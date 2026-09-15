@@ -1,0 +1,60 @@
+{
+  "node": "asset-source-review",
+  "observedAt": "2026-09-14T13:10:18.371Z",
+  "nodeWallMs": 992342,
+  "failure": {
+    "category": "invalid_output",
+    "reasonCode": "task_semantics",
+    "providerId": "zai-bigmodel-api",
+    "modelId": "glm-5.3-flash",
+    "queueWaitMs": 0,
+    "providerWaitMs": 989138,
+    "finishReason": "stop",
+    "promptTokens": 24036,
+    "completionTokens": 38311,
+    "totalTokens": 62347,
+    "reasoningTokens": 36514,
+    "taskKind": "visual-review",
+    "modelAttemptCount": 1,
+    "structuredRepairCount": 0
+  },
+  "agentLoop": {
+    "modelCallCount": 1,
+    "producerMs": 989999,
+    "auditMs": 0,
+    "validationMs": 0,
+    "structuredRepairModelCallCount": 0,
+    "retryCount": 0
+  },
+  "frames": {
+    "count": 15,
+    "totalBytes": 612496,
+    "sampling": {
+      "coveredScenePositions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "missingScenePositions": [],
+      "mode": "hook_and_scene_midpoints",
+      "sceneCount": 5
+    },
+    "duplicateShaGroups": [
+      {
+        "sha": "a39443fba15147bd",
+        "count": 2
+      },
+      {
+        "sha": "3c3e72607c40afc9",
+        "count": 2
+      },
+      {
+        "sha": "b3b917dd3de10640",
+        "count": 2
+      }
+    ]
+  },
+  "reviewContextChars": 15367
+}

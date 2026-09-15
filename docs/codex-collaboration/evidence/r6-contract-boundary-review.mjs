@@ -36,7 +36,7 @@ async function withBroker(executor, check) {
   }
 }
 
-const passAudit = { version: 'video-factory/role-audit-v1', verdict: 'pass', score: 90, summary: '证据与报告一致。', issues: [], repairInstructions: [], planningDisposition: null };
+const passAudit = { version: 'video-factory/role-audit-v1', verdict: 'pass', score: 90, summary: '证据与报告一致。', issues: [], repairInstructions: [], planningDisposition: null, hostReadinessReview: null };
 for (const variant of ['text-audit', 'image-audit', 'rank-without-thumbnail']) {
   test(`${layer}: actual execution model equals immutable model binding (${variant})`, async () => {
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]);

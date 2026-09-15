@@ -1,0 +1,150 @@
+
+> video-factory@0.1.0 build
+> npm run build:broker && npm run studio:build
+
+
+> video-factory@0.1.0 build:broker
+> npm run build --workspace @video-factory/codex-broker
+
+
+> @video-factory/codex-broker@0.1.0 build
+> tsc -p tsconfig.build.json
+
+
+> video-factory@0.1.0 studio:build
+> npm run build:pipeline && npm run build --workspace @video-factory/studio
+
+
+> video-factory@0.1.0 build:pipeline
+> npm run build:template && npm run build:core && node -e "require('node:fs').rmSync('packages/production-pipeline/dist',{recursive:true,force:true})" && tsc -p packages/production-pipeline/tsconfig.build.json
+
+
+> video-factory@0.1.0 build:template
+> node -e "require('node:fs').rmSync('packages/template-core/dist',{recursive:true,force:true})" && tsc -p packages/template-core/tsconfig.build.json
+
+
+> video-factory@0.1.0 build:core
+> node -e "require('node:fs').rmSync('packages/workflow-core/dist',{recursive:true,force:true})" && tsc -p packages/workflow-core/tsconfig.build.json
+
+
+> @video-factory/studio@0.1.0 build
+> vite build && tsc -p tsconfig.server.build.json
+
+vite v8.2.2 building client environment for production...
+transforming...
+✓ 1867 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/client/index.html                                                   0.78 kB │ gzip:   0.48 kB
+dist/client/assets/noto-sans-sc-88-wght-normal-ClNDOCGW.woff2            7.33 kB
+dist/client/assets/noto-sans-sc-87-wght-normal-DYfJ-vGE.woff2            8.01 kB
+dist/client/assets/noto-sans-sc-latin-ext-wght-normal-CqPqLCfe.woff2     8.24 kB
+dist/client/assets/manrope-vietnamese-wght-normal-usUDDRr7.woff2         8.52 kB
+dist/client/assets/noto-sans-sc-91-wght-normal-CGekvDdH.woff2            8.70 kB
+dist/client/assets/noto-sans-sc-vietnamese-wght-normal-y5SU35Rl.woff2    9.09 kB
+dist/client/assets/noto-sans-sc-90-wght-normal-BWcrRNoG.woff2            9.34 kB
+dist/client/assets/manrope-greek-wght-normal-DL7QRZyv.woff2              9.44 kB
+dist/client/assets/noto-sans-sc-99-wght-normal-Q_IptJM5.woff2            9.70 kB
+dist/client/assets/noto-sans-sc-cyrillic-wght-normal-CRA5_Pf1.woff2     10.00 kB
+dist/client/assets/noto-sans-sc-89-wght-normal-IQU_KQA8.woff2           10.98 kB
+dist/client/assets/noto-sans-sc-21-wght-normal-DIu_1ZBI.woff2           11.35 kB
+dist/client/assets/noto-sans-sc-6-wght-normal-ozUCEY9O.woff2            11.46 kB
+dist/client/assets/manrope-cyrillic-wght-normal-Dvxsihut.woff2          14.50 kB
+dist/client/assets/manrope-latin-ext-wght-normal-Ch3YOpNY.woff2         15.12 kB
+dist/client/assets/noto-sans-sc-5-wght-normal-DI846rD9.woff2            20.17 kB
+dist/client/assets/manrope-latin-wght-normal-DHIcAJRg.woff2             24.83 kB
+dist/client/assets/noto-sans-sc-latin-wght-normal-DYAKOyvl.woff2        25.24 kB
+dist/client/assets/noto-sans-sc-85-wght-normal-DBcDBu1n.woff2           26.90 kB
+dist/client/assets/noto-sans-sc-84-wght-normal-C7NxT478.woff2           32.61 kB
+dist/client/assets/noto-sans-sc-80-wght-normal-BEFypWOO.woff2           32.63 kB
+dist/client/assets/noto-sans-sc-86-wght-normal-CLJIoPpl.woff2           33.57 kB
+dist/client/assets/noto-sans-sc-41-wght-normal-CZqajZnl.woff2           36.41 kB
+dist/client/assets/noto-sans-sc-77-wght-normal-Dkbi3pye.woff2           36.78 kB
+dist/client/assets/noto-sans-sc-73-wght-normal-DwSJRYPJ.woff2           39.31 kB
+dist/client/assets/noto-sans-sc-79-wght-normal-DoJG4UTB.woff2           41.23 kB
+dist/client/assets/noto-sans-sc-60-wght-normal-C1lngC61.woff2           41.43 kB
+dist/client/assets/noto-sans-sc-64-wght-normal-CbIuD2Eg.woff2           41.54 kB
+dist/client/assets/noto-sans-sc-68-wght-normal-c0FjfUaj.woff2           41.56 kB
+dist/client/assets/noto-sans-sc-65-wght-normal-BGqvKda2.woff2           41.60 kB
+dist/client/assets/noto-sans-sc-51-wght-normal-C2bq6hC8.woff2           41.61 kB
+dist/client/assets/noto-sans-sc-36-wght-normal-CtU9CyKw.woff2           41.83 kB
+dist/client/assets/noto-sans-sc-70-wght-normal-ColEcmtJ.woff2           42.23 kB
+dist/client/assets/noto-sans-sc-83-wght-normal-C9UjAcMM.woff2           43.50 kB
+dist/client/assets/noto-sans-sc-53-wght-normal-Bgkuo2tF.woff2           43.52 kB
+dist/client/assets/noto-sans-sc-75-wght-normal-B0qL41rF.woff2           43.94 kB
+dist/client/assets/noto-sans-sc-61-wght-normal-BxWkGF5M.woff2           45.27 kB
+dist/client/assets/noto-sans-sc-42-wght-normal-CQ4lY28u.woff2           45.54 kB
+dist/client/assets/noto-sans-sc-50-wght-normal-C5KfAmFp.woff2           45.87 kB
+dist/client/assets/noto-sans-sc-82-wght-normal-DcxfR5OJ.woff2           46.17 kB
+dist/client/assets/noto-sans-sc-118-wght-normal-BPEb0gM9.woff2          46.19 kB
+dist/client/assets/noto-sans-sc-43-wght-normal-psppu0d8.woff2           46.62 kB
+dist/client/assets/noto-sans-sc-40-wght-normal-BVn4-kgX.woff2           46.62 kB
+dist/client/assets/noto-sans-sc-34-wght-normal-BF1rqDSt.woff2           46.88 kB
+dist/client/assets/noto-sans-sc-72-wght-normal-D1VyfEG3.woff2           47.03 kB
+dist/client/assets/noto-sans-sc-31-wght-normal-DW0t445S.woff2           47.22 kB
+dist/client/assets/noto-sans-sc-33-wght-normal-BOTZYTjM.woff2           47.45 kB
+dist/client/assets/noto-sans-sc-27-wght-normal-BP2pEGQH.woff2           47.48 kB
+dist/client/assets/noto-sans-sc-81-wght-normal-ed_TZlfo.woff2           47.54 kB
+dist/client/assets/noto-sans-sc-59-wght-normal-Azv2Ku9_.woff2           47.67 kB
+dist/client/assets/noto-sans-sc-71-wght-normal-ChZfXpdg.woff2           47.90 kB
+dist/client/assets/noto-sans-sc-55-wght-normal-BV_Oy6IF.woff2           48.13 kB
+dist/client/assets/noto-sans-sc-76-wght-normal-BPLMO_2x.woff2           48.42 kB
+dist/client/assets/noto-sans-sc-78-wght-normal-BFUXeSw6.woff2           49.15 kB
+dist/client/assets/noto-sans-sc-63-wght-normal-4La5uKvS.woff2           49.18 kB
+dist/client/assets/noto-sans-sc-28-wght-normal-BWPKDbtH.woff2           50.20 kB
+dist/client/assets/noto-sans-sc-35-wght-normal-Bosspiyr.woff2           50.68 kB
+dist/client/assets/noto-sans-sc-48-wght-normal-DFMjDDY6.woff2           50.76 kB
+dist/client/assets/noto-sans-sc-26-wght-normal-YNOygvr_.woff2           50.88 kB
+dist/client/assets/noto-sans-sc-39-wght-normal-Ddtm1XVC.woff2           51.78 kB
+dist/client/assets/noto-sans-sc-52-wght-normal-P18e_Y0j.woff2           51.84 kB
+dist/client/assets/noto-sans-sc-54-wght-normal-DL5lmlUd.woff2           52.00 kB
+dist/client/assets/noto-sans-sc-117-wght-normal-Dsz3vkzU.woff2          52.46 kB
+dist/client/assets/noto-sans-sc-32-wght-normal-ShbWPcei.woff2           52.54 kB
+dist/client/assets/noto-sans-sc-67-wght-normal-CC-WRBV-.woff2           52.58 kB
+dist/client/assets/noto-sans-sc-49-wght-normal-B7l_3BZr.woff2           52.84 kB
+dist/client/assets/noto-sans-sc-66-wght-normal-BvNozWOY.woff2           52.86 kB
+dist/client/assets/noto-sans-sc-116-wght-normal-vdFVzbO2.woff2          52.98 kB
+dist/client/assets/noto-sans-sc-56-wght-normal-B4L7Hj8f.woff2           53.50 kB
+dist/client/assets/noto-sans-sc-37-wght-normal-ghDiyiuv.woff2           53.52 kB
+dist/client/assets/noto-sans-sc-29-wght-normal-45aVmHn_.woff2           54.00 kB
+dist/client/assets/noto-sans-sc-44-wght-normal-cbKJlTUe.woff2           54.24 kB
+dist/client/assets/noto-sans-sc-38-wght-normal-4Nz8k_dt.woff2           54.59 kB
+dist/client/assets/noto-sans-sc-30-wght-normal-B8_s30jZ.woff2           54.65 kB
+dist/client/assets/noto-sans-sc-57-wght-normal-DU8YBsDj.woff2           55.49 kB
+dist/client/assets/noto-sans-sc-69-wght-normal-D596Jjl2.woff2           55.60 kB
+dist/client/assets/noto-sans-sc-47-wght-normal-C5Kgg1_m.woff2           56.15 kB
+dist/client/assets/noto-sans-sc-74-wght-normal-Cte7o1QG.woff2           56.42 kB
+dist/client/assets/noto-sans-sc-115-wght-normal-BN__2iBG.woff2          56.50 kB
+dist/client/assets/noto-sans-sc-23-wght-normal-4HrHKhpL.woff2           56.79 kB
+dist/client/assets/noto-sans-sc-112-wght-normal-CiZxJMyY.woff2          57.64 kB
+dist/client/assets/noto-sans-sc-58-wght-normal-CE0BKS9u.woff2           57.64 kB
+dist/client/assets/noto-sans-sc-46-wght-normal-CErGc6Mt.woff2           57.66 kB
+dist/client/assets/noto-sans-sc-114-wght-normal-CRH9SDZu.woff2          57.96 kB
+dist/client/assets/noto-sans-sc-101-wght-normal-c94LAl5p.woff2          58.20 kB
+dist/client/assets/noto-sans-sc-25-wght-normal-C3Jm6l7O.woff2           58.32 kB
+dist/client/assets/noto-sans-sc-113-wght-normal-OgQXOX6x.woff2          58.64 kB
+dist/client/assets/noto-sans-sc-62-wght-normal-CXXMAq-5.woff2           59.11 kB
+dist/client/assets/noto-sans-sc-109-wght-normal-CnjNbNmw.woff2          60.37 kB
+dist/client/assets/noto-sans-sc-102-wght-normal-C1RtbCZr.woff2          60.70 kB
+dist/client/assets/noto-sans-sc-107-wght-normal-kFQzJDLH.woff2          61.07 kB
+dist/client/assets/noto-sans-sc-110-wght-normal-D2JBr045.woff2          61.47 kB
+dist/client/assets/noto-sans-sc-104-wght-normal-CJT2ioDJ.woff2          61.58 kB
+dist/client/assets/noto-sans-sc-105-wght-normal-BFoiJwz2.woff2          61.82 kB
+dist/client/assets/noto-sans-sc-24-wght-normal-B58DWgHS.woff2           62.58 kB
+dist/client/assets/noto-sans-sc-106-wght-normal-D6uUHw3w.woff2          62.63 kB
+dist/client/assets/noto-sans-sc-111-wght-normal-ClFr5QXM.woff2          62.66 kB
+dist/client/assets/noto-sans-sc-103-wght-normal-DGHo20nu.woff2          63.86 kB
+dist/client/assets/noto-sans-sc-100-wght-normal-DrqXJETY.woff2          64.54 kB
+dist/client/assets/noto-sans-sc-108-wght-normal-7aXvqIa2.woff2          64.55 kB
+dist/client/assets/noto-sans-sc-22-wght-normal-VXjdYcT-.woff2           65.38 kB
+dist/client/assets/noto-sans-sc-45-wght-normal-MKIEVRIC.woff2           67.62 kB
+dist/client/assets/noto-sans-sc-119-wght-normal-BfzSEbFz.woff2          76.80 kB
+dist/client/assets/index-C8blMorW.css                                  427.15 kB │ gzip: 102.76 kB
+dist/client/assets/index-CETexNzC.js                                   771.12 kB │ gzip: 227.38 kB
+
+✓ built in 2.86s
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.

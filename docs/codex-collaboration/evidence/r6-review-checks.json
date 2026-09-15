@@ -1,0 +1,86 @@
+{
+  "taskId": "VF-R3-CLOSURE-20260912-01",
+  "reviewedRevision": 6,
+  "verdict": "CHANGES_REQUIRED",
+  "capturedAt": "2026-09-13T01:15:55.914Z",
+  "nodeVersion": "v26.8.1",
+  "head": "570fe6e59e072c4965c86769bf2096825f003383",
+  "independentChecks": [
+    {
+      "command": "node --test --test-concurrency=1 --import tsx docs/codex-collaboration/evidence/r4-boundary-probes.mjs docs/codex-collaboration/evidence/r4-receipt-race.mjs docs/codex-collaboration/evidence/r5-combined-audit.mjs packages/production-pipeline/test/role-agent-loop.test.ts apps/studio/test/text-task-production-recovery.test.ts apps/studio/test/text-task-recovery-receipt.cross.test.ts",
+      "pass": 39,
+      "fail": 0,
+      "exit": 0,
+      "log": "r6-independent-focused-green.txt"
+    },
+    {
+      "command": "node --test --test-concurrency=1 --import tsx apps/codex-broker/test/broker-server.test.ts apps/codex-broker/test/task-definitions.test.ts apps/studio/test/codex-provider-settings.test.ts packages/production-pipeline/test/codex-publish-copy.test.ts",
+      "pass": 75,
+      "fail": 0,
+      "exit": 0,
+      "log": "r6-independent-existing-green.txt"
+    },
+    {
+      "command": "./node_modules/.bin/tsc -p packages/production-pipeline/tsconfig.json --noEmit",
+      "exit": 0,
+      "output": "empty"
+    },
+    {
+      "command": "node --test --test-concurrency=1 --import tsx docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs",
+      "pass": 5,
+      "fail": 10,
+      "exit": 1,
+      "log": "r6-independent-contract-source-red.txt"
+    },
+    {
+      "command": "VF_REVIEW_DIST=1 node --test --test-concurrency=1 --import tsx docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs",
+      "pass": 5,
+      "fail": 10,
+      "exit": 1,
+      "log": "r6-independent-contract-dist-red.txt",
+      "note": "正式 broker/pipeline/Studio dist，不由本窗口重新构建。"
+    }
+  ],
+  "actualLocalReadOnlyProbes": [
+    {
+      "socket": ".local/runtime/codex/worker.sock",
+      "model": "gpt-5.6-sol",
+      "taskKinds": 10,
+      "taskContracts": 5,
+      "active": 0,
+      "queued": 0,
+      "completed": 0,
+      "failed": 0,
+      "formalStudioProbeAvailable": false
+    },
+    {
+      "socket": ".local/runtime/zai-codex/worker.sock",
+      "model": "glm-5.3",
+      "taskKinds": 10,
+      "taskContracts": 5,
+      "active": 0,
+      "queued": 0,
+      "completed": 0,
+      "failed": 0,
+      "formalStudioProbeAvailable": false
+    }
+  ],
+  "caveats": [
+    "源级 probe 的 Studio 源码 import 使用已构建 pipeline 依赖；dist probe 则全部使用正式构建模块。",
+    "图像字节是现有测试风格的最小 JPEG 头尾夹具，外部 HTTP 已注入；只证明路由、传输和身份一致性，不证明模型可视能力。",
+    "本次角色快照独立动态证据来自选片适配器；视觉审片、参考片、系列两个回调通过源码核实同类漏接，须由执行窗口补正式行为矩阵。",
+    "不重复执行全仓、Python或真实E2E；未向外部模型、媒体Provider发请求。",
+    "publish-copy 初版探针旁白少于3条，在进入executor前被输入校验拒绝；更正为3条后的正式日志才作为产品失败证据。"
+  ],
+  "sideEffects": {
+    "productFilesModified": 0,
+    "realServicesRestarted": 0,
+    "realModelTasks": 0,
+    "realMediaTasks": 0,
+    "mediaSpendRmb": 0,
+    "commit": false,
+    "push": false,
+    "deploy": false,
+    "userDataChanged": false
+  }
+}

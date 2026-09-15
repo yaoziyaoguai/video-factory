@@ -1,71 +1,62 @@
-# 当前执行任务：Revision 9
+# 当前任务：Revision 11 — 用户主导创作讨论与交接修复
 
-- taskId：VF-R3-CLOSURE-20260912-01
-- revision：9
-- status：READY_FOR_IMPLEMENTATION
-- 仓库：/Users/jinkun.wang/work_space/veidofactory
-- 审查窗口维护TASK/REVIEW/方案，执行窗口修改产品并追加RESULT。此包没有自动启动执行窗口。
-- 原TASK完整归档为TASK_REVISION8.md，不重做其中已通过的修复。
+- taskId：`VF-CREATOR-COLLABORATION-R11-20260914`
+- revision：11
+- status：`READY_FOR_IMPLEMENTATION`（资料包完成，不代表产品已实现）
+- 仓库：`/Users/jinkun.wang/work_space/veidofactory`
+- 完整资料包：`/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/revision11`
 
-## 目标与三组强制范围
+## 1. 先读这些，不从旧聊天猜任务
 
-让现有通用视频流水线在不降低创作质量的情况下真正可制作、用户能理解和恢复；用真实完整新片验证，不能只让一个题目或测试通过。
+完整读取 revision11/README.md 并按顺序读取：
 
-本轮三组必须一起做，不是后续建议：
+1. implementation/01_PRODUCT_AND_UX.md
+2. implementation/02_TECHNICAL_DESIGN.md
+3. implementation/03_EXECUTION_PLAN.md
+4. implementation/04_ROLE_PROMPTS.md
+5. implementation/05_ACCEPTANCE.md
+6. qa/01_RUNBOOK.md
+7. qa/02_CASES_AND_REPORT.md
+8. revision11/BASELINE.json、REVIEW_REVISION10.md、RESULT.md 的R10和最新R11段落。
 
-1. W1：用户明确要求不被自动建议覆盖；模板默认方法可适配，保留叙事职责、真实性、质量与用户/系列明确约束。
-2. W2：区分构思质量与制作前提；缺专属核心证据及时反馈，高分不放行；修正一槽一镜、视频必须两个节拍等机械限制，保留时间完整性与执行校验。
-3. W3：模型切换真实生效、失败消费到可恢复状态、重启进度保真、全节点调用/耗时可信、查询完成竞态。五项均不可当“附带问题”漏掉。
+上面 implementation 和 qa 路径均相对 revision11。旧TASK已原样保存到TASK_REVISION10.md；旧资料只作历史导航，不重新实施A/B/C或R10。
 
-用户已确认：导演可在承诺、真实能力、时长范围和授权内主动优化质量与成本；更改核心承诺、专属实测改生成、实质改变确认方案须用户决定。模型规划不是购买授权。
+## 2. 当前真实状态
 
-## 必读：四份当前文件
+R10已经有实质代码改动及自动化验证记录，但本窗口实际源码/组合审查是CHANGES_REQUIRED。确认的F01–F08见REVIEW_REVISION10。新要求的三阶段讨论确认和热点原文阅读尚未实现。
 
-完整按序读取：
+开始资料包时HEAD为b36ebac3189cf574b8e437cbe16eb9d0b228a177，branch为codex/final-dual-review-cloud-acceptance，暂存区为空；BASELINE记录316个现有文件摘要。已有dirty成果属于用户，不能回滚。另一个窗口可能继续修改，开工先核对实际状态与RESULT。
 
-1. /Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/TASK.md
-2. /Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/REVIEW_REVISION8.md
-3. /Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/IMPLEMENTATION_REVISION9.md
-4. /Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/VALIDATION_REVISION9.md
+## 3. 本轮必须一起做
 
-然后读取RESULT的Revision 8及后续新内容、最新真实QA：
+- 保留三入口、模板退出新生产而管理/历史保留；不后台补固定套路。
+- 用户要求与自动建议分开；明确采用才升级为约束。
+- 导演初案、脚本、分镜/画面方案各自草稿后等待，多轮自然讨论；用户确认当前版本后才进入下一阶段，绝不把聊天当付款。
+- 采用、撤销、局部讨论、上游返回、模型选择、移动端/刷新/重启可用；不只加前端暂停按钮。
+- 修恢复读写合同、误分类有效反馈、导演素材路线权限、声音共同配置与依赖、系列前期约束、机械词规则裁决与声音界面。
+- 热点入围后读原文、保留证据和不确定项，再由现有总编发散；真正把来源传入制作链。
+- 保留现有时间轴、媒体复用、精确授权、TTS自动后台记账、局部返工与双真实模型审片。恢复unknown只观察原任务。
 
-- /Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/RESULT.md
-- /Users/jinkun.wang/work_space/veidofactory/docs/qa/videofactory-real-local-qa-20260913-07.md
+不换框架/数据库，不建通用聊天/版本/核账平台，不增加监工Agent、不做数字人/短剧。不为题材、镜号、runId、模型名增加语义特判；不降模型强度或质量标准。
 
-相关安全回归保留ACCEPTANCE.md。PROMPT_REVISION.md和旧A/B/C资料仅作历史导航；语义冲突以当前四份文件为准，不能重引旧机械限制。此优先级不削弱CAS/lease、原任务结清、费用授权、双审/返工边界。
+## 4. 执行方式
 
-## 开始基线与源码检查
+执行端实现全部S0→S6，阶段内正常聚焦红绿，全部范围收口后一次集中回归与自查，再进入真实本地QA。不要完成一点就外部审计，不每改一点就部署。技术细则/接口/状态/依赖以02为准，验收以05为准。
 
-- 准备时HEAD：570fe6e59e072c4965c86769bf2096825f003383；分支codex/final-dual-review-cloud-acceptance。
-- 用户确认后，现有150个产品/测试/配置文件已本地保存为`10592eb6538b8c2e755c1d3744764fd97be2246b`，内容未变。当前资料随第二笔文档提交保存；执行端从包含本TASK的最新HEAD开工，两笔都不推送。详情见LOCAL_COMMIT_PLAN.md，不再把准备时旧HEAD当成必须回退的目标。
-- 产品/测试/配置基线：/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r9-start-baseline.json，322个路径SHA256；不含docs。
-- 现场核对HEAD、git status、staged和基线hash；保留A/B/C、revision1–8所有修改。本地commit可变HEAD而不改内容，不能只因HEAD改变认定污染；记录差异。内容已变先核对RESULT和并行窗口，不能覆盖成果。
-- 文件/行号只是导航，改前完整读相关函数与调用链。只让一个执行窗口写产品。
-- 先运行evidence/r9-director-contract.test.mjs记录原红灯，再为共同根因补正式行为用例。
+一个窗口维护本任务与方案；执行窗口只追加RESULT的R11实际进度/证据/未验证项，不改验收条件迎合实现。QA详细报告写docs/qa/videofactory-real-local-qa-<实际日期>-r11.md，RESULT链接它。
 
-## 执行方式
+## 5. 权限
 
-W1→W2→W3连续完成，不做一小项就停下等审计。按IMPLEMENTATION路径，不另选框架或产品语义。允许聚焦红绿迭代；所有修改后集中回归、最终build、source/dist验证、本地部署、真实QA。
+允许范围内代码/测试/文档修改与确定性验证；实现验收通过后，允许正式本地构建/启动/正常重启及真实QA，按现有本地配置加载本项目所需凭据但不显示或外发秘密。
 
-QA按VALIDATION有界安排：一轮测完可测范围再集中修，不每修一点重启一次。正例出片、负例早停、三入口、两真实模型、返工如实覆盖；同因不无限重试。上下文切换在RESULT记录续接点，不重新调研工具/重做任务。
+用户本次明确授权测试端代用户确认创作及图片/视频费用，本轮所有QA新增现金最大暴露合计上限 **¥50.00**，包括媒体/TTS/在途/未知，跨run和session共用。不是产品全局限额，不是每条片50元，不新增订阅/充值。详细费用纪律见qa/01_RUNBOOK。无需重复询问该已授权额度。
 
-F05仍有未定位部分，先找正式失败链第一处丢失边界；不能把相邻诊断修复当全部根因消除。同范围真实缺陷集中修；需要新架构/产品能力带最小决定交回。
+不commit/push、不云部署/外部发布，不删除/迁移历史数据、不reset/stash/clean、不升级工具、不启动Oracle或把私有资料发外部。需要突破50元、无法替代的新登录/权限、破坏性操作或改变本包产品决定时停止相关路径并询问用户。
 
-## Non-goals与固定约束
+## 6. 完成与停止
 
-- 不重做A/B/C，不加框架/数据库/缓存/队列服务/监督Agent/顶层run状态/新视频方式，不把大文件拆分或全库清理变支线。
-- 不按题材、镜号、runId、模型名称特判；不删质量门/降分数、模型、effort、输出上限，不增循环掩盖失败。
-- 不接生产fake broker，不伪造来源/审片/费用/完成状态，不删历史数据解锁；替身只用于隔离测试。
-- 不重启pi/Claude/Copilot协作或升级Oracle工具；执行端沿用用户当前配置，实际模型/强度被替换须报告。
-- 不为清理dirty而回滚/reset/delete；本地commit独立授权，见LOCAL_COMMIT_PLAN.md。本任务不让执行端顺手commit/push。
+执行状态：IMPLEMENTING→CODE_VALIDATED→LOCAL_QA_RUNNING→READY_FOR_REVIEW。另列QA_PASSED或QA_DONE_WITH_CONCERNS。
 
-## 权限与停止条件
+真实QA先记录问题与根因、尽量完成独立用例；同根因不盲重试、不边测边改产品，测完交回报告后停止。没有完整新主片/真实音轨/双模型审片/局部返工证据必须列缺口，不能只用自动化测试通过宣称产品验收通过。
 
-代码/测试修改与隔离验证在本任务范围内。本地正式部署、真实QA依用户启动消息现行授权执行；此包不是密钥值或付费凭证，不向外发送私有材料。
-
-授权真实QA与小额花费时可自行确认精确媒体报价；沿用上轮¥50新增媒体+TTS的QA止损，不是产品上限。记录授权、范围、金额及未结清暴露；超额须追加。文本/订阅审片不引入现金审批，TTS自动后台记账。
-
-未经新明确授权，不commit/push、云部署、外部发布、删迁移数据；不修改TASK/REVIEW/方案/历史RESULT。unknown只查原请求，不靠删除/重启/换路由重买。
-
-全部实现及有界验证后，追加RESULT Revision9，映射V9-01–12/E01–07、退出码、费用与未验证，设READY_FOR_REVIEW并停止产品修改，交审查窗口一次统一复核。真权限/产品阻断可提前报告。不得将“可交审查”写成“产品通过”。
+本次资料编写没有修改产品代码、运行真实模型/媒体或使用测试额度。执行端开始后用自己的实际证据更新状态。

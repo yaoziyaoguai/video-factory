@@ -1,0 +1,15 @@
+{
+  "cookies": [
+    {
+      "name": "vf_session",
+      "value": "eyJ2ZXJzaW9uIjoxLCJ1c2VybmFtZSI6InFhLWxvY2FsIiwiZXhwaXJlc0F0IjoxNzg5NDc4MTE3MDA5LCJub25jZSI6InVmWnFsS2ZaTEIzOVVIa1YifQ.v49VUtieJoOJj7-c1GGFJEQ0s1wgtJZKQ36zBV5H2HU",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "expires": 1789478117.015426,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Strict"
+    }
+  ],
+  "origins": []
+}

@@ -1,0 +1,12 @@
+✔ dist: registry, executor identities, descriptors, health, and pipeline pins expose one canonical task set (30.429916ms)
+✔ dist: topic article body and series/audio context survive both profile parsers while illegal fields fail closed (2.874667ms)
+✔ dist: openai executor and Broker/client validate every creative discussion intent (169.156292ms)
+✔ dist: zai executor and Broker/client validate every creative discussion intent (178.397708ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 383.920125

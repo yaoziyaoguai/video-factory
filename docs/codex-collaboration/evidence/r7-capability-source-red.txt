@@ -1,0 +1,109 @@
+{"layer":"src","providerId":"seedance-video-v1","modelId":"doubao-seedance-2-5-260628","aspectRatios":["9:16","16:9","1:1","3:4","4:3"],"error":"payload.brief.productionCapabilities.assetProviders[0].aspectRatios contains an unsupported ratio.","externalCalls":0}
+{"layer":"src","providerId":"hailuo-video-v1","modelId":"MiniMax-H3","aspectRatios":["9:16","16:9","1:1"],"externalCalls":0}
+{"layer":"src","providerId":"wan-video-v1","modelId":"wan3.0-video","aspectRatios":["9:16","16:9"],"externalCalls":0}
+✖ src: enabled seedance-video-v1 official model capabilities reach treatment parser (7.514709ms)
+✔ src: enabled hailuo-video-v1 official model capabilities reach treatment parser (0.396083ms)
+✔ src: enabled wan-video-v1 official model capabilities reach treatment parser (0.180167ms)
+✖ src: a series with no established facts may return an empty canonFacts array (0.8445ms)
+{"layer":"src","omitSeedance":false,"executions":0,"error":{"message":"Codex bridge returned HTTP 400. {\"error\":\"payload.brief.productionCapabilities.assetProviders[3].aspectRatios contains an unsupported ratio.\"}","stage":"rejected","status":400},"capabilities":{"assetProviders":[{"id":"pexels-stock-v1","deliveryTypes":["stock_video","stock_image"],"supportsReferenceImage":false,"strengths":["通用真实人物、生活动作、办公场景、城市与自然环境、建立镜头"],"constraints":["通用图库不是具体新闻事件证据","不得把图库人物描述为事件当事人","中文地域与具体事件匹配度可能有限"]},{"id":"seedream-image-v1","deliveryTypes":["generated_image"],"supportsReferenceImage":true,"strengths":["解释性插画、抽象概念、无法检索到的关键静态画面与统一系列视觉"],"constraints":["合成内容不得作为事实证据","人物、品牌与地标需要规避权利和误导风险","成片必须保留 AIGC 标识"]},{"id":"hailuo-video-v1","deliveryTypes":["generated_video"],"supportsReferenceImage":false,"strengths":["难以实拍的概念视觉、情绪化转场与关键表现镜头"],"constraints":["合成内容不得作为事实证据","人物、品牌与地标需要规避权利和误导风险","成片必须保留 AIGC 标识"],"selectedModelId":"MiniMax-H3","minDurationSeconds":4,"maxDurationSeconds":15,"aspectRatios":["9:16","16:9","1:1"]},{"id":"seedance-video-v1","deliveryTypes":["generated_video"],"supportsReferenceImage":false,"strengths":["难以实拍的概念视觉、情绪化转场与关键表现镜头"],"constraints":["合成内容不得作为事实证据","人物、品牌与地标需要规避权利和误导风险","成片必须保留 AIGC 标识"],"selectedModelId":"doubao-seedance-2-5-260628","minDurationSeconds":4,"maxDurationSeconds":15,"aspectRatios":["9:16","16:9","1:1","3:4","4:3"]}],"editing":{"sourceRangeReuse":true,"staticEditorialCard":false}},"persistedErrorContainsField":false,"failure":[{"nodeId":"creative-planning","error":"模型服务拒绝了本次请求（请求与任务合同不一致），任务没有开始执行；不会产生模型调用或费用。请查看诊断信息。"}]}
+✖ src: captured manual run through formal pipeline/socket (original-selection) (156.385542ms)
+{"layer":"src","omitSeedance":true,"executions":1,"error":{"message":"Codex task completed with failure status 500. {\"error\":\"The model service could not complete this step.\"}","stage":"completed_failure","status":500},"capabilities":{"assetProviders":[{"id":"pexels-stock-v1","deliveryTypes":["stock_video","stock_image"],"supportsReferenceImage":false,"strengths":["通用真实人物、生活动作、办公场景、城市与自然环境、建立镜头"],"constraints":["通用图库不是具体新闻事件证据","不得把图库人物描述为事件当事人","中文地域与具体事件匹配度可能有限"]},{"id":"seedream-image-v1","deliveryTypes":["generated_image"],"supportsReferenceImage":true,"strengths":["解释性插画、抽象概念、无法检索到的关键静态画面与统一系列视觉"],"constraints":["合成内容不得作为事实证据","人物、品牌与地标需要规避权利和误导风险","成片必须保留 AIGC 标识"]},{"id":"hailuo-video-v1","deliveryTypes":["generated_video"],"supportsReferenceImage":false,"strengths":["难以实拍的概念视觉、情绪化转场与关键表现镜头"],"constraints":["合成内容不得作为事实证据","人物、品牌与地标需要规避权利和误导风险","成片必须保留 AIGC 标识"],"selectedModelId":"MiniMax-H3","minDurationSeconds":4,"maxDurationSeconds":15,"aspectRatios":["9:16","16:9","1:1"]}],"editing":{"sourceRangeReuse":true,"staticEditorialCard":false}},"persistedErrorContainsField":false,"failure":[{"nodeId":"creative-planning","error":"导演前期构思的内容生成暂时失败，尚未消耗质量审计轮次；当前内容和进度已保留，可直接重试。模型没有完成此步骤，请重试或选择其他模型。"}]}
+✔ src: captured manual run through formal pipeline/socket (isolate-other-providers) (115.548333ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 3
+ℹ fail 3
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1716.992833
+
+✖ failing tests:
+
+test at docs/codex-collaboration/evidence/r7-capability-contract-review.mjs:26:3
+✖ src: enabled seedance-video-v1 official model capabilities reach treatment parser (7.514709ms)
+  AssertionError [ERR_ASSERTION]: official enabled capability profile must not reject an unrelated text planning request
+  + actual - expected
+  
+  + CodexExecutorError: payload.brief.productionCapabilities.assetProviders[0].aspectRatios contains an unsupported ratio.
+  +     at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/apps/codex-broker/src/codex-executor.ts:1919:13)
+  +     at Array.map (<anonymous>)
+  +     at requireProductionCapabilities (/Users/jinkun.wang/work_space/veidofactory/apps/codex-broker/src/codex-executor.ts:1877:48)
+  +     at requireCreativeTreatmentBrief (/Users/jinkun.wang/work_space/veidofactory/apps/codex-broker/src/codex-executor.ts:1955:29)
+  +     at validateTaskPayload (/Users/jinkun.wang/work_space/veidofactory/apps/codex-broker/src/codex-executor.ts:608:16)
+  +     at parseTaskRequest (/Users/jinkun.wang/work_space/veidofactory/apps/codex-broker/src/codex-executor.ts:523:16)
+  +     at TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r7-capability-contract-review.mjs:45:7)
+  +     at async Test.run (node:internal/test_runner/test:1409:7)
+  +     at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+  +   details: undefined,
+  +   failureKind: undefined,
+  +   outcomeUncertain: false,
+  +   transient: false
+  + }
+  - undefined
+  
+      at TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r7-capability-contract-review.mjs:51:12)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: CodexExecutorError: payload.brief.productionCapabilities.assetProviders[0].aspectRatios contains an unsupported ratio.
+        at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/apps/codex-broker/src/codex-executor.ts:1919:13)
+        at Array.map (<anonymous>)
+        at requireProductionCapabilities (/Users/jinkun.wang/work_space/veidofactory/apps/codex-broker/src/codex-executor.ts:1877:48)
+        at requireCreativeTreatmentBrief (/Users/jinkun.wang/work_space/veidofactory/apps/codex-broker/src/codex-executor.ts:1955:29)
+        at validateTaskPayload (/Users/jinkun.wang/work_space/veidofactory/apps/codex-broker/src/codex-executor.ts:608:16)
+        at parseTaskRequest (/Users/jinkun.wang/work_space/veidofactory/apps/codex-broker/src/codex-executor.ts:523:16)
+        at TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r7-capability-contract-review.mjs:45:7)
+        at async Test.run (node:internal/test_runner/test:1409:7)
+        at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3),
+    expected: undefined,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r7-capability-contract-review.mjs:55:1
+✖ src: a series with no established facts may return an empty canonFacts array (0.8445ms)
+  AssertionError [ERR_ASSERTION]: Got unwanted exception: a factual-integrity requirement must not force invented facts
+  Actual message: "Series script drafts must contain between 1 and 8 canonFacts."
+      at TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r7-capability-contract-review.mjs:59:10)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: Error: Series script drafts must contain between 1 and 8 canonFacts.
+        at validateScriptDraft (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-screenwriter.ts:410:11)
+        at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r7-capability-contract-review.mjs:59:29)
+        at getActual (node:assert:580:5)
+        at strict.doesNotThrow (node:assert:748:32)
+        at TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r7-capability-contract-review.mjs:59:10)
+        at Test.runInAsyncScope (node:async_hooks:226:14)
+        at Test.run (node:internal/test_runner/test:1402:25)
+        at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+        at Test.postRun (node:internal/test_runner/test:1542:19)
+        at Test.run (node:internal/test_runner/test:1467:12),
+    expected: undefined,
+    operator: 'doesNotThrow',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r7-capability-contract-review.mjs:66:5
+✖ src: captured manual run through formal pipeline/socket (original-selection) (156.385542ms)
+  AssertionError [ERR_ASSERTION]: valid Studio entry must reach the isolated executor exactly once
+  
+  0 !== 1
+  
+      at TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r7-capability-contract-review.mjs:110:16)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 0,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

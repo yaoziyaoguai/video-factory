@@ -1,0 +1,416 @@
+{"layer":"dist","variant":"text-audit","calls":1,"boundModel":"glm-5.3","actualModel":"glm-5.3","traceModel":"glm-5.3","returned":"success"}
+✔ dist: actual execution model equals immutable model binding (text-audit) (369.837917ms)
+{"layer":"dist","variant":"image-audit","calls":1,"boundModel":"glm-5.3","actualModel":"glm-5.3-flash","traceModel":"glm-5.3-flash","returned":"success"}
+✖ dist: actual execution model equals immutable model binding (image-audit) (148.648875ms)
+{"layer":"dist","variant":"rank-without-thumbnail","calls":1,"boundModel":"glm-5.3-flash","actualModel":"glm-5.3","traceModel":"glm-5.3","returned":"success"}
+✖ dist: actual execution model equals immutable model binding (rank-without-thumbnail) (101.116542ms)
+{"layer":"dist","probe":"ranking-checkpoint","calls":1,"active":1,"pendingOperation":null,"attempts":1}
+✖ dist: formal ranking adapter persists accepted operation before it can time out (262.412375ms)
+✔ all ten canonical descriptors match pipeline pins (0.909417ms)
+{"layer":"dist","profile":"openai","subset":false,"tasks":10,"digests":5,"missing":["series-roadmap","director-plan","publish-copy","asset-rank","reference-grammar"],"available":false,"reason":"Codex bridge socket '/var/folders/0y/bqp593v95dqdf62qylfn92ch0000gq/T/vf-r6-contract-review-FK7LbM/worker.sock' 使用了不兼容的协议版本。","executions":0}
+✖ dist: formal openai health is accepted by Studio (all tasks) (92.908708ms)
+{"layer":"dist","profile":"openai","subset":true,"tasks":2,"digests":2,"missing":[],"available":true,"reason":"","executions":0}
+✔ dist: formal openai health is accepted by Studio (subset) (89.2765ms)
+{"layer":"dist","profile":"zai","subset":false,"tasks":10,"digests":5,"missing":["series-roadmap","director-plan","publish-copy","asset-rank","reference-grammar"],"available":false,"reason":"Codex bridge socket '/var/folders/0y/bqp593v95dqdf62qylfn92ch0000gq/T/vf-r6-contract-review-qr4vAn/worker.sock' 使用了不兼容的协议版本。","executions":0}
+✖ dist: formal zai health is accepted by Studio (all tasks) (116.5095ms)
+{"layer":"dist","profile":"zai","subset":true,"tasks":2,"digests":2,"missing":[],"available":true,"reason":"","executions":0}
+✔ dist: formal zai health is accepted by Studio (subset) (185.492208ms)
+{"layer":"dist","platform":"douyin","transportCalls":1,"canonicalDigest":"b2ba3e2c155aefda2dd47213eea13f7260b4580bf13e0a66408621ba2fff15cf","executionDigest":"740e014cc1b9788ff48dd76dcd28a46b5f1f2c8291f8c4f17ef7129afe0c53b5","error":"Codex task completed with failure status 422. {\"error\":\"The model could not complete this step.\",\"failureDetails\":{\"category\":\"invalid_output\",\"reasonCode\":\"contract_mismatch\",\"providerId\":\"zai-bigmodel-api","stage":"completed_failure"}
+✖ dist: publish-copy douyin survives real writer/client/parser/executor/result binding (1174.230792ms)
+{"layer":"dist","platform":"shipinhao","transportCalls":1,"canonicalDigest":"b2ba3e2c155aefda2dd47213eea13f7260b4580bf13e0a66408621ba2fff15cf","executionDigest":"e426f442bc78decaa79638f64e7d406d3dd39f3f8603c7a0c7b0357c2168b169","error":"Codex task completed with failure status 422. {\"error\":\"The model could not complete this step.\",\"failureDetails\":{\"category\":\"invalid_output\",\"reasonCode\":\"contract_mismatch\",\"providerId\":\"zai-bigmodel-api","stage":"completed_failure"}
+✖ dist: publish-copy shipinhao survives real writer/client/parser/executor/result binding (1039.388083ms)
+{"layer":"dist","platform":"kuaishou","transportCalls":1,"canonicalDigest":"b2ba3e2c155aefda2dd47213eea13f7260b4580bf13e0a66408621ba2fff15cf","executionDigest":"e90b1a9c31d8bf388d78ba201453eaec244d5e9a74f47dc63f5f3291979aaa19","error":"Codex task completed with failure status 422. {\"error\":\"The model could not complete this step.\",\"failureDetails\":{\"category\":\"invalid_output\",\"reasonCode\":\"contract_mismatch\",\"providerId\":\"zai-bigmodel-api","stage":"completed_failure"}
+✖ dist: publish-copy kuaishou survives real writer/client/parser/executor/result binding (1042.778625ms)
+{"layer":"dist","platform":"xiaohongshu","transportCalls":1,"canonicalDigest":"b2ba3e2c155aefda2dd47213eea13f7260b4580bf13e0a66408621ba2fff15cf","executionDigest":"5571645128fd93238e810318d30b9b128fe67df791f7bfedfb3427394abc769a","error":"Codex task completed with failure status 422. {\"error\":\"The model could not complete this step.\",\"failureDetails\":{\"category\":\"invalid_output\",\"reasonCode\":\"contract_mismatch\",\"providerId\":\"zai-bigmodel-api","stage":"completed_failure"}
+✖ dist: publish-copy xiaohongshu survives real writer/client/parser/executor/result binding (1083.167417ms)
+{"layer":"dist","platform":"bilibili","transportCalls":1,"canonicalDigest":"b2ba3e2c155aefda2dd47213eea13f7260b4580bf13e0a66408621ba2fff15cf","executionDigest":"a474bf93a2763bf1f127faa20b964617a7b279da968919cad3f9d2b299cfe323","error":"Codex task completed with failure status 422. {\"error\":\"The model could not complete this step.\",\"failureDetails\":{\"category\":\"invalid_output\",\"reasonCode\":\"contract_mismatch\",\"providerId\":\"zai-bigmodel-api","stage":"completed_failure"}
+✖ dist: publish-copy bilibili survives real writer/client/parser/executor/result binding (1039.489084ms)
+{"layer":"dist","platform":"unknown-platform","transportCalls":1,"canonicalDigest":"b2ba3e2c155aefda2dd47213eea13f7260b4580bf13e0a66408621ba2fff15cf","executionDigest":"b2ba3e2c155aefda2dd47213eea13f7260b4580bf13e0a66408621ba2fff15cf"}
+✔ dist: publish-copy unknown-platform survives real writer/client/parser/executor/result binding (1045.340625ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 5
+ℹ fail 10
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 9847.874708
+
+✖ failing tests:
+
+test at docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:41:3
+✖ dist: actual execution model equals immutable model binding (image-audit) (148.648875ms)
+  AssertionError [ERR_ASSERTION]: accepted identity must match the model that really executed
+  + actual - expected
+  
+  + 'glm-5.3'
+  - 'glm-5.3-flash'
+            ^
+  
+      at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:64:14)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+      at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:54:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'glm-5.3',
+    expected: 'glm-5.3-flash',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:41:3
+✖ dist: actual execution model equals immutable model binding (rank-without-thumbnail) (101.116542ms)
+  AssertionError [ERR_ASSERTION]: accepted identity must match the model that really executed
+  + actual - expected
+  
+  + 'glm-5.3-flash'
+  - 'glm-5.3'
+            ^
+  
+      at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:64:14)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+      at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:54:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'glm-5.3-flash',
+    expected: 'glm-5.3',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:69:1
+✖ dist: formal ranking adapter persists accepted operation before it can time out (262.412375ms)
+  AssertionError [ERR_ASSERTION]: accepted ranking must have a restorable request snapshot
+      at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:89:16)
+      at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+      at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:81:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:104:5
+✖ dist: formal openai health is accepted by Studio (all tasks) (92.908708ms)
+  AssertionError [ERR_ASSERTION]: formal Broker health must satisfy formal Studio probe
+  
+  false !== true
+  
+      at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:118:16)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+      at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:108:7)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:104:5
+✖ dist: formal zai health is accepted by Studio (all tasks) (116.5095ms)
+  AssertionError [ERR_ASSERTION]: formal Broker health must satisfy formal Studio probe
+  
+  false !== true
+  
+      at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:118:16)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+      at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:108:7)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:126:3
+✖ dist: publish-copy douyin survives real writer/client/parser/executor/result binding (1174.230792ms)
+  AssertionError [ERR_ASSERTION]: a valid platform-specific output must not fail contract binding
+  + actual - expected
+  
+  + CodexBridgeError: Codex task completed with failure status 422. {"error":"The model could not complete this step.","failureDetails":{"category":"invalid_output","reasonCode":"contract_mismatch","providerId":"zai-bigmodel-api
+  +     at completedFailureError (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:1060:10)
+  +     at CodexBridgeClient.awaitOutcome (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:546:13)
+  +     at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+  +     at async CodexBridgeClient.runTaskDetailed (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:312:16)
+  +     at async CodexBridgeClient.runTask (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:263:13)
+  +     at async CodexPublishCopyWriter.write (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-publish-copy.ts:72:21)
+  +     at async <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:141:18)
+  +     at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+  +     at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+  +     at async Test.run (node:internal/test_runner/test:1409:7) {
+  +   creatorMessage: '模型没有完成此步骤，请重试或选择其他模型。',
+  +   failureDetails: {
+  +     category: 'invalid_output',
+  +     modelId: 'glm-5.3',
+  +     providerId: 'zai-bigmodel-api',
+  +     queueWaitMs: 0,
+  +     reasonCode: 'contract_mismatch'
+  +   },
+  +   failureKind: undefined,
+  +   stage: 'completed_failure',
+  +   statusCode: 422,
+  +   transient: false
+  + }
+  - undefined
+  
+      at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:145:14)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+      at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: CodexBridgeError: Codex task completed with failure status 422. {"error":"The model could not complete this step.","failureDetails":{"category":"invalid_output","reasonCode":"contract_mismatch","providerId":"zai-bigmodel-api
+        at completedFailureError (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:1060:10)
+        at CodexBridgeClient.awaitOutcome (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:546:13)
+        at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+        at async CodexBridgeClient.runTaskDetailed (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:312:16)
+        at async CodexBridgeClient.runTask (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:263:13)
+        at async CodexPublishCopyWriter.write (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-publish-copy.ts:72:21)
+        at async <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:141:18)
+        at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+        at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+        at async Test.run (node:internal/test_runner/test:1409:7),
+    expected: undefined,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:126:3
+✖ dist: publish-copy shipinhao survives real writer/client/parser/executor/result binding (1039.388083ms)
+  AssertionError [ERR_ASSERTION]: a valid platform-specific output must not fail contract binding
+  + actual - expected
+  
+  + CodexBridgeError: Codex task completed with failure status 422. {"error":"The model could not complete this step.","failureDetails":{"category":"invalid_output","reasonCode":"contract_mismatch","providerId":"zai-bigmodel-api
+  +     at completedFailureError (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:1060:10)
+  +     at CodexBridgeClient.awaitOutcome (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:546:13)
+  +     at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+  +     at async CodexBridgeClient.runTaskDetailed (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:312:16)
+  +     at async CodexBridgeClient.runTask (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:263:13)
+  +     at async CodexPublishCopyWriter.write (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-publish-copy.ts:72:21)
+  +     at async <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:141:18)
+  +     at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+  +     at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+  +     at async Test.run (node:internal/test_runner/test:1409:7) {
+  +   creatorMessage: '模型没有完成此步骤，请重试或选择其他模型。',
+  +   failureDetails: {
+  +     category: 'invalid_output',
+  +     modelId: 'glm-5.3',
+  +     providerId: 'zai-bigmodel-api',
+  +     queueWaitMs: 0,
+  +     reasonCode: 'contract_mismatch'
+  +   },
+  +   failureKind: undefined,
+  +   stage: 'completed_failure',
+  +   statusCode: 422,
+  +   transient: false
+  + }
+  - undefined
+  
+      at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:145:14)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+      at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: CodexBridgeError: Codex task completed with failure status 422. {"error":"The model could not complete this step.","failureDetails":{"category":"invalid_output","reasonCode":"contract_mismatch","providerId":"zai-bigmodel-api
+        at completedFailureError (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:1060:10)
+        at CodexBridgeClient.awaitOutcome (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:546:13)
+        at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+        at async CodexBridgeClient.runTaskDetailed (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:312:16)
+        at async CodexBridgeClient.runTask (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:263:13)
+        at async CodexPublishCopyWriter.write (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-publish-copy.ts:72:21)
+        at async <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:141:18)
+        at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+        at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+        at async Test.run (node:internal/test_runner/test:1409:7),
+    expected: undefined,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:126:3
+✖ dist: publish-copy kuaishou survives real writer/client/parser/executor/result binding (1042.778625ms)
+  AssertionError [ERR_ASSERTION]: a valid platform-specific output must not fail contract binding
+  + actual - expected
+  
+  + CodexBridgeError: Codex task completed with failure status 422. {"error":"The model could not complete this step.","failureDetails":{"category":"invalid_output","reasonCode":"contract_mismatch","providerId":"zai-bigmodel-api
+  +     at completedFailureError (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:1060:10)
+  +     at CodexBridgeClient.awaitOutcome (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:546:13)
+  +     at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+  +     at async CodexBridgeClient.runTaskDetailed (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:312:16)
+  +     at async CodexBridgeClient.runTask (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:263:13)
+  +     at async CodexPublishCopyWriter.write (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-publish-copy.ts:72:21)
+  +     at async <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:141:18)
+  +     at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+  +     at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+  +     at async Test.run (node:internal/test_runner/test:1409:7) {
+  +   creatorMessage: '模型没有完成此步骤，请重试或选择其他模型。',
+  +   failureDetails: {
+  +     category: 'invalid_output',
+  +     modelId: 'glm-5.3',
+  +     providerId: 'zai-bigmodel-api',
+  +     queueWaitMs: 0,
+  +     reasonCode: 'contract_mismatch'
+  +   },
+  +   failureKind: undefined,
+  +   stage: 'completed_failure',
+  +   statusCode: 422,
+  +   transient: false
+  + }
+  - undefined
+  
+      at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:145:14)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+      at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: CodexBridgeError: Codex task completed with failure status 422. {"error":"The model could not complete this step.","failureDetails":{"category":"invalid_output","reasonCode":"contract_mismatch","providerId":"zai-bigmodel-api
+        at completedFailureError (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:1060:10)
+        at CodexBridgeClient.awaitOutcome (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:546:13)
+        at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+        at async CodexBridgeClient.runTaskDetailed (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:312:16)
+        at async CodexBridgeClient.runTask (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:263:13)
+        at async CodexPublishCopyWriter.write (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-publish-copy.ts:72:21)
+        at async <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:141:18)
+        at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+        at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+        at async Test.run (node:internal/test_runner/test:1409:7),
+    expected: undefined,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:126:3
+✖ dist: publish-copy xiaohongshu survives real writer/client/parser/executor/result binding (1083.167417ms)
+  AssertionError [ERR_ASSERTION]: a valid platform-specific output must not fail contract binding
+  + actual - expected
+  
+  + CodexBridgeError: Codex task completed with failure status 422. {"error":"The model could not complete this step.","failureDetails":{"category":"invalid_output","reasonCode":"contract_mismatch","providerId":"zai-bigmodel-api
+  +     at completedFailureError (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:1060:10)
+  +     at CodexBridgeClient.awaitOutcome (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:546:13)
+  +     at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+  +     at async CodexBridgeClient.runTaskDetailed (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:312:16)
+  +     at async CodexBridgeClient.runTask (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:263:13)
+  +     at async CodexPublishCopyWriter.write (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-publish-copy.ts:72:21)
+  +     at async <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:141:18)
+  +     at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+  +     at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+  +     at async Test.run (node:internal/test_runner/test:1409:7) {
+  +   creatorMessage: '模型没有完成此步骤，请重试或选择其他模型。',
+  +   failureDetails: {
+  +     category: 'invalid_output',
+  +     modelId: 'glm-5.3',
+  +     providerId: 'zai-bigmodel-api',
+  +     queueWaitMs: 0,
+  +     reasonCode: 'contract_mismatch'
+  +   },
+  +   failureKind: undefined,
+  +   stage: 'completed_failure',
+  +   statusCode: 422,
+  +   transient: false
+  + }
+  - undefined
+  
+      at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:145:14)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+      at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: CodexBridgeError: Codex task completed with failure status 422. {"error":"The model could not complete this step.","failureDetails":{"category":"invalid_output","reasonCode":"contract_mismatch","providerId":"zai-bigmodel-api
+        at completedFailureError (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:1060:10)
+        at CodexBridgeClient.awaitOutcome (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:546:13)
+        at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+        at async CodexBridgeClient.runTaskDetailed (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:312:16)
+        at async CodexBridgeClient.runTask (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:263:13)
+        at async CodexPublishCopyWriter.write (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-publish-copy.ts:72:21)
+        at async <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:141:18)
+        at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+        at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+        at async Test.run (node:internal/test_runner/test:1409:7),
+    expected: undefined,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:126:3
+✖ dist: publish-copy bilibili survives real writer/client/parser/executor/result binding (1039.489084ms)
+  AssertionError [ERR_ASSERTION]: a valid platform-specific output must not fail contract binding
+  + actual - expected
+  
+  + CodexBridgeError: Codex task completed with failure status 422. {"error":"The model could not complete this step.","failureDetails":{"category":"invalid_output","reasonCode":"contract_mismatch","providerId":"zai-bigmodel-api
+  +     at completedFailureError (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:1060:10)
+  +     at CodexBridgeClient.awaitOutcome (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:546:13)
+  +     at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+  +     at async CodexBridgeClient.runTaskDetailed (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:312:16)
+  +     at async CodexBridgeClient.runTask (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:263:13)
+  +     at async CodexPublishCopyWriter.write (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-publish-copy.ts:72:21)
+  +     at async <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:141:18)
+  +     at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+  +     at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+  +     at async Test.run (node:internal/test_runner/test:1409:7) {
+  +   creatorMessage: '模型没有完成此步骤，请重试或选择其他模型。',
+  +   failureDetails: {
+  +     category: 'invalid_output',
+  +     modelId: 'glm-5.3',
+  +     providerId: 'zai-bigmodel-api',
+  +     queueWaitMs: 0,
+  +     reasonCode: 'contract_mismatch'
+  +   },
+  +   failureKind: undefined,
+  +   stage: 'completed_failure',
+  +   statusCode: 422,
+  +   transient: false
+  + }
+  - undefined
+  
+      at <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:145:14)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+      at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: CodexBridgeError: Codex task completed with failure status 422. {"error":"The model could not complete this step.","failureDetails":{"category":"invalid_output","reasonCode":"contract_mismatch","providerId":"zai-bigmodel-api
+        at completedFailureError (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:1060:10)
+        at CodexBridgeClient.awaitOutcome (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:546:13)
+        at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+        at async CodexBridgeClient.runTaskDetailed (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:312:16)
+        at async CodexBridgeClient.runTask (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-chat.ts:263:13)
+        at async CodexPublishCopyWriter.write (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/src/codex-publish-copy.ts:72:21)
+        at async <anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:141:18)
+        at async withBroker (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:32:5)
+        at async TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/docs/codex-collaboration/evidence/r6-contract-boundary-review.mjs:137:5)
+        at async Test.run (node:internal/test_runner/test:1409:7),
+    expected: undefined,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

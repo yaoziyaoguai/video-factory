@@ -1,0 +1,45 @@
+{
+  "checkboxes": [
+    {
+      "label": "第 1 镜",
+      "checked": true,
+      "disabled": true
+    },
+    {
+      "label": "第 2 镜",
+      "checked": true,
+      "disabled": true
+    },
+    {
+      "label": "第 3 镜",
+      "checked": true,
+      "disabled": true
+    },
+    {
+      "label": "第 4 镜",
+      "checked": true,
+      "disabled": true
+    },
+    {
+      "label": "第 5 镜",
+      "checked": false,
+      "disabled": false
+    },
+    {
+      "label": null,
+      "checked": true,
+      "disabled": false
+    },
+    {
+      "label": null,
+      "checked": true,
+      "disabled": true
+    }
+  ],
+  "summary": [
+    "本轮选择 4 个镜头：1、2、3、4"
+  ],
+  "reuse": [
+    "其余 1 个镜头计划沿用：5"
+  ]
+}

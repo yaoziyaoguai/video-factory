@@ -1,0 +1,25 @@
+=== 返修前 ===
+  run=needs_human revision=13
+  metered ¥17.00｜收据 2 笔｜授权 2 笔
+
+  原文: "蒸汽有了亮边。"
+  新文: "杯沿，亮着。"
+  提交按钮 disabled=false
+  已提交「按新文字重做配音与字幕」
+    [15s] run=failed revision=15
+
+=== 返修后 ===
+  run=failed revision=15
+  metered ¥17.00｜收据 2 笔｜授权 2 笔
+  付费增量 ¥0.00（应为 0：本地配音+本地渲染）
+  node brief = succeeded
+  node creative-planning = succeeded
+  node assets = succeeded
+  node asset-source-review = succeeded
+  node voice = failed
+  node render = pending
+  node technical-review = pending
+  node visual-review = pending
+  node final-review = pending
+
+  最新脚本产物 attempt-2 镜头4 旁白: "蒸汽有了亮边。"

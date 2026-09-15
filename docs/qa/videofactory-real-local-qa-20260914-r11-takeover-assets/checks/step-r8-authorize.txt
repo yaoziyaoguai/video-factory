@@ -1,0 +1,6 @@
+=== 本会话未持有报价，先重新获取 ===
+=== 待授权最高额 === ¥17.00
+=== 授权按钮 === "确认并授权（最高 ¥17.00）" disabled= false
+=== 点击授权 ===
+=== run 状态 === running revision 9
+=== spendAuthorizations ===

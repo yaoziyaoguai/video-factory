@@ -1,0 +1,58 @@
+▶ formal text-task recovery through Studio and joint-v1 pipeline
+  ✔ consumes one late completed_success result and advances the real workflow once (478.530709ms)
+  ✔ consumes one late completed_failure result and advances the real workflow once (371.6475ms)
+✔ formal text-task recovery through Studio and joint-v1 pipeline (850.986959ms)
+{"probe":"receipt-race","terminal":{"type":"done","state":"completed_failure"},"stale":{"type":"done","state":"completed_failure"},"persistedState":"completed_failure","posts":0}
+✔ R4-F03: concurrent processes must not overwrite terminal receipt with stale running (2173.123417ms)
+{"probe":"audit-upgrade","change":false,"observed":1,"newAudits":0,"produced":1,"status":"passed","resultContract":"v1"}
+{"probe":"audit-upgrade","change":true,"observed":1,"newAudits":1,"produced":1,"status":"passed","resultContract":"v2"}
+{"probe":"one-human-retry","resume":false,"observations":1,"submissions":[],"iterations":0}
+{"probe":"one-human-retry","resume":true,"observations":1,"submissions":["agent-e2bbee10320976d39abe8465823c47ab289cbf48e6f9c20040f5de4218b7a9fb"],"iterations":0}
+✔ control: same-contract pending audit is reused (2.617167ms)
+✔ R4-F02: old pending audit cannot certify new criteria (0.724708ms)
+✔ control: automatic recovery stops at known completed_failure (0.519375ms)
+✔ R4-F01: manual retry must not silently retry every new failure (0.508167ms)
+{"probe":"receipt-race","terminal":{"type":"done","state":"completed_failure"},"stale":{"type":"done","state":"completed_failure"},"persistedState":"completed_failure","posts":0}
+✔ R4-F03: concurrent processes must not overwrite terminal receipt with stale running (2151.447583ms)
+{"probe":"upgrade-plus-manual-failure-recovery","produced":1,"observed":1,"currentAudits":1,"status":"passed"}
+✔ new successful audit after settling old failure should not be discarded as old-contract audit (2.673625ms)
+▶ role agent loop audit boundary
+  ✔ stops after a bounded number of session rebuilds when every produce request is rejected as not accepted (2.341833ms)
+  ✔ rejects a low-score pass even when the broker is bypassed (0.169042ms)
+  ✔ resumes from a persisted candidate without repeating completed model work (1.663667ms)
+  ✔ reports real producer, audit, validation, and retry timings (0.657958ms)
+  ✔ never rotates an accepted request with an uncertain broker outcome (0.60575ms)
+  ✔ observes an accepted pending operation before applying a changed role contract (0.599708ms)
+  ✔ retires a verified transient terminal failure and creates one new generation only on explicit recovery (0.550375ms)
+  ✔ consumes a produce recovery grant on the verified request and stops on the next completed failure (0.561125ms)
+  ✔ consumes an audit recovery grant without repeating produce or leaking it into a later phase (0.622958ms)
+  ✔ does not let a produce recovery grant authorize a new audit failure (0.6255ms)
+  ✔ does not let a recovery grant from an earlier role authorize a later role request (0.181ms)
+  ✔ settles an old pending audit but re-audits after a contractVersion change and survives another interruption (0.638416ms)
+  ✔ settles an old pending audit but re-audits after a criteria change and survives another interruption (0.4605ms)
+  ✔ accepts the first current audit after contractVersion with transient old failure (0.511833ms)
+  ✔ accepts the first current audit after criteria with no-output old failure (0.320125ms)
+  ✔ stops when the first current audit fails after settling an old-contract failure (0.393166ms)
+  ✔ observes the current audit after interruption without repeating the producer (0.478625ms)
+  ✔ opens a fresh bounded session with full repair context when the broker loses an old handle (0.4595ms)
+  ✔ keeps an exhausted checkpoint terminal until the caller supplies a new key (0.738333ms)
+  ✔ does not share operation request ids between checkpoint-free loop invocations (0.190875ms)
+  ✔ carries the previous audit into the next review so the standard cannot move between rounds (0.1695ms)
+  ✔ keeps one producer session and one isolated audit session for the whole role loop (0.346833ms)
+  ✔ fails fast on completed infrastructure errors without consuming a semantic audit round (0.373625ms)
+  ✔ repairs invalid producer and auditor output in the same bounded role sessions (0.419583ms)
+  ✔ does not spend a semantic audit round on malformed repair output (0.226625ms)
+  ✔ records a failed checkpoint when structured output retries are exhausted and resumes it (0.392542ms)
+  ✔ reactivates an older checkpoint that mistook malformed output for semantic exhaustion (0.3565ms)
+  ✔ migrates an interrupted v3 checkpoint without repeating its completed candidate (0.271916ms)
+  ✔ migrates v5 checkpoints so historical infrastructure failures do not exhaust semantic rounds (0.216ms)
+  ✔ audits an existing human candidate before asking the producer to repair it (0.088292ms)
+✔ role agent loop audit boundary (16.683292ms)
+ℹ tests 39
+ℹ suites 2
+ℹ pass 39
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 9527.071542

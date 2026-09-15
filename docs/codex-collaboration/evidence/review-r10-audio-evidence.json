@@ -1,0 +1,14 @@
+{
+  "kind": "isolated-production-pipeline-observation",
+  "realModelOrMediaCall": false,
+  "productAcceptance": false,
+  "source": "/var/folders/0y/bqp593v95dqdf62qylfn92ch0000gq/T/vf-r10-audio-review-Wvebrj/runs/run-1afedb56-56c9-4a0a-ac6d-0bb04d2fa23b/run.json",
+  "operation": "joint-v1 planning -> applyNodeInputOverride(voice, rate=120, pause_scale=2, current revision/input-version) -> resumeStale",
+  "savedBriefVoiceDirection": { "profileId": "macos:Tingting", "rate": 185, "pauseScale": 1, "masteringPreset": "natural" },
+  "firstVoiceReceiptParameters": { "rate": 185, "pauseScale": 1 },
+  "secondVoiceReceiptParameters": { "rate": 120, "pauseScale": 2 },
+  "planningStatusAfterResume": "succeeded",
+  "producerCallsBefore": { "treatment": 1, "script": 1, "director": 1 },
+  "producerCallsAfter": { "treatment": 1, "script": 1, "director": 1 },
+  "evidenceLimit": "正式规划/持久化/输入编辑流程，外部角色与媒体为隔离依赖替身；证明配置分歧，不证明真实音轨已溢出。"
+}

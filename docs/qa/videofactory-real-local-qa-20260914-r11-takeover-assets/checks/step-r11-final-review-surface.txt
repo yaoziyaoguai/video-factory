@@ -1,0 +1,18 @@
+=== run === needs_human revision 12
+
+=== final-review 介入项 ===
+
+=== 双模型复审结论 ===
+  (节点报告接口可用)
+
+=== 宿主给出的返工草稿 GET /rework-draft ===
+  错误: {"error":"只有失败、已打回或已完成的制作才能生成新版本草稿。"}
+
+=== 页面可见的决定面文案 ===
+  [成片] 从证据走到成片 / 成片预览 / 成片双审：2/2 已完成
+  [批准] 待补查项只会重新审查当前成片，不会重新购买画面或配音。已确认缺陷才进入调整方案；批准则会覆盖视觉审片建议并生成发布包。 / 仍要批准（说明理由）
+
+=== 可见按钮 ===
+  ["创作向导","qa-local","搜索项目、选题、模板或功能\n⌘ K","镜头 4 · 00:10","替换后重新审片","镜头 5 · 00:13","替换后重新审片","补查现有成片（不重买素材）","修改后再审","仍要批准（说明理由）","创作向导"]
+  pageerror Failed to load resource: the server responded with a status of 404 (Not Found)
+  pageerror Failed to load resource: the server responded with a status of 409 (Conflict)

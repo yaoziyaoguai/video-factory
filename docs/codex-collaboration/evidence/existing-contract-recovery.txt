@@ -1,0 +1,29 @@
+Command: node --test --import tsx apps/codex-broker/test/topic-script-contract.cross.test.ts apps/codex-broker/test/codex-bridge-recovery.cross.test.ts
+Working directory: /Users/jinkun.wang/work_space/veidofactory
+Exit code: 0
+Captured: 2026-09-12 (local audit; fixture executors only)
+
+▶ CodexBridgeClient × CodexBrokerServer durable recovery
+  ✔ polls the accepted task to completion without resubmitting it (64.839667ms)
+  ✔ recovers the durable outcome on resubmission after the first submission is lost (99.811834ms)
+  ✔ keeps the task facts accepted while the query connection itself keeps failing (3.470375ms)
+  ✔ returns an authoritative not_accepted when no durable acceptance exists, allowing a bounded retry (2.089667ms)
+✔ CodexBridgeClient × CodexBrokerServer durable recovery (171.005291ms)
+▶ topic-ideas cross-process contract (Studio builder × Broker parser)
+  ✔ accepts the canonical Studio payload: only signals + strategy (1.687417ms)
+  ✔ keeps generationNonce out of the payload while varying the generation identity (0.216791ms)
+  ✔ enforces the shared 2000-character strategy limit on both sides (0.343042ms)
+  ✔ protects topic-ideas with the shared contract digest (0.2275ms)
+✔ topic-ideas cross-process contract (Studio builder × Broker parser) (3.166917ms)
+▶ script-draft cross-process contract (planning chain brief × Broker parser)
+  ✔ accepts the real planning-chain brief: durationRange + creativeTreatment + planningIssues (0.280667ms)
+  ✔ still rejects unknown brief keys and invalid duration ranges (0.167709ms)
+✔ script-draft cross-process contract (planning chain brief × Broker parser) (0.548083ms)
+ℹ tests 10
+ℹ suites 3
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 309.3505

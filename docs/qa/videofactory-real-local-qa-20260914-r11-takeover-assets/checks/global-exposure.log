@@ -1,0 +1,13 @@
+=== run object keys === ["runId","title","totals"]
+=== runs full ===
+{"runId":"run-a7c42cc4-98de-4354-9dc9-c268b68b1446","title":"城市微光：匆忙之中重新看见日常","totals":{"estimatedCostCny":20,"authorizedCostCny":20.5,"actualCostCny":9.5,"actualPendingCount":1,"meteredCalls":2,"subscriptionCalls":26,"freeCalls":3,"failedMeteredCalls":0}}
+{"runId":"run-51821120-3ee6-4373-a129-0ebe975c9d2a","title":"城市微光：匆忙之中重新看见日常","totals":{"estimatedCostCny":0,"authorizedCostCny":0,"actualCostCny":0,"actualPendingCount":0,"meteredCalls":0,"subscriptionCalls":1,"freeCalls":1,"failedMeteredCalls":0}}
+{"runId":"run-cff8e1e0-ba46-4dc5-8729-b0468700d1fb","title":"城市微光：匆忙之中重新看见日常","totals":{"estimatedCostCny":0,"authorizedCostCny":0,"actualCostCny":0,"actualPendingCount":0,"meteredCalls":0,"subscriptionCalls":1,"freeCalls":1,"failedMeteredCalls":0}}
+{"runId":"run-6083f24f-bc98-4fb5-81f2-2aeb3954e285","title":"QA缺来源负例：我的桌面整理计时实验","totals":{"estimatedCostCny":0,"authorizedCostCny":0,"actualCostCny":0,"actualPendingCount":0,"meteredCalls":0,"subscriptionCalls":4,"freeCalls":1,"failedMeteredCalls":0}}
+{"runId":"run-62324471-a9bd-4e6d-9b90-5cfe049dc700","title":"城市观察01：晨光在墙上的移动","totals":{"estimatedCostCny":0,"authorizedCostCny":0,"actualCostCny":0,"actualPendingCount":0,"meteredCalls":0,"subscriptionCalls":18,"freeCalls":1,"failedMeteredCalls":0}}
+{"runId":"run-25b4c195-a50c-4344-98fd-197d1bf58438","title":"城市微光：匆忙之中重新看见日常","totals":{"estimatedCostCny":16.5,"authorizedCostCny":16,"actualCostCny":4,"actualPendingCount":1,"meteredCalls":1,"subscriptionCalls":24,"freeCalls":1,"failedMeteredCalls":0}}
+=== per-run pending scan ===
+run run-a7c42cc4-98de-4354-9dc9-c268b68b1446 pending=1
+    {"id":"assets:2026-09-14T10:16:51.214Z:16","nodeId":"assets","provider":"seedance-video-v1","status":"failed","est":5,"startedAt":"2026-09-14T10:16:51.214Z","finishedAt":"2026-09-14T10:16:51.801Z"}
+run run-25b4c195-a50c-4344-98fd-197d1bf58438 pending=1
+    {"id":"assets:2026-09-14T07:17:02.437Z:23","nodeId":"assets","provider":"seedance-video-v1","status":"failed","est":5,"startedAt":"2026-09-14T07:17:02.437Z","finishedAt":"2026-09-14T07:17:02.485Z"}

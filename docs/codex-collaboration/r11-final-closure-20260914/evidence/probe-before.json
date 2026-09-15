@@ -1,0 +1,512 @@
+{
+  "snapshot": {
+    "sameRevisionThinEventDropsPlanningStages": true
+  },
+  "semanticBoundary": {
+    "validControlCalls": 1,
+    "transportCalls": 1,
+    "validateCalls": 0,
+    "diagnostic": {
+      "category": "invalid_output",
+      "reasonCode": "duplicate_scene_position",
+      "providerId": "zai-bigmodel-api",
+      "modelId": "glm-5.3",
+      "providerWaitMs": 1,
+      "fieldPath": "output.shots[1].scenePosition",
+      "taskKind": "director-plan",
+      "finishReason": "stop"
+    }
+  },
+  "topic": {
+    "candidateCount": 0,
+    "diagnoses": [
+      {
+        "index": 0,
+        "referencesValid": true,
+        "accepted": false,
+        "rejectedFields": [
+          {
+            "field": "rationale",
+            "quotes": [
+              "问题—党纪处分—政务处分"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualProof",
+            "quotes": [
+              "行为—党纪处分—政务处分"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualPlan.beats[0].description",
+            "quotes": [
+              "当前来源：知乎回答"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualPlan.beats[1].description",
+            "quotes": [
+              "待官方核对"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualPlan.beats[2].description",
+            "quotes": [
+              "案例文字",
+              "作者判断",
+              "未来预测"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          }
+        ]
+      },
+      {
+        "index": 1,
+        "referencesValid": true,
+        "accepted": false,
+        "rejectedFields": [
+          {
+            "field": "rationale",
+            "quotes": [
+              "网红厨具实测"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualPlan.beats[0].description",
+            "quotes": [
+              "省步骤，还是只省刀工？"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          }
+        ]
+      },
+      {
+        "index": 2,
+        "referencesValid": true,
+        "accepted": false,
+        "rejectedFields": [
+          {
+            "field": "visualPlan.strategy",
+            "quotes": [
+              "角色如何被交接"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualPlan.beats[2].description",
+            "quotes": [
+              "解释动作原因",
+              "年轻演员形成自己的理解"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          }
+        ]
+      },
+      {
+        "index": 3,
+        "referencesValid": true,
+        "accepted": false,
+        "rejectedFields": [
+          {
+            "field": "audience",
+            "quotes": [],
+            "numbers": [],
+            "latin": [
+              "AI"
+            ],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "hook",
+            "quotes": [
+              "安全是唯一原因"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "rationale",
+            "quotes": [],
+            "numbers": [],
+            "latin": [
+              "AI"
+            ],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualProof",
+            "quotes": [
+              "原话—转述—推演"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualPlan.strategy",
+            "quotes": [
+              "直接引语、作者判断、未核验外推"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualPlan.beats[0].description",
+            "quotes": [
+              "安全是唯一原因"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualPlan.beats[2].description",
+            "quotes": [
+              "原始采访待读取—新智元文章—36氪转载"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          }
+        ]
+      },
+      {
+        "index": 4,
+        "referencesValid": true,
+        "accepted": false,
+        "rejectedFields": [
+          {
+            "field": "painPoint",
+            "quotes": [
+              "比肩旗舰"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualProof",
+            "quotes": [
+              "机制示意"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualPlan.beats[0].description",
+            "quotes": [
+              "基准提升≠所有游戏指标同时领先"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualPlan.beats[1].description",
+            "quotes": [
+              "机制示意，非真实芯片剖面"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          }
+        ]
+      },
+      {
+        "index": 5,
+        "referencesValid": true,
+        "accepted": false,
+        "rejectedFields": [
+          {
+            "field": "visualProof",
+            "quotes": [
+              "仅按热榜字符串演算，不代表正式政策"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualPlan.beats[1].description",
+            "quotes": [
+              "假设四段依次执行"
+            ],
+            "numbers": [
+              "28"
+            ],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          },
+          {
+            "field": "visualPlan.beats[3].description",
+            "quotes": [
+              "字面演算成立；真实适用范围待核验"
+            ],
+            "numbers": [],
+            "latin": [],
+            "attribution": false,
+            "clickbait": false
+          }
+        ]
+      }
+    ]
+  },
+  "recovery": {
+    "owner": "run-25b4c195-a50c-4344-98fd-197d1bf58438-creative-planning-operation-862408e4-cfe7-4551-b9fe-1a5332b521a3",
+    "summary": {
+      "modelCallCount": 2,
+      "producerModelCallCount": 2,
+      "auditModelCallCount": 0,
+      "discussionModelCallCount": 0,
+      "structuredRepairModelCallCount": 0,
+      "retryCount": 1,
+      "unknownModelExecutionCount": 0,
+      "producerMs": 439225,
+      "auditMs": 0,
+      "discussionMs": 0,
+      "loopValidationMs": 0,
+      "previousModelCallCount": 10,
+      "previousProducerModelCallCount": 2,
+      "previousAuditModelCallCount": 3,
+      "previousDiscussionModelCallCount": 5,
+      "previousStructuredRepairModelCallCount": 0,
+      "previousRetryCount": 0,
+      "previousUnknownModelExecutionCount": 0,
+      "previousProducerMs": 267399,
+      "previousAuditMs": 220381,
+      "previousDiscussionMs": 239916,
+      "previousLoopValidationMs": 20
+    },
+    "checkpoint": {
+      "name": "68df67d2435c745c1cc67579bef74270f34bf2933f73dbbae50fa6956fcd0f62.json",
+      "attemptedRequestIds": [
+        "agent-c389b3c2b13326bdd798798bb58e58d8e6be68ea922984063080d2280d6253ec",
+        "agent-c1381e9b8b425cd092ea96333ba30c4be665b388a5519c930bc7aac3d2373915"
+      ],
+      "durations": {
+        "produce": 439225,
+        "audit": 0
+      }
+    },
+    "physicalDirectorRequests": [
+      {
+        "requestId": "agent-c1381e9b8b425cd092ea96333ba30c4be665b388a5519c930bc7aac3d2373915",
+        "providerWaitMs": 183185,
+        "queueWaitMs": 0
+      },
+      {
+        "requestId": "agent-c389b3c2b13326bdd798798bb58e58d8e6be68ea922984063080d2280d6253ec",
+        "providerWaitMs": 234566,
+        "queueWaitMs": 20333
+      }
+    ]
+  },
+  "series": [
+    {
+      "requestId": "agent-e6194f8544ac2ec77895ee4f12129eb30c50c802e0d562dd5ddc2a0d9ac0d561",
+      "providerWaitMs": 262258,
+      "payloadKeys": [
+        "brief",
+        "scenes",
+        "assetProviders",
+        "directorProfiles",
+        "economics"
+      ],
+      "hasPriorPlan": false,
+      "issues": [
+        {
+          "scenePositions": [
+            1
+          ],
+          "requiredChange": "调整该镜头画面路线（检索词、生成或复用）；素材确实不可得时按 source/user 上报",
+          "authenticity": "illustrative"
+        },
+        {
+          "scenePositions": [
+            2
+          ],
+          "requiredChange": "调整该镜头画面路线（检索词、生成或复用）；素材确实不可得时按 source/user 上报",
+          "authenticity": "illustrative"
+        }
+      ],
+      "shots": [
+        {
+          "scene": 1,
+          "authenticity": "illustrative",
+          "delivery": "generated_video",
+          "reuse": null
+        },
+        {
+          "scene": 2,
+          "authenticity": "illustrative",
+          "delivery": "generated_video",
+          "reuse": null
+        },
+        {
+          "scene": 3,
+          "authenticity": "illustrative",
+          "delivery": "generated_video",
+          "reuse": null
+        },
+        {
+          "scene": 4,
+          "authenticity": "illustrative",
+          "delivery": "stock_video",
+          "reuse": null
+        },
+        {
+          "scene": 5,
+          "authenticity": "illustrative",
+          "delivery": "generated_video",
+          "reuse": 3
+        }
+      ]
+    },
+    {
+      "requestId": "agent-8acfd36b00f9b6d801788371017cb4295cb0014ddcff9e48acff6a0dd6633feb",
+      "providerWaitMs": 179329,
+      "payloadKeys": [
+        "brief",
+        "scenes",
+        "assetProviders",
+        "directorProfiles",
+        "economics"
+      ],
+      "hasPriorPlan": false,
+      "issues": [
+        {
+          "scenePositions": [
+            4
+          ],
+          "requiredChange": "调整该镜头画面路线（检索词、生成或复用）；素材确实不可得时按 source/user 上报",
+          "authenticity": "illustrative"
+        }
+      ],
+      "shots": [
+        {
+          "scene": 1,
+          "authenticity": "illustrative",
+          "delivery": "stock_video",
+          "reuse": null
+        },
+        {
+          "scene": 2,
+          "authenticity": "illustrative",
+          "delivery": "stock_video",
+          "reuse": null
+        },
+        {
+          "scene": 3,
+          "authenticity": "illustrative",
+          "delivery": "generated_video",
+          "reuse": null
+        },
+        {
+          "scene": 4,
+          "authenticity": "illustrative",
+          "delivery": "generated_video",
+          "reuse": null
+        },
+        {
+          "scene": 5,
+          "authenticity": "illustrative",
+          "delivery": "generated_video",
+          "reuse": 3
+        }
+      ]
+    },
+    {
+      "requestId": "agent-5321b085f78a8ecb65db217ef550ca51c4e19325dc0ab456d8a12e8e2d01b2b4",
+      "providerWaitMs": 212223,
+      "payloadKeys": [
+        "brief",
+        "scenes",
+        "assetProviders",
+        "directorProfiles",
+        "economics"
+      ],
+      "hasPriorPlan": false,
+      "issues": null,
+      "shots": [
+        {
+          "scene": 1,
+          "authenticity": "illustrative",
+          "delivery": "stock_video",
+          "reuse": null
+        },
+        {
+          "scene": 2,
+          "authenticity": "illustrative",
+          "delivery": "stock_video",
+          "reuse": null
+        },
+        {
+          "scene": 3,
+          "authenticity": "illustrative",
+          "delivery": "generated_video",
+          "reuse": null
+        },
+        {
+          "scene": 4,
+          "authenticity": "illustrative",
+          "delivery": "generated_video",
+          "reuse": null
+        },
+        {
+          "scene": 5,
+          "authenticity": "illustrative",
+          "delivery": "generated_video",
+          "reuse": 3
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+
+insert 'artifact-35bacec2-7abf-43e6-a92c-4cb08d2d2daf' (script) at index 1, same slot as in the parent version
+node-level artifactIds 7 -> 8
+
+backup: /Users/jinkun.wang/work_space/veidofactory/.local/runtime/qa-r11-repair-20260914/backups/run-f8e2635f-4baa-4a4d-9a2b-a6e169ee5c08-rev15-before-membership-repair-2026-09-15T02-13-10-513Z.json
+written: /Users/jinkun.wang/work_space/veidofactory/workspace/qa-r11-repair-20260914/runs/run-f8e2635f-4baa-4a4d-9a2b-a6e169ee5c08/run.json

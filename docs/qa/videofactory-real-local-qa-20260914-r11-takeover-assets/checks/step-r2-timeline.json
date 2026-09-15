@@ -1,0 +1,23 @@
+[
+  {
+    "gate": 1,
+    "outcome": "confirmed",
+    "stage": "treatment",
+    "reviewRevision": 5,
+    "at": "2026-09-14T16:15:31.474Z"
+  },
+  {
+    "gate": 2,
+    "outcome": "confirmed",
+    "stage": "script",
+    "reviewRevision": 8,
+    "at": "2026-09-14T16:19:44.892Z"
+  },
+  {
+    "gate": 3,
+    "outcome": "confirmed",
+    "stage": "director",
+    "reviewRevision": 11,
+    "at": "2026-09-14T16:32:43.875Z"
+  }
+]

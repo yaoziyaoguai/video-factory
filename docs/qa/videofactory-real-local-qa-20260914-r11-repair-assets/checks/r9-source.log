@@ -1,0 +1,13 @@
+✔ src: current planning fields and treatment v2 survive every producer parser without template guidance (2.893417ms)
+✔ src: deprecated template guidance is rejected at every new producer request boundary (0.450292ms)
+✔ src: validation repair keeps the same formal producer contract (1.049958ms)
+✔ src: audit and audit-structure-repair retain bounded revision 9 context (0.24875ms)
+✔ src: broker and pipeline digest pins match for all revised planning tasks (0.165958ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 9.366333

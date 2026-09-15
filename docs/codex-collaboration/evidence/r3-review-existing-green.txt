@@ -1,0 +1,45 @@
+Command: node --test --import tsx docs/codex-collaboration/evidence/transport-audit.test.mjs apps/codex-broker/test/task-lifecycle-v3.cross.test.ts apps/codex-broker/test/durable-owner-lifecycle.cross.test.ts
+Exit code: 0
+Scope: isolated executors; no real model or media calls.
+
+▶ durable broker owner and shutdown lifecycle
+  ✔ G02 rejects a second process that targets the same durable store (208.47625ms)
+  ✔ G02 reclaims a parseable owner lock only after its PID is confirmed dead (97.635959ms)
+  ✔ G04 waits for active completion persistence before releasing the store (29.0135ms)
+  ✔ G04 keeps the owner fence after a shutdown deadline until old work settles (74.318542ms)
+  ✔ G04 persists a queued shutdown rejection as terminal not_accepted (25.299334ms)
+✔ durable broker owner and shutdown lifecycle (435.675458ms)
+▶ durable task lifecycle v3
+  ✔ A01/A07 preserves output, trace, and session and rematerializes a missing registry (68.329333ms)
+  ✔ A02 serializes identical acceptance and rejects a different binding (39.623459ms)
+  ✔ A03 requires the complete immutable query binding (31.000708ms)
+  ✔ A04 projects orphan legacy acceptance as unknown without execution (60.708209ms)
+  ✔ A05 keeps accepted fact when observation transport is unavailable (202.210084ms)
+  ✔ A06 preserves a verified terminal failure (34.672041ms)
+  ✔ A08 blocks rejected and conflict failures from provider fallback (0.276416ms)
+  ✔ A09 preserves every valid topic preference section (0.183292ms)
+  ✔ A10 reconciles a lost POST response with one physical execution (17.444583ms)
+  ✔ A11 rejects a completed envelope whose request identity was replaced (34.025417ms)
+  ✔ A12 consumes background completion persistence rejection (270.637959ms)
+  ✔ projects checkpoint-only planning intent before the real asset-rank broker boundary (34.770333ms)
+✔ durable task lifecycle v3 (795.408041ms)
+✔ P01: poll completion preserves the producer session handle (58.714125ms)
+✔ P02: concurrent identical POSTs execute exactly once (78.339583ms)
+✔ P03: query without immutable binding does not disclose a completed outcome (45.445667ms)
+✔ P04: an orphan accepted record is unknown, not eternally running (63.139292ms)
+✔ P05: observation connection loss after accepted must not become not_accepted (310.325125ms)
+✔ P06: persisted terminal failure stays completed_failure even with HTTP 500 outcome (45.853125ms)
+✔ P07: GET restores missing derived session registry from completed evidence (88.981958ms)
+✔ P08: rejected/conflict stages cannot fall back based on generic network details (0.345917ms)
+✔ P09: a valid long preference retains positioning and audience (0.137292ms)
+✔ P10: lost acceptance response reconciles the original task before returning (59.023167ms)
+✔ P11: completed response for a different requestId is rejected (48.798ms)
+✔ P12: background completion persistence failure does not crash the broker process (300.965958ms)
+ℹ tests 29
+ℹ suites 2
+ℹ pass 29
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1523.523542

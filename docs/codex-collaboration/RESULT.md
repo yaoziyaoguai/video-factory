@@ -875,3 +875,1205 @@ QA 报告：`docs/qa/videofactory-real-local-qa-20260913-06.md`；截图：`docs
 - 未验证：正例真实报价与三动作、媒体/TTS/渲染、新 evidence SHA 双真实模型审片、审片建议驱动的必要返工/复用、新片声画及创作质量。没有新成片，不能写完整生产流程通过。
 - 没有 commit、push、云端部署、外部发布、删除或迁移用户数据；没有覆盖历史报告或修改 TASK/REVIEW。
 - 完成时间：2026-09-13（Asia/Shanghai）。revision 8 状态：`READY_FOR_REVIEW`。指定修复完成，QA 执行完，产品验收未通过。产品修改与真实 QA 到此停止，等待审查窗口统一检查。
+
+---
+
+# Revision 9 执行记录
+
+- taskId: `VF-R3-CLOSURE-20260912-01`
+- revision: `9`
+- status: `PAUSED_BY_USER`
+
+## R9.1 开始基线与暂停前工作点
+
+- 现场仓库 `/Users/jinkun.wang/work_space/veidofactory`，branch `codex/final-dual-review-cloud-acceptance`，HEAD `b36ebac3189cf574b8e437cbe16eb9d0b228a177`；暂存区为空。保留 45 个当前产品/测试修改路径、2 个本轮新增 pipeline 源文件及约 230 个历史未跟踪资料/证据，没有 reset、stash、clean 或回退到历史 `570fe6e`。
+- `r9-start-baseline.json` 保存的 322 个产品、测试及配置摘要与提交前内容基线相符；revision 9 在此之上的实际实现和 QA 证据继续保留。未修改 TASK、REVIEW、IMPLEMENTATION 或 VALIDATION。
+- 已完成 W1/W2/W3 的实现、聚焦测试和集中确定性回归。最新补充修复把 `templateGuidance` 纳入构思阶段身份，防止模板变化复用旧构思；Studio 持久化摘要优先展示正式 `visualIntent`；visual-review/role-audit 正式合同与 digest 同步 `sourceTimecodeMs`；正式 halt receipt 明确为 produce 1 + audit 1；崩溃恢复 fixture 改用不改变构思输入的系列连续性变化。
+- 暂停前工作点：用户明确同意追加 `¥6.25` 后，执行窗口只在原 run 正式页面确认一次。5 个镜头现已全部 materialized，实际媒体费用 `¥8.75 / ¥50`，无 unknown、失败或人工对账；镜头 2 确实复用，其余 4 个新 taskId 唯一。workflow 已把 `assets` 标为 succeeded 并进入 `asset-source-review`。素材阶段 20 分 41 秒中，约 15 分钟来自两次 GLM pilot review；Seedream 实测约 8 秒，三条新 MiniMax 视频约 2 分 04 秒、2 分 04 秒、1 分 33 秒。预检约 6 分钟后曾进入 `accepted_unknown`；只查询一次相同原任务，task identity 不变、Broker active 1/queued 0，没有重提。后续终态和暂停边界见 R9.4–R9.5。
+
+## R9.2 已完成的集中检查
+
+| 命令/检查 | 完整终态 | exit |
+| --- | --- | ---: |
+| `npm run build:pipeline` | 通过 | 0 |
+| `npm run test:ts` 首轮 | 797 pass / 1 fail / 1 skip；旧 afterSeed fixture 因构思 identity 正确纳入模板后语义过期 | 1 |
+| 修正等价 fixture 后 `npm run test:ts` | 798 pass / 0 fail / 1 skip | 0 |
+| `npm run test:broker` | 197 pass / 0 fail | 0 |
+| `npm run studio:test` | Vitest 383/383；Node 515/515 | 0 |
+| `npm run typecheck` | 全 workspace 通过 | 0 |
+| `npm run build` | Broker、pipeline、Studio production build 成功；仅既有 Vite chunk warning | 0 |
+| `npm run test:package` | 3 pass / 0 fail | 0 |
+| `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests` | 131 tests，`OK` | 0 |
+| `apps/codex-broker/test/deploy-service.test.ts` | 28 pass / 0 fail | 0 |
+| `r6-contract-boundary-review.mjs` source / dist | 15/15；15/15 | 0；0 |
+| `r7-capability-contract-review.mjs` source / dist | 6/6；6/6 | 0；0 |
+| `r9-planning-contract-boundary.mjs` source / dist | 4/4；4/4 | 0；0 |
+| `r9-director-contract.test.mjs` | 5/5 | 0 |
+| `git diff --check` | 无 whitespace error | 0 |
+
+一次从仓库根直接调用 Studio Vitest 未加载 workspace 的 jsdom 配置而出现 `document is not defined`；随后使用正式 `npm run studio:test` 全量通过。该记录是命令入口误用，不是产品失败，也不从证据中删除。
+
+## R9.3 最终真实环境与 QA 继续点
+
+- 最终 build 产物：Broker `apps/codex-broker/dist/main.js` SHA-256 `665709f2e52374ce37ff2f5660b42ebf997933eadb5a67c420359247dcf6f124`；Studio server `1b2f5b487e785de95cfee6d37411b332799bd65d92389873967e95aaf5a5787a`；client index `da00a462b123c739bd08440c122797cccca22fbe0fe94beb33dd8d73e345b4c1`。
+- OpenAI Broker PID `15927`，`gpt-5.6-sol / xhigh`；ZAI Broker PID `15928`，`glm-5.3 / max`、视觉 `glm-5.3-flash`；Studio PID `15929`。三个 cwd 均为本仓库，使用绝对 workspace 与双绝对 socket；两个 Broker 10 kinds / 10 contracts、启动时 active/queued 0/0，Studio health ok，Python/FFmpeg/ffprobe/say 均 true。
+- QA 报告继续追加于 `docs/qa/videofactory-real-local-qa-20260913-r9.md`，证据目录为同名 `-assets/`。本轮 `qa-only` 只记录期间未修改产品代码；最终构建后的恢复证据为 `39-new-contract-recovery-ready.png`、`40-incremental-quote-mobile.png`。
+
+## R9.4 用户要求暂停后的统一问题记录
+
+- 用户明确要求“先别修了，把出现的问题都记录下来”。自该指令起停止产品修改、真实模型调用、媒体购买、TTS 和重试；没有把 revision 9 状态标成 `READY_FOR_REVIEW` 或 `ACCEPTED`。
+- 主 run `run-e72cd051-e83c-4a9f-8cc8-5a4d2ae70b6f` 的 5 个素材均被正式 workflow 消费，`assets` 成功推进到 `asset-source-review`。预检第 2/3 轮正确以 `replan_upstream` 打回 `visual-direction/script`，没有第 3 轮和再次购买；实际媒体费用 `¥8.75 / ¥50.00`，无待确认费用。配音、渲染和双成片审片未开始。
+- 已证实的四项 High 问题：
+  1. 模板默认知识/证据职责覆盖用户明确的“只借节奏、纯主观隐喻”要求；
+  2. 可由 AIGC 完成的普通抽象示意被错误升级为上传、实拍或图库来源要求；
+  3. 一条视频母片加独立静态结尾被误判为两个母片必须同对象连续；
+  4. 导演原方案没有在付费前建立跨镜一致性机制，四条独立视频的空间、卡片形态和色板在花费 `¥8.75` 后才由画面预检发现严重发散。
+- 已证实的体验/容量问题：页面没有完整汇总前序 producer、audit、结构修复、调用数与总耗时；返工原因含过长内部技术文案；镜头勾选范围与自然语言时长要求的关系仍易误解。两次 GLM pilot review 合计约 15 分钟；全量预检首轮 producer `504,277ms` + audit `361,073ms`，约 14 分 25 秒，二者 `queueWaitMs=0`。这证明长耗时来自大上下文真实视觉调用，不是媒体 Provider、排队、候选不足或三轮反复。
+- 用户提出但尚未确认实施的产品方向：以单视频、单角色节点为粒度，总机会考虑限制为 `1 次自动创建 + 2 次审计/修订`；耗尽后明确问题并转人工介入，不允许打回后重新获得三轮。本轮按 TASK 边界只记录，没有实现。证据同时表明还需单独决定单次墙钟止损和进度说明，不能只靠轮次数量解决等待问题。
+- 三个受控返工 run：`run-66e84d3e-4ecb-4e36-ac58-cc0590e5de05`（3 分 47 秒、2 次真实执行、`needs_source`）、`run-e1d213cd-1267-4116-b30f-44b27df8445b`（6 分 12 秒、4 次真实执行、`needs_user`）、`run-d514e218-b8fd-4fa3-b00b-045954747991`（2 分 15 秒、2 次真实执行、同类 `needs_source`）。每个 `accepted_unknown` 只查询原任务一次，没有换 ID、重提或增加轮次；同类根因复现后按止损停止。
+- `run-1dd80478-bff5-499f-8046-84c38aa221d8` 的 18 秒结果已排除为产品校验错误：QA 只勾选镜头 1–4，系统正确保留未勾选镜头 5 的 3 秒。OpenAI `process_exit` 也已排除为产品代码缺陷：其根因是 QA 部署传入相对 workspace，切换为绝对路径后正式调用恢复。
+- 完整问题表、运行证据、费用和截图见 `docs/qa/videofactory-real-local-qa-20260913-r9.md` 第 6–7 节及 `videofactory-real-local-qa-20260913-r9-assets/43-template-priority-needs-source.png`。
+
+## R9.5 暂停时验收边界
+
+- 代码回归：revision 9 现有确定性回归、类型检查、正式构建及 source/dist 合同检查已通过，命令与退出码见 R9.2；本次暂停记录没有修改产品代码。
+- QA 执行：只完成到真实素材与画面预检、调整方案及三次有界规划复现；按用户要求停止后不再继续。状态是 `PAUSED_BY_USER`，不是 QA 全部执行完。
+- 产品验收：未通过。没有 TTS、渲染、新成片、同一 evidence SHA 的两个真实模型独立审片、审片建议驱动的局部返工或最终人工批准；无法评价新片声音、字幕、声画同步、节奏和内容兑现。
+- 后续若恢复，应先由审查窗口统一确认上述根因与产品决定，再集中修复；不得在同类失败上继续换措辞、换 run 或盲目重试。
+
+---
+
+# Revision 10 交接准备
+
+- taskId：`VF-DIRECTOR-CLOSURE-20260914`
+- 日期：2026-09-14（Asia/Shanghai）
+- 状态：`HANDOFF_READY`；执行入口 TASK.md 为 `READY_FOR_IMPLEMENTATION`。这不是产品 `READY_FOR_REVIEW` 或验收通过。
+
+## 本轮交付
+
+- TASK.md：最新决定、权限和 S0–S5 连续执行顺序。原 TASK 完整保存在 TASK_REVISION9.md。
+- IMPLEMENTATION_REVISION10.md：现状证据、允许范围、模板退出、宿主/审计误分类纠正、导演与声音交接、恢复/统计/无损性能排查的固定实施方案。
+- PROMPTS_REVISION10.md：公共规则、构思/编剧/导演/角色审计/视觉审片的可实施文本，以及必须保留的原合同。
+- VALIDATION_REVISION10.md：21项确定性验收与9项真实QA验收；完整检查命令、有限样本、集中修复和止损规则。
+- evidence/r10-handoff-baseline.json：资料准备开始时306个产品/测试/脚本文件hash，包含HEAD与分支，不含秘密；不是产品完成快照。
+
+## 与 Revision 9 的明确差异
+
+- 模板不再参与新生产，而非继续调整模板 required 职责。模板管理/历史、三入口、原声音与其它既有能力保留。
+- 生产者误将示意分类成实证时，允许独立审计以绑定宿主issue的明确证据要求当前候选有界修订；不是直接放行或删除真实来源门。
+- 导演在已有构思/方案/反馈环节统筹，不加总监督Agent；声音按真实配音与声音处理能力交接，不新建音乐/音效系统。
+- 未采用“单视频单角色终身1次创建+2次审计”的待定配额。真实QA费用必须依据执行窗口当前授权，旧¥50不自动沿用。
+
+## 本轮验证与边界
+
+- 重新核对当前源码、R9记录和相关调用边界。Graphify已作导航，图谱较旧，结论以源码为准；没有重建图谱。
+- 已比较上述306个文件hash：相对本轮资料准备基线变化0。本轮只编辑交接文档，没有追加产品修改。
+- 文档完整性、验收编号和相关路径检查通过；`git diff --check` exit 0。
+- 未运行产品构建/回归、真实模型、媒体、配音或部署；没有commit/push。源码仍包含上轮模板停用半成品，已在S0点名，不能直接用于付费QA。
+- R9已有素材和¥8.75历史费用事实保留；TTS、新成片、双真实成片审片与局部返工仍未验证，未重新宣称通过。
+
+执行窗口从 TASK.md 开始，完整读取三份附件，追加本节之后的 Revision 10 实施记录；不要覆盖本节和任何历史证据。
+
+---
+
+# Revision 10 执行记录
+
+- taskId：`VF-DIRECTOR-CLOSURE-20260914`
+- revision：`10`
+- status：`READY_FOR_REVIEW`
+- 完成时间：2026-09-14 01:34:45 +0800
+- 结论：`CODE_VALIDATED`；真实本地 QA 为 `WAITING_AUTHORIZATION`，不是 `PRODUCT_ACCEPTED`。
+
+## R10.1 基线、环境与权限
+
+- 开始与结束 HEAD 均为 `b36ebac3189cf574b8e437cbe16eb9d0b228a177`，branch 为 `codex/final-dual-review-cloud-acceptance`。保留全部既有未提交修改，未执行 reset、stash、clean、commit、push、部署或用户数据迁移；暂存区为空。
+- 以 `evidence/r10-handoff-baseline.json` 的 306 个文件摘要为开始导航，逐项按当前源码复核。最终相对该摘要有 42 个源码/测试路径变化；另更新 README、两份当前指南及本 Revision 记录。删除的旧 `planning-guidance.ts` 没有以兼容分支恢复，新职责由当前正式合同承担。
+- 实际验证环境：Node `v26.8.1`，Python `3.12.10`。本地 shell 不暴露当前编辑会话的准确模型/effort，因此没有猜测或伪造；产品运行模型、effort、输出上限和审片阈值均未降低。
+- 本轮没有启动真实模型、媒体或 TTS 任务，没有读取/输出凭据，也没有替换当前运行中的本地服务。新增现金费用、在途费用和未知费用均为 `¥0.00`；R9 已发生的 `¥8.75` 仅作为历史事实保留，不构成本轮授权。
+
+## R10.2 S0–S5 实际完成
+
+### S0：半成品与编译边界
+
+- 收口 Studio 悬空引用和已经删除的生产模板选项；所有新制作仍强制使用 `joint-v1` 与可执行计划，历史 run 只读兼容，不恢复第二套旧流程。
+- 最终类型检查最初发现两处新增合同后的测试类型未同步：视觉导演捕获类型漏 `voiceTiming`，音频能力夹具的 `pauseControl` 被扩成普通字符串。仅补类型边界后，完整类型检查通过。
+
+### S1：模板退出生产
+
+- 热点、系列和自有想法的新制作不再查询、等待、自动选择或提交模板；候选仍保留视频形态和三拍视觉方向。
+- Studio 直接 start、Pipeline 有效 brief、构思/编剧/导演 producer、独立 audit、重新规划与返工均不再接收或回注 `templateGuidance`。已知旧 `template`/`templateSnapshot` 只在输入边界明确剥离，其它未知顶层字段继续 fail closed。
+- Broker 的 `creative-treatment`、`script-draft`、`director-plan` 明确拒绝新请求中的旧模板指导。模板 CRUD、发布版本、删除/恢复、资源统计和历史快照读取保持；页面明确提示“暂不用于新制作”。
+- 原模型、画面来源、声音、导演配置、系列约束、时长范围、视觉计划、参考语法、技能选择、报价与返工范围继续保留。图库/生成/复用失败仍不得生成说明卡；主动导演选择的正式 `editorial_card` 不受影响。
+
+### S2：共同依据、导演与审计纠错
+
+- 构思、编剧、视觉导演的 producer/audit 使用同版本用户要求、时长范围、能力、上游产物、声音节奏和返工范围；用户明确要求保持最高优先级。
+- 新增宿主制作前提 `hostReadiness` 与审计复核 `hostReadinessReview`。独立审计只能精确引用被宿主误分类的问题并要求当前角色 `revise_here`；不能直接放行、不能覆盖真正的来源/用户阻断，未知、重复或越权引用均拒绝。
+- 纯示意、普通机制说明与真实专属事实采用结构化证据语义，不以题材关键词特判。跨镜连续身份必须有可执行母片/引用关系；独立同风格镜头和独立静态结尾不被机械判为同对象连续。付费前导演检查仍通过现有构思、方案编译和独立审计完成，没有新增逐步监督 Agent。
+
+### S3：声音与剪辑真实交接
+
+- `ProductionCapabilities.audio` 只声明当前真实能力：旁白、Provider 实际支持的停顿控制；`musicTrack` 与 `soundEffectsTrack` 不伪造为可用。
+- `voiceTiming` 进入编剧、导演与独立审计上下文，用户 `voiceDirection` 不再被模板覆盖。现有配音、语速、停顿、声音处理、TTS 自动执行与后台记账均保留，没有增加声音模型节点或人工核账门。
+- worker validator 保留 `executablePlanPath`；素材、配音、渲染和质检消费同一已接受时间轴。超长语音继续返回 `VOICE_DOES_NOT_FIT`，保留原音频证据与可行动修订入口，不靠截断或强制加速伪成功。
+
+### S4：模型切换、恢复、统计和耗时
+
+- 保存编剧模型后只复用已完成构思并真实重跑编剧/导演；保存导演模型只重跑导演及下游。界面草稿在保存成功前不会生效，保存失败继续保留草稿并禁用旧模型重试；服务端在持锁点再次校验 run revision 与 input version，冲突零写入。
+- `accepted_unknown` 继续只观察原 `requestId`，不换模型、不新 POST；迟到成功/失败、暂停、重启、持久化异常和并发消费均由正式 checkpoint/role loop 测试覆盖。
+- 调用数按物理请求身份聚合；结构修复不重复计数，查询不算新执行，历史/本轮/未知状态分开。进行中费用与已物化进度沿用不可变 receipt/ledger。
+- 新增不含内容的性能诊断：`requestPayloadBytes`、`promptBytes`、图像数量/字节、图像集合 SHA 与映射 SHA。诊断从不可变请求计算，不保存 `jpegBase64`；视觉证据只通过图像通道传递，独立双审仍各自获得完整证据。Studio 折叠展示“发送数据、模型指令、视觉证据”。
+- 没有真实同模型、同证据的前后性能对照，因此本轮只证明冗余与统计口径修正，**没有宣称实际模型提速**。
+
+### S5：文档、探针与交付
+
+- 更新 `README.md`、`docs/guides/production-workflow.md`、`docs/guides/web-studio.md`：模板暂停参与新制作/重新规划/返工，CRUD 和历史资料保留；声音能力按真实 Provider 投影。
+- 修订旧 source/dist 探针：role-audit 样本补当前必填的 `hostReadinessReview: null`；R9 规划探针从“模板指导必须穿透”改为“正常请求不传、旧指导在三个 producer 边界均拒绝”。
+
+## R10.3 V10 验收状态
+
+| ID | 状态 | 证据摘要 |
+| --- | --- | --- |
+| V10-01 | PASS | 类型、正式构建、source/dist 均无悬空引用或 source-only 修改。 |
+| V10-02 | PASS | 三入口、模板正常/空/失败和无默认 beats 的 Studio/Pipeline 测试通过；正式请求无模板字段。 |
+| V10-03 | PASS | `contracts.test.ts` 与 Broker 三角色边界证明旧字段剥离、旧 guidance 拒绝、其它未知字段拒绝。 |
+| V10-04 | PASS | 模板 CRUD/历史、原模型/声音/素材/参考/系列能力回归通过；说明卡禁令未削弱。 |
+| V10-05 | PASS | 在途原任务恢复、历史模板剥离、局部返工范围/复用/缺证据边界回归通过。 |
+| V10-06 | PASS | 三正式 adapter 与 ProductionStudio→Pipeline 组合验证共同依据及依赖失效身份。 |
+| V10-07 | PARTIAL | 多领域结构化示意/事实边界与宿主判断确定性通过；真实模型自然语言效果留给 E10-01。 |
+| V10-08 | PASS | 宿主误分类只能有界 `revise_here`，不能绕过宿主；错误字段和越权引用拒绝。 |
+| V10-09 | PASS | candidate/audit/修订等待等 checkpoint 与正式 socket 恢复测试证明不重复物理调用。 |
+| V10-10 | PARTIAL | 连续母片、独立镜头和静态结尾的确定性执行边界通过；真实导演模型判断留给 E10-01/E10-02。 |
+| V10-11 | PASS | 动态时长、时间轴、temporal beats、source range、复用和局部不变范围回归通过。 |
+| V10-12 | PASS | no-match/能力不足/导演上推/单镜返工/not_observed 与卡片禁令测试通过。 |
+| V10-13 | PASS | 三类声音 Provider 能力投影、voiceTiming 传递和不伪造音乐/音效轨通过。 |
+| V10-14 | PASS | 正式 validator→worker 的 executable plan 传递及 Python 真实 worker 时间轴测试通过。 |
+| V10-15 | PASS | `VOICE_DOES_NOT_FIT`、原音频证据、修改后恢复与未受影响媒体不重购通过。 |
+| V10-16 | PASS | UI保存→revision→失效→真实 port 路由、草稿失败和并发冲突通过。 |
+| V10-17 | PASS | 首 produce/audit 失败、迟到结果、暂停/恢复、lease 和重启终态组合通过。 |
+| V10-18 | PASS | 多角色/回退/恢复物理调用聚合、未知单列与费用 ledger 回归通过。 |
+| V10-19 | PARTIAL | 无损请求诊断、图像去重和耗时口径通过；实际提速没有真实对照，未验证。 |
+| V10-20 | PARTIAL | 组件、键盘焦点、文案、模板暂停提示和恢复动作自动化通过；1440/390 真实浏览器未运行。 |
+| V10-21 | PASS（确定性层） | 十类 digest、OpenAI/ZAI source/dist、正式 adapter/parser、隔离 socket 与正式 pipeline 组合全部通过；不冒充真实外部模型 E2E。 |
+
+## R10.4 集中验证
+
+| 命令/检查 | 最终结果 | exit |
+| --- | --- | ---: |
+| `npm run build:pipeline` | 成功 | 0 |
+| `npm run test:ts` | 804 tests；803 pass / 0 fail / 1 既有 real production E2E skip | 0 |
+| `npm run test:broker` | 198 pass / 0 fail | 0 |
+| `npm run studio:test` | Vitest 384/384；Studio Node 515/515 | 0 |
+| `npm run typecheck` | 全 workspace 通过 | 0 |
+| `npm run build` | Broker/Pipeline/Studio production build 成功；仅 Vite 大 chunk 警告 | 0 |
+| `npm run test:package` | 3 pass / 0 fail | 0 |
+| `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests` | 131 tests，OK | 0 |
+| R6 contract probe source / dist | 15/15；15/15 | 0；0 |
+| R7 capability probe source / dist | 6/6；6/6 | 0；0 |
+| R9 planning probe source / dist（已更新模板边界） | 5/5；5/5 | 0；0 |
+| `r9-director-contract.test.mjs` | 5/5 | 0 |
+| `git diff --check`（记录前） | 无 whitespace error | 0 |
+
+自动化只证明确定性控制流、协议、恢复和边界，不证明真实模型一定产出高质量创作，也不证明真实媒体、听感或实际性能改善。
+
+## R10.5 E10、费用与未验证项
+
+- E10-01～E10-09：`WAITING_AUTHORIZATION / NOT_RUN`。本轮没有新的真实模型、媒体或 TTS 授权，因此没有启动 production 服务或 QA 浏览器，也没有创建替身 broker 来冒充真实验收。
+- 尚未验证：两个真实文本模型的正/负语义效果、三入口真实到报价、报价三动作、媒体→配音→渲染、同一 evidence SHA 的两个真实成片审片模型、审片建议预填与局部返工、1440/390 真浏览器、完整新片画面/声音/同步/文字污染/视觉一致性，以及同模型同证据的实际性能对照。
+- 新增实际费用 `¥0.00`，新增在途/未知最大暴露 `¥0.00`。没有把 R9 的历史止损金额当成本轮授权，没有发生外部发布。
+- 最终状态是 `READY_FOR_REVIEW + CODE_VALIDATED + WAITING_AUTHORIZATION`。在上述真实证据完成前不得写 `QA_DONE` 或 `PRODUCT_ACCEPTED`。
+
+## R10.6 Graphify 与最终差异
+
+- 按任务约束只执行一次 `graphify update .`，exit 0。增量更新完成后为 6,779 nodes、14,744 edges、280 communities；`graphify-out/graph.json` 与 `graphify-out/GRAPH_REPORT.md` 已更新。
+- 图谱超过 5,000 节点，Graphify 按可视化阈值跳过 `graph.html`；这是工具的明确保护提示，不是代码验证失败。本轮没有提高阈值、缩小项目或再次运行图谱命令。
+
+## Revision 11 — 实现包与真实本地 QA 包交接（2026-09-14）
+
+- taskId：`VF-CREATOR-COLLABORATION-R11-20260914`。
+- 当前状态：`PACKET_READY / READY_FOR_IMPLEMENTATION`，不是 `CODE_VALIDATED` 或产品验收通过。
+- 唯一执行入口：`docs/codex-collaboration/revision11/MASTER_PROMPT.md`；总目录见同目录 `README.md`。
+- 实现包：`revision11/implementation/` 五份文档，覆盖产品交互、技术设计、S0–S6执行步骤、角色提示词与 D11-01～D11-46 确定性验收。
+- 测试包：`revision11/qa/` 两份文档，覆盖正式本地环境、QA技能、Q11-01～Q11-12真实用例、费用与报告格式。先完成实现及集中验证，再运行真实QA；测试阶段集中记录现象、原因和未验证项，结束后交回，不无限修复重试。
+
+### 已固定的本轮范围与权限
+
+三入口保留；模板继续退出新生产而管理与历史保留；用户明确要求与自动建议分离；导演初案、脚本、分镜与画面方案分别支持自然语言多轮讨论，由用户确认当前版本后才继续。保留声音、技能、真实模型、时间轴、素材复用、局部返工、付费安全与双真实审片。
+
+同时修复 `REVIEW_REVISION10.md` 的 F01–F08，落实导演素材路线权限、唯一有效审计反馈、声音配置同步、系列约束前置、恢复与界面纠正；热点入围后读取原文，再形成可追溯的事实和选题建议。技术方案复用现有工作流、SQLite checkpoint和Broker，不重建项目。
+
+用户本次明确授权：实现及确定性验证收口后，可启动正式本地环境，通过QA技能代用户确认创作及必要付款，**本轮全部测试新增现金最大暴露总额不超过人民币50元**，跨run/session/重启共用，包含TTS及在途/未知费用。此授权取代本记录R10中针对当轮的“真实QA未授权”，不扩大为产品全局限额、每条视频50元或云端权限。不commit、push、云部署、外部发布、删除/迁移历史数据；不启动Oracle或外发资料。
+
+### 本窗口实际修改与验证
+
+- 基线：HEAD `b36ebac3189cf574b8e437cbe16eb9d0b228a177`，分支 `codex/final-dual-review-cloud-acceptance`，暂存区为空。`revision11/BASELINE.json`保留316个现有文件摘要及开始git状态。
+- 新增10份资料包文件；原TASK原样存档为`TASK_REVISION10.md`，`TASK.md`更新为R11入口，并追加本记录。没有覆盖已有产品修改。
+- 文档检查：10个文件齐全，Markdown代码块、相对链接、尾随空白检查通过；46个D11验收与12个Q11用例编号齐全；TASK存档SHA与编写前原文件完全相同。
+- 追加本记录前，316个基线文件仅`TASK.md`发生变化，`RESULT.md`与产品源码均未被其它窗口修改。本窗口没有修改产品代码。
+- 本次只准备交接资料，未运行编译、产品测试、真实模型/媒体任务或服务部署；新增现金费用`¥0.00`。所有D11/Q11仍待执行端用实际证据验证，不能把资料校验当成功能通过。
+
+执行端下一步：完整读取MASTER_PROMPT与其指定资料，从S0核对当前现场开始，连续完成本轮实现和有界真实QA；仅在本文件追加R11执行记录，详细QA报告按测试包写入`docs/qa/`。
+
+## Revision 11 — 实现与确定性验收（2026-09-14）
+
+- status：`CODE_VALIDATED / LOCAL_QA_PENDING`。这里只表示代码与确定性合同通过；真实主片、真实音轨、双真实模型审片和局部返工仍须由 Q11 证明。
+- 开始与结束 HEAD 均为 `b36ebac`；保留既有 dirty 成果，没有 reset/stash/clean、commit、push、云部署、外部发布、Oracle 或付费调用。
+- 最后一次 `git diff --check`：exit 0。
+
+### D11-01～D11-46 证据
+
+下列行为均由正式领域图、Studio、SQLite/checkpoint、Broker 合同或 UI 组件接缝验证；外部模型语义、真实媒体质量和实际视觉仍按 Q11 单列，未用 D 证据替代。
+
+| ID | 状态 | 确定性证据（测试文件与准确行为） |
+| --- | --- | --- |
+| D11-01 | PASS | `production-pipeline-reference-grammar.test.ts`：`runs a single joint creative-planning stage instead of the four legacy planning nodes`；`creative-review.test.ts`：`waits without side effects and resumes exactly one confirmed stage at a time`。 |
+| D11-02 | PASS | `creative-review.test.ts`：同上，逐次确认只推进一个角色；`creative-planning.test.ts`：`图运行期间付费媒体调用为 0，且只访问创作规划 port`。 |
+| D11-03 | PASS | `creative-review.test.ts` 的等待/确认/返回上游组合；`production-pipeline.test.ts`：`pauses before a metered worker and only calls it after the exact spend plan is approved`。 |
+| D11-04 | PASS | `creative-os.test.tsx`：`shows an unsaved visual suggestion without submitting it as a user requirement`；Broker `rejects retired template guidance on every new planning-role request`。 |
+| D11-05 | PASS | `role-agent-loop.test.ts`：`stops on host readiness after preserving a passing independent audit and replays without new calls` 及损坏 checkpoint 恢复组合。 |
+| D11-06 | PASS | `role-agent-loop.test.ts`：`lets an independent audit send a misclassified source issue back to the same role without bypassing revalidation`、`does not let a partial or unknown host correction hide a real source blocker`。 |
+| D11-07 | PASS | `production-pipeline.test.ts`：`allows the director to reroute an illustrative stock suggestion to an executable generated source`；不支持路线负例仍 fail closed。 |
+| D11-08 | PASS | `trend-opportunity-agent.test.ts` 的问号、数字、空泛语义和来源组合回归，含 `keeps evergreen method-structure quantities...` 与 `blocks an unsupported factual premise...`。 |
+| D11-09 | PASS | `codex-screenwriter.test.ts` 的 canon 输入边界；`production-planning-editing.test.ts` 的模型/输入 digest 失效与保留组合。 |
+| D11-10 | PASS | `creative-review.test.ts` 等待无副作用；`production-planning-stages.test.ts` 的重启、同 digest 恢复和损坏 checkpoint 拒绝。 |
+| D11-11 | PASS | `creative-review.test.ts`：`records an explanation...without changing the draft`、`keeps proposals separate...`；`creative-discussion-panel.test.tsx` 覆盖讨论动作。 |
+| D11-12 | PASS | `creative-review.test.ts`：提案采用、撤销和旧稿保护；采用/撤销均不触发新模型调用。 |
+| D11-13 | PASS | `creative-review.test.ts`：`keeps the same draft waiting when its confirmation check requests repair`；确认绑定候选 SHA，修订后重新等待。 |
+| D11-14 | PASS | `production-planning-editing.test.ts`：`revalidates caller tokens at the locked point after both requests passed the service precheck`；Studio command replay/409 组合。 |
+| D11-15 | PASS | `production-planning-editing.test.ts`：`rejects a stale caller revision at the locked mutation point with zero state change`；stage/run/baseSHA 边界测试。 |
+| D11-16 | PASS | `text-task-production-recovery.test.ts` 的真实 socket 迟到成功/失败；Broker durable replay 与 `creative-review.test.ts` 的持久化命令恢复。 |
+| D11-17 | PASS | `codex-bridge-recovery.cross.test.ts`：只轮询原任务、不重复 POST、身份错配拒绝；`role-agent-loop.test.ts`：accepted pending 观察恢复。 |
+| D11-18 | PASS | 讨论历史无产品轮数上限；结构修复/角色循环仍由 `role-agent-loop.test.ts` 的有界重试、exhaustion 用例限制。 |
+| D11-19 | PASS | `creative-discussion-panel.test.tsx`：可读阶段、正确主动作；`production-planning-stages.test.ts`：实际节点/产物投影。 |
+| D11-20 | PASS | `creative-discussion-panel.test.tsx`：选中镜头讨论、返回影响；`creative-review.test.ts`：备选、采用、撤销、返回上游。 |
+| D11-21 | PASS | `creative-discussion-panel.test.tsx`：不确定提交复用 commandId、轮询不覆盖未发送草稿、冲突保留输入。 |
+| D11-22 | PASS | `creative-discussion-panel.test.tsx` 的冲突状态；`production-planning-editing.test.ts` 的持锁 revision 重验与模型设置生效边界。 |
+| D11-23 | PASS | `creative-discussion-panel.test.tsx`：Ctrl+Enter、中文 IME、焦点/草稿；390px 真实布局和遮挡仍由 Q11-02/Q11-11补充视觉证据。 |
+| D11-24 | PASS | Studio server/auth/component 回归覆盖登录、run 访问、字段 parser 与恶意文本按普通文本展示。 |
+| D11-25 | PASS | 声音配置到规划/配音的共同输入与依赖闭包测试；`production-pipeline.test.ts`：声音节点编辑重合成且不重买无关媒体。 |
+| D11-26 | PASS | 声音影响矩阵与 Provider 参数适配测试；不支持 pause 不投影为已生效。 |
+| D11-27 | PASS | `VoiceStudio` 组件/参数测试覆盖 MiniMax 相对速度、Kokoro pause 禁用说明及 macOS 能力保留。 |
+| D11-28 | PASS | `creative-review.test.ts`：从 director 返回已持久化 script，重确认后只重生下游；系列/核心要求失效组合。 |
+| D11-29 | PASS | `production-joint-rework.test.ts`：读取上一版正式产物、按 finding 预填、只向受影响脚本/导演阶段反馈。 |
+| D11-30 | PASS | `production-planning-editing.test.ts`：导演或脚本模型修改只失效对应及下游；在途安全合同拒绝切换。 |
+| D11-31 | PASS | `production-planning-stages.test.ts` legacy run 可读；新流程确认门不可关闭；Broker/client recovery 只回收原任务。 |
+| D11-32 | PASS | `production-pipeline-reference-grammar.test.ts`：joint-v1 commit 完整性、篡改/输入 digest 变化拒绝；未确认 draft 不发布。 |
+| D11-33 | PASS | `production-authorization.test.ts`：无 scope 不执行、unknown 占用预算、digest/范围变化重新等待；Pipeline 精确批准组合。 |
+| D11-34 | PASS | Studio 模板 CRUD、三入口、配置、动态时长、复用、局部返工、TTS记账和双审既有回归均通过；新生产请求拒绝模板指导。 |
+| D11-35 | PASS | `trend-article-reader.test.ts`：编号段落与不可变快照；`trend-opportunity-agent.test.ts`：只存在于文章段落的合法事实可引用，缺段落拒绝。 |
+| D11-36 | PASS | `trend-article-reader.test.ts`：登录墙/无正文诚实标注、批量截止；UI/agent 保留 title-only/partial 状态。 |
+| D11-37 | PASS | `trend-article-reader.test.ts`：逐跳重验、内网/映射回环/非标准端口/解压上限/提示注入约束。 |
+| D11-38 | PASS | `trend-article-reader.test.ts`：同 URL 合并、缓存、并发3、16 URL/128000字符和批次截止；调用方 sourceId 正确重绑。 |
+| D11-39 | PASS | Broker task-definition、executor、cross-contract 与 R11 source/dist `4/4 + 4/4`，验证 kind/descriptor/normalizer/digest 和 discussion intent 一致。 |
+| D11-40 | PASS | 三阶段 producer/discussion/audit 的共同 identity、旧审计隔离和自动建议边界由 creative-review、Broker executor 与角色输入捕获测试覆盖。 |
+| D11-41 | PASS | 热点采用→ProductionBrief→treatment/script/director 的来源快照组合测试；verified 状态由服务端生成，客户端不能伪造。 |
+| D11-42 | PASS | 热点正文失败与其它入口隔离、title-only 事实门、多转载合并不冒充独立核验的 agent/Studio 组合回归。 |
+| D11-43 | PASS | `role-agent-loop.test.ts`：真实 producer/audit/validation/retry timings；Broker durable replay 与 UI 投影按物理 request 去重。 |
+| D11-44 | PASS | `role-agent-loop.test.ts`：`reports real producer, audit, validation, and retry timings`；等待/排队/执行/修复分项且不从缺失时间戳编造。 |
+| D11-45 | PASS | Pipeline timeline、VOICE_DOES_NOT_FIT、render、visual-review、局部返工与完整双审既有回归全部通过；复用镜头和最终发布证明未退化。 |
+| D11-46 | PASS | `npm run test:ts` 813 pass/0 fail/1既有skip；`npm run studio:test` 390/390 + 529/529；`npm run test:broker` 199/199；`npm run typecheck`、`npm run build`、`npm run test:package` 3/3、Python 131/131、R6 source/dist 15/15、R9 5/5、R11 4/4均 exit 0。 |
+
+### 集中验证边界
+
+- `npm run build` 只有既有 Vite chunk size warning，不是失败。
+- D11-23 的真实 390px 视觉、D11-35～42 的真实网页来源质量、D11-43～45 的真实模型/媒体/声音与成片质量仍进入 Q11，不把确定性测试写成真实验收。
+- 下一状态：`LOCAL_QA_RUNNING`。按 revision11 QA 包使用正式 dist、真实 OpenAI/ZAI Broker 和隔离 workspace，集中测试、集中记录，本轮总现金与未知暴露不得超过 ¥50.00。
+
+## R11 QA 集中修复资料包交接（2026-09-14 08:57，Asia/Shanghai）
+
+- 用户本次要求读取最新报告/记录，生成交给普通 coding agent 的修复资料，并明确授予其本地测试所需权限。本窗口状态为 `PACKET_READY`；没有实施修复，没有替旧 QA 窗口写终态或宣称产品通过。
+- 执行入口：`docs/codex-collaboration/r11-qa-repair-20260914/MASTER_PROMPT.md`；目录 README、FINDINGS_AND_FIXES、VALIDATION_AND_QA、BASELINE、两个脱敏证据快照已保存。任务标识 `VF-R11-QA-REPAIR-20260914`，属于 R11 定向修复，不替换 TASK/REVIEW、不重做 R11/A/B/C。
+- 当前六项问题：F01 预算意向导致正式创建400；F02 采用备选已完成但页面仍等待；F03 OpenAI构思确认独审失败且安全诊断丢失；F04 阶段/终态/调用耗时投影矛盾；F05 脚本模型切换导致已采用构思和当前讨论回退；F06 GLM脚本本地执行退出后durable仍accepted/无outcome、观察无从收口。F06是资料编写期间最新QA-R11-006追加，已纳入V10验证。
+- 关键核对：Broker的422是受理后错误的统一包装，不是已证实的上游原始HTTP码；失败confirm不等于有效StageConfirmation；Broker idle不证明远端任务失败。新包分别要求保护用户当前稿、保持确认门，以及保存未知证据/停止假运行，禁止超时后伪造远端失败以解锁重复提交。
+- 修复与验证矩阵：V01～V10补完整HTTP/Pipeline/SQLite/Broker/RunPage组合失败序列；Q11-01～12保留三入口、正负语义、报价/媒体/TTS/渲染、双真实审片、返工、声音/恢复/移动端和统计。原报告中部分D11编号误映射已在新包注明，不改写历史报告。
+- 授权：执行者可自行修改范围代码/测试、构建、启动/安全重启真实本地服务、读取必要配置/凭据、使用QA/浏览器、代用户讨论采用确认及额度内媒体付款/TTS/渲染/双审/有限返工；已授权动作不用逐项再问。沿用R11这一轮累计¥50止损，不因资料包/agent/run/session重新增加50元。凭据不回显，不commit/push/云部署/外部发布，不删除迁移历史或清checkpoint。
+- 核对基线：HEAD `b36ebac3189cf574b8e437cbe16eb9d0b228a177`，原分支，暂存区为空；新BASELINE保存321个现有产品/测试/配置摘要、92项tracked dirty状态及322个未跟踪文件数量。资料编写期间这些321项没有变化；最新QA报告由原执行活动追加F06，其变化保留。
+- 实际检查：报告/当前源码/正式durable与health只读核对；Graphify查询只用于源码导航。Markdown链接、代码块、尾随空白校验通过；`git diff --check` exit 0。没有为文档编写重跑产品测试、构建或真实请求，新增媒体/TTS费用为0。
+- 现场截至08:57：主run revision9仍running；GLM构思producer/audit已完成，脚本原request `agent-e9fc146b34379bc729eb6f0cfcce4ff30586ce59be714157986fc13d6287ed60` 的结果未知。较后health为active/queued 0/0、completed/failed 2/1。没有干预、重投或重启它，接手先查原任务与最新QA报告。
+- 产品验收仍未通过：最新主片未完成脚本确认/分镜/报价/媒体/TTS/渲染、新成片/双真实审片/成片返工；原Q11矩阵多项未验证。资料包已准备好，后续执行结果由coding agent追加于本文件。
+
+## Revision 11 — 真实本地 QA 收口（2026-09-14 09:28，Asia/Shanghai）
+
+- status：`QA_DONE_WITH_CONCERNS / PRODUCT_NOT_ACCEPTED`。这表示本轮可安全执行的真实点击、恢复观察和报告已经完成，不表示产品通过验收。
+- 正式环境：HEAD `b36ebac`，Studio `http://127.0.0.1:4317`，workspace `workspace/qa-r11-20260914-001`；OpenAI Broker 为 `gpt-5.6-sol` xhigh，ZAI Broker 为 `glm-5.3` max，11类任务及合同摘要一致。没有fake Broker。
+- 确定性基线沿用R11实现记录：TypeScript 813 pass/0 fail/1既有skip、Studio 390/390 + 529/529、Broker 199/199、Python 131/131、typecheck/build/package/source-dist均通过。本QA收口没有重新修改或重跑产品代码，只完成浏览器验证、现场读取和报告；最终 `git diff --check` exit 0。
+- 真实主片没有完成。导演初案、解释、独立备选与采用已真实执行；OpenAI构思独审以422包装失败。切GLM后构思生成与独审真实成功，但脚本执行计入Broker failed后，durable原任务仍保持accepted且无outcome；Studio等待42分59秒后才本地收敛为失败。没有到报价、媒体、TTS、渲染、双真实视觉审片或局部返工。
+- 真实文本任务共9个物理request：OpenAI completed=3/failed=3；ZAI completed=2/failed=1，另有同一失败执行对应的durable accepted原任务。轮询与刷新没有重复计数。媒体/TTS现金实际费用 `¥0.00`，在途/未知现金暴露 `¥0.00`，本轮50元止损未使用。
+- QA共记录11项问题：P0 2项、P1 6项、P2 3项。共同根因集中在：OpenAI结构化任务执行/诊断边界、无远端身份的accepted收敛、stage-scoped模型失效和UI状态投影、预算输入双合同、热点正文DNS/IP安全校验。独立UX问题为声音预设静默换演员、模板暂停与复盘文案矛盾、全局搜索“声音”指向错误入口。
+- 独立用例：热点真实刷新完成，但9/9正文读取失败且总编422，只得到规则回退候选；QA系列及6集路线图持久化，首集采用被OpenAI独审422阻断；声音设置、素材库空态、模板CRUD与刷新持久化、390px/1440px主要页面、搜索焦点/Escape、主run刷新恢复均已检查。因为底层原任务仍accepted，没有重启Broker或进行两窗口并发修改。
+- 完整报告：`docs/qa/videofactory-real-local-qa-20260914-r11.md`；截图目录：`docs/qa/videofactory-real-local-qa-20260914-r11-assets/`。覆盖矩阵逐项标记Q11-01～Q11-12的PASS、PARTIAL、BLOCKED和NOT_VERIFIED，没有把确定性测试冒充真实E2E。
+- 最终现场保持运行：Studio PID 84675；OpenAI Broker PID 84673，active/queued=0/0；ZAI Broker PID 84674，active/queued=0/0。未知原任务 `agent-e9fc146b34379bc729eb6f0cfcce4ff30586ce59be714157986fc13d6287ed60` 只允许继续查询原身份，不能重放或通过重启抹除。
+- 未执行commit、push、云部署、外部发布、Oracle、工具升级或产品源码修改。下一轮应先按报告中的共同根因集中修复，再做确定性回归和一次有界真实主片复验；不能继续换题、换run或为单一case打补丁。
+
+## Revision 11 — QA集中修复资料包完整更新（2026-09-14）
+
+- 本次任务：依据执行者记录整理可由普通coding agent执行的资料；不实施产品修复，不运行真实QA。复用`docs/codex-collaboration/r11-qa-repair-20260914/`，唯一入口仍为`MASTER_PROMPT.md`，没有新增平行版本。
+- 依据：09:28收口的最终QA报告、当前RESULT、R11产品/技术/验收/QA合同、相关源码和既有测试。Graphify仅用于定位Broker接缝，实际结论以当前源码为准，没有重建/修复图谱。
+- 原包只覆盖6项，现更新为F01～F11、V01～V15及完整Q11矩阵；补齐共享热点/系列模型失败、正文读取、声音预设、模板复盘、设置搜索。分别给出已证实事实/未知原因、固定修正、允许模块、失败序列和验证范围。
+- 新的定位证据：本机Node v26.8.1的连接lookup传入all=true；现有requestPinned返回标量而非数组。无外网/无模型的最小Node诊断复现`ERR_INVALID_IP_ADDRESS: Invalid IP address: undefined`，原测试整体替换request未覆盖此层。exit0表示捕获错误，不是产品测试通过。资料要求修callback合同并保留DNS固定/SSRF保护。
+- 纠正三类误导：Broker包装422不等于上游HTTP422；采用后confirm审计失败不等于有有效StageConfirmation；旧Studio已在约43分钟后本地失败，但Broker仍accepted/无outcome，不能伪造远端失败来解锁重投。OpenAI具体拒绝原因仍待安全诊断取证，未宣称已定位或已修。
+- 执行指令已明确：集中修复及代码验证后直接部署真实本地环境，使用QA技能继续浏览器QA/E2E，不能停在编译通过；集中记录后仅对同范围遗漏作有界修正/复验。原R11累计¥50授权不重开预算；unknown只查原身份；不commit/push/云部署/外部发布或降模型质量。
+- 修改文件：本包四份Markdown和新增`EVIDENCE_FINAL_UPDATE.json`，以及本条RESULT记录。旧BASELINE与两个运行快照、原QA报告、TASK/REVIEW均保留。
+- 资料验证：17个Markdown本地链接存在，11个问题与15条验收均完整、JSON可解析、代码围栏/尾随空白检查通过，`git diff --check` exit0。原BASELINE的321个产品/测试/配置摘要核对无变化，暂存区仍为空。未运行编译/产品测试/模型或媒体任务，本次现金新增¥0。
+- 交付状态：`PACKET_READY`；产品仍未验收通过。执行端从入口开始，修复与真实测试的结果继续追加本文件，不据本条资料交付记录声明产品已修复。
+
+## R11 QA集中修复 / VF-R11-QA-REPAIR-20260914
+
+- 状态：`IMPLEMENTING`。接管现有未提交修改；HEAD `b36ebac3189cf574b8e437cbe16eb9d0b228a177`，分支 `codex/final-dual-review-cloud-acceptance`，暂存区为空。资料基线321项源码摘要已核对一致。
+- 执行范围：F01–F11共同根因修复、V01–V15确定性验证、正式本地部署与Q11有界真实验证；不以编译通过替代成片验收。
+- 先修Broker结构化请求/安全诊断/未知结果，再修预算、命令终态、采用稿保留和正文/声音/复盘/搜索。沿用R11累计50元，不重开预算；当前尚未新增模型或现金调用，付款前重新核实账本。
+- 原GLM未知请求保留，只查询原身份；不以重启/清checkpoint/换模型重提解锁。不commit、push、云部署、升级工具或覆盖历史证据。
+
+### 集中修复进度（实施中，尚未代码/产品验收）
+
+- 已修改：预算意向正式合同与角色输入；OpenAI provider schema 投影和安全诊断；GLM 本地结束而远端未知的 durable 诊断及有界观察；采用备选的命令终态刷新；同 run 采用稿在脚本模型调整后的保留；阶段失败投影；正文固定 IP lookup 合同；声音预设保留演员；复盘历史模板降级展示；声音设置搜索深链。
+- 当前证据：`npm run test:broker` 202/202 exit 0（`/tmp/vf-r11-broker-all.log`）；`npm run typecheck` exit 0（`/tmp/vf-r11-typecheck.log`）；正式 Pipeline/SQLite/Studio 采用稿恢复聚焦 1/1 exit 0（`/tmp/vf-r11-carry-focus.log`）。
+- 尚未通过项：UI 聚焦 231 pass/2 fail，新增 RunPage 用例因测试环境缺 localStorage.getItem 抛错，正在补齐夹具后复跑；规划组合此前51/52，单项修正后尚待整组复跑。统计累计、未知状态换模型保护、声音不可用选择等边界继续核对，不能声称11项全部完成。
+- 本轮尚未启动真实模型/媒体任务，新增现金¥0；真实 QA、成片、双审、局部返工均未验证。最终集中回归和正式本地部署仍在本任务内继续执行。
+
+### 集中回归与进入真实QA前检查
+
+- 进一步修复：无模型操作保留历史累计而本次调用为0；重复checkpoint不重复累计；未知文本任务在持锁的配置/输入修改边界拒绝重新提交。真实socket恢复测试发现 beforeSubmit 快照仍可能写 not_submitted，故以最新 uncertain failure 为准，不能据旧快照解锁。没有放宽付费或阶段确认。
+- 声音不可用时保留配置并要求显式选演员，不把预设修改写成macOS默认；三个初始演员×全部节奏预设通过。声音搜索五个同义词到真实ResourcesPage同页分区通过。正文失败与无正文事实分开说明。
+- 聚焦：规划/合同/正文78/78；UI三文件233/233，扩充后client+creative-os 231/231；正式socket/Studio恢复5/5，均exit0。初期两次vitest失败分别是测试工作目录错误、spy历史未清，均已纠正并保存日志，不计为产品通过证据。
+- 集中：`npm run test:ts` 814 pass/0 fail/1既有skip，`npm run studio:test` 395/395组件 + 531/531 Node，Python unittest 131/131，`npm run typecheck` exit0。Broker202/202已完成且其后未修改Broker源码。完整构建/package/source-dist继续执行；不能据此声明V01–V15所有组合与真实产品已通过。
+- 只读核对旧R11账本未发现媒体/现金记录；原GLM请求仍accepted且无outcome，保持现场。新QA使用`.local/runtime/qa-r11-repair-20260914`与`workspace/qa-r11-repair-20260914`、端口4319，沿用既有真实配置/登录，不清旧任务。现金已花0、未知现金0，R11共用剩余额度50元。
+
+### 正式本地QA推进（持续执行，尚未收口）
+
+- 正式build、package 3/3、R6 source/dist各15/15、R9各5/5、R11各4/4均exit0；完整日志保存于本轮QA的checks目录。新dist的Studio 4319与两个独立真实Broker已启动。
+- 主片`run-25b4c195-a50c-4344-98fd-197d1bf58438`：预算35元成功往返；导演初案、解释、备选、采用与确认已真实完成。OpenAI确认独审95分pass并进入脚本等待，确认本轮不再遇到原schema拒绝。脚本正在做一次仅结尾旁白的表达修改，随后验证撤销和确认。
+- 系列开拍复核已通过，准备以GLM执行本轮系列制作验证，不购买第二主片。复盘390布局、声音搜索同页落点和保留演员的节奏预设已真实点击。
+- 新发现正常运行时提前显示未知恢复警告、自动视觉建议显示为“必须看到”，已记QA-R11R-01/02；后者尚未证明造成实际阻断。按约定先集中测试，不边点击边改产品。
+- 当前现金及未知现金暴露仍0，未到媒体/TTS/渲染/成片双审，不能写产品通过。现场和详细步骤持续写入`docs/qa/videofactory-real-local-qa-20260914-r11-repair.md`。
+
+### 第一轮真实QA集中收集后补修（进行中）
+
+- 主片脚本修改/撤销和确认已执行，最终脚本独审96分通过；分镜返回`invalid_output/task_semantics`，原durable未保留具体规则。未重建样片或盲点重试。系列GLM脚本修改后独审通过，正在执行分镜/图库候选适配，尚未购买。
+- 已确证QA-R11R-03：撤销只还原文档、未还原有效指令。新增稿件/指令成对快照，撤销与恢复一起切换；保留讨论历史；旧记录无法证明上一稿指令时明确拒绝安全撤销，不清空要求。
+- 已确证QA-R11R-04：真实队列503拒绝在查询层被伪装404、重投又变409会话重建。正式socket→client→role loop回归已复现并修复，保留原拒绝原因、原ID继续封存；新代码及旧pending checkpoint恢复都通过，有界下一代只在确证未受理后执行。未知/冲突仍不切换重发。
+- QA-R11R-01/02：正常running checkpoint不再自动投影成故障恢复；策划进度纳入creative-planning；等待用户明确停止自动执行；系统推导画面摘要改为参考而非“必须看到”。没有据界面文案误判去改写用户简报或放宽来源规则。
+- QA-R11R-05：OpenAI/ZAI共享分镜语义诊断白名单，给出重复编号、引用/复用冲突、前向引用、非图片参考路线的安全code/字段；客户端保留并翻译，不暴露生成内容。原分镜失败的具体规则历史不可恢复，需新build下原run一次受控复验。
+- 热点真实产出6ideas，但groundModelIdea全部过滤；已用原模型返回及原已读段落离线重放确认0。引用ID均有效，存在创作标签引号触发词面过滤的迹象；没有放宽事实核验换通过，热点正链仍未验收。
+- 本段只新增确定性测试/源码修正，未追加人工真实生成操作。正在运行集中回归/typecheck；现金及未知现金暴露仍¥0/¥0，累计止损¥50不变。未commit/push，未操作旧GLM未知任务。
+
+### 补修验证完成，原样片受控复验（2026-09-14 12:27）
+
+- 补修回归：TS串行815 pass/0 fail/1既有skip；Broker205/205；Studio组件395/395及Node531/531；typecheck、正式build、package3/3均exit0。随后新增审计队列拒绝回归与显式phase修正，role-loop37/37、最终正式组合295/295及正式build均exit0；R11 source/dist各4/4。没有把最后新增单测冒充已重跑的全量TS数字。完整输出保存在本轮QA `checks/qa-followup-*`。
+- 保留失败证据：首次并行npm脚本重写共享dist造成TS三项文件读取错误，串行重跑消除；Broker旧断言将已撤回任务预期为409，按原503重放合同及零新增执行改正后全过。此后共享build脚本只串行。
+- 系列真实链约21m14s后因图库候选不足停止；GLM三次分镜均成功返回，但导演调整后仍保留不可得stock镜头，未抵达报价。其AI示意目标与补料文案之间的问题仍待解释，不能标为正链通过。
+- 确认本轮两个Broker均无在途后，正常重启本轮三服务：Studio86968、OpenAI86965、ZAI86967，同workspace、同socket、端口4319。`/api/health`正常、11类合同一致，模型仍sol/xhigh与GLM/max。旧4317环境与未知请求不动。
+- 原主片刷新保留treatment/script完成状态；12:27仅点击一次“重试失败步骤”，新请求`agent-c1381e9b8b425cd092ea96333ba30c4be665b388a5519c930bc7aac3d2373915`为director-plan。没有重开run/预算、没有重跑上游。正常运行误报未知警告已消失，截图`11-recovered-running.png`已检查。
+- 当前仍`LOCAL_QA_RUNNING`：等待这次分镜受控复验后继续可达链；现金及未知现金暴露0，成片/双审/返工尚未验证。
+
+### R11集中修复最终交回（2026-09-14，补修后有界QA结束）
+
+**提交审查状态：READY_FOR_REVIEW；代码检查：CODE_VALIDATED；QA：QA_DONE_WITH_CONCERNS；产品：PRODUCT_NOT_ACCEPTED；建议：CHANGES_REQUIRED。** 这些不是同义词。已运行的代码检查通过，但不能宣称11项全部验收或新视频已完成。按MASTER规定，集中补修后单次受控复验仍阻断，停止新生产与产品修改，没有继续无条件重试。
+
+#### 已完成与剩余问题
+
+| 项目 | 当前结论 |
+|---|---|
+| F01预算 | 正式合同与规划输入已修，真实35元创建/持久化通过，授权仍0 |
+| F02采用终态 | 真实采用无需刷新即可继续；generic retry后阶段详情仍有需刷新补齐的相邻遗漏 |
+| F03共享独审/诊断 | 原OpenAI schema拒绝已不复现，真实构思/脚本独审推进；新分镜输出重复编号仍阻断，安全诊断已可取 |
+| F04状态/统计 | 正常未知警告、部分阶段投影已修；恢复把checkpoint内部旧调用/时间移入本次仍错误，未完成 |
+| F05上游稿保留 | 正式carry回归通过；真实检查失败后只改script模型，上游SHA和repair76保留、零新增模型；全部并发分支没有冒称真实测过 |
+| F06未知结果 | ZAI本地结束/远端未知诊断和有界观察、持锁禁止重投已修并通过回归；旧accepted无outcome仍未知，不伪造恢复 |
+| F07热点/系列调用 | 两类真实调用成功；热点后过滤成0、系列图库no-match仍使业务正链未通过 |
+| F08正文 | 正式固定IP lookup合同已修，6 read/2 title_only、澎湃原文核对，无InvalidIP；B站描述不当视频证据 |
+| F09声音 | 节奏预设不暗换演员、不可用演员不静默替换、参数说明已修；真实音轨/TTS未执行 |
+| F10复盘 | 作品优先、模板仅历史，组件和真实空态通过，CRUD保留 |
+| F11搜索 | 声音同义索引与同页分区激活已修，真实声音/停顿搜索可达 |
+
+真实主片最终：`run-25b4c195-a50c-4344-98fd-197d1bf58438` revision11/failed。导演讨论和采用、构思独审95、脚本修改与复验96完成；唯一分镜复验request `agent-c1381e9b8b425cd092ea96333ba30c4be665b388a5519c930bc7aac3d2373915`，实际模型运行183185ms、排队0，失败规则`duplicate_scene_position`，字段`output.shots[2].scenePosition`。不是网络超时，不是上游HTTP422。旧task_semantics究竟哪条规则仍不可逆推，不能补写猜测。刷新后页面能显示诊断；当前稿与上游保留，没有手工删镜头/改号/关校验。
+
+系列：`run-62324471-a9bd-4e6d-9b90-5cfe049dc700` revision5/failed。GLM构思、脚本及3次分镜成功，但调整后图库1/2仍没有可采用候选，约21m14s停止；AI示意作品却被泛化成“上传实拍/改变实验主张”提示，用户不能顺畅回到分镜调整。热点真实总编与独审产出6ideas，正式宿主过滤为0；原引用有效，`unsupportedClaim`对创作标签/引号等仍有词面误判。两者均保留证据，不换题刷成功。
+
+负例：`run-6083f24f-bc98-4fb5-81f2-2aeb3954e285`修后原run恢复，GLM-5.3/max构思69283ms成功；OpenAI真实独审27940ms、76分repair，明确本人录像/数据缺失，停treatment、script未开始、媒体0。随后仅改脚本模型并按人工版本恢复，run revision3→5，草稿SHA`ca743be661b34c403cb40b01227335821d6d4adafeb96b84532ead8bcae82fe1`和check修订要求保持，零新增模型。390手机未发送输入跨刷新保留；但发送中心被sticky撤销按钮覆盖，截图和DOM命中均已确认（QA-R11R-09）。
+
+新增/残留的优先事项：分镜输出唯一性及其有界修正（不能靠重试碰运气）；示意路线no-match反馈与返回讨论；热点事实与创作表达混判；恢复按原request归属统计；手机底栏遮挡。当前证据不要求重写框架或数据库。具体共同根因、确定/待查边界和最小建议在QA报告，不新增题材特判。
+
+#### 验证和证据
+
+- 代码日志与退出码沿上节；最终TS全量实跑815 pass/0 fail/1既有skip，Broker205/205、Studio395+531、Python131/131；最后phase修正后role-loop37/37和正式组合295/295、build、R11 source/dist通过。没有在最后增补后虚报更高全量TS数量。首次dist并发竞争失败与Broker旧断言失败均保留，有对应串行/修正后成功证据。
+- V01–V15：V01 PASS、V02 PARTIAL、V03 PASS、V04 PARTIAL、V05 FAIL、V06 PASS、V07 PARTIAL、V08 PARTIAL、V09 PASS、V10 PARTIAL、V11 PARTIAL、V12 PASS、V13 PARTIAL、V14 PASS、V15 PASS；逐项范围/缺口在报告，不用测试总数覆盖未证明的组合。
+- Q11-01 PASS；Q11-02 PARTIAL/FAIL；Q11-03/04/05 NOT_VERIFIED；Q11-06/07 PARTIAL/FAIL；Q11-08 PASS；Q11-09/10 PARTIAL；Q11-11 PARTIAL/FAIL；Q11-12 FAIL。无成片/正式音轨/双真实视觉审片/局部成片返工/交付，听感未验证。没有用旧片或替身冒充。
+- 详细报告：`docs/qa/videofactory-real-local-qa-20260914-r11-repair.md`；新截图11～15与此前截图均保留；脱敏任务清单、原durable路径、实际模型/effort/时间/输出SHA、运行文件SHA、build摘要及43个本次基线变化文件：`docs/qa/videofactory-real-local-qa-20260914-r11-repair-assets/final-evidence.json`。
+- 最终HEAD仍`b36ebac3189cf574b8e437cbe16eb9d0b228a177`，暂存区空，`git diff --check` exit0。资料BASELINE中的TASK与REVIEW_REVISION10摘要核对未变；保留全部dirty，无commit/push/云部署/升级/Oracle或外部发布。
+
+#### 费用与最终现场
+
+- 本QA新目录共41个物理Broker任务：38 completed（36成功、2失败）、3 not_accepted（实际0执行），无accepted在途；原R11此前9个请求另计，非重开测试轮。请求清单不含凭据/完整prompt。
+- 四条R11相关run均无spendAuthorization，receipt仅订阅或本地；未到媒体/TTS。累计已确定现金¥0.00、在途/未知现金暴露¥0.00、剩余¥50.00。旧GLM未知请求依然accepted无outcome、订阅路由，不重投，不将未知执行判失败。
+- 正式本地服务保持运行：http://127.0.0.1:4319；Studio PID86968、OpenAI86965、ZAI86967；同`workspace/qa-r11-repair-20260914`与对应runtime。最后`/api/health`正常，两个Broker active=0/queued=0。OpenAI本次进程completed1/failed1，ZAI completed1/failed0，仅为重启后计数，不能代替41条持久化任务总数。
+- 旧4317服务/历史数据/未明GLM请求没有干预。正常CRUD仅删除本轮自建临时模板，6个内置保留。测试草稿留在本机负例的讨论输入中、未发送，便于审查。
+
+### R11 剩余根因审计与新执行包（2026-09-14）
+
+状态：`AUDIT_PACKAGE_READY`；产品仍为`CHANGES_REQUIRED / PRODUCT_NOT_ACCEPTED`。本轮按用户最新要求只审计并写修复/真实测试包，没有继续改产品或真实生成。
+
+资料入口：`docs/codex-collaboration/r11-final-closure-20260914/MASTER_PROMPT.md`。同目录AUDIT记录根因与证据等级，IMPLEMENTATION规定K1–K6最小修正路线，VALIDATION列C01–C15跨边界失败/回归，REAL_QA规定修完编译回归后直接真实本地部署与主片/双审/局部返工测试；BASELINE记录325项当前源码/测试/脚本摘要。沿用R11累计50元，不新开预算；执行前核对实时现金暴露。
+
+本次新增确认：
+
+- K1：Broker在role-loop宿主校验前拒绝director语义错误；合法输出对照1次成功，只改变一处scenePosition后1次拒绝、宿主validate调用0，当前有界结构修正未消费此路径。原坏输出无法恢复，未臆测模型为何重复编号。
+- K2：原系列三轮顺序更正为初次stock1/2→修1/2时又把4改stock→修4时又把1/2改stock。真实反馈有传递，但下一producer输入没有上一完整分镜基线。图库路径halt在director_review之前，普通失败与统一补实拍文案进一步堵住讨论入口。新包一并要求修改分镜后的候选/可得性复核与确认身份，不能仅连接UI后绕过编译前检查。
+- K3：正式原数据回放6ideas→0候选；6项引用都有效、6项均受引号词面过滤，第4项另有AI、第6项另有28。不是正文未读或模型未返回，不等于6项语义全都合格。明确机器引用校验与现有独审事实判断分工。
+- K4：原主片正式summary复现本次2次/439225ms，实际本次只1个director请求/183185ms。checkpoint可变owner与整个执行墙钟是两个独立归属/时间问题，不能靠改显示数字修复。
+- K5：同revision简略事件用当前preferRunSnapshot函数复现清掉planningStages；GET有增强但publish/toDetail没有，终态停止订阅又阻断补全。未冒称重演了全部原浏览器事件顺序。
+- K6：沿用真实390手机DOM命中和截图15，sticky动作覆盖发送；新QA包含较矮窗口、长输入、IME与hit-test，不把无横滚当通过。
+
+验证：`node --import tsx docs/codex-collaboration/r11-final-closure-20260914/evidence/probe.mjs`退出0；证据`evidence/probe-before.json`。探针只用本地记录/受控transport和当前模块，不发真实网络/模型。`node --test --test-concurrency=1 --test-name-pattern='preserves safe director semantic diagnostics' --import tsx apps/codex-broker/test/codex-executor.test.ts`为1/1、退出0；只证明原诊断能力，没有声称新方案已实现。最初CJS探针因ESM-only exports失败，改内存ESM加载后成功，未动依赖。一次证据patch因同文件双操作被拒绝，改为单文件更新完成，未影响产品。
+
+325项产品/测试/脚本SHA复核全未变；本轮仅新资料包与本RESULT记录，不重跑全量构建、不操作服务、不新增费用、不commit/push/部署/升级或Oracle外传。新执行端下一步按MASTER接管集中修复，不再从历史A/B/C重做。
+
+### R11 主线续测（2026-09-14，进行中）
+
+状态：`IN_PROGRESS / PRODUCT_NOT_ACCEPTED`。以上 AUDIT_PACKAGE_READY 是历史状态，未及时记录后续实施，不能代表当前源码或实时费用。用户最新要求先完成当前主片的素材、声音、渲染、同片双审和局部返工，再集中修非阻断问题；不换题刷成功、不 commit/push。
+
+- 当前续接制作：`run-a7c42cc4-98de-4354-9dc9-c268b68b1446`，revision20，`awaiting_spend_approval`。此前已有导演/脚本/分镜产物，镜头5已物化，实际 Provider task `441663804842287`，不可重复购买。
+- 最近已经实施但旧记录未覆盖：审片 criteria 合同上限同步到16（正式调用为13）；失败/拒绝操作中未提交 prepared 的费用预留释放，submitted/unknown 仍保守占用；素材提前终止关闭未提交条目。此前报告的403重新核对为测试请求漏 `x-video-factory-request: studio`，不是产品登录故障，没有修改鉴权。
+- 本次独立运行 `node --test --test-concurrency=1 --import tsx packages/production-pipeline/test/production-authorization.test.ts packages/production-pipeline/test/generative-asset-worker.test.ts apps/studio/test/production-authorization-api.test.ts`：141/141，退出0。完整日志 `/tmp/vf-main-resume-regression.log`。不以此宣称完整成片验收通过。
+- 付款前只读所有本轮6条run的账本，经正式物理请求去重：父制作镜头5 ¥4、当前制作镜头5 ¥4，累计确定媒体 ¥8；在途/未知现金0。当前尚缺镜头1报价 ¥5.50，原scope ¥9.50中的余额足够；仍共用本轮¥50（不是新预算），给声音及局部返工留余量。旧两个prepared各¥5.50已由真实failed/rejected receipt证明操作终止，不是应追加购买的¥11。
+- 正式本地服务4319及两Broker仍运行；使用19:31构建产物，19:33启动。续测结果与旁支清单持续追加到 `docs/qa/videofactory-real-local-qa-20260914-r11-closure.md`。
+
+续测更新（20:03）：原授权幂等续接成功，revision20→21，assets已succeeded，进入asset-source-review。镜头1新task `441687379644690`真实生成/落盘，SHA `7d414749a6207fd3bb1e2fb50b75cf9e4a7f36f1817f05e1a9fb7c222e491543`，11.542秒/277帧/24fps/768×1344；镜头5复用SHA未变，2–4为镜头1的复用段。累计本轮媒体¥13.50（父片4+本片9.50），未追加scope、未重复购买。GLM镜头5的报告复核pass/92，249703ms/1attempt；整组素材审查是新职责的真实visual-review，仍在原请求等待，未盲重试。配音/渲染/最终双审尚未发生。
+
+仅新增既有 `production-authorization.test.ts` 内3个真实宿主/持久化回归，覆盖终止未提交释放、活跃预留保留、终止但已提交保留，以及续接不重复派生。合跑144/144，退出0（`/tmp/vf-main-resume-regression-final.log`）；pipeline不产出构建的类型检查退出0。另下游试片/审片/生产预检42/42，退出0（`/tmp/vf-main-downstream-regression.log`）。运行中没有修改产品源码或重启服务。
+
+用户新增明确要求：本次整组素材审查已超过10分钟，**即使成功也必须在主线之后追查慢的根因**。已登记QA报告 `PERF-R11-01 / OPEN`，记录原request、受理/观察时间、15帧及输入体量、当前produce/audit阶段和待查时间拆分；功能成功不自动关闭该项。当前仍观察原请求，不重投、不降模型/质量。
+
+续测更新（20:14终态）：整组素材审查失败，989138ms/1attempt/0结构修正/0排队，HTTP422 task_semantics。输入24036tokens、输出38311tokens（思考36514）；不是网络超时。具体语义规则被错误诊断映射遗漏，公开脱敏后未保留，旧候选无法恢复；不臆测是某个镜头或某条规则。正在检查完整validator/prompt/executor/Broker错误链并建立不调用模型的失败回归。两素材保留，累计¥13.50，声音/成片/双真实审片未达。
+
+补记回归：全量TS828 pass/0 fail/1既有skip，exit0；Broker全量211 pass/2 fail，exit1，两个固定毫秒等待的恢复断言actual0/expected1，原样单跑2/2 exit0。不是全量通过；需核对时序并重新验证。证据见QA closure报告及`/tmp/vf-main-broker-regression.log`。
+
+20:24用户要求停止并移交Claude Code。状态`PAUSED_BY_USER / PRODUCT_NOT_ACCEPTED`。最后新增visual七类语义安全诊断、v16输出规则、同步digest及集成回归，**未完成验证**：聚焦66 pass/1 fail，exit1，新增全链测试error.statusCode undefined（预期422），尚未查清。没有build/重启/真实复验。完整现场及下一步见`docs/codex-collaboration/HANDOFF_R11_20260914.md`；源码保留未撤回，不得把新patch说成已修好。无新增购买，累计媒体仍¥13.50。
+
+### R11 接管续测（Claude Code，2026-09-14 20:30 起）
+
+状态：`IN_PROGRESS / PRODUCT_NOT_ACCEPTED`。接手后先复现红灯、沿调用链定位，再集中修复并重新验证。
+
+**失败测试的真根因（不是测试问题，是产品缺陷）**：新增全链用例的1项失败在 `replay=1`，不在首次执行。逐案探针（7类×2次重放，共14个断言）显示：**首次执行7类语义拒绝全部正确保留** `statusCode=422/reasonCode/fieldPath/taskKind`；**失败的是同一 requestId 的幂等重放**——`CodexBridgeClient.submit()` 对 `status=200` 一律按成功信封调用 `parseEnvelope`，而 Broker 重放已终结失败时返回的是 `200 + state=completed_failure + ok:false + outcome`，于是抛出 `Codex bridge response envelope is missing ok/output.`（`stage=uncertain`，无 statusCode），把已落盘的权威诊断整个丢掉。这是独立于“visual 诊断映射遗漏”的第二个诊断丢失缺陷，且恰好命中产品主线的失败观察路径。
+
+**修复（最小、不放宽任何校验）**：`packages/production-pipeline/src/codex-chat.ts` 的 `submit()` 200 分支在解析成功信封前先判 `ok`；`ok!==true` 时先做身份校验，`state==="completed_failure"` 走既有 `completedFailureError(outcome)`，否则保持原 `missing ok/output` 行为。没有改 validator、评分、超时或重试语义。
+
+**确定性测试**：
+- `packages/production-pipeline/test/codex-chat.test.ts` 新增2个客户端边界用例（同requestId重放失败信封保留诊断且只POST一次；无法解释的200仍按 uncertain + missing ok/output 失败）。已做 RED 验证：撤回修复后新用例1/1失败，恢复后25/25通过。
+- 既有 `apps/codex-broker/test/zai-fallback-integration.test.ts` 七类规则链路用例由 1 fail 转 0 fail。
+
+**恢复测试的调度敏感性**：`codex-bridge-recovery.cross.test.ts` 此前用固定 20/30ms sleep 后再断言 `executor.calls.length===1`，在全量运行时读到0（历史日志`/tmp/vf-main-broker-regression.log` 记 actual0/expected1×2）。已改为真实事件/状态同步：`ScriptedExecutor.waitForCallCount()`（真实开始事件，带5s有界失败）与 `waitForDurableState()`（读已落盘的 durable record 终态，按 requestId 匹配）。未增加 sleep、未删断言；同时消除了“release 早于 executor 启动导致 gate 永不释放”的真实竞态。全量复跑214/214。
+
+**Node 运行时纠正**：首次全量 TS 出现122 fail，全部来自 `better_sqlite3.node` 的 `NODE_MODULE_VERSION 147 vs 127` ABI 不匹配——原因是本 shell 的 `node` 解析到 nvm v22.23.1，而项目按交接要求使用 `/opt/homebrew/bin/node` v26.8.1。改用正确 Node 后无失败。**未重建 ABI、未换 Node**。
+
+**集中验证（全部使用 `/opt/homebrew/bin/node` v26.8.1）**：聚焦67/67 exit0；Broker全量214/214 exit0；全量TS 831项 830 pass/0 fail/1既有E2E skip exit0；Studio vitest 399/399 + node --test 532/532 exit0；source/dist 合同探针 `r11-contract-boundary.mjs` src 4/4、dist 4/4 exit0；`tsc --noEmit` pipeline/broker/template-core/workflow-core 与 studio server+client 全部 exit0；`npm run build` exit0。日志 `/tmp/vf-node26-*.log`、`/tmp/vf-contract-*.log`、`/tmp/vf-studio-test.log`、`/tmp/vf-build-1.log`。
+
+**真实本地部署**：核对两 Broker `active=0/queued=0`、无在途 durable 任务后，仅重启本轮三个服务（保留 workspace/媒体/checkpoint，未动 08:15 起的旧环境）。现 PID：openai 6746、zai 6751、studio 6804，均从 20:56 新 dist 启动。`/api/health` 为 `{"status":"ok","runtime":{"python":true,"ffmpeg":true,"ffprobe":true,"say":true}}`；两 Broker `/health` 正常且 active/queued=0。dist 已确认包含本次修复。注意本机 shell 有代理，本地请求需 `--noproxy '*'`。
+
+费用未变：累计媒体仍 ¥13.50，本轮无新增购买、无在途/未知现金。下一步按用户要求用正式 UI 恢复原主片一次，只重做受影响的素材审查。
+
+### R11 接管续测（22:3x 更新）：恢复链逐次归因、三处同源缺陷修复、构建与契约复验、一次受控返工
+
+主片 `run-a7c42cc4-98de-4354-9dc9-c268b68b1446` 的 `asset-source-review` 共 7 次真实运行。按调用链逐次归因，四类问题分开陈述，不写"语义不符合"了事：
+
+| # | 本地时间 | 耗时 | 结果 | 模型调用 | 归类 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 19:57:52→20:14:24 | 989s | 失败 HTTP422 `task_semantics` | 1 | 模型输出错误 |
+| 2 | 21:07:18→21:27:26 | 1208s | 审片完成 `revise`，节点 `rejected` | 3 | **合同闸门**（`production-pipeline.ts:8930` 要求 `recommendation === "approve"`），不是缺陷 |
+| 3 | 21:39:52→21:39:57 | 5.0s | 失败，无 attempt 产物 | 0 | 恢复错误（缺陷 A） |
+| 4 | 21:52:51→21:52:55 | 4.0s | 409 `binding_conflict` | 0 | 恢复错误（B/C） |
+| 5 | 21:57:47→21:57:50 | 3.0s | 409 `binding_conflict` | 0 | 恢复错误（C） |
+| 6 | 21:58:13→21:58:15 | 2.9s | 409 `binding_conflict` | 0 | 恢复错误（C） |
+| 7 | 22:03:43→22:22:24 | 1120.3s | 审片完成 `reject`，节点 `rejected` | produce 1 + audit 1，修复 0 | 受控复验 |
+
+第 1 次是模型输出错误；第 2 次产出的报告在合同内完全有效，节点 `rejected` 是规定闸门，据此排除"提示词与校验合同矛盾"；第 3–6 次都是**传输/恢复错误**，`modelCallCount=0`，物理请求在代理处即被拒，模型一次都没被调用。
+
+**缺陷 A（恢复期校验失败被伪装成服务故障）**：`restoreCheckpoint` 用宿主 `options.validate` 重新校验检查点内的候选，而审片报告是证据绑定的；帧重新生成后旧结论不再成立，校验抛的是普通 `Error`，不经 `failedLoopError` 包装，于是既不是 `RoleAgentLoopError` 也不是 `VisualReviewFallbackError`，落到 `production-pipeline.ts:8861-8865` 兜底分支，被报成"源素材视觉预检服务暂时不可用…请重试…或更换视觉审片模型"——**把确定性校验失败说成服务故障，并给出无效建议**。已改为标记该次拒绝，非"已受理未结清"的物理任务以 `fresh(cycle + 1)` 开新 cycle 重跑。
+
+**缺陷 B（冲突只清 pending、不换身份，运行永久卡死）**：409 `binding_conflict` 表示该身份已被内容不同的历史任务占用；旧代码只 `clearPendingOperation`，generation 不变，每次重试都撞同一条 durable 记录。已改为 `stage === "conflict"` 时 `retireAcceptedOperation`（generation+1）后抛出，**不自动重发**，由操作者显式重试。
+
+**缺陷 C（审片身份不绑定证据快照）**：物理请求身份由 `{scope, contractDigest, cycle, iteration, phase, generation}` 派生，而审片节点声明的输入只有素材方案与脚本**路径**；帧重新生成时路径不变、载荷已变，于是既回放绑定旧证据的旧结论，又与历史任务撞身份。这也是 B 修完后第 5、6 次仍冲突的原因。已改为在传给 agent loop 的 `contractVersion` 上追加 `|evidence:${evidenceSnapshotId}`（与既有 `|cycle:` 同一约定）。未改 `VISUAL_REVIEW_AGENT_CONTRACT_VERSION` 常量、未改评分门槛、未加题材特判、未删任何断言。
+
+**证据集为什么会变（关键旁证）**：工作区 `src/video_factory/review_media.py` 有一处未提交改动（mtime 21:33，`git diff` 只有这一段）：全片预检原先固定每场只加两轮采样（每场 3 帧、共 15 帧），改为与试片共用同一笔 24 帧预算逐场轮转（场 1–4 各 5 帧、场 5 为 4 帧）。第 2 次审片证据在 21:07 生成（15 帧，`imageSetSha256 85968597…`）；第 3 次起为 24 帧（`26cb90ee…`）。这既解释了两次结论差异（稀疏采样只落在人物仍在画的时段，故判 satisfied），也正是缺陷 A 的触发条件、并证实缺陷 C 的必要性。详见 QA 资产 `checks/evidence-budget-change.md`。该改动只把没被用满的既有预算用满，未改上限、未改模型、未改思考强度、未改门槛。
+
+**RED→GREEN（均不调用真实模型）**：`role-agent-loop.test.ts` 增 3 例（证据重生后重跑且 produce 请求 id 与旧的不同；已受理 pending 保留现场不被跳过；代理报身份冲突后换发新身份），第 3 例在移除 `retireAcceptedOperation` 后失败，恢复后通过，套件 42/42。`codex-visual-review.test.ts` 增 1 例（证据重生时以新身份重审；证据未变时回放已通过结论、不重复付费），移除 `|evidence:` 后失败，恢复后通过，套件 35/35。
+
+**受控复验（同 run、不重买素材、不新建 run）**：22:02 构建（含 A+B+C）→ 22:02:56 重启 studio → 22:03:44 点击一次。得到全新 `requestId`（`agent-b7bea825…`）与新检查点摘要 `f564cec3…`，代理新建 `accepted` durable 记录，真实模型执行、`active=1`；**不再 409，也不再沿用历史身份**。反向对照：同样的点击在部署 C 之前连续三次（21:52 / 21:57 / 21:58）都是 409 `binding_conflict`、零模型调用。每次点击都有明确修正依据，未自动重发任何物理任务。
+
+**复验的实际产出（真实结论，不是系统缺陷）**：produce 于 22:16 完成（`queueWaitMs=1`、`providerWaitMs=755687`、`modelAttemptCount=1`、`structuredRepairCount=0`、`finishReason=stop`、24 帧证据），产出 `recommendation=reject`、confidence 0.78、评分 composition 82 / continuity 52 / pacing 68 / legibility 88 / safety 93；5 条 findings 中 2 条 `critical` + `rework_asset`、1 条 `inspect_existing_media`、2 条 satisfied，全部指向场 1 母片（asset `441687379644690`）。已人工查帧独立复核：`scene-01-03.jpg`（源 3150 毫秒）画面只剩墙面、接缝与树影，**人物确已离画**；`scene-04-00.jpg`（源 5100 毫秒）与 `scene-04-04.jpg`（源 9900 毫秒）树影在墙面同一位置，4.8 秒内无跨缝移动。两条 critical 成立，本次审片是对**真实素材缺陷**的如实报告。证据 `docs/qa/.../checks/attempt-7-review-outcome.json`。
+
+**构建与契约复验**：`npm run build` 退出 0，`npm run test:package` 3/3 退出 0（日志 `/tmp/vf-build-r11-takeover.log`、`/tmp/vf-test-package-r11-takeover.log`）。A/B/C 三处修复均已确认存在于 `packages/production-pipeline/dist`；最后一次源码改动 mtime 22:01:18，studio PID 33563 启动于 22:02:54，即**运行中的进程已经加载含三处修复的同一源码版本，无需再重启**。`tsc -p` 六个工程全部退出 0、无 `error TS`（`/tmp/vf-typecheck-r11-takeover.log`）；未在模型调用进行中重写 `dist`。
+
+**费用与暴露复核（修正接管前的记录）**：接管前记的"在途 1 笔"不准确。逐 run 扫描后确认是 **2 笔**未结清：`assets:2026-09-14T10:16:51.214Z:16`（本片）与 `assets:2026-09-14T07:17:02.437Z:23`（同题更早的 run-25b4c195，早于接管轮），两笔都是 `seedance-video-v1` / `status: failed` / est ¥5 / `actualPending: true`，都在 1 秒内在供应商边界失败。全工作区 `actualCostCny 13.5`、`actualPendingCount 2`、`authorizedCostCny 36.5`。**已确认现金仍 ¥13.50；最坏情形暴露 ¥23.50**，仍在累计 ¥50 授权内。按约束不动这两笔历史记录，仅计入暴露。详见 `checks/pre-rework-exposure.md`。购买前只读确认两 Broker `active 0 / queued 0`、studio `/api/health` 正常。
+
+**一次受控返工（产品自带路径，不是另建 run、不换题）**：主片被真实素材缺陷挡住，产品自身的处置建议是"调整导演方案或画面 Provider，重新报价并确认后再生成"。走正式 UI 入口"调整方案后重新制作"提交一次返工，新制作 `run-e204cd6c-2365-4cda-bb1d-c50e6e69bb8a`：`initialInput.rework.sourceRunId = run-a7c42cc4…`、`sourceRunRevision 27`（**与父片同一制作谱系，不是新建 run**），继承 `brief / script / visual-direction / visual-review`，`affectedScenePositions [1,2,3,4,5]`。第 5 镜为必改是因其 finding 的 `targetNodeIds` 含 `assets`（只调看、不新购），与对话框"审片明确要求的镜头不能移除"的规则一致；API 字段 `requiredAffectedScenePositions` 只列 `[1,2,3,4]`，比 UI 语义窄，属命名与语义不齐的低优先级观察，行为本身正确。提交本身不产生现金支出：新一轮先重新规划并逐项报价，购买前仍需人工确认。证据 `checks/step-13-*.log`、`checks/step-13-submitted-payload.json`、`screenshots/12a-rework-dialog.png`、`13a-rework-run-created.png`。
+
+**尚未验证**：返工后的素材预检、配音（本片声音实际为 macOS `say` Tingting/rate185/pauseScale1/natural，**不冒称 MiniMax TTS**）、渲染、技术质检、同片由两个不同真实视觉模型复审、无关素材复用。PERF-R11-01 仍 `OPEN`。
+
+### R11 接管续测（23:0x 更新）：配音默认值纠偏、返工 scope 合同矛盾的根因修复与重新部署
+
+**先更正上一条记录中的一处错误结论（不是补充，是推翻）**：上一条写"第 5 镜为必改…行为本身正确，仅 `requiredAffectedScenePositions` 命名与语义不齐"。按调用链复核后该结论**不成立**，正确结论恰好相反：服务端给的 `[1,2,3,4]` 是对的，客户端把它扩成 `[1,2,3,4,5]` 才是缺陷，而这正是返工轮卡在导演闸门、模型编造 `EXISTING_ASSET_ONLY` 伪语法的触发原因。上一段保留在文档中作为过程记录，但以本节为准。
+
+#### 1. 配音为什么走了 macOS `say` 而不是已配置的 TTS（用户提问的逐链归因）
+
+结论：**MiniMax TTS 一直是可用状态，是本轮 run 的配音绑定被出厂默认值锁死，不是"没配 TTS"、不是供应商不可用、也不是运行环境缺依赖。**
+
+只读证据（`harness/step-17-tts-availability-and-rework.mjs`、`step-17b-voices.mjs`）：
+
+- studio 进程环境里 `MINIMAX_API_KEY` 存在且非空（`apps/studio` 侧读取，未回显任何凭据内容）；运行时依赖 `python/ffmpeg` 均为 true，`miniMaxTtsAvailable` 的前三个条件全部满足。
+- `GET /api/providers`：`minimax-tts-v1` 为 `capability=voice.synthesize`、`available:true`、`status:"ready"`，模型 `speech-2.8-turbo` 可用。
+- `GET /api/voices`：共 28 个音色，其中 minimax 引擎 9 个、macos 引擎 19 个。
+
+根因链（三处叠加，全部在源码中读到，未靠猜测）：
+
+1. `DEFAULT_CREATOR_SETTINGS.voiceDirection` 把出厂音色硬编码为 `macos:Tingting`（`apps/studio/src/server/creator-settings-store.ts`）。
+2. 本运行环境没有 `settings/creator-settings.json`，服务端于是把出厂默认值当作"创作者的设置"交给对话框。
+3. `NewRunDialog` 让 `creatorSettings.voiceDirection` 优先于唯一按可用性决策的 `defaultVoiceDirection(providers)`，而后者才会选 `minimax:Chinese (Mandarin)_News_Anchor`。因此在正常操作路径上，**偏好云端配音的默认分支永远不可达**；返工 run 又按创建时绑定继承 `macos-say-v1`。
+4. 配音绑定只在创建时决定（`packages/production-pipeline/src/production-pipeline.ts:3435-3451` 读 `brief.providers.voice` + `brief.voiceDirection`），没有任何变更路由（`return_to_stage` 只接受 treatment/script），所以创建后不可改。
+
+修复（按用户在两个选择项上的决定实施）：默认策略改为**已配置云端 TTS 时优先**；本轮主片**沿用 macOS `say`**（不改本轮绑定，不重跑已完成的阶段）。改动为把出厂音色提取为具名常量 `DEFAULT_STUDIO_VOICE_DIRECTION`（`apps/studio/src/shared/api.ts`），`creator-settings-store.ts` 复用它，`NewRunDialog.tsx` 新增 `creatorVoiceIsShippedDefault()`：只有当设置值**逐字段等于出厂值且未被标记为自定义**时才让位给 `defaultVoiceDirection(providers)`；任何真实选择（如已改成 `macos:Meijia`）或自定义标记仍然优先。没有删除任何断言、没有降低质量门槛、没有加题材特判。
+
+RED→GREEN：新增用例 `prefers a configured cloud voice over the shipped macOS default`，撤回修复时 1 failed | 18 skipped，恢复后 19 passed。全量：studio vitest 19 文件 / **401 用例全通过**（原 400 + 新增 1）；`node --import tsx --test test/studio-service.test.ts test/api-contract.test.ts` 137/137；`tsc -p tsconfig.server.json` 与 `tsc -p tsconfig.client.json` 均 exit 0。
+
+#### 2. 返工轮卡在导演闸门的根因：提示词与校验合同矛盾，触发器是客户端的 scope 推导缺陷
+
+现象：返工 run `run-e204cd6c-2365-4cda-bb1d-c50e6e69bb8a` 连续两次 `confirm`（reviewRevision 45→46→47）都被独立 `check` 判 `verdict:"repair"` 并重新开闸，证据是"场5使用了合同未声明的既有素材绑定语法"。
+
+**归类：提示词与校验合同矛盾（不是模型输出错误，不是传输/恢复错误，不是测试问题）。** 依据是下面四条互相独立的证据：
+
+1. **模型在三次连续尝试里给出同一结果**（`nodes/creative-planning/attempt-2|3|4/director-draft-r2.json`）：场 5 全部是 `preferredProviderId:"pexels-stock-v1"` + `deliveryType:"stock_video"` + `query:"EXISTING_ASSET_ONLY scene 5；先检查源4.5秒至结尾完整连续片段"`。三次取样一致说明这是对合同的确定性反应，不是采样噪声。
+2. **它被要求做的事情没有可表达的方式**。assets 指令对场 5 写的是"先补查已有素材，不进入新购买"，同时 `affectedScenePositions` 把场 5 标成本轮必须重做。而合同里唯一的"用已有素材"语法是 `REUSE_ONLY scene N` / `reuseFromScenePosition`，它只能指向**同一方案中更早的镜头**（`packages/production-pipeline/src/generative-asset-worker.ts:1908` 明确对 `reuseFrom <= 自身` 抛错），无法绑定上一版 run 已生成的母片。于是模型只能编一个 token。
+3. **触发原因是客户端把"只要求补查"的 finding 扩成了强制重做范围**。服务端 `recommendedReworkScenePositions` 在 `apps/studio/src/server/production-studio.ts:3833` 显式 `if (finding.action === "inspect_existing_media") continue;`；执行层两处投影（`generative-asset-worker.ts:1305`、`production-pipeline.ts:3413`）同样排除它。但客户端 `NewRunDialog.tsx` 的 `defaultReworkScenePositions`（预选）与 `requiredScenePositionsForRework`（必改）都没有这个过滤。部署前实测：第 5 镜复选框 `checked=true, disabled=true`（必改不可移除），摘要"本轮选择 5 个镜头：1、2、3、4、5"。**操作者在 UI 上无法取消它**，所以这不是操作者误选。
+4. **范围一旦包含场 5，宿主就不再逐字继承它**。`codex-visual-director.ts:369 mergeReworkCandidateShots` 的语义是"未受影响镜头由宿主程序逐字继承"；场 5 在 affected 集合内，于是走模型输出，上一版场 5 的真实母片（`hailuo-video-v1` / `generated_video`）被丢弃并改道到 `pexels-stock-v1`。
+
+修复：新增 `isInspectionOnlyReworkFinding()`（`apps/studio/src/client/components/NewRunDialog.tsx`），在上述两个函数里与服务端范围推荐、执行层投影使用同一口径跳过 `action === "inspect_existing_media"` 的 finding。未改任何校验、评分、超时或重试语义；场 5 的 finding 与"先调看源 4.5 秒至结尾"的建议原样保留。
+
+RED→GREEN：新增用例 `keeps an inspection-only finding out of the mandatory rework scope`，修复前失败输出与线上症状逐字一致（`checked="" disabled=""`），修复后通过。全量 studio vitest 401/401。
+
+**重新部署与线上复验**：`npm run build --workspace @video-factory/studio` exit 0（22:50），随后仅重启本轮 studio 服务（PID 33563 → 54660，22:50:59，`Server listening at http://127.0.0.1:4319`），两 Broker 未动。用修复后的客户端对同一源 run 做只读复验（`harness/step-19-rework-scope-recheck.mjs`，证据 `checks/step-19-rework-scope.json`）：第 5 镜 `checked:false, disabled:false`，摘要"本轮选择 4 个镜头：1、2、3、4"，"其余 1 个镜头计划沿用：5"，控制台 0 错误。
+
+**一次受控复验（同源 run、同 findings、不换题、不另立成功线）**：以修复后的默认范围提交，新制作 `run-b0468e64-2815-46e6-b837-7cf1bfafa389`，`initialInput.rework.sourceRunId = run-a7c42cc4-98de-4354-9dc9-c268b68b1446`、`sourceRunRevision 27`，`affectedScenePositions [1,2,3,4]`，findings 三条与父片完全一致（场 1/4 `replace_asset`、场 5 `inspect_existing_media`），配音按本轮决定仍为 `macos-say-v1` / `macos:Tingting`。提交本身不产生现金支出。被卡住的 `run-e204cd6c` 原样保留在磁盘作为证据，未删除、未批准、未重试。
+
+**新记录的开放观察（不是本轮阻断项）**：场 5 的 `inspect_existing_media` finding 来自 `source_assets` 阶段，而产品目前只有 `POST /api/runs/:runId/reinspect-visual-review`（对应 `visual-review` 的成片审片），**没有**针对 `asset-source-review` 既有素材的补查入口（`packages/production-pipeline.ts:3002 dispatchVisualReinspection` 只接受 visual-review 的 delivery 与 evidenceId）。因此"先完整调看源 4.5 秒至结尾"这一要求在产物上没有对应的可执行路径，只能靠素材节点重跑时的既有采样策略。本轮按"记录具体原因和证据、继续其他独立可测项"处理，不以此放宽任何审片门槛。
+
+**尚未验证**：复验轮导演闸门的独立 check 结论、素材预检、配音、渲染、技术质检、同片由两个不同真实视觉模型复审、无关素材复用。PERF-R11-01 仍 `OPEN`。
+
+### R11 接管轮补充记录：缺陷 F、G、H 的定性与取证
+
+（本节补齐此前只存于过程记录、未落盘的三个编号；同时修正一处先前结论。）
+
+#### 缺陷 F：返工审计没有可比对的基线，凭空指控"擅自换成付费生成路线"
+
+**归类：合同/协同缺陷（不是模型输出错误）。** 现象是返工轮的独立审计声称场 5 被改成新的付费生成路线，而场 5 实际按宿主规则逐字继承了上一版母片。
+
+根因：`visualDirectorAuditContext` 只拿到经 `directorInputForModel` **收窄后**的 `brief.rework`。收窄对生产模型是必要的（只该看受影响镜头），但审计被同样收窄后就没有 `previousDirectorPlan` 这个基线可用，"其余镜头逐字继承"这条要求便无从核对；审计只能拿上游 `scenes[].visualStrategy` 反推既有路线——那是素材获取建议，可能已被上一版导演方案取代——于是把逐字继承的镜头误判成擅自改路线。
+
+修复：审计上下文改传**未经收窄**的原始 rework（`packages/production-pipeline/src/codex-visual-director.ts:137`），函数内提取 `reworkBaseline = sourceRework.previousDirectorPlan` 并注入 `previousDirectorPlan`（同文件 `:434-455`）。未改评分门槛、未删断言、未加题材特判。
+
+验证：RED→GREEN（撤回修复即复现）。生产复验：同一审计、同一 candidate，修复后不再指控换路线，并明确写出场 5 保留原 Provider / deliveryType / 既有素材。
+
+#### 缺陷 G：check 模式仍可改写方案（复核与生产共用同一多轮迭代预算）
+
+**归类：合同缺陷。** 创作闸门的独立复核以 `mode=check` 与生产草稿 `mode=draft` 共用 agent loop 的 `maxIterations`，复核因此保有迭代空间去**重写候选**——把"检查当前方案"变成"再产一版方案"，于是同一个闸门可以被反复重新开闸。
+
+修复：`packages/production-pipeline/src/codex-visual-director.ts:120-123` —— `maxIterations: input.creativeReviewExecution ? 1 : this.maxReviewIterations`；`mode=draft` 时 `deferAudit: true`；`mode=check` 时以既有 candidate 作为 `initialCandidate`，复核只判不改。该修复随导演角色合同 `director-v31 → v35` 一起部署。
+
+验证：源码形态已核实（见上引行号）。生产复验的完整结论取决于新起端到端制作的闸门表现，见后续记录；在此之前按"已修、生产未复验"计，**不记为已通过**。
+
+#### 缺陷 H：同 digest 复用的规划线程在真实输入漂移时 fail-closed —— **判定为不是缺陷**
+
+现象：主片第 3 次 `confirm` 报
+`Creative planning cannot resume this thread: the real inputs of a planning stage (asset catalog, runtime models, or role bindings) changed while the planning input stayed the same.`
+
+**归类：不是缺陷；是设计上的 fail-closed。** 逐条排除：不是模型输出错误（模型未被调用）；不是提示词与校验合同矛盾；不是传输/恢复错误（无 409、无重放）。真实原因是**接管者在 run 进行中重新部署**：导演角色合同 `director-v31 → v35`（`packages/production-pipeline/src/codex-visual-director.ts:37`）在 15:23:54Z 被换掉，而 run 记录的 executionSeq 8 由旧进程于 15:18:54Z 写入，新 studio 起来 18 秒后第 3 次 confirm 即失败。
+
+判据：该 guard 被仓库自带回归钉住 —— `production-planning-closure.test.ts` 的 "same-digest replay fails closed when stage inputs drift (B-FIX)" 断言 `assert.equal(spies.directorCalls, 1, "the drifted thread must not silently replay or re-run planning")`。我一度实现"漂移即作废并重跑导演阶段"，会使该断言变成 2，即把 fail-closed **降级为 fail-open**，被要求 3 明确禁止；已逐处回退，回退后残留引用为空、`tsc --noEmit` 退出 0、`production-planning-closure.test.ts` 26/26 通过。
+
+结论：**保持 fail-closed，不放宽**。合同 `v31 → v35` 携带本轮真实合同变更（`assertPlanningRevisionScope`、`maxIterations`/`deferAudit`/`initialCandidate`、审计基线、voiceTiming/articleSources），不能为恢复可续跑而回滚。
+
+**保留的操作面观察（开放项，不是本轮阻断）**：该 guard 给出的补救是"编辑规划输入以开启新的规划线程"。对已进入终态的 run，通用节点编辑路由（`PUT …/nodes/creative-planning/input-override` 与 `…/execution-configuration`）都要求 `confirmTerminalEdit: true`，而**界面上没有对应入口**。即：中途重新部署会让在跑的 run 失败，而失败信息指向的补救动作在 UI 上不可达。按"记录具体原因和证据、继续其他独立可测项"处理。
+
+#### 缺陷 I：复核判定 repair 后主按钮仍可点击，唯一结果是同一份草稿的同一结论
+
+**归类：界面与流程状态不一致（真实缺陷）。** 在 `checkResult.verdict === "repair"` 状态下，面板已显示"有 N 处需要调整，尚未进入下一步"，但主按钮仍是"确认当前方案，继续"且可点击。此时点击的唯一后果是按**同一份草稿**重跑一次独立复核，回到同一个 repair —— 推不动流程，却要消耗一次付费复核。这解释了主片上观察到的连续三次确认、`reviewRevision` 44→45→46 而草稿 sha 未变。
+
+判据：`packages/production-pipeline/src/creative-review.ts:318` 的不变量 `checkResult: sameDraft ? current.checkResult : null` —— 草稿一变必然清空 `checkResult`，所以在场的 repair 一定针对当前草稿；而 `confirmCreativeDraft` 硬性要求 `verdict === "pass"`。两点合起来使该点击必然无进展。
+
+修复：`apps/studio/src/client/components/CreativeDiscussionPanel.tsx` 新增 `awaitingRepair = review.checkResult?.verdict === "repair"`，主按钮在此时禁用并把文案改为"先按上面的意见调整"。
+
+RED→GREEN：`apps/studio/test/creative-discussion-panel.test.tsx` 新增 2 例（repair 在场时确认按钮不存在且替代按钮禁用；repair 不在场时确认按钮可用），`npx vitest run test/creative-discussion-panel.test.tsx` **8 passed**（原 6 + 新 2）。未改任何校验、评分、超时或重试语义。
+
+#### 本轮基线与构建复核
+
+- 生产链路回归（不调用真实模型）：`node --test --import tsx packages/production-pipeline/test/*.test.ts` → **765 用例 / 764 通过 / 0 失败 / 1 跳过**，exit 0。
+- `tsc -p apps/studio/tsconfig.server.json --noEmit` 与 `tsc -p apps/studio/tsconfig.client.json --noEmit` 均 exit 0。
+- `npm run studio:build` exit 0；仅重启本轮 studio 服务（PID 68107 → 75915，2026-09-14 23:42:23），两 Broker 未动。
+
+#### 模板（template）在当前代码中的实际状态 —— 与"早已去掉"的印象不符
+
+新制作**确实不再走模板**：创建路径 `apps/studio/src/server/production-studio.ts` 对 `template` 无任何引用（除可选 `templateSnapshot`）；`packages/production-pipeline/src/contracts.ts:351` 的 `templateSnapshot?` 为可选，仅历史 run 携带；`packages/template-core/src/types.ts` 的 `TemplateCostPolicy` 注释写明"仅用于读取历史模板。费用控制已经移到每次真实报价后的人工授权"。
+
+但代码面并未拆除：`/templates` 页面（`apps/studio/src/client/App.tsx:33`）、`/api/templates` 及 8 条 CRUD 路由（`apps/studio/src/server/app.ts:232-288`）、`template-store.ts` / `template-catalog.ts` / `template-studio.ts`、整个 `packages/template-core/` 仍在。它们现在是**不参与生产链路的残留面**，不阻断端到端，但需要决定是拆除还是明确标注为历史兼容。原概念为分层制作模板（`TemplateLayer = system | platform | template | series | run | node`），含叙事节拍、镜头槽位、视觉/声音系统、质量规则与费用策略；其费用角色由**配方 recipe**（`economics.recipeId`）+ 逐次报价授权接管。
+
+### 端到端续跑：操作员角色与 treatment 闸门处置（run-f8e2635f）
+
+**角色约定（操作员口径）**：这条 run 由我以**操作员身份**在闸门上做决定——不是"新增人工环节"，闸门本来就是设计给人在此决策的入口（三阶段各一个：treatment / script / director，动作 `discuss | adopt_proposal | undo_draft | return_to_stage | confirm`）。我不新增流程、不改代码实现，只按已有 UI 动作做决策并留证。
+
+**链路事实（新建制作的真实起点）**：`run-f8e2635f-4baa-4a4d-9a2b-a6e169ee5c08`，`runPurpose: production`，无 `rework`。第一道闸门为 `stage=treatment`（不是 `director`），确认新的制作确实从构思起点开始。node 链为 `brief → creative-planning → assets → voice → render → technical-review → visual-review → final-review → publish-package`；三个阶段都在 `creative-planning` **一个节点内部**。
+
+**treatment 闸门第 1 次阻断的完整归因（不是猜）**：
+
+- 现象：gate1 `stage=treatment rev=1` 无 `checkResult`；点"确认当前方案，继续"后，gate2 出现 `rev=2`、`checkResult.verdict=repair`、`score=74`、1 条 blocking，而两版 **`draftSha256` 完全相同**（`2996c19c…`）。
+- 第一层解释（设计行为，非缺陷）：`codex-creative-treatment.ts:206` 的 `deferAudit`（缺陷 G 的修复）使 draft 模式先出稿、审计延后；用户点确认才触发那次独立复核。因此"确认"不是无效果，而是**确认触发的那次复核判了 repair**，流程按设计停在原地。主按钮 `disabled=true` 是缺陷 I 的修复在生产生效。
+- 第二层解释（阻断内容）：候选 treatment 的 `evidenceRequirements` 有 7 条，其中 `beatId=half_pause`、`claim="若画面中的脚步、车流或街区声被呈现为同期声，其来源必须能确认属于对应原片。"` 被标为 `factual_support` + `critical: true` + `acquisition: "external_required"`。宿主 `treatment-readiness.ts:34,36` 对该组合**无条件**判阻断（生成 `treatment-readiness-5`），独立审计读取 `hostReadiness` 后如实引用。
+- 第三层解释（根因，逐层核对后确认）：该条内容是**创作边界声明**（"不以别处音效冒充现场记录"），而角色指令 `task-definitions.ts:173` 明确写着「边界声明本身不是 factual_support」「不自动升级为外部来源要求」，第 174 行又明确 `external_required` 只用于**流水线不能取得的用户专属实验或拍摄**。**模型同时违反了这两条明确指令。**
+- 对照证据：同一简报下，原始主片 treatment 仅 5 条 `evidenceRequirements`（5 个 beat 各 1 条），全为 `illustration_only` + `pipeline_retrievable`/`not_needed`，且把同一约束正确处理为 `soundPrinciples` 的**退路句**（"若无法混合素材同期声…不虚构可听见的环境声"），因此 0 条 `external_required`。本次模型把同一约束错误归档进 evidenceRequirements 并标成核心外部依赖。简报逐字段比对除 `creationContext`（我剥离的来源标记）与 `taskContractDigests`（服务端重新计算）外**完全一致**。
+- **定性：模型输出错误（指令遵循失败），被宿主确定性合同正确拦下、被独立审计如实引用。不是产品缺陷，不是提示词与校验的矛盾，也不是传输/恢复错误。** 结论是**此处不改任何代码**——去松动 `treatment-readiness` 才是"降低质量门槛过关"。
+- 自我更正：本段一度判断"提示词未说明 `external_required` 语义"，属**错误结论**。错因是只查了 `treatmentPayload`（仅装 brief/suppliedSources/referenceGrammar），漏看指令经 broker 的 `task-definitions.ts` 下发这条路径。已核对第 173/174 行后更正。
+
+**操作员决定与结果**：在 treatment 闸门以 `discuss` 动作提交决策（命令 `d2e8aa02-4b44-4788-bca9-c65ee6b6cd61`，75 秒完成）：本片不承诺可听环境同期声，要求把该条从 `evidenceRequirements` 移除、把边界并入 `soundPrinciples`。模型返回修订稿 `f2e884c6…`，改动为：`evidenceRequirements` 7→6 条且**该条已删除**（其余全为 `illustration_only` + `pipeline_retrievable`/`not_needed`）；`soundPrinciples[1]` 改为"本片不使用可听的环境同期声，也不以另配的脚步、车流或街区音效冒充现场记录"；**并额外修正了真正的过度承诺** `soundPrinciples[2]`（原"前段保留通勤声压…突出更近、更轻的环境细节"→"前段旁白略紧，注意力转向后拉开句间停顿"）。其余 beat、观众承诺、事实边界未动。新稿 `checkResult` 按 `creative-review.ts:318` 自动清空，随后点确认触发新稿上的独立复核。
+
+**本轮新记的流程问题（真实存在、未修，与本条 run 的阻断无关）**：
+
+1. **闸门未告知"确认"的真实语义。** 首屏文案是「导演方案已生成，等你确认」「确认只检查当前版本，不会购买素材」，但没有说明**确认会触发一次独立复核、该复核可能驳回、驳回后仍停在同一份稿上**。现场表现即为：点了确认没有任何进展，只是多出一条此前未展示的意见。对必须在此做决策的操作员，这是信息缺失。
+2. **驳回后没有结构化补救动作。** 本次阻断的本质是"某字段被错误分类"，但闸门只提供自由文本讨论框，只能以自然语言描述，无法表达"把这条从 A 类移到 B 类"。人来操作勉强可行，代价是每轮多消耗一次模型调用。
+3. **模型违反明确指令后没有有界自动重做。** `codex-creative-treatment.ts:206` 在创作复核路径将 `maxIterations` 钉死为 1（缺陷 G 的修复：独立复核不得改写候选），因此不存在"把 hostReadiness 回喂生成方自动重做一次"的路径。这是**有意的取舍**（复核不得悄悄改稿，改不改由人定），代价是每次指令遵循失败都必须停下等人。是否有界放开属产品决策，未自行更改。
+4. **已核实不成立、予以撤回**：曾判断 `inspect_existing_media`（"补查已有素材"）没有执行入口。实为有：`RunWorkbench.tsx:305` 在 `pendingInspectionCount > 0` 时提供按钮，走 `POST /api/runs/:id/reinspect-visual-review`。
+
+**操作员决定的事实依据（独立复核，非从权）**：该决定"本片不承诺可听环境同期声"由两条独立证据支持——①本条 run 的 `providers.voice = macos-say-v1`，只有旁白 TTS；②`src/video_factory/renderer.py:775-782` 的 `render_audio_input` 只返回旁白音轨或 `anullsrc` 静音，**素材片源自带音频从不进入渲染**。即流水线在能力上确实无法产出可听的环境同期声，因此该边界声明必须落在 `soundPrinciples` 而不是 `evidenceRequirements`。这不是为通过闸门而降低要求。
+
+**下一个花钱关口（预判）**：`economics.recipeId = "keyshot-ai"`、`allowMeteredProviders: true`、`providers.assets = "ai-shot-router-v1"`，因此 `assets` 节点会按镜头给出真实报价。`budgetIntentionCny = 35` 是费用意向而非付款授权。本条 run 为全新制作、无 `rework`，**不复用已归档母片**，需自行采购。读到报价后先核对是否落在剩余额度内再决定。
+
+**费用与现场**：本条 run 至今 `spendAuthorizations` 为空、无 `production-quotes`，未产生任何现金。已付费母片所在的 `run-a7c42cc4` / `run-25b4c195` 按操作员决定**移出工作区归档**至 `.local/archive/qa-r11-superseded-20260914/`（14M，可 `mv` 回），未做不可逆删除——因母片仅存于此、工作区无共享媒体库。当前累计已确定现金仍 ¥13.50，最坏 ¥23.50。
+
+### treatment 第 2 次阻断：我上次的指令错了，以及由此暴露的设计缺陷 J–N
+
+**自我更正（重要）**：第 2 次独立复核判 `repair`（score 76），宿主确定性阻断项 **0**。复核意见是"上游 visualPlan 采用同期环境声，候选却规定不使用可听的环境同期声，形成直接冲突"。我核对上游后确认：**复核是对的，我错了。** `brief.visualPlan.strategy` 原文即写着「人物、街区细节与**同期环境声**」（`run.json` → `initialInput.visualPlan.strategy`），而我在 R3 那次 discuss 里让模型写"本片不使用可听的环境同期声"，等于让产物与上游对着干，且当时**没有核对上游就动手改**。R2 阶段模型把该约束标成 `external_required` 被宿主拦下，与这一条是同一根因的两面。
+
+**操作员处置（`run-f8e2635f`，R4）**：命令 `4c807cd1-0673-42e5-9805-29f558fd4627`，16:14:27 completed。新稿 `attempt-5/treatment-draft-r3.json`，`soundPrinciples[1]` 改为：
+
+> 本片不产出可听的环境同期声，也不以另配的脚步、车流或街区音效冒充现场记录；声音只由旁白及其停顿节奏构成。**这是对上游 brief.visualPlan.strategy 中"同期环境声"一项的已知偏离，原因是当前流水线只支持旁白音轨。**
+
+即**在稿面上记录偏离**，而不是靠删除上游要求来消除冲突。依据仍是 `providers.voice = macos-say-v1` 与 `renderer.py:775-782`（`render_audio_input` 只接旁白音轨或 `anullsrc`，源片音轨从不进渲染）——复核给的 A 分支"保留并核验素材原始同期声"在当前流水线不可实现。
+
+#### 本轮新确认的设计缺陷（J–N，均有代码或现场证据）
+
+| 编号 | 缺陷 | 证据 | 状态 |
+| --- | --- | --- | --- |
+| **J**（根因） | 上游输入可声明流水线不具备的能力，创建/简报阶段**无任何对账** | `brief.visualPlan.strategy` 写"同期环境声"；`renderer.py:775-782` 证明渲染器不接源片音轨；`providers.voice = macos-say-v1`、`musicTrack=false`、`soundEffectsTrack=false`。模型于是被逼进死角：照做→被宿主拦，违背→被审计拦 | **未修**（需产品决策：在创建阶段做能力对账，或在闸门记录偏离） |
+| **K** | 审计裁决是"否决"而非"提议" | `creative-review.ts` `confirmCreativeDraft` 原先硬要求 `checkResult.verdict === "pass"`，否则抛错；命令契约仅 `confirm/discuss/adopt_proposal/undo_draft/return_to_stage`，**无 override** | **已修（RED→GREEN）** |
+| **L** | 闸门未告知"确认"的真实语义 | `CreativeDiscussionPanel.tsx` 原文案「确认只检查当前版本，不会购买素材」，未说明确认会触发独立复核、复核可能驳回、驳回后仍停在同一稿 | **已修** |
+| **M** | 驳回后没有结构化补救动作 | 只有自由文本框；`api.ts` 的 `discuss` 已带 `selection` 可表达"针对哪一条"，但缺"做什么操作" | **部分修复**：每条意见旁给"按这条意见改 / 这条我不同意"，**预填不发送**；完整的"结构化字段操作"仍需复核输出携带机器可读目标 |
+| **N** | 无法记录"操作员批准了对上游输入的偏离" | treatment 文档字段仅 `version/viewerPromise/hook/progression/payoff/visualPrinciples/soundPrinciples/evidenceRequirements/feasibilityQuestions`，无承载偏离之处；本次只能写进 `soundPrinciples` 散文 | **未修**（K 的 `acknowledgedRepair` 只覆盖复核裁决，不覆盖上游偏离） |
+
+**另一条机制性问题（非缺陷，待缓解）**：`discuss` 返回**整份新稿**而非定点补丁，且稿子一变 `checkResult` 即清空（`creative-review.ts:318`，本身正确）。因此每轮都可能冒出新问题且无法累积进度——这是"反复打回"的机制来源，不是同一个问题回归。缓解方向：把复核意见的字段路径变成范围约束，由宿主校验 diff 越界即 fail-closed。
+
+#### K/L/M 的实现与验证
+
+- **K（领域层）**：`CreativeReviewConfirmResume` 增 `acknowledgeRepair?: true`；`confirmCreativeDraft` 改为"检查存在且与当前草稿匹配"即放行，`verdict !== "pass"` 时要求显式 `acknowledgeRepair`；`CreativeStageConfirmation` 增 `acknowledgedRepair: { verdict, score, issueCount }` 留痕。沿用既有 `return_to_stage`/`acknowledgeImpact` 的显式承担模式，未发明新机制。
+- **K（客户端）**：`parseStudioCreativeReviewCommandInput` 增该字段；面板 `awaitingRepair` 不再禁用主按钮，改文案为"看过意见，仍然确认"，点击先经 `window.confirm` 说明后果，并带上 `acknowledgeRepair`。
+- **L**：首屏文案改为明说"确认会按当前这一版做一次独立复核；复核通过才进入下一步；复核提出意见时会停在同一份方案上"。
+- **M**：`creative-check-result` 每条意见旁新增两个按钮，把复核自己的 `criterion`/`repairInstruction`/`evidence` 组好预填进输入框（含"不要扩大改动范围""如有多分支取最保守一支"），**只预填不发送**。
+- **验证**：`packages/production-pipeline/test/creative-review.test.ts` **10/10 通过**（新增用例 `treats the independent check as advice: repair blocks by default but can be explicitly acknowledged`，先 RED：`Creative review resume field 'acknowledgeRepair' is not allowed.`）；`apps/studio/test/creative-discussion-panel.test.tsx` **9/9 通过**（原缺陷 I 的用例断言的是旧行为，已改写为新契约，非删除断言）；`tsc` server/client/pipeline 三个 tsconfig 均 exit 0。
+- **未部署**：以上改动**尚未 build、未重启服务**。理由是缺陷 H——中途更换 studio dist 会把在跑的 run 判 fail-closed。构建与重启安排在 `run-f8e2635f` 到达终态之后。
+
+### 端到端续跑：规划三阶段通过 → 方案报价 → 第一笔真实媒体授权（run-f8e2635f）
+
+#### 规划闸门完整历史（由 `run.json` 的 `creativeReviewOperations` 与 `outputState.versions` 还原，非推测）
+
+| 接受时间 (UTC) | 动作 | stage | 结果 |
+| --- | --- | --- | --- |
+| 15:51:10 | confirm | treatment | → `repair(74)`，第 1 次阻断 |
+| 16:02:20 | discuss | treatment | R3 我的**错误指令**（见上节自我更正） |
+| 16:03:59 | confirm | treatment | → `repair(76)`，第 2 次阻断；宿主确定性阻断项 **0** |
+| 16:13:41 | discuss | treatment | R4 **更正指令**：把偏离写进稿面而非删上游要求 |
+| 16:15:31 | confirm | treatment | completed 16:19:40 → **`pass(95)`** |
+| 16:19:44 | confirm | script | completed 16:32:25 → **`pass(96)`，`issues=0`** |
+| 16:32:43 | confirm | director | → `creative-planning` **succeeded** |
+
+最终确认态（从 `outputState.versions` 读出）：`treatment=confirmed/pass(95)`、`script=confirmed/pass(96)`、`director` 阶段随节点成功结束。节点终态：`brief=succeeded`、`creative-planning=succeeded`、`assets=awaiting_spend_approval`，`run.status=awaiting_spend_approval revision=7`。
+
+#### 导演方案实际内容（7 个镜头，`blockingIssues=0`）
+
+| 镜头 | 路线 | provider | 计入报价 | 估价 |
+| --- | --- | --- | --- | --- |
+| 1 | generated_video | seedance-video-v1 | 是 | ¥5 |
+| 2 | generated_video | seedance-video-v1 | 是 | ¥5 |
+| 3 | generated_video | hailuo-video-v1 | 是 | ¥2 |
+| 6 | generated_video | seedance-video-v1 | 是 | ¥5 |
+| 4 / 5 | stock_video | pexels-stock-v1 | 否 | ¥0 |
+| 7 | generated_video | seedance-video-v1 | 否（复用 #1 同一母片的不同区间） | ¥0 |
+
+`libraryRoute = brief.workflowFeatures?.assetSemanticRank === true`（`production-pipeline.ts:4779`）为 **true**，即本 run 走的正是本轮要求的"候选素材库 + 语义排序 → 复用"路线，`planning-history.json` 的 `stageInputs.rank`、`candidateSearchPath` / `candidateRankingPath` / `candidateInventoryPath` 均由此产生。
+
+#### 购买前预算重核（按**工作区**分账，不是全盘求和）
+
+全盘求和会得到毫无意义的 ¥68.50——那会把**本轮授权之前的既有历史工作区**算进来。`¥50` 授权是"本轮累计"，必须按工作区分开：
+
+| 工作区 | runs | 已发生 | 在途 | 是否本轮口径 |
+| --- | --- | --- | --- | --- |
+| `live:factory`（历史） | 74 | ¥55.00 | ¥2.10 | **否**，本轮授权之前 |
+| `live:qa-r11-20260914-001` | 1 | ¥0 | ¥0 | 是（无花费） |
+| `live:qa-r11-repair-20260914`（本 run 所在） | 2 | ¥0 | ¥0 | 是 |
+| `archive:…/run-a7c42cc4` | 1 | ¥9.50 | ¥5.00 | 是 |
+| `archive:…/run-25b4c195` | 1 | ¥4.00 | ¥5.00 | 是 |
+
+**本轮口径**：已发生现金 **¥13.50**（与交接时的 ¥13.50 逐分吻合）＋ 在途最坏 **¥10.00** ＝ **¥23.50**，¥50 授权**余 ¥26.50**。
+
+两笔未结清经逐条核验：均为 `billing=metered`、`status=failed`、**从未写入 `actualCostCny`** 的历史回执（`estimatedCostCny=5` 各一），归属 `run-a7c42cc4`（finishedAt 14:22:24Z）与 `run-25b4c195`（finishedAt 08:17:55Z）。按最坏全额预留。
+
+**在途/未知任务**：`openai/tasks/.video-factory` 与 `zai/tasks/.video-factory` 下**无**媒体任务；运行中进程仅本轮的 1 个 studio + 2 个 broker。无未知暴露。
+
+核对口径仍是 **`maximumCostCny`（授权上限）**，不是 `estimatedCostCny`——界面文案本身写着"授权额是上限，不是目标"。
+
+#### 一处**我自己的测试脚本错误**（澄清，非产品缺陷）
+
+我先前用 `GET /api/runs/:id/production-quotes` 拉报价，得到 `404 {"error":"API route was not found."}`，一度记为"报价接口 404"。核对 `apps/studio/src/server/app.ts:579`：该路由是 **`POST`**，GET 命中 Fastify 默认 404。**这是我的方法错误，不是产品缺陷**；报价由客户端在节点进入 `awaiting_spend_approval` 时 POST 生成。此前"`production-quotes` 目录不存在 = 报价未落盘"的推断一并作废——报价不落盘在该目录，它经由 `POST` 实时签发。
+
+同理，先前记的"`creative-review` 接口 404"也已核清：`app.ts:467` 在 `node?.status !== "needs_human"` 时返回 404 文案「这条制作当前没有等待讨论的创作方案。」（`production-studio.ts:1431` 的 `intervention.kind === "creative_review"` 守卫）。复核进行中的节点是 `running`，故 404 是**设计内行为**。
+
+#### 闸门实际形态（两阶段流）与操作员复核
+
+界面不是"一个按钮直接付钱"，而是**两阶段**（`NodeWorkspace.tsx:318-358`，注释即写明「prepare 不授权，accept 不重算价」）：
+
+1. 首屏：`本次最高授权额（元，可不填）` 输入框（placeholder 默认 ¥17.00）+ 「获取费用报价」。`disabled` 条件含 `!acceptedPlanDigest`。
+2. 点击后 → `POST /production-quotes` 取回**服务端不可变报价**并展示。
+3. 操作员看到金额后才可点「确认并授权（最高 ¥X）」→ `POST /production-authorizations`（带 `quoteId` + `acceptedPlanDigest` + `idempotencyKey`）。
+
+**现场捕获的服务端报价**（截自 `checks/step-r7-spend-gate.txt`）：
+
+```
+预计费用 :: ¥17.00
+最高授权 :: ¥17.00
+制作内容 :: 城市微光：匆忙之中重新看见日常｜做一支20–35秒的竖屏短片…｜面向忙碌的城市上班族
+镜头 1 :: ¥5.00 · 最多 1 次 · Seedance 2.0 Mini
+镜头 2 :: ¥5.00 · 最多 1 次 · Seedance 2.0 Mini
+镜头 3 :: ¥2.00 · 最多 1 次 · MiniMax H3
+镜头 6 :: ¥5.00 · 最多 1 次 · Seedance 2.0 Mini
+不确定项 :: 实际结果仍需素材预检、技术质检和双模型审片。
+```
+
+**操作员逐条复核**：金额 ¥17.00 ≤ 余 ¥26.50 ✓；四个付费镜头与导演方案逐条一致 ✓；镜头 4/5/7 为 ¥0 故不入报价 ✓；不确定项如实披露后续质检环节 ✓。**决定：批准。**
+
+**授权落地证据**（`run.json` → `spendAuthorizations[0]`）：
+
+| 字段 | 值 |
+| --- | --- |
+| `id` | `spend-authorization-bd6bef3f-25e3-4a56-af12-a363c7483d11` |
+| `maxCostCny` / `maxAttempts` | ¥17 / 1 |
+| `derivedFromScopeId` | `auth-d6ef90f499e8cddf209060df562265ad` |
+| `itemCreateBudgets` | `{scene-1:1, scene-2:1, scene-3:1, scene-6:1}` |
+| `approvedBy` | `qa-local（制作范围授权 auth-d6ef90f499e8cddf209060df562265ad）` |
+| `approvedAt` | 2026-09-14T16:36:55.993Z |
+
+授权后 `run.status` `awaiting_spend_approval` → **`running`**（revision 7 → 9），`assets` 节点由 `awaiting_spend_approval` → `running`，`spendAuthorizationId` 已挂上节点。报价→授权的溯源链（`derivedFromScopeId`）完整。
+
+#### 新记的可用性缺口（候选，未定性、未修）
+
+**报价只列付费镜头，不列免费镜头。** 本片 7 个镜头中，镜头 4/5（`pexels-stock-v1`）与镜头 7（复用 #1 母片区间）费用为 ¥0，因此在 `.spend-quote-summary` 中**完全不出现**。操作员看到"制作内容"写的是整片，但清单只有 4 条，无从在闸门上确认另外 3 个镜头"有人管、且确实免费"。这不阻断授权（我另有 `director_plan.json` 可核对），但对只看闸门的操作员是信息缺口：**"不花钱的镜头"与"被遗漏的镜头"在界面上不可区分**。是否值得修属产品决策，未自行更改。
+
+#### 另一处如实记录：4 个曾存在的 run 已不在盘上（未解释，未掩饰）
+
+14:26:06Z 的 `/api/costs` 扫描列出 **6 个 run**，现工作区只剩 2 个。`run-51821120`、`run-cff8e1e0`、`run-6083f24f`、`run-62324471`（**四者全部零花费、零未结清**）既不在 `workspace/` 也不在 `.local/archive/`。
+
+证据链：`studio.log` 中唯一一次 `DELETE` 是 `/api/templates/custom-260bab38-d43`（03:32:31Z 删模板），**无任何 run 删除或归档调用**；四者末次访问全部是 14:26:06Z；`ProductionStudio.list()` 无缓存（`production-studio.ts:237-244`），故当时确实在盘上；我的归档记录只写了 2 个 run。**金额不受影响**（四者均零花费）。**已请用户确认是否为其更早轮次主动清理；若非，需查明。** 未做任何推测性结论。
+
+#### 顺带核实：PERF-R11-01 无需重做
+
+`reasoningTokens` vs `providerWaitMs` Pearson **r=0.913**（glm 子集 0.954），`promptTokens` r=**−0.186**（无关）；154 个样本中 `modelAttemptCount > 1` **0** 个、`structuredRepairCount > 0` **0** 个、`queueWaitMs = 1`。实质是"异常大的推理输出在正常速率下生成"（glm 中位 45.9 tok/s）。真实风险是余量薄：实测最长 989138ms 占 Broker `timeoutMs=1200000` 的 **82.4%**。可观测性缺口：glm 全部 44/153 条 `firstOutputEventMs === providerWaitMs`（等待期无增量事件）。**未动**模型、思考强度、证据帧数、criteria 或超时阈值。**保持 OPEN。**
+
+#### 当前状态
+
+`assets` 节点已 `running`，本轮第一笔真实媒体支出开始流动（上限 ¥17）。观察器覆盖成功与失败两类终态。后续链路：`assets → asset-source-review → voice → render → technical-review → visual-review（两个不同真实视觉模型同片双审）→ final-review → publish-package`，其中一次局部返工与无关素材复用按本轮要求执行。K/L/M 的 build 与重启仍排在 run 终态之后（缺陷 H）。
+
+#### 等待期间预检：双真实模型复审的接线是否真的生效（避免跑到终审才发现配置不对）
+
+本 run 的 `providers.visualReview = "glm-visual-review-v1"` 只有**一个** id，乍看不像"两个模型"。逐层核对如下：
+
+- `role-agent-assembly.ts:151-179` 的 `orderedVisualReviewAgents`：**当且仅当 codex 与 glm 两个视觉 agent 都存在**时，才返回两个 `IndependentDualVisualReviewAgent`——一个 `primary=glm / secondary=codex`，一个 `primary=codex / secondary=glm`；否则只返回单个，且该单个**没有** `finalReviewConfiguration`。
+- 每个 `IndependentDualVisualReviewAgent` 构造时即校验 `primary.id !== secondary.id && primary.modelId !== secondary.modelId`（`codex-visual-review.ts:307`），并生成 `finalReviewConfiguration.mode = "dual"`、`reviewers = [primary, secondary]`。其 `id` 取 `primary.id`，故 `glm` 主序那个的 id 恰为 `"glm-visual-review-v1"`，正是 `brief.providers.visualReview` 指向的对象。
+- `production-pipeline.ts:9753-9790` 的 `assertProductionVisualReviewReady` 要求 `mode === "dual"`、`reviewers.length === 2`、providerId 与 modelId **各自**去重后仍为 2、且两者 `independentRoleAudit === true`。
+- 该断言在 **`dispatch()` 内、建 run 之前**执行（`production-pipeline.ts:659`）。`main.ts:128` 确实把 `visualReviewAgents` 传入了流水线选项。
+
+**结论（逻辑蕴含，非推测）：本 run 已建成并在运行 ⇒ 该断言已通过 ⇒ codex 与 glm 两个真实视觉 agent 当时都已注册、modelId 互异、都带独立角色审计。** 反证也成立：若 codex 缺失，`orderedVisualReviewAgents` 只返回 `[glm]`，其 `finalReviewConfiguration` 为 `undefined`，`dispatch` 会直接抛 "Formal production requires two distinct GLM and Codex visual-review providers…"，本 run 根本不会存在。
+
+**尚未成为证据的部分**：实际跑了哪两个 provider/model，须以 `visual_review.json` 的 `reviewScope.actualModels`（`production-pipeline.ts:9158` 由 `independentReviews` 派生）与 `independentReviews[]` 长度 2（`production-pipeline.ts:10605` 校验）为准，届时核验，**现在不预称已达成**。
+
+---
+
+### 缺陷 O（新）：试片闸门把"证据合同规定的咨询项"当作阻断条件 —— 源素材阶段的结构性死锁
+
+#### 现象与证据（全部来自本 run 的磁盘产物，非推测）
+
+`run-f8e2635f` 于 `2026-09-14T16:49:39.280Z` 在 `assets` 节点 `rejected`，已花费 ¥2.00。`nodes/assets/attempt-1/pilot-review-scene-3.json` 的原文：
+
+| 字段 | 实际值 |
+| --- | --- |
+| `recommendation` | `revise` |
+| `scores` | composition 85 / continuity 82 / pacing 80 / legibility 88 / safety 95（**五项均 ≥ 75**） |
+| `confidence` | 0.82（**≥ 0.7**） |
+| finding 1 | `satisfied` / `info` / `nextAction: none`——"场景3源素材达到单镜要求，可按当前区间进入后续合成，**无需替换**" |
+| finding 2 | `not_observed` / `info` / `nextAction: inspect_existing_media`——"待场景1–2素材可用后再下结论；**不据此要求重新生成场景3，也不进入重买清单**" |
+| `reviewScope.actualModels` | `[{providerId: zai-bigmodel-api, modelId: glm-5.3-flash}]`（试片执行者） |
+
+宿主的报错文案是"镜头 3 试片未通过…**请调整对应方案后重新报价**"，而它引用的报告自己写着"无需替换"——**文案与它引用的证据自相矛盾**。
+
+#### 根因：三条各自正确的规则叠成必然死锁
+
+1. 提示词判据第 6/7 条**要求**模型把无法核验的内容如实记为 `not_observed`，不得据此判缺陷。
+2. `assertFindingEvidenceContract`（`codex-visual-review.ts`）规定 `not_observed` 必须是 `severity: info` + `nextAction: inspect_existing_media`，语义是"先查看已有素材"，**明确不是返工指令**。
+3. `normalizeRecommendation`（同一文件）却把 `not_observed` 与 `failed` 并列，**强制**把 `recommendation` 降为 `revise`。
+4. 试片闸门（`generative-asset-worker.ts`）要求 `recommendation === "approve"` 才放行付费生成。
+
+叠加结果：**只要试片诚实记录了任何未覆盖项，`recommendation` 必然是 `revise`，闸门必然打回。** 而试片**按定义就是局部视图**——本片试片只覆盖镜头 3 的 24 帧（52–2448ms），镜头 1–2 尚未生成，"跨镜剪辑速度"在物理上无法核验。也就是说：**该闸门对任何如实标注证据边界的试片都会必然打回，等于在筛掉诚实的报告、只放行声称"全片已验证"的报告。**
+
+该降级条件由 commit `0bfa7f8` 引入（`severity === "warning"` → `evidenceStatus === "failed" || "not_observed"`），而**同一次提交**新增的 `assertFindingEvidenceContract` 恰好把 `not_observed` 定义为非缺陷语义——矛盾在同一提交内产生。
+
+#### 为什么缺陷在闸门而不在归一化
+
+- 归一化层的 fail-closed 是**有意且有测试锁定**的：`codex-visual-review.test.ts` 显式断言 `notObserved.recommendation === "revise"`。
+- 成片终审消费 `revise` 的方式是**交给操作员决定**（`production-pipeline.ts:3523` → `needs_human`，"视觉审片建议修改，请人工确认是否继续"，选项 approve/request_changes/reject），并非否决。
+- 而试片闸门是**硬抛错、无人工放行路径**。同一系统内同类审计，一个可被接受/不接受，一个直接否决——正是你指出的"审计强制能力太强"。
+- 旁证：`pilot-review-scene-*.json` 的返工范围逻辑**本来就排除 inspect-only 发现**（现有测试 `does not turn inspect-only findings into a paid rework scope`）。只有试片闸门例外，属判据不一致。
+
+#### 修复（最小且不降门槛）
+
+新增并按"是否继续"语义命名的共享判据 `visualReviewBlocksContinuation(report)`（`codex-visual-review.ts`，经 `index.ts` 导出）：
+
+```
+recommendation === "reject"
+|| findings.some(severity !== "info")          // 需要返工的缺陷
+|| min(五项评分) < VISUAL_REVIEW_PASS_MIN_SCORE       // 75
+|| confidence < VISUAL_REVIEW_PASS_MIN_CONFIDENCE     // 0.7
+```
+
+- 门槛常量 `VISUAL_REVIEW_PASS_MIN_SCORE = 75` / `VISUAL_REVIEW_PASS_MIN_CONFIDENCE = 0.7` 从 `normalizeRecommendation` 中提取导出，**两处共用同一组常量**，防止将来各自漂移；这两个数字与提示词判据第 9 条向模型声明的门槛**完全一致**——修复后宿主判据与提示词判据首次对齐。
+- 两处"是否继续"闸门改用该判据：试片闸门（`generative-asset-worker.ts`）与源素材预检闸门（`production-pipeline.ts:8930`，原先同样要求 `recommendation === "approve"`，属同一缺陷类）。
+- **未改动** `normalizeRecommendation` 与 `assertFindingEvidenceContract`：成片终审保持 fail-closed，其 `revise` 仍走 `needs_human` 交操作员决定。
+- `not_observed` 发现**原样保留**在试片报告与产物中供操作员复核，未被丢弃或降噪。
+
+#### 验证（确定性，不调用任何真实模型）
+
+| 检查 | 结果 |
+| --- | --- |
+| RED：临时还原旧判据后跑新增用例 | **失败** `AssertionError: actual 'rejected' / expected 'succeeded'`（direct 与 director 两种模式均失败）——与本 run 实际被拒的同一判据 |
+| GREEN：修复后 `generative-asset-worker.test.ts` | **101/101 pass, 0 fail** |
+| `codex-visual-review.test.ts`（含新增判据矩阵用例） | **37/37 pass, 0 fail** |
+| `packages/production-pipeline` 全部 72 个套件 | **771 pass / 0 fail / 1 skipped**（共 772） |
+| `npm run typecheck`（六个 tsconfig，含 `tsc --noEmit`） | **EXIT=0** |
+| `npm run build`（broker + studio） | **EXIT=0** |
+| 修复已进入正式产物 | `dist/codex-visual-review.js` / `.d.ts` / `dist/generative-asset-worker.js:779` / `dist/production-pipeline.js:7245` 均已核对 |
+
+新增用例覆盖"必须继续阻断"的全部实质条件——明确否决、warning 级 failed 缺陷、单项评分 74、confidence 0.6——以证明本次修复**没有降低任何质量门槛**。
+
+#### 未降低门槛的边界（如实声明残留缺口）
+
+模型**显式**说 `revise` 但只记录了 info 级发现、且评分与置信度全部达标时，新判据不再阻断。理论上这属提示词判据第 9 条禁止的自相矛盾输出（评分达标却要求修改），且实践中模型的关切仍留在 `description` / `suggestion` 字段供操作员阅读。若要连这一情形也拦住，需在报告中区分"模型显式要求"与"宿主归一化降级"两个来源（新增字段，波及 `visual_review.json` 与 studio 类型契约），或把这两处闸门改为 `revise → needs_human` 交操作员决定。**两者都是产品决策，未自行实施，留待你定。**
+
+#### 附：一处 QA 环境陷阱（非产品缺陷，但会制造假失败）
+
+`which node` → **`~/.nvm/versions/node/v22.23.1/bin/node` 排在 `/opt/homebrew/bin/node` 之前**。`npm run studio:test` 的子进程因此用 v22（ABI 127）执行，而 `better-sqlite3.node` 是按 ABI 147 编译的：
+
+```
+The module 'better_sqlite3.node' was compiled against a different Node.js version
+using NODE_MODULE_VERSION 147. This version of Node.js requires NODE_MODULE_VERSION 127.
+```
+
+首次运行产生 33 个 `not ok`，**全部**源于该 ABI 不匹配（交接文档已警告"nvm v22 会产生 122 个幻影失败"）。已终止该次运行，改用 `PATH=/opt/homebrew/bin:$PATH` 重跑。**未重建任何原生模块**（交接约束：不得重建 Node ABI）。
+
+#### 修复后以操作员身份续跑（复用已物化试片，不重买）
+
+部署：`npm run build` 后仅重启本轮 studio（旧 pid 75915 → 新 pid 57877，`127.0.0.1:4319`）；**未触碰 broker 与任何旧服务，未重建原生模块**。run 已处终态，缺陷 H 的前置条件满足。
+
+操作员动作：`RunWorkbench.tsx:402` 在 `run.status === "rejected"` 且存在源素材失败时提供按钮 **「重新检查已有试片」**（`checks/step-r10-retry-assets.txt`、截图 `r10a`/`r10b`）。这是设计者为此情形预留的恢复路径——但旧判据下缓存报告每次都会重新归一化，该按钮**必然再次打回**，是个死按钮；修复后才真正可用。
+
+| 时点 | `run.status` | revision |
+| --- | --- | --- |
+| 点击前 | `rejected` | 9 |
+| 点击后 | **`running`** | 11 |
+
+**续跑未新增授权敞口（预算纪律的正向证据）**：
+
+| 授权 | `maxCostCny` | `itemCreateBudgets` | `approvedAt` |
+| --- | --- | --- | --- |
+| `spend-authorization-bd6bef3f…` | ¥17 | `{scene-1:1, scene-2:1, scene-3:1, scene-6:1}` | 16:36:55.993Z |
+| `spend-authorization-b8d76e9d…`（重试派生） | ¥15 | `{scene-1:1, scene-2:1, scene-6:1}` | 17:12:13.826Z |
+
+- 镜头 3 **已从新授权的 `itemCreateBudgets` 中消失**——复用已物化素材，未重新购买（¥2 已经结算并保留）。
+- 两笔授权的 `derivedFromScopeId` 同为 `auth-d6ef90f499e8cddf209060df562265ad`，即操作员此前接受的 plan digest。累计敞口 = 已花 ¥2 + 新授权 ¥15 = **¥17，恰好等于批准上限**，未越权，也未重新向操作员索要超过原批准范围的费用。
+- 预算：本轮最坏 ¥23.50，¥50 授权下余 ¥26.50；本次续跑不改变该数字（仍在原 ¥17 之内）。
+
+---
+
+## R11 续轮：主线推至成片双模型复审 + 成片终审（真实付费路径）
+
+run：`run-f8e2635f-4baa-4a4d-9a2b-a6e169ee5c08`。完整证据：`docs/qa/videofactory-real-local-qa-20260914-r11-takeover-assets/checks/r11-dual-review-and-final-review.md`。
+
+### 节点链结果
+
+| 节点 | 结果 |
+| --- | --- |
+| brief / creative-planning | succeeded |
+| assets | **succeeded**（4 个付费镜头全部 materialized，attempt-2 实付 ¥15） |
+| asset-source-review | succeeded |
+| voice | succeeded（7 镜 + narration，free / macos-say） |
+| render | succeeded |
+| technical-review | succeeded |
+| visual-review | **succeeded（双模型同片复审）** |
+| final-review | needs_human → 操作员补查后进入新一轮复审 |
+
+成片（`nodes/render/attempt-1/renders/1/final.mp4`）：`h264 / 1080x1920 / 30fps / 24.000000s / 7,231,304 B / 含 aac`。
+
+### 用户第 5 条要求「同片由两个不同真实视觉模型复审」：已完成
+
+权威证据 `nodes/visual-review/attempt-1/visual_review.json` → `reviewScope.actualModels`：
+
+| providerId | modelId | evidenceId | producer | audit |
+| --- | --- | --- | --- | --- |
+| `zai-bigmodel-api` | `glm-5.3-flash` | `b9193232…1928f` | true | true |
+| `openai` | `gpt-5.6-sol` | `b9193232…1928f` | true | true |
+
+- `providerId`/`modelId` **两两不同**（确为两个不同真实模型）；`evidenceId` **完全相同**（确为同一份成片证据，而非各审各的）。
+- `independentReviews.length === 2`；`producerContractDigest`/`auditContractDigest` 相同且两项 completed 均为 true。
+- 旁证：两个并行的 `视觉审片员` agent loop 检查点（分别只含 glm / gpt）、两条独立轨迹 `agent_loop_trace-{1,2}.json`（269,831 B / 193,018 B）、UI「成片双审：2/2 已完成」。
+- 装配条件见 `apps/studio/src/server/role-agent-assembly.ts:151-183`（仅当 codex 与 glm 均在位才构造两个互审 Agent）；`assertProductionVisualReviewReady` 在 `dispatch()` 内、建 run 之前 **fail-closed** 断言 `mode==="dual"` 且去重后 provider/model 各为 2——不会静默降级为单模型。
+
+### 复审结论与操作员独立核对
+
+原始报告 `recommendation: revise`，`scores {composition:82, continuity:74, pacing:72, legibility:86, safety:92}`（min 72），`confidence 0.73`，findings 18 条 = info 17 / warning 1，evidenceStatus satisfied 12 / not_observed 5 / failed 1。
+
+操作员**抽帧亲看**（t=1.5/5.0/8.5/9.9/10.6/11.6/13.0/16.0/21.0s）确认：唯一实质缺陷（scene4 蒸汽轮廓极弱）**属实**——10.6s/11.6s 蒸汽几乎不可见，暖色亮边落在**杯口**而非蒸汽，而字幕写"蒸汽有了亮边"。其余各镜与 renderManifest 文案一致，scene7 与 scene1 母片同源呼应成立。
+
+### 新缺陷 P（已定性、已记录，未擅自实施修法）
+
+`apps/studio/src/client/components/RunWorkbench.tsx:925-928` 的替换候选集恒为 `1 … scenePosition-1`，即**只允许复制一条更早的镜头**。三个确定性后果：
+
+1. 对 scene4 任何可选替换都只换画面、不改字幕 → 让"蒸汽有了亮边"与画面直接矛盾，**一个缺陷换成两个缺陷**；选镜头 3 还会与 scene3 连续同景。
+2. 素材来自免费图库的镜头（scene4 = `pexels 7577435`）无法"另选一条同源素材"——该能力未被返修面暴露，而这恰是零成本正解。
+3. **scene1 永远无法返修**：`scenePosition-1 = 0` → `sourceOptions` 恒空 → 控件整块不渲染（`:938` 守卫）。
+
+同文件 `:937` 对 `replan_upstream` 已写明"不能用任意旧素材替代"，而 `rework_asset` 的唯一通道恰恰就是它——设计自相矛盾。定性为**宿主向操作员暴露的返修能力**与其自身产出的返修建议之间的矛盾，非模型输出错误（`rework_asset` 是证据合同强制取值），亦非提示词问题。三种候选修法（a 图库重选 / b 开放 `replan_upstream` 建议位 / c 显式提示候选不满足）列于 `checks/defect-P-rework-surface.md`，**待用户裁决**。
+
+### 本段花费
+
+| 尝试 | 授权 | 上限 | 实付 | 实际模型 | 结局 |
+| --- | --- | --- | --- | --- | --- |
+| attempt-1 | `spend-authorization-bd6bef3f…` | ¥17 | **¥2** | MiniMax-H3 | rejected（缺陷 O） |
+| attempt-2 | `spend-authorization-b8d76e9d…` | ¥15 | **¥15** | MiniMax-H3 + doubao-seedance-2-0-mini-260615 | succeeded |
+
+- attempt-2 实付恰等于上限且**不含 scene-3 的 ¥2** → 复用未重买；独立佐证：两 attempt 的 `scene_03_hailuo-video-v1.mp4` sha256 均为 `59c7735c…fec986d5`。
+- 本 run metered 累计 **¥17**，未越各自授权上限；补查、双模型复审、配音、渲染、技术质检均 ¥0。
+- **计费证据更正（自行发现）**：`GET /api/runs/:id`（制作详情）**不返回** `executionReceipts` / `spendAuthorizations`；harness 有四个步骤从该响应取数，全部静默得到空值并打印成"0 笔 / ¥0.00"或"[]"，被误读为"没有花钱/没有授权"。产品另有权威成本入口 `GET /api/runs/:id/costs`。已修四处取数（改磁盘 `run.json` 或 `costs` 端点），在四份证据文件内**保留原读数并就地追加更正标注**，未删任何历史记录。交叉核对：官方 `totals.actualCostCny` = ¥17、磁盘核算 = ¥17.00、`actualPendingCount: 0`（无在途），两侧一致。记入 OBS-4。
+
+### 缺陷 Q：素材试片审查是单模型，双审的检测优势无法在最便宜的阶段生效
+
+**同一镜头，两个阶段判定相反**（`run-f8e2635f-…` scene4 蒸汽）：
+
+| 阶段 | 模型 | 判定 |
+| --- | --- | --- |
+| `asset-source-review`（素材试片） | **glm-5.3-flash（单模型）** | `info/satisfied`「蒸汽持续上升且形态逐帧变化…**蒸汽亮边兑现成立**」→ `approve` |
+| `visual-review` 分支 1 | glm-5.3-flash | `info/satisfied`（failed 0 条） |
+| `visual-review` 分支 2 | **gpt-5.6-sol** | `warning/failed/rework_asset`「**蒸汽轮廓极弱**，未形成要求的清晰暖色亮边」 |
+
+**代码级根因**（`packages/production-pipeline/src/codex-visual-review.ts:332-335`）：`input.reviewStage === "source_assets"` 时**显式退化为单模型** `sourceAgent ?? primary`，只有 `rendered_video` 才走双模型分支。`sourceAgent` 由装配顺序决定（`role-agent-assembly.ts:151-183`）：`agents[0]` = glm 侧（`sourceAgent` = glm），`agents[1]` = codex 侧。本 run `providers.visualReview = "glm-visual-review-v1"` 命中第 0 项 → 素材审查走 **glm**，即两个模型里判 `satisfied` 的那一个。`asset-pilot-review.ts:88-91` 的 `actualModels` 硬编码为单元素，与之吻合。**这是设计，不是 bug**；但"用哪个模型"由装配顺序而非质量考虑决定。
+
+**操作员抽帧核实**（`checks/frames/`）：源素材四帧中蒸汽**间歇可见**（0.0s/2.4s 有清晰白色蒸汽丝，1.1s/2.1s 几乎不可见）；源素材与成片同刻画面**除字幕外完全一致**（渲染未劣化）；画面中暖色亮边落在**杯口边缘与杯身高光**、不在蒸汽上。结论：glm"有蒸汽、形态变化"对一半、"持续上升"不成立；gpt"极弱、未形成亮边"更贴合整体观感；**字幕「蒸汽有了亮边」在四帧中均不成立 → 文案过度承诺，画面本身基本合格**。
+
+**三条结构性后果**：① 检测能力与修复成本倒挂（双审只在成片阶段生效，而那时唯一返修工具是"复用更早镜头"，修不了；素材阶段修则 ¥0）；② 两模型分歧时产品取并集（保守正确）但**不向操作员暴露"这是分歧项"**；③ 是否引入第二个模型，直接决定该缺陷能否被发现。
+
+**建议方向（未实施，待裁决）**：I 素材阶段也走双模型（复用现成 `IndependentDualVisualReviewAgent`，多一次 subscription 调用、现金 ¥0）；II 保留单模型但在成片 `failed` 且素材阶段 `satisfied` 时显式标注跨阶段分歧；III 不动装配，改给"文案与画面不符"提供零成本修法（缺陷 P 的 a2）。三者不互斥。完整记录：`docs/qa/videofactory-real-local-qa-20260914-r11-takeover-assets/checks/defect-Q-source-review-single-model.md`。
+
+**与缺陷 O/P 的关系**：Q 是上游（廉价发现机会被单模型漏掉），P 是下游（缺陷流到成片后返修面无解），O 是同区段另一个已修缺陷（试片闸门死锁），三者无因果链但同在 `assets`/`asset-source-review` 区间。
+
+### 补查结果（revision 12）：双模型仍然成立，但否决项由 1 条增至 2 条
+
+补查 `2026-09-14T18:01:39Z → 18:11:54Z`（10m15s），产物 `nodes/visual-review/attempt-2/visual_review.json`。四项核对：
+
+| 核对项 | 结果 |
+| --- | --- |
+| 两个不同真实模型 | **成立**——`actualModels` 两项 providerId/modelId 两两不同（`zai-bigmodel-api`/`glm-5.3-flash`、`openai`/`gpt-5.6-sol`） |
+| 同一份成片证据 | **成立**——两项 `evidenceId` 仍为 `b9193232…1928f`（未变，成片未被改动，符合"补查不重渲染"的预期） |
+| `independentReviews.length` | **2** |
+| 花费增量 | **¥0**——metered 仍 2 笔 ¥17.00，授权仍 2 笔，末次付费仍 `17:24:34.504Z` |
+
+**但结论变了**：`recommendation` 仍 `revise`，findings 18→15，`warning/failed` 1/1 → **2/2**，`not_observed` 5→3，scores 中 continuity 74→72、legibility 86→92、pacing 72→74、confidence 0.73→0.78。镜头 4 蒸汽否决**仍在**；**新增**镜头 5 树影否决（仅 gpt）。5 条咨询项减为 3 条，减掉的两条都属镜头 5——glm 判它"兑现"，gpt 判它"不成立"，分歧镜头由 1 个增至 2 个。
+
+### 缺陷 R：补查在逐字节相同的输入上重跑审片，判定不可复现且新增了一条依据不成立的否决项
+
+**输入逐字节相同（可核验）**：主审提示词 sha256 前 16 位两轮均为 `66587f99663397c1`（25,708 字符，`agent_loop_trace-2.json` gpt 分支 iteration 0）；21 帧逐帧 `sha256` 与 02:01 重新抽出的帧文件全部一致（attempt-1 findings 引用 13 帧、attempt-2 引用 15 帧，**0 处不符**）；`sampling.mode=scene_triplets`、7 场景 × 3 帧、时间码两轮相同。
+
+**同一输入下两个模型各自推翻自己的事实陈述**：
+
+| 模型 | 补查前（镜头 5） | 补查后（镜头 5） | 变化 |
+| --- | --- | --- | --- |
+| glm-5.3-flash | 「**帧间位置与形态无可辨推进**……现有证据不足以判定」 | 「**帧间影子位置存在可见变化**，与摇曳要求一致」 | `not_observed` → `satisfied`（放宽） |
+| gpt-5.6-sol | 「影子位置和明暗状态**近似**，无法据此确认」 | 「枝叶、树影位置和取景范围**近乎一致**，未形成可见的连续摇曳」 | `not_observed` → `failed`（收紧） |
+
+**操作员独立测量否证了 gpt 的依据**：审片员看到的同三帧 `SSIM_Y = 0.6965 / 0.6958 / 0.5993`（相隔 0.875s / 0.875s / 1.750s），远非"近乎一致"；场景 5 内相邻 0.25s 帧 SSIM 0.93（比场景 1 快速运动的 0.86 更稳）→ **缓慢但持续的变化**。源素材 `scene_05_pexels_6666665.mp4`（8.43s）抽 6 帧：**粗枝位置基本不动（相机静止），叶片簇明显转动**，墙面影子随之变形 → 素材本身确有叶动。**结论：镜头 5 字幕「树影，也在晃。」有画面支撑，新增否决不成立。**（与镜头 4 相反：镜头 4 是画面合格、文案过度承诺。）
+
+**四条结构性后果**：① 补查不是收敛操作而是同输入重掷——无记忆地重跑整轮，不仅重判 `not_observed` 项，也重判上一轮已 `satisfied` 的镜头（本 run 未发生翻转，但机制上可能，且无提示）；② 面板文案「**待补查项**只会重新审查当前成片」把动作描述为定向复查，实际是全集重跑（`RunWorkbench.tsx:318`）；③ 越过证据类别边界——镜头 5 要否定的是**运动属性**，证据是**静帧**，gpt 第一轮自己判的就是 `not_observed`，补查没增加任何证据却改判 `failed`；④ 补查之后没有退路——新报告覆盖旧报告，唯一能"不接受"的按钮是「仍要批准（说明理由）」，而面板把它定义为"覆盖视觉审片建议"，于是"驳回一条依据不成立的否决"在产品语义里等于"降格放行"，没有"逐条接受/驳回"的通道。
+
+**建议方向（未实施，待裁决）**：IV 补查语义对齐（真做定向复查，或文案如实写"重跑整轮、结论可能变化"）；V 明确禁止用静帧证据对**运动类**主张下 `failed`（只记 `not_observed`，或补连续帧/视频证据）——这不是放宽标准，而是不允许用不足的证据下重判；VI 把"与上一轮判定不同"的条目显式标为判定变动项并给出两轮原文对照；VII 终审需要逐条接受/驳回，而不是只有一个全局"批准"按钮。完整记录：`checks/defect-R-reinspection-nondeterminism.md`。
+
+### 主线状态：五要素全部完成；成片终审**阻塞**，需用户裁决
+
+用户第 5 条要求的五个环节均已在本 run 真实完成并可核验：素材审查（`asset-source-review` succeeded）→ 配音（`voice` succeeded，7 镜 + narration）→ 渲染（`render` succeeded，1080×1920/30fps/24.000s）→ **同片由两个不同真实视觉模型复审**（`visual-review` succeeded，双模型证据见上）→ **一次本地返工与无关素材复用**（attempt-1 rejected → attempt-2 重跑资产，`scene-03` 未重买、两 attempt sha256 相同，实付 ¥15 恰等于上限且不含该镜的 ¥2）。
+
+成片终审 `final-review` 停在 `needs_human`（revision 12）。三个出口逐条核对后**都不构成正解**：
+
+| 出口 | 后果 |
+| --- | --- |
+| 替换后重新审片（镜头 4 → 候选 1/2/3；镜头 5 → 候选 1/2/3/4） | 候选全是"更早的镜头"，替换会让字幕「蒸汽有了亮边」/「树影，也在晃。」与画面直接矛盾，且 s4 选镜头 3 会与 scene3 同景 |
+| 补查现有成片 | 已执行一次，结果是把否决从 1 条变成 2 条；再执行属"盲目重试"，且不改画面、不可能消除任何一条否决 |
+| 仍要批准（说明理由） | 镜头 4 的文案与画面不符是真实且观众可见的缺陷 → 等于覆盖审片建议、降格放行 |
+| 修改后再审 | 同样落在 `requestSceneRevision`，只改 asset plan、不改脚本/字幕，受同一候选集约束 |
+
+即**主线在成片终审处被真实阻塞**，阻塞原因是产品缝隙而非本次操作失误：上游单模型漏检（缺陷 Q）→ 补查同输入重掷并新增一条依据不成立的否决（缺陷 R）→ 返修面无法修复任何一条、也无逐条驳回通道（缺陷 P）。因此**本轮不批准、不另建 run、不换题**，把缺陷 P / Q / R 一并上报裁决。run 保持 `needs_human`，无新增花费。
+
+---
+
+## 收尾轮（revision 15 → 16）：joint 引用闭包缺陷修复与主线打通
+
+### 1. 本段结论
+
+**端到端主线已在 revision 16 打通。** run 从 `failed` 走回 `needs_human`，且**没有多花一分钱、没有重买任何素材**：
+
+| 项 | 结果 | 证据 |
+| --- | --- | --- |
+| run 状态 | `failed`(rev 15) → **`needs_human`**(rev 16) | `checks/step-r16-retry-failed-voice.txt` |
+| 节点 | `voice` / `render` / `technical-review` / `visual-review` 全部 succeeded；`final-review` 停在人工裁决点 | 同上 |
+| 付费增量 | **¥0.00**（metered 恒为 ¥17.00，收据 2 笔、授权 2 笔未变） | 同上 |
+| 已付费素材 | 7 件 **SHA256 全部未变** | 同上 |
+| 双视觉模型复审 | `glm-5.3-flash`(zai-bigmodel-api) 与 `gpt-5.6-sol`(openai) 对**同一成片**各自出报告 | `nodes/visual-review/attempt-4/` 的 `model_trace-1/2.json` |
+
+### 2. 缺陷：joint 拓扑下人工改旁白会破坏可执行方案的引用闭包
+
+**根因链（逐层，不是"语义不符"）**
+
+1. `dispatchNarrationRevision` 在 joint 下**沿用 legacy 语义**：把被改的那一版原稿从规划节点当前接受版本里踢出去。
+2. 但 joint 的可执行方案**按 artifact id 引用脚本**（`plan.scriptArtifactId`）。方案的引用集受 `verifyExecutablePlanReferenceClosure`（`production-pipeline.ts:12248-12359`）约束：plan 与全部被引用产物必须同属规划节点**当前 effective version** 的 `artifactIds`（该集合读自 run.json，`:12222-12246`）。
+3. 于是 `voice` 消费方案时 fail closed，整条主片卡在配音。
+
+**逐字报错**（RED 复现，与生产**逐字相同**；由"把 `joint ||` 去掉"的受控变异得到）：
+
+```
+Executable plan reference 'artifact-9c552b1e-ebfa-4bea-8758-f3be77c5ea16' (script) is not a member of the current accepted planning output version.
+```
+
+**修法**（`packages/production-pipeline/src/production-pipeline.ts:1869`，含说明注释）：
+
+```ts
+retainedArtifactIds: planningVersion.artifactIds.filter((artifactId) => (
+  joint || artifactId !== scriptArtifact.id
+)),
+```
+
+joint 下保留全部原成员；人工改出的新稿**另立一件**，父级为被改的那一版原稿（如实记录"这行字从哪一版改来"，不冒充 Provider 产物）。legacy 语义不变。
+
+**为什么不重绑方案**（这是本段放弃的第一种修法）：方案是那次规划 commit 的**证据快照**。`verifyJointPlanningCommit`（`:5786-5914`）要求 commit 文件条目 ↔ run 的 artifact 记录 ↔ 磁盘 sha256 三方向一致，且 `executablePlan.scriptArtifactId` 必须等于 `committedId("script")` —— **方案的引用 id 被 commit 文件钉死**。同时 `ExecutableProductionPlan` 全文只有 `durationRange/fps/totalFrames/cuts[...]`，**不含旁白文字**（旁白由 `output.scriptPath` 提供）。所以"改字不动方案"在语义上成立：不重编译、零 Provider 调用、零费用。
+
+**GREEN**：`packages/production-pipeline/test/production-planning-closure.test.ts` 用例
+`revises narration without evicting the script its commit-registered executable plan references`，断言：版本成员只增不减（每个旧 id 仍在）、当前版本内 `executable_plan` 恰 1 份且 id 与 uri 不变、`cuts`/`totalFrames` 与改前深等、原稿仍在版本内且磁盘字节深等、下游 `workerCalls` 增量深等 `["voice.synthesize","video.render","quality.review"]`、`asset.prepare` 计数不变、`media_asset` id 列表不变。
+
+**幂等性**：连续多次改字下方案引用集始终是成员（成员数 6→8→10→12，引用恒全在）。
+
+### 3. 落盘状态已被旧代码写坏，且**产品路径无法恢复**（新缺陷，独立于上条）
+
+旧代码在修复前已把一个**活的 run** 写成损坏态：effective version 缺 `artifact-35bacec2-7abf-43e6-a92c-4cb08d2d2daf`（方案引用的原稿）。修复代码不会**再**写出这种版本，但**已写坏的那一版救不回**：
+
+- `applyNodeRevision` 硬约束 `retainedArtifactIds ⊆ 当前版本成员`（`packages/workflow-core/src/workflow-runner.ts:767-771`，否则抛 `Node revision cannot retain non-current artifact`），且用 `exactArtifactIds = [...retained, ...new]` 覆盖版本与 nodeRun 的 artifactIds（`:785-787`）—— 所以任何返修/override **都无法把被踢出的产物加回版本**；
+- `retryFailedNode` 只是用同一份 run.json 重跑，必然同一条报错；
+- 没有任何"回退到上一版本 / 撤销 revision"的产品操作；
+- 重跑 `creative-planning` 会失效 assets 下游，等于重买已付费素材。
+
+**本段做的手工落盘修复（必须如实标注：这是数据修复，不是产品路径）**
+
+脚本 `docs/qa/.../harness/repair-r15-planning-membership.mjs`（dry-run 默认，`--apply` 才写；fail-closed 前置条件见脚本头注释）只做一件事：把原稿 id 插回 effective version 与 `planning.artifactIds` 的**同一索引**（index 1，与父版本同位），使落盘状态**等于修好后的代码本来会写出的那一版**。不碰方案文件、原稿文件、规划 commit 文件、素材、任何金额或授权记录、revision 计数。有备份、有逐 id 前后对照：`checks/step-r15-membership-repair-{dryrun,apply}.txt`，备份 `.local/runtime/qa-r11-repair-20260914/backups/run-f8e2635f-…-rev15-before-membership-repair-2026-09-15T02-13-10-513Z.json`。
+
+**这不是造假**：被加回的产物真实存在于磁盘，sha256 / provenance / commit 三方一致且未改动，恢复的是"它本来就该在版本里"这一条成员关系；配音、渲染、双模型复审全部真实执行。**但它确实不是产品路径 —— 产品对该损坏没有任何恢复手段。**
+
+### 4. 受控复验（步骤 16，一次，非盲目重试）
+
+复验依据是上条的 RED→GREEN 证据 + 修复前后成员表逐 id 对照。操作员先用只读脚本枚举失败态下产品提供的**全部**恢复动作（唯一可用动作是「重试失败步骤」），再执行一次。结果见 §1 表；完整节点迁移：
+
+```
+[15s]  voice=running
+[75s]  voice=succeeded render=succeeded technical-review=succeeded visual-review=running
+[560s] run=needs_human  visual-review=succeeded final-review=needs_human
+```
+
+付费增量 ¥0.00、7 件素材 SHA256 全部未变，**"无关素材复用"成立**（其中两件 sha 同为 `59c7735c6f804a4e…`，是未重买的直接佐证；方案里 `场景7` 复用 `asset-scene-1` 亦为同片内复用）。
+
+### 5. 部署事实（可核验）
+
+| 产物 | sha256 | mtime |
+| --- | --- | --- |
+| `packages/production-pipeline/dist/production-pipeline.js` | `601c86d2db893d6afb9673560f8d45b78e2a0ceaaa9f6b44c057e5e840d473fb` | 2026-09-15T10:09:57 |
+| `apps/studio/dist/server/server/main.js` | `a78e01b71ac73c4d8ad826fce56ad3cf33781ec2f992d4c24632e8ca525e7d89` | 2026-09-15T10:10:34 |
+| `apps/codex-broker/dist/main.js` | `665709f2e52374ce37ff2f5660b42ebf997933eadb5a67c420359247dcf6f124` | 2026-09-15T10:09:38 |
+
+- 管道 dist **是当前的**：`packages/production-pipeline/src` 中比它新的文件数为 **0**，第 1274 行含修复后的 `retainedArtifactIds: ...(joint || artifactId !== scriptArtifact.id)`。studio bundle **不内联**管道代码（`main.js:5` 从 `@video-factory/production-pipeline` 导入，经 node_modules 符号链接解析到 `packages/production-pipeline`），故运行中的 studio 消费的就是修好的 dist。
+- **studio bundle 比源码旧 1 个文件**：`apps/studio/src/server/production-studio.ts`（本段删除的不可达块，见 §7）。该改动已用探针证明行为等价，所以运行中的 studio 与源码**功能等价但不字节一致** —— 如继续 QA 需重建 bundle。**如实标注，不声称已重建。**
+
+### 6. 门禁
+
+| 检查 | 结果 |
+| --- | --- |
+| `production-planning-closure` 回归 | **122/122 通过** |
+| `npx tsc -p packages/production-pipeline/tsconfig.json` | exit 0 |
+| `npx tsc -p apps/studio/tsconfig.json --noEmit` | exit 0 |
+| `npx tsc -p apps/studio/tsconfig.server.json --noEmit` | exit 0 |
+| `unittest tests.test_review_media` | 25/25 通过 |
+| studio 生产相关 10 个测试文件 | 233 个测试通过（探针实验，见 §7） |
+
+**已知假红（既有问题，非本段引入）**：`apps/studio/test/text-task-production-recovery.test.ts` 在**多文件并行**运行时偶发失败（4 次运行 2 次），错误为临时目录清理竞态 `ENOTEMPTY: directory not empty, rmdir '…/runs/run-…'`（另一次表现为 `waitForStopped` 超时）；**单文件运行 5/5 通过**。失败的具体用例在运行间变化（completed_success ↔ completed_failure），属测试基础设施竞态。同类问题：`npm run test:ts` 无默认超时，门禁可永久挂起。
+
+### 7. legacy 死路径审计与本次删除
+
+对 `joint`/`legacy` 双拓扑做了一次只读审计（判别值唯一：`ProductionBrief.workflowFeatures.creativePlanning === "joint-v1"`，helper `production-pipeline.ts:602-606`；`packages/workflow-core` 完全不感知拓扑；无任何环境变量或开关可切换）。
+
+**本次删除（唯一一条，可证明不可达）**：`apps/studio/src/server/production-studio.ts` 中"把缺标记的 brief 自动升级为 joint"的兜底块。
+
+- 不可达证明：`start()` 第一行 `assertStudioExecutableProductionInput(input)`（`:733`）已在 `apps/studio/src/shared/api.ts:1717-1720` 强制 `creativePlanning === "joint-v1"` 且 `creativeReview === "user-confirmed-v1"`，否则抛 `StudioInputError`；而 `parseWorkflowFeatures`（`packages/production-pipeline/src/contracts.ts:1163-1176`）**原样保留**这两个标记（`:479-481` 会带上 `workflowFeatures`）。故块内条件恒为 false。
+- **实测证明**（不只靠推理）：把该块首行改为 `throw new Error("UNREACHABLE-BLOCK-EXECUTED")`，跑 10 个生产相关 studio 测试文件 —— **233 个测试通过、探针命中 0 次**。
+- 顺手把 `let brief` 收紧为 `const`（该函数内已无整体赋值）。
+
+**未删除（审计判定仍活或需人裁决，逐条给出依据）**：
+
+| 路径 | 判定 | 依据 |
+| --- | --- | --- |
+| `script` / `visual-direction` 等节点构造与依赖链 | **活** | `make sample-production`（`Makefile:31` + `examples/briefs/*.json` 均无 `workflowFeatures`）+ 磁盘 48 个 legacy run 复跑时重建 |
+| `currentPlanningOutputPaths` 的 legacy 分支（`:4969-4990`） | **活** | B4 卡明确要求的"唯一兼容投影"（`docs/videofactory-recovery-handoff-20260911/B4_EXECUTION_CARD.md:117`），下游 assets/voice/render 只消费它 |
+| 历史 run 编辑合同放宽（`:1470`/`:1869`/`:1894`） | **活** | 磁盘 48 个 legacy run 仍可被编辑/修订 |
+| `production-preflight`（legacy 可执行方案）拓扑整体 | **需裁决，本次不动** | 产品入口不可达（Studio 被 `api.ts:1717` 拦死；79 个持久化 run 中满足该拓扑的 = 0；3 个 example brief 均无 `durationRange`），**但 5 个测试文件正在真实构造它**（`production-pipeline-preflight.test.ts:280/:434`、`production-planning-stages.test.ts:803`(`joint:false`)、`codex-visual-review.test.ts:861`、`production-pipeline-asset-rank-fallback.test.ts:105`），且 `factory run <手写 brief>` 可构造。删它等于连测试一起删（违反"不得删断言"），故上报裁决 |
+| `@deprecated` 字段（`contracts.ts:24,26` 等 5 处） | **活** | 实测 18 个 persist run 携带；`docs/loops/022-…md:16` 规定"只保留解析兼容" |
+| `production-pipeline.ts:9111-9116` 硬编码 `sourceNodeIds` 含 `"script"` | **疑似漏改** | joint run 也会声明一个不存在的来源节点，目前只写进报告、无校验故不炸。属"legacy 假设泄漏进 joint 路径"的反向问题，需人确认是否有意 |
+
+### 8. 新发现：成片终审的帧预算与主张类型结构性不匹配（未修，需裁决）
+
+`visual-review` 17 条发现里 **8 条 `not_observed`**（`nextAction: inspect_existing_media`）、1 条 `critical/failed`、8 条 `satisfied`，`recommendation: reject`。
+
+- 成因（设计使然，非 bug）：成片路径走 `_select_render_timeline_samples`（`src/video_factory/review_media.py:564`），注释写明**"每镜头三帧是可审计的状态证据：起始、中段、结束"**。21 帧 / 7 场景 = 每镜恰好 3 帧。
+- 但审片契约含**时间性主张**（"第六秒前暖光"、"连续单镜四阶段动作"、"树影持续摇曳"、"末秒保持约一秒"），3 张稀疏静帧**既不能证实也不能证伪** → 模型只能如实报 `not_observed`，终审无法自行结论，退回人工。
+- **同源问题刚在素材侧被修好**：本段提交的 `review_media.py` 改动把全片预检从"固定两轮（每场 3 帧）"改为"逐场轮转补齐"，理由正是"场内的动作窗口一个采样点都落不到，审片只能报 not_observed，预检就会在配音与渲染前停住整条主片"。**成片侧尚未做同样处理。**
+- **本次不改**：动它会改变审片行为与分数，而用户明确要求"不得改审片分数"。上报裁决。
+
+**另一条值得记录的观察**：两个模型对**同一批帧**给出相反判断 —— `glm-5.3-flash` 称"场景4亮沿与可见蒸汽…兑现静态要求"，`gpt-5.6-sol` 称"三相抽帧均未呈现蒸汽或暖色亮边"。**我（操作员）逐帧复核了场景4的三张采样帧**（`review_media/frames/frame-09/10/11`，9875/10750/11625ms，均在方案 `cuts` 的场景4 区间 9500–12000ms 内）：三帧**都有**杯沿暖色亮边，杯口左上方**都有**细薄蒸汽丝（偏淡但可见）。即 `critical/failed` 至少对"暖色亮边"这一半与像素不符。**因此本次不据此触发付费返工** —— 在证据与模型结论冲突时先复核，不先花钱。
+
+### 9. 本地提交（仅本地，未 push）
+
+本段把 revision 9–15 期间累积的未提交工作整理为本地提交，按工作区切分、依赖序排列：
+
+| # | 提交 | 范围 |
+| --- | --- | --- |
+| 1 | `chore: ignore QA screenshot artifacts` | `.gitignore`（`docs/qa/**/*.png|jpg|jpeg` 不入库，报告与文本证据照常提交） |
+| 2 | `feat: extend the production pipeline with creative review and planning closure` | `packages/production-pipeline`(46 文件) + `packages/workflow-core` |
+| 3 | `fix: harden broker task lifecycle, recovery and zai fallback` | `apps/codex-broker`(15 文件) |
+| 4 | `feat: add creative discussion, trend reading and rework surfaces to studio` | `apps/studio`(57 文件) + `package-lock.json` |
+| 5 | `fix: give full preflight the same frame budget as pilot review` | `src/video_factory/review_media.py` + `tests/test_review_media.py` |
+| 6 | `docs: record QA reports and evidence through revision 15` | `docs/` + `README.md` |
+
+未跟踪体积因此从 **532MB 降到 11.6MB**（`docs/qa` 截图被忽略，报告与文本证据保留）。提交前已扫描：无密钥特征、无大媒体文件、无临时/备份文件残留。**未 push、未云部署、未删除历史。**
+
+**如实标注**：这是一次累积工作的检查点式切分，**各提交未必能独立通过完整门禁**（它们不是独立开发的增量，而是同一批互相依赖的改动的按区拆分）；已通过的验证见 §6，均针对**当前最终工作区**。
+

@@ -1,0 +1,25 @@
+=== 页面标题 ===
+  VideoFactory Studio
+
+=== 全部按钮（可见） ===
+  ×2 创作向导
+     qa-local
+     搜索项目、选题、模板或功能 ⌘ K
+     镜头 2 · 00:05
+  ×2 替换后重新审片
+  ×2 改这一镜的字幕/旁白
+     镜头 4 · 00:10
+     补查现有成片（不重买素材）
+     修改后再审
+     仍要批准（说明理由）
+
+=== 逐条表态项 ===
+  条目数 0
+
+=== 终审结论/指引文本 ===
+
+=== 可用输入框 ===
+  <select> name=- label=- placeholder=-
+  <textarea> name=- label=- placeholder=-
+  <select> name=- label=- placeholder=-
+  <textarea> name=- label=- placeholder=-

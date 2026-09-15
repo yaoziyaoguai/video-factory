@@ -1,0 +1,49 @@
+{"probe":"audit-upgrade","change":false,"observed":1,"newAudits":0,"produced":1,"status":"passed","resultContract":"v1"}
+{"probe":"audit-upgrade","change":true,"observed":1,"newAudits":0,"produced":1,"status":"passed","resultContract":"v2"}
+{"probe":"one-human-retry","resume":false,"observations":1,"submissions":[],"iterations":0}
+{"probe":"one-human-retry","resume":true,"observations":1,"submissions":["agent-e2bbee10320976d39abe8465823c47ab289cbf48e6f9c20040f5de4218b7a9fb","agent-eb47108b746892d8784130c83f05ac869c5b2c3f7d5948299349d65f6b775070","agent-eaef7f045a3e1734d136b576bf15778eba9e81117c86e5b395e6cf7799b925ac","agent-6de8b70bea45191ed6b92dafe3562d351cf3979757795c9861be749607984466"],"iterations":0}
+✔ control: same-contract pending audit is reused (3.56625ms)
+✖ R4-F02: old pending audit cannot certify new criteria (1.043334ms)
+✔ control: automatic recovery stops at known completed_failure (0.544042ms)
+✖ R4-F01: manual retry must not silently retry every new failure (0.993792ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 2
+ℹ fail 2
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 195.314334
+
+✖ failing tests:
+
+test at ../../../../private/tmp/vf-r4-boundary-probes.mjs:45:1
+✖ R4-F02: old pending audit cannot certify new criteria (1.043334ms)
+  AssertionError [ERR_ASSERTION]: 不能将只按旧准则审过的 pass 标成新合同通过
+      at auditUpgrade (file:///private/tmp/vf-r4-boundary-probes.mjs:41:22)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }
+
+test at ../../../../private/tmp/vf-r4-boundary-probes.mjs:79:1
+✖ R4-F01: manual retry must not silently retry every new failure (0.993792ms)
+  AssertionError [ERR_ASSERTION]: 一次人工重试只能越过已确认的原失败，新的失败必须再次停止
+  
+  4 !== 1
+  
+      at transientRetry (file:///private/tmp/vf-r4-boundary-probes.mjs:76:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 4,
+    expected: 1,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

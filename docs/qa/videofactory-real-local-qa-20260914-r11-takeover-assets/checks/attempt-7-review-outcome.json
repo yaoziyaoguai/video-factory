@@ -1,0 +1,130 @@
+{
+  "runId": "run-a7c42cc4-98de-4354-9dc9-c268b68b1446",
+  "nodeId": "asset-source-review",
+  "attempt": 7,
+  "clickedAt": "2026-09-14T14:03:44.006Z",
+  "build": "22:02 local (fixes A+B+C), studio restart 14:02:56Z pid 33563",
+  "identity": {
+    "checkpointDigest": "f564cec3c3f5144f...",
+    "roleContractDigest": "81f76a8f2d026ef273503333ad4de0f60346da94b54c077219c244e31097f997",
+    "produceRequestId": "agent-b7bea825be00e3bc21e568d4dda27f65083acbb33f30eff4e6c9bb16ab2729c6",
+    "auditRequestId": "agent-ab0b7a6726d21d0cfaa188d5194ac9c0c6d172d0b4f1794f9b368169c3969732",
+    "durableProduceRecord": "0b378847f2f577978b22b3b383bee35ffba2e097d148410c52adcaae0781817b.json",
+    "durableAuditRecord": "1c6ada2d3ab9e5da8e778f88e204c2f6ca03dfa68954cca20975c93319f44565.json",
+    "note": "roleContractDigest 与第 2 次的 81f76a8f 相同：Fix C 只在传给 agent loop 的 contractVersion 上追加证据快照后缀，因此循环/检查点身份与物理 requestId 换新，而 trace 里的角色合同摘要不变。"
+  },
+  "producePhase": {
+    "state": "accepted",
+    "completedAtLocal": "22:16",
+    "queueWaitMs": 1,
+    "providerWaitMs": 755687,
+    "firstOutputEventMs": 755687,
+    "toolMs": 0,
+    "validationMs": 4,
+    "modelAttemptCount": 1,
+    "structuredRepairCount": 0,
+    "finishReason": "stop",
+    "promptVersion": "video-factory/visual-review-v16",
+    "modelId": "glm-5.3-flash",
+    "reasoningEffort": "max",
+    "promptTokens": 33192,
+    "completionTokens": 28872,
+    "reasoningTokens": 27194
+  },
+  "evidence": {
+    "mode": "scene_sequence",
+    "sceneCount": 5,
+    "frameCount": 24,
+    "imageBytes": 973764,
+    "promptBytes": 42319,
+    "requestPayloadBytes": 1330085,
+    "imageSetSha256": "26cb90ee429e4eece29406543fed2a1c86ad1980aa998ece9374a9dbe2615fba",
+    "imageMappingSha256": "a657654eb2058b373124ced86ce3339d020f45fd6ffb70fe7944ffa248a41717",
+    "framesPerScene": [5, 5, 5, 5, 4]
+  },
+  "candidate": {
+    "version": "video-factory/visual-review-v1",
+    "recommendation": "reject",
+    "confidence": 0.78,
+    "scores": {
+      "composition": 82,
+      "continuity": 52,
+      "pacing": 68,
+      "legibility": 88,
+      "safety": 93
+    },
+    "findings": [
+      {
+        "scenePosition": 1,
+        "severity": "critical",
+        "category": "continuity",
+        "evidenceStatus": "failed",
+        "nextAction": "rework_asset",
+        "sourceTimecodeMs": 3150,
+        "evidenceFrameSha256": "ab6e8220d981b1d2722544752dc8efc1a45370f83359bd01decfddf7f6195702",
+        "claim": "通勤者约在源 3 秒内提前离画；母片后半段无人物，场 1 后半段快走与场 3 完整重看不成立"
+      },
+      {
+        "scenePosition": 2,
+        "severity": "info",
+        "category": "continuity",
+        "evidenceStatus": "satisfied",
+        "nextAction": "none",
+        "sourceTimecodeMs": 1350,
+        "claim": "场 2 复用母片源 0 至 1.5 秒成立，前 6 秒部分兑现"
+      },
+      {
+        "scenePosition": 4,
+        "severity": "critical",
+        "category": "continuity",
+        "evidenceStatus": "failed",
+        "nextAction": "rework_asset",
+        "sourceTimecodeMs": 15900,
+        "evidenceFrameSha256": "bf83b4fb3cfd8d99f2b2163152a63b58f267ee6f9556215463fac76560350445",
+        "claim": "源 5100 至 9900 毫秒五个采样帧中树影无跨缝移动或可辨认明暗变化，场 4 停留段 payoff 缺失"
+      },
+      {
+        "scenePosition": 5,
+        "severity": "info",
+        "category": "continuity",
+        "evidenceStatus": "not_observed",
+        "nextAction": "inspect_existing_media",
+        "sourceTimecodeMs": 23062,
+        "claim": "倒影缓慢移动仅两个稀疏采样状态，无法确认，先调看完整片段"
+      },
+      {
+        "scenePosition": 5,
+        "severity": "info",
+        "category": "continuity",
+        "evidenceStatus": "satisfied",
+        "nextAction": "none",
+        "sourceTimecodeMs": 23062,
+        "claim": "返程人物早于最迟 5.5 秒上限离画且未返场，无人橱窗暖色倒影留存"
+      }
+    ],
+    "summary": "reviewStage=source_assets：5个场景共24个采样帧已按时间线核对…核心问题集中在场1母片（asset 441687379644690）…两项均属方案可执行而素材未命中，需重做该母片。"
+  },
+  "independentFrameCheck": {
+    "method": "人工查看 asset_review_media/frames 下对应帧，与本报告 findings 的 evidenceFrameSha256 对齐",
+    "observations": [
+      "scene-01-02.jpg（源 2250 毫秒，sha 3c3e7260…）：通勤者在画、迈步清晰 —— 与第 2 次报告一致",
+      "scene-01-03.jpg（源 3150 毫秒，sha ab6e8220…）：画面只剩墙面、接缝与树影，地面空旷，**没有人物** —— 独立证实 critical finding 1 的‘约 3 秒内提前离画’",
+      "scene-04-00.jpg（源 5100 毫秒）与 scene-01-03.jpg 构图、树影位置基本一致",
+      "scene-04-04.jpg（源 9900 毫秒，sha bf83b4fb…）：树影仍在墙面同一位置，4.8 秒内没有可辨认的跨缝移动 —— 独立证实 critical finding 3"
+    ],
+    "conclusion": "两条 critical 结论经人工查帧成立，不是模型臆断；本次审片是对真实素材缺陷的如实报告，属于资产质量问题，不是系统缺陷。"
+  },
+  "costBeforeThisDecision": {
+    "runActualCostCny": 9.5,
+    "runActualPendingCount": 1,
+    "runEstimatedCostCny": 20,
+    "runAuthorizedCostCny": 20.5,
+    "meteredCalls": 2,
+    "subscriptionCalls": 24,
+    "freeCalls": 3,
+    "failedMeteredCalls": 0,
+    "pendingLineId": "assets:2026-09-14T10:16:51.214Z:15",
+    "cumulativeKnownCashCny": 13.5,
+    "note": "本轮未新增付费调用；已知现金与接管前一致。"
+  }
+}

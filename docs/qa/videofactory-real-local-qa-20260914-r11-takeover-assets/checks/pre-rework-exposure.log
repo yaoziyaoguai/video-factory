@@ -1,0 +1,10 @@
+=== run costs status 200 ===
+runScalars: {"runId":"run-a7c42cc4-98de-4354-9dc9-c268b68b1446","title":"城市微光：匆忙之中重新看见日常"}
+lineCount: 25 byBilling: {"local_compute":3,"subscription":18,"metered":4}
+meteredOrPendingLines: 4
+{"id":"assets:2026-09-14T10:16:51.214Z:16","nodeId":"assets","provider":"seedance-video-v1","model":"MiniMax-H3+doubao-seedance-2-0-mini-260615+doubao-seedream-4-0-250828","billing":"metered","status":"failed","estimatedCostCny":5,"actualPending":true,"startedAt":"2026-09-14T10:16:51.214Z","finishedAt":"2026-09-14T10:16:51.801Z"}
+{"id":"assets:2026-09-14T10:21:53.845Z:17","nodeId":"assets","provider":"hailuo-video-v1","model":"MiniMax-H3","billing":"metered","status":"unknown","estimatedCostCny":5,"actualPending":false,"startedAt":"2026-09-14T10:21:53.845Z","finishedAt":"2026-09-14T10:38:17.732Z"}
+{"id":"assets:2026-09-14T10:52:53.694Z:18","nodeId":"assets","provider":"hailuo-video-v1","model":"MiniMax-H3","billing":"metered","status":"failed","estimatedCostCny":5,"actualPending":false,"startedAt":"2026-09-14T10:52:53.694Z","finishedAt":"2026-09-14T11:04:21.086Z"}
+{"id":"assets:2026-09-14T11:50:12.883Z:2","nodeId":"assets","provider":"hailuo-video-v1","model":"MiniMax-H3","billing":"metered","status":"succeeded","estimatedCostCny":5,"actualPending":false,"startedAt":"2026-09-14T11:50:12.883Z","finishedAt":"2026-09-14T11:57:52.525Z"}
+pendingEstimatedCny(仅 actualPending 行求和): 5
+=== /api/costs totals === {"estimatedCostCny":36.5,"authorizedCostCny":36.5,"actualCostCny":13.5,"actualPendingCount":2,"meteredCalls":3,"subscriptionCalls":74,"freeCalls":8,"failedMeteredCalls":0}

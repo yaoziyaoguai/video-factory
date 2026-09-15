@@ -1,0 +1,230 @@
+{
+  "runId": "run-732178ce-3d5a-4f93-8e8f-b3da53bfd600",
+  "method": "read-only persisted role checkpoints; no model calls",
+  "roles": [
+    {
+      "checkpoint": "workspace/factory/runs/run-732178ce-3d5a-4f93-8e8f-b3da53bfd600/nodes/creative-planning/agent-loop-checkpoints/6db1078cdb3a46dbb078fdb786e0a5caf0ee09781e54f65cf40af53ac5f222c5.json",
+      "sha256": "b6034b824f9d243ba3ed7bbf83d505debfffdb614a96c0f8a66e4da7954f07f2",
+      "role": "导演前期构思",
+      "phaseAttempts": {
+        "produce": 1,
+        "audit": 1
+      },
+      "phaseDurationsMs": {
+        "produce": 47231,
+        "audit": 24107
+      },
+      "sessionRebuilds": {
+        "produce": 0,
+        "audit": 0
+      },
+      "iterations": [
+        {
+          "iteration": 1,
+          "score": 96,
+          "issues": [],
+          "repairInstructions": [],
+          "feasibilityQuestions": [
+            {
+              "beatId": "setup",
+              "question": "能否取得同一部手机和同一充电器，并在两轮前准确恢复到相同起始电量，同时尽量保持温度、后台活动、屏幕状态与供电环境一致？"
+            },
+            {
+              "beatId": "online",
+              "question": "能否拍到正常联网状态、起始电量、接入充电、15分钟计时关系和结束电量均可辨认的真实素材？"
+            },
+            {
+              "beatId": "airplane",
+              "question": "能否拍到飞行模式已开启、起始条件一致、15分钟计时关系和结束电量均可辨认的真实素材？"
+            },
+            {
+              "beatId": "compare",
+              "question": "当前编辑能力能否在没有静态说明卡的前提下，将两轮起止读数、计时依据和净增电量清楚地并列呈现？"
+            }
+          ],
+          "producer": {
+            "providerWaitMs": 46475,
+            "queueWaitMs": 0,
+            "promptTokens": 15417,
+            "completionTokens": 2111,
+            "reasoningTokens": 859,
+            "promptChars": 3230
+          },
+          "audit": {
+            "providerWaitMs": 23080,
+            "queueWaitMs": 0,
+            "promptTokens": 14067
+          }
+        }
+      ]
+    },
+    {
+      "checkpoint": "workspace/factory/runs/run-732178ce-3d5a-4f93-8e8f-b3da53bfd600/nodes/creative-planning/agent-loop-checkpoints/71ace25c445d8e8cf61d3b9ec88746334a85f6acf1e773a78098d68f79c92e9d.json",
+      "sha256": "7edff7bcb0f0cbdbd2b3a0a6661bd05498c8e222d646b4edd62b2e901d848ca2",
+      "role": "编剧",
+      "phaseAttempts": {
+        "produce": 4,
+        "audit": 3
+      },
+      "phaseDurationsMs": {
+        "produce": 512473,
+        "audit": 249774
+      },
+      "sessionRebuilds": {
+        "produce": 0,
+        "audit": 0
+      },
+      "iterations": [
+        {
+          "iteration": 1,
+          "score": 57,
+          "issues": [
+            {
+              "severity": "blocking",
+              "criterion": "素材/编辑要求符合 productionCapabilities；同母片源区间方案允许在覆盖可证的前提下交导演落实，独立生成不能冒充同一对象或真实实验。",
+              "evidence": "currentRoleContract 仅声明 pexels-stock-v1 的 stock_video、stock_image 搜索能力，且明确通用图库不能充当具体事实证据；候选第2、4至10场却反复要求“本轮测试现场取得的真实记录照片”“同一手机和同一充电器的真实合照”，宿主输入既未提供这些素材，也未声明原创拍摄或实验采集能力。因而下游无法按现有能力取得支撑两轮真实实验及最终数字的核心证据。",
+              "repairInstruction": "不要用图库、生成图或假读数补齐。先由上游责任方在输入中确认并提供可用的原创测试素材，或正式确认实验拍摄与采集能力；若无法确认，应由上游调整生产路线或观众承诺。确认后，编剧再仅引用该已确认来源编排同机、同起点、同充电器的真实读数与计时画面。"
+            },
+            {
+              "severity": "blocking",
+              "criterion": "所有选项使用相同输入、版本和测试条件",
+              "evidence": "第3场只公开“同机同充电器、同电量、15分钟净增”，第4至5场也没有规定两轮的系统版本、屏幕状态、起始温度、后台活动和供电环境保持一致；第3场 failure_conditions 仅要求不要声称这些未记录条件严格相同。creativeTreatment 已把这些条件列为可行性问题，而候选没有解决或披露其结果，因此差值【D】不能可靠归因于正常联网与飞行模式这一变量。",
+              "repairInstruction": "在第2至5场加入可执行且可记录的控制方案：两轮保持同一系统版本、屏幕状态、起始温度范围、后台任务基线和供电环境，仅改变网络模式；若上游无法确认这些条件可执行，则明确上报该核心可行性缺口，不得继续把差值解释为飞行模式造成的结果。"
+            },
+            {
+              "severity": "blocking",
+              "criterion": "前两秒有具体吸引点，前六秒有与本片承诺相符的部分兑现；后段有推进，结尾不另起承诺。",
+              "evidence": "0至2.5秒的第1场只有通勤图库、充电动作和提问“开飞行模式，十五分钟真能多充？”，屏幕文字也仅为“15分钟｜联网 vs 飞行模式”。同一手机、相同起始电量、同一充电器以及两轮计时启动直到第2场才出现，未满足 editorial.guardrails 和 creativeTreatment.hook 要求在前两秒兑现完整对照设置。",
+              "repairInstruction": "在核心实测素材来源得到上游确认后，把第1场改为两轮真实开始画面的快速并列，并在两秒内明确“同一手机、同一起点、同一充电器、各计时15分钟”；保留当前问题句且不暗示胜负，将通勤情境移至后续承接。"
+            },
+            {
+              "severity": "blocking",
+              "criterion": "durationRange 优先，模板必需职责、visualPlan 和系列约束一致；冲突不能通过静默跳过或捏造能力解决。",
+              "evidence": "十场 duration 合计为34.5秒，超过 durationRange 和 acceptedSceneDurationTotal 的34秒上限。",
+              "repairInstruction": "把总时长压至34秒以内且不少于20秒，例如将第10场由3.5秒调整为3秒；必须保留最终唯一结论、原始数据、15分钟信息及适用边界，不得靠加速口播或缩短关键读数可见时间达标。"
+            }
+          ],
+          "repairInstructions": [
+            "先由上游确认原创实验素材或实验采集能力，并解决关键测试条件的可执行控制；不得以 Pexels 图库或生成内容冒充本次实验。",
+            "重写前两秒，使真实对照设置在钩子内完整出现，同时保留不预示胜负的提问。",
+            "将场景总时长从34.5秒降至34秒以内，并保持数据、条件结论和适用边界清晰可读。"
+          ],
+          "candidateTotalSeconds": 34,
+          "candidateCanonFacts": [
+            "本集验证同一部手机在相同起始电量和同一充电器下，正常联网与飞行模式各充 15 分钟的净增电量差异。",
+            "本集结论仅适用于所示手机、充电器与本次测试条件，不外推至所有设备。"
+          ],
+          "producer": {
+            "providerWaitMs": 193565,
+            "queueWaitMs": 0,
+            "promptTokens": 15927,
+            "completionTokens": 13195,
+            "reasoningTokens": 9536,
+            "promptChars": 11804
+          },
+          "audit": {
+            "providerWaitMs": 105591,
+            "queueWaitMs": 0,
+            "promptTokens": 19195
+          }
+        },
+        {
+          "iteration": 2,
+          "score": 46,
+          "issues": [
+            {
+              "severity": "blocking",
+              "criterion": "保持 creativeTreatment 的观众承诺、段落责任与 payoff；落实本次 planningIssues，事实边界一致。",
+              "evidence": "creativeTreatment 要求通过本集两轮真实的15分钟对照展示起止电量、计时依据和净增量，并在结尾给出一个基于本次结果的“开或不开”判断。候选却在 narrativeArc 明确改为“本片只教学自测”，第6场只展示待填写公式，第8、9场同时保留两个条件分支，第10场又明确不勾选任何答案。它诚实避免了虚构数据，但实际以教程替换了既定实验兑现；前六秒也只有流程设置，没有与原承诺相符的实测证据或部分结果。这是上轮核心素材来源问题尚未解决后的承诺降级，不构成修复。",
+              "repairInstruction": "该缺口不能靠编剧虚构读数解决。先由上游明确确认原创受控测试的采集能力或提供可用测试证据；确认后恢复本集实测路线，在脚本中安排两轮真实起止读数、15分钟计时关系、净增差值及唯一的结果化判断，同时保留现有变量控制和本机、本充电器、本次条件的边界。若上游决定只做自测教程，必须先正式修改 creativeTreatment、系列单集承诺和 payoff，再交编剧重写。"
+            },
+            {
+              "severity": "blocking",
+              "criterion": "脚本动作、旁白、屏幕文字、声音提示与时长协调，可见成功条件具体；不靠加速或凑镜头塞内容。",
+              "evidence": "本轮为修复控制条件而新增的执行步骤形成了时长回归：第4场仅3.5秒，却要求依次核对系统版本、充电器、线材和插座，记录联网状态、S与T1，插线关屏，表现15:00至00:00并处理E1；第5场同为3.5秒，还要恢复S、重复后台基线、核验温差、切换飞行模式并再次完成计时；第6场5秒内又要填写三项原始读数并依次讲清三条公式。即使总时长为33.5秒合规，这些连续动作和文字也无法按正常观看速度辨认，必须依赖急促剪辑或形式化计时动画。",
+              "repairInstruction": "在上游确定实测或教程路线后重新分配场景责任：把两轮共用的版本、供电和后台核对集中到结果出现前的一场，测试场只保留该轮必须可见的模式、起点、计时关系和终点，并为比较数字与最终判断留足可读时间；总时长仍须保持20至34秒，不能用加速口播补偿。"
+            },
+            {
+              "severity": "advisory",
+              "criterion": "canonFacts 只写已建立事实；事实阈值与条件不因 hook 或总结被改成绝对断言。",
+              "evidence": "acceptedCanonFacts 为空，而候选 canonFacts 主要写的是本集将采用的自测方法、控制要求、输入未确认素材的状态和结论适用规则。这些属于创作方案、可行性边界或表达约束，不是已经建立的系列事实；其中“输入未提供经确认的……采集能力”只能说明宿主未提供确认，不能沉淀为长期 canon。",
+              "repairInstruction": "canonFacts 仅保留宿主已经建立且需要延续的事实；当前这些方法、输入缺口和适用范围分别留在 narrativeArc、场景执行要求及结尾限制中。没有可新增的已建立事实时可保持为空。"
+            }
+          ],
+          "repairInstructions": [
+            "由上游先确认原创受控测试的采集能力或正式修改为教程路线；在此之前不得用空白自测模板冒充原定实测兑现，也不得虚构数据。",
+            "若继续原定实测路线，恢复两轮真实起止读数、15分钟计时依据、净增差值和唯一的条件化结论，并保留现有控制变量及适用边界。",
+            "精简并重排第4至6场，使每轮关键状态、计时关系和结果在正常节奏下可辨认，同时将总时长保持在20至34秒。"
+          ],
+          "candidateTotalSeconds": 33.5,
+          "candidateCanonFacts": [
+            "本集提供同一部手机在相同起始电量和同一充电器下，正常联网与飞行模式各充15分钟的自测方法。",
+            "两轮须保持同一系统版本、屏幕状态、起始温度范围、后台任务基线及充电器、线材和插座一致，仅改变网络模式。",
+            "输入未提供经确认的原创实验素材或实验采集能力，因此本集不呈现具体实测读数，也不宣称飞行模式造成任何差值。",
+            "自测结论仅适用于所测手机、充电器与本次测试条件，不外推至所有设备。"
+          ],
+          "producer": {
+            "providerWaitMs": 182177,
+            "queueWaitMs": 0,
+            "promptTokens": 21415,
+            "completionTokens": 3939,
+            "reasoningTokens": 0,
+            "promptChars": 9052
+          },
+          "audit": {
+            "providerWaitMs": 87564,
+            "queueWaitMs": 0,
+            "promptTokens": 20540
+          }
+        },
+        {
+          "iteration": 3,
+          "score": 38,
+          "issues": [
+            {
+              "severity": "blocking",
+              "criterion": "保持 creativeTreatment 的观众承诺、段落责任与 payoff；落实本次 planningIssues，事实边界一致。",
+              "evidence": "creativeTreatment 和系列单集承诺要求展示同一部手机两轮真实测试的起止电量、15分钟计时依据和净增差值，并依据本次结果给出唯一的条件化判断。候选 narrativeArc 却明确写“本片只教学自测”，第4至6场只保留待填写的S、E1、E2和公式，第8、9场并列保留两个假设分支，第10场明确不预选答案；前六秒也只有流程示意和条件说明，没有与原承诺相符的实测证据或部分兑现。上轮指出的核心承诺降级仍然存在。宿主缺少的是经确认的原创受控测试采集能力或可用测试证据，这不能由编剧虚构补齐。",
+              "repairInstruction": "先由上游确认并提供原创受控测试的采集能力或可用证据；确认后恢复本集实测路线，给下游明确安排两轮真实起止读数、各自15分钟计时关系、净增差值及依据结果只保留一个“开或不开”的判断，同时保留现有变量控制和适用边界。若上游正式决定改做自测教程，应先同步修改creativeTreatment、系列单集承诺和payoff，再由编剧按新合同重写。"
+            },
+            {
+              "severity": "blocking",
+              "criterion": "脚本动作、旁白、屏幕文字、声音提示与时长协调，可见成功条件具体；不靠加速或凑镜头塞内容。",
+              "evidence": "第4场仅3.5秒，却依次要求核对系统版本、充电器、线材和插座，记录联网状态、S与T1，插线关屏，表现15:00至00:00并处理E1；第5场同为3.5秒，还要恢复S、重复后台基线、核验温差、切换飞行模式并完成第二轮计时；第6场5秒内需填写三项原始读数并依次呈现三条公式。总时长33.5秒虽在范围内，但这些单场责任仍只能依赖急促剪辑或不可读的形式化动作完成，上轮的时长 blocking 未修复。",
+              "repairInstruction": "在上游确定实测或教程路线后重新分配场景责任：将版本、供电、后台和温度等共用控制集中在结果出现前清楚交代；每轮测试场只保留必须可见的模式、相同起点、15分钟计时关系和终点；为两轮读数、差值及最终判断留出正常可读时间，并将总时长继续控制在20至34秒。"
+            },
+            {
+              "severity": "blocking",
+              "criterion": "素材/编辑要求符合 productionCapabilities；同母片源区间方案允许在覆盖可证的前提下交导演落实，独立生成不能冒充同一对象或真实实验。",
+              "evidence": "currentRoleContract 明示 editing.staticEditorialCard=false，但候选把核心信息建立在第2场“测试条件卡”、第4场“后期信息卡”、第6场“后期叠加可填写的两行记录表与三条公式”以及第8至10场的后期条件牌和选择框上。现有Provider仅支持通用stock_video与stock_image，这些图库也不能证明同一手机的真实两轮实验。该直接能力冲突为上轮遗漏的关键合同问题，且当前候选仍明确依赖它完成主要叙事。",
+              "repairInstruction": "删除对静态编辑卡、可填写后期表格和后期选择牌的核心依赖；在继续实测路线时，把模式、起止电量、计时和结果设计为真实手机画面或真实拍摄记录中可见的信息，仅使用能力范围内的简洁屏幕文字辅助。通勤图库只用于建立情境，不得承担实验数据或同一对象连续性的证明。"
+            }
+          ],
+          "repairInstructions": [
+            "由上游先确认原创受控测试的采集能力或提供可用测试证据；若改为教程，必须先正式修改creativeTreatment、系列承诺和payoff。",
+            "继续实测路线时，恢复两轮真实起止读数、15分钟计时依据、净增差值和唯一的条件化结论，同时保留变量控制与适用边界。",
+            "重排第4至6场并删除对静态编辑卡的核心依赖，使关键状态、计算和结论在20至34秒内以当前能力正常可读地呈现。"
+          ],
+          "candidateTotalSeconds": 33.5,
+          "candidateCanonFacts": [
+            "本集的验证对象是：同一部手机在相同起始电量、相同充电器下各充15分钟，飞行模式是否比正常联网补入更多电量。"
+          ],
+          "validationError": "Series script drafts must contain between 1 and 8 canonFacts.",
+          "producer": {
+            "providerWaitMs": 67742,
+            "queueWaitMs": 0,
+            "promptTokens": 19784,
+            "completionTokens": 4765,
+            "reasoningTokens": 923,
+            "promptChars": 18588
+          },
+          "audit": {
+            "providerWaitMs": 54543,
+            "queueWaitMs": 0,
+            "promptTokens": 20469
+          }
+        }
+      ]
+    }
+  ]
+}

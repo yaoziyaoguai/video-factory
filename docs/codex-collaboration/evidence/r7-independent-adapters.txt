@@ -1,0 +1,68 @@
+▶ CodexSeriesPlanningAgent
+  ✔ repairs a roadmap through an independent audit before returning it (3.834375ms)
+  ✔ rejects duplicate promises and pillars outside the series bible (0.296875ms)
+  ✔ audits a human episode against the latest canon before changing it (0.562875ms)
+  ✔ rejects a greenlight agent that rewrites creator-owned continuity requirements (0.664042ms)
+  ✔ resumes the saved series generation result before starting its audit (34.770541ms)
+  ✔ resumes the saved greenlight audit without regenerating the human episode (21.167666ms)
+✔ CodexSeriesPlanningAgent (62.232375ms)
+▶ asset semantic ranking
+  ✔ repairs a semantic ranking after independent contract audit (3.198916ms)
+  ✔ parses bounded public candidate metadata and never requires download URLs (0.106875ms)
+  ✔ provides a deterministic inspectable fallback (0.125875ms)
+  ✔ rejects model output that silently removes a candidate (0.233792ms)
+  ✔ reserves candidate locks for human overrides and preserves original ranks (0.147459ms)
+  ✔ pins provider and model evidence to the configured ranker (0.168208ms)
+  ✔ sends bounded candidate thumbnails with an explicit scene and asset mapping (0.2585ms)
+  ✔ keeps checkpoint-only planning intent out of the broker asset-rank payload (0.219583ms)
+  ✔ drops thumbnails larger than the broker per-image boundary before sending (0.320875ms)
+  ✔ resumes the saved ranking request and reuses its thumbnail snapshot (1.655208ms)
+✔ asset semantic ranking (7.270833ms)
+▶ CodexVisualReviewAgent
+  ✔ includes source timecodes in the image context and evidence snapshot identity (2.997959ms)
+  ✔ runs final Codex and GLM reviews independently over one immutable evidence snapshot (1.114708ms)
+  ✔ preserves more than fifty distinct findings across the two independent reviews (0.494334ms)
+  ✔ merges the same finding from both reviewers and keeps the strongest severity and both sources (0.251791ms)
+  ✔ retries only the failed final-review branch after preserving the completed model result (1.10775ms)
+  ✔ rejects a finding outside the requested pilot before completing the review (0.181ms)
+  ✔ rejects a stale selected model before preprocessing media for a single configured agent (0.100792ms)
+  ✔ reviews frames against the editable script, director intent, and render timeline (31.468542ms)
+  ✔ preserves prepared source identity while authoritative run fields override stale namesakes (0.272583ms)
+  ✔ describes dense pilot frames as ordered sequence evidence instead of sparse midpoints (0.324ms)
+  ✔ identifies director-approved editorial cards while keeping undeclared text blocked and private paths hidden (8.160542ms)
+  ✔ sends only the bounded preprocessed frame payload and validates the report (0.383042ms)
+  ✔ uses a stable broker request id for an interrupted visual review operation (0.530542ms)
+  ✔ repairs a visual report against an independent audit for at most three semantic rounds (0.63975ms)
+  ✔ uses the OpenAI audit client when the visual producer only accepts ZAI review tasks (0.263541ms)
+  ✔ keeps stateless ZAI visual-review calls out of Codex sessions while preserving full repair context (0.333792ms)
+  ✔ never exceeds the configured paid visual-producer call budget (0.377958ms)
+  ✔ forwards the render manifest to media preprocessing (6.714792ms)
+  ✔ forwards the executable plan to source-asset media preprocessing (11.400917ms)
+  ✔ returns the inspected media duration with detailed review evidence (0.279042ms)
+  ✔ records an explicitly configured provider and model identity (0.065417ms)
+  ✔ uses an isolated backup model only after an eligible provider failure (1.071292ms)
+  ✔ rethrows an uncertain provider failure without ever invoking the visual backup (0.2275ms)
+  ✔ keeps a produced visual report and switches only the independent audit after a transient failure (0.962667ms)
+  ✔ places the explicitly selected visual model first and can fall back in reverse provider order (0.286167ms)
+  ✔ does not mask a valid semantic audit failure with the backup model (0.254667ms)
+  ✔ reports both provider failures without leaking their raw diagnostics (0.271125ms)
+  ✔ continues through multiple visual candidates until one succeeds (0.204208ms)
+  ✔ rejects visual candidates without explicit broker provider identities (0.097292ms)
+  ✔ rejects findings outside the inspected video and malformed scores (0.073292ms)
+  ✔ preserves validated scene and repair ownership on each localized finding (0.104792ms)
+  ✔ validates evidence ranges and frame references, and keeps not-observed work out of paid rework (0.174792ms)
+  ✔ fails closed when model recommendation conflicts with scores, findings, or confidence (0.051834ms)
+  ✔ resumes a saved visual-review request without preprocessing the same media again (1.010959ms)
+✔ CodexVisualReviewAgent (73.647625ms)
+▶ CodexReferenceGrammarAgent
+  ✔ repairs abstract shot grammar before returning it to the director (3.578125ms)
+  ✔ observes a saved audit and does not resample the reference video (1.47975ms)
+✔ CodexReferenceGrammarAgent (5.660625ms)
+ℹ tests 52
+ℹ suites 4
+ℹ pass 52
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4371.661084

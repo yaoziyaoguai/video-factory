@@ -1,0 +1,10 @@
+=== 点击前 run 状态 === rejected revision 9
+=== 页面失败说明 === 画面预检未通过
+=== 重试按钮数 === 1
+=== 点击按钮 === "重新检查已有试片" disabled= false
+=== 点击后 run 状态 === running revision 11
+=== metered 回执 === 0 笔，已结算合计 ¥0.00
+  ⚠ 更正（后续复核发现）：GET /api/runs/:id 的响应**不含** executionReceipts 字段，
+  这里的"0 笔"是字段缺失所致，**不是"没有花钱"**——点击重试当时 assets 已有 1 笔 ¥2 的
+  metered 收据。该行不构成本步骤的证据；本步骤的结论（重试按钮可用、rejected→running）
+  不受影响。权威来源：harness/step-r12c-budget-audit.mjs → checks/step-r12c-budget-audit.txt。

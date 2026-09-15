@@ -1,0 +1,56 @@
+=== source run before === {"revision":27,"status":"rejected","currentVersionRunId":null}
+=== start button enabled === true
+=== new runId === run-e204cd6c-2365-4cda-bb1d-c50e6e69bb8a
+=== screenshot === /Users/jinkun.wang/work_space/veidofactory/docs/qa/videofactory-real-local-qa-20260914-r11-takeover-assets/screenshots/13a-rework-run-created.png
+=== submitted summary ===
+{"title":"城市微光：匆忙之中重新看见日常","affectedScenePositions":[1,2,3,4,5],"sourceRunId":"run-a7c42cc4-98de-4354-9dc9-c268b68b1446","sourceRunRevision":27,"inheritedNodeIds":["protocolVersion","title","angle","audience","nicheSlug","durationSeconds","durationRange","platform","reviewMode","runPurpose","visualPlan","creationContext","voiceDirection","providers","models","workflowFeatures","director","economics","budgetIntentionCny"],"voice":null}
+=== payload saved to checks/step-13-submitted-payload.json ===
+=== new run detail === {
+ "revision": 0,
+ "status": "running",
+ "versionOf": null,
+ "nodes": [
+  {
+   "id": "brief",
+   "status": "succeeded"
+  },
+  {
+   "id": "creative-planning",
+   "status": "running"
+  },
+  {
+   "id": "assets",
+   "status": "pending"
+  },
+  {
+   "id": "asset-source-review",
+   "status": "pending"
+  },
+  {
+   "id": "voice",
+   "status": "pending"
+  },
+  {
+   "id": "render",
+   "status": "pending"
+  },
+  {
+   "id": "technical-review",
+   "status": "pending"
+  },
+  {
+   "id": "visual-review",
+   "status": "pending"
+  },
+  {
+   "id": "final-review",
+   "status": "pending"
+  },
+  {
+   "id": "publish-package",
+   "status": "pending"
+  }
+ ],
+ "totals": null
+}
+=== console errors === 0

@@ -1,0 +1,31 @@
+{"probe":"receipt-race","terminal":{"type":"done","state":"completed_failure"},"stale":{"type":"done","state":"running"},"persistedState":"running","posts":0}
+✖ R4-F03: concurrent processes must not overwrite terminal receipt with stale running (1762.576208ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3014.480791
+
+✖ failing tests:
+
+test at ../../../../private/tmp/vf-r4-receipt-race.mjs:68:1
+✖ R4-F03: concurrent processes must not overwrite terminal receipt with stale running (1762.576208ms)
+  AssertionError [ERR_ASSERTION]: 旧 running 在 read/merge 后延迟落盘，不得覆盖另一个进程已经写入的终态
+  + actual - expected
+  
+  + 'running'
+  - 'completed_failure'
+  
+      at TestContext.<anonymous> (file:///private/tmp/vf-r4-receipt-race.mjs:85:10)
+      at async Test.run (node:internal/test_runner/test:1409:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'running',
+    expected: 'completed_failure',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
