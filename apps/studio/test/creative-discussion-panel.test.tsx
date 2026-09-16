@@ -176,7 +176,13 @@ describe("CreativeDiscussionPanel", () => {
     confirmSpy.mockReturnValue(true);
     await userEvent.click(confirmButton);
     await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
-    expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "confirm", acknowledgeRepair: true });
+    // 身份必须跟着一起发：服务端会拿它跟记录里的那一条比对，缺了就直接拒收这条命令。
+    // 只有 acknowledgeRepair 而没带编号，"仍然确认"会在服务端变成一条无法送达的命令。
+    expect(onCommand.mock.calls[0]![0]).toMatchObject({
+      action: "confirm",
+      acknowledgeRepair: true,
+      expectedCheckIdentity: "c1d1e1f1" + "0".repeat(56),
+    });
   });
 
   it("prefills the composer from a check issue so the user does not retype a field-level instruction", async () => {
