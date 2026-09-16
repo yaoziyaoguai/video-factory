@@ -96,6 +96,7 @@ if [[ -f "$zai_env_file" ]] \
   env -u ZAI_BIGMODEL_API_KEY -u ZAI_API_KEY \
     VIDEO_FACTORY_CODEX_PROFILE=zai \
     VIDEO_FACTORY_CODEX_EFFORT=max \
+    VIDEO_FACTORY_CODEX_AUDIT_EFFORT=high \
     VIDEO_FACTORY_CODEX_TIMEOUT_MS="$codex_timeout_ms" \
     VIDEO_FACTORY_CODEX_SOCKET_PATH="$zai_socket_path" \
     VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="$zai_workspace_root" \

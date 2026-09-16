@@ -494,6 +494,65 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(requestBodies[1]?.temperature, 0.6);
   });
 
+  it("repairs one unparseable reply instead of burning the round as invalid_json", async () => {
+    // 实测故障（topic-ideas）：模型这轮话说了，只是形态不是 JSON。它与"JSON 合规但违反 schema"
+    // 同属可修，过去却只有后者有修复轮，前者直接判终局，整轮模型调用就此作废。
+    const prose = "这版方案我建议这样拍：先给出结论，再补三组证据。";
+    let calls = 0;
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async (_input, init) => {
+        calls += 1;
+        requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        const content = calls === 1 ? prose : JSON.stringify(validReport());
+        return new Response(JSON.stringify({
+          choices: [{ finish_reason: "stop", message: { content } }],
+        }), { status: 200 });
+      },
+    });
+
+    const result = await executor.runTask(visualReviewTask());
+
+    assert.equal(calls, 2, "unparseable reply must get exactly one repair attempt");
+    assert.deepEqual(JSON.parse(result.output), validReport());
+    assert.equal(result.trace?.modelAttemptCount, 2);
+    assert.equal(result.trace?.structuredRepairCount, 1);
+    const retryMessages = requestBodies[1]?.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    const retryPrompt = String(retryMessages[0]?.content[0]?.text);
+    assert.match(retryPrompt, /不是合法 JSON/);
+    assert.match(retryPrompt, /这版方案我建议这样拍/);
+    // 什么都没解析出来，就不能告诉模型"上一份已完成内容判断"——那会诱导它现编一份判断来保护。
+    assert.doesNotMatch(retryPrompt, /已完成内容判断/);
+    assert.equal(requestBodies[0]?.temperature, 1);
+    assert.equal(requestBodies[1]?.temperature, 0.6);
+  });
+
+  it("stops after one unparseable-reply repair and keeps the evidence", async () => {
+    let calls = 0;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({
+          choices: [{ finish_reason: "stop", message: { content: "仍然不是 JSON。" } }],
+        }), { status: 200 });
+      },
+    });
+
+    await assert.rejects(
+      () => executor.runTask(visualReviewTask()),
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.details?.reasonCode, "invalid_json");
+        assert.equal(error.details?.structuredRepairCount, 1);
+        assert.equal(error.details?.modelAttemptCount, 2);
+        return true;
+      },
+    );
+    assert.equal(calls, 2, "one accepted task may execute at most one structured repair");
+  });
+
   it("allows a visual format repair to remove only an unsupported extra field", async () => {
     const invalid = { ...validReport(), internalNote: "must not cross the public contract" };
     let calls = 0;
@@ -713,6 +772,53 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(capturedBody?.model, "glm-5.3");
     assert.equal(typeof (capturedBody?.messages as Array<{ content: unknown }>)[0]?.content, "string");
     assert.equal(result.trace?.modelId, "glm-5.3");
+    // 没给审计强度时，复核沿用产出强度：这条路径的行为不该被新选项改变。
+    assert.equal(capturedBody?.reasoning_effort, "max");
+  });
+
+  it("gives the independent audit its own effort while production stays at max", async () => {
+    const queued = [validScriptDraft(), validRoleAudit()];
+    const efforts: unknown[] = [];
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      effort: "max",
+      auditEffort: "high",
+      fetchFn: async (_input, init) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        efforts.push(body.reasoning_effort);
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(queued.shift()) } }],
+        }), { status: 200 });
+      },
+    });
+
+    // 同一轮里跑两次：产出只有一次机会，留 max；复核读的是已经成型的产出，用审计强度。
+    const production = await executor.runTask(scriptDraftTask());
+    const audit = await executor.runTask(roleAuditTask(false));
+
+    assert.deepEqual(efforts, ["max", "high"]);
+    assert.equal(production.trace?.reasoningEffort, "max");
+    assert.equal(audit.trace?.reasoningEffort, "high");
+  });
+
+  it("falls back to max rather than sending glm-5.3 an effort tier it does not accept", async () => {
+    let captured: Record<string, unknown> | undefined;
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      effort: "max",
+      auditEffort: "xhigh",
+      fetchFn: async (_input, init) => {
+        captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(validRoleAudit()) } }],
+        }), { status: 200 });
+      },
+    });
+
+    await executor.runTask(roleAuditTask(false));
+
+    // glm-5.3 只认 low|high|max：发一个它不认识的档位不是"降级"，是这一轮复核直接没有结果。
+    assert.equal(captured?.reasoning_effort, "max");
   });
 
   it("runs creative-treatment on the text model and rejects the same invalid fixture as the OpenAI executor", async () => {

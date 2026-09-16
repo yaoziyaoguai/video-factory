@@ -5,9 +5,15 @@ import {
   type CodexExecutorProfile,
   type CodexExecutorProfileId,
 } from "./codex-executor.js";
+import { GLM_REASONING_EFFORTS } from "./zai-code-plan-executor.js";
 
 const DEFAULT_PRODUCTION_MODEL = "gpt-5.6-sol";
 const DEFAULT_DEEP_REVIEW_MODEL = "gpt-5.6-sol";
+/**
+ * zai 的独立复核默认 high 而不是 xhigh：glm-5.3 只有 low|high|max 三档，xhigh 在这里不是
+ * "降级"而是让请求失败。复核读的是已经成型的产出，中间档就够；实测 max 档一次复核约 4 分钟。
+ */
+const DEFAULT_ZAI_AUDIT_EFFORT = "high";
 
 export interface BrokerRuntimeConfig {
   profile: CodexExecutorProfile;
@@ -43,9 +49,13 @@ export function brokerRuntimeConfigFromEnv(env: NodeJS.ProcessEnv): BrokerRuntim
   if (!ALLOWED_REASONING_EFFORTS.has(effort)) {
     throw new Error("VIDEO_FACTORY_CODEX_EFFORT must be one of low|medium|high|xhigh|max.");
   }
-  const auditEffort = optionalText(env, "VIDEO_FACTORY_CODEX_AUDIT_EFFORT") ?? "xhigh";
+  const auditEffort = optionalText(env, "VIDEO_FACTORY_CODEX_AUDIT_EFFORT")
+    ?? (profileId === "zai" ? DEFAULT_ZAI_AUDIT_EFFORT : "xhigh");
   if (!ALLOWED_REASONING_EFFORTS.has(auditEffort)) {
     throw new Error("VIDEO_FACTORY_CODEX_AUDIT_EFFORT must be one of low|medium|high|xhigh|max.");
+  }
+  if (profileId === "zai" && !GLM_REASONING_EFFORTS.has(auditEffort)) {
+    throw new Error("VIDEO_FACTORY_CODEX_AUDIT_EFFORT must be one of low|high|max for the zai profile.");
   }
 
   return {

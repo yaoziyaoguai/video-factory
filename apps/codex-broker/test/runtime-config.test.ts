@@ -34,6 +34,8 @@ describe("brokerRuntimeConfigFromEnv", () => {
     assert.equal(zai.socketPath, "/run/video-factory-zai-codex/worker.sock");
     assert.equal(zai.workspaceRoot, "/var/lib/video-factory-zai-codex/workspace");
     assert.equal(zai.effort, "max");
+    // 独立复核单独走一档：glm-5.3 只有 low|high|max，默认取中间档而不是 openai 那侧的 xhigh。
+    assert.equal(zai.auditEffort, "high");
     assert.equal(zai.timeoutMs, 1_200_000);
     assert.doesNotMatch(JSON.stringify(zai), new RegExp(fakeSecret));
 
@@ -81,6 +83,30 @@ describe("brokerRuntimeConfigFromEnv", () => {
       async () => brokerRuntimeConfigFromEnv({ VIDEO_FACTORY_CODEX_PROFILE: "zai" }),
       /ZAI_BIGMODEL_API_KEY environment variable is required/,
     );
+  });
+
+  it("rejects an audit effort the zai profile's model cannot accept", () => {
+    const zaiEnvironment = {
+      VIDEO_FACTORY_CODEX_PROFILE: "zai",
+      ZAI_BIGMODEL_API_KEY: "test-only-secret",
+    };
+    // 在启动时拦下，而不是等一次已经开始的复核请求被 glm-5.3 判为非法档位。
+    assert.throws(
+      () => brokerRuntimeConfigFromEnv({ ...zaiEnvironment, VIDEO_FACTORY_CODEX_AUDIT_EFFORT: "xhigh" }),
+      /VIDEO_FACTORY_CODEX_AUDIT_EFFORT must be one of low\|high\|max for the zai profile/,
+    );
+    assert.throws(
+      () => brokerRuntimeConfigFromEnv({ ...zaiEnvironment, VIDEO_FACTORY_CODEX_AUDIT_EFFORT: "extreme" }),
+      /VIDEO_FACTORY_CODEX_AUDIT_EFFORT must be one of low\|medium\|high\|xhigh\|max/,
+    );
+    for (const effort of ["low", "high", "max"]) {
+      assert.equal(
+        brokerRuntimeConfigFromEnv({ ...zaiEnvironment, VIDEO_FACTORY_CODEX_AUDIT_EFFORT: effort }).auditEffort,
+        effort,
+      );
+    }
+    // openai 那侧不受影响：xhigh 仍是它的默认复核强度。
+    assert.equal(brokerRuntimeConfigFromEnv({ VIDEO_FACTORY_CODEX_AUDIT_EFFORT: "xhigh" }).auditEffort, "xhigh");
   });
 
   it("routes only the ZAI profile to the official Chat Completion executor", () => {

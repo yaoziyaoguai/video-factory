@@ -18,6 +18,7 @@ export function createBrokerExecutor(
     return new ZaiCodePlanExecutor({
       env: environment,
       effort: config.effort,
+      auditEffort: config.auditEffort,
       timeoutMs: config.timeoutMs,
       ...(dependencies.fetchFn ? { fetchFn: dependencies.fetchFn } : {}),
     });

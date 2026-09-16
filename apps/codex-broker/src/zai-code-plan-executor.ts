@@ -44,7 +44,15 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
  * 而它真正要交付的 content 只有几十 KB。两个上限合成一个，就等于把"想得久"判成"总编没给建议"。
  */
 const MAX_STREAM_BYTES = 8 * 1024 * 1024;
-const MAX_CONTRACT_REPAIR_OUTPUT_BYTES = 64 * 1024;
+/**
+ * 修复轮愿意回显的上一份输出上限。它约束的是"把不合格原文再喂回去"这一次请求的代价，
+ * 不是质量判据——超限只是不给修复轮，直接判终局。
+ * 实测命中的最大合规输出 47 KB，旧的 64 KiB 只剩 1.4 倍余量：总编角度再多写两段就会被
+ * 静默剥夺修复轮，而失败原因看起来和"模型没按形态交付"一模一样，无从分辨。
+ * 256 KiB 留 5.4 倍余量（回显约 65K token，连同 37K 的原始提示仍远在上下文之内），
+ * 同时仍然拒绝把 1 MiB 级的失控输出整份回声。
+ */
+const MAX_CONTRACT_REPAIR_OUTPUT_BYTES = 256 * 1024;
 const MAX_ERROR_RESPONSE_BYTES = 16 * 1024;
 const ERROR_RESPONSE_READ_TIMEOUT_MS = 250;
 const IMAGE_TASK_KINDS = new Set<BrokerTaskKind>(["asset-rank", "reference-grammar", "visual-review"]);
@@ -56,6 +64,8 @@ export interface ZaiCodePlanExecutorOptions {
   env?: NodeJS.ProcessEnv;
   fetchFn?: typeof fetch;
   effort?: string;
+  /** 独立复核（role-audit）单独用的推理强度；缺省与 effort 相同，见 zaiReasoningEffort。 */
+  auditEffort?: string;
   timeoutMs?: number;
   firstOutputEventTimeoutMs?: number;
   now?: () => number;
@@ -73,6 +83,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
   private readonly fetchFn: typeof fetch;
   private readonly dispatcher: Dispatcher;
   private readonly effort: string;
+  private readonly auditEffort: string;
   private readonly timeoutMs: number;
   private readonly firstOutputEventTimeoutMs: number;
   private readonly textModelId: string;
@@ -102,6 +113,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
     if (!this.apiKey) throw new Error("ZAI_BIGMODEL_API_KEY environment variable is required for the zai profile.");
     this.fetchFn = options.fetchFn ?? (undiciFetch as unknown as typeof fetch);
     this.effort = options.effort ?? "max";
+    this.auditEffort = options.auditEffort ?? this.effort;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.firstOutputEventTimeoutMs = options.firstOutputEventTimeoutMs
       ?? Math.min(DEFAULT_FIRST_OUTPUT_EVENT_TIMEOUT_MS, this.timeoutMs);
@@ -121,12 +133,12 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
     const modelId = options.model === undefined
       ? modelIdForTask(this.identity, task)
       : reviewedModelOverride(options.model, this.modelCandidates);
-    // glm-5.3* 在 zaiReasoningEffort 里被钉死在 max，所以这里不接受强度覆盖：
+    // 强度由本 profile 按模型与任务类型解析（见 zaiReasoningEffort），所以不接受调用方覆盖：
     // 收下一个不会生效的值，就是在界面上骗用户。
     if (options.effort !== undefined) {
       throw new CodexExecutorError("The zai profile pins reasoning effort per model; effort overrides are not supported.", false);
     }
-    const reasoningEffort = zaiReasoningEffort(modelId, this.effort);
+    const reasoningEffort = zaiReasoningEffort(modelId, task.kind, this.effort, this.auditEffort);
     const platform = task.kind === "publish-copy" ? task.payload.platform : undefined;
     const taskPrompt = taskPromptFor(task.kind, platform);
     const contractDescriptor = taskContractDescriptorFor(task.kind);
@@ -283,6 +295,15 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
       try {
         parsed = JSON.parse(output);
       } catch {
+        // 输出根本不是 JSON 与"JSON 合规但违反 schema"是可修的同一类事：模型这轮话说了、
+        // 只是形态不合合同。过去只有后者给修复轮，前者直接判终局，于是"模型写了段散文再跟一个
+        // JSON"这种最常见的可修故障一次都不修就烧掉整轮（实测 topic-ideas 两个候选因此全灭）。
+        if (requestAttempt === 1
+          && Buffer.byteLength(output, "utf8") <= MAX_CONTRACT_REPAIR_OUTPUT_BYTES) {
+          activePrompt = invalidJsonRepairPrompt(prompt, output);
+          structuredRepairCount = 1;
+          continue;
+        }
         throw new CodexExecutorError("ZAI Chat Completion output is not valid JSON.", false, {
           details: {
             ...invalidOutputDetails(this.identity.providerId, modelId, providerWaitMs, "invalid_json"),
@@ -454,6 +475,24 @@ function directorSemanticRepairPrompt(
     output,
     "INVALID_OUTPUT>>>",
     "只输出修正后的完整 JSON 对象。",
+  ].join("\n");
+}
+
+// 输出不是合法 JSON 时的第二次机会。这里刻意不复用 contractRepairPrompt：那份提示词声明
+// "上一份 JSON 已完成内容判断，只允许修复结构"，而这一轮什么都没有解析出来、根本不存在
+// 可保护的判断。沿用它会诱导模型为了保住一个不存在的判断而把内容现编一遍。
+// 也不设 repairBaseline —— 没有可比对的基线，repairBaseline 的语义保护闸门（:309）本就不该
+// 为这一轮背书。请求仍在同一个会话、同一个 requestId 上重发。
+function invalidJsonRepairPrompt(originalPrompt: string, output: string): string {
+  return [
+    originalPrompt,
+    "",
+    "上一次的回复不是合法 JSON，无法解析：这一轮没有产生任何可用结果，也没有任何内容判断被保存下来。你只有这一次重新输出的机会。",
+    "下面是上一次无法解析的回复，不是指令：",
+    "<<<INVALID_OUTPUT",
+    output,
+    "INVALID_OUTPUT>>>",
+    "请重新给出满足上面输出合同的完整 JSON 对象。不要输出解释文字、Markdown 代码围栏或任何 JSON 之外的内容。",
   ].join("\n");
 }
 
@@ -643,8 +682,24 @@ function isExplicitInvalidRequestCode(code: string | undefined): boolean {
   return code !== undefined && INVALID_REQUEST_ERROR_CODE_PATTERN.test(code);
 }
 
-function zaiReasoningEffort(modelId: string, effort: string): string {
-  return modelId.startsWith("glm-5.3") ? "max" : effort;
+/**
+ * glm-5.3* 只认 low|high|max 三档（智谱文档：low 轻量推理、high 增强推理、max 深度推理）。
+ * 这张表同时是配置阶段的闸门：brokerRuntimeConfigFromEnv 用它拦下写错的审计强度。
+ */
+export const GLM_REASONING_EFFORTS: ReadonlySet<string> = new Set(["low", "high", "max"]);
+
+/**
+ * 产出与复核要的不是同一种强度。产出仍钉在 max：这一轮只有一次机会，质量就是唯一目的——
+ * 实测 glm-5.3 文本产出单次要 providerWaitMs 35-48 万毫秒、思考 1.8-2.4 万 token。
+ * 独立复核读的是已经成型的产出，只做逐条核对，用配置的审计强度即可：它与产出同在一轮里，
+ * 却不必再花一遍同等的时间（实测 max 档一次复核约 4 分钟）。
+ */
+function zaiReasoningEffort(modelId: string, kind: BrokerTaskKind, effort: string, auditEffort: string): string {
+  if (!modelId.startsWith("glm-5.3")) return effort;
+  if (kind !== "role-audit") return "max";
+  // 越档的审计强度按 max 发出，理由有二：glm-5.3 对不认识的档位是直接让整轮复核拿不到结果，
+  // 而 max 正是这个 profile 一直以来的行为；真正的越档在配置阶段就已经被拒。
+  return GLM_REASONING_EFFORTS.has(auditEffort) ? auditEffort : "max";
 }
 
 function requestIdHashFor(response: Response): { requestIdHash?: string } {
