@@ -14,7 +14,7 @@ import { ProductionQueue } from "../src/client/components/ProductionQueue.js";
 import { RunWorkbench } from "../src/client/components/RunWorkbench.js";
 import { MultiPlatformPublishDialog } from "../src/client/components/MultiPlatformPublishDialog.js";
 import { preferRunSnapshot, RunPage } from "../src/client/pages/RunPage.js";
-import type { StudioCreatorSettings, StudioDecisionInput, StudioProvider, StudioRunDetail, StudioRunSummary, StudioTemplate } from "../src/shared/api.js";
+import type { StudioCreatorSettings, StudioDecisionInput, StudioNode, StudioProvider, StudioRunDetail, StudioRunSummary, StudioTemplate } from "../src/shared/api.js";
 
 const runSummary: StudioRunSummary = {
   id: "run-1",
@@ -3662,7 +3662,7 @@ describe("Studio client", () => {
         boundary: "node-complete",
         reason: "这一步已完成，等你确认后进入下一步。",
         options: ["approve", "reject"],
-        createdAt: runDetail.activeIntervention.createdAt,
+        createdAt: "2026-08-21T10:05:00.000Z",
       },
       nodes: runDetail.nodes.map((node) => node.id === "brief"
         ? {
