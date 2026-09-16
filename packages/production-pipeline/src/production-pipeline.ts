@@ -7393,7 +7393,7 @@ function creativePlanningNode(
             intervention: {
               kind: "creative_review",
               reason: stage === "treatment"
-                ? "导演方案已生成，等你确认。你可以直接继续，也可以先聊聊想改的地方。"
+                ? "前期构思已生成，等你确认。你可以直接继续，也可以先聊聊想改的地方。"
                 : stage === "script"
                   ? "脚本草稿已生成，等你确认。"
                   : blockingIssues.length > 0
