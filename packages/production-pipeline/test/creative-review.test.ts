@@ -13,7 +13,7 @@ import {
   type CreativeReviewGate,
 } from "../src/index.js";
 import { planningThreadId } from "../src/creative-planning-store.js";
-import { initialCreativeReviewState, publishCreativeDraft, recordCreativeDiscussion, applyCreativeReviewDeterministicCommand, recordCreativeReviewCheck, confirmCreativeDraft } from "../src/creative-review.js";
+import { initialCreativeReviewState, publishCreativeDraft, recordCreativeDiscussion, applyCreativeReviewDeterministicCommand, recordCreativeReviewCheck, confirmCreativeDraft, creativeReturnTargets, returnCreativeReviewToStage } from "../src/creative-review.js";
 
 // 构思、脚本、导演方案都是创作交付：宿主规定的评估对象是当前完整候选（根路径 ""），
 // 维度固定为 attention/progression/payoff/expression。全部分数取同一个值，
@@ -140,6 +140,59 @@ describe("three-stage creative review gates", () => {
     assert.throws(() => applyCreativeReviewDeterministicCommand(review, { ...command("legacy"), action: "undo_draft" }), /缺少对应的要求记录/);
     assert.deepEqual(review.stages.script.currentDocument, edited);
   });
+  it("names the three creative stages the way the creator sees them, at every stop", () => {
+    // 创作规划三段只有一套用户可见名字：treatment=前期构思、script=脚本、director=导演方案。
+    // 这里逐段钉住回退提示里的说法。曾经 treatment 被叫成"导演方案"、director 被叫成"分镜与
+    // 画面方案"，于是同一个停点的标题和影响提示各说各的名字，人不知道自己确认的是哪一份东西。
+    const confirmedStage = (
+      review: ReturnType<typeof initialCreativeReviewState>,
+      stage: "treatment" | "script" | "director",
+      document: unknown,
+    ) => {
+      const published = publishCreativeDraft(review, stage, stage, document, "input");
+      const draftSha256 = published.stages[stage].currentDraft!.sha256;
+      const checkIdentity = contentSha256(`checked-${stage}`);
+      const checked = recordCreativeReviewCheck(published, stage, {
+        draftSha256, checkIdentity, verdict: "pass", score: 90, summary: "可继续", issues: [],
+      });
+      return confirmCreativeDraft(checked, {
+        action: "confirm", stage, commandId: `confirm-${stage}`, actor: "creator",
+        baseDraftSha256: draftSha256,
+        expectedReviewRevision: checked.reviewRevision,
+        checkIdentity,
+        confirmedAt: "2026-09-14T00:00:00.000Z",
+      });
+    };
+    let review = initialCreativeReviewState();
+    review = confirmedStage(review, "treatment", treatment);
+    review = confirmedStage(review, "script", script);
+    // 回退发生在导演讲完了、人还没确认的那个停点上，所以导演阶段停在 waiting_user。
+    review = publishCreativeDraft(review, "director", "director", director, "input");
+    const returnTo = (targetStage: "treatment" | "script") => returnCreativeReviewToStage(review, {
+      action: "return_to_stage",
+      stage: "director",
+      commandId: `return-${targetStage}`,
+      actor: "creator",
+      baseDraftSha256: review.stages.director.currentDraft!.sha256,
+      expectedReviewRevision: review.reviewRevision,
+      targetStage,
+      acknowledgeImpact: true,
+    });
+
+    const backToTreatment = returnTo("treatment").stages.treatment.messages.at(-1)!.text;
+    assert.match(backToTreatment, /^已返回前期构思。/);
+    assert.match(backToTreatment, /脚本、导演方案及其后续确认已失效/);
+    // "分镜"是导演方案里的镜头，不是任何阶段的阶段名；它出现在这一段就说明名字又串了。
+    assert.equal(backToTreatment.includes("分镜"), false);
+
+    const backToScript = returnTo("script").stages.script.messages.at(-1)!.text;
+    assert.match(backToScript, /^已返回脚本。/);
+    assert.match(backToScript, /前期构思确认保留，导演方案及其后续确认已失效/);
+    assert.equal(backToScript.includes("分镜"), false);
+
+    assert.deepEqual(creativeReturnTargets(review), ["treatment", "script", "director"]);
+  });
+
   it("treats the independent check as advice: repair blocks by default but can be explicitly acknowledged", () => {
     let review = publishCreativeDraft(initialCreativeReviewState(), "treatment", "treatment", treatment, "input");
     const draftSha256 = review.stages.treatment.currentDraft!.sha256;
@@ -238,10 +291,15 @@ describe("three-stage creative review gates", () => {
     // 「看过意见，仍然确认」必须真的放行：否则人只能在同一条意见上无限重试，
     // 决策权就还在模型手里。放行用的就是他已经看过的那一条复核，不另跑一轮。
     const auditsBeforeOverride = calls.audit;
+    const recorded = advised.state.creativeReview!.stages.treatment.checkResult!;
     const overridden = await runCreativePlanning(graph, {
       input,
       threadId,
-      resume: { ...resume(advised.gate, "confirm-override"), acknowledgeRepair: true },
+      resume: {
+        ...resume(advised.gate, "confirm-override"),
+        acknowledgeRepair: true,
+        checkIdentity: recorded.checkIdentity,
+      },
     });
     assert.equal(calls.audit, auditsBeforeOverride, "人已经承担过的意见不重跑复核");
     assert.equal(overridden.status, "waiting_user");
@@ -252,7 +310,95 @@ describe("three-stage creative review gates", () => {
       verdict: "repair", score: 76, issueCount: 1,
     });
   });
-  it("waits without side effects and resumes exactly one confirmed stage at a time", async () => {
+
+  it("refuses to rebind an acknowledgement onto a review the creator never saw", async () => {
+    const calls = { audit: 0 };
+    const rolePort = <T>(artifactId: string, output: T) =>
+      async (context: Parameters<CreativePlanningPorts["treatment"]>[0]) => {
+        if (context.creativeReviewExecution?.mode === "check") {
+          calls.audit += 1;
+          return {
+            artifactId,
+            output,
+            reviewCheck: {
+              audit: {
+                version: "video-factory/role-audit-v2" as const,
+                rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+                assessments: auditAssessments(76),
+                verdict: "repair" as const,
+                score: 76,
+                summary: "还有意见",
+                issues: [{
+                  severity: "blocking" as const,
+                  criterion: "与已声明能力相容",
+                  evidence: "上游采用同期环境声",
+                  repairInstruction: "二选一",
+                }],
+                repairInstructions: ["二选一"],
+                planningDisposition: null,
+                hostReadinessReview: null,
+              },
+              checkIdentity: contentSha256({ round: calls.audit }),
+            },
+          };
+        }
+        return { artifactId, output };
+      };
+    const ports: CreativePlanningPorts = {
+      treatment: rolePort("treatment-1", treatment),
+      screenwriter: rolePort("script-1", script),
+      director: rolePort("director-1", director),
+      compile: executablePlanCompilePort,
+    };
+    const graph = createCreativePlanningGraph({ ports, checkpointer: new MemorySaver() });
+    const input = {
+      runId: "run-review-stale",
+      inputDigest: "digest-review-stale",
+      durationRange: { minSeconds: 20, maxSeconds: 30 },
+      creativeReview: CREATIVE_REVIEW_FEATURE,
+    };
+    const threadId = planningThreadId(input.runId, input.inputDigest);
+
+    const first = await runCreativePlanning(graph, { input, threadId });
+    if (first.status !== "waiting_user") throw new Error("expected a treatment gate");
+    const advised = await runCreativePlanning(graph, { input, threadId, resume: resume(first.gate, "confirm-advised") });
+    if (advised.status !== "waiting_user") throw new Error("expected a repair stop");
+    const recorded = advised.state.creativeReview!.stages.treatment.checkResult!;
+    const auditsBefore = calls.audit;
+
+    // 旧页面：这一版复核已经被换过一轮，它带着旧编号提交"仍然确认"。
+    await assert.rejects(
+      () => runCreativePlanning(graph, {
+        input,
+        threadId,
+        resume: {
+          ...resume(advised.gate, "confirm-stale-revision"),
+          acknowledgeRepair: true,
+          checkIdentity: recorded.checkIdentity,
+          expectedReviewRevision: advised.gate.reviewRevision - 1,
+        },
+      }),
+      /已经不是当前这一条/,
+    );
+    // 编号对不上：人确认的是他没看过的那一条意见。
+    await assert.rejects(
+      () => runCreativePlanning(graph, {
+        input,
+        threadId,
+        resume: {
+          ...resume(advised.gate, "confirm-stale-identity"),
+          acknowledgeRepair: true,
+          checkIdentity: contentSha256({ stage: "treatment", advice: "never-shown" }),
+        },
+      }),
+      /已经不是当前这一条/,
+    );
+    assert.equal(calls.audit, auditsBefore, "被拒的确认不能偷偷再跑一轮复核");
+  });
+  // 「默认只审计一轮」这条承诺的证据就在这里：下面的 audit 计数在每次确认后只涨 1，且不确认的
+  // 观察调用一次都不涨。改动复核回路时这两个事实必须同时成立——多涨一次是偷偷加审，不涨是复核
+  // 被跳过了。
+  it("waits without side effects, runs exactly one independent audit per confirmation, and resumes one stage at a time", async () => {
     const calls = { treatment: 0, script: 0, director: 0, audit: 0, compile: 0 };
     const rolePort = <T>(stage: "treatment" | "script" | "director", artifactId: string, output: T) =>
       async (context: Parameters<CreativePlanningPorts["treatment"]>[0]) => {
@@ -307,12 +453,14 @@ describe("three-stage creative review gates", () => {
 
     const observed = await runCreativePlanning(graph, { input, threadId });
     assert.equal(observed.status, "waiting_user");
+    // 只是重新看一眼停点，不能再跑一轮复核。
     assert.deepEqual(calls, { treatment: 1, script: 0, director: 0, audit: 0, compile: 0 });
 
     const second = await runCreativePlanning(graph, { input, threadId, resume: resume(first.gate, "confirm-treatment") });
     assert.equal(second.status, "waiting_user");
     if (second.status !== "waiting_user") return;
     assert.equal(second.gate.stage, "script");
+    // 一次确认 = 一轮复核：audit 从 0 到 1，不多不少。
     assert.deepEqual(calls, { treatment: 1, script: 1, director: 0, audit: 1, compile: 0 });
 
     const third = await runCreativePlanning(graph, { input, threadId, resume: resume(second.gate, "confirm-script") });

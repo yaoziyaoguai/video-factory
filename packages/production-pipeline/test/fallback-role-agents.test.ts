@@ -909,6 +909,43 @@ describe("model provider failure policy", () => {
       undefined,
       { category: "invalid_request", reasonCode: "invalid_json_schema", providerId: "openai", modelId: "gpt-5.6-sol" },
     ), false],
+    // 被下线或改名的 model id：provider 回 404，Broker 如实归类成 invalid_request，但 reasonCode
+    // 记着"是 404"。这一条必须换下一个候选——停止会让人以为自己的请求有问题。三种 reasonCode
+    // 写法说的是同一件事，都要认。
+    ["retired model id HTTP 404", new CodexBridgeError(
+      "ZAI Chat Completion returned HTTP 404.",
+      false,
+      "completed_failure",
+      422,
+      undefined,
+      { category: "invalid_request", reasonCode: "http_404", providerId: "zai-bigmodel-api", modelId: "glm-4.5" },
+    ), true],
+    ["retired model id with numeric provider code", new CodexBridgeError(
+      "ZAI Chat Completion returned HTTP 404 (code 404).",
+      false,
+      "completed_failure",
+      422,
+      undefined,
+      { category: "invalid_request", reasonCode: "404", providerId: "zai-bigmodel-api", modelId: "glm-4.5" },
+    ), true],
+    // 合同违规同样是 invalid_request，但 reasonCode 不是 404：这里必须停下。合同 bug 换一个模型
+    // 只会被掩盖成"第二个模型也不行"。
+    ["contract mismatch stays terminal", new CodexBridgeError(
+      "The requested task contract is not available on this broker.",
+      false,
+      "completed_failure",
+      422,
+      undefined,
+      { category: "invalid_request", reasonCode: "contract_mismatch", providerId: "codex-broker", modelId: "gpt-5.6-sol" },
+    ), false],
+    ["unsupported parameter stays terminal", new CodexBridgeError(
+      "request uses an unsupported parameter",
+      false,
+      "completed_failure",
+      422,
+      undefined,
+      { category: "invalid_request", reasonCode: "unsupported_parameter", providerId: "zai-bigmodel-api", modelId: "glm-5.3" },
+    ), false],
     ["output contract", new CodexBridgeError("output contract failed", false, "completed_failure", 503), false],
     ["content safety", new CodexBridgeError("content safety policy rejected the prompt", false, "completed_failure", 503), false],
     ["schema failure", new CodexBridgeError("response schema validation failed", false, "completed_failure", 503), false],

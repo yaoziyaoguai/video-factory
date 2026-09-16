@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import {
   CodexBridgeClient,
   CodexBridgeError,
+  FallbackBriefAuditAgent,
+  FallbackCreativeTreatmentAgent,
   IndependentVisualReviewError,
   ModelCandidatesExhaustedError,
   type CodexTaskExecution,
@@ -351,6 +353,99 @@ describe("buildRoleAgentAssembly", () => {
             ["gpt-writer", "openai"],
             ["gpt-5.6-sol", "openai"],
             ["glm-writer", "zai-bigmodel-api"],
+          ],
+        );
+        return true;
+      },
+    );
+  });
+
+  it("sends the selected model first for treatment and brief audit, not just in the picker", async () => {
+    // 界面上的候选顺序说明不了实际首发是谁：真正上线路的顺序由 Fallback*Agent 在调用时按
+    // selectedModelId 重排。这里照着生产的接法把两种 agent 真的建出来（与 production-pipeline
+    // 里 `new FallbackCreativeTreatmentAgent({ candidates: treatmentBindings })`、
+    // `new FallbackBriefAuditAgent({ candidates: bindings })` 同一形状），让每个候选都瞬断，
+    // 失败清单的顺序就是实际的尝试顺序。
+    const openai = new ControlledCodexClient("openai", "unused", () => {
+      throw new CodexBridgeError("OpenAI 暂时不可用。", true, "not_accepted", 503);
+    });
+    const zai = new ControlledCodexClient("zai-bigmodel-api", "unused", () => {
+      throw new CodexBridgeError("GLM 暂时不可用。", true, "not_accepted", 503);
+    });
+    const announced = ["gpt-5.6-sol", "gpt-6-astra"];
+    const result = buildRoleAgentAssembly({
+      codexSettings: {
+        ...settings("openai", ["creative-treatment", "role-audit"], {
+          "creative-treatment": "gpt-director",
+          "role-audit": "gpt-audit",
+        }),
+        modelCandidates: announced,
+      },
+      zaiCodexSettings: settings("zai", ["creative-treatment", "role-audit"], {
+        "creative-treatment": "glm-director",
+        "role-audit": "glm-audit",
+      }),
+      codexClient: openai,
+      zaiCodexClient: zai,
+      reviewMedia,
+      environment: {},
+    });
+    assert.deepEqual(
+      result.treatmentAgents.map(({ agent }) => agent.modelId),
+      ["gpt-director", "gpt-5.6-sol", "gpt-6-astra", "glm-director"],
+    );
+
+    await assert.rejects(
+      () => new FallbackCreativeTreatmentAgent({ candidates: result.treatmentAgents })
+        .treatDetailed({
+          brief: {
+            title: "下班后的三个真实动作",
+            angle: "验证构思候选顺序",
+            audience: "普通上班族",
+            nicheSlug: "assembly-treatment-order",
+            platform: "douyin",
+            durationSeconds: 24,
+          },
+          suppliedSources: [],
+          selectedModelId: "glm-director",
+        } as never),
+      (error: unknown) => {
+        assert.ok(error instanceof ModelCandidatesExhaustedError);
+        assert.deepEqual(
+          error.attempts.map((attempt) => [attempt.modelId, attempt.providerId]),
+          [
+            ["glm-director", "zai-bigmodel-api"],
+            ["gpt-director", "openai"],
+            ["gpt-5.6-sol", "openai"],
+            ["gpt-6-astra", "openai"],
+          ],
+        );
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      () => new FallbackBriefAuditAgent({ candidates: result.briefAuditAgents })
+        .auditBrief({
+          brief: {
+            title: "下班后的三个真实动作",
+            angle: "先做后说，不喊口号",
+            audience: "普通上班族",
+            nicheSlug: "assembly-brief-audit-order",
+            platform: "douyin",
+            durationSeconds: 24,
+          } as unknown as ProductionBrief,
+          selectedModelId: "gpt-6-astra",
+        } as never),
+      (error: unknown) => {
+        assert.ok(error instanceof ModelCandidatesExhaustedError);
+        assert.deepEqual(
+          error.attempts.map((attempt) => [attempt.modelId, attempt.providerId]),
+          [
+            ["gpt-6-astra", "openai"],
+            ["gpt-audit", "openai"],
+            ["gpt-5.6-sol", "openai"],
+            ["glm-audit", "zai-bigmodel-api"],
           ],
         );
         return true;

@@ -54,7 +54,6 @@ import {
   type StudioAgentLoopProgress,
   type StudioDecision,
   type StudioDecisionInput,
-  type StudioCreativeReviewConfirmInput,
   type StudioCreativeReviewCommandInput,
   type StudioCreativeReviewCommandReceipt,
   type StudioCreativeReviewSnapshot,
@@ -1483,10 +1482,12 @@ export class ProductionStudio {
       && (rawCheckResult.verdict === "pass" || rawCheckResult.verdict === "repair")
       && typeof rawCheckResult.score === "number"
       && typeof rawCheckResult.summary === "string"
+      && typeof rawCheckResult.checkIdentity === "string"
       ? {
         verdict: rawCheckResult.verdict,
         score: rawCheckResult.score,
         summary: rawCheckResult.summary,
+        checkIdentity: rawCheckResult.checkIdentity,
         issues: Array.isArray(rawCheckResult.issues) ? rawCheckResult.issues.filter(isRecord).flatMap((issue) => (
           (issue.severity === "advisory" || issue.severity === "blocking")
             && typeof issue.criterion === "string"
@@ -1508,10 +1509,10 @@ export class ProductionStudio {
       .filter((stage) => isRecord(stages?.[stage]) && isRecord((stages?.[stage] as Record<string, unknown>).currentDraft))
       .map((stage) => ({
         stage,
-        label: stage === "treatment" ? "返回导演方案" : "返回脚本",
+        label: stage === "treatment" ? "返回前期构思" : "返回脚本",
         impact: stage === "treatment"
-          ? "脚本、分镜和后续确认会失效；历史稿件与已经可用的素材会保留，重新确认后再生成后续方案。"
-          : "分镜和后续确认会失效；导演方案、历史稿件与已经可用的素材会保留。",
+          ? "脚本、导演方案和后续确认会失效；历史稿件与已经可用的素材会保留，重新确认后再生成后续方案。"
+          : "导演方案和后续确认会失效；前期构思、历史稿件与已经可用的素材会保留。",
       }));
     return {
       runId,
@@ -1611,40 +1612,6 @@ export class ProductionStudio {
       status,
       observationUrl: `/api/runs/${encodeURIComponent(runId)}/creative-review/commands/${encodeURIComponent(commandId)}`,
     };
-  }
-
-  async confirmCreativeReview(
-    runId: string,
-    input: StudioCreativeReviewConfirmInput,
-    actor: string,
-  ): Promise<StudioRunDetail> {
-    if (!this.options.pipeline.confirmCreativeReview) {
-      throw new StudioConflictError("当前制作引擎不支持创作阶段确认。");
-    }
-    const current = await this.loadRequiredRun(runId);
-    assertExecutableRunContinuation(current);
-    const intervention = current.nodeRuns.find((node) => node.nodeId === "creative-planning")?.intervention;
-    if (current.status !== "needs_human" || intervention?.kind !== "creative_review" || !intervention.continuation) {
-      throw new StudioConflictError("这条制作当前没有等待确认的创作方案。");
-    }
-    try {
-      const updated = await this.options.pipeline.confirmCreativeReview(runId, {
-        commandId: input.commandId,
-        actor,
-        expectedRunRevision: input.expectedRunRevision,
-        expectedReviewRevision: input.expectedReviewRevision,
-        stage: input.stage,
-        baseDraftSha256: input.baseDraftSha256,
-      });
-      const detail = this.toDetail(updated);
-      this.publish(detail);
-      return detail;
-    } catch (error) {
-      if (error instanceof StaleRunRevisionError || (error instanceof Error && /stale|another stage|locked by another writer/i.test(error.message))) {
-        throw new StudioConflictError("当前方案已经更新，请查看最新版后重新确认。");
-      }
-      throw error;
-    }
   }
 
   async requestSceneRevision(
@@ -4784,5 +4751,6 @@ function creativeReviewCommandDraft(
     baseDraftSha256: input.baseDraftSha256,
     action: "confirm",
     ...(input.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
+    ...(input.expectedCheckIdentity === undefined ? {} : { expectedCheckIdentity: input.expectedCheckIdentity }),
   };
 }

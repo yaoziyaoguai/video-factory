@@ -18,8 +18,8 @@ function review(overrides: Partial<StudioCreativeReviewSnapshot> = {}): StudioCr
     allowedActions: ["discuss", "adopt_proposal", "undo_draft", "confirm", "return_to_stage"],
     returnTargets: [{
       stage: "treatment",
-      label: "返回导演方案",
-      impact: "脚本、分镜及其后续确认会失效；历史稿件和已有素材保留。",
+      label: "返回前期构思",
+      impact: "脚本、导演方案和后续确认会失效；历史稿件与已经可用的素材会保留，重新确认后再生成后续方案。",
     }],
     draft: {
       narrativeArc: "问题到答案",
@@ -74,7 +74,7 @@ describe("CreativeDiscussionPanel", () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
     vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
-    const button = screen.getByRole("button", { name: "返回导演方案" });
+    const button = screen.getByRole("button", { name: "返回前期构思" });
     await userEvent.click(button);
     expect(onCommand).not.toHaveBeenCalled();
     await userEvent.click(button);
@@ -136,7 +136,7 @@ describe("CreativeDiscussionPanel", () => {
       }],
     })} busy={false} onCommand={vi.fn(async () => undefined)} />);
 
-    expect(screen.getByRole("heading", { name: "当前画面方案需要你决定" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "当前导演方案需要你决定" })).toBeInTheDocument();
     expect(screen.getByText(/已保留你确认的方案，不会自动改成生成画面/)).toBeInTheDocument();
     expect(screen.getByText(/镜头 1、2、3、4/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "修改后重新检查" })).toBeInTheDocument();
@@ -151,6 +151,7 @@ describe("CreativeDiscussionPanel", () => {
         verdict: "repair",
         score: 78,
         summary: "独立复核未通过",
+        checkIdentity: "c1d1e1f1" + "0".repeat(56),
         issues: [{
           severity: "blocking",
           criterion: "重新审片条件",
@@ -186,6 +187,7 @@ describe("CreativeDiscussionPanel", () => {
         verdict: "repair",
         score: 70,
         summary: "独立复核未通过",
+        checkIdentity: "c1d1e1f1" + "0".repeat(56),
         issues: [{
           severity: "blocking",
           criterion: "声音原则与已声明能力相容",
@@ -208,5 +210,18 @@ describe("CreativeDiscussionPanel", () => {
   it("still offers confirmation while no repair verdict is outstanding", () => {
     render(<CreativeDiscussionPanel review={review({ stage: "director" })} busy={false} onCommand={vi.fn(async () => undefined)} />);
     expect(screen.getByRole("button", { name: "确认当前方案，继续" })).toBeEnabled();
+  });
+
+  it("names each creative stage the way the rest of the studio names it", () => {
+    // 停点标题是创作者判断"我现在在确认哪一份东西"的唯一依据，所以三个阶段名逐段钉住：
+    // treatment=前期构思、script=脚本、director=导演方案（与 PlanningStagesPanel 一致）。
+    // 这里曾经把 treatment 显示成"导演方案"，于是停点说的名字和阶段列表说的名字对不上。
+    const headingByStage = { treatment: "前期构思已生成，等你确认", script: "脚本已生成，等你确认", director: "导演方案已生成，等你确认" } as const;
+    for (const [stage, heading] of Object.entries(headingByStage)) {
+      const { unmount } = render(<CreativeDiscussionPanel review={review({ stage: stage as keyof typeof headingByStage })} busy={false} onCommand={vi.fn(async () => undefined)} />);
+      expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+      expect(screen.getByLabelText(`当前${heading.replace("已生成，等你确认", "")}`)).toBeInTheDocument();
+      unmount();
+    }
   });
 });

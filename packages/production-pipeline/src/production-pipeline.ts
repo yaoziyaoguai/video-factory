@@ -251,6 +251,10 @@ export interface ProductionCreativeReviewConfirmationDraft {
   expectedReviewRevision: number;
   stage: CreativeStage;
   baseDraftSha256: string;
+  // 这两个字段必须跟着确认一起走。确认入口虽然只有一份实现，但类型上少一个字段，
+  // 走这几个窄入口的调用方就会把人的显式承担静默丢掉——那正是"仍然确认"曾经失效的样子。
+  acknowledgeRepair?: true;
+  expectedCheckIdentity?: string;
 }
 
 export type ProductionCreativeReviewCommandDraft = {
@@ -261,7 +265,7 @@ export type ProductionCreativeReviewCommandDraft = {
   stage: CreativeStage;
   baseDraftSha256: string;
 } & (
-  | { action: "confirm"; acknowledgeRepair?: true }
+  | { action: "confirm"; acknowledgeRepair?: true; expectedCheckIdentity?: string }
   | { action: "discuss"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
   | { action: "adopt_proposal"; proposalId: string }
   | { action: "undo_draft" }
@@ -1205,6 +1209,19 @@ export class ProductionPipeline {
         || continuation.draftSha256 !== draft.baseDraftSha256) {
         throw new Error("Creative review confirmation is stale or belongs to another stage draft.");
       }
+      if (draft.action === "confirm" && draft.acknowledgeRepair === true && draft.expectedCheckIdentity === undefined) {
+        // "仍然确认"复用他看过的那一条复核，所以命令必须自己说出是哪一条。这里曾经替他造一个
+        // identity：造出来的那个必然对不上记录里的那个，绑定就退化成一个永远失败的空检查，
+        // 报错还把人指向"没有独立复核"这种错误方向。
+        throw new Error("确认已经看过的复核意见时必须指明那一条复核的编号。");
+      }
+      if (draft.action === "confirm" && draft.acknowledgeRepair === true
+        && recordedCreativeCheckIdentity(node, continuation.stage) !== draft.expectedCheckIdentity) {
+        // 就在命令边界上证明他手上的编号就是记录里那一条。放进去让图来拒的话，形态会变成
+        // "这个节点失败了"——整条制作直接 failed，而他只是拿着一个过期的页面按了按钮。
+        // 图里那道同样的比对仍然保留：它守的是从 checkpoint 直接恢复的那条路。
+        throw new Error("你确认的那一条独立复核意见已经不是当前这一条了，请重新查看当前的复核意见再确认。");
+      }
       const brief = parsePersistedBrief(previous.initialInput);
       if (brief.workflowFeatures?.creativeReview !== "user-confirmed-v1") {
         throw new Error("This run does not use the user-confirmed creative review workflow.");
@@ -1223,7 +1240,9 @@ export class ProductionPipeline {
           // 人的显式承担必须跟着命令落到 resume 上：少了它，"仍然确认"就退化成再跑一轮复核，
           // 而新裁决照样是 repair 时人永远推不动这条制作。
           ...(draft.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
-          checkIdentity: contentSha256({
+          // 走"确认即复核"这条路时，reviewGateNode 会用刚跑出来的那一条复核覆盖这里的值，
+          // 所以缺省值只是个占位；复用已展示复核时必须由调用方带上，上面的守卫保证它存在。
+          checkIdentity: draft.expectedCheckIdentity ?? contentSha256({
             runId,
             stage: draft.stage,
             draftSha256: draft.baseDraftSha256,
@@ -4220,12 +4239,19 @@ export class ProductionPipeline {
 // 停点只由一个不带 kind 的 needs_human 表达——带 kind 会落到 creative_review 那类专门路径，
 // 而这里要的是通用路径：批准即把本节点标 succeeded、产物与回执原样保留、不重跑本节点。
 // 自己就返回 needs_human 的节点（final-review 等）原样放过，不二次包裹。
-function withBoundaryGate(node: NodeDefinition): NodeDefinition {
+export function withBoundaryGate(node: NodeDefinition): NodeDefinition {
   const execute = node.execute;
   if (!execute) return node;
   return {
     ...node,
     execute: async (input, context) => {
+      // qualityGates 只在"执行成功"之后评估（workflow-runner 的 evaluateQualityGates），而边界包装
+      // 会把成功整个换成人工停点——两者叠加会让一个不可绕过的约束在没人看见的地方消失，而停点上
+      // 还摆着一个"批准"按钮。今天没有任何节点声明 qualityGates，所以这条路走不到；真到了那一天，
+      // 需要先决定这些约束与人工停点的先后，而不是在这里静默降级。
+      if (node.qualityGates?.length) {
+        throw new Error(`节点 '${node.id}' 声明了 qualityGates，边界闸门无法在保留这些约束的前提下停下：请先决定约束与人工停点的先后，再启用边界闸门。`);
+      }
       const result = await execute(input, context);
       // 成功臂的 status 是可选的，undefined 与 "succeeded" 同义，两者都要拦下来。
       if (result.status !== undefined && result.status !== "succeeded") return result;
@@ -4264,6 +4290,22 @@ function finalReviewEvidenceId(node: WorkflowRun<ProductionBrief>["nodeRuns"][nu
   if (node.nodeId !== "final-review" || !isObjectRecord(node.output)) return null;
   const value = node.output.reviewEvidenceId;
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null;
+}
+
+/**
+ * 规划节点回执里记着的那一条独立复核的编号。规划状态整份落在节点输出里，所以"他看到的是哪一条"
+ * 在命令边界上就能查到，不必等到图里才知道。
+ */
+function recordedCreativeCheckIdentity(
+  node: WorkflowRun<ProductionBrief>["nodeRuns"][number],
+  stage: string,
+): string | undefined {
+  if (!isObjectRecord(node.output) || !isObjectRecord(node.output.creativeReview)) return undefined;
+  const stages = node.output.creativeReview.stages;
+  if (!isObjectRecord(stages) || !isObjectRecord(stages[stage])) return undefined;
+  const checkResult = stages[stage].checkResult;
+  if (!isObjectRecord(checkResult) || typeof checkResult.checkIdentity !== "string") return undefined;
+  return checkResult.checkIdentity;
 }
 
 function currentVisualReviewDelivery(run: WorkflowRun<ProductionBrief>): unknown {
@@ -6468,8 +6510,11 @@ const UNTRANSLATED_PLANNING_FAILURE = "这一步没有完成。可以重试；�
 
 // 曾经原样上屏的英文失败叙述。每一条都对应一个真实发生过的泄漏。
 const KNOWN_ENGLISH_FAILURE_NARRATIVES = [
-  // 创作复核跑完但没有通过的裁决时的旧抛错原文。
-  /check completed without a passing audit/i,
+  // 复核这一腿根本没跑出裁决时的抛错原文。两种措辞都要认：旧措辞说的是"没有通过的裁决"、
+  // 新措辞说的是"没有独立裁决"。它们都不是质量判断——复核压根没产出结论是执行故障，映射到
+  // "这一步没有完成"才不会被人读成作品被否。旧措辞仍在表内，是因为历史 run 的失败文案
+  // 会被缓存后再展示。
+  /check completed without (?:a passing|an independent) audit/i,
   // 确认后独立复核没有产出通过裁决时的旧抛错原文。
   /confirmation did not produce a passing independent check/i,
 ];
@@ -7397,8 +7442,8 @@ function creativePlanningNode(
                 : stage === "script"
                   ? "脚本草稿已生成，等你确认。"
                   : blockingIssues.length > 0
-                    ? "当前分镜方案需要你决定：素材条件无法满足已确认的画面路线，系统已保留方案且不会自动改写。"
-                    : "分镜与画面方案已生成，等你确认。",
+                    ? "当前导演方案需要你决定：素材条件无法满足已确认的画面路线，系统已保留方案且不会自动改写。"
+                    : "导演方案已生成，等你确认。",
               requiredAction: "approve",
               options: ["approve", "request_changes"],
               artifactIds: [registered.id],

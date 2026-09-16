@@ -174,7 +174,7 @@ describe("Studio client", () => {
     vi.spyOn(studioApi, "creativeReviewCommand").mockImplementation(async (_id, commandId) => ({ commandId, status: "completed", observationUrl: "/unused" }));
     render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
     await user.click(await screen.findByRole("button", { name: "采用这个备选" }));
-    await waitFor(() => expect(within(screen.getByRole("article", { name: "当前导演方案" })).getByText("采用后的新结尾")).toBeInTheDocument());
+    await waitFor(() => expect(within(screen.getByRole("article", { name: "当前前期构思" })).getByText("采用后的新结尾")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "确认当前方案，继续" })).toBeEnabled();
     expect(screen.queryByText("正在处理原操作")).not.toBeInTheDocument();
     expect(post).toHaveBeenCalledTimes(1);

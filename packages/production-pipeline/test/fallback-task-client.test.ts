@@ -196,4 +196,52 @@ describe("FallbackCodexTaskClient", () => {
     await assert.rejects(() => client.runTaskDetailed("publish-copy", {}), /Output contract is invalid/);
     assert.equal(zai.calls.length, 0);
   });
+
+  it("switches providers when the configured model id is retired", async () => {
+    // 模型被下线或改名：provider 回 404，Broker 照实归类成 invalid_request 并把 404 记进
+    // reasonCode。这条腿必须换下一个候选——停下来会让人以为自己的请求有问题，而合同一个字都没错。
+    const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
+      throw new CodexBridgeError("Codex bridge returned HTTP 422.", false, "completed_failure", 422, undefined, {
+        category: "invalid_request",
+        reasonCode: "http_404",
+        providerId: "openai",
+        modelId: "gpt-5.6-sol",
+      });
+    });
+    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const client = new FallbackCodexTaskClient({
+      candidates: [
+        { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
+        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["publish-copy"] },
+      ],
+    });
+
+    const execution = await client.runTaskDetailed("publish-copy", {}, "publish-retired-model");
+    assert.deepEqual(execution.output, { ok: true });
+    assert.equal(zai.calls.length, 1);
+    assert.match(zai.calls[0]?.requestId ?? "", /^backup-/);
+  });
+
+  it("does not switch providers for a request-contract violation", async () => {
+    // 同样是 invalid_request，但 reasonCode 说的是"请求本身不合合同"。换第二个模型只会把
+    // 合同 bug 掩盖成"第二个模型也不行"，所以这条腿必须停下并保留原证据。
+    const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
+      throw new CodexBridgeError("Codex bridge returned HTTP 422.", false, "completed_failure", 422, undefined, {
+        category: "invalid_request",
+        reasonCode: "contract_mismatch",
+        providerId: "codex-broker",
+        modelId: "gpt-5.6-sol",
+      });
+    });
+    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const client = new FallbackCodexTaskClient({
+      candidates: [
+        { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
+        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["publish-copy"] },
+      ],
+    });
+
+    await assert.rejects(() => client.runTaskDetailed("publish-copy", {}), /HTTP 422/);
+    assert.equal(zai.calls.length, 0);
+  });
 });

@@ -250,9 +250,9 @@ export function creativeReturnTargets(review: CreativeReviewState): CreativeStag
 }
 
 function returnImpactMessage(stage: CreativeStage): string {
-  if (stage === "treatment") return "已返回导演方案。脚本、分镜及其后续确认已失效；已有历史稿件和素材保留，重新确认后再生成下游。";
-  if (stage === "script") return "已返回脚本。导演方案确认保留，分镜及其后续确认已失效；已有历史稿件和素材保留。";
-  return "仍停留在分镜与画面方案；当前版本需要重新确认。";
+  if (stage === "treatment") return "已返回前期构思。脚本、导演方案及其后续确认已失效；已有历史稿件和素材保留，重新确认后再生成下游。";
+  if (stage === "script") return "已返回脚本。前期构思确认保留，导演方案及其后续确认已失效；已有历史稿件和素材保留。";
+  return "仍停留在导演方案；当前版本需要重新确认。";
 }
 
 function emptyStage(): CreativeStageReviewState {

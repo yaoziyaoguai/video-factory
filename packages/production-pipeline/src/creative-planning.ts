@@ -1466,13 +1466,21 @@ function reviewGateNode(
       // 人已经看过这一版字节的复核意见并明确承担：用他看过的那一条复核放行，不另跑一轮。
       // 重跑会把"他承担的是哪条结论"换成一条新裁决，确认留痕就不再是当时那个决定；
       // 而且裁决一旦再给 repair，人只能在同一条意见上无限重试，决策权又回到模型手里。
+      //
+      // 但"他看过的那一条"必须真的对得上：草稿、复核版本、复核编号三者都要吻合。
+      // 直接拿当前记录去覆盖 resume 里那三个期望值，等于把陈旧请求也重新绑到最新记录上，
+      // 人确认的就成了他从没见过的意见。
       const recorded = state.creativeReview.stages[stage].checkResult;
-      if (resume.acknowledgeRepair === true && recorded?.draftSha256 === gate.draft.sha256) {
+      if (resume.acknowledgeRepair === true) {
+        if (!recorded
+          || recorded.draftSha256 !== gate.draft.sha256
+          || resume.expectedReviewRevision !== state.creativeReview.reviewRevision
+          || resume.checkIdentity !== recorded.checkIdentity) {
+          throw new Error("你确认的那一条独立复核意见已经不是当前这一条了，请重新查看当前的复核意见再确认。");
+        }
         return {
           creativeReview: confirmCreativeDraft(state.creativeReview, {
             ...resume,
-            expectedReviewRevision: state.creativeReview.reviewRevision,
-            checkIdentity: recorded.checkIdentity,
             confirmedAt: new Date().toISOString(),
           }),
         };

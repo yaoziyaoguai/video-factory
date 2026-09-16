@@ -9197,6 +9197,111 @@ describe("ProductionPipeline", () => {
     assert.equal(scriptNode?.intervention?.boundary, "node-complete");
   });
 
+  it("机械节点也停在边界上：批准不重跑、后继不抢跑、发布包完成也不自动结束 run", async () => {
+    // 用户报的原始问题就是"系统自己一路跑到底"。所以这条不只走前面的规划节点，而是一直走到
+    // 发布包：每个机械节点都要停，停下时后继不许已经在跑，批准只翻转状态，产物原样保留。
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-mechanical-boundary-"));
+    const worker = new FakeWorker();
+    const gatedBrief = {
+      ...brief,
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" as const },
+    };
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+    let run = await subject.start(gatedBrief);
+
+    const stops: string[] = [];
+    let approvedAfterPublishPackage: WorkflowRun<pipeline.ProductionBrief> | undefined;
+    for (let step = 0; step < 20 && run.status === "needs_human"; step += 1) {
+      const stopped = run.nodeRuns.find((node) => node.status === "needs_human");
+      assert.ok(stopped, "needs_human 的 run 必须有一个真正停下的节点");
+      const intervention = stopped.intervention;
+      assert.ok(intervention, `停下的节点 ${stopped.nodeId} 必须带着一个干预`);
+      if (stopped.nodeId !== "final-review") {
+        // 机械节点和创作节点用同一种停点：不带 kind 的通用边界，按钮就是"批准"。
+        assert.equal(intervention.boundary, "node-complete", `${stopped.nodeId} 没走边界停点`);
+        assert.equal(intervention.kind, undefined, `${stopped.nodeId} 的停点被当成了别的干预类型`);
+        assert.deepEqual(intervention.options, ["approve", "reject"]);
+      }
+      assert.equal(stopped.error, undefined, `停下的节点不该带着错误：${stopped.nodeId}`);
+      stops.push(stopped.nodeId);
+
+      // 后继不抢跑：排在这个停点后面的节点，一个都不许是 running 或 succeeded。
+      const stoppedIndex = run.nodeRuns.findIndex((node) => node.nodeId === stopped.nodeId);
+      for (const later of run.nodeRuns.slice(stoppedIndex + 1)) {
+        assert.equal(
+          later.status === "running" || later.status === "succeeded",
+          false,
+          `${stopped.nodeId} 还没放行，${later.nodeId} 却已经是 ${later.status}`,
+        );
+      }
+
+      const before = run.nodeRuns.find((node) => node.nodeId === stopped.nodeId)!;
+      // 停在这一步时 run 必须还没收尾：发布包做完也一样，只有人放行才允许走到 succeeded。
+      assert.equal(run.status, "needs_human", `${stopped.nodeId} 停下时 run 已经自己收尾了`);
+      const decision = stopped.nodeId === "final-review"
+        ? humanDecisionFor(run, "approve", "owner", undefined, "default")
+        : {
+          interventionId: String(intervention.id),
+          action: "approve" as const,
+          actor: "owner",
+          expectedRunRevision: run.revision,
+          reviewEvidenceId: null,
+        };
+      run = await subject.decide(run.id, decision);
+
+      const after = run.nodeRuns.find((node) => node.nodeId === stopped.nodeId)!;
+      assert.equal(after.status, "succeeded", `批准 ${stopped.nodeId} 之后它该是成功`);
+      // 批准只翻转状态：产物、回执、输出都原样保留，绝不重跑这一步。
+      assert.deepEqual(after.artifactIds, before.artifactIds, `${stopped.nodeId} 被重跑了`);
+      assert.deepEqual(after.output, before.output, `${stopped.nodeId} 的输出被重算了`);
+      if (stopped.nodeId === "publish-package") approvedAfterPublishPackage = run;
+    }
+
+    // 走遍了机械链：素材、配音、渲染、技术质检、发布包都得停。
+    for (const nodeId of ["assets", "voice", "render", "technical-review", "publish-package"]) {
+      assert.ok(stops.includes(nodeId), `${nodeId} 没有停在边界上；实际停过：${stops.join(", ")}`);
+    }
+    assert.ok(approvedAfterPublishPackage, "发布包必须是一个停点");
+    // 整条 run 只因为人放行了最后一个停点才收尾——不是自己跑到底的。
+    assert.equal(run.status, "succeeded");
+
+    // 进程重启：停点是持久化的，换一个 pipeline 实例读同一个工作区，仍然停在同一个地方。
+    const restartRoot = await mkdtemp(path.join(tmpdir(), "video-factory-boundary-restart-"));
+    const restarted = new pipeline.ProductionPipeline({ workspaceRoot: restartRoot, worker: new FakeWorker() });
+    const waiting = await restarted.start({ ...gatedBrief, title: `${brief.title} 重启` });
+    const stoppedNode = waiting.nodeRuns.find((node) => node.status === "needs_human");
+    assert.equal(stoppedNode?.nodeId, "brief");
+    const reloaded = await new pipeline.ProductionPipeline({ workspaceRoot: restartRoot, worker: new FakeWorker() }).show(waiting.id);
+    assert.equal(reloaded.status, "needs_human");
+    assert.equal(
+      reloaded.nodeRuns.find((node) => node.nodeId === "brief")?.intervention?.id,
+      stoppedNode?.intervention?.id,
+    );
+  });
+
+  it("边界闸门不会静默跳过声明了 qualityGates 的节点", async () => {
+    // qualityGates 只在"执行成功"之后评估，而边界包装会把成功整个换成人工停点：两者叠加，
+    // 一个不可绕过的约束会在停点的"批准"按钮后面消失。今天没有任何节点声明 qualityGates，
+    // 所以这条路走不到；这里钉住的是"哪天真有人加第一个 gate"时的行为——显式拒绝，不静默降级。
+    const gated = pipeline.withBoundaryGate({
+      id: "gated-with-quality-gate",
+      label: "Gated node",
+      capability: "script.draft",
+      mode: "automatic",
+      qualityGates: [{
+        id: "must-hold",
+        description: "不可绕过的执行约束",
+        evaluate: () => ({ gateId: "must-hold", status: "failed", reasons: ["约束没通过"] }),
+      }],
+      execute: () => ({ output: { ok: true } }),
+    });
+
+    await assert.rejects(
+      () => gated.execute!(undefined, {} as never) as Promise<unknown>,
+      /qualityGates/,
+    );
+  });
+
   it("没有边界标记的简报仍落在原来的工作流版本上", () => {
     // 红线：不带标记的 brief 版本串必须逐字节不变，它同时是在飞 run 的续跑比较基准。
     assert.equal(pipeline.productionWorkflowVersion(brief), "1.0.0");

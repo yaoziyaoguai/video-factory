@@ -8,6 +8,7 @@ import {
   parseStudioOpportunityStatusInput,
   parseStudioNarrationRevisionInput,
   parseStudioPublishInput,
+  parseStudioCreativeReviewCommandInput,
   parseStudioSeriesInput,
   parseStudioDecisionInput,
   parseStudioVoicePreviewInput,
@@ -447,5 +448,53 @@ describe("scene narration revision API contracts", () => {
       }),
       (error: unknown) => error instanceof StudioInputError,
     );
+  });
+});
+
+describe("creative review confirm API contract", () => {
+  const base = {
+    action: "confirm",
+    commandId: "confirm-1",
+    expectedRunRevision: 3,
+    expectedReviewRevision: 7,
+    stage: "treatment",
+    baseDraftSha256: "a".repeat(64),
+  };
+
+  it("keeps the acknowledgement together with the review it overrides", () => {
+    assert.deepEqual(parseStudioCreativeReviewCommandInput({
+      ...base,
+      acknowledgeRepair: true,
+      expectedCheckIdentity: "b".repeat(64),
+    }), {
+      ...base,
+      acknowledgeRepair: true,
+      expectedCheckIdentity: "b".repeat(64),
+    });
+  });
+
+  it("refuses an acknowledgement that does not say which review it overrides", () => {
+    // 这两个字段曾经漏在字段白名单外，"看过意见，仍然确认"因此在 HTTP 入口就被拒，
+    // 界面上的按钮背后整条断路——而图级单测手工构造 resume，正好绕过了这一层。
+    assert.throws(
+      () => parseStudioCreativeReviewCommandInput({ ...base, acknowledgeRepair: true }),
+      (error: unknown) => error instanceof StudioInputError
+        && /确认前请先查看当前的独立复核意见/.test(error.message),
+    );
+  });
+
+  it("refuses a malformed review identity instead of forwarding it", () => {
+    assert.throws(
+      () => parseStudioCreativeReviewCommandInput({
+        ...base,
+        acknowledgeRepair: true,
+        expectedCheckIdentity: "not-a-digest",
+      }),
+      StudioInputError,
+    );
+  });
+
+  it("still accepts a plain confirmation that overrides nothing", () => {
+    assert.deepEqual(parseStudioCreativeReviewCommandInput(base), base);
   });
 });

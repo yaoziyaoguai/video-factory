@@ -266,10 +266,6 @@ export const studioApi = {
     `/api/runs/${encodeURIComponent(runId)}/creative-review/commands`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
-  confirmCreativeReview: (runId: string, input: StudioCreativeReviewConfirmInput) => requestJson<StudioCreativeReviewCommandReceipt>(
-    `/api/runs/${encodeURIComponent(runId)}/creative-review/commands`,
-    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
-  ),
   creativeReviewCommand: (runId: string, commandId: string) => requestJson<StudioCreativeReviewCommandReceipt>(
     `/api/runs/${encodeURIComponent(runId)}/creative-review/commands/${encodeURIComponent(commandId)}`,
   ),

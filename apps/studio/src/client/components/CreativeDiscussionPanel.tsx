@@ -8,7 +8,9 @@ interface CreativeDiscussionPanelProps {
   onCommand(input: StudioCreativeReviewCommandInput): Promise<void>;
 }
 
-const STAGE_LABEL = { treatment: "导演方案", script: "脚本", director: "分镜与画面方案" } as const;
+// 与 PlanningStagesPanel 的阶段名保持一致。这里曾经把 treatment 写成"导演方案"、
+// 把 director 写成"分镜与画面方案"，于是同一个停点的标题和提示各说各的名字。
+const STAGE_LABEL = { treatment: "前期构思", script: "脚本", director: "导演方案" } as const;
 
 export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDiscussionPanelProps) {
   const storageKey = `vf:creative-draft:${review.runId}:${review.stage}`;
@@ -88,6 +90,9 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       action: "confirm",
       commandId: crypto.randomUUID(),
       ...commandBase,
+      // 把界面上这一条复核的身份原样带回去：确认要指向人看到的意见，不能指向服务端
+      // 此刻恰好记着的那一条。
+      ...(review.checkResult ? { expectedCheckIdentity: review.checkResult.checkIdentity } : {}),
       ...(awaitingRepair ? { acknowledgeRepair: true } : {}),
     }).catch(() => undefined);
   }
@@ -108,7 +113,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       <header className="creative-discussion-header">
         <div>
           <p className="eyebrow">当前需要你参与</p>
-          <h2 id="creative-review-title">{hasBlockingIssues ? "当前画面方案需要你决定" : `${STAGE_LABEL[review.stage]}已生成，等你确认`}</h2>
+          <h2 id="creative-review-title">{hasBlockingIssues ? "当前导演方案需要你决定" : `${STAGE_LABEL[review.stage]}已生成，等你确认`}</h2>
           <p>{hasBlockingIssues
             ? "没有找到满足当前要求的素材。已保留你确认的方案，不会自动改成生成画面；请先在右侧告诉导演允许怎样调整，或补充合适素材。"
             : "可以直接继续，也可以先聊聊想改的地方。点确认会按当前这一版做一次独立复核：复核通过才进入下一步；复核提出意见时你会停在同一份方案上，可以照着改，也可以看过意见后仍然确认。确认不会购买素材。"}</p>

@@ -705,9 +705,6 @@ export class StudioService {
   creativeReview(runId: string): Promise<StudioCreativeReviewSnapshot | undefined> {
     return this.production.creativeReview(runId);
   }
-  confirmCreativeReview(runId: string, input: StudioCreativeReviewConfirmInput, actor = "studio-owner"): Promise<StudioRunDetail> {
-    return this.withLease(runId, async () => this.production.confirmCreativeReview(runId, input, actor));
-  }
   commandCreativeReview(runId: string, input: StudioCreativeReviewCommandInput, actor = "studio-owner"): Promise<StudioCreativeReviewCommandReceipt> {
     return this.withLease(runId, async () => this.production.commandCreativeReview(runId, input, actor));
   }

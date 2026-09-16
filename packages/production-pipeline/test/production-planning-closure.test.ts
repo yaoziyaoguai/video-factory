@@ -20,6 +20,7 @@ import {
   type VisualDirectorAgentInput,
   type WorkerResponse,
 } from "../src/index.js";
+import type { WorkflowRun } from "@video-factory/workflow-core";
 import { summarizeJointPlanningExecution } from "../src/production-pipeline.js";
 
 // ---------------------------------------------------------------------------
@@ -173,6 +174,53 @@ function passingCreativeReviewExecution<T>(
   };
 }
 
+/**
+ * 复核跑完但裁决是 repair：这不是执行故障，loop 以 awaiting_user 正常返回，把建议交给上层，
+ * 采不采用由人定。用来在真实 pipeline 上造出确定的"给出负面意见"那一腿。
+ */
+function repairingCreativeReviewExecution<T>(
+  output: T,
+  role: string,
+  contractVersion: string,
+  taskKind: "creative-treatment" | "script-draft" | "director-plan",
+  modelId: string,
+) {
+  const passed = passingCreativeReviewExecution(output, role, contractVersion, taskKind, modelId);
+  const iteration = passed.agentLoop.iterations[0]!;
+  return {
+    ...passed,
+    agentLoop: {
+      ...passed.agentLoop,
+      status: "awaiting_user" as const,
+      iterations: [{
+        ...iteration,
+        audit: {
+          ...iteration.audit,
+          assessments: [{
+            targetPath: "",
+            dimensions: [
+              { dimension: "attention" as const, score: 70, evidence: "开场是抽象概括。" },
+              { dimension: "progression" as const, score: 70, evidence: "中段推进偏慢。" },
+              { dimension: "payoff" as const, score: 70, evidence: "结尾没有收束。" },
+              { dimension: "expression" as const, score: 70, evidence: "表达偏空。" },
+            ],
+          }],
+          verdict: "repair" as const,
+          score: 70,
+          summary: "开场缺少具体对象，先改这一处再确认。",
+          issues: [{
+            severity: "blocking" as const,
+            criterion: "前两秒建立具体钩子",
+            evidence: "开场是抽象概括，没有具体动作。",
+            repairInstruction: "把开场换成一个人正在做的动作。",
+          }],
+          repairInstructions: ["把开场换成一个人正在做的动作。"],
+        },
+      }],
+    },
+  };
+}
+
 function legalTreatment(title: string): CreativeTreatment {
   return {
     version: "video-factory/creative-treatment-v2",
@@ -193,7 +241,7 @@ function legalTreatment(title: string): CreativeTreatment {
 // 两候选构思替身：记录每次调用实际使用的模型，可按候选制造 not_accepted 故障。
 function closureTreatmentAgents(
   spies: ClosureSpies,
-  options: { failFirstCandidate?: boolean } = {},
+  options: { failFirstCandidate?: boolean; repairCheck?: boolean } = {},
 ): Array<{ providerId: string; agent: CreativeTreatmentAgent }> {
   const makeAgent = (modelId: string, providerLabel: string): { providerId: string; agent: CreativeTreatmentAgent } => ({
     providerId: providerLabel,
@@ -208,7 +256,7 @@ function closureTreatmentAgents(
       treatDetailed: async (input: CreativeTreatmentAgentInput) => {
         if (input.creativeReviewExecution?.mode === "check") {
           spies.treatmentAuditCalls = (spies.treatmentAuditCalls ?? 0) + 1;
-          return passingCreativeReviewExecution(
+          return (options.repairCheck ? repairingCreativeReviewExecution : passingCreativeReviewExecution)(
             input.creativeReviewExecution.candidate,
             "导演前期构思",
             "fixture-treatment-contract-v1",
@@ -419,7 +467,7 @@ function scriptStageTemplateSnapshot() {
 function newClosurePipeline(
   workspaceRoot: string,
   spies: ClosureSpies,
-  treatmentOptions: { failFirstCandidate?: boolean } = {},
+  treatmentOptions: { failFirstCandidate?: boolean; repairCheck?: boolean } = {},
 ): ProductionPipeline {
   return new ProductionPipeline({
     workspaceRoot,
@@ -527,6 +575,105 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
     ]);
     assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
     assert.equal(outcomes.filter((outcome) => outcome.status === "rejected").length, 1);
+    assert.deepEqual(spies.screenwriterCalls, ["joint-v1 规划编辑闭环"]);
+  });
+
+  it("只认当前那一份复核：过期页面上的“仍然确认”被拒，当前页面的复用不再新增审计", async () => {
+    // F1 的反例，逐条走真实 pipeline：草稿没变、复核版本前进了。旧页面拿着旧版本号提交，
+    // 系统必须拒绝，而不是替他把旧确认绑到新记录上；当前页面按他真正看到的那一条确认则要
+    // 走通，并且复用已展示的复核——不新增一轮审计，这正是“默认审计一轮”。
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-creative-stale-confirm-"));
+    const spies: ClosureSpies = {
+      treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+    };
+    const pipeline = newClosurePipeline(workspaceRoot, spies, { repairCheck: true });
+    const started = await pipeline.start(closureBrief({ creativeReview: true }));
+
+    const gateOf = (run: WorkflowRun<ProductionBrief>) => {
+      const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning");
+      assert.ok(node?.intervention?.continuation, "创作规划必须停在复核停点上");
+      return { node, continuation: node.intervention.continuation };
+    };
+    const checkIdentityOf = (run: WorkflowRun<ProductionBrief>) => {
+      const output = gateOf(run).node.output as {
+        creativeReview: { stages: Record<string, { checkResult?: { verdict: string; checkIdentity: string } }> };
+      };
+      const checkResult = output.creativeReview.stages.treatment?.checkResult;
+      assert.ok(checkResult, "复核跑完必须留下可回查的裁决记录");
+      return checkResult;
+    };
+
+    const opener = gateOf(started).continuation;
+    assert.equal(opener.stage, "treatment");
+    // 旧页面上看到的那一版：草稿 H、复核版本 R。
+    const stalePage = { expectedReviewRevision: opener.reviewRevision, baseDraftSha256: opener.draftSha256 };
+
+    // 用户点“确认” → 系统只跑这一轮独立复核 → 裁决是 repair → 记成建议停在他面前。
+    const checked = await pipeline.confirmCreativeReview(started.id, {
+      commandId: "confirm-opener",
+      actor: "creator",
+      stage: "treatment",
+      expectedRunRevision: started.revision,
+      ...stalePage,
+    });
+    assert.equal(spies.treatmentAuditCalls, 1);
+    assert.equal(checked.status, "needs_human");
+    const afterCheck = gateOf(checked).continuation;
+    assert.equal(afterCheck.stage, "treatment");
+    assert.equal(afterCheck.draftSha256, stalePage.baseDraftSha256, "裁决只给建议，不改草稿");
+    assert.notEqual(afterCheck.reviewRevision, stalePage.expectedReviewRevision);
+    const shown = checkIdentityOf(checked);
+    assert.equal(shown.verdict, "repair");
+
+    // 旧页面提交：复核版本还停在 R，而记录已经前进。这份确认只能被拒。
+    await assert.rejects(
+      () => pipeline.confirmCreativeReview(checked.id, {
+        commandId: "confirm-from-stale-page",
+        actor: "creator",
+        stage: "treatment",
+        expectedRunRevision: checked.revision,
+        ...stalePage,
+        acknowledgeRepair: true,
+        expectedCheckIdentity: shown.checkIdentity,
+      }),
+      /stale or belongs to another stage draft/,
+    );
+
+    // 版本对上了、但编号指向另一条复核：同样不放行——人确认的必须是他看见的那一份。
+    await assert.rejects(
+      () => pipeline.confirmCreativeReview(checked.id, {
+        commandId: "confirm-with-wrong-check",
+        actor: "creator",
+        stage: "treatment",
+        expectedRunRevision: checked.revision,
+        expectedReviewRevision: afterCheck.reviewRevision,
+        baseDraftSha256: afterCheck.draftSha256,
+        acknowledgeRepair: true,
+        expectedCheckIdentity: "0".repeat(64),
+      }),
+      /复核/,
+    );
+
+    // 两次被拒都没有推走流程：仍停在同一个阶段，也没有偷偷多跑一轮审计。
+    const stillWaiting = await pipeline.show(checked.id);
+    assert.equal(stillWaiting.status, "needs_human");
+    assert.equal(gateOf(stillWaiting).continuation.stage, "treatment");
+    assert.equal(spies.treatmentAuditCalls, 1);
+
+    // 当前页面按他真正看到的那一条确认：复用，不新增审计。
+    const confirmed = await pipeline.confirmCreativeReview(checked.id, {
+      commandId: "confirm-current-check",
+      actor: "creator",
+      stage: "treatment",
+      expectedRunRevision: stillWaiting.revision,
+      expectedReviewRevision: afterCheck.reviewRevision,
+      baseDraftSha256: afterCheck.draftSha256,
+      acknowledgeRepair: true,
+      expectedCheckIdentity: shown.checkIdentity,
+    });
+    assert.equal(spies.treatmentAuditCalls, 1, "“仍然确认”复用已展示的复核，不能悄悄再跑一轮");
+    assert.equal(gateOf(confirmed).continuation.stage, "script");
     assert.deepEqual(spies.screenwriterCalls, ["joint-v1 规划编辑闭环"]);
   });
 
@@ -1824,6 +1971,17 @@ describe("planning failure creator copy (B4-FIX)", () => {
     assert.equal(leaked.includes("Creative review"), false);
     assert.equal(leaked.includes("passing audit"), false);
     assert.match(leaked, /^这一步没有完成/);
+
+    // 复核跑完但没有独立裁决，说的是"这一腿没产出结果"，不是"作品没通过"。措辞换成
+    // "independent audit" 之后必须仍然被认出来，且映射文案里不能出现评判作品的说法——
+    // 一旦这里退化成"未通过"，人就会把执行故障读成自己的方案被否掉。
+    const missingAudit = planningFailureForCreators(
+      "Creative review 'director' check completed without an independent audit.",
+    );
+    assert.equal(missingAudit.includes("Creative review"), false);
+    assert.equal(missingAudit.includes("independent audit"), false);
+    assert.equal(missingAudit.includes("未通过"), false);
+    assert.match(missingAudit, /^这一步没有完成/);
 
     // 兜底是"按句登记"，不是"看着像英文就替换"：未登记的英文诊断是这条腿唯一的下线信息，
     // 整句换成通用说明等于把它藏起来。上面的 provider 一条就是这个契约的守门人。

@@ -1349,6 +1349,9 @@ export interface StudioCreativeReviewSnapshot {
     score: number;
     summary: string;
     issues: Array<{ severity: "advisory" | "blocking"; criterion: string; evidence: string; repairInstruction: string }>;
+    // 这一条复核的身份。确认时原样回传，服务端拿它和当前记录比对——"确认"必须指向界面上
+    // 展示的那一条意见，而不是"当前这一版草稿碰巧存在的某条意见"。
+    checkIdentity: string;
   };
 }
 
@@ -1362,7 +1365,7 @@ type StudioCreativeReviewCommandBase = {
 
 export type StudioCreativeReviewCommandInput = StudioCreativeReviewCommandBase & (
   // 独立复核是"提议"而非"否决"：repair 时人仍可继续，但必须显式承担（与 return_to_stage 的 acknowledgeImpact 同模式）。
-  | { action: "confirm"; acknowledgeRepair?: boolean }
+  | { action: "confirm"; acknowledgeRepair?: boolean; expectedCheckIdentity?: string }
   | { action: "discuss"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
   | { action: "adopt_proposal"; proposalId: string }
   | { action: "undo_draft" }
@@ -1386,6 +1389,10 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
       ? ["proposalId"]
       : input.action === "return_to_stage"
         ? ["targetStage", "acknowledgeImpact"]
+        : input.action === "confirm"
+          // 这两个字段曾经漏在白名单外，于是"看过意见，仍然确认"在 HTTP 入口就被拒，
+          // 整条链在界面后面断掉、只在图级单测里看着是通的。
+          ? ["acknowledgeRepair", "expectedCheckIdentity"]
       : [];
   const allowed = new Set([...commonFields, ...actionFields]);
   const unknown = Object.keys(input).find((key) => !allowed.has(key));
@@ -1430,7 +1437,25 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
     if (input.acknowledgeImpact !== true) throw new StudioInputError("请先确认返回上游会使后续方案失效。");
     return { action: "return_to_stage", ...common, targetStage: input.targetStage as StudioPlanningEditableStage, acknowledgeImpact: true };
   }
-  return { action: "confirm", ...common, ...(input.acknowledgeRepair === true ? { acknowledgeRepair: true } : {}) };
+  if (input.acknowledgeRepair !== undefined && input.acknowledgeRepair !== true) {
+    throw new StudioInputError("确认意见承担标记不正确。");
+  }
+  const expectedCheckIdentity = input.expectedCheckIdentity;
+  if (expectedCheckIdentity !== undefined
+    && (typeof expectedCheckIdentity !== "string" || !/^[a-f0-9]{64}$/.test(expectedCheckIdentity))) {
+    throw new StudioInputError("复核意见编号格式不正确。");
+  }
+  // "仍然确认"必须说出它承担的是哪一条复核。说不出就不算"看过意见"：服务端只能拿当前
+  // 记录去凑，人确认的就不是他看到的那条意见了。
+  if (input.acknowledgeRepair === true && expectedCheckIdentity === undefined) {
+    throw new StudioInputError("确认前请先查看当前的独立复核意见。");
+  }
+  return {
+    action: "confirm",
+    ...common,
+    ...(input.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
+    ...(expectedCheckIdentity === undefined ? {} : { expectedCheckIdentity }),
+  };
 }
 
 export function parseStudioCreativeReviewConfirmInput(value: unknown): StudioCreativeReviewConfirmInput {
@@ -1830,7 +1855,7 @@ export interface StudioProductionInput {
     executablePlan?: boolean;
     /** 新制作显式写入 "joint-v1"（共同创作规划）；历史 run 不补标记。 */
     creativePlanning?: "joint-v1";
-    /** 导演方案、脚本、分镜逐阶段由用户确认后才继续。 */
+    /** 前期构思、脚本、导演方案逐阶段由用户确认后才继续。 */
     creativeReview?: "user-confirmed-v1";
     /** 每个节点边界都停下等用户放行；缺失即维持既有的自动推进。 */
     boundaryGates?: "user-confirmed-v1";
@@ -1867,7 +1892,7 @@ export function assertStudioExecutableProductionInput(value: unknown): void {
   }
   if ((workflowFeatures as Record<string, unknown>).creativePlanning !== "joint-v1"
     || (workflowFeatures as Record<string, unknown>).creativeReview !== "user-confirmed-v1") {
-    throw new StudioInputError("新建制作必须启用逐阶段讨论与确认，不能自动跳过导演方案、脚本或分镜确认。");
+    throw new StudioInputError("新建制作必须启用逐阶段讨论与确认，不能自动跳过前期构思、脚本或导演方案的确认。");
   }
   if ((workflowFeatures as Record<string, unknown>).boundaryGates !== "user-confirmed-v1") {
     throw new StudioInputError("新建制作必须在每个节点边界停下等你确认（workflowFeatures.boundaryGates=\"user-confirmed-v1\"）。");
