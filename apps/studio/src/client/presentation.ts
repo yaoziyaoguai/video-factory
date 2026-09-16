@@ -91,26 +91,7 @@ function uniqueText(values: string[]): string[] {
   return values.map((value) => value.trim()).filter((value, index, items) => value.length > 0 && items.indexOf(value) === index);
 }
 
-export function platformLabel(platform: string): string {
-  return ({
-    douyin: "抖音",
-    kuaishou: "快手",
-    xiaohongshu: "小红书",
-    shipinhao: "视频号",
-    bilibili: "哔哩哔哩",
-    weibo: "微博",
-    zhihu: "知乎",
-    baidu: "百度",
-    toutiao: "今日头条",
-    thepaper: "澎湃新闻",
-    "36kr": "36氪",
-    ithome: "IT之家",
-    sspai: "少数派",
-    hupu: "虎扑",
-    tieba: "百度贴吧",
-    guokr: "果壳",
-  } as Record<string, string>)[platform] ?? platform;
-}
+export { platformLabel } from "../shared/platform-label.js";
 
 export function providerLabel(providerId?: string): string | undefined {
   if (!providerId) return undefined;

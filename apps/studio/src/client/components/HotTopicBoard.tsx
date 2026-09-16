@@ -1,14 +1,16 @@
-import { ArrowRight, Link2, ShieldAlert, Sparkles, XCircle } from "lucide-react";
+import { AlertCircle, ArrowRight, Link2, ShieldAlert, Sparkles, XCircle } from "lucide-react";
 import { useMemo } from "react";
-import type { StudioCandidateInboxItem, StudioEditorialVerdict } from "../../shared/api.js";
+import type { StudioCandidateInboxItem, StudioTopicGenerationReceipt } from "../../shared/api.js";
 import { canonicalizeSourceUrl } from "../../shared/api.js";
 import { platformLabel, proposalSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
 
 interface HotTopicBoardProps {
   candidates: StudioCandidateInboxItem[];
+  topicGeneration?: StudioTopicGenerationReceipt;
   adoptingId?: string;
   onAdopt: (candidate: StudioCandidateInboxItem) => Promise<void>;
   onSupplementSources?: (candidate: StudioCandidateInboxItem) => void;
+  onRetry?: () => void;
 }
 
 // 待制作区一次只回答"今天先做哪一条"：Top 5 个热点足够覆盖一轮选题，
@@ -23,18 +25,37 @@ interface HotTopic {
   directions: StudioCandidateInboxItem[];
 }
 
-export function HotTopicBoard({ candidates, adoptingId, onAdopt, onSupplementSources }: HotTopicBoardProps) {
+export function HotTopicBoard({ candidates, topicGeneration, adoptingId, onAdopt, onSupplementSources, onRetry }: HotTopicBoardProps) {
   const topics = useMemo(() => buildHotTopics(candidates), [candidates]);
+  // 总编模型轮失败时整块看板都是规则线索：这时"每个热点已给出可用方向"是假话，
+  // 必须在不依赖用户逐行辨认的前提下先说清整块看板的性质。
+  // 不能只信 receipt：历史缓存可能没有 generationReceipt，那时看板仍是规则线索，
+  // 按候选本身判断才不会因为缺一个字段就退回假话。
+  const ruleFallback = topicGeneration?.source === "rule-fallback"
+    || (candidates.length > 0 && candidates.every(isRuleLead));
   if (topics.length === 0) return null;
   return (
     <section className="hot-topic-board" aria-labelledby="hot-topic-board-title" data-tour="hot-topic-board">
       <header className="hot-topic-board-heading">
         <div>
           <p className="eyebrow">今日热点机会</p>
-          <h3 id="hot-topic-board-title">最可能出爆款的 {topics.length} 个热点</h3>
+          <h3 id="hot-topic-board-title">综合选题分最高的 {topics.length} 个热点</h3>
         </div>
-        <span>每个热点已给出可用方向；选一个方向直接进入制作路径</span>
+        <span>{ruleFallback
+          ? "排序只说明这一轮的相对优先级，不是播放量预测；本轮没有总编给出的创作角度，下面是榜单原始线索"
+          : "排序只说明这一轮的相对优先级，不是播放量预测；每个热点已给出可用方向，选一个直接进入制作路径"}</span>
       </header>
+      {ruleFallback ? (
+        <div className="hot-topic-fallback" role="status">
+          <AlertCircle aria-hidden="true" size={16} />
+          <div>
+            <strong>本轮总编没有给出选题建议</strong>
+            <p>{topicGeneration ? ruleFallbackReason(topicGeneration) : "这些候选是本地规则按榜单信号生成的，没有经过选题总编。"}</p>
+            <p>下面的热点来自榜单信号，没有经过总编判断，也没有创作角度与观众需求评分——它们只是线索。你仍然可以选其中任意一条开工。</p>
+          </div>
+          {onRetry ? <button className="button button-secondary" type="button" onClick={onRetry}>重新生成</button> : null}
+        </div>
+      ) : null}
       <ol className="hot-topic-list">
         {topics.map((topic, index) => (
           <li className="hot-topic" key={topic.key}>
@@ -42,7 +63,8 @@ export function HotTopicBoard({ candidates, adoptingId, onAdopt, onSupplementSou
               <span className="hot-topic-index">{String(index + 1).padStart(2, "0")}</span>
               <div>
                 <strong>{topic.headline}</strong>
-                <small>{topic.sourceLabel} · {topic.directions.length} 个方向</small>
+                {/* 规则线索没有方向可数：写"2 个方向"等于替总编认领了它没给过的东西。 */}
+                <small>{topic.sourceLabel} · {topic.directions.length} {ruleFallback ? "条线索" : "个方向"}</small>
               </div>
             </header>
             <ul className="hot-direction-list">
@@ -76,9 +98,15 @@ function DirectionRow({ item, adopting, disabled, onAdopt, onSupplementSources }
     <li className="hot-direction">
       <div className="hot-direction-copy">
         <strong>{item.title}</strong>
-        <p>{item.hook}</p>
+        {/* 规则线索的 hook 是把榜单标题套进问句模板生成的，不是总编想出来的角度。
+            把它当"方向"印出来会让用户以为这条有人想过——这里如实说没有角度。 */}
+        {isRuleLead(item)
+          ? <p>总编本轮没有为这条给出创作角度。</p>
+          : <p>{item.hook}</p>}
         <small>
-          {editorialVerdictLabel(item.editorialDecision.verdict)} · {TOPIC_CATEGORY_LABELS[item.category]} · {item.audience} · <Sparkles aria-hidden="true" size={11} />{proposalSourceLabel(item.providerId)}
+          {editorialVerdictLabel(item)} · {TOPIC_CATEGORY_LABELS[item.category]} · {item.audience}
+          {item.score.audienceDemand === undefined ? null : ` · 观众需求 ${Math.round(item.score.audienceDemand)}`}
+          {" · "}<Sparkles aria-hidden="true" size={11} />{proposalSourceLabel(item.providerId)}
         </small>
       </div>
       <div className="hot-direction-action">
@@ -131,6 +159,10 @@ function directionAction(item: StudioCandidateInboxItem, canSupplement: boolean)
       supplement: canSupplement,
     };
   }
+  // 规则线索没有总编结论，不能把"还没评估"说成"总编不建议生产"——那样等于替总编表态。
+  if (isRuleLead(item)) {
+    return { kind: "adopt", label: "仍然进入制作", note: `总编本轮没有评估这条：${item.editorialDecision.reasons[0] ?? "未经选题总编判断。"}（是否开工由你决定）` };
+  }
   if (item.editorialDecision.verdict === "skip") {
     return { kind: "adopt", label: "仍然进入制作", note: `总编不建议生产：${item.editorialDecision.reasons[0] ?? "未给出理由。"}（是否开工由你决定）` };
   }
@@ -166,7 +198,7 @@ function hotTopicKey(candidate: StudioCandidateInboxItem): string {
 function buildHotTopics(candidates: StudioCandidateInboxItem[]): HotTopic[] {
   const groups = new Map<string, StudioCandidateInboxItem[]>();
   // 排序必须用界面上显示的那个分：规则保底候选还没有总编评分，
-  // 按 editorialDecision.score（恒为 0）排会让"最可能出爆款"这个标题和列表顺序自相矛盾。
+  // 按 editorialDecision.score（恒为 0）排会让标题里的"综合选题分最高"和列表顺序自相矛盾。
   for (const candidate of [...candidates].sort((left, right) => editorialScoreValue(right) - editorialScoreValue(left))) {
     const key = hotTopicKey(candidate);
     const group = groups.get(key);
@@ -190,10 +222,30 @@ function isManualEvidence(evidence: { source: string; platform: string }): boole
   return evidence.source === "manual-supplement" || evidence.platform === "manual";
 }
 
-function editorialVerdictLabel(verdict: StudioEditorialVerdict): string {
+// 规则线索的 verdict 是本地规则算出来的"skip"，不是总编的判断：
+// 直接印"暂不生产"会让用户以为是总编否掉了这条。
+function editorialVerdictLabel(item: StudioCandidateInboxItem): string {
+  if (isRuleLead(item)) return "待总编评估";
   return {
     produce_video: "建议视频",
     produce_image_story: "建议图文成片",
     skip: "暂不生产",
-  }[verdict];
+  }[item.editorialDecision.verdict];
+}
+
+// pendingEditorReview 只在候选由本地规则产出时为真（editorial-decision.ts 按 providerId 标记），
+// 所以它就是"这条没有经过总编"的权威标记，不需要再去猜 providerId 的写法。
+function isRuleLead(item: StudioCandidateInboxItem): boolean {
+  return item.editorialDecision.pendingEditorReview === true;
+}
+
+// 只说"总编没给建议"不够：用户无从判断是模型不可用、超时，还是输出被合同拦下。
+function ruleFallbackReason(receipt: StudioTopicGenerationReceipt): string {
+  const category = {
+    model_unavailable: "总编模型当前不可用。",
+    accepted_unknown: "总编的产出没有通过合同校验。",
+    contract_rejected: "总编的产出被任务合同拒绝。",
+    model_error: "总编这轮执行出错。",
+  }[receipt.failureCategory ?? "model_error"];
+  return receipt.failureReason ? `${category}原因：${receipt.failureReason}` : category;
 }

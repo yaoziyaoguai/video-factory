@@ -45,7 +45,7 @@ export function decideEditorialFormat(
   input: EditorialDecisionInput,
   _publishedTemplates: readonly EditorialTemplateOption[],
 ): StudioEditorialDecision {
-  const decision = decideProductionPotential(input);
+  const decision = withDemandAdvice(decideProductionPotential(input), input.score.audienceDemand);
   // 规则保底候选的所有结论都没有经过选题总编：无论走哪个分支，都要如实标记等待评估，
   // 避免把"尚未评估"投影成"总编评分 0 · 暂不生产"。
   const marked = input.providerId === "trend-heuristic-v1"
@@ -85,15 +85,7 @@ function decideProductionPotential(
 
   const topicText = `${input.title} ${input.track}`;
   const staticUpdate = isPublicStaticUpdate(input, topicText);
-  const videoValue = Math.round(
-    input.score.visualFeasibility * 0.34
-    + input.score.novelty * 0.2
-    + input.score.audienceReach * 0.18
-    + input.score.productionCostEfficiency * 0.16
-    + input.score.seriesPotential * 0.12
-    - input.score.complianceRisk * 0.22
-    - (staticUpdate ? 12 : 0),
-  );
+  const videoValue = Math.round(scoreVideoValue(input.score) - (staticUpdate ? 12 : 0));
 
   if (input.risk !== "low" || staticUpdate || input.score.visualFeasibility < 62) {
     if (input.score.audienceReach < 42 && input.score.novelty < 42) {
@@ -138,6 +130,54 @@ function decideProductionPotential(
     score: clamp(videoValue),
     reasons: [`面向${audience}，围绕“${painPoint}”的画面可行性和创作增量达到视频生产门槛。`],
     guardrails: [`前两秒兑现钩子“${input.hook!.trim()}”；事实与结果必须回到${evidenceSources}，热度本身不能替代内容价值。`],
+  };
+}
+
+// 显示在候选卡上的"评分"就是这条综合分。旧公式把近一半权重给了视觉可行性与成本效率——
+// 那是"我们做不做得出来"，不是"有没有人看"，于是最容易做的选题排在最前，而观众需求从未入场。
+// 现在观众需求由选题总编单独打分并占最高权重；热度派生的 audienceReach 权重下调，
+// 因为同一批候选的热度普遍接近满分，它几乎不区分任何东西。
+const VIDEO_VALUE_WEIGHTS_WITH_DEMAND: ReadonlyArray<readonly [keyof StudioOpportunityScore, number]> = [
+  ["audienceDemand", 0.26],
+  ["visualFeasibility", 0.2],
+  ["novelty", 0.18],
+  ["seriesPotential", 0.14],
+  ["productionCostEfficiency", 0.12],
+  ["audienceReach", 0.1],
+];
+
+// 没有需求分时沿用原权重，不假装把需求权重重新分配给别的维度：系列路线图候选与规则保底候选
+// 本来就没经过这道判断，给它们换一套口径只会让"评估过"和"没评估过"看起来一样。
+const VIDEO_VALUE_WEIGHTS_WITHOUT_DEMAND: ReadonlyArray<readonly [keyof StudioOpportunityScore, number]> = [
+  ["visualFeasibility", 0.34],
+  ["novelty", 0.2],
+  ["audienceReach", 0.18],
+  ["productionCostEfficiency", 0.16],
+  ["seriesPotential", 0.12],
+];
+
+function scoreVideoValue(score: StudioOpportunityScore): number {
+  const weights = score.audienceDemand === undefined
+    ? VIDEO_VALUE_WEIGHTS_WITHOUT_DEMAND
+    : VIDEO_VALUE_WEIGHTS_WITH_DEMAND;
+  const positive = weights.reduce((sum, [key, weight]) => sum + (score[key] ?? 0) * weight, 0);
+  return positive - score.complianceRisk * 0.22;
+}
+
+// 需求偏弱只出建议，不新增否决线：这条进 guardrails 而不是 verdict。
+const DEMAND_ADVISORY_FLOOR = 55;
+
+function withDemandAdvice(
+  decision: StudioEditorialDecision,
+  audienceDemand: number | undefined,
+): StudioEditorialDecision {
+  if (audienceDemand === undefined || audienceDemand >= DEMAND_ADVISORY_FLOOR) return decision;
+  return {
+    ...decision,
+    guardrails: [
+      `选题总编判断这条的观众需求偏弱（${audienceDemand}/100）：说不清具体是谁、在什么场景下会因为什么点开。热度不等于有人看，这只是建议，是否开工由你决定。`,
+      ...decision.guardrails,
+    ],
   };
 }
 

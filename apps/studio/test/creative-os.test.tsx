@@ -1001,7 +1001,9 @@ describe("Creative OS", () => {
     );
 
     expect(screen.getAllByText(opportunity.title).length).toBeGreaterThan(0);
-    expect(screen.getByRole("link", { name: /manual-research/ })).toHaveAttribute("href", "https://example.com/evidence");
+    // 来源线索印的必须是用户认得的平台，不是采集器 id：manual-research 对用户没有意义。
+    expect(screen.getByRole("link", { name: "查看 下班后什么都不想做 来源" })).toHaveAttribute("href", "https://example.com/evidence");
+    expect(screen.queryByText("manual-research")).toBeNull();
     expect(screen.getByText("84")).toBeInTheDocument();
     expect(screen.getByLabelText("机会评分维度")).toHaveTextContent("安全82%");
     expect(screen.getAllByText(/录入时估分/).length).toBeGreaterThan(0);
@@ -1472,6 +1474,51 @@ describe("Creative OS", () => {
     expect(screen.getByText("总编不建议 · 0 分")).toBeInTheDocument();
     expect(screen.getAllByText("没有越过生产门槛。").length).toBeGreaterThan(0);
     expect(screen.queryByText("证据不足，暂不可采用")).not.toBeInTheDocument();
+  });
+
+  it("never bills a rule-baseline round as the editor's judgement or leaks the collector id", async () => {
+    const user = userEvent.setup();
+    // 规则保底候选的 skip 是本地规则算出来的，不是总编说的：
+    // 把它算进"总编不建议"会让从未评估过的候选看起来像被人否掉过。
+    const ruleLead: StudioCandidateInboxItem = {
+      ...unselectedCandidate(81),
+      providerId: "trend-heuristic-v1",
+      editorialDecision: {
+        verdict: "skip",
+        score: 0,
+        reasons: ["当前只是热点规则保底候选，还没有经过选题总编形成具体、可拍的创作角度。"],
+        guardrails: [],
+        pendingEditorReview: true,
+      },
+    };
+    render(<MemoryRouter><TopicEntryWorkspace
+      initialMode="trend"
+      selectedSeriesId={undefined}
+      inbox={inbox([ruleLead])}
+      series={[]}
+      historicalRuns={[]}
+      loading={{}}
+      trendMeta={{ platformCount: 1, candidateCount: 1 }}
+      onRetry={vi.fn()}
+      onRefreshTrends={vi.fn()}
+      onAdopt={vi.fn()}
+      onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()}
+      onUpdateSeriesEpisode={vi.fn()}
+      onLinkLegacyRun={vi.fn()}
+      onRescanSeries={vi.fn()}
+      onViewProductionRecords={vi.fn()}
+      onSupplementSources={vi.fn()}
+      onManual={vi.fn()}
+      onImport={vi.fn()}
+    /></MemoryRouter>);
+
+    expect(screen.getByRole("button", { name: /待总编评估 1/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /总编不建议 0/ })).toBeDisabled();
+    expect(screen.getByText("本轮热点由本地规则保底生成，还没有经过选题总编转译；先筛选，再核验证据。")).toBeInTheDocument();
+    // 来源线索给的是平台，采集器 id 是内部实现，不该出现在用户面前。
+    await user.click(screen.getByRole("button", { name: `查看${ruleLead.title}` }));
+    expect(screen.getByText("抖音 · 榜单热度或排名信号 90")).toBeInTheDocument();
   });
 
   it("focuses the first source-blocked historical topic from the recovery action instead of the editorially skipped one", async () => {
@@ -1967,8 +2014,9 @@ describe("Creative OS", () => {
       onImport={vi.fn()}
     /></MemoryRouter>);
 
-    // 两条候选都是总编不建议：它们照常出现在候选列表里，没有被闸门藏进任何分区。
-    await user.click(await screen.findByRole("button", { name: /总编不建议 2/ }));
+    // 两条候选各归各的分区：规则保底进"待总编评估"，总编真评过零分的才进"总编不建议"。
+    // 两者照常出现在候选列表里，没有被任何闸门藏进任何分区。
+    await user.click(await screen.findByRole("button", { name: /待总编评估 1/ }));
 
     // 规则保底候选：分数芯片显示“待总编评估”，绝不把“尚未评估”投影成“总编评分 0”。
     const heuristicRow = screen.getByRole("button", { name: `查看${heuristicCandidate.title}` });
@@ -1981,11 +2029,12 @@ describe("Creative OS", () => {
     expect(screen.getByText("尚未评估 · 当前只有规则保底")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: `采用候选 ${heuristicCandidate.title}` })).toHaveTextContent("仍然采用");
     expect(screen.getByRole("button", { name: `采用候选 ${heuristicCandidate.title}` })).toBeEnabled();
-    // 总编不建议只是醒目标注，按钮保持可用。
-    expect(screen.getByRole("note")).toHaveTextContent("总编不建议生产：当前只是热点规则保底候选，还没有经过选题总编形成具体、可拍的创作角度。（只是建议，不影响你采用）");
+    // 提醒只是醒目标注，按钮保持可用；措辞必须说"没评估过"，不能替总编说"不建议"。
+    expect(screen.getByRole("note")).toHaveTextContent("总编本轮没有评估这条：当前只是热点规则保底候选，还没有经过选题总编形成具体、可拍的创作角度。（只是建议，不影响你采用）");
     expect(screen.queryByLabelText("总编评分 0 分")).not.toBeInTheDocument();
 
     // 真实总编评出的 0 分仍如实显示为“总编评分 0”，不与“尚未评估”混淆。
+    await user.click(screen.getByRole("button", { name: /总编不建议 1/ }));
     await user.click(screen.getByRole("button", { name: `查看${modelEvaluated.title}` }));
     expect(screen.getByLabelText("总编评分 0 分")).toBeInTheDocument();
     expect(screen.getByText("总编不建议 · 0 分")).toBeInTheDocument();

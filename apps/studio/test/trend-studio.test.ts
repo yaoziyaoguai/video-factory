@@ -150,7 +150,7 @@ describe("TrendStudio", () => {
       assert.deepEqual(await first.listCandidates(), cached);
       assert.equal(firstCalls, 1);
       const persisted = JSON.parse(await readFile(cachePath, "utf8"));
-      assert.equal(persisted.schemaVersion, 5);
+      assert.equal(persisted.schemaVersion, 6);
       assert.deepEqual(persisted.generationReceipt, generationReceipt);
 
       let restartedCalls = 0;
@@ -165,6 +165,45 @@ describe("TrendStudio", () => {
       assert.deepEqual(await restarted.listCandidates(), cached);
       assert.equal(restartedCalls, 0);
       assert.deepEqual(restarted.latestGenerationReceipt(), generationReceipt);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("names why the topic editor never ran when no agent was wired at startup", async () => {
+    // 没有 trendAgent 就说明选题总编任务在启动时没就绪。这条路径不会产生 generationFallback，
+    // 不补原因的话用户只看到一堆规则候选，无从知道总编为什么没给建议。
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-trend-no-editor-"));
+    try {
+      const studio = new TrendStudio({
+        repositoryRoot: "/repo",
+        cachePath: path.join(root, "candidates.json"),
+        environment: {},
+        now: () => new Date("2026-08-30T12:00:00.000Z"),
+        trendGateway: {
+          listServices: async () => [],
+          listSignals: async () => [{
+            id: "signal-guokr-1",
+            sourceId: "dailyhot" as const,
+            platform: "guokr",
+            title: "被用了几千年的铜，怎么突然成了AI时代的新宠？",
+            rank: 1,
+            collectedAt: "2026-08-30T11:00:00.000Z",
+            url: "https://www.guokr.com/article/470243",
+          }],
+        },
+      });
+
+      const candidates = await studio.listCandidates();
+      const receipt = studio.latestGenerationReceipt();
+      assert.equal(receipt?.source, "rule-fallback");
+      assert.equal(receipt?.modelInvoked, false);
+      assert.equal(receipt?.failureCategory, "model_unavailable");
+      assert.match(receipt?.failureReason ?? "", /总编/);
+      // 线索文案写给用户看：平台标识和"零成本规则评分"这类内部口径都不能出现。
+      for (const candidate of candidates) {
+        assert.doesNotMatch(candidate.rationale ?? "", /guokr|零成本规则评分/);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }

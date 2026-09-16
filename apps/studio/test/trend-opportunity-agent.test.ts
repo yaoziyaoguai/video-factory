@@ -123,6 +123,7 @@ describe("TrendOpportunityAgent", () => {
         novelty: 85,
         seriesPotential: 88,
         monetization: 72,
+        audienceDemand: 70,
       }],
     }));
     const model = new CodexTopicIdeaModel(codexClient);
@@ -205,6 +206,7 @@ describe("TrendOpportunityAgent", () => {
       novelty: 80,
       seriesPotential: 80,
       monetization: 60,
+      audienceDemand: 70,
     };
     const safeIdea = {
       ...unsafeIdea,
@@ -282,6 +284,7 @@ describe("TrendOpportunityAgent", () => {
       novelty: 80,
       seriesPotential: 80,
       monetization: 60,
+      audienceDemand: 70,
     };
     class NeverPassingClient extends CodexBridgeClient {
       private topicCalls = 0;
@@ -345,6 +348,7 @@ describe("TrendOpportunityAgent", () => {
         novelty: 85,
         seriesPotential: 88,
         monetization: 72,
+        audienceDemand: 70,
       }],
       lastAuditAdvice: () => ({
         status: "awaiting_user",
@@ -392,6 +396,7 @@ describe("TrendOpportunityAgent", () => {
         novelty: 85,
         seriesPotential: 88,
         monetization: 72,
+        audienceDemand: 70,
       }],
     }));
 
@@ -428,6 +433,7 @@ describe("TrendOpportunityAgent", () => {
         novelty: 85,
         seriesPotential: 88,
         monetization: 72,
+        audienceDemand: 70,
       }],
     }));
     const model = new CodexTopicIdeaModel(codexClient);
@@ -468,6 +474,7 @@ describe("TrendOpportunityAgent", () => {
         novelty: 85,
         seriesPotential: 88,
         monetization: 72,
+        audienceDemand: 70,
       }],
     }));
     const model = new CodexTopicIdeaModel(codexClient);
@@ -495,6 +502,7 @@ describe("TrendOpportunityAgent", () => {
         novelty: 85,
         seriesPotential: 88,
         monetization: 72,
+        audienceDemand: 70,
       }],
     }));
     const model = new CodexTopicIdeaModel(codexClient);
@@ -546,6 +554,7 @@ describe("TrendOpportunityAgent", () => {
       novelty: 85,
       seriesPotential: 88,
       monetization: 72,
+      audienceDemand: 70,
     });
     const model: TrendIdeaModel = {
       id: "api-topic-editor-v1",
@@ -603,6 +612,7 @@ describe("TrendOpportunityAgent", () => {
         novelty: 85,
         seriesPotential: 88,
         monetization: 72,
+        audienceDemand: 70,
       }],
     };
     const agent = new TrendOpportunityAgent({
@@ -648,6 +658,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 0,
           seriesPotential: 1,
           monetization: 2,
+          audienceDemand: 70,
         }],
       },
     });
@@ -685,6 +696,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 85,
           seriesPotential: 88,
           monetization: 72,
+          audienceDemand: 70,
         }],
       },
     });
@@ -721,6 +733,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 1,
           seriesPotential: 1,
           monetization: 1,
+          audienceDemand: 70,
         }],
       },
     });
@@ -793,6 +806,7 @@ describe("TrendOpportunityAgent", () => {
             novelty: 80,
             seriesPotential: 76,
             monetization: 40,
+            audienceDemand: 70,
           }];
         },
       },
@@ -892,7 +906,11 @@ describe("TrendOpportunityAgent", () => {
     const candidates = await agent.listCandidates({ generationNonce: "fallback-generation-1" });
 
     assert.equal(candidates[0]?.providerId, "trend-heuristic-v1");
-    assert.match(candidates[0]?.rationale ?? "", /排名/);
+    // 兜底线索的说明要写给用户看：说清它来自哪个平台的第几名、还没经过总编，
+    // 不能出现"零成本规则评分"这类内部口径。
+    assert.match(candidates[0]?.rationale ?? "", /抖音.*第 2 名/);
+    assert.match(candidates[0]?.rationale ?? "", /尚未经过选题总编/);
+    assert.doesNotMatch(candidates[0]?.rationale ?? "", /零成本|规则评分/);
     assert.deepEqual(agent.generationReceipt(), {
       generationId: "fallback-generation-1",
       generatedAt: "2026-09-12T10:00:00.000Z",
@@ -998,6 +1016,7 @@ describe("TrendOpportunityAgent", () => {
             novelty: 82,
             seriesPotential: 86,
             monetization: 68,
+            audienceDemand: 70,
           }];
         },
       },
@@ -1073,6 +1092,7 @@ describe("TrendOpportunityAgent", () => {
             novelty: 82,
             seriesPotential: 86,
             monetization: 68,
+            audienceDemand: 70,
           }];
         },
       },
@@ -1100,6 +1120,7 @@ describe("TrendOpportunityAgent", () => {
         novelty: 80,
         seriesPotential: 70,
         monetization: 60,
+        audienceDemand: 70,
       }],
     };
     const agent = new TrendOpportunityAgent({
@@ -1127,6 +1148,7 @@ describe("TrendOpportunityAgent", () => {
         novelty: 90,
         seriesPotential: 60,
         monetization: 40,
+        audienceDemand: 70,
       }],
     };
     const quakeSignal: StudioTrendSignal = {
@@ -1163,6 +1185,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 82,
           seriesPotential: 86,
           monetization: 70,
+          audienceDemand: 70,
         }],
       },
     });
@@ -1202,6 +1225,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 80,
           seriesPotential: 80,
           monetization: 60,
+          audienceDemand: 70,
         }],
       },
     });
@@ -1234,6 +1258,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 82,
           seriesPotential: 86,
           monetization: 70,
+          audienceDemand: 70,
         }],
       },
     });
@@ -1281,6 +1306,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 80,
           seriesPotential: 60,
           monetization: 20,
+          audienceDemand: 70,
         }],
       },
     });
@@ -1318,6 +1344,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 76,
           seriesPotential: 55,
           monetization: 15,
+          audienceDemand: 70,
         }],
       },
     });
@@ -1370,6 +1397,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 70,
           seriesPotential: 60,
           monetization: 20,
+          audienceDemand: 70,
         }],
       },
     });
@@ -1400,6 +1428,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 82,
           seriesPotential: 86,
           monetization: 70,
+          audienceDemand: 70,
         }],
       },
     });
@@ -1436,6 +1465,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 85,
           seriesPotential: 88,
           monetization: 72,
+          audienceDemand: 70,
         }],
       },
     });
@@ -1477,6 +1507,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 70,
           seriesPotential: 30,
           monetization: 10,
+          audienceDemand: 70,
         }],
       },
     });
@@ -1504,6 +1535,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 0,
           seriesPotential: 0,
           monetization: 0,
+          audienceDemand: 70,
         }],
       },
     });
@@ -1531,6 +1563,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 80,
           seriesPotential: 85,
           monetization: 60,
+          audienceDemand: 70,
         }],
       },
     });
@@ -1572,6 +1605,7 @@ describe("TrendOpportunityAgent", () => {
           novelty: 80,
           seriesPotential: 70,
           monetization: 60,
+          audienceDemand: 70,
         }],
       },
     });
@@ -1597,6 +1631,7 @@ describe("TrendOpportunityAgent", () => {
       novelty: 80,
       seriesPotential: 70,
       monetization: 60,
+      audienceDemand: 70,
     };
     for (const readStatus of ["read", "title_only"] as const) {
       const agent = new TrendOpportunityAgent({
@@ -1620,5 +1655,29 @@ describe("TrendOpportunityAgent", () => {
       });
       assert.deepEqual(await agent.listCandidates(), []);
     }
+  });
+
+  it("rejects a topic idea that omits audience demand instead of scoring it as nobody watching", async () => {
+    const ideaWithoutDemand = {
+      signalId: "signal-ai",
+      title: "下班后的 AI 时间账本",
+      track: "ai-daily-life",
+      audience: "普通上班族",
+      painPoint: "工具很多，却没有减少疲惫",
+      hook: "真正偷走你下班时间的，可能不是加班。",
+      rationale: "适合做低成本生活实验。",
+      facts: [],
+      uncertainties: [],
+      novelty: 85,
+      seriesPotential: 88,
+      monetization: 72,
+    };
+    const model = new CodexTopicIdeaModel(new CapturingCodexClient(() => ({ ideas: [ideaWithoutDemand] })), 1);
+
+    // 缺字段必须走校验失败：把"没回答"折成 0 会变成"没有人会看"这个具体结论。
+    await assert.rejects(
+      () => model.generate(modelSignals),
+      /连续两次返回了无法使用的结果/,
+    );
   });
 });

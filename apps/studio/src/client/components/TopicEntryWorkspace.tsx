@@ -36,7 +36,7 @@ import { CandidateVerificationDialog } from "./CandidateVerificationDialog.js";
 import { SeriesEpisodeDialog } from "./SeriesEpisodeDialog.js";
 
 type EntryMode = StudioCandidateOrigin | "custom";
-type TrendDeskView = "all" | "produce_video" | "produce_image_story" | "not_recommended" | "source_short";
+type TrendDeskView = "all" | "produce_video" | "produce_image_story" | "not_recommended" | "pending_editor" | "source_short";
 
 interface TopicEntryWorkspaceProps {
   initialMode?: EntryMode;
@@ -88,7 +88,9 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const verdictCounts = countVerdicts(seriesItems);
   const platforms = [...new Set(seriesItems.map((item) => item.platform))];
   const sourceShortCount = seriesItems.filter((item) => item.verification.status === "blocked").length;
-  const notRecommendedCount = seriesItems.filter((item) => item.editorialDecision.verdict === "skip").length;
+  // "总编不建议"必须是总编说的：规则保底候选的 skip 是本地规则算出来的，
+  // 把它们算进这一格，会让从未评估过的候选显示成"总编不建议"。
+  const notRecommendedCount = seriesItems.filter((item) => item.editorialDecision.verdict === "skip" && item.editorialDecision.pendingEditorReview !== true).length;
   // 规则保底（未经总编评估）与来源不足是独立维度：来源不足的候选同样可能是"待总编评估"。
   const ruleBaselineCount = seriesItems.filter((item) => item.editorialDecision.pendingEditorReview === true).length;
   // "总编这轮没给建议"必须连带原因一起说，否则用户只看到一堆规则候选，无从判断是配额、超时还是输出被合同拦下。
@@ -143,7 +145,11 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
             <div>
               <p className="eyebrow">{mode === "trend" ? "实时信号" : "系列策划"}</p>
               <h2>{mode === "trend" ? "热点候选收件箱" : "系列选题台"}</h2>
-              <p>{mode === "trend" ? "热点信号已经过选题总编转译；先筛选，再核验证据。" : "每个系列保留长期承诺，策划器只生成接下来的可制作集数。"}</p>
+              <p>{mode === "trend"
+                ? ruleBaselineCount > 0 && ruleBaselineCount >= modeItems.length
+                  ? "本轮热点由本地规则保底生成，还没有经过选题总编转译；先筛选，再核验证据。"
+                  : "热点信号已经过选题总编转译；先筛选，再核验证据。"
+                : "每个系列保留长期承诺，策划器只生成接下来的可制作集数。"}</p>
             </div>
             {mode === "trend" ? (
               <div className="trend-refresh-status" aria-label="热点更新状态">
@@ -211,6 +217,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
                     <button key={item} type="button" className={deskView === item ? "is-active" : ""} disabled={!verdictCounts[item]} onClick={() => setDeskView(item)}>{editorialVerdictLabel(item)} <span>{verdictCounts[item] ?? 0}</span></button>
                   ))}
                   <button type="button" className={deskView === "not_recommended" ? "is-active" : ""} disabled={!notRecommendedCount} onClick={() => setDeskView("not_recommended")}>总编不建议 <span>{notRecommendedCount}</span></button>
+                  <button type="button" className={deskView === "pending_editor" ? "is-active" : ""} disabled={!ruleBaselineCount} onClick={() => setDeskView("pending_editor")}>待总编评估 <span>{ruleBaselineCount}</span></button>
                   <button type="button" className={deskView === "source_short" ? "is-active" : ""} disabled={!sourceShortCount} onClick={() => setDeskView("source_short")}>来源不足 <span>{sourceShortCount}</span></button>
                 </div>
                 <div className="category-filter" aria-label="内容分类">
@@ -537,9 +544,13 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
   // 提醒只标注、不拦人：每条候选都能采用，这里把"为什么建议先别做"说清楚。
   const advice = sourceShort
     ? `来源不足：${item.verification.reasons[0] ?? "有效来源还没达到当前标准。"}`
-    : adviceSkip
-      ? `总编不建议生产：${item.editorialDecision.reasons[0] ?? "未给出理由。"}`
-      : undefined;
+    // 规则保底候选的 skip 是本地规则算出来的，不是总编的判断：
+    // 写成"总编不建议生产"等于替总编表态，用户会以为已经有人看过这条。
+    : pendingEditor
+      ? `总编本轮没有评估这条：${item.editorialDecision.reasons[0] ?? "未经选题总编判断。"}`
+      : adviceSkip
+        ? `总编不建议生产：${item.editorialDecision.reasons[0] ?? "未给出理由。"}`
+        : undefined;
   return (
     <article className="candidate-detail" aria-labelledby="candidate-detail-title">
       <header><span>{item.origin === "series" ? `${item.seriesName} · 第 ${item.episodeNumber} 集` : `${TOPIC_CATEGORY_LABELS[item.category]}观察`}</span><strong aria-label={`${scoreLabel} ${scoreValue} 分`}><small>{scoreLabel}</small>{scoreValue}</strong></header>
@@ -561,6 +572,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
       <details className="candidate-score-explainer">
         <summary>{scoreLabel}依据 · {scoreValue} 分</summary>
         <div>
+          {item.score.audienceDemand === undefined ? null : <span>观众需求 {Math.round(item.score.audienceDemand)}</span>}
           <span>受众 {Math.round(item.score.audienceReach)}</span>
           <span>画面 {Math.round(item.score.visualFeasibility)}</span>
           <span>成本 {Math.round(item.score.productionCostEfficiency)}</span>
@@ -570,13 +582,16 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
         </div>
         <p>{sourceShort
           ? "内容潜力分只反映选题机会与制作可行性；来源不足只是提醒，是否开工由你决定。证据强度表示当前信号热度或排名，不等同于事实可信度。"
-          : "总分综合内容机会与制作可行性；风险分越低越安全。证据强度表示当前信号热度或排名，不等同于事实可信度。"}</p>
+          : "总分以观众需求为主：它回答“具体是谁、在什么场景下会因为什么点开”，由选题总编单独判断，热度不参与。风险分越低越安全。证据强度表示当前信号热度或排名，不等同于事实可信度。"}</p>
       </details>
-      <div className="candidate-evidence"><span>来源线索</span>{item.evidence.slice(0, 2).map((evidence, index) => evidence.evidenceUrl ? <a key={`${item.id}-${index}`} href={evidence.evidenceUrl} target="_blank" rel="noreferrer"><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong><small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${evidence.source} · 榜单热度或排名信号 ${evidence.strength}`}</small></a> : <div key={`${item.id}-${index}`}><strong>{evidence.keyword}</strong><small>{evidence.source} · 榜单热度或排名信号 {evidence.strength}</small></div>)}</div>
+      <div className="candidate-evidence"><span>来源线索</span>{item.evidence.slice(0, 2).map((evidence, index) => evidence.evidenceUrl ? <a key={`${item.id}-${index}`} href={evidence.evidenceUrl} target="_blank" rel="noreferrer"><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong><small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${platformLabel(evidence.platform)} · 榜单热度或排名信号 ${evidence.strength}`}</small></a> : <div key={`${item.id}-${index}`}><strong>{evidence.keyword}</strong><small>{platformLabel(evidence.platform)} · 榜单热度或排名信号 {evidence.strength}</small></div>)}</div>
       {item.origin === "trend" && item.articleSources?.length ? <details className="candidate-score-explainer candidate-article-reading">
         <summary>原文阅读与事实依据</summary>
-        <div>{item.articleSources.map((source) => <span key={source.sourceId}>{articleReadStatusLabel(source.readStatus)} · {source.pageTitle || source.finalUrl}{source.readStatus === "failed" ? "。读取服务未能完成，不代表文章没有事实依据。" : null}</span>)}</div>
-        {item.articleFacts?.map((fact, index) => <p key={`${fact.sourceId}-${index}`}>已读事实：{fact.statement} <small>（{fact.sourceId} · {fact.paragraphIds.join("、")}）</small></p>)}
+        <div>{item.articleSources.map((source, index) => <span key={source.sourceId}>{index + 1}. {articleReadStatusLabel(source.readStatus)} · {source.pageTitle || source.finalUrl}{source.readStatus === "failed" ? "。读取服务未能完成，不代表文章没有事实依据。" : null}</span>)}</div>
+        {item.articleFacts?.map((fact, index) => {
+          const origin = factOriginLabel(item, fact);
+          return <p key={`${fact.sourceId}-${index}`}>已读事实：{fact.statement}{origin ? <small>（{origin}）</small> : null}</p>;
+        })}
         {item.articleUncertainties?.map((uncertainty, index) => <p key={index}>仍待核验：{uncertainty}</p>)}
         {!item.articleFacts?.length ? <p>当前没有可作为正文事实引用的内容；标题和热度只用于选题线索。</p> : null}
       </details> : null}
@@ -604,6 +619,23 @@ function articleReadStatusLabel(status: NonNullable<StudioCandidateInboxItem["ar
     blocked: "原文受限",
     failed: "原文读取失败",
   }[status];
+}
+
+// 事实出处写给读者看：sourceId 和 p1 是内部标识，用户看不动它们。改用上面来源列表的序号
+// 加"第几段"——序号能在同一块界面里对回具体文章，段落位置让用户能自己去原文核对。
+// 解析不出时不显示括号，也不退回机器 id。
+function factOriginLabel(
+  item: StudioCandidateInboxItem,
+  fact: NonNullable<StudioCandidateInboxItem["articleFacts"]>[number],
+): string | undefined {
+  const sourceIndex = item.articleSources?.findIndex((source) => source.sourceId === fact.sourceId) ?? -1;
+  if (sourceIndex < 0) return undefined;
+  const source = item.articleSources![sourceIndex]!;
+  const paragraphs = fact.paragraphIds
+    .map((id) => source.paragraphs.findIndex((paragraph) => paragraph.id === id))
+    .filter((position) => position >= 0)
+    .map((position) => `第 ${position + 1} 段`);
+  return [`来源 ${sourceIndex + 1}`, ...paragraphs].join(" · ");
 }
 
 // 没有闸门，只有"这条候选是否已经明确到可以一路做完"：来源达标且系列顺序没轮到它等。
@@ -634,7 +666,8 @@ function candidateScoreValue(item: StudioCandidateInboxItem): number {
 function matchesDeskView(item: StudioCandidateInboxItem, view: TrendDeskView): boolean {
   if (view === "all") return true;
   if (view === "source_short") return item.verification.status === "blocked";
-  if (view === "not_recommended") return item.editorialDecision.verdict === "skip";
+  if (view === "pending_editor") return item.editorialDecision.pendingEditorReview === true;
+  if (view === "not_recommended") return item.editorialDecision.verdict === "skip" && item.editorialDecision.pendingEditorReview !== true;
   return item.editorialDecision.verdict === view;
 }
 

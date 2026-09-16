@@ -30,6 +30,7 @@ const base = {
     productionCostEfficiency: 88,
     novelty: 76,
     monetization: 62,
+    audienceDemand: 70,
     seriesPotential: 82,
     complianceRisk: 12,
     final: 83,
@@ -334,5 +335,36 @@ describe("editorial production decision", () => {
     assert.equal(decision.recommendedTemplate, undefined);
     assert.match(decision.reasons.join(" "), /项目经理|返工半小时/);
     assert.match(decision.guardrails.join(" "), /同一段录音|同条件测试录像|原始会议纪要/);
+  });
+});
+
+describe("audience demand in the editorial score", () => {
+  // 这是"做出来根本没人看"的回归测试。旧公式把 0.34+0.16 给了视觉可行性与成本效率，
+  // 需求完全没有入场，于是"最好做"的选题排在最前，好做反而成了最强的排序信号。
+  const easyButNobodyCares = { ...base, score: { ...base.score, audienceDemand: 30, visualFeasibility: 85, productionCostEfficiency: 85 } };
+  const hardButWanted = { ...base, score: { ...base.score, audienceDemand: 90, visualFeasibility: 60, productionCostEfficiency: 60 } };
+
+  it("ranks a topic people have a reason to open above one that is merely easy to make", () => {
+    const wanted = decideEditorialFormat(hardButWanted).score;
+    const easy = decideEditorialFormat(easyButNobodyCares).score;
+
+    assert.equal(wanted > easy, true, `${wanted} 应高于 ${easy}`);
+  });
+
+  it("keeps weak demand advisory and never uses it to block production", () => {
+    const decision = decideEditorialFormat({ ...base, score: { ...base.score, audienceDemand: 20 } });
+
+    assert.equal(decision.verdict, "produce_video");
+    assert.match(decision.guardrails.join(" "), /观众需求偏弱/);
+    assert.match(decision.guardrails.join(" "), /是否开工由你决定/);
+  });
+
+  it("falls back to the producibility weights when a score carries no demand judgement", () => {
+    const { audienceDemand: _omitted, ...withoutDemand } = base.score;
+    const decision = decideEditorialFormat({ ...base, score: withoutDemand });
+
+    // 没有需求分不等于需求为 0：仍然给出一条可用的结论，并保持"未经总编评估"的口径。
+    assert.equal(decision.verdict, "produce_video");
+    assert.equal(decision.pendingEditorReview, undefined);
   });
 });

@@ -1,7 +1,7 @@
 import { AlertTriangle, ArrowUpRight, Clock3, Link2, Search, Target } from "lucide-react";
 import type { StudioOpportunity, StudioVisualSource } from "../../shared/api.js";
 import { resolveOpportunityVisualPlan } from "../../shared/visual-plan.js";
-import { scoreSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
+import { platformLabel, scoreSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
 
 interface OpportunityFocusProps {
   opportunity: StudioOpportunity;
@@ -90,17 +90,20 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
                 <small><Clock3 aria-hidden="true" size={12} />{formatEvidenceTime(evidence.collectedAt)}</small>
               </div>
               {evidence.evidenceUrl ? (
-                <a href={evidence.evidenceUrl} target="_blank" rel="noreferrer" aria-label={`查看 ${evidence.source} 来源`}>
-                  <Link2 aria-hidden="true" size={14} />{isManualEvidence(evidence) ? "用户补充" : evidence.source}<ArrowUpRight aria-hidden="true" size={13} />
+                <a href={evidence.evidenceUrl} target="_blank" rel="noreferrer" aria-label={`查看 ${evidence.keyword} 来源`}>
+                  <Link2 aria-hidden="true" size={14} />{isManualEvidence(evidence) ? "用户补充" : platformLabel(evidence.platform)}<ArrowUpRight aria-hidden="true" size={13} />
                 </a>
-              ) : <span className="evidence-source">{evidence.source}</span>}
+              ) : <span className="evidence-source">{platformLabel(evidence.platform)}</span>}
             </article>
           ))}
         </div>
         {opportunity.articleSources?.length ? <div className="candidate-score-explainer candidate-article-reading">
           <strong>原文阅读</strong>
-          {opportunity.articleSources.map((source) => <p key={source.sourceId}>{articleReadStatusLabel(source.readStatus)} · {source.pageTitle || source.finalUrl}{source.readStatus === "failed" ? "。读取服务未能完成，不代表文章没有事实依据。" : null}</p>)}
-          {opportunity.articleFacts?.map((fact, index) => <p key={`${fact.sourceId}-${index}`}>已读事实：{fact.statement}（{fact.paragraphIds.join("、")}）</p>)}
+          {opportunity.articleSources.map((source, index) => <p key={source.sourceId}>{index + 1}. {articleReadStatusLabel(source.readStatus)} · {source.pageTitle || source.finalUrl}{source.readStatus === "failed" ? "。读取服务未能完成，不代表文章没有事实依据。" : null}</p>)}
+          {opportunity.articleFacts?.map((fact, index) => {
+            const origin = factOriginLabel(opportunity, fact);
+            return <p key={`${fact.sourceId}-${index}`}>已读事实：{fact.statement}{origin ? `（${origin}）` : null}</p>;
+          })}
           {opportunity.articleUncertainties?.map((uncertainty, index) => <p key={index}>仍待核验：{uncertainty}</p>)}
         </div> : null}
       </section>
@@ -110,6 +113,22 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
 
 function articleReadStatusLabel(status: NonNullable<StudioOpportunity["articleSources"]>[number]["readStatus"]): string {
   return { read: "已读取正文", partial: "已读取部分正文", title_only: "仅有标题", blocked: "原文受限", failed: "原文读取失败" }[status];
+}
+
+// 与候选卡同一口径：事实出处写"来源几 · 第几段"，序号对回上面的原文阅读列表；
+// 不把 sourceId 和 p1 这类内部标识摆给用户，解析不出时也不退回它们。
+function factOriginLabel(
+  opportunity: StudioOpportunity,
+  fact: NonNullable<StudioOpportunity["articleFacts"]>[number],
+): string | undefined {
+  const sourceIndex = opportunity.articleSources?.findIndex((source) => source.sourceId === fact.sourceId) ?? -1;
+  if (sourceIndex < 0) return undefined;
+  const source = opportunity.articleSources![sourceIndex]!;
+  const paragraphs = fact.paragraphIds
+    .map((id) => source.paragraphs.findIndex((paragraph) => paragraph.id === id))
+    .filter((position) => position >= 0)
+    .map((position) => `第 ${position + 1} 段`);
+  return [`来源 ${sourceIndex + 1}`, ...paragraphs].join(" · ");
 }
 
 function visualSourceLabel(source: StudioVisualSource): string {

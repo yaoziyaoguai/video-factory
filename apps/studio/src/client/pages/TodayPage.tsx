@@ -545,9 +545,11 @@ export function TodayPage() {
         {entryMode === "trend" ? (
           <HotTopicBoard
             candidates={(trendInbox?.items ?? []).filter((item) => !opportunities.some((adopted) => adopted.id === item.id))}
+            {...(trendInbox?.topicGeneration ? { topicGeneration: trendInbox.topicGeneration } : {})}
             {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})}
             onAdopt={adoptDirection}
             onSupplementSources={(candidate) => setSourceSupplementTarget({ kind: "candidate", candidate })}
+            onRetry={() => void loadTrendInbox(true)}
           />
         ) : null}
         {opportunitiesLoading ? <div className="today-loading"><RadioTower aria-hidden="true" size={22} />正在读取制作机会...</div> : opportunitiesError ? (

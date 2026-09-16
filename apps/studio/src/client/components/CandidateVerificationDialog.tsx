@@ -1,6 +1,7 @@
 import { Check, ExternalLink, ShieldCheck, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { StudioCandidateInboxItem } from "../../shared/api.js";
+import { platformLabel } from "../presentation.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 
 interface CandidateVerificationDialogProps {
@@ -29,8 +30,8 @@ export function CandidateVerificationDialog({ candidate, pending, onClose, onCon
             {candidate.evidence.map((evidence, index) => (
               <article key={`${evidence.source}-${index}`}>
                 <span>{String(index + 1).padStart(2, "0")}</span>
-                <div><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong><small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${evidence.source} · 榜单热度或排名信号 ${evidence.strength}`}</small></div>
-                {evidence.evidenceUrl ? <a href={evidence.evidenceUrl} target="_blank" rel="noreferrer" aria-label={`打开来源 ${evidence.source}`}><ExternalLink aria-hidden="true" size={15} /></a> : <small>无链接</small>}
+                <div><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong><small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${platformLabel(evidence.platform)} · 榜单热度或排名信号 ${evidence.strength}`}</small></div>
+                {evidence.evidenceUrl ? <a href={evidence.evidenceUrl} target="_blank" rel="noreferrer" aria-label={`打开来源 ${evidence.keyword}`}><ExternalLink aria-hidden="true" size={15} /></a> : <small>无链接</small>}
               </article>
             ))}
           </div>

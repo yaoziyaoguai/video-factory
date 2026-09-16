@@ -284,7 +284,9 @@ export class TrendStudio {
         : undefined);
       const cachedAt = this.options.now().toISOString();
       const generationReceipt = this.agent?.generationReceipt?.()
-        ?? generationReceiptFromCandidates(values, cachedAt);
+        ?? generationReceiptFromCandidates(values, cachedAt, this.agent
+          ? undefined
+          : "选题总编任务在本次启动时没有就绪，本轮只生成了本地规则保底线索。");
       // 缓存写入与人工来源写入共用同一进程内文件队列，避免两套原子写交错。
       await this.queueFileMutation(() => this.persistCache({ schemaVersion: CANDIDATE_CACHE_SCHEMA_VERSION, cachedAt, values, generationReceipt }));
       // 只有持久化生命周期结束后才发布新缓存，避免调用方看到新值时后台仍在改文件。
@@ -350,15 +352,15 @@ const DAILY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const AUTOMATIC_REFRESH_RETRY_MS = 60 * 60 * 1000;
 
 interface PersistedCandidateCache {
-  // schema 5：选题总编接收 canonical topic 的关联报道，且来源数量门槛改由下游执行。
-  // 旧合同可能留下错误空短名单，不能继续复用。
+  // schema 6：选题总编新合同增加 audienceDemand（观众需求）评分，旧候选没有这个分，
+  // 复用会让一整屏"看起来评过"的候选缺掉本轮唯一判断"有没有人看"的维度。
   schemaVersion: typeof CANDIDATE_CACHE_SCHEMA_VERSION;
   cachedAt: string;
   values: StudioTrendCandidate[];
   generationReceipt?: StudioTopicGenerationReceipt;
 }
 
-const CANDIDATE_CACHE_SCHEMA_VERSION = 5;
+const CANDIDATE_CACHE_SCHEMA_VERSION = 6;
 
 interface PersistedSourceSupplements {
   version: 1;
@@ -398,7 +400,11 @@ function isPersistedCandidateCache(value: unknown): value is PersistedCandidateC
     && (record.generationReceipt === undefined || isTopicGenerationReceipt(record.generationReceipt));
 }
 
-function generationReceiptFromCandidates(values: StudioTrendCandidate[], generatedAt: string): StudioTopicGenerationReceipt {
+function generationReceiptFromCandidates(
+  values: StudioTrendCandidate[],
+  generatedAt: string,
+  unavailableReason?: string,
+): StudioTopicGenerationReceipt {
   const modelCandidate = values.find((candidate) => candidate.providerId !== "trend-heuristic-v1");
   const fallback = values.find((candidate) => candidate.generationFallback)?.generationFallback;
   return {
@@ -408,7 +414,13 @@ function generationReceiptFromCandidates(values: StudioTrendCandidate[], generat
     source: modelCandidate ? "editor-model" : "rule-fallback",
     candidateCount: values.length,
     ...(modelCandidate ? { providerId: modelCandidate.providerId } : {}),
-    ...(fallback ? { failureCategory: fallback.category, failureReason: fallback.reason } : {}),
+    // 模型真跑过就会留下 generationFallback；既没有候选也没有 fallback，只剩"任务根本没起来"
+    // 这一种解释。不写原因的话，用户看到的只是一屏规则候选，永远不知道总编为什么没给建议。
+    ...(fallback
+      ? { failureCategory: fallback.category, failureReason: fallback.reason }
+      : !modelCandidate && unavailableReason
+        ? { failureCategory: "model_unavailable" as const, failureReason: unavailableReason }
+        : {}),
   };
 }
 

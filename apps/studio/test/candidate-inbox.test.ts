@@ -46,6 +46,7 @@ const trendCandidate = {
     productionCostEfficiency: 90,
     novelty: 84,
     monetization: 72,
+    audienceDemand: 70,
     seriesPotential: 88,
     complianceRisk: 12,
     final: 86,

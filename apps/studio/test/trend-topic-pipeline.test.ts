@@ -64,6 +64,7 @@ describe("trend topic pipeline regression", () => {
           novelty: 82,
           seriesPotential: 80,
           monetization: 62,
+          audienceDemand: 70,
         },
         {
           signalId: byTitle("华为").id,
@@ -79,6 +80,7 @@ describe("trend topic pipeline regression", () => {
           novelty: 76,
           seriesPotential: 70,
           monetization: 66,
+          audienceDemand: 70,
         },
       ];
     });

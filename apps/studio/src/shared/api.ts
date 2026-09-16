@@ -595,6 +595,12 @@ export interface StudioOpportunityScore {
   seriesPotential: number;
   complianceRisk: number;
   final: number;
+  /**
+   * 选题总编对"现实中是否真有一群人因为具体理由点开并看完"的判断。
+   * 只在总编真的给过这条判断时存在：系列路线图候选与规则保底候选没有这个分，
+   * 不能用别的维度顶替，否则"评估过"和"没评估过"在界面上看起来一样。
+   */
+  audienceDemand?: number;
 }
 
 export interface StudioOpportunityScoreProvenance {

@@ -19,6 +19,7 @@ import type {
   StudioVisualPlan,
 } from "../shared/api.js";
 import { parseStudioVisualPlan } from "../shared/api.js";
+import { platformLabel } from "../shared/platform-label.js";
 import { planVisualDirection } from "../shared/visual-plan.js";
 import { classifyTopicCategory, topicRiskLevel } from "./topic-taxonomy.js";
 import { topicIdeasModelPayload } from "./topic-ideas-payload.js";
@@ -47,6 +48,8 @@ export interface TrendModelIdea {
   novelty: number;
   seriesPotential: number;
   monetization: number;
+  /** 观众需求是总编的判断，必须由模型给出：热度与榜单排名不是需求证据。 */
+  audienceDemand: number;
 }
 
 export interface TrendModelSignal extends StudioTrendSignal {
@@ -221,7 +224,7 @@ export class TrendOpportunityAgent {
     const grounded = groundModelIdea(idea, signals, articleSources);
     // 宿主只执行可确定验证的来源绑定；事实是否被正文支持由已经完成的独立总编复核判断。
     if (!grounded) return null;
-    const scores = [idea.novelty, idea.seriesPotential, idea.monetization].map(normalizePercent);
+    const scores = [idea.novelty, idea.seriesPotential, idea.monetization, idea.audienceDemand].map(normalizePercent);
     return this.buildCandidate({
       signal,
       relatedSignals: signals,
@@ -246,6 +249,7 @@ export class TrendOpportunityAgent {
       novelty: scores[0]!,
       seriesPotential: scores[1]!,
       monetization: scores[2]!,
+      audienceDemand: scores[3]!,
     });
   }
 
@@ -275,7 +279,7 @@ export class TrendOpportunityAgent {
         ? risk >= 72
           ? `该热点涉及高风险公共事件；系统未扩写事实，只保留原始信号与核验问题。`
           : `该热点涉及需要核验的公共议题；系统未扩写事实，只保留原始信号与核验问题。`
-        : `${platformLabel(signal.platform)}榜单排名 ${signal.rank}，采用零成本规则评分并保留原始证据。`,
+        : `${platformLabel(signal.platform)}第 ${signal.rank} 名的原始线索，尚未经过选题总编转译。`,
       providerId: "trend-heuristic-v1",
       ...(fallback ? { generationFallback: fallback } : {}),
       novelty: risk >= 60 ? 40 : track === "breaking-news" ? 48 : 72,
@@ -305,6 +309,7 @@ export class TrendOpportunityAgent {
     seriesPotential: number;
     visualFeasibility?: number;
     productionCostEfficiency?: number;
+    audienceDemand?: number;
   }): StudioTrendCandidate {
     const strength = Math.max(20, Math.min(100, 100 - input.signal.rank));
     const risk = complianceRisk(input.signal.title);
@@ -330,6 +335,11 @@ export class TrendOpportunityAgent {
       seriesPotential: input.seriesPotential,
       complianceRisk: risk,
     });
+    // 需求分不进 workflow-core 的通用评分（那里同时被系列路线图复用，没有这个维度），
+    // 只在总编真的判断过时挂到分数上一并交给展示与决策层。
+    const score = input.audienceDemand === undefined
+      ? candidate.score
+      : { ...candidate.score, audienceDemand: normalizePercent(input.audienceDemand) };
     const title = clean(input.title, input.signal.title);
     const hook = clean(input.hook, `这条热点，真正影响的是普通人的选择。`);
     return {
@@ -349,7 +359,7 @@ export class TrendOpportunityAgent {
       ...(input.articleSources?.length ? { articleSources: structuredClone(input.articleSources) } : {}),
       ...(input.articleFacts?.length ? { articleFacts: structuredClone(input.articleFacts) } : {}),
       ...(input.articleUncertainties?.length ? { articleUncertainties: [...input.articleUncertainties] } : {}),
-      score: candidate.score,
+      score,
       category: classifyTopicCategory(title, input.track, input.relatedSignals.map((item) => item.title)),
       visualPlan: structuredClone(input.visualPlan ?? planVisualDirection({ title, hook })),
     };
@@ -392,7 +402,8 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
       criteria: [
         "逐项审查 title、hook、rationale、facts、visualProof 与 visualPlan：事实、数字、引语和因果须由可读正文支持；创作标签、假设演算、受众描述和明确的不确定表达无需原文逐字出现",
         "按strategy中的受众与定位审查：标题和hook指向具体对象、问题或体验，观众能理解继续看的理由；同批候选在观众任务、观看过程或结尾兑现上有实质差异，不因换词就判原创。",
-        "按各自rubric核对视觉可行性、成本效率、新颖性、系列潜力与商业适配；高分必须有当前输入支持，未确认的实验、专属拍摄和素材获取不能被当作已落实能力。内容潜力与制作就绪分开判断。",
+        "按各自rubric核对观众需求、视觉可行性、成本效率、新颖性、系列潜力与商业适配；高分必须有当前输入支持，未确认的实验、专属拍摄和素材获取不能被当作已落实能力。内容潜力与制作就绪分开判断。",
+        "单独核对 audienceDemand：它判断现实中具体是谁、在什么场景下会因为什么点开并看完，不是热度、榜单排名或题材讨论度。画面好做、角度新奇都不能抬高它；用泛化人群或空承诺充数的需求分必须要求重做。",
         "前两秒让具体吸引点开始成立，不强求完整长句在两秒内念完。hook可自然朗读且前提真实；准确限定不能被删除，也不应以堆叠限定替代改写。不得夸大或娱乐化灾害伤亡、政治突发。",
         "榜单排名、热度与链接只是来源线索，不得把热度当作事实或结论引用",
         "先评内容潜力与适合的视频形态；来源数量门槛由下游执行，不得仅因来源暂时不足删除有潜力且可补源的角度",
@@ -427,6 +438,8 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
             reviewAllCandidateFieldsForUnsupportedFactualClaims: true,
             creativeFramingDoesNotRequireVerbatimSourceText: true,
             scoresAreIntegersFromZeroToOneHundred: true,
+            everyIdeaMustScoreAudienceDemand: true,
+            heatIsNotAudienceDemandEvidence: true,
             sourceGateAppliedDownstream: true,
             sourceBlockedIdeasRemainVisibleForSupplement: true,
             emptyIdeasCannotBeJustifiedSolelyByMissingSourceCount: true,
@@ -508,8 +521,12 @@ function parseModelIdea(value: unknown): TrendModelIdea[] {
     novelty: number(item.novelty),
     seriesPotential: number(item.seriesPotential),
     monetization: number(item.monetization),
+    audienceDemand: number(item.audienceDemand),
   };
   if (Object.values(scores).some((score) => !Number.isInteger(score) || score < 0 || score > 100)) return [];
+  // number() 会把缺失字段折成 0，而"观众需求 0"是一个具体结论：没有人会看。缺字段必须走
+  // 校验失败让循环要求补交，不能把"没回答"写成"没人看"。
+  if (typeof item.audienceDemand !== "number") return [];
   return [{
     signalId: item.signalId as string,
     title: item.title as string,
@@ -791,10 +808,6 @@ function groundedEditorialTitle(sourceTitle: string, track: string): string {
 
 function numberTokens(value: string): string[] {
   return value.match(/\d+(?:\.\d+)?%?/g) ?? [];
-}
-
-function platformLabel(platform: string): string {
-  return ({ douyin: "抖音", weibo: "微博", zhihu: "知乎", bilibili: "B 站" } as Record<string, string>)[platform] ?? platform;
 }
 
 function byFinalScore(left: StudioTrendCandidate, right: StudioTrendCandidate): number {

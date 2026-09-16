@@ -14,7 +14,7 @@ import {
 
 export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as const;
 export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
-  "topic-ideas": "bf5ce8242c42922c1529dd6b76ad357f06f237a61cf7bc38c0f14acbc8caf77e",
+  "topic-ideas": "bdae923579b878af2e99612cca071a661d3fd39f7c382a42442c36645b0e0f73",
   "series-roadmap": "7a6b2dcac3856e429bcaf4eef69c98ea9917b43ef0750b3b1cb1987dc42c48df",
   "creative-treatment": "ce01a42e3b9bbf84b97cdae810d498cf6514b94615c18856794cf6d34a754c8c",
   "director-plan": "1fb8d802d23bac9e21a0999a5774aceed3b3331a01ff229d462573f9b36696a7",

@@ -1794,6 +1794,7 @@ describe("Studio API", () => {
         productionCostEfficiency: 84,
         novelty: 78,
         monetization: 62,
+        audienceDemand: 70,
         seriesPotential: 91,
         complianceRisk: 18,
         final: 84,

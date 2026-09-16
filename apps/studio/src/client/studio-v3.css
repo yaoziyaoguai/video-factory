@@ -704,6 +704,11 @@ body { background: var(--canvas); }
 .studio-v3 .hot-topic-board-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .studio-v3 .hot-topic-board-heading h3 { margin: 3px 0 0; color: var(--ink); font-family: "Manrope Variable", "Noto Sans SC Variable", "PingFang SC", sans-serif; font-size: 18px; }
 .studio-v3 .hot-topic-board-heading > span { color: #777b74; font-size: 10px; font-weight: 760; }
+.studio-v3 .hot-topic-fallback { display: flex; align-items: start; gap: 10px; margin: 12px 0 0; padding: 11px 13px; color: var(--yellow); background: var(--yellow-soft); border: 1px solid #f0e0bb; border-radius: 5px; }
+.studio-v3 .hot-topic-fallback > div { display: grid; min-width: 0; gap: 4px; }
+.studio-v3 .hot-topic-fallback strong { font-size: 12px; }
+.studio-v3 .hot-topic-fallback p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.studio-v3 .hot-topic-fallback > button { margin-left: auto; flex: none; }
 .studio-v3 .hot-topic-list { display: grid; margin: 0; padding: 0; list-style: none; }
 .studio-v3 .hot-topic { display: grid; gap: 9px; padding: 13px 0; border-bottom: 1px dashed var(--line); }
 .studio-v3 .hot-topic:last-child { padding-bottom: 0; border-bottom: 0; }

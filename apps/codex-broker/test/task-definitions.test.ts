@@ -647,11 +647,19 @@ describe("broker-owned task definitions", () => {
         novelty: 80,
         seriesPotential: 70,
         monetization: 60,
+        audienceDemand: 75,
       }],
     };
     assert.equal(outputValidationErrorFor("topic-ideas", valid), undefined);
     assert.equal(typeof outputValidationErrorFor("topic-ideas", {
       ideas: [{ ...valid.ideas[0], novelty: 80.5 }],
+    }), "string");
+    // audienceDemand 是"会不会有人看"的唯一落点，缺了它这条候选就不该通过合同。
+    assert.equal(typeof outputValidationErrorFor("topic-ideas", {
+      ideas: [{ ...valid.ideas[0], audienceDemand: undefined }],
+    }), "string");
+    assert.equal(typeof outputValidationErrorFor("topic-ideas", {
+      ideas: [{ ...valid.ideas[0], audienceDemand: 75.5 }],
     }), "string");
     assert.equal(typeof outputValidationErrorFor("topic-ideas", {
       ideas: [{ ...valid.ideas[0], monetization: 101 }],
