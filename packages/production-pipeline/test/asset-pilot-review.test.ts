@@ -91,7 +91,18 @@ it("judges a pilot claim against the frames the pilot itself sampled", async () 
     recommendation: "revise", confidence: 0.9,
   });
   const audit = {
-    version: "video-factory/role-audit-v1", verdict: "pass", score: 92,
+    version: "video-factory/role-audit-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v1",
+    assessments: [{
+      targetPath: "",
+      dimensions: [
+        { dimension: "evidence", score: 92, evidence: "结论都指向试片自身采样的帧。" },
+        { dimension: "coverage", score: 92, evidence: "覆盖了本轮要求的镜头范围。" },
+        { dimension: "consistency", score: 92, evidence: "评分与 findings 一致。" },
+        { dimension: "actionability", score: 92, evidence: "下一步指明补拍哪一镜。" },
+      ],
+    }],
+    verdict: "pass", score: 92,
     summary: "结论与证据边界一致。", issues: [], repairInstructions: [],
   };
   const pilotInput: AssetPilotReviewInput = {

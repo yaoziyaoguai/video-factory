@@ -10,8 +10,8 @@ import type { StudioSeriesEpisode } from "../shared/api.js";
 import type { SeriesEpisodeDraft } from "./series-planner.js";
 import type { SeriesRecord } from "./series-store.js";
 
-const SERIES_SHOWRUNNER_CONTRACT_VERSION = "series-showrunner-v1|role-audit-v3|series-roadmap-validator-v1";
-const SERIES_GREENLIGHT_CONTRACT_VERSION = "series-greenlight-v1|role-audit-v3|series-roadmap-validator-v1";
+const SERIES_SHOWRUNNER_CONTRACT_VERSION = "series-showrunner-v1|role-audit-v9|series-roadmap-validator-v1";
+const SERIES_GREENLIGHT_CONTRACT_VERSION = "series-greenlight-v1|role-audit-v9|series-roadmap-validator-v1";
 
 export interface SeriesPlanningResult {
   drafts: SeriesEpisodeDraft[];
@@ -66,9 +66,9 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
       contractVersion: SERIES_SHOWRUNNER_CONTRACT_VERSION,
       criteria: [
         "路线图严格遵守 Series Bible 与当前 Canon，不把未来计划、未验证结论或人物变化冒充已发生事实",
-        "每一集都有可独立兑现的观众承诺，同时对本季篇章形成清晰且不重复的递进",
+        "每集有本集能够独立交付的问题、结果或体验，并说明对本季增加了什么；不能用下一集的承诺填补本集核心兑现。",
         "相邻集的承接和留扣具体可用，但不以悬念替代本集 payoff，也不过度依赖尚未定版的前集内容",
-        "标题、钩子、兑现和内容支柱一致，六集不是同一种清单、复盘或反例模板的机械轮换",
+        "标题、hook、payoff与内容支柱一致；相邻集的具体问题、观看过程或所得至少有一项实质推进。同一栏目可以保持形式稳定，但不能用新标题重复同一内容。",
         "每集具备明确可见的短视频表达空间，能够在经济素材与必要的生成素材之间做逐镜选择",
         "集数连续、数量准确，且没有输入中不存在的事实、数字、经历、引用或来源",
       ],

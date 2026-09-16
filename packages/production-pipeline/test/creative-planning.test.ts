@@ -3347,9 +3347,19 @@ describe("B3 固定创作规划图", () => {
               audit: async () => {
                 auditCalls += 1;
                 return { output: {
-                  version: "video-factory/role-audit-v1",
+                  version: "video-factory/role-audit-v2",
+                  rubricVersion: "video-factory/role-quality-rubric-v1",
                   verdict: "repair",
                   score: 91,
+                  assessments: [{
+                    targetPath: "",
+                    dimensions: [
+                      { dimension: "attention", score: 91, evidence: "开场给出具体对象。" },
+                      { dimension: "progression", score: 91, evidence: "中段逐步给出结果。" },
+                      { dimension: "payoff", score: 91, evidence: "结尾回答原承诺。" },
+                      { dimension: "expression", score: 91, evidence: "表达具体可执行。" },
+                    ],
+                  }],
                   summary: "创作表达完整，但锁定的真实实测承诺缺少证据来源",
                   issues: [{
                     severity: "blocking",

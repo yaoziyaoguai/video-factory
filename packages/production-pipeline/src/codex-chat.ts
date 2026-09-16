@@ -14,17 +14,17 @@ import {
 
 export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as const;
 export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
-  "topic-ideas": "6e954dfd3b07ac84170800b3d0d29d5399c3692c5d771196c2846e4173e165fe",
-  "series-roadmap": "19b961d58dcc4e87dbc7c4e710766b417e57f89f565ad07b776fb54017874b3f",
-  "creative-treatment": "b7df171497e45b714f3a3064b33ef93faee0e7f48724ac83589ca1d6dd10c3b4",
-  "director-plan": "4c2bbab843fed18658ee8d5345ac81694a18f10e0dd45b362f782bbe4640c299",
-  "script-draft": "e2f8ac99ff8acc72b998641e1bd2653add4b939cccd4074105c64ab84146e9c1",
-  "publish-copy": "db27873c44bb30623d5fceb6e5d3811912b32aeea3762fc7d18f3cb9cd58e9bd",
-  "asset-rank": "c52416dc97cbd09ff747fa48f69fe65caa9a4c43fe5f1e3d3325dbb8031d5ba1",
-  "reference-grammar": "49a25cf42265929fa0bc244967acc7f36e53c7de2546957798a6f1631e447ca7",
-  "visual-review": "3b4fdb92daaf787d10df51b2325c61ba2eb6e979927a560132a8733daff46b38",
-  "role-audit": "cb6c74ee00b1d40aebd2fdbb676e6a43e048011bc33d864ae44ebc60873495d6",
-  "creative-discussion": "d1b6d26789c65330c306e82205141c00b108c5f6c3a3d39a3ce5724c85b0b2a4",
+  "topic-ideas": "bf5ce8242c42922c1529dd6b76ad357f06f237a61cf7bc38c0f14acbc8caf77e",
+  "series-roadmap": "7a6b2dcac3856e429bcaf4eef69c98ea9917b43ef0750b3b1cb1987dc42c48df",
+  "creative-treatment": "ce01a42e3b9bbf84b97cdae810d498cf6514b94615c18856794cf6d34a754c8c",
+  "director-plan": "1fb8d802d23bac9e21a0999a5774aceed3b3331a01ff229d462573f9b36696a7",
+  "script-draft": "9fdfdc99e648aa0a0be779bc371d2e658cc9a550add46638c3df8f7bffc34d20",
+  "publish-copy": "321a9b07d9eeb6bd1bb1e075a16c7d3bc65948983be11b3c082834aa8a030dd4",
+  "asset-rank": "8693ee66be5e7db08d20c1847786e015734cda4f63d1c369f2141336dd31723b",
+  "reference-grammar": "f14b46d1b3e675d21973b6f6ae8daf594b010409007473cdfaa5adbecb1dea8e",
+  "visual-review": "7fc682f73d5750ae7776ec9e42f52a043c17e4258d95f368e03937b964e1b73a",
+  "role-audit": "b7959cc68e5edef85fb9aafba755e55a6040234e80c5e1892f81ae7a4df20e1d",
+  "creative-discussion": "e9197cfbf9705f74f1454f74ee0794708922ddf528c25eb45545212d8cf033af",
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。
@@ -164,10 +164,34 @@ export interface RoleAuditIssue {
   repairInstruction: string;
 }
 
+export type RoleAuditDimension =
+  | "attention"
+  | "progression"
+  | "payoff"
+  | "expression"
+  | "evidence"
+  | "coverage"
+  | "consistency"
+  | "actionability";
+
+/** 审计对单个评估对象的维度分。维度集合由宿主按角色决定，模型不能自己挑。 */
+export interface RoleAuditAssessment {
+  /** 创作交付用根路径 ""；集合交付逐项用 "/ideas/0" 这样的路径。 */
+  targetPath: string;
+  dimensions: Array<{
+    dimension: RoleAuditDimension;
+    score: number;
+    evidence: string;
+  }>;
+}
+
 export interface RoleAudit {
-  version: "video-factory/role-audit-v1";
+  version: "video-factory/role-audit-v2";
+  rubricVersion: string;
   verdict: "pass" | "repair";
+  /** 归约值，等于全部 dimension.score 的最低分；没有依据的单一标量不再作为质量信号。 */
   score: number;
+  assessments: RoleAuditAssessment[];
   summary: string;
   issues: RoleAuditIssue[];
   repairInstructions: string[];

@@ -47,10 +47,28 @@ const SCRIPT = {
   })),
 };
 
+const CREATIVE_DIMENSION_EVIDENCE: Record<string, string> = {
+  attention: "前两秒给出本片承诺里的具体动作。",
+  progression: "三段之间有可辨认的推进。",
+  payoff: "结尾兑现了观众承诺。",
+  expression: "画面要求在当前素材能力内可落地。",
+};
+
+// 编剧属于创作交付：宿主只要求一个根对象，维度固定为四维创作维度。
+// rubric v1 要求总分等于全部维度分的最低分；让每维都取同一个分数，最小值自然成立。
+function screenwriterAssessments(score: number) {
+  return [{
+    targetPath: "",
+    dimensions: Object.entries(CREATIVE_DIMENSION_EVIDENCE).map(([dimension, evidence]) => ({ dimension, score, evidence })),
+  }];
+}
+
 const PASS_AUDIT = {
-  version: "video-factory/role-audit-v1",
+  version: "video-factory/role-audit-v2",
+  rubricVersion: "video-factory/role-quality-rubric-v1",
   verdict: "pass",
   score: 92,
+  assessments: screenwriterAssessments(92),
   summary: "当前合同可执行。",
   issues: [],
   repairInstructions: [],
@@ -58,9 +76,11 @@ const PASS_AUDIT = {
 } as const;
 
 const NEEDS_SOURCE_AUDIT = {
-  version: "video-factory/role-audit-v1",
+  version: "video-factory/role-audit-v2",
+  rubricVersion: "video-factory/role-quality-rubric-v1",
   verdict: "repair",
   score: 58,
+  assessments: screenwriterAssessments(58),
   summary: "核心承诺需要当前流水线没有的真实记录。",
   issues: [{
     severity: "blocking",

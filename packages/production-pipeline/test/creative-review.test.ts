@@ -15,6 +15,18 @@ import {
 import { planningThreadId } from "../src/creative-planning-store.js";
 import { initialCreativeReviewState, publishCreativeDraft, recordCreativeDiscussion, applyCreativeReviewDeterministicCommand, recordCreativeReviewCheck, confirmCreativeDraft } from "../src/creative-review.js";
 
+// 构思、脚本、导演方案都是创作交付：宿主规定的评估对象是当前完整候选（根路径 ""），
+// 维度固定为 attention/progression/payoff/expression。全部分数取同一个值，
+// 好让 score 恰好等于最低维度分这个归约成立。
+const CREATIVE_AUDIT_DIMENSIONS = ["attention", "progression", "payoff", "expression"] as const;
+
+function auditAssessments(score: number) {
+  return [{
+    targetPath: "",
+    dimensions: CREATIVE_AUDIT_DIMENSIONS.map((dimension) => ({ dimension, score, evidence: "本轮维度依据已核对。" })),
+  }];
+}
+
 const treatment = {
   version: "video-factory/creative-treatment-v2" as const,
   viewerPromise: "看懂一个判断方法",
@@ -171,7 +183,9 @@ describe("three-stage creative review gates", () => {
             output,
             reviewCheck: {
               audit: {
-                version: "video-factory/role-audit-v1" as const,
+                version: "video-factory/role-audit-v2" as const,
+                rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+                assessments: auditAssessments(92),
                 verdict: "pass" as const,
                 score: 92,
                 summary: `${stage}可以继续`,
@@ -298,7 +312,9 @@ describe("three-stage creative review gates", () => {
   it("keeps the same draft waiting when its confirmation check requests repair", async () => {
     const calls = { treatment: 0, audit: 0, script: 0 };
     const repairingAudit = {
-      version: "video-factory/role-audit-v1" as const,
+      version: "video-factory/role-audit-v2" as const,
+      rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+      assessments: auditAssessments(64),
       verdict: "repair" as const,
       score: 64,
       summary: "开头尚未兑现观众收益。",
@@ -481,7 +497,9 @@ describe("three-stage creative review gates", () => {
             output,
             reviewCheck: {
               audit: {
-                version: "video-factory/role-audit-v1" as const,
+                version: "video-factory/role-audit-v2" as const,
+                rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+                assessments: auditAssessments(95),
                 verdict: "pass" as const,
                 score: 95,
                 summary: "可以继续",
@@ -588,7 +606,9 @@ describe("three-stage creative review gates", () => {
     let directorDraftCall = 0;
     const passingCheck = (stage: string, output: unknown) => ({
       audit: {
-        version: "video-factory/role-audit-v1" as const,
+        version: "video-factory/role-audit-v2" as const,
+        rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+        assessments: auditAssessments(92),
         verdict: "pass" as const,
         score: 92,
         summary: `${stage}可以继续`,
@@ -709,7 +729,9 @@ describe("three-stage creative review gates", () => {
     const calls = { treatment: 0, script: 0, director: 0, check: 0, discuss: 0, candidates: 0, rank: 0, integrate: 0, compile: 0 };
     const passingCheck = (stage: string, output: unknown) => ({
       audit: {
-        version: "video-factory/role-audit-v1" as const,
+        version: "video-factory/role-audit-v2" as const,
+        rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+        assessments: auditAssessments(95),
         verdict: "pass" as const,
         score: 95,
         summary: `${stage}可以继续`,
@@ -921,7 +943,9 @@ describe("three-stage creative review gates", () => {
     let discussionCalls = 0;
     const passingCheck = (stage: string, output: unknown) => ({
       audit: {
-        version: "video-factory/role-audit-v1" as const,
+        version: "video-factory/role-audit-v2" as const,
+        rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+        assessments: auditAssessments(95),
         verdict: "pass" as const,
         score: 95,
         summary: `${stage}可以继续`,

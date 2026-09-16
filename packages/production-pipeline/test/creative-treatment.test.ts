@@ -246,7 +246,17 @@ test("宿主锁定的观众承诺覆盖模型输出，未锁定时保留生成�
 });
 
 const passingAudit = {
-  version: "video-factory/role-audit-v1",
+  version: "video-factory/role-audit-v2",
+  rubricVersion: "video-factory/role-quality-rubric-v1",
+  assessments: [{
+    targetPath: "",
+    dimensions: [
+      { dimension: "attention", score: 95, evidence: "开场提出一个具体判断。" },
+      { dimension: "progression", score: 95, evidence: "抽查逐步展开资料核对。" },
+      { dimension: "payoff", score: 95, evidence: "结尾给出有条件的结论。" },
+      { dimension: "expression", score: 95, evidence: "承诺表述自然可读。" },
+    ],
+  }],
   verdict: "pass",
   score: 95,
   summary: "构思满足合同。",

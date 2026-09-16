@@ -35,6 +35,26 @@ const series: SeriesRecord = {
   updatedAt: "2026-08-24T08:00:00.000Z",
 };
 
+const CREATIVE_DIMENSION_EVIDENCE: Record<string, string> = {
+  attention: "前两秒给出本集的具体问题。",
+  progression: "本集对当季篇章形成可辨认的推进。",
+  payoff: "结尾兑现了本集自己的观众承诺。",
+  expression: "画面表达在本集预算内可落地。",
+};
+
+// rubric v1 要求总分等于全部维度分的最低分；让每维都取同一个分数，最小值自然成立。
+function creativeDimensions(score: number) {
+  return Object.entries(CREATIVE_DIMENSION_EVIDENCE).map(([dimension, evidence]) => ({ dimension, score, evidence }));
+}
+
+// 系列类角色的评估对象由宿主逐集核对，模型不能挑：几集就写几条。
+function episodeAssessments(episodeCount: number, score: number) {
+  return Array.from({ length: episodeCount }, (_, index) => ({
+    targetPath: `/episodes/${index}`,
+    dimensions: creativeDimensions(score),
+  }));
+}
+
 class RepairingClient extends CodexBridgeClient {
   readonly calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
   private productionCount = 0;
@@ -48,17 +68,23 @@ class RepairingClient extends CodexBridgeClient {
     this.calls.push({ kind, payload });
     if (kind === "role-audit") {
       this.auditCount += 1;
+      // 系列总编逐集评估路线图：本用例规划两集，两轮审计评的是同一份两集候选。
+      const assessments = episodeAssessments(2, this.auditCount === 1 ? 72 : 91);
       return { output: this.auditCount === 1 ? {
-        version: "video-factory/role-audit-v1",
+        version: "video-factory/role-audit-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v1",
         verdict: "repair",
         score: 72,
+        assessments,
         summary: "两集承诺重复。",
         issues: [{ severity: "blocking", criterion: "单集独立价值", evidence: "两集 viewerPromise 相同", repairInstruction: "让第二集兑现成本判断" }],
         repairInstructions: ["让第二集兑现成本判断"],
       } : {
-        version: "video-factory/role-audit-v1",
+        version: "video-factory/role-audit-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v1",
         verdict: "pass",
         score: 91,
+        assessments,
         summary: "路线图有独立价值并形成递进。",
         issues: [],
         repairInstructions: [],
@@ -119,9 +145,12 @@ describe("CodexSeriesPlanningAgent", () => {
         calls.push(kind);
         return {
           output: {
-            version: "video-factory/role-audit-v1",
+            version: "video-factory/role-audit-v2",
+            rubricVersion: "video-factory/role-quality-rubric-v1",
             verdict: "pass",
             score: 94,
+            // 系列开拍总编的候选是单集，episodes 只有一项。
+            assessments: episodeAssessments(1, 94),
             summary: "人工单集与最新正史一致。",
             issues: [],
             repairInstructions: [],
@@ -187,9 +216,11 @@ describe("CodexSeriesPlanningAgent", () => {
         if (kind === "role-audit") {
           audits += 1;
           return { output: {
-            version: "video-factory/role-audit-v1",
+            version: "video-factory/role-audit-v2",
+            rubricVersion: "video-factory/role-quality-rubric-v1",
             verdict: audits === 1 ? "repair" : "pass",
             score: audits === 1 ? 70 : 95,
+            assessments: episodeAssessments(1, audits === 1 ? 70 : 95),
             summary: audits === 1 ? "需要修订。" : "可以开拍。",
             issues: audits === 1 ? [{
               severity: "blocking",
@@ -330,6 +361,12 @@ class InterruptingSeriesClient extends CodexBridgeClient {
     super({ socketPath: "/tmp/series-recovery.sock" });
   }
 
+  /** 被审计的候选就是本客户端产出的路线图，集数决定宿主要求的 assessments 覆盖范围。 */
+  private auditOutput(): unknown {
+    const episodes = this.roadmap.episodes;
+    return passingAudit(Array.isArray(episodes) ? episodes.length : 1);
+  }
+
   async runTaskDetailed(
     kind: CodexTaskKind,
     payload: unknown,
@@ -343,20 +380,22 @@ class InterruptingSeriesClient extends CodexBridgeClient {
       await requestOptions.beforeSubmit?.(preparedOperation(kind, payload, requestId));
       throw new Error("series response interrupted");
     }
-    return { output: kind === "series-roadmap" ? this.roadmap : passingAudit() };
+    return { output: kind === "series-roadmap" ? this.roadmap : this.auditOutput() };
   }
 
   async observePrepared(operation: CodexPreparedOperation): Promise<CodexTaskExecution> {
     this.observedKinds.push(operation.kind);
-    return { output: operation.kind === "series-roadmap" ? this.roadmap : passingAudit() };
+    return { output: operation.kind === "series-roadmap" ? this.roadmap : this.auditOutput() };
   }
 }
 
-function passingAudit() {
+function passingAudit(episodeCount: number) {
   return {
-    version: "video-factory/role-audit-v1",
+    version: "video-factory/role-audit-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v1",
     verdict: "pass",
     score: 94,
+    assessments: episodeAssessments(episodeCount, 94),
     summary: "系列规划与当前正史一致。",
     issues: [],
     repairInstructions: [],

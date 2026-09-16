@@ -173,7 +173,17 @@ describe("CodexScreenwriterAgent", () => {
     const repaired = validDraft();
     repaired.scenes[0]!.narration = "别眨眼，先看结果。";
     const repairAudit = {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 68, evidence: "首句只有说明，没有给出具体结果。" },
+          { dimension: "progression", score: 68, evidence: "中段推进靠讲解而非动作。" },
+          { dimension: "payoff", score: 68, evidence: "结尾没有回应开头承诺。" },
+          { dimension: "expression", score: 68, evidence: "旁白措辞偏抽象。" },
+        ],
+      }],
       verdict: "repair",
       score: 68,
       summary: "开头不够具体。",
@@ -182,7 +192,17 @@ describe("CodexScreenwriterAgent", () => {
       hostReadinessReview: null,
     };
     const passAudit = {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 91, evidence: "第一镜先给具体结果。" },
+          { dimension: "progression", score: 91, evidence: "三镜按步骤推进。" },
+          { dimension: "payoff", score: 91, evidence: "结尾兑现原承诺。" },
+          { dimension: "expression", score: 91, evidence: "旁白自然可读。" },
+        ],
+      }],
       verdict: "pass",
       score: 91,
       summary: "合同可执行。",
@@ -278,7 +298,17 @@ describe("CodexScreenwriterAgent", () => {
     const client = new SessionAwareCodexClient({
       "script-draft": [first, repaired],
       "role-audit": [{
-        version: "video-factory/role-audit-v1",
+        version: "video-factory/role-audit-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v1",
+        assessments: [{
+          targetPath: "",
+          dimensions: [
+            { dimension: "attention", score: 72, evidence: "第一句没有先给结果。" },
+            { dimension: "progression", score: 72, evidence: "中段推进较弱。" },
+            { dimension: "payoff", score: 72, evidence: "结尾回应不足。" },
+            { dimension: "expression", score: 72, evidence: "措辞偏说明。" },
+          ],
+        }],
         verdict: "repair",
         score: 72,
         summary: "钩子需要修改。",
@@ -290,7 +320,17 @@ describe("CodexScreenwriterAgent", () => {
         }],
         repairInstructions: ["先展示结果。"],
       }, {
-        version: "video-factory/role-audit-v1",
+        version: "video-factory/role-audit-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v1",
+        assessments: [{
+          targetPath: "",
+          dimensions: [
+            { dimension: "attention", score: 92, evidence: "开场给出具体结果。" },
+            { dimension: "progression", score: 92, evidence: "镜头逐步推进。" },
+            { dimension: "payoff", score: 92, evidence: "结尾兑现承诺。" },
+            { dimension: "expression", score: 92, evidence: "旁白清楚。" },
+          ],
+        }],
         verdict: "pass",
         score: 92,
         summary: "可以进入下游。",
@@ -325,7 +365,17 @@ describe("CodexScreenwriterAgent", () => {
     };
     const producerClient = new SequencedCodexClient([validDraft()]);
     const auditClient = new SequencedCodexClient([{
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 92, evidence: "返工后开场具体。" },
+          { dimension: "progression", score: 92, evidence: "镜头顺序连贯。" },
+          { dimension: "payoff", score: 92, evidence: "结尾回到返工目标。" },
+          { dimension: "expression", score: 92, evidence: "旁白自然。" },
+        ],
+      }],
       verdict: "pass",
       score: 92,
       summary: "返工脚本可执行。",
@@ -384,7 +434,17 @@ describe("CodexScreenwriterAgent", () => {
       ],
     };
     const repairAudit = {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 72, evidence: "开场缺少具体动作。" },
+          { dimension: "progression", score: 72, evidence: "第二镜动作不具体。" },
+          { dimension: "payoff", score: 72, evidence: "结尾收益不明确。" },
+          { dimension: "expression", score: 72, evidence: "旁白描述含糊。" },
+        ],
+      }],
       verdict: "repair",
       score: 72,
       summary: "第二镜仍需给出更具体的动作。",
@@ -393,7 +453,17 @@ describe("CodexScreenwriterAgent", () => {
     };
     const producerClient = new SequencedCodexClient([candidate, repairedCandidate]);
     const auditClient = new SequencedCodexClient([repairAudit, {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 92, evidence: "开场保持原有钩子。" },
+          { dimension: "progression", score: 92, evidence: "第二镜动作已具体。" },
+          { dimension: "payoff", score: 92, evidence: "结尾收益明确。" },
+          { dimension: "expression", score: 92, evidence: "旁白可读。" },
+        ],
+      }],
       verdict: "pass",
       score: 92,
       summary: "局部返工保持了未受影响镜头。",
@@ -451,7 +521,17 @@ describe("CodexScreenwriterAgent", () => {
 
   it("uses the shared wall-clock deadline as an admission gate without shortening accepted operations", async () => {
     const client = new SequencedCodexClient([validDraft(), {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 90, evidence: "开场具体。" },
+          { dimension: "progression", score: 90, evidence: "推进连贯。" },
+          { dimension: "payoff", score: 90, evidence: "结尾兑现。" },
+          { dimension: "expression", score: 90, evidence: "表达清楚。" },
+        ],
+      }],
       verdict: "pass",
       score: 90,
       summary: "通过。",
@@ -473,7 +553,17 @@ describe("CodexScreenwriterAgent", () => {
 
   it("allows three audit and repair rounds by default", async () => {
     const repairAudit = {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 70, evidence: "开场没有先给结果。" },
+          { dimension: "progression", score: 70, evidence: "动作不够具体。" },
+          { dimension: "payoff", score: 70, evidence: "结尾收益含糊。" },
+          { dimension: "expression", score: 70, evidence: "旁白偏概括。" },
+        ],
+      }],
       verdict: "repair",
       score: 70,
       summary: "仍需修订。",
@@ -481,7 +571,17 @@ describe("CodexScreenwriterAgent", () => {
       repairInstructions: ["补充可见动作"],
     };
     const passAudit = {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 92, evidence: "先展示结果。" },
+          { dimension: "progression", score: 92, evidence: "动作步骤清楚。" },
+          { dimension: "payoff", score: 92, evidence: "结尾兑现承诺。" },
+          { dimension: "expression", score: 92, evidence: "旁白自然。" },
+        ],
+      }],
       verdict: "pass",
       score: 92,
       summary: "第三轮达到交付标准。",
@@ -541,7 +641,17 @@ describe("CodexScreenwriterAgent", () => {
     input.brief.durationRange = { minSeconds: 20, maxSeconds: 90 };
     const producerClient = new SequencedCodexClient([rangedDraft]);
     const auditClient = new SequencedCodexClient([{
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 92, evidence: "开场具体。" },
+          { dimension: "progression", score: 92, evidence: "十镜推进平稳。" },
+          { dimension: "payoff", score: 92, evidence: "结尾兑现承诺。" },
+          { dimension: "expression", score: 92, evidence: "旁白清楚。" },
+        ],
+      }],
       verdict: "pass",
       score: 92,
       summary: "时长和内容均可执行。",
@@ -596,7 +706,17 @@ describe("CodexScreenwriterAgent", () => {
     input.brief.durationRange = { minSeconds: 20, maxSeconds: 34 };
     const producerClient = new SequencedCodexClient([draft]);
     const auditClient = new SequencedCodexClient([{
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 92, evidence: "开场给出具体对象。" },
+          { dimension: "progression", score: 92, evidence: "镜头推进连贯。" },
+          { dimension: "payoff", score: 92, evidence: "结尾回答原承诺。" },
+          { dimension: "expression", score: 92, evidence: "时长与表达匹配。" },
+        ],
+      }],
       verdict: "pass",
       score: 92,
       summary: "宿主时长事实合规。",

@@ -588,7 +588,17 @@ describe("FallbackScreenwriterAgent", () => {
                 backupAuditCalls += 1;
                 return {
                   output: {
-                    version: "video-factory/role-audit-v1",
+                    version: "video-factory/role-audit-v2",
+                    rubricVersion: "video-factory/role-quality-rubric-v1",
+                    assessments: [{
+                      targetPath: "",
+                      dimensions: [
+                        { dimension: "attention", score: 96, evidence: "开场给出具体对象。" },
+                        { dimension: "progression", score: 96, evidence: "中段逐步给出结果。" },
+                        { dimension: "payoff", score: 96, evidence: "结尾回答原承诺。" },
+                        { dimension: "expression", score: 96, evidence: "旁白自然可读。" },
+                      ],
+                    }],
                     verdict: "pass",
                     score: 96,
                     summary: "替补审计通过",

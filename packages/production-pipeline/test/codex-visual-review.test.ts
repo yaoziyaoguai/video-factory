@@ -78,7 +78,17 @@ const report = {
 const mutableReport: VisualReviewReport = { ...report, findings: report.findings.map((finding) => ({ ...finding })) };
 
 const passingAudit = {
-  version: "video-factory/role-audit-v1",
+  version: "video-factory/role-audit-v2",
+  rubricVersion: "video-factory/role-quality-rubric-v1",
+  assessments: [{
+    targetPath: "",
+    dimensions: [
+      { dimension: "evidence", score: 92, evidence: "每条结论都能对应到已提供的抽帧。" },
+      { dimension: "coverage", score: 92, evidence: "覆盖了本轮要求审看的镜头范围。" },
+      { dimension: "consistency", score: 92, evidence: "评分与 findings 的严重度一致。" },
+      { dimension: "actionability", score: 92, evidence: "下一步动作指向已有素材的具体返修。" },
+    ],
+  }],
   verdict: "pass",
   score: 92,
   summary: "报告忠于关键帧证据并清楚声明证据边界。",
@@ -671,7 +681,17 @@ describe("CodexVisualReviewAgent", () => {
           }
           auditCalls += 1;
           return { output: auditCalls === 1 ? {
-            version: "video-factory/role-audit-v1",
+            version: "video-factory/role-audit-v2",
+            rubricVersion: "video-factory/role-quality-rubric-v1",
+            assessments: [{
+              targetPath: "",
+              dimensions: [
+                { dimension: "evidence", score: 72, evidence: "摘要未把评分回溯到抽帧证据。" },
+                { dimension: "coverage", score: 72, evidence: "评分依据的镜头范围未说明。" },
+                { dimension: "consistency", score: 72, evidence: "摘要与 findings 的严重度相互矛盾。" },
+                { dimension: "actionability", score: 72, evidence: "返修方向没有落到具体镜头。" },
+              ],
+            }],
             verdict: "repair",
             score: 72,
             summary: "摘要没有解释评分与问题的关系。",
@@ -762,7 +782,17 @@ describe("CodexVisualReviewAgent", () => {
           auditCalls += 1;
           return {
             output: auditCalls === 1 ? {
-              version: "video-factory/role-audit-v1",
+              version: "video-factory/role-audit-v2",
+              rubricVersion: "video-factory/role-quality-rubric-v1",
+              assessments: [{
+                targetPath: "",
+                dimensions: [
+                  { dimension: "evidence", score: 74, evidence: "摘要把抽样帧观察写成了连续事实。" },
+                  { dimension: "coverage", score: 74, evidence: "抽样边界与报告覆盖范围不符。" },
+                  { dimension: "consistency", score: 74, evidence: "证据边界声明与结论强度不一致。" },
+                  { dimension: "actionability", score: 74, evidence: "返修要求没有限定结论范围。" },
+                ],
+              }],
               verdict: "repair",
               score: 74,
               summary: "摘要没有说明抽样证据边界。",
@@ -805,7 +835,17 @@ describe("CodexVisualReviewAgent", () => {
       auditClient: {
         runTaskDetailed: async () => ({
           output: {
-            version: "video-factory/role-audit-v1",
+            version: "video-factory/role-audit-v2",
+            rubricVersion: "video-factory/role-quality-rubric-v1",
+            assessments: [{
+              targetPath: "",
+              dimensions: [
+                { dimension: "evidence", score: 70, evidence: "摘要越过了关键帧证据能支撑的范围。" },
+                { dimension: "coverage", score: 70, evidence: "未说明结论覆盖到哪些镜头。" },
+                { dimension: "consistency", score: 70, evidence: "结论强度与 findings 不一致。" },
+                { dimension: "actionability", score: 70, evidence: "返修指令无法直接执行。" },
+              ],
+            }],
             verdict: "repair",
             score: 70,
             summary: "需要再修一轮。",

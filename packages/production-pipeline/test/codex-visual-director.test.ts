@@ -226,7 +226,17 @@ describe("CodexVisualDirectorAgent", () => {
     const repairedPlan = validPlan();
     repairedPlan.profileRationale = "都市夜景、人物动作与冷暖光对照共同兑现观众承诺。";
     const repairAudit = {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 78, evidence: "开场镜头有具体对象。" },
+          { dimension: "progression", score: 78, evidence: "逐镜视觉推进不明确。" },
+          { dimension: "payoff", score: 78, evidence: "风格理由没有兑现观众承诺。" },
+          { dimension: "expression", score: 78, evidence: "理由只写题材适配。" },
+        ],
+      }],
       verdict: "repair",
       score: 78,
       summary: "导演风格理由没有连接具体动作与光线。",
@@ -239,7 +249,17 @@ describe("CodexVisualDirectorAgent", () => {
       repairInstructions: ["补全动作、光线与观众承诺之间的关系。"],
     };
     const passAudit = {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 94, evidence: "开场给出具体动作。" },
+          { dimension: "progression", score: 94, evidence: "逐镜视觉推进连贯。" },
+          { dimension: "payoff", score: 94, evidence: "结尾兑现观众承诺。" },
+          { dimension: "expression", score: 94, evidence: "风格理由自然可读。" },
+        ],
+      }],
       verdict: "pass",
       score: 94,
       summary: "逐镜方案可执行。",
@@ -316,7 +336,7 @@ describe("CodexVisualDirectorAgent", () => {
     const auditCriteria = (auditClient.calls[0]!.payload as { criteria: string[] }).criteria.join("\n");
     assert.match(
       auditCriteria,
-      /视觉圣经、逐镜职责与已接受构思、脚本承诺一致.*视觉推进/,
+      /视觉圣经和逐镜职责兑现已接受构思与脚本承诺.*可说明的推进/,
     );
     assert.match(
       auditCriteria,
@@ -379,7 +399,17 @@ describe("CodexVisualDirectorAgent", () => {
     const client = new SessionAwareCodexClient({
       "director-plan": [first, repaired],
       "role-audit": [{
-        version: "video-factory/role-audit-v1",
+        version: "video-factory/role-audit-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v1",
+        assessments: [{
+          targetPath: "",
+          dimensions: [
+            { dimension: "attention", score: 76, evidence: "开场钩子偏弱。" },
+            { dimension: "progression", score: 76, evidence: "镜头推进缺少变化。" },
+            { dimension: "payoff", score: 76, evidence: "风格理由没有说明动作与光线。" },
+            { dimension: "expression", score: 76, evidence: "理由表述笼统。" },
+          ],
+        }],
         verdict: "repair",
         score: 76,
         summary: "风格理由需要修改。",
@@ -391,7 +421,17 @@ describe("CodexVisualDirectorAgent", () => {
         }],
         repairInstructions: ["补充动作和光线。"],
       }, {
-        version: "video-factory/role-audit-v1",
+        version: "video-factory/role-audit-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v1",
+        assessments: [{
+          targetPath: "",
+          dimensions: [
+            { dimension: "attention", score: 93, evidence: "开场具体。" },
+            { dimension: "progression", score: 93, evidence: "视觉推进清楚。" },
+            { dimension: "payoff", score: 93, evidence: "结尾兑现承诺。" },
+            { dimension: "expression", score: 93, evidence: "风格理由可读。" },
+          ],
+        }],
         verdict: "pass",
         score: 93,
         summary: "可以进入下游。",
@@ -453,7 +493,17 @@ describe("CodexVisualDirectorAgent", () => {
     revisedShot.estimatedCostCny = 6;
     const producerClient = new SequencedCodexClient([revisedPlan], "zai-bigmodel-api", "glm-5.3");
     const auditClient = new SequencedCodexClient([{
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 95, evidence: "开场具体。" },
+          { dimension: "progression", score: 95, evidence: "逐镜推进连贯。" },
+          { dimension: "payoff", score: 95, evidence: "两类返工要求均已落实。" },
+          { dimension: "expression", score: 95, evidence: "方案表述清楚。" },
+        ],
+      }],
       verdict: "pass",
       score: 95,
       summary: "两类返工要求均已进入可执行方案。",
@@ -544,7 +594,17 @@ describe("CodexVisualDirectorAgent", () => {
     candidate.shots = [(candidate.shots as Array<Record<string, unknown>>)[1]!];
     const producerClient = new SequencedCodexClient([candidate], "openai", "gpt-5.6-sol");
     const auditClient = new SequencedCodexClient([{
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 95, evidence: "开场镜头保持有效。" },
+          { dimension: "progression", score: 95, evidence: "返工后推进连贯。" },
+          { dimension: "payoff", score: 95, evidence: "结尾兑现承诺。" },
+          { dimension: "expression", score: 95, evidence: "方案表述清楚。" },
+        ],
+      }],
       verdict: "pass",
       score: 95,
       summary: "返工范围正确。",
@@ -618,7 +678,17 @@ describe("CodexVisualDirectorAgent", () => {
     candidate.shots = [candidateShots[1]!];
     const producerClient = new SequencedCodexClient([candidate], "openai", "gpt-5.6-sol");
     const auditClient = new SequencedCodexClient([{
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 96, evidence: "开场镜头保持有效。" },
+          { dimension: "progression", score: 96, evidence: "返工后推进连贯。" },
+          { dimension: "payoff", score: 96, evidence: "结尾兑现承诺。" },
+          { dimension: "expression", score: 96, evidence: "方案表述清楚。" },
+        ],
+      }],
       verdict: "pass",
       score: 96,
       summary: "返工范围正确。",
@@ -651,7 +721,17 @@ describe("CodexVisualDirectorAgent", () => {
     firstCandidate.shots = [(firstCandidate.shots as Array<Record<string, unknown>>)[1]!];
     const producerClient = new SequencedCodexClient([firstCandidate, secondCandidate], "zai-bigmodel-api", "glm-5.3");
     const auditClient = new SequencedCodexClient([{
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 78, evidence: "开场钩子偏弱。" },
+          { dimension: "progression", score: 78, evidence: "第二镜缺少动作落点。" },
+          { dimension: "payoff", score: 78, evidence: "结尾收益不明确。" },
+          { dimension: "expression", score: 78, evidence: "镜头描述偏笼统。" },
+        ],
+      }],
       verdict: "repair",
       score: 78,
       summary: "第二镜动作还不够明确。",
@@ -663,7 +743,17 @@ describe("CodexVisualDirectorAgent", () => {
       }],
       repairInstructions: ["只补齐第二镜动作落点。"],
     }, {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 94, evidence: "开场镜头有效。" },
+          { dimension: "progression", score: 94, evidence: "第二镜动作已落实。" },
+          { dimension: "payoff", score: 94, evidence: "结尾兑现承诺。" },
+          { dimension: "expression", score: 94, evidence: "镜头描述具体。" },
+        ],
+      }],
       verdict: "pass",
       score: 94,
       summary: "局部返工可执行。",
@@ -708,7 +798,17 @@ describe("CodexVisualDirectorAgent", () => {
     (repairedCandidate.shots as Array<Record<string, unknown>>)[1]!.generationPrompt = "第一次修正后的第二镜";
     const producerClient = new SequencedCodexClient([firstCandidate, repairedCandidate], "zai-bigmodel-api", "glm-5.3");
     const auditClient = new SequencedCodexClient([{
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 75, evidence: "开场镜头有效。" },
+          { dimension: "progression", score: 75, evidence: "第一镜水位与视觉圣经冲突。" },
+          { dimension: "payoff", score: 75, evidence: "结尾收益受影响。" },
+          { dimension: "expression", score: 75, evidence: "跨镜描述不一致。" },
+        ],
+      }],
       verdict: "repair",
       score: 75,
       summary: "第一镜仍有阻断性的水位矛盾。",
@@ -720,7 +820,17 @@ describe("CodexVisualDirectorAgent", () => {
       }],
       repairInstructions: ["只修正第一镜水位，其他镜头保持不变。"],
     }, {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 92, evidence: "开场镜头有效。" },
+          { dimension: "progression", score: 92, evidence: "跨镜水位已经统一。" },
+          { dimension: "payoff", score: 92, evidence: "结尾兑现承诺。" },
+          { dimension: "expression", score: 92, evidence: "描述一致可读。" },
+        ],
+      }],
       verdict: "pass",
       score: 92,
       summary: "合并后的完整方案已经一致。",
@@ -1587,7 +1697,17 @@ describe("CodexVisualDirectorAgent", () => {
     }));
     const producerClient = new SequencedCodexClient([plan], "zai-bigmodel-api", "glm-5.3");
     const auditClient = new SequencedCodexClient([{
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 55, evidence: "开场画面独立可用。" },
+          { dimension: "progression", score: 55, evidence: "跨镜身份依赖没有执行依据。" },
+          { dimension: "payoff", score: 55, evidence: "身份连续性承诺无法兑现。" },
+          { dimension: "expression", score: 55, evidence: "画面描述与路由不一致。" },
+        ],
+      }],
       verdict: "repair",
       score: 55,
       summary: "方案把两个独立生成镜头当作同一人物与物件，当前路由无法兑现。",

@@ -148,7 +148,7 @@ export interface CodexCreativeTreatmentAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_TREATMENT_TIMEOUT_MS = 660_000;
 const DEFAULT_TREATMENT_MAX_ATTEMPTS = 2;
-export const CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION = "creative-treatment-v8|role-audit-v8|treatment-validator-v2|production-capabilities-v3|visual-plan-v2|planning-disposition-v1|host-readiness-v2|rework-instruction-v1|series-context-v1";
+export const CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION = "creative-treatment-v8|role-audit-v9|treatment-validator-v2|production-capabilities-v3|visual-plan-v2|planning-disposition-v1|host-readiness-v2|rework-instruction-v1|series-context-v1";
 
 // id 固定为 codex-creative-treatment-v1：构思产物登记来源时按该 id 标注。
 export class CodexCreativeTreatmentAgent implements CreativeTreatmentAgent {
@@ -200,8 +200,8 @@ export class CodexCreativeTreatmentAgent implements CreativeTreatmentAgent {
       planningRole: input.planningMode === true,
       contractVersion: CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION,
       criteria: [
-        "观众承诺具体，与用户/系列锁定目标实质一致；hook、progression、payoff 能形成完整体验。",
-        "每段有新增信息、情绪或必要承接，beatId 稳定；不把段落机械等同镜头。",
+        "观众承诺与用户和系列锁定目标一致；能具体描述开头吸引、观看过程和结尾兑现，而不只是填写hook、progression、payoff标签。",
+        "每段说明观众相对上一段新知道、看到或感到什么；没有新增作用的段落合并，必要停顿与承接保留并说明职责。beatId稳定，段落不机械等同镜头。",
         "时长遵守本次明确范围，视觉/声音原则与已声明能力相容；普通素材不要求提前下载，但核心制作前提必须有可信获取责任。",
         "事实来源、机制示意与情绪表达分开；critical、acquisition 与 retrievalProviderId 可信，suppliedSourceIds 只引用已有 id，来源缺口不伪装已证实。",
         "保质量后优化复用与成本；不以说明卡、无关图库或缩水承诺假装可行。",

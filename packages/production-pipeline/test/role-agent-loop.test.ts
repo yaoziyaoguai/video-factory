@@ -24,6 +24,25 @@ describe("role agent loop audit boundary", () => {
     assert.equal(modelCalls, 0);
   });
 
+  // 上限两侧都要钉住：只证明 17 被拒不证明 16 仍可用，容量被悄悄收紧时不会有测试变红。
+  it("accepts exactly 16 audit criteria and runs the loop", async () => {
+    let auditCalls = 0;
+    const execution = await runRoleAgentLoop<{ title: string }>({
+      role: "视觉审片员",
+      contractVersion: "visual-review-contract",
+      criteria: Array.from({ length: 16 }, (_, index) => `审片标准 ${index + 1}`),
+      maxIterations: 1,
+      produce: async () => ({ output: { title: "满额标准候选" } }),
+      audit: async () => {
+        auditCalls += 1;
+        return { output: passingAudit(REPORT_AUDIT_DIMENSIONS) };
+      },
+      validate: titleCandidate,
+    });
+    assert.equal(execution.output.title, "满额标准候选");
+    assert.equal(auditCalls, 1);
+  });
+
   it("does not count queue rejection as audit execution and preserves the producer on retry", async () => {
     let stored: unknown;
     let rejectAudit = true;
@@ -174,9 +193,11 @@ describe("role agent loop audit boundary", () => {
 
   it("rejects a low-score pass even when the broker is bypassed", () => {
     assert.throws(() => validateRoleAudit({
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
       verdict: "pass",
       score: 79,
+      assessments: auditAssessments(CREATIVE_AUDIT_DIMENSIONS, 79),
       summary: "错误放行",
       issues: [],
       repairInstructions: [],
@@ -213,9 +234,11 @@ describe("role agent loop audit boundary", () => {
         }
         return {
           output: {
-            version: "video-factory/role-audit-v1",
+            version: "video-factory/role-audit-v2",
+            rubricVersion: "video-factory/role-quality-rubric-v1",
             verdict: "pass",
             score: 92,
+            assessments: auditAssessments(CREATIVE_AUDIT_DIMENSIONS, 92),
             summary: "可以进入下游",
             issues: [],
             repairInstructions: [],
@@ -1278,7 +1301,7 @@ describe("role agent loop audit boundary", () => {
       },
       audit: async () => {
         auditCalls += 1;
-        return { output: passingAudit() };
+        return { output: passingAudit(REPORT_AUDIT_DIMENSIONS) };
       },
       validate: titleCandidate,
     });
@@ -1311,9 +1334,11 @@ describe("role agent loop audit boundary", () => {
       audit: async () => {
         auditCalls += 1;
         return { output: {
-          version: "video-factory/role-audit-v1",
+          version: "video-factory/role-audit-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v1",
           verdict: "repair",
           score: 55,
+          assessments: auditAssessments(CREATIVE_AUDIT_DIMENSIONS, 55),
           summary: "缺少实验记录",
           issues: [{
             severity: "blocking",
@@ -1350,7 +1375,7 @@ describe("role agent loop audit boundary", () => {
     let produceCalls = 0;
     let auditCalls = 0;
     const execute = () => runRoleAgentLoop<{ title: string }>({
-      role: "前期构思师",
+      role: "导演前期构思",
       planningRole: true,
       contractVersion: "creative-treatment-v2",
       criteria: ["构思质量与制作前提分别核对"],
@@ -1570,7 +1595,7 @@ describe("role agent loop audit boundary", () => {
       },
       audit: async () => {
         auditCalls += 1;
-        return { output: passingAudit() };
+        return { output: passingAudit(REPORT_AUDIT_DIMENSIONS) };
       },
       validate: (value) => {
         const candidate = titleCandidate(value);
@@ -1660,7 +1685,7 @@ describe("role agent loop audit boundary", () => {
         }
         return { output: { title: "重跑后的审片结论" } };
       },
-      audit: async () => ({ output: passingAudit() }),
+      audit: async () => ({ output: passingAudit(REPORT_AUDIT_DIMENSIONS) }),
       validate: titleCandidate,
     });
 
@@ -1704,11 +1729,25 @@ function preparedOperation(
   };
 }
 
-function passingAudit() {
+const CREATIVE_AUDIT_DIMENSIONS = ["attention", "progression", "payoff", "expression"] as const;
+const REPORT_AUDIT_DIMENSIONS = ["evidence", "coverage", "consistency", "actionability"] as const;
+
+// 宿主按角色决定维度集合，审计必须按同一版本标准给每个维度分；这里让全部分数相等，
+// 好让各用例原本断言的 score 保持成立（score 归约成最低维度分）。
+function auditAssessments(dimensions: readonly string[], score: number) {
+  return [{
+    targetPath: "",
+    dimensions: dimensions.map((dimension) => ({ dimension, score, evidence: "本轮维度依据已核对。" })),
+  }];
+}
+
+function passingAudit(dimensions: readonly string[] = CREATIVE_AUDIT_DIMENSIONS) {
   return {
-    version: "video-factory/role-audit-v1",
+    version: "video-factory/role-audit-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v1",
     verdict: "pass",
     score: 92,
+    assessments: auditAssessments(dimensions, 92),
     summary: "可以进入下游",
     issues: [],
     repairInstructions: [],
@@ -1716,11 +1755,13 @@ function passingAudit() {
   } as const;
 }
 
-function repairingAudit() {
+function repairingAudit(dimensions: readonly string[] = CREATIVE_AUDIT_DIMENSIONS) {
   return {
-    version: "video-factory/role-audit-v1",
+    version: "video-factory/role-audit-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v1",
     verdict: "repair",
     score: 60,
+    assessments: auditAssessments(dimensions, 60),
     summary: "仍需修改",
     issues: [{ severity: "blocking", criterion: "标题具体", evidence: "仍然抽象", repairInstruction: "改成具体动作" }],
     repairInstructions: ["改成具体动作"],

@@ -246,7 +246,17 @@ function assetRankTask(withThumbnail: boolean) {
 
 function validRoleAudit(): Record<string, unknown> {
   return {
-    version: "video-factory/role-audit-v1",
+    version: "video-factory/role-audit-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v1",
+    assessments: [{
+      targetPath: "",
+      dimensions: [
+        { dimension: "attention", score: 90, evidence: "开场就给出具体对象。" },
+        { dimension: "progression", score: 90, evidence: "每场都在推进信息。" },
+        { dimension: "payoff", score: 90, evidence: "结尾回答了原承诺。" },
+        { dimension: "expression", score: 90, evidence: "旁白具体可理解。" },
+      ],
+    }],
     verdict: "pass",
     score: 90,
     summary: "候选交付满足本轮验收标准。",
@@ -734,7 +744,7 @@ describe("ZaiCodePlanExecutor", () => {
     assert.match(capturedPrompt, /source-1/);
     assert.deepEqual(JSON.parse(result.output), output);
     assert.equal(result.trace?.taskKind, "creative-treatment");
-    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v5");
+    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v6");
 
     await assert.rejects(
       async () => executor.runTask(creativeTreatmentTask([])),

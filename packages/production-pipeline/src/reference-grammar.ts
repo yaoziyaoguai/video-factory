@@ -60,7 +60,7 @@ export interface CodexReferenceGrammarAgentOptions {
   maxReviewIterations?: number;
 }
 
-export const REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION = "reference-grammar-v2|role-audit-v3|shot-grammar-validator-v1";
+export const REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION = "reference-grammar-v2|role-audit-v9|shot-grammar-validator-v1";
 
 export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
   readonly id: string;
@@ -95,7 +95,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
       criteria: [
         "节拍时间有序、互不重叠，并覆盖被观察视频的主要叙事结构",
         "静帧不能证明的连续运动和声音被明确降置信，而不是写成确定事实",
-        "只提炼节奏、构图、运镜、色彩、转场与声音功能等抽象语法",
+        "从实际观察中提炼顺序、构图、色彩、转换等可复用语法，并说明其可能承担的引导注意、对比、揭示或回收功能；作者意图与传播效果只可作为有边界的分析，不补造未观察的运动和声音。",
         "avoidCopying 明确排除人物身份、对白、品牌、独特情节和标志性资产",
       ],
       maxIterations: this.options.maxReviewIterations ?? 3,

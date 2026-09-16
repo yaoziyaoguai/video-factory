@@ -538,7 +538,17 @@ describe("ProductionPipeline codex screenwriter", () => {
             return {
               output: repairing
                 ? {
-                    version: "video-factory/role-audit-v1",
+                    version: "video-factory/role-audit-v2",
+                    rubricVersion: "video-factory/role-quality-rubric-v1",
+                    assessments: [{
+                      targetPath: "",
+                      dimensions: [
+                        { dimension: "attention", score: 70, evidence: "开场没有具体对象。" },
+                        { dimension: "progression", score: 70, evidence: "中段信息推进偏慢。" },
+                        { dimension: "payoff", score: 70, evidence: "结尾没有回答开场承诺。" },
+                        { dimension: "expression", score: 70, evidence: "旁白句式拖沓。" },
+                      ],
+                    }],
                     verdict: "repair",
                     score: 70,
                     summary: "仍需修订。",
@@ -546,7 +556,17 @@ describe("ProductionPipeline codex screenwriter", () => {
                     repairInstructions: ["重写开场"],
                   }
                 : {
-                    version: "video-factory/role-audit-v1",
+                    version: "video-factory/role-audit-v2",
+                    rubricVersion: "video-factory/role-quality-rubric-v1",
+                    assessments: [{
+                      targetPath: "",
+                      dimensions: [
+                        { dimension: "attention", score: 92, evidence: "开场给出具体对象。" },
+                        { dimension: "progression", score: 92, evidence: "中段逐步给出结果。" },
+                        { dimension: "payoff", score: 92, evidence: "结尾回答原承诺。" },
+                        { dimension: "expression", score: 92, evidence: "旁白自然可读。" },
+                      ],
+                    }],
                     verdict: "pass",
                     score: 92,
                     summary: "可以继续。",
@@ -595,7 +615,17 @@ describe("ProductionPipeline codex screenwriter", () => {
             candidate: rejectedDraft,
             candidateHash: "a".repeat(64),
             audit: {
-              version: "video-factory/role-audit-v1",
+              version: "video-factory/role-audit-v2",
+              rubricVersion: "video-factory/role-quality-rubric-v1",
+              assessments: [{
+                targetPath: "",
+                dimensions: [
+                  { dimension: "attention", score: 70, evidence: "开场没有具体对象。" },
+                  { dimension: "progression", score: 70, evidence: "中段信息推进偏慢。" },
+                  { dimension: "payoff", score: 70, evidence: "结尾没有回答开场承诺。" },
+                  { dimension: "expression", score: 70, evidence: "旁白句式拖沓。" },
+                ],
+              }],
               verdict: "repair",
               score: 70,
               summary: "仍需人工判断。",
@@ -734,7 +764,17 @@ describe("ProductionPipeline codex screenwriter", () => {
               providerWaitMs: 12_340,
             },
             audit: {
-              version: "video-factory/role-audit-v1",
+              version: "video-factory/role-audit-v2",
+              rubricVersion: "video-factory/role-quality-rubric-v1",
+              assessments: [{
+                targetPath: "",
+                dimensions: [
+                  { dimension: "attention", score: 93, evidence: "开场给出具体对象。" },
+                  { dimension: "progression", score: 93, evidence: "中段逐步给出结果。" },
+                  { dimension: "payoff", score: 93, evidence: "结尾回答原承诺。" },
+                  { dimension: "expression", score: 93, evidence: "旁白自然可读。" },
+                ],
+              }],
               verdict: "pass",
               score: 93,
               summary: "可执行。",

@@ -7,7 +7,7 @@ export interface PublishCopy {
   hashtags: string[];
 }
 
-export const PUBLISH_COPY_AGENT_CONTRACT_VERSION = "publish-editor-v2|role-audit-v3|publish-copy-validator-v1";
+export const PUBLISH_COPY_AGENT_CONTRACT_VERSION = "publish-editor-v2|role-audit-v9|publish-copy-validator-v1";
 
 export interface PublishCopyInput {
   platform: string;
@@ -88,10 +88,10 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
       role: "发行编辑",
       contractVersion: PUBLISH_COPY_AGENT_CONTRACT_VERSION,
       criteria: [
-        "标题与描述只使用脚本已经表达的事实和价值，不制造额外承诺",
-        "标题、描述与话题标签符合目标平台语气和长度约束",
-        "开头信息具体、有辨识度，不使用空泛、夸张或误导性表达",
-        "话题标签覆盖内容主题与目标受众，且没有重复、空白或无关热词",
+        "标题选择一个成片已经表达并兑现的具体对象、问题、变化或结果；没有新增事实、因果或收益承诺。",
+        "目标观众读完标题能说出将看到什么、为何与自己有关；仅有方法论、情绪形容词或万能导语时指出具体缺口。",
+        "描述补充标题未说明的价值或必要范围，表达自然且符合平台语气、长度和既有格式，不机械复述标题。",
+        "话题标签准确覆盖主题和目标受众，遵守数量与格式；去除重复、空白和无关热词，不把热词堆积当作传播力。",
       ],
       maxIterations: this.maxReviewIterations,
       produce: (revision, { requestId, session, requestOptions, preparedOperation }) => preparedOperation

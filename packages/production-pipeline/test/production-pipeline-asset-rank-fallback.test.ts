@@ -244,7 +244,17 @@ describe("ProductionPipeline semantic ranking fallback", () => {
                   reasoningEffort: "xhigh",
                 },
                 audit: {
-                  version: "video-factory/role-audit-v1",
+                  version: "video-factory/role-audit-v2",
+                  rubricVersion: "video-factory/role-quality-rubric-v1",
+                  assessments: [{
+                    targetPath: "",
+                    dimensions: [
+                      { dimension: "evidence", score: 96, evidence: "排序依据来自候选清单。" },
+                      { dimension: "coverage", score: 96, evidence: "逐场给出候选顺序。" },
+                      { dimension: "consistency", score: 96, evidence: "顺序与画面意图一致。" },
+                      { dimension: "actionability", score: 96, evidence: "直接给出可执行顺序。" },
+                    ],
+                  }],
                   verdict: "pass",
                   score: 96,
                   summary: "排序已核验。",

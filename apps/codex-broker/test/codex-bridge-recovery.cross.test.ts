@@ -614,7 +614,17 @@ function topicCandidate(value: unknown): { ideas: unknown[] } {
 
 function passingAudit() {
   return {
-    version: "video-factory/role-audit-v1",
+    version: "video-factory/role-audit-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v1",
+    assessments: [{
+      targetPath: "",
+      dimensions: [
+        { dimension: "evidence", score: 90, evidence: "结论都指向已提供材料。" },
+        { dimension: "coverage", score: 90, evidence: "覆盖本轮要求的范围。" },
+        { dimension: "consistency", score: 90, evidence: "评分与 findings 一致。" },
+        { dimension: "actionability", score: 90, evidence: "下一步具体可执行。" },
+      ],
+    }],
     verdict: "pass",
     score: 90,
     summary: "通过",

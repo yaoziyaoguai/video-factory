@@ -55,10 +55,20 @@ describe("CodexPublishCopyWriter", () => {
           publishAttempt += 1;
           return { output: rawCopy({ title: publishAttempt === 1 ? "震惊所有人" : "下班后先少做一个决定" }) };
         }
+        const auditScore = publishAttempt === 1 ? 58 : 91;
         return { output: {
-          version: "video-factory/role-audit-v1",
+          version: "video-factory/role-audit-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v1",
+          assessments: [{
+            targetPath: "",
+            dimensions: [
+              { dimension: "attention", score: auditScore, evidence: "标题能让人停下。" },
+              { dimension: "payoff", score: auditScore, evidence: "看完能知道具体收益。" },
+              { dimension: "expression", score: auditScore, evidence: "措辞自然不生硬。" },
+            ],
+          }],
           verdict: publishAttempt === 1 ? "repair" : "pass",
-          score: publishAttempt === 1 ? 58 : 91,
+          score: auditScore,
           summary: publishAttempt === 1 ? "标题夸张且没有传达内容价值。" : "文案与脚本和平台约束一致。",
           issues: publishAttempt === 1 ? [{
             severity: "blocking",

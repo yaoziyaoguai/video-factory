@@ -7,6 +7,8 @@ import type {
   CodexPreparedOperation,
   CodexTaskRequestOptions,
   RoleAudit,
+  RoleAuditAssessment,
+  RoleAuditDimension,
   RoleAuditIssue,
   RoleAuditPlanningDisposition,
 } from "./codex-chat.js";
@@ -14,6 +16,35 @@ import { CodexBridgeError } from "./codex-chat.js";
 
 const MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN = 2;
 export const ROLE_AUDIT_CRITERIA_MAX_ITEMS = 16;
+// 评分标准文本在 broker 的 ROLE_AUDIT_DIRECTIVE 里，维度归属在宿主这里。两侧的版本串
+// 必须一致：rubric 一改，旧版本给出的维度分就不再是本轮标准的结论，必须重评。
+export const ROLE_QUALITY_RUBRIC_VERSION = "video-factory/role-quality-rubric-v1";
+
+const CREATIVE_AUDIT_DIMENSIONS = ["attention", "progression", "payoff", "expression"] as const;
+const PUBLISH_AUDIT_DIMENSIONS = ["attention", "payoff", "expression"] as const;
+const REPORT_AUDIT_DIMENSIONS = ["evidence", "coverage", "consistency", "actionability"] as const;
+
+interface RoleAuditAssessmentPlan {
+  /** 逐项评估的集合字段；缺省表示评当前完整候选（根路径 ""）。 */
+  collection?: "ideas" | "episodes";
+  dimensions: readonly RoleAuditDimension[];
+}
+
+// 审计 C2：评估对象与维度集合由宿主按角色决定，模型不能挑容易通过的维度。
+// 表里没有的角色一律拒绝——新工位必须自己声明评什么，不能默认放行一个标量分。
+const ROLE_AUDIT_ASSESSMENT_PLANS: Record<string, RoleAuditAssessmentPlan> = {
+  "编剧": { dimensions: CREATIVE_AUDIT_DIMENSIONS },
+  "导演前期构思": { dimensions: CREATIVE_AUDIT_DIMENSIONS },
+  "导演": { dimensions: CREATIVE_AUDIT_DIMENSIONS },
+  "发行编辑": { dimensions: PUBLISH_AUDIT_DIMENSIONS },
+  "视觉审片员": { dimensions: REPORT_AUDIT_DIMENSIONS },
+  "候选画面复核": { dimensions: REPORT_AUDIT_DIMENSIONS },
+  "参考片分析师": { dimensions: REPORT_AUDIT_DIMENSIONS },
+  "选题总编": { collection: "ideas", dimensions: CREATIVE_AUDIT_DIMENSIONS },
+  "系列总编": { collection: "episodes", dimensions: CREATIVE_AUDIT_DIMENSIONS },
+  "系列开拍总编": { collection: "episodes", dimensions: CREATIVE_AUDIT_DIMENSIONS },
+};
+
 // C5：每个 phase 的已确证未受理（409）会话重建上界。第一次重建是受控恢复；连续被拒
 // 说明模型服务异常，继续重建只会形成无界请求循环。计数持久化在 checkpoint 中，进程
 // 恢复不重置。允许一次受控重建后，第二次到达上限即停止并保留原因。
@@ -424,7 +455,7 @@ export async function runRoleAgentLoop<TOutput>(
         throw await failedLoopError(error, options, state, iterations, candidateExecution.trace, "audit");
       }
       try {
-        audit = timedValidateAudit(options, state, auditExecution.output, hostReadiness);
+        audit = timedValidateAudit(options, state, auditExecution.output, hostReadiness, candidate);
         if (auditContractDigest !== state.contractDigest) {
           // 原物理 audit 必须先结清，但旧合同的 verdict 不能认证当前 criteria。保留候选，
           // 清掉旧审计会话并迁移到当前 checkpoint，再提交一份当前标准的独立审计。
@@ -546,11 +577,16 @@ async function resumePendingAudit<TOutput>(
     if (entry.iteration !== index + 1) {
       throw new Error("Agent loop audit fallback iterations are not contiguous.");
     }
+    const candidate = timedValidate(options, state, entry.candidate, validationContext(entry.iteration));
     return {
       iteration: entry.iteration,
-      candidate: timedValidate(options, state, entry.candidate, validationContext(entry.iteration)),
+      candidate,
       ...(entry.candidateTrace ? { candidateTrace: structuredClone(entry.candidateTrace) } : {}),
-      audit: validateRoleAudit(entry.audit, { planningRole: options.planningRole === true }),
+      audit: validateRoleAudit(entry.audit, {
+        planningRole: options.planningRole === true,
+        role: options.role,
+        candidate,
+      }),
       ...(entry.auditTrace ? { auditTrace: structuredClone(entry.auditTrace) } : {}),
     };
   });
@@ -756,6 +792,8 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
         ...(value.candidateTrace ? { candidateTrace: value.candidateTrace } : {}),
         audit: validateRoleAudit(value.audit, {
           planningRole: options.planningRole === true,
+          role: options.role,
+          candidate: output,
           ...(hostReadiness ? { hostReadiness } : {}),
         }),
         ...(hostReadiness ? { hostReadiness } : {}),
@@ -1224,12 +1262,15 @@ function timedValidateAudit<TOutput>(
   options: RoleAgentLoopOptions<TOutput>,
   state: PersistedLoopState,
   value: unknown,
-  hostReadiness?: HostPlanningReadiness,
+  hostReadiness: HostPlanningReadiness | undefined,
+  candidate: TOutput,
 ): RoleAudit {
   const startedAt = nowMs(options);
   try {
     return validateRoleAudit(value, {
       planningRole: options.planningRole === true,
+      role: options.role,
+      candidate,
       ...(hostReadiness ? { hostReadiness } : {}),
     });
   } finally {
@@ -1346,14 +1387,24 @@ function isPersistedPendingOperation(value: unknown): value is NonNullable<Persi
 
 export function validateRoleAudit(
   value: unknown,
-  options: { planningRole?: boolean; hostReadiness?: HostPlanningReadiness } = {},
+  options: {
+    planningRole?: boolean;
+    hostReadiness?: HostPlanningReadiness;
+    /** 给出角色与候选时，宿主核对评估对象与维度集合；只给 value 时跳过（测试与纯输出校验）。 */
+    role?: string;
+    candidate?: unknown;
+  } = {},
 ): RoleAudit {
   const audit = record(value, "Role audit");
-  if (audit.version !== "video-factory/role-audit-v1") throw new Error("Role audit version is invalid.");
+  if (audit.version !== "video-factory/role-audit-v2") throw new Error("Role audit version is invalid.");
+  if (audit.rubricVersion !== ROLE_QUALITY_RUBRIC_VERSION) {
+    throw new Error(`Role audit rubricVersion must be ${ROLE_QUALITY_RUBRIC_VERSION}.`);
+  }
   if (audit.verdict !== "pass" && audit.verdict !== "repair") throw new Error("Role audit verdict is invalid.");
   if (!Number.isInteger(audit.score) || Number(audit.score) < 0 || Number(audit.score) > 100) {
     throw new Error("Role audit score must be an integer between 0 and 100.");
   }
+  const assessments = validateRoleAuditAssessments(audit.assessments, Number(audit.score), options);
   const issues = array(audit.issues, "Role audit issues", 12).map((entry, index): RoleAuditIssue => {
     const issue = record(entry, `Role audit issues[${index}]`);
     if (issue.severity !== "advisory" && issue.severity !== "blocking") {
@@ -1383,14 +1434,106 @@ export function validateRoleAudit(
   );
   return {
     version: audit.version,
+    rubricVersion: audit.rubricVersion,
     verdict: audit.verdict,
     score: Number(audit.score),
+    assessments,
     summary: text(audit.summary, "Role audit summary"),
     issues,
     repairInstructions,
     ...(planningDisposition !== undefined ? { planningDisposition } : {}),
     hostReadinessReview,
   };
+}
+
+const ROLE_AUDIT_DIMENSION_NAMES: readonly RoleAuditDimension[] = [
+  ...REPORT_AUDIT_DIMENSIONS,
+  ...CREATIVE_AUDIT_DIMENSIONS,
+];
+
+// 审计 C3 的非补偿归约：总分等于全部维度分的最低分，八条选题里七条较好不能把一条很差的
+// 平均掉。分数仍由宿主算，模型自己报的数必须与归约一致，否则拒收。
+function validateRoleAuditAssessments(
+  value: unknown,
+  score: number,
+  options: { role?: string; candidate?: unknown },
+): RoleAuditAssessment[] {
+  const entries = array(value, "Role audit assessments", 12);
+  if (entries.length < 1) throw new Error("Role audit assessments must not be empty.");
+  const assessments = entries.map((entry, index): RoleAuditAssessment => {
+    const item = record(entry, `Role audit assessments[${index}]`);
+    const dimensions = array(item.dimensions, `Role audit assessments[${index}].dimensions`, 4)
+      .map((dimensionEntry, dimensionIndex): RoleAuditAssessment["dimensions"][number] => {
+        const dimension = record(dimensionEntry, `Role audit assessments[${index}].dimensions[${dimensionIndex}]`);
+        if (!ROLE_AUDIT_DIMENSION_NAMES.includes(dimension.dimension as RoleAuditDimension)) {
+          throw new Error(`Role audit assessments[${index}].dimensions[${dimensionIndex}].dimension is invalid.`);
+        }
+        if (!Number.isInteger(dimension.score) || Number(dimension.score) < 0 || Number(dimension.score) > 100) {
+          throw new Error(`Role audit assessments[${index}].dimensions[${dimensionIndex}].score must be an integer between 0 and 100.`);
+        }
+        return {
+          dimension: dimension.dimension as RoleAuditDimension,
+          score: Number(dimension.score),
+          evidence: text(dimension.evidence, `Role audit assessments[${index}].dimensions[${dimensionIndex}].evidence`),
+        };
+      });
+    if (dimensions.length < 3) {
+      throw new Error(`Role audit assessments[${index}] must carry at least 3 dimensions.`);
+    }
+    const names = dimensions.map((dimension) => dimension.dimension);
+    if (new Set(names).size !== names.length) {
+      throw new Error(`Role audit assessments[${index}] repeats a dimension.`);
+    }
+    return { targetPath: targetPathText(item.targetPath), dimensions };
+  });
+  const paths = assessments.map((assessment) => assessment.targetPath);
+  if (new Set(paths).size !== paths.length) {
+    throw new Error("Role audit assessments repeat a targetPath.");
+  }
+  const lowest = Math.min(...assessments.flatMap((assessment) => assessment.dimensions.map((dimension) => dimension.score)));
+  if (score !== lowest) {
+    throw new Error(`Role audit score must equal the lowest dimension score (${lowest}).`);
+  }
+  if (options.role !== undefined) validateRoleAuditTargets(assessments, options.role, options.candidate);
+  return assessments;
+}
+
+// 评估对象和维度集合是宿主的判断，不是模型的：只接收 (kind, value) 的输出校验无从知道
+// 本轮候选有几个、是什么角色。模型漏评一个候选、只评容易过的维度、或用报告维度评创作
+// 交付，都在这里被拒。
+function validateRoleAuditTargets(assessments: RoleAuditAssessment[], role: string, candidate: unknown): void {
+  const plan = ROLE_AUDIT_ASSESSMENT_PLANS[role];
+  if (plan === undefined) {
+    throw new Error(`Role audit has no host assessment plan for role ${role}.`);
+  }
+  let items: unknown[] | undefined;
+  if (plan.collection !== undefined) {
+    const collection = (candidate as Record<string, unknown> | undefined)?.[plan.collection];
+    items = Array.isArray(collection) ? collection : undefined;
+  }
+  // 合法空结果评的是"是否应该为空"这个判断本身，用报告型维度，不要求空集合制造吸引点。
+  const expected = items === undefined || items.length === 0
+    ? [{ targetPath: "", dimensions: plan.collection === undefined ? plan.dimensions : REPORT_AUDIT_DIMENSIONS }]
+    : items.map((_, index) => ({ targetPath: `/${plan.collection}/${index}`, dimensions: plan.dimensions }));
+  const actual = new Map(assessments.map((assessment) => [assessment.targetPath, assessment]));
+  for (const target of expected) {
+    const assessment = actual.get(target.targetPath);
+    if (assessment === undefined) {
+      throw new Error(`Role audit for ${role} is missing the assessment for "${target.targetPath}".`);
+    }
+    actual.delete(target.targetPath);
+    const names = assessment.dimensions.map((dimension) => dimension.dimension);
+    const missing = target.dimensions.filter((dimension) => !names.includes(dimension));
+    const extra = names.filter((dimension) => !target.dimensions.includes(dimension));
+    if (missing.length > 0 || extra.length > 0) {
+      throw new Error(
+        `Role audit for ${role} must score "${target.targetPath}" on ${target.dimensions.join(", ")}; missing ${missing.join(", ") || "none"}, unexpected ${extra.join(", ") || "none"}.`,
+      );
+    }
+  }
+  if (actual.size > 0) {
+    throw new Error(`Role audit for ${role} scores objects the candidate does not have: ${[...actual.keys()].join(", ")}.`);
+  }
 }
 
 function validateHostReadinessReview(
@@ -1659,5 +1802,11 @@ function array(value: unknown, field: string, maximum: number): unknown[] {
 
 function text(value: unknown, field: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${field} must be a non-empty string.`);
+  return value.trim();
+}
+
+// 根路径 "" 是合法目标：创作交付评的是当前完整候选本身，不是它的某个子对象。
+function targetPathText(value: unknown): string {
+  if (typeof value !== "string") throw new Error("Role audit assessment targetPath must be a string.");
   return value.trim();
 }

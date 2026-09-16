@@ -34,7 +34,7 @@ export interface CodexVisualDirectorAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_DIRECTOR_TIMEOUT_MS = 660_000;
 const DEFAULT_DIRECTOR_MAX_ATTEMPTS = 2;
-export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v35|role-audit-v8|director-validator-v7|visual-plan-v2|production-capabilities-v3|voice-timing-v1|planning-disposition-v1|article-sources-v1";
+export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v35|role-audit-v9|director-validator-v7|visual-plan-v2|production-capabilities-v3|voice-timing-v1|planning-disposition-v1|article-sources-v1";
 
 // id 保持 api-visual-director-v1：历史 run 的 brief 持久化了该 id，ProductionPipeline.createRegistry 按 id 匹配 provider。
 export class CodexVisualDirectorAgent implements VisualDirectorAgent {
@@ -107,7 +107,7 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
       planningRole: planningMode === true,
       contractVersion: VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
       criteria: [
-        "视觉圣经、逐镜职责与已接受构思、脚本承诺一致，有清楚的视觉推进而非风格堆砌。",
+        "视觉圣经和逐镜职责兑现已接受构思与脚本承诺；首镜有明确注意对象，相邻镜头在信息、动作或情绪上形成可说明的推进。只换风格、机位或漂亮素材而无新增作用时，定位到具体镜头。",
         "Shot Spec、temporalBeats、Provider、deliveryType、提示词与成功条件彼此一致且可执行；静态不假装动态。",
         "sourceInSeconds、母片覆盖、复用与参考图关系有效，实际使用区间完整兑现；多余生成尾部不改变成片时间轴。",
         "真正的跨镜身份与因果要求有执行依据，独立生成和免责声明不能伪装保证；否定句中的词语不构成肯定要求。",

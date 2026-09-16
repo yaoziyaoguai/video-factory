@@ -44,10 +44,27 @@ describe("asset semantic ranking", () => {
             : "缩略图显示蒸汽动作清楚，且竖屏主体完整。";
           return { output: ranking };
         }
+        const auditScore = rankAttempt === 1 ? 55 : 90;
         return { output: {
-          version: "video-factory/role-audit-v1",
+          version: "video-factory/role-audit-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v1",
+          assessments: [{
+            targetPath: "",
+            dimensions: [
+              {
+                dimension: "evidence",
+                score: auditScore,
+                evidence: rankAttempt === 1
+                  ? "首选理由只依赖素材 ID，没有可核对的缩略图证据。"
+                  : "排序理由逐条对应缩略图可见内容。",
+              },
+              { dimension: "coverage", score: auditScore, evidence: "评估覆盖本轮的全部候选。" },
+              { dimension: "consistency", score: auditScore, evidence: "评分与 issues 的严重度一致。" },
+              { dimension: "actionability", score: auditScore, evidence: "返修要求可落到具体候选的理由。" },
+            ],
+          }],
           verdict: rankAttempt === 1 ? "repair" : "pass",
-          score: rankAttempt === 1 ? 55 : 90,
+          score: auditScore,
           summary: rankAttempt === 1 ? "首选理由依赖素材 ID 臆测。" : "排序理由诚实反映证据边界。",
           issues: rankAttempt === 1 ? [{
             severity: "blocking",
@@ -288,7 +305,17 @@ describe("asset semantic ranking", () => {
 
 function passingAudit() {
   return {
-    version: "video-factory/role-audit-v1",
+    version: "video-factory/role-audit-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v1",
+    assessments: [{
+      targetPath: "",
+      dimensions: [
+        { dimension: "evidence", score: 92, evidence: "排序理由都能对应到缩略图证据。" },
+        { dimension: "coverage", score: 92, evidence: "覆盖了本轮全部候选画面。" },
+        { dimension: "consistency", score: 92, evidence: "评分与 issues 的严重度一致。" },
+        { dimension: "actionability", score: 92, evidence: "结论可直接用于后续选片。" },
+      ],
+    }],
     verdict: "pass",
     score: 92,
     summary: "排序候选与证据一致。",

@@ -8,6 +8,7 @@ import {
   outputSchemaFor,
   providerOutputSchemaFor,
   outputSchemaValidationErrorFor,
+  outputSemanticValidationErrorFor,
   outputValidationErrorFor,
   taskContractDescriptorFor,
   taskPromptFor,
@@ -116,11 +117,53 @@ function assertStrictObjectRequirements(schema: unknown, path: string): void {
   if (record.type === "array") assertStrictObjectRequirements(record.items, `${path}[]`);
 }
 
+// 示例文本里凡嵌入了该 kind 全部顶层 required 键的 JSON 对象，就是在向模型声称"完整字段组合"。
+// 这类示例必须由真校验器裁定：审计指出模型会照抄示例，示例违规即示范违规。
+function claimedCompleteExamplesFor(kind: (typeof BROKER_TASK_KINDS)[number]): Array<{ exampleIndex: number; value: unknown }> {
+  const required = (outputSchemaFor(kind) as { required?: unknown }).required;
+  if (!Array.isArray(required) || required.length === 0) return [];
+  return taskPromptFor(kind).examples.flatMap((example, exampleIndex) => {
+    const start = example.indexOf("{");
+    const end = example.lastIndexOf("}");
+    if (start < 0 || end <= start) return [];
+    let value: unknown;
+    try {
+      value = JSON.parse(example.slice(start, end + 1));
+    } catch {
+      return [];
+    }
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+    const keys = new Set(Object.keys(value as Record<string, unknown>));
+    return (required as string[]).every((key) => keys.has(key)) ? [{ exampleIndex, value }] : [];
+  });
+}
+
 describe("broker-owned task definitions", () => {
   it("keeps production contract pins synchronized with protected broker tasks", () => {
     assert.deepEqual(Object.keys(REQUIRED_CODEX_TASK_CONTRACT_DIGESTS).sort(), [...BROKER_TASK_KINDS].sort());
     for (const kind of BROKER_TASK_KINDS) {
       assert.equal(REQUIRED_CODEX_TASK_CONTRACT_DIGESTS[kind], taskContractDescriptorFor(kind).digest);
+    }
+  });
+  it("validates every example that claims a complete field combination against the real validators", () => {
+    const claimed = BROKER_TASK_KINDS.flatMap((kind) =>
+      claimedCompleteExamplesFor(kind).map((entry) => ({ kind, ...entry })),
+    );
+
+    // 找不到任何示例说明检测逻辑失效，而不是"没有问题"；这条守卫防止测试空转通过。
+    assert.equal(claimed.length > 0, true, "no example claims a complete field combination; the detector is broken");
+
+    for (const { kind, exampleIndex, value } of claimed) {
+      assert.equal(
+        outputSchemaValidationErrorFor(kind, value),
+        undefined,
+        `${kind} example #${exampleIndex} claims a complete field combination but fails the output schema`,
+      );
+      assert.equal(
+        outputSemanticValidationErrorFor(kind, value),
+        undefined,
+        `${kind} example #${exampleIndex} claims a complete field combination but fails the semantic rules`,
+      );
     }
   });
   it("publishes source timecodes in both visual evidence input contracts", () => {
@@ -206,21 +249,21 @@ describe("broker-owned task definitions", () => {
     assert.deepEqual(
       [topic.version, series.version, treatment.version, script.version, director.version],
       [
-        "video-factory/topic-editor-v8",
-        "video-factory/series-showrunner-v2",
-        "video-factory/treatment-director-v5",
-        "video-factory/screenwriter-v17",
-        "video-factory/director-v28",
+        "video-factory/topic-editor-v11",
+        "video-factory/series-showrunner-v3",
+        "video-factory/treatment-director-v6",
+        "video-factory/screenwriter-v18",
+        "video-factory/director-v29",
       ],
     );
     assert.deepEqual(
       [publish.version, rank.version, reference.version, review.version, audit.version],
       [
-        "video-factory/publish-editor-v3",
-        "video-factory/asset-rank-v4",
-        "video-factory/reference-grammar-v3",
-        "video-factory/visual-review-v18",
-        "video-factory/role-audit-v8",
+        "video-factory/publish-editor-v4",
+        "video-factory/asset-rank-v6",
+        "video-factory/reference-grammar-v4",
+        "video-factory/visual-review-v20",
+        "video-factory/role-audit-v10",
       ],
     );
 
@@ -243,7 +286,7 @@ describe("broker-owned task definitions", () => {
     assert.match(rank.directive, /全部不合格时诚实返回 no-match/);
     assert.match(reference.directive, /静帧无法证明真实相机运动、连续动作或音轨/);
     assert.match(audit.directive, /判断语义而不是匹配词语/);
-    assert.match(audit.directive, /iteration 大于 1 时逐项复核 previousAudit/);
+    assert.match(audit.directive, /每轮都按同一版本 criteria 与 rubric 评估完整候选，再逐项报告 previousAudit 问题的修复状态/);
     assert.match(review.outputRules.join("\n"), /不得为了通过审计而美化评分/);
     assert.match(review.directive, /pilotScenePositions.*仅审已列出的试片/);
     assert.match(review.directive, /稀疏模式只能证明已采样状态[\s\S]*not_observed/);
@@ -297,7 +340,7 @@ describe("broker-owned task definitions", () => {
       ["asset-rank", ["version", "source", "providerId", "modelId", "summary", "scenes"]],
       ["reference-grammar", ["version", "summary", "durationMs", "pacing", "composition", "camera", "color", "transitions", "sound", "beats", "reusableRules", "avoidCopying", "confidence"]],
       ["visual-review", ["version", "summary", "scores", "findings", "confidence", "recommendation"]],
-      ["role-audit", ["version", "verdict", "score", "summary", "issues", "repairInstructions", "planningDisposition", "hostReadinessReview"]],
+      ["role-audit", ["version", "rubricVersion", "verdict", "score", "assessments", "summary", "issues", "repairInstructions", "planningDisposition", "hostReadinessReview"]],
       ["creative-discussion", ["stage", "intent", "reply", "changeSummary", "treatment", "script", "director", "upstreamRequest"]],
     ] as const);
 
@@ -331,7 +374,20 @@ describe("broker-owned task definitions", () => {
     assert.ok(JSON.stringify(outputSchemaFor("topic-ideas")).includes('"uniqueItems":true'));
     assert.ok(JSON.stringify(outputSchemaFor("role-audit")).includes('"uniqueItems":true'));
     assert.match(outputSchemaValidationErrorFor("role-audit", {
-      version: "video-factory/role-audit-v1", verdict: "pass", score: 95, summary: "检查完成",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      verdict: "pass",
+      score: 95,
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score: 95, evidence: "开场给出具体对象。" },
+          { dimension: "progression", score: 95, evidence: "中段逐步给出结果。" },
+          { dimension: "payoff", score: 95, evidence: "结尾回答原承诺。" },
+          { dimension: "expression", score: 95, evidence: "标题自然可读。" },
+        ],
+      }],
+      summary: "检查完成",
       issues: [], repairInstructions: [], planningDisposition: null,
       hostReadinessReview: { misclassifiedIssueIds: ["issue-1", "issue-1"] },
     }) ?? "", /unique|duplicate|match any/i);
@@ -639,7 +695,7 @@ describe("broker-owned task definitions", () => {
 
   it("pins the creative-treatment prompt pack and enforces beat-reference semantics", () => {
     const prompt = taskPromptFor("creative-treatment");
-    assert.equal(prompt.version, "video-factory/treatment-director-v5");
+    assert.equal(prompt.version, "video-factory/treatment-director-v6");
     assert.match(prompt.directive, /不输出完整逐镜分镜.*不报价.*不声称画面或配音已完成/);
     assert.match(prompt.directive, /lockedViewerPromise.*保持其实际收益与事实边界/);
     assert.match(prompt.directive, /suppliedSourceIds 只能引用 suppliedSources 中的 id/);
@@ -691,7 +747,7 @@ describe("broker-owned task definitions", () => {
   it("pins the creative-treatment semantic rules version that owns the whitespace contract", () => {
     assert.equal(
       taskContractDescriptorFor("creative-treatment").semanticRulesVersion,
-      "creative-treatment-semantics-v10|production-capabilities-v3|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
+      "creative-treatment-semantics-v11|production-capabilities-v3|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
     );
   });
 });

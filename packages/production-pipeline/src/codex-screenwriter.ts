@@ -103,7 +103,7 @@ export interface CodexScreenwriterAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_SCREENWRITER_TIMEOUT_MS = 660_000;
 const DEFAULT_SCREENWRITER_MAX_ATTEMPTS = 2;
-export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v20|role-audit-v8|script-validator-v5|visual-plan-v2|production-capabilities-v3|voice-timing-v1|creative-treatment-v2|canon-facts-v2|article-sources-v1";
+export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v20|role-audit-v9|script-validator-v5|visual-plan-v2|production-capabilities-v3|voice-timing-v1|creative-treatment-v2|canon-facts-v2|article-sources-v1";
 
 // id 固定为 codex-screenwriter-v1：brief.providers.script 持久化该 id，registry 按 id 匹配 provider。
 export class CodexScreenwriterAgent implements ScreenwriterAgent {
@@ -158,8 +158,8 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
       contractVersion: SCREENWRITER_AGENT_CONTRACT_VERSION,
       criteria: [
         "保持 creativeTreatment 的观众承诺、段落责任与 payoff；落实本次 planningIssues，事实边界一致。",
-        "前两秒有具体吸引点，前六秒有与本片承诺相符的部分兑现；后段有推进，结尾不另起承诺。",
-        "脚本动作、旁白、屏幕文字、声音提示与时长协调，可见成功条件具体；不靠加速或凑镜头塞内容。",
+        "前两秒让具体对象、问题、动作或感受开始成立；前六秒出现与承诺相符的实际内容或情绪进展，不要求读完完整hook。逐段指出新增内容，结尾兑现原承诺；纯导语、同义复述和空泛升华不算推进。",
+        "脚本动作、旁白、屏幕文字、声音提示与时长协调；旁白可自然朗读，内部制作术语不进入观众表达。必要事实限定保留，冗长句先改写而不是加速或增加无职责镜头。",
         "素材/编辑要求符合 productionCapabilities；同母片源区间方案允许在覆盖可证的前提下交导演落实，独立生成不能冒充同一对象或真实实验。",
         "durationRange 优先，visualPlan、用户要求和系列约束一致；冲突不能通过静默跳过或捏造能力解决。",
         "canonFacts 必须是 0-8 条已建立事实；没有新增事实时为空数组，不能用计划或推测凑数；事实阈值与条件不因 hook 或总结被改成绝对断言。",

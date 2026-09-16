@@ -244,7 +244,17 @@ class ParsingTreatmentClient extends CodexBridgeClient {
     if (kind === "role-audit") {
       return {
         output: {
-          version: "video-factory/role-audit-v1",
+          version: "video-factory/role-audit-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v1",
+          assessments: [{
+            targetPath: "",
+            dimensions: [
+              { dimension: "attention", score: 95, evidence: "开场就给出具体对象。" },
+              { dimension: "progression", score: 95, evidence: "每场都在推进信息。" },
+              { dimension: "payoff", score: 95, evidence: "结尾回答了原承诺。" },
+              { dimension: "expression", score: 95, evidence: "表达决策具体可执行。" },
+            ],
+          }],
           verdict: "pass",
           score: 95,
           summary: "构思合同与能力上下文一致。",
@@ -370,7 +380,17 @@ class ParsingRepairClient extends CodexBridgeClient {
     if (kind === "role-audit") {
       return {
         output: {
-          version: "video-factory/role-audit-v1",
+          version: "video-factory/role-audit-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v1",
+          assessments: [{
+            targetPath: "",
+            dimensions: [
+              { dimension: "attention", score: 95, evidence: "开场就给出具体对象。" },
+              { dimension: "progression", score: 95, evidence: "每场都在推进信息。" },
+              { dimension: "payoff", score: 95, evidence: "结尾回答了原承诺。" },
+              { dimension: "expression", score: 95, evidence: "旁白具体可理解。" },
+            ],
+          }],
           verdict: "pass",
           score: 95,
           summary: "正式输入、候选与下游边界一致。",
@@ -565,7 +585,17 @@ describe("visual-review adapter × Broker parser", () => {
       recommendation: "approve",
     };
     const audit = {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "evidence", score: 95, evidence: "结论都指向已提供材料。" },
+          { dimension: "coverage", score: 95, evidence: "覆盖本轮要求的范围。" },
+          { dimension: "consistency", score: 95, evidence: "评分与 findings 一致。" },
+          { dimension: "actionability", score: 95, evidence: "下一步具体可执行。" },
+        ],
+      }],
       verdict: "pass",
       score: 95,
       summary: "报告与画面证据和硬性要求一致。",

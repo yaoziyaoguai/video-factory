@@ -149,7 +149,17 @@ function passingCreativeReviewExecution<T>(
           modelId: `${modelId}-audit`,
         },
         audit: {
-          version: "video-factory/role-audit-v1" as const,
+          version: "video-factory/role-audit-v2" as const,
+          rubricVersion: "video-factory/role-quality-rubric-v1",
+          assessments: [{
+            targetPath: "",
+            dimensions: [
+              { dimension: "attention" as const, score: 92, evidence: "开场给出具体对象。" },
+              { dimension: "progression" as const, score: 92, evidence: "中段逐步给出结果。" },
+              { dimension: "payoff" as const, score: 92, evidence: "结尾回答原承诺。" },
+              { dimension: "expression" as const, score: 92, evidence: "表达具体可执行。" },
+            ],
+          }],
           verdict: "pass" as const,
           score: 92,
           summary: "当前版本可以确认。",

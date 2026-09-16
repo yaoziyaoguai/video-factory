@@ -83,7 +83,7 @@ const MAX_RANK_THUMBNAILS = 12;
 // 与 Broker 的逐图边界保持一致，避免在模型调用前被协议层拒绝。
 const MAX_THUMBNAIL_BYTES = 256 * 1024;
 const THUMBNAIL_HOSTS = new Set(["images.pexels.com", "cdn.pixabay.com"]);
-export const ASSET_RANK_AGENT_CONTRACT_VERSION = "asset-rank-v3|role-audit-v3|asset-ranking-validator-v1";
+export const ASSET_RANK_AGENT_CONTRACT_VERSION = "asset-rank-v3|role-audit-v9|asset-ranking-validator-v1";
 
 export class CodexAssetSemanticRanker implements AssetSemanticRanker {
   readonly id: string;
@@ -118,7 +118,7 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
       criteria: [
         "逐镜候选完整保留，排名和原始排名均连续且没有重复",
         "排序理由引用可见证据或明确承认证据不足，不根据 URL、作者或素材 ID 臆测",
-        "主体、环境、动作、景别、构图与连续性优先于单纯分辨率和素材源质量分",
+        "先确认核心主体、动作和证据职责匹配，再比较识别速度、必要信息可见性、裁切适配与邻镜关系；清晰度、漂亮程度和视觉刺激不能补偿不匹配，也不能使缺证据候选跨过自动采用阈值。",
         "对已有合格候选的镜头，首选候选的核心主体、物体和动作必须与导演意图一致；没有合格候选时必须诚实标记无匹配，并把所有不合格候选评分保持在自动执行阈值以下，这种排序结果本身可以通过审计；输入候选为空时只需如实标记无可排序项，由下游素材路由决定生成、复用或停住",
         "没有把候选锁定，也没有新增、删除或替换候选素材",
       ],

@@ -57,13 +57,40 @@ class ControlledCodexClient extends CodexBridgeClient {
   }
 }
 
+const CREATIVE_DIMENSION_EVIDENCE: Record<string, string> = {
+  attention: "前两秒给出具体动作，不靠口号开场。",
+  progression: "三段之间有可辨认的推进。",
+  payoff: "结尾兑现了观众承诺。",
+  expression: "画面要求在当前素材能力内可落地。",
+};
+
+const REPORT_DIMENSION_EVIDENCE: Record<string, string> = {
+  evidence: "结论引用了具体的关键帧或时间码。",
+  coverage: "覆盖了需要判断的全部镜头。",
+  consistency: "同一对象在不同镜头里的描述一致。",
+  actionability: "给出的处理方式可以直接执行。",
+};
+
+function scoredDimensions(evidenceByDimension: Record<string, string>, score: number) {
+  return Object.entries(evidenceByDimension).map(([dimension, evidence]) => ({ dimension, score, evidence }));
+}
+
+// 评估对象与维度集合由宿主按角色决定：创作交付（编剧/导演）评四维创作维度，
+// 报告型（视觉审片员）评四维报告维度，两者不能互换。
 const passingAudit = {
-  version: "video-factory/role-audit-v1",
+  version: "video-factory/role-audit-v2",
+  rubricVersion: "video-factory/role-quality-rubric-v1",
   verdict: "pass",
   score: 95,
+  assessments: [{ targetPath: "", dimensions: scoredDimensions(CREATIVE_DIMENSION_EVIDENCE, 95) }],
   summary: "候选交付满足约束。",
   issues: [],
   repairInstructions: [],
+};
+
+const passingReportAudit = {
+  ...passingAudit,
+  assessments: [{ targetPath: "", dimensions: scoredDimensions(REPORT_DIMENSION_EVIDENCE, 95) }],
 };
 
 function validDraft() {
@@ -244,9 +271,11 @@ describe("buildRoleAgentAssembly", () => {
 
   it("keeps assembled OpenAI producer revisions isolated from prior model history", async () => {
     const repairAudit = {
-      version: "video-factory/role-audit-v1",
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
       verdict: "repair",
       score: 70,
+      assessments: [{ targetPath: "", dimensions: scoredDimensions(CREATIVE_DIMENSION_EVIDENCE, 70) }],
       summary: "第一镜需要更具体。",
       issues: [{
         severity: "blocking",
@@ -300,7 +329,7 @@ describe("buildRoleAgentAssembly", () => {
   it("runs the assembled GLM visual reviewer through its OpenAI backup after a transient outage", async () => {
     const openai = new ControlledCodexClient("openai", "gpt-review", (kind) => {
       if (kind === "visual-review") return passingVisualReport;
-      if (kind === "role-audit") return passingAudit;
+      if (kind === "role-audit") return passingReportAudit;
       throw new Error(`Unexpected OpenAI task ${kind}`);
     });
     const zai = new ControlledCodexClient("zai-bigmodel-api", "glm-review", (kind) => {
@@ -350,12 +379,12 @@ describe("buildRoleAgentAssembly", () => {
     };
     const openai = new ControlledCodexClient("openai", "gpt-review", (kind) => {
       if (kind === "visual-review") return passingVisualReport;
-      if (kind === "role-audit") return passingAudit;
+      if (kind === "role-audit") return passingReportAudit;
       throw new Error(`Unexpected OpenAI task ${kind}`);
     });
     const zai = new ControlledCodexClient("zai-bigmodel-api", "glm-review", (kind) => {
       if (kind === "visual-review") return passingVisualReport;
-      if (kind === "role-audit") return passingAudit;
+      if (kind === "role-audit") return passingReportAudit;
       throw new Error(`Unexpected ZAI task ${kind}`);
     });
     const result = buildRoleAgentAssembly({

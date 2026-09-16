@@ -50,10 +50,27 @@ describe("CodexReferenceGrammarAgent", () => {
           analysisAttempt += 1;
           return { output: grammar(analysisAttempt === 1 ? "复制原片标志性的环绕运镜" : "缓慢推进后稳定") };
         }
+        const auditScore = analysisAttempt === 1 ? 61 : 93;
         return { output: {
-          version: "video-factory/role-audit-v1",
+          version: "video-factory/role-audit-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v1",
+          assessments: [{
+            targetPath: "",
+            dimensions: [
+              {
+                dimension: "evidence",
+                score: auditScore,
+                evidence: analysisAttempt === 1
+                  ? "camera 字段要求复刻原片标志性运镜，没有抽象证据支撑。"
+                  : "语法结论都能对应到抽帧里的可见运动。",
+              },
+              { dimension: "coverage", score: auditScore, evidence: "覆盖了本轮要求提炼的语法范围。" },
+              { dimension: "consistency", score: auditScore, evidence: "评分与 issues 的严重度一致。" },
+              { dimension: "actionability", score: auditScore, evidence: "输出可直接交给导演作为机位依据。" },
+            ],
+          }],
           verdict: analysisAttempt === 1 ? "repair" : "pass",
-          score: analysisAttempt === 1 ? 61 : 93,
+          score: auditScore,
           summary: analysisAttempt === 1 ? "包含应排除的标志性镜头复刻。" : "只保留了可复用的抽象制作语法。",
           issues: analysisAttempt === 1 ? [{
             severity: "blocking",
@@ -154,7 +171,17 @@ describe("CodexReferenceGrammarAgent", () => {
 
 function passingAudit() {
   return {
-    version: "video-factory/role-audit-v1",
+    version: "video-factory/role-audit-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v1",
+    assessments: [{
+      targetPath: "",
+      dimensions: [
+        { dimension: "evidence", score: 93, evidence: "语法结论对应抽帧中可见的运动。" },
+        { dimension: "coverage", score: 93, evidence: "覆盖了参考片要求的语法范围。" },
+        { dimension: "consistency", score: 93, evidence: "评分与 issues 的严重度一致。" },
+        { dimension: "actionability", score: 93, evidence: "结论可直接用于后续机位设计。" },
+      ],
+    }],
     verdict: "pass",
     score: 93,
     summary: "参考片语法与证据边界一致。",

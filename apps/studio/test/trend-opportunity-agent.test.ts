@@ -48,6 +48,23 @@ const MINIMAL_FIXTURE_VISUAL_PLAN = {
 
 const modelSignals = signals.map((signal) => ({ ...signal, relatedSignals: [] }));
 
+const CREATIVE_DIMENSION_EVIDENCE: Record<string, string> = {
+  attention: "前两秒给出具体问题，不靠热搜标题复述。",
+  progression: "中段有明确推进，不停在同一种清单模板。",
+  payoff: "结尾兑现了承诺里的具体结论。",
+  expression: "视觉方案写清了可拍的具体动作。",
+};
+
+// rubric v1 要求总分等于全部维度分的最低分；让每维都取同一个分数，最小值自然成立。
+function creativeDimensions(score: number) {
+  return Object.entries(CREATIVE_DIMENSION_EVIDENCE).map(([dimension, evidence]) => ({ dimension, score, evidence }));
+}
+
+// 选题总编的评估对象由宿主逐条给出，模型不能挑。本文件每个候选都只有一条 idea。
+function ideaAssessments(score: number) {
+  return [{ targetPath: "/ideas/0", dimensions: creativeDimensions(score) }];
+}
+
 class CapturingCodexClient extends CodexBridgeClient {
   readonly calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
 
@@ -64,9 +81,11 @@ class CapturingCodexClient extends CodexBridgeClient {
     this.calls.push({ kind, payload });
     if (kind === "role-audit") {
       return { output: {
-        version: "video-factory/role-audit-v1",
+        version: "video-factory/role-audit-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v1",
         verdict: "pass",
         score: 92,
+        assessments: ideaAssessments(92),
         summary: "候选有来源、观众价值与可执行角度。",
         issues: [],
         repairInstructions: [],
@@ -209,9 +228,11 @@ describe("TrendOpportunityAgent", () => {
         }
         this.auditCalls += 1;
         return { output: this.auditCalls === 1 ? {
-          version: "video-factory/role-audit-v1",
+          version: "video-factory/role-audit-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v1",
           verdict: "repair",
           score: 55,
+          assessments: ideaAssessments(55),
           summary: "候选添加了正文不支持的比例。",
           issues: [{
             severity: "blocking",
@@ -221,9 +242,11 @@ describe("TrendOpportunityAgent", () => {
           }],
           repairInstructions: ["删除比例断言，保留可验证的前后对照角度。"],
         } : {
-          version: "video-factory/role-audit-v1",
+          version: "video-factory/role-audit-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v1",
           verdict: "pass",
           score: 91,
+          assessments: ideaAssessments(91),
           summary: "修订后事实边界清楚。",
           issues: [],
           repairInstructions: [],

@@ -4038,7 +4038,7 @@ export class ProductionPipeline {
                 transport: "unix_socket",
                 billing: "subscription",
                 configurationSource: "system_default",
-                parameters: { promptPack: "video-factory/publish-editor-v2" },
+                parameters: { promptPack: "video-factory/publish-editor-v4" },
               },
               providerLabel: "Codex 发行编辑",
             });
@@ -4633,14 +4633,14 @@ function videoPricingProfile(
 // 回执里的 promptPack 是"这份输出由哪版合同产生"的证据。它必须与 codex-broker 中
 // visual-review 任务定义的 version 一致（apps/codex-broker/src/task-definitions.ts）；
 // 两个 workspace 之间没有依赖，只能靠这处常量对齐，改 broker 合同时必须同步这里。
-const VISUAL_REVIEW_PROMPT_PACK = "video-factory/visual-review-v18";
+const VISUAL_REVIEW_PROMPT_PACK = "video-factory/visual-review-v20";
 
 class VisualDirectorProvider implements Provider<VisualDirectorAgentInput, CodexTaskExecution<unknown>> {
   readonly capability: Capability = "storyboard.plan";
   readonly label = "Codex 视觉导演";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly parameters = { promptPack: "video-factory/director-v28" };
+  readonly parameters = { promptPack: "video-factory/director-v29" };
 
   constructor(
     private readonly agent: VisualDirectorAgent,
@@ -4673,7 +4673,7 @@ class ScreenwriterProvider implements Provider<ScreenwriterAgentInput, CodexTask
   readonly label = "AI 编剧";
   readonly transport = "unix_socket" as const;
   readonly billing = "subscription" as const;
-  readonly parameters = { promptPack: "video-factory/screenwriter-v14" };
+  readonly parameters = { promptPack: "video-factory/screenwriter-v18" };
 
   constructor(
     private readonly agent: ScreenwriterAgent,
@@ -4990,7 +4990,7 @@ function referenceGrammarNode(
       transport: "unix_socket",
       billing: "subscription",
       configurationSource: "system_default",
-      parameters: { sampleMode: "keyframes", promptPack: "video-factory/reference-grammar-v2" },
+      parameters: { sampleMode: "keyframes", promptPack: "video-factory/reference-grammar-v4" },
       estimatedCostCny: 0,
     },
     mode: "automatic",
@@ -5089,7 +5089,7 @@ function referenceGrammarNode(
               transport: "unix_socket",
               billing: "subscription",
               configurationSource: "system_default",
-              parameters: { sampleMode: "keyframes", promptPack: "video-factory/reference-grammar-v2" },
+              parameters: { sampleMode: "keyframes", promptPack: "video-factory/reference-grammar-v4" },
             },
             providerLabel: "Codex 参考视频分析",
           });
@@ -5147,7 +5147,7 @@ function referenceGrammarNode(
                 billing: "subscription" as const,
                 configurationSource: "system_default" as const,
               }),
-          parameters: { sampleMode: "keyframes", promptPack: (execution?.trace ?? failedTrace)?.promptVersion ?? "video-factory/reference-grammar-v2" },
+          parameters: { sampleMode: "keyframes", promptPack: (execution?.trace ?? failedTrace)?.promptVersion ?? "video-factory/reference-grammar-v4" },
           estimatedCostCny: 0,
           requestId: context.nextId("reference-grammar"),
         },
@@ -8045,7 +8045,7 @@ function directorNode(
       };
       const producerIdentity = producerRequestIdentity(DIRECTOR_PRODUCER_REQUEST_SCHEMA_VERSION, {
         contractVersion: VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
-        promptPack: "video-factory/director-v28",
+        promptPack: "video-factory/director-v29",
         request: {
           ...producerInput,
           brief: producerBriefWithoutRework(producerInput.brief),
@@ -8225,7 +8225,7 @@ async function inheritUnchangedReworkDirector(options: {
   if (sourceNode?.status !== "succeeded"
     || sourceNode.outputState?.stale === true
     || sourceNode.executionReceipt?.modelId !== currentModelId
-    || sourceNode.executionReceipt?.parameters?.promptPack !== "video-factory/director-v28"
+    || sourceNode.executionReceipt?.parameters?.promptPack !== "video-factory/director-v29"
     || sourceNode.executionReceipt?.parameters?.producerRequestSchemaVersion !== options.producerIdentity.schemaVersion
     || sourceNode.executionReceipt?.parameters?.producerRequestDigest !== options.producerIdentity.digest) {
     return undefined;
@@ -8534,7 +8534,7 @@ function screenwriterNode(
       delete producerBrief.rework;
       const producerIdentity = producerRequestIdentity(SCREENWRITER_PRODUCER_REQUEST_SCHEMA_VERSION, {
         contractVersion: SCREENWRITER_AGENT_CONTRACT_VERSION,
-        promptPack: "video-factory/screenwriter-v14",
+        promptPack: "video-factory/screenwriter-v18",
         request: {
           brief: producerBrief,
           selectedModelId: request.selectedModelId ?? agent?.modelId ?? "codex-default",
@@ -8722,7 +8722,7 @@ async function inheritUnchangedReworkScript(options: {
   if (sourceNode?.status !== "succeeded"
     || sourceNode.outputState?.stale === true
     || sourceNode.executionReceipt?.modelId !== currentModelId
-    || sourceNode.executionReceipt?.parameters?.promptPack !== "video-factory/screenwriter-v14"
+    || sourceNode.executionReceipt?.parameters?.promptPack !== "video-factory/screenwriter-v18"
     || sourceNode.executionReceipt?.parameters?.producerRequestSchemaVersion !== options.producerIdentity.schemaVersion
     || sourceNode.executionReceipt?.parameters?.producerRequestDigest !== options.producerIdentity.digest) {
     return undefined;
@@ -9824,7 +9824,7 @@ function assetSemanticRankNode(
       transport: "unix_socket",
       billing: "subscription",
       configurationSource: "system_default",
-      parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v3" },
+      parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v6" },
       estimatedCostCny: 0,
     } : {
       providerId: "deterministic-quality-v1",
@@ -9894,7 +9894,7 @@ function assetSemanticRankNode(
                 transport: "unix_socket",
                 billing: "subscription",
                 configurationSource: "system_default",
-                parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v3" },
+                parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v6" },
               },
               providerLabel: "Codex 候选画面排序",
             });

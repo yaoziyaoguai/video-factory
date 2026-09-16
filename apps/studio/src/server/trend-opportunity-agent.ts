@@ -24,7 +24,7 @@ import { classifyTopicCategory, topicRiskLevel } from "./topic-taxonomy.js";
 import { topicIdeasModelPayload } from "./topic-ideas-payload.js";
 import type { TrendArticleReader, TrendArticleSnapshot } from "./trend-article-reader.js";
 
-const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v9|role-audit-v3|topic-ideas-validator-v7|complete-role-scope-v1|canonical-signal-groups-v1|downstream-source-gate-v1|visual-plan-v2|angle-identity-v1|cited-facts-v2";
+const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v10|role-audit-v9|topic-ideas-validator-v7|complete-role-scope-v1|canonical-signal-groups-v1|downstream-source-gate-v1|visual-plan-v2|angle-identity-v1|cited-facts-v2";
 
 export interface TrendSignalPort {
   listSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]>;
@@ -375,9 +375,9 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
       contractVersion: TOPIC_EDITOR_AGENT_CONTRACT_VERSION,
       criteria: [
         "逐项审查 title、hook、rationale、facts、visualProof 与 visualPlan：事实、数字、引语和因果须由可读正文支持；创作标签、假设演算、受众描述和明确的不确定表达无需原文逐字出现",
-        "角度对普通观众有明确收益，且不是对热搜标题的简单改写",
-        "视觉可表现性、证据可得性、制作成本、合规风险和系列潜力得到实际权衡",
-        "钩子能在两秒内建立具体问题或反差，但不夸张、不消费灾害伤亡或政治突发",
+        "按strategy中的受众与定位审查：标题和hook指向具体对象、问题或体验，观众能理解继续看的理由；同批候选在观众任务、观看过程或结尾兑现上有实质差异，不因换词就判原创。",
+        "按各自rubric核对视觉可行性、成本效率、新颖性、系列潜力与商业适配；高分必须有当前输入支持，未确认的实验、专属拍摄和素材获取不能被当作已落实能力。内容潜力与制作就绪分开判断。",
+        "前两秒让具体吸引点开始成立，不强求完整长句在两秒内念完。hook可自然朗读且前提真实；准确限定不能被删除，也不应以堆叠限定替代改写。不得夸大或娱乐化灾害伤亡、政治突发。",
         "榜单排名、热度与链接只是来源线索，不得把热度当作事实或结论引用",
         "先评内容潜力与适合的视频形态；来源数量门槛由下游执行，不得仅因来源暂时不足删除有潜力且可补源的角度",
       ],

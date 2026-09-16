@@ -391,7 +391,17 @@ function passedVisualReviewLoop(
         modelId,
       },
       audit: {
-        version: "video-factory/role-audit-v1",
+        version: "video-factory/role-audit-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v1",
+        assessments: [{
+          targetPath: "",
+          dimensions: [
+            { dimension: "evidence", score: 95, evidence: "结论引用成片证据。" },
+            { dimension: "coverage", score: 95, evidence: "覆盖本轮应检查的画面范围。" },
+            { dimension: "consistency", score: 95, evidence: "评分与结论互相一致。" },
+            { dimension: "actionability", score: 95, evidence: "下一步具体且不越权。" },
+          ],
+        }],
         verdict: "pass",
         score: 95,
         summary: "审片结论与证据一致。",
@@ -706,7 +716,7 @@ describe("ProductionPipeline", () => {
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.modelId, "glm-5.3-flash");
     assert.equal(
       waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/visual-review-v18",
+      "video-factory/visual-review-v20",
     );
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan, undefined);
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.billing, "subscription");
@@ -3814,7 +3824,7 @@ describe("ProductionPipeline", () => {
     });
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/director-v28",
+      "video-factory/director-v29",
     );
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.modelId,

@@ -135,6 +135,20 @@ interface PlanningSpies {
   rankCalls: number;
 }
 
+const CREATIVE_DIMENSION_EVIDENCE: Record<string, string> = {
+  attention: "前两秒给出具体问题。",
+  progression: "中段有可辨认的推进。",
+  payoff: "结尾兑现了承诺里的结论。",
+  expression: "画面要求在当前素材能力内可落地。",
+};
+
+// 创作交付类角色的评估对象是整份候选（根路径 ""），维度由宿主固定为四维创作维度；
+// 总分等于全部维度分的最低分，所以每维取同一个分数。
+const CREATIVE_ASSESSMENTS = [{
+  targetPath: "",
+  dimensions: Object.entries(CREATIVE_DIMENSION_EVIDENCE).map(([dimension, evidence]) => ({ dimension, score: 92, evidence })),
+}];
+
 function planningAgents(
   spies: PlanningSpies,
   failure: { treatment?: boolean; screenwriter?: boolean } = {},
@@ -284,9 +298,11 @@ function reviewCapablePlanningAgents(
     }
     const output = input.creativeReviewExecution.candidate;
     const audit = {
-      version: "video-factory/role-audit-v1" as const,
+      version: "video-factory/role-audit-v2" as const,
+      rubricVersion: "video-factory/role-quality-rubric-v1" as const,
       verdict: "pass" as const,
       score: 92,
+      assessments: CREATIVE_ASSESSMENTS,
       summary: "当前构思可以确认。",
       issues: [],
       repairInstructions: [],
