@@ -2,12 +2,14 @@ import { AlertCircle, ArrowRight, Link2, ShieldAlert, Sparkles, XCircle } from "
 import { useMemo } from "react";
 import type { StudioCandidateInboxItem, StudioTopicGenerationReceipt } from "../../shared/api.js";
 import { canonicalizeSourceUrl } from "../../shared/api.js";
-import { platformLabel, proposalSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
+import { creatorFacingTechnicalText, platformLabel, proposalSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
 
 interface HotTopicBoardProps {
   candidates: StudioCandidateInboxItem[];
   topicGeneration?: StudioTopicGenerationReceipt;
   adoptingId?: string;
+  /** 已有一轮更新在跑：这里的"重新生成"走的是同一个刷新入口，不能再放一次。 */
+  refreshBusy?: boolean;
   onAdopt: (candidate: StudioCandidateInboxItem) => Promise<void>;
   onSupplementSources?: (candidate: StudioCandidateInboxItem) => void;
   onRetry?: () => void;
@@ -25,7 +27,7 @@ interface HotTopic {
   directions: StudioCandidateInboxItem[];
 }
 
-export function HotTopicBoard({ candidates, topicGeneration, adoptingId, onAdopt, onSupplementSources, onRetry }: HotTopicBoardProps) {
+export function HotTopicBoard({ candidates, topicGeneration, adoptingId, refreshBusy, onAdopt, onSupplementSources, onRetry }: HotTopicBoardProps) {
   const topics = useMemo(() => buildHotTopics(candidates), [candidates]);
   // 总编模型轮失败时整块看板都是规则线索：这时"每个热点已给出可用方向"是假话，
   // 必须在不依赖用户逐行辨认的前提下先说清整块看板的性质。
@@ -53,7 +55,7 @@ export function HotTopicBoard({ candidates, topicGeneration, adoptingId, onAdopt
             <p>{topicGeneration ? ruleFallbackReason(topicGeneration) : "这些候选是本地规则按榜单信号生成的，没有经过选题总编。"}</p>
             <p>下面的热点来自榜单信号，没有经过总编判断，也没有创作角度与观众需求评分——它们只是线索。你仍然可以选其中任意一条开工。</p>
           </div>
-          {onRetry ? <button className="button button-secondary" type="button" onClick={onRetry}>重新生成</button> : null}
+          {onRetry ? <button className="button button-secondary" type="button" disabled={refreshBusy === true} onClick={onRetry}>重新生成</button> : null}
         </div>
       ) : null}
       <ol className="hot-topic-list">
@@ -240,6 +242,7 @@ function isRuleLead(item: StudioCandidateInboxItem): boolean {
 }
 
 // 只说"总编没给建议"不够：用户无从判断是模型不可用、超时，还是输出被合同拦下。
+// failureReason 来自服务端的失败叙述，可能带机器诊断尾巴，过一遍创作者措辞表再显示。
 function ruleFallbackReason(receipt: StudioTopicGenerationReceipt): string {
   const category = {
     model_unavailable: "总编模型当前不可用。",
@@ -247,5 +250,6 @@ function ruleFallbackReason(receipt: StudioTopicGenerationReceipt): string {
     contract_rejected: "总编的产出被任务合同拒绝。",
     model_error: "总编这轮执行出错。",
   }[receipt.failureCategory ?? "model_error"];
-  return receipt.failureReason ? `${category}原因：${receipt.failureReason}` : category;
+  const reason = creatorFacingTechnicalText(receipt.failureReason);
+  return reason ? `${category}原因：${reason}` : category;
 }

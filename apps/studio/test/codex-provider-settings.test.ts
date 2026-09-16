@@ -476,9 +476,19 @@ describe("buildProviderCatalog codex fallback", () => {
     );
     assert.equal(screenwriter?.defaultModelId, "gpt-5.6-sol");
 
+    // 构思、导演、独立复核也已经按请求换模型了：这几条腿的候选 agent 同样按公告表逐个建出来，
+    // 选中哪一个都能真的送上线路，所以候选表也要列进界面。
+    for (const providerId of ["codex-creative-treatment-v1", "api-visual-director-v1", "codex-role-auditor-v1"]) {
+      assert.deepEqual(
+        providers.find((provider) => provider.id === providerId)?.modelProfiles?.map((model) => model.id),
+        ["gpt-5.6-sol", "gpt-6-astra", "glm-5.3"],
+        `${providerId} 应当列出 broker 公告的全部候选模型`,
+      );
+    }
+
     // 其余角色还没有按请求换模型的能力，展开候选表只会列出选中必然报错的选项。
-    const director = providers.find((provider) => provider.id === "api-visual-director-v1");
-    assert.deepEqual(director?.modelProfiles?.map((model) => model.id), ["gpt-5.6-sol", "glm-5.3"]);
+    const publishCopy = providers.find((provider) => provider.id === "codex-publish-copy-v1");
+    assert.deepEqual(publishCopy?.modelProfiles?.map((model) => model.id), ["gpt-5.6-sol", "glm-5.3"]);
   });
 
   it("shows the role-specific production and audit models reported by the broker", () => {

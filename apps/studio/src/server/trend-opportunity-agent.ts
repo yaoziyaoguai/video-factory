@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   CodexBridgeClient,
   CodexBridgeError,
+  ModelCandidatesExhaustedError,
   fileRoleAgentLoopCheckpoint,
   roleAgentCheckpointKey,
   runRoleAgentLoop,
@@ -876,12 +877,30 @@ function ruleFallbackDiagnostic(error: unknown): RuleFallbackDiagnostic {
       return { category: "accepted_unknown", reason: error.creatorMessage };
     }
     if (error.stage === "rejected") {
-      return { category: "contract_rejected", reason: error.message };
+      // 这里曾取 error.message：那是给操作员看的英语技术叙述（schema 名、字段路径）。
+      // creatorMessage 是同一判断的中文说法，不会把模型身份与校验细节抖给创作者。
+      return { category: "contract_rejected", reason: error.creatorMessage };
     }
     return { category: "model_error", reason: error.creatorMessage };
   }
+  // 非桥接错误：这里最常见的是 RoleAgentLoopError，它的 message 是写给操作员的——候选模型身份、
+  // 逐个模型的失败原因，尾巴上还挂着 `诊断：stage=…；reasonCode=…`。这份 reason 会进
+  // generationReceipt 并直接显示给创作者，所以按结构重建一句人话，不转发原文；
+  // 结构化的 stage/statusCode/failureKind 仍在检查点里，操作员排查不受影响。
+  const attempted = candidateAttemptCount(error);
   return {
     category: "model_error",
-    reason: error instanceof Error ? error.message : String(error),
+    reason: attempted > 0
+      ? `已尝试 ${attempted} 个模型，都没能给出可用结果。`
+      : "总编这一轮没有产出可用的建议。",
   };
+}
+
+// 候选耗尽错误被 RoleAgentLoopError 包在 cause 链上，按类型识别而不是解析文案。
+function candidateAttemptCount(error: unknown): number {
+  for (let current: unknown = error, depth = 0; current instanceof Error && depth < 4; depth += 1) {
+    if (current instanceof ModelCandidatesExhaustedError) return current.attempts.length;
+    current = current.cause;
+  }
+  return 0;
 }

@@ -166,6 +166,73 @@ describe("node production workspaces", () => {
     expect(within(configuration).getByRole("button", { name: "保存选择" })).toBeInTheDocument();
   });
 
+  it("lists the fallback models read-only and follows the preferred model that is picked", async () => {
+    const providers: StudioProvider[] = [{
+      id: "codex-screenwriter-v1",
+      capability: "script.draft",
+      label: "AI 编剧",
+      available: true,
+      kind: "external",
+      billing: "subscription",
+      defaultModelId: "gpt-5.6-terra",
+      modelProfiles: [{
+        id: "gpt-5.6-terra",
+        providerId: "codex-screenwriter-v1",
+        providerFamily: "openai",
+        label: "GPT-5.6 Terra",
+        description: "日常创作",
+        available: true,
+        taskTypes: ["text"],
+      }, {
+        id: "gpt-6-astra",
+        providerId: "codex-screenwriter-v1",
+        providerFamily: "openai",
+        label: "GPT-6 Astra",
+        description: "长稿更稳",
+        available: true,
+        taskTypes: ["text"],
+      }],
+    }];
+    const node: StudioNode = {
+      id: "script",
+      label: "脚本",
+      role: "编剧",
+      status: "pending",
+      artifactIds: [],
+      qualityGateResults: [],
+      executionConfiguration: {
+        providerId: "codex-screenwriter-v1",
+        modelSelections: {},
+      },
+    };
+
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw"
+      runRevision={2}
+      node={node}
+      providers={providers}
+      runStatus="paused"
+      artifacts={[]}
+      busy={false}
+      onOverride={async () => undefined}
+      onConfigure={async () => undefined}
+      onAuthorize={async () => undefined}
+    />);
+
+    const configuration = screen.getByRole("region", { name: "编剧本次制作选择" });
+    await userEvent.click(within(configuration).getByRole("button", { name: "调整" }));
+
+    // 没选之前首选是推荐模型，兜底链里就只剩另一个；顺序由 broker 公告决定，用户不排序。
+    const fallback = within(configuration).getByLabelText("兜底模型顺序");
+    expect(within(fallback).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["GPT-6 Astra"]);
+    expect(within(fallback).queryByRole("combobox")).toBeNull();
+
+    // 选了另一个模型，兜底链立刻跟着换：它展示的是"首选之后会接手的是谁"。
+    // 提示语在 label 内，所以可访问名不止"首选模型"四个字——用前缀匹配。
+    await userEvent.selectOptions(within(configuration).getByRole("combobox", { name: /^首选模型/ }), "gpt-6-astra");
+    expect(within(configuration).getByLabelText("兜底模型顺序")).toHaveTextContent("GPT-5.6 Terra");
+  });
+
   it("explains real model, audit, validation, and retry timings without exposing the prompt", async () => {
     const node: StudioNode = {
       ...succeededNode,
@@ -773,7 +840,8 @@ describe("node production workspaces", () => {
     const summary = container.querySelector("summary");
     expect(summary).toHaveTextContent("已尝试替补模型，但本步骤仍未完成");
     expect(summary).not.toHaveTextContent("替补模型已完成");
-    expect(screen.getByRole("alert")).toHaveTextContent(`已尝试替补模型，但本步骤仍未完成：${fallbackReason}`);
+    // 服务端给的原文是"2 个候选模型均未能完成。"，界面上说的是创作者读得懂的那句。
+    expect(screen.getByRole("alert")).toHaveTextContent("已尝试替补模型，但本步骤仍未完成：已尝试 2 个模型，都没能给出可用结果。");
   });
 
   it("shows the immutable planned provider and model before a node executes", async () => {

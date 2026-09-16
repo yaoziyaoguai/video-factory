@@ -1027,6 +1027,13 @@ h1, h2, .creative-stage blockquote, .brand strong { font-family: "Manrope Variab
 .agent-loop-progress.is-exhausted { color: #a54236; background: #edf4ff; border-left-color: #da6555; }
 /* 不是失败也不是通过：自动修订用尽，停在用户面前。用待办色，避免读成"作品有问题"或"已通过"。 */
 .agent-loop-progress.is-awaiting_user { color: #7a5a12; background: #fdf6e3; border-left-color: #d9a72b; }
+/* 停在用户面前时的审计建议：信息和节点工作区里那块一样，但要点是可照做的一条条意见，所以竖排。 */
+.agent-loop-progress.is-stacked { display: grid; justify-content: start; gap: 8px; }
+.agent-audit-issues { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.agent-audit-issues li { display: grid; gap: 3px; }
+.agent-audit-issues li > strong { font-size: 12px; }
+.agent-audit-issues li > span { color: var(--muted); }
+.agent-audit-issue-severity { color: #9b650e; font-size: 10px; font-weight: 700; }
 
 .provider-ledger { border-top: 1px solid var(--line); }
 .provider-ledger-row { display: grid; min-height: 76px; grid-template-columns: 38px minmax(230px, 1.2fr) minmax(180px, .8fr) 56px 68px 24px; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }

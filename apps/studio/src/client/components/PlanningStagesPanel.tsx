@@ -2,6 +2,7 @@ import { CircleAlert, Cpu, FilePenLine, RefreshCw, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { StudioNodeExecutionConfigurationDraft, StudioPlanningEditableStage, StudioPlanningStage, StudioProvider } from "../../shared/api.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
+import { creatorFacingTechnicalText } from "../presentation.js";
 
 function isEditablePlanningStage(stageId: StudioPlanningStage["id"]): stageId is StudioPlanningEditableStage {
   return stageId === "treatment" || stageId === "script" || stageId === "director";
@@ -111,7 +112,7 @@ export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditS
                   <span className="planning-stage-model"><Cpu aria-hidden="true" size={13} /> {stage.effectiveModelId}</span>
                 ) : null}
               </div>
-              {stage.issue ? <p className="planning-stage-issue"><CircleAlert aria-hidden="true" size={13} /> {stage.issue}</p> : null}
+              {stage.issue ? <p className="planning-stage-issue"><CircleAlert aria-hidden="true" size={13} /> {creatorFacingTechnicalText(stage.issue)}</p> : null}
               {editable && isEditablePlanningStage(stage.id) ? (
                 <button className="button button-ghost" type="button" onClick={() => onEditStageInput(stage.id)}>
                   <FilePenLine aria-hidden="true" size={14} /> 编辑这一阶段的输入

@@ -37,11 +37,22 @@ type AssetDeliveryType = NonNullable<StudioProvider["deliveryTypes"]>[number];
  * 已经接上"按请求换模型"的角色：这些角色的候选 agent 是按 broker 公告的候选表逐个建出来的，
  * 选中哪一个都能真的把模型送上线路。
  *
- * 其余角色仍然是一个 broker 一个候选 agent。对它们展开候选表会把一批"选中就报
- * Selected model '…' is not available for this role."的选项列进界面——比不列更糟。
- * 接完一个角色就往这里加一个，加满即删掉这个集合。
+ * 其余角色（审片、发行文案、选题总编……）仍然是一个 broker 一个候选 agent。对它们展开候选表
+ * 会把一批"选中就报 Selected model '…' is not available for this role."的选项列进界面——
+ * 比不列更糟。接完一个角色就往这里加一个，加满即删掉这个集合。
+ *
+ * 审片刻意不在这里：它的两个候选必须是两个不同模型（独立双审），而展开候选表会让用户把
+ * GLM 那条也选成 Codex 的同名模型，静默破坏那道不变量。它的兜底走的是跨 broker 的
+ * FallbackVisualReviewAgent，不由这层负责。
  */
-const MODEL_SWITCH_TASK_KINDS = new Set<string>(["script-draft"]);
+const MODEL_SWITCH_TASK_KINDS = new Set<string>([
+  "script-draft",
+  "creative-treatment",
+  "director-plan",
+  // 简报那一轮独立复核也是用户可选的：目录里只有 codex-role-auditor-v1 承载 role.audit，
+  // 两个 broker 的候选模型都从这一个能力键下面选。
+  "role-audit",
+]);
 
 const ASSET_PROVIDER_DELIVERY_TYPES = {
   "local-editorial-v1": ["editorial_card"],

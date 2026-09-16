@@ -11,11 +11,11 @@ import { CreativeDiscussionPanel } from "../components/CreativeDiscussionPanel.j
 import { MultiPlatformPublishDialog } from "../components/MultiPlatformPublishDialog.js";
 
 export function preferRunSnapshot(current: StudioRunDetail | undefined, next: StudioRunDetail): StudioRunDetail {
-  if (!current || next.revision > current.revision) return next;
+  if (!current) return next;
   if (next.revision < current.revision) return current;
-  // SSE 是轻量状态通知；同 revision 下不能用它抹掉 GET 详情里才有的规划与恢复证据。
-  return {
+  const adopted = next.revision > current.revision ? next : {
     ...next,
+    // SSE 是轻量状态通知；同 revision 下不能用它抹掉 GET 详情里才有的规划与恢复证据。
     ...(next.planningStages === undefined && current.planningStages !== undefined
       ? { planningStages: current.planningStages }
       : {}),
@@ -25,6 +25,28 @@ export function preferRunSnapshot(current: StudioRunDetail | undefined, next: St
     ...(next.productionPlanDigest === undefined && current.productionPlanDigest !== undefined
       ? { productionPlanDigest: current.productionPlanDigest }
       : {}),
+  };
+  return withCarriedAgentLoopProgress(current, adopted);
+}
+
+/**
+ * 把上一次快照里已有的角色审计进度按 nodeId 补回来。SSE 推的是未经富化的 run 详情
+ * （富化只在权威 GET 那条路上做），而边界暂停会把 revision 推高——于是"新 revision 赢"
+ * 的分支整体采用 SSE 载荷，审计意见在用户正要拿主意的那一刻消失，要等十秒心跳才回来。
+ * 只在两次快照属于同一次节点执行（startedAt 相同）时才补：节点重跑会拿到新的
+ * startedAt，旧建议不会被复活成当前结论。
+ */
+function withCarriedAgentLoopProgress(current: StudioRunDetail, next: StudioRunDetail): StudioRunDetail {
+  if (!next.nodes.some((node) => node.agentLoopProgress === undefined)) return next;
+  const previousByNodeId = new Map(current.nodes.map((node) => [node.id, node]));
+  return {
+    ...next,
+    nodes: next.nodes.map((node) => {
+      if (node.agentLoopProgress !== undefined) return node;
+      const previous = previousByNodeId.get(node.id);
+      if (previous?.agentLoopProgress === undefined || previous.startedAt !== node.startedAt) return node;
+      return { ...node, agentLoopProgress: previous.agentLoopProgress };
+    }),
   };
 }
 

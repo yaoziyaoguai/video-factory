@@ -4,7 +4,7 @@ import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput,
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { studioApi } from "../api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
-import { catalogModelLabel, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
+import { agentLoopPhaseLabel, catalogModelLabel, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
@@ -661,25 +661,6 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   );
 }
 
-function agentLoopPhaseLabel(progress: NonNullable<StudioNode["agentLoopProgress"]>): string {
-  const phase = progress.phase === "auditing"
-    ? "独立复核中"
-    : progress.phase === "repairing"
-      ? "按复核意见修订中"
-      : progress.phase === "passed"
-        ? "独立复核已通过"
-        : progress.phase === "exhausted"
-          ? "三轮复核未通过"
-          : progress.phase === "awaiting_user"
-            ? "自动修订轮次已用尽，这一版与复核意见交给你裁决"
-          : progress.phase === "halted"
-            ? "发现当前角色无法解决的前提，已停住"
-          : progress.phase === "failed"
-            ? "模型调用已停止，请查看失败原因"
-          : "AI 创作中";
-  return `第 ${progress.iteration} / ${progress.maxIterations} 轮 · ${phase}`;
-}
-
 // C1/C2：结构化评估的创作者文案——只说发生了什么、保留了什么、下一步；金额之外的
 // 原因（scope/attempts/quality）加钱解决不了，不提供"只加钱继续"的入口。
 function spendAssessmentHeadline(assessment: NonNullable<StudioNode["spendAssessment"]>): string {
@@ -902,6 +883,13 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
   const selectedProviderModels = selectedProvider
     ? selectableModelsForCapability(selectedProvider.modelProfiles, selectedProvider.capability)
     : [];
+  // 首选之外的其余可用模型就是这个角色的兜底链，顺序即 broker 公告顺序（用户不排序，只读展示）。
+  // 只有已经把候选摊到模型级的角色才列：其余角色"换首选模型"并不会真的换到另一个模型上运行，
+  // 列出兜底链等于承诺一件不会发生的事。
+  const preferredModelId = (modelSelections[providerId] ?? "").trim() || selectedProvider?.defaultModelId;
+  const fallbackModels = MODEL_FALLBACK_NODE_IDS.includes(node.id)
+    ? selectedProviderModels.filter((model) => model.id !== preferredModelId)
+    : [];
 
   useEffect(() => {
     if (editing) return;
@@ -967,12 +955,18 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
           {inheritedProviderUnavailable ? <option value={providerId} disabled>{selectedProvider?.label ?? providerLabel(providerId) ?? "未识别的制作服务"}（已失效）</option> : null}
           {roleProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
         </select></label>
-        {selectedProviderModels.length ? <label className="field"><span>首选模型</span><select value={modelSelections[providerId] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, [providerId]: event.target.value }))}>
-          <option value="">使用推荐：{providerModelLabel(selectedProvider, selectedProvider?.defaultModelId)}</option>
-          {selectedProviderModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
-        </select>{["script", "visual-direction", "visual-review"].includes(node.id) && selectedProviderModels.length > 1
-          ? <small>当前选择会优先使用；只有这个模型暂时无法使用时，才会依次尝试其他可用模型。</small>
-          : null}</label> : null}
+        {selectedProviderModels.length ? <>
+          <label className="field"><span>首选模型</span><select value={modelSelections[providerId] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, [providerId]: event.target.value }))}>
+            <option value="">使用推荐：{providerModelLabel(selectedProvider, selectedProvider?.defaultModelId)}</option>
+            {selectedProviderModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
+          </select>{["brief", "script", "visual-direction", "visual-review"].includes(node.id) && selectedProviderModels.length > 1
+            ? <small>当前选择会优先使用；只有这个模型暂时无法使用时，才会依次尝试其他可用模型。</small>
+            : null}</label>
+          {fallbackModels.length ? <div className="node-model-fallback" aria-label="兜底模型顺序">
+            <span>兜底顺序</span>
+            <ol>{fallbackModels.map((model) => <li key={model.id}>{providerModelLabel(selectedProvider, model.id)}</li>)}</ol>
+          </div> : null}
+        </> : null}
       </> : <>
         <div className="node-asset-source-options">
           {inheritedUnavailableAssetSources.map((provider) => <article key={provider.id} className="is-selected">
@@ -1002,6 +996,8 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
 
 function configurableNodeCapability(nodeId: string): string | undefined {
   return {
+    // 简报没有可切换的执行能力，能调的是它那一轮独立复核用哪个模型。
+    brief: "role.audit",
     script: "script.draft",
     "visual-direction": "storyboard.plan",
     "asset-source-review": "quality.review.visual",
@@ -1009,6 +1005,13 @@ function configurableNodeCapability(nodeId: string): string | undefined {
     "visual-review": "quality.review.visual",
   }[nodeId];
 }
+
+/**
+ * 候选已经摊到模型级的角色——也就是"换首选模型"真的会换一个模型运行、其余模型会依次接手的那几个。
+ * 审片刻意不在里面：它的兜底是跨 broker 的整体接管（另一个 provider 的审片员），不是这个 provider
+ * 目录里的下一个模型，列在这里会指向一个它其实不会用的模型。
+ */
+const MODEL_FALLBACK_NODE_IDS = ["brief", "script", "visual-direction"];
 
 function executionConfigurationSummary(node: StudioNode, providers: StudioProvider[]): string {
   const configuration = node.executionConfiguration!;

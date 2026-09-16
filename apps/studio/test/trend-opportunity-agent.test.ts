@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { CodexBridgeClient, type CodexTaskExecution, type CodexTaskKind } from "@video-factory/production-pipeline";
+import { CodexBridgeClient, ModelCandidatesExhaustedError, type CodexTaskExecution, type CodexTaskKind } from "@video-factory/production-pipeline";
 import {
   CodexTopicIdeaModel,
   TrendOpportunityAgent,
@@ -918,8 +918,32 @@ describe("TrendOpportunityAgent", () => {
       source: "rule-fallback",
       candidateCount: candidates.length,
       failureCategory: "model_error",
-      failureReason: "model offline",
+      // receipt 是创作者读的：不再转发模型抛出的原文，只留一句能读懂的结论。
+      failureReason: "总编这一轮没有产出可用的建议。",
     });
+  });
+
+  it("keeps candidate model identities and bridge diagnostics out of the creator-facing reason", async () => {
+    // 真实失败链：候选耗尽错误带上模型身份与原因码，外层 loop 错误再挂一串机器诊断。
+    const exhausted = new ModelCandidatesExhaustedError([
+      { modelId: "gpt-5.6-sol", providerId: "openai", error: new Error("invalid_json") },
+      { modelId: "glm-5.3", providerId: "zai", error: new Error("invalid_json") },
+    ]);
+    const loopError = new Error(
+      `${exhausted.message}\n诊断：stage=completed_failure；httpStatus=422；reasonCode=invalid_json`,
+      { cause: exhausted },
+    );
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => signals },
+      model: { id: "api-topic-editor-v1", generate: async () => { throw loopError; } },
+      now: () => new Date("2026-09-12T10:00:00.000Z"),
+    });
+
+    await agent.listCandidates({ generationNonce: "candidate-exhaustion-1" });
+    const reason = agent.generationReceipt()?.failureReason ?? "";
+
+    assert.equal(reason, "已尝试 2 个模型，都没能给出可用结果。");
+    assert.doesNotMatch(reason, /诊断：|stage=|reasonCode=|httpStatus=|gpt-5\.6-sol|glm-5\.3|invalid_json/);
   });
 
   it("does not let a vague rule fallback become producible when the semantic model fails", async () => {

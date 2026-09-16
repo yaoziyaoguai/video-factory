@@ -580,7 +580,7 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
     }
   });
 
-  it("consumes a planning needs_source disposition before another producer or downstream work", async () => {
+  it("carries a planning source gap as an advice and still reaches the human review", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-formal-planning-halt-"));
     const executor = new PlanningHaltExecutor();
     const broker = await brokerWithExecutor(workspaceRoot, executor);
@@ -589,13 +589,18 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
     const worker = new RecoveryWorker();
     try {
       const firstPipeline = pipeline(workspaceRoot, client, treatmentCounter, undefined, worker);
-      const failed = await firstPipeline.start(brief());
-      assert.equal(failed.status, "failed");
+      const run = await firstPipeline.start(brief());
+      // 来源缺口只作建议：审计判 pass、缺口由它路由出去，规划照常交付（脚本带一条建议），
+      // 制作继续跑到人工终审等人裁决。门槛不替创作者决定这条片子能不能开工——建议怎么显示、
+      // 确认关怎么呈现，由 creative-planning 的 issues 通道与确认关负责（见 role-agent-loop
+      // 与 creative-planning 的用例）。这里钉住的是"它不再拦下制作"这件事。
+      assert.equal(run.status, "needs_human");
       assert.equal(treatmentCounter.calls, 1);
       assert.deepEqual(executor.submissions, ["script-draft", "role-audit"]);
-      assert.deepEqual(worker.calls, []);
-      assert.equal(failed.artifacts.some((artifact) => artifact.kind === "script"), false);
-      const planningReceipt = failed.nodeRuns.find((node) => node.nodeId === "creative-planning")?.executionReceipt;
+      assert.equal(run.artifacts.some((artifact) => artifact.kind === "script"), true);
+      assert.equal(run.nodeRuns.find((node) => node.nodeId === "final-review")?.status, "needs_human");
+      assert.deepEqual(worker.calls, ["asset.prepare", "voice.synthesize", "video.render", "quality.review"]);
+      const planningReceipt = run.nodeRuns.find((node) => node.nodeId === "creative-planning")?.executionReceipt;
       assert.equal(planningReceipt?.parameters?.modelCallCount, 2);
       assert.equal(planningReceipt?.parameters?.producerModelCallCount, 1);
       assert.equal(planningReceipt?.parameters?.auditModelCallCount, 1);
@@ -607,13 +612,13 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
         commandAvailable: async () => true,
         environment: {},
       });
-      const detail = await studio.getRun(failed.id);
-      assert.equal(detail?.failure?.nodeId, "creative-planning");
-      assert.equal(detail?.failure?.retryable, false);
-      assert.equal(detail?.nodes.find((node) => node.id === "creative-planning")?.agentLoopProgress?.phase, "halted");
-      await assert.rejects(() => studio.retryFailedNode(failed.id, "creative-planning"), /人工调整|重新规划/);
+      const detail = await studio.getRun(run.id);
+      // 缺口没有被记成规划失败，也没有变成 run 的失败：规划节点成功收口在"等创作者裁决"。
+      assert.equal(detail?.failure, undefined);
+      assert.equal(detail?.nodes.find((node) => node.id === "creative-planning")?.status, "succeeded");
+      assert.equal(detail?.nodes.find((node) => node.id === "creative-planning")?.agentLoopProgress?.phase, "awaiting_user");
+      // 重开也不会把已经花掉的生产者与审计请求再花一遍。
       assert.deepEqual(executor.submissions, ["script-draft", "role-audit"]);
-      assert.deepEqual(worker.calls, []);
     } finally {
       await broker.close();
       await rm(workspaceRoot, { recursive: true, force: true });

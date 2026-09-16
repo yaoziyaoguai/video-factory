@@ -1027,7 +1027,19 @@ export interface StudioAgentLoopProgress {
     verdict: "pass" | "repair";
     score: number;
     summary: string;
+    /**
+     * 审计给出的逐条可执行意见。停在用户面前时，"这一版 76 分"帮不上忙——他要的是
+     * 照着能改的东西：哪一条不达标、凭什么这么判、建议怎么改。
+     */
+    issues?: StudioAgentLoopAuditIssue[];
   };
+}
+
+export interface StudioAgentLoopAuditIssue {
+  severity: "advisory" | "blocking";
+  criterion: string;
+  evidence: string;
+  repairInstruction: string;
 }
 
 export interface StudioNodeExecutionPlan {
@@ -1294,6 +1306,8 @@ export interface StudioIntervention {
   id: string;
   nodeId: string;
   kind?: "creative_review";
+  /** 节点边界的"完成待放行"停点：这一步已做完，产物已存，只等你决定是否进入下一步。 */
+  boundary?: "node-complete";
   reason: string;
   options: Array<"approve" | "request_changes" | "reject">;
   createdAt: string;
@@ -1818,6 +1832,8 @@ export interface StudioProductionInput {
     creativePlanning?: "joint-v1";
     /** 导演方案、脚本、分镜逐阶段由用户确认后才继续。 */
     creativeReview?: "user-confirmed-v1";
+    /** 每个节点边界都停下等用户放行；缺失即维持既有的自动推进。 */
+    boundaryGates?: "user-confirmed-v1";
   };
   referenceVideo?: {
     uploadId: string;
@@ -1852,6 +1868,9 @@ export function assertStudioExecutableProductionInput(value: unknown): void {
   if ((workflowFeatures as Record<string, unknown>).creativePlanning !== "joint-v1"
     || (workflowFeatures as Record<string, unknown>).creativeReview !== "user-confirmed-v1") {
     throw new StudioInputError("新建制作必须启用逐阶段讨论与确认，不能自动跳过导演方案、脚本或分镜确认。");
+  }
+  if ((workflowFeatures as Record<string, unknown>).boundaryGates !== "user-confirmed-v1") {
+    throw new StudioInputError("新建制作必须在每个节点边界停下等你确认（workflowFeatures.boundaryGates=\"user-confirmed-v1\"）。");
   }
   if (typeof input.durationRange !== "object" || input.durationRange === null || Array.isArray(input.durationRange)) {
     throw new StudioInputError("新建制作必须填写可编辑的成片时长范围。");

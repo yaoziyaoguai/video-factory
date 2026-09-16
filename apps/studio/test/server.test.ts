@@ -1380,6 +1380,7 @@ describe("Studio API", () => {
           executablePlan: true,
           creativePlanning: "joint-v1",
           creativeReview: "user-confirmed-v1",
+          boundaryGates: "user-confirmed-v1",
         },
         director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
       },

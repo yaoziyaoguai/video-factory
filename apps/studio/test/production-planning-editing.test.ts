@@ -339,6 +339,39 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
     );
   });
 
+  it("keeps each stage's model choice after a later stage swaps its own model", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-editing-stage-models-"));
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };
+    const harness = newEditingStudio(workspaceRoot, spies);
+    const runId = await startJointRun(harness);
+
+    // 构思阶段：bar 那条模型来自 zai broker，但它落在构思能力键下面——键是能力，值是模型。
+    await harness.studio.applyNodeExecutionConfiguration(runId, "creative-planning", {
+      ...await planningEditTokens(harness.studio, runId),
+      planningStageId: "treatment",
+      modelSelections: { [TREATMENT_PROVIDER_ID]: "treatment-model-b" },
+    }, "producer");
+    let detail = await harness.studio.get(runId);
+    // 阶段模型不挂在节点的 executionConfiguration 上（那里只有该节点自己的执行能力），
+    // 它的落点就是简报的 models，界面上经 planningStages 投影读出来。
+    assert.equal(
+      detail.planningStages?.find((stage) => stage.id === "treatment")?.effectiveModelId,
+      "treatment-model-b",
+      "构思阶段选的模型必须落进简报，界面才可能把它显示成当前选择",
+    );
+
+    // 接着改导演阶段的模型：通用收尾会按"这份简报启用了哪些能力"清键，构思那个键不在
+    // brief.providers 里，很容易被顺手删掉——删掉就等于下一次构思又从头撞一遍不可用的模型。
+    await harness.studio.applyNodeExecutionConfiguration(runId, "creative-planning", {
+      ...await planningEditTokens(harness.studio, runId),
+      planningStageId: "director",
+      modelSelections: { "api-visual-director-v1": "director-model-two" },
+    }, "producer");
+    detail = await harness.studio.get(runId);
+    assert.equal(detail.planningStages?.find((stage) => stage.id === "treatment")?.effectiveModelId, "treatment-model-b");
+    assert.equal(detail.planningStages?.find((stage) => stage.id === "director")?.effectiveModelId, "director-model-two");
+  });
+
   it("maps planningStageId validation failures and conflicts to 400/409 at the HTTP layer", async () => {
     const overrides: string[] = [];
     const service: StudioServicePort = {

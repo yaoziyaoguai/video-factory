@@ -2110,6 +2110,10 @@ body:has(.studio-v3) {
 .studio-v3 .node-asset-source-options label small { color: #7a8088; font-size: 9px; }
 .studio-v3 .node-budget-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .studio-v3 .node-budget-fields > p { grid-column: 1 / -1; margin: 0; color: #6d747d; font-size: 9px; line-height: 1.6; }
+/* 兜底链只读：首选下面的次序是系统按 broker 公告顺序排的，用户不参与排序。 */
+.studio-v3 .node-model-fallback { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; color: #6d747d; font-size: 9px; }
+.studio-v3 .node-model-fallback > ol { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.studio-v3 .node-model-fallback li { padding: 2px 6px; border: 1px solid #2a2f37; border-radius: 999px; color: #9aa1aa; }
 
 .studio-v3 .role-configuration-grid {
   display: grid;

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { StudioCostRunDetail, StudioDecisionInput, StudioNarrationRevisionInput, StudioSceneResourceRevisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { creatorFacingTechnicalText, platformLabel, providerLabel, catalogModelLabel, sourceAssetReviewBreakdown } from "../presentation.js";
+import { agentLoopPhaseLabel, creatorFacingTechnicalText, humanizeCreativeText, platformLabel, providerLabel, catalogModelLabel, runNodeLabel, sourceAssetReviewBreakdown } from "../presentation.js";
 import { NodeWorkspace } from "./NodeWorkspace.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 
@@ -78,6 +78,16 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const visualReview = visualReviewDecision(run);
   const voiceTiming = voiceTimingConflict(run);
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
+  // 边界停点：这一步已做完、产物已存，只等用户决定是否进入下一步。按钮文案必须按
+  // 它真正的后果说话——把中间节点的放行写成「批准进入发布包」会让用户以为点下去就发了。
+  const boundaryGate = run.activeIntervention?.boundary === "node-complete";
+  const boundaryOptions = boundaryGate ? run.activeIntervention?.options ?? [] : [];
+  // 停下来的这一步的独立复核进度。SSE 载荷里没有它，由 preferRunSnapshot 从上一帧补回来，
+  // 否则用户点开决策面板的瞬间看到的是一片空白，要等十秒心跳才出现建议。
+  const waitingNodeId = run.activeIntervention?.nodeId;
+  const waitingNodeProgress = waitingNodeId
+    ? run.nodes.find((node) => node.id === waitingNodeId)?.agentLoopProgress
+    : undefined;
   const flawedReviewBranches = (visualReview?.independentReviews ?? []).filter((branch) => branch.auditVerdict === "repair");
   const reviewItems = visualReview?.reviewItems ?? [];
   const undisposedReviewItems = reviewItems.filter((item) => item.itemKey && !reviewDecisions[item.itemKey]);
@@ -293,9 +303,27 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
             <section className="intervention-panel">
               <div className="attention-heading">
                 <AlertTriangle aria-hidden="true" size={18} />
-                <h2>需要你的判断</h2>
+                {/* 边界停点由界面按 nodeId 说步骤名（服务端只有英文节点标识），否则用户看不出停在哪一步。 */}
+                <h2>{boundaryGate ? `${runNodeLabel(run.activeIntervention.nodeId)}做完了，等你放行` : "需要你的判断"}</h2>
               </div>
               <p>{creatorFacingTechnicalText(run.activeIntervention.reason)}</p>
+              {waitingNodeProgress ? <div className={`agent-loop-progress is-stacked is-${waitingNodeProgress.phase}`} role="status">
+                <strong>{agentLoopPhaseLabel(waitingNodeProgress)}</strong>
+                {waitingNodeProgress.latestAudit ? <>
+                  <span>独立复核 {waitingNodeProgress.latestAudit.score} 分：{creatorFacingTechnicalText(humanizeCreativeText(waitingNodeProgress.latestAudit.summary))}</span>
+                  {waitingNodeProgress.latestAudit.issues?.length ? <ul className="agent-audit-issues">
+                    {waitingNodeProgress.latestAudit.issues.map((issue, index) => <li key={`${issue.criterion}:${index}`}>
+                      <strong>{creatorFacingTechnicalText(humanizeCreativeText(issue.criterion))}
+                        {/* 审计自己的措辞是 blocking/advisory；对用户它始终只是建议，所以写"建议先改"而不是"阻断"。 */}
+                        <span className="agent-audit-issue-severity">{issue.severity === "blocking" ? "建议先改" : "可选"}</span>
+                      </strong>
+                      <span>{creatorFacingTechnicalText(humanizeCreativeText(issue.evidence))}</span>
+                      <span>建议：{creatorFacingTechnicalText(humanizeCreativeText(issue.repairInstruction))}</span>
+                    </li>)}
+                  </ul> : null}
+                </> : <span>正在生成本轮方案，完成后由独立 AI 做质量复核。</span>}
+                <span>实际模型调用：创作 {waitingNodeProgress.producerModelCallCount ?? 0} 次，审计 {waitingNodeProgress.auditModelCallCount ?? 0} 次。查询、刷新和等待不计为新调用。</span>
+              </div> : null}
               {visualReviewRequiresRevision && visualReview ? <div className="agent-review-decision">
                 <strong>视觉审片建议修改后再审</strong>
                 <p>{creatorFacingTechnicalText(visualReview.summary)}</p>
@@ -357,7 +385,25 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                 <p className="agent-review-guidance">补查会重跑整轮审片、不会重新购买画面或配音，因此<strong>其它镜头（包括上一轮已通过的镜头）的结论也可能变化</strong>；判定与上一轮不同的条目会标出「判定变动」，并给出两轮原文。批准前你要对本轮每一条结论逐条表态：采纳的必须先返修，不采纳的要写明理由。</p>
               </div> : null}
               <div className="decision-actions">
-                {voiceTiming ? <>
+                {boundaryGate ? <>
+                  {/* 尊重 runner 实际接受的闸门：options 里没有的动作不发按钮，否则按钮会与
+                      服务端校验漂移（点了必然报"does not allow action"）。 */}
+                  {boundaryOptions.includes("approve") ? (
+                    <button
+                      className="button button-primary"
+                      type="button"
+                      disabled={decisionPending}
+                      onClick={() => openDecision("approve")}
+                    >
+                      <Check aria-hidden="true" size={17} />做完了，进入下一步
+                    </button>
+                  ) : null}
+                  {boundaryOptions.includes("reject") ? (
+                    <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
+                      <XCircle aria-hidden="true" size={17} />终止制作
+                    </button>
+                  ) : null}
+                </> : voiceTiming ? <>
                   <button className="button button-primary" type="button" disabled={decisionPending} onClick={openVoiceTimingDecision}>
                     <RotateCcw aria-hidden="true" size={17} />调整方案
                   </button>
@@ -1449,10 +1495,16 @@ function hasContent(value: unknown): boolean {
   return true;
 }
 
+// 只滤掉"英文开头 + failed/error"这一类是不够的：桥接失败消息常常以中文叙述开头，
+// 中间夹着 stage=/reasonCode=/诊断： 这类机器诊断，旧判据会把它原样放行到界面上。
+const TECHNICAL_DIAGNOSTIC_PATTERN = /诊断：|\b(?:stage|httpStatus|failureKind|reasonCode|fieldPath|taskKind|requestIdHash|accepted)=/;
+
 function safeRunError(message?: string): string {
   if (!message) return "制作失败，请检查对应能力和本地运行环境。";
   if (message.includes("应用重启")) return message;
-  if (/\/(Users|home|private|tmp)\//.test(message) || /^[A-Za-z].*(failed|error|invalid|missing)/i.test(message)) {
+  if (/\/(Users|home|private|tmp)\//.test(message)
+    || /^[A-Za-z].*(failed|error|invalid|missing)/i.test(message)
+    || TECHNICAL_DIAGNOSTIC_PATTERN.test(message)) {
     return "这一步执行失败。技术细节已保留在本地服务日志中，请检查对应能力后重试。";
   }
   return message;

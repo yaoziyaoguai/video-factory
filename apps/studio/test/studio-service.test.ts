@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -78,6 +78,8 @@ const brief: ProductionBrief = {
     executablePlan: true,
     creativePlanning: "joint-v1",
     creativeReview: "user-confirmed-v1",
+    // 边界闸门是新建制作的必需项，所以"一份现代简报"必须带上它——少了它连 start 都进不去。
+    boundaryGates: "user-confirmed-v1",
   },
   director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
 };
@@ -1436,11 +1438,15 @@ describe("StudioService", () => {
       /可执行制作方案|executablePlan/,
     );
     await assert.rejects(
-      () => production.start({ ...brief, runPurpose: "production", durationRange: undefined, providers, director, workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1" } }),
+      () => production.start({ ...brief, runPurpose: "production", durationRange: { minSeconds: 20, maxSeconds: 34 }, providers, director, workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1" } }),
+      /节点边界|boundaryGates/,
+    );
+    await assert.rejects(
+      () => production.start({ ...brief, runPurpose: "production", durationRange: undefined, providers, director, workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1", boundaryGates: "user-confirmed-v1" } }),
       /时长范围|durationRange/,
     );
     await assert.rejects(
-      () => production.start({ ...brief, runPurpose: "production", durationRange: { minSeconds: 20, maxSeconds: 34 }, director: undefined, workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1" } }),
+      () => production.start({ ...brief, runPurpose: "production", durationRange: { minSeconds: 20, maxSeconds: 34 }, director: undefined, workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1", boundaryGates: "user-confirmed-v1" } }),
       /导演|director/,
     );
     assert.equal(pipeline.dispatchCount, 0);
@@ -1889,6 +1895,42 @@ describe("StudioService", () => {
       phase: "awaiting_user",
       latestAudit: { verdict: "repair", score: 63, summary: "第 3 版仍未兑现开场承诺。" },
     });
+  });
+
+  it("keeps the audit advice visible after a model fallback leaves two stopped checkpoints", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-fallback-progress-"));
+    const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", "brief", "agent-loop-checkpoints");
+    await mkdir(directory, { recursive: true });
+    const recoveryOwner = { runId: "run-1", nodeId: "brief", workflowOperationRequestId: "operation-brief" };
+    const failedPath = path.join(directory, "preferred-model.json");
+    await writeFile(failedPath, JSON.stringify({
+      version: "video-factory/agent-loop-checkpoint-v9",
+      maxIterations: 1,
+      status: "failed",
+      completed: [],
+      recoveryOwner,
+    }), "utf8");
+    const fallbackPath = path.join(directory, "fallback-model.json");
+    await writeFile(fallbackPath, JSON.stringify({
+      version: "video-factory/agent-loop-checkpoint-v9",
+      maxIterations: 1,
+      status: "awaiting_user",
+      completed: [{
+        iteration: 1,
+        audit: { verdict: "repair", score: 71, summary: "受众与平台对不上。" },
+      }],
+      recoveryOwner,
+    }), "utf8");
+    // 首选模型失败、兜底接上：两份都属于同一次节点执行，只有写入时间能分出哪份是当下。
+    await utimes(failedPath, new Date(1_700_000_000_000), new Date(1_700_000_000_000));
+    await utimes(fallbackPath, new Date(1_700_000_060_000), new Date(1_700_000_060_000));
+
+    // 首选模型额度耗尽是最常见的一种兜底。两份都"已停下"时若一律返回 undefined，
+    // "要改哪里"会正好在用户拿主意的一刻消失，只剩一个停在边界上、没有任何理由的节点。
+    const progress = await loadAgentLoopProgress(workspaceRoot, "run-1", "brief", "operation-brief");
+
+    assert.equal(progress?.phase, "awaiting_user");
+    assert.deepEqual(progress?.latestAudit, { verdict: "repair", score: 71, summary: "受众与平台对不上。" });
   });
 
   it("does not expose an active agent-loop checkpoint after its node has failed", async () => {
@@ -4221,6 +4263,7 @@ describe("StudioService", () => {
         executablePlan: true,
         creativePlanning: "joint-v1",
         creativeReview: "user-confirmed-v1",
+        boundaryGates: "user-confirmed-v1",
       },
       referenceVideo: { uploadId: uploaded.uploadId, label: uploaded.label },
     };
@@ -5093,6 +5136,89 @@ describe("StudioService", () => {
     );
     assert.equal(pipeline.lastOverride, undefined);
     assert.equal(pipeline.lastInputOverride, undefined);
+  });
+
+  it("lets the brief node pick the model of its independent review and nothing else", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-brief-audit-model-"));
+    const initialInput: ProductionBrief = {
+      ...brief,
+      workflowFeatures: { ...brief.workflowFeatures, boundaryGates: "user-confirmed-v1" },
+    };
+    const pipeline = new FakePipeline({
+      ...waitingRun(workspaceRoot),
+      workflowVersion: productionWorkflowVersion(initialInput),
+      initialInput,
+    });
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    // 读：简报节点没有可切换的执行能力，能调的只有独立复核那一项能力键。
+    const opened = await service.getRun("run-1");
+    assert.deepEqual(opened?.nodes.find((node) => node.id === "brief")?.executionConfiguration, {
+      providerId: "codex-role-auditor-v1",
+      modelSelections: {},
+    });
+    // 复核模型必须来自目录里真实存在的模型档案，否则这轮改动只是在写一个永不生效的键。
+    const reviewer = (await service.listProviders()).find((provider) => provider.id === "codex-role-auditor-v1");
+    assert.equal(reviewer?.capability, "role.audit");
+    const reviewModels = (reviewer?.modelProfiles ?? []).filter((model) => model.available).map((model) => model.id);
+    assert.ok(reviewModels.length > 0, "the catalog must offer at least one independent-review model");
+
+    await service.applyNodeExecutionConfiguration("run-1", "brief", {
+      providerId: "codex-role-auditor-v1",
+      modelSelections: { "codex-role-auditor-v1": reviewModels[0]! },
+      expectedRunRevision: 0,
+    }, "vfqa");
+
+    assert.equal(pipeline.run.initialInput.models?.["codex-role-auditor-v1"], reviewModels[0]);
+    assert.equal(pipeline.run.initialInput.modelSelectionSources?.["codex-role-auditor-v1"], "node_override");
+    assert.equal(pipeline.lastExecutionConfigurationNodeId, "brief");
+
+    // 写回空字符串等于界面上的"使用推荐"：删掉这条选择，而不是记下一个空模型名。
+    await service.applyNodeExecutionConfiguration("run-1", "brief", {
+      providerId: "codex-role-auditor-v1",
+      modelSelections: { "codex-role-auditor-v1": "" },
+      expectedRunRevision: 1,
+    }, "vfqa");
+    assert.equal(pipeline.run.initialInput.models?.["codex-role-auditor-v1"], undefined);
+    assert.equal(pipeline.run.initialInput.modelSelectionSources?.["codex-role-auditor-v1"], undefined);
+
+    // 拒：复核能力不可切换，也不能借简报节点改别的能力的模型。
+    await assert.rejects(
+      () => service.applyNodeExecutionConfiguration("run-1", "brief", {
+        providerId: "codex-screenwriter-v1",
+        modelSelections: {},
+        expectedRunRevision: 2,
+      }, "vfqa"),
+      /独立复核能力不可切换/,
+    );
+    await assert.rejects(
+      () => service.applyNodeExecutionConfiguration("run-1", "brief", {
+        modelSelections: { "codex-screenwriter-v1": reviewModels[0]! },
+        expectedRunRevision: 2,
+      }, "vfqa"),
+      /只能调整独立复核的模型/,
+    );
+  });
+
+  it("offers no brief review model when the production has no boundary gates", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-brief-no-gate-"));
+    const pipeline = new FakePipeline(executableWaitingRun(workspaceRoot));
+    // 这条测的是"没有闸门"的历史形态：版本串要照旧，所以 flags 直接从简报里去掉而不是换一份。
+    const { boundaryGates: _withoutGates, ...flagsWithoutGates } = brief.workflowFeatures ?? {};
+    pipeline.run.initialInput = { ...brief, workflowFeatures: flagsWithoutGates };
+    pipeline.run.workflowVersion = productionWorkflowVersion(pipeline.run.initialInput);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const opened = await service.getRun("run-1");
+    assert.equal(opened?.nodes.find((node) => node.id === "brief")?.executionConfiguration, undefined);
+    await assert.rejects(
+      () => service.applyNodeExecutionConfiguration("run-1", "brief", {
+        providerId: "codex-role-auditor-v1",
+        modelSelections: { "codex-role-auditor-v1": "glm-5.3" },
+        expectedRunRevision: 0,
+      }, "vfqa"),
+      /简报不跑独立复核/,
+    );
   });
 
   it("rejects a stale spend confirmation and authorizes only the current server plan", async () => {

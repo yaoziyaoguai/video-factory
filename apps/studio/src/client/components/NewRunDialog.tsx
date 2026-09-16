@@ -632,6 +632,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
           // 所有新制作和返工都走同一套逐阶段讨论/确认链；历史 run 只读，不由这里补确认。
           creativePlanning: "joint-v1" as const,
           creativeReview: "user-confirmed-v1" as const,
+          // 每个节点边界都停下等用户放行：新制作一律带上，缺失标记的历史 run 保持原自动推进。
+          boundaryGates: "user-confirmed-v1" as const,
         },
         ...(referenceVideo && isUploadedReferenceVideo(referenceVideo)
           ? { referenceVideo: { uploadId: referenceVideo.uploadId, label: referenceVideo.label } }

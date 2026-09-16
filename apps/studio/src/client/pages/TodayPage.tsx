@@ -547,6 +547,7 @@ export function TodayPage() {
             candidates={(trendInbox?.items ?? []).filter((item) => !opportunities.some((adopted) => adopted.id === item.id))}
             {...(trendInbox?.topicGeneration ? { topicGeneration: trendInbox.topicGeneration } : {})}
             {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})}
+            refreshBusy={trendRefreshPending || trendRefreshing}
             onAdopt={adoptDirection}
             onSupplementSources={(candidate) => setSourceSupplementTarget({ kind: "candidate", candidate })}
             onRetry={() => void loadTrendInbox(true)}

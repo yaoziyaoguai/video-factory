@@ -12,6 +12,7 @@ import {
   canonicalQualityContractDigest,
   CodexBridgeClient,
   CodexBridgeError,
+  BRIEF_AUDIT_PROVIDER_ID,
   CREATIVE_TREATMENT_PROVIDER_ID,
   effectiveProductionBrief,
   PaidOperationManualReconciliationError,
@@ -49,6 +50,7 @@ import {
   type StartRunResponse,
   type StudioArtifact,
   type StudioArtifactResource,
+  type StudioAgentLoopAuditIssue,
   type StudioAgentLoopProgress,
   type StudioDecision,
   type StudioDecisionInput,
@@ -401,6 +403,8 @@ export class ProductionStudio {
         // 新分配的返工版本统一使用 joint-v1；来源历史 run 保持原样。
         creativePlanning: "joint-v1" as const,
         creativeReview: "user-confirmed-v1" as const,
+        // 返工版本与新建走同一套边界闸门：返工也必须逐节点由用户放行。
+        boundaryGates: "user-confirmed-v1" as const,
       },
       director: structuredClone(reworkDirector),
       economics: structuredClone(brief.economics),
@@ -2581,6 +2585,9 @@ export class ProductionStudio {
       ...(brief.workflowFeatures?.referenceGrammar ? ["codex-reference-grammar-v1"] : []),
       // joint-v1 规划包含前期构思阶段：构思能力键在模型选择校验范围内。
       ...(brief.workflowFeatures?.creativePlanning === "joint-v1" ? [CREATIVE_TREATMENT_PROVIDER_ID] : []),
+      // 带边界闸门的制作会在简报后先跑一轮独立复核：复核能力键同样在模型选择校验范围内。
+      // 没有这道闸门就没有那一轮调用，因此不给一个用不上的键开口子。
+      ...(brief.workflowFeatures?.boundaryGates === "user-confirmed-v1" ? [BRIEF_AUDIT_PROVIDER_ID] : []),
     ]);
     if (brief.workflowFeatures?.referenceGrammar) {
       const referenceProvider = providers.find((provider) => provider.id === "codex-reference-grammar-v1");
@@ -3040,9 +3047,15 @@ export async function loadAgentLoopProgress(
       && ["producing", "auditing", "repairing"].includes(candidate.progress.phase));
     if (active.length === 1) return active[0]?.progress;
     if (active.length > 1) return undefined;
-    const stopped = owned.filter((candidate) => candidate.progress
-      && ["passed", "failed", "exhausted", "awaiting_user", "halted"].includes(candidate.progress.phase));
-    return stopped.length === 1 ? stopped[0]?.progress : undefined;
+    // 同一节点可以有多个已停下的 checkpoint 命中同一个操作归属：角色循环的首选模型失败、兜底
+    // 接上之后，失败终态与最终状态各留一份。这时"最新写入的那份"才是这个节点此刻的样子；
+    // 之前这里一律返回 undefined，于是带着兜底链跑起来（首选模型额度耗尽是最常见的一种）审计
+    // 建议必然消失，而那正是用户要拿主意的一刻。
+    const stopped = owned
+      .filter((candidate) => candidate.progress
+        && ["passed", "failed", "exhausted", "awaiting_user", "halted"].includes(candidate.progress.phase))
+      .sort((left, right) => right.modifiedAt - left.modifiedAt);
+    return stopped[0]?.progress;
   } catch (error) {
     if (hasCode(error, "ENOENT")) return undefined;
     return undefined;
@@ -3099,8 +3112,11 @@ function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undef
   const verdict = audit?.verdict === "pass" || audit?.verdict === "repair" ? audit.verdict : undefined;
   const score = Number(audit?.score);
   const summary = typeof audit?.summary === "string" ? redactManagedPathText(audit.summary) : undefined;
+  // 裁决为 repair 时，真正能照着改的是这三段（哪条不达标/凭什么/建议怎么改）。缺任何一段
+  // 就整条丢掉：只给出半截意见会让用户以为"这条没什么可改的"，比不显示更误导。
+  const issues = auditIssueTexts(audit?.issues);
   const latestAudit: StudioAgentLoopProgress["latestAudit"] = verdict && Number.isInteger(score) && score >= 0 && score <= 100 && summary
-    ? { verdict, score, summary }
+    ? { verdict, score, summary, ...(issues.length ? { issues } : {}) }
     : undefined;
   // v7 的 status "failed" 是角色调用终态失败（Provider/基础设施故障等）——与"轮次耗尽未能
   // 通过审计"分开呈现，不误报为 audit exhausted。
@@ -3564,6 +3580,7 @@ function toRunDetail(
     id: active.id,
     nodeId: active.nodeId,
     ...(active.kind === "creative_review" ? { kind: "creative_review" as const } : {}),
+    ...(active.boundary === "node-complete" ? { boundary: "node-complete" as const } : {}),
     reason: active.reason,
     options: [...(active.options ?? [active.requiredAction])],
     createdAt: active.createdAt,
@@ -3652,6 +3669,19 @@ function nodeExecutionConfiguration(
   brief: ProductionBrief,
   nodeId: string,
 ): Pick<StudioNode, "executionConfiguration"> | Record<string, never> {
+  // 简报节点没有可切换的执行能力：它写的字是自己写的。能调的是这一轮独立复核用哪个模型，
+  // 所以这里填的是复核能力键而不是 brief.providers 里的任何一项（那张表里没有对应成员）。
+  // 没有边界闸门就没有那一轮复核，此时不给出一个调不动的编辑器。
+  if (nodeId === "brief") {
+    if (brief.workflowFeatures?.boundaryGates !== "user-confirmed-v1") return {};
+    const auditModelId = brief.models?.[BRIEF_AUDIT_PROVIDER_ID];
+    return {
+      executionConfiguration: {
+        providerId: BRIEF_AUDIT_PROVIDER_ID,
+        modelSelections: auditModelId ? { [BRIEF_AUDIT_PROVIDER_ID]: auditModelId } : {},
+      },
+    };
+  }
   const providerField = NODE_PROVIDER_FIELDS[nodeId];
   if (!providerField || nodeId === "render" || nodeId === "technical-review") return {};
   const providerId = brief.providers[providerField];
@@ -4269,6 +4299,7 @@ function applyNodeExecutionConfiguration(
   nodeId: string,
   input: StudioNodeExecutionConfigurationInput,
 ): ProductionBrief {
+  if (nodeId === "brief") return applyBriefAuditConfiguration(brief, input);
   const providerField = NODE_PROVIDER_FIELDS[nodeId];
   if (!providerField) throw new StudioInputError(`“${nodeId}”没有可切换的模型或执行能力。`);
   if (nodeId !== "assets" && (input.assetProviderIds || input.economics)) {
@@ -4322,6 +4353,44 @@ function applyNodeExecutionConfiguration(
     ...(Object.keys(models).length ? { models, modelSelectionSources } : { models: undefined, modelSelectionSources: undefined }),
     ...(director ? { director } : {}),
     economics,
+  });
+}
+
+// 简报节点唯一能调的是这一轮独立复核用哪个模型——简报的字是人写的，没有可切换的执行能力。
+// 刻意不走上面那段通用收尾：它按"这份简报启用了哪些能力"清掉不再启用的模型键，而复核能力键
+// 不在 brief.providers 里，走通用逻辑等于每次保存都把刚选下的复核模型删掉。
+function applyBriefAuditConfiguration(
+  brief: ProductionBrief,
+  input: StudioNodeExecutionConfigurationInput,
+): ProductionBrief {
+  if (input.assetProviderIds || input.economics) {
+    throw new StudioInputError("素材来源和付费能力设置只能在素材导演节点修改。");
+  }
+  if (brief.workflowFeatures?.boundaryGates !== "user-confirmed-v1") {
+    throw new StudioInputError("这条制作没有在每个节点边界停下，简报不跑独立复核，没有可调整的模型。");
+  }
+  // 复核能力是固定的：换 provider 等于换一项服务，不是这个编辑器能决定的事。
+  if (input.providerId !== undefined && input.providerId !== BRIEF_AUDIT_PROVIDER_ID) {
+    throw new StudioInputError("简报节点的独立复核能力不可切换；这里只能选它用哪个模型。");
+  }
+  const models = { ...(brief.models ?? {}) };
+  const modelSelectionSources = { ...(brief.modelSelectionSources ?? {}) };
+  for (const [providerId, modelId] of Object.entries(input.modelSelections ?? {})) {
+    if (providerId !== BRIEF_AUDIT_PROVIDER_ID) {
+      throw new StudioInputError("简报节点只能调整独立复核的模型。");
+    }
+    // 空字符串是界面上的"使用推荐"：与 null 同义，删掉这条选择，而不是记下一个空模型名。
+    if (!modelId?.trim()) {
+      delete models[providerId];
+      delete modelSelectionSources[providerId];
+    } else {
+      models[providerId] = modelId;
+      modelSelectionSources[providerId] = "node_override";
+    }
+  }
+  return parseBrief({
+    ...brief,
+    ...(Object.keys(models).length ? { models, modelSelectionSources } : { models: undefined, modelSelectionSources: undefined }),
   });
 }
 
@@ -4403,6 +4472,27 @@ function redactManagedPathText(value: string): string {
       `$1${MANAGED_FILE_PLACEHOLDER}`,
     )
     .replace(/(^|[\s"'`(=])[A-Za-z]:\\[^\s"'`<>),;\]}]+/g, `$1${MANAGED_FILE_PLACEHOLDER}`);
+}
+
+/**
+ * 审计意见的逐条文本。上限 12 条与审计侧一致；三段（哪条不达标/凭什么/建议怎么改）
+ * 缺任何一段就整条丢掉——半截意见会让用户以为"这条没什么可改的"，比不显示更误导。
+ * 存储里可能是任意历史形状，所以逐字段判型。
+ */
+function auditIssueTexts(value: unknown): StudioAgentLoopAuditIssue[] {
+  if (!Array.isArray(value)) return [];
+  const issues: StudioAgentLoopAuditIssue[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const severity = entry.severity === "blocking" ? "blocking" : entry.severity === "advisory" ? "advisory" : undefined;
+    const criterion = typeof entry.criterion === "string" ? redactManagedPathText(entry.criterion) : "";
+    const evidence = typeof entry.evidence === "string" ? redactManagedPathText(entry.evidence) : "";
+    const repairInstruction = typeof entry.repairInstruction === "string" ? redactManagedPathText(entry.repairInstruction) : "";
+    if (!severity || !criterion || !evidence || !repairInstruction) continue;
+    issues.push({ severity, criterion, evidence, repairInstruction });
+    if (issues.length === 12) break;
+  }
+  return issues;
 }
 
 function restoreManagedFileReferences(value: unknown, reference: unknown): unknown {

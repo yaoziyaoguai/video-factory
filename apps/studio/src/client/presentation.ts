@@ -1,4 +1,4 @@
-import type { StudioCandidateInboxItem, StudioOpportunity, StudioRunFailure, StudioRunSummary } from "../shared/api.js";
+import type { StudioAgentLoopProgress, StudioCandidateInboxItem, StudioOpportunity, StudioRunFailure, StudioRunSummary } from "../shared/api.js";
 
 export const RUN_NODE_LABELS: Record<string, string> = {
   brief: "内容简报",
@@ -196,6 +196,17 @@ export function humanizeCreativeText(value: string): string {
 export function creatorFacingTechnicalText(value?: string): string | undefined {
   if (!value) return undefined;
   return value
+    // 桥接失败消息尾部的机器诊断（`\n诊断：stage=…；reasonCode=…`）。它和下面那串
+    // key=value 一样，是给操作员定位用的：创作者读不懂，也不该读到。
+    .replace(/\s*\n?\s*诊断：[^\n]*/g, "")
+    .replace(/\b(?:stage|httpStatus|failureKind|reasonCode|fieldPath|taskKind|requestIdHash|accepted)=[^\s；，。]*[；，]?/g, "")
+    // 候选耗尽的叙述整段换掉：后面跟着的逐个候选是操作员的定位信息（模型身份、
+    // "输出未通过合同（reasonCode）"）。只翻译开头那句会把模型名与合同术语留在屏幕上，
+    // 而创作者需要知道的只有"都试过了、都没成"。
+    .replace(/([^\n；。]*?)\s*\d+\s*个候选模型均未能完成[:：][^\n]*/g, "$1候选模型都没能给出可用结果。")
+    .replace(/([^\n；。]*?)前\s*\d+\s*个候选模型调用失败，已自动切换[^\n]*/g, "$1已自动换用下一个可用模型。")
+    // 没有明细可带的短句（缓存里的历史文案）只翻这一句。
+    .replace(/(\d+)\s*个候选模型均未能完成/g, "已尝试 $1 个模型，都没能给出可用结果")
     .replace(/已按\s+hook_and_scene_midpoints\s+的稀疏证据逐场核对。?/gi, "已抽查各镜头关键帧，未覆盖逐帧运动与声音。")
     .replace(/画面\s+Provider/gi, "画面服务")
     .replace(/\bstudio-owner\b/gi, "由你确认")
@@ -243,6 +254,9 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/\s*\bscene_change_keyframes\b\s*/gi, "场景变化关键画面抽查")
     .replace(/\s*\bsource_assets\b\s*/gi, "源素材预检")
     .replace(/manualReplacement/gi, "人工补充素材")
+    // 上面几条具名的内部键都翻译完了，剩下的裸 snake_case 就是失败原因码（如 invalid_json），
+    // 对创作者没有意义，连同括号一起去掉。
+    .replace(/（[a-z][a-z0-9]*(?:_[a-z0-9]+)+）/g, "")
     .replace(/primary\s+服务\s+timed\s+out/gi, "首选服务响应超时")
     .replace(/服务\s+timed\s+out/gi, "服务响应超时")
     .replace(/服务\s+unavailable/gi, "服务暂时不可用")
@@ -261,6 +275,29 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/本地生成/g, "在本机生成")
     .replace(/异步生成/g, "后台生成")
     .replace(/统一任务协议/g, "统一调用");
+}
+
+/**
+ * 角色循环的轮次与阶段说明。停在用户面前的那一版和节点工作区里显示的是同一件事，
+ * 两处必须说同一句话——各写一份迟早会漂移成两种说法。
+ */
+export function agentLoopPhaseLabel(progress: StudioAgentLoopProgress): string {
+  const phase = progress.phase === "auditing"
+    ? "独立复核中"
+    : progress.phase === "repairing"
+      ? "按复核意见修订中"
+      : progress.phase === "passed"
+        ? "独立复核已通过"
+        : progress.phase === "exhausted"
+          ? "三轮复核未通过"
+          : progress.phase === "awaiting_user"
+            ? "自动修订轮次已用尽，这一版与复核意见交给你裁决"
+          : progress.phase === "halted"
+            ? "发现当前角色无法解决的前提，已停住"
+          : progress.phase === "failed"
+            ? "模型调用已停止，请查看失败原因"
+          : "AI 创作中";
+  return `第 ${progress.iteration} / ${progress.maxIterations} 轮 · ${phase}`;
 }
 
 // 返回"为什么建议先别做这条选题"的理由，供界面醒目标注。

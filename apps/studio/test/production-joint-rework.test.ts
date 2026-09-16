@@ -318,6 +318,45 @@ async function confirmCreativeStages(
   return run;
 }
 
+// 返工版本与新建一样带边界闸门（reworkDraft 会补上 boundaryGates），所以驱动返工 run 时要先替用户
+// 放行 brief 那道「这一步已完成」。停在 creative-planning 自己的闸门上——那正是导演方案重新产出的
+// 时刻，也是这几个用例要断言的状态；再往下推就会顺手把素材、配音这些不相干的节点也跑起来。
+async function confirmGatedRework(
+  pipeline: ProductionPipeline,
+  input: ProductionBrief,
+): Promise<Awaited<ReturnType<ProductionPipeline["start"]>>> {
+  let run = await pipeline.start(input);
+  for (let index = 0; index < 6; index += 1) {
+    if (run.status !== "needs_human") break;
+    const planning = run.nodeRuns.find((node) => node.status === "needs_human" && node.nodeId === "creative-planning")?.intervention;
+    if (planning?.kind === "creative_review" && planning.continuation) {
+      const gate = planning.continuation;
+      run = await pipeline.confirmCreativeReview(run.id, {
+        commandId: `rework-confirm-${gate.stage}-${index + 1}`,
+        actor: "producer",
+        expectedRunRevision: run.revision,
+        expectedReviewRevision: gate.reviewRevision,
+        stage: gate.stage,
+        baseDraftSha256: gate.draftSha256,
+      });
+      continue;
+    }
+    // 必须按 status 过滤：放行过的节点仍挂着旧 intervention，拿它去 decide 会被判"不是当前干预"。
+    const boundary = run.nodeRuns.find((node) => node.status === "needs_human"
+      && node.nodeId !== "creative-planning"
+      && node.intervention?.boundary === "node-complete")?.intervention;
+    if (!boundary) break;
+    run = await pipeline.decide(run.id, {
+      interventionId: boundary.id,
+      action: "approve",
+      actor: "producer",
+      expectedRunRevision: run.revision,
+      reviewEvidenceId: null,
+    });
+  }
+  return run;
+}
+
 async function rejectedJointRun(harness: { studio: ProductionStudio; pipeline: ProductionPipeline }): Promise<string> {
   const run = await confirmCreativeStages(harness.pipeline, await harness.pipeline.start(jointReworkBrief()));
   assert.equal(run.status, "needs_human", JSON.stringify(run.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
@@ -361,7 +400,7 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     const draft = await harness.studio.reworkDraft(runId);
     assert.ok(draft);
 
-    const reworkRun = await confirmCreativeStages(harness.pipeline, await harness.pipeline.start(draft.input as ProductionBrief));
+    const reworkRun = await confirmGatedRework(harness.pipeline, draft.input as ProductionBrief);
     assert.equal(reworkRun.status, "needs_human", JSON.stringify(reworkRun.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
     const reworkScreenwriterBodies = spies.screenwriterBodies.slice(1);
     const reworkTreatmentCalls = spies.treatmentCalls - 1;

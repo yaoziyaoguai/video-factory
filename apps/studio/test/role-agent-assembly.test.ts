@@ -4,9 +4,11 @@ import {
   CodexBridgeClient,
   CodexBridgeError,
   IndependentVisualReviewError,
+  ModelCandidatesExhaustedError,
   type CodexTaskExecution,
   type CodexTaskKind,
   type CodexTaskRequestOptions,
+  type ProductionBrief,
 } from "@video-factory/production-pipeline";
 import type { CodexProviderSettings } from "../src/server/codex-provider-settings.js";
 import { buildRoleAgentAssembly } from "../src/server/role-agent-assembly.js";
@@ -230,6 +232,130 @@ describe("buildRoleAgentAssembly", () => {
       environment: {},
     });
     assert.deepEqual(withoutAuditor.treatmentAgents, []);
+  });
+
+  it("assembles a brief auditor per broker and validates it against the report dimensions", async () => {
+    const openai = new ControlledCodexClient("openai", "gpt-audit", () => passingReportAudit);
+    const result = buildRoleAgentAssembly({
+      codexSettings: settings("openai", ["role-audit"], { "role-audit": "gpt-audit" }),
+      zaiCodexSettings: unavailable,
+      codexClient: openai,
+      reviewMedia,
+      environment: {},
+    });
+
+    assert.deepEqual(
+      result.briefAuditAgents.map(({ agent, providerId }) => [agent.modelId, providerId]),
+      [["gpt-audit", "openai"]],
+    );
+
+    // 评估维度由宿主按角色决定：内容简报走报告四维、评整份简报（根路径 ""）。这次审计必须真的
+    // 过校验，否则校验失败会把整条建议丢掉，界面在用户要拿主意时只剩一个空面板。
+    const execution = await result.briefAuditAgents[0]!.agent.auditBrief({
+      // 审计只读投影里的字段，这里给到投影真正会用到的那些。
+      brief: {
+        title: "下班后的三个真实动作",
+        angle: "先做后说，不喊口号",
+        audience: "普通上班族",
+        nicheSlug: "assembly-brief-audit",
+        platform: "douyin",
+        durationSeconds: 24,
+      } as unknown as ProductionBrief,
+    });
+
+    // 只审不产：一次简报审计里除了 role-audit 不该出现任何生产任务。
+    assert.deepEqual(openai.calls, ["role-audit"]);
+    assert.equal(execution.trace?.modelId, "gpt-audit");
+
+    // 没有 role-audit 合同的 broker 不产出审计候选：复核必须独立，不能拿生产模型顶上。
+    const withoutAuditor = buildRoleAgentAssembly({
+      codexSettings: settings("openai", ["creative-treatment"], {}),
+      zaiCodexSettings: unavailable,
+      codexClient: client,
+      reviewMedia,
+      environment: {},
+    });
+    assert.deepEqual(withoutAuditor.briefAuditAgents, []);
+  });
+
+  it("expands every role pool to the announced models and lets the selected one go first", async () => {
+    // 一个 broker 上公告了几个可用模型，这个角色池里就该有几个候选——首选只是排在最前，不是唯一。
+    const announced = ["gpt-5.6-sol", "gpt-6-astra"];
+    const openai = new ControlledCodexClient("openai", "unused", () => {
+      throw new CodexBridgeError("OpenAI 暂时不可用。", true, "not_accepted", 503);
+    });
+    const zai = new ControlledCodexClient("zai-bigmodel-api", "unused", () => {
+      throw new CodexBridgeError("GLM 暂时不可用。", true, "not_accepted", 503);
+    });
+    const result = buildRoleAgentAssembly({
+      codexSettings: {
+        ...settings("openai", ["director-plan", "creative-treatment", "role-audit", "script-draft"], {
+          "director-plan": "gpt-director",
+          "creative-treatment": "gpt-director",
+          "role-audit": "gpt-audit",
+          "script-draft": "gpt-writer",
+        }),
+        modelCandidates: announced,
+      },
+      // ZAI 公告了同一批 id：重复的候选会被丢弃（留着它跑的是同一个模型，不是一次兜底），
+      // 而 `validateCandidates` 对重复 id 是**建图时**就抛，也就是整个服务起不来。
+      zaiCodexSettings: {
+        ...settings("zai", ["director-plan", "creative-treatment", "role-audit", "script-draft"], {
+          "director-plan": "glm-director",
+          "creative-treatment": "glm-director",
+          "role-audit": "glm-audit",
+          "script-draft": "glm-writer",
+        }),
+        modelCandidates: announced,
+      },
+      codexClient: openai,
+      zaiCodexClient: zai,
+      reviewMedia,
+      environment: {},
+    });
+
+    assert.deepEqual(
+      result.treatmentAgents.map(({ agent }) => agent.modelId),
+      ["gpt-director", "gpt-5.6-sol", "gpt-6-astra", "glm-director"],
+    );
+    assert.deepEqual(
+      result.briefAuditAgents.map(({ agent, providerId }) => [agent.modelId, providerId]),
+      [["gpt-audit", "openai"], ["gpt-5.6-sol", "openai"], ["gpt-6-astra", "openai"], ["glm-audit", "zai-bigmodel-api"]],
+    );
+    // 没有选择时首选是 broker 的默认模型；"请求的模型就是我"由 broker 归一化成没有覆盖。
+    assert.equal(result.directorAgent?.modelId, "gpt-director");
+    assert.equal(result.screenwriterAgent?.modelId, "gpt-writer");
+
+    // 选中的模型排在最前，其余按公告顺序跟上。让每个候选都掉线，失败清单的顺序就是实际的尝试顺序。
+    await assert.rejects(
+      () => result.screenwriterAgent!.draftDetailed!({
+        brief: {
+          title: "下班后的三个真实动作",
+          angle: "验证候选顺序",
+          audience: "普通上班族",
+          nicheSlug: "assembly-candidate-order",
+          platform: "douyin",
+          durationSeconds: 24,
+        },
+        selectedModelId: "gpt-6-astra",
+      }),
+      (error: unknown) => {
+        assert.ok(
+          error instanceof ModelCandidatesExhaustedError,
+          `期望所有候选都被尝试过，实际抛出 ${(error as Error)?.name}: ${(error as Error)?.message}`,
+        );
+        assert.deepEqual(
+          error.attempts.map((attempt) => [attempt.modelId, attempt.providerId]),
+          [
+            ["gpt-6-astra", "openai"],
+            ["gpt-writer", "openai"],
+            ["gpt-5.6-sol", "openai"],
+            ["glm-writer", "zai-bigmodel-api"],
+          ],
+        );
+        return true;
+      },
+    );
   });
 
   it("runs the assembled OpenAI screenwriter through its GLM backup after a transient outage", async () => {

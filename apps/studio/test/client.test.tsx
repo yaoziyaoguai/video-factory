@@ -228,6 +228,52 @@ describe("Studio client", () => {
     expect(preferRunSnapshot(undefined, older)).toBe(older);
   });
 
+  it("keeps the paused node's audit advice when a boundary stop bumps the revision", () => {
+    const progress: NonNullable<StudioNode["agentLoopProgress"]> = {
+      iteration: 1,
+      maxIterations: 1,
+      completedIterations: 1,
+      phase: "awaiting_user",
+      latestAudit: {
+        verdict: "repair",
+        score: 76,
+        summary: "结尾没有兑现标题里的承诺",
+        issues: [{
+          severity: "blocking",
+          criterion: "结尾兑现",
+          evidence: "标题说避开 3 个坑，结尾只讲了一个",
+          repairInstruction: "把另外两个坑各补一句",
+        }],
+      },
+    };
+    const detailed: StudioRunDetail = {
+      ...runDetail,
+      revision: 4,
+      nodes: runDetail.nodes.map((node) => node.id === "brief"
+        ? { ...node, startedAt: "2026-09-16T10:00:00.000Z", agentLoopProgress: progress }
+        : node),
+    };
+    // SSE 载荷：revision 前进了一格，但不含只有权威 GET 才富化出来的 agentLoopProgress。
+    const pushed: StudioRunDetail = {
+      ...detailed,
+      revision: 5,
+      nodes: detailed.nodes.map(({ agentLoopProgress: _dropped, ...node }) => node),
+    };
+
+    const merged = preferRunSnapshot(detailed, pushed);
+    expect(merged.nodes.find((node) => node.id === "brief")?.agentLoopProgress).toEqual(progress);
+
+    // 只在同一次节点执行内补：重跑会换掉 startedAt，旧建议不能复活成当前结论。
+    const rerun: StudioRunDetail = {
+      ...pushed,
+      revision: 6,
+      nodes: pushed.nodes.map((node) => node.id === "brief"
+        ? { ...node, startedAt: "2026-09-16T11:00:00.000Z" }
+        : node),
+    };
+    expect(preferRunSnapshot(detailed, rerun).nodes.find((node) => node.id === "brief")?.agentLoopProgress).toBeUndefined();
+  });
+
   it("shows an actionable error when the terminal event cannot be reconciled with authoritative detail", async () => {
     const { activeIntervention: _activeIntervention, ...runWithoutIntervention } = runDetail;
     const terminalRun: StudioRunDetail = {
@@ -1623,8 +1669,8 @@ describe("Studio client", () => {
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       referenceVideo: { uploadId: "67d86948-5517-4b17-8da1-b0a695159d4d", label: "参考节奏.mp4" },
-      // 新制作显式携带 joint-v1 共同创作规划标记（B4）。
-      workflowFeatures: { assetSemanticRank: true, referenceGrammar: true, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1" },
+      // 新制作显式携带 joint-v1 共同创作规划标记（B4）与逐节点边界放行标记。
+      workflowFeatures: { assetSemanticRank: true, referenceGrammar: true, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1", boundaryGates: "user-confirmed-v1" },
     }));
   });
 
@@ -1715,7 +1761,7 @@ describe("Studio client", () => {
     expect(screen.queryByText("参考节奏.mp4")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "开始制作" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1" },
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1", boundaryGates: "user-confirmed-v1" },
     }));
     expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty("referenceVideo");
   });
@@ -3604,6 +3650,56 @@ describe("Studio client", () => {
       interventionId: "intervention-1",
       reviewEvidenceId: null,
     });
+  });
+
+  it("shows the audit's actionable advice at the stop point instead of only a score", () => {
+    const run: StudioRunDetail = {
+      ...runDetail,
+      revision: 5,
+      activeIntervention: {
+        id: "boundary-1",
+        nodeId: "brief",
+        boundary: "node-complete",
+        reason: "这一步已完成，等你确认后进入下一步。",
+        options: ["approve", "reject"],
+        createdAt: runDetail.activeIntervention.createdAt,
+      },
+      nodes: runDetail.nodes.map((node) => node.id === "brief"
+        ? {
+          ...node,
+          agentLoopProgress: {
+            iteration: 1,
+            maxIterations: 1,
+            completedIterations: 1,
+            phase: "awaiting_user" as const,
+            producerModelCallCount: 1,
+            auditModelCallCount: 1,
+            latestAudit: {
+              verdict: "repair" as const,
+              score: 76,
+              summary: "结尾没有兑现标题里的承诺",
+              issues: [{
+                severity: "blocking" as const,
+                criterion: "结尾兑现",
+                evidence: "标题说避开 3 个坑，结尾只讲了一个",
+                repairInstruction: "把另外两个坑各补一句",
+              }],
+            },
+          },
+        }
+        : node),
+    };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
+
+    expect(screen.getByText("内容简报做完了，等你放行")).toBeInTheDocument();
+    expect(screen.getByText(/独立复核 76 分/)).toBeInTheDocument();
+    expect(screen.getByText("结尾兑现")).toBeInTheDocument();
+    expect(screen.getByText("标题说避开 3 个坑，结尾只讲了一个")).toBeInTheDocument();
+    expect(screen.getByText(/建议：把另外两个坑各补一句/)).toBeInTheDocument();
+    // 审计自己的措辞是 blocking；对用户它始终只是建议，界面不能写成"阻断"。
+    expect(screen.getByText("建议先改")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /做完了，进入下一步/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /批准进入发布包/ })).not.toBeInTheDocument();
   });
 
   it("offers the voice timing intervention action instead of publish approval", async () => {

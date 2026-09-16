@@ -79,6 +79,21 @@ describe("creator-facing presentation labels", () => {
       .toBe("已抽查各镜头关键帧，未覆盖逐帧运动与声音。请调整源素材预检或画面服务。");
   });
 
+  it("drops machine diagnostics and candidate identities from a failure narrative", () => {
+    // 落过盘的那句原文（candidate-cache 的形态）：候选身份、"输出未通过合同（reasonCode）"，
+    // 尾巴上还挂着一串 stage=/httpStatus= 的诊断。
+    const diagnostic = "2 个候选模型均未能完成：1. gpt-5.6-sol 暂时不可用；2. glm-5.3 输出未通过合同（invalid_json）。\n诊断：stage=completed_failure；httpStatus=422；reasonCode=invalid_json";
+    const shown = creatorFacingTechnicalText(diagnostic) ?? "";
+
+    expect(shown).toBe("候选模型都没能给出可用结果。");
+    expect(shown).not.toMatch(/诊断：|stage=|httpStatus=|reasonCode=|invalid_json|gpt-5\.6-sol|glm-5\.3/);
+    // 审片侧的同类叙述带"视觉审片的"前缀，前缀是创作者需要的语境，要留住。
+    expect(creatorFacingTechnicalText("视觉审片的 2 个候选模型均未能完成：1. glm-5.3 输出未通过合同（invalid_json）。"))
+      .toBe("视觉审片的候选模型都没能给出可用结果。");
+    expect(creatorFacingTechnicalText("前 1 个候选模型调用失败，已自动切换到 glm-5.3-flash。"))
+      .toBe("已自动换用下一个可用模型。");
+  });
+
   it("translates persisted worker provenance into clear Chinese", () => {
     expect(creatorFacingTechnicalText("从未完成任务恢复：Pexels free stock license; review current provider license before publishing."))
       .toBe("从未完成任务恢复：Pexels 免费图库素材；发布前需核对当前授权条款。");

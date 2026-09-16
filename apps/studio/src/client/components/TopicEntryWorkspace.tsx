@@ -155,7 +155,9 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
               <div className="trend-refresh-status" aria-label="热点更新状态">
                 <span><i aria-hidden="true" />{modeBusy ? (modeItems.length > 0 ? "正在更新，当前仍可使用" : "正在生成今日提案") : "每日缓存"}</span>
                 <small>{trendStatusText(props.trendMeta)}</small>
-                <button className="icon-button" type="button" aria-label="立即刷新热点" title="立即刷新热点" disabled={modeLoading || props.trendRefreshPending === true} onClick={props.onRefreshTrends}><RefreshCw aria-hidden="true" size={16} /></button>
+                {/* 判据必须是 modeBusy 而不是 modeLoading：读取返回后这一轮生成仍在后台推进，
+                    此时再点一次不会"插队"，只会排到 broker 的唯一队列里等上几分钟才开始。 */}
+                <button className="icon-button" type="button" aria-label="立即刷新热点" title="立即刷新热点" disabled={modeBusy || props.trendRefreshPending === true} onClick={props.onRefreshTrends}><RefreshCw aria-hidden="true" size={16} /></button>
               </div>
             ) : mode === "series" ? (
               <div className="series-controls">
@@ -181,7 +183,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
               {...(editorFailureReason !== undefined ? { editorFailureReason } : {})}
               sourceShortCount={sourceShortCount}
               historicalSourceBlockedCount={sourceBlockedOpportunities.length}
-              refreshing={modeLoading}
+              refreshing={modeBusy}
               refreshPending={props.trendRefreshPending === true}
               onRefresh={props.onRefreshTrends}
               onManual={props.onManual}
@@ -727,8 +729,9 @@ function TrendRecoveryPanel({
           : pendingEditorCount >= evaluatedCount
             ? `本轮 ${evaluatedCount} 条热点候选由规则保底生成，还没有经过选题总编评估；它们不会按“总编评分 0”对待。`
             : `选题总编本轮评估了 ${evaluatedCount - pendingEditorCount} 条热点候选，其中 ${notRecommendedCount} 条建议不做。建议只作参考，是否开工由你决定。`}</p>
-        {pendingEditorCount > 0 && editorFailureReason
-          ? <p className="trend-recovery-blocked" role="note">总编本轮没能给出建议的原因：{editorFailureReason.split("\n")[0]}</p>
+        {/* 服务端的失败叙述可能通篇都是机器诊断，滤完就空了：那种情况只留断句没有意义，整条不显示。 */}
+        {pendingEditorCount > 0 && creatorFacingTechnicalText(editorFailureReason)
+          ? <p className="trend-recovery-blocked" role="note">总编本轮没能给出建议的原因：{creatorFacingTechnicalText(editorFailureReason)}</p>
           : null}
         {sourceShortCount > 0 ? <p className="trend-recovery-blocked">本轮另有 {sourceShortCount} 条候选的来源还没达到当前采用标准；补齐来源只是建议，不影响你直接开工。</p> : null}
         {historicalSourceBlockedCount > 0 ? <p className="trend-recovery-blocked">另有 {historicalSourceBlockedCount} 条历史选题来源不足，同样只是提醒。</p> : null}
