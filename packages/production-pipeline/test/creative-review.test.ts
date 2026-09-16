@@ -172,6 +172,86 @@ describe("three-stage creative review gates", () => {
       /requires an independent check/,
     );
   });
+  it("lets the creator override a repair verdict at the graph gate, and records which verdict was overridden", async () => {
+    const calls = { treatment: 0, audit: 0, script: 0, director: 0 };
+    // 每一轮独立复核都给 repair：这正是"模型说不行、人说了算"要验的场景。
+    const rolePort = <T>(stage: "treatment" | "script" | "director", artifactId: string, output: T) =>
+      async (context: Parameters<CreativePlanningPorts["treatment"]>[0]) => {
+        if (context.creativeReviewExecution?.mode === "check") {
+          calls.audit += 1;
+          return {
+            artifactId,
+            output,
+            reviewCheck: {
+              audit: {
+                version: "video-factory/role-audit-v2" as const,
+                rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+                assessments: auditAssessments(76),
+                verdict: "repair" as const,
+                score: 76,
+                summary: `${stage}还有意见`,
+                issues: [{
+                  severity: "blocking" as const,
+                  criterion: "与已声明能力相容",
+                  evidence: "上游采用同期环境声",
+                  repairInstruction: "二选一",
+                }],
+                repairInstructions: ["二选一"],
+                planningDisposition: null,
+                hostReadinessReview: null,
+              },
+              checkIdentity: contentSha256({ stage, output, round: calls.audit }),
+            },
+          };
+        }
+        calls[stage] += 1;
+        return { artifactId, output };
+      };
+    const ports: CreativePlanningPorts = {
+      treatment: rolePort("treatment", "treatment-1", treatment),
+      screenwriter: rolePort("script", "script-1", script),
+      director: rolePort("director", "director-1", director),
+      compile: executablePlanCompilePort,
+    };
+    const graph = createCreativePlanningGraph({ ports, checkpointer: new MemorySaver() });
+    const input = {
+      runId: "run-review-override",
+      inputDigest: "digest-review-override",
+      durationRange: { minSeconds: 20, maxSeconds: 30 },
+      creativeReview: CREATIVE_REVIEW_FEATURE,
+    };
+    const threadId = planningThreadId(input.runId, input.inputDigest);
+
+    const first = await runCreativePlanning(graph, { input, threadId });
+    assert.equal(first.status, "waiting_user");
+    if (first.status !== "waiting_user") return;
+
+    // 确认之后复核给 repair：不是 run failed，而是带着这条意见停在人面前。
+    const advised = await runCreativePlanning(graph, { input, threadId, resume: resume(first.gate, "confirm-advised") });
+    assert.equal(advised.status, "waiting_user");
+    if (advised.status !== "waiting_user") return;
+    assert.equal(advised.gate.stage, "treatment");
+    assert.equal(advised.state.creativeReview!.stages.treatment.checkResult?.verdict, "repair");
+    assert.equal(advised.state.creativeReview!.stages.treatment.phase, "waiting_user");
+    assert.equal(calls.script, 0, "意见没有通过之前不许进入下一阶段");
+
+    // 「看过意见，仍然确认」必须真的放行：否则人只能在同一条意见上无限重试，
+    // 决策权就还在模型手里。放行用的就是他已经看过的那一条复核，不另跑一轮。
+    const auditsBeforeOverride = calls.audit;
+    const overridden = await runCreativePlanning(graph, {
+      input,
+      threadId,
+      resume: { ...resume(advised.gate, "confirm-override"), acknowledgeRepair: true },
+    });
+    assert.equal(calls.audit, auditsBeforeOverride, "人已经承担过的意见不重跑复核");
+    assert.equal(overridden.status, "waiting_user");
+    if (overridden.status !== "waiting_user") return;
+    assert.equal(overridden.gate.stage, "script", "承担之后要真的进入下一阶段");
+    // 放行要留痕：事后必须查得出"是谁在哪条裁决下按的确认"。
+    assert.deepEqual(overridden.state.creativeReview!.stages.treatment.confirmation?.acknowledgedRepair, {
+      verdict: "repair", score: 76, issueCount: 1,
+    });
+  });
   it("waits without side effects and resumes exactly one confirmed stage at a time", async () => {
     const calls = { treatment: 0, script: 0, director: 0, audit: 0, compile: 0 };
     const rolePort = <T>(stage: "treatment" | "script" | "director", artifactId: string, output: T) =>

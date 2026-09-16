@@ -1553,7 +1553,7 @@ export class ProductionStudio {
     try {
       const dispatched = await this.options.pipeline.dispatchCreativeReviewCommand(
         runId,
-        { ...input, actor },
+        creativeReviewCommandDraft(input, actor),
         (run) => this.publish(this.toDetail(run)),
       );
       void dispatched.completion.then(
@@ -4766,4 +4766,23 @@ async function withTextTaskRecoveryReceiptLock<T>(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// 界面 DTO 里 acknowledgeRepair 是普通布尔（表单字段天然可缺省），管道合同只认显式的 true
+// ——那是"我承担了这条复核意见"的留痕开关，不该被一个 falsy 值悄悄带进去。
+function creativeReviewCommandDraft(
+  input: StudioCreativeReviewCommandInput,
+  actor: string,
+): ProductionCreativeReviewCommandDraft {
+  if (input.action !== "confirm") return { ...input, actor };
+  return {
+    commandId: input.commandId,
+    actor,
+    expectedRunRevision: input.expectedRunRevision,
+    expectedReviewRevision: input.expectedReviewRevision,
+    stage: input.stage,
+    baseDraftSha256: input.baseDraftSha256,
+    action: "confirm",
+    ...(input.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
+  };
 }

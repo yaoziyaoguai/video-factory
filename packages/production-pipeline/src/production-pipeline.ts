@@ -261,7 +261,7 @@ export type ProductionCreativeReviewCommandDraft = {
   stage: CreativeStage;
   baseDraftSha256: string;
 } & (
-  | { action: "confirm" }
+  | { action: "confirm"; acknowledgeRepair?: true }
   | { action: "discuss"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
   | { action: "adopt_proposal"; proposalId: string }
   | { action: "undo_draft" }
@@ -1220,6 +1220,9 @@ export class ProductionPipeline {
         ? {
           action: "confirm",
           ...common,
+          // 人的显式承担必须跟着命令落到 resume 上：少了它，"仍然确认"就退化成再跑一轮复核，
+          // 而新裁决照样是 repair 时人永远推不动这条制作。
+          ...(draft.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
           checkIdentity: contentSha256({
             runId,
             stage: draft.stage,

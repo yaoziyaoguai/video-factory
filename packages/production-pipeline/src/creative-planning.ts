@@ -1463,6 +1463,20 @@ function reviewGateNode(
     const gate = creativeReviewGate(state.creativeReview, stage);
     const resume = parseCreativeReviewResume(interrupt(gate));
     if (resume.action === "confirm") {
+      // 人已经看过这一版字节的复核意见并明确承担：用他看过的那一条复核放行，不另跑一轮。
+      // 重跑会把"他承担的是哪条结论"换成一条新裁决，确认留痕就不再是当时那个决定；
+      // 而且裁决一旦再给 repair，人只能在同一条意见上无限重试，决策权又回到模型手里。
+      const recorded = state.creativeReview.stages[stage].checkResult;
+      if (resume.acknowledgeRepair === true && recorded?.draftSha256 === gate.draft.sha256) {
+        return {
+          creativeReview: confirmCreativeDraft(state.creativeReview, {
+            ...resume,
+            expectedReviewRevision: state.creativeReview.reviewRevision,
+            checkIdentity: recorded.checkIdentity,
+            confirmedAt: new Date().toISOString(),
+          }),
+        };
+      }
       let checked: PlanningArtifact<CreativeTreatment | ScriptDraft | VisualDirectorPlan>;
       try {
         checked = await rolePort(contextFor(state, { mode: "check", stage }));
