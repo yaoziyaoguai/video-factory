@@ -11,6 +11,7 @@ import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import { RoleAgentPlanningHaltError } from "./role-agent-loop.js";
 import type { CreativeTreatment } from "./creative-treatment.js";
 import type { CreativeTreatmentAgent, CreativeTreatmentAgentInput } from "./codex-creative-treatment.js";
+import type { BriefAuditAgent, BriefAuditAgentInput, BriefAuditCandidate } from "./codex-brief-audit.js";
 import type { VisualDirectorAgent, VisualDirectorAgentInput } from "./visual-director.js";
 import type { CreativeDiscussionAgentInput } from "./codex-creative-discussion.js";
 import type { CreativeDiscussionResult } from "./creative-review.js";
@@ -38,6 +39,13 @@ export interface FallbackVisualDirectorAgentOptions {
    * 默认 45 分钟仅在启动新候选/新 agent-loop stage 之前被检查；已交给 durable broker 的请求仍按
    * 客户端单次超时继续等待，不会被 Abort 强杀，也不会因此切换 Provider（at-most-once 优先）。
    */
+  totalTimeoutMs?: number;
+  now?: () => number;
+}
+
+export interface FallbackBriefAuditAgentOptions {
+  candidates: Array<RoleCandidate<BriefAuditAgent>>;
+  /** 与其它角色同义：只控制“新阶段准入窗口”，不截断已交给 durable broker 的同一 requestId。 */
   totalTimeoutMs?: number;
   now?: () => number;
 }
@@ -119,6 +127,35 @@ export class FallbackScreenwriterAgent implements ScreenwriterAgent {
         return agent.discussDetailed(candidateInput);
       },
     ) as Promise<CodexTaskExecution<CreativeDiscussionResult>>;
+  }
+}
+
+// 内容简报审计的模型候选路由：与构思/编剧同一 runCandidates 合同——selectedModelId 只改变候选顺序，
+// Provider 故障按既有分类切换，schema/业务失败不切换；不新造第二套模型路由器。
+// 走 runCandidates 而不是直接调 broker 是硬要求：它在执行没有 trace 时会抛（见下），
+// 审计停在 awaiting_user 时同样必须带得回 trace，否则建议会连同执行回执一起丢掉。
+export class FallbackBriefAuditAgent implements BriefAuditAgent {
+  readonly id: string;
+  readonly modelId: string;
+  private readonly stageAdmissionWindowMs: number;
+  private readonly now: () => number;
+
+  constructor(private readonly options: FallbackBriefAuditAgentOptions) {
+    const first = validateCandidates(options.candidates, "brief audit");
+    this.id = first.agent.id;
+    this.modelId = requiredModelId(first.agent);
+    this.stageAdmissionWindowMs = positiveStageAdmissionWindow(options.totalTimeoutMs);
+    this.now = options.now ?? Date.now;
+  }
+
+  async auditBrief(input: BriefAuditAgentInput): Promise<CodexTaskExecution<BriefAuditCandidate>> {
+    const boundedInput = withStageAdmissionDeadline(input, this.stageAdmissionWindowMs, this.now);
+    return await runCandidates(
+      this.options.candidates,
+      input.selectedModelId,
+      boundedInput,
+      (agent, candidateInput) => agent.auditBrief(candidateInput),
+    ) as CodexTaskExecution<BriefAuditCandidate>;
   }
 }
 

@@ -104,8 +104,17 @@ export type {
 export { assertCurrentVisualReviewContract, CodexVisualReviewAgent, FallbackVisualReviewAgent, IndependentDualVisualReviewAgent, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, claimEvidenceSufficient, VISUAL_REVIEW_PASS_MIN_CONFIDENCE, VISUAL_REVIEW_PASS_MIN_SCORE, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport, visualReviewBlocksContinuation } from "./codex-visual-review.js";
 export { visualReviewFindingKey } from "./production-pipeline.js";
 export type { CodexVisualReviewAgentOptions, FallbackVisualReviewAgentOptions, IndependentDualVisualReviewAgentOptions, IndependentVisualReviewExecution, IndependentVisualReviewFailure, VisualReviewAgent, VisualReviewAgentInput, VisualReviewExecution, VisualReviewFinding, VisualReviewFramePayload, VisualReviewMediaPayload, VisualReviewMediaPreprocessor, VisualReviewReport, VisualReviewScope } from "./codex-visual-review.js";
-export { FallbackCreativeTreatmentAgent, FallbackScreenwriterAgent, FallbackVisualDirectorAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
-export type { FallbackCreativeTreatmentAgentOptions, FallbackScreenwriterAgentOptions, FallbackVisualDirectorAgentOptions } from "./fallback-role-agents.js";
+export { FallbackBriefAuditAgent, FallbackCreativeTreatmentAgent, FallbackScreenwriterAgent, FallbackVisualDirectorAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
+export type { FallbackBriefAuditAgentOptions, FallbackCreativeTreatmentAgentOptions, FallbackScreenwriterAgentOptions, FallbackVisualDirectorAgentOptions } from "./fallback-role-agents.js";
+export {
+  BRIEF_AUDIT_AGENT_CONTRACT_VERSION,
+  BRIEF_AUDIT_CRITERIA,
+  BRIEF_AUDIT_PROVIDER_ID,
+  BRIEF_AUDIT_ROLE,
+  CodexBriefAuditAgent,
+  briefAuditProjection,
+} from "./codex-brief-audit.js";
+export type { BriefAuditAgent, BriefAuditAgentInput, BriefAuditCandidate, CodexBriefAuditAgentOptions } from "./codex-brief-audit.js";
 export {
   CREATIVE_TREATMENT_CAPABILITY,
   CREATIVE_TREATMENT_PROVIDER_ID,

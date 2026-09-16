@@ -269,6 +269,8 @@ export interface ProductionWorkflowFeatures {
   creativePlanning?: "joint-v1";
   /** 新制作强制启用的三阶段用户确认合同。 */
   creativeReview?: "user-confirmed-v1";
+  /** 每个节点边界都停下等用户放行的合同：仅由新制作入口显式写入，缺失即维持原自动推进。 */
+  boundaryGates?: "user-confirmed-v1";
 }
 
 export type ProductionModelSelectionSource = "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
@@ -485,6 +487,10 @@ export function parseBrief(value: unknown): ProductionBrief {
     ...(Object.keys(modelSelectionSources).length ? { modelSelectionSources } : {}),
     ...(workflowFeatures.assetSemanticRank || workflowFeatures.referenceGrammar || workflowFeatures.executablePlan
       || workflowFeatures.creativePlanning
+      // 边界闸门可以独立于共同创作规划存在（旧规划链也能逐节点放行），所以它必须自己
+      // 把 workflowFeatures 带进落盘结果——漏掉这一步，标记会在解析时静默消失，重读
+      // 出来的 run 版本退回 1.0.0 且不再有闸门。
+      || workflowFeatures.boundaryGates
       ? { workflowFeatures }
       : {}),
     ...(referenceVideo ? { referenceVideo } : {}),
@@ -1188,12 +1194,16 @@ function parseWorkflowFeatures(value: unknown): ProductionWorkflowFeatures {
   if (input.creativeReview === "user-confirmed-v1" && input.creativePlanning !== "joint-v1") {
     throw new Error("workflowFeatures.creativeReview requires creativePlanning 'joint-v1'.");
   }
+  if (input.boundaryGates !== undefined && input.boundaryGates !== "user-confirmed-v1") {
+    throw new Error("workflowFeatures.boundaryGates must be the literal 'user-confirmed-v1' when provided.");
+  }
   return {
     assetSemanticRank: input.assetSemanticRank,
     referenceGrammar: input.referenceGrammar,
     ...(input.executablePlan === true ? { executablePlan: true } : {}),
     ...(input.creativePlanning === "joint-v1" ? { creativePlanning: "joint-v1" } : {}),
     ...(input.creativeReview === "user-confirmed-v1" ? { creativeReview: "user-confirmed-v1" } : {}),
+    ...(input.boundaryGates === "user-confirmed-v1" ? { boundaryGates: "user-confirmed-v1" } : {}),
   };
 }
 

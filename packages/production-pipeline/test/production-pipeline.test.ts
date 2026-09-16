@@ -9149,4 +9149,163 @@ describe("ProductionPipeline", () => {
     assert.equal(scene?.selectedInFinal, true);
     assert.equal(manifest.items.filter((item) => item.sha256 === scene?.sha256).length, 1);
   });
+
+  it("在每个节点边界停下等用户放行，批准后推进而不重跑该节点", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-boundary-gate-"));
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });
+    const gatedBrief = {
+      ...brief,
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" as const },
+    };
+
+    const waiting = await subject.start(gatedBrief);
+
+    assert.equal(waiting.workflowVersion, "1.8.0");
+    assert.equal(waiting.status, "needs_human");
+    const briefNode = waiting.nodeRuns.find((node) => node.nodeId === "brief");
+    assert.equal(briefNode?.status, "needs_human");
+    assert.equal(briefNode?.intervention?.boundary, "node-complete");
+    // 必须走通用路径：带 kind 会被 runner 当成 creative_review 硬拦，也会把界面引到创作面板上。
+    assert.equal(briefNode?.intervention?.kind, undefined);
+    assert.deepEqual(briefNode?.intervention?.options, ["approve", "reject"]);
+    // 是"做完了等你放行"，不是失败：产物在停下的那一刻就已经登记好了。
+    assert.equal(briefNode?.error, undefined);
+    const briefArtifacts = waiting.artifacts.filter((artifact) => artifact.kind === "production_brief");
+    assert.equal(briefArtifacts.length, 1);
+
+    const approved = await subject.decide(waiting.id, {
+      interventionId: String(briefNode?.intervention?.id),
+      action: "approve",
+      actor: "owner",
+      expectedRunRevision: waiting.revision,
+      // 非 final-review 节点没有审片证据可绑，闸门要求显式 null 而不是省略。
+      reviewEvidenceId: null,
+    });
+
+    // 批准只翻转状态：本节点不重跑一遍，产物与归属原样保留。
+    const approvedBrief = approved.nodeRuns.find((node) => node.nodeId === "brief");
+    assert.equal(approvedBrief?.status, "succeeded");
+    assert.deepEqual(approvedBrief?.artifactIds, briefNode?.artifactIds);
+    assert.deepEqual(
+      approved.artifacts.filter((artifact) => artifact.kind === "production_brief").map((artifact) => artifact.id),
+      briefArtifacts.map((artifact) => artifact.id),
+    );
+    // 下一个节点同样在边界上停下，而不是一路自动跑到底。
+    assert.equal(approved.status, "needs_human");
+    const scriptNode = approved.nodeRuns.find((node) => node.nodeId === "script");
+    assert.equal(scriptNode?.status, "needs_human");
+    assert.equal(scriptNode?.intervention?.boundary, "node-complete");
+  });
+
+  it("没有边界标记的简报仍落在原来的工作流版本上", () => {
+    // 红线：不带标记的 brief 版本串必须逐字节不变，它同时是在飞 run 的续跑比较基准。
+    assert.equal(pipeline.productionWorkflowVersion(brief), "1.0.0");
+    assert.equal(
+      pipeline.productionWorkflowVersion({
+        ...brief,
+        workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" },
+      }),
+      "1.8.0",
+    );
+  });
+
+  it("简报的独立复核只给建议：裁决与复核失败都不改变这个节点的结果", async () => {
+    const gatedBrief = {
+      ...brief,
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" as const },
+    };
+    const reviewed: string[] = [];
+    let auditFailure: Error | undefined;
+    const auditAgent: pipeline.BriefAuditAgent = {
+      id: "codex-brief-audit-v1",
+      modelId: "audit-model",
+      auditBrief: async (input) => {
+        reviewed.push(input.brief.title);
+        if (auditFailure) throw auditFailure;
+        return {
+          output: { title: input.brief.title },
+          trace: { taskKind: "role-audit", promptVersion: "test-v1", prompt: "", providerId: "openai", modelId: "audit-model" },
+        };
+      },
+    };
+    const subject = async (workspaceRoot: string) => new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      briefAuditAgents: [{ providerId: "openai", agent: auditAgent }],
+    });
+
+    const passed = await (await subject(await mkdtemp(path.join(tmpdir(), "video-factory-brief-audit-")))).start(gatedBrief);
+    assert.deepEqual(reviewed, [brief.title]);
+    const passedBrief = passed.nodeRuns.find((node) => node.nodeId === "brief");
+    // 复核判 pass 也照样停在边界：裁决不是状态，放行只看人按不按。
+    assert.equal(passedBrief?.status, "needs_human");
+    assert.equal(passedBrief?.error, undefined);
+    assert.equal(passed.status, "needs_human");
+
+    // 复核调用自己失败：建议缺席，但节点照常完成，产物照常登记，停在边界等人放行。
+    auditFailure = new Error("audit model unavailable");
+    const failed = await (await subject(await mkdtemp(path.join(tmpdir(), "video-factory-brief-audit-")))).start(gatedBrief);
+    const failedBrief = failed.nodeRuns.find((node) => node.nodeId === "brief");
+    assert.equal(failed.status, "needs_human");
+    assert.equal(failedBrief?.status, "needs_human");
+    assert.equal(failedBrief?.error, undefined);
+    assert.equal(failed.artifacts.filter((artifact) => artifact.kind === "production_brief").length, 1);
+  });
+
+  it("不带边界标记的简报不跑复核算力", async () => {
+    const reviewed: string[] = [];
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot: await mkdtemp(path.join(tmpdir(), "video-factory-plain-brief-")),
+      worker: new FakeWorker(),
+      briefAuditAgents: [{
+        providerId: "openai",
+        agent: {
+          id: "codex-brief-audit-v1",
+          modelId: "audit-model",
+          auditBrief: async (input) => {
+            reviewed.push(input.brief.title);
+            return {
+              output: { title: input.brief.title },
+              trace: { taskKind: "role-audit", promptVersion: "test-v1", prompt: "", providerId: "openai", modelId: "audit-model" },
+            };
+          },
+        },
+      }],
+    });
+
+    // 没有边界停点的流程图里，复核建议没有地方呈现，就不该白花一次模型调用——
+    // 这也正是版本红线要守的"不带标记的简报行为逐字节不变"。
+    await subject.start(brief);
+    assert.deepEqual(reviewed, []);
+  });
+
+  it("送审的简报投影不带来源正文", () => {
+    const projection = pipeline.briefAuditProjection({
+      ...brief,
+      // 夹具 brief 走的是 parseBrief 入参形状，这里补上投影所需的类型字段。
+      economics: { recipeId: "free-stock", allowMeteredProviders: false },
+      articleSources: [{
+        sourceId: "source-1",
+        originalUrl: "https://example.com/a",
+        finalUrl: "https://example.com/a",
+        pageTitle: "示例来源",
+        fetchedAt: "2026-01-01T00:00:00.000Z",
+        extractorVersion: "v1",
+        readStatus: "read",
+        paragraphs: [{ id: "p1", text: "正文".repeat(5000) }],
+        truncated: false,
+      }],
+    });
+
+    // role-audit 的 candidate 与 context 各有 192KB 上限，整段正文会让一次审计直接撑爆载荷。
+    assert.deepEqual(projection.articleSources, [{
+      sourceId: "source-1",
+      pageTitle: "示例来源",
+      finalUrl: "https://example.com/a",
+      readStatus: "read",
+      paragraphCount: 1,
+      truncated: false,
+    }]);
+    assert.equal(JSON.stringify(projection).includes("正文正文"), false);
+  });
 });

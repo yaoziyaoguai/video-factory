@@ -1488,12 +1488,27 @@ function reviewGateNode(
         };
       }
       const audit = checked.reviewCheck?.audit;
-      if (!audit || audit.verdict !== "pass" || !checked.reviewCheck?.checkIdentity) {
-        throw new Error(`Creative review '${stage}' confirmation did not produce a passing independent check.`);
+      const checkIdentity = checked.reviewCheck?.checkIdentity;
+      if (!audit || !checkIdentity) {
+        throw new Error(`Creative review '${stage}' confirmation did not produce an independent check.`);
+      }
+      // 独立复核是"提议"而非"否决"：裁决为 repair 时把意见记成 checkResult，停在用户面前
+      // 由他决定是否"看过意见，仍然确认"，而不是替他宣布这次确认失败。
+      if (audit.verdict !== "pass") {
+        return {
+          creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
+            draftSha256: gate.draft.sha256,
+            checkIdentity,
+            verdict: "repair",
+            score: audit.score,
+            summary: audit.summary,
+            issues: structuredClone(audit.issues),
+          }),
+        };
       }
       const reviewed = recordCreativeReviewCheck(state.creativeReview, stage, {
         draftSha256: gate.draft.sha256,
-        checkIdentity: checked.reviewCheck.checkIdentity,
+        checkIdentity,
         verdict: "pass",
         score: audit.score,
         summary: audit.summary,
@@ -1503,7 +1518,7 @@ function reviewGateNode(
         creativeReview: confirmCreativeDraft(reviewed, {
           ...resume,
           expectedReviewRevision: reviewed.reviewRevision,
-          checkIdentity: checked.reviewCheck.checkIdentity,
+          checkIdentity,
           confirmedAt: new Date().toISOString(),
         }),
       };

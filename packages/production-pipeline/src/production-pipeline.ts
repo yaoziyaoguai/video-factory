@@ -60,7 +60,9 @@ import {
   type VideoGenerationRuntimeProfile,
 } from "./generative-asset-worker.js";
 import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput, type ScriptDraft } from "./codex-screenwriter.js";
-import { FallbackCreativeTreatmentAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
+import { FallbackBriefAuditAgent, FallbackCreativeTreatmentAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
+import type { BriefAuditAgent } from "./codex-brief-audit.js";
+import { BRIEF_AUDIT_AGENT_CONTRACT_VERSION, BRIEF_AUDIT_PROVIDER_ID, briefAuditProjection } from "./codex-brief-audit.js";
 import {
   compileExecutableProductionPlan,
   parseExecutableProductionPlan,
@@ -137,6 +139,8 @@ export interface ProductionPipelineOptions {
   referenceVideoRoot?: string;
   /** joint-v1 创作规划的角色绑定：真实构思 agent 与其宿主 provider（如 openai/zai-bigmodel-api）。 */
   treatmentAgents?: Array<{ providerId: string; agent: CreativeTreatmentAgent }>;
+  /** 简报的独立复核绑定：与构思同一候选合同，只审不产，裁决只作建议。 */
+  briefAuditAgents?: Array<{ providerId: string; agent: BriefAuditAgent }>;
   /** 崩溃窗口注入点：图完成/正式产物登记后抛错，用于恢复语义测试；生产不得配置。 */
   /** 仅测试注入的规划崩溃窗口：真实子进程测试用硬 kill，不用 throw 代替进程死亡。 */
   planningFailpoints?: {
@@ -597,6 +601,10 @@ function productionNodeIds(brief: ProductionBrief): string[] {
 export function productionWorkflowVersion(
   brief: Pick<ProductionBrief, "providers" | "workflowFeatures" | "director" | "durationRange">,
 ): string {
+  // 每个节点边界由用户放行的合同是独立拓扑形态（节点数组里多一层闸门包装）：恢复与审计
+  // 必须能与不带该标记的历史 run 区分开。缺失标记时版本串保持逐字节不变——它同时是
+  // supportsRunContinuation 的比较基准，改一下会让所有在飞的 run 立刻变只读。
+  if (brief.workflowFeatures?.boundaryGates === "user-confirmed-v1") return "1.8.0";
   // joint-v1 共同创作规划是独立拓扑：恢复与审计必须能把它与旧规划链区分开。
   if (brief.workflowFeatures?.creativeReview === "user-confirmed-v1") return "1.7.0";
   if (usesJointCreativePlanning(brief)) return "1.6.1";
@@ -3721,8 +3729,11 @@ export class ProductionPipeline {
         capability: "brief.validate",
         mode: "automatic",
         getInput: (context) => context.initialInput as ProductionBrief,
-        execute: (input) => {
+        execute: async (input, context) => {
           const validatedBrief = validateBriefInputOverride(input, brief);
+          // 独立复核是建议性证据，不是状态：它挂在节点 checkpoint 上（界面据 node.agentLoopProgress
+          // 显示建议），无论裁决是 pass 还是 repair，本节点照常 succeeded，暂停由边界闸门负责。
+          if (boundaryGatesEnabled(brief)) await recordBriefAudit(this.options.briefAuditAgents, validatedBrief, context, this.runsRoot);
           return ({
           status: "succeeded",
           output: validatedBrief,
@@ -4197,9 +4208,42 @@ export class ProductionPipeline {
       id: "daily-production",
       name: "Daily short-video production",
       version: productionWorkflowVersion(brief),
-      nodes,
+      nodes: boundaryGatesEnabled(brief) ? nodes.map(withBoundaryGate) : nodes,
     };
   }
+}
+
+// 边界闸门：节点照常执行，执行成功后不直接放行，而是把控制权交回用户，等他按下"进入下一步"。
+// 停点只由一个不带 kind 的 needs_human 表达——带 kind 会落到 creative_review 那类专门路径，
+// 而这里要的是通用路径：批准即把本节点标 succeeded、产物与回执原样保留、不重跑本节点。
+// 自己就返回 needs_human 的节点（final-review 等）原样放过，不二次包裹。
+function withBoundaryGate(node: NodeDefinition): NodeDefinition {
+  const execute = node.execute;
+  if (!execute) return node;
+  return {
+    ...node,
+    execute: async (input, context) => {
+      const result = await execute(input, context);
+      // 成功臂的 status 是可选的，undefined 与 "succeeded" 同义，两者都要拦下来。
+      if (result.status !== undefined && result.status !== "succeeded") return result;
+      return {
+        ...result,
+        status: "needs_human",
+        intervention: {
+          boundary: "node-complete",
+          // 刻意不拼 node.label：它是内部的英文标识（"Validate brief"），拼进来就成了
+          // 「Validate brief已完成」这种半截中英混排。步骤名由界面按 nodeId 用它自己的中文表渲染。
+          reason: "这一步已完成，等你确认后进入下一步。",
+          requiredAction: "approve",
+          options: ["approve", "reject"],
+        },
+      };
+    },
+  };
+}
+
+function boundaryGatesEnabled(brief: Pick<ProductionBrief, "workflowFeatures">): boolean {
+  return brief.workflowFeatures?.boundaryGates === "user-confirmed-v1";
 }
 
 function currentPublishApproval(context: WorkflowContext): WorkflowContext["decisions"][number] | undefined {
@@ -6407,10 +6451,25 @@ export function planningFailureForCreators(error: string): string {
           : "多次调整仍未通过质量复核，已停止自动重试：";
     return `${headline}${detail}`;
   }
+  // 上面只认登记过的失败形态，未登记的整句原样通过。这里**刻意不做"看着像英文就替换"的兜底**：
+  // 未登记的英文诊断是这条腿唯一的下线信息（例如 "simulated publication failure …"），整句换成
+  // 通用说明等于把它藏起来，创作者就只剩一句"这一步没有完成"。已经上过屏的那几句按句登记在
+  // KNOWN_ENGLISH_FAILURE_NARRATIVES 里逐条替换；再发现新的泄漏就再加一条，而不是放宽匹配。
+  if (KNOWN_ENGLISH_FAILURE_NARRATIVES.some((pattern) => pattern.test(redacted))) return UNTRANSLATED_PLANNING_FAILURE;
   return redacted
     .replace(/\s*不回退旧规划流程。/g, "")
     .replace(/Joint creative planning/g, "创作规划");
 }
+
+const UNTRANSLATED_PLANNING_FAILURE = "这一步没有完成。可以重试；连续失败时检查这一步使用的服务与模型配置。";
+
+// 曾经原样上屏的英文失败叙述。每一条都对应一个真实发生过的泄漏。
+const KNOWN_ENGLISH_FAILURE_NARRATIVES = [
+  // 创作复核跑完但没有通过的裁决时的旧抛错原文。
+  /check completed without a passing audit/i,
+  // 确认后独立复核没有产出通过裁决时的旧抛错原文。
+  /confirmation did not produce a passing independent check/i,
+];
 
 // 当前 inputDigest 的 role trace：只读执行历史中本 digest 的记录；历史缺失或损坏时返回
 // 空映射（阶段显示回退到当前绑定模型），不读取其他 digest 的旧执行 trace，也不阻断检视。
@@ -6474,8 +6533,8 @@ function planningReviewCheckResult(
   if (context.creativeReviewExecution?.mode !== "check") return {};
   const audit = execution.agentLoop?.iterations.at(-1)?.audit;
   const agentLoop = execution.agentLoop;
-  if (!audit || audit.verdict !== "pass" || !agentLoop) {
-    throw new Error(`Creative review '${context.creativeReviewExecution.stage}' check completed without a passing audit.`);
+  if (!audit || !agentLoop) {
+    throw new Error(`Creative review '${context.creativeReviewExecution.stage}' check completed without an independent audit.`);
   }
   return {
     reviewCheck: {
@@ -12185,6 +12244,57 @@ function nodeAgentLoopCheckpoint(
         : {}),
     },
   );
+}
+
+/**
+ * 简报节点的独立复核。裁决只落在节点 checkpoint 上（界面按 node.agentLoopProgress 读它），
+ * 不进节点产物：brief 的产物必须逐字节仍是一份合法简报，多挂一个字段就会被 validateOverride 剥掉，
+ * 而且审计没有权力改变这个节点的结果——pass 与 repair 都一样是 succeeded，暂停由边界闸门负责。
+ *
+ * 审计自己失败不改变本节点：建议缺席比整个制作停摆轻得多。原因不会消失，它以 failed/halted
+ * 阶段留在同一份 checkpoint 里，界面照这句话说「模型调用已停止，请查看失败原因」。
+ */
+async function recordBriefAudit(
+  bindings: Array<{ providerId: string; agent: BriefAuditAgent }> | undefined,
+  validatedBrief: ProductionBrief,
+  context: WorkflowContext,
+  runsRoot: string,
+): Promise<void> {
+  // provider 不可用时图仍要能建出来（续跑会用到它），没有绑定就跳过复核，不在这里抛。
+  if (!bindings?.length) return;
+  const agent = new FallbackBriefAuditAgent({ candidates: bindings });
+  const checkpointInput = { stage: "brief", brief: briefAuditProjection(validatedBrief) };
+  try {
+    await agent.auditBrief({
+      brief: validatedBrief,
+      agentLoopCheckpoint: nodeAgentLoopCheckpoint(
+        runsRoot,
+        context.runId,
+        "brief",
+        checkpointInput,
+        BRIEF_AUDIT_AGENT_CONTRACT_VERSION,
+        undefined,
+        context.operationRequestId,
+      ),
+      // 每个候选模型一份 checkpoint：A 失败兜底到 B 之后，B 的进度同样可恢复。
+      agentLoopCheckpointForModel: (modelId) => nodeAgentLoopCheckpoint(
+        runsRoot,
+        context.runId,
+        "brief",
+        checkpointInput,
+        BRIEF_AUDIT_AGENT_CONTRACT_VERSION,
+        modelId,
+        context.operationRequestId,
+      ),
+      // 操作者在简报节点上选定的首选模型，键就是上面那个能力键；没选就让候选按 broker 顺序排。
+      ...(validatedBrief.models?.[BRIEF_AUDIT_PROVIDER_ID]
+        ? { selectedModelId: validatedBrief.models[BRIEF_AUDIT_PROVIDER_ID] }
+        : {}),
+    });
+  } catch {
+    // 故意的静默：这里没有第二条汇报通道（节点产物不能带附加字段），而失败原因已经由
+    // role-agent-loop 写进 checkpoint 的 failed 阶段，界面读的就是那份记录。
+  }
 }
 
 function visualReinspectionCyclePath(runsRoot: string, runId: string): string {

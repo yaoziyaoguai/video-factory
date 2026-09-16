@@ -1818,6 +1818,25 @@ describe("planning failure creator copy (B4-FIX)", () => {
     const provider = planningFailureForCreators("treatment model a connection failed (ECONNREFUSED)");
     assert.match(provider, /treatment model a connection failed/);
     assert.equal(provider.includes("Joint creative planning"), false);
+
+    // 曾在界面上原样上屏的那句必须换成中文说明。
+    const leaked = planningFailureForCreators("Creative review 'treatment' check completed without a passing audit.");
+    assert.equal(leaked.includes("Creative review"), false);
+    assert.equal(leaked.includes("passing audit"), false);
+    assert.match(leaked, /^这一步没有完成/);
+
+    // 兜底是"按句登记"，不是"看着像英文就替换"：未登记的英文诊断是这条腿唯一的下线信息，
+    // 整句换成通用说明等于把它藏起来。上面的 provider 一条就是这个契约的守门人。
+    const unregistered = planningFailureForCreators("simulated publication failure after the planning graph completed");
+    assert.match(unregistered, /simulated publication failure/);
+  });
+
+  it("keeps a creator-facing Chinese failure reason as written", async () => {
+    const { planningFailureForCreators } = await import("../src/index.js");
+    assert.equal(
+      planningFailureForCreators("导演经过 3 轮修改后仍未通过独立审计。画面承诺无法兑现。"),
+      "导演经过 3 轮修改后仍未通过独立审计。画面承诺无法兑现。",
+    );
   });
 });
 

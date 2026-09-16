@@ -40,6 +40,9 @@ const ROLE_AUDIT_ASSESSMENT_PLANS: Record<string, RoleAuditAssessmentPlan> = {
   "视觉审片员": { dimensions: REPORT_AUDIT_DIMENSIONS },
   "候选画面复核": { dimensions: REPORT_AUDIT_DIMENSIONS },
   "参考片分析师": { dimensions: REPORT_AUDIT_DIMENSIONS },
+  // 内容简报是创作者写下的任务书本身，创意四维量不到东西；用报告四维（证据/覆盖/一致/可执行）。
+  // 它不设 collection：评的是那一份简报整体，不是某个集合里的条目。
+  "内容简报": { dimensions: REPORT_AUDIT_DIMENSIONS },
   "选题总编": { collection: "ideas", dimensions: CREATIVE_AUDIT_DIMENSIONS },
   "系列总编": { collection: "episodes", dimensions: CREATIVE_AUDIT_DIMENSIONS },
   "系列开拍总编": { collection: "episodes", dimensions: CREATIVE_AUDIT_DIMENSIONS },
