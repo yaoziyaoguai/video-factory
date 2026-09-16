@@ -82,26 +82,25 @@ function DirectionRow({ item, adopting, disabled, onAdopt, onSupplementSources }
         </small>
       </div>
       <div className="hot-direction-action">
-        <span className="hot-direction-score" aria-label={`总编评分 ${Math.round(item.editorialDecision.score)}`}>
+        <span className="hot-direction-score" aria-label={`${editorialScoreLabel(item)} ${Math.round(editorialScoreValue(item))}`}>
           <small>{editorialScoreLabel(item)}</small>{Math.round(editorialScoreValue(item))}
         </span>
-        {action.kind === "supplement" && onSupplementSources ? (
+        {action.supplement && onSupplementSources ? (
           <button className="button button-secondary" type="button" disabled={disabled} onClick={() => onSupplementSources(item)}>
-            <Link2 aria-hidden="true" size={15} />{action.label}
+            <Link2 aria-hidden="true" size={15} />补充来源
           </button>
-        ) : (
-          <button
-            className="button button-primary"
-            type="button"
-            data-tour="hot-direction-produce"
-            disabled={disabled || action.kind === "blocked"}
-            aria-label={`${action.label} ${item.title}`}
-            onClick={() => void onAdopt(item)}
-          >
-            {adopting ? "正在采用..." : action.label}
-            {action.kind === "blocked" ? <XCircle aria-hidden="true" size={15} /> : <ArrowRight aria-hidden="true" size={15} />}
-          </button>
-        )}
+        ) : null}
+        <button
+          className="button button-primary"
+          type="button"
+          data-tour="hot-direction-produce"
+          disabled={disabled || action.kind === "blocked"}
+          aria-label={`${action.label} ${item.title}`}
+          onClick={() => void onAdopt(item)}
+        >
+          {adopting ? "正在采用..." : action.label}
+          {action.kind === "blocked" ? <XCircle aria-hidden="true" size={15} /> : <ArrowRight aria-hidden="true" size={15} />}
+        </button>
       </div>
       {action.note ? <p className="hot-direction-note"><ShieldAlert aria-hidden="true" size={13} />{action.note}</p> : null}
     </li>
@@ -110,24 +109,30 @@ function DirectionRow({ item, adopting, disabled, onAdopt, onSupplementSources }
 
 // note 显式带上 undefined：reason 列表可能为空，exactOptionalPropertyTypes 下
 // "可能没有 note" 与 "note 可能是 undefined" 是两种类型。
-type DirectionAction =
-  | { kind: "adopt"; label: string; note?: string | undefined }
-  | { kind: "supplement"; label: string; note?: string | undefined }
-  | { kind: "blocked"; label: string; note?: string | undefined };
+type DirectionAction = {
+  kind: "adopt" | "blocked";
+  label: string;
+  note?: string | undefined;
+  /** 来源不足时同时给出"补充来源"这条恢复路径，但采用按钮保持可用。 */
+  supplement?: boolean | undefined;
+};
 
-// 方向按钮只有三种真实结果：能采用、需要先补来源、当前不建议生产。
+// 门槛只作建议：除了系列顺序这种事实性依赖，没有任何模型或审计结论能拦下"进入制作"。
 // 按钮文案必须预告点下去会发生什么，不能让"进入制作"变成一次核验弹窗的惊喜。
 function directionAction(item: StudioCandidateInboxItem, canSupplement: boolean): DirectionAction {
   if (item.seriesSequence?.status === "blocked") {
     return { kind: "blocked", label: `等待第 ${item.seriesSequence.blockedByEpisodeNumber} 集`, note: "本方向属于系列后续单集，前集定版后自动解锁。" };
   }
   if (item.verification.status === "blocked") {
-    return canSupplement
-      ? { kind: "supplement", label: "补充来源", note: item.verification.reasons[0] }
-      : { kind: "blocked", label: "等待补充来源", note: item.verification.reasons[0] };
+    return {
+      kind: "adopt",
+      label: "仍然进入制作",
+      note: `建议先补来源：${item.verification.reasons[0] ?? "当前有效来源不足。"}（只是建议，不影响你现在开工）`,
+      supplement: canSupplement,
+    };
   }
   if (item.editorialDecision.verdict === "skip") {
-    return { kind: "blocked", label: "当前不建议生产", note: item.editorialDecision.reasons[0] };
+    return { kind: "adopt", label: "仍然进入制作", note: `总编不建议生产：${item.editorialDecision.reasons[0] ?? "未给出理由。"}（是否开工由你决定）` };
   }
   if (item.verification.status === "review_required") {
     return { kind: "adopt", label: "核验后进入制作", note: item.verification.reasons[0] };
@@ -160,7 +165,9 @@ function hotTopicKey(candidate: StudioCandidateInboxItem): string {
 
 function buildHotTopics(candidates: StudioCandidateInboxItem[]): HotTopic[] {
   const groups = new Map<string, StudioCandidateInboxItem[]>();
-  for (const candidate of [...candidates].sort((left, right) => right.editorialDecision.score - left.editorialDecision.score)) {
+  // 排序必须用界面上显示的那个分：规则保底候选还没有总编评分，
+  // 按 editorialDecision.score（恒为 0）排会让"最可能出爆款"这个标题和列表顺序自相矛盾。
+  for (const candidate of [...candidates].sort((left, right) => editorialScoreValue(right) - editorialScoreValue(left))) {
     const key = hotTopicKey(candidate);
     const group = groups.get(key);
     if (group) group.push(candidate);

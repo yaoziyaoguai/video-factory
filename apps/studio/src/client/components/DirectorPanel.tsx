@@ -1,7 +1,7 @@
 import { ArrowRight, CheckCircle2, CircleDashed, WandSparkles } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { StudioOpportunity, StudioProvider } from "../../shared/api.js";
-import { opportunityProductionBlockReason, platformLabel } from "../presentation.js";
+import { opportunityProductionAdvice, platformLabel } from "../presentation.js";
 
 interface DirectorPanelProps {
   opportunity: StudioOpportunity;
@@ -27,8 +27,8 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
     label,
     available: providers.some((provider) => provider.capability === capability && provider.available && provider.kind !== "test"),
   }));
-  const topicBlockReason = opportunityProductionBlockReason(opportunity);
-  const productionReady = !providerError && !topicBlockReason && capabilities.every((item) => item.available);
+  const topicAdvice = opportunityProductionAdvice(opportunity);
+  const productionReady = !providerError && capabilities.every((item) => item.available);
   const missingCapabilities = capabilities.filter((item) => !item.available).map((item) => item.capability);
   const hasTopicAgent = providers.some((provider) => provider.capability === "topic.intelligence" && provider.available && provider.kind !== "test");
   const topicIntelligenceCopy = opportunity.origin === "trend"
@@ -79,11 +79,11 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
       </div>
 
       <div className="director-actions">
-        {topicBlockReason ? <p className="director-inline-error">这条历史选题不再满足当前制作标准：{topicBlockReason}</p> : null}
+        {topicAdvice ? <p className="director-topic-advice" role="note">提醒（仅供参考，不影响你开工）：{topicAdvice}</p> : null}
         <button className="button button-director" type="button" onClick={onProduce} disabled={!productionReady} data-tour="create-production">
           新建制作<ArrowRight aria-hidden="true" size={17} />
         </button>
-        {!productionReady && !topicBlockReason ? <Link className="director-resource-link" to={`/resources?missing=${encodeURIComponent(missingCapabilities.join(","))}#production-roles`}>查看缺失能力</Link> : null}
+        {!productionReady ? <Link className="director-resource-link" to={`/resources?missing=${encodeURIComponent(missingCapabilities.join(","))}#production-roles`}>查看缺失能力</Link> : null}
       </div>
     </aside>
   );

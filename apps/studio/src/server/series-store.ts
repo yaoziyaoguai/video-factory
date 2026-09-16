@@ -145,9 +145,8 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       if (episode.canonBaseRevision !== current.canon.revision) {
         throw new SeriesStoreConflictError(`第 ${episodeNumber} 集尚未通过基于最新已确认内容的开拍复核。`);
       }
-      if (episode.planning.auditStatus !== "passed") {
-        throw new SeriesStoreConflictError(`第 ${episodeNumber} 集尚未通过独立开拍审计。`);
-      }
+      // 开拍复核是建议，不是闸门：auditStatus 只说明那份自动审计判了什么，采用与否由用户决定。
+      // 会真正拦住用户的是上面那条"计划基于旧版已定版内容"的一致性事实，以及下面的集序约束。
       const upstreamEdit = current.episodes.find((candidate) => candidate.episodeNumber < episode.episodeNumber
         && activeEditLease(candidate, updatedAt));
       if (upstreamEdit) {

@@ -23,8 +23,8 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
           {sourceBlocked ? <div className="opportunity-readiness-warning" role="status">
             <AlertTriangle aria-hidden="true" size={16} />
             <span>
-              <strong>暂不可开工 · 来源还没达到制作标准</strong>
-              <small>{opportunity.verification?.reasons[0] ?? `目前只有 ${opportunity.verification?.independentSources ?? 0}/${opportunity.verification?.requiredSources ?? 2} 个独立来源。`}先补齐来源并重新核验，再决定是否投入制作。</small>
+              <strong>来源提醒（不影响你开工）</strong>
+              <small>{opportunity.verification?.reasons[0] ?? `目前只有 ${opportunity.verification?.independentSources ?? 0}/${opportunity.verification?.requiredSources ?? 2} 个独立来源。`}可以补齐来源并重新核验；是否投入制作由你决定。</small>
               {onSupplementSources ? (
                 <button className="button button-secondary opportunity-supplement-sources" type="button" onClick={onSupplementSources}><Link2 aria-hidden="true" size={15} />补充原始来源</button>
               ) : null}
@@ -42,7 +42,7 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
 
       <section className="visual-contact-sheet visual-plan" aria-label="镜头方向示意" data-tour="visual-direction">
           <header className="contact-sheet-heading">
-            <div><span>镜头方向预览</span><h2>{sourceBlocked ? "补齐来源后的镜头方向" : hasSavedVisualPlan ? "已保存的镜头方向" : "可参考的镜头方向"}</h2></div>
+            <div><span>镜头方向预览</span><h2>{hasSavedVisualPlan ? "已保存的镜头方向" : "可参考的镜头方向"}</h2></div>
             <p>{visualPlan.strategy}</p>
           </header>
           <div className="visual-beat-list">

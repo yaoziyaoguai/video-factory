@@ -28,6 +28,7 @@ import type {
   StudioSeries,
   StudioSeriesEpisodePlanInput,
   StudioTopicCategory,
+  StudioTopicGenerationReceipt,
 } from "../../shared/api.js";
 import { creatorFacingTechnicalText, reasoningEffortLabel } from "../presentation.js";
 import { platformLabel, proposalSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
@@ -35,7 +36,7 @@ import { CandidateVerificationDialog } from "./CandidateVerificationDialog.js";
 import { SeriesEpisodeDialog } from "./SeriesEpisodeDialog.js";
 
 type EntryMode = StudioCandidateOrigin | "custom";
-type TrendDeskView = "shortlist" | "produce_video" | "produce_image_story" | "not_selected" | "source_blocked";
+type TrendDeskView = "all" | "produce_video" | "produce_image_story" | "not_recommended" | "source_short";
 
 interface TopicEntryWorkspaceProps {
   initialMode?: EntryMode;
@@ -74,7 +75,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const mode = props.initialMode ?? "trend";
   const [category, setCategory] = useState<StudioTopicCategory | "all">("all");
   const [platform, setPlatform] = useState("all");
-  const [deskView, setDeskView] = useState<TrendDeskView>("shortlist");
+  const [deskView, setDeskView] = useState<TrendDeskView>("all");
   const [selectedId, setSelectedId] = useState(props.initialSelectedId ?? "");
   const [verificationCandidate, setVerificationCandidate] = useState<StudioCandidateInboxItem>();
 
@@ -86,17 +87,22 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const categoryCounts = countCategories(deskItems);
   const verdictCounts = countVerdicts(seriesItems);
   const platforms = [...new Set(seriesItems.map((item) => item.platform))];
-  const shortlistCount = seriesItems.filter(isShortlisted).length;
-  const notSelectedCount = seriesItems.filter(isNotSelected).length;
-  const notRecommendedCount = seriesItems.filter((item) => item.editorialDecision.verdict === "skip" && item.verification.status !== "blocked").length;
-  // 规则保底（未经总编评估）与来源阻断是独立维度：被阻断的候选同样可能是“待总编评估”。
+  const sourceShortCount = seriesItems.filter((item) => item.verification.status === "blocked").length;
+  const notRecommendedCount = seriesItems.filter((item) => item.editorialDecision.verdict === "skip").length;
+  // 规则保底（未经总编评估）与来源不足是独立维度：来源不足的候选同样可能是"待总编评估"。
   const ruleBaselineCount = seriesItems.filter((item) => item.editorialDecision.pendingEditorReview === true).length;
-  const roundSourceBlockedCount = seriesItems.filter((item) => item.verification.status === "blocked").length;
+  // "总编这轮没给建议"必须连带原因一起说，否则用户只看到一堆规则候选，无从判断是配额、超时还是输出被合同拦下。
+  const editorFailureReason = ruleBaselineCount > 0
+    ? seriesItems.find((item) => item.generationFallback)?.generationFallback?.reason
+    : undefined;
+  // 总编这轮真跑了、但独立复核没判通过时，审计的建议必须跟着候选一起出现。
+  const auditAdvice = mode === "trend" ? topicAuditAdvice(props.inbox?.topicGeneration) : undefined;
+  const clearCount = seriesItems.filter(isClearForProduction).length;
   const visibleItems = deskItems
     .filter((item) => category === "all" || item.category === category)
     .filter((item) => platform === "all" || item.platform === platform)
-    .sort((left, right) => right.editorialDecision.score - left.editorialDecision.score || left.title.localeCompare(right.title, "zh-CN"));
-  const hasActiveFilters = category !== "all" || platform !== "all" || deskView !== "shortlist";
+    .sort((left, right) => candidateScoreValue(right) - candidateScoreValue(left) || left.title.localeCompare(right.title, "zh-CN"));
+  const hasActiveFilters = category !== "all" || platform !== "all" || deskView !== "all";
   const selected = visibleItems.find((item) => item.id === selectedId) ?? visibleItems[0];
   const selectedSeries = props.series.find((item) => item.id === props.selectedSeriesId) ?? props.series[0];
   const candidateMode = mode === "trend" || mode === "series" ? mode : "trend";
@@ -118,16 +124,16 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   useEffect(() => {
     setCategory("all");
     setPlatform("all");
-    setDeskView("shortlist");
+    setDeskView("all");
     setSelectedId(props.initialSelectedId ?? "");
   }, [mode, props.initialSelectedId, props.selectedSeriesId]);
 
   useEffect(() => {
-    if (deskView !== "source_blocked" || roundSourceBlockedCount > 0) return;
+    if (deskView !== "source_short" || sourceShortCount > 0) return;
     setCategory("all");
     setPlatform("all");
-    setDeskView("shortlist");
-  }, [deskView, roundSourceBlockedCount]);
+    setDeskView("all");
+  }, [deskView, sourceShortCount]);
 
   return (
     <section className="topic-entry-workspace" data-tour="topic-inbox" aria-label={mode === "trend" ? "热点选题" : mode === "series" ? "系列选题" : "自定义创作"}>
@@ -154,26 +160,27 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
           </header>
 
           {modeError && modeItems.length > 0 ? <div className="candidate-cache-warning" role="status"><AlertCircle aria-hidden="true" size={17} /><span>本次更新失败，继续展示上次缓存：{modeError}</span></div> : null}
+          {auditAdvice ? <div className="candidate-audit-advice" role="note"><ShieldAlert aria-hidden="true" size={17} /><span>{auditAdvice}</span></div> : null}
           {modeError && modeItems.length === 0 ? (
             <div className="candidate-error" role="alert"><AlertCircle aria-hidden="true" size={20} /><div><strong>{mode === "trend" ? "热点候选暂时不可用" : "系列候选暂时不可用"}</strong><span>{modeError}</span></div><button className="button button-secondary" type="button" onClick={() => props.onRetry(candidateMode)}><RefreshCw aria-hidden="true" size={15} />重试</button></div>
           ) : modeBusy && modeItems.length === 0 ? (
             <div className="candidate-loading"><RadioTower aria-hidden="true" size={24} /><div><h2>{mode === "trend" ? "正在生成今日提案" : "正在读取系列选题"}</h2><p>{mode === "trend" ? "AI 选题总编正在分析热点并形成提案，通常需要几分钟；页面会自动更新，系列和自定义创作仍可立即使用。" : "系列策划通常几秒内就会出现。"}</p></div>{mode === "trend" ? <button className="button button-secondary" type="button" onClick={props.onManual}>录入自己的选题</button> : null}</div>
           ) : mode === "series" && props.series.length === 0 ? (
             <div className="series-empty"><LibraryBig aria-hidden="true" size={28} /><div><h3>先创建一个可持续的系列</h3><p>定义受众、栏目承诺和内容支柱后，系统会给出连续编号的下一集候选。</p></div><button className="button button-primary" type="button" onClick={props.onCreateSeries}>创建第一个系列</button></div>
-          ) : mode === "trend" && shortlistCount === 0 && deskView === "shortlist" ? (
+          ) : mode === "trend" && clearCount === 0 && deskView === "all" ? (
             <TrendRecoveryPanel
               evaluatedCount={modeItems.length}
               notRecommendedCount={notRecommendedCount}
-              notSelectedCount={notSelectedCount}
               pendingEditorCount={ruleBaselineCount}
-              roundSourceBlockedCount={roundSourceBlockedCount}
+              {...(editorFailureReason !== undefined ? { editorFailureReason } : {})}
+              sourceShortCount={sourceShortCount}
               historicalSourceBlockedCount={sourceBlockedOpportunities.length}
               refreshing={modeLoading}
               refreshPending={props.trendRefreshPending === true}
               onRefresh={props.onRefreshTrends}
               onManual={props.onManual}
-              onShowNotSelected={() => setDeskView("not_selected")}
-              onShowRoundSourceBlocked={() => setDeskView("source_blocked")}
+              onShowNotRecommended={() => setDeskView("not_recommended")}
+              onShowSourceShort={() => setDeskView("source_short")}
               onShowSourceBlocked={() => {
                 const firstSourceBlocked = sourceBlockedOpportunities[0];
                 if (firstSourceBlocked) props.onFocusSourceBlocked?.(firstSourceBlocked.id);
@@ -199,12 +206,12 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
             <>
               <div className="candidate-filters" aria-label="候选筛选">
                 <div className="verdict-filter" aria-label="生产建议">
-                  <button type="button" className={deskView === "shortlist" ? "is-active" : ""} onClick={() => setDeskView("shortlist")}>可采用候选 <span>{shortlistCount}</span></button>
+                  <button type="button" className={deskView === "all" ? "is-active" : ""} onClick={() => setDeskView("all")}>全部 <span>{seriesItems.length}</span></button>
                   {(["produce_video", "produce_image_story"] as const).map((item) => (
                     <button key={item} type="button" className={deskView === item ? "is-active" : ""} disabled={!verdictCounts[item]} onClick={() => setDeskView(item)}>{editorialVerdictLabel(item)} <span>{verdictCounts[item] ?? 0}</span></button>
                   ))}
-                  <button type="button" className={deskView === "source_blocked" ? "is-active" : ""} disabled={!roundSourceBlockedCount} onClick={() => setDeskView("source_blocked")}>待补来源 <span>{roundSourceBlockedCount}</span></button>
-                  <button type="button" className={deskView === "not_selected" ? "is-active" : ""} disabled={!notSelectedCount} onClick={() => setDeskView("not_selected")}>未入选 <span>{notSelectedCount}</span></button>
+                  <button type="button" className={deskView === "not_recommended" ? "is-active" : ""} disabled={!notRecommendedCount} onClick={() => setDeskView("not_recommended")}>总编不建议 <span>{notRecommendedCount}</span></button>
+                  <button type="button" className={deskView === "source_short" ? "is-active" : ""} disabled={!sourceShortCount} onClick={() => setDeskView("source_short")}>来源不足 <span>{sourceShortCount}</span></button>
                 </div>
                 <div className="category-filter" aria-label="内容分类">
                   <button type="button" className={category === "all" ? "is-active" : ""} onClick={() => setCategory("all")}>全部 <span>{deskItems.length}</span></button>
@@ -213,7 +220,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
                   ))}
                 </div>
                 <label className="platform-filter"><span>热点来源平台</span><select aria-label="热点来源平台" value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">全部来源平台</option>{platforms.map((item) => <option key={item} value={item}>{platformLabel(item)}</option>)}</select></label>
-                {hasActiveFilters ? <button className="candidate-clear-filters" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setDeskView("shortlist"); }}>清除筛选</button> : null}
+                {hasActiveFilters ? <button className="candidate-clear-filters" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setDeskView("all"); }}>清除筛选</button> : null}
               </div>
               {visibleItems.length > 0 ? (
                 <div className="candidate-inbox-body">
@@ -232,7 +239,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
                   </div>
                   {selected ? <CandidateDetail item={selected} adopting={props.adoptingId === selected.id} disabled={props.adoptingId !== undefined} onAdopt={() => adopt(selected)} {...(props.onSupplementSources ? { onSupplementSources: props.onSupplementSources } : {})} /> : null}
                 </div>
-              ) : <div className="filtered-empty"><BookOpenText aria-hidden="true" size={22} /><span>{deskView === "shortlist" ? "选题总编本轮没有可采用的候选。" : "当前筛选下没有候选。"}</span>{hasActiveFilters ? <button className="button button-secondary" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setDeskView("shortlist"); }}>清除筛选</button> : null}</div>}
+              ) : <div className="filtered-empty"><BookOpenText aria-hidden="true" size={22} /><span>当前筛选下没有候选。</span>{hasActiveFilters ? <button className="button button-secondary" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setDeskView("all"); }}>清除筛选</button> : null}</div>}
             </>
           )}
         </div>
@@ -292,12 +299,11 @@ function SeriesRoadmap({
     ? candidates.find((candidate) => candidate.id === selectedEpisode.id)
     : undefined;
   const blockedBy = selectedCandidate?.seriesSequence?.blockedByEpisodeNumber;
-  // 序列解锁与来源门禁是两道独立的阻断：补齐原始来源解决后者，不能也不应跳过前者。
+  // 来源不足只是提醒，不再参与解锁判断；集序与开拍审计由服务端强制，客户端如实镜像。
   const sourceBlocked = selectedEpisode?.status === "planned"
     && selectedCandidate?.verification.status === "blocked";
   const mayAdopt = selectedEpisode?.status === "planned"
-    && selectedCandidate?.seriesSequence?.status === "ready"
-    && !sourceBlocked;
+    && selectedCandidate?.seriesSequence?.status === "ready";
   const needsGreenlight = selectedEpisode?.planning.auditStatus !== "passed";
   const auditAvailabilityPending = needsGreenlight && seriesAuditReady === undefined;
   const auditUnavailable = needsGreenlight && seriesAuditReady === false;
@@ -382,13 +388,13 @@ function SeriesRoadmap({
               {selectedEpisode.planning.auditSummary ? <p><strong>复核结论：</strong>{creatorFacingTechnicalText(selectedEpisode.planning.auditSummary)}{selectedEpisode.planning.auditScore !== undefined ? `（${selectedEpisode.planning.auditScore} 分）` : ""}</p> : null}
               {selectedEpisode.planning.fallbackReason ? <p>{creatorFacingTechnicalText(selectedEpisode.planning.fallbackReason)}</p> : null}
             </section>
-            {auditUnavailable ? <p className="series-lock-note"><ShieldAlert aria-hidden="true" size={15} />开拍前独立质量复核尚未就绪。<Link to="/resources#production-roles">去配置系列主理人</Link></p> : null}
+            {auditUnavailable ? <p className="series-lock-note"><ShieldAlert aria-hidden="true" size={15} />开拍前独立质量复核尚未就绪，仍然可以进入制作；配置系列主理人后可拿到复核建议。<Link to="/resources#production-roles">去配置系列主理人</Link></p> : null}
             {blockedBy ? <p className="series-lock-note"><LockKeyhole aria-hidden="true" size={15} />第 {blockedBy} 集尚未定版；完成审片后，本集会自动继承最新已确认内容再解锁。</p> : null}
-            {sourceBlocked && selectedCandidate ? <p className="series-lock-note" role="alert"><ShieldAlert aria-hidden="true" size={15} />{selectedCandidate.verification.reasons[0]}</p> : null}
+            {sourceBlocked && selectedCandidate ? <p className="series-lock-note" role="note"><ShieldAlert aria-hidden="true" size={15} />来源提醒（不影响你开工）：{selectedCandidate.verification.reasons[0]}</p> : null}
             {selectedEpisode.status === "planned" ? (
               <div className="series-episode-actions">
                 <button className="button button-secondary" type="button" disabled={adoptingId !== undefined} onClick={() => setEditing(true)}><PencilLine aria-hidden="true" size={16} />编辑路线图</button>
-                <button className="button button-primary" type="button" disabled={!mayAdopt || adoptingId !== undefined || auditAvailabilityPending || auditUnavailable || unsupportedProductionPlatform} onClick={() => selectedCandidate && void onAdopt(selectedCandidate)}>{adoptingId === selectedEpisode.id ? "正在复核..." : unsupportedProductionPlatform ? "请先迁移到支持的平台" : blockedBy ? `完成第 ${blockedBy} 集后解锁` : sourceBlocked ? "等待补充原始来源"  : auditAvailabilityPending ? "正在确认复核能力" : auditUnavailable ? "开拍前复核未就绪" : needsGreenlight ? "先复核，再进入制作" : "采用本集并进入制作"}<ArrowRight aria-hidden="true" size={16} /></button>
+                <button className="button button-primary" type="button" disabled={!mayAdopt || adoptingId !== undefined || unsupportedProductionPlatform} onClick={() => selectedCandidate && void onAdopt(selectedCandidate)}>{adoptingId === selectedEpisode.id ? "正在复核..." : unsupportedProductionPlatform ? "请先迁移到支持的平台" : blockedBy ? `完成第 ${blockedBy} 集后解锁` : auditAvailabilityPending ? "正在确认复核能力" : auditUnavailable ? "复核未就绪，仍然进入制作" : needsGreenlight ? "先复核，再进入制作" : sourceBlocked ? "仍然进入制作" : "采用本集并进入制作"}<ArrowRight aria-hidden="true" size={16} /></button>
                 {sourceBlocked && selectedCandidate && onSupplementSources ? (
                   <button className="button button-secondary" type="button" disabled={adoptingId !== undefined} onClick={() => onSupplementSources(selectedCandidate)}><ShieldAlert aria-hidden="true" size={16} />补充原始来源</button>
                 ) : null}
@@ -424,6 +430,8 @@ function SeriesRoadmap({
 
 function planningAuditLabel(planning: StudioSeries["episodes"][number]["planning"]): string {
   if (planning.auditStatus === "passed") return `独立复核 ${planning.auditIterations}/3 轮通过`;
+  // 不说"通过"：轮次跑完仍没判 pass 时审计明确要求过修复，只是它无权否决，交给你裁决。
+  if (planning.auditStatus === "awaiting_user") return `独立复核 ${planning.auditIterations}/3 轮未通过 · 建议已附上`;
   if (planning.auditStatus === "stale") return "已定版内容更新 · 采用时先重审";
   if (planning.auditStatus === "human_override") return "人工修订 · 待后续复核";
   return "规则保底";
@@ -516,17 +524,22 @@ function normalizeMatchText(value: string): string {
 }
 
 function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSources }: { item: StudioCandidateInboxItem; adopting: boolean; disabled: boolean; onAdopt: () => Promise<void>; onSupplementSources?: (candidate: StudioCandidateInboxItem) => void }) {
-  const skipped = item.editorialDecision.verdict === "skip";
-  const sourceBlocked = item.verification.status === "blocked";
+  const adviceSkip = item.editorialDecision.verdict === "skip";
+  const sourceShort = item.verification.status === "blocked";
   // 规则保底候选未经总编评估：内容潜力继续作为参考分展示，不把“尚未评估”投影成“总编评分 0”。
   const pendingEditor = item.editorialDecision.pendingEditorReview === true;
-  const blocked = sourceBlocked || skipped;
-  // 系列与热点共用同一个“补充原始来源”恢复动作；补齐后由服务端重算门禁与建议。
-  const canSupplementSources = sourceBlocked && onSupplementSources !== undefined;
-  // 内容潜力（信号强度与制作可行性）与当前开工状态分开呈现：来源被阻断不等于选题质量为零。
-  const scoreLabel = sourceBlocked || pendingEditor ? "内容潜力" : "总编评分";
-  const scoreValue = Math.round(sourceBlocked || pendingEditor ? item.score.final : item.editorialDecision.score);
+  // 系列与热点共用同一个“补充原始来源”恢复动作；补齐后由服务端重算来源与建议。
+  const canSupplementSources = sourceShort && onSupplementSources !== undefined;
+  // 内容潜力（信号强度与制作可行性）与建议分开呈现：来源不足不等于选题质量为零。
+  const scoreLabel = sourceShort || pendingEditor ? "内容潜力" : "总编评分";
+  const scoreValue = Math.round(candidateScoreValue(item));
   const verdictLabel = editorialVerdictLabel(item.editorialDecision.verdict);
+  // 提醒只标注、不拦人：每条候选都能采用，这里把"为什么建议先别做"说清楚。
+  const advice = sourceShort
+    ? `来源不足：${item.verification.reasons[0] ?? "有效来源还没达到当前标准。"}`
+    : adviceSkip
+      ? `总编不建议生产：${item.editorialDecision.reasons[0] ?? "未给出理由。"}`
+      : undefined;
   return (
     <article className="candidate-detail" aria-labelledby="candidate-detail-title">
       <header><span>{item.origin === "series" ? `${item.seriesName} · 第 ${item.episodeNumber} 集` : `${TOPIC_CATEGORY_LABELS[item.category]}观察`}</span><strong aria-label={`${scoreLabel} ${scoreValue} 分`}><small>{scoreLabel}</small>{scoreValue}</strong></header>
@@ -536,11 +549,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
       {item.visualProof ? <p className="candidate-visual-proof"><small>可见画面</small>{item.visualProof}</p> : null}
       <div className={`editorial-decision is-${item.editorialDecision.verdict}`}>
         <span>总编建议</span>
-        <strong>{sourceBlocked
-          ? (skipped ? "待补来源 · 补齐后再评估" : `补齐后建议采用 · ${verdictLabel}`)
-          : pendingEditor
-            ? "来源已达标 · 等待总编评估"
-            : `${verdictLabel} · ${item.editorialDecision.score} 分`}</strong>
+        <strong>{pendingEditor ? "尚未评估 · 当前只有规则保底" : `${verdictLabel} · ${item.editorialDecision.score} 分`}</strong>
         <p>{item.editorialDecision.reasons[0]}</p>
         <small>{item.editorialDecision.guardrails[0]}</small>
       </div>
@@ -559,8 +568,8 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
           <span>系列 {Math.round(item.score.seriesPotential)}</span>
           <span>风险 {Math.round(item.score.complianceRisk)}</span>
         </div>
-        <p>{sourceBlocked
-          ? "内容潜力分只反映选题机会与制作可行性，不代表当前可以采用；下方的形态建议在补齐来源并通过核验前仅供参考。"
+        <p>{sourceShort
+          ? "内容潜力分只反映选题机会与制作可行性；来源不足只是提醒，是否开工由你决定。证据强度表示当前信号热度或排名，不等同于事实可信度。"
           : "总分综合内容机会与制作可行性；风险分越低越安全。证据强度表示当前信号热度或排名，不等同于事实可信度。"}</p>
       </details>
       <div className="candidate-evidence"><span>来源线索</span>{item.evidence.slice(0, 2).map((evidence, index) => evidence.evidenceUrl ? <a key={`${item.id}-${index}`} href={evidence.evidenceUrl} target="_blank" rel="noreferrer"><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong><small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${evidence.source} · 榜单热度或排名信号 ${evidence.strength}`}</small></a> : <div key={`${item.id}-${index}`}><strong>{evidence.keyword}</strong><small>{evidence.source} · 榜单热度或排名信号 {evidence.strength}</small></div>)}</div>
@@ -571,24 +580,18 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
         {item.articleUncertainties?.map((uncertainty, index) => <p key={index}>仍待核验：{uncertainty}</p>)}
         {!item.articleFacts?.length ? <p>当前没有可作为正文事实引用的内容；标题和热度只用于选题线索。</p> : null}
       </details> : null}
-      <div className={`candidate-verification is-${item.verification.status}`}><ShieldAlert aria-hidden="true" size={15} /><span><strong>{sourceBlocked
-        ? "待补来源 · 暂不可采用"
-        : skipped
-          ? pendingEditor
-            ? "待总编评估 · 暂不可采用"
-            : "内容暂不推荐 · 暂不可采用"
-          : item.verification.status === "review_required"
-              ? "采用前需要你核验"
-              : "可进入制作区"}</strong><small>{sourceBlocked
-        ? item.verification.reasons[0]
-        : skipped
-          ? item.editorialDecision.reasons[0]
-          : item.verification.reasons[0]}</small></span><output>{item.evidence.length} 条来源线索 · {item.verification.independentSources} 个有效来源域名（需 {item.verification.requiredSources} 个）</output></div>
-      {canSupplementSources ? (
-        <button className="button button-primary candidate-adopt" type="button" aria-label={`补充来源 ${item.title}`} disabled={disabled} onClick={() => onSupplementSources?.(item)}>保存来源并重新评估<ArrowRight aria-hidden="true" size={16} /></button>
-      ) : (
-        <button className="button button-primary candidate-adopt" data-tour="candidate-adopt" type="button" aria-label={`采用候选 ${item.title}`} disabled={disabled || blocked} onClick={() => void onAdopt()}>{adopting ? "正在采用..." : skipped ? (pendingEditor ? "等待总编评估" : "当前不建议生产")  : item.verification.status === "blocked" ? "等待补充来源" : item.verification.status === "review_required" ? "核验后采用" : "采用到制作区"}<ArrowRight aria-hidden="true" size={16} /></button>
-      )}
+      {advice ? <p className="candidate-advisory" role="note"><ShieldAlert aria-hidden="true" size={15} />{advice}（只是建议，不影响你采用）</p> : null}
+      <div className={`candidate-verification is-${item.verification.status}`}><ShieldAlert aria-hidden="true" size={15} /><span><strong>{sourceShort
+        ? "来源不足 · 仍可由你决定开工"
+        : item.verification.status === "review_required"
+          ? "建议采用前先核验"
+          : "来源已达标"}</strong><small>{item.verification.reasons[0]}</small></span><output>{item.evidence.length} 条来源线索 · {item.verification.independentSources} 个有效来源域名（需 {item.verification.requiredSources} 个）</output></div>
+      <div className="candidate-actions">
+        {canSupplementSources ? (
+          <button className="button button-secondary" type="button" aria-label={`补充来源 ${item.title}`} disabled={disabled} onClick={() => onSupplementSources?.(item)}>保存来源并重新评估</button>
+        ) : null}
+        <button className="button button-primary candidate-adopt" data-tour="candidate-adopt" type="button" aria-label={`采用候选 ${item.title}`} disabled={disabled} onClick={() => void onAdopt()}>{adopting ? "正在采用..." : advice ? "仍然采用" : item.verification.status === "review_required" ? "核验后采用" : "采用到制作区"}<ArrowRight aria-hidden="true" size={16} /></button>
+      </div>
     </article>
   );
 }
@@ -603,25 +606,40 @@ function articleReadStatusLabel(status: NonNullable<StudioCandidateInboxItem["ar
   }[status];
 }
 
-function isShortlisted(item: StudioCandidateInboxItem): boolean {
-  return item.editorialDecision.verdict !== "skip"
-    && item.verification.status !== "blocked"
+// 没有闸门，只有"这条候选是否已经明确到可以一路做完"：来源达标且系列顺序没轮到它等。
+function isClearForProduction(item: StudioCandidateInboxItem): boolean {
+  return item.verification.status !== "blocked"
     && item.seriesSequence?.status !== "blocked";
 }
 
-function isNotSelected(item: StudioCandidateInboxItem): boolean {
-  return !isShortlisted(item) && item.verification.status !== "blocked";
+// 审计只出建议，但建议不能只存在于服务端：复核没判通过时把它的原话摆出来，
+// 否则用户面对一屏真模型候选，无从知道审计正要修哪里。
+function topicAuditAdvice(receipt: StudioTopicGenerationReceipt | undefined): string | undefined {
+  if (receipt?.auditStatus !== "awaiting_user") return undefined;
+  const advice = (receipt.auditRepairInstructions ?? []).slice(0, 3);
+  return [
+    "选题总编这轮独立复核未判通过，候选仍然可以直接进入制作；这是复核建议修复的点：",
+    receipt.auditSummary,
+    ...advice,
+  ].filter((line): line is string => Boolean(line)).join(" ");
+}
+
+// 排序必须用界面上显示的那个分，否则列表顺序会和行上显示的数字自相矛盾。
+function candidateScoreValue(item: StudioCandidateInboxItem): number {
+  return item.verification.status === "blocked" || item.editorialDecision.pendingEditorReview
+    ? item.score.final
+    : item.editorialDecision.score;
 }
 
 function matchesDeskView(item: StudioCandidateInboxItem, view: TrendDeskView): boolean {
-  if (view === "shortlist") return isShortlisted(item);
-  if (view === "source_blocked") return item.verification.status === "blocked";
-  if (view === "not_selected") return isNotSelected(item);
-  return isShortlisted(item) && item.editorialDecision.verdict === view;
+  if (view === "all") return true;
+  if (view === "source_short") return item.verification.status === "blocked";
+  if (view === "not_recommended") return item.editorialDecision.verdict === "skip";
+  return item.editorialDecision.verdict === view;
 }
 
 function candidateStatusLabel(item: StudioCandidateInboxItem): string {
-  if (item.verification.status === "blocked") return "待补来源";
+  if (item.verification.status === "blocked") return "来源不足";
   return item.editorialDecision.pendingEditorReview ? "待总编评估" : editorialVerdictLabel(item.editorialDecision.verdict);
 }
 
@@ -631,61 +649,65 @@ function isManualEvidence(evidence: { source: string; platform: string }): boole
 
 function editorialVerdictLabel(verdict: StudioEditorialVerdict): string {
   return {
-    produce_video: "建议视频",
-    produce_image_story: "建议图文成片",
-    skip: "暂不生产",
+    produce_video: "建议做视频",
+    produce_image_story: "建议做图文成片",
+    skip: "总编不建议",
   }[verdict];
 }
 
 function TrendRecoveryPanel({
   evaluatedCount,
   notRecommendedCount,
-  notSelectedCount,
   pendingEditorCount,
-  roundSourceBlockedCount,
+  editorFailureReason,
+  sourceShortCount,
   historicalSourceBlockedCount,
   refreshing,
   refreshPending,
   onRefresh,
   onManual,
-  onShowNotSelected,
-  onShowRoundSourceBlocked,
+  onShowNotRecommended,
+  onShowSourceShort,
   onShowSourceBlocked,
 }: {
   evaluatedCount: number;
   notRecommendedCount: number;
-  notSelectedCount: number;
   pendingEditorCount: number;
-  roundSourceBlockedCount: number;
+  /** 本轮总编没能给出建议的原因；有它就说明候选为什么是规则保底，而不是让用户去猜。 */
+  editorFailureReason?: string | undefined;
+  sourceShortCount: number;
   historicalSourceBlockedCount: number;
   refreshing: boolean;
   refreshPending: boolean;
   onRefresh: () => void;
   onManual: () => void;
-  onShowNotSelected: () => void;
-  onShowRoundSourceBlocked: () => void;
+  onShowNotRecommended: () => void;
+  onShowSourceShort: () => void;
   onShowSourceBlocked: () => void;
 }) {
   return (
     <section className="trend-recovery" aria-label="热点恢复路径" data-tour="trend-recovery">
       <div className="trend-recovery-copy">
-        <h3>这轮没有可采用的热点建议</h3>
-        <p>{evaluatedCount > 0
-          ? pendingEditorCount >= evaluatedCount
+        <h3>{evaluatedCount === 0 ? "本轮还没有热点候选" : "本轮候选都附带提醒，但都能开工"}</h3>
+        <p>{evaluatedCount === 0
+          ? "本轮收件箱还没有任何热点候选。"
+          : pendingEditorCount >= evaluatedCount
             ? `本轮 ${evaluatedCount} 条热点候选由规则保底生成，还没有经过选题总编评估；它们不会按“总编评分 0”对待。`
-            : `选题总编本轮评估了 ${evaluatedCount - pendingEditorCount} 条热点候选，其中 ${notRecommendedCount} 条未推荐。`
-          : "本轮收件箱还没有任何热点候选。"}</p>
-        {roundSourceBlockedCount > 0 ? <p className="trend-recovery-blocked">本轮另有 {roundSourceBlockedCount} 条候选有内容潜力，但来源还没达到当前采用标准，先补齐来源再决定。</p> : null}
-        {historicalSourceBlockedCount > 0 ? <p className="trend-recovery-blocked">另有 {historicalSourceBlockedCount} 条历史选题因来源核验被阻断。</p> : null}
+            : `选题总编本轮评估了 ${evaluatedCount - pendingEditorCount} 条热点候选，其中 ${notRecommendedCount} 条建议不做。建议只作参考，是否开工由你决定。`}</p>
+        {pendingEditorCount > 0 && editorFailureReason
+          ? <p className="trend-recovery-blocked" role="note">总编本轮没能给出建议的原因：{editorFailureReason.split("\n")[0]}</p>
+          : null}
+        {sourceShortCount > 0 ? <p className="trend-recovery-blocked">本轮另有 {sourceShortCount} 条候选的来源还没达到当前采用标准；补齐来源只是建议，不影响你直接开工。</p> : null}
+        {historicalSourceBlockedCount > 0 ? <p className="trend-recovery-blocked">另有 {historicalSourceBlockedCount} 条历史选题来源不足，同样只是提醒。</p> : null}
       </div>
       <div className="trend-recovery-actions">
         <button className="button button-primary" type="button" disabled={refreshing || refreshPending} onClick={onRefresh}><RefreshCw aria-hidden="true" size={16} />重新刷新热点</button>
         <button className="button button-secondary" type="button" onClick={onManual}><PenLine aria-hidden="true" size={16} />录入自己的选题</button>
         <Link className="button button-secondary" to="/topics?mode=series"><LibraryBig aria-hidden="true" size={16} />继续已有系列</Link>
-        {roundSourceBlockedCount > 0 ? <button className="button button-secondary" type="button" onClick={onShowRoundSourceBlocked}><ShieldAlert aria-hidden="true" size={16} />查看待补来源候选（{roundSourceBlockedCount} 条）</button> : null}
+        {sourceShortCount > 0 ? <button className="button button-secondary" type="button" onClick={onShowSourceShort}><ShieldAlert aria-hidden="true" size={16} />查看来源不足的候选（{sourceShortCount} 条）</button> : null}
         {historicalSourceBlockedCount > 0 ? <button className="button button-secondary" type="button" onClick={onShowSourceBlocked}><ShieldAlert aria-hidden="true" size={16} />查看缺来源的选题</button> : null}
       </div>
-      {notSelectedCount > 0 ? <button className="trend-recovery-secondary" type="button" onClick={onShowNotSelected}>查看未入选（{notSelectedCount} 条）</button> : null}
+      {notRecommendedCount > 0 ? <button className="trend-recovery-secondary" type="button" onClick={onShowNotRecommended}>查看总编不建议的（{notRecommendedCount} 条）</button> : null}
     </section>
   );
 }

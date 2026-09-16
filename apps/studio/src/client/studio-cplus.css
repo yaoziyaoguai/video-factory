@@ -1424,6 +1424,11 @@ body:has(.studio-v3) {
 .studio-v3 .project-load-more:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-2px); }
 .studio-v3 .candidate-score { width: 54px; height: 44px; align-content: center; gap: 1px; line-height: 1; }
 .studio-v3 .candidate-score small { font-size: 8px; font-weight: 650; }
+/* 建议性提示：要看得见，但不能长得像阻断错误，否则又会读成"不许开工"。 */
+.studio-v3 .candidate-advisory { margin: 0; color: #825f1b; font-size: 11px; line-height: 1.6; }
+.studio-v3 .candidate-audit-advice { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 12px; padding: 9px 11px; color: #825f1b; background: #fdf7e7; border: 1px solid #efe0b8; border-radius: 5px; font-size: 11px; line-height: 1.6; }
+.studio-v3 .candidate-audit-advice svg { flex: 0 0 auto; margin-top: 1px; }
+.studio-v3 .director-topic-advice { margin: 0 0 10px; padding: 8px 10px; color: #825f1b; background: #fdf7e7; border: 1px solid #efe0b8; border-radius: 5px; font-size: 11px; line-height: 1.6; }
 .studio-v3 .candidate-detail > header > strong { width: 64px; height: 54px; align-content: center; gap: 2px; line-height: 1; }
 .studio-v3 .candidate-detail > header > strong small { font-family: "Noto Sans SC Variable", sans-serif; font-size: 8px; font-weight: 650; }
 .studio-v3 .project-delete { flex: 0 0 auto; color: #8c3d35; border-color: #ddc0bb; }

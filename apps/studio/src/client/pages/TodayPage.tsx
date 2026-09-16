@@ -26,7 +26,7 @@ import { ProductionStrip } from "../components/ProductionStrip.js";
 import { SeriesDialog } from "../components/SeriesDialog.js";
 import { SourceSupplementDialog } from "../components/SourceSupplementDialog.js";
 import { TopicEntryWorkspace } from "../components/TopicEntryWorkspace.js";
-import { opportunityProductionBlockReason } from "../presentation.js";
+import { opportunityProductionAdvice } from "../presentation.js";
 
 export function TodayPage() {
   const navigate = useNavigate();
@@ -272,20 +272,19 @@ export function TodayPage() {
       && isPendingProduction(item, entryMode, series, selectedSeriesId, runs)),
     [entryMode, opportunities, runs, selectedSeriesId, series],
   );
-  const startableOpportunities = useMemo(
+  // 建议只影响排序与标注：所有待制作机会都能开工，界面不再按建议把机会分流成"可开工/不可开工"。
+  const advisedOpportunities = useMemo(
     () => entryMode === "trend"
-      ? visibleOpportunities.filter((item) => !opportunityProductionBlockReason(item))
-      : visibleOpportunities,
+      ? visibleOpportunities.filter((item) => opportunityProductionAdvice(item) !== undefined)
+      : [],
     [entryMode, visibleOpportunities],
   );
-  const blockedOpportunityCount = entryMode === "trend"
-    ? visibleOpportunities.length - startableOpportunities.length
-    : 0;
+  const advisedOpportunityCount = advisedOpportunities.length;
   const displayedOpportunities = useMemo(
-    () => blockedOpportunityCount
-      ? [...startableOpportunities, ...visibleOpportunities.filter((item) => opportunityProductionBlockReason(item))]
+    () => advisedOpportunityCount
+      ? [...visibleOpportunities.filter((item) => opportunityProductionAdvice(item) === undefined), ...advisedOpportunities]
       : visibleOpportunities,
-    [blockedOpportunityCount, startableOpportunities, visibleOpportunities],
+    [advisedOpportunityCount, advisedOpportunities, visibleOpportunities],
   );
   const sourceBlockedOpportunities = useMemo(
     () => entryMode === "trend"
@@ -294,7 +293,6 @@ export function TodayPage() {
     [entryMode, visibleOpportunities],
   );
   const sourceBlockedCount = sourceBlockedOpportunities.length;
-  const otherBlockedCount = Math.max(0, blockedOpportunityCount - sourceBlockedCount);
   const visibleRuns = useMemo(
     () => runs.filter((run) => matchesEntryOrigin(entryMode, run.creationOrigin)
       && (entryMode !== "series" || !selectedSeriesId || run.seriesId === selectedSeriesId)),
@@ -346,11 +344,8 @@ export function TodayPage() {
   const adoptableCandidateCount = visibleCandidateItems.filter(isAdoptableCandidate).length;
   const completedCount = visibleRuns.filter((run) => run.status === "succeeded").length;
   const dailyStatus = entryMode === "trend"
-    ? `${adoptableCandidateCount} 条可采用候选 · ${startableOpportunities.length} 条已进入待制作区${blockedOpportunityCount > 0 ? ` · ${blockedTrendStatusText(sourceBlockedCount, otherBlockedCount)}` : ""} · ${completedCount} 条已完成`
-    : `${visibleCandidateCount} 条候选 · ${startableOpportunities.length} 条制作机会 · ${completedCount} 条已完成`;
-  const onlyBlockedHistoricalTopics = entryMode === "trend"
-    && startableOpportunities.length === 0
-    && blockedOpportunityCount > 0;
+    ? `${adoptableCandidateCount} 条候选可进入制作 · ${visibleOpportunities.length} 条已进入待制作区${advisedOpportunityCount > 0 ? ` · ${advisedOpportunityText(advisedOpportunityCount, sourceBlockedCount)}` : ""} · ${completedCount} 条已完成`
+    : `${visibleCandidateCount} 条候选 · ${visibleOpportunities.length} 条制作机会 · ${completedCount} 条已完成`;
   const seriesAuditReady = providersLoading
     ? undefined
     : !providersError && providers.some((provider) => provider.capability === "series.plan" && provider.available && provider.kind !== "test");
@@ -533,8 +528,8 @@ export function TodayPage() {
       <section ref={adoptedSectionRef} tabIndex={-1} className="adopted-opportunities" aria-labelledby="adopted-opportunities-title">
         <header>
           <div>
-            <p className="eyebrow">{entryMode === "series" ? "本集制作" : onlyBlockedHistoricalTopics ? "暂不可开工" : "待制作"}</p>
-            <h2 id="adopted-opportunities-title">{entryMode === "series" ? "本集制作准备" : onlyBlockedHistoricalTopics ? (otherBlockedCount === 0 ? "历史候选需补来源" : "暂不可开工的选题") : "待制作机会"}</h2>
+            <p className="eyebrow">{entryMode === "series" ? "本集制作" : "待制作"}</p>
+            <h2 id="adopted-opportunities-title">{entryMode === "series" ? "本集制作准备" : "待制作机会"}</h2>
           </div>
           {entryMode === "series" && selected ? (
             <label className="series-production-selector">
@@ -544,8 +539,8 @@ export function TodayPage() {
               </select>
             </label>
           ) : <span>{entryMode === "trend"
-            ? `${startableOpportunities.length} 条已进入待制作区${blockedOpportunityCount > 0 ? ` · ${blockedTrendCountText(sourceBlockedCount, otherBlockedCount)}` : ""}`
-            : `${startableOpportunities.length} 条`}</span>}
+            ? `${visibleOpportunities.length} 条已进入待制作区${advisedOpportunityCount > 0 ? ` · ${advisedOpportunityText(advisedOpportunityCount, sourceBlockedCount)}` : ""}`
+            : `${visibleOpportunities.length} 条`}</span>}
         </header>
         {entryMode === "trend" ? (
           <HotTopicBoard
@@ -614,6 +609,8 @@ export function TodayPage() {
         durationSeconds: creatorSettings?.productionDefaults.durationSeconds ?? 24,
         ...(selected.visualProof ? { visualProof: selected.visualProof } : {}),
         ...(selected.visualPlan ? { visualPlan: selected.visualPlan } : {}),
+        // editorial 是"做哪种形态"给编剧/导演用的形态指令，不是总编的意见记录：
+        // 总编建议不做（skip）时不该把它塞进这里，否则下游会把它当成形态指令。
         ...(selected.editorialDecision?.verdict !== "skip" && selected.editorialDecision ? {
           editorial: {
             verdict: selected.editorialDecision.verdict,
@@ -659,10 +656,9 @@ function isProductionPlatform(platform: string): boolean {
   return platform === "douyin" || platform === "xiaohongshu" || platform === "bilibili";
 }
 
+// "可进入制作"只排除系列顺序还没轮到的候选：来源与总编建议都只是提醒，不再构成闸门。
 function isAdoptableCandidate(candidate: StudioCandidateInboxItem): boolean {
-  return candidate.editorialDecision.verdict !== "skip"
-    && candidate.verification.status !== "blocked"
-    && candidate.seriesSequence?.status !== "blocked";
+  return candidate.seriesSequence?.status !== "blocked";
 }
 
 function isPendingProduction(
@@ -681,16 +677,11 @@ function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
 }
 
-function blockedTrendStatusText(sourceBlockedCount: number, otherBlockedCount: number): string {
-  if (sourceBlockedCount > 0 && otherBlockedCount > 0) return `${sourceBlockedCount} 条需补来源 · ${otherBlockedCount} 条暂不建议生产`;
-  if (sourceBlockedCount > 0) return `${sourceBlockedCount} 条历史候选需补来源`;
-  return `${otherBlockedCount} 条历史选题暂不建议生产`;
-}
-
-function blockedTrendCountText(sourceBlockedCount: number, otherBlockedCount: number): string {
-  if (sourceBlockedCount > 0 && otherBlockedCount > 0) return `${sourceBlockedCount} 条需补来源 · ${otherBlockedCount} 条暂不建议生产`;
-  if (sourceBlockedCount > 0) return `${sourceBlockedCount} 条需补来源`;
-  return `${otherBlockedCount} 条暂不建议生产`;
+// 只用于汇总文案：提醒条数按"建议先补来源"与"总编不建议"分开说，避免把两种建议混成一个数。
+function advisedOpportunityText(count: number, sourceBlockedCount: number): string {
+  if (sourceBlockedCount > 0 && count > sourceBlockedCount) return `${sourceBlockedCount} 条建议先补来源 · ${count - sourceBlockedCount} 条总编不建议`;
+  if (sourceBlockedCount > 0) return `${sourceBlockedCount} 条建议先补来源`;
+  return `${count} 条总编不建议`;
 }
 
 function onlyOrigin(inbox: StudioCandidateInbox, origin: StudioCandidateInboxItem["origin"]): StudioCandidateInbox {

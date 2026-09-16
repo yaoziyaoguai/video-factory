@@ -201,7 +201,7 @@ describe("JsonSeriesStore", () => {
     );
   });
 
-  it("fails closed when an episode has not passed an independent greenlight audit", async () => {
+  it("lets an episode into production while its missing independent audit stays visible as advice", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-series-greenlight-"));
     const store = new JsonSeriesStore(path.join(root, "series.json"));
     const unaudited = record();
@@ -212,10 +212,12 @@ describe("JsonSeriesStore", () => {
     };
     await store.create(unaudited);
 
-    await assert.rejects(
-      () => store.adoptEpisode("series-1", 1, "2026-08-24T09:00:00.000Z"),
-      (error: unknown) => error instanceof SeriesStoreConflictError && /独立开拍审计/.test(error.message),
-    );
+    // 开拍复核只出建议，没有否决权：审计缺失不能替用户决定这集不能做。但它也不能被静默抹掉，
+    // 记录必须继续如实写着这集没拿到复核，采用与否由用户看着这条提示决定。
+    const selected = await store.adoptEpisode("series-1", 1, "2026-08-24T09:00:00.000Z");
+    assert.equal(selected.episodes[0]?.status, "selected");
+    assert.equal(selected.episodes[0]?.planning.auditStatus, "fallback");
+    assert.equal(selected.episodes[0]?.planning.auditIterations, 0);
   });
 
   it("edits only planned episodes with revision protection and preserves human provenance", async () => {

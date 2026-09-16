@@ -342,6 +342,13 @@ export interface StudioTopicGenerationReceipt {
   invalidSourceBindingCount?: number;
   duplicateAngleCount?: number;
   preferenceExcludedCount?: number;
+  /**
+   * 选题总编这轮独立复核的真实结论。awaiting_user 表示轮次跑完仍未判通过：
+   * 候选照常返回、用户照常能开工，但审计的建议必须一起显示出来，不能只留一堆"看起来已经过审"的候选。
+   */
+  auditStatus?: "passed" | "awaiting_user";
+  auditSummary?: string;
+  auditRepairInstructions?: string[];
 }
 
 export interface StudioCandidateInboxItem extends StudioTrendCandidate {
@@ -421,7 +428,8 @@ export interface StudioSeriesEpisodePlanning {
   source: "agent" | "rules" | "human";
   role: string;
   auditRole: string;
-  auditStatus: "passed" | "fallback" | "human_override" | "stale";
+  // awaiting_user：自动复核跑完但没判通过，结论与建议留在记录里等用户裁决。
+  auditStatus: "passed" | "awaiting_user" | "fallback" | "human_override" | "stale";
   auditIterations: number;
   auditScore?: number;
   auditSummary?: string;

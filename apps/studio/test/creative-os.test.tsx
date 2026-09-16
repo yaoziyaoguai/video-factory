@@ -332,7 +332,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("link", { name: "查看制作记录" })).toHaveAttribute("href", "/projects");
   });
 
-  it("does not present policy-blocked historical topics as current production opportunities", async () => {
+  it("presents a source-blocked historical topic as a current production opportunity with a visible advisory", async () => {
     const blocked = {
       ...opportunity,
       id: "historical-blocked",
@@ -358,14 +358,15 @@ describe("Creative OS", () => {
 
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "历史候选需补来源" })).toBeInTheDocument();
-    expect(screen.getByText(/0 条可采用候选 · 0 条已进入待制作区 · 1 条历史候选需补来源/)).toBeInTheDocument();
-    expect(screen.queryByText(/1 条制作机会/)).not.toBeInTheDocument();
+    expect(await screen.findByText(/0 条候选可进入制作 · 1 条已进入待制作区 · 1 条建议先补来源 · 0 条已完成/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "待制作机会" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: blocked.title })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "新建制作" })).toBeDisabled();
+    // 来源不足只是醒目标注，不能变成"不可制作"的判决。
+    expect(screen.getByRole("note")).toHaveTextContent("提醒（仅供参考，不影响你开工）：当前总编规则要求至少 2 个不同域名的有效原始来源链接。");
+    expect(screen.getByRole("button", { name: "新建制作" })).toBeEnabled();
   });
 
-  it("supplements a blocked candidate and refreshes its gate before enabling adoption", async () => {
+  it("supplements a source-blocked candidate and refreshes its sources before adoption", async () => {
     const user = userEvent.setup();
     const blocked = {
       ...candidate(81, "technology"),
@@ -391,7 +392,7 @@ describe("Creative OS", () => {
     const supplement = vi.spyOn(studioApi, "supplementCandidateSources").mockResolvedValue(ready);
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    await user.click(await screen.findByRole("button", { name: "查看待补来源候选（1 条）" }));
+    await user.click(await screen.findByRole("button", { name: "查看来源不足的候选（1 条）" }));
     const supplementButton = await screen.findByRole("button", { name: `补充来源 ${blocked.title}` });
     await user.click(supplementButton);
     const input = screen.getByLabelText("来源链接（每行一条，1–10 条）");
@@ -440,7 +441,7 @@ describe("Creative OS", () => {
     const supplement = vi.spyOn(studioApi, "supplementOpportunitySources").mockResolvedValue(ready);
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "补齐来源后的镜头方向" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "可参考的镜头方向" })).toBeInTheDocument();
     expect(screen.getByLabelText(/历史机会评分/)).toHaveTextContent("历史分");
     await user.click(screen.getByRole("button", { name: "补充原始来源" }));
     await user.type(screen.getByLabelText("来源链接（每行一条，1–10 条）"), "https://news.example.org/report");
@@ -530,8 +531,8 @@ describe("Creative OS", () => {
 
     await screen.findAllByRole("button", { name: /查看候选提案/ });
     await waitFor(() => expect(screen.getByText(/2 个平台 · 2 条/)).toBeInTheDocument());
-    expect(screen.getByText("2 条可采用候选 · 0 条已进入待制作区 · 0 条已完成")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "可采用候选 2" })).toBeInTheDocument();
+    expect(screen.getByText("2 条候选可进入制作 · 0 条已进入待制作区 · 0 条已完成")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "建议做视频 2" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: `采用候选 ${candidates[0]!.title}` })).toBeEnabled();
     expect(screen.getByRole("button", { name: "游戏电竞 0" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "汽车 0" })).toBeDisabled();
@@ -846,9 +847,10 @@ describe("Creative OS", () => {
 
     expect(screen.getByRole("heading", { name: "台风伤亡消息持续更新" })).toBeInTheDocument();
     expect(screen.getByText(/高风险公共题材不能只依据系列路线图开拍/)).toBeInTheDocument();
-    const adopt = screen.getByRole("button", { name: /采用本集|等待补充原始来源/ });
-    expect(adopt).toBeDisabled();
-    expect(adopt).toHaveTextContent("等待补充原始来源");
+    // 来源不足只是提醒：按钮保持可用，文案预告点下去会发生什么。
+    const adopt = screen.getByRole("button", { name: /仍然进入制作/ });
+    expect(adopt).toBeEnabled();
+    expect(screen.getByRole("note")).toHaveTextContent("来源提醒（不影响你开工）：高风险公共题材不能只依据系列路线图开拍");
 
     await user.click(screen.getByRole("button", { name: /^补充原始来源/ }));
     expect(onSupplementSources).toHaveBeenCalledWith(blockedEpisodeCandidate);
@@ -1019,7 +1021,7 @@ describe("Creative OS", () => {
     expect(screen.getByText("系列选题、连续性检查与开拍前复核由 AI 系列总编完成")).toBeInTheDocument();
   });
 
-  it("blocks production when a historical trend no longer meets the current editorial gate", () => {
+  it("keeps production available for a historical trend the current criteria no longer recommend, with a visible advisory", () => {
     render(<MemoryRouter><DirectorPanel
       opportunity={{
         ...opportunity,
@@ -1040,8 +1042,9 @@ describe("Creative OS", () => {
       onProduce={() => undefined}
     /></MemoryRouter>);
 
-    expect(screen.getByRole("button", { name: "新建制作" })).toBeDisabled();
-    expect(screen.getByText(/这条历史选题不再满足当前制作标准/)).toBeInTheDocument();
+    // 建议不再禁用开工：能力齐备时按钮必须可用，同时把提醒醒目标注出来。
+    expect(screen.getByRole("note")).toHaveTextContent("提醒（仅供参考，不影响你开工）：当前总编规则要求至少 2 个不同域名的有效原始来源链接。");
+    expect(screen.getByRole("button", { name: "新建制作" })).toBeEnabled();
     expect(screen.queryByRole("link", { name: "查看缺失能力" })).not.toBeInTheDocument();
   });
 
@@ -1097,7 +1100,7 @@ describe("Creative OS", () => {
     expect(within(shotBoard).queryByRole("img")).not.toBeInTheDocument();
   });
 
-  it("puts a blocked source gate ahead of historical scores and labels the shot plan as provisional", () => {
+  it("keeps source advice visible without claiming the topic cannot start", () => {
     render(<OpportunityFocus opportunity={{
       ...opportunity,
       verification: {
@@ -1119,11 +1122,11 @@ describe("Creative OS", () => {
       },
     }} />);
 
-    expect(screen.getByRole("status")).toHaveTextContent("暂不可开工");
+    expect(screen.getByRole("status")).toHaveTextContent("来源提醒（不影响你开工）");
     expect(screen.getByRole("status")).toHaveTextContent("还缺少第二个独立来源");
     expect(screen.getByLabelText(/历史机会评分/)).toHaveTextContent("历史分");
     expect(screen.getByText(/历史内容潜力，仅供参考/)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "补齐来源后的镜头方向" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "已保存的镜头方向" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "可执行镜头计划" })).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "镜头方向示意" })).toHaveTextContent("高亮“网传”和“正在核查”");
   });
@@ -1283,7 +1286,7 @@ describe("Creative OS", () => {
     expect(screen.queryByText(/播放量/)).not.toBeInTheDocument();
   });
 
-  it("offers a real recovery path instead of a dead end when no trend candidate is startable", async () => {
+  it("offers a real recovery path instead of a dead end when the round has no trend candidates", async () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
@@ -1292,7 +1295,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "本轮还没有热点候选" })).toBeInTheDocument());
     expect(screen.getByText(/本轮收件箱还没有任何热点候选/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "查看缺来源的选题" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新刷新热点" })).toBeEnabled();
@@ -1306,7 +1309,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("button", { name: "录入自己的选题" })).toHaveFocus();
   });
 
-  it("shows the exact evaluated, unselected, and source-blocked counts with four recovery actions when the shortlist is empty", async () => {
+  it("shows the exact evaluated, unselected, and source-blocked counts with the full recovery action set when nothing is clear for production", async () => {
     vi.spyOn(studioApi, "opportunities").mockResolvedValue([
       sourceBlockedOpportunity("historical-blocked-1", "第一条缺来源的历史选题"),
       sourceBlockedOpportunity("historical-blocked-2", "第二条缺来源的历史选题"),
@@ -1315,24 +1318,36 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
     vi.spyOn(studioApi, "series").mockResolvedValue([]);
-    const evaluated = Array.from({ length: 12 }, (_, index) => unselectedCandidate(index + 1, index % 2 === 0 ? "technology" : "society"));
+    // 恢复面板只在本轮没有任何候选"来源达标且系列顺序已轮到"时出现，所以这一轮的候选全部来源不足。
+    const evaluated = Array.from({ length: 12 }, (_, index) => ({
+      ...unselectedCandidate(index + 1, index % 2 === 0 ? "technology" : "society"),
+      verification: {
+        status: "blocked" as const,
+        independentSources: 1,
+        requiredSources: 2,
+        reasons: ["当前总编规则要求至少 2 个不同域名的有效原始来源链接。"],
+      },
+    }));
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox(evaluated));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
-    expect(screen.getByText(/选题总编本轮评估了 12 条热点候选，其中 12 条未推荐/)).toBeInTheDocument();
-    expect(screen.getByText(/其中 12 条未推荐/)).toBeInTheDocument();
-    expect(screen.getByText(/3 条历史选题因来源核验被阻断/)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "本轮候选都附带提醒，但都能开工" })).toBeInTheDocument();
+    expect(screen.getByText(/选题总编本轮评估了 12 条热点候选，其中 12 条建议不做/)).toBeInTheDocument();
+    expect(screen.getByText(/其中 12 条建议不做/)).toBeInTheDocument();
+    expect(screen.getByText(/本轮另有 12 条候选的来源还没达到当前采用标准/)).toBeInTheDocument();
+    expect(screen.getByText(/另有 3 条历史选题来源不足/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新刷新热点" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "录入自己的选题" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "继续已有系列" })).toHaveAttribute("href", "/topics?mode=series");
+    expect(screen.getByRole("button", { name: "查看来源不足的候选（12 条）" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看缺来源的选题" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "全部 0" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /科技 0/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /查看未入选（12 条）/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /查看总编不建议的（12 条）/ })).toBeInTheDocument();
+    // 恢复面板取代了筛选栏：本轮候选没有被闸门藏进任何分区。
+    expect(screen.queryByRole("button", { name: /^全部 / })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /科技 / })).not.toBeInTheDocument();
   });
 
-  it("keeps recommended but under-sourced candidates separate from editorially unselected candidates", async () => {
+  it("keeps every candidate reachable by default and filters under-sourced and editorially unskipped ones by tab", async () => {
     const user = userEvent.setup();
     const underSourced = {
       ...candidate(51, "technology"),
@@ -1359,18 +1374,22 @@ describe("Creative OS", () => {
       onImport={vi.fn()}
     /></MemoryRouter>);
 
-    expect(screen.getByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
-    expect(screen.getByText(/选题总编本轮评估了 3 条热点候选，其中 2 条未推荐/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "查看未入选（2 条）" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "查看待补来源候选（1 条）" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "查看未入选（2 条）" }));
-
-    expect(screen.getAllByRole("button", { name: /查看候选提案/ })).toHaveLength(2);
-    expect(screen.queryByRole("button", { name: `查看${underSourced.title}` })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: /待补来源 1/ }));
+    // 没有闸门：默认视图里三条候选全部可见，来源不足的那条没有被藏起来。
+    expect(screen.getAllByRole("button", { name: /^查看/ })).toHaveLength(3);
     expect(screen.getByRole("button", { name: `查看${underSourced.title}` })).toBeInTheDocument();
+    // 来源不足只是醒目标注，采用按钮保持可用。
+    expect(screen.getByRole("note")).toHaveTextContent("来源不足：高风险热点至少需要 2 个独立来源（只是建议，不影响你采用）");
+    expect(screen.getByRole("button", { name: `采用候选 ${underSourced.title}` })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: /总编不建议 2/ }));
+
+    expect(screen.getAllByRole("button", { name: /^查看/ })).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: `查看${underSourced.title}` })).not.toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent("总编不建议生产：没有越过生产门槛。（只是建议，不影响你采用）");
+
+    await user.click(screen.getByRole("button", { name: /来源不足 1/ }));
+    expect(screen.getByRole("button", { name: `查看${underSourced.title}` })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^查看/ })).toHaveLength(1);
   });
 
   it("allows an editorial candidate without a live recommended template to enter production", () => {
@@ -1439,23 +1458,23 @@ describe("Creative OS", () => {
     /></MemoryRouter>);
 
     const { unmount } = renderWorkspace([underSourced]);
-    await user.click(screen.getByRole("button", { name: "查看待补来源候选（1 条）" }));
+    await user.click(screen.getByRole("button", { name: "查看来源不足的候选（1 条）" }));
     await user.click(screen.getByRole("button", { name: `查看${underSourced.title}` }));
-    expect(screen.getByText("待补来源 · 暂不可采用")).toBeInTheDocument();
+    expect(screen.getByText("来源不足 · 仍可由你决定开工")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: `补充来源 ${underSourced.title}` })).toHaveTextContent("保存来源并重新评估");
     // 悬停提示用创作者语言，不暴露内部 provider id。
     expect(screen.getByTitle("AI 选题总编")).toBeInTheDocument();
     unmount();
 
     renderWorkspace([skipped]);
-    await user.click(screen.getByRole("button", { name: "查看未入选（1 条）" }));
+    await user.click(screen.getByRole("button", { name: /总编不建议 1/ }));
     await user.click(screen.getByRole("button", { name: `查看${skipped.title}` }));
-    expect(screen.getByText("内容暂不推荐 · 暂不可采用")).toBeInTheDocument();
+    expect(screen.getByText("总编不建议 · 0 分")).toBeInTheDocument();
     expect(screen.getAllByText("没有越过生产门槛。").length).toBeGreaterThan(0);
     expect(screen.queryByText("证据不足，暂不可采用")).not.toBeInTheDocument();
   });
 
-  it("selects and focuses the first source-blocked historical topic instead of editorial skips", async () => {
+  it("focuses the first source-blocked historical topic from the recovery action instead of the editorially skipped one", async () => {
     const user = userEvent.setup();
     const scrollIntoView = vi.fn();
     const scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "scrollIntoView");
@@ -1485,11 +1504,13 @@ describe("Creative OS", () => {
     const adopt = vi.spyOn(studioApi, "adoptCandidate");
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
-    expect(screen.getByText(/2 条历史选题因来源核验被阻断/)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "本轮还没有热点候选" })).toBeInTheDocument();
+    expect(screen.getByText(/另有 2 条历史选题来源不足/)).toBeInTheDocument();
+    // 总编不建议的历史选题照样在待制作区里，没有被藏起来。
+    expect(screen.getByRole("button", { name: new RegExp(editorialSkipOnly.title) })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "查看缺来源的选题" }));
 
-    const blockedSection = screen.getByRole("region", { name: "暂不可开工的选题" });
+    const blockedSection = screen.getByRole("region", { name: "待制作机会" });
     await waitFor(() => expect(blockedSection).toHaveFocus());
     expect(scrollIntoView).toHaveBeenCalled();
     expect(screen.getByRole("heading", { name: firstBlocked.title })).toBeInTheDocument();
@@ -1520,16 +1541,17 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
-    expect(screen.getByText(/另有 2 条历史选题因来源核验被阻断/)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "暂不可开工的选题" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "本轮还没有热点候选" })).toBeInTheDocument();
+    expect(screen.getByText(/另有 2 条历史选题来源不足/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "待制作机会" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "历史候选需补来源" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/3 条需补来源/)).not.toBeInTheDocument();
-    expect(screen.getByText("0 条已进入待制作区 · 2 条需补来源 · 1 条暂不建议生产")).toBeInTheDocument();
-    expect(screen.getByText(/0 条可采用候选 · 0 条已进入待制作区 · 2 条需补来源 · 1 条暂不建议生产 · 0 条已完成/)).toBeInTheDocument();
-    // 被当前政策阻断的历史热点：旧分数标为历史内容潜力，并突出当前不可开工，而不是当作当前结论。
+    // 两种理由不得合并计数：2 条来源不足的历史选题 + 1 条总编不建议，必须分开说。
+    expect(screen.queryByText(/3 条建议先补来源/)).not.toBeInTheDocument();
+    expect(screen.getByText("3 条已进入待制作区 · 2 条建议先补来源 · 1 条总编不建议")).toBeInTheDocument();
+    expect(screen.getByText(/0 条候选可进入制作 · 3 条已进入待制作区 · 2 条建议先补来源 · 1 条总编不建议 · 0 条已完成/)).toBeInTheDocument();
+    // 被当前政策阻断的历史热点：旧分数标为历史内容潜力，而不是当作当前结论。
     expect(screen.getAllByText("历史内容潜力").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getAllByText("待补来源 · 当前不可开工").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("待补来源 · 仍可开工").length).toBeGreaterThanOrEqual(2);
   });
 
   it("keeps the manual path usable while the local topic model is warming up", async () => {
@@ -1559,20 +1581,23 @@ describe("Creative OS", () => {
     expect(await screen.findByText("热点候选暂时不可用")).toBeInTheDocument();
     expect(screen.getByText("热点服务超时")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /重试/ })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "这轮没有可采用的热点建议" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "本轮还没有热点候选" })).not.toBeInTheDocument();
     unmount();
 
+    // 总编不建议的候选不是被闸门拦住的候选：它们照常出现在候选列表里。
     inboxApi.mockResolvedValue(inbox([unselectedCandidate(1), unselectedCandidate(2)]));
     const refresh = vi.spyOn(studioApi, "refreshTrendCandidates").mockRejectedValue(new Error("上游刷新失败"));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "重新刷新热点" }));
+    expect(await screen.findByRole("button", { name: "查看候选提案 1" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "立即刷新热点" }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
     expect(await screen.findByText(/本次更新失败，继续展示上次缓存/)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "录入自己的选题" })).toBeInTheDocument();
+    // 刷新失败也不能把上一批缓存变成死路：候选继续可用，刷新入口重新打开。
+    expect(screen.getByRole("button", { name: "查看候选提案 1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看候选提案 2" })).toBeInTheDocument();
     expect(refresh).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("button", { name: "重新刷新热点" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "立即刷新热点" })).toBeEnabled();
   });
 
   it("clears the stale cache warning once the background refresh lands and the fresh inbox arrives", async () => {
@@ -1816,7 +1841,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("status")).toHaveTextContent("下一步：检查证据与镜头计划");
   });
 
-  it("requires explicit evidence confirmation for review candidates and blocks insufficient high-risk candidates", async () => {
+  it("requires explicit evidence confirmation for review candidates and keeps under-sourced high-risk candidates adoptable", async () => {
     const user = userEvent.setup();
     const reviewCandidate: StudioCandidateInboxItem = {
       ...candidate(31, "society"),
@@ -1848,12 +1873,16 @@ describe("Creative OS", () => {
     await user.click(screen.getByRole("button", { name: "确认核验并采用" }));
     expect(adopt).toHaveBeenCalledWith(reviewCandidate.id, { origin: "trend", verificationConfirmed: true });
 
-    await user.click(screen.getByRole("button", { name: "查看待补来源候选（1 条）" }));
+    await user.click(screen.getByRole("button", { name: "查看来源不足的候选（1 条）" }));
     await user.click(screen.getByRole("button", { name: `查看${blockedCandidate.title}` }));
     const supplementSources = screen.getByRole("button", { name: `补充来源 ${blockedCandidate.title}` });
     expect(supplementSources).toBeEnabled();
-    expect(screen.queryByRole("button", { name: `采用候选 ${blockedCandidate.title}` })).not.toBeInTheDocument();
-    expect(withinTrendInbox().getByText(/至少需要 2 个独立来源/)).toBeInTheDocument();
+    // 来源不足同样是建议：采用按钮存在、可用，同时必须出现醒目标注。
+    const adoptBlocked = screen.getByRole("button", { name: `采用候选 ${blockedCandidate.title}` });
+    expect(adoptBlocked).toBeEnabled();
+    expect(adoptBlocked).toHaveTextContent("仍然采用");
+    expect(withinTrendInbox().getByRole("note")).toHaveTextContent("来源不足：高风险热点至少需要 2 个独立来源（只是建议，不影响你采用）");
+    expect(withinTrendInbox().getAllByText(/至少需要 2 个独立来源/).length).toBeGreaterThan(0);
     await user.click(supplementSources);
     expect(screen.getByRole("dialog", { name: "补齐可核验的原始来源" })).toBeInTheDocument();
   });
@@ -1887,13 +1916,14 @@ describe("Creative OS", () => {
       onImport={vi.fn()}
     /></MemoryRouter>);
 
-    // 内容潜力与开工状态分开：阻断项显示内容潜力分与“待补来源”，不再显示“总编评分 0”。
-    await user.click(screen.getByRole("button", { name: /待补来源 1/ }));
+    // 内容潜力与开工状态分开：来源不足候选显示内容潜力分，不再显示“总编评分 0”。
+    await user.click(screen.getByRole("button", { name: /来源不足 1/ }));
     expect(screen.getByRole("button", { name: `查看${blockedCandidate.title}` })).toBeInTheDocument();
     expect(screen.getByLabelText("内容潜力 78 分")).toBeInTheDocument();
     expect(screen.queryByLabelText("总编评分 0 分")).not.toBeInTheDocument();
-    expect(screen.getByText("待补来源 · 补齐后再评估")).toBeInTheDocument();
-    expect(screen.getByText("待补来源 · 暂不可采用")).toBeInTheDocument();
+    expect(screen.getByText("来源不足 · 仍可由你决定开工")).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent("来源不足：至少需要 2 个不同域名的有效原始来源链接。（只是建议，不影响你采用）");
+    expect(screen.getByRole("button", { name: `采用候选 ${blockedCandidate.title}` })).toBeEnabled();
     expect(screen.queryByText("推荐形态")).not.toBeInTheDocument();
   });
 
@@ -1937,9 +1967,8 @@ describe("Creative OS", () => {
       onImport={vi.fn()}
     /></MemoryRouter>);
 
-    // 两条候选都不是可采用：先经过恢复面板，再进入未入选视图。
-    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "查看未入选（2 条）" }));
+    // 两条候选都是总编不建议：它们照常出现在候选列表里，没有被闸门藏进任何分区。
+    await user.click(await screen.findByRole("button", { name: /总编不建议 2/ }));
 
     // 规则保底候选：分数芯片显示“待总编评估”，绝不把“尚未评估”投影成“总编评分 0”。
     const heuristicRow = screen.getByRole("button", { name: `查看${heuristicCandidate.title}` });
@@ -1948,21 +1977,26 @@ describe("Creative OS", () => {
     expect(heuristicChip).not.toHaveTextContent("0");
     await user.click(heuristicRow);
     expect(screen.getByLabelText("内容潜力 78 分")).toBeInTheDocument();
-    expect(screen.getByText("来源已达标 · 等待总编评估")).toBeInTheDocument();
-    expect(screen.getByText("待总编评估 · 暂不可采用")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: `采用候选 ${heuristicCandidate.title}` })).toHaveTextContent("等待总编评估");
+    expect(screen.getByText("来源已达标")).toBeInTheDocument();
+    expect(screen.getByText("尚未评估 · 当前只有规则保底")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `采用候选 ${heuristicCandidate.title}` })).toHaveTextContent("仍然采用");
+    expect(screen.getByRole("button", { name: `采用候选 ${heuristicCandidate.title}` })).toBeEnabled();
+    // 总编不建议只是醒目标注，按钮保持可用。
+    expect(screen.getByRole("note")).toHaveTextContent("总编不建议生产：当前只是热点规则保底候选，还没有经过选题总编形成具体、可拍的创作角度。（只是建议，不影响你采用）");
     expect(screen.queryByLabelText("总编评分 0 分")).not.toBeInTheDocument();
 
     // 真实总编评出的 0 分仍如实显示为“总编评分 0”，不与“尚未评估”混淆。
     await user.click(screen.getByRole("button", { name: `查看${modelEvaluated.title}` }));
     expect(screen.getByLabelText("总编评分 0 分")).toBeInTheDocument();
-    expect(screen.getByText("暂不生产 · 0 分")).toBeInTheDocument();
+    expect(screen.getByText("总编不建议 · 0 分")).toBeInTheDocument();
   });
 
   it("does not claim the topic editor evaluated a rule-only round in the recovery panel", async () => {
+    // 恢复面板只在没有候选"来源达标且系列顺序已轮到"时出现，所以这一轮的规则保底候选同时来源不足。
     const pendingFirst: StudioCandidateInboxItem = {
       ...unselectedCandidate(91),
       title: "规则保底候选一",
+      verification: { status: "blocked", independentSources: 1, requiredSources: 2, reasons: ["还缺少第二个独立来源。"] },
       editorialDecision: {
         ...unselectedCandidate(91).editorialDecision,
         reasons: ["当前只是热点规则保底候选，还没有经过选题总编形成具体、可拍的创作角度。"],
@@ -1995,7 +2029,7 @@ describe("Creative OS", () => {
       onImport={vi.fn()}
     /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "本轮候选都附带提醒，但都能开工" })).toBeInTheDocument();
     // 规则保底轮次不得谎称“选题总编已评估”。
     expect(screen.getByText(/2 条热点候选由规则保底生成，还没有经过选题总编评估/)).toBeInTheDocument();
     expect(screen.queryByText(/选题总编本轮评估了/)).not.toBeInTheDocument();
@@ -2027,7 +2061,7 @@ describe("Creative OS", () => {
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     // 先等热点收件箱完成加载并稳定在恢复面板，避免点击命中被替换的加载态按钮。
-    await waitFor(() => expect(screen.getByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "本轮还没有热点候选" })).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "录入自己的选题" }));
     await user.type(await screen.findByLabelText("选题标题"), created.title);
     await user.type(screen.getByLabelText("目标受众"), "经常出门又不方便充电的通勤族");
@@ -2194,10 +2228,15 @@ describe("Creative OS", () => {
       editorialDecision: { verdict: "skip", score: 0, reasons: ["证据门槛未满足：至少 2 个独立来源。"], guardrails: ["补齐来源后才推荐形态。"] },
       verification: { status: "blocked", independentSources: 1, requiredSources: 2, reasons: ["至少需要 2 个不同域名的有效原始来源链接。"] },
     };
+    const blockedSecond: StudioCandidateInboxItem = {
+      ...unselectedCandidate(72),
+      title: "第二条本轮来源不足的候选",
+      verification: { status: "blocked", independentSources: 1, requiredSources: 2, reasons: ["还缺少第二个独立来源。"] },
+    };
     render(<MemoryRouter><TopicEntryWorkspace
       initialMode="trend"
       selectedSeriesId={undefined}
-      inbox={inbox([blockedCandidate, unselectedCandidate(72)])}
+      inbox={inbox([blockedCandidate, blockedSecond])}
       series={[]}
       historicalRuns={[]}
       loading={{}}
@@ -2215,18 +2254,20 @@ describe("Creative OS", () => {
       onImport={vi.fn()}
     /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "这轮没有可采用的热点建议" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "本轮候选都附带提醒，但都能开工" })).toBeInTheDocument();
     // 恢复面板统计的是本轮候选的来源阻断，而不是历史机会。
-    expect(screen.getByText(/本轮另有 1 条候选有内容潜力/)).toBeInTheDocument();
-    expect(screen.getByText(/其中 1 条未推荐/)).toBeInTheDocument();
+    expect(screen.getByText(/本轮另有 2 条候选的来源还没达到当前采用标准/)).toBeInTheDocument();
+    expect(screen.getByText(/其中 2 条建议不做/)).toBeInTheDocument();
+    expect(screen.queryByText(/历史选题来源不足/)).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "查看待补来源候选（1 条）" }));
+    await user.click(screen.getByRole("button", { name: "查看来源不足的候选（2 条）" }));
 
-    expect(screen.getByRole("button", { name: `查看${blockedCandidate.title}` })).toBeInTheDocument();
+    const blockedRow = screen.getByRole("button", { name: `查看${blockedCandidate.title}` });
+    expect(blockedRow.querySelector(".candidate-score")).toHaveTextContent("内容潜力");
     expect(screen.getByLabelText("内容潜力 78 分")).toBeInTheDocument();
   });
 
-  it("shows only the editorial shortlist by default and ranks it by the editorial score", async () => {
+  it("shows every candidate by default and ranks the list by the score it displays", async () => {
     const user = userEvent.setup();
     const editorialWinner: StudioCandidateInboxItem = {
       ...candidate(33, "technology"),
@@ -2274,11 +2315,19 @@ describe("Creative OS", () => {
       onImport={vi.fn()}
     /></MemoryRouter>);
 
+    // 没有闸门：默认视图里两条候选都在。
     expect(screen.getByRole("button", { name: `查看${editorialWinner.title}` })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: `查看${rejectedRawWinner.title}` })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `查看${rejectedRawWinner.title}` })).toBeInTheDocument();
+    // 排序必须用界面上显示的那个分：未入选候选显示的是总编评分 0，所以排在总编评分 93 之后。
+    const listed = screen.getAllByRole("button", { name: /^查看/ }).map((row) => row.getAttribute("aria-label"));
+    expect(listed).toEqual([`查看${editorialWinner.title}`, `查看${rejectedRawWinner.title}`]);
     expect(screen.getByLabelText("总编评分 93 分")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /未入选 1/ }));
+    // 总编不建议只是醒目标注：候选照常排在列表里，点开就能看到"只是建议，不影响你采用"。
+    await user.click(screen.getByRole("button", { name: `查看${rejectedRawWinner.title}` }));
+    expect(screen.getByRole("note")).toHaveTextContent("总编不建议生产：没有越过生产门槛。（只是建议，不影响你采用）");
+
+    await user.click(screen.getByRole("button", { name: /总编不建议 1/ }));
 
     expect(screen.getByRole("button", { name: `查看${rejectedRawWinner.title}` })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: `查看${editorialWinner.title}` })).not.toBeInTheDocument();

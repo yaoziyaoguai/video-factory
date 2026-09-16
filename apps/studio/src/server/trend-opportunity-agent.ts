@@ -54,10 +54,17 @@ export interface TrendModelSignal extends StudioTrendSignal {
   articleSources?: TrendArticleSnapshot[];
 }
 
+export interface TrendAuditAdvice {
+  status: "passed" | "awaiting_user";
+  summary?: string;
+  repairInstructions?: string[];
+}
+
 export interface TrendIdeaModel {
   id: string;
   generate(signals: TrendModelSignal[], strategy?: StudioTopicStrategy, generationNonce?: string): Promise<TrendModelIdea[]>;
   lastExecutionIdentity?(): { providerId: string; modelId: string } | undefined;
+  lastAuditAdvice?(): TrendAuditAdvice | undefined;
 }
 
 export interface TrendOpportunityAgentOptions {
@@ -148,6 +155,7 @@ export class TrendOpportunityAgent {
           .slice(0, 8);
         const selected = selectCandidatePortfolio(selectedByModel, [], TREND_CANDIDATE_LIMIT, compareCandidates);
         const identity = this.options.model.lastExecutionIdentity?.();
+        const auditAdvice = this.options.model.lastAuditAdvice?.();
         this.lastReceipt = {
           generationId: options.generationNonce ?? `topic-${this.now().getTime()}`,
           generatedAt: this.now().toISOString(),
@@ -163,6 +171,13 @@ export class TrendOpportunityAgent {
           preferenceExcludedCount: modelCandidates.length - modelCandidates.filter(
             (candidate) => !matchesExcludedDirection(candidate, strategy),
           ).length,
+          // 复核没判通过时它的建议必须一起交出去：这些候选是真模型产出、也能直接开工，
+          // 只有把审计要修的点点名说出来，才不至于让一屏"看起来过了审"的候选替审计宣布通过。
+          ...(auditAdvice ? {
+            auditStatus: auditAdvice.status,
+            ...(auditAdvice.summary ? { auditSummary: auditAdvice.summary } : {}),
+            ...(auditAdvice.repairInstructions?.length ? { auditRepairInstructions: auditAdvice.repairInstructions } : {}),
+          } : {}),
         };
         return selected;
       } catch (error) {
@@ -357,6 +372,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
   readonly id = "api-topic-editor-v1";
   private readonly client: CodexBridgeClient;
   private executionIdentity: { providerId: string; modelId: string } | undefined;
+  private auditAdvice: TrendAuditAdvice | undefined;
 
   constructor(
     client: CodexBridgeClient,
@@ -432,11 +448,28 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
     this.executionIdentity = execution.trace
       ? { providerId: execution.trace.providerId, modelId: execution.trace.modelId }
       : undefined;
+    // 只认这两种状态：failed/exhausted 会让循环抛错，根本走不到这里；真出现别的状态时宁可不说，
+    // 也不能把它归成"待裁决"制造一个不存在的建议。
+    const audit = execution.agentLoop?.iterations.at(-1)?.audit;
+    const status = execution.agentLoop?.status;
+    this.auditAdvice = (status === "passed" || status === "awaiting_user")
+      ? {
+          status,
+          ...(audit?.summary ? { summary: audit.summary } : {}),
+          ...(audit?.repairInstructions.length ? { repairInstructions: audit.repairInstructions.slice(0, 4) } : {}),
+        }
+      : undefined;
     return execution.output.ideas;
   }
 
   lastExecutionIdentity(): { providerId: string; modelId: string } | undefined {
     return this.executionIdentity ? { ...this.executionIdentity } : undefined;
+  }
+
+  lastAuditAdvice(): TrendAuditAdvice | undefined {
+    return this.auditAdvice
+      ? { ...this.auditAdvice, ...(this.auditAdvice.repairInstructions ? { repairInstructions: [...this.auditAdvice.repairInstructions] } : {}) }
+      : undefined;
   }
 }
 

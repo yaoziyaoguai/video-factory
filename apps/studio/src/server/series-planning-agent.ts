@@ -113,7 +113,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         source: "agent",
         role: "系列总编",
         auditRole: "独立质量复核",
-        auditStatus: "passed",
+        auditStatus: seriesAuditStatus(execution.agentLoop?.status),
         auditIterations: execution.agentLoop?.iterations.length ?? 1,
         ...(finalAudit ? { auditScore: finalAudit.score, auditSummary: finalAudit.summary } : {}),
         providerId: execution.trace?.providerId ?? "openai",
@@ -198,7 +198,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         source: episode.planning.source === "human" ? "human" : "agent",
         role: "系列开拍总编",
         auditRole: "独立质量复核",
-        auditStatus: "passed",
+        auditStatus: seriesAuditStatus(execution.agentLoop?.status),
         auditIterations: execution.agentLoop?.iterations.length ?? 1,
         ...(finalIteration ? { auditScore: finalIteration.audit.score, auditSummary: finalIteration.audit.summary } : {}),
         providerId: trace?.providerId ?? "openai",
@@ -304,4 +304,13 @@ function integer(value: unknown, label: string): number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * 审计真实结论落到单集记录上。轮次跑完仍未判 pass 时循环停在 awaiting_user，它照常返回候选，
+ * 所以这里过去无条件写 "passed" 会把"审计明确要求修复"谎报成"3/3 轮通过"——用户据此放行的
+ * 是一份审计自己没认可的方案。审计只出建议，但建议必须如实呈现，不能替它宣布通过。
+ */
+function seriesAuditStatus(status: string | undefined): StudioSeriesEpisodePlanning["auditStatus"] {
+  return status === "passed" ? "passed" : "awaiting_user";
 }

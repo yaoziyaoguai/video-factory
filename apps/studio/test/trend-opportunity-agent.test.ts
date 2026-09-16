@@ -267,6 +267,106 @@ describe("TrendOpportunityAgent", () => {
     assert.match(firstAudit.context.upstreamFacts.signals[0]!.articleSources[0]!.paragraphs[0]!.text, /没有效率提升比例/);
   });
 
+  it("keeps the editor audit's unmet advice instead of letting candidates look pre-approved", async () => {
+    const unsupportedIdea = {
+      signalId: "signal-ai",
+      title: "AI 时间管理让效率提升 90%",
+      track: "ai-daily-life",
+      audience: "普通上班族",
+      painPoint: "工具很多却没有减少疲惫",
+      hook: "效率提升 90%。",
+      rationale: "用实验解释变化。",
+      facts: [],
+      uncertainties: [],
+      visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
+      novelty: 80,
+      seriesPotential: 80,
+      monetization: 60,
+    };
+    class NeverPassingClient extends CodexBridgeClient {
+      private topicCalls = 0;
+
+      constructor() {
+        super({ socketPath: "/nonexistent/vf-codex.sock", sleep: async () => {} });
+      }
+
+      async runTaskDetailed(kind: CodexTaskKind): Promise<CodexTaskExecution> {
+        if (kind === "topic-ideas") {
+          this.topicCalls += 1;
+          return { output: { ideas: [this.topicCalls === 1
+            ? unsupportedIdea
+            // 每轮都要真改：循环会拦下"按修改建议重做后内容没变"的假修订，那种情况直接判失败。
+            : { ...unsupportedIdea, title: "下班后的 AI 时间账本", hook: "同一页日程，调整前后到底差在哪里？" }] } };
+        }
+        return { output: {
+          version: "video-factory/role-audit-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v1",
+          verdict: "repair",
+          score: 55,
+          assessments: ideaAssessments(55),
+          summary: "候选添加了正文不支持的比例。",
+          issues: [{
+            severity: "blocking",
+            criterion: "事实必须由正文支持",
+            evidence: "90% 未出现在任何可读段落。",
+            repairInstruction: "删除比例断言，保留可验证的前后对照角度。",
+          }],
+          repairInstructions: ["删除比例断言，保留可验证的前后对照角度。"],
+        } };
+      }
+    }
+    const model = new CodexTopicIdeaModel(new NeverPassingClient(), 2);
+
+    const ideas = await model.generate(modelSignals);
+
+    // 轮次用尽不等于失败：候选照常返回、用户照常能开工，但审计要修的必须跟着一起交出去。
+    assert.equal(ideas[0]?.title, "下班后的 AI 时间账本");
+    const advice = model.lastAuditAdvice();
+    assert.equal(advice?.status, "awaiting_user");
+    assert.equal(advice?.summary, "候选添加了正文不支持的比例。");
+    assert.deepEqual(advice?.repairInstructions, ["删除比例断言，保留可验证的前后对照角度。"]);
+  });
+
+  it("carries the editor audit verdict and its advice on the generation receipt", async () => {
+    const model: TrendIdeaModel = {
+      id: "api-topic-editor-v1",
+      generate: async () => [{
+        signalId: "signal-ai",
+        title: "下班后的 AI 时间账本",
+        track: "ai-daily-life",
+        audience: "想提高生活掌控感的上班族",
+        painPoint: "工具很多，却没有减少疲惫",
+        hook: "真正偷走你下班时间的，可能不是加班。",
+        rationale: "热点有规模，且能转化为低成本生活实验。",
+        visualProof: "实拍同一张纸质时间账本整理前后的对照。",
+        visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN,
+        visualFeasibility: 91,
+        productionCostEfficiency: 94,
+        novelty: 85,
+        seriesPotential: 88,
+        monetization: 72,
+      }],
+      lastAuditAdvice: () => ({
+        status: "awaiting_user",
+        summary: "候选添加了正文不支持的比例。",
+        repairInstructions: ["删除比例断言，保留可验证的前后对照角度。"],
+      }),
+    };
+    const agent = new TrendOpportunityAgent({
+      signals: { listSignals: async () => signals },
+      model,
+      now: () => new Date("2026-09-12T10:00:00.000Z"),
+    });
+
+    await agent.listCandidates({ generationNonce: "advised-generation-1" });
+
+    const receipt = agent.generationReceipt();
+    assert.equal(receipt?.source, "editor-model");
+    assert.equal(receipt?.auditStatus, "awaiting_user");
+    assert.equal(receipt?.auditSummary, "候选添加了正文不支持的比例。");
+    assert.deepEqual(receipt?.auditRepairInstructions, ["删除比例断言，保留可验证的前后对照角度。"]);
+  });
+
   it("serializes related reports under the canonical signal instead of flattening secondary ids", async () => {
     const related = {
       id: "signal-ai-independent",

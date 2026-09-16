@@ -282,14 +282,16 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/统一任务协议/g, "统一调用");
 }
 
-export function opportunityProductionBlockReason(
+// 返回"为什么建议先别做这条选题"的理由，供界面醒目标注。
+// 它只是建议：调用方不得用它来禁用开工，否则模型的一票就变成了硬闸门。
+export function opportunityProductionAdvice(
   opportunity: Pick<StudioOpportunity, "verification" | "editorialDecision">,
 ): string | undefined {
   if (opportunity.verification?.status === "blocked") {
     return opportunity.verification.reasons[0] ?? "来源证据未达到当前标准。";
   }
   if (opportunity.editorialDecision?.verdict === "skip") {
-    return opportunity.editorialDecision.reasons[0] ?? "当前选题不建议进入制作。";
+    return opportunity.editorialDecision.reasons[0] ?? "选题总编不建议现在做这条选题。";
   }
   return undefined;
 }

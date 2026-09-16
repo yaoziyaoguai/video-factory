@@ -90,7 +90,7 @@ export class CandidateInboxStudio {
       .filter((item) => !query.categories?.length || query.categories.includes(item.category))
       .filter((item) => !query.platforms?.length || query.platforms.includes(item.platform))
       .filter((item) => !query.verdicts?.length || query.verdicts.includes(item.editorialDecision.verdict))
-      .sort((left, right) => Number(isShortlisted(right)) - Number(isShortlisted(left))
+      .sort((left, right) => Number(adviceRanksFirst(right)) - Number(adviceRanksFirst(left))
         || right.editorialDecision.score - left.editorialDecision.score
         || left.title.localeCompare(right.title, "zh-CN"));
     const limit = Math.max(1, Math.min(200, Math.floor(query.limit ?? 100)));
@@ -198,12 +198,8 @@ export class CandidateInboxStudio {
     if (candidate.origin !== adoptionInput.origin) {
       throw new StudioConflictError("候选来源与当前创作入口不一致，请刷新后重试。");
     }
-    if (candidate.verification.status === "blocked") {
-      throw new StudioConflictError(candidate.verification.reasons[0] ?? "这条候选尚未达到可采用的证据标准。");
-    }
-    if (candidate.editorialDecision.verdict === "skip") {
-      throw new StudioConflictError(candidate.editorialDecision.reasons[0] ?? "这条候选当前不值得进入生产。");
-    }
+    // 来源标准与总编建议都只是建议：它们会在界面上醒目提示，但不构成采用闸门。
+    // 采用与否由创作者决定，服务端只保留"候选存在、入口一致、系列顺序"这类事实性约束。
     if (candidate.seriesSequence?.status === "blocked") {
       throw new StudioConflictError(`请先完成第 ${candidate.seriesSequence.blockedByEpisodeNumber} 集，再推进当前单集。`);
     }
@@ -398,7 +394,8 @@ export function reviewTrendOpportunityAgainstCurrentPolicy(
   };
 }
 
-function isShortlisted(item: StudioCandidateInboxItem): boolean {
+// 仅仅是列表排序偏好（总编建议生产、来源达标的候选排在前面），不是采用闸门。
+function adviceRanksFirst(item: StudioCandidateInboxItem): boolean {
   return item.editorialDecision.verdict !== "skip"
     && item.verification.status !== "blocked"
     && item.seriesSequence?.status !== "blocked";

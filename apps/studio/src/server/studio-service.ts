@@ -536,12 +536,8 @@ export class StudioService {
     const opportunity = opportunityId ? await this.getOpportunity(opportunityId) : undefined;
     if (!opportunity) throw new StudioInputError("没有找到与这次制作对应的热点机会，请返回热点选题重新选择。");
     if (opportunity.origin !== "trend") return;
-    if (opportunity.verification?.status === "blocked") {
-      throw new StudioInputError(opportunity.verification.reasons[0] ?? "这条热点不再满足当前来源标准，请补齐来源后重新评估。");
-    }
-    if (opportunity.editorialDecision?.verdict === "skip") {
-      throw new StudioInputError(opportunity.editorialDecision.reasons[0] ?? "这条热点不再满足当前视频制作标准，请重新评估选题。");
-    }
+    // 来源标准与总编建议只是建议：开工与否由创作者决定，这里不做拦截。
+    // 它们仍会随机会一起投影到界面，由界面醒目提示。
   }
 
   private async resolveSeriesProductionContext(input: unknown) {

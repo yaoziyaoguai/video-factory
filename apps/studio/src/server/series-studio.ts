@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { CodexBridgeError, RoleAgentLoopError } from "@video-factory/production-pipeline";
 import type {
   StudioCandidateInboxItem,
   StudioSeries,
@@ -339,12 +340,17 @@ export class SeriesStudio {
     const needsGreenlight = episode.canonBaseRevision !== series.canon.revision
       || episode.planning.auditStatus !== "passed";
     if (!needsGreenlight) return series;
-    if (!this.options.planningAgent) {
-      throw new SeriesStoreConflictError(episode.canonBaseRevision !== series.canon.revision
-        ? "系列已定版内容有更新，但开拍前复核当前不可用，不能沿用旧路线图。"
-        : "这集尚未通过开拍前独立复核，当前不能进入制作。");
+    // 开拍前复核是建议，不是闸门。没有配置复核能力、或模型这轮不可用时，沿用现有路线图继续，
+    // 不把用户挡在制作之外；这集的 planning 会如实显示它没拿到通过的复核（规则保底/待裁决），
+    // 采用与否由用户决定。真正还会拦住他的是 store 里"计划基于旧版已定版内容"那条一致性事实。
+    if (!this.options.planningAgent) return series;
+    let reviewed: Awaited<ReturnType<SeriesPlanningAgent["reviewEpisode"]>>;
+    try {
+      reviewed = await this.options.planningAgent.reviewEpisode(series, episode);
+    } catch (error) {
+      if (!isModelUnavailable(error)) throw error;
+      return series;
     }
-    const reviewed = await this.options.planningAgent.reviewEpisode(series, episode);
     return this.options.series.rebaseEpisodePlan(
       series.id,
       episode.episodeNumber,
@@ -399,4 +405,14 @@ export class SeriesStudio {
 
 function currentQuarterLabel(now: Date): string {
   return `${now.getFullYear()} Q${Math.floor(now.getMonth() / 3) + 1}`;
+}
+
+/**
+ * 只把"模型这轮拿不到结果"当作可以降级的情形。循环会把底层桥接错误包进 RoleAgentLoopError 并
+ * 在 failure 上留下 stage；没有 failure 的那种（合同不匹配、校验重试耗尽）是真缺陷，必须照常
+ * 抛出去，不能被这里吞成"继续用旧路线图"，否则排查时线索全没了。
+ */
+function isModelUnavailable(error: unknown): boolean {
+  if (error instanceof CodexBridgeError) return true;
+  return error instanceof RoleAgentLoopError && error.agentLoop.failure !== undefined;
 }

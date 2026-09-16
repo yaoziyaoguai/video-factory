@@ -3150,7 +3150,7 @@ describe("StudioService", () => {
     assert.deepEqual((pipeline.lastInput as ProductionBrief).articleSources, trustedSources);
   });
 
-  it("rechecks adopted trend opportunities against the current source standard before production", async () => {
+  it("reports the current source standard for a stale trend opportunity without blocking production", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-historical-trend-gate-"));
     const opportunityStore = new JsonOpportunityStore(path.join(workspaceRoot, "opportunities.json"));
     await opportunityStore.create({
@@ -3186,21 +3186,24 @@ describe("StudioService", () => {
       commandAvailable: allCommandsAvailable,
       environment: {},
     });
-    // 这条断言验证的是"旧记录会被当前更严的标准重新拦下"，与默认档是哪一档无关：
+    // 这条断言验证的是"旧记录会被当前更严的标准重新算一遍"，与默认档是哪一档无关：
     // 显式钉住严格档，默认档调整时这条测试才不会被静默改写成空断言。
     await service.updateCreatorSettings({ topicStrategy: { sourcePolicy: "primary_or_two_independent" } });
 
     const [historical] = await service.listOpportunities("trend");
     assert.equal(historical?.verification?.status, "blocked");
     assert.equal(historical?.editorialDecision?.verdict, "produce_video");
-    await assert.rejects(
-      () => service.startRun({
+    // 来源不足只是如实标注：服务端不再据此拦下开工，决定权在创作者。
+    assert.deepEqual(
+      await service.startRun({
         ...brief,
         creationContext: { origin: "trend", opportunityId: "historical-trend-1" },
       }, "historical-trend-start-1"),
-      /当前总编规则要求至少 2 个不同域名/,
+      { runId: "run-1", status: "running" },
     );
-    assert.equal(pipeline.dispatchCount, 0);
+    assert.equal(pipeline.dispatchCount, 1);
+    // 放行不等于抹平：机会上仍然保留来源不足的结论，界面据此提示。
+    assert.equal((await service.getOpportunity("historical-trend-1")).verification?.status, "blocked");
 
     const supplemented = await service.supplementOpportunitySources("historical-trend-1", {
       evidenceUrls: ["https://source-b.example/report"],

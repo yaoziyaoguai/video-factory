@@ -359,7 +359,7 @@ describe("CandidateInboxStudio", () => {
     assert.equal(listed.find((item) => item.id === sequenceBlockedCandidate.id)?.editorialDecision.recommendedTemplate, undefined);
   });
 
-  it("keeps a rule roadmap editable but blocks adoption while the independent audit Agent is unavailable", async () => {
+  it("lets a rule roadmap into production while the missing independent audit stays visible as advice", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-series-unaudited-"));
     const opportunities = new OpportunityStudio({
       opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
@@ -386,10 +386,13 @@ describe("CandidateInboxStudio", () => {
     });
     const [candidate] = (await inbox.list({ origins: ["series"] })).items;
 
-    await assert.rejects(
-      () => inbox.adopt(candidate!.id, { origin: "series" }),
-      /开拍前独立复核/,
-    );
+    // 没配复核 Agent 时这条路线图只有规则保底。复核是建议不是闸门：它不能替用户拦下采用，
+    // 但也不能被冒充成"已复核"，采用后记录里仍要看得见它没拿到过独立复核。
+    const adopted = await inbox.adopt(candidate!.id, { origin: "series" });
+    assert.equal(adopted.episodeNumber, candidate!.episodeNumber);
+    const episode = (await series.list())[0]!.episodes.find((item) => item.episodeNumber === candidate!.episodeNumber);
+    assert.equal(episode?.status, "selected");
+    assert.equal(episode?.planning.auditStatus, "fallback");
   });
 
   it("adopts the title, hook, and viewer promise produced by the opening greenlight review", async () => {
@@ -454,7 +457,7 @@ describe("CandidateInboxStudio", () => {
     assert.equal(adopted.painPoint, reviewedViewerPromise);
   });
 
-  it("rechecks a reviewed series candidate before selecting or persisting it", async () => {
+  it("keeps a reviewed high-risk series candidate adoptable while carrying the source advice into the opportunity", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-series-reviewed-gate-"));
     const opportunities = new OpportunityStudio({
       opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
@@ -505,16 +508,22 @@ describe("CandidateInboxStudio", () => {
     });
     const [beforeReview] = (await inbox.list({ origins: ["series"] })).items;
 
-    await assert.rejects(
-      () => inbox.adopt(beforeReview!.id, { origin: "series", verificationConfirmed: true }),
-      /高风险公共题材不能只依据系列路线图开拍/,
-    );
+    // 来源不足只是建议：高风险公共题材不再拦下采用，决定权在创作者。
+    const adopted = await inbox.adopt(beforeReview!.id, { origin: "series", verificationConfirmed: true });
 
-    assert.deepEqual(await opportunities.list(), []);
-    assert.equal((await series.list())[0]?.episodes[0]?.status, "planned");
+    // 采用的是开拍复核产出的稿件，而不是系列路线图草稿。
+    assert.equal(adopted.title, "台风伤亡消息持续更新");
+    assert.equal(adopted.hook, "台风伤亡消息不断更新，哪些说法真的有来源？");
+    assert.equal(adopted.origin, "series");
+    // 放行不等于抹平：来源不足的结论随机会一起留档，界面据此提示。
+    assert.equal(adopted.verification?.status, "blocked");
+    assert.match(adopted.verification?.reasons[0] ?? "", /高风险公共题材不能只依据系列路线图开拍/);
+    assert.equal((await opportunities.list()).length, 1);
+    assert.equal((await series.list())[0]?.episodes[0]?.status, "selected");
+    assert.equal((await series.list())[0]?.episodes[0]?.opportunityId, beforeReview!.id);
   });
 
-  it("blocks a high-risk trend backed by one source and requires confirmation for review candidates", async () => {
+  it("keeps a one-source high-risk trend adoptable while still requiring confirmation for review candidates", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-verified-inbox-"));
     const opportunities = new OpportunityStudio({
       opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
@@ -547,7 +556,11 @@ describe("CandidateInboxStudio", () => {
     assert.equal(listed.items.find((item) => item.id === review.id)?.verification.status, "review_required");
     assert.equal(listed.items.find((item) => item.id === review.id)?.editorialDecision.verdict, "produce_image_story");
     assert.equal(listed.items.find((item) => item.id === review.id)?.editorialDecision.recommendedTemplate, undefined);
-    await assert.rejects(() => inbox.adopt(highRisk.id, { origin: "trend", verificationConfirmed: true }), /至少 2 个不同域名的有效原始来源链接/);
+    // 来源标准只是建议：只补到一个来源不再拦下采用，结论随机会留档并醒目提示。
+    const adoptedHighRisk = await inbox.adopt(highRisk.id, { origin: "trend", verificationConfirmed: true });
+    assert.equal(adoptedHighRisk.verification?.status, "blocked");
+    assert.match(adoptedHighRisk.verification?.reasons[0] ?? "", /至少 2 个不同域名的有效原始来源链接/);
+    // review_required 是事实性闸门：没有确认核验仍然不能采用。
     await assert.rejects(() => inbox.adopt(review.id, { origin: "trend" }), /确认核验/);
     const adopted = await inbox.adopt(review.id, { origin: "trend", verificationConfirmed: true });
     assert.equal(adopted.verification?.status, "verified");
@@ -766,8 +779,21 @@ describe("CandidateInboxStudio", () => {
     const [blocked] = (await inbox.list({ origins: ["trend"] })).items;
     assert.equal(blocked?.verification.status, "blocked");
     assert.equal(blocked?.verification.independentSources, 1);
-    // 补充前 BLOCKED 不可采用；但创作方向不因门禁消失，也不通过模板锁定制作方式。
-    await assert.rejects(() => inbox.adopt("trend-supplement", { origin: "trend" }), /至少 2 个不同域名/);
+    // 补充前 BLOCKED 只是建议：采用不再被拦下，来源结论随机会留档。
+    // 采用会把候选移出收件箱，所以用一份独立的存储做这次"真的能采用"的探查，
+    // 后面的补充来源与重算断言仍针对原收件箱。
+    const probeInbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => [current] },
+      series,
+      opportunities: new OpportunityStudio({
+        opportunities: new JsonOpportunityStore(path.join(root, "adoption-probe.json")),
+      }),
+      publishedTemplates: async () => BUILTIN_TEMPLATES,
+    });
+    const adoptedWhileBlocked = await probeInbox.adopt("trend-supplement", { origin: "trend" });
+    assert.equal(adoptedWhileBlocked.verification?.status, "blocked");
+    assert.equal(adoptedWhileBlocked.verification?.independentSources, 1);
+    // 创作方向不因门禁消失，也不通过模板锁定制作方式。
     assert.equal(blocked?.editorialDecision.recommendedTemplate, undefined);
     assert.match(blocked?.editorialDecision.guardrails[0] ?? "", /开工门槛/);
 
@@ -913,7 +939,7 @@ describe("CandidateInboxStudio", () => {
     );
   });
 
-  it("keeps same-domain and search-page supplements from counting as independent sources", async () => {
+  it("keeps same-domain and search-page supplements from counting as independent sources and still leaves the candidate adoptable", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-supplement-search-inbox-"));
     const opportunities = new OpportunityStudio({
       opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
@@ -961,7 +987,11 @@ describe("CandidateInboxStudio", () => {
     assert.equal(searchPage.verification.independentSources, 1);
     assert.equal(searchPage.evidence.length, 3);
     assert.equal(searchPage.evidence.some((item) => item.evidenceUrl === "https://www.baidu.com/s?wd=hot-topic"), true);
-    await assert.rejects(() => inbox.adopt("trend-supplement-search", { origin: "trend" }), /至少 2 个不同域名/);
+    // 来源不足只是建议：独立来源仍是 1 个，但采用不再被拦下，结论随机会留档。
+    const adopted = await inbox.adopt("trend-supplement-search", { origin: "trend" });
+    assert.equal(adopted.verification?.status, "blocked");
+    assert.equal(adopted.verification?.independentSources, 1);
+    assert.equal(adopted.evidence.length, 3);
   });
 
   it("rejects source supplements when the trend chain cannot append", async () => {
@@ -1128,7 +1158,7 @@ describe("CandidateInboxStudio", () => {
     await assert.rejects(() => inbox.adopt(visibleCandidate!.id, { origin: "trend" }), /已被采用|已经失效/);
   });
 
-  it("rejects a remembered trend when the current source policy becomes stricter", async () => {
+  it("re-normalizes a remembered trend against the current stricter source policy instead of trusting the stale verdict", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-refreshed-policy-inbox-"));
     const opportunities = new OpportunityStudio({
       opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
@@ -1154,11 +1184,16 @@ describe("CandidateInboxStudio", () => {
     currentCandidates = [];
     sourcePolicy = "primary_or_two_independent";
 
-    await assert.rejects(
-      () => inbox.adopt(visibleCandidate!.id, { origin: "trend" }),
-      /至少 2 个不同域名的有效原始来源链接/,
-    );
-    assert.deepEqual(await opportunities.list(), []);
+    // 被记住的候选仍然可以采用，但采用时按当前更严的标准重算，而不是沿用旧的 ready。
+    const adopted = await inbox.adopt(visibleCandidate!.id, { origin: "trend" });
+
+    assert.equal(adopted.id, visibleCandidate!.id);
+    assert.equal(adopted.verification?.status, "blocked");
+    assert.equal(adopted.verification?.independentSources, 1);
+    assert.match(adopted.verification?.reasons[0] ?? "", /至少 2 个不同域名的有效原始来源链接/);
+    const persisted = await opportunities.list();
+    assert.equal(persisted.length, 1);
+    assert.equal(persisted[0]?.verification?.status, "blocked");
   });
 
   it("uses the explicit origin instead of guessing from a candidate id prefix", async () => {
