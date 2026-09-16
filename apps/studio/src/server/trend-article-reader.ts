@@ -77,8 +77,10 @@ export class TrendArticleReader {
     let cursor = 0;
     const deadline = Date.now() + this.batchTimeoutMs;
     const controller = new AbortController();
+    // 这两个 deadline 定时器都不能 unref：它们是把在途读取判定为超时的唯一凭据。
+    // unref 后事件循环可以在定时器触发前退出，await 中的批次就永远不会落定
+    // （只剩桩实现、没有真实 socket 的调用方会先撞上这一点）。
     const deadlineTimer = setTimeout(() => controller.abort(), Math.max(0, deadline - Date.now()));
-    deadlineTimer.unref?.();
     try {
       await Promise.all(Array.from({ length: Math.min(3, unique.length) }, async () => {
         while (cursor < unique.length && Date.now() < deadline && !controller.signal.aborted) {
@@ -275,7 +277,6 @@ async function settleBeforeDeadline<T>(operation: Promise<T>, deadline: number, 
           controller.abort();
           reject(new Error("本批原文读取已到总时间上限。"));
         }, remaining);
-        timer.unref?.();
       }),
     ]);
   } finally {
