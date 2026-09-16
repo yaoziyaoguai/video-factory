@@ -1312,7 +1312,7 @@ describe("role agent loop audit boundary", () => {
     assert.equal(result.agentLoop?.iterations.length, 1);
   });
 
-  it("persists a planning source halt before another producer call and replays it after restart", async () => {
+  it("stops on an audit-declared source gap with the candidate preserved and replays without new calls", async () => {
     let stored: unknown;
     let produceCalls = 0;
     let auditCalls = 0;
@@ -1353,24 +1353,26 @@ describe("role agent loop audit boundary", () => {
       validate: titleCandidate,
     });
 
-    let haltFailure: unknown;
-    await assert.rejects(execute, (error: unknown) => {
-      haltFailure = error;
-      return error instanceof Error
-        && error.name === "RoleAgentPlanningHaltError"
-        && /尚未具备的来源/.test(error.message);
-    });
-    assert.equal(haltFailure instanceof RoleAgentLoopError ? haltFailure.agentLoop.modelCallCount : -1, 2);
-    assert.equal(haltFailure instanceof RoleAgentLoopError ? haltFailure.agentLoop.producerModelCallCount : -1, 1);
-    assert.equal(haltFailure instanceof RoleAgentLoopError ? haltFailure.agentLoop.auditModelCallCount : -1, 1);
+    // 来源缺口不再拦下整条制作：候选与那一轮独立审计原样留在 checkpoint，循环按"等创作者裁决"
+    // 收口，缺口由调用方从 iterations[].audit.planningDisposition 取出，作为建议标签继续传递。
+    const result = await execute();
+    assert.equal(result.agentLoop?.status, "awaiting_user");
+    assert.deepEqual(result.output, { title: "展示真实实验结果" });
+    assert.equal(result.agentLoop?.iterations.length, 1);
+    const disposition = result.agentLoop?.iterations[0]?.audit.planningDisposition;
+    assert.equal(disposition?.action, "needs_source");
+    assert.equal(result.agentLoop?.modelCallCount, 2);
+    assert.equal(result.agentLoop?.producerModelCallCount, 1);
+    assert.equal(result.agentLoop?.auditModelCallCount, 1);
     assert.equal(produceCalls, 1);
     assert.equal(auditCalls, 1);
-    await assert.rejects(execute, (error: unknown) => error instanceof Error && error.name === "RoleAgentPlanningHaltError");
+    const replayed = await execute();
+    assert.equal(replayed.agentLoop?.status, "awaiting_user");
     assert.equal(produceCalls, 1, "restart must not create another producer task for the same unresolved input");
-    assert.equal(auditCalls, 1, "restart must replay the persisted halt without another audit");
+    assert.equal(auditCalls, 1, "restart must replay the persisted result without another audit");
   });
 
-  it("stops on host readiness after preserving a passing independent audit and replays without new calls", async () => {
+  it("delivers a passing candidate with the host source gap kept as advice and replays without new calls", async () => {
     let stored: unknown;
     let produceCalls = 0;
     let auditCalls = 0;
@@ -1409,16 +1411,17 @@ describe("role agent loop audit boundary", () => {
       validate: titleCandidate,
     });
 
-    let halt: unknown;
-    await assert.rejects(execute, (error: unknown) => {
-      halt = error;
-      return error instanceof Error && error.name === "RoleAgentPlanningHaltError";
-    });
+    // 宿主门槛只出建议，没有权力拦下制作：独立审计已判 pass，这里就带着来源建议照常交付，
+    // 缺口留在 iterations[].hostReadiness 里，由调用方转成创作者能看到的建议标签。
+    const result = await execute();
+    assert.equal(result.agentLoop?.status, "passed");
+    assert.deepEqual(result.output, { title: "构思本身完整" });
     assert.equal(produceCalls, 1);
     assert.equal(auditCalls, 1);
-    assert.equal(halt instanceof RoleAgentLoopError ? halt.agentLoop.iterations[0]?.audit.verdict : undefined, "pass");
-    assert.equal(halt instanceof RoleAgentLoopError ? halt.agentLoop.iterations[0]?.hostReadiness?.status : undefined, "needs_source");
-    await assert.rejects(execute, (error: unknown) => error instanceof Error && error.name === "RoleAgentPlanningHaltError");
+    assert.equal(result.agentLoop?.iterations[0]?.audit.verdict, "pass");
+    assert.equal(result.agentLoop?.iterations[0]?.hostReadiness?.status, "needs_source");
+    const replayed = await execute();
+    assert.equal(replayed.agentLoop?.status, "passed");
     assert.equal(produceCalls, 1);
     assert.equal(auditCalls, 1);
   });
@@ -1514,24 +1517,27 @@ describe("role agent loop audit boundary", () => {
         evidenceArtifactIds: [],
       })),
     };
-    await assert.rejects(
-      runRoleAgentLoop<{ title: string }>({
-        role: "导演前期构思",
-        contractVersion: "treatment-host-partial-v1",
-        criteria: ["真实来源完整"],
-        planningRole: true,
-        maxIterations: 2,
-        produce: async () => ({ output: { title: "仍需实证" } }),
-        assessPlanningReadiness: () => readiness,
-        audit: async () => ({ output: {
-          ...repairingAudit(),
-          planningDisposition: { action: "revise_here", issueIndexes: [0] },
-          hostReadinessReview: { misclassifiedIssueIds: ["source-1"] },
-        } }),
-        validate: titleCandidate,
-      }),
-      (error: unknown) => error instanceof Error && error.name === "RoleAgentPlanningHaltError",
-    );
+    const result = await runRoleAgentLoop<{ title: string }>({
+      role: "导演前期构思",
+      contractVersion: "treatment-host-partial-v1",
+      criteria: ["真实来源完整"],
+      planningRole: true,
+      maxIterations: 2,
+      produce: async () => ({ output: { title: "仍需实证" } }),
+      assessPlanningReadiness: () => readiness,
+      audit: async () => ({ output: {
+        ...repairingAudit(),
+        planningDisposition: { action: "revise_here", issueIndexes: [0] },
+        hostReadinessReview: { misclassifiedIssueIds: ["source-1"] },
+      } }),
+      validate: titleCandidate,
+    });
+    // 只纠正了一半不算纠正：未被审计认领的 source-2 必须原样留在建议里，不能被一次局部更正
+    // 悄悄抹掉——它现在只是不再拦下这条制作，作为标签该在的还在。
+    assert.equal(result.agentLoop?.status, "awaiting_user");
+    const hostReadiness = result.agentLoop?.iterations[0]?.hostReadiness;
+    assert.equal(hostReadiness?.status, "needs_source");
+    assert.deepEqual(hostReadiness?.issues.map((issue) => issue.id), ["source-1", "source-2"]);
     assert.throws(() => validateRoleAudit({
       ...repairingAudit(),
       planningDisposition: { action: "revise_here", issueIndexes: [0] },

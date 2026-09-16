@@ -14,6 +14,7 @@ import {
   type VisualDirectorAgent,
   type VisualDirectorAgentInput,
 } from "../src/index.js";
+import { RoleAgentPlanningHaltError } from "../src/role-agent-loop.js";
 
 const input: ScreenwriterAgentInput = {
   brief: {
@@ -444,6 +445,74 @@ describe("FallbackScreenwriterAgent", () => {
             failureReason: "调用失败",
           },
         ]);
+        return true;
+      },
+    );
+  });
+
+  it("hands a planning halt to the planner instead of folding it into candidate failures", async () => {
+    // 规划停摆不是模型故障：候选已经产出、独立审计也已经给出结论，需要的是人来补来源或做决定。
+    // 它若被折成"候选模型均未能完成"，整份构思连同停摆原因一起消失，调用方再也看不到该处理的事。
+    const halt = new RoleAgentPlanningHaltError(
+      "导演前期构思需要当前流水线尚未具备的来源：核心兑现依赖当前流水线无法取得的外部材料。",
+      {
+        version: "video-factory/agent-loop-v1",
+        role: "导演前期构思",
+        contractVersion: "creative-treatment-test-v1",
+        criteria: ["核心制作前提必须有可信获取责任"],
+        status: "failed",
+        maxIterations: 1,
+        iterations: [],
+      },
+      null,
+      { hook: "候选构思" },
+      {
+        version: "video-factory/role-audit-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v1",
+        verdict: "repair",
+        score: 88,
+        assessments: [],
+        summary: "构思本身达标，阻断点在来源。",
+        issues: [{
+          severity: "blocking",
+          criterion: "核心制作前提必须有可信获取责任",
+          evidence: "核心兑现依赖当前流水线无法取得的外部材料。",
+          repairInstruction: "补齐材料，或由用户确认降级方案。",
+        }],
+        repairInstructions: ["补齐材料"],
+        planningDisposition: null,
+      },
+      {
+        status: "needs_source",
+        issues: [{
+          id: "host-1",
+          target: "source",
+          beatIds: ["b1"],
+          scenePositions: [0],
+          reason: "核心兑现依赖当前流水线无法取得的外部材料。",
+          requiredChange: "补齐材料，或由用户确认降级方案。",
+          evidenceArtifactIds: [],
+        }],
+      },
+    );
+    const fallback = new FallbackScreenwriterAgent({
+      candidates: [
+        {
+          providerId: "openai",
+          agent: agent("gpt-quality", async () => { throw providerFailure("gpt-quality"); }),
+        },
+        {
+          providerId: "zai-bigmodel-api",
+          agent: agent("glm-5.3", async () => { throw halt; }),
+        },
+      ],
+    });
+
+    await assert.rejects(
+      () => fallback.draftDetailed(input),
+      (error: unknown) => {
+        assert.ok(!(error instanceof ModelCandidatesExhaustedError));
+        assert.equal(error, halt);
         return true;
       },
     );

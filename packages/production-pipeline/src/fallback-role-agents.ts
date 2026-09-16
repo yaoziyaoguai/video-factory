@@ -8,6 +8,7 @@ import {
 } from "./model-fallback.js";
 import type { AgentLoopTrace } from "./codex-chat.js";
 import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
+import { RoleAgentPlanningHaltError } from "./role-agent-loop.js";
 import type { CreativeTreatment } from "./creative-treatment.js";
 import type { CreativeTreatmentAgent, CreativeTreatmentAgentInput } from "./codex-creative-treatment.js";
 import type { VisualDirectorAgent, VisualDirectorAgentInput } from "./visual-director.js";
@@ -293,6 +294,10 @@ async function runCandidates<
       }
       // isModelProviderFailure 对 stage=uncertain 一律返回 false：请求可能已被 durable broker
       // 受理并仍在执行，绝不能用新的 backup requestId 启动下一个候选（双跑风险），原样上抛。
+      // 规划停摆（缺少来源或需用户决定）同样原样上抛：候选已经产出且通过了独立审计，它不是
+      // "这个模型没干成"，换模型也不会改变结论；折成候选失败会连同停摆原因一起丢掉整份构思，
+      // 调用方 planningRoleHaltUpdate 拿不到它就无法把它转成创作者能处理的问题。
+      if (error instanceof RoleAgentPlanningHaltError) throw error;
       if (!isModelProviderFailure(error)) {
         if (failures.length > 1) throw new ModelCandidatesExhaustedError(failures);
         throw error;

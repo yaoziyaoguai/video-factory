@@ -90,6 +90,7 @@ import {
   createCreativePlanningGraph,
   executablePlanCompilePort,
   initialPlanningGraphState,
+  planningSourceAdvisories,
   rankingSemanticIntent,
   runCreativePlanning,
   type CreativePlanningGraph,
@@ -6821,9 +6822,12 @@ function creativePlanningNode(
               providerTraces.treatment = treatmentExecution.trace.providerId;
               await recordExecutionTraces();
             }
+            // 来源缺口不再是停摆：角色产出把它当建议带上去，进 state.issues 给下游角色与创作者看。
+            const treatmentAdvisories = planningSourceAdvisories(treatmentExecution, "treatment");
             return {
               artifactId: planningArtifactId("creative-treatment", treatmentExecution.output),
               output: treatmentExecution.output,
+              ...(treatmentAdvisories.length ? { advisories: treatmentAdvisories } : {}),
               ...planningReviewCheckResult(planningContext, treatmentExecution),
             };
           },
@@ -6889,9 +6893,11 @@ function creativePlanningNode(
               ...(requestBrief.durationRange ? { durationRange: requestBrief.durationRange } : {}),
               requireCanonFacts: Boolean(requestBrief.seriesContext),
             });
+            const scriptAdvisories = planningSourceAdvisories(execution, "script");
             return {
               artifactId: planningArtifactId("script-draft", draft),
               output: draft,
+              ...(scriptAdvisories.length ? { advisories: scriptAdvisories } : {}),
               ...planningReviewCheckResult(planningContext, execution),
             };
           },
@@ -7047,9 +7053,11 @@ function creativePlanningNode(
               options.providerRuntimeMetadata ?? [],
               viewerPromise,
             ));
+            const directorAdvisories = planningSourceAdvisories(execution, "director");
             return {
               artifactId: planningArtifactId("director-plan", plan),
               output: plan,
+              ...(directorAdvisories.length ? { advisories: directorAdvisories } : {}),
               ...planningReviewCheckResult(planningContext, execution),
             };
           },

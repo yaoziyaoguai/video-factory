@@ -268,7 +268,17 @@ export async function runRoleAgentLoop<TOutput>(
   const persistedPlanningHalt = options.planningRole
     ? nonLocalPlanningDisposition(state.completed.at(-1)?.audit)
     : undefined;
-  if (state.status === "failed" && !persistedPlanningHalt) {
+  // needs_source 不再是停摆（见轮内注释），恢复时按同一语义收口：旧版本把它记成 failed 落过盘，
+  // 这里既不能让它继续重跑（生产者/审计请求都已花掉，重跑只是重复花钱），也不能让它停在 failed 上
+  // ——它不是失败，是"材料当前拿不到"这条建议。
+  const persistedFinal = state.completed.at(-1);
+  const persistedSourceGap = persistedFinal !== undefined
+    && ((persistedFinal.hostReadiness?.status === "needs_source"
+        && !allHostSourceIssuesMisclassified(persistedFinal.hostReadiness, persistedFinal.audit))
+      || persistedPlanningHalt?.action === "needs_source");
+  // 只有 needs_user 仍然停摆：它把决定交还给决策者本人，不是对作品下判。
+  const persistedUserHalt = persistedPlanningHalt?.action === "needs_user" ? persistedPlanningHalt : undefined;
+  if (state.status === "failed" && !persistedUserHalt && !persistedSourceGap) {
     state.status = "running";
     delete state.failure;
     await persistCheckpoint(options, state);
@@ -299,16 +309,14 @@ export async function runRoleAgentLoop<TOutput>(
     audit: entry.audit,
     ...(entry.hostReadiness ? { hostReadiness: structuredClone(entry.hostReadiness) } : {}),
   }));
-  const persistedHostHalt = options.planningRole
-    && state.completed.at(-1)?.hostReadiness?.status === "needs_source"
-    && !allHostSourceIssuesMisclassified(state.completed.at(-1)!.hostReadiness!, state.completed.at(-1)!.audit)
-    ? state.completed.at(-1)?.hostReadiness
-    : undefined;
-  if (persistedHostHalt) {
-    throw hostPlanningHaltError(options, state, iterations, persistedHostHalt);
+  if (persistedSourceGap) {
+    const terminalStatus = terminalStatusForSourceGap(persistedFinal!.audit);
+    state.status = terminalStatus;
+    await persistCheckpoint(options, state);
+    return completedExecution(options, state, iterations, terminalStatus);
   }
-  if (persistedPlanningHalt) {
-    throw planningHaltError(options, state, iterations, persistedPlanningHalt);
+  if (persistedUserHalt) {
+    throw planningHaltError(options, state, iterations, persistedUserHalt);
   }
   if (state.status === "passed" || state.status === "awaiting_user") {
     // awaiting_user 表示上一轮已经审完并停在用户面前；恢复时原样交还，不重跑审计。
@@ -521,12 +529,24 @@ export async function runRoleAgentLoop<TOutput>(
       audit,
       ...(hostReadiness ? { hostReadiness: structuredClone(hostReadiness) } : {}),
     });
+    // 来源缺口（宿主就绪检查或独立审计判定的 needs_source）不拦下制作：门槛只出建议，没有权力
+    // 决定一条片子能不能开工，判不判得成是创作者的事。候选与那一轮审计原样留在 checkpoint，
+    // 循环在这里收口——审计判 pass 就带着建议照常交付，否则沿用 awaiting_user（产出与审计都在，
+    // 交创作者裁决）。缺口证据留在 iterations[].hostReadiness / audit.planningDisposition 里，
+    // 由调用方转成创作者能看到的建议标签继续传递，不在这里丢掉。
     if (hostReadiness?.status === "needs_source" && !allHostSourceIssuesMisclassified(hostReadiness, audit)) {
-      state.status = "failed";
+      const terminalStatus = terminalStatusForSourceGap(audit);
+      state.status = terminalStatus;
       await persistCheckpoint(options, state);
-      throw hostPlanningHaltError(options, state, iterations, hostReadiness);
+      return completedExecution(options, state, iterations, terminalStatus);
     }
     const nonLocalDisposition = options.planningRole ? nonLocalPlanningDisposition(audit) : undefined;
+    if (nonLocalDisposition?.action === "needs_source") {
+      const terminalStatus = terminalStatusForSourceGap(audit);
+      state.status = terminalStatus;
+      await persistCheckpoint(options, state);
+      return completedExecution(options, state, iterations, terminalStatus);
+    }
     if (nonLocalDisposition) {
       state.status = "failed";
       await persistCheckpoint(options, state);
@@ -1662,6 +1682,13 @@ function nonLocalPlanningDisposition(audit: RoleAudit | undefined): RoleAuditPla
   return disposition && disposition.action !== "revise_here" ? disposition : undefined;
 }
 
+// 来源缺口的收口状态：独立审计已经判 pass，说明这份产出本身没有问题，缺的只是"材料当前拿不到"，
+// 那就照常交付，把缺口当建议带上；审计没判 pass 时沿用 awaiting_user —— 产出与那一轮审计都留在
+// checkpoint 里，停在创作者面前由他裁决，不替他判失败。
+function terminalStatusForSourceGap(audit: RoleAudit): "passed" | "awaiting_user" {
+  return audit.verdict === "pass" ? "passed" : "awaiting_user";
+}
+
 function planningHaltError<TOutput>(
   options: RoleAgentLoopOptions<TOutput>,
   state: PersistedLoopState,
@@ -1699,44 +1726,6 @@ function planningHaltError<TOutput>(
     structuredClone(final.candidate),
     structuredClone(final.audit),
     undefined,
-    final.auditTrace ?? final.candidateTrace,
-  );
-}
-
-function hostPlanningHaltError<TOutput>(
-  options: RoleAgentLoopOptions<TOutput>,
-  state: PersistedLoopState,
-  iterations: AgentLoopTrace["iterations"],
-  hostReadiness: HostPlanningReadiness,
-): RoleAgentPlanningHaltError {
-  const final = state.completed.at(-1);
-  if (!final) throw new Error("Planning halt has no persisted candidate and audit.");
-  const { producerModelCallCount, auditModelCallCount } = actualPhaseModelCallCounts(state);
-  const trace: AgentLoopTrace = {
-    version: "video-factory/agent-loop-v1",
-    role: options.role,
-    contractVersion: options.contractVersion,
-    criteria: [...options.criteria],
-    status: "failed",
-    maxIterations: options.maxIterations,
-    modelCallCount: producerModelCallCount + auditModelCallCount,
-    producerModelCallCount,
-    auditModelCallCount,
-    producerMs: state.phaseDurationsMs.produce,
-    auditMs: state.phaseDurationsMs.audit,
-    validationMs: state.validationMs,
-    structuredRepairModelCallCount: totalStructuredRepairModelCallCount(state),
-    retryCount: state.retriedRequestIds.length,
-    iterations,
-  };
-  const reason = hostReadiness.issues.map((issue) => issue.reason).join("；");
-  return new RoleAgentPlanningHaltError(
-    `${options.role}需要当前流水线尚未具备的来源：${reason}`,
-    trace,
-    null,
-    structuredClone(final.candidate),
-    structuredClone(final.audit),
-    structuredClone(hostReadiness),
     final.auditTrace ?? final.candidateTrace,
   );
 }

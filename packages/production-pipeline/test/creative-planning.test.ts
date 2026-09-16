@@ -19,6 +19,7 @@ import {
   executablePlanCompilePort,
   MAX_CROSS_ROLE_REVISIONS,
   planningIssueDigest,
+  planningSourceAdvisories,
   runCreativePlanning,
   type AvailabilityReviewer,
   type CreateCreativePlanningGraphOptions,
@@ -3320,7 +3321,7 @@ describe("B3 固定创作规划图", () => {
   });
 
   describe("25 规划角色非局部处置", () => {
-    it("消费正式 role loop 的 needs_source 并在图恢复时保持零新增调用", async () => {
+    it("把正式 role loop 的 needs_source 转成下游可见的建议，不再拦下这条制作", async () => {
       await withWorkspace(async (workspaceRoot) => {
         const store = CreativePlanningStore.open(workspaceRoot);
         let roleCheckpoint: unknown;
@@ -3373,25 +3374,33 @@ describe("B3 固定创作规划图", () => {
               },
               validate: (value) => value as CreativeTreatment,
             });
-            return { artifactId: "must-not-complete", output: execution.output };
+            const advisories = planningSourceAdvisories(execution, "treatment");
+            assert.equal(execution.agentLoop?.status, "awaiting_user");
+            return {
+              artifactId: "treatment:needs-source",
+              output: execution.output,
+              ...(advisories.length ? { advisories } : {}),
+            };
           };
           const graph = createCreativePlanningGraph({ ports: spy.ports, checkpointer: store.saver });
           const input = { runId: RUN_ID, inputDigest: `${INPUT_DIGEST}-needs-source`, durationRange: DURATION_RANGE };
           const threadId = planningThreadId(input.runId, input.inputDigest);
 
           const first = await runCreativePlanning(graph, { input, threadId });
-          assert.equal(first.status, "halted");
-          if (first.status !== "halted") return;
-          assert.equal(first.halt.reason, "needs_source");
-          assert.equal(first.state.issues[0]?.target, "source");
-          assert.match(first.state.issues[0]?.requiredChange ?? "", /补充真实实验记录/);
+          // 来源缺口只出建议：制作继续往下走，缺口随 state.issues 交给下一个角色，创作者在确认关
+          // 也能看到它。判不判得成是创作者的事，规则没有权力在这里把整条制作判停。
+          assert.equal(first.status, "completed");
           assert.equal(producerCalls, 1);
           assert.equal(auditCalls, 1);
-          assert.equal(spy.calls.script.length, 0);
-          assert.equal(spy.calls.director.length, 0);
+          assert.equal(spy.calls.script.length, 1);
+          const delivered = spy.calls.script[0]?.issues ?? [];
+          const sourceAdvice = delivered.find((issue) => issue.target === "source");
+          assert.ok(sourceAdvice, "下游角色必须收到来源缺口这条建议");
+          assert.match(sourceAdvice.requiredChange, /补充真实实验记录/);
+          assert.match(sourceAdvice.reason, /事实来源/);
 
           const resumed = await runCreativePlanning(graph, { input, threadId });
-          assert.equal(resumed.status, "halted");
+          assert.equal(resumed.status, "completed");
           assert.equal(producerCalls, 1, "refresh/restart replay must not produce again");
           assert.equal(auditCalls, 1, "refresh/restart replay must not audit again");
         } finally {

@@ -8,7 +8,7 @@ import { validateAssetSemanticRanking, type AssetCandidateReport, type AssetSema
 import { planningThreadId } from "./creative-planning-store.js";
 import type { DurationRange } from "./executable-timeline.js";
 import { RoleAgentLoopError, RoleAgentPlanningHaltError } from "./role-agent-loop.js";
-import type { RoleAudit } from "./codex-chat.js";
+import type { AgentLoopTrace, RoleAudit, RoleAuditPlanningDisposition } from "./codex-chat.js";
 import {
   compileExecutableProductionPlan,
   parseExecutableProductionPlan,
@@ -120,6 +120,12 @@ export interface PlanningArtifact<Output> {
   artifactId: string;
   output: Output;
   reviewCheck?: { audit: RoleAudit; checkIdentity: string };
+  /**
+   * 角色产出时带上来的建议：来源缺口这类"当前拿不到材料"的判定只能出建议，不能拦下制作。
+   * 它进 state.issues → 下游角色当输入收到、创作者在确认关看到（见 production-pipeline 的
+   * blockingIssues），但既不触发 halt 也不参与 duplicate_issue 判定。
+   */
+  advisories?: PlanningIssue[];
 }
 
 // 图的可持久化输入身份只包含 durable 领域字段。角色/模型输入与执行期 callback、deadline
@@ -769,6 +775,7 @@ function planningNodeActions(
         return {
           stage: "treatment" as const,
           treatmentArtifact: artifact,
+          ...sourceAdvisoryUpdate(artifact),
           artifactIds: withArtifactId(state, "treatment", artifact.artifactId),
           ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE
             ? { creativeReview: publishCreativeDraft(state.creativeReview, "treatment", artifact.artifactId, artifact.output, treatmentReviewInputDigest(state)) }
@@ -790,6 +797,7 @@ function planningNodeActions(
         return {
           stage: "script" as const,
           scriptArtifact: artifact,
+          ...sourceAdvisoryUpdate(artifact),
           ...(changed ? invalidateRankingEvidence(artifactIds) : { artifactIds }),
           ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE
             ? { creativeReview: publishCreativeDraft(state.creativeReview, "script", artifact.artifactId, artifact.output, scriptReviewInputDigest(state)) }
@@ -810,6 +818,7 @@ function planningNodeActions(
         return {
           stage: "director" as const,
           directorPlan: artifact,
+          ...sourceAdvisoryUpdate(artifact),
           ...(changed ? invalidateRankingEvidence(artifactIds) : { artifactIds }),
           ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE && !searchCandidates
             ? { creativeReview: publishCreativeDraft(state.creativeReview, "director", artifact.artifactId, artifact.output, directorReviewInputDigest(state)) }
@@ -971,26 +980,29 @@ function routeAfterDirector(state: PlanningGraphState): "halt" | "candidates" | 
   return "evaluate";
 }
 
-function planningRoleHaltUpdate(error: unknown, stage: "treatment" | "script" | "director") {
-  if (!(error instanceof RoleAgentPlanningHaltError)) throw error;
-  if (error.hostReadiness?.status === "needs_source") {
-    const issues = structuredClone(error.hostReadiness.issues);
-    return {
-      stage,
-      issues,
-      unresolvedIssueDigests: issues.map(planningIssueDigest),
-      halt: {
-        reason: "needs_source" as const,
-        issueIds: issues.map((issue) => issue.id),
-        detail: `继续制作仍缺少可证明的核心材料：${issues.map((issue) => issue.reason).join("；")}`,
-      },
-    };
-  }
-  if (!error.disposition) throw new Error("Planning role halt has neither host readiness nor audit disposition.");
-  const disposition = error.disposition;
+/**
+ * 角色产出携带的来源建议转入图状态。它只进 state.issues（下游角色当输入收到、创作者在确认关
+ * 看到），不进 unresolvedIssueDigests：来源缺口不是"同一问题回退后原样出现"，把它记成未解问题
+ * 会让 duplicate_issue 把一条本来可以继续做的方案判停。
+ */
+function sourceAdvisoryUpdate<Output>(
+  artifact: PlanningArtifact<Output>,
+): { issues: PlanningIssue[] } | Record<string, never> {
+  const advisories = artifact.advisories;
+  if (!advisories?.length) return {};
+  return { issues: advisories.map((issue) => parsePlanningIssue(issue)) };
+}
+
+// 审计路由出去的阻塞问题转成图的 PlanningIssue：id 由 stage + 路由动作 + 判据内容决定，
+// 改写修复建议或换措辞不会伪装成另一条问题。
+function auditDispositionIssues(
+  audit: RoleAudit,
+  disposition: RoleAuditPlanningDisposition,
+  stage: "treatment" | "script" | "director",
+): PlanningIssue[] {
   const target = disposition.action === "needs_source" ? "source" as const : "user" as const;
-  const issues: PlanningIssue[] = disposition.issueIndexes.map((issueIndex) => {
-    const issue = error.audit.issues[issueIndex];
+  return disposition.issueIndexes.map((issueIndex) => {
+    const issue = audit.issues[issueIndex];
     if (!issue || issue.severity !== "blocking") {
       throw new Error("Planning role halt references an invalid non-blocking audit issue.");
     }
@@ -1011,16 +1023,57 @@ function planningRoleHaltUpdate(error: unknown, stage: "treatment" | "script" | 
       evidenceArtifactIds: [],
     };
   });
+}
+
+/**
+ * 角色产出携带的来源建议：宿主就绪检查判定的 needs_source（已由审计认领为误判的不算）与独立
+ * 审计路由出去的 needs_source 合并成建议列表。宿主与审计是同一件事的两条来源——"当前流水线
+ * 拿不到这份材料"——所以共用同一份转换，不各自造一套 id 约定。
+ */
+export function planningSourceAdvisories(
+  execution: { agentLoop?: AgentLoopTrace },
+  stage: "treatment" | "script" | "director",
+): PlanningIssue[] {
+  const last = execution.agentLoop?.iterations.at(-1);
+  if (!last) return [];
+  const corrected = new Set(last.audit.hostReadinessReview?.misclassifiedIssueIds ?? []);
+  const hostIssues: PlanningIssue[] = last.hostReadiness?.status === "needs_source"
+    ? last.hostReadiness.issues
+      .filter((issue) => (issue.target === "source" || issue.target === "user") && !corrected.has(issue.id))
+      .map((issue) => ({
+        id: issue.id,
+        target: issue.target === "user" ? "user" as const : "source" as const,
+        beatIds: [...issue.beatIds],
+        scenePositions: [...issue.scenePositions],
+        reason: issue.reason,
+        requiredChange: issue.requiredChange,
+        evidenceArtifactIds: [...issue.evidenceArtifactIds],
+      }))
+    : [];
+  const disposition = last.audit.planningDisposition;
+  const auditIssues = disposition?.action === "needs_source"
+    ? auditDispositionIssues(last.audit, disposition, stage)
+    : [];
+  return [...hostIssues, ...auditIssues];
+}
+
+// needs_user 仍然停摆：它把决定交还给决策者本人，不是对作品下判。needs_source 已经不再是停摆
+// （见 role-agent-loop 的轮内注释），走的是 sourceAdvisoryUpdate 那条建议通道。
+function planningRoleHaltUpdate(error: unknown, stage: "treatment" | "script" | "director") {
+  if (!(error instanceof RoleAgentPlanningHaltError)) throw error;
+  const disposition = error.disposition;
+  if (!disposition || disposition.action !== "needs_user") {
+    throw new Error("Planning role halt must carry a needs_user audit disposition.");
+  }
+  const issues = auditDispositionIssues(error.audit, disposition, stage);
   return {
     stage,
     issues,
     unresolvedIssueDigests: issues.map(planningIssueDigest),
     halt: {
-      reason: disposition.action,
+      reason: "needs_user" as const,
       issueIds: issues.map((issue) => issue.id),
-      detail: disposition.action === "needs_source"
-        ? `独立审计确认当前承诺缺少流水线可取得的必要来源：${error.audit.summary}`
-        : `独立审计确认继续需要用户决定是否改变既定承诺或路线：${error.audit.summary}`,
+      detail: `独立审计确认继续需要用户决定是否改变既定承诺或路线：${error.audit.summary}`,
     },
   };
 }
