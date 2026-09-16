@@ -372,8 +372,10 @@ export interface ProductionBrief {
   visualPlan?: ProductionVisualPlan;
   seriesContext?: ProductionSeriesContext;
   creationContext?: {
-    origin: "trend" | "series" | "manual";
+    origin: "trend" | "series" | "manual" | "case";
     opportunityId: string;
+    /** origin 为 case 时指向服务端保存的案例参考；其它来源不带这个字段。 */
+    caseSelectionId?: string;
   };
   articleSources?: ProductionArticleSourceSnapshot[];
   rework?: ProductionReworkContext;
@@ -1003,8 +1005,17 @@ function parseSpendFeedback(value: unknown): ProductionSpendFeedback[] {
 function parseCreationContext(value: unknown): ProductionBrief["creationContext"] {
   if (value === undefined) return undefined;
   const input = requireRecord(value, "creationContext");
-  if (input.origin !== "trend" && input.origin !== "series" && input.origin !== "manual") {
+  if (input.origin !== "trend" && input.origin !== "series" && input.origin !== "manual" && input.origin !== "case") {
     throw new Error("creationContext.origin is invalid.");
+  }
+  // 案例来源没有机会编号：它绑定的是一条外部参考，不是选题候选，
+  // 因此不进热点候选池，也不参与任何选题评分。
+  if (input.origin === "case") {
+    return {
+      origin: "case",
+      opportunityId: typeof input.opportunityId === "string" ? input.opportunityId.trim() : "",
+      caseSelectionId: requireString(input.caseSelectionId, "creationContext.caseSelectionId"),
+    };
   }
   return {
     origin: input.origin,

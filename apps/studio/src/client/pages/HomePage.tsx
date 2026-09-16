@@ -1,4 +1,4 @@
-import { ArrowRight, Flame, Lightbulb, ListVideo, Play, Plus, RefreshCw } from "lucide-react";
+import { ArrowRight, Clapperboard, Flame, Lightbulb, ListVideo, Play, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
@@ -91,6 +91,11 @@ export function HomePage() {
             <span className="home-option-icon is-idea"><Lightbulb aria-hidden="true" size={21} /></span>
             <span><strong>从自己的想法开始</strong><small>输入主题，需要时添加参考视频</small></span>
             <Plus aria-hidden="true" size={18} />
+          </button>
+          <button type="button" onClick={() => navigate("/cases")}>
+            <span className="home-option-icon is-case"><Clapperboard aria-hidden="true" size={21} /></span>
+            <span><strong>从案例 / 脚本开始</strong><small>发现值得借鉴的视频和脚本，开始自己的创作</small></span>
+            <ArrowRight aria-hidden="true" size={18} />
           </button>
         </div>
       </section>

@@ -9,6 +9,9 @@ import type {
   StudioCandidateInboxItem,
   StudioCandidateInboxQuery,
   StudioCandidateSourcesInput,
+  StudioCaseCatalog,
+  StudioCaseDetail,
+  StudioCaseSelection,
   StudioCreatorSettings,
   StudioCreatorSettingsPatch,
   StudioCostDashboard,
@@ -75,6 +78,7 @@ import { StudioInputError } from "../shared/api.js";
 import { RunLockedError } from "@video-factory/production-pipeline";
 import { CapabilityStudio } from "./capability-studio.js";
 import { CandidateInboxStudio, reviewTrendOpportunityAgainstCurrentPolicy } from "./candidate-inbox-studio.js";
+import { CaseStudio, type CaseSearchQuery } from "./case-studio.js";
 import { CostStudio } from "./cost-studio.js";
 import { JsonCreatorSettingsStore, type CreatorSettingsRepository } from "./creator-settings-store.js";
 import type { LocalCapabilityService } from "./local-capabilities.js";
@@ -130,7 +134,14 @@ export interface StudioServiceOptions {
   creatorSettings?: CreatorSettingsRepository;
   runArchive?: RunArchiveRepository;
   publishers?: PlatformPublisher[];
+  cases?: CaseStudioPort;
 }
+
+/** 案例参考在制作链里只被用到这几件事；其余（取数、缓存）留在 CaseStudio 内部。 */
+export type CaseStudioPort = Pick<
+  CaseStudio,
+  "search" | "readDetail" | "getSelection" | "saveSelection" | "clearSelection" | "articleSourcesFor" | "borrowDirectiveFor"
+>;
 
 /**
  * 稳定的 Studio 外部入口。领域行为分别收拢在四个深模块中，路由层不需要知道其组装方式。
@@ -148,6 +159,7 @@ export class StudioService {
   private readonly costs: CostStudio;
   private readonly referenceVideos: ReferenceVideoStore;
   private readonly resourceGovernance: ResourceGovernanceStudio;
+  private readonly cases: CaseStudioPort;
 
   constructor(options: StudioServiceOptions) {
     const repositoryRoot = options.repositoryRoot ?? process.cwd();
@@ -184,6 +196,11 @@ export class StudioService {
     });
     this.creatorSettings = options.creatorSettings
       ?? new JsonCreatorSettingsStore(path.join(options.workspaceRoot, "settings", "creator-settings.json"));
+    this.cases = options.cases ?? new CaseStudio({
+      cacheRoot: path.join(options.workspaceRoot, "cache", "cases"),
+      selectionPath: path.join(options.workspaceRoot, "cases", "selection.json"),
+      now,
+    });
     const templateStore = new JsonTemplateStore(
       path.join(options.workspaceRoot, "templates", "templates.json"),
       BUILTIN_TEMPLATES,
@@ -391,7 +408,7 @@ export class StudioService {
     return this.opportunities.updateStatus(opportunityId, status);
   }
 
-  async listRuns(origin?: "trend" | "series" | "manual"): Promise<StudioRunSummary[]> {
+  async listRuns(origin?: "trend" | "series" | "manual" | "case"): Promise<StudioRunSummary[]> {
     const runs = await this.production.list();
     return origin
       ? runs.filter((item) => origin === "manual" ? item.creationOrigin === "manual" || item.creationOrigin === undefined : item.creationOrigin === origin)
@@ -408,6 +425,20 @@ export class StudioService {
     await this.reconcileSeriesRuns();
   }
   costDashboard(): Promise<StudioCostDashboard> { return this.costs.dashboard(); }
+  // 「从案例 / 脚本开始」：浏览与选择走服务端，正文快照也保存在服务端，
+  // 制作链只认服务端保存的那一条，客户端提交的正文一律不采信。
+  listCases(query: CaseSearchQuery, force = false): Promise<StudioCaseCatalog> { return this.cases.search(query, { force }); }
+  readCase(caseId: string, force = false): Promise<StudioCaseDetail | undefined> { return this.cases.readDetail(caseId, { force }); }
+  caseSelection(): Promise<StudioCaseSelection | undefined> { return this.cases.getSelection(); }
+  async selectCase(input: { caseId: string; intent: string; borrowIntent: string[] }): Promise<StudioCaseSelection> {
+    // 校验与收敛都在 CaseStudio 里做：入口有多条（HTTP、将来的批量导入），规则只应有一份。
+    try {
+      return await this.cases.saveSelection(input);
+    } catch (error) {
+      throw new StudioInputError(error instanceof Error ? error.message : "保存参考内容失败。");
+    }
+  }
+  clearCaseSelection(): Promise<void> { return this.cases.clearSelection(); }
   runCostDetail(runId: string): Promise<StudioCostRunDetail | undefined> { return this.costs.runDetail(runId); }
   async uploadReferenceVideo(input: { label: string; mimeType: string; bytes: Buffer }): Promise<StudioReferenceVideo> {
     try {
@@ -456,16 +487,20 @@ export class StudioService {
         }
       : configuredInput;
     if (isRecord(trustedInput) && isRecord(trustedInput.creationContext)) {
+      const creationOrigin = trustedInput.creationContext.origin;
       const trustedOpportunityId = typeof trustedInput.creationContext.opportunityId === "string"
         ? trustedInput.creationContext.opportunityId
         : "";
       const trustedOpportunity = trustedOpportunityId ? await this.opportunities.get(trustedOpportunityId) : undefined;
-      trustedInput = {
+      const withTrustedSources: Record<string, unknown> = {
         ...trustedInput,
         ...(trustedOpportunity?.articleSources?.length
           ? { articleSources: structuredClone(trustedOpportunity.articleSources) }
           : {}),
       };
+      trustedInput = creationOrigin === "case"
+        ? await this.applyCaseReference(withTrustedSources)
+        : withTrustedSources;
     }
     if (seriesContext && reservationId && opportunityId) {
       await this.series.reserveRun(seriesContext, opportunityId, reservationId);
@@ -530,6 +565,32 @@ export class StudioService {
     }
   }
 
+  /**
+   * 案例参考的内容由服务端写入，和热点来源的 articleSources 走同一条通道。
+   * 客户端只能指定"参考哪一条、想借鉴什么"：正文快照一律取自服务端保存的选中记录，
+   * 这样刷新、修改、移除之后，后续规划拿到的都是当前版本。
+   */
+  private async applyCaseReference(input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const creation = isRecord(input.creationContext) ? input.creationContext : undefined;
+    const caseSelectionId = typeof creation?.caseSelectionId === "string" ? creation.caseSelectionId.trim() : "";
+    if (!caseSelectionId) throw new StudioInputError("这次制作没有指定参考内容，请返回案例页面重新选择。");
+    let articleSources;
+    let directive;
+    try {
+      articleSources = await this.cases.articleSourcesFor(caseSelectionId);
+      directive = await this.cases.borrowDirectiveFor(caseSelectionId);
+    } catch (error) {
+      throw new StudioInputError(error instanceof Error ? error.message : "参考内容不可用，请返回案例页面重新选择。");
+    }
+    const angle = typeof input.angle === "string" ? input.angle.trim() : "";
+    // 借鉴方式附在用户自己写的角度之后：用户的原话在前、不被改写，系统只补一句它选了什么。
+    return {
+      ...input,
+      articleSources,
+      ...(directive ? { angle: [angle, directive].filter(Boolean).join("\n") } : {}),
+    };
+  }
+
   private async assertOpportunityReadyForProduction(input: unknown): Promise<void> {
     if (!isRecord(input) || !isRecord(input.creationContext) || input.creationContext.origin !== "trend") return;
     const opportunityId = typeof input.creationContext.opportunityId === "string" ? input.creationContext.opportunityId : "";
@@ -548,7 +609,8 @@ export class StudioService {
     }
     const opportunityId = typeof creation?.opportunityId === "string" ? creation.opportunityId : "";
     const opportunity = opportunityId ? await this.opportunities.get(opportunityId) : undefined;
-    if (creation) {
+    // 案例来源没有机会记录：它绑定的是服务端保存的外部参考，不参与选题候选与评分。
+    if (creation && creation.origin !== "case") {
       if (!opportunity) throw new StudioInputError("没有找到与这次制作对应的机会，请返回入口重新选择。");
       const expectedOrigin = opportunity.origin ?? "manual";
       if (creation.origin !== expectedOrigin) {

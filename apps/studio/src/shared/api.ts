@@ -180,6 +180,113 @@ export interface StudioProvider {
   deliveryTypes?: Array<"editorial_card" | "stock_video" | "stock_image" | "generated_image" | "generated_video">;
 }
 
+/**
+ * 「从案例 / 脚本开始」的来源条目。
+ *
+ * 这一组类型刻意不含任何评分：案例是给人看的参考，不是被系统排序的候选。
+ * 凡是模型总结、翻译或改写都不放进这些字段——它们只承载来源方自己公布的内容。
+ */
+/**
+ * 可选的借鉴方式。它会被拼进给模型的说明里，所以客户端只是选项，
+ * 服务端按同一张表校验：任意文本不能借此进入规划指令。
+ */
+export const STUDIO_CASE_BORROW_AXES = ["开场方式", "叙事推进", "解释方式", "证据编排", "结尾回收", "节奏控制"] as const;
+
+export type StudioCaseBorrowAxis = typeof STUDIO_CASE_BORROW_AXES[number];
+
+export type StudioCaseSourceId = "ted" | "bilibili";
+
+export type StudioCaseContentState =
+  /** 已取得真实正文（原站逐字稿 / 字幕），可在页内阅读。 */
+  | "transcript"
+  /** 来源只公开视频信息，没有可自动取得的正文。 */
+  | "video_only"
+  /** 尚未读取正文；来源可能提供，但未验证，不得当成已有正文。 */
+  | "unread";
+
+export interface StudioCaseMetric {
+  label: string;
+  value: number;
+}
+
+export interface StudioCaseSummary {
+  id: string;
+  sourceId: StudioCaseSourceId;
+  sourceLabel: string;
+  title: string;
+  originalUrl: string;
+  author?: string;
+  publishedAt?: string;
+  durationSeconds?: number;
+  /** 只有真实观察到语言时才写入；读不到就留空，不用"未知语言"占位。 */
+  language?: string;
+  topics: string[];
+  contentState: StudioCaseContentState;
+  /** 给用户看的内容性质标签，例如「原站逐字稿（字幕）」。 */
+  contentTypeLabel: string;
+  /** 来源方自己的简介，不是模型摘要。 */
+  summary?: string;
+  metrics: StudioCaseMetric[];
+  /** 公开指标的取得时间；指标缺失就不该被当成 0。 */
+  metricsFetchedAt: string;
+  usageNote: string;
+}
+
+export interface StudioCaseTranscript {
+  state: "read" | "partial" | "unavailable";
+  language?: string;
+  fetchedAt?: string;
+  paragraphs: Array<{ id: string; text: string }>;
+  truncated: boolean;
+  reason?: string;
+  usageNote: string;
+}
+
+export interface StudioCaseDetail {
+  item: StudioCaseSummary;
+  transcript: StudioCaseTranscript;
+}
+
+export interface StudioCaseSourceStatus {
+  sourceId: StudioCaseSourceId;
+  label: string;
+  state: "ready" | "loading" | "unavailable" | "needs_config" | "failed";
+  itemCount: number;
+  detail: string;
+  fetchedAt?: string;
+}
+
+export interface StudioCaseFacets {
+  sources: Record<string, number>;
+  topics: Record<string, number>;
+  languages: Record<string, number>;
+  contentStates: Record<string, number>;
+}
+
+export interface StudioCaseCatalog {
+  items: StudioCaseSummary[];
+  facets: StudioCaseFacets;
+  sources: StudioCaseSourceStatus[];
+  generatedAt?: string;
+  loading: boolean;
+}
+
+export interface StudioCaseSelection {
+  caseId: string;
+  sourceId: StudioCaseSourceId;
+  sourceLabel: string;
+  title: string;
+  originalUrl: string;
+  contentState: StudioCaseContentState;
+  contentTypeLabel: string;
+  language?: string;
+  /** 用户选择的借鉴方式；只影响参考如何被使用，不改写用户主题。 */
+  borrowIntent: string[];
+  /** 用户补充的本次创作意图。 */
+  intent: string;
+  selectedAt: string;
+}
+
 export interface StudioTrendSource {
   id: string;
   label: string;
@@ -696,7 +803,7 @@ export interface StudioRunSummary {
   nextAction?: "review" | "confirm_spend" | "regenerate";
   videoContentUrl?: string;
   archivedAt?: string;
-  creationOrigin?: "trend" | "series" | "manual";
+  creationOrigin?: "trend" | "series" | "manual" | "case";
   opportunityId?: string;
   seriesId?: string;
   episodeNumber?: number;
@@ -1686,8 +1793,10 @@ export interface StudioProductionInput {
   visualPlan?: StudioVisualPlan;
   seriesContext?: StudioSeriesProductionContext;
   creationContext?: {
-    origin: "trend" | "series" | "manual";
+    origin: "trend" | "series" | "manual" | "case";
+    /** origin 为 case 时为空串：案例来源绑定的是服务端保存的参考，不是选题候选。 */
     opportunityId: string;
+    caseSelectionId?: string;
   };
   rework?: StudioReworkContext;
   voiceDirection: StudioVoiceDirection;

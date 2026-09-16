@@ -681,3 +681,60 @@ describe("ProductionBrief", () => {
     );
   });
 });
+
+describe("creationContext", () => {
+  it("carries a case reference without inventing an opportunity id", () => {
+    const parsed = pipeline.parseBrief({
+      ...validBrief,
+      creationContext: { origin: "case", opportunityId: "", caseSelectionId: "case:ted:ted:one" },
+    });
+    assert.deepEqual(parsed.creationContext, {
+      origin: "case",
+      opportunityId: "",
+      caseSelectionId: "case:ted:ted:one",
+    });
+  });
+
+  it("refuses a case origin with no reference, and refuses unknown origins", () => {
+    assert.throws(
+      () => pipeline.parseBrief({ ...validBrief, creationContext: { origin: "case", opportunityId: "" } }),
+      /caseSelectionId/,
+    );
+    assert.throws(
+      () => pipeline.parseBrief({ ...validBrief, creationContext: { origin: "case-reference", opportunityId: "x" } }),
+      /creationContext.origin/,
+    );
+    assert.throws(
+      () => pipeline.parseBrief({ ...validBrief, creationContext: { origin: "case", opportunityId: "", caseSelectionId: "" } }),
+      /caseSelectionId/,
+    );
+  });
+
+  it("keeps only real body text citable: title_only sources carry no paragraphs and no digest", () => {
+    const titleOnly = {
+      sourceId: "case:bilibili:BV1",
+      originalUrl: "https://www.bilibili.com/video/BV1",
+      finalUrl: "https://www.bilibili.com/video/BV1",
+      pageTitle: "只有视频信息的案例",
+      fetchedAt: "2026-09-16T00:00:00.000Z",
+      extractorVersion: "case-source-v1",
+      readStatus: "title_only",
+      reason: "该平台只公开视频信息，没有可自动取得的正文。",
+      paragraphs: [],
+      truncated: false,
+    };
+    const parsed = pipeline.parseBrief({ ...validBrief, articleSources: [titleOnly] });
+    assert.equal(parsed.articleSources?.[0]?.readStatus, "title_only");
+    assert.equal(parsed.articleSources?.[0]?.contentSha256, undefined);
+    // 有正文却没有摘要，或有摘要却没有正文，都是自相矛盾的合同。
+    for (const contradictory of [
+      { ...titleOnly, paragraphs: [{ id: "p1", text: "并不存在的正文。" }] },
+      { ...titleOnly, readStatus: "read", contentSha256: "0".repeat(64) },
+    ]) {
+      assert.throws(
+        () => pipeline.parseBrief({ ...validBrief, articleSources: [contradictory] }),
+        /body evidence does not match readStatus/,
+      );
+    }
+  });
+});

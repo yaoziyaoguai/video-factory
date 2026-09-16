@@ -632,7 +632,8 @@ export function TodayPage() {
 
 function matchesEntryOrigin(
   mode: "trend" | "series" | "custom",
-  origin: "trend" | "series" | "manual" | undefined,
+  // 案例来源的 run 不属于这里的任何一个入口：它从案例页出发，不在选题页的列表里出现。
+  origin: "trend" | "series" | "manual" | "case" | undefined,
 ): boolean {
   if (mode === "trend") return origin === "trend";
   if (mode === "series") return origin === "series";

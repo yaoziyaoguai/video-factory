@@ -4,6 +4,7 @@ import { parseProductionTemplate } from "@video-factory/template-core";
 import { CodexBridgeError, RoleAgentLoopError } from "@video-factory/production-pipeline";
 import { StudioAuthenticator, type StudioAuthOptions } from "./auth.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-service.js";
+import type { CaseSearchQuery } from "./case-studio.js";
 import { StudioVoicePreviewUnavailableError } from "./local-capabilities.js";
 import {
   StudioInputError,
@@ -36,6 +37,9 @@ import {
   type StudioCandidateInboxItem,
   type StudioCandidateInboxQuery,
   type StudioCandidateSourcesInput,
+  type StudioCaseCatalog,
+  type StudioCaseDetail,
+  type StudioCaseSelection,
   type StudioCreatorSettings,
   type StudioCreatorSettingsPatch,
   type StudioCostDashboard,
@@ -133,7 +137,12 @@ export interface StudioServicePort {
   getOpportunity(opportunityId: string): Promise<StudioOpportunity | undefined>;
   createOpportunity(input: StudioOpportunityInput): Promise<StudioOpportunity>;
   updateOpportunityStatus(opportunityId: string, status: StudioOpportunityStatus): Promise<StudioOpportunity>;
-  listRuns(origin?: "trend" | "series" | "manual"): Promise<StudioRunSummary[]>;
+  listCases?(query: CaseSearchQuery, force?: boolean): Promise<StudioCaseCatalog>;
+  readCase?(caseId: string, force?: boolean): Promise<StudioCaseDetail | undefined>;
+  caseSelection?(): Promise<StudioCaseSelection | undefined>;
+  selectCase?(input: { caseId: string; intent: string; borrowIntent: string[] }): Promise<StudioCaseSelection>;
+  clearCaseSelection?(): Promise<void>;
+  listRuns(origin?: "trend" | "series" | "manual" | "case"): Promise<StudioRunSummary[]>;
   getRun(runId: string): Promise<StudioRunDetail | undefined>;
   reworkDraft(runId: string): Promise<StudioReworkDraft | undefined>;
   archiveRuns(runIds: string[]): Promise<void>;
@@ -374,12 +383,52 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     },
   );
   app.get<{ Querystring: { origin?: string } }>("/api/opportunities", async (request) => {
-    return options.service.listOpportunities(parseCreationOrigin(request.query.origin));
+    return options.service.listOpportunities(parseOpportunityOrigin(request.query.origin));
   });
   app.get<{ Querystring: { origin?: string } }>("/api/runs", async (request) => {
     return options.service.listRuns(parseCreationOrigin(request.query.origin));
   });
   app.get("/api/costs", async () => options.service.costDashboard());
+
+  // 「从案例 / 脚本开始」：列表、详情、以及一条被服务端保存的选中记录。
+  // 选中是单例，换一条就是替换；正文快照保存在服务端，制作链只认服务端这一份。
+  app.get<{ Querystring: { keyword?: string; source?: string; topic?: string; language?: string; contentState?: string; refresh?: string } }>(
+    "/api/cases",
+    async (request) => {
+      if (!options.service.listCases) throw new StudioInputError("当前环境没有启用案例来源。");
+      return options.service.listCases({
+        ...(request.query.keyword ? { keyword: request.query.keyword } : {}),
+        ...(request.query.source ? { sourceId: request.query.source } : {}),
+        ...(request.query.topic ? { topic: request.query.topic } : {}),
+        ...(request.query.language ? { language: request.query.language } : {}),
+        ...(request.query.contentState ? { contentState: request.query.contentState } : {}),
+      }, request.query.refresh === "1");
+    },
+  );
+  app.get("/api/cases/selection", async (request, reply) => {
+    if (!options.service.caseSelection) throw new StudioInputError("当前环境没有启用案例来源。");
+    const selection = await options.service.caseSelection();
+    return selection ?? reply.code(204).send();
+  });
+  app.post("/api/cases/selection", async (request, reply) => {
+    if (!options.service.selectCase) throw new StudioInputError("当前环境没有启用案例来源。");
+    return reply.code(201).send(await options.service.selectCase(parseStudioCaseSelectionInput(request.body)));
+  });
+  app.delete("/api/cases/selection", async (request, reply) => {
+    if (!options.service.clearCaseSelection) throw new StudioInputError("当前环境没有启用案例来源。");
+    await options.service.clearCaseSelection();
+    return reply.code(204).send();
+  });
+  app.get<{ Params: { caseId: string }; Querystring: { refresh?: string } }>(
+    "/api/cases/:caseId",
+    async (request, reply) => {
+      if (!options.service.readCase) throw new StudioInputError("当前环境没有启用案例来源。");
+      const caseId = requireCaseRouteId(request.params.caseId);
+      const detail = await options.service.readCase(caseId, request.query.refresh === "1");
+      if (!detail) return reply.code(404).send({ error: "没有找到这条参考内容。" });
+      return detail;
+    },
+  );
 
   app.post<{ Body: Buffer }>("/api/reference-videos", async (request, reply) => {
     if (!options.service.uploadReferenceVideo) throw new StudioInputError("当前环境没有启用参考视频上传。");
@@ -1213,10 +1262,17 @@ function parseResourceReviewInput(value: unknown): StudioResourceReviewInput {
   return { runId, itemId, expectedRevision: Number(input.expectedRevision), action: input.action, ...(note ? { note } : {}) };
 }
 
-function parseCreationOrigin(value: string | undefined): "trend" | "series" | "manual" | undefined {
+function parseCreationOrigin(value: string | undefined): "trend" | "series" | "manual" | "case" | undefined {
   if (value === undefined || value === "") return undefined;
-  if (value === "trend" || value === "series" || value === "manual") return value;
+  if (value === "trend" || value === "series" || value === "manual" || value === "case") return value;
   throw new StudioInputError("创作入口不正确。");
+}
+
+// 案例参考不是选题候选：它不进候选池，也不参与选题评分，因此不接受 case 过滤。
+function parseOpportunityOrigin(value: string | undefined): "trend" | "series" | "manual" | undefined {
+  const origin = parseCreationOrigin(value);
+  if (origin === "case") throw new StudioInputError("案例参考不是选题候选，请在案例页浏览。");
+  return origin;
 }
 
 function isTerminal(status: StudioRunDetail["status"]): boolean {
@@ -1225,6 +1281,30 @@ function isTerminal(status: StudioRunDetail["status"]): boolean {
 
 function requireSafeRouteId(value: string, label: string): void {
   if (!SAFE_ROUTE_ID.test(value)) throw new StudioInputError(`${label}格式不正确。`);
+}
+
+// 案例编号形如 ted:<slug>，比普通路由编号多一个来源前缀；它只用于在内存目录里查表，
+// 不会拼进任何文件路径，因此按字符集收紧后直接查不到就返回 404。
+const SAFE_CASE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
+
+function requireCaseRouteId(value: string): string {
+  if (!SAFE_CASE_ID.test(value)) throw new StudioInputError("参考内容编号格式不正确。");
+  return value;
+}
+
+function parseStudioCaseSelectionInput(value: unknown): { caseId: string; intent: string; borrowIntent: string[] } {
+  if (typeof value !== "object" || value === null) throw new StudioInputError("请求内容不正确。");
+  const input = value as Record<string, unknown>;
+  const caseId = typeof input.caseId === "string" ? input.caseId.trim() : "";
+  if (!caseId) throw new StudioInputError("请先选择一条参考内容。");
+  const intent = typeof input.intent === "string" ? input.intent : "";
+  const borrowIntent = input.borrowIntent === undefined
+    ? []
+    : Array.isArray(input.borrowIntent) && input.borrowIntent.every((item) => typeof item === "string")
+      ? input.borrowIntent
+      : undefined;
+  if (!borrowIntent) throw new StudioInputError("借鉴方式必须是文本列表。");
+  return { caseId: requireCaseRouteId(caseId), intent, borrowIntent };
 }
 
 function trustedStudioActor(auth: StudioAuthenticator | undefined, cookie: string | undefined): string {

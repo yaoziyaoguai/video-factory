@@ -12,6 +12,9 @@ import type {
   StudioCandidateInbox,
   StudioCandidateAdoptionInput,
   StudioCandidateInboxQuery,
+  StudioCaseCatalog,
+  StudioCaseDetail,
+  StudioCaseSelection,
   StudioCreatorSettings,
   StudioCreatorSettingsPatch,
   StudioCostDashboard,
@@ -152,6 +155,21 @@ export const studioApi = {
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ runId }) },
   ),
   opportunities: (origin?: "trend" | "series" | "manual") => requestJson<StudioOpportunity[]>(scopedCollectionPath("/api/opportunities", origin)),
+  cases: (query: { keyword?: string; source?: string; topic?: string; language?: string; contentState?: string; refresh?: string } = {}) => {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) if (value) params.set(key, value);
+    const search = params.toString();
+    return requestJson<StudioCaseCatalog>(`/api/cases${search ? `?${search}` : ""}`);
+  },
+  caseDetail: (caseId: string, refresh = false) => requestJson<StudioCaseDetail>(
+    `/api/cases/${encodeURIComponent(caseId)}${refresh ? "?refresh=1" : ""}`,
+  ),
+  caseSelection: () => requestJson<StudioCaseSelection | undefined>("/api/cases/selection"),
+  selectCase: (input: { caseId: string; intent: string; borrowIntent: string[] }) => requestJson<StudioCaseSelection>(
+    "/api/cases/selection",
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  clearCaseSelection: () => requestEmpty("/api/cases/selection", { method: "DELETE" }),
   createOpportunity: (input: StudioOpportunityInput) => requestJson<StudioOpportunity>("/api/opportunities", {
     method: "POST",
     headers: { "content-type": "application/json" },

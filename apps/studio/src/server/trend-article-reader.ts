@@ -1,17 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lookup as dnsLookup } from "node:dns/promises";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import http from "node:http";
-import https from "node:https";
-import net from "node:net";
 import path from "node:path";
-import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import { Readability } from "@mozilla/readability";
 import { JSDOM, VirtualConsole } from "jsdom";
 import type { ProductionArticleSourceSnapshot } from "@video-factory/production-pipeline";
+import {
+  canonicalExternalUrl,
+  DEFAULT_MAX_BODY_BYTES,
+  ExternalPageFetcher,
+  type HostLookup,
+  type PinnedRequester,
+} from "./external-page.js";
 
 const EXTRACTOR_VERSION = "readability-v1";
-const MAX_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_BODY_BYTES = DEFAULT_MAX_BODY_BYTES;
 const MAX_EXCERPT_CHARS = 8_000;
 const SUCCESS_TTL_MS = 6 * 60 * 60 * 1_000;
 const FAILURE_TTL_MS = 10 * 60 * 1_000;
@@ -26,26 +28,29 @@ export interface TrendArticleSnapshot extends Omit<ProductionArticleSourceSnapsh
 export interface TrendArticleReaderOptions {
   cacheRoot: string;
   now?: () => Date;
-  lookup?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
-  request?: typeof requestPinned;
+  lookup?: HostLookup;
+  request?: PinnedRequester;
   timeoutMs?: number;
   batchTimeoutMs?: number;
 }
 
 export class TrendArticleReader {
   private readonly now: () => Date;
-  private readonly lookup: NonNullable<TrendArticleReaderOptions["lookup"]>;
   private readonly timeoutMs: number;
   private readonly batchTimeoutMs: number;
-  private readonly request: typeof requestPinned;
+  private readonly fetcher: ExternalPageFetcher;
   private readonly inFlight = new Map<string, Promise<TrendArticleSnapshot>>();
 
   constructor(private readonly options: TrendArticleReaderOptions) {
     this.now = options.now ?? (() => new Date());
-    this.lookup = options.lookup ?? (async (hostname) => dnsLookup(hostname, { all: true, verbatim: true }));
     this.timeoutMs = options.timeoutMs ?? 15_000;
     this.batchTimeoutMs = options.batchTimeoutMs ?? 60_000;
-    this.request = options.request ?? requestPinned;
+    // 出网防护（DNS 固定、内网段拦截、逐跳重定向复检、解压后体积上限）由共享内核提供，
+    // 案例源与原文本阅读器共用同一份实现，不回退成两套各自演化的安全代码。
+    this.fetcher = new ExternalPageFetcher({
+      ...(options.lookup ? { lookup: options.lookup } : {}),
+      ...(options.request ? { request: options.request } : {}),
+    });
   }
 
   async read(
@@ -53,7 +58,7 @@ export class TrendArticleReader {
     force = false,
     signal?: AbortSignal,
   ): Promise<TrendArticleSnapshot> {
-    const canonical = canonicalArticleUrl(input.url);
+    const canonical = canonicalExternalUrl(input.url);
     const key = `${EXTRACTOR_VERSION}:${canonical}`;
     if (!force) {
       const cached = await this.readCache(key);
@@ -107,7 +112,7 @@ export class TrendArticleReader {
 
   private async fetchAndExtract(sourceId: string, originalUrl: string, fallbackTitle: string, signal?: AbortSignal): Promise<TrendArticleSnapshot> {
     try {
-      const response = await this.fetchHtml(originalUrl, 0, Date.now() + this.timeoutMs, signal);
+      const response = await this.fetchHtml(originalUrl, Date.now() + this.timeoutMs, signal);
       const virtualConsole = new VirtualConsole();
       const dom = new JSDOM(response.html, { url: response.finalUrl, virtualConsole });
       const pageTitle = dom.window.document.title.trim() || fallbackTitle;
@@ -149,33 +154,14 @@ export class TrendArticleReader {
     }
   }
 
-  private async fetchHtml(url: string, redirects: number, deadline: number, signal?: AbortSignal): Promise<{ finalUrl: string; html: string }> {
-    if (redirects > 3) throw new Error("原文重定向次数超过 3 次。 ");
-    const parsed = new URL(canonicalArticleUrl(url));
-    const addresses = await this.lookup(parsed.hostname);
-    if (addresses.length === 0 || addresses.some((entry) => isForbiddenAddress(entry.address))) {
-      throw new Error("原文地址解析到不可访问的内部或保留网络。 ");
-    }
-    const address = addresses[0]!;
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) throw new Error("原文读取超时。 ");
-    if (signal?.aborted) throw new Error("本批原文读取已到总时间上限。");
-    const response = await this.request(parsed, address, remaining, signal);
-    try {
-    const statusCode = response.statusCode ?? 0;
-    if (statusCode >= 300 && statusCode < 400) {
-      const location = response.headers.location;
-      if (!location) throw new Error("原文重定向缺少目标地址。 ");
-      return this.fetchHtml(new URL(location, parsed).toString(), redirects + 1, deadline, signal);
-    }
-    if (statusCode < 200 || statusCode >= 300) throw new Error(`原文服务返回 ${statusCode || "未知状态"}。`);
-    const contentType = String(response.headers["content-type"] ?? "").toLowerCase();
-    if (!contentType.includes("text/html") && !contentType.includes("text/plain")) throw new Error("原文不是可读取的网页文本。 ");
-    return { finalUrl: parsed.toString(), html: await readDecodedBody(response, MAX_BODY_BYTES) };
-    } finally {
-      // 重定向、格式拒绝、解压超限也必须释放原连接，不能只销毁解压后的派生流。
-      response.destroy();
-    }
+  private async fetchHtml(url: string, deadline: number, signal?: AbortSignal): Promise<{ finalUrl: string; html: string }> {
+    const page = await this.fetcher.fetch(url, {
+      deadline,
+      maxBytes: MAX_BODY_BYTES,
+      accept: "text/html,text/plain;q=0.8",
+      signal,
+    });
+    return { finalUrl: page.finalUrl, html: page.body };
   }
 
   private async readCache(key: string): Promise<TrendArticleSnapshot | undefined> {
@@ -201,67 +187,6 @@ export class TrendArticleReader {
     return path.join(this.options.cacheRoot, `${createHash("sha256").update(key).digest("hex")}.json`);
   }
 }
-
-function canonicalArticleUrl(value: string): string {
-  const url = new URL(value);
-  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) throw new Error("原文 URL 只支持不含凭据的 HTTP/HTTPS。 ");
-  if ((url.protocol === "http:" && url.port && url.port !== "80") || (url.protocol === "https:" && url.port && url.port !== "443")) throw new Error("原文 URL 不支持非标准端口。 ");
-  url.hash = "";
-  return url.toString();
-}
-
-function isForbiddenAddress(address: string): boolean {
-  if (address.toLowerCase().startsWith("::ffff:")) return true;
-  const family = net.isIP(address);
-  return family === 4
-    ? FORBIDDEN_ADDRESSES.check(address, "ipv4")
-    : family === 6
-      ? FORBIDDEN_ADDRESSES.check(address, "ipv6")
-      : true;
-}
-
-const FORBIDDEN_ADDRESSES = new net.BlockList();
-for (const [address, prefix] of [
-  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
-  ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24],
-  ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24],
-  ["224.0.0.0", 4], ["240.0.0.0", 4],
-] as const) {
-  FORBIDDEN_ADDRESSES.addSubnet(address, prefix, "ipv4");
-}
-for (const [address, prefix] of [
-  ["::", 128], ["::1", 128], ["64:ff9b:1::", 48], ["100::", 64],
-  ["2001:2::", 48], ["2001:10::", 28], ["2001:db8::", 32], ["fc00::", 7],
-  ["fe80::", 10], ["ff00::", 8],
-] as const) {
-  FORBIDDEN_ADDRESSES.addSubnet(address, prefix, "ipv6");
-}
-
-function requestPinned(
-  url: URL,
-  address: { address: string; family: number },
-  timeoutMs: number,
-  signal?: AbortSignal,
-): Promise<http.IncomingMessage> {
-  const request = url.protocol === "https:" ? https.request : http.request;
-  return new Promise((resolve, reject) => {
-    const outgoing = request(url, {
-      method: "GET",
-      headers: { accept: "text/html,text/plain;q=0.8", "user-agent": "VideoFactoryArticleReader/1.0" },
-      lookup: (_hostname, options, callback) => {
-        if (typeof options === "object" && options.all) callback(null, [address]);
-        else callback(null, address.address, address.family);
-      },
-      servername: url.hostname,
-      timeout: timeoutMs,
-      signal,
-    }, resolve);
-    outgoing.once("timeout", () => outgoing.destroy(new Error("原文读取超时。")));
-    outgoing.once("error", reject);
-    outgoing.end();
-  });
-}
-
 async function settleBeforeDeadline<T>(operation: Promise<T>, deadline: number, controller: AbortController): Promise<T> {
   const remaining = deadline - Date.now();
   if (remaining <= 0) {
@@ -287,27 +212,6 @@ async function settleBeforeDeadline<T>(operation: Promise<T>, deadline: number, 
 function bindSnapshotToSource(snapshot: TrendArticleSnapshot, sourceId: string): TrendArticleSnapshot {
   return snapshot.sourceId === sourceId ? snapshot : { ...structuredClone(snapshot), sourceId };
 }
-
-async function readDecodedBody(response: http.IncomingMessage, maxBytes: number): Promise<string> {
-  const encoding = String(response.headers["content-encoding"] ?? "").toLowerCase();
-  const stream = encoding === "gzip" ? response.pipe(createGunzip())
-    : encoding === "deflate" ? response.pipe(createInflate())
-      : encoding === "br" ? response.pipe(createBrotliDecompress())
-        : response;
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of stream) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    bytes += buffer.length;
-    if (bytes > maxBytes) {
-      stream.destroy();
-      throw new Error("原文解压后超过 2 MiB 上限。 ");
-    }
-    chunks.push(buffer);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
 function looksBlocked(title: string, text: string): boolean {
   const sample = `${title} ${text.slice(0, 600)}`.toLowerCase();
   return /(登录|验证码|访问受限|安全验证|sign in|log in|captcha|enable javascript)/i.test(sample) && text.length < 2_000;

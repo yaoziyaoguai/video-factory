@@ -3,6 +3,7 @@ import { AuthGate } from "./components/AuthGate.js";
 import { AppShell } from "./components/AppShell.js";
 import { ExperimentsPage } from "./pages/ExperimentsPage.js";
 import { AssetsPage } from "./pages/AssetsPage.js";
+import { CasesPage } from "./pages/CasesPage.js";
 import { HomePage } from "./pages/HomePage.js";
 import { ProjectsPage } from "./pages/ProjectsPage.js";
 import { ResourcesPage } from "./pages/ResourcesPage.js";
@@ -27,6 +28,7 @@ function StudioRoutes() {
     <Routes>
       <Route path="/" element={<HomePage />} />
       <Route path="/topics" element={<TodayPage />} />
+      <Route path="/cases" element={<CasesPage />} />
       <Route path="/projects" element={<ProjectsPage />} />
       <Route path="/projects/:runId" element={<RunPage />} />
       <Route path="/assets" element={<AssetsPage />} />

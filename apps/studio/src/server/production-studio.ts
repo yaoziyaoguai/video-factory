@@ -3367,7 +3367,8 @@ function toRunSummary(run: WorkflowRun<ProductionBrief>): StudioRunSummary {
     ...(videoArtifact?.uri ? { videoContentUrl: `/api/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(videoArtifact.id)}/content` } : {}),
     ...(brief.creationContext ? {
       creationOrigin: brief.creationContext.origin,
-      opportunityId: brief.creationContext.opportunityId,
+      // 案例来源没有机会编号，投影时省略而不是给一个空串：空串看起来像一个真实编号。
+      ...(brief.creationContext.opportunityId ? { opportunityId: brief.creationContext.opportunityId } : {}),
     } : {}),
     ...(brief.seriesContext ? {
       seriesId: brief.seriesContext.seriesId,
