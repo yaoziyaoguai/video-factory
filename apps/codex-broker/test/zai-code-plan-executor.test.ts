@@ -1247,16 +1247,55 @@ describe("ZaiCodePlanExecutor", () => {
     assert.ok(Date.now() - startedAt < 1_000);
   });
 
-  it("rejects an oversized success response without buffering it all", async () => {
+  it("rejects an oversized success response and names the reason", async () => {
     const executor = new ZaiCodePlanExecutor({
       env: { ZAI_BIGMODEL_API_KEY: API_KEY },
-      fetchFn: async () => new Response(new Uint8Array(1024 * 1024 + 1), { status: 200 }),
+      fetchFn: async () => new Response(new Uint8Array(8 * 1024 * 1024 + 1), { status: 200 }),
     });
 
     await assert.rejects(
       () => executor.runTask(visualReviewTask()),
-      /response exceeds 1048576 bytes/,
+      (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.match(error.message, /response exceeds 8388608 bytes/);
+        // 这个原因码是终态失败唯一留下的证据：没有它，上游只能打出笼统的"服务端错误（HTTP 422）"。
+        assert.equal(error.details?.reasonCode, "response_too_large");
+        return true;
+      },
     );
+  });
+
+  // 订阅额度、推理长度这些"模型确实在工作"的失败，过去会被合进同一个 1 MiB 上限里，
+  // 于是 glm-5.3 在 max 强度下思考 110 秒就被判成总编不可用，全站静默退回规则保底。
+  // 这里钉住不变量：被丢弃的 reasoning 帧只受传输上限约束，不占交付内容的配额。
+  it("does not charge discarded reasoning frames against the delivered answer limit", async () => {
+    const payload = JSON.stringify(validReport());
+    const encoder = new TextEncoder();
+    const reasoningFrame = (text: string): string =>
+      `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: text } }] })}\n\n`;
+    const frames = [
+      // 40 帧 × 32 KB ≈ 1.25 MB 的推理流，已经超过交付上限，但一个字节都不该算进答案。
+      ...Array.from({ length: 40 }, () => reasoningFrame("思考".repeat(5_500))),
+      `data: ${JSON.stringify({ choices: [{ delta: { content: payload } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`,
+      "data: [DONE]\n\n",
+    ];
+    const fetchFn: typeof fetch = async () => new Response(new ReadableStream({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(encoder.encode(frame));
+        controller.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } });
+    const executor = new ZaiCodePlanExecutor({
+      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      fetchFn,
+      timeoutMs: 5_000,
+    });
+
+    const result = await executor.runTask(visualReviewTask());
+
+    assert.deepEqual(JSON.parse(result.output), validReport());
+    assert.equal(result.trace?.finishReason, "stop");
   });
 
   it("rejects malformed reports and findings outside the supplied duration", async () => {

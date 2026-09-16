@@ -57,6 +57,15 @@ export function publicModelFailure(error: unknown): string {
   if (/temporarily unavailable|role is unavailable/i.test(message)) return "暂时不可用";
   if (bridgeError?.failureKind === "model_provider_no_output") return "未返回结果";
   if (/socket .* failed|ECONN|ENOENT|could not connect/i.test(message)) return "连接失败";
+  // 422 既可能是服务端故障，也可能是"模型回来了但输出不合合同"。笼统写成"服务端错误"
+  // 会把后者藏起来——用户看到的只是"总编又没给建议"，而真正的原因（输出被合同拦下）永远不出现。
+  const failure = bridgeError?.failureDetails;
+  if (failure?.category === "invalid_output") {
+    return failure.reasonCode === "response_too_large"
+      ? "输出超过上限"
+      : `输出未通过合同（${failure.reasonCode}）`;
+  }
+  if (failure?.category === "invalid_request") return "请求未通过合同";
   if (bridgeError?.statusCode !== undefined) return `服务端错误（HTTP ${bridgeError.statusCode}）`;
   if (error instanceof RoleAgentLoopError && error.agentLoop.iterations.length > 0) return "质量审计未通过";
   return "调用失败";

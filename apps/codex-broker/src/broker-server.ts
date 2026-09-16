@@ -1183,6 +1183,7 @@ function publicExecutorMessage(message: string, transient = false): string {
   if (message.startsWith("Codex output exceeds ")) return "the model result exceeded the configured size limit.";
   if (message === "Codex finished without writing an output file.") return "the model did not return a result.";
   if (message.startsWith("Codex prompt exceeds ")) return "the task context exceeded the configured size limit.";
+  if (/response exceeds \d+ bytes/.test(message)) return "the model returned more data than the configured limit.";
   if (message.startsWith("Codex task kind ")) return "the requested role is unavailable on this model profile.";
   return "The model could not complete this step.";
 }

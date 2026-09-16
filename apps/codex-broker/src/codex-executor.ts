@@ -139,12 +139,19 @@ const AUTHENTICATION_CODEX_EXIT_PATTERN = /\b(?:unauthori[sz]ed|forbidden|authen
 const INVALID_REQUEST_CODEX_EXIT_PATTERN = /\b(?:invalid configuration|configuration error|invalid[_ -]?json[_ -]?schema|prompt rejected)\b/i;
 const RATE_LIMIT_CODEX_EXIT_PATTERN = /(?:\b(?:http\s*)?429\b|\btoo many requests\b|\brate[ _-]?limit(?:ed|ing)?\b)/i;
 const NETWORK_CODEX_EXIT_PATTERN = /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EPIPE)\b|connection (?:failed|reset|refused)/i;
+// 订阅额度耗尽是确定的限流，不是模糊的服务端错误，必须与 429 同等对待才能换候选：
+// 真实措辞（"You've hit your usage limit... purchase more credits"）不含 rate/429/capacity，
+// 漏掉它会让整条兜底链静默失效——请求被判成 terminal，备选 broker 一次都不会被调用。
+// quota 与被限流动词之间用有界窗口匹配（"exceeded your current quota" 夹了修饰词），
+// 窗口不跨句号。只认明确的额度与计费措辞，结构、质量与输出合同失败仍然保持 terminal。
+const QUOTA_EXHAUSTED_CODEX_EXIT_PATTERN = /(?:\busage limit\b|\binsufficient_quota\b|\bquota\b[^.\n]{0,24}\b(?:exceeded|exhausted|insufficient|reached|limit)\b|\b(?:exceeded|exhausted|insufficient|reached|over)\b[^.\n]{0,24}\bquota\b|\bcredit (?:balance|limit)\b|\b(?:purchase|buy|add|top up) more credits\b|\bout of credits\b|\bno credits\b|\bbilling (?:hard )?limit\b|\bspending limit\b|额度不足|配额|余额不足)/i;
 
 function isTransientCodexExit(stdout: string, stderr: string): boolean {
   const diagnostics = codexFailureDiagnostics(stdout, stderr);
   // 只有能明确归因到服务限流或容量的退出才允许换候选；其余非零退出保持 terminal。
   if (diagnostics.some((diagnostic) => TERMINAL_CODEX_EXIT_PATTERN.test(diagnostic))) return false;
-  return diagnostics.some((diagnostic) => TRANSIENT_CODEX_EXIT_PATTERN.test(diagnostic));
+  return diagnostics.some((diagnostic) => TRANSIENT_CODEX_EXIT_PATTERN.test(diagnostic)
+    || QUOTA_EXHAUSTED_CODEX_EXIT_PATTERN.test(diagnostic));
 }
 
 function isNoOutputCodexExit(stdout: string, stderr: string): boolean {
@@ -1810,7 +1817,7 @@ function codexExitClassification(
   if (INVALID_REQUEST_CODEX_EXIT_PATTERN.test(diagnostics)) {
     return { category: "invalid_request", reasonCode: "invalid_request" };
   }
-  if (RATE_LIMIT_CODEX_EXIT_PATTERN.test(diagnostics)) {
+  if (RATE_LIMIT_CODEX_EXIT_PATTERN.test(diagnostics) || QUOTA_EXHAUSTED_CODEX_EXIT_PATTERN.test(diagnostics)) {
     return { category: "rate_limited", reasonCode: "rate_limited" };
   }
   if (NETWORK_CODEX_EXIT_PATTERN.test(diagnostics)) {

@@ -36,7 +36,14 @@ const DEFAULT_TIMEOUT_MS = 1_200_000;
  */
 const DEFAULT_FIRST_OUTPUT_EVENT_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_TOKENS = 65_536;
+/** 合同答案的上限：模型最终 content 超过它就不可能解析出符合 schema 的结果。 */
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+/**
+ * 传输上限，只防失控读写，不是质量判据。SSE 每个 token 一帧 JSON，被丢弃的
+ * reasoning_content 与框架开销都计在这里；实测 glm-5.3 在 max 强度下思考 110 秒即撞穿 1 MiB，
+ * 而它真正要交付的 content 只有几十 KB。两个上限合成一个，就等于把"想得久"判成"总编没给建议"。
+ */
+const MAX_STREAM_BYTES = 8 * 1024 * 1024;
 const MAX_CONTRACT_REPAIR_OUTPUT_BYTES = 64 * 1024;
 const MAX_ERROR_RESPONSE_BYTES = 16 * 1024;
 const ERROR_RESPONSE_READ_TIMEOUT_MS = 250;
@@ -194,7 +201,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
         );
       }
       const requestIdDiagnostics = requestIdHashFor(response);
-      const envelopeFailureDetails = (reasonCode: "invalid_json" | "output_contract") => ({
+      const envelopeFailureDetails = (reasonCode: EnvelopeFailureReasonCode) => ({
         ...invalidOutputDetails(
           this.identity.providerId,
           modelId,
@@ -232,7 +239,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
             },
           ),
         })
-        : await readEnvelope(await readBoundedResponse(response), envelopeFailureDetails);
+        : await readEnvelope(await readBoundedResponse(response, envelopeFailureDetails), envelopeFailureDetails);
       const providerWaitMs = elapsedMs(requestStartedAt, this.now());
       const validationStartedAt = this.now();
       const responseDiagnostics = {
@@ -653,6 +660,9 @@ function elapsedMs(startedAt: number, finishedAt: number): number {
   return Math.max(0, Math.round(finishedAt - startedAt));
 }
 
+/** envelope 解析各路径共享的失败原因码；response_too_large 见 MAX_STREAM_BYTES。 */
+type EnvelopeFailureReasonCode = "invalid_json" | "output_contract" | "response_too_large";
+
 function invalidOutputDetails(
   providerId: string,
   modelId: string,
@@ -664,7 +674,8 @@ function invalidOutputDetails(
     | "timecode_out_of_bounds"
     | "task_schema"
     | "task_semantics"
-    | "repair_semantic_drift",
+    | "repair_semantic_drift"
+    | "response_too_large",
 ): CodexExecutorFailureDetails {
   return {
     category: "invalid_output",
@@ -749,7 +760,7 @@ async function readStreamedCompletion(
     /** 超过这个时间没有收到任何输出事件就判定为卡死；返回该情况下要抛出的错误。 */
     onFirstOutputEventTimeout: () => CodexExecutorError;
     abort: (reason: Error) => void;
-    failureDetails: (reasonCode: "invalid_json" | "output_contract") => CodexExecutorFailureDetails;
+    failureDetails: (reasonCode: EnvelopeFailureReasonCode) => CodexExecutorFailureDetails;
   },
 ): Promise<ZaiCompletionRead> {
   if (!response.body) {
@@ -773,8 +784,11 @@ async function readStreamedCompletion(
         : await reader.read();
       if (chunk.done) break;
       received += chunk.value.byteLength;
-      if (received > MAX_RESPONSE_BYTES) {
-        throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false);
+      // 这里量的是整条流（含被丢弃的推理帧），所以用传输上限；交付内容的配额在流结束时另算。
+      if (received > MAX_STREAM_BYTES) {
+        throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_STREAM_BYTES} bytes.`, false, {
+          details: options.failureDetails("response_too_large"),
+        });
       }
       buffer += decoder.decode(chunk.value, { stream: true });
       let newline = buffer.indexOf("\n");
@@ -816,6 +830,12 @@ async function readStreamedCompletion(
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
+  // 交付内容的配额：推理流已经在上面的传输上限里放过，这里只卡真正要解析的答案。
+  if (Buffer.byteLength(content, "utf8") > MAX_RESPONSE_BYTES) {
+    throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false, {
+      details: options.failureDetails("response_too_large"),
+    });
+  }
   return {
     content: content === "" ? undefined : content,
     diagnostics: responseDiagnostics(
@@ -854,7 +874,7 @@ function firstOutputEventDeadline(options: {
 
 function parseStreamEvent(
   payload: string,
-  options: { failureDetails: (reasonCode: "invalid_json" | "output_contract") => CodexExecutorFailureDetails },
+  options: { failureDetails: (reasonCode: EnvelopeFailureReasonCode) => CodexExecutorFailureDetails },
 ): Record<string, unknown> {
   let parsed: unknown;
   try {
@@ -879,17 +899,22 @@ function isEventStreamResponse(response: Response): boolean {
 /** 整包 JSON 响应归一到与流式相同的形状；这里没有分段事件可测，所以不给首事件时间。 */
 function readEnvelope(
   raw: string,
-  failureDetails: (reasonCode: "invalid_json" | "output_contract") => CodexExecutorFailureDetails,
+  failureDetails: (reasonCode: EnvelopeFailureReasonCode) => CodexExecutorFailureDetails,
 ): ZaiCompletionRead {
   const envelope = responseEnvelope(raw, failureDetails);
   return { content: envelope.content, diagnostics: envelope.diagnostics };
 }
 
-async function readBoundedResponse(response: Response): Promise<string> {
+async function readBoundedResponse(
+  response: Response,
+  failureDetails: (reasonCode: "response_too_large") => CodexExecutorFailureDetails,
+): Promise<string> {
   const declaredBytes = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declaredBytes) && declaredBytes > MAX_RESPONSE_BYTES) {
+  if (Number.isFinite(declaredBytes) && declaredBytes > MAX_STREAM_BYTES) {
     await response.body?.cancel().catch(() => undefined);
-    throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false);
+    throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_STREAM_BYTES} bytes.`, false, {
+      details: failureDetails("response_too_large"),
+    });
   }
   if (!response.body) return "";
   const reader = response.body.getReader();
@@ -900,9 +925,12 @@ async function readBoundedResponse(response: Response): Promise<string> {
       const { done, value } = await reader.read();
       if (done) break;
       received += value.byteLength;
-      if (received > MAX_RESPONSE_BYTES) {
+      // 整包 JSON 也可能带着被丢弃的 reasoning_content，所以传输上限与内容上限分开。
+      if (received > MAX_STREAM_BYTES) {
         await reader.cancel().catch(() => undefined);
-        throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false);
+        throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_STREAM_BYTES} bytes.`, false, {
+          details: failureDetails("response_too_large"),
+        });
       }
       chunks.push(Buffer.from(value));
     }
@@ -940,7 +968,7 @@ interface ZaiResponseDiagnostics {
 
 function responseEnvelope(
   raw: string,
-  failureDetails: (reasonCode: "invalid_json" | "output_contract") => CodexExecutorFailureDetails,
+  failureDetails: (reasonCode: EnvelopeFailureReasonCode) => CodexExecutorFailureDetails,
 ): { content: string | undefined; diagnostics: ZaiResponseDiagnostics } {
   let parsed: unknown;
   try {
@@ -968,6 +996,12 @@ function responseEnvelope(
   if (typeof choice.message.content !== "string") {
     throw new CodexExecutorError("ZAI Chat Completion response has invalid message content.", false, {
       details: failureDetails("output_contract"),
+    });
+  }
+  // 与流式路径同一个不变量：配额只卡交付的答案，不卡被丢弃的推理。
+  if (Buffer.byteLength(choice.message.content, "utf8") > MAX_RESPONSE_BYTES) {
+    throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false, {
+      details: failureDetails("response_too_large"),
     });
   }
   return { content: choice.message.content, diagnostics };

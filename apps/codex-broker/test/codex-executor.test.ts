@@ -2199,6 +2199,40 @@ describe("CodexExecutor.runTask", () => {
     }
   });
 
+  // 订阅额度耗尽曾被判成 execution_failed/process_exit → stage=completed_failure →
+  // 上游 model-fallback 拒绝换候选，于是 codex 优先、zai 兜底的链路一次都没触发过，
+  // 选题总编静默降级成规则保底。这里钉住生产环境真实措辞，防止再次退化成 terminal。
+  it("treats exhausted subscription quota as a switchable rate limit", async () => {
+    const diagnostics = [
+      "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 19th, 2026 4:21 PM.",
+      "insufficient_quota: You exceeded your current quota, please check your plan and billing details.",
+      "billing hard limit reached",
+      "Your credit balance is too low to access the model.",
+      "额度不足，请充值后重试",
+    ];
+    for (const diagnostic of diagnostics) {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-quota-"));
+      const executor = new CodexExecutor({
+        workspaceRoot,
+        spawnFn: fakeSpawn(({ child }) => {
+          child.stdout.end();
+          child.stderr.end(diagnostic);
+          child.emit("close", 1, null);
+        }),
+      });
+
+      await assert.rejects(
+        () => executor.runTask(parseTaskRequest(topicRequest())),
+        (error: unknown) => {
+          assert.ok(error instanceof CodexExecutorError);
+          assert.equal(error.transient, true, diagnostic);
+          assert.equal(error.details?.category, "rate_limited", diagnostic);
+          return true;
+        },
+      );
+    }
+  });
+
   it("classifies a completed model turn with no result for candidate fallback", async () => {
     for (const diagnostic of ["The model could not complete this step.", "model returned no output"]) {
       const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-no-output-"));

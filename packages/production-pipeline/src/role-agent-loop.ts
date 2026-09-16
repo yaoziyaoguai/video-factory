@@ -1622,10 +1622,15 @@ function validatePlanningDisposition(
   planningRole: boolean,
 ): RoleAuditPlanningDisposition | null | undefined {
   if (!planningRole) {
-    if (value !== undefined && value !== null) {
-      throw new Error("Non-planning role audits cannot route work outside their role.");
-    }
-    return value === null ? null : undefined;
+    if (value === null) return null;
+    if (value === undefined) return undefined;
+    // 非规划角色的审计 payload 从未说明自己是不是规划角色，所以"非规划角色输出 null"这条
+    // 指令对模型不可执行，它会顺着 repair 语境填一个 revise_here。而 revise_here 的语义是
+    // "当前角色就地修"，与 verdict: repair 完全重合，不含任何越权路由；为此作废一整轮审计，
+    // 丢掉的是已经抓到真实事实错误的那份结论。归一化为 null。needs_source/needs_user 才是
+    // 真的把工作路由出当前角色，仍然拒绝。
+    if (isRecordValue(value) && value.action === "revise_here") return null;
+    throw new Error("Non-planning role audits cannot route work outside their role.");
   }
   if (verdict === "pass") {
     if (value !== null) throw new Error("Passing planning role audits must set planningDisposition to null.");
