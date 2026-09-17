@@ -25,11 +25,14 @@ export { BROKER_TASK_KINDS } from "./task-definitions.js";
 export type { BrokerTaskKind } from "./task-definitions.js";
 
 const OPENAI_TASK_KINDS = [...BROKER_TASK_KINDS] as const satisfies readonly BrokerTaskKind[];
-export const ZAI_TASK_KINDS = [...BROKER_TASK_KINDS] as const satisfies readonly BrokerTaskKind[];
-export const DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID = "glm-5.3-flash";
-export const DEFAULT_ZAI_TEXT_MODEL_ID = "glm-5.3";
+export const DEEPSEEK_TASK_KINDS = [...BROKER_TASK_KINDS] as const satisfies readonly BrokerTaskKind[];
+/**
+ * DeepSeek 的首选模型：既能读 image_url 的 data URI，也接受 reasoning_effort=xhigh，
+ * 所以文本与视觉两角都由它默认承担（两者仍可分开配置，见 chat-completions-executor.ts）。
+ */
+export const DEFAULT_DEEPSEEK_MODEL_ID = "deepseek-flash";
 
-export type CodexExecutorProfileId = "openai" | "zai";
+export type CodexExecutorProfileId = "openai" | "deepseek";
 
 export interface CodexExecutorIdentity {
   profileId: CodexExecutorProfileId;
@@ -53,7 +56,7 @@ export interface CodexExecutorProfile {
 export function codexExecutorProfileFor(
   profileId: CodexExecutorProfileId,
   openaiModel?: string,
-  zaiModel = DEFAULT_ZAI_TEXT_MODEL_ID,
+  chatCompletionsModel?: string,
 ): CodexExecutorProfile {
   if (profileId === "openai") {
     return {
@@ -69,9 +72,9 @@ export function codexExecutorProfileFor(
   return {
     identity: {
       profileId,
-      providerId: "zai-bigmodel-api",
-      modelId: zaiModel,
-      taskKinds: [...ZAI_TASK_KINDS],
+      providerId: "deepseek",
+      modelId: chatCompletionsModel ?? DEFAULT_DEEPSEEK_MODEL_ID,
+      taskKinds: [...DEEPSEEK_TASK_KINDS],
     },
   };
 }
@@ -571,13 +574,20 @@ export interface BrokerTaskExecutor {
   runTask(task: ValidatedTask, options?: CodexExecutionOptions): Promise<CodexExecutionResult>;
 }
 
+/**
+ * 这个任务是否真的把图像送上了线路。`withImages` 路由与"能不能按请求换模型"必须共用这一个判据，
+ * 否则两处会各说各话：路由认为带图、覆盖却以为纯文本，于是一个看不见图的模型接下了复核。
+ */
+export function taskCarriesImages(task: ValidatedTask): boolean {
+  if (task.kind === "role-audit") return task.payload.images.length > 0;
+  if (task.kind === "asset-rank") return task.payload.thumbnails.length > 0;
+  return task.kind === "reference-grammar" || task.kind === "visual-review";
+}
+
 export function modelIdForTask(identity: CodexExecutorIdentity, task: ValidatedTask): string {
   const route = identity.taskModelRoutes?.[task.kind];
   if (route) {
-    const withImages = task.kind === "role-audit"
-      ? task.payload.images.length > 0
-      : task.kind === "asset-rank" && task.payload.thumbnails.length > 0;
-    return withImages ? route.withImages : route.withoutImages;
+    return taskCarriesImages(task) ? route.withImages : route.withoutImages;
   }
   return identity.taskModels?.[task.kind] ?? identity.modelId;
 }

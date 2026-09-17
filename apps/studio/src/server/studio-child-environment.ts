@@ -1,4 +1,4 @@
-const BROKER_ONLY_CREDENTIALS = ["ZAI_BIGMODEL_API_KEY", "ZAI_API_KEY"] as const;
+const BROKER_ONLY_CREDENTIALS = ["DEEPSEEK_API_KEY"] as const;
 
 export function buildStudioChildEnvironment(
   environment: NodeJS.ProcessEnv,

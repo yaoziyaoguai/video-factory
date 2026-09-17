@@ -475,8 +475,8 @@ describe("role agent loop audit boundary", () => {
           throw new CodexBridgeError("bridge completed with failure", false, "completed_failure", 422, undefined, {
             category,
             reasonCode,
-            providerId: "zai-bigmodel-api",
-            modelId: "glm-5.3-flash",
+            providerId: "deepseek",
+            modelId: "deepseek-flash",
             ...(fieldPath ? { fieldPath } : {}),
             queueWaitMs: 0,
             providerWaitMs: 989_138,
@@ -1445,7 +1445,7 @@ describe("role agent loop audit boundary", () => {
     );
     // 非规划角色的审计 payload 里没有字段说明它是不是规划角色，模型只能顺着 repair 语境填一个
     // revise_here。它的语义与 verdict: repair 完全重合、不含越权路由，所以不该作废整轮审计——
-    // 实测 glm-5.3 在选题总编上就这么填了一次，代价是一整轮五分钟的审计被丢掉重跑。
+    // 实测 deepseek-flash 在选题总编上就这么填了一次，代价是一整轮五分钟的审计被丢掉重跑。
     assert.equal(
       validateRoleAudit({ ...repairingAudit(), planningDisposition: { action: "revise_here", issueIndexes: [0] } }).planningDisposition,
       null,

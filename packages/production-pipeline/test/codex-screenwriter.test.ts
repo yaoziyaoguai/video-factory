@@ -139,7 +139,7 @@ describe("CodexScreenwriterAgent", () => {
     assert.equal(client.calls.length, 0);
   });
 
-  it("routes stateless ZAI production and independent OpenAI audit to separate clients", async () => {
+  it("routes stateless DeepSeek production and independent OpenAI audit to separate clients", async () => {
     const input = screenwriterInput();
     const visualProof = "两条真实标题的措辞差异可以直接并列核对。";
     const visualPlan = {
@@ -212,8 +212,8 @@ describe("CodexScreenwriterAgent", () => {
     };
     const producerClient = new SequencedCodexClient(
       [first, repaired],
-      "zai-bigmodel-api",
-      "glm-5.3",
+      "deepseek",
+      "deepseek-flash",
     );
     const auditClient = new SequencedCodexClient(
       [repairAudit, passAudit],
@@ -224,11 +224,11 @@ describe("CodexScreenwriterAgent", () => {
       client: producerClient,
       auditClient,
       maxReviewIterations: 2,
-      modelId: "glm-5.3",
+      modelId: "deepseek-flash",
       sessionMode: "stateless",
     });
 
-    const execution = await agent.draftDetailed({ ...input, selectedModelId: "glm-5.3" });
+    const execution = await agent.draftDetailed({ ...input, selectedModelId: "deepseek-flash" });
 
     assert.equal(execution.output.scenes[0]?.narration, "别眨眼，先看结果。");
     assert.deepEqual(producerClient.calls.map((call) => call.kind), ["script-draft", "script-draft"]);
@@ -256,8 +256,8 @@ describe("CodexScreenwriterAgent", () => {
         iteration.auditTrace?.modelId,
       ]),
       [
-        ["zai-bigmodel-api", "glm-5.3", "openai", "gpt-5.6-sol"],
-        ["zai-bigmodel-api", "glm-5.3", "openai", "gpt-5.6-sol"],
+        ["deepseek", "deepseek-flash", "openai", "gpt-5.6-sol"],
+        ["deepseek", "deepseek-flash", "openai", "gpt-5.6-sol"],
       ],
     );
 

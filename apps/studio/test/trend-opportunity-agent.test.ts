@@ -927,7 +927,7 @@ describe("TrendOpportunityAgent", () => {
     // 真实失败链：候选耗尽错误带上模型身份与原因码，外层 loop 错误再挂一串机器诊断。
     const exhausted = new ModelCandidatesExhaustedError([
       { modelId: "gpt-5.6-sol", providerId: "openai", error: new Error("invalid_json") },
-      { modelId: "glm-5.3", providerId: "zai", error: new Error("invalid_json") },
+      { modelId: "deepseek-flash", providerId: "deepseek", error: new Error("invalid_json") },
     ]);
     const loopError = new Error(
       `${exhausted.message}\n诊断：stage=completed_failure；httpStatus=422；reasonCode=invalid_json`,
@@ -943,7 +943,7 @@ describe("TrendOpportunityAgent", () => {
     const reason = agent.generationReceipt()?.failureReason ?? "";
 
     assert.equal(reason, "已尝试 2 个模型，都没能给出可用结果。");
-    assert.doesNotMatch(reason, /诊断：|stage=|reasonCode=|httpStatus=|gpt-5\.6-sol|glm-5\.3|invalid_json/);
+    assert.doesNotMatch(reason, /诊断：|stage=|reasonCode=|httpStatus=|gpt-5\.6-sol|deepseek-flash|invalid_json/);
   });
 
   it("does not let a vague rule fallback become producible when the semantic model fails", async () => {

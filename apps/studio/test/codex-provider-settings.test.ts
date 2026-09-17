@@ -7,10 +7,10 @@ import { describe, it } from "node:test";
 import { REQUIRED_CODEX_TASK_CONTRACT_DIGESTS } from "@video-factory/production-pipeline";
 import {
   DEFAULT_CODEX_SOCKET_PATH,
-  DEFAULT_ZAI_CODEX_SOCKET_PATH,
+  DEFAULT_DEEPSEEK_CODEX_SOCKET_PATH,
   auditedRoleCandidateAvailability,
   readCodexProviderSettings,
-  readZaiCodexProviderSettings,
+  readDeepseekCodexProviderSettings,
   resolveCodexSocketPath,
   type CodexSocketStatus,
 } from "../src/server/codex-provider-settings.js";
@@ -59,7 +59,7 @@ describe("readCodexProviderSettings", () => {
     assert.ok(settings.taskKinds.includes("role-audit"));
     assert.deepEqual(
       auditedRoleCandidateAvailability(settings, { available: false, taskKinds: [] }, "creative-treatment"),
-      { codex: true, zai: false },
+      { codex: true, deepseek: false },
     );
   });
 
@@ -208,29 +208,32 @@ describe("readCodexProviderSettings", () => {
   });
 });
 
-describe("readZaiCodexProviderSettings", () => {
-  it("requires the exact ZAI Coding Plan broker identity and preserves task models", async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), "vf-zai-codex-settings-"));
+describe("readDeepseekCodexProviderSettings", () => {
+  it("requires the exact DeepSeek broker identity and preserves task models", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "vf-deepseek-codex-settings-"));
     const socketPath = path.join(directory, "worker.sock");
     let identity: Record<string, unknown> = {
-      profileId: "zai",
-      providerId: "zai-bigmodel-api",
-      modelId: "glm-5.3",
+      profileId: "deepseek",
+      providerId: "deepseek",
+      modelId: "deepseek-flash",
       taskKinds: ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"],
       taskModels: {
-        "topic-ideas": "glm-5.3",
-        "series-roadmap": "glm-5.3",
-        "director-plan": "glm-5.3",
-        "script-draft": "glm-5.3",
-        "publish-copy": "glm-5.3",
-        "asset-rank": "glm-5.3-flash",
-        "reference-grammar": "glm-5.3-flash",
-        "visual-review": "glm-5.3-flash",
-        "role-audit": "glm-5.3-flash",
+        "topic-ideas": "deepseek-flash",
+        "series-roadmap": "deepseek-flash",
+        "director-plan": "deepseek-flash",
+        "script-draft": "deepseek-flash",
+        "publish-copy": "deepseek-flash",
+        "asset-rank": "deepseek-v4-pro",
+        "reference-grammar": "deepseek-flash",
+        "visual-review": "deepseek-flash",
+        "role-audit": "deepseek-v4-pro",
       },
+      // 带图的任务只能落到 flash：pro 接受 image_url 却收不到图像，会把"没看过图"当成审片结论。
+      // 纯文本的 asset-rank / role-audit 走 pro 是合法的，夹具故意这样配，才验得出 studio 是
+      // 原样保留 broker 公告的路由、而不是自己按 kind 猜一个。
       taskModelRoutes: {
-        "asset-rank": { withoutImages: "glm-5.3", withImages: "glm-5.3-flash" },
-        "role-audit": { withoutImages: "glm-5.3", withImages: "glm-5.3-flash" },
+        "asset-rank": { withoutImages: "deepseek-v4-pro", withImages: "deepseek-flash" },
+        "role-audit": { withoutImages: "deepseek-v4-pro", withImages: "deepseek-flash" },
       },
       taskContracts: REQUIRED_CODEX_TASK_CONTRACT_DIGESTS,
     };
@@ -247,30 +250,30 @@ describe("readZaiCodexProviderSettings", () => {
     });
 
     try {
-      const ready = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
+      const ready = await readDeepseekCodexProviderSettings({ VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH: socketPath });
       assert.equal(ready.available, true);
-      assert.equal(ready.taskModels?.["visual-review"], "glm-5.3-flash");
+      assert.equal(ready.taskModels?.["visual-review"], "deepseek-flash");
       assert.deepEqual(ready.taskModelRoutes, identity.taskModelRoutes);
 
-      identity = { ...identity, taskModelRoutes: { "role-audit": { withImages: "glm-5.3-flash" } } };
-      const malformedRoute = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
+      identity = { ...identity, taskModelRoutes: { "role-audit": { withImages: "deepseek-flash" } } };
+      const malformedRoute = await readDeepseekCodexProviderSettings({ VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH: socketPath });
       assert.equal(malformedRoute.available, false);
       assert.match(malformedRoute.reason, /不兼容的协议版本/);
 
       identity = {
         ...identity,
-        modelId: "glm-5.3-preview",
+        modelId: "deepseek-flash-preview",
         taskModelRoutes: {
-          "asset-rank": { withoutImages: "glm-5.3", withImages: "glm-5.3-flash" },
-          "role-audit": { withoutImages: "glm-5.3", withImages: "glm-5.3-flash" },
+          "asset-rank": { withoutImages: "deepseek-v4-pro", withImages: "deepseek-flash" },
+          "role-audit": { withoutImages: "deepseek-v4-pro", withImages: "deepseek-flash" },
         },
       };
-      const brokerSelectedModel = await readZaiCodexProviderSettings({
-        VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath,
-        ZAI_TEXT_MODEL_ID: "studio-does-not-own-this-setting",
+      const brokerSelectedModel = await readDeepseekCodexProviderSettings({
+        VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH: socketPath,
+        DEEPSEEK_TEXT_MODEL_ID: "studio-does-not-own-this-setting",
       });
       assert.equal(brokerSelectedModel.available, true);
-      assert.equal(brokerSelectedModel.modelId, "glm-5.3-preview");
+      assert.equal(brokerSelectedModel.modelId, "deepseek-flash-preview");
       assert.deepEqual(brokerSelectedModel.taskModels, identity.taskModels);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -280,16 +283,16 @@ describe("readZaiCodexProviderSettings", () => {
 
   it("uses a distinct default socket from the OpenAI Codex broker", async () => {
     let probedPath = "";
-    await readZaiCodexProviderSettings({}, { socketProbe: async (socketPath) => {
+    await readDeepseekCodexProviderSettings({}, { socketProbe: async (socketPath) => {
       probedPath = socketPath;
       return "missing";
     } });
-    assert.equal(probedPath, DEFAULT_ZAI_CODEX_SOCKET_PATH);
-    assert.notEqual(DEFAULT_ZAI_CODEX_SOCKET_PATH, DEFAULT_CODEX_SOCKET_PATH);
+    assert.equal(probedPath, DEFAULT_DEEPSEEK_CODEX_SOCKET_PATH);
+    assert.notEqual(DEFAULT_DEEPSEEK_CODEX_SOCKET_PATH, DEFAULT_CODEX_SOCKET_PATH);
   });
 
-  it("fails closed when ZAI advertises creative-treatment without the pinned contract digest", async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), "vf-zai-settings-treatment-digest-"));
+  it("fails closed when DeepSeek advertises creative-treatment without the pinned contract digest", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "vf-ds-treatment-digest-"));
     const socketPath = path.join(directory, "worker.sock");
     const pinnedDigests = REQUIRED_CODEX_TASK_CONTRACT_DIGESTS as Record<string, string>;
     let taskContracts: Record<string, string> = { ...pinnedDigests, "creative-treatment": "0".repeat(64) };
@@ -297,11 +300,11 @@ describe("readZaiCodexProviderSettings", () => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({
         protocolVersion: "video-factory/codex-bridge-v2",
-        profileId: "zai",
-        providerId: "zai-bigmodel-api",
-        modelId: "glm-5.3",
+        profileId: "deepseek",
+        providerId: "deepseek",
+        modelId: "deepseek-flash",
         taskKinds: ["creative-treatment", "role-audit"],
-        taskModels: { "creative-treatment": "glm-5.3", "role-audit": "glm-5.3-flash" },
+        taskModels: { "creative-treatment": "deepseek-flash", "role-audit": "deepseek-v4-pro" },
         taskContracts,
       }));
     });
@@ -314,18 +317,18 @@ describe("readZaiCodexProviderSettings", () => {
     });
 
     try {
-      const wrongDigest = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
+      const wrongDigest = await readDeepseekCodexProviderSettings({ VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH: socketPath });
       assert.equal(wrongDigest.available, false);
       assert.match(wrongDigest.reason, /不兼容的协议版本/);
 
       taskContracts = { ...pinnedDigests };
       delete taskContracts["creative-treatment"];
-      const missingDigest = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
+      const missingDigest = await readDeepseekCodexProviderSettings({ VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH: socketPath });
       assert.equal(missingDigest.available, false);
       assert.match(missingDigest.reason, /不兼容的协议版本/);
 
       taskContracts = { ...pinnedDigests };
-      const ready = await readZaiCodexProviderSettings({ VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: socketPath });
+      const ready = await readDeepseekCodexProviderSettings({ VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH: socketPath });
       assert.equal(ready.available, true);
       assert.ok(ready.taskKinds.includes("creative-treatment"));
     } finally {
@@ -343,15 +346,15 @@ describe("auditedRoleCandidateAvailability", () => {
       { available: true, taskKinds: ["script-draft", "role-audit"] },
       unavailable,
       "script-draft",
-    ), { codex: true, zai: false });
+    ), { codex: true, deepseek: false });
   });
 
-  it("selects only ZAI when ZAI owns both production and independent audit", () => {
+  it("selects only DeepSeek when DeepSeek owns both production and independent audit", () => {
     assert.deepEqual(auditedRoleCandidateAvailability(
       { available: true, taskKinds: ["role-audit"] },
       { available: true, taskKinds: ["script-draft", "role-audit"] },
       "script-draft",
-    ), { codex: false, zai: true });
+    ), { codex: false, deepseek: true });
   });
 
   it("selects only providers that own both the producer and audit tasks", () => {
@@ -359,12 +362,12 @@ describe("auditedRoleCandidateAvailability", () => {
       { available: true, taskKinds: ["director-plan", "role-audit"] },
       { available: true, taskKinds: ["director-plan"] },
       "director-plan",
-    ), { codex: true, zai: false });
+    ), { codex: true, deepseek: false });
     assert.deepEqual(auditedRoleCandidateAvailability(
       { available: true, taskKinds: ["director-plan"] },
       { available: true, taskKinds: ["director-plan"] },
       "director-plan",
-    ), { codex: false, zai: false });
+    ), { codex: false, deepseek: false });
   });
 });
 
@@ -374,12 +377,12 @@ describe("buildProviderCatalog codex fallback", () => {
       { python: true, ffmpeg: true, ffprobe: true, say: false },
       {},
       { available: false, reason: "OpenAI broker unavailable" },
-      { available: false, reason: "ZAI broker unavailable" },
+      { available: false, reason: "DeepSeek broker unavailable" },
     );
 
     const requirement = providers.find((provider) => provider.id === "api-visual-director-v1")?.requirement ?? "";
     assert.equal(requirement.match(/OpenAI broker unavailable/g)?.length, 1);
-    assert.equal(requirement.match(/ZAI broker unavailable/g)?.length, 1);
+    assert.equal(requirement.match(/DeepSeek broker unavailable/g)?.length, 1);
   });
 
   it("shows reviewed video model catalogs before provider credentials are configured", () => {
@@ -451,7 +454,7 @@ describe("buildProviderCatalog codex fallback", () => {
 
     const screenwriter = providers.find((provider) => provider.id === "codex-screenwriter-v1");
     assert.equal(screenwriter?.defaultModelId, "gpt-5.6-sol");
-    assert.equal(screenwriter?.modelProfiles?.[0]?.id, "gpt-5.6-sol");
+    assert.deepEqual(screenwriter?.modelProfiles?.map((model) => model.id), ["deepseek-flash", "gpt-5.6-sol"]);
   });
 
   it("offers every reviewed broker model to roles that can switch per request, and only the default elsewhere", () => {
@@ -468,11 +471,11 @@ describe("buildProviderCatalog codex fallback", () => {
     );
 
     // script-draft 已接入"按请求换模型"：候选表里的每个模型都能真的送上线路，所以全部列出；
-    // 末尾的 glm-5.3 是每个角色都有的跨 broker 候选，此处没有 ZAI broker，所以它不可用。
+    // 最前面的 deepseek-flash 是每个角色都有的跨 broker 首选候选，此处没有 DeepSeek broker，所以它不可用。
     const screenwriter = providers.find((provider) => provider.id === "codex-screenwriter-v1");
     assert.deepEqual(
       screenwriter?.modelProfiles?.map((model) => [model.id, model.recommended]),
-      [["gpt-5.6-sol", true], ["gpt-6-astra", false], ["glm-5.3", false]],
+      [["deepseek-flash", false], ["gpt-5.6-sol", true], ["gpt-6-astra", false]],
     );
     assert.equal(screenwriter?.defaultModelId, "gpt-5.6-sol");
 
@@ -481,14 +484,14 @@ describe("buildProviderCatalog codex fallback", () => {
     for (const providerId of ["codex-creative-treatment-v1", "api-visual-director-v1", "codex-role-auditor-v1"]) {
       assert.deepEqual(
         providers.find((provider) => provider.id === providerId)?.modelProfiles?.map((model) => model.id),
-        ["gpt-5.6-sol", "gpt-6-astra", "glm-5.3"],
+        ["deepseek-flash", "gpt-5.6-sol", "gpt-6-astra"],
         `${providerId} 应当列出 broker 公告的全部候选模型`,
       );
     }
 
     // 其余角色还没有按请求换模型的能力，展开候选表只会列出选中必然报错的选项。
     const publishCopy = providers.find((provider) => provider.id === "codex-publish-copy-v1");
-    assert.deepEqual(publishCopy?.modelProfiles?.map((model) => model.id), ["gpt-5.6-sol", "glm-5.3"]);
+    assert.deepEqual(publishCopy?.modelProfiles?.map((model) => model.id), ["deepseek-flash", "gpt-5.6-sol"]);
   });
 
   it("shows the role-specific production and audit models reported by the broker", () => {
@@ -511,7 +514,7 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.equal(providers.find((provider) => provider.id === "codex-role-auditor-v1")?.defaultModelId, "gpt-5.6-sol");
   });
 
-  it("offers OpenAI and glm-5.3 as one ordered model pool for script and director nodes", () => {
+  it("offers DeepSeek and OpenAI as one ordered model pool for script and director nodes", () => {
     const taskKinds = ["script-draft", "director-plan", "role-audit"];
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },
@@ -527,8 +530,8 @@ describe("buildProviderCatalog codex fallback", () => {
         available: true,
         reason: "",
         taskKinds: ["script-draft", "director-plan"],
-        modelId: "glm-5.3",
-        taskModels: { "script-draft": "glm-5.3", "director-plan": "glm-5.3" },
+        modelId: "deepseek-flash",
+        taskModels: { "script-draft": "deepseek-flash", "director-plan": "deepseek-flash" },
       },
     );
 
@@ -536,9 +539,9 @@ describe("buildProviderCatalog codex fallback", () => {
       const provider = providers.find((candidate) => candidate.id === providerId);
       assert.equal(provider?.available, true);
       assert.equal(provider?.defaultModelId, "gpt-5.6-sol");
-      assert.deepEqual(provider?.modelProfiles?.map((model) => model.id), ["gpt-5.6-sol", "glm-5.3"]);
-      assert.deepEqual(provider?.modelProfiles?.map((model) => model.recommended), [true, false]);
-      assert.deepEqual(provider?.modelProfiles?.map((model) => model.providerFamily), ["openai", "zai-bigmodel"]);
+      assert.deepEqual(provider?.modelProfiles?.map((model) => model.id), ["deepseek-flash", "gpt-5.6-sol"]);
+      assert.deepEqual(provider?.modelProfiles?.map((model) => model.recommended), [false, true]);
+      assert.deepEqual(provider?.modelProfiles?.map((model) => model.providerFamily), ["deepseek", "openai"]);
     }
   });
 
@@ -556,7 +559,7 @@ describe("buildProviderCatalog codex fallback", () => {
         available: true,
         reason: "",
         taskKinds: ["script-draft", "director-plan"],
-        modelId: "glm-5.3",
+        modelId: "deepseek-flash",
       },
     );
 
@@ -608,50 +611,51 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.equal(visualReview?.capability, "quality.review.visual");
   });
 
-  it("advertises GLM-5.3-Flash as the preferred visual reviewer only after its isolated broker is ready", () => {
+  it("advertises DeepSeek as the preferred visual reviewer only after its isolated broker is ready", () => {
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },
       {},
       { available: true, reason: "" },
       { available: true, reason: "" },
     );
-    const glm = providers.find((provider) => provider.id === "glm-visual-review-v1");
+    const deepseek = providers.find((provider) => provider.id === "deepseek-visual-review-v1");
 
-    assert.equal(glm?.available, true);
-    assert.equal(glm?.billing, "subscription");
-    assert.equal(glm?.approvalPolicy, "none");
-    assert.equal(glm?.estimatedCnyPerClip, undefined);
-    assert.equal(glm?.capability, "quality.review.visual");
-    assert.match(glm?.description ?? "", /GLM-5\.3-Flash/);
-    assert.match(glm?.description ?? "", /Code Plan/);
+    assert.equal(deepseek?.label, "DeepSeek 视觉审片");
+    assert.equal(deepseek?.available, true);
+    assert.equal(deepseek?.billing, "subscription");
+    assert.equal(deepseek?.approvalPolicy, "none");
+    assert.equal(deepseek?.estimatedCnyPerClip, undefined);
+    assert.equal(deepseek?.capability, "quality.review.visual");
+    assert.match(deepseek?.description ?? "", /deepseek-flash/);
+    assert.match(deepseek?.description ?? "", /关键帧/);
   });
 
-  it("does not advertise GLM visual review without its own independent audit task", () => {
+  it("does not advertise DeepSeek visual review without its own independent audit task", () => {
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },
       {},
       { available: true, reason: "", taskKinds: ["visual-review"] },
       { available: true, reason: "", taskKinds: ["visual-review"] },
     );
-    const glm = providers.find((provider) => provider.id === "glm-visual-review-v1");
+    const deepseek = providers.find((provider) => provider.id === "deepseek-visual-review-v1");
 
-    assert.equal(glm?.available, false);
-    assert.equal(glm?.modelProfiles?.[0]?.available, false);
-    assert.match(glm?.requirement ?? "", /role-audit/);
-    assert.match(glm?.requirement ?? "", /独立质量复核/);
+    assert.equal(deepseek?.available, false);
+    assert.equal(deepseek?.modelProfiles?.[0]?.available, false);
+    assert.match(deepseek?.requirement ?? "", /role-audit/);
+    assert.match(deepseek?.requirement ?? "", /独立质量复核/);
   });
 
-  it("shows the configured GLM visual-review model instead of a hard-coded model", () => {
+  it("shows the configured DeepSeek visual-review model instead of a hard-coded model", () => {
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },
-      { ZAI_VISUAL_REVIEW_MODEL_ID: "glm-5.3-flash-preview" },
+      { DEEPSEEK_MODEL_ID: "deepseek-flash-preview" },
       { available: true, reason: "" },
       { available: true, reason: "", taskKinds: ["visual-review"] },
     );
-    const glm = providers.find((provider) => provider.id === "glm-visual-review-v1");
+    const deepseek = providers.find((provider) => provider.id === "deepseek-visual-review-v1");
 
-    assert.equal(glm?.defaultModelId, "glm-5.3-flash-preview");
-    assert.equal(glm?.modelProfiles?.[0]?.id, "glm-5.3-flash-preview");
+    assert.equal(deepseek?.defaultModelId, "deepseek-flash-preview");
+    assert.equal(deepseek?.modelProfiles?.[0]?.id, "deepseek-flash-preview");
   });
 
   it("keeps digital-human generation separate from ordinary Ark video models", () => {

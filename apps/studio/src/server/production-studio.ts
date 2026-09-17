@@ -2516,7 +2516,7 @@ export class ProductionStudio {
     const providers = await this.options.listProviders();
     if (brief.runPurpose !== "test") {
       const selectedReviewProvider = brief.providers.visualReview;
-      const finalReviewers = ["glm-visual-review-v1", "codex-visual-review-v1"].map((id) => (
+      const finalReviewers = ["deepseek-visual-review-v1", "codex-visual-review-v1"].map((id) => (
         providers.find((provider) => provider.id === id
           && provider.capability === "quality.review.visual"
           && provider.available
@@ -2527,12 +2527,12 @@ export class ProductionStudio {
         && provider.available
         && provider.kind !== "test");
       if (!selectedReviewProvider
-        || !["glm-visual-review-v1", "codex-visual-review-v1"].includes(selectedReviewProvider)
+        || !["deepseek-visual-review-v1", "codex-visual-review-v1"].includes(selectedReviewProvider)
         || finalReviewers.some((provider) => !provider)
         || reviewerModels.length !== 2
         || new Set(reviewerModels).size !== 2
         || !roleAuditReady) {
-        throw new StudioInputError("正式制作需要 GLM 与 Codex 使用两个不同模型完成独立双审；请先在创作设置中恢复两种审片和独立质量复核能力。");
+        throw new StudioInputError("正式制作需要 DeepSeek 与 Codex 使用两个不同模型完成独立双审；请先在创作设置中恢复两种审片和独立质量复核能力。");
       }
     }
     const selectedVisualSources = new Set([

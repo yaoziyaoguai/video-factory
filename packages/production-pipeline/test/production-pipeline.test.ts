@@ -416,8 +416,8 @@ function completedDualVisualReview(
   input: pipeline.VisualReviewAgentInput,
   output: pipeline.VisualReviewReport,
   primary: { providerId: string; modelId: string } = {
-    providerId: "glm-visual-review-v1",
-    modelId: "glm-5.3-flash",
+    providerId: "deepseek-visual-review-v1",
+    modelId: "deepseek-flash",
   },
 ): pipeline.VisualReviewExecution {
   const secondary = { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol" };
@@ -467,13 +467,13 @@ describe("ProductionPipeline", () => {
           },
         },
       }, {
-        providerId: "zai-bigmodel-api",
+        providerId: "deepseek",
         agent: {
           id: "codex-screenwriter-v1",
-          modelId: "glm-5.3",
+          modelId: "deepseek-flash",
           draft: async () => { throw new Error("Detailed draft must be used."); },
           draftDetailed: async () => {
-            calls.push("glm-5.3");
+            calls.push("deepseek-flash");
             return {
               output: {
                 scenes: [1, 2, 3].map((position) => ({
@@ -489,8 +489,8 @@ describe("ProductionPipeline", () => {
                 taskKind: "script-draft" as const,
                 promptVersion: "model-switch-test-v1",
                 prompt: "bounded test prompt",
-                providerId: "zai-bigmodel-api",
-                modelId: "glm-5.3",
+                providerId: "deepseek",
+                modelId: "deepseek-flash",
               },
             };
           },
@@ -512,14 +512,14 @@ describe("ProductionPipeline", () => {
 
     const stale = await subject.applyNodeExecutionConfiguration(failed.id, "script", {
       ...failed.initialInput,
-      models: { "codex-screenwriter-v1": "glm-5.3" },
+      models: { "codex-screenwriter-v1": "deepseek-flash" },
       modelSelectionSources: { "codex-screenwriter-v1": "node_override" },
     }, "owner");
     const resumed = await subject.resumeStale(stale.id);
 
     assert.equal(resumed.status, "needs_human");
-    assert.deepEqual(calls, ["gpt-5.6-sol", "glm-5.3"]);
-    assert.equal(resumed.nodeRuns.find((node) => node.nodeId === "script")?.executionReceipt?.modelId, "glm-5.3");
+    assert.deepEqual(calls, ["gpt-5.6-sol", "deepseek-flash"]);
+    assert.equal(resumed.nodeRuns.find((node) => node.nodeId === "script")?.executionReceipt?.modelId, "deepseek-flash");
   });
 
   it("persists every failed screenwriter model instead of reporting only the preferred model", async () => {
@@ -532,8 +532,8 @@ describe("ProductionPipeline", () => {
     });
     const screenwriterAgent = new pipeline.FallbackScreenwriterAgent({
       candidates: [{
-        providerId: "zai-bigmodel-api",
-        agent: failingAgent("glm-5.3", new pipeline.CodexBridgeError(
+        providerId: "deepseek",
+        agent: failingAgent("deepseek-flash", new pipeline.CodexBridgeError(
           "socket /private/run/producer failed with ECONNREFUSED secret-primary",
           true,
           "not_accepted",
@@ -556,12 +556,12 @@ describe("ProductionPipeline", () => {
     const run = await subject.start({
       ...brief,
       providers: { ...brief.providers, script: "codex-screenwriter-v1" },
-      models: { "codex-screenwriter-v1": "glm-5.3" },
+      models: { "codex-screenwriter-v1": "deepseek-flash" },
     });
 
     await assertCandidateFailureTrace(run, "script", [{
-      modelId: "glm-5.3",
-      providerId: "zai-bigmodel-api",
+      modelId: "deepseek-flash",
+      providerId: "deepseek",
       outcome: "failed",
       failureStage: "not_accepted",
       failureReason: "连接失败",
@@ -574,7 +574,7 @@ describe("ProductionPipeline", () => {
     }]);
   });
 
-  it("runs GLM visual review through Code Plan without a cash spend approval", async () => {
+  it("runs DeepSeek visual review on a subscription without a cash spend approval", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-review-"));
     class LocalizedReviewWorker extends FakeWorker {
       override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
@@ -598,9 +598,9 @@ describe("ProductionPipeline", () => {
       workspaceRoot,
       worker,
       providerRuntimeMetadata: [{
-        id: "glm-visual-review-v1",
-        label: "GLM-5.3-Flash 视觉审片",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek 视觉审片",
+        modelId: "deepseek-flash",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
@@ -613,8 +613,8 @@ describe("ProductionPipeline", () => {
           review: async () => { throw new Error("The non-selected reviewer must not run."); },
         },
         {
-          id: "glm-visual-review-v1",
-          modelId: "glm-5.3-flash",
+          id: "deepseek-visual-review-v1",
+          modelId: "deepseek-flash",
           review: async () => { throw new Error("Detailed review must be used."); },
           reviewDetailed: async (input) => {
             reviewCalls.push(input);
@@ -655,9 +655,9 @@ describe("ProductionPipeline", () => {
             return {
               output,
               inspectedDurationMs: 20_000,
-              attemptedModelIds: ["glm-5.3-flash", "gpt-5.6-sol"],
+              attemptedModelIds: ["deepseek-flash", "gpt-5.6-sol"],
               independentReviews: [
-                { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash", output },
+                { providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash", output },
                 {
                   providerId: "codex-visual-review-v1",
                   modelId: "gpt-5.6-sol",
@@ -689,8 +689,8 @@ describe("ProductionPipeline", () => {
 
     const waiting = await subject.start({
       ...brief,
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
-      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-flash" },
     });
 
     assert.equal(waiting.status, "needs_human");
@@ -700,20 +700,20 @@ describe("ProductionPipeline", () => {
     assert.equal(reviewCalls[1]!.reviewStage, "rendered_video");
     assert.match(reviewCalls[1]!.videoPath ?? "", /final\.mp4$/);
     assert.match(reviewCalls[1]!.renderManifestPath ?? "", /render_manifest\.json$/);
-    assert.equal(reviewCalls[1]!.selectedModelId, "glm-5.3-flash");
-    const reviewPrimaryCheckpoint = reviewCalls[1]!.agentLoopCheckpointForModel?.("glm-5.3-flash");
+    assert.equal(reviewCalls[1]!.selectedModelId, "deepseek-flash");
+    const reviewPrimaryCheckpoint = reviewCalls[1]!.agentLoopCheckpointForModel?.("deepseek-flash");
     const reviewBackupCheckpoint = reviewCalls[1]!.agentLoopCheckpointForModel?.("gpt-5.6-sol");
     assert.ok(reviewPrimaryCheckpoint);
     assert.ok(reviewBackupCheckpoint);
     assert.notEqual(reviewPrimaryCheckpoint.key, reviewBackupCheckpoint.key);
-    const independentPrimaryCheckpoint = reviewCalls[1]!.independentReviewCheckpointForModel?.("glm-5.3-flash");
+    const independentPrimaryCheckpoint = reviewCalls[1]!.independentReviewCheckpointForModel?.("deepseek-flash");
     const independentBackupCheckpoint = reviewCalls[1]!.independentReviewCheckpointForModel?.("gpt-5.6-sol");
     assert.ok(independentPrimaryCheckpoint);
     assert.ok(independentBackupCheckpoint);
     assert.notEqual(independentPrimaryCheckpoint.key, independentBackupCheckpoint.key);
     assert.notEqual(independentPrimaryCheckpoint.key, reviewPrimaryCheckpoint.key);
     assert.ok(waiting.nodeRuns.some((node) => node.nodeId === "visual-review" && node.status === "succeeded"));
-    assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.modelId, "glm-5.3-flash");
+    assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.modelId, "deepseek-flash");
     assert.equal(
       waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.parameters?.promptPack,
       "video-factory/visual-review-v20",
@@ -732,17 +732,17 @@ describe("ProductionPipeline", () => {
     assert.match(visualOutput.report.reviewScope?.evidenceId ?? "", /^[a-f0-9]{64}$/);
     assert.deepEqual(visualOutput.report.reviewScope?.sourceNodeIds, ["render", "technical-review"]);
     assert.deepEqual(visualOutput.report.independentReviews?.map(({ providerId, modelId }) => ({ providerId, modelId })), [
-      { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" },
+      { providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash" },
       { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol" },
     ]);
-    assert.ok(waiting.artifacts.some((artifact) => artifact.kind === "review_report" && artifact.provenance.providerId === "glm-visual-review-v1"));
+    assert.ok(waiting.artifacts.some((artifact) => artifact.kind === "review_report" && artifact.provenance.providerId === "deepseek-visual-review-v1"));
   });
 
   it("persists completed final-review branches when the other reviewer fails", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-partial-visual-review-"));
     const approvedReport: pipeline.VisualReviewReport = {
       version: "video-factory/visual-review-v1",
-      summary: "GLM 已完成独立审片，未发现阻断问题。",
+      summary: "DeepSeek 已完成独立审片，未发现阻断问题。",
       scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 95 },
       findings: [],
       confidence: 0.94,
@@ -752,17 +752,17 @@ describe("ProductionPipeline", () => {
       workspaceRoot,
       worker: new FakeWorker(),
       providerRuntimeMetadata: [{
-        id: "glm-visual-review-v1",
-        label: "GLM + Codex 双模型审片",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek + Codex 双模型审片",
+        modelId: "deepseek-flash",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
         maxAttempts: 1,
       }],
       visualReviewAgents: [{
-        id: "glm-visual-review-v1",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-flash",
         review: async () => { throw new Error("Detailed review must be used."); },
         reviewDetailed: async (input) => {
           if (input.reviewStage === "source_assets") return { output: approvedReport, inspectedDurationMs: 10_000 };
@@ -771,15 +771,15 @@ describe("ProductionPipeline", () => {
             modelId: "gpt-5.6-sol",
             error: new Error("Codex review temporarily unavailable"),
           }], [{
-            providerId: "glm-visual-review-v1",
-            modelId: "glm-5.3-flash",
+            providerId: "deepseek-visual-review-v1",
+            modelId: "deepseek-flash",
             output: approvedReport,
             trace: {
               taskKind: "visual-review",
               promptVersion: "visual-review-test-v1",
               prompt: "inspect immutable frames",
-              providerId: "zai-code-plan",
-              modelId: "glm-5.3-flash",
+              providerId: "deepseek",
+              modelId: "deepseek-flash",
               reasoningEffort: "high",
             },
           }]);
@@ -789,8 +789,8 @@ describe("ProductionPipeline", () => {
 
     const failed = await subject.start({
       ...brief,
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
-      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-flash" },
     });
 
     assert.equal(failed.status, "failed");
@@ -798,7 +798,7 @@ describe("ProductionPipeline", () => {
     assert.equal(node?.status, "failed");
     assert.match(node?.error ?? "", /已完成分支保留/);
     assert.equal(node?.executionReceipt?.billing, "subscription");
-    assert.deepEqual(node?.executionReceipt?.actualModelIds, ["glm-5.3-flash", "gpt-5.6-sol"]);
+    assert.deepEqual(node?.executionReceipt?.actualModelIds, ["deepseek-flash", "gpt-5.6-sol"]);
     assert.equal(node?.spendPlan, undefined);
     const statusArtifact = failed.artifacts.find((artifact) => artifact.kind === "review_branch_status");
     assert.ok(statusArtifact?.uri);
@@ -808,10 +808,10 @@ describe("ProductionPipeline", () => {
     };
     assert.equal(status.status, "partial");
     assert.deepEqual(status.branches, [
-      { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash", status: "succeeded" },
+      { providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash", status: "succeeded" },
       { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol", status: "failed", reason: "Codex review temporarily unavailable" },
     ]);
-    assert.ok(failed.artifacts.some((artifact) => artifact.kind === "model_trace" && artifact.provenance.model === "glm-5.3-flash"));
+    assert.ok(failed.artifacts.some((artifact) => artifact.kind === "model_trace" && artifact.provenance.model === "deepseek-flash"));
   });
 
   it("stops before voice and render when source assets fail the free visual gate, and hands the verdict to the user", async () => {
@@ -889,17 +889,17 @@ describe("ProductionPipeline", () => {
         deliveryTypes: ["stock_image"],
       }],
       providerRuntimeMetadata: [{
-        id: "glm-visual-review-v1",
-        label: "GLM-5.3-Flash 视觉审片",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek 视觉审片",
+        modelId: "deepseek-flash",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
         maxAttempts: 3,
       }],
       visualReviewAgents: [{
-        id: "glm-visual-review-v1",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-flash",
         review: async () => { throw new Error("Detailed review must be used."); },
         reviewDetailed: async (input) => {
           reviewInputs.push(input);
@@ -937,7 +937,7 @@ describe("ProductionPipeline", () => {
         ...brief.providers,
         director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
-        visualReview: "glm-visual-review-v1",
+        visualReview: "deepseek-visual-review-v1",
       },
       director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
     });
@@ -964,8 +964,8 @@ describe("ProductionPipeline", () => {
     assert.deepEqual(sourceReviewOutput.report?.reviewScope?.scenePositions, [2]);
     assert.match(sourceReviewOutput.report?.reviewScope?.evidenceId ?? "", /^[a-f0-9]{64}$/);
     assert.deepEqual(sourceReviewOutput.report?.reviewScope?.actualModels, [{
-      providerId: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      providerId: "deepseek-visual-review-v1",
+      modelId: "deepseek-flash",
     }]);
     assert.ok(run.artifacts.some((artifact) => (
       artifact.kind === "review_report"
@@ -985,8 +985,8 @@ describe("ProductionPipeline", () => {
       recommendation: "approve",
     };
     const primary: pipeline.VisualReviewAgent = {
-      id: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      id: "deepseek-visual-review-v1",
+      modelId: "deepseek-flash",
       review: async () => { throw new Error("Detailed review must be used."); },
       reviewDetailed: async () => {
         // HTTP 503 在 not_accepted 阶段是队列拒绝（未受理），是唯一可安全切换 backup 的失败类；
@@ -1014,9 +1014,9 @@ describe("ProductionPipeline", () => {
       workspaceRoot,
       worker: new FakeWorker(),
       providerRuntimeMetadata: [{
-        id: "glm-visual-review-v1",
-        label: "GLM-5.3-Flash 视觉审片",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek 视觉审片",
+        modelId: "deepseek-flash",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
@@ -1024,14 +1024,14 @@ describe("ProductionPipeline", () => {
       }],
       visualReviewAgents: [new pipeline.FallbackVisualReviewAgent({
         primary,
-        primaryProviderId: "zai-bigmodel-api",
+        primaryProviderId: "deepseek",
         backups: [{ agent: backup, label: "Codex 视觉审片", providerId: "openai" }],
       })],
     });
 
     const waiting = await subject.start({
       ...brief,
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
     });
     const receipt = waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt;
 
@@ -1039,9 +1039,9 @@ describe("ProductionPipeline", () => {
     assert.equal(receipt?.providerId, "openai");
     assert.equal(receipt?.providerLabel, "Codex 视觉审片");
     assert.equal(receipt?.modelId, "gpt-backup");
-    assert.equal(receipt?.fallbackFromProviderId, "zai-bigmodel-api");
+    assert.equal(receipt?.fallbackFromProviderId, "deepseek");
     assert.match(receipt?.fallbackReason ?? "", /已自动切换到 gpt-backup/);
-    assert.deepEqual(receipt?.actualModelIds, ["glm-5.3-flash", "gpt-backup"]);
+    assert.deepEqual(receipt?.actualModelIds, ["deepseek-flash", "gpt-backup"]);
     assert.equal(receipt?.billing, "subscription");
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan, undefined);
   });
@@ -1056,8 +1056,8 @@ describe("ProductionPipeline", () => {
     });
     const visualReviewAgent = new pipeline.FallbackVisualReviewAgent({
       primary: failingReviewer(
-        "glm-visual-review-v1",
-        "glm-5.3-flash",
+        "deepseek-visual-review-v1",
+        "deepseek-flash",
         new pipeline.CodexBridgeError(
           "Codex bridge returned HTTP 503. secret-primary",
           true,
@@ -1065,7 +1065,7 @@ describe("ProductionPipeline", () => {
           503,
         ),
       ),
-      primaryProviderId: "zai-bigmodel-api",
+      primaryProviderId: "deepseek",
       backups: [{
         providerId: "openai",
         agent: failingReviewer(
@@ -1084,9 +1084,9 @@ describe("ProductionPipeline", () => {
       workspaceRoot,
       worker: new FakeWorker(),
       providerRuntimeMetadata: [{
-        id: "glm-visual-review-v1",
-        label: "GLM-5.3-Flash 视觉审片",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek 视觉审片",
+        modelId: "deepseek-flash",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
@@ -1097,13 +1097,13 @@ describe("ProductionPipeline", () => {
 
     const run = await subject.start({
       ...brief,
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
-      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-flash" },
     });
 
     await assertCandidateFailureTrace(run, "asset-source-review", [{
-      modelId: "glm-5.3-flash",
-      providerId: "zai-bigmodel-api",
+      modelId: "deepseek-flash",
+      providerId: "deepseek",
       outcome: "failed",
       failureStage: "not_accepted",
       failureReason: "服务端错误（HTTP 503）",
@@ -1129,15 +1129,15 @@ describe("ProductionPipeline", () => {
     let primaryCalls = 0;
     let backupCalls = 0;
     const primary: pipeline.VisualReviewAgent = {
-      id: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      id: "deepseek-visual-review-v1",
+      modelId: "deepseek-flash",
       review: async () => { throw new Error("Detailed review must be used."); },
       reviewDetailed: async () => {
         primaryCalls += 1;
         // stage=uncertain 的 503 表示原请求可能已被受理并仍在执行：节点必须失败，
         // backup 调用次数必须为 0，也不得把 backup 伪造成成功执行写进回执或 trace。
         throw new pipeline.CodexBridgeError(
-          "Codex bridge returned HTTP 503. socket /private/run/zai.sock detail secret-primary",
+          "Codex bridge returned HTTP 503. socket /private/run/deepseek.sock detail secret-primary",
           false,
           "uncertain",
           503,
@@ -1168,9 +1168,9 @@ describe("ProductionPipeline", () => {
       workspaceRoot,
       worker,
       providerRuntimeMetadata: [{
-        id: "glm-visual-review-v1",
-        label: "GLM-5.3-Flash 视觉审片",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek 视觉审片",
+        modelId: "deepseek-flash",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
@@ -1178,15 +1178,15 @@ describe("ProductionPipeline", () => {
       }],
       visualReviewAgents: [new pipeline.FallbackVisualReviewAgent({
         primary,
-        primaryProviderId: "zai-bigmodel-api",
+        primaryProviderId: "deepseek",
         backups: [{ agent: backup, label: "Codex 视觉审片", providerId: "openai" }],
       })],
     });
 
     const run = await subject.start({
       ...brief,
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
-      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-flash" },
     });
 
     const node = run.nodeRuns.find((candidate) => candidate.nodeId === "asset-source-review");
@@ -1196,9 +1196,9 @@ describe("ProductionPipeline", () => {
     assert.equal(primaryCalls, 1);
     assert.equal(backupCalls, 0);
     assert.match(node?.error ?? "", /源素材视觉预检服务暂时不可用/);
-    assert.doesNotMatch(node?.error ?? "", /secret-primary|zai\.sock|\/private\/run|HTTP 503/);
-    assert.equal(node?.executionReceipt?.providerId, "glm-visual-review-v1");
-    assert.equal(node?.executionReceipt?.modelId, "glm-5.3-flash");
+    assert.doesNotMatch(node?.error ?? "", /secret-primary|deepseek.sock|\/private\/run|HTTP 503/);
+    assert.equal(node?.executionReceipt?.providerId, "deepseek-visual-review-v1");
+    assert.equal(node?.executionReceipt?.modelId, "deepseek-flash");
     assert.equal(node?.executionReceipt?.actualModelIds, undefined);
     assert.equal(node?.executionReceipt?.fallbackFromProviderId, undefined);
     assert.equal(node?.executionReceipt?.fallbackReason, undefined);
@@ -1285,8 +1285,8 @@ describe("ProductionPipeline", () => {
     }
     const worker = new SceneRevisionWorker();
     const visualReviewAgent: pipeline.VisualReviewAgent = {
-      id: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      id: "deepseek-visual-review-v1",
+      modelId: "deepseek-flash",
       review: async () => { throw new Error("Detailed review must be used."); },
       reviewDetailed: async (input) => {
         if (input.reviewStage === "source_assets") return {
@@ -1317,9 +1317,9 @@ describe("ProductionPipeline", () => {
       workspaceRoot,
       worker,
       providerRuntimeMetadata: [{
-        id: "glm-visual-review-v1",
-        label: "GLM-5.3-Flash 视觉审片",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek 视觉审片",
+        modelId: "deepseek-flash",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
@@ -1329,7 +1329,7 @@ describe("ProductionPipeline", () => {
     });
     const waiting = await subject.start({
       ...brief,
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
     });
     const reviewArtifact = waiting.artifacts.find((artifact) => artifact.kind === "review_report" && artifact.producer?.nodeId === "visual-review")!;
     const assetsBefore = waiting.nodeRuns.find((node) => node.nodeId === "assets")!;
@@ -1683,8 +1683,8 @@ describe("ProductionPipeline", () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-narration-revision-"));
     const worker = new FakeWorker();
     const visualReviewAgent: pipeline.VisualReviewAgent = {
-      id: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      id: "deepseek-visual-review-v1",
+      modelId: "deepseek-flash",
       review: async () => { throw new Error("Detailed review must be used."); },
       reviewDetailed: async (input) => {
         const output: pipeline.VisualReviewReport = {
@@ -1703,9 +1703,9 @@ describe("ProductionPipeline", () => {
       workspaceRoot,
       worker,
       providerRuntimeMetadata: [{
-        id: "glm-visual-review-v1",
-        label: "GLM-5.3-Flash 视觉审片",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek 视觉审片",
+        modelId: "deepseek-flash",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
@@ -1715,7 +1715,7 @@ describe("ProductionPipeline", () => {
     });
     const waiting = await subject.start({
       ...brief,
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
     });
     assert.equal(waiting.status, "needs_human");
     const scriptNodeRun = waiting.nodeRuns.find((node) => node.nodeId === "script")!;
@@ -1826,17 +1826,17 @@ describe("ProductionPipeline", () => {
 
     await assert.rejects(
       () => new pipeline.ProductionPipeline({ workspaceRoot, worker }).dispatch(productionBrief),
-      /requires GLM and Codex visual review before work can start/,
+      /requires DeepSeek and Codex visual review before work can start/,
     );
     assert.equal(worker.calls.length, 0);
 
     const singleReviewAgent: pipeline.VisualReviewAgent = {
-      id: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      id: "deepseek-visual-review-v1",
+      modelId: "deepseek-flash",
       finalReviewConfiguration: {
         mode: "dual",
         reviewers: [
-          { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash", independentRoleAudit: true },
+          { providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash", independentRoleAudit: true },
           { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol", independentRoleAudit: false },
         ],
       },
@@ -1849,9 +1849,9 @@ describe("ProductionPipeline", () => {
         visualReviewAgents: [singleReviewAgent],
       }).dispatch({
         ...productionBrief,
-        providers: { ...productionBrief.providers, visualReview: "glm-visual-review-v1" },
+        providers: { ...productionBrief.providers, visualReview: "deepseek-visual-review-v1" },
       }),
-      /requires two distinct GLM and Codex visual-review providers, models, and independent role audits/,
+      /requires two distinct DeepSeek and Codex visual-review providers, models, and independent role audits/,
     );
     assert.equal(worker.calls.length, 0);
   });
@@ -1870,21 +1870,21 @@ describe("ProductionPipeline", () => {
       workspaceRoot,
       worker: new FakeWorker(),
       providerRuntimeMetadata: [{
-        id: "glm-visual-review-v1",
-        label: "GLM + Codex 双模型审片",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek + Codex 双模型审片",
+        modelId: "deepseek-flash",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
         maxAttempts: 1,
       }],
       visualReviewAgents: [{
-        id: "glm-visual-review-v1",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-flash",
         finalReviewConfiguration: {
           mode: "dual",
           reviewers: [
-            { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash", independentRoleAudit: true },
+            { providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash", independentRoleAudit: true },
             { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol", independentRoleAudit: true },
           ],
         },
@@ -1897,8 +1897,8 @@ describe("ProductionPipeline", () => {
     const waiting = await subject.start({
       ...brief,
       runPurpose: "production",
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
-      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-flash" },
     });
     assert.equal(waiting.status, "needs_human");
     const runPath = path.join(workspaceRoot, "runs", waiting.id, "run.json");
@@ -1989,8 +1989,8 @@ describe("ProductionPipeline", () => {
     const legacy = await subject.start({
       ...brief,
       runPurpose: "production",
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
-      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-flash" },
     });
     assert.equal(legacy.status, "needs_human");
     const legacyPath = path.join(workspaceRoot, "runs", legacy.id, "run.json");
@@ -2006,15 +2006,15 @@ describe("ProductionPipeline", () => {
     assert.equal(legacyApproved.status, "succeeded");
   });
 
-  it("fails closed when the Code Plan visual reviewer has no subscription metadata", async () => {
+  it("fails closed when the DeepSeek visual reviewer has no subscription metadata", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-review-metadata-"));
     let calls = 0;
     const subject = new pipeline.ProductionPipeline({
       workspaceRoot,
       worker: new FakeWorker(),
       visualReviewAgents: [{
-        id: "glm-visual-review-v1",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-flash",
         review: async () => {
           calls += 1;
           throw new Error("must not execute");
@@ -2024,7 +2024,7 @@ describe("ProductionPipeline", () => {
 
     await assert.rejects(() => subject.start({
       ...brief,
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
       economics: { recipeId: "economy-daily", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     }), /must use subscription billing without spend approval/);
     assert.equal(calls, 0);
@@ -2510,9 +2510,9 @@ describe("ProductionPipeline", () => {
           maxAttempts: 1,
         },
         {
-          id: "glm-visual-review-v1",
-          label: "GLM 视觉审片",
-          modelId: "glm-review",
+          id: "deepseek-visual-review-v1",
+          label: "DeepSeek 视觉审片",
+          modelId: "deepseek-review",
           transport: "unix_socket",
           billing: "subscription",
           approvalPolicy: "none",
@@ -2520,8 +2520,8 @@ describe("ProductionPipeline", () => {
         },
       ],
       visualReviewAgents: [{
-        id: "glm-visual-review-v1",
-        modelId: "glm-review",
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-review",
         review: async () => { throw new Error("Detailed review must be used."); },
         reviewDetailed: async (input) => {
           reviewInputs.push(input);
@@ -2542,7 +2542,7 @@ describe("ProductionPipeline", () => {
 
     const paused = await subject.start({
       ...brief,
-      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "deepseek-visual-review-v1" },
       economics: {
         recipeId: "keyshot-ai",
         allowMeteredProviders: true,
@@ -2589,33 +2589,33 @@ describe("ProductionPipeline", () => {
         estimatedCostCny: 2,
         maxAttempts: 1,
       }, {
-        id: "glm-visual-review-primary-v1",
-        label: "GLM 首选视觉审片",
-        modelId: "glm-review-primary",
+        id: "deepseek-visual-review-primary-v1",
+        label: "DeepSeek 首选视觉审片",
+        modelId: "deepseek-review-primary",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
         maxAttempts: 1,
       }, {
-        id: "glm-visual-review-backup-v1",
-        label: "GLM 备用视觉审片",
-        modelId: "glm-review-backup",
+        id: "deepseek-visual-review-backup-v1",
+        label: "DeepSeek 备用视觉审片",
+        modelId: "deepseek-review-backup",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
         maxAttempts: 1,
       }],
       visualReviewAgents: [{
-        id: "glm-visual-review-primary-v1",
-        modelId: "glm-review-primary",
+        id: "deepseek-visual-review-primary-v1",
+        modelId: "deepseek-review-primary",
         review: async () => { throw new Error("Detailed review must be used."); },
         reviewDetailed: async () => {
           primaryReviewCalls += 1;
           throw new Error("Primary source reviewer timed out.");
         },
       }, {
-        id: "glm-visual-review-backup-v1",
-        modelId: "glm-review-backup",
+        id: "deepseek-visual-review-backup-v1",
+        modelId: "deepseek-review-backup",
         review: async () => { throw new Error("Detailed review must be used."); },
         reviewDetailed: async (input) => {
           backupReviewInputs.push(input);
@@ -2629,8 +2629,8 @@ describe("ProductionPipeline", () => {
           };
           if (input.reviewStage === "source_assets") return { output, inspectedDurationMs: 10_000 };
           return completedDualVisualReview(input, output, {
-            providerId: "glm-visual-review-backup-v1",
-            modelId: "glm-review-backup",
+            providerId: "deepseek-visual-review-backup-v1",
+            modelId: "deepseek-review-backup",
           });
         },
       }],
@@ -2642,9 +2642,9 @@ describe("ProductionPipeline", () => {
       providers: {
         ...brief.providers,
         assets: "seedance-video-v1",
-        visualReview: "glm-visual-review-primary-v1",
+        visualReview: "deepseek-visual-review-primary-v1",
       },
-      models: { "glm-visual-review-primary-v1": "glm-review-primary" },
+      models: { "deepseek-visual-review-primary-v1": "deepseek-review-primary" },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
     const plan = paused.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
@@ -2673,11 +2673,11 @@ describe("ProductionPipeline", () => {
         ...failed.initialInput,
         providers: {
           ...failed.initialInput.providers,
-          visualReview: "glm-visual-review-backup-v1",
+          visualReview: "deepseek-visual-review-backup-v1",
         },
         models: {
           ...(failed.initialInput.models ?? {}),
-          "glm-visual-review-backup-v1": "glm-review-backup",
+          "deepseek-visual-review-backup-v1": "deepseek-review-backup",
         },
       },
       "owner",
@@ -2729,14 +2729,14 @@ describe("ProductionPipeline", () => {
       }],
       recommendation: "revise",
     };
-    const branchCalls = { glm: 0, codex: 0 };
+    const branchCalls = { deepseek: 0, codex: 0 };
     // 按"哪个模型、在哪一阶段"记账：试片与成片终审各自要两个不同模型，
     // 只看总数会把"某阶段只跑了一个模型"和"另一阶段多跑了一次"混成同一个数字。
     const reviewCalls: Array<{ id: string; stage: "source_assets" | "rendered_video" }> = [];
     const reviewer = (
-      id: "glm-visual-review-v1" | "codex-visual-review-v1",
-      modelId: "glm-5.3-flash" | "gpt-5.6-sol",
-      counter: "glm" | "codex",
+      id: "deepseek-visual-review-v1" | "codex-visual-review-v1",
+      modelId: "deepseek-flash" | "gpt-5.6-sol",
+      counter: "deepseek" | "codex",
     ): pipeline.VisualReviewAgent => ({
       id,
       modelId,
@@ -2758,18 +2758,18 @@ describe("ProductionPipeline", () => {
       },
     });
     const dualReview = new pipeline.IndependentDualVisualReviewAgent({
-      primary: reviewer("glm-visual-review-v1", "glm-5.3-flash", "glm"),
+      primary: reviewer("deepseek-visual-review-v1", "deepseek-flash", "deepseek"),
       secondary: reviewer("codex-visual-review-v1", "gpt-5.6-sol", "codex"),
       sourceAgent: {
-        id: "glm-source-review-v1",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-source-review-v1",
+        modelId: "deepseek-flash",
         review: async () => { throw new Error("Detailed review must be used."); },
         reviewDetailed: async (input) => {
-          reviewCalls.push({ id: "glm-source-review-v1", stage: input.reviewStage === "source_assets" ? "source_assets" : "rendered_video" });
+          reviewCalls.push({ id: "deepseek-source-review-v1", stage: input.reviewStage === "source_assets" ? "source_assets" : "rendered_video" });
           return {
             output: cleanReport,
-            executedProviderId: "glm-source-review-v1",
-            executedModelId: "glm-5.3-flash",
+            executedProviderId: "deepseek-source-review-v1",
+            executedModelId: "deepseek-flash",
           };
         },
       },
@@ -2787,9 +2787,9 @@ describe("ProductionPipeline", () => {
       workspaceRoot,
       worker,
       providerRuntimeMetadata: [{
-        id: "glm-visual-review-v1",
-        label: "GLM + Codex 双模型审片",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek + Codex 双模型审片",
+        modelId: "deepseek-flash",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
@@ -2800,18 +2800,18 @@ describe("ProductionPipeline", () => {
     const waiting = await subject.start({
       ...brief,
       runPurpose: "production",
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
-      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-flash" },
     });
     assert.equal(waiting.status, "needs_human");
     // 试片也必须是两个不同模型的独立复审：它是"要不要继续花钱"的闸门。
     assert.deepEqual(
       reviewCalls.filter((call) => call.stage === "source_assets").map((call) => call.id).sort(),
-      ["codex-visual-review-v1", "glm-source-review-v1"],
+      ["codex-visual-review-v1", "deepseek-source-review-v1"],
     );
     assert.deepEqual(
       reviewCalls.filter((call) => call.stage === "rendered_video").map((call) => call.id).sort(),
-      ["codex-visual-review-v1", "glm-visual-review-v1"],
+      ["codex-visual-review-v1", "deepseek-visual-review-v1"],
     );
     const workerCallsBefore = worker.calls.map((call) => String(call.capability));
     const visualDelivery = waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.output as {
@@ -2861,8 +2861,8 @@ describe("ProductionPipeline", () => {
       recommendation: "approve",
     };
     const reviewer = (
-      id: "glm-visual-review-v1" | "codex-visual-review-v1",
-      modelId: "glm-5.3-flash" | "gpt-5.6-sol",
+      id: "deepseek-visual-review-v1" | "codex-visual-review-v1",
+      modelId: "deepseek-flash" | "gpt-5.6-sol",
     ): pipeline.VisualReviewAgent => ({
       id,
       modelId,
@@ -2882,20 +2882,20 @@ describe("ProductionPipeline", () => {
       workspaceRoot,
       worker,
       providerRuntimeMetadata: [{
-        id: "glm-visual-review-v1",
-        label: "GLM + Codex 双模型审片",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek + Codex 双模型审片",
+        modelId: "deepseek-flash",
         transport: "unix_socket",
         billing: "subscription",
         approvalPolicy: "none",
         maxAttempts: 1,
       }],
       visualReviewAgents: [new pipeline.IndependentDualVisualReviewAgent({
-        primary: reviewer("glm-visual-review-v1", "glm-5.3-flash"),
+        primary: reviewer("deepseek-visual-review-v1", "deepseek-flash"),
         secondary: reviewer("codex-visual-review-v1", "gpt-5.6-sol"),
         sourceAgent: {
-          id: "glm-source-review-v1",
-          modelId: "glm-5.3-flash",
+          id: "deepseek-source-review-v1",
+          modelId: "deepseek-flash",
           review: async (input) => ({
             version: "video-factory/visual-review-v1",
             summary: "源素材可以进入后续制作。",
@@ -2919,8 +2919,8 @@ describe("ProductionPipeline", () => {
     const waiting = await subject.start({
       ...brief,
       runPurpose: "production",
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
-      models: { "glm-visual-review-v1": "glm-5.3-flash" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-flash" },
     });
 
     const reviewedItems = currentReviewItems(waiting);
@@ -3000,8 +3000,8 @@ describe("ProductionPipeline", () => {
           503,
         )),
       }, {
-        providerId: "zai-bigmodel-api",
-        agent: failingAgent("glm-5.3", new pipeline.CodexBridgeError(
+        providerId: "deepseek",
+        agent: failingAgent("deepseek-flash", new pipeline.CodexBridgeError(
           "socket /private/run/director failed with ECONNREFUSED secret-backup",
           true,
           "not_accepted",
@@ -3042,8 +3042,8 @@ describe("ProductionPipeline", () => {
       failureStage: "not_accepted",
       failureReason: "服务端错误（HTTP 503）",
     }, {
-      modelId: "glm-5.3",
-      providerId: "zai-bigmodel-api",
+      modelId: "deepseek-flash",
+      providerId: "deepseek",
       outcome: "failed",
       failureStage: "not_accepted",
       failureReason: "连接失败",
@@ -3152,7 +3152,7 @@ describe("ProductionPipeline", () => {
           sourceReviewNodeId: "asset-source-review",
           sourceReviewVersionId: "version-review",
           reviewEvidenceId: "b".repeat(64),
-          actualModels: [{ providerId: "zai-bigmodel-api", modelId: "glm-5.3-flash" }],
+          actualModels: [{ providerId: "deepseek", modelId: "deepseek-flash" }],
           current: true,
         }],
         previousScript,
@@ -3188,14 +3188,14 @@ describe("ProductionPipeline", () => {
       plan: async () => { throw new Error("unexpected direct plan call"); },
       planDetailed: async () => {
         calls.push(modelId);
-        if (modelId === "glm-5.3") throw new Error("prompt validation stopped before transport");
+        if (modelId === "deepseek-flash") throw new Error("prompt validation stopped before transport");
         throw new Error("backup must not run");
       },
     });
     const directorAgent = new pipeline.FallbackVisualDirectorAgent({
       candidates: [
         { agent: candidate("gpt-5.6-terra"), providerId: "openai" },
-        { agent: candidate("glm-5.3"), providerId: "zai-bigmodel-api" },
+        { agent: candidate("deepseek-flash"), providerId: "deepseek" },
       ],
     });
     const subject = new pipeline.ProductionPipeline({
@@ -3214,18 +3214,18 @@ describe("ProductionPipeline", () => {
     const run = await subject.start({
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      models: { "api-visual-director-v1": "glm-5.3" },
+      models: { "api-visual-director-v1": "deepseek-flash" },
       modelSelectionSources: { "api-visual-director-v1": "run_override" },
       director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
     });
 
-    assert.deepEqual(calls, ["glm-5.3"]);
+    assert.deepEqual(calls, ["deepseek-flash"]);
     const plan = run.executionPlan?.find(({ nodeId }) => nodeId === "visual-direction");
-    assert.equal(plan?.modelId, "glm-5.3");
+    assert.equal(plan?.modelId, "deepseek-flash");
     assert.equal(plan?.configurationSource, "run_override");
     const node = run.nodeRuns.find(({ nodeId }) => nodeId === "visual-direction");
     assert.equal(node?.status, "failed");
-    assert.equal(node?.executionReceipt?.modelId, "glm-5.3");
+    assert.equal(node?.executionReceipt?.modelId, "deepseek-flash");
     assert.equal(node?.executionReceipt?.configurationSource, "run_override");
   });
 
@@ -3245,19 +3245,19 @@ describe("ProductionPipeline", () => {
           },
         },
       }, {
-        providerId: "zai-bigmodel-api",
+        providerId: "deepseek",
         agent: {
           id: "api-visual-director-v1",
-          modelId: "glm-5.3",
+          modelId: "deepseek-flash",
           plan: async () => { throw new Error("Detailed plan must be used."); },
           planDetailed: async (input) => {
-            calls.push("glm-5.3");
+            calls.push("deepseek-flash");
             return {
               output: {
                 version: "video-factory/director-plan-v1" as const,
                 requestedProfileId: input.brief.requestedProfileId,
                 resolvedProfileId: "documentary-observer",
-                profileRationale: "generated-by-glm-5.3",
+                profileRationale: "generated-by-deepseek-flash",
                 visualBible: {
                   narrativeApproach: "逐镜解释",
                   pacing: "稳定",
@@ -3290,8 +3290,8 @@ describe("ProductionPipeline", () => {
                 taskKind: "director-plan" as const,
                 promptVersion: "director-model-switch-test-v1",
                 prompt: "bounded director prompt",
-                providerId: "zai-bigmodel-api",
-                modelId: "glm-5.3",
+                providerId: "deepseek",
+                modelId: "deepseek-flash",
               },
             };
           },
@@ -3323,32 +3323,32 @@ describe("ProductionPipeline", () => {
 
     const stale = await subject.applyNodeExecutionConfiguration(failed.id, "visual-direction", {
       ...failed.initialInput,
-      models: { ...failed.initialInput.models, "api-visual-director-v1": "glm-5.3" },
+      models: { ...failed.initialInput.models, "api-visual-director-v1": "deepseek-flash" },
       modelSelectionSources: {
         ...failed.initialInput.modelSelectionSources,
         "api-visual-director-v1": "node_override",
       },
     }, "owner");
     assert.equal(stale.nodeRuns.find(({ nodeId }) => nodeId === "visual-direction")?.status, "stale");
-    assert.equal(stale.initialInput.models?.["api-visual-director-v1"], "glm-5.3");
+    assert.equal(stale.initialInput.models?.["api-visual-director-v1"], "deepseek-flash");
 
     const resumed = await subject.resumeStale(stale.id);
 
-    assert.deepEqual(calls, ["gpt-5.6-terra", "glm-5.3"]);
+    assert.deepEqual(calls, ["gpt-5.6-terra", "deepseek-flash"]);
     const plan = resumed.executionPlan?.find(({ nodeId }) => nodeId === "visual-direction");
-    assert.equal(plan?.modelId, "glm-5.3");
+    assert.equal(plan?.modelId, "deepseek-flash");
     assert.equal(plan?.configurationSource, "node_override");
     const node = resumed.nodeRuns.find(({ nodeId }) => nodeId === "visual-direction");
     assert.equal(node?.status, "succeeded");
-    assert.equal(node?.executionReceipt?.providerId, "zai-bigmodel-api");
-    assert.equal(node?.executionReceipt?.modelId, "glm-5.3");
+    assert.equal(node?.executionReceipt?.providerId, "deepseek");
+    assert.equal(node?.executionReceipt?.modelId, "deepseek-flash");
     assert.equal(node?.executionReceipt?.configurationSource, "node_override");
-    assert.deepEqual(node?.executionReceipt?.actualModelIds, ["glm-5.3"]);
+    assert.deepEqual(node?.executionReceipt?.actualModelIds, ["deepseek-flash"]);
     const persistedPlan = JSON.parse(await readFile(
       String((node?.output as Record<string, unknown>).directorPlanPath),
       "utf8",
     )) as { profileRationale?: string };
-    assert.equal(persistedPlan.profileRationale, "generated-by-glm-5.3");
+    assert.equal(persistedPlan.profileRationale, "generated-by-deepseek-flash");
   });
 
   it("reuses a verified unchanged director plan before calling the director model", async () => {
@@ -3838,7 +3838,7 @@ describe("ProductionPipeline", () => {
     assert.equal(run.executionPlan?.find((node) => node.nodeId === "visual-direction")?.configurationSource, "run_override");
     assert.equal(directorInput?.selectedModelId, "gpt-5.6-terra");
     const directorPrimaryCheckpoint = directorInput?.agentLoopCheckpointForModel?.("gpt-5.6-terra");
-    const directorBackupCheckpoint = directorInput?.agentLoopCheckpointForModel?.("glm-5.3");
+    const directorBackupCheckpoint = directorInput?.agentLoopCheckpointForModel?.("deepseek-flash");
     assert.ok(directorPrimaryCheckpoint);
     assert.ok(directorBackupCheckpoint);
     assert.notEqual(directorPrimaryCheckpoint.key, directorBackupCheckpoint.key);

@@ -22,7 +22,7 @@ try {
       `profileId=${config.profile.identity.profileId}`,
       `providerId=${config.profile.identity.providerId}`,
       `modelId=${config.profile.identity.modelId}`,
-      `engine=${config.profile.identity.profileId === "zai" ? "chat-completions" : "codex-cli"}`,
+      `engine=${config.profile.identity.profileId === "openai" ? "codex-cli" : "chat-completions"}`,
       `workspace=${config.workspaceRoot}`,
       `codexBin=${config.codexBin}`,
       `auditModel=${config.auditModel ?? "same-as-production"}`,

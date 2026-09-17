@@ -85,11 +85,11 @@ async function runDirtyReleaseScenario(scenario: DirtyReleaseScenario): Promise<
 
 type DeployFailureScenario =
   | "openai-unit-install"
-  | "zai-unit-install"
-  | "zai-health"
+  | "deepseek-unit-install"
+  | "deepseek-health"
   | "broker-identity"
   | "app-health"
-  | "zai-upstream";
+  | "deepseek-upstream";
 
 interface DeployFailureResult {
   candidateImage: string;
@@ -97,8 +97,8 @@ interface DeployFailureResult {
   openAiUnit: string;
   stderr: string;
   trace: string;
-  zaiUnit: string;
-  zaiWorkspaceExists: boolean;
+  deepseekUnit: string;
+  deepseekWorkspaceExists: boolean;
 }
 
 async function runDeployFailureScenario(scenario: DeployFailureScenario): Promise<DeployFailureResult> {
@@ -110,10 +110,10 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario): Promis
   const previousRelease = path.join(releasesDirectory, "previous");
   const systemdDirectory = path.join(directory, "systemd");
   const openAiUnitPath = path.join(systemdDirectory, "vf-codex-broker.service");
-  const zaiUnitPath = path.join(systemdDirectory, "vf-zai-codex-broker.service");
-  const zaiEnvironmentPath = path.join(directory, "zai-codex-broker.env");
-  const zaiRuntimeDirectory = path.join(directory, "run", "zai");
-  const zaiStateRoot = path.join(directory, "var", "lib", "video-factory-zai-codex");
+  const deepseekUnitPath = path.join(systemdDirectory, "vf-deepseek-codex-broker.service");
+  const deepseekEnvironmentPath = path.join(directory, "deepseek-codex-broker.env");
+  const deepseekRuntimeDirectory = path.join(directory, "run", "deepseek");
+  const deepseekStateRoot = path.join(directory, "var", "lib", "video-factory-deepseek-codex");
   const candidateBroker = path.join(directory, "candidate-broker");
   const binDirectory = path.join(directory, "bin");
   const stateDirectory = path.join(directory, "state");
@@ -136,14 +136,14 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario): Promis
     mkdir(path.join(candidateBroker, "deploy"), { recursive: true }),
     mkdir(binDirectory, { recursive: true }),
     mkdir(stateDirectory, { recursive: true }),
-    mkdir(zaiRuntimeDirectory, { recursive: true }),
+    mkdir(deepseekRuntimeDirectory, { recursive: true }),
   ]);
 
   await Promise.all([
     writeFile(environmentPath, "VIDEO_FACTORY_TEST=1\n", "utf8"),
-    writeFile(zaiEnvironmentPath, "ZAI_BIGMODEL_API_KEY=test-only\n", "utf8"),
+    writeFile(deepseekEnvironmentPath, "DEEPSEEK_API_KEY=test-only\n", "utf8"),
     writeFile(openAiUnitPath, "[Unit]\nDescription=old-openai\n", "utf8"),
-    writeFile(zaiUnitPath, "[Unit]\nDescription=old-zai\n", "utf8"),
+    writeFile(deepseekUnitPath, "[Unit]\nDescription=old-deepseek\n", "utf8"),
     writeFile(path.join(candidateBroker, "dist", "main.js"), "export {};\n", "utf8"),
     writeFile(
       path.join(candidateBroker, "node_modules", "undici", "package.json"),
@@ -156,8 +156,8 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario): Promis
       "utf8",
     ),
     writeFile(
-      path.join(candidateBroker, "deploy", "vf-zai-codex-broker.service"),
-      "[Unit]\nDescription=new-zai\n",
+      path.join(candidateBroker, "deploy", "vf-deepseek-codex-broker.service"),
+      "[Unit]\nDescription=new-deepseek\n",
       "utf8",
     ),
     writeFile(path.join(stateDirectory, "candidate-image"), "sha256:new-image\n", "utf8"),
@@ -168,10 +168,10 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario): Promis
   const originalDeploy = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
   const isolatedDeploy = originalDeploy
     .replace("broker_unit=/etc/systemd/system/vf-codex-broker.service", `broker_unit=${JSON.stringify(openAiUnitPath)}`)
-    .replace("zai_broker_unit=/etc/systemd/system/vf-zai-codex-broker.service", `zai_broker_unit=${JSON.stringify(zaiUnitPath)}`)
+    .replace("deepseek_broker_unit=/etc/systemd/system/vf-deepseek-codex-broker.service", `deepseek_broker_unit=${JSON.stringify(deepseekUnitPath)}`)
     .replace("broker_root=/opt/video-factory/codex-broker", `broker_root=${JSON.stringify(brokerInstallRoot)}`)
-    .replace("zai_broker_state_root=/var/lib/video-factory-zai-codex", `zai_broker_state_root=${JSON.stringify(zaiStateRoot)}`)
-    .replaceAll("/etc/video-factory/zai-codex-broker.env", zaiEnvironmentPath)
+    .replace("deepseek_broker_state_root=/var/lib/video-factory-deepseek-codex", `deepseek_broker_state_root=${JSON.stringify(deepseekStateRoot)}`)
+    .replaceAll("/etc/video-factory/deepseek-codex-broker.env", deepseekEnvironmentPath)
     .replaceAll('"$broker_root/bin/node"', "node");
   const deployPath = path.join(scriptsDirectory, "deploy-production.sh");
   await writeFile(deployPath, isolatedDeploy, "utf8");
@@ -220,7 +220,7 @@ echo "install:$source->$destination" >> "$DEPLOY_TRACE"
 if [ "$DEPLOY_SCENARIO" = "openai-unit-install" ] && [ "$destination" = "$TEST_OPENAI_UNIT" ] && grep -q "new-openai" "$source"; then
   exit 81
 fi
-if [ "$DEPLOY_SCENARIO" = "zai-unit-install" ] && [ "$destination" = "$TEST_ZAI_UNIT" ] && grep -q "new-zai" "$source"; then
+if [ "$DEPLOY_SCENARIO" = "deepseek-unit-install" ] && [ "$destination" = "$TEST_DEEPSEEK_UNIT" ] && grep -q "new-deepseek" "$source"; then
   exit 82
 fi
 /bin/cp "$source" "$destination"
@@ -230,8 +230,8 @@ fi
       "stat",
       `#!/bin/sh
 case "$*" in
-  *"%U:%G"*"$TEST_ZAI_STATE"*) echo "vf-zai-codex:vf-bridge" ;;
-  *"%a"*"$TEST_ZAI_STATE"*) echo "750" ;;
+  *"%U:%G"*"$TEST_DEEPSEEK_STATE"*) echo "vf-deepseek-codex:vf-bridge" ;;
+  *"%a"*"$TEST_DEEPSEEK_STATE"*) echo "750" ;;
   *) exec /usr/bin/stat "$@" ;;
 esac
 `,
@@ -241,7 +241,7 @@ esac
       `#!/bin/sh
 case " $* " in
   *" --env-file="*)
-    if [ "$DEPLOY_SCENARIO" = "zai-upstream" ]; then exit 71; fi
+    if [ "$DEPLOY_SCENARIO" = "deepseek-upstream" ]; then exit 71; fi
     exit 0
     ;;
 esac
@@ -292,9 +292,9 @@ esac
       "curl",
       `#!/bin/sh
 echo "curl:$*" >> "$DEPLOY_TRACE"
-if [ "$DEPLOY_SCENARIO" = "zai-health" ]; then
+if [ "$DEPLOY_SCENARIO" = "deepseek-health" ]; then
   case " $* " in
-    *"$TEST_ZAI_SOCKET"*)
+    *"$TEST_DEEPSEEK_SOCKET"*)
       current_release="$(readlink "$TEST_BROKER_CURRENT")"
       if [ "$current_release" != "$TEST_PREVIOUS_RELEASE" ]; then
         exit 22
@@ -305,14 +305,14 @@ fi
 case " $* " in
   *" --unix-socket "*)
     case " $* " in
-      *"$TEST_ZAI_SOCKET"*)
+      *"$TEST_DEEPSEEK_SOCKET"*)
         current_release="$(readlink "$TEST_BROKER_CURRENT")"
         if [ "$DEPLOY_SCENARIO" = "broker-identity" ] && [ "$current_release" != "$TEST_PREVIOUS_RELEASE" ]; then
           echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"openai","providerId":"openai","modelId":"gpt-test","taskKinds":["director-plan","script-draft","visual-review"],"taskModels":{"director-plan":"gpt-test","script-draft":"gpt-test","visual-review":"gpt-test"}}'
         elif [ "$current_release" = "$TEST_PREVIOUS_RELEASE" ]; then
-          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"zai","providerId":"zai-bigmodel-api","modelId":"glm-5.3","taskKinds":["director-plan","script-draft","visual-review"],"taskModels":{"director-plan":"glm-5.3","script-draft":"glm-5.3","visual-review":"glm-5.3-flash"}}'
+          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"deepseek","providerId":"deepseek","modelId":"deepseek-flash","taskKinds":["director-plan","script-draft","visual-review"],"taskModels":{"director-plan":"deepseek-flash","script-draft":"deepseek-flash","visual-review":"deepseek-flash"}}'
         else
-          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"zai","providerId":"zai-bigmodel-api","modelId":"glm-5.3","taskKinds":["topic-ideas","series-roadmap","creative-treatment","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit"],"taskModels":{"topic-ideas":"glm-5.3","series-roadmap":"glm-5.3","creative-treatment":"glm-5.3","director-plan":"glm-5.3","script-draft":"glm-5.3","publish-copy":"glm-5.3","asset-rank":"glm-5.3-flash","reference-grammar":"glm-5.3-flash","visual-review":"glm-5.3-flash","role-audit":"glm-5.3"}}'
+          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"deepseek","providerId":"deepseek","modelId":"deepseek-flash","taskKinds":["topic-ideas","series-roadmap","creative-treatment","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit"],"taskModels":{"topic-ideas":"deepseek-flash","series-roadmap":"deepseek-flash","creative-treatment":"deepseek-flash","director-plan":"deepseek-flash","script-draft":"deepseek-flash","publish-copy":"deepseek-flash","asset-rank":"deepseek-flash","reference-grammar":"deepseek-flash","visual-review":"deepseek-flash","role-audit":"deepseek-flash"}}'
         fi
         ;;
       *)
@@ -349,11 +349,11 @@ exit 0
         TEST_CANDIDATE_BROKER: candidateBroker,
         TEST_OPENAI_UNIT: openAiUnitPath,
         TEST_PREVIOUS_RELEASE: previousRelease,
-        TEST_ZAI_SOCKET: path.join(zaiRuntimeDirectory, "worker.sock"),
-        TEST_ZAI_STATE: zaiStateRoot,
-        TEST_ZAI_UNIT: zaiUnitPath,
+        TEST_DEEPSEEK_SOCKET: path.join(deepseekRuntimeDirectory, "worker.sock"),
+        TEST_DEEPSEEK_STATE: deepseekStateRoot,
+        TEST_DEEPSEEK_UNIT: deepseekUnitPath,
         VIDEO_FACTORY_ENV_FILE: environmentPath,
-        VIDEO_FACTORY_ZAI_CODEX_RUNTIME_DIR: zaiRuntimeDirectory,
+        VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR: deepseekRuntimeDirectory,
       },
     });
     assert.fail(`deployment unexpectedly succeeded for ${scenario}`);
@@ -370,8 +370,8 @@ exit 0
       openAiUnit: await readFile(openAiUnitPath, "utf8"),
       stderr,
       trace: await readFile(tracePath, "utf8"),
-      zaiUnit: await readFile(zaiUnitPath, "utf8"),
-      zaiWorkspaceExists: await statExists(path.join(zaiStateRoot, "workspace")),
+      deepseekUnit: await readFile(deepseekUnitPath, "utf8"),
+      deepseekWorkspaceExists: await statExists(path.join(deepseekStateRoot, "workspace")),
     };
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -383,12 +383,12 @@ function assertFullDeployRollback(result: DeployFailureResult, expectAppRollback
   assert.equal(result.candidateImage, expectAppRollback ? "sha256:old-image" : "sha256:new-image");
   assert.match(result.openAiUnit, /Description=old-openai/);
   assert.doesNotMatch(result.openAiUnit, /Description=new-openai/);
-  assert.match(result.zaiUnit, /Description=old-zai/);
-  assert.doesNotMatch(result.zaiUnit, /Description=new-zai/);
+  assert.match(result.deepseekUnit, /Description=old-deepseek/);
+  assert.doesNotMatch(result.deepseekUnit, /Description=new-deepseek/);
   assert.match(result.stderr, /Deployment failed; restoring the application and all configured brokers/);
   assert.doesNotMatch(result.stderr, /Rollback did not fully recover every component/);
   assert.match(result.trace, /systemctl:restart vf-codex-broker/);
-  assert.match(result.trace, /systemctl:restart vf-zai-codex-broker/);
+  assert.match(result.trace, /systemctl:restart vf-deepseek-codex-broker/);
   if (expectAppRollback) {
     assert.match(result.trace, /docker:tag video-factory:rollback video-factory:candidate/);
     assert.match(result.trace, /docker:compose .* up --detach --no-deps --force-recreate app/);
@@ -396,55 +396,54 @@ function assertFullDeployRollback(result: DeployFailureResult, expectAppRollback
     assert.doesNotMatch(result.trace, /docker:tag video-factory:rollback video-factory:candidate/);
     assert.doesNotMatch(result.trace, /docker:compose .* up --detach --no-deps --force-recreate app/);
   }
-  assert.equal(result.zaiWorkspaceExists, true);
+  assert.equal(result.deepseekWorkspaceExists, true);
 }
 
-describe("ZAI systemd service sample", () => {
+describe("DeepSeek systemd service sample", () => {
   it("isolates runtime state and enforces a 0600 sensitive environment file", async () => {
     const service = await readFile(
-      path.join(brokerRoot, "deploy", "vf-zai-codex-broker.service"),
+      path.join(brokerRoot, "deploy", "vf-deepseek-codex-broker.service"),
       "utf8",
     );
 
-    assert.match(service, /^User=vf-zai-codex$/m);
-    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_PROFILE=zai$/m);
-    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_EFFORT=max$/m);
-    // ZAI unit 显式配置 1200s（20 分钟），与 broker 默认及本地开发脚本一致，避免 max 推理在旧 deadline 被截断。
+    assert.match(service, /^User=vf-deepseek-codex$/m);
+    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_PROFILE=deepseek$/m);
+    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_EFFORT=xhigh$/m);
+    // unit 显式配置 1200s（20 分钟），与 broker 默认及本地开发脚本一致，避免强推理在旧 deadline 被截断。
     assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=1200000$/m);
-    assert.match(service, /^EnvironmentFile=\/etc\/video-factory\/zai-codex-broker\.env$/m);
-    assert.match(service, /stat -c %%U:%%G \/etc\/video-factory\/zai-codex-broker\.env/);
-    assert.match(service, /stat -c %%a \/etc\/video-factory\/zai-codex-broker\.env/);
-    assert.doesNotMatch(service, /stat -c %U:%G \/etc\/video-factory\/zai-codex-broker\.env/);
+    assert.match(service, /^EnvironmentFile=\/etc\/video-factory\/deepseek-codex-broker\.env$/m);
+    assert.match(service, /stat -c %%U:%%G \/etc\/video-factory\/deepseek-codex-broker\.env/);
+    assert.match(service, /stat -c %%a \/etc\/video-factory\/deepseek-codex-broker\.env/);
+    assert.doesNotMatch(service, /stat -c %U:%G \/etc\/video-factory\/deepseek-codex-broker\.env/);
     assert.match(service, /test .* = 600/);
     assert.match(service, /^Group=vf-bridge$/m);
     assert.match(service, /^UMask=0007$/m);
     assert.match(service, /^RuntimeDirectoryMode=0750$/m);
     assert.match(service, /^RuntimeDirectoryPreserve=restart$/m);
-    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_WORKSPACE_ROOT=\/var\/lib\/video-factory-zai-codex\/workspace$/m);
-    assert.match(service, /^ReadWritePaths=\/var\/lib\/video-factory-zai-codex \/run\/video-factory-zai-codex$/m);
-    assert.match(service, /\/run\/video-factory-zai-codex\/worker\.sock/);
+    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_WORKSPACE_ROOT=\/var\/lib\/video-factory-deepseek-codex\/workspace$/m);
+    assert.match(service, /^ReadWritePaths=\/var\/lib\/video-factory-deepseek-codex \/run\/video-factory-deepseek-codex$/m);
+    assert.match(service, /\/run\/video-factory-deepseek-codex\/worker\.sock/);
     assert.doesNotMatch(service, /CODEX_HOME|CODEX_BIN|MODEL_CATALOG/);
-    assert.match(service, /ZAI_BIGMODEL_API_KEY/);
-    assert.match(service, /^UnsetEnvironment=ZAI_API_KEY$/m);
-    assert.match(service, /grep -q "\^ZAI_API_KEY"/);
-    assert.doesNotMatch(service, /ZAI_(?:BIGMODEL_)?API_KEY\s*=/);
+    assert.match(service, /DEEPSEEK_API_KEY/);
+    // 密钥只能来自那个 0600 文件：unit 自身不得内联任何密钥赋值。
+    assert.doesNotMatch(service, /DEEPSEEK_API_KEY\s*=/);
   });
 
   it("uses the validated shared Node runtime without installing a second Codex CLI", async () => {
     const script = await readFile(
-      path.join(repositoryRoot, "scripts", "setup-zai-codex-broker-host.sh"),
+      path.join(repositoryRoot, "scripts", "setup-deepseek-codex-broker-host.sh"),
       "utf8",
     );
 
     assert.match(script, /node_bin="\$broker_root\/bin\/node"/);
     assert.match(script, /runuser -u "\$broker_user"[\s\S]*"\$node_bin" --version/);
-    assert.match(script, /broker_state_root=\/var\/lib\/video-factory-zai-codex/);
+    assert.match(script, /broker_state_root=\/var\/lib\/video-factory-deepseek-codex/);
     assert.match(script, /broker_workspace="\$broker_state_root\/workspace"/);
     assert.match(script, /install -d -o "\$broker_user" -g "\$broker_group" -m 0750 "\$broker_state_root" "\$broker_workspace"/);
-    assert.doesNotMatch(script, /npm_bin|codex_bin|@openai\/codex|zai-models\.json/);
+    assert.doesNotMatch(script, /npm_bin|codex_bin|@openai\/codex|deepseek-models\.json/);
   });
 
-  it("keeps the local BigModel key in a broker-only ignored environment file", async () => {
+  it("keeps the local DeepSeek key in a broker-only ignored environment file", async () => {
     const script = await readFile(path.join(repositoryRoot, "scripts", "studio-dev-with-codex.sh"), "utf8");
 
     assert.match(script, /codex_process_home=\$\{VIDEO_FACTORY_CODEX_LOCAL_PROCESS_HOME:-"\$runtime_root\/home"\}/);
@@ -452,22 +451,22 @@ describe("ZAI systemd service sample", () => {
     assert.match(script, /codex_auth_file=\$\{VIDEO_FACTORY_CODEX_AUTH_FILE:-"\$source_codex_home\/auth\.json"\}/);
     assert.match(script, /ln -sfn "\$codex_auth_file" "\$codex_home\/auth\.json"/);
     assert.match(script, /HOME="\$codex_process_home" \\\nCODEX_HOME="\$codex_home" \\\nVIDEO_FACTORY_CODEX_SOCKET_PATH/);
-    assert.match(script, /\.local\/secrets\/zai-bigmodel\.env/);
-    assert.match(script, /zai_workspace_root=\$\{VIDEO_FACTORY_ZAI_CODEX_WORKSPACE_ROOT:-"\$zai_runtime_root\/tasks"\}/);
-    assert.match(script, /mkdir -p "\$zai_runtime_root" "\$zai_workspace_root"/);
-    assert.match(script, /VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="\$zai_workspace_root"/);
-    assert.match(script, /node --env-file="\$zai_env_file" apps\/codex-broker\/dist\/main\.js/);
+    assert.match(script, /\.local\/secrets\/deepseek\.env/);
+    assert.match(script, /deepseek_workspace_root=\$\{VIDEO_FACTORY_DEEPSEEK_CODEX_WORKSPACE_ROOT:-"\$deepseek_runtime_root\/tasks"\}/);
+    assert.match(script, /mkdir -p "\$deepseek_runtime_root" "\$deepseek_workspace_root"/);
+    assert.match(script, /VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="\$deepseek_workspace_root"/);
+    assert.match(script, /node --env-file="\$deepseek_env_file" apps\/codex-broker\/dist\/main\.js/);
     assert.doesNotMatch(script, /node --env-file="\$repository_root\/\.env"/);
   });
 
-  it("pins every BigModel request to the Coding Plan endpoint", async () => {
+  it("pins every DeepSeek request to the public chat-completions endpoint", async () => {
     const executor = await readFile(
-      path.join(brokerRoot, "src", "zai-code-plan-executor.ts"),
+      path.join(brokerRoot, "src", "chat-completions-executor.ts"),
       "utf8",
     );
 
-    assert.match(executor, /https:\/\/open\.bigmodel\.cn\/api\/coding\/paas\/v4\/chat\/completions/);
-    assert.doesNotMatch(executor, /open\.bigmodel\.cn\/api\/paas\/v4\/chat\/completions/);
+    assert.match(executor, /https:\/\/api\.deepseek\.com\/chat\/completions/);
+    assert.doesNotMatch(executor, /open\.bigmodel\.cn/);
     assert.match(executor, /model: modelId/);
     assert.match(executor, /type: "image_url"/);
     assert.match(executor, /response_format: \{ type: "json_object" \}/);
@@ -548,17 +547,17 @@ describe("production deployment transaction", () => {
     assert.match(dockerfile, /^COPY apps\/codex-broker\/deploy apps\/codex-broker\/deploy$/m);
     assert.match(deploy, /Candidate image does not contain a complete broker release/);
     assert.match(deploy, /! -f "\$staging\/broker\/node_modules\/undici\/package\.json"/);
-    assert.match(deploy, /vf-zai-codex-broker\.service/);
+    assert.match(deploy, /vf-deepseek-codex-broker\.service/);
     const validationPosition = deploy.indexOf('! -f "$staging/broker/dist/main.js"');
     const switchPosition = deploy.indexOf('ln -sfn "$candidate_broker_release" "$broker_root/current"');
     assert.ok(validationPosition >= 0 && switchPosition > validationPosition);
     assert.match(deploy, /install_broker_units_from_release\(\)/);
     assert.match(deploy, /install -m 0644 "\$source" "\$broker_unit" \|\| return 1/);
-    assert.match(deploy, /install -m 0644 "\$zai_source" "\$zai_broker_unit" \|\| return 1/);
+    assert.match(deploy, /install -m 0644 "\$deepseek_source" "\$deepseek_broker_unit" \|\| return 1/);
     assert.match(deploy, /systemctl daemon-reload \|\| return 1/);
     assert.match(deploy, /install_broker_units_from_release "\$broker_root\/current"/);
     assert.match(deploy, /previous_broker_unit_backup/);
-    assert.match(deploy, /previous_zai_broker_unit_backup/);
+    assert.match(deploy, /previous_deepseek_broker_unit_backup/);
     assert.match(deploy, /chown -R vf-codex:vf-bridge "\$release_dir" \|\| return 1/);
     assert.match(deploy, /chmod -R a\+rX "\$release_dir" \|\| return 1/);
     assert.match(deploy, /image_id="\$\(docker create video-factory:candidate\)" \|\| return 1/);
@@ -579,8 +578,8 @@ describe("production deployment transaction", () => {
       const script = `
 set -Eeuo pipefail
 broker_unit=${JSON.stringify(path.join(directory, "installed.service"))}
-zai_broker_unit=${JSON.stringify(path.join(directory, "installed-zai.service"))}
-zai_broker_configured=0
+deepseek_broker_unit=${JSON.stringify(path.join(directory, "installed-deepseek.service"))}
+deepseek_broker_configured=0
 install() { return 23; }
 systemctl() { return 0; }
 ${installFunction}
@@ -690,12 +689,12 @@ exit 42
     assert.match(script, /rollback_broker \|\| failed=1[\s\S]*video-factory:rollback/);
     assert.match(script, /restart_brokers\(\) \{[\s\S]*?local [^\n]*failed=0/);
     assert.match(script, /systemctl restart "\$broker_service"/);
-    assert.match(script, /systemctl restart "\$zai_broker_service"/);
-    assert.match(script, /Configured ZAI Code Plan broker is unavailable; refusing a partial deployment/);
-    assert.doesNotMatch(script, /Optional ZAI Code Plan broker is unavailable; continuing/);
+    assert.match(script, /systemctl restart "\$deepseek_broker_service"/);
+    assert.match(script, /Configured DeepSeek broker is unavailable; refusing a partial deployment/);
+    assert.doesNotMatch(script, /Optional DeepSeek broker is unavailable; continuing/);
     assert.match(script, /return "\$failed"\n\}/);
     assert.match(script, /install -m 0644 "\$previous_broker_unit_backup" "\$broker_unit" \|\| return 1/);
-    assert.match(script, /install -m 0644 "\$previous_zai_broker_unit_backup" "\$zai_broker_unit" \|\| return 1/);
+    assert.match(script, /install -m 0644 "\$previous_deepseek_broker_unit_backup" "\$deepseek_broker_unit" \|\| return 1/);
     assert.match(script, /systemctl daemon-reload \|\| return 1/);
     assert.ok(
       script.indexOf('[[ -s "$previous_broker_unit_backup" ]]')
@@ -704,7 +703,7 @@ exit 42
     );
   });
 
-  for (const scenario of ["openai-unit-install", "zai-unit-install"] as const) {
+  for (const scenario of ["openai-unit-install", "deepseek-unit-install"] as const) {
     it(`executes a complete rollback when ${scenario} fails`, async () => {
       const result = await runDeployFailureScenario(scenario);
 
@@ -712,10 +711,10 @@ exit 42
     });
   }
 
-  it("executes a complete rollback when the configured ZAI broker stays unhealthy", async () => {
-    const result = await runDeployFailureScenario("zai-health");
+  it("executes a complete rollback when the configured DeepSeek broker stays unhealthy", async () => {
+    const result = await runDeployFailureScenario("deepseek-health");
 
-    assert.match(result.stderr, /Configured ZAI Code Plan broker is unavailable/);
+    assert.match(result.stderr, /Configured DeepSeek broker is unavailable/);
     assertFullDeployRollback(result, false);
   });
 
@@ -731,27 +730,27 @@ exit 42
     assertFullDeployRollback(result, true);
   });
 
-  it("checks ZAI reachability without submitting content before mutating the release", async () => {
-    const result = await runDeployFailureScenario("zai-upstream");
+  it("checks DeepSeek reachability without submitting content before mutating the release", async () => {
+    const result = await runDeployFailureScenario("deepseek-upstream");
 
     assert.equal(path.basename(result.currentRelease), "previous");
     assert.match(result.openAiUnit, /Description=old-openai/);
-    assert.match(result.zaiUnit, /Description=old-zai/);
-    assert.equal(result.zaiWorkspaceExists, true);
-    assert.match(result.stderr, /ZAI upstream readiness check failed/);
+    assert.match(result.deepseekUnit, /Description=old-deepseek/);
+    assert.equal(result.deepseekWorkspaceExists, true);
+    assert.match(result.stderr, /DeepSeek upstream readiness check failed/);
     assert.doesNotMatch(result.trace, /docker:compose .* build app/);
     assert.doesNotMatch(result.trace, /systemctl:restart/);
   });
 
-  it("validates durable ZAI workspace permissions and parses app and broker readiness bodies", async () => {
+  it("validates durable DeepSeek workspace permissions and parses app and broker readiness bodies", async () => {
     const deploy = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
 
-    assert.match(deploy, /ensure_zai_workspace\(\)/);
+    assert.match(deploy, /ensure_deepseek_workspace\(\)/);
     assert.match(deploy, /\[\[ -L "\$target" \|\| -e "\$target" && ! -d "\$target" \]\]/);
-    assert.match(deploy, /install -d -o "\$zai_broker_user" -g vf-bridge -m 0750/);
+    assert.match(deploy, /install -d -o "\$deepseek_broker_user" -g vf-bridge -m 0750/);
     assert.match(deploy, /stat -c %U:%G "\$target"/);
     assert.match(deploy, /stat -c %a "\$target"/);
-    assert.match(deploy, /runuser -u "\$zai_broker_user" -- test -w "\$zai_broker_workspace"/);
+    assert.match(deploy, /runuser -u "\$deepseek_broker_user" -- test -w "\$deepseek_broker_workspace"/);
     assert.match(deploy, /health\?\.status === "ok"/);
     assert.match(deploy, /health\.protocolVersion === "video-factory\/codex-bridge-v2"/);
     assert.match(deploy, /health\.profileId === process\.env\.EXPECTED_BROKER_PROFILE/);
@@ -762,43 +761,44 @@ exit 42
     assert.match(deploy, /restart_brokers director-plan,script-draft,visual-review 1/);
     assert.match(
       deploy,
-      /broker_health "\$zai_broker_socket" zai zai-bigmodel-api \\\n\s+topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit/,
+      /broker_health "\$deepseek_broker_socket" deepseek deepseek \\\n\s+topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit/,
     );
   });
 
   it("uses authenticated GET readiness probes that cannot submit billable content", async () => {
     const deploy = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
-    const probe = deploy.match(/check_zai_upstream\(\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    const probe = deploy.match(/check_deepseek_upstream\(\) \{([\s\S]*?)\n\}/)?.[1] ?? "";
 
-    assert.match(probe, /--env-file=\/etc\/video-factory\/zai-codex-broker\.env/);
+    assert.match(probe, /--env-file=\/etc\/video-factory\/deepseek-codex-broker\.env/);
     assert.match(probe, /method: "GET"/);
-    assert.match(probe, /api\/coding\/paas\/v4\/models/);
-    assert.doesNotMatch(probe, /open\.bigmodel\.cn\/api\/paas\/v4\/models/);
+    assert.match(probe, /api\.deepseek\.com\/models/);
+    // 探针只读模型目录；生成内容的那条端点连出现都不该出现。
+    assert.doesNotMatch(probe, /chat\/completions/);
     assert.doesNotMatch(probe, /method: "POST"|messages:|body:\s*(?:JSON|stringify|["'`])/);
     assert.match(probe, /response\.status !== 200/);
   });
 
-  it("never changes ownership or mode of an existing disabled-ZAI runtime directory", async () => {
+  it("never changes ownership or mode of an existing disabled-DeepSeek runtime directory", async () => {
     const script = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
     const ensureRuntimeMount = script.match(
-      /ensure_zai_runtime_mount\(\) \{([\s\S]*?)\n\}/,
+      /ensure_deepseek_runtime_mount\(\) \{([\s\S]*?)\n\}/,
     )?.[1] ?? "";
 
-    assert.match(ensureRuntimeMount, /if \[\[ ! -e "\$zai_broker_runtime_dir" \]\]; then/);
-    assert.match(ensureRuntimeMount, /install -d -o root -g vf-bridge -m 0750 "\$zai_broker_runtime_dir"/);
+    assert.match(ensureRuntimeMount, /if \[\[ ! -e "\$deepseek_broker_runtime_dir" \]\]; then/);
+    assert.match(ensureRuntimeMount, /install -d -o root -g vf-bridge -m 0750 "\$deepseek_broker_runtime_dir"/);
     assert.doesNotMatch(ensureRuntimeMount, /chown|chmod/);
   });
 
-  it("fails the deployment when a configured ZAI broker is unhealthy", async () => {
+  it("fails the deployment when a configured DeepSeek broker is unhealthy", async () => {
     const script = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
     const restartBrokers = script.match(
       /restart_brokers\(\) \{([\s\S]*?)\n\}/,
     )?.[1] ?? "";
     const optionalFailure = restartBrokers.match(
-      /if ! systemctl restart "\$zai_broker_service"[\s\S]*?then([\s\S]*?)\n    fi/,
+      /if ! systemctl restart "\$deepseek_broker_service"[\s\S]*?then([\s\S]*?)\n    fi/,
     )?.[1] ?? "";
 
     assert.match(optionalFailure, /failed=1/);
-    assert.doesNotMatch(optionalFailure, /zai_broker_enabled=0|systemctl stop|ensure_zai_runtime_mount/);
+    assert.doesNotMatch(optionalFailure, /deepseek_broker_enabled=0|systemctl stop|ensure_deepseek_runtime_mount/);
   });
 });

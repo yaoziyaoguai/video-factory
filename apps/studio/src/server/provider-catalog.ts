@@ -1,9 +1,8 @@
 import type { StudioProvider, StudioTrendService, StudioTrendSource } from "../shared/api.js";
 import {
   resolveCodexSocketPath,
-  resolveZaiCodexSocketPath,
-  resolveZaiTextModelId,
-  resolveZaiVisualReviewModelId,
+  resolveDeepseekCodexSocketPath,
+  resolveDeepseekModelId,
   type CodexProviderSettings,
 } from "./codex-provider-settings.js";
 import {
@@ -42,7 +41,7 @@ type AssetDeliveryType = NonNullable<StudioProvider["deliveryTypes"]>[number];
  * 比不列更糟。接完一个角色就往这里加一个，加满即删掉这个集合。
  *
  * 审片刻意不在这里：它的两个候选必须是两个不同模型（独立双审），而展开候选表会让用户把
- * GLM 那条也选成 Codex 的同名模型，静默破坏那道不变量。它的兜底走的是跨 broker 的
+ * DeepSeek 那条也选成 Codex 的同名模型，静默破坏那道不变量。它的兜底走的是跨 broker 的
  * FallbackVisualReviewAgent，不由这层负责。
  */
 const MODEL_SWITCH_TASK_KINDS = new Set<string>([
@@ -81,7 +80,7 @@ export function buildProviderCatalog(
   runtime: ProviderRuntime,
   environment: NodeJS.ProcessEnv,
   codexAvailability?: CodexCatalogAvailability,
-  zaiCodexAvailability?: CodexCatalogAvailability,
+  deepseekCodexAvailability?: CodexCatalogAvailability,
 ): StudioProvider[] {
   const videoSettings = readMeteredVideoProviderSettings(environment);
   const reviewedVideoModels = reviewedVideoModelCatalog(environment);
@@ -133,69 +132,67 @@ export function buildProviderCatalog(
     }));
   };
   const codexRequirement = (taskKind: string) => providerTaskRequirement(resolveCodexSocketPath(environment).requirement, codex, taskKind);
-  const zaiCodex = zaiCodexAvailability ?? { available: false, reason: "尚未完成独立 broker 协议健康检查。" };
-  const zaiCodexRequirementFor = (taskKind: string) => providerTaskRequirement(resolveZaiCodexSocketPath(environment).requirement, zaiCodex, taskKind);
-  const zaiCodexRequirement = zaiCodexRequirementFor("visual-review");
-  const zaiTextModelId = zaiCodex.modelId?.trim() || resolveZaiTextModelId(environment);
-  const zaiModelForTask = (taskKind: string) => zaiCodex.taskModels?.[taskKind]?.trim() || zaiTextModelId;
-  const zaiModelId = zaiCodex.taskModels?.["visual-review"]?.trim() || resolveZaiVisualReviewModelId(environment);
-  const zaiModelLabel = zaiModelId === "glm-5.3-flash" ? "GLM-5.3-Flash" : zaiModelId;
+  const deepseekCodex = deepseekCodexAvailability ?? { available: false, reason: "尚未完成独立 broker 协议健康检查。" };
+  const deepseekCodexRequirementFor = (taskKind: string) => providerTaskRequirement(resolveDeepseekCodexSocketPath(environment).requirement, deepseekCodex, taskKind);
+  const deepseekTextModelId = deepseekCodex.modelId?.trim() || resolveDeepseekModelId(environment);
+  const deepseekModelForTask = (taskKind: string) => deepseekCodex.taskModels?.[taskKind]?.trim() || deepseekTextModelId;
+  const deepseekVisualModelId = deepseekCodex.taskModels?.["visual-review"]?.trim() || resolveDeepseekModelId(environment);
   const codexAuditAvailable = supportsTask(codex, "role-audit");
-  const zaiAuditAvailable = supportsTask(zaiCodex, "role-audit");
+  const deepseekAuditAvailable = supportsTask(deepseekCodex, "role-audit");
   const codexRoleAvailable = (taskKind: string) => supportsTask(codex, taskKind) && codexAuditAvailable;
-  const zaiRoleAvailable = (taskKind: string) => supportsTask(zaiCodex, taskKind) && zaiAuditAvailable;
+  const deepseekRoleAvailable = (taskKind: string) => supportsTask(deepseekCodex, taskKind) && deepseekAuditAvailable;
   const roleModelProfiles = (
     providerId: string,
     taskKind: string,
     taskType: "text" | "visual-review" = "text",
     runtimeAvailable = true,
   ) => [
-    ...codexProfiles(providerId, taskKind, taskType, runtimeAvailable && codexAuditAvailable).map((model) => ({
-      ...model,
-      // 只有 broker 的默认模型是推荐项；候选表里的其他模型是可选项，标成推荐会变成两个"默认"。
-      recommended: model.recommended && codexRoleAvailable(taskKind),
-    })),
     {
       ...textModelProfile(
-        zaiModelForTask(taskKind),
-        zaiModelForTask(taskKind) === "glm-5.3" ? "GLM-5.3" : zaiModelForTask(taskKind),
+        deepseekModelForTask(taskKind),
+        deepseekModelForTask(taskKind),
         providerId,
-        "zai-bigmodel",
-        runtimeAvailable && zaiRoleAvailable(taskKind),
-        "智谱 Coding Plan 模型；首选模型发生连接、超时、限流、容量或服务不可用时可作为候选，业务校验失败不会触发切换。",
+        "deepseek",
+        runtimeAvailable && deepseekRoleAvailable(taskKind),
+        "DeepSeek 首选模型；首选模型发生连接、超时、限流、容量或服务不可用时可作为候选，业务校验失败不会触发切换。",
       ),
-      recommended: !codexRoleAvailable(taskKind) && zaiRoleAvailable(taskKind),
+      recommended: deepseekRoleAvailable(taskKind),
       taskTypes: [taskType],
     },
+    ...codexProfiles(providerId, taskKind, taskType, runtimeAvailable && codexAuditAvailable).map((model) => ({
+      ...model,
+      // 只有首选那一侧是推荐项；候选表里的其他模型是可选项，标成推荐会变成两个"默认"。
+      recommended: model.recommended && !deepseekRoleAvailable(taskKind) && codexRoleAvailable(taskKind),
+    })),
   ];
-  const roleRequirement = (taskKind: string) => codexRoleAvailable(taskKind) || zaiRoleAvailable(taskKind)
+  const roleRequirement = (taskKind: string) => deepseekRoleAvailable(taskKind) || codexRoleAvailable(taskKind)
     ? "至少一个能同时完成生产与独立质量复核的模型服务可用。"
-    : `OpenAI：${uniqueRequirements(codexRequirement(taskKind), codexRequirement("role-audit"))} ZAI：${uniqueRequirements(zaiCodexRequirementFor(taskKind), zaiCodexRequirementFor("role-audit"))}`;
-  const zaiVisualProducerAvailable = supportsTask(zaiCodex, "visual-review");
+    : `DeepSeek：${uniqueRequirements(deepseekCodexRequirementFor(taskKind), deepseekCodexRequirementFor("role-audit"))} OpenAI：${uniqueRequirements(codexRequirement(taskKind), codexRequirement("role-audit"))}`;
+  const deepseekVisualProducerAvailable = supportsTask(deepseekCodex, "visual-review");
   const codexVisualProducerAvailable = supportsTask(codex, "visual-review");
-  const zaiVisualReviewAvailable = runtime.python
+  const deepseekVisualReviewAvailable = runtime.python
     && runtime.ffmpeg
     && runtime.ffprobe
-    && zaiVisualProducerAvailable
-    && zaiAuditAvailable;
-  const zaiVisualReviewRequirement = !zaiVisualProducerAvailable
-    ? zaiCodexRequirement
-    : !zaiAuditAvailable
-      ? `GLM 审片意见必须经过独立质量复核。${zaiCodexRequirementFor("role-audit")}`
-      : zaiCodexRequirement;
+    && deepseekVisualProducerAvailable
+    && deepseekAuditAvailable;
+  const deepseekVisualReviewRequirement = !deepseekVisualProducerAvailable
+    ? deepseekCodexRequirementFor("visual-review")
+    : !deepseekAuditAvailable
+      ? `DeepSeek 审片意见必须经过独立质量复核。${deepseekCodexRequirementFor("role-audit")}`
+      : deepseekCodexRequirementFor("visual-review");
 
   return [
     provider({
       id: "api-topic-editor-v1",
       capability: "topic.intelligence",
       label: "Codex 选题总编",
-      available: codexRoleAvailable("topic-ideas") || zaiRoleAvailable("topic-ideas"),
+      available: codexRoleAvailable("topic-ideas") || deepseekRoleAvailable("topic-ideas"),
       kind: "external",
       billing: "subscription",
       description: "通过宿主机 Codex 把实时热点转译为可拍摄、可连载的中文短视频角度；失败时回退到确定性评分。",
       modes: ["热点理解", "选题提案", "结构化输出"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("topic-ideas") ? modelForTask("topic-ideas") : zaiModelForTask("topic-ideas"),
+      defaultModelId: codexRoleAvailable("topic-ideas") ? modelForTask("topic-ideas") : deepseekModelForTask("topic-ideas"),
       modelProfiles: roleModelProfiles("api-topic-editor-v1", "topic-ideas"),
       requirement: roleRequirement("topic-ideas"),
     }),
@@ -203,13 +200,13 @@ export function buildProviderCatalog(
       id: "codex-series-showrunner-v1",
       capability: "series.plan",
       label: "Codex 系列主理人",
-      available: codexRoleAvailable("series-roadmap") || zaiRoleAvailable("series-roadmap"),
+      available: codexRoleAvailable("series-roadmap") || deepseekRoleAvailable("series-roadmap"),
       kind: "external",
       billing: "subscription",
       description: "维护 Series Bible、Canon 与集间承接，规划长期路线并在单集开拍前重新复核。",
       modes: ["系列圣经", "连续性", "单集开拍复核", "最多三轮修订"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("series-roadmap") ? modelForTask("series-roadmap") : zaiModelForTask("series-roadmap"),
+      defaultModelId: codexRoleAvailable("series-roadmap") ? modelForTask("series-roadmap") : deepseekModelForTask("series-roadmap"),
       modelProfiles: roleModelProfiles("codex-series-showrunner-v1", "series-roadmap"),
       requirement: roleRequirement("series-roadmap"),
     }),
@@ -228,13 +225,13 @@ export function buildProviderCatalog(
       id: "codex-screenwriter-v1",
       capability: "script.draft",
       label: "AI 编剧",
-      available: codexRoleAvailable("script-draft") || zaiRoleAvailable("script-draft"),
+      available: codexRoleAvailable("script-draft") || deepseekRoleAvailable("script-draft"),
       kind: "external",
       billing: "subscription",
       description: "按选题角度撰写可拍、可朗读、可核验的分镜脚本；首选模型调用故障时按候选顺序切换，内容校验或质量复核未通过时明确失败，不回退模板。",
       modes: ["口语旁白", "3-10 场分镜", "逐场画面指令"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("script-draft") ? modelForTask("script-draft") : zaiModelForTask("script-draft"),
+      defaultModelId: codexRoleAvailable("script-draft") ? modelForTask("script-draft") : deepseekModelForTask("script-draft"),
       modelProfiles: roleModelProfiles("codex-screenwriter-v1", "script-draft"),
       requirement: roleRequirement("script-draft"),
     }),
@@ -242,13 +239,13 @@ export function buildProviderCatalog(
       id: "api-visual-director-v1",
       capability: "storyboard.plan",
       label: "Codex 视觉导演",
-      available: codexRoleAvailable("director-plan") || zaiRoleAvailable("director-plan"),
+      available: codexRoleAvailable("director-plan") || deepseekRoleAvailable("director-plan"),
       kind: "external",
       billing: "subscription",
       description: "统一全片视觉规则，并根据叙事、真实性、连续性和可执行性逐镜选择画面来源；首选模型调用故障时按健康候选顺序切换。",
       modes: ["导演角色", "全片视觉规则", "逐镜选画面"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("director-plan") ? modelForTask("director-plan") : zaiModelForTask("director-plan"),
+      defaultModelId: codexRoleAvailable("director-plan") ? modelForTask("director-plan") : deepseekModelForTask("director-plan"),
       modelProfiles: roleModelProfiles("api-visual-director-v1", "director-plan"),
       requirement: roleRequirement("director-plan"),
     }),
@@ -257,13 +254,13 @@ export function buildProviderCatalog(
       id: "codex-creative-treatment-v1",
       capability: "creative.treatment",
       label: "AI 前期构思",
-      available: codexRoleAvailable("creative-treatment") || zaiRoleAvailable("creative-treatment"),
+      available: codexRoleAvailable("creative-treatment") || deepseekRoleAvailable("creative-treatment"),
       kind: "external",
       billing: "subscription",
       description: "在脚本写定前确定观众承诺、开头吸引、推进与兑现，并标注素材可行性风险；首选模型调用故障时按健康候选顺序切换。",
       modes: ["观众承诺", "内容推进", "可行性风险", "订阅能力"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("creative-treatment") ? modelForTask("creative-treatment") : zaiModelForTask("creative-treatment"),
+      defaultModelId: codexRoleAvailable("creative-treatment") ? modelForTask("creative-treatment") : deepseekModelForTask("creative-treatment"),
       modelProfiles: roleModelProfiles("codex-creative-treatment-v1", "creative-treatment"),
       requirement: roleRequirement("creative-treatment"),
     }),
@@ -272,13 +269,13 @@ export function buildProviderCatalog(
       capability: "reference.grammar",
       label: "Codex 参考视频分析",
       available: runtime.python && runtime.ffmpeg && runtime.ffprobe
-        && (codexRoleAvailable("reference-grammar") || zaiRoleAvailable("reference-grammar")),
+        && (codexRoleAvailable("reference-grammar") || deepseekRoleAvailable("reference-grammar")),
       kind: "external",
       billing: "subscription",
       description: "安全抽取参考视频关键帧，只提炼节奏、构图、运镜、色彩、转场和声音结构等风格规则。",
       modes: ["关键帧分析", "镜头语法", "可编辑规则", "订阅能力"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("reference-grammar") ? modelForTask("reference-grammar") : zaiModelForTask("reference-grammar"),
+      defaultModelId: codexRoleAvailable("reference-grammar") ? modelForTask("reference-grammar") : deepseekModelForTask("reference-grammar"),
       modelProfiles: roleModelProfiles(
         "codex-reference-grammar-v1",
         "reference-grammar",
@@ -291,13 +288,13 @@ export function buildProviderCatalog(
       id: "codex-asset-ranker-v1",
       capability: "asset.rank.semantic",
       label: "Codex 候选画面排序",
-      available: codexRoleAvailable("asset-rank") || zaiRoleAvailable("asset-rank"),
+      available: codexRoleAvailable("asset-rank") || deepseekRoleAvailable("asset-rank"),
       kind: "external",
       billing: "subscription",
       description: "在下载前依据逐镜意图重排图库候选；不可用时保留确定性原始排序。",
       modes: ["候选排序", "逐项理由", "人工锁定", "订阅能力"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("asset-rank") ? modelForTask("asset-rank") : zaiModelForTask("asset-rank"),
+      defaultModelId: codexRoleAvailable("asset-rank") ? modelForTask("asset-rank") : deepseekModelForTask("asset-rank"),
       modelProfiles: roleModelProfiles("codex-asset-ranker-v1", "asset-rank"),
       requirement: roleRequirement("asset-rank"),
     }),
@@ -305,7 +302,7 @@ export function buildProviderCatalog(
       id: "ai-shot-router-v1",
       capability: "asset.prepare",
       label: "AI 逐镜路由",
-      available: runtime.python && (codexRoleAvailable("director-plan") || zaiRoleAvailable("director-plan")),
+      available: runtime.python && (codexRoleAvailable("director-plan") || deepseekRoleAvailable("director-plan")),
       kind: "external",
       description: "执行导演计划；每个镜头可独立调用本地、图库或图片及视频生成能力。",
       modes: ["逐镜决策", "多来源", "逐项报价"],
@@ -566,28 +563,28 @@ export function buildProviderCatalog(
       requirement: "需要 python3、ffmpeg 和 ffprobe",
     }),
     provider({
-      id: "glm-visual-review-v1",
+      id: "deepseek-visual-review-v1",
       capability: "quality.review.visual",
-      label: "GLM-5.3-Flash 视觉审片",
-      available: zaiVisualReviewAvailable,
+      label: "DeepSeek 视觉审片",
+      available: deepseekVisualReviewAvailable,
       kind: "external",
       billing: "subscription",
       approvalPolicy: "none",
-      description: `从成片中抽取带时间码的关键帧，使用用户的 Code Plan 调用 ${zaiModelLabel}，检查构图、连续性、节奏、文字可读性与内容安全。`,
-      modes: ["原生多模态", "关键帧审片", "时间码问题", "Code Plan"],
+      description: `从成片中抽取带时间码的关键帧，调用 ${deepseekVisualModelId}，检查构图、连续性、节奏、文字可读性与内容安全。`,
+      modes: ["原生多模态", "关键帧审片", "时间码问题", "订阅额度"],
       latency: "seconds",
-      defaultModelId: zaiModelId,
+      defaultModelId: deepseekVisualModelId,
       modelProfiles: [{
-        id: zaiModelId,
-        label: zaiModelLabel,
-        providerId: "glm-visual-review-v1",
-        providerFamily: "zai-bigmodel",
-        available: zaiVisualReviewAvailable,
+        id: deepseekVisualModelId,
+        label: deepseekVisualModelId,
+        providerId: "deepseek-visual-review-v1",
+        providerFamily: "deepseek",
+        available: deepseekVisualReviewAvailable,
         recommended: true,
-        description: "抽取成片关键帧后执行多模态视觉审片，使用用户的 Code Plan 额度。",
+        description: "抽取成片关键帧后执行多模态视觉审片，使用 DeepSeek 订阅额度。",
         taskTypes: ["visual-review"],
       }],
-      requirement: zaiVisualReviewRequirement,
+      requirement: deepseekVisualReviewRequirement,
     }),
     provider({
       id: "codex-visual-review-v1",
@@ -616,13 +613,13 @@ export function buildProviderCatalog(
       id: "codex-publish-copy-v1",
       capability: "publish.copy",
       label: "Codex 发行编辑",
-      available: codexRoleAvailable("publish-copy") || zaiRoleAvailable("publish-copy"),
+      available: codexRoleAvailable("publish-copy") || deepseekRoleAvailable("publish-copy"),
       kind: "external",
       billing: "subscription",
       description: "人工终审通过后为成片生成平台标题、描述与话题标签；不可用时发布包回退使用简报标题并如实标注来源。",
       modes: ["平台标题", "发布描述", "话题标签"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("publish-copy") ? modelForTask("publish-copy") : zaiModelForTask("publish-copy"),
+      defaultModelId: codexRoleAvailable("publish-copy") ? modelForTask("publish-copy") : deepseekModelForTask("publish-copy"),
       modelProfiles: roleModelProfiles("codex-publish-copy-v1", "publish-copy"),
       requirement: roleRequirement("publish-copy"),
     }),
@@ -630,13 +627,13 @@ export function buildProviderCatalog(
       id: "codex-role-auditor-v1",
       capability: "role.audit",
       label: "AI 独立质量复核",
-      available: codexAuditAvailable || zaiAuditAvailable,
+      available: codexAuditAvailable || deepseekAuditAvailable,
       kind: "external",
       billing: "subscription",
       description: "由独立 AI 核对创作依据、角色要求和后续能否直接使用；发现必须修改的问题时，交回原角色修订。",
       modes: ["独立复核", "深入核对", "最多三轮", "不通过则要求修改"],
       latency: "seconds",
-      defaultModelId: codexAuditAvailable ? modelForTask("role-audit") : zaiModelForTask("role-audit"),
+      defaultModelId: codexAuditAvailable ? modelForTask("role-audit") : deepseekModelForTask("role-audit"),
       modelProfiles: roleModelProfiles("codex-role-auditor-v1", "role-audit"),
       requirement: roleRequirement("role-audit"),
     }),

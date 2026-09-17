@@ -490,16 +490,16 @@ describe("parseTaskRequest", () => {
 
   it("allows visual-review on both isolated profiles and enforces every frame boundary before execution", async () => {
     const openaiIdentity = codexExecutorProfileFor("openai").identity;
-    const zaiIdentity = codexExecutorProfileFor("zai").identity;
+    const deepseekIdentity = codexExecutorProfileFor("deepseek").identity;
     const validMaximum = visualReviewRequest([{ timecodeMs: 0, jpeg: jpegOfSize(256 * 1024) }]);
     assert.equal(parseTaskRequest(validMaximum, openaiIdentity).kind, "visual-review");
-    assert.equal(parseTaskRequest(validMaximum, zaiIdentity).kind, "visual-review");
+    assert.equal(parseTaskRequest(validMaximum, deepseekIdentity).kind, "visual-review");
     const maximumJpeg = jpegOfSize(256 * 1024);
     const validTotalMaximum = visualReviewRequest(Array.from(
       { length: 20 },
       (_, index) => ({ timecodeMs: index, jpeg: maximumJpeg }),
     ));
-    assert.equal(parseTaskRequest(validTotalMaximum, zaiIdentity).kind, "visual-review");
+    assert.equal(parseTaskRequest(validTotalMaximum, deepseekIdentity).kind, "visual-review");
 
     const tooMany = visualReviewRequest(Array.from(
       { length: 25 },
@@ -945,7 +945,7 @@ describe("parseTaskRequest", () => {
 });
 
 describe("buildCodexExecCommand", () => {
-  it("defines isolated OpenAI and ZAI profile identities without embedding a credential", () => {
+  it("defines isolated OpenAI and DeepSeek profile identities without embedding a credential", () => {
     const openai = codexExecutorProfileFor("openai", "gpt-5.3-codex");
     assert.deepEqual(openai.identity, {
       profileId: "openai",
@@ -954,15 +954,15 @@ describe("buildCodexExecCommand", () => {
       taskKinds: BROKER_TASK_KINDS,
     });
 
-    const zai = codexExecutorProfileFor("zai");
-    assert.deepEqual(zai.identity, {
-      profileId: "zai",
-      providerId: "zai-bigmodel-api",
-      modelId: "glm-5.3",
+    const deepseek = codexExecutorProfileFor("deepseek");
+    assert.deepEqual(deepseek.identity, {
+      profileId: "deepseek",
+      providerId: "deepseek",
+      modelId: "deepseek-flash",
       taskKinds: BROKER_TASK_KINDS,
     });
-    assert.equal(zai.model, undefined);
-    assert.equal("apiKey" in zai, false);
+    assert.equal(deepseek.model, undefined);
+    assert.equal("apiKey" in deepseek, false);
   });
 
   it("builds the verified isolation argv without shell or payload-sourced commands", () => {
@@ -2200,7 +2200,7 @@ describe("CodexExecutor.runTask", () => {
   });
 
   // 订阅额度耗尽曾被判成 execution_failed/process_exit → stage=completed_failure →
-  // 上游 model-fallback 拒绝换候选，于是 codex 优先、zai 兜底的链路一次都没触发过，
+  // 上游 model-fallback 拒绝换候选，于是 codex 优先、备选模型兜底的链路一次都没触发过，
   // 选题总编静默降级成规则保底。这里钉住生产环境真实措辞，防止再次退化成 terminal。
   it("treats exhausted subscription quota as a switchable rate limit", async () => {
     const diagnostics = [

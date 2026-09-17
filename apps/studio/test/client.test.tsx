@@ -36,7 +36,7 @@ const providers: StudioProvider[] = [
   { id: "macos-say-v1", capability: "voice.synthesize", label: "macOS 系统配音", available: true, kind: "local" },
   { id: "python-ffmpeg-v1", capability: "video.render", label: "FFmpeg 竖屏渲染", available: true, kind: "local" },
   { id: "python-technical-review-v1", capability: "quality.review", label: "本地技术审片", available: true, kind: "local" },
-  { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM-5.3-Flash 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "glm-5.3-flash" },
+  { id: "deepseek-visual-review-v1", capability: "quality.review.visual", label: "DeepSeek 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "deepseek-flash" },
   { id: "codex-visual-review-v1", capability: "quality.review.visual", label: "Codex 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
   { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立质量审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
 ];
@@ -835,7 +835,7 @@ describe("Studio client", () => {
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
-      providers: expect.objectContaining({ visualReview: "glm-visual-review-v1" }),
+      providers: expect.objectContaining({ visualReview: "deepseek-visual-review-v1" }),
     }));
   });
 
@@ -997,7 +997,7 @@ describe("Studio client", () => {
     expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
   });
 
-  it("shows the production team and applies a shared GLM choice to script and treatment", async () => {
+  it("shows the production team and applies a shared DeepSeek choice to script and treatment", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const providersWithAgents: StudioProvider[] = [
@@ -1013,7 +1013,7 @@ describe("Studio client", () => {
         modelProfiles: [
           { id: "gpt-5.6-terra", providerId: "codex-screenwriter-v1", providerFamily: "openai", label: "GPT-5.6 Terra", description: "日常创作", available: true, taskTypes: ["text"] },
           { id: "gpt-5.6-sol", providerId: "codex-screenwriter-v1", providerFamily: "openai", label: "GPT-5.6 Sol", description: "高质量创作", available: true, recommended: true, taskTypes: ["text"] },
-          { id: "glm-5.3", providerId: "codex-screenwriter-v1", providerFamily: "zai-bigmodel", label: "GLM-5.3", description: "GLM 创作", available: true, taskTypes: ["text"] },
+          { id: "deepseek-flash", providerId: "codex-screenwriter-v1", providerFamily: "deepseek", label: "DeepSeek-Flash", description: "DeepSeek 创作", available: true, taskTypes: ["text"] },
         ],
       },
       {
@@ -1026,7 +1026,7 @@ describe("Studio client", () => {
         defaultModelId: "gpt-5.6-terra",
         modelProfiles: [
           { id: "gpt-5.6-terra", providerId: "codex-creative-treatment-v1", providerFamily: "openai", label: "GPT-5.6 Terra", description: "日常构思", available: true, taskTypes: ["text"] },
-          { id: "glm-5.3", providerId: "codex-creative-treatment-v1", providerFamily: "zai-bigmodel", label: "GLM-5.3", description: "GLM 构思", available: true, taskTypes: ["text"] },
+          { id: "deepseek-flash", providerId: "codex-creative-treatment-v1", providerFamily: "deepseek", label: "DeepSeek-Flash", description: "DeepSeek 构思", available: true, taskTypes: ["text"] },
         ],
       },
     ];
@@ -1049,7 +1049,7 @@ describe("Studio client", () => {
     expect(screen.getByRole("combobox", { name: "编剧能力" })).toHaveValue("codex-screenwriter-v1");
     expect(screen.getByText(/独立质量复核/)).toBeInTheDocument();
     expect(screen.getByText(/深入质量复核.*最多三轮/)).toBeInTheDocument();
-    await user.selectOptions(screen.getByRole("combobox", { name: "编剧本次模型" }), "glm-5.3");
+    await user.selectOptions(screen.getByRole("combobox", { name: "编剧本次模型" }), "deepseek-flash");
     await user.type(screen.getByLabelText("视频标题"), "角色配置必须在开工前确认");
     await user.type(screen.getByLabelText("内容角度"), "验证编剧模型覆盖真实进入生产单");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
@@ -1058,8 +1058,8 @@ describe("Studio client", () => {
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ script: "codex-screenwriter-v1" }),
       models: expect.objectContaining({
-        "codex-screenwriter-v1": "glm-5.3",
-        "codex-creative-treatment-v1": "glm-5.3",
+        "codex-screenwriter-v1": "deepseek-flash",
+        "codex-creative-treatment-v1": "deepseek-flash",
       }),
     }));
   });
@@ -1503,11 +1503,11 @@ describe("Studio client", () => {
 
     expect(await screen.findByText(/上一版有 1 项已失效，暂不能开工/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /查看继承设置/ }));
-    await user.selectOptions(screen.getByRole("combobox", { name: "视觉审片员能力" }), "glm-visual-review-v1");
+    await user.selectOptions(screen.getByRole("combobox", { name: "视觉审片员能力" }), "deepseek-visual-review-v1");
     await waitFor(() => expect(screen.queryByText(/上一版有.*项已失效/)).not.toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "开始制作" }));
     expect(onSubmit).toHaveBeenCalled();
-    expect(onSubmit.mock.calls[0]?.[0].providers).toMatchObject({ visualReview: "glm-visual-review-v1" });
+    expect(onSubmit.mock.calls[0]?.[0].providers).toMatchObject({ visualReview: "deepseek-visual-review-v1" });
   });
 
   it("allows an explicitly selected editorial layout source alongside a paid visual strategy", async () => {
@@ -1536,7 +1536,7 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("button", { name: "开始制作" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      providers: expect.objectContaining({ visualReview: "glm-visual-review-v1" }),
+      providers: expect.objectContaining({ visualReview: "deepseek-visual-review-v1" }),
       director: expect.objectContaining({ assetProviderIds: expect.arrayContaining(["local-editorial-v1"]) }),
     }));
   });
@@ -1609,7 +1609,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
     await user.click(screen.getByRole("button", { name: "开始制作" }));
     expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
-      providers: expect.objectContaining({ visualReview: "glm-visual-review-v1" }),
+      providers: expect.objectContaining({ visualReview: "deepseek-visual-review-v1" }),
     }));
 
     await user.click(visualReview);
@@ -1834,7 +1834,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
     await user.click(screen.getByRole("button", { name: "开始制作" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      providers: expect.objectContaining({ visualReview: "glm-visual-review-v1" }),
+      providers: expect.objectContaining({ visualReview: "deepseek-visual-review-v1" }),
       economics: {
         recipeId: "keyshot-ai",
         allowMeteredProviders: true,
@@ -1877,14 +1877,14 @@ describe("Studio client", () => {
     expect(screen.getByLabelText("费用方式")).toHaveTextContent(/按实际方案报价.*逐项人工确认/);
   });
 
-  it("treats GLM Flash visual review as Code Plan without a cash quote and explains final dual review", async () => {
+  it("treats DeepSeek visual review as a subscription without a cash quote and explains final dual review", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={onSubmit} />);
 
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
     expect(screen.queryByText("1 次付费审片")).not.toBeInTheDocument();
     expect(screen.getByText(/视觉审片使用订阅额度/)).toBeInTheDocument();
-    expect(screen.getByText(/负责中途预检；最终成片由 GLM 与 Codex 对同一组抽帧分别独立审查，不上传音轨/)).toBeInTheDocument();
+    expect(screen.getByText(/负责中途预检；最终成片由 DeepSeek 与 Codex 对同一组抽帧分别独立审查，不上传音轨/)).toBeInTheDocument();
     expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
     const user = userEvent.setup();
     await user.type(screen.getByLabelText("视频标题"), "按次审片预算");
@@ -1892,7 +1892,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
     await user.click(screen.getByRole("button", { name: "开始制作" }));
     expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
-      providers: expect.objectContaining({ visualReview: "glm-visual-review-v1" }),
+      providers: expect.objectContaining({ visualReview: "deepseek-visual-review-v1" }),
       economics: {
         recipeId: "free-stock",
         allowMeteredProviders: false,
@@ -2059,7 +2059,7 @@ describe("Studio client", () => {
       providers: expect.objectContaining({
         assets: "ai-shot-router-v1",
         director: "api-visual-director-v1",
-        visualReview: "glm-visual-review-v1",
+        visualReview: "deepseek-visual-review-v1",
       }),
       director: expect.objectContaining({
         profileId: "auto",
@@ -2137,7 +2137,7 @@ describe("Studio client", () => {
 
     expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(screen.getByText(/缺少正式生产能力/)).toHaveTextContent("GLM 与 Codex 双模型审片");
+    expect(screen.getByText(/缺少正式生产能力/)).toHaveTextContent("DeepSeek 与 Codex 双模型审片");
   });
 
   it("prefills an editable production brief from a selected opportunity", () => {
@@ -2542,7 +2542,7 @@ describe("Studio client", () => {
       defaultModelId: "gpt-primary",
       modelProfiles: [
         { id: "gpt-primary", providerId: "codex-screenwriter-v1", providerFamily: "openai", label: "GPT 首选", description: "首选编剧", available: true, taskTypes: ["text"] },
-        { id: "glm-backup", providerId: "codex-screenwriter-v1", providerFamily: "zai-bigmodel", label: "GLM 替补", description: "替补编剧", available: true, taskTypes: ["text"] },
+        { id: "deepseek-backup", providerId: "codex-screenwriter-v1", providerFamily: "deepseek", label: "DeepSeek 替补", description: "替补编剧", available: true, taskTypes: ["text"] },
       ],
     };
     render(<NewRunDialog
@@ -2599,7 +2599,7 @@ describe("Studio client", () => {
     const assetInstruction = screen.getByRole("textbox", { name: "画面素材修改要求" });
     expect(assetInstruction).toHaveValue("只替换第三镜；没有合格素材时进入 人工补充素材，禁止使用带字素材和说明卡。");
     expect(screen.getByRole("combobox", { name: "编剧本次模型" })).toHaveValue("gpt-primary");
-    await user.selectOptions(screen.getByRole("combobox", { name: "编剧本次模型" }), "glm-backup");
+    await user.selectOptions(screen.getByRole("combobox", { name: "编剧本次模型" }), "deepseek-backup");
     await user.clear(assetInstruction);
     await user.type(assetInstruction, "第三镜改用无字实拍母片，其他镜头不得变化。");
     await user.click(screen.getByRole("button", { name: "开始制作" }));
@@ -2611,7 +2611,7 @@ describe("Studio client", () => {
         assets: "ai-shot-router-v1",
         voice: "macos-say-v1",
       }),
-      models: { "codex-screenwriter-v1": "glm-backup", "pexels-stock-v1": "search-v2" },
+      models: { "codex-screenwriter-v1": "deepseek-backup", "pexels-stock-v1": "search-v2" },
       director: { profileId: "documentary-observer", assetProviderIds: ["pexels-stock-v1"] },
       voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" },
       rework: expect.objectContaining({
@@ -3709,9 +3709,9 @@ describe("Studio client", () => {
       label: "Codex 编剧",
       available: true,
       kind: "external",
-      defaultModelId: "glm-5.3",
+      defaultModelId: "deepseek-flash",
       modelProfiles: [
-        { id: "glm-5.3", label: "GLM-5.3", providerId: "codex-screenwriter-v1", providerFamily: "zai", available: true, description: "主力编剧模型", taskTypes: ["text"] },
+        { id: "deepseek-flash", label: "DeepSeek-Flash", providerId: "codex-screenwriter-v1", providerFamily: "deepseek", available: true, description: "主力编剧模型", taskTypes: ["text"] },
         { id: "gpt-5.6-sol", label: "GPT-5.6", providerId: "codex-screenwriter-v1", providerFamily: "openai", available: true, description: "备用编剧模型", taskTypes: ["text"] },
       ],
     };
@@ -3862,11 +3862,11 @@ describe("Studio client", () => {
             ],
             reviewScope: { evidenceId: "a".repeat(64) },
             independentReviews: [{
-              providerId: "glm-visual-review-v1",
-              modelId: "glm-5.3-flash",
+              providerId: "deepseek-visual-review-v1",
+              modelId: "deepseek-flash",
               report: {
                 recommendation: "revise",
-                summary: "GLM 发现开场画面没有兑现承诺。",
+                summary: "DeepSeek 发现开场画面没有兑现承诺。",
                 scores: { composition: 68, continuity: 45, pacing: 52, legibility: 64, safety: 86 },
                 findings: [{ claimType: "static", evidenceStatus: "failed", severity: "warning" }],
               },
@@ -3899,9 +3899,9 @@ describe("Studio client", () => {
     expect(screen.getByRole("button", { name: "终止制作" })).toBeInTheDocument();
     const dualReview = screen.getByRole("region", { name: "双模型审片结果" });
     expect(within(dualReview).getByText("两者查看同一份成片证据")).toBeInTheDocument();
-    expect(within(dualReview).getByText("GLM 发现开场画面没有兑现承诺。")).toBeInTheDocument();
+    expect(within(dualReview).getByText("DeepSeek 发现开场画面没有兑现承诺。")).toBeInTheDocument();
     expect(within(dualReview).getByText("Codex 认为关键动作缺失，不能直接发布。")).toBeInTheDocument();
-    expect(within(dualReview).getByText(/glm-5\.3-flash · 63 分 · 1 项问题/)).toBeInTheDocument();
+    expect(within(dualReview).getByText(/deepseek-flash · 63 分 · 1 项问题/)).toBeInTheDocument();
     expect(within(dualReview).getByText(/gpt-5\.6-sol · 59 分 · 2 项问题/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
@@ -3967,14 +3967,14 @@ describe("Studio client", () => {
             reviewScope: {
               evidenceId: "a".repeat(64),
               actualModels: [
-                { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash", auditVerdict: "pass" },
+                { providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash", auditVerdict: "pass" },
                 { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol", auditVerdict: "repair" },
               ],
             },
             independentReviews: [{
-              providerId: "glm-visual-review-v1",
-              modelId: "glm-5.3-flash",
-              report: { recommendation: "approve", summary: "GLM 认为可以发布。", scores: { composition: 80 } },
+              providerId: "deepseek-visual-review-v1",
+              modelId: "deepseek-flash",
+              report: { recommendation: "approve", summary: "DeepSeek 认为可以发布。", scores: { composition: 80 } },
             }, {
               providerId: "codex-visual-review-v1",
               modelId: "gpt-5.6-sol",
@@ -3997,7 +3997,7 @@ describe("Studio client", () => {
     expect(caveat).toHaveTextContent("作品能不能发由你定");
     // 逐分支标注：只有没过质检的那条被点名，另一条不受牵连。
     expect(within(dualReview).getByText(/gpt-5\.6-sol · 76 分 · 0 项问题 · 独立审计未通过/)).toBeInTheDocument();
-    expect(within(dualReview).getByText(/glm-5\.3-flash · 80 分 · 0 项问题/).textContent).toBe("glm-5.3-flash · 80 分 · 0 项问题");
+    expect(within(dualReview).getByText(/deepseek-flash · 80 分 · 0 项问题/).textContent).toBe("deepseek-flash · 80 分 · 0 项问题");
   });
 
   it("keeps an older workflow read-only and offers a new production instead of broken review actions", async () => {
@@ -4074,7 +4074,7 @@ describe("Studio client", () => {
               artifactIds: ["review-current"],
               inputVersionIds: [],
               createdAt: "2026-08-21T10:00:30.000Z",
-              createdBy: "glm-visual-review-v1",
+              createdBy: "deepseek-visual-review-v1",
               schemaVersion: "video-factory/visual-review-v1",
               output: { report: {
                 recommendation: "revise",
@@ -4156,7 +4156,7 @@ describe("Studio client", () => {
               artifactIds: ["review-current"],
               inputVersionIds: [],
               createdAt: "2026-08-21T10:00:30.000Z",
-              createdBy: "glm-visual-review-v1",
+              createdBy: "deepseek-visual-review-v1",
               schemaVersion: "video-factory/visual-review-v1",
               output: { report: {
                 recommendation: "revise",
@@ -4522,9 +4522,9 @@ describe("Studio client", () => {
           ...node,
           status: "running",
           plannedExecution: {
-            providerId: "glm-director",
-            providerLabel: "智谱视觉导演",
-            modelId: "glm-5.3-flash",
+            providerId: "deepseek-director",
+            providerLabel: "DeepSeek 视觉导演",
+            modelId: "deepseek-flash",
             transport: "http_api",
             billing: "subscription",
             snapshotSource: "created",
@@ -4533,14 +4533,14 @@ describe("Studio client", () => {
         artifacts: [],
       }}
       providers={[{
-        id: "glm-director",
+        id: "deepseek-director",
         capability: "storyboard.plan",
-        label: "智谱视觉导演",
+        label: "DeepSeek 视觉导演",
         available: true,
         kind: "external",
         billing: "subscription",
-        defaultModelId: "glm-5.3-flash",
-        modelProfiles: [{ id: "glm-5.3-flash", providerId: "glm-director", providerFamily: "zai-bigmodel", label: "GLM-5.3-Flash", description: "视觉导演模型", available: true, taskTypes: ["text"] }],
+        defaultModelId: "deepseek-flash",
+        modelProfiles: [{ id: "deepseek-flash", providerId: "deepseek-director", providerFamily: "deepseek", label: "DeepSeek-Flash", description: "视觉导演模型", available: true, taskTypes: ["text"] }],
       }]}
       decisionPending={false}
       onDecision={async () => undefined}
@@ -4554,8 +4554,8 @@ describe("Studio client", () => {
     expect(screen.getByText("当前步骤")).toBeInTheDocument();
     expect(screen.getByText("正在统一叙事节奏、镜头语法与视觉规则")).toBeInTheDocument();
     expect(screen.getByText("暂无法估算剩余时间；已处理 42 秒")).toBeInTheDocument();
-    expect(screen.getByText(/智谱视觉导演 · GLM-5.3-Flash/)).toBeInTheDocument();
-    expect(screen.queryByText(/glm-5\.3-flash/)).not.toBeInTheDocument();
+    expect(screen.getByText(/DeepSeek 视觉导演 · DeepSeek-Flash/)).toBeInTheDocument();
+    expect(screen.queryByText(/deepseek-flash/)).not.toBeInTheDocument();
     expect(screen.getByText("制作服务连接刚刚确认")).toBeInTheDocument();
   });
 
@@ -5680,7 +5680,7 @@ describe("joint-v1 planning stages panel (B4)", () => {
       defaultModelId: "treatment-model-a",
       modelProfiles: [
         { id: "treatment-model-a", label: "构思一号", providerId: "codex-creative-treatment-v1", providerFamily: "openai", available: true, description: "首选", taskTypes: ["text"] },
-        { id: "treatment-model-b", label: "构思二号", providerId: "codex-creative-treatment-v1", providerFamily: "zai-bigmodel", available: true, description: "备选", taskTypes: ["text"] },
+        { id: "treatment-model-b", label: "构思二号", providerId: "codex-creative-treatment-v1", providerFamily: "deepseek", available: true, description: "备选", taskTypes: ["text"] },
       ],
     },
   ];

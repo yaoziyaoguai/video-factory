@@ -73,7 +73,7 @@ const CAPABILITIES: CapabilityDefinition[] = [
   { key: "voice", capability: "voice.synthesize", label: "配音", role: "声音导演", description: "旁白音色与语速", preferred: "macos-say-v1", icon: Mic2 },
   { key: "render", capability: "video.render", label: "视频渲染", role: "剪辑师", description: "9:16 合成、字幕与音轨", preferred: "python-ffmpeg-v1", icon: Film },
   { key: "technicalReview", capability: "quality.review", label: "机器质检", role: "技术质检", description: "分辨率、时长与产物校验", preferred: "python-technical-review-v1", icon: ScanSearch },
-  { key: "visualReview", capability: "quality.review.visual", label: "视觉审片", role: "视觉审片员", description: "构图、连续性、节奏与文字可读性", preferred: "glm-visual-review-v1", icon: ScanSearch },
+  { key: "visualReview", capability: "quality.review.visual", label: "视觉审片", role: "视觉审片员", description: "构图、连续性、节奏与文字可读性", preferred: "deepseek-visual-review-v1", icon: ScanSearch },
 ];
 
 const RECIPES: Array<{
@@ -184,7 +184,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const visualSourceIssue = visualSourceCompatibilityIssue(undefined, selectedAssetSources);
   const effectiveModelId = (provider: StudioProvider) => modelSelections[provider.id]
     ?? provider.defaultModelId;
-  const finalReviewProviders = ["glm-visual-review-v1", "codex-visual-review-v1"].map((providerId) => (
+  const finalReviewProviders = ["deepseek-visual-review-v1", "codex-visual-review-v1"].map((providerId) => (
     providers.find((provider) => provider.id === providerId
       && provider.capability === "quality.review.visual"
       && provider.available
@@ -309,7 +309,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     ...missingCapabilities.map((item) => item.label),
     ...(assetProviderIds.length > 0 ? [] : ["导演画面来源"]),
     ...(roleAuditProvider ? [] : ["独立质量复核"]),
-    ...(dualFinalReviewAvailable ? [] : ["GLM 与 Codex 双模型审片"]),
+    ...(dualFinalReviewAvailable ? [] : ["DeepSeek 与 Codex 双模型审片"]),
     ...(voiceSelectionAvailable === false && !initialValues?.rework ? ["可用声音演员"] : []),
   ];
   // 链接按现有分区优先：制作角色能力缺口落到制作分工；只剩画面来源缺口时落到画面来源分区，避免让创作者自己找。
@@ -566,7 +566,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         throw new Error("请选择目标平台后再开始制作。");
       }
       if (!dualFinalReviewAvailable || !visualReviewProvider) {
-        throw new Error("正式制作必须由 GLM 与 Codex 使用两个不同模型独立审片；请先在创作设置中恢复两种审片和独立质量复核能力。");
+        throw new Error("正式制作必须由 DeepSeek 与 Codex 使用两个不同模型独立审片；请先在创作设置中恢复两种审片和独立质量复核能力。");
       }
       const providersForRun: StudioProductionInput["providers"] = { ...effectiveBindings };
       providersForRun.visualReview = visualReviewProvider.id;
@@ -1187,9 +1187,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   disabled
                   readOnly
                 />
-                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片 · GLM + Codex 双模型</strong></span>
+                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片 · DeepSeek + Codex 双模型</strong></span>
                 <small>{dualFinalReviewAvailable && visualReviewProvider
-                  ? `${creatorProviderName(visualReviewProvider)} 负责中途预检；最终成片由 GLM 与 Codex 对同一组抽帧分别独立审查，不上传音轨`
+                  ? `${creatorProviderName(visualReviewProvider)} 负责中途预检；最终成片由 DeepSeek 与 Codex 对同一组抽帧分别独立审查，不上传音轨`
                   : "两种审片模型或独立质量复核当前不完整，正式制作不能开工"}</small>
               </label>
               <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>

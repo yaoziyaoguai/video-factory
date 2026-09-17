@@ -122,7 +122,7 @@ export interface StudioServiceOptions {
   environment?: NodeJS.ProcessEnv;
   commandAvailable?: (command: string) => Promise<boolean>;
   codexAvailability?: CodexCatalogAvailability;
-  zaiCodexAvailability?: CodexCatalogAvailability;
+  deepseekCodexAvailability?: CodexCatalogAvailability;
   now?: () => Date;
   createId?: () => string;
   localCapabilities?: Pick<LocalCapabilityService, "report" | "listVoices" | "preview">;
@@ -172,7 +172,7 @@ export class StudioService {
       ...(options.commandAvailable ? { commandAvailable: options.commandAvailable } : {}),
       ...(options.localCapabilities ? { localCapabilities: options.localCapabilities } : {}),
       ...(options.codexAvailability ? { codexAvailability: options.codexAvailability } : {}),
-      ...(options.zaiCodexAvailability ? { zaiCodexAvailability: options.zaiCodexAvailability } : {}),
+      ...(options.deepseekCodexAvailability ? { deepseekCodexAvailability: options.deepseekCodexAvailability } : {}),
     });
     this.trends = new TrendStudio({
       repositoryRoot,

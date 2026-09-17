@@ -129,7 +129,7 @@ describe("CodexVisualReviewAgent", () => {
     );
     assert.notEqual(first.evidenceSnapshotId, second.evidenceSnapshotId);
   });
-  it("runs final Codex and GLM reviews independently over one immutable evidence snapshot", async () => {
+  it("runs final Codex and DeepSeek reviews independently over one immutable evidence snapshot", async () => {
     let prepareCalls = 0;
     const preparedInputs: VisualReviewMediaPayload[] = [];
     const calls: string[] = [];
@@ -147,7 +147,7 @@ describe("CodexVisualReviewAgent", () => {
     });
     const hardFailure = {
       ...report,
-      summary: "GLM 确认画面存在水印。",
+      summary: "DeepSeek 确认画面存在水印。",
       scores: { ...report.scores, legibility: 35 },
       findings: [{ ...report.findings[0], severity: "critical" as const, description: "画面存在水印。" }],
       recommendation: "reject" as const,
@@ -161,7 +161,7 @@ describe("CodexVisualReviewAgent", () => {
       recommendation: "approve" as const,
     };
     const subject = new IndependentDualVisualReviewAgent({
-      primary: reviewer("glm-visual-review-v1", "glm-5.3-flash", hardFailure),
+      primary: reviewer("deepseek-visual-review-v1", "deepseek-flash", hardFailure),
       secondary: reviewer("codex-visual-review-v1", "gpt-5.6-sol", codexPass),
       media: {
         prepare: async () => {
@@ -178,7 +178,7 @@ describe("CodexVisualReviewAgent", () => {
     });
 
     assert.equal(prepareCalls, 1);
-    assert.deepEqual(new Set(calls), new Set(["glm-visual-review-v1", "codex-visual-review-v1"]));
+    assert.deepEqual(new Set(calls), new Set(["deepseek-visual-review-v1", "codex-visual-review-v1"]));
     // BG-08：两分支收到共同快照的独立深拷贝（同内容、不同引用——分支改写互不可见）。
     assert.deepEqual(preparedInputs[0], preparedInputs[1]);
     assert.notEqual(preparedInputs[0], preparedInputs[1]);
@@ -186,7 +186,7 @@ describe("CodexVisualReviewAgent", () => {
     assert.equal(execution.output.scores.legibility, 35);
     assert.equal(execution.output.findings.some((finding) => finding.description === "画面存在水印。"), true);
     assert.deepEqual(execution.independentReviews?.map(({ providerId, modelId }) => ({ providerId, modelId })), [
-      { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" },
+      { providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash" },
       { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol" },
     ]);
   });
@@ -214,11 +214,11 @@ describe("CodexVisualReviewAgent", () => {
     };
     const strictPilot: VisualReviewReport = {
       ...mutableReport,
-      summary: "GLM 认为试片灯位不连续。",
+      summary: "DeepSeek 认为试片灯位不连续。",
       scores: { ...mutableReport.scores, continuity: 60 },
     };
     const subject = new IndependentDualVisualReviewAgent({
-      primary: reviewer("glm-visual-review-v1", "glm-5.3-flash", lenientPilot),
+      primary: reviewer("deepseek-visual-review-v1", "deepseek-flash", lenientPilot),
       secondary: reviewer("codex-visual-review-v1", "gpt-5.6-sol", strictPilot),
       media: { prepare: async () => { throw new Error("A pilot review has no sampled sequence to prepare."); } },
     });
@@ -231,13 +231,13 @@ describe("CodexVisualReviewAgent", () => {
     });
 
     assert.equal(calls.length, 2);
-    assert.deepEqual(new Set(calls), new Set(["glm-visual-review-v1", "codex-visual-review-v1"]));
+    assert.deepEqual(new Set(calls), new Set(["deepseek-visual-review-v1", "codex-visual-review-v1"]));
     // 闸门取保守侧：一个模型说不可以用，试片就不为后续付费放行。
     assert.equal(execution.output.scores.continuity, 60);
     assert.equal(visualReviewBlocksContinuation(execution.output), true);
     assert.equal(execution.output.findings.some((finding) => finding.description === "字幕行数偏多。"), true);
     assert.deepEqual(execution.independentReviews?.map(({ providerId, modelId }) => ({ providerId, modelId })), [
-      { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" },
+      { providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash" },
       { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol" },
     ]);
   });
@@ -245,8 +245,8 @@ describe("CodexVisualReviewAgent", () => {
   it("refuses to clear a paid pilot when only one of the two branches reported", async () => {
     const subject = new IndependentDualVisualReviewAgent({
       primary: {
-        id: "glm-visual-review-v1",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-flash",
         review: async () => mutableReport,
       },
       secondary: {
@@ -263,7 +263,7 @@ describe("CodexVisualReviewAgent", () => {
         assert.ok(error instanceof IndependentVisualReviewError);
         // 失败分支要指名道姓，且已跑完的那一支必须带着结果留下——重试时它不该被再跑一遍。
         assert.equal(error.completedReviews.length, 1);
-        assert.equal(error.completedReviews[0]?.modelId, "glm-5.3-flash");
+        assert.equal(error.completedReviews[0]?.modelId, "deepseek-flash");
         assert.equal(error.failures.length, 1);
         assert.equal(error.failures[0]?.modelId, "gpt-5.6-sol");
         assert.match(String((error.failures[0]?.error as Error).message), /Codex 审片暂不可用/);
@@ -276,16 +276,16 @@ describe("CodexVisualReviewAgent", () => {
     // 两个分支各自按自己的名义身份回话，但落到同一个实际模型。
     const sameIdentity = new IndependentDualVisualReviewAgent({
       primary: {
-        id: "glm-visual-review-v1",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-flash",
         review: async () => mutableReport,
-        reviewDetailed: async () => ({ output: mutableReport, executedProviderId: "glm-visual-review-v1", executedModelId: "glm-5.3-flash" }),
+        reviewDetailed: async () => ({ output: mutableReport, executedProviderId: "deepseek-visual-review-v1", executedModelId: "deepseek-flash" }),
       },
       secondary: {
         id: "codex-visual-review-v1",
         modelId: "gpt-5.6-sol",
         review: async () => mutableReport,
-        reviewDetailed: async () => ({ output: mutableReport, executedProviderId: "glm-visual-review-v1", executedModelId: "glm-5.3-flash" }),
+        reviewDetailed: async () => ({ output: mutableReport, executedProviderId: "deepseek-visual-review-v1", executedModelId: "deepseek-flash" }),
       },
       media: { prepare: async () => media },
     });
@@ -316,7 +316,7 @@ describe("CodexVisualReviewAgent", () => {
       }),
     });
     const subject = new IndependentDualVisualReviewAgent({
-      primary: reviewer("glm-visual-review-v1", "glm-5.3-flash", "GLM"),
+      primary: reviewer("deepseek-visual-review-v1", "deepseek-flash", "DeepSeek"),
       secondary: reviewer("codex-visual-review-v1", "gpt-5.6-sol", "Codex"),
       media: { prepare: async () => media },
     });
@@ -343,7 +343,7 @@ describe("CodexVisualReviewAgent", () => {
       }),
     });
     const subject = new IndependentDualVisualReviewAgent({
-      primary: reviewer("glm-visual-review-v1", "glm-5.3-flash", "warning"),
+      primary: reviewer("deepseek-visual-review-v1", "deepseek-flash", "warning"),
       secondary: reviewer("codex-visual-review-v1", "gpt-5.6-sol", "critical"),
       media: { prepare: async () => media },
     });
@@ -357,13 +357,13 @@ describe("CodexVisualReviewAgent", () => {
     assert.equal(execution.output.findings.length, 1);
     assert.equal(execution.output.findings[0]?.severity, "critical");
     assert.deepEqual(execution.output.findings[0]?.reviewSources, [
-      { providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" },
+      { providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash" },
       { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol" },
     ]);
   });
 
   it("retries only the failed final-review branch after preserving the completed model result", async () => {
-    const calls = { glm: 0, codex: 0 };
+    const calls = { deepseek: 0, codex: 0 };
     const stored = new Map<string, unknown>();
     const cleanReport: VisualReviewReport = {
       ...report,
@@ -373,10 +373,10 @@ describe("CodexVisualReviewAgent", () => {
     };
     const subject = new IndependentDualVisualReviewAgent({
       primary: {
-        id: "glm-visual-review-v1",
-        modelId: "glm-5.3-flash",
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-flash",
         review: async () => {
-          calls.glm += 1;
+          calls.deepseek += 1;
           return cleanReport;
         },
       },
@@ -407,8 +407,8 @@ describe("CodexVisualReviewAgent", () => {
       (error: unknown) => {
         assert.ok(error instanceof IndependentVisualReviewError);
         assert.deepEqual(error.completedReviews.map(({ providerId, modelId }) => ({ providerId, modelId })), [{
-          providerId: "glm-visual-review-v1",
-          modelId: "glm-5.3-flash",
+          providerId: "deepseek-visual-review-v1",
+          modelId: "deepseek-flash",
         }]);
         assert.deepEqual(error.failures.map(({ providerId, modelId }) => ({ providerId, modelId })), [{
           providerId: "codex-visual-review-v1",
@@ -420,7 +420,7 @@ describe("CodexVisualReviewAgent", () => {
     );
     const recovered = await subject.reviewDetailed(input);
 
-    assert.deepEqual(calls, { glm: 1, codex: 2 });
+    assert.deepEqual(calls, { deepseek: 1, codex: 2 });
     assert.equal(recovered.independentReviews?.length, 2);
     assert.equal(recovered.output.recommendation, "approve");
   });
@@ -730,7 +730,7 @@ describe("CodexVisualReviewAgent", () => {
     assert.deepEqual(execution.output, repairedReport);
   });
 
-  it("uses the OpenAI audit client when the visual producer only accepts ZAI review tasks", async () => {
+  it("uses the OpenAI audit client when the visual producer only accepts DeepSeek review tasks", async () => {
     const producerKinds: CodexTaskKind[] = [];
     const auditKinds: CodexTaskKind[] = [];
     const agent = new CodexVisualReviewAgent({
@@ -757,7 +757,7 @@ describe("CodexVisualReviewAgent", () => {
     assert.equal(execution.agentLoop?.iterations.length, 1);
   });
 
-  it("keeps stateless ZAI visual-review calls out of Codex sessions while preserving full repair context", async () => {
+  it("keeps stateless DeepSeek visual-review calls out of Codex sessions while preserving full repair context", async () => {
     const producerSessions: unknown[] = [];
     const producerPayloads: Array<Record<string, unknown>> = [];
     const auditSessions: unknown[] = [];
@@ -950,8 +950,8 @@ describe("CodexVisualReviewAgent", () => {
     const primaryInputs: VisualReviewAgentInput[] = [];
     const backupInputs: VisualReviewAgentInput[] = [];
     const primary: VisualReviewAgent = {
-      id: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      id: "deepseek-visual-review-v1",
+      modelId: "deepseek-flash",
       review: async () => { throw new Error("Detailed review must be used."); },
       reviewDetailed: async (input) => {
         primaryInputs.push(input);
@@ -987,7 +987,7 @@ describe("CodexVisualReviewAgent", () => {
     };
     const agent = new FallbackVisualReviewAgent({
       primary,
-      primaryProviderId: "zai-bigmodel-api",
+      primaryProviderId: "deepseek",
       backups: [{ agent: backup, label: "Codex 视觉审片", providerId: "openai" }],
     });
 
@@ -1000,18 +1000,18 @@ describe("CodexVisualReviewAgent", () => {
 
     assert.equal(primaryInputs.length, 1);
     assert.equal(backupInputs.length, 1);
-    assert.equal(primaryInputs[0]?.agentLoopCheckpoint, checkpoints.get("glm-5.3-flash"));
+    assert.equal(primaryInputs[0]?.agentLoopCheckpoint, checkpoints.get("deepseek-flash"));
     assert.equal(backupInputs[0]?.agentLoopCheckpoint, checkpoints.get("gpt-backup"));
     assert.match(String(backupInputs[0]?.requestId), /^backup-[a-f0-9]{64}$/);
     assert.notEqual(backupInputs[0]?.requestId, primaryInputs[0]?.requestId);
     assert.equal(execution.executedProviderId, "openai");
     assert.equal(execution.executedProviderLabel, "Codex 视觉审片");
     assert.equal(execution.executedModelId, "gpt-backup");
-    assert.equal(execution.fallbackFromProviderId, "zai-bigmodel-api");
-    assert.deepEqual(execution.attemptedModelIds, ["glm-5.3-flash", "gpt-backup"]);
+    assert.equal(execution.fallbackFromProviderId, "deepseek");
+    assert.deepEqual(execution.attemptedModelIds, ["deepseek-flash", "gpt-backup"]);
     assert.deepEqual(execution.trace?.modelCandidateAttempts, [{
-      modelId: "glm-5.3-flash",
-      providerId: "zai-bigmodel-api",
+      modelId: "deepseek-flash",
+      providerId: "deepseek",
       outcome: "failed",
       failureStage: "not_accepted",
       failureReason: "服务端错误（HTTP 503）",
@@ -1027,14 +1027,14 @@ describe("CodexVisualReviewAgent", () => {
     // stage=uncertain 表示原请求可能已被 durable broker 受理并仍在执行；
     // 此时启动 backup 会造成原任务与 backup 双跑，必须原样上抛且不得伪造 backup 成功。
     const uncertainFailure = new CodexBridgeError(
-      "Codex bridge returned HTTP 503. socket /private/run/zai.sock detail secret-primary",
+      "Codex bridge returned HTTP 503. socket /private/run/deepseek.sock detail secret-primary",
       false,
       "uncertain",
       503,
     );
     const primary: VisualReviewAgent = {
-      id: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      id: "deepseek-visual-review-v1",
+      modelId: "deepseek-flash",
       review: async () => { throw new Error("Detailed review must be used."); },
       reviewDetailed: async () => { throw uncertainFailure; },
     };
@@ -1058,7 +1058,7 @@ describe("CodexVisualReviewAgent", () => {
     };
     const agent = new FallbackVisualReviewAgent({
       primary,
-      primaryProviderId: "zai-bigmodel-api",
+      primaryProviderId: "deepseek",
       backups: [{ agent: backup, label: "Codex 视觉审片", providerId: "openai" }],
     });
 
@@ -1071,7 +1071,7 @@ describe("CodexVisualReviewAgent", () => {
         assert.equal(error.statusCode, 503);
         // C5/CG-08：uncertain 结果的文案必须引导核对原请求，不得建议重试或换模型。
         assert.equal(error.creatorMessage, "与模型服务的连接中断，结果未知：这次请求可能已经被模型受理。当前进度已保留，请先核对原有任务的结果，不要重新发起同样的请求。");
-        assert.doesNotMatch(error.creatorMessage, /secret-primary|zai\.sock|\/private\/run/);
+        assert.doesNotMatch(error.creatorMessage, /secret-primary|deepseek.sock|\/private\/run/);
         return true;
       },
     );
@@ -1125,7 +1125,7 @@ describe("CodexVisualReviewAgent", () => {
     };
     const backup: VisualReviewAgent = {
       id: "codex-visual-review-v1",
-      modelId: "glm-backup",
+      modelId: "deepseek-backup",
       review: async () => validateVisualReviewReport(report, media.durationMs),
       reviewDetailed: async (input) => {
         candidateInputs.push(input);
@@ -1146,8 +1146,8 @@ describe("CodexVisualReviewAgent", () => {
                 taskKind: "role-audit",
                 promptVersion: "visual-review-test-v1",
                 prompt: "bounded audit prompt",
-                providerId: "zai-bigmodel-api",
-                modelId: "glm-backup",
+                providerId: "deepseek",
+                modelId: "deepseek-backup",
               },
             };
           },
@@ -1159,7 +1159,7 @@ describe("CodexVisualReviewAgent", () => {
     const fallback = new FallbackVisualReviewAgent({
       primary,
       primaryProviderId: "openai",
-      backups: [{ agent: backup, providerId: "zai-bigmodel-api" }],
+      backups: [{ agent: backup, providerId: "deepseek" }],
     });
 
     const execution = await fallback.reviewDetailed({
@@ -1175,31 +1175,31 @@ describe("CodexVisualReviewAgent", () => {
     assert.equal(backupProducerCalls, 0);
     assert.equal(backupAuditCalls, 1);
     assert.notEqual(candidateInputs[0]?.requestId, candidateInputs[1]?.requestId);
-    assert.equal(candidateInputs[1]?.agentLoopCheckpoint?.key, "checkpoint-glm-backup");
+    assert.equal(candidateInputs[1]?.agentLoopCheckpoint?.key, "checkpoint-deepseek-backup");
     assert.ok(candidateInputs[1]?.agentLoopCheckpoint?.resumeFrom?.pendingCandidate);
     assert.equal(execution.agentLoop?.iterations[0]?.candidateTrace?.modelId, "gpt-primary");
-    assert.equal(execution.agentLoop?.iterations[0]?.auditTrace?.modelId, "glm-backup");
-    assert.equal(execution.executedProviderId, "zai-bigmodel-api");
-    assert.equal(execution.executedModelId, "glm-backup");
-    assert.deepEqual(execution.attemptedModelIds, ["gpt-primary", "glm-backup"]);
+    assert.equal(execution.agentLoop?.iterations[0]?.auditTrace?.modelId, "deepseek-backup");
+    assert.equal(execution.executedProviderId, "deepseek");
+    assert.equal(execution.executedModelId, "deepseek-backup");
+    assert.deepEqual(execution.attemptedModelIds, ["gpt-primary", "deepseek-backup"]);
   });
 
   it("places the explicitly selected visual model first and can fall back in reverse provider order", async () => {
     const calls: string[] = [];
     const primary: VisualReviewAgent = {
-      id: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      id: "deepseek-visual-review-v1",
+      modelId: "deepseek-flash",
       review: async () => validateVisualReviewReport(report, media.durationMs),
       reviewDetailed: async () => {
-        calls.push("glm-5.3-flash");
+        calls.push("deepseek-flash");
         return {
           output: validateVisualReviewReport(report, media.durationMs),
           trace: {
             taskKind: "visual-review",
             promptVersion: "visual-review-test-v1",
             prompt: "bounded test prompt",
-            providerId: "zai-bigmodel-api",
-            modelId: "glm-5.3-flash",
+            providerId: "deepseek",
+            modelId: "deepseek-flash",
           },
         };
       },
@@ -1215,7 +1215,7 @@ describe("CodexVisualReviewAgent", () => {
     };
     const agent = new FallbackVisualReviewAgent({
       primary,
-      primaryProviderId: "zai-bigmodel-api",
+      primaryProviderId: "deepseek",
       backups: [{ agent: backup, providerId: "openai" }],
     });
 
@@ -1225,18 +1225,18 @@ describe("CodexVisualReviewAgent", () => {
       selectedModelId: "gpt-vision",
     });
 
-    assert.deepEqual(calls, ["gpt-vision", "glm-5.3-flash"]);
-    assert.equal(execution.executedModelId, "glm-5.3-flash");
+    assert.deepEqual(calls, ["gpt-vision", "deepseek-flash"]);
+    assert.equal(execution.executedModelId, "deepseek-flash");
     assert.equal(execution.executedProviderLabel, undefined);
     assert.equal(execution.fallbackFromProviderId, "openai");
-    assert.deepEqual(execution.attemptedModelIds, ["gpt-vision", "glm-5.3-flash"]);
+    assert.deepEqual(execution.attemptedModelIds, ["gpt-vision", "deepseek-flash"]);
   });
 
   it("does not mask a valid semantic audit failure with the backup model", async () => {
     let backupCalls = 0;
     const primary: VisualReviewAgent = {
-      id: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      id: "deepseek-visual-review-v1",
+      modelId: "deepseek-flash",
       review: async () => { throw new Error("Detailed review must be used."); },
       reviewDetailed: async () => {
         throw new RoleAgentLoopError("Visual report did not pass its audit.", {
@@ -1260,7 +1260,7 @@ describe("CodexVisualReviewAgent", () => {
     };
     const agent = new FallbackVisualReviewAgent({
       primary,
-      primaryProviderId: "zai-bigmodel-api",
+      primaryProviderId: "deepseek",
       backups: [{ agent: backup, providerId: "openai" }],
     });
 
@@ -1273,8 +1273,8 @@ describe("CodexVisualReviewAgent", () => {
 
   it("reports both provider failures without leaking their raw diagnostics", async () => {
     const primary: VisualReviewAgent = {
-      id: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      id: "deepseek-visual-review-v1",
+      modelId: "deepseek-flash",
       review: async () => { throw new Error("Detailed review must be used."); },
       reviewDetailed: async () => {
         // 两个候选都必须确证未受理（not_accepted），耗尽错误才有权聚合全部失败；
@@ -1292,7 +1292,7 @@ describe("CodexVisualReviewAgent", () => {
     };
     const agent = new FallbackVisualReviewAgent({
       primary,
-      primaryProviderId: "zai-bigmodel-api",
+      primaryProviderId: "deepseek",
       backups: [{ agent: backup, providerId: "openai" }],
     });
 
@@ -1300,13 +1300,13 @@ describe("CodexVisualReviewAgent", () => {
       () => agent.reviewDetailed({ videoPath: "/run/final.mp4", runRoot: "/run" }),
       (error: unknown) => {
         assert.ok(error instanceof VisualReviewFallbackError);
-        assert.match(error.message, /1\. glm-5\.3-flash 服务端错误（HTTP 503）/);
+        assert.match(error.message, /1\. deepseek-flash 服务端错误（HTTP 503）/);
         assert.match(error.message, /2\. gpt-backup 请求过多/);
         assert.doesNotMatch(error.message, /secret-primary|secret-backup/);
         assert.deepEqual(error.attempts, [
           {
-            modelId: "glm-5.3-flash",
-            providerId: "zai-bigmodel-api",
+            modelId: "deepseek-flash",
+            providerId: "deepseek",
             outcome: "failed",
             failureStage: "not_accepted",
             failureReason: "服务端错误（HTTP 503）",
@@ -1371,8 +1371,8 @@ describe("CodexVisualReviewAgent", () => {
 
   it("rejects visual candidates without explicit broker provider identities", () => {
     const primary: VisualReviewAgent = {
-      id: "glm-visual-review-v1",
-      modelId: "glm-5.3-flash",
+      id: "deepseek-visual-review-v1",
+      modelId: "deepseek-flash",
       review: async () => validateVisualReviewReport(report, media.durationMs),
     };
     const backup: VisualReviewAgent = {

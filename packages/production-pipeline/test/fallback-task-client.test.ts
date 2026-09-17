@@ -47,33 +47,33 @@ describe("FallbackCodexTaskClient", () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
       throw new CodexBridgeError("OpenAI service temporarily unavailable.", true, "not_accepted", 503, "model_provider_transient");
     });
-    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ideas: [] }));
+    const deepseek = new ControlledClient("deepseek", "deepseek-flash", () => ({ ideas: [] }));
     const client = new FallbackCodexTaskClient({
       candidates: [
         { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["topic-ideas", "role-audit"] },
-        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["topic-ideas", "role-audit"] },
+        { client: deepseek, providerId: "deepseek", modelId: "deepseek-flash", taskKinds: ["topic-ideas", "role-audit"] },
       ],
     });
 
     const result = await client.runTaskDetailed("topic-ideas", {}, "topic-request", { key: "topic-session" });
 
-    assert.deepEqual(result.trace?.attemptedModelIds, ["gpt-5.6-sol", "glm-5.3"]);
+    assert.deepEqual(result.trace?.attemptedModelIds, ["gpt-5.6-sol", "deepseek-flash"]);
     assert.equal(result.trace?.fallbackFromModelId, "gpt-5.6-sol");
     assert.deepEqual(result.trace?.modelCandidateAttempts?.map((attempt) => attempt.outcome), ["failed", "succeeded"]);
     assert.equal(openai.calls[0]?.requestId, "topic-request");
-    assert.notEqual(zai.calls[0]?.requestId, "topic-request");
-    assert.equal(zai.calls[0]?.session?.handle, undefined);
+    assert.notEqual(deepseek.calls[0]?.requestId, "topic-request");
+    assert.equal(deepseek.calls[0]?.session?.handle, undefined);
   });
 
   it("keeps later calls in one session on the provider that accepted it", async () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
       throw new CodexBridgeError("OpenAI service temporarily unavailable.", true, "not_accepted", 503, "model_provider_transient");
     });
-    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const deepseek = new ControlledClient("deepseek", "deepseek-flash", () => ({ ok: true }));
     const client = new FallbackCodexTaskClient({
       candidates: [
         { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["series-roadmap"] },
-        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["series-roadmap"] },
+        { client: deepseek, providerId: "deepseek", modelId: "deepseek-flash", taskKinds: ["series-roadmap"] },
       ],
     });
 
@@ -81,22 +81,22 @@ describe("FallbackCodexTaskClient", () => {
     await client.runTaskDetailed("series-roadmap", {}, "series-2", first.session);
 
     assert.equal(openai.calls.length, 1);
-    assert.equal(zai.calls.length, 2);
-    assert.equal(zai.calls[1]?.session?.handle, "zai-bigmodel-api-session");
+    assert.equal(deepseek.calls.length, 2);
+    assert.equal(deepseek.calls[1]?.session?.handle, "deepseek-session");
   });
 
   it("keeps a stateless backup on the same provider without sending unsupported session fields", async () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
       throw new CodexBridgeError("OpenAI service temporarily unavailable.", true, "not_accepted", 503, "model_provider_transient");
     });
-    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const deepseek = new ControlledClient("deepseek", "deepseek-flash", () => ({ ok: true }));
     const client = new FallbackCodexTaskClient({
       candidates: [
         { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
         {
-          client: zai,
-          providerId: "zai-bigmodel-api",
-          modelId: "glm-5.3",
+          client: deepseek,
+          providerId: "deepseek",
+          modelId: "deepseek-flash",
           taskKinds: ["publish-copy"],
           sessionMode: "stateless",
         },
@@ -107,20 +107,20 @@ describe("FallbackCodexTaskClient", () => {
     await client.runTaskDetailed("publish-copy", {}, "publish-2", { key: "publish-session" });
 
     assert.equal(openai.calls.length, 1);
-    assert.equal(zai.calls.length, 2);
-    assert.equal(zai.calls[0]?.session, undefined);
-    assert.equal(zai.calls[1]?.session, undefined);
+    assert.equal(deepseek.calls.length, 2);
+    assert.equal(deepseek.calls[0]?.session, undefined);
+    assert.equal(deepseek.calls[1]?.session, undefined);
   });
 
   it("still switches providers after a not_accepted service-unavailable rejection", async () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
       throw new CodexBridgeError("Codex bridge returned HTTP 503.", true, "not_accepted", 503);
     });
-    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const deepseek = new ControlledClient("deepseek", "deepseek-flash", () => ({ ok: true }));
     const client = new FallbackCodexTaskClient({
       candidates: [
         { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
-        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["publish-copy"] },
+        { client: deepseek, providerId: "deepseek", modelId: "deepseek-flash", taskKinds: ["publish-copy"] },
       ],
     });
 
@@ -132,21 +132,21 @@ describe("FallbackCodexTaskClient", () => {
       attempt.failureStage,
     ]), [
       ["gpt-5.6-sol", "failed", "not_accepted"],
-      ["glm-5.3", "succeeded", undefined],
+      ["deepseek-flash", "succeeded", undefined],
     ]);
     assert.equal(openai.calls[0]?.requestId, "publish-primary");
-    assert.equal(zai.calls.length, 1);
+    assert.equal(deepseek.calls.length, 1);
   });
 
   it("does not generate a fallback requestId when the primary outcome is uncertain", async () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
       throw new CodexBridgeError("request timed out after 285000ms; the task may still be executing", false, "uncertain");
     });
-    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const deepseek = new ControlledClient("deepseek", "deepseek-flash", () => ({ ok: true }));
     const client = new FallbackCodexTaskClient({
       candidates: [
         { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
-        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["publish-copy"] },
+        { client: deepseek, providerId: "deepseek", modelId: "deepseek-flash", taskKinds: ["publish-copy"] },
       ],
     });
 
@@ -160,41 +160,41 @@ describe("FallbackCodexTaskClient", () => {
     );
 
     assert.deepEqual(openai.calls, [{ kind: "publish-copy", requestId: "publish-uncertain" }]);
-    assert.equal(zai.calls.length, 0);
+    assert.equal(deepseek.calls.length, 0);
   });
 
   it("switches providers after the broker confirms a classified transient failure", async () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
       throw new CodexBridgeError("OpenAI service temporarily unavailable.", false, "completed_failure", 503, "model_provider_transient");
     });
-    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const deepseek = new ControlledClient("deepseek", "deepseek-flash", () => ({ ok: true }));
     const client = new FallbackCodexTaskClient({
       candidates: [
         { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
-        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["publish-copy"] },
+        { client: deepseek, providerId: "deepseek", modelId: "deepseek-flash", taskKinds: ["publish-copy"] },
       ],
     });
 
     const execution = await client.runTaskDetailed("publish-copy", {}, "publish-completed-failure");
     assert.deepEqual(execution.output, { ok: true });
-    assert.equal(zai.calls.length, 1);
-    assert.match(zai.calls[0]?.requestId ?? "", /^backup-/);
+    assert.equal(deepseek.calls.length, 1);
+    assert.match(deepseek.calls[0]?.requestId ?? "", /^backup-/);
   });
 
   it("does not switch providers for invalid output or business validation failures", async () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
       throw new CodexBridgeError("Output contract is invalid.", false, "completed_failure", 422);
     });
-    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const deepseek = new ControlledClient("deepseek", "deepseek-flash", () => ({ ok: true }));
     const client = new FallbackCodexTaskClient({
       candidates: [
         { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
-        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["publish-copy"] },
+        { client: deepseek, providerId: "deepseek", modelId: "deepseek-flash", taskKinds: ["publish-copy"] },
       ],
     });
 
     await assert.rejects(() => client.runTaskDetailed("publish-copy", {}), /Output contract is invalid/);
-    assert.equal(zai.calls.length, 0);
+    assert.equal(deepseek.calls.length, 0);
   });
 
   it("switches providers when the configured model id is retired", async () => {
@@ -208,18 +208,18 @@ describe("FallbackCodexTaskClient", () => {
         modelId: "gpt-5.6-sol",
       });
     });
-    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const deepseek = new ControlledClient("deepseek", "deepseek-flash", () => ({ ok: true }));
     const client = new FallbackCodexTaskClient({
       candidates: [
         { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
-        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["publish-copy"] },
+        { client: deepseek, providerId: "deepseek", modelId: "deepseek-flash", taskKinds: ["publish-copy"] },
       ],
     });
 
     const execution = await client.runTaskDetailed("publish-copy", {}, "publish-retired-model");
     assert.deepEqual(execution.output, { ok: true });
-    assert.equal(zai.calls.length, 1);
-    assert.match(zai.calls[0]?.requestId ?? "", /^backup-/);
+    assert.equal(deepseek.calls.length, 1);
+    assert.match(deepseek.calls[0]?.requestId ?? "", /^backup-/);
   });
 
   it("does not switch providers for a request-contract violation", async () => {
@@ -233,15 +233,15 @@ describe("FallbackCodexTaskClient", () => {
         modelId: "gpt-5.6-sol",
       });
     });
-    const zai = new ControlledClient("zai-bigmodel-api", "glm-5.3", () => ({ ok: true }));
+    const deepseek = new ControlledClient("deepseek", "deepseek-flash", () => ({ ok: true }));
     const client = new FallbackCodexTaskClient({
       candidates: [
         { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
-        { client: zai, providerId: "zai-bigmodel-api", modelId: "glm-5.3", taskKinds: ["publish-copy"] },
+        { client: deepseek, providerId: "deepseek", modelId: "deepseek-flash", taskKinds: ["publish-copy"] },
       ],
     });
 
     await assert.rejects(() => client.runTaskDetailed("publish-copy", {}), /HTTP 422/);
-    assert.equal(zai.calls.length, 0);
+    assert.equal(deepseek.calls.length, 0);
   });
 });

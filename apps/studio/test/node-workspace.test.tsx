@@ -305,7 +305,7 @@ describe("node production workspaces", () => {
       ...succeededNode,
       executionReceipt: {
         ...succeededNode.executionReceipt!,
-        actualModelIds: ["glm-5.3", "gpt-5.6-sol"],
+        actualModelIds: ["deepseek-flash", "gpt-5.6-sol"],
         fallbackReason: "前 1 个候选模型调用失败，已自动切换。",
         parameters: {
           ...succeededNode.executionReceipt!.parameters,
@@ -488,14 +488,14 @@ describe("node production workspaces", () => {
     const onConfigure = vi.fn(async () => undefined);
     const providers: StudioProvider[] = [
       {
-        id: "glm-visual-review-v1",
+        id: "deepseek-visual-review-v1",
         capability: "quality.review.visual",
-        label: "GLM 视觉审片",
+        label: "DeepSeek 视觉审片",
         available: true,
         kind: "external",
         billing: "subscription",
-        defaultModelId: "glm-review",
-        modelProfiles: [{ id: "glm-review", providerId: "glm-visual-review-v1", providerFamily: "zai", label: "GLM Review", description: "视觉审片", available: true, taskTypes: ["visual-review"] }],
+        defaultModelId: "deepseek-review",
+        modelProfiles: [{ id: "deepseek-review", providerId: "deepseek-visual-review-v1", providerFamily: "deepseek", label: "DeepSeek Review", description: "视觉审片", available: true, taskTypes: ["visual-review"] }],
       },
       {
         id: "codex-visual-review-v1",
@@ -517,8 +517,8 @@ describe("node production workspaces", () => {
       artifactIds: [],
       qualityGateResults: [],
       executionConfiguration: {
-        providerId: "glm-visual-review-v1",
-        modelSelections: { "glm-visual-review-v1": "glm-review" },
+        providerId: "deepseek-visual-review-v1",
+        modelSelections: { "deepseek-visual-review-v1": "deepseek-review" },
       },
     };
 
@@ -810,9 +810,9 @@ describe("node production workspaces", () => {
         providerId: "openai",
         providerLabel: "Codex 视觉审片",
         modelId: "gpt-backup",
-        fallbackFromProviderId: "glm-visual-review-v1",
+        fallbackFromProviderId: "deepseek-visual-review-v1",
         fallbackReason,
-        actualModelIds: ["glm-5.3-flash", "gpt-backup"],
+        actualModelIds: ["deepseek-flash", "gpt-backup"],
       },
     };
     const { container } = render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
@@ -832,7 +832,7 @@ describe("node production workspaces", () => {
         ...succeededNode.executionReceipt!,
         status: "failed",
         fallbackReason,
-        actualModelIds: ["glm-5.3", "gpt-5.6-sol"],
+        actualModelIds: ["deepseek-flash", "gpt-5.6-sol"],
       },
     };
     const { container } = render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} runStatus="failed" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
@@ -875,14 +875,14 @@ describe("node production workspaces", () => {
   it("lets a failed visual review select another model before recovery", async () => {
     const onConfigure = vi.fn(async () => undefined);
     const provider: StudioProvider = {
-      id: "glm-visual-review-v1",
+      id: "deepseek-visual-review-v1",
       capability: "quality.review.visual",
-      label: "GLM 视觉审片",
+      label: "DeepSeek 视觉审片",
       available: true,
       kind: "external",
       modelProfiles: [
-        { id: "glm-old", providerId: "glm-visual-review-v1", providerFamily: "glm", label: "GLM Old", description: "视觉审片", available: true, taskTypes: ["visual-review"] },
-        { id: "glm-new", providerId: "glm-visual-review-v1", providerFamily: "glm", label: "GLM New", description: "视觉审片", available: true, taskTypes: ["visual-review"] },
+        { id: "deepseek-old", providerId: "deepseek-visual-review-v1", providerFamily: "deepseek", label: "DeepSeek Old", description: "视觉审片", available: true, taskTypes: ["visual-review"] },
+        { id: "deepseek-new", providerId: "deepseek-visual-review-v1", providerFamily: "deepseek", label: "DeepSeek New", description: "视觉审片", available: true, taskTypes: ["visual-review"] },
       ],
     };
     const node: StudioNode = {
@@ -893,18 +893,18 @@ describe("node production workspaces", () => {
       error: "HTTP 500 upstream failed",
       artifactIds: [],
       qualityGateResults: [],
-      executionConfiguration: { providerId: provider.id, modelSelections: { [provider.id]: "glm-old" } },
+      executionConfiguration: { providerId: provider.id, modelSelections: { [provider.id]: "deepseek-old" } },
     };
     render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} providers={[provider]} runStatus="failed" artifacts={[]} busy={false} onOverride={async () => undefined} onConfigure={onConfigure} onAuthorize={async () => undefined} />);
 
     await userEvent.click(screen.getByRole("button", { name: "调整" }));
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: /^首选模型/ }), "glm-new");
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: /^首选模型/ }), "deepseek-new");
     await userEvent.click(screen.getByRole("button", { name: "保存选择" }));
 
     expect(onConfigure).toHaveBeenCalledWith("visual-review", {
       expectedRunRevision: 2,
       providerId: provider.id,
-      modelSelections: { [provider.id]: "glm-new" },
+      modelSelections: { [provider.id]: "deepseek-new" },
       confirmTerminalEdit: true,
     });
   });

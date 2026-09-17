@@ -125,7 +125,7 @@ function childAgents(args: ChildArgs): Pick<ProductionPipelineOptions, "treatmen
       },
     },
     {
-      providerId: "zai-bigmodel-api",
+      providerId: "deepseek",
       agent: {
         id: TREATMENT_PROVIDER_ID,
         modelId: "treatment-model-b",
@@ -134,7 +134,7 @@ function childAgents(args: ChildArgs): Pick<ProductionPipelineOptions, "treatmen
           await recordSideEffect(args.sideEffectFile, "treatment:treatment-model-b");
           return {
             output: legalTreatment(input.brief.title),
-            trace: { taskKind: "creative-treatment" as const, promptVersion: "v1", prompt: "fixture", providerId: "zai-bigmodel-api", modelId: "treatment-model-b" },
+            trace: { taskKind: "creative-treatment" as const, promptVersion: "v1", prompt: "fixture", providerId: "deepseek", modelId: "treatment-model-b" },
           };
         },
       },

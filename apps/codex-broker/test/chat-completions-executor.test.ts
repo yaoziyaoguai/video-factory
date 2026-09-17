@@ -3,7 +3,11 @@ import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import { CodexExecutorError, codexExecutorProfileFor, parseTaskRequest } from "../src/codex-executor.js";
 import { BROKER_TASK_KINDS, taskContractDescriptorFor } from "../src/task-definitions.js";
-import { ZaiCodePlanExecutor } from "../src/zai-code-plan-executor.js";
+import {
+  ChatCompletionsExecutor,
+  DEEPSEEK_CHAT_COMPLETIONS_PROVIDER,
+  type ChatCompletionsExecutorOptions,
+} from "../src/chat-completions-executor.js";
 import {
   creativeTreatmentRequest,
   creativeTreatmentSourceContractCases,
@@ -14,8 +18,16 @@ import {
   paddedLegalCreativeTreatmentOutput,
 } from "./fixtures/creative-treatment.js";
 
-const API_KEY = "test-only-zai-key";
-const ZAI_CODING_PLAN_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
+const API_KEY = "test-only-deepseek-key";
+const CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions";
+
+/**
+ * 这个文件测的是 chat-completions 引擎本身，与供应商无关；固定挂在 DeepSeek 描述符上，
+ * 于是断言里的端点、标签与默认模型都只有一处出处。
+ */
+function chatExecutor(options: Omit<ChatCompletionsExecutorOptions, "provider">): ChatCompletionsExecutor {
+  return new ChatCompletionsExecutor({ ...options, provider: DEEPSEEK_CHAT_COMPLETIONS_PROVIDER });
+}
 
 function scriptDraftTask() {
   return parseTaskRequest({
@@ -37,7 +49,7 @@ function scriptDraftTask() {
         },
       },
     },
-  }, codexExecutorProfileFor("zai").identity);
+  }, codexExecutorProfileFor("deepseek").identity);
 }
 
 function validScriptDraft(): Record<string, unknown> {
@@ -88,7 +100,7 @@ function directorPlanTask() {
       assetProviders: [{ id: "pexels-stock-v1", deliveryTypes: ["stock_video"] }],
       economics: { allowMeteredProviders: false },
     },
-  }, codexExecutorProfileFor("zai").identity);
+  }, codexExecutorProfileFor("deepseek").identity);
 }
 
 function validDirectorPlan(): Record<string, unknown> {
@@ -147,7 +159,7 @@ function creativeTreatmentTask(suppliedSources: Array<Record<string, unknown>> =
     ...creativeTreatmentRequest(),
     expectedContractDigest: taskContractDescriptorFor("creative-treatment").digest,
     payload: { ...creativeTreatmentRequest().payload, suppliedSources },
-  }, codexExecutorProfileFor("zai").identity);
+  }, codexExecutorProfileFor("deepseek").identity);
 }
 
 function visualReviewTask() {
@@ -165,7 +177,7 @@ function visualReviewTask() {
       }],
       reviewContext: { title: "测试短片", viewerPromise: "验证画面是否清晰" },
     },
-  }, codexExecutorProfileFor("zai").identity);
+  }, codexExecutorProfileFor("deepseek").identity);
 }
 
 function validReport(): Record<string, unknown> {
@@ -221,7 +233,7 @@ function roleAuditTask(withImage: boolean) {
         }],
       } : {}),
     },
-  }, codexExecutorProfileFor("zai").identity);
+  }, codexExecutorProfileFor("deepseek").identity);
 }
 
 function assetRankTask(withThumbnail: boolean) {
@@ -241,7 +253,7 @@ function assetRankTask(withThumbnail: boolean) {
         jpegBase64: jpeg.toString("base64"),
       }] : [],
     },
-  }, codexExecutorProfileFor("zai").identity);
+  }, codexExecutorProfileFor("deepseek").identity);
 }
 
 function validRoleAudit(): Record<string, unknown> {
@@ -267,18 +279,18 @@ function validRoleAudit(): Record<string, unknown> {
   };
 }
 
-describe("ZaiCodePlanExecutor", () => {
+describe("ChatCompletionsExecutor", () => {
   it("does not fall through to the ambient process credential when an environment is injected", () => {
-    const previous = process.env.ZAI_BIGMODEL_API_KEY;
-    process.env.ZAI_BIGMODEL_API_KEY = "ambient-test-key";
+    const previous = process.env.DEEPSEEK_API_KEY;
+    process.env.DEEPSEEK_API_KEY = "ambient-test-key";
     try {
       assert.throws(
-        () => new ZaiCodePlanExecutor({ env: {} }),
-        /ZAI_BIGMODEL_API_KEY environment variable is required/,
+        () => chatExecutor({ env: {} }),
+        /DEEPSEEK_API_KEY environment variable is required/,
       );
     } finally {
-      if (previous === undefined) delete process.env.ZAI_BIGMODEL_API_KEY;
-      else process.env.ZAI_BIGMODEL_API_KEY = previous;
+      if (previous === undefined) delete process.env.DEEPSEEK_API_KEY;
+      else process.env.DEEPSEEK_API_KEY = previous;
     }
   });
 
@@ -292,18 +304,18 @@ describe("ZaiCodePlanExecutor", () => {
         choices: [{ message: { content: JSON.stringify(validReport()) } }],
       }), { status: 200, headers: { "content-type": "application/json" } });
     };
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn,
       effort: "max",
     });
 
     const result = await executor.runTask(visualReviewTask());
 
-    assert.equal(capturedUrl, ZAI_CODING_PLAN_URL);
+    assert.equal(capturedUrl, CHAT_COMPLETIONS_URL);
     assert.equal(new Headers(capturedInit?.headers).get("authorization"), `Bearer ${API_KEY}`);
     const body = JSON.parse(String(capturedInit?.body)) as Record<string, unknown>;
-    assert.equal(body.model, "glm-5.3-flash");
+    assert.equal(body.model, "deepseek-flash");
     assert.equal(body.reasoning_effort, "max");
     assert.deepEqual(body.thinking, { type: "enabled", clear_thinking: false });
     assert.deepEqual(body.response_format, { type: "json_object" });
@@ -319,18 +331,18 @@ describe("ZaiCodePlanExecutor", () => {
       image_url: { url: "data:image/jpeg;base64,/9j/4AAA/9k=" },
     });
     assert.deepEqual(JSON.parse(result.output), validReport());
-    assert.equal(result.trace?.providerId, "zai-bigmodel-api");
-    assert.equal(result.trace?.modelId, "glm-5.3-flash");
+    assert.equal(result.trace?.providerId, "deepseek");
+    assert.equal(result.trace?.modelId, "deepseek-flash");
     assert.equal(result.trace?.taskKind, "visual-review");
-    assert.doesNotMatch(result.trace?.prompt ?? "", /base64|test-only-zai-key/i);
+    assert.doesNotMatch(result.trace?.prompt ?? "", /base64|test-only-deepseek-key/i);
   });
 
   it("uses the configured visual-review model in both the request and trace", async () => {
     let capturedBody: Record<string, unknown> | undefined;
-    const executor = new ZaiCodePlanExecutor({
+    const executor = chatExecutor({
       env: {
-        ZAI_BIGMODEL_API_KEY: API_KEY,
-        ZAI_VISUAL_REVIEW_MODEL_ID: "glm-5.3-flash-preview",
+        DEEPSEEK_API_KEY: API_KEY,
+        DEEPSEEK_VISUAL_MODEL_ID: "deepseek-flash-preview",
       },
       fetchFn: async (_input, init) => {
         capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -342,16 +354,16 @@ describe("ZaiCodePlanExecutor", () => {
 
     const result = await executor.runTask(visualReviewTask());
 
-    assert.equal(capturedBody?.model, "glm-5.3-flash-preview");
-    assert.equal(result.trace?.modelId, "glm-5.3-flash-preview");
-    assert.equal(executor.identity.modelId, "glm-5.3");
-    assert.equal(executor.identity.taskModels?.["visual-review"], "glm-5.3-flash-preview");
+    assert.equal(capturedBody?.model, "deepseek-flash-preview");
+    assert.equal(result.trace?.modelId, "deepseek-flash-preview");
+    assert.equal(executor.identity.modelId, "deepseek-flash");
+    assert.equal(executor.identity.taskModels?.["visual-review"], "deepseek-flash-preview");
   });
 
-  it("normalizes xhigh to max for glm-5.3-flash requests and traces", async () => {
+  it("sends the configured effort through unchanged", async () => {
     let capturedBody: Record<string, unknown> | undefined;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       effort: "xhigh",
       fetchFn: async (_input, init) => {
         capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -363,18 +375,57 @@ describe("ZaiCodePlanExecutor", () => {
 
     const result = await executor.runTask(visualReviewTask());
 
-    assert.equal(capturedBody?.reasoning_effort, "max");
-    assert.equal(result.trace?.reasoningEffort, "max");
+    assert.equal(capturedBody?.reasoning_effort, "xhigh");
+    assert.equal(result.trace?.reasoningEffort, "xhigh");
   });
 
-  it("sends script drafting to the ZAI Coding Plan endpoint with glm-5.3", async () => {
+  it("ignores a requested model on a task that carries images", async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
+      // 候选表里的模型不保证都能读图：deepseek-v4-pro 接受 image_url 却收不到图像。
+      extraModelCandidates: ["deepseek-v4-pro"],
+      fetchFn: async (_input, init) => {
+        capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(validReport()) } }],
+        }), { status: 200 });
+      },
+    });
+
+    // 覆盖请求命中的是一条带图的复核：让看不见图的模型接过去，会产出一份格式合法、内容瞎猜的裁决。
+    await executor.runTask(visualReviewTask(), { model: "deepseek-v4-pro" });
+
+    assert.equal(capturedBody?.model, "deepseek-flash");
+  });
+
+  it("honours a requested model on a task that carries no images", async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
+      extraModelCandidates: ["deepseek-v4-pro"],
+      fetchFn: async (_input, init) => {
+        capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(validScriptDraft()) } }],
+        }), { status: 200 });
+      },
+    });
+
+    const result = await executor.runTask(scriptDraftTask(), { model: "deepseek-v4-pro" });
+
+    assert.equal(capturedBody?.model, "deepseek-v4-pro");
+    assert.equal(result.trace?.modelId, "deepseek-v4-pro");
+  });
+
+  it("sends script drafting to the DeepSeek chat-completions endpoint with deepseek-flash", async () => {
     let capturedUrl = "";
     let capturedInit: RequestInit | undefined;
     let capturedBody: Record<string, unknown> | undefined;
     let clock = 2_000;
     const output = validScriptDraft();
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       now: () => clock,
       fetchFn: async (input, init) => {
         capturedUrl = String(input);
@@ -389,24 +440,24 @@ describe("ZaiCodePlanExecutor", () => {
             total_tokens: 4_600,
             completion_tokens_details: { reasoning_tokens: 2_700 },
           },
-        }), { status: 200, headers: { "x-request-id": "zai-success-request" } });
+        }), { status: 200, headers: { "x-request-id": "deepseek-success-request" } });
       },
     });
 
     const result = await executor.runTask(scriptDraftTask());
 
-    assert.equal(capturedUrl, ZAI_CODING_PLAN_URL);
+    assert.equal(capturedUrl, CHAT_COMPLETIONS_URL);
     assert.equal(
       ((capturedInit as RequestInit & { dispatcher?: { constructor?: { name?: string } } })?.dispatcher)?.constructor?.name,
       "Agent",
     );
-    assert.equal(capturedBody?.model, "glm-5.3");
+    assert.equal(capturedBody?.model, "deepseek-flash");
     assert.equal(capturedBody?.reasoning_effort, "max");
     assert.equal(capturedBody?.max_tokens, 65_536);
     assert.equal(typeof (capturedBody?.messages as Array<{ content: unknown }>)[0]?.content, "string");
     assert.deepEqual(JSON.parse(result.output), output);
-    assert.equal(result.trace?.providerId, "zai-bigmodel-api");
-    assert.equal(result.trace?.modelId, "glm-5.3");
+    assert.equal(result.trace?.providerId, "deepseek");
+    assert.equal(result.trace?.modelId, "deepseek-flash");
     assert.equal(result.trace?.taskKind, "script-draft");
     assert.equal(result.trace?.providerWaitMs, 41);
     assert.equal(result.trace?.firstOutputEventMs, 41);
@@ -417,13 +468,13 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(result.trace?.completionTokens, 3_400);
     assert.equal(result.trace?.totalTokens, 4_600);
     assert.equal(result.trace?.reasoningTokens, 2_700);
-    assert.equal(result.trace?.requestIdHash, createHash("sha256").update("zai-success-request").digest("hex"));
+    assert.equal(result.trace?.requestIdHash, createHash("sha256").update("deepseek-success-request").digest("hex"));
   });
 
   it("classifies finish_reason length as truncated no-output before JSON parsing", async () => {
-    const requestId = "zai-truncated-request";
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const requestId = "deepseek-truncated-request";
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       now: () => 0,
       fetchFn: async () => new Response(JSON.stringify({
         choices: [{ finish_reason: "length", message: { content: '{"viewerPromise":"unfinished' } }],
@@ -445,8 +496,8 @@ describe("ZaiCodePlanExecutor", () => {
         assert.deepEqual(error.details, {
           category: "invalid_output",
           reasonCode: "output_truncated",
-          providerId: "zai-bigmodel-api",
-          modelId: "glm-5.3",
+          providerId: "deepseek",
+          modelId: "deepseek-flash",
           providerWaitMs: 0,
           requestIdHash: createHash("sha256").update(requestId).digest("hex"),
           finishReason: "length",
@@ -467,8 +518,8 @@ describe("ZaiCodePlanExecutor", () => {
     delete (invalid as Partial<typeof invalid>).version;
     let calls = 0;
     const requestBodies: Array<Record<string, unknown>> = [];
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async (_input, init) => {
         calls += 1;
         requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -500,8 +551,8 @@ describe("ZaiCodePlanExecutor", () => {
     const prose = "这版方案我建议这样拍：先给出结论，再补三组证据。";
     let calls = 0;
     const requestBodies: Array<Record<string, unknown>> = [];
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async (_input, init) => {
         calls += 1;
         requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -530,8 +581,8 @@ describe("ZaiCodePlanExecutor", () => {
 
   it("stops after one unparseable-reply repair and keeps the evidence", async () => {
     let calls = 0;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => {
         calls += 1;
         return new Response(JSON.stringify({
@@ -556,8 +607,8 @@ describe("ZaiCodePlanExecutor", () => {
   it("allows a visual format repair to remove only an unsupported extra field", async () => {
     const invalid = { ...validReport(), internalNote: "must not cross the public contract" };
     let calls = 0;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => {
         calls += 1;
         return new Response(JSON.stringify({
@@ -580,8 +631,8 @@ describe("ZaiCodePlanExecutor", () => {
     changed.recommendation = "approve";
     changed.findings = [];
     let calls = 0;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => {
         calls += 1;
         return new Response(JSON.stringify({
@@ -611,8 +662,8 @@ describe("ZaiCodePlanExecutor", () => {
     (changed.findings as Array<Record<string, unknown>>)[0]!.targetNodeId = "creative-planning";
     (changed.findings as Array<Record<string, unknown>>)[0]!.planningStageId = "script";
     let calls = 0;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => {
         calls += 1;
         return new Response(JSON.stringify({
@@ -632,12 +683,12 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(calls, 2);
   });
 
-  it("sends director planning to the ZAI Coding Plan endpoint with glm-5.3", async () => {
+  it("sends director planning to the DeepSeek chat-completions endpoint with deepseek-flash", async () => {
     let capturedUrl = "";
     let capturedBody: Record<string, unknown> | undefined;
     const output = validDirectorPlan();
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async (input, init) => {
         capturedUrl = String(input);
         capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -649,12 +700,12 @@ describe("ZaiCodePlanExecutor", () => {
 
     const result = await executor.runTask(directorPlanTask());
 
-    assert.equal(capturedUrl, ZAI_CODING_PLAN_URL);
-    assert.equal(capturedBody?.model, "glm-5.3");
+    assert.equal(capturedUrl, CHAT_COMPLETIONS_URL);
+    assert.equal(capturedBody?.model, "deepseek-flash");
     assert.equal(typeof (capturedBody?.messages as Array<{ content: unknown }>)[0]?.content, "string");
     assert.deepEqual(JSON.parse(result.output), output);
-    assert.equal(result.trace?.providerId, "zai-bigmodel-api");
-    assert.equal(result.trace?.modelId, "glm-5.3");
+    assert.equal(result.trace?.providerId, "deepseek");
+    assert.equal(result.trace?.modelId, "deepseek-flash");
     assert.equal(result.trace?.taskKind, "director-plan");
   });
 
@@ -669,8 +720,8 @@ describe("ZaiCodePlanExecutor", () => {
     (repaired.shots as Array<Record<string, unknown>>)[1]!.scenePosition = 2;
     let calls = 0;
     let repairPrompt = "";
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async (_input, init) => {
         calls += 1;
         if (calls === 2) {
@@ -699,8 +750,8 @@ describe("ZaiCodePlanExecutor", () => {
     const invalidShots = invalid.shots as Array<Record<string, unknown>>;
     invalidShots.push({ ...invalidShots[0], scenePosition: 1, narrativeRole: "payoff" });
     let calls = 0;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => {
         calls += 1;
         return new Response(JSON.stringify({
@@ -732,8 +783,8 @@ describe("ZaiCodePlanExecutor", () => {
     const schemaInvalid = structuredClone(semanticInvalid) as Record<string, unknown>;
     delete schemaInvalid.version;
     let calls = 0;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => {
         calls += 1;
         return new Response(JSON.stringify({
@@ -755,8 +806,8 @@ describe("ZaiCodePlanExecutor", () => {
   it("sends a role audit without images to Coding Plan with the text model", async () => {
     let capturedUrl = "";
     let capturedBody: Record<string, unknown> | undefined;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async (input, init) => {
         capturedUrl = String(input);
         capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -768,19 +819,19 @@ describe("ZaiCodePlanExecutor", () => {
 
     const result = await executor.runTask(roleAuditTask(false));
 
-    assert.equal(capturedUrl, ZAI_CODING_PLAN_URL);
-    assert.equal(capturedBody?.model, "glm-5.3");
+    assert.equal(capturedUrl, CHAT_COMPLETIONS_URL);
+    assert.equal(capturedBody?.model, "deepseek-flash");
     assert.equal(typeof (capturedBody?.messages as Array<{ content: unknown }>)[0]?.content, "string");
-    assert.equal(result.trace?.modelId, "glm-5.3");
+    assert.equal(result.trace?.modelId, "deepseek-flash");
     // 没给审计强度时，复核沿用产出强度：这条路径的行为不该被新选项改变。
     assert.equal(capturedBody?.reasoning_effort, "max");
   });
 
-  it("gives the independent audit its own effort while production stays at max", async () => {
+  it("gives the independent audit its own effort while production keeps its own", async () => {
     const queued = [validScriptDraft(), validRoleAudit()];
     const efforts: unknown[] = [];
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       effort: "max",
       auditEffort: "high",
       fetchFn: async (_input, init) => {
@@ -792,33 +843,13 @@ describe("ZaiCodePlanExecutor", () => {
       },
     });
 
-    // 同一轮里跑两次：产出只有一次机会，留 max；复核读的是已经成型的产出，用审计强度。
+    // 同一轮里跑两次：产出走产出强度，复核读的是已经成型的产出，走审计强度。
     const production = await executor.runTask(scriptDraftTask());
     const audit = await executor.runTask(roleAuditTask(false));
 
     assert.deepEqual(efforts, ["max", "high"]);
     assert.equal(production.trace?.reasoningEffort, "max");
     assert.equal(audit.trace?.reasoningEffort, "high");
-  });
-
-  it("falls back to max rather than sending glm-5.3 an effort tier it does not accept", async () => {
-    let captured: Record<string, unknown> | undefined;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
-      effort: "max",
-      auditEffort: "xhigh",
-      fetchFn: async (_input, init) => {
-        captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: JSON.stringify(validRoleAudit()) } }],
-        }), { status: 200 });
-      },
-    });
-
-    await executor.runTask(roleAuditTask(false));
-
-    // glm-5.3 只认 low|high|max：发一个它不认识的档位不是"降级"，是这一轮复核直接没有结果。
-    assert.equal(captured?.reasoning_effort, "max");
   });
 
   it("runs creative-treatment on the text model and rejects the same invalid fixture as the OpenAI executor", async () => {
@@ -835,16 +866,16 @@ describe("ZaiCodePlanExecutor", () => {
         choices: [{ message: { content: JSON.stringify(output) } }],
       }), { status: 200 });
     };
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn,
       effort: "max",
     });
 
     const result = await executor.runTask(creativeTreatmentTask());
 
-    assert.equal(capturedUrl, ZAI_CODING_PLAN_URL);
-    assert.equal(capturedBody?.model, "glm-5.3");
+    assert.equal(capturedUrl, CHAT_COMPLETIONS_URL);
+    assert.equal(capturedBody?.model, "deepseek-flash");
     assert.equal(capturedBody?.reasoning_effort, "max");
     assert.match(capturedPrompt, /你在脚本写定前建立本片创作方向/);
     assert.match(capturedPrompt, /source-1/);
@@ -864,8 +895,8 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("rejects the shared ghost-beat fixture at the same semantic boundary as the OpenAI executor", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(JSON.stringify({
         choices: [{ message: { content: JSON.stringify(ghostBeatCreativeTreatmentOutput()) } }],
       }), { status: 200 }),
@@ -886,8 +917,8 @@ describe("ZaiCodePlanExecutor", () => {
     for (const testCase of creativeTreatmentWhitespaceInvalidCases()) {
       const invalidOutput = legalCreativeTreatmentOutput();
       testCase.apply(invalidOutput);
-      const executor = new ZaiCodePlanExecutor({
-        env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      const executor = chatExecutor({
+        env: { DEEPSEEK_API_KEY: API_KEY },
         fetchFn: async () => new Response(JSON.stringify({
           choices: [{ message: { content: JSON.stringify(invalidOutput) } }],
         }), { status: 200 }),
@@ -907,8 +938,8 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("accepts padded legal creative-treatment text because the host trims it", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(JSON.stringify({
         choices: [{ message: { content: JSON.stringify(paddedLegalCreativeTreatmentOutput()) } }],
       }), { status: 200 }),
@@ -933,8 +964,8 @@ describe("ZaiCodePlanExecutor", () => {
         continue;
       }
       const output = legalCreativeTreatmentOutputWithSourceRefs(testCase.suppliedSourceIds);
-      const executor = new ZaiCodePlanExecutor({
-        env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      const executor = chatExecutor({
+        env: { DEEPSEEK_API_KEY: API_KEY },
         fetchFn: async () => new Response(JSON.stringify({
           choices: [{ message: { content: JSON.stringify(output) } }],
         }), { status: 200 }),
@@ -962,8 +993,8 @@ describe("ZaiCodePlanExecutor", () => {
 
   it("repairs creative-treatment structure without touching existing contract content", async () => {
     let attempt = 0;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => {
         attempt += 1;
         const output = attempt === 1
@@ -1002,8 +1033,8 @@ describe("ZaiCodePlanExecutor", () => {
   ] as const) {
     it(`allows a creative-treatment repair that only drops the extra own field ${JSON.stringify(field)}`, async () => {
       let attempt = 0;
-      const executor = new ZaiCodePlanExecutor({
-        env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      const executor = chatExecutor({
+        env: { DEEPSEEK_API_KEY: API_KEY },
         fetchFn: async () => {
           attempt += 1;
           const output = attempt === 1
@@ -1037,8 +1068,8 @@ describe("ZaiCodePlanExecutor", () => {
     };
     for (const drift of [rewrittenHook, rewrittenProgression]) {
       let attempt = 0;
-      const executor = new ZaiCodePlanExecutor({
-        env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      const executor = chatExecutor({
+        env: { DEEPSEEK_API_KEY: API_KEY },
         fetchFn: async () => {
           attempt += 1;
           return new Response(JSON.stringify({
@@ -1062,8 +1093,8 @@ describe("ZaiCodePlanExecutor", () => {
   it("sends a role audit with images to Chat Completions with the visual model", async () => {
     let capturedUrl = "";
     let capturedBody: Record<string, unknown> | undefined;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async (input, init) => {
         capturedUrl = String(input);
         capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -1075,21 +1106,21 @@ describe("ZaiCodePlanExecutor", () => {
 
     const result = await executor.runTask(roleAuditTask(true));
 
-    assert.equal(capturedUrl, ZAI_CODING_PLAN_URL);
-    assert.equal(capturedBody?.model, "glm-5.3-flash");
+    assert.equal(capturedUrl, CHAT_COMPLETIONS_URL);
+    assert.equal(capturedBody?.model, "deepseek-flash");
     const content = (capturedBody?.messages as Array<{ content: unknown }>)[0]?.content;
     assert.ok(Array.isArray(content));
     assert.equal(content[0]?.type, "text");
     assert.equal(content[1]?.type, "image_url");
-    assert.equal(result.trace?.modelId, "glm-5.3-flash");
+    assert.equal(result.trace?.modelId, "deepseek-flash");
   });
 
   it("advertises every broker task with the configured text and visual models", () => {
-    const executor = new ZaiCodePlanExecutor({
+    const executor = chatExecutor({
       env: {
-        ZAI_BIGMODEL_API_KEY: API_KEY,
-        ZAI_TEXT_MODEL_ID: "text-custom",
-        ZAI_VISUAL_REVIEW_MODEL_ID: "visual-custom",
+        DEEPSEEK_API_KEY: API_KEY,
+        DEEPSEEK_MODEL_ID: "text-custom",
+        DEEPSEEK_VISUAL_MODEL_ID: "visual-custom",
       },
     });
 
@@ -1108,11 +1139,11 @@ describe("ZaiCodePlanExecutor", () => {
 
   it("uses the same declared model route for asset ranking with and without thumbnails", async () => {
     const models: unknown[] = [];
-    const executor = new ZaiCodePlanExecutor({
+    const executor = chatExecutor({
       env: {
-        ZAI_BIGMODEL_API_KEY: API_KEY,
-        ZAI_TEXT_MODEL_ID: "text-custom",
-        ZAI_VISUAL_REVIEW_MODEL_ID: "visual-custom",
+        DEEPSEEK_API_KEY: API_KEY,
+        DEEPSEEK_MODEL_ID: "text-custom",
+        DEEPSEEK_VISUAL_MODEL_ID: "visual-custom",
       },
       fetchFn: async (_input, init) => {
         models.push((JSON.parse(String(init?.body)) as Record<string, unknown>).model);
@@ -1120,7 +1151,7 @@ describe("ZaiCodePlanExecutor", () => {
           choices: [{ message: { content: JSON.stringify({
             version: "video-factory/asset-ranking-v1",
             source: "model",
-            providerId: "zai-bigmodel-api",
+            providerId: "deepseek",
             modelId: "test",
             summary: "没有候选需要排序。",
             scenes: [],
@@ -1138,8 +1169,8 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("does not expose API error bodies or the credential", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(
         JSON.stringify({ error: { code: "1308", message: `upstream echoed ${API_KEY}` } }),
         { status: 429 },
@@ -1159,10 +1190,10 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("keeps safe structured diagnostics for a non-2xx provider response", async () => {
-    const upstreamRequestId = "zai-upstream-request-secret";
+    const upstreamRequestId = "deepseek-upstream-request-secret";
     let clock = 1_000;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       now: () => clock,
       fetchFn: async () => {
         clock = 1_037;
@@ -1181,23 +1212,23 @@ describe("ZaiCodePlanExecutor", () => {
           category: "rate_limited",
           reasonCode: "1308",
           requestIdHash: createHash("sha256").update(upstreamRequestId).digest("hex"),
-          providerId: "zai-bigmodel-api",
-          modelId: "glm-5.3",
+          providerId: "deepseek",
+          modelId: "deepseek-flash",
           providerWaitMs: 37,
           modelAttemptCount: 1,
           structuredRepairCount: 0,
         });
         const serialized = JSON.stringify(error.details);
         assert.doesNotMatch(serialized, new RegExp(API_KEY));
-        assert.doesNotMatch(serialized, /private response|zai-upstream-request-secret/);
+        assert.doesNotMatch(serialized, /private response|deepseek-upstream-request-secret/);
         return true;
       },
     );
   });
 
   it("does not classify a generic HTTP 500 response as transient", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(
         JSON.stringify({ error: { code: "execution_failed" } }),
         { status: 500 },
@@ -1217,8 +1248,8 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("classifies an HTTP 408 response as a timeout-category transient failure", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(null, { status: 408 }),
     });
 
@@ -1241,8 +1272,8 @@ describe("ZaiCodePlanExecutor", () => {
     const providerError = Object.assign(new Error(privateMessage), {
       code: "UND_ERR_HEADERS_TIMEOUT",
     });
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       now: () => clock,
       fetchFn: async () => {
         clock = 305_051;
@@ -1259,8 +1290,8 @@ describe("ZaiCodePlanExecutor", () => {
         assert.deepEqual(error.details, {
           category: "timeout",
           reasonCode: "response_headers_timeout",
-          providerId: "zai-bigmodel-api",
-          modelId: "glm-5.3",
+          providerId: "deepseek",
+          modelId: "deepseek-flash",
           providerWaitMs: 300_051,
           executionLayer: "provider_transport",
           networkCode: "UND_ERR_HEADERS_TIMEOUT",
@@ -1278,8 +1309,8 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("classifies an explicit service-unavailable error code as transient", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(
         JSON.stringify({ error: { code: "service_unavailable" } }),
         { status: 500 },
@@ -1299,8 +1330,8 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("does not classify an explicit invalid-request response as transient", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(
         JSON.stringify({ error: { code: "invalid_request" } }),
         { status: 503 },
@@ -1320,8 +1351,8 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("classifies an empty successful response as provider no-output", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(JSON.stringify({
         choices: [{ message: { content: "" } }],
       }), { status: 200 }),
@@ -1341,8 +1372,8 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("does not let a stalled HTTP error body occupy the broker request timeout", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(new ReadableStream({ start() {} }), { status: 429 }),
       timeoutMs: 2_000,
     });
@@ -1354,8 +1385,8 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("rejects an oversized success response and names the reason", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(new Uint8Array(8 * 1024 * 1024 + 1), { status: 200 }),
     });
 
@@ -1372,7 +1403,7 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   // 订阅额度、推理长度这些"模型确实在工作"的失败，过去会被合进同一个 1 MiB 上限里，
-  // 于是 glm-5.3 在 max 强度下思考 110 秒就被判成总编不可用，全站静默退回规则保底。
+  // 于是 deepseek-flash 在 max 强度下思考 110 秒就被判成总编不可用，全站静默退回规则保底。
   // 这里钉住不变量：被丢弃的 reasoning 帧只受传输上限约束，不占交付内容的配额。
   it("does not charge discarded reasoning frames against the delivered answer limit", async () => {
     const payload = JSON.stringify(validReport());
@@ -1392,8 +1423,8 @@ describe("ZaiCodePlanExecutor", () => {
         controller.close();
       },
     }), { status: 200, headers: { "content-type": "text/event-stream" } });
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn,
       timeoutMs: 5_000,
     });
@@ -1410,8 +1441,8 @@ describe("ZaiCodePlanExecutor", () => {
     }), { status: 200 });
 
     await assert.rejects(
-      () => new ZaiCodePlanExecutor({
-        env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      () => chatExecutor({
+        env: { DEEPSEEK_API_KEY: API_KEY },
         fetchFn: responseFor({ summary: "missing required fields" }),
       }).runTask(visualReviewTask()),
       (error: unknown) => {
@@ -1442,8 +1473,8 @@ describe("ZaiCodePlanExecutor", () => {
       suggestion: "重新定位。",
     }];
     await assert.rejects(
-      () => new ZaiCodePlanExecutor({
-        env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+      () => chatExecutor({
+        env: { DEEPSEEK_API_KEY: API_KEY },
         fetchFn: responseFor(lateFinding),
       }).runTask(visualReviewTask()),
       (error: unknown) => {
@@ -1458,8 +1489,8 @@ describe("ZaiCodePlanExecutor", () => {
 
   it("classifies non-JSON model output without retaining the response body", async () => {
     const privateOutput = `not-json-${API_KEY}`;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(JSON.stringify({
         choices: [{ message: { content: privateOutput } }],
       }), { status: 200 }),
@@ -1471,8 +1502,8 @@ describe("ZaiCodePlanExecutor", () => {
         assert.ok(error instanceof CodexExecutorError);
         assert.equal(error.details?.category, "invalid_output");
         assert.equal(error.details?.reasonCode, "invalid_json");
-        assert.equal(error.details?.providerId, "zai-bigmodel-api");
-        assert.equal(error.details?.modelId, "glm-5.3");
+        assert.equal(error.details?.providerId, "deepseek");
+        assert.equal(error.details?.modelId, "deepseek-flash");
         assert.equal(typeof error.details?.providerWaitMs, "number");
         assert.doesNotMatch(JSON.stringify(error.details), new RegExp(API_KEY));
         assert.doesNotMatch(JSON.stringify(error.details), /not-json/);
@@ -1497,8 +1528,8 @@ describe("ZaiCodePlanExecutor", () => {
         }, { once: true });
       },
     }), { status: 200 });
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn,
       timeoutMs: 5,
     });
@@ -1548,9 +1579,9 @@ describe("ZaiCodePlanExecutor", () => {
           controller.error(init.signal?.reason);
         }, { once: true });
       },
-    }), { status: 200, headers: { "content-type": "text/event-stream", "x-request-id": "zai-streamed-request" } });
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    }), { status: 200, headers: { "content-type": "text/event-stream", "x-request-id": "deepseek-streamed-request" } });
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn,
       timeoutMs: 5_000,
     });
@@ -1563,7 +1594,7 @@ describe("ZaiCodePlanExecutor", () => {
     assert.equal(result.trace?.completionTokens, 3_400);
     assert.equal(result.trace?.totalTokens, 4_600);
     assert.equal(result.trace?.reasoningTokens, 2_700);
-    assert.equal(result.trace?.requestIdHash, createHash("sha256").update("zai-streamed-request").digest("hex"));
+    assert.equal(result.trace?.requestIdHash, createHash("sha256").update("deepseek-streamed-request").digest("hex"));
     const firstOutputEventMs = result.trace?.firstOutputEventMs;
     const providerWaitMs = result.trace?.providerWaitMs;
     assert.equal(typeof firstOutputEventMs, "number");
@@ -1590,8 +1621,8 @@ describe("ZaiCodePlanExecutor", () => {
         }, { once: true });
       },
     }), { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8" } });
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn,
       timeoutMs: 5_000,
       firstOutputEventTimeoutMs: 60,
@@ -1608,8 +1639,8 @@ describe("ZaiCodePlanExecutor", () => {
         assert.equal(error.outcomeUncertain, true);
         assert.equal(error.details?.category, "timeout");
         assert.equal(error.details?.reasonCode, "response_first_output_timeout");
-        assert.equal(error.details?.providerId, "zai-bigmodel-api");
-        assert.equal(error.details?.modelId, "glm-5.3-flash");
+        assert.equal(error.details?.providerId, "deepseek");
+        assert.equal(error.details?.modelId, "deepseek-flash");
         assert.equal(error.details?.executionLayer, "provider_transport");
         assert.equal(error.details?.headersReceived, true);
         assert.equal(error.details?.remoteQueryable, false);
@@ -1624,8 +1655,8 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("treats a stream that ends without content as provider no-output", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response("data: [DONE]\n\n", {
         status: 200,
         headers: { "content-type": "text/event-stream" },
@@ -1645,8 +1676,8 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("rejects a stream frame that is not a data event", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(
         'event: ping\ndata: {"choices":[{"delta":{"content":"{}"}}]}\n\n',
         { status: 200, headers: { "content-type": "text/event-stream" } },
@@ -1666,8 +1697,8 @@ describe("ZaiCodePlanExecutor", () => {
   });
 
   it("keeps a whole JSON response on the envelope path even when its body looks like SSE", async () => {
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => new Response(
         'data: {"choices":[{"delta":{"content":"{}"}}]}\n\n',
         { status: 200, headers: { "content-type": "application/json" } },
@@ -1685,22 +1716,24 @@ describe("ZaiCodePlanExecutor", () => {
   });
 });
 
-describe("ZaiCodePlanExecutor reviewed model override", () => {
-  it("announces exactly the two glm models this system runs", () => {
-    const executor = new ZaiCodePlanExecutor({ env: { ZAI_BIGMODEL_API_KEY: API_KEY } });
-    assert.deepEqual(executor.modelCandidates, ["glm-5.3", "glm-5.3-flash"]);
+describe("ChatCompletionsExecutor reviewed model override", () => {
+  it("announces one candidate when both roles point at the same model, and the extras alongside it", () => {
+    // 文本与视觉都默认是 deepseek-flash：同一个模型不该在候选表里出现两遍。
+    const collapsed = chatExecutor({ env: { DEEPSEEK_API_KEY: API_KEY } });
+    assert.deepEqual(collapsed.modelCandidates, ["deepseek-flash"]);
 
-    // 两个环境变量指向同一个模型时，候选表里不该出现两遍。
-    const collapsed = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY, ZAI_VISUAL_REVIEW_MODEL_ID: "glm-5.3" },
+    const split = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY, DEEPSEEK_VISUAL_MODEL_ID: "deepseek-v4-pro" },
+      extraModelCandidates: ["deepseek-v4-pro", "deepseek-flash"],
     });
-    assert.deepEqual(collapsed.modelCandidates, ["glm-5.3"]);
+    assert.deepEqual(split.modelCandidates, ["deepseek-flash", "deepseek-v4-pro"]);
   });
 
-  it("runs a text task on the visual model when the request asks for it", async () => {
+  it("runs a text task on a candidate model when the request asks for it", async () => {
     let capturedBody: Record<string, unknown> | undefined;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
+      extraModelCandidates: ["deepseek-v4-pro"],
       fetchFn: async (_input, init) => {
         capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(JSON.stringify({
@@ -1709,17 +1742,17 @@ describe("ZaiCodePlanExecutor reviewed model override", () => {
       },
     });
 
-    // script-draft 默认走 glm-5.3；覆盖成视觉模型必须同时改请求体和 trace。
-    const result = await executor.runTask(scriptDraftTask(), { model: "glm-5.3-flash" });
+    // script-draft 默认走 deepseek-flash；覆盖成另一个已审核模型必须同时改请求体和 trace。
+    const result = await executor.runTask(scriptDraftTask(), { model: "deepseek-v4-pro" });
 
-    assert.equal(capturedBody?.model, "glm-5.3-flash");
-    assert.equal(result.trace?.modelId, "glm-5.3-flash");
+    assert.equal(capturedBody?.model, "deepseek-v4-pro");
+    assert.equal(result.trace?.modelId, "deepseek-v4-pro");
   });
 
   it("rejects an unreviewed model instead of sending it upstream", async () => {
     let calls = 0;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => {
         calls += 1;
         return new Response("{}", { status: 200 });
@@ -1727,26 +1760,26 @@ describe("ZaiCodePlanExecutor reviewed model override", () => {
     });
 
     await assert.rejects(
-      executor.runTask(scriptDraftTask(), { model: "glm-9-unreviewed" }),
+      executor.runTask(scriptDraftTask(), { model: "deepseek-9-unreviewed" }),
       /is not in the reviewed model candidates/,
     );
     assert.equal(calls, 0);
   });
 
-  it("refuses an effort override because glm-5.3 pins its own effort", async () => {
+  it("refuses an effort override because the runtime configuration pins the effort", async () => {
     let calls = 0;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: API_KEY },
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
       fetchFn: async () => {
         calls += 1;
         return new Response("{}", { status: 200 });
       },
     });
 
-    // glm-5.3* 在 zaiReasoningEffort 里被钉死在 max：收下一个不会生效的值就是骗用户。
+    // 强度来自 broker 的运行时配置：收下一个不会生效的值就是骗用户。
     await assert.rejects(
       executor.runTask(scriptDraftTask(), { effort: "low" }),
-      /pins reasoning effort per model/,
+      /pins reasoning effort in its runtime configuration/,
     );
     assert.equal(calls, 0);
   });

@@ -601,7 +601,7 @@ function fallbackClient(
   reverse: boolean,
 ): FallbackCodexTaskClient {
   const primary = { client: original, providerId: "openai", modelId: "codex-default", taskKinds: ["topic-ideas"] };
-  const secondary = { client: backup, providerId: "zai-bigmodel-api", modelId: "glm-test", taskKinds: ["topic-ideas"] };
+  const secondary = { client: backup, providerId: "deepseek", modelId: "deepseek-flash", taskKinds: ["topic-ideas"] };
   return new FallbackCodexTaskClient({ candidates: reverse ? [secondary, primary] : [primary, secondary] });
 }
 

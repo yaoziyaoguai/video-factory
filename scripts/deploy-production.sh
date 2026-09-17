@@ -9,23 +9,23 @@ deployment_mode="${VIDEO_FACTORY_DEPLOYMENT_MODE:-release}"
 container="video_factory_prod"
 broker_service=vf-codex-broker
 broker_unit=/etc/systemd/system/vf-codex-broker.service
-zai_broker_service=vf-zai-codex-broker
-zai_broker_unit=/etc/systemd/system/vf-zai-codex-broker.service
+deepseek_broker_service=vf-deepseek-codex-broker
+deepseek_broker_unit=/etc/systemd/system/vf-deepseek-codex-broker.service
 broker_root=/opt/video-factory/codex-broker
 broker_user=vf-codex
 broker_socket=/run/video-factory-codex/worker.sock
-zai_broker_user=vf-zai-codex
-zai_broker_state_root=/var/lib/video-factory-zai-codex
-zai_broker_workspace="$zai_broker_state_root/workspace"
+deepseek_broker_user=vf-deepseek-codex
+deepseek_broker_state_root=/var/lib/video-factory-deepseek-codex
+deepseek_broker_workspace="$deepseek_broker_state_root/workspace"
 trend_network=video-factory-trends
 compose=(docker compose --project-name video-factory --env-file "$environment_file" -f "$repository_root/docker/docker-compose.prod.yml")
 # ECS 在中国大陆构建镜像时使用阿里云 Alpine 源；CI 直接 docker build 时保留全球官方源。
 export ALPINE_MIRROR="${ALPINE_MIRROR:-http://mirrors.cloud.aliyuncs.com/alpine}"
-zai_broker_enabled=0
-if systemctl cat "$zai_broker_service" >/dev/null 2>&1 && [[ -s /etc/video-factory/zai-codex-broker.env ]]; then
-  zai_broker_enabled=1
+deepseek_broker_enabled=0
+if systemctl cat "$deepseek_broker_service" >/dev/null 2>&1 && [[ -s /etc/video-factory/deepseek-codex-broker.env ]]; then
+  deepseek_broker_enabled=1
 fi
-zai_broker_configured="$zai_broker_enabled"
+deepseek_broker_configured="$deepseek_broker_enabled"
 
 if [[ ! -f "$environment_file" ]]; then
   echo "Missing production environment file: $environment_file" >&2
@@ -56,40 +56,40 @@ elif [[ "$deployment_mode" != "bootstrap" ]]; then
   exit 1
 fi
 
-zai_broker_runtime_dir="${VIDEO_FACTORY_ZAI_CODEX_RUNTIME_DIR:-}"
-if [[ -z "$zai_broker_runtime_dir" ]]; then
-  zai_broker_runtime_dir="$(awk -F= '$1 == "VIDEO_FACTORY_ZAI_CODEX_RUNTIME_DIR" { sub(/^[^=]*=/, ""); print; exit }' "$environment_file")"
+deepseek_broker_runtime_dir="${VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR:-}"
+if [[ -z "$deepseek_broker_runtime_dir" ]]; then
+  deepseek_broker_runtime_dir="$(awk -F= '$1 == "VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR" { sub(/^[^=]*=/, ""); print; exit }' "$environment_file")"
 fi
-zai_broker_runtime_dir="${zai_broker_runtime_dir:-/run/video-factory-zai-codex}"
-zai_broker_socket="$zai_broker_runtime_dir/worker.sock"
+deepseek_broker_runtime_dir="${deepseek_broker_runtime_dir:-/run/video-factory-deepseek-codex}"
+deepseek_broker_socket="$deepseek_broker_runtime_dir/worker.sock"
 
-ensure_zai_runtime_mount() {
-  if [[ ! -e "$zai_broker_runtime_dir" ]]; then
-    install -d -o root -g vf-bridge -m 0750 "$zai_broker_runtime_dir"
-  elif [[ ! -d "$zai_broker_runtime_dir" ]]; then
-    echo "$zai_broker_runtime_dir exists but is not a directory." >&2
+ensure_deepseek_runtime_mount() {
+  if [[ ! -e "$deepseek_broker_runtime_dir" ]]; then
+    install -d -o root -g vf-bridge -m 0750 "$deepseek_broker_runtime_dir"
+  elif [[ ! -d "$deepseek_broker_runtime_dir" ]]; then
+    echo "$deepseek_broker_runtime_dir exists but is not a directory." >&2
     return 1
   fi
 }
 
-ensure_zai_workspace() {
+ensure_deepseek_workspace() {
   local target
-  for target in "$zai_broker_state_root" "$zai_broker_workspace"; do
+  for target in "$deepseek_broker_state_root" "$deepseek_broker_workspace"; do
     if [[ -L "$target" || -e "$target" && ! -d "$target" ]]; then
-      echo "Refusing unsafe ZAI broker workspace path: $target" >&2
+      echo "Refusing unsafe DeepSeek broker workspace path: $target" >&2
       return 1
     fi
   done
-  install -d -o "$zai_broker_user" -g vf-bridge -m 0750 \
-    "$zai_broker_state_root" "$zai_broker_workspace" || return 1
-  for target in "$zai_broker_state_root" "$zai_broker_workspace"; do
-    if [[ "$(stat -c %U:%G "$target")" != "$zai_broker_user:vf-bridge" \
+  install -d -o "$deepseek_broker_user" -g vf-bridge -m 0750 \
+    "$deepseek_broker_state_root" "$deepseek_broker_workspace" || return 1
+  for target in "$deepseek_broker_state_root" "$deepseek_broker_workspace"; do
+    if [[ "$(stat -c %U:%G "$target")" != "$deepseek_broker_user:vf-bridge" \
       || "$(stat -c %a "$target")" != 750 ]]; then
-      echo "ZAI broker workspace has unsafe ownership or mode: $target" >&2
+      echo "DeepSeek broker workspace has unsafe ownership or mode: $target" >&2
       return 1
     fi
   done
-  runuser -u "$zai_broker_user" -- test -w "$zai_broker_workspace"
+  runuser -u "$deepseek_broker_user" -- test -w "$deepseek_broker_workspace"
 }
 
 check_codex_upstream() {
@@ -106,14 +106,13 @@ check_codex_upstream() {
   return 1
 }
 
-check_zai_upstream() {
-  # Broker 的文本与视觉任务统一使用 Coding Plan；这里只读模型目录，不提交 prompt、
-  # 不创建模型任务，也不会产生内容生成费用。
-  "$broker_root/bin/node" --env-file=/etc/video-factory/zai-codex-broker.env --input-type=module --eval '
+check_deepseek_upstream() {
+  # 这里只读模型目录，不提交 prompt、不创建模型任务，也不会产生内容生成费用。
+  "$broker_root/bin/node" --env-file=/etc/video-factory/deepseek-codex-broker.env --input-type=module --eval '
     const urls = [
-      "https://open.bigmodel.cn/api/coding/paas/v4/models",
+      "https://api.deepseek.com/models",
     ];
-    const key = process.env.ZAI_BIGMODEL_API_KEY?.trim();
+    const key = process.env.DEEPSEEK_API_KEY?.trim();
     if (!key) process.exit(2);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
@@ -141,12 +140,12 @@ fi
 # compose 变量插值中 shell 环境优先于 env-file：此导出以宿主机实际组为准，
 # 覆盖 env-file 里可能残留的旧值；不解析、也不改写任何含密文件。
 export VIDEO_FACTORY_CODEX_SOCKET_GID="$bridge_gid"
-if [[ "$zai_broker_enabled" -eq 0 ]]; then
-  ensure_zai_runtime_mount || exit 1
+if [[ "$deepseek_broker_enabled" -eq 0 ]]; then
+  ensure_deepseek_runtime_mount || exit 1
 else
-  ensure_zai_workspace || exit 1
-  check_zai_upstream || {
-    echo "ZAI upstream readiness check failed; leaving the current production release untouched." >&2
+  ensure_deepseek_workspace || exit 1
+  check_deepseek_upstream || {
+    echo "DeepSeek upstream readiness check failed; leaving the current production release untouched." >&2
     exit 1
   }
 fi
@@ -168,13 +167,13 @@ fi
 
 previous_broker_release="$(readlink "$broker_root/current" 2>/dev/null || true)"
 previous_broker_unit_backup="$(mktemp)"
-previous_zai_broker_unit_backup="$(mktemp)"
+previous_deepseek_broker_unit_backup="$(mktemp)"
 candidate_broker_release=""
 if [[ -f "$broker_unit" ]]; then
   cp -a "$broker_unit" "$previous_broker_unit_backup"
 fi
-if [[ -f "$zai_broker_unit" ]]; then
-  cp -a "$zai_broker_unit" "$previous_zai_broker_unit_backup"
+if [[ -f "$deepseek_broker_unit" ]]; then
+  cp -a "$deepseek_broker_unit" "$previous_deepseek_broker_unit_backup"
 fi
 
 app_health() {
@@ -224,10 +223,10 @@ broker_health() {
           && (allowExtraKinds || expectedKinds.length === actualKinds.length);
         const modelsMatch = taskModels && typeof taskModels === "object" && !Array.isArray(taskModels)
           && expectedKinds.every((kind) => typeof taskModels[kind] === "string" && taskModels[kind].length > 0);
-        const zaiModelsMatch = process.env.EXPECTED_BROKER_PROFILE !== "zai"
+        const deepseekModelsMatch = process.env.EXPECTED_BROKER_PROFILE !== "deepseek"
           || taskModels["director-plan"] === health.modelId
             && taskModels["script-draft"] === health.modelId;
-        process.exit(identityMatches && kindsMatch && modelsMatch && zaiModelsMatch ? 0 : 1);
+        process.exit(identityMatches && kindsMatch && modelsMatch && deepseekModelsMatch ? 0 : 1);
       } catch {
         process.exit(1);
       }
@@ -246,35 +245,35 @@ wait_for_broker_health() {
 }
 
 install_broker_units_from_release() {
-  local release="$1" source="$1/deploy/vf-codex-broker.service" zai_source="$1/deploy/vf-zai-codex-broker.service"
+  local release="$1" source="$1/deploy/vf-codex-broker.service" deepseek_source="$1/deploy/vf-deepseek-codex-broker.service"
   if [[ ! -f "$source" ]]; then
     echo "Broker release is missing its systemd unit: $source" >&2
     return 1
   fi
   install -m 0644 "$source" "$broker_unit" || return 1
-  if [[ "$zai_broker_configured" -eq 1 ]]; then
-    if [[ ! -f "$zai_source" ]]; then
-      echo "Broker release is missing its ZAI systemd unit: $zai_source" >&2
+  if [[ "$deepseek_broker_configured" -eq 1 ]]; then
+    if [[ ! -f "$deepseek_source" ]]; then
+      echo "Broker release is missing its DeepSeek systemd unit: $deepseek_source" >&2
       return 1
     fi
-    install -m 0644 "$zai_source" "$zai_broker_unit" || return 1
+    install -m 0644 "$deepseek_source" "$deepseek_broker_unit" || return 1
   fi
   systemctl daemon-reload || return 1
 }
 
 restart_brokers() {
-  local zai_expected_kinds="${1:-topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit}"
-  local zai_allow_extra_kinds="${2:-0}" failed=0
+  local deepseek_expected_kinds="${1:-topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit}"
+  local deepseek_allow_extra_kinds="${2:-0}" failed=0
   if ! systemctl restart "$broker_service" \
     || ! wait_for_broker_health "$broker_socket" 20 openai openai \
       topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
     failed=1
   fi
-  if [[ "$zai_broker_enabled" -eq 1 ]]; then
-    if ! systemctl restart "$zai_broker_service" \
-      || ! wait_for_broker_health "$zai_broker_socket" 20 zai zai-bigmodel-api \
-        "$zai_expected_kinds" "$zai_allow_extra_kinds"; then
-      echo "Configured ZAI Code Plan broker is unavailable; refusing a partial deployment." >&2
+  if [[ "$deepseek_broker_enabled" -eq 1 ]]; then
+    if ! systemctl restart "$deepseek_broker_service" \
+      || ! wait_for_broker_health "$deepseek_broker_socket" 20 deepseek deepseek \
+        "$deepseek_expected_kinds" "$deepseek_allow_extra_kinds"; then
+      echo "Configured DeepSeek broker is unavailable; refusing a partial deployment." >&2
       failed=1
     fi
   fi
@@ -297,13 +296,13 @@ rollback_broker() {
   if ! ln -sfn "$previous_broker_release" "$broker_root/current"; then
     return 1
   fi
-  # 回滚必须恢复部署前实际运行的 unit。旧 release 可能早于 ZAI unit 纳入制品，
+  # 回滚必须恢复部署前实际运行的 unit。旧 release 可能早于 DeepSeek unit 纳入制品，
   # 只按 release 取文件会让应用已回滚、视觉审片服务却留在新版本。
   if [[ -s "$previous_broker_unit_backup" ]]; then
     install -m 0644 "$previous_broker_unit_backup" "$broker_unit" || return 1
-    if [[ "$zai_broker_configured" -eq 1 ]]; then
-      [[ -s "$previous_zai_broker_unit_backup" ]] || return 1
-      install -m 0644 "$previous_zai_broker_unit_backup" "$zai_broker_unit" || return 1
+    if [[ "$deepseek_broker_configured" -eq 1 ]]; then
+      [[ -s "$previous_deepseek_broker_unit_backup" ]] || return 1
+      install -m 0644 "$previous_deepseek_broker_unit_backup" "$deepseek_broker_unit" || return 1
     fi
     systemctl daemon-reload || return 1
   elif [[ -f "$previous_broker_release/deploy/vf-codex-broker.service" ]]; then
@@ -355,7 +354,7 @@ rollback_on_exit() {
       echo "Rollback did not fully recover every component; operator intervention is required." >&2
     fi
   fi
-  rm -f "$previous_broker_unit_backup" "$previous_zai_broker_unit_backup"
+  rm -f "$previous_broker_unit_backup" "$previous_deepseek_broker_unit_backup"
   exit "$status"
 }
 
@@ -381,7 +380,7 @@ stage_broker_release() {
   if [[ ! -f "$staging/broker/dist/main.js"
     || ! -f "$staging/broker/node_modules/undici/package.json"
     || ! -f "$staging/broker/deploy/vf-codex-broker.service"
-    || ! -f "$staging/broker/deploy/vf-zai-codex-broker.service" ]]; then
+    || ! -f "$staging/broker/deploy/vf-deepseek-codex-broker.service" ]]; then
     echo "Candidate image does not contain a complete broker release." >&2
     rm -rf "$staging"
     return 1
@@ -422,8 +421,8 @@ fi
 
 if ! restart_brokers; then
   systemctl --no-pager --lines=60 status "$broker_service" || true
-  if [[ "$zai_broker_enabled" -eq 1 ]]; then
-    systemctl --no-pager --lines=60 status "$zai_broker_service" || true
+  if [[ "$deepseek_broker_enabled" -eq 1 ]]; then
+    systemctl --no-pager --lines=60 status "$deepseek_broker_service" || true
   fi
   exit 1
 fi
@@ -444,9 +443,9 @@ if ! broker_health "$broker_socket" openai openai \
   echo "Codex broker became unhealthy after the app deployment." >&2
   exit 1
 fi
-if [[ "$zai_broker_enabled" -eq 1 ]] && ! broker_health "$zai_broker_socket" zai zai-bigmodel-api \
+if [[ "$deepseek_broker_enabled" -eq 1 ]] && ! broker_health "$deepseek_broker_socket" deepseek deepseek \
   topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
-  echo "ZAI Code Plan broker became unhealthy after the app deployment." >&2
+  echo "DeepSeek broker became unhealthy after the app deployment." >&2
   exit 1
 fi
 

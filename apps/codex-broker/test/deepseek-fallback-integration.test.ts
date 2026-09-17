@@ -13,7 +13,7 @@ import {
   type ScreenwriterAgentInput,
 } from "../../../packages/production-pipeline/src/index.js";
 import { CodexBrokerServer } from "../src/broker-server.js";
-import { ZaiCodePlanExecutor } from "../src/zai-code-plan-executor.js";
+import { ChatCompletionsExecutor, DEEPSEEK_CHAT_COMPLETIONS_PROVIDER } from "../src/chat-completions-executor.js";
 import { outputSchemaValidationErrorFor } from "../src/task-definitions.js";
 
 it("preserves each visual semantic rejection through the real executor, durable broker and client without re-execution", async () => {
@@ -43,8 +43,9 @@ it("preserves each visual semantic rejection through the real executor, durable 
     const directory = await mkdtemp(path.join(tmpdir(), "vf-visual-diagnostic-"));
     const socketPath = path.join(directory, "worker.sock");
     let calls = 0;
-    const executor = new ZaiCodePlanExecutor({
-      env: { ZAI_BIGMODEL_API_KEY: "test-only-zai-key" },
+    const executor = new ChatCompletionsExecutor({
+      env: { DEEPSEEK_API_KEY: "test-only-deepseek-key" },
+      provider: DEEPSEEK_CHAT_COMPLETIONS_PROVIDER,
       fetchFn: async () => {
         calls += 1;
         return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify(scenario.output) } }] }), { status: 200 });
@@ -74,6 +75,8 @@ it("preserves each visual semantic rejection through the real executor, durable 
   }
 });
 
+// 这几个临时目录名刻意保持短：macOS 的 sun_path 上限是 104 字节，超了以后 listen() 照样
+// 报成功却不建出 socket 文件，失败会推到之后那次 chmod 上（ENOENT），看起来与 socket 无关。
 const brief: ScreenwriterAgentInput["brief"] = {
   title: "基础设施故障需要候选模型接管",
   angle: "验证完整 broker 错误链路",
@@ -88,29 +91,30 @@ const brief: ScreenwriterAgentInput["brief"] = {
   },
 };
 
-it("starts a backup after an accepted ZAI request definitively ends with an upstream outage", async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), "video-factory-zai-fallback-"));
+it("starts a backup after an accepted DeepSeek request definitively ends with an upstream outage", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "vf-ds-fallback-"));
   const socketPath = path.join(directory, "worker.sock");
-  let zaiCalls = 0;
-  const zai = new ZaiCodePlanExecutor({
-    env: { ZAI_BIGMODEL_API_KEY: "test-only-zai-key" },
+  let deepseekCalls = 0;
+  const deepseek = new ChatCompletionsExecutor({
+    env: { DEEPSEEK_API_KEY: "test-only-deepseek-key" },
+    provider: DEEPSEEK_CHAT_COMPLETIONS_PROVIDER,
     fetchFn: async () => {
-      zaiCalls += 1;
+      deepseekCalls += 1;
       return new Response(JSON.stringify({ error: { code: "service_unavailable" } }), {
         status: 503,
         headers: { "content-type": "application/json" },
       });
     },
   });
-  const broker = new CodexBrokerServer({ socketPath, executor: zai });
+  const broker = new CodexBrokerServer({ socketPath, executor: deepseek });
   await broker.start();
   try {
     const client = new CodexBridgeClient({ socketPath, maxAttempts: 1 });
-    const glm: ScreenwriterAgent = {
+    const candidate: ScreenwriterAgent = {
       id: "codex-screenwriter-v1",
-      modelId: "glm-5.3",
-      draft: async (input) => (await client.runTask("script-draft", { brief: input.brief }, "zai-fallback-chain")),
-      draftDetailed: async (input) => client.runTaskDetailed("script-draft", { brief: input.brief }, "zai-fallback-chain"),
+      modelId: "deepseek-flash",
+      draft: async (input) => (await client.runTask("script-draft", { brief: input.brief }, "deepseek-fallback-chain")),
+      draftDetailed: async (input) => client.runTaskDetailed("script-draft", { brief: input.brief }, "deepseek-fallback-chain"),
     };
     let backupCalls = 0;
     const openai: ScreenwriterAgent = {
@@ -133,14 +137,14 @@ it("starts a backup after an accepted ZAI request definitively ends with an upst
     };
     const candidates = new FallbackScreenwriterAgent({
       candidates: [
-        { agent: glm, providerId: "zai-bigmodel-api" },
+        { agent: candidate, providerId: "deepseek" },
         { agent: openai, providerId: "openai" },
       ],
     });
 
-    const result = await candidates.draftDetailed({ brief, selectedModelId: "glm-5.3" });
+    const result = await candidates.draftDetailed({ brief, selectedModelId: "deepseek-flash" });
 
-    assert.equal(zaiCalls, 1);
+    assert.equal(deepseekCalls, 1);
     assert.equal(backupCalls, 1);
     assert.equal(result.trace?.modelId, "gpt-5.6-sol");
   } finally {
@@ -149,29 +153,30 @@ it("starts a backup after an accepted ZAI request definitively ends with an upst
   }
 });
 
-it("starts a backup after an accepted ZAI request definitively completes without output", async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), "video-factory-zai-no-output-fallback-"));
+it("starts a backup after an accepted DeepSeek request definitively completes without output", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "vf-ds-no-output-fallback-"));
   const socketPath = path.join(directory, "worker.sock");
-  let zaiCalls = 0;
-  const zai = new ZaiCodePlanExecutor({
-    env: { ZAI_BIGMODEL_API_KEY: "test-only-zai-key" },
+  let deepseekCalls = 0;
+  const deepseek = new ChatCompletionsExecutor({
+    env: { DEEPSEEK_API_KEY: "test-only-deepseek-key" },
+    provider: DEEPSEEK_CHAT_COMPLETIONS_PROVIDER,
     fetchFn: async () => {
-      zaiCalls += 1;
+      deepseekCalls += 1;
       return new Response(JSON.stringify({ choices: [{ message: { content: "" } }] }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
     },
   });
-  const broker = new CodexBrokerServer({ socketPath, executor: zai });
+  const broker = new CodexBrokerServer({ socketPath, executor: deepseek });
   await broker.start();
   try {
     const client = new CodexBridgeClient({ socketPath, maxAttempts: 1 });
-    const glm: ScreenwriterAgent = {
+    const candidate: ScreenwriterAgent = {
       id: "codex-screenwriter-v1",
-      modelId: "glm-5.3",
-      draft: async (input) => client.runTask("script-draft", { brief: input.brief }, "zai-no-output-chain"),
-      draftDetailed: async (input) => client.runTaskDetailed("script-draft", { brief: input.brief }, "zai-no-output-chain"),
+      modelId: "deepseek-flash",
+      draft: async (input) => client.runTask("script-draft", { brief: input.brief }, "deepseek-no-output-chain"),
+      draftDetailed: async (input) => client.runTaskDetailed("script-draft", { brief: input.brief }, "deepseek-no-output-chain"),
     };
     let backupCalls = 0;
     const openai: ScreenwriterAgent = {
@@ -194,14 +199,14 @@ it("starts a backup after an accepted ZAI request definitively completes without
     };
     const candidates = new FallbackScreenwriterAgent({
       candidates: [
-        { agent: glm, providerId: "zai-bigmodel-api" },
+        { agent: candidate, providerId: "deepseek" },
         { agent: openai, providerId: "openai" },
       ],
     });
 
-    const result = await candidates.draftDetailed({ brief, selectedModelId: "glm-5.3" });
+    const result = await candidates.draftDetailed({ brief, selectedModelId: "deepseek-flash" });
 
-    assert.equal(zaiCalls, 1);
+    assert.equal(deepseekCalls, 1);
     assert.equal(backupCalls, 1);
     assert.equal(result.trace?.modelId, "gpt-5.6-sol");
   } finally {
@@ -210,25 +215,26 @@ it("starts a backup after an accepted ZAI request definitively completes without
   }
 });
 
-it("does not fall back after a generic ZAI HTTP 500 crosses the broker boundary", async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), "video-factory-zai-generic-500-"));
+it("does not fall back after a generic DeepSeek HTTP 500 crosses the broker boundary", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "vf-ds-generic-500-"));
   const socketPath = path.join(directory, "worker.sock");
-  const zai = new ZaiCodePlanExecutor({
-    env: { ZAI_BIGMODEL_API_KEY: "test-only-zai-key" },
+  const deepseek = new ChatCompletionsExecutor({
+    env: { DEEPSEEK_API_KEY: "test-only-deepseek-key" },
+    provider: DEEPSEEK_CHAT_COMPLETIONS_PROVIDER,
     fetchFn: async () => new Response(JSON.stringify({ error: { code: "1300" } }), {
       status: 500,
       headers: { "content-type": "application/json" },
     }),
   });
-  const broker = new CodexBrokerServer({ socketPath, executor: zai });
+  const broker = new CodexBrokerServer({ socketPath, executor: deepseek });
   await broker.start();
   try {
     const client = new CodexBridgeClient({ socketPath, maxAttempts: 1 });
-    const glm: ScreenwriterAgent = {
+    const candidate: ScreenwriterAgent = {
       id: "codex-screenwriter-v1",
-      modelId: "glm-5.3",
-      draft: async (input) => client.runTask("script-draft", { brief: input.brief }, "zai-generic-500-chain"),
-      draftDetailed: async (input) => client.runTaskDetailed("script-draft", { brief: input.brief }, "zai-generic-500-chain"),
+      modelId: "deepseek-flash",
+      draft: async (input) => client.runTask("script-draft", { brief: input.brief }, "deepseek-generic-500-chain"),
+      draftDetailed: async (input) => client.runTaskDetailed("script-draft", { brief: input.brief }, "deepseek-generic-500-chain"),
     };
     let backupCalls = 0;
     const openai: ScreenwriterAgent = {
@@ -242,13 +248,13 @@ it("does not fall back after a generic ZAI HTTP 500 crosses the broker boundary"
     };
     const candidates = new FallbackScreenwriterAgent({
       candidates: [
-        { agent: glm, providerId: "zai-bigmodel-api" },
+        { agent: candidate, providerId: "deepseek" },
         { agent: openai, providerId: "openai" },
       ],
     });
 
     await assert.rejects(
-      () => candidates.draftDetailed({ brief, selectedModelId: "glm-5.3" }),
+      () => candidates.draftDetailed({ brief, selectedModelId: "deepseek-flash" }),
       (error: unknown) => {
         assert.ok(error instanceof CodexBridgeError);
         assert.equal(error.statusCode, 422);

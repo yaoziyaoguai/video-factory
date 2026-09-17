@@ -14,7 +14,7 @@ import { buildStudioApp } from "./app.js";
 import { readStudioAuthEnvironment } from "./auth.js";
 import {
   readCodexProviderSettings,
-  readZaiCodexProviderSettings,
+  readDeepseekCodexProviderSettings,
 } from "./codex-provider-settings.js";
 import { JsonCreatorSettingsStore } from "./creator-settings-store.js";
 import { JsonOpportunityStore } from "./opportunity-store.js";
@@ -34,9 +34,8 @@ import { CodexTopicIdeaModel, TrendOpportunityAgent } from "./trend-opportunity-
 
 const repositoryRoot = await findRepositoryRoot(process.cwd());
 loadLocalEnvironment(repositoryRoot);
-// BigModel 凭据只属于宿主机 broker；新旧变量即使误放进 Studio 环境也立即移除。
-delete process.env.ZAI_BIGMODEL_API_KEY;
-delete process.env.ZAI_API_KEY;
+// 模型供应商凭据只属于宿主机 broker；即使误放进 Studio 环境也立即移除。
+delete process.env.DEEPSEEK_API_KEY;
 const workspaceRoot = path.resolve(
   process.env.VIDEO_FACTORY_WORKSPACE ?? path.join(repositoryRoot, "workspace", "factory"),
 );
@@ -45,9 +44,9 @@ const pythonPath = process.env.PYTHONPATH
   ? `${path.join(repositoryRoot, "src")}${path.delimiter}${process.env.PYTHONPATH}`
   : path.join(repositoryRoot, "src");
 // 启动时探测一次宿主机 Codex bridge；不可用时不创建任何 agent，保持规则与模板行为。
-const [codexSettings, zaiCodexSettings] = await Promise.all([
+const [codexSettings, deepseekCodexSettings] = await Promise.all([
   readCodexProviderSettings(process.env),
-  readZaiCodexProviderSettings(process.env),
+  readDeepseekCodexProviderSettings(process.env),
 ]);
 const codexModelId = codexSettings.modelId || process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
 // 单并发 broker 中，41 分钟覆盖一个 20 分钟在途任务、一个完整执行和传输余量；
@@ -55,24 +54,26 @@ const codexModelId = codexSettings.modelId || process.env.VIDEO_FACTORY_CODEX_MO
 const codexClient = codexSettings.available
   ? new CodexBridgeClient({ socketPath: codexSettings.socketPath, timeoutMs: 2_460_000 })
   : undefined;
-const zaiCodexClient = zaiCodexSettings.available
-  ? new CodexBridgeClient({ socketPath: zaiCodexSettings.socketPath, timeoutMs: 2_460_000 })
+const deepseekCodexClient = deepseekCodexSettings.available
+  ? new CodexBridgeClient({ socketPath: deepseekCodexSettings.socketPath, timeoutMs: 2_460_000 })
   : undefined;
+// 顺序即首选：DeepSeek 排在最前，所以 `auditedModelFor` 取到的默认模型是它。用户手动配置
+// 只影响候选的取舍，不改这里的顺序。
 const auditedTaskCandidates = [
+  ...(deepseekCodexClient && deepseekCodexSettings.taskKinds.includes("role-audit") ? [{
+    client: deepseekCodexClient,
+    providerId: "deepseek",
+    modelId: deepseekCodexSettings.modelId,
+    taskKinds: deepseekCodexSettings.taskKinds,
+    sessionMode: "stateless" as const,
+    ...(deepseekCodexSettings.taskModels ? { taskModels: deepseekCodexSettings.taskModels } : {}),
+  }] : []),
   ...(codexClient && codexSettings.taskKinds.includes("role-audit") ? [{
     client: codexClient,
     providerId: "openai",
     modelId: codexModelId,
     taskKinds: codexSettings.taskKinds,
     ...(codexSettings.taskModels ? { taskModels: codexSettings.taskModels } : {}),
-  }] : []),
-  ...(zaiCodexClient && zaiCodexSettings.taskKinds.includes("role-audit") ? [{
-    client: zaiCodexClient,
-    providerId: "zai-bigmodel-api",
-    modelId: zaiCodexSettings.modelId,
-    taskKinds: zaiCodexSettings.taskKinds,
-    sessionMode: "stateless" as const,
-    ...(zaiCodexSettings.taskModels ? { taskModels: zaiCodexSettings.taskModels } : {}),
   }] : []),
 ];
 const auditedTaskClient = auditedTaskCandidates.length > 0
@@ -103,9 +104,9 @@ const referenceGrammarAgent = auditedTaskClient && auditedTaskReady("reference-g
 }) : undefined;
 const { screenwriterAgent, directorAgent, visualReviewAgents, treatmentAgents, briefAuditAgents } = buildRoleAgentAssembly({
   codexSettings,
-  zaiCodexSettings,
+  deepseekCodexSettings,
   ...(codexClient ? { codexClient } : {}),
-  ...(zaiCodexClient ? { zaiCodexClient } : {}),
+  ...(deepseekCodexClient ? { deepseekCodexClient } : {}),
   reviewMedia,
   environment: process.env,
 });
@@ -145,13 +146,13 @@ const service = new StudioService({
     ...(codexSettings.taskModels ? { taskModels: codexSettings.taskModels } : {}),
     ...(codexSettings.modelCandidates ? { modelCandidates: codexSettings.modelCandidates } : {}),
   },
-  zaiCodexAvailability: {
-    available: zaiCodexSettings.available,
-    reason: zaiCodexSettings.reason,
-    taskKinds: zaiCodexSettings.taskKinds,
-    modelId: zaiCodexSettings.modelId,
-    ...(zaiCodexSettings.taskModels ? { taskModels: zaiCodexSettings.taskModels } : {}),
-    ...(zaiCodexSettings.modelCandidates ? { modelCandidates: zaiCodexSettings.modelCandidates } : {}),
+  deepseekCodexAvailability: {
+    available: deepseekCodexSettings.available,
+    reason: deepseekCodexSettings.reason,
+    taskKinds: deepseekCodexSettings.taskKinds,
+    modelId: deepseekCodexSettings.modelId,
+    ...(deepseekCodexSettings.taskModels ? { taskModels: deepseekCodexSettings.taskModels } : {}),
+    ...(deepseekCodexSettings.modelCandidates ? { modelCandidates: deepseekCodexSettings.modelCandidates } : {}),
   },
   ...(auditedTaskClient && auditedTaskReady("series-roadmap") ? {
     seriesPlanningAgent: new CodexSeriesPlanningAgent(

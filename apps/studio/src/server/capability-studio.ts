@@ -19,7 +19,7 @@ export interface CapabilityStudioOptions {
   commandAvailable?: (command: string) => Promise<boolean>;
   localCapabilities?: Pick<LocalCapabilityService, "report" | "listVoices" | "preview">;
   codexAvailability?: CodexCatalogAvailability;
-  zaiCodexAvailability?: CodexCatalogAvailability;
+  deepseekCodexAvailability?: CodexCatalogAvailability;
 }
 
 export class CapabilityStudio {
@@ -56,7 +56,7 @@ export class CapabilityStudio {
       ffmpeg: health.runtime.ffmpeg ?? false,
       ffprobe: health.runtime.ffprobe ?? false,
       say: health.runtime.say ?? false,
-    }, this.options.environment, this.options.codexAvailability, this.options.zaiCodexAvailability);
+    }, this.options.environment, this.options.codexAvailability, this.options.deepseekCodexAvailability);
   }
 
   listLocalCapabilities(): Promise<StudioLocalCapability[]> {

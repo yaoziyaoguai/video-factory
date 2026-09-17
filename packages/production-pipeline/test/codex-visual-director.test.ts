@@ -190,7 +190,7 @@ describe("CodexVisualDirectorAgent", () => {
     assert.equal(client.calls.length, 0);
   });
 
-  it("routes stateless ZAI production and independent OpenAI audit to separate clients", async () => {
+  it("routes stateless DeepSeek production and independent OpenAI audit to separate clients", async () => {
     const input = directorInput();
     input.brief.durationRange = { minSeconds: 20, maxSeconds: 34 };
     const visualProof = "两条真实标题的措辞差异可以直接并列核对。";
@@ -268,8 +268,8 @@ describe("CodexVisualDirectorAgent", () => {
     };
     const producerClient = new SequencedCodexClient(
       [firstPlan, repairedPlan],
-      "zai-bigmodel-api",
-      "glm-5.3",
+      "deepseek",
+      "deepseek-flash",
     );
     const auditClient = new SequencedCodexClient(
       [repairAudit, passAudit],
@@ -280,11 +280,11 @@ describe("CodexVisualDirectorAgent", () => {
       client: producerClient,
       auditClient,
       maxReviewIterations: 2,
-      modelId: "glm-5.3",
+      modelId: "deepseek-flash",
       sessionMode: "stateless",
     });
 
-    const execution = await agent.planDetailed({ ...input, selectedModelId: "glm-5.3" });
+    const execution = await agent.planDetailed({ ...input, selectedModelId: "deepseek-flash" });
 
     assert.equal(execution.agentLoop?.status, "passed");
     assert.deepEqual(producerClient.calls.map(({ kind }) => kind), ["director-plan", "director-plan"]);
@@ -302,8 +302,8 @@ describe("CodexVisualDirectorAgent", () => {
         iteration.auditTrace?.modelId,
       ]),
       [
-        ["zai-bigmodel-api", "glm-5.3", "openai", "gpt-5.6-sol"],
-        ["zai-bigmodel-api", "glm-5.3", "openai", "gpt-5.6-sol"],
+        ["deepseek", "deepseek-flash", "openai", "gpt-5.6-sol"],
+        ["deepseek", "deepseek-flash", "openai", "gpt-5.6-sol"],
       ],
     );
     const auditPayload = auditClient.calls[0]!.payload as {
@@ -491,7 +491,7 @@ describe("CodexVisualDirectorAgent", () => {
     revisedShot.query = "rainy city portrait";
     revisedShot.generationPrompt = "无文字的雨夜人物近景，人物收伞后停在暖光边缘";
     revisedShot.estimatedCostCny = 6;
-    const producerClient = new SequencedCodexClient([revisedPlan], "zai-bigmodel-api", "glm-5.3");
+    const producerClient = new SequencedCodexClient([revisedPlan], "deepseek", "deepseek-flash");
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
       rubricVersion: "video-factory/role-quality-rubric-v1",
@@ -514,11 +514,11 @@ describe("CodexVisualDirectorAgent", () => {
       client: producerClient,
       auditClient,
       maxReviewIterations: 1,
-      modelId: "glm-5.3",
+      modelId: "deepseek-flash",
       sessionMode: "stateless",
     });
 
-    const execution = await agent.planDetailed({ ...input, selectedModelId: "glm-5.3" });
+    const execution = await agent.planDetailed({ ...input, selectedModelId: "deepseek-flash" });
 
     assert.equal(execution.agentLoop?.status, "passed");
     const producerRework = (producerClient.calls[0]!.payload as {
@@ -719,7 +719,7 @@ describe("CodexVisualDirectorAgent", () => {
     (firstCandidate.shots as Array<Record<string, unknown>>)[1]!.generationPrompt = "第一次修正后的第二镜";
     (secondCandidate.shots as Array<Record<string, unknown>>)[1]!.generationPrompt = "审计后修正的第二镜";
     firstCandidate.shots = [(firstCandidate.shots as Array<Record<string, unknown>>)[1]!];
-    const producerClient = new SequencedCodexClient([firstCandidate, secondCandidate], "zai-bigmodel-api", "glm-5.3");
+    const producerClient = new SequencedCodexClient([firstCandidate, secondCandidate], "deepseek", "deepseek-flash");
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
       rubricVersion: "video-factory/role-quality-rubric-v1",
@@ -764,11 +764,11 @@ describe("CodexVisualDirectorAgent", () => {
       client: producerClient,
       auditClient,
       maxReviewIterations: 2,
-      modelId: "glm-5.3",
+      modelId: "deepseek-flash",
       sessionMode: "stateless",
     });
 
-    const execution = await agent.planDetailed({ ...input, selectedModelId: "glm-5.3" });
+    const execution = await agent.planDetailed({ ...input, selectedModelId: "deepseek-flash" });
 
     const firstPayload = producerClient.calls[0]!.payload as {
       brief: { rework: { previousDirectorPlan: { shots: Array<{ scenePosition: number }> } } };
@@ -796,7 +796,7 @@ describe("CodexVisualDirectorAgent", () => {
     const repairedCandidate = structuredClone(previousPlan);
     (repairedCandidate.shots as Array<Record<string, unknown>>)[0]!.generationPrompt = "第一镜水位已经统一";
     (repairedCandidate.shots as Array<Record<string, unknown>>)[1]!.generationPrompt = "第一次修正后的第二镜";
-    const producerClient = new SequencedCodexClient([firstCandidate, repairedCandidate], "zai-bigmodel-api", "glm-5.3");
+    const producerClient = new SequencedCodexClient([firstCandidate, repairedCandidate], "deepseek", "deepseek-flash");
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
       rubricVersion: "video-factory/role-quality-rubric-v1",
@@ -841,12 +841,12 @@ describe("CodexVisualDirectorAgent", () => {
       client: producerClient,
       auditClient,
       maxReviewIterations: 2,
-      modelId: "glm-5.3",
+      modelId: "deepseek-flash",
       sessionMode: "stateless",
     });
 
     await assert.rejects(
-      () => agent.planDetailed({ ...input, selectedModelId: "glm-5.3" }),
+      () => agent.planDetailed({ ...input, selectedModelId: "deepseek-flash" }),
       /按修改建议重做后内容没有变化/,
     );
 
@@ -1695,7 +1695,7 @@ describe("CodexVisualDirectorAgent", () => {
       generationPrompt: `第 ${position} 个独立生成画面`,
       continuityNote: "同一人物与杯子保持一致",
     }));
-    const producerClient = new SequencedCodexClient([plan], "zai-bigmodel-api", "glm-5.3");
+    const producerClient = new SequencedCodexClient([plan], "deepseek", "deepseek-flash");
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
       rubricVersion: "video-factory/role-quality-rubric-v1",
@@ -1723,13 +1723,13 @@ describe("CodexVisualDirectorAgent", () => {
       client: producerClient,
       auditClient,
       maxReviewIterations: 1,
-      modelId: "glm-5.3",
+      modelId: "deepseek-flash",
       sessionMode: "stateless",
     });
 
     // 方案没有被关键词过滤器拦下（它会误伤"不承诺精确身份"的否定句），而是走完了 producer，
     // 由独立审计指名问题。审计只出建议，不替用户判成败：候选与这条 repair 结论一起交还给用户。
-    const stopped = await agent.planDetailed({ ...input, selectedModelId: "glm-5.3" });
+    const stopped = await agent.planDetailed({ ...input, selectedModelId: "deepseek-flash" });
     assert.equal(stopped.agentLoop?.status, "awaiting_user");
     assert.equal(stopped.agentLoop?.iterations.at(-1)?.audit.verdict, "repair");
     assert.match(stopped.agentLoop?.iterations.at(-1)?.audit.summary ?? "", /同一人物与物件/);

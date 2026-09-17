@@ -120,7 +120,7 @@ const passingVisualReport = {
 };
 
 function settings(
-  provider: "openai" | "zai",
+  provider: "openai" | "deepseek",
   taskKinds: string[],
   taskModels: Record<string, string>,
 ): CodexProviderSettings {
@@ -128,7 +128,7 @@ function settings(
     socketPath: `/tmp/${provider}.sock`,
     configured: true,
     available: true,
-    modelId: provider === "openai" ? "gpt-default" : "glm-default",
+    modelId: provider === "openai" ? "gpt-default" : "deepseek-default",
     requirement: "test",
     reason: "",
     taskKinds,
@@ -154,20 +154,21 @@ describe("buildRoleAgentAssembly", () => {
         "director-plan": "gpt-director",
         "visual-review": "gpt-review",
       }),
-      zaiCodexSettings: settings("zai", ["script-draft", "director-plan", "visual-review", "role-audit"], {
-        "script-draft": "glm-writer",
-        "director-plan": "glm-director",
-        "visual-review": "glm-review",
+      deepseekCodexSettings: settings("deepseek", ["script-draft", "director-plan", "visual-review", "role-audit"], {
+        "script-draft": "deepseek-writer",
+        "director-plan": "deepseek-director",
+        "visual-review": "deepseek-review",
       }),
       codexClient: client,
-      zaiCodexClient: client,
+      deepseekCodexClient: client,
       reviewMedia,
       environment: {},
     });
 
-    assert.equal(result.screenwriterAgent?.modelId, "gpt-writer");
-    assert.equal(result.directorAgent?.modelId, "gpt-director");
-    assert.deepEqual(result.visualReviewAgents.map((agent) => agent.modelId), ["glm-review", "gpt-review"]);
+    // 顺序即默认：DeepSeek 在前，Codex 在后。
+    assert.equal(result.screenwriterAgent?.modelId, "deepseek-writer");
+    assert.equal(result.directorAgent?.modelId, "deepseek-director");
+    assert.deepEqual(result.visualReviewAgents.map((agent) => agent.modelId), ["deepseek-review", "gpt-review"]);
   });
 
   it("routes the selected reviewed model onto the wire and keeps the broker default when nothing is selected", async () => {
@@ -179,7 +180,7 @@ describe("buildRoleAgentAssembly", () => {
         ...settings("openai", ["script-draft", "role-audit"], { "script-draft": "gpt-5.6-sol" }),
         modelCandidates: ["gpt-5.6-sol", "gpt-6-astra"],
       },
-      zaiCodexSettings: unavailable,
+      deepseekCodexSettings: unavailable,
       codexClient: openai,
       reviewMedia,
       environment: {},
@@ -205,22 +206,22 @@ describe("buildRoleAgentAssembly", () => {
   it("assembles treatment producers for both brokers and fails closed without the task contract", () => {
     const both = buildRoleAgentAssembly({
       codexSettings: settings("openai", ["creative-treatment", "role-audit"], { "creative-treatment": "gpt-director" }),
-      zaiCodexSettings: settings("zai", ["creative-treatment", "role-audit"], { "creative-treatment": "glm-director" }),
+      deepseekCodexSettings: settings("deepseek", ["creative-treatment", "role-audit"], { "creative-treatment": "deepseek-director" }),
       codexClient: client,
-      zaiCodexClient: client,
+      deepseekCodexClient: client,
       reviewMedia,
       environment: {},
     });
     assert.deepEqual(
       both.treatmentAgents.map(({ agent, providerId }) => [agent.modelId, providerId]),
-      [["gpt-director", "openai"], ["glm-director", "zai-bigmodel-api"]],
+      [["deepseek-director", "deepseek"], ["gpt-director", "openai"]],
     );
 
     const withoutTreatment = buildRoleAgentAssembly({
       codexSettings: settings("openai", ["script-draft", "role-audit"], {}),
-      zaiCodexSettings: settings("zai", ["script-draft", "role-audit"], {}),
+      deepseekCodexSettings: settings("deepseek", ["script-draft", "role-audit"], {}),
       codexClient: client,
-      zaiCodexClient: client,
+      deepseekCodexClient: client,
       reviewMedia,
       environment: {},
     });
@@ -228,7 +229,7 @@ describe("buildRoleAgentAssembly", () => {
 
     const withoutAuditor = buildRoleAgentAssembly({
       codexSettings: settings("openai", ["creative-treatment"], {}),
-      zaiCodexSettings: unavailable,
+      deepseekCodexSettings: unavailable,
       codexClient: client,
       reviewMedia,
       environment: {},
@@ -240,7 +241,7 @@ describe("buildRoleAgentAssembly", () => {
     const openai = new ControlledCodexClient("openai", "gpt-audit", () => passingReportAudit);
     const result = buildRoleAgentAssembly({
       codexSettings: settings("openai", ["role-audit"], { "role-audit": "gpt-audit" }),
-      zaiCodexSettings: unavailable,
+      deepseekCodexSettings: unavailable,
       codexClient: openai,
       reviewMedia,
       environment: {},
@@ -272,7 +273,7 @@ describe("buildRoleAgentAssembly", () => {
     // 没有 role-audit 合同的 broker 不产出审计候选：复核必须独立，不能拿生产模型顶上。
     const withoutAuditor = buildRoleAgentAssembly({
       codexSettings: settings("openai", ["creative-treatment"], {}),
-      zaiCodexSettings: unavailable,
+      deepseekCodexSettings: unavailable,
       codexClient: client,
       reviewMedia,
       environment: {},
@@ -286,8 +287,8 @@ describe("buildRoleAgentAssembly", () => {
     const openai = new ControlledCodexClient("openai", "unused", () => {
       throw new CodexBridgeError("OpenAI 暂时不可用。", true, "not_accepted", 503);
     });
-    const zai = new ControlledCodexClient("zai-bigmodel-api", "unused", () => {
-      throw new CodexBridgeError("GLM 暂时不可用。", true, "not_accepted", 503);
+    const deepseek = new ControlledCodexClient("deepseek", "unused", () => {
+      throw new CodexBridgeError("DeepSeek 暂时不可用。", true, "not_accepted", 503);
     });
     const result = buildRoleAgentAssembly({
       codexSettings: {
@@ -299,34 +300,34 @@ describe("buildRoleAgentAssembly", () => {
         }),
         modelCandidates: announced,
       },
-      // ZAI 公告了同一批 id：重复的候选会被丢弃（留着它跑的是同一个模型，不是一次兜底），
+      // DeepSeek 公告了同一批 id：重复的候选会被丢弃（留着它跑的是同一个模型，不是一次兜底），
       // 而 `validateCandidates` 对重复 id 是**建图时**就抛，也就是整个服务起不来。
-      zaiCodexSettings: {
-        ...settings("zai", ["director-plan", "creative-treatment", "role-audit", "script-draft"], {
-          "director-plan": "glm-director",
-          "creative-treatment": "glm-director",
-          "role-audit": "glm-audit",
-          "script-draft": "glm-writer",
+      deepseekCodexSettings: {
+        ...settings("deepseek", ["director-plan", "creative-treatment", "role-audit", "script-draft"], {
+          "director-plan": "deepseek-director",
+          "creative-treatment": "deepseek-director",
+          "role-audit": "deepseek-audit",
+          "script-draft": "deepseek-writer",
         }),
         modelCandidates: announced,
       },
       codexClient: openai,
-      zaiCodexClient: zai,
+      deepseekCodexClient: deepseek,
       reviewMedia,
       environment: {},
     });
 
     assert.deepEqual(
       result.treatmentAgents.map(({ agent }) => agent.modelId),
-      ["gpt-director", "gpt-5.6-sol", "gpt-6-astra", "glm-director"],
+      ["deepseek-director", "gpt-5.6-sol", "gpt-6-astra", "gpt-director"],
     );
     assert.deepEqual(
       result.briefAuditAgents.map(({ agent, providerId }) => [agent.modelId, providerId]),
-      [["gpt-audit", "openai"], ["gpt-5.6-sol", "openai"], ["gpt-6-astra", "openai"], ["glm-audit", "zai-bigmodel-api"]],
+      [["deepseek-audit", "deepseek"], ["gpt-5.6-sol", "deepseek"], ["gpt-6-astra", "deepseek"], ["gpt-audit", "openai"]],
     );
-    // 没有选择时首选是 broker 的默认模型；"请求的模型就是我"由 broker 归一化成没有覆盖。
-    assert.equal(result.directorAgent?.modelId, "gpt-director");
-    assert.equal(result.screenwriterAgent?.modelId, "gpt-writer");
+    // 没有选择时首选是每个角色的第一个候选，也就是 DeepSeek 的默认模型。
+    assert.equal(result.directorAgent?.modelId, "deepseek-director");
+    assert.equal(result.screenwriterAgent?.modelId, "deepseek-writer");
 
     // 选中的模型排在最前，其余按公告顺序跟上。让每个候选都掉线，失败清单的顺序就是实际的尝试顺序。
     await assert.rejects(
@@ -349,10 +350,10 @@ describe("buildRoleAgentAssembly", () => {
         assert.deepEqual(
           error.attempts.map((attempt) => [attempt.modelId, attempt.providerId]),
           [
-            ["gpt-6-astra", "openai"],
+            ["gpt-6-astra", "deepseek"],
+            ["deepseek-writer", "deepseek"],
+            ["gpt-5.6-sol", "deepseek"],
             ["gpt-writer", "openai"],
-            ["gpt-5.6-sol", "openai"],
-            ["glm-writer", "zai-bigmodel-api"],
           ],
         );
         return true;
@@ -369,8 +370,8 @@ describe("buildRoleAgentAssembly", () => {
     const openai = new ControlledCodexClient("openai", "unused", () => {
       throw new CodexBridgeError("OpenAI 暂时不可用。", true, "not_accepted", 503);
     });
-    const zai = new ControlledCodexClient("zai-bigmodel-api", "unused", () => {
-      throw new CodexBridgeError("GLM 暂时不可用。", true, "not_accepted", 503);
+    const deepseek = new ControlledCodexClient("deepseek", "unused", () => {
+      throw new CodexBridgeError("DeepSeek 暂时不可用。", true, "not_accepted", 503);
     });
     const announced = ["gpt-5.6-sol", "gpt-6-astra"];
     const result = buildRoleAgentAssembly({
@@ -381,18 +382,18 @@ describe("buildRoleAgentAssembly", () => {
         }),
         modelCandidates: announced,
       },
-      zaiCodexSettings: settings("zai", ["creative-treatment", "role-audit"], {
-        "creative-treatment": "glm-director",
-        "role-audit": "glm-audit",
+      deepseekCodexSettings: settings("deepseek", ["creative-treatment", "role-audit"], {
+        "creative-treatment": "deepseek-director",
+        "role-audit": "deepseek-audit",
       }),
       codexClient: openai,
-      zaiCodexClient: zai,
+      deepseekCodexClient: deepseek,
       reviewMedia,
       environment: {},
     });
     assert.deepEqual(
       result.treatmentAgents.map(({ agent }) => agent.modelId),
-      ["gpt-director", "gpt-5.6-sol", "gpt-6-astra", "glm-director"],
+      ["deepseek-director", "gpt-director", "gpt-5.6-sol", "gpt-6-astra"],
     );
 
     await assert.rejects(
@@ -407,15 +408,15 @@ describe("buildRoleAgentAssembly", () => {
             durationSeconds: 24,
           },
           suppliedSources: [],
-          selectedModelId: "glm-director",
+          selectedModelId: "gpt-director",
         } as never),
       (error: unknown) => {
         assert.ok(error instanceof ModelCandidatesExhaustedError);
         assert.deepEqual(
           error.attempts.map((attempt) => [attempt.modelId, attempt.providerId]),
           [
-            ["glm-director", "zai-bigmodel-api"],
             ["gpt-director", "openai"],
+            ["deepseek-director", "deepseek"],
             ["gpt-5.6-sol", "openai"],
             ["gpt-6-astra", "openai"],
           ],
@@ -443,9 +444,9 @@ describe("buildRoleAgentAssembly", () => {
           error.attempts.map((attempt) => [attempt.modelId, attempt.providerId]),
           [
             ["gpt-6-astra", "openai"],
+            ["deepseek-audit", "deepseek"],
             ["gpt-audit", "openai"],
             ["gpt-5.6-sol", "openai"],
-            ["glm-audit", "zai-bigmodel-api"],
           ],
         );
         return true;
@@ -453,20 +454,20 @@ describe("buildRoleAgentAssembly", () => {
     );
   });
 
-  it("runs the assembled OpenAI screenwriter through its GLM backup after a transient outage", async () => {
-    const openai = new ControlledCodexClient("openai", "gpt-writer", () => {
-      throw new CodexBridgeError("OpenAI service temporarily unavailable.", true, "not_accepted", 503);
+  it("runs the assembled DeepSeek screenwriter through its OpenAI backup after a transient outage", async () => {
+    const deepseek = new ControlledCodexClient("deepseek", "deepseek-writer", () => {
+      throw new CodexBridgeError("DeepSeek service temporarily unavailable.", true, "not_accepted", 503);
     });
-    const zai = new ControlledCodexClient("zai-bigmodel-api", "glm-writer", (kind) => {
+    const openai = new ControlledCodexClient("openai", "gpt-writer", (kind) => {
       if (kind === "script-draft") return validDraft();
       if (kind === "role-audit") return passingAudit;
-      throw new Error(`Unexpected ZAI task ${kind}`);
+      throw new Error(`Unexpected OpenAI task ${kind}`);
     });
     const result = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["script-draft", "role-audit"], { "script-draft": "gpt-writer" }),
-      zaiCodexSettings: settings("zai", ["script-draft", "role-audit"], { "script-draft": "glm-writer", "role-audit": "glm-writer" }),
+      codexSettings: settings("openai", ["script-draft", "role-audit"], { "script-draft": "gpt-writer", "role-audit": "gpt-writer" }),
+      deepseekCodexSettings: settings("deepseek", ["script-draft", "role-audit"], { "script-draft": "deepseek-writer", "role-audit": "deepseek-writer" }),
       codexClient: openai,
-      zaiCodexClient: zai,
+      deepseekCodexClient: deepseek,
       reviewMedia,
       environment: {},
     });
@@ -483,11 +484,11 @@ describe("buildRoleAgentAssembly", () => {
     });
 
     assert.ok(execution);
-    assert.deepEqual(openai.calls, ["script-draft"]);
-    assert.deepEqual(zai.calls, ["script-draft", "role-audit"]);
-    assert.equal(execution.trace?.modelId, "glm-writer");
-    assert.equal(execution.trace?.fallbackFromModelId, "gpt-writer");
-    assert.deepEqual(execution.trace?.attemptedModelIds, ["gpt-writer", "glm-writer"]);
+    assert.deepEqual(deepseek.calls, ["script-draft"]);
+    assert.deepEqual(openai.calls, ["script-draft", "role-audit"]);
+    assert.equal(execution.trace?.modelId, "gpt-writer");
+    assert.equal(execution.trace?.fallbackFromModelId, "deepseek-writer");
+    assert.deepEqual(execution.trace?.attemptedModelIds, ["deepseek-writer", "gpt-writer"]);
   });
 
   it("keeps assembled OpenAI producer revisions isolated from prior model history", async () => {
@@ -526,7 +527,7 @@ describe("buildRoleAgentAssembly", () => {
         "script-draft": "gpt-writer",
         "role-audit": "gpt-writer",
       }),
-      zaiCodexSettings: unavailable,
+      deepseekCodexSettings: unavailable,
       codexClient: openai,
       reviewMedia,
       environment: {},
@@ -547,29 +548,29 @@ describe("buildRoleAgentAssembly", () => {
     assert.deepEqual(openai.sessions, [undefined, undefined, undefined, undefined]);
   });
 
-  it("runs the assembled GLM visual reviewer through its OpenAI backup after a transient outage", async () => {
+  it("runs the assembled DeepSeek visual reviewer through its OpenAI backup after a transient outage", async () => {
     const openai = new ControlledCodexClient("openai", "gpt-review", (kind) => {
       if (kind === "visual-review") return passingVisualReport;
       if (kind === "role-audit") return passingReportAudit;
       throw new Error(`Unexpected OpenAI task ${kind}`);
     });
-    const zai = new ControlledCodexClient("zai-bigmodel-api", "glm-review", (kind) => {
+    const deepseek = new ControlledCodexClient("deepseek", "deepseek-review", (kind) => {
       if (kind === "visual-review") {
-        throw new CodexBridgeError("GLM service temporarily unavailable.", true, "not_accepted", 503);
+        throw new CodexBridgeError("DeepSeek service temporarily unavailable.", true, "not_accepted", 503);
       }
-      throw new Error(`Unexpected ZAI task ${kind}`);
+      throw new Error(`Unexpected DeepSeek task ${kind}`);
     });
     const result = buildRoleAgentAssembly({
       codexSettings: settings("openai", ["visual-review", "role-audit"], { "visual-review": "gpt-review" }),
-      zaiCodexSettings: settings("zai", ["visual-review", "role-audit"], { "visual-review": "glm-review", "role-audit": "glm-review" }),
+      deepseekCodexSettings: settings("deepseek", ["visual-review", "role-audit"], { "visual-review": "deepseek-review", "role-audit": "deepseek-review" }),
       codexClient: openai,
-      zaiCodexClient: zai,
+      deepseekCodexClient: deepseek,
       reviewMedia,
       environment: {},
     });
 
     // 试片是"要不要继续为同方案其余镜头付费"的闸门，所以它和成片终审一样要求两个分支
-    // 落在两个不同的实际身份上。GLM 掉线时备份确实顶上了，但两个分支于是都成了 gpt-review：
+    // 落在两个不同的实际身份上。DeepSeek 掉线时备份确实顶上了，但两个分支于是都成了 gpt-review：
     // 闸门宁可不开，也不能拿同一个模型的两份回答当成两次独立复审。
     await assert.rejects(
       () => result.visualReviewAgents[0]!.reviewDetailed!({
@@ -585,8 +586,8 @@ describe("buildRoleAgentAssembly", () => {
         return true;
       },
     );
-    assert.deepEqual(zai.calls, ["visual-review"]);
-    // 两个分支都跑完了：GLM 那一路掉线后由 Codex 顶上，Codex 那一路本来就是 Codex。
+    assert.deepEqual(deepseek.calls, ["visual-review"]);
+    // 两个分支都跑完了：DeepSeek 那一路掉线后由 Codex 顶上，Codex 那一路本来就是 Codex。
     assert.deepEqual(openai.calls, ["visual-review", "role-audit", "visual-review", "role-audit"]);
   });
 
@@ -603,16 +604,16 @@ describe("buildRoleAgentAssembly", () => {
       if (kind === "role-audit") return passingReportAudit;
       throw new Error(`Unexpected OpenAI task ${kind}`);
     });
-    const zai = new ControlledCodexClient("zai-bigmodel-api", "glm-review", (kind) => {
+    const deepseek = new ControlledCodexClient("deepseek", "deepseek-review", (kind) => {
       if (kind === "visual-review") return passingVisualReport;
       if (kind === "role-audit") return passingReportAudit;
-      throw new Error(`Unexpected ZAI task ${kind}`);
+      throw new Error(`Unexpected DeepSeek task ${kind}`);
     });
     const result = buildRoleAgentAssembly({
       codexSettings: settings("openai", ["visual-review", "role-audit"], { "visual-review": "gpt-review" }),
-      zaiCodexSettings: settings("zai", ["visual-review", "role-audit"], { "visual-review": "glm-review", "role-audit": "glm-review" }),
+      deepseekCodexSettings: settings("deepseek", ["visual-review", "role-audit"], { "visual-review": "deepseek-review", "role-audit": "deepseek-review" }),
       codexClient: openai,
-      zaiCodexClient: zai,
+      deepseekCodexClient: deepseek,
       reviewMedia: sharedReviewMedia,
       environment: {},
     });
@@ -625,15 +626,15 @@ describe("buildRoleAgentAssembly", () => {
 
     assert.ok(execution);
     assert.equal(prepareCalls, 1);
-    assert.deepEqual(zai.calls, ["visual-review", "role-audit"]);
+    assert.deepEqual(deepseek.calls, ["visual-review", "role-audit"]);
     assert.deepEqual(openai.calls, ["visual-review", "role-audit"]);
-    assert.deepEqual(execution.independentReviews?.map(({ modelId }) => modelId), ["glm-review", "gpt-review"]);
+    assert.deepEqual(execution.independentReviews?.map(({ modelId }) => modelId), ["deepseek-review", "gpt-review"]);
   });
 
-  it("assembles OpenAI-only roles when ZAI is unavailable", () => {
+  it("assembles OpenAI-only roles when DeepSeek is unavailable", () => {
     const result = buildRoleAgentAssembly({
       codexSettings: settings("openai", ["script-draft", "director-plan", "visual-review", "role-audit"], {}),
-      zaiCodexSettings: unavailable,
+      deepseekCodexSettings: unavailable,
       codexClient: client,
       reviewMedia,
       environment: {},
@@ -644,30 +645,30 @@ describe("buildRoleAgentAssembly", () => {
     assert.deepEqual(result.visualReviewAgents.map((agent) => agent.modelId), ["gpt-default"]);
   });
 
-  it("uses ZAI production roles with ZAI independent audits when OpenAI is unavailable", () => {
+  it("uses DeepSeek production roles with DeepSeek independent audits when OpenAI is unavailable", () => {
     const result = buildRoleAgentAssembly({
       codexSettings: unavailable,
-      zaiCodexSettings: settings("zai", ["script-draft", "director-plan", "visual-review", "role-audit"], {
-        "script-draft": "glm-writer",
-        "director-plan": "glm-director",
-        "visual-review": "glm-review",
-        "role-audit": "glm-auditor",
+      deepseekCodexSettings: settings("deepseek", ["script-draft", "director-plan", "visual-review", "role-audit"], {
+        "script-draft": "deepseek-writer",
+        "director-plan": "deepseek-director",
+        "visual-review": "deepseek-review",
+        "role-audit": "deepseek-auditor",
       }),
-      zaiCodexClient: client,
+      deepseekCodexClient: client,
       reviewMedia,
       environment: {},
     });
 
-    assert.equal(result.screenwriterAgent?.modelId, "glm-writer");
-    assert.equal(result.directorAgent?.modelId, "glm-director");
-    assert.deepEqual(result.visualReviewAgents.map((agent) => agent.modelId), ["glm-review"]);
+    assert.equal(result.screenwriterAgent?.modelId, "deepseek-writer");
+    assert.equal(result.directorAgent?.modelId, "deepseek-director");
+    assert.deepEqual(result.visualReviewAgents.map((agent) => agent.modelId), ["deepseek-review"]);
   });
 
   it("fails closed when no independent auditor is available", () => {
     const result = buildRoleAgentAssembly({
       codexSettings: unavailable,
-      zaiCodexSettings: settings("zai", ["script-draft", "director-plan", "visual-review"], {}),
-      zaiCodexClient: client,
+      deepseekCodexSettings: settings("deepseek", ["script-draft", "director-plan", "visual-review"], {}),
+      deepseekCodexClient: client,
       reviewMedia,
       environment: {},
     });

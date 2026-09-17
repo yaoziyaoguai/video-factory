@@ -109,7 +109,7 @@ function editingAgents(spies: EditingSpies): Pick<ProductionPipelineOptions, "tr
         },
       },
       {
-        providerId: "zai-bigmodel-api",
+        providerId: "deepseek",
         agent: {
           id: TREATMENT_PROVIDER_ID,
           modelId: "treatment-model-b",
@@ -238,7 +238,7 @@ function editingProviders(): StudioProvider[] {
   return [
     { id: "codex-screenwriter-v1", capability: "script.draft", label: "AI 编剧", available: true, kind: "external", defaultModelId: "screenwriter-model-one", modelProfiles: textModelProfile("codex-screenwriter-v1", "screenwriter-model-one", "openai", true).concat(textModelProfile("codex-screenwriter-v1", "screenwriter-model-two", "openai")) },
     { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "external", defaultModelId: "director-model-one", modelProfiles: textModelProfile("api-visual-director-v1", "director-model-one", "openai", true).concat(textModelProfile("api-visual-director-v1", "director-model-two", "openai")) },
-    { id: TREATMENT_PROVIDER_ID, capability: "creative.treatment", label: "AI 前期构思", available: true, kind: "external", defaultModelId: "treatment-model-a", modelProfiles: textModelProfile(TREATMENT_PROVIDER_ID, "treatment-model-a", "openai", true).concat(textModelProfile(TREATMENT_PROVIDER_ID, "treatment-model-b", "zai-bigmodel")) },
+    { id: TREATMENT_PROVIDER_ID, capability: "creative.treatment", label: "AI 前期构思", available: true, kind: "external", defaultModelId: "treatment-model-a", modelProfiles: textModelProfile(TREATMENT_PROVIDER_ID, "treatment-model-a", "openai", true).concat(textModelProfile(TREATMENT_PROVIDER_ID, "treatment-model-b", "deepseek")) },
     { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" },
     { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels", available: true, kind: "external" },
     { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑画面", available: true, kind: "local" },
@@ -345,7 +345,7 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
     const harness = newEditingStudio(workspaceRoot, spies);
     const runId = await startJointRun(harness);
 
-    // 构思阶段：bar 那条模型来自 zai broker，但它落在构思能力键下面——键是能力，值是模型。
+    // 构思阶段：bar 那条模型来自 deepseek broker，但它落在构思能力键下面——键是能力，值是模型。
     await harness.studio.applyNodeExecutionConfiguration(runId, "creative-planning", {
       ...await planningEditTokens(harness.studio, runId),
       planningStageId: "treatment",

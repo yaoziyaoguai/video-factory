@@ -123,7 +123,7 @@ export function providerLabel(providerId?: string): string | undefined {
     "python-ffmpeg-v1": "FFmpeg 本地渲染",
     "python-technical-review-v1": "本地机器质检",
     "codex-visual-review-v1": "AI 视觉审片",
-    "glm-visual-review-v1": "GLM-5.3-Flash 视觉审片",
+    "deepseek-visual-review-v1": "DeepSeek 视觉审片",
     "codex-role-auditor-v1": "AI 独立质量复核",
     openai: "AI 创作服务",
     pexels: "Pexels 图库",

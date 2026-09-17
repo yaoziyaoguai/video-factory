@@ -138,7 +138,7 @@ export interface ProductionPipelineOptions {
   assetSemanticRanker?: AssetSemanticRanker;
   referenceGrammarAgent?: ReferenceGrammarAgent;
   referenceVideoRoot?: string;
-  /** joint-v1 创作规划的角色绑定：真实构思 agent 与其宿主 provider（如 openai/zai-bigmodel-api）。 */
+  /** joint-v1 创作规划的角色绑定：真实构思 agent 与其宿主 provider（如 deepseek/openai）。 */
   treatmentAgents?: Array<{ providerId: string; agent: CreativeTreatmentAgent }>;
   /** 简报的独立复核绑定：与构思同一候选合同，只审不产，裁决只作建议。 */
   briefAuditAgents?: Array<{ providerId: string; agent: BriefAuditAgent }>;
@@ -536,7 +536,7 @@ const KNOWN_METERED_WORKER_PROVIDER_IDS = new Set([
   "wan-video-v1",
   "minimax-tts-v1",
 ]);
-const KNOWN_SUBSCRIPTION_VISUAL_REVIEW_PROVIDER_IDS = new Set(["glm-visual-review-v1"]);
+const KNOWN_SUBSCRIPTION_VISUAL_REVIEW_PROVIDER_IDS = new Set(["deepseek-visual-review-v1"]);
 
 export interface ProductionProviderModelRuntimeMetadata {
   modelId: string;
@@ -10401,7 +10401,7 @@ function assertProductionVisualReviewReady(
   if (brief.runPurpose === "test") return;
   const providerId = brief.providers.visualReview;
   if (!providerId) {
-    throw new Error("Formal production requires GLM and Codex visual review before work can start.");
+    throw new Error("Formal production requires DeepSeek and Codex visual review before work can start.");
   }
   const agent = [
     ...(options.visualReviewAgents ?? []),
@@ -10413,7 +10413,7 @@ function assertProductionVisualReviewReady(
     || new Set(reviewers.map((reviewer) => reviewer.providerId)).size !== 2
     || new Set(reviewers.map((reviewer) => reviewer.modelId)).size !== 2
     || reviewers.some((reviewer) => reviewer.independentRoleAudit !== true)) {
-    throw new Error("Formal production requires two distinct GLM and Codex visual-review providers, models, and independent role audits.");
+    throw new Error("Formal production requires two distinct DeepSeek and Codex visual-review providers, models, and independent role audits.");
   }
 }
 

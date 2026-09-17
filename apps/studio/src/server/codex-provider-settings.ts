@@ -5,7 +5,13 @@ import type { Stats } from "node:fs";
 import { CODEX_BRIDGE_PROTOCOL_VERSION, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, brokerModelCandidates } from "@video-factory/production-pipeline";
 
 export const DEFAULT_CODEX_SOCKET_PATH = "/run/video-factory-codex/worker.sock";
-export const DEFAULT_ZAI_CODEX_SOCKET_PATH = "/run/video-factory-zai-codex/worker.sock";
+export const DEFAULT_DEEPSEEK_CODEX_SOCKET_PATH = "/run/video-factory-deepseek/worker.sock";
+/**
+ * DeepSeek 的首选模型，同时承担文本与视觉两种角色，所以这里只需要一个默认值。
+ * 候选链上的其他模型（例如 deepseek-v4-pro）由 broker 在 /health 公告，不在这里列举：
+ * 哪些模型可用是 broker 的事实，不是 Studio 的配置。
+ */
+export const DEFAULT_DEEPSEEK_MODEL_ID = "deepseek-flash";
 
 export type CodexSocketStatus =
   | "ready"
@@ -60,12 +66,12 @@ export function supportsBrokerTasks(
 
 export function auditedRoleCandidateAvailability(
   codex: Pick<CodexProviderSettings, "available" | "taskKinds">,
-  zai: Pick<CodexProviderSettings, "available" | "taskKinds">,
+  deepseek: Pick<CodexProviderSettings, "available" | "taskKinds">,
   taskKind: string,
-): { codex: boolean; zai: boolean } {
+): { codex: boolean; deepseek: boolean } {
   return {
     codex: supportsBrokerTasks(codex, taskKind, "role-audit"),
-    zai: supportsBrokerTasks(zai, taskKind, "role-audit"),
+    deepseek: supportsBrokerTasks(deepseek, taskKind, "role-audit"),
   };
 }
 
@@ -97,21 +103,17 @@ export function resolveCodexSocketPath(environment: NodeJS.ProcessEnv): CodexSoc
   };
 }
 
-export function resolveZaiCodexSocketPath(environment: NodeJS.ProcessEnv): CodexSocketResolution {
-  const configured = environment.VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH?.trim() ?? "";
+export function resolveDeepseekCodexSocketPath(environment: NodeJS.ProcessEnv): CodexSocketResolution {
+  const configured = environment.VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH?.trim() ?? "";
   return {
-    socketPath: configured || DEFAULT_ZAI_CODEX_SOCKET_PATH,
+    socketPath: configured || DEFAULT_DEEPSEEK_CODEX_SOCKET_PATH,
     configured: configured.length > 0,
-    requirement: "需要 ZAI Code Plan broker 正在监听，并将 VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH 指向该 Unix socket。",
+    requirement: "需要 DeepSeek broker 正在监听，并将 VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH 指向该 Unix socket。",
   };
 }
 
-export function resolveZaiVisualReviewModelId(environment: NodeJS.ProcessEnv): string {
-  return environment.ZAI_VISUAL_REVIEW_MODEL_ID?.trim() || "glm-5.3-flash";
-}
-
-export function resolveZaiTextModelId(environment: NodeJS.ProcessEnv): string {
-  return environment.ZAI_TEXT_MODEL_ID?.trim() || "glm-5.3";
+export function resolveDeepseekModelId(environment: NodeJS.ProcessEnv): string {
+  return environment.DEEPSEEK_MODEL_ID?.trim() || DEFAULT_DEEPSEEK_MODEL_ID;
 }
 
 // 异步层：先验证文件类型与权限，再通过 Unix socket 请求 /health 并核对协议版本。
@@ -129,13 +131,13 @@ export async function readCodexProviderSettings(
   }, options);
 }
 
-export async function readZaiCodexProviderSettings(
+export async function readDeepseekCodexProviderSettings(
   environment: NodeJS.ProcessEnv,
   options: CodexProviderSettingsOptions = {},
 ): Promise<CodexProviderSettings> {
-  return readProviderSettings(resolveZaiCodexSocketPath(environment), {
-    profileId: "zai",
-    providerId: "zai-bigmodel-api",
+  return readProviderSettings(resolveDeepseekCodexSocketPath(environment), {
+    profileId: "deepseek",
+    providerId: "deepseek",
     taskKinds: ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit", "creative-discussion"],
   }, options);
 }

@@ -455,20 +455,20 @@ describe("ProductionPipeline codex screenwriter", () => {
 
     const run = await pipeline.start({
       ...brief,
-      models: { "codex-screenwriter-v1": "glm-5.3" },
+      models: { "codex-screenwriter-v1": "deepseek-flash" },
       modelSelectionSources: { "codex-screenwriter-v1": "run_override" },
     });
 
     const input = inputs[0];
-    assert.equal(input?.selectedModelId, "glm-5.3");
+    assert.equal(input?.selectedModelId, "deepseek-flash");
     assert.ok(input?.agentLoopCheckpointForModel);
-    const selectedCheckpoint = input.agentLoopCheckpointForModel("glm-5.3");
+    const selectedCheckpoint = input.agentLoopCheckpointForModel("deepseek-flash");
     const backupCheckpoint = input.agentLoopCheckpointForModel("gpt-5.6-sol");
     assert.notEqual(selectedCheckpoint.key, backupCheckpoint.key);
     assert.notEqual(selectedCheckpoint.key, input.agentLoopCheckpoint?.key);
-    assert.equal(input.agentLoopCheckpointForModel("glm-5.3").key, selectedCheckpoint.key);
+    assert.equal(input.agentLoopCheckpointForModel("deepseek-flash").key, selectedCheckpoint.key);
     const plan = run.executionPlan?.find(({ nodeId }) => nodeId === "script");
-    assert.equal(plan?.modelId, "glm-5.3");
+    assert.equal(plan?.modelId, "deepseek-flash");
     assert.equal(plan?.configurationSource, "run_override");
   });
 
@@ -481,28 +481,28 @@ describe("ProductionPipeline codex screenwriter", () => {
       draft: async () => scriptDraft,
       draftDetailed: async () => {
         calls.push(modelId);
-        if (modelId === "glm-5.3") throw new Error("prompt validation stopped before transport");
+        if (modelId === "deepseek-flash") throw new Error("prompt validation stopped before transport");
         throw new Error("backup must not run");
       },
     });
     const agent = new FallbackScreenwriterAgent({
       candidates: [
         { agent: candidate("gpt-5.6-sol"), providerId: "openai" },
-        { agent: candidate("glm-5.3"), providerId: "zai-bigmodel-api" },
+        { agent: candidate("deepseek-flash"), providerId: "deepseek" },
       ],
     });
     const pipeline = new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: agent });
 
     const run = await pipeline.start({
       ...brief,
-      models: { "codex-screenwriter-v1": "glm-5.3" },
+      models: { "codex-screenwriter-v1": "deepseek-flash" },
       modelSelectionSources: { "codex-screenwriter-v1": "run_override" },
     });
 
-    assert.deepEqual(calls, ["glm-5.3"]);
+    assert.deepEqual(calls, ["deepseek-flash"]);
     const node = run.nodeRuns.find(({ nodeId }) => nodeId === "script");
     assert.equal(node?.status, "failed");
-    assert.equal(node?.executionReceipt?.modelId, "glm-5.3");
+    assert.equal(node?.executionReceipt?.modelId, "deepseek-flash");
     assert.equal(node?.executionReceipt?.configurationSource, "run_override");
   });
 
@@ -716,17 +716,17 @@ describe("ProductionPipeline codex screenwriter", () => {
           providerId: "openai",
           modelId: "gpt-5.4",
           reasoningEffort: "high",
-          fallbackFromModelId: "glm-5.3",
+          fallbackFromModelId: "deepseek-flash",
           fallbackReason: "首选模型连接失败，已自动切换。",
-          attemptedModelIds: ["glm-5.3", "gpt-5.4"],
+          attemptedModelIds: ["deepseek-flash", "gpt-5.4"],
           providerWaitMs: 12_340,
           queueWaitMs: 100,
           firstOutputEventMs: 410,
           toolMs: 0,
           validationMs: 7,
           modelCandidateAttempts: [{
-            modelId: "glm-5.3",
-            providerId: "zai-bigmodel-api",
+            modelId: "deepseek-flash",
+            providerId: "deepseek",
             outcome: "failed",
             failureStage: "not_accepted",
             failureReason: "连接失败",
@@ -811,12 +811,12 @@ describe("ProductionPipeline codex screenwriter", () => {
       providerId: "openai",
       modelId: "gpt-5.4",
       reasoningEffort: "high",
-      fallbackFromModelId: "glm-5.3",
+      fallbackFromModelId: "deepseek-flash",
       fallbackReason: "首选模型连接失败，已自动切换。",
-      attemptedModelIds: ["glm-5.3", "gpt-5.4"],
+      attemptedModelIds: ["deepseek-flash", "gpt-5.4"],
       modelCandidateAttempts: [{
-        modelId: "glm-5.3",
-        providerId: "zai-bigmodel-api",
+        modelId: "deepseek-flash",
+        providerId: "deepseek",
         outcome: "failed",
         failureStage: "not_accepted",
         failureReason: "连接失败",
@@ -850,7 +850,7 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.equal(scriptNode?.executionReceipt?.parameters?.loopValidationMs, 14);
     assert.equal(scriptNode?.executionReceipt?.parameters?.retryCount, 1);
     assert.equal(scriptNode?.executionReceipt?.fallbackReason, "首选模型连接失败，已自动切换。");
-    assert.deepEqual(scriptNode?.executionReceipt?.actualModelIds, ["glm-5.3", "gpt-5.4"]);
+    assert.deepEqual(scriptNode?.executionReceipt?.actualModelIds, ["deepseek-flash", "gpt-5.4"]);
     const generatedVersion = scriptNode?.outputState?.versions.find((version) => version.source === "generated");
     assert.ok(generatedVersion?.artifactIds.includes(traceArtifact.id));
   });

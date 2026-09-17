@@ -551,7 +551,7 @@ describe("StudioService", () => {
             source: "stock",
           }],
         },
-        providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1", visualReview: "glm-visual-review-v1" },
+        providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1", visualReview: "deepseek-visual-review-v1" },
         models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
         director: { profileId: "documentary-observer", assetProviderIds: ["pexels-stock-v1", "seedance-video-v1"] },
       },
@@ -883,7 +883,7 @@ describe("StudioService", () => {
               sourceArtifactIds: ["pilot-media-3"],
               scenePositions: [3],
               timelineDurationMs: 10_000,
-              actualModels: [{ providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" }],
+              actualModels: [{ providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash" }],
             },
             findings: [{
               timecodeMs: 8_000,
@@ -933,7 +933,7 @@ describe("StudioService", () => {
     assert.equal(finding?.sourceReviewNodeId, "assets");
     assert.equal(finding?.sourceReviewVersionId, "legacy-output");
     assert.equal(finding?.reviewEvidenceId, "b".repeat(64));
-    assert.deepEqual(finding?.actualModels, [{ providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" }]);
+    assert.deepEqual(finding?.actualModels, [{ providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash" }]);
     assert.equal(finding?.current, true);
     assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /第三镜换成无字素材并重新检查/);
     assert.doesNotMatch(draft?.input.rework?.nodeInstructions.assets ?? "", /补充已有素材的过程帧/);
@@ -972,7 +972,7 @@ describe("StudioService", () => {
         sourceArtifactIds: ["old-render-artifact"],
         scenePositions: [1],
         timelineDurationMs: 24_000,
-        actualModels: [{ providerId: "glm-visual-review-v1", modelId: "glm-5.3-flash" }],
+        actualModels: [{ providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash" }],
         current: true,
       },
     } };
@@ -981,7 +981,7 @@ describe("StudioService", () => {
       status: "rejected",
       initialInput: {
         ...base.initialInput,
-        providers: { ...base.initialInput.providers, visualReview: "glm-visual-review-v1" },
+        providers: { ...base.initialInput.providers, visualReview: "deepseek-visual-review-v1" },
       },
       decisions: [],
       interventions: [],
@@ -1004,7 +1004,7 @@ describe("StudioService", () => {
             output: reportOutput,
             inputVersionIds: ["old-render-v1"],
             createdAt: base.startedAt,
-            createdBy: "glm-visual-review-v1",
+            createdBy: "deepseek-visual-review-v1",
             schemaVersion: "video-factory/visual-review-v1",
           }],
         },
@@ -1670,12 +1670,12 @@ describe("StudioService", () => {
       { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" as const },
       { id: "python-ffmpeg-v1", capability: "video.render", label: "本地渲染", available: true, kind: "local" as const },
       { id: "python-technical-review-v1", capability: "quality.review", label: "机器质检", available: true, kind: "local" as const },
-      { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM 审片", available: true, kind: "external" as const, defaultModelId: "glm-5.3-flash" },
+      { id: "deepseek-visual-review-v1", capability: "quality.review.visual", label: "DeepSeek 审片", available: true, kind: "external" as const, defaultModelId: "deepseek-flash" },
     ];
     const productionBrief: ProductionBrief = {
       ...brief,
       runPurpose: "production",
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
     };
     const studio = (extraProviders: StudioProvider[] = []) => new ProductionStudio({
       workspaceRoot,
@@ -1684,14 +1684,14 @@ describe("StudioService", () => {
       listProviders: async () => [...baseProviders, ...extraProviders],
     });
 
-    await assert.rejects(() => studio().start(productionBrief), /正式制作需要 GLM 与 Codex 使用两个不同模型完成独立双审/);
+    await assert.rejects(() => studio().start(productionBrief), /正式制作需要 DeepSeek 与 Codex 使用两个不同模型完成独立双审/);
     await assert.rejects(() => studio([{
       id: "codex-visual-review-v1",
       capability: "quality.review.visual",
       label: "Codex 审片",
       available: true,
       kind: "external",
-      defaultModelId: "glm-5.3-flash",
+      defaultModelId: "deepseek-flash",
     }, {
       id: "codex-role-auditor-v1",
       capability: "role.audit",
@@ -1733,7 +1733,7 @@ describe("StudioService", () => {
         { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" },
         { id: "python-ffmpeg-v1", capability: "video.render", label: "本地渲染", available: true, kind: "local" },
         { id: "python-technical-review-v1", capability: "quality.review", label: "机器质检", available: true, kind: "local" },
-        { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM 审片", available: true, kind: "external", billing: "subscription", defaultModelId: "glm-5.3-flash" },
+        { id: "deepseek-visual-review-v1", capability: "quality.review.visual", label: "DeepSeek 审片", available: true, kind: "external", billing: "subscription", defaultModelId: "deepseek-flash" },
         { id: "codex-visual-review-v1", capability: "quality.review.visual", label: "Codex 审片", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
         { id: "codex-role-auditor-v1", capability: "role.audit", label: "独立质量复核", available: true, kind: "external", billing: "subscription" },
       ],
@@ -1767,7 +1767,7 @@ describe("StudioService", () => {
         voice: "macos-say-v1",
         render: "python-ffmpeg-v1",
         technicalReview: "python-technical-review-v1",
-        visualReview: "glm-visual-review-v1",
+        visualReview: "deepseek-visual-review-v1",
       },
       director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
@@ -1790,7 +1790,7 @@ describe("StudioService", () => {
         { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" },
         { id: "python-ffmpeg-v1", capability: "video.render", label: "本地渲染", available: true, kind: "local" },
         { id: "python-technical-review-v1", capability: "quality.review", label: "机器质检", available: true, kind: "local" },
-        { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM 审片", available: true, kind: "external", defaultModelId: "glm-5.3-flash" },
+        { id: "deepseek-visual-review-v1", capability: "quality.review.visual", label: "DeepSeek 审片", available: true, kind: "external", defaultModelId: "deepseek-flash" },
         { id: "codex-visual-review-v1", capability: "quality.review.visual", label: "Codex 审片", available: true, kind: "external", defaultModelId: "gpt-5.6-sol" },
         { id: "codex-role-auditor-v1", capability: "role.audit", label: "独立质量复核", available: true, kind: "external" },
       ],
@@ -1800,7 +1800,7 @@ describe("StudioService", () => {
       () => production.start({
         ...brief,
         runPurpose: "production",
-        providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+        providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
         director: { profileId: "auto", assetProviderIds: ["opaque-asset-v1"] },
       }),
       /当前素材池没有任何可用画面来源/,
@@ -2743,7 +2743,7 @@ describe("StudioService", () => {
       ...historicalRun.initialInput,
       providers: {
         ...historicalRun.initialInput.providers,
-        visualReview: "glm-visual-review-v1",
+        visualReview: "deepseek-visual-review-v1",
       },
     };
     const pipeline = new FakePipeline(historicalRun);
@@ -4124,12 +4124,12 @@ describe("StudioService", () => {
       pipeline,
       commandAvailable: allCommandsAvailable,
       environment,
-      zaiCodexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
     });
     await service.updateCreatorSettings({ modelDefaults: { "seedance-video-v1": "doubao-seedance-2-5-260628" } });
     const input = {
       ...brief,
-      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "deepseek-visual-review-v1" },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 4 },
     };
 
@@ -4141,7 +4141,7 @@ describe("StudioService", () => {
       pipeline,
       commandAvailable: allCommandsAvailable,
       environment,
-      zaiCodexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
     });
 
     assert.deepEqual(await restarted.startRun(input, "model-default-request-1"), first);
@@ -4483,7 +4483,7 @@ describe("StudioService", () => {
       workspaceRoot,
       pipeline,
       commandAvailable: allCommandsAvailable,
-      zaiCodexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
       environment: {
         ARK_API_KEY: "seedance-key",
         SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
@@ -4494,7 +4494,7 @@ describe("StudioService", () => {
     });
     const seedanceBrief = {
       ...brief,
-      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "deepseek-visual-review-v1" },
     };
 
     await assert.rejects(() => service.startRun(seedanceBrief), /未允许使用付费能力/);
@@ -4521,7 +4521,7 @@ describe("StudioService", () => {
       workspaceRoot,
       pipeline,
       commandAvailable: allCommandsAvailable,
-      zaiCodexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
       environment: {
         ARK_API_KEY: "seedance-key",
         SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
@@ -4531,7 +4531,7 @@ describe("StudioService", () => {
 
     const result = await service.startRun({
       ...brief,
-      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "deepseek-visual-review-v1" },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
 
@@ -4539,7 +4539,7 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
-  it("accepts one metered GLM review without treating it as a paid shot", async () => {
+  it("accepts one metered DeepSeek review without treating it as a paid shot", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const service = new StudioService({
@@ -4548,12 +4548,12 @@ describe("StudioService", () => {
       commandAvailable: allCommandsAvailable,
       environment: {},
       codexAvailability: { available: true, reason: "" },
-      zaiCodexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
     });
 
     await service.startRun({
       ...brief,
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
       economics: {
         recipeId: "economy-daily",
         allowMeteredProviders: true,
@@ -4574,12 +4574,12 @@ describe("StudioService", () => {
       commandAvailable: allCommandsAvailable,
       environment: { VIDEO_FACTORY_MAX_RUN_COST_CNY: "0.05" },
       codexAvailability: { available: true, reason: "" },
-      zaiCodexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
     });
 
     const result = await service.startRun({
       ...brief,
-      providers: { ...brief.providers, visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
       economics: {
         recipeId: "economy-daily",
         allowMeteredProviders: true,
@@ -4603,7 +4603,7 @@ describe("StudioService", () => {
       pipeline,
       commandAvailable: allCommandsAvailable,
       environment,
-      zaiCodexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
     });
     await service.updateCreatorSettings({ modelDefaults: { "seedance-video-v1": "doubao-seedance-1-5-pro-251215" } });
     const catalog = await service.listTemplates();
@@ -4621,7 +4621,7 @@ describe("StudioService", () => {
     const paidBrief = {
       ...brief,
       template: { templateId: "knowledge-model-routing" },
-      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "deepseek-visual-review-v1" },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 4 },
     };
 
@@ -4699,7 +4699,7 @@ describe("StudioService", () => {
         ...brief.providers,
         director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
-        visualReview: "glm-visual-review-v1",
+        visualReview: "deepseek-visual-review-v1",
       },
       director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
       models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
@@ -4717,7 +4717,7 @@ describe("StudioService", () => {
       commandAvailable: allCommandsAvailable,
       environment: { ARK_API_KEY: "test-ark-key", SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5" },
       codexAvailability: { available: true, reason: "" },
-      zaiCodexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
     });
 
     await service.applyNodeExecutionConfiguration("run-1", "assets", {
@@ -4737,7 +4737,7 @@ describe("StudioService", () => {
         ...brief.providers,
         director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
-        visualReview: "glm-visual-review-v1",
+        visualReview: "deepseek-visual-review-v1",
       },
       director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
       models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
@@ -4755,7 +4755,7 @@ describe("StudioService", () => {
       commandAvailable: allCommandsAvailable,
       environment: { ARK_API_KEY: "test-ark-key", SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5" },
       codexAvailability: { available: true, reason: "" },
-      zaiCodexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
     });
 
     await service.applyNodeExecutionConfiguration("run-1", "assets", {
@@ -4776,13 +4776,13 @@ describe("StudioService", () => {
       pipeline,
       commandAvailable: allCommandsAvailable,
       environment,
-      zaiCodexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
     });
     await service.updateCreatorSettings({ modelDefaults: { "seedance-video-v1": "doubao-seedance-2-5-260628" } });
 
     await assert.rejects(() => service.startRun({
       ...brief,
-      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "deepseek-visual-review-v1" },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 4 },
       models: { "seedance-video-v1": 123 },
     }), /制作参数不符合要求/);
@@ -4811,12 +4811,12 @@ describe("StudioService", () => {
       pipeline,
       commandAvailable: allCommandsAvailable,
       environment,
-      zaiCodexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
     });
 
     await assert.rejects(() => service.startRun({
       ...brief,
-      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "glm-visual-review-v1" },
+      providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "deepseek-visual-review-v1" },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 4 },
       models: { "seedance-video-v1": "seedance-image-only" },
     }), /不适合/);
@@ -4874,7 +4874,7 @@ describe("StudioService", () => {
       pipeline,
       commandAvailable: allCommandsAvailable,
       codexAvailability: { available: true, reason: "" },
-      zaiCodexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
       environment: {
         ARK_API_KEY: "seedance-key",
         SEEDANCE_MODEL_ID: "doubao-seedance-2-5-260628",
@@ -4888,7 +4888,7 @@ describe("StudioService", () => {
         ...brief.providers,
         director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
-        visualReview: "glm-visual-review-v1",
+        visualReview: "deepseek-visual-review-v1",
       },
       director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 3.5 },
@@ -5214,7 +5214,7 @@ describe("StudioService", () => {
     await assert.rejects(
       () => service.applyNodeExecutionConfiguration("run-1", "brief", {
         providerId: "codex-role-auditor-v1",
-        modelSelections: { "codex-role-auditor-v1": "glm-5.3" },
+        modelSelections: { "codex-role-auditor-v1": "deepseek-flash" },
         expectedRunRevision: 0,
       }, "vfqa"),
       /简报不跑独立复核/,

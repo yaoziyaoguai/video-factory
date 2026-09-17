@@ -10,16 +10,20 @@ codex_home=${VIDEO_FACTORY_CODEX_LOCAL_HOME:-"$runtime_root/codex-home"}
 source_codex_home=${CODEX_HOME:-"$HOME/.codex"}
 codex_auth_file=${VIDEO_FACTORY_CODEX_AUTH_FILE:-"$source_codex_home/auth.json"}
 codex_bin=${CODEX_BIN:-$(command -v codex || true)}
-zai_runtime_root=${VIDEO_FACTORY_ZAI_CODEX_LOCAL_RUNTIME_ROOT:-"$repository_root/.local/runtime/zai-codex"}
-zai_socket_path=${VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH:-"$zai_runtime_root/worker.sock"}
-zai_workspace_root=${VIDEO_FACTORY_ZAI_CODEX_WORKSPACE_ROOT:-"$zai_runtime_root/tasks"}
-zai_env_file=${ZAI_BIGMODEL_ENV_FILE:-"$repository_root/.local/secrets/zai-bigmodel.env"}
+deepseek_runtime_root=${VIDEO_FACTORY_DEEPSEEK_CODEX_LOCAL_RUNTIME_ROOT:-"$repository_root/.local/runtime/deepseek-codex"}
+deepseek_socket_path=${VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH:-"$deepseek_runtime_root/worker.sock"}
+deepseek_workspace_root=${VIDEO_FACTORY_DEEPSEEK_CODEX_WORKSPACE_ROOT:-"$deepseek_runtime_root/tasks"}
+deepseek_env_file=${DEEPSEEK_ENV_FILE:-"$repository_root/.local/secrets/deepseek.env"}
 # 本地与生产 unit 统一 1200s（20 分钟）deadline；xhigh/max 强推理候选在旧 300s/600s 默认下无法完成。
 codex_timeout_ms=${VIDEO_FACTORY_CODEX_TIMEOUT_MS:-1200000}
 # 已审核的模型候选表：界面上能按节点指定的模型只能是这张表里的（首个即 broker 默认模型）。
 # 留空则完全禁止按请求换模型——所以这里是启用的地方，不是可选的装饰。
 codex_model_candidates=${VIDEO_FACTORY_CODEX_MODEL_CANDIDATES:-gpt-5.6-sol,gpt-6-astra}
-zai_broker_pid=""
+# DeepSeek 侧的额外候选。首个是首选，与 DeepSeek 的文本默认模型一致。
+# deepseek-v4-pro 只能列在纯文本角色上：实测它接受 image_url 却收不到图像，带图的任务由
+# broker 的 withImages 路由强制落到多模态模型，覆盖对带图调用无效（见 DEEPSEEK_VISUAL_MODEL_ID）。
+deepseek_model_candidates=${VIDEO_FACTORY_DEEPSEEK_MODEL_CANDIDATES:-deepseek-flash,deepseek-v4-pro}
+deepseek_broker_pid=""
 
 if [[ -z "$codex_bin" ]]; then
   echo "Codex CLI is unavailable. Install or expose codex before starting the full Studio." >&2
@@ -59,12 +63,12 @@ broker_pid=$!
 
 cleanup() {
   kill "$broker_pid" 2>/dev/null || true
-  if [[ -n "$zai_broker_pid" ]]; then
-    kill "$zai_broker_pid" 2>/dev/null || true
+  if [[ -n "$deepseek_broker_pid" ]]; then
+    kill "$deepseek_broker_pid" 2>/dev/null || true
   fi
   wait "$broker_pid" 2>/dev/null || true
-  if [[ -n "$zai_broker_pid" ]]; then
-    wait "$zai_broker_pid" 2>/dev/null || true
+  if [[ -n "$deepseek_broker_pid" ]]; then
+    wait "$deepseek_broker_pid" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT INT TERM
@@ -85,39 +89,35 @@ if ! curl --fail --silent --unix-socket "$socket_path" http://localhost/health >
   exit 1
 fi
 
-if [[ -f "$zai_env_file" ]] && grep -qE '^ZAI_API_KEY=' "$zai_env_file"; then
-  echo "$zai_env_file still contains legacy ZAI_API_KEY; remove it and keep only ZAI_BIGMODEL_API_KEY." >&2
-  exit 1
-fi
-
-if [[ -f "$zai_env_file" ]] \
-  && env -u ZAI_BIGMODEL_API_KEY -u ZAI_API_KEY node --env-file="$zai_env_file" -e 'process.exit(process.env.ZAI_BIGMODEL_API_KEY?.trim() ? 0 : 1)'; then
-  mkdir -p "$zai_runtime_root" "$zai_workspace_root"
-  env -u ZAI_BIGMODEL_API_KEY -u ZAI_API_KEY \
-    VIDEO_FACTORY_CODEX_PROFILE=zai \
-    VIDEO_FACTORY_CODEX_EFFORT=max \
-    VIDEO_FACTORY_CODEX_AUDIT_EFFORT=high \
+if [[ -f "$deepseek_env_file" ]] \
+  && env -u DEEPSEEK_API_KEY node --env-file="$deepseek_env_file" -e 'process.exit(process.env.DEEPSEEK_API_KEY?.trim() ? 0 : 1)'; then
+  mkdir -p "$deepseek_runtime_root" "$deepseek_workspace_root"
+  env -u DEEPSEEK_API_KEY \
+    VIDEO_FACTORY_CODEX_PROFILE=deepseek \
+    VIDEO_FACTORY_CODEX_EFFORT=xhigh \
+    VIDEO_FACTORY_CODEX_AUDIT_EFFORT=xhigh \
     VIDEO_FACTORY_CODEX_TIMEOUT_MS="$codex_timeout_ms" \
-    VIDEO_FACTORY_CODEX_SOCKET_PATH="$zai_socket_path" \
-    VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="$zai_workspace_root" \
-    node --env-file="$zai_env_file" apps/codex-broker/dist/main.js &
-  zai_broker_pid=$!
+    VIDEO_FACTORY_CODEX_SOCKET_PATH="$deepseek_socket_path" \
+    VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="$deepseek_workspace_root" \
+    VIDEO_FACTORY_CODEX_MODEL_CANDIDATES="$deepseek_model_candidates" \
+    node --env-file="$deepseek_env_file" apps/codex-broker/dist/main.js &
+  deepseek_broker_pid=$!
   for _ in $(seq 1 50); do
-    if curl --fail --silent --unix-socket "$zai_socket_path" http://localhost/health >/dev/null 2>&1; then
+    if curl --fail --silent --unix-socket "$deepseek_socket_path" http://localhost/health >/dev/null 2>&1; then
       break
     fi
-    if ! kill -0 "$zai_broker_pid" 2>/dev/null; then
-      wait "$zai_broker_pid"
+    if ! kill -0 "$deepseek_broker_pid" 2>/dev/null; then
+      wait "$deepseek_broker_pid"
       exit 1
     fi
     sleep 0.1
   done
-  if ! curl --fail --silent --unix-socket "$zai_socket_path" http://localhost/health >/dev/null; then
-    echo "ZAI Code Plan bridge did not become healthy at $zai_socket_path." >&2
+  if ! curl --fail --silent --unix-socket "$deepseek_socket_path" http://localhost/health >/dev/null; then
+    echo "DeepSeek bridge did not become healthy at $deepseek_socket_path." >&2
     exit 1
   fi
 fi
 
 VIDEO_FACTORY_CODEX_SOCKET_PATH="$socket_path" \
-VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH="$zai_socket_path" \
+VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH="$deepseek_socket_path" \
 npm run studio:dev

@@ -293,7 +293,7 @@ function closureTreatmentAgents(
       },
     },
   });
-  return [makeAgent("treatment-model-a", "openai"), makeAgent("treatment-model-b", "zai-bigmodel-api")];
+  return [makeAgent("treatment-model-a", "openai"), makeAgent("treatment-model-b", "deepseek")];
 }
 
 function closureScreenwriter(spies: ClosureSpies): ScreenwriterAgent {
@@ -1611,13 +1611,13 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
     const pipeline = newClosurePipeline(workspaceRoot, spies, { failFirstCandidate: true });
     const run = await pipeline.start(closureBrief());
     assert.equal(run.status, "needs_human", JSON.stringify(run.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
-    // fallback 后实际执行的是候选 B：providerId = zai-bigmodel-api，modelId = treatment-model-b。
+    // fallback 后实际执行的是候选 B：providerId = deepseek，modelId = treatment-model-b。
     assert.deepEqual(spies.treatmentModelCalls, ["treatment-model-a", "treatment-model-b"]);
     const treatmentArtifact = run.artifacts.find((artifact) => artifact.kind === "creative_treatment");
     assert.ok(treatmentArtifact, "the run must register the formal treatment artifact");
     assert.equal(
       treatmentArtifact.provenance?.providerId,
-      "zai-bigmodel-api",
+      "deepseek",
       "formal treatment provenance must record the actual executing provider, not a model string",
     );
     assert.notEqual(treatmentArtifact.provenance?.providerId, "treatment-model-b");

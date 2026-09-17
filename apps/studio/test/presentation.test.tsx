@@ -16,8 +16,8 @@ describe("creator-facing presentation labels", () => {
   });
 
   it("maps catalog model ids to labels and leaves unmapped ids to the caller", () => {
-    const providers = [{ modelProfiles: [{ id: "glm-5.3-flash", label: "GLM-5.3-Flash" }] }];
-    expect(catalogModelLabel(providers, "glm-5.3-flash")).toBe("GLM-5.3-Flash");
+    const providers = [{ modelProfiles: [{ id: "deepseek-flash", label: "DeepSeek-Flash" }] }];
+    expect(catalogModelLabel(providers, "deepseek-flash")).toBe("DeepSeek-Flash");
     expect(catalogModelLabel(providers, "secret-internal-model")).toBeUndefined();
     expect(catalogModelLabel(providers, undefined)).toBeUndefined();
   });
@@ -66,7 +66,7 @@ describe("creator-facing presentation labels", () => {
   it("hides internal actor and local service connection details", () => {
     const diagnostics = [
       "studio-owner：需要宿主机 Codex bridge 服务正在监听，并将 VIDEO_FACTORY_CODEX_SOCKET_PATH 指向该 Unix socket。 当前：未找到 Codex bridge socket '/run/video-factory-codex/worker.sock'；请确认宿主机 broker 已启动。",
-      "需要 ZAI Code Plan broker 正在监听，并将 VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH 指向该 Unix socket。 当前：未找到 Codex bridge socket '/run/video-factory-zai-codex/worker.sock'；请确认宿主机 broker 已启动。",
+      "需要 DeepSeek broker 正在监听，并将 VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH 指向该 Unix socket。 当前：未找到 Codex bridge socket '/run/video-factory-deepseek/worker.sock'；请确认宿主机 broker 已启动。",
     ];
 
     for (const diagnostic of diagnostics) {
@@ -82,15 +82,15 @@ describe("creator-facing presentation labels", () => {
   it("drops machine diagnostics and candidate identities from a failure narrative", () => {
     // 落过盘的那句原文（candidate-cache 的形态）：候选身份、"输出未通过合同（reasonCode）"，
     // 尾巴上还挂着一串 stage=/httpStatus= 的诊断。
-    const diagnostic = "2 个候选模型均未能完成：1. gpt-5.6-sol 暂时不可用；2. glm-5.3 输出未通过合同（invalid_json）。\n诊断：stage=completed_failure；httpStatus=422；reasonCode=invalid_json";
+    const diagnostic = "2 个候选模型均未能完成：1. gpt-5.6-sol 暂时不可用；2. deepseek-flash 输出未通过合同（invalid_json）。\n诊断：stage=completed_failure；httpStatus=422；reasonCode=invalid_json";
     const shown = creatorFacingTechnicalText(diagnostic) ?? "";
 
     expect(shown).toBe("候选模型都没能给出可用结果。");
-    expect(shown).not.toMatch(/诊断：|stage=|httpStatus=|reasonCode=|invalid_json|gpt-5\.6-sol|glm-5\.3/);
+    expect(shown).not.toMatch(/诊断：|stage=|httpStatus=|reasonCode=|invalid_json|gpt-5\.6-sol|deepseek-flash/);
     // 审片侧的同类叙述带"视觉审片的"前缀，前缀是创作者需要的语境，要留住。
-    expect(creatorFacingTechnicalText("视觉审片的 2 个候选模型均未能完成：1. glm-5.3 输出未通过合同（invalid_json）。"))
+    expect(creatorFacingTechnicalText("视觉审片的 2 个候选模型均未能完成：1. deepseek-flash 输出未通过合同（invalid_json）。"))
       .toBe("视觉审片的候选模型都没能给出可用结果。");
-    expect(creatorFacingTechnicalText("前 1 个候选模型调用失败，已自动切换到 glm-5.3-flash。"))
+    expect(creatorFacingTechnicalText("前 1 个候选模型调用失败，已自动切换到 deepseek-flash。"))
       .toBe("已自动换用下一个可用模型。");
   });
 

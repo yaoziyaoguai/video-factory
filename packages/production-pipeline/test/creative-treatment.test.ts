@@ -310,12 +310,12 @@ function agentInput(overrides: Record<string, unknown> = {}) {
 }
 
 test("producer 将合同 fixture 转换为 CreativeTreatment 并复用 role-audit", async () => {
-  const client = new ControlledTreatmentClient("zai-bigmodel-api", "glm-5.3", (kind) => {
+  const client = new ControlledTreatmentClient("deepseek", "deepseek-flash", (kind) => {
     if (kind === "creative-treatment") return structuredClone(valid);
     if (kind === "role-audit") return passingAudit;
     throw new Error(`Unexpected task ${kind}`);
   });
-  const agent = new CodexCreativeTreatmentAgent({ client, modelId: "glm-5.3" });
+  const agent = new CodexCreativeTreatmentAgent({ client, modelId: "deepseek-flash" });
   const execution = await agent.treatDetailed(agentInput());
 
   assert.deepEqual(client.calls.map((call) => call.kind), ["creative-treatment", "role-audit"]);
@@ -391,12 +391,12 @@ test("系列创作事实同时进入构思 producer 与独立 audit", async () =
 });
 
 test("宿主锁定承诺时 producer 覆盖输出且把锁定值传给模型", async () => {
-  const client = new ControlledTreatmentClient("zai-bigmodel-api", "glm-5.3", (kind) => {
+  const client = new ControlledTreatmentClient("deepseek", "deepseek-flash", (kind) => {
     if (kind === "creative-treatment") return structuredClone(valid);
     if (kind === "role-audit") return passingAudit;
     throw new Error(`Unexpected task ${kind}`);
   });
-  const agent = new CodexCreativeTreatmentAgent({ client, modelId: "glm-5.3" });
+  const agent = new CodexCreativeTreatmentAgent({ client, modelId: "deepseek-flash" });
   const treatment = await agent.treat(agentInput({ lockedViewerPromise: "系列已定的观众承诺" }));
 
   assert.equal(treatment.viewerPromise, "系列已定的观众承诺");
@@ -405,11 +405,11 @@ test("宿主锁定承诺时 producer 覆盖输出且把锁定值传给模型", a
 });
 
 test("producer 拒绝引用越界来源的候选并指出字段", async () => {
-  const client = new ControlledTreatmentClient("zai-bigmodel-api", "glm-5.3", (kind) => {
+  const client = new ControlledTreatmentClient("deepseek", "deepseek-flash", (kind) => {
     if (kind === "creative-treatment") return structuredClone(valid);
     throw new Error(`Unexpected task ${kind}`);
   });
-  const agent = new CodexCreativeTreatmentAgent({ client, modelId: "glm-5.3" });
+  const agent = new CodexCreativeTreatmentAgent({ client, modelId: "deepseek-flash" });
   await assert.rejects(
     () => agent.treat({ ...agentInput(), suppliedSources: [] }),
     /suppliedSourceIds/,

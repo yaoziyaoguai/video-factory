@@ -2476,7 +2476,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "providers").mockResolvedValue([
       ...providers,
       { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external", billing: "free", deliveryTypes: ["stock_video"] },
-      { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "glm-5.3-flash" },
+      { id: "deepseek-visual-review-v1", capability: "quality.review.visual", label: "DeepSeek 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "deepseek-flash" },
       { id: "codex-visual-review-v1", capability: "quality.review.visual", label: "Codex 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
     ]);
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
@@ -2511,7 +2511,7 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "providers").mockResolvedValue([
       ...providers,
       { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external", billing: "free", deliveryTypes: ["stock_video"] },
-      { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "glm-5.3-flash" },
+      { id: "deepseek-visual-review-v1", capability: "quality.review.visual", label: "DeepSeek 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "deepseek-flash" },
       { id: "codex-visual-review-v1", capability: "quality.review.visual", label: "Codex 视觉审片", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol" },
     ]);
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
@@ -3121,7 +3121,7 @@ describe("Creative OS", () => {
         ],
       },
       { id: "codex-role-auditor-v1", capability: "role.audit", label: "Codex 独立质量审计", available: true, kind: "external", billing: "subscription", defaultModelId: "gpt-5.6-sol", modes: ["独立会话", "xhigh 推理", "最多三轮"] },
-      { id: "glm-visual-review-v1", capability: "quality.review.visual", label: "GLM 视觉审片", available: true, kind: "external", billing: "subscription" },
+      { id: "deepseek-visual-review-v1", capability: "quality.review.visual", label: "DeepSeek 视觉审片", available: true, kind: "external", billing: "subscription" },
       { id: "codex-visual-review-v1", capability: "quality.review.visual", label: "Codex 视觉审片", available: true, kind: "external", billing: "subscription" },
     ];
     const initialSettings = {
@@ -3182,7 +3182,7 @@ describe("Creative OS", () => {
     const roleSection = screen.getByRole("heading", { name: "按角色配置生产能力" }).closest("section");
     expect(within(roleSection!).getByText("GPT-5.6 Terra")).toBeInTheDocument();
     expect(within(roleSection!).getByText("故障替补：GPT-5.6 Sol")).toBeInTheDocument();
-    expect(within(roleSection!).getByText(/中途画面预检优先使用首选模型.*连接故障.*最终成片由 GLM 与 Codex/)).toBeInTheDocument();
+    expect(within(roleSection!).getByText(/中途画面预检优先使用首选模型.*连接故障.*最终成片由 DeepSeek 与 Codex/)).toBeInTheDocument();
     expect(screen.getByText("独立质量复核")).toBeInTheDocument();
     expect(screen.getByText("独立复核 · 最多三轮")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存角色配置" }));

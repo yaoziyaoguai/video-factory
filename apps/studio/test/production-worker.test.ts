@@ -22,14 +22,13 @@ describe("production Python runtime", () => {
     assert.equal(resolveProductionPython("/repo", {}, () => false), "python3");
   });
 
-  it("never forwards BigModel broker credentials to Studio child processes", () => {
+  it("never forwards DeepSeek broker credentials to Studio child processes", () => {
     assert.deepEqual(buildStudioChildEnvironment({
       SAFE_VALUE: "kept",
-      ZAI_BIGMODEL_API_KEY: "new-secret",
-      ZAI_API_KEY: "legacy-secret",
+      DEEPSEEK_API_KEY: "new-secret",
     }, {
       PYTHONPATH: "/repo/python",
-      ZAI_BIGMODEL_API_KEY: "override-secret",
+      DEEPSEEK_API_KEY: "override-secret",
     }), {
       SAFE_VALUE: "kept",
       PYTHONPATH: "/repo/python",
@@ -89,19 +88,19 @@ describe("production provider runtime metadata", () => {
     }
   });
 
-  it("uses Code Plan for GLM review and auto-accounts the low-cost MiniMax voice call", () => {
+  it("uses Code Plan for DeepSeek review and auto-accounts the low-cost MiniMax voice call", () => {
     const metadata = buildProductionProviderRuntimeMetadata({
       MINIMAX_API_KEY: "test-only-key",
       MINIMAX_TTS_ESTIMATED_CNY_PER_CLIP: "0.5",
-      ZAI_VISUAL_REVIEW_ESTIMATED_CNY: "0.1",
-      ZAI_VISUAL_REVIEW_MODEL_ID: "glm-5.3-flash-preview",
+      DEEPSEEK_VISUAL_REVIEW_ESTIMATED_CNY: "0.1",
+      DEEPSEEK_MODEL_ID: "deepseek-flash-preview",
     });
 
-    const glm = metadata.find((item) => item.id === "glm-visual-review-v1");
-    assert.equal(glm?.billing, "subscription");
-    assert.equal(glm?.approvalPolicy, "none");
-    assert.equal(glm?.modelId, "glm-5.3-flash-preview");
-    assert.equal(glm?.maxAttempts, 3);
+    const deepseek = metadata.find((item) => item.id === "deepseek-visual-review-v1");
+    assert.equal(deepseek?.billing, "subscription");
+    assert.equal(deepseek?.approvalPolicy, "none");
+    assert.equal(deepseek?.modelId, "deepseek-flash-preview");
+    assert.equal(deepseek?.maxAttempts, 3);
     const voice = metadata.find((item) => item.id === "minimax-tts-v1");
     assert.equal(voice?.billing, "metered");
     assert.equal(voice?.approvalPolicy, "automatic");

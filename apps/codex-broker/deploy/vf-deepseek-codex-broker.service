@@ -1,0 +1,50 @@
+[Unit]
+Description=VideoFactory DeepSeek broker (Unix socket only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vf-deepseek-codex
+Group=vf-bridge
+UMask=0007
+Environment=HOME=/home/vf-deepseek-codex
+Environment=PATH=/opt/video-factory/codex-broker/bin:/usr/local/bin:/usr/bin:/bin
+# 文件保存 DEEPSEEK_API_KEY 及可选模型 ID，部署时必须安装为 root:root 0600；值不得写入 unit 或命令行。
+EnvironmentFile=/etc/video-factory/deepseek-codex-broker.env
+ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %%U:%%G /etc/video-factory/deepseek-codex-broker.env)" = root:root'
+ExecStartPre=/usr/bin/bash -c 'test "$(/usr/bin/stat -c %%a /etc/video-factory/deepseek-codex-broker.env)" = 600'
+Environment=VIDEO_FACTORY_CODEX_PROFILE=deepseek
+Environment=VIDEO_FACTORY_CODEX_EFFORT=xhigh
+Environment=VIDEO_FACTORY_CODEX_SOCKET_PATH=/run/video-factory-deepseek-codex/worker.sock
+Environment=VIDEO_FACTORY_CODEX_WORKSPACE_ROOT=/var/lib/video-factory-deepseek-codex/workspace
+Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=1200000
+ExecStart=/opt/video-factory/codex-broker/bin/node /opt/video-factory/codex-broker/current/dist/main.js
+RuntimeDirectory=video-factory-deepseek-codex
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/video-factory-deepseek-codex /run/video-factory-deepseek-codex
+
+[Install]
+WantedBy=multi-user.target

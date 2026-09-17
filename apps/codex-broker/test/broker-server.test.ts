@@ -376,10 +376,10 @@ describe("CodexBrokerServer routes", () => {
     }
   });
 
-  it("reports the ZAI text identity and accepts text tasks through the same isolated profile", async () => {
+  it("reports the DeepSeek text identity and accepts text tasks through the same isolated profile", async () => {
     let executed = false;
     const broker = await startBroker({
-      profile: codexExecutorProfileFor("zai"),
+      profile: codexExecutorProfileFor("deepseek"),
       script: () => {
         executed = true;
         return { output: "{}" };
@@ -387,15 +387,15 @@ describe("CodexBrokerServer routes", () => {
     });
     try {
       const report = await healthReport(broker.socketPath);
-      assert.equal(report.profileId, "zai");
-      assert.equal(report.providerId, "zai-bigmodel-api");
-      assert.equal(report.modelId, "glm-5.3");
+      assert.equal(report.profileId, "deepseek");
+      assert.equal(report.providerId, "deepseek");
+      assert.equal(report.modelId, "deepseek-flash");
       assert.deepEqual(report.taskKinds, BROKER_TASK_KINDS);
 
       const response = await brokerRequest(broker.socketPath, {
         method: "POST",
         path: "/v1/tasks",
-        body: scriptTaskBody("zai-script"),
+        body: scriptTaskBody("deepseek-script"),
       });
       assert.equal(response.status, 200);
       assert.equal(executed, true);
@@ -772,9 +772,9 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
     }
   });
 
-  it("accepts bounded visual-review requests on both OpenAI and ZAI profiles", async () => {
-    const zai = await startBroker({
-      profile: codexExecutorProfileFor("zai"),
+  it("accepts bounded visual-review requests on both OpenAI and DeepSeek profiles", async () => {
+    const deepseek = await startBroker({
+      profile: codexExecutorProfileFor("deepseek"),
       script: (task) => {
         assert.equal(task.kind, "visual-review");
         return {
@@ -784,8 +784,8 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
             promptVersion: taskContractDescriptorFor(task.kind).promptVersion,
             contractDigest: task.expectedContractDigest!,
             prompt: "test",
-            providerId: "zai-bigmodel-api",
-            modelId: "glm-5.3",
+            providerId: "deepseek",
+            modelId: "deepseek-flash",
           },
         };
       },
@@ -808,7 +808,7 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
     });
     const body = visualReviewTaskBody();
     try {
-      const accepted = await brokerRequest(zai.socketPath, {
+      const accepted = await brokerRequest(deepseek.socketPath, {
         method: "POST",
         path: "/v1/tasks",
         body,
@@ -822,14 +822,14 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       });
       assert.equal(openaiAccepted.status, 200);
     } finally {
-      await zai.close();
+      await deepseek.close();
       await openai.close();
     }
   });
 
   it("rejects executor results whose trace does not match the accepted task binding", async () => {
     const cases = [
-      { name: "provider", trace: { providerId: "zai-bigmodel-api" }, reasonCode: "binding_mismatch" },
+      { name: "provider", trace: { providerId: "deepseek" }, reasonCode: "binding_mismatch" },
       { name: "model", trace: { modelId: "other-model" }, reasonCode: "binding_mismatch" },
       { name: "kind", trace: { taskKind: "script-draft" as const }, reasonCode: "binding_mismatch" },
       { name: "digest", trace: { contractDigest: "0".repeat(64) }, reasonCode: "contract_mismatch" },
@@ -940,8 +940,8 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
                 category: "invalid_request",
                 reasonCode: "1308",
                 requestIdHash: "a".repeat(64),
-                providerId: "zai-bigmodel-api",
-                modelId: "glm-5.3",
+                providerId: "deepseek",
+                modelId: "deepseek-flash",
                 providerWaitMs: 37,
               },
             },
@@ -982,8 +982,8 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
         category: "invalid_request",
         reasonCode: "1308",
         requestIdHash: "a".repeat(64),
-        providerId: "zai-bigmodel-api",
-        modelId: "glm-5.3",
+        providerId: "deepseek",
+        modelId: "deepseek-flash",
         providerWaitMs: 37,
       });
       assert.doesNotMatch(credentialDiagnostic.body, /Agent|Codex bridge|host-only broker|socket/i);

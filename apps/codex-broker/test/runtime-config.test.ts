@@ -3,11 +3,11 @@ import { describe, it } from "node:test";
 import { CodexExecutor } from "../src/codex-executor.js";
 import { createBrokerExecutor } from "../src/executor-factory.js";
 import { brokerRuntimeConfigFromEnv } from "../src/runtime-config.js";
-import { ZaiCodePlanExecutor } from "../src/zai-code-plan-executor.js";
+import { ChatCompletionsExecutor } from "../src/chat-completions-executor.js";
 import { BROKER_TASK_KINDS } from "../src/task-definitions.js";
 
 describe("brokerRuntimeConfigFromEnv", () => {
-  it("selects fixed OpenAI and ZAI profiles without retaining the ZAI key", () => {
+  it("selects fixed OpenAI and DeepSeek profiles without retaining the DeepSeek key", () => {
     const openai = brokerRuntimeConfigFromEnv({});
     assert.deepEqual(openai.profile.identity, {
       profileId: "openai",
@@ -24,28 +24,28 @@ describe("brokerRuntimeConfigFromEnv", () => {
     assert.equal(openai.maxBacklog, 1);
 
     const fakeSecret = "test-only-secret-not-for-a-real-request";
-    const zai = brokerRuntimeConfigFromEnv({
-      VIDEO_FACTORY_CODEX_PROFILE: "zai",
-      ZAI_BIGMODEL_API_KEY: fakeSecret,
+    const deepseek = brokerRuntimeConfigFromEnv({
+      VIDEO_FACTORY_CODEX_PROFILE: "deepseek",
+      DEEPSEEK_API_KEY: fakeSecret,
       VIDEO_FACTORY_CODEX_EFFORT: "max",
     });
-    assert.equal(zai.profile.identity.profileId, "zai");
-    assert.equal(zai.profile.identity.modelId, "glm-5.3");
-    assert.equal(zai.socketPath, "/run/video-factory-zai-codex/worker.sock");
-    assert.equal(zai.workspaceRoot, "/var/lib/video-factory-zai-codex/workspace");
-    assert.equal(zai.effort, "max");
-    // 独立复核单独走一档：glm-5.3 只有 low|high|max，默认取中间档而不是 openai 那侧的 xhigh。
-    assert.equal(zai.auditEffort, "high");
-    assert.equal(zai.timeoutMs, 1_200_000);
-    assert.doesNotMatch(JSON.stringify(zai), new RegExp(fakeSecret));
+    assert.equal(deepseek.profile.identity.profileId, "deepseek");
+    assert.equal(deepseek.profile.identity.modelId, "deepseek-flash");
+    assert.equal(deepseek.socketPath, "/run/video-factory-deepseek/worker.sock");
+    assert.equal(deepseek.workspaceRoot, "/var/lib/video-factory-deepseek/workspace");
+    assert.equal(deepseek.effort, "max");
+    // 用户指定的审计强度就是 xhigh，没有别的供应商那种"档位闸门"要迁就。
+    assert.equal(deepseek.auditEffort, "xhigh");
+    assert.equal(deepseek.timeoutMs, 1_200_000);
+    assert.doesNotMatch(JSON.stringify(deepseek), new RegExp(fakeSecret));
 
-    const customZai = brokerRuntimeConfigFromEnv({
-      VIDEO_FACTORY_CODEX_PROFILE: "zai",
-      ZAI_BIGMODEL_API_KEY: fakeSecret,
-      ZAI_TEXT_MODEL_ID: "glm-5.3-preview",
+    const customDeepseek = brokerRuntimeConfigFromEnv({
+      VIDEO_FACTORY_CODEX_PROFILE: "deepseek",
+      DEEPSEEK_API_KEY: fakeSecret,
+      DEEPSEEK_MODEL_ID: "deepseek-v4-pro",
     });
-    assert.equal(customZai.profile.identity.modelId, "glm-5.3-preview");
-    assert.equal(customZai.effort, "max");
+    assert.equal(customDeepseek.profile.identity.modelId, "deepseek-v4-pro");
+    assert.equal(customDeepseek.effort, "xhigh");
   });
 
   it("allows the host to configure production and deep-review models independently", () => {
@@ -74,34 +74,30 @@ describe("brokerRuntimeConfigFromEnv", () => {
     );
   });
 
-  it("rejects unknown profiles and a ZAI profile without its environment key", async () => {
+  it("rejects unknown profiles and a chat-completions profile without its environment key", async () => {
     await assert.rejects(
       async () => brokerRuntimeConfigFromEnv({ VIDEO_FACTORY_CODEX_PROFILE: "arbitrary" }),
-      /VIDEO_FACTORY_CODEX_PROFILE must be openai or zai/,
+      /VIDEO_FACTORY_CODEX_PROFILE must be openai or deepseek/,
     );
     await assert.rejects(
-      async () => brokerRuntimeConfigFromEnv({ VIDEO_FACTORY_CODEX_PROFILE: "zai" }),
-      /ZAI_BIGMODEL_API_KEY environment variable is required/,
+      async () => brokerRuntimeConfigFromEnv({ VIDEO_FACTORY_CODEX_PROFILE: "deepseek" }),
+      /DEEPSEEK_API_KEY environment variable is required/,
     );
   });
 
-  it("rejects an audit effort the zai profile's model cannot accept", () => {
-    const zaiEnvironment = {
-      VIDEO_FACTORY_CODEX_PROFILE: "zai",
-      ZAI_BIGMODEL_API_KEY: "test-only-secret",
+  it("rejects an effort tier the whole engine rejects, on every profile", () => {
+    const deepseekEnvironment = {
+      VIDEO_FACTORY_CODEX_PROFILE: "deepseek",
+      DEEPSEEK_API_KEY: "test-only-secret",
     };
-    // 在启动时拦下，而不是等一次已经开始的复核请求被 glm-5.3 判为非法档位。
+    // 在启动时拦下，而不是等一次已经开始的请求被上游判为非法档位。
     assert.throws(
-      () => brokerRuntimeConfigFromEnv({ ...zaiEnvironment, VIDEO_FACTORY_CODEX_AUDIT_EFFORT: "xhigh" }),
-      /VIDEO_FACTORY_CODEX_AUDIT_EFFORT must be one of low\|high\|max for the zai profile/,
-    );
-    assert.throws(
-      () => brokerRuntimeConfigFromEnv({ ...zaiEnvironment, VIDEO_FACTORY_CODEX_AUDIT_EFFORT: "extreme" }),
+      () => brokerRuntimeConfigFromEnv({ ...deepseekEnvironment, VIDEO_FACTORY_CODEX_AUDIT_EFFORT: "extreme" }),
       /VIDEO_FACTORY_CODEX_AUDIT_EFFORT must be one of low\|medium\|high\|xhigh\|max/,
     );
-    for (const effort of ["low", "high", "max"]) {
+    for (const effort of ["low", "high", "max", "xhigh"]) {
       assert.equal(
-        brokerRuntimeConfigFromEnv({ ...zaiEnvironment, VIDEO_FACTORY_CODEX_AUDIT_EFFORT: effort }).auditEffort,
+        brokerRuntimeConfigFromEnv({ ...deepseekEnvironment, VIDEO_FACTORY_CODEX_AUDIT_EFFORT: effort }).auditEffort,
         effort,
       );
     }
@@ -109,19 +105,22 @@ describe("brokerRuntimeConfigFromEnv", () => {
     assert.equal(brokerRuntimeConfigFromEnv({ VIDEO_FACTORY_CODEX_AUDIT_EFFORT: "xhigh" }).auditEffort, "xhigh");
   });
 
-  it("routes only the ZAI profile to the official Chat Completion executor", () => {
+  it("routes the chat-completions profile to the shared Chat Completion executor", () => {
     const fetchFn: typeof fetch = async () => new Response();
-    const zaiEnvironment = {
-      VIDEO_FACTORY_CODEX_PROFILE: "zai",
-      ZAI_BIGMODEL_API_KEY: "test-only-secret",
+    const deepseekEnvironment = {
+      VIDEO_FACTORY_CODEX_PROFILE: "deepseek",
+      DEEPSEEK_API_KEY: "test-only-secret",
     };
-    const zai = createBrokerExecutor(
-      brokerRuntimeConfigFromEnv(zaiEnvironment),
-      zaiEnvironment,
-      { fetchFn },
-    );
-    assert.ok(zai instanceof ZaiCodePlanExecutor);
-    assert.deepEqual(zai.identity.taskKinds, BROKER_TASK_KINDS);
+    const deepseekConfig = brokerRuntimeConfigFromEnv(deepseekEnvironment);
+    const deepseek = createBrokerExecutor(deepseekConfig, deepseekEnvironment, { fetchFn });
+    assert.ok(deepseek instanceof ChatCompletionsExecutor);
+    assert.equal(deepseekConfig.profile.identity.providerId, "deepseek");
+    assert.equal(deepseekConfig.profile.identity.modelId, "deepseek-flash");
+    assert.equal(deepseekConfig.socketPath, "/run/video-factory-deepseek/worker.sock");
+    // 用户指定的思考强度：默认就是 xhigh。
+    assert.equal(deepseekConfig.effort, "xhigh");
+    assert.equal(deepseekConfig.auditEffort, "xhigh");
+    assert.deepEqual(deepseek.identity.taskKinds, BROKER_TASK_KINDS);
 
     const openai = createBrokerExecutor(brokerRuntimeConfigFromEnv({}), {});
     assert.ok(openai instanceof CodexExecutor);

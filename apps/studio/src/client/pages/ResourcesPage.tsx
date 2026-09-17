@@ -85,7 +85,7 @@ const PRODUCTION_ROLE_DEFINITIONS: ProductionRoleDefinition[] = [
   { key: "voice", label: "配音执行", capability: "voice.synthesize", preferredProviderId: "macos-say-v1", responsibility: "按声音演员表执行音色、语速和停顿", mode: "tool", selectable: false, configurationAnchor: "voice-casting", configurationLabel: "去声音演员表配置" },
   { key: "render", label: "剪辑师", capability: "video.render", preferredProviderId: "python-ffmpeg-v1", responsibility: "合成画面、字幕、旁白和音轨", mode: "tool" },
   { key: "technicalReview", label: "技术质检", capability: "quality.review", preferredProviderId: "python-technical-review-v1", responsibility: "检查分辨率、时长、轨道、文件和产物哈希", mode: "tool" },
-  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "glm-visual-review-v1", responsibility: "正式制作必须完成 GLM 与 Codex 双审；任一路未就绪均不能开工", mode: "model" },
+  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "deepseek-visual-review-v1", responsibility: "正式制作必须完成 DeepSeek 与 Codex 双审；任一路未就绪均不能开工", mode: "model" },
 ];
 
 const AUTOMATIC_AGENT_ROLES = [
@@ -712,7 +712,7 @@ function RoleProviderCard({ definition, providers, selectedProvider, missing = f
   const backupModels = models.filter((model) => model.id !== activeModel?.id);
   const ready = Boolean(selectedProvider && isProductionReady(selectedProvider));
   const dualFinalReviewAvailable = definition.key === "visualReview"
-    && providers.some((provider) => provider.id === "glm-visual-review-v1" && isProductionReady(provider))
+    && providers.some((provider) => provider.id === "deepseek-visual-review-v1" && isProductionReady(provider))
     && providers.some((provider) => provider.id === "codex-visual-review-v1" && isProductionReady(provider));
   return <article className={`role-configuration${ready ? "" : " is-unavailable"}${missing ? " is-missing" : ""}`}>
     <header>
@@ -739,7 +739,7 @@ function RoleProviderCard({ definition, providers, selectedProvider, missing = f
       </label>
       <div className="role-runtime-summary"><span>系统推荐</span><strong>{activeModel?.label ?? selectedProvider?.label ?? "尚未配置"}</strong>{backupModels.length ? <span>故障替补：{backupModels.map((model) => model.label).join("、")}</span> : null}</div>
       {dualFinalReviewAvailable
-        ? <p className="role-fallback-note">中途画面预检优先使用首选模型；只有确认请求尚未开始，或原请求已明确结束于连接故障、服务不可用、限流、超时或无输出时才切换。结果不确定会暂停核对。最终成片由 GLM 与 Codex 基于同一份抽帧证据分别审查，任一方确认的缺陷都会保留。</p>
+        ? <p className="role-fallback-note">中途画面预检优先使用首选模型；只有确认请求尚未开始，或原请求已明确结束于连接故障、服务不可用、限流、超时或无输出时才切换。结果不确定会暂停核对。最终成片由 DeepSeek 与 Codex 基于同一份抽帧证据分别审查，任一方确认的缺陷都会保留。</p>
         : candidates.filter((provider) => provider.id !== selectedProvider?.id && isProductionReady(provider)).length > 0
           ? <p className="role-fallback-note">只有确认首选请求尚未开始，或原请求已明确结束于连接故障、服务不可用、限流、超时或无输出时，其余可用能力才会依次接管。若请求结果不确定，流程会暂停核对，不会切换模型或重复生成。</p>
         : null}

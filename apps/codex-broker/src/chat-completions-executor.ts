@@ -2,19 +2,19 @@ import { createHash } from "node:crypto";
 import { Agent, fetch as undiciFetch, type Dispatcher } from "undici";
 import {
   CodexExecutorError,
-  DEFAULT_ZAI_TEXT_MODEL_ID,
-  DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID,
-  ZAI_TASK_KINDS,
+  DEFAULT_DEEPSEEK_MODEL_ID,
   buildTaskPrompt,
   codexExecutorProfileFor,
   modelIdForTask,
   reviewedModelOverride,
+  taskCarriesImages,
   unreferencedCreativeTreatmentSourceId,
   type BrokerTaskExecutor,
   type CodexExecutionOptions,
   type CodexExecutionResult,
   type CodexExecutorFailureDetails,
   type CodexExecutorIdentity,
+  type CodexExecutorProfileId,
   type ValidatedTask,
 } from "./codex-executor.js";
 import {
@@ -28,7 +28,28 @@ import {
   type BrokerTaskKind,
 } from "./task-definitions.js";
 
-const ZAI_CODING_PLAN_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
+const DEEPSEEK_CHAT_COMPLETIONS_URL = "https://api.deepseek.com/chat/completions";
+/**
+ * 一个 chat-completions 供应商需要的全部差异。
+ *
+ * 这套引擎（SSE 流读取、合同校验、修复轮、失败分类、图片消息）与供应商无关，差异只有端点、
+ * 密钥环境变量、providerId 与模型 id，以及失败消息里的标签。标签必须显式声明而不是写死：
+ * 这些字符串会一路走到界面上（见 dogfood 记录 F2），写死一家的名字就会在换供应商之后撒谎。
+ */
+export interface ChatCompletionsProvider {
+  /** 失败消息里的短标签，例如 "DeepSeek"。 */
+  label: string;
+  profileId: CodexExecutorProfileId;
+  providerId: string;
+  endpoint: string;
+  /** 读密钥的环境变量名。缺了它这个 profile 直接拒绝启动，不做"匿名请求"。 */
+  apiKeyEnv: string;
+  /** 文本/视觉模型 id 各自的环境变量名；同一个模型担两角时两个字段填同一个名字。 */
+  textModelIdEnv: string;
+  visualModelIdEnv: string;
+  textModelId: string;
+  visualModelId: string;
+}
 const DEFAULT_TIMEOUT_MS = 1_200_000;
 /**
  * 首个输出事件的等待上限。它是"连接还在不在"的判据，不是生成预算：
@@ -40,8 +61,9 @@ const DEFAULT_MAX_TOKENS = 65_536;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 /**
  * 传输上限，只防失控读写，不是质量判据。SSE 每个 token 一帧 JSON，被丢弃的
- * reasoning_content 与框架开销都计在这里；实测 glm-5.3 在 max 强度下思考 110 秒即撞穿 1 MiB，
- * 而它真正要交付的 content 只有几十 KB。两个上限合成一个，就等于把"想得久"判成"总编没给建议"。
+ * reasoning_content 与框架开销都计在这里；本上限是按实测定的：一次高强度推理的思考量
+ * 在 110 秒内就撞穿了 1 MiB 的交付上限，而它真正要交付的 content 只有几十 KB。
+ * 两个上限合成一个，就等于把"想得久"判成"总编没给建议"。
  */
 const MAX_STREAM_BYTES = 8 * 1024 * 1024;
 /**
@@ -60,25 +82,34 @@ const TRANSIENT_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);
 const TRANSIENT_ERROR_CODE_PATTERN = /^(?:temporarily[_-]unavailable|(?:service|model|capacity)[_-](?:temporarily[_-])?unavailable|(?:insufficient|exhausted|unavailable)[_-](?:model[_-])?capacity|(?:(?:model|capacity)[_-])?overload(?:ed)?)$/i;
 const INVALID_REQUEST_ERROR_CODE_PATTERN = /^(?:invalid|bad)[_-](?:request|parameter|argument)$/i;
 
-export interface ZaiCodePlanExecutorOptions {
+export interface ChatCompletionsExecutorOptions {
   env?: NodeJS.ProcessEnv;
   fetchFn?: typeof fetch;
   effort?: string;
-  /** 独立复核（role-audit）单独用的推理强度；缺省与 effort 相同，见 zaiReasoningEffort。 */
+  /** 独立复核（role-audit）单独用的推理强度；缺省与 effort 相同。 */
   auditEffort?: string;
+  /** 该实例服务的供应商。没有默认值：猜错一家就会用别人的密钥打别人的端点。 */
+  provider: ChatCompletionsProvider;
+  /** 除文本/视觉两个默认模型之外，额外允许调用方按请求选择的已审核模型。 */
+  extraModelCandidates?: readonly string[];
   timeoutMs?: number;
   firstOutputEventTimeoutMs?: number;
   now?: () => number;
 }
 
-export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
+export class ChatCompletionsExecutor implements BrokerTaskExecutor {
   readonly identity: CodexExecutorIdentity;
   /**
-   * zai 的候选表默认就是这套系统实际在用的两个模型：文本 glm-5.3 与视觉 glm-5.3-flash。
-   * 与 openai 那侧不同，这里不需要 fail closed 的空表：这两个 id 本来就已经是各自任务类型的
-   * 默认值，列出来不引入任何新的模型、也不引入任何新的花费面，只是让用户能在两者之间换。
+   * 候选表默认就是这套系统实际在用的那些模型（文本一个、视觉一个），再由 extraModelCandidates
+   * 补上同一供应商下其他已审核的模型。与 openai 那侧不同，这里不需要 fail closed 的空表：这些 id
+   * 本来就已经是各自任务类型的默认值，列出来不引入任何新的花费面，只是让用户能在它们之间换。
+   * DeepSeek 用一个模型担两个角色，去重之后就是一条，再由额外候选补成多条。
+   *
+   * 注意：候选表是"允许被请求"，不是"每个任务都能用"。带图的任务由 withImages 路由决定，
+   * 不受覆盖影响——见 runTask 里的 taskCarriesImages 守卫。
    */
   readonly modelCandidates: readonly string[];
+  private readonly provider: ChatCompletionsProvider;
   private readonly apiKey: string;
   private readonly fetchFn: typeof fetch;
   private readonly dispatcher: Dispatcher;
@@ -90,17 +121,25 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
   private readonly visualModelId: string;
   private readonly now: () => number;
 
-  constructor(options: ZaiCodePlanExecutorOptions = {}) {
+  constructor(options: ChatCompletionsExecutorOptions) {
     const environment = options.env ?? process.env;
-    this.textModelId = environment.ZAI_TEXT_MODEL_ID?.trim() || DEFAULT_ZAI_TEXT_MODEL_ID;
-    this.visualModelId = environment.ZAI_VISUAL_REVIEW_MODEL_ID?.trim() || DEFAULT_ZAI_VISUAL_REVIEW_MODEL_ID;
+    this.provider = options.provider;
+    const provider = this.provider;
+    this.textModelId = environment[provider.textModelIdEnv]?.trim() || provider.textModelId;
+    this.visualModelId = environment[provider.visualModelIdEnv]?.trim() || provider.visualModelId;
     // 去重：两个环境变量指向同一个模型时，候选表里不该出现两遍。
-    this.modelCandidates = [...new Set([this.textModelId, this.visualModelId])];
+    this.modelCandidates = [...new Set([
+      this.textModelId,
+      this.visualModelId,
+      ...(options.extraModelCandidates ?? []),
+    ])];
+    const profile = codexExecutorProfileFor(provider.profileId, undefined, this.textModelId).identity;
+    const taskKinds = BROKER_TASK_KINDS.filter((kind) => profile.taskKinds.includes(kind));
     this.identity = {
-      ...codexExecutorProfileFor("zai", undefined, this.textModelId).identity,
+      ...profile,
       modelId: this.textModelId,
-      taskKinds: [...ZAI_TASK_KINDS],
-      taskModels: Object.fromEntries(ZAI_TASK_KINDS.map((kind) => [
+      taskKinds: [...profile.taskKinds],
+      taskModels: Object.fromEntries(taskKinds.map((kind) => [
         kind,
         IMAGE_TASK_KINDS.has(kind) ? this.visualModelId : this.textModelId,
       ])),
@@ -109,8 +148,10 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
         "role-audit": { withoutImages: this.textModelId, withImages: this.visualModelId },
       },
     };
-    this.apiKey = environment.ZAI_BIGMODEL_API_KEY?.trim() ?? "";
-    if (!this.apiKey) throw new Error("ZAI_BIGMODEL_API_KEY environment variable is required for the zai profile.");
+    this.apiKey = environment[provider.apiKeyEnv]?.trim() ?? "";
+    if (!this.apiKey) {
+      throw new Error(`${provider.apiKeyEnv} environment variable is required for the ${provider.profileId} profile.`);
+    }
     this.fetchFn = options.fetchFn ?? (undiciFetch as unknown as typeof fetch);
     this.effort = options.effort ?? "max";
     this.auditEffort = options.auditEffort ?? this.effort;
@@ -130,15 +171,22 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
   ): Promise<CodexExecutionResult> {
     // 覆盖参数先于任何资源获取校验：这里的 throw 不会经过下面的 finally，
     // 放在 setTimeout 之后就意味着每拒绝一次请求都留下一个永远不会被清理的定时器。
-    const modelId = options.model === undefined
+    //
+    // 带图的任务不接受覆盖：候选表里的模型不保证都能读图——DeepSeek 的 deepseek-v4-pro 就是
+    // 一例，它接受 image_url 却收不到图像（实测 prompt_tokens 只多 5，回答"我无法查看你上传的图片"），
+    // 于是会产出一份格式合法、内容瞎猜的复核结论。让 withImages 路由说话，覆盖只在纯文本调用上生效。
+    const override = taskCarriesImages(task) ? undefined : options.model;
+    const modelId = override === undefined
       ? modelIdForTask(this.identity, task)
-      : reviewedModelOverride(options.model, this.modelCandidates);
-    // 强度由本 profile 按模型与任务类型解析（见 zaiReasoningEffort），所以不接受调用方覆盖：
-    // 收下一个不会生效的值，就是在界面上骗用户。
+      : reviewedModelOverride(override, this.modelCandidates);
+    // 强度由本 profile 从配置里钉死，所以不接受调用方覆盖：收下一个不会生效的值，就是在界面上骗用户。
     if (options.effort !== undefined) {
-      throw new CodexExecutorError("The zai profile pins reasoning effort per model; effort overrides are not supported.", false);
+      throw new CodexExecutorError(
+        `The ${this.provider.profileId} profile pins reasoning effort in its runtime configuration; effort overrides are not supported.`,
+        false,
+      );
     }
-    const reasoningEffort = zaiReasoningEffort(modelId, task.kind, this.effort, this.auditEffort);
+    const reasoningEffort = task.kind === "role-audit" ? this.auditEffort : this.effort;
     const platform = task.kind === "publish-copy" ? task.payload.platform : undefined;
     const taskPrompt = taskPromptFor(task.kind, platform);
     const contractDescriptor = taskContractDescriptorFor(task.kind);
@@ -148,6 +196,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
       "返回对象还必须通过以下 JSON Schema：",
       JSON.stringify(outputSchemaFor(task.kind)),
     ].join("\n");
+    const label = this.provider.label;
     const controller = new AbortController();
     const abort = () => controller.abort(options.signal?.reason);
     options.signal?.addEventListener("abort", abort, { once: true });
@@ -164,7 +213,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
       let repairBaseline: unknown;
       for (let requestAttempt = 1; ; requestAttempt += 1) {
       modelAttemptCount = requestAttempt;
-      const response = await this.fetchFn(ZAI_CODING_PLAN_URL, {
+      const response = await this.fetchFn(this.provider.endpoint, {
         method: "POST",
         headers: {
           authorization: `Bearer ${this.apiKey}`,
@@ -198,7 +247,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
       if (!response.ok) {
         const code = await readErrorCode(response);
         throw new CodexExecutorError(
-          `ZAI Chat Completion returned HTTP ${response.status}${code ? ` (code ${code})` : ""}.`,
+          `${label} Chat Completion returned HTTP ${response.status}${code ? ` (code ${code})` : ""}.`,
           isTransientProviderFailure(response.status, code),
           {
             details: {
@@ -230,8 +279,9 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
           firstOutputEventTimeoutMs: this.firstOutputEventTimeoutMs,
           abort: (reason) => controller.abort(reason),
           failureDetails: envelopeFailureDetails,
+          label,
           onFirstOutputEventTimeout: () => new CodexExecutorError(
-            `ZAI Chat Completion produced no output event within ${this.firstOutputEventTimeoutMs} ms.`,
+            `${label} Chat Completion produced no output event within ${this.firstOutputEventTimeoutMs} ms.`,
             true,
             {
               failureKind: "model_provider_no_output",
@@ -251,7 +301,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
             },
           ),
         })
-        : await readEnvelope(await readBoundedResponse(response, envelopeFailureDetails), envelopeFailureDetails);
+        : await readEnvelope(await readBoundedResponse(response, envelopeFailureDetails, label), envelopeFailureDetails, label);
       const providerWaitMs = elapsedMs(requestStartedAt, this.now());
       const validationStartedAt = this.now();
       const responseDiagnostics = {
@@ -260,7 +310,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
       };
       if (envelope.diagnostics.finishReason === "length") {
         throw new CodexExecutorError(
-          "ZAI Chat Completion reached its output limit before completing the result.",
+          `${label} Chat Completion reached its output limit before completing the result.`,
           false,
           {
             failureKind: "model_provider_no_output",
@@ -278,7 +328,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
       }
       const content = envelope.content;
       if (content === undefined || !content.trim()) {
-        throw new CodexExecutorError("ZAI Chat Completion returned an empty result.", false, {
+        throw new CodexExecutorError(`${label} Chat Completion returned an empty result.`, false, {
           failureKind: "model_provider_no_output",
           details: {
             category: "execution_failed",
@@ -304,7 +354,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
           structuredRepairCount = 1;
           continue;
         }
-        throw new CodexExecutorError("ZAI Chat Completion output is not valid JSON.", false, {
+        throw new CodexExecutorError(`${label} Chat Completion output is not valid JSON.`, false, {
           details: {
             ...invalidOutputDetails(this.identity.providerId, modelId, providerWaitMs, "invalid_json"),
             ...responseDiagnostics,
@@ -320,7 +370,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
           structuredRepairCount = 1;
           continue;
         }
-        throw new CodexExecutorError(`ZAI output does not match ${task.kind} schema: ${schemaError}`, false, {
+        throw new CodexExecutorError(`${label} output does not match ${task.kind} schema: ${schemaError}`, false, {
           details: {
             ...invalidOutputDetails(this.identity.providerId, modelId, providerWaitMs, "task_schema"),
             ...responseDiagnostics,
@@ -328,7 +378,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
         });
       }
       if (repairBaseline !== undefined && !contractRepairPreservesSemantics(task.kind, repairBaseline, parsed)) {
-        throw new CodexExecutorError(`ZAI ${task.kind} format repair changed protected content.`, false, {
+        throw new CodexExecutorError(`${label} ${task.kind} format repair changed protected content.`, false, {
           details: {
             ...invalidOutputDetails(this.identity.providerId, modelId, providerWaitMs, "repair_semantic_drift"),
             ...responseDiagnostics,
@@ -351,7 +401,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
           structuredRepairCount = 1;
           continue;
         }
-        throw new CodexExecutorError(`ZAI output does not satisfy ${task.kind} semantics: ${semanticError}`, false, {
+        throw new CodexExecutorError(`${label} output does not satisfy ${task.kind} semantics: ${semanticError}`, false, {
           details: {
             ...invalidOutputDetails(this.identity.providerId, modelId, providerWaitMs, "task_semantics"),
             ...outputSemanticDiagnosticFor(task.kind, semanticError), taskKind: task.kind,
@@ -365,7 +415,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
       if (task.kind === "visual-review"
         && visualFindings.some((finding) => finding.timecodeMs > task.payload.durationMs)) {
         throw new CodexExecutorError(
-          "ZAI output does not match visual-review schema: finding timecodeMs exceeds payload.durationMs.",
+          `${label} output does not match visual-review schema: finding timecodeMs exceeds payload.durationMs.`,
           false,
           {
             details: {
@@ -381,7 +431,7 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
         }).evidenceRequirements;
         if (unreferencedCreativeTreatmentSourceId(evidence, task.payload.suppliedSources) !== undefined) {
           throw new CodexExecutorError(
-            "ZAI output does not satisfy creative-treatment semantics: evidenceRequirements.suppliedSourceIds must reference payload.suppliedSources source ids.",
+            `${label} output does not satisfy creative-treatment semantics: evidenceRequirements.suppliedSourceIds must reference payload.suppliedSources source ids.`,
             false,
             {
               details: {
@@ -422,12 +472,12 @@ export class ZaiCodePlanExecutor implements BrokerTaskExecutor {
         throw error;
       }
       const cancelled = options.signal?.aborted === true;
-      const requestFailure = networkFailureFor(error, controller.signal.aborted);
+      const requestFailure = networkFailureFor(error, controller.signal.aborted, label);
       const definitelyNotAccepted = !responseHeadersReceived
         && (errorCodeInCauseChain(error) === "ENOTFOUND" || errorCodeInCauseChain(error) === "ECONNREFUSED");
       throw new CodexExecutorError(
         cancelled
-          ? "ZAI Code Plan task was cancelled because its client disconnected."
+          ? `${label} Code Plan task was cancelled because its client disconnected.`
           : requestFailure.message,
         true,
         {
@@ -626,23 +676,24 @@ function protectedRoleAuditContent(value: unknown): unknown {
 function networkFailureFor(
   error: unknown,
   requestAborted: boolean,
+  label: string,
 ): { message: string; category: "timeout" | "network"; reasonCode: string } {
   if (requestAborted) {
     return {
-      message: "ZAI Code Plan request timed out.",
+      message: `${label} Code Plan request timed out.`,
       category: "timeout",
       reasonCode: "request_timeout",
     };
   }
   if (errorCodeInCauseChain(error) === "UND_ERR_HEADERS_TIMEOUT") {
     return {
-      message: "ZAI Code Plan response headers timed out.",
+      message: `${label} Code Plan response headers timed out.`,
       category: "timeout",
       reasonCode: "response_headers_timeout",
     };
   }
   return {
-    message: "ZAI Code Plan request could not connect.",
+    message: `${label} Code Plan request could not connect.`,
     category: "network",
     reasonCode: "connection_failed",
   };
@@ -683,27 +734,27 @@ function isExplicitInvalidRequestCode(code: string | undefined): boolean {
 }
 
 /**
- * glm-5.3* 只认 low|high|max 三档（智谱文档：low 轻量推理、high 增强推理、max 深度推理）。
- * 这张表同时是配置阶段的闸门：brokerRuntimeConfigFromEnv 用它拦下写错的审计强度。
+ * 文本与视觉拆成两个环境变量，虽然两者默认都指向 deepseek-flash：实测 deepseek-v4-pro
+ * 接受 image_url 却收不到图像（prompt_tokens 只多 5，回答"我无法查看你上传的图片"），
+ * 所以"能不能看图"不是这个供应商所有模型共有的性质，必须能分开指定、也必须能单独锁住。
+ *
+ * 推理强度不在这里改写：实测 deepseek-flash 对 low|minimal|high|max|xhigh 都返回 200，
+ * 调用方给什么就发什么。
  */
-export const GLM_REASONING_EFFORTS: ReadonlySet<string> = new Set(["low", "high", "max"]);
-
-/**
- * 产出与复核要的不是同一种强度。产出仍钉在 max：这一轮只有一次机会，质量就是唯一目的——
- * 实测 glm-5.3 文本产出单次要 providerWaitMs 35-48 万毫秒、思考 1.8-2.4 万 token。
- * 独立复核读的是已经成型的产出，只做逐条核对，用配置的审计强度即可：它与产出同在一轮里，
- * 却不必再花一遍同等的时间（实测 max 档一次复核约 4 分钟）。
- */
-function zaiReasoningEffort(modelId: string, kind: BrokerTaskKind, effort: string, auditEffort: string): string {
-  if (!modelId.startsWith("glm-5.3")) return effort;
-  if (kind !== "role-audit") return "max";
-  // 越档的审计强度按 max 发出，理由有二：glm-5.3 对不认识的档位是直接让整轮复核拿不到结果，
-  // 而 max 正是这个 profile 一直以来的行为；真正的越档在配置阶段就已经被拒。
-  return GLM_REASONING_EFFORTS.has(auditEffort) ? auditEffort : "max";
-}
+export const DEEPSEEK_CHAT_COMPLETIONS_PROVIDER: ChatCompletionsProvider = {
+  label: "DeepSeek",
+  profileId: "deepseek",
+  providerId: "deepseek",
+  endpoint: DEEPSEEK_CHAT_COMPLETIONS_URL,
+  apiKeyEnv: "DEEPSEEK_API_KEY",
+  textModelIdEnv: "DEEPSEEK_MODEL_ID",
+  visualModelIdEnv: "DEEPSEEK_VISUAL_MODEL_ID",
+  textModelId: DEFAULT_DEEPSEEK_MODEL_ID,
+  visualModelId: DEFAULT_DEEPSEEK_MODEL_ID,
+};
 
 function requestIdHashFor(response: Response): { requestIdHash?: string } {
-  const requestId = ["x-request-id", "x-zhipu-request-id", "x-requestid", "request-id", "x-trace-id"]
+  const requestId = ["x-request-id", "x-requestid", "request-id", "x-trace-id"]
     .map((name) => response.headers.get(name)?.trim())
     .find((value): value is string => Boolean(value));
   return requestId
@@ -788,9 +839,9 @@ async function readErrorCode(response: Response): Promise<string | undefined> {
  * 流式响应的读取结果。两种传输（SSE 与整包 JSON）都归一到同一个形状，
  * 下游的合同校验、修复与 trace 才不必各写一份。
  */
-interface ZaiCompletionRead {
+interface ChatCompletionRead {
   content: string | undefined;
-  diagnostics: ZaiResponseDiagnostics;
+  diagnostics: ChatResponseDiagnostics;
   /** 首个 Provider 输出事件的耗时；整包响应下无从测得分段事件，因此缺省。 */
   firstOutputEventMs?: number;
 }
@@ -816,10 +867,13 @@ async function readStreamedCompletion(
     onFirstOutputEventTimeout: () => CodexExecutorError;
     abort: (reason: Error) => void;
     failureDetails: (reasonCode: EnvelopeFailureReasonCode) => CodexExecutorFailureDetails;
+    /** 失败消息里用的供应商短标签，见 ChatCompletionsProvider.label。 */
+    label: string;
   },
-): Promise<ZaiCompletionRead> {
+): Promise<ChatCompletionRead> {
+  const { label } = options;
   if (!response.body) {
-    throw new CodexExecutorError("ZAI Chat Completion returned an empty stream.", false, {
+    throw new CodexExecutorError(`${label} Chat Completion returned an empty stream.`, false, {
       details: options.failureDetails("output_contract"),
     });
   }
@@ -841,7 +895,7 @@ async function readStreamedCompletion(
       received += chunk.value.byteLength;
       // 这里量的是整条流（含被丢弃的推理帧），所以用传输上限；交付内容的配额在流结束时另算。
       if (received > MAX_STREAM_BYTES) {
-        throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_STREAM_BYTES} bytes.`, false, {
+        throw new CodexExecutorError(`${label} Chat Completion response exceeds ${MAX_STREAM_BYTES} bytes.`, false, {
           details: options.failureDetails("response_too_large"),
         });
       }
@@ -853,7 +907,7 @@ async function readStreamedCompletion(
         // 空行与以 ':' 开头的心跳（keep-alive）注释都不承载数据。
         if (line && !line.startsWith(":")) {
           if (!line.startsWith("data:")) {
-            throw new CodexExecutorError("ZAI Chat Completion stream contained a non-data event.", false, {
+            throw new CodexExecutorError(`${label} Chat Completion stream contained a non-data event.`, false, {
               details: options.failureDetails("output_contract"),
             });
           }
@@ -887,7 +941,7 @@ async function readStreamedCompletion(
   }
   // 交付内容的配额：推理流已经在上面的传输上限里放过，这里只卡真正要解析的答案。
   if (Buffer.byteLength(content, "utf8") > MAX_RESPONSE_BYTES) {
-    throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false, {
+    throw new CodexExecutorError(`${label} Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false, {
       details: options.failureDetails("response_too_large"),
     });
   }
@@ -929,18 +983,22 @@ function firstOutputEventDeadline(options: {
 
 function parseStreamEvent(
   payload: string,
-  options: { failureDetails: (reasonCode: EnvelopeFailureReasonCode) => CodexExecutorFailureDetails },
+  options: {
+    failureDetails: (reasonCode: EnvelopeFailureReasonCode) => CodexExecutorFailureDetails;
+    label: string;
+  },
 ): Record<string, unknown> {
+  const { label } = options;
   let parsed: unknown;
   try {
     parsed = JSON.parse(payload);
   } catch {
-    throw new CodexExecutorError("ZAI Chat Completion stream event is not valid JSON.", false, {
+    throw new CodexExecutorError(`${label} Chat Completion stream event is not valid JSON.`, false, {
       details: options.failureDetails("invalid_json"),
     });
   }
   if (!isRecord(parsed)) {
-    throw new CodexExecutorError("ZAI Chat Completion stream event is not an object.", false, {
+    throw new CodexExecutorError(`${label} Chat Completion stream event is not an object.`, false, {
       details: options.failureDetails("output_contract"),
     });
   }
@@ -955,19 +1013,21 @@ function isEventStreamResponse(response: Response): boolean {
 function readEnvelope(
   raw: string,
   failureDetails: (reasonCode: EnvelopeFailureReasonCode) => CodexExecutorFailureDetails,
-): ZaiCompletionRead {
-  const envelope = responseEnvelope(raw, failureDetails);
+  label: string,
+): ChatCompletionRead {
+  const envelope = responseEnvelope(raw, failureDetails, label);
   return { content: envelope.content, diagnostics: envelope.diagnostics };
 }
 
 async function readBoundedResponse(
   response: Response,
   failureDetails: (reasonCode: "response_too_large") => CodexExecutorFailureDetails,
+  label: string,
 ): Promise<string> {
   const declaredBytes = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredBytes) && declaredBytes > MAX_STREAM_BYTES) {
     await response.body?.cancel().catch(() => undefined);
-    throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_STREAM_BYTES} bytes.`, false, {
+    throw new CodexExecutorError(`${label} Chat Completion response exceeds ${MAX_STREAM_BYTES} bytes.`, false, {
       details: failureDetails("response_too_large"),
     });
   }
@@ -983,7 +1043,7 @@ async function readBoundedResponse(
       // 整包 JSON 也可能带着被丢弃的 reasoning_content，所以传输上限与内容上限分开。
       if (received > MAX_STREAM_BYTES) {
         await reader.cancel().catch(() => undefined);
-        throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_STREAM_BYTES} bytes.`, false, {
+        throw new CodexExecutorError(`${label} Chat Completion response exceeds ${MAX_STREAM_BYTES} bytes.`, false, {
           details: failureDetails("response_too_large"),
         });
       }
@@ -1013,7 +1073,7 @@ function responseErrorCode(raw: string): string | undefined {
   return undefined;
 }
 
-interface ZaiResponseDiagnostics {
+interface ChatResponseDiagnostics {
   finishReason?: string;
   promptTokens?: number;
   completionTokens?: number;
@@ -1024,23 +1084,24 @@ interface ZaiResponseDiagnostics {
 function responseEnvelope(
   raw: string,
   failureDetails: (reasonCode: EnvelopeFailureReasonCode) => CodexExecutorFailureDetails,
-): { content: string | undefined; diagnostics: ZaiResponseDiagnostics } {
+  label: string,
+): { content: string | undefined; diagnostics: ChatResponseDiagnostics } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new CodexExecutorError("ZAI Chat Completion returned a non-JSON response.", false, {
+    throw new CodexExecutorError(`${label} Chat Completion returned a non-JSON response.`, false, {
       details: failureDetails("invalid_json"),
     });
   }
   if (!isRecord(parsed) || !Array.isArray(parsed.choices)) {
-    throw new CodexExecutorError("ZAI Chat Completion response is missing choices.", false, {
+    throw new CodexExecutorError(`${label} Chat Completion response is missing choices.`, false, {
       details: failureDetails("output_contract"),
     });
   }
   const choice = parsed.choices[0];
   if (!isRecord(choice) || !isRecord(choice.message)) {
-    throw new CodexExecutorError("ZAI Chat Completion response is missing message content.", false, {
+    throw new CodexExecutorError(`${label} Chat Completion response is missing message content.`, false, {
       details: failureDetails("output_contract"),
     });
   }
@@ -1049,20 +1110,20 @@ function responseEnvelope(
     return { content: undefined, diagnostics };
   }
   if (typeof choice.message.content !== "string") {
-    throw new CodexExecutorError("ZAI Chat Completion response has invalid message content.", false, {
+    throw new CodexExecutorError(`${label} Chat Completion response has invalid message content.`, false, {
       details: failureDetails("output_contract"),
     });
   }
   // 与流式路径同一个不变量：配额只卡交付的答案，不卡被丢弃的推理。
   if (Buffer.byteLength(choice.message.content, "utf8") > MAX_RESPONSE_BYTES) {
-    throw new CodexExecutorError(`ZAI Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false, {
+    throw new CodexExecutorError(`${label} Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false, {
       details: failureDetails("response_too_large"),
     });
   }
   return { content: choice.message.content, diagnostics };
 }
 
-function responseDiagnostics(response: Record<string, unknown>, choice: Record<string, unknown>): ZaiResponseDiagnostics {
+function responseDiagnostics(response: Record<string, unknown>, choice: Record<string, unknown>): ChatResponseDiagnostics {
   const usage = isRecord(response.usage) ? response.usage : undefined;
   const completionDetails = usage && isRecord(usage.completion_tokens_details)
     ? usage.completion_tokens_details
@@ -1082,12 +1143,12 @@ function responseDiagnostics(response: Record<string, unknown>, choice: Record<s
   };
 }
 
-function tokenDiagnostic<Key extends keyof ZaiResponseDiagnostics>(
+function tokenDiagnostic<Key extends keyof ChatResponseDiagnostics>(
   key: Key,
   value: unknown,
-): Partial<Pick<ZaiResponseDiagnostics, Key>> {
+): Partial<Pick<ChatResponseDiagnostics, Key>> {
   return Number.isSafeInteger(value) && Number(value) >= 0
-    ? { [key]: Number(value) } as Partial<Pick<ZaiResponseDiagnostics, Key>>
+    ? { [key]: Number(value) } as Partial<Pick<ChatResponseDiagnostics, Key>>
     : {};
 }
 

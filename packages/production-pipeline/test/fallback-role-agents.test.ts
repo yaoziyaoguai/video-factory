@@ -46,7 +46,7 @@ function successful(modelId: string): CodexTaskExecution<unknown> {
       taskKind: "script-draft",
       promptVersion: "fallback-test-v1",
       prompt: "bounded test prompt",
-      providerId: modelId.startsWith("glm") ? "zai-bigmodel-api" : "openai",
+      providerId: modelId.startsWith("deepseek") ? "deepseek" : "openai",
       modelId,
     },
   };
@@ -62,14 +62,14 @@ function providerFailure(modelId: string): CodexBridgeError {
 }
 
 function brokerProviderId(modelId: string): string {
-  return modelId.startsWith("glm") ? "zai-bigmodel-api" : "openai";
+  return modelId.startsWith("deepseek") ? "deepseek" : "openai";
 }
 
 describe("FallbackScreenwriterAgent", () => {
   it("puts the user-selected model first and does not call lower-ranked candidates after success", async () => {
     const calls: string[] = [];
     const fallback = new FallbackScreenwriterAgent({
-      candidates: ["gpt-quality", "glm-5.3", "gpt-fast"].map((modelId) => ({
+      candidates: ["gpt-quality", "deepseek-flash", "gpt-fast"].map((modelId) => ({
         providerId: brokerProviderId(modelId),
         agent: agent(modelId, async () => {
           calls.push(modelId);
@@ -78,14 +78,14 @@ describe("FallbackScreenwriterAgent", () => {
       })),
     });
 
-    const execution = await fallback.draftDetailed({ ...input, selectedModelId: "glm-5.3" });
+    const execution = await fallback.draftDetailed({ ...input, selectedModelId: "deepseek-flash" });
 
-    assert.deepEqual(calls, ["glm-5.3"]);
-    assert.equal(execution.trace?.modelId, "glm-5.3");
-    assert.deepEqual(execution.trace?.attemptedModelIds, ["glm-5.3"]);
+    assert.deepEqual(calls, ["deepseek-flash"]);
+    assert.equal(execution.trace?.modelId, "deepseek-flash");
+    assert.deepEqual(execution.trace?.attemptedModelIds, ["deepseek-flash"]);
     assert.deepEqual(execution.trace?.modelCandidateAttempts, [{
-      modelId: "glm-5.3",
-      providerId: "zai-bigmodel-api",
+      modelId: "deepseek-flash",
+      providerId: "deepseek",
       outcome: "succeeded",
     }]);
   });
@@ -93,7 +93,7 @@ describe("FallbackScreenwriterAgent", () => {
   it("tries every compatible candidate in order and records the final model", async () => {
     const calls: string[] = [];
     const checkpoints: unknown[] = [];
-    const candidates = ["gpt-quality", "glm-5.3", "gpt-fast"].map((modelId, index) => ({
+    const candidates = ["gpt-quality", "deepseek-flash", "gpt-fast"].map((modelId, index) => ({
       agent: agent(modelId, async (candidateInput) => {
         calls.push(modelId);
         checkpoints.push(candidateInput.agentLoopCheckpoint);
@@ -112,15 +112,15 @@ describe("FallbackScreenwriterAgent", () => {
 
     const execution = await fallback.draftDetailed({ ...input, agentLoopCheckpointForModel: checkpointFactory });
 
-    assert.deepEqual(calls, ["gpt-quality", "glm-5.3", "gpt-fast"]);
+    assert.deepEqual(calls, ["gpt-quality", "deepseek-flash", "gpt-fast"]);
     assert.deepEqual(checkpoints, [
       checkpointsByModel.get("gpt-quality"),
-      checkpointsByModel.get("glm-5.3"),
+      checkpointsByModel.get("deepseek-flash"),
       checkpointsByModel.get("gpt-fast"),
     ]);
     assert.equal(execution.trace?.modelId, "gpt-fast");
     assert.equal(execution.trace?.fallbackFromModelId, "gpt-quality");
-    assert.deepEqual(execution.trace?.attemptedModelIds, ["gpt-quality", "glm-5.3", "gpt-fast"]);
+    assert.deepEqual(execution.trace?.attemptedModelIds, ["gpt-quality", "deepseek-flash", "gpt-fast"]);
     assert.deepEqual(execution.trace?.modelCandidateAttempts?.map((attempt) => [
       attempt.modelId,
       attempt.providerId,
@@ -129,7 +129,7 @@ describe("FallbackScreenwriterAgent", () => {
       attempt.failureReason,
     ]), [
       ["gpt-quality", "openai", "failed", "not_accepted", "服务端错误（HTTP 503）"],
-      ["glm-5.3", "zai-bigmodel-api", "failed", "not_accepted", "服务端错误（HTTP 503）"],
+      ["deepseek-flash", "deepseek", "failed", "not_accepted", "服务端错误（HTTP 503）"],
       ["gpt-fast", "openai", "succeeded", undefined, undefined],
     ]);
   });
@@ -150,10 +150,10 @@ describe("FallbackScreenwriterAgent", () => {
           }),
         },
         {
-          providerId: "zai-bigmodel-api",
-          agent: agent("glm-backup", async (candidateInput) => {
+          providerId: "deepseek",
+          agent: agent("deepseek-backup", async (candidateInput) => {
             deadlines.push(candidateInput.wallClockDeadlineAtMs);
-            return successful("glm-backup");
+            return successful("deepseek-backup");
           }),
         },
       ],
@@ -182,11 +182,11 @@ describe("FallbackScreenwriterAgent", () => {
           }),
         },
         {
-          providerId: "zai-bigmodel-api",
-          agent: agent("glm-backup", async (candidateInput) => {
-            calls.push("glm-backup");
+          providerId: "deepseek",
+          agent: agent("deepseek-backup", async (candidateInput) => {
+            calls.push("deepseek-backup");
             deadlines.push(candidateInput.wallClockDeadlineAtMs);
-            return successful("glm-backup");
+            return successful("deepseek-backup");
           }),
         },
       ],
@@ -194,13 +194,13 @@ describe("FallbackScreenwriterAgent", () => {
 
     const execution = await fallback.draftDetailed(input);
 
-    assert.deepEqual(calls, ["gpt-primary", "glm-backup"]);
+    assert.deepEqual(calls, ["gpt-primary", "deepseek-backup"]);
     assert.deepEqual(deadlines, [1_000_000 + 2_700_000, 1_000_000 + 2_700_000]);
     assert.ok(deadlines[0]! > now);
-    assert.equal(execution.trace?.modelId, "glm-backup");
+    assert.equal(execution.trace?.modelId, "deepseek-backup");
   });
 
-  it("does not switch from OpenAI to GLM after the original request completed with a provider failure", async () => {
+  it("does not switch from OpenAI to DeepSeek after the original request completed with a provider failure", async () => {
     const calls: string[] = [];
     const fallback = new FallbackScreenwriterAgent({
       candidates: [
@@ -217,10 +217,10 @@ describe("FallbackScreenwriterAgent", () => {
           }),
         },
         {
-          providerId: "zai-bigmodel-api",
-          agent: agent("glm-5.3", async () => {
-            calls.push("glm-5.3");
-            return successful("glm-5.3");
+          providerId: "deepseek",
+          agent: agent("deepseek-flash", async () => {
+            calls.push("deepseek-flash");
+            return successful("deepseek-flash");
           }),
         },
       ],
@@ -246,10 +246,10 @@ describe("FallbackScreenwriterAgent", () => {
           }),
         },
         {
-          providerId: "zai-bigmodel-api",
-          agent: agent("glm-5.3", async () => {
+          providerId: "deepseek",
+          agent: agent("deepseek-flash", async () => {
             backupCalls += 1;
-            return successful("glm-5.3");
+            return successful("deepseek-flash");
           }),
         },
       ],
@@ -286,10 +286,10 @@ describe("FallbackScreenwriterAgent", () => {
           }),
         },
         {
-          providerId: "zai-bigmodel-api",
-          agent: agent("glm-5.3", async () => {
+          providerId: "deepseek",
+          agent: agent("deepseek-flash", async () => {
             backupCalls += 1;
-            return successful("glm-5.3");
+            return successful("deepseek-flash");
           }),
         },
       ],
@@ -328,10 +328,10 @@ describe("FallbackScreenwriterAgent", () => {
             }),
           },
           {
-            providerId: "zai-bigmodel-api",
-            agent: agent("glm-5.3", async () => {
-              calls.push("glm-5.3");
-              return successful("glm-5.3");
+            providerId: "deepseek",
+            agent: agent("deepseek-flash", async () => {
+              calls.push("deepseek-flash");
+              return successful("deepseek-flash");
             }),
           },
         ],
@@ -339,8 +339,8 @@ describe("FallbackScreenwriterAgent", () => {
 
       const execution = await fallback.draftDetailed(input);
 
-      assert.deepEqual(calls, ["gpt-primary", "glm-5.3"]);
-      assert.equal(execution.trace?.modelId, "glm-5.3");
+      assert.deepEqual(calls, ["gpt-primary", "deepseek-flash"]);
+      assert.equal(execution.trace?.modelId, "deepseek-flash");
       assert.equal(execution.trace?.fallbackFromModelId, "gpt-primary");
       assert.deepEqual(execution.trace?.modelCandidateAttempts?.map((attempt) => [
         attempt.modelId,
@@ -348,7 +348,7 @@ describe("FallbackScreenwriterAgent", () => {
         attempt.failureStage,
       ]), [
         ["gpt-primary", "failed", "not_accepted"],
-        ["glm-5.3", "succeeded", undefined],
+        ["deepseek-flash", "succeeded", undefined],
       ]);
     });
   }
@@ -371,10 +371,10 @@ describe("FallbackScreenwriterAgent", () => {
           }),
         },
         {
-          providerId: "zai-bigmodel-api",
-          agent: agent("glm-5.3", async () => {
+          providerId: "deepseek",
+          agent: agent("deepseek-flash", async () => {
             backupCalls += 1;
-            return successful("glm-5.3");
+            return successful("deepseek-flash");
           }),
         },
       ],
@@ -397,9 +397,9 @@ describe("FallbackScreenwriterAgent", () => {
     const fallback = new FallbackScreenwriterAgent({
       candidates: [
         { providerId: "openai", agent: agent("gpt-quality", async () => { throw new Error("Script draft scenes must be an array."); }) },
-        { providerId: "zai-bigmodel-api", agent: agent("glm-5.3", async () => {
+        { providerId: "deepseek", agent: agent("deepseek-flash", async () => {
           backupCalls += 1;
-          return successful("glm-5.3");
+          return successful("deepseek-flash");
         }) },
       ],
     });
@@ -417,8 +417,8 @@ describe("FallbackScreenwriterAgent", () => {
           agent: agent("gpt-quality", async () => { throw providerFailure("gpt-quality"); }),
         },
         {
-          providerId: "zai-bigmodel-api",
-          agent: agent("glm-5.3", async () => { throw terminalBackupError; }),
+          providerId: "deepseek",
+          agent: agent("deepseek-flash", async () => { throw terminalBackupError; }),
         },
       ],
     });
@@ -428,7 +428,7 @@ describe("FallbackScreenwriterAgent", () => {
       (error: unknown) => {
         assert.ok(error instanceof ModelCandidatesExhaustedError);
         assert.equal(error.cause, terminalBackupError);
-        assert.deepEqual(error.failures.map((failure) => failure.modelId), ["gpt-quality", "glm-5.3"]);
+        assert.deepEqual(error.failures.map((failure) => failure.modelId), ["gpt-quality", "deepseek-flash"]);
         assert.deepEqual(error.attempts, [
           {
             modelId: "gpt-quality",
@@ -438,8 +438,8 @@ describe("FallbackScreenwriterAgent", () => {
             failureReason: "服务端错误（HTTP 503）",
           },
           {
-            modelId: "glm-5.3",
-            providerId: "zai-bigmodel-api",
+            modelId: "deepseek-flash",
+            providerId: "deepseek",
             outcome: "failed",
             failureStage: "transport",
             failureReason: "调用失败",
@@ -502,8 +502,8 @@ describe("FallbackScreenwriterAgent", () => {
           agent: agent("gpt-quality", async () => { throw providerFailure("gpt-quality"); }),
         },
         {
-          providerId: "zai-bigmodel-api",
-          agent: agent("glm-5.3", async () => { throw halt; }),
+          providerId: "deepseek",
+          agent: agent("deepseek-flash", async () => { throw halt; }),
         },
       ],
     });
@@ -531,7 +531,7 @@ describe("FallbackScreenwriterAgent", () => {
 
   it("reports every attempted model when all compatible candidates are exhausted", async () => {
     const fallback = new FallbackScreenwriterAgent({
-      candidates: ["gpt-quality", "glm-5.3", "gpt-fast"].map((modelId) => ({
+      candidates: ["gpt-quality", "deepseek-flash", "gpt-fast"].map((modelId) => ({
         providerId: brokerProviderId(modelId),
         agent: agent(modelId, async () => { throw providerFailure(modelId); }),
       })),
@@ -541,7 +541,7 @@ describe("FallbackScreenwriterAgent", () => {
       () => fallback.draftDetailed(input),
       (error: unknown) => {
         assert.ok(error instanceof ModelCandidatesExhaustedError);
-        assert.deepEqual(error.failures.map((failure) => failure.modelId), ["gpt-quality", "glm-5.3", "gpt-fast"]);
+        assert.deepEqual(error.failures.map((failure) => failure.modelId), ["gpt-quality", "deepseek-flash", "gpt-fast"]);
         assert.deepEqual(error.attempts, [
           {
             modelId: "gpt-quality",
@@ -551,8 +551,8 @@ describe("FallbackScreenwriterAgent", () => {
             failureReason: "服务端错误（HTTP 503）",
           },
           {
-            modelId: "glm-5.3",
-            providerId: "zai-bigmodel-api",
+            modelId: "deepseek-flash",
+            providerId: "deepseek",
             outcome: "failed",
             failureStage: "not_accepted",
             failureReason: "服务端错误（HTTP 503）",
@@ -576,10 +576,10 @@ describe("FallbackScreenwriterAgent", () => {
     const fallback = new FallbackScreenwriterAgent({
       candidates: [
         { providerId: "openai", agent: agent("gpt-primary", async () => { throw providerFailure("gpt-primary"); }) },
-        { providerId: "zai-bigmodel-api", agent: agent("glm-backup", async (candidateInput) => {
+        { providerId: "deepseek", agent: agent("deepseek-backup", async (candidateInput) => {
           const checkpoint = candidateInput.agentLoopCheckpoint;
           assert.ok(checkpoint);
-          if (await checkpoint.load()) return successful("glm-backup");
+          if (await checkpoint.load()) return successful("deepseek-backup");
           backupModelCalls += 1;
           await checkpoint.save({ acceptedCandidate: true });
           throw new CodexBridgeError("request timed out after acceptance", false, "uncertain");
@@ -599,7 +599,7 @@ describe("FallbackScreenwriterAgent", () => {
     const execution = await fallback.draftDetailed({ ...input, agentLoopCheckpointForModel: checkpointFactory });
 
     assert.equal(backupModelCalls, 1);
-    assert.equal(execution.trace?.modelId, "glm-backup");
+    assert.equal(execution.trace?.modelId, "deepseek-backup");
   });
 
   for (const [label, auditFailure] of [
@@ -643,8 +643,8 @@ describe("FallbackScreenwriterAgent", () => {
             })),
           },
           {
-            providerId: "zai-bigmodel-api",
-            agent: agent("glm-5.3", async (candidateInput) => runRoleAgentLoop({
+            providerId: "deepseek",
+            agent: agent("deepseek-flash", async (candidateInput) => runRoleAgentLoop({
               role: "编剧",
               contractVersion: "screenwriter-test-v1",
               criteria: ["结构完整"],
@@ -678,8 +678,8 @@ describe("FallbackScreenwriterAgent", () => {
                     taskKind: "role-audit",
                     promptVersion: "fallback-test-v1",
                     prompt: "bounded audit prompt",
-                    providerId: "zai-bigmodel-api",
-                    modelId: "glm-5.3",
+                    providerId: "deepseek",
+                    modelId: "deepseek-flash",
                   },
                 };
               },
@@ -698,9 +698,9 @@ describe("FallbackScreenwriterAgent", () => {
       assert.equal(backupProducerCalls, 0);
       assert.equal(backupAuditCalls, 1);
       assert.equal(execution.agentLoop?.iterations[0]?.candidateTrace?.modelId, "gpt-primary");
-      assert.equal(execution.agentLoop?.iterations[0]?.auditTrace?.modelId, "glm-5.3");
-      assert.deepEqual(execution.trace?.attemptedModelIds, ["gpt-primary", "glm-5.3"]);
-      assert.equal((checkpointState.get("glm-5.3") as { status?: string }).status, "passed");
+      assert.equal(execution.agentLoop?.iterations[0]?.auditTrace?.modelId, "deepseek-flash");
+      assert.deepEqual(execution.trace?.attemptedModelIds, ["gpt-primary", "deepseek-flash"]);
+      assert.equal((checkpointState.get("deepseek-flash") as { status?: string }).status, "passed");
     });
   }
 
@@ -735,8 +735,8 @@ describe("FallbackScreenwriterAgent", () => {
           })),
         },
         {
-          providerId: "zai-bigmodel-api",
-          agent: agent("glm-5.3", async () => runRoleAgentLoop({
+          providerId: "deepseek",
+          agent: agent("deepseek-flash", async () => runRoleAgentLoop({
             role: "编剧",
             contractVersion: "screenwriter-test-v1",
             criteria: ["结构完整"],
@@ -796,10 +796,10 @@ describe("FallbackScreenwriterAgent", () => {
           }),
         },
         {
-          providerId: "zai-bigmodel-api",
-          agent: agent("glm-5.3", async () => {
+          providerId: "deepseek",
+          agent: agent("deepseek-flash", async () => {
             backupCalls += 1;
-            return successful("glm-5.3");
+            return successful("deepseek-flash");
           }),
         },
       ],
@@ -891,7 +891,7 @@ describe("model provider failure policy", () => {
       "completed_failure",
       422,
       undefined,
-      { category: "invalid_output", reasonCode: "invalid_json", providerId: "zai-bigmodel-api", modelId: "glm-5.3" },
+      { category: "invalid_output", reasonCode: "invalid_json", providerId: "deepseek", modelId: "deepseek-flash" },
     ), false],
     ["structured output contract", new CodexBridgeError(
       "model output does not satisfy the requested structure",
@@ -899,7 +899,7 @@ describe("model provider failure policy", () => {
       "completed_failure",
       422,
       undefined,
-      { category: "invalid_output", reasonCode: "output_contract", providerId: "zai-bigmodel-api", modelId: "glm-5.3" },
+      { category: "invalid_output", reasonCode: "output_contract", providerId: "deepseek", modelId: "deepseek-flash" },
     ), false],
     ["invalid request mentioning JSON", new CodexBridgeError(
       "request uses an invalid JSON schema",
@@ -913,20 +913,20 @@ describe("model provider failure policy", () => {
     // 记着"是 404"。这一条必须换下一个候选——停止会让人以为自己的请求有问题。三种 reasonCode
     // 写法说的是同一件事，都要认。
     ["retired model id HTTP 404", new CodexBridgeError(
-      "ZAI Chat Completion returned HTTP 404.",
+      "DeepSeek Chat Completion returned HTTP 404.",
       false,
       "completed_failure",
       422,
       undefined,
-      { category: "invalid_request", reasonCode: "http_404", providerId: "zai-bigmodel-api", modelId: "glm-4.5" },
+      { category: "invalid_request", reasonCode: "http_404", providerId: "deepseek", modelId: "deepseek-v3" },
     ), true],
     ["retired model id with numeric provider code", new CodexBridgeError(
-      "ZAI Chat Completion returned HTTP 404 (code 404).",
+      "DeepSeek Chat Completion returned HTTP 404 (code 404).",
       false,
       "completed_failure",
       422,
       undefined,
-      { category: "invalid_request", reasonCode: "404", providerId: "zai-bigmodel-api", modelId: "glm-4.5" },
+      { category: "invalid_request", reasonCode: "404", providerId: "deepseek", modelId: "deepseek-v3" },
     ), true],
     // 合同违规同样是 invalid_request，但 reasonCode 不是 404：这里必须停下。合同 bug 换一个模型
     // 只会被掩盖成"第二个模型也不行"。
@@ -944,7 +944,7 @@ describe("model provider failure policy", () => {
       "completed_failure",
       422,
       undefined,
-      { category: "invalid_request", reasonCode: "unsupported_parameter", providerId: "zai-bigmodel-api", modelId: "glm-5.3" },
+      { category: "invalid_request", reasonCode: "unsupported_parameter", providerId: "deepseek", modelId: "deepseek-flash" },
     ), false],
     ["output contract", new CodexBridgeError("output contract failed", false, "completed_failure", 503), false],
     ["content safety", new CodexBridgeError("content safety policy rejected the prompt", false, "completed_failure", 503), false],
@@ -968,7 +968,7 @@ describe("FallbackVisualDirectorAgent", () => {
       plan: async () => ({}),
       planDetailed: async () => {
         calls.push(modelId);
-        if (modelId === "glm-5.3") throw providerFailure(modelId);
+        if (modelId === "deepseek-flash") throw providerFailure(modelId);
         return {
           output: {},
           trace: {
@@ -982,18 +982,18 @@ describe("FallbackVisualDirectorAgent", () => {
       },
     });
     const fallback = new FallbackVisualDirectorAgent({
-      candidates: ["gpt-quality", "glm-5.3", "gpt-fast"].map((modelId) => ({
+      candidates: ["gpt-quality", "deepseek-flash", "gpt-fast"].map((modelId) => ({
         providerId: brokerProviderId(modelId),
         agent: directorAgent(modelId),
       })),
     });
 
     const execution = await fallback.planDetailed({
-      selectedModelId: "glm-5.3",
+      selectedModelId: "deepseek-flash",
     } as VisualDirectorAgentInput);
 
-    assert.deepEqual(calls, ["glm-5.3", "gpt-quality"]);
+    assert.deepEqual(calls, ["deepseek-flash", "gpt-quality"]);
     assert.equal(execution.trace?.modelId, "gpt-quality");
-    assert.deepEqual(execution.trace?.attemptedModelIds, ["glm-5.3", "gpt-quality"]);
+    assert.deepEqual(execution.trace?.attemptedModelIds, ["deepseek-flash", "gpt-quality"]);
   });
 });

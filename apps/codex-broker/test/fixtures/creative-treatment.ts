@@ -1,4 +1,4 @@
-// 两种文本 executor（OpenAI Codex 与 ZAI/GLM）必须使用同一组合法/非法 fixture，
+// 两种文本 executor（OpenAI Codex 与 DeepSeek）必须使用同一组合法/非法 fixture，
 // 防止各自复制后随时间漂移；production 侧 parser 测试不与本文件跨包耦合。
 
 export function creativeTreatmentRequest(): { protocolVersion: string; kind: string; payload: Record<string, unknown> } {

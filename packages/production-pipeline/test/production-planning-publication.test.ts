@@ -201,7 +201,7 @@ describe("joint-v1 planning publication crash recovery (real child processes)", 
 
       assert.equal(
         recovery.report.treatmentProvenance?.providerId,
-        "zai-bigmodel-api",
+        "deepseek",
         "the carried treatment's formal provenance must keep the fallback provider, not the model string or the first binding",
       );
       const treatmentStage = recovery.report.planningStageModels.find((stage) => stage.stageId === "treatment");

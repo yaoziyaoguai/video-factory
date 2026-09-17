@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# ZAI Code Plan broker 的一次性宿主机初始化。密钥只从既有 0600 文件读取。
+# DeepSeek broker 的一次性宿主机初始化。密钥只从既有 0600 文件读取。
 set -Eeuo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 broker_root=/opt/video-factory/codex-broker
-broker_user=vf-zai-codex
+broker_user=vf-deepseek-codex
 broker_group=vf-bridge
-broker_uid="${ZAI_CODEX_UID:-22003}"
-broker_home=/home/vf-zai-codex
-broker_state_root=/var/lib/video-factory-zai-codex
+broker_uid="${DEEPSEEK_CODEX_UID:-22003}"
+broker_home=/home/vf-deepseek-codex
+broker_state_root=/var/lib/video-factory-deepseek-codex
 broker_workspace="$broker_state_root/workspace"
-broker_socket=/run/video-factory-zai-codex/worker.sock
-env_file=/etc/video-factory/zai-codex-broker.env
-unit_source="$repository_root/apps/codex-broker/deploy/vf-zai-codex-broker.service"
-unit_target=/etc/systemd/system/vf-zai-codex-broker.service
-service=vf-zai-codex-broker
+broker_socket=/run/video-factory-deepseek-codex/worker.sock
+env_file=/etc/video-factory/deepseek-codex-broker.env
+unit_source="$repository_root/apps/codex-broker/deploy/vf-deepseek-codex-broker.service"
+unit_target=/etc/systemd/system/vf-deepseek-codex-broker.service
+service=vf-deepseek-codex-broker
 
 fail() {
-  echo "[setup-zai-codex-broker] $1" >&2
+  echo "[setup-deepseek-codex-broker] $1" >&2
   exit 1
 }
 
@@ -32,13 +32,10 @@ if ! id -nG "$broker_user" | tr ' ' '\n' | grep -qx "$broker_group"; then
 fi
 install -d -o "$broker_user" -g "$broker_group" -m 0750 "$broker_state_root" "$broker_workspace"
 
-[[ -f "$env_file" ]] || fail "缺少 $env_file；请先以 root:root 0600 写入 ZAI_BIGMODEL_API_KEY。"
+[[ -f "$env_file" ]] || fail "缺少 $env_file；请先以 root:root 0600 写入 DEEPSEEK_API_KEY。"
 [[ "$(stat -c %U:%G "$env_file")" == "root:root" ]] || fail "$env_file 必须属于 root:root。"
 [[ "$(stat -c %a "$env_file")" == "600" ]] || fail "$env_file 权限必须是 600。"
-grep -qE '^ZAI_BIGMODEL_API_KEY=.+$' "$env_file" || fail "$env_file 缺少非空 ZAI_BIGMODEL_API_KEY。"
-if grep -qE '^ZAI_API_KEY=' "$env_file"; then
-  fail "$env_file 仍包含旧 ZAI_API_KEY；请删除后只保留 ZAI_BIGMODEL_API_KEY。"
-fi
+grep -qE '^DEEPSEEK_API_KEY=.+$' "$env_file" || fail "$env_file 缺少非空 DEEPSEEK_API_KEY。"
 
 node_bin="$broker_root/bin/node"
 [[ -x "$node_bin" ]] || fail "缺少共享 Node 运行时；请先运行 setup-codex-broker-host.sh。"
@@ -56,7 +53,7 @@ if [[ -f "$broker_root/current/dist/main.js" ]]; then
   systemctl restart "$service"
   for _ in $(seq 1 20); do
     if curl --fail --silent --max-time 5 --unix-socket "$broker_socket" http://localhost/health >/dev/null; then
-      echo "ZAI Code Plan broker 已就绪。"
+      echo "DeepSeek broker 已就绪。"
       exit 0
     fi
     sleep 1
@@ -65,4 +62,4 @@ if [[ -f "$broker_root/current/dist/main.js" ]]; then
   fail "$service 未在健康检查内就绪。"
 fi
 
-echo "宿主机初始化完成；下一次部署会安装并启动 ZAI broker 制品。"
+echo "宿主机初始化完成；下一次部署会安装并启动 DeepSeek broker 制品。"
