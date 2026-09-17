@@ -464,10 +464,15 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
       )));
       const scriptCheckpoint = checkpoints.find((checkpoint) => checkpoint.role === "编剧");
       assert.equal(scriptCheckpoint?.status, "failed");
-      const failure = scriptCheckpoint?.failure as { details?: { queueWaitMs?: number } } | undefined;
+      const failure = scriptCheckpoint?.failure as { details?: { queueWaitMs?: number }; summary?: string } | undefined;
       assert.ok(Number.isInteger(failure?.details?.queueWaitMs) && failure!.details!.queueWaitMs! >= 0);
+      // 面向创作者的中文说明也随机器诊断一起落盘。节点失败拖垮整条 run 时原因会走 node.error，
+      // 可节点活下来接着往下走时 checkpoint 是唯一通道；这里钉住它确实穿过了真实 socket 与节点，
+      // 具体措辞由 role-agent-loop 的单测负责。
+      assert.match(failure?.summary ?? "", /模型调用超时/);
       assert.deepEqual({
         ...(scriptCheckpoint?.failure as Record<string, unknown>),
+        summary: "creator-facing",
         details: {
           ...((scriptCheckpoint?.failure as { details?: Record<string, unknown> } | undefined)?.details ?? {}),
           queueWaitMs: "measured",
@@ -476,6 +481,7 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
         stage: "completed_failure",
         statusCode: 422,
         failureKind: "model_provider_transient",
+        summary: "creator-facing",
         details: {
           category: "timeout",
           reasonCode: "provider_timeout",
