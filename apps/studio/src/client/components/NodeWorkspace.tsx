@@ -1,5 +1,5 @@
 import { AlertTriangle, Check, ChevronDown, CircleDollarSign, Clock3, FilePenLine, Pause, Save, Settings2, ShieldCheck, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProductionQuote, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { studioApi } from "../api.js";
@@ -236,6 +236,18 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   function beginPlanningStageInputEdit(stageId: StudioPlanningStage["id"]) {
     beginInputEditing(stageId as StudioPlanningEditableStage);
   }
+
+  // 输入编辑器渲染在本工作区靠下的位置：不滚过去的话，「编辑某一阶段的输入」点完看起来
+  // 毫无反应，用户会以为按钮坏了，直到自己往下拖动页面才发现编辑器早就打开了（真实
+  // dogfood 反馈）。打开即把编辑器滚进视野。
+  const inputEditorSectionRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!editingInput) return;
+    const section = inputEditorSectionRef.current;
+    if (section && typeof section.scrollIntoView === "function") {
+      section.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [editingInput, editingPlanningStageId]);
 
   async function saveOverride(confirmTerminalEdit = false, preparedOverride?: StudioNodeOverrideInput) {
     setError(undefined);
@@ -510,7 +522,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
                 </article>)}
               </div>
             </section> : null}
-            {hasEditableInput ? <section className="node-output-preview">
+            {hasEditableInput ? <section ref={inputEditorSectionRef} className="node-output-preview">
               <header><div><strong>{editingPlanningStageId ? `正在修改创作规划「${editingPlanningStageId === "treatment" ? "前期构思" : editingPlanningStageId === "script" ? "脚本" : "导演方案"}」阶段的输入` : "本步骤专用设置"}</strong><small>{inputSourceLabel(effectiveInputVersion?.source)}{node.inputState?.stale ? " · 前序内容已变化，需复核" : ""}{editingPlanningStageId ? " · 保存后从该阶段开始重新规划" : ""}</small></div>{!editingInput ? <button className="button button-ghost" type="button" onClick={() => beginInputEditing()}><FilePenLine aria-hidden="true" size={15} />编辑输入</button> : null}</header>
               {effectiveInputVersion?.source === "reconstructed" ? <p className="node-version-note">旧任务没有保存当时的原始输入；这里展示的是按当前上游内容推断出的可编辑版本。</p> : null}
               {editingInput ? <NodeStructuredEditor nodeId={`${node.id}-input`} value={safeParse(inputDraft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setInputDraft(pretty(value)); }} /> : <NodeDeliveryPreview nodeId={`${node.id}-input`} value={effectiveInput(node)} />}

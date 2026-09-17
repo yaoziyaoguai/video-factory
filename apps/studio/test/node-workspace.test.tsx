@@ -659,6 +659,24 @@ describe("node production workspaces", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("brings the input editor into view as soon as input editing begins", async () => {
+    // 「编辑某一阶段的输入」的编辑器在工作区下方：不滚过去，按钮点完看起来毫无反应，
+    // 用户会以为按钮坏了，直到自己往下拖动页面才发现编辑器早就打开了（真实 dogfood 反馈）。
+    // jsdom 没有实现 scrollIntoView，先补一个可断言的替身再还原。
+    const scrollSpy = vi.fn(() => {});
+    Object.defineProperty(Element.prototype, "scrollIntoView", { value: scrollSpy, configurable: true, writable: true });
+    try {
+      render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={succeededNode} runStatus="stale" artifacts={[]} busy={false} onOverride={async () => undefined} onInputOverride={async () => undefined} onAuthorize={async () => undefined} />);
+
+      await userEvent.click(screen.getByRole("button", { name: "编辑输入" }));
+      await waitFor(() => expect(scrollSpy).toHaveBeenCalled());
+      const section = scrollSpy.mock.contexts[0] as HTMLElement | undefined;
+      expect(section?.className).toBe("node-output-preview");
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
   it("discloses a failed agent audit and its public rule fallback reason", () => {
     const fallbackReason = "模型连续三轮未通过审计，已采用确定性脚本规则。";
     const node: StudioNode = {

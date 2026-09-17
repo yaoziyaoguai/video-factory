@@ -384,7 +384,9 @@ export async function runRoleAgentLoop<TOutput>(
             throw await failedLoopError(
               new Error(
                 `${options.role}连续两次返回了无法使用的结果；本轮质量审计尚未消耗，`
-                + `可从已保存进度继续。${validationRevision.validationError}`,
+                // 机器诊断放进「诊断：」段：界面渲染时剥掉这一整段，创作者只读到中文句；
+                // 原文留在 checkpoint 与日志里给操作员定位。裸拼在中文句后面会变成半句英文。
+                + `可从已保存进度继续。\n诊断：${validationRevision.validationError}`,
               ),
               options,
               state,
@@ -501,7 +503,8 @@ export async function runRoleAgentLoop<TOutput>(
           throw await failedLoopError(
             new Error(
               `${options.role}的独立审计连续两次返回了无法使用的结果；本轮质量审计尚未消耗，`
-              + `可从已保存进度继续。${publicValidationError(error)}`,
+              // 同上：诊断进「诊断：」段，界面剥掉，操作员保留。
+              + `可从已保存进度继续。\n诊断：${publicValidationError(error)}`,
             ),
             options,
             state,
@@ -1679,8 +1682,15 @@ function validatePlanningDisposition(
   if (new Set(normalized).size !== normalized.length) {
     throw new Error("Role audit planningDisposition.issueIndexes must be unique.");
   }
-  if (normalized.some((index) => issues[index]?.severity !== "blocking")) {
-    throw new Error("Role audit planningDisposition can only identify blocking issues.");
+  // 审计模型可能把处置指向的问题标成 advisory（合同要求处置只指 blocking），而处置本身
+  // （verdict=repair 加指名这些问题）已经说明它认为这些问题必须就地修。severity 是描述，
+  // 处置才是决定——为一处标错 severity 作废整轮审计，丢掉的是已经抓到真实问题的结论
+  // （与上面 revise_here 归一化为 null 同一条纪律；deepseek-flash 在 dogfood 里真实踩过，
+  // 代价是整条制作被打成 failed）。按处置的指认把这些条目升格为 blocking，修复回路照常
+  // 工作；处置没指认的问题保持原样。
+  for (const index of normalized) {
+    const issue = issues[index];
+    if (issue && issue.severity !== "blocking") issues[index] = { ...issue, severity: "blocking" };
   }
   return { action: disposition.action, issueIndexes: normalized };
 }

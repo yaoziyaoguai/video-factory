@@ -1487,6 +1487,64 @@ describe("role agent loop audit boundary", () => {
     );
   });
 
+  it("promotes disposition-flagged issues to blocking instead of discarding the whole audit", () => {
+    // 审计模型偶发把处置指向的问题标成 advisory（合同要求处置只指 blocking）。为一处
+    // severity 标错作废整轮审计，在真实 dogfood 里把整条制作打成了 failed——而处置本身
+    // （verdict=repair 加指名这些问题）已经说明模型认为它们必须就地修。升格为 blocking，
+    // 修复回路照常工作；这与上面 revise_here 归一化为 null 是同一条纪律。
+    const parsed = validateRoleAudit({
+      ...repairingAudit(),
+      issues: [{ severity: "advisory", criterion: "标题具体", evidence: "仍然抽象", repairInstruction: "改成具体动作" }],
+      planningDisposition: { action: "revise_here", issueIndexes: [0] },
+    }, { planningRole: true });
+    assert.equal(parsed.issues[0]?.severity, "blocking", "处置指认的问题必须随处置升格");
+    assert.deepEqual(parsed.planningDisposition, { action: "revise_here", issueIndexes: [0] });
+    // 处置没指认的问题保持原样：升格只发生在模型自己指名的问题上。
+    const untouched = validateRoleAudit({
+      ...repairingAudit(),
+      issues: [
+        { severity: "advisory", criterion: "标题具体", evidence: "仍然抽象", repairInstruction: "改成具体动作" },
+        { severity: "advisory", criterion: "节奏拖沓", evidence: "开场太长", repairInstruction: "压缩开场" },
+      ],
+      planningDisposition: { action: "revise_here", issueIndexes: [0] },
+    }, { planningRole: true });
+    assert.equal(untouched.issues[0]?.severity, "blocking");
+    assert.equal(untouched.issues[1]?.severity, "advisory");
+  });
+
+  it("moves the machine validation detail into a strippable diagnostics line on exhaustion", async () => {
+    let stored: unknown;
+    const execute = () => runRoleAgentLoop<{ title: string }>({
+      role: "编剧",
+      planningRole: true,
+      contractVersion: "screenwriter-audit-copy-v1",
+      criteria: ["脚本可执行"],
+      maxIterations: 3,
+      checkpoint: {
+        key: "audit-exhaustion-copy",
+        load: async () => stored,
+        save: async (value) => { stored = structuredClone(value); },
+      },
+      produce: async () => ({ output: { title: "完整脚本" } }),
+      audit: async () => ({
+        // 处置指向不存在的问题：模型反复踩同一条合同红线，两次后被放弃。
+        output: { ...repairingAudit(), planningDisposition: { action: "revise_here", issueIndexes: [99] } },
+      }),
+      validate: titleCandidate,
+    });
+
+    await assert.rejects(execute, (error: Error) => {
+      assert.match(error.message, /编剧的独立审计连续两次返回了无法使用的结果/);
+      assert.match(error.message, /可从已保存进度继续/);
+      // 机器诊断挪进「诊断：」段：界面把这一整段剥掉，创作者只读到中文句；
+      // 原文留在 checkpoint 与日志里给操作员定位。曾经裸拼在中文句号后面，
+      // 屏幕上是半句英文（真实 dogfood 反馈）。
+      assert.match(error.message, /\n诊断：Role audit planningDisposition/);
+      assert.equal(/继续\.\s*Role audit/.test(error.message), false, "机器原文不得裸拼在中文句后面");
+      return true;
+    });
+  });
+
   it("lets an independent audit send a misclassified source issue back to the same role without bypassing revalidation", async () => {
     let produceCalls = 0;
     const result = await runRoleAgentLoop<{ title: string }>({
