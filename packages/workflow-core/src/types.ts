@@ -137,6 +137,11 @@ export interface HumanInterventionDraft {
     reviewRevision: number;
     draftSha256: string;
   };
+  /**
+   * 自动循环是自己推不动了才停下的：停下的理由必须随停点一起到达人眼前。没有它，人只看到
+   * "方案已生成，等你确认"，无从知道该在哪一件事上做决定。
+   */
+  stopDetail?: string;
 }
 
 export interface HumanIntervention extends HumanInterventionDraft {

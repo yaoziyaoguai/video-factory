@@ -972,6 +972,8 @@ body { background: var(--canvas); }
 .studio-v3 .node-preview-expand:focus-visible { outline: 2px solid var(--violet); outline-offset: 3px; }
 .studio-v3 .node-pause-edit { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 11px; color: var(--muted); background: color-mix(in srgb, var(--violet) 7%, #fff); border-left: 3px solid color-mix(in srgb, var(--violet) 62%, #fff); font-size: 10px; line-height: 1.5; }
 .studio-v3 .node-pause-edit .button { flex: 0 0 auto; }
+.studio-v3 .boundary-next-step { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 12px; padding: 9px 11px; color: var(--muted); background: color-mix(in srgb, var(--violet) 7%, #fff); border-left: 3px solid color-mix(in srgb, var(--violet) 62%, #fff); font-size: 10px; line-height: 1.5; }
+.studio-v3 .boundary-next-step .button { flex: 0 0 auto; }
 .studio-v3 .run-pause-button { justify-self: start; }
 .studio-v3 .asset-routing-list { display: grid; gap: 8px; }
 .studio-v3 .asset-routing-scene { min-width: 0; padding: 11px; background: #ffffff; border: 1px solid var(--line); border-radius: 6px; }

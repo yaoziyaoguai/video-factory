@@ -92,6 +92,7 @@ import {
   createCreativePlanningGraph,
   executablePlanCompilePort,
   initialPlanningGraphState,
+  planningArtifactId,
   planningSourceAdvisories,
   rankingSemanticIntent,
   runCreativePlanning,
@@ -6053,11 +6054,6 @@ function effectiveTreatmentModelId(
   return bindings[0]?.agent.modelId;
 }
 
-// 图内产物 id：内容摘要派生，重放/恢复得到相同产物时 id 稳定。
-function planningArtifactId(stage: string, output: unknown): string {
-  return `${stage}:${createHash("sha256").update(JSON.stringify(output)).digest("hex")}`;
-}
-
 // joint-v1 规划输出的正式合同：必需路径缺失即拒绝；图库路线必须给出候选检索、排序路径与
 // 私有库存路径（物化消费库存，不得拿公开报告顶替），无图库路线不伪造候选路径。
 function validateJointPlanningOutput(output: unknown, libraryRoute: boolean): Record<string, unknown> {
@@ -7426,6 +7422,10 @@ function creativePlanningNode(
               blockingIssues,
               draftArtifactId: registered.id,
               stage,
+              // 自动循环自停的理由随停点一起交给界面：人做决定时要知道是哪一件事把循环卡住了。
+              ...(outcome.state.planningStop
+                ? { planningStop: structuredClone(outcome.state.planningStop) }
+                : {}),
               ...(creativeReviewResume ? {
                 creativeReviewOperation: {
                   commandId: creativeReviewResume.commandId,
@@ -7444,6 +7444,11 @@ function creativePlanningNode(
                   : blockingIssues.length > 0
                     ? "当前导演方案需要你决定：素材条件无法满足已确认的画面路线，系统已保留方案且不会自动改写。"
                     : "导演方案已生成，等你确认。",
+              // 自动循环是自己推不动了才停下的，这一点必须说出来：否则人以为一切正常，
+              // 不知道该在哪一件事上做决定。停下等人的决定权在人手里，不是已经判了这个作品。
+              ...(outcome.state.planningStop
+                ? { stopDetail: `自动检查已停止：${outcome.state.planningStop.detail}` }
+                : {}),
               requiredAction: "approve",
               options: ["approve", "request_changes"],
               artifactIds: [registered.id],

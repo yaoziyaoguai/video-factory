@@ -1477,6 +1477,12 @@ export class ProductionStudio {
         }];
       })
       : [];
+    // 自动循环自停的理由：它与本轮审计裁决无关（裁决是确认时才跑的那一轮），所以单独带出来，
+    // 不能混进 checkResult，否则界面会把"循环停下"当成一条还没看过的复核意见。
+    const rawPlanningStop = isRecord(output?.planningStop) ? output.planningStop : undefined;
+    const stopDetail = rawPlanningStop && typeof rawPlanningStop.detail === "string"
+      ? rawPlanningStop.detail
+      : undefined;
     const rawCheckResult = isRecord(stageState?.checkResult) ? stageState.checkResult : undefined;
     const checkResult: StudioCreativeReviewSnapshot["checkResult"] = rawCheckResult
       && (rawCheckResult.verdict === "pass" || rawCheckResult.verdict === "repair")
@@ -1540,6 +1546,7 @@ export class ProductionStudio {
           .map((instruction) => ({ commandId: String(instruction.commandId ?? ""), message: String(instruction.message ?? "") }))
         : [],
       ...(checkResult ? { checkResult } : {}),
+      ...(stopDetail ? { stopDetail } : {}),
     };
   }
 

@@ -1353,6 +1353,11 @@ export interface StudioCreativeReviewSnapshot {
     // 展示的那一条意见，而不是"当前这一版草稿碰巧存在的某条意见"。
     checkIdentity: string;
   };
+  /**
+   * 停在这里是因为自动循环先停下了，而不是因为这一版做完了。理由要给人看：否则人以为一切
+   * 正常，不知道该在哪一件事上拍板。它独立于 checkResult——那是确认时才跑的那一轮复核。
+   */
+  stopDetail?: string;
 }
 
 type StudioCreativeReviewCommandBase = {

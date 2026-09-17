@@ -4,7 +4,7 @@ import type { StudioCostRunDetail, StudioDecisionInput, StudioNarrationRevisionI
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { agentLoopPhaseLabel, creatorFacingTechnicalText, humanizeCreativeText, platformLabel, providerLabel, catalogModelLabel, runNodeLabel, sourceAssetReviewBreakdown } from "../presentation.js";
-import { NodeWorkspace } from "./NodeWorkspace.js";
+import { NodeWorkspace, revealNodeWorkspace } from "./NodeWorkspace.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 
 interface RunWorkbenchProps {
@@ -68,7 +68,15 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const voiceTimingDialogRef = useDialogFocus<HTMLElement>(replanningVoice, closeVoiceTimingDecision, decisionPending);
   const readOnly = run.continuation?.supported === false;
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
-  const creatorNodes = run.nodes.filter((node) => nodeHasCreatorContent(node, run));
+  // 边界停点：这一步已做完、产物已存，只等用户决定是否进入下一步。按钮文案必须按
+  // 它真正的后果说话——把中间节点的放行写成「批准进入发布包」会让用户以为点下去就发了。
+  const boundaryGate = run.activeIntervention?.boundary === "node-complete";
+  const boundaryOptions = boundaryGate ? run.activeIntervention?.options ?? [] : [];
+  // 停点放行的是下一步，而下一步还没跑、没有任何产物，于是它从前落不进 creatorNodes：
+  // 用户看得到「进入下一步」，却找不到地方配置那一步怎么跑——简报之后最典型，创作规划
+  // 用哪个模型只能等它自己跑起来才有地方改。带可调执行的下一步在停点上一并露出。
+  const nextGateNode = boundaryGate ? nextConfigurableNode(run) : undefined;
+  const creatorNodes = run.nodes.filter((node) => node.id === nextGateNode?.id || nodeHasCreatorContent(node, run));
   const activeSpendNode = readOnly ? undefined : creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
   const remainingCreatorNodes = creatorNodes.filter((node) => node.id !== activeSpendNode?.id);
   const showReviewSurface = Boolean(readOnly || video?.contentUrl || run.activeIntervention || isStoppedStatus(run.status));
@@ -78,10 +86,6 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const visualReview = visualReviewDecision(run);
   const voiceTiming = voiceTimingConflict(run);
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
-  // 边界停点：这一步已做完、产物已存，只等用户决定是否进入下一步。按钮文案必须按
-  // 它真正的后果说话——把中间节点的放行写成「批准进入发布包」会让用户以为点下去就发了。
-  const boundaryGate = run.activeIntervention?.boundary === "node-complete";
-  const boundaryOptions = boundaryGate ? run.activeIntervention?.options ?? [] : [];
   // 停下来的这一步的独立复核进度。SSE 载荷里没有它，由 preferRunSnapshot 从上一帧补回来，
   // 否则用户点开决策面板的瞬间看到的是一片空白，要等十秒心跳才出现建议。
   const waitingNodeId = run.activeIntervention?.nodeId;
@@ -383,6 +387,10 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                   </button>
                 ) : null}
                 <p className="agent-review-guidance">补查会重跑整轮审片、不会重新购买画面或配音，因此<strong>其它镜头（包括上一轮已通过的镜头）的结论也可能变化</strong>；判定与上一轮不同的条目会标出「判定变动」，并给出两轮原文。批准前你要对本轮每一条结论逐条表态：采纳的必须先返修，不采纳的要写明理由。</p>
+              </div> : null}
+              {nextGateNode ? <div className="boundary-next-step">
+                <span>下一步「{nextGateNode.label}」还没开始。放行后它会直接按现在保存的模型和设置开始跑；要改就在放行前改。</span>
+                <button className="button button-ghost" type="button" onClick={() => revealNodeWorkspace(nextGateNode.id)}>去配置「{nextGateNode.label}」</button>
               </div> : null}
               <div className="decision-actions">
                 {boundaryGate ? <>
@@ -1476,6 +1484,16 @@ function runStateMessage(run: StudioRunDetail): string {
   if (run.status === "paused") return "制作已经安全暂停。现在可以修改已完成角色的输入或交付；不修改也可以直接继续。";
   if (run.pauseRequested) return "已请求暂停；当前步骤会先安全完成，系统将在下一步开始前停下。";
   return "制作正在自动执行，详情页会实时更新；连接中断时会明确提示。";
+}
+
+// 边界停点之后、还没开始跑的第一个带可调执行的节点。机械步骤（渲染、技术质检、终审）
+// 在服务端就不下发 executionConfiguration，自然落选——露出一个没有可调项的面板只是空壳。
+function nextConfigurableNode(run: StudioRunDetail): StudioRunDetail["nodes"][number] | undefined {
+  const waitingIndex = run.nodes.findIndex((node) => node.id === run.activeIntervention?.nodeId);
+  if (waitingIndex < 0) return undefined;
+  return run.nodes
+    .slice(waitingIndex + 1)
+    .find((node) => node.status === "pending" && node.executionConfiguration !== undefined);
 }
 
 function nodeHasCreatorContent(node: StudioRunDetail["nodes"][number], run: StudioRunDetail): boolean {

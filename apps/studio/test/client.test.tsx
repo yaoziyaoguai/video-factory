@@ -3702,6 +3702,70 @@ describe("Studio client", () => {
     expect(screen.queryByRole("button", { name: /批准进入发布包/ })).not.toBeInTheDocument();
   });
 
+  it("lets the creator configure the step a boundary stop is about to release", () => {
+    const scriptProvider: StudioProvider = {
+      id: "codex-screenwriter-v1",
+      capability: "script.draft",
+      label: "Codex 编剧",
+      available: true,
+      kind: "external",
+      defaultModelId: "glm-5.3",
+      modelProfiles: [
+        { id: "glm-5.3", label: "GLM-5.3", providerId: "codex-screenwriter-v1", providerFamily: "zai", available: true, description: "主力编剧模型", taskTypes: ["text"] },
+        { id: "gpt-5.6-sol", label: "GPT-5.6", providerId: "codex-screenwriter-v1", providerFamily: "openai", available: true, description: "备用编剧模型", taskTypes: ["text"] },
+      ],
+    };
+    const boundaryRun: StudioRunDetail = {
+      ...runDetail,
+      revision: 6,
+      planningStages: [
+        { id: "treatment", status: "pending", artifactIds: [], allowedActions: ["edit_input", "change_model"] },
+        { id: "script", status: "pending", providerId: "codex-screenwriter-v1", artifactIds: [], allowedActions: ["edit_input", "change_model"] },
+      ],
+      nodes: [
+        { id: "brief", label: "内容简报", role: "制片人", status: "needs_human", artifactIds: [], qualityGateResults: [], output: { title: "做决定前，先避开这 3 个坑" } },
+        { id: "creative-planning", label: "创作规划", role: "创作规划制片", status: "pending", artifactIds: [], qualityGateResults: [], executionConfiguration: { providerId: "codex-screenwriter-v1", modelSelections: {} } },
+      ],
+      activeIntervention: {
+        id: "boundary-brief",
+        nodeId: "brief",
+        boundary: "node-complete",
+        reason: "这一步已完成，等你确认后进入下一步。",
+        options: ["approve", "reject"],
+        createdAt: "2026-08-21T10:05:00.000Z",
+      },
+    };
+    render(<RunWorkbench run={boundaryRun} providers={[scriptProvider]} decisionPending={false} onDecision={async () => undefined} />);
+
+    // 停点上放行的正是下一步，而下一步还没跑、没有任何产物；从前它在界面上不存在，
+    // 于是"进入下一步"之前没有任何地方能改那一步怎么跑。
+    expect(screen.getByRole("button", { name: "去配置「创作规划」" })).toBeInTheDocument();
+    const workspace = screen.getByRole("group", { name: "创作规划 · 创作规划制片" });
+    expect(within(workspace).getByRole("region", { name: "创作规划阶段" })).toBeInTheDocument();
+    // 阶段模型在这里就能换：停点上改的必须是它真正会用的那一项。
+    expect(within(workspace).getByRole("combobox", { name: /下次使用脚本模型/ })).toBeInTheDocument();
+    // 规划节点自己的"本次制作选择"只覆盖编剧一项能力，与阶段面板说法不同、还会显示成"已失效"。
+    expect(within(workspace).queryByRole("region", { name: "创作规划制片本次制作选择" })).not.toBeInTheDocument();
+    // 规划还没启动，没有可编辑的输入版本；不能给一个点了没反应的按钮。
+    expect(within(workspace).queryByRole("button", { name: /编辑这一阶段的输入/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps an unrun step out of the workspace list when no boundary stop is pending", () => {
+    const { videoArtifactId: _videoArtifactId, ...runWithoutVideo } = runDetail;
+    const run: StudioRunDetail = {
+      ...runWithoutVideo,
+      revision: 6,
+      nodes: [
+        { id: "brief", label: "内容简报", role: "制片人", status: "needs_human", artifactIds: [], qualityGateResults: [], output: { title: "标题" } },
+        { id: "creative-planning", label: "创作规划", role: "创作规划制片", status: "pending", artifactIds: [], qualityGateResults: [], executionConfiguration: { providerId: "codex-screenwriter-v1", modelSelections: {} } },
+      ],
+    };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
+
+    expect(screen.queryByRole("group", { name: "创作规划 · 创作规划制片" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "去配置「创作规划」" })).not.toBeInTheDocument();
+  });
+
   it("offers the voice timing intervention action instead of publish approval", async () => {
     const user = userEvent.setup();
     const onDecision = vi.fn().mockResolvedValue(undefined);

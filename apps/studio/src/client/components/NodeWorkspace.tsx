@@ -127,6 +127,10 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const canEdit = !readOnly && !paidRecoveryLocked && !outputReadOnly && (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
   const canEditInput = !readOnly && !paidRecoveryLocked && !nodeReadOnly && effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
+  // 创作规划节点自己的"本次制作选择"只有编剧这一项能力，而阶段模型是逐个阶段挂在简报上的：
+  // 同时给出两个说法不同的控件，其中一个还会因为节点没有可切换能力而显示成"已失效"。
+  // 规划节点只留阶段面板这一个入口，且只在阶段面板真的在时才撤掉节点级编辑器。
+  const showPlanningStages = node.id === "creative-planning" && Boolean(planningStages?.length);
   const fallbackReason = useMemo(() => agentFallbackReason(execution), [execution]);
   const executionTiming = useMemo(() => executionTimingDetails(receipt), [receipt]);
   const modelBackupUsed = (execution?.actualModelIds?.length ?? 0) > 1;
@@ -443,7 +447,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>{fallbackHeading}</strong>：{fallbackReason}</span></p> : null}
         {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />这一步的结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成；仍然适用的部分会自动保留，不会全部重做。</p> : null}
-        {node.executionConfiguration ? <NodeExecutionConfigurationEditor
+        {node.executionConfiguration && !showPlanningStages ? <NodeExecutionConfigurationEditor
           node={node}
           providers={providers}
           runStatus={runStatus}
@@ -467,14 +471,16 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           <button className="button button-ghost" type="button" disabled={pauseBusy || pauseRequested} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{pauseRequested ? "等待暂停" : "暂停后修改"}</button>
         </div> : null}
 
-        {node.id === "creative-planning" && planningStages && planningStages.length > 0 ? (
+        {showPlanningStages && planningStages ? (
           <PlanningStagesPanel
             stages={planningStages}
             providers={providers}
             busy={busy}
             readOnly={readOnly || runStatus === "running"}
             {...(onPendingPlanningConfigurationChange ? { onPendingChange: onPendingPlanningConfigurationChange } : {})}
-            onEditStageInput={beginPlanningStageInputEdit}
+            // 节点还没有输入版本时（例如停在简报、规划尚未启动）没有可编辑的输入，
+            // 给了按钮也只是点了没反应——那就先不给。
+            {...(canEditInput ? { onEditStageInput: beginPlanningStageInputEdit } : {})}
             onConfigureStage={async (input) => {
               setError(undefined);
               try {
@@ -500,7 +506,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
               <div>
                 {inputSources.map((source) => <article key={source.node.id}>
                   <span><strong>{source.node.role ?? "制作角色"} · {source.node.label}</strong><small>{source.versionLabel}{source.node.outputState?.stale ? " · 前序内容已变化" : ""}</small></span>
-                  <button className="button button-ghost" type="button" aria-label={`${source.canEdit ? "查看与修改" : "查看"} ${source.node.role ?? "制作角色"} · ${source.node.label}`} onClick={() => revealSourceWorkspace(source.node.id)}>{source.canEdit ? "查看与修改" : "查看"}</button>
+                  <button className="button button-ghost" type="button" aria-label={`${source.canEdit ? "查看与修改" : "查看"} ${source.node.role ?? "制作角色"} · ${source.node.label}`} onClick={() => revealNodeWorkspace(source.node.id)}>{source.canEdit ? "查看与修改" : "查看"}</button>
                 </article>)}
               </div>
             </section> : null}
@@ -689,7 +695,7 @@ function revealExpandedWorkspace(workspace: HTMLDetailsElement): void {
   window.requestAnimationFrame(() => workspace.scrollIntoView({ block: "start" }));
 }
 
-function revealSourceWorkspace(nodeId: string): void {
+export function revealNodeWorkspace(nodeId: string): void {
   if (typeof document === "undefined") return;
   const workspace = document.getElementById(`node-workspace-${nodeId}`);
   if (!(workspace instanceof HTMLDetailsElement)) return;

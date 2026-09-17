@@ -9,8 +9,11 @@ import {
   executablePlanCompilePort,
   RoleAgentLoopError,
   runCreativePlanning,
+  runRoleAgentLoop,
+  type AvailabilityReviewer,
   type CreativePlanningPorts,
   type CreativeReviewGate,
+  type CreativeTreatment,
 } from "../src/index.js";
 import { planningThreadId } from "../src/creative-planning-store.js";
 import { initialCreativeReviewState, publishCreativeDraft, recordCreativeDiscussion, applyCreativeReviewDeterministicCommand, recordCreativeReviewCheck, confirmCreativeDraft, creativeReturnTargets, returnCreativeReviewToStage } from "../src/creative-review.js";
@@ -1351,5 +1354,251 @@ describe("three-stage creative review gates", () => {
     if (adjusted.status !== "waiting_user") return;
     assert.equal(adjusted.gate.draft.sha256, contentSha256(director));
     assert.deepEqual(adjusted.state.issues, [], "issues for the replaced draft must not remain current");
+  });
+});
+
+// 自动循环停下说的是"我推不动了"，不是"这个作品不行"。有创作确认关时它必须收成一个等人决定的
+// 停点：角色这一轮已经产出的候选以草稿身份发布出去，停下的理由一起带到人眼前，人确认就继续、
+// 要改就就地改。让它以 run failed 收场，等于让模型替人下了判决——治理不变量「任何审计都不能
+// 判定成功或失败，只有人能」拦的正是这件事。
+describe("自动循环停下时把决定交还给人", () => {
+  const passingCheck = (stage: string, output: unknown) => ({
+    audit: {
+      version: "video-factory/role-audit-v2" as const,
+      rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+      assessments: auditAssessments(92),
+      verdict: "pass" as const,
+      score: 92,
+      summary: `${stage}可以继续`,
+      issues: [],
+      repairInstructions: [],
+      planningDisposition: null,
+      hostReadinessReview: null,
+    },
+    checkIdentity: contentSha256({ stage, output }),
+  });
+
+  // 直接构造 RoleAgentPlanningHaltError 会把"生产里到底抛出什么"变成测试的假设，所以这里跑
+  // 真的角色循环：审计给出 needs_user 处置时它中止这一轮，把候选与审计一起抛出来。
+  const haltingTreatment = (key: string): CreativePlanningPorts["treatment"] => async (context) => {
+    if (context.creativeReviewExecution?.mode === "check") {
+      return { artifactId: "treatment", output: treatment, reviewCheck: passingCheck("treatment", treatment) };
+    }
+    await runRoleAgentLoop<CreativeTreatment>({
+      role: "导演前期构思",
+      planningRole: true,
+      contractVersion: "creative-treatment-planning-disposition-v1",
+      criteria: ["核心真实承诺必须有来源"],
+      maxIterations: 3,
+      checkpoint: { key, load: async () => undefined, save: async () => undefined },
+      produce: async () => ({ output: treatment }),
+      audit: async () => ({ output: {
+        version: "video-factory/role-audit-v2" as const,
+        rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+        verdict: "repair" as const,
+        score: 91,
+        assessments: [{ targetPath: "", dimensions: auditAssessments(91)[0]!.dimensions }],
+        summary: "创作表达完整，但锁定的真实实测承诺只有用户能决定是否改",
+        issues: [{
+          severity: "blocking" as const,
+          criterion: "事实来源",
+          evidence: "当前输入没有专属实验记录，现有图库和生成能力不能证明真实结果",
+          repairInstruction: "请补充真实实验记录，或由用户确认改变承诺",
+        }],
+        repairInstructions: ["补充真实实验记录"],
+        planningDisposition: { action: "needs_user" as const, issueIndexes: [0] },
+      } }),
+      validate: (value) => value as CreativeTreatment,
+    });
+    throw new Error("needs_user 处置必须中止这一轮构思，测试替身不应走到这里。");
+  };
+
+  it("角色级的 needs_user 停在构思确认关等人，确认后照常进入脚本", async () => {
+    const ports: CreativePlanningPorts = {
+      treatment: haltingTreatment("creative-treatment-needs-user"),
+      screenwriter: async (context) => ({
+        artifactId: "script",
+        output: script,
+        ...(context.creativeReviewExecution?.mode === "check" ? { reviewCheck: passingCheck("script", script) } : {}),
+      }),
+      director: async (context) => ({
+        artifactId: "director",
+        output: director,
+        ...(context.creativeReviewExecution?.mode === "check" ? { reviewCheck: passingCheck("director", director) } : {}),
+      }),
+      compile: executablePlanCompilePort,
+    };
+    const graph = createCreativePlanningGraph({ ports, checkpointer: new MemorySaver() });
+    const input = {
+      runId: "run-role-needs-user-halt",
+      inputDigest: "digest-role-needs-user-halt",
+      durationRange: { minSeconds: 20, maxSeconds: 30 },
+      creativeReview: CREATIVE_REVIEW_FEATURE,
+    };
+    const threadId = planningThreadId(input.runId, input.inputDigest);
+
+    const stop = await runCreativePlanning(graph, { input, threadId });
+    assert.equal(stop.status, "waiting_user", "自动循环停下必须停在人面前，而不是把整条制作判失败");
+    if (stop.status !== "waiting_user") return;
+    assert.equal(stop.gate.stage, "treatment");
+    assert.equal(stop.state.planningStop?.reason, "needs_user");
+    assert.match(stop.state.planningStop?.detail ?? "", /独立审计确认继续需要用户决定/);
+    assert.deepEqual(stop.state.issues.map((issue) => issue.target), ["user"]);
+    // 角色这一轮的产出以草稿身份发出去，并登记成这一步的产物：人看到的是"这一步做完了，
+    // 有件事只有你能定"，而不是一个连产物都没有的失败节点。
+    assert.equal(stop.state.artifactIds.treatment?.length, 1);
+    assert.equal(stop.state.creativeReview?.stages.treatment.phase, "waiting_user");
+    assert.deepEqual(stop.state.creativeReview?.stages.treatment.currentDocument, treatment);
+
+    const advanced = await runCreativePlanning(graph, {
+      input,
+      threadId,
+      resume: resume(stop.gate, "confirm-treatment-needs-user"),
+    });
+    assert.equal(advanced.status, "waiting_user");
+    if (advanced.status !== "waiting_user") return;
+    // 确认就是放行：照常走到脚本确认关，而不是在原处再停一遍。
+    assert.equal(advanced.gate.stage, "script");
+    assert.equal(advanced.state.planningStop, undefined, "人做过决定之后，停下的理由不能再跟着走");
+  });
+
+  it("复检级的 needs_user 停在导演确认关等人，并让已确认的方案继续走到编译", async () => {
+    const stockDirector = {
+      ...director,
+      shots: [{
+        ...director.shots[0]!,
+        deliveryType: "stock_video" as const,
+        query: "person comparing two visible results",
+        generationPrompt: "",
+      }],
+    };
+    const ports: CreativePlanningPorts = {
+      treatment: async (context) => ({
+        artifactId: "treatment",
+        output: treatment,
+        ...(context.creativeReviewExecution?.mode === "check" ? { reviewCheck: passingCheck("treatment", treatment) } : {}),
+      }),
+      screenwriter: async (context) => ({
+        artifactId: "script",
+        output: script,
+        ...(context.creativeReviewExecution?.mode === "check" ? { reviewCheck: passingCheck("script", script) } : {}),
+      }),
+      director: async (context) => {
+        const output = context.integratedPlan?.output ?? context.directorPlan?.output ?? stockDirector;
+        return context.creativeReviewExecution?.mode === "check"
+          ? { artifactId: "director", output, reviewCheck: passingCheck("director", output) }
+          : { artifactId: "director", output };
+      },
+      searchCandidates: async (context) => ({
+        artifactId: "candidates",
+        output: {
+          version: "video-factory/asset-candidates-v1" as const,
+          scenes: context.directorPlan!.output.shots
+            .filter((shot) => shot.deliveryType === "stock_video")
+            .map((shot) => ({
+              scenePosition: shot.scenePosition,
+              intent: { narrativeRole: shot.narrativeRole },
+              query: shot.query,
+              candidates: [{
+                provider: "provider-1", assetId: "asset-1", mediaType: "video" as const,
+                width: 1920, height: 1080, duration: 24,
+                previewUrl: "https://example.test/preview.jpg", sourceUrl: "https://example.test/source",
+                creator: "fixture", licenseNote: "fixture", query: shot.query, qualityScore: 80,
+              }],
+            })),
+        },
+      }),
+      rank: async (context) => ({
+        artifactId: "ranking",
+        output: {
+          version: "video-factory/asset-ranking-v1" as const,
+          source: "model" as const,
+          providerId: "ranker",
+          modelId: "ranker-model",
+          summary: "逐镜排序",
+          scenes: context.candidates!.output.scenes.map((scene) => ({
+            scenePosition: scene.scenePosition,
+            summary: "可用",
+            candidates: scene.candidates.map((candidate, index) => ({
+              provider: candidate.provider, assetId: candidate.assetId,
+              originalRank: index + 1, rank: index + 1,
+              semanticScore: 80, rationale: "匹配", locked: false,
+            })),
+          })),
+        },
+      }),
+      integrateDirector: async (context) => ({
+        artifactId: "director-integrated",
+        output: structuredClone(context.directorPlan!.output),
+      }),
+      compile: executablePlanCompilePort,
+    };
+    // 只有用户能解决的问题：第一轮停下等人，之后不再重复上报。
+    let reported = false;
+    const reviewer: AvailabilityReviewer = () => {
+      if (reported) return [];
+      reported = true;
+      return [{
+        id: "issue-needs-user",
+        target: "user",
+        beatIds: [],
+        scenePositions: [1],
+        reason: "这条画面要求会改变你已锁定的承诺",
+        requiredChange: "请你决定是否改口径",
+        evidenceArtifactIds: [],
+      }];
+    };
+    const graph = createCreativePlanningGraph({ ports, checkpointer: new MemorySaver(), availabilityReviewer: reviewer });
+    const input = {
+      runId: "run-evaluate-needs-user-halt",
+      inputDigest: "digest-evaluate-needs-user-halt",
+      durationRange: { minSeconds: 20, maxSeconds: 30 },
+      creativeReview: CREATIVE_REVIEW_FEATURE,
+    };
+    const threadId = planningThreadId(input.runId, input.inputDigest);
+
+    const treatmentGate = await runCreativePlanning(graph, { input, threadId });
+    assert.equal(treatmentGate.status, "waiting_user");
+    if (treatmentGate.status !== "waiting_user") return;
+    const scriptGate = await runCreativePlanning(graph, {
+      input,
+      threadId,
+      resume: resume(treatmentGate.gate, "confirm-treatment-evaluate-halt"),
+    });
+    assert.equal(scriptGate.status, "waiting_user");
+    if (scriptGate.status !== "waiting_user") return;
+
+    const stop = await runCreativePlanning(graph, {
+      input,
+      threadId,
+      resume: resume(scriptGate.gate, "confirm-script-evaluate-halt"),
+    });
+    assert.equal(stop.status, "waiting_user", "复检停下必须停在导演确认关，而不是把整条制作判失败");
+    if (stop.status !== "waiting_user") return;
+    assert.equal(stop.gate.stage, "director");
+    assert.equal(stop.state.planningStop?.reason, "needs_user");
+    assert.deepEqual(stop.state.creativeReview?.stages.director.currentDocument, stockDirector);
+
+    const afterDecision = await runCreativePlanning(graph, {
+      input,
+      threadId,
+      resume: resume(stop.gate, "confirm-director-evaluate-halt"),
+    });
+    // 人确认之后自动循环继续跑下去，走到下一个正常的确认关（整合方案复检），而不是又停在
+    // 同一个停点上、也不是以失败收场。停下的理由已经作废，不能跟着走到这一步。
+    assert.equal(afterDecision.status, "waiting_user");
+    if (afterDecision.status !== "waiting_user") return;
+    assert.equal(afterDecision.gate.stage, "director");
+    assert.equal(afterDecision.state.planningStop, undefined);
+    assert.deepEqual(afterDecision.state.artifactIds.integrate?.length, 1, "确认后必须真的走过整合，而不是原地打转");
+    assert.notEqual(afterDecision.gate.reviewRevision, stop.gate.reviewRevision, "这是一次新的确认，不是原来那一次");
+
+    const completed = await runCreativePlanning(graph, {
+      input,
+      threadId,
+      resume: resume(afterDecision.gate, "confirm-integrated-director-plan"),
+    });
+    // 这条制作不是被审计否掉的，是被人的决定放行的；编译照常完成。
+    assert.equal(completed.status, "completed");
   });
 });

@@ -16,7 +16,8 @@ interface PlanningStagesPanelProps {
   providers: StudioProvider[];
   busy: boolean;
   readOnly: boolean;
-  onEditStageInput: (stageId: StudioPlanningStage["id"]) => void;
+  /** 宿主节点当前没有可编辑的输入版本时不传：此时给按钮只会点了没反应。 */
+  onEditStageInput?: (stageId: StudioPlanningStage["id"]) => void;
   /** 面板只构造草稿；wire DTO 的并发基线由宿主在用户点击时补齐。 */
   onConfigureStage: (input: StudioNodeExecutionConfigurationDraft) => Promise<void>;
   onPendingChange?: (pending: boolean) => void;
@@ -99,7 +100,7 @@ export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditS
             ?? planningStageProvider(providers, stage.id);
           const models = provider ? selectableModelsForCapability(provider.modelProfiles, provider.capability) : [];
           const editable = !readOnly && !busy && stage.allowedActions.includes("edit_input")
-            && isEditablePlanningStage(stage.id);
+            && isEditablePlanningStage(stage.id) && onEditStageInput !== undefined;
           const canChangeModel = !readOnly && !busy && stage.allowedActions.includes("change_model")
             && isEditablePlanningStage(stage.id) && Boolean(provider) && models.length > 0;
           const draftModel = stageModelDrafts[stage.id] ?? "";
@@ -114,7 +115,7 @@ export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditS
               </div>
               {stage.issue ? <p className="planning-stage-issue"><CircleAlert aria-hidden="true" size={13} /> {creatorFacingTechnicalText(stage.issue)}</p> : null}
               {editable && isEditablePlanningStage(stage.id) ? (
-                <button className="button button-ghost" type="button" onClick={() => onEditStageInput(stage.id)}>
+                <button className="button button-ghost" type="button" onClick={() => onEditStageInput?.(stage.id)}>
                   <FilePenLine aria-hidden="true" size={14} /> 编辑这一阶段的输入
                 </button>
               ) : null}

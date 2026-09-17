@@ -172,6 +172,11 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
               </div>
             </li>)}</ul>
           </section> : null}
+          {/* 停在这里是因为自动循环推不动了，不是这一版做完了。不说出来，人会以为一切正常。 */}
+          {review.stopDetail ? <section className="creative-check-result" role="status">
+            <strong>自动检查已停止，需要你决定</strong>
+            <p>{review.stopDetail}</p>
+          </section> : null}
           {hasBlockingIssues ? <section className="creative-check-result" role="status">
             <strong>当前素材条件无法满足方案</strong>
             <ul>{review.blockingIssues.map((issue, index) => <li key={`${issue.reason}:${index}`}>

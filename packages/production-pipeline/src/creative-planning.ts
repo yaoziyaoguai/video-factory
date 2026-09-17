@@ -94,6 +94,8 @@ export interface CreativePlanningState {
   unresolvedIssueDigests: string[];
   issues: PlanningIssue[];
   creativeReview?: CreativeReviewState;
+  /** 本次停在人工确认关，是因为自动循环先停下了；理由必须一起带出来，否则人只看到"方案已生成"。 */
+  planningStop?: PlanningHalt;
 }
 
 export type PlanningHaltReason =
@@ -246,6 +248,11 @@ const PlanningGraphAnnotation = Annotation.Root({
   /** 播种产物所依据的阶段兼容身份；恢复不能依赖另一个非原子 sidecar。 */
   carriedStageInputIdentities: Annotation<Partial<Record<PlanningStageId, string>>>(),
   halt: Annotation<PlanningHalt | null>(),
+  /**
+   * 自动循环停下、把决定交还给人的原因。与 halt 互斥：halt 结束整条制作（旧流程保留），
+   * planningStop 只是把"为什么停下"带到人工停点上，让在场的人看着理由做决定。
+   */
+  planningStop: Annotation<PlanningHalt | null>(),
   /** 自动图库调整达到止损边界后，转入现有导演讨论，而不是结束整条制作。 */
   manualDirectorReview: Annotation<boolean>(),
   creativeReview: Annotation<CreativeReviewState>(),
@@ -281,6 +288,7 @@ export function initialPlanningGraphState(input: CreativePlanningInput): Plannin
     carriedProviderTraces: {},
     carriedStageInputIdentities: {},
     halt: null,
+    planningStop: null,
     manualDirectorReview: false,
     creativeReview: initialCreativeReviewState(),
   };
@@ -334,7 +342,18 @@ export function projectCreativePlanningState(state: PlanningGraphState): Creativ
     ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE
       ? { creativeReview: structuredClone(state.creativeReview) }
       : {}),
+    ...(state.planningStop ? { planningStop: structuredClone(state.planningStop) } : {}),
   };
+}
+
+/**
+ * 图内产物 id：内容摘要派生，重放/恢复得到相同产物时 id 稳定。
+ *
+ * 它是图与 port 之间的同一份约定：port 用它给正式产物命名，图在角色中途停下时也要用同一个
+ * 公式把候选认成"这一步的产物"。两处各写一份必然漂移，所以只有这一份。
+ */
+export function planningArtifactId(stage: string, output: unknown): string {
+  return `${stage}:${createHash("sha256").update(JSON.stringify(output)).digest("hex")}`;
 }
 
 // issue digest 只由结构化责任字段决定：id 与 requiredChange 不参与——改写修复建议或换一个
@@ -782,7 +801,7 @@ function planningNodeActions(
             : {}),
         };
       } catch (error) {
-        return planningRoleHaltUpdate(error, "treatment");
+        return planningRoleHaltUpdate(error, "treatment", state);
       }
     },
     script: async (state: PlanningGraphState) => {
@@ -804,7 +823,7 @@ function planningNodeActions(
             : {}),
         };
       } catch (error) {
-        return planningRoleHaltUpdate(error, "script");
+        return planningRoleHaltUpdate(error, "script", state);
       }
     },
     director: async (state: PlanningGraphState) => {
@@ -825,7 +844,7 @@ function planningNodeActions(
             : {}),
         };
       } catch (error) {
-        return planningRoleHaltUpdate(error, "director");
+        return planningRoleHaltUpdate(error, "director", state);
       }
     },
     candidates: async (state: PlanningGraphState) => {
@@ -1057,24 +1076,103 @@ export function planningSourceAdvisories(
   return [...hostIssues, ...auditIssues];
 }
 
-// needs_user 仍然停摆：它把决定交还给决策者本人，不是对作品下判。needs_source 已经不再是停摆
+// needs_user 仍然停下：它把决定交还给决策者本人，不是对作品下判。needs_source 已经不再是停摆
 // （见 role-agent-loop 的轮内注释），走的是 sourceAdvisoryUpdate 那条建议通道。
-function planningRoleHaltUpdate(error: unknown, stage: "treatment" | "script" | "director") {
+//
+// 但"停下"有两种表达，区别是谁来收尾：没有创作确认关时只能结束整条制作（旧流程，逐字节保留）；
+// 有确认关时停下来等人——角色已经产出的候选发布成该阶段草稿，人看到的是"这一步做完了，审计要
+// 你决定这件事"，确认就继续、要改就就地改。把审计想交还给人的决定翻译成"作品失败"，等于让
+// 审计替人下判，正是这条边界要拦的事。
+function planningRoleHaltUpdate(error: unknown, stage: "treatment" | "script" | "director", state: PlanningGraphState) {
   if (!(error instanceof RoleAgentPlanningHaltError)) throw error;
   const disposition = error.disposition;
   if (!disposition || disposition.action !== "needs_user") {
     throw new Error("Planning role halt must carry a needs_user audit disposition.");
   }
   const issues = auditDispositionIssues(error.audit, disposition, stage);
-  return {
+  const stop: PlanningHalt = {
+    reason: "needs_user",
+    issueIds: issues.map((issue) => issue.id),
+    detail: `独立审计确认继续需要用户决定是否改变既定承诺或路线：${error.audit.summary}`,
+  };
+  const opened = {
     stage,
     issues,
     unresolvedIssueDigests: issues.map(planningIssueDigest),
-    halt: {
-      reason: "needs_user" as const,
-      issueIds: issues.map((issue) => issue.id),
-      detail: `独立审计确认继续需要用户决定是否改变既定承诺或路线：${error.audit.summary}`,
-    },
+  };
+  if (state.base.creativeReview !== CREATIVE_REVIEW_FEATURE) {
+    return { ...opened, halt: stop };
+  }
+  // 候选是角色这一轮的产出，过审与否都不改变它"已经做出来了"这个事实——草稿的语义正是
+  // "未确认的产出"，所以它就该以草稿身份停在确认关上。
+  const artifactId = planningArtifactId(ROLE_STAGE_ARTIFACT_KIND[stage], error.candidate);
+  const draft = { artifactId, output: error.candidate };
+  return {
+    ...opened,
+    halt: null,
+    planningStop: stop,
+    ...stageArtifactUpdate(stage, draft),
+    artifactIds: withArtifactId(state, stage, artifactId),
+    creativeReview: publishCreativeDraft(
+      state.creativeReview,
+      stage,
+      artifactId,
+      draft.output,
+      ROLE_STAGE_REVIEW_DIGEST[stage](state),
+    ),
+  };
+}
+
+const ROLE_STAGE_ARTIFACT_KIND = {
+  treatment: "creative-treatment",
+  script: "script-draft",
+  director: "director-plan",
+} as const;
+
+const ROLE_STAGE_REVIEW_DIGEST = {
+  treatment: treatmentReviewInputDigest,
+  script: scriptReviewInputDigest,
+  director: directorReviewInputDigest,
+} as const;
+
+// 三个阶段的产物字段类型不同，动态键会让 TS 把整个对象退化成宽类型；按阶段分别返回保持
+// 注解的判别能力。
+function stageArtifactUpdate(
+  stage: "treatment" | "script" | "director",
+  artifact: { artifactId: string; output: unknown },
+): Partial<PlanningGraphState> {
+  if (stage === "treatment") return { treatmentArtifact: artifact as PlanningArtifact<CreativeTreatment> };
+  if (stage === "script") return { scriptArtifact: artifact as PlanningArtifact<ScriptDraft> };
+  return { directorPlan: artifact as PlanningArtifact<VisualDirectorPlan> };
+}
+
+/**
+ * evaluate 停下时的两种收尾，区别是谁来收尾。
+ *
+ * 没有创作确认关（旧流程）时只能结束整条制作——逐字节保留。有确认关时把决定交还给人：当前
+ * 导演方案发布成待确认草稿，连同"为什么停下"一起停在导演确认关上，人确认就继续编译，要改
+ * 就地改。自动循环停下来是说"我推不动了"，不是"这个作品不行"；让前者以失败收场，等于让模型
+ * 替人下了判决。
+ */
+function directorStopUpdate(
+  state: PlanningGraphState,
+  stop: PlanningHalt,
+  fields: Partial<PlanningGraphState>,
+): Partial<PlanningGraphState> {
+  const plan = state.integratedPlan ?? state.directorPlan;
+  if (state.base.creativeReview !== CREATIVE_REVIEW_FEATURE || !plan) return { ...fields, halt: stop };
+  return {
+    ...fields,
+    halt: null,
+    planningStop: stop,
+    manualDirectorReview: true,
+    creativeReview: publishCreativeDraft(
+      state.creativeReview,
+      "director",
+      plan.artifactId,
+      plan.output,
+      directorReviewInputDigest(state),
+    ),
   };
 }
 
@@ -1204,33 +1302,27 @@ function evaluateNode(availabilityReviewer: AvailabilityReviewer) {
     );
 
     // 只有用户能解决的问题（口径、取舍、授权范围）与素材确实不可得：停止自动重试。
+    const availabilityFields = {
+      issues: pending,
+      unresolvedIssueDigests: carriedUnresolved,
+      availabilityBlockerDigests: carriedAvailabilityBlockers,
+      availabilityBlockerObservations: carriedAvailabilityObservations,
+    };
     const userIssues = pending.filter((issue) => issue.target === "user");
     if (userIssues.length > 0) {
-      return {
-        issues: pending,
-        unresolvedIssueDigests: carriedUnresolved,
-        availabilityBlockerDigests: carriedAvailabilityBlockers,
-        availabilityBlockerObservations: carriedAvailabilityObservations,
-        halt: {
-          reason: "needs_user" as const,
-          issueIds: userIssues.map((issue) => issue.id),
-          detail: "存在只有用户能解决的问题，停止自动重试，等待用户决定。",
-        },
-      };
+      return directorStopUpdate(state, {
+        reason: "needs_user",
+        issueIds: userIssues.map((issue) => issue.id),
+        detail: "存在只有用户能解决的问题，停止自动重试，等待用户决定。",
+      }, availabilityFields);
     }
     const sourceIssues = pending.filter((issue) => issue.target === "source");
     if (sourceIssues.length > 0) {
-      return {
-        issues: pending,
-        unresolvedIssueDigests: carriedUnresolved,
-        availabilityBlockerDigests: carriedAvailabilityBlockers,
-        availabilityBlockerObservations: carriedAvailabilityObservations,
-        halt: {
-          reason: "needs_source" as const,
-          issueIds: sourceIssues.map((issue) => issue.id),
-          detail: "素材来源确实不可得，停止自动重试，需要补充素材或更换输入。",
-        },
-      };
+      return directorStopUpdate(state, {
+        reason: "needs_source",
+        issueIds: sourceIssues.map((issue) => issue.id),
+        detail: "素材来源确实不可得，停止自动重试，需要补充素材或更换输入。",
+      }, availabilityFields);
     }
     const confirmedDirector = state.creativeReview.stages.director.confirmation;
     const confirmedDirectorDraft = state.creativeReview.stages.director.currentDraft;
@@ -1315,30 +1407,18 @@ function evaluateNode(availabilityReviewer: AvailabilityReviewer) {
     }
     const duplicated = pending.filter((issue, index) => state.unresolvedIssueDigests.includes(digests[index]!));
     if (duplicated.length > 0) {
-      return {
-        issues: pending,
-        unresolvedIssueDigests: carriedUnresolved,
-        availabilityBlockerDigests: carriedAvailabilityBlockers,
-        availabilityBlockerObservations: carriedAvailabilityObservations,
-        halt: {
-          reason: "duplicate_issue" as const,
-          issueIds: duplicated.map((issue) => issue.id),
-          detail: "同一结构问题在回退后原样出现：修复没有生效，停止循环。",
-        },
-      };
+      return directorStopUpdate(state, {
+        reason: "duplicate_issue",
+        issueIds: duplicated.map((issue) => issue.id),
+        detail: "同一结构问题在回退后原样出现：修复没有生效，停止循环。",
+      }, availabilityFields);
     }
     if (state.crossRoleRevisions >= MAX_CROSS_ROLE_REVISIONS) {
-      return {
-        issues: pending,
-        unresolvedIssueDigests: carriedUnresolved,
-        availabilityBlockerDigests: carriedAvailabilityBlockers,
-        availabilityBlockerObservations: carriedAvailabilityObservations,
-        halt: {
-          reason: "cross_role_revisions_exhausted" as const,
-          issueIds: pending.map((issue) => issue.id),
-          detail: `跨角色回退已达上限 ${MAX_CROSS_ROLE_REVISIONS} 次，停止自动重试。`,
-        },
-      };
+      return directorStopUpdate(state, {
+        reason: "cross_role_revisions_exhausted",
+        issueIds: pending.map((issue) => issue.id),
+        detail: `跨角色回退已达上限 ${MAX_CROSS_ROLE_REVISIONS} 次，停止自动重试。`,
+      }, availabilityFields);
     }
     return {
       issues: pending,
@@ -1483,6 +1563,9 @@ function reviewGateNode(
             ...resume,
             confirmedAt: new Date().toISOString(),
           }),
+          // 人已经就"自动循环停下"这件事做了决定，理由随之作废：再留着它，下一个正常的
+          // 阶段停点会顶着上一次"自动检查已停止"的牌子出现，人以为又停了。
+          planningStop: null,
         };
       }
       let checked: PlanningArtifact<CreativeTreatment | ScriptDraft | VisualDirectorPlan>;
@@ -1543,12 +1626,15 @@ function reviewGateNode(
           checkIdentity,
           confirmedAt: new Date().toISOString(),
         }),
+        planningStop: null,
       };
     }
     if (resume.action === "adopt_proposal" || resume.action === "undo_draft") {
       const creativeReview = applyCreativeReviewDeterministicCommand(state.creativeReview, resume);
       return {
         creativeReview,
+        // 草稿被换成了另一版，"自动循环为什么停下"说的已经不是当前这一版，跟着一起放掉。
+        planningStop: null,
         ...creativeDocumentArtifactUpdate(state, stage, creativeReview),
       };
     }
@@ -1559,6 +1645,7 @@ function reviewGateNode(
         stage: resume.targetStage,
         issues: [],
         halt: null,
+        planningStop: null,
         ...invalidateAfterCreativeReturn(state, resume.targetStage),
       };
     }
@@ -1589,6 +1676,7 @@ function reviewGateNode(
         ? {
             issues: [],
             halt: null,
+            planningStop: null,
             ...(stage === "director" ? { manualDirectorReview: false } : {}),
           }
         : {}),
