@@ -583,15 +583,21 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
         <div className="dialog-backdrop" role="presentation">
           <section ref={approveDialogRef} className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="approve-title" tabIndex={-1}>
             <header className="dialog-header">
-              <div><p className="eyebrow">最终决定</p><h2 id="approve-title">{reviewItems.length > 0 ? "逐条表态后批准成片" : "确认批准成片"}</h2></div>
+              <div><p className="eyebrow">{boundaryGate ? "节点放行" : "最终决定"}</p><h2 id="approve-title">{boundaryGate
+                ? `确认放行「${runNodeLabel(run.activeIntervention?.nodeId ?? "")}」`
+                : reviewItems.length > 0 ? "逐条表态后批准成片" : "确认批准成片"}</h2></div>
               <button className="icon-button" type="button" onClick={closeApproveDecision} disabled={decisionPending} title="关闭"><X aria-hidden="true" size={19} /></button>
             </header>
-            <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p><strong>{reviewItems.length > 0
-              ? `审片提出 ${reviewItems.length} 条结论，请逐条看过并表态。`
-              : "批准后将生成发布包。"}</strong><span>这会结束人工终审；请确认已经完整观看画面、字幕并听过声音。</span></p></div>
+            {/* 边界停点批准的是"这一步的产出可以往下走"，不生成发布包、不结束终审，也和机器质检无关。
+                这里原来一律讲终审的话——用户点下去之前读到的最后一段话是错的。 */}
+            <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p>{boundaryGate
+              ? <><strong>放行后这一步的结果就固定下来，制作按现在保存的设置继续往下走。</strong><span>想换模型、参数或输入，请先关掉这个窗口去配置；放行之后要改，就得让这一步连同下游重做。</span></>
+              : <><strong>{reviewItems.length > 0
+                ? `审片提出 ${reviewItems.length} 条结论，请逐条看过并表态。`
+                : "批准后将生成发布包。"}</strong><span>这会结束人工终审；请确认已经完整观看画面、字幕并听过声音。</span></>}</p></div>
             {/* 逐条表态管的是审片结论。机器质检是判过或不过的闸门——它不通过时流程走不到终审，
-                所以这里没有它的条目，操作员不必怀疑自己漏签了什么。 */}
-            <p className="review-disposition-note">技术质检不适用逐条表态：它由机器判定通过或不过，没过就到不了这一步，不在这里逐条签。</p>
+                所以这里没有它的条目，操作员不必怀疑自己漏签了什么。边界停点上两件事都不涉及。 */}
+            {boundaryGate ? null : <p className="review-disposition-note">技术质检不适用逐条表态：它由机器判定通过或不过，没过就到不了这一步，不在这里逐条签。</p>}
             {reviewItems.length > 0 ? <div className="review-disposition-list">
               <p className="review-disposition-guide">采纳=你要按这条结论返修，本轮就不能批准；不采纳=你看过并认为可以维持现状，需要写明理由留痕。</p>
               {reviewItems.map((item, index) => {
@@ -649,7 +655,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
               {acceptedReviewItems.length > 0 ? `其中 ${acceptedReviewItems.length} 条已采纳、还等着返修。` : ""}
             </p> : null}
             <footer className="dialog-actions">
-              <button className="button button-ghost" type="button" onClick={closeApproveDecision} disabled={decisionPending}>再看一遍</button>
+              <button className="button button-ghost" type="button" onClick={closeApproveDecision} disabled={decisionPending}>{boundaryGate ? "先不放行" : "再看一遍"}</button>
               <button
                 className="button button-primary"
                 type="button"
@@ -670,7 +676,10 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                     }),
                   } : {}),
                 })}
-              ><Check aria-hidden="true" size={17} />{decisionPending ? "正在批准..." : reviewItems.length > 0 ? "逐条表态已完成，生成发布包" : "确认批准并生成发布包"}</button>
+              ><Check aria-hidden="true" size={17} />{decisionPending
+                ? "正在批准..."
+                : boundaryGate ? "确认放行，进入下一步"
+                  : reviewItems.length > 0 ? "逐条表态已完成，生成发布包" : "确认批准并生成发布包"}</button>
             </footer>
           </section>
         </div>

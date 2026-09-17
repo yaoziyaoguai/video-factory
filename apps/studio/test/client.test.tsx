@@ -3702,6 +3702,36 @@ describe("Studio client", () => {
     expect(screen.queryByRole("button", { name: /批准进入发布包/ })).not.toBeInTheDocument();
   });
 
+  it("speaks about releasing one step, not the final review, in the boundary confirm dialog", async () => {
+    const user = userEvent.setup();
+    const run: StudioRunDetail = {
+      ...runDetail,
+      revision: 5,
+      activeIntervention: {
+        id: "boundary-1",
+        nodeId: "brief",
+        boundary: "node-complete",
+        reason: "这一步已完成，等你确认后进入下一步。",
+        options: ["approve", "reject"],
+        createdAt: "2026-08-21T10:05:00.000Z",
+      },
+    };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
+
+    await user.click(screen.getByRole("button", { name: /做完了，进入下一步/ }));
+
+    expect(screen.getByRole("dialog", { name: /确认放行「内容简报」/ })).toBeInTheDocument();
+    expect(screen.getByText(/这一步的结果就固定下来/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /确认放行，进入下一步/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "先不放行" })).toBeInTheDocument();
+    // 简报停点上批准既不生成发布包，也不结束人工终审，更与技术质检无关。这是用户点下去之前
+    // 读到的最后一段话，弹窗不能沿用终审的语义。
+    expect(screen.queryByText(/批准后将生成发布包/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/这会结束人工终审/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/技术质检不适用逐条表态/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /生成发布包/ })).not.toBeInTheDocument();
+  });
+
   it("lets the creator configure the step a boundary stop is about to release", () => {
     const scriptProvider: StudioProvider = {
       id: "codex-screenwriter-v1",
