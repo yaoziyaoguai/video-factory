@@ -309,8 +309,10 @@ export function agentLoopPhaseLabel(progress: StudioAgentLoopProgress): string {
 export function agentLoopPendingNote(progress: StudioAgentLoopProgress): string {
   const reason = progress.phase === "failed" ? progress.failureSummary?.trim() : undefined;
   if (reason) return creatorFacingTechnicalText(humanizeCreativeText(reason)) ?? reason;
-  if (progress.phase === "failed") return "这次调用没有留下可读的原因记录。请先看这一步的诊断信息，再决定是否重试。";
-  if (progress.phase === "halted") return "这一步已停住：当前角色解决不了它需要的前提，处理办法见上面的说明。";
+  // 旧记录里只存了机器诊断，没有面向人的那句说明。这里不能指向"诊断信息"之类并不存在于
+  // 界面的东西——那正是原来那句「请查看失败原因」的毛病。只说清能做什么。
+  if (progress.phase === "failed") return "这次调用没有留下可读的原因记录。可以按现在的结果放行，也可以先关掉这个窗口改这一步的模型，再让它重做。";
+  if (progress.phase === "halted") return "这一步停住了：它需要的前提当前角色给不出来，补上才能继续。";
   return "正在生成本轮方案，完成后由独立 AI 做质量复核。";
 }
 

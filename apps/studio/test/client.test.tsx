@@ -3771,6 +3771,44 @@ describe("Studio client", () => {
     expect(panel.queryByText(/正在生成本轮方案/)).not.toBeInTheDocument();
   });
 
+  it("admits a stopped step left no readable reason instead of pointing at a screen that does not exist", () => {
+    const run: StudioRunDetail = {
+      ...runDetail,
+      revision: 5,
+      activeIntervention: {
+        id: "boundary-1",
+        nodeId: "brief",
+        boundary: "node-complete",
+        reason: "这一步已完成，等你确认后进入下一步。",
+        options: ["approve", "reject"],
+        createdAt: "2026-08-21T10:05:00.000Z",
+      },
+      nodes: runDetail.nodes.map((node) => node.id === "brief"
+        ? {
+          ...node,
+          // 旧版 checkpoint 只存了 stage/statusCode/failureKind/details 这些机器字段，
+          // 没有面向人的那句说明。这类历史记录必须如实说明，不能再指向别处。
+          agentLoopProgress: {
+            iteration: 1,
+            maxIterations: 1,
+            completedIterations: 0,
+            phase: "failed" as const,
+            producerModelCallCount: 0,
+            auditModelCallCount: 3,
+          },
+        }
+        : node),
+    };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
+
+    const panel = within(document.querySelector(".intervention-panel") as HTMLElement);
+    expect(panel.getByText(/没有留下可读的原因记录/)).toBeInTheDocument();
+    // 「请查看失败原因」「请先看诊断信息」都是把人指向一个界面上并不存在的地方——
+    // 工作区里没有任何按节点展示诊断的入口，这正是原来那句话的毛病。
+    expect(panel.queryByText(/诊断/)).not.toBeInTheDocument();
+    expect(panel.queryByText(/正在生成本轮方案/)).not.toBeInTheDocument();
+  });
+
   it("lets the creator configure the step a boundary stop is about to release", () => {
     const scriptProvider: StudioProvider = {
       id: "codex-screenwriter-v1",
