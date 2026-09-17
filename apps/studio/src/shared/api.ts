@@ -1333,7 +1333,7 @@ export interface StudioCreativeReviewSnapshot {
   draftArtifactId: string;
   draftContentUrl?: string;
   phase: "waiting_user" | "checking";
-  allowedActions: Array<"discuss" | "adopt_proposal" | "undo_draft" | "confirm" | "return_to_stage">;
+  allowedActions: Array<"discuss" | "adopt_proposal" | "edit_draft" | "undo_draft" | "confirm" | "return_to_stage">;
   returnTargets: Array<{
     stage: StudioPlanningEditableStage;
     label: string;
@@ -1379,6 +1379,7 @@ export type StudioCreativeReviewCommandInput = StudioCreativeReviewCommandBase &
   | { action: "confirm"; acknowledgeRepair?: boolean; expectedCheckIdentity?: string }
   | { action: "discuss"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
   | { action: "adopt_proposal"; proposalId: string }
+  | { action: "edit_draft"; document: Record<string, unknown> }
   | { action: "undo_draft" }
   | { action: "return_to_stage"; targetStage: StudioPlanningEditableStage; acknowledgeImpact: true }
 );
@@ -1398,17 +1399,19 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
     ? ["message", "selection"]
     : input.action === "adopt_proposal"
       ? ["proposalId"]
-      : input.action === "return_to_stage"
-        ? ["targetStage", "acknowledgeImpact"]
-        : input.action === "confirm"
-          // 这两个字段曾经漏在白名单外，于是"看过意见，仍然确认"在 HTTP 入口就被拒，
-          // 整条链在界面后面断掉、只在图级单测里看着是通的。
-          ? ["acknowledgeRepair", "expectedCheckIdentity"]
-      : [];
+      : input.action === "edit_draft"
+        ? ["document"]
+        : input.action === "return_to_stage"
+          ? ["targetStage", "acknowledgeImpact"]
+          : input.action === "confirm"
+            // 这两个字段曾经漏在白名单外，于是"看过意见，仍然确认"在 HTTP 入口就被拒，
+            // 整条链在界面后面断掉、只在图级单测里看着是通的。
+            ? ["acknowledgeRepair", "expectedCheckIdentity"]
+        : [];
   const allowed = new Set([...commonFields, ...actionFields]);
   const unknown = Object.keys(input).find((key) => !allowed.has(key));
   if (unknown) throw new StudioInputError(`创作操作不支持字段“${unknown}”。`);
-  if (!["confirm", "discuss", "adopt_proposal", "undo_draft", "return_to_stage"].includes(String(input.action))) {
+  if (!["confirm", "discuss", "adopt_proposal", "edit_draft", "undo_draft", "return_to_stage"].includes(String(input.action))) {
     throw new StudioInputError("创作操作类型不正确。");
   }
   const commandId = requiredTrimmedString(input.commandId, "操作编号");
@@ -1439,6 +1442,12 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
   }
   if (input.action === "adopt_proposal") {
     return { action: "adopt_proposal", ...common, proposalId: requiredTrimmedString(input.proposalId, "备选方案编号") };
+  }
+  if (input.action === "edit_draft") {
+    if (typeof input.document !== "object" || input.document === null || Array.isArray(input.document)) {
+      throw new StudioInputError("人工修订的稿件必须是完整的方案内容。");
+    }
+    return { action: "edit_draft", ...common, document: input.document as Record<string, unknown> };
   }
   if (input.action === "undo_draft") return { action: "undo_draft", ...common };
   if (input.action === "return_to_stage") {

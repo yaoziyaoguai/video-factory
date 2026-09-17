@@ -1303,6 +1303,8 @@ describe("B3 固定创作规划图", () => {
             "rank",
             "compile",
             "discuss",
+            // 人工修订稿的阶段合同校验：纯校验闭包，无付费/媒体依赖面。
+            "validateEditedDraft",
           ]);
           for (const key of accessedPortKeys) {
             assert.ok(allowedPortKeys.has(key), `图访问了规划合同之外的依赖面：${key}`);

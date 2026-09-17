@@ -84,7 +84,7 @@ import {
 } from "./visual-director.js";
 import type { CreativeTreatmentAgent, CreativeTreatmentAgentInput } from "./codex-creative-treatment.js";
 import { CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION, creativeTreatmentSeriesContext } from "./codex-creative-treatment.js";
-import { CREATIVE_TREATMENT_PROVIDER_ID } from "./creative-treatment.js";
+import { CREATIVE_TREATMENT_PROVIDER_ID, parseCreativeTreatment } from "./creative-treatment.js";
 import { contentSha256, parseCreativeReviewResume, type CreativeDiscussionResult, type CreativeReviewConfirmResume, type CreativeReviewResume, type CreativeReviewState, type CreativeStage } from "./creative-review.js";
 import { PRODUCTION_AUTHORIZATION_VERSION, assessProductionSpendPlan, canonicalProductionAssetIntentDigest, canonicalQualityContractDigest, foldProductionSpendLedger, parseProductionAuthorizationScope, resolveProductionSpendDecision, scopeCoversSpendPlan, type ProductionAuthorizationScope, type ProductionSpendPlanAssessment } from "./production-authorization.js";
 import {
@@ -269,6 +269,7 @@ export type ProductionCreativeReviewCommandDraft = {
   | { action: "confirm"; acknowledgeRepair?: true; expectedCheckIdentity?: string }
   | { action: "discuss"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
   | { action: "adopt_proposal"; proposalId: string }
+  | { action: "edit_draft"; document: unknown }
   | { action: "undo_draft" }
   | { action: "return_to_stage"; targetStage: CreativeStage; acknowledgeImpact: true }
 );
@@ -1261,7 +1262,9 @@ export class ProductionPipeline {
           }
           : draft.action === "adopt_proposal"
             ? { action: "adopt_proposal", ...common, proposalId: draft.proposalId }
-            : draft.action === "undo_draft"
+            : draft.action === "edit_draft"
+              ? { action: "edit_draft", ...common, document: draft.document }
+              : draft.action === "undo_draft"
               ? { action: "undo_draft", ...common }
               : { action: "return_to_stage", ...common, targetStage: draft.targetStage, acknowledgeImpact: true };
       const runner = new WorkflowRunner({
@@ -7240,6 +7243,31 @@ function creativePlanningNode(
           },
           ...(libraryRoute ? libraryPorts : {}),
           compile: executablePlanCompilePort,
+          // 人工修订稿与模型产出过同一份阶段合同：参数构建与各角色生成路径逐字同源
+          // （脚本按时长区间、导演按当前脚本场景与资产提供方、构思按供给来源清单），
+          // 放宽任何一边都会让"手改的稿"和"生成的稿"活在两套合同里。
+          validateEditedDraft: (stage, document, upstreamScript) => {
+            if (stage === "script") {
+              validateScriptDraft(document, {
+                durationSeconds: currentBrief.durationSeconds,
+                ...(currentBrief.durationRange ? { durationRange: currentBrief.durationRange } : {}),
+                requireCanonFacts: Boolean(currentBrief.seriesContext),
+              });
+              return;
+            }
+            if (stage === "director") {
+              const scriptDocument = (upstreamScript ?? {}) as { scenes?: unknown; viewerPromise?: unknown };
+              validateVisualDirectorPlan(document, visualDirectorPlanValidation(
+                currentBrief,
+                parseDirectorScenes(scriptDocument.scenes),
+                options.assetProviders ?? [],
+                options.providerRuntimeMetadata ?? [],
+                optionalOutputString(scriptDocument.viewerPromise),
+              ));
+              return;
+            }
+            parseCreativeTreatment(document, treatmentSuppliedSources(currentBrief).map((source) => source.sourceId));
+          },
         };
         const graph = createCreativePlanningGraph({ ports, checkpointer: store.saver });
         const threadConfig = store.threadConfig(context.runId, inputDigest);

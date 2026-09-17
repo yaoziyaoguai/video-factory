@@ -1531,7 +1531,7 @@ export class ProductionStudio {
       phase: current.creativeReviewOperations?.some((operation) => operation.stage === continuation.stage && operation.status === "running")
         ? "checking"
         : "waiting_user",
-      allowedActions: ["discuss", "adopt_proposal", "undo_draft", "confirm", "return_to_stage"],
+      allowedActions: ["discuss", "adopt_proposal", "edit_draft", "undo_draft", "confirm", "return_to_stage"],
       returnTargets,
       draft: structuredClone(stageState?.currentDocument),
       ...(stageState?.previousDocument !== null && stageState?.previousDocument !== undefined

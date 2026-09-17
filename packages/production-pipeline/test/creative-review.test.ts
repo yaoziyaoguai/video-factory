@@ -16,7 +16,7 @@ import {
   type CreativeTreatment,
 } from "../src/index.js";
 import { planningThreadId } from "../src/creative-planning-store.js";
-import { initialCreativeReviewState, publishCreativeDraft, recordCreativeDiscussion, applyCreativeReviewDeterministicCommand, recordCreativeReviewCheck, confirmCreativeDraft, creativeReturnTargets, returnCreativeReviewToStage } from "../src/creative-review.js";
+import { initialCreativeReviewState, publishCreativeDraft, recordCreativeDiscussion, applyCreativeReviewDeterministicCommand, applyCreativeReviewEditDraft, recordCreativeReviewCheck, confirmCreativeDraft, creativeReturnTargets, returnCreativeReviewToStage, parseCreativeReviewResume } from "../src/creative-review.js";
 
 // 构思、脚本、导演方案都是创作交付：宿主规定的评估对象是当前完整候选（根路径 ""），
 // 维度固定为 attention/progression/payoff/expression。全部分数取同一个值，
@@ -104,6 +104,75 @@ function resume(gate: CreativeReviewGate, commandId: string) {
 }
 
 describe("three-stage creative review gates", () => {
+  it("swaps in a hand-edited draft as a new revision, clearing the old check binding", () => {
+    // 人工修订与 AI 修订走同一条制度：换稿即新一版草稿（revision+1、sha256 按新文档重算、
+    // checkResult/confirmation 清空、上一稿入 previousDraft 槽）。旧复核意见不能继续绑在新稿上，
+    // 之后的确认必须对改后的稿重新跑一轮独立复核。
+    let review = publishCreativeDraft(initialCreativeReviewState(), "treatment", "treatment", treatment, "input");
+    review = recordCreativeReviewCheck(review, "treatment", {
+      draftSha256: review.stages.treatment.currentDraft!.sha256,
+      checkIdentity: "check-1",
+      verdict: "repair",
+      score: 55,
+      summary: "开场不够直接",
+      issues: [{ severity: "blocking", criterion: "开场", evidence: "铺垫太长", repairInstruction: "直接给冲突" }],
+    });
+    const before = review.stages.treatment;
+    assert.equal(before.checkResult?.verdict, "repair");
+
+    const edited = structuredClone(treatment);
+    edited.hook.narrationIntent = "第一句就给冲突";
+    const gate: CreativeReviewGate = {
+      kind: "creative_review",
+      stage: "treatment",
+      reviewRevision: review.reviewRevision,
+      draft: review.stages.treatment.currentDraft!,
+    };
+    const editResume = {
+      action: "edit_draft" as const,
+      stage: "treatment" as const,
+      commandId: "edit-1",
+      actor: "creator",
+      baseDraftSha256: gate.draft.sha256,
+      expectedReviewRevision: review.reviewRevision,
+      document: edited,
+    };
+    review = applyCreativeReviewEditDraft(review, editResume, edited);
+
+    const after = review.stages.treatment;
+    assert.equal(after.phase, "waiting_user");
+    assert.deepEqual(after.currentDocument, edited, "当前稿件必须是修订后的这一份");
+    assert.equal(after.currentDraft!.sha256, contentSha256(edited), "草稿摘要必须随内容重算");
+    assert.equal(after.currentDraft!.revision, before.currentDraft!.revision + 1);
+    assert.equal(after.checkResult, null, "旧复核意见不得继续绑在新稿上");
+    assert.equal(after.confirmation, null);
+    assert.deepEqual(after.previousDocument, treatment);
+    assert.equal(review.reviewRevision, gate.reviewRevision + 1);
+    assert.ok(after.effectiveUserInstructions.some((instruction) => instruction.commandId === "edit-1"));
+
+    // 旧稿摘要再来一次必须被拒：修订只能基于人当前看到的那一版（版本或摘要任一过期都算）。
+    assert.throws(
+      () => applyCreativeReviewEditDraft(review, { ...editResume, baseDraftSha256: gate.draft.sha256 }, edited),
+      /stale/,
+    );
+
+    // parse 侧：document 缺失或不是对象必须被拒；未知字段同样拒绝。
+    assert.throws(
+      () => parseCreativeReviewResume({ ...editResume, document: undefined }),
+      /requires a document object/,
+    );
+    assert.throws(
+      () => parseCreativeReviewResume({ ...editResume, document: [edited] }),
+      /requires a document object/,
+    );
+    assert.throws(
+      () => parseCreativeReviewResume({ ...editResume, extra: 1 }),
+      /field 'extra' is not allowed/,
+    );
+    const parsed = parseCreativeReviewResume(editResume);
+    assert.equal(parsed.action, "edit_draft");
+  });
+
   it("restores revision instructions with the draft across persistence and keeps discussion history", () => {
     let review = publishCreativeDraft(initialCreativeReviewState(), "treatment", "treatment", treatment, "input");
     review = recordCreativeReviewCheck(review, "treatment", {

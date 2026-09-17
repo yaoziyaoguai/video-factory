@@ -5,6 +5,7 @@ import type { ScriptDraft } from "./codex-screenwriter.js";
 import type { ShotDecision, VisualDirectorPlan } from "./visual-director.js";
 import { assetReuseSourceScenePosition } from "./generative-asset-worker.js";
 import { validateAssetSemanticRanking, type AssetCandidateReport, type AssetSemanticRanking } from "./asset-semantic-ranker.js";
+import { applyCreativeReviewEditDraft } from "./creative-review.js";
 import { planningThreadId } from "./creative-planning-store.js";
 import type { DurationRange } from "./executable-timeline.js";
 import { RoleAgentLoopError, RoleAgentPlanningHaltError } from "./role-agent-loop.js";
@@ -191,6 +192,12 @@ export interface CreativePlanningPorts {
     effectiveUserInstructions: Array<{ commandId: string; message: string }>;
     upstreamDocuments: Partial<Record<"treatment" | "script", unknown>>;
   }) => Promise<CreativeDiscussionResult>;
+  /**
+   * 人工修订稿的阶段合同校验（edit_draft 命令）。需要 brief/脚本等组合根上下文才能构建
+   * 与生成路径一致的校验参数，所以由 port 装配方注入；缺失时人工修订不可用（gate 明确报错，
+   * 不静默放行未校验的稿件）。upstreamScript 是当前已确认脚本（导演稿校验的 scenes 来源）。
+   */
+  validateEditedDraft?: (stage: CreativeStage, document: unknown, upstreamScript: unknown) => void;
 }
 
 export interface AvailabilityReviewInput {
@@ -961,9 +968,9 @@ function planningNodeActions(
         artifactIds: withArtifactId(state, "compile", artifact.artifactId),
       };
     },
-    treatmentReview: reviewGateNode("treatment", ports.discuss, ports.treatment),
-    scriptReview: reviewGateNode("script", ports.discuss, ports.screenwriter),
-    directorReview: reviewGateNode("director", ports.discuss, ports.director),
+    treatmentReview: reviewGateNode("treatment", ports.discuss, ports.treatment, ports.validateEditedDraft),
+    scriptReview: reviewGateNode("script", ports.discuss, ports.screenwriter, ports.validateEditedDraft),
+    directorReview: reviewGateNode("director", ports.discuss, ports.director, ports.validateEditedDraft),
   };
 }
 
@@ -1537,6 +1544,7 @@ function reviewGateNode(
   stage: CreativeStage,
   discuss: CreativePlanningPorts["discuss"],
   rolePort: PlanningPort<CreativeTreatment | ScriptDraft | VisualDirectorPlan>,
+  validateEditedDraft: CreativePlanningPorts["validateEditedDraft"],
 ) {
   return async (state: PlanningGraphState) => {
     if (state.base.creativeReview !== CREATIVE_REVIEW_FEATURE) return {};
@@ -1635,6 +1643,21 @@ function reviewGateNode(
         creativeReview,
         // 草稿被换成了另一版，"自动循环为什么停下"说的已经不是当前这一版，跟着一起放掉。
         planningStop: null,
+        ...creativeDocumentArtifactUpdate(state, stage, creativeReview),
+      };
+    }
+    if (resume.action === "edit_draft") {
+      // 人工修订稿先过阶段合同校验再入状态：坏稿在命令层被拒绝，不能等确认时的复核腿
+      // 才炸——那条路径上格式错误没有可落盘的复核结论，会把整条制作打成 failed。
+      if (!validateEditedDraft) {
+        throw new Error("Creative planning ports do not support hand-edited drafts.");
+      }
+      validateEditedDraft(stage, structuredClone(resume.document), state.scriptArtifact?.output ?? null);
+      const creativeReview = applyCreativeReviewEditDraft(state.creativeReview, resume, resume.document);
+      return {
+        creativeReview,
+        planningStop: null,
+        issues: [],
         ...creativeDocumentArtifactUpdate(state, stage, creativeReview),
       };
     }

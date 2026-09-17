@@ -230,4 +230,25 @@ describe("CreativeDiscussionPanel", () => {
       unmount();
     }
   });
+
+  it("saves a hand-edited draft as an edit_draft command carrying the full document", async () => {
+    // 人工修订与 AI 修订同一条制度：编辑器只改文字性字段，保存即提交整份修订稿，
+    // 由服务端按阶段合同整体校验、随后停点带新复核意见重现。
+    const onCommand = vi.fn(async () => undefined);
+    render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
+
+    await userEvent.click(screen.getByText("手动修订这份稿件（保存后会自动重新独立复核）"));
+    const narration = screen.getByLabelText("分镜 1 · 旁白");
+    await userEvent.clear(narration);
+    await userEvent.type(narration, "第一句就给结果。");
+
+    await userEvent.click(screen.getByRole("button", { name: "保存修订并重新复核" }));
+    await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
+    const command = onCommand.mock.calls[0][0] as StudioCreativeReviewCommandInput;
+    expect(command.action).toBe("edit_draft");
+    expect(command.baseDraftSha256).toBe(sha);
+    expect(command.expectedReviewRevision).toBe(3);
+    const document = (command as { document: { scenes: Array<{ narration: string }> } }).document;
+    expect(document.scenes[0].narration).toBe("第一句就给结果。");
+  });
 });

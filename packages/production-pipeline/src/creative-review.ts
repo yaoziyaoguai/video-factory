@@ -106,6 +106,17 @@ export interface CreativeReviewAdoptResume {
   proposalId: string;
 }
 
+export interface CreativeReviewEditDraftResume {
+  action: "edit_draft";
+  stage: CreativeStage;
+  commandId: string;
+  actor: string;
+  baseDraftSha256: string;
+  expectedReviewRevision: number;
+  /** 人工修订后的整份阶段稿。进入状态前由 gate 层按阶段合同校验（这里只保证存在且是对象）。 */
+  document: unknown;
+}
+
 export interface CreativeReviewUndoResume {
   action: "undo_draft";
   stage: CreativeStage;
@@ -201,6 +212,7 @@ export type CreativeReviewResume =
   | CreativeReviewConfirmResume
   | CreativeReviewDiscussResume
   | CreativeReviewAdoptResume
+  | CreativeReviewEditDraftResume
   | CreativeReviewUndoResume
   | CreativeReviewReturnResume;
 
@@ -545,6 +557,49 @@ export function applyCreativeReviewDeterministicCommand(
   };
 }
 
+/**
+ * 人工修订稿换入当前阶段。文档必须先由 gate 层按阶段合同校验（这里不做阶段 schema 校验，
+ * 只做状态迁移）——校验与迁移分离，是因为阶段合同校验需要 brief/脚本上下文，那是组合根的职责。
+ *
+ * 与 AI 讨论改稿同一条制度：换稿即新一版草稿（revision+1、checkResult 清空），随后停点重现，
+ * 人点确认时对改后的稿自动跑一轮新的独立复核——通过直接放行，有问题把意见摆出来由人承担。
+ */
+export function applyCreativeReviewEditDraft(
+  review: CreativeReviewState,
+  command: CreativeReviewEditDraftResume,
+  validatedDocument: unknown,
+): CreativeReviewState {
+  const current = requireWaitingDraft(review, command);
+  return {
+    ...review,
+    reviewRevision: review.reviewRevision + 1,
+    stages: {
+      ...review.stages,
+      [command.stage]: {
+        ...current,
+        phase: "waiting_user",
+        previousDraft: current.currentDraft,
+        previousDocument: current.currentDocument,
+        previousEffectiveUserInstructions: structuredClone(current.effectiveUserInstructions),
+        // artifactId 与 stageInputDigest 保持不变：工件由调用方的 creativeDocumentArtifactUpdate
+        // 原地换内容，阶段输入没变；变的是稿件内容本身，所以 sha256 按新文档重算、revision+1。
+        currentDraft: {
+          ...current.currentDraft!,
+          sha256: contentSha256(validatedDocument),
+          revision: current.currentDraft!.revision + 1,
+        },
+        currentDocument: structuredClone(validatedDocument),
+        confirmation: null,
+        checkResult: null,
+        effectiveUserInstructions: [
+          ...current.effectiveUserInstructions,
+          { commandId: command.commandId, message: "人工修订这一阶段的稿件", active: true },
+        ],
+      },
+    },
+  };
+}
+
 export function parseCreativeReviewResume(value: unknown): CreativeReviewResume {
   if (!isRecord(value)) throw new Error("Creative review resume must be an object.");
   if (value.action === "confirm") return parseCreativeReviewConfirmResume(value);
@@ -558,6 +613,21 @@ export function parseCreativeReviewResume(value: unknown): CreativeReviewResume 
       action: "adopt_proposal",
       ...parseCreativeReviewCommandBase(value),
       proposalId: requiredText(value.proposalId, "proposalId"),
+    };
+  }
+  if (value.action === "edit_draft") {
+    const allowed = new Set([
+      "action", "stage", "commandId", "actor", "baseDraftSha256", "expectedReviewRevision", "document",
+    ]);
+    const unknown = Object.keys(value).find((key) => !allowed.has(key));
+    if (unknown) throw new Error(`Creative review resume field '${unknown}' is not allowed.`);
+    if (typeof value.document !== "object" || value.document === null || Array.isArray(value.document)) {
+      throw new Error("Creative review edit requires a document object.");
+    }
+    return {
+      action: "edit_draft",
+      ...parseCreativeReviewCommandBase(value),
+      document: value.document,
     };
   }
   if (value.action === "undo_draft") {

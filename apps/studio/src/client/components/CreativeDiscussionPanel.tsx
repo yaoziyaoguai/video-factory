@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, MessageCircle, RotateCcw, Send } from "lucide-react";
+import { ArrowLeft, Check, FilePenLine, MessageCircle, RotateCcw, Save, Send } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { StudioCreativeReviewCommandInput, StudioCreativeReviewSnapshot } from "../../shared/api.js";
 
@@ -108,6 +108,16 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
     }).catch(() => undefined);
   }
 
+  function saveEditedDraft(document: Record<string, unknown>) {
+    if (busy) return;
+    void submit({
+      action: "edit_draft",
+      commandId: crypto.randomUUID(),
+      ...commandBase,
+      document,
+    }).catch(() => undefined);
+  }
+
   return (
     <section className="creative-discussion-panel" aria-labelledby="creative-review-title">
       <header className="creative-discussion-header">
@@ -131,6 +141,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       <div className="creative-discussion-layout">
         <article className={mobileTab === "draft" ? "creative-draft-surface is-mobile-active" : "creative-draft-surface"} aria-label={`当前${STAGE_LABEL[review.stage]}`}>
           <CreativeDraft stage={review.stage} value={review.draft} />
+          <CreativeDraftEditor stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking"} onSave={saveEditedDraft} />
           <CreativeSelection
             stage={review.stage}
             draft={review.draft}
@@ -292,4 +303,166 @@ function DraftList({ label, value }: { label: string; value: unknown }) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * 人工修订编辑器（v1）：只暴露各阶段合同里的**文字性字段**——叙述、承诺、视觉规则的措辞、
+ * 每段/每镜的描述文字。镜头增删、路线更换这类结构性改动会牵动排序/报价/画面证据，仍然走
+ * 讨论或重新生成；文字修订在这里改完保存，走与 AI 修订完全相同的制度：换稿 → 停点重现 →
+ * 确认时自动跑一轮新的独立复核。
+ */
+function CreativeDraftEditor({ stage, draft, busy, onSave }: {
+  stage: StudioCreativeReviewSnapshot["stage"];
+  draft: unknown;
+  busy: boolean;
+  onSave(document: Record<string, unknown>): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [edited, setEdited] = useState<Record<string, unknown> | null>(null);
+  const draftKey = draftIdentityKey(stage, draft);
+  useEffect(() => {
+    // 草稿换了（复核出意见、AI 改稿、撤销）就丢弃本地未保存的修订：它基于旧稿，留着只会
+    // 让人把过时的文字当成当前方案。
+    setEdited(null);
+    setOpen(false);
+  }, [draftKey]);
+  const fields = useMemo(() => editableTextFields(stage, edited ?? draft), [stage, edited, draft]);
+  if (!isRecord(draft) || fields.length === 0) return null;
+  const current = edited ?? draft;
+  const dirty = edited !== null;
+  return <details className="creative-draft-editor" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary><FilePenLine aria-hidden="true" size={14} />手动修订这份稿件（保存后会自动重新独立复核）</summary>
+    {/* 收起时不渲染字段：可读稿和编辑器里会出现相同文字，展开才挂载避免同一屏两份同文。 */}
+    {open ? <>
+      {fields.map((field) => <label key={field.key} className="creative-edit-field">
+        <span>{field.label}</span>
+        <textarea
+          value={field.value}
+          disabled={busy}
+          onChange={(event) => setEdited(field.apply(structuredClone(current), event.target.value))}
+        />
+      </label>)}
+      <div className="creative-edit-actions">
+        {dirty ? <button type="button" className="button button-ghost" disabled={busy} onClick={() => setEdited(null)}>放弃修改</button> : null}
+        <button
+          type="button"
+          className="button button-primary"
+          disabled={busy || !dirty}
+          onClick={() => { if (edited) onSave(edited); }}
+        ><Save aria-hidden="true" size={15} />{busy ? "正在处理…" : "保存修订并重新复核"}</button>
+      </div>
+    </> : null}
+  </details>;
+}
+
+function draftIdentityKey(stage: StudioCreativeReviewSnapshot["stage"], draft: unknown): string {
+  return JSON.stringify({ stage, draft });
+}
+
+interface EditableTextField {
+  key: string;
+  label: string;
+  value: string;
+  apply(draft: Record<string, unknown>, value: string): Record<string, unknown>;
+}
+
+function editableTextFields(stage: StudioCreativeReviewSnapshot["stage"], draft: unknown): EditableTextField[] {
+  if (!isRecord(draft)) return [];
+  const text = (key: string, label: string, get: (draft: Record<string, unknown>) => unknown, set: (draft: Record<string, unknown>, value: string) => void): EditableTextField | null => {
+    const raw = get(draft);
+    if (raw === undefined || raw === null) return null;
+    return { key, label, value: String(raw), apply: (next, value) => { set(next, value); return next; } };
+  };
+  const list = (key: string, label: string, field: string): EditableTextField | null => {
+    const items = draft[field];
+    if (!Array.isArray(items) || items.length === 0) return null;
+    return {
+      key,
+      label,
+      value: items.map((item) => String(item)).join("\n"),
+      apply: (next, value) => { next[field] = value.split("\n").map((line) => line.trim()).filter(Boolean); return next; },
+    };
+  };
+  if (stage === "treatment") {
+    const fields: EditableTextField[] = [];
+    const viewer = text("viewerPromise", "观众看完能得到什么", (d) => d.viewerPromise, (d, v) => { d.viewerPromise = v; });
+    if (viewer) fields.push(viewer);
+    if (isRecord(draft.hook)) {
+      for (const [field, fieldLabel] of [["narrationIntent", "开头的叙述意图"], ["visualIntent", "开头的画面意图"]] as const) {
+        if (draft.hook[field] === undefined || draft.hook[field] === null) continue;
+        fields.push({
+          key: `hook.${field}`,
+          label: fieldLabel,
+          value: String(draft.hook[field]),
+          apply: (next, value) => { next.hook = { ...(next.hook as Record<string, unknown>), [field]: value }; return next; },
+        });
+      }
+    }
+    fields.push(...collectionTextFields(draft, "progression", "内容推进", [
+      ["purpose", "这一段的作用"],
+      ["viewerGain", "观众得到什么"],
+    ], (item) => String(item.beatId ?? "")));
+    const payoff = text("payoff", "结尾兑现", (d) => d.payoff, (d, v) => { d.payoff = v; });
+    if (payoff) fields.push(payoff);
+    const principles = list("visualPrinciples", "视觉方向（每行一条）", "visualPrinciples");
+    if (principles) fields.push(principles);
+    const sound = list("soundPrinciples", "声音方向（每行一条）", "soundPrinciples");
+    if (sound) fields.push(sound);
+    return fields;
+  }
+  if (stage === "script") {
+    const fields: EditableTextField[] = [];
+    const arc = text("narrativeArc", "叙事推进", (d) => d.narrativeArc, (d, v) => { d.narrativeArc = v; });
+    if (arc) fields.push(arc);
+    fields.push(...collectionTextFields(draft, "scenes", "分镜", [
+      ["narration", "旁白"],
+      ["visual_prompt", "画面描述"],
+    ], (item) => String(item.id ?? item.position ?? "")));
+    return fields;
+  }
+  // director：v1 只开放视觉规则的文字修订；逐镜计划的结构与路线仍走讨论/重新生成。
+  if (!isRecord(draft.visualBible)) return [];
+  const fields: EditableTextField[] = [];
+  fields.push(...collectionTextFields(draft, "visualBible", "全片视觉规则", [
+    ["viewerPromise", "观众承诺"],
+    ["narrativeApproach", "叙事方式"],
+    ["pacing", "节奏"],
+    ["composition", "构图"],
+    ["camera", "镜头运动"],
+    ["color", "色彩"],
+    ["continuity", "连续性"],
+    ["sound", "声音"],
+  ]));
+  return fields;
+}
+
+function collectionTextFields(
+  draft: Record<string, unknown>,
+  collectionField: string,
+  label: string,
+  itemFields: Array<[field: string, label: string]>,
+  itemKey: (item: Record<string, unknown>) => string = (item) => String(item.position ?? ""),
+): EditableTextField[] {
+  const items = draft[collectionField];
+  if (!Array.isArray(items)) return [];
+  const fields: EditableTextField[] = [];
+  items.forEach((item, index) => {
+    if (!isRecord(item)) return;
+    const keyOf = itemKey(item) || String(index + 1);
+    for (const [field, fieldLabel] of itemFields) {
+      if (item[field] === undefined || item[field] === null) continue;
+      fields.push({
+        key: `${collectionField}.${keyOf}.${field}`,
+        label: `${label} ${index + 1} · ${fieldLabel}`,
+        value: String(item[field]),
+        apply: (next, value) => {
+          const collection = [...(next[collectionField] as unknown[])];
+          collection[index] = { ...(collection[index] as Record<string, unknown>), [field]: value };
+          next[collectionField] = collection;
+          return next;
+        },
+      });
+    }
+  });
+  return fields;
 }

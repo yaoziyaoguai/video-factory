@@ -494,6 +494,24 @@ describe("creative review confirm API contract", () => {
     );
   });
 
+  it("accepts a hand-edited draft only as a complete document object", () => {
+    // 人工修订走 edit_draft：稿件必须整体提交（服务端会按阶段合同整体校验），
+    // 数组或残缺载荷在这里就被拒，不会进到图的校验层。
+    const document = { viewerPromise: "看懂一个判断方法", payoff: "给出检查表" };
+    assert.deepEqual(
+      parseStudioCreativeReviewCommandInput({ ...base, action: "edit_draft", document }),
+      { ...base, action: "edit_draft", document },
+    );
+    assert.throws(
+      () => parseStudioCreativeReviewCommandInput({ ...base, action: "edit_draft", document: [document] }),
+      (error: unknown) => error instanceof StudioInputError && /完整的方案内容/.test(error.message),
+    );
+    assert.throws(
+      () => parseStudioCreativeReviewCommandInput({ ...base, action: "edit_draft" }),
+      (error: unknown) => error instanceof StudioInputError && /完整的方案内容/.test(error.message),
+    );
+  });
+
   it("still accepts a plain confirmation that overrides nothing", () => {
     assert.deepEqual(parseStudioCreativeReviewCommandInput(base), base);
   });

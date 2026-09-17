@@ -483,7 +483,7 @@ export interface WorkflowRun<TInitialInput = unknown> {
   creativeReviewOperations?: Array<{
     commandId: string;
     requestDigest: string;
-    action: "discuss" | "adopt_proposal" | "undo_draft" | "confirm" | "return_to_stage";
+    action: "discuss" | "adopt_proposal" | "edit_draft" | "undo_draft" | "confirm" | "return_to_stage";
     stage: "treatment" | "script" | "director";
     status: "running" | "completed" | "failed" | "unknown";
     acceptedAt: string;
