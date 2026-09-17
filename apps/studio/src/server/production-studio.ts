@@ -2713,6 +2713,9 @@ interface PendingTextTask {
   identityDigest: string;
   operation: CodexPreparedOperation;
   locallyRunning: boolean;
+  /** 该节点此刻的状态。决定这个未决任务是不是"用户正卡住的那一个"，见 selectPendingTextTask。 */
+  nodeStatus: string;
+  modifiedAt: number;
 }
 
 interface TextTaskRecoveryReceipt {
@@ -2734,6 +2737,11 @@ async function withTaskRecovery(
 ): Promise<StudioRunDetail> {
   const pending = await loadPendingTextTask(workspaceRoot, detail.id, detail.nodes, nodeRuns);
   if (!pending) return detail;
+  // 节点已经成功（或跳过）时，挂在它上面的未决任务只是历史账：那条路当时被人工放行，产出已经用上了，
+  // 而 checkpoint 是只增不减的对账凭据，不会被回收。在一条已经走完的 run 上弹出「有未决付费任务」，
+  // 只会让人以为还有事要处理；何况下面所有恢复动作都被 detail.status === "failed" 挡着，一个都点不动。
+  // 历史留在账本里，不进界面。
+  if (pending.nodeStatus === "succeeded" || pending.nodeStatus === "skipped") return detail;
   const receipt = await readTextTaskRecoveryReceipt(
     textTaskRecoveryReceiptPath(workspaceRoot, detail.id, pending.nodeId),
   );
@@ -2751,8 +2759,20 @@ async function withTaskRecovery(
     if (currentReceipt && retryableCompletedTextFailure(currentReceipt)) allowedActions.push("retry_failed_step");
     allowedActions.push("adjust_plan");
   }
+  // failure 的"下一步"和 taskRecovery 的按钮讲的是同一件事，必须一致：这里既然已经确认原任务悬着，
+  // 就不能再让 failure 去建议"重试这一步"——那条路会被重试守卫按 409 挡回来。文案指向一个点不动的
+  // 按钮，比没有文案更糟：用户会以为是自己操作不对。
+  //
+  // 只改文案，不动 retryable：retryable 是 studio-service 选择用哪一句守卫文案的依据
+  // （studio-service.ts:776 在 retryable === false 时先抛），在这里把它翻成 false 会让用户看到
+  // "需要人工调整方案"，而真正该说的是"先去查询原任务"。重试按钮本身已经被上面的 allowedActions
+  // 挡掉了，不需要靠 retryable 再挡一次。
+  const failure = detail.status === "failed" && detail.failure
+    ? { ...detail.failure, recoveryActions: textTaskRecoveryActions(allowedActions) }
+    : detail.failure;
   return {
     ...detail,
+    ...(failure ? { failure } : {}),
     taskRecovery: {
       nodeId: pending.nodeId,
       phase: pending.phase,
@@ -2782,6 +2802,7 @@ async function loadPendingTextTask(
   const operationRequestIds = new Map(nodeRuns.flatMap((node) => (
     node.operationRequestId ? [[node.nodeId, node.operationRequestId] as const] : []
   )));
+  const nodeStatuses = new Map(nodeRuns.map((node) => [node.nodeId, node.status] as const));
   const candidates: PendingTextTask[] = [];
   for (const node of nodes) {
     if (requestedNodeId && node.id !== requestedNodeId) continue;
@@ -2861,13 +2882,43 @@ async function loadPendingTextTask(
           identityDigest,
           operation,
           locallyRunning: value.status === "running" && !checkpointFailure,
+          nodeStatus: nodeStatuses.get(node.id) ?? "pending",
+          modifiedAt: await stat(filePath).then((fileStat) => fileStat.mtimeMs, () => 0),
         });
       } catch {
         // 单个损坏 checkpoint 不得让整条 run 详情失效；其本身也不能成为恢复授权。
       }
     }
   }
-  return candidates.length === 1 ? candidates[0] : undefined;
+  return selectPendingTextTask(candidates);
+}
+
+// 一条 run 里可以有多个未决的付费任务——最典型的是某个节点的审计中断过一次（stage=uncertain），
+// 之后它照样被人工放行并成功走过去了，而那个 checkpoint 谁也不去收尾（checkpoint 是只增不减的
+// 对账凭据，不能删）。旧规则要求"全 run 恰好只有一个"才认，于是历史里留下任意一个中断记录，
+// 恢复面板就整体消失：用户既看不到"查询原任务"，重试又必然被守卫拦下，整条 run 无路可走。
+//
+// 真正的判据不是"有几个"，而是"用户此刻卡在哪一个上"。按节点的当前状态排序：failed 的节点就是
+// 卡住的那一个；已经 succeeded 的节点上的未决任务只是历史，排在最后。同类里取 checkpoint 最新
+// 写入的那份。注意这个顺序只决定"先给谁看"，不放松任何验证——被选中后仍要过 receipt 与身份摘要。
+function selectPendingTextTask(candidates: PendingTextTask[]): PendingTextTask | undefined {
+  const rank = (candidate: PendingTextTask): number => {
+    if (candidate.nodeStatus === "failed") return 0;
+    if (candidate.nodeStatus === "succeeded" || candidate.nodeStatus === "skipped") return 2;
+    return 1;
+  };
+  return [...candidates].sort((left, right) => rank(left) - rank(right) || right.modifiedAt - left.modifiedAt)[0];
+}
+
+/**
+ * 与 taskRecovery 真正给出的按钮一一对应。原任务的处置只有三种：还没查过就先查；查出来已受理
+ * 且成功就取回结果接着做；查出来确证没被受理才能重发。文案不得出现这之外的出路。
+ */
+function textTaskRecoveryActions(allowedActions: string[]): string[] {
+  const actions = ["先查询原任务，确认它是否已被受理、是否已经扣费"];
+  if (allowedActions.includes("retrieve_and_continue")) actions.push("取回原任务结果并继续制作");
+  if (allowedActions.includes("retry_failed_step")) actions.push("确认结果无法复用后再重试这一步");
+  return actions;
 }
 
 function producerRoleMatchesTask(role: string, kind: CodexPreparedOperation["kind"]): boolean {

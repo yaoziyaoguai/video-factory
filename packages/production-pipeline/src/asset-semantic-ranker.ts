@@ -82,6 +82,13 @@ interface AssetRankThumbnail {
 const MAX_RANK_THUMBNAILS = 12;
 // 与 Broker 的逐图边界保持一致，避免在模型调用前被协议层拒绝。
 const MAX_THUMBNAIL_BYTES = 256 * 1024;
+/**
+ * base64 的长度上界必须由字节上界换算而来，不能沿用给短标签定的 2_000 字符上限：
+ * 写入侧放行到 MAX_THUMBNAIL_BYTES，读取侧却只认 1_500 字节的图，结果就是"写得进去、
+ * 读不回来"——真实缩略图 30–80 KB，于是每一次恢复已存盘的 asset-rank 操作都必然失败。
+ * ceil(n/3)*4 是 base64 的精确长度上界。
+ */
+const MAX_THUMBNAIL_BASE64_CHARS = Math.ceil(MAX_THUMBNAIL_BYTES / 3) * 4;
 const THUMBNAIL_HOSTS = new Set(["images.pexels.com", "cdn.pixabay.com"]);
 export const ASSET_RANK_AGENT_CONTRACT_VERSION = "asset-rank-v3|role-audit-v9|asset-ranking-validator-v1";
 
@@ -202,7 +209,7 @@ function recoveredAssetRankPayload(
       provider: text(item.provider, "saved asset-rank provider"),
       assetId: text(item.assetId, "saved asset-rank assetId"),
       sha256: text(item.sha256, "saved asset-rank sha256"),
-      jpegBase64: text(item.jpegBase64, "saved asset-rank jpegBase64"),
+      jpegBase64: thumbnailJpegBase64(item.jpegBase64, "saved asset-rank jpegBase64"),
     };
   });
   return { version: report.version, scenes: report.scenes, thumbnails };
@@ -427,6 +434,21 @@ function stringRecord(value: unknown, label: string): Record<string, string> {
 function text(value: unknown, label: string, allowEmpty = false): string {
   if (typeof value !== "string" || (!allowEmpty && !value.trim()) || value.length > 2_000) throw new Error(`${label} is invalid.`);
   return value.trim();
+}
+
+/**
+ * 缩略图 base64 的读取校验，与 collectRankThumbnails 的写入校验对称：同一个长度上界，
+ * 同样核对 JPEG 魔数。写入侧只接受 0xff 0xd8 开头的图，读取侧就不能接受别的。
+ */
+function thumbnailJpegBase64(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim() || value.length > MAX_THUMBNAIL_BASE64_CHARS) {
+    throw new Error(`${label} is invalid.`);
+  }
+  const jpeg = Buffer.from(value, "base64");
+  if (jpeg.length < 4 || jpeg.length > MAX_THUMBNAIL_BYTES || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
+    throw new Error(`${label} is invalid.`);
+  }
+  return value;
 }
 
 function integer(value: unknown, label: string, minimum: number, maximum = Number.MAX_SAFE_INTEGER): number {

@@ -189,7 +189,7 @@ function recoveredReferenceGrammarPayload(
     return {
       timecodeMs: integer(frame.timecodeMs, `saved reference frame ${index} timecodeMs`, 0, durationMs),
       sha256: text(frame.sha256, `saved reference frame ${index} sha256`),
-      jpegBase64: text(frame.jpegBase64, `saved reference frame ${index} jpegBase64`),
+      jpegBase64: referenceFrameJpegBase64(frame.jpegBase64, `saved reference frame ${index} jpegBase64`),
       ...(frame.scenePosition === undefined ? {} : {
         scenePosition: integer(frame.scenePosition, `saved reference frame ${index} scenePosition`, 1, Number.MAX_SAFE_INTEGER),
       }),
@@ -297,6 +297,29 @@ function record(value: unknown, label: string): Record<string, unknown> {
 function text(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim() || value.length > 2_000) throw new Error(`Shot grammar ${label} is invalid.`);
   return value.trim();
+}
+
+/**
+ * 关键帧的字节上界。它与 review-media-preprocessor 的 MAX_FRAME_BYTES、Broker 的
+ * MAX_VISUAL_REVIEW_FRAME_BYTES 是同一个边界，三方必须一致。
+ */
+const MAX_REFERENCE_FRAME_BYTES = 256 * 1024;
+/**
+ * 恢复路径读回关键帧时，长度上界只能由字节上界换算，不能沿用 text() 给短标签定的
+ * 2_000 字符上限——真实关键帧 30–80 KB，套 2_000 就等于存进去的关键帧永远读不回来。
+ */
+const MAX_REFERENCE_FRAME_BASE64_CHARS = Math.ceil(MAX_REFERENCE_FRAME_BYTES / 3) * 4;
+
+/** 与预处理侧对称的关键帧读取校验：同一个长度上界，同样核对 JPEG 魔数。 */
+function referenceFrameJpegBase64(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim() || value.length > MAX_REFERENCE_FRAME_BASE64_CHARS) {
+    throw new Error(`Shot grammar ${label} is invalid.`);
+  }
+  const jpeg = Buffer.from(value, "base64");
+  if (jpeg.length < 4 || jpeg.length > MAX_REFERENCE_FRAME_BYTES || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) {
+    throw new Error(`Shot grammar ${label} is invalid.`);
+  }
+  return value;
 }
 
 function integer(value: unknown, label: string, minimum: number, maximum: number): number {

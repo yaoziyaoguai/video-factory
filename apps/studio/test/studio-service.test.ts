@@ -2048,6 +2048,83 @@ describe("StudioService", () => {
       "normal in-flight execution without an observation failure is not a recovery incident");
   });
 
+  it("still finds the stuck task when an earlier node left a settled checkpoint behind", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-settled-checkpoint-"));
+    const run = textRecoveryRun(workspaceRoot, "failed");
+    // brief 节点那次审计中断过（stage=uncertain），之后它被人工放行、照样成功了。checkpoint 是只增不减的
+    // 对账凭据，谁也不去收尾，于是它永远留在候选里，跟着 run 一起变老。
+    run.nodeRuns.push({
+      nodeId: "brief",
+      status: "succeeded",
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      operationRequestId: "brief-workflow-operation-old",
+      artifactIds: [],
+      qualityGateResults: [],
+    });
+    await writePendingTextCheckpoint(workspaceRoot, scriptDraftOperation("stuck-request-id"), {
+      checkpointKey: "e".repeat(64),
+    });
+    await writePendingTextCheckpoint(workspaceRoot, roleAuditOperation("settled-request-id"), {
+      nodeId: "brief",
+      checkpointKey: "f".repeat(64),
+      role: "内容简报",
+      phase: "audit",
+      workflowOperationRequestId: "brief-workflow-operation-old",
+    });
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline: new FakePipeline(run),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    });
+
+    const detail = await service.getRun("run-1");
+
+    // 旧规则要求"全 run 恰好只有一个未决任务"，于是这份历史记录让恢复路径整体失明：
+    // 用户既看不到"查询原任务"，重试又必然被判 409，run 到死都推不动。
+    assert.equal(detail?.taskRecovery?.nodeId, "creative-planning",
+      "已走过的节点留下的未决记录只是历史，不能盖过真正卡住的那个任务");
+    assert.equal(detail?.nodes.find((node) => node.id === "brief")?.status, "succeeded");
+    // 「连续失败时切换同类能力」在这条路径上不成立：结果未知时换模型等于可能重复扣费。
+    // 建议必须与上面那排真正给出的按钮一致，否则用户会去找一个点不动的控件。
+    assert.deepEqual(detail?.failure?.recoveryActions, ["先查询原任务，确认它是否已被受理、是否已经扣费"]);
+    assert.deepEqual(detail?.taskRecovery?.allowedActions, ["query_original_task"]);
+  });
+
+  it("does not project a recovery panel for a checkpoint on an already-succeeded node", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-settled-only-"));
+    const run = executableWaitingRun(workspaceRoot);
+    run.nodeRuns.push({
+      nodeId: "brief",
+      status: "succeeded",
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      operationRequestId: "brief-workflow-operation-old",
+      artifactIds: [],
+      qualityGateResults: [],
+    });
+    await writePendingTextCheckpoint(workspaceRoot, roleAuditOperation("settled-request-id"), {
+      nodeId: "brief",
+      checkpointKey: "f".repeat(64),
+      role: "内容简报",
+      phase: "audit",
+      workflowOperationRequestId: "brief-workflow-operation-old",
+    });
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline: new FakePipeline(run),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    });
+
+    const detail = await service.getRun("run-1");
+
+    // run 已经走完、节点成功，产出也用上了；这时弹"有未决付费任务"只会让人以为还有事要处理，
+    // 而恢复动作又全被 detail.status === "failed" 挡着，一个都点不动。
+    assert.equal(detail?.taskRecovery, undefined);
+  });
+
   it("queries and concurrently retrieves one completed original text task without resubmitting it", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-text-task-completed-"));
     const bridge = await startTextRecoveryBridge();
@@ -6144,43 +6221,88 @@ async function writePendingTextCheckpoint(
   operation: CodexPreparedOperation,
   options: {
     checkpointKey?: string;
+    nodeId?: string;
+    role?: string;
+    phase?: "produce" | "audit";
     workflowOperationRequestId?: string;
     failedOperationRequestIds?: Record<string, string>;
   } = {},
 ): Promise<void> {
-  const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", "creative-planning", "agent-loop-checkpoints");
+  const nodeId = options.nodeId ?? "creative-planning";
+  const phase = options.phase ?? "produce";
+  const operationKey = `0:1:${phase}`;
+  const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", nodeId, "agent-loop-checkpoints");
   const checkpointKey = options.checkpointKey ?? "d".repeat(64);
   await mkdir(directory, { recursive: true });
   await writeFile(path.join(directory, `${checkpointKey}.json`), JSON.stringify({
     version: "video-factory/agent-loop-checkpoint-v8",
     key: checkpointKey,
     contractDigest: "fixture-contract",
-    role: "编剧",
+    role: options.role ?? "编剧",
     maxIterations: 3,
     cycle: 0,
     status: "failed",
     completed: [],
-    operationGenerations: { "0:1:produce": 0 },
+    operationGenerations: { [operationKey]: 0 },
     ...(options.failedOperationRequestIds
       ? {
         failedOperationRequestIds: options.failedOperationRequestIds,
         failure: { stage: "not_accepted", failureKind: "model_provider_transient" },
       }
       : {}),
-    phaseAttempts: { produce: 1, audit: 0 },
+    phaseAttempts: { produce: phase === "produce" ? 1 : 0, audit: phase === "audit" ? 1 : 0 },
     recoveryOwner: {
       runId: "run-1",
-      nodeId: "creative-planning",
+      nodeId,
       workflowOperationRequestId: options.workflowOperationRequestId ?? "script-workflow-operation-current",
     },
     pendingOperation: {
-      phase: "produce",
+      phase,
       iteration: 1,
-      operationKey: "0:1:produce",
+      operationKey,
       generation: 0,
       operation,
     },
   }), "utf8");
+}
+
+/** 一份形状合法的未决付费操作。requestId 就是将来拿去向 broker 对账的那个身份。 */
+function preparedTextOperation(kind: CodexPreparedOperation["kind"], requestId: string): CodexPreparedOperation {
+  const storeId = `vfs_store_${"b".repeat(32)}`;
+  const brokerBinding = {
+    version: "video-factory/task-binding-v1" as const,
+    storeId,
+    providerId: "openai",
+    modelId: "gpt-test",
+  };
+  return {
+    version: "video-factory/codex-prepared-operation-v1",
+    requestId,
+    kind,
+    envelope: { protocolVersion: "video-factory/codex-bridge-v2", requestId, kind, payload: { brief: { title: "未决任务" } } },
+    serializedEnvelope: "{\"brief\":{\"title\":\"未决任务\"}}",
+    binding: {
+      version: "video-factory/task-binding-v1",
+      storeId,
+      providerId: "openai",
+      modelId: "gpt-test",
+      requestDigest: "a".repeat(64),
+      kind,
+      contractDigest: null,
+      sessionDigest: "c".repeat(64),
+    },
+    brokerBinding,
+    route: { socketPath: "/private/runtime/worker.sock" },
+    taskFact: "accepted_unknown",
+  };
+}
+
+function scriptDraftOperation(requestId: string): CodexPreparedOperation {
+  return preparedTextOperation("script-draft", requestId);
+}
+
+function roleAuditOperation(requestId: string): CodexPreparedOperation {
+  return preparedTextOperation("role-audit", requestId);
 }
 
 async function startTextRecoveryBridge(

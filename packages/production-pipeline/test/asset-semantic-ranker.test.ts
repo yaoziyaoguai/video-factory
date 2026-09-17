@@ -301,6 +301,103 @@ describe("asset semantic ranking", () => {
     assert.equal(observed.length, 1);
     assert.equal(thumbnailFetches, 2, "recovery must reuse the original two thumbnails instead of downloading them again");
   });
+
+  it("recovers a saved ranking whose thumbnails are real JPEG sizes", async () => {
+    const report = parseAssetCandidateReport(rawReport);
+    let stored: unknown;
+    let interruptProducer = true;
+    // 真实缩略图 30–80 KB。上面那条恢复用例用的是 5 字节的假图，base64 只有 8 个字符，
+    // 所以读回侧的 2_000 字符上限一直被绕过：写入侧收下 256 KiB，恢复侧只认 1_500 字节，
+    // 于是"存得进去、读不回来"，每一次恢复已存盘的 asset-rank 操作都必然失败。
+    const jpeg = Buffer.concat([
+      Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+      Buffer.alloc(60 * 1024, 0x41),
+      Buffer.from([0xff, 0xd9]),
+    ]);
+    const ranking = deterministicAssetRanking(report);
+    ranking.source = "model";
+    ranking.providerId = "codex-asset-ranker-v1";
+    ranking.modelId = "codex-default";
+    const checkpoint = {
+      key: "asset-rank-real-size",
+      load: async () => stored,
+      save: async (value: unknown) => { stored = structuredClone(value); },
+    };
+    const client = {
+      runTask: async () => ranking,
+      runTaskDetailed: async (
+        kind: CodexTaskKind,
+        payload: unknown,
+        requestId?: string,
+        _session?: unknown,
+        requestOptions?: CodexTaskRequestOptions,
+      ): Promise<CodexTaskExecution> => {
+        if (kind === "asset-rank") {
+          if (interruptProducer) {
+            await requestOptions?.beforeSubmit?.(preparedOperation(kind, payload, requestId!));
+            throw new Error("ranking response interrupted");
+          }
+          return { output: ranking };
+        }
+        return { output: passingAudit() };
+      },
+      observePrepared: async (): Promise<CodexTaskExecution> => ({ output: ranking }),
+    };
+    const ranker = new CodexAssetSemanticRanker({ client, fetchThumbnail: async () => jpeg });
+
+    await assert.rejects(() => ranker.rankDetailed(report, checkpoint), /ranking response interrupted/);
+    const savedThumbnails = (stored as {
+      pendingOperation?: { operation?: { envelope?: { payload?: { thumbnails?: Array<{ jpegBase64?: string }> } } } };
+    }).pendingOperation?.operation?.envelope?.payload?.thumbnails;
+    assert.ok(
+      typeof savedThumbnails?.[0]?.jpegBase64 === "string" && savedThumbnails[0].jpegBase64.length > 2_000,
+      "回归前提：存盘的缩略图 base64 必须超过旧的 2_000 字符上限，否则这条用例测不到 F10",
+    );
+
+    interruptProducer = false;
+    const execution = await ranker.rankDetailed(report, checkpoint);
+
+    assert.equal(execution.agentLoop?.status, "passed");
+  });
+
+  it("rejects a recovered thumbnail whose base64 is not a JPEG", async () => {
+    const report = parseAssetCandidateReport(rawReport);
+    const notJpeg = Buffer.alloc(60 * 1024, 0x41);
+    const checkpoint = {
+      key: "asset-rank-not-jpeg",
+      load: async () => ({
+        pendingOperation: {
+          operation: preparedOperation("asset-rank", {
+            version: report.version,
+            scenes: report.scenes,
+            thumbnails: [{
+              scenePosition: 1,
+              provider: "pexels",
+              assetId: "first",
+              sha256: "a".repeat(64),
+              jpegBase64: notJpeg.toString("base64"),
+            }],
+          }, "agent-not-jpeg"),
+        },
+      }),
+      save: async () => {},
+    };
+    const ranker = new CodexAssetSemanticRanker({
+      client: {
+        runTask: async () => deterministicAssetRanking(report),
+        // 没有 runTaskDetailed 时 rankDetailed 会直接走 rank()，根本走不到恢复路径。
+        // 这里让它一旦被调用就失败，确保上面那句 rejection 只可能来自载荷校验。
+        runTaskDetailed: async () => { throw new Error("recovery should have rejected before any model call"); },
+      },
+      fetchThumbnail: async () => undefined,
+    });
+
+    // 读取侧必须和写入侧一样核对 JPEG 魔数：长度对了不代表这串 base64 真是一张图。
+    await assert.rejects(
+      () => ranker.rankDetailed(report, checkpoint),
+      /saved asset-rank jpegBase64 is invalid/,
+    );
+  });
 });
 
 function passingAudit() {
