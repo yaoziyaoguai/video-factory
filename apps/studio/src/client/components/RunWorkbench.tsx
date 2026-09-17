@@ -446,8 +446,12 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
           ) : (
             <section className={`run-state-panel${run.failure ? " has-failure" : ""}`}>
               {run.failure ? <>
-                <p className="eyebrow">{sourceAssetFailure ? "制作已安全停止" : `停在 ${run.failure.nodeLabel}`}</p>
-                <h2>{sourceAssetFailure ? "画面预检未通过" : `${run.failure.nodeLabel}没有完成`}</h2>
+                <p className="eyebrow">{sourceAssetFailure
+                  ? (sourceReviewIncomplete(run.failure) ? "制作已暂停，画面与费用都已保留" : "制作已安全停止")
+                  : `停在 ${run.failure.nodeLabel}`}</p>
+                <h2>{sourceAssetFailure
+                  ? (sourceReviewIncomplete(run.failure) ? "试片审查还没完成" : "画面预检未通过")
+                  : `${run.failure.nodeLabel}没有完成`}</h2>
                 {sourceAssetFailure ? <>
                   <div className="run-failure-breakdown">
                     <strong>结论</strong>
@@ -1415,6 +1419,14 @@ function isSourceAssetReviewFailure(failure: NonNullable<StudioRunDetail["failur
   return failure.nodeId === "asset-source-review"
     || (["assets", "asset-source-review"].includes(failure.nodeId)
       && /源素材视觉预检|试片未通过|试片审查暂未完成/.test(failure.technicalDetail ?? ""));
+}
+
+// 「审查没跑完」（复核服务不可用、模型没给出可用结论）和「审查未通过」（复核给出了否定
+// 结论）是两回事：前者没有任何裁决，主动权在用户手里——等服务恢复或直接重试都行，措辞
+// 必须说"暂停"而不是"未通过"，否则复核基础设施的一次故障就被渲染成作品被否。
+function sourceReviewIncomplete(failure: NonNullable<StudioRunDetail["failure"]>): boolean {
+  return isSourceAssetReviewFailure(failure)
+    && /试片审查暂未完成|复审尚未完成/.test(failure.technicalDetail ?? "");
 }
 
 function runningNodeLabel(run: StudioRunDetail): string {
