@@ -1616,6 +1616,8 @@ function reviewGateNode(
             summary: audit.summary,
             issues: structuredClone(audit.issues),
           }),
+          // 上一轮若留下"复核没跑成"的提示，此刻已被带结论的复核替代，跟着清掉。
+          planningStop: null,
         };
       }
       const audit = checked.reviewCheck?.audit;
@@ -1635,6 +1637,8 @@ function reviewGateNode(
             summary: audit.summary,
             issues: structuredClone(audit.issues),
           }),
+          // 上一轮若留下"复核没跑成"的提示，此刻已被带结论的复核替代，跟着清掉。
+          planningStop: null,
         };
       }
       const reviewed = recordCreativeReviewCheck(state.creativeReview, stage, {
