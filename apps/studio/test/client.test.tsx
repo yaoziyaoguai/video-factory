@@ -4666,6 +4666,80 @@ describe("Studio client", () => {
     expect(screen.getByText("制作服务连接刚刚确认")).toBeInTheDocument();
   });
 
+  it("names the local orchestration step in the interface's own words, not its pipeline label", () => {
+    // brief 是本地编排节点：它自己不调模型，回执里的 providerLabel 是流水线内部的英文标识
+    // （"Validate brief"），modelId 是字面量 "inline"。两样都不能直接上屏——英文内部标识不是
+    // 界面词汇，而"这一步不调模型"也不是"没记录"。
+    const { activeIntervention: _activeIntervention, videoArtifactId: _videoArtifactId, ...withoutReview } = runDetail;
+    render(<RunWorkbench
+      run={{
+        ...withoutReview,
+        status: "running",
+        currentNodeId: "brief",
+        nodes: [{
+          id: "brief",
+          label: "Validate brief",
+          role: "制片人",
+          status: "running",
+          artifactIds: [],
+          qualityGateResults: [],
+          plannedExecution: {
+            providerId: "inline:brief",
+            providerLabel: "Validate brief",
+            modelId: "inline",
+            transport: "local_process",
+            billing: "local_compute",
+            snapshotSource: "created",
+          },
+        }],
+        artifacts: [],
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+    />);
+
+    expect(screen.getByText("当前能力：内容简报")).toBeInTheDocument();
+    expect(screen.queryByText(/Validate brief/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/模型名称未记录/)).not.toBeInTheDocument();
+  });
+
+  it("does not report a missing model for an orchestrator whose models live in its stages", () => {
+    // 创作规划是联合编排器，模型在它下面的阶段里——所以回执的 modelId 是 "inline"。可界面显示
+    // 「模型名称未记录」的那一刻，同一屏的阶段面板上正写着 effectiveModelId。把"这一步由阶段
+    // 各自调模型"说成"我们没记下来"，用户只会以为记录丢了。
+    const { activeIntervention: _activeIntervention, videoArtifactId: _videoArtifactId, ...withoutReview } = runDetail;
+    render(<RunWorkbench
+      run={{
+        ...withoutReview,
+        status: "running",
+        currentNodeId: "creative-planning",
+        nodes: [{
+          id: "creative-planning",
+          label: "Joint creative planning",
+          role: "创作规划制片",
+          status: "running",
+          artifactIds: [],
+          qualityGateResults: [],
+          plannedExecution: {
+            providerId: "codex-screenwriter-v1",
+            providerLabel: "Joint creative planning",
+            modelId: "inline",
+            transport: "local_process",
+            billing: "local_compute",
+            snapshotSource: "created",
+          },
+        }],
+        artifacts: [],
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+    />);
+
+    expect(screen.getByText("当前能力：创作规划")).toBeInTheDocument();
+    expect(screen.queryByText(/Joint creative planning/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/模型名称未记录/)).not.toBeInTheDocument();
+  });
+
   it("uses the observable active node instead of a stale summary node", () => {
     const { activeIntervention: _activeIntervention, videoArtifactId: _videoArtifactId, ...withoutReview } = runDetail;
     render(<RunWorkbench

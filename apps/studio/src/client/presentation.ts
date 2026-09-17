@@ -2,6 +2,7 @@ import type { StudioAgentLoopProgress, StudioCandidateInboxItem, StudioOpportuni
 
 export const RUN_NODE_LABELS: Record<string, string> = {
   brief: "内容简报",
+  "creative-planning": "创作规划",
   script: "脚本",
   "reference-grammar": "参考视频风格分析",
   "visual-direction": "导演方案",
@@ -17,7 +18,27 @@ export const RUN_NODE_LABELS: Record<string, string> = {
   "publish-package": "发布文案与发布包",
 };
 
-export const RUN_NODE_ORDER = Object.keys(RUN_NODE_LABELS);
+/**
+ * 旧版线性流程的固定工序（不含 joint-v1 收敛出来的创作规划节点）。写成字面量而不是
+ * `Object.keys(RUN_NODE_LABELS)`：后者意味着"给某个节点补一个中文名"会顺手改掉旧 run 进度条的
+ * 格子数，而这两件事没有关系——补名字不该动顺序，动顺序也不该靠加名字。
+ */
+export const RUN_NODE_ORDER: readonly string[] = [
+  "brief",
+  "script",
+  "reference-grammar",
+  "visual-direction",
+  "asset-candidates",
+  "asset-semantic-rank",
+  "assets",
+  "asset-source-review",
+  "voice",
+  "render",
+  "technical-review",
+  "visual-review",
+  "final-review",
+  "publish-package",
+];
 
 export function runNodeLabel(nodeId: string): string {
   return RUN_NODE_LABELS[nodeId] ?? nodeId;

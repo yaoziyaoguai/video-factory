@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { StudioCostRunDetail, StudioDecisionInput, StudioNarrationRevisionInput, StudioSceneResourceRevisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { agentLoopPendingNote, agentLoopPhaseLabel, creatorFacingTechnicalText, humanizeCreativeText, platformLabel, providerLabel, catalogModelLabel, runNodeLabel, sourceAssetReviewBreakdown } from "../presentation.js";
+import { agentLoopPendingNote, agentLoopPhaseLabel, creatorFacingTechnicalText, humanizeCreativeText, platformLabel, providerLabel, catalogModelLabel, runNodeLabel, RUN_NODE_LABELS, sourceAssetReviewBreakdown } from "../presentation.js";
 import { NodeWorkspace, revealNodeWorkspace } from "./NodeWorkspace.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 
@@ -207,7 +207,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
           {run.nodes.map((node, index) => (
             <div className={`workflow-node node-${node.status}`} key={node.id}>
               <span className="node-index">{node.status === "succeeded" ? <Check aria-hidden="true" size={13} /> : index + 1}</span>
-              <span>{node.role ? `${node.role} · ${node.label}` : node.label}</span>
+              <span>{node.role ? `${node.role} · ${stepNameFor(node, node.label)}` : stepNameFor(node, node.label)}</span>
             </div>
           ))}
         </section>
@@ -215,7 +215,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
 
       {activeSpendNode ? <section className="current-production-action" aria-labelledby="current-production-action-title">
         <header>
-          <div><p className="eyebrow">当前需要处理</p><h2 id="current-production-action-title">现在需要你：确认{activeSpendNode.label}</h2></div>
+          <div><p className="eyebrow">当前需要处理</p><h2 id="current-production-action-title">现在需要你：确认{stepNameFor(activeSpendNode, activeSpendNode.label)}</h2></div>
           <StatusBadge status={run.status} />
         </header>
         <p>{activeSpendNode.role ?? "当前角色"}完成后，系统会继续推进后续步骤。请先检查它收到的内容、实际使用的模型和本次报价。</p>
@@ -389,8 +389,8 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                 <p className="agent-review-guidance">补查会重跑整轮审片、不会重新购买画面或配音，因此<strong>其它镜头（包括上一轮已通过的镜头）的结论也可能变化</strong>；判定与上一轮不同的条目会标出「判定变动」，并给出两轮原文。批准前你要对本轮每一条结论逐条表态：采纳的必须先返修，不采纳的要写明理由。</p>
               </div> : null}
               {nextGateNode ? <div className="boundary-next-step">
-                <span>下一步「{nextGateNode.label}」还没开始。放行后它会直接按现在保存的模型和设置开始跑；要改就在放行前改。</span>
-                <button className="button button-ghost" type="button" onClick={() => revealNodeWorkspace(nextGateNode.id)}>去配置「{nextGateNode.label}」</button>
+                <span>下一步「{stepNameFor(nextGateNode, nextGateNode.label)}」还没开始。放行后它会直接按现在保存的模型和设置开始跑；要改就在放行前改。</span>
+                <button className="button button-ghost" type="button" onClick={() => revealNodeWorkspace(nextGateNode.id)}>去配置「{stepNameFor(nextGateNode, nextGateNode.label)}」</button>
               </div> : null}
               <div className="decision-actions">
                 {boundaryGate ? <>
@@ -1428,15 +1428,47 @@ function runningNodeLabel(run: StudioRunDetail): string {
       ? "编剧与独立质量复核正在修改脚本"
       : "编剧正在生成结构化脚本";
   }
-  return current ? `${current.role ?? "制作角色"}正在处理${current.label}` : "系统正在推进制作";
+  return current ? `${current.role ?? "制作角色"}正在处理${stepNameFor(current, current.label)}` : "系统正在推进制作";
 }
 
+/**
+ * 顶栏这一行回答的是"现在是谁在工作"，所以两半都必须站在界面自己的词汇里——名字走
+ * capacityNameFor，模型走 recordedModelName，两处各自处理回执里的内部标识。
+ */
 function activeNodeModel(run: StudioRunDetail, providers: StudioProvider[]): string | undefined {
   const current = run.nodes.find((node) => node.id === run.currentAction?.nodeId)
     ?? run.nodes.find((node) => node.status === "running");
-  const execution = current?.executionReceipt ?? current?.plannedExecution;
+  if (!current) return undefined;
+  const execution = current.executionReceipt ?? current.plannedExecution;
   if (!execution) return undefined;
-  return `${execution.providerLabel} · ${catalogModelLabel(providers, execution.modelId) ?? "模型名称未记录"}`;
+  const name = stepNameFor(current, execution.providerLabel);
+  const model = recordedModelName(execution.modelId, providers);
+  return model ? `${name} · ${model}` : name;
+}
+
+/**
+ * 界面里的步骤名。候选名来自回执（`providerLabel`）或节点自身（`label`），两者都可能是流水线
+ * 内部的英文标识——`brief` 是 "Validate brief"，导演方案是 "Direct visual plan"，终审是
+ * "Human final review"。带中文的候选名才是界面词汇（「AI 视觉导演」这类 provider 名），保留它
+ * 能说清"是哪一台在跑"；英文的一律换成界面按 nodeId 维护的中文步骤名，否则拼进中文句子里
+ * 就是半截中英混排。NodeWorkspace 一直是这么渲染的，只有本组件漏了。
+ */
+function stepNameFor(
+  node: StudioRunDetail["nodes"][number],
+  candidateLabel: string | undefined,
+): string {
+  const label = candidateLabel?.trim();
+  if (label && /[一-鿿]/.test(label)) return label;
+  return RUN_NODE_LABELS[node.id] ?? node.role?.trim() ?? runNodeLabel(node.id);
+}
+
+function recordedModelName(modelId: string | undefined, providers: StudioProvider[]): string | undefined {
+  const id = modelId?.trim();
+  // 本地编排节点（brief、创作规划）自己不调模型，模型在它下面的阶段里。回执记的 "inline" 是个
+  // 字面量、不是模型，所以整段模型名都不显示：把"这一步不直接调模型"说成"我们没记下来"，
+  // 用户会以为记录丢了。
+  if (!id || id === "inline") return undefined;
+  return catalogModelLabel(providers, id) ?? "模型名称未记录";
 }
 
 function etaLabel(progress: NonNullable<StudioRunDetail["progress"]>): string {

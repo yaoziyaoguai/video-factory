@@ -46,6 +46,18 @@ const STAGE_CAPABILITY: Partial<Record<StudioPlanningStage["id"], string>> = {
   director: "storyboard.plan",
 };
 
+/**
+ * 换模型这一格的说明。保存的后果按阶段是否已经跑过而定，不是一句话能盖住的：
+ * 已经跑过的阶段会被标成待重做、连同下游一起重跑；还没跑过的阶段（例如停在简报边界时，
+ * 创作规划三个阶段都是"待开始"）根本无产可重做，保存只是给它选一台模型然后开始跑。
+ * 说成"重新执行"会让用户以为自己会丢掉一版已经做好的产出，从而不敢改模型。
+ */
+function stageModelNote(status: StudioPlanningStage["status"]): string {
+  return status === "pending"
+    ? "选择只是草稿；保存后这一步会按你选的模型开始执行。"
+    : "选择只是草稿；保存后才会重新执行这一阶段开始的后续部分。";
+}
+
 function planningStageProvider(providers: StudioProvider[], stageId: StudioPlanningStage["id"]): StudioProvider | undefined {
   const capability = STAGE_CAPABILITY[stageId];
   if (!capability) return undefined;
@@ -133,7 +145,7 @@ export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditS
                       <option key={model.id} value={model.id}>{model.label}{model.recommended ? "（推荐）" : ""}</option>
                     ))}
                   </select>
-                  <small><RefreshCw aria-hidden="true" size={12} /> 选择只是草稿；保存后才会重新执行这一阶段开始的后续部分。</small>
+                  <small><RefreshCw aria-hidden="true" size={12} /> {stageModelNote(stage.status)}</small>
                   <button
                     className="button button-secondary"
                     type="button"
