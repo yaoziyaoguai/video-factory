@@ -1987,6 +1987,10 @@ describe("planning failure creator copy (B4-FIX)", () => {
     // 整句换成通用说明等于把它藏起来。上面的 provider 一条就是这个契约的守门人。
     const unregistered = planningFailureForCreators("simulated publication failure after the planning graph completed");
     assert.match(unregistered, /simulated publication failure/);
+    // 但也不能让它裸着上屏——创作者看到屏幕上孤零零一句英文，只会以为界面坏了或者自己看不懂。
+    // 补一句中文说明这是什么，原文一字不动地跟在后面：既不藏信息，也不把机器的话冒充成界面的话。
+    assert.match(unregistered, /^这一步没有完成。/);
+    assert.match(unregistered, /机器给出的原文：simulated publication failure/);
   });
 
   it("keeps a creator-facing Chinese failure reason as written", async () => {

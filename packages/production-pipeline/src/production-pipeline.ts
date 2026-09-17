@@ -6497,9 +6497,17 @@ export function planningFailureForCreators(error: string): string {
   // 通用说明等于把它藏起来，创作者就只剩一句"这一步没有完成"。已经上过屏的那几句按句登记在
   // KNOWN_ENGLISH_FAILURE_NARRATIVES 里逐条替换；再发现新的泄漏就再加一条，而不是放宽匹配。
   if (KNOWN_ENGLISH_FAILURE_NARRATIVES.some((pattern) => pattern.test(redacted))) return UNTRANSLATED_PLANNING_FAILURE;
-  return redacted
+  const cleaned = redacted
     .replace(/\s*不回退旧规划流程。/g, "")
     .replace(/Joint creative planning/g, "创作规划");
+  // 但"原文保留"不等于"裸着上屏"：屏幕上孤零零一句英文会被读成界面自己的话，创作者只会以为
+  // 界面坏了或者自己看不懂。所以补一句中文说明它是什么，原文一字不动跟在后面——信息一点不丢，
+  // 读的人也知道该把哪一段转述给操作员。整句本来就有中文的（这条腿的中文文案、历史 run 的
+  // 缓存文案）不加壳：它们是能直接读的话，不是机器诊断。
+  if (!cleaned.trim()) return UNTRANSLATED_PLANNING_FAILURE;
+  return /[一-鿿]/.test(cleaned)
+    ? cleaned
+    : `${UNTRANSLATED_PLANNING_FAILURE}\n机器给出的原文：${cleaned}`;
 }
 
 const UNTRANSLATED_PLANNING_FAILURE = "这一步没有完成。可以重试；连续失败时检查这一步使用的服务与模型配置。";
