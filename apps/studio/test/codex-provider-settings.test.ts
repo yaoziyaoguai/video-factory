@@ -494,6 +494,65 @@ describe("buildProviderCatalog codex fallback", () => {
     assert.deepEqual(publishCopy?.modelProfiles?.map((model) => model.id), ["deepseek-flash", "gpt-5.6-sol"]);
   });
 
+  it("lists every DeepSeek fallback leg the broker announces, not just the first one", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      { available: true, reason: "", taskKinds: ["role-audit"], modelId: "gpt-5.6-sol" },
+      {
+        available: true,
+        reason: "",
+        taskKinds: ["script-draft", "director-plan", "role-audit"],
+        modelId: "deepseek-flash",
+        modelCandidates: ["deepseek-flash", "deepseek-v4-pro"],
+      },
+    );
+
+    // role-agent-assembly 对已接入的角色按 broker 公告的候选表逐个建候选 agent，所以
+    // deepseek-v4-pro 是一条真会在线路故障时被自动用上的兜底腿。目录少列它，用户就既看不见
+    // 这条腿，也没法把首选直接设成它——production-studio 的模型选择校验正是照这份列表做的。
+    for (const providerId of ["codex-screenwriter-v1", "api-visual-director-v1", "codex-role-auditor-v1"]) {
+      assert.deepEqual(
+        providers.find((provider) => provider.id === providerId)?.modelProfiles?.map((model) => model.id),
+        ["deepseek-flash", "deepseek-v4-pro", "gpt-5.6-sol"],
+        `${providerId} 应当把 DeepSeek 侧公告的兜底腿一并列出`,
+      );
+    }
+    // 兜底腿不是第二个"默认"。
+    assert.deepEqual(
+      providers.find((provider) => provider.id === "codex-screenwriter-v1")?.modelProfiles?.map((model) => model.recommended),
+      [true, false, false],
+    );
+    // 没有接入按请求换模型能力的角色仍然只列首选：候选表对它们不是可选集合。
+    assert.deepEqual(
+      providers.find((provider) => provider.id === "codex-publish-copy-v1")?.modelProfiles?.map((model) => model.id),
+      ["deepseek-flash", "gpt-5.6-sol"],
+    );
+  });
+
+  it("lists a model announced by both brokers only once", () => {
+    const shared = {
+      available: true,
+      reason: "",
+      taskKinds: ["script-draft", "role-audit"],
+      modelId: "deepseek-flash",
+      modelCandidates: ["deepseek-flash", "shared-model"],
+    };
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      shared,
+      shared,
+    );
+
+    // 两个 broker 公告同一个模型 id 时，role-agent-assembly 的 distinctCandidates 只留先出现的那条
+    // ——它跑的是同一个模型，不是一次兜底。目录用同一条规则，否则界面上会出现两个同名选项。
+    assert.deepEqual(
+      providers.find((provider) => provider.id === "codex-screenwriter-v1")?.modelProfiles?.map((model) => model.id),
+      ["deepseek-flash", "shared-model"],
+    );
+  });
+
   it("shows the role-specific production and audit models reported by the broker", () => {
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },

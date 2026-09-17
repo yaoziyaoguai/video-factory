@@ -141,30 +141,58 @@ export function buildProviderCatalog(
   const deepseekAuditAvailable = supportsTask(deepseekCodex, "role-audit");
   const codexRoleAvailable = (taskKind: string) => supportsTask(codex, taskKind) && codexAuditAvailable;
   const deepseekRoleAvailable = (taskKind: string) => supportsTask(deepseekCodex, taskKind) && deepseekAuditAvailable;
+  const deepseekProfiles = (
+    providerId: string,
+    taskKind: string,
+    taskType: "text" | "visual-review" = "text",
+    runtimeAvailable = true,
+  ) => {
+    const defaultModelId = deepseekModelForTask(taskKind);
+    // 与 codexProfiles 同一条规则：broker 在 /health 公告的候选表里，每个模型都是
+    // role-agent-assembly 真会建出候选 agent 的模型。目录少列一条，用户就既看不见那条兜底腿，
+    // 也没法把它直接设成首选——而它照样会在首选故障时被自动用上。这两件事必须一致。
+    const selectable = [...new Set([
+      defaultModelId,
+      ...(MODEL_SWITCH_TASK_KINDS.has(taskKind) ? deepseekCodex.modelCandidates ?? [] : []),
+    ].filter((modelId) => modelId.trim()))];
+    return selectable.map((modelId) => ({
+      ...textModelProfile(
+        modelId,
+        modelId,
+        providerId,
+        "deepseek",
+        runtimeAvailable && deepseekRoleAvailable(taskKind),
+        modelId === defaultModelId
+          ? "DeepSeek 首选模型；首选模型发生连接、超时、限流、容量或服务不可用时可作为候选，业务校验失败不会触发切换。"
+          : "DeepSeek broker 公告的已审核候选，排在首选之后的兜底腿；也可在本次制作或单个节点上直接选为首选。",
+      ),
+      recommended: modelId === defaultModelId && deepseekRoleAvailable(taskKind),
+      taskTypes: [taskType],
+    }));
+  };
   const roleModelProfiles = (
     providerId: string,
     taskKind: string,
     taskType: "text" | "visual-review" = "text",
     runtimeAvailable = true,
-  ) => [
-    {
-      ...textModelProfile(
-        deepseekModelForTask(taskKind),
-        deepseekModelForTask(taskKind),
-        providerId,
-        "deepseek",
-        runtimeAvailable && deepseekRoleAvailable(taskKind),
-        "DeepSeek 首选模型；首选模型发生连接、超时、限流、容量或服务不可用时可作为候选，业务校验失败不会触发切换。",
-      ),
-      recommended: deepseekRoleAvailable(taskKind),
-      taskTypes: [taskType],
-    },
-    ...codexProfiles(providerId, taskKind, taskType, runtimeAvailable && codexAuditAvailable).map((model) => ({
-      ...model,
-      // 只有首选那一侧是推荐项；候选表里的其他模型是可选项，标成推荐会变成两个"默认"。
-      recommended: model.recommended && !deepseekRoleAvailable(taskKind) && codexRoleAvailable(taskKind),
-    })),
-  ];
+  ) => {
+    const profiles = [
+      ...deepseekProfiles(providerId, taskKind, taskType, runtimeAvailable),
+      ...codexProfiles(providerId, taskKind, taskType, runtimeAvailable && codexAuditAvailable).map((model) => ({
+        ...model,
+        // 只有首选那一侧是推荐项；候选表里的其他模型是可选项，标成推荐会变成两个"默认"。
+        recommended: model.recommended && !deepseekRoleAvailable(taskKind) && codexRoleAvailable(taskKind),
+      })),
+    ];
+    // 两个 broker 公告同一个模型 id 时只留先出现的那条，顺序即偏好——这与 role-agent-assembly 的
+    // distinctCandidates 是同一条规则。留着重复项只会让界面上出现两个同名选项。
+    const seen = new Set<string>();
+    return profiles.filter((model) => {
+      if (seen.has(model.id)) return false;
+      seen.add(model.id);
+      return true;
+    });
+  };
   const roleRequirement = (taskKind: string) => deepseekRoleAvailable(taskKind) || codexRoleAvailable(taskKind)
     ? "至少一个能同时完成生产与独立质量复核的模型服务可用。"
     : `DeepSeek：${uniqueRequirements(deepseekCodexRequirementFor(taskKind), deepseekCodexRequirementFor("role-audit"))} OpenAI：${uniqueRequirements(codexRequirement(taskKind), codexRequirement("role-audit"))}`;
