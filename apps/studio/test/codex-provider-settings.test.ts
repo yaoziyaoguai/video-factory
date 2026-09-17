@@ -553,6 +553,57 @@ describe("buildProviderCatalog codex fallback", () => {
     );
   });
 
+  it("presets the model it labels as recommended, and the one the runtime pool tries first", () => {
+    const providers = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      {
+        available: true,
+        reason: "",
+        modelId: "gpt-5.6-sol",
+        taskKinds: ["script-draft", "director-plan", "creative-treatment", "role-audit"],
+        modelCandidates: ["gpt-5.6-sol"],
+      },
+      {
+        available: true,
+        reason: "",
+        modelId: "deepseek-flash",
+        taskKinds: ["script-draft", "director-plan", "creative-treatment", "role-audit"],
+        modelCandidates: ["deepseek-flash", "deepseek-v4-pro"],
+      },
+    );
+
+    // 三处必须同源：界面拿 defaultModelId 给新建制作和节点编辑器**预置**模型（NewRunDialog 用它
+    // 拼 initialInput.models、NodeWorkspace 与 PlanningStagesPanel 用它定下拉初值），
+    // modelProfiles 的 recommended 决定下拉里标谁「（推荐）」，而 role-agent-assembly 的候选池
+    // 决定运行时真先试谁。曾经三者不一致：运行时和标签都是 DeepSeek，预置给用户的却是 Codex——
+    // 界面上于是出现一台既不是"推荐"、也不是运行时首选的模型。这条断言钉住三者相等。
+    for (const providerId of ["codex-screenwriter-v1", "api-visual-director-v1", "codex-creative-treatment-v1", "codex-role-auditor-v1"]) {
+      const provider = providers.find((candidate) => candidate.id === providerId);
+      assert.deepEqual(
+        provider?.modelProfiles?.filter((model) => model.recommended).map((model) => model.id),
+        ["deepseek-flash"],
+        `${providerId} 只应有一个推荐项`,
+      );
+      assert.equal(provider?.defaultModelId, "deepseek-flash", `${providerId} 预置的应当是运行时先试的那一台`);
+      assert.equal(provider?.modelProfiles?.[0]?.id, "deepseek-flash", `${providerId} 列表首位与预置必须一致`);
+    }
+
+    // DeepSeek 服务不了这个任务时才退回 Codex——预置不会指到一台没有的模型上。
+    const withoutDeepseek = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: false },
+      {},
+      {
+        available: true,
+        reason: "",
+        modelId: "gpt-5.6-sol",
+        taskKinds: ["script-draft", "role-audit"],
+        modelCandidates: ["gpt-5.6-sol"],
+      },
+    );
+    assert.equal(withoutDeepseek.find((provider) => provider.id === "codex-screenwriter-v1")?.defaultModelId, "gpt-5.6-sol");
+  });
+
   it("shows the role-specific production and audit models reported by the broker", () => {
     const providers = buildProviderCatalog(
       { python: true, ffmpeg: true, ffprobe: true, say: false },

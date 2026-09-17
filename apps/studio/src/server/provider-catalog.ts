@@ -141,6 +141,18 @@ export function buildProviderCatalog(
   const deepseekAuditAvailable = supportsTask(deepseekCodex, "role-audit");
   const codexRoleAvailable = (taskKind: string) => supportsTask(codex, taskKind) && codexAuditAvailable;
   const deepseekRoleAvailable = (taskKind: string) => supportsTask(deepseekCodex, taskKind) && deepseekAuditAvailable;
+  /**
+   * 这个 provider 给界面预置的模型。首选是 DeepSeek，DeepSeek 服务不了这个任务时才用 Codex。
+   *
+   * 这与 role-agent-assembly 的候选池顺序是同一条规则——那里的注释写着「顺序即默认：每个角色的
+   * 池子都是 DeepSeek 在前、Codex 在后，所以「首选」是 DeepSeek」；也与下面 modelProfiles 里
+   * 的 recommended 同源。三处必须一致，因为这个字段不只是显示：NewRunDialog 用它拼出新建制作的
+   * initialInput.models，NodeWorkspace 与 PlanningStagesPanel 用它决定下拉默认选中哪个。
+   * 三者不一致时，界面会给用户预置一台与"推荐"标签、与运行时真实首选都不同的模型。
+   */
+  const preferredModelFor = (taskKind: string) => (deepseekRoleAvailable(taskKind)
+    ? deepseekModelForTask(taskKind)
+    : modelForTask(taskKind));
   const deepseekProfiles = (
     providerId: string,
     taskKind: string,
@@ -220,7 +232,7 @@ export function buildProviderCatalog(
       description: "通过宿主机 Codex 把实时热点转译为可拍摄、可连载的中文短视频角度；失败时回退到确定性评分。",
       modes: ["热点理解", "选题提案", "结构化输出"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("topic-ideas") ? modelForTask("topic-ideas") : deepseekModelForTask("topic-ideas"),
+      defaultModelId: preferredModelFor("topic-ideas"),
       modelProfiles: roleModelProfiles("api-topic-editor-v1", "topic-ideas"),
       requirement: roleRequirement("topic-ideas"),
     }),
@@ -234,7 +246,7 @@ export function buildProviderCatalog(
       description: "维护 Series Bible、Canon 与集间承接，规划长期路线并在单集开拍前重新复核。",
       modes: ["系列圣经", "连续性", "单集开拍复核", "最多三轮修订"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("series-roadmap") ? modelForTask("series-roadmap") : deepseekModelForTask("series-roadmap"),
+      defaultModelId: preferredModelFor("series-roadmap"),
       modelProfiles: roleModelProfiles("codex-series-showrunner-v1", "series-roadmap"),
       requirement: roleRequirement("series-roadmap"),
     }),
@@ -259,7 +271,7 @@ export function buildProviderCatalog(
       description: "按选题角度撰写可拍、可朗读、可核验的分镜脚本；首选模型调用故障时按候选顺序切换，内容校验或质量复核未通过时明确失败，不回退模板。",
       modes: ["口语旁白", "3-10 场分镜", "逐场画面指令"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("script-draft") ? modelForTask("script-draft") : deepseekModelForTask("script-draft"),
+      defaultModelId: preferredModelFor("script-draft"),
       modelProfiles: roleModelProfiles("codex-screenwriter-v1", "script-draft"),
       requirement: roleRequirement("script-draft"),
     }),
@@ -273,7 +285,7 @@ export function buildProviderCatalog(
       description: "统一全片视觉规则，并根据叙事、真实性、连续性和可执行性逐镜选择画面来源；首选模型调用故障时按健康候选顺序切换。",
       modes: ["导演角色", "全片视觉规则", "逐镜选画面"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("director-plan") ? modelForTask("director-plan") : deepseekModelForTask("director-plan"),
+      defaultModelId: preferredModelFor("director-plan"),
       modelProfiles: roleModelProfiles("api-visual-director-v1", "director-plan"),
       requirement: roleRequirement("director-plan"),
     }),
@@ -288,7 +300,7 @@ export function buildProviderCatalog(
       description: "在脚本写定前确定观众承诺、开头吸引、推进与兑现，并标注素材可行性风险；首选模型调用故障时按健康候选顺序切换。",
       modes: ["观众承诺", "内容推进", "可行性风险", "订阅能力"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("creative-treatment") ? modelForTask("creative-treatment") : deepseekModelForTask("creative-treatment"),
+      defaultModelId: preferredModelFor("creative-treatment"),
       modelProfiles: roleModelProfiles("codex-creative-treatment-v1", "creative-treatment"),
       requirement: roleRequirement("creative-treatment"),
     }),
@@ -303,7 +315,7 @@ export function buildProviderCatalog(
       description: "安全抽取参考视频关键帧，只提炼节奏、构图、运镜、色彩、转场和声音结构等风格规则。",
       modes: ["关键帧分析", "镜头语法", "可编辑规则", "订阅能力"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("reference-grammar") ? modelForTask("reference-grammar") : deepseekModelForTask("reference-grammar"),
+      defaultModelId: preferredModelFor("reference-grammar"),
       modelProfiles: roleModelProfiles(
         "codex-reference-grammar-v1",
         "reference-grammar",
@@ -322,7 +334,7 @@ export function buildProviderCatalog(
       description: "在下载前依据逐镜意图重排图库候选；不可用时保留确定性原始排序。",
       modes: ["候选排序", "逐项理由", "人工锁定", "订阅能力"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("asset-rank") ? modelForTask("asset-rank") : deepseekModelForTask("asset-rank"),
+      defaultModelId: preferredModelFor("asset-rank"),
       modelProfiles: roleModelProfiles("codex-asset-ranker-v1", "asset-rank"),
       requirement: roleRequirement("asset-rank"),
     }),
@@ -647,7 +659,7 @@ export function buildProviderCatalog(
       description: "人工终审通过后为成片生成平台标题、描述与话题标签；不可用时发布包回退使用简报标题并如实标注来源。",
       modes: ["平台标题", "发布描述", "话题标签"],
       latency: "seconds",
-      defaultModelId: codexRoleAvailable("publish-copy") ? modelForTask("publish-copy") : deepseekModelForTask("publish-copy"),
+      defaultModelId: preferredModelFor("publish-copy"),
       modelProfiles: roleModelProfiles("codex-publish-copy-v1", "publish-copy"),
       requirement: roleRequirement("publish-copy"),
     }),
@@ -661,7 +673,7 @@ export function buildProviderCatalog(
       description: "由独立 AI 核对创作依据、角色要求和后续能否直接使用；发现必须修改的问题时，交回原角色修订。",
       modes: ["独立复核", "深入核对", "最多三轮", "不通过则要求修改"],
       latency: "seconds",
-      defaultModelId: codexAuditAvailable ? modelForTask("role-audit") : deepseekModelForTask("role-audit"),
+      defaultModelId: preferredModelFor("role-audit"),
       modelProfiles: roleModelProfiles("codex-role-auditor-v1", "role-audit"),
       requirement: roleRequirement("role-audit"),
     }),
