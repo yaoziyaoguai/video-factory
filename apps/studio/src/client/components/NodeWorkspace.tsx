@@ -4,7 +4,7 @@ import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput,
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { studioApi } from "../api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
-import { agentLoopPhaseLabel, catalogModelLabel, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
+import { agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
@@ -442,7 +442,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         {readOnly ? <p className="node-workspace-warning"><AlertTriangle aria-hidden="true" size={16} />旧版工作流结果只读；要继续修改，请基于这版重新制作。</p> : null}
         {node.agentLoopProgress ? <div className={`agent-loop-progress is-${node.agentLoopProgress.phase}`} role="status">
           <strong>{agentLoopPhaseLabel(node.agentLoopProgress)}</strong>
-          {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{creatorFacingTechnicalText(humanizeCreativeText(node.agentLoopProgress.latestAudit.summary))}</span> : <span>正在生成本轮方案，完成后由独立 AI 做质量复核。</span>}
+          {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{creatorFacingTechnicalText(humanizeCreativeText(node.agentLoopProgress.latestAudit.summary))}</span> : <span>{agentLoopPendingNote(node.agentLoopProgress)}</span>}
           <span>实际模型调用：创作 {node.agentLoopProgress.producerModelCallCount ?? 0} 次，审计 {node.agentLoopProgress.auditModelCallCount ?? 0} 次{(node.agentLoopProgress.structuredRepairModelCallCount ?? 0) > 0 ? `（其中结构修复 ${node.agentLoopProgress.structuredRepairModelCallCount} 次）` : ""}。查询、刷新和等待不计为新调用。</span>
         </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>{fallbackHeading}</strong>：{fallbackReason}</span></p> : null}

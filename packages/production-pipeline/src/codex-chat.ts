@@ -258,6 +258,9 @@ export interface AgentLoopTrace {
     statusCode?: number;
     failureKind?: CodexBridgeFailureKind;
     details?: ModelProviderFailureDetails;
+    // creatorMessageFor 生成的面向创作者的中文说明。它必须随 failure 一起落盘：节点失败
+    // 拖垮整条 run 时原因走 node.error，可节点活下来接着往下走时，checkpoint 是唯一的通道。
+    summary?: string;
   };
   iterations: AgentLoopIterationTrace[];
   pendingCandidate?: AgentLoopPendingCandidateTrace;

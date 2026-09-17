@@ -3732,6 +3732,45 @@ describe("Studio client", () => {
     expect(screen.queryByRole("button", { name: /生成发布包/ })).not.toBeInTheDocument();
   });
 
+  it("says why the step stopped instead of describing work that is no longer happening", () => {
+    const run: StudioRunDetail = {
+      ...runDetail,
+      revision: 5,
+      activeIntervention: {
+        id: "boundary-1",
+        nodeId: "brief",
+        boundary: "node-complete",
+        reason: "这一步已完成，等你确认后进入下一步。",
+        options: ["approve", "reject"],
+        createdAt: "2026-08-21T10:05:00.000Z",
+      },
+      nodes: runDetail.nodes.map((node) => node.id === "brief"
+        ? {
+          ...node,
+          agentLoopProgress: {
+            iteration: 1,
+            maxIterations: 1,
+            completedIterations: 0,
+            phase: "failed" as const,
+            producerModelCallCount: 0,
+            auditModelCallCount: 3,
+            failureSummary: "与模型服务的连接中断，结果未知：这次请求可能已经被模型受理。",
+          },
+        }
+        : node),
+    };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
+
+    // 同一个节点在停点面板和节点工作区里各渲染一次进度；这里要验的是停点面板，
+    // 那是用户拿主意时真正会读的那一处。
+    const panel = within(document.querySelector(".intervention-panel") as HTMLElement);
+    expect(panel.getByText(/模型调用已停止，请查看失败原因/)).toBeInTheDocument();
+    expect(panel.getByText(/与模型服务的连接中断/)).toBeInTheDocument();
+    // 调用已经停了，下面那行不能再写「正在生成本轮方案」：它会正好出现在「创作 0 次，审计 3 次」
+    // 的上面，用户读到的是"系统还在工作，只是暂时没结果"，而它其实早就停了。
+    expect(panel.queryByText(/正在生成本轮方案/)).not.toBeInTheDocument();
+  });
+
   it("lets the creator configure the step a boundary stop is about to release", () => {
     const scriptProvider: StudioProvider = {
       id: "codex-screenwriter-v1",

@@ -685,6 +685,11 @@ async function failedLoopError<TOutput>(
       ...(bridgeError.statusCode !== undefined ? { statusCode: bridgeError.statusCode } : {}),
       ...(bridgeError.failureKind !== undefined ? { failureKind: bridgeError.failureKind } : {}),
       ...(bridgeError.failureDetails ? { details: structuredClone(bridgeError.failureDetails) } : {}),
+      // 上面那句 baseMessage 已经算出面向创作者的中文说明（creatorMessageFor），只是过去
+      // 只跟着抛出的异常走。节点失败拖垮整条 run 时原因会出现在 run.failure 上，可节点活下来
+      // 接着往下走时（现在每条路径都可能如此），checkpoint 是唯一的通道——不写进去，界面就只能
+      // 说"请查看失败原因"，而那个原因在任何地方都不存在。
+      summary: baseMessage,
     };
   } else {
     delete state.failure;

@@ -300,6 +300,20 @@ export function agentLoopPhaseLabel(progress: StudioAgentLoopProgress): string {
   return `第 ${progress.iteration} / ${progress.maxIterations} 轮 · ${phase}`;
 }
 
+/**
+ * 复核结论还没出来时，`latestAudit` 那一格该说什么。它缺失并不代表"还在跑"：`latestAudit`
+ * 取自已完成轮次里的审计，所以调用失败、还没产出、以及被人工处理过的历史节点都会走到这里。
+ * 这里曾经一律用现在进行时，于是「模型调用已停止」下面紧跟一句「正在生成本轮方案」——
+ * 用户会以为系统还在工作，只是暂时没结果，而实际上它已经停了。
+ */
+export function agentLoopPendingNote(progress: StudioAgentLoopProgress): string {
+  const reason = progress.phase === "failed" ? progress.failureSummary?.trim() : undefined;
+  if (reason) return creatorFacingTechnicalText(humanizeCreativeText(reason)) ?? reason;
+  if (progress.phase === "failed") return "这次调用没有留下可读的原因记录。请先看这一步的诊断信息，再决定是否重试。";
+  if (progress.phase === "halted") return "这一步已停住：当前角色解决不了它需要的前提，处理办法见上面的说明。";
+  return "正在生成本轮方案，完成后由独立 AI 做质量复核。";
+}
+
 // 返回"为什么建议先别做这条选题"的理由，供界面醒目标注。
 // 它只是建议：调用方不得用它来禁用开工，否则模型的一票就变成了硬闸门。
 export function opportunityProductionAdvice(

@@ -3140,6 +3140,12 @@ function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undef
   // 裁决为 repair 时，真正能照着改的是这三段（哪条不达标/凭什么/建议怎么改）。缺任何一段
   // 就整条丢掉：只给出半截意见会让用户以为"这条没什么可改的"，比不显示更误导。
   const issues = auditIssueTexts(audit?.issues);
+  // 角色循环失败时，中文原因由 role-agent-loop 写进 checkpoint 的 failure.summary。不投影它，
+  // 上面那句「模型调用已停止，请查看失败原因」里的"失败原因"在任何界面上都不存在——节点活下来
+  // 接着往下走时没有第二条通道，原因会静默地留在磁盘上。存储里可能是任意历史形状，逐字段判型。
+  const failureSummary = isRecord(value.failure) && typeof value.failure.summary === "string"
+    ? redactManagedPathText(value.failure.summary)
+    : undefined;
   const latestAudit: StudioAgentLoopProgress["latestAudit"] = verdict && Number.isInteger(score) && score >= 0 && score <= 100 && summary
     ? { verdict, score, summary, ...(issues.length ? { issues } : {}) }
     : undefined;
@@ -3168,6 +3174,7 @@ function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undef
     structuredRepairModelCallCount,
     phase,
     ...(latestAudit ? { latestAudit } : {}),
+    ...(failureSummary ? { failureSummary } : {}),
   };
 }
 

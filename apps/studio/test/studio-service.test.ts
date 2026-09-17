@@ -1933,6 +1933,33 @@ describe("StudioService", () => {
     assert.deepEqual(progress?.latestAudit, { verdict: "repair", score: 71, summary: "受众与平台对不上。" });
   });
 
+  it("carries the recorded failure reason out of a stopped checkpoint", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-failed-reason-progress-"));
+    const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", "brief", "agent-loop-checkpoints");
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "stopped.json"), JSON.stringify({
+      version: "video-factory/agent-loop-checkpoint-v9",
+      maxIterations: 1,
+      status: "failed",
+      completed: [],
+      failure: {
+        stage: "uncertain",
+        failureKind: "model_provider_no_output",
+        details: { category: "network", reasonCode: "connection_failed" },
+        summary: "与模型服务的连接中断，结果未知：这次请求可能已经被模型受理。当前进度已保留，请先核对原有任务的结果，不要重新发起同样的请求。",
+      },
+      recoveryOwner: { runId: "run-1", nodeId: "brief", workflowOperationRequestId: "operation-brief-stopped" },
+    }), "utf8");
+
+    // 审计三次全挂之后节点照样往下走，界面上只剩「模型调用已停止，请查看失败原因」，
+    // 而那句"失败原因"过去没有任何字段装得下——原因齐备地落在磁盘上，用户端一个字都没有。
+    const progress = await loadAgentLoopProgress(workspaceRoot, "run-1", "brief", "operation-brief-stopped");
+
+    assert.equal(progress?.phase, "failed");
+    assert.equal(progress?.latestAudit, undefined);
+    assert.match(progress?.failureSummary ?? "", /连接中断/);
+  });
+
   it("does not expose an active agent-loop checkpoint after its node has failed", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-failed-agent-progress-"));
     const directory = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "agent-loop-checkpoints");

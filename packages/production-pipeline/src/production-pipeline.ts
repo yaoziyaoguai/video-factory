@@ -12346,7 +12346,8 @@ async function recordBriefAudit(
     });
   } catch {
     // 故意的静默：这里没有第二条汇报通道（节点产物不能带附加字段），而失败原因已经由
-    // role-agent-loop 写进 checkpoint 的 failed 阶段，界面读的就是那份记录。
+    // role-agent-loop 写进 checkpoint 的 failure.summary，界面读的就是那份记录
+    // （production-studio 的 parseAgentLoopProgress 投影成 agentLoopProgress.failureSummary）。
   }
 }
 

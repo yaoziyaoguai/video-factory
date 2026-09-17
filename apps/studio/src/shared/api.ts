@@ -1033,6 +1033,12 @@ export interface StudioAgentLoopProgress {
      */
     issues?: StudioAgentLoopAuditIssue[];
   };
+  /**
+   * 角色调用停下来的中文原因。`phase === "failed"` 时 `latestAudit` 必然为空（失败发生在
+   * 产出那一轮之前），所以界面只能靠这个字段说清"为什么停"。节点失败拖垮整条 run 时同样的
+   * 原因会出现在 `run.failure` 上；节点活下来继续往下走时，这里是唯一能看到它的地方。
+   */
+  failureSummary?: string;
 }
 
 export interface StudioAgentLoopAuditIssue {

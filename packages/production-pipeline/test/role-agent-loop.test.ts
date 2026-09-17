@@ -497,6 +497,41 @@ describe("role agent loop audit boundary", () => {
     }
   });
 
+  it("persists the creator-facing failure reason alongside the machine diagnostics", async () => {
+    let stored: unknown;
+    const failure = await runRoleAgentLoop<{ title: string }>({
+      role: "内容简报",
+      contractVersion: "brief-failure-summary-v1",
+      criteria: ["结论具体"],
+      maxIterations: 1,
+      checkpoint: {
+        key: "brief-failure-summary",
+        load: async () => stored,
+        save: async (value: unknown) => { stored = structuredClone(value); },
+      },
+      produce: async () => {
+        throw new CodexBridgeError("socket hang up", true, "uncertain", undefined, undefined, {
+          category: "network",
+          reasonCode: "connection_failed",
+          providerId: "deepseek",
+          modelId: "deepseek-flash",
+          queueWaitMs: 0,
+          providerWaitMs: 155_751,
+        });
+      },
+      audit: async () => ({ output: passingAudit() }),
+      validate: titleCandidate,
+    }).then(() => null, (error: unknown) => error as Error);
+
+    assert.ok(failure);
+    const persisted = (stored as { failure?: { stage?: string; summary?: string } }).failure;
+    assert.equal(persisted?.stage, "uncertain");
+    // failure 里原来只有 stage/statusCode/failureKind/details —— 都是给操作员定位用的机器字段。
+    // 节点失败拖垮整条 run 时中文原因会走 run.failure，可节点活下来接着往下走时（现在每条路径
+    // 都可能如此）checkpoint 是唯一通道：中文说明不落盘，界面上就只剩"请查看失败原因"这句空指。
+    assert.match(persisted?.summary ?? "", /连接中断|结果未知/);
+  });
+
   it("consumes a produce recovery grant on the verified request and stops on the next completed failure", async () => {
     let stored: unknown;
     let setup = true;

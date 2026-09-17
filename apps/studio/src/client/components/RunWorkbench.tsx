@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { StudioCostRunDetail, StudioDecisionInput, StudioNarrationRevisionInput, StudioSceneResourceRevisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { agentLoopPhaseLabel, creatorFacingTechnicalText, humanizeCreativeText, platformLabel, providerLabel, catalogModelLabel, runNodeLabel, sourceAssetReviewBreakdown } from "../presentation.js";
+import { agentLoopPendingNote, agentLoopPhaseLabel, creatorFacingTechnicalText, humanizeCreativeText, platformLabel, providerLabel, catalogModelLabel, runNodeLabel, sourceAssetReviewBreakdown } from "../presentation.js";
 import { NodeWorkspace, revealNodeWorkspace } from "./NodeWorkspace.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 
@@ -325,7 +325,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                       <span>建议：{creatorFacingTechnicalText(humanizeCreativeText(issue.repairInstruction))}</span>
                     </li>)}
                   </ul> : null}
-                </> : <span>正在生成本轮方案，完成后由独立 AI 做质量复核。</span>}
+                </> : <span>{agentLoopPendingNote(waitingNodeProgress)}</span>}
                 <span>实际模型调用：创作 {waitingNodeProgress.producerModelCallCount ?? 0} 次，审计 {waitingNodeProgress.auditModelCallCount ?? 0} 次。查询、刷新和等待不计为新调用。</span>
               </div> : null}
               {visualReviewRequiresRevision && visualReview ? <div className="agent-review-decision">
