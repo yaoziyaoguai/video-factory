@@ -1580,9 +1580,27 @@ function reviewGateNode(
       try {
         checked = await rolePort(contextFor(state, { mode: "check", stage }));
       } catch (error) {
-        if (!(error instanceof RoleAgentLoopError)) throw error;
-        const audit = error.agentLoop.iterations.at(-1)?.audit;
-        if (!audit) throw error;
+        // 复核腿没跑出结论时一律转可恢复停点：服务故障、输出超限、甚至候选本身过不了
+        // 合同校验（例如讨论改稿越权改动了不受影响的镜头）——进度都已落盘，run 不能因为
+        // 「给建议的这一腿」出问题而被判死（审计故障不能判作品失败）。停点原样重现，人可以
+        // 再点确认重试，也可以用讨论修改稿件后重试。
+        if (!(error instanceof RoleAgentLoopError)) {
+          // 非 RoleAgentLoopError 说明是校验/服务层的裸异常：同样按可恢复处理，但保留诊断
+          // 进日志供操作员定位。
+          console.error(`[creative-review] ${stage} check leg failed:`, error);
+        }
+        const audit = error instanceof RoleAgentLoopError
+          ? error.agentLoop.iterations.at(-1)?.audit
+          : undefined;
+        if (!audit) {
+          return {
+            planningStop: {
+              reason: "needs_user",
+              issueIds: [],
+              detail: "独立复核这一轮没有完成，方案与进度都已保留。点「确认当前方案，继续」可再试一次；若反复出现，请用讨论修改这份稿件（或返回上游）后再试。",
+            },
+          };
+        }
         const checkIdentity = contentSha256({
           stage,
           draftSha256: gate.draft.sha256,
