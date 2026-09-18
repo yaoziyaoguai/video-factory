@@ -1087,19 +1087,26 @@ export class WorkflowRunner {
     definition: WorkflowDefinition,
     previousRun: WorkflowRun<TInitialInput>,
     nodeId: string,
-    options: { resumeUncertainOperation?: boolean; allowRejectedNode?: boolean } = {},
+    options: { resumeUncertainOperation?: boolean; allowRejectedNode?: boolean; allowSourceReviewRetry?: boolean } = {},
   ): Promise<WorkflowRun<TInitialInput>> {
     validateWorkflowDefinition(definition);
     if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
       throw new Error("Workflow definition does not match the persisted run.");
     }
     const retryingRejectedNode = options.allowRejectedNode === true && previousRun.status === "rejected";
-    if (previousRun.status !== "failed" && !retryingRejectedNode) {
+    // 试片审查暂停（source_review_retry）：复核腿没跑出结论时 run 停在 needs_human 而不是
+    // failed——重试就是「再跑一次审查」，不改变任何已确认内容；放行/跳过已被 decision 端点
+    // 硬禁，这里只放行显式带上本选项的重试调用。
+    const reviewRetryPause = options.allowSourceReviewRetry === true
+      && previousRun.status === "needs_human"
+      && previousRun.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId)?.intervention?.kind === "source_review_retry";
+    if (previousRun.status !== "failed" && !retryingRejectedNode && !reviewRetryPause) {
       throw new Error(`Run '${previousRun.id}' is not failed.`);
     }
     const failedNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId);
     const retryableNodeStatus = failedNode?.status === "failed"
-      || retryingRejectedNode && failedNode?.status === "rejected";
+      || retryingRejectedNode && failedNode?.status === "rejected"
+      || reviewRetryPause;
     if (!failedNode || !retryableNodeStatus || !definition.nodes.some((node) => node.id === nodeId)) {
       throw new Error(`Node '${nodeId}' is not the failed node.`);
     }

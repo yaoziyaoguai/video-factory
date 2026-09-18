@@ -21,6 +21,60 @@ function deterministicIds(): (prefix: string) => string {
 const clock = (): string => "2026-08-21T10:00:00.000Z";
 
 describe("WorkflowRunner", () => {
+  it("re-runs a paused source review only with the dedicated retry option", async () => {
+    // 试片审查没跑出结论（复核服务故障）→ 节点停在 needs_human（source_review_retry），
+    // run 不判死。重试必须显式带 allowSourceReviewRetry：不带时 needs_human 不可重试，
+    // 通用「放行」路径永远到不了这里（decision 端点对这种干预直接拒绝 approve）。
+    let calls = 0;
+    const reviewNode: NodeDefinition = {
+      id: "assets",
+      label: "Assets",
+      capability: "asset.prepare",
+      mode: "automatic",
+      execute: () => {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            status: "needs_human" as const,
+            error: "镜头 1 已生成，但试片审查暂未完成，后续付费生成已停止。",
+            intervention: {
+              kind: "source_review_retry" as const,
+              reason: "镜头 1 已生成，但试片审查暂未完成，后续付费生成已停止。",
+              requiredAction: "reject" as const,
+              options: ["reject" as const],
+            },
+          };
+        }
+        return { output: { assets: ["kept"] } };
+      },
+    };
+    const definition: WorkflowDefinition = {
+      id: "source-review-pause",
+      name: "Source review pause",
+      version: "1.0.0",
+      nodes: [reviewNode],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: new ProviderRegistry() });
+    const paused = await runner.run(definition, {});
+    assert.equal(paused.status, "needs_human");
+    const pausedNode = paused.nodeRuns.find((node) => node.nodeId === "assets");
+    assert.equal(pausedNode?.intervention?.kind, "source_review_retry");
+
+    await assert.rejects(
+      () => runner.retryFailedNode(definition, paused, "assets"),
+      /is not failed/,
+      "不带专用选项时不得重试 needs_human 暂停",
+    );
+
+    const retried = await runner.retryFailedNode(definition, paused, "assets", { allowSourceReviewRetry: true });
+    assert.equal(retried.status, "succeeded");
+    const retriedNode = retried.nodeRuns.find((node) => node.nodeId === "assets");
+    assert.equal(retriedNode?.status, "succeeded");
+    assert.equal(retriedNode?.intervention, undefined, "重试后暂停干预必须清掉");
+    assert.equal(calls, 2);
+  });
+
+
   it("pauses between nodes on request and resumes without replaying completed work", async () => {
     let pauseRequested = false;
     let firstCalls = 0;

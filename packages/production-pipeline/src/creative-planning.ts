@@ -1593,11 +1593,15 @@ function reviewGateNode(
           ? error.agentLoop.iterations.at(-1)?.audit
           : undefined;
         if (!audit) {
+          // 带上失败原因的中文首句（截掉「诊断：」机读段）：人重试前有权知道上次为什么没跑成。
+          const reasonLead = error instanceof Error
+            ? (error.message.split("\n诊断：")[0] ?? "").slice(0, 200)
+            : "未知错误";
           return {
             planningStop: {
               reason: "needs_user",
               issueIds: [],
-              detail: "独立复核这一轮没有完成，方案与进度都已保留。点「确认当前方案，继续」可再试一次；若反复出现，请用讨论修改这份稿件（或返回上游）后再试。",
+              detail: `独立复核这一轮没有完成（${reasonLead}），方案与进度都已保留。点「确认当前方案，继续」可再试一次；若反复出现，请用讨论修改这份稿件（或返回上游）后再试。`,
             },
           };
         }

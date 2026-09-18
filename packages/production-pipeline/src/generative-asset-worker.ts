@@ -112,7 +112,18 @@ class ReworkEvidenceRequiredError extends Error {
     this.name = "ReworkEvidenceRequiredError";
   }
 }
-class AssetPilotReviewError extends Error {};
+class AssetPilotReviewError extends Error {
+  /** true = 试片审查本身没跑成（服务/输出故障，无裁决）；false = 审查给出了否定裁决。 */
+  reviewIncomplete = false;
+}
+
+/**
+ * 试片审查腿没跑出结论（复核服务不可用、模型输出不可用等）。这类故障没有任何裁决，
+ * 调用方应把制作转入暂停等人，而不是判死——主动权在用户，审查只能提供建议。
+ */
+export function isSourceReviewIncompleteError(error: unknown): boolean {
+  return error instanceof AssetPilotReviewError && error.reviewIncomplete;
+}
 
 interface GenerationJob {
   scenePosition: number;
@@ -1244,7 +1255,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     } catch (error) {
       if (error instanceof AssetPilotReviewError) throw error;
       job.pilotReview = "unavailable";
-      throw new AssetPilotReviewError(`镜头 ${item.scenePosition} 已生成，但试片审查暂未完成，后续付费生成已停止。重试时会复用该镜头并恢复审查。${safeGenerationDiagnostic(error)}`);
+      const incomplete = new AssetPilotReviewError(`镜头 ${item.scenePosition} 已生成，但试片审查暂未完成，后续付费生成已停止。重试时会复用该镜头并恢复审查。${safeGenerationDiagnostic(error)}`);
+      incomplete.reviewIncomplete = true;
+      throw incomplete;
     }
   }
 

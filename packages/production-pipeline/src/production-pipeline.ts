@@ -58,6 +58,7 @@ import {
   type PaidAssetSpendForecast,
   type PaidAssetSpendForecastRequest,
   type VideoGenerationRuntimeProfile,
+  isSourceReviewIncompleteError,
 } from "./generative-asset-worker.js";
 import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput, type ScriptDraft } from "./codex-screenwriter.js";
 import { FallbackBriefAuditAgent, FallbackCreativeTreatmentAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
@@ -1063,6 +1064,14 @@ export class ProductionPipeline {
       if (activeInterventionNode.intervention?.kind === "creative_review") {
         throw new Error(
           "Creative review cannot use the generic decision endpoint; use the stage confirmation command.",
+        );
+      }
+      if (activeInterventionNode.intervention?.kind === "source_review_retry"
+        && decision.action !== "reject") {
+        // 试片审查还没完成：放行/调整都等于跳过审查继续付费生成（资金安全线）。
+        // 人只有两个出口：重试审查（复用已生成画面），或终止制作。
+        throw new Error(
+          "试片审查还没完成，不能跳过审查继续制作。请重试审查（复用已生成画面），或终止本次制作。",
         );
       }
       const currentReviewEvidenceId = finalReviewEvidenceId(activeInterventionNode);
@@ -3440,7 +3449,11 @@ export class ProductionPipeline {
         }),
         withExecutableBrief(previous, brief),
         nodeId,
-        retryRejectedReview ? { allowRejectedNode: true } : undefined,
+        retryRejectedReview
+          ? { allowRejectedNode: true }
+          : previous.nodeRuns.find((node) => node.nodeId === nodeId)?.intervention?.kind === "source_review_retry"
+            ? { allowSourceReviewRetry: true }
+            : undefined,
       );
     }, listener);
     return this.continueCoveredSpendApproval(runId, dispatched, listener);
@@ -3730,7 +3743,24 @@ export class ProductionPipeline {
           capability,
           providerId,
         });
-        const workerResponse = await provider.run(input as Record<string, unknown>, context);
+        let workerResponse: WorkerResponse;
+        try {
+          workerResponse = await provider.run(input as Record<string, unknown>, context);
+        } catch (error) {
+          if (!isSourceReviewIncompleteError(error)) throw error;
+          // 试片审查没跑出结论（复核服务故障）：没有任何裁决，不能判死制作，也不能给
+          // 「放行」出口（跳过审查=未审查继续花钱）。转入暂停干预，人只能重试审查或终止。
+          return {
+            status: "needs_human" as const,
+            error: error instanceof Error ? error.message : String(error),
+            intervention: {
+              kind: "source_review_retry" as const,
+              reason: error instanceof Error ? error.message : String(error),
+              requiredAction: "reject" as const,
+              options: ["reject" as const],
+            },
+          };
+        }
         const response = capability === "script.draft" && brief.seriesContext
           ? await validateSeriesWorkerScriptResponse(workerResponse)
           : workerResponse;

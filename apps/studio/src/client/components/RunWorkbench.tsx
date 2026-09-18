@@ -303,7 +303,27 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
               /> : null}
               {onRestart ? <button className="button button-primary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
             </section>
-          ) : run.activeIntervention?.kind !== "creative_review" && run.activeIntervention ? (
+          ) : run.activeIntervention?.kind === "source_review_retry" && run.activeIntervention ? (
+            <section className="intervention-panel" aria-label="试片审查暂停">
+              <div className="attention-heading">
+                <AlertTriangle aria-hidden="true" size={18} />
+                <h2>试片审查还没完成，制作已暂停</h2>
+              </div>
+              <p>{creatorFacingTechnicalText(run.activeIntervention.reason) ?? run.activeIntervention.reason}</p>
+              <p>已生成的画面与已花费的费用都保留。重试只续未完成的审查分支，不会重新购买成功素材；审查给出结论之前，不能跳过它继续付费生成。</p>
+              <div className="decision-actions">
+                <button
+                  className="button button-primary"
+                  type="button"
+                  disabled={nodeMutationPending || !onRetryFailedNode}
+                  onClick={() => { if (onRetryFailedNode) void onRetryFailedNode(run.activeIntervention!.nodeId); }}
+                ><RotateCcw aria-hidden="true" size={17} />重试审查（复用已生成画面）</button>
+                <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
+                  <XCircle aria-hidden="true" size={17} />终止制作
+                </button>
+              </div>
+            </section>
+          ) : run.activeIntervention?.kind !== "creative_review" && run.activeIntervention?.kind !== "source_review_retry" && run.activeIntervention ? (
             <section className="intervention-panel">
               <div className="attention-heading">
                 <AlertTriangle aria-hidden="true" size={18} />

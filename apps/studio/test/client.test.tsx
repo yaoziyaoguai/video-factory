@@ -4666,6 +4666,59 @@ describe("Studio client", () => {
     expect(screen.getByText("制作服务连接刚刚确认")).toBeInTheDocument();
   });
 
+  it("offers retry-or-terminate only for a paused source review, never a skip", () => {
+    // 试片审查没跑成（复核服务故障）→ 暂停干预。主动权在用户：只能重试审查或终止，
+    // 绝不能出现「放行/跳过」按钮——跳过等于未审查继续付费生成。
+    const { activeIntervention: _a, videoArtifactId: _v, ...withoutReview } = runDetail;
+    const onRetryFailedNode = vi.fn(async () => undefined);
+    render(<RunWorkbench
+      run={{
+        ...withoutReview,
+        status: "needs_human",
+        currentNodeId: "assets",
+        activeIntervention: {
+          id: "intervention-source-review",
+          nodeId: "assets",
+          kind: "source_review_retry",
+          reason: "镜头 1 已生成，但试片审查暂未完成，后续付费生成已停止。重试时会复用该镜头并恢复审查。",
+          requiredAction: "reject",
+          options: ["reject"],
+          createdAt: "2026-09-18T00:00:00.000Z",
+        },
+        nodes: [{
+          id: "assets",
+          label: "Prepare assets",
+          role: "制片",
+          status: "needs_human",
+          artifactIds: [],
+          qualityGateResults: [],
+          intervention: {
+            id: "intervention-source-review",
+            nodeId: "assets",
+            kind: "source_review_retry",
+            reason: "镜头 1 已生成，但试片审查暂未完成，后续付费生成已停止。重试时会复用该镜头并恢复审查。",
+            requiredAction: "reject",
+            options: ["reject"],
+            createdAt: "2026-09-18T00:00:00.000Z",
+          },
+        }],
+        artifacts: [],
+      }}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onRetryFailedNode={onRetryFailedNode}
+    />);
+
+    expect(screen.getByRole("heading", { name: "试片审查还没完成，制作已暂停" })).toBeInTheDocument();
+    expect(screen.getByText(/重试只续未完成的审查分支/)).toBeInTheDocument();
+    const retry = screen.getByRole("button", { name: "重试审查（复用已生成画面）" });
+    expect(screen.getByRole("button", { name: "终止制作" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /做完了|批准进入发布包/ })).not.toBeInTheDocument();
+
+    fireEvent.click(retry);
+    expect(onRetryFailedNode).toHaveBeenCalledWith("assets");
+  });
+
   it("names the local orchestration step in the interface's own words, not its pipeline label", () => {
     // brief 是本地编排节点：它自己不调模型，回执里的 providerLabel 是流水线内部的英文标识
     // （"Validate brief"），modelId 是字面量 "inline"。两样都不能直接上屏——英文内部标识不是

@@ -122,7 +122,7 @@ export interface ArtifactDraft<TData = unknown> {
 export type HumanDecisionAction = "approve" | "request_changes" | "reject";
 
 export interface HumanInterventionDraft {
-  kind?: "creative_review";
+  kind?: "creative_review" | "source_review_retry";
   /**
    * 节点边界的"完成待放行"停点。显式标记而不靠 nodeId 或 options 猜：节点改名、增删
    * 按钮都不该让界面把"批准进入发布包"错安在一个中间节点的放行上。

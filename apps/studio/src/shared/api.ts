@@ -1311,7 +1311,7 @@ export interface StudioArtifact {
 export interface StudioIntervention {
   id: string;
   nodeId: string;
-  kind?: "creative_review";
+  kind?: "creative_review" | "source_review_retry";
   /** 节点边界的"完成待放行"停点：这一步已做完，产物已存，只等你决定是否进入下一步。 */
   boundary?: "node-complete";
   reason: string;
