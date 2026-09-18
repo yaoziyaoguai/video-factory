@@ -400,6 +400,32 @@ function closureDirector(spies: ClosureSpies): VisualDirectorAgent {
       };
     },
   };
+  // check 模式走 role loop，需要完整 execution（含审计迭代）；只实现 plan 时 Provider 会把
+  // execution 再包一层当文档校验，「Director plan version」必然缺失（F17 前这个故障被
+  // 节点 failed 掩盖，F14/F17 后正确转为暂停停点，夹具随之对齐）。
+  director.planDetailed = async (input: VisualDirectorAgentInput) => {
+    if (input.creativeReviewExecution?.mode === "check") {
+      spies.directorAuditCalls = (spies.directorAuditCalls ?? 0) + 1;
+      return passingCreativeReviewExecution(
+        input.creativeReviewExecution.candidate,
+        "视觉导演",
+        "fixture-director-contract-v1",
+        "director-plan",
+        input.selectedModelId ?? "director-binding-model",
+      ) as never;
+    }
+    return {
+      output: await director.plan(input),
+      trace: {
+        taskKind: "director-plan" as const,
+        promptVersion: "v1",
+        prompt: "fixture director plan",
+        providerId: "fixture-role",
+        modelId: input.selectedModelId ?? "director-binding-model",
+      },
+    };
+  };
+  return director;
 }
 
 const CLOSURE_ASSET_PROVIDERS: VisualAssetProviderCapability[] = [
