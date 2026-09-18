@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import {
   CodexBridgeError,
   ProductionPipeline,
+  sourceReviewIncompleteError,
   type CreativeTreatment,
   type CreativeTreatmentAgent,
   type CreativeTreatmentAgentInput,
@@ -775,6 +776,92 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
     assert.equal(spies.directorCalls, 1);
     assert.equal(spies.directorAuditCalls, 1);
   });
+  it("pauses paid generation on an unfinished source review; approve cannot skip it and retry only completes the review", async () => {
+    // 资金安全链（R03/R05）：试片审查没跑成 → assets 转暂停干预；通用放行被服务端拒绝且
+    // 无任何状态变化；重试只重跑该节点（第二次 asset.prepare 成功），制作继续推进。
+    class SourceReviewFlakyWorker extends ClosureWorker {
+      assetPrepareCalls = 0;
+      async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        if (String(request.capability) === "asset.prepare") {
+          this.assetPrepareCalls += 1;
+          if (this.assetPrepareCalls === 1) {
+            throw sourceReviewIncompleteError(
+              "镜头 1 已生成，但试片审查暂未完成，后续付费生成已停止。重试时会复用该镜头并恢复审查。",
+            );
+          }
+        }
+        return super.run(request);
+      }
+    }
+    const worker = new SourceReviewFlakyWorker();
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-source-review-pause-"));
+    const spies: ClosureSpies = {
+      treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+    };
+    const pipeline = new ProductionPipeline({
+      workspaceRoot,
+      worker,
+      treatmentAgents: closureTreatmentAgents(spies),
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureDirector(spies),
+      assetProviders: CLOSURE_ASSET_PROVIDERS,
+    });
+    let run = await pipeline.start(closureBrief({ creativeReview: true }));
+
+    // 走完三个规划阶段的确认，规划完成后流程自动进入 assets。
+    for (const stage of ["treatment", "script", "director"] as const) {
+      const gate = () => {
+        const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning");
+        assert.equal(node?.intervention?.kind, "creative_review");
+        return node.intervention!.continuation!;
+      };
+      const continuation = gate();
+      run = await pipeline.confirmCreativeReview(run.id, {
+        commandId: `confirm-${stage}`,
+        actor: "creator",
+        stage: continuation.stage,
+        expectedRunRevision: run.revision,
+        expectedReviewRevision: continuation.reviewRevision,
+        baseDraftSha256: continuation.draftSha256,
+      });
+    }
+    // 三个阶段确认完成后等待规划编译收尾并自动进入 assets（审查未完成处暂停）。
+    for (let i = 0; i < 60; i += 1) {
+      run = await pipeline.show(run.id);
+      const assets = run.nodeRuns.find((node) => node.nodeId === "assets");
+      if (assets?.status === "needs_human") break;
+      if (run.status === "failed" || run.status === "succeeded") break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    run = await pipeline.show(run.id);
+    const assetsNode = run.nodeRuns.find((node) => node.nodeId === "assets");
+    assert.equal(assetsNode?.status, "needs_human", `assets 应因审查未完成暂停，实际 run=${run.status} assets=${assetsNode?.status} err=${assetsNode?.error ?? ""}`);
+    assert.equal(assetsNode?.intervention?.kind, "source_review_retry");
+    assert.equal(worker.assetPrepareCalls, 1, "暂停前只发生一次 asset.prepare 请求");
+
+    // R05：普通 approve 被服务端硬禁，且不产生任何状态或资金副作用。
+    const revisionBefore = run.revision;
+    await assert.rejects(
+      () => pipeline.decide(run.id, {
+        interventionId: assetsNode!.intervention!.id,
+        action: "approve",
+        actor: "creator",
+        expectedRunRevision: run.revision,
+      }),
+      /不能跳过审查继续制作/,
+    );
+    const afterRefusal = await pipeline.show(run.id);
+    assert.equal(afterRefusal.status, "needs_human");
+    assert.equal(afterRefusal.revision, revisionBefore, "被拒的放行不得改变 run 状态");
+
+    // 重试：只重跑 assets 节点；第二次 asset.prepare 成功后流程继续。
+    run = await pipeline.retryFailedNode(run.id, "assets");
+    assert.equal(worker.assetPrepareCalls, 2, "重试恰好补跑一次 asset.prepare");
+    assert.notEqual(run.status, "failed");
+    assert.notEqual(run.nodeRuns.find((node) => node.nodeId === "assets")?.status, "needs_human");
+  });
+
   it("feeds visual intent and script-owned rework into treatment identity and execution", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-treatment-rework-identity-"));
     const spies: ClosureSpies = {

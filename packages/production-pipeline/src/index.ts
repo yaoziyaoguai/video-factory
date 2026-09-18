@@ -297,8 +297,10 @@ export type {
 export {
   GenerativeAssetWorkerClient,
   inspectPaidAssetLedger,
+  isSourceReviewIncompleteError,
   paidAssetSourceFingerprint,
   reworkSceneDependencyClosure,
+  sourceReviewIncompleteError,
 } from "./generative-asset-worker.js";
 export type {
   GenerativeAssetWorkerClientOptions,

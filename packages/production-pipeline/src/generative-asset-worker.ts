@@ -125,6 +125,13 @@ export function isSourceReviewIncompleteError(error: unknown): boolean {
   return error instanceof AssetPilotReviewError && error.reviewIncomplete;
 }
 
+/** 测试接缝：构造与生产审查腿同型的「审查未完成」错误，供注入 provider/transport 替身。 */
+export function sourceReviewIncompleteError(message: string): Error {
+  const error = new AssetPilotReviewError(message);
+  error.reviewIncomplete = true;
+  return error;
+}
+
 interface GenerationJob {
   scenePosition: number;
   providerId: string;
