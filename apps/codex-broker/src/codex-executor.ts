@@ -226,6 +226,9 @@ export interface CodexExecutorFailureDetails {
   completionTokens?: number;
   totalTokens?: number;
   reasoningTokens?: number;
+  /** §6.2 有界诊断：response_too_large 时记录的传输/交付字节数（不含任何内容正文）。 */
+  transportBytes?: number;
+  contentBytes?: number;
   fieldPath?: string;
   taskKind?: BrokerTaskKind;
   accepted?: boolean;
@@ -614,6 +617,9 @@ export interface CodexTaskTrace {
   completionTokens?: number;
   totalTokens?: number;
   reasoningTokens?: number;
+  /** §6.2 有界诊断：response_too_large 时记录的传输/交付字节数（不含任何内容正文）。 */
+  transportBytes?: number;
+  contentBytes?: number;
   retryCount?: number;
   modelAttemptCount?: number;
   structuredRepairCount?: number;
@@ -1435,6 +1441,9 @@ function codexUsageFromJsonl(stdout: string): {
   completionTokens?: number;
   totalTokens?: number;
   reasoningTokens?: number;
+  /** §6.2 有界诊断：response_too_large 时记录的传输/交付字节数（不含任何内容正文）。 */
+  transportBytes?: number;
+  contentBytes?: number;
 } {
   let result: ReturnType<typeof codexUsageFromJsonl> = {};
   for (const line of stdout.split(/\r?\n/)) {

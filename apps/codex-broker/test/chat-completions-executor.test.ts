@@ -1385,16 +1385,18 @@ describe("ChatCompletionsExecutor", () => {
   });
 
   it("rejects an oversized success response and names the reason", async () => {
+    // 传输上限随 max_tokens 预算推导（65536×512=32MB）：F15 的教训是 8MB 会被一次
+    // 合法的 xhigh 长审计（reasoning 逐 token 的 SSE 信封）在未超 token 预算时撞穿。
     const executor = chatExecutor({
       env: { DEEPSEEK_API_KEY: API_KEY },
-      fetchFn: async () => new Response(new Uint8Array(8 * 1024 * 1024 + 1), { status: 200 }),
+      fetchFn: async () => new Response(new Uint8Array(32 * 1024 * 1024 + 1), { status: 200 }),
     });
 
     await assert.rejects(
       () => executor.runTask(visualReviewTask()),
       (error: unknown) => {
         assert.ok(error instanceof CodexExecutorError);
-        assert.match(error.message, /response exceeds 8388608 bytes/);
+        assert.match(error.message, /response exceeds 33554432 bytes/);
         // 这个原因码是终态失败唯一留下的证据：没有它，上游只能打出笼统的"服务端错误（HTTP 422）"。
         assert.equal(error.details?.reasonCode, "response_too_large");
         return true;

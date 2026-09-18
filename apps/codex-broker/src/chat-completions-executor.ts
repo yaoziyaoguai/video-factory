@@ -65,7 +65,10 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
  * 在 110 秒内就撞穿了 1 MiB 的交付上限，而它真正要交付的 content 只有几十 KB。
  * 两个上限合成一个，就等于把"想得久"判成"总编没给建议"。
  */
-const MAX_STREAM_BYTES = 8 * 1024 * 1024;
+// 传输上限必须覆盖输出预算的最坏情况：max_tokens 全部用满时，每 token 一条 SSE 事件，
+// 含 JSON 外壳与 CJK 转义约 150-256 字节/token——8MB 会在一次合法的 xhigh 长审计（F15）
+// 未超 token 预算前先撞穿传输上限。512 字节/token 为保守信封上界，仍能拦住真正的失控流。
+const MAX_STREAM_BYTES = DEFAULT_MAX_TOKENS * 512;
 /**
  * 修复轮愿意回显的上一份输出上限。它约束的是"把不合格原文再喂回去"这一次请求的代价，
  * 不是质量判据——超限只是不给修复轮，直接判终局。
@@ -896,7 +899,11 @@ async function readStreamedCompletion(
       // 这里量的是整条流（含被丢弃的推理帧），所以用传输上限；交付内容的配额在流结束时另算。
       if (received > MAX_STREAM_BYTES) {
         throw new CodexExecutorError(`${label} Chat Completion response exceeds ${MAX_STREAM_BYTES} bytes.`, false, {
-          details: options.failureDetails("response_too_large"),
+          details: {
+            ...options.failureDetails("response_too_large"),
+            transportBytes: received,
+            ...(finishReason ? { finishReason } : {}),
+          },
         });
       }
       buffer += decoder.decode(chunk.value, { stream: true });
@@ -942,7 +949,12 @@ async function readStreamedCompletion(
   // 交付内容的配额：推理流已经在上面的传输上限里放过，这里只卡真正要解析的答案。
   if (Buffer.byteLength(content, "utf8") > MAX_RESPONSE_BYTES) {
     throw new CodexExecutorError(`${label} Chat Completion response exceeds ${MAX_RESPONSE_BYTES} bytes.`, false, {
-      details: options.failureDetails("response_too_large"),
+      details: {
+        ...options.failureDetails("response_too_large"),
+        transportBytes: received,
+        contentBytes: Buffer.byteLength(content, "utf8"),
+        ...(finishReason ? { finishReason } : {}),
+      },
     });
   }
   return {
