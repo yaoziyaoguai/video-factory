@@ -4681,7 +4681,6 @@ describe("Studio client", () => {
           nodeId: "assets",
           kind: "source_review_retry",
           reason: "镜头 1 已生成，但试片审查暂未完成，后续付费生成已停止。重试时会复用该镜头并恢复审查。",
-          requiredAction: "reject",
           options: ["reject"],
           createdAt: "2026-09-18T00:00:00.000Z",
         },
@@ -4692,15 +4691,6 @@ describe("Studio client", () => {
           status: "needs_human",
           artifactIds: [],
           qualityGateResults: [],
-          intervention: {
-            id: "intervention-source-review",
-            nodeId: "assets",
-            kind: "source_review_retry",
-            reason: "镜头 1 已生成，但试片审查暂未完成，后续付费生成已停止。重试时会复用该镜头并恢复审查。",
-            requiredAction: "reject",
-            options: ["reject"],
-            createdAt: "2026-09-18T00:00:00.000Z",
-          },
         }],
         artifacts: [],
       }}

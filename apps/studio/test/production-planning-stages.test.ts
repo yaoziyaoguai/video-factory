@@ -487,10 +487,17 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
     await command("adopt_proposal", { proposalId: proposal.proposalId });
     const adopted = (await studio.creativeReview(run.id))!;
     const failed = await command("confirm");
-    assert.equal(failed.status, "failed");
+    // F14/F17 契约：复核腿故障（此处为审计请求合同被拒，无任何裁决）不再是节点 failed，
+    // 而是可恢复暂停——adopted 草稿与进度保留，等用户重试或修改。
+    assert.equal(failed.status, "needs_human");
     const failedNode = failed.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
-    assert.equal((failedNode.output as { continuationOperation: { status: string } }).continuationOperation.status, "failed");
-    assert.equal((await pipeline.inspectCreativePlanningStages(run.id))?.find((stage) => stage.status === "failed")?.id, "treatment");
+    assert.equal((failed.creativeReviewOperations ?? []).at(-1)?.status, "completed", "确认命令正常完成：暂停是停点，不是命令失败");
+    const stopDetail = failedNode.intervention?.stopDetail
+      ?? (failedNode.output as { planningStop?: { detail?: string } } | undefined)?.planningStop?.detail
+      ?? "";
+    assert.match(stopDetail, /构思独审请求合同被拒绝/, "停点必须带上复核失败的原因");
+    assert.equal((await pipeline.inspectCreativePlanningStages(run.id))?.find((stage) => stage.id === "treatment")?.status, "completed",
+      "复核没跑成不是内容失败：adopted 草稿仍在，阶段不得标 failed");
     await pipeline.applyNodeExecutionConfiguration(run.id, "creative-planning", {
       ...input, models: { ...input.models, [input.providers.script]: "different-script-model" },
     }, "creator", failed.revision);

@@ -350,7 +350,7 @@ function closureScreenwriter(spies: ClosureSpies): ScreenwriterAgent {
 }
 
 function closureDirector(spies: ClosureSpies): VisualDirectorAgent {
-  return {
+  const director: VisualDirectorAgent = {
     id: "api-visual-director-v1",
     modelId: "director-binding-model",
     plan: async (input: VisualDirectorAgentInput) => {
