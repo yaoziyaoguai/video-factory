@@ -672,6 +672,11 @@ exit 42
     assert.match(dockerfile, /^ARG ALPINE_MIRROR$/m);
     assert.match(dockerfile, /^ARG NPM_REGISTRY$/m);
     assert.match(dockerfile, /npm config set registry "\$NPM_REGISTRY"/);
+    assert.match(dockerfile, /FROM \$\{NODE_IMAGE\} AS dependencies[\s\S]*apk add --no-cache python3 make g\+\+[\s\S]*npm ci/);
+    assert.ok(
+      dockerfile.indexOf("apk add --no-cache python3 make g++") < dockerfile.indexOf("npm ci"),
+      "native dependency toolchain must exist before npm falls back to source compilation",
+    );
     assert.match(dockerfile, /^ARG NODE_IMAGE=node:22-alpine$/m);
     assert.match(dockerfile, /^FROM \$\{NODE_IMAGE\} AS dependencies$/m);
     assert.doesNotMatch(dockerfile, /^RUN sed .*mirrors\.aliyun\.com/m);

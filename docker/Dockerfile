@@ -2,9 +2,14 @@ ARG NODE_IMAGE=node:22-alpine
 
 FROM ${NODE_IMAGE} AS dependencies
 
+ARG ALPINE_MIRROR
 ARG NPM_REGISTRY
 
 WORKDIR /app
+RUN if [ -n "$ALPINE_MIRROR" ]; then \
+      sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR%/}|g" /etc/apk/repositories; \
+    fi \
+    && apk add --no-cache python3 make g++
 COPY package.json package-lock.json ./
 COPY apps/codex-broker/package.json apps/codex-broker/package.json
 COPY apps/studio/package.json apps/studio/package.json
