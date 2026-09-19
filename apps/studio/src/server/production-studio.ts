@@ -2526,13 +2526,12 @@ export class ProductionStudio {
       const roleAuditReady = providers.some((provider) => provider.capability === "role.audit"
         && provider.available
         && provider.kind !== "test");
+      // ChatGPT/Codex 套餐退役（N5）：审片只要求 DeepSeek 单腿可用 + 独立审计就绪。
+      // codex-visual-review-v1 已退役，不再作为正式生产的必要条件。
       if (!selectedReviewProvider
         || !["deepseek-visual-review-v1", "codex-visual-review-v1"].includes(selectedReviewProvider)
-        || finalReviewers.some((provider) => !provider)
-        || reviewerModels.length !== 2
-        || new Set(reviewerModels).size !== 2
         || !roleAuditReady) {
-        throw new StudioInputError("正式制作需要 DeepSeek 与 Codex 使用两个不同模型完成独立双审；请先在创作设置中恢复两种审片和独立质量复核能力。");
+        throw new StudioInputError("正式制作需要 DeepSeek 视觉审片模型可用，且独立质量复核已配置。");
       }
     }
     const selectedVisualSources = new Set([
