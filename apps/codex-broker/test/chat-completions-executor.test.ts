@@ -1710,7 +1710,9 @@ describe("ChatCompletionsExecutor", () => {
     });
   });
 
-  it("fails fast when an SSE stream never produces an output event", async () => {
+  it("fails fast when an SSE stream never produces an output event", async (context) => {
+    // 定时器与耗时使用同一受控时钟，避免不同平台的毫秒取整影响期限断言。
+    context.mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: 0 });
     const encoder = new TextEncoder();
     let aborted = false;
     const fetchFn: typeof fetch = async (_input, init) => new Response(new ReadableStream({
@@ -1730,9 +1732,7 @@ describe("ChatCompletionsExecutor", () => {
       timeoutMs: 5_000,
       firstOutputEventTimeoutMs: 60,
     });
-    const startedAt = Date.now();
-
-    await assert.rejects(
+    const rejected = assert.rejects(
       () => executor.runTask(visualReviewTask()),
       (error: unknown) => {
         assert.ok(error instanceof CodexExecutorError);
@@ -1747,13 +1747,19 @@ describe("ChatCompletionsExecutor", () => {
         assert.equal(error.details?.executionLayer, "provider_transport");
         assert.equal(error.details?.headersReceived, true);
         assert.equal(error.details?.remoteQueryable, false);
-        assert.ok((error.details?.providerWaitMs ?? 0) >= 60);
+        assert.equal(error.details?.providerWaitMs, 60);
         return true;
       },
     );
 
-    // 卡死必须在整体超时之前暴露，否则等待期又变回不可观测。
-    assert.ok(Date.now() - startedAt < 1_000);
+    // 先让异步响应接上 reader，再验证期限前不误杀，期限到达后不等整体 5 秒超时。
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    context.mock.timers.tick(59);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(aborted, false);
+    context.mock.timers.tick(1);
+    await rejected;
+    assert.equal(Date.now(), 60);
     assert.equal(aborted, true);
   });
 
