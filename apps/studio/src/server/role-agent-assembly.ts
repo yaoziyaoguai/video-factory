@@ -25,7 +25,7 @@ import {
 export type RoleProviderId = "deepseek" | "openai";
 
 export interface RoleAgentAssemblyOptions {
-  codexSettings: CodexProviderSettings;
+  codexSettings?: CodexProviderSettings;
   deepseekCodexSettings: CodexProviderSettings;
   codexClient?: CodexBridgeClient;
   deepseekCodexClient?: CodexBridgeClient;
@@ -76,8 +76,9 @@ function distinctCandidates<TAgent extends { modelId?: string }>(
 
 export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleAgentAssembly {
   const { codexSettings, deepseekCodexSettings, codexClient, deepseekCodexClient } = options;
-  const codexModelId = codexSettings.modelId || options.environment.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
-  const codexModelFor = (taskKind: string) => codexSettings.taskModels?.[taskKind] || codexModelId;
+  // ChatGPT/Codex 套餐已退役（用户指令 2026-09-18）：codexSettings/codexClient 不再传入，
+  // codex 侧候选分支全部自然关闭。provider id（codex-*-v1）作为遗留名保留以兼容历史 run。
+  const codexModelFor = (taskKind: string) => codexSettings?.taskModels?.[taskKind] || codexSettings?.modelId || "codex-default";
   const deepseekModelId = deepseekCodexSettings.modelId || resolveDeepseekModelId(options.environment);
   const deepseekModelFor = (taskKind: string) => deepseekCodexSettings.taskModels?.[taskKind] || deepseekModelId;
 
@@ -88,7 +89,7 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
   // 在制作或单个节点上手动改选了别的模型（那只是把数组重排，不改这里的候选集合）。
   //
   // chat-completions 那条通路上 broker 不持有会话，所以属于它的 agent 一律 stateless。
-  const directorAvailability = auditedRoleCandidateAvailability(codexSettings, deepseekCodexSettings, "director-plan");
+  const directorAvailability = auditedRoleCandidateAvailability(deepseekCodexSettings, "director-plan");
   const directorCandidates = distinctCandidates<CodexVisualDirectorAgent>([
     ...(deepseekCodexClient && directorAvailability.deepseek
       ? offeredModels(deepseekCodexSettings, deepseekModelFor("director-plan")).map((modelId) => ({
@@ -100,19 +101,9 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
           providerId: "deepseek" as const,
         }))
       : []),
-    ...(codexClient && directorAvailability.codex
-      ? offeredModels(codexSettings, codexModelFor("director-plan")).map((modelId) => ({
-          agent: new CodexVisualDirectorAgent({
-            client: codexClient,
-            modelId,
-            sessionMode: "stateless",
-          }),
-          providerId: "openai" as const,
-        }))
-      : []),
   ]);
 
-  const screenwriterAvailability = auditedRoleCandidateAvailability(codexSettings, deepseekCodexSettings, "script-draft");
+  const screenwriterAvailability = auditedRoleCandidateAvailability(deepseekCodexSettings, "script-draft");
   const deepseekScreenwriter = deepseekCodexClient && screenwriterAvailability.deepseek
     ? offeredModels(deepseekCodexSettings, deepseekModelFor("script-draft")).map((modelId) => ({
         agent: new CodexScreenwriterAgent({
@@ -123,19 +114,9 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
         providerId: "deepseek" as const,
       }))
     : [];
-  const codexScreenwriter = codexClient && screenwriterAvailability.codex
-    ? offeredModels(codexSettings, codexModelFor("script-draft")).map((modelId) => ({
-        agent: new CodexScreenwriterAgent({
-          client: codexClient,
-          modelId,
-          sessionMode: "stateless",
-        }),
-        providerId: "openai" as const,
-      }))
-    : [];
-  const screenwriterCandidates = distinctCandidates<ScreenwriterAgent>([...deepseekScreenwriter, ...codexScreenwriter]);
+  const screenwriterCandidates = distinctCandidates<ScreenwriterAgent>([...deepseekScreenwriter]);
 
-  const treatmentAvailability = auditedRoleCandidateAvailability(codexSettings, deepseekCodexSettings, "creative-treatment");
+  const treatmentAvailability = auditedRoleCandidateAvailability(deepseekCodexSettings, "creative-treatment");
   const treatmentAgents = distinctCandidates<CodexCreativeTreatmentAgent>([
     ...(deepseekCodexClient && treatmentAvailability.deepseek
       ? offeredModels(deepseekCodexSettings, deepseekModelFor("creative-treatment")).map((modelId) => ({
@@ -147,20 +128,10 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
           providerId: "deepseek" as const,
         }))
       : []),
-    ...(codexClient && treatmentAvailability.codex
-      ? offeredModels(codexSettings, codexModelFor("creative-treatment")).map((modelId) => ({
-          agent: new CodexCreativeTreatmentAgent({
-            client: codexClient,
-            modelId,
-            sessionMode: "stateless",
-          }),
-          providerId: "openai" as const,
-        }))
-      : []),
   ]);
 
   // 简报复核只跑 role-audit，没有 producer 任务要过，所以可用性只看 role-audit 一项。
-  const briefAuditAvailability = auditedRoleCandidateAvailability(codexSettings, deepseekCodexSettings, "role-audit");
+  const briefAuditAvailability = auditedRoleCandidateAvailability(deepseekCodexSettings, "role-audit");
   const briefAuditAgents = distinctCandidates<BriefAuditAgent>([
     ...(deepseekCodexClient && briefAuditAvailability.deepseek
       ? offeredModels(deepseekCodexSettings, deepseekModelFor("role-audit")).map((modelId) => ({
@@ -171,18 +142,9 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
           providerId: "deepseek" as const,
         }))
       : []),
-    ...(codexClient && briefAuditAvailability.codex
-      ? offeredModels(codexSettings, codexModelFor("role-audit")).map((modelId) => ({
-          agent: new CodexBriefAuditAgent({
-            client: codexClient,
-            modelId,
-          }),
-          providerId: "openai" as const,
-        }))
-      : []),
   ]);
 
-  const reviewAvailability = auditedRoleCandidateAvailability(codexSettings, deepseekCodexSettings, "visual-review");
+  const reviewAvailability = auditedRoleCandidateAvailability(deepseekCodexSettings, "visual-review");
   const deepseekReview = deepseekCodexClient && reviewAvailability.deepseek
     ? new CodexVisualReviewAgent({
         client: deepseekCodexClient,
@@ -193,14 +155,10 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
         maxProducerCalls: 3,
       })
     : undefined;
-  const codexReview = codexClient && reviewAvailability.codex
-    ? new CodexVisualReviewAgent({
-        client: codexClient,
-        media: options.reviewMedia,
-        providerId: "codex-visual-review-v1",
-        modelId: codexModelFor("visual-review"),
-      })
-    : undefined;
+  // 第二审片腿：原 gpt-5.6-sol（codex broker）已随 ChatGPT 套餐退役，改为 deepseek-v4-pro
+  //（同一 broker 的另一模型，非同一模型双跑）。providerId 保留遗留名以兼容已暂停 run 的
+  // checkpoint 恢复；界面展示的是真实 modelId。
+
 
   return {
     ...(screenwriterCandidates.length > 0 ? {
@@ -209,7 +167,8 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
     ...(directorCandidates.length > 0 ? {
       directorAgent: new FallbackVisualDirectorAgent({ candidates: directorCandidates }),
     } : {}),
-    visualReviewAgents: orderedVisualReviewAgents(deepseekReview, codexReview, options.reviewMedia),
+    // 双模型审片随 ChatGPT/Codex 套餐一并退役：只剩 DeepSeek 单腿复核（用户指令 2026-09-18）。
+    visualReviewAgents: orderedVisualReviewAgents(deepseekReview, undefined, options.reviewMedia),
     treatmentAgents,
     briefAuditAgents,
   };

@@ -309,7 +309,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     ...missingCapabilities.map((item) => item.label),
     ...(assetProviderIds.length > 0 ? [] : ["导演画面来源"]),
     ...(roleAuditProvider ? [] : ["独立质量复核"]),
-    ...(dualFinalReviewAvailable ? [] : ["DeepSeek 与 Codex 双模型审片"]),
+    ...(dualFinalReviewAvailable ? [] : ["双模型审片（两个不同模型）"]),
     ...(voiceSelectionAvailable === false && !initialValues?.rework ? ["可用声音演员"] : []),
   ];
   // 链接按现有分区优先：制作角色能力缺口落到制作分工；只剩画面来源缺口时落到画面来源分区，避免让创作者自己找。
@@ -1187,9 +1187,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   disabled
                   readOnly
                 />
-                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片 · DeepSeek + Codex 双模型</strong></span>
+                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片 · 双模型（deepseek-flash + deepseek-v4-pro）</strong></span>
                 <small>{dualFinalReviewAvailable && visualReviewProvider
-                  ? `${creatorProviderName(visualReviewProvider)} 负责中途预检；最终成片由 DeepSeek 与 Codex 对同一组抽帧分别独立审查，不上传音轨`
+                  ? `${creatorProviderName(visualReviewProvider)} 负责中途预检；最终成片由两个不同模型（deepseek-flash 与 deepseek-v4-pro）对同一组抽帧分别独立审查，不上传音轨`
                   : "两种审片模型或独立质量复核当前不完整，正式制作不能开工"}</small>
               </label>
               <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>

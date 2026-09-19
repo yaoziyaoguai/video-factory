@@ -44,16 +44,11 @@ const pythonPath = process.env.PYTHONPATH
   ? `${path.join(repositoryRoot, "src")}${path.delimiter}${process.env.PYTHONPATH}`
   : path.join(repositoryRoot, "src");
 // 启动时探测一次宿主机 Codex bridge；不可用时不创建任何 agent，保持规则与模板行为。
-const [codexSettings, deepseekCodexSettings] = await Promise.all([
-  readCodexProviderSettings(process.env),
+// ChatGPT/Codex 套餐已退役（用户指令 2026-09-18）：不再创建 codex broker 客户端，
+// 全部角色只走 DeepSeek broker。codex-* 的 provider id 作为遗留名保留以兼容历史 run。
+const [deepseekCodexSettings] = await Promise.all([
   readDeepseekCodexProviderSettings(process.env),
 ]);
-const codexModelId = codexSettings.modelId || process.env.VIDEO_FACTORY_CODEX_MODEL?.trim() || "codex-default";
-// 单并发 broker 中，41 分钟覆盖一个 20 分钟在途任务、一个完整执行和传输余量；
-// 生产任务会插队尚未开始的热点任务，客户端仍不重放已受理任务。
-const codexClient = codexSettings.available
-  ? new CodexBridgeClient({ socketPath: codexSettings.socketPath, timeoutMs: 2_460_000 })
-  : undefined;
 const deepseekCodexClient = deepseekCodexSettings.available
   ? new CodexBridgeClient({ socketPath: deepseekCodexSettings.socketPath, timeoutMs: 2_460_000 })
   : undefined;
@@ -67,13 +62,6 @@ const auditedTaskCandidates = [
     taskKinds: deepseekCodexSettings.taskKinds,
     sessionMode: "stateless" as const,
     ...(deepseekCodexSettings.taskModels ? { taskModels: deepseekCodexSettings.taskModels } : {}),
-  }] : []),
-  ...(codexClient && codexSettings.taskKinds.includes("role-audit") ? [{
-    client: codexClient,
-    providerId: "openai",
-    modelId: codexModelId,
-    taskKinds: codexSettings.taskKinds,
-    ...(codexSettings.taskModels ? { taskModels: codexSettings.taskModels } : {}),
   }] : []),
 ];
 const auditedTaskClient = auditedTaskCandidates.length > 0
@@ -103,9 +91,7 @@ const referenceGrammarAgent = auditedTaskClient && auditedTaskReady("reference-g
   modelId: auditedModelFor("reference-grammar"),
 }) : undefined;
 const { screenwriterAgent, directorAgent, visualReviewAgents, treatmentAgents, briefAuditAgents } = buildRoleAgentAssembly({
-  codexSettings,
   deepseekCodexSettings,
-  ...(codexClient ? { codexClient } : {}),
   ...(deepseekCodexClient ? { deepseekCodexClient } : {}),
   reviewMedia,
   environment: process.env,
@@ -139,12 +125,9 @@ const service = new StudioService({
   pipeline,
   opportunities,
   codexAvailability: {
-    available: codexSettings.available,
-    reason: codexSettings.reason,
-    taskKinds: codexSettings.taskKinds,
-    modelId: codexSettings.modelId,
-    ...(codexSettings.taskModels ? { taskModels: codexSettings.taskModels } : {}),
-    ...(codexSettings.modelCandidates ? { modelCandidates: codexSettings.modelCandidates } : {}),
+    available: false,
+    reason: "ChatGPT/Codex 套餐已退役：全部角色改用 DeepSeek 模型。",
+    taskKinds: [],
   },
   deepseekCodexAvailability: {
     available: deepseekCodexSettings.available,

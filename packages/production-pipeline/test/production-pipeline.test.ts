@@ -1851,7 +1851,7 @@ describe("ProductionPipeline", () => {
         ...productionBrief,
         providers: { ...productionBrief.providers, visualReview: "deepseek-visual-review-v1" },
       }),
-      /requires two distinct DeepSeek and Codex visual-review providers, models, and independent role audits/,
+      /Formal production requires a visual-review contract: dual \(two distinct independent reviewers, legacy\) or single \(DeepSeek single leg with independent role audit\)/,
     );
     assert.equal(worker.calls.length, 0);
   });

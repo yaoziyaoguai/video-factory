@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
+# ChatGPT/Codex 套餐已退役（用户指令 2026-09-18）：本脚本只拉起 DeepSeek broker 与 Studio。
+# 文件名保留（package.json 与重启脚本的既有引用），内容已不含 codex broker。
 set -euo pipefail
 
 repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-runtime_root=${VIDEO_FACTORY_CODEX_LOCAL_RUNTIME_ROOT:-"$repository_root/.local/runtime/codex"}
-socket_path=${VIDEO_FACTORY_CODEX_SOCKET_PATH:-"$runtime_root/worker.sock"}
-workspace_root=${VIDEO_FACTORY_CODEX_WORKSPACE_ROOT:-"$runtime_root/tasks"}
-codex_process_home=${VIDEO_FACTORY_CODEX_LOCAL_PROCESS_HOME:-"$runtime_root/home"}
-codex_home=${VIDEO_FACTORY_CODEX_LOCAL_HOME:-"$runtime_root/codex-home"}
-source_codex_home=${CODEX_HOME:-"$HOME/.codex"}
-codex_auth_file=${VIDEO_FACTORY_CODEX_AUTH_FILE:-"$source_codex_home/auth.json"}
-codex_bin=${CODEX_BIN:-$(command -v codex || true)}
 deepseek_runtime_root=${VIDEO_FACTORY_DEEPSEEK_CODEX_LOCAL_RUNTIME_ROOT:-"$repository_root/.local/runtime/deepseek-codex"}
 deepseek_socket_path=${VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH:-"$deepseek_runtime_root/worker.sock"}
 deepseek_workspace_root=${VIDEO_FACTORY_DEEPSEEK_CODEX_WORKSPACE_ROOT:-"$deepseek_runtime_root/tasks"}
@@ -18,76 +12,11 @@ deepseek_env_file=${DEEPSEEK_ENV_FILE:-"$repository_root/.local/secrets/deepseek
 codex_timeout_ms=${VIDEO_FACTORY_CODEX_TIMEOUT_MS:-1200000}
 # 已审核的模型候选表：界面上能按节点指定的模型只能是这张表里的（首个即 broker 默认模型）。
 # 留空则完全禁止按请求换模型——所以这里是启用的地方，不是可选的装饰。
-codex_model_candidates=${VIDEO_FACTORY_CODEX_MODEL_CANDIDATES:-gpt-5.6-sol,gpt-6-astra}
-# DeepSeek 侧的额外候选。首个是首选，与 DeepSeek 的文本默认模型一致。
-# deepseek-v4-pro 只能列在纯文本角色上：实测它接受 image_url 却收不到图像，带图的任务由
-# broker 的 withImages 路由强制落到多模态模型，覆盖对带图调用无效（见 DEEPSEEK_VISUAL_MODEL_ID）。
 deepseek_model_candidates=${VIDEO_FACTORY_DEEPSEEK_MODEL_CANDIDATES:-deepseek-flash,deepseek-v4-pro}
 deepseek_broker_pid=""
 
-if [[ -z "$codex_bin" ]]; then
-  echo "Codex CLI is unavailable. Install or expose codex before starting the full Studio." >&2
-  exit 1
-fi
-if ! "$codex_bin" login status >/dev/null 2>&1; then
-  echo "Codex is not logged in. Run 'codex login' before starting the full Studio." >&2
-  exit 1
-fi
-
-mkdir -p "$runtime_root" "$workspace_root" "$codex_process_home" "$codex_home"
-if [[ ! -f "$codex_auth_file" ]]; then
-  echo "Codex auth file is unavailable at $codex_auth_file." >&2
-  exit 1
-fi
-if [[ -e "$codex_home/auth.json" && ! -L "$codex_home/auth.json" ]]; then
-  echo "$codex_home/auth.json exists and is not a symlink; refusing to overwrite it." >&2
-  exit 1
-fi
-ln -sfn "$codex_auth_file" "$codex_home/auth.json"
-if ! HOME="$codex_process_home" CODEX_HOME="$codex_home" "$codex_bin" login status >/dev/null 2>&1; then
-  echo "The isolated Codex runtime cannot read the existing login at $codex_auth_file." >&2
-  exit 1
-fi
 cd "$repository_root"
 npm run build:broker
-
-HOME="$codex_process_home" \
-CODEX_HOME="$codex_home" \
-VIDEO_FACTORY_CODEX_SOCKET_PATH="$socket_path" \
-VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="$workspace_root" \
-VIDEO_FACTORY_CODEX_TIMEOUT_MS="$codex_timeout_ms" \
-VIDEO_FACTORY_CODEX_MODEL_CANDIDATES="$codex_model_candidates" \
-CODEX_BIN="$codex_bin" \
-npm run start --workspace @video-factory/codex-broker &
-broker_pid=$!
-
-cleanup() {
-  kill "$broker_pid" 2>/dev/null || true
-  if [[ -n "$deepseek_broker_pid" ]]; then
-    kill "$deepseek_broker_pid" 2>/dev/null || true
-  fi
-  wait "$broker_pid" 2>/dev/null || true
-  if [[ -n "$deepseek_broker_pid" ]]; then
-    wait "$deepseek_broker_pid" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT INT TERM
-
-for _ in $(seq 1 50); do
-  if curl --fail --silent --unix-socket "$socket_path" http://localhost/health >/dev/null 2>&1; then
-    break
-  fi
-  if ! kill -0 "$broker_pid" 2>/dev/null; then
-    wait "$broker_pid"
-    exit 1
-  fi
-  sleep 0.1
-done
-
-if ! curl --fail --silent --unix-socket "$socket_path" http://localhost/health >/dev/null; then
-  echo "Codex bridge did not become healthy at $socket_path." >&2
-  exit 1
-fi
 
 if [[ -f "$deepseek_env_file" ]] \
   && env -u DEEPSEEK_API_KEY node --env-file="$deepseek_env_file" -e 'process.exit(process.env.DEEPSEEK_API_KEY?.trim() ? 0 : 1)'; then
@@ -116,8 +45,10 @@ if [[ -f "$deepseek_env_file" ]] \
     echo "DeepSeek bridge did not become healthy at $deepseek_socket_path." >&2
     exit 1
   fi
+else
+  echo "DeepSeek env file is unavailable at $deepseek_env_file; the broker cannot start without its key." >&2
+  exit 1
 fi
 
-VIDEO_FACTORY_CODEX_SOCKET_PATH="$socket_path" \
 VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH="$deepseek_socket_path" \
 npm run studio:dev

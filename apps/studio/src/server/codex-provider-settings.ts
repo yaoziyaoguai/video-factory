@@ -65,12 +65,10 @@ export function supportsBrokerTasks(
 }
 
 export function auditedRoleCandidateAvailability(
-  codex: Pick<CodexProviderSettings, "available" | "taskKinds">,
   deepseek: Pick<CodexProviderSettings, "available" | "taskKinds">,
   taskKind: string,
-): { codex: boolean; deepseek: boolean } {
+): { deepseek: boolean } {
   return {
-    codex: supportsBrokerTasks(codex, taskKind, "role-audit"),
     deepseek: supportsBrokerTasks(deepseek, taskKind, "role-audit"),
   };
 }
@@ -141,6 +139,9 @@ export async function readDeepseekCodexProviderSettings(
     taskKinds: ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit", "creative-discussion"],
   }, options);
 }
+
+// 第二审片腿的专用 broker 实例（deepseek-v4-pro）：独立 socket、独立进程、独立模型配置。
+// 与首选 DeepSeek broker 的分离是双模型审片独立性的物理基础——同一实例对同一任务只能
 
 async function readProviderSettings(
   resolution: CodexSocketResolution,

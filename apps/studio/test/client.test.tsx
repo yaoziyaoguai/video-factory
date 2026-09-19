@@ -1884,7 +1884,7 @@ describe("Studio client", () => {
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
     expect(screen.queryByText("1 次付费审片")).not.toBeInTheDocument();
     expect(screen.getByText(/视觉审片使用订阅额度/)).toBeInTheDocument();
-    expect(screen.getByText(/负责中途预检；最终成片由 DeepSeek 与 Codex 对同一组抽帧分别独立审查，不上传音轨/)).toBeInTheDocument();
+    expect(screen.getByText(/负责中途预检；最终成片由两个不同模型（deepseek-flash 与 deepseek-v4-pro）对同一组抽帧分别独立审查，不上传音轨/)).toBeInTheDocument();
     expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
     const user = userEvent.setup();
     await user.type(screen.getByLabelText("视频标题"), "按次审片预算");
@@ -2137,7 +2137,7 @@ describe("Studio client", () => {
 
     expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(screen.getByText(/缺少正式生产能力/)).toHaveTextContent("DeepSeek 与 Codex 双模型审片");
+    expect(screen.getByText(/缺少正式生产能力/)).toHaveTextContent("双模型审片（两个不同模型）");
   });
 
   it("prefills an editable production brief from a selected opportunity", () => {

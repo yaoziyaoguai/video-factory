@@ -55,7 +55,10 @@ class ControlledCodexClient extends CodexBridgeClient {
         promptVersion: `test/${kind}`,
         prompt: `prompt:${kind}`,
         providerId: this.providerId,
-        modelId: this.modelId,
+        // 与真实 broker 一致：trace 记录的是本次请求实际使用的模型（selectedModelId 经
+        // requestOptions 上线路），而不是客户端构造时的默认模型——同 socket 的两条审片腿
+        // 靠这个字段区分身份。
+        modelId: requestOptions.model ?? this.modelId,
       },
     };
   }
@@ -147,41 +150,34 @@ const unavailable: CodexProviderSettings = {
 };
 
 describe("buildRoleAgentAssembly", () => {
-  it("assembles both brokers using health-reported role models", () => {
+  it("assembles the DeepSeek broker using health-reported role models", () => {
     const result = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["script-draft", "director-plan", "visual-review", "role-audit"], {
-        "script-draft": "gpt-writer",
-        "director-plan": "gpt-director",
-        "visual-review": "gpt-review",
-      }),
       deepseekCodexSettings: settings("deepseek", ["script-draft", "director-plan", "visual-review", "role-audit"], {
         "script-draft": "deepseek-writer",
         "director-plan": "deepseek-director",
         "visual-review": "deepseek-review",
       }),
-      codexClient: client,
       deepseekCodexClient: client,
       reviewMedia,
       environment: {},
     });
 
-    // 顺序即默认：DeepSeek 在前，Codex 在后。
+    // ChatGPT/Codex 套餐退役后只剩 DeepSeek 一个候选源；审片第二腿是同 broker 的另一模型。
     assert.equal(result.screenwriterAgent?.modelId, "deepseek-writer");
     assert.equal(result.directorAgent?.modelId, "deepseek-director");
-    assert.deepEqual(result.visualReviewAgents.map((agent) => agent.modelId), ["deepseek-review", "gpt-review"]);
+    assert.deepEqual(result.visualReviewAgents.map((agent) => agent.modelId), ["deepseek-review"]);
   });
 
   it("routes the selected reviewed model onto the wire and keeps the broker default when nothing is selected", async () => {
-    const openai = new ControlledCodexClient("openai", "gpt-5.6-sol", (kind) => (
+    const deepseek = new ControlledCodexClient("deepseek", "deepseek-flash", (kind) => (
       kind === "script-draft" ? validDraft() : passingAudit
     ));
     const result = buildRoleAgentAssembly({
-      codexSettings: {
-        ...settings("openai", ["script-draft", "role-audit"], { "script-draft": "gpt-5.6-sol" }),
-        modelCandidates: ["gpt-5.6-sol", "gpt-6-astra"],
+      deepseekCodexSettings: {
+        ...settings("deepseek", ["script-draft", "role-audit"], { "script-draft": "deepseek-flash" }),
+        modelCandidates: ["deepseek-flash", "deepseek-v4-pro"],
       },
-      deepseekCodexSettings: unavailable,
-      codexClient: openai,
+      deepseekCodexClient: deepseek,
       reviewMedia,
       environment: {},
     });
@@ -194,33 +190,29 @@ describe("buildRoleAgentAssembly", () => {
       durationSeconds: 24,
     };
 
-    await result.screenwriterAgent?.draftDetailed?.({ brief, selectedModelId: "gpt-6-astra" });
-    assert.equal(openai.requestOptions[0]?.model, "gpt-6-astra");
+    await result.screenwriterAgent?.draftDetailed?.({ brief, selectedModelId: "deepseek-v4-pro" });
+    assert.equal(deepseek.requestOptions[0]?.model, "deepseek-v4-pro");
 
     // 没有选择时走 broker 的默认模型，"请求的模型就是我"由 broker 归一化成没有覆盖。
-    openai.requestOptions.length = 0;
+    deepseek.requestOptions.length = 0;
     await result.screenwriterAgent?.draftDetailed?.({ brief });
-    assert.equal(openai.requestOptions[0]?.model, "gpt-5.6-sol");
+    assert.equal(deepseek.requestOptions[0]?.model, "deepseek-flash");
   });
 
-  it("assembles treatment producers for both brokers and fails closed without the task contract", () => {
-    const both = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["creative-treatment", "role-audit"], { "creative-treatment": "gpt-director" }),
+  it("assembles treatment producers and fails closed without the task contract", () => {
+    const withTreatment = buildRoleAgentAssembly({
       deepseekCodexSettings: settings("deepseek", ["creative-treatment", "role-audit"], { "creative-treatment": "deepseek-director" }),
-      codexClient: client,
       deepseekCodexClient: client,
       reviewMedia,
       environment: {},
     });
     assert.deepEqual(
-      both.treatmentAgents.map(({ agent, providerId }) => [agent.modelId, providerId]),
-      [["deepseek-director", "deepseek"], ["gpt-director", "openai"]],
+      withTreatment.treatmentAgents.map(({ agent, providerId }) => [agent.modelId, providerId]),
+      [["deepseek-director", "deepseek"]],
     );
 
     const withoutTreatment = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["script-draft", "role-audit"], {}),
       deepseekCodexSettings: settings("deepseek", ["script-draft", "role-audit"], {}),
-      codexClient: client,
       deepseekCodexClient: client,
       reviewMedia,
       environment: {},
@@ -228,34 +220,31 @@ describe("buildRoleAgentAssembly", () => {
     assert.deepEqual(withoutTreatment.treatmentAgents, []);
 
     const withoutAuditor = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["creative-treatment"], {}),
       deepseekCodexSettings: unavailable,
-      codexClient: client,
+      deepseekCodexClient: client,
       reviewMedia,
       environment: {},
     });
     assert.deepEqual(withoutAuditor.treatmentAgents, []);
   });
 
-  it("assembles a brief auditor per broker and validates it against the report dimensions", async () => {
-    const openai = new ControlledCodexClient("openai", "gpt-audit", () => passingReportAudit);
+  it("assembles a brief auditor and validates it against the report dimensions", async () => {
+    const deepseek = new ControlledCodexClient("deepseek", "deepseek-audit", () => passingReportAudit);
     const result = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["role-audit"], { "role-audit": "gpt-audit" }),
-      deepseekCodexSettings: unavailable,
-      codexClient: openai,
+      deepseekCodexSettings: settings("deepseek", ["role-audit"], { "role-audit": "deepseek-audit" }),
+      deepseekCodexClient: deepseek,
       reviewMedia,
       environment: {},
     });
 
     assert.deepEqual(
       result.briefAuditAgents.map(({ agent, providerId }) => [agent.modelId, providerId]),
-      [["gpt-audit", "openai"]],
+      [["deepseek-audit", "deepseek"]],
     );
 
     // 评估维度由宿主按角色决定：内容简报走报告四维、评整份简报（根路径 ""）。这次审计必须真的
     // 过校验，否则校验失败会把整条建议丢掉，界面在用户要拿主意时只剩一个空面板。
     const execution = await result.briefAuditAgents[0]!.agent.auditBrief({
-      // 审计只读投影里的字段，这里给到投影真正会用到的那些。
       brief: {
         title: "下班后的三个真实动作",
         angle: "先做后说，不喊口号",
@@ -267,41 +256,26 @@ describe("buildRoleAgentAssembly", () => {
     });
 
     // 只审不产：一次简报审计里除了 role-audit 不该出现任何生产任务。
-    assert.deepEqual(openai.calls, ["role-audit"]);
-    assert.equal(execution.trace?.modelId, "gpt-audit");
+    assert.deepEqual(deepseek.calls, ["role-audit"]);
+    assert.equal(execution.trace?.modelId, "deepseek-audit");
 
     // 没有 role-audit 合同的 broker 不产出审计候选：复核必须独立，不能拿生产模型顶上。
     const withoutAuditor = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["creative-treatment"], {}),
-      deepseekCodexSettings: unavailable,
-      codexClient: client,
+      deepseekCodexSettings: settings("deepseek", ["creative-treatment"], {}),
+      deepseekCodexClient: client,
       reviewMedia,
       environment: {},
     });
     assert.deepEqual(withoutAuditor.briefAuditAgents, []);
   });
 
-  it("expands every role pool to the announced models and lets the selected one go first", async () => {
+  it("expands the role pools to the announced models and lets the selected one go first", async () => {
     // 一个 broker 上公告了几个可用模型，这个角色池里就该有几个候选——首选只是排在最前，不是唯一。
-    const announced = ["gpt-5.6-sol", "gpt-6-astra"];
-    const openai = new ControlledCodexClient("openai", "unused", () => {
-      throw new CodexBridgeError("OpenAI 暂时不可用。", true, "not_accepted", 503);
-    });
+    const announced = ["deepseek-flash", "deepseek-v4-pro"];
     const deepseek = new ControlledCodexClient("deepseek", "unused", () => {
       throw new CodexBridgeError("DeepSeek 暂时不可用。", true, "not_accepted", 503);
     });
     const result = buildRoleAgentAssembly({
-      codexSettings: {
-        ...settings("openai", ["director-plan", "creative-treatment", "role-audit", "script-draft"], {
-          "director-plan": "gpt-director",
-          "creative-treatment": "gpt-director",
-          "role-audit": "gpt-audit",
-          "script-draft": "gpt-writer",
-        }),
-        modelCandidates: announced,
-      },
-      // DeepSeek 公告了同一批 id：重复的候选会被丢弃（留着它跑的是同一个模型，不是一次兜底），
-      // 而 `validateCandidates` 对重复 id 是**建图时**就抛，也就是整个服务起不来。
       deepseekCodexSettings: {
         ...settings("deepseek", ["director-plan", "creative-treatment", "role-audit", "script-draft"], {
           "director-plan": "deepseek-director",
@@ -311,7 +285,6 @@ describe("buildRoleAgentAssembly", () => {
         }),
         modelCandidates: announced,
       },
-      codexClient: openai,
       deepseekCodexClient: deepseek,
       reviewMedia,
       environment: {},
@@ -319,11 +292,11 @@ describe("buildRoleAgentAssembly", () => {
 
     assert.deepEqual(
       result.treatmentAgents.map(({ agent }) => agent.modelId),
-      ["deepseek-director", "gpt-5.6-sol", "gpt-6-astra", "gpt-director"],
+      ["deepseek-director", "deepseek-flash", "deepseek-v4-pro"],
     );
     assert.deepEqual(
       result.briefAuditAgents.map(({ agent, providerId }) => [agent.modelId, providerId]),
-      [["deepseek-audit", "deepseek"], ["gpt-5.6-sol", "deepseek"], ["gpt-6-astra", "deepseek"], ["gpt-audit", "openai"]],
+      [["deepseek-audit", "deepseek"], ["deepseek-flash", "deepseek"], ["deepseek-v4-pro", "deepseek"]],
     );
     // 没有选择时首选是每个角色的第一个候选，也就是 DeepSeek 的默认模型。
     assert.equal(result.directorAgent?.modelId, "deepseek-director");
@@ -340,7 +313,7 @@ describe("buildRoleAgentAssembly", () => {
           platform: "douyin",
           durationSeconds: 24,
         },
-        selectedModelId: "gpt-6-astra",
+        selectedModelId: "deepseek-v4-pro",
       }),
       (error: unknown) => {
         assert.ok(
@@ -350,10 +323,9 @@ describe("buildRoleAgentAssembly", () => {
         assert.deepEqual(
           error.attempts.map((attempt) => [attempt.modelId, attempt.providerId]),
           [
-            ["gpt-6-astra", "deepseek"],
+            ["deepseek-v4-pro", "deepseek"],
             ["deepseek-writer", "deepseek"],
-            ["gpt-5.6-sol", "deepseek"],
-            ["gpt-writer", "openai"],
+            ["deepseek-flash", "deepseek"],
           ],
         );
         return true;
@@ -363,37 +335,25 @@ describe("buildRoleAgentAssembly", () => {
 
   it("sends the selected model first for treatment and brief audit, not just in the picker", async () => {
     // 界面上的候选顺序说明不了实际首发是谁：真正上线路的顺序由 Fallback*Agent 在调用时按
-    // selectedModelId 重排。这里照着生产的接法把两种 agent 真的建出来（与 production-pipeline
-    // 里 `new FallbackCreativeTreatmentAgent({ candidates: treatmentBindings })`、
+    // selectedModelId 重排。这里照着生产的接法把 agent 真的建出来（与 production-pipeline 里
+    // `new FallbackCreativeTreatmentAgent({ candidates: treatmentBindings })`、
     // `new FallbackBriefAuditAgent({ candidates: bindings })` 同一形状），让每个候选都瞬断，
     // 失败清单的顺序就是实际的尝试顺序。
-    const openai = new ControlledCodexClient("openai", "unused", () => {
-      throw new CodexBridgeError("OpenAI 暂时不可用。", true, "not_accepted", 503);
-    });
     const deepseek = new ControlledCodexClient("deepseek", "unused", () => {
       throw new CodexBridgeError("DeepSeek 暂时不可用。", true, "not_accepted", 503);
     });
-    const announced = ["gpt-5.6-sol", "gpt-6-astra"];
     const result = buildRoleAgentAssembly({
-      codexSettings: {
-        ...settings("openai", ["creative-treatment", "role-audit"], {
-          "creative-treatment": "gpt-director",
-          "role-audit": "gpt-audit",
-        }),
-        modelCandidates: announced,
-      },
       deepseekCodexSettings: settings("deepseek", ["creative-treatment", "role-audit"], {
         "creative-treatment": "deepseek-director",
         "role-audit": "deepseek-audit",
       }),
-      codexClient: openai,
       deepseekCodexClient: deepseek,
       reviewMedia,
       environment: {},
     });
     assert.deepEqual(
       result.treatmentAgents.map(({ agent }) => agent.modelId),
-      ["deepseek-director", "gpt-director", "gpt-5.6-sol", "gpt-6-astra"],
+      ["deepseek-director"],
     );
 
     await assert.rejects(
@@ -408,19 +368,12 @@ describe("buildRoleAgentAssembly", () => {
             durationSeconds: 24,
           },
           suppliedSources: [],
-          selectedModelId: "gpt-director",
+          selectedModelId: "deepseek-director",
         } as never),
       (error: unknown) => {
-        assert.ok(error instanceof ModelCandidatesExhaustedError);
-        assert.deepEqual(
-          error.attempts.map((attempt) => [attempt.modelId, attempt.providerId]),
-          [
-            ["gpt-director", "openai"],
-            ["deepseek-director", "deepseek"],
-            ["gpt-5.6-sol", "openai"],
-            ["gpt-6-astra", "openai"],
-          ],
-        );
+        // 单候选池失败没有排序语义：断言聚合错误把唯一候选的原因带出来即可。
+        assert.match((error as Error).message, /1 个候选模型均未能完成/);
+        assert.match((error as Error).message, /deepseek-director 服务端错误/);
         return true;
       },
     );
@@ -436,62 +389,53 @@ describe("buildRoleAgentAssembly", () => {
             platform: "douyin",
             durationSeconds: 24,
           } as unknown as ProductionBrief,
-          selectedModelId: "gpt-6-astra",
+          selectedModelId: "deepseek-v4-pro",
         } as never),
       (error: unknown) => {
-        assert.ok(error instanceof ModelCandidatesExhaustedError);
-        assert.deepEqual(
-          error.attempts.map((attempt) => [attempt.modelId, attempt.providerId]),
-          [
-            ["gpt-6-astra", "openai"],
-            ["deepseek-audit", "deepseek"],
-            ["gpt-audit", "openai"],
-            ["gpt-5.6-sol", "openai"],
-          ],
-        );
+        // 该 fixture 的池子只有一个候选：选中不在池中的模型 → 快速拒绝（选型校验先于任何调用）。
+        assert.match((error as Error).message, /Selected model 'deepseek-v4-pro' is not available for this role/);
+        // calls 里的 creative-treatment 是同 client 前一段 treatment 尝试的调用残留。
+        assert.deepEqual(deepseek.calls, ["creative-treatment"]);
         return true;
       },
     );
   });
 
-  it("runs the assembled DeepSeek screenwriter through its OpenAI backup after a transient outage", async () => {
+  it("fails the screenwriter without a backup after a transient DeepSeek outage", async () => {
+    // ChatGPT/Codex 套餐退役后没有跨厂商 backup：DeepSeek 掉线时制作暂停等人，
+    // 不存在"另一个厂商的模型顶上"的路径。
     const deepseek = new ControlledCodexClient("deepseek", "deepseek-writer", () => {
       throw new CodexBridgeError("DeepSeek service temporarily unavailable.", true, "not_accepted", 503);
     });
-    const openai = new ControlledCodexClient("openai", "gpt-writer", (kind) => {
-      if (kind === "script-draft") return validDraft();
-      if (kind === "role-audit") return passingAudit;
-      throw new Error(`Unexpected OpenAI task ${kind}`);
-    });
     const result = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["script-draft", "role-audit"], { "script-draft": "gpt-writer", "role-audit": "gpt-writer" }),
       deepseekCodexSettings: settings("deepseek", ["script-draft", "role-audit"], { "script-draft": "deepseek-writer", "role-audit": "deepseek-writer" }),
-      codexClient: openai,
       deepseekCodexClient: deepseek,
       reviewMedia,
       environment: {},
     });
 
-    const execution = await result.screenwriterAgent?.draftDetailed?.({
-      brief: {
-        title: "下班后的三个真实动作",
-        angle: "验证生产装配中的模型接管",
-        audience: "普通上班族",
-        nicheSlug: "assembly-fallback",
-        platform: "douyin",
-        durationSeconds: 24,
+    await assert.rejects(
+      () => result.screenwriterAgent?.draftDetailed?.({
+        brief: {
+          title: "下班后的三个真实动作",
+          angle: "验证生产装配中的暂停语义",
+          audience: "普通上班族",
+          nicheSlug: "assembly-no-backup",
+          platform: "douyin",
+          durationSeconds: 24,
+        },
+      }),
+      (error: unknown) => {
+        // 无 backup 后失败以 RoleAgentLoopError 形态上抛（loop 的标准包装），
+        // 聚合消息里保留暂时性故障的中文原因；没有任何第二厂商调用。
+        assert.match(error?.message ?? "", /暂时不可用/);
+        assert.deepEqual(deepseek.calls, ["script-draft"]);
+        return true;
       },
-    });
-
-    assert.ok(execution);
-    assert.deepEqual(deepseek.calls, ["script-draft"]);
-    assert.deepEqual(openai.calls, ["script-draft", "role-audit"]);
-    assert.equal(execution.trace?.modelId, "gpt-writer");
-    assert.equal(execution.trace?.fallbackFromModelId, "deepseek-writer");
-    assert.deepEqual(execution.trace?.attemptedModelIds, ["deepseek-writer", "gpt-writer"]);
+    );
   });
 
-  it("keeps assembled OpenAI producer revisions isolated from prior model history", async () => {
+  it("keeps assembled producer revisions isolated from prior model history", async () => {
     const repairAudit = {
       version: "video-factory/role-audit-v2",
       rubricVersion: "video-factory/role-quality-rubric-v1",
@@ -509,7 +453,7 @@ describe("buildRoleAgentAssembly", () => {
     };
     let scriptCalls = 0;
     let auditCalls = 0;
-    const openai = new ControlledCodexClient("openai", "gpt-writer", (kind) => {
+    const deepseek = new ControlledCodexClient("deepseek", "deepseek-writer", (kind) => {
       if (kind === "script-draft") {
         scriptCalls += 1;
         const draft = validDraft();
@@ -520,15 +464,14 @@ describe("buildRoleAgentAssembly", () => {
         auditCalls += 1;
         return auditCalls === 1 ? repairAudit : passingAudit;
       }
-      throw new Error(`Unexpected OpenAI task ${kind}`);
+      throw new Error(`Unexpected DeepSeek task ${kind}`);
     });
     const result = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["script-draft", "role-audit"], {
-        "script-draft": "gpt-writer",
-        "role-audit": "gpt-writer",
+      deepseekCodexSettings: settings("deepseek", ["script-draft", "role-audit"], {
+        "script-draft": "deepseek-writer",
+        "role-audit": "deepseek-writer",
       }),
-      deepseekCodexSettings: unavailable,
-      codexClient: openai,
+      deepseekCodexClient: deepseek,
       reviewMedia,
       environment: {},
     });
@@ -544,54 +487,12 @@ describe("buildRoleAgentAssembly", () => {
       },
     });
 
-    assert.deepEqual(openai.calls, ["script-draft", "role-audit", "script-draft", "role-audit"]);
-    assert.deepEqual(openai.sessions, [undefined, undefined, undefined, undefined]);
+    assert.deepEqual(deepseek.calls, ["script-draft", "role-audit", "script-draft", "role-audit"]);
+    assert.deepEqual(deepseek.sessions, [undefined, undefined, undefined, undefined]);
   });
 
-  it("runs the assembled DeepSeek visual reviewer through its OpenAI backup after a transient outage", async () => {
-    const openai = new ControlledCodexClient("openai", "gpt-review", (kind) => {
-      if (kind === "visual-review") return passingVisualReport;
-      if (kind === "role-audit") return passingReportAudit;
-      throw new Error(`Unexpected OpenAI task ${kind}`);
-    });
-    const deepseek = new ControlledCodexClient("deepseek", "deepseek-review", (kind) => {
-      if (kind === "visual-review") {
-        throw new CodexBridgeError("DeepSeek service temporarily unavailable.", true, "not_accepted", 503);
-      }
-      throw new Error(`Unexpected DeepSeek task ${kind}`);
-    });
-    const result = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["visual-review", "role-audit"], { "visual-review": "gpt-review" }),
-      deepseekCodexSettings: settings("deepseek", ["visual-review", "role-audit"], { "visual-review": "deepseek-review", "role-audit": "deepseek-review" }),
-      codexClient: openai,
-      deepseekCodexClient: deepseek,
-      reviewMedia,
-      environment: {},
-    });
-
-    // 试片是"要不要继续为同方案其余镜头付费"的闸门，所以它和成片终审一样要求两个分支
-    // 落在两个不同的实际身份上。DeepSeek 掉线时备份确实顶上了，但两个分支于是都成了 gpt-review：
-    // 闸门宁可不开，也不能拿同一个模型的两份回答当成两次独立复审。
-    await assert.rejects(
-      () => result.visualReviewAgents[0]!.reviewDetailed!({
-        videoPath: "/run/final.mp4",
-        runRoot: "/run",
-        reviewStage: "source_assets",
-      }),
-      (error: unknown) => {
-        assert.ok(error instanceof IndependentVisualReviewError);
-        // 操作员要能看出这是试片而不是成片终审：一个还没花钱，一个已经花过了。
-        assert.match(error.message, /试片双模型复审无法成立/);
-        assert.deepEqual(error.failures.map((failure) => failure.kind), ["not_independent"]);
-        return true;
-      },
-    );
-    assert.deepEqual(deepseek.calls, ["visual-review"]);
-    // 两个分支都跑完了：DeepSeek 那一路掉线后由 Codex 顶上，Codex 那一路本来就是 Codex。
-    assert.deepEqual(openai.calls, ["visual-review", "role-audit", "visual-review", "role-audit"]);
-  });
-
-  it("runs both configured models for the final review while preprocessing evidence once", async () => {
+  it("runs the single DeepSeek review leg for the pilot review while preprocessing evidence once", async () => {
+    // 双模型审片随 ChatGPT/Codex 套餐退役取消：只剩 DeepSeek 单腿，抽帧预处理一次。
     let prepareCalls = 0;
     const sharedReviewMedia = {
       prepare: async () => {
@@ -599,20 +500,50 @@ describe("buildRoleAgentAssembly", () => {
         return reviewMedia.prepare();
       },
     };
-    const openai = new ControlledCodexClient("openai", "gpt-review", (kind) => {
-      if (kind === "visual-review") return passingVisualReport;
-      if (kind === "role-audit") return passingReportAudit;
-      throw new Error(`Unexpected OpenAI task ${kind}`);
-    });
     const deepseek = new ControlledCodexClient("deepseek", "deepseek-review", (kind) => {
       if (kind === "visual-review") return passingVisualReport;
       if (kind === "role-audit") return passingReportAudit;
       throw new Error(`Unexpected DeepSeek task ${kind}`);
     });
     const result = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["visual-review", "role-audit"], { "visual-review": "gpt-review" }),
-      deepseekCodexSettings: settings("deepseek", ["visual-review", "role-audit"], { "visual-review": "deepseek-review", "role-audit": "deepseek-review" }),
-      codexClient: openai,
+      deepseekCodexSettings: settings("deepseek", ["visual-review", "role-audit"], {
+        "visual-review": "deepseek-review",
+      }),
+      deepseekCodexClient: deepseek,
+      reviewMedia: sharedReviewMedia,
+      environment: {},
+    });
+
+    const execution = await result.visualReviewAgents[0]?.reviewDetailed?.({
+      videoPath: "/run/final.mp4",
+      runRoot: "/run",
+      reviewStage: "source_assets",
+    });
+
+    assert.ok(execution);
+    assert.equal(prepareCalls, 1, "抽帧预处理只做一次");
+    assert.equal(execution.trace?.modelId, "deepseek-review");
+    assert.ok(execution.output, "单腿审查必须产出真实报告");
+  });
+
+
+  it("runs the single DeepSeek review leg for the final review while preprocessing evidence once", async () => {
+    let prepareCalls = 0;
+    const sharedReviewMedia = {
+      prepare: async () => {
+        prepareCalls += 1;
+        return reviewMedia.prepare();
+      },
+    };
+    const deepseek = new ControlledCodexClient("deepseek", "deepseek-review", (kind) => {
+      if (kind === "visual-review") return passingVisualReport;
+      if (kind === "role-audit") return passingReportAudit;
+      throw new Error(`Unexpected DeepSeek task ${kind}`);
+    });
+    const result = buildRoleAgentAssembly({
+      deepseekCodexSettings: settings("deepseek", ["visual-review", "role-audit"], {
+        "visual-review": "deepseek-review",
+      }),
       deepseekCodexClient: deepseek,
       reviewMedia: sharedReviewMedia,
       environment: {},
@@ -626,28 +557,15 @@ describe("buildRoleAgentAssembly", () => {
 
     assert.ok(execution);
     assert.equal(prepareCalls, 1);
-    assert.deepEqual(deepseek.calls, ["visual-review", "role-audit"]);
-    assert.deepEqual(openai.calls, ["visual-review", "role-audit"]);
-    assert.deepEqual(execution.independentReviews?.map(({ modelId }) => modelId), ["deepseek-review", "gpt-review"]);
+    assert.equal(execution.trace?.modelId, "deepseek-review");
+    assert.ok(execution.output, "单腿审查必须产出真实报告");
   });
 
-  it("assembles OpenAI-only roles when DeepSeek is unavailable", () => {
-    const result = buildRoleAgentAssembly({
-      codexSettings: settings("openai", ["script-draft", "director-plan", "visual-review", "role-audit"], {}),
-      deepseekCodexSettings: unavailable,
-      codexClient: client,
-      reviewMedia,
-      environment: {},
-    });
 
-    assert.equal(result.screenwriterAgent?.modelId, "gpt-default");
-    assert.equal(result.directorAgent?.modelId, "gpt-default");
-    assert.deepEqual(result.visualReviewAgents.map((agent) => agent.modelId), ["gpt-default"]);
-  });
 
-  it("uses DeepSeek production roles with DeepSeek independent audits when OpenAI is unavailable", () => {
+  it("assembles DeepSeek-only roles when no codex settings exist at all", () => {
+    // ChatGPT/Codex 套餐退役后的默认世界：buildRoleAgentAssembly 不再接受 codex 入参也能装配。
     const result = buildRoleAgentAssembly({
-      codexSettings: unavailable,
       deepseekCodexSettings: settings("deepseek", ["script-draft", "director-plan", "visual-review", "role-audit"], {
         "script-draft": "deepseek-writer",
         "director-plan": "deepseek-director",

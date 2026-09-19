@@ -58,8 +58,8 @@ describe("readCodexProviderSettings", () => {
     assert.ok(settings.taskKinds.includes("creative-treatment"));
     assert.ok(settings.taskKinds.includes("role-audit"));
     assert.deepEqual(
-      auditedRoleCandidateAvailability(settings, { available: false, taskKinds: [] }, "creative-treatment"),
-      { codex: true, deepseek: false },
+      auditedRoleCandidateAvailability(settings, "creative-treatment"),
+      { deepseek: true },
     );
   });
 
@@ -339,35 +339,27 @@ describe("readDeepseekCodexProviderSettings", () => {
 });
 
 describe("auditedRoleCandidateAvailability", () => {
-  const unavailable = { available: false, taskKinds: [] };
-
-  it("selects only OpenAI when it owns both production and independent audit tasks", () => {
+  // ChatGPT/Codex 套餐退役后只剩 DeepSeek 一个候选源：可用性=DeepSeek 是否同时拥有
+  // 生产任务与独立审计任务（缺 role-audit 的 broker 不能承担构思生产）。
+  it("selects DeepSeek when it owns both production and independent audit tasks", () => {
     assert.deepEqual(auditedRoleCandidateAvailability(
       { available: true, taskKinds: ["script-draft", "role-audit"] },
-      unavailable,
       "script-draft",
-    ), { codex: true, deepseek: false });
+    ), { deepseek: true });
   });
 
-  it("selects only DeepSeek when DeepSeek owns both production and independent audit", () => {
+  it("rejects a provider that lacks the independent audit task", () => {
     assert.deepEqual(auditedRoleCandidateAvailability(
-      { available: true, taskKinds: ["role-audit"] },
-      { available: true, taskKinds: ["script-draft", "role-audit"] },
-      "script-draft",
-    ), { codex: false, deepseek: true });
+      { available: true, taskKinds: ["director-plan"] },
+      "director-plan",
+    ), { deepseek: false });
   });
 
-  it("selects only providers that own both the producer and audit tasks", () => {
+  it("rejects an unavailable provider", () => {
     assert.deepEqual(auditedRoleCandidateAvailability(
-      { available: true, taskKinds: ["director-plan", "role-audit"] },
-      { available: true, taskKinds: ["director-plan"] },
-      "director-plan",
-    ), { codex: true, deepseek: false });
-    assert.deepEqual(auditedRoleCandidateAvailability(
-      { available: true, taskKinds: ["director-plan"] },
-      { available: true, taskKinds: ["director-plan"] },
-      "director-plan",
-    ), { codex: false, deepseek: false });
+      { available: false, taskKinds: [] },
+      "script-draft",
+    ), { deepseek: false });
   });
 });
 

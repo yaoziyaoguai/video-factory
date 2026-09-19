@@ -182,7 +182,7 @@ export interface VisualReviewAgent {
   modelId: string;
   independentRoleAudit?: boolean;
   finalReviewConfiguration?: {
-    mode: "dual";
+    mode: "dual" | "single";
     reviewers: Array<{ providerId: string; modelId: string; independentRoleAudit: boolean }>;
   };
   review(input: VisualReviewAgentInput): Promise<VisualReviewReport>;
@@ -675,12 +675,27 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
   readonly independentRoleAudit: boolean;
   private readonly maxReviewIterations: number;
 
+  readonly finalReviewConfiguration?: NonNullable<VisualReviewAgent["finalReviewConfiguration"]>;
+
   constructor(private readonly options: CodexVisualReviewAgentOptions) {
     this.id = options.providerId ?? "codex-visual-review-v1";
     this.modelId = options.modelId ?? "codex-default";
     this.independentRoleAudit = typeof options.client.runTaskDetailed === "function"
       && typeof (options.auditClient ?? options.client).runTaskDetailed === "function";
     this.maxReviewIterations = options.maxReviewIterations ?? 3;
+    // ChatGPT/Codex 套餐退役后（N5），单腿即完整审片合同：一个独立角色模型、一份完整
+    // 回执。self-declare 让正式生产合同检查（assertCurrentVisualReviewContract）按单腿
+    // 验收，而不是按已退役的"必须双模型"拒绝。
+    if (this.independentRoleAudit) {
+      this.finalReviewConfiguration = {
+        mode: "single",
+        reviewers: [{
+          providerId: this.id,
+          modelId: this.modelId,
+          independentRoleAudit: this.independentRoleAudit,
+        }],
+      };
+    }
   }
 
   async review(input: VisualReviewAgentInput): Promise<VisualReviewReport> {
