@@ -10,6 +10,7 @@ services:
         NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
         ALPINE_MIRROR: ${ALPINE_MIRROR:-}
         NPM_REGISTRY: ${NPM_REGISTRY:-}
+        NODE_DIST_URL: ${NODE_DIST_URL:-}
     container_name: video_factory_prod
     restart: unless-stopped
     environment:

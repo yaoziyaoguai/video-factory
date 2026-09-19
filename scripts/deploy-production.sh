@@ -22,6 +22,7 @@ compose=(docker compose --project-name video-factory --env-file "$environment_fi
 export ALPINE_MIRROR="${ALPINE_MIRROR:-http://mirrors.cloud.aliyuncs.com/alpine}"
 # ECS 无法稳定访问 npm 官方源；只影响服务器内候选镜像构建，CI 安全审计仍使用官方源。
 export NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
+export NODE_DIST_URL="${NODE_DIST_URL:-https://npmmirror.com/mirrors/node}"
 deepseek_broker_enabled=0
 if [[ -s /etc/video-factory/deepseek-codex-broker.env ]]; then
   deepseek_broker_enabled=1

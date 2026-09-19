@@ -4,6 +4,7 @@ FROM ${NODE_IMAGE} AS dependencies
 
 ARG ALPINE_MIRROR
 ARG NPM_REGISTRY
+ARG NODE_DIST_URL
 
 WORKDIR /app
 RUN if [ -n "$ALPINE_MIRROR" ]; then \
@@ -17,7 +18,7 @@ COPY packages/production-pipeline/package.json packages/production-pipeline/pack
 COPY packages/template-core/package.json packages/template-core/package.json
 COPY packages/workflow-core/package.json packages/workflow-core/package.json
 RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi \
-    && npm ci
+    && if [ -n "$NODE_DIST_URL" ]; then npm_config_disturl="$NODE_DIST_URL" npm ci; else npm ci; fi
 
 FROM dependencies AS builder
 
