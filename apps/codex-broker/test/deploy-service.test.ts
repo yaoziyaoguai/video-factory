@@ -145,6 +145,25 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario, firstMi
     writeFile(openAiUnitPath, "[Unit]\nDescription=old-openai\n", "utf8"),
     writeFile(deepseekUnitPath, "[Unit]\nDescription=old-deepseek\n", "utf8"),
     writeFile(path.join(candidateBroker, "dist", "main.js"), "export {};\n", "utf8"),
+    writeFile(path.join(candidateBroker, "package.json"), '{"type":"module"}\n', "utf8"),
+    writeFile(
+      path.join(candidateBroker, "dist", "task-definitions.js"),
+      `export const BROKER_TASK_KINDS = [
+  "topic-ideas",
+  "series-roadmap",
+  "creative-treatment",
+  "director-plan",
+  "script-draft",
+  "publish-copy",
+  "asset-rank",
+  "reference-grammar",
+  "visual-review",
+  "role-audit",
+  "creative-discussion",
+];
+`,
+      "utf8",
+    ),
     writeFile(
       path.join(candidateBroker, "node_modules", "undici", "package.json"),
       '{"name":"undici","type":"commonjs"}\n',
@@ -321,11 +340,11 @@ case " $* " in
         elif [ "$current_release" = "$TEST_PREVIOUS_RELEASE" ]; then
           echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"deepseek","providerId":"deepseek","modelId":"deepseek-flash","taskKinds":["director-plan","script-draft","visual-review"],"taskModels":{"director-plan":"deepseek-flash","script-draft":"deepseek-flash","visual-review":"deepseek-flash"}}'
         else
-          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"deepseek","providerId":"deepseek","modelId":"deepseek-flash","taskKinds":["topic-ideas","series-roadmap","creative-treatment","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit"],"taskModels":{"topic-ideas":"deepseek-flash","series-roadmap":"deepseek-flash","creative-treatment":"deepseek-flash","director-plan":"deepseek-flash","script-draft":"deepseek-flash","publish-copy":"deepseek-flash","asset-rank":"deepseek-flash","reference-grammar":"deepseek-flash","visual-review":"deepseek-flash","role-audit":"deepseek-flash"}}'
+          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"deepseek","providerId":"deepseek","modelId":"deepseek-flash","taskKinds":["topic-ideas","series-roadmap","creative-treatment","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit","creative-discussion"],"taskModels":{"topic-ideas":"deepseek-flash","series-roadmap":"deepseek-flash","creative-treatment":"deepseek-flash","director-plan":"deepseek-flash","script-draft":"deepseek-flash","publish-copy":"deepseek-flash","asset-rank":"deepseek-flash","reference-grammar":"deepseek-flash","visual-review":"deepseek-flash","role-audit":"deepseek-flash","creative-discussion":"deepseek-flash"}}'
         fi
         ;;
       *)
-        echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"openai","providerId":"openai","modelId":"gpt-test","taskKinds":["topic-ideas","series-roadmap","creative-treatment","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit"],"taskModels":{"topic-ideas":"gpt-test","series-roadmap":"gpt-test","creative-treatment":"gpt-test","director-plan":"gpt-test","script-draft":"gpt-test","publish-copy":"gpt-test","asset-rank":"gpt-test","reference-grammar":"gpt-test","visual-review":"gpt-test","role-audit":"gpt-test"}}'
+        echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"openai","providerId":"openai","modelId":"gpt-test","taskKinds":["topic-ideas","series-roadmap","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit"],"taskModels":{"topic-ideas":"gpt-test","series-roadmap":"gpt-test","director-plan":"gpt-test","script-draft":"gpt-test","publish-copy":"gpt-test","asset-rank":"gpt-test","reference-grammar":"gpt-test","visual-review":"gpt-test","role-audit":"gpt-test"}}'
         ;;
     esac
     ;;
@@ -426,7 +445,7 @@ legacy_broker_was_active=1
 systemctl() { echo "$*"; [[ "$*" != *retired-openai* ]]; }
 wait_for_broker_health() { return 0; }
 ${restart}
-restart_brokers
+restart_brokers topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit,creative-discussion
 `]);
     assert.match(stdout, /restart deepseek/);
     assert.doesNotMatch(stdout, /retired-openai/);
@@ -830,11 +849,13 @@ exit 42
     assert.match(deploy, /expectedKinds\.every\(\(kind\) => typeof taskModels\[kind\] === "string"/);
     assert.match(deploy, /EXPECTED_BROKER_ALLOW_EXTRA_KINDS/);
     assert.match(deploy, /allowExtraKinds \|\| expectedKinds\.length === actualKinds\.length/);
-    assert.match(deploy, /restart_brokers director-plan,script-draft,visual-review 1 1/);
-    assert.match(
-      deploy,
-      /broker_health "\$deepseek_broker_socket" deepseek deepseek \\\n\s+topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit/,
-    );
+    assert.match(deploy, /broker_contract_kinds\(\)/);
+    assert.match(deploy, /task_kinds_from_release\(\)/);
+    assert.match(deploy, /BROKER_TASK_DEFINITIONS="\$definitions"/);
+    assert.match(deploy, /candidate_broker_task_kinds="\$\(task_kinds_from_release "\$candidate_broker_release"\)"/);
+    assert.match(deploy, /restart_brokers "\$deepseek_broker_rollback_kinds" 0 1/);
+    assert.match(deploy, /restart_brokers "\$candidate_broker_task_kinds"/);
+    assert.match(deploy, /broker_health "\$deepseek_broker_socket" deepseek deepseek \\\n\s+"\$candidate_broker_task_kinds"/);
   });
 
   it("uses authenticated GET readiness probes that cannot submit billable content", async () => {
@@ -863,11 +884,9 @@ exit 42
     const restartBrokers = script.match(
       /restart_brokers\(\) \{([\s\S]*?)\n\}/,
     )?.[1] ?? "";
-    const optionalFailure = restartBrokers.match(
-      /if ! systemctl restart "\$deepseek_broker_service"[\s\S]*?then([\s\S]*?)\n    fi/,
-    )?.[1] ?? "";
-
-    assert.match(optionalFailure, /failed=1/);
-    assert.doesNotMatch(optionalFailure, /deepseek_broker_enabled=0|systemctl stop|ensure_deepseek_runtime_mount/);
+    assert.match(restartBrokers, /! systemctl restart "\$deepseek_broker_service"/);
+    assert.match(restartBrokers, /Configured DeepSeek broker is unavailable; refusing a partial deployment/);
+    assert.match(restartBrokers, /failed=1/);
+    assert.doesNotMatch(restartBrokers, /deepseek_broker_enabled=0|ensure_deepseek_runtime_mount/);
   });
 });

@@ -30,6 +30,9 @@ fi
 deepseek_broker_configured="$deepseek_broker_enabled"
 deepseek_broker_was_active=0
 legacy_broker_was_active=0
+legacy_broker_rollback_kinds=""
+deepseek_broker_rollback_kinds=""
+candidate_broker_task_kinds=""
 systemctl is-active --quiet "$deepseek_broker_service" && deepseek_broker_was_active=1
 systemctl is-active --quiet "$broker_service" && legacy_broker_was_active=1
 
@@ -217,6 +220,53 @@ broker_health() {
     '
 }
 
+broker_contract_kinds() {
+  local socket="$1" expected_profile="$2" expected_provider="$3" health_json
+  health_json="$(curl --fail --silent --max-time 5 --unix-socket "$socket" http://localhost/health)" || return 1
+  BROKER_HEALTH_JSON="$health_json" \
+    EXPECTED_BROKER_PROFILE="$expected_profile" \
+    EXPECTED_BROKER_PROVIDER="$expected_provider" \
+    "$broker_root/bin/node" --eval '
+      try {
+        const health = JSON.parse(process.env.BROKER_HEALTH_JSON ?? "");
+        const taskKinds = Array.isArray(health.taskKinds) ? health.taskKinds : [];
+        const taskModels = health.taskModels;
+        const valid = health.protocolVersion === "video-factory/codex-bridge-v2"
+          && health.profileId === process.env.EXPECTED_BROKER_PROFILE
+          && health.providerId === process.env.EXPECTED_BROKER_PROVIDER
+          && taskKinds.length > 0
+          && new Set(taskKinds).size === taskKinds.length
+          && taskKinds.every((kind) => typeof kind === "string" && /^[a-z0-9-]+$/.test(kind))
+          && taskModels && typeof taskModels === "object" && !Array.isArray(taskModels)
+          && taskKinds.every((kind) => typeof taskModels[kind] === "string" && taskModels[kind].length > 0);
+        if (!valid) process.exit(1);
+        process.stdout.write(taskKinds.join(","));
+      } catch {
+        process.exit(1);
+      }
+    '
+}
+
+task_kinds_from_release() {
+  local release="$1" definitions="$1/dist/task-definitions.js"
+  [[ -f "$definitions" ]] || return 1
+  BROKER_TASK_DEFINITIONS="$definitions" "$broker_root/bin/node" --input-type=module --eval '
+    import { pathToFileURL } from "node:url";
+    try {
+      const definitions = await import(pathToFileURL(process.env.BROKER_TASK_DEFINITIONS).href);
+      const taskKinds = definitions.BROKER_TASK_KINDS;
+      const valid = Array.isArray(taskKinds)
+        && taskKinds.length > 0
+        && new Set(taskKinds).size === taskKinds.length
+        && taskKinds.every((kind) => typeof kind === "string" && /^[a-z0-9-]+$/.test(kind));
+      if (!valid) process.exit(1);
+      process.stdout.write(taskKinds.join(","));
+    } catch {
+      process.exit(1);
+    }
+  '
+}
+
 wait_for_broker_health() {
   local socket="$1" attempts="$2" expected_profile="$3" expected_provider="$4" expected_kinds="$5" allow_extra_kinds="${6:-0}" count
   for count in $(seq 1 "$attempts"); do
@@ -241,18 +291,19 @@ install_broker_units_from_release() {
 }
 
 restart_brokers() {
-  local deepseek_expected_kinds="${1:-topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit}"
+  local deepseek_expected_kinds="$1"
   local deepseek_allow_extra_kinds="${2:-0}" restore_previous="${3:-0}" failed=0
   # 旧服务仅用于恢复部署前的版本；新版本不能再依赖退役的 OpenAI 链路。
   if [[ "$restore_previous" -eq 1 && "$legacy_broker_was_active" -eq 1 ]]; then
     if ! systemctl restart "$broker_service" \
       || ! wait_for_broker_health "$broker_socket" 20 openai openai \
-        topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
+        "$legacy_broker_rollback_kinds"; then
       failed=1
     fi
   fi
   if [[ "$restore_previous" -eq 0 || "$deepseek_broker_was_active" -eq 1 ]]; then
-    if ! systemctl restart "$deepseek_broker_service" \
+    if [[ -z "$deepseek_expected_kinds" ]] \
+      || ! systemctl restart "$deepseek_broker_service" \
       || ! wait_for_broker_health "$deepseek_broker_socket" 20 deepseek deepseek \
         "$deepseek_expected_kinds" "$deepseek_allow_extra_kinds"; then
       echo "Configured DeepSeek broker is unavailable; refusing a partial deployment." >&2
@@ -299,7 +350,7 @@ rollback_broker() {
     echo "No previous broker unit is available for rollback." >&2
     return 1
   fi
-  restart_brokers director-plan,script-draft,visual-review 1 1
+  restart_brokers "$deepseek_broker_rollback_kinds" 0 1
 }
 
 rollback() {
@@ -366,6 +417,7 @@ stage_broker_release() {
     return 1
   fi
   if [[ ! -f "$staging/broker/dist/main.js"
+    || ! -f "$staging/broker/dist/task-definitions.js"
     || ! -f "$staging/broker/node_modules/undici/package.json"
     || ! -f "$staging/broker/deploy/vf-deepseek-codex-broker.service" ]]; then
     echo "Candidate image does not contain a complete broker release." >&2
@@ -390,12 +442,31 @@ stage_broker_release() {
   candidate_broker_release="$release_dir"
 }
 
+# 回滚验收必须使用部署前实际运行的合同。旧版本可能少于新版本的任务类型，
+# 用新合同检查旧进程会把已经恢复的站点误报成回滚失败。
+if [[ "$legacy_broker_was_active" -eq 1 ]]; then
+  legacy_broker_rollback_kinds="$(broker_contract_kinds "$broker_socket" openai openai)" || {
+    echo "Unable to capture the running OpenAI broker contract before deployment." >&2
+    exit 1
+  }
+fi
+if [[ "$deepseek_broker_was_active" -eq 1 ]]; then
+  deepseek_broker_rollback_kinds="$(broker_contract_kinds "$deepseek_broker_socket" deepseek deepseek)" || {
+    echo "Unable to capture the running DeepSeek broker contract before deployment." >&2
+    exit 1
+  }
+fi
+
 "${compose[@]}" build app
 
 if ! stage_broker_release; then
   echo "Failed to extract the codex broker release from the candidate image." >&2
   exit 1
 fi
+candidate_broker_task_kinds="$(task_kinds_from_release "$candidate_broker_release")" || {
+  echo "Candidate broker release does not publish a valid task contract." >&2
+  exit 1
+}
 # 候选 release 已完整校验；只有从这里切换指针后，失败才需要回滚应用和 broker。
 deployment_mutated=1
 if ! ln -sfn "$candidate_broker_release" "$broker_root/current"; then
@@ -406,7 +477,7 @@ if ! install_broker_units_from_release "$broker_root/current"; then
   exit 1
 fi
 
-if ! restart_brokers; then
+if ! restart_brokers "$candidate_broker_task_kinds"; then
   systemctl --no-pager --lines=60 status "$broker_service" || true
   if [[ "$deepseek_broker_enabled" -eq 1 ]]; then
     systemctl --no-pager --lines=60 status "$deepseek_broker_service" || true
@@ -426,7 +497,7 @@ if ! wait_for_health 36; then
 fi
 
 if [[ "$deepseek_broker_enabled" -eq 1 ]] && ! broker_health "$deepseek_broker_socket" deepseek deepseek \
-  topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
+  "$candidate_broker_task_kinds"; then
   echo "DeepSeek broker became unhealthy after the app deployment." >&2
   exit 1
 fi
