@@ -662,7 +662,7 @@ exit 42
     assert.match(dropIn, /^RestartSec=60s$/m);
   });
 
-  it("uses a regional Alpine mirror only for ECS deployment builds", async () => {
+  it("uses regional package mirrors only for ECS deployment builds", async () => {
     const [dockerfile, compose, deploy] = await Promise.all([
       readFile(path.join(repositoryRoot, "docker", "Dockerfile"), "utf8"),
       readFile(path.join(repositoryRoot, "docker", "docker-compose.prod.yml"), "utf8"),
@@ -670,12 +670,16 @@ exit 42
     ]);
 
     assert.match(dockerfile, /^ARG ALPINE_MIRROR$/m);
+    assert.match(dockerfile, /^ARG NPM_REGISTRY$/m);
+    assert.match(dockerfile, /npm config set registry "\$NPM_REGISTRY"/);
     assert.match(dockerfile, /^ARG NODE_IMAGE=node:22-alpine$/m);
     assert.match(dockerfile, /^FROM \$\{NODE_IMAGE\} AS dependencies$/m);
     assert.doesNotMatch(dockerfile, /^RUN sed .*mirrors\.aliyun\.com/m);
     assert.match(compose, /NODE_IMAGE: \$\{NODE_IMAGE:-node:22-alpine\}/);
     assert.match(compose, /ALPINE_MIRROR: \$\{ALPINE_MIRROR:-\}/);
+    assert.match(compose, /NPM_REGISTRY: \$\{NPM_REGISTRY:-\}/);
     assert.match(deploy, /ALPINE_MIRROR="\$\{ALPINE_MIRROR:-http:\/\/mirrors\.cloud\.aliyuncs\.com\/alpine\}"/);
+    assert.match(deploy, /NPM_REGISTRY="\$\{NPM_REGISTRY:-https:\/\/registry\.npmmirror\.com\}"/);
   });
 
   it("passes curated multi-model video settings into the production container", async () => {

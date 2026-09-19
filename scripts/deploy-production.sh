@@ -20,6 +20,8 @@ trend_network=video-factory-trends
 compose=(docker compose --project-name video-factory --env-file "$environment_file" -f "$repository_root/docker/docker-compose.prod.yml")
 # ECS 在中国大陆构建镜像时使用阿里云 Alpine 源；CI 直接 docker build 时保留全球官方源。
 export ALPINE_MIRROR="${ALPINE_MIRROR:-http://mirrors.cloud.aliyuncs.com/alpine}"
+# ECS 无法稳定访问 npm 官方源；只影响服务器内候选镜像构建，CI 安全审计仍使用官方源。
+export NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
 deepseek_broker_enabled=0
 if [[ -s /etc/video-factory/deepseek-codex-broker.env ]]; then
   deepseek_broker_enabled=1

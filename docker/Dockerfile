@@ -2,6 +2,8 @@ ARG NODE_IMAGE=node:22-alpine
 
 FROM ${NODE_IMAGE} AS dependencies
 
+ARG NPM_REGISTRY
+
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/codex-broker/package.json apps/codex-broker/package.json
@@ -9,7 +11,8 @@ COPY apps/studio/package.json apps/studio/package.json
 COPY packages/production-pipeline/package.json packages/production-pipeline/package.json
 COPY packages/template-core/package.json packages/template-core/package.json
 COPY packages/workflow-core/package.json packages/workflow-core/package.json
-RUN npm ci
+RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi \
+    && npm ci
 
 FROM dependencies AS builder
 
