@@ -135,6 +135,28 @@ const runDetail: StudioRunDetail = {
 };
 
 describe("Studio client", () => {
+  it("labels a planning stop as confirmation rather than claiming a film is ready", () => {
+    render(<MemoryRouter><ProductionQueue runs={[{ ...runSummary, currentNodeId: "creative-planning" }]} loading={false} onCreate={() => undefined} /></MemoryRouter>);
+    expect(screen.getByText("等你确认创作规划")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: `查看并确认方案：${runSummary.title}` })).toHaveAttribute("href", "/projects/run-1");
+    expect(screen.queryByText("已有成片可预览")).not.toBeInTheDocument();
+    expect(screen.queryByText("等你审片")).not.toBeInTheDocument();
+  });
+
+  it("keeps the project identity before the creative draft without an empty video or final-review actions", () => {
+    const draftRun: StudioRunDetail = {
+      ...runDetail, currentNodeId: "creative-planning", artifacts: [],
+      activeIntervention: { ...runDetail.activeIntervention!, nodeId: "creative-planning", kind: "creative_review" },
+    };
+    const { container } = render(<RunWorkbench run={draftRun} creativeDiscussion={<section aria-label="当前稿件">等待用户确认的真实方案</section>} decisionPending={false} onDecision={async () => undefined} />);
+    const title = screen.getByRole("heading", { level: 1, name: runDetail.title });
+    const draft = screen.getByRole("region", { name: "当前稿件" });
+    expect(title.compareDocumentPosition(draft) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.querySelector("video")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "成片预览" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "审片与产物" })).not.toBeInTheDocument();
+  });
+
   it.each([false, true])("settles an adopted proposal at the same run revision, including lost submit response (%s)", async (lostResponse) => {
     vi.restoreAllMocks();
     const storage = new Map<string, string>();
@@ -181,7 +203,7 @@ describe("Studio client", () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
-  it("types voice timing as an action-discriminated decision", () => {
+  it("types voice timing as an optional request-changes detail", () => {
     const requestChanges: StudioDecisionInput = {
       action: "request_changes",
       expectedRunRevision: 4,
@@ -189,7 +211,6 @@ describe("Studio client", () => {
       reviewEvidenceId: null,
       voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
     };
-    // @ts-expect-error request_changes 必须携带配音时长调整。
     const missingVoiceTiming: StudioDecisionInput = {
       action: "request_changes",
       expectedRunRevision: 4,
@@ -205,7 +226,7 @@ describe("Studio client", () => {
       voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
     };
 
-    expect(requestChanges.voiceTiming.durationSeconds).toBe(8.2);
+    expect(requestChanges.voiceTiming?.durationSeconds).toBe(8.2);
     expect(missingVoiceTiming.action).toBe("request_changes");
     expect(approveWithVoiceTiming.action).toBe("approve");
   });
@@ -552,6 +573,25 @@ describe("Studio client", () => {
     const archivedRuns = onArchive.mock.calls[0]![0];
     expect(archivedRuns).toHaveLength(2);
     expect(archivedRuns).toEqual(expect.arrayContaining([first, second]));
+  });
+
+  it("keeps optional visual requirements discoverable and preserves them when collapsed", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={onSubmit} />);
+    expect(screen.queryByRole("region", { name: "创作目标摘要" })).not.toBeInTheDocument();
+    const disclosure = screen.getByText("画面要求与证据（可选）").closest("details")!;
+    expect(disclosure).not.toHaveAttribute("open");
+    await user.click(screen.getByText("画面要求与证据（可选）"));
+    await user.type(screen.getByLabelText("必须让观众看到的证据（可选）"), "必须显示原始来源");
+    await user.click(screen.getByText("画面要求与证据（可选）"));
+    expect(disclosure).not.toHaveAttribute("open");
+    expect(screen.getByText("已填写，展开查看")).toBeVisible();
+    await user.click(screen.getByText("画面要求与证据（可选）"));
+    expect(screen.getByLabelText("必须让观众看到的证据（可选）")).toHaveValue("必须显示原始来源");
+    await user.type(screen.getByLabelText("视频标题"), "创作目标");
+    expect(screen.getByRole("region", { name: "创作目标摘要" })).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("creates a valid free-stock production brief without auto-selecting editorial cards", async () => {
@@ -947,6 +987,7 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
+    await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
     expect(screen.getByRole("combobox", { name: "编剧能力" })).toHaveValue("python-template-v1");
     await user.type(screen.getByLabelText("视频标题"), "失效配置必须安全回退");
     await user.type(screen.getByLabelText("内容角度"), "不能显示一个能力却提交另一个能力");
@@ -1045,6 +1086,7 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
+    await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
     expect(screen.getByRole("heading", { name: "自动制作设置" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "编剧能力" })).toHaveValue("codex-screenwriter-v1");
     expect(screen.getByText(/独立质量复核/)).toBeInTheDocument();
@@ -1105,6 +1147,18 @@ describe("Studio client", () => {
     expect(await screen.findByRole("button", { name: "开始制作" })).toBeEnabled();
     expect(screen.queryByText(/无法读取模板目录/)).not.toBeInTheDocument();
     expect(studioApi.templates).not.toHaveBeenCalled();
+  });
+
+  it("keeps per-role and per-model overrides out of the main new-production form", async () => {
+    const user = userEvent.setup();
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={vi.fn()} />);
+
+    expect(screen.getByText("继承制作设置")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "编剧能力" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "编剧本次模型" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
+    expect(screen.getByRole("combobox", { name: "编剧能力" })).toBeInTheDocument();
   });
 
   it("keeps rework, voice, sources, and form edits across readiness rerenders without querying templates", async () => {
@@ -1230,6 +1284,7 @@ describe("Studio client", () => {
     expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
 
     await user.click(screen.getByRole("button", { name: /查看继承设置/ }));
+    await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
     await user.selectOptions(screen.getByRole("combobox", { name: "编剧能力" }), "python-template-v1");
     await user.selectOptions(screen.getByRole("combobox", { name: "导演本次模型" }), "");
     await user.click(screen.getByRole("button", { name: "用当前策略的可用来源替换" }));
@@ -1503,6 +1558,7 @@ describe("Studio client", () => {
 
     expect(await screen.findByText(/上一版有 1 项已失效，暂不能开工/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /查看继承设置/ }));
+    await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
     await user.selectOptions(screen.getByRole("combobox", { name: "视觉审片员能力" }), "deepseek-visual-review-v1");
     await waitFor(() => expect(screen.queryByText(/上一版有.*项已失效/)).not.toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "开始制作" }));
@@ -2598,6 +2654,8 @@ describe("Studio client", () => {
     expect(screen.getByRole("textbox", { name: "导演方案修改要求" })).toHaveValue("第三镜沿用服务选择的自然纪实风格并留出字幕安全区。");
     const assetInstruction = screen.getByRole("textbox", { name: "画面素材修改要求" });
     expect(assetInstruction).toHaveValue("只替换第三镜；没有合格素材时进入 人工补充素材，禁止使用带字素材和说明卡。");
+    await user.click(screen.getByRole("button", { name: /查看继承设置/ }));
+    await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
     expect(screen.getByRole("combobox", { name: "编剧本次模型" })).toHaveValue("gpt-primary");
     await user.selectOptions(screen.getByRole("combobox", { name: "编剧本次模型" }), "deepseek-backup");
     await user.clear(assetInstruction);
@@ -4107,6 +4165,45 @@ describe("Studio client", () => {
     expect(within(dualReview).getByText(/deepseek-flash · 80 分 · 0 项问题/).textContent).toBe("deepseek-flash · 80 分 · 0 项问题");
   });
 
+  it("shows one complete DeepSeek review as a finished independent quality review", () => {
+    const run: StudioRunDetail = {
+      ...runDetail,
+      nodes: [
+        ...runDetail.nodes.filter((node) => node.id !== "final-review"),
+        {
+          id: "visual-review",
+          label: "视觉审片",
+          role: "视觉审片员",
+          status: "succeeded",
+          artifactIds: [],
+          qualityGateResults: [],
+          output: { report: {
+            recommendation: "approve",
+            confidence: 0.91,
+            summary: "这一版成片已完成 DeepSeek 独立质量复核。",
+            scores: { composition: 89, continuity: 87, pacing: 88, legibility: 90, safety: 96 },
+            findings: [],
+            reviewScope: {
+              evidenceId: "a".repeat(64),
+              actualModels: [{ providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash", auditVerdict: "repair" }],
+            },
+          } },
+        },
+        runDetail.nodes.find((node) => node.id === "final-review")!,
+      ],
+    };
+
+    render(<RunWorkbench run={run} providers={providers} decisionPending={false} onDecision={vi.fn()} />);
+
+    const singleReview = screen.getByRole("region", { name: "独立质量复核结果" });
+    expect(within(singleReview).getByText("成片独立质量复核：1 份已完成")).toBeInTheDocument();
+    expect(within(singleReview).getByText("该模型审查同一版成片")).toBeInTheDocument();
+    expect(within(singleReview).getByText(/deepseek-flash · 90 分 · 0 项问题/)).toBeInTheDocument();
+    expect(within(singleReview).queryByText(/缺少.*独立审片结果/)).not.toBeInTheDocument();
+    // 单审的独立复核不通过只提示这份意见需重点核对，不能因分支汇总遗漏而悄悄消失。
+    expect(within(singleReview).getByRole("note")).toHaveTextContent("有 1 份意见自己的独立审计没通过");
+  });
+
   it("keeps an older workflow read-only and offers a new production instead of broken review actions", async () => {
     const user = userEvent.setup();
     const onDecision = vi.fn().mockResolvedValue(undefined);
@@ -4433,7 +4530,7 @@ describe("Studio client", () => {
     const confirmButton = screen.getByRole("button", { name: /获取费用报价/ });
     expect(confirmButton).toBeInTheDocument();
     expect((confirmButton as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText(/声音导演完成后，系统会继续推进后续步骤/)).toBeInTheDocument();
+    expect(screen.getByText(/授权只针对本次制作范围，后续仍保留逐步确认/)).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "成片预览" })).not.toBeInTheDocument();
   });
 
@@ -4656,7 +4753,7 @@ describe("Studio client", () => {
 
     expect(screen.getByRole("region", { name: "制作进度" })).toBeInTheDocument();
     expect(screen.getAllByText("策划定稿").length).toBeGreaterThan(0);
-    expect(screen.getByText("1 / 4 个步骤完成")).toBeInTheDocument();
+    expect(screen.getByText("已完成 1 / 4 个步骤")).toBeInTheDocument();
     expect(screen.getByText("7 秒")).toBeInTheDocument();
     expect(screen.getByText("当前步骤")).toBeInTheDocument();
     expect(screen.getByText("正在统一叙事节奏、镜头语法与视觉规则")).toBeInTheDocument();
@@ -4707,6 +4804,75 @@ describe("Studio client", () => {
 
     fireEvent.click(retry);
     expect(onRetryFailedNode).toHaveBeenCalledWith("assets");
+  });
+
+  it("lets the user adjust, accept, or terminate a complete pilot review with the server-issued evidence", async () => {
+    const user = userEvent.setup();
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const evidenceId = "a".repeat(64);
+    const { activeIntervention: _activeIntervention, videoArtifactId: _videoArtifactId, ...withoutReview } = runDetail;
+    render(<RunWorkbench
+      run={{
+        ...withoutReview,
+        status: "needs_human",
+        currentNodeId: "assets",
+        revision: 8,
+        activeIntervention: {
+          id: "intervention-source-review-decision",
+          nodeId: "assets",
+          kind: "source_review_decision",
+          reason: "镜头 1 的试片有水印，建议调整画面方案。",
+          options: ["approve", "request_changes", "reject"],
+          createdAt: "2026-09-19T00:00:00.000Z",
+        },
+        nodes: [{
+          id: "assets",
+          label: "Prepare assets",
+          role: "制片",
+          status: "needs_human",
+          artifactIds: [],
+          qualityGateResults: [],
+          output: {
+            sourceReview: {
+              kind: "complete_negative",
+              evidenceId,
+              mediaSha256: "b".repeat(64),
+              inputFingerprint: "c".repeat(64),
+              operationId: "assets-operation-1",
+              scenePosition: 1,
+              reviewArtifactSha256: "d".repeat(64),
+            },
+          },
+        }],
+        artifacts: [],
+      }}
+      decisionPending={false}
+      onDecision={onDecision}
+    />);
+
+    expect(screen.getByRole("heading", { name: "试片提出质量意见，等你决定" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "调整方案" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "承担这些质量意见后继续" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "终止制作" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "调整方案" }));
+    expect(onDecision).toHaveBeenCalledWith({
+      action: "request_changes",
+      expectedRunRevision: 8,
+      interventionId: "intervention-source-review-decision",
+      reviewEvidenceId: evidenceId,
+    });
+
+    onDecision.mockClear();
+    await user.click(screen.getByRole("button", { name: "承担这些质量意见后继续" }));
+    expect(screen.getByRole("dialog", { name: "确认承担这些质量意见后继续" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认承担并继续" }));
+    expect(onDecision).toHaveBeenCalledWith({
+      action: "approve",
+      expectedRunRevision: 8,
+      interventionId: "intervention-source-review-decision",
+      reviewEvidenceId: evidenceId,
+    });
   });
 
   it("names the local orchestration step in the interface's own words, not its pipeline label", () => {

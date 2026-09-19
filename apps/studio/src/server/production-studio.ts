@@ -989,7 +989,7 @@ export class ProductionStudio {
         ...(plan.excludedItems?.length
           ? { excludedAssets: plan.excludedItems.map((item) => ({ id: item.id, label: item.label, note: item.note })) }
           : {}),
-        uncertainty: plan.items?.length ? ["实际结果仍需素材预检、技术质检和双模型审片。"] : [],
+        uncertainty: plan.items?.length ? ["实际结果仍需素材预检、技术质检和独立视觉审片。"] : [],
       },
       ...(fundingRequestId ? {
         fundingRequestId,
@@ -1390,22 +1390,24 @@ export class ProductionStudio {
       throw new StudioConflictError("当前确认点不支持这个操作，请刷新后重试。");
     }
     if (input.action === "request_changes") {
-      if (intervention.nodeId !== "voice" || !input.voiceTiming) {
-        throw new StudioConflictError("当前确认点没有可调整的配音时间方案。");
+      if (intervention.nodeId === "voice" && input.voiceTiming) {
+        const updated = await this.options.pipeline.requestVoiceTimingRevision(runId, {
+          expectedRunRevision: input.expectedRunRevision,
+          interventionId: input.interventionId,
+          scenePosition: input.voiceTiming.scenePosition,
+          durationSeconds: input.voiceTiming.durationSeconds,
+          actor,
+        });
+        const detail = this.toDetail(updated);
+        this.publish(detail);
+        return detail;
       }
-      const updated = await this.options.pipeline.requestVoiceTimingRevision(runId, {
-        expectedRunRevision: input.expectedRunRevision,
-        interventionId: input.interventionId,
-        scenePosition: input.voiceTiming.scenePosition,
-        durationSeconds: input.voiceTiming.durationSeconds,
-        actor,
-      });
-      const detail = this.toDetail(updated);
-      this.publish(detail);
-      return detail;
+      if (intervention.kind !== "source_review_decision" || input.voiceTiming) {
+        throw new StudioConflictError("当前确认点没有可调整的方案。");
+      }
     }
     if (input.action === "reject" && !input.note?.trim()) throw new StudioConflictError("打回时必须填写原因。");
-    const decision: HumanDecisionDraft & { action: "approve" | "reject" } = {
+    const decision: HumanDecisionDraft = {
       interventionId: input.interventionId,
       action: input.action,
       actor,
@@ -2377,7 +2379,9 @@ export class ProductionStudio {
     }
     const retryingFailure = current.status === "failed"
       && current.nodeRuns.find((node) => node.nodeId === nodeId)?.status === "failed";
-    if (!retryingFailure && !canRetryRejectedReviewNode(current, nodeId)) {
+    const retryingIncompleteSourceReview = current.status === "needs_human"
+      && current.nodeRuns.find((node) => node.nodeId === nodeId)?.intervention?.kind === "source_review_retry";
+    if (!retryingFailure && !retryingIncompleteSourceReview && !canRetryRejectedReviewNode(current, nodeId)) {
       throw new StudioConflictError("这个节点当前不能重试，请刷新页面检查最新状态。");
     }
     assertExecutableRunContinuation(current);
@@ -2516,20 +2520,17 @@ export class ProductionStudio {
     const providers = await this.options.listProviders();
     if (brief.runPurpose !== "test") {
       const selectedReviewProvider = brief.providers.visualReview;
-      const finalReviewers = ["deepseek-visual-review-v1", "codex-visual-review-v1"].map((id) => (
-        providers.find((provider) => provider.id === id
-          && provider.capability === "quality.review.visual"
-          && provider.available
-          && provider.kind !== "test")
-      ));
-      const reviewerModels = finalReviewers.map((provider) => provider?.defaultModelId).filter(Boolean);
+      const deepseekReviewReady = providers.some((provider) => provider.id === "deepseek-visual-review-v1"
+        && provider.capability === "quality.review.visual"
+        && provider.available
+        && provider.kind !== "test");
       const roleAuditReady = providers.some((provider) => provider.capability === "role.audit"
         && provider.available
         && provider.kind !== "test");
       // ChatGPT/Codex 套餐退役（N5）：审片只要求 DeepSeek 单腿可用 + 独立审计就绪。
       // codex-visual-review-v1 已退役，不再作为正式生产的必要条件。
-      if (!selectedReviewProvider
-        || !["deepseek-visual-review-v1", "codex-visual-review-v1"].includes(selectedReviewProvider)
+      if (selectedReviewProvider !== "deepseek-visual-review-v1"
+        || !deepseekReviewReady
         || !roleAuditReady) {
         throw new StudioInputError("正式制作需要 DeepSeek 视觉审片模型可用，且独立质量复核已配置。");
       }
@@ -3300,6 +3301,7 @@ const IMMUTABLE_CANDIDATE_FIELDS = [
   "preview_url",
   "source_url",
   "creator",
+  "creator_url",
   "license_note",
 ] as const;
 
@@ -3511,6 +3513,9 @@ function toRunDetail(
     ...(artifact.schemaVersion ? { schemaVersion: artifact.schemaVersion } : {}),
     ...(artifact.producer ? { producerNodeId: artifact.producer.nodeId } : {}),
     ...(artifact.provenance.providerId ? { providerId: artifact.provenance.providerId } : {}),
+    ...(artifact.provenance.creator ? { creator: artifact.provenance.creator } : {}),
+    ...(artifact.provenance.creatorUrl ? { creatorUrl: artifact.provenance.creatorUrl } : {}),
+    ...(artifact.provenance.previewUrl ? { previewUrl: artifact.provenance.previewUrl } : {}),
     ...(artifact.provenance.scenePosition ? { scenePosition: artifact.provenance.scenePosition } : {}),
     ...(artifact.provenance.licenseNote ? { licenseNote: artifact.provenance.licenseNote } : {}),
     ...(artifact.uri && !isPrivateArtifactKind(artifact.kind) ? { contentUrl: `/api/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}/content` } : {}),
@@ -3610,7 +3615,7 @@ function toRunDetail(
   const activeIntervention: StudioIntervention | undefined = active ? {
     id: active.id,
     nodeId: active.nodeId,
-    ...(active.kind === "creative_review" ? { kind: "creative_review" as const } : {}),
+    ...(active.kind ? { kind: active.kind } : {}),
     ...(active.boundary === "node-complete" ? { boundary: "node-complete" as const } : {}),
     reason: active.reason,
     options: [...(active.options ?? [active.requiredAction])],
@@ -4354,8 +4359,14 @@ function applyNodeExecutionConfiguration(
   const modelSelectionSources = { ...(brief.modelSelectionSources ?? {}) };
   for (const [providerId, modelId] of Object.entries(input.modelSelections ?? {})) {
     if (modelId === null) {
-      delete models[providerId];
-      delete modelSelectionSources[providerId];
+      const frozen = brief.frozenModelSelections?.[providerId];
+      if (frozen) {
+        models[providerId] = frozen.modelId;
+        modelSelectionSources[providerId] = frozen.source;
+      } else {
+        delete models[providerId];
+        delete modelSelectionSources[providerId];
+      }
     } else {
       models[providerId] = modelId;
       modelSelectionSources[providerId] = "node_override";
@@ -4412,8 +4423,14 @@ function applyBriefAuditConfiguration(
     }
     // 空字符串是界面上的"使用推荐"：与 null 同义，删掉这条选择，而不是记下一个空模型名。
     if (!modelId?.trim()) {
-      delete models[providerId];
-      delete modelSelectionSources[providerId];
+      const frozen = brief.frozenModelSelections?.[providerId];
+      if (frozen) {
+        models[providerId] = frozen.modelId;
+        modelSelectionSources[providerId] = frozen.source;
+      } else {
+        delete models[providerId];
+        delete modelSelectionSources[providerId];
+      }
     } else {
       models[providerId] = modelId;
       modelSelectionSources[providerId] = "node_override";
@@ -4614,6 +4631,8 @@ function rewriteArtifactBackedMediaProvenance(
       rewritten.rights_status = "review_required";
       delete rewritten.source_url;
       delete rewritten.creator;
+      delete rewritten.creator_url;
+      delete rewritten.preview_url;
       return rewritten;
     }
     const providerId = artifact.provenance.providerId ?? "unknown";
@@ -4622,6 +4641,10 @@ function rewriteArtifactBackedMediaProvenance(
     rewritten.rights_status = artifact.kind === "human_media_revision" ? "review_required" : "artifact_recorded";
     if (artifact.provenance.creator) rewritten.creator = artifact.provenance.creator;
     else delete rewritten.creator;
+    if (artifact.provenance.creatorUrl) rewritten.creator_url = artifact.provenance.creatorUrl;
+    else delete rewritten.creator_url;
+    if (artifact.provenance.previewUrl) rewritten.preview_url = artifact.provenance.previewUrl;
+    else delete rewritten.preview_url;
     if (artifact.provenance.licenseNote) rewritten.license_note = artifact.provenance.licenseNote;
     else delete rewritten.license_note;
     if (artifact.provenance.sourceUrl) rewritten.source_url = artifact.provenance.sourceUrl;

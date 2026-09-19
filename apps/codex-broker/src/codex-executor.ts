@@ -205,6 +205,7 @@ export class CodexExecutorError extends Error {
 
 export type CodexExecutorFailureCategory =
   | "authentication"
+  | "payment_required"
   | "invalid_request"
   | "rate_limited"
   | "service_unavailable"
@@ -218,6 +219,8 @@ export interface CodexExecutorFailureDetails {
   reasonCode: string;
   providerId: string;
   modelId: string;
+  /** 故障影响一个模型还是该 provider 绑定的同一账户；用于安全地选择候选模型。 */
+  scope?: "model" | "provider_account";
   queueWaitMs?: number;
   providerWaitMs?: number;
   requestIdHash?: string;

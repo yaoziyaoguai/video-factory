@@ -307,6 +307,76 @@ describe("FallbackScreenwriterAgent", () => {
     assert.equal(backupCalls, 0);
   });
 
+  it("skips another model on the same provider account after a known account limit, then may use a different provider", async () => {
+    const calls: string[] = [];
+    const fallback = new FallbackScreenwriterAgent({
+      candidates: [
+        {
+          providerId: "deepseek",
+          agent: agent("deepseek-primary", async () => {
+            calls.push("deepseek-primary");
+            throw new CodexBridgeError("broker reported HTTP 429", false, "completed_failure", 422, undefined, {
+              category: "rate_limited",
+              reasonCode: "http_429",
+              providerId: "deepseek",
+              modelId: "deepseek-primary",
+              scope: "provider_account",
+            });
+          }),
+        },
+        {
+          providerId: "deepseek",
+          agent: agent("deepseek-backup", async () => {
+            calls.push("deepseek-backup");
+            return successful("deepseek-backup");
+          }),
+        },
+        {
+          providerId: "other-provider",
+          agent: agent("other-model", async () => {
+            calls.push("other-model");
+            return successful("other-model");
+          }),
+        },
+      ],
+    });
+
+    const execution = await fallback.draftDetailed(input);
+
+    assert.deepEqual(calls, ["deepseek-primary", "other-model"]);
+    assert.deepEqual(execution.trace?.modelCandidateAttempts?.map((attempt) => attempt.modelId), ["deepseek-primary", "other-model"]);
+  });
+
+  it("does not use any fallback after the current credentials are rejected", async () => {
+    let backupCalls = 0;
+    const fallback = new FallbackScreenwriterAgent({
+      candidates: [
+        {
+          providerId: "deepseek",
+          agent: agent("deepseek-primary", async () => {
+            throw new CodexBridgeError("broker account failure", false, "completed_failure", 422, undefined, {
+              category: "authentication",
+              reasonCode: "http_401",
+              providerId: "deepseek",
+              modelId: "deepseek-primary",
+              scope: "provider_account",
+            });
+          }),
+        },
+        {
+          providerId: "other-provider",
+          agent: agent("other-model", async () => {
+            backupCalls += 1;
+            return successful("other-model");
+          }),
+        },
+      ],
+    });
+
+    await assert.rejects(() => fallback.draftDetailed(input));
+    assert.equal(backupCalls, 0);
+  });
+
   for (const [label, notAcceptedFailure] of [
     ["timeout", new CodexBridgeError("request timed out before the task was accepted", false, "not_accepted")],
     ["service unavailable", new CodexBridgeError(
@@ -909,24 +979,29 @@ describe("model provider failure policy", () => {
       undefined,
       { category: "invalid_request", reasonCode: "invalid_json_schema", providerId: "openai", modelId: "gpt-5.6-sol" },
     ), false],
-    // 被下线或改名的 model id：provider 回 404，Broker 如实归类成 invalid_request，但 reasonCode
-    // 记着"是 404"。这一条必须换下一个候选——停止会让人以为自己的请求有问题。三种 reasonCode
-    // 写法说的是同一件事，都要认。
-    ["retired model id HTTP 404", new CodexBridgeError(
+    ["bare HTTP 404 stays terminal", new CodexBridgeError(
       "DeepSeek Chat Completion returned HTTP 404.",
       false,
       "completed_failure",
       422,
       undefined,
       { category: "invalid_request", reasonCode: "http_404", providerId: "deepseek", modelId: "deepseek-v3" },
-    ), true],
-    ["retired model id with numeric provider code", new CodexBridgeError(
+    ), false],
+    ["numeric provider code 404 stays terminal", new CodexBridgeError(
       "DeepSeek Chat Completion returned HTTP 404 (code 404).",
       false,
       "completed_failure",
       422,
       undefined,
       { category: "invalid_request", reasonCode: "404", providerId: "deepseek", modelId: "deepseek-v3" },
+    ), false],
+    ["explicit retired model code can switch", new CodexBridgeError(
+      "DeepSeek Chat Completion returned HTTP 404 (code model_not_found).",
+      false,
+      "completed_failure",
+      422,
+      undefined,
+      { category: "invalid_request", reasonCode: "model_not_found", providerId: "deepseek", modelId: "deepseek-v3" },
     ), true],
     // 合同违规同样是 invalid_request，但 reasonCode 不是 404：这里必须停下。合同 bug 换一个模型
     // 只会被掩盖成"第二个模型也不行"。

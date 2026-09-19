@@ -121,6 +121,7 @@ export type CodexBridgeFailureKind = "model_provider_transient" | "model_provide
 
 export type ModelProviderFailureCategory =
   | "authentication"
+  | "payment_required"
   | "invalid_request"
   | "rate_limited"
   | "service_unavailable"
@@ -134,6 +135,7 @@ export interface ModelProviderFailureDetails {
   reasonCode: string;
   providerId: string;
   modelId: string;
+  scope?: "model" | "provider_account";
   queueWaitMs?: number;
   providerWaitMs?: number;
   requestIdHash?: string;
@@ -1497,6 +1499,7 @@ function bridgeFailureKind(raw: string): CodexBridgeFailureKind | undefined {
 
 const MODEL_PROVIDER_FAILURE_CATEGORIES = new Set<ModelProviderFailureCategory>([
   "authentication",
+  "payment_required",
   "invalid_request",
   "rate_limited",
   "service_unavailable",
@@ -1516,6 +1519,7 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       || !isBoundedIdentifier(details.reasonCode, 128)
       || !isBoundedIdentifier(details.providerId, 128)
       || !isBoundedIdentifier(details.modelId, 128)
+      || (details.scope !== undefined && details.scope !== "model" && details.scope !== "provider_account")
       || (details.queueWaitMs !== undefined && optionalDurationMs(details.queueWaitMs, "queueWaitMs") === undefined)
       || (details.providerWaitMs !== undefined && optionalDurationMs(details.providerWaitMs, "providerWaitMs") === undefined)
       || (details.requestIdHash !== undefined
@@ -1537,6 +1541,7 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       reasonCode: details.reasonCode as string,
       providerId: details.providerId as string,
       modelId: details.modelId as string,
+      ...(details.scope === "model" || details.scope === "provider_account" ? { scope: details.scope } : {}),
       ...(details.queueWaitMs !== undefined ? { queueWaitMs: Number(details.queueWaitMs) } : {}),
       ...(details.providerWaitMs !== undefined ? { providerWaitMs: Number(details.providerWaitMs) } : {}),
       ...(typeof details.requestIdHash === "string" ? { requestIdHash: details.requestIdHash } : {}),
@@ -1640,6 +1645,8 @@ function creatorMessageFor(
       return "模型暂时不可用，请重试或选择其他模型。";
     case "authentication":
       return "模型服务配置需要检查。";
+    case "payment_required":
+      return "模型服务账户余额或订阅额度不足，当前稿已保留；请处理该账户的额度后再继续。";
     default:
       if (statusCode === 429) return "模型请求过多，请稍后重试或选择其他模型。";
       if (statusCode === 408 || /timed?\s*out|timeout/i.test(message)) {

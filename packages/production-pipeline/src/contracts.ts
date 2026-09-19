@@ -275,6 +275,15 @@ export interface ProductionWorkflowFeatures {
 
 export type ProductionModelSelectionSource = "system_default" | "global_default" | "template_default" | "run_override" | "node_override";
 
+/**
+ * 新建制作时冻结的模型选择。节点工作区临时覆盖模型后，清除覆盖必须回到这份
+ * run 自己的起点，而不是读取后来被人改过的全局默认。
+ */
+export interface ProductionFrozenModelSelection {
+  modelId: string;
+  source: Exclude<ProductionModelSelectionSource, "node_override">;
+}
+
 export interface ProductionReferenceVideo {
   uploadId: string;
   label: string;
@@ -361,6 +370,7 @@ export interface ProductionBrief {
   providers: ProductionProviderBindings;
   models?: Record<string, string>;
   modelSelectionSources?: Record<string, ProductionModelSelectionSource>;
+  frozenModelSelections?: Record<string, ProductionFrozenModelSelection>;
   workflowFeatures?: ProductionWorkflowFeatures;
   referenceVideo?: ProductionReferenceVideo;
   director?: ProductionDirectorDirection;
@@ -386,7 +396,7 @@ export interface ProductionBrief {
 
 const PRODUCTION_BRIEF_INPUT_KEYS = new Set([
   "protocolVersion", "title", "angle", "audience", "nicheSlug", "durationSeconds", "durationRange",
-  "platform", "reviewMode", "runPurpose", "providers", "models", "modelSelectionSources", "workflowFeatures",
+  "platform", "reviewMode", "runPurpose", "providers", "models", "modelSelectionSources", "frozenModelSelections", "workflowFeatures",
   "referenceVideo", "director", "economics", "spendFeedback", "voiceDirection", "editorial", "visualProof",
   "visualIntent", "visualPlan", "seriesContext", "creationContext", "rework", "taskContractDigests",
   "articleSources", "budgetIntentionCny",
@@ -409,6 +419,7 @@ export function parseBrief(value: unknown): ProductionBrief {
   const providers = requireRecord(value.providers, "providers");
   const models = parseModelSelections(value.models);
   const modelSelectionSources = parseModelSelectionSources(value.modelSelectionSources, models);
+  const frozenModelSelections = parseFrozenModelSelections(value.frozenModelSelections);
   const workflowFeatures = parseWorkflowFeatures(value.workflowFeatures);
   const referenceVideo = parseReferenceVideo(value.referenceVideo);
   const director = parseDirectorDirection(value.director, providers);
@@ -485,6 +496,7 @@ export function parseBrief(value: unknown): ProductionBrief {
     },
     ...(Object.keys(models).length ? { models } : {}),
     ...(Object.keys(modelSelectionSources).length ? { modelSelectionSources } : {}),
+    ...(Object.keys(frozenModelSelections).length ? { frozenModelSelections } : {}),
     ...(workflowFeatures.assetSemanticRank || workflowFeatures.referenceGrammar || workflowFeatures.executablePlan
       || workflowFeatures.creativePlanning
       // 边界闸门可以独立于共同创作规划存在（旧规划链也能逐节点放行），所以它必须自己
@@ -1243,6 +1255,32 @@ function parseModelSelections(value: unknown): Record<string, string> {
       throw new Error(`models.${providerId} is invalid.`);
     }
     return [providerId, normalized];
+  }));
+}
+
+function parseFrozenModelSelections(value: unknown): Record<string, ProductionFrozenModelSelection> {
+  if (value === undefined) return {};
+  const input = requireRecord(value, "frozenModelSelections");
+  const entries = Object.entries(input);
+  if (entries.length > 32) throw new Error("frozenModelSelections must not contain more than 32 selections.");
+  return Object.fromEntries(entries.map(([providerId, rawSelection]) => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(providerId)) {
+      throw new Error(`frozenModelSelections provider id '${providerId}' is invalid.`);
+    }
+    const selection = requireRecord(rawSelection, `frozenModelSelections.${providerId}`);
+    const unknown = Object.keys(selection).find((key) => key !== "modelId" && key !== "source");
+    if (unknown) throw new Error(`frozenModelSelections.${providerId} field '${unknown}' is not allowed.`);
+    const modelId = requireString(selection.modelId, `frozenModelSelections.${providerId}.modelId`);
+    if (modelId.length > 160 || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(modelId)) {
+      throw new Error(`frozenModelSelections.${providerId}.modelId is invalid.`);
+    }
+    if (selection.source !== "system_default"
+      && selection.source !== "global_default"
+      && selection.source !== "template_default"
+      && selection.source !== "run_override") {
+      throw new Error(`frozenModelSelections.${providerId}.source is invalid.`);
+    }
+    return [providerId, { modelId, source: selection.source }];
   }));
 }
 

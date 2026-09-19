@@ -8,6 +8,33 @@ import { AssetsPage } from "../src/client/pages/AssetsPage.js";
 describe("AssetsPage", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("displays Unsplash CDN previews with linked photographer credit and a source configuration entry", async () => {
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({
+      generatedAt: "2026-09-19T00:00:00Z", totalItems: 1, needsReviewCount: 0,
+      legacyRunsWithoutManifest: 0, reconstructedRunCount: 0, unreadableManifestCount: 0,
+      truncatedRunCount: 0, truncatedItemCount: 0,
+      categories: { visual: 1, voice: 0, font: 0, document: 0, other: 0 }, items: [],
+      assetIndex: { version: "video-factory/asset-index-v1", totalAssets: 1, duplicateUses: 0,
+        reusableCount: 1, needsReviewCount: 0,
+        facets: { mediaKinds: {}, origins: {}, providers: {}, reuseStatuses: {} }, assets: [{
+          key: "photo", mediaKind: "image", origin: "stock", reuseStatus: "ready", category: "visual",
+          kind: "media_asset", providerId: "unsplash-stock-v1", creator: "Photographer",
+          creatorUrl: "https://unsplash.com/@photographer?utm_source=videofactory&utm_medium=referral",
+          previewUrl: "https://images.unsplash.com/photo-1?w=400&ixid=view",
+          contentUrl: "/api/runs/one/artifacts/photo/content", tags: [],
+          commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "recorded",
+          useCount: 0, usages: [],
+        }] },
+    });
+    render(<MemoryRouter><AssetsPage /></MemoryRouter>);
+    const credit = await screen.findByRole("link", { name: "Photographer" });
+    expect(credit).toHaveAttribute("href", "https://unsplash.com/@photographer?utm_source=videofactory&utm_medium=referral");
+    expect(screen.getByRole("link", { name: "Unsplash" })).toHaveAttribute("href", "https://unsplash.com/?utm_source=videofactory&utm_medium=referral");
+    expect(screen.getByRole("img")).toHaveAttribute("src", "https://images.unsplash.com/photo-1?w=400&ixid=view");
+    expect(screen.getByRole("link", { name: "配置外部素材来源" })).toHaveAttribute("href", "/resources#visual-providers");
+  });
+
   it("routes pending rights reviews to the official manifest section from both entry points", async () => {
     vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({
       generatedAt: "2026-09-06T08:00:00.000Z",

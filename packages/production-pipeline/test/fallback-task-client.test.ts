@@ -197,13 +197,11 @@ describe("FallbackCodexTaskClient", () => {
     assert.equal(deepseek.calls.length, 0);
   });
 
-  it("switches providers when the configured model id is retired", async () => {
-    // 模型被下线或改名：provider 回 404，Broker 照实归类成 invalid_request 并把 404 记进
-    // reasonCode。这条腿必须换下一个候选——停下来会让人以为自己的请求有问题，而合同一个字都没错。
+  it("switches providers only when the configured model id is explicitly retired", async () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
       throw new CodexBridgeError("Codex bridge returned HTTP 422.", false, "completed_failure", 422, undefined, {
         category: "invalid_request",
-        reasonCode: "http_404",
+        reasonCode: "model_not_found",
         providerId: "openai",
         modelId: "gpt-5.6-sol",
       });
@@ -220,6 +218,27 @@ describe("FallbackCodexTaskClient", () => {
     assert.deepEqual(execution.output, { ok: true });
     assert.equal(deepseek.calls.length, 1);
     assert.match(deepseek.calls[0]?.requestId ?? "", /^backup-/);
+  });
+
+  it("does not switch providers for a bare HTTP 404", async () => {
+    const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
+      throw new CodexBridgeError("Codex bridge returned HTTP 404.", false, "completed_failure", 404, undefined, {
+        category: "invalid_request",
+        reasonCode: "http_404",
+        providerId: "openai",
+        modelId: "gpt-5.6-sol",
+      });
+    });
+    const deepseek = new ControlledClient("deepseek", "deepseek-flash", () => ({ ok: true }));
+    const client = new FallbackCodexTaskClient({
+      candidates: [
+        { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
+        { client: deepseek, providerId: "deepseek", modelId: "deepseek-flash", taskKinds: ["publish-copy"] },
+      ],
+    });
+
+    await assert.rejects(() => client.runTaskDetailed("publish-copy", {}), /HTTP 404/);
+    assert.equal(deepseek.calls.length, 0);
   });
 
   it("does not switch providers for a request-contract violation", async () => {
@@ -242,6 +261,28 @@ describe("FallbackCodexTaskClient", () => {
     });
 
     await assert.rejects(() => client.runTaskDetailed("publish-copy", {}), /HTTP 422/);
+    assert.equal(deepseek.calls.length, 0);
+  });
+
+  it("does not use another provider when the current credentials are rejected", async () => {
+    const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
+      throw new CodexBridgeError("Codex bridge returned HTTP 401.", false, "completed_failure", 422, undefined, {
+        category: "authentication",
+        reasonCode: "http_401",
+        providerId: "openai",
+        modelId: "gpt-5.6-sol",
+        scope: "provider_account",
+      });
+    });
+    const deepseek = new ControlledClient("deepseek", "deepseek-flash", () => ({ ok: true }));
+    const client = new FallbackCodexTaskClient({
+      candidates: [
+        { client: openai, providerId: "openai", modelId: "gpt-5.6-sol", taskKinds: ["publish-copy"] },
+        { client: deepseek, providerId: "deepseek", modelId: "deepseek-flash", taskKinds: ["publish-copy"] },
+      ],
+    });
+
+    await assert.rejects(() => client.runTaskDetailed("publish-copy", {}), /HTTP 401/);
     assert.equal(deepseek.calls.length, 0);
   });
 });

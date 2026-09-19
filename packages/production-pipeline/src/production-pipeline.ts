@@ -75,7 +75,7 @@ import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.
 import { assertCurrentVisualReviewContract, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport, visualReviewBlocksContinuation, type IndependentVisualReviewExecution, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewFinding, type VisualReviewReport, type VisualReviewScope } from "./codex-visual-review.js";
 import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, parseVoiceDoesNotFitConflict, WORKER_PROTOCOL_VERSION, type ProductionBrief, type ProductionReworkFinding } from "./contracts.js";
 import { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
-import type { WorkerResponse } from "./python-worker-client.js";
+import { parseSourceReviewOutcome, type WorkerResponse } from "./python-worker-client.js";
 import {
   validateVisualDirectorPlan,
   type VisualAssetProviderCapability,
@@ -1074,7 +1074,7 @@ export class ProductionPipeline {
           "试片审查还没完成，不能跳过审查继续制作。请重试审查（复用已生成画面），或终止本次制作。",
         );
       }
-      const currentReviewEvidenceId = finalReviewEvidenceId(activeInterventionNode);
+      const currentReviewEvidenceId = sourceReviewEvidenceId(activeInterventionNode) ?? finalReviewEvidenceId(activeInterventionNode);
       if (decision.reviewEvidenceId !== currentReviewEvidenceId) {
         throw new Error("Human decision is not bound to the current review evidence.");
       }
@@ -3768,6 +3768,33 @@ export class ProductionPipeline {
         if (capability === "voice.synthesize") {
           receipt.parameters = effectiveVoiceReceiptParameters(input as Record<string, unknown>, receipt.parameters);
         }
+        const sourceReview = response.sourceReview === undefined
+          ? undefined
+          : parseSourceReviewOutcome(response.sourceReview);
+        if (sourceReview) {
+          assertSourceReviewWorkerBinding({ capability, response, sourceReview, context });
+          const result = workerResponseToNodeResult(response, context, parentNodeIds);
+          const reason = response.error?.message ?? "素材试片审查暂停。";
+          return {
+            status: "needs_human" as const,
+            error: reason,
+            output: { ...(response.output ?? {}), sourceReview },
+            ...(result.artifacts ? { artifacts: result.artifacts } : {}),
+            ...(result.providerOutcomeKnown !== undefined ? { providerOutcomeKnown: result.providerOutcomeKnown } : {}),
+            intervention: sourceReview.kind === "complete_negative" ? {
+              kind: "source_review_decision" as const,
+              reason,
+              requiredAction: "approve" as const,
+              options: ["approve" as const, "request_changes" as const, "reject" as const],
+            } : {
+              kind: "source_review_retry" as const,
+              reason,
+              requiredAction: "reject" as const,
+              options: ["reject" as const],
+            },
+            receipt,
+          };
+        }
         return {
           ...workerResponseToNodeResult(response, context, parentNodeIds),
           receipt,
@@ -4326,6 +4353,71 @@ function finalReviewEvidenceId(node: WorkflowRun<ProductionBrief>["nodeRuns"][nu
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null;
 }
 
+function sourceReviewEvidenceId(node: WorkflowRun<ProductionBrief>["nodeRuns"][number]): string | null {
+  if (node.intervention?.kind !== "source_review_decision" || !isObjectRecord(node.output)) return null;
+  const sourceReview = node.output.sourceReview;
+  if (!isObjectRecord(sourceReview) || sourceReview.kind !== "complete_negative") return null;
+  const evidenceId = sourceReview.evidenceId;
+  return typeof evidenceId === "string" && /^[a-f0-9]{64}$/.test(evidenceId) ? evidenceId : null;
+}
+
+/**
+ * Worker 的 sourceReview 不是浏览器提交的建议，而是会影响「继续未完成素材」的服务端证据。
+ * 即使 worker 协议已经校验字段形状，也要在编排边界确认它确实对应本次操作内已校验的媒体和
+ * 报告；否则一个无关响应也可能获得质量承担出口。
+ */
+function assertSourceReviewWorkerBinding(options: {
+  capability: Capability;
+  response: WorkerResponse;
+  sourceReview: NonNullable<WorkerResponse["sourceReview"]>;
+  context: WorkflowContext;
+}): void {
+  const { capability, response, sourceReview, context } = options;
+  if (capability !== "asset.prepare") {
+    throw new Error("Only asset preparation may return a source review outcome.");
+  }
+  if (!context.operationRequestId || sourceReview.operationId !== context.operationRequestId) {
+    throw new Error("Source review outcome is not bound to the current asset operation.");
+  }
+  const hasArtifact = (kind: string, sha256: string) => response.artifacts.some((artifact) => (
+    artifact.kind === kind
+    && artifact.sha256.toLowerCase() === sha256
+    && artifact.provenance.scenePosition === sourceReview.scenePosition
+  ));
+  if (!hasArtifact("media_asset", sourceReview.mediaSha256)) {
+    throw new Error("Source review outcome is missing its materialized pilot media artifact.");
+  }
+  if (sourceReview.kind === "incomplete") {
+    if (response.status !== "failed") {
+      throw new Error("An incomplete source review must keep the asset operation failed for dedicated retry.");
+    }
+    return;
+  }
+  if (response.status !== "rejected") {
+    throw new Error("A complete negative source review must keep the asset operation rejected pending a user decision.");
+  }
+  if (!sourceReview.reviewArtifactSha256 || !sourceReview.evidenceId
+    || !hasArtifact("review_report", sourceReview.reviewArtifactSha256)) {
+    throw new Error("Complete negative source review is missing its materialized report artifact.");
+  }
+  const report = response.output?.sourceVisualReview;
+  if (!isObjectRecord(report)) {
+    throw new Error("Complete negative source review is missing its report payload.");
+  }
+  const expectedEvidenceId = createHash("sha256").update(JSON.stringify({
+    version: "video-factory/source-pilot-evidence-v1",
+    report,
+    reviewArtifactSha256: sourceReview.reviewArtifactSha256,
+    mediaSha256: sourceReview.mediaSha256,
+    inputFingerprint: sourceReview.inputFingerprint,
+    operationId: sourceReview.operationId,
+    scenePosition: sourceReview.scenePosition,
+  })).digest("hex");
+  if (sourceReview.evidenceId !== expectedEvidenceId) {
+    throw new Error("Complete negative source review evidence does not match its materialized report and pilot media.");
+  }
+}
+
 /**
  * 规划节点回执里记着的那一条独立复核的编号。规划状态整份落在节点输出里，所以"他看到的是哪一条"
  * 在命令边界上就能查到，不必等到图里才知道。
@@ -4637,6 +4729,13 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
     const attempt = await reserveAttemptDirectory(path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId));
     const outputDir = attempt.directory;
     const parameters: Record<string, unknown> = { ...this.config.parameters, providerId: this.config.id };
+    if (this.config.capability === "asset.prepare") {
+      const acceptedEvidenceIds = [...new Set(context.decisions
+        .filter((decision) => decision.action === "approve")
+        .map((decision) => decision.reviewEvidenceId)
+        .filter((evidenceId): evidenceId is string => typeof evidenceId === "string" && /^[a-f0-9]{64}$/i.test(evidenceId)))];
+      if (acceptedEvidenceIds.length) parameters.acceptedSourceReviewEvidenceIds = acceptedEvidenceIds;
+    }
     if (this.billing === "metered") {
       const authorization = context.spendAuthorization;
       const noSpendExecution = context.spendAuthorizationExemptProviderId === this.id;
@@ -9854,8 +9953,8 @@ function visualReviewNode(
         modelId: execution.executedModelId ?? execution.trace?.modelId ?? provider.modelId ?? provider.id,
       }];
       const actualModelProofs = execution.independentReviews?.map((review) => (
-        visualReviewModelProof(review, execution.evidenceSnapshotId)
-      )) ?? actualModels;
+        visualReviewModelProof(review, execution.evidenceSnapshotId, review)
+      )) ?? [visualReviewModelProof(execution, execution.evidenceSnapshotId, actualModels[0]!)];
       const scenePositions = [...new Set([
         ...(execution.sampling?.coveredScenePositions ?? []),
         ...localizedReport.findings.flatMap((finding) => finding.scenePosition ? [finding.scenePosition] : []),
@@ -10304,6 +10403,7 @@ function providerConfig(
       "local-editorial-v1": { provider: "local", mediaType: "image" },
       "pexels-stock-v1": { provider: "pexels", mediaType: "video" },
       "pixabay-stock-v1": { provider: "pixabay", mediaType: "video" },
+      "unsplash-stock-v1": { provider: "unsplash", mediaType: "image" },
       "seedream-image-v1": { provider: "seedream", mediaType: "image" },
       "seedance-video-v1": { provider: "seedance", mediaType: "video" },
       "hailuo-video-v1": { provider: "minimax", mediaType: "video" },
@@ -10466,32 +10566,25 @@ function assertProductionVisualReviewReady(
 ): void {
   if (brief.runPurpose === "test") return;
   const providerId = brief.providers.visualReview;
-  if (!providerId) {
-    throw new Error("Formal production requires DeepSeek and Codex visual review before work can start.");
+  if (providerId !== "deepseek-visual-review-v1") {
+    throw new Error("Formal production requires the configured DeepSeek visual reviewer before work can start.");
   }
   const agent = [
     ...(options.visualReviewAgents ?? []),
     ...(options.visualReviewAgent ? [options.visualReviewAgent] : []),
   ].find((candidate) => candidate.id === providerId);
-  // ChatGPT/Codex 套餐退役后（N5）审片合同有两种合法形态：
-  // - dual：历史形态，两个不同厂商/模型的 reviewer 各带独立审计（存量 run 兼容，语义不减）。
-  // - single：DeepSeek 单腿，一个 reviewer 且独立审计为真（N5 之后唯一的生产形态）。
-  // 两者都要求 reviewer 声明独立审计；没有任何形态即拒绝开工。
+  // 新 production 只建立 DeepSeek 单腿审片。双审是历史 run 的只读事实；把它重新接入
+  // 新 run 会恢复已退役的生产依赖。
   const reviewers = agent?.finalReviewConfiguration?.reviewers ?? [];
   const mode = agent?.finalReviewConfiguration?.mode;
-  if (mode === "dual"
-    && reviewers.length === 2
-    && new Set(reviewers.map((reviewer) => reviewer.providerId)).size === 2
-    && new Set(reviewers.map((reviewer) => reviewer.modelId)).size === 2
-    && reviewers.every((reviewer) => reviewer.independentRoleAudit === true)) {
-    return;
-  }
   if (mode === "single"
     && reviewers.length === 1
-    && reviewers.every((reviewer) => reviewer.independentRoleAudit === true)) {
+    && reviewers[0]?.providerId === providerId
+    && reviewers[0]?.modelId === agent?.modelId
+    && reviewers[0]?.independentRoleAudit === true) {
     return;
   }
-  throw new Error("Formal production requires a visual-review contract: dual (two distinct independent reviewers, legacy) or single (DeepSeek single leg with independent role audit).");
+  throw new Error("Formal production requires one DeepSeek visual review with an independent role audit.");
 }
 
 function roundCurrency(value: number): number {
@@ -10539,6 +10632,8 @@ function workerResponseToNodeResult(
       licenseNote: artifact.provenance.licenseNote,
       ...(artifact.provenance.sourceUrl ? { sourceUrl: artifact.provenance.sourceUrl } : {}),
       ...(artifact.provenance.creator ? { creator: artifact.provenance.creator } : {}),
+      ...(artifact.provenance.creatorUrl ? { creatorUrl: artifact.provenance.creatorUrl } : {}),
+      ...(artifact.provenance.previewUrl ? { previewUrl: artifact.provenance.previewUrl } : {}),
       ...(artifact.provenance.scenePosition ? { scenePosition: artifact.provenance.scenePosition } : {}),
       ...(artifact.provenance.notes ? { notes: artifact.provenance.notes } : {}),
     },
@@ -11120,6 +11215,7 @@ function validateBriefInputOverride(value: unknown, workflowBrief: ProductionBri
     providers: parsed.providers,
     models: parsed.models,
     modelSelectionSources: parsed.modelSelectionSources,
+    frozenModelSelections: parsed.frozenModelSelections,
     workflowFeatures: parsed.workflowFeatures,
     referenceVideo: parsed.referenceVideo,
     director: parsed.director,
@@ -11130,6 +11226,7 @@ function validateBriefInputOverride(value: unknown, workflowBrief: ProductionBri
     providers: workflowBrief.providers,
     models: workflowBrief.models,
     modelSelectionSources: workflowBrief.modelSelectionSources,
+    frozenModelSelections: workflowBrief.frozenModelSelections,
     workflowFeatures: workflowBrief.workflowFeatures,
     referenceVideo: workflowBrief.referenceVideo,
     director: workflowBrief.director,
@@ -11167,6 +11264,7 @@ function mergeCurrentBrief(value: unknown, workflowBrief: ProductionBrief): Prod
     providers: workflowBrief.providers,
     models: workflowBrief.models,
     modelSelectionSources: workflowBrief.modelSelectionSources,
+    frozenModelSelections: workflowBrief.frozenModelSelections,
     workflowFeatures: workflowBrief.workflowFeatures,
     referenceVideo: workflowBrief.referenceVideo,
     director: workflowBrief.director,
@@ -11260,8 +11358,9 @@ function finalVisualReviewScope(reviewedDelivery: unknown): VisualReviewScope {
 }
 
 function visualReviewModelProof(
-  review: IndependentVisualReviewExecution,
+  review: VisualReviewExecution | IndependentVisualReviewExecution,
   evidenceId: string | undefined,
+  identity: { providerId: string; modelId: string },
 ): VisualReviewScope["actualModels"][number] {
   const iterations = review.agentLoop?.iterations ?? [];
   const producerDigests = [...new Set(iterations.flatMap((iteration) => (
@@ -11282,8 +11381,8 @@ function visualReviewModelProof(
     && iterations.every((iteration) => Boolean(iteration.auditTrace?.contractDigest));
   const auditVerdict = review.agentLoop?.iterations.at(-1)?.audit.verdict;
   return {
-    providerId: review.providerId,
-    modelId: review.modelId,
+    providerId: ("executedProviderId" in review ? review.executedProviderId : undefined) ?? review.trace?.providerId ?? identity.providerId,
+    modelId: ("executedModelId" in review ? review.executedModelId : undefined) ?? review.trace?.modelId ?? identity.modelId,
     ...(evidenceId ? { evidenceId } : {}),
     ...(producerDigests.length === 1 ? { producerContractDigest: producerDigests[0] } : {}),
     ...(auditDigests.length === 1 ? { auditContractDigest: auditDigests[0] } : {}),
@@ -11293,14 +11392,19 @@ function visualReviewModelProof(
   };
 }
 
-function assertDualVisualReviewReady(reviewedDelivery: unknown, brief: ProductionBrief): void {
+function assertVisualReviewReady(reviewedDelivery: unknown, brief: ProductionBrief): void {
   const delivery = requireOutputRecord(reviewedDelivery, "visual-review delivery");
   const report = requireOutputRecord(delivery.report, "visual-review report");
   const scope = finalVisualReviewScope(delivery);
-  if (scope.actualModels.length !== 2
-    || new Set(scope.actualModels.map((model) => model.providerId)).size !== 2
-    || new Set(scope.actualModels.map((model) => model.modelId)).size !== 2) {
-    throw new Error("Final publication requires two distinct actual visual-review providers and models.");
+  // 单审不能携带历史双审的分支载荷；否则篡改者删掉一条 actual model 就可能把残缺双审
+  // 误读成合法单审。分支载荷一旦存在，必须按完整历史双审验证。
+  const mode = report.independentReviews === undefined && scope.actualModels.length === 1
+    ? "single"
+    : scope.actualModels.length === 2
+      ? "dual"
+      : undefined;
+  if (!mode) {
+    throw new Error("Final publication requires one current DeepSeek review or two historical independent review proofs.");
   }
   for (const model of scope.actualModels) {
     if (model.evidenceId !== scope.evidenceId
@@ -11310,12 +11414,14 @@ function assertDualVisualReviewReady(reviewedDelivery: unknown, brief: Productio
       || !/^[a-f0-9]{64}$/.test(model.producerContractDigest)
       || typeof model.auditContractDigest !== "string"
       || !/^[a-f0-9]{64}$/.test(model.auditContractDigest)) {
-      throw new Error("Final publication requires complete producer and audit proof for both visual-review models on the same evidence.");
+      throw new Error("Final publication requires complete producer and audit proof for every visual-review model on the same evidence.");
     }
   }
-  if (new Set(scope.actualModels.map((model) => model.producerContractDigest)).size !== 1
-    || new Set(scope.actualModels.map((model) => model.auditContractDigest)).size !== 1) {
-    throw new Error("Final visual-review branches did not use the same producer and audit contracts.");
+  if (mode === "dual" && (new Set(scope.actualModels.map((model) => model.providerId)).size !== 2
+    || new Set(scope.actualModels.map((model) => model.modelId)).size !== 2
+    || new Set(scope.actualModels.map((model) => model.producerContractDigest)).size !== 1
+    || new Set(scope.actualModels.map((model) => model.auditContractDigest)).size !== 1)) {
+    throw new Error("Historical dual visual-review branches must use distinct identities and the same contracts.");
   }
   // 证据必须由**当前**这套审片合同产出：结论是按某套判据裁出来的，判据换了，旧结论就不再等价。
   //
@@ -11335,16 +11441,25 @@ function assertDualVisualReviewReady(reviewedDelivery: unknown, brief: Productio
       ? ""
       : "（这个制作建立时用的是更早的审片合同）";
     throw new Error(
-      `这份双模型审片证据是更早的审片合同产出的${origin}：`
+      `这份${mode === "dual" ? "双模型" : "单模型"}审片证据是更早的审片合同产出的${origin}：`
       + staleContractModels
         .map((model) => `${model.providerId}/${model.modelId} 用 ${String(model.producerContractDigest).slice(0, 12)}…`)
         .join("、")
       + `，当前要求 ${requiredProducerContract.slice(0, 12)}…。不能用它发布成片。`
-      + "请先补查现有成片，让两个模型按当前合同重新审一遍，再走终审；补查只重跑审片，不会重买画面或配音。",
+      + "请先补查现有成片，按当前合同重新审查后再走终审；补查只重跑审片，不会重买画面或配音。",
     );
   }
+  if (mode === "single") {
+    if (scope.actualModels[0]?.providerId !== "deepseek-visual-review-v1") {
+      throw new Error("Final publication requires the current single-review evidence to come from DeepSeek.");
+    }
+    if (report.independentReviews !== undefined) {
+      throw new Error("Single visual-review evidence must not contain fabricated independent branch reports.");
+    }
+    return;
+  }
   if (!Array.isArray(report.independentReviews) || report.independentReviews.length !== 2) {
-    throw new Error("Final publication requires both independent visual-review reports.");
+    throw new Error("Historical dual visual review requires both independent branch reports.");
   }
   const scopedIdentities = new Set(scope.actualModels.map((model) => `${model.providerId}\u0000${model.modelId}`));
   const reportedIdentities = new Set(report.independentReviews.map((entry, index) => {
@@ -11355,7 +11470,7 @@ function assertDualVisualReviewReady(reviewedDelivery: unknown, brief: Productio
     return `${review.providerId}\u0000${review.modelId}`;
   }));
   if (reportedIdentities.size !== 2 || [...reportedIdentities].some((identity) => !scopedIdentities.has(identity))) {
-    throw new Error("Independent visual-review reports do not match the actual model proof.");
+    throw new Error("Historical independent visual-review reports do not match the actual model proof.");
   }
 }
 
@@ -11374,7 +11489,7 @@ function assertPublishEvidenceReady(context: WorkflowContext, brief: ProductionB
     throw new Error("Final approval is not bound to the current review artifact versions.");
   }
   if (brief.runPurpose !== "test" || brief.providers.visualReview) {
-    assertDualVisualReviewReady(context.outputs.get("visual-review"), brief);
+    assertVisualReviewReady(context.outputs.get("visual-review"), brief);
     const scope = finalVisualReviewScope(context.outputs.get("visual-review"));
     if (finalReview.reviewEvidenceId !== scope.evidenceId) {
       throw new Error("Final approval is not bound to the current visual evidence digest.");
@@ -11430,7 +11545,7 @@ function assertPersistedFinalApprovalReady(
     if (visualNode?.status !== "succeeded") {
       throw new Error("Final approval requires a completed visual-review node.");
     }
-    assertDualVisualReviewReady(visualNode.output, brief);
+    assertVisualReviewReady(visualNode.output, brief);
     const scope = finalVisualReviewScope(visualNode.output);
     if (output.reviewEvidenceId !== scope.evidenceId) {
       throw new Error("Final approval is not bound to the current visual evidence digest.");
@@ -12569,6 +12684,8 @@ function publishArtifactDescriptor(artifact: Artifact): Record<string, unknown> 
       ...(artifact.provenance.providerVersion ? { providerVersion: artifact.provenance.providerVersion } : {}),
       ...(sourceUrl ? { sourceUrl } : {}),
       ...(artifact.provenance.creator ? { creator: artifact.provenance.creator } : {}),
+      ...(artifact.provenance.creatorUrl ? { creatorUrl: artifact.provenance.creatorUrl } : {}),
+      ...(artifact.provenance.previewUrl ? { previewUrl: artifact.provenance.previewUrl } : {}),
       ...(artifact.provenance.licenseNote ? { licenseNote: artifact.provenance.licenseNote } : {}),
       ...(artifact.provenance.promptVersion ? { promptVersion: artifact.provenance.promptVersion } : {}),
       ...(artifact.provenance.model ? { model: artifact.provenance.model } : {}),
@@ -12589,6 +12706,8 @@ interface ProductionResourceManifestItem {
   providerId: string;
   sourceUrl?: string;
   creator?: string;
+  creatorUrl?: string;
+  previewUrl?: string;
   licenseNote?: string;
   contentType?: string;
   sha256?: string;
@@ -12639,6 +12758,8 @@ function resourceItemFromArtifact(artifact: Artifact): ProductionResourceManifes
     providerId,
     ...(sourceUrl ? { sourceUrl } : {}),
     ...(artifact.provenance.creator ? { creator: artifact.provenance.creator } : {}),
+    ...(artifact.provenance.creatorUrl ? { creatorUrl: artifact.provenance.creatorUrl } : {}),
+    ...(artifact.provenance.previewUrl ? { previewUrl: artifact.provenance.previewUrl } : {}),
     ...(licenseNote ? { licenseNote } : {}),
     ...(artifact.contentType ? { contentType: artifact.contentType } : {}),
     ...(artifact.sha256 ? { sha256: artifact.sha256 } : {}),
@@ -12681,6 +12802,8 @@ async function assetPlanResourceItems(assetPlanPath: string, artifacts: Artifact
       providerId,
       ...(publicSourceUrl ? { sourceUrl: publicSourceUrl } : {}),
       ...(creator ? { creator } : {}),
+      ...(mediaArtifact?.provenance.creatorUrl ? { creatorUrl: mediaArtifact.provenance.creatorUrl } : {}),
+      ...(mediaArtifact?.provenance.previewUrl ? { previewUrl: mediaArtifact.provenance.previewUrl } : {}),
       ...(licenseNote ? { licenseNote } : {}),
       ...(mediaArtifact?.contentType ? { contentType: mediaArtifact.contentType } : {}),
       ...(mediaArtifact?.sha256 ? { sha256: mediaArtifact.sha256 } : {}),
@@ -12716,6 +12839,7 @@ function normalizedSceneProviderId(value: string): string {
     local: "local-editorial-v1",
     pexels: "pexels-stock-v1",
     pixabay: "pixabay-stock-v1",
+    unsplash: "unsplash-stock-v1",
     mock: "mock-stock-v1",
   } as Record<string, string>)[value] ?? value;
 }

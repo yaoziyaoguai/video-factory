@@ -184,14 +184,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const visualSourceIssue = visualSourceCompatibilityIssue(undefined, selectedAssetSources);
   const effectiveModelId = (provider: StudioProvider) => modelSelections[provider.id]
     ?? provider.defaultModelId;
-  const finalReviewProviders = ["deepseek-visual-review-v1", "codex-visual-review-v1"].map((providerId) => (
-    providers.find((provider) => provider.id === providerId
-      && provider.capability === "quality.review.visual"
-      && provider.available
-      && provider.kind !== "test")
-  ));
-  const visualReviewProvider = finalReviewProviders.find((provider) => provider?.id === effectiveBindings.visualReview)
-    ?? finalReviewProviders.find((provider): provider is StudioProvider => provider !== undefined);
+  const visualReviewProvider = providers.find((provider) => provider.id === "deepseek-visual-review-v1"
+    && provider.capability === "quality.review.visual"
+    && provider.available
+    && provider.kind !== "test");
   const referenceGrammarProvider = providers.find((provider) => {
     return provider.id === "codex-reference-grammar-v1" && provider.capability === "reference.grammar" && provider.available;
   });
@@ -201,7 +197,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       && provider.available
       && provider.kind !== "test";
   });
-  const finalReviewerModels = finalReviewProviders.map((provider) => provider?.defaultModelId).filter(Boolean);
   // ChatGPT/Codex 套餐退役（N5）后，审片只剩 DeepSeek 单腿：可用即可开工，
   // 不再要求两个不同模型的 Provider（旧双审合同已取消）。
   const singleReviewAvailable = Boolean(visualReviewProvider) && Boolean(roleAuditProvider);
@@ -565,7 +560,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         throw new Error("请选择目标平台后再开始制作。");
       }
       if (!singleReviewAvailable || !visualReviewProvider) {
-        throw new Error("正式制作必须由 DeepSeek 与 Codex 使用两个不同模型独立审片；请先在创作设置中恢复两种审片和独立质量复核能力。");
+        throw new Error("正式制作需要 DeepSeek 视觉审片和独立质量复核；请先在创作设置中恢复这两项能力。");
       }
       const providersForRun: StudioProductionInput["providers"] = { ...effectiveBindings };
       providersForRun.visualReview = visualReviewProvider.id;
@@ -659,7 +654,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
           <div>
             <p className="eyebrow">制作方案</p>
             <h2 id="new-run-title">{rework ? "调整方案后重新制作" : "新建制作"}</h2>
-            <p>{rework ? "已载入上一版可用设置；真实母片复用与最终方案仍需重新规划验证。下面的修改要求会真正交给对应制作步骤执行。" : "先定内容与画面方案；图片和视频按实际方案报价。声音与审片不弹现金报价，但失败或质量问题会停在对应步骤。"}</p>
+            <p>{rework ? "已载入上一版可用设置；真实母片复用与最终方案仍需重新规划验证。下面的修改要求会真正交给对应制作步骤执行。" : "先生成前期构思，再与你讨论定稿。脚本与分镜也会分别等你确认；付费图片和视频另行报价。"}</p>
           </div>
           <div className="dialog-budget" aria-label="费用方式">
             <span>{meteredSelected ? "图片 / 视频按实际方案报价" : "图片 / 视频无现金报价"}</span>
@@ -753,6 +748,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 </article> : null}
               </div> : null}
               {reworkTargetStepLabels.length > 0 ? <p className="rework-boundary-note">审片反馈将预填到：{reworkTargetStepLabels.join("、")}。</p> : null}
+              {!advancedOpen ? <button className="button button-ghost" type="button" onClick={openAssetSourceControls}>调整来源</button> : null}
               <div className="rework-instruction-grid">
                 <label className="field">
                   <span>脚本修改要求</span>
@@ -785,6 +781,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <span>查看继承设置</span><small>上一版预填与本轮可调整设置</small><ChevronDown aria-hidden="true" size={17} />
               </button>
             </div> : null}
+            <details className="inherited-production-summary">
+              <summary><span>继承制作设置</span><small>优先使用免费路线；收费画面仍需逐项报价确认</small></summary>
+              <p>角色、模型、声音和画面来源会继承创作设置与本次入口内容。开始后可在对应节点工作区单独调整，不会改动全局默认。</p>
+            </details>
+
             <div hidden={Boolean(rework) && !inheritedSettingsOpen}>
             <section className="brief-section" aria-labelledby="brief-section-title">
               <div className="compact-section-heading">
@@ -827,7 +828,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                       .map((seconds) => <option key={seconds} value={seconds}>{seconds} 秒</option>)}
                   </select>
                 </label>
-                {durationRange ? <>
+                {durationRange ? <details className="brief-extra-options duration-range-options">
+                  <summary>时长范围 <span>{durationRange.minSeconds}–{durationRange.maxSeconds} 秒</span></summary>
+                  <div className="brief-extra-fields">
                   <label className="field field-compact">
                     <span>最短时长</span>
                     <input type="number" min={20} max={durationRange.maxSeconds} step={1} value={durationRange.minSeconds} onChange={(event) => changeDurationRange("minSeconds", Number(event.target.value))} />
@@ -836,7 +839,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                     <span>最长时长</span>
                     <input type="number" min={durationRange.minSeconds} max={180} step={1} value={durationRange.maxSeconds} onChange={(event) => changeDurationRange("maxSeconds", Number(event.target.value))} />
                   </label>
-                </> : null}
+                  </div>
+                </details> : null}
+                <details className="brief-extra-options visual-intent-options">
+                  <summary>画面要求与证据（可选）<span>{visualBriefValues.visualProof.trim() || visualBriefValues.strategy.trim() ? "已填写，展开查看" : "留空，由创作角色提案"}</span></summary>
+                  <div className="brief-extra-fields">
                 <label className="field field-wide">
                   <span>必须让观众看到的证据（可选）</span>
                   <textarea
@@ -862,8 +869,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                     <small>可参考的方向：{initialValues.visualPlan.strategy}。只有你填写或明确采用后，才会成为制作要求。</small>
                   ) : null}
                 </label>
+                  </div>
+                </details>
               </div>
-              <CreativeSummary summary={creativeSummary} />
+              {Object.values(briefSummaryValues).some((value) => value.trim()) || visualBriefValues.visualProof.trim() || visualBriefValues.strategy.trim() ? <CreativeSummary summary={creativeSummary} /> : null}
               {imageStory ? (
                 <div className="editorial-brief-note" role="note">
                   <strong>总编建议 · 图文成片</strong>
@@ -958,98 +967,99 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               </label>
             </section>
 
-            <section className="production-team-section" aria-labelledby="production-team-title">
-              <div className="compact-section-heading">
-                <div><span>04</span><h3 id="production-team-title">自动制作设置</h3></div>
-                <small>这里的选择会真实进入本次生产单</small>
-              </div>
-              <div className="production-role-grid">
-                {CAPABILITIES.map((item) => {
-                  const candidates = roleProviderCandidates(item, providers);
-                  const requestedProviderId = effectiveBindings[item.key];
-                  const selected = providers.find((provider) => provider.id === requestedProviderId);
-                  const Icon = item.icon;
-                  const models = selectableModelsForCapability(selected?.modelProfiles, item.capability);
-                  const selectedModelId = selected ? modelSelections[selected.id] : undefined;
-                  const inheritedProviderUnavailable = Boolean(requestedProviderId && !candidates.some((provider) => provider.id === requestedProviderId));
-                  const inheritedModelUnavailable = Boolean(selectedModelId && !models.some((model) => model.id === selectedModelId));
-                  return <article className={selected?.available ? "production-role" : "production-role is-unavailable"} key={item.key}>
-                    <header>
-                      <span className="production-role-icon"><Icon aria-hidden="true" size={17} /></span>
-                      <span><strong>{item.role}</strong><small>{item.label}</small></span>
-                      <em>{roleExecutionLabel(item, selected)}</em>
-                    </header>
-                    <label className="field production-role-provider">
-                      <span>{item.role}能力</span>
-                      <select
-                        aria-label={`${item.role}能力`}
-                        value={requestedProviderId ?? ""}
-                        disabled={item.key === "voice" || (candidates.length < 2 && !inheritedProviderUnavailable)}
-                        onChange={(event) => {
-                          const provider = providers.find((candidate) => candidate.id === event.target.value);
-                          if (!provider) return;
-                          setBindings((current) => ({ ...current, [item.key]: provider.id }));
-                        }}
-                      >
-                        {!requestedProviderId ? <option value="">未配置</option> : null}
-                        {inheritedProviderUnavailable ? <option value={requestedProviderId} disabled>上一版：{selected ? creatorProviderName(selected) : requestedProviderId}（不可用）</option> : null}
-                        {candidates.map((provider) => <option value={provider.id} key={provider.id}>{creatorProviderName(provider)}</option>)}
-                      </select>
-                    </label>
-                    {models.length > 0 && selected ? <label className="field production-role-model">
-                      <span>{item.role}本次模型</span>
-                      <select
-                        aria-label={`${item.role}本次模型`}
-                        value={selectedModelId ?? ""}
-                        onChange={(event) => setModelSelections((current) => withModelSelection(current, selected.id, event.target.value))}
-                      >
-                        <option value="">继承推荐：{effectiveModelId(selected) ?? "由系统按当前配置选择"}</option>
-                        {inheritedModelUnavailable && selectedModelId ? <option value={selectedModelId} disabled>上一版：{selectedModelId}（不可用）</option> : null}
-                        {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
-                      </select>
-                      {(item.key === "script" || item.key === "director" || item.key === "visualReview") && models.length > 1
-                        ? <small>你选的是首选；只有确认请求未被受理时，兼容候选才会接管。若请求可能已受理但结果不确定，流程会暂停核对，不会切换模型。</small>
-                        : null}
-                    </label> : <p>{item.key === "voice" ? "音色与语速在下方声音导演中调整。" : selected?.description ?? item.description}</p>}
-                    {item.key === "assets" ? <div className="production-role-source-models">
-                      <strong>本次画面来源与模型</strong>
-                      {selectedAssetSources.map((provider) => {
-                        const models = selectableModelsForCapability(provider.modelProfiles, provider.capability);
-                        const selectedModelId = modelSelections[provider.id];
-                        const inheritedModelUnavailable = Boolean(selectedModelId && !models.some((model) => model.id === selectedModelId));
-                        return <label className="field" key={provider.id}>
-                        <span>{creatorProviderName(provider)}</span>
-                        {models.length ? <select aria-label={`${creatorProviderName(provider)}开工模型`} value={selectedModelId ?? ""} onChange={(event) => setModelSelections((current) => withModelSelection(current, provider.id, event.target.value))}>
-                          <option value="">使用推荐：{effectiveModelId(provider) ?? "自动选择"}</option>
-                          {inheritedModelUnavailable && selectedModelId ? <option value={selectedModelId} disabled>上一版：{selectedModelId}（不可用）</option> : null}
-                          {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
-                        </select> : <small>{providerBillingLabel(provider)}</small>}
-                      </label>;})}
-                      <button className="button button-ghost" type="button" onClick={toggleAssetSourceControls}>{advancedOpen ? "收起来源" : "调整来源"}</button>
-                    </div> : null}
-                    <small className="production-role-billing">{selected
-                      ? item.key === "assets"
-                        ? meteredSelected
-                          ? "画面方案本身不收费 · 按实际生成需求报价 · 生成前逐笔人工确认"
-                          : "画面方案本身不收费 · 当前方案不调用付费生成"
-                        : `${providerBillingLabel(selected)} · ${effectiveModelId(selected) ?? "不使用模型"}`
-                      : "尚未选择制作方式"}</small>
-                  </article>;
-                })}
-              </div>
-              <div className={roleAuditProvider ? "production-auditor" : "production-auditor is-unavailable"}>
-                <span><ScanSearch aria-hidden="true" size={18} /></span>
-                <div><strong>{roleAuditProvider ? creatorProviderName(roleAuditProvider) : "独立质量复核未接通"}</strong><small>由独立 AI 逐步检查输入、交付格式和后续使用是否一致。</small></div>
-                <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "实际使用模型"} · 深入质量复核 · 最多三轮` : "开工前请先恢复独立质量复核能力"}</em>
-              </div>
-            </section>
-
             <div hidden={Boolean(rework) && !inheritedSettingsOpen}>
             <div className={advancedOpen ? "advanced-production is-open" : "advanced-production"}>
               <button className="advanced-production-toggle" type="button" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((current) => !current)}>
-                <span>更多：素材来源与制作细节</span><small>需要时再展开</small><ChevronDown aria-hidden="true" size={17} />
+                <span>更多：素材来源与制作细节</span><small>通常在后续节点工作区调整</small><ChevronDown aria-hidden="true" size={17} />
               </button>
-              {advancedOpen ? <section className="workflow-config" aria-labelledby="workflow-config-title">
+              {advancedOpen ? <>
+              <section className="production-team-section" aria-labelledby="production-team-title">
+                <div className="compact-section-heading">
+                  <div><span>04</span><h3 id="production-team-title">自动制作设置</h3></div>
+                  <small>这里的覆盖只影响本次制作</small>
+                </div>
+                <p className="production-settings-guidance">默认使用创作设置中的模型与能力。开工后可以在对应节点的工作区调整；只有需要在开工前覆盖时，才在这里修改。</p>
+                <div className="production-role-grid">
+                  {CAPABILITIES.map((item) => {
+                    const candidates = roleProviderCandidates(item, providers);
+                    const requestedProviderId = effectiveBindings[item.key];
+                    const selected = providers.find((provider) => provider.id === requestedProviderId);
+                    const Icon = item.icon;
+                    const models = selectableModelsForCapability(selected?.modelProfiles, item.capability);
+                    const selectedModelId = selected ? modelSelections[selected.id] : undefined;
+                    const inheritedProviderUnavailable = Boolean(requestedProviderId && !candidates.some((provider) => provider.id === requestedProviderId));
+                    const inheritedModelUnavailable = Boolean(selectedModelId && !models.some((model) => model.id === selectedModelId));
+                    return <article className={selected?.available ? "production-role" : "production-role is-unavailable"} key={item.key}>
+                      <header>
+                        <span className="production-role-icon"><Icon aria-hidden="true" size={17} /></span>
+                        <span><strong>{item.role}</strong><small>{item.label}</small></span>
+                        <em>{roleExecutionLabel(item, selected)}</em>
+                      </header>
+                      <label className="field production-role-provider">
+                        <span>{item.role}能力</span>
+                        <select
+                          aria-label={`${item.role}能力`}
+                          value={requestedProviderId ?? ""}
+                          disabled={item.key === "voice" || (candidates.length < 2 && !inheritedProviderUnavailable)}
+                          onChange={(event) => {
+                            const provider = providers.find((candidate) => candidate.id === event.target.value);
+                            if (!provider) return;
+                            setBindings((current) => ({ ...current, [item.key]: provider.id }));
+                          }}
+                        >
+                          {!requestedProviderId ? <option value="">未配置</option> : null}
+                          {inheritedProviderUnavailable ? <option value={requestedProviderId} disabled>上一版：{selected ? creatorProviderName(selected) : requestedProviderId}（不可用）</option> : null}
+                          {candidates.map((provider) => <option value={provider.id} key={provider.id}>{creatorProviderName(provider)}</option>)}
+                        </select>
+                      </label>
+                      {models.length > 0 && selected ? <label className="field production-role-model">
+                        <span>{item.role}本次模型</span>
+                        <select
+                          aria-label={`${item.role}本次模型`}
+                          value={selectedModelId ?? ""}
+                          onChange={(event) => setModelSelections((current) => withModelSelection(current, selected.id, event.target.value))}
+                        >
+                          <option value="">继承推荐：{effectiveModelId(selected) ?? "由系统按当前配置选择"}</option>
+                          {inheritedModelUnavailable && selectedModelId ? <option value={selectedModelId} disabled>上一版：{selectedModelId}（不可用）</option> : null}
+                          {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
+                        </select>
+                        {(item.key === "script" || item.key === "director" || item.key === "visualReview") && models.length > 1
+                          ? <small>你选的是首选；只有确认请求未被受理时，兼容候选才会接管。若请求可能已受理但结果不确定，流程会暂停核对，不会切换模型。</small>
+                          : null}
+                      </label> : <p>{item.key === "voice" ? "音色与语速在下方声音导演中调整。" : selected?.description ?? item.description}</p>}
+                      {item.key === "assets" ? <div className="production-role-source-models">
+                        <strong>本次画面来源与模型</strong>
+                        {selectedAssetSources.map((provider) => {
+                          const models = selectableModelsForCapability(provider.modelProfiles, provider.capability);
+                          const selectedModelId = modelSelections[provider.id];
+                          const inheritedModelUnavailable = Boolean(selectedModelId && !models.some((model) => model.id === selectedModelId));
+                          return <label className="field" key={provider.id}>
+                          <span>{creatorProviderName(provider)}</span>
+                          {models.length ? <select aria-label={`${creatorProviderName(provider)}开工模型`} value={selectedModelId ?? ""} onChange={(event) => setModelSelections((current) => withModelSelection(current, provider.id, event.target.value))}>
+                            <option value="">使用推荐：{effectiveModelId(provider) ?? "自动选择"}</option>
+                            {inheritedModelUnavailable && selectedModelId ? <option value={selectedModelId} disabled>上一版：{selectedModelId}（不可用）</option> : null}
+                            {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
+                          </select> : <small>{providerBillingLabel(provider)}</small>}
+                        </label>;})}
+                        <button className="button button-ghost" type="button" onClick={toggleAssetSourceControls}>{advancedOpen ? "收起来源" : "调整来源"}</button>
+                      </div> : null}
+                      <small className="production-role-billing">{selected
+                        ? item.key === "assets"
+                          ? meteredSelected
+                            ? "画面方案本身不收费 · 按实际生成需求报价 · 生成前逐笔人工确认"
+                            : "画面方案本身不收费 · 当前方案不调用付费生成"
+                          : `${providerBillingLabel(selected)} · ${effectiveModelId(selected) ?? "不使用模型"}`
+                        : "尚未选择制作方式"}</small>
+                    </article>;
+                  })}
+                </div>
+                <div className={roleAuditProvider ? "production-auditor" : "production-auditor is-unavailable"}>
+                  <span><ScanSearch aria-hidden="true" size={18} /></span>
+                  <div><strong>{roleAuditProvider ? creatorProviderName(roleAuditProvider) : "独立质量复核未接通"}</strong><small>由独立 AI 逐步检查输入、交付格式和后续使用是否一致。</small></div>
+                  <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "实际使用模型"} · 深入质量复核 · 最多三轮` : "开工前请先恢复独立质量复核能力"}</em>
+                </div>
+              </section>
+              <section className="workflow-config" aria-labelledby="workflow-config-title">
               <div className="workflow-stage-panel">
                 <div className="compact-section-heading workflow-heading">
                   <div><span>A</span><h3 id="workflow-config-title">制作步骤</h3></div>
@@ -1115,8 +1125,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   })}
                 </div>
               </div>
-              </section> : null}
-              {advancedOpen ? <section ref={assetSourcePoolRef} className="asset-source-pool" aria-labelledby="asset-source-pool-title">
+              </section>
+              <section ref={assetSourcePoolRef} className="asset-source-pool" aria-labelledby="asset-source-pool-title">
                 <div className="compact-section-heading">
                   <div><span>B</span><h3 id="asset-source-pool-title">导演可用素材池</h3></div>
                   <small>{assetProviderIds.length} 项已启用，最终组合由 AI 生成</small>
@@ -1158,7 +1168,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                     </label>;
                   })}
                 </div> : null}
-              </section> : null}
+              </section>
+              </> : null}
             </div>
 
             <VoiceStudio
@@ -1208,7 +1219,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
           </div>
 
           <footer className="dialog-actions recipe-dialog-actions">
-            <div><strong>{selectedRecipe.label}</strong><span>{meteredSelected ? "图片 / 视频按实际方案报价 · 逐项人工确认" : roleAuditProvider?.billing === "subscription" ? "订阅能力不产生现金报价" : "图片 / 视频无现金报价"}</span></div>
+            <div><strong>{selectedRecipe.label}</strong><span>下一步：生成前期构思并等你确认。{meteredSelected ? "图片 / 视频另行报价授权。" : roleAuditProvider?.billing === "subscription" ? "订阅能力不产生现金报价。" : "图片 / 视频无现金报价。"}</span></div>
             <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
             <button className="button button-primary" type="button" onClick={(event) => {
               if (event.currentTarget.form?.reportValidity()) void submit(event.currentTarget.form);

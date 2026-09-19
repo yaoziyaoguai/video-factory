@@ -1,13 +1,14 @@
 import { Activity, AlertTriangle, Check, Clock3, Download, Pause, Play, RotateCcw, Send, X, XCircle } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { StudioCostRunDetail, StudioDecisionInput, StudioNarrationRevisionInput, StudioSceneResourceRevisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { agentLoopPendingNote, agentLoopPhaseLabel, creatorFacingTechnicalText, humanizeCreativeText, platformLabel, providerLabel, catalogModelLabel, runNodeLabel, RUN_NODE_LABELS, sourceAssetReviewBreakdown } from "../presentation.js";
+import { agentLoopPendingNote, agentLoopPhaseLabel, creatorFacingTechnicalText, creatorRunStatusLabel, humanizeCreativeText, platformLabel, providerLabel, catalogModelLabel, runNodeLabel, RUN_NODE_LABELS, sourceAssetReviewBreakdown } from "../presentation.js";
 import { NodeWorkspace, revealNodeWorkspace } from "./NodeWorkspace.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 
 interface RunWorkbenchProps {
+  creativeDiscussion?: ReactNode;
   run: StudioRunDetail;
   providers?: StudioProvider[];
   decisionPending: boolean;
@@ -40,7 +41,7 @@ interface RunWorkbenchProps {
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, creativeDiscussion, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
@@ -78,14 +79,20 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   const nextGateNode = boundaryGate ? nextConfigurableNode(run) : undefined;
   const creatorNodes = run.nodes.filter((node) => node.id === nextGateNode?.id || nodeHasCreatorContent(node, run));
   const activeSpendNode = readOnly ? undefined : creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
-  const remainingCreatorNodes = creatorNodes.filter((node) => node.id !== activeSpendNode?.id);
-  const showReviewSurface = Boolean(readOnly || video?.contentUrl || run.activeIntervention || isStoppedStatus(run.status));
+  const currentArtifactNode = !video?.contentUrl && !creativeDiscussion && run.activeIntervention?.kind !== "creative_review"
+    ? creatorNodes.find((node) => node.id === run.activeIntervention?.nodeId && node.id !== activeSpendNode?.id)
+    : undefined;
+  const remainingCreatorNodes = creatorNodes.filter((node) => node.id !== activeSpendNode?.id && node.id !== currentArtifactNode?.id);
+  const showReviewSurface = Boolean(readOnly || video?.contentUrl || (run.activeIntervention && run.activeIntervention.kind !== "creative_review") || isStoppedStatus(run.status));
   const uncertainPaidNode = run.nodes.find((node) => node.outcomeUncertain === true);
   const visiblePaidNodeSummary = paidNodeSummary?.nodeId === uncertainPaidNode?.id ? paidNodeSummary : undefined;
   const uncertainPaidNodeProviderId = (uncertainPaidNode?.executionReceipt ?? uncertainPaidNode?.plannedExecution)?.providerId;
   const visualReview = visualReviewDecision(run);
+  const sourceReviewEvidenceId = sourceReviewDecisionEvidenceId(run);
+  const sourceReviewDecision = run.activeIntervention?.kind === "source_review_decision";
   const voiceTiming = voiceTimingConflict(run);
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
+  const singleVisualReview = visualReview?.mode === "single";
   // 停下来的这一步的独立复核进度。SSE 载荷里没有它，由 preferRunSnapshot 从上一帧补回来，
   // 否则用户点开决策面板的瞬间看到的是一片空白，要等十秒心跳才出现建议。
   const waitingNodeId = run.activeIntervention?.nodeId;
@@ -174,7 +181,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
     setDecisionSnapshot({
       expectedRunRevision: run.revision,
       interventionId: run.activeIntervention.id,
-      reviewEvidenceId: visualReview?.evidenceId ?? null,
+      reviewEvidenceId: sourceReviewDecision ? sourceReviewEvidenceId : visualReview?.evidenceId ?? null,
     });
     if (kind === "approve") setApproving(true);
     else setRejecting(true);
@@ -192,17 +199,25 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
   };
 
   return (
-    <main className="page run-page">
+    <main className={`page run-page${creativeDiscussion ? " has-creative-discussion" : ""}`}>
       <header className="run-header" data-tour="run-header">
         <div>
-          <p className="eyebrow">{platformLabel(run.platform)} · 目标 {run.durationSeconds} 秒</p>
           <h1>{run.title}</h1>
-          <p className="page-summary">{run.angle} · {run.audience}</p>
+          <div className="run-title-meta"><span>{platformLabel(run.platform)} · 目标 {run.durationSeconds} 秒</span><details className="run-brief-context"><summary>创作目标与受众</summary><p className="page-summary">{run.angle} · {run.audience}</p></details></div>
         </div>
-        <StatusBadge status={run.status} {...(readOnly ? { label: "历史只读" } : {})} />
+        <StatusBadge status={run.status} {...(creatorRunStatusLabel(run) ? { label: creatorRunStatusLabel(run)! } : {})} />
       </header>
 
-      {!readOnly && (run.phases && run.progress ? <ProductionProgress run={run} /> : (
+      <div className="run-workspace-toolbar">
+      <nav className="run-section-nav" aria-label="作品工作区">
+        <a href="#run-current">当前步骤与产物</a>
+        {remainingCreatorNodes.length > 0 ? <a href="#run-artifacts">已保留的内容与设置</a> : null}
+        {costDetail ? <a href="#run-costs">调用与费用</a> : null}
+      </nav>
+
+      {!readOnly ? <details className="run-progress-disclosure" open={creativeDiscussion ? undefined : true}>
+        <summary>制作进度{run.progress ? <span>{run.progress.completedNodes} / {run.progress.totalNodes} 步完成</span> : null}</summary>
+      {run.phases && run.progress ? <ProductionProgress run={run} /> : (
         <section className="workflow-track" aria-label="生产工作流" data-tour="run-workflow">
           {run.nodes.map((node, index) => (
             <div className={`workflow-node node-${node.status}`} key={node.id}>
@@ -211,14 +226,19 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
             </div>
           ))}
         </section>
-      ))}
+      )}
+      </details> : null}
+      </div>
 
+      <div id="run-current" className="run-current-workspace">
+      {creativeDiscussion}
+      {!creativeDiscussion && run.activeIntervention?.kind === "creative_review" ? <p className="workspace-loading" role="status">正在读取当前方案与讨论。读取完成后才能确认此版本。</p> : null}
       {activeSpendNode ? <section className="current-production-action" aria-labelledby="current-production-action-title">
         <header>
           <div><p className="eyebrow">当前需要处理</p><h2 id="current-production-action-title">现在需要你：确认{stepNameFor(activeSpendNode, activeSpendNode.label)}</h2></div>
           <StatusBadge status={run.status} />
         </header>
-        <p>{activeSpendNode.role ?? "当前角色"}完成后，系统会继续推进后续步骤。请先检查它收到的内容、实际使用的模型和本次报价。</p>
+        <p>先核对当前方案、可复用素材与服务端报价，再单独确认本次费用。授权只针对本次制作范围，后续仍保留逐步确认。</p>
         {renderNodeWorkspace(activeSpendNode)}
       </section> : run.status === "running" ? <section className="current-production-action is-running" aria-live="polite">
         <header><div><p className="eyebrow">自动制作中</p><h2>{runningNodeLabel(run)}</h2></div><StatusBadge status={run.status} /></header>
@@ -237,8 +257,8 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
 
       {taskRecoveryPanel}
 
-      {showReviewSurface ? <div className="review-layout">
-        <section className="video-stage" aria-labelledby="preview-title" data-tour="run-preview">
+      {showReviewSurface ? <div className={`review-layout${!video?.contentUrl && !currentArtifactNode ? " review-layout-no-media" : ""}`}>
+        {video?.contentUrl ? <section className="video-stage" aria-labelledby="preview-title" data-tour="run-preview">
           <div className="section-heading stage-heading">
             <div><p className="eyebrow">最终画面</p><h2 id="preview-title">成片预览</h2></div>
             {video?.contentUrl ? (
@@ -254,7 +274,11 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
               <div className="video-unavailable">视频将在渲染完成后出现在这里</div>
             )}
           </div>
-        </section>
+          <p className="preview-provenance">当前成片 · {new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(video.createdAt))} 生成。先观看实际内容，再结合复核意见判断。</p>
+        </section> : currentArtifactNode ? <section className="current-artifact-surface" aria-label="当前步骤产物">
+          <header className="section-heading"><div><h2>{runNodeLabel(currentArtifactNode.id)}</h2><p>当前已保留的产物与设置。核对后再决定是否进入下一步。</p></div></header>
+          {renderNodeWorkspace(currentArtifactNode)}
+        </section> : null}
 
         <aside className="review-panel" aria-label="审片与产物" data-tour="run-review">
           {run.creativeSummary ? <details className="creative-summary run-creative-summary" role="region" aria-label="创作目标摘要">
@@ -267,10 +291,14 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
               <div><dt>结尾收益</dt><dd>{run.creativeSummary.payoff}</dd></div>
             </dl>
           </details> : null}
-          {visualReview ? <section className="independent-review-panel" aria-label="双模型审片结果">
-            <header><strong>成片双审：{visualReview.independentReviews.length}/2 已完成</strong><small>{visualReview.independentReviews.length === 2
-              ? visualReview.evidenceId ? "两者查看同一份成片证据" : "独立审查同一版成片"
-              : "审片结果不完整，不能按完整双审处理"}</small></header>
+          {visualReview ? <section className="independent-review-panel" aria-label={singleVisualReview ? "独立质量复核结果" : "双模型审片结果"}>
+            <header><strong>{singleVisualReview
+              ? `成片独立质量复核：${visualReview.independentReviews.length} 份已完成`
+              : `成片双审：${visualReview.independentReviews.length}/2 已完成`}</strong><small>{singleVisualReview
+              ? "该模型审查同一版成片"
+              : visualReview.independentReviews.length === 2
+                ? visualReview.evidenceId ? "两者查看同一份成片证据" : "独立审查同一版成片"
+                : "审片结果不完整，不能按完整双审处理"}</small></header>
             <div className="merged-review-summary">
               <span>综合结论 · {visualReviewRecommendationLabel(visualReview.recommendation)}</span>
               <p>{creatorFacingTechnicalText(visualReview.summary)}</p>
@@ -285,7 +313,7 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                 <small>{catalogModelLabel(providers, review.modelId) ?? review.modelId}{review.score !== undefined ? ` · ${review.score} 分` : ""}{` · ${review.findingCount} 项问题`}{review.auditVerdict === "repair" ? " · 独立审计未通过" : ""}</small>
                 <p>{creatorFacingTechnicalText(review.summary)}</p>
               </article>)}
-              {visualReview.independentReviews.length < 2 ? <p role="status">缺少 {2 - visualReview.independentReviews.length} 个可验证的独立审片结果，请重新审查当前成片。</p> : null}
+              {!singleVisualReview && visualReview.independentReviews.length < 2 ? <p role="status">缺少 {2 - visualReview.independentReviews.length} 个可验证的独立审片结果，请重新审查当前成片。</p> : null}
             </div>
           </section> : null}
           {readOnly ? (
@@ -319,6 +347,34 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                   onClick={() => { if (onRetryFailedNode) void onRetryFailedNode(run.activeIntervention!.nodeId); }}
                 ><RotateCcw aria-hidden="true" size={17} />重试审查（复用已生成画面）</button>
                 <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
+                  <XCircle aria-hidden="true" size={17} />终止制作
+                </button>
+              </div>
+            </section>
+          ) : run.activeIntervention?.kind === "source_review_decision" && run.activeIntervention ? (
+            <section className="intervention-panel" aria-label="试片质量意见">
+              <div className="attention-heading">
+                <AlertTriangle aria-hidden="true" size={18} />
+                <h2>试片提出质量意见，等你决定</h2>
+              </div>
+              <p>{creatorFacingTechnicalText(run.activeIntervention.reason) ?? run.activeIntervention.reason}</p>
+              <p>这是一份完整的试片审查意见，不是系统替你否决作品。已生成画面和费用都会保留；继续时只复用这份已确认的试片，后续素材是否会产生费用仍以当前报价为准。</p>
+              <div className="decision-actions">
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  disabled={decisionPending || !sourceReviewEvidenceId}
+                  onClick={() => sourceReviewEvidenceId && void onDecision({
+                    action: "request_changes",
+                    expectedRunRevision: run.revision,
+                    interventionId: run.activeIntervention!.id,
+                    reviewEvidenceId: sourceReviewEvidenceId,
+                  })}
+                ><RotateCcw aria-hidden="true" size={17} />调整方案</button>
+                <button className="button button-primary" type="button" disabled={decisionPending || !sourceReviewEvidenceId} onClick={() => openDecision("approve")}>
+                  <Check aria-hidden="true" size={17} />承担这些质量意见后继续
+                </button>
+                <button className="button button-secondary" type="button" disabled={decisionPending || !sourceReviewEvidenceId} onClick={() => openDecision("reject")}>
                   <XCircle aria-hidden="true" size={17} />终止制作
                 </button>
               </div>
@@ -529,14 +585,15 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
         </aside>
       </div> : null}
 
-      {remainingCreatorNodes.length ? <section className="role-workspaces" aria-labelledby="role-workspaces-title">
+      </div>
+      {remainingCreatorNodes.length ? <section id="run-artifacts" className="role-workspaces" aria-labelledby="role-workspaces-title">
         <header className="section-heading"><div><p className="eyebrow">创作内容</p><h2 id="role-workspaces-title">逐项预览与修改</h2><p>这里只呈现会影响作品、并且适合人工调整的内容。路径、版本和运行参数不会占用你的注意力。</p></div><span>{remainingCreatorNodes.length} 项</span></header>
         <div className="node-workspace-list">
           {remainingCreatorNodes.map(renderNodeWorkspace)}
         </div>
       </section> : null}
 
-      {costDetail ? <RunCostDetailPanel detail={costDetail} providers={providers} /> : null}
+      {costDetail ? <div id="run-costs"><RunCostDetailPanel detail={costDetail} providers={providers} /></div> : null}
 
       {replanningVoice && voiceTiming ? (
         <div className="dialog-backdrop" role="presentation">
@@ -607,14 +664,18 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
         <div className="dialog-backdrop" role="presentation">
           <section ref={approveDialogRef} className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="approve-title" tabIndex={-1}>
             <header className="dialog-header">
-              <div><p className="eyebrow">{boundaryGate ? "节点放行" : "最终决定"}</p><h2 id="approve-title">{boundaryGate
+              <div><p className="eyebrow">{sourceReviewDecision ? "试片质量意见" : boundaryGate ? "节点放行" : "最终决定"}</p><h2 id="approve-title">{sourceReviewDecision
+                ? "确认承担这些质量意见后继续"
+                : boundaryGate
                 ? `确认放行「${runNodeLabel(run.activeIntervention?.nodeId ?? "")}」`
                 : reviewItems.length > 0 ? "逐条表态后批准成片" : "确认批准成片"}</h2></div>
               <button className="icon-button" type="button" onClick={closeApproveDecision} disabled={decisionPending} title="关闭"><X aria-hidden="true" size={19} /></button>
             </header>
             {/* 边界停点批准的是"这一步的产出可以往下走"，不生成发布包、不结束终审，也和机器质检无关。
                 这里原来一律讲终审的话——用户点下去之前读到的最后一段话是错的。 */}
-            <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p>{boundaryGate
+            <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p>{sourceReviewDecision
+              ? <><strong>你确认的是：已看过这份试片意见，愿意按当前方案继续。</strong><span>系统不会重新购买已生成试片；其它尚未生成的素材仍会先依据当前报价和授权处理。</span></>
+              : boundaryGate
               ? <><strong>放行后这一步的结果就固定下来，制作按现在保存的设置继续往下走。</strong><span>想换模型、参数或输入，请先关掉这个窗口去配置；放行之后要改，就得让这一步连同下游重做。</span></>
               : <><strong>{reviewItems.length > 0
                 ? `审片提出 ${reviewItems.length} 条结论，请逐条看过并表态。`
@@ -702,7 +763,8 @@ export function RunWorkbench({ run, providers = [], decisionPending, onDecision,
                 })}
               ><Check aria-hidden="true" size={17} />{decisionPending
                 ? "正在批准..."
-                : boundaryGate ? "确认放行，进入下一步"
+                : sourceReviewDecision ? "确认承担并继续"
+                  : boundaryGate ? "确认放行，进入下一步"
                   : reviewItems.length > 0 ? "逐条表态已完成，生成发布包" : "确认批准并生成发布包"}</button>
             </footer>
           </section>
@@ -989,6 +1051,7 @@ function paidOperationCostLabel(item: StudioPaidNodeSummary["items"][number]): s
 }
 
 interface VisualReviewDecision {
+  mode: "single" | "dual" | "incomplete";
   recommendation: "approve" | "revise" | "reject";
   confidence: number;
   summary: string;
@@ -1120,14 +1183,17 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
   if (!isRecord(effectiveOutput)) return undefined;
   const report = isRecord(effectiveOutput.report) ? effectiveOutput.report : effectiveOutput;
   if (report.recommendation !== "approve" && report.recommendation !== "revise" && report.recommendation !== "reject") return undefined;
+  const reviewRecommendation = report.recommendation as VisualReviewDecision["recommendation"];
   const confidence = typeof report.confidence === "number" && Number.isFinite(report.confidence)
     ? Math.min(1, Math.max(0, report.confidence))
     : 0;
-  const scores = isRecord(report.scores) ? Object.entries(report.scores)
+  const reportScoreValues = isRecord(report.scores) ? Object.entries(report.scores)
     .filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1]))
+    : [];
+  const scores = reportScoreValues
     .map(([key, value]) => ({ key, label: VISUAL_SCORE_LABELS[key] ?? key, value }))
     .sort((left, right) => left.value - right.value)
-    .slice(0, 2) : [];
+    .slice(0, 2);
   const previousReviewIndex = previousRenderedReviewIndex(node);
   const findings = Array.isArray(report.findings) ? report.findings.flatMap((value, findingIndex): VisualReviewFinding[] => {
     if (!isRecord(value) || !Number.isInteger(value.timecodeMs) || Number(value.timecodeMs) < 0) return [];
@@ -1162,21 +1228,25 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
     run.artifacts.some((artifact) => artifact.id === artifactId && artifact.kind === "review_report" && artifact.producerNodeId === "visual-review")
   ));
   const reviewScope = isRecord(report.reviewScope) ? report.reviewScope : undefined;
+  const actualModels = Array.isArray(reviewScope?.actualModels)
+    ? reviewScope.actualModels.filter(isRecord)
+    : [];
   // 各分支独立审计的投票，按 providerId+modelId 认领。审计查的是"这份审片报告本身站不站得住"，
   // 与作品好坏是两件事：auditVerdict 为 repair 时这份意见的结论需要用户重点核对，但它不是判决。
   const branchAuditVerdicts = new Map<string, "pass" | "repair">();
-  if (Array.isArray(reviewScope?.actualModels)) {
-    for (const model of reviewScope.actualModels) {
+  if (actualModels.length > 0) {
+    for (const model of actualModels) {
       if (!isRecord(model) || typeof model.providerId !== "string" || typeof model.modelId !== "string") continue;
       if (model.auditVerdict !== "pass" && model.auditVerdict !== "repair") continue;
-      branchAuditVerdicts.set(`${model.providerId} ${model.modelId}`, model.auditVerdict);
+      branchAuditVerdicts.set(`${model.providerId}\u0000${model.modelId}`, model.auditVerdict);
     }
   }
-  const independentReviews = Array.isArray(report.independentReviews)
+  const reportedReviews = Array.isArray(report.independentReviews)
     ? report.independentReviews.flatMap((value): VisualReviewBranch[] => {
         if (!isRecord(value) || typeof value.providerId !== "string" || typeof value.modelId !== "string" || !isRecord(value.report)) return [];
         const branch = value.report;
         if (branch.recommendation !== "approve" && branch.recommendation !== "revise" && branch.recommendation !== "reject") return [];
+        const recommendation = branch.recommendation as VisualReviewBranch["recommendation"];
         const branchScores = isRecord(branch.scores)
           ? Object.values(branch.scores).filter((score): score is number => typeof score === "number" && Number.isFinite(score))
           : [];
@@ -1184,7 +1254,7 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
         return [{
           providerId: value.providerId,
           modelId: value.modelId,
-          recommendation: branch.recommendation,
+          recommendation,
           summary: typeof branch.summary === "string" && branch.summary.trim() ? branch.summary.trim() : "该模型没有提供审片摘要。",
           ...(branchScores.length ? { score: Math.round(branchScores.reduce((sum, score) => sum + score, 0) / branchScores.length) } : {}),
           findingCount: Array.isArray(branch.findings) ? branch.findings.filter((finding) => (
@@ -1194,8 +1264,34 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
         }];
       })
     : [];
+  const singleModel = actualModels.length === 1
+    && typeof actualModels[0]?.providerId === "string"
+    && typeof actualModels[0]?.modelId === "string"
+    ? { providerId: actualModels[0].providerId, modelId: actualModels[0].modelId }
+    : undefined;
+  const singleAuditVerdict = singleModel
+    ? branchAuditVerdicts.get(`${singleModel.providerId}\u0000${singleModel.modelId}`)
+    : undefined;
+  const mode = report.independentReviews === undefined && singleModel
+    ? "single"
+    : actualModels.length === 2 && reportedReviews.length === 2
+      ? "dual"
+      : "incomplete";
+  const independentReviews = mode === "single" && singleModel
+    ? [{
+        ...singleModel,
+        recommendation: reviewRecommendation,
+        summary: typeof report.summary === "string" && report.summary.trim() ? report.summary.trim() : "该模型没有提供审片摘要。",
+        ...(reportScoreValues.length ? { score: Math.round(reportScoreValues.reduce((sum, [, score]) => sum + score, 0) / reportScoreValues.length) } : {}),
+        findingCount: reviewedFindings.filter((finding) => finding.evidenceStatus === "failed" && finding.severity !== "info").length,
+        ...(singleAuditVerdict
+          ? { auditVerdict: singleAuditVerdict }
+          : {}),
+      }]
+    : reportedReviews;
   return {
-    recommendation: report.recommendation,
+    mode,
+    recommendation: reviewRecommendation,
     confidence,
     summary: typeof report.summary === "string" && report.summary.trim() ? report.summary.trim() : "视觉审片发现需要人工确认的问题。",
     findingCount: reviewedFindings.filter((finding) => finding.evidenceStatus === "failed" && finding.severity !== "info").length,
@@ -1208,6 +1304,15 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
     independentReviews,
     lowestScores: scores,
   };
+}
+
+function sourceReviewDecisionEvidenceId(run: StudioRunDetail): string | null {
+  if (run.activeIntervention?.kind !== "source_review_decision") return null;
+  const node = run.nodes.find((candidate) => candidate.id === run.activeIntervention?.nodeId);
+  const output = node?.outputState?.versions.find((version) => version.id === node?.outputState?.effectiveVersionId)?.output ?? node?.output;
+  if (!isRecord(output) || !isRecord(output.sourceReview)) return null;
+  const evidenceId = output.sourceReview.evidenceId;
+  return typeof evidenceId === "string" && /^[a-f0-9]{64}$/.test(evidenceId) ? evidenceId : null;
 }
 
 function visualReviewRecommendationLabel(value: VisualReviewDecision["recommendation"]): string {
@@ -1397,10 +1502,9 @@ function ProductionProgress({ run }: { run: StudioRunDetail }) {
   if (!run.progress || !run.phases) return null;
   return <section className="production-progress" aria-label="制作进度" data-tour="run-workflow">
     <header>
-      <div><p className="eyebrow">制作进度</p><strong>{run.progress.completedNodes} / {run.progress.totalNodes} 个步骤完成</strong></div>
-      <span>{run.progress.percentage}%</span>
+      <div><strong>制作阶段</strong><small>已完成 {run.progress.completedNodes} / {run.progress.totalNodes} 个步骤</small></div>
+      <span>{creatorRunStatusLabel(run) ?? runNodeLabel(run.currentNodeId)}</span>
     </header>
-    <div className="production-progress-bar" aria-hidden="true"><span style={{ width: `${run.progress.percentage}%` }} /></div>
     <div className="production-phases">
       {run.phases.map((phase, index) => <article className={`production-phase is-${phase.status}`} key={phase.id}>
         <span className="production-phase-index">{phase.status === "completed" ? <Check aria-hidden="true" size={13} /> : index + 1}</span>

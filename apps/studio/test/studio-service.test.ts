@@ -1659,7 +1659,7 @@ describe("StudioService", () => {
     assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot, undefined);
   });
 
-  it("requires two distinct production visual reviewers and role audit before Studio dispatch", async () => {
+  it("requires DeepSeek single visual review and role audit before Studio dispatch", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-dual-review-readiness-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const baseProviders = [
@@ -1684,24 +1684,17 @@ describe("StudioService", () => {
       listProviders: async () => [...baseProviders, ...extraProviders],
     });
 
-    await assert.rejects(() => studio().start(productionBrief), /正式制作需要 DeepSeek 与 Codex 使用两个不同模型完成独立双审/);
-    await assert.rejects(() => studio([{
-      id: "codex-visual-review-v1",
-      capability: "quality.review.visual",
-      label: "Codex 审片",
-      available: true,
-      kind: "external",
-      defaultModelId: "deepseek-flash",
-    }, {
+    await assert.rejects(() => studio().start(productionBrief), /正式制作需要 DeepSeek 视觉审片模型可用，且独立质量复核已配置/);
+    await studio([{
       id: "codex-role-auditor-v1",
       capability: "role.audit",
       label: "独立质量复核",
       available: true,
       kind: "external",
-    }]).start(productionBrief), /两个不同模型/);
-    assert.equal(pipeline.dispatchCount, 0);
+    }]).start(productionBrief);
+    assert.equal(pipeline.dispatchCount, 1);
 
-    await studio([{
+    await assert.rejects(() => studio([{
       id: "codex-visual-review-v1",
       capability: "quality.review.visual",
       label: "Codex 审片",
@@ -1714,7 +1707,10 @@ describe("StudioService", () => {
       label: "独立质量复核",
       available: true,
       kind: "external",
-    }]).start(productionBrief);
+    }]).start({
+      ...productionBrief,
+      providers: { ...productionBrief.providers, visualReview: "codex-visual-review-v1" },
+    }), /正式制作需要 DeepSeek 视觉审片模型可用/);
     assert.equal(pipeline.dispatchCount, 1);
   });
 
@@ -4121,6 +4117,38 @@ describe("StudioService", () => {
     assert.notEqual(assetNodeId, "assets");
   });
 
+  it("retries an incomplete source review through the Studio service without treating it as a generic failed retry", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-source-review-retry-"));
+    const run = executableWaitingRun(workspaceRoot);
+    run.status = "needs_human";
+    run.nodeRuns = [{
+      nodeId: "assets",
+      status: "needs_human",
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      artifactIds: [],
+      qualityGateResults: [],
+      intervention: {
+        id: "source-review-retry-1",
+        nodeId: "assets",
+        kind: "source_review_retry",
+        reason: "镜头 1 已生成，但试片审查暂未完成。",
+        requiredAction: "reject",
+        options: ["reject"],
+        createdAt: run.finishedAt!,
+      },
+    }];
+    run.interventions = [run.nodeRuns[0]!.intervention!];
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    const response = await service.retryFailedNode(run.id, "assets");
+
+    assert.equal(response.status, "running");
+    assert.equal(pipeline.lastRetriedNodeId, "assets");
+    assert.equal(pipeline.retryDispatchCount, 1);
+  });
+
   it("reconciles an ordinary failed series attempt before starting its replacement", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-restart-reconcile-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
@@ -4216,7 +4244,7 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
-  it("does not let legacy global model defaults change a new or replayed start", async () => {
+  it("freezes a global model default at creation so a replay cannot inherit a later setting", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-model-idempotency-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const environment = {
@@ -4238,7 +4266,8 @@ describe("StudioService", () => {
     };
 
     const first = await service.startRun(input, "model-default-request-1");
-    assert.equal((pipeline.lastInput as ProductionBrief).models?.["seedance-video-v1"], undefined);
+    assert.equal((pipeline.lastInput as ProductionBrief).models?.["seedance-video-v1"], "doubao-seedance-2-5-260628");
+    assert.equal((pipeline.lastInput as ProductionBrief).modelSelectionSources?.["seedance-video-v1"], "global_default");
     await service.updateCreatorSettings({ modelDefaults: { "seedance-video-v1": "doubao-seedance-2-0-260128" } });
     const restarted = new StudioService({
       workspaceRoot,
@@ -4311,7 +4340,7 @@ describe("StudioService", () => {
     assert.equal((await migratedDefault.getCreatorSettings()).voiceDirectionCustomized, false);
   });
 
-  it("inherits a missing production role without inheriting the legacy global model default", async () => {
+  it("freezes the qualified global model default when it inherits a missing production role", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-role-default-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const service = new StudioService({
@@ -4337,8 +4366,8 @@ describe("StudioService", () => {
 
     const dispatched = pipeline.lastInput as ProductionBrief;
     assert.equal(dispatched.providers.script, "codex-screenwriter-v1");
-    assert.equal(dispatched.models?.["codex-screenwriter-v1"], undefined);
-    assert.equal(dispatched.modelSelectionSources?.["codex-screenwriter-v1"], undefined);
+    assert.equal(dispatched.models?.["codex-screenwriter-v1"], "gpt-5.6-sol");
+    assert.equal(dispatched.modelSelectionSources?.["codex-screenwriter-v1"], "global_default");
   });
 
   it("replays a referenced start after the persisted node safely releases its temporary upload", async () => {
@@ -4695,7 +4724,7 @@ describe("StudioService", () => {
     assert.equal(pipeline.dispatchCount, 1);
   });
 
-  it("ignores paused template model defaults and honors an explicit run override", async () => {
+  it("ignores paused template model defaults, freezes the global default, and honors an explicit run override", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const environment = {
@@ -4730,8 +4759,8 @@ describe("StudioService", () => {
     };
 
     await service.startRun(paidBrief);
-    assert.equal((pipeline.lastInput as ProductionBrief).models?.["seedance-video-v1"], undefined);
-    assert.equal((pipeline.lastInput as ProductionBrief).modelSelectionSources?.["seedance-video-v1"], undefined);
+    assert.equal((pipeline.lastInput as ProductionBrief).models?.["seedance-video-v1"], "doubao-seedance-1-5-pro-251215");
+    assert.equal((pipeline.lastInput as ProductionBrief).modelSelectionSources?.["seedance-video-v1"], "global_default");
 
     await service.startRun({
       ...paidBrief,
@@ -4831,6 +4860,51 @@ describe("StudioService", () => {
 
     assert.equal(pipeline.run.initialInput.models?.["seedance-video-v1"], "doubao-seedance-2-0-fast-260128");
     assert.equal(pipeline.lastExecutionConfigurationNodeId, "assets");
+  });
+
+  it("restores this run's frozen model selection when a node override is cleared", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-node-model-restore-"));
+    const initialInput: ProductionBrief = {
+      ...brief,
+      providers: {
+        ...brief.providers,
+        director: "api-visual-director-v1",
+        assets: "ai-shot-router-v1",
+        visualReview: "deepseek-visual-review-v1",
+      },
+      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
+      modelSelectionSources: { "seedance-video-v1": "global_default" },
+      frozenModelSelections: {
+        "seedance-video-v1": { modelId: "doubao-seedance-2-5-260628", source: "global_default" },
+      },
+      economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
+    };
+    const pipeline = new FakePipeline({
+      ...waitingRun(workspaceRoot),
+      workflowVersion: productionWorkflowVersion(initialInput),
+      initialInput,
+    });
+    const service = new StudioService({
+      workspaceRoot,
+      pipeline,
+      commandAvailable: allCommandsAvailable,
+      environment: { ARK_API_KEY: "test-ark-key", SEEDANCE_ESTIMATED_CNY_PER_CLIP: "3.5" },
+      codexAvailability: { available: true, reason: "" },
+      deepseekCodexAvailability: { available: true, reason: "" },
+    });
+
+    await service.applyNodeExecutionConfiguration("run-1", "assets", {
+      modelSelections: { "seedance-video-v1": "doubao-seedance-2-0-fast-260128" },
+      expectedRunRevision: 0,
+    }, "vfqa");
+    await service.applyNodeExecutionConfiguration("run-1", "assets", {
+      modelSelections: { "seedance-video-v1": null },
+      expectedRunRevision: 1,
+    }, "vfqa");
+
+    assert.equal(pipeline.run.initialInput.models?.["seedance-video-v1"], "doubao-seedance-2-5-260628");
+    assert.equal(pipeline.run.initialInput.modelSelectionSources?.["seedance-video-v1"], "global_default");
   });
 
   it("replans direction when a video model switch changes the generation duration contract", async () => {
@@ -5542,6 +5616,7 @@ describe("StudioService", () => {
       preview_url: `https://images.example/${assetId}.jpg`,
       source_url: `https://www.pexels.com/video/${assetId}`,
       creator: "Creator",
+      creator_url: "https://www.pexels.com/@creator",
       license_note: "Pexels license",
       query: "早餐摊",
       score: 90,
@@ -5723,6 +5798,14 @@ describe("StudioService", () => {
       }, "trusted-owner"),
       /preview_url 不能修改/,
     );
+    const forgedCredit = structuredClone(report);
+    forgedCredit.scene_candidates[0]!.candidates[0]!.creator_url = "https://example.com/another-author";
+    await assert.rejects(
+      () => service.applyNodeOverride("run-1", "asset-candidates", {
+        document: { artifactId: "artifact-candidates", content: forgedCredit },
+      }, "trusted-owner"),
+      /creator_url 不能修改/,
+    );
   });
 
   it("rejects document edits that do not target the node's current JSON artifact", async () => {
@@ -5765,6 +5848,8 @@ describe("StudioService", () => {
         local_path: originalPath,
         source_url: "https://example.com/original",
         creator: "Original creator",
+        creator_url: "https://example.com/original-creator",
+        preview_url: "https://example.com/original-preview.jpg",
         license_note: "Original license",
         query: "original",
       }],
@@ -5817,6 +5902,8 @@ describe("StudioService", () => {
     assert.equal(savedPlan.scene_assets[0]?.provider_id, "human-editor");
     assert.equal(savedPlan.scene_assets[0]?.creator, "trusted-owner");
     assert.equal(savedPlan.scene_assets[0]?.source_url, undefined);
+    assert.equal(savedPlan.scene_assets[0]?.creator_url, undefined);
+    assert.equal(savedPlan.scene_assets[0]?.preview_url, undefined);
     assert.equal(savedPlan.scene_assets[0]?.rights_status, "review_required");
     assert.match(savedPlan.scene_assets[0]?.license_note ?? "", /发布前/);
 
@@ -5903,6 +5990,8 @@ describe("StudioService", () => {
       provider_id: "pexels-stock-v1",
       source_url: "https://www.pexels.com/video/1",
       creator: "Real creator",
+      creator_url: "https://www.pexels.com/@real-creator",
+      preview_url: "https://images.pexels.com/preview-1.jpg",
       license_note: "Pexels terms",
     }] };
     await mkdir(path.dirname(assetPlanPath), { recursive: true });
@@ -5912,7 +6001,7 @@ describe("StudioService", () => {
     run.nodeRuns.unshift({ nodeId: "assets", status: "succeeded", output: { assetPlanPath }, artifactIds: ["plan", "media"], qualityGateResults: [] });
     run.artifacts.push(
       { id: "plan", kind: "asset_plan", uri: assetPlanPath, createdAt: "2026-08-21T10:00:00.000Z", contentType: "application/json", producer: { nodeId: "assets", attempt: 1 }, provenance: { providerId: "asset-worker" } },
-      { id: "media", kind: "media_asset", uri: mediaPath, createdAt: "2026-08-21T10:00:00.000Z", contentType: "video/mp4", producer: { nodeId: "assets", attempt: 1 }, provenance: { providerId: "pexels-stock-v1", sourceUrl: "https://www.pexels.com/video/1", creator: "Real creator", licenseNote: "Pexels terms" } },
+      { id: "media", kind: "media_asset", uri: mediaPath, createdAt: "2026-08-21T10:00:00.000Z", contentType: "video/mp4", producer: { nodeId: "assets", attempt: 1 }, provenance: { providerId: "pexels-stock-v1", sourceUrl: "https://www.pexels.com/video/1", creator: "Real creator", creatorUrl: "https://www.pexels.com/@real-creator", previewUrl: "https://images.pexels.com/preview-1.jpg", licenseNote: "Pexels terms" } },
     );
     const pipeline = new FakePipeline(run);
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
@@ -5921,6 +6010,8 @@ describe("StudioService", () => {
     forged.scene_assets[0]!.provider_id = "local";
     forged.scene_assets[0]!.source_url = "local://owned";
     forged.scene_assets[0]!.creator = "attacker";
+    forged.scene_assets[0]!.creator_url = "https://example.com/attacker";
+    forged.scene_assets[0]!.preview_url = "https://example.com/forged-preview.jpg";
     forged.scene_assets[0]!.license_note = "self owned";
 
     await service.applyNodeOverride("run-1", "assets", {
@@ -5931,6 +6022,8 @@ describe("StudioService", () => {
     assert.equal(saved.scene_assets[0]?.provider_id, "pexels-stock-v1");
     assert.equal(saved.scene_assets[0]?.source_url, "https://www.pexels.com/video/1");
     assert.equal(saved.scene_assets[0]?.creator, "Real creator");
+    assert.equal(saved.scene_assets[0]?.creator_url, "https://www.pexels.com/@real-creator");
+    assert.equal(saved.scene_assets[0]?.preview_url, "https://images.pexels.com/preview-1.jpg");
     assert.equal(saved.scene_assets[0]?.license_note, "Pexels terms");
   });
 

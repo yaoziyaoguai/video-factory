@@ -40,11 +40,14 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
         </div>
       </header>
 
-      <section className="visual-contact-sheet visual-plan" aria-label="镜头方向示意" data-tour="visual-direction">
+      <nav className="opportunity-context-nav" aria-label="选题内容"><a href="#evidence-heading">先看来源与事实 · {opportunity.evidence.length} 条线索</a><a href="#creative-direction">查看创作建议</a></nav>
+
+      <section id="creative-direction" className="visual-contact-sheet visual-plan" aria-label="镜头方向示意" data-tour="visual-direction">
           <header className="contact-sheet-heading">
-            <div><span>镜头方向预览</span><h2>{hasSavedVisualPlan ? "已保存的镜头方向" : "可参考的镜头方向"}</h2></div>
+            <div><span>创作建议 · 不代表外部事实</span><h2>{hasSavedVisualPlan ? "已保存的镜头方向" : "可参考的镜头方向"}</h2></div>
             <p>{visualPlan.strategy}</p>
           </header>
+          <p className="creative-direction-disclaimer">{hasSavedVisualPlan ? "这是已保存的创作方向，正式镜头仍由你与导演逐步确认。" : "以下仅供构思参考，尚未生成画面；不会自动替你填成硬性要求。"}</p>
           <div className="visual-beat-list">
             {visualPlan.beats.map((beat, index) => (
               <article key={beat.id} className="visual-beat">
@@ -65,7 +68,7 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
       </div>
 
       <div className="creative-stage">
-        <span className="stage-kicker"><Target aria-hidden="true" size={14} />开场命题</span>
+        <span className="stage-kicker"><Target aria-hidden="true" size={14} />开场表达建议</span>
         <blockquote>{opportunity.hook}</blockquote>
         <div className="stage-meta">
           <span>{opportunity.audience}</span>
@@ -77,7 +80,7 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
         <div className="section-heading">
           <div>
             <span className="eyebrow">依据</span>
-            <h2 id="evidence-heading">来源线索</h2>
+            <h2 id="evidence-heading">来源线索与已读事实</h2>
           </div>
           <span>{opportunity.evidence.length} 条</span>
         </div>

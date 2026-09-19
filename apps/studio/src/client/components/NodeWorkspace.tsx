@@ -7,6 +7,7 @@ import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
+import { UnsplashAttribution, unsplashPublicUrl } from "./UnsplashAttribution.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
 import { PlanningStagesPanel } from "./PlanningStagesPanel.js";
 import type { StudioPlanningEditableStage, StudioPlanningStage } from "../../shared/api.js";
@@ -573,7 +574,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
                   {pendingQuote.quote.scopeSummary.excludedAssets?.length ? <div><dt>本片镜数</dt><dd>付费 {pendingQuote.quote.scopeSummary.assets.length} 个 · 免收费 {pendingQuote.quote.scopeSummary.excludedAssets.length} 个 · 合计 {pendingQuote.quote.scopeSummary.assets.length + pendingQuote.quote.scopeSummary.excludedAssets.length} 个</dd></div> : null}
                   {pendingQuote.quote.scopeSummary.uncertainty.map((note) => <div key={note}><dt>不确定项</dt><dd>{note}</dd></div>)}
                 </dl>
-                <small>确认后本次制作会自动继续，范围内的有限修复不再逐项打扰；授权额是上限，不是目标。</small>
+                <small>授权后执行本次范围，范围内的有限修复共用此额度；后续方案仍需按流程确认。授权额是上限，不是必须花满的目标。</small>
                 <div className="spend-gate-buttons">
                   {node.id === "assets" ? <button className="button button-ghost" type="button" disabled={busy || scopeAuthorizing} onClick={() => { setError(undefined); setRejectingSpend(true); }}>这份报价不合适</button> : null}
                   <button className="button button-ghost" type="button" disabled={busy || scopeAuthorizing} onClick={() => setPendingQuote(undefined)}>重新填写额度</button>
@@ -613,8 +614,8 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
               {visualArtifacts.map((artifact, index) => <figure key={artifact.id}>
                 {artifact.contentType?.startsWith("video/")
                   ? <video aria-label={`${artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`} 画面预览`} src={artifact.contentUrl} controls playsInline preload="metadata" />
-                  : <img alt={`${artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`} 画面预览`} src={artifact.contentUrl} loading="lazy" />}
-                <figcaption><span>{artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`}</span><small>{providerLabel(artifact.providerId) ?? "素材来源未记录"}</small></figcaption>
+                  : <img alt={`${artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`} 画面预览`} src={artifact.providerId === "unsplash-stock-v1" ? unsplashPublicUrl(artifact.previewUrl, "images.unsplash.com") : artifact.contentUrl} loading="lazy" />}
+                <figcaption><span>{artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`}</span><small>{artifact.providerId === "unsplash-stock-v1" ? <UnsplashAttribution creator={artifact.creator} creatorUrl={artifact.creatorUrl} /> : providerLabel(artifact.providerId) ?? "素材来源未记录"}</small></figcaption>
               </figure>)}
             </div>
           </div> : null}

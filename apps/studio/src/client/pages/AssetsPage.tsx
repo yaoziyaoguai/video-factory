@@ -25,6 +25,7 @@ import type {
 import { studioApi } from "../api.js";
 import { creatorFacingTechnicalText, providerLabel } from "../presentation.js";
 import { statusLabel } from "../components/StatusBadge.js";
+import { UnsplashAttribution, unsplashPublicUrl } from "../components/UnsplashAttribution.js";
 
 type AssetFilter = "all" | StudioAssetMediaKind | "reusable" | "needs_review";
 type AssetCollection = "creative" | "records";
@@ -126,6 +127,7 @@ export function AssetsPage() {
           <p className="eyebrow">创作资产</p>
           <h1>素材库</h1>
           <p className="page-summary">{collection === "creative" ? "可再次用于创作的画面与声音，按内容去重并保留授权和入片记录。" : "最终成片、脚本与质检记录独立归档，不混入可复用素材。"}</p>
+          <Link to="/resources#visual-providers">配置外部素材来源</Link>
         </div>
         <div className="asset-library-count"><strong>{collectionAssets.length}</strong><span>{collection === "creative" ? "项创作素材" : "项成片与记录"}</span></div>
       </header>
@@ -225,7 +227,9 @@ function AssetCard({ asset, usage, run, grouped = false }: { asset: StudioIndexe
     <div className="asset-card-copy">
       <header><span>{originLabel(asset.origin)} · {mediaKindLabel(asset.mediaKind)}</span><b className={`reuse-${asset.reuseStatus}`}>{reuseStatusLabel(asset.reuseStatus)}</b></header>
       <h3>{assetTitle(asset, resolvedUsage)}</h3>
-      <p className="asset-provider">{providerLabel(asset.providerId) ?? "其他制作服务"}{creator ? ` · ${creator}` : ""}</p>
+      <p className="asset-provider">{(resolvedUsage?.providerId ?? asset.providerId) === "unsplash-stock-v1"
+        ? <UnsplashAttribution creator={resolvedUsage?.creator ?? creator} creatorUrl={resolvedUsage?.creatorUrl ?? asset.creatorUrl} />
+        : <>{providerLabel(asset.providerId) ?? "其他制作服务"}{creator ? ` · ${creator}` : ""}</>}</p>
       {metadata.length ? <ul className="asset-metadata" aria-label="素材规格">{metadata.map((item) => <li key={item}>{item}</li>)}</ul> : null}
       {visibleTags.length ? <div className="asset-tags">{visibleTags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
       <footer>
@@ -237,8 +241,12 @@ function AssetCard({ asset, usage, run, grouped = false }: { asset: StudioIndexe
 }
 
 function AssetPreview({ asset, usage = asset.usages.at(-1), identity }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; identity: string }) {
+  const isUnsplash = (usage?.providerId ?? asset.providerId) === "unsplash-stock-v1";
+  const imageUrl = isUnsplash
+    ? unsplashPublicUrl(usage?.previewUrl ?? asset.previewUrl, "images.unsplash.com")
+    : asset.contentUrl;
   if (asset.contentUrl && asset.mediaKind === "video") return <div className="asset-card-preview"><video aria-label={`${assetTitle(asset, usage)} 预览`} src={`${asset.contentUrl}#t=0.1`} muted controls playsInline preload="metadata" /><span className="asset-card-identity">{identity}</span></div>;
-  if (asset.contentUrl && asset.mediaKind === "image") return <div className="asset-card-preview"><img src={asset.contentUrl} alt={`${assetTitle(asset, usage)} 素材`} loading="lazy" /><span className="asset-card-identity">{identity}</span></div>;
+  if (imageUrl && asset.mediaKind === "image") return <div className="asset-card-preview"><img src={imageUrl} alt={`${assetTitle(asset, usage)} 素材`} loading="lazy" /><span className="asset-card-identity">{identity}</span></div>;
   if (asset.contentUrl && asset.mediaKind === "audio") return <div className="asset-card-preview is-audio"><Music2 aria-hidden="true" size={28} /><audio aria-label={`${assetTitle(asset, usage)} 试听`} src={asset.contentUrl} controls preload="none" /><span className="asset-card-identity">{identity}</span></div>;
   const Icon = asset.mediaKind === "video" ? Film : asset.mediaKind === "image" ? ImageIcon : asset.mediaKind === "audio" ? Music2 : asset.mediaKind === "document" ? FileText : Database;
   return <div className={`asset-card-preview is-${asset.mediaKind}`}><Icon aria-hidden="true" size={28} /><span>{mediaKindLabel(asset.mediaKind)}</span><span className="asset-card-identity">{identity}</span></div>;

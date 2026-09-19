@@ -6,6 +6,20 @@ import { describe, it } from "node:test";
 import { PythonWorkerClient } from "../src/index.js";
 
 describe("PythonWorkerClient", () => {
+  it("keeps stock attribution through the actual worker protocol parser", async () => {
+    const provenance = {
+      providerId: "unsplash-stock-v1", producerNodeId: "assets", attempt: 1,
+      licenseNote: "Photo by Photographer on Unsplash", creator: "Photographer",
+      creatorUrl: "https://unsplash.com/@photographer?utm_source=videofactory&utm_medium=referral",
+      previewUrl: "https://images.unsplash.com/photo-1?w=400&ixid=view",
+    };
+    const wire = { protocolVersion: "video-factory/worker-v1", commandId: "credit", status: "succeeded",
+      output: {}, artifacts: [{ kind: "media_asset", uri: "/tmp/image.jpg", sizeBytes: 10,
+        sha256: "c".repeat(64), contentType: "image/jpeg", provenance }] };
+    const client = new PythonWorkerClient({ command: [process.execPath, "-e", `process.stdout.write(${JSON.stringify(JSON.stringify(wire))})`], timeoutMs: 2_000 });
+    const result = await client.run({ protocolVersion: "video-factory/worker-v1", commandId: "credit" });
+    assert.deepEqual(result.artifacts[0]?.provenance, provenance);
+  });
   it("exchanges one versioned JSON request and response with the real Python worker", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-worker-client-"));
     const repositoryRoot = process.cwd();

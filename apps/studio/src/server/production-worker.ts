@@ -191,6 +191,17 @@ export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOption
       constraints: ["通用图库不是具体新闻事件证据", "不得把图库人物描述为事件当事人", "中文语义搜索结果可能需要人工复核"],
     });
   }
+  if (options.environment.UNSPLASH_ACCESS_KEY?.trim()) {
+    providers.push({
+      id: "unsplash-stock-v1",
+      label: "Unsplash 图片",
+      billing: "free",
+      modes: ["摄影图片", "作者署名"],
+      deliveryTypes: assetProviderDeliveryTypes("unsplash-stock-v1"),
+      strengths: ["通用生活、建筑、自然与物件摄影，补充静态画面"],
+      constraints: ["只交付图片，不交付视频或动作", "不是具体新闻事件证据", "需保留作者署名，人物和商标权仍需核对"],
+    });
+  }
   for (const setting of readMeteredImageProviderSettings(options.environment)) {
     providers.push({
       id: setting.providerId,
@@ -235,6 +246,7 @@ export function buildProductionProviderRuntimeMetadata(environment: NodeJS.Proce
     { id: "local-editorial-v1", label: "本地编辑卡片", modelId: "editorial-v1", transport: "local_process", billing: "free" },
     { id: "pexels-stock-v1", label: "Pexels 视频", modelId: "pexels-api", transport: "http_api", billing: "free" },
     { id: "pixabay-stock-v1", label: "Pixabay 视频", modelId: "pixabay-api", transport: "http_api", billing: "free" },
+    { id: "unsplash-stock-v1", label: "Unsplash 图片", modelId: "unsplash-api", transport: "http_api", billing: "free" },
     { id: "macos-say-v1", label: "macOS 系统配音", modelId: "say", transport: "local_process", billing: "free" },
     { id: "kokoro-local-v1", label: "Kokoro 本地配音", modelId: "kokoro", transport: "local_process", billing: "local_compute" },
     { id: "python-ffmpeg-v1", label: "FFmpeg 竖屏渲染", modelId: "ffmpeg", transport: "local_process", billing: "local_compute" },

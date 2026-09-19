@@ -12,7 +12,6 @@ broker_unit=/etc/systemd/system/vf-codex-broker.service
 deepseek_broker_service=vf-deepseek-codex-broker
 deepseek_broker_unit=/etc/systemd/system/vf-deepseek-codex-broker.service
 broker_root=/opt/video-factory/codex-broker
-broker_user=vf-codex
 broker_socket=/run/video-factory-codex/worker.sock
 deepseek_broker_user=vf-deepseek-codex
 deepseek_broker_state_root=/var/lib/video-factory-deepseek-codex
@@ -22,10 +21,14 @@ compose=(docker compose --project-name video-factory --env-file "$environment_fi
 # ECS 在中国大陆构建镜像时使用阿里云 Alpine 源；CI 直接 docker build 时保留全球官方源。
 export ALPINE_MIRROR="${ALPINE_MIRROR:-http://mirrors.cloud.aliyuncs.com/alpine}"
 deepseek_broker_enabled=0
-if systemctl cat "$deepseek_broker_service" >/dev/null 2>&1 && [[ -s /etc/video-factory/deepseek-codex-broker.env ]]; then
+if [[ -s /etc/video-factory/deepseek-codex-broker.env ]]; then
   deepseek_broker_enabled=1
 fi
 deepseek_broker_configured="$deepseek_broker_enabled"
+deepseek_broker_was_active=0
+legacy_broker_was_active=0
+systemctl is-active --quiet "$deepseek_broker_service" && deepseek_broker_was_active=1
+systemctl is-active --quiet "$broker_service" && legacy_broker_was_active=1
 
 if [[ ! -f "$environment_file" ]]; then
   echo "Missing production environment file: $environment_file" >&2
@@ -56,21 +59,18 @@ elif [[ "$deployment_mode" != "bootstrap" ]]; then
   exit 1
 fi
 
+if [[ "$deepseek_broker_configured" -ne 1 ]]; then
+  echo "DeepSeek broker credentials are not configured; leaving the current production release untouched." >&2
+  exit 1
+fi
+
 deepseek_broker_runtime_dir="${VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR:-}"
 if [[ -z "$deepseek_broker_runtime_dir" ]]; then
   deepseek_broker_runtime_dir="$(awk -F= '$1 == "VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR" { sub(/^[^=]*=/, ""); print; exit }' "$environment_file")"
 fi
 deepseek_broker_runtime_dir="${deepseek_broker_runtime_dir:-/run/video-factory-deepseek-codex}"
 deepseek_broker_socket="$deepseek_broker_runtime_dir/worker.sock"
-
-ensure_deepseek_runtime_mount() {
-  if [[ ! -e "$deepseek_broker_runtime_dir" ]]; then
-    install -d -o root -g vf-bridge -m 0750 "$deepseek_broker_runtime_dir"
-  elif [[ ! -d "$deepseek_broker_runtime_dir" ]]; then
-    echo "$deepseek_broker_runtime_dir exists but is not a directory." >&2
-    return 1
-  fi
-}
+export VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR="$deepseek_broker_runtime_dir"
 
 ensure_deepseek_workspace() {
   local target
@@ -90,20 +90,6 @@ ensure_deepseek_workspace() {
     fi
   done
   runuser -u "$deepseek_broker_user" -- test -w "$deepseek_broker_workspace"
-}
-
-check_codex_upstream() {
-  local attempt
-  for attempt in 1 2 3; do
-    # ChatGPT 登录态只能证明凭据存在；401 也能证明 OpenAI TLS 出口真实可达。
-    if runuser -u "$broker_user" -- curl --silent --show-error --output /dev/null \
-      --connect-timeout 8 --max-time 15 https://api.openai.com/v1/models; then
-      return 0
-    fi
-    sleep 3
-  done
-  echo "Codex upstream is unreachable from $broker_user; leaving the current production release untouched." >&2
-  return 1
 }
 
 check_deepseek_upstream() {
@@ -140,16 +126,11 @@ fi
 # compose 变量插值中 shell 环境优先于 env-file：此导出以宿主机实际组为准，
 # 覆盖 env-file 里可能残留的旧值；不解析、也不改写任何含密文件。
 export VIDEO_FACTORY_CODEX_SOCKET_GID="$bridge_gid"
-if [[ "$deepseek_broker_enabled" -eq 0 ]]; then
-  ensure_deepseek_runtime_mount || exit 1
-else
-  ensure_deepseek_workspace || exit 1
-  check_deepseek_upstream || {
-    echo "DeepSeek upstream readiness check failed; leaving the current production release untouched." >&2
-    exit 1
-  }
-fi
-check_codex_upstream || exit 1
+ensure_deepseek_workspace || exit 1
+check_deepseek_upstream || {
+  echo "DeepSeek upstream readiness check failed; leaving the current production release untouched." >&2
+  exit 1
+}
 
 # 应用与自托管热点容器只经内部网络通信；没有部署热点时保留空网络，应用会如实报告离线。
 docker network inspect "$trend_network" >/dev/null 2>&1 \
@@ -245,12 +226,7 @@ wait_for_broker_health() {
 }
 
 install_broker_units_from_release() {
-  local release="$1" source="$1/deploy/vf-codex-broker.service" deepseek_source="$1/deploy/vf-deepseek-codex-broker.service"
-  if [[ ! -f "$source" ]]; then
-    echo "Broker release is missing its systemd unit: $source" >&2
-    return 1
-  fi
-  install -m 0644 "$source" "$broker_unit" || return 1
+  local deepseek_source="$1/deploy/vf-deepseek-codex-broker.service"
   if [[ "$deepseek_broker_configured" -eq 1 ]]; then
     if [[ ! -f "$deepseek_source" ]]; then
       echo "Broker release is missing its DeepSeek systemd unit: $deepseek_source" >&2
@@ -263,18 +239,27 @@ install_broker_units_from_release() {
 
 restart_brokers() {
   local deepseek_expected_kinds="${1:-topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit}"
-  local deepseek_allow_extra_kinds="${2:-0}" failed=0
-  if ! systemctl restart "$broker_service" \
-    || ! wait_for_broker_health "$broker_socket" 20 openai openai \
-      topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
-    failed=1
+  local deepseek_allow_extra_kinds="${2:-0}" restore_previous="${3:-0}" failed=0
+  # 旧服务仅用于恢复部署前的版本；新版本不能再依赖退役的 OpenAI 链路。
+  if [[ "$restore_previous" -eq 1 && "$legacy_broker_was_active" -eq 1 ]]; then
+    if ! systemctl restart "$broker_service" \
+      || ! wait_for_broker_health "$broker_socket" 20 openai openai \
+        topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
+      failed=1
+    fi
   fi
-  if [[ "$deepseek_broker_enabled" -eq 1 ]]; then
+  if [[ "$restore_previous" -eq 0 || "$deepseek_broker_was_active" -eq 1 ]]; then
     if ! systemctl restart "$deepseek_broker_service" \
       || ! wait_for_broker_health "$deepseek_broker_socket" 20 deepseek deepseek \
         "$deepseek_expected_kinds" "$deepseek_allow_extra_kinds"; then
       echo "Configured DeepSeek broker is unavailable; refusing a partial deployment." >&2
       failed=1
+    fi
+  else
+    systemctl stop "$deepseek_broker_service" || failed=1
+    # 首次迁移回滚时 systemd 会移除运行目录；旧镜像仍按本次 compose 重建，保留空挂载点。
+    if [[ ! -e "$deepseek_broker_runtime_dir" ]]; then
+      install -d -o root -g vf-bridge -m 0750 "$deepseek_broker_runtime_dir" || failed=1
     fi
   fi
   return "$failed"
@@ -300,7 +285,7 @@ rollback_broker() {
   # 只按 release 取文件会让应用已回滚、视觉审片服务却留在新版本。
   if [[ -s "$previous_broker_unit_backup" ]]; then
     install -m 0644 "$previous_broker_unit_backup" "$broker_unit" || return 1
-    if [[ "$deepseek_broker_configured" -eq 1 ]]; then
+    if [[ "$deepseek_broker_was_active" -eq 1 ]]; then
       [[ -s "$previous_deepseek_broker_unit_backup" ]] || return 1
       install -m 0644 "$previous_deepseek_broker_unit_backup" "$deepseek_broker_unit" || return 1
     fi
@@ -311,7 +296,7 @@ rollback_broker() {
     echo "No previous broker unit is available for rollback." >&2
     return 1
   fi
-  restart_brokers director-plan,script-draft,visual-review 1
+  restart_brokers director-plan,script-draft,visual-review 1 1
 }
 
 rollback() {
@@ -379,7 +364,6 @@ stage_broker_release() {
   fi
   if [[ ! -f "$staging/broker/dist/main.js"
     || ! -f "$staging/broker/node_modules/undici/package.json"
-    || ! -f "$staging/broker/deploy/vf-codex-broker.service"
     || ! -f "$staging/broker/deploy/vf-deepseek-codex-broker.service" ]]; then
     echo "Candidate image does not contain a complete broker release." >&2
     rm -rf "$staging"
@@ -398,7 +382,7 @@ stage_broker_release() {
     return 1
   fi
   rm -rf "$staging"
-  chown -R vf-codex:vf-bridge "$release_dir" || return 1
+  chown -R root:vf-bridge "$release_dir" || return 1
   chmod -R a+rX "$release_dir" || return 1
   candidate_broker_release="$release_dir"
 }
@@ -438,11 +422,6 @@ if ! wait_for_health 36; then
   exit 1
 fi
 
-if ! broker_health "$broker_socket" openai openai \
-  topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
-  echo "Codex broker became unhealthy after the app deployment." >&2
-  exit 1
-fi
 if [[ "$deepseek_broker_enabled" -eq 1 ]] && ! broker_health "$deepseek_broker_socket" deepseek deepseek \
   topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit; then
   echo "DeepSeek broker became unhealthy after the app deployment." >&2
@@ -454,7 +433,15 @@ if [[ -n "$public_health_url" ]] && ! app_health "$public_health_url" 15; then
   exit 1
 fi
 
+systemctl enable "$deepseek_broker_service" >/dev/null
 deployment_committed=1
+
+# 新版本已健康且无需回滚后，才退役旧生产服务；不删除旧制品和凭据。
+for retired_service in vf-codex-broker vf-zai-codex-broker; do
+  if systemctl cat "$retired_service" >/dev/null 2>&1; then
+    systemctl disable --now "$retired_service" || echo "Could not disable retired service $retired_service." >&2
+  fi
+done
 
 # 以下仅为可观测性与空间回收，不再把一次健康的发布判为失败。
 "${compose[@]}" ps || true

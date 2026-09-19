@@ -38,6 +38,7 @@ import {
 } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { VoiceStudio } from "../components/VoiceStudio.js";
+import { UnsplashAttribution, unsplashPublicUrl } from "../components/UnsplashAttribution.js";
 import { creatorFacingTechnicalText, providerLabel, providerModelLabel } from "../presentation.js";
 
 const SERVICE_STATUS = { ready: "在线", degraded: "受限", stopped: "离线" } as const;
@@ -55,6 +56,7 @@ const RECIPE_OPTIONS: Array<{ id: StudioProductionRecipeId; label: string }> = [
 ];
 const RESOURCE_SECTION_IDS = [
   "creation-defaults",
+  "model-settings",
   "topic-strategy",
   "trend-connections",
   "voice-casting",
@@ -65,6 +67,15 @@ const RESOURCE_SECTION_IDS = [
 ] as const;
 type ResourceSectionId = typeof RESOURCE_SECTION_IDS[number];
 type SettingsNotice = { kind: "success" | "error"; message: string };
+type ModelDefaultCategoryId = "text" | "multimodal" | "image" | "video" | "voice";
+
+const MODEL_DEFAULT_CATEGORIES: Array<{ id: ModelDefaultCategoryId; label: string; description: string }> = [
+  { id: "text", label: "文本模型", description: "选题、构思、脚本和导演方案等文字创作" },
+  { id: "multimodal", label: "多模态模型", description: "需要理解画面或图片证据的审查" },
+  { id: "image", label: "图片生成模型", description: "生成静态画面或插画" },
+  { id: "video", label: "视频生成模型", description: "生成动态镜头" },
+  { id: "voice", label: "声音生成模型", description: "合成旁白或声音内容" },
+];
 
 interface ProductionRoleDefinition {
   key: StudioProductionRoleBindingKey;
@@ -85,7 +96,7 @@ const PRODUCTION_ROLE_DEFINITIONS: ProductionRoleDefinition[] = [
   { key: "voice", label: "配音执行", capability: "voice.synthesize", preferredProviderId: "macos-say-v1", responsibility: "按声音演员表执行音色、语速和停顿", mode: "tool", selectable: false, configurationAnchor: "voice-casting", configurationLabel: "去声音演员表配置" },
   { key: "render", label: "剪辑师", capability: "video.render", preferredProviderId: "python-ffmpeg-v1", responsibility: "合成画面、字幕、旁白和音轨", mode: "tool" },
   { key: "technicalReview", label: "技术质检", capability: "quality.review", preferredProviderId: "python-technical-review-v1", responsibility: "检查分辨率、时长、轨道、文件和产物哈希", mode: "tool" },
-  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "deepseek-visual-review-v1", responsibility: "正式制作必须完成 DeepSeek 与 Codex 双审；任一路未就绪均不能开工", mode: "model" },
+  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "deepseek-visual-review-v1", responsibility: "正式制作由 DeepSeek 完成独立质量复核；未就绪时不能开工", mode: "model" },
 ];
 
 const AUTOMATIC_AGENT_ROLES = [
@@ -136,6 +147,7 @@ export function ResourcesPage() {
   });
   const [defaultRecipeId, setDefaultRecipeId] = useState<StudioProductionRecipeId>("free-stock");
   const [roleProviderDefaults, setRoleProviderDefaults] = useState<StudioRoleProviderDefaults>({});
+  const [modelDefaults, setModelDefaults] = useState<Record<string, string>>({});
   const [productionDefaults, setProductionDefaults] = useState<StudioProductionDefaults>(DEFAULT_STUDIO_PRODUCTION_DEFAULTS);
   const [topicStrategy, setTopicStrategy] = useState<StudioTopicStrategy>(DEFAULT_STUDIO_TOPIC_STRATEGY);
 
@@ -211,6 +223,7 @@ export function ResourcesPage() {
         setVoiceDirection(value.voiceDirection);
         setDefaultRecipeId(canonicalRecipeId(value.defaultRecipeId));
         setRoleProviderDefaults(value.roleProviderDefaults ?? {});
+        setModelDefaults(value.modelDefaults ?? {});
         setProductionDefaults(value.productionDefaults ?? DEFAULT_STUDIO_PRODUCTION_DEFAULTS);
         setTopicStrategy({ ...DEFAULT_STUDIO_TOPIC_STRATEGY, ...value.topicStrategy });
       })
@@ -247,6 +260,7 @@ export function ResourcesPage() {
       if (patch.voiceDirection) setVoiceDirection(updated.voiceDirection);
       if (patch.defaultRecipeId) setDefaultRecipeId(canonicalRecipeId(updated.defaultRecipeId));
       if (patch.roleProviderDefaults) setRoleProviderDefaults(updated.roleProviderDefaults ?? {});
+      if (patch.modelDefaults) setModelDefaults(updated.modelDefaults ?? {});
       if (patch.productionDefaults) setProductionDefaults(updated.productionDefaults);
       if (patch.topicStrategy) setTopicStrategy({ ...DEFAULT_STUDIO_TOPIC_STRATEGY, ...updated.topicStrategy });
       setSettingsNotice({ kind: "success", message: successMessage });
@@ -275,6 +289,10 @@ export function ResourcesPage() {
   const roleHasChanges = settings
     ? !sameStringRecord(settings.roleProviderDefaults, roleProviderDefaults)
     : false;
+  const modelDefaultsHaveChanges = settings
+    ? !sameStringRecord(settings.modelDefaults, modelDefaults)
+    : false;
+  const modelDefaultGroups = useMemo(() => groupProvidersForModelDefaults(providers), [providers]);
   const topicHasChanges = settings ? !sameTopicStrategy({ ...DEFAULT_STUDIO_TOPIC_STRATEGY, ...settings.topicStrategy }, topicStrategy) : false;
   const topicStrategyComplete = Boolean(
     topicStrategy.positioning?.trim()
@@ -327,6 +345,7 @@ export function ResourcesPage() {
 
       <nav className="configuration-index" aria-label="配置分区">
         <a href="#creation-defaults" aria-current={activeSection === "creation-defaults" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("creation-defaults"); }}><SlidersHorizontal aria-hidden="true" size={15} />创作默认</a>
+        <a href="#model-settings" aria-current={activeSection === "model-settings" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("model-settings"); }}><Settings2 aria-hidden="true" size={15} />模型设置</a>
         <a href="#topic-strategy" aria-current={activeSection === "topic-strategy" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("topic-strategy"); }}><Sparkles aria-hidden="true" size={15} />选题策略</a>
         <a href="#trend-connections" aria-current={activeSection === "trend-connections" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("trend-connections"); }}><RadioTower aria-hidden="true" size={15} />热点信号</a>
         <a href="#voice-casting" aria-current={activeSection === "voice-casting" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("voice-casting"); }}><Sparkles aria-hidden="true" size={15} />声音演员</a>
@@ -356,6 +375,30 @@ export function ResourcesPage() {
         </div>}
       </section>
       {settingsNotice ? <p className={`resource-settings-notice is-${settingsNotice.kind}`} role={settingsNotice.kind === "error" ? "alert" : "status"}>{settingsNotice.message}</p> : null}
+
+      <section id="model-settings" className="resource-section model-settings" data-resource-section data-active={activeSection === "model-settings" ? "true" : undefined}>
+        <ResourceHeading eyebrow="模型默认" title="模型设置" meta="只影响后续新建制作；正在制作的项目不会被改动" />
+        {settingsError ? <ResourceError title="模型默认设置读取失败" message={settingsError} retry={load} /> : !settings ? <div className="region-loading">正在读取模型默认设置...</div> : <>
+          <div className="model-defaults-intro">
+            <Settings2 aria-hidden="true" size={22} />
+            <div><strong>按能力设定默认模型</strong><p>不选时由系统推荐。新建制作会冻结这里的选择；进入节点后仍可临时改用其它可用模型，清除覆盖会回到该制作创建时的默认值。</p></div>
+          </div>
+          <div className="model-default-groups">
+            {modelDefaultGroups.map((group) => <section className="model-default-group" key={group.category.id} aria-labelledby={`model-default-${group.category.id}`}>
+              <header><div><h3 id={`model-default-${group.category.id}`}>{group.category.label}</h3><p>{group.category.description}</p></div><span>{group.providers.length} 项能力</span></header>
+              {group.providers.length === 0 ? <p className="model-default-empty">当前没有可选择的模型。</p> : <div className="model-default-cards">
+                {group.providers.map((provider) => <ModelDefaultCard
+                  key={provider.id}
+                  provider={provider}
+                  selectedModelId={modelDefaults[provider.id]}
+                  onChange={(modelId) => setModelDefaults((current) => setModelDefault(current, provider.id, modelId))}
+                />)}
+              </div>}
+            </section>)}
+          </div>
+          <div className="configuration-save-row model-default-save-row"><span>{modelDefaultsHaveChanges ? "有未保存的模型默认设置" : "模型默认设置已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !modelDefaultsHaveChanges} onClick={() => void saveDefaults({ modelDefaults }, "模型默认设置已保存，仅影响后续新建制作。") }><Save aria-hidden="true" size={16} />{modelDefaultsHaveChanges ? "保存模型默认" : "已保存"}</button></div>
+        </>}
+      </section>
 
       <section id="topic-strategy" className="resource-section topic-strategy-config" data-resource-section data-active={activeSection === "topic-strategy" ? "true" : undefined} data-tour="topic-strategy">
         <ResourceHeading eyebrow="总编规则" title="什么题值得做" meta="系统综合判断下列准入条件；你只需维护账号定位、内容边界和来源标准，不需要调整评分权重" />
@@ -424,7 +467,8 @@ export function ResourcesPage() {
       </div>
 
       <section id="visual-providers" className="resource-section visual-library" data-resource-section data-active={activeSection === "visual-providers" ? "true" : undefined} data-tour="resource-visual">
-        <ResourceHeading eyebrow="画面资源" title="按画面能力选择模型" meta={`${readyVisual} 项可直接生产 · 服务商仅标明能力来源`} />
+        <ResourceHeading eyebrow="画面资源" title="图库与画面生成" meta={`${readyVisual} 项已配置 · 图库搜索与 AI 生成分开展示`} />
+        <p className="resource-note">免费图库可以减少生成费用，但仍须核对素材内容和授权。密钥在本机配置，不会显示在网页中；新来源配置后需重新启动本地服务。</p>
         {providerLoading ? <div className="region-loading">正在读取画面能力...</div> : providerError ? (
           <ResourceError title="画面能力状态未知" message={providerError} retry={load} />
         ) : <>
@@ -435,6 +479,17 @@ export function ResourcesPage() {
               provider={provider}
             />)}</div>
           </section>)}</div>
+          <details className="stock-source-research">
+            <summary>国内与付费图库（尚未接入）</summary>
+            <p>以下已完成初步官方调研，尚不能在制作中自动选用。商务开通、合同价格和下载授权确定后，才能接入采购；普通网站会员不等于接口权限。</p>
+            <ul>
+              <li><a href="https://699pic.com/vip/api" target="_blank" rel="noreferrer">摄图网 OpenAPI</a>：图片、视频；公开接口文档完整，优先考虑。需合作方账号、授权主体和合同价格。</li>
+              <li><a href="https://open.hellorf.com/" target="_blank" rel="noreferrer">站酷海洛开放平台</a>：图片、视频；提供测试与正式应用、购买记录及授权书接口。需商务申请。</li>
+              <li><a href="https://ibaotu.com/" target="_blank" rel="noreferrer">包图网</a>：国内图片、实拍视频采购备选；自动接入权限尚未核实，不抓取网站下载。</li>
+              <li><a href="https://developer.adobe.com/stock/docs/getting-started/" target="_blank" rel="noreferrer">Adobe Stock</a>：企业 API 候选，普通个人订阅不等于 API 权限。</li>
+            </ul>
+            <p>个人非商业用途也可使用相应许可的素材；不会仅因“禁止商用”排除。另需核对剪辑、公开发布和署名要求；带水印预览不能当作正式素材。</p>
+          </details>
         </>}
       </section>
 
@@ -532,7 +587,13 @@ function ManifestLedger({ items, record = false, onReview }: { items: StudioReso
       const sourceUrl = externalResourceUrl(item.sourceUrl);
       return <article key={`${item.runId}:${item.id}`}>
         <ResourceItemPreview item={item} />
-        <div className="resource-manifest-copy"><div className="resource-item-heading"><span className={`resource-kind is-${item.category}`}>{resourceCategoryLabel(item.category)}</span><strong>{item.scenePosition ? `第 ${item.scenePosition} 镜 · ` : ""}{creatorFacingTechnicalText(item.creator) ?? resourceItemLabel(item)}</strong></div><small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small>{!item.scenePosition ? <small className="resource-item-identity">未定位镜头 · 素材标识 {shortItemIdentifier(item.id)}</small> : null}<p>{creatorFacingTechnicalText(item.licenseNote) ?? (record ? "保留这条记录用于追溯制作过程。" : "缺少授权说明，需要人工确认。")}</p></div>
+        <div className="resource-manifest-copy">
+          <div className="resource-item-heading"><span className={`resource-kind is-${item.category}`}>{resourceCategoryLabel(item.category)}</span><strong>{item.scenePosition ? `第 ${item.scenePosition} 镜 · ` : ""}{creatorFacingTechnicalText(item.creator) ?? resourceItemLabel(item)}</strong></div>
+          <small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small>
+          {item.providerId === "unsplash-stock-v1" ? <small><UnsplashAttribution creator={item.creator} creatorUrl={item.creatorUrl} /></small> : null}
+          {!item.scenePosition ? <small className="resource-item-identity">未定位镜头 · 素材标识 {shortItemIdentifier(item.id)}</small> : null}
+          <p>{creatorFacingTechnicalText(item.licenseNote) ?? (record ? "保留这条记录用于追溯制作过程。" : "缺少授权说明，需要人工确认。")}</p>
+        </div>
         <span className={record || item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{record ? "制作记录" : item.reviewDecision?.action === "confirmed" ? "已确认可用" : item.reviewDecision?.action === "rejected" ? "需在原制作返工" : item.reviewStatus === "recorded" ? "已记录" : "待确认"}</span>
         {sourceUrl ? <a className="resource-source-link" href={sourceUrl} target="_blank" rel="noreferrer" title="核验资源来源"><ArrowUpRight aria-hidden="true" size={15} /></a> : <span className="resource-source-link" />}
         {!record && onReview ? <ResourceReviewActions item={item} onReview={onReview} /> : null}
@@ -543,8 +604,9 @@ function ManifestLedger({ items, record = false, onReview }: { items: StudioReso
 
 function ResourceItemPreview({ item }: { item: StudioResourceManifest["items"][number] }) {
   const label = resourceItemIdentity(item);
-  if (item.contentUrl && item.contentType?.startsWith("image/")) {
-    return <div className="resource-item-preview"><img src={item.contentUrl} alt={`${label}素材缩略图`} loading="lazy" /><span>{label}</span></div>;
+  const imageUrl = item.providerId === "unsplash-stock-v1" ? unsplashPublicUrl(item.previewUrl, "images.unsplash.com") : item.contentUrl;
+  if (imageUrl && item.contentType?.startsWith("image/")) {
+    return <div className="resource-item-preview"><img src={imageUrl} alt={`${label}素材缩略图`} loading="lazy" /><span>{label}</span></div>;
   }
   if (item.contentUrl && item.contentType?.startsWith("video/")) {
     return <div className="resource-item-preview"><video src={`${item.contentUrl}#t=0.1`} aria-label={`${label}素材缩略图`} muted playsInline preload="metadata" /><span>{label}</span></div>;
@@ -697,6 +759,58 @@ function creatorProviderLabel(provider: StudioProvider): string {
   return !normalized || normalized === provider.id ? provider.label : normalized;
 }
 
+function ModelDefaultCard({ provider, selectedModelId, onChange }: {
+  provider: StudioProvider;
+  selectedModelId: string | undefined;
+  onChange: (modelId: string) => void;
+}) {
+  const models = provider.modelProfiles?.filter((model) => model.available) ?? [];
+  const recommended = models.find((model) => model.id === provider.defaultModelId)
+    ?? models.find((model) => model.recommended)
+    ?? models[0];
+  const inheritedModelUnavailable = Boolean(selectedModelId && !models.some((model) => model.id === selectedModelId));
+  return <article className="model-default-card">
+    <div><strong>{creatorProviderLabel(provider)}</strong><small>{provider.capability === "voice.synthesize" ? "声音生成" : capabilityLabel(provider.capability)}</small></div>
+    <label className="field">
+      <span>{creatorProviderLabel(provider)}默认模型</span>
+      <select aria-label={`${creatorProviderLabel(provider)}默认模型`} value={selectedModelId ?? ""} onChange={(event) => onChange(event.target.value)}>
+        <option value="">系统推荐：{recommended?.label ?? "自动选择"}</option>
+        {inheritedModelUnavailable && selectedModelId ? <option value={selectedModelId} disabled>原默认：{selectedModelId}（当前不可用）</option> : null}
+        {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
+      </select>
+    </label>
+    <footer><span>{billingLabel(provider.billing)}</span><span>{providerReadinessLabel(provider, isProductionReady(provider))}</span></footer>
+  </article>;
+}
+
+function groupProvidersForModelDefaults(providers: StudioProvider[]): Array<{
+  category: typeof MODEL_DEFAULT_CATEGORIES[number];
+  providers: StudioProvider[];
+}> {
+  return MODEL_DEFAULT_CATEGORIES.map((category) => ({
+    category,
+    providers: providers.filter((provider) => provider.kind !== "test"
+      && (provider.modelProfiles?.some((model) => model.available) ?? false)
+      && modelDefaultCategoryFor(provider) === category.id),
+  }));
+}
+
+function modelDefaultCategoryFor(provider: StudioProvider): ModelDefaultCategoryId {
+  const taskTypes = provider.modelProfiles?.flatMap((model) => model.taskTypes) ?? [];
+  if (provider.capability === "voice.synthesize") return "voice";
+  if (taskTypes.includes("text-to-video") || taskTypes.includes("image-to-video")) return "video";
+  if (taskTypes.includes("text-to-image")) return "image";
+  if (taskTypes.includes("visual-review") || provider.capability === "quality.review.visual") return "multimodal";
+  return "text";
+}
+
+function setModelDefault(current: Record<string, string>, providerId: string, modelId: string): Record<string, string> {
+  const next = { ...current };
+  if (modelId) next[providerId] = modelId;
+  else delete next[providerId];
+  return next;
+}
+
 function RoleProviderCard({ definition, providers, selectedProvider, missing = false, onProviderChange }: {
   definition: ProductionRoleDefinition;
   providers: StudioProvider[];
@@ -711,9 +825,9 @@ function RoleProviderCard({ definition, providers, selectedProvider, missing = f
     ?? models[0];
   const backupModels = models.filter((model) => model.id !== activeModel?.id);
   const ready = Boolean(selectedProvider && isProductionReady(selectedProvider));
-  const dualFinalReviewAvailable = definition.key === "visualReview"
-    && providers.some((provider) => provider.id === "deepseek-visual-review-v1" && isProductionReady(provider))
-    && providers.some((provider) => provider.id === "codex-visual-review-v1" && isProductionReady(provider));
+  const singleFinalReviewAvailable = definition.key === "visualReview"
+    && selectedProvider?.id === "deepseek-visual-review-v1"
+    && isProductionReady(selectedProvider);
   return <article className={`role-configuration${ready ? "" : " is-unavailable"}${missing ? " is-missing" : ""}`}>
     <header>
       <span>{definition.label}{missing ? <b className="role-missing-flag">当前缺失</b> : null}</span>
@@ -738,8 +852,8 @@ function RoleProviderCard({ definition, providers, selectedProvider, missing = f
         </select>
       </label>
       <div className="role-runtime-summary"><span>系统推荐</span><strong>{activeModel?.label ?? selectedProvider?.label ?? "尚未配置"}</strong>{backupModels.length ? <span>故障替补：{backupModels.map((model) => model.label).join("、")}</span> : null}</div>
-      {dualFinalReviewAvailable
-        ? <p className="role-fallback-note">中途画面预检优先使用首选模型；只有确认请求尚未开始，或原请求已明确结束于连接故障、服务不可用、限流、超时或无输出时才切换。结果不确定会暂停核对。最终成片由 DeepSeek 与 Codex 基于同一份抽帧证据分别审查，任一方确认的缺陷都会保留。</p>
+      {singleFinalReviewAvailable
+        ? <p className="role-fallback-note">中途画面预检优先使用首选模型；只有确认请求尚未开始，或原请求已明确结束于连接故障、服务不可用、限流、超时或无输出时才切换。结果不确定会暂停核对。最终成片由 DeepSeek 基于抽帧证据完成独立质量复核，审片意见会保留给你确认。</p>
         : candidates.filter((provider) => provider.id !== selectedProvider?.id && isProductionReady(provider)).length > 0
           ? <p className="role-fallback-note">只有确认首选请求尚未开始，或原请求已明确结束于连接故障、服务不可用、限流、超时或无输出时，其余可用能力才会依次接管。若请求结果不确定，流程会暂停核对，不会切换模型或重复生成。</p>
         : null}

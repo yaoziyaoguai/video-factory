@@ -332,7 +332,8 @@ export class WorkflowRunner {
   ): Promise<WorkflowRun<TInitialInput>> {
     validateWorkflowDefinition(definition);
     validateResumeRequest(definition, previousRun, decision);
-    if (decision.action === "request_changes") {
+    const waitingBeforeResume = previousRun.nodeRuns.find((nodeRun) => nodeRun.intervention?.id === decision.interventionId);
+    if (decision.action === "request_changes" && waitingBeforeResume?.intervention?.kind !== "source_review_decision") {
       throw new Error("A request_changes decision must include a node revision.");
     }
 
@@ -343,6 +344,40 @@ export class WorkflowRunner {
     }
     if (waitingNode.intervention?.kind === "creative_review") {
       throw new Error("Creative review cannot be approved through the generic decision endpoint; use the stage confirmation command.");
+    }
+
+    if (waitingNode.intervention?.kind === "source_review_decision") {
+      run.decisions.push({
+        ...decision,
+        id: this.idFactory("decision"),
+        createdAt: this.clock(),
+      });
+      if (decision.action === "reject") {
+        run.revision += 1;
+        waitingNode.status = "rejected";
+        waitingNode.finishedAt = this.clock();
+        run.status = "rejected";
+        run.finishedAt = this.clock();
+        return run;
+      }
+      if (decision.action === "request_changes") {
+        run.revision += 1;
+        // 这不是代替用户修改方案：只把当前版本安全地切到 stale，保留已物化媒体、报告和
+        // 历史决定，等待用户在现有编辑入口实际修改后再恢复。不能让一次「调整」偷偷购买。
+        waitingNode.status = "stale";
+        delete waitingNode.intervention;
+        if (waitingNode.outputState) waitingNode.outputState.stale = true;
+        run.interventions = run.interventions.filter((intervention) => intervention.nodeId !== waitingNode.nodeId);
+        run.status = "stale";
+        delete run.finishedAt;
+        await this.checkpoint?.(run);
+        return run;
+      }
+      // 承担的是这份已绑定证据的质量建议，不是把半完成 assets 标为 succeeded。保留同一
+      // operationRequestId，后续仍先按当前报价/授权守卫判断能否产生新的素材费用。
+      // retryFailedNode 是这次命令唯一的版本迁移点；若先在这里加 revision，首次
+      // checkpoint 会把 revision +2 当成一笔落盘，破坏 RunStore 的乐观并发合同。
+      return this.retryFailedNode(definition, run, waitingNode.nodeId, { allowSourceReviewDecision: true });
     }
 
     run.decisions.push({
@@ -1087,7 +1122,12 @@ export class WorkflowRunner {
     definition: WorkflowDefinition,
     previousRun: WorkflowRun<TInitialInput>,
     nodeId: string,
-    options: { resumeUncertainOperation?: boolean; allowRejectedNode?: boolean; allowSourceReviewRetry?: boolean } = {},
+    options: {
+      resumeUncertainOperation?: boolean;
+      allowRejectedNode?: boolean;
+      allowSourceReviewRetry?: boolean;
+      allowSourceReviewDecision?: boolean;
+    } = {},
   ): Promise<WorkflowRun<TInitialInput>> {
     validateWorkflowDefinition(definition);
     if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
@@ -1100,13 +1140,17 @@ export class WorkflowRunner {
     const reviewRetryPause = options.allowSourceReviewRetry === true
       && previousRun.status === "needs_human"
       && previousRun.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId)?.intervention?.kind === "source_review_retry";
-    if (previousRun.status !== "failed" && !retryingRejectedNode && !reviewRetryPause) {
+    const reviewDecisionPause = options.allowSourceReviewDecision === true
+      && previousRun.status === "needs_human"
+      && previousRun.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId)?.intervention?.kind === "source_review_decision";
+    if (previousRun.status !== "failed" && !retryingRejectedNode && !reviewRetryPause && !reviewDecisionPause) {
       throw new Error(`Run '${previousRun.id}' is not failed.`);
     }
     const failedNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId);
     const retryableNodeStatus = failedNode?.status === "failed"
       || retryingRejectedNode && failedNode?.status === "rejected"
-      || reviewRetryPause;
+      || reviewRetryPause
+      || reviewDecisionPause;
     if (!failedNode || !retryableNodeStatus || !definition.nodes.some((node) => node.id === nodeId)) {
       throw new Error(`Node '${nodeId}' is not the failed node.`);
     }
@@ -1124,7 +1168,8 @@ export class WorkflowRunner {
     const run = cloneWorkflowRun(previousRun);
     const retryNode = run.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId)!;
     retryNode.status = "pending";
-    const preserveInterruptedOperation = retryNode.interrupted === true;
+    const preserveSourceReviewAuthorization = reviewRetryPause || reviewDecisionPause;
+    const preserveInterruptedOperation = retryNode.interrupted === true || preserveSourceReviewAuthorization;
     retryNode.artifactIds = [];
     retryNode.qualityGateResults = [];
     delete retryNode.output;
@@ -1132,12 +1177,14 @@ export class WorkflowRunner {
     delete retryNode.error;
     delete retryNode.intervention;
     delete retryNode.executionReceipt;
-    delete retryNode.spendPlan;
-    if (retryNode.spendAuthorizationId) {
+    // 已物化试片后的暂停不是一次新的采购：只要同一 operation、同一输入和当前报价仍然
+    // 匹配，原授权仍覆盖尚未提交的素材。其他失败重试则沿用原有的「旧授权已消费」规则。
+    if (!preserveSourceReviewAuthorization) delete retryNode.spendPlan;
+    if (!preserveSourceReviewAuthorization && retryNode.spendAuthorizationId) {
       const consumed = (run.consumedSpendAuthorizationIds ??= []);
       if (!consumed.includes(retryNode.spendAuthorizationId)) consumed.push(retryNode.spendAuthorizationId);
     }
-    delete retryNode.spendAuthorizationId;
+    if (!preserveSourceReviewAuthorization) delete retryNode.spendAuthorizationId;
     if (!preserveInterruptedOperation) delete retryNode.interrupted;
     if (!preserveInterruptedOperation) delete retryNode.operationRequestId;
     if (retryNode.outputState) retryNode.outputState.stale = true;
@@ -1259,7 +1306,11 @@ export class WorkflowRunner {
         run.spendAuthorizations ?? [],
         new Set([
           ...(run.consumedSpendAuthorizationIds ?? []),
-          ...(run.executionReceipts ?? []).flatMap((receipt) => receipt.spendAuthorizationId ? [receipt.spendAuthorizationId] : []),
+          ...(run.executionReceipts ?? []).flatMap((receipt) => (
+            receipt.spendAuthorizationId && receipt.spendAuthorizationId !== existingNodeRun?.spendAuthorizationId
+              ? [receipt.spendAuthorizationId]
+              : []
+          )),
         ]),
         existingNodeRun,
         async (runningNode) => {
@@ -1293,6 +1344,13 @@ export class WorkflowRunner {
         } else {
           receipts.push(cloneExecutionReceipt(nodeRun.executionReceipt));
         }
+      }
+      // `onStarted` 在计费请求离开进程前先把授权列为已消费，防止崩溃后重复购买。
+      // 收到确定结果后该保护必须撤销：它既不能阻止同一试片操作继续使用剩余授权，
+      // 也不能把一次已知成功永久伪装成未知扣费。
+      if (nodeRun.spendAuthorizationId && !nodeRun.outcomeUncertain) {
+        run.consumedSpendAuthorizationIds = (run.consumedSpendAuthorizationIds ?? [])
+          .filter((authorizationId) => authorizationId !== nodeRun.spendAuthorizationId);
       }
       if (nodeRun.intervention) {
         run.interventions.push(nodeRun.intervention);
@@ -1379,7 +1437,12 @@ export class WorkflowRunner {
             const spendPlan = nodeRun.spendPlan ?? createSpendPlan(node, provider, quote, inputVersionIds, publicContext);
             nodeRun.spendPlan = spendPlan;
             if (!spendPlanMatchesExecution(spendPlan, node, provider, quote, inputVersionIds)) {
-              throw new Error(`Spend plan for node '${node.id}' no longer matches its metered provider.`);
+              // 试片暂停后继续时仍要重新确认现在的 scope。不能沿用旧授权硬跑，也不能把
+              // 已生成试片变成失败；更新报价后停在既有的失效确认状态。
+              nodeRun.spendPlan = createSpendPlan(node, provider, quote, inputVersionIds, publicContext);
+              delete nodeRun.spendAuthorizationId;
+              nodeRun.status = "approval_invalidated";
+              return nodeRun;
             }
             authorization = spendAuthorizations.find((candidate) =>
               !consumedSpendAuthorizationIds.has(candidate.id) && authorizationMatchesPlan(candidate, spendPlan));

@@ -24,6 +24,8 @@ export interface WorkerArtifactDescriptor {
     licenseNote: string;
     sourceUrl?: string;
     creator?: string;
+    creatorUrl?: string;
+    previewUrl?: string;
     scenePosition?: number;
     notes?: string;
   };
@@ -37,6 +39,22 @@ export interface WorkerResponse {
   artifacts: WorkerArtifactDescriptor[];
   error?: { code: string; message: string };
   diagnostics?: Record<string, unknown>;
+  /**
+   * 素材试片在 worker 内已经物化、但不能继续提交后续付费任务时的结构化结果。
+   * 这不是浏览器可以伪造的决定；ProductionPipeline 只接受 worker 已校验过的素材、报告和身份。
+   */
+  sourceReview?: SourceReviewOutcome;
+}
+
+export interface SourceReviewOutcome {
+  kind: "complete_negative" | "incomplete";
+  mediaSha256: string;
+  inputFingerprint: string;
+  operationId: string;
+  scenePosition: number;
+  /** 完整负面报告才有可供用户承担的证据身份。 */
+  evidenceId?: string;
+  reviewArtifactSha256?: string;
 }
 
 export class PythonWorkerClient {
@@ -173,7 +191,50 @@ function parseWorkerResponse(stdout: string, expectedCommandId: unknown): Worker
     }
     response.diagnostics = value.diagnostics;
   }
+  if (value.sourceReview !== undefined) {
+    response.sourceReview = parseSourceReviewOutcome(value.sourceReview);
+  }
   return response;
+}
+
+/** WorkerProvider 也会调用它，避免测试替身绕过子进程 parser 后把任意字段当成质量决定。 */
+export function parseSourceReviewOutcome(value: unknown): SourceReviewOutcome {
+  if (!isRecord(value)) throw new Error("Worker sourceReview must be a JSON object.");
+  if (value.kind !== "complete_negative" && value.kind !== "incomplete") {
+    throw new Error(`Worker sourceReview kind is unsupported: ${String(value.kind)}.`);
+  }
+  if (typeof value.mediaSha256 !== "string" || !/^[a-f0-9]{64}$/i.test(value.mediaSha256)) {
+    throw new Error("Worker sourceReview mediaSha256 must be a SHA-256 digest.");
+  }
+  if (typeof value.inputFingerprint !== "string" || !/^[a-f0-9]{64}$/i.test(value.inputFingerprint)) {
+    throw new Error("Worker sourceReview inputFingerprint must be a SHA-256 digest.");
+  }
+  if (typeof value.operationId !== "string" || !value.operationId.trim() || value.operationId.length > 512) {
+    throw new Error("Worker sourceReview operationId must be a non-empty string.");
+  }
+  if (!Number.isSafeInteger(value.scenePosition) || Number(value.scenePosition) < 1) {
+    throw new Error("Worker sourceReview scenePosition must be a positive integer.");
+  }
+  const outcome: SourceReviewOutcome = {
+    kind: value.kind,
+    mediaSha256: value.mediaSha256.toLowerCase(),
+    inputFingerprint: value.inputFingerprint.toLowerCase(),
+    operationId: value.operationId,
+    scenePosition: Number(value.scenePosition),
+  };
+  if (value.kind === "complete_negative") {
+    if (typeof value.evidenceId !== "string" || !/^[a-f0-9]{64}$/i.test(value.evidenceId)) {
+      throw new Error("Complete negative sourceReview must include an evidenceId SHA-256 digest.");
+    }
+    if (typeof value.reviewArtifactSha256 !== "string" || !/^[a-f0-9]{64}$/i.test(value.reviewArtifactSha256)) {
+      throw new Error("Complete negative sourceReview must include a reviewArtifactSha256 digest.");
+    }
+    outcome.evidenceId = value.evidenceId.toLowerCase();
+    outcome.reviewArtifactSha256 = value.reviewArtifactSha256.toLowerCase();
+  } else if (value.evidenceId !== undefined || value.reviewArtifactSha256 !== undefined) {
+    throw new Error("Incomplete sourceReview must not claim a review evidence identity.");
+  }
+  return outcome;
 }
 
 function parseArtifactDescriptor(value: unknown, index: number): WorkerArtifactDescriptor {
@@ -222,6 +283,8 @@ function parseArtifactDescriptor(value: unknown, index: number): WorkerArtifactD
       licenseNote: provenance.licenseNote,
       ...(optionalArtifactText(provenance.sourceUrl, `${prefix} provenance sourceUrl`) ? { sourceUrl: optionalArtifactText(provenance.sourceUrl, `${prefix} provenance sourceUrl`)! } : {}),
       ...(optionalArtifactText(provenance.creator, `${prefix} provenance creator`) ? { creator: optionalArtifactText(provenance.creator, `${prefix} provenance creator`)! } : {}),
+      ...(optionalArtifactText(provenance.creatorUrl, `${prefix} provenance creatorUrl`) ? { creatorUrl: optionalArtifactText(provenance.creatorUrl, `${prefix} provenance creatorUrl`)! } : {}),
+      ...(optionalArtifactText(provenance.previewUrl, `${prefix} provenance previewUrl`) ? { previewUrl: optionalArtifactText(provenance.previewUrl, `${prefix} provenance previewUrl`)! } : {}),
       ...(Number.isInteger(provenance.scenePosition) && Number(provenance.scenePosition) > 0
         ? { scenePosition: Number(provenance.scenePosition) }
         : {}),

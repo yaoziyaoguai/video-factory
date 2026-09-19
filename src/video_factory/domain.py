@@ -132,6 +132,8 @@ class StockAssetCandidate:
     license_note: str
     query: str
     score: int
+    creator_url: str = ""
+    download_tracking_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -148,3 +150,5 @@ class SceneAsset:
     creator: str
     license_note: str
     query: str
+    creator_url: str = ""
+    preview_url: str = ""

@@ -470,12 +470,21 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
       assert.equal(first.status, 202);
       const firstEnvelope = JSON.parse(first.body) as { accepted: boolean; binding: Record<string, unknown> };
       assert.equal(firstEnvelope.accepted, true);
-      await waitFor(() => calls === 1);
-      const record = JSON.parse(await readFile(path.join(
+      const durableRecordPath = path.join(
         broker.directory,
         "idempotency",
         `${createHash("sha256").update(requestId).digest("hex")}.json`,
-      ), "utf8")) as { version: number; state: string };
+      );
+      await waitFor(async () => {
+        if (calls !== 1) return false;
+        try {
+          const persisted = JSON.parse(await readFile(durableRecordPath, "utf8")) as { uncertainty?: unknown };
+          return persisted.uncertainty !== undefined;
+        } catch {
+          return false;
+        }
+      });
+      const record = JSON.parse(await readFile(durableRecordPath, "utf8")) as { version: number; state: string };
       assert.equal(record.version, 3);
       assert.equal(record.state, "accepted");
 

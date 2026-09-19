@@ -84,6 +84,11 @@ const IMAGE_TASK_KINDS = new Set<BrokerTaskKind>(["asset-rank", "reference-gramm
 const TRANSIENT_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);
 const TRANSIENT_ERROR_CODE_PATTERN = /^(?:temporarily[_-]unavailable|(?:service|model|capacity)[_-](?:temporarily[_-])?unavailable|(?:insufficient|exhausted|unavailable)[_-](?:model[_-])?capacity|(?:(?:model|capacity)[_-])?overload(?:ed)?)$/i;
 const INVALID_REQUEST_ERROR_CODE_PATTERN = /^(?:invalid|bad)[_-](?:request|parameter|argument)$/i;
+const ACCOUNT_BALANCE_ERROR_CODE_PATTERN = /^(?:insufficient|exhausted|out[_-]of|no)[_-]?(?:balance|credit|credits|quota)|(?:billing|payment)[_-]?(?:required|limit)|insufficient[_-]?quota$/i;
+const ACCOUNT_RATE_LIMIT_ERROR_CODE_PATTERN = /^(?:account|organization|org|project|user)[_-]?(?:rate[_-]?limit(?:ed)?|throttled)$/i;
+// 只有供应商显式声明的模型生命周期代码才能触发候选切换。HTTP 404 和数字 404
+// 同时可能表示 endpoint 写错，不能由 Broker 猜成模型退役。
+const MODEL_UNAVAILABLE_ERROR_CODE_PATTERN = /^model[_-](?:not[_-](?:found|exist)|retired|deprecated)$/i;
 
 export interface ChatCompletionsExecutorOptions {
   env?: NodeJS.ProcessEnv;
@@ -249,6 +254,7 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
       responseHeadersReceived = true;
       if (!response.ok) {
         const code = await readErrorCode(response);
+        const scope = failureScopeFor(response.status, code);
         throw new CodexExecutorError(
           `${label} Chat Completion returned HTTP ${response.status}${code ? ` (code ${code})` : ""}.`,
           isTransientProviderFailure(response.status, code),
@@ -256,6 +262,7 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
             details: {
               category: failureCategoryFor(response.status, code),
               reasonCode: code ?? `http_${response.status}`,
+              ...(scope !== undefined ? { scope } : {}),
               ...requestIdHashFor(response),
               providerId: this.identity.providerId,
               modelId,
@@ -713,14 +720,22 @@ function errorCodeInCauseChain(error: unknown): string | undefined {
   return undefined;
 }
 
-function failureCategoryFor(status: number, code: string | undefined): "authentication" | "invalid_request" | "rate_limited" | "service_unavailable" | "timeout" | "execution_failed" {
+function failureCategoryFor(status: number, code: string | undefined): "authentication" | "payment_required" | "invalid_request" | "rate_limited" | "service_unavailable" | "timeout" | "execution_failed" {
   if (status === 401 || status === 403) return "authentication";
+  if (status === 402 || isAccountBalanceCode(code)) return "payment_required";
   if (isExplicitInvalidRequestCode(code)) return "invalid_request";
   if (status === 429) return "rate_limited";
   if (status === 408) return "timeout";
   if (status === 502 || status === 503 || status === 504 || isExplicitTransientCode(code)) return "service_unavailable";
   if (status === 400 || status === 404 || status === 409 || status === 422) return "invalid_request";
   return "execution_failed";
+}
+
+function failureScopeFor(status: number, code: string | undefined): "model" | "provider_account" | undefined {
+  if (status === 401 || status === 402 || status === 403 || status === 429
+    || isAccountBalanceCode(code) || isAccountRateLimitCode(code)) return "provider_account";
+  if (isExplicitModelUnavailableCode(code) || isExplicitTransientCode(code)) return "model";
+  return undefined;
 }
 
 function isTransientProviderFailure(status: number, code: string | undefined): boolean {
@@ -734,6 +749,18 @@ function isExplicitTransientCode(code: string | undefined): boolean {
 
 function isExplicitInvalidRequestCode(code: string | undefined): boolean {
   return code !== undefined && INVALID_REQUEST_ERROR_CODE_PATTERN.test(code);
+}
+
+function isAccountBalanceCode(code: string | undefined): boolean {
+  return code !== undefined && ACCOUNT_BALANCE_ERROR_CODE_PATTERN.test(code);
+}
+
+function isAccountRateLimitCode(code: string | undefined): boolean {
+  return code !== undefined && ACCOUNT_RATE_LIMIT_ERROR_CODE_PATTERN.test(code);
+}
+
+function isExplicitModelUnavailableCode(code: string | undefined): boolean {
+  return code !== undefined && MODEL_UNAVAILABLE_ERROR_CODE_PATTERN.test(code);
 }
 
 /**
@@ -770,7 +797,7 @@ function elapsedMs(startedAt: number, finishedAt: number): number {
 }
 
 /** envelope 解析各路径共享的失败原因码；response_too_large 见 MAX_STREAM_BYTES。 */
-type EnvelopeFailureReasonCode = "invalid_json" | "output_contract" | "response_too_large";
+type EnvelopeFailureReasonCode = "invalid_json" | "output_contract" | "response_too_large" | "stream_incomplete";
 
 function invalidOutputDetails(
   providerId: string,
@@ -784,7 +811,8 @@ function invalidOutputDetails(
     | "task_schema"
     | "task_semantics"
     | "repair_semantic_drift"
-    | "response_too_large",
+    | "response_too_large"
+    | "stream_incomplete",
 ): CodexExecutorFailureDetails {
   return {
     category: "invalid_output",
@@ -888,6 +916,7 @@ async function readStreamedCompletion(
   let received = 0;
   let lastUsage: Record<string, unknown> | undefined;
   let finishReason: string | undefined;
+  let reachedTerminalEvent = false;
   let firstOutputEventMs: number | undefined;
   try {
     while (true) {
@@ -919,7 +948,9 @@ async function readStreamedCompletion(
             });
           }
           const payload = line.slice(5).trim();
-          if (payload !== "[DONE]") {
+          if (payload === "[DONE]") {
+            reachedTerminalEvent = true;
+          } else {
             const event = parseStreamEvent(payload, options);
             if (firstOutputEventMs === undefined) {
               firstOutputEventMs = options.elapsed();
@@ -931,6 +962,7 @@ async function readStreamedCompletion(
               if (typeof delta?.content === "string") content += delta.content;
               if (typeof choice.finish_reason === "string" && choice.finish_reason.length > 0) {
                 finishReason = choice.finish_reason;
+                reachedTerminalEvent = true;
               }
             }
             if (isRecord(event.usage)) lastUsage = event.usage;
@@ -939,12 +971,24 @@ async function readStreamedCompletion(
         newline = buffer.indexOf("\n");
       }
     }
+    // 让 TextDecoder 将 EOF 时残留的半个 UTF-8 序列显式冲刷出来。它不会被当作一个完整
+    // SSE 事件处理，随后统一按“没有终止帧”拒绝，不能把截断响应伪装成有效回执。
+    buffer += decoder.decode();
   } finally {
     deadline.clear();
     // 首事件超时路径上仍有一次读在途，此时 releaseLock 会抛 TypeError 并顶掉真正的失败原因；
     // 先取消（在途读会以 done 收尾并被清空），再释放锁。
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
+  }
+  if (!reachedTerminalEvent) {
+    throw new CodexExecutorError(`${label} Chat Completion stream ended before a terminal event.`, false, {
+      details: {
+        ...options.failureDetails("stream_incomplete"),
+        transportBytes: received,
+        ...(finishReason ? { finishReason } : {}),
+      },
+    });
   }
   // 交付内容的配额：推理流已经在上面的传输上限里放过，这里只卡真正要解析的答案。
   if (Buffer.byteLength(content, "utf8") > MAX_RESPONSE_BYTES) {
@@ -1081,7 +1125,12 @@ function responseErrorCode(raw: string): string | undefined {
     return String(candidate);
   }
   if (typeof candidate === "string"
-    && (/^\d{3,8}$/.test(candidate) || isExplicitTransientCode(candidate) || isExplicitInvalidRequestCode(candidate))) return candidate;
+    && (/^\d{3,8}$/.test(candidate)
+      || isExplicitTransientCode(candidate)
+      || isExplicitInvalidRequestCode(candidate)
+      || isAccountBalanceCode(candidate)
+      || isAccountRateLimitCode(candidate)
+      || isExplicitModelUnavailableCode(candidate))) return candidate;
   return undefined;
 }
 

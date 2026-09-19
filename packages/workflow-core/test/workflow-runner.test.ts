@@ -74,6 +74,289 @@ describe("WorkflowRunner", () => {
     assert.equal(calls, 2);
   });
 
+  it("continues a complete negative source review under the same operation only after the user accepts its evidence", async () => {
+    const evidenceId = "a".repeat(64);
+    const operationIds: Array<string | undefined> = [];
+    let calls = 0;
+    const definition: WorkflowDefinition = {
+      id: "source-review-decision",
+      name: "Source review decision",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        mode: "automatic",
+        execute: (_input, context) => {
+          calls += 1;
+          operationIds.push(context.operationRequestId);
+          if (calls === 1) {
+            return {
+              status: "needs_human" as const,
+              error: "试片提出质量意见。",
+              output: { sourceReview: { kind: "complete_negative", evidenceId } },
+              intervention: {
+                kind: "source_review_decision" as const,
+                reason: "试片提出质量意见。",
+                requiredAction: "approve" as const,
+                options: ["approve" as const, "request_changes" as const, "reject" as const],
+              },
+            };
+          }
+          return { output: { assets: ["remaining-scenes"] } };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: new ProviderRegistry() });
+    const waiting = await runner.run(definition, {});
+    const intervention = waiting.nodeRuns[0]?.intervention;
+    assert.equal(waiting.status, "needs_human");
+    assert.equal(intervention?.kind, "source_review_decision");
+    const originalOperationId = waiting.nodeRuns[0]?.operationRequestId;
+
+    const resumed = await runner.resume(definition, waiting, {
+      interventionId: intervention!.id,
+      action: "approve",
+      actor: "studio-owner",
+      reviewEvidenceId: evidenceId,
+    });
+
+    const assets = resumed.nodeRuns[0]!;
+    assert.equal(resumed.status, "succeeded");
+    assert.equal(calls, 2, "承担意见必须重新进入尚未完成的素材节点，不能把它伪装成已成功");
+    assert.equal(operationIds[1], operationIds[0]);
+    assert.equal(assets.operationRequestId, originalOperationId);
+    assert.equal(assets.outputState?.versions.length, 2, "原试片意见必须保留为版本历史");
+    assert.deepEqual(assets.outputState?.versions[0]?.output, { sourceReview: { kind: "complete_negative", evidenceId } });
+  });
+
+  it("keeps a still-matching paid authorization for the remaining source-review operation", async () => {
+    const evidenceId = "c".repeat(64);
+    let providerCalls = 0;
+    let executions = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "paid-assets",
+      label: "Paid assets",
+      modelId: "video-v1",
+      capability: "asset.prepare",
+      transport: "http_api",
+      billing: "metered",
+      estimatedCostCny: 2,
+      maxCostCny: 4,
+      maxAttempts: 2,
+      quoteSpend: () => ({ estimatedCostCny: 4, maxCostCny: 4 }),
+      run: () => {
+        providerCalls += 1;
+        return { accepted: true };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "source-review-retains-authorization",
+      name: "Source review retains authorization",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "paid-assets",
+        mode: "automatic",
+        execute: async (input, context) => {
+          await context.resolveProvider({ capability: "asset.prepare", providerId: "paid-assets" }).run(input, context);
+          executions += 1;
+          const receipt = {
+            providerId: "paid-assets",
+            providerLabel: "Paid assets",
+            modelId: "video-v1",
+            transport: "http_api" as const,
+            billing: "metered" as const,
+            estimatedCostCny: 4,
+            actualCostCny: executions === 1 ? 2 : 4,
+            actualCostSource: "provider_reported" as const,
+            meteredAttemptCount: executions,
+            meteredFailedAttemptCount: 0,
+          };
+          if (executions === 1) {
+            return {
+              status: "needs_human" as const,
+              output: { sourceReview: { kind: "complete_negative", evidenceId } },
+              intervention: {
+                kind: "source_review_decision" as const,
+                reason: "试片提出质量意见。",
+                requiredAction: "approve" as const,
+                options: ["approve" as const, "request_changes" as const, "reject" as const],
+              },
+              receipt,
+              providerOutcomeKnown: true,
+            };
+          }
+          return { output: { assets: ["remaining-scenes"] }, receipt, providerOutcomeKnown: true };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry });
+    const awaitingApproval = await runner.run(definition, {});
+    const plan = awaitingApproval.nodeRuns[0]?.spendPlan;
+    assert.ok(plan);
+
+    const waiting = await runner.authorizeSpend(definition, awaitingApproval, {
+      spendPlanId: plan.id,
+      nodeId: plan.nodeId,
+      inputVersionIds: plan.inputVersionIds,
+      providerId: plan.providerId,
+      modelId: plan.modelId,
+      maxCostCny: plan.maxCostCny,
+      maxAttempts: plan.maxAttempts,
+      approvedBy: "producer",
+    });
+    const waitingNode = waiting.nodeRuns[0]!;
+    const authorizationId = waitingNode.spendAuthorizationId;
+    assert.equal(waiting.status, "needs_human");
+    assert.ok(authorizationId);
+
+    const resumed = await runner.resume(definition, waiting, {
+      interventionId: waitingNode.intervention!.id,
+      action: "approve",
+      actor: "studio-owner",
+      reviewEvidenceId: evidenceId,
+    });
+
+    assert.equal(resumed.status, "succeeded");
+    assert.equal(providerCalls, 2, "第二次调用继续同一已授权操作，而不是创建另一份授权");
+    assert.equal(resumed.nodeRuns[0]?.spendAuthorizationId, authorizationId);
+    assert.deepEqual(resumed.consumedSpendAuthorizationIds ?? [], []);
+  });
+
+  it("requires a new approval when the quote changes after a complete source review", async () => {
+    const evidenceId = "d".repeat(64);
+    let quotedMaxCostCny = 4;
+    let providerCalls = 0;
+    let executions = 0;
+    const registry = new ProviderRegistry();
+    registry.register({
+      id: "paid-assets",
+      label: "Paid assets",
+      modelId: "video-v1",
+      capability: "asset.prepare",
+      transport: "http_api",
+      billing: "metered",
+      estimatedCostCny: 4,
+      maxCostCny: 8,
+      maxAttempts: 2,
+      quoteSpend: () => ({ estimatedCostCny: quotedMaxCostCny, maxCostCny: quotedMaxCostCny }),
+      run: () => {
+        providerCalls += 1;
+        return { accepted: true };
+      },
+    });
+    const definition: WorkflowDefinition = {
+      id: "source-review-invalidates-authorization",
+      name: "Source review invalidates authorization",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        providerId: "paid-assets",
+        mode: "automatic",
+        execute: async (input, context) => {
+          await context.resolveProvider({ capability: "asset.prepare", providerId: "paid-assets" }).run(input, context);
+          executions += 1;
+          if (executions === 1) {
+            return {
+              status: "needs_human" as const,
+              output: { sourceReview: { kind: "complete_negative", evidenceId } },
+              intervention: {
+                kind: "source_review_decision" as const,
+                reason: "试片提出质量意见。",
+                requiredAction: "approve" as const,
+                options: ["approve" as const, "request_changes" as const, "reject" as const],
+              },
+              providerOutcomeKnown: true,
+            };
+          }
+          return { output: { assets: ["must-not-be-created"] }, providerOutcomeKnown: true };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: registry });
+    const awaitingApproval = await runner.run(definition, {});
+    const originalPlan = awaitingApproval.nodeRuns[0]!.spendPlan!;
+    const waiting = await runner.authorizeSpend(definition, awaitingApproval, {
+      spendPlanId: originalPlan.id,
+      nodeId: originalPlan.nodeId,
+      inputVersionIds: originalPlan.inputVersionIds,
+      providerId: originalPlan.providerId,
+      modelId: originalPlan.modelId,
+      maxCostCny: originalPlan.maxCostCny,
+      maxAttempts: originalPlan.maxAttempts,
+      approvedBy: "producer",
+    });
+    const waitingNode = waiting.nodeRuns[0]!;
+    const originalOperationId = waitingNode.operationRequestId;
+    quotedMaxCostCny = 6;
+
+    const invalidated = await runner.resume(definition, waiting, {
+      interventionId: waitingNode.intervention!.id,
+      action: "approve",
+      actor: "studio-owner",
+      reviewEvidenceId: evidenceId,
+    });
+
+    assert.equal(invalidated.status, "approval_invalidated");
+    assert.equal(providerCalls, 1, "报价变化时不得借质量承担直接产生第二次调用");
+    assert.equal(invalidated.nodeRuns[0]?.operationRequestId, originalOperationId);
+    assert.equal(invalidated.nodeRuns[0]?.spendPlan?.maxCostCny, 6);
+    assert.deepEqual(invalidated.nodeRuns[0]?.outputState?.versions[0]?.output, {
+      sourceReview: { kind: "complete_negative", evidenceId },
+    });
+  });
+
+  it("marks a complete negative source review stale when the user chooses to adjust instead of purchasing again", async () => {
+    const evidenceId = "b".repeat(64);
+    let calls = 0;
+    const definition: WorkflowDefinition = {
+      id: "source-review-adjust",
+      name: "Source review adjustment",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        mode: "automatic",
+        execute: () => {
+          calls += 1;
+          return {
+            status: "needs_human" as const,
+            output: { sourceReview: { kind: "complete_negative", evidenceId } },
+            intervention: {
+              kind: "source_review_decision" as const,
+              reason: "试片提出质量意见。",
+              requiredAction: "approve" as const,
+              options: ["approve" as const, "request_changes" as const, "reject" as const],
+            },
+          };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: new ProviderRegistry() });
+    const waiting = await runner.run(definition, {});
+    const intervention = waiting.nodeRuns[0]?.intervention;
+
+    const adjusted = await runner.resume(definition, waiting, {
+      interventionId: intervention!.id,
+      action: "request_changes",
+      actor: "studio-owner",
+      reviewEvidenceId: evidenceId,
+    });
+
+    assert.equal(adjusted.status, "stale");
+    assert.equal(adjusted.nodeRuns[0]?.status, "stale");
+    assert.equal(adjusted.nodeRuns[0]?.intervention, undefined);
+    assert.deepEqual(adjusted.nodeRuns[0]?.output, { sourceReview: { kind: "complete_negative", evidenceId } });
+    assert.equal(calls, 1, "调整方案不能在用户真正修改前自动重新执行或购买素材");
+  });
+
 
   it("pauses between nodes on request and resumes without replaying completed work", async () => {
     let pauseRequested = false;

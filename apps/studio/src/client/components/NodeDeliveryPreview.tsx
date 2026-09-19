@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { creatorContainerViewId, creatorViewId, isCreatorNestedField, isCreatorTopLevelField } from "../creator-document-policy.js";
+import { UnsplashAttribution, unsplashPublicUrl } from "./UnsplashAttribution.js";
 import { humanizeCreativeText, platformLabel, providerLabel } from "../presentation.js";
 
 interface NodeDeliveryPreviewProps {
@@ -379,6 +380,7 @@ function AssetCandidate({ candidate, index }: { candidate: unknown; index: numbe
   const selected = record.selected === true;
   const previewUrl = safeCandidateUrl(record.preview_url);
   const sourceUrl = safeCandidateUrl(record.source_url);
+  const isUnsplash = record.provider === "unsplash" || record.provider_id === "unsplash-stock-v1";
   const dimensions = [record.width, record.height].every((value) => typeof value === "number")
     ? `${record.width} × ${record.height}`
     : "尺寸未知";
@@ -390,7 +392,10 @@ function AssetCandidate({ candidate, index }: { candidate: unknown; index: numbe
     <figcaption>
       <strong>{formatScalar(record.provider_id ?? record.provider, "provider")}</strong>
       <small>{dimensions}{typeof record.duration === "number" && record.duration > 0 ? ` · ${record.duration} 秒` : ""}</small>
-      {isScalar(record.creator) && record.creator ? <small>作者：{formatScalar(record.creator)}</small> : null}
+      {isUnsplash ? <small><UnsplashAttribution
+        creator={typeof record.creator === "string" ? record.creator : undefined}
+        creatorUrl={typeof record.creator_url === "string" ? record.creator_url : undefined}
+      /></small> : isScalar(record.creator) && record.creator ? <small>作者：{formatScalar(record.creator)}</small> : null}
       {isScalar(record.license_note) ? <small className="asset-license">{formatScalar(record.license_note)}</small> : null}
       {sourceUrl ? <a href={sourceUrl} rel="noreferrer" target="_blank">核验原始来源</a> : null}
     </figcaption>
@@ -442,6 +447,8 @@ function hasCreatorCollectionItem(value: unknown): boolean {
 
 function safeCandidateUrl(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
+  const unsplash = unsplashPublicUrl(value, "unsplash.com") ?? unsplashPublicUrl(value, "images.unsplash.com");
+  if (unsplash) return unsplash;
   try {
     const url = new URL(value);
     if (url.protocol !== "https:") return undefined;

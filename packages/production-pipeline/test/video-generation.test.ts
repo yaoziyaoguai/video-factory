@@ -621,7 +621,10 @@ describe("metered video generation adapters", () => {
   });
 
   it("keeps a polling timeout uncertain so the accepted task cannot be recreated", async () => {
-    const timeoutOptions = { sleep: async () => new Promise<void>((resolve) => setTimeout(resolve, 2)), pollIntervalMs: 0, timeoutMs: 1 };
+    // 此处验证的是“任务已受理后的轮询超时”，不是 POST 响应与 1ms 定时器抢跑。
+    // 给提交足够的确定性余量，再由下一轮 sleep 跨过 deadline；否则慢机器会在尚未
+    // 获得 taskId 时就超时，测到的是另一个已有专项覆盖的 create-timeout 路径。
+    const timeoutOptions = { sleep: async () => new Promise<void>((resolve) => setTimeout(resolve, 25)), pollIntervalMs: 0, timeoutMs: 20 };
     const cases: Array<{ label: string; adapter: VideoGenerationAdapter }> = [{
       label: "Seedance",
       adapter: new SeedanceVideoAdapter({

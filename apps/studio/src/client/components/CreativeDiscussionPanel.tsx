@@ -20,6 +20,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   const [message, setMessage] = useState(() => window.localStorage.getItem(storageKey) ?? "");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [error, setError] = useState<string>();
+  const [hasUnsavedEdits, setHasUnsavedEdits] = useState(false);
   const [mobileTab, setMobileTab] = useState<"draft" | "discussion">("draft");
   const hasBlockingIssues = review.blockingIssues.length > 0;
   // 草稿一变 publishCreativeDraft 必然清空 checkResult，所以在场的 repair 一定是针对当前草稿的。
@@ -63,7 +64,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
 
   function sendMessage() {
     const text = message.trim();
-    if (!text || busy) return;
+    if (!text || busy || !review.allowedActions.includes("discuss")) return;
     void submit({
       action: "discuss",
       commandId: crypto.randomUUID(),
@@ -80,7 +81,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   }
 
   function confirmDraft() {
-    if (busy) return;
+    if (busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")) return;
     if (awaitingRepair && !window.confirm(
       "独立复核对当前这一版提出了意见，还没有通过。\n\n"
       + "继续会让流程带着这些未处理的意见进入下一步，系统会记录是你确认放行的。\n\n"
@@ -98,7 +99,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   }
 
   function returnToStage(target: StudioCreativeReviewSnapshot["returnTargets"][number]) {
-    if (busy || !window.confirm(`${target.impact}\n\n确定${target.label}吗？`)) return;
+    if (busy || hasUnsavedEdits || !review.allowedActions.includes("return_to_stage") || !window.confirm(`${target.impact}\n\n确定${target.label}吗？`)) return;
     void submit({
       action: "return_to_stage",
       commandId: crypto.randomUUID(),
@@ -108,46 +109,43 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
     }).catch(() => undefined);
   }
 
-  function saveEditedDraft(document: Record<string, unknown>) {
-    if (busy) return;
-    void submit({
+  async function saveEditedDraft(document: Record<string, unknown>) {
+    if (busy || !review.allowedActions.includes("edit_draft")) throw new Error("当前版本暂不允许保存，请等待操作完成。");
+    await submit({
       action: "edit_draft",
       commandId: crypto.randomUUID(),
       ...commandBase,
       document,
-    }).catch(() => undefined);
+    });
   }
 
   return (
     <section className="creative-discussion-panel" aria-labelledby="creative-review-title">
       <header className="creative-discussion-header">
         <div>
-          <p className="eyebrow">当前需要你参与</p>
           <h2 id="creative-review-title">{hasBlockingIssues ? "当前导演方案需要你决定" : `${STAGE_LABEL[review.stage]}已生成，等你确认`}</h2>
-          <p>{hasBlockingIssues
-            ? "没有找到满足当前要求的素材。已保留你确认的方案，不会自动改成生成画面；请先在右侧告诉导演允许怎样调整，或补充合适素材。"
-            : "可以直接继续，也可以先聊聊想改的地方。点确认会按当前这一版做一次独立复核：复核通过才进入下一步；复核提出意见时你会停在同一份方案上，可以照着改，也可以看过意见后仍然确认。确认不会购买素材。"}</p>
+          {hasBlockingIssues ? <p>素材暂不满足方案。已保留你确认的方案，不会自动改成生成画面；请在讨论区说明允许怎样调整，或补充素材。</p> : null}
         </div>
         <span className={`creative-review-phase phase-${review.phase}`}>
           {review.phase === "checking" ? "正在处理原操作" : `第 ${review.reviewRevision} 版讨论`}
         </span>
       </header>
 
-      <div className="creative-mobile-tabs" role="tablist" aria-label="方案与讨论">
-        <button type="button" role="tab" aria-selected={mobileTab === "draft"} onClick={() => setMobileTab("draft")}>当前方案</button>
-        <button type="button" role="tab" aria-selected={mobileTab === "discussion"} onClick={() => setMobileTab("discussion")}>讨论</button>
+      <div className="creative-mobile-tabs" role="group" aria-label="方案与讨论">
+        <button type="button" aria-pressed={mobileTab === "draft"} aria-controls="creative-draft" onClick={() => setMobileTab("draft")}>当前方案</button>
+        <button type="button" aria-pressed={mobileTab === "discussion"} aria-controls="creative-chat" onClick={() => setMobileTab("discussion")}>讨论{review.messages.length > 0 ? ` · ${review.messages.length}` : ""}</button>
       </div>
 
       <div className="creative-discussion-layout">
-        <article className={mobileTab === "draft" ? "creative-draft-surface is-mobile-active" : "creative-draft-surface"} aria-label={`当前${STAGE_LABEL[review.stage]}`}>
+        <article id="creative-draft" tabIndex={0} className={mobileTab === "draft" ? "creative-draft-surface is-mobile-active" : "creative-draft-surface"} aria-label={`当前${STAGE_LABEL[review.stage]}`}>
+          <CreativeDraftEditor storageKey={`${storageKey}:edit`} draftIdentity={`${review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} />
           <CreativeDraft stage={review.stage} value={review.draft} />
-          <CreativeDraftEditor stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking"} onSave={saveEditedDraft} />
-          <CreativeSelection
+          <details className="creative-selection-disclosure"><summary>指定讨论范围{selectedIds.length > 0 ? ` · 已选 ${selectedIds.length} 项` : "（可选）"}</summary><CreativeSelection
             stage={review.stage}
             draft={review.draft}
             selectedIds={selectedIds}
             onChange={setSelectedIds}
-          />
+          /></details>
           {review.previousDraft !== undefined ? <details><summary>查看上一版</summary><CreativeDraft stage={review.stage} value={review.previousDraft} /></details> : null}
           {review.checkResult?.verdict === "repair" ? <section className="creative-check-result" role="status">
             <strong>有 {review.checkResult.issues.length} 处需要调整，尚未进入下一步</strong>
@@ -198,11 +196,12 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
           {review.proposals.map((proposal) => <section className="creative-proposal" key={proposal.proposalId}>
             <header><strong>备选方案</strong><small>{proposal.changeSummary.join("；") || "可与当前方案比较"}</small></header>
             <CreativeDraft stage={review.stage} value={proposal.document} />
-            <button type="button" className="button button-secondary" disabled={busy} onClick={() => void submit({ action: "adopt_proposal", commandId: crypto.randomUUID(), ...commandBase, proposalId: proposal.proposalId }).catch(() => undefined)}>采用这个备选</button>
+            <button type="button" className="button button-secondary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("adopt_proposal")} onClick={() => void submit({ action: "adopt_proposal", commandId: crypto.randomUUID(), ...commandBase, proposalId: proposal.proposalId }).catch(() => undefined)}>采用这个备选</button>
           </section>)}
         </article>
 
-        <section className={mobileTab === "discussion" ? "creative-chat-surface is-mobile-active" : "creative-chat-surface"} aria-label="与当前角色讨论">
+        <section id="creative-chat" className={mobileTab === "discussion" ? "creative-chat-surface is-mobile-active" : "creative-chat-surface"} aria-label="与当前角色讨论">
+          <header className="creative-chat-heading"><MessageCircle aria-hidden="true" size={17} /><strong>一起打磨这一版</strong></header>
           <div className="creative-message-list" aria-live="polite">
             {review.messages.length === 0 ? <p className="creative-empty-chat"><MessageCircle aria-hidden="true" size={18} />还没有讨论。可以问为什么这样安排，或直接说想改成什么样。</p> : null}
             {review.messages.map((entry) => <p key={entry.id} className={`creative-message message-${entry.role}`}><span>{entry.role === "user" ? "你" : "创作角色"}</span>{entry.text}</p>)}
@@ -215,7 +214,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
             <textarea value={message} maxLength={4000} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="例如：为什么这样开场？或者：把开头改得更直接一些。" />
             <small>Ctrl + Enter 发送；普通换行不会发送。</small>
           </label>
-          <button type="button" className="button button-secondary" disabled={busy || !message.trim()} onClick={sendMessage}><Send aria-hidden="true" size={16} />{busy ? "正在处理…" : "发送"}</button>
+          <button type="button" className="button button-secondary" disabled={busy || !message.trim() || !review.allowedActions.includes("discuss")} onClick={sendMessage}><Send aria-hidden="true" size={16} />{busy ? "正在处理…" : "发送"}</button>
         </section>
       </div>
 
@@ -223,11 +222,12 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       {review.returnTargets.length > 0 ? <aside className="creative-return-actions" aria-label="返回前期方案">
         <strong>需要调整更早的决定？</strong>
         <p>返回后只让受影响的后续方案失效，历史稿件和已可用素材会保留。</p>
-        {review.returnTargets.map((target) => <button key={target.stage} type="button" className="button button-secondary" disabled={busy} title={target.impact} onClick={() => returnToStage(target)}><ArrowLeft aria-hidden="true" size={16} />{target.label}</button>)}
+        {review.returnTargets.map((target) => <button key={target.stage} type="button" className="button button-secondary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("return_to_stage")} title={target.impact} onClick={() => returnToStage(target)}><ArrowLeft aria-hidden="true" size={16} />{target.label}</button>)}
       </aside> : null}
       <footer className="creative-review-actions">
-        <button type="button" className="button button-ghost" disabled={busy || review.previousDraft === undefined} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button>
-        <button type="button" className="button button-primary" disabled={busy} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{awaitingRepair ? "看过意见，仍然确认" : hasBlockingIssues ? "修改后重新检查" : "确认当前方案，继续"}</button>
+        <div className="creative-confirm-context"><strong>{hasUnsavedEdits ? "有未保存的手动修改" : `确认对象：当前${STAGE_LABEL[review.stage]}`}</strong><small>{hasUnsavedEdits ? "先保存或放弃修改，再确认采用；不会提交编辑器里的未保存文字。" : "确认时独立复核，不会购买素材；有意见由你决定，后续步骤仍需确认。"}</small></div>
+        <button type="button" className="button button-ghost" disabled={busy || hasUnsavedEdits || review.previousDraft === undefined || !review.allowedActions.includes("undo_draft")} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button>
+        <button type="button" className="button button-primary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{awaitingRepair ? "看过意见，仍然确认" : hasBlockingIssues ? "修改后重新检查" : "确认当前方案，继续"}</button>
       </footer>
     </section>
   );
@@ -287,7 +287,7 @@ function CreativeDraft({ stage, value }: { stage: StudioCreativeReviewSnapshot["
     <DraftList label="视觉方向" value={value.visualPrinciples} />
     <DraftList label="声音方向" value={value.soundPrinciples} />
   </div>;
-  if (stage === "script") return <div className="creative-readable-draft"><DraftField label="叙事推进" value={value.narrativeArc} />{Array.isArray(value.scenes) ? value.scenes.map((scene, index) => isRecord(scene) ? <section className="creative-scene" key={String(scene.id ?? index)}><strong>第 {Number(scene.position ?? index + 1)} 段 · {Number(scene.duration ?? 0)} 秒</strong><p>{String(scene.narration ?? "")}</p><small>画面描述（尚未生成）：{String(scene.visual_prompt ?? "")}</small></section> : null) : null}</div>;
+  if (stage === "script") return <div className="creative-readable-draft"><DraftField label="叙事推进（制作参考）" value={value.narrativeArc} />{Array.isArray(value.scenes) ? value.scenes.map((scene, index) => isRecord(scene) ? <section className="creative-scene" key={String(scene.id ?? index)}><strong>第 {Number(scene.position ?? index + 1)} 段 · {Number(scene.duration ?? 0)} 秒</strong><div className="creative-audience-copy"><small>旁白 · 观众听到的内容</small><p>{String(scene.narration ?? "")}</p></div><div className="creative-production-note"><small>画面描述 · 制作参考，尚未生成</small><p>{String(scene.visual_prompt ?? "")}</p></div></section> : null) : null}</div>;
   return <div className="creative-readable-draft">{isRecord(value.visualBible) ? <DraftField label="全片视觉规则" value={`${String(value.visualBible.narrativeApproach ?? "")} · ${String(value.visualBible.pacing ?? "")} · ${String(value.visualBible.continuity ?? "")}`} /> : null}{Array.isArray(value.shots) ? value.shots.map((shot, index) => isRecord(shot) ? <section className="creative-scene" key={String(shot.scenePosition ?? index)}><strong>镜头 {Number(shot.scenePosition ?? index + 1)} · {String(shot.deliveryType ?? "待定路线")}</strong><p>{String(shot.visibleAction ?? shot.generationPrompt ?? shot.query ?? "")}</p><small>预计时长与获取路线将在当前方案确认后进入报价；画面尚未生成。</small></section> : null) : null}</div>;
 }
 
@@ -311,52 +311,75 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * 讨论或重新生成；文字修订在这里改完保存，走与 AI 修订完全相同的制度：换稿 → 停点重现 →
  * 确认时自动跑一轮新的独立复核。
  */
-function CreativeDraftEditor({ stage, draft, busy, onSave }: {
+function CreativeDraftEditor({ storageKey, draftIdentity, stage, draft, busy, onSave, onDirtyChange }: {
+  storageKey: string;
+  draftIdentity: string;
   stage: StudioCreativeReviewSnapshot["stage"];
   draft: unknown;
   busy: boolean;
-  onSave(document: Record<string, unknown>): void;
+  onSave(document: Record<string, unknown>): Promise<void>;
+  onDirtyChange(dirty: boolean): void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [edited, setEdited] = useState<Record<string, unknown> | null>(null);
-  const draftKey = draftIdentityKey(stage, draft);
+  const [edited, setEdited] = useState<{ baseKey: string; document: Record<string, unknown> } | null>(() => {
+    try {
+      const stored: unknown = JSON.parse(window.localStorage.getItem(storageKey) ?? "null");
+      return isRecord(stored) && typeof stored.baseKey === "string" && isRecord(stored.document)
+        ? { baseKey: stored.baseKey, document: stored.document } : null;
+    } catch { return null; }
+  });
+  const [open, setOpen] = useState(edited !== null);
+  const [saving, setSaving] = useState(false);
+  const [saveState, setSaveState] = useState<"saved" | "failed">();
+  const draftKey = JSON.stringify({ stage, draftIdentity, draft });
+  const stale = edited !== null && edited.baseKey !== draftKey;
   useEffect(() => {
-    // 草稿换了（复核出意见、AI 改稿、撤销）就丢弃本地未保存的修订：它基于旧稿，留着只会
-    // 让人把过时的文字当成当前方案。
-    setEdited(null);
-    setOpen(false);
-  }, [draftKey]);
-  const fields = useMemo(() => editableTextFields(stage, edited ?? draft), [stage, edited, draft]);
+    onDirtyChange(edited !== null);
+    // 本地文字只用于恢复编辑，不作为服务端采用版本或确认依据。
+    try {
+      if (edited) window.localStorage.setItem(storageKey, JSON.stringify(edited));
+      else window.localStorage.removeItem(storageKey);
+    } catch { /* 存储不可用时仍保留当前页内的文字。 */ }
+  }, [edited, onDirtyChange, storageKey]);
+  useEffect(() => {
+    if (!edited) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [edited]);
+  const fields = useMemo(() => editableTextFields(stage, edited?.document ?? draft), [stage, edited, draft]);
   if (!isRecord(draft) || fields.length === 0) return null;
-  const current = edited ?? draft;
+  const current = edited?.document ?? draft;
   const dirty = edited !== null;
   return <details className="creative-draft-editor" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary><FilePenLine aria-hidden="true" size={14} />手动修订这份稿件（保存后会自动重新独立复核）</summary>
+    <summary><FilePenLine aria-hidden="true" size={14} />手动修订这份稿件{dirty ? " · 有未保存修改" : ""}</summary>
     {/* 收起时不渲染字段：可读稿和编辑器里会出现相同文字，展开才挂载避免同一屏两份同文。 */}
     {open ? <>
+      <p className="creative-edit-state" role="status">{stale ? "当前方案已更新。你的未保存文字仍在下方，可先复制留存；请放弃旧稿修改、重新读取当前版本后再编辑。旧稿不能覆盖新稿。" : saving ? "正在保存修订，等待服务端确认…" : saveState === "failed" ? "保存未完成，输入仍保留。请查看错误后重试。" : dirty ? "修改尚未生效；保存后仍等你确认采用，确认时重新独立复核。" : saveState === "saved" ? "修订已保存。请核对当前稿，再确认采用。" : "可直接修改文字。保存不会自动采用或购买素材；确认采用时重新独立复核。"}</p>
       {fields.map((field) => <label key={field.key} className="creative-edit-field">
         <span>{field.label}</span>
         <textarea
           value={field.value}
-          disabled={busy}
-          onChange={(event) => setEdited(field.apply(structuredClone(current), event.target.value))}
+          disabled={busy || saving}
+          onChange={(event) => { setSaveState(undefined); setEdited({ baseKey: edited?.baseKey ?? draftKey, document: field.apply(structuredClone(current), event.target.value) }); }}
         />
       </label>)}
       <div className="creative-edit-actions">
-        {dirty ? <button type="button" className="button button-ghost" disabled={busy} onClick={() => setEdited(null)}>放弃修改</button> : null}
+        {dirty ? <button type="button" className="button button-ghost" disabled={busy || saving} onClick={() => { setEdited(null); setSaveState(undefined); }}>放弃修改</button> : null}
         <button
           type="button"
           className="button button-primary"
-          disabled={busy || !dirty}
-          onClick={() => { if (edited) onSave(edited); }}
-        ><Save aria-hidden="true" size={15} />{busy ? "正在处理…" : "保存修订并重新复核"}</button>
+          disabled={busy || saving || !dirty || stale}
+          onClick={async () => {
+            if (!edited || stale || saving || busy) return;
+            setSaving(true);
+            try { await onSave(edited.document); setEdited(null); setSaveState("saved"); }
+            catch { setSaveState("failed"); }
+            finally { setSaving(false); }
+          }}
+        ><Save aria-hidden="true" size={15} />{saving || busy ? "正在处理…" : "保存修订"}</button>
       </div>
     </> : null}
   </details>;
-}
-
-function draftIdentityKey(stage: StudioCreativeReviewSnapshot["stage"], draft: unknown): string {
-  return JSON.stringify({ stage, draft });
 }
 
 interface EditableTextField {
@@ -423,7 +446,7 @@ function editableTextFields(stage: StudioCreativeReviewSnapshot["stage"], draft:
   // director：v1 只开放视觉规则的文字修订；逐镜计划的结构与路线仍走讨论/重新生成。
   if (!isRecord(draft.visualBible)) return [];
   const fields: EditableTextField[] = [];
-  fields.push(...collectionTextFields(draft, "visualBible", "全片视觉规则", [
+  for (const [field, label] of [
     ["viewerPromise", "观众承诺"],
     ["narrativeApproach", "叙事方式"],
     ["pacing", "节奏"],
@@ -432,7 +455,10 @@ function editableTextFields(stage: StudioCreativeReviewSnapshot["stage"], draft:
     ["color", "色彩"],
     ["continuity", "连续性"],
     ["sound", "声音"],
-  ]));
+  ] as const) {
+    const item = text(`visualBible.${field}`, `全片视觉规则 · ${label}`, (d) => isRecord(d.visualBible) ? d.visualBible[field] : undefined, (d, value) => { d.visualBible = { ...(d.visualBible as Record<string, unknown>), [field]: value }; });
+    if (item) fields.push(item);
+  }
   return fields;
 }
 

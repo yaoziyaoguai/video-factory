@@ -88,6 +88,8 @@ VideoFactory 是为单人创作者设计的 Light Curated Studio。产品气质�
 
 Runs remain rows, not promotional cards. Filters separate all, active, review, and terminal work; title search remains local and deterministic. Each row exposes status, current node, start time, and the next action. Missing thumbnails use silver editorial placeholders; failure is expressed by the status label, not by painting the whole placeholder red.
 
+制作记录使用紧凑统计和纵向作品行；小预览、作品标题、当前状态与下一操作共同出现在首屏，不再用大面积统计卡和占位封面挤走作品。手机转为单列，保留搜索、筛选和归档操作。
+
 ### Resources
 
 Strategic resources explicitly report trend ingestion, reasoning/director models, and generative visual models. A compact pulse row summarizes readiness, while three-column registries preserve readable names, requirements, provenance, and cost. The provider table is the source of truth for actual node execution and never displays secret values.
@@ -98,7 +100,17 @@ Series uses a master-detail editorial layout. Season promise, canon, completed e
 
 ### Review Workbench
 
-The 9:16 native video monitor is the primary surface. Workflow status remains above it; the sticky review panel keeps approval/rejection and artifacts together. Artifacts are grouped by producer node so the reviewer can reconstruct the production evidence. Review metrics are neutral data; approval is the single cobalt primary action; rejection stays neutral until the user enters a destructive confirmation.
+当前阶段的真实产物是主区：前期为可读稿件与讨论，已有成片时才呈现原生视频预览。作品标题、阶段和区域导航在顶部；模型调用和费用明细放在下方可查。讨论版本与稿件身份不混称，不用空播放器或内部进度百分比充当产物。
+
+桌面稿件区宽于讨论区；手机通过「当前方案 / 讨论」切换，保留输入与显式确认。手动修改保存成功后才标记已保存，服务端换稿后保留旧文字但禁止覆盖新稿。保存、确认采用、费用授权是不同动作；关键后果说明在手机上也不能隐藏。
+
+有待讨论稿件时，制作进度默认折叠在区域导航旁，创作目标与受众可展开，优先让正文进入首屏；没有讨论稿件时进度仍展开。稿件与讨论在桌面各自滚动，手动修订入口位于稿件顶部。手机确认区随页面滚动，不用悬浮栏遮挡讨论输入与发送；长讨论记录限高滚动，输入区按内容展开。
+
+新建制作的时长范围、画面要求与证据允许展开填写，折叠不得改变或丢弃字段值；已有值须在摘要中提示。空表单不显示一整块待填写的创作摘要，用户输入后再显示。原模型、声音、预算意向和付费确认边界不变。
+
+已有成片时视频优先，复核与局部返工在相邻面板；900px 以下改为上下布局，避免审片意见横向溢出。复核是建议，用户承担 repair 的入口保留，版本、审计身份及资金权限仍由服务端校验。历史双审只读展示不意味着恢复已退役的生产模型。
+
+本次参考 Cue Kit 的 Minimal AI Dev Workspace（稿件与讨论层级）和 Expandable Share Card（可选信息逐步展开）；沿用现有字体、冷白纸面与钴蓝变量，不复制参考里的模拟消息或业务逻辑。含运行现场信息的 QA 证据留在本地，不随公开仓库发布。
 
 ## Responsive Rules
 

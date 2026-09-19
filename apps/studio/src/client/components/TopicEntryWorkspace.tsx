@@ -557,9 +557,10 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
     <article className="candidate-detail" aria-labelledby="candidate-detail-title">
       <header><span>{item.origin === "series" ? `${item.seriesName} · 第 ${item.episodeNumber} 集` : `${TOPIC_CATEGORY_LABELS[item.category]}观察`}</span><strong aria-label={`${scoreLabel} ${scoreValue} 分`}><small>{scoreLabel}</small>{scoreValue}</strong></header>
       <h3 id="candidate-detail-title">{item.title}</h3>
+      <p className="candidate-creation-label">创作建议 · 不代表外部事实或播放量保证</p>
       <blockquote>{item.hook}</blockquote>
       <p>{item.rationale}</p>
-      {item.visualProof ? <p className="candidate-visual-proof"><small>可见画面</small>{item.visualProof}</p> : null}
+      {item.visualProof ? <p className="candidate-visual-proof"><small>画面构思 · 尚未生成</small>{item.visualProof}</p> : null}
       <div className={`editorial-decision is-${item.editorialDecision.verdict}`}>
         <span>总编建议</span>
         <strong>{pendingEditor ? "尚未评估 · 当前只有规则保底" : `${verdictLabel} · ${item.editorialDecision.score} 分`}</strong>
@@ -587,7 +588,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
           : "总分以观众需求为主：它回答“具体是谁、在什么场景下会因为什么点开”，由选题总编单独判断，热度不参与。风险分越低越安全。证据强度表示当前信号热度或排名，不等同于事实可信度。"}</p>
       </details>
       <div className="candidate-evidence"><span>来源线索</span>{item.evidence.slice(0, 2).map((evidence, index) => evidence.evidenceUrl ? <a key={`${item.id}-${index}`} href={evidence.evidenceUrl} target="_blank" rel="noreferrer"><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong><small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${platformLabel(evidence.platform)} · 榜单热度或排名信号 ${evidence.strength}`}</small></a> : <div key={`${item.id}-${index}`}><strong>{evidence.keyword}</strong><small>{platformLabel(evidence.platform)} · 榜单热度或排名信号 {evidence.strength}</small></div>)}</div>
-      {item.origin === "trend" && item.articleSources?.length ? <details className="candidate-score-explainer candidate-article-reading">
+      {item.origin === "trend" && item.articleSources?.length ? <details className="candidate-score-explainer candidate-article-reading" open>
         <summary>原文阅读与事实依据</summary>
         <div>{item.articleSources.map((source, index) => <span key={source.sourceId}>{index + 1}. {articleReadStatusLabel(source.readStatus)} · {source.pageTitle || source.finalUrl}{source.readStatus === "failed" ? "。读取服务未能完成，不代表文章没有事实依据。" : null}</span>)}</div>
         {item.articleFacts?.map((fact, index) => {

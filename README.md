@@ -2,7 +2,7 @@
 
 VideoFactory 是面向单人创作者的本地优先短视频 Creative OS。它把热点与系列选题、可编辑 Brief、模型与 Provider 路由、逐镜素材方案、配音与渲染、技术/视觉审片、人工返修和发布包放在同一条可恢复、可审计的生产链中。
 
-当前正式操作入口是 React/Fastify Web Studio。TypeScript 负责工作流、版本、审批、成本与 artifact 治理；Python/FFmpeg 负责媒体执行；宿主机 Codex broker 负责需要语义判断的生产角色。
+当前正式操作入口是本地 React/Fastify Web Studio。TypeScript 负责工作流、版本、审批、成本与 artifact 治理；Python/FFmpeg 负责媒体执行；宿主机 DeepSeek broker 负责需要语义判断的生产角色。`codex-broker` 是保留的历史目录名，不表示新制作需要 Codex CLI 或 OpenAI 账号。
 
 ## 当前生产原则
 
@@ -16,12 +16,13 @@ VideoFactory 是面向单人创作者的本地优先短视频 Creative OS。它�
 - 图库为空、下载失败、生成失败或复用失败都会让对应节点明确停止，不能用说明卡伪装成功。
 - 质量检查分为付费前方案审计、生成路线试片、整批素材预检、最终成片审片。每条生成路线先审代表镜头，通过后才继续花费；试片直接用于正式素材，不另买一份。失败保留已生成素材，修改方案后重新报价。
 - 整批素材预检在配音与渲染前执行；可读文字、乱码、水印、内部术语，以及与镜头要求不符的主体或动作都会阻断下游。仅说明证据边界的 info 提示保留在报告中，不自动变成付费返工镜头。
-- 最终成片必须由 DeepSeek 与 Codex 对同一证据快照独立双审。两个分支必须是不同的实际 Provider 和模型，任一分支缺失或落到同一模型都只能保留已完成结果并继续未完成分支，不能降级成单审发布。
+- 新制作使用 DeepSeek 单模型审片，并保留独立角色复核与人工终审。没有有效回执不能冒充审片完成。历史双审证据只读保留，不恢复退役的 GPT/Codex 生产调用。
 - 模型节点保存一个首选模型，同能力下其余健康模型作为有序候选；请求未受理时的连接、超时、限流、容量或模型不可用，以及原请求已明确结束且由 Broker 结构化归类的基础设施故障或模型无输出，才允许切换。已受理但结果不确定、结构/业务/内容安全/审计失败都不会被替补模型掩盖。
 - 声音设置保留演员、语速、停顿和已有母带处理，并按当前真实配音 Provider 能力进入编剧、导演和执行计划；模板不会再覆盖声音选择，也不会虚构尚未接入的音乐或音效轨。
 - `editorial_card` 只有在导演明确选择 `local-editorial-v1` 时才是合法成片内容；正式卡片由作品内容生成，不会因英文 query 命中硬编码规则而改写成内部工作流术语。
 - `REUSE_ONLY scene N` 复用更早且已物化的母片，不重新搜索、生成或计费，也不能虚构新的动作或画面状态。
 - Agent 负责提案，程序负责可计算事实，用户保留费用审批、节点修改、局部返修和最终审片权。
+- 默认用途是个人娱乐、非商业创作；允许非商业使用的素材不会仅因禁止商用而被排除。仍须遵守具体的剪辑、公开发布和署名条件。
 - 费用界面区分“报价授权金额”和“已记录费用”；配置费率只是本地核算依据，不冒充服务商确认账单。
 - 面向创作者的界面使用“制作步骤、服务商、来源核验、逐镜自动调度”等可理解用语；`Node`、`Provider`、`gate` 等术语只保留在工程合同与审计记录中。
 
@@ -51,7 +52,7 @@ flowchart LR
     C[React Studio] --> API[Fastify API]
     API --> PIPE[ProductionPipeline]
     PIPE --> CORE[workflow-core]
-    PIPE --> BROKER[Codex brokers]
+    PIPE --> BROKER[DeepSeek broker]
     PIPE --> WORKER[Python media worker]
     PIPE --> STORE[(run / settings / series JSON)]
 ```
@@ -61,7 +62,7 @@ flowchart LR
 - `packages/workflow-core`：DAG、节点、Provider、artifact、intervention 与审批合同。
 - `packages/production-pipeline`：生产角色、逐镜路由、报价、run checkpoint、revision/CAS、返修和发布包。
 - `apps/studio`：Creator Studio UI、API、持久化服务与生产 worker。
-- `apps/codex-broker`：OpenAI Code Plan 与 DeepSeek 的宿主机 Unix socket bridge。
+- `apps/codex-broker`：当前 DeepSeek 宿主机 Unix socket bridge；保留历史协议目录名。
 - `src/video_factory`：Python 媒体 worker、素材准备、配音、渲染和确定性媒体检查。
 
 ## 开发环境
@@ -69,14 +70,14 @@ flowchart LR
 要求 Node.js 22、Python 3.11、FFmpeg 和 ffprobe。macOS 本地确定性配音还需要系统 `say`。
 
 ```bash
-cd /Users/jinkun.wang/work_space/veidofactory
+cd video-factory
 npm install
 make setup-local-runtime
 make setup-local-trends
 make studio-local
 ```
 
-打开 [http://127.0.0.1:4317](http://127.0.0.1:4317)。`make studio-local` 会检查本机 Codex 登录、启动两个 broker，再启动 Studio。只调试不依赖 broker 的确定性路径时可运行：
+打开 [http://127.0.0.1:4317](http://127.0.0.1:4317)。`make studio-local` 使用本地 DeepSeek 配置启动一个 broker，再启动 Studio；默认凭据文件由 `scripts/studio-dev-with-codex.sh` 指向 `.local/secrets/deepseek.env`，可用 `DEEPSEEK_ENV_FILE` 指定。无需 Codex CLI 登录。只调试不依赖 broker 的确定性路径时可运行：
 
 ```bash
 npm run studio:dev
@@ -94,7 +95,7 @@ npm run studio:dev
 
 ```bash
 make local-trends-status
-make codex-broker-status
+curl --fail --unix-socket .local/runtime/deepseek-codex/worker.sock http://localhost/health
 ```
 
 ## Provider 配置
@@ -109,12 +110,16 @@ cp .env.example .env
 
 常用外部能力：
 
-- Pexels：`PEXELS_API_KEY`
+- Pexels 图片/视频：`PEXELS_API_KEY`
+- Pixabay 图片/视频：`PIXABAY_API_KEY`
+- Unsplash 图片：`UNSPLASH_ACCESS_KEY`；保留作者署名、CDN 预览和采用时的下载事件。仅图片，不提供视频；开发额度与正式应用审核由 Unsplash 决定。
 - Seedream / Seedance：`ARK_API_KEY`；Seedance 另需对应 model/估价配置
 - MiniMax 视频与 TTS：`MINIMAX_API_KEY` 与对应 model；TTS 保留后台核算估价
 - Wan：`DASHSCOPE_API_KEY`、workspace 与当前已接入的 model
 
 图片和视频规格用于生成保守的逐镜报价，不冒充厂商实时账单，也不构成整片预算上限。Seedream、MiniMax Hailuo 与 Wan 的内建模型按已审核规格报价；Seedance 和显式自定义模型仍由部署配置提供估价。
+
+素材库显示已经归档的素材；外部来源在“创作设置 → 画面来源”查看。国内摄图网、站酷海洛已核实正式 API，但**尚未接入生产采购**，不能把普通会员或官网链接当成可用接口。见[素材来源配置指南](docs/guides/stock-sources.md)。
 
 ## 验证
 
@@ -136,29 +141,16 @@ make test-e2e
 
 ## 部署
 
-生产发布只走：
+个人开发使用 `main` 主分支，禁止强推和删除。普通推送触发 GitHub Actions 的依赖安全检查、完整测试、构建与 Linux 容器成片 smoke；两项 CI 作业通过后，按该提交的精确 SHA 部署到阿里云。
 
-```text
-feature branch -> Pull Request -> GitHub Actions -> Alibaba ECS
-```
-
-`main` push 触发依赖安全检查、完整测试/build、Linux 容器成片 smoke，然后以该 GitHub commit SHA 部署到阿里云。部署脚本同时验证应用 HTTP health 和两个 broker Unix socket；失败会回滚。不要通过 SSH 手工覆盖生产代码。
-
-详见 [生产部署指南](docs/guides/production-deployment.md)。
+部署使用宿主机 DeepSeek broker 和 Docker Studio，验证服务身份及应用健康；切换失败则回滚。密钥、工作区和本地 QA 记录不进 Git。详见[生产部署指南](docs/guides/production-deployment.md)。
 
 ## 文档
 
-- [Web Studio 与完整用户流程](docs/guides/web-studio.md)
-- [生产工作流与 Provider 边界](docs/guides/production-workflow.md)
+- [素材来源配置](docs/guides/stock-sources.md)
 - [生产部署](docs/guides/production-deployment.md)
 - [视觉与交互规范](DESIGN.md)
 - [领域语言](CONTEXT.md)
-- [架构决策](docs/adr/)
-- [Loop 工程方法](docs/loop-engineering.md)
-- [项目演进摘要](docs/HISTORY.md)
-- [当前费用与严格素材验收记录](docs/loops/022-spend-approval-and-strict-assets-results.md)
-- [爆款选题、返工继承与创作者语言记录](docs/loops/023-viral-selection-rework-and-creator-language.md)
-- [发布前严格审计与云端验收记录](docs/loops/024-pre-landing-audit-and-cloud-acceptance.md)
 
 历史实现计划、过期视觉方案和一次性验收报告不再保留在当前工作树；需要考古时从 Git 历史读取，清理前基线为 `2d4f842b160801925115acbae9d1e536079334c6`。
 
@@ -166,6 +158,6 @@ feature branch -> Pull Request -> GitHub Actions -> Alibaba ECS
 
 - 发布包和多平台合规编排已经存在，但真实平台上传仍由人工完成。
 - 平台表现连接器尚未接入；真实发布数据仍需外部记录。
-- 当前持久化和 execution lease 面向单机 ECS，不是多实例分布式协调方案。
+- 当前持久化和 execution lease 面向单实例（本地或 ECS），不是多实例分布式协调方案。
 - 新批准的付费成片仍必须逐条执行帧数、时长、黑帧、逐片段画面、视觉一致性和内部术语检查。
 - 当前生产渲染的时长合同固定为 30fps；例如 24 秒成片必须严格输出 720 帧，并在整条时间线上持续有画面。

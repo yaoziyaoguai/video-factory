@@ -84,7 +84,7 @@ async function runDirtyReleaseScenario(scenario: DirtyReleaseScenario): Promise<
 }
 
 type DeployFailureScenario =
-  | "openai-unit-install"
+  | "deepseek-not-configured"
   | "deepseek-unit-install"
   | "deepseek-health"
   | "broker-identity"
@@ -101,7 +101,7 @@ interface DeployFailureResult {
   deepseekWorkspaceExists: boolean;
 }
 
-async function runDeployFailureScenario(scenario: DeployFailureScenario): Promise<DeployFailureResult> {
+async function runDeployFailureScenario(scenario: DeployFailureScenario, firstMigration = false): Promise<DeployFailureResult> {
   const directory = await mkdtemp(path.join(tmpdir(), "video-factory-deploy-transaction-"));
   const repository = path.join(directory, "repository");
   const scriptsDirectory = path.join(repository, "scripts");
@@ -141,7 +141,7 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario): Promis
 
   await Promise.all([
     writeFile(environmentPath, "VIDEO_FACTORY_TEST=1\n", "utf8"),
-    writeFile(deepseekEnvironmentPath, "DEEPSEEK_API_KEY=test-only\n", "utf8"),
+    writeFile(deepseekEnvironmentPath, scenario === "deepseek-not-configured" ? "" : "DEEPSEEK_API_KEY=test-only\n", "utf8"),
     writeFile(openAiUnitPath, "[Unit]\nDescription=old-openai\n", "utf8"),
     writeFile(deepseekUnitPath, "[Unit]\nDescription=old-deepseek\n", "utf8"),
     writeFile(path.join(candidateBroker, "dist", "main.js"), "export {};\n", "utf8"),
@@ -197,7 +197,14 @@ esac
     writeExecutable("runuser", "#!/bin/sh\nexit 0\n"),
     writeExecutable("sleep", "#!/bin/sh\nexit 0\n"),
     writeExecutable("chown", "#!/bin/sh\nexit 0\n"),
-    writeExecutable("systemctl", '#!/bin/sh\necho "systemctl:$*" >> "$DEPLOY_TRACE"\nexit 0\n'),
+    writeExecutable("systemctl", `#!/bin/sh
+echo "systemctl:$*" >> "$DEPLOY_TRACE"
+if [ "$TEST_FIRST_MIGRATION" = "1" ]; then
+  if [ "$*" = "is-active --quiet vf-deepseek-codex-broker" ]; then exit 3; fi
+  if [ "$*" = "stop vf-deepseek-codex-broker" ]; then /bin/rmdir "$VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR"; fi
+fi
+exit 0
+`),
     writeExecutable(
       "install",
       `#!/bin/sh
@@ -217,9 +224,6 @@ for argument in "$@"; do
 done
 source="$previous"
 echo "install:$source->$destination" >> "$DEPLOY_TRACE"
-if [ "$DEPLOY_SCENARIO" = "openai-unit-install" ] && [ "$destination" = "$TEST_OPENAI_UNIT" ] && grep -q "new-openai" "$source"; then
-  exit 81
-fi
 if [ "$DEPLOY_SCENARIO" = "deepseek-unit-install" ] && [ "$destination" = "$TEST_DEEPSEEK_UNIT" ] && grep -q "new-deepseek" "$source"; then
   exit 82
 fi
@@ -267,6 +271,11 @@ case "$1" in
     fi
     ;;
   compose)
+    case " $* " in
+      *" up "*)
+        if [ ! -d "$VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR" ]; then exit 84; fi
+        ;;
+    esac
     case " $* " in
       *" build app "*) echo "sha256:new-image" > "$DEPLOY_STATE/candidate-image" ;;
     esac
@@ -340,6 +349,7 @@ exit 0
       env: {
         ...process.env,
         DEPLOY_SCENARIO: scenario,
+        TEST_FIRST_MIGRATION: firstMigration ? "1" : "0",
         DEPLOY_STATE: stateDirectory,
         DEPLOY_TRACE: tracePath,
         PATH: `${binDirectory}:${process.env.PATH ?? ""}`,
@@ -400,6 +410,28 @@ function assertFullDeployRollback(result: DeployFailureResult, expectAppRollback
 }
 
 describe("DeepSeek systemd service sample", () => {
+  it("starts only DeepSeek for a new release even if the legacy service cannot start", async () => {
+    const deploy = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
+    const restart = deploy.match(/restart_brokers\(\) \{[\s\S]*?\n\}/)?.[0];
+    assert.ok(restart);
+    const { stdout } = await execFileAsync("bash", ["-c", `
+set -Eeuo pipefail
+broker_service=retired-openai
+broker_socket=/unused/old.sock
+deepseek_broker_service=deepseek
+deepseek_broker_socket=/new/deepseek.sock
+deepseek_broker_enabled=1
+deepseek_broker_was_active=1
+legacy_broker_was_active=1
+systemctl() { echo "$*"; [[ "$*" != *retired-openai* ]]; }
+wait_for_broker_health() { return 0; }
+${restart}
+restart_brokers
+`]);
+    assert.match(stdout, /restart deepseek/);
+    assert.doesNotMatch(stdout, /retired-openai/);
+  });
+
   it("isolates runtime state and enforces a 0600 sensitive environment file", async () => {
     const service = await readFile(
       path.join(brokerRoot, "deploy", "vf-deepseek-codex-broker.service"),
@@ -550,13 +582,13 @@ describe("production deployment transaction", () => {
     const switchPosition = deploy.indexOf('ln -sfn "$candidate_broker_release" "$broker_root/current"');
     assert.ok(validationPosition >= 0 && switchPosition > validationPosition);
     assert.match(deploy, /install_broker_units_from_release\(\)/);
-    assert.match(deploy, /install -m 0644 "\$source" "\$broker_unit" \|\| return 1/);
+    assert.doesNotMatch(deploy, /install -m 0644 "\$source" "\$broker_unit"/);
     assert.match(deploy, /install -m 0644 "\$deepseek_source" "\$deepseek_broker_unit" \|\| return 1/);
     assert.match(deploy, /systemctl daemon-reload \|\| return 1/);
     assert.match(deploy, /install_broker_units_from_release "\$broker_root\/current"/);
     assert.match(deploy, /previous_broker_unit_backup/);
     assert.match(deploy, /previous_deepseek_broker_unit_backup/);
-    assert.match(deploy, /chown -R vf-codex:vf-bridge "\$release_dir" \|\| return 1/);
+    assert.match(deploy, /chown -R root:vf-bridge "\$release_dir" \|\| return 1/);
     assert.match(deploy, /chmod -R a\+rX "\$release_dir" \|\| return 1/);
     assert.match(deploy, /image_id="\$\(docker create video-factory:candidate\)" \|\| return 1/);
     assert.match(deploy, /if ! staging="\$\(mktemp -d\)"; then/);
@@ -570,14 +602,14 @@ describe("production deployment transaction", () => {
     const directory = await mkdtemp(path.join(tmpdir(), "video-factory-deploy-unit-"));
     const release = path.join(directory, "release");
     await mkdir(path.join(release, "deploy"), { recursive: true });
-    await writeFile(path.join(release, "deploy", "vf-codex-broker.service"), "[Unit]\n", "utf8");
+    await writeFile(path.join(release, "deploy", "vf-deepseek-codex-broker.service"), "[Unit]\n", "utf8");
 
     try {
       const script = `
 set -Eeuo pipefail
 broker_unit=${JSON.stringify(path.join(directory, "installed.service"))}
 deepseek_broker_unit=${JSON.stringify(path.join(directory, "installed-deepseek.service"))}
-deepseek_broker_configured=0
+deepseek_broker_configured=1
 install() { return 23; }
 systemctl() { return 0; }
 ${installFunction}
@@ -595,17 +627,16 @@ exit 42
     }
   });
 
-  it("checks Codex upstream reachability before mutating the production release", async () => {
+  it("requires DeepSeek readiness instead of retired OpenAI connectivity before mutating the release", async () => {
     const script = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
 
-    const probePosition = script.indexOf("check_codex_upstream || exit 1");
+    const probePosition = script.indexOf("check_deepseek_upstream || {");
     const networkMutationPosition = script.indexOf('docker network inspect "$trend_network"');
     const buildPosition = script.indexOf('"${compose[@]}" build app');
     assert.ok(probePosition >= 0);
     assert.ok(networkMutationPosition > probePosition);
     assert.ok(buildPosition > probePosition);
-    assert.match(script, /runuser -u "\$broker_user" -- curl/);
-    assert.match(script, /https:\/\/api\.openai\.com\/v1\/models/);
+    assert.doesNotMatch(script, /check_codex_upstream|api\.openai\.com/);
   });
 
   it("provides a restart policy for an existing OpenAI egress tunnel", async () => {
@@ -701,7 +732,7 @@ exit 42
     );
   });
 
-  for (const scenario of ["openai-unit-install", "deepseek-unit-install"] as const) {
+  for (const scenario of ["deepseek-unit-install"] as const) {
     it(`executes a complete rollback when ${scenario} fails`, async () => {
       const result = await runDeployFailureScenario(scenario);
 
@@ -726,6 +757,24 @@ exit 42
     const result = await runDeployFailureScenario("app-health");
 
     assertFullDeployRollback(result, true);
+  });
+
+  it("restores the old app after a failed first DeepSeek migration without requiring a prior DeepSeek service", async () => {
+    const result = await runDeployFailureScenario("app-health", true);
+    assert.equal(path.basename(result.currentRelease), "previous");
+    assert.equal(result.candidateImage, "sha256:old-image");
+    assert.match(result.trace, /systemctl:stop vf-deepseek-codex-broker/);
+    assert.match(result.trace, /systemctl:restart vf-codex-broker/);
+    assert.equal(result.trace.match(/systemctl:restart vf-deepseek-codex-broker/g)?.length, 1);
+    assert.match(result.trace, /docker:compose .* up --detach --no-deps --force-recreate app/);
+    assert.doesNotMatch(result.stderr, /Rollback did not fully recover every component/);
+  });
+
+  it("preserves both retired socket mounts for rollback to the previous production image", async () => {
+    const compose = await readFile(path.join(repositoryRoot, "docker", "docker-compose.prod.yml"), "utf8");
+    assert.match(compose, /target: \/run\/video-factory-codex\n/);
+    assert.match(compose, /target: \/run\/video-factory-zai-codex\n/);
+    assert.match(compose, /VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH:/);
   });
 
   it("checks DeepSeek reachability without submitting content before mutating the release", async () => {
@@ -756,7 +805,7 @@ exit 42
     assert.match(deploy, /expectedKinds\.every\(\(kind\) => typeof taskModels\[kind\] === "string"/);
     assert.match(deploy, /EXPECTED_BROKER_ALLOW_EXTRA_KINDS/);
     assert.match(deploy, /allowExtraKinds \|\| expectedKinds\.length === actualKinds\.length/);
-    assert.match(deploy, /restart_brokers director-plan,script-draft,visual-review 1/);
+    assert.match(deploy, /restart_brokers director-plan,script-draft,visual-review 1 1/);
     assert.match(
       deploy,
       /broker_health "\$deepseek_broker_socket" deepseek deepseek \\\n\s+topic-ideas,series-roadmap,creative-treatment,director-plan,script-draft,publish-copy,asset-rank,reference-grammar,visual-review,role-audit/,
@@ -776,15 +825,12 @@ exit 42
     assert.match(probe, /response\.status !== 200/);
   });
 
-  it("never changes ownership or mode of an existing disabled-DeepSeek runtime directory", async () => {
-    const script = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
-    const ensureRuntimeMount = script.match(
-      /ensure_deepseek_runtime_mount\(\) \{([\s\S]*?)\n\}/,
-    )?.[1] ?? "";
-
-    assert.match(ensureRuntimeMount, /if \[\[ ! -e "\$deepseek_broker_runtime_dir" \]\]; then/);
-    assert.match(ensureRuntimeMount, /install -d -o root -g vf-bridge -m 0750 "\$deepseek_broker_runtime_dir"/);
-    assert.doesNotMatch(ensureRuntimeMount, /chown|chmod/);
+  it("leaves the existing release untouched when DeepSeek credentials are missing", async () => {
+    const result = await runDeployFailureScenario("deepseek-not-configured");
+    assert.equal(path.basename(result.currentRelease), "previous");
+    assert.match(result.stderr, /DeepSeek broker credentials are not configured/);
+    assert.equal(result.deepseekWorkspaceExists, false);
+    assert.doesNotMatch(result.trace, /docker:|systemctl:restart|install:/);
   });
 
   it("fails the deployment when a configured DeepSeek broker is unhealthy", async () => {

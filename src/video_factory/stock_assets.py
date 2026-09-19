@@ -22,6 +22,7 @@ from .domain import Scene, SceneAsset, StockAssetCandidate
 PROVIDER_KEY_ENV = {
     "pexels": "PEXELS_API_KEY",
     "pixabay": "PIXABAY_API_KEY",
+    "unsplash": "UNSPLASH_ACCESS_KEY",
 }
 MAX_ASSET_DOWNLOAD_BYTES = 12_000_000
 MAX_ASSET_DOWNLOAD_SECONDS = 45
@@ -98,6 +99,12 @@ PROVIDER_LICENSE_NOTE = {
 
 class MissingProviderKey(RuntimeError):
     pass
+
+
+class NoProviderRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        # 鉴权 API 不跟随重定向，避免把 Authorization 转交第三方。
+        return None
 
 
 @dataclass(frozen=True)
@@ -289,10 +296,12 @@ def prepare_scene_assets(
                     media_type=candidate.media_type,
                     width=candidate.width,
                     height=candidate.height,
-                    duration=candidate.duration,
+                    duration=scene.duration if candidate.media_type == "image" else candidate.duration,
                     local_path=str(actual_path),
                     source_url=candidate.source_url,
                     creator=candidate.creator,
+                    creator_url=candidate.creator_url,
+                    preview_url=candidate.preview_url if candidate.provider == "unsplash" else "",
                     license_note=candidate.license_note,
                     query=candidate.query,
                 )
@@ -721,6 +730,8 @@ def materialize_first_candidate(
             local_path=str(actual_path),
             source_url=candidate.source_url,
             creator=candidate.creator,
+            creator_url=candidate.creator_url,
+            preview_url=candidate.preview_url if candidate.provider == "unsplash" else "",
             license_note=candidate.license_note,
             query=candidate.query,
         )
@@ -732,6 +743,7 @@ def stock_provider_name(provider_id: str) -> str:
         "local-editorial-v1": "local",
         "pexels-stock-v1": "pexels",
         "pixabay-stock-v1": "pixabay",
+        "unsplash-stock-v1": "unsplash",
     }
     provider = providers.get(provider_id)
     if provider is None:
@@ -793,7 +805,74 @@ def search_stock_assets(
         return search_pexels(query, media_type, limit, opener=opener, environ=environ)
     if provider == "pixabay":
         return search_pixabay(query, media_type, limit, opener=opener, environ=environ)
+    if provider == "unsplash":
+        return search_unsplash(query, media_type, limit, opener=opener, environ=environ)
     raise ValueError(f"Unsupported asset provider: {provider}")
+
+
+def unsplash_url(value: str, host: str) -> str:
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme != "https" or parsed.hostname != host or parsed.username or parsed.password or parsed.port:
+        raise ValueError("Unsplash returned an unsupported media or attribution URL.")
+    return value
+
+
+def unsplash_referral_url(value: str) -> str:
+    parsed = urllib.parse.urlsplit(unsplash_url(value, "unsplash.com"))
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path,
+                                   "utm_source=videofactory&utm_medium=referral", ""))
+
+
+def search_unsplash(
+    query: str,
+    media_type: str,
+    limit: int,
+    opener: Optional[Callable] = None,
+    environ: Optional[dict] = None,
+) -> List[StockAssetCandidate]:
+    if media_type != "image":
+        raise ValueError("Unsplash only provides stock images, not video.")
+    key = provider_key("unsplash", environ)
+    url = "https://api.unsplash.com/search/photos?" + urllib.parse.urlencode({
+        "query": query, "orientation": "portrait", "per_page": max(1, min(limit, 30)),
+        "content_filter": "high",
+    })
+    payload = fetch_json(urllib.request.Request(url, headers=api_headers({
+        "Authorization": f"Client-ID {key}", "Accept-Version": "v1",
+    })), opener or urllib.request.build_opener(NoProviderRedirect()).open)
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        raise RuntimeError("Unsplash search returned an invalid response.")
+    candidates = []
+    for item in payload["results"]:
+        try:
+            asset_id = item["id"]
+            if not isinstance(asset_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", asset_id):
+                continue
+            width, height = int(item["width"]), int(item["height"])
+            if width <= 0 or height <= 0:
+                continue
+            creator = item["user"]["name"]
+            if not isinstance(creator, str) or not creator.strip():
+                continue
+            creator_url = unsplash_referral_url(item["user"]["links"]["html"])
+            tracking = unsplash_url(item["links"]["download_location"], "api.unsplash.com")
+            if urllib.parse.urlsplit(tracking).path != f"/photos/{asset_id}/download":
+                continue
+            candidates.append(StockAssetCandidate(
+                provider="unsplash", asset_id=asset_id, media_type="image",
+                width=width, height=height, duration=0,
+                preview_url=unsplash_url(item["urls"]["small"], "images.unsplash.com"),
+                download_url=unsplash_url(item["urls"]["regular"], "images.unsplash.com"),
+                source_url=unsplash_referral_url(item["links"]["html"]),
+                creator=creator, creator_url=creator_url, download_tracking_url=tracking,
+                license_note=f"Photo by {creator} on Unsplash; https://unsplash.com/license; "
+                             "review third-party rights before publishing.",
+                query=query, score=quality_score(width, height, 0),
+            ))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            # 缺少署名或正式 CDN 资源的条目不能冒充可制作候选。
+            continue
+    return candidates[:max(0, limit)]
 
 
 def search_pexels(
@@ -1045,6 +1124,7 @@ def candidate_to_public_dict(
         "preview_url": candidate.preview_url,
         "source_url": candidate.source_url,
         "creator": candidate.creator,
+        **({"creator_url": candidate.creator_url} if candidate.creator_url else {}),
         "license_note": candidate.license_note,
         "query": candidate.query,
         "score": candidate.score,
@@ -1140,6 +1220,24 @@ def materialize_candidate(
     local_path: Path,
     opener: Optional[Callable] = None,
 ) -> Path:
+    if candidate.provider == "unsplash":
+        tracking = unsplash_url(candidate.download_tracking_url, "api.unsplash.com")
+        if urllib.parse.urlsplit(tracking).path != f"/photos/{candidate.asset_id}/download":
+            raise ValueError("Unsplash download tracking does not match the selected photo.")
+        unsplash_url(candidate.download_url, "images.unsplash.com")
+        key = provider_key("unsplash")
+        tracking_request = urllib.request.Request(tracking, headers=api_headers({
+            "Authorization": f"Client-ID {key}", "Accept-Version": "v1",
+        }))
+        # 只在采用素材时上报；预览/搜索不计下载。失败不跳过，也不重复上报。
+        try:
+            track_opener = opener or urllib.request.build_opener(NoProviderRedirect()).open
+            with track_opener(tracking_request, timeout=20) as response:
+                receipt = json.loads(response.read().decode("utf-8"))
+                if not isinstance(receipt, dict) or not isinstance(receipt.get("url"), str):
+                    raise ValueError("Invalid download receipt")
+        except (HTTPError, URLError, ConnectionError, TimeoutError, ValueError) as error:
+            raise RuntimeError("Unsplash download tracking failed; no media downloaded.") from error
     local_path.parent.mkdir(parents=True, exist_ok=True)
     if candidate.download_url.startswith("mock://"):
         return write_mock_image(candidate, local_path)

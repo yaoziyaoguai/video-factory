@@ -344,6 +344,8 @@ function reconstructManifestItem(run: WorkflowRun<ProductionBrief>, artifact: Ar
     providerId,
     ...(artifact.provenance.sourceUrl ? { sourceUrl: artifact.provenance.sourceUrl } : {}),
     ...(artifact.provenance.creator ? { creator: artifact.provenance.creator } : {}),
+    ...(artifact.provenance.creatorUrl ? { creatorUrl: artifact.provenance.creatorUrl } : {}),
+    ...(artifact.provenance.previewUrl ? { previewUrl: artifact.provenance.previewUrl } : {}),
     licenseNote: licenseNote
       ?? (selfOwned
         ? "从未完成任务恢复：本地制作产物，来源已记录。"
@@ -415,6 +417,8 @@ function parseManifestItem(value: unknown, index: number): StoredManifest["items
     providerId: requiredText(item.providerId, "providerId", 160),
     ...(optionalText(item.sourceUrl, "sourceUrl", 2_048) ? { sourceUrl: optionalText(item.sourceUrl, "sourceUrl", 2_048)! } : {}),
     ...(optionalText(item.creator, "creator", 512) ? { creator: optionalText(item.creator, "creator", 512)! } : {}),
+    ...(optionalText(item.creatorUrl, "creatorUrl", 2_048) ? { creatorUrl: optionalText(item.creatorUrl, "creatorUrl", 2_048)! } : {}),
+    ...(optionalText(item.previewUrl, "previewUrl", 2_048) ? { previewUrl: optionalText(item.previewUrl, "previewUrl", 2_048)! } : {}),
     ...(optionalText(item.licenseNote, "licenseNote", 2_048) ? { licenseNote: optionalText(item.licenseNote, "licenseNote", 2_048)! } : {}),
     ...(optionalText(item.contentType, "contentType", 160) ? { contentType: optionalText(item.contentType, "contentType", 160)! } : {}),
     ...(sha256 ? { sha256 } : {}),
@@ -453,6 +457,8 @@ function buildAssetIndex(items: StudioResourceManifestItem[]): StudioAssetIndex 
       reviewStatus: item.reviewStatus,
       ...(item.sourceUrl ? { sourceUrl: item.sourceUrl } : {}),
       ...(item.creator ? { creator: item.creator } : {}),
+      ...(item.creatorUrl ? { creatorUrl: item.creatorUrl } : {}),
+      ...(item.previewUrl ? { previewUrl: item.previewUrl } : {}),
       ...(item.licenseNote ? { licenseNote: item.licenseNote } : {}),
       ...(item.scenePosition !== undefined ? { scenePosition: item.scenePosition } : {}),
       ...(item.selectedInFinal !== undefined ? { selectedInFinal: item.selectedInFinal } : {}),
@@ -478,6 +484,8 @@ function buildAssetIndex(items: StudioResourceManifestItem[]): StudioAssetIndex 
       existing.reviewStatus = existing.reviewStatus === "needs_review" || item.reviewStatus === "needs_review" ? "needs_review" : "recorded";
       existing.reuseStatus = strictReuseStatus(existing.reuseStatus, reuseStatus);
       if (existing.provenanceConflict) {
+        delete existing.creatorUrl;
+        delete existing.previewUrl;
         existing.reviewStatus = "needs_review";
         existing.reuseStatus = strictReuseStatus(existing.reuseStatus, "review_required");
       }
@@ -494,6 +502,8 @@ function buildAssetIndex(items: StudioResourceManifestItem[]): StudioAssetIndex 
       ...(item.sourceUrl ? { sourceUrl: item.sourceUrl } : {}),
       ...(item.contentUrl ? { contentUrl: item.contentUrl } : {}),
       ...(item.creator ? { creator: item.creator } : {}),
+      ...(item.creatorUrl ? { creatorUrl: item.creatorUrl } : {}),
+      ...(item.previewUrl ? { previewUrl: item.previewUrl } : {}),
       ...(item.licenseNote ? { licenseNote: item.licenseNote } : {}),
       ...(item.contentType ? { contentType: item.contentType } : {}),
       ...(item.sha256 ? { sha256: item.sha256 } : {}),

@@ -6,7 +6,7 @@ const STATUS_LABELS: Record<StudioRunStatus, string> = {
   running: "制作中",
   succeeded: "已完成",
   failed: "失败",
-  needs_human: "等你审片",
+  needs_human: "等你确认",
   rejected: "已打回",
   paused: "已暂停",
   stale: "待重新生成",
@@ -15,7 +15,7 @@ const STATUS_LABELS: Record<StudioRunStatus, string> = {
 };
 
 export function StatusBadge({ status, label }: { status: StudioRunStatus; label?: string }) {
-  const Icon = label
+  const Icon = label === "历史只读"
     ? CircleDashed
     : status === "running"
     ? LoaderCircle
@@ -27,7 +27,7 @@ export function StatusBadge({ status, label }: { status: StudioRunStatus; label?
           ? XCircle
           : CircleDashed;
   return (
-    <span className={`status-badge${label ? " status-historical" : ` status-${status}`}`}>
+    <span className={`status-badge${label === "历史只读" ? " status-historical" : ` status-${status}`}`}>
       <Icon aria-hidden="true" size={14} strokeWidth={2} />
       {label ?? STATUS_LABELS[status]}
     </span>

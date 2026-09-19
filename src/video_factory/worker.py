@@ -118,7 +118,7 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
         raise WorkerProtocolError("asset.prepare requires a script with scenes")
     parameters = request.get("parameters", {})
     provider = str(parameters.get("provider", "local"))
-    if provider not in {"local", "pexels", "pixabay", "mock", "ai-router"}:
+    if provider not in {"local", "pexels", "pixabay", "unsplash", "mock", "ai-router"}:
         raise WorkerProtocolError(f"Unsupported asset provider: {provider}")
     if provider == "local":
         raise WorkerProtocolError(
@@ -192,6 +192,8 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
             provider_id=provider_id,
             source_url=optional_string(scene_asset.get("source_url")),
             creator=optional_string(scene_asset.get("creator")),
+            creator_url=optional_string(scene_asset.get("creator_url")),
+            preview_url=optional_string(scene_asset.get("preview_url")),
             scene_position=int(scene_asset.get("scene_position", 0)) or None,
         ))
     return success_response(
@@ -690,6 +692,8 @@ def describe_artifact(
     source_url: str | None = None,
     creator: str | None = None,
     scene_position: int | None = None,
+    creator_url: str | None = None,
+    preview_url: str | None = None,
 ) -> Dict[str, Any]:
     content = path.read_bytes()
     return {
@@ -705,6 +709,8 @@ def describe_artifact(
             "licenseNote": license_note,
             **({"sourceUrl": source_url} if source_url else {}),
             **({"creator": creator} if creator else {}),
+            **({"creatorUrl": creator_url} if creator_url else {}),
+            **({"previewUrl": preview_url} if preview_url else {}),
             **({"scenePosition": scene_position} if scene_position else {}),
         },
     }
@@ -719,6 +725,7 @@ def scene_asset_provider_id(scene_asset: Dict[str, Any]) -> str:
         "local": "local-editorial-v1",
         "pexels": "pexels-stock-v1",
         "pixabay": "pixabay-stock-v1",
+        "unsplash": "unsplash-stock-v1",
         "mock": "mock-stock-v1",
     }.get(provider, provider)
 

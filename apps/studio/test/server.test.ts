@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import { buildStudioApp, type StudioServicePort } from "../src/server/app.js";
 import { StudioConflictError, StudioNotFoundError } from "../src/server/studio-service.js";
 import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
-import type { StudioOpportunity, StudioPaidReconciliationInput, StudioResourceReviewInput, StudioRunDetail } from "../src/shared/api.js";
+import type { StudioDecisionInput, StudioOpportunity, StudioPaidReconciliationInput, StudioResourceReviewInput, StudioRunDetail } from "../src/shared/api.js";
 
 function runDetail(status: StudioRunDetail["status"] = "needs_human"): StudioRunDetail {
   return {
@@ -1406,6 +1406,44 @@ describe("Studio API", () => {
     assert.equal(detail.statusCode, 200);
     assert.equal(decision.statusCode, 200);
     assert.equal(decision.json().status, "succeeded");
+    await app.close();
+  });
+
+  it("forwards a complete pilot-review decision only with its server-issued evidence id", async () => {
+    let received: StudioDecisionInput | undefined;
+    const app = buildStudioApp({ service: fakeService({
+      decide: async (_runId, input) => {
+        received = input;
+        return runDetail("needs_human");
+      },
+    }) });
+    const evidenceId = "a".repeat(64);
+
+    const accepted = await app.inject({
+      method: "POST",
+      url: "/api/runs/run-1/decisions",
+      payload: {
+        action: "approve",
+        expectedRunRevision: 1,
+        interventionId: "pilot-review-1",
+        reviewEvidenceId: evidenceId,
+      },
+    });
+    const malformed = await app.inject({
+      method: "POST",
+      url: "/api/runs/run-1/decisions",
+      payload: {
+        action: "approve",
+        expectedRunRevision: 1,
+        interventionId: "pilot-review-1",
+        reviewEvidenceId: "not-a-sha",
+      },
+    });
+
+    assert.equal(accepted.statusCode, 200);
+    assert.equal(received?.reviewEvidenceId, evidenceId);
+    assert.equal(malformed.statusCode, 400);
+    assert.equal(received?.reviewEvidenceId, evidenceId, "malformed evidence must not reach the production service");
     await app.close();
   });
 

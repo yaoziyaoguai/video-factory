@@ -3,6 +3,7 @@ import type { ScreenwriterAgent, ScreenwriterAgentInput } from "./codex-screenwr
 import {
   failedModelCandidateAttempt,
   isModelProviderFailure,
+  isProviderAccountFailure,
   isTransientRoleAuditProviderFailure,
   publicModelFailure,
 } from "./model-fallback.js";
@@ -72,7 +73,7 @@ export class ModelCandidatesExhaustedError extends Error {
 
   constructor(readonly failures: Array<{ modelId: string; providerId: string; error: unknown }>) {
     super(
-      `${failures.length} 个候选模型均未能完成：`
+      `${failures.length} 个候选模型调用未能完成：`
       + failures.map((failure, index) => `${index + 1}. ${failure.modelId} ${publicModelFailure(failure.error)}`).join("；")
       + "。",
       failures.at(-1)?.error instanceof Error ? { cause: failures.at(-1)!.error } : undefined,
@@ -278,8 +279,10 @@ async function runCandidates<
 ): Promise<CodexTaskExecution<unknown>> {
   const ordered = orderCandidates(candidates, selectedModelId);
   const failures: Array<{ modelId: string; providerId: string; error: unknown }> = [];
+  const unavailableProviderAccounts = new Set<string>();
   let resumeFrom: AgentLoopTrace | undefined;
   for (const [position, candidate] of ordered.entries()) {
+    if (unavailableProviderAccounts.has(candidate.providerId)) continue;
     const modelId = requiredModelId(candidate.agent);
     const candidateInput = inputForCandidate(input, modelId, position, resumeFrom);
     try {
@@ -322,6 +325,7 @@ async function runCandidates<
       };
     } catch (error) {
       failures.push({ modelId: requiredModelId(candidate.agent), providerId: candidate.providerId, error });
+      if (isProviderAccountFailure(error)) unavailableProviderAccounts.add(candidate.providerId);
       if (isTransientRoleAuditProviderFailure(error)) {
         // 仅当审计请求能明确归类为可安全切换的瞬时故障（not_accepted 或 completed transient）时，
         // 才允许带 checkpoint 切换审计 Provider；审计请求 outcome uncertain 时同样禁止切换。

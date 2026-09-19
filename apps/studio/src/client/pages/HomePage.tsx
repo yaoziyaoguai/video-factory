@@ -4,7 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { StatusBadge } from "../components/StatusBadge.js";
-import { isHistoricalReadOnlyRun, runNeedsCreatorAction } from "../presentation.js";
+import { creatorReviewAction, creatorRunStatusLabel, isHistoricalReadOnlyRun, runNeedsCreatorAction, runNodeLabel } from "../presentation.js";
 
 export function HomePage() {
   const navigate = useNavigate();
@@ -64,7 +64,7 @@ export function HomePage() {
           <div className="home-continuation-copy">
             <p className="eyebrow">继续上次工作</p>
             <h2 id="continue-title">{currentRun.title}</h2>
-            <div><StatusBadge status={currentRun.status} {...(isHistoricalReadOnlyRun(currentRun) ? { label: "历史只读" } : {})} /><span>{continueMessage(currentRun)}</span></div>
+            <div><StatusBadge status={currentRun.status} {...(creatorRunStatusLabel(currentRun) ? { label: creatorRunStatusLabel(currentRun)! } : {})} /><span>{continueMessage(currentRun)}</span></div>
           </div>
           {currentRun.videoContentUrl ? <video muted playsInline preload="metadata" src={`${currentRun.videoContentUrl}#t=0.1`} aria-hidden="true" /> : <div className="home-run-mark" aria-hidden="true"><Play size={24} /></div>}
           <Link className="button button-primary" to={`/projects/${currentRun.id}`}>{continueAction(currentRun)}<ArrowRight aria-hidden="true" size={16} /></Link>
@@ -106,7 +106,7 @@ export function HomePage() {
 function continueAction(run: StudioRunSummary): string {
   if (isHistoricalReadOnlyRun(run)) return "基于这版重新制作";
   if (run.nextAction === "confirm_spend") return "确认费用";
-  if (run.nextAction === "review") return "进入审片";
+  if (run.nextAction === "review") return creatorReviewAction(run);
   if (run.nextAction === "regenerate") return "确认后继续";
   if (run.status === "succeeded") return "查看成片";
   if (run.status === "failed" || run.status === "rejected") return "重新调整";
@@ -116,9 +116,12 @@ function continueAction(run: StudioRunSummary): string {
 function continueMessage(run: StudioRunSummary): string {
   if (isHistoricalReadOnlyRun(run)) return "这是旧版制作记录；现有结果可以查看，继续调整会创建一个新版制作。";
   if (run.nextAction === "confirm_spend") return "下一步会产生费用，正在等你检查前面的内容。";
-  if (run.nextAction === "review") return "成片已经准备好，正在等你完整观看和判断。";
+  if (run.nextAction === "review") return run.currentNodeId === "final-review" && run.videoContentUrl
+    ? "成片已经准备好，正在等你完整观看和判断。"
+    : `${runNodeLabel(run.currentNodeId)}等待你的判断，打开后可以查看产物、讨论或确认当前版本。`;
   if (run.nextAction === "regenerate") return "人工修改已经保存，正在等你确认后续重新生成。";
   if (run.status === "succeeded") return "这条视频已经完成，可以查看成片与发布包。";
   if (run.status === "failed" || run.status === "rejected") return "这条制作需要调整后重新开始。";
-  return "制作正在自动推进，你随时可以进入查看。";
+  if (run.status === "paused") return "制作已暂停。先查看已保留的结果，再决定是否恢复。";
+  return "当前步骤正在制作，完成后会按流程等待你的确认。";
 }

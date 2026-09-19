@@ -1,7 +1,7 @@
 import { ArrowUpRight, CircleCheck, CircleDollarSign, LoaderCircle, RotateCcw } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
-import { isHistoricalReadOnlyRun, runNodeLabel } from "../presentation.js";
+import { creatorReviewAction, creatorRunStatusLabel, isHistoricalReadOnlyRun, runNodeLabel } from "../presentation.js";
 
 export function ProductionStrip({ runs }: { runs: StudioRunSummary[] }) {
   const currentRuns = runs.filter((run) => !isHistoricalReadOnlyRun(run));
@@ -18,7 +18,7 @@ export function ProductionStrip({ runs }: { runs: StudioRunSummary[] }) {
   const needsSpend = activeRun.status === "awaiting_spend_approval" || activeRun.status === "approval_invalidated";
   const needsRegenerate = activeRun.status === "stale";
   const needsAction = needsReview || needsSpend || needsRegenerate;
-  const label = needsSpend ? "待确认费用" : needsRegenerate ? "待确认重生成" : needsReview ? "等你审片" : "正在制作";
+  const label = needsSpend ? "待确认费用" : needsRegenerate ? "待确认重生成" : needsReview ? creatorRunStatusLabel(activeRun) : "正在制作";
   return (
     <aside className={`production-strip ${needsAction ? "production-strip-review" : ""} ${activeRun.videoContentUrl ? "has-preview" : ""}`} aria-label="当前生产">
       {activeRun.videoContentUrl ? (
@@ -43,7 +43,7 @@ export function ProductionStrip({ runs }: { runs: StudioRunSummary[] }) {
       </div>
       <small>{runNodeLabel(activeRun.currentNodeId)}</small>
       <Link to={`/projects/${activeRun.id}`} aria-label={`查看生产：${activeRun.title}`}>
-        {needsSpend ? "确认费用" : needsRegenerate ? "处理修改" : needsReview ? "现在审片" : "查看进度"}<ArrowUpRight aria-hidden="true" size={15} />
+        {needsSpend ? "确认费用" : needsRegenerate ? "处理修改" : needsReview ? creatorReviewAction(activeRun) : "查看进度"}<ArrowUpRight aria-hidden="true" size={15} />
       </Link>
     </aside>
   );

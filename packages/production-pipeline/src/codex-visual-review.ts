@@ -1126,7 +1126,7 @@ export function assertCurrentVisualReviewContract(storedReport: unknown): void {
     "这份视觉审片报告是更早的审片合同裁出来的"
     + `（${storedContract ?? "早于合同标记"}，现在的合同是 ${VISUAL_REVIEW_AGENT_CONTRACT_VERSION}），`
     + "它的结论不满足现在对证据的要求，不能直接据此继续。"
-    + "请先补查成片（重新做一次双模型审片），再按补查后的结论继续。",
+    + "请先补查成片（按当前审片配置重新审查），再按补查后的结论继续。",
   );
 }
 
@@ -1137,8 +1137,19 @@ export function validateAggregatedVisualReviewReport(
   evidenceFrames?: readonly VisualReviewFramePayload[],
 ): VisualReviewReport {
   const report = record(value, "aggregated visual review");
-  if (!Array.isArray(report.independentReviews) || report.independentReviews.length !== 2) {
-    throw new Error("Aggregated visual review must preserve two independent branch reports.");
+  const scope = record(report.reviewScope, "aggregated visual review scope");
+  const actualModels = scope.actualModels;
+  if (!Array.isArray(actualModels)) {
+    throw new Error("Aggregated visual review must preserve the actual review model evidence.");
+  }
+  if (actualModels.length === 1) {
+    if (report.independentReviews !== undefined) {
+      throw new Error("Single visual review must not claim independent branch reports.");
+    }
+    return validateVisualReviewReportWithLimit(value, durationMs, scenePositions, evidenceFrames, 50);
+  }
+  if (actualModels.length !== 2 || !Array.isArray(report.independentReviews) || report.independentReviews.length !== 2) {
+    throw new Error("Dual visual review must preserve two independent branch reports.");
   }
   // 容量合同：单分支各 50 条；双审汇总是两分支去重并集，合法上界为两者之和。
   // 两个合法分支合并出 51+ 条不再被更靠前的边界拒绝（无静默截断）。

@@ -33,6 +33,7 @@ function hasFallbackEligibleProviderFailure(error: unknown): boolean {
     if (TERMINAL_MODEL_FAILURE_PATTERN.test(candidate.message)) return false;
     if (candidate.failureDetails?.category === "authentication"
       || candidate.failureDetails?.category === "invalid_output") return false;
+    if (candidate.failureDetails?.category === "payment_required") return true;
     if (candidate.failureDetails?.category === "invalid_request") {
       // 404 说的是"这个地址上没有这个模型"——被下线或改名的模型 id 就长这样，它和"我们的
       // 请求违反了合同"是两回事。前者换下一个候选，后者仍然必须停下：用第二个模型掩盖
@@ -71,14 +72,23 @@ export function publicModelFailure(error: unknown): string {
       : `输出未通过合同（${failure.reasonCode}）`;
   }
   if (failure?.category === "invalid_request") {
-    // 404 归到"请求未通过合同"会把人引向错误的排查方向：合同没问题，是模型 id 没了。
     return isModelNotFoundFailure(failure.reasonCode)
       ? "模型不存在或已下线"
+      : failure.reasonCode === "http_404" || failure.reasonCode === "404"
+        ? "模型服务地址未找到（HTTP 404）"
       : `请求未通过合同（${failure.reasonCode}）`;
   }
+  if (failure?.category === "payment_required") return "模型账户余额或订阅额度不足";
+  if (failure?.category === "authentication") return "模型服务认证或权限需要检查";
+  if (failure?.category === "rate_limited" && failure.scope === "provider_account") return "模型服务账户请求过多";
   if (bridgeError?.statusCode !== undefined) return `服务端错误（HTTP ${bridgeError.statusCode}）`;
   if (error instanceof RoleAgentLoopError && error.agentLoop.iterations.length > 0) return "质量审计未通过";
   return "调用失败";
+}
+
+export function isProviderAccountFailure(error: unknown): boolean {
+  return errorChain(error).some((candidate) => candidate instanceof CodexBridgeError
+    && candidate.failureDetails?.scope === "provider_account");
 }
 
 export function failedModelCandidateAttempt(
@@ -100,12 +110,13 @@ export function fallbackRequestId(requestId: string, candidateId: string, positi
   return `backup-${createHash("sha256").update(`${requestId}:${candidateId}:${position}`).digest("hex")}`;
 }
 
-// Broker 把 provider 的 `error.code` 原样放进 reasonCode，识别不出 code 时才退化成 `http_<status>`；
-// provider 把状态码当 code 回（`{"error":{"code":404}}`）时又会原样变成裸 `"404"`。三种写法说的是
-// 同一件事：这个 model id 在这个地址上不存在。合同违规（invalid_json_schema 等）不在其中，仍按
-// 致命处理——用第二个模型掩盖合同 bug 是这套兜底最该避免的事。
+// 只接收 provider 显式给出的模型生命周期代码。裸 HTTP 404 或数字 404 也可能是 endpoint
+// 写错，必须停在原模型并保留诊断；把它们当成模型退役会用 backup 掩盖部署/合同错误。
 function isModelNotFoundFailure(reasonCode: string): boolean {
-  return reasonCode === "http_404" || reasonCode === "404";
+  return reasonCode === "model_not_found"
+    || reasonCode === "model_not_exist"
+    || reasonCode === "model_retired"
+    || reasonCode === "model_deprecated";
 }
 
 function errorChain(error: unknown): unknown[] {

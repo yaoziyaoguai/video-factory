@@ -44,6 +44,18 @@ export function runNodeLabel(nodeId: string): string {
   return RUN_NODE_LABELS[nodeId] ?? nodeId;
 }
 
+/** 列表和详情共用服务端阶段，不把所有人工停点都称为成片审片。 */
+export function creatorRunStatusLabel(run: Pick<StudioRunSummary, "status" | "currentNodeId" | "continuation">): string | undefined {
+  if (isHistoricalReadOnlyRun(run)) return "历史只读";
+  if (run.status !== "needs_human") return undefined;
+  if (run.currentNodeId === "final-review") return "等你审片";
+  return `等你确认${runNodeLabel(run.currentNodeId)}`;
+}
+
+export function creatorReviewAction(run: Pick<StudioRunSummary, "currentNodeId">): string {
+  return run.currentNodeId === "final-review" ? "进入审片" : "查看并确认方案";
+}
+
 export function isHistoricalReadOnlyRun(run: Pick<StudioRunSummary, "continuation">): boolean {
   return run.continuation?.supported === false;
 }
@@ -136,6 +148,7 @@ export function providerLabel(providerId?: string): string | undefined {
     "local-editorial-v1": "本地编辑画面",
     "pexels-stock-v1": "Pexels 图库",
     "pixabay-stock-v1": "Pixabay 图库",
+    "unsplash-stock-v1": "Unsplash 图片",
     "seedream-image-v1": "Seedream 图片生成",
     "seedance-video-v1": "Seedance 视频生成",
     "wan-video-v1": "百炼 · 通义万相视频",
@@ -149,6 +162,7 @@ export function providerLabel(providerId?: string): string | undefined {
     openai: "AI 创作服务",
     pexels: "Pexels 图库",
     pixabay: "Pixabay 图库",
+    unsplash: "Unsplash 图片",
     local: "本地编辑画面",
     minimax: "MiniMax",
     "minimax-tts-v1": "MiniMax 中文配音",

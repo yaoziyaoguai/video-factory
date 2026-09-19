@@ -89,7 +89,7 @@ const MAX_THUMBNAIL_BYTES = 256 * 1024;
  * ceil(n/3)*4 是 base64 的精确长度上界。
  */
 const MAX_THUMBNAIL_BASE64_CHARS = Math.ceil(MAX_THUMBNAIL_BYTES / 3) * 4;
-const THUMBNAIL_HOSTS = new Set(["images.pexels.com", "cdn.pixabay.com"]);
+const THUMBNAIL_HOSTS = new Set(["images.pexels.com", "cdn.pixabay.com", "images.unsplash.com"]);
 export const ASSET_RANK_AGENT_CONTRACT_VERSION = "asset-rank-v3|role-audit-v9|asset-ranking-validator-v1";
 
 export class CodexAssetSemanticRanker implements AssetSemanticRanker {

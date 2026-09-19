@@ -10,7 +10,7 @@ import {
 import { readMeteredImageProviderSettings } from "../src/server/image-provider-settings.js";
 import { readMeteredVideoProviderSettings } from "../src/server/video-provider-settings.js";
 import { buildStudioChildEnvironment } from "../src/server/studio-child-environment.js";
-import { assetProviderDeliveryTypes, assetProviderSupportsReferenceImage } from "../src/server/provider-catalog.js";
+import { assetProviderDeliveryTypes, assetProviderSupportsReferenceImage, buildProviderCatalog } from "../src/server/provider-catalog.js";
 
 describe("production Python runtime", () => {
   it("prefers an explicit runtime, then the verified project environment", () => {
@@ -67,6 +67,19 @@ describe("generated media probing", () => {
 });
 
 describe("production provider runtime metadata", () => {
+  it("only enables Unsplash with a key, advertises images only and never treats it as paid generation", () => {
+    assert.equal(buildDirectorAssetProviders({ environment: {} }).some((item) => item.id === "unsplash-stock-v1"), false);
+    const provider = buildDirectorAssetProviders({ environment: { UNSPLASH_ACCESS_KEY: "test-key" } })
+      .find((item) => item.id === "unsplash-stock-v1");
+    assert.deepEqual(provider?.deliveryTypes, ["stock_image"]);
+    assert.equal(provider?.billing, "free");
+    assert.notEqual(provider?.generative, true);
+    const catalog = buildProviderCatalog({ python: true, ffmpeg: true, ffprobe: true, say: true }, {}, { available: false });
+    const entry = catalog.find((item) => item.id === "unsplash-stock-v1");
+    assert.equal(entry?.available, false);
+    assert.match(entry?.requirement ?? "", /UNSPLASH_ACCESS_KEY/);
+    assert.equal(buildProductionProviderRuntimeMetadata({}).find((item) => item.id === "unsplash-stock-v1")?.billing, "free");
+  });
   it("uses the shared asset delivery directory for every director source", () => {
     const providers = buildDirectorAssetProviders({ environment: {
       PEXELS_API_KEY: "pexels-key",

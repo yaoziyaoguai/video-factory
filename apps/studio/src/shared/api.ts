@@ -1303,6 +1303,9 @@ export interface StudioArtifact {
   schemaVersion?: string;
   producerNodeId?: string;
   providerId?: string;
+  creator?: string;
+  creatorUrl?: string;
+  previewUrl?: string;
   scenePosition?: number;
   licenseNote?: string;
   contentUrl?: string;
@@ -1311,7 +1314,7 @@ export interface StudioArtifact {
 export interface StudioIntervention {
   id: string;
   nodeId: string;
-  kind?: "creative_review" | "source_review_retry";
+  kind?: "creative_review" | "source_review_retry" | "source_review_decision";
   /** 节点边界的"完成待放行"停点：这一步已做完，产物已存，只等你决定是否进入下一步。 */
   boundary?: "node-complete";
   reason: string;
@@ -1573,6 +1576,8 @@ export interface StudioResourceManifestItem {
   sourceUrl?: string;
   contentUrl?: string;
   creator?: string;
+  creatorUrl?: string;
+  previewUrl?: string;
   licenseNote?: string;
   contentType?: string;
   sha256?: string;
@@ -1611,6 +1616,8 @@ export interface StudioIndexedAssetUsage {
   reviewStatus: StudioResourceManifestItem["reviewStatus"];
   sourceUrl?: string;
   creator?: string;
+  creatorUrl?: string;
+  previewUrl?: string;
   licenseNote?: string;
   scenePosition?: number;
   selectedInFinal?: boolean;
@@ -1627,6 +1634,8 @@ export interface StudioIndexedAsset {
   sourceUrl?: string;
   contentUrl?: string;
   creator?: string;
+  creatorUrl?: string;
+  previewUrl?: string;
   licenseNote?: string;
   contentType?: string;
   sha256?: string;
@@ -1957,7 +1966,7 @@ interface StudioDecisionInputBase {
 export type StudioDecisionInput = StudioDecisionInputBase & (
   | {
     action: "request_changes";
-    voiceTiming: {
+    voiceTiming?: {
       scenePosition: number;
       durationSeconds: number;
     };
@@ -2377,24 +2386,26 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
   }
   let voiceTiming: StudioDecisionInput["voiceTiming"];
   if (input.action === "request_changes") {
-    if (typeof input.voiceTiming !== "object" || input.voiceTiming === null || Array.isArray(input.voiceTiming)) {
-      throw new StudioInputError("调整配音方案时必须填写镜头和新时长。");
+    if (input.voiceTiming !== undefined) {
+      if (typeof input.voiceTiming !== "object" || input.voiceTiming === null || Array.isArray(input.voiceTiming)) {
+        throw new StudioInputError("调整配音方案时必须填写镜头和新时长。");
+      }
+      const timing = input.voiceTiming as Record<string, unknown>;
+      if (Object.keys(timing).some((field) => field !== "scenePosition" && field !== "durationSeconds")) {
+        throw new StudioInputError("配音时长调整包含不支持的字段。");
+      }
+      if (!Number.isSafeInteger(timing.scenePosition) || Number(timing.scenePosition) < 1) {
+        throw new StudioInputError("配音镜头编号必须是正整数。");
+      }
+      if (typeof timing.durationSeconds !== "number" || !Number.isFinite(timing.durationSeconds)
+        || timing.durationSeconds <= 0 || timing.durationSeconds > 180) {
+        throw new StudioInputError("配音镜头时长必须大于 0 秒且不超过 180 秒。");
+      }
+      voiceTiming = {
+        scenePosition: Number(timing.scenePosition),
+        durationSeconds: timing.durationSeconds,
+      };
     }
-    const timing = input.voiceTiming as Record<string, unknown>;
-    if (Object.keys(timing).some((field) => field !== "scenePosition" && field !== "durationSeconds")) {
-      throw new StudioInputError("配音时长调整包含不支持的字段。");
-    }
-    if (!Number.isSafeInteger(timing.scenePosition) || Number(timing.scenePosition) < 1) {
-      throw new StudioInputError("配音镜头编号必须是正整数。");
-    }
-    if (typeof timing.durationSeconds !== "number" || !Number.isFinite(timing.durationSeconds)
-      || timing.durationSeconds <= 0 || timing.durationSeconds > 180) {
-      throw new StudioInputError("配音镜头时长必须大于 0 秒且不超过 180 秒。");
-    }
-    voiceTiming = {
-      scenePosition: Number(timing.scenePosition),
-      durationSeconds: timing.durationSeconds,
-    };
   } else if (input.voiceTiming !== undefined) {
     throw new StudioInputError("只有调整方案时才能提交配音时长。");
   }
@@ -2408,7 +2419,7 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
     if (input.reviewDispositions !== undefined) {
       throw new StudioInputError("只有批准成片时才需要逐条表态。");
     }
-    return { ...parsed, action: "request_changes", voiceTiming: voiceTiming! };
+    return { ...parsed, action: "request_changes", ...(voiceTiming ? { voiceTiming } : {}) };
   }
   const reviewDispositions = parseReviewDispositions(input.reviewDispositions, input.action);
   return {

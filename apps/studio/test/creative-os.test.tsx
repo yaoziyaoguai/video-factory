@@ -2825,7 +2825,7 @@ describe("Creative OS", () => {
     }]);
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
-    const assetSection = (await screen.findByRole("heading", { name: "按画面能力选择模型" })).closest("section");
+    const assetSection = (await screen.findByRole("heading", { name: "图库与画面生成" })).closest("section");
     expect(assetSection).not.toBeNull();
     expect(within(assetSection!).getByText("Seedance 视频生成")).toBeInTheDocument();
     expect(within(assetSection!).getByText("Kling 可灵")).toBeInTheDocument();
@@ -3065,7 +3065,7 @@ describe("Creative OS", () => {
     await user.click(await screen.findByRole("button", { name: "设为制作默认" }));
     expect(update).toHaveBeenCalledWith({ voiceDirection: { ...initialSettings.voiceDirection, rate: 190 } });
 
-    const assetSection = screen.getByRole("heading", { name: "按画面能力选择模型" }).closest("section");
+    const assetSection = screen.getByRole("heading", { name: "图库与画面生成" }).closest("section");
     expect(assetSection).not.toBeNull();
     expect(within(assetSection!).getByText("Pexels 图库")).toBeInTheDocument();
     expect(within(assetSection!).getByText("AI 逐镜选择画面来源")).toBeInTheDocument();
@@ -3182,7 +3182,7 @@ describe("Creative OS", () => {
     const roleSection = screen.getByRole("heading", { name: "按角色配置生产能力" }).closest("section");
     expect(within(roleSection!).getByText("GPT-5.6 Terra")).toBeInTheDocument();
     expect(within(roleSection!).getByText("故障替补：GPT-5.6 Sol")).toBeInTheDocument();
-    expect(within(roleSection!).getByText(/中途画面预检优先使用首选模型.*连接故障.*最终成片由 DeepSeek 与 Codex/)).toBeInTheDocument();
+    expect(within(roleSection!).getByText(/中途画面预检优先使用首选模型.*连接故障.*最终成片由 DeepSeek 基于抽帧证据完成独立质量复核/)).toBeInTheDocument();
     expect(screen.getByText("独立质量复核")).toBeInTheDocument();
     expect(screen.getByText("独立复核 · 最多三轮")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存角色配置" }));

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { isHistoricalReadOnlyRun, platformLabel, RUN_NODE_ORDER, runNeedsCreatorAction, runNodeLabel } from "../presentation.js";
+import { creatorReviewAction, creatorRunStatusLabel, isHistoricalReadOnlyRun, platformLabel, RUN_NODE_ORDER, runNeedsCreatorAction, runNodeLabel } from "../presentation.js";
 
 interface ProductionQueueProps {
   runs: StudioRunSummary[];
@@ -60,9 +60,8 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
     <main className="page queue-page">
       <header className="page-header">
         <div>
-          <p className="eyebrow">制作档案</p>
           <h1>制作记录</h1>
-          <p className="page-summary">当前工作只保留正在推进和最近完成的内容，旧项目随时可以从归档中找回。</p>
+          <p className="page-summary">{reviewCount > 0 ? `${reviewCount} 条制作等你处理。打开作品，接着上次的方案继续。` : "打开作品继续制作，或开始一个新想法。"}</p>
         </div>
         <button className="button button-primary project-create-button" type="button" onClick={onCreate} data-tour="project-create">
           <Plus aria-hidden="true" size={17} />
@@ -71,16 +70,12 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
       </header>
 
       <section className="queue-section" aria-labelledby="today-heading" data-tour="project-queue">
-        <div className="project-edition" data-tour="project-overview">
-          <div><span>制作中</span><strong>{activeCount}</strong></div>
-          <div><span>待你处理</span><strong>{reviewCount}</strong></div>
-          <div><span>近期完成</span><strong>{finishedCount}</strong></div>
-          <div><span>已归档</span><strong>{archivedRuns.length}</strong></div>
-        </div>
         <div className="project-archive-heading">
-          <div>
-            <p className="eyebrow">{view === "current" ? "正在发生" : "历史资料"}</p>
-            <h2 id="today-heading">{view === "current" ? "当前制作" : "已归档"}</h2>
+          <h2 id="today-heading" className="sr-only">{view === "current" ? "当前制作" : "已归档"}</h2>
+          <div className="project-edition" data-tour="project-overview">
+            <div><strong>{activeCount}</strong><span>制作中</span></div>
+            <div><strong>{reviewCount}</strong><span>待你处理</span></div>
+            <div><strong>{finishedCount}</strong><span>近期完成</span></div>
           </div>
           <div className="queue-view-switch" role="group" aria-label="制作记录视图">
             <button type="button" aria-pressed={view === "current"} onClick={() => setView("current")}>当前</button>
@@ -154,12 +149,12 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
                     <span>{run.runPurpose === "test" ? "测试记录 · " : ""}{platformLabel(run.platform)} · 9:16</span>
                     <time dateTime={run.archivedAt ?? run.startedAt}>{run.archivedAt ? `归档于 ${formatTime(run.archivedAt)}` : formatTime(run.startedAt)}</time>
                   </div>
-                  <h3>{run.title}</h3>
-                  <div className="project-folio-state"><StatusBadge status={run.status} {...(isHistoricalReadOnlyRun(run) ? { label: "历史只读" } : {})} /><span>{isHistoricalReadOnlyRun(run) ? "旧版制作记录" : runNodeLabel(run.currentNodeId)}</span></div>
+                  <h3><Link to={`/projects/${run.id}`}>{run.title}</Link></h3>
+                  <div className="project-folio-state"><StatusBadge status={run.status} {...(creatorRunStatusLabel(run) ? { label: creatorRunStatusLabel(run)! } : {})} /><span>{isHistoricalReadOnlyRun(run) ? "旧版制作记录" : runNodeLabel(run.currentNodeId)}</span>{run.videoContentUrl ? <span>已有成片可预览</span> : null}</div>
                   {isHistoricalReadOnlyRun(run) ? null : <RunProgress currentNodeId={run.currentNodeId} status={run.status} {...(run.workflowNodeIds ? { workflowNodeIds: run.workflowNodeIds } : {})} />}
                   <div className="project-folio-actions">
-                    <Link className="project-folio-action" to={`/projects/${run.id}`} aria-label={runAction(run) ? `${actionLabel(runAction(run)!)}：${run.title}` : `查看制作：${run.title}`}>
-                      {runAction(run) ? actionLabel(runAction(run)!) : run.status === "succeeded" ? "查看成片" : "打开制作记录"}
+                    <Link className="project-folio-action" to={`/projects/${run.id}`} aria-label={runAction(run) ? `${actionLabel(runAction(run)!, run)}：${run.title}` : `查看制作：${run.title}`}>
+                      {runAction(run) ? actionLabel(runAction(run)!, run) : run.status === "succeeded" ? "查看成片" : "打开制作记录"}
                       <ArrowRight aria-hidden="true" size={16} />
                     </Link>
                     {view === "current" && onArchive && isTerminal(run) ? (
@@ -250,12 +245,12 @@ function isTerminal(run: StudioRunSummary): boolean {
 
 type QueueAction = NonNullable<StudioRunSummary["nextAction"]> | "rework" | "legacy_rework";
 
-function actionLabel(action: QueueAction): string {
+function actionLabel(action: QueueAction, run: StudioRunSummary): string {
   if (action === "confirm_spend") return "确认费用";
   if (action === "regenerate") return "确认后续生成";
   if (action === "rework") return "调整方案后重新制作";
   if (action === "legacy_rework") return "基于这版重新制作";
-  return "进入审片";
+  return creatorReviewAction(run);
 }
 
 function runAction(run: StudioRunSummary): QueueAction | undefined {

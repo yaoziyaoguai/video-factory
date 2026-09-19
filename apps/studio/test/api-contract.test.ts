@@ -37,12 +37,17 @@ describe("run intervention API contracts", () => {
       executablePlanPath: "/etc/passwd",
       voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
     }), /不支持|字段/);
-    assert.throws(() => parseStudioDecisionInput({
+    assert.deepEqual(parseStudioDecisionInput({
       action: "request_changes",
       expectedRunRevision: 4,
       interventionId: "voice-timing-1",
       reviewEvidenceId: null,
-    }), /必须填写镜头和新时长/);
+    }), {
+      action: "request_changes",
+      expectedRunRevision: 4,
+      interventionId: "voice-timing-1",
+      reviewEvidenceId: null,
+    });
     for (const action of ["approve", "reject"] as const) {
       assert.throws(() => parseStudioDecisionInput({
         action,

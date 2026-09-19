@@ -104,12 +104,20 @@ describe("GenerativeAssetWorkerClient", () => {
       assert.equal((result.output?.sourceVisualReview as VisualReviewReport).findings[0]?.scenePosition, 1);
       assert.ok(result.artifacts.some((artifact) => artifact.kind === "media_asset"));
       assert.ok(result.artifacts.some((artifact) => artifact.kind === "review_report"));
+      assert.equal(result.sourceReview?.kind, "complete_negative");
+      assert.match(result.sourceReview?.evidenceId ?? "", /^[a-f0-9]{64}$/);
+      assert.match(result.sourceReview?.reviewArtifactSha256 ?? "", /^[a-f0-9]{64}$/);
+      assert.equal(
+        result.sourceReview?.mediaSha256,
+        result.artifacts.find((artifact) => artifact.kind === "media_asset")?.sha256,
+        "承担意见必须锚定已物化的试片，而不是只引用一个可伪造的镜头号",
+      );
       const ledgerName = (await readdir(path.join(harness.root, ".generation-operations")))[0]!;
       const ledger = JSON.parse(await readFile(path.join(harness.root, ".generation-operations", ledgerName), "utf8"));
       assert.deepEqual(
         ledger.items.map((item: { state: string }) => item.state).sort(),
-        ["materialized", "terminal_failed", "terminal_failed"],
-        "a terminal operation must release every item that never crossed the provider boundary",
+        ["materialized", "prepared", "prepared"],
+        "完整负面试片是可恢复的人工停点，尚未提交的镜头不能被提前永久关闭",
       );
 
       const repeated = await harness.worker.run({ ...harness.request, outputDir: path.join(harness.root, "attempt-2") });
@@ -163,23 +171,34 @@ describe("GenerativeAssetWorkerClient", () => {
     });
   }
 
-  it("retains the materialized pilot when review is unavailable and resumes without buying it again", async () => {
-    const harness = await pilotHarness(false, "unavailable");
-    const result = await harness.worker.run(harness.request);
-    assert.equal(result.status, "failed");
-    assert.equal(result.diagnostics?.providerOutcomeKnown, true);
-    assert.equal(result.diagnostics?.generatedScenes, 1);
-    assert.deepEqual(harness.events, ["generate-1", "review-1"]);
-    harness.setVerdict("approve");
-    const resumed = await harness.worker.run({ ...harness.request,
-      commandId: "new-authorized-operation",
-      outputDir: path.join(harness.root, "attempt-2"),
-      parameters: { ...harness.request.parameters, maxCostCny: 4 },
+  for (const routed of [false, true]) {
+    it(`retains the materialized pilot when review is unavailable and resumes without buying it again (${routed ? "director" : "direct"})`, async () => {
+      const harness = await pilotHarness(routed, "unavailable");
+      const result = await harness.worker.run(harness.request);
+      assert.equal(result.status, "failed");
+      assert.equal(result.sourceReview?.kind, "incomplete");
+      assert.match(result.sourceReview?.mediaSha256 ?? "", /^[a-f0-9]{64}$/);
+      assert.equal(result.diagnostics?.providerOutcomeKnown, true);
+      assert.equal(result.diagnostics?.generatedScenes, 1);
+      assert.deepEqual(harness.events, ["generate-1", "review-1"]);
+      const ledgerName = (await readdir(path.join(harness.root, ".generation-operations")))[0]!;
+      const ledger = JSON.parse(await readFile(path.join(harness.root, ".generation-operations", ledgerName), "utf8"));
+      assert.deepEqual(
+        ledger.items.map((item: { state: string }) => item.state).sort(),
+        ["materialized", "prepared", "prepared"],
+        "审查无结果也只是可恢复暂停，不能关闭未提交镜头",
+      );
+      harness.setVerdict("approve");
+      const resumed = await harness.worker.run({ ...harness.request,
+        commandId: "new-authorized-operation",
+        outputDir: path.join(harness.root, "attempt-2"),
+        parameters: { ...harness.request.parameters, maxCostCny: 4 },
+      });
+      assert.equal(resumed.status, "succeeded");
+      assert.equal(resumed.diagnostics?.actualCostCny, 4);
+      assert.deepEqual(harness.events, ["generate-1", "review-1", "review-1", "generate-2", "generate-3"]);
     });
-    assert.equal(resumed.status, "succeeded");
-    assert.equal(resumed.diagnostics?.actualCostCny, 4);
-    assert.deepEqual(harness.events, ["generate-1", "review-1", "review-1", "generate-2", "generate-3"]);
-  });
+  }
 
   it("rechecks a materialized rejected pilot and quotes only the remaining scenes", async () => {
     const harness = await pilotHarness(true, "revise");
@@ -293,6 +312,15 @@ describe("GenerativeAssetWorkerClient", () => {
       () => runCraftedAssetPlan({ asset: { provider_id: "local-editorial-v1" } }),
       /local card without explicit editorial_card authorization/i,
     );
+  });
+
+  it("executes a director Unsplash image route through the free stock worker, without paid adapters", async () => {
+    const response = await runCraftedAssetPlan({
+      directorShot: { preferredProviderId: "unsplash-stock-v1", deliveryType: "stock_image" },
+      asset: { provider: "unsplash", provider_id: "unsplash-stock-v1", media_type: "image", source_url: "https://unsplash.com/photos/test" },
+      route: { preferred_provider_id: "unsplash-stock-v1", actual_provider_id: "unsplash-stock-v1", actual_provider: "unsplash" },
+    });
+    assert.equal(response.status, "succeeded");
   });
 
   it("rejects a routed stock shot whose actual route provider reveals an unauthorized local card", async () => {

@@ -658,11 +658,29 @@ export class StudioService {
       !isRecord(input.models)
       || Object.values(input.models).some((modelId) => typeof modelId !== "string")
     )) return roleConfiguredInput;
-    const models = (input.models as Record<string, string> | undefined) ?? {};
-    const modelSelectionSources = Object.fromEntries(Object.keys(models).map((providerId) => [providerId, "run_override"]));
+    const explicitModels = (input.models as Record<string, string> | undefined) ?? {};
+    const catalog = new Map((await this.capabilities.listProviders()).map((provider) => [provider.id, provider]));
+    const inheritedModels = Object.fromEntries(
+      Object.entries(settings.modelDefaults ?? {}).filter(([providerId, modelId]) => {
+        const provider = catalog.get(providerId);
+        return explicitModels[providerId] === undefined
+          && provider?.available === true
+          && provider.kind !== "test"
+          && provider.modelProfiles?.some((profile) => profile.id === modelId && profile.available) === true;
+      }),
+    );
+    const models = { ...inheritedModels, ...explicitModels };
+    const modelSelectionSources = Object.fromEntries(Object.keys(models).map((providerId) => [
+      providerId,
+      explicitModels[providerId] === undefined ? "global_default" : "run_override",
+    ]));
+    const frozenModelSelections = Object.fromEntries(Object.entries(models).map(([providerId, modelId]) => [
+      providerId,
+      { modelId, source: modelSelectionSources[providerId] },
+    ]));
     return {
       ...roleConfiguredInput,
-      ...(Object.keys(models).length ? { models, modelSelectionSources } : {}),
+      ...(Object.keys(models).length ? { models, modelSelectionSources, frozenModelSelections } : {}),
     };
   }
 

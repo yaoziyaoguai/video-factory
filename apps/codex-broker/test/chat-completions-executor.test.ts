@@ -1211,6 +1211,7 @@ describe("ChatCompletionsExecutor", () => {
         assert.deepEqual(error.details, {
           category: "rate_limited",
           reasonCode: "1308",
+          scope: "provider_account",
           requestIdHash: createHash("sha256").update(upstreamRequestId).digest("hex"),
           providerId: "deepseek",
           modelId: "deepseek-flash",
@@ -1224,6 +1225,62 @@ describe("ChatCompletionsExecutor", () => {
         return true;
       },
     );
+  });
+
+  it("preserves an explicit model retirement code without treating a bare 404 as one", async () => {
+    const explicitModelFailure = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
+      fetchFn: async () => new Response(
+        JSON.stringify({ error: { code: "model_not_found", message: "private upstream detail" } }),
+        { status: 404 },
+      ),
+    });
+    const barePathFailure = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
+      fetchFn: async () => new Response(JSON.stringify({ error: { message: "private upstream detail" } }), { status: 404 }),
+    });
+
+    await assert.rejects(() => explicitModelFailure.runTask(scriptDraftTask()), (error: unknown) => {
+      assert.ok(error instanceof CodexExecutorError);
+      assert.equal(error.details?.category, "invalid_request");
+      assert.equal(error.details?.reasonCode, "model_not_found");
+      return true;
+    });
+    await assert.rejects(() => barePathFailure.runTask(scriptDraftTask()), (error: unknown) => {
+      assert.ok(error instanceof CodexExecutorError);
+      assert.equal(error.details?.category, "invalid_request");
+      assert.equal(error.details?.reasonCode, "http_404");
+      return true;
+    });
+  });
+
+  it("classifies account credentials, balance, and generic rate limits without exposing provider text", async () => {
+    const cases: Array<{
+      status: number;
+      body: unknown;
+      category: "authentication" | "payment_required" | "rate_limited";
+      reasonCode: string;
+    }> = [
+      { status: 401, body: { error: { message: "private authentication detail" } }, category: "authentication", reasonCode: "http_401" },
+      { status: 403, body: { error: { message: "private permission detail" } }, category: "authentication", reasonCode: "http_403" },
+      { status: 402, body: { error: { code: "insufficient_quota", message: "private balance detail" } }, category: "payment_required", reasonCode: "insufficient_quota" },
+      { status: 429, body: { error: { message: "private throttling detail" } }, category: "rate_limited", reasonCode: "http_429" },
+    ];
+
+    for (const item of cases) {
+      const executor = chatExecutor({
+        env: { DEEPSEEK_API_KEY: API_KEY },
+        fetchFn: async () => new Response(JSON.stringify(item.body), { status: item.status }),
+      });
+      await assert.rejects(() => executor.runTask(scriptDraftTask()), (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.details?.category, item.category);
+        assert.equal(error.details?.reasonCode, item.reasonCode);
+        assert.equal(error.details?.scope, "provider_account");
+        assert.doesNotMatch(JSON.stringify(error.details), /private (?:authentication|permission|balance|throttling) detail/);
+        return true;
+      });
+    }
   });
 
   it("does not classify a generic HTTP 500 response as transient", async () => {
@@ -1607,6 +1664,50 @@ describe("ChatCompletionsExecutor", () => {
       `expected the first output event (${firstOutputEventMs} ms) well before the whole wait (${providerWaitMs} ms)`,
     );
     assert.doesNotMatch(JSON.stringify(result.trace), new RegExp(API_KEY));
+  });
+
+  it("preserves a UTF-8 character split across SSE chunks", async () => {
+    const payload = JSON.stringify(validReport());
+    const frame = [
+      `data: ${JSON.stringify({ choices: [{ delta: { content: payload } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`,
+      "data: [DONE]\n\n",
+    ].join("");
+    const encoded = new TextEncoder().encode(frame);
+    const splitAt = encoded.findIndex((byte, index) => byte >= 0xc2 && byte <= 0xf4 && index + 1 < encoded.length);
+    assert.ok(splitAt > 0, "fixture must contain a multi-byte UTF-8 code point");
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
+      fetchFn: async () => new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encoded.slice(0, splitAt + 1));
+          controller.enqueue(encoded.slice(splitAt + 1));
+          controller.close();
+        },
+      }), { status: 200, headers: { "content-type": "text/event-stream" } }),
+    });
+
+    const result = await executor.runTask(visualReviewTask());
+
+    assert.deepEqual(JSON.parse(result.output), validReport());
+  });
+
+  it("does not accept a partial SSE response as a completed model result", async () => {
+    const payload = JSON.stringify(validReport());
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
+      fetchFn: async () => new Response(
+        `data: ${JSON.stringify({ choices: [{ delta: { content: payload } }] })}\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+    });
+
+    await assert.rejects(() => executor.runTask(visualReviewTask()), (error: unknown) => {
+      assert.ok(error instanceof CodexExecutorError);
+      assert.equal(error.details?.category, "invalid_output");
+      assert.equal(error.details?.reasonCode, "stream_incomplete");
+      return true;
+    });
   });
 
   it("fails fast when an SSE stream never produces an output event", async () => {

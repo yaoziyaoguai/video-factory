@@ -9,6 +9,24 @@ import { ResourceGovernanceStudio } from "../src/server/resource-governance-stud
 import { StudioInputError } from "../src/shared/api.js";
 
 describe("ResourceGovernanceStudio", () => {
+  it("preserves Unsplash credits and CDN previews through the persisted manifest and asset index", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-unsplash-rights-"));
+    const manifestPath = path.join(root, "resource_manifest.json");
+    const creatorUrl = "https://unsplash.com/@photographer?utm_source=videofactory&utm_medium=referral";
+    const previewUrl = "https://images.unsplash.com/photo-1?w=400&ixid=view";
+    await writeFile(manifestPath, JSON.stringify({ version: "video-factory/resource-manifest-v1", runId: "run-1", items: [{
+      id: "scene:1:unsplash-stock-v1", category: "visual", kind: "stock_image", providerId: "unsplash-stock-v1",
+      creator: "Photographer", creatorUrl, previewUrl, sourceUrl: "https://unsplash.com/photos/photo-1",
+      sha256: "c".repeat(64), licenseNote: "Unsplash License; third-party rights require review.",
+      commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "recorded",
+    }] }));
+    const studio = new ResourceGovernanceStudio(root, async () => [completedRun(manifestPath)]);
+    const manifest = await studio.manifest();
+    assert.equal(manifest.items[0]?.creatorUrl, creatorUrl);
+    assert.equal(manifest.assetIndex.assets[0]?.previewUrl, previewUrl);
+    assert.equal(manifest.assetIndex.assets[0]?.usages[0]?.creatorUrl, creatorUrl);
+    assert.equal(manifest.assetIndex.assets[0]?.origin, "stock");
+  });
   it("aggregates persisted resource manifests and evidence-based template scorecards", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-resources-"));
     const manifestPath = path.join(workspaceRoot, "resource_manifest.json");

@@ -7,7 +7,7 @@ import { isIP } from "node:net";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
-import type { WorkerArtifactDescriptor, WorkerResponse } from "./python-worker-client.js";
+import type { SourceReviewOutcome, WorkerArtifactDescriptor, WorkerResponse } from "./python-worker-client.js";
 import type {
   VideoAspectRatio,
   VideoGenerationAdapter,
@@ -115,6 +115,7 @@ class ReworkEvidenceRequiredError extends Error {
 class AssetPilotReviewError extends Error {
   /** true = 试片审查本身没跑成（服务/输出故障，无裁决）；false = 审查给出了否定裁决。 */
   reviewIncomplete = false;
+  sourceReview?: SourceReviewOutcome;
 }
 
 /**
@@ -148,6 +149,7 @@ interface GenerationJob {
   [METERED_CREATE_ATTEMPTED]?: boolean;
   error?: string;
   pilotReview?: "approved" | "rejected" | "unavailable";
+  sourceReview?: SourceReviewOutcome;
 }
 
 export type PaidAssetItemState =
@@ -296,6 +298,7 @@ const KNOWN_FREE_ASSET_PROVIDERS = new Set([
   "local-editorial-v1",
   "pexels-stock-v1",
   "pixabay-stock-v1",
+  "unsplash-stock-v1",
 ]);
 
 export class GenerativeAssetWorkerClient implements WorkerClient {
@@ -602,7 +605,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     await writeJsonAtomically(planPath, plan);
     await writeJobs(jobsPath, jobs);
     if (ledgerPath && openedLedger) {
-      if (failedJob) closeUnsubmittedItemsAfterTerminalOperation(openedLedger.ledger, failedJob.error);
+      // 试片已经有了可恢复的素材与结论（或缺结论但可重审）；它不是生成终止。
+      // 不能为了一次审查暂停，把尚未提交的同一操作条目提前标成 terminal_failed。
+      if (failedJob && !failedJob.pilotReview) closeUnsubmittedItemsAfterTerminalOperation(openedLedger.ledger, failedJob.error);
       openedLedger.ledger.completed = openedLedger.ledger.items.every((item) => item.state === "materialized");
       await writeGenerationLedger(ledgerPath, openedLedger.ledger);
     }
@@ -653,6 +658,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           // 交由人工核账闭环而不是解锁重试。
           providerOutcomeKnown: ledgerProviderOutcomeKnown(openedLedger?.ledger),
         },
+        ...(failedJob.sourceReview ? { sourceReview: failedJob.sourceReview } : {}),
       };
     }
     return {
@@ -1124,7 +1130,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     await writeJsonAtomically(planPath, plan);
     await writeJobs(jobsPath, jobs);
     if (ledgerPath && openedLedger) {
-      if (failedJob) closeUnsubmittedItemsAfterTerminalOperation(openedLedger.ledger, failedJob.error);
+      // 与 direct 路线保持同一恢复合同：试片暂停不能关闭尚未跨 provider 边界的后续镜头。
+      if (failedJob && !failedJob.pilotReview) closeUnsubmittedItemsAfterTerminalOperation(openedLedger.ledger, failedJob.error);
       openedLedger.ledger.completed = openedLedger.ledger.items.every((item) => item.state === "materialized");
       await writeGenerationLedger(ledgerPath, openedLedger.ledger);
     }
@@ -1175,6 +1182,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           // 交由人工核账闭环而不是解锁重试。
           providerOutcomeKnown: ledgerProviderOutcomeKnown(openedLedger?.ledger),
         },
+        ...(failedJob.sourceReview ? { sourceReview: failedJob.sourceReview } : {}),
       };
     }
     return {
@@ -1246,16 +1254,40 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         ...(optionalString(parameters.reviewProviderId) ? { reviewProviderId: String(parameters.reviewProviderId) } : {}),
         ...(optionalString(parameters.reviewModelId) ? { reviewModelId: String(parameters.reviewModelId) } : {}),
       });
-      options.mediaArtifacts.push(await describeFile(result.reportPath, "review_report", "application/json",
+      const reviewArtifact = await describeFile(result.reportPath, "review_report", "application/json",
         optionalString(parameters.reviewProviderId) ?? "source-asset-pilot-review", request,
-        "Pilot source review before subsequent paid generation.", item.scenePosition));
+        "Pilot source review before subsequent paid generation.", item.scenePosition);
+      options.mediaArtifacts.push(reviewArtifact);
       const report = result.execution.output;
       plan.sourceVisualReview = report;
       // 本闸门只为"是否继续为同方案其余镜头付费"负责，放行判据见 visualReviewBlocksContinuation：
       // 提示词要求模型诚实记录无法核验项，若把该咨询项当作阻断条件，任何未覆盖项都会永久停掉付费生成。
       if (visualReviewBlocksContinuation(report)) {
         job.pilotReview = "rejected";
-        throw new AssetPilotReviewError(`镜头 ${item.scenePosition} 试片未通过，已停止后续付费生成。已保留试片与审查报告。${report.summary} ${report.findings.map((finding) => finding.suggestion).join(" ")} 请调整对应方案后重新报价；已生成素材不会自动重买。`);
+        const sourceReview = completeNegativeSourceReview({
+          report,
+          reviewArtifactSha256: reviewArtifact.sha256,
+          item,
+          operationId: requiredString(request.commandId, "commandId"),
+        });
+        job.sourceReview = sourceReview;
+        // 人的「承担继续」只接受这份服务端已生成、且仍与当前素材/方案绑定的证据。
+        // 确认后仍会重新走当前报价守卫；这里只允许同一试片组越过已经看过的质量建议。
+        const acceptedEvidenceIds = new Set(optionalStringArray(
+          parameters.acceptedSourceReviewEvidenceIds,
+          "acceptedSourceReviewEvidenceIds",
+        ));
+        if (acceptedEvidenceIds.has(sourceReview.evidenceId!)) {
+          options.approvedPilotGroups.add(group);
+          return;
+        }
+        const rejected = new AssetPilotReviewError(
+          `镜头 ${item.scenePosition} 试片提出质量问题，已停止后续付费生成。已保留试片与审查报告。`
+          + `${report.summary} ${report.findings.map((finding) => finding.suggestion).join(" ")}`
+          + "你可以调整方案、明确承担这些质量意见后继续，或终止制作；已生成素材不会自动重买。",
+        );
+        rejected.sourceReview = sourceReview;
+        throw rejected;
       }
       job.pilotReview = "approved";
       options.approvedPilotGroups.add(group);
@@ -1264,6 +1296,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       job.pilotReview = "unavailable";
       const incomplete = new AssetPilotReviewError(`镜头 ${item.scenePosition} 已生成，但试片审查暂未完成，后续付费生成已停止。重试时会复用该镜头并恢复审查。${safeGenerationDiagnostic(error)}`);
       incomplete.reviewIncomplete = true;
+      incomplete.sourceReview = incompleteSourceReview(item, requiredString(request.commandId, "commandId"));
+      job.sourceReview = incomplete.sourceReview;
       throw incomplete;
     }
   }
@@ -3401,6 +3435,48 @@ function closeUnsubmittedItemsAfterTerminalOperation(
     delete item.actualCostCny;
     delete item.actualCostSource;
   }
+}
+
+/**
+ * 质量承担必须锚定报告的完整内容、当前试片媒体和本次方案输入。仅媒体 SHA 不够：同一画面
+ * 换审片规则、模型或方案后，结论也可能不同，旧决定不能借此复活。
+ */
+function completeNegativeSourceReview(options: {
+  report: unknown;
+  reviewArtifactSha256: string;
+  item: PaidAssetOperationItem;
+  operationId: string;
+}): SourceReviewOutcome {
+  const { report, reviewArtifactSha256, item, operationId } = options;
+  const evidenceId = createHash("sha256").update(JSON.stringify({
+    version: "video-factory/source-pilot-evidence-v1",
+    report,
+    reviewArtifactSha256,
+    mediaSha256: item.sha256,
+    inputFingerprint: item.inputFingerprint,
+    operationId,
+    scenePosition: item.scenePosition,
+  })).digest("hex");
+  return {
+    kind: "complete_negative",
+    evidenceId,
+    reviewArtifactSha256,
+    mediaSha256: item.sha256!,
+    inputFingerprint: item.inputFingerprint,
+    operationId,
+    scenePosition: item.scenePosition,
+  };
+}
+
+function incompleteSourceReview(item: PaidAssetOperationItem, operationId: string): SourceReviewOutcome {
+  if (!item.sha256) throw new Error("Incomplete pilot review requires a materialized asset identity.");
+  return {
+    kind: "incomplete",
+    mediaSha256: item.sha256,
+    inputFingerprint: item.inputFingerprint,
+    operationId,
+    scenePosition: item.scenePosition,
+  };
 }
 
 function acceptedResultFromLedger(item: PaidAssetOperationItem): { taskId: string; url: string } {

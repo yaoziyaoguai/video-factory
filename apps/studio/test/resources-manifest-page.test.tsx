@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { StudioResourceManifest } from "../src/shared/api.js";
+import type { StudioModelProfile, StudioProvider, StudioResourceManifest } from "../src/shared/api.js";
 import { studioApi } from "../src/client/api.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
 
@@ -76,6 +76,50 @@ describe("ResourcesPage source and rights section", () => {
     const rolesLink = await screen.findByRole("link", { name: "制作分工" });
     fireEvent.click(rolesLink);
     expect(screen.getByText("文本模型在新建或返工时选择；只有付费图片、视频会在执行前逐镜报价并确认")).toBeInTheDocument();
+  });
+
+  it("groups model defaults by capability and saves one change without dropping the other defaults", async () => {
+    const providers: StudioProvider[] = [
+      modelProvider("writer-v1", "编剧模型", "script.draft", ["text"], ["writer-a", "writer-b"]),
+      modelProvider("reviewer-v1", "多模态审片", "quality.review.visual", ["visual-review"], ["reviewer-a"]),
+      modelProvider("image-v1", "图片生成", "asset.prepare", ["text-to-image"], ["image-a"]),
+      modelProvider("video-v1", "视频生成", "asset.prepare", ["text-to-video"], ["video-a"]),
+      modelProvider("voice-v1", "声音生成", "voice.synthesize", ["text"], ["voice-a"]),
+    ];
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "trendSources").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendServices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "trendSignals").mockResolvedValue([]);
+    vi.spyOn(studioApi, "localCapabilities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "voices").mockResolvedValue([]);
+    vi.spyOn(studioApi, "settings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "economy-daily",
+      roleProviderDefaults: {},
+      modelDefaults: { "video-v1": "video-a" },
+      topicStrategy: { customInstruction: "" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
+    vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue(emptyResourceManifest());
+    const update = vi.spyOn(studioApi, "updateSettings").mockResolvedValue({
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      defaultRecipeId: "economy-daily",
+      roleProviderDefaults: {},
+      modelDefaults: { "writer-v1": "writer-b", "video-v1": "video-a" },
+      topicStrategy: { customInstruction: "" },
+      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    });
+
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+
+    await screen.findByRole("heading", { name: "模型设置" });
+    for (const category of ["文本模型", "多模态模型", "图片生成模型", "视频生成模型", "声音生成模型"]) {
+      expect(screen.getByRole("heading", { name: category })).toBeInTheDocument();
+    }
+    fireEvent.change(screen.getByRole("combobox", { name: "编剧模型默认模型" }), { target: { value: "writer-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存模型默认" }));
+    expect(update).toHaveBeenCalledWith({ modelDefaults: { "writer-v1": "writer-b", "video-v1": "video-a" } });
   });
 
   it("groups materials by video and reveals additional video records in batches", async () => {
@@ -457,5 +501,33 @@ function emptyResourceManifest(): StudioResourceManifest {
     categories: { visual: 0, voice: 0, font: 0, document: 0, other: 0 },
     items: [],
     assetIndex: { version: "video-factory/asset-index-v1", totalAssets: 0, duplicateUses: 0, reusableCount: 0, needsReviewCount: 0, facets: { mediaKinds: {}, origins: {}, providers: {}, reuseStatuses: {} }, assets: [] },
+  };
+}
+
+function modelProvider(
+  id: string,
+  label: string,
+  capability: string,
+  taskTypes: StudioModelProfile["taskTypes"],
+  modelIds: [string, ...string[]],
+): StudioProvider {
+  return {
+    id,
+    label,
+    capability,
+    available: true,
+    kind: "external",
+    billing: "free",
+    defaultModelId: modelIds[0],
+    modelProfiles: modelIds.map((modelId, index) => ({
+      id: modelId,
+      label: modelId,
+      providerId: id,
+      providerFamily: id,
+      available: true,
+      ...(index === 0 ? { recommended: true } : {}),
+      description: "测试模型",
+      taskTypes,
+    })),
   };
 }

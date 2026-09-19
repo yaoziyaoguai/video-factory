@@ -372,7 +372,7 @@ describe("buildRoleAgentAssembly", () => {
         } as never),
       (error: unknown) => {
         // 单候选池失败没有排序语义：断言聚合错误把唯一候选的原因带出来即可。
-        assert.match((error as Error).message, /1 个候选模型均未能完成/);
+        assert.match((error as Error).message, /1 个候选模型调用未能完成/);
         assert.match((error as Error).message, /deepseek-director 服务端错误/);
         return true;
       },

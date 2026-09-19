@@ -15,6 +15,7 @@ import {
   assertCurrentVisualReviewContract,
   claimEvidenceSufficient,
   runRoleAgentLoop,
+  validateAggregatedVisualReviewReport,
   validateVisualReviewReport,
   type CodexPreparedOperation,
   type CodexTaskExecution,
@@ -1781,6 +1782,29 @@ describe("assertCurrentVisualReviewContract", () => {
     for (const value of [undefined, null, "report", [], {}, { reviewScope: null }, { reviewScope: 7 }]) {
       assert.throws(() => assertCurrentVisualReviewContract(value), /更早的审片合同裁出来的/);
     }
+  });
+});
+
+describe("validateAggregatedVisualReviewReport", () => {
+  it("accepts one complete current single-review report without inventing a second branch", () => {
+    const singleReview = {
+      ...mutableReport,
+      reviewScope: {
+        reviewStage: "rendered_video" as const,
+        evidenceId: "c".repeat(64),
+        sourceNodeIds: ["render", "technical-review"],
+        sourceArtifactIds: ["render-artifact", "technical-review-artifact"],
+        scenePositions: [1],
+        timelineDurationMs: media.durationMs,
+        actualModels: [{
+          providerId: "deepseek-visual-review-v1",
+          modelId: "deepseek-visual",
+        }],
+        reviewContractVersion: VISUAL_REVIEW_AGENT_CONTRACT_VERSION,
+      },
+    };
+
+    assert.doesNotThrow(() => validateAggregatedVisualReviewReport(singleReview, media.durationMs));
   });
 });
 

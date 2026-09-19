@@ -450,7 +450,232 @@ function completedDualVisualReview(
   };
 }
 
+function completedSingleVisualReview(
+  input: pipeline.VisualReviewAgentInput,
+  output: pipeline.VisualReviewReport,
+): pipeline.VisualReviewExecution {
+  const providerId = "deepseek-visual-review-v1";
+  const modelId = "deepseek-visual";
+  const trace = {
+    taskKind: "visual-review" as const,
+    promptVersion: "visual-review-test-v1",
+    contractDigest: visualProducerContractDigest,
+    prompt: "Inspect the immutable rendered-video evidence.",
+    providerId,
+    modelId,
+  };
+  return {
+    output,
+    inspectedDurationMs: 15_000,
+    evidenceSnapshotId: createHash("sha256").update(JSON.stringify({
+      videoPath: input.videoPath,
+      renderManifestPath: input.renderManifestPath,
+    })).digest("hex"),
+    executedProviderId: providerId,
+    executedModelId: modelId,
+    attemptedModelIds: [modelId],
+    trace,
+    agentLoop: passedVisualReviewLoop(output, providerId, modelId),
+  };
+}
+
 describe("ProductionPipeline", () => {
+  it("carries a complete pilot rejection into a user decision and resumes the same asset operation only with its accepted evidence", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-pilot-decision-"));
+    let evidenceId = "";
+    class PilotDecisionWorker extends FakeWorker {
+      readonly assetRequests: Array<Record<string, unknown>> = [];
+
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const response = await super.run(request);
+        if (request.capability !== "asset.prepare") return response;
+        this.assetRequests.push(request);
+        const parameters = request.parameters as Record<string, unknown>;
+        const acceptedEvidenceIds = Array.isArray(parameters.acceptedSourceReviewEvidenceIds)
+          ? parameters.acceptedSourceReviewEvidenceIds
+          : [];
+        if (acceptedEvidenceIds.includes(evidenceId)) return response;
+
+        const outputDir = String(request.outputDir);
+        const mediaPath = path.join(outputDir, "pilot.mp4");
+        const reportPath = path.join(outputDir, "pilot-review.json");
+        const media = "materialized pilot media";
+        const reportPayload = { recommendation: "revise", summary: "试片有水印。" };
+        const report = JSON.stringify(reportPayload);
+        await writeFile(mediaPath, media, "utf8");
+        await writeFile(reportPath, report, "utf8");
+        const mediaSha256 = createHash("sha256").update(media).digest("hex");
+        const reviewArtifactSha256 = createHash("sha256").update(report).digest("hex");
+        evidenceId = createHash("sha256").update(JSON.stringify({
+          version: "video-factory/source-pilot-evidence-v1",
+          report: reportPayload,
+          reviewArtifactSha256,
+          mediaSha256,
+          inputFingerprint: "b".repeat(64),
+          operationId: String(request.commandId),
+          scenePosition: 1,
+        })).digest("hex");
+        const provenance = { ...response.artifacts[0]!.provenance, scenePosition: 1 };
+        return {
+          ...response,
+          status: "rejected",
+          error: { code: "ASSET_PILOT_REVIEW_FAILED", message: "试片已完成，发现水印。" },
+          output: { ...(response.output ?? {}), sourceVisualReview: reportPayload },
+          artifacts: [...response.artifacts, {
+            kind: "media_asset",
+            uri: mediaPath,
+            sha256: mediaSha256,
+            sizeBytes: Buffer.byteLength(media),
+            contentType: "video/mp4",
+            provenance,
+          }, {
+            kind: "review_report",
+            uri: reportPath,
+            sha256: reviewArtifactSha256,
+            sizeBytes: Buffer.byteLength(report),
+            contentType: "application/json",
+            provenance,
+          }],
+          sourceReview: {
+            kind: "complete_negative",
+            evidenceId,
+            reviewArtifactSha256,
+            mediaSha256,
+            inputFingerprint: "b".repeat(64),
+            operationId: String(request.commandId),
+            scenePosition: 1,
+          },
+        };
+      }
+    }
+    const worker = new PilotDecisionWorker();
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+
+    const waiting = await subject.start(brief);
+    const waitingAssets = waiting.nodeRuns.find((node) => node.nodeId === "assets");
+    assert.equal(waiting.status, "needs_human");
+    assert.equal(waitingAssets?.status, "needs_human");
+    assert.equal(waitingAssets?.intervention?.kind, "source_review_decision");
+    assert.equal(worker.assetRequests.length, 1);
+    const firstOperationId = worker.assetRequests[0]?.commandId;
+    const sourceReview = waitingAssets?.output as { sourceReview?: { evidenceId?: string } } | undefined;
+    assert.equal(sourceReview?.sourceReview?.evidenceId, evidenceId);
+
+    const resumed = await subject.decide(waiting.id, {
+      interventionId: waitingAssets!.intervention!.id,
+      action: "approve",
+      actor: "studio-owner",
+      expectedRunRevision: waiting.revision,
+      reviewEvidenceId: evidenceId,
+    });
+
+    assert.equal(resumed.nodeRuns.find((node) => node.nodeId === "assets")?.status, "succeeded");
+    assert.equal(worker.assetRequests.length, 2);
+    assert.equal(worker.assetRequests[1]?.commandId, firstOperationId, "恢复必须继续同一素材操作，而不是创建另一笔试片");
+    assert.deepEqual(
+      (worker.assetRequests[1]?.parameters as Record<string, unknown> | undefined)?.acceptedSourceReviewEvidenceIds,
+      [evidenceId],
+    );
+  });
+
+  it("fails closed when a complete pilot review is not bound to materialized media and report artifacts", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-unbound-pilot-decision-"));
+    class UnboundPilotWorker extends FakeWorker {
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const response = await super.run(request);
+        if (request.capability !== "asset.prepare") return response;
+        return {
+          ...response,
+          status: "rejected",
+          error: { code: "ASSET_PILOT_REVIEW_FAILED", message: "试片有质量问题。" },
+          sourceReview: {
+            kind: "complete_negative",
+            evidenceId: "a".repeat(64),
+            reviewArtifactSha256: "b".repeat(64),
+            mediaSha256: "c".repeat(64),
+            inputFingerprint: "d".repeat(64),
+            operationId: String(request.commandId),
+            scenePosition: 1,
+          },
+        };
+      }
+    }
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new UnboundPilotWorker() });
+
+    const failed = await subject.start(brief);
+
+    assert.equal(failed.status, "failed");
+    assert.match(failed.nodeRuns.find((node) => node.nodeId === "assets")?.error ?? "", /materialized pilot media artifact/);
+    assert.equal(
+      failed.nodeRuns.find((node) => node.nodeId === "assets")?.intervention,
+      undefined,
+      "不可信的 worker 响应不得获得用户承担质量意见的入口",
+    );
+  });
+
+  it("retries an incomplete pilot review through the same asset operation without allowing a generic approval", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-pilot-review-retry-"));
+    class IncompletePilotWorker extends FakeWorker {
+      readonly assetRequests: Array<Record<string, unknown>> = [];
+
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const response = await super.run(request);
+        if (request.capability !== "asset.prepare") return response;
+        this.assetRequests.push(request);
+        if (this.assetRequests.length > 1) return response;
+
+        const mediaPath = path.join(String(request.outputDir), "pilot.mp4");
+        const media = "materialized pilot media";
+        await writeFile(mediaPath, media, "utf8");
+        const mediaSha256 = createHash("sha256").update(media).digest("hex");
+        return {
+          ...response,
+          status: "failed",
+          error: { code: "ASSET_PILOT_REVIEW_FAILED", message: "试片审查暂未完成。" },
+          artifacts: [...response.artifacts, {
+            kind: "media_asset",
+            uri: mediaPath,
+            sha256: mediaSha256,
+            sizeBytes: Buffer.byteLength(media),
+            contentType: "video/mp4",
+            provenance: { ...response.artifacts[0]!.provenance, scenePosition: 1 },
+          }],
+          sourceReview: {
+            kind: "incomplete",
+            mediaSha256,
+            inputFingerprint: "b".repeat(64),
+            operationId: String(request.commandId),
+            scenePosition: 1,
+          },
+        };
+      }
+    }
+    const worker = new IncompletePilotWorker();
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+
+    const waiting = await subject.start(brief);
+    const waitingAssets = waiting.nodeRuns.find((node) => node.nodeId === "assets");
+    assert.equal(waiting.status, "needs_human");
+    assert.equal(waitingAssets?.intervention?.kind, "source_review_retry");
+    const firstOperationId = worker.assetRequests[0]?.commandId;
+
+    await assert.rejects(
+      () => subject.decide(waiting.id, {
+        interventionId: waitingAssets!.intervention!.id,
+        action: "approve",
+        actor: "studio-owner",
+        expectedRunRevision: waiting.revision,
+      }),
+      /不能跳过审查继续制作/,
+    );
+
+    const resumed = await subject.retryFailedNode(waiting.id, "assets");
+    assert.equal(resumed.status, "needs_human", "素材恢复后仍须保留成片终审停点");
+    assert.equal(resumed.nodeRuns.find((node) => node.nodeId === "assets")?.status, "succeeded");
+    assert.equal(worker.assetRequests.length, 2);
+    assert.equal(worker.assetRequests[1]?.commandId, firstOperationId, "重试审查必须复用原素材操作");
+  });
+
   it("uses the newly selected script model when regenerating a failed node", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-script-model-switch-"));
     const calls: string[] = [];
@@ -1819,14 +2044,14 @@ describe("ProductionPipeline", () => {
     assert.equal(revised.nodeRuns.find((node) => node.nodeId === "visual-review")?.outputState?.versions.length, 2);
   });
 
-  it("rejects formal production before any worker runs when dual visual review is incomplete", async () => {
+  it("rejects formal production before any worker runs when the DeepSeek single-review contract is incomplete", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-final-review-readiness-"));
     const worker = new FakeWorker();
     const productionBrief = { ...brief, runPurpose: "production" as const };
 
     await assert.rejects(
       () => new pipeline.ProductionPipeline({ workspaceRoot, worker }).dispatch(productionBrief),
-      /requires DeepSeek and Codex visual review before work can start/,
+      /requires the configured DeepSeek visual reviewer before work can start/,
     );
     assert.equal(worker.calls.length, 0);
 
@@ -1851,12 +2076,12 @@ describe("ProductionPipeline", () => {
         ...productionBrief,
         providers: { ...productionBrief.providers, visualReview: "deepseek-visual-review-v1" },
       }),
-      /Formal production requires a visual-review contract: dual \(two distinct independent reviewers, legacy\) or single \(DeepSeek single leg with independent role audit\)/,
+      /Formal production requires one DeepSeek visual review with an independent role audit/,
     );
     assert.equal(worker.calls.length, 0);
   });
 
-  it("requires complete current dual-review proof before final publication", async () => {
+  it("keeps complete current dual-review proof strict when reading a historical review", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-final-review-proof-"));
     const cleanReport: pipeline.VisualReviewReport = {
       version: "video-factory/visual-review-v1",
@@ -1894,9 +2119,11 @@ describe("ProductionPipeline", () => {
           : completedDualVisualReview(input, cleanReport),
       }],
     });
+    // 新 production 只允许 DeepSeek 单审；这里保留双审载荷，只验证历史记录的读取/发布守卫，
+    // 不能为了让旧测试通过而重新放开新建双审。
     const waiting = await subject.start({
       ...brief,
-      runPurpose: "production",
+      runPurpose: "test",
       providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
       models: { "deepseek-visual-review-v1": "deepseek-flash" },
     });
@@ -1940,7 +2167,7 @@ describe("ProductionPipeline", () => {
       const scope = visualReport.reviewScope as { actualModels: unknown[] };
       scope.actualModels = scope.actualModels.slice(0, 1);
       visualReport.independentReviews = (visualReport.independentReviews as unknown[]).slice(0, 1);
-    }, /two distinct actual visual-review providers and models/);
+    }, /one current DeepSeek review or two historical independent review proofs/);
     await assertTamperRejected((visualReport) => {
       const scope = visualReport.reviewScope as { actualModels: Array<Record<string, unknown>> };
       scope.actualModels[1]!.providerId = scope.actualModels[0]!.providerId;
@@ -1948,7 +2175,7 @@ describe("ProductionPipeline", () => {
       const reviews = visualReport.independentReviews as Array<Record<string, unknown>>;
       reviews[1]!.providerId = reviews[0]!.providerId;
       reviews[1]!.modelId = reviews[0]!.modelId;
-    }, /two distinct actual visual-review providers and models/);
+    }, /Historical dual visual-review branches must use distinct identities and the same contracts/);
     await assertTamperRejected((visualReport) => {
       const scope = visualReport.reviewScope as { actualModels: Array<Record<string, unknown>> };
       scope.actualModels[1]!.evidenceId = "f".repeat(64);
@@ -1960,7 +2187,7 @@ describe("ProductionPipeline", () => {
     await assertTamperRejected((visualReport) => {
       const scope = visualReport.reviewScope as { actualModels: Array<Record<string, unknown>> };
       scope.actualModels[1]!.producerContractDigest = "f".repeat(64);
-    }, /did not use the same producer and audit contracts/);
+    }, /Historical dual visual-review branches must use distinct identities and the same contracts/);
     // 升级前裁出来的证据：两个分支同属一份更早的审片合同。它必须被拒，而且拒绝文案要说清
     // 该做什么——只报"不匹配"等于把操作员留在原地（见 assertDualVisualReviewReady 的注释）。
     await assertTamperRejected((visualReport) => {
@@ -1988,7 +2215,7 @@ describe("ProductionPipeline", () => {
     // 合同重跑出来的。这里断言的是恢复路径真的存在：证据合规就放行。
     const legacy = await subject.start({
       ...brief,
-      runPurpose: "production",
+      runPurpose: "test",
       providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
       models: { "deepseek-visual-review-v1": "deepseek-flash" },
     });
@@ -2004,6 +2231,67 @@ describe("ProductionPipeline", () => {
       humanDecisionFor(legacy, "approve", "director", "审片已按当前合同重跑，批准发布。", "default"),
     );
     assert.equal(legacyApproved.status, "succeeded");
+  });
+
+  it("publishes formal production after one complete DeepSeek visual review", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-single-review-publication-"));
+    const cleanReport: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1",
+      summary: "当前成片已完成独立质量复核，可进入人工终审。",
+      scores: { composition: 90, continuity: 90, pacing: 90, legibility: 92, safety: 96 },
+      findings: [],
+      confidence: 0.95,
+      recommendation: "approve",
+    };
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      providerRuntimeMetadata: [{
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek 视觉审片",
+        modelId: "deepseek-visual",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 1,
+      }],
+      visualReviewAgents: [{
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-visual",
+        finalReviewConfiguration: {
+          mode: "single",
+          reviewers: [{
+            providerId: "deepseek-visual-review-v1",
+            modelId: "deepseek-visual",
+            independentRoleAudit: true,
+          }],
+        },
+        review: async () => { throw new Error("Detailed review must be used."); },
+        reviewDetailed: async (input) => input.reviewStage === "source_assets"
+          ? { output: cleanReport, inspectedDurationMs: 10_000 }
+          : completedSingleVisualReview(input, cleanReport),
+      }],
+    });
+
+    const waiting = await subject.start({
+      ...brief,
+      runPurpose: "production",
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-visual" },
+    });
+    assert.equal(waiting.status, "needs_human");
+    const report = waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.output as {
+      report?: pipeline.VisualReviewReport;
+    } | undefined;
+    assert.equal(report?.report?.reviewScope?.actualModels.length, 1);
+    assert.equal(report?.report?.independentReviews, undefined);
+
+    const approved = await subject.decide(
+      waiting.id,
+      humanDecisionFor(waiting, "approve", "director", "单审证据完整，批准发布。", "default"),
+    );
+    assert.equal(approved.status, "succeeded");
+    assert.ok(approved.artifacts.some((artifact) => artifact.kind === "publish_package"));
   });
 
   it("fails closed when the DeepSeek visual reviewer has no subscription metadata", async () => {
@@ -2213,6 +2501,35 @@ describe("ProductionPipeline", () => {
       actor: "producer",
       output: { ...briefOutput, reviewMode: "automatic" },
     }), /requires starting a new run/);
+  });
+
+  it("does not let brief edits replace the model selections frozen for this run", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-frozen-model-brief-"));
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });
+    const waiting = await subject.start({
+      ...brief,
+      frozenModelSelections: {
+        "python-template-v1": { modelId: "template-model-v1", source: "global_default" },
+      },
+    });
+    const briefOutput = waiting.nodeRuns.find((node) => node.nodeId === "brief")?.output as pipeline.ProductionBrief;
+
+    await assert.rejects(() => subject.applyNodeOverride(waiting.id, {
+      nodeId: "brief",
+      actor: "producer",
+      output: {
+        ...briefOutput,
+        frozenModelSelections: {
+          "python-template-v1": { modelId: "untrusted-replacement", source: "run_override" },
+        },
+      },
+    }), /requires starting a new run/);
+
+    const unchanged = await subject.show(waiting.id);
+    assert.deepEqual(
+      (unchanged.nodeRuns.find((node) => node.nodeId === "brief")?.output as pipeline.ProductionBrief).frozenModelSelections,
+      { "python-template-v1": { modelId: "template-model-v1", source: "global_default" } },
+    );
   });
 
   it("uses the current edited brief for screenwriting, direction, publishing, and agent checkpoints", async () => {
@@ -2797,9 +3114,10 @@ describe("ProductionPipeline", () => {
       }],
       visualReviewAgents: [dualReview],
     });
+    // 新 production 是单审；这里保留历史双审载荷，验证补查不会重跑已完成的素材、声音或渲染。
     const waiting = await subject.start({
       ...brief,
-      runPurpose: "production",
+      runPurpose: "test",
       providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
       models: { "deepseek-visual-review-v1": "deepseek-flash" },
     });
@@ -2916,9 +3234,10 @@ describe("ProductionPipeline", () => {
         },
       })],
     });
+    // 逐项表态的断言独立于新 production 的单审配置；沿历史双审载荷验证它的发布守卫。
     const waiting = await subject.start({
       ...brief,
-      runPurpose: "production",
+      runPurpose: "test",
       providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
       models: { "deepseek-visual-review-v1": "deepseek-flash" },
     });
@@ -9079,29 +9398,32 @@ describe("ProductionPipeline", () => {
     assert.equal((await subject.show(waiting.id)).status, "failed");
   });
 
-  it("indexes prepared scene media with reusable production metadata", async () => {
+  for (const stock of ["pexels", "unsplash"]) {
+  it(`indexes ${stock} scene media with authoritative attribution through the publish package`, async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-asset-index-"));
     class IndexedAssetWorker extends FakeWorker {
       override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
         const response = await super.run(request);
         if (request.capability !== "asset.prepare") return response;
         const outputDir = String(request.outputDir);
-        const mediaPath = path.join(outputDir, "scene_01.mp4");
+        const mediaPath = path.join(outputDir, stock === "unsplash" ? "scene_01.jpg" : "scene_01.mp4");
         const media = Buffer.from("scene-video");
         await writeFile(mediaPath, media);
         const planPath = String(response.output?.assetPlanPath);
         const plan = JSON.stringify({
           scene_assets: [{
             scene_position: 1,
-            provider: "pexels",
+            provider: stock,
             asset_id: "42",
-            media_type: "video",
+            media_type: stock === "unsplash" ? "image" : "video",
             width: 1080,
             height: 1920,
             duration: 5,
             local_path: mediaPath,
             source_url: "https://www.pexels.com/video/42",
             creator: "Fixture Creator",
+            creator_url: "https://untrusted.example/creator",
+            preview_url: "https://untrusted.example/preview",
             license_note: "Pexels provider terms apply.",
             query: "night office close up",
           }],
@@ -9119,14 +9441,16 @@ describe("ProductionPipeline", () => {
           uri: mediaPath,
           sha256: createHash("sha256").update(media).digest("hex"),
           sizeBytes: media.length,
-          contentType: "video/mp4",
+          contentType: stock === "unsplash" ? "image/jpeg" : "video/mp4",
           provenance: {
-            providerId: "pexels-stock-v1",
+            providerId: `${stock}-stock-v1`,
             producerNodeId: String(request.nodeRunId),
             attempt: Number(request.attempt),
             licenseNote: "Pexels provider terms apply.",
             sourceUrl: "https://www.pexels.com/video/42",
             creator: "Fixture Creator",
+            creatorUrl: `https://${stock}.com/creator`,
+            previewUrl: `https://images.${stock}.com/preview`,
           },
         });
         return response;
@@ -9138,10 +9462,12 @@ describe("ProductionPipeline", () => {
     const manifestArtifact = finished.artifacts.find((artifact) => artifact.kind === "resource_manifest");
     assert.ok(manifestArtifact?.uri);
     const manifest = JSON.parse(await readFile(manifestArtifact.uri, "utf8")) as { items: Array<Record<string, unknown>> };
-    const scene = manifest.items.find((item) => item.id === "scene:1:pexels-stock-v1");
+    const scene = manifest.items.find((item) => item.id === `scene:1:${stock}-stock-v1`);
 
-    assert.equal(scene?.providerId, "pexels-stock-v1");
-    assert.equal(scene?.contentType, "video/mp4");
+    assert.equal(scene?.providerId, `${stock}-stock-v1`);
+    assert.equal(scene?.contentType, stock === "unsplash" ? "image/jpeg" : "video/mp4");
+    assert.equal(scene?.creatorUrl, `https://${stock}.com/creator`);
+    assert.equal(scene?.previewUrl, `https://images.${stock}.com/preview`);
     assert.equal(scene?.width, 1080);
     assert.equal(scene?.height, 1920);
     assert.equal(scene?.durationSeconds, 5);
@@ -9149,6 +9475,7 @@ describe("ProductionPipeline", () => {
     assert.equal(scene?.selectedInFinal, true);
     assert.equal(manifest.items.filter((item) => item.sha256 === scene?.sha256).length, 1);
   });
+  }
 
   it("在每个节点边界停下等用户放行，批准后推进而不重跑该节点", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-boundary-gate-"));

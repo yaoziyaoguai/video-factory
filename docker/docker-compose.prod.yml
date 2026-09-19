@@ -23,6 +23,7 @@ services:
       VIDEO_FACTORY_MAX_CLOUD_VOICE_PREVIEWS_PER_HOUR: ${VIDEO_FACTORY_MAX_CLOUD_VOICE_PREVIEWS_PER_HOUR:-12}
       PEXELS_API_KEY: ${PEXELS_API_KEY:-}
       PIXABAY_API_KEY: ${PIXABAY_API_KEY:-}
+      UNSPLASH_ACCESS_KEY: ${UNSPLASH_ACCESS_KEY:-}
       ARK_API_KEY: ${ARK_API_KEY:-}
       SEEDREAM_MODEL_ID: ${SEEDREAM_MODEL_ID:-doubao-seedream-4-0-250828}
       SEEDREAM_ESTIMATED_CNY_PER_IMAGE: ${SEEDREAM_ESTIMATED_CNY_PER_IMAGE:-0.25}
@@ -48,8 +49,10 @@ services:
       VIDEO_FACTORY_NEWSNOW_URL: ${VIDEO_FACTORY_NEWSNOW_URL:-}
       VIDEO_FACTORY_DAILYHOT_URL: ${VIDEO_FACTORY_DAILYHOT_URL:-}
       VIDEO_FACTORY_RSSHUB_URL: ${VIDEO_FACTORY_RSSHUB_URL:-}
+      # 仅供失败时旧镜像回滚；当前 Studio 不再装配 OpenAI 生产角色。
       VIDEO_FACTORY_CODEX_SOCKET_PATH: ${VIDEO_FACTORY_CODEX_SOCKET_PATH:-/run/video-factory-codex/worker.sock}
-      VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH: ${VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH:-/run/video-factory-deepseek/worker.sock}
+      VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: ${VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH:-/run/video-factory-zai-codex/worker.sock}
+      VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH: /run/video-factory-deepseek-codex/worker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -65,15 +68,22 @@ services:
       - video_factory_workspace:/data/factory
       # read_only 只阻止文件系统变更；Unix socket 的 connect 是协议写不是文件系统写，
       # 因此安全边界不在此处，而在 broker 的 kind 白名单与 socket 0660 组权限。
+      # 保留旧镜像的回滚挂载；成功部署会停用旧服务，新生产不使用此 socket。
       - type: bind
         source: ${VIDEO_FACTORY_CODEX_RUNTIME_DIR:-/run/video-factory-codex}
         target: /run/video-factory-codex
         read_only: true
         bind:
-          create_host_path: false
+          create_host_path: true
       - type: bind
-        source: ${VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR:-/run/video-factory-deepseek}
-        target: /run/video-factory-deepseek
+        source: ${VIDEO_FACTORY_ZAI_CODEX_RUNTIME_DIR:-/run/video-factory-zai-codex}
+        target: /run/video-factory-zai-codex
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR:-/run/video-factory-deepseek-codex}
+        target: /run/video-factory-deepseek-codex
         read_only: true
         bind:
           create_host_path: false
