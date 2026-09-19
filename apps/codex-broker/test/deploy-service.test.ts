@@ -514,6 +514,18 @@ restart_brokers
 });
 
 describe("production deployment transaction", () => {
+  it("transfers the tested commit as a bundle when ECS cannot reach GitHub", async () => {
+    const workflow = await readFile(path.join(repositoryRoot, ".github", "workflows", "ci-cd.yml"), "utf8");
+    const deployJob = workflow.slice(workflow.indexOf("  deploy:"));
+
+    assert.match(deployJob, /git bundle create video-factory-release\.bundle HEAD/);
+    assert.match(deployJob, /appleboy\/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345/);
+    assert.match(deployJob, /git -C "\$PROJECT_PATH" fetch "\$bundle_path" HEAD/);
+    assert.match(deployJob, /test "\$\(git -C "\$PROJECT_PATH" rev-parse FETCH_HEAD\)" = "\$RELEASE_SHA"/);
+    assert.match(deployJob, /trap 'rm -f "\$bundle_path"' EXIT/);
+    assert.doesNotMatch(deployJob, /git fetch origin/);
+  });
+
   for (const scenario of ["tracked", "untracked"] as const) {
     it(`refuses to build a release checkout with ${scenario} changes`, async () => {
       const stderr = await runDirtyReleaseScenario(scenario);

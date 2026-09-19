@@ -62,6 +62,22 @@ jobs:
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     environment: production
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Package the verified commit
+        run: |
+          git bundle create video-factory-release.bundle HEAD
+          test "$(git bundle list-heads video-factory-release.bundle | awk '$2 == "HEAD" { print $1 }')" = "$GITHUB_SHA"
+      - name: Transfer release bundle
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: video-factory-release.bundle
+          target: /tmp
+          overwrite: true
       - name: Deploy with rollback
         uses: appleboy/ssh-action@2ead5e36573f08b82fbfce1504f1a4b05a647c6f # v1.2.2
         env:
@@ -76,9 +92,14 @@ jobs:
           envs: PROJECT_PATH,PUBLIC_HEALTH_URL,RELEASE_SHA
           script: |
             set -euo pipefail
+            bundle_path=/tmp/video-factory-release.bundle
             release_path="${PROJECT_PATH}.release"
+            trap 'rm -f "$bundle_path"' EXIT
+            test -f "$bundle_path"
             cd "$PROJECT_PATH"
-            git fetch origin "$RELEASE_SHA"
+            git -C "$PROJECT_PATH" bundle verify "$bundle_path"
+            git -C "$PROJECT_PATH" fetch "$bundle_path" HEAD
+            test "$(git -C "$PROJECT_PATH" rev-parse FETCH_HEAD)" = "$RELEASE_SHA"
             if [[ -e "$release_path/.git" ]]; then
               if ! release_status="$(git -C "$release_path" status --porcelain=v1 --untracked-files=all)"; then
                 echo "Unable to verify release worktree cleanliness; refusing to reuse it." >&2
