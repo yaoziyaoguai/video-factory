@@ -444,19 +444,17 @@ describe("DeepSeek systemd service sample", () => {
   });
 
   it("keeps the local DeepSeek key in a broker-only ignored environment file", async () => {
+    // ChatGPT/Codex 套餐退役（N1/N2）后，launcher 只拉起 DeepSeek broker；
+    // 不再需要 Codex CLI 登录、隔离 HOME 与 auth.json 符号链接。
     const script = await readFile(path.join(repositoryRoot, "scripts", "studio-dev-with-codex.sh"), "utf8");
 
-    assert.match(script, /codex_process_home=\$\{VIDEO_FACTORY_CODEX_LOCAL_PROCESS_HOME:-"\$runtime_root\/home"\}/);
-    assert.match(script, /codex_home=\$\{VIDEO_FACTORY_CODEX_LOCAL_HOME:-"\$runtime_root\/codex-home"\}/);
-    assert.match(script, /codex_auth_file=\$\{VIDEO_FACTORY_CODEX_AUTH_FILE:-"\$source_codex_home\/auth\.json"\}/);
-    assert.match(script, /ln -sfn "\$codex_auth_file" "\$codex_home\/auth\.json"/);
-    assert.match(script, /HOME="\$codex_process_home" \\\nCODEX_HOME="\$codex_home" \\\nVIDEO_FACTORY_CODEX_SOCKET_PATH/);
     assert.match(script, /\.local\/secrets\/deepseek\.env/);
     assert.match(script, /deepseek_workspace_root=\$\{VIDEO_FACTORY_DEEPSEEK_CODEX_WORKSPACE_ROOT:-"\$deepseek_runtime_root\/tasks"\}/);
     assert.match(script, /mkdir -p "\$deepseek_runtime_root" "\$deepseek_workspace_root"/);
     assert.match(script, /VIDEO_FACTORY_CODEX_WORKSPACE_ROOT="\$deepseek_workspace_root"/);
     assert.match(script, /node --env-file="\$deepseek_env_file" apps\/codex-broker\/dist\/main\.js/);
     assert.doesNotMatch(script, /node --env-file="\$repository_root\/\.env"/);
+    assert.doesNotMatch(script, /codex_bin|codex_process_home|CODEX_HOME/);
   });
 
   it("pins every DeepSeek request to the public chat-completions endpoint", async () => {

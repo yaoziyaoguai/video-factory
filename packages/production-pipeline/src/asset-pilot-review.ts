@@ -41,12 +41,12 @@ export class SourceAssetPilotReviewer implements AssetPilotReviewer {
     // 试片是付费闸门，所以"服务已连接"必须按它实际需要的审查强度判定：声明双审的
     // 审查器若只有同一个实际模型的两个名义分支，就不算独立复审，宁可现在拒绝动手，
     // 也不要等素材生成完才在复审里发现。
-    const reviewers = agent.finalReviewConfiguration?.mode === "dual"
-      ? agent.finalReviewConfiguration.reviewers
-      : [];
-    if (reviewers.length > 0
-      && (new Set(reviewers.map((reviewer) => reviewer.providerId)).size !== reviewers.length
-        || new Set(reviewers.map((reviewer) => reviewer.modelId)).size !== reviewers.length)) {
+    // ChatGPT/Codex 退役后（N5）审片合同有两种合法形态：dual（存量兼容，两不同 reviewer）
+    // 与 single（单腿，一个带独立审计的 reviewer）。单腿即完整审片合同，不适用双审的
+    // 去重约束；声明了 reviewers 却互相重复仍然拒绝（配置矛盾宁可拒绝动手）。
+    const reviewers = agent.finalReviewConfiguration?.reviewers ?? [];
+    if (agent.finalReviewConfiguration?.mode === "dual" && reviewers.length >= 1
+      && new Set(reviewers.map((reviewer) => reviewer.providerId)).size !== reviewers.length) {
       throw new Error("试片复审需要两个不同的视觉审片模型，当前两个分支是同一个 Provider 或模型。");
     }
   }

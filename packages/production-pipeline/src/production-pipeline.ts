@@ -10473,14 +10473,25 @@ function assertProductionVisualReviewReady(
     ...(options.visualReviewAgents ?? []),
     ...(options.visualReviewAgent ? [options.visualReviewAgent] : []),
   ].find((candidate) => candidate.id === providerId);
+  // ChatGPT/Codex 套餐退役后（N5）审片合同有两种合法形态：
+  // - dual：历史形态，两个不同厂商/模型的 reviewer 各带独立审计（存量 run 兼容，语义不减）。
+  // - single：DeepSeek 单腿，一个 reviewer 且独立审计为真（N5 之后唯一的生产形态）。
+  // 两者都要求 reviewer 声明独立审计；没有任何形态即拒绝开工。
   const reviewers = agent?.finalReviewConfiguration?.reviewers ?? [];
-  if (agent?.finalReviewConfiguration?.mode !== "dual"
-    || reviewers.length !== 2
-    || new Set(reviewers.map((reviewer) => reviewer.providerId)).size !== 2
-    || new Set(reviewers.map((reviewer) => reviewer.modelId)).size !== 2
-    || reviewers.some((reviewer) => reviewer.independentRoleAudit !== true)) {
-    throw new Error("Formal production requires two distinct DeepSeek and Codex visual-review providers, models, and independent role audits.");
+  const mode = agent?.finalReviewConfiguration?.mode;
+  if (mode === "dual"
+    && reviewers.length === 2
+    && new Set(reviewers.map((reviewer) => reviewer.providerId)).size === 2
+    && new Set(reviewers.map((reviewer) => reviewer.modelId)).size === 2
+    && reviewers.every((reviewer) => reviewer.independentRoleAudit === true)) {
+    return;
   }
+  if (mode === "single"
+    && reviewers.length === 1
+    && reviewers.every((reviewer) => reviewer.independentRoleAudit === true)) {
+    return;
+  }
+  throw new Error("Formal production requires a visual-review contract: dual (two distinct independent reviewers, legacy) or single (DeepSeek single leg with independent role audit).");
 }
 
 function roundCurrency(value: number): number {
