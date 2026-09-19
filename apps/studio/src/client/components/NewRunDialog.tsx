@@ -202,14 +202,13 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       && provider.kind !== "test";
   });
   const finalReviewerModels = finalReviewProviders.map((provider) => provider?.defaultModelId).filter(Boolean);
-  const dualFinalReviewAvailable = finalReviewProviders.every(Boolean)
-    && finalReviewerModels.length === 2
-    && new Set(finalReviewerModels).size === 2
-    && Boolean(roleAuditProvider);
+  // ChatGPT/Codex 套餐退役（N5）后，审片只剩 DeepSeek 单腿：可用即可开工，
+  // 不再要求两个不同模型的 Provider（旧双审合同已取消）。
+  const singleReviewAvailable = Boolean(visualReviewProvider) && Boolean(roleAuditProvider);
   const semanticRankCompatible = Boolean(effectiveBindings.director && effectiveBindings.assets === "ai-shot-router-v1");
   const effectiveSemanticRank = semanticRankCompatible && semanticRankEnabled;
   const meteredSelected = selectedMeteredSources.length > 0 && selectedRecipe.allowMeteredProviders;
-  const subscriptionVisualReview = dualFinalReviewAvailable && visualReviewProvider?.billing === "subscription"
+  const subscriptionVisualReview = singleReviewAvailable && visualReviewProvider?.billing === "subscription"
     ? visualReviewProvider
     : undefined;
   const automaticVoiceProvider = providers.find((provider) => {
@@ -309,7 +308,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     ...missingCapabilities.map((item) => item.label),
     ...(assetProviderIds.length > 0 ? [] : ["导演画面来源"]),
     ...(roleAuditProvider ? [] : ["独立质量复核"]),
-    ...(dualFinalReviewAvailable ? [] : ["双模型审片（两个不同模型）"]),
+    
     ...(voiceSelectionAvailable === false && !initialValues?.rework ? ["可用声音演员"] : []),
   ];
   // 链接按现有分区优先：制作角色能力缺口落到制作分工；只剩画面来源缺口时落到画面来源分区，避免让创作者自己找。
@@ -565,7 +564,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       if (!isProductionPlatform(platform)) {
         throw new Error("请选择目标平台后再开始制作。");
       }
-      if (!dualFinalReviewAvailable || !visualReviewProvider) {
+      if (!singleReviewAvailable || !visualReviewProvider) {
         throw new Error("正式制作必须由 DeepSeek 与 Codex 使用两个不同模型独立审片；请先在创作设置中恢复两种审片和独立质量复核能力。");
       }
       const providersForRun: StudioProductionInput["providers"] = { ...effectiveBindings };
@@ -1180,17 +1179,17 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <span><Sparkles aria-hidden="true" size={17} /><strong>AI 候选画面排序</strong></span>
                 <small>{semanticRankCompatible ? "先预览图库候选并给出逐镜排序；失败时保留素材源原顺序，下载前仍可人工调整" : "需要先启用 AI 视觉导演与逐镜画面选择"}</small>
               </label>
-              <label className={dualFinalReviewAvailable ? "visual-review-control is-enabled" : "visual-review-control"}>
+              <label className={singleReviewAvailable ? "visual-review-control is-enabled" : "visual-review-control"}>
                 <input
                   type="checkbox"
-                  checked={dualFinalReviewAvailable && Boolean(visualReviewProvider)}
+                  checked={singleReviewAvailable && Boolean(visualReviewProvider)}
                   disabled
                   readOnly
                 />
-                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片 · 双模型（deepseek-flash + deepseek-v4-pro）</strong></span>
-                <small>{dualFinalReviewAvailable && visualReviewProvider
-                  ? `${creatorProviderName(visualReviewProvider)} 负责中途预检；最终成片由两个不同模型（deepseek-flash 与 deepseek-v4-pro）对同一组抽帧分别独立审查，不上传音轨`
-                  : "两种审片模型或独立质量复核当前不完整，正式制作不能开工"}</small>
+                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片 · DeepSeek</strong></span>
+                <small>{singleReviewAvailable && visualReviewProvider
+                  ? `${creatorProviderName(visualReviewProvider)} 负责中途预检；最终成片由 DeepSeek 审片模型对同一组抽帧独立审查，不上传音轨`
+                  : "DeepSeek 审片模型当前不可用，正式制作不能开工"}</small>
               </label>
               <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>
               <div className="budget-control">
