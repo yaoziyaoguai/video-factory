@@ -7,6 +7,7 @@ const TASK_TYPES_BY_CAPABILITY: Record<string, ModelTaskType[]> = {
   "storyboard.plan": ["text"],
   "asset.prepare": ["text-to-video", "text-to-image"],
   "quality.review.visual": ["visual-review"],
+  "quality.review.audio": ["audio-review"],
   "avatar.generate": ["digital-human"],
 };
 

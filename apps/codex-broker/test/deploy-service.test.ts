@@ -130,6 +130,7 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario, firstMi
   await Promise.all([
     mkdir(scriptsDirectory, { recursive: true }),
     mkdir(previousRelease, { recursive: true }),
+    mkdir(path.join(brokerInstallRoot, "deployment"), { recursive: true }),
     mkdir(systemdDirectory, { recursive: true }),
     mkdir(path.join(candidateBroker, "dist"), { recursive: true }),
     mkdir(path.join(candidateBroker, "node_modules", "undici"), { recursive: true }),
@@ -141,6 +142,7 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario, firstMi
 
   await Promise.all([
     writeFile(environmentPath, "VIDEO_FACTORY_TEST=1\n", "utf8"),
+    writeFile(path.join(brokerInstallRoot, "deployment", "current.compose.json"), '{"services":{"app":{"environment":{"OLD_CONFIG":"preserved"}}}}'),
     writeFile(deepseekEnvironmentPath, scenario === "deepseek-not-configured" ? "" : "DEEPSEEK_API_KEY=test-only\n", "utf8"),
     writeFile(openAiUnitPath, "[Unit]\nDescription=old-openai\n", "utf8"),
     writeFile(deepseekUnitPath, "[Unit]\nDescription=old-deepseek\n", "utf8"),
@@ -421,6 +423,7 @@ function assertFullDeployRollback(result: DeployFailureResult, expectAppRollback
   if (expectAppRollback) {
     assert.match(result.trace, /docker:tag video-factory:rollback video-factory:candidate/);
     assert.match(result.trace, /docker:compose .* up --detach --no-deps --force-recreate app/);
+    assert.match(result.trace, /docker:compose .*current\.compose\.json up --detach --no-deps --force-recreate app/);
   } else {
     assert.doesNotMatch(result.trace, /docker:tag video-factory:rollback video-factory:candidate/);
     assert.doesNotMatch(result.trace, /docker:compose .* up --detach --no-deps --force-recreate app/);
@@ -533,11 +536,41 @@ restart_brokers topic-ideas,series-roadmap,creative-treatment,director-plan,scri
 });
 
 describe("production deployment transaction", () => {
+  it("restores the DeepSeek unit even when no legacy unit exists", async () => {
+    const source = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
+    const rollback = source.match(/rollback_broker\(\) \{[\s\S]*?\n\}/)?.[0];
+    assert.ok(rollback);
+    const directory = await mkdtemp(path.join(tmpdir(), "vf-deepseek-only-rollback-"));
+    try {
+      await mkdir(path.join(directory, "releases", "old"), { recursive: true });
+      await writeFile(path.join(directory, "old-deepseek"), "old-deepseek");
+      const { stdout } = await execFileAsync("bash", ["-c", `
+set -Eeuo pipefail
+broker_root=${JSON.stringify(directory)}
+previous_broker_release="$broker_root/releases/old"
+previous_broker_unit_backup="$broker_root/missing-legacy"
+previous_deepseek_broker_unit_backup="$broker_root/old-deepseek"
+deepseek_broker_unit="$broker_root/current-deepseek"
+legacy_broker_was_active=0
+deepseek_broker_was_active=1
+deepseek_broker_rollback_kinds=director-plan
+systemctl() { return 0; }
+restart_brokers() { echo "old-contract:$*"; }
+${rollback}
+rollback_broker
+`]);
+      assert.equal(await readFile(path.join(directory, "current-deepseek"), "utf8"), "old-deepseek");
+      assert.match(stdout, /old-contract:director-plan 0 1/);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("transfers the tested commit as a bundle when ECS cannot reach GitHub", async () => {
     const workflow = await readFile(path.join(repositoryRoot, ".github", "workflows", "ci-cd.yml"), "utf8");
     const deployJob = workflow.slice(workflow.indexOf("  deploy:"));
 
-    assert.match(deployJob, /git bundle create video-factory-release\.bundle HEAD/);
+    assert.match(deployJob, /git bundle create "video-factory-release-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}\.bundle" HEAD/);
+    assert.match(deployJob, /flock -w 2400 9/);
+    assert.match(deployJob, /git merge-base --is-ancestor/);
     assert.match(deployJob, /appleboy\/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345/);
     assert.match(deployJob, /git -C "\$PROJECT_PATH" fetch "\$bundle_path" HEAD/);
     assert.match(deployJob, /test "\$\(git -C "\$PROJECT_PATH" rev-parse FETCH_HEAD\)" = "\$RELEASE_SHA"/);
@@ -769,11 +802,7 @@ exit 42
     assert.match(script, /install -m 0644 "\$previous_broker_unit_backup" "\$broker_unit" \|\| return 1/);
     assert.match(script, /install -m 0644 "\$previous_deepseek_broker_unit_backup" "\$deepseek_broker_unit" \|\| return 1/);
     assert.match(script, /systemctl daemon-reload \|\| return 1/);
-    assert.ok(
-      script.indexOf('[[ -s "$previous_broker_unit_backup" ]]')
-        < script.indexOf('[[ -f "$previous_broker_release/deploy/vf-codex-broker.service" ]]'),
-      "rollback must prefer the exact pre-deploy unit backups over an older release bundle",
-    );
+    assert.match(script, /if \[\[ ! -s "\$previous_broker_unit_backup" && -f "\$previous_broker_release\/deploy\/vf-codex-broker.service" \]\]/);
   });
 
   for (const scenario of ["deepseek-unit-install"] as const) {

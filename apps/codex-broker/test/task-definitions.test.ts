@@ -190,6 +190,7 @@ describe("broker-owned task definitions", () => {
       "visual-review",
       "role-audit",
       "creative-discussion",
+      "audio-review",
     ]);
     for (const kind of BROKER_TASK_KINDS) {
       assert.equal(
@@ -331,6 +332,7 @@ describe("broker-owned task definitions", () => {
 
   it("owns a strict output schema for every allowed task kind", () => {
     const requiredByKind = new Map([
+      ["audio-review", ["audioSha256", "summary", "checks", "findings"]],
       ["topic-ideas", ["ideas"]],
       ["series-roadmap", ["episodes"]],
       ["creative-treatment", ["version", "viewerPromise", "hook", "progression", "payoff", "visualPrinciples", "soundPrinciples", "evidenceRequirements", "feasibilityQuestions"]],

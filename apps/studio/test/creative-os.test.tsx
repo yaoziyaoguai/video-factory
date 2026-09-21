@@ -2955,7 +2955,7 @@ describe("Creative OS", () => {
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
     expect(await screen.findByRole("combobox", { name: "默认导演角色" })).toBeInTheDocument();
-    expect(screen.getAllByText("模板脚本").length).toBeGreaterThan(0);
+    expect(screen.getByRole("combobox", { name: "编剧首选能力" })).toHaveValue("python-template-v1");
     expect(screen.queryByText("正在读取创作默认值...")).not.toBeInTheDocument();
   });
 
@@ -3182,7 +3182,7 @@ describe("Creative OS", () => {
     const roleSection = screen.getByRole("heading", { name: "按角色配置生产能力" }).closest("section");
     expect(within(roleSection!).getByText("GPT-5.6 Terra")).toBeInTheDocument();
     expect(within(roleSection!).getByText("故障替补：GPT-5.6 Sol")).toBeInTheDocument();
-    expect(within(roleSection!).getByText(/中途画面预检优先使用首选模型.*连接故障.*最终成片由 DeepSeek 基于抽帧证据完成独立质量复核/)).toBeInTheDocument();
+    expect(within(roleSection!).getByText(/中途画面预检优先使用首选模型.*连接故障.*最终成片由所选模型基于抽帧证据完成独立质量复核/)).toBeInTheDocument();
     expect(screen.getByText("独立质量复核")).toBeInTheDocument();
     expect(screen.getByText("独立复核 · 最多三轮")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存角色配置" }));

@@ -6,6 +6,18 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./diagnostics": {
+      "types": "./dist/diagnostics.d.ts",
+      "import": "./dist/diagnostics.js"
+    },
+    "./model-connection": {
+      "types": "./dist/model-connection.d.ts",
+      "import": "./dist/model-connection.js"
+    },
+    "./audio-review": {
+      "types": "./dist/audio-review.d.ts",
+      "import": "./dist/audio-review.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"

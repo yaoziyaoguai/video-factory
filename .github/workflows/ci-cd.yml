@@ -7,13 +7,15 @@ on:
   push:
     branches: [main]
 
-concurrency:
-  group: video-factory-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+permissions:
+  contents: read
 
 jobs:
   verify:
     name: Test and build
+    concurrency:
+      group: video-factory-verify-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,15 +38,24 @@ jobs:
           --build-arg NODE_IMAGE=public.ecr.aws/docker/library/node:22-alpine
           --file docker/Dockerfile
           --tag video-factory:ci .
+      - name: Verify Flickr through packaged Python worker
+        run: >-
+          docker run --rm --network none
+          --mount type=bind,src=${{ github.workspace }}/tests,dst=/tmp/vf-tests,readonly
+          --env PYTHONPATH=/app/src --entrypoint python3 video-factory:ci
+          -m unittest discover -s /tmp/vf-tests -p test_flickr.py
       - name: Render a Linux container smoke video
         run: >-
-          docker run --rm video-factory:ci
+          docker run --rm --network none video-factory:ci
           node packages/production-pipeline/dist/cli.js run
           examples/briefs/linux-container-smoke.json
           --workspace /tmp/video-factory-smoke
 
   security:
     name: Dependency security
+    concurrency:
+      group: video-factory-security-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +68,9 @@ jobs:
 
   deploy:
     name: Deploy to Alibaba ECS
+    concurrency:
+      group: video-factory-production
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     needs: [verify, security]
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -65,41 +79,96 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Package the verified commit
+      - name: Skip a superseded release
+        id: latest
         run: |
-          git bundle create video-factory-release.bundle HEAD
-          test "$(git bundle list-heads video-factory-release.bundle | awk '$2 == "HEAD" { print $1 }')" = "$GITHUB_SHA"
+          latest_sha="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+          test -n "$latest_sha"
+          if [[ "$latest_sha" == "$GITHUB_SHA" ]]; then
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            echo 'A newer main commit exists; skipping this deployment.'
+          fi
+      - name: Package the verified commit
+        if: steps.latest.outputs.current == 'true'
+        run: |
+          git bundle create "video-factory-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.bundle" HEAD
+          test "$(git bundle list-heads "video-factory-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.bundle" | awk '$2 == "HEAD" { print $1 }')" = "$GITHUB_SHA"
       - name: Transfer release bundle
+        if: steps.latest.outputs.current == 'true'
         uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: video-factory-release.bundle
+          source: video-factory-release-${{ github.run_id }}-${{ github.run_attempt }}.bundle
           target: /tmp
           overwrite: true
       - name: Deploy with rollback
+        if: steps.latest.outputs.current == 'true'
         uses: appleboy/ssh-action@2ead5e36573f08b82fbfce1504f1a4b05a647c6f # v1.2.2
         env:
           PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
           PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}
           RELEASE_SHA: ${{ github.sha }}
+          DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 40m
-          envs: PROJECT_PATH,PUBLIC_HEALTH_URL,RELEASE_SHA
+          envs: PROJECT_PATH,PUBLIC_HEALTH_URL,RELEASE_SHA,DEPLOY_RUN
           script: |
             set -euo pipefail
-            bundle_path=/tmp/video-factory-release.bundle
+            umask 077
+            [[ "$DEPLOY_RUN" =~ ^[0-9]+-[0-9]+$ ]]
+            bundle_path="/tmp/video-factory-release-${DEPLOY_RUN}.bundle"
             release_path="${PROJECT_PATH}.release"
             trap 'rm -f "$bundle_path"' EXIT
             test -f "$bundle_path"
+            exec 9>/var/lock/video-factory-deploy.lock
+            flock -w 2400 9
             cd "$PROJECT_PATH"
+            maintenance="$PROJECT_PATH/.dogfood-maintenance.json"
+            if [[ -f "$maintenance" ]]; then
+              python3 - "$maintenance" "$RELEASE_SHA" <<'PY'
+            import json,sys,pathlib,os,stat
+            path=pathlib.Path(sys.argv[1]); info=path.lstat()
+            assert stat.S_ISREG(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o600
+            data=json.loads(path.read_text())
+            assert data['targetSha']==sys.argv[2] and data['status']=='cleaned_waiting_for_actions'
+            assert pathlib.Path(data['backup'],'SHA256SUMS').is_file()
+            PY
+            fi
             git -C "$PROJECT_PATH" bundle verify "$bundle_path"
             git -C "$PROJECT_PATH" fetch "$bundle_path" HEAD
             test "$(git -C "$PROJECT_PATH" rev-parse FETCH_HEAD)" = "$RELEASE_SHA"
+            last_release="$PROJECT_PATH/.last-successful-release"
+            if [[ -s "$last_release" ]]; then
+              git merge-base --is-ancestor "$(cat "$last_release")" "$RELEASE_SHA" || {
+                echo 'Refusing a release older than the last successful deployment.' >&2
+                exit 1
+              }
+            fi
+            # 在 checkout 之前保存旧版解析配置，并以容器实际环境覆盖已更新的 env 文件。
+            rollback_config="/opt/video-factory/codex-broker/deployment/before-${DEPLOY_RUN}.json"
+            install -d -m 0700 "$(dirname "$rollback_config")"
+            if docker inspect video_factory_prod >/dev/null 2>&1; then
+              VIDEO_FACTORY_CODEX_SOCKET_GID="$(getent group vf-bridge | cut -d: -f3)" \
+                docker compose --project-name video-factory --env-file "$PROJECT_PATH/.env.docker.prod" \
+                -f "$release_path/docker/docker-compose.prod.yml" config --format json > "$rollback_config"
+              python3 - "$rollback_config" <<'PY'
+            import json,sys,subprocess,pathlib
+            path=pathlib.Path(sys.argv[1])
+            config=json.loads(path.read_text())
+            old=json.loads(subprocess.check_output(['docker','inspect','video_factory_prod']))[0]
+            config['services']['app']['environment']=dict(item.split('=',1) for item in old['Config']['Env'])
+            config['services']['app']['image']='video-factory:rollback'
+            config['services']['app'].pop('build',None)
+            path.write_text(json.dumps(config).replace('$','$$'))
+            PY
+            fi
             if [[ -e "$release_path/.git" ]]; then
               if ! release_status="$(git -C "$release_path" status --porcelain=v1 --untracked-files=all)"; then
                 echo "Unable to verify release worktree cleanliness; refusing to reuse it." >&2
@@ -119,5 +188,9 @@ jobs:
             fi
             test "$(git -C "$release_path" rev-parse HEAD)" = "$RELEASE_SHA"
             VIDEO_FACTORY_ENV_FILE="$PROJECT_PATH/.env.docker.prod" \
+              VIDEO_FACTORY_ROLLBACK_COMPOSE_FILE="$rollback_config" \
               PUBLIC_HEALTH_URL="$PUBLIC_HEALTH_URL" \
               bash "$release_path/scripts/deploy-production.sh"
+            printf '%s\n' "$RELEASE_SHA" > "$last_release.partial"
+            mv "$last_release.partial" "$last_release"
+            if [[ -f "$maintenance" ]]; then mv "$maintenance" "$maintenance.consumed"; fi

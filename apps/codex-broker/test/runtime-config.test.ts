@@ -4,7 +4,7 @@ import { CodexExecutor } from "../src/codex-executor.js";
 import { createBrokerExecutor } from "../src/executor-factory.js";
 import { brokerRuntimeConfigFromEnv } from "../src/runtime-config.js";
 import { ChatCompletionsExecutor } from "../src/chat-completions-executor.js";
-import { BROKER_TASK_KINDS } from "../src/task-definitions.js";
+import { REQUIRED_BROKER_TASK_KINDS as BROKER_TASK_KINDS } from "../src/task-definitions.js";
 
 describe("brokerRuntimeConfigFromEnv", () => {
   it("selects fixed OpenAI and DeepSeek profiles without retaining the DeepSeek key", () => {

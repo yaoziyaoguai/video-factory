@@ -9,6 +9,7 @@ import {
   CodexPublishCopyWriter,
   FallbackCodexTaskClient,
   ProductionPipeline,
+  type ProductionPipelineOptions,
 } from "@video-factory/production-pipeline";
 import { buildStudioApp } from "./app.js";
 import { readStudioAuthEnvironment } from "./auth.js";
@@ -31,6 +32,8 @@ import { StudioService } from "./studio-service.js";
 import { TrendGateway } from "./trend-gateway.js";
 import { TrendArticleReader } from "./trend-article-reader.js";
 import { CodexTopicIdeaModel, TrendOpportunityAgent } from "./trend-opportunity-agent.js";
+import { ModelConnections } from "./model-connections.js";
+import { AudioReviewService } from "./audio-review-service.js";
 
 const repositoryRoot = await findRepositoryRoot(process.cwd());
 loadLocalEnvironment(repositoryRoot);
@@ -52,6 +55,8 @@ const [deepseekCodexSettings] = await Promise.all([
 const deepseekCodexClient = deepseekCodexSettings.available
   ? new CodexBridgeClient({ socketPath: deepseekCodexSettings.socketPath, timeoutMs: 2_460_000 })
   : undefined;
+const modelConnections = new ModelConnections(deepseekCodexSettings.socketPath);
+await modelConnections.refresh().catch(() => { process.stderr.write("Model connection management is unavailable; existing configured models remain in use.\n"); });
 // 顺序即首选：DeepSeek 排在最前，所以 `auditedModelFor` 取到的默认模型是它。用户手动配置
 // 只影响候选的取舍，不改这里的顺序。
 const auditedTaskCandidates = [
@@ -59,44 +64,54 @@ const auditedTaskCandidates = [
     client: deepseekCodexClient,
     providerId: "deepseek",
     modelId: deepseekCodexSettings.modelId,
+    ...(deepseekCodexSettings.modelCandidates ? { modelCandidates: deepseekCodexSettings.modelCandidates } : {}),
     taskKinds: deepseekCodexSettings.taskKinds,
     sessionMode: "stateless" as const,
     ...(deepseekCodexSettings.taskModels ? { taskModels: deepseekCodexSettings.taskModels } : {}),
   }] : []),
 ];
-const auditedTaskClient = auditedTaskCandidates.length > 0
-  ? new FallbackCodexTaskClient({ candidates: auditedTaskCandidates })
-  : undefined;
-const auditedTaskReady = (taskKind: string) => auditedTaskCandidates.some((candidate) => candidate.taskKinds.includes(taskKind));
+const configuredTaskCandidates = () => modelConnections.connections.map(({ model, client }) => ({
+  client, providerId: model.id, modelId: model.id, enabled: model.enabled,
+  taskKinds: [
+    ...(model.capabilities.includes("text") ? ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "creative-discussion"] : []),
+    ...(model.capabilities.includes("image") ? ["asset-rank", "reference-grammar", "visual-review"] : []),
+    "role-audit",
+  ], sessionMode: "stateless" as const,
+}));
+const auditedTaskClient = new FallbackCodexTaskClient({ candidates: [...auditedTaskCandidates, ...configuredTaskCandidates()] });
 const auditedModelFor = (taskKind: string) => {
-  const candidate = auditedTaskCandidates.find((item) => item.taskKinds.includes(taskKind));
-  return candidate?.taskModels?.[taskKind] || candidate?.modelId || "codex-default";
+  const candidate = [...auditedTaskCandidates, ...configuredTaskCandidates().filter((item) => item.enabled)].find((item) => item.taskKinds.includes(taskKind));
+  return (candidate && "taskModels" in candidate ? candidate.taskModels?.[taskKind] : undefined) || candidate?.modelId || "codex-default";
 };
-const publishCopyWriter = auditedTaskClient && auditedTaskReady("publish-copy")
-  ? new CodexPublishCopyWriter({ client: auditedTaskClient })
-  : undefined;
-const assetSemanticRanker = auditedTaskClient && auditedTaskReady("asset-rank") ? new CodexAssetSemanticRanker({
+const publishCopyWriter = new CodexPublishCopyWriter({ client: auditedTaskClient });
+const assetSemanticRanker = new CodexAssetSemanticRanker({
   client: auditedTaskClient,
   modelId: auditedModelFor("asset-rank"),
-}) : undefined;
+});
 const reviewMedia = new PythonReviewMediaPreprocessor({
   repositoryRoot,
   pythonPath,
   pythonCommand: resolveProductionPython(repositoryRoot, process.env),
   environment: process.env,
 });
-const referenceGrammarAgent = auditedTaskClient && auditedTaskReady("reference-grammar") ? new CodexReferenceGrammarAgent({
+const referenceGrammarAgent = new CodexReferenceGrammarAgent({
   client: auditedTaskClient,
   media: reviewMedia,
   modelId: auditedModelFor("reference-grammar"),
-}) : undefined;
-const { screenwriterAgent, directorAgent, visualReviewAgents, treatmentAgents, briefAuditAgents } = buildRoleAgentAssembly({
+});
+const soundReview = new AudioReviewService({ connections: () => modelConnections.connections, media: reviewMedia });
+const assembleRoles = () => {
+  const assembly = buildRoleAgentAssembly({
   deepseekCodexSettings,
   ...(deepseekCodexClient ? { deepseekCodexClient } : {}),
   reviewMedia,
   environment: process.env,
-});
-const pipeline = new ProductionPipeline({
+  connectedModels: modelConnections.connections,
+  });
+  return { ...assembly, visualReviewAgents: assembly.visualReviewAgents.map((agent) => soundReview.wrap(agent)) };
+};
+const { screenwriterAgent, directorAgent, visualReviewAgents, treatmentAgents, briefAuditAgents } = assembleRoles();
+const pipelineOptions: ProductionPipelineOptions = {
   workspaceRoot,
   worker: buildProductionWorker({
     repositoryRoot,
@@ -116,10 +131,21 @@ const pipeline = new ProductionPipeline({
   ...(visualReviewAgents.length > 0 ? { visualReviewAgents } : {}),
   assetProviders: buildDirectorAssetProviders({ environment: process.env }),
   providerRuntimeMetadata: buildProductionProviderRuntimeMetadata(process.env),
-});
+};
+const pipeline = new ProductionPipeline(pipelineOptions);
+modelConnections.onChange = () => {
+  const assembly = assembleRoles();
+  // 保持 worker 持有的数组引用；已开始的角色调用持有自己的候选快照。
+  visualReviewAgents.splice(0, visualReviewAgents.length, ...assembly.visualReviewAgents);
+  Object.assign(pipelineOptions, assembly, { visualReviewAgents });
+  if (!assembly.screenwriterAgent) delete pipelineOptions.screenwriterAgent;
+  if (!assembly.directorAgent) delete pipelineOptions.directorAgent;
+  auditedTaskClient?.updateCandidates([...auditedTaskCandidates, ...configuredTaskCandidates()]);
+};
 await pipeline.recoverInterruptedRuns();
 const opportunities = new JsonOpportunityStore(path.join(workspaceRoot, "opportunities", "opportunities.json"));
 const service = new StudioService({
+  registeredModels: () => modelConnections.connections.map(({ model }) => model),
   repositoryRoot,
   workspaceRoot,
   pipeline,
@@ -137,14 +163,15 @@ const service = new StudioService({
     ...(deepseekCodexSettings.taskModels ? { taskModels: deepseekCodexSettings.taskModels } : {}),
     ...(deepseekCodexSettings.modelCandidates ? { modelCandidates: deepseekCodexSettings.modelCandidates } : {}),
   },
-  ...(auditedTaskClient && auditedTaskReady("series-roadmap") ? {
+  ...{
     seriesPlanningAgent: new CodexSeriesPlanningAgent(
       auditedTaskClient,
       3,
       path.join(workspaceRoot, "checkpoints", "series-showrunner"),
+      async () => (await creatorSettings.get()).modelDefaults?.["codex-series-showrunner-v1"],
     ),
-  } : {}),
-  ...(auditedTaskClient && auditedTaskReady("topic-ideas") ? {
+  },
+  ...{
     trendAgent: new TrendOpportunityAgent({
       signals: new TrendGateway({ environment: process.env }),
       articleReader: new TrendArticleReader({ cacheRoot: path.join(workspaceRoot, "cache", "trend-articles") }),
@@ -152,15 +179,16 @@ const service = new StudioService({
         auditedTaskClient,
         3,
         path.join(workspaceRoot, "checkpoints", "topic-editor"),
+        async () => (await creatorSettings.get()).modelDefaults?.["api-topic-editor-v1"],
       ),
       strategy: async () => (await creatorSettings.get()).topicStrategy,
     }),
-  } : {}),
+  },
   creatorSettings,
 });
 const development = process.env.STUDIO_DEV === "1";
 const auth = readStudioAuthEnvironment(process.env, { required: !development, secureCookie: !development });
-const app = buildStudioApp({ service, logger: true, ...(auth ? { auth } : {}) });
+const app = buildStudioApp({ service, modelConnections, logger: true, ...(auth ? { auth } : {}) });
 const interruptedRecoveryTimer = setInterval(() => {
   void pipeline.recoverInterruptedRuns().catch(() => {
     app.log.error("Interrupted production recovery failed; the next recovery cycle will retry.");

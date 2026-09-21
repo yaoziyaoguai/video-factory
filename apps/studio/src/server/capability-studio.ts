@@ -11,6 +11,8 @@ import type {
 } from "../shared/api.js";
 import { LocalCapabilityService } from "./local-capabilities.js";
 import { buildProviderCatalog, type CodexCatalogAvailability } from "./provider-catalog.js";
+import type { ModelConnection } from "@video-factory/production-pipeline";
+import { includeRegisteredModels } from "./registered-model-catalog.js";
 
 export interface CapabilityStudioOptions {
   repositoryRoot: string;
@@ -20,6 +22,7 @@ export interface CapabilityStudioOptions {
   localCapabilities?: Pick<LocalCapabilityService, "report" | "listVoices" | "preview">;
   codexAvailability?: CodexCatalogAvailability;
   deepseekCodexAvailability?: CodexCatalogAvailability;
+  registeredModels?: () => ModelConnection[];
 }
 
 export class CapabilityStudio {
@@ -51,12 +54,14 @@ export class CapabilityStudio {
 
   async listProviders(): Promise<StudioProvider[]> {
     const health = await this.health();
-    return buildProviderCatalog({
+    return includeRegisteredModels(buildProviderCatalog({
       python: health.runtime.python ?? false,
       ffmpeg: health.runtime.ffmpeg ?? false,
       ffprobe: health.runtime.ffprobe ?? false,
       say: health.runtime.say ?? false,
-    }, this.options.environment, this.options.codexAvailability, this.options.deepseekCodexAvailability);
+    }, this.options.environment, this.options.codexAvailability, this.options.deepseekCodexAvailability), this.options.registeredModels?.() ?? [], {
+      python: health.runtime.python ?? false, ffmpeg: health.runtime.ffmpeg ?? false, ffprobe: health.runtime.ffprobe ?? false,
+    });
   }
 
   listLocalCapabilities(): Promise<StudioLocalCapability[]> {

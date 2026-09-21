@@ -1684,7 +1684,7 @@ describe("StudioService", () => {
       listProviders: async () => [...baseProviders, ...extraProviders],
     });
 
-    await assert.rejects(() => studio().start(productionBrief), /正式制作需要 DeepSeek 视觉审片模型可用，且独立质量复核已配置/);
+    await assert.rejects(() => studio().start(productionBrief), /正式制作需要视觉审片模型可用，且独立质量复核已配置/);
     await studio([{
       id: "codex-role-auditor-v1",
       capability: "role.audit",
@@ -1710,7 +1710,7 @@ describe("StudioService", () => {
     }]).start({
       ...productionBrief,
       providers: { ...productionBrief.providers, visualReview: "codex-visual-review-v1" },
-    }), /正式制作需要 DeepSeek 视觉审片模型可用/);
+    }), /正式制作需要视觉审片模型可用/);
     assert.equal(pipeline.dispatchCount, 1);
   });
 

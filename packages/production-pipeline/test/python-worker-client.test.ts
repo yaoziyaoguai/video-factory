@@ -6,6 +6,37 @@ import { describe, it } from "node:test";
 import { PythonWorkerClient } from "../src/index.js";
 
 describe("PythonWorkerClient", () => {
+  it("treats stderr flooding and a broken log sink as disposable diagnostics", async (t) => {
+    t.mock.method(console, "error", () => { throw new Error("log disk unavailable"); });
+    const wire = { protocolVersion: "video-factory/worker-v1", commandId: "flood", status: "succeeded", artifacts: [] };
+    const client = new PythonWorkerClient({ command: [process.execPath, "-e",
+      `process.stderr.write('private user content'.repeat(300000), () => process.stdout.write(${JSON.stringify(JSON.stringify(wire))}));`], timeoutMs: 5_000 });
+    assert.equal((await client.run({ commandId: "flood" })).status, "succeeded");
+  });
+  it("does not expose unstructured child content through errors or logs", async (t) => {
+    const logs: string[] = [];
+    t.mock.method(console, "error", (line: string) => logs.push(line));
+    for (const script of ["process.stderr.write('private user content');process.exitCode=1", "process.stdout.write('private user content')"]) {
+      const client = new PythonWorkerClient({ command: [process.execPath, "-e", script], timeoutMs: 2_000 });
+      await assert.rejects(client.run({ commandId: "private" }), error => {
+        assert.doesNotMatch(String(error), /private user content/); return true;
+      });
+    }
+    assert.doesNotMatch(logs.join("\n"), /private user content/);
+  });
+  it("redacts child errors and forwards stage facts without contaminating stdout", async (t) => {
+    const logs: string[] = [];
+    t.mock.method(console, "error", (line: string) => logs.push(line));
+    const client = new PythonWorkerClient({ command: [process.execPath, "-e",
+      `process.stderr.write(JSON.stringify({component:'media-worker',event:'stock.search',state:'started',query:'private'})+'\\n'); process.stderr.write('failure secret-test https://example.org?token=private'); process.exitCode=1;`],
+      env: { ...process.env, TEST_API_KEY: "secret-test" }, timeoutMs: 2_000 });
+    await assert.rejects(client.run({ commandId: "cmd-log", runId: "run-log" }), error => {
+      assert.doesNotMatch(String(error), /secret-test|token=private/);
+      return true;
+    });
+    assert.ok(logs.some(line => line.includes('"event":"stock.search"') && line.includes('"runId":"run-log"')));
+    assert.doesNotMatch(logs.join("\n"), /secret-test|private/);
+  });
   it("keeps stock attribution through the actual worker protocol parser", async () => {
     const provenance = {
       providerId: "unsplash-stock-v1", producerNodeId: "assets", attempt: 1,

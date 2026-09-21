@@ -19,9 +19,11 @@ export interface FallbackTaskClientCandidate {
   client: CodexBridgeClient;
   providerId: string;
   modelId: string;
+  modelCandidates?: readonly string[];
   taskKinds: readonly string[];
   taskModels?: Partial<Record<CodexTaskKind, string>>;
   sessionMode?: "stateful" | "stateless";
+  enabled?: boolean;
 }
 
 export interface FallbackTaskClientOptions {
@@ -35,11 +37,15 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
 
   constructor(options: FallbackTaskClientOptions) {
     super({ socketPath: "/fallback-task-client-does-not-send" });
-    if (options.candidates.length < 1) throw new Error("Task fallback requires at least one client candidate.");
     if (new Set(options.candidates.map((candidate) => candidate.providerId)).size !== options.candidates.length) {
       throw new Error("Task fallback candidates must use distinct provider ids.");
     }
     this.candidates = [...options.candidates];
+  }
+
+  updateCandidates(candidates: FallbackTaskClientCandidate[]): void {
+    if (new Set(candidates.map((candidate) => candidate.providerId)).size !== candidates.length) throw new Error("Task fallback requires distinct provider identities.");
+    this.candidates.splice(0, this.candidates.length, ...candidates);
   }
 
   override async runTask(
@@ -58,7 +64,13 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
     session?: CodexTaskSession,
     requestOptions: CodexTaskRequestOptions = {},
   ): Promise<CodexTaskExecution> {
-    const available = this.candidates.filter((candidate) => candidate.taskKinds.includes(kind));
+    const available = this.candidates.filter((candidate) => candidate.enabled !== false && candidate.taskKinds.includes(kind));
+    const preferredModel = requestOptions.model;
+    if (preferredModel) {
+      const index = available.findIndex((candidate) => modelForTask(candidate, kind) === preferredModel || candidate.modelCandidates?.includes(preferredModel));
+      if (index < 0) throw new CodexBridgeError("所选模型不支持当前任务，或已经停用。", false, "not_accepted");
+      available.unshift(...available.splice(index, 1));
+    }
     if (available.length === 0) {
       throw new CodexBridgeError(`No healthy model provider supports '${kind}'.`, false, "not_accepted");
     }
@@ -71,7 +83,8 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
       : available;
     const failures: Array<{ modelId: string; providerId: string; error: unknown }> = [];
     for (const [position, candidate] of ordered.entries()) {
-      const modelId = modelForTask(candidate, kind);
+      const modelId = preferredModel && (modelForTask(candidate, kind) === preferredModel || candidate.modelCandidates?.includes(preferredModel))
+        ? preferredModel : modelForTask(candidate, kind);
       const candidateRequestId = requestId && position > 0
         ? fallbackRequestId(requestId, `${candidate.providerId}:${modelId}`, position)
         : requestId;
@@ -82,7 +95,9 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
           }
         : undefined;
       try {
-        const execution = await candidate.client.runTaskDetailed(kind, payload, candidateRequestId, candidateSession, requestOptions);
+        const execution = await candidate.client.runTaskDetailed(kind, payload, candidateRequestId, candidateSession, {
+          ...requestOptions, ...(preferredModel ? { model: modelId } : {}),
+        });
         if (session) this.rememberAffinity(session.key, candidate.providerId);
         return failures.length > 0 ? withFallbackTrace(execution, failures, modelId, candidate.providerId) : execution;
       } catch (error) {

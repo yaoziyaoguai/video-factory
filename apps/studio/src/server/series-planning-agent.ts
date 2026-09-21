@@ -28,9 +28,11 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
     private readonly client: CodexBridgeClient,
     private readonly maxReviewIterations = 3,
     private readonly checkpointDirectory?: string,
+    private readonly selectedModel?: () => Promise<string | undefined>,
   ) {}
 
   async generate(series: SeriesRecord, count: number): Promise<SeriesPlanningResult> {
+    const model = await this.selectedModel?.();
     const existing = [...series.episodes].sort((left, right) => left.episodeNumber - right.episodeNumber);
     const startEpisodeNumber = Math.max(series.nextEpisodeNumber, (existing.at(-1)?.episodeNumber ?? 0) + 1);
     const request = {
@@ -60,7 +62,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
       },
       planningWindow: { startEpisodeNumber, count },
     };
-    const checkpointKey = roleAgentCheckpointKey({ request, contractVersion: SERIES_SHOWRUNNER_CONTRACT_VERSION });
+    const checkpointKey = roleAgentCheckpointKey({ request, model, contractVersion: SERIES_SHOWRUNNER_CONTRACT_VERSION });
     const execution = await runRoleAgentLoop<{ episodes: SeriesEpisodeDraft[] }>({
       role: "系列总编",
       contractVersion: SERIES_SHOWRUNNER_CONTRACT_VERSION,
@@ -78,7 +80,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         : this.client.runTaskDetailed("series-roadmap", {
         ...request,
         ...(revision ? { revision } : {}),
-      }, requestId, session, requestOptions),
+      }, requestId, session, { ...requestOptions, ...(model ? { model } : {}) }),
       audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session, requestOptions, preparedOperation }) => preparedOperation
         ? this.client.observePrepared(preparedOperation, requestOptions)
         : this.client.runTaskDetailed("role-audit", {
@@ -97,7 +99,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
         ...(validationFailure ? { validationFailure } : {}),
-      }, requestId, session, requestOptions),
+      }, requestId, session, { ...requestOptions, ...(model ? { model } : {}) }),
       validate: (value) => parseSeriesRoadmapOutput(value, series.pillars, startEpisodeNumber, count),
       ...(this.checkpointDirectory ? {
         checkpoint: fileRoleAgentLoopCheckpoint(
@@ -128,6 +130,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
     series: SeriesRecord,
     episode: StudioSeriesEpisode,
   ): Promise<{ draft: SeriesEpisodeDraft; planning: StudioSeriesEpisodePlanning }> {
+    const model = await this.selectedModel?.();
     const request = {
       series: seriesPlanningContext(series),
       planningWindow: { startEpisodeNumber: episode.episodeNumber, count: 1, mode: "greenlight" },
@@ -136,7 +139,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         inheritedFromPrevious: [...(episode.continuity.inheritedFromPrevious ?? [])],
       },
     };
-    const checkpointKey = roleAgentCheckpointKey({ request, contractVersion: SERIES_GREENLIGHT_CONTRACT_VERSION });
+    const checkpointKey = roleAgentCheckpointKey({ request, model, contractVersion: SERIES_GREENLIGHT_CONTRACT_VERSION });
     const execution = await runRoleAgentLoop<{ episodes: SeriesEpisodeDraft[] }>({
       role: "系列开拍总编",
       contractVersion: SERIES_GREENLIGHT_CONTRACT_VERSION,
@@ -155,7 +158,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         : this.client.runTaskDetailed("series-roadmap", {
         ...request,
         ...(revision ? { revision } : {}),
-      }, requestId, session, requestOptions),
+      }, requestId, session, { ...requestOptions, ...(model ? { model } : {}) }),
       audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session, requestOptions, preparedOperation }) => preparedOperation
         ? this.client.observePrepared(preparedOperation, requestOptions)
         : this.client.runTaskDetailed("role-audit", {
@@ -174,7 +177,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
         ...(validationFailure ? { validationFailure } : {}),
-      }, requestId, session, requestOptions),
+      }, requestId, session, { ...requestOptions, ...(model ? { model } : {}) }),
       validate: (value) => {
         const parsed = parseSeriesRoadmapOutput(value, series.pillars, episode.episodeNumber, 1);
         if (JSON.stringify(parsed.episodes[0]?.fromPrevious) !== JSON.stringify(episode.continuity.fromPrevious)) {

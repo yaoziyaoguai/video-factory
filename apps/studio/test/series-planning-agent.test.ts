@@ -110,6 +110,24 @@ class RepairingClient extends CodexBridgeClient {
 }
 
 describe("CodexSeriesPlanningAgent", () => {
+  it("freezes the selected connection for production and audit within one planning loop", async () => {
+    const client = new RepairingClient();
+    const original = client.runTaskDetailed.bind(client);
+    const selected: Array<string | undefined> = [];
+    let defaultModel = "m-first";
+    (client as CodexBridgeClient).runTaskDetailed = async (kind, payload, _id, _session, options) => {
+      selected.push(options?.model);
+      defaultModel = "m-next";
+      return original(kind, payload);
+    };
+    const agent = new CodexSeriesPlanningAgent(client, 3, undefined, async () => defaultModel);
+    await agent.generate(series, 2);
+    assert.deepEqual(selected, ["m-first", "m-first", "m-first", "m-first"]);
+    selected.length = 0;
+    await agent.generate(series, 2);
+    assert.deepEqual(selected, ["m-next", "m-next"]);
+  });
+
   it("repairs a roadmap through an independent audit before returning it", async () => {
     const client = new RepairingClient();
     const result = await new CodexSeriesPlanningAgent(client, 3).generate(series, 2);

@@ -6,6 +6,7 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
+from PIL import Image
 
 from video_factory.domain import StockAssetCandidate
 from video_factory.stock_assets import search_stock_assets, candidate_to_public_dict, materialize_candidate
@@ -57,19 +58,22 @@ class UnsplashTest(unittest.TestCase):
 
     def test_selected_download_is_tracked_before_media_without_sending_key_to_cdn(self):
         requests = []
+        encoded = io.BytesIO()
+        Image.new('RGB', (1200, 1800), 'navy').save(encoded, format='JPEG')
+        body = encoded.getvalue()
 
         def opener(request, timeout):
             requests.append(request)
             if urllib.parse.urlsplit(request.full_url).hostname == "api.unsplash.com":
                 return io.BytesIO(b'{"url":"https://images.unsplash.com/photo-1"}')
-            response = io.BytesIO(b"image-bytes")
-            response.headers = {"Content-Type": "image/jpeg", "Content-Length": "11"}
+            response = io.BytesIO(body)
+            response.headers = {"Content-Type": "image/jpeg", "Content-Length": str(len(body))}
             return response
 
         with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"UNSPLASH_ACCESS_KEY": "test-key"}), \
-             patch("video_factory.stock_assets.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
+             patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
             result = materialize_candidate(self.candidate(), Path(tmp) / "image.jpg", opener=opener)
-            self.assertEqual(result.read_bytes(), b"image-bytes")
+            self.assertEqual(result.read_bytes(), body)
         self.assertEqual(len(requests), 2)
         self.assertEqual(requests[0].full_url, self.candidate().download_tracking_url)
         self.assertEqual(requests[0].get_header("Authorization"), "Client-ID test-key")
@@ -79,7 +83,7 @@ class UnsplashTest(unittest.TestCase):
         for tracking in ("", "https://attacker.example/photos/photo-1/download", "https://api.unsplash.com/photos/other/download"):
             with self.subTest(tracking=tracking), tempfile.TemporaryDirectory() as tmp, \
                  patch("video_factory.stock_assets.open_asset_request") as opener, \
-                 patch("video_factory.stock_assets.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
+                 patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]):
                 with self.assertRaisesRegex((RuntimeError, ValueError), "Unsplash"):
                     materialize_candidate(replace(self.candidate(), download_tracking_url=tracking), Path(tmp) / "x.jpg")
                 opener.assert_not_called()

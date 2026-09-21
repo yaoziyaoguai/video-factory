@@ -147,7 +147,7 @@ export interface StudioModelProfile {
   available: boolean;
   recommended?: boolean;
   description: string;
-  taskTypes: Array<"text-to-video" | "image-to-video" | "text-to-image" | "visual-review" | "digital-human" | "text">;
+  taskTypes: Array<"text-to-video" | "image-to-video" | "text-to-image" | "visual-review" | "audio-review" | "digital-human" | "text">;
   resolutions?: string[];
   aspectRatios?: Array<"9:16" | "16:9" | "1:1" | "3:4" | "4:3">;
   minDurationSeconds?: number;

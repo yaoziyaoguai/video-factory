@@ -100,6 +100,20 @@ const hailuoProvider: StudioProvider = {
 };
 
 describe("node production workspaces", () => {
+  it("retains official stock credit and share-alike conditions beside adopted videos", () => {
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+      runId="run-nw" runRevision={2}
+      node={{ ...succeededNode, id: "assets", label: "画面", artifactIds: ["coverr", "wikimedia"] }}
+      runStatus="stale" busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined}
+      artifacts={[
+        { id: "coverr", kind: "media_asset", createdAt: "2026-09-20T00:00:00Z", contentType: "video/mp4", contentUrl: "/coverr.mp4", producerNodeId: "assets", providerId: "coverr-stock-v1", creator: "Coverr creator" },
+        { id: "wikimedia", kind: "media_asset", createdAt: "2026-09-20T00:00:00Z", contentType: "video/webm", contentUrl: "/commons.webm", producerNodeId: "assets", providerId: "wikimedia-stock-v1", creator: "Commons creator", licenseNote: "CC BY-SA 4.0：改编须按相同许可分享" },
+      ]}
+    />);
+    expect(screen.getByRole("link", { name: "Coverr" })).toHaveAttribute("href", "https://coverr.co");
+    expect(screen.getByRole("link", { name: "Wikimedia Commons" })).toBeInTheDocument();
+    expect(screen.getByText(/改编须按相同许可分享/)).toBeInTheDocument();
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
   });

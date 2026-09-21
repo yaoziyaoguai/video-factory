@@ -627,13 +627,13 @@ class PipelineTest(unittest.TestCase):
             return FakeResponse()
 
         for media_type in ("image", "video"):
-            with self.subTest(media_type=media_type):
+            with self.subTest(media_type=media_type), tempfile.TemporaryDirectory() as cache_home:
                 result = search_pixabay(
                     "city",
                     media_type,
                     2,
                     opener=opener,
-                    environ={"PIXABAY_API_KEY": "test-key"},
+                    environ={"PIXABAY_API_KEY": "test-key", "XDG_CACHE_HOME": cache_home},
                 )
 
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(requested_urls[-1]).query)
@@ -673,7 +673,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(query_for_scene(hook), "asian office worker tired after work")
         self.assertEqual(query_for_scene(action), "asian person journaling at home")
 
-    def test_director_stock_query_keeps_ai_intent_but_localizes_known_chinese_topics(self):
+    def test_director_stock_query_preserves_the_approved_mixed_language_intent(self):
         scene = Scene(
             position=3,
             narration="真正难退出的，是大脑还在等待下一条工作消息。",
@@ -688,7 +688,7 @@ class PipelineTest(unittest.TestCase):
             "conceptual illustration of hidden reason behind 关掉工作消息后，大脑为什么还停不下来",
         )
 
-        self.assertEqual(resolved, "asian person quiet reflection night")
+        self.assertEqual(resolved, "conceptual illustration of hidden reason behind 关掉工作消息后，大脑为什么还停不下来")
 
     def test_director_stock_query_does_not_replace_specific_shot_with_broad_topic(self):
         scene = Scene(
@@ -950,7 +950,7 @@ class PipelineTest(unittest.TestCase):
         class RedirectResponse:
             status = 302
             reason = "Found"
-            headers = {"Location": "http://127.0.0.1/private.mp4"}
+            headers = {"Location": "https://127.0.0.1/private.mp4"}
 
             def close(self):
                 return None
@@ -960,7 +960,7 @@ class PipelineTest(unittest.TestCase):
             return [(2, 1, 6, "", (address, port))]
 
         with patch("socket.getaddrinfo", side_effect=resolve), \
-             patch("video_factory.stock_assets.open_pinned_asset_response", return_value=RedirectResponse()) as open_response:
+             patch("video_factory.asset_transport.open_pinned_asset_response", return_value=RedirectResponse()) as open_response:
             with self.assertRaisesRegex(RuntimeError, "private or unsafe"):
                 open_asset_request(
                     urllib.request.Request("https://media.example/public.mp4"),

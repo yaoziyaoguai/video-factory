@@ -7,7 +7,8 @@ import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
-import { UnsplashAttribution, unsplashPublicUrl } from "./UnsplashAttribution.js";
+import { unsplashPublicUrl } from "./UnsplashAttribution.js";
+import { hasStockAttribution, StockAttribution } from "./StockAttribution.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
 import { PlanningStagesPanel } from "./PlanningStagesPanel.js";
 import type { StudioPlanningEditableStage, StudioPlanningStage } from "../../shared/api.js";
@@ -615,7 +616,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
                 {artifact.contentType?.startsWith("video/")
                   ? <video aria-label={`${artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`} 画面预览`} src={artifact.contentUrl} controls playsInline preload="metadata" />
                   : <img alt={`${artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`} 画面预览`} src={artifact.providerId === "unsplash-stock-v1" ? unsplashPublicUrl(artifact.previewUrl, "images.unsplash.com") : artifact.contentUrl} loading="lazy" />}
-                <figcaption><span>{artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`}</span><small>{artifact.providerId === "unsplash-stock-v1" ? <UnsplashAttribution creator={artifact.creator} creatorUrl={artifact.creatorUrl} /> : providerLabel(artifact.providerId) ?? "素材来源未记录"}</small></figcaption>
+                <figcaption><span>{artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`}</span><small>{hasStockAttribution(artifact.providerId) ? <StockAttribution provider={artifact.providerId} creator={artifact.creator} creatorUrl={artifact.creatorUrl} licenseNote={artifact.licenseNote} /> : providerLabel(artifact.providerId) ?? "素材来源未记录"}</small></figcaption>
               </figure>)}
             </div>
           </div> : null}
@@ -938,7 +939,9 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
     try {
       const providerModels = node.id === "assets"
         ? Object.fromEntries(assetProviderIds.map((id) => [id, modelSelections[id] ?? null]))
-        : { [providerId]: modelSelections[providerId] ?? null };
+        : { [providerId]: modelSelections[providerId] ?? null,
+            ...(node.id === "visual-review" && (modelSelections["sound-review-v1"] !== undefined || providers.some((provider) => provider.id === "sound-review-v1" && provider.available))
+              ? { "sound-review-v1": modelSelections["sound-review-v1"] || null } : {}) };
       await onSave({
         expectedRunRevision: editBaselineRevision,
         ...(node.id === "assets" ? {} : { providerId }),
@@ -969,6 +972,11 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
       {canEdit && !editing ? <button className="button button-ghost" type="button" onClick={() => { setEditBaselineRevision(runRevision); setEditing(true); }}>调整</button> : null}
     </header>
     {editing ? <div className="node-execution-config-editor">
+      {node.id === "visual-review" ? <label className="field"><span>声音审片模型</span><select aria-label="声音审片模型"
+        value={modelSelections["sound-review-v1"] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, "sound-review-v1": event.target.value }))}>
+        <option value="">继承本条制作的声音选择</option>
+        {providers.find((provider) => provider.id === "sound-review-v1")?.modelProfiles?.filter((model) => model.available).map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+      </select><small>直接听取成片音轨；没有可用接入时如实标为未审听，不影响你查看视觉意见。</small></label> : null}
       {node.id !== "assets" ? <>
         <label className="field"><span>制作方式</span><select value={providerId} disabled={node.id === "voice" || !hasAlternativeRoleProvider} onChange={(event) => setProviderId(event.target.value)}>
           {inheritedProviderUnavailable ? <option value={providerId} disabled>{selectedProvider?.label ?? providerLabel(providerId) ?? "未识别的制作服务"}（已失效）</option> : null}
@@ -1206,6 +1214,7 @@ function executionTimingDetails(
   const queueWaitMs = timingParameter(parameters.queueWaitMs);
   const providerWaitMs = timingParameter(parameters.providerWaitMs);
   const modelCallCount = nonNegativeIntegerParameter(parameters.modelCallCount);
+  const audioModelCallCount = nonNegativeIntegerParameter(parameters.audioModelCallCount);
   const brokerTaskCount = nonNegativeIntegerParameter(parameters.brokerTaskCount);
   const modelExecutionCount = nonNegativeIntegerParameter(parameters.modelExecutionCount);
   const brokerStructuredRepairCount = nonNegativeIntegerParameter(parameters.brokerStructuredRepairCount);
@@ -1259,6 +1268,7 @@ function executionTimingDetails(
     validationMs === undefined ? undefined : { label: "结构与合同校验", value: formatDuration(validationMs) },
     fallbackCandidateCount > 0 ? { label: "候选切换", value: `${fallbackCandidateCount} 次` } : undefined,
     modelCallCount === undefined ? undefined : { label: "本次已证实模型执行", value: `${modelCallCount} 次` },
+    parameters.audioReviewStatus === undefined ? undefined : { label: "其中声音审片", value: audioModelCallCount === undefined ? "调用次数待核实" : `${audioModelCallCount} 次` },
     brokerTaskCount === undefined ? undefined : { label: "Broker 任务", value: `${brokerTaskCount} 次` },
     modelExecutionCount === undefined ? undefined : { label: "任务内模型执行", value: `${modelExecutionCount} 次` },
     brokerStructuredRepairCount === undefined || brokerStructuredRepairCount === 0

@@ -24,8 +24,8 @@ export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as 
 export { BROKER_TASK_KINDS } from "./task-definitions.js";
 export type { BrokerTaskKind } from "./task-definitions.js";
 
-const OPENAI_TASK_KINDS = [...BROKER_TASK_KINDS] as const satisfies readonly BrokerTaskKind[];
-export const DEEPSEEK_TASK_KINDS = [...BROKER_TASK_KINDS] as const satisfies readonly BrokerTaskKind[];
+const OPENAI_TASK_KINDS = BROKER_TASK_KINDS.filter((kind) => kind !== "audio-review");
+export const DEEPSEEK_TASK_KINDS = BROKER_TASK_KINDS.filter((kind) => kind !== "audio-review");
 /**
  * DeepSeek 的首选模型：既能读 image_url 的 data URI，也接受 reasoning_effort=xhigh，
  * 所以文本与视觉两角都由它默认承担（两者仍可分开配置，见 chat-completions-executor.ts）。
@@ -483,6 +483,7 @@ export type ValidatedTask = (
   | { kind: "asset-rank"; payload: AssetRankPayload }
   | { kind: "reference-grammar"; payload: ReferenceGrammarPayload }
   | { kind: "visual-review"; payload: VisualReviewPayload }
+  | { kind: "audio-review"; payload: VisualReviewPayload & { audioSha256: string; audio: Buffer } }
   | { kind: "role-audit"; payload: RoleAuditPayload }
   | { kind: "creative-discussion"; payload: CreativeDiscussionPayload }
 ) & { expectedContractDigest?: string };
@@ -830,6 +831,18 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
       kind,
       payload: requireVisualReviewPayload(record),
     };
+  }
+  if (kind === "audio-review") {
+    assertExactKeys(record, ["durationMs", "frames", "reviewContext", "audioSha256", "audioBase64"], "payload");
+    const audioSha256 = requiredText(record.audioSha256, "payload.audioSha256");
+    const base64 = requiredText(record.audioBase64, "payload.audioBase64");
+    const audio = Buffer.from(base64, "base64");
+    if (audio.length < 4 || audio.length > 5 * 1024 * 1024 || audio.toString("base64") !== base64
+      || createHash("sha256").update(audio).digest("hex") !== audioSha256
+      || !(audio.subarray(0, 3).toString() === "ID3" || (audio[0] === 0xff && (audio[1]! & 0xe0) === 0xe0))) {
+      throw new CodexExecutorError("payload audio evidence is invalid.", false);
+    }
+    return { kind, payload: { ...requireVisualReviewPayload(record), audioSha256, audio } };
   }
   if (kind === "asset-rank") {
     assertExactKeys(record, ["version", "scenes", "thumbnails", "revision"], "payload");
@@ -1547,6 +1560,11 @@ export function buildTaskPrompt(
       })),
       ...(task.payload.reviewContext ? { reviewContext: task.payload.reviewContext } : {}),
       ...(task.payload.revision ? { revision: task.payload.revision } : {}),
+    };
+  } else if (task.kind === "audio-review") {
+    data = { durationMs: task.payload.durationMs, audioSha256: task.payload.audioSha256,
+      frames: task.payload.frames.map((frame, index) => ({ frameIndex: index + 1, timecodeMs: frame.timecodeMs, sha256: frame.sha256 })),
+      reviewContext: task.payload.reviewContext ?? {},
     };
   } else if (task.kind === "asset-rank") {
     data = {

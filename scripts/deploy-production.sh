@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 environment_file="${VIDEO_FACTORY_ENV_FILE:-$repository_root/.env.docker.prod}"
@@ -147,14 +148,23 @@ docker network inspect "$trend_network" >/dev/null 2>&1 \
 # 显式标记失败（“应用重启中断了这次制作”），不会伪装成成功。
 
 previous_image="$(docker inspect --format='{{.Image}}' "$container" 2>/dev/null || true)"
+deployment_state="$broker_root/deployment"
+mkdir -p "$deployment_state"
+previous_compose="${VIDEO_FACTORY_ROLLBACK_COMPOSE_FILE:-$deployment_state/current.compose.json}"
+rollback_compose=(docker compose --project-name video-factory -f "$previous_compose")
 if [[ -n "$previous_image" ]]; then
+  if [[ ! -s "$previous_compose" ]]; then
+    echo "Missing pre-deploy resolved Compose configuration; refusing unsafe image-only rollback." >&2
+    exit 1
+  fi
+  "${rollback_compose[@]}" config --quiet
   docker tag "$previous_image" video-factory:rollback
   "$repository_root/scripts/backup-production.sh"
 fi
 
 previous_broker_release="$(readlink "$broker_root/current" 2>/dev/null || true)"
-previous_broker_unit_backup="$(mktemp)"
-previous_deepseek_broker_unit_backup="$(mktemp)"
+previous_broker_unit_backup="$(mktemp "$deployment_state/legacy-unit.XXXXXX")"
+previous_deepseek_broker_unit_backup="$(mktemp "$deployment_state/deepseek-unit.XXXXXX")"
 candidate_broker_release=""
 if [[ -f "$broker_unit" ]]; then
   cp -a "$broker_unit" "$previous_broker_unit_backup"
@@ -254,7 +264,7 @@ task_kinds_from_release() {
     import { pathToFileURL } from "node:url";
     try {
       const definitions = await import(pathToFileURL(process.env.BROKER_TASK_DEFINITIONS).href);
-      const taskKinds = definitions.BROKER_TASK_KINDS;
+      const taskKinds = definitions.REQUIRED_BROKER_TASK_KINDS ?? definitions.BROKER_TASK_KINDS;
       const valid = Array.isArray(taskKinds)
         && taskKinds.length > 0
         && new Set(taskKinds).size === taskKinds.length
@@ -337,19 +347,18 @@ rollback_broker() {
   fi
   # 回滚必须恢复部署前实际运行的 unit。旧 release 可能早于 DeepSeek unit 纳入制品，
   # 只按 release 取文件会让应用已回滚、视觉审片服务却留在新版本。
-  if [[ -s "$previous_broker_unit_backup" ]]; then
-    install -m 0644 "$previous_broker_unit_backup" "$broker_unit" || return 1
-    if [[ "$deepseek_broker_was_active" -eq 1 ]]; then
-      [[ -s "$previous_deepseek_broker_unit_backup" ]] || return 1
-      install -m 0644 "$previous_deepseek_broker_unit_backup" "$deepseek_broker_unit" || return 1
+  if [[ "$legacy_broker_was_active" -eq 1 ]]; then
+    if [[ ! -s "$previous_broker_unit_backup" && -f "$previous_broker_release/deploy/vf-codex-broker.service" ]]; then
+      cp "$previous_broker_release/deploy/vf-codex-broker.service" "$previous_broker_unit_backup" || return 1
     fi
-    systemctl daemon-reload || return 1
-  elif [[ -f "$previous_broker_release/deploy/vf-codex-broker.service" ]]; then
-    install_broker_units_from_release "$previous_broker_release" || return 1
-  else
-    echo "No previous broker unit is available for rollback." >&2
-    return 1
+    [[ -s "$previous_broker_unit_backup" ]] || return 1
+    install -m 0644 "$previous_broker_unit_backup" "$broker_unit" || return 1
   fi
+  if [[ "$deepseek_broker_was_active" -eq 1 ]]; then
+    [[ -s "$previous_deepseek_broker_unit_backup" ]] || return 1
+    install -m 0644 "$previous_deepseek_broker_unit_backup" "$deepseek_broker_unit" || return 1
+  fi
+  systemctl daemon-reload || return 1
   restart_brokers "$deepseek_broker_rollback_kinds" 0 1
 }
 
@@ -365,7 +374,7 @@ rollback() {
     else
       echo "Restoring the previous VideoFactory image."
       if ! docker tag video-factory:rollback video-factory:candidate \
-        || ! "${compose[@]}" up --detach --no-deps --force-recreate app \
+        || ! "${rollback_compose[@]}" up --detach --no-deps --force-recreate app \
         || ! wait_for_health 24; then
         failed=1
       fi
@@ -393,11 +402,15 @@ rollback_on_exit() {
       echo "Rollback did not fully recover every component; operator intervention is required." >&2
     fi
   fi
-  rm -f "$previous_broker_unit_backup" "$previous_deepseek_broker_unit_backup"
+  if [[ "$deployment_committed" -eq 1 ]]; then
+    rm -f "$previous_broker_unit_backup" "$previous_deepseek_broker_unit_backup"
+  fi
   exit "$status"
 }
 
 trap rollback_on_exit EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # 从候选镜像原子提取 broker 制品：容器只创建、绝不启动；失败时显式清理临时容器与 staging。
 stage_broker_release() {
@@ -424,15 +437,8 @@ stage_broker_release() {
     rm -rf "$staging"
     return 1
   fi
-  release_dir="$broker_root/releases/$(date -u +%Y%m%dT%H%M%SZ)"
-  case "$release_dir" in
-    "$broker_root/releases/"*) rm -rf "$release_dir" ;;
-    *)
-      rm -rf "$staging"
-      return 1
-      ;;
-  esac
-  if ! mv "$staging/broker" "$release_dir"; then
+  release_dir="$(mktemp -d "$broker_root/releases/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")" || return 1
+  if ! cp -a "$staging/broker/." "$release_dir/"; then
     rm -rf "$staging"
     return 1
   fi
@@ -478,10 +484,7 @@ if ! install_broker_units_from_release "$broker_root/current"; then
 fi
 
 if ! restart_brokers "$candidate_broker_task_kinds"; then
-  systemctl --no-pager --lines=60 status "$broker_service" || true
-  if [[ "$deepseek_broker_enabled" -eq 1 ]]; then
-    systemctl --no-pager --lines=60 status "$deepseek_broker_service" || true
-  fi
+  echo "Broker readiness failed; raw diagnostics remain in the private host journal." >&2
   exit 1
 fi
 
@@ -492,7 +495,7 @@ fi
 
 if ! wait_for_health 36; then
   "${compose[@]}" ps
-  "${compose[@]}" logs --tail=160 app
+  echo "App readiness failed; inspect private host logs with credential-safe tooling." >&2
   exit 1
 fi
 
@@ -508,6 +511,9 @@ if [[ -n "$public_health_url" ]] && ! app_health "$public_health_url" 15; then
 fi
 
 systemctl enable "$deepseek_broker_service" >/dev/null
+"${compose[@]}" config --format json | python3 -c 'import sys; print(sys.stdin.read().replace("$", "$$"))' \
+  > "$deployment_state/current.compose.json.partial"
+mv "$deployment_state/current.compose.json.partial" "$deployment_state/current.compose.json"
 deployment_committed=1
 
 # 新版本已健康且无需回滚后，才退役旧生产服务；不删除旧制品和凭据。

@@ -14,6 +14,7 @@ import {
 
 export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as const;
 export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
+  "audio-review": "938ffad01a5b608729d01e582734369158361fc3a08464402888f0552a34e75c",
   "topic-ideas": "bdae923579b878af2e99612cca071a661d3fd39f7c382a42442c36645b0e0f73",
   "series-roadmap": "7a6b2dcac3856e429bcaf4eef69c98ea9917b43ef0750b3b1cb1987dc42c48df",
   "creative-treatment": "ce01a42e3b9bbf84b97cdae810d498cf6514b94615c18856794cf6d34a754c8c",
@@ -28,7 +29,7 @@ export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。
-export const CODEX_TASK_KINDS = ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit", "creative-discussion"] as const;
+export const CODEX_TASK_KINDS = ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit", "creative-discussion", "audio-review"] as const;
 export type CodexTaskKind = (typeof CODEX_TASK_KINDS)[number];
 
 interface ModelCandidateAttemptBase {

@@ -162,6 +162,6 @@ function isStoreId(value: unknown): value is string {
 function isTaskKind(value: unknown): value is CodexTaskKind {
   return typeof value === "string" && [
     "topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft",
-    "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit", "creative-discussion",
+    "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit", "creative-discussion", "audio-review",
   ].includes(value);
 }

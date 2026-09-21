@@ -389,14 +389,16 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
     client: CodexBridgeClient,
     private readonly maxReviewIterations = 3,
     private readonly checkpointDirectory?: string,
+    private readonly selectedModel?: () => Promise<string | undefined>,
   ) {
     this.client = client;
   }
 
   async generate(signals: TrendModelSignal[], strategy?: StudioTopicStrategy, generationNonce?: string): Promise<TrendModelIdea[]> {
+    const model = await this.selectedModel?.();
     // canonical payload 只含 signals/strategy；generationNonce 只进入生成身份（checkpoint key）。
     const { payload, generationNonce: identityNonce } = topicIdeasModelPayload(signals, strategy, generationNonce);
-    const request = { ...payload, ...(identityNonce ? { generationNonce: identityNonce } : {}) };
+    const request = { ...payload, ...(model ? { selectedModelId: model } : {}), ...(identityNonce ? { generationNonce: identityNonce } : {}) };
     const execution = await runRoleAgentLoop<{ ideas: TrendModelIdea[] }>({
       role: "选题总编",
       contractVersion: TOPIC_EDITOR_AGENT_CONTRACT_VERSION,
@@ -415,7 +417,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         : this.client.runTaskDetailed("topic-ideas", {
         ...payload,
         ...(revision ? { revision } : {}),
-      }, requestId, session, requestOptions),
+      }, requestId, session, { ...requestOptions, ...(model ? { model } : {}) }),
       audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session, requestOptions, preparedOperation }) => preparedOperation
         ? this.client.observePrepared(preparedOperation, requestOptions)
         : this.client.runTaskDetailed("role-audit", {
@@ -450,7 +452,7 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
         ...(validationFailure ? { validationFailure } : {}),
-      }, requestId, session, requestOptions),
+      }, requestId, session, { ...requestOptions, ...(model ? { model } : {}) }),
       validate: parseTopicIdeasOutput,
       ...(this.checkpointDirectory ? {
         checkpoint: fileRoleAgentLoopCheckpoint(

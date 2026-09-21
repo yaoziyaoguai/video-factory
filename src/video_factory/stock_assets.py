@@ -1,10 +1,8 @@
-import ipaddress
-import http.client
 import json
+import math
 import os
 import re
-import socket
-import ssl
+import subprocess
 import time
 import urllib.parse
 import urllib.request
@@ -17,26 +15,32 @@ from threading import Lock
 from typing import Callable, Iterable, List, Optional
 
 from .domain import Scene, SceneAsset, StockAssetCandidate
+from .stock_cache import cached_pixabay_response
+from .wikimedia import normalize_images as normalize_wikimedia_images, normalize_videos as normalize_wikimedia_videos
+from .asset_transport import AssetNetworkError, open_asset_request, remaining, validate_asset_download_url
+from .open_stock import search_cleveland, search_met, search_nasa, search_openverse
+from .archive_stock import search_archive
+from .flickr_stock import search_flickr, validate_flickr_adoption
+from .stock_images import inspect_image_dimensions
+from .diagnostics import diagnostic_span
 
 
 PROVIDER_KEY_ENV = {
     "pexels": "PEXELS_API_KEY",
     "pixabay": "PIXABAY_API_KEY",
     "unsplash": "UNSPLASH_ACCESS_KEY",
+    "coverr": "COVERR_API_KEY",
+    "flickr": "FLICKR_API_KEY",
 }
-MAX_ASSET_DOWNLOAD_BYTES = 12_000_000
+MAX_ASSET_DOWNLOAD_BYTES = 128_000_000
+MAX_IMAGE_DOWNLOAD_BYTES = 64_000_000
 MAX_ASSET_DOWNLOAD_SECONDS = 45
+MAX_ASSET_REQUEST_SECONDS = 90
 PROVIDER_REQUEST_ATTEMPTS = 3
 ASSET_DOWNLOAD_ATTEMPTS = 2
 ASSET_PREPARE_WORKERS = 3
 NETWORK_RETRY_DELAY_SECONDS = 0.25
-ASSET_REDIRECT_LIMIT = 5
 MIN_MODEL_SEMANTIC_SCORE = 40
-UNSAFE_IPV6_NETWORKS = (
-    ipaddress.ip_network("64:ff9b::/96"),
-    ipaddress.ip_network("64:ff9b:1::/48"),
-    ipaddress.ip_network("fec0::/10"),
-)
 
 TOPIC_SHOT_QUERIES = (
     (("下班", "上班", "职场", "工作", "加班"), (
@@ -92,6 +96,7 @@ TOPIC_SHOT_QUERIES = (
 PROVIDER_LICENSE_NOTE = {
     "pexels": "Pexels free stock license; review current provider license before publishing.",
     "pixabay": "Pixabay Content License; cache API responses for 24h and avoid systematic mass downloads.",
+    "coverr": "Coverr free stock video; attribute Coverr and review https://coverr.co/license before publishing.",
     "mock": "Generated local placeholder for tests and visual pipeline checks; not a real stock asset.",
     "local": "Owner-generated local graphic card; no external stock license required.",
 }
@@ -214,6 +219,7 @@ def search_routed_scene_asset_candidates(
         provider_ids = [preferred_id, *[item.strip() for item in alternatives if item.strip() != preferred_id]]
         public_candidates = []
         private_candidates = []
+        seen_originals: set[str] = set()
         search_errors = []
         for provider_id in provider_ids if reuse_from_scene_position is None else []:
             if is_generative_provider(provider_id) or stock_provider_name(provider_id) == "local":
@@ -221,12 +227,17 @@ def search_routed_scene_asset_candidates(
             provider = stock_provider_name(provider_id)
             stock_query = resolve_director_stock_query(scene, director_query)
             try:
-                candidates = search_stock_assets(provider=provider, query=stock_query, media_type=route_media_type, limit=limit)
+                candidates = search_stock_query_variants(provider, stock_query, scene.search_terms, route_media_type, limit)
             except (RuntimeError, ValueError) as error:
                 search_errors.append({"provider_id": provider_id, "message": str(error)[:500]})
                 continue
-            public_candidates.extend(candidate_to_public_dict(candidate, provider_id=provider_id) for candidate in candidates)
-            private_candidates.extend(candidate_to_private_dict(candidate, provider_id) for candidate in candidates)
+            for candidate in candidates:
+                original = candidate.source_url or candidate.download_url
+                if original in seen_originals:
+                    continue
+                seen_originals.add(original)
+                public_candidates.append(candidate_to_public_dict(candidate, provider_id=provider_id))
+                private_candidates.append(candidate_to_private_dict(candidate, provider_id))
         report["scene_candidates"].append({
             "scene_position": scene.position,
             "intent": {
@@ -285,6 +296,7 @@ def prepare_scene_assets(
             local_path = asset_dir / local_filename(scene.position, candidate)
             try:
                 actual_path = materialize_candidate(candidate, local_path)
+                candidate = inspect_open_stock_file(candidate, actual_path)
             except RuntimeError as error:
                 last_error = error
                 continue
@@ -422,7 +434,7 @@ def prepare_routed_scene_assets(
                 discovered_candidates = (
                     list(inventory_by_scene.get(scene.position, {}).get(provider_id, []))
                     if candidate_inventory is not None
-                    else search_stock_assets(provider=provider, query=stock_query, media_type=route_media_type, limit=limit)
+                    else search_stock_query_variants(provider, stock_query, scene.search_terms, route_media_type, limit)
                 )
                 candidates = reorder_candidates(discovered_candidates, ranking_by_scene.get(scene.position, []))
                 if discovered_candidates and not candidates:
@@ -713,6 +725,7 @@ def materialize_first_candidate(
             continue
         try:
             actual_path = materialize_candidate(candidate, asset_dir / local_filename(scene.position, candidate))
+            candidate = inspect_open_stock_file(candidate, actual_path)
         except RuntimeError as error:
             if release is not None:
                 release(candidate)
@@ -738,12 +751,51 @@ def materialize_first_candidate(
     return None
 
 
+def inspect_open_stock_file(candidate: StockAssetCandidate, path: Path) -> StockAssetCandidate:
+    with diagnostic_span('stock.inspect', provider=candidate.provider, mediaType=candidate.media_type):
+        return _inspect_open_stock_file(candidate, path)
+
+
+def _inspect_open_stock_file(candidate: StockAssetCandidate, path: Path) -> StockAssetCandidate:
+    if candidate.provider not in {"met", "nasa", "openverse", "cleveland", "archive", "flickr"}:
+        return candidate
+    try:
+        duration = 0
+        if candidate.media_type == "image":
+            width, height = inspect_image_dimensions(path)
+        else:
+            result = subprocess.run([
+                "ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height,duration:format=duration", "-of", "json", str(path),
+            ], check=True, capture_output=True, text=True, timeout=20)
+            probe = json.loads(result.stdout)
+            stream = probe["streams"][0]
+            width, height = int(stream["width"]), int(stream["height"])
+            duration = float(stream.get("duration") or probe.get("format", {}).get("duration") or 0)
+            if not math.isfinite(duration) or duration <= 0:
+                raise ValueError("invalid duration")
+        if min(width, height) < 720:
+            raise ValueError(f"actual resolution {width}x{height} below 720p floor")
+        return replace(candidate, width=width, height=height, duration=duration)
+    except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError) as error:
+        path.unlink(missing_ok=True)
+        raise RuntimeError(f"素材真实文件校验失败（{candidate.provider}；尺寸不足、格式损坏或媒体工具不可用）") from error
+
+
 def stock_provider_name(provider_id: str) -> str:
     providers = {
         "local-editorial-v1": "local",
         "pexels-stock-v1": "pexels",
         "pixabay-stock-v1": "pixabay",
         "unsplash-stock-v1": "unsplash",
+        "coverr-stock-v1": "coverr",
+        "wikimedia-stock-v1": "wikimedia",
+        "met-stock-v1": "met",
+        "cleveland-stock-v1": "cleveland",
+        "archive-stock-v1": "archive",
+        "flickr-stock-v1": "flickr",
+        "nasa-stock-v1": "nasa",
+        "openverse-stock-v1": "openverse",
     }
     provider = providers.get(provider_id)
     if provider is None:
@@ -797,8 +849,41 @@ def search_stock_assets(
     opener: Optional[Callable] = None,
     environ: Optional[dict] = None,
 ) -> List[StockAssetCandidate]:
+    with diagnostic_span('stock.search', provider=provider, mediaType=media_type) as facts:
+        candidates = _search_stock_assets(provider, query, media_type, limit, opener, environ)
+        facts['candidateCount'] = len(candidates)
+        return candidates
+
+
+def _search_stock_assets(
+    provider: str,
+    query: str,
+    media_type: str = "video",
+    limit: int = 3,
+    opener: Optional[Callable] = None,
+    environ: Optional[dict] = None,
+) -> List[StockAssetCandidate]:
     provider = provider.lower()
     media_type = media_type.lower()
+    if limit <= 0:
+        return []
+    if provider == 'flickr':
+        return search_flickr(query, media_type, min(limit, 6), flickr_api_client(opener, environ))
+    if provider == 'archive':
+        deadline = time.monotonic() + 30
+        return search_archive(query, media_type, min(limit, 6), lambda url: fetch_json(
+            urllib.request.Request(url, headers=api_headers()),
+            opener or urllib.request.build_opener(NoProviderRedirect()).open,
+            deadline=deadline,
+        ), MAX_ASSET_DOWNLOAD_BYTES)
+    if provider in {"met", "nasa", "openverse", "cleveland"}:
+        search = {"met": search_met, "nasa": search_nasa, "openverse": search_openverse, "cleveland": search_cleveland}[provider]
+        deadline = time.monotonic() + 30
+        return search(query, media_type, min(limit, 12), lambda url: fetch_json(
+            urllib.request.Request(url, headers=api_headers()),
+            opener or urllib.request.build_opener(NoProviderRedirect()).open,
+            deadline=deadline,
+        ))
     if provider == "mock":
         return mock_asset_candidates(query, media_type, limit)
     if provider == "pexels":
@@ -807,7 +892,50 @@ def search_stock_assets(
         return search_pixabay(query, media_type, limit, opener=opener, environ=environ)
     if provider == "unsplash":
         return search_unsplash(query, media_type, limit, opener=opener, environ=environ)
+    if provider == "coverr":
+        return search_coverr(query, media_type, limit, opener=opener, environ=environ)
+    if provider == "wikimedia":
+        return search_wikimedia(query, media_type, limit, opener=opener)
     raise ValueError(f"Unsupported asset provider: {provider}")
+
+
+def search_wikimedia(query: str, media_type: str, limit: int, opener: Optional[Callable] = None) -> List[StockAssetCandidate]:
+    if media_type not in {"image", "video"}:
+        raise ValueError("Wikimedia supports image or video only.")
+    if limit <= 0:
+        return []
+    params = {
+        "action": "query", "generator": "search", "gsrnamespace": 6,
+        "gsrsearch": f"{query} filetype:video", "gsrlimit": min(20, max(6, limit * 3)),
+        "prop": "videoinfo|imageinfo", "viprop": "url|size|mime|mediatype|derivatives|extmetadata",
+        "iiprop": "url", "iiurlwidth": 640, "format": "json", "formatversion": 2,
+    }
+    normalize = normalize_wikimedia_videos
+    if media_type == "image":
+        params.update({"gsrsearch": f"{query} filetype:bitmap", "prop": "imageinfo",
+                       "iiprop": "url|size|mime|mediatype|extmetadata"})
+        params.pop("viprop")
+        normalize = normalize_wikimedia_images
+    candidates = {}
+    for _ in range(2):
+        request = urllib.request.Request("https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode(params), headers=api_headers())
+        payload = fetch_json(request, opener or urllib.request.build_opener(NoProviderRedirect()).open)
+        if not isinstance(payload, dict) or "error" in payload or "batchcomplete" not in payload and "query" not in payload:
+            raise RuntimeError("Wikimedia search returned an API error or invalid response.")
+        query_result = payload.get("query", {})
+        if not isinstance(query_result, dict):
+            raise RuntimeError("Wikimedia search returned an invalid query response.")
+        pages = query_result.get("pages", [])
+        if not isinstance(pages, list):
+            raise RuntimeError("Wikimedia search returned invalid pages.")
+        for candidate in normalize(pages, query, MAX_IMAGE_DOWNLOAD_BYTES if media_type == 'image' else MAX_ASSET_DOWNLOAD_BYTES):
+            candidates.setdefault(candidate.asset_id, candidate)
+        continuation = payload.get("continue", {})
+        offset = continuation.get("gsroffset") if isinstance(continuation, dict) else None
+        if len(candidates) >= limit or not isinstance(offset, int) or offset <= int(params.get("gsroffset", -1)):
+            break
+        params["gsroffset"] = offset
+    return list(candidates.values())[:limit]
 
 
 def unsplash_url(value: str, host: str) -> str:
@@ -875,6 +1003,113 @@ def search_unsplash(
     return candidates[:max(0, limit)]
 
 
+def search_coverr(
+    query: str,
+    media_type: str,
+    limit: int,
+    opener: Optional[Callable] = None,
+    environ: Optional[dict] = None,
+) -> List[StockAssetCandidate]:
+    if media_type != "video":
+        raise ValueError("Coverr only provides stock video in VideoFactory.")
+    if limit <= 0:
+        return []
+    key = provider_key("coverr", environ)
+    page_size = min(50, max(20, limit * 3))
+    candidates = {}
+    # Demo 额度有限：每次检索最多两页，过滤后补齐但不无限翻页。
+    for page in range(2):
+        url = "https://api.coverr.co/videos?" + urllib.parse.urlencode({
+            "query": query, "page_size": page_size, "page": page, "urls": "true",
+        })
+        payload = fetch_json(urllib.request.Request(url, headers=api_headers({
+            "Authorization": f"Bearer {key}",
+        })), opener or urllib.request.build_opener(NoProviderRedirect()).open)
+        if not isinstance(payload, dict) or not isinstance(payload.get("hits"), list):
+            raise RuntimeError("Coverr search returned an invalid response.")
+        for candidate in normalize_coverr_videos(payload, query):
+            candidates.setdefault(candidate.asset_id, candidate)
+        if len(candidates) >= limit or len(payload["hits"]) < page_size:
+            break
+    return list(candidates.values())[:limit]
+
+
+def normalize_coverr_videos(payload: dict, query: str) -> List[StockAssetCandidate]:
+    candidates = []
+    for item in payload["hits"]:
+        try:
+            # Coverr 的公开 API 也会返回 AI 和付费内容；免费实拍库存不能混入这两类结果。
+            if any(field in item and item[field] is not False for field in ("is_ai_generated", "is_premium")):
+                continue
+            asset_id = str(item["id"]).strip()
+            if not asset_id or not re.fullmatch(r"[A-Za-z0-9_-]+", asset_id):
+                continue
+            width = int(item["max_width"])
+            height = int(item["max_height"])
+            duration = float(item["duration"])
+            if width <= 0 or height <= 0 or not math.isfinite(duration) or duration <= 0:
+                continue
+            download_url = coverr_url(
+                item["urls"]["mp4_download"],
+                {"cdn.coverr.co", "storage.coverr.co"},
+            )
+            thumbnail = coverr_public_url(item.get("thumbnail")) or coverr_public_url(item.get("poster"))
+            slug = str(item.get("slug") or asset_id).strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", slug):
+                slug = asset_id
+            contributor = str(item.get("contributor_name") or "Coverr").strip() or "Coverr"
+            contributor_url = str(item.get("contributor_url") or "").strip()
+            if contributor_url:
+                try:
+                    contributor_url = coverr_public_url(coverr_url(contributor_url, {"coverr.co"})) or "https://coverr.co"
+                except ValueError:
+                    contributor_url = "https://coverr.co"
+            else:
+                contributor_url = "https://coverr.co"
+            candidates.append(StockAssetCandidate(
+                provider="coverr",
+                asset_id=asset_id,
+                media_type="video",
+                width=width,
+                height=height,
+                duration=duration,
+                preview_url=thumbnail,
+                download_url=download_url,
+                source_url=f"https://coverr.co/videos/{slug}",
+                creator=contributor,
+                creator_url=contributor_url,
+                license_note=PROVIDER_LICENSE_NOTE["coverr"],
+                query=query,
+                score=quality_score(width, height, duration),
+            ))
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+            continue
+    return candidates
+
+
+def coverr_url(value: str, hosts: set[str]) -> str:
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in hosts
+        or parsed.username
+        or parsed.password
+        or parsed.port
+    ):
+        raise ValueError("Coverr returned an unsupported media or attribution URL.")
+    return value
+
+
+def coverr_public_url(value: str) -> str:
+    # 签名链接不能公开，也不能删掉签名假装它仍可访问；没有安全缩略图时只保留来源。
+    try:
+        url = coverr_url(value, {"coverr.co", "cdn.coverr.co", "storage.coverr.co"})
+        parsed = urllib.parse.urlsplit(url)
+        return url if not parsed.query and not parsed.fragment else ""
+    except (TypeError, ValueError, AttributeError):
+        return ""
+
+
 def search_pexels(
     query: str,
     media_type: str,
@@ -940,7 +1175,10 @@ def search_pixabay(
         )
     else:
         raise ValueError(f"Unsupported media_type for Pixabay: {media_type}")
-    payload = fetch_json(urllib.request.Request(url, headers=api_headers()), opener)
+    environment = os.environ if environ is None else environ
+    cache_home = Path(environment.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    request = urllib.request.Request(url, headers=api_headers())
+    payload = cached_pixabay_response(url, lambda: fetch_json(request, opener), cache_home)
     if media_type == "video":
         return normalize_pixabay_videos(payload, query, limit)
     return normalize_pixabay_images(payload, query, limit)
@@ -1121,7 +1359,7 @@ def candidate_to_public_dict(
         "width": candidate.width,
         "height": candidate.height,
         "duration": candidate.duration,
-        "preview_url": candidate.preview_url,
+        "preview_url": coverr_public_url(candidate.preview_url) if candidate.provider == "coverr" else candidate.preview_url,
         "source_url": candidate.source_url,
         "creator": candidate.creator,
         **({"creator_url": candidate.creator_url} if candidate.creator_url else {}),
@@ -1154,21 +1392,19 @@ def query_for_scene(scene: Scene) -> str:
 
 
 def resolve_director_stock_query(scene: Scene, director_query: str) -> str:
-    director_scene = Scene(
-        position=scene.position,
-        narration=scene.narration,
-        duration=scene.duration,
-        visual_strategy=scene.visual_strategy,
-        visual_prompt=director_query,
-        search_terms=[],
-    )
-    semantic_query = semantic_query_for_scene(director_scene)
-    if semantic_query:
-        return semantic_query
-    explicit_query = english_query_from_visual_prompt(director_query)
-    if explicit_query:
-        return explicit_query
-    return semantic_query_for_scene(scene) or query_for_scene(scene)
+    # 已确认的导演查询优先，不能按几个题材词偷偷改成另一类镜头。
+    return director_query.strip() or query_for_scene(scene)
+
+
+def search_stock_query_variants(provider: str, query: str, search_terms: list[str], media_type: str, limit: int):
+    queries = list(dict.fromkeys(value.strip() for value in [query, *search_terms] if isinstance(value, str) and value.strip()))[:3]
+    candidates = {}
+    for term in queries:
+        for candidate in search_stock_assets(provider=provider, query=term, media_type=media_type, limit=limit):
+            candidates.setdefault(candidate.source_url or candidate.asset_id, candidate)
+        if len(candidates) >= limit:
+            break
+    return list(candidates.values())[:limit]
 
 
 def semantic_query_for_scene(scene: Scene) -> str:
@@ -1188,6 +1424,29 @@ def semantic_query_for_scene(scene: Scene) -> str:
     return ""
 
 
+def flickr_api_client(opener=None, environ=None):
+    key = provider_key('flickr', environ)
+    deadline = time.monotonic() + 30
+    active_opener = opener or urllib.request.build_opener(NoProviderRedirect()).open
+
+    def call(method, parameters):
+        request = urllib.request.Request('https://www.flickr.com/services/rest/',
+            data=urllib.parse.urlencode({'method': method, 'api_key': key, 'format': 'json',
+                                       'nojsoncallback': 1, **parameters}).encode(),
+            headers=api_headers({'Content-Type': 'application/x-www-form-urlencoded'}))
+        try:
+            payload = fetch_json(request, active_opener, deadline=deadline)
+        except (RuntimeError, ValueError):
+            # 上游错误页可能回显凭据，不能把其正文或请求地址带入日志/产物。
+            raise RuntimeError('Flickr 请求失败或超过检索时限；请检查 API 权限、配额与网络。') from None
+        if payload.get('stat') != 'ok':
+            code = str(payload.get('code', ''))
+            raise RuntimeError('Flickr API 拒绝请求，错误码：' + (code if code.isdigit() else 'unknown'))
+        return payload
+
+    return call
+
+
 def provider_key(provider: str, environ: Optional[dict] = None) -> str:
     env = os.environ if environ is None else environ
     env_name = PROVIDER_KEY_ENV[provider]
@@ -1197,17 +1456,42 @@ def provider_key(provider: str, environ: Optional[dict] = None) -> str:
     return key
 
 
-def fetch_json(request: urllib.request.Request, opener: Optional[Callable] = None) -> dict:
+def fetch_json(request: urllib.request.Request, opener: Optional[Callable] = None, *, deadline: Optional[float] = None) -> dict:
     active_opener = opener or urllib.request.urlopen
-    for attempt in range(1, PROVIDER_REQUEST_ATTEMPTS + 1):
+    # 聚合搜索的一组详情请求共用预算，不能每条详情再启动三轮重试。
+    attempts = 1 if deadline is not None else PROVIDER_REQUEST_ATTEMPTS
+    for attempt in range(1, attempts + 1):
         try:
-            with active_opener(request, timeout=20) as response:
-                return json.loads(response.read().decode("utf-8"))
+            timeout = min(10, remaining(deadline)) if deadline is not None else 20
+            with active_opener(request, timeout=timeout) as response:
+                if deadline is None:
+                    body = response.read()
+                else:
+                    chunks, size = [], 0
+                    read = getattr(response, 'read1', None) or response.read
+                    while True:
+                        remaining(deadline)
+                        chunk = read(64 * 1024)
+                        remaining(deadline)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > 2_000_000:
+                            raise RuntimeError('Provider metadata exceeds the 2MB limit.')
+                        chunks.append(chunk)
+                    body = b''.join(chunks)
+                payload = json.loads(body.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise RuntimeError('Provider returned a non-object JSON response.')
+                return payload
         except HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")[:300]
+            with error:
+                detail = error.read(300).decode("utf-8", errors="replace")
             raise RuntimeError(f"Provider request failed with HTTP {error.code}: {detail}") from error
         except (URLError, ConnectionError, TimeoutError) as error:
-            if attempt == PROVIDER_REQUEST_ATTEMPTS:
+            if deadline is not None and isinstance(error, AssetNetworkError):
+                raise RuntimeError('素材检索总时限已耗尽；请稍后重试或选择其他来源。') from error
+            if attempt == attempts:
                 raise RuntimeError(
                     f"Provider request failed after {attempt} attempts: {type(error).__name__}"
                 ) from error
@@ -1220,6 +1504,19 @@ def materialize_candidate(
     local_path: Path,
     opener: Optional[Callable] = None,
 ) -> Path:
+    with diagnostic_span('stock.materialize', provider=candidate.provider, mediaType=candidate.media_type) as facts:
+        result = _materialize_candidate(candidate, local_path, opener)
+        facts['bytes'] = result.stat().st_size
+        return result
+
+
+def _materialize_candidate(
+    candidate: StockAssetCandidate,
+    local_path: Path,
+    opener: Optional[Callable] = None,
+) -> Path:
+    if candidate.provider == 'flickr':
+        validate_flickr_adoption(candidate, flickr_api_client())
     if candidate.provider == "unsplash":
         tracking = unsplash_url(candidate.download_tracking_url, "api.unsplash.com")
         if urllib.parse.urlsplit(tracking).path != f"/photos/{candidate.asset_id}/download":
@@ -1241,19 +1538,32 @@ def materialize_candidate(
     local_path.parent.mkdir(parents=True, exist_ok=True)
     if candidate.download_url.startswith("mock://"):
         return write_mock_image(candidate, local_path)
-    validate_asset_download_url(candidate.download_url)
+    deadline = time.monotonic() + MAX_ASSET_REQUEST_SECONDS
+    if opener is not None:
+        validate_asset_download_url(candidate.download_url, timeout=remaining(deadline))
     request = urllib.request.Request(candidate.download_url, headers=download_headers(candidate.source_url))
     active_opener = opener or open_asset_request
+    max_bytes = MAX_IMAGE_DOWNLOAD_BYTES if candidate.media_type == 'image' else MAX_ASSET_DOWNLOAD_BYTES
     for attempt in range(1, ASSET_DOWNLOAD_ATTEMPTS + 1):
         try:
-            with active_opener(request, timeout=60) as response:
+            with active_opener(request, timeout=remaining(deadline)) as response:
                 validate_asset_content_type(candidate.media_type, response.headers.get("Content-Type"))
                 content_length = int(response.headers.get("Content-Length") or 0)
-                if content_length > MAX_ASSET_DOWNLOAD_BYTES:
+                if content_length > max_bytes:
                     raise RuntimeError(
                         f"Asset download is too large ({content_length} bytes) for {candidate.provider}:{candidate.asset_id}"
                     )
-                write_response_body(response, local_path, MAX_ASSET_DOWNLOAD_BYTES)
+                write_response_body(response, local_path, max_bytes,
+                                    max_seconds=min(MAX_ASSET_DOWNLOAD_SECONDS, remaining(deadline)))
+                if content_length > 0 and local_path.stat().st_size != content_length:
+                    local_path.unlink(missing_ok=True)
+                    raise RuntimeError(f'Asset download is incomplete for {candidate.provider}:{candidate.asset_id}')
+            if candidate.media_type == 'image':
+                try:
+                    inspect_image_dimensions(local_path)
+                except RuntimeError:
+                    local_path.unlink(missing_ok=True)
+                    raise
             return local_path
         except HTTPError as error:
             raise RuntimeError(
@@ -1261,138 +1571,16 @@ def materialize_candidate(
             ) from error
         except (URLError, ConnectionError, TimeoutError) as error:
             local_path.unlink(missing_ok=True)
-            if attempt == ASSET_DOWNLOAD_ATTEMPTS:
+            if attempt == ASSET_DOWNLOAD_ATTEMPTS or time.monotonic() >= deadline:
+                detail = str(error.reason) if isinstance(error, AssetNetworkError) else type(error).__name__
                 raise RuntimeError(
                     f"Asset download failed after {attempt} attempts for "
-                    f"{candidate.provider}:{candidate.asset_id}: {type(error).__name__}"
+                    f"{candidate.provider}:{candidate.asset_id}: {detail}"
                 ) from error
-            time.sleep(NETWORK_RETRY_DELAY_SECONDS * attempt)
+            time.sleep(min(NETWORK_RETRY_DELAY_SECONDS * attempt, remaining(deadline)))
     raise AssertionError("Asset download retry loop exited unexpectedly")
 
 
-def validate_asset_download_url(value: str) -> str:
-    return resolve_asset_download_target(value)[0]
-
-
-def resolve_asset_download_target(value: str) -> tuple[str, tuple[str, ...]]:
-    try:
-        parsed = urllib.parse.urlsplit(value)
-        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-    except ValueError as error:
-        raise RuntimeError("Asset download URL is invalid.") from error
-    if parsed.scheme.lower() not in {"http", "https"}:
-        raise RuntimeError("Asset download URL must use HTTP or HTTPS.")
-    if parsed.username or parsed.password or not parsed.hostname:
-        raise RuntimeError("Asset download URL points to a private or unsafe network destination.")
-    host = parsed.hostname.rstrip(".").lower()
-    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
-        raise RuntimeError("Asset download URL points to a private or unsafe network destination.")
-    try:
-        resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as error:
-        raise RuntimeError("Asset download URL hostname could not be resolved.") from error
-    addresses = {str(entry[4][0]).split("%", 1)[0] for entry in resolved if entry[4]}
-    if not addresses or any(not is_public_ip_address(address) for address in addresses):
-        raise RuntimeError("Asset download URL points to a private or unsafe network destination.")
-    return parsed.geturl(), tuple(sorted(addresses))
-
-
-def is_public_ip_address(value: str) -> bool:
-    try:
-        address = ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-        address = address.ipv4_mapped
-    if isinstance(address, ipaddress.IPv6Address) and any(address in network for network in UNSAFE_IPV6_NETWORKS):
-        return False
-    return address.is_global
-
-
-def open_asset_request(request: urllib.request.Request, timeout: float):
-    current_url = request.full_url
-    headers = dict(request.header_items())
-    for redirect_count in range(ASSET_REDIRECT_LIMIT + 1):
-        validated_url, addresses = resolve_asset_download_target(current_url)
-        response = open_pinned_asset_response(validated_url, addresses, headers, timeout)
-        if response.status not in {301, 302, 303, 307, 308}:
-            if response.status >= 400:
-                status = response.status
-                reason = response.reason
-                response_headers = response.headers
-                response.close()
-                raise HTTPError(validated_url, status, reason, response_headers, None)
-            return response
-        location = response.headers.get("Location")
-        response.close()
-        if not location:
-            raise RuntimeError("Asset redirect did not include a location.")
-        if redirect_count == ASSET_REDIRECT_LIMIT:
-            raise RuntimeError("Asset download exceeded the redirect limit.")
-        current_url = urllib.parse.urljoin(validated_url, location)
-    raise AssertionError("Asset redirect loop exited unexpectedly")
-
-
-def open_pinned_asset_response(
-    value: str,
-    addresses: tuple[str, ...],
-    headers: dict,
-    timeout: float,
-):
-    parsed = urllib.parse.urlsplit(value)
-    host = parsed.hostname or ""
-    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-    path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
-    last_error = None
-    for address in addresses:
-        connection = None
-        raw_socket = None
-        try:
-            if parsed.scheme.lower() == "https":
-                context = ssl.create_default_context()
-                connection = http.client.HTTPSConnection(host, port, timeout=timeout, context=context)
-                raw_socket = socket.create_connection((address, port), timeout=timeout)
-                connection.sock = context.wrap_socket(raw_socket, server_hostname=host)
-            else:
-                connection = http.client.HTTPConnection(host, port, timeout=timeout)
-                connection.sock = socket.create_connection((address, port), timeout=timeout)
-            connection.request("GET", path, headers=headers)
-            return PinnedAssetResponse(connection, connection.getresponse())
-        except (OSError, ssl.SSLError, http.client.HTTPException) as error:
-            last_error = error
-            if connection is not None:
-                connection.close()
-            elif raw_socket is not None:
-                raw_socket.close()
-    raise URLError(last_error or f"Unable to connect to {host}")
-
-
-class PinnedAssetResponse:
-    def __init__(self, connection, response):
-        self._connection = connection
-        self._response = response
-        self.status = response.status
-        self.reason = response.reason
-        self.headers = response.headers
-
-    def read(self, *args, **kwargs):
-        return self._response.read(*args, **kwargs)
-
-    def read1(self, *args, **kwargs):
-        read1 = getattr(self._response, "read1", self._response.read)
-        return read1(*args, **kwargs)
-
-    def close(self):
-        try:
-            self._response.close()
-        finally:
-            self._connection.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
 
 
 def validate_asset_content_type(media_type: str, value: Optional[str]) -> str:
@@ -1872,7 +2060,7 @@ def local_filename(scene_position: int, candidate: StockAssetCandidate) -> str:
 def extension_for(candidate: StockAssetCandidate) -> str:
     parsed = urllib.parse.urlparse(candidate.download_url)
     suffix = Path(parsed.path).suffix.lower()
-    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov"}:
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".webm", ".ogv"}:
         return suffix
     if candidate.media_type == "video":
         return ".mp4"

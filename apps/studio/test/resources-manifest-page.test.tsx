@@ -1,12 +1,27 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StudioModelProfile, StudioProvider, StudioResourceManifest } from "../src/shared/api.js";
 import { studioApi } from "../src/client/api.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
 
 describe("ResourcesPage source and rights section", () => {
+  it("retains Coverr official credit and Commons reuse terms in the saved materials ledger", async () => {
+    stubResourcePage({ ...emptyResourceManifest(), totalItems: 2, categories: { visual: 2, voice: 0, font: 0, document: 0, other: 0 },
+      items: [
+        { id: "coverr", runId: "run-stock", runTitle: "库存验证", category: "visual", kind: "media_asset", providerId: "coverr-stock-v1", creator: "Coverr creator", commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "needs_review" },
+        { id: "commons", runId: "run-stock", runTitle: "库存验证", category: "visual", kind: "media_asset", providerId: "wikimedia-stock-v1", creator: "Commons creator", licenseNote: "CC BY-SA 4.0：改编须按相同许可分享", commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "needs_review" },
+      ],
+    });
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+    const runs = await screen.findByLabelText("按视频整理的素材记录");
+    fireEvent.click(within(runs).getByText("库存验证", { selector: "summary strong" }));
+    expect(within(runs).getByRole("link", { name: "Coverr" })).toHaveAttribute("href", "https://coverr.co");
+    expect(within(runs).getByRole("link", { name: "Wikimedia Commons" })).toBeInTheDocument();
+    expect(within(runs).getByText(/改编须按相同许可分享/)).toBeInTheDocument();
+  });
+  beforeEach(() => { vi.spyOn(studioApi, "models").mockResolvedValue({ models: [] }); });
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -114,11 +129,12 @@ describe("ResourcesPage source and rights section", () => {
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
     await screen.findByRole("heading", { name: "模型设置" });
-    for (const category of ["文本模型", "多模态模型", "图片生成模型", "视频生成模型", "声音生成模型"]) {
-      expect(screen.getByRole("heading", { name: category })).toBeInTheDocument();
+    for (const category of ["文本生成", "内容生成", "内容理解"]) {
+      expect(screen.getByRole("button", { name: category })).toBeInTheDocument();
     }
-    fireEvent.change(screen.getByRole("combobox", { name: "编剧模型默认模型" }), { target: { value: "writer-b" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存模型默认" }));
+    expect(within(screen.getByLabelText("全局模型目录")).queryByRole("combobox")).toBeNull();
+    fireEvent.change(screen.getByRole("combobox", { name: "编剧默认模型" }), { target: { value: "writer-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存角色配置" }));
     expect(update).toHaveBeenCalledWith({ modelDefaults: { "writer-v1": "writer-b", "video-v1": "video-a" } });
   });
 

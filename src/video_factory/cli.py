@@ -508,13 +508,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     asset_search = subparsers.add_parser("asset-search")
     asset_search.add_argument("job_id", type=int)
-    asset_search.add_argument("--provider", choices=["mock", "pexels", "pixabay", "unsplash"], default="pexels")
+    asset_search.add_argument("--provider", choices=["mock", "pexels", "pixabay", "unsplash", "coverr", "wikimedia", "met", "nasa", "openverse", "cleveland", "archive", "flickr"], default="pexels")
     asset_search.add_argument("--media-type", choices=["image", "video"], default="video")
     asset_search.add_argument("--limit", type=int, default=3)
 
     prepare_assets = subparsers.add_parser("prepare-assets")
     prepare_assets.add_argument("job_id", type=int)
-    prepare_assets.add_argument("--provider", choices=["mock", "pexels", "pixabay", "unsplash"], default="pexels")
+    prepare_assets.add_argument("--provider", choices=["mock", "pexels", "pixabay", "unsplash", "coverr", "wikimedia", "met", "nasa", "openverse", "cleveland", "archive", "flickr"], default="pexels")
     prepare_assets.add_argument("--media-type", choices=["image", "video"], default="video")
     prepare_assets.add_argument("--limit", type=int, default=3)
 

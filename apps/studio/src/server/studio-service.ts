@@ -115,6 +115,7 @@ import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 export type { StudioPipelinePort } from "./production-studio.js";
 
 export interface StudioServiceOptions {
+  registeredModels?: () => import("@video-factory/production-pipeline").ModelConnection[];
   workspaceRoot: string;
   repositoryRoot?: string;
   pipeline: StudioPipelinePort;
@@ -166,6 +167,7 @@ export class StudioService {
     const environment = options.environment ?? process.env;
     const now = options.now ?? (() => new Date());
     this.capabilities = new CapabilityStudio({
+      ...(options.registeredModels ? { registeredModels: options.registeredModels } : {}),
       repositoryRoot,
       workspaceRoot: options.workspaceRoot,
       environment,
@@ -660,10 +662,24 @@ export class StudioService {
     )) return roleConfiguredInput;
     const explicitModels = (input.models as Record<string, string> | undefined) ?? {};
     const catalog = new Map((await this.capabilities.listProviders()).map((provider) => [provider.id, provider]));
+    const sound = catalog.get("sound-review-v1");
+    const selectedIds = new Set(Object.values(providers).filter((id): id is string => typeof id === "string"));
+    if (isRecord(input.director) && Array.isArray(input.director.assetProviderIds)) {
+      for (const id of input.director.assetProviderIds) if (typeof id === "string") selectedIds.add(id);
+      selectedIds.add("codex-asset-ranker-v1");
+    }
+    selectedIds.add("codex-publish-copy-v1");
+    if (providers.visualReview) selectedIds.add("sound-review-v1");
+    if (isRecord(input.workflowFeatures)) {
+      if (input.workflowFeatures.referenceGrammar) selectedIds.add("codex-reference-grammar-v1");
+      if (input.workflowFeatures.creativePlanning) selectedIds.add("codex-creative-treatment-v1");
+      if (input.workflowFeatures.boundaryGates) selectedIds.add("codex-role-auditor-v1");
+    }
+    const defaults = { ...(sound?.available && sound.defaultModelId ? { [sound.id]: sound.defaultModelId } : {}), ...settings.modelDefaults };
     const inheritedModels = Object.fromEntries(
-      Object.entries(settings.modelDefaults ?? {}).filter(([providerId, modelId]) => {
+      Object.entries(defaults).filter(([providerId, modelId]) => {
         const provider = catalog.get(providerId);
-        return explicitModels[providerId] === undefined
+        return selectedIds.has(providerId) && explicitModels[providerId] === undefined
           && provider?.available === true
           && provider.kind !== "test"
           && provider.modelProfiles?.some((profile) => profile.id === modelId && profile.available) === true;

@@ -5,6 +5,45 @@ import { describe, expect, it } from "vitest";
 import { NodeDeliveryPreview } from "../src/client/components/NodeDeliveryPreview.js";
 
 describe("NodeDeliveryPreview", () => {
+  it("shows new stock sources, original credits and unknown dimensions honestly", () => {
+    const { container } = render(<NodeDeliveryPreview nodeId="asset-candidates" value={{ scene_candidates: [{
+      scene_position: 1, candidates: [
+        { provider: "met", width: 0, height: 0, preview_url: "https://images.metmuseum.org/art.jpg", source_url: "https://www.metmuseum.org/art/collection/search/1", creator: "画家", license_note: "CC0" },
+        { provider: "nasa", preview_url: "https://images-assets.nasa.gov/earth.jpg", source_url: "https://images.nasa.gov/details/earth", creator: "NASA/GSFC", license_note: "保留原始创作者" },
+        { provider: "openverse", preview_url: "https://api.openverse.org/v1/images/id/thumb/", source_url: "https://www.flickr.com/photos/author/1", creator: "摄影师", license_note: "仅限非商业" },
+        { provider: "cleveland", preview_url: "https://openaccess-cdn.clevelandart.org/1/web.jpg", source_url: "https://clevelandart.org/art/1", creator: "馆藏作者", license_note: "CC0" },
+        { provider: "archive", preview_url: "https://archive.org/download/clouds/thumb.jpg", source_url: "https://archive.org/details/clouds", creator: "视频作者", license_note: "CC BY · 需署名" },
+      ],
+    }] }} />);
+    expect(screen.getByRole("link", { name: "The Met" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "NASA" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Openverse" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Cleveland Museum of Art" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Internet Archive" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "候选素材 5" })).toHaveAttribute("src", "https://archive.org/download/clouds/thumb.jpg");
+    expect(screen.getByRole("img", { name: "候选素材 4" })).toHaveAttribute("src", "https://openaccess-cdn.clevelandart.org/1/web.jpg");
+    expect(screen.getAllByRole("link", { name: "核验原始来源" })).toHaveLength(5);
+    expect(screen.getByRole("img", { name: "候选素材 1" })).toHaveAttribute("src", "https://images.metmuseum.org/art.jpg");
+    expect(screen.getByText(/仅限非商业/)).toBeInTheDocument();
+    expect(container.textContent).not.toContain("0 × 0");
+  });
+  it("shows Coverr logo credit and Commons source/license with safe previews", () => {
+    const { container } = render(<NodeDeliveryPreview nodeId="asset-candidates" value={{ scene_candidates: [{
+      scene_position: 1, candidates: [
+        { provider: "coverr", preview_url: "https://cdn.coverr.co/a.jpg", source_url: "https://coverr.co/videos/a", creator: "A" },
+        { provider: "wikimedia", preview_url: "https://thumb.wikimedia.org/a.jpg", source_url: "https://commons.wikimedia.org/wiki/File:A.webm", creator: "B", license_note: "CC BY-SA 4.0 · 改编须按相同许可分享" },
+        { provider: "coverr", preview_url: "https://cdn.coverr.co/private.jpg?token=secret", source_url: "https://user:password@coverr.co/videos/a" },
+      ],
+    }] }} />);
+    expect(screen.getAllByRole("link", { name: "Coverr" })[0]).toHaveAttribute("href", "https://coverr.co");
+    expect(screen.getAllByRole("img", { name: "Coverr" })).toHaveLength(2);
+    expect(screen.getByRole("img", { name: "候选素材 1" })).toHaveAttribute("src", "https://cdn.coverr.co/a.jpg");
+    expect(screen.getByRole("img", { name: "候选素材 2" })).toHaveAttribute("src", "https://thumb.wikimedia.org/a.jpg");
+    expect(screen.getByText(/改编须按相同许可分享/)).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "核验原始来源" })).toHaveLength(2);
+    expect(container.innerHTML).not.toContain("token=secret");
+    expect(container.innerHTML).not.toContain("user:password");
+  });
   it("makes every storyboard scene reachable instead of silently truncating the delivery", async () => {
     const scenes = Array.from({ length: 11 }, (_, index) => ({
       position: index + 1,

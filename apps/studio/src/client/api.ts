@@ -64,6 +64,7 @@ import type {
   StudioVoicePreviewInput,
   StudioVoiceProfile,
 } from "../shared/api.js";
+import type { ModelConnection, ModelConnectionInput } from "@video-factory/production-pipeline";
 
 const MAX_PENDING_START_REQUESTS = 32;
 const pendingStartKeys = new Map<string, string>();
@@ -89,6 +90,10 @@ export const studioApi = {
   logout: () => requestJson<void>("/api/auth/logout", { method: "POST" }),
   health: () => requestJson<StudioHealth>("/api/health"),
   providers: () => requestJson<StudioProvider[]>("/api/providers"),
+  models: () => requestJson<{ models: ModelConnection[] }>("/api/models"),
+  addModel: (input: ModelConnectionInput) => requestJson<{ models: ModelConnection[] }>("/api/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }),
+  disableModel: (id: string) => requestJson<{ models: ModelConnection[] }>(`/api/models/${encodeURIComponent(id)}/disable`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }),
+  enableModel: (id: string) => requestJson<{ models: ModelConnection[] }>(`/api/models/${encodeURIComponent(id)}/enable`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }),
   localCapabilities: () => requestJson<StudioLocalCapability[]>("/api/local-capabilities"),
   voices: () => requestJson<StudioVoiceProfile[]>("/api/voices"),
   voicePreview: (input: StudioVoicePreviewInput) => requestObjectUrl("/api/voices/preview", {

@@ -2,6 +2,7 @@ import http from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { diagnosticEvent } from "@video-factory/production-pipeline/diagnostics";
 import {
   CODEX_BRIDGE_PROTOCOL_VERSION,
   BROKER_TASK_KINDS,
@@ -31,7 +32,7 @@ const DEFAULT_SOCKET_MODE = 0o660;
 const DEFAULT_CONCURRENCY = 1;
 const DEFAULT_MAX_BACKLOG = 1;
 // 5 MiB JPEG 解码预算经 base64 后约 6.7 MiB；额外空间容纳固定 JSON 元数据与审片上下文。
-const DEFAULT_MAX_BODY_BYTES = 9 * 1024 * 1024;
+const DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 const DEFAULT_RETRY_AFTER_SECONDS = 5;
 const STALE_PROBE_TIMEOUT_MS = 500;
@@ -50,6 +51,7 @@ export type TaskOutcome =
   };
 
 interface QueuedTask {
+  requestId?: string;
   task: ValidatedTask;
   executionOptions: CodexExecutionOptions;
   controller: AbortController;
@@ -82,12 +84,13 @@ class BrokerTaskQueue {
   completed(): number { return this.completedTasks; }
   failed(): number { return this.failedTasks; }
 
-  submit(task: ValidatedTask, executionOptions: CodexExecutionOptions = {}): TaskSubmission {
+  submit(task: ValidatedTask, executionOptions: CodexExecutionOptions = {}, requestId?: string): TaskSubmission {
     if (this.closed) return settledSubmission(shutdownOutcome());
     if (this.pending.length >= this.maxBacklog) return settledSubmission(busyOutcome());
     let entry!: QueuedTask;
     const outcome = new Promise<TaskOutcome>((settle) => {
       entry = {
+        ...(requestId ? { requestId } : {}),
         task,
         executionOptions,
         settle,
@@ -135,6 +138,9 @@ class BrokerTaskQueue {
       next.active = true;
       this.activeTasks += 1;
       const queueWaitMs = Math.max(0, Date.now() - next.submittedAtMs);
+      const diagnostic = { requestId: next.requestId, taskKind: next.task.kind, providerId: this.executor.identity.providerId,
+        modelId: next.executionOptions.model ?? modelIdForTask(this.executor.identity, next.task), queueWaitMs };
+      diagnosticEvent("model.started", diagnostic);
       try {
         const result = await this.executor.runTask(next.task, {
           ...next.executionOptions,
@@ -167,6 +173,7 @@ class BrokerTaskQueue {
           });
         }
         this.completedTasks += 1;
+        diagnosticEvent("model.finished", { ...result.trace, ...diagnostic, status: "succeeded", elapsedMs: Date.now() - next.submittedAtMs });
         next.settle({
           ok: true,
           output: result.output,
@@ -175,6 +182,8 @@ class BrokerTaskQueue {
         });
       } catch (error) {
         this.failedTasks += 1;
+        diagnosticEvent("model.finished", { ...(error instanceof CodexExecutorError ? error.details : {}), ...diagnostic,
+          status: "failed", errorType: error instanceof Error ? error.name : "UnknownError", elapsedMs: Date.now() - next.submittedAtMs });
         next.settle(failureOutcome(error, queueWaitMs));
       } finally {
         next.active = false;
@@ -197,6 +206,7 @@ export interface CodexBrokerServerOptions {
   idempotencyDirectory?: string;
   sessionDirectory?: string;
   now?: () => Date;
+  modelManagement?: (method: string, url: string, body?: unknown) => Promise<unknown>;
 }
 
 export class CodexBrokerServer {
@@ -329,6 +339,22 @@ export class CodexBrokerServer {
       }
       if (url === "/health" && request.method === "GET") {
         this.sendJson(response, 200, this.healthReport());
+        return;
+      }
+      if (this.options.modelManagement && (url === "/v1/models" || /^\/v1\/models\/m-[a-f0-9]{12}\/(disable|enable)$/.test(url))) {
+        if (request.method !== "GET" && request.method !== "POST") {
+          this.sendJson(response, 405, { error: "Method not allowed." });
+          return;
+        }
+        try {
+          const raw = request.method === "POST" ? await this.readBody(request) : undefined;
+          if (raw !== undefined && Buffer.byteLength(raw) > 16 * 1024) throw new Error("模型配置过大。");
+          const result = await this.options.modelManagement(request.method, url, raw ? JSON.parse(raw) : undefined);
+          this.sendJson(response, 200, result);
+        } catch {
+          // 请求含密钥；不把解析器或文件系统异常中的原始输入回显给浏览器。
+          this.sendJson(response, 400, { error: "模型配置未保存，请检查协议、地址、能力和参数。" });
+        }
         return;
       }
       if (url === "/v1/tasks" && request.method === "POST") {
@@ -682,7 +708,7 @@ export class CodexBrokerServer {
       ...executionOptions,
       ...(sessionId ? { sessionId } : {}),
       persistSession: session !== undefined,
-    }).outcome;
+    }, requestId).outcome;
     if (!outcome.ok && outcome.status === 503) {
       // 队列拒绝＝从未进入 Provider；保留带绑定的终结证据，封住原物理 ID。
       await writeIdempotencyRecord(recordPath, { version: 3, requestId, digest, binding, state: "not_accepted", outcome });

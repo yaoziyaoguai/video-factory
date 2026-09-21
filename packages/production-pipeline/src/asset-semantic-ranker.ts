@@ -60,7 +60,7 @@ export interface AssetSemanticRanker {
   readonly id: string;
   readonly modelId: string;
   rank(report: AssetCandidateReport): Promise<AssetSemanticRanking>;
-  rankDetailed?(report: AssetCandidateReport, checkpoint?: RoleAgentLoopCheckpoint): Promise<CodexTaskExecution<AssetSemanticRanking>>;
+  rankDetailed?(report: AssetCandidateReport, checkpoint?: RoleAgentLoopCheckpoint, selectedModelId?: string): Promise<CodexTaskExecution<AssetSemanticRanking>>;
 }
 
 export interface CodexAssetSemanticRankerOptions {
@@ -106,7 +106,7 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
     return validateAssetSemanticRanking(await this.options.client.runTask("asset-rank", payload), report);
   }
 
-  async rankDetailed(report: AssetCandidateReport, checkpoint?: RoleAgentLoopCheckpoint): Promise<CodexTaskExecution<AssetSemanticRanking>> {
+  async rankDetailed(report: AssetCandidateReport, checkpoint?: RoleAgentLoopCheckpoint, selectedModelId?: string): Promise<CodexTaskExecution<AssetSemanticRanking>> {
     const client = this.options.client;
     if (typeof client.runTaskDetailed !== "function") return { output: await this.rank(report) };
     const runTaskDetailed = client.runTaskDetailed.bind(client);
@@ -138,7 +138,7 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
         return runTaskDetailed("asset-rank", {
         ...await payload(),
         ...(revision ? { revision } : {}),
-        }, requestId, session, requestOptions);
+        }, requestId, session, { ...requestOptions, ...(selectedModelId ? { model: selectedModelId } : {}) });
       },
       audit: async ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session, requestOptions, preparedOperation }) => {
         if (preparedOperation) {
@@ -175,7 +175,7 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
           sha256: thumbnail.sha256,
           jpegBase64: thumbnail.jpegBase64,
         })),
-        }, requestId, session, requestOptions);
+        }, requestId, session, { ...requestOptions, ...(selectedModelId ? { model: selectedModelId } : {}) });
       },
       validate: (value) => validateAssetSemanticRanking(value, report),
       ...(checkpoint ? { checkpoint } : {}),

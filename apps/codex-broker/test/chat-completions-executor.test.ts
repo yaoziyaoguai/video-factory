@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import { CodexExecutorError, codexExecutorProfileFor, parseTaskRequest } from "../src/codex-executor.js";
-import { BROKER_TASK_KINDS, taskContractDescriptorFor } from "../src/task-definitions.js";
+import { REQUIRED_BROKER_TASK_KINDS as BROKER_TASK_KINDS, taskContractDescriptorFor } from "../src/task-definitions.js";
 import {
   ChatCompletionsExecutor,
   DEEPSEEK_CHAT_COMPLETIONS_PROVIDER,

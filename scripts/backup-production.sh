@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 container="${VIDEO_FACTORY_CONTAINER:-video_factory_prod}"
 backup_root="${VIDEO_FACTORY_BACKUP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/backups/video-factory}"
@@ -17,7 +18,13 @@ partial="$target.partial"
 trap 'rm -f "$partial"' EXIT
 
 # 视频、音频和缓存可重新生成；自动备份只保留轻量工作流状态。
-docker exec "$container" tar -C /data/factory -czf - \
+# 独立只读挂载在停服维护时也可备份，不启动应用或旧任务。
+image="$(docker inspect --format='{{.Image}}' "$container")"
+workspace_volume="$(docker inspect --format='{{range .Mounts}}{{if eq .Destination "/data/factory"}}{{.Name}}{{end}}{{end}}' "$container")"
+[[ -n "$workspace_volume" ]] && docker volume inspect "$workspace_volume" >/dev/null
+docker run --rm --pull never --network none --user 0:0 \
+  --mount "type=volume,src=$workspace_volume,dst=/data/factory,readonly,volume-nocopy" \
+  --entrypoint tar "$image" -C /data/factory -czf - \
   --exclude='*.mp4' \
   --exclude='*.mov' \
   --exclude='*.m4a' \

@@ -1192,6 +1192,7 @@ function closureRanker(
     rankDetailed: async (
       report: { scenes: Array<{ scenePosition: number; candidates: Array<{ provider: string; assetId: string }> }>; planningIntent?: { rankingIntent?: unknown; semanticIntentVersion?: string } },
       checkpoint?: { key?: string },
+      selectedModelId?: string,
     ) => {
       calls += 1;
       spies.rankCalls += 1;
@@ -1208,7 +1209,7 @@ function closureRanker(
           version: "video-factory/asset-ranking-v1",
           source: "model",
           providerId: "codex-asset-ranker-v1",
-          modelId,
+          modelId: selectedModelId ?? modelId,
           summary: "语义排序完成",
           scenes: report.scenes.map((scene) => ({
             scenePosition: scene.scenePosition,
@@ -1229,7 +1230,7 @@ function closureRanker(
           promptVersion: "v1",
           prompt: "fixture prompt",
           providerId: "codex-asset-ranker-v1",
-          modelId,
+          modelId: selectedModelId ?? modelId,
         },
       };
     },
@@ -1589,6 +1590,48 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
     assert.equal(searchCalls, 1, "candidate evidence must be reused without a new search");
     assert.equal(spies.rankCalls, 1, "ranking evidence must be reused without a new rank call");
     void countSearchCalls;
+  });
+
+  it("uses the selected ranking model and invalidates only ranking evidence when that selection changes", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-selected-ranker-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const worker = new ClosureLibraryWorker();
+    const runWorker = worker.run.bind(worker);
+    let searches = 0;
+    worker.run = async (request: Record<string, unknown>) => {
+      if (request.capability === "asset.search") searches += 1;
+      return runWorker(request);
+    };
+    const pipeline = new ProductionPipeline({
+      workspaceRoot, worker,
+      treatmentAgents: closureTreatmentAgents(spies),
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureLibraryDirector(spies),
+      assetSemanticRanker: closureRanker(spies),
+      assetProviders: [
+        { id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] },
+        ...CLOSURE_ASSET_PROVIDERS,
+      ],
+    });
+    const brief = closureBrief({ assetSemanticRank: true, models: { "codex-asset-ranker-v1": "selected-ranker-a" } });
+    const run = await pipeline.start(brief);
+    assert.equal(run.status, "needs_human");
+    const firstRanking = run.artifacts.find((artifact) => artifact.kind === "asset_ranking");
+    assert.equal(JSON.parse(await readFile(firstRanking!.uri!, "utf8")).modelId, "selected-ranker-a");
+    await pipeline.applyNodeExecutionConfiguration(run.id, "creative-planning", {
+      ...brief, models: { "codex-asset-ranker-v1": "selected-ranker-b" },
+    }, "producer", await currentRunRevision(pipeline, run.id));
+    const resumed = await pipeline.resumeStale(run.id);
+    assert.equal(resumed.status, "needs_human");
+    assert.equal(spies.rankCalls, 2, "a changed explicit model must invalidate the old ranking");
+    assert.equal(searches, 1);
+    assert.equal(spies.treatmentTitles.length, 1);
+    assert.equal(spies.screenwriterCalls.length, 1);
+    assert.equal(spies.directorCalls, 1);
+    assert.notEqual(spies.rankCheckpoints[0]?.key, spies.rankCheckpoints[1]?.key);
+    const activeIds = resumed.nodeRuns.find((node) => node.nodeId === "creative-planning")!.artifactIds;
+    const ranking = resumed.artifacts.find((artifact) => artifact.kind === "asset_ranking" && activeIds.includes(artifact.id));
+    assert.equal(JSON.parse(await readFile(ranking!.uri!, "utf8")).modelId, "selected-ranker-b");
   });
 
   it("reranks with the new ranker identity when only the ranker changes, without re-searching", async () => {

@@ -43,6 +43,20 @@ class ControlledClient extends CodexBridgeClient {
 }
 
 describe("FallbackCodexTaskClient", () => {
+  it("routes an explicitly selected advertised model on an existing provider without overwriting it", async () => {
+    const backend = new ControlledClient("deepseek", "base", () => ({ ideas: [] }));
+    let observed: string | undefined;
+    const original = backend.runTaskDetailed.bind(backend);
+    (backend as CodexBridgeClient).runTaskDetailed = async (kind, payload, requestId, session, options) => {
+      observed = options?.model;
+      return original(kind, payload, requestId, session);
+    };
+    const client = new FallbackCodexTaskClient({ candidates: [{ client: backend, providerId: "deepseek", modelId: "base", modelCandidates: ["base", "better"], taskKinds: ["topic-ideas"] }] });
+    await client.runTaskDetailed("topic-ideas", {}, undefined, undefined, { model: "better" });
+    assert.equal(observed, "better");
+    await assert.rejects(() => client.runTaskDetailed("topic-ideas", {}, undefined, undefined, { model: "not-advertised" }), /所选模型/);
+  });
+
   it("switches providers only for a classified provider failure and records the attempt chain", async () => {
     const openai = new ControlledClient("openai", "gpt-5.6-sol", () => {
       throw new CodexBridgeError("OpenAI service temporarily unavailable.", true, "not_accepted", 503, "model_provider_transient");

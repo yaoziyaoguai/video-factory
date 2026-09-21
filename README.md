@@ -113,6 +113,7 @@ cp .env.example .env
 - Pexels 图片/视频：`PEXELS_API_KEY`
 - Pixabay 图片/视频：`PIXABAY_API_KEY`
 - Unsplash 图片：`UNSPLASH_ACCESS_KEY`；保留作者署名、CDN 预览和采用时的下载事件。仅图片，不提供视频；开发额度与正式应用审核由 Unsplash 决定。
+- Coverr 视频：`COVERR_API_KEY`；Demo 免费额度每小时 50 次，保留来源与作者信息，只使用官方签名下载链接。
 - Seedream / Seedance：`ARK_API_KEY`；Seedance 另需对应 model/估价配置
 - MiniMax 视频与 TTS：`MINIMAX_API_KEY` 与对应 model；TTS 保留后台核算估价
 - Wan：`DASHSCOPE_API_KEY`、workspace 与当前已接入的 model

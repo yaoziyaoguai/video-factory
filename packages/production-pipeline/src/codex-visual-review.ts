@@ -36,6 +36,7 @@ export interface VisualReviewMediaPayload {
 }
 
 export interface VisualReviewAgentInput {
+  selectedAudioModelId?: string;
   videoPath?: string;
   assetPlanPath?: string;
   reviewStage?: "source_assets" | "rendered_video";
@@ -76,6 +77,7 @@ export interface VisualReviewMediaPreprocessor {
 }
 
 export type VisualReviewExecution = CodexTaskExecution<VisualReviewReport> & {
+  audioReview?: import("./audio-review.js").AudioReviewResult;
   requestId?: string;
   inspectedDurationMs?: number;
   evidenceSnapshotId?: string;
@@ -131,6 +133,7 @@ export const VISUAL_REVIEW_PASS_MIN_SCORE = 75;
 export const VISUAL_REVIEW_PASS_MIN_CONFIDENCE = 0.7;
 
 export interface VisualReviewReport {
+  audioReview?: import("./audio-review.js").AudioReviewResult;
   version: "video-factory/visual-review-v1";
   summary: string;
   scores: { composition: number; continuity: number; pacing: number; legibility: number; safety: number };
@@ -236,6 +239,8 @@ export class VisualReviewFallbackError extends Error {
 export class FallbackVisualReviewAgent implements VisualReviewAgent {
   readonly id: string;
   readonly modelId: string;
+  readonly independentRoleAudit: boolean;
+  readonly finalReviewConfiguration: NonNullable<VisualReviewAgent["finalReviewConfiguration"]>;
 
   constructor(private readonly options: FallbackVisualReviewAgentOptions) {
     if (options.backups.length === 0) throw new Error("Visual review fallback requires at least one backup candidate.");
@@ -247,6 +252,8 @@ export class FallbackVisualReviewAgent implements VisualReviewAgent {
     }
     this.id = options.primary.id;
     this.modelId = options.primary.modelId;
+    this.independentRoleAudit = [options.primary, ...options.backups.map(({ agent }) => agent)].every((agent) => agent.independentRoleAudit === true);
+    this.finalReviewConfiguration = { mode: "single", reviewers: [{ providerId: this.id, modelId: this.modelId, independentRoleAudit: this.independentRoleAudit }] };
   }
 
   async review(input: VisualReviewAgentInput): Promise<VisualReviewReport> {

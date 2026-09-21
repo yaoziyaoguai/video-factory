@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AUDIO_REVIEW_PROMPT, AUDIO_REVIEW_SCHEMA } from "./audio-review-contract.js";
 
 export const BROKER_TASK_KINDS = [
   "topic-ideas",
@@ -12,8 +13,11 @@ export const BROKER_TASK_KINDS = [
   "visual-review",
   "role-audit",
   "creative-discussion",
+  "audio-review",
 ] as const;
 export type BrokerTaskKind = (typeof BROKER_TASK_KINDS)[number];
+// 声音理解需要另行配置，不能因为新增合同就宣称现有 DeepSeek 具备审听能力。
+export const REQUIRED_BROKER_TASK_KINDS = BROKER_TASK_KINDS.filter((kind) => kind !== "audio-review");
 
 export interface BrokerTaskPrompt {
   version: string;
@@ -48,6 +52,7 @@ export const CREATIVE_TREATMENT_BRIEF_FIELDS = [
 ] as const;
 
 export const BROKER_TASK_INPUT_CONTRACTS = {
+  "audio-review": { version: "video-factory/audio-review-input-v1", fields: ["durationMs", "audioSha256", "audioBase64", "frames", "reviewContext"], format: "mp3", maxAudioBytes: 5242880 },
   "topic-ideas": {
     version: "video-factory/topic-ideas-input-v4",
     fields: ["signals", "strategy", "revision"],
@@ -94,6 +99,7 @@ export const BROKER_TASK_INPUT_CONTRACTS = {
 } as const;
 
 const SEMANTIC_RULES_VERSION: Record<BrokerTaskKind, string> = {
+  "audio-review": "audio-evidence-sha-time-ranges-v1",
   "topic-ideas": "topic-ideas-semantics-v10|canonical-strategy-v1|article-sources-v2|cited-facts-v2",
   "series-roadmap": "series-roadmap-semantics-v2",
   "creative-treatment": "creative-treatment-semantics-v11|production-capabilities-v3|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
@@ -393,6 +399,7 @@ const PLATFORM_NOTES: Record<string, string> = {
 const DEFAULT_PLATFORM_NOTE = "平台未识别时使用中性、不夸张的标题与 2 到 4 个话题标签。";
 
 export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTaskPrompt {
+  if (kind === "audio-review") return AUDIO_REVIEW_PROMPT;
   if (kind === "creative-discussion") {
     return {
       version: "video-factory/creative-discussion-v2",
@@ -1208,6 +1215,7 @@ const CREATIVE_DISCUSSION_OUTPUT_SCHEMA = {
 } as const;
 
 export function outputSchemaFor(kind: BrokerTaskKind): Record<string, unknown> {
+  if (kind === "audio-review") return AUDIO_REVIEW_SCHEMA;
   if (kind === "topic-ideas") return TOPIC_IDEAS_OUTPUT_SCHEMA;
   if (kind === "series-roadmap") return SERIES_ROADMAP_OUTPUT_SCHEMA;
   if (kind === "creative-treatment") return CREATIVE_TREATMENT_OUTPUT_SCHEMA;

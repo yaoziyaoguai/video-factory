@@ -8,6 +8,31 @@ import { AssetsPage } from "../src/client/pages/AssetsPage.js";
 describe("AssetsPage", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("shows Coverr logo and Commons share-alike terms for recorded stock, not only pending reviews", async () => {
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({
+      generatedAt: "2026-09-20T00:00:00Z", totalItems: 2, needsReviewCount: 0,
+      legacyRunsWithoutManifest: 0, reconstructedRunCount: 0, unreadableManifestCount: 0,
+      truncatedRunCount: 0, truncatedItemCount: 0,
+      categories: { visual: 2, voice: 0, font: 0, document: 0, other: 0 }, items: [],
+      assetIndex: { version: "video-factory/asset-index-v1", totalAssets: 2, duplicateUses: 0,
+        reusableCount: 2, needsReviewCount: 0, facets: { mediaKinds: {}, origins: {}, providers: {}, reuseStatuses: {} },
+        assets: ["coverr", "wikimedia"].map((provider) => ({
+          key: provider, mediaKind: "video", origin: "stock", reuseStatus: "ready", category: "visual",
+          kind: "media_asset", providerId: `${provider}-stock-v1`, creator: `${provider} 作者`,
+          licenseNote: provider === "wikimedia" ? "CC BY-SA 4.0：改编须按相同许可分享" : "Coverr license",
+          contentUrl: `/media/${provider}.webm`, tags: [], commercialUse: "provider_terms",
+          attributionRequirement: "provider_terms", reviewStatus: "recorded", useCount: 0, usages: [],
+        })),
+      },
+    });
+    render(<MemoryRouter><AssetsPage /></MemoryRouter>);
+    expect(await screen.findByRole("link", { name: "Coverr" })).toHaveAttribute("href", "https://coverr.co");
+    expect(screen.getByRole("img", { name: "Coverr" })).toHaveAttribute("src", "/media/coverr-logo.svg");
+    expect(screen.getByRole("link", { name: "Wikimedia Commons" })).toBeInTheDocument();
+    expect(screen.getByText(/改编须按相同许可分享/)).toBeInTheDocument();
+  });
+
   it("displays Unsplash CDN previews with linked photographer credit and a source configuration entry", async () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
     vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({

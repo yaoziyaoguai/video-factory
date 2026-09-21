@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
-import type { BrokerTaskKind } from "./task-definitions.js";
+import { BROKER_TASK_KINDS, type BrokerTaskKind } from "./task-definitions.js";
 
 export const TASK_BINDING_VERSION = "video-factory/task-binding-v1" as const;
 
@@ -169,8 +169,5 @@ function isDigest(value: unknown): value is string {
 }
 
 function isTaskKind(value: unknown): value is BrokerTaskKind {
-  return typeof value === "string" && [
-    "topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft",
-    "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit", "creative-discussion",
-  ].includes(value);
+  return typeof value === "string" && (BROKER_TASK_KINDS as readonly string[]).includes(value);
 }

@@ -202,6 +202,43 @@ export function buildDirectorAssetProviders(options: Pick<ProductionWorkerOption
       constraints: ["只交付图片，不交付视频或动作", "不是具体新闻事件证据", "需保留作者署名，人物和商标权仍需核对"],
     });
   }
+  if (options.environment.FLICKR_API_KEY?.trim()) {
+    providers.push({
+      id: "flickr-stock-v1", label: "Flickr 开放摄影图片", billing: "free",
+      modes: ["摄影图片", "逐文件许可"], deliveryTypes: assetProviderDeliveryTypes("flickr-stock-v1"),
+      strengths: ["公开城市、自然和生活摄影，补充静态画面"],
+      constraints: ["仅图片，不提供视频或动作", "采用前复核下载权限和许可；须保留署名并遵守非商业等条件", "不是特定新闻事件的保证证据"],
+    });
+  }
+  if (options.environment.COVERR_API_KEY?.trim()) {
+    providers.push({
+      id: "coverr-stock-v1",
+      label: "Coverr 视频",
+      billing: "free",
+      modes: ["实拍", "横竖屏候选", "HD/4K"],
+      deliveryTypes: assetProviderDeliveryTypes("coverr-stock-v1"),
+      strengths: ["通用生活、人物、城市、自然和创意实拍镜头，补充 Pexels 与 Pixabay 的覆盖"],
+      constraints: ["通用图库不是具体新闻事件证据", "不得把图库人物描述为事件当事人", "使用 API 时需展示 Coverr 来源"],
+    });
+  }
+  providers.push({
+    id: "wikimedia-stock-v1",
+    label: "Wikimedia 图片与视频",
+    billing: "free",
+    modes: ["图片与视频", "逐文件许可"],
+    deliveryTypes: assetProviderDeliveryTypes("wikimedia-stock-v1"),
+    strengths: ["补充全球城市、自然、历史与知识类公开视频，无需 API Key"],
+    constraints: ["不是特定新闻事件的保证证据，须逐文件核验", "至少 720p；图片不超过 64MB/8000万像素，视频不超过 128MB；大图按实际输出缩放", "保留作者与许可；CC BY-SA 改编须同许可分享，发布前确认能履行"],
+  });
+  for (const source of [
+    { id: "archive-stock-v1", label: "Internet Archive 开放视频", strengths: ["开放素材集合的自然、城市、延时摄影实拍片段，无需 Key"], constraints: ["只检索 stock_footage 中逐项明确开放许可的片段，不代表全站版权担保", "至少 720p、单文件不超过 128MB；保留署名，非商业及同许可分享条件须遵守", "不是具体新闻事件的保证证据，原片声音不代表可独立使用的音乐授权"] },
+    { id: "cleveland-stock-v1", label: "Cleveland 开放馆藏图片", strengths: ["中国与世界绘画、文物、玉器、陶瓷的 CC0 高清图片"], constraints: ["仅图片；不是现代生活或特定新闻事件证据", "仅使用逐条明确 CC0 的高清 JPEG，保留年代、机构与来源"] },
+    { id: "met-stock-v1", label: "Met 开放馆藏图片", strengths: ["历史文物、绘画、器物和服饰开放图像；包含中国馆藏"], constraints: ["只提供图片，不提供现代生活视频", "核对作品年代与描述，不能把图片当特定事件证据"] },
+    { id: "nasa-stock-v1", label: "NASA 科学图片与视频", strengths: ["科学、航天、地球观测图片和视频"], constraints: ["按题材选择，不适合普通生活 B-roll", "核对第三方权利与真实尺寸，保留机构和创作者，不暗示官方背书"] },
+    { id: "openverse-stock-v1", label: "Openverse 开放图片", strengths: ["开放许可图片聚合，补充城市、自然与文化摄影"], constraints: ["不提供视频；会与其他来源重复", "原站文件和许可须核对；非商业素材须满足非商业用途，不能一概当商业可用"] },
+  ]) {
+    providers.push({ ...source, billing: "free", modes: ["无需 Key", "来源与许可"], deliveryTypes: assetProviderDeliveryTypes(source.id) });
+  }
   for (const setting of readMeteredImageProviderSettings(options.environment)) {
     providers.push({
       id: setting.providerId,
@@ -247,6 +284,14 @@ export function buildProductionProviderRuntimeMetadata(environment: NodeJS.Proce
     { id: "pexels-stock-v1", label: "Pexels 视频", modelId: "pexels-api", transport: "http_api", billing: "free" },
     { id: "pixabay-stock-v1", label: "Pixabay 视频", modelId: "pixabay-api", transport: "http_api", billing: "free" },
     { id: "unsplash-stock-v1", label: "Unsplash 图片", modelId: "unsplash-api", transport: "http_api", billing: "free" },
+    { id: "coverr-stock-v1", label: "Coverr 视频", modelId: "coverr-api", transport: "http_api", billing: "free" },
+    { id: "wikimedia-stock-v1", label: "Wikimedia 图片与视频", modelId: "wikimedia-api", transport: "http_api", billing: "free" },
+    { id: "met-stock-v1", label: "Met 开放馆藏图片", modelId: "met-api", transport: "http_api", billing: "free" },
+    { id: "cleveland-stock-v1", label: "Cleveland 开放馆藏图片", modelId: "cleveland-api", transport: "http_api", billing: "free" },
+    { id: "archive-stock-v1", label: "Internet Archive 开放视频", modelId: "archive-api", transport: "http_api", billing: "free" },
+    { id: "flickr-stock-v1", label: "Flickr 开放摄影图片", modelId: "flickr-api", transport: "http_api", billing: "free" },
+    { id: "nasa-stock-v1", label: "NASA 科学图片与视频", modelId: "nasa-api", transport: "http_api", billing: "free" },
+    { id: "openverse-stock-v1", label: "Openverse 开放图片", modelId: "openverse-api", transport: "http_api", billing: "free" },
     { id: "macos-say-v1", label: "macOS 系统配音", modelId: "say", transport: "local_process", billing: "free" },
     { id: "kokoro-local-v1", label: "Kokoro 本地配音", modelId: "kokoro", transport: "local_process", billing: "local_compute" },
     { id: "python-ffmpeg-v1", label: "FFmpeg 竖屏渲染", modelId: "ffmpeg", transport: "local_process", billing: "local_compute" },

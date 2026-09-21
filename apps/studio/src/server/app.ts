@@ -6,6 +6,7 @@ import { StudioAuthenticator, type StudioAuthOptions } from "./auth.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-service.js";
 import type { CaseSearchQuery } from "./case-studio.js";
 import { StudioVoicePreviewUnavailableError } from "./local-capabilities.js";
+import type { ModelConnections } from "./model-connections.js";
 import {
   StudioInputError,
   STUDIO_PLANNING_EDITABLE_STAGES,
@@ -188,6 +189,7 @@ export interface BuildStudioAppOptions {
   service: StudioServicePort;
   logger?: boolean;
   auth?: StudioAuthOptions;
+  modelConnections?: Pick<ModelConnections, "refresh" | "add" | "disable" | "enable">;
 }
 
 const SAFE_ROUTE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -238,7 +240,27 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
 
   app.get("/api/health", async () => options.service.health());
   app.get("/api/providers", async () => options.service.listProviders());
+  app.get("/api/models", async (_request, reply) => {
+    if (!options.modelConnections) return reply.code(503).send({ error: "模型接入管理尚未启动。" });
+    try { return { models: await options.modelConnections.refresh() }; }
+    catch { return reply.code(503).send({ error: "模型接入管理暂不可用，请检查模型服务版本与连接。" }); }
+  });
+  app.post("/api/models", async (request, reply) => {
+    if (!options.modelConnections) return reply.code(503).send({ error: "模型接入管理尚未启动。" });
+    try { return { models: await options.modelConnections.add(request.body) }; }
+    catch { return reply.code(400).send({ error: "未保存模型，请检查地址、协议、密钥、能力和参数。" }); }
+  });
+  app.post("/api/models/:modelId/disable", async (request, reply) => {
+    if (!options.modelConnections) return reply.code(503).send({ error: "模型接入管理尚未启动。" });
+    try { return { models: await options.modelConnections.disable((request.params as { modelId: string }).modelId) }; }
+    catch { return reply.code(400).send({ error: "未能停用模型，请刷新后重试。" }); }
+  });
   app.get("/api/local-capabilities", async () => options.service.listLocalCapabilities());
+  app.post("/api/models/:modelId/enable", async (request, reply) => {
+    if (!options.modelConnections) return reply.code(503).send({ error: "模型接入管理尚未启动。" });
+    try { return { models: await options.modelConnections.enable((request.params as { modelId: string }).modelId) }; }
+    catch { return reply.code(400).send({ error: "未能启用模型，请刷新后重试。" }); }
+  });
   app.get("/api/voices", async () => options.service.listVoices());
   app.get("/api/settings", async () => options.service.getCreatorSettings());
   app.patch("/api/settings", async (request) => {

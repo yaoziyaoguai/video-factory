@@ -25,7 +25,8 @@ import type {
 import { studioApi } from "../api.js";
 import { creatorFacingTechnicalText, providerLabel } from "../presentation.js";
 import { statusLabel } from "../components/StatusBadge.js";
-import { UnsplashAttribution, unsplashPublicUrl } from "../components/UnsplashAttribution.js";
+import { unsplashPublicUrl } from "../components/UnsplashAttribution.js";
+import { hasStockAttribution, StockAttribution } from "../components/StockAttribution.js";
 
 type AssetFilter = "all" | StudioAssetMediaKind | "reusable" | "needs_review";
 type AssetCollection = "creative" | "records";
@@ -227,8 +228,8 @@ function AssetCard({ asset, usage, run, grouped = false }: { asset: StudioIndexe
     <div className="asset-card-copy">
       <header><span>{originLabel(asset.origin)} · {mediaKindLabel(asset.mediaKind)}</span><b className={`reuse-${asset.reuseStatus}`}>{reuseStatusLabel(asset.reuseStatus)}</b></header>
       <h3>{assetTitle(asset, resolvedUsage)}</h3>
-      <p className="asset-provider">{(resolvedUsage?.providerId ?? asset.providerId) === "unsplash-stock-v1"
-        ? <UnsplashAttribution creator={resolvedUsage?.creator ?? creator} creatorUrl={resolvedUsage?.creatorUrl ?? asset.creatorUrl} />
+      <p className="asset-provider">{hasStockAttribution(resolvedUsage?.providerId ?? asset.providerId)
+        ? <StockAttribution provider={resolvedUsage?.providerId ?? asset.providerId} creator={resolvedUsage?.creator ?? creator} creatorUrl={resolvedUsage?.creatorUrl ?? asset.creatorUrl} licenseNote={resolvedUsage?.licenseNote ?? asset.licenseNote} />
         : <>{providerLabel(asset.providerId) ?? "其他制作服务"}{creator ? ` · ${creator}` : ""}</>}</p>
       {metadata.length ? <ul className="asset-metadata" aria-label="素材规格">{metadata.map((item) => <li key={item}>{item}</li>)}</ul> : null}
       {visibleTags.length ? <div className="asset-tags">{visibleTags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}

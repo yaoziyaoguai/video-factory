@@ -323,6 +323,36 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.equal(response.status, "succeeded");
   });
 
+  it("executes Commons and Coverr routes as free stock without a paid adapter", async () => {
+    for (const provider of ["wikimedia", "coverr"]) {
+      const providerId = `${provider}-stock-v1`;
+      const response = await runCraftedAssetPlan({
+        directorShot: { preferredProviderId: providerId, deliveryType: "stock_video" },
+        asset: { provider, provider_id: providerId, media_type: "video", source_url: provider === "wikimedia" ? "https://commons.wikimedia.org/wiki/File:Video.webm" : "https://coverr.co/videos/video" },
+        route: { preferred_provider_id: providerId, actual_provider_id: providerId, actual_provider: provider },
+      });
+      assert.equal(response.status, "succeeded");
+    }
+  });
+
+  it("executes Internet Archive video routes as free stock without a paid adapter", async () => {
+    const response = await runCraftedAssetPlan({
+      directorShot: { preferredProviderId: "archive-stock-v1", deliveryType: "stock_video" },
+      asset: { provider: "archive", provider_id: "archive-stock-v1", media_type: "video", source_url: "https://archive.org/details/clouds" },
+      route: { preferred_provider_id: "archive-stock-v1", actual_provider_id: "archive-stock-v1", actual_provider: "archive" },
+    });
+    assert.equal(response.status, "succeeded");
+  });
+
+  it("executes Cleveland image routes as free stock without a paid adapter", async () => {
+    const response = await runCraftedAssetPlan({
+      directorShot: { preferredProviderId: "cleveland-stock-v1", deliveryType: "stock_image" },
+      asset: { provider: "cleveland", provider_id: "cleveland-stock-v1", media_type: "image", source_url: "https://clevelandart.org/art/1" },
+      route: { preferred_provider_id: "cleveland-stock-v1", actual_provider_id: "cleveland-stock-v1", actual_provider: "cleveland" },
+    });
+    assert.equal(response.status, "succeeded");
+  });
+
   it("rejects a routed stock shot whose actual route provider reveals an unauthorized local card", async () => {
     await assert.rejects(
       () => runCraftedAssetPlan({ route: { actual_provider_id: "local-editorial-v1" } }),

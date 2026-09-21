@@ -2532,7 +2532,7 @@ export class ProductionStudio {
       if (selectedReviewProvider !== "deepseek-visual-review-v1"
         || !deepseekReviewReady
         || !roleAuditReady) {
-        throw new StudioInputError("正式制作需要 DeepSeek 视觉审片模型可用，且独立质量复核已配置。");
+        throw new StudioInputError("正式制作需要视觉审片模型可用，且独立质量复核已配置。");
       }
     }
     const selectedVisualSources = new Set([
@@ -2562,6 +2562,9 @@ export class ProductionStudio {
       // 带边界闸门的制作会在简报后先跑一轮独立复核：复核能力键同样在模型选择校验范围内。
       // 没有这道闸门就没有那一轮调用，因此不给一个用不上的键开口子。
       ...(brief.workflowFeatures?.boundaryGates === "user-confirmed-v1" ? [BRIEF_AUDIT_PROVIDER_ID] : []),
+      "codex-publish-copy-v1",
+      ...(brief.director ? ["codex-asset-ranker-v1"] : []),
+      ...(brief.providers.visualReview ? ["sound-review-v1"] : []),
     ]);
     if (brief.workflowFeatures?.referenceGrammar) {
       const referenceProvider = providers.find((provider) => provider.id === "codex-reference-grammar-v1");
@@ -3724,7 +3727,7 @@ function nodeExecutionConfiguration(
   if (!providerId) return {};
   const relevantProviderIds = nodeId === "assets"
     ? [providerId, ...(brief.director?.assetProviderIds ?? [])]
-    : [providerId];
+    : nodeId === "visual-review" ? [providerId, "sound-review-v1"] : [providerId];
   const modelSelections = Object.fromEntries(relevantProviderIds.flatMap((id) => {
     const modelId = brief.models?.[id];
     return modelId ? [[id, modelId]] : [];

@@ -881,6 +881,11 @@ describe("ProductionPipeline", () => {
               output,
               inspectedDurationMs: 20_000,
               attemptedModelIds: ["deepseek-flash", "gpt-5.6-sol"],
+              audioReview: {
+                status: "completed", modelId: "audio-model", modelLabel: "声音模型", videoSha256: "b".repeat(64), audioSha256: "a".repeat(64), durationMs: 20_000,
+                report: { audioSha256: "a".repeat(64), summary: "测试声音证据", checks: { pronunciation: "not_observed", performance: "not_observed", pauses: "not_observed", noise: "not_observed", balance: "not_observed", audiovisual_alignment: "not_observed" }, findings: [] },
+                trace: { taskKind: "audio-review", promptVersion: "video-factory/audio-review-v1", prompt: "测试", providerId: "audio-model", modelId: "audio-model", modelAttemptCount: 2 },
+              },
               independentReviews: [
                 { providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash", output },
                 {
@@ -946,6 +951,8 @@ describe("ProductionPipeline", () => {
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan, undefined);
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.billing, "subscription");
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.estimatedCostCny, 0);
+    assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.parameters?.audioModelCallCount, 2);
+    assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.parameters?.modelCallCount, 5);
     const visualOutput = waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.output as {
       report: pipeline.VisualReviewReport & {
         reviewScope?: { reviewStage?: string; evidenceId?: string; sourceNodeIds?: string[] };

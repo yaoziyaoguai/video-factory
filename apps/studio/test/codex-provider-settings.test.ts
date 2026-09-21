@@ -722,7 +722,7 @@ describe("buildProviderCatalog codex fallback", () => {
     );
     const deepseek = providers.find((provider) => provider.id === "deepseek-visual-review-v1");
 
-    assert.equal(deepseek?.label, "DeepSeek 视觉审片");
+    assert.equal(deepseek?.label, "视觉审片员");
     assert.equal(deepseek?.available, true);
     assert.equal(deepseek?.billing, "subscription");
     assert.equal(deepseek?.approvalPolicy, "none");

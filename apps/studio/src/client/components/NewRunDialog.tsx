@@ -560,13 +560,14 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         throw new Error("请选择目标平台后再开始制作。");
       }
       if (!singleReviewAvailable || !visualReviewProvider) {
-        throw new Error("正式制作需要 DeepSeek 视觉审片和独立质量复核；请先在创作设置中恢复这两项能力。");
+        throw new Error("正式制作需要视觉审片和独立质量复核；请先在创作设置中恢复这两项能力。");
       }
       const providersForRun: StudioProductionInput["providers"] = { ...effectiveBindings };
       providersForRun.visualReview = visualReviewProvider.id;
       const selectedProviderIds = new Set([
         ...Object.values(providersForRun).filter((providerId): providerId is string => Boolean(providerId)),
         ...assetProviderIds,
+        "sound-review-v1",
       ]);
       const modelsForRun = Object.fromEntries(Object.entries(modelSelections).filter(([providerId, modelId]) => {
         return selectedProviderIds.has(providerId) && Boolean(modelId);
@@ -980,6 +981,12 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 </div>
                 <p className="production-settings-guidance">默认使用创作设置中的模型与能力。开工后可以在对应节点的工作区调整；只有需要在开工前覆盖时，才在这里修改。</p>
                 <div className="production-role-grid">
+                  {providers.find((provider) => provider.id === "sound-review-v1" && provider.available) ? <label className="field"><span>声音审片本次模型</span><select
+                    aria-label="声音审片本次模型" value={modelSelections["sound-review-v1"] ?? ""}
+                    onChange={(event) => setModelSelections((current) => withModelSelection(current, "sound-review-v1", event.target.value))}>
+                    <option value="">继承角色默认</option>
+                    {providers.find((provider) => provider.id === "sound-review-v1")?.modelProfiles?.filter((model) => model.available).map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}
+                  </select><small>将直接审听成片音轨；费用按你的模型服务账号计算。</small></label> : null}
                   {CAPABILITIES.map((item) => {
                     const candidates = roleProviderCandidates(item, providers);
                     const requestedProviderId = effectiveBindings[item.key];

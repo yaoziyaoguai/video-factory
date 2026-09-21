@@ -272,8 +272,10 @@ class VisualRenderingTest(unittest.TestCase):
             self.assertIn("窗边的光。", lines)
 
     def test_image_clips_receive_subtle_motion_but_video_clips_do_not(self):
+        from PIL import Image
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            Image.new('RGB', (1080, 1920), 'navy').save(root / 'card.png')
             scene = {"position": 1, "duration": 2.0}
 
             def fake_run(command, check, capture_output, text):

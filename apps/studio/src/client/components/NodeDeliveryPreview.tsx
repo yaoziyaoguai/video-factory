@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { creatorContainerViewId, creatorViewId, isCreatorNestedField, isCreatorTopLevelField } from "../creator-document-policy.js";
-import { UnsplashAttribution, unsplashPublicUrl } from "./UnsplashAttribution.js";
+import { unsplashPublicUrl } from "./UnsplashAttribution.js";
+import { hasStockAttribution, StockAttribution, stockPublicUrl, stockSourceUrl } from "./StockAttribution.js";
 import { humanizeCreativeText, platformLabel, providerLabel } from "../presentation.js";
 
 interface NodeDeliveryPreviewProps {
@@ -379,11 +380,11 @@ function AssetCandidate({ candidate, index }: { candidate: unknown; index: numbe
   if (!record) return null;
   const selected = record.selected === true;
   const previewUrl = safeCandidateUrl(record.preview_url);
-  const sourceUrl = safeCandidateUrl(record.source_url);
-  const isUnsplash = record.provider === "unsplash" || record.provider_id === "unsplash-stock-v1";
-  const dimensions = [record.width, record.height].every((value) => typeof value === "number")
+  const sourceUrl = safeCandidateUrl(record.source_url) ?? stockSourceUrl(record.source_url);
+  const provider = typeof record.provider_id === "string" ? record.provider_id : typeof record.provider === "string" ? record.provider : undefined;
+  const dimensions = [record.width, record.height].every((value) => typeof value === "number" && value > 0)
     ? `${record.width} × ${record.height}`
-    : "尺寸未知";
+    : "尺寸待下载后核验";
   return <figure className={selected ? "is-selected" : undefined}>
     <div className="asset-candidate-media">
       {previewUrl ? <img alt={`候选素材 ${index + 1}`} loading="lazy" src={previewUrl} /> : <span>暂无缩略图</span>}
@@ -392,7 +393,7 @@ function AssetCandidate({ candidate, index }: { candidate: unknown; index: numbe
     <figcaption>
       <strong>{formatScalar(record.provider_id ?? record.provider, "provider")}</strong>
       <small>{dimensions}{typeof record.duration === "number" && record.duration > 0 ? ` · ${record.duration} 秒` : ""}</small>
-      {isUnsplash ? <small><UnsplashAttribution
+      {hasStockAttribution(provider) ? <small><StockAttribution provider={provider}
         creator={typeof record.creator === "string" ? record.creator : undefined}
         creatorUrl={typeof record.creator_url === "string" ? record.creator_url : undefined}
       /></small> : isScalar(record.creator) && record.creator ? <small>作者：{formatScalar(record.creator)}</small> : null}
@@ -449,9 +450,11 @@ function safeCandidateUrl(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const unsplash = unsplashPublicUrl(value, "unsplash.com") ?? unsplashPublicUrl(value, "images.unsplash.com");
   if (unsplash) return unsplash;
+  const stock = stockPublicUrl(value);
+  if (stock) return stock;
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:") return undefined;
+    if (url.protocol !== "https:" || url.username || url.password || url.port) return undefined;
     const hostname = url.hostname.toLowerCase();
     const allowed = ["pexels.com", "pixabay.com"].some((domain) => (
       hostname === domain || hostname.endsWith(`.${domain}`)

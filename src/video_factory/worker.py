@@ -5,7 +5,6 @@ import json
 import mimetypes
 import sys
 import time
-import traceback
 from pathlib import Path
 from typing import Any, Dict
 
@@ -15,6 +14,7 @@ from .stock_assets import prepare_routed_scene_assets, prepare_scene_assets, sea
 from .technical_review import review_video
 from .voiceover import VoiceDoesNotFitError, synthesize_voiceover_plan
 from .renderer import render_job_manifest
+from .diagnostics import diagnostic_context, diagnostic_span
 
 
 WORKER_PROTOCOL_VERSION = "video-factory/worker-v1"
@@ -118,7 +118,7 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
         raise WorkerProtocolError("asset.prepare requires a script with scenes")
     parameters = request.get("parameters", {})
     provider = str(parameters.get("provider", "local"))
-    if provider not in {"local", "pexels", "pixabay", "unsplash", "mock", "ai-router"}:
+    if provider not in {"local", "pexels", "pixabay", "unsplash", "coverr", "wikimedia", "met", "nasa", "openverse", "cleveland", "archive", "flickr", "mock", "ai-router"}:
         raise WorkerProtocolError(f"Unsupported asset provider: {provider}")
     if provider == "local":
         raise WorkerProtocolError(
@@ -320,7 +320,7 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
             "protocolVersion": WORKER_PROTOCOL_VERSION,
             "commandId": request["commandId"],
             "status": "failed",
-            "error": {"code": "WORKER_REQUEST_FAILED", "message": str(error)},
+            "error": {"code": "WORKER_REQUEST_FAILED", "message": safe_worker_failure(error)},
             "artifacts": [],
             "diagnostics": {
                 "durationMs": round((time.monotonic() - started_at) * 1000, 3),
@@ -726,6 +726,14 @@ def scene_asset_provider_id(scene_asset: Dict[str, Any]) -> str:
         "pexels": "pexels-stock-v1",
         "pixabay": "pixabay-stock-v1",
         "unsplash": "unsplash-stock-v1",
+        "coverr": "coverr-stock-v1",
+        "wikimedia": "wikimedia-stock-v1",
+        "met": "met-stock-v1",
+        "cleveland": "cleveland-stock-v1",
+        "archive": "archive-stock-v1",
+        "flickr": "flickr-stock-v1",
+        "nasa": "nasa-stock-v1",
+        "openverse": "openverse-stock-v1",
         "mock": "mock-stock-v1",
     }.get(provider, provider)
 
@@ -759,6 +767,14 @@ def success_response(
     }
 
 
+def safe_worker_failure(error: Exception) -> str:
+    # 未受控的供应商异常可能含密钥、URL或用户原文；保留错误类型与阶段日志定位。
+    kind = type(error).__name__
+    if not kind.isidentifier() or len(kind) > 80:
+        kind = "WorkerError"
+    return f"媒体处理失败（{kind}），请查看本次任务对应的阶段诊断记录。"
+
+
 def main() -> int:
     request: Dict[str, Any] = {}
     try:
@@ -766,18 +782,16 @@ def main() -> int:
         request = json.loads(payload)
         if not isinstance(request, dict):
             raise WorkerProtocolError("Worker request must be a JSON object")
-        response = handle_request(request)
+        with diagnostic_context(request), diagnostic_span('worker.execute'):
+            response = handle_request(request)
     except Exception as error:
-        # 协议要求失败也返回 exit 0，且 error.message 只有一行；完整调用栈只经 stderr 送出，
-        # 否则 ffmpeg 与素材准备的真实失败原因在 run.json 里不可复原。
-        traceback.print_exc(file=sys.stderr)
         response = {
             "protocolVersion": WORKER_PROTOCOL_VERSION,
             "commandId": request.get("commandId") if isinstance(request, dict) else None,
             "status": "failed",
             "error": {
                 "code": "WORKER_REQUEST_FAILED",
-                "message": str(error),
+                "message": safe_worker_failure(error),
             },
             "artifacts": [],
         }

@@ -10,6 +10,7 @@ export interface PublishCopy {
 export const PUBLISH_COPY_AGENT_CONTRACT_VERSION = "publish-editor-v2|role-audit-v9|publish-copy-validator-v1";
 
 export interface PublishCopyInput {
+  selectedModelId?: string;
   platform: string;
   brief: {
     title: string;
@@ -73,7 +74,7 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
       platform: input.platform,
       brief: input.brief,
       narrations: input.narrations,
-    });
+    }, undefined, input.selectedModelId ? { model: input.selectedModelId } : {});
     return validatePublishCopy(rawCopy);
   }
 
@@ -99,7 +100,7 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
         : this.client.runTaskDetailed("publish-copy", {
         ...request,
         ...(revision ? { revision } : {}),
-      }, requestId, session, requestOptions),
+      }, requestId, session, { ...requestOptions, ...(input.selectedModelId ? { model: input.selectedModelId } : {}) }),
       audit: ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session, requestOptions, preparedOperation }) => preparedOperation
         ? this.client.observePrepared(preparedOperation, requestOptions)
         : this.client.runTaskDetailed("role-audit", {
@@ -118,7 +119,7 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
         ...(validationFailure ? { validationFailure } : {}),
-      }, requestId, session, requestOptions),
+      }, requestId, session, { ...requestOptions, ...(input.selectedModelId ? { model: input.selectedModelId } : {}) }),
       validate: validatePublishCopy,
       ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
     });

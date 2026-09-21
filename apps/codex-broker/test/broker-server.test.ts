@@ -17,7 +17,7 @@ import {
   type CodexExecutorProfile,
   type ValidatedTask,
 } from "../src/codex-executor.js";
-import { BROKER_TASK_KINDS, taskContractDescriptorFor } from "../src/task-definitions.js";
+import { REQUIRED_BROKER_TASK_KINDS as BROKER_TASK_KINDS, taskContractDescriptorFor } from "../src/task-definitions.js";
 import { TASK_BINDING_VERSION } from "../src/task-binding.js";
 
 class ScriptedExecutor extends CodexExecutor {

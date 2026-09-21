@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { WORKER_PROTOCOL_VERSION } from "./contracts.js";
+import { diagnosticEvent } from "./diagnostics.js";
 
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
-const MAX_LOGGED_CHILD_STDERR = 8_000;
+const MAX_DIAGNOSTIC_LINE = 8_192;
 
 export interface PythonWorkerClientOptions {
   command: string[];
@@ -68,6 +69,8 @@ export class PythonWorkerClient {
   }
 
   async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+    const startedAt = performance.now();
+    diagnosticEvent("worker.started", request);
     const [executable, ...args] = this.options.command;
     if (!executable) {
       throw new Error("Python worker command cannot be empty.");
@@ -81,7 +84,9 @@ export class PythonWorkerClient {
         stdio: ["pipe", "pipe", "pipe"],
       });
       let stdout = "";
-      let stderr = "";
+      let diagnosticLine = "";
+      let discardDiagnosticLine = false;
+      let stderrBytes = 0;
       let timedOut = false;
       let outputExceeded = false;
       const timer = setTimeout(() => {
@@ -99,34 +104,56 @@ export class PythonWorkerClient {
         }
       });
       child.stderr.on("data", (chunk: string) => {
-        stderr += chunk;
-        if (Buffer.byteLength(stderr) > MAX_OUTPUT_BYTES) {
-          outputExceeded = true;
-          killProcessTree(child.pid);
+        // stderr 只消费白名单事件；海量或无换行的诊断不得杀死已经付费的任务。
+        stderrBytes += Buffer.byteLength(chunk);
+        const parts = chunk.split("\n");
+        for (const [index, part] of parts.entries()) {
+          if (!discardDiagnosticLine) {
+            diagnosticLine += part;
+            if (Buffer.byteLength(diagnosticLine) > MAX_DIAGNOSTIC_LINE) {
+              diagnosticLine = "";
+              discardDiagnosticLine = true;
+            }
+          }
+          if (index === parts.length - 1) break;
+          const line = discardDiagnosticLine ? "" : diagnosticLine;
+          diagnosticLine = "";
+          discardDiagnosticLine = false;
+          try {
+            const entry: unknown = JSON.parse(line);
+            if (isRecord(entry) && entry.component === "media-worker" && typeof entry.event === "string"
+              && /^(stock\.[a-z_]+|worker\.execute)$/.test(entry.event)) {
+              diagnosticEvent(entry.event, { ...entry, ...request, providerId: entry.provider, status: entry.state });
+            }
+          } catch { /* 原始异常可能含提示词、密钥或签名地址，不转发。 */ }
         }
       });
       child.on("error", (error) => {
         clearTimeout(timer);
+        diagnosticEvent("worker.spawn_failed", { ...request, errorType: error.name, elapsedMs: performance.now() - startedAt });
         reject(error);
       });
       child.on("close", (code) => {
         clearTimeout(timer);
-        logWorkerStderr(stderr, request, code);
+        diagnosticEvent("worker.process_finished", { ...request, exitCode: code, bytes: stderrBytes, elapsedMs: performance.now() - startedAt,
+          status: timedOut ? "timeout" : outputExceeded ? "output_limit" : code === 0 ? "exited" : "failed" });
         if (timedOut) {
-          reject(new Error(`Python worker timed out after ${this.options.timeoutMs}ms.${stderrTail(stderr)}`));
+          reject(new Error(`Python worker timed out after ${this.options.timeoutMs}ms.`));
           return;
         }
         if (outputExceeded) {
-          reject(new Error(`Python worker output exceeded ${MAX_OUTPUT_BYTES} bytes.${stderrTail(stderr)}`));
+          reject(new Error(`Python worker output exceeded ${MAX_OUTPUT_BYTES} bytes.`));
           return;
         }
         if (code !== 0) {
-          reject(new Error(`Python worker exited with code ${String(code)}: ${stderr.trim()}`));
+          reject(new Error(`Python worker exited with code ${String(code)}. See structured worker stage diagnostics.`));
           return;
         }
 
         try {
-          resolve(parseWorkerResponse(stdout, request.commandId));
+          const response = parseWorkerResponse(stdout, request.commandId);
+          diagnosticEvent("worker.result", { ...request, status: response.status, elapsedMs: performance.now() - startedAt });
+          resolve(response);
         } catch (error) {
           reject(error);
         }
@@ -145,23 +172,23 @@ function parseWorkerResponse(stdout: string, expectedCommandId: unknown): Worker
   let value: unknown;
   try {
     value = JSON.parse(lines[0] ?? "");
-  } catch (error) {
-    throw new Error(`Python worker did not return valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  } catch {
+    throw new Error("Python worker did not return valid JSON.");
   }
   if (!isRecord(value)) {
     throw new Error("Python worker response must be a JSON object.");
   }
   if (value.protocolVersion !== WORKER_PROTOCOL_VERSION) {
-    throw new Error(`Unsupported worker response protocolVersion: ${String(value.protocolVersion)}.`);
+    throw new Error("Unsupported worker response protocolVersion.");
   }
   if (typeof expectedCommandId !== "string" || !expectedCommandId) {
     throw new Error("Worker request commandId must be a non-empty string.");
   }
   if (typeof value.commandId !== "string" || value.commandId !== expectedCommandId) {
-    throw new Error(`Worker response commandId '${String(value.commandId)}' does not match the request.`);
+    throw new Error("Worker response commandId does not match the request.");
   }
   if (value.status !== "succeeded" && value.status !== "failed" && value.status !== "rejected") {
-    throw new Error(`Unsupported worker response status: ${String(value.status)}.`);
+    throw new Error("Unsupported worker response status.");
   }
   if (!Array.isArray(value.artifacts)) {
     throw new Error("Worker response artifacts must be an array.");
@@ -201,7 +228,7 @@ function parseWorkerResponse(stdout: string, expectedCommandId: unknown): Worker
 export function parseSourceReviewOutcome(value: unknown): SourceReviewOutcome {
   if (!isRecord(value)) throw new Error("Worker sourceReview must be a JSON object.");
   if (value.kind !== "complete_negative" && value.kind !== "incomplete") {
-    throw new Error(`Worker sourceReview kind is unsupported: ${String(value.kind)}.`);
+    throw new Error("Worker sourceReview kind is unsupported.");
   }
   if (typeof value.mediaSha256 !== "string" || !/^[a-f0-9]{64}$/i.test(value.mediaSha256)) {
     throw new Error("Worker sourceReview mediaSha256 must be a SHA-256 digest.");
@@ -300,23 +327,6 @@ function optionalArtifactText(value: unknown, label: string): string | undefined
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function stderrTail(stderr: string): string {
-  const trimmed = stderr.trim();
-  if (!trimmed) return "";
-  const tail = trimmed.length > MAX_LOGGED_CHILD_STDERR ? trimmed.slice(-MAX_LOGGED_CHILD_STDERR) : trimmed;
-  return `\n--- worker stderr (tail) ---\n${tail}`;
-}
-
-// worker.py 以 exit 0 + status:"failed" 表达协议内失败，响应里只有一行 error.message；
-// 完整调用栈只走 stderr，所以这里无条件转发到服务端日志，避免深层失败不可复原。
-function logWorkerStderr(stderr: string, request: Record<string, unknown>, code: number | null): void {
-  if (!stderr.trim()) return;
-  const context = [request.capability, request.runId, request.nodeRunId, `attempt-${String(request.attempt)}`]
-    .map((part) => String(part))
-    .join(" / ");
-  console.error(`[python-worker] ${context} exited with code ${String(code)}${stderrTail(stderr)}`);
 }
 
 function killProcessTree(pid: number | undefined): void {

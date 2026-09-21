@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from .stock_assets import default_asset_plan_path, load_asset_plan
+from .stock_images import prepare_render_image
 
 
 FONT_CANDIDATES = [
@@ -205,6 +206,7 @@ def render_asset_video(
     }
     clips = []
     scene_commands = []
+    image_processing = []
     frame_counts = timeline_frame_counts(manifest["slides"])
     for scene, frame_count in zip(manifest["slides"], frame_counts):
         asset = scene_assets[int(scene["position"])]
@@ -229,6 +231,12 @@ def render_asset_video(
         )
         clips.append(clip_path)
         scene_commands.append(command)
+        derived_image = clips_dir / f"scene_{scene['position']:02d}.render.png"
+        if str(derived_image) in command:
+            image_processing.append({
+                'scene_position': scene['position'],
+                **json.loads(derived_image.with_suffix('.json').read_text(encoding='utf-8')),
+            })
 
     clips_concat_path = write_clip_concat_file(output_dir / "clips.txt", clips)
     output_file = Path(str(manifest["output_file"]))
@@ -273,6 +281,7 @@ def render_asset_video(
     manifest["clips_dir"] = str(clips_dir)
     manifest["clips_concat_file"] = str(clips_concat_path)
     manifest["ffmpeg_scene_commands"] = scene_commands
+    manifest['image_processing'] = image_processing
     manifest["ffmpeg_command"] = final_command
     manifest["probe"] = probe_video(output_file)
     manifest_path.write_text(
@@ -411,6 +420,9 @@ def render_scene_clip(
     elif asset["media_type"] == "image":
         if source_in_frame != 0:
             raise RuntimeError(f"Scene {scene['position']} cannot apply a source frame offset to an image.")
+        asset_path = prepare_render_image(
+            asset_path, clips_dir / f"scene_{scene['position']:02d}.render.png", width, height,
+        )
         input_args = [
             "-framerate",
             "30",

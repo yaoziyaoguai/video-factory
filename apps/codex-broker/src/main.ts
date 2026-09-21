@@ -2,10 +2,17 @@ import { CodexBrokerServer } from "./broker-server.js";
 import path from "node:path";
 import { createBrokerExecutor } from "./executor-factory.js";
 import { brokerRuntimeConfigFromEnv } from "./runtime-config.js";
+import { ModelRegistry } from "./model-registry.js";
 
 // 只信启动环境，不接受任何来自 HTTP payload 的执行参数；无 host/port 概念，只走 Unix socket。
 try {
   const config = brokerRuntimeConfigFromEnv(process.env);
+  const models = new ModelRegistry({
+    directory: path.join(config.workspaceRoot, ".video-factory", "models"),
+    socketDirectory: path.dirname(config.socketPath),
+    timeoutMs: config.timeoutMs,
+  });
+  await models.start();
 
   const server = new CodexBrokerServer({
     socketPath: config.socketPath,
@@ -14,6 +21,7 @@ try {
     maxBacklog: config.maxBacklog,
     idempotencyDirectory: path.join(config.workspaceRoot, ".video-factory", "codex-idempotency", config.profile.identity.profileId),
     sessionDirectory: path.join(config.workspaceRoot, ".video-factory", "codex-sessions", config.profile.identity.profileId),
+    modelManagement: (method, url, body) => models.handle(method, url, body),
   });
   await server.start();
   process.stdout.write(
@@ -40,7 +48,7 @@ try {
     process.on(signal, () => {
       if (shuttingDown) return;
       shuttingDown = true;
-      void server.close().then(() => process.exit(0)).catch((error: unknown) => {
+      void Promise.all([server.close(), models.close()]).then(() => process.exit(0)).catch((error: unknown) => {
         process.stderr.write(`codex-broker shutdown failed: ${error instanceof Error ? error.message : String(error)}\n`);
         process.exit(1);
       });

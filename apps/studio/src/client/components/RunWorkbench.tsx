@@ -6,6 +6,7 @@ import { StatusBadge } from "./StatusBadge.js";
 import { agentLoopPendingNote, agentLoopPhaseLabel, creatorFacingTechnicalText, creatorRunStatusLabel, humanizeCreativeText, platformLabel, providerLabel, catalogModelLabel, runNodeLabel, RUN_NODE_LABELS, sourceAssetReviewBreakdown } from "../presentation.js";
 import { NodeWorkspace, revealNodeWorkspace } from "./NodeWorkspace.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
+import { AudioReviewPanel } from "./AudioReviewPanel.js";
 
 interface RunWorkbenchProps {
   creativeDiscussion?: ReactNode;
@@ -300,7 +301,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                 ? visualReview.evidenceId ? "两者查看同一份成片证据" : "独立审查同一版成片"
                 : "审片结果不完整，不能按完整双审处理"}</small></header>
             <div className="merged-review-summary">
-              <span>综合结论 · {visualReviewRecommendationLabel(visualReview.recommendation)}</span>
+              <span>视觉结论 · {visualReviewRecommendationLabel(visualReview.recommendation)}</span>
               <p>{creatorFacingTechnicalText(visualReview.summary)}</p>
             </div>
             {flawedReviewBranches.length > 0 ? <p className="review-audit-caveat" role="note">
@@ -316,6 +317,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               {!singleVisualReview && visualReview.independentReviews.length < 2 ? <p role="status">缺少 {2 - visualReview.independentReviews.length} 个可验证的独立审片结果，请重新审查当前成片。</p> : null}
             </div>
           </section> : null}
+          {visualReview ? <AudioReviewPanel value={visualReview.audioReview} /> : null}
           {readOnly ? (
             <section className="run-state-panel" role="status">
               <p className="eyebrow">历史制作记录</p>
@@ -1051,6 +1053,7 @@ function paidOperationCostLabel(item: StudioPaidNodeSummary["items"][number]): s
 }
 
 interface VisualReviewDecision {
+  audioReview?: unknown;
   mode: "single" | "dual" | "incomplete";
   recommendation: "approve" | "revise" | "reject";
   confidence: number;
@@ -1291,6 +1294,7 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
     : reportedReviews;
   return {
     mode,
+    audioReview: report.audioReview,
     recommendation: reviewRecommendation,
     confidence,
     summary: typeof report.summary === "string" && report.summary.trim() ? report.summary.trim() : "视觉审片发现需要人工确认的问题。",

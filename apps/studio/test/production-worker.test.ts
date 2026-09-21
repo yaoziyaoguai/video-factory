@@ -67,6 +67,47 @@ describe("generated media probing", () => {
 });
 
 describe("production provider runtime metadata", () => {
+  it("only offers Flickr photography to the director when credentials exist", () => {
+    const runtime = { python: true, ffmpeg: true, ffprobe: true, say: false };
+    for (const configured of [false, true]) {
+      const environment = configured ? { FLICKR_API_KEY: "test-key" } : {};
+      const entry = buildProviderCatalog(runtime, environment, { available: false }).find((item) => item.id === "flickr-stock-v1");
+      assert.equal(entry?.available, configured);
+      if (!configured) assert.match(entry?.requirement ?? "", /FLICKR_API_KEY/);
+      const director = buildDirectorAssetProviders({ environment }).find((item) => item.id === "flickr-stock-v1");
+      assert.equal(Boolean(director), configured);
+      if (director) assert.deepEqual(director.deliveryTypes, ["stock_image"]);
+    }
+    assert.equal(buildProductionProviderRuntimeMetadata({}).find((item) => item.id === "flickr-stock-v1")?.billing, "free");
+  });
+  it("makes Wikimedia free stock video available without credentials, never as generation", () => {
+    const provider = buildDirectorAssetProviders({ environment: {} }).find((item) => item.id === "wikimedia-stock-v1");
+    assert.deepEqual(provider?.deliveryTypes, ["stock_video", "stock_image"]);
+    assert.equal(provider?.billing, "free");
+    assert.notEqual(provider?.generative, true);
+    for (const python of [true, false]) {
+      const catalog = buildProviderCatalog({ python, ffmpeg: true, ffprobe: true, say: false }, {}, { available: false });
+      assert.equal(catalog.find((item) => item.id === "wikimedia-stock-v1")?.available, python);
+    }
+    assert.equal(buildProductionProviderRuntimeMetadata({}).find((item) => item.id === "wikimedia-stock-v1")?.billing, "free");
+  });
+  it("wires zero-key sources into catalog, director choices and free runtime metadata", () => {
+    const runtime = { python: true, ffmpeg: true, ffprobe: true, say: false };
+    const catalog = buildProviderCatalog(runtime, {}, { available: false });
+    for (const [id, deliveries] of [
+      ["met-stock-v1", ["stock_image"]],
+      ["cleveland-stock-v1", ["stock_image"]],
+      ["archive-stock-v1", ["stock_video"]],
+      ["openverse-stock-v1", ["stock_image"]],
+      ["nasa-stock-v1", ["stock_image", "stock_video"]],
+    ] as const) {
+      assert.deepEqual(buildDirectorAssetProviders({ environment: {} }).find((item) => item.id === id)?.deliveryTypes, [...deliveries]);
+      assert.equal(catalog.find((item) => item.id === id)?.available, true);
+      assert.equal(buildProductionProviderRuntimeMetadata({}).find((item) => item.id === id)?.billing, "free");
+    }
+    const noProbe = buildProviderCatalog({ ...runtime, ffprobe: false }, {}, { available: false });
+    assert.equal(noProbe.find((item) => item.id === "archive-stock-v1")?.available, false);
+  });
   it("only enables Unsplash with a key, advertises images only and never treats it as paid generation", () => {
     assert.equal(buildDirectorAssetProviders({ environment: {} }).some((item) => item.id === "unsplash-stock-v1"), false);
     const provider = buildDirectorAssetProviders({ environment: { UNSPLASH_ACCESS_KEY: "test-key" } })
@@ -79,6 +120,21 @@ describe("production provider runtime metadata", () => {
     assert.equal(entry?.available, false);
     assert.match(entry?.requirement ?? "", /UNSPLASH_ACCESS_KEY/);
     assert.equal(buildProductionProviderRuntimeMetadata({}).find((item) => item.id === "unsplash-stock-v1")?.billing, "free");
+  });
+  it("only enables Coverr with a key and advertises free stock video", () => {
+    assert.equal(buildDirectorAssetProviders({ environment: {} }).some((item) => item.id === "coverr-stock-v1"), false);
+    const provider = buildDirectorAssetProviders({ environment: { COVERR_API_KEY: "test-key" } })
+      .find((item) => item.id === "coverr-stock-v1");
+    assert.deepEqual(provider?.deliveryTypes, ["stock_video"]);
+    assert.equal(provider?.billing, "free");
+    assert.notEqual(provider?.generative, true);
+    const catalog = buildProviderCatalog(
+      { python: true, ffmpeg: true, ffprobe: true, say: true },
+      { COVERR_API_KEY: "test-key" },
+      { available: false },
+    );
+    assert.equal(catalog.find((item) => item.id === "coverr-stock-v1")?.available, true);
+    assert.equal(buildProductionProviderRuntimeMetadata({}).find((item) => item.id === "coverr-stock-v1")?.billing, "free");
   });
   it("uses the shared asset delivery directory for every director source", () => {
     const providers = buildDirectorAssetProviders({ environment: {

@@ -3313,7 +3313,9 @@ export class ProductionPipeline {
       case "director": return brief.providers.director !== undefined
         ? brief.models?.[brief.providers.director] ?? this.options.directorAgent?.modelId
         : this.options.directorAgent?.modelId;
-      case "rank": return this.options.assetSemanticRanker?.modelId;
+      case "rank": return this.options.assetSemanticRanker
+        ? brief.models?.[this.options.assetSemanticRanker.id] ?? this.options.assetSemanticRanker.modelId
+        : undefined;
       default: return undefined;
     }
   }
@@ -5282,6 +5284,7 @@ function referenceGrammarNode(
       try {
         execution = agent.analyzeDetailed
           ? await agent.analyzeDetailed({
+              ...(brief.models?.[agent.id] ? { selectedModelId: brief.models[agent.id] } : {}),
               videoPath: copiedVideoPath,
               runRoot: attempt.directory,
               sourceLabel: requiredOutputString(request, "label"),
@@ -5289,7 +5292,7 @@ function referenceGrammarNode(
                 runsRoot,
                 context.runId,
                 "reference-grammar",
-                { sha256: reference.sha256, label: requiredOutputString(request, "label") },
+                { sha256: reference.sha256, label: requiredOutputString(request, "label"), selectedModelId: brief.models?.[agent.id] },
                 REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION,
                 undefined,
                 context.operationRequestId,
@@ -5722,7 +5725,9 @@ function jointPlanningStageInputs(
     // 不得重放 completed graph 的旧排序；无图库路线同样记录（无 ranker 的身份），保持形状稳定。
     rank: digestOf({
       rankerId: options.assetSemanticRanker?.id ?? null,
-      modelId: options.assetSemanticRanker?.modelId ?? null,
+      modelId: options.assetSemanticRanker
+        ? brief.models?.[options.assetSemanticRanker.id] ?? options.assetSemanticRanker.modelId
+        : null,
       contractVersion: ASSET_RANK_AGENT_CONTRACT_VERSION,
       // 排序语义意图的构造规则版本：语义投影字段变化也让旧排序证据失效。
       semanticIntentVersion: RANKING_SEMANTIC_INTENT_VERSION,
@@ -6926,7 +6931,7 @@ function creativePlanningNode(
                         // 同一真实执行输入派生，provider/model/合同变化必然换 checkpoint。
                         ranker: {
                           id: ranker.id,
-                          modelId: ranker.modelId ?? null,
+                          modelId: currentBrief.models?.[ranker.id] ?? ranker.modelId ?? null,
                           contractVersion: ASSET_RANK_AGENT_CONTRACT_VERSION,
                         },
                       },
@@ -6937,6 +6942,7 @@ function creativePlanningNode(
                       resumeCompletedTextTaskRequestId,
                       recoverTextTask?.nodeId === "creative-planning" ? recoverTextTask.workflowOperationRequestId : undefined,
                     ),
+                    currentBrief.models?.[ranker.id],
                   )
                 : { output: await ranker.rank(currentRankingRequest) };
               const ranking = validateAssetSemanticRanking({
@@ -9178,6 +9184,7 @@ async function generatePublishCopy(input: {
     const narrations = await readNarrations(input.scriptPath);
     const request = {
       platform: input.brief.platform,
+      ...(input.brief.models?.[input.writer.id] ? { selectedModelId: input.brief.models[input.writer.id] } : {}),
       brief: {
         title: input.brief.title,
         angle: input.brief.angle,
@@ -9530,6 +9537,7 @@ function validateVisualReviewInput(
   if (input.selectedModelId !== undefined) {
     request.selectedModelId = requiredOutputString(input, "selectedModelId");
   }
+  if (input.selectedAudioModelId !== undefined) request.selectedAudioModelId = requiredOutputString(input, "selectedAudioModelId");
   return request;
 }
 
@@ -9835,6 +9843,7 @@ function visualReviewNode(
           }),
       renderManifestPath: outputPath(context, "render", "renderManifestPath"),
       ...(brief.models?.[providerId] ? { selectedModelId: brief.models[providerId] } : {}),
+      ...(brief.models?.["sound-review-v1"] ? { selectedAudioModelId: brief.models["sound-review-v1"] } : {}),
       };
     },
     validateInputOverride: (input) => validateVisualReviewInput(
@@ -9964,6 +9973,7 @@ function visualReviewNode(
         : brief.durationSeconds * 1_000;
       const report: VisualReviewReport = {
         ...localizedReport,
+        ...(execution.audioReview ? { audioReview: execution.audioReview } : {}),
         reviewScope: {
           reviewStage: "rendered_video",
           evidenceId: execution.evidenceSnapshotId ?? visualReviewEvidenceId(context, parentArtifactIds),
@@ -9983,6 +9993,10 @@ function visualReviewNode(
       const reportPath = path.join(attempt.directory, "visual_review.json");
       const content = `${JSON.stringify(report, null, 2)}\n`;
       await writeTextAtomically(reportPath, content);
+      const audioTraceArtifact = execution.audioReview?.status === "completed" ? await persistModelTrace({
+        trace: execution.audioReview.trace, attemptDirectory: attempt.directory, nodeId: "visual-review",
+        attempt: attempt.attempt, parentArtifactIds, fileSuffix: "-audio",
+      }) : undefined;
       const traceArtifact = await persistModelTrace({
         trace: execution.trace,
         attemptDirectory: attempt.directory,
@@ -10018,6 +10032,9 @@ function visualReviewNode(
       const meteredAttemptCount = provider.billing === "metered"
         ? Math.max(1, execution.agentLoop?.producerModelCallCount ?? execution.agentLoop?.iterations.length ?? 1)
         : undefined;
+      const audioModelCallCount = execution.audioReview?.status === "completed"
+        ? execution.audioReview.trace?.modelAttemptCount
+        : execution.audioReview?.status === "not_configured" || execution.audioReview?.status === "not_reviewed" ? 0 : undefined;
       return {
         status: "succeeded",
         output: {
@@ -10044,6 +10061,11 @@ function visualReviewNode(
               producerModelCallCount: execution.agentLoop.producerModelCallCount ?? execution.agentLoop.iterations.length,
               auditModelCallCount: execution.agentLoop.auditModelCallCount ?? execution.agentLoop.iterations.length,
             } : {}),
+            ...(execution.audioReview ? {
+              audioReviewStatus: execution.audioReview.status,
+              audioModelCallCount: audioModelCallCount ?? "unknown",
+              modelCallCount: (execution.agentLoop?.modelCallCount ?? execution.trace?.modelAttemptCount ?? 0) + (audioModelCallCount ?? 0),
+            } : {}),
             ...(execution.sampling?.sceneCount !== undefined ? {
               samplingCoverage: `${execution.sampling.coveredScenePositions?.length ?? 0}/${execution.sampling.sceneCount}`,
               missingScenePositions: (execution.sampling.missingScenePositions ?? []).map(String),
@@ -10069,7 +10091,7 @@ function visualReviewNode(
           providerId,
           "Sampled-frame AI visual review; human final review remains mandatory.",
           attempt.attempt,
-        ), ...(traceArtifact ? [traceArtifact] : []), ...(loopArtifact ? [loopArtifact] : []), ...independentTraceArtifacts],
+        ), ...(traceArtifact ? [traceArtifact] : []), ...(loopArtifact ? [loopArtifact] : []), ...(audioTraceArtifact ? [audioTraceArtifact] : []), ...independentTraceArtifacts],
       };
     },
     validateOverride: (output) => {
@@ -10148,11 +10170,12 @@ function assetSemanticRankNode(
                   runsRoot,
                   context.runId,
                   "asset-semantic-rank",
-                  report,
+                  { report, modelId: brief.models?.[ranker.id] ?? ranker.modelId },
                   ASSET_RANK_AGENT_CONTRACT_VERSION,
                   undefined,
                   context.operationRequestId,
                 ),
+                brief.models?.[ranker.id],
               )
             : { output: await ranker.rank(report) };
           const actualProviderId = execution.trace?.providerId ?? ranker.id;
@@ -10404,6 +10427,14 @@ function providerConfig(
       "pexels-stock-v1": { provider: "pexels", mediaType: "video" },
       "pixabay-stock-v1": { provider: "pixabay", mediaType: "video" },
       "unsplash-stock-v1": { provider: "unsplash", mediaType: "image" },
+      "coverr-stock-v1": { provider: "coverr", mediaType: "video" },
+      "wikimedia-stock-v1": { provider: "wikimedia", mediaType: "video" },
+      "met-stock-v1": { provider: "met", mediaType: "image" },
+      "cleveland-stock-v1": { provider: "cleveland", mediaType: "image" },
+      "archive-stock-v1": { provider: "archive", mediaType: "video" },
+      "flickr-stock-v1": { provider: "flickr", mediaType: "image" },
+      "nasa-stock-v1": { provider: "nasa", mediaType: "video" },
+      "openverse-stock-v1": { provider: "openverse", mediaType: "image" },
       "seedream-image-v1": { provider: "seedream", mediaType: "image" },
       "seedance-video-v1": { provider: "seedance", mediaType: "video" },
       "hailuo-video-v1": { provider: "minimax", mediaType: "video" },
@@ -12840,6 +12871,14 @@ function normalizedSceneProviderId(value: string): string {
     pexels: "pexels-stock-v1",
     pixabay: "pixabay-stock-v1",
     unsplash: "unsplash-stock-v1",
+    coverr: "coverr-stock-v1",
+    wikimedia: "wikimedia-stock-v1",
+    met: "met-stock-v1",
+    cleveland: "cleveland-stock-v1",
+    archive: "archive-stock-v1",
+    flickr: "flickr-stock-v1",
+    nasa: "nasa-stock-v1",
+    openverse: "openverse-stock-v1",
     mock: "mock-stock-v1",
   } as Record<string, string>)[value] ?? value;
 }

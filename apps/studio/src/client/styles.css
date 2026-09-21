@@ -977,6 +977,11 @@ h1, h2, .creative-stage blockquote, .brand strong { font-family: "Manrope Variab
 .model-default-card footer { display: flex; justify-content: space-between; gap: 12px; }
 .model-default-empty { padding: 16px; }
 .model-default-save-row { margin-top: 16px; padding-left: 0; }
+.model-library { display: grid; gap: 16px; }
+.model-library .model-defaults-intro { justify-content: space-between; flex-wrap: wrap; }
+.model-library fieldset { display: flex; gap: 16px; flex-wrap: wrap; margin: 16px 0; border: 1px solid var(--line); padding: 12px; }
+.model-library .model-default-card small { overflow-wrap: anywhere; }
+.model-library .segmented-control button[aria-pressed="true"] { background: var(--accent); color: var(--paper, #fff); }
 .inherited-production-summary { margin-top: 20px; border-top: 1px solid var(--line-strong); border-bottom: 1px solid var(--line); }
 .inherited-production-summary > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 48px; cursor: pointer; }
 .inherited-production-summary > summary::marker { color: var(--muted); }
@@ -1186,3 +1191,13 @@ h1, h2, .creative-stage blockquote, .brand strong { font-family: "Manrope Variab
 .source-supplement-hint { margin: 0; color: #6b716b; font-size: 12px; line-height: 1.7; }
 .source-supplement-error { margin: 0; color: #a13026; font-size: 12px; font-weight: 600; }
 .opportunity-supplement-sources { margin-top: 8px; }
+
+.model-library .segmented-control { display: inline-flex; flex-wrap: wrap; gap: 4px; margin: 20px 0 8px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface, #fff); }
+.model-library .segmented-control button { padding: 9px 16px; border: 0; border-radius: 7px; background: transparent; color: inherit; font: inherit; font-size: 14px; cursor: pointer; }
+.model-library .segmented-control button[aria-pressed="true"] { background: #145bff; color: #fff; }
+.model-library .segmented-control button:focus-visible { outline: 2px solid #145bff; outline-offset: 2px; }
+.model-library > h3 { margin: 16px 0; font-size: 18px; }
+.model-library .model-default-card { overflow-wrap: anywhere; }
+.model-library .configuration-sheet { margin: 20px 0; }
+.model-library fieldset { display: flex; flex-wrap: wrap; gap: 16px; margin: 16px 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; }
+.model-library fieldset label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }

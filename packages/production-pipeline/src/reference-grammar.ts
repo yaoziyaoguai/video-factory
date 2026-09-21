@@ -35,6 +35,7 @@ export interface ShotGrammar {
 }
 
 export interface ReferenceGrammarAgentInput {
+  selectedModelId?: string;
   videoPath: string;
   runRoot: string;
   sourceLabel: string;
@@ -73,7 +74,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
 
   async analyze(input: ReferenceGrammarAgentInput): Promise<ShotGrammar> {
     const payload = await this.payload(input);
-    return validateShotGrammar(await this.options.client.runTask("reference-grammar", payload), payload.durationMs);
+    return validateShotGrammar(await this.options.client.runTask("reference-grammar", payload, undefined, input.selectedModelId ? { model: input.selectedModelId } : {}), payload.durationMs);
   }
 
   async analyzeDetailed(input: ReferenceGrammarAgentInput): Promise<ReferenceGrammarExecution> {
@@ -108,7 +109,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
         return runTaskDetailed("reference-grammar", {
           ...taskPayload,
           ...(revision ? { revision } : {}),
-        }, requestId, session, requestOptions);
+        }, requestId, session, { ...requestOptions, ...(input.selectedModelId ? { model: input.selectedModelId } : {}) });
       },
       audit: async ({ role, iteration, criteria, candidate, previousAudit, validationFailure, requestId, session, requestOptions, preparedOperation }) => {
         if (preparedOperation) {
@@ -150,7 +151,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
           ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
           ...(frame.phase ? { phase: frame.phase } : {}),
         })),
-        }, requestId, session, requestOptions);
+        }, requestId, session, { ...requestOptions, ...(input.selectedModelId ? { model: input.selectedModelId } : {}) });
       },
       validate: (value) => validateShotGrammar(value, resolvedPayload?.durationMs ?? grammarDuration(value)),
       ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),

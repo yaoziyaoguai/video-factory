@@ -38,7 +38,9 @@ import {
 } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { VoiceStudio } from "../components/VoiceStudio.js";
-import { UnsplashAttribution, unsplashPublicUrl } from "../components/UnsplashAttribution.js";
+import { ModelLibrary } from "../components/ModelLibrary.js";
+import { unsplashPublicUrl } from "../components/UnsplashAttribution.js";
+import { hasStockAttribution, StockAttribution } from "../components/StockAttribution.js";
 import { creatorFacingTechnicalText, providerLabel, providerModelLabel } from "../presentation.js";
 
 const SERVICE_STATUS = { ready: "在线", degraded: "受限", stopped: "离线" } as const;
@@ -96,7 +98,7 @@ const PRODUCTION_ROLE_DEFINITIONS: ProductionRoleDefinition[] = [
   { key: "voice", label: "配音执行", capability: "voice.synthesize", preferredProviderId: "macos-say-v1", responsibility: "按声音演员表执行音色、语速和停顿", mode: "tool", selectable: false, configurationAnchor: "voice-casting", configurationLabel: "去声音演员表配置" },
   { key: "render", label: "剪辑师", capability: "video.render", preferredProviderId: "python-ffmpeg-v1", responsibility: "合成画面、字幕、旁白和音轨", mode: "tool" },
   { key: "technicalReview", label: "技术质检", capability: "quality.review", preferredProviderId: "python-technical-review-v1", responsibility: "检查分辨率、时长、轨道、文件和产物哈希", mode: "tool" },
-  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "deepseek-visual-review-v1", responsibility: "正式制作由 DeepSeek 完成独立质量复核；未就绪时不能开工", mode: "model" },
+  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "deepseek-visual-review-v1", responsibility: "用已选视觉模型检查画面，并复核审片意见；未就绪时不能开工", mode: "model" },
 ];
 
 const AUTOMATIC_AGENT_ROLES = [
@@ -377,27 +379,8 @@ export function ResourcesPage() {
       {settingsNotice ? <p className={`resource-settings-notice is-${settingsNotice.kind}`} role={settingsNotice.kind === "error" ? "alert" : "status"}>{settingsNotice.message}</p> : null}
 
       <section id="model-settings" className="resource-section model-settings" data-resource-section data-active={activeSection === "model-settings" ? "true" : undefined}>
-        <ResourceHeading eyebrow="模型默认" title="模型设置" meta="只影响后续新建制作；正在制作的项目不会被改动" />
-        {settingsError ? <ResourceError title="模型默认设置读取失败" message={settingsError} retry={load} /> : !settings ? <div className="region-loading">正在读取模型默认设置...</div> : <>
-          <div className="model-defaults-intro">
-            <Settings2 aria-hidden="true" size={22} />
-            <div><strong>按能力设定默认模型</strong><p>不选时由系统推荐。新建制作会冻结这里的选择；进入节点后仍可临时改用其它可用模型，清除覆盖会回到该制作创建时的默认值。</p></div>
-          </div>
-          <div className="model-default-groups">
-            {modelDefaultGroups.map((group) => <section className="model-default-group" key={group.category.id} aria-labelledby={`model-default-${group.category.id}`}>
-              <header><div><h3 id={`model-default-${group.category.id}`}>{group.category.label}</h3><p>{group.category.description}</p></div><span>{group.providers.length} 项能力</span></header>
-              {group.providers.length === 0 ? <p className="model-default-empty">当前没有可选择的模型。</p> : <div className="model-default-cards">
-                {group.providers.map((provider) => <ModelDefaultCard
-                  key={provider.id}
-                  provider={provider}
-                  selectedModelId={modelDefaults[provider.id]}
-                  onChange={(modelId) => setModelDefaults((current) => setModelDefault(current, provider.id, modelId))}
-                />)}
-              </div>}
-            </section>)}
-          </div>
-          <div className="configuration-save-row model-default-save-row"><span>{modelDefaultsHaveChanges ? "有未保存的模型默认设置" : "模型默认设置已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !modelDefaultsHaveChanges} onClick={() => void saveDefaults({ modelDefaults }, "模型默认设置已保存，仅影响后续新建制作。") }><Save aria-hidden="true" size={16} />{modelDefaultsHaveChanges ? "保存模型默认" : "已保存"}</button></div>
-        </>}
+        <ResourceHeading eyebrow="全局接入" title="模型设置" meta="模型本身只配置一次；角色默认在制作分工中设置" />
+        <ModelLibrary providers={providers} onChanged={load} />
       </section>
 
       <section id="topic-strategy" className="resource-section topic-strategy-config" data-resource-section data-active={activeSection === "topic-strategy" ? "true" : undefined} data-tour="topic-strategy">
@@ -495,6 +478,13 @@ export function ResourcesPage() {
 
       <section id="production-roles" className="resource-section foundation-registry" data-resource-section data-active={activeSection === "production-roles" ? "true" : undefined}>
         <ResourceHeading eyebrow="制作角色" title="按角色配置生产能力" meta="文本模型在新建或返工时选择；只有付费图片、视频会在执行前逐镜报价并确认" />
+        <div className="model-defaults-intro"><div><strong>角色默认不是固定绑定</strong><p>节点本次选择优先于本条视频选择，再优先于这里的默认值。新建制作会保存当时的选择；更改默认值不改写正在制作的视频。</p><a href="#model-settings">去添加或管理模型接入</a></div></div>
+        {settingsError ? <ResourceError title="角色默认读取失败" message={settingsError} retry={load} /> : settings ? <>
+          <div className="model-default-groups" aria-label="角色与执行模型默认值">{modelDefaultGroups.map((group) => <section className="model-default-group" key={group.category.id} aria-labelledby={`model-default-${group.category.id}`}>
+            <header><div><h3 id={`model-default-${group.category.id}`}>{group.category.label}</h3><p>{group.category.description}</p></div></header>
+            <div className="model-default-cards">{group.providers.map((provider) => <ModelDefaultCard key={provider.id} provider={provider} selectedModelId={modelDefaults[provider.id]} onChange={(modelId) => setModelDefaults((current) => setModelDefault(current, provider.id, modelId))} />)}</div>
+          </section>)}</div>
+        </> : null}
         {providerLoading ? <div className="region-loading">正在读取制作能力...</div> : providerError ? null : (
           <>
             <div className="role-configuration-grid" aria-label="制作角色配置">
@@ -505,6 +495,8 @@ export function ResourcesPage() {
                   definition={definition}
                   providers={providers}
                   selectedProvider={selected}
+                  selectedModelId={selected ? modelDefaults[selected.id] : undefined}
+                  onModelChange={(modelId) => { if (selected) setModelDefaults((current) => setModelDefault(current, selected.id, modelId)); }}
                   {...(missingCapabilities.has(definition.capability) ? { missing: true } : {})}
                   onProviderChange={(providerId) => setRoleProviderDefaults((current) => ({ ...current, [definition.key]: providerId }))}
                 />;
@@ -516,7 +508,7 @@ export function ResourcesPage() {
             </div>
           </>
         )}
-        {settings ? <div className="configuration-save-row foundation-save-row"><span>{roleHasChanges ? "有未保存的角色调整" : "角色配置已同步"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !roleHasChanges} onClick={() => void saveDefaults({ roleProviderDefaults }, "角色能力已保存，将从下一条新制作生效。") }><Save aria-hidden="true" size={16} />{roleHasChanges ? "保存角色配置" : "已保存"}</button></div> : null}
+        {settings ? <div className="configuration-save-row foundation-save-row"><span>{roleHasChanges || modelDefaultsHaveChanges ? "有未保存的角色或模型调整" : "角色配置已同步"}</span><button className="button button-primary" type="button" disabled={settingsSaving || (!roleHasChanges && !modelDefaultsHaveChanges)} onClick={() => void saveDefaults({ ...(roleHasChanges ? { roleProviderDefaults } : {}), ...(modelDefaultsHaveChanges ? { modelDefaults } : {}) }, "角色配置已保存，仅影响后续新建制作。") }><Save aria-hidden="true" size={16} />{roleHasChanges || modelDefaultsHaveChanges ? "保存角色配置" : "已保存"}</button></div> : null}
       </section>
 
       <section id="resource-manifest" className="resource-section resource-manifest-section" data-resource-section data-active={activeSection === "resource-manifest" ? "true" : undefined} data-tour="resource-manifest">
@@ -590,7 +582,7 @@ function ManifestLedger({ items, record = false, onReview }: { items: StudioReso
         <div className="resource-manifest-copy">
           <div className="resource-item-heading"><span className={`resource-kind is-${item.category}`}>{resourceCategoryLabel(item.category)}</span><strong>{item.scenePosition ? `第 ${item.scenePosition} 镜 · ` : ""}{creatorFacingTechnicalText(item.creator) ?? resourceItemLabel(item)}</strong></div>
           <small>{item.runTitle} · {providerLabel(item.providerId) ?? "来源未命名"}</small>
-          {item.providerId === "unsplash-stock-v1" ? <small><UnsplashAttribution creator={item.creator} creatorUrl={item.creatorUrl} /></small> : null}
+          {hasStockAttribution(item.providerId) ? <small><StockAttribution provider={item.providerId} creator={item.creator} creatorUrl={item.creatorUrl} /></small> : null}
           {!item.scenePosition ? <small className="resource-item-identity">未定位镜头 · 素材标识 {shortItemIdentifier(item.id)}</small> : null}
           <p>{creatorFacingTechnicalText(item.licenseNote) ?? (record ? "保留这条记录用于追溯制作过程。" : "缺少授权说明，需要人工确认。")}</p>
         </div>
@@ -790,9 +782,10 @@ function groupProvidersForModelDefaults(providers: StudioProvider[]): Array<{
   return MODEL_DEFAULT_CATEGORIES.map((category) => ({
     category,
     providers: providers.filter((provider) => provider.kind !== "test"
+      && !PRODUCTION_ROLE_DEFINITIONS.some((role) => role.selectable !== false && role.capability === provider.capability)
       && (provider.modelProfiles?.some((model) => model.available) ?? false)
       && modelDefaultCategoryFor(provider) === category.id),
-  }));
+  })).filter((group) => group.providers.length > 0);
 }
 
 function modelDefaultCategoryFor(provider: StudioProvider): ModelDefaultCategoryId {
@@ -800,7 +793,7 @@ function modelDefaultCategoryFor(provider: StudioProvider): ModelDefaultCategory
   if (provider.capability === "voice.synthesize") return "voice";
   if (taskTypes.includes("text-to-video") || taskTypes.includes("image-to-video")) return "video";
   if (taskTypes.includes("text-to-image")) return "image";
-  if (taskTypes.includes("visual-review") || provider.capability === "quality.review.visual") return "multimodal";
+  if (taskTypes.includes("visual-review") || taskTypes.includes("audio-review") || provider.capability === "quality.review.visual") return "multimodal";
   return "text";
 }
 
@@ -811,16 +804,18 @@ function setModelDefault(current: Record<string, string>, providerId: string, mo
   return next;
 }
 
-function RoleProviderCard({ definition, providers, selectedProvider, missing = false, onProviderChange }: {
+function RoleProviderCard({ definition, providers, selectedProvider, selectedModelId, onModelChange, missing = false, onProviderChange }: {
   definition: ProductionRoleDefinition;
   providers: StudioProvider[];
   selectedProvider: StudioProvider | undefined;
+  selectedModelId?: string | undefined;
+  onModelChange: (modelId: string) => void;
   missing?: boolean;
   onProviderChange: (providerId: string) => void;
 }) {
   const candidates = providers.filter((provider) => provider.capability === definition.capability && provider.kind !== "test");
   const models = selectedProvider?.modelProfiles?.filter((model) => model.available) ?? [];
-  const activeModel = models.find((model) => model.id === selectedProvider?.defaultModelId)
+  const activeModel = models.find((model) => model.id === (selectedModelId ?? selectedProvider?.defaultModelId))
     ?? models.find((model) => model.recommended)
     ?? models[0];
   const backupModels = models.filter((model) => model.id !== activeModel?.id);
@@ -851,9 +846,14 @@ function RoleProviderCard({ definition, providers, selectedProvider, missing = f
           {candidates.map((provider) => <option key={provider.id} value={provider.id} disabled={!isProductionReady(provider)}>{creatorProviderLabel(provider)}{isProductionReady(provider) ? "" : " · 不可用"}</option>)}
         </select>
       </label>
-      <div className="role-runtime-summary"><span>系统推荐</span><strong>{activeModel?.label ?? selectedProvider?.label ?? "尚未配置"}</strong>{backupModels.length ? <span>故障替补：{backupModels.map((model) => model.label).join("、")}</span> : null}</div>
+      {models.length ? <label className="field"><span>{definition.label}默认模型</span><select aria-label={`${definition.label}默认模型`} value={selectedModelId ?? ""} onChange={(event) => onModelChange(event.target.value)}>
+        <option value="">使用系统推荐</option>
+        {selectedModelId && !models.some((model) => model.id === selectedModelId) ? <option value={selectedModelId} disabled>原选择已不可用</option> : null}
+        {models.map((model) => <option key={model.id} value={model.id}>{model.label}</option>)}
+      </select><small>仅作为新制作默认；本条视频和节点仍可改选。</small></label> : null}
+      <div className="role-runtime-summary"><span>默认选择：{activeModel?.label ?? selectedProvider?.label ?? "尚未配置"}</span>{backupModels.length ? <span>故障替补：{backupModels.map((model) => model.label).join("、")}</span> : null}</div>
       {singleFinalReviewAvailable
-        ? <p className="role-fallback-note">中途画面预检优先使用首选模型；只有确认请求尚未开始，或原请求已明确结束于连接故障、服务不可用、限流、超时或无输出时才切换。结果不确定会暂停核对。最终成片由 DeepSeek 基于抽帧证据完成独立质量复核，审片意见会保留给你确认。</p>
+        ? <p className="role-fallback-note">中途画面预检优先使用首选模型；只有确认请求尚未开始，或原请求已明确结束于连接故障、服务不可用、限流、超时或无输出时才切换。结果不确定会暂停核对。最终成片由所选模型基于抽帧证据完成独立质量复核，审片意见会保留给你确认；声音审片单独记录。</p>
         : candidates.filter((provider) => provider.id !== selectedProvider?.id && isProductionReady(provider)).length > 0
           ? <p className="role-fallback-note">只有确认首选请求尚未开始，或原请求已明确结束于连接故障、服务不可用、限流、超时或无输出时，其余可用能力才会依次接管。若请求结果不确定，流程会暂停核对，不会切换模型或重复生成。</p>
         : null}

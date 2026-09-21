@@ -299,6 +299,14 @@ const KNOWN_FREE_ASSET_PROVIDERS = new Set([
   "pexels-stock-v1",
   "pixabay-stock-v1",
   "unsplash-stock-v1",
+  "coverr-stock-v1",
+  "wikimedia-stock-v1",
+  "met-stock-v1",
+  "cleveland-stock-v1",
+  "archive-stock-v1",
+  "flickr-stock-v1",
+  "nasa-stock-v1",
+  "openverse-stock-v1",
 ]);
 
 export class GenerativeAssetWorkerClient implements WorkerClient {

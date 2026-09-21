@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "auth:hash": "tsx scripts/hash-password.ts",
-    "build": "npm run build:broker && npm run studio:build",
+    "build": "npm run studio:build && npm run build:broker",
     "build:broker": "npm run build --workspace @video-factory/codex-broker",
     "build:template": "node -e \"require('node:fs').rmSync('packages/template-core/dist',{recursive:true,force:true})\" && tsc -p packages/template-core/tsconfig.build.json",
     "build:core": "node -e \"require('node:fs').rmSync('packages/workflow-core/dist',{recursive:true,force:true})\" && tsc -p packages/workflow-core/tsconfig.build.json",

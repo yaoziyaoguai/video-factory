@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 import { Agent, fetch as undiciFetch, type Dispatcher } from "undici";
+import { validateAudioReviewReport } from "@video-factory/production-pipeline/audio-review";
+import type { ModelConnectionInput } from "@video-factory/production-pipeline/model-connection";
+import { anthropicCompletionEnvelope, configuredModelRequest } from "./model-protocol.js";
 import {
   CodexExecutorError,
   DEFAULT_DEEPSEEK_MODEL_ID,
@@ -91,6 +94,7 @@ const ACCOUNT_RATE_LIMIT_ERROR_CODE_PATTERN = /^(?:account|organization|org|proj
 const MODEL_UNAVAILABLE_ERROR_CODE_PATTERN = /^model[_-](?:not[_-](?:found|exist)|retired|deprecated)$/i;
 
 export interface ChatCompletionsExecutorOptions {
+  configuredModel?: { id: string; connection: ModelConnectionInput };
   env?: NodeJS.ProcessEnv;
   fetchFn?: typeof fetch;
   effort?: string;
@@ -106,6 +110,7 @@ export interface ChatCompletionsExecutorOptions {
 }
 
 export class ChatCompletionsExecutor implements BrokerTaskExecutor {
+  private readonly configuredModel: ChatCompletionsExecutorOptions["configuredModel"];
   readonly identity: CodexExecutorIdentity;
   /**
    * 候选表默认就是这套系统实际在用的那些模型（文本一个、视觉一个），再由 extraModelCandidates
@@ -130,6 +135,7 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
   private readonly now: () => number;
 
   constructor(options: ChatCompletionsExecutorOptions) {
+    this.configuredModel = options.configuredModel;
     const environment = options.env ?? process.env;
     this.provider = options.provider;
     const provider = this.provider;
@@ -156,7 +162,16 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
         "role-audit": { withoutImages: this.textModelId, withImages: this.visualModelId },
       },
     };
-    this.apiKey = environment[provider.apiKeyEnv]?.trim() ?? "";
+    if (options.configuredModel) {
+      this.identity = {
+        profileId: provider.profileId,
+        providerId: options.configuredModel.id,
+        modelId: options.configuredModel.id,
+        taskKinds: [...profile.taskKinds.filter((kind) => kind !== "audio-review"), ...(options.configuredModel.connection.capabilities.includes("audio") ? ["audio-review"] : [])],
+      };
+      this.modelCandidates = [options.configuredModel.id];
+    }
+    this.apiKey = options.configuredModel?.connection.apiKey ?? environment[provider.apiKeyEnv]?.trim() ?? "";
     if (!this.apiKey) {
       throw new Error(`${provider.apiKeyEnv} environment variable is required for the ${provider.profileId} profile.`);
     }
@@ -183,7 +198,7 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
     // 带图的任务不接受覆盖：候选表里的模型不保证都能读图——DeepSeek 的 deepseek-v4-pro 就是
     // 一例，它接受 image_url 却收不到图像（实测 prompt_tokens 只多 5，回答"我无法查看你上传的图片"），
     // 于是会产出一份格式合法、内容瞎猜的复核结论。让 withImages 路由说话，覆盖只在纯文本调用上生效。
-    const override = taskCarriesImages(task) ? undefined : options.model;
+    const override = taskCarriesImages(task) && !this.configuredModel ? undefined : options.model;
     const modelId = override === undefined
       ? modelIdForTask(this.identity, task)
       : reviewedModelOverride(override, this.modelCandidates);
@@ -221,13 +236,17 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
       let repairBaseline: unknown;
       for (let requestAttempt = 1; ; requestAttempt += 1) {
       modelAttemptCount = requestAttempt;
-      const response = await this.fetchFn(this.provider.endpoint, {
+      const configured = this.configuredModel
+        ? configuredModelRequest(this.configuredModel.connection, activePrompt, images, task.kind === "audio-review" ? task.payload.audio : undefined)
+        : undefined;
+      const response = await this.fetchFn(configured?.endpoint ?? this.provider.endpoint, {
         method: "POST",
-        headers: {
+        redirect: "error",
+        headers: configured?.headers ?? {
           authorization: `Bearer ${this.apiKey}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({
+        body: JSON.stringify(configured?.body ?? {
           model: modelId,
           messages: [{
             role: "user",
@@ -311,7 +330,12 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
             },
           ),
         })
-        : await readEnvelope(await readBoundedResponse(response, envelopeFailureDetails, label), envelopeFailureDetails, label);
+        : await readEnvelope(
+          this.configuredModel?.connection.protocol === "anthropic-messages"
+            ? anthropicCompletionEnvelope(await readBoundedResponse(response, envelopeFailureDetails, label))
+            : await readBoundedResponse(response, envelopeFailureDetails, label),
+          envelopeFailureDetails, label,
+        );
       const providerWaitMs = elapsedMs(requestStartedAt, this.now());
       const validationStartedAt = this.now();
       const responseDiagnostics = {
@@ -422,6 +446,7 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
       const visualFindings = task.kind === "visual-review"
         ? (parsed as { findings: Array<{ timecodeMs: number }> }).findings
         : [];
+      if (task.kind === "audio-review") validateAudioReviewReport(parsed, task.payload.audioSha256, task.payload.durationMs);
       if (task.kind === "visual-review"
         && visualFindings.some((finding) => finding.timecodeMs > task.payload.durationMs)) {
         throw new CodexExecutorError(
@@ -461,7 +486,7 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
           prompt,
           providerId: this.identity.providerId,
           modelId,
-          reasoningEffort,
+          ...(!this.configuredModel ? { reasoningEffort } : this.configuredModel.connection.reasoningEffort ? { reasoningEffort: this.configuredModel.connection.reasoningEffort } : {}),
           providerWaitMs,
           // 流式下这是真实的首个输出事件耗时；整包响应无从测得分段事件，只能退回总耗时。
           firstOutputEventMs: envelope.firstOutputEventMs ?? providerWaitMs,
@@ -825,7 +850,7 @@ function invalidOutputDetails(
 
 
 function taskImages(task: ValidatedTask): Buffer[] {
-  if (task.kind === "visual-review" || task.kind === "reference-grammar") {
+  if (task.kind === "visual-review" || task.kind === "reference-grammar" || task.kind === "audio-review") {
     return task.payload.frames.map((frame) => frame.jpeg);
   }
   if (task.kind === "asset-rank") return task.payload.thumbnails.map((thumbnail) => thumbnail.jpeg);
