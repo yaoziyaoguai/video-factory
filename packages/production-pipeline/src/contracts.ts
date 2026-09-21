@@ -382,6 +382,8 @@ export interface ProductionBrief {
   visualProof?: string;
   visualIntent?: string;
   visualPlan?: ProductionVisualPlan;
+  /** visualPlan 的来源证据：false=创建端确认是未采用的系统建议；缺省=来源未知，不得擅自降级。 */
+  visualPlanAdopted?: boolean;
   seriesContext?: ProductionSeriesContext;
   creationContext?: {
     origin: "trend" | "series" | "manual" | "case";
@@ -398,7 +400,7 @@ const PRODUCTION_BRIEF_INPUT_KEYS = new Set([
   "protocolVersion", "title", "angle", "audience", "nicheSlug", "durationSeconds", "durationRange",
   "platform", "reviewMode", "runPurpose", "providers", "models", "modelSelectionSources", "frozenModelSelections", "workflowFeatures",
   "referenceVideo", "director", "economics", "spendFeedback", "voiceDirection", "editorial", "visualProof",
-  "visualIntent", "visualPlan", "seriesContext", "creationContext", "rework", "taskContractDigests",
+  "visualIntent", "visualPlan", "visualPlanAdopted", "seriesContext", "creationContext", "rework", "taskContractDigests",
   "articleSources", "budgetIntentionCny",
   // 模板字段只为旧调用方提供明确的弃用剥离；它们不会进入有效 brief。
   "template", "templateSnapshot",
@@ -432,6 +434,11 @@ export function parseBrief(value: unknown): ProductionBrief {
   const visualProof = value.visualProof === undefined ? undefined : requireString(value.visualProof, "visualProof");
   const visualIntent = value.visualIntent === undefined ? undefined : optionalBoundedText(value.visualIntent, "visualIntent", 1000);
   const visualPlan = parseProductionVisualPlan(value.visualPlan);
+  // 来源证据只接受缺省或严格布尔：字符串/数字等非法值必须显式拒绝，不能归一化成
+  // “未采用建议”而降低用户要求身份（R4-08）。
+  const visualPlanAdopted = value.visualPlanAdopted === undefined ? undefined
+    : typeof value.visualPlanAdopted === "boolean" ? value.visualPlanAdopted
+      : (() => { throw new Error("visualPlanAdopted must be a boolean when provided."); })();
   const seriesContext = parseProductionSeriesContext(value.seriesContext);
   const creationContext = parseCreationContext(value.creationContext);
   const articleSources = parseProductionArticleSources(value.articleSources);
@@ -515,6 +522,7 @@ export function parseBrief(value: unknown): ProductionBrief {
     ...(visualProof ? { visualProof } : {}),
     ...(visualIntent ? { visualIntent } : {}),
     ...(visualPlan ? { visualPlan } : {}),
+    ...(visualPlanAdopted !== undefined ? { visualPlanAdopted } : {}),
     ...(seriesContext ? { seriesContext } : {}),
     ...(creationContext ? { creationContext } : {}),
     ...(articleSources.length ? { articleSources } : {}),

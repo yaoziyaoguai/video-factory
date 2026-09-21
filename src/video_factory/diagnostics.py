@@ -55,3 +55,8 @@ def diagnostic_span(event, **facts):
     else:
         facts['elapsedMs'] = round((time.monotonic() - started) * 1000, 3)
         _emit(event, 'succeeded', facts)
+
+
+def diagnostic_event(event, state, **facts):
+    """跨度之外的 单条白名单事实（如“缓存已跳过”），与阶段日志走同一脱敏通道。"""
+    _emit(event, state, facts)

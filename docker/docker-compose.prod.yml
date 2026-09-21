@@ -25,6 +25,10 @@ services:
       STUDIO_HOST: 0.0.0.0
       STUDIO_PORT: 4317
       VIDEO_FACTORY_WORKSPACE: /data/factory
+      # Pixabay 接入要求 24 小时跨任务响应缓存（stock_cache）。根文件系统 read_only，
+      # 缓存必须落在可写持久卷上；指向 workspace 卷内目录即可跨任务、跨重启复用。
+      # 代码侧 best-effort 降级只是异常保护，不替代这条正常部署前提。
+      XDG_CACHE_HOME: /data/factory/cache
       VIDEO_FACTORY_AUTH_USERNAME: ${VIDEO_FACTORY_AUTH_USERNAME:-}
       VIDEO_FACTORY_AUTH_PASSWORD_HASH: ${VIDEO_FACTORY_AUTH_PASSWORD_HASH:-}
       VIDEO_FACTORY_AUTH_SESSION_SECRET: ${VIDEO_FACTORY_AUTH_SESSION_SECRET:-}

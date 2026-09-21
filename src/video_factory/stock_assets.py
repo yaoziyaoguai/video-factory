@@ -106,6 +106,10 @@ class MissingProviderKey(RuntimeError):
     pass
 
 
+class StockSearchUnavailableError(RuntimeError):
+    """全部启用的图库来源都检索失败。message 只含来源标识与错误类型，可安全直达创作者界面。"""
+
+
 class NoProviderRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, msg, headers, newurl):
         # 鉴权 API 不跟随重定向，避免把 Authorization 转交第三方。
@@ -185,6 +189,8 @@ def search_routed_scene_asset_candidates(
     if not isinstance(shots, list):
         raise ValueError("Director plan shots must be an array")
     routes = director_routes_for_scenes(shots, scene_list)
+    provider_search_attempts = 0
+    provider_search_successes = 0
     report = {
         "version": "video-factory/asset-candidates-v1",
         "job_id": job_id,
@@ -226,11 +232,18 @@ def search_routed_scene_asset_candidates(
                 continue
             provider = stock_provider_name(provider_id)
             stock_query = resolve_director_stock_query(scene, director_query)
+            provider_search_attempts += 1
             try:
                 candidates = search_stock_query_variants(provider, stock_query, scene.search_terms, route_media_type, limit)
-            except (RuntimeError, ValueError) as error:
-                search_errors.append({"provider_id": provider_id, "message": str(error)[:500]})
+            except Exception as error:
+                # 单一可替代来源的任何异常都只记为该来源失败，其余来源的候选照常交付（DF-03）。
+                # 公开报告只携带受控投影字段（类型/HTTP 状态/缺密钥提示），不带异常原文（R3-06）。
+                search_errors.append({
+                    "provider_id": provider_id,
+                    **public_provider_error_fields(error),
+                })
                 continue
+            provider_search_successes += 1
             for candidate in candidates:
                 original = candidate.source_url or candidate.download_url
                 if original in seen_originals:
@@ -263,6 +276,24 @@ def search_routed_scene_asset_candidates(
         })
     output = default_asset_search_report_path(workspace, job_id)
     inventory_output = default_asset_candidate_inventory_path(workspace, job_id)
+    if provider_search_attempts > 0 and provider_search_successes == 0:
+        # 全部启用来源都失败才判失败：按来源汇总受控失败原因（类型/HTTP 状态，不含
+        # 未受控异常原文），给出可操作的下一步；部分失败时有效候选已在报告里，
+        # 走正常候选不足路径。不承诺上游检查点行为——恢复以实际入口为准（R3-07）。
+        failure_reasons: dict[str, str] = {}
+        for row in report["scene_candidates"]:
+            for entry in row["search_errors"]:
+                # search_errors 的 message 只可能是受控投影（HTTP 状态/静态常量），
+                # 优先携带以保留超时等真实根因；否则退化到错误类型与状态码。
+                reason = str(entry["message"]) if entry.get("message") else str(entry["error_type"])
+                if entry.get("message") is None and entry.get("http_status") is not None:
+                    reason += f"/HTTP {entry['http_status']}"
+                failure_reasons.setdefault(str(entry["provider_id"]), reason)
+        summary = "、".join(f"{provider_id}：{reason}" for provider_id, reason in sorted(failure_reasons.items()))
+        raise StockSearchUnavailableError(
+            f"图库候选检索全部来源失败（{summary}）。请按各来源的失败类型（如密钥、服务状态、网络）"
+            "处理后，通过当前可用的恢复入口继续本步骤；工作区中已保存的进度会保留。"
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     inventory_output.write_text(json.dumps(inventory, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1396,14 +1427,52 @@ def resolve_director_stock_query(scene: Scene, director_query: str) -> str:
     return director_query.strip() or query_for_scene(scene)
 
 
+# 受控静态原因：由本模块常量构造。公开时投影这份常量本身，而不是复制匹配前缀后的
+# 异常原文——原文后缀可能被注入任意内容（R5-02）。
+STATIC_TIMEOUT_REASON = "素材检索总时限已耗尽；请稍后重试或选择其他来源。"
+
+
+def public_provider_error_fields(error: Exception) -> dict:
+    """受控检索异常进入公开报告前的安全投影（R3-06/R4-05/R5-02）。
+
+    公开字段只允许两类事实：错误类型，以及本模块构造的受控消息——HTTP 状态投影
+    （正文一律丢弃）或固定常量。任何异常原文不得进入公开报告。
+    """
+    fields: dict = {"error_type": type(error).__name__}
+    message = str(error)
+    match = re.match(r"Provider request failed with HTTP (\d+)", message)
+    if match:
+        fields["message"] = f"Provider request failed with HTTP {match.group(1)}"
+        fields["http_status"] = int(match.group(1))
+        return fields
+    timeout_match = re.match(r"Provider request timed out after (\d+) attempts", message)
+    if timeout_match:
+        fields["message"] = f"Provider request timed out after {timeout_match.group(1)} attempts"
+        return fields
+    if message.startswith("素材检索总时限已耗尽"):
+        fields["message"] = STATIC_TIMEOUT_REASON
+    return fields
+
+
 def search_stock_query_variants(provider: str, query: str, search_terms: list[str], media_type: str, limit: int):
     queries = list(dict.fromkeys(value.strip() for value in [query, *search_terms] if isinstance(value, str) and value.strip()))[:3]
     candidates = {}
+    errors: list[Exception] = []
+    succeeded_queries = 0
     for term in queries:
-        for candidate in search_stock_assets(provider=provider, query=term, media_type=media_type, limit=limit):
+        try:
+            results = search_stock_assets(provider=provider, query=term, media_type=media_type, limit=limit)
+        except Exception as error:
+            # 单个变体查询失败不能抹掉前面查询已经拿到的合法候选（同来源内部的局部隔离）。
+            errors.append(error)
+            continue
+        succeeded_queries += 1
+        for candidate in results:
             candidates.setdefault(candidate.source_url or candidate.asset_id, candidate)
         if len(candidates) >= limit:
             break
+    if not candidates and errors and succeeded_queries == 0:
+        raise errors[0]
     return list(candidates.values())[:limit]
 
 
@@ -1436,9 +1505,20 @@ def flickr_api_client(opener=None, environ=None):
             headers=api_headers({'Content-Type': 'application/x-www-form-urlencoded'}))
         try:
             payload = fetch_json(request, active_opener, deadline=deadline)
-        except (RuntimeError, ValueError):
-            # 上游错误页可能回显凭据，不能把其正文或请求地址带入日志/产物。
-            raise RuntimeError('Flickr 请求失败或超过检索时限；请检查 API 权限、配额与网络。') from None
+        except RuntimeError as error:
+            message = str(error)
+            http_match = re.match(r"Provider request failed with HTTP (\d+)", message)
+            if http_match:
+                # 重建受控消息（只含状态码，正文丢弃），保留 HTTP 原因跨包装层不丢（R6-02）。
+                raise RuntimeError(
+                    f"Provider request failed with HTTP {http_match.group(1)}；Flickr 请求被拒绝，请检查 API 权限与配额。"
+                ) from None
+            # 受控超时/总时限消息本身已是常量级安全投影，原样保留其身份。
+            if message.startswith("Provider request timed out") or message.startswith("素材检索总时限已耗尽"):
+                raise
+            raise RuntimeError('Flickr 请求失败；请检查 API 权限、配额与网络。') from None
+        except ValueError:
+            raise RuntimeError('Flickr 请求失败；请检查 API 权限、配额与网络。') from None
         if payload.get('stat') != 'ok':
             code = str(payload.get('code', ''))
             raise RuntimeError('Flickr API 拒绝请求，错误码：' + (code if code.isdigit() else 'unknown'))
@@ -1454,6 +1534,15 @@ def provider_key(provider: str, environ: Optional[dict] = None) -> str:
     if not key:
         raise MissingProviderKey(f"{env_name} is required for {provider} asset search.")
     return key
+
+
+def _is_timeout_error(error: BaseException) -> bool:
+    """按异常类型识别超时（含 URLError.reason 包装的 socket 超时），不做正文匹配（R6-02）。"""
+    if isinstance(error, TimeoutError):
+        return True
+    if isinstance(error, urllib.error.URLError):
+        return isinstance(getattr(error, "reason", None), TimeoutError)
+    return False
 
 
 def fetch_json(request: urllib.request.Request, opener: Optional[Callable] = None, *, deadline: Optional[float] = None) -> dict:
@@ -1492,6 +1581,10 @@ def fetch_json(request: urllib.request.Request, opener: Optional[Callable] = Non
             if deadline is not None and isinstance(error, AssetNetworkError):
                 raise RuntimeError('素材检索总时限已耗尽；请稍后重试或选择其他来源。') from error
             if attempt == attempts:
+                # 依据异常类型识别超时（含 URLError.reason 包装的 socket 超时），
+                # 保留受控超时身份：不能退化成裸 RuntimeError 丢失根因（R6-02）。
+                if _is_timeout_error(error):
+                    raise RuntimeError(f"Provider request timed out after {attempt} attempts") from error
                 raise RuntimeError(
                     f"Provider request failed after {attempt} attempts: {type(error).__name__}"
                 ) from error

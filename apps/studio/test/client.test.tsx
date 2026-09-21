@@ -1639,6 +1639,8 @@ describe("Studio client", () => {
     expect(maximum).toHaveValue(34);
 
     fireEvent.change(minimum, { target: { value: "30" } });
+    // 时长范围按“失焦才提交”合同生效：编辑期间不逐键夹取（产品缺陷修复）。
+    fireEvent.blur(minimum);
     expect(screen.getByLabelText("建议时长")).toHaveValue("30");
 
     await user.type(screen.getByLabelText("视频标题"), "动态时长合同测试");
@@ -2795,6 +2797,8 @@ describe("Studio client", () => {
     expect(screen.getByRole("textbox", { name: "脚本修改要求" })).not.toHaveValue("关闭弹窗后不应保留的本地编辑");
     expect(screen.getByText(/已带入上一版基线资料/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("最长时长"), { target: { value: "36" } });
+    // 时长范围按“失焦才提交”合同生效：编辑期间不逐键夹取（产品缺陷修复）。
+    fireEvent.blur(screen.getByLabelText("最长时长"));
     expect(screen.getByLabelText("最长时长")).toHaveValue(36);
 
     await userEvent.click(screen.getByRole("button", { name: "开始制作" }));

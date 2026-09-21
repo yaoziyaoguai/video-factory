@@ -10,7 +10,12 @@ from typing import Any, Dict
 
 from .domain import Scene
 from .script_service import draft_script_from_values, draft_to_dict
-from .stock_assets import prepare_routed_scene_assets, prepare_scene_assets, search_routed_scene_asset_candidates
+from .stock_assets import (
+    StockSearchUnavailableError,
+    prepare_routed_scene_assets,
+    prepare_scene_assets,
+    search_routed_scene_asset_candidates,
+)
 from .technical_review import review_video
 from .voiceover import VoiceDoesNotFitError, synthesize_voiceover_plan
 from .renderer import render_job_manifest
@@ -223,14 +228,27 @@ def search_assets(request: Dict[str, Any], output_dir: Path, started_at: float) 
     if not scenes:
         raise WorkerProtocolError("asset.search requires a script with scenes")
     parameters = request.get("parameters", {})
-    report_path, inventory_path = search_routed_scene_asset_candidates(
-        job_id=1,
-        scenes=scenes,
-        workspace=output_dir,
-        director_plan=director_plan,
-        media_type=str(parameters.get("mediaType", "video")),
-        limit=int(parameters.get("limit", 6)),
-    )
+    try:
+        report_path, inventory_path = search_routed_scene_asset_candidates(
+            job_id=1,
+            scenes=scenes,
+            workspace=output_dir,
+            director_plan=director_plan,
+            media_type=str(parameters.get("mediaType", "video")),
+            limit=int(parameters.get("limit", 6)),
+        )
+    except StockSearchUnavailableError as error:
+        # 这条 message 只由来源标识与错误类型构成（未受控异常原文不进入），可以直达界面；
+        # 顶层 safe_worker_failure 会把它脱敏成「媒体处理失败（RuntimeError）」，丢失全部
+        # 可操作信息，所以在这里直接返回结构化失败。
+        return {
+            "protocolVersion": WORKER_PROTOCOL_VERSION,
+            "commandId": request["commandId"],
+            "status": "failed",
+            "error": {"code": "ASSET_SEARCH_SOURCES_UNAVAILABLE", "message": str(error)},
+            "artifacts": [],
+            "diagnostics": {"durationMs": round((time.monotonic() - started_at) * 1000, 3)},
+        }
     artifact = describe_artifact(
         path=report_path,
         kind="asset_candidates",

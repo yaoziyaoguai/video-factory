@@ -1859,6 +1859,8 @@ export interface StudioProductionInput {
   visualProof?: string;
   visualIntent?: string;
   visualPlan?: StudioVisualPlan;
+  /** visualPlan 的来源证据：false=继承的未采用系统建议；缺省=来源未知。 */
+  visualPlanAdopted?: boolean;
   seriesContext?: StudioSeriesProductionContext;
   creationContext?: {
     origin: "trend" | "series" | "manual" | "case";

@@ -6879,7 +6879,9 @@ function creativePlanningNode(
                 outputDir: searchAttempt.directory,
               });
               if (response.status !== "succeeded") {
-                throw new Error(`Joint creative planning candidate search failed: ${response.error?.message ?? "worker command failed"}.`);
+                const searchError = response.error?.message ?? "worker command failed";
+                const searchCode = response.error?.code ? ` [${response.error.code}]` : "";
+                throw new Error(`Joint creative planning candidate search failed: ${searchError}${searchCode}.`);
               }
               await verifyWorkerArtifacts(response, searchAttempt.directory);
               await verifyWorkerPrivateOutputPath(response.output?.candidateInventoryPath, searchAttempt.directory);
@@ -10641,7 +10643,9 @@ function workerResponseToNodeResult(
   context: WorkflowContext,
   parentNodeIds: string[],
 ): NodeExecutionResult<Record<string, unknown>> {
-  const error = response.error?.message ?? "Worker execution failed without an error message.";
+  // 结构化错误码随 message 贯通：展示层按稳定码分类，不依赖英文包装前缀（R3-07）。
+  const rawError = response.error?.message ?? "Worker execution failed without an error message.";
+  const error = response.error?.code ? `${rawError} [${response.error.code}]` : rawError;
   const parentArtifactIds = context.artifacts
     .filter((artifact) => artifact.producer && parentNodeIds.includes(artifact.producer.nodeId))
     .map((artifact) => artifact.id);

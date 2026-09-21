@@ -126,6 +126,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [durationRange, setDurationRange] = useState<StudioProductionInput["durationRange"]>(() => (
     initialValues?.durationRange ?? defaultStudioDurationRange(initialValues?.durationSeconds ?? 24)
   ));
+  const [durationRangeDrafts, setDurationRangeDrafts] = useState<Partial<Record<"minSeconds" | "maxSeconds", string>>>({});
   const durationRangeTouched = useRef(false);
   const visualIntentTouched = useRef(false);
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([]);
@@ -505,6 +506,19 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setDurationSeconds((current) => Math.min(next.maxSeconds, Math.max(next.minSeconds, current)));
   }
 
+  // 逐键夹取会让“想输入 45”变成 20/180 的来回跳动：编辑期间只保留草稿文本，
+  // 离开输入框时才校验并提交（清空或非整数则还原为当前值）。
+  function commitDurationDraft(field: "minSeconds" | "maxSeconds") {
+    const draft = durationRangeDrafts[field];
+    setDurationRangeDrafts((current) => {
+      if (!(field in current)) return current;
+      const { [field]: _removed, ...rest } = current;
+      return rest;
+    });
+    if (draft === undefined || !Number.isInteger(Number(draft))) return;
+    changeDurationRange(field, Number(draft));
+  }
+
   function toggleAssetProvider(provider: StudioProvider) {
     if (!provider.available || (provider.billing === "metered" && !selectedRecipe.allowMeteredProviders)) return;
     if (provider.id === "local-editorial-v1" && imageStory) return;
@@ -613,7 +627,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         ...(editorial ? { editorial } : {}),
         ...(visualProof ? { visualProof } : {}),
         ...(visualIntent ? { visualIntent } : {}),
-        ...(preserveInheritedVisualPlan ? { visualPlan: initialValues!.visualPlan } : {}),
+        ...(preserveInheritedVisualPlan ? { visualPlan: initialValues!.visualPlan, visualPlanAdopted: false } : {}),
         ...(initialValues?.seriesContext ? { seriesContext: initialValues.seriesContext } : {}),
         ...(initialValues?.creationContext ? { creationContext: initialValues.creationContext } : {}),
         ...(rework ? { rework } : {}),
@@ -834,11 +848,17 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   <div className="brief-extra-fields">
                   <label className="field field-compact">
                     <span>最短时长</span>
-                    <input type="number" min={20} max={durationRange.maxSeconds} step={1} value={durationRange.minSeconds} onChange={(event) => changeDurationRange("minSeconds", Number(event.target.value))} />
+                    <input type="number" min={20} max={durationRange.maxSeconds} step={1}
+                      value={durationRangeDrafts.minSeconds ?? durationRange.minSeconds}
+                      onChange={(event) => setDurationRangeDrafts((current) => ({ ...current, minSeconds: event.target.value }))}
+                      onBlur={() => commitDurationDraft("minSeconds")} />
                   </label>
                   <label className="field field-compact">
                     <span>最长时长</span>
-                    <input type="number" min={durationRange.minSeconds} max={180} step={1} value={durationRange.maxSeconds} onChange={(event) => changeDurationRange("maxSeconds", Number(event.target.value))} />
+                    <input type="number" min={durationRange.minSeconds} max={180} step={1}
+                      value={durationRangeDrafts.maxSeconds ?? durationRange.maxSeconds}
+                      onChange={(event) => setDurationRangeDrafts((current) => ({ ...current, maxSeconds: event.target.value }))}
+                      onBlur={() => commitDurationDraft("maxSeconds")} />
                   </label>
                   </div>
                 </details> : null}

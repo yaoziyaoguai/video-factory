@@ -2225,6 +2225,772 @@ describe("WorkflowRunner", () => {
     assert.equal(regenerated.executionReceipts?.length, 8);
   });
 
+  it("keeps the human stop point and refuses whole-run success when later required nodes never ran", async () => {
+    // 边界闸门场景：run 停在 brief 的人工确认点，后续必需节点还没创建。此时保存人工版本
+    // 只能换稿，不能代替确认，更不能把只完成 1/3 的 run 判成整条成功（DF-01）。
+    const calls: string[] = [];
+    const definition: WorkflowDefinition = {
+      id: "boundary-gate-override",
+      name: "Boundary gate override",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "brief",
+          label: "Brief",
+          capability: "brief.validate",
+          mode: "automatic",
+          execute: () => ({
+            status: "needs_human" as const,
+            output: { angle: "generated" },
+            intervention: {
+              boundary: "node-complete",
+              reason: "这一步已完成，等你确认后进入下一步。",
+              requiredAction: "approve",
+              options: ["approve", "reject"],
+            },
+          }),
+        },
+        {
+          id: "script",
+          label: "Script",
+          capability: "script.draft",
+          mode: "automatic",
+          dependsOn: ["brief"],
+          getInput: (context) => context.outputs.get("brief"),
+          execute: (input) => {
+            calls.push(`script:${JSON.stringify(input)}`);
+            return { output: { script: "ok" } };
+          },
+        },
+        {
+          id: "render",
+          label: "Render",
+          capability: "video.render",
+          mode: "automatic",
+          dependsOn: ["script"],
+          execute: () => ({ output: { video: "ok" } }),
+        },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, {});
+    assert.equal(waiting.status, "needs_human");
+    assert.equal(waiting.nodeRuns.length, 1);
+    const intervention = waiting.interventions.at(-1)!;
+
+    const overridden = runner.applyNodeOverride(definition, waiting, {
+      nodeId: "brief",
+      actor: "editor",
+      output: { angle: "human edit" },
+    });
+
+    const briefRun = overridden.nodeRuns.find((node) => node.nodeId === "brief");
+    assert.equal(briefRun?.status, "needs_human", "人工保存不能代替停点上的确认动作");
+    assert.equal(briefRun?.intervention?.boundary, "node-complete", "确认入口必须保留");
+    assert.notEqual(briefRun?.intervention?.id, intervention.id, "换稿必须换发新停点身份，旧页面的批准不能作用于新版本");
+    assert.equal(overridden.status, "needs_human", "未创建的必需节点不能被忽略，run 不能判成 succeeded");
+    assert.equal(overridden.interventions.some((entry) => entry.id === briefRun?.intervention?.id), true);
+
+    // 正常确认后能够继续：下游拿到的是人工版本，且后续节点照常执行。
+    const resumed = await runner.resume(definition, overridden, {
+      interventionId: briefRun!.intervention!.id,
+      action: "approve",
+      actor: "studio-owner",
+    });
+    assert.equal(resumed.status, "succeeded");
+    assert.deepEqual(calls, ['script:{"angle":"human edit"}']);
+    const humanVersion = resumed.nodeRuns.find((node) => node.nodeId === "brief")?.outputState?.versions.at(-1);
+    assert.equal(humanVersion?.source, "human");
+    assert.equal(humanVersion?.output && typeof humanVersion.output === "object"
+      ? (humanVersion.output as { angle?: string }).angle : undefined, "human edit");
+  });
+
+  it("does not mark a terminal-edited failed run succeeded while later required nodes never ran", async () => {
+    // 终局修订场景：run 失败在中间节点，用户人工修好这一步的输出。后续必需节点同样没跑过，
+    // 完成判定不能只看“现有节点都不 stale”就宣布整条成功（DF-01 的共享机制面）。
+    const definition: WorkflowDefinition = {
+      id: "terminal-edit-incomplete",
+      name: "Terminal edit incomplete",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "brief",
+          label: "Brief",
+          capability: "brief.validate",
+          mode: "automatic",
+          execute: () => ({ output: { angle: "generated" } }),
+        },
+        {
+          id: "script",
+          label: "Script",
+          capability: "script.draft",
+          mode: "automatic",
+          dependsOn: ["brief"],
+          execute: () => { throw new Error("model down"); },
+        },
+        {
+          id: "render",
+          label: "Render",
+          capability: "video.render",
+          mode: "automatic",
+          dependsOn: ["script"],
+          execute: () => ({ output: { video: "ok" } }),
+        },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const failed = await runner.run(definition, {});
+    assert.equal(failed.status, "failed");
+
+    const overridden = runner.applyNodeOverride(definition, failed, {
+      nodeId: "script",
+      actor: "editor",
+      output: { script: "human fix" },
+      allowTerminalEdit: true,
+    });
+
+    assert.equal(overridden.nodeRuns.find((node) => node.nodeId === "script")?.status, "succeeded");
+    assert.notEqual(overridden.status, "succeeded", "render 从未执行，run 不能判成 succeeded");
+    assert.equal(overridden.finishedAt, undefined);
+
+    // 落在可恢复状态：重新生成只补未完成部分，不重跑已成功节点。
+    const resumed = await runner.resumeStale(definition, overridden);
+    assert.equal(resumed.status, "succeeded");
+    assert.equal(resumed.nodeRuns.find((node) => node.nodeId === "render")?.status, "succeeded");
+    assert.equal(resumed.nodeRuns.find((node) => node.nodeId === "brief")?.status, "succeeded");
+  });
+
+  it("does not resurrect an already-approved stop point on a later edit", async () => {
+    // resume() 批准后不删除 nodeRun.intervention 对象：历史停点只能留作审计记录。
+    // 再次人工修订该节点时不能把它复活成 needs_human（Oracle 审查 S03）。
+    const definition: WorkflowDefinition = {
+      id: "no-stop-resurrection",
+      name: "No stop resurrection",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "brief",
+          label: "Brief",
+          capability: "brief.validate",
+          mode: "automatic",
+          execute: () => ({
+            status: "needs_human" as const,
+            output: { angle: "generated" },
+            intervention: {
+              boundary: "node-complete",
+              reason: "这一步已完成，等你确认后进入下一步。",
+              requiredAction: "approve",
+              options: ["approve", "reject"],
+            },
+          }),
+        },
+        {
+          id: "script",
+          label: "Script",
+          capability: "script.draft",
+          mode: "automatic",
+          dependsOn: ["brief"],
+          execute: () => ({ output: { script: "ok" } }),
+        },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, {});
+    const approved = await runner.resume(definition, waiting, {
+      interventionId: waiting.nodeRuns[0]!.intervention!.id,
+      action: "approve",
+      actor: "studio-owner",
+    });
+    assert.equal(approved.status, "succeeded");
+    assert.equal(approved.nodeRuns[0]!.status, "succeeded");
+    assert.notEqual(approved.nodeRuns[0]!.intervention, undefined, "批准后对象保留是既有行为（前提条件）");
+
+    const revised = runner.applyNodeOverride(definition, approved, {
+      nodeId: "brief",
+      actor: "editor",
+      output: { angle: "revised" },
+      allowTerminalEdit: true,
+    });
+    const briefRun = revised.nodeRuns.find((node) => node.nodeId === "brief");
+    assert.equal(briefRun?.status, "succeeded", "历史停点不得复活");
+    assert.equal(revised.status, "stale", "script 因上游修订过期，等待重新生成");
+    const regenerated = await runner.resumeStale(definition, revised);
+    assert.equal(regenerated.status, "succeeded");
+    assert.equal(regenerated.nodeRuns.find((node) => node.nodeId === "brief")?.status, "succeeded");
+  });
+
+  it("keeps an unrelated failed node's recovery entry when editing another node", async () => {
+    // A 成功、独立的 B 失败、C 依赖 B：终局修订 A 不能把 run 改写成普通 stale 缺口，
+    // 否则 resumeStale 会跳过失败的 B 直接执行 C（Oracle 审查场景 E）。
+    const calls: string[] = [];
+    const definition: WorkflowDefinition = {
+      id: "unrelated-failure-preserved",
+      name: "Unrelated failure preserved",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "brief",
+          label: "Brief",
+          capability: "brief.validate",
+          mode: "automatic",
+          execute: () => ({ output: { angle: "generated" } }),
+        },
+        {
+          id: "script",
+          label: "Script",
+          capability: "script.draft",
+          mode: "automatic",
+          execute: () => {
+            calls.push("script");
+            if (calls.filter((entry) => entry === "script").length === 1) throw new Error("model down");
+            return { output: { script: "recovered" } };
+          },
+        },
+        {
+          id: "render",
+          label: "Render",
+          capability: "video.render",
+          mode: "automatic",
+          dependsOn: ["script"],
+          execute: () => {
+            calls.push("render");
+            return { output: { video: "ok" } };
+          },
+        },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const failed = await runner.run(definition, {});
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.nodeRuns.find((node) => node.nodeId === "script")?.status, "failed");
+
+    const overridden = runner.applyNodeOverride(definition, failed, {
+      nodeId: "brief",
+      actor: "editor",
+      output: { angle: "human edit" },
+      allowTerminalEdit: true,
+    });
+    assert.equal(overridden.status, "failed", "未解决的失败节点保持 failed 恢复入口");
+    assert.equal(overridden.nodeRuns.find((node) => node.nodeId === "script")?.status, "failed");
+    assert.equal(calls.includes("render"), false, "依赖失败节点的 render 不得被执行");
+
+    await assert.rejects(() => runner.resumeStale(definition, overridden), /no stale nodes/);
+    const retried = await runner.retryFailedNode(definition, overridden, "script");
+    assert.notEqual(retried.status, "failed");
+  });
+
+  it("does not execute a stale node when continuing after approving a stop (S04)", async () => {
+    const calls: string[] = [];
+    const definition: WorkflowDefinition = {
+      id: "approve-with-stale-descendant",
+      name: "Approve with stale descendant",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "brief",
+          label: "Brief",
+          capability: "brief.validate",
+          mode: "automatic",
+          execute: () => ({
+            status: "needs_human" as const,
+            output: { angle: "generated" },
+            intervention: {
+              boundary: "node-complete",
+              reason: "等确认",
+              requiredAction: "approve",
+              options: ["approve", "reject"],
+            },
+          }),
+        },
+        {
+          id: "script",
+          label: "Script",
+          capability: "script.draft",
+          mode: "automatic",
+          dependsOn: ["brief"],
+          execute: () => {
+            calls.push("script");
+            return { output: { script: "ok" } };
+          },
+        },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, {});
+    // 构造混合持久化状态（恢复健壮性测试，与资料包同款）：A 等人审，B 带 stale 标记。
+    const mixed = structuredClone(waiting);
+    mixed.nodeRuns.unshift({
+      nodeId: "script",
+      status: "stale",
+      startedAt: clock(),
+      outputState: {
+        nodeId: "script",
+        effectiveVersionId: "script-v1",
+        generatedVersionId: "script-v1",
+        stale: true,
+        versions: [],
+      },
+      inputState: { nodeId: "script", effectiveVersionId: "script-in-1", stale: true, versions: [] },
+      artifactIds: [],
+      qualityGateResults: [],
+    });
+    mixed.status = "needs_human";
+    calls.length = 0;
+
+    const approved = await runner.resume(definition, mixed, {
+      interventionId: mixed.nodeRuns.find((node) => node.nodeId === "brief")!.intervention!.id,
+      action: "approve",
+      actor: "studio-owner",
+    });
+    assert.equal(approved.status, "stale", "批准后仍存在 stale 节点时不得自动续跑或宣布成功");
+    assert.deepEqual(calls, [], "stale 节点必须等受控再生成，批准动作不得顺带执行它");
+    // 机器生成的 stale 内容走受控再生成入口补齐；人工版本仍由既有预检拒绝。
+    const regenerated = await runner.resumeStale(definition, approved);
+    assert.equal(regenerated.status, "succeeded");
+    assert.deepEqual(calls, ["script"]);
+  });
+
+  it("does not bypass an unrelated spend stop when continuing after approval", async () => {
+    // 构造混合持久化状态（恢复健壮性测试）：A 等人审，独立分支 B 停在费用待审批。
+    const definition: WorkflowDefinition = {
+      id: "mixed-spend-stop",
+      name: "Mixed spend stop",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "brief",
+          label: "Brief",
+          capability: "brief.validate",
+          mode: "automatic",
+          execute: () => ({
+            status: "needs_human" as const,
+            output: { angle: "generated" },
+            intervention: {
+              boundary: "node-complete",
+              reason: "等确认",
+              requiredAction: "approve",
+              options: ["approve", "reject"],
+            },
+          }),
+        },
+        {
+          id: "assets",
+          label: "Assets",
+          capability: "asset.prepare",
+          mode: "automatic",
+          execute: () => {
+            throw new Error("assets must not execute while its spend stop is unresolved");
+          },
+        },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, {});
+    const mixed = structuredClone(waiting);
+    mixed.nodeRuns.unshift({
+      nodeId: "assets",
+      status: "awaiting_spend_approval",
+      startedAt: clock(),
+      spendPlan: {
+        id: "plan-1",
+        nodeId: "assets",
+        providerId: "metered-test-v1",
+        modelId: "m1",
+        inputVersionIds: [],
+        estimatedCostCny: 1,
+        maxCostCny: 1,
+        maxAttempts: 1,
+        createdAt: clock(),
+      },
+      artifactIds: [],
+      qualityGateResults: [],
+    });
+    mixed.status = "needs_human";
+
+    const approved = await runner.resume(definition, mixed, {
+      interventionId: mixed.nodeRuns.find((node) => node.nodeId === "brief")!.intervention!.id,
+      action: "approve",
+      actor: "studio-owner",
+    });
+    assert.equal(approved.status, "awaiting_spend_approval", "未解除的费用停点保持其恢复入口");
+    assert.equal(
+      approved.nodeRuns.find((node) => node.nodeId === "assets")?.status,
+      "awaiting_spend_approval",
+      "费用停点不得被普通批准跳过或改写",
+    );
+    // 两步保存绕过的第一步同样必须被拒绝：费用待审批目标不接受通用输入保存。
+    assert.throws(
+      () => runner.applyNodeInputOverride(definition, mixed, {
+        nodeId: "assets",
+        actor: "editor",
+        input: { replaced: true },
+      }),
+      /waiting for spend approval/,
+    );
+  });
+
+  it("rejects saving a human output over a stale input and completes after explicit input review (S07/R3-02)", async () => {
+    const definition: WorkflowDefinition = {
+      id: "stale-input-save-guard",
+      name: "Stale input save guard",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "brief",
+          label: "Brief",
+          capability: "brief.validate",
+          mode: "automatic",
+          execute: () => ({ output: { angle: "generated" } }),
+        },
+        {
+          id: "script",
+          label: "Script",
+          capability: "script.draft",
+          mode: "automatic",
+          dependsOn: ["brief"],
+          getInput: (context) => context.outputs.get("brief"),
+          execute: (input) => ({ output: { echo: input } }),
+        },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const generated = await runner.run(definition, {});
+    // 上游修订让 script 的输入失效。
+    const upstreamEdited = runner.applyNodeOverride(definition, generated, {
+      nodeId: "brief",
+      actor: "editor",
+      output: { angle: "human edit" },
+      allowTerminalEdit: true,
+    });
+    const scriptRun = upstreamEdited.nodeRuns.find((node) => node.nodeId === "script")!;
+    assert.equal(scriptRun.status, "stale");
+    assert.equal(scriptRun.inputState?.stale, true);
+
+    // 直接保存人工输出必须被拒绝：输入已失效。
+    assert.throws(
+      () => runner.applyNodeOverride(definition, upstreamEdited, {
+        nodeId: "script",
+        actor: "editor",
+        output: { echo: "human fix" },
+        allowTerminalEdit: true,
+      }),
+      /input is stale/,
+    );
+
+    // 显式复核并保存输入后，才能保存输出；两者都有效完成后整条才 succeeded，
+    // 且不存在“succeeded 但 stale 标记”的残留。
+    const inputReviewed = runner.applyNodeInputOverride(definition, upstreamEdited, {
+      nodeId: "script",
+      actor: "editor",
+      input: { angle: "human edit" },
+      expectedRunRevision: upstreamEdited.revision,
+      expectedVersionId: scriptRun.inputState!.effectiveVersionId,
+    });
+    const outputSaved = runner.applyNodeOverride(definition, inputReviewed, {
+      nodeId: "script",
+      actor: "editor",
+      output: { echo: "human fix" },
+      allowTerminalEdit: true,
+    });
+    assert.equal(outputSaved.status, "succeeded", "全部节点有效完成后才允许整条成功");
+    assert.equal(
+      outputSaved.nodeRuns.some((node) => node.inputState?.stale || node.outputState?.stale),
+      false,
+      "不存在 succeeded 但内容仍带失效标记的状态",
+    );
+  });
+
+  it("rejects generic output overrides on dedicated decision stops (R3-03)", async () => {
+    const definition: WorkflowDefinition = {
+      id: "dedicated-stop-guard",
+      name: "Dedicated stop guard",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        mode: "automatic",
+        execute: () => ({
+          status: "needs_human" as const,
+          output: { sourceReview: { kind: "complete_negative", evidenceId: "e".repeat(64) } },
+          intervention: {
+            kind: "source_review_decision" as const,
+            reason: "试片提出质量意见。",
+            requiredAction: "approve",
+            options: ["approve", "request_changes", "reject"],
+          },
+        }),
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, {});
+    assert.throws(
+      () => runner.applyNodeOverride(definition, waiting, {
+        nodeId: "assets",
+        actor: "editor",
+        output: { replaced: true },
+      }),
+      /dedicated 'source_review_decision'/,
+    );
+    assert.throws(
+      () => runner.applyNodeInputOverride(definition, waiting, {
+        nodeId: "assets",
+        actor: "editor",
+        input: { replaced: true },
+      }),
+      /dedicated 'source_review_decision'/,
+    );
+  });
+
+  it("rejects node edits while another node is still running (R3-05 stillness)", async () => {
+    const definition: WorkflowDefinition = {
+      id: "stillness-guard",
+      name: "Stillness guard",
+      version: "1.0.0",
+      nodes: [
+        { id: "brief", label: "Brief", capability: "brief.validate", mode: "automatic", execute: () => ({ output: { ok: true } }) },
+        { id: "script", label: "Script", capability: "script.draft", mode: "automatic", dependsOn: ["brief"], execute: () => ({ output: { ok: true } }) },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const done = await runner.run(definition, {});
+    const running = structuredClone(done);
+    running.status = "running";
+    running.nodeRuns.find((node) => node.nodeId === "script")!.status = "running";
+    assert.throws(
+      () => runner.applyNodeOverride(definition, running, {
+        nodeId: "brief",
+        actor: "editor",
+        output: { ok: false },
+      }),
+      /must be paused or stopped/,
+    );
+    assert.throws(
+      () => runner.applyNodeInputOverride(definition, running, {
+        nodeId: "brief",
+        actor: "editor",
+        input: { ok: false },
+      }),
+      /must be paused or stopped/,
+    );
+  });
+
+  it("does not execute successors when an effective version pointer is dangling (R4-01)", async () => {
+    const calls: string[] = [];
+    const definition: WorkflowDefinition = {
+      id: "dangling-version-guard",
+      name: "Dangling version guard",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "brief",
+          label: "Brief",
+          capability: "brief.validate",
+          mode: "automatic",
+          execute: () => ({
+            status: "needs_human" as const,
+            output: { angle: "generated" },
+            intervention: {
+              boundary: "node-complete",
+              reason: "等确认",
+              requiredAction: "approve",
+              options: ["approve", "reject"],
+            },
+          }),
+        },
+        {
+          id: "script",
+          label: "Script",
+          capability: "script.draft",
+          mode: "automatic",
+          dependsOn: ["brief"],
+          execute: () => {
+            calls.push("script");
+            return { output: { ok: true } };
+          },
+        },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, {});
+    assert.equal(waiting.status, "needs_human");
+    const interventionId = waiting.nodeRuns.find((node) => node.nodeId === "brief")!.intervention!.id;
+    const mixed = structuredClone(waiting);
+    // 持久化一致性防御：上游的输入有效版本指针悬空。
+    const briefRun = mixed.nodeRuns.find((node) => node.nodeId === "brief")!;
+    briefRun.inputState = { nodeId: "brief", effectiveVersionId: "input-missing", stale: false, versions: [] };
+    briefRun.outputState = {
+      nodeId: "brief", effectiveVersionId: "out-missing", generatedVersionId: "out-missing", stale: false, versions: [],
+    };
+    const approved = await runner.resume(definition, mixed, {
+      interventionId,
+      action: "approve",
+      actor: "studio-owner",
+    });
+    assert.deepEqual(calls, [], "有效版本悬空的上游不得放行后继执行");
+    assert.notEqual(approved.status, "succeeded", "有效版本缺失时不得判整条成功");
+    // 输出指针悬空同样拦截（输入合法时）。
+    const fixed = structuredClone(mixed);
+    fixed.nodeRuns.find((node) => node.nodeId === "brief")!.inputState = {
+      nodeId: "brief", effectiveVersionId: "in-1", stale: false, versions: [
+        { id: "in-1", nodeId: "brief", source: "derived" as const, value: {}, upstreamVersionIds: [], createdAt: clock(), createdBy: "system", schemaVersion: "1" },
+      ],
+    };
+    const approved2 = await runner.resume(definition, fixed, {
+      interventionId,
+      action: "approve",
+      actor: "studio-owner",
+    });
+    assert.deepEqual(calls, []);
+    assert.notEqual(approved2.status, "succeeded");
+  });
+
+  it("keeps a paused run paused when editing an unrelated node", async () => {
+    const definition: WorkflowDefinition = {
+      id: "paused-preserved",
+      name: "Paused preserved",
+      version: "1.0.0",
+      nodes: [
+        { id: "brief", label: "Brief", capability: "brief.validate", mode: "automatic", execute: () => ({ output: { ok: true } }) },
+        { id: "script", label: "Script", capability: "script.draft", mode: "automatic", dependsOn: ["brief"], execute: () => ({ output: { ok: true } }) },
+      ],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const done = await runner.run(definition, {});
+    const paused = structuredClone(done);
+    paused.status = "paused";
+    const edited = runner.applyNodeOverride(definition, paused, {
+      nodeId: "brief",
+      actor: "editor",
+      output: { ok: false },
+      allowTerminalEdit: true,
+    });
+    assert.equal(edited.status, "paused", "未显式解除的暂停不得被无关编辑消除");
+    assert.equal(edited.nodeRuns.find((node) => node.nodeId === "script")?.status, "stale");
+  });
+
+  it("rejects a two-step save that would bypass a waiting stop via input then output (R4-02)", async () => {
+    const definition: WorkflowDefinition = {
+      id: "input-bypass-guard",
+      name: "Input bypass guard",
+      version: "1.0.0",
+      nodes: [{
+        id: "brief",
+        label: "Brief",
+        capability: "brief.validate",
+        mode: "automatic",
+        execute: () => ({
+          status: "needs_human" as const,
+          output: { angle: "generated" },
+          intervention: {
+            boundary: "node-complete",
+            reason: "等确认",
+            requiredAction: "approve",
+            options: ["approve", "reject"],
+          },
+        }),
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, {});
+    const before = structuredClone(waiting);
+    // 第一步：对等待中节点的输入保存必须被拒绝（否则第二步输出保存会把停点洗成成功）。
+    assert.throws(
+      () => runner.applyNodeInputOverride(definition, waiting, {
+        nodeId: "brief",
+        actor: "editor",
+        input: { initial: false },
+      }),
+      /waiting for human confirmation/,
+    );
+    assert.deepEqual(waiting, before, "被拒绝的保存不得留下任何快照修改");
+  });
+
+  it("rejects a generic approve on a source_review_retry stop regardless of its declared options (R4-03)", async () => {
+    const definition: WorkflowDefinition = {
+      id: "retry-approve-guard",
+      name: "Retry approve guard",
+      version: "1.0.0",
+      nodes: [{
+        id: "assets",
+        label: "Assets",
+        capability: "asset.prepare",
+        mode: "automatic",
+        execute: () => ({
+          status: "needs_human" as const,
+          error: "试片审查暂未完成，后续付费生成已停止。",
+          intervention: {
+            kind: "source_review_retry" as const,
+            reason: "试片审查暂未完成。",
+            // 即使停点数据错误地声明了 approve，通用批准也不得把它变成普通成功。
+            requiredAction: "approve",
+            options: ["approve", "reject"],
+          },
+        }),
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, {});
+    await assert.rejects(
+      () => runner.resume(definition, waiting, {
+        interventionId: waiting.nodeRuns[0]!.intervention!.id,
+        action: "approve",
+        actor: "studio-owner",
+      }),
+      /Source review retry/,
+    );
+    // 专属终止动作（reject）保持可用。
+    const rejected = await runner.resume(definition, waiting, {
+      interventionId: waiting.nodeRuns[0]!.intervention!.id,
+      action: "reject",
+      actor: "studio-owner",
+    });
+    assert.equal(rejected.status, "rejected");
+  });
+
+  it("rejects needs_human results without a usable intervention and blocks generic saves on them (R5-01)", async () => {
+    const definition: WorkflowDefinition = {
+      id: "stopless-wait-guard",
+      name: "Stopless wait guard",
+      version: "1.0.0",
+      nodes: [{
+        id: "brief",
+        label: "Brief",
+        capability: "brief.validate",
+        mode: "automatic",
+        execute: () => ({ output: { ok: true } }),
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const done = await runner.run(definition, {});
+    // 异常执行结果：needs_human 但 intervention 缺失/为 null——runner 必须拒绝。
+    // （validateNodeResultStatus 在 runNode 内抛错，这里验证其拒绝行为经由持久化状态
+    // 构造后的编辑入口守卫生效。）
+    const inconsistent = structuredClone(done);
+    inconsistent.status = "needs_human";
+    inconsistent.nodeRuns[0]!.status = "needs_human";
+    delete inconsistent.nodeRuns[0]!.intervention;
+
+    assert.throws(
+      () => runner.applyNodeInputOverride(definition, inconsistent, {
+        nodeId: "brief",
+        actor: "editor",
+        input: { replaced: true },
+      }),
+      /waiting for human confirmation/,
+    );
+    assert.throws(
+      () => runner.applyNodeOverride(definition, inconsistent, {
+        nodeId: "brief",
+        actor: "editor",
+        output: { replaced: true },
+      }),
+      /without a usable stop/,
+    );
+    // 两步绕过与直接保存都不可达：快照保持原样，不会出现决定数为 0 的“成功”。
+    assert.equal(inconsistent.nodeRuns[0]!.status, "needs_human");
+  });
+
   it("records request changes and reruns only the revised asset descendants", async () => {
     const calls = { assets: 0, voice: 0, render: 0, review: 0, final: 0 };
     const definition: WorkflowDefinition = {

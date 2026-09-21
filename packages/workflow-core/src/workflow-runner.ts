@@ -345,6 +345,11 @@ export class WorkflowRunner {
     if (waitingNode.intervention?.kind === "creative_review") {
       throw new Error("Creative review cannot be approved through the generic decision endpoint; use the stage confirmation command.");
     }
+    // 试片重试暂停只有"终止(reject)"与专用重试继续两种出路：通用批准不得把它变成
+    // 普通节点成功——即使停点数据错误地声明了 approve 选项（R4-03）。
+    if (waitingNode.intervention?.kind === "source_review_retry" && decision.action !== "reject") {
+      throw new Error("Source review retry stops can only be rejected here; continue them via the dedicated review retry command.");
+    }
 
     if (waitingNode.intervention?.kind === "source_review_decision") {
       run.decisions.push({
@@ -524,8 +529,29 @@ export class WorkflowRunner {
     if (!node || !previousNodeRun) {
       throw new Error(`Unknown completed node '${override.nodeId}'.`);
     }
+    if (previousRun.status === "running" || previousRun.nodeRuns.some((candidate) => candidate.status === "running")) {
+      throw new Error(`Run '${previousRun.id}' must be paused or stopped before editing nodes.`);
+    }
     if (previousNodeRun.status === "running") {
       throw new Error(`Node '${override.nodeId}' cannot be overridden while it is running.`);
+    }
+    // 失效输入上不能直接换人工输出：新输出会绑定一套已失效的依赖语义。必须先走
+    // 输入复核入口确认输入，再保存输出（R3-02，S07）。
+    if (previousNodeRun.inputState?.stale === true) {
+      throw new Error(`Node '${override.nodeId}' input is stale; review and save its input before replacing the output.`);
+    }
+    // 费用停点是授权入口的专属状态：通用输出保存不能把它直接变成已完成（R3-02）。
+    if (previousNodeRun.status === "awaiting_spend_approval" || previousNodeRun.status === "approval_invalidated") {
+      throw new Error(`Node '${override.nodeId}' is waiting for spend approval; use the spend authorization flow instead of editing its output.`);
+    }
+    // 专用停点（试片决定/试片重试/创作讨论）承载各自的裁决与继续合同，通用换稿
+    // 无法证明新版本会被继续路径采用——明确拒绝，指向专用入口（R3-03）。
+    if (
+      previousNodeRun.status === "needs_human"
+      && previousNodeRun.intervention
+      && ["source_review_decision", "source_review_retry", "creative_review"].includes(previousNodeRun.intervention.kind ?? "")
+    ) {
+      throw new Error(`Node '${override.nodeId}' is waiting for a dedicated '${previousNodeRun.intervention.kind}' decision; use its dedicated command instead of a generic output override.`);
     }
     const descendants = descendantNodeIds(definition.nodes, override.nodeId);
     assertNoUncertainPaidOutcomeInvalidated(previousRun, new Set([override.nodeId, ...descendants]));
@@ -596,10 +622,27 @@ export class WorkflowRunner {
     } else {
       delete nodeRun.output;
     }
-    nodeRun.status = "succeeded";
-    delete nodeRun.intervention;
-    delete nodeRun.spendPlan;
-    delete nodeRun.spendAuthorizationId;
+    // needs_human 却没有可用 intervention 是不可裁决的不一致状态：直接拒绝编辑，
+    // 不让通用保存把它洗成成功（R5-01）。
+    if (previousNodeRun.status === "needs_human" && !previousNodeRun.intervention) {
+      throw new Error(`Node '${override.nodeId}' is marked needs_human without a usable stop; this record must be repaired before editing.`);
+    }
+    // 人工版本是“换稿”，不是“放行”：节点若正停在人面前等确认（边界闸门或自带停点），
+    // 保存后必须继续等确认动作，不能替用户按下批准（DF-01）。判定只认 needs_human
+    // 状态下的停点——resume() 批准后不删除 intervention 对象，已消费的历史停点不能
+    // 因为对象还在就复活。换稿同时换发新的停点身份：旧页面拿着旧 intervention ID
+    // 无法批准它没见过的新版本（并发保护，S11）。
+    const waitingForHuman = previousNodeRun.status === "needs_human";
+    const preservedAuthorizationId = waitingForHuman ? nodeRun.spendAuthorizationId : undefined;
+    if (waitingForHuman) {
+      nodeRun.status = "needs_human";
+      nodeRun.intervention = { ...nodeRun.intervention!, id: context.nextId("intervention") };
+    } else {
+      nodeRun.status = "succeeded";
+      delete nodeRun.intervention;
+      delete nodeRun.spendPlan;
+      delete nodeRun.spendAuthorizationId;
+    }
     nodeRun.outputState = {
       ...outputState,
       effectiveVersionId: versionId,
@@ -627,20 +670,22 @@ export class WorkflowRunner {
 
     const invalidatedNodeIds = new Set([node.id, ...descendants]);
     run.interventions = run.interventions.filter((intervention) => !invalidatedNodeIds.has(intervention.nodeId));
+    // 保留等待节点所持授权的全局实体，避免“节点持有授权 ID、全局授权已被删除”的
+    // 悬空引用；确实失效的后代仍按原规则删除其授权（R3-03）。保留记录≠批准新采购，
+    // 继续执行仍要过既有的报价与授权匹配守卫。
     run.spendAuthorizations = (run.spendAuthorizations ?? [])
-      .filter((authorization) => !invalidatedNodeIds.has(authorization.nodeId));
+      .filter((authorization) => (
+        (preservedAuthorizationId !== undefined && authorization.id === preservedAuthorizationId)
+        || !invalidatedNodeIds.has(authorization.nodeId)
+      ));
+    if (waitingForHuman && nodeRun.intervention) {
+      run.interventions.push(nodeRun.intervention);
+    }
 
     run.revision += 1;
-    const hasStaleNode = run.nodeRuns.some((candidate) => candidate.status === "stale"
-      || candidate.inputState?.stale === true
-      || candidate.outputState?.stale === true);
-    if (hasStaleNode) {
-      run.status = "stale";
-      delete run.finishedAt;
-    } else {
-      run.status = "succeeded";
-      run.finishedAt = this.clock();
-    }
+    // 出口状态按当前节点集合归并：停点/失败/费用闸门优先，其次失效标记，
+    // 最后才按“定义内全部节点有效完成”判定整条成功（DF-01，R3-01）。
+    this.mergeRunStatus(definition, run);
     return run;
   }
 
@@ -668,8 +713,24 @@ export class WorkflowRunner {
     if (!node || !previousNodeRun) {
       throw new Error(`Unknown started node '${override.nodeId}'.`);
     }
+    if (previousRun.status === "running" || previousRun.nodeRuns.some((candidate) => candidate.status === "running")) {
+      throw new Error(`Run '${previousRun.id}' must be paused or stopped before editing node inputs.`);
+    }
     if (previousNodeRun.status === "running") {
       throw new Error(`Node '${override.nodeId}' input cannot be overridden while it is running.`);
+    }
+    // 等待中的人审/费用停点是专属恢复入口的状态：通用输入保存会清掉停点（intervention/
+    // spendPlan），随后的输出保存就能把节点标成成功——两步绕过必须从第一步拒绝
+    //（R4-02/R5-01）。人审拒绝只看状态，不依赖 intervention 对象是否还在；普通 stale
+    // 节点的显式输入复核不受影响。
+    if (previousNodeRun.status === "needs_human") {
+      if (previousNodeRun.intervention && ["source_review_decision", "source_review_retry", "creative_review"].includes(previousNodeRun.intervention.kind ?? "")) {
+        throw new Error(`Node '${override.nodeId}' is waiting for a dedicated '${previousNodeRun.intervention.kind}' decision; use its dedicated command instead of a generic input override.`);
+      }
+      throw new Error(`Node '${override.nodeId}' is waiting for human confirmation; approve or reject it at its stop before editing inputs.`);
+    }
+    if (previousNodeRun.status === "awaiting_spend_approval" || previousNodeRun.status === "approval_invalidated") {
+      throw new Error(`Node '${override.nodeId}' is waiting for spend approval; use the spend authorization flow instead of editing inputs.`);
     }
     const descendants = descendantNodeIds(definition.nodes, override.nodeId);
     assertNoUncertainPaidOutcomeInvalidated(previousRun, new Set([override.nodeId, ...descendants]));
@@ -754,8 +815,9 @@ export class WorkflowRunner {
     run.spendAuthorizations = (run.spendAuthorizations ?? [])
       .filter((authorization) => !invalidatedNodeIds.has(authorization.nodeId));
     run.revision += 1;
-    run.status = "stale";
-    delete run.finishedAt;
+    // 出口同样按当前节点集合归并：本节点已标 stale 通常落到 stale；但其他节点上的
+    // 未解除停点/失败优先呈现，暂停中的 run 不因输入修改失去暂停状态。
+    this.mergeRunStatus(definition, run);
     return run;
   }
 
@@ -842,6 +904,9 @@ export class WorkflowRunner {
       id: this.idFactory("decision"),
       createdAt: this.clock(),
     });
+    // 选择性恢复可能带回带停点/失效标记的旁支：出口必须按恢复后的最终节点集合
+    // 归并状态，而不是沿用 applyNodeOverride 中途算出的状态（R3-04）。
+    this.mergeRunStatus(definition, run);
     return run;
   }
 
@@ -1020,6 +1085,15 @@ export class WorkflowRunner {
     const uncertainNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.status === "stale" && nodeRun.outcomeUncertain);
     if (uncertainNode) {
       throw new Error(`Node '${uncertainNode.nodeId}' has an uncertain paid-provider outcome and cannot be regenerated before reconciliation.`);
+    }
+    // 状态与失效标记不一致的历史数据（succeeded/failed 但带 stale 标记）不能被空恢复
+    // 静默“洗白”：必须先经对应编辑入口复核，否则恢复会跳过内容复核（R3-02，S07）。
+    const inconsistentNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.status !== "stale"
+      && (nodeRun.inputState?.stale === true || nodeRun.outputState?.stale === true));
+    if (inconsistentNode) {
+      throw new Error(
+        `Node '${inconsistentNode.nodeId}' is ${inconsistentNode.status} but its content is marked stale; review and save its input or output again before regeneration.`,
+      );
     }
     const run = cloneWorkflowRun(previousRun);
     for (const nodeRun of run.nodeRuns) {
@@ -1293,10 +1367,39 @@ export class WorkflowRunner {
         context as InMemoryWorkflowContext<unknown>,
       );
     }
+    // 执行前阻断：存在未解除的人审、费用停点或失败/拒绝时，普通续跑不得越过它们
+    // 执行后继节点。恢复这些状态必须走各自的专用入口（resume/retry/授权）。
+    const entryBlock = run.nodeRuns.find((candidate) => candidate.status === "needs_human")
+      ?? run.nodeRuns.find((candidate) => candidate.status === "awaiting_spend_approval" || candidate.status === "approval_invalidated")
+      ?? run.nodeRuns.find((candidate) => candidate.status === "failed" || candidate.status === "rejected");
+    if (entryBlock) {
+      this.mergeRunStatus(definition, run);
+      await this.checkpoint?.(run);
+      return run;
+    }
     for (const node of orderNodes(definition.nodes)) {
       const existingNodeRun = run.nodeRuns.find((nodeRun) => nodeRun.nodeId === node.id);
-      if (existingNodeRun && existingNodeRun.status !== "pending") {
-        continue;
+      if (existingNodeRun) {
+        if (isEffectivelyDone(existingNodeRun)) {
+          continue;
+        }
+        // pending 是恢复入口（resume/resumeStale/授权）的受控重执行标记；其余未完成
+        // 状态（stale 等）不属于普通续跑的授权范围，停下来交给对应入口。
+        if (existingNodeRun.status !== "pending") {
+          this.mergeRunStatus(definition, run);
+          await this.checkpoint?.(run);
+          return run;
+        }
+      }
+      // 执行前统一依赖校验：既存 pending 与尚未创建的节点使用同一条件——依赖必须
+      // 全部有效完成才允许执行，防止失败/失效/版本悬空节点被跳过（R4-01）。
+      const dependenciesReady = (node.dependsOn ?? []).every((dependencyId) => (
+        isEffectivelyDone(run.nodeRuns.find((candidate) => candidate.nodeId === dependencyId))
+      ));
+      if (!dependenciesReady) {
+        this.mergeRunStatus(definition, run);
+        await this.checkpoint?.(run);
+        return run;
       }
 
       const nodeRun = await this.runNode(
@@ -1373,10 +1476,47 @@ export class WorkflowRunner {
       }
     }
 
-    run.status = "succeeded";
-    run.finishedAt = this.clock();
+    // 共享完成不变量：只有全部必需节点有效完成、且无未解决阻断时才 succeeded；
+    // 其余按当前节点集合归并到对应恢复状态。
+    this.mergeRunStatus(definition, run);
     await this.checkpoint?.(run);
     return run;
+  }
+
+  // 按当前节点集合归并整条状态：读取现存停点/失败/失效标记，而不是照搬入口时的
+  // run.status。succeeded 只认“定义内全部节点有效完成”；未显式解除的暂停是用户
+  // 的显式状态，优先于节点级阻断保留——恢复暂停后 continueRun 会对阻断重新归并。
+  private mergeRunStatus<TInitialInput>(definition: WorkflowDefinition, run: WorkflowRun<TInitialInput>): void {
+    const nodeRunFor = (nodeId: string) => run.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+    const waiting = run.nodeRuns.find((candidate) => candidate.status === "needs_human");
+    const spendStop = run.nodeRuns.find((candidate) => candidate.status === "awaiting_spend_approval" || candidate.status === "approval_invalidated");
+    const failedNode = run.nodeRuns.find((candidate) => candidate.status === "failed");
+    const rejectedNode = run.nodeRuns.find((candidate) => candidate.status === "rejected");
+    const hasStale = run.nodeRuns.some((candidate) => candidate.status === "stale"
+      || candidate.inputState?.stale === true
+      || candidate.outputState?.stale === true);
+    const allEffectivelyDone = definition.nodes.every((node) => isEffectivelyDone(nodeRunFor(node.id)));
+    if (run.status === "paused") {
+      delete run.finishedAt;
+    } else if (waiting) {
+      run.status = "needs_human";
+      run.finishedAt = this.clock();
+    } else if (spendStop) {
+      run.status = spendStop.status === "approval_invalidated" ? "approval_invalidated" : "awaiting_spend_approval";
+      run.finishedAt = this.clock();
+    } else if (failedNode) {
+      run.status = "failed";
+      run.finishedAt = this.clock();
+    } else if (rejectedNode) {
+      run.status = "rejected";
+      run.finishedAt = this.clock();
+    } else if (allEffectivelyDone) {
+      run.status = "succeeded";
+      run.finishedAt = this.clock();
+    } else {
+      run.status = "stale";
+      delete run.finishedAt;
+    }
   }
 
   private async runNode<TInput, TOutput>(
@@ -2521,6 +2661,22 @@ function legacyVersionId(kind: "input" | "output", nodeId: string, startedAt: st
   return `legacy-${kind}:${nodeId}:${startedAt}`;
 }
 
+// 有效完成：节点存在、已成功，且输入/输出都没有失效标记；已存在的版本状态必须能
+// 解析出其 effectiveVersion（悬空指针视为未完成）。缺失整个版本状态的合法历史节点
+// 与合法无输出节点按既有兼容合同处理。所有成功出口（保存归并、续跑跳过、整条完成
+// 判定）必须使用同一个定义，避免“succeeded 但内容已失效”被当作完成（R4-01）。
+function isEffectivelyDone(nodeRun: NodeRun | undefined): boolean {
+  if (nodeRun === undefined || nodeRun.status !== "succeeded") return false;
+  if (nodeRun.inputState?.stale === true || nodeRun.outputState?.stale === true) return false;
+  if (nodeRun.inputState && !nodeRun.inputState.versions.some((version) => version.id === nodeRun.inputState!.effectiveVersionId)) {
+    return false;
+  }
+  if (nodeRun.outputState && !nodeRun.outputState.versions.some((version) => version.id === nodeRun.outputState!.effectiveVersionId)) {
+    return false;
+  }
+  return true;
+}
+
 function descendantNodeIds(nodes: NodeDefinition[], rootNodeId: string): Set<string> {
   const dependents = new Map<string, string[]>();
   for (const node of nodes) {
@@ -2628,8 +2784,13 @@ function validateNodeResultStatus(
     );
   }
 
-  if (status === "needs_human" && !("intervention" in result)) {
-    throw new Error(`Node '${nodeId}' returned 'needs_human' without an intervention.`);
+  // needs_human 必须携带可裁决的 intervention 对象：缺失/undefined/null 会造成
+  // “等确认却无处确认”的不可绕过停点失效（R5-01）。
+  if (status === "needs_human") {
+    const intervention = (result as { intervention?: unknown }).intervention;
+    if (!("intervention" in result) || intervention === undefined || intervention === null || typeof intervention !== "object") {
+      throw new Error(`Node '${nodeId}' returned 'needs_human' without an intervention.`);
+    }
   }
 }
 

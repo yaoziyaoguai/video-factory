@@ -17,7 +17,7 @@ export const BRIEF_AUDIT_ROLE = "内容简报";
  * 是同一项服务。与 `CREATIVE_TREATMENT_PROVIDER_ID` 同一写法。
  */
 export const BRIEF_AUDIT_PROVIDER_ID = "codex-role-auditor-v1";
-export const BRIEF_AUDIT_AGENT_CONTRACT_VERSION = "brief-audit-v1|role-audit-v9|brief-projection-v1";
+export const BRIEF_AUDIT_AGENT_CONTRACT_VERSION = "brief-audit-v1|role-audit-v9|brief-projection-v2";
 
 const DEFAULT_BRIEF_AUDIT_TIMEOUT_MS = 660_000;
 const DEFAULT_BRIEF_AUDIT_MAX_ATTEMPTS = 2;
@@ -126,11 +126,16 @@ export class CodexBriefAuditAgent implements BriefAuditAgent {
  * 审计的角色视野：它评的是这份简报本身，下游做得对不对不在这里判——那是构思/剧本自己那一轮的
  * 独立复核要管的事。写清楚"不管什么"是为了让"建议先改"落在简报真能改的地方。
  */
-function briefAuditContext(submitted: BriefAuditCandidate): Record<string, unknown> {
+export function briefAuditContext(submitted: BriefAuditCandidate): Record<string, unknown> {
   return {
     roleScope: {
       owns: ["标题与角度", "受众与平台", "时长与内容体量", "简报里已写明的来源与约束"],
       doesNotOwn: ["构思怎么讲", "分镜与素材获取", "配音与渲染成品", "费用与授权"],
+      // DF-02：visualPlanProvenance=system_suggested_reference 由创建端证据（visualPlanAdopted
+      // =false）授予，表示未采用的系统建议。它不是用户提出的要求：与标题/角度/受众或
+      // visualProof/visualIntent 的分歧不是简报缺陷，不需要建议人工修复；用户明确要求永远优先。
+      // 没有 provenance 标记的 visualPlan 来源未知或已采用，按用户约束正常参与一致性审查。
+      visualPlan: "visualPlanProvenance=system_suggested_reference 时是系统建议的参考方向，不是必须满足的要求；用户的明确要求（标题/角度/受众/visualProof/visualIntent）优先，两者分歧不构成简报内部不一致。",
     },
     brief: submitted,
   };
@@ -149,7 +154,14 @@ export function briefAuditProjection(brief: ProductionBrief): BriefAuditCandidat
     ...(brief.editorial ? { editorial: brief.editorial } : {}),
     ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
     ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
-    ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
+    // 来源身份由创建端证据（visualPlanAdopted）决定，不由字段空值推断（R3-09）：
+    // false=创建端确认未采用的系统建议 → 标记为参考；缺省/true=来源未知或已采用 →
+    // 保留原要求语义送审，不替用户作降级决定。
+    ...(brief.visualPlan
+      ? brief.visualPlanAdopted === false
+        ? { visualPlan: brief.visualPlan, visualPlanProvenance: "system_suggested_reference" }
+        : { visualPlan: brief.visualPlan }
+      : {}),
     // 锁定的观众承诺在 seriesContext.episode.viewerPromise 里，随系列事实一起送审；
     // productionCapabilities 是宿主按运行时算出来的，不属于创作者写下的简报，不进这一轮。
     ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),

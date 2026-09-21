@@ -551,7 +551,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                   </div>
                 </> : <>
                   <p className="run-failure-summary">{run.failure.summary}</p>
-                  {(["asset-source-review", "visual-review"].includes(run.failure.nodeId) || /源素材视觉预检/.test(run.failure.technicalDetail ?? "")) && run.failure.technicalDetail
+                  {(["asset-source-review", "visual-review"].includes(run.failure.nodeId) || run.failure.category === "infrastructure" || /源素材视觉预检|媒体处理失败|ASSET_SEARCH_SOURCES_UNAVAILABLE|图库候选检索全部来源失败/.test(run.failure.technicalDetail ?? "")) && run.failure.technicalDetail
                     ? <p className="run-failure-summary"><strong>失败原因：</strong>{creatorFacingTechnicalText(run.failure.technicalDetail)}</p>
                     : null}
                   <div className="run-failure-impact">

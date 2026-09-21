@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { StudioNode } from "../src/shared/api.js";
+import type { StudioNode, StudioRunStatus } from "../src/shared/api.js";
 import { buildRunObservability } from "../src/server/run-observability.js";
 
 function node(
@@ -214,6 +214,85 @@ describe("run observability", () => {
     expect(result.failure?.recoveryActions).toContain("稍后重试配音");
   });
 
+  it("explains a media-worker failure as an environment fault, not a creative input problem", () => {
+    // DF-04：候选检索的 Python worker 故障（如 OSError）以前落进通用兜底，被建议
+    // “检查输入后重试/切换同类能力”，与真实失败原因无关。
+    const result = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-09-21T13:40:00.000Z",
+      finishedAt: "2026-09-21T13:42:54.000Z",
+      now: "2026-09-21T13:43:00.000Z",
+      nodes: [
+        node("brief", "内容简报", "succeeded"),
+        node("creative-planning", "创作规划", "failed", {
+          role: "创作规划制片",
+          error: "Joint creative planning candidate search failed: 媒体处理失败（OSError），请查看本次任务对应的阶段诊断记录。",
+        }),
+        node("assets", "画面", "pending"),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure).toMatchObject({
+      nodeId: "creative-planning",
+      category: "node_failure",
+      retryable: true,
+    });
+    expect(result.failure?.summary).toContain("本地处理未返回具体原因");
+    expect(result.failure?.impact).toContain("已保存的创作进度");
+    const actions = result.failure?.recoveryActions.join("；") ?? "";
+    expect(actions).not.toContain("切换");
+    expect(actions).toContain("重试");
+  });
+
+  it("keeps routing a wrapped auth failure to configuration instead of infrastructure", () => {
+    // 上游若把鉴权错误包进 candidate search 前缀，仍必须命中既有的密钥配置指引，
+    // 不能被素材检索分支的文案覆盖（Oracle 审查 U05）。
+    const result = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-09-21T13:40:00.000Z",
+      finishedAt: "2026-09-21T13:42:54.000Z",
+      now: "2026-09-21T13:43:00.000Z",
+      nodes: [
+        node("brief", "内容简报", "succeeded"),
+        node("creative-planning", "创作规划", "failed", {
+          role: "创作规划制片",
+          error: "Joint creative planning candidate search failed: HTTP 401 invalid API key",
+        }),
+        node("assets", "画面", "pending"),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure?.category).toBe("configuration");
+    expect(result.failure?.summary).toContain("密钥");
+  });
+
+  it("surfaces the named failing stock sources from an all-sources candidate search failure", () => {
+    const result = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-09-21T13:40:00.000Z",
+      finishedAt: "2026-09-21T13:42:54.000Z",
+      now: "2026-09-21T13:43:00.000Z",
+      nodes: [
+        node("brief", "内容简报", "succeeded"),
+        node("creative-planning", "创作规划", "failed", {
+          role: "创作规划制片",
+          error: "Joint creative planning candidate search failed: 图库候选检索全部来源失败（pexels-stock-v1：OSError、pixabay-stock-v1：PermissionError）。请检查这些素材来源的服务状态与网络后重试本步骤；已确认的构思、脚本与导演方案不会重跑。",
+        }),
+        node("assets", "画面", "pending"),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure).toMatchObject({ category: "infrastructure", retryable: true });
+    expect(result.failure?.summary).toContain("素材来源");
+    expect(result.failure?.technicalDetail).toContain("pixabay-stock-v1：PermissionError");
+  });
+
   it("explains a director contract failure with the affected scene and a concrete recovery", () => {
     const result = buildRunObservability({
       status: "failed",
@@ -260,10 +339,13 @@ describe("run observability", () => {
       publishPackageAvailable: false,
     });
 
-    expect(result.failure?.summary).toContain("核心承诺要求同机位连续实验，但当前图库镜头无法兑现");
+    // 复核意见本身经可信渠道（这一步的审计记录/latestAudit）展示；summary 是固定
+    // 概要，不截取任意 error 正文（R6-01）。
+    expect(result.failure?.summary).toContain("导演方案经过多轮修改仍未通过质量复核");
+    expect(result.failure?.summary).not.toContain("核心承诺要求同机位连续实验");
     expect(result.failure?.recoveryActions).toEqual([
-      "调整视频承诺，确保现有画面能力能够真实兑现",
-      "或准备连续实拍/自有素材后重新规划；脚本不会自动重跑",
+      "查看这一步的复核意见，按意见调整视频承诺或画面要求",
+      "或准备连续实拍/自有素材后重新规划；已完成的脚本不会自动重跑",
     ]);
   });
 
@@ -448,7 +530,9 @@ describe("run observability", () => {
     expect(result.failure?.impact).toContain("成片已保留");
   });
 
-  it("does not ask for billing reconciliation when a zero-attempt receipt proves rejection before submission", () => {
+  it("does not ask for billing reconciliation when the provider returned a known content-policy rejection", () => {
+    // 已知结果（provider 明确返回内容策略拒绝，核心已结清 outcomeUncertain）按普通
+    // 内容问题恢复，不进入账单核对。
     const result = buildRunObservability({
       status: "failed",
       startedAt: "2026-08-30T10:00:00.000Z",
@@ -457,7 +541,6 @@ describe("run observability", () => {
       nodes: [
         node("assets", "画面", "failed", {
           role: "素材导演",
-          outcomeUncertain: true,
           error: "The input text may contain sensitive information.",
           executionReceipt: {
             providerId: "seedream-image-v1",
@@ -486,6 +569,312 @@ describe("run observability", () => {
       summary: "Seedream 关键画面没有通过内容安全检查",
     });
     expect(result.failure?.recoveryActions).toContain("修改该节点的输入内容");
+  });
+
+  it("keeps an outcome-uncertain metered failure gated behind reconciliation even with a zero-attempt receipt", () => {
+    // R3-08：核心对 providerOutcomeKnown=false 保留未知结果；展示层不得用零回执
+    // 抵消后开放普通重试。
+    const result = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-08-30T10:00:00.000Z",
+      finishedAt: "2026-08-30T10:01:00.000Z",
+      now: "2026-08-30T10:01:00.000Z",
+      nodes: [
+        node("assets", "画面", "failed", {
+          role: "素材导演",
+          outcomeUncertain: true,
+          error: "connection reset while submitting the shot",
+          executionReceipt: {
+            providerId: "seedream-image-v1",
+            providerLabel: "Seedream 关键画面",
+            modelId: "doubao-seedream-test",
+            transport: "http_api",
+            billing: "metered",
+            status: "failed",
+            actualCostCny: 0,
+            actualCostSource: "configured_rate",
+            meteredAttemptCount: 0,
+            meteredFailedAttemptCount: 0,
+            startedAt: "2026-08-30T10:00:00.000Z",
+            finishedAt: "2026-08-30T10:01:00.000Z",
+          },
+        }),
+        node("voice", "配音", "pending"),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    expect(result.failure?.retryable).toBe(false);
+    expect(result.failure?.recoveryActions).toContain("先到服务商控制台核对任务状态与账单");
+  });
+
+  it("does not present a stale publish package or render as the current deliverable (U09)", () => {
+    // 过期发布包不得遮住仍然有效的成片：当前交付投影落到有效成片分支。
+    const stalePublishValidVideo = buildRunObservability({
+      status: "stale",
+      startedAt: "2026-09-20T10:00:00.000Z",
+      now: "2026-09-20T10:05:00.000Z",
+      nodes: [
+        node("render", "渲染", "succeeded"),
+        node("publish-package", "发布包", "stale", {
+          outputState: { generatedVersionId: "pkg-v1", effectiveVersionId: "pkg-v1", stale: true, versions: [] },
+        }),
+      ],
+      videoAvailable: true,
+      publishPackageAvailable: true,
+    });
+    expect(stalePublishValidVideo.resultAvailability.kind).toBe("draft_video");
+    expect(stalePublishValidVideo.resultAvailability.usable).toBe(false);
+    expect(stalePublishValidVideo.resultAvailability.label).not.toContain("发布包");
+
+    // 成片与发布包都失效且没有有效成片可显示时，才显示过期发布包。
+    const stalePublishStaleRender = buildRunObservability({
+      status: "stale",
+      startedAt: "2026-09-20T10:00:00.000Z",
+      now: "2026-09-20T10:05:00.000Z",
+      nodes: [
+        node("render", "渲染", "stale", {
+          outputState: { generatedVersionId: "render-v1", effectiveVersionId: "render-v1", stale: true, versions: [] },
+        }),
+        node("publish-package", "发布包", "stale", {
+          outputState: { generatedVersionId: "pkg-v1", effectiveVersionId: "pkg-v1", stale: true, versions: [] },
+        }),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: true,
+    });
+    expect(stalePublishStaleRender.resultAvailability).toMatchObject({
+      kind: "publish_package",
+      usable: false,
+      label: "发布包已过期",
+    });
+
+    const staleRender = buildRunObservability({
+      status: "stale",
+      startedAt: "2026-09-20T10:00:00.000Z",
+      now: "2026-09-20T10:05:00.000Z",
+      nodes: [
+        node("render", "渲染", "stale", {
+          outputState: { generatedVersionId: "render-v1", effectiveVersionId: "render-v1", stale: true, versions: [] },
+        }),
+      ],
+      videoAvailable: true,
+      publishPackageAvailable: false,
+    });
+    expect(staleRender.resultAvailability).toMatchObject({
+      kind: "draft_video",
+      usable: false,
+      label: "成片已过期",
+    });
+
+    // 有效产物不被误禁：render 有效且后置审查失败时仍是可预览的待审成片。
+    const validRender = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-09-20T10:00:00.000Z",
+      now: "2026-09-20T10:05:00.000Z",
+      nodes: [
+        node("render", "渲染", "succeeded"),
+        node("visual-review", "视觉审片", "failed", { error: "连接超时" }),
+      ],
+      videoAvailable: true,
+      publishPackageAvailable: false,
+    });
+    expect(validRender.resultAvailability).toMatchObject({ kind: "draft_video", usable: false, label: "成片需修复" });
+  });
+
+  it("keeps human rejection separate from technical failure in mixed states (R4-07)", () => {
+    // 终审人工拒绝不是技术失败：混合状态下也不投影成可重试故障。
+    const humanReject = buildRunObservability({
+      status: "stale",
+      startedAt: "2026-09-20T10:00:00.000Z",
+      now: "2026-09-20T10:05:00.000Z",
+      nodes: [
+        node("render", "渲染", "succeeded"),
+        node("final-review", "人工终审", "rejected"),
+      ],
+      videoAvailable: true,
+      publishPackageAvailable: false,
+    });
+    expect(humanReject.failure).toBeUndefined();
+
+    // 但未解决的 failed 节点在任何整体状态下都保持失败说明可见。
+    const mixedFailure = buildRunObservability({
+      status: "needs_human",
+      startedAt: "2026-09-20T10:00:00.000Z",
+      now: "2026-09-20T10:05:00.000Z",
+      nodes: [
+        node("brief", "内容简报", "needs_human"),
+        node("assets", "画面", "failed", { error: "连接被重置" }),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+    expect(mixedFailure.failure).toMatchObject({ nodeId: "assets" });
+  });
+
+  it("never echoes injected secrets through failure detail fields (R5-02)", () => {
+    const secret = "SECRET_MARKER sk-injected-key https://internal.example/path";
+    // 稳定码后拼接注入内容：technicalDetail 只保留受控令牌。
+    const coded = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-09-20T10:00:00.000Z",
+      now: "2026-09-20T10:05:00.000Z",
+      nodes: [
+        node("brief", "内容简报", "succeeded"),
+        node("creative-planning", "创作规划", "failed", {
+          error: `图库候选检索全部来源失败（pexels-stock-v1：PermissionError、pixabay-stock-v1：RuntimeError）。工作区中已保存的进度会保留。${secret} [ASSET_SEARCH_SOURCES_UNAVAILABLE]`,
+        }),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+    const codedDetail = coded.failure?.technicalDetail ?? "";
+    expect(codedDetail).not.toContain("SECRET_MARKER");
+    expect(codedDetail).not.toContain("sk-injected-key");
+    expect(codedDetail).toContain("pexels-stock-v1：PermissionError");
+    expect(codedDetail).toContain("ASSET_SEARCH_SOURCES_UNAVAILABLE");
+
+    // 诊断尾标后拼接注入内容：尾标只提取白名单键值对。
+    const diagnosed = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-09-20T10:00:00.000Z",
+      now: "2026-09-20T10:05:00.000Z",
+      nodes: [
+        node("script", "脚本", "failed", {
+          error: `模型调用超时\n诊断：stage=completed_failure；reasonCode=provider_timeout${secret}`,
+        }),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+    const diagnosedDetail = diagnosed.failure?.technicalDetail ?? "";
+    expect(diagnosedDetail).toContain("stage=completed_failure");
+    expect(diagnosedDetail).not.toContain("SECRET_MARKER");
+
+    // 审查节点的非审片异常不享受整段透出。
+    const reviewInjected = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-09-20T10:00:00.000Z",
+      now: "2026-09-20T10:05:00.000Z",
+      nodes: [
+        node("visual-review", "视觉审片", "failed", { error: secret }),
+      ],
+      videoAvailable: true,
+      publishPackageAvailable: false,
+    });
+    expect(reviewInjected.failure?.technicalDetail).toBeUndefined();
+  });
+
+  it("keeps the observability projection itself from throwing on inherited diagnostic keys (R7-01)", () => {
+    for (const injectedKey of ["constructor", "toString", "hasOwnProperty", "valueOf"]) {
+      const result = buildRunObservability({
+        status: "failed",
+        startedAt: "2026-09-20T10:00:00.000Z",
+        now: "2026-09-20T10:05:00.000Z",
+        nodes: [
+          node("script", "脚本", "failed", {
+            error: `模型调用超时\n诊断：stage=completed_failure；${injectedKey}=secret_marker`,
+          }),
+        ],
+        videoAvailable: false,
+        publishPackageAvailable: false,
+      });
+      const detail = result.failure?.technicalDetail ?? "";
+      expect(result.failure?.nodeId).toBe("script");
+      expect(detail).toContain("stage=completed_failure");
+      expect(detail).not.toContain(injectedKey);
+      expect(detail).not.toContain("secret_marker");
+    }
+  });
+
+  it("shows producer-format HTTP and total-timeout reasons instead of unknown (R7-02)", () => {
+    const build = (summaryPart: string) => buildRunObservability({
+      status: "failed",
+      startedAt: "2026-09-20T10:00:00.000Z",
+      now: "2026-09-20T10:05:00.000Z",
+      nodes: [
+        node("creative-planning", "创作规划", "failed", {
+          error: `Joint creative planning candidate search failed: 图库候选检索全部来源失败（${summaryPart}）。请按各来源的失败类型处理后重试。 [ASSET_SEARCH_SOURCES_UNAVAILABLE]`,
+        }),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    // 生产者实际格式：public_provider_error_fields 的完整投影。
+    const producerHttp = build("pexels-stock-v1：Provider request failed with HTTP 401");
+    expect(producerHttp.failure?.category).toBe("configuration");
+    expect(producerHttp.failure?.technicalDetail).toContain("HTTP 401");
+    expect(producerHttp.failure?.technicalDetail).not.toContain("未知原因");
+
+    // 总时限常量被分段截断为前缀：按前缀识别并以完整常量重建。
+    const producerTimeout = build("pexels-stock-v1：素材检索总时限已耗尽");
+    expect(producerTimeout.failure?.category).toBe("provider_timeout");
+    expect(producerTimeout.failure?.technicalDetail).toContain("素材检索总时限已耗尽");
+    expect(producerTimeout.failure?.technicalDetail).not.toContain("未知原因");
+
+    // 未知原因保持中性降级。
+    const unknown = build("pexels-stock-v1：something unparseable happened");
+    expect(unknown.failure?.technicalDetail).toContain("pexels-stock-v1：未知原因");
+  });
+
+  it("classifies all-sources candidate failures per reason and neutralises mixed causes (R5-03)", () => {
+    const build = (summaryPart: string) => buildRunObservability({
+      status: "failed",
+      startedAt: "2026-09-20T10:00:00.000Z",
+      now: "2026-09-20T10:05:00.000Z",
+      nodes: [
+        node("creative-planning", "创作规划", "failed", {
+          error: `Joint creative planning candidate search failed: 图库候选检索全部来源失败（${summaryPart}）。请按各来源的失败类型处理后重试。 [ASSET_SEARCH_SOURCES_UNAVAILABLE]`,
+        }),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    // 单一鉴权原因 → configuration 且不可直接重试（与通用鉴权口径一致）。
+    const auth = build("pexels-stock-v1：MissingProviderKey、pixabay-stock-v1：RuntimeError/HTTP 401");
+    expect(auth.failure).toMatchObject({ category: "configuration", retryable: false });
+
+    // 单一限流原因 → provider_capacity。
+    const capacity = build("pexels-stock-v1：RuntimeError/HTTP 429");
+    expect(capacity.failure).toMatchObject({ category: "provider_capacity", retryable: true });
+
+    // 单一超时原因（受控超时身份保留）→ provider_timeout。
+    const timeout = build("pexels-stock-v1：Provider request timed out after 2 attempts");
+    expect(timeout.failure).toMatchObject({ category: "provider_timeout", retryable: true });
+
+    // 混合原因 → 中性 infrastructure，不强行单因归因。
+    const mixed = build("pexels-stock-v1：RuntimeError/HTTP 401、pixabay-stock-v1：RuntimeError/HTTP 429");
+    expect(mixed.failure).toMatchObject({ category: "infrastructure", retryable: true });
+  });
+
+  it("projects the real failed node even when a human rejection precedes it (R5-04)", () => {
+    const build = (status: StudioRunStatus) => buildRunObservability({
+      status,
+      startedAt: "2026-09-20T10:00:00.000Z",
+      now: "2026-09-20T10:05:00.000Z",
+      nodes: [
+        node("final-review", "人工终审", "rejected"),
+        node("assets", "画面", "failed", {
+          outcomeUncertain: true,
+          error: "connection reset while submitting the shot",
+        }),
+      ],
+      videoAvailable: false,
+      publishPackageAvailable: false,
+    });
+
+    // 整体 rejected 下真实 failed 仍可见，且指向 failed 节点。
+    for (const status of ["rejected", "needs_human", "awaiting_spend_approval", "stale", "paused"] as const) {
+      const result = build(status);
+      expect(result.failure?.nodeId).toBe("assets");
+    }
+    // 未知结果保护跟随真实失败节点：零回执也不抵消。
+    const uncertain = build("rejected");
+    expect(uncertain.failure?.retryable).toBe(false);
+    expect(uncertain.failure?.recoveryActions).toContain("先到服务商控制台核对任务状态与账单");
   });
 
   it("keeps an explicit human rejection separate from a system failure", () => {

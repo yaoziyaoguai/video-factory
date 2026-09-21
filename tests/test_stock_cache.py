@@ -80,6 +80,23 @@ search_stock_assets('pixabay', 'city', opener=opener, environ={'PIXABAY_API_KEY'
             self.assertEqual(search_stock_assets("pixabay", "city", opener=valid, environ=env), [])
             self.assertEqual(len(calls), 1)
 
+    def test_an_unwritable_cache_home_degrades_to_direct_fetch(self):
+        # DF-03：生产容器以只读根文件系统运行时，缓存目录 mkdir 会抛 PermissionError。
+        # 缓存是优化不是前提，必须退化为直接检索，而不是让 Pixabay 整体失败。
+        import stat
+        calls = []
+        def opener(request, timeout):
+            calls.append(request.full_url)
+            return io.BytesIO(b'{"hits":[]}')
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked = Path(tmp) / "blocked"
+            blocked.mkdir()
+            blocked.chmod(stat.S_IRUSR | stat.S_IXUSR)  # 去掉写权限，模拟只读文件系统
+            env = {"PIXABAY_API_KEY": "dummy", "XDG_CACHE_HOME": str(blocked)}
+            self.assertEqual(search_stock_assets("pixabay", "sea", opener=opener, environ=env), [])
+            self.assertEqual(len(calls), 1)
+            blocked.chmod(stat.S_IRWXU)  # 还原权限，TemporaryDirectory 才能清理
+
 
 if __name__ == "__main__":
     unittest.main()
