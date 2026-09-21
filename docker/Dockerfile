@@ -78,10 +78,13 @@ COPY --from=builder /app/packages/production-pipeline/dist/audio-review.js apps/
 COPY --from=builder /app/packages/production-pipeline/dist/diagnostics.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/diagnostics.js
 COPY apps/codex-broker/deploy apps/codex-broker/deploy
 
+# 宿主机的私密 umask 可能让源码为 0600；镜像应用文件必须可被非 root 用户读取。
+# /app 只含构建产物和代码，运行凭据与用户数据在镜像之外，保持各自的严格权限。
 RUN addgroup --system --gid 1001 video-factory \
     && adduser --system --uid 1001 --ingroup video-factory --home /app video-factory \
     && mkdir -p /data/factory \
-    && chown -R video-factory:video-factory /data
+    && chown -R video-factory:video-factory /data \
+    && chmod -R a+rX /app
 
 USER video-factory
 

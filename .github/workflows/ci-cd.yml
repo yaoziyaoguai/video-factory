@@ -37,11 +37,18 @@ jobs:
       - run: npm test
       - run: bash -n scripts/deploy-production.sh scripts/backup-production.sh scripts/setup-codex-broker-host.sh scripts/setup-deepseek-codex-broker-host.sh
       - run: docker compose --env-file .env.docker.prod.example -f docker/docker-compose.prod.yml config --quiet
+      - name: Reproduce private-umask release checkout permissions
+        run: chmod -R go-rwx apps packages src examples
       - run: >-
           docker build
           --build-arg NODE_IMAGE=public.ecr.aws/docker/library/node:22-alpine
           --file docker/Dockerfile
           --tag video-factory:ci .
+      - name: Boot production Studio as the image user without network or credentials
+        run: >-
+          docker run --rm --network none
+          --mount type=bind,src=${{ github.workspace }}/scripts/smoke-studio-container.mjs,dst=/tmp/smoke-studio-container.mjs,readonly
+          --entrypoint node video-factory:ci /tmp/smoke-studio-container.mjs
       - name: Verify Flickr through packaged Python worker
         run: >-
           docker run --rm --network none
