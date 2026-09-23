@@ -5007,9 +5007,9 @@ describe("Studio client", () => {
       connectionHeartbeatAt="2026-08-30T10:00:43.000Z"
     />);
 
-    expect(screen.getByRole("region", { name: "制作进度" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "制作章节" })).toBeInTheDocument();
     expect(screen.getAllByText("策划定稿").length).toBeGreaterThan(0);
-    expect(screen.getByText("已完成 1 / 4 个步骤")).toBeInTheDocument();
+    expect(screen.getByText("1 / 4")).toBeInTheDocument();
     expect(screen.getByText("7 秒")).toBeInTheDocument();
     expect(screen.getByText("当前步骤")).toBeInTheDocument();
     expect(screen.getByText("正在统一叙事节奏、镜头语法与视觉规则")).toBeInTheDocument();
@@ -6376,13 +6376,13 @@ describe("joint-v1 planning stages panel (B4)", () => {
     render(<RunWorkbench run={jointRun} providers={jointProviders} decisionPending={false} onDecision={async () => undefined} />);
 
     const panel = screen.getByLabelText("创作规划阶段");
-    expect(within(panel).getByText("前期构思")).toBeInTheDocument();
-    expect(within(panel).getByText("已完成")).toBeInTheDocument();
+    expect(within(panel).getAllByText("前期构思").length).toBeGreaterThan(0);
+    expect(within(panel).getByText("已产出")).toBeInTheDocument();
     expect(within(panel).getByText("treatment-model-a")).toBeInTheDocument();
-    expect(within(panel).getByText("脚本")).toBeInTheDocument();
-    expect(within(panel).getByText("未通过")).toBeInTheDocument();
-    expect(within(panel).getByText(/脚本三次修改仍未通过质量复核/)).toBeInTheDocument();
-    expect(within(panel).getByText("导演方案")).toBeInTheDocument();
+    expect(within(panel).getAllByText("脚本").length).toBeGreaterThan(0);
+    expect(within(panel).getAllByText("执行中断").length).toBeGreaterThan(0);
+    expect(within(panel).getAllByText(/脚本三次修改仍未通过质量复核/).length).toBeGreaterThan(0);
+    expect(within(panel).getAllByText("导演方案").length).toBeGreaterThan(0);
     expect(within(panel).getAllByText("待开始").length).toBe(2);
     // 内部术语不进入用户文案。
     expect(within(panel).queryByText(/checkpoint|lease|audit exhausted|digest/i)).not.toBeInTheDocument();
@@ -6465,7 +6465,7 @@ describe("joint-v1 planning stages panel (B4)", () => {
     />);
 
     const panel = screen.getByLabelText("创作规划阶段");
-    const scriptStage = within(panel).getByText("脚本").closest("li")!;
+    const scriptStage = within(panel).getByText("脚本", { selector: ".planning-stage-name" }).closest("li")!;
     await userEvent.click(within(scriptStage as HTMLElement).getByRole("button", { name: /编辑这一阶段的输入/ }));
     await userEvent.click(screen.getByRole("button", { name: /保存人工输入/ }));
     await waitFor(() => {

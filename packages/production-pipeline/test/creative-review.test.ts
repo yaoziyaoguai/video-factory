@@ -188,6 +188,12 @@ describe("three-stage creative review gates", () => {
     }
     assert.equal(outcome.status, "waiting_user");
     if (outcome.status !== "waiting_user") throw new Error("missing director gate");
+    assert.equal(outcome.gate.purpose, "direction");
+    assert.equal(searches, 0);
+    outcome = await runCreativePlanning(graph, { input, threadId, resume: resume(outcome.gate, "confirm-direction") });
+    assert.equal(outcome.status, "waiting_user");
+    if (outcome.status !== "waiting_user") throw new Error("missing material plan gate");
+    assert.equal(outcome.gate.purpose, "material_plan");
     if (legacyStop) await graph.updateState({ configurable: { thread_id: threadId } }, { integratedPlan: null, manualDirectorReview: true }, "evaluate");
     outcome = await runCreativePlanning(graph, { input, threadId, resume: {
       action: "discuss", stage: "director", commandId: "explain-stock", actor: "creator", message: "解释当前候选",
@@ -1115,9 +1121,16 @@ describe("three-stage creative review gates", () => {
     const draftContexts = directorContexts.filter((context) => context.creativeReviewExecution?.mode !== "check");
     assert.equal(draftContexts.length, 1);
     assert.deepEqual(directorGate.state.issues, []);
-    assert.deepEqual(directorGate.state.advisoryIssues?.flatMap(issue => issue.scenePositions), [1, 2]);
+    assert.deepEqual(directorGate.state.advisoryIssues?.flatMap(issue => issue.scenePositions), [],
+      "stock quality advice appears only after the creator approves the initial direction and candidates are inspected");
     assert.deepEqual(directorGate.state.creativeReview?.stages.director.currentDocument, plans[0]);
     assert.equal(directorGate.state.creativeReview?.stages.director.currentDocument !== null, true);
+    const materialGate = await runCreativePlanning(graph, { input, threadId, resume: resume(directorGate.gate, "confirm-direction-availability") });
+    assert.equal(materialGate.status, "waiting_user");
+    if (materialGate.status === "waiting_user") {
+      assert.equal(materialGate.gate.purpose, "material_plan");
+      assert.deepEqual(materialGate.state.advisoryIssues?.flatMap(issue => issue.scenePositions), [1, 2]);
+    }
   });
 
   it("rebuilds library evidence when director discussion changes a generated shot to stock", async () => {
@@ -1267,6 +1280,8 @@ describe("three-stage creative review gates", () => {
     const directorGate = await runCreativePlanning(graph, { input, threadId, resume: resume(scriptGate.gate, "confirm-script-route-change") });
     assert.equal(directorGate.status, "waiting_user");
     if (directorGate.status !== "waiting_user") return;
+    assert.equal(calls.candidates, 0, "the first director draft must wait for the creator before searching stock");
+    assert.equal(calls.rank, 0, "the first director draft must wait for the creator before ranking stock");
 
     const revised = await runCreativePlanning(graph, {
       input,
@@ -1296,13 +1311,13 @@ describe("three-stage creative review gates", () => {
       director: 1,
       check: 3,
       discuss: 1,
-      candidates: 2,
-      rank: 2,
-      integrate: 2,
+      candidates: 1,
+      rank: 1,
+      integrate: 1,
       compile: 0,
     });
-    assert.deepEqual(afterConfirmation.state.artifactIds.candidates, ["candidates-2"]);
-    assert.deepEqual(afterConfirmation.state.artifactIds.rank, ["ranking-2"]);
+    assert.deepEqual(afterConfirmation.state.artifactIds.candidates, ["candidates-1"]);
+    assert.deepEqual(afterConfirmation.state.artifactIds.rank, ["ranking-1"]);
 
     const completed = await runCreativePlanning(graph, {
       input,
@@ -1327,9 +1342,9 @@ describe("three-stage creative review gates", () => {
 
     const recovered = await runCreativePlanning(graph, { input, threadId });
     assert.equal(recovered.status, "waiting_user", "a poisoned completed checkpoint must rebuild missing library evidence");
-    assert.equal(calls.candidates, 3);
-    assert.equal(calls.rank, 3);
-    assert.equal(calls.integrate, 3);
+    assert.equal(calls.candidates, 2);
+    assert.equal(calls.rank, 2);
+    assert.equal(calls.integrate, 2);
     assert.equal(calls.compile, 1, "recovery must not compile before rebuilt evidence is reviewed");
   });
 
@@ -1637,6 +1652,57 @@ describe("自动循环停下时把决定交还给人", () => {
     assert.equal(advanced.state.planningStop, undefined, "人做过决定之后，停下的理由不能再跟着走");
   });
 
+  it("导演角色级 needs_user 仍是初稿停点，确认前不得检索候选", async () => {
+    let candidateCalls = 0;
+    const ports: CreativePlanningPorts = {
+      treatment: async (context) => ({ artifactId: "treatment", output: treatment,
+        ...(context.creativeReviewExecution?.mode === "check" ? { reviewCheck: passingCheck("treatment", treatment) } : {}) }),
+      screenwriter: async (context) => ({ artifactId: "script", output: script,
+        ...(context.creativeReviewExecution?.mode === "check" ? { reviewCheck: passingCheck("script", script) } : {}) }),
+      director: async (context) => {
+        if (context.creativeReviewExecution?.mode === "check") {
+          return { artifactId: "director", output: director, reviewCheck: passingCheck("director", director) };
+        }
+        await runRoleAgentLoop<VisualDirectorPlan>({
+          role: "导演前期构思", planningRole: true, contractVersion: "director-needs-user-test-v1",
+          criteria: ["创作方向需由用户决定"], maxIterations: 3,
+          checkpoint: { key: "director-needs-user", load: async () => undefined, save: async () => undefined },
+          produce: async () => ({ output: director }),
+          audit: async () => ({ output: {
+            version: "video-factory/role-audit-v2" as const,
+            rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+            verdict: "repair" as const, score: 91, assessments: auditAssessments(91),
+            summary: "创作方向需要用户决定", issues: [{ severity: "blocking" as const,
+              criterion: "创作方向", evidence: "现有画面路线存在取舍", repairInstruction: "请用户决定画面路线" }],
+            repairInstructions: ["请用户决定画面路线"],
+            planningDisposition: { action: "needs_user" as const, issueIndexes: [0] },
+          } }),
+          validate: (value) => value as VisualDirectorPlan,
+        });
+        throw new Error("needs_user 应中止导演角色循环");
+      },
+      searchCandidates: async () => { candidateCalls += 1; throw new Error("确认前不得检索候选"); },
+      rank: async () => { throw new Error("确认前不得排序"); },
+      integrateDirector: async () => { throw new Error("确认前不得整合"); },
+      compile: executablePlanCompilePort,
+    };
+    const graph = createCreativePlanningGraph({ ports, checkpointer: new MemorySaver() });
+    const input = { runId: "run-director-needs-user", inputDigest: "digest-director-needs-user",
+      durationRange: { minSeconds: 20, maxSeconds: 30 }, creativeReview: CREATIVE_REVIEW_FEATURE };
+    const threadId = planningThreadId(input.runId, input.inputDigest);
+    const treatmentGate = await runCreativePlanning(graph, { input, threadId });
+    assert.equal(treatmentGate.status, "waiting_user");
+    if (treatmentGate.status !== "waiting_user") return;
+    const scriptGate = await runCreativePlanning(graph, { input, threadId, resume: resume(treatmentGate.gate, "confirm-treatment-director-halt") });
+    assert.equal(scriptGate.status, "waiting_user");
+    if (scriptGate.status !== "waiting_user") return;
+    const directorGate = await runCreativePlanning(graph, { input, threadId, resume: resume(scriptGate.gate, "confirm-script-director-halt") });
+    assert.equal(directorGate.status, "waiting_user");
+    if (directorGate.status !== "waiting_user") return;
+    assert.equal(directorGate.gate.purpose, "direction");
+    assert.equal(candidateCalls, 0);
+  });
+
   it("复检级的 needs_user 停在导演确认关等人，并让已确认的方案继续走到编译", async () => {
     const stockDirector = {
       ...director,
@@ -1743,10 +1809,18 @@ describe("自动循环停下时把决定交还给人", () => {
     assert.equal(scriptGate.status, "waiting_user");
     if (scriptGate.status !== "waiting_user") return;
 
-    const stop = await runCreativePlanning(graph, {
+    const directionGate = await runCreativePlanning(graph, {
       input,
       threadId,
       resume: resume(scriptGate.gate, "confirm-script-evaluate-halt"),
+    });
+    assert.equal(directionGate.status, "waiting_user");
+    if (directionGate.status !== "waiting_user") return;
+    assert.equal(directionGate.gate.purpose, "direction");
+    const stop = await runCreativePlanning(graph, {
+      input,
+      threadId,
+      resume: resume(directionGate.gate, "confirm-direction-evaluate-halt"),
     });
     assert.equal(stop.status, "waiting_user", "复检停下必须停在导演确认关，而不是把整条制作判失败");
     if (stop.status !== "waiting_user") return;

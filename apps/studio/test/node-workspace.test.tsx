@@ -10,6 +10,16 @@ import { NodeWorkspace } from "../src/client/components/NodeWorkspace.js";
 // C2 制作范围授权需要当前方案 digest：工作区测试统一携带一个合法形态的 fixture 值。
 const TEST_PLAN_DIGEST = "b".repeat(64);
 
+// 正式规划的 output 只有受保护的文件引用；可读交付必须走当前版本的登记产物。
+const planningNode: StudioNode = {
+  id: "creative-planning", label: "创作规划", role: "创作规划制片", status: "succeeded",
+  artifactIds: ["planning-treatment"], qualityGateResults: [], output: { scriptPath: "/managed/script.json" },
+  outputState: { generatedVersionId: "planning-v1", effectiveVersionId: "planning-v1", stale: false, versions: [{
+    id: "planning-v1", source: "generated", artifactIds: ["planning-treatment"], inputVersionIds: [],
+    createdAt: "2026-09-24T00:00:00.000Z", createdBy: "pipeline", schemaVersion: "planning-v1",
+  }] },
+};
+
 const succeededNode: StudioNode = {
   id: "script",
   label: "脚本",
@@ -100,6 +110,20 @@ const hailuoProvider: StudioProvider = {
 };
 
 describe("node production workspaces", () => {
+  it("reads a formal planning delivery even when the node output contains paths only", async () => {
+    vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ viewerPromise: "清楚解释选择", progression: [{ purpose: "先展示差异" }] });
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2}
+      node={planningNode} runStatus="failed" artifacts={[{
+        id: "planning-treatment", kind: "creative_treatment", producerNodeId: "creative-planning",
+        createdAt: "2026-09-24T00:00:00.000Z", contentType: "application/json",
+        contentUrl: "/api/planning-treatment", sha256: "a".repeat(64),
+      }]} planningStages={[{ id: "treatment", status: "completed", artifactIds: ["planning-treatment"], allowedActions: ["view_artifacts"] }]}
+      busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    expect(await screen.findByText("清楚解释选择")).toBeInTheDocument();
+    expect(screen.getByText("规划交付目录")).toBeInTheDocument();
+    expect(screen.queryByText("这一步没有需要人工查看或修改的创作内容。")).not.toBeInTheDocument();
+  });
+
   it("retains official stock credit and share-alike conditions beside adopted videos", () => {
     render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
       runId="run-nw" runRevision={2}
@@ -115,6 +139,7 @@ describe("node production workspaces", () => {
     expect(screen.getByText(/改编须按相同许可分享/)).toBeInTheDocument();
   });
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 

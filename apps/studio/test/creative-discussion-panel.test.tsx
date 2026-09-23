@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CreativeDiscussionPanel } from "../src/client/components/CreativeDiscussionPanel.js";
+import { studioApi } from "../src/client/api.js";
 import type { StudioCreativeReviewCommandInput, StudioCreativeReviewSnapshot } from "../src/shared/api.js";
 
 const sha = "a".repeat(64);
@@ -52,6 +53,35 @@ afterEach(() => {
 });
 
 describe("CreativeDiscussionPanel", () => {
+  it("reconciles a pending command without sending a new one", async () => {
+    window.localStorage.setItem("vf:creative-command:run-creative:script:draft", JSON.stringify({ commandId: "saved-command", action: "discuss" }));
+    const read = vi.spyOn(studioApi, "creativeReviewCommand")
+      .mockResolvedValueOnce({ commandId: "saved-command", status: "unknown", observationUrl: "/pending" })
+      .mockResolvedValueOnce({ commandId: "saved-command", status: "completed", observationUrl: "/done" });
+    const onCommand = vi.fn(async () => undefined);
+    render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
+    await userEvent.click(screen.getByRole("button", { name: "核对上一条操作" }));
+    expect(await screen.findByText(/结果未确定；请稍后核对/)).toBeInTheDocument();
+    expect(window.localStorage.getItem("vf:creative-command:run-creative:script:draft")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "核对上一条操作" }));
+    expect(await screen.findByText(/上一条操作已完成。请刷新查看当前方案/)).toBeInTheDocument();
+    expect(window.localStorage.getItem("vf:creative-command:run-creative:script:draft")).toBeNull();
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it("does not call a completed command unknown when local reconciliation cleanup fails", async () => {
+    window.localStorage.setItem("vf:creative-command:run-creative:script:draft", JSON.stringify({ commandId: "saved-command", action: "discuss" }));
+    vi.spyOn(studioApi, "creativeReviewCommand").mockResolvedValue({ commandId: "saved-command", status: "completed", observationUrl: "/done" });
+    vi.spyOn(window.localStorage, "removeItem").mockImplementation(() => { throw new Error("storage unavailable"); });
+    const onCommand = vi.fn(async () => undefined);
+    render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
+    await userEvent.click(screen.getByRole("button", { name: "核对上一条操作" }));
+    expect(await screen.findByText(/上一条操作已完成，但本机恢复记录未清理/)).toBeInTheDocument();
+    expect(screen.queryByText(/暂时无法核对上一条操作/)).not.toBeInTheDocument();
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
   it("signals only a genuinely new draft in the same run and resets the baseline on run switch", () => {
     vi.useFakeTimers();
     try {

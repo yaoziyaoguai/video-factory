@@ -925,6 +925,8 @@ export interface StudioPlanningStage {
   /** 模型阶段当前绑定的能力提供者 id（UI 模型选择据此解析）。 */
   providerId?: string;
   artifactIds: string[];
+  decisionStatus?: "waiting_user" | "checking" | "confirmed";
+  reviewPurpose?: "direction" | "material_plan";
   issue?: string;
   allowedActions: Array<"edit_input" | "change_model" | "view_artifacts">;
 }
@@ -1334,6 +1336,7 @@ export interface StudioCreativeReviewSnapshot {
   runId: string;
   runRevision: number;
   stage: StudioPlanningEditableStage;
+  reviewPurpose?: "direction" | "material_plan";
   reviewRevision: number;
   draftSha256: string;
   draftArtifactId: string;
@@ -1379,6 +1382,7 @@ type StudioCreativeReviewCommandBase = {
   expectedRunRevision: number;
   expectedReviewRevision: number;
   stage: StudioPlanningEditableStage;
+  reviewPurpose?: "direction" | "material_plan";
   baseDraftSha256: string;
 };
 
@@ -1402,7 +1406,7 @@ export interface StudioCreativeReviewCommandReceipt {
 
 export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCreativeReviewCommandInput {
   const input = requiredObject(value, "创作操作");
-  const commonFields = ["action", "commandId", "expectedRunRevision", "expectedReviewRevision", "stage", "baseDraftSha256"];
+  const commonFields = ["action", "commandId", "expectedRunRevision", "expectedReviewRevision", "stage", "reviewPurpose", "baseDraftSha256"];
   const actionFields = input.action === "discuss"
     ? ["message", "selection"]
     : input.action === "adopt_proposal"
@@ -1429,6 +1433,10 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
   if (!STUDIO_PLANNING_EDITABLE_STAGES.includes(input.stage as StudioPlanningEditableStage)) {
     throw new StudioInputError("创作确认阶段不正确。");
   }
+  if (input.reviewPurpose !== undefined
+    && (input.stage !== "director" || (input.reviewPurpose !== "direction" && input.reviewPurpose !== "material_plan"))) {
+    throw new StudioInputError("导演方案确认用途不正确。");
+  }
   const baseDraftSha256 = requiredTrimmedString(input.baseDraftSha256, "方案摘要");
   if (!/^[a-f0-9]{64}$/.test(baseDraftSha256)) throw new StudioInputError("方案摘要格式不正确。");
   const common: StudioCreativeReviewCommandBase = {
@@ -1436,6 +1444,7 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
     expectedRunRevision,
     expectedReviewRevision,
     stage: input.stage as StudioPlanningEditableStage,
+    ...(input.reviewPurpose === "direction" || input.reviewPurpose === "material_plan" ? { reviewPurpose: input.reviewPurpose } : {}),
     baseDraftSha256,
   };
   if (input.action === "discuss") {
@@ -2103,6 +2112,8 @@ export interface StudioArtifactResource {
   path: string;
   contentType: string;
   sizeBytes: number;
+  /** 需核验完整性的 JSON 直接返回已核验的字节，避免校验后再次打开文件。 */
+  verifiedBytes?: Uint8Array;
 }
 
 export function parseStudioVoicePreviewInput(value: unknown): StudioVoicePreviewInput {

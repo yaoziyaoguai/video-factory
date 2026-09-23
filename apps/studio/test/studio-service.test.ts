@@ -6144,6 +6144,24 @@ describe("StudioService", () => {
     await assert.rejects(() => service.resolveArtifact("run-1", "artifact-video"), /outside run directory/);
   });
 
+  it("refuses a changed formal planning document before serving its bytes", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-planning-read-"));
+    const run = waitingRun(workspaceRoot);
+    const documentPath = path.join(workspaceRoot, "runs", "run-1", "planning", "treatment.json");
+    const content = JSON.stringify({ viewerPromise: "原来的观众承诺" });
+    await mkdir(path.dirname(documentPath), { recursive: true });
+    await writeFile(documentPath, content, "utf8");
+    const pipeline = new FakePipeline({ ...run, artifacts: [{
+      id: "planning-treatment", kind: "creative_treatment", uri: documentPath,
+      createdAt: run.startedAt, contentType: "application/json", ...fileIntegrity(content),
+      producer: { nodeId: "creative-planning", attempt: 1 }, provenance: { providerId: "treatment" },
+    }] });
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+    assert.equal((await service.resolveArtifact("run-1", "planning-treatment"))?.sizeBytes, Buffer.byteLength(content));
+    await writeFile(documentPath, JSON.stringify({ viewerPromise: "被替换的观众承诺" }), "utf8");
+    await assert.rejects(() => service.resolveArtifact("run-1", "planning-treatment"), /与登记记录不一致/);
+  });
+
   it("serves persisted artifacts even when a legacy brief cannot be rehydrated", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
     const run = waitingRun(workspaceRoot);

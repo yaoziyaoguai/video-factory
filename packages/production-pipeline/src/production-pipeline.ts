@@ -253,6 +253,7 @@ export interface ProductionCreativeReviewConfirmationDraft {
   expectedRunRevision: number;
   expectedReviewRevision: number;
   stage: CreativeStage;
+  reviewPurpose?: "direction" | "material_plan";
   baseDraftSha256: string;
   // 这两个字段必须跟着确认一起走。确认入口虽然只有一份实现，但类型上少一个字段，
   // 走这几个窄入口的调用方就会把人的显式承担静默丢掉——那正是"仍然确认"曾经失效的样子。
@@ -268,6 +269,7 @@ export type ProductionCreativeReviewCommandDraft = {
   expectedRunRevision: number;
   expectedReviewRevision: number;
   stage: CreativeStage;
+  reviewPurpose?: "direction" | "material_plan";
   baseDraftSha256: string;
 } & (
   | { action: "confirm"; acknowledgeRepair?: true; acknowledgeIncomplete?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string }
@@ -1280,6 +1282,14 @@ export class ProductionPipeline {
         || continuation.reviewRevision !== draft.expectedReviewRevision
         || continuation.draftSha256 !== draft.baseDraftSha256) {
         throw new Error("Creative review confirmation is stale or belongs to another stage draft.");
+      }
+      const nodeReview = isObjectRecord(node.output) && isObjectRecord(node.output.creativeReview)
+        ? node.output.creativeReview : undefined;
+      const actualPurpose = draft.stage === "director"
+        ? nodeReview?.directorReviewPurpose === "direction" ? "direction" : "material_plan"
+        : undefined;
+      if (draft.reviewPurpose !== undefined && draft.reviewPurpose !== actualPurpose) {
+        throw new Error("Creative review confirmation is stale or belongs to another director decision.");
       }
       if (draft.action === "confirm" && (draft.acknowledgeRepair === true || draft.acknowledgeIncomplete === true) && draft.expectedCheckIdentity === undefined) {
         // "仍然确认"复用他看过的那一条复核，所以命令必须自己说出是哪一条。这里曾经替他造一个
@@ -3355,12 +3365,20 @@ export class ProductionPipeline {
         ? roleModelTraces[stage] ?? (modelStage ? "unknown" : undefined)
         : roleModelTraces[stage] ?? this.planningBindingModelId(stage, brief);
       const providerId = this.planningBindingProviderId(stage, brief);
+      const reviewState = stage === "treatment" || stage === "script" || stage === "director"
+        ? values.creativeReview?.stages[stage] : undefined;
+      const decisionStatus = reviewState?.currentDraft
+        ? reviewState.phase === "waiting_user" ? "waiting_user" as const
+          : reviewState.phase === "checking" ? "checking" as const
+            : reviewState.phase === "confirmed" && reviewState.confirmation?.draftSha256 === reviewState.currentDraft.sha256
+              ? "confirmed" as const : undefined
+        : undefined;
       const issue = status === "failed"
         ? structuredIssueByStage.get(stage)
           ?? (commitVerificationFailed && stage === "compile"
-            ? "正式方案还没有通过核验，请重试生成或重新规划。"
+            ? "正式交付记录暂未核对成功；已产出的内容会保留，请先检查交付记录。"
             : planningFailureForCreators(planningNode.error ?? ""))
-        : structuredIssueByStage.get(stage);
+        : decisionStatus === "waiting_user" ? structuredIssueByStage.get(stage) : undefined;
       const allowedActions: CreativePlanningStageAction[] = [
         ...(stage === "treatment" || stage === "script" || stage === "director"
           ? (["edit_input", "change_model"] as const)
@@ -3373,6 +3391,9 @@ export class ProductionPipeline {
         ...(effectiveModelId !== undefined ? { effectiveModelId } : {}),
         ...(providerId !== undefined ? { providerId } : {}),
         artifactIds: [...artifactIds],
+        ...(decisionStatus ? { decisionStatus } : {}),
+        ...(stage === "director" && values.creativeReview?.directorReviewPurpose
+          ? { reviewPurpose: values.creativeReview.directorReviewPurpose } : {}),
         ...(issue !== undefined && issue !== "" ? { issue } : {}),
         allowedActions,
       };
@@ -3424,22 +3445,19 @@ export class ProductionPipeline {
     const executablePlan = values.executablePlan;
     if (!treatment || !script || !finalPlan || !executablePlan) return {};
     if (libraryRoute && (!candidates || !ranking)) return {};
-    // 与执行侧同一公式重算 commit key：同输入身份必然命中执行时写入的同一 commit 文件。
-    const planningCommitKey = createHash("sha256").update(JSON.stringify({
-      version: PLANNING_COMMIT_VERSION,
-      runId,
-      inputDigest,
-      planning: {
+    let commit: JointPlanningCommit;
+    try {
+      const planningCommitKey = jointPlanningCommitKey({
+        runId,
+        inputDigest,
         treatment: treatment.artifactId,
         script: script.artifactId,
         directorPlan: finalPlan.artifactId,
         ...(libraryRoute && candidates ? { candidates: candidates.artifactId } : {}),
         ...(libraryRoute && ranking ? { ranking: ranking.artifactId } : {}),
+        stockAcceptance: confirmedStockDeliveryAcceptance(values as PlanningGraphState),
         executablePlan: executablePlan.artifactId,
-      },
-    })).digest("hex");
-    let commit: JointPlanningCommit;
-    try {
+      });
       const existing = await readJointPlanningCommit(
         path.join(this.runsRoot, runId, "planning", "commits", `${planningCommitKey}.json`),
       );
@@ -6344,6 +6362,34 @@ function validateJointPlanningOutput(output: unknown, libraryRoute: boolean): Re
 
 const PLANNING_COMMIT_VERSION = "video-factory/planning-commit-v1";
 
+function jointPlanningCommitKey(input: {
+  runId: string;
+  inputDigest: string;
+  treatment: string;
+  script: string;
+  directorPlan: string;
+  candidates?: string;
+  ranking?: string;
+  stockAcceptance?: ReturnType<typeof confirmedStockDeliveryAcceptance>;
+  executablePlan: string;
+}): string {
+  // 字段顺序属于已有 commit 身份合同；读写共用，历史记录的 key 不变。
+  return createHash("sha256").update(JSON.stringify({
+    version: PLANNING_COMMIT_VERSION,
+    runId: input.runId,
+    inputDigest: input.inputDigest,
+    planning: {
+      treatment: input.treatment,
+      script: input.script,
+      directorPlan: input.directorPlan,
+      ...(input.candidates !== undefined ? { candidates: input.candidates } : {}),
+      ...(input.ranking !== undefined ? { ranking: input.ranking } : {}),
+      ...(input.stockAcceptance !== undefined ? { stockAcceptance: input.stockAcceptance } : {}),
+      executablePlan: input.executablePlan,
+    },
+  })).digest("hex");
+}
+
 interface JointPlanningCommitEntry {
   kind: string;
   artifactId: string;
@@ -6577,6 +6623,8 @@ export interface CreativePlanningStageInspection {
   /** 模型阶段当前绑定的能力提供者 id：UI 据此解析模型选择，不按能力目录顺序猜测。 */
   providerId?: string;
   artifactIds: string[];
+  decisionStatus?: "waiting_user" | "checking" | "confirmed";
+  reviewPurpose?: "direction" | "material_plan";
   issue?: string;
   allowedActions: CreativePlanningStageAction[];
 }
@@ -7923,20 +7971,17 @@ function creativePlanningNode(
       ];
       // commit key 绑定 runId、当前 inputDigest 与完成态图内产物身份（内容派生 id）：
       // 不含 attempt/路径/时间，同输入重放必然命中同 key。
-      const planningCommitKey = createHash("sha256").update(JSON.stringify({
-        version: PLANNING_COMMIT_VERSION,
+      const planningCommitKey = jointPlanningCommitKey({
         runId: context.runId,
         inputDigest,
-        planning: {
-          treatment: treatmentArtifact.artifactId,
-          script: scriptArtifact.artifactId,
-          directorPlan: finalPlanArtifact.artifactId,
-          ...(candidateContent !== undefined && candidatesArtifact ? { candidates: candidatesArtifact.artifactId } : {}),
-          ...(rankingContent !== undefined && rankingArtifact ? { ranking: rankingArtifact.artifactId } : {}),
-          ...(stockAcceptance ? { stockAcceptance } : {}),
-          executablePlan: executablePlanArtifact.artifactId,
-        },
-      })).digest("hex");
+        treatment: treatmentArtifact.artifactId,
+        script: scriptArtifact.artifactId,
+        directorPlan: finalPlanArtifact.artifactId,
+        ...(candidateContent !== undefined && candidatesArtifact ? { candidates: candidatesArtifact.artifactId } : {}),
+        ...(rankingContent !== undefined && rankingArtifact ? { ranking: rankingArtifact.artifactId } : {}),
+        stockAcceptance,
+        executablePlan: executablePlanArtifact.artifactId,
+      });
       const planningCommitPath = path.join(runsRoot, context.runId, "planning", "commits", `${planningCommitKey}.json`);
       const committedSha256 = (kind: string) => createHash("sha256")
         .update(expectedFormalContents.find((entry) => entry.kind === kind)!.content)

@@ -23,7 +23,7 @@ class WorkerContractTest(unittest.TestCase):
         from PIL import Image
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            script = {"scenes": [{"position": 1, "duration": 3, "narration": "示意", "visual_strategy": "stock", "visual_prompt": "landscape", "search_terms": []}]}
+            script = {"scenes": [{"position": 1, "duration": 20, "narration": "示意", "visual_strategy": "stock", "visual_prompt": "landscape", "search_terms": []}]}
             director = {"shots": [{"scenePosition": 1, "preferredProviderId": "nasa-stock-v1", "alternativeProviderIds": [], "deliveryType": "stock_image", "authenticityPolicy": "illustrative", "query": "landscape"}]}
             inventory = {"version": "video-factory/asset-candidate-inventory-v1", "scene_candidates": [{"scene_position": 1, "candidates": [{
                 "provider": "nasa", "provider_id": "nasa-stock-v1", "asset_id": "low", "media_type": "image", "width": 720, "height": 1280, "duration": 0,
@@ -41,8 +41,14 @@ class WorkerContractTest(unittest.TestCase):
             }
             ranking_path = root / "ranking.json"
             ranking_path.write_text(json.dumps(ranking), encoding="utf-8")
+            executable_plan_path = root / "executable_plan.json"
+            executable_plan_path.write_text(json.dumps({
+                "version": "video-factory/executable-plan-v1", "durationRange": {"minSeconds": 20, "maxSeconds": 20},
+                "fps": 30, "totalFrames": 600,
+                "cuts": [{"scenePosition": 1, "assetKey": "asset-scene-1", "startFrame": 0, "frameCount": 600, "sourceInFrame": 0}],
+            }), encoding="utf-8")
             request = self.valid_request("asset.prepare", root / "output")
-            request["input"] = {**paths, "candidateRankingPath": str(ranking_path)}
+            request["input"] = {**paths, "candidateRankingPath": str(ranking_path), "executablePlanPath": str(executable_plan_path)}
             request["parameters"] = {"provider": "ai-router", "mediaType": "image"}
             image_bytes = io.BytesIO()
             Image.new("RGB", (720, 1280), "navy").save(image_bytes, format="PNG")

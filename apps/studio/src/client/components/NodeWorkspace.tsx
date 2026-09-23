@@ -11,6 +11,7 @@ import { unsplashPublicUrl } from "./UnsplashAttribution.js";
 import { hasStockAttribution, StockAttribution } from "./StockAttribution.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
 import { PlanningStagesPanel } from "./PlanningStagesPanel.js";
+import { PlanningDeliveryPanel } from "./PlanningDeliveryPanel.js";
 import type { StudioPlanningEditableStage, StudioPlanningStage } from "../../shared/api.js";
 
 // 编辑器内的输入草稿类型：不含并发 token。wire DTO（含 expectedRunRevision/expectedVersionId）
@@ -126,7 +127,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const outputReadOnly = READ_ONLY_OUTPUT_NODE_IDS.has(node.id);
   const nodeReadOnly = READ_ONLY_NODE_IDS.has(node.id);
   const paidRecoveryLocked = nodes.some((candidate) => candidate.outcomeUncertain === true);
-  const canEdit = !readOnly && !paidRecoveryLocked && !outputReadOnly && (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
+  const canEdit = !readOnly && !paidRecoveryLocked && !outputReadOnly && node.id !== "creative-planning" && (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
   const canEditInput = !readOnly && !paidRecoveryLocked && !nodeReadOnly && effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
   // 创作规划节点自己的"本次制作选择"只有编剧这一项能力，而阶段模型是逐个阶段挂在简报上的：
@@ -152,7 +153,12 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     [assetProviderIds, providers],
   );
   const deliveryValue = documentPreview ?? node.output ?? effectiveOutput(node);
-  const hasDelivery = hasCreatorDocumentContent(node.id, deliveryValue);
+  const planningVersionArtifactIds = node.id === "creative-planning" ? effectiveVersion?.artifactIds ?? [] : [];
+  const verifiedPlanningArtifactIds = new Set(planningStages?.flatMap((stage) => stage.artifactIds) ?? []);
+  const planningArtifactIds = planningVersionArtifactIds.filter((id) => verifiedPlanningArtifactIds.has(id));
+  const hasDelivery = node.id === "creative-planning"
+    ? planningVersionArtifactIds.length > 0
+    : hasCreatorDocumentContent(node.id, deliveryValue);
   const hasEditableInput = node.id !== "brief" && hasCreatorDocumentContent(`${node.id}-input`, effectiveInput(node));
   const inputSources = useMemo(
     () => creatorInputSources(node, nodes, effectiveInputVersion),
@@ -448,12 +454,13 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       <summary>
         <span className="node-workspace-state">{node.status === "succeeded" ? <Check aria-hidden="true" size={14} /> : <span />}</span>
         <span className="node-workspace-title"><strong>{node.label}</strong><small>{node.role ?? "制作角色"}</small></span>
-        {capability ? <span className="node-workspace-provenance">{capability}</span> : <span />}
+        {capability && !showPlanningStages ? <span className="node-workspace-provenance">{capability}</span> : <span />}
         {node.outputState?.stale ? <span className="node-stale-label"><AlertTriangle aria-hidden="true" size={14} />旧结果</span> : null}
         <ChevronDown className="node-workspace-chevron" aria-hidden="true" size={17} />
       </summary>
       <div className="node-workspace-body">
         {readOnly ? <p className="node-workspace-warning"><AlertTriangle aria-hidden="true" size={16} />旧版工作流结果只读；要继续修改，请基于这版重新制作。</p> : null}
+        {showPlanningStages && capability ? <details className="node-capability-details"><summary>本次使用的创作服务</summary><p>{capability}</p></details> : null}
         {node.agentLoopProgress ? <div className={`agent-loop-progress is-${node.agentLoopProgress.phase}`} role="status">
           <strong>{agentLoopPhaseLabel(node.agentLoopProgress)}</strong>
           {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{node.agentLoopProgress.latestAudit.summary}</span> : <span>{agentLoopPendingNote(node.agentLoopProgress)}</span>}
@@ -608,7 +615,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         ) : null}
 
         <section className="node-output-preview node-creator-delivery">
-          <header><div><strong>{node.role ?? "制作角色"}的交付</strong><small>{deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
+          <header><div><strong>{node.id === "creative-planning" ? "规划交付目录" : `${node.role ?? "制作角色"}的交付`}</strong><small>{node.id === "creative-planning" ? "当前正式版本 · 逐项阅读，不在这里修改历史产物" : deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
           {node.id === "assets" && visualArtifacts.length ? <div className={visualsAreCurrent ? "node-visual-preview" : "node-visual-preview is-stale"}>
             <header><strong>{visualsAreCurrent ? "实际素材画面" : "上次生成的素材画面"}</strong><small>{visualArtifacts.length} 个可预览素材{visualsAreCurrent ? "" : " · 将重新检查适用性，只重做不再适用的部分"}</small></header>
             <div>
@@ -620,7 +627,14 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
               </figure>)}
             </div>
           </div> : null}
-          {editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <p className="node-workspace-error" role="alert">详细内容读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
+          {node.id === "creative-planning" ? <PlanningDeliveryPanel
+            key={`${runId}:${effectiveVersion?.id ?? "pending"}`}
+            runId={runId}
+            versionId={effectiveVersion?.id ?? "pending"}
+            artifactIds={planningArtifactIds}
+            artifacts={artifacts}
+            publicationExpected={node.status === "succeeded"}
+          /> : editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <p className="node-workspace-error" role="alert">详细内容读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
           {audioArtifact?.contentUrl ? <div className={audioIsCurrent ? "node-audio-preview" : "node-audio-preview is-stale"}><div><strong>{audioIsCurrent ? "实际配音试听" : "上次生成的配音"}</strong>{!audioIsCurrent ? <small>当前文字已修改或上游已变化；继续生成后会更新声音。</small> : null}</div><audio aria-label={audioIsCurrent ? "实际配音试听" : "上次生成的配音试听"} src={audioArtifact.contentUrl} controls preload="metadata" /></div> : null}
           {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
         </section>
@@ -1184,7 +1198,9 @@ function creatorCapabilityLabel(
   const reasoningEffort = execution?.parameters?.reasoningEffort;
   const loopIterations = execution?.parameters?.agentLoopIterations;
   const auditEffort = execution?.parameters?.auditReasoningEffort;
-  const providerName = providerLabel(providerId) ?? execution?.providerLabel ?? "未识别的制作服务";
+  const knownProviderName = providerLabel(providerId);
+  const providerName = providers.find((provider) => provider.id === providerId)?.label
+    ?? (knownProviderName && !knownProviderName.startsWith("服务名称未收录（") ? knownProviderName : "AI 创作服务");
   const modelName = catalogModelLabel(providers, modelId);
   return [
     `本次使用 ${providerName}${!modelName || modelId === providerId || modelName === providerName ? "" : ` · ${modelName}`}`,

@@ -769,6 +769,13 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
     assert.equal(waiting().stage, "director");
     assert.equal(spies.directorCalls, 1);
 
+    const directorGate = waiting();
+    await assert.rejects(() => pipeline.confirmCreativeReview(run.id, {
+      commandId: "wrong-director-purpose", actor: "creator", expectedRunRevision: run.revision,
+      expectedReviewRevision: directorGate.reviewRevision, stage: "director",
+      baseDraftSha256: directorGate.draftSha256, reviewPurpose: "material_plan",
+    }), /another director decision/);
+
     await confirm("confirm-director");
     assert.notEqual(run.nodeRuns.find((node) => node.nodeId === "creative-planning")?.status, "needs_human");
     assert.equal(spies.treatmentTitles.length, 1);
@@ -1370,14 +1377,25 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
     const brief = closureBrief({ assetSemanticRank: true, creativeReview: true });
     if (sourceReview) brief.providers.visualReview = "deepseek-visual-review-v1";
     let run = await pipeline.start(brief);
-    for (const stage of ["treatment", "script", "director"] as const) {
+    for (const stage of ["treatment", "script", "director", "director"] as const) {
       const gate = run.nodeRuns.find(node => node.nodeId === "creative-planning")?.intervention?.continuation;
       assert.equal(gate?.stage, stage, JSON.stringify(run.nodeRuns));
-      run = await pipeline.confirmCreativeReview(run.id, { commandId: `accept-${stage}`, actor: "creator", stage,
+      const purpose = (run.nodeRuns.find(node => node.nodeId === "creative-planning")?.output as { creativeReview?: { directorReviewPurpose?: string } } | undefined)
+        ?.creativeReview?.directorReviewPurpose;
+      if (stage === "director" && purpose === "direction") {
+        assert.equal(spies.searchCalls, 0, "the initial director gate must precede candidate search");
+      }
+      run = await pipeline.confirmCreativeReview(run.id, { commandId: `accept-${stage}-${purpose ?? "draft"}`, actor: "creator", stage,
         expectedRunRevision: run.revision, expectedReviewRevision: gate!.reviewRevision, baseDraftSha256: gate!.draftSha256,
-        ...(stage === "director" ? { acceptQualityFallback: true } : {}),
+        ...(purpose === "material_plan" ? { acceptQualityFallback: true } : {}),
       });
     }
+    const publishedStages = await pipeline.inspectCreativePlanningStages(run.id);
+    assert.ok(publishedStages);
+    assert.equal(publishedStages.find(stage => stage.id === "compile")?.status, "completed",
+      "accepted stock quality risk must not make a published formal plan look unverified");
+    assert.ok(publishedStages.find(stage => stage.id === "compile")?.artifactIds.length,
+      "the read-side commit identity must include the accepted stock scope");
     assert.ok(prepared, "confirmation must reach the actual asset worker boundary");
     const input = prepared.input as Record<string, string>;
     const ranking = JSON.parse(await readFile(input.candidateRankingPath!, "utf8"));
@@ -1699,6 +1717,10 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
       if (request.capability === "asset.search") searches++;
       return runWorker(request);
     };
+    const director = closureLibraryDirector(spies);
+    director.planDetailed = async input => input.creativeReviewExecution?.mode === "check"
+      ? passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "视觉导演", "fixture-director-contract-v1", "director-plan", "director-binding-model")
+      : { output: await director.plan(input) };
     const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
       client: { runTask: async () => { throw new Error("must use audited client"); },
         runTaskDetailed: async (kind, payload, requestId, session, options) => {
@@ -1719,7 +1741,7 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
     });
     const pipeline = new ProductionPipeline({ workspaceRoot, worker,
       treatmentAgents: closureTreatmentAgents(spies), screenwriterAgent: closureScreenwriter(spies),
-      directorAgent: closureLibraryDirector(spies), assetSemanticRanker: ranker,
+      directorAgent: director, assetSemanticRanker: ranker,
       assetProviders: [{ id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] }, ...CLOSURE_ASSET_PROVIDERS],
     });
     let first = await pipeline.start(closureBrief({ assetSemanticRank: true, creativeReview: true }));

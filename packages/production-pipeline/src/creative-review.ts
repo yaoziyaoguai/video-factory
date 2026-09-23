@@ -200,12 +200,16 @@ export interface CreativeReviewState {
   version: typeof CREATIVE_REVIEW_VERSION;
   activeStage: CreativeStage;
   reviewRevision: number;
+  /** 导演初稿与选材方案复用同一讨论机制，但必须保留各自的决定语义。 */
+  directorReviewPurpose?: "direction" | "material_plan";
+  directionConfirmation?: CreativeStageConfirmation | undefined;
   stages: Record<CreativeStage, CreativeStageReviewState>;
 }
 
 export interface CreativeReviewGate {
   kind: "creative_review";
   stage: CreativeStage;
+  purpose?: "direction" | "material_plan";
   reviewRevision: number;
   draft: CreativeDraftRef;
 }
@@ -267,6 +271,7 @@ export function returnCreativeReviewToStage(
   });
   return {
     ...review,
+    directionConfirmation: undefined,
     activeStage: command.targetStage,
     reviewRevision: review.reviewRevision + 1,
     stages,
@@ -361,7 +366,13 @@ export function creativeReviewGate(review: CreativeReviewState, stage: CreativeS
   if (review.activeStage !== stage || current.phase !== "waiting_user" || !current.currentDraft) {
     throw new Error(`Creative review stage '${stage}' is not waiting for a current draft.`);
   }
-  return { kind: "creative_review", stage, reviewRevision: review.reviewRevision, draft: current.currentDraft };
+  return {
+    kind: "creative_review",
+    stage,
+    ...(stage === "director" ? { purpose: review.directorReviewPurpose ?? "material_plan" } : {}),
+    reviewRevision: review.reviewRevision,
+    draft: current.currentDraft,
+  };
 }
 
 export function confirmCreativeDraft(review: CreativeReviewState, raw: unknown): CreativeReviewState {

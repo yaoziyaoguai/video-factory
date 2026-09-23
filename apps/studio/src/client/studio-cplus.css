@@ -2924,6 +2924,56 @@ body:has(.studio-v3) {
 .studio-v3 .run-progress-disclosure > summary span { margin-left: 10px; font-variant-numeric: tabular-nums; }
 .studio-v3 .run-progress-disclosure[open] { flex-basis: 100%; }
 .studio-v3 .run-progress-disclosure .production-progress { margin: 0 0 12px; padding: 12px; box-shadow: none; }
+.studio-v3 .run-workspace-toolbar { display: block; }
+.studio-v3 .production-progress { margin: 4px 0 12px; padding: 0; border: 0; background: transparent; box-shadow: none; }
+.studio-v3 .production-phases { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 6px; }
+.studio-v3 .production-phase { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; min-height: 40px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 13px; }
+.studio-v3 .production-phase.is-running { background: color-mix(in srgb, var(--accent) 9%, transparent); color: var(--accent); font-weight: 700; }
+.studio-v3 .production-phase.is-completed { color: var(--ink); }
+.studio-v3 .production-phase-index { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; margin: 0; padding: 0; border: 0; background: transparent; }
+.studio-v3 .run-progress-disclosure { display: block; padding-bottom: 4px; }
+.studio-v3 .run-progress-disclosure > summary { width: fit-content; }
+.studio-v3 .node-planning-stages { padding: 16px 18px; border-color: color-mix(in srgb, var(--accent) 16%, var(--line)); background: color-mix(in srgb, var(--accent) 3%, var(--surface)); }
+.studio-v3 .node-capability-details { margin: 0 0 12px; color: var(--muted); font-size: 12px; }
+.studio-v3 .node-capability-details > summary { min-height: 36px; align-content: center; cursor: pointer; }
+.studio-v3 .node-capability-details > p { margin: 2px 0 8px; overflow-wrap: anywhere; }
+.studio-v3 .node-planning-stages > header strong { display: block; color: var(--muted); font-size: 12px; font-weight: 650; }
+.studio-v3 .node-planning-stages > header p { margin: 4px 0 0; color: var(--ink); font-size: 18px; font-weight: 700; line-height: 1.5; }
+.studio-v3 :is(.planning-stage-details, .planning-stage-settings) { border-top: 1px solid var(--line); padding-top: 6px; }
+.studio-v3 :is(.planning-stage-details, .planning-stage-settings) > summary { min-height: 44px; align-content: center; cursor: pointer; color: var(--accent); font-size: 14px; font-weight: 650; }
+.studio-v3 .planning-stage-list { padding: 4px 0 10px; }
+.studio-v3 .planning-stage { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 10px 0; }
+.studio-v3 .planning-stage-status { border: 0; background: transparent; font-size: 12px; }
+.studio-v3 .planning-stage-settings > p { margin: 2px 0 14px; color: var(--muted); font-size: 13px; line-height: 1.65; }
+.studio-v3 .planning-stage-setting { display: grid; gap: 6px; padding: 12px 0; border-top: 1px solid var(--line); }
+.studio-v3 .planning-delivery { display: grid; grid-template-columns: minmax(160px, 220px) minmax(0, 1fr); gap: 20px; padding: 18px; }
+.studio-v3 .planning-delivery-index { display: grid; align-content: start; gap: 4px; }
+.studio-v3 .planning-delivery-index button { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 44px; padding: 9px 11px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
+.studio-v3 .planning-delivery-index button.is-selected { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); color: var(--accent); font-weight: 700; }
+.studio-v3 .planning-delivery-index button small { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.studio-v3 .planning-delivery-document { min-width: 0; border-left: 1px solid var(--line); padding-left: 20px; font-size: 15px; line-height: 1.65; }
+.studio-v3 .planning-delivery-document > header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+.studio-v3 .planning-delivery-document > header strong { font-size: 20px; }
+.studio-v3 .planning-delivery-document > header small { color: var(--muted); font-size: 12px; }
+.studio-v3 .planning-document-fields { display: grid; gap: 12px; margin: 0; }
+.studio-v3 .planning-document-fields > div { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.studio-v3 .planning-document-fields dt { margin-bottom: 4px; color: var(--muted); font-size: 12px; font-weight: 700; }
+.studio-v3 .planning-document-fields dd { margin: 0; overflow-wrap: anywhere; }
+.studio-v3 .planning-document-list { margin: 0; padding-left: 24px; }
+.studio-v3 .planning-document-list > li { margin: 0 0 10px; padding-left: 4px; }
+.studio-v3 .planning-document-records { margin-top: 12px; color: var(--muted); font-size: 12px; }
+.studio-v3 .planning-document-records > summary { min-height: 36px; align-content: center; cursor: pointer; }
+.studio-v3 .planning-document-records .planning-document-fields { padding: 8px 0 4px; }
+.studio-v3 .planning-delivery-document .node-readable-preview { padding: 0; background: transparent; }
+.studio-v3 .planning-delivery-complete { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 8px; }
+.studio-v3 .planning-delivery-complete > summary { min-height: 44px; align-content: center; color: var(--accent); font-size: 13px; font-weight: 650; cursor: pointer; }
+.studio-v3 :is(.planning-delivery-index button, .planning-stage-details summary, .planning-stage-settings summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 680px) {
+  .studio-v3 .planning-delivery { grid-template-columns: 1fr; gap: 12px; padding: 12px; }
+  .studio-v3 .planning-delivery-index { display: flex; overflow-x: auto; padding-bottom: 4px; }
+  .studio-v3 .planning-delivery-index button { flex: 0 0 auto; }
+  .studio-v3 .planning-delivery-document { border-left: 0; border-top: 1px solid var(--line); padding: 14px 0 0; }
+}
 .studio-v3 :is(#run-current, #run-artifacts, #run-costs, #evidence-heading, #creative-direction) { scroll-margin-top: 84px; }
 .studio-v3 .run-current-workspace { min-width: 0; }
 .studio-v3 .workspace-loading { padding: 32px 20px; background: var(--paper); border: 1px solid var(--line); }

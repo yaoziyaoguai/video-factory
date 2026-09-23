@@ -639,10 +639,13 @@ function confirmPlanningDraft(
 ): CreativeReviewState {
   const confirmedAt = new Date().toISOString();
   const confirmed = confirmCreativeDraft(review, { ...command, confirmedAt });
-  if (command.stage === "director") {
+  if (command.stage === "director" && review.directorReviewPurpose === "direction") {
+    confirmed.directionConfirmation = structuredClone(confirmed.stages.director.confirmation!);
+  }
+  if (command.stage === "director" && review.directorReviewPurpose !== "direction") {
     confirmed.stages.director.confirmation!.libraryEvidenceDigest = stockDeliveryScopeDigest(state);
   }
-  if (command.stage === "director" && command.acceptQualityFallback === true) {
+  if (command.stage === "director" && review.directorReviewPurpose !== "direction" && command.acceptQualityFallback === true) {
     const deliveryAcceptance: StockDeliveryAcceptance = {
       policyVersion: "playable-first-v1",
       scopeDigest: stockDeliveryScopeDigest(state),
@@ -844,12 +847,12 @@ export function createCreativePlanningGraph(options: CreateCreativePlanningGraph
     .addConditionalEdges("treatment_review", routeAfterReview("treatment"), { wait: "treatment_review", next: "script" })
     .addConditionalEdges("script", routeAfterScript, { halt: END, review: "script_review", next: "director" })
     .addConditionalEdges("script_review", routeAfterReview("script"), { wait: "script_review", treatment: "treatment_review", next: "director" })
-    // 首轮导演草案之后先搜候选；重修/重建后只在候选获取身份变化时重搜，排序实际输入变化时
-    // 只重排，两者都未变才直接复检。
+    // 导演初稿先交给创作者；确认后才可开始候选检索。旧 checkpoint 已在候选阶段的
+    // 继续按其真实位置恢复，不补写过去并未发生的初稿确认。
     .addConditionalEdges(
       "director",
       routeAfterDirector,
-      { halt: END, candidates: "candidates", rank: "rank", evaluate: "evaluate" },
+      { halt: END, review: "director_review", candidates: "candidates", rank: "rank", evaluate: "evaluate" },
     )
     .addEdge("candidates", "rank")
     .addEdge("rank", "evaluate")
@@ -945,8 +948,11 @@ function planningNodeActions(
           directorPlan: artifact,
           ...sourceAdvisoryUpdate(artifact),
           ...(changed ? invalidateRankingEvidence(artifactIds) : { artifactIds }),
-          ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE && !searchCandidates
-            ? { creativeReview: publishCreativeDraft(state.creativeReview, "director", artifact.artifactId, artifact.output, directorReviewInputDigest(state)) }
+          ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE
+            ? { creativeReview: {
+              ...publishCreativeDraft(state.creativeReview, "director", artifact.artifactId, artifact.output, directorReviewInputDigest(state)),
+              directorReviewPurpose: "direction" as const,
+            } }
             : {}),
         };
       } catch (error) {
@@ -1066,7 +1072,7 @@ function planningNodeActions(
         integratedPlan: integratedArtifact,
         artifactIds: withArtifactId(state, "integrate", integratedArtifact.artifactId),
         ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE && !preserveConfirmed
-          ? { creativeReview: publishCreativeDraft(state.creativeReview, "director", integratedArtifact.artifactId, integratedArtifact.output, directorReviewInputDigest(state)) }
+          ? { creativeReview: publishDirectorMaterialDraft(state, integratedArtifact) }
           : {}),
       };
     },
@@ -1110,7 +1116,14 @@ function routeAfterFinalDirector(state: PlanningGraphState): "halt" | "review" |
   return state.base.creativeReview === CREATIVE_REVIEW_FEATURE ? "review" : "next";
 }
 
-function routeAfterDirector(state: PlanningGraphState): "halt" | "candidates" | "rank" | "evaluate" {
+function routeAfterDirector(state: PlanningGraphState): "halt" | "review" | "candidates" | "rank" | "evaluate" {
+  if (state.halt) return "halt";
+  if (state.base.creativeReview === CREATIVE_REVIEW_FEATURE
+    && state.creativeReview.stages.director.phase !== "confirmed") return "review";
+  return routeAfterConfirmedDirector(state);
+}
+
+function routeAfterConfirmedDirector(state: PlanningGraphState): "halt" | "candidates" | "rank" | "evaluate" {
   if (state.halt) return "halt";
   if (state.candidatesArtifact === null) return "candidates";
   const current = candidateSearchFingerprint(state.directorPlan?.output ?? rejectMissingDirectorPlan());
@@ -1243,13 +1256,16 @@ function planningRoleHaltUpdate(error: unknown, stage: "treatment" | "script" | 
     planningStop: stop,
     ...stageArtifactUpdate(stage, draft),
     artifactIds: withArtifactId(state, stage, artifactId),
-    creativeReview: publishCreativeDraft(
-      state.creativeReview,
-      stage,
-      artifactId,
-      draft.output,
-      ROLE_STAGE_REVIEW_DIGEST[stage](state),
-    ),
+    creativeReview: {
+      ...publishCreativeDraft(
+        state.creativeReview,
+        stage,
+        artifactId,
+        draft.output,
+        ROLE_STAGE_REVIEW_DIGEST[stage](state),
+      ),
+      ...(stage === "director" ? { directorReviewPurpose: "direction" as const } : {}),
+    },
   };
 }
 
@@ -1296,13 +1312,17 @@ function directorStopUpdate(
     halt: null,
     planningStop: stop,
     manualDirectorReview: true,
-    creativeReview: publishCreativeDraft(
-      state.creativeReview,
-      "director",
-      plan.artifactId,
-      plan.output,
-      directorReviewInputDigest(state),
-    ),
+    creativeReview: publishDirectorMaterialDraft(state, plan),
+  };
+}
+
+function publishDirectorMaterialDraft(
+  state: PlanningGraphState,
+  plan: PlanningArtifact<VisualDirectorPlan>,
+) {
+  return {
+    ...publishCreativeDraft(state.creativeReview, "director", plan.artifactId, plan.output, directorReviewInputDigest(state)),
+    directorReviewPurpose: "material_plan" as const,
   };
 }
 
@@ -1484,13 +1504,7 @@ function evaluateNode(availabilityReviewer: AvailabilityReviewer) {
         availabilityBlockerObservations: carriedAvailabilityObservations,
         halt: null,
         manualDirectorReview: true,
-        creativeReview: publishCreativeDraft(
-          state.creativeReview,
-          "director",
-          reviewedPlan.artifactId,
-          reviewedPlan.output,
-          directorReviewInputDigest(state),
-        ),
+        creativeReview: publishDirectorMaterialDraft(state, reviewedPlan),
       };
     }
     const stalledAvailabilityIssues = pending.filter((issue) => {
@@ -1517,13 +1531,7 @@ function evaluateNode(availabilityReviewer: AvailabilityReviewer) {
           availabilityBlockerObservations: carriedAvailabilityObservations,
           halt: null,
           manualDirectorReview: true,
-          creativeReview: publishCreativeDraft(
-            state.creativeReview,
-            "director",
-            reviewedPlan.artifactId,
-            reviewedPlan.output,
-            directorReviewInputDigest(state),
-          ),
+          creativeReview: publishDirectorMaterialDraft(state, reviewedPlan),
         };
       }
       return {
@@ -1689,7 +1697,8 @@ function reviewGateNode(
         || resume.expectedReviewRevision !== gate.reviewRevision) {
         throw new Error("Creative review confirmation is stale：你确认的那一条已经不是当前这一条，请重新查看。");
       }
-      const qualityIssues = stage === "director" ? currentStockQualityIssues(state) : [];
+      const qualityIssues = stage === "director" && gate.purpose === "material_plan"
+        ? currentStockQualityIssues(state) : [];
       if (qualityIssues.length > 0 && resume.acceptQualityFallback !== true) {
         return {
           advisoryIssues: qualityIssues,
@@ -1961,12 +1970,12 @@ function routeAfterLibraryDirectorReview(
   state: PlanningGraphState,
 ): "halt" | "wait" | "next" | "treatment" | "script" | "recheck" | "candidates" | "rank" | "evaluate" {
   const reviewRoute = routeAfterReview("director")(state);
-  if (reviewRoute === "recheck") return routeAfterDirector(state);
+  if (reviewRoute === "recheck") return routeAfterConfirmedDirector(state);
   if (reviewRoute !== "next") return reviewRoute;
   // 用户在导演讨论中可能改变素材路线或检索身份。讨论会使旧排序、整合与编译证据失效；
   // 只有当前确认稿仍有完整整合证据时才能直接编译，否则复用与正常导演节点相同的证据路由。
   if (state.integratedPlan !== null) return "next";
-  return routeAfterDirector(state);
+  return routeAfterConfirmedDirector(state);
 }
 
 function currentCreativeDocument(

@@ -428,7 +428,7 @@ function reverseObjectKeyOrder(value: unknown): unknown {
   );
 }
 
-const STAGE_FIELD_NAMES = ["id", "status", "effectiveModelId", "providerId", "artifactIds", "issue", "allowedActions"] as const;
+const STAGE_FIELD_NAMES = ["id", "status", "effectiveModelId", "providerId", "artifactIds", "decisionStatus", "reviewPurpose", "issue", "allowedActions"] as const;
 
 // 字段合同：所有出现的键都必须属于六字段；键集合必须包含四个必填字段。
 // optional（effectiveModelId / issue）缺省时不得以 undefined 键出现。
@@ -498,6 +498,8 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
     assert.match(stopDetail, /构思独审请求合同被拒绝/, "停点必须带上复核失败的原因");
     assert.equal((await pipeline.inspectCreativePlanningStages(run.id))?.find((stage) => stage.id === "treatment")?.status, "completed",
       "复核没跑成不是内容失败：adopted 草稿仍在，阶段不得标 failed");
+    assert.equal((await pipeline.inspectCreativePlanningStages(run.id))?.find((stage) => stage.id === "treatment")?.decisionStatus, "waiting_user",
+      "产物已生成不等于当前版本已经得到用户确认");
     await pipeline.applyNodeExecutionConfiguration(run.id, "creative-planning", {
       ...input, models: { ...input.models, [input.providers.script]: "different-script-model" },
     }, "creator", failed.revision);

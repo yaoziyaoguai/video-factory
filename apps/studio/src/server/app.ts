@@ -846,10 +846,12 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
         const contentLength = range.end - range.start + 1;
         reply.header("content-range", `bytes ${range.start}-${range.end}/${resource.sizeBytes}`);
         reply.header("content-length", contentLength);
-        return reply.code(206).send(createReadStream(resource.path, range));
+        return reply.code(206).send(resource.verifiedBytes
+          ? Buffer.from(resource.verifiedBytes.subarray(range.start, range.end + 1))
+          : createReadStream(resource.path, range));
       }
       reply.header("content-length", resource.sizeBytes);
-      return reply.send(createReadStream(resource.path));
+      return reply.send(resource.verifiedBytes ? Buffer.from(resource.verifiedBytes) : createReadStream(resource.path));
     },
   );
 

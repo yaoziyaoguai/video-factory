@@ -276,13 +276,15 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
       <div className="run-workspace-toolbar">
       <nav className="run-section-nav" aria-label="作品工作区">
         <a href="#run-current">当前步骤与产物</a>
+        {run.nodes.some((node) => node.id === "creative-planning" && node.outputState?.versions.some((version) => version.id === node.outputState?.effectiveVersionId && version.artifactIds.length > 0))
+          ? <a href="#node-workspace-creative-planning" onClick={() => revealNodeWorkspace("creative-planning")}>查看规划交付</a> : null}
         {remainingCreatorNodes.length > 0 ? <a href="#run-artifacts">已保留的内容与设置</a> : null}
         {costDetail ? <a href="#run-costs">调用与费用</a> : null}
       </nav>
 
-      {!readOnly ? <details className="run-progress-disclosure" open={creativeDiscussion ? undefined : true}>
-        <summary>制作进度{run.progress ? <span>{run.progress.completedNodes} / {run.progress.totalNodes} 步完成</span> : null}</summary>
-      {run.phases && run.progress ? <ProductionProgress run={run} /> : (
+      {!readOnly && run.phases && run.progress ? <ProductionProgress run={run} /> : null}
+      {!readOnly ? <details className="run-progress-disclosure">
+        <summary>查看详细进度</summary>
         <section className="workflow-track" aria-label="生产工作流" data-tour="run-workflow">
           {run.nodes.map((node, index) => (
             <div className={`workflow-node node-${node.status}`} key={node.id}>
@@ -291,7 +293,6 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
             </div>
           ))}
         </section>
-      )}
       </details> : null}
       </div>
 
@@ -1618,18 +1619,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function ProductionProgress({ run }: { run: StudioRunDetail }) {
   if (!run.progress || !run.phases) return null;
-  return <section className="production-progress" aria-label="制作进度" data-tour="run-workflow">
-    <header>
-      <div><strong>制作阶段</strong><small>已完成 {run.progress.completedNodes} / {run.progress.totalNodes} 个步骤</small></div>
-      <span>{creatorRunStatusLabel(run) ?? runNodeLabel(run.currentNodeId)}</span>
-    </header>
+  return <nav className="production-progress" aria-label="制作章节" data-tour="run-workflow">
     <div className="production-phases">
-      {run.phases.map((phase, index) => <article className={`production-phase is-${phase.status}`} key={phase.id}>
-        <span className="production-phase-index">{phase.status === "completed" ? <Check aria-hidden="true" size={13} /> : index + 1}</span>
-        <div><strong>{phase.label}</strong><small>{phase.completedNodes}/{phase.totalNodes} 步骤</small></div>
-      </article>)}
+      {run.phases.map((phase) => <span className={`production-phase is-${phase.status}`} key={phase.id} aria-current={phase.status === "running" ? "step" : undefined}>
+        <span className="production-phase-index">{phase.status === "completed" ? <Check aria-hidden="true" size={13} /> : null}</span>
+        <strong>{phase.label}</strong>
+      </span>)}
     </div>
-  </section>;
+  </nav>;
 }
 
 // 复核摘要默认只给节选：真实结论可能很长，长文必须通过明确的展开入口查看，

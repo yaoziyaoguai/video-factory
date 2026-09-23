@@ -2,6 +2,7 @@ import { ArrowLeft, Check, FilePenLine, MessageCircle, RotateCcw, Save, Send, X 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { stageHandoffIdentityChanged } from "../film-arrival.js";
+import { studioApi } from "../api.js";
 import type { StudioCreativeReviewCommandInput, StudioCreativeReviewSnapshot } from "../../shared/api.js";
 
 interface CreativeDiscussionPanelProps {
@@ -24,6 +25,7 @@ interface PendingRiskConfirm {
   identity: {
     runId: string;
     stage: StudioCreativeReviewSnapshot["stage"];
+    reviewPurpose?: StudioCreativeReviewSnapshot["reviewPurpose"];
     runRevision: number;
     reviewRevision: number;
     draftSha256: string;
@@ -42,14 +44,23 @@ function safeStorageGet(key: string): string | null {
 }
 
 export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDiscussionPanelProps) {
-  const storageKey = `vf:creative-draft:${review.runId}:${review.stage}`;
-  const commandStorageKey = `vf:creative-command:${review.runId}:${review.stage}`;
+  const purposeKey = review.reviewPurpose ?? "draft";
+  const storageKey = `vf:creative-draft:${review.runId}:${review.stage}:${purposeKey}`;
+  const commandStorageKey = `vf:creative-command:${review.runId}:${review.stage}:${purposeKey}`;
   const currentStorageKey = useRef(storageKey);
   currentStorageKey.current = storageKey;
   const [message, setMessage] = useState(() => safeStorageGet(storageKey) ?? "");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [error, setError] = useState<string>();
   const [completionNotice, setCompletionNotice] = useState<string>();
+  const [pendingCommandId, setPendingCommandId] = useState<string | undefined>(() => {
+    try {
+      const saved: unknown = JSON.parse(window.localStorage.getItem(commandStorageKey) ?? "null");
+      return saved && typeof saved === "object" && typeof (saved as { commandId?: unknown }).commandId === "string"
+        ? (saved as { commandId: string }).commandId : undefined;
+    } catch { return undefined; }
+  });
+  const [reconcilingCommand, setReconcilingCommand] = useState(false);
   const [hasUnsavedEdits, setHasUnsavedEdits] = useState(false);
   const [mobileTab, setMobileTab] = useState<"draft" | "discussion">("draft");
   const [storageBroken, setStorageBroken] = useState(false);
@@ -79,7 +90,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   const seenDraftIdentityRef = useRef<string | null>(null);
   const stageHandoffTimerRef = useRef<number | undefined>(undefined);
   const stageHandoffFrameRef = useRef<number | undefined>(undefined);
-  const draftIdentity = `${review.stage}:${review.draftArtifactId}:${review.draftSha256}`;
+  const draftIdentity = `${review.stage}:${purposeKey}:${review.draftArtifactId}:${review.draftSha256}`;
   useEffect(() => {
     if (seenRunIdRef.current !== review.runId) {
       seenRunIdRef.current = review.runId;
@@ -133,11 +144,12 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   const awaitingRepair = review.checkResult?.verdict === "repair";
   const incompleteCheck = review.checkResult?.status === "incomplete";
   const qualityAdvisories = review.qualityAdvisories ?? [];
-  const needsStockConsent = review.stage === "director" && qualityAdvisories.length > 0;
+  const needsStockConsent = review.stage === "director" && review.reviewPurpose !== "direction" && qualityAdvisories.length > 0;
   const commandBase = useMemo(() => ({
     expectedRunRevision: review.runRevision,
     expectedReviewRevision: review.reviewRevision,
     stage: review.stage,
+    ...(review.reviewPurpose ? { reviewPurpose: review.reviewPurpose } : {}),
     baseDraftSha256: review.draftSha256,
   }), [review]);
 
@@ -183,9 +195,14 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       setError("本机存储暂不可用，无法可靠记录待发命令；请恢复浏览器存储后再发送。");
       throw new Error("本机存储暂不可用，无法可靠记录待发命令。");
     }
-    const command = pending && sameCommandBody(pending, input) ? pending : input;
+    if (pending && !sameCommandBody(pending, input)) {
+      setError("上一条操作的结果尚未核清，不能用新操作覆盖它。请先核对上一条操作。");
+      throw new Error("上一条创作操作尚未核清。");
+    }
+    const command = pending ?? input;
     try {
       window.localStorage.setItem(commandStorageKey, JSON.stringify(command));
+      setPendingCommandId(command.commandId);
     } catch {
       setError("本机存储暂不可用，命令没有发送；请恢复浏览器存储后重试。");
       throw new Error("本机存储暂不可用，命令没有发送。");
@@ -196,6 +213,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       if (caught instanceof Error && "commandCompleted" in caught && caught.commandCompleted === true) {
         try {
           window.localStorage.removeItem(commandStorageKey);
+          setPendingCommandId(undefined);
         } catch { /* 服务器已确认完成；本机清理失败单独提示，不影响这条结论。 */ }
       }
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -211,7 +229,37 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       setCompletionNotice("操作已完成，本机恢复记录未清理；不需要重发。");
       return;
     }
+    setPendingCommandId(undefined);
     if (clearMessage && currentStorageKey.current === storageKey) setMessage((current) => current === message ? "" : current);
+  }
+
+  async function reconcilePendingCommand() {
+    if (!pendingCommandId || reconcilingCommand) return;
+    setReconcilingCommand(true);
+    setError(undefined);
+    try {
+      const receipt = await studioApi.creativeReviewCommand(review.runId, pendingCommandId);
+      if (receipt.status === "running" || receipt.status === "unknown") {
+        setCompletionNotice("上一条操作仍在处理或结果未确定；请稍后核对，不要再次发送。");
+        return;
+      }
+      try {
+        window.localStorage.removeItem(commandStorageKey);
+      } catch {
+        setCompletionNotice(receipt.status === "completed"
+          ? "上一条操作已完成，但本机恢复记录未清理；不需要重发，请刷新查看当前方案。"
+          : "上一条操作已失败，但本机恢复记录未清理；请刷新查看失败原因，不要直接重发。");
+        return;
+      }
+      setPendingCommandId(undefined);
+      setCompletionNotice(receipt.status === "completed"
+        ? "上一条操作已完成。请刷新查看当前方案，再继续讨论。"
+        : "上一条操作已失败，当前稿件保留。请刷新查看失败原因后决定下一步。");
+    } catch {
+      setError("暂时无法核对上一条操作，记录已保留；不要发送新操作。稍后再核对。");
+    } finally {
+      setReconcilingCommand(false);
+    }
   }
 
   function sendMessage() {
@@ -248,6 +296,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       identity: {
         runId: review.runId,
         stage: review.stage,
+        reviewPurpose: review.reviewPurpose,
         runRevision: review.runRevision,
         reviewRevision: review.reviewRevision,
         draftSha256: review.draftSha256,
@@ -293,6 +342,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       identity: {
         runId: review.runId,
         stage: review.stage,
+        reviewPurpose: review.reviewPurpose,
         runRevision: review.runRevision,
         reviewRevision: review.reviewRevision,
         draftSha256: review.draftSha256,
@@ -315,6 +365,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
     const identity = pendingRisk.identity;
     const stillCurrent = identity.runId === review.runId
       && identity.stage === review.stage
+      && identity.reviewPurpose === review.reviewPurpose
       && identity.runRevision === review.runRevision
       && identity.reviewRevision === review.reviewRevision
       && identity.draftSha256 === review.draftSha256
@@ -344,17 +395,19 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
     <section className="creative-discussion-panel" aria-labelledby="creative-review-title">
       <header className="creative-discussion-header">
         <div>
-          <h2 id="creative-review-title">{hasBlockingIssues ? "当前导演方案需要你决定" : `${STAGE_LABEL[review.stage]}已生成，等你确认`}</h2>
+          <h2 id="creative-review-title">{hasBlockingIssues ? "当前导演方案需要你决定" : review.reviewPurpose === "direction" ? "导演初稿已就绪，等你决定" : review.reviewPurpose === "material_plan" ? "选材方案已就绪，等你决定" : `${STAGE_LABEL[review.stage]}已生成，等你确认`}</h2>
           {hasBlockingIssues ? <p>自动选材尚未通过，具体原因见下方。已保留你确认的方案，不会自动改成生成画面；请在讨论区说明允许怎样调整，或补充素材。</p> : null}
+          {review.reviewPurpose === "direction" ? <p>你可以和导演继续讨论；只有采用这版初稿后，才会开始寻找候选画面。</p> : null}
+          {review.reviewPurpose === "material_plan" ? <p>请查看选材结果与风险；这次决定不会自动扩大素材采购授权。</p> : null}
         </div>
         {/* 只定位到确认区，不发送任何命令；真正的批准仍在随页滚动的底部确认区。 */}
         <button type="button" className="button button-ghost creative-confirm-jump" onClick={() => {
           const target = document.getElementById("creative-confirm-footer");
-          target?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+          target?.scrollIntoView?.({ behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ? "auto" : "smooth", block: "center" });
           target?.querySelector<HTMLElement>(".creative-confirm-context")?.focus();
         }}>查看确认 ↓</button>
         <span className={`creative-review-phase phase-${review.phase}`}>
-          {review.phase === "checking" ? "正在处理原操作" : `第 ${review.reviewRevision} 版讨论`}
+          {review.phase === "checking" ? "正在处理原操作" : "等你决定"}
         </span>
       </header>
 
@@ -466,6 +519,11 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       </div>
 
       {error ? <p className="form-error" role="alert">{error} 输入内容已保留，请查看最新方案后再试。</p> : null}
+      {pendingCommandId ? <div className="creative-storage-note" role="status">上一条操作结果尚未核清。
+        <button type="button" className="button button-secondary" disabled={reconcilingCommand || busy} onClick={() => void reconcilePendingCommand()}>
+          {reconcilingCommand ? "正在核对…" : "核对上一条操作"}
+        </button>
+      </div> : null}
       {completionNotice ? <p className="creative-storage-note" role="status">{completionNotice}</p> : null}
       {storageBroken ? <p className="creative-storage-note" role="status">本机草稿无法保存，关闭页面前请复制内容；待发命令也需要浏览器存储恢复后才能发送。</p> : null}
       {review.returnTargets.length > 0 ? <aside className="creative-return-actions" aria-label="返回前期方案">
@@ -474,9 +532,9 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
         {review.returnTargets.map((target) => <button key={target.stage} type="button" className="button button-secondary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("return_to_stage")} title={target.impact} onClick={() => returnToStage(target)}><ArrowLeft aria-hidden="true" size={16} />{target.label}</button>)}
       </aside> : null}
       <footer className="creative-review-actions" id="creative-confirm-footer">
-        <div className="creative-confirm-context" tabIndex={-1}><strong>{hasUnsavedEdits ? "有未保存的手动修改" : `确认对象：当前${STAGE_LABEL[review.stage]}`}</strong><small>{hasUnsavedEdits ? "先保存或放弃修改，再确认采用；不会提交编辑器里的未保存文字。" : "确认时独立复核，不会购买素材；有意见由你决定，后续步骤仍需确认。"}</small></div>
+        <div className="creative-confirm-context" tabIndex={-1}><strong>{hasUnsavedEdits ? "有未保存的手动修改" : review.reviewPurpose === "direction" ? "确认对象：当前导演初稿" : review.reviewPurpose === "material_plan" ? "确认对象：当前选材方案" : `确认对象：当前${STAGE_LABEL[review.stage]}`}</strong><small>{hasUnsavedEdits ? "先保存或放弃修改，再确认采用；不会提交编辑器里的未保存文字。" : "确认时会调用模型独立复核，但不会授权购买素材；有意见由你决定，后续付费仍需单独确认。"}</small></div>
         <button type="button" className="button button-ghost" disabled={busy || hasUnsavedEdits || review.previousDraft === undefined || !review.allowedActions.includes("undo_draft")} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button>
-        <button type="button" className="button button-primary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{needsStockConsent ? "接受素材风险，先制作首版" : incompleteCheck ? "接受复核未完成，采用本版" : awaitingRepair ? "看过意见，仍然确认" : hasBlockingIssues ? "修改后重新检查" : "确认当前方案，继续"}</button>
+        <button type="button" className="button button-primary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{needsStockConsent ? "接受素材风险，先制作首版" : incompleteCheck ? "接受复核未完成，采用本版" : awaitingRepair ? "看过意见，仍然确认" : hasBlockingIssues ? "修改后重新检查" : review.reviewPurpose === "direction" ? "采用导演初稿，开始选材" : review.reviewPurpose === "material_plan" ? "采用选材方案，继续制作" : "确认当前方案，继续"}</button>
       </footer>
 
       {pendingRisk ? <div className="dialog-backdrop" role="presentation">

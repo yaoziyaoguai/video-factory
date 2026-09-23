@@ -1816,6 +1816,21 @@ describe("Studio API", () => {
     await app.close();
   });
 
+  it("serves verified planning bytes even if the file changes before the response", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "video-factory-verified-read-"));
+    const artifactPath = path.join(directory, "treatment.json");
+    await writeFile(artifactPath, "changed", "utf8");
+    const app = buildStudioApp({ service: fakeService({
+      resolveArtifact: async () => ({ path: artifactPath, contentType: "application/json", sizeBytes: 8,
+        verifiedBytes: Buffer.from("verified") }),
+    }) });
+    const complete = await app.inject({ method: "GET", url: "/api/runs/run-1/artifacts/treatment/content" });
+    const partial = await app.inject({ method: "GET", url: "/api/runs/run-1/artifacts/treatment/content", headers: { range: "bytes=1-3" } });
+    assert.equal(complete.body, "verified");
+    assert.equal(partial.body, "eri");
+    await app.close();
+  });
+
   it("creates, lists, loads, and updates opportunities through validated routes", async () => {
     const opportunity: StudioOpportunity = {
       id: "opportunity-1",

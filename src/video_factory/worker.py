@@ -107,8 +107,12 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
-    script_path, executable_plan = materialize_executable_script(request["input"], output_dir)
-    script = json.loads(script_path.read_text(encoding="utf-8"))
+    formal_script_path = require_existing_path(request["input"], "scriptPath")
+    formal_script_bytes = formal_script_path.read_bytes()
+    script_path, executable_plan = materialize_executable_script(
+        request["input"], output_dir, formal_script_bytes=formal_script_bytes,
+    )
+    script = json.loads(script_path.read_text(encoding="utf-8")) if executable_plan is not None else json.loads(formal_script_bytes)
     scenes = [
         Scene(
             position=int(scene["position"]),
@@ -150,8 +154,10 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
                 raise WorkerProtocolError("Stock delivery acceptance contract is invalid")
             if candidate_inventory is None:
                 raise WorkerProtocolError("Stock delivery acceptance requires the confirmed inventory")
-            for field, target in (("scriptSha256", script_path), ("directorPlanSha256", director_plan_path), ("inventorySha256", inventory_path)):
-                if acceptance.get(field) != hashlib.sha256(target.read_bytes()).hexdigest():
+            for field, digest in (("scriptSha256", hashlib.sha256(formal_script_bytes).hexdigest()),
+                                  ("directorPlanSha256", hashlib.sha256(director_plan_path.read_bytes()).hexdigest()),
+                                  ("inventorySha256", hashlib.sha256(inventory_path.read_bytes()).hexdigest())):
+                if acceptance.get(field) != digest:
                     raise WorkerProtocolError(f"Stock delivery acceptance does not match {field}")
             positions = acceptance.get("scenePositions")
             if not isinstance(positions, list) or any(type(position) is not int or position <= 0 for position in positions):
@@ -541,6 +547,7 @@ def run_technical_review(request: Dict[str, Any], output_dir: Path, started_at: 
 def materialize_executable_script(
     input_payload: Dict[str, Any],
     output_dir: Path,
+    formal_script_bytes: bytes | None = None,
 ) -> tuple[Path, Dict[str, Any] | None]:
     script_path = require_existing_path(input_payload, "scriptPath")
     executable_plan_value = input_payload.get("executablePlanPath")
@@ -548,7 +555,7 @@ def materialize_executable_script(
         return script_path, None
     executable_plan_path = require_existing_path(input_payload, "executablePlanPath")
     try:
-        script = json.loads(script_path.read_text(encoding="utf-8"))
+        script = json.loads((formal_script_bytes if formal_script_bytes is not None else script_path.read_bytes()).decode("utf-8"))
         executable_plan = json.loads(executable_plan_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WorkerProtocolError(f"Executable production input is not valid JSON: {error}") from error

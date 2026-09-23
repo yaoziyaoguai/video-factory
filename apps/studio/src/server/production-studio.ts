@@ -90,6 +90,9 @@ import type { RunArchiveRepository } from "./run-archive-store.js";
 import { buildRunObservability, nodeActionLabel } from "./run-observability.js";
 
 const MANAGED_FILE_PLACEHOLDER = "[系统托管文件]";
+const PLANNING_DELIVERY_KINDS = new Set([
+  "creative_treatment", "script", "storyboard", "asset_candidates", "asset_ranking", "executable_plan",
+]);
 
 export interface StudioPipelinePort {
   list(): Promise<WorkflowRun<ProductionBrief>[]>;
@@ -1536,6 +1539,9 @@ export class ProductionStudio {
       runId,
       runRevision: current.revision,
       stage: continuation.stage,
+      ...(continuation.stage === "director" ? {
+        reviewPurpose: review?.directorReviewPurpose === "direction" ? "direction" as const : "material_plan" as const,
+      } : {}),
       reviewRevision: continuation.reviewRevision,
       draftSha256: continuation.draftSha256,
       draftArtifactId,
@@ -2519,7 +2525,19 @@ export class ProductionStudio {
     }
     const artifactStat = await stat(artifactPath);
     if (!artifactStat.isFile()) return undefined;
-    return { path: artifactPath, contentType: artifact.contentType ?? "application/octet-stream", sizeBytes: artifactStat.size };
+    let verifiedBytes: Uint8Array | undefined;
+    if (artifact.producer?.nodeId === "creative-planning" && PLANNING_DELIVERY_KINDS.has(artifact.kind)) {
+      if (!artifact.sha256 || artifact.sizeBytes === undefined) {
+        throw new Error("规划交付缺少完整性记录，暂时不能阅读。");
+      }
+      const bytes = await readFile(artifactPath);
+      if (bytes.length !== artifact.sizeBytes || createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) {
+        throw new Error("规划交付文件与登记记录不一致，暂时不能阅读。");
+      }
+      verifiedBytes = bytes;
+    }
+    return { path: artifactPath, contentType: artifact.contentType ?? "application/octet-stream", sizeBytes: verifiedBytes?.length ?? artifactStat.size,
+      ...(verifiedBytes ? { verifiedBytes } : {}) };
   }
 
   private async loadRequiredRun(runId: string): Promise<WorkflowRun<ProductionBrief>> {
@@ -2718,6 +2736,8 @@ async function withPlanningStages(
       ...(stage.effectiveModelId !== undefined ? { effectiveModelId: stage.effectiveModelId } : {}),
       ...(stage.providerId !== undefined ? { providerId: stage.providerId } : {}),
       artifactIds: [...stage.artifactIds],
+      ...(stage.decisionStatus ? { decisionStatus: stage.decisionStatus } : {}),
+      ...(stage.reviewPurpose ? { reviewPurpose: stage.reviewPurpose } : {}),
       ...(stage.issue !== undefined && stage.issue !== "" ? { issue: redactManagedPathText(stage.issue) } : {}),
       allowedActions: [...stage.allowedActions],
     })),
@@ -4862,6 +4882,7 @@ function creativeReviewCommandDraft(
     expectedRunRevision: input.expectedRunRevision,
     expectedReviewRevision: input.expectedReviewRevision,
     stage: input.stage,
+    ...(input.reviewPurpose ? { reviewPurpose: input.reviewPurpose } : {}),
     baseDraftSha256: input.baseDraftSha256,
     action: "confirm",
     ...(input.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),

@@ -36,9 +36,16 @@ const STAGE_LABELS: Record<StudioPlanningStage["id"], string> = {
 const STAGE_STATUS_LABELS: Record<StudioPlanningStage["status"], string> = {
   pending: "待开始",
   running: "进行中",
-  completed: "已完成",
-  failed: "未通过",
+  completed: "已产出",
+  failed: "执行中断",
 };
+
+function stageStateLabel(stage: StudioPlanningStage): string {
+  if (stage.decisionStatus === "waiting_user") return stage.reviewPurpose === "direction" ? "初稿已生成 · 等你确认" : "方案已生成 · 等你确认";
+  if (stage.decisionStatus === "checking") return "正在复核你采用的这一版";
+  if (stage.decisionStatus === "confirmed") return stage.reviewPurpose === "direction" ? "初稿已采用 · 接下来选材" : "已由你采用";
+  return STAGE_STATUS_LABELS[stage.status];
+}
 
 const STAGE_CAPABILITY: Partial<Record<StudioPlanningStage["id"], string>> = {
   treatment: "creative.treatment",
@@ -66,6 +73,10 @@ export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditS
   const hasPendingModelDraft = stages.some((stage) => isEditablePlanningStage(stage.id)
     && Boolean(stageModelDrafts[stage.id])
     && stageModelDrafts[stage.id] !== stage.effectiveModelId);
+  const currentStage = stages.find((stage) => stage.decisionStatus === "waiting_user")
+    ?? stages.find((stage) => stage.status === "failed" || stage.status === "running")
+    ?? stages.find((stage) => stage.status === "pending")
+    ?? stages.at(-1);
 
   useEffect(() => {
     onPendingChange?.(hasPendingModelDraft);
@@ -93,32 +104,18 @@ export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditS
 
   return (
     <section className="node-planning-stages" aria-label="创作规划阶段">
-      <header>
-        <div>
-          <strong>创作规划阶段</strong>
-          <small>修改只重做受影响的阶段：改构思会重做后续全部；改脚本保留构思；改导演方案保留构思和脚本。</small>
-        </div>
-      </header>
+      <header><div><strong>当前工作</strong><p>{currentStage ? `${STAGE_LABELS[currentStage.id]} · ${stageStateLabel(currentStage)}` : "等待创作规划开始"}</p></div></header>
+      {currentStage?.issue ? <p className="planning-stage-issue" role="status"><CircleAlert aria-hidden="true" size={15} />{creatorFacingTechnicalText(currentStage.issue)}</p> : null}
+      <details className="planning-stage-details"><summary>查看制作细节</summary>
       <ul className="planning-stage-list">
         {stages.map((stage) => {
-          // 模型选择解析“当前制作绑定的提供者”，不按能力目录顺序取第一个可用者——
-          // 同一能力可能有多个提供者，绑定错了服务端会拒绝一次正常操作。
-          const provider = providers.find((candidate) => candidate.id === stage.providerId && candidate.available)
-            ?? planningStageProvider(providers, stage.id);
-          const models = provider ? selectableModelsForCapability(provider.modelProfiles, provider.capability) : [];
           const editable = !readOnly && !busy && stage.allowedActions.includes("edit_input")
             && isEditablePlanningStage(stage.id) && onEditStageInput !== undefined;
-          const canChangeModel = !readOnly && !busy && stage.allowedActions.includes("change_model")
-            && isEditablePlanningStage(stage.id) && Boolean(provider) && models.length > 0;
-          const draftModel = stageModelDrafts[stage.id] ?? "";
           return (
             <li key={stage.id} className={`planning-stage planning-stage-${stage.status}`}>
               <div className="planning-stage-head">
                 <span className="planning-stage-name">{STAGE_LABELS[stage.id]}</span>
-                <span className={`planning-stage-status status-${stage.status}`}>{STAGE_STATUS_LABELS[stage.status]}</span>
-                {stage.effectiveModelId ? (
-                  <span className="planning-stage-model"><Cpu aria-hidden="true" size={13} /> {stage.effectiveModelId}</span>
-                ) : null}
+                <span className={`planning-stage-status status-${stage.status}`}>{stageStateLabel(stage)}</span>
               </div>
               {stage.issue ? <p className="planning-stage-issue"><CircleAlert aria-hidden="true" size={13} /> {creatorFacingTechnicalText(stage.issue)}</p> : null}
               {editable && isEditablePlanningStage(stage.id) ? (
@@ -126,7 +123,22 @@ export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditS
                   <FilePenLine aria-hidden="true" size={14} /> 编辑这一阶段的输入
                 </button>
               ) : null}
-              {canChangeModel && provider ? (
+            </li>
+          );
+        })}
+      </ul></details>
+      <details className="planning-stage-settings"><summary>制作设置{hasPendingModelDraft ? " · 有未保存的模型选择" : ""}</summary>
+        <p>修改只重做受影响的阶段：改构思会重做后续全部；改脚本保留构思；改导演方案保留构思和脚本。</p>
+        {stages.filter((stage) => isEditablePlanningStage(stage.id)).map((stage) => {
+          const provider = providers.find((candidate) => candidate.id === stage.providerId && candidate.available)
+            ?? planningStageProvider(providers, stage.id);
+          const models = provider ? selectableModelsForCapability(provider.modelProfiles, provider.capability) : [];
+          const canChangeModel = !readOnly && !busy && stage.allowedActions.includes("change_model") && Boolean(provider) && models.length > 0;
+          const draftModel = stageModelDrafts[stage.id] ?? "";
+          return <div key={stage.id} className="planning-stage-setting">
+            <strong>{STAGE_LABELS[stage.id]}</strong>
+            {stage.effectiveModelId ? <span className="planning-stage-model"><Cpu aria-hidden="true" size={13} />{stage.effectiveModelId}</span> : null}
+            {canChangeModel && provider ? (
                 <label className="field planning-stage-model-select">
                   <span>{stage.id === "treatment" ? "构思" : stage.id === "script" ? "脚本" : "导演方案"}阶段模型</span>
                   <select
@@ -155,10 +167,9 @@ export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditS
                   </button>
                 </label>
               ) : null}
-            </li>
-          );
+          </div>;
         })}
-      </ul>
+      </details>
       {stageError ? <p className="form-error" role="alert">{stageError}</p> : null}
     </section>
   );
