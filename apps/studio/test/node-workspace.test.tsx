@@ -298,7 +298,7 @@ describe("node production workspaces", () => {
     await userEvent.click(screen.getByText("这一步为什么用了这些时间"));
     expect(screen.getByText("步骤总耗时").parentElement).toHaveTextContent("21 秒");
     expect(screen.getByText("排队等待").parentElement).toHaveTextContent("不到 1 秒");
-    expect(screen.getByText("Provider 执行").parentElement).toHaveTextContent("12 秒");
+    expect(screen.getByText("服务执行").parentElement).toHaveTextContent("12 秒");
     expect(screen.getByText("未细分等待 / 处理").parentElement).toHaveTextContent("8.4 秒");
     expect(screen.queryByText("首次响应")).not.toBeInTheDocument();
     expect(screen.getByText("内容生成累计").parentElement).toHaveTextContent("13 秒");
@@ -346,7 +346,7 @@ describe("node production workspaces", () => {
 
     await userEvent.click(screen.getByText("这一步为什么用了这些时间"));
     expect(screen.getByText("排队等待").parentElement).toHaveTextContent("8.0 秒");
-    expect(screen.getByText("Provider 执行").parentElement).toHaveTextContent("12 秒");
+    expect(screen.getByText("服务执行").parentElement).toHaveTextContent("12 秒");
     expect(screen.getByText("未细分等待 / 处理").parentElement).toHaveTextContent("2 分 40 秒");
     expect(screen.getByText("候选切换").parentElement).toHaveTextContent("1 次");
     expect(screen.getByText("本次已证实模型执行").parentElement).toHaveTextContent("2 次");
@@ -737,7 +737,7 @@ describe("node production workspaces", () => {
     render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} runStatus="running" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
 
     expect(screen.getByText("第 2 / 3 轮 · 独立复核中")).toBeInTheDocument();
-    expect(screen.getByText("上一轮 68 分：AI 图片生成的屏幕文字仍有必须修改的问题。")).toBeInTheDocument();
+    expect(screen.getByText("上一轮 68 分：generated_image的on_screen_text仍有blocking。")).toBeInTheDocument();
   });
 
   it("keeps the role workspace open while live run data rerenders", async () => {
@@ -1808,7 +1808,7 @@ describe("node production workspaces", () => {
     render(<MemoryRouter><CostDashboard dashboard={dashboard} /></MemoryRouter>);
 
     expect(screen.getByRole("heading", { name: "按服务和制作步骤核对费用" })).toBeInTheDocument();
-    expect(screen.getByText("报价授权金额（非消费）")).toBeInTheDocument();
+    expect(screen.getByText("历史累计报价授权额")).toBeInTheDocument();
     expect(screen.getByText("待确认是否扣费")).toBeInTheDocument();
     expect(screen.getByText("按实际服务")).toBeInTheDocument();
     expect(screen.queryByText("授权上限")).not.toBeInTheDocument();
@@ -1854,7 +1854,7 @@ describe("node production workspaces", () => {
     }} />);
 
     expect(screen.getByText("付费服务失败")).toBeInTheDocument();
-    const detailsHint = screen.getByText("报价不等于消费；只有外部任务结果不明确时才需确认是否扣费");
+    const detailsHint = screen.getByText("报价和授权不等于实际消费；结果不明确的调用要核对是否扣费，按配置费率登记的金额仍需与服务商账单核对。");
     await userEvent.click(detailsHint.closest("summary")!);
     expect(screen.getByText("AI 创作服务 · gpt-5.6-terra")).toBeInTheDocument();
     expect(screen.getByText("订阅任务失败 · 不产生按量费用")).toBeInTheDocument();

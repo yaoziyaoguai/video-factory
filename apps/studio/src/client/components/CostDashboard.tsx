@@ -27,7 +27,7 @@ export function RunCostDetailPanel({ detail, providers }: { detail: StudioCostRu
       <header className="section-heading"><div><p className="eyebrow">本片费用</p><h2 id="run-cost-title">调用与费用明细</h2></div><ReceiptText aria-hidden="true" size={19} /></header>
       <CostMetrics totals={detail.totals} compact />
       <details className="cost-call-details">
-        <summary><span><strong>调用与费用明细</strong><small>报价不等于消费；只有外部任务结果不明确时才需确认是否扣费</small></span><b>{lines.length} 项</b></summary>
+        <summary><span><strong>调用与费用明细</strong><small>报价和授权不等于实际消费；结果不明确的调用要核对是否扣费，按配置费率登记的金额仍需与服务商账单核对。</small></span><b>{lines.length} 项</b></summary>
         <div className="cost-line-list">
           {lines.length ? lines.map((line) => <article key={line.id}><span><strong>{line.role ?? runNodeLabel(line.nodeId)}</strong><small>{line.nodeId === "assets" ? "实际生成：" : ""}{capabilityLabel(line, providers)}</small></span><span><small>{line.callCount > 1 ? `${line.callCount} 次执行 · ` : ""}{costLineLabel(line)}</small><b>{line.actualPending ? `待确认是否扣费 · 预估 ¥${line.estimatedCostCny.toFixed(2)}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
         </div>
@@ -59,8 +59,8 @@ function groupCostLines(lines: StudioCostRunDetail["lines"]): GroupedCostLine[] 
 
 function CostMetrics({ totals, compact = false }: { totals: StudioCostTotals; compact?: boolean }) {
   return <div className={compact ? "cost-metrics is-compact" : "cost-metrics"}>
-    <article title="包含服务商回传费用，以及按项目配置费率记录但尚未由服务商账单确认的费用"><CircleDollarSign aria-hidden="true" size={17} /><span>已记录费用</span><strong>{actualCostLabel(totals)}</strong></article>
-    <article title="历史所有已确认报价的授权金额，仅用于执行控制，不是费用上限，也不代表实际消费"><Gauge aria-hidden="true" size={17} /><span>报价授权金额（非消费）</span><strong>¥{totals.authorizedCostCny.toFixed(2)}</strong></article>
+    <article><CircleDollarSign aria-hidden="true" size={17} /><span>已记录费用<small>含服务商回传和按配置费率登记的金额；部分仍需与账单核对。</small></span><strong>{actualCostLabel(totals)}</strong></article>
+    <article><Gauge aria-hidden="true" size={17} /><span>历史累计报价授权额<small>不是实际消费，也不是当前可用额度。</small></span><strong>¥{totals.authorizedCostCny.toFixed(2)}</strong></article>
     <article><Clock3 aria-hidden="true" size={17} /><span>待确认是否扣费</span><strong>{totals.actualPendingCount}</strong></article>
     <article><RotateCcw aria-hidden="true" size={17} /><span>付费服务失败</span><strong>{totals.failedMeteredCalls}</strong></article>
   </div>;
@@ -82,7 +82,7 @@ function capabilityLabel(line: StudioCostRunDetail["lines"][number], providers?:
   if (!line.modelId || line.modelId === "inline" || line.modelId === line.providerId) return provider;
   // 主界面始终由 RunWorkbench 注入 Provider 目录；未注入目录的旧调用保留原样展示。
   if (providers === undefined) return `${provider} · ${line.modelId}`;
-  const model = catalogModelLabel(providers, line.modelId) ?? UNRECORDED_MODEL_LABEL;
+  const model = catalogModelLabel(providers, line.modelId) ?? `模型名称未收录（${line.modelId}）`;
   return model === provider ? provider : `${provider} · ${model}`;
 }
 

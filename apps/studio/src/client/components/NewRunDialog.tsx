@@ -93,7 +93,7 @@ const RECIPES: Array<{
   {
     id: "keyshot-ai",
     label: "允许 AI 生成画面，按实际镜头报价",
-    description: "导演可建议生成关键图片或视频，每次调用前都会给出报价并等你确认",
+    description: "导演可建议生成关键图片或视频；付费生成按本次报价范围授权，范围内列明的有限修复共用额度，超出范围需重新确认",
     allowMeteredProviders: true,
   },
 ];
@@ -153,6 +153,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     strategy: initialValues?.visualIntent ?? "",
   }));
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [focusInvalidBudget, setFocusInvalidBudget] = useState(false);
+  const budgetInputRef = useRef<HTMLInputElement>(null);
   const [inheritedSettingsOpen, setInheritedSettingsOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
@@ -162,7 +164,69 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     requiredAffectedScenePositions,
   ));
   const initializedForOpen = useRef(false);
-  const dialogRef = useDialogFocus<HTMLElement>(open, onClose, submitting);
+  // 误关保护：以初始化完成后的表单快照为基线，只有用户实际修改才视为 dirty；
+  // 异步初始化与后台 providers 更新不算修改，也不能覆盖已编辑值（AC-08）。
+  const baselineSnapshotRef = useRef<string | null>(null);
+  const [discardPromptOpen, setDiscardPromptOpen] = useState(false);
+  const [closingShell, setClosingShell] = useState(false);
+  const wasOpenForExitRef = useRef(false);
+  useLayoutEffect(() => {
+    if (open) {
+      wasOpenForExitRef.current = true;
+      setClosingShell(false);
+      return;
+    }
+    if (!wasOpenForExitRef.current) return;
+    wasOpenForExitRef.current = false;
+    setClosingShell(true);
+    const timer = window.setTimeout(() => setClosingShell(false), 120);
+    return () => window.clearTimeout(timer);
+  }, [open]);
+  const [discardExitVisible, setDiscardExitVisible] = useState(false);
+  const discardWasOpenRef = useRef(false);
+  useEffect(() => {
+    if (discardPromptOpen) {
+      discardWasOpenRef.current = true;
+      setDiscardExitVisible(false);
+      return;
+    }
+    if (!discardWasOpenRef.current) return;
+    discardWasOpenRef.current = false;
+    setDiscardExitVisible(true);
+    const timer = window.setTimeout(() => setDiscardExitVisible(false), 120);
+    return () => window.clearTimeout(timer);
+  }, [discardPromptOpen]);
+  const [visualGroupOpen, setVisualGroupOpen] = useState(false);
+  const formSnapshot = useMemo(() => JSON.stringify({
+    bindings, recipeId, directorProfileId, platform, durationSeconds, durationRange, durationRangeDrafts,
+    assetProviderIds: [...assetProviderIds].sort(), modelSelections, voiceDirection, budgetIntention,
+    semanticRankEnabled, acceptUnreviewedFirstCut, briefSummaryValues, visualBriefValues,
+    referenceVideo: referenceVideo ? { ...referenceVideo } : null, rework,
+  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, directorProfileId, durationRange, durationRangeDrafts, durationSeconds, modelSelections, platform, recipeId, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection]);
+  useLayoutEffect(() => {
+    if (!open || !initialDataReady || !initializedForOpen.current) return;
+    if (baselineSnapshotRef.current === null) baselineSnapshotRef.current = formSnapshot;
+  }, [formSnapshot, initialDataReady, open]);
+  useLayoutEffect(() => {
+    if (!focusInvalidBudget || !advancedOpen) return;
+    budgetInputRef.current?.focus();
+    setFocusInvalidBudget(false);
+  }, [advancedOpen, focusInvalidBudget]);
+  const formDirty = open && baselineSnapshotRef.current !== null && formSnapshot !== baselineSnapshotRef.current;
+  const requestClose = () => {
+    if (submitting) return;
+    if (formDirty) {
+      setDiscardPromptOpen(true);
+      return;
+    }
+    onClose();
+  };
+  const dialogRef = useDialogFocus<HTMLElement>(
+    open,
+    discardPromptOpen ? () => setDiscardPromptOpen(false) : requestClose,
+    submitting,
+    discardPromptOpen,
+  );
   const activeCapability = CAPABILITIES.find((item) => item.key === activeKey) ?? CAPABILITIES[1]!;
   const groupedReworkFindings = useMemo(() => groupReworkFindingsByScene(rework?.findings), [rework?.findings]);
   const reworkScope = useMemo(() => summarizeReworkScope(rework), [rework]);
@@ -216,6 +280,16 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       && provider.billing === "metered"
       && provider.approvalPolicy === "automatic";
   });
+  const selectedVoiceProvider = providers.find((provider) => provider.capability === "voice.synthesize" && provider.id === effectiveBindings.voice);
+  const voiceCostSummary = automaticVoiceProvider
+    ? `配音：${creatorProviderName(automaticVoiceProvider)} 自动按量计费，不另弹逐笔报价`
+    : selectedVoiceProvider?.kind === "local"
+      ? "配音：本地系统声音，不产生外部服务调用费"
+      : selectedVoiceProvider?.billing === "metered" && selectedVoiceProvider.approvalPolicy === "manual"
+        ? "配音：按实际方案报价，确认后才执行"
+        : selectedVoiceProvider?.billing === "subscription"
+          ? "配音：使用订阅额度，实际计费以供应商账号规则为准"
+          : selectedVoiceProvider ? "配音：计费方式尚未确认，请检查所选服务" : "配音：未选择声音";
   const hasMeteredCalls = meteredSelected || automaticVoiceProvider !== undefined;
   const economics: StudioProductionInput["economics"] = {
     recipeId,
@@ -335,6 +409,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     if (initializedForOpen.current) return;
     initializedForOpen.current = true;
     initialScrollResetPending.current = true;
+    // 重新初始化时重置脏态基线：异步到达的初始值不算用户修改。
+    baselineSnapshotRef.current = null;
+    setDiscardPromptOpen(false);
     if (formScrollRef.current) formScrollRef.current.scrollTop = 0;
     durationRangeTouched.current = false;
     const initialVoiceDirection = initialValues?.voiceDirection
@@ -421,7 +498,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     };
   }, [open, referenceVideo]);
 
-  if (!open) return null;
+  if (!open && !closingShell) return null;
 
   if (!initialDataReady && !initializedForOpen.current) {
     // 设置读取失败与仍在加载是两种不同状态：失败时允许打开查看原因并原地重读，但表单不初始化、不能提交。
@@ -474,6 +551,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       assetSourcePoolRef.current?.scrollIntoView?.({ block: "nearest" });
     } else {
       scrollToAssetSourcesOnOpen.current = true;
+    setVisualGroupOpen(true);
     }
     setInheritedSettingsOpen(true);
     setAdvancedOpen(true);
@@ -613,6 +691,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       if (visualIntent.length > 1000) throw new Error("画面呈现想法不能超过 1000 个字符。");
       const budgetIntentionCny = budgetIntention.trim() ? Number(budgetIntention) : undefined;
       if (budgetIntentionCny !== undefined && (!Number.isFinite(budgetIntentionCny) || budgetIntentionCny < 0 || budgetIntentionCny > 100_000)) {
+        setAdvancedOpen(true);
+        setFocusInvalidBudget(true);
         throw new Error("预算意向请输入 0 到 100000 元的有效金额，或留空；这不是付款授权。");
       }
       await onSubmit({
@@ -664,26 +744,28 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   }
 
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget && !submitting) onClose();
+    <div className={`dialog-backdrop${!open ? " dialog-exit-decoration" : ""}`} role="presentation" aria-hidden={!open} inert={!open} onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !submitting) requestClose();
     }}>
-      <section ref={dialogRef} className="run-dialog recipe-dialog" role="dialog" aria-modal="true" aria-labelledby="new-run-title" tabIndex={-1}>
-        <header className="dialog-header recipe-dialog-header">
+      <section ref={dialogRef} className="run-dialog recipe-dialog" role="dialog" aria-modal="true" aria-labelledby={discardPromptOpen ? "new-run-discard-title" : "new-run-title"} tabIndex={-1}>
+        <header className="dialog-header recipe-dialog-header" inert={discardPromptOpen} aria-hidden={discardPromptOpen}>
           <div>
             <p className="eyebrow">制作方案</p>
             <h2 id="new-run-title">{rework ? "调整方案后重新制作" : "新建制作"}</h2>
             <p>{rework ? "已载入上一版可用设置；真实母片复用与最终方案仍需重新规划验证。下面的修改要求会真正交给对应制作步骤执行。" : "先生成前期构思，再与你讨论定稿。脚本与分镜也会分别等你确认；付费图片和视频另行报价。"}</p>
           </div>
           <div className="dialog-budget" aria-label="费用方式">
-            <span>{meteredSelected ? "图片 / 视频按实际方案报价" : "图片 / 视频无现金报价"}</span>
-            <strong>{meteredSelected ? "逐项人工确认" : "无需现金确认"}</strong>
+            {/* 费用说明分对象陈述：画面策略、配音规则、订阅/未知各说各的，不作全单免费或逐笔确认的绝对承诺（UX-01）。 */}
+            <span>{meteredSelected ? "画面：按实际方案逐项报价，确认后才执行" : "画面：使用免费图库，无现金报价"}</span>
+            <strong>{voiceCostSummary}</strong>
+            <small>订阅模型按你的供应商账号计费；预算意向不是花费授权。</small>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭" aria-label="关闭新建制作">
+          <button className="icon-button" type="button" onClick={requestClose} disabled={submitting} title="关闭" aria-label="关闭新建制作">
             <X aria-hidden="true" size={19} />
           </button>
         </header>
 
-        <form className="run-form recipe-form" onSubmit={(event) => event.preventDefault()} key={initialValues?.title ?? "blank-production"}>
+        <form className="run-form recipe-form" onSubmit={(event) => event.preventDefault()} key={initialValues?.title ?? "blank-production"} inert={discardPromptOpen} aria-hidden={discardPromptOpen}>
           <div ref={formScrollRef} className="recipe-form-scroll" style={{ overflowAnchor: "none" }}>
             {rework ? <section className="rework-brief-section" aria-labelledby="rework-scope-title" tabIndex={-1} data-dialog-initial-focus>
               <div className="compact-section-heading">
@@ -907,6 +989,13 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
             </section>
             </div>
 
+            <details className="new-run-group new-run-group-visual" open={visualGroupOpen} onToggle={(event) => setVisualGroupOpen(event.currentTarget.open)}>
+              <summary>
+                <strong>02 画面与声音</strong>
+                <small>{`${STUDIO_DIRECTOR_PROFILES.find((profile) => profile.id === directorProfileId)?.label ?? "导演"} · ${selectedRecipe.label} · ${automaticVoiceProvider ? `${creatorProviderName(automaticVoiceProvider)}（自动按量计费）` : effectiveBindings.voice ? "声音已配置" : "未选择声音"}`}</small>
+                <ChevronDown aria-hidden="true" size={15} />
+              </summary>
+              <div className="new-run-group-body">
             <section className="director-casting-section" aria-labelledby="director-casting-title">
               <div className="compact-section-heading">
                 <div><span>02</span><h3 id="director-casting-title">导演角色</h3></div>
@@ -928,7 +1017,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
 
             <section className="reference-style-section" aria-labelledby="reference-style-title">
               <div className="compact-section-heading">
-                <div><span>02B</span><h3 id="reference-style-title">参考视频风格</h3></div>
+                <div><span>＋</span><h3 id="reference-style-title">参考视频风格（可选）</h3></div>
                 <small>可选，不复制参考内容</small>
               </div>
               <div className={referenceVideo ? "reference-video-control has-file" : "reference-video-control"}>
@@ -976,9 +1065,28 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   );
                 })}
               </fieldset>
+            </section>
+
+            <VoiceStudio
+              sectionLabel="05"
+              value={voiceDirection}
+              preserveUnavailableSelection={Boolean(initialValues?.rework)}
+              onSelectionAvailabilityChange={setVoiceSelectionAvailable}
+              onChange={(next, providerId) => {
+                setVoiceDirection(next);
+                setBindings((current) => ({ ...current, voice: providerId }));
+              }}
+            />
+              </div>
+            </details>
+
+            <details className="new-run-group new-run-group-advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
+              <summary><strong>03 模型与高级设置</strong><small>{budgetIntention.trim() ? `预算意向 ¥${budgetIntention}` : "预算意向未填写"} · {Object.keys(modelSelections).length ? `${Object.keys(modelSelections).length} 项本片模型覆盖` : "沿用角色默认模型"}</small><ChevronDown aria-hidden="true" size={15} /></summary>
+              <div className="new-run-group-body">
               <label className="field budget-intention-field">
                 <span>本片预算意向（元，可不填）</span>
                 <input
+                  ref={budgetInputRef}
                   type="number"
                   min="0"
                   step="0.01"
@@ -987,16 +1095,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   onChange={(event) => setBudgetIntention(event.target.value)}
                   aria-label="本片预算意向"
                 />
-                <small>只影响导演的方案取舍参考，不是付款授权；实际花费仍会在确认方案时逐次报价并等你确认。</small>
+                <small>预算意向只供导演方案参考，不是付款授权。付费画面按现有报价授权流程执行；配音和模型按上方所示规则计费。</small>
               </label>
-            </section>
-
             <div hidden={Boolean(rework) && !inheritedSettingsOpen}>
-            <div className={advancedOpen ? "advanced-production is-open" : "advanced-production"}>
-              <button className="advanced-production-toggle" type="button" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((current) => !current)}>
-                <span>更多：素材来源与制作细节</span><small>通常在后续节点工作区调整</small><ChevronDown aria-hidden="true" size={17} />
-              </button>
-              {advancedOpen ? <>
+            <div className="advanced-production is-open">
               <section className="production-team-section" aria-labelledby="production-team-title">
                 <div className="compact-section-heading">
                   <div><span>04</span><h3 id="production-team-title">自动制作设置</h3></div>
@@ -1076,8 +1178,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                       <small className="production-role-billing">{selected
                         ? item.key === "assets"
                           ? meteredSelected
-                            ? "画面方案本身不收费 · 按实际生成需求报价 · 生成前逐笔人工确认"
-                            : "画面方案本身不收费 · 当前方案不调用付费生成"
+                            ? "此处不购买画面素材；付费生成按实际镜头报价并等待本次范围授权，规划模型按所选接入规则计费"
+                            : "当前不购买付费画面素材；规划模型按所选接入规则计费"
                           : `${providerBillingLabel(selected)} · ${effectiveModelId(selected) ?? "不使用模型"}`
                         : "尚未选择制作方式"}</small>
                     </article>;
@@ -1086,7 +1188,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <div className={roleAuditProvider ? "production-auditor" : "production-auditor is-unavailable"}>
                   <span><ScanSearch aria-hidden="true" size={18} /></span>
                   <div><strong>{roleAuditProvider ? creatorProviderName(roleAuditProvider) : "独立质量复核未接通"}</strong><small>由独立 AI 逐步检查输入、交付格式和后续使用是否一致。</small></div>
-                  <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "实际使用模型"} · 深入质量复核 · 最多三轮` : "开工前请先恢复独立质量复核能力"}</em>
+                  <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "所选模型"} · 深入质量复核 · 有限轮次` : "独立质量复核当前不可用；相关质量建议可能缺失"}</em>
                 </div>
               </section>
               <section className="workflow-config" aria-labelledby="workflow-config-title">
@@ -1199,20 +1301,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   })}
                 </div> : null}
               </section>
-              </> : null}
             </div>
-
-            <VoiceStudio
-              sectionLabel="05"
-              value={voiceDirection}
-              preserveUnavailableSelection={Boolean(initialValues?.rework)}
-              onSelectionAvailabilityChange={setVoiceSelectionAvailable}
-              onChange={(next, providerId) => {
-                setVoiceDirection(next);
-                setBindings((current) => ({ ...current, voice: providerId }));
-              }}
-            />
             </div>
+              </div>
+            </details>
 
             <section className="production-guardrails" aria-label="开工前检查">
               <label className={effectiveSemanticRank ? "visual-review-control is-enabled" : "visual-review-control"}>
@@ -1230,7 +1322,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <small>视觉审片当前不可用。勾选后仍可生成和播放首版，但不会显示正式审片通过或发布包已通过。</small>
               </label> : <label className="visual-review-control is-enabled">
                 <input type="checkbox" checked readOnly disabled />
-                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片 · DeepSeek</strong></span>
+                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片 · {effectiveModelId(visualReviewProvider!) ?? "所选模型"}</strong></span>
                 <small>{`${creatorProviderName(visualReviewProvider!)} 负责中途预检；最终成片由视觉审片模型对同一组抽帧独立审查，不上传音轨`}</small>
               </label>}
               <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>
@@ -1238,7 +1330,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <span><strong>费用确认方式</strong></span>
                 <small>{[
                   meteredSelected ? "图片和视频按实际方案逐项报价，人工确认后才执行" : "图片和视频不会产生现金报价",
-                  automaticVoiceProvider ? "配音自动计入已记录费用，不弹现金报价；失败会停在配音步骤" : "",
+                  automaticVoiceProvider ? "配音按量计费，执行时自动调用并记账，不另弹报价确认；失败会停在配音步骤" : "",
                   subscriptionVisualReview ? "视觉审片使用订阅额度，不产生现金报价；质量问题会停在审片步骤" : "",
                 ].filter(Boolean).join("；")}</small>
               </div>
@@ -1250,16 +1342,52 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
           </div>
 
           <footer className="dialog-actions recipe-dialog-actions">
-            <div><strong>{selectedRecipe.label}</strong><span>下一步：生成前期构思并等你确认。{visualReviewUnavailable ? "当前已选择先生成首版，审片结果稍后补齐。" : meteredSelected ? "图片 / 视频另行报价授权。" : roleAuditProvider?.billing === "subscription" ? "订阅能力不产生现金报价。" : "图片 / 视频无现金报价。"}</span></div>
-            <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
+            <div><strong>{selectedRecipe.label}</strong><span>下一步：生成前期构思并等你确认。{visualReviewUnavailable ? "当前已选择先生成首版，审片结果稍后补齐。" : meteredSelected ? "图片 / 视频另行报价授权。" : "图片 / 视频当前无现金报价。"} {voiceCostSummary}。订阅模型依供应商账号计费。</span></div>
+            <button className="button button-ghost" type="button" onClick={requestClose} disabled={submitting}>取消</button>
             <button className="button button-primary" type="button" onClick={(event) => {
-              if (event.currentTarget.form?.reportValidity()) void submit(event.currentTarget.form);
+              const form = event.currentTarget.form;
+              if (!form) return;
+              const invalid = form.querySelector<HTMLElement>(":invalid");
+              if (invalid) {
+                for (let parent = invalid.parentElement; parent && parent !== form; parent = parent.parentElement) {
+                  if (parent instanceof HTMLDetailsElement) parent.open = true;
+                }
+                if (invalid.closest(".new-run-group-visual")) setVisualGroupOpen(true);
+                if (invalid.closest(".new-run-group-advanced")) setAdvancedOpen(true);
+                if (invalid.closest(".advanced-production")) setInheritedSettingsOpen(true);
+                invalid.focus();
+                form.reportValidity();
+                return;
+              }
+              void submit(form);
             }} disabled={submitting || referenceUploading || productionBlocked || (visualReviewUnavailable && !acceptUnreviewedFirstCut)} data-tour="production-start">
               <Check aria-hidden="true" size={17} />
-              {submitting ? "正在创建..." : "开始制作"}
+              {submitting ? "正在创建..." : "开始前期构思"}
             </button>
           </footer>
         </form>
+
+        {discardPromptOpen ? <div className="dialog-backdrop new-run-discard-backdrop" role="presentation">
+          <section className="decision-dialog" aria-labelledby="new-run-discard-title">
+            <header className="dialog-header">
+              <div><p className="eyebrow">未保存的修改</p><h2 id="new-run-discard-title">要放弃本次填写吗？</h2></div>
+              <button className="icon-button" type="button" onClick={() => setDiscardPromptOpen(false)} title="关闭" aria-label="关闭放弃确认"><X aria-hidden="true" size={19} /></button>
+            </header>
+            <div className="decision-dialog-copy">
+              <AlertCircle aria-hidden="true" size={22} />
+              <div>
+                <p>标题、方案设置与参考视频都会消失。</p>
+                <p>已经上传的参考视频会一并删除；不会创建任何制作。</p>
+              </div>
+            </div>
+            <footer className="dialog-actions">
+              <button className="button button-primary" type="button" data-dialog-initial-focus autoFocus onClick={() => setDiscardPromptOpen(false)}>返回填写</button>
+              <button className="button button-danger-ghost" type="button" onClick={() => { setDiscardPromptOpen(false); onClose(); }}>放弃并关闭</button>
+            </footer>
+          </section>
+        </div> : discardExitVisible ? <div className="dialog-backdrop dialog-exit-decoration" aria-hidden="true" inert>
+          <div className="decision-dialog"><h2>要放弃本次填写吗？</h2></div>
+        </div> : null}
       </section>
     </div>
   );
@@ -1758,5 +1886,5 @@ function providerBillingLabel(provider: StudioProvider): string {
 
 function creatorProviderName(provider: StudioProvider): string {
   const normalized = providerLabel(provider.id);
-  return !normalized || normalized === provider.id ? provider.label : normalized;
+  return !normalized || normalized === provider.id || normalized.startsWith("服务名称未收录（") ? provider.label : normalized;
 }

@@ -110,12 +110,12 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
           <span><small>{today} · 今日创作</small><strong>从证据走到成片</strong></span>
         </div>
         <nav className="primary-nav" aria-label="主导航" data-tour="primary-nav">
-          <NavLink to="/" end><Radar aria-hidden="true" size={18} /><span>创作台</span></NavLink>
-          <NavLink to="/projects" data-tour="projects-nav"><Layers3 aria-hidden="true" size={18} /><span>制作记录</span></NavLink>
-          <NavLink to="/assets"><Images aria-hidden="true" size={18} /><span>素材库</span></NavLink>
-          <NavLink to="/templates"><LayoutTemplate aria-hidden="true" size={18} /><span>模板资料</span></NavLink>
-          <NavLink to="/resources"><Settings2 aria-hidden="true" size={18} /><span>创作设置</span></NavLink>
-          <NavLink to="/experiments"><ChartNoAxesCombined aria-hidden="true" size={18} /><span>制作复盘</span></NavLink>
+          <NavLink to="/" end aria-label="创作台" title="创作台"><Radar aria-hidden="true" size={18} /><span>创作台</span></NavLink>
+          <NavLink to="/projects" data-tour="projects-nav" aria-label="制作记录" title="制作记录"><Layers3 aria-hidden="true" size={18} /><span>制作记录</span></NavLink>
+          <NavLink to="/assets" aria-label="素材库" title="素材库"><Images aria-hidden="true" size={18} /><span>素材库</span></NavLink>
+          <NavLink to="/templates" aria-label="模板资料" title="模板资料"><LayoutTemplate aria-hidden="true" size={18} /><span>模板资料</span></NavLink>
+          <NavLink to="/resources" aria-label="创作设置" title="创作设置"><Settings2 aria-hidden="true" size={18} /><span>创作设置</span></NavLink>
+          <NavLink to="/experiments" aria-label="制作复盘" title="制作复盘"><ChartNoAxesCombined aria-hidden="true" size={18} /><span>制作复盘</span></NavLink>
         </nav>
         <div className="sidebar-footer">
           <button className="tour-help-button" type="button" onClick={() => setGuideOpen(true)} title="打开创作向导" aria-label="打开创作向导">
@@ -153,11 +153,11 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
       </header>
       <div id="main-content" className="content-shell" tabIndex={-1}>{children}</div>
       <nav className="mobile-nav" aria-label="移动端主导航">
-        <NavLink to="/" end><Radar aria-hidden="true" size={19} /><span>首页</span></NavLink>
-        <NavLink to="/projects" data-tour="projects-nav"><Layers3 aria-hidden="true" size={19} /><span>记录</span></NavLink>
+        <NavLink to="/" end><Radar aria-hidden="true" size={19} /><span>创作台</span></NavLink>
+        <NavLink to="/projects" data-tour="projects-nav"><Layers3 aria-hidden="true" size={19} /><span>制作记录</span></NavLink>
         <NavLink to="/assets"><Images aria-hidden="true" size={19} /><span>素材</span></NavLink>
         <NavLink to="/templates"><LayoutTemplate aria-hidden="true" size={19} /><span>模板资料</span></NavLink>
-        <NavLink to="/resources"><Settings2 aria-hidden="true" size={19} /><span>配置</span></NavLink>
+        <NavLink to="/resources" aria-label="创作设置"><Settings2 aria-hidden="true" size={19} /><span>设置</span></NavLink>
       </nav>
       <GuideDock
         open={guideOpen}

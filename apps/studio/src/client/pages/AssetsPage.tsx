@@ -11,7 +11,7 @@ import {
   Search,
   ShieldAlert,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import type {
   StudioAssetMediaKind,
@@ -43,6 +43,21 @@ export function AssetsPage() {
   const [collection, setCollection] = useState<AssetCollection>("creative");
   const [runs, setRuns] = useState<StudioRunSummary[]>([]);
   const [expandedWorkKeys, setExpandedWorkKeys] = useState<Set<string>>(new Set());
+  // 主动预览协调：同一时间最多一个 video/audio 在播；开始新播放时暂停上一个，
+  // 不重置它的 currentTime；切筛选/视图或离开页面时停掉旧播放（UX-08）。
+  const playingMediaRef = useRef<HTMLMediaElement | null>(null);
+  const handleMediaPlay = useCallback((element: HTMLMediaElement) => {
+    if (playingMediaRef.current && playingMediaRef.current !== element) playingMediaRef.current.pause();
+    playingMediaRef.current = element;
+  }, []);
+  const stopPlayingMedia = useCallback(() => {
+    if (playingMediaRef.current) {
+      playingMediaRef.current.pause();
+      playingMediaRef.current = null;
+    }
+  }, []);
+  useEffect(() => { stopPlayingMedia(); }, [filter, origin, provider, query, view, collection, stopPlayingMedia]);
+  useEffect(() => () => stopPlayingMedia(), [stopPlayingMedia]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -135,7 +150,7 @@ export function AssetsPage() {
 
       {manifest ? <section className="asset-index-summary" aria-label="素材库概况">
         {collection === "creative" ? <>
-          <div><Database aria-hidden="true" size={18} /><span>可直接复用<strong>{collectionStats.reusable}</strong></span></div>
+          <div><Database aria-hidden="true" size={18} /><span>可复用（使用范围见授权记录）<strong>{collectionStats.reusable}</strong></span></div>
           <div><Layers3 aria-hidden="true" size={18} /><span>跨作品使用<strong>{collectionStats.duplicateUses}</strong></span></div>
           <div className={collectionStats.needsReview ? "needs-attention" : ""}><ShieldAlert aria-hidden="true" size={18} /><span><Link to="/resources#resource-manifest" aria-label={`去确认授权：授权待确认 ${collectionStats.needsReview} 项`}>授权待确认<strong>{collectionStats.needsReview}</strong></Link></span></div>
         </> : <>
@@ -172,7 +187,7 @@ export function AssetsPage() {
       {!loading && manifest && assets.length === 0 ? <div className="asset-library-empty"><FolderOpen aria-hidden="true" size={28} /><strong>这个范围里还没有内容</strong><span>{hasFilters ? "可以清除筛选，查看完整素材库。" : "完成一次真实制作后，镜头和制作记录会自动归档到这里。"}</span>{hasFilters ? <button className="button button-secondary" type="button" onClick={clearFilters}>清除筛选</button> : null}</div> : null}
 
       {assets.length && view === "asset" ? <section className="asset-library-grid" aria-live="polite">
-        {assets.map((asset) => <AssetCard asset={asset} run={runsById.get(asset.usages.at(-1)?.runId ?? "")} key={asset.key} />)}
+        {assets.map((asset) => <AssetCard onMediaPlay={handleMediaPlay} asset={asset} run={runsById.get(asset.usages.at(-1)?.runId ?? "")} key={asset.key} />)}
       </section> : null}
       {assets.length && view === "work" ? <section className="asset-work-groups" aria-live="polite">
         {workGroups.map((group, index) => {
@@ -183,7 +198,7 @@ export function AssetsPage() {
             if (next.has(group.key)) next.delete(group.key); else next.add(group.key);
             return next;
           })}><ChevronDown aria-hidden="true" size={18} /><div><small>{index === 0 ? "最近制作" : "历史制作"} · {group.items.length} 项素材</small><h2 id={`asset-work-${group.key}`}>{group.runTitle}</h2></div></button>{group.runId ? <Link to={`/projects/${group.runId}`}>打开制作</Link> : null}</header>
-          {expanded ? <div id={`asset-work-items-${group.key}`} className="asset-library-grid">{group.items.map(({ asset, usage }) => <AssetCard asset={asset} usage={usage} run={runsById.get(group.runId ?? "")} grouped key={`${asset.key}:${usage?.itemId ?? "unassigned"}`} />)}</div> : null}
+          {expanded ? <div id={`asset-work-items-${group.key}`} className="asset-library-grid">{group.items.map(({ asset, usage }) => <AssetCard onMediaPlay={handleMediaPlay} asset={asset} usage={usage} run={runsById.get(group.runId ?? "")} grouped key={`${asset.key}:${usage?.itemId ?? "unassigned"}`} />)}</div> : null}
           </section>;
         })}
       </section> : null}
@@ -217,14 +232,14 @@ function groupAssetsByWork(assets: StudioIndexedAsset[], runs: StudioRunSummary[
   });
 }
 
-function AssetCard({ asset, usage, run, grouped = false }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; run?: StudioRunSummary | undefined; grouped?: boolean }) {
+function AssetCard({ asset, usage, run, grouped = false, onMediaPlay }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; run?: StudioRunSummary | undefined; grouped?: boolean; onMediaPlay?: (element: HTMLMediaElement) => void }) {
   const resolvedUsage = usage ?? asset.usages.at(-1);
   const identity = assetUsageIdentity(asset, resolvedUsage, grouped);
   const metadata = assetMetadata(asset, run);
   const creator = creatorFacingTechnicalText(asset.creator);
   const visibleTags = asset.tags.filter((tag) => tag !== "studio-owner" && tag !== asset.creator);
   return <article className="asset-card">
-    <AssetPreview asset={asset} usage={resolvedUsage} identity={identity} />
+    <AssetPreview asset={asset} usage={resolvedUsage} identity={identity} {...(onMediaPlay ? { onMediaPlay } : {})} />
     <div className="asset-card-copy">
       <header><span>{originLabel(asset.origin)} · {mediaKindLabel(asset.mediaKind)}</span><b className={`reuse-${asset.reuseStatus}`}>{reuseStatusLabel(asset.reuseStatus)}</b></header>
       <h3>{assetTitle(asset, resolvedUsage)}</h3>
@@ -235,20 +250,20 @@ function AssetCard({ asset, usage, run, grouped = false }: { asset: StudioIndexe
       {visibleTags.length ? <div className="asset-tags">{visibleTags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
       <footer>
         <span>{grouped ? identity : asset.useCount > 1 ? `已用于 ${asset.useCount} 个镜头` : resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? identity : "未归属"}</span>
-        <div>{asset.reuseStatus === "review_required" ? <Link to="/resources#resource-manifest">去确认授权</Link> : null}{resolvedUsage ? <Link to={`/projects/${resolvedUsage.runId}`}>查看作品</Link> : null}{asset.sourceUrl ? <a href={asset.sourceUrl} target="_blank" rel="noreferrer" aria-label="查看素材原始来源"><ExternalLink aria-hidden="true" size={14} /></a> : null}</div>
+        <div>{asset.reuseStatus === "review_required" ? <Link to="/resources#resource-manifest" aria-label={`去确认授权：${assetTitle(asset, resolvedUsage)}`}>去确认授权</Link> : null}{resolvedUsage ? <Link to={`/projects/${resolvedUsage.runId}`} aria-label={`查看作品：${assetTitle(asset, resolvedUsage)}`}>查看作品</Link> : null}{asset.sourceUrl ? <a href={asset.sourceUrl} target="_blank" rel="noreferrer" aria-label={`查看素材原始来源：${assetTitle(asset, resolvedUsage)}（新窗口）`}><ExternalLink aria-hidden="true" size={14} /></a> : null}</div>
       </footer>
     </div>
   </article>;
 }
 
-function AssetPreview({ asset, usage = asset.usages.at(-1), identity }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; identity: string }) {
+function AssetPreview({ asset, usage = asset.usages.at(-1), identity, onMediaPlay }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; identity: string; onMediaPlay?: (element: HTMLMediaElement) => void }) {
   const isUnsplash = (usage?.providerId ?? asset.providerId) === "unsplash-stock-v1";
   const imageUrl = isUnsplash
     ? unsplashPublicUrl(usage?.previewUrl ?? asset.previewUrl, "images.unsplash.com")
     : asset.contentUrl;
-  if (asset.contentUrl && asset.mediaKind === "video") return <div className="asset-card-preview"><video aria-label={`${assetTitle(asset, usage)} 预览`} src={`${asset.contentUrl}#t=0.1`} muted controls playsInline preload="metadata" /><span className="asset-card-identity">{identity}</span></div>;
+  if (asset.contentUrl && asset.mediaKind === "video") return <div className="asset-card-preview"><video aria-label={`${assetTitle(asset, usage)} 预览`} src={`${asset.contentUrl}#t=0.1`} muted controls playsInline preload="metadata" onPlay={(event) => onMediaPlay?.(event.currentTarget)} /><span className="asset-card-identity">{identity}</span></div>;
   if (imageUrl && asset.mediaKind === "image") return <div className="asset-card-preview"><img src={imageUrl} alt={`${assetTitle(asset, usage)} 素材`} loading="lazy" /><span className="asset-card-identity">{identity}</span></div>;
-  if (asset.contentUrl && asset.mediaKind === "audio") return <div className="asset-card-preview is-audio"><Music2 aria-hidden="true" size={28} /><audio aria-label={`${assetTitle(asset, usage)} 试听`} src={asset.contentUrl} controls preload="none" /><span className="asset-card-identity">{identity}</span></div>;
+  if (asset.contentUrl && asset.mediaKind === "audio") return <div className="asset-card-preview is-audio"><Music2 aria-hidden="true" size={28} /><audio aria-label={`${assetTitle(asset, usage)} 试听`} src={asset.contentUrl} controls preload="none" onPlay={(event) => onMediaPlay?.(event.currentTarget)} /><span className="asset-card-identity">{identity}</span></div>;
   const Icon = asset.mediaKind === "video" ? Film : asset.mediaKind === "image" ? ImageIcon : asset.mediaKind === "audio" ? Music2 : asset.mediaKind === "document" ? FileText : Database;
   return <div className={`asset-card-preview is-${asset.mediaKind}`}><Icon aria-hidden="true" size={28} /><span>{mediaKindLabel(asset.mediaKind)}</span><span className="asset-card-identity">{identity}</span></div>;
 }
@@ -375,5 +390,5 @@ function originLabel(origin: StudioAssetOrigin): string {
 }
 
 function reuseStatusLabel(status: StudioAssetReuseStatus): string {
-  return ({ ready: "可直接复用", review_required: "授权待确认", private: "仅当前项目", not_reusable: "仅作记录" })[status];
+  return ({ ready: "可复用，使用范围见授权记录", review_required: "授权待确认", private: "仅当前项目可用", not_reusable: "仅作记录" })[status];
 }

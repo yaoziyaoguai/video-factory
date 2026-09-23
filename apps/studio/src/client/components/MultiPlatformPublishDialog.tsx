@@ -39,6 +39,9 @@ export function MultiPlatformPublishDialog({ runId, onClose }: MultiPlatformPubl
   const [error, setError] = useState<string>();
   const dialogRef = useDialogFocus<HTMLElement>(true, onClose, pending);
   const allConfirmed = useMemo(() => Object.values(confirmations).every(Boolean), [confirmations]);
+  const selectedTargets = readiness?.targets.filter((target) => selected.includes(target.id)) ?? [];
+  const submitCount = selectedTargets.filter((target) => target.status === "ready").length;
+  const exportCount = selectedTargets.filter((target) => target.status === "manual_only").length;
 
   useEffect(() => {
     let active = true;
@@ -79,7 +82,7 @@ export function MultiPlatformPublishDialog({ runId, onClose }: MultiPlatformPubl
     <div className="dialog-backdrop" role="presentation">
       <section ref={dialogRef} className="publish-dialog" role="dialog" aria-modal="true" aria-labelledby="publish-title" tabIndex={-1}>
         <header className="dialog-header">
-          <div><p className="eyebrow">发行制片</p><h2 id="publish-title">发布到多个平台</h2><p>一次确认，各平台独立发送与审核；失败平台单独留档。</p></div>
+          <div><p className="eyebrow">发行制片</p><h2 id="publish-title">{!readiness ? "检查可用的发布方式" : !selected.length ? "选择发布平台" : submitCount && exportCount ? "提交与导出发布材料" : submitCount ? "提交到已授权平台" : "准备各平台发布包"}</h2><p>{!readiness || !selected.length ? "确认各平台的实际处理方式后再继续。" : submitCount && exportCount ? `${submitCount} 个平台将提交，${exportCount} 个平台仅生成发布包。` : submitCount ? "提交后仍需等待各平台处理或审核。" : "下载后，由你到目标平台上传和确认发布。"}</p></div>
           <button className="icon-button" type="button" onClick={onClose} disabled={pending} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
 
@@ -130,7 +133,7 @@ export function MultiPlatformPublishDialog({ runId, onClose }: MultiPlatformPubl
         {batch ? <div className={`publish-result is-${batch.status}`} role="status">
           <div className="publish-result-heading">
             {batch.status === "succeeded" ? <Check aria-hidden="true" size={20} /> : <AlertCircle aria-hidden="true" size={20} />}
-            <span><strong>{batchStatusLabel(batch.status)}</strong><small>每个平台的结果已独立留存；相同请求不会重复发送。</small></span>
+            <span><strong>{batchStatusLabel(batch)}</strong><small>每个平台的结果已独立留存。提交审核不等于已公开发布；导出发布包不等于已上传。</small></span>
           </div>
           <div className="publish-delivery-list">{batch.deliveries.map((delivery) => <div key={delivery.platformId}><strong>{readiness?.targets.find((target) => target.id === delivery.platformId)?.label ?? delivery.platformId}</strong><span>{deliveryStatusLabel(delivery.status)}</span><small>{delivery.detail ?? delivery.externalId ?? "等待平台审核"}</small></div>)}</div>
         </div> : null}
@@ -159,6 +162,10 @@ function deliveryStatusLabel(status: StudioPublishBatch["deliveries"][number]["s
   return ({ submitted: "已提交审核", export_ready: "发布包已准备", needs_config: "需要配置", failed: "发送失败" })[status];
 }
 
-function batchStatusLabel(status: StudioPublishBatch["status"]): string {
-  return ({ succeeded: "发布任务已处理", partial: "部分平台需要处理", failed: "发布任务未发送" })[status];
+function batchStatusLabel(batch: StudioPublishBatch): string {
+  if (batch.status === "failed") return "本次提交或导出未完成";
+  const submitted = batch.deliveries.filter((delivery) => delivery.status === "submitted").length;
+  const exported = batch.deliveries.filter((delivery) => delivery.status === "export_ready").length;
+  const summary = [submitted ? `${submitted} 个平台已提交审核` : "", exported ? `${exported} 个平台发布包已准备` : ""].filter(Boolean).join("；");
+  return batch.status === "partial" ? `${summary}；部分平台仍需处理` : summary || "本次处理已完成，请查看各平台结果";
 }

@@ -75,7 +75,7 @@ export function SourceSupplementDialog({
               placeholder={"https://example.com/article-a\nhttps://news.example.org/article-b"}
             />
           </label>
-          <p className="source-supplement-hint">需要的是<b>不同域名的有效原始来源</b>，不是链接条数；搜索结果页可以保存留档，但不会被计入有效来源。补齐后系统会按最新来源重算开工门槛与制作建议，仍可能需要人工核验，或因内容质量暂不推荐。</p>
+          <p className="source-supplement-hint">需要的是<b>不同域名的有效原始来源</b>，不是链接条数；搜索结果页可以保存留档，但不会被计入有效来源。补充后会重新评估来源与制作建议；需要人工核验的内容仍须由你确认。</p>
           {error ? <p className="source-supplement-error" role="alert">{error}</p> : null}
         </div>
         <footer className="dialog-actions">

@@ -55,7 +55,7 @@ describe("PlanningStagesPanel model switching copy", () => {
       onConfigureStage={vi.fn(async () => undefined)}
     />);
 
-    expect(screen.getByText(/保存后这一步会按你选的模型开始执行/)).toBeInTheDocument();
+    expect(screen.getByText(/继续制作时才会使用，不会立即调用模型/)).toBeInTheDocument();
     expect(screen.queryByText(/重新执行/)).not.toBeInTheDocument();
   });
 
@@ -68,7 +68,7 @@ describe("PlanningStagesPanel model switching copy", () => {
       onConfigureStage={vi.fn(async () => undefined)}
     />);
 
-    expect(screen.getByText(/保存后才会重新执行这一阶段开始的后续部分/)).toBeInTheDocument();
+    expect(screen.getByText(/由你继续制作时才重新执行，不会立即调用模型/)).toBeInTheDocument();
   });
 
   it("keeps the model selector reachable at a boundary stop", () => {

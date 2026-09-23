@@ -98,7 +98,7 @@ const PRODUCTION_ROLE_DEFINITIONS: ProductionRoleDefinition[] = [
   { key: "voice", label: "配音执行", capability: "voice.synthesize", preferredProviderId: "macos-say-v1", responsibility: "按声音演员表执行音色、语速和停顿", mode: "tool", selectable: false, configurationAnchor: "voice-casting", configurationLabel: "去声音演员表配置" },
   { key: "render", label: "剪辑师", capability: "video.render", preferredProviderId: "python-ffmpeg-v1", responsibility: "合成画面、字幕、旁白和音轨", mode: "tool" },
   { key: "technicalReview", label: "技术质检", capability: "quality.review", preferredProviderId: "python-technical-review-v1", responsibility: "检查分辨率、时长、轨道、文件和产物哈希", mode: "tool" },
-  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "deepseek-visual-review-v1", responsibility: "用已选视觉模型检查画面，并复核审片意见；未就绪时不能开工", mode: "model" },
+  { key: "visualReview", label: "视觉审片员", capability: "quality.review.visual", preferredProviderId: "deepseek-visual-review-v1", responsibility: "用已选视觉模型检查画面，并复核审片意见；未就绪时可选择先生成首版，首版不代表正式审片通过", mode: "model" },
 ];
 
 const AUTOMATIC_AGENT_ROLES = [
@@ -109,6 +109,18 @@ const AUTOMATIC_AGENT_ROLES = [
   { label: "发行编辑", capability: "publish.copy" },
   { label: "独立质量复核", capability: "role.audit" },
 ] as const;
+
+const RESOURCE_SECTIONS: Array<{ id: ResourceSectionId; label: string; icon: typeof Clapperboard }> = [
+  { id: "creation-defaults", label: "创作默认", icon: SlidersHorizontal },
+  { id: "model-settings", label: "模型设置", icon: Settings2 },
+  { id: "topic-strategy", label: "选题策略", icon: Sparkles },
+  { id: "trend-connections", label: "热点信号", icon: RadioTower },
+  { id: "voice-casting", label: "声音演员", icon: Sparkles },
+  { id: "visual-providers", label: "画面来源", icon: Film },
+  { id: "production-roles", label: "制作分工", icon: Clapperboard },
+  { id: "resource-manifest", label: "来源与授权", icon: ListChecks },
+  { id: "publish-channels", label: "发布渠道", icon: UploadCloud },
+];
 
 export function ResourcesPage() {
   const location = useLocation();
@@ -346,16 +358,16 @@ export function ResourcesPage() {
       </section>
 
       <nav className="configuration-index" aria-label="配置分区">
-        <a href="#creation-defaults" aria-current={activeSection === "creation-defaults" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("creation-defaults"); }}><SlidersHorizontal aria-hidden="true" size={15} />创作默认</a>
-        <a href="#model-settings" aria-current={activeSection === "model-settings" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("model-settings"); }}><Settings2 aria-hidden="true" size={15} />模型设置</a>
-        <a href="#topic-strategy" aria-current={activeSection === "topic-strategy" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("topic-strategy"); }}><Sparkles aria-hidden="true" size={15} />选题策略</a>
-        <a href="#trend-connections" aria-current={activeSection === "trend-connections" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("trend-connections"); }}><RadioTower aria-hidden="true" size={15} />热点信号</a>
-        <a href="#voice-casting" aria-current={activeSection === "voice-casting" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("voice-casting"); }}><Sparkles aria-hidden="true" size={15} />声音演员</a>
-        <a href="#visual-providers" aria-current={activeSection === "visual-providers" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("visual-providers"); }}><Film aria-hidden="true" size={15} />画面来源</a>
-        <a href="#production-roles" aria-current={activeSection === "production-roles" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("production-roles"); }}><Clapperboard aria-hidden="true" size={15} />制作分工</a>
-        <a href="#resource-manifest" aria-current={activeSection === "resource-manifest" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("resource-manifest"); }}><ListChecks aria-hidden="true" size={15} />来源与授权</a>
-        <a href="#publish-channels" aria-current={activeSection === "publish-channels" ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection("publish-channels"); }}><UploadCloud aria-hidden="true" size={15} />发布渠道</a>
+        {RESOURCE_SECTIONS.map(({ id, label, icon: Icon }) => (
+          <a key={id} href={`#${id}`} aria-current={activeSection === id ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection(id); }}><Icon aria-hidden="true" size={15} />{label}</a>
+        ))}
       </nav>
+      <label className="configuration-index-select">
+        <span>设置分区</span>
+        <select value={activeSection} onChange={(event) => showSection(event.target.value as ResourceSectionId)}>
+          {RESOURCE_SECTIONS.map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+        </select>
+      </label>
 
       <section id="creation-defaults" className="resource-section configuration-defaults" data-resource-section data-active={activeSection === "creation-defaults" ? "true" : undefined} data-tour="configuration-defaults">
         <ResourceHeading eyebrow="创作基线" title="新建制作默认值" meta="保存后自动带入下一条视频，创建时仍可单独调整" />
@@ -385,7 +397,7 @@ export function ResourcesPage() {
 
       <section id="topic-strategy" className="resource-section topic-strategy-config" data-resource-section data-active={activeSection === "topic-strategy" ? "true" : undefined} data-tour="topic-strategy">
         <ResourceHeading eyebrow="总编规则" title="什么题值得做" meta="系统综合判断下列准入条件；你只需维护账号定位、内容边界和来源标准，不需要调整评分权重" />
-        <div className="topic-rubric" aria-label="视频选题准入标准">
+        <div className="topic-rubric" aria-label="选题评估参考">
           {[['明确观众收益', '必需', '说清谁会看，以及看完能解决什么具体问题'], ['前两秒钩子', '必需', '开场立即给出具体承诺或值得停留的理由'], ['画面不可替代', '必需', '有可见行动、对比或现场，而不只是把文字换成口播'], ['创作增量', '必需', '提供通稿之外的新解释、验证或选择依据'], ['可追溯来源', '必需', '事实能回到有效原始链接，并满足下方来源标准'], ['成本与价值匹配', '综合', '预计画面成本要与观看价值和制作必要性相称'], ['风险与形式匹配', '综合', '公共或高风险事件优先证据表达，不用生成画面虚构现场']].map(([label, gate, detail]) => <article key={label}><span>{gate}</span><strong>{label}</strong><small>{detail}</small></article>)}
         </div>
         <div className="topic-instruction-editor">
@@ -523,7 +535,7 @@ export function ResourcesPage() {
           {resourceManifest.unreadableManifestCount ? <p className="resource-manifest-legacy" role="status">有 {resourceManifest.unreadableManifestCount} 条资源清单损坏或不可信，已隔离；其余任务仍可正常查看。</p> : null}
           {resourceManifest.truncatedRunCount ? <p className="resource-manifest-legacy" role="status">当前仅汇总最近 500 条制作，另有 {resourceManifest.truncatedRunCount} 条较早记录未进入本页统计。</p> : null}
           <ManifestRunGroups groups={reviewableManifestRuns.slice(0, manifestLimit)} onReview={reviewResource} />
-          {reviewableManifestItems.length === 0 ? <div className="resource-manifest-empty"><ListChecks aria-hidden="true" size={18} /><span>当前没有需要确认或返工的素材。</span></div> : null}
+          {reviewableManifestItems.length === 0 ? <div className="resource-manifest-empty"><ListChecks aria-hidden="true" size={18} /><span>本页已读取记录中，没有待处理的授权确认或返工事项。{resourceManifest.legacyRunsWithoutManifest || resourceManifest.unreadableManifestCount || resourceManifest.truncatedRunCount ? "未纳入统计或缺少历史记录的素材，不在本次结论范围内。" : ""}</span></div> : null}
           {reviewableManifestRuns.length > manifestLimit ? <button className="button button-secondary" type="button" onClick={() => setManifestLimit((current) => current + 8)}>显示更多素材视频（还剩 {reviewableManifestRuns.length - manifestLimit} 条）</button> : null}
           {productionRecordItems.length ? <details className="resource-manifest-records">
             <summary><span><strong>制作过程记录</strong><small>脚本、方案和质检报告默认收起，不混入授权待办</small></span><b>{productionRecordItems.length} 项</b></summary>
@@ -586,7 +598,7 @@ function ManifestLedger({ items, record = false, onReview }: { items: StudioReso
           {!item.scenePosition ? <small className="resource-item-identity">未定位镜头 · 素材标识 {shortItemIdentifier(item.id)}</small> : null}
           <p>{creatorFacingTechnicalText(item.licenseNote) ?? (record ? "保留这条记录用于追溯制作过程。" : "缺少授权说明，需要人工确认。")}</p>
         </div>
-        <span className={record || item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{record ? "制作记录" : item.reviewDecision?.action === "confirmed" ? "已确认可用" : item.reviewDecision?.action === "rejected" ? "需在原制作返工" : item.reviewStatus === "recorded" ? "已记录" : "待确认"}</span>
+        <span className={record || item.reviewStatus === "recorded" ? "ledger-state is-ready" : "ledger-state"}>{record ? "制作记录" : item.reviewDecision?.action === "confirmed" ? "授权信息已人工核对" : item.reviewDecision?.action === "rejected" ? "需在原制作返工" : item.reviewStatus === "recorded" ? "已记录" : "待确认"}</span>
         {sourceUrl ? <a className="resource-source-link" href={sourceUrl} target="_blank" rel="noreferrer" title="核验资源来源"><ArrowUpRight aria-hidden="true" size={15} /></a> : <span className="resource-source-link" />}
         {!record && onReview ? <ResourceReviewActions item={item} onReview={onReview} /> : null}
       </article>;
@@ -674,7 +686,7 @@ function ResourceReviewActions({ item, onReview }: { item: StudioResourceManifes
   if (item.reviewDecision?.action === "rejected") return <div className="resource-review-actions"><Link to={`/projects/${item.runId}`}>打开原制作，点击“基于这版重新制作”</Link>{item.reviewDecision.note ? <small>{item.reviewDecision.note}</small> : null}</div>;
   if (item.reviewStatus === "recorded") return null;
   return <div className="resource-review-actions">
-    <button className="button button-secondary" type="button" disabled={pending} onClick={() => void submit("confirmed")}>确认可用</button>
+    <button className="button button-secondary" type="button" disabled={pending} onClick={() => void submit("confirmed")}>确认已核对授权信息</button>
     <button className="button button-danger-ghost" type="button" disabled={pending} onClick={() => setRejecting(true)}>驳回</button>
     {rejecting ? <div className="resource-review-reject"><label><span>驳回原因</span><input value={note} onChange={(event) => setNote(event.target.value)} /></label><button className="button button-danger" type="button" disabled={pending || !note.trim()} onClick={() => void submit("rejected")}>确认驳回</button></div> : null}
     {error ? <small role="alert">{error}</small> : null}
@@ -748,7 +760,7 @@ function creatorFacingProviderKind(provider: StudioProvider): string {
 
 function creatorProviderLabel(provider: StudioProvider): string {
   const normalized = providerLabel(provider.id);
-  return !normalized || normalized === provider.id ? provider.label : normalized;
+  return !normalized || normalized === provider.id || normalized.startsWith("服务名称未收录（") ? provider.label : normalized;
 }
 
 function ModelDefaultCard({ provider, selectedModelId, onChange }: {

@@ -109,7 +109,7 @@ function continueAction(run: StudioRunSummary): string {
   if (run.nextAction === "review") return creatorReviewAction(run);
   if (run.nextAction === "regenerate") return "确认后继续";
   if (run.status === "succeeded") return "查看成片";
-  if (run.status === "failed" || run.status === "rejected") return "重新调整";
+  if (run.status === "failed" || run.status === "rejected") return "查看并继续处理";
   return "继续制作";
 }
 
@@ -121,7 +121,7 @@ function continueMessage(run: StudioRunSummary): string {
     : `${runNodeLabel(run.currentNodeId)}等待你的判断，打开后可以查看产物、讨论或确认当前版本。`;
   if (run.nextAction === "regenerate") return "人工修改已经保存，正在等你确认后续重新生成。";
   if (run.status === "succeeded") return "这条视频已经完成，可以查看成片与发布包。";
-  if (run.status === "failed" || run.status === "rejected") return "这条制作需要调整后重新开始。";
+  if (run.status === "failed" || run.status === "rejected") return "制作停在失败步骤；已保留的内容不会丢，打开后查看并继续处理。";
   if (run.status === "paused") return "制作已暂停。先查看已保留的结果，再决定是否恢复。";
   return "当前步骤正在制作，完成后会按流程等待你的确认。";
 }

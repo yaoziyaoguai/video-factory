@@ -231,7 +231,7 @@ function editorialVerdictLabel(item: StudioCandidateInboxItem): string {
   return {
     produce_video: "建议视频",
     produce_image_story: "建议图文成片",
-    skip: "暂不生产",
+    skip: "暂不建议制作",
   }[item.editorialDecision.verdict];
 }
 
@@ -246,8 +246,8 @@ function isRuleLead(item: StudioCandidateInboxItem): boolean {
 function ruleFallbackReason(receipt: StudioTopicGenerationReceipt): string {
   const category = {
     model_unavailable: "总编模型当前不可用。",
-    accepted_unknown: "总编的产出没有通过合同校验。",
-    contract_rejected: "总编的产出被任务合同拒绝。",
+    accepted_unknown: "选题结果未通过格式校验，本轮未能采用。",
+    contract_rejected: "选题结果未满足本次任务要求，本轮未能采用。",
     model_error: "总编这轮执行出错。",
   }[receipt.failureCategory ?? "model_error"];
   const reason = creatorFacingTechnicalText(receipt.failureReason);

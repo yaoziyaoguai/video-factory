@@ -46,16 +46,11 @@ const STAGE_CAPABILITY: Partial<Record<StudioPlanningStage["id"], string>> = {
   director: "storyboard.plan",
 };
 
-/**
- * 换模型这一格的说明。保存的后果按阶段是否已经跑过而定，不是一句话能盖住的：
- * 已经跑过的阶段会被标成待重做、连同下游一起重跑；还没跑过的阶段（例如停在简报边界时，
- * 创作规划三个阶段都是"待开始"）根本无产可重做，保存只是给它选一台模型然后开始跑。
- * 说成"重新执行"会让用户以为自己会丢掉一版已经做好的产出，从而不敢改模型。
- */
+/** 保存只更新配置；已完成的阶段会失效，但模型调用仍由后续继续制作动作触发。 */
 function stageModelNote(status: StudioPlanningStage["status"]): string {
   return status === "pending"
-    ? "选择只是草稿；保存后这一步会按你选的模型开始执行。"
-    : "选择只是草稿；保存后才会重新执行这一阶段开始的后续部分。";
+    ? "保存只记录模型选择；继续制作时才会使用，不会立即调用模型。"
+    : "保存后受影响的阶段会标为待重做；由你继续制作时才重新执行，不会立即调用模型。";
 }
 
 function planningStageProvider(providers: StudioProvider[], stageId: StudioPlanningStage["id"]): StudioProvider | undefined {
@@ -133,7 +128,7 @@ export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditS
               ) : null}
               {canChangeModel && provider ? (
                 <label className="field planning-stage-model-select">
-                  <span>下次使用{stage.id === "treatment" ? "构思" : stage.id === "script" ? "脚本" : "导演方案"}模型</span>
+                  <span>{stage.id === "treatment" ? "构思" : stage.id === "script" ? "脚本" : "导演方案"}阶段模型</span>
                   <select
                     value={draftModel || stage.effectiveModelId || provider.defaultModelId || ""}
                     onChange={(event) => {
@@ -156,7 +151,7 @@ export function PlanningStagesPanel({ stages, providers, busy, readOnly, onEditS
                       }
                     }}
                   >
-                    <Save aria-hidden="true" size={14} />{savingStageId === stage.id ? "保存中…" : "保存模型"}
+                    <Save aria-hidden="true" size={14} />{savingStageId === stage.id ? "保存中…" : "保存模型选择"}
                   </button>
                 </label>
               ) : null}

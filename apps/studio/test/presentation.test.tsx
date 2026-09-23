@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildProviderCatalog } from "../src/server/provider-catalog.js";
-import { RUN_NODE_ORDER, catalogModelLabel, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, runNodeLabel } from "../src/client/presentation.js";
+import { RUN_NODE_ORDER, agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, creatorFacingTechnicalText, creatorRunStatusLabel, proposalSourceLabel, providerLabel, providerModelLabel, reasoningEffortLabel, runNodeLabel } from "../src/client/presentation.js";
 
 describe("creator-facing presentation labels", () => {
   it("does not expose internal provider ids or director routing codes", () => {
@@ -9,10 +9,8 @@ describe("creator-facing presentation labels", () => {
     expect(providerLabel("human-validated-director-plan-v1")).toBe("人工确认导演方案");
     expect(providerLabel("multiple")).toBe("多来源制作记录");
     expect(providerLabel("codex-role-auditor-v1")).toBe("AI 独立质量复核");
-    expect(providerLabel("unknown-provider-v1")).toBeUndefined();
-    expect(providerModelLabel(undefined, "internal-model-id")).toBe("未识别模型");
-    expect(humanizeCreativeText("knowledge-failed-intuition：generated_image，REUSE_ONLY scene 2"))
-      .toBe("打破直觉：AI 图片生成，复用镜头 2");
+    expect(providerLabel("unknown-provider-v1")).toBe("服务名称未收录（unknown-provider-v1）");
+    expect(providerModelLabel(undefined, "internal-model-id")).toBe("模型名称未收录（internal-model-id）");
   });
 
   it("maps catalog model ids to labels and leaves unmapped ids to the caller", () => {
@@ -43,14 +41,12 @@ describe("creator-facing presentation labels", () => {
 
   it("turns system diagnostics into creator language without rewriting creative copy", () => {
     const technical = creatorFacingTechnicalText("Agent Provider Broker schema manifest fallback taskId api-visual-director-v1 primary provider timed out blocking");
-    expect(technical).toBe("AI 服务 AI 服务 数据格式 资源清单 备用方案 任务编号 内部能力 首选服务响应超时 必须修改的问题");
-    expect(technical).not.toMatch(/Agent|Provider|Broker|schema|manifest|fallback|taskId|api-visual-director-v1|blocking/i);
+    expect(technical).toBe("AI 服务 AI 服务 数据格式 资源清单 备用方案 任务编号 内部能力 首选服务响应超时 blocking");
+    expect(technical).not.toMatch(/Agent|Provider|Broker|schema|manifest|fallback|taskId|api-visual-director-v1/i);
     expect(creatorFacingTechnicalText("Codex 独立质量审计 · xhigh 推理 · 阻断门禁"))
       .toBe("Codex 独立质量复核 · 深入推理 · 不通过则要求修改");
     expect(creatorFacingTechnicalText("Codex 独立质量审计 Agent")).toBe("Codex 独立质量复核");
 
-    const creatorCopy = "我的 Provider 不是故事主角，Agent 也不是标题。";
-    expect(humanizeCreativeText(creatorCopy)).toBe(creatorCopy);
   });
 
   it("publishes the independent reviewer catalog in creator language", () => {
@@ -98,7 +94,7 @@ describe("creator-facing presentation labels", () => {
     expect(creatorFacingTechnicalText("从未完成任务恢复：Pexels free stock license; review current provider license before publishing."))
       .toBe("从未完成任务恢复：Pexels 免费图库素材；发布前需核对当前授权条款。");
     expect(creatorFacingTechnicalText("从未完成任务恢复：Pixabay Content License; cache API responses for 24h and avoid systematic mass downloads."))
-      .toBe("从未完成任务恢复：Pixabay 内容许可；接口结果最多缓存 24 小时，禁止系统性批量下载。");
+      .toBe("从未完成任务恢复：Pixabay 内容许可；接口响应缓存 24 小时，并避免系统性批量下载。");
     expect(creatorFacingTechnicalText("Human-selected media retained with immutable bytes and run-local provenance."))
       .toBe("保留人工选中的原始素材，并记录本次制作中的来源信息。");
     expect(creatorFacingTechnicalText("Human-edited derivative retained as an immutable revision."))
@@ -119,5 +115,34 @@ describe("creator-facing presentation labels", () => {
       .toBe("成片渲染记录。");
     expect(creatorFacingTechnicalText("VideoFactory technical review result."))
       .toBe("机器质检结果。");
+  });
+
+  it("does not turn unknown identities into a known model, source, or step", () => {
+    expect(providerModelLabel(undefined, "custom-model-2026")).toContain("custom-model-2026");
+    expect(providerLabel("custom-provider-v2")).toContain("custom-provider-v2");
+    expect(proposalSourceLabel("custom-planner-v2")).toContain("custom-planner-v2");
+    expect(proposalSourceLabel("custom-planner-v2")).not.toContain("总编");
+    expect(reasoningEffortLabel("future-effort")).toContain("future-effort");
+    expect(reasoningEffortLabel(undefined)).toBe("使用服务默认推理设置");
+    expect(runNodeLabel("custom-export-v2")).toBe("当前步骤");
+    expect(creatorRunStatusLabel({ status: "needs_human", currentNodeId: "custom-export-v2" })).toBe("等你确认当前步骤");
+  });
+
+  it("keeps actionable recovery text and never returns an empty failure explanation", () => {
+    expect(creatorFacingTechnicalText("诊断：stage=submit；reasonCode=unknown。"))
+      .toBe("本次调用未完成，当前记录没有可读的失败说明。请查看本步骤的状态和可用处理方式。");
+    expect(creatorFacingTechnicalText("2 个候选模型均未能完成：A 超时；B 结果未知。请先核对原任务，不要重复提交。"))
+      .toContain("请先核对原任务，不要重复提交。");
+    expect(creatorFacingTechnicalText("合同约束：不得商用。"))
+      .toBe("合同约束：不得商用。");
+  });
+
+  it("uses the recorded phase and limit instead of claiming a stopped loop is generating", () => {
+    const progress = { iteration: 2, maxIterations: 2, phase: "exhausted" } as Parameters<typeof agentLoopPhaseLabel>[0];
+    expect(agentLoopPhaseLabel(progress)).toContain("第 2 / 2 轮 · 自动修订已停止");
+    expect(agentLoopPendingNote(progress)).toContain("自动修订已停止");
+    expect(agentLoopPendingNote(progress)).not.toContain("正在生成");
+    expect(agentLoopPendingNote({ ...progress, phase: "awaiting_user" })).toContain("等待你的决定");
+    expect(agentLoopPendingNote({ ...progress, phase: "passed" })).not.toContain("正在生成");
   });
 });

@@ -116,9 +116,9 @@ function ModelConnectionForm({ busy, onSave }: { busy: boolean; onSave: (input: 
     <label className="field"><span>接口根地址（含版本路径）</span><input type="url" name="baseUrl" required placeholder="https://api.example.com/v1" /></label>
     <label className="field"><span>模型 ID（供应商原名）</span><input name="modelId" required maxLength={160} /></label>
     <label className="field"><span>API Key</span><input type="password" name="apiKey" required autoComplete="new-password" maxLength={4096} /></label>
-    <label className="field"><span>最大输出 token（按模型文档填写）</span><input type="number" name="maxOutputTokens" required min={1} max={262144} /></label>
+    <label className="field"><span>最大输出长度（token，按模型文档填写）</span><input type="number" name="maxOutputTokens" required min={1} max={262144} /></label>
     {protocol === "openai-chat-completions" ? <label className="field"><span>推理强度（仅填写该接口支持的值）</span><select name="reasoningEffort"><option value="">服务商默认，不发送此参数</option>{["low", "medium", "high", "xhigh", "max"].map((item) => <option key={item}>{item}</option>)}</select></label>
-      : <label className="field"><span>Thinking budget（留空遵循服务商默认）</span><input type="number" name="thinkingBudget" min={1024} /></label>}
+      : <label className="field"><span>推理预算（Thinking budget，留空使用服务商默认）</span><input type="number" name="thinkingBudget" min={1024} /></label>}
   </div><fieldset><legend>模型实际支持的能力</legend>{(Object.keys(CAPABILITIES) as ModelUnderstandingCapability[]).map((capability) => <label key={capability}>
     <input type="checkbox" checked={capabilities.includes(capability)} disabled={capability === "audio" && protocol === "anthropic-messages"} onChange={(event) => setCapabilities((current) => event.target.checked ? [...current, capability] : current.filter((item) => item !== capability))} />{CAPABILITIES[capability]}
   </label>)}</fieldset><p>勾选是你的能力声明，不等于已实测。成片声音审片需同时支持音频与图像输入，以便判断音画配合；Anthropic 此适配器不提供音频输入。保存不会调用模型。</p>

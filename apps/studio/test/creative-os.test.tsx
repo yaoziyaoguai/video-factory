@@ -404,7 +404,7 @@ describe("Creative OS", () => {
       origin: "trend",
     }));
     expect(await screen.findByRole("button", { name: `采用候选 ${ready.title}` })).toBeEnabled();
-    expect(screen.getByText(/来源已保存；开工门槛与制作建议已按最新来源重算/)).toBeInTheDocument();
+    expect(screen.getByText(/来源已保存；来源核验结果与制作建议已更新/)).toBeInTheDocument();
     expect(screen.getByText("用户补充 · 不作为热度信号")).toBeInTheDocument();
   });
 
@@ -901,6 +901,10 @@ describe("Creative OS", () => {
     expect(navigation.getByRole("link", { name: /模板资料/ })).toHaveAttribute("href", "/templates");
     expect(navigation.getByRole("link", { name: /创作设置/ })).toHaveAttribute("href", "/resources");
     expect(navigation.getByRole("link", { name: /制作复盘/ })).toHaveAttribute("href", "/experiments");
+    for (const label of ["创作台", "制作记录", "素材库", "模板资料", "创作设置", "制作复盘"]) {
+      expect(navigation.getByRole("link", { name: label })).toHaveAttribute("aria-label", label);
+      expect(navigation.getByRole("link", { name: label })).toHaveAttribute("title", label);
+    }
   });
 
   it("opens an account menu before signing out", async () => {
@@ -1237,7 +1241,7 @@ describe("Creative OS", () => {
     expect(productionHeader).not.toBeNull();
     await user.click(within(productionHeader!).getByRole("button", { name: "新建制作" }));
     const dialog = screen.getByRole("dialog", { name: "创作设置读取失败" });
-    expect(within(dialog).queryByRole("button", { name: "开始制作" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "开始前期构思" })).not.toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "重新读取" }));
     expect(settingsRequest).toHaveBeenCalledTimes(2);
@@ -1270,7 +1274,7 @@ describe("Creative OS", () => {
     await waitFor(() => expect(screen.getByText(/未能读取你的创作设置，为避免用错声音\/平台\/时长，暂未开工/)).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "新建制作" }));
     const dialog = screen.getByRole("dialog", { name: "创作设置读取失败" });
-    expect(within(dialog).queryByRole("button", { name: "开始制作" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "开始前期构思" })).not.toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "重新读取" }));
     expect(settingsRequest).toHaveBeenCalledTimes(2);
@@ -2497,7 +2501,7 @@ describe("Creative OS", () => {
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     await user.click(await screen.findByRole("button", { name: "新建制作" }));
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     await waitFor(() => expect(start).toHaveBeenCalledOnce());
     expect(updateStatus).not.toHaveBeenCalled();
@@ -2533,7 +2537,7 @@ describe("Creative OS", () => {
     expect(await screen.findByText("可参考的镜头方向")).toBeInTheDocument();
     expect(screen.getByText(planVisualDirection(opportunity).strategy)).toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: "新建制作" }));
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     await waitFor(() => expect(start).toHaveBeenCalledOnce());
     // 自动预览只是建议；用户没有填写或采用时，不能升级成正式创作要求。
@@ -2969,7 +2973,7 @@ describe("Creative OS", () => {
 
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
-    const topicGates = await screen.findByLabelText("视频选题准入标准");
+    const topicGates = await screen.findByLabelText("选题评估参考");
     expect(within(topicGates).getByText("明确观众收益")).toBeInTheDocument();
     expect(within(topicGates).getByText("前两秒钩子")).toBeInTheDocument();
     expect(within(topicGates).getByText("画面不可替代")).toBeInTheDocument();

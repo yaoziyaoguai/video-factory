@@ -39,8 +39,8 @@ export function TemplateGallery({ templates, selectedId, onSelect }: TemplateGal
               <span className="template-card-meta">
                 <span><LayoutTemplate size={13} aria-hidden="true" />{templateCategoryLabel(template.category)}</span>
                 <span><Clock3 size={13} aria-hidden="true" />{template.durationSeconds} 秒</span>
-                <span><Gauge size={13} aria-hidden="true" />{automationLabel(template.automationLevel)}</span>
-                <span><WalletCards size={13} aria-hidden="true" />产生付费画面时逐项确认</span>
+                <span><Gauge size={13} aria-hidden="true" />记录模式：{automationLabel(template.automationLevel)}</span>
+                <span><WalletCards size={13} aria-hidden="true" />模板资料，当前不影响制作</span>
               </span>
               <span className="template-beat-line">{template.storyStructure.map((beat) => beat.label).join(" / ")}</span>
             </span>

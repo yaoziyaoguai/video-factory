@@ -100,7 +100,7 @@ export function GuideDock({ open, pathname, onOpenChange, onStartFullTour, onSta
 
 function guideContext(pathname: string): { title: string; description: string; step: number } {
   if (pathname === "/projects") {
-    return { title: "到了制作记录，接下来这样做", description: "看制作状态，打开具体记录；只有“等你审片”时才需要操作。", step: 2 };
+    return { title: "到了制作记录，接下来这样做", description: "先查看“待你处理”的制作。方案确认、费用授权、失败恢复和人工终审，都可能需要你操作。", step: 2 };
   }
   if (pathname.startsWith("/projects/")) {
     return { title: "制作详情，先判断要不要动手", description: "看每一步的进度和成片；出现人工判断时审片，批准后可下载或准备各平台发布包。", step: 3 };

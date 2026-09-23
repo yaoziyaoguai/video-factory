@@ -44,7 +44,7 @@ test("model library has no role selector and adding a model sends the real conne
   expect(within(screen.getByLabelText("全局模型目录")).queryByRole("combobox")).toBeNull();
   await vi.waitFor(() => expect(screen.getByRole("button", { name: "添加模型" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
-  for (const [name, value] of [["接入名称", "我的模型"], ["接口根地址（含版本路径）", "https://api.example.com/v1"], ["模型 ID（供应商原名）", "new-model"], ["API Key", "test-key"], ["最大输出 token（按模型文档填写）", "32768"]]) {
+  for (const [name, value] of [["接入名称", "我的模型"], ["接口根地址（含版本路径）", "https://api.example.com/v1"], ["模型 ID（供应商原名）", "new-model"], ["API Key", "test-key"], ["最大输出长度（token，按模型文档填写）", "32768"]]) {
     fireEvent.change(screen.getByLabelText(name!), { target: { value } });
   }
   fireEvent.click(screen.getByRole("button", { name: "保存模型接入" }));

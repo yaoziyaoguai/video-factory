@@ -4,7 +4,7 @@ import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput,
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { studioApi } from "../api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
-import { agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, creatorFacingTechnicalText, humanizeCreativeText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
+import { agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, creatorFacingTechnicalText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
 import { unsplashPublicUrl } from "./UnsplashAttribution.js";
@@ -456,7 +456,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         {readOnly ? <p className="node-workspace-warning"><AlertTriangle aria-hidden="true" size={16} />旧版工作流结果只读；要继续修改，请基于这版重新制作。</p> : null}
         {node.agentLoopProgress ? <div className={`agent-loop-progress is-${node.agentLoopProgress.phase}`} role="status">
           <strong>{agentLoopPhaseLabel(node.agentLoopProgress)}</strong>
-          {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{creatorFacingTechnicalText(humanizeCreativeText(node.agentLoopProgress.latestAudit.summary))}</span> : <span>{agentLoopPendingNote(node.agentLoopProgress)}</span>}
+          {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{node.agentLoopProgress.latestAudit.summary}</span> : <span>{agentLoopPendingNote(node.agentLoopProgress)}</span>}
           <span>实际模型调用：创作 {node.agentLoopProgress.producerModelCallCount ?? 0} 次，审计 {node.agentLoopProgress.auditModelCallCount ?? 0} 次{(node.agentLoopProgress.structuredRepairModelCallCount ?? 0) > 0 ? `（其中结构修复 ${node.agentLoopProgress.structuredRepairModelCallCount} 次）` : ""}。查询、刷新和等待不计为新调用。</span>
         </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>{fallbackHeading}</strong>：{fallbackReason}</span></p> : null}
@@ -632,7 +632,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <section ref={spendDialogRef} role="dialog" aria-modal="true" aria-label="确认本次费用" tabIndex={-1}>
           <CircleDollarSign aria-hidden="true" size={24} />
           <h3>确认执行 {node.label}</h3>
-          {node.id === "assets" ? <p>每种生成路线先检查一镜，通过后继续制作。试片会直接用于成片，只计费一次；检查未通过就停止后续付费生成。全部素材还会在配音和剪辑前复查。</p> : null}
+          {node.id === "assets" ? <p>每种生成路线先检查一镜，再决定后续制作。试片通过适用性检查后可用于成片；修复次数和费用以本次授权范围为准，超出范围须重新确认。全部素材还会在配音和剪辑前复查。</p> : null}
           <p>这次授权只对下面已经审阅的输入版本、{node.spendPlan.items?.length
             ? `报价中列出的 ${node.spendPlan.items.length} 个画面任务`
             : providerModelLabel(providers.find((provider) => provider.id === node.spendPlan?.providerId), node.spendPlan.modelId)}和本次最高授权额 ¥{node.spendPlan.maxCostCny.toFixed(2)} 有效。任何内容、模型、报价或重试次数变化都会让授权自动失效。</p>
@@ -642,7 +642,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           <div className="spend-input-versions" aria-label="本次付费所使用的上游版本">
             {spendInputs.map((input) => <div key={input.versionId}><span><strong>{input.role} · {input.label}</strong><small>{input.source === "human" ? "人工版本" : "自动版本"}</small></span></div>)}
           </div>
-          <div><button className="button button-ghost" type="button" onClick={() => { setError(undefined); setAuthorizing(false); }}>返回检查</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void authorize()}>确认并执行</button></div>
+          <div><button className="button button-ghost" type="button" onClick={() => { setError(undefined); setAuthorizing(false); }}>返回检查</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void authorize()}>授权本次最高 ¥{node.spendPlan.maxCostCny.toFixed(2)} 并执行</button></div>
         </section>
       </div> : null}
       {rejectingSpend && node.spendPlan ? <div className="node-confirm-layer" role="presentation">
@@ -1266,21 +1266,21 @@ function executionTimingDetails(
   const items = [
     totalMs === undefined ? undefined : { label: "步骤总耗时", value: formatDuration(totalMs) },
     queueWaitMs === undefined ? undefined : { label: "排队等待", value: formatDuration(queueWaitMs) },
-    providerWaitMs === undefined ? undefined : { label: "Provider 执行", value: formatDuration(providerWaitMs) },
+    providerWaitMs === undefined ? undefined : { label: "服务执行", value: formatDuration(providerWaitMs) },
     unclassifiedMs === undefined
       ? undefined
       : { label: "未细分等待 / 处理", value: formatDuration(unclassifiedMs) },
     producerMs === undefined ? undefined : { label: "内容生成累计", value: formatDuration(producerMs) },
     auditMs === undefined ? undefined : { label: "确认时独立复核累计", value: formatDuration(auditMs) },
     discussionMs === undefined ? undefined : { label: "创作讨论累计", value: formatDuration(discussionMs) },
-    validationMs === undefined ? undefined : { label: "结构与合同校验", value: formatDuration(validationMs) },
+    validationMs === undefined ? undefined : { label: "输出格式与使用要求检查", value: formatDuration(validationMs) },
     unattributedProducerMs === undefined ? undefined : { label: "生成耗时（跨操作，未分摊）", value: formatDuration(unattributedProducerMs) },
     unattributedAuditMs === undefined ? undefined : { label: "复核耗时（跨操作，未分摊）", value: formatDuration(unattributedAuditMs) },
     unattributedValidationMs === undefined ? undefined : { label: "校验耗时（跨操作，未分摊）", value: formatDuration(unattributedValidationMs) },
     fallbackCandidateCount > 0 ? { label: "候选切换", value: `${fallbackCandidateCount} 次` } : undefined,
     modelCallCount === undefined ? undefined : { label: "本次已证实模型执行", value: `${modelCallCount} 次` },
     parameters.audioReviewStatus === undefined ? undefined : { label: "其中声音审片", value: audioModelCallCount === undefined ? "调用次数待核实" : `${audioModelCallCount} 次` },
-    brokerTaskCount === undefined ? undefined : { label: "Broker 任务", value: `${brokerTaskCount} 次` },
+    brokerTaskCount === undefined ? undefined : { label: "模型服务调度任务", value: `${brokerTaskCount} 次` },
     modelExecutionCount === undefined ? undefined : { label: "任务内模型执行", value: `${modelExecutionCount} 次` },
     brokerStructuredRepairCount === undefined || brokerStructuredRepairCount === 0
       ? undefined

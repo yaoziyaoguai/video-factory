@@ -151,7 +151,7 @@ describe("NodeStructuredEditor", () => {
     expect(screen.queryByText("brief")).not.toBeInTheDocument();
   });
 
-  it("uses creator language for director fields and production shorthand", () => {
+  it("uses creator labels while preserving editable director wording", () => {
     const { container } = render(<NodeStructuredEditor
       nodeId="visual-direction"
       assetProviderIds={["pexels-stock-v1", "hailuo-video-v1"]}
@@ -174,12 +174,12 @@ describe("NodeStructuredEditor", () => {
     expect(screen.getByRole("combobox", { name: "首选画面来源" })).toHaveDisplayValue("Pexels 图库");
     expect(screen.getByRole("option", { name: "MiniMax 视频生成" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Seedance 视频生成" })).not.toBeInTheDocument();
-    expect(screen.getByDisplayValue("几何秩序 匹配本片")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("节奏 舒缓克制，字幕密度 适中")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("提问钩子：提出问题")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("geometric-control 匹配本片")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("节奏 measured，字幕密度 medium")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("question / shot-question：提出问题")).toBeInTheDocument();
     expect(screen.queryByRole("spinbutton", { name: "镜头序号" })).not.toBeInTheDocument();
     expect(container).not.toHaveTextContent("requestedProfileId");
-    expect(container).not.toHaveTextContent("shot-question");
+    expect(container).toHaveTextContent("shot-question");
   });
 
   it("keeps the director shot contract consistent when its visual provider changes", async () => {
@@ -317,7 +317,7 @@ describe("NodeStructuredEditor", () => {
     expect(screen.getByDisplayValue("转场闪白")).toBeInTheDocument();
     expect(screen.getByRole("spinbutton", { name: "置信度（%）" })).toHaveValue(96);
     expect(screen.getByRole("spinbutton", { name: "连续性" })).toHaveValue(27);
-    expect(screen.getByDisplayValue("使用 人工补充素材 修复")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("使用 manualReplacement 修复")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("h264")).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue("internal")).not.toBeInTheDocument();
   });

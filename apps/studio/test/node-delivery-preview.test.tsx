@@ -20,10 +20,10 @@ describe("NodeDeliveryPreview", () => {
     expect(screen.getByRole("link", { name: "Openverse" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Cleveland Museum of Art" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Internet Archive" })).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "候选素材 5" })).toHaveAttribute("src", "https://archive.org/download/clouds/thumb.jpg");
-    expect(screen.getByRole("img", { name: "候选素材 4" })).toHaveAttribute("src", "https://openaccess-cdn.clevelandart.org/1/web.jpg");
-    expect(screen.getAllByRole("link", { name: "核验原始来源" })).toHaveLength(5);
-    expect(screen.getByRole("img", { name: "候选素材 1" })).toHaveAttribute("src", "https://images.metmuseum.org/art.jpg");
+    expect(screen.getByRole("img", { name: "镜头 1 的候选素材 5" })).toHaveAttribute("src", "https://archive.org/download/clouds/thumb.jpg");
+    expect(screen.getByRole("img", { name: "镜头 1 的候选素材 4" })).toHaveAttribute("src", "https://openaccess-cdn.clevelandart.org/1/web.jpg");
+    expect(screen.getAllByRole("link", { name: /核验原始来源：镜头 1，候选/ })).toHaveLength(5);
+    expect(screen.getByRole("img", { name: "镜头 1 的候选素材 1" })).toHaveAttribute("src", "https://images.metmuseum.org/art.jpg");
     expect(screen.getByText(/仅限非商业/)).toBeInTheDocument();
     expect(container.textContent).not.toContain("0 × 0");
   });
@@ -37,10 +37,10 @@ describe("NodeDeliveryPreview", () => {
     }] }} />);
     expect(screen.getAllByRole("link", { name: "Coverr" })[0]).toHaveAttribute("href", "https://coverr.co");
     expect(screen.getAllByRole("img", { name: "Coverr" })).toHaveLength(2);
-    expect(screen.getByRole("img", { name: "候选素材 1" })).toHaveAttribute("src", "https://cdn.coverr.co/a.jpg");
-    expect(screen.getByRole("img", { name: "候选素材 2" })).toHaveAttribute("src", "https://thumb.wikimedia.org/a.jpg");
+    expect(screen.getByRole("img", { name: "镜头 1 的候选素材 1" })).toHaveAttribute("src", "https://cdn.coverr.co/a.jpg");
+    expect(screen.getByRole("img", { name: "镜头 1 的候选素材 2" })).toHaveAttribute("src", "https://thumb.wikimedia.org/a.jpg");
     expect(screen.getByText(/改编须按相同许可分享/)).toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "核验原始来源" })).toHaveLength(2);
+    expect(screen.getAllByRole("link", { name: /核验原始来源：镜头 1，候选/ })).toHaveLength(2);
     expect(container.innerHTML).not.toContain("token=secret");
     expect(container.innerHTML).not.toContain("user:password");
   });
@@ -88,8 +88,8 @@ describe("NodeDeliveryPreview", () => {
     expect(screen.getByText("导演选材与备选素材")).toBeInTheDocument();
     expect(screen.getByText("镜头 2")).toBeInTheDocument();
     expect(screen.getByText("当前采用")).toBeInTheDocument();
-    expect(screen.getByRole("img", { name: "候选素材 1" })).toHaveAttribute("src", "https://images.pexels.com/photos/asset-2.jpg");
-    expect(screen.getByRole("link", { name: "核验原始来源" })).toHaveAttribute("href", "https://www.pexels.com/video/asset-2");
+    expect(screen.getByRole("img", { name: "镜头 2 的候选素材 1" })).toHaveAttribute("src", "https://images.pexels.com/photos/asset-2.jpg");
+    expect(screen.getByRole("link", { name: /核验原始来源：镜头 2，候选 1，.*（新窗口）/ })).toHaveAttribute("href", "https://www.pexels.com/video/asset-2");
     expect(container).not.toHaveTextContent("download_url");
     expect(container.querySelector('a[href*="temporary"]')).toBeNull();
   });
@@ -157,7 +157,7 @@ describe("NodeDeliveryPreview", () => {
 
   it("translates production enums into creator language", () => {
     render(<NodeDeliveryPreview nodeId="script" value={{
-      scenes: [{ narration: "开场", visual_strategy: "stock" }],
+      scenes: [{ position: 1, narration: "开场", visual_strategy: "stock" }],
     }} />);
 
     expect(screen.getByText("实拍视频素材")).toBeInTheDocument();
@@ -175,7 +175,7 @@ describe("NodeDeliveryPreview", () => {
     expect(screen.getByText("Pexels 图库")).toBeInTheDocument();
   });
 
-  it("hides rendered asset metadata and translates internal creative terms", () => {
+  it("hides rendered asset metadata and preserves the model's creative wording", () => {
     const { container } = render(<NodeDeliveryPreview nodeId="assets" value={{
       scene_assets: [{ scene_position: 1, media_type: "video", width: 720, height: 1280 }],
       director_routing: [{
@@ -185,8 +185,7 @@ describe("NodeDeliveryPreview", () => {
       }],
     }} />);
 
-    expect(screen.getByText("提问镜头 使用 AI 视频生成，其他镜头交给本地编辑画面。")).toBeInTheDocument();
-    expect(container).not.toHaveTextContent("Provider");
+    expect(screen.getByText("shot-question 使用 asset.generate.video，其他镜头交给本地 Provider。")).toBeInTheDocument();
     expect(container).not.toHaveTextContent("media type");
     expect(container).not.toHaveTextContent("720");
     expect(container).not.toHaveTextContent("1280");
@@ -202,7 +201,7 @@ describe("NodeDeliveryPreview", () => {
     expect(screen.getByText("内容安全")).toBeInTheDocument();
     expect(screen.getByText("00:06")).toBeInTheDocument();
     expect(screen.getByText("连续性")).toBeInTheDocument();
-    expect(screen.getByText("需修改")).toBeInTheDocument();
+    expect(screen.getByText("需你判断的质量问题")).toBeInTheDocument();
     expect(container).not.toHaveTextContent("timecodeMs");
     expect(container).not.toHaveTextContent("legibility");
   });
@@ -215,7 +214,7 @@ describe("NodeDeliveryPreview", () => {
 
     expect(screen.getByRole("heading", { name: "本轮审片结论" })).toBeInTheDocument();
     expect(screen.getByText("画面与叙事可以定版。")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /拟写入系列正史的事实/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /拟加入系列设定的内容/ })).toBeInTheDocument();
     expect(screen.getByText("本集已经完成一次可复现的真实验证。")).toBeInTheDocument();
   });
 
@@ -235,5 +234,25 @@ describe("NodeDeliveryPreview", () => {
     expect(screen.getAllByText("10").length).toBeGreaterThan(0);
     expect(container).not.toHaveTextContent("h264");
     expect(container).not.toHaveTextContent("codec name");
+  });
+
+  it("preserves original creative and license text instead of rewriting words", () => {
+    render(<NodeDeliveryPreview nodeId="script" value={{ scenes: [{ position: 1, narration: "Learn fast；合同约束不是创作约束。" }] }} />);
+    expect(screen.getByText("Learn fast；合同约束不是创作约束。")).toBeInTheDocument();
+  });
+
+  it("makes inner candidate and fact truncation visible and reversible", async () => {
+    const candidates = Array.from({ length: 7 }, (_, index) => ({ provider: "pexels", creator: `作者 ${index + 1}` }));
+    render(<NodeDeliveryPreview nodeId="asset-candidates" value={{ scene_candidates: [{ scene_position: 3, candidates }] }} />);
+    expect(screen.getByText("7 个候选")).toBeInTheDocument();
+    expect(screen.queryByText("作者：作者 7")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "展开其余 1 个候选" }));
+    expect(screen.getByText("作者：作者 7")).toBeInTheDocument();
+  });
+
+  it("does not invent a scene identity when its number is absent", () => {
+    render(<NodeDeliveryPreview nodeId="asset-candidates" value={{ scene_candidates: [{ candidates: [] }] }} />);
+    expect(screen.getByText(/镜头编号未记录 · 第 1 条记录/)).toBeInTheDocument();
+    expect(screen.queryByText("镜头 1")).not.toBeInTheDocument();
   });
 });

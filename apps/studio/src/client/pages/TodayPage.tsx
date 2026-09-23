@@ -487,7 +487,7 @@ export function TodayPage() {
         setOpportunities(await studioApi.opportunities(origin));
       }
       setSourceSupplementTarget(undefined);
-      announceNotice("来源已保存；开工门槛与制作建议已按最新来源重算。");
+      announceNotice("来源已保存；来源核验结果与制作建议已更新。");
     } catch (caught) {
       setSourceSupplementError(`来源保存失败：${errorMessage(caught)}`);
       throw caught;

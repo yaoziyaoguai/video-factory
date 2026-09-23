@@ -396,7 +396,7 @@ describe("ResourcesPage source and rights section", () => {
     const ledger = screen.getByLabelText("素材来源与授权明细");
     expect(within(ledger).getByText("未定位镜头 · 素材标识 CONFIRM")).toBeInTheDocument();
     expect(within(ledger).getByText("未定位镜头 · 素材标识 REJECT")).toBeInTheDocument();
-    const confirmButton = screen.getAllByRole("button", { name: "确认可用" })[0]!;
+    const confirmButton = screen.getAllByRole("button", { name: "确认已核对授权信息" })[0]!;
     const rejectButton = screen.getAllByRole("button", { name: "驳回" })[0]!;
     expect(confirmButton).toHaveClass("button", "button-secondary");
     expect(rejectButton).toHaveClass("button", "button-danger-ghost");

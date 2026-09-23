@@ -281,7 +281,7 @@ export function CasesPage() {
         </section>
 
         <section className="case-detail" aria-label="参考详情">
-          {!selectedId ? <p className="case-hint">从左侧选一条参考内容，这里会显示它的正文或可用信息。</p> : null}
+          {!selectedId ? <p className="case-hint">先选择一条参考内容，这里会显示它的正文或可用信息。</p> : null}
           {detailError ? <p className="case-error">{detailError}</p> : null}
           {detail ? (
             <article>

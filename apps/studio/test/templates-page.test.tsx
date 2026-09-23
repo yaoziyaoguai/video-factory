@@ -196,11 +196,11 @@ describe("TemplatesPage", () => {
 
     await screen.findByRole("heading", { name: "知识解释" });
     await user.click(screen.getByRole("radio", { name: /我的系列/ }));
-    await user.click(screen.getByRole("button", { name: "发布新版本" }));
+    await user.click(screen.getByRole("button", { name: "保存为模板正式版" }));
 
     expect(studioApi.publishTemplate).not.toHaveBeenCalled();
-    const dialog = screen.getByRole("dialog", { name: "确认发布“我的系列”" });
-    await user.click(within(dialog).getByRole("button", { name: "确认发布" }));
+    const dialog = screen.getByRole("dialog", { name: "确认保存“我的系列”正式版" });
+    await user.click(within(dialog).getByRole("button", { name: "确认保存正式版" }));
     expect(studioApi.publishTemplate).toHaveBeenCalledWith("my-series", 3);
   });
 
@@ -214,8 +214,8 @@ describe("TemplatesPage", () => {
     await user.click(screen.getByRole("radio", { name: /我的系列/ }));
     await user.clear(screen.getByLabelText("模板名称"));
     await user.type(screen.getByLabelText("模板名称"), "已保存但尚未发布");
-    await user.click(screen.getByRole("button", { name: "发布新版本" }));
-    await user.click(within(screen.getByRole("dialog", { name: "确认发布“已保存但尚未发布”" })).getByRole("button", { name: "确认发布" }));
+    await user.click(screen.getByRole("button", { name: "保存为模板正式版" }));
+    await user.click(within(screen.getByRole("dialog", { name: "确认保存“已保存但尚未发布”正式版" })).getByRole("button", { name: "确认保存正式版" }));
 
     expect(await screen.findByText("草稿已保存，发布未完成：发布校验暂时不可用")).toBeInTheDocument();
     expect(screen.queryByText("有未保存修改")).not.toBeInTheDocument();

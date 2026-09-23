@@ -270,7 +270,7 @@ export function TemplatesPage() {
                 <label className="field"><span>音乐策略</span><textarea rows={3} value={draft.soundSystem.musicIntent} disabled={draft.status !== "draft"} onChange={(event) => setDraft({ ...draft, soundSystem: { ...draft.soundSystem, musicIntent: event.target.value } })} /></label>
               </div>
               {modelProviders.length || providerError ? <details className="template-model-strategy" aria-label="高级模型设置">
-                <summary><span><strong>高级模型设置</strong><small>通常保持系统推荐；只有模板确实依赖某个模型时才固定。</small></span><b>{providerError ? "目录暂时不可用" : `${Object.keys(draft.modelDefaults ?? {}).length} 项固定`}</b></summary>
+                <summary><span><strong>高级模型设置</strong><small>这里只记录模板的模型偏好，目前不会影响新制作或返工。</small></span><b>{providerError ? "目录暂时不可用" : `${Object.keys(draft.modelDefaults ?? {}).length} 项固定`}</b></summary>
                 {providerError ? <p className="template-editor-notice is-warning" role="status">模型目录暂时不可用：{providerError}。模板内容仍可查看和编辑。</p> : null}
                 <div>{modelProviders.map((provider) => {
                   const selectedModelId = draft.modelDefaults?.[provider.id] ?? "";
@@ -281,7 +281,7 @@ export function TemplatesPage() {
                       <option value="">系统推荐 · {providerModelLabel(provider, provider.defaultModelId)}</option>
                       {provider.modelProfiles?.map((model) => <option key={model.id} value={model.id} disabled={!model.available}>{model.label}{model.recommended ? " · 推荐" : ""}{model.available ? "" : " · 当前不可用"}</option>)}
                     </select>
-                    <small>{selected?.description ?? "新建制作时会预选系统推荐，你仍可为本次制作单独选择。"}</small>
+                    <small>{selected?.description ?? "仅作为模板资料记录，目前不会自动套用到制作。"}</small>
                   </label>;
                 })}</div>
               </details> : null}
@@ -335,7 +335,7 @@ export function TemplatesPage() {
             {draft.status === "draft" ? (
               <>
                 <button className="button button-secondary" type="button" disabled={saving} onClick={() => void saveDraft()}><Save size={16} aria-hidden="true" />保存草稿</button>
-                <button className="button button-primary" type="button" disabled={saving} onClick={() => setPublishConfirmOpen(true)}><Send size={16} aria-hidden="true" />发布新版本</button>
+                <button className="button button-primary" type="button" disabled={saving} onClick={() => setPublishConfirmOpen(true)}><Send size={16} aria-hidden="true" />保存为模板正式版</button>
               </>
             ) : (
               <button className="button button-primary" type="button" disabled={saving} onClick={() => void reviseSelected()}><Pencil size={16} aria-hidden="true" />编辑下一版本</button>
@@ -374,16 +374,16 @@ export function TemplatesPage() {
           <div className="create-template-fields">
             <label className="field"><span>模板名称</span><input autoFocus value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="例如：城市人物微纪录" /></label>
             <label className="field"><span>适用说明</span><textarea rows={3} value={createDescription} onChange={(event) => setCreateDescription(event.target.value)} placeholder="适合什么题材、观众和表达目标" /></label>
-            <p>系统只创建一份可运行的三段式草稿，不调用模型，也不会产生费用。</p>
+            <p>创建一份三段式模板草稿，仅保存在模板资料库；不调用模型，也不会产生费用。</p>
           </div>
           <footer className="dialog-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => setCreateOpen(false)}>取消</button><button className="button button-primary" type="button" disabled={saving || !createName.trim()} onClick={() => void createTemplate()}>{saving ? "正在创建..." : "创建并编辑"}</button></footer>
         </section>
       </div> : null}
       {publishConfirmOpen && draft?.status === "draft" ? <div className="dialog-backdrop" role="presentation">
         <section className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="publish-template-title">
-          <header className="dialog-header"><div><p className="eyebrow">模板发布</p><h2 id="publish-template-title">确认发布“{draft.name}”</h2></div><button className="icon-button" type="button" aria-label="关闭" disabled={saving} onClick={() => setPublishConfirmOpen(false)}><X size={18} aria-hidden="true" /></button></header>
-          <p>发布仅保存到模板资料库，目前不会用于新制作或返工；历史快照保持原样。{dirty ? "当前未保存修改会先保存，再一起发布。" : ""}</p>
-          <footer className="dialog-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => setPublishConfirmOpen(false)}>返回检查</button><button className="button button-primary" type="button" disabled={saving} onClick={() => { setPublishConfirmOpen(false); void publishDraft(); }}><Send size={16} aria-hidden="true" />确认发布</button></footer>
+          <header className="dialog-header"><div><p className="eyebrow">模板资料</p><h2 id="publish-template-title">确认保存“{draft.name}”正式版</h2></div><button className="icon-button" type="button" aria-label="关闭" disabled={saving} onClick={() => setPublishConfirmOpen(false)}><X size={18} aria-hidden="true" /></button></header>
+          <p>正式版仅保存到模板资料库，目前不会用于新制作或返工；历史快照保持原样。{dirty ? "当前未保存修改会先保存，再一起存为正式版。" : ""}</p>
+          <footer className="dialog-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => setPublishConfirmOpen(false)}>返回检查</button><button className="button button-primary" type="button" disabled={saving} onClick={() => { setPublishConfirmOpen(false); void publishDraft(); }}><Send size={16} aria-hidden="true" />确认保存正式版</button></footer>
         </section>
       </div> : null}
       {deleteConfirmOpen && draft ? <div className="dialog-backdrop" role="presentation">

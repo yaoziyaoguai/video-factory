@@ -41,7 +41,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
     waitForElement: 5_000,
     popover: {
       title: "采用候选，才会进入制作区",
-      description: "先看原始来源与核验结果。常规候选可直接采用；敏感候选需要确认核验，证据不足的高风险热点会被阻止。",
+      description: "先查看来源提醒并核对关键事实。选题建议供你判断；页面要求的人工核验仍需完成。",
       side: "top",
       align: "end",
       showButtons: ["previous", "close"],
@@ -111,15 +111,15 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
     waitForElement: 8_000,
     popover: {
       title: "检查完，再亲自开拍",
-      description: "确认标题、声音和配方后点击开始制作。系统随后自动执行脚本、画面、配音、渲染和机器质检。",
+      description: "点击“开始前期构思”后，先查看并讨论方案。脚本与导演方案会按流程等待你确认；付费画面另行报价，成片完成后再由你终审。",
       side: "top",
       align: "end",
     },
   },
   {
     popover: {
-      title: "第三步：等待自动制作",
-      description: "启动后会进入制作详情并实时更新每一步；断线时页面会提示并自动重连。记录和已生成产物会保留。",
+      title: "第三步：逐步确认制作",
+      description: "启动后会进入制作详情并更新进度。每个关键交付会等你讨论和确认；断线时记录和已生成产物会保留。",
     },
   },
   {
@@ -178,14 +178,14 @@ const PROJECT_TOUR_STEPS: DriveStep[] = [
   {
     popover: {
       title: "到了制作记录，接下来这样做",
-      description: "先看状态，再打开具体记录；只有“等你审片”的制作需要马上处理。",
+      description: "先查看“待你处理”的制作。方案确认、费用授权、失败恢复和人工终审，都可能需要你操作。",
     },
   },
   {
     element: '[data-tour="project-overview"]',
     popover: {
       title: "先看今天卡在哪一步",
-      description: "制作中会自动推进；等你审片需要你决策；已完成表示发布包已准备好，可以下载后到目标平台发布。",
+      description: "先查看当前状态与下一步提示。等待确认时由你决定；已完成表示发布包可下载，不代表已在平台发布。",
       side: "bottom",
       align: "start",
     },
@@ -194,7 +194,7 @@ const PROJECT_TOUR_STEPS: DriveStep[] = [
     element: '[data-tour="project-controls"]',
     popover: {
       title: "按下一步动作筛选",
-      description: "时间紧时直接筛“等你审片”。也可以按标题搜索，不必逐条翻找。",
+      description: "时间紧时先查看需要你处理的记录；也可以按标题搜索，不必逐条翻找。",
       side: "bottom",
       align: "start",
     },
@@ -203,7 +203,7 @@ const PROJECT_TOUR_STEPS: DriveStep[] = [
     element: '[data-tour="project-queue"]',
     popover: {
       title: "每个项目都保留完整进度",
-      description: "九段进度对应内容简报、脚本、导演方案、画面、配音、渲染、机器质检、人工终审和发布包。每一段都标出对应制作角色。",
+      description: "进度条显示这条制作实际包含的步骤，每一步都会标明当前状态。",
       side: "top",
       align: "center",
     },
@@ -230,7 +230,7 @@ const RUN_TOUR_STEPS: DriveStep[] = [
     element: '[data-tour="run-header"]',
     popover: {
       title: "这是这条视频的制作详情",
-      description: "标题旁的状态决定现在要做什么：制作中就等待，等你审片就做人工终审；失败时先查看真实原因，选择其他模型或调整配置后重试；待重新生成时确认修改后继续，已完成就下载或准备各平台发布包。",
+      description: "先看当前状态和下一步提示。等待确认时由你决定；失败时先查看恢复方式，不要直接重复创建任务。",
       side: "bottom",
       align: "start",
     },
@@ -257,7 +257,7 @@ const RUN_TOUR_STEPS: DriveStep[] = [
     element: '[data-tour="run-review"]',
     popover: {
       title: "系统会明确告诉你是否要动手",
-      description: "出现“需要你的判断”时，满意就批准；不满意就打回并写清画面、节奏或内容问题。其余状态无需操作。",
+      description: "这里显示当前可用的人工作业。构思、脚本、导演方案、费用授权和成片终审都可能需要你的判断。",
       side: "left",
       align: "start",
     },

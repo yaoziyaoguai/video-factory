@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -144,9 +144,9 @@ describe("AssetsPage", () => {
 
     const rightsSummaryLink = await screen.findByRole("link", { name: /授权待确认 1 项/ });
     expect(rightsSummaryLink).toHaveAttribute("href", "/resources#resource-manifest");
-    expect(await screen.findByRole("link", { name: "去确认授权" })).toHaveAttribute("href", "/resources#resource-manifest");
-    expect(screen.getAllByRole("link", { name: "查看作品" })).toHaveLength(2);
-    const sourceLinks = screen.getAllByRole("link", { name: "查看素材原始来源" });
+    expect((await screen.findAllByRole("link", { name: /去确认授权：/ })).some((link) => link.getAttribute("href") === "/resources#resource-manifest")).toBe(true);
+    expect(screen.getAllByRole("link", { name: /查看作品：/ })).toHaveLength(2);
+    const sourceLinks = screen.getAllByRole("link", { name: /查看素材原始来源：/ });
     expect(sourceLinks).toHaveLength(2);
     expect(sourceLinks.map((link) => link.getAttribute("href"))).toEqual(
       expect.arrayContaining(["https://example.com/pending-source", "https://example.com/cleared-source"]),
@@ -413,5 +413,44 @@ describe("AssetsPage", () => {
     }
     expect(screen.getAllByText(/2026.*09.*06.*已打回/)).toHaveLength(records.length);
     expect(screen.queryByRole("heading", { level: 3, name: "爆款候选复盘" })).not.toBeInTheDocument();
+  });
+});
+
+describe("AssetsPage preview coordination", () => {
+  function mediaManifest(assets: Array<{ key: string; mediaKind: "video" | "audio" }>) {
+    return Promise.resolve({
+      generatedAt: "2026-09-23T00:00:00Z", totalItems: assets.length, needsReviewCount: 0,
+      legacyRunsWithoutManifest: 0, reconstructedRunCount: 0, unreadableManifestCount: 0,
+      truncatedRunCount: 0, truncatedItemCount: 0,
+      categories: { visual: assets.length, voice: 0, font: 0, document: 0, other: 0 }, items: [],
+      assetIndex: { version: "video-factory/asset-index-v1", totalAssets: assets.length, duplicateUses: 0,
+        reusableCount: assets.length, needsReviewCount: 0,
+        facets: { mediaKinds: {}, origins: {}, providers: {}, reuseStatuses: {} },
+        assets: assets.map(({ key, mediaKind }) => ({
+          key, mediaKind, origin: "stock", reuseStatus: "ready", category: "visual",
+          kind: "media_asset", providerId: `${key}-stock-v1`, creator: `${key} 作者`,
+          licenseNote: "Coverr license", contentUrl: `/media/${key}.webm`, tags: [],
+          commercialUse: "provider_terms", attributionRequirement: "provider_terms",
+          reviewStatus: "recorded", useCount: 0, usages: [],
+        })) },
+    } as never);
+  }
+
+  it("pauses the previous preview without resetting its position when another starts", async () => {
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "resourceManifest").mockImplementation(() => mediaManifest([
+      { key: "alpha", mediaKind: "video" }, { key: "beta", mediaKind: "video" },
+    ]) as never);
+    const { container } = render(<MemoryRouter><AssetsPage /></MemoryRouter>);
+    const videos = await screen.findAllByLabelText(/预览/);
+    expect(videos.length).toBe(2);
+    const [first, second] = videos;
+    const pauseFirst = vi.spyOn(first as HTMLVideoElement, "pause").mockImplementation(() => undefined);
+    Object.defineProperty(first, "currentTime", { value: 5, configurable: true });
+    act(() => { first!.dispatchEvent(new Event("play", { bubbles: true })); });
+    act(() => { second!.dispatchEvent(new Event("play", { bubbles: true })); });
+    expect(pauseFirst).toHaveBeenCalledTimes(1);
+    expect((first as unknown as { currentTime: number }).currentTime).toBe(5);
+    expect(container).toBeTruthy();
   });
 });

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { ArrowDown, ArrowUp, Trash2 } from "lucide-react";
 import type { StudioProvider } from "../../shared/api.js";
 import { creatorContainerViewId, creatorViewId, isCreatorNestedField, isCreatorTopLevelField } from "../creator-document-policy.js";
-import { humanizeCreativeText, providerLabel } from "../presentation.js";
+import { providerLabel } from "../presentation.js";
 
 interface NodeStructuredEditorProps {
   nodeId: string;
@@ -343,7 +343,7 @@ function isScalar(value: unknown): boolean {
 }
 
 function formatEditableScalar(value: unknown): string {
-  return value === null || value === undefined ? "" : humanizeCreativeText(String(value));
+  return value === null || value === undefined ? "" : String(value);
 }
 
 function hasEditableValue(value: unknown): boolean {
@@ -374,7 +374,7 @@ function collectionItemSummary(value: unknown): string {
   if (!record) return "点开查看和修改";
   const summary = [record.purpose, record.narrativeRole, record.narration, record.query, record.rationale, record.description]
     .find((candidate): candidate is string => typeof candidate === "string" && Boolean(candidate.trim())) ?? "点开查看和修改";
-  return summary.length > 64 ? `${summary.slice(0, 64)}…` : humanizeCreativeText(summary);
+  return summary.length > 64 ? `${summary.slice(0, 64)}…` : summary;
 }
 
 function findingTitle(value: unknown, index: number): string {

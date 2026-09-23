@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -68,6 +68,15 @@ function runningRun(): StudioRunDetail {
 }
 
 describe("text task recovery UI", () => {
+  it("keeps a paused local run distinct from an accepted unknown original task", () => {
+    const run = { ...failedRun("accepted_unknown"), status: "paused" as const };
+    render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} /></MemoryRouter>);
+    const panel = screen.getByRole("status", { name: "原模型任务恢复" });
+    expect(panel).toHaveTextContent("本地流程已暂停");
+    expect(panel).toHaveTextContent("原任务状态以最近一次核对结果为准");
+    expect(panel).not.toHaveTextContent("原任务已取消");
+  });
+
   it("shows the server-authorized query while the run is still active", async () => {
     const query = vi.fn(async () => undefined);
     render(<MemoryRouter><RunWorkbench
@@ -77,6 +86,8 @@ describe("text task recovery UI", () => {
       onQueryOriginalTextTask={query}
     /></MemoryRouter>);
 
+    expect(screen.getByRole("status", { name: "原模型任务恢复" })).toHaveTextContent("本地流程仍在运行");
+    expect(screen.getByRole("status", { name: "原模型任务恢复" })).not.toHaveTextContent("本地流程已停止等待");
     await userEvent.click(screen.getByRole("button", { name: "查询原任务" }));
     expect(query).toHaveBeenCalledOnce();
   });
@@ -92,6 +103,7 @@ describe("text task recovery UI", () => {
       onRetryFailedNode={retry}
     /></MemoryRouter>);
 
+    expect(screen.getByRole("status", { name: "原模型任务恢复" })).toHaveTextContent("本地流程已停止等待");
     await userEvent.click(screen.getByRole("button", { name: "查询原任务" }));
     expect(query).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
@@ -142,5 +154,58 @@ describe("text task recovery UI", () => {
     expect(retry).toHaveBeenCalledOnce();
     expect(adjust).toHaveBeenCalledOnce();
     expect(screen.getByText(/原任务失败原因/)).toBeVisible();
+  });
+
+  it("explains local stop and original-task state as two separate dimensions and queries first", () => {
+    render(<MemoryRouter><RunWorkbench
+      run={failedRun("running")}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onQueryOriginalTextTask={async () => undefined}
+    /></MemoryRouter>);
+
+    const panel = screen.getByRole("status", { name: "原模型任务恢复" });
+    // 两个维度分开说清：本地停在哪、远端任务处于什么状态。
+    expect(within(panel).getByText(/本地流程已停止/)).toBeVisible();
+    expect(within(panel).getByText(/不会重复提交/)).toBeVisible();
+    // 唯一推荐动作是查询原任务，它是面板里第一个按钮。
+    const firstButton = within(panel).getAllByRole("button")[0]!;
+    expect(firstButton).toHaveTextContent("查询原任务");
+    // 不能暗示远端已经取消。
+    expect(screen.queryByText(/已取消/)).not.toBeInTheDocument();
+  });
+
+  it("concentrates local retry and adjust actions in the recovery panel without duplicates", () => {
+    render(<MemoryRouter><RunWorkbench
+      run={failedRun("completed_failure")}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onQueryOriginalTextTask={async () => undefined}
+      onRetryFailedNode={async () => undefined}
+      onRestart={() => undefined}
+    /></MemoryRouter>);
+
+    const panel = screen.getByRole("status", { name: "原模型任务恢复" });
+    // 本地动作迁移进恢复面板，和原任务动作集中在一处。
+    expect(within(panel).getByRole("button", { name: "重试失败步骤" })).toBeVisible();
+    expect(within(panel).getByRole("button", { name: "调整方案后重新制作" })).toBeVisible();
+    // 同一命令全页只允许出现一次。
+    expect(screen.getAllByRole("button", { name: "重试失败步骤" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "调整方案后重新制作" })).toHaveLength(1);
+  });
+
+  it("does not offer retry or restart while the original outcome is unknown", () => {
+    render(<MemoryRouter><RunWorkbench
+      run={failedRun("accepted_unknown")}
+      decisionPending={false}
+      onDecision={async () => undefined}
+      onQueryOriginalTextTask={async () => undefined}
+      onRetryFailedNode={async () => undefined}
+      onRestart={() => undefined}
+    /></MemoryRouter>);
+
+    expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "调整方案后重新制作" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "基于这版重新制作" })).not.toBeInTheDocument();
   });
 });

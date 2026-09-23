@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CreativeDiscussionPanel } from "../src/client/components/CreativeDiscussionPanel.js";
@@ -52,31 +52,211 @@ afterEach(() => {
 });
 
 describe("CreativeDiscussionPanel", () => {
+  it("signals only a genuinely new draft in the same run and resets the baseline on run switch", () => {
+    vi.useFakeTimers();
+    try {
+      const onCommand = vi.fn(async () => undefined);
+      const first = review();
+      const { rerender, unmount } = render(<CreativeDiscussionPanel review={first} busy={false} onCommand={onCommand} />);
+      const article = screen.getByRole("article", { name: "当前脚本" });
+      expect(article).not.toHaveClass("stage-handoff");
+      const second = { ...first, draftArtifactId: "script-draft-2", draftSha256: "b".repeat(64) };
+      rerender(<CreativeDiscussionPanel review={second} busy={false} onCommand={onCommand} />);
+      act(() => vi.advanceTimersByTime(20));
+      expect(screen.getByRole("status", { name: "" })).toHaveTextContent("当前稿件已更新");
+      expect(article).toHaveClass("stage-handoff");
+      expect(screen.getByRole("article", { name: "当前脚本" })).toBe(article);
+      const third = { ...second, draftArtifactId: "script-draft-3", draftSha256: "c".repeat(64) };
+      rerender(<CreativeDiscussionPanel review={third} busy={false} onCommand={onCommand} />);
+      act(() => vi.advanceTimersByTime(20));
+      expect(article).toHaveClass("stage-handoff");
+      act(() => vi.advanceTimersByTime(1000));
+      expect(article).not.toHaveClass("stage-handoff");
+      rerender(<CreativeDiscussionPanel review={{ ...third, reviewRevision: third.reviewRevision + 1 }} busy={false} onCommand={onCommand} />);
+      expect(article).not.toHaveClass("stage-handoff");
+      rerender(<CreativeDiscussionPanel review={{ ...third, runId: "another-run" }} busy={false} onCommand={onCommand} />);
+      expect(article).not.toHaveClass("stage-handoff");
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows an incomplete review without a score and binds explicit consent to that check", async () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const confirmSpy = vi.spyOn(window, "confirm");
     render(<CreativeDiscussionPanel review={review({ checkResult: {
       status: "incomplete", summary: "请求已结清，但没有有效复核结论", issues: [], checkIdentity: "b".repeat(64),
     } })} busy={false} onCommand={onCommand} />);
     expect(screen.getByText("独立复核未完成 · 无评分")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "接受复核未完成，采用本版" }));
+    // 应用内风险弹窗出现；不再使用 window.confirm。
+    const dialog = screen.getByRole("dialog");
+    expect(confirmSpy).not.toHaveBeenCalled();
     expect(onCommand).not.toHaveBeenCalled();
-    confirm.mockReturnValue(true);
+    // 关闭（返回查看）不发送命令。
+    await userEvent.click(within(dialog).getByRole("button", { name: "返回查看" }));
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // 再次打开并确认：身份一致时才发送，携带看到的复核身份。
     await userEvent.click(screen.getByRole("button", { name: "接受复核未完成，采用本版" }));
+    await userEvent.click(screen.getByRole("button", { name: /接受复核未完成的风险并采用本版/ }));
+    await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
     expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "confirm", acknowledgeIncomplete: true, expectedCheckIdentity: "b".repeat(64), baseDraftSha256: sha });
+  });
+
+  it("refuses to confirm when the displayed identity changed while the dialog was open", async () => {
+    const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
+    const rendered = render(<CreativeDiscussionPanel review={review({ checkResult: {
+      status: "incomplete", summary: "请求已结清，但没有有效复核结论", issues: [], checkIdentity: "b".repeat(64),
+    } })} busy={false} onCommand={onCommand} />);
+    await userEvent.click(screen.getByRole("button", { name: "接受复核未完成，采用本版" }));
+    const dialog = screen.getByRole("dialog");
+    // 弹窗打开期间服务端换了稿/换了复核。
+    rendered.rerender(<CreativeDiscussionPanel review={review({
+      reviewRevision: 4,
+      draftSha256: "c".repeat(64),
+      checkResult: { status: "incomplete", summary: "新的复核结论", issues: [], checkIdentity: "d".repeat(64) },
+    })} busy={false} onCommand={onCommand} />);
+    await userEvent.click(within(dialog).getByRole("button", { name: /接受复核未完成的风险并采用本版/ }));
+    // 不能把旧文案当作新身份提交。
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(within(dialog).getByText(/内容已更新，请重新查看后确认/)).toBeInTheDocument();
+  });
+
+  it("keeps the in-app return confirmation bound to the displayed stage and impact", async () => {
+    const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
+    const confirmSpy = vi.spyOn(window, "confirm");
+    render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
+    await userEvent.click(screen.getByRole("button", { name: "返回前期构思" }));
+    const dialog = screen.getByRole("dialog");
+    expect(confirmSpy).not.toHaveBeenCalled();
+    // 弹窗展示原有影响范围与用户看到的稿件身份。
+    expect(dialog).toHaveTextContent("脚本、导演方案和后续确认会失效");
+    expect(dialog).toHaveTextContent("脚本");
+    await userEvent.click(within(dialog).getByRole("button", { name: /仍然返回/ }));
+    await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
+    expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "return_to_stage", targetStage: "treatment", acknowledgeImpact: true });
+  });
+
+  it("allows returning from an unchanged checked draft", async () => {
+    const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
+    render(<CreativeDiscussionPanel review={review({ checkResult: {
+      status: "incomplete", summary: "复核尚未完成", issues: [], checkIdentity: "b".repeat(64),
+    } })} busy={false} onCommand={onCommand} />);
+    await userEvent.click(screen.getByRole("button", { name: "返回前期构思" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /仍然返回/ }));
+    await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
+    expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "return_to_stage", targetStage: "treatment" });
+  });
+
+  it("does not return from a dialog opened for another run with identical revisions", async () => {
+    const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
+    const checked = { status: "incomplete" as const, summary: "复核尚未完成", issues: [] as [], checkIdentity: "b".repeat(64) };
+    const rendered = render(<CreativeDiscussionPanel review={review({ checkResult: checked })} busy={false} onCommand={onCommand} />);
+    await userEvent.click(screen.getByRole("button", { name: "返回前期构思" }));
+    rendered.rerender(<CreativeDiscussionPanel review={review({ runId: "another-run", checkResult: checked })} busy={false} onCommand={onCommand} />);
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /仍然返回/ }));
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(screen.getByText(/内容已更新，请重新查看后确认/)).toBeInTheDocument();
+  });
+
+  it("keeps the composer usable in memory when reading stored drafts fails", () => {
+    vi.mocked(window.localStorage.getItem).mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+    const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
+    render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
+    expect(screen.getByText(/本机草稿无法保存/)).toBeInTheDocument();
+    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    fireEvent.change(composer, { target: { value: "存储坏了也能打字" } });
+    expect(composer).toHaveValue("存储坏了也能打字");
+  });
+
+  it("does not send a command when the local pending record cannot be written", async () => {
+    const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
+    render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
+    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    await userEvent.type(composer, "先写下来");
+    vi.mocked(window.localStorage.setItem).mockImplementation(() => {
+      throw new Error("storage full");
+    });
+    fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(screen.getByText(/本机存储/)).toBeInTheDocument());
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it("keeps a hand-edited draft when its command record cannot be written", async () => {
+    const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
+    render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
+    await userEvent.click(screen.getByText("手动修订这份稿件"));
+    const narration = screen.getByLabelText("分镜 1 · 旁白");
+    await userEvent.clear(narration);
+    await userEvent.type(narration, "不要丢掉这句手写旁白");
+    const originalSetItem = vi.mocked(window.localStorage.setItem).getMockImplementation()!;
+    vi.mocked(window.localStorage.setItem).mockImplementation((key, value) => {
+      if (key.startsWith("vf:creative-command:")) throw new Error("storage full");
+      originalSetItem(key, value);
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "保存修订" }));
+    await screen.findByText(/保存未完成，输入仍保留/);
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("分镜 1 · 旁白")).toHaveValue("不要丢掉这句手写旁白");
+    expect(screen.getByRole("button", { name: "确认当前方案，继续" })).toBeDisabled();
+    expect(screen.queryByText(/修订已保存。/)).not.toBeInTheDocument();
+  });
+
+  it("warns when an unsaved hand edit cannot be cached locally", async () => {
+    const originalSetItem = vi.mocked(window.localStorage.setItem).getMockImplementation()!;
+    vi.mocked(window.localStorage.setItem).mockImplementation((key, value) => {
+      if (key.endsWith(":edit")) throw new Error("storage full");
+      originalSetItem(key, value);
+    });
+    render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={vi.fn(async () => undefined)} />);
+    await userEvent.click(screen.getByText("手动修订这份稿件"));
+    const narration = screen.getByLabelText("分镜 1 · 旁白");
+    await userEvent.clear(narration);
+    await userEvent.type(narration, "关闭页面前要复制的文字");
+
+    expect(narration).toHaveValue("关闭页面前要复制的文字");
+    expect(screen.getByText(/手工修订无法在本机保存.*关闭页面前请复制/)).toBeInTheDocument();
+  });
+
+  it("reports success when the server accepted but local cleanup failed", async () => {
+    const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
+    render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
+    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    await userEvent.type(composer, "发送这条");
+    vi.mocked(window.localStorage.removeItem).mockImplementation(() => {
+      throw new Error("cleanup failed");
+    });
+    fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
+    // 服务器已成功：不能谎报"提交失败"诱导用户重发。
+    const notice = screen.getByText(/操作已完成，本机恢复记录未清理/);
+    expect(notice).toHaveAttribute("role", "status");
+    expect(notice).not.toHaveTextContent("再试");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("only sends stock risk consent after showing the risk and receiving confirmation", async () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const confirmSpy = vi.spyOn(window, "confirm");
     render(<CreativeDiscussionPanel review={review({ stage: "director", qualityAdvisories: [
       { scenePositions: [1], reason: "候选仅得20分，视觉核验未完成" },
     ] })} busy={false} onCommand={onCommand} />);
     expect(screen.getByText(/候选仅得20分/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "接受素材风险，先制作首版" }));
+    // 应用内弹窗出现，先看风险再决定；关闭不发送。
+    const dialog = screen.getByRole("dialog");
+    expect(confirmSpy).not.toHaveBeenCalled();
     expect(onCommand).not.toHaveBeenCalled();
-    confirm.mockReturnValue(true);
+    await userEvent.click(within(dialog).getByRole("button", { name: "返回查看" }));
+    expect(onCommand).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: "接受素材风险，先制作首版" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /接受素材风险，先制作首版/ }));
+    await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
     expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "confirm", acceptQualityFallback: true, baseDraftSha256: sha });
   });
   it("preserves unsaved manual edits across a new server draft and refuses to overwrite it", async () => {
@@ -162,12 +342,14 @@ describe("CreativeDiscussionPanel", () => {
 
   it("shows server-computed return impact and only returns after explicit confirmation", async () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
-    vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
     const button = screen.getByRole("button", { name: "返回前期构思" });
     await userEvent.click(button);
+    // 应用内确认：先关闭（不发送），再打开并确认。
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "返回查看" }));
     expect(onCommand).not.toHaveBeenCalled();
     await userEvent.click(button);
+    await userEvent.click(screen.getByRole("button", { name: /仍然返回/ }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
     expect(onCommand.mock.calls[0]?.[0]).toMatchObject({
       action: "return_to_stage",
@@ -234,7 +416,7 @@ describe("CreativeDiscussionPanel", () => {
 
   it("keeps confirmation available under a repair verdict but only after an explicit acknowledgement", async () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const confirmSpy = vi.spyOn(window, "confirm");
     render(<CreativeDiscussionPanel review={review({
       stage: "director",
       checkResult: {
@@ -257,14 +439,16 @@ describe("CreativeDiscussionPanel", () => {
     expect(confirmButton).toBeEnabled();
     expect(screen.queryByRole("button", { name: "确认当前方案，继续" })).not.toBeInTheDocument();
 
-    // 复核是"提议"不是"否决"：按钮可用，但默认不承担，直接点不会推走流程。
+    // 复核是"提议"不是"否决"：按钮可用，但默认不承担；应用内弹窗先展示意见，关闭不发送。
     await userEvent.click(confirmButton);
-    expect(confirmSpy).toHaveBeenCalled();
+    const repairDialog = screen.getByRole("dialog");
+    expect(confirmSpy).not.toHaveBeenCalled();
+    await userEvent.click(within(repairDialog).getByRole("button", { name: "返回查看" }));
     expect(onCommand).not.toHaveBeenCalled();
 
     // 显式承担后才放行，并带上 acknowledgeRepair 让这次放行可追溯。
-    confirmSpy.mockReturnValue(true);
     await userEvent.click(confirmButton);
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /看过意见，仍采用本版/ }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
     // 身份必须跟着一起发：服务端会拿它跟记录里的那一条比对，缺了就直接拒收这条命令。
     // 只有 acknowledgeRepair 而没带编号，"仍然确认"会在服务端变成一条无法送达的命令。

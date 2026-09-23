@@ -41,7 +41,7 @@ export const RUN_NODE_ORDER: readonly string[] = [
 ];
 
 export function runNodeLabel(nodeId: string): string {
-  return RUN_NODE_LABELS[nodeId] ?? nodeId;
+  return RUN_NODE_LABELS[nodeId] ?? "当前步骤";
 }
 
 /** 列表和详情共用服务端阶段，不把所有人工停点都称为成片审片。 */
@@ -53,7 +53,7 @@ export function creatorRunStatusLabel(run: Pick<StudioRunSummary, "status" | "cu
 }
 
 export function creatorReviewAction(run: Pick<StudioRunSummary, "currentNodeId">): string {
-  return run.currentNodeId === "final-review" ? "进入审片" : "查看并确认方案";
+  return run.currentNodeId === "final-review" ? "进入审片" : RUN_NODE_LABELS[run.currentNodeId] ? "查看并确认方案" : "查看本步骤并决定是否继续";
 }
 
 export function isHistoricalReadOnlyRun(run: Pick<StudioRunSummary, "continuation">): boolean {
@@ -181,7 +181,7 @@ export function providerLabel(providerId?: string): string | undefined {
     minimax: "MiniMax",
     "minimax-tts-v1": "MiniMax 中文配音",
     seedance: "Seedance",
-  } as Record<string, string>)[providerId];
+  } as Record<string, string>)[providerId] ?? `服务名称未收录（${displayIdentifier(providerId)}）`;
 }
 
 export function providerModelLabel(
@@ -189,7 +189,11 @@ export function providerModelLabel(
   modelId?: string,
 ): string {
   if (!modelId) return "自动选择";
-  return provider?.modelProfiles?.find((model) => model.id === modelId)?.label ?? "未识别模型";
+  return provider?.modelProfiles?.find((model) => model.id === modelId)?.label ?? `模型名称未收录（${displayIdentifier(modelId)}）`;
+}
+
+function displayIdentifier(value: string): string {
+  return value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 80) || "标识未记录";
 }
 
 export function catalogModelLabel(providers: Array<{ modelProfiles?: Array<{ id: string; label: string }> }>, modelId?: string): string | undefined {
@@ -201,58 +205,17 @@ export function catalogModelLabel(providers: Array<{ modelProfiles?: Array<{ id:
   return undefined;
 }
 
-export function humanizeCreativeText(value: string): string {
-  return value
-    .replace(/knowledge-failed-intuition/gi, "打破直觉")
-    .replace(/knowledge-question/gi, "明确问题")
-    .replace(/knowledge-cause/gi, "解释原因")
-    .replace(/knowledge-chain/gi, "补全因果")
-    .replace(/knowledge-example-setup/gi, "建立验证条件")
-    .replace(/knowledge-example-change/gi, "展示变量变化")
-    .replace(/knowledge-rule/gi, "提炼判断规则")
-    .replace(/knowledge-use/gi, "落地操作")
-    .replace(/^question\s*\/\s*shot-question\s*[：:]?\s*/i, "提问钩子：")
-    .replace(/^model\s*\/\s*shot-model\s*[：:]?\s*/i, "原理说明：")
-    .replace(/^example\s*\/\s*shot-example\s*[：:]?\s*/i, "实例验证：")
-    .replace(/^takeaway\s*\/\s*shot-takeaway\s*[：:]?\s*/i, "结论行动：")
-    .replace(/question[—-]model[—-]example[—-]takeaway/gi, "提问—原理—验证—结论")
-    .replace(/geometric-control/gi, "几何秩序")
-    .replace(/shot-question/gi, "提问镜头")
-    .replace(/shot-model/gi, "原理镜头")
-    .replace(/shot-example/gi, "验证镜头")
-    .replace(/shot-takeaway/gi, "结论镜头")
-    .replace(/asset\.generate\.video/gi, "AI 视频生成")
-    .replace(/asset\.generate\.image/gi, "AI 图片生成")
-    .replace(/asset\.search/gi, "图库检索")
-    .replace(/\bgenerated_image\b/gi, "AI 图片生成")
-    .replace(/\bgenerated_video\b/gi, "AI 视频生成")
-    .replace(/\bstock_video\b/gi, "图库实拍视频")
-    .replace(/\beditorial_card\b/gi, "主动排版画面")
-    .replace(/\bon_screen_text\b/gi, "屏幕文字")
-    .replace(/REUSE_ONLY\s+scene\s+(\d+)/gi, "复用镜头 $1")
-    .replace(/\bblocking\b/gi, "必须修改的问题")
-    .replace(/\bAIGC\b/gi, "AI 内容声明")
-    .replace(/AI 编剧短视频结构/g, "提问—解释—验证—结论")
-    .replace(/manualReplacement/gi, "人工补充素材")
-    .replace(/\bmeasured\b/gi, "舒缓克制")
-    .replace(/\bmedium\b/gi, "适中")
-    .replace(/\bfast\b/gi, "明快")
-    .replace(/\bslow\b/gi, "舒缓")
-    .replace(/合同约束/g, "创作约束")
-    .replace(/\s+(提问镜头|原理镜头|验证镜头|结论镜头)\s+/g, "$1");
-}
-
 export function creatorFacingTechnicalText(value?: string): string | undefined {
   if (!value) return undefined;
-  return value
+  const text = value
     // 桥接失败消息尾部的机器诊断（`\n诊断：stage=…；reasonCode=…`）。它和下面那串
     // key=value 一样，是给操作员定位用的：创作者读不懂，也不该读到。
-    .replace(/\s*\n?\s*诊断：[^\n]*/g, "")
+    .replace(/诊断：(?:[A-Za-z][A-Za-z0-9]*=[^；。\n]*(?:[；。]|$))+/g, "")
     .replace(/\b(?:stage|httpStatus|failureKind|reasonCode|fieldPath|taskKind|requestIdHash|accepted)=[^\s；，。]*[；，]?/g, "")
     // 候选耗尽的叙述整段换掉：后面跟着的逐个候选是操作员的定位信息（模型身份、
     // "输出未通过合同（reasonCode）"）。只翻译开头那句会把模型名与合同术语留在屏幕上，
     // 而创作者需要知道的只有"都试过了、都没成"。
-    .replace(/([^\n；。]*?)\s*\d+\s*个候选模型均未能完成[:：][^\n]*/g, "$1候选模型都没能给出可用结果。")
+    .replace(/([^\n；。]*?)\s*\d+\s*个候选模型均未能完成[:：][^。\n]*。?/g, "$1候选模型都没能给出可用结果。")
     .replace(/([^\n；。]*?)前\s*\d+\s*个候选模型调用失败，已自动切换[^\n]*/g, "$1已自动换用下一个可用模型。")
     // 没有明细可带的短句（缓存里的历史文案）只翻这一句。
     .replace(/(\d+)\s*个候选模型均未能完成/g, "已尝试 $1 个模型，都没能给出可用结果")
@@ -261,7 +224,7 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/\bstudio-owner\b/gi, "由你确认")
     .replace(/需要[^。]*VIDEO_FACTORY_[A-Z0-9_]+[^。]*。?\s*当前：[^。]*。?/gi, "AI 创作服务尚未连接，请到“创作设置 → 制作分工”检查服务状态。")
     .replace(/Pexels free stock license; review current provider license before publishing\.?/gi, "Pexels 免费图库素材；发布前需核对当前授权条款。")
-    .replace(/Pixabay Content License; cache API responses for 24h and avoid systematic mass downloads\.?/gi, "Pixabay 内容许可；接口结果最多缓存 24 小时，禁止系统性批量下载。")
+    .replace(/Pixabay Content License; cache API responses for 24h and avoid systematic mass downloads\.?/gi, "Pixabay 内容许可；接口响应缓存 24 小时，并避免系统性批量下载。")
     .replace(/Human-selected media retained with immutable bytes and run-local provenance\.?/gi, "保留人工选中的原始素材，并记录本次制作中的来源信息。")
     .replace(/Human-edited derivative retained as an immutable revision\.?/gi, "保留人工编辑后的素材版本，便于追溯修改记录。")
     .replace(/VideoFactory generated script; human review required before publishing\.?/gi, "AI 生成脚本；发布前需要人工核对事实与表述。")
@@ -278,7 +241,7 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/AI-generated (?:image|video) selected by the director plan; review terms, likeness rights, and AIGC disclosure\.?/gi, "由导演方案选中的 AI 画面；发布前需核对使用条款、肖像权和 AI 内容声明。")
     .replace(/AI-generated (?:image|video); review provider terms, likeness rights, and AIGC disclosure before publishing\.?/gi, "AI 生成画面；发布前需核对使用条款、肖像权和 AI 内容声明。")
     .replace(/AI-generated script; facts and claims require human review before publication\.?/gi, "AI 生成脚本；发布前需要人工核对事实与表述。")
-    .replace(/Independent role audit and bounded repair history; credentials and hidden reasoning are not stored\.?/gi, "保存独立质量复核与最多三轮修订记录，不包含密钥或模型内部推理。")
+    .replace(/Independent role audit and bounded repair history; credentials and hidden reasoning are not stored\.?/gi, "保存独立质量复核与有限轮次修订记录，不包含密钥或模型内部推理。")
     .replace(/Preview-only candidate metadata; no media was downloaded by this node\.?/gi, "只保存候选素材信息，这一步没有下载素材。")
     .replace(/Candidate ranking only; no source media was downloaded or altered\.?/gi, "只保存候选排序结果，没有下载或修改原始素材。")
     .replace(/Series Bible/gi, "系列设定")
@@ -297,7 +260,6 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/\bManifest\b/gi, "资源清单")
     .replace(/\bFallback\b/gi, "备用方案")
     .replace(/\btaskId\b/gi, "任务编号")
-    .replace(/\bblocking\b/gi, "必须修改的问题")
     .replace(/\s*\bhook_and_scene_midpoints\b\s*/gi, "逐镜关键画面抽查")
     .replace(/\s*\bscene_triplets\b\s*/gi, "逐镜首中尾抽查")
     .replace(/\s*\bscene_change_keyframes\b\s*/gi, "场景变化关键画面抽查")
@@ -323,7 +285,9 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
     .replace(/绿灯审计/g, "开拍前复核")
     .replace(/本地生成/g, "在本机生成")
     .replace(/异步生成/g, "后台生成")
-    .replace(/统一任务协议/g, "统一调用");
+    .replace(/统一任务协议/g, "统一调用")
+    .trim();
+  return text || "本次调用未完成，当前记录没有可读的失败说明。请查看本步骤的状态和可用处理方式。";
 }
 
 /**
@@ -338,13 +302,13 @@ export function agentLoopPhaseLabel(progress: StudioAgentLoopProgress): string {
       : progress.phase === "passed"
         ? "独立复核已通过"
         : progress.phase === "exhausted"
-          ? "三轮复核未通过"
+        ? "自动修订已停止"
           : progress.phase === "awaiting_user"
             ? "自动修订轮次已用尽，这一版与复核意见交给你裁决"
           : progress.phase === "halted"
             ? "发现当前角色无法解决的前提，已停住"
           : progress.phase === "failed"
-            ? "模型调用已停止，请查看失败原因"
+            ? progress.failureSummary?.trim() ? "模型调用已停止，请查看失败原因" : "模型调用已停止"
           : "AI 创作中";
   return `第 ${progress.iteration} / ${progress.maxIterations} 轮 · ${phase}`;
 }
@@ -357,12 +321,18 @@ export function agentLoopPhaseLabel(progress: StudioAgentLoopProgress): string {
  */
 export function agentLoopPendingNote(progress: StudioAgentLoopProgress): string {
   const reason = progress.phase === "failed" ? progress.failureSummary?.trim() : undefined;
-  if (reason) return creatorFacingTechnicalText(humanizeCreativeText(reason)) ?? reason;
+  if (reason) return creatorFacingTechnicalText(reason) ?? reason;
   // 旧记录里只存了机器诊断，没有面向人的那句说明。这里不能指向"诊断信息"之类并不存在于
   // 界面的东西——那正是原来那句「请查看失败原因」的毛病。只说清能做什么。
-  if (progress.phase === "failed") return "这次调用没有留下可读的原因记录。可以按现在的结果放行，也可以先关掉这个窗口改这一步的模型，再让它重做。";
+  if (progress.phase === "failed") return "本次调用已停止，但这条记录没有留下可读的原因记录。请根据本步骤显示的操作决定是否继续。";
   if (progress.phase === "halted") return "这一步停住了：它需要的前提当前角色给不出来，补上才能继续。";
-  return "正在生成本轮方案，完成后由独立 AI 做质量复核。";
+  if (progress.phase === "auditing") return "独立质量复核正在进行，尚未返回本轮结论。";
+  if (progress.phase === "repairing") return "正在按复核意见修订本轮方案。";
+  if (progress.phase === "exhausted") return "自动修订已停止。请查看已有结果和复核意见，再决定下一步。";
+  if (progress.phase === "awaiting_user") return "正在等待你的决定，没有继续自动修订。";
+  if (progress.phase === "passed") return "本轮状态记录为复核通过，当前未附可展示的报告详情。";
+  if (progress.phase === "producing") return "正在生成本轮方案，完成后由独立 AI 做质量复核。";
+  return "当前阶段暂无法识别，请查看最新制作状态。";
 }
 
 // 返回"为什么建议先别做这条选题"的理由，供界面醒目标注。
@@ -380,18 +350,19 @@ export function opportunityProductionAdvice(
 }
 
 export function reasoningEffortLabel(value: unknown): string {
+  if (value === undefined || value === null || value === "") return "使用服务默认推理设置";
   if (value === "none" || value === "minimal" || value === "low") return "快速判断";
   if (value === "medium") return "标准推理";
   if (value === "high" || value === "xhigh") return "深入推理";
   if (value === "max" || value === "ultra") return "最高强度推理";
-  return "由服务自动选择";
+  return `推理强度值未识别：${displayIdentifier(String(value))}；是否支持待核对。`;
 }
 
 export function proposalSourceLabel(providerId: string): string {
   if (providerId === "series-planner-v1") return "系列策划器";
   if (providerId === "api-topic-editor-v1") return "AI 选题总编";
   if (providerId.includes("heuristic") || providerId.includes("deterministic")) return "本地规则提案";
-  return "API 总编提案";
+  return `提案来源名称未收录（${displayIdentifier(providerId)}）`;
 }
 
 export const TOPIC_CATEGORY_LABELS = {

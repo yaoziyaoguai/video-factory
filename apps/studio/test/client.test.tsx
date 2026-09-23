@@ -135,6 +135,37 @@ const runDetail: StudioRunDetail = {
 };
 
 describe("Studio client", () => {
+  it("reveals only the currently loaded new film, without remounting the player or replaying an earlier film", async () => {
+    const { videoArtifactId: _initialVideo, ...withoutVideo } = runDetail;
+    const a = { ...runDetail, videoArtifactId: "video", artifacts: runDetail.artifacts };
+    const b = { ...a, videoArtifactId: "video-b", artifacts: [...runDetail.artifacts, { ...runDetail.artifacts[1]!, id: "video-b", contentUrl: "/api/video-b" }] };
+    const view = (run: StudioRunDetail) => <RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />;
+    const { rerender } = render(view({ ...withoutVideo, artifacts: withoutVideo.artifacts.filter((artifact) => artifact.id !== "video") }));
+    rerender(view(a));
+    const player = screen.getByTitle("成片预览") as HTMLVideoElement;
+    let readyState: number = HTMLMediaElement.HAVE_CURRENT_DATA;
+    Object.defineProperty(player, "readyState", { configurable: true, get: () => readyState });
+    fireEvent.loadedData(player);
+    expect(player.closest(".video-frame")).toHaveClass("film-reveal-active");
+
+    rerender(view(b));
+    expect(screen.getByTitle("成片预览")).toBe(player);
+    expect(player.closest(".video-frame")).not.toHaveClass("film-reveal-active");
+    readyState = HTMLMediaElement.HAVE_NOTHING;
+    fireEvent.loadedData(player);
+    expect(player.closest(".video-frame")).not.toHaveClass("film-reveal-active");
+    readyState = HTMLMediaElement.HAVE_CURRENT_DATA;
+    fireEvent.loadedData(player);
+    expect(player.closest(".video-frame")).toHaveClass("film-reveal-active");
+
+    rerender(view(a));
+    fireEvent.loadedData(player);
+    expect(player.closest(".video-frame")).not.toHaveClass("film-reveal-active");
+    rerender(view({ ...a, artifacts: a.artifacts.map((artifact) => artifact.id === "video" ? { ...artifact, contentUrl: "/api/video-renewed" } : artifact) }));
+    fireEvent.loadedData(player);
+    expect(player.closest(".video-frame")).not.toHaveClass("film-reveal-active");
+  });
+
   it("labels a planning stop as confirmation rather than claiming a film is ready", () => {
     render(<MemoryRouter><ProductionQueue runs={[{ ...runSummary, currentNodeId: "creative-planning" }]} loading={false} onCreate={() => undefined} /></MemoryRouter>);
     expect(screen.getByText("等你确认创作规划")).toBeInTheDocument();
@@ -594,6 +625,84 @@ describe("Studio client", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it("states scoped billing facts instead of promising the whole production is free", () => {
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={vi.fn()} />);
+    const cost = screen.getByLabelText("费用方式");
+    // 画面与配音分开说；不再出现"无需现金确认"这类全单承诺。
+    expect(cost).toHaveTextContent("画面：使用免费图库，无现金报价");
+    expect(cost).toHaveTextContent("配音：");
+    expect(cost).not.toHaveTextContent("无需现金确认");
+    expect(cost).toHaveTextContent("预算意向不是花费授权");
+  });
+
+  it("reveals and focuses an invalid budget instead of leaving the error inside a closed group", async () => {
+    const user = userEvent.setup();
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={vi.fn()} />);
+    await user.type(screen.getByLabelText("视频标题"), "预算校验定位");
+    await user.type(screen.getByLabelText("内容角度"), "保持字段可见");
+    await user.type(screen.getByLabelText("目标受众"), "创作者");
+    const advancedGroup = screen.getByText("03 模型与高级设置").closest("details")!;
+    await user.click(within(advancedGroup).getByText("03 模型与高级设置"));
+    const budget = screen.getByRole("spinbutton", { name: "本片预算意向" });
+    await user.type(budget, "100001");
+    await user.click(within(advancedGroup).getByText("03 模型与高级设置"));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
+    expect(await screen.findByText(/预算意向请输入 0 到 100000 元/)).toBeInTheDocument();
+    expect(budget).toHaveFocus();
+    expect(budget.closest("details")).toHaveAttribute("open");
+  });
+
+  it("focuses the first native required field before starting production", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={onSubmit} />);
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
+    expect(screen.getByLabelText("视频标题")).toHaveFocus();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("protects edited fields across the close button and discards only after explicit confirmation", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<NewRunDialog open providers={providers} onClose={onClose} onSubmit={vi.fn()} />);
+    await user.type(screen.getByLabelText("视频标题"), "我的未保存标题");
+    await user.click(screen.getByRole("button", { name: "关闭新建制作" }));
+    expect(await screen.findByText("要放弃本次填写吗？")).toBeInTheDocument();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    const returnButton = screen.getByRole("button", { name: "返回填写" });
+    const discardButton = screen.getByRole("button", { name: "放弃并关闭" });
+    const closePromptButton = screen.getByRole("button", { name: "关闭放弃确认" });
+    expect(document.activeElement).toBe(returnButton);
+    discardButton.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(closePromptButton);
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(discardButton);
+    expect(onClose).not.toHaveBeenCalled();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("heading", { name: "要放弃本次填写吗？" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("视频标题")).toHaveValue("我的未保存标题");
+    expect(onClose).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "关闭新建制作" }));
+    // 返回填写：输入保留，弹窗关闭。
+    await user.click(screen.getByRole("button", { name: "返回填写" }));
+    expect(screen.getByLabelText("视频标题")).toHaveValue("我的未保存标题");
+    expect(screen.queryByRole("heading", { name: "要放弃本次填写吗？" })).not.toBeInTheDocument();
+    // 再次关闭并明确放弃：只关闭一次，输入丢弃。
+    await user.click(screen.getByRole("button", { name: "关闭新建制作" }));
+    await user.click(screen.getByRole("button", { name: "放弃并关闭" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes directly when the user has not edited anything", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<NewRunDialog open providers={providers} onClose={onClose} onSubmit={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "关闭新建制作" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("heading", { name: "要放弃本次填写吗？" })).not.toBeInTheDocument();
+  });
+
   it("creates a valid free-stock production brief without auto-selecting editorial cards", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
@@ -612,16 +721,17 @@ describe("Studio client", () => {
     expect(screen.getByRole("radio", { name: /允许 AI 生成画面，按实际镜头报价/ })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "导演角色" })).toHaveValue("auto");
     expect(screen.getByText(/AI 根据题材选择导演语法/)).toBeInTheDocument();
-    expect(screen.getByLabelText("费用方式")).toHaveTextContent("图片 / 视频无现金报价");
-    expect(screen.queryByRole("button", { name: /画面素材/ })).not.toBeInTheDocument();
-    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    expect(screen.getByLabelText("费用方式")).toHaveTextContent("画面：使用免费图库，无现金报价");
+    expect(screen.getByRole("button", { name: /画面素材/, hidden: true })).not.toBeVisible();
+    await user.click(screen.getByText("03 模型与高级设置"));
+    await user.click(screen.getByText("02 画面与声音"));
     await user.click(screen.getByRole("button", { name: /画面素材/ }));
     expect(screen.getByRole("radio", { name: /AI 逐镜选择画面来源/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /本地编辑画面/ })).not.toBeChecked();
     expect(screen.getByRole("checkbox", { name: /Pexels 图库/ })).toBeChecked();
     expect(screen.getByRole("option", { name: "20 秒" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "18 秒" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       title: "下班后别急着做这 3 件事",
@@ -650,7 +760,7 @@ describe("Studio client", () => {
 
     rerender(<NewRunDialog open={false} providers={providers} onClose={onClose} onSubmit={onSubmit} />);
     rerender(<NewRunDialog open providers={providers} onClose={onClose} onSubmit={onSubmit} />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "开始前期构思" })).toBeEnabled());
   });
 
   it("drops a stale suggested visual plan when the creator rewrites its visual intent", async () => {
@@ -693,7 +803,7 @@ describe("Studio client", () => {
     await user.clear(screen.getByLabelText("视觉论证方式（可选）"));
     await user.type(screen.getByLabelText("视觉论证方式（可选）"), "先并列原始截图，再逐项标出措辞差异。");
 
-    await user.click(await screen.findByRole("button", { name: "开始制作" }));
+    await user.click(await screen.findByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       visualProof: "两张来源截图必须在同一屏内完整可读。",
@@ -733,7 +843,7 @@ describe("Studio client", () => {
     expect(screen.getByLabelText("视觉论证方式（可选）")).toHaveValue("");
     expect(screen.getByText(/可参考的方向：用三组构图示意展示视觉重心变化/)).toBeInTheDocument();
 
-    await user.click(await screen.findByRole("button", { name: "开始制作" }));
+    await user.click(await screen.findByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       visualPlan,
@@ -796,7 +906,7 @@ describe("Studio client", () => {
 
     expect(screen.getByRole("dialog", { name: "创作设置读取失败" })).toBeInTheDocument();
     expect(screen.getByText(/未能读取你的创作设置，为避免用错声音\/平台\/时长，暂未开工/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "开始制作" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "开始前期构思" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重新读取" }));
     expect(onRetrySettings).toHaveBeenCalledTimes(1);
 
@@ -812,7 +922,7 @@ describe("Studio client", () => {
 
     expect(await screen.findByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
     expect(screen.getByRole("combobox", { name: "建议时长" })).toHaveValue("45");
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeInTheDocument();
     expect(screen.queryByText(/未能读取你的创作设置/)).not.toBeInTheDocument();
   });
 
@@ -831,7 +941,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "平台边界测试");
     await user.type(screen.getByLabelText("内容角度"), "验证来源平台不会进入成片配置");
     await user.type(screen.getByLabelText("目标受众"), "内容创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent("请选择目标平台");
@@ -871,7 +981,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "旧配方映射到真实策略");
     await user.type(screen.getByLabelText("内容角度"), "不再展示重复选择");
     await user.type(screen.getByLabelText("目标受众"), "内容创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
@@ -894,7 +1004,7 @@ describe("Studio client", () => {
       onClose={() => undefined}
       onSubmit={async () => undefined}
     />);
-    await screen.findByRole("button", { name: "开始制作" });
+    await screen.findByRole("button", { name: "开始前期构思" });
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "目标平台" }), "xiaohongshu");
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "建议时长" }), "40");
 
@@ -934,11 +1044,11 @@ describe("Studio client", () => {
       onSubmit={vi.fn()}
     />);
 
-    await screen.findByRole("button", { name: "开始制作" });
-    await userEvent.click(screen.getByText("更多：素材来源与制作细节"));
+    await screen.findByRole("button", { name: "开始前期构思" });
+    await userEvent.click(screen.getByText("03 模型与高级设置"));
     expect(screen.getByRole("checkbox", { name: /本地编辑画面/ })).not.toBeChecked();
     expect(screen.getByText(/缺少正式生产能力.*导演画面来源/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeDisabled();
   });
 
   it("starts production only from the explicit start control", async () => {
@@ -954,7 +1064,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "避免下拉选择误触开工");
     await user.type(screen.getByLabelText("内容角度"), "所有配置完成后再明确开始制作");
     await user.type(screen.getByLabelText("目标受众"), "内容创作者");
-    const startButton = await screen.findByRole("button", { name: "开始制作" });
+    const startButton = await screen.findByRole("button", { name: "开始前期构思" });
     const form = startButton.closest("form");
     expect(form).not.toBeNull();
 
@@ -987,12 +1097,12 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
-    await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
+    await user.click(screen.getByText("03 模型与高级设置"));
     expect(screen.getByRole("combobox", { name: "编剧能力" })).toHaveValue("python-template-v1");
     await user.type(screen.getByLabelText("视频标题"), "失效配置必须安全回退");
     await user.type(screen.getByLabelText("内容角度"), "不能显示一个能力却提交另一个能力");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ script: "python-template-v1" }),
@@ -1007,9 +1117,9 @@ describe("Studio client", () => {
       onSubmit={async () => undefined}
     />);
 
-    await userEvent.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
+    await userEvent.click(screen.getByText("03 模型与高级设置"));
     expect(screen.getByText("独立质量复核未接通")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeEnabled();
   });
 
   it("does not treat the advisory role auditor as a missing production role", async () => {
@@ -1020,10 +1130,10 @@ describe("Studio client", () => {
       onSubmit={async () => undefined}
     />);
 
-    await userEvent.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
+    await userEvent.click(screen.getByText("03 模型与高级设置"));
     expect(screen.getByText("独立质量复核未接通")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "打开创作设置" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeEnabled();
   });
 
   it("links a missing director asset source to the visual-providers settings section", async () => {
@@ -1036,7 +1146,7 @@ describe("Studio client", () => {
 
     expect(await screen.findByText(/缺少正式生产能力：导演画面来源/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "打开创作设置" })).toHaveAttribute("href", "/resources#visual-providers");
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeDisabled();
   });
 
   it("shows the production team and applies a shared DeepSeek choice to script and treatment", async () => {
@@ -1087,16 +1197,16 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
-    await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
+    await user.click(screen.getByText("03 模型与高级设置"));
     expect(screen.getByRole("heading", { name: "自动制作设置" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "编剧能力" })).toHaveValue("codex-screenwriter-v1");
     expect(screen.getByText(/独立质量复核/)).toBeInTheDocument();
-    expect(screen.getByText(/深入质量复核.*最多三轮/)).toBeInTheDocument();
+    expect(screen.getByText(/深入质量复核.*有限轮次/)).toBeInTheDocument();
     await user.selectOptions(screen.getByRole("combobox", { name: "编剧本次模型" }), "deepseek-flash");
     await user.type(screen.getByLabelText("视频标题"), "角色配置必须在开工前确认");
     await user.type(screen.getByLabelText("内容角度"), "验证编剧模型覆盖真实进入生产单");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ script: "codex-screenwriter-v1" }),
@@ -1121,7 +1231,7 @@ describe("Studio client", () => {
     );
 
     await user.type(screen.getByLabelText("视频标题"), "后台刷新不能清空这段编辑");
-    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    await user.click(screen.getByText("03 模型与高级设置"));
     const voiceStage = screen.getByRole("button", { name: /配音声音导演/ });
     await user.click(voiceStage);
     expect(voiceStage).toHaveAttribute("aria-pressed", "true");
@@ -1145,7 +1255,7 @@ describe("Studio client", () => {
     const onSubmit = vi.fn(async () => undefined);
     render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={onSubmit} />);
 
-    expect(await screen.findByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "开始前期构思" })).toBeEnabled();
     expect(screen.queryByText(/无法读取模板目录/)).not.toBeInTheDocument();
     expect(studioApi.templates).not.toHaveBeenCalled();
   });
@@ -1155,10 +1265,10 @@ describe("Studio client", () => {
     render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={vi.fn()} />);
 
     expect(screen.getByText("继承制作设置")).toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: "编剧能力" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: "编剧本次模型" })).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "编剧能力", hidden: true })).not.toBeVisible();
+    expect(screen.queryByRole("combobox", { name: "编剧本次模型", hidden: true })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
+    await user.click(screen.getByText("03 模型与高级设置"));
     expect(screen.getByRole("combobox", { name: "编剧能力" })).toBeInTheDocument();
   });
 
@@ -1197,7 +1307,7 @@ describe("Studio client", () => {
     const scriptInstruction = screen.getByRole("textbox", { name: "脚本修改要求" });
     await user.clear(scriptInstruction);
     await user.type(scriptInstruction, "只缩短第一句，其他内容不变。");
-    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    await user.click(screen.getByText("03 模型与高级设置"));
     await user.click(screen.getByRole("checkbox", { name: /本地编辑画面/ }));
     await user.click(screen.getByRole("button", { name: /人物纪实/ }));
 
@@ -1282,17 +1392,17 @@ describe("Studio client", () => {
     expect(alert).not.toHaveTextContent("macos:Retired");
     expect(alert).not.toHaveTextContent("asset.prepare");
     expect(alert).not.toHaveTextContent("script.draft");
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeDisabled();
 
     await user.click(screen.getByRole("button", { name: /查看继承设置/ }));
-    await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
+    await user.click(screen.getByText("03 模型与高级设置"));
     await user.selectOptions(screen.getByRole("combobox", { name: "编剧能力" }), "python-template-v1");
     await user.selectOptions(screen.getByRole("combobox", { name: "导演本次模型" }), "");
     await user.click(screen.getByRole("button", { name: "用当前策略的可用来源替换" }));
     await user.click(screen.getByRole("radio", { name: /Tingting/ }));
 
     await waitFor(() => expect(screen.queryByRole("alert", { name: /上一版有/ })).not.toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeEnabled();
   });
 
   it("opens inherited settings and the asset source controls from the rework source shortcut", async () => {
@@ -1316,14 +1426,14 @@ describe("Studio client", () => {
       await user.click(screen.getByRole("button", { name: "调整来源" }));
 
       expect(inheritedToggle).toHaveAttribute("aria-expanded", "true");
-      expect(screen.getByRole("button", { name: /更多：素材来源与制作细节/ })).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByText("03 模型与高级设置").closest("details")).toHaveAttribute("open");
       expect(screen.getByRole("checkbox", { name: /Pexels 图库/ })).toBeVisible();
       expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
       expect(screen.getByRole("button", { name: "收起来源" })).toBeInTheDocument();
 
       await user.click(screen.getByRole("button", { name: "收起来源" }));
-      expect(screen.getByRole("button", { name: /更多：素材来源与制作细节/ })).toHaveAttribute("aria-expanded", "false");
-      expect(screen.queryByRole("checkbox", { name: /Pexels 图库/ })).not.toBeInTheDocument();
+      expect(screen.getByText("03 模型与高级设置").closest("details")).not.toHaveAttribute("open");
+      expect(screen.getByRole("checkbox", { name: /Pexels 图库/, hidden: true })).not.toBeVisible();
     } finally {
       HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
     }
@@ -1361,7 +1471,9 @@ describe("Studio client", () => {
 
       const inheritedToggle = await screen.findByRole("button", { name: /查看继承设置/ });
       await user.click(inheritedToggle);
-      await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
+      // 来源池收在「02 画面与声音」组里：先展开组，再展开高级区。
+      await user.click(screen.getByText("02 画面与声音"));
+      await user.click(screen.getByText("03 模型与高级设置"));
       expect(screen.getByRole("checkbox", { name: /Pexels 图库/ })).toBeVisible();
       scrollIntoView.mockClear();
 
@@ -1402,7 +1514,7 @@ describe("Studio client", () => {
 
     await user.click(await screen.findByRole("button", { name: "用当前策略的可用来源替换" }));
     await waitFor(() => expect(screen.queryByText(/上一版有.*项已失效/)).not.toBeInTheDocument());
-    const start = screen.getByRole("button", { name: "开始制作" });
+    const start = screen.getByRole("button", { name: "开始前期构思" });
     await waitFor(() => expect(start).toBeEnabled());
     await user.click(start);
 
@@ -1455,7 +1567,7 @@ describe("Studio client", () => {
 
     expect(screen.queryByRole("radio", { name: /历史模板/ })).not.toBeInTheDocument();
     expect(screen.queryByText(/上一版有.*项已失效/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeEnabled();
     expect(studioApi.templates).not.toHaveBeenCalled();
   });
 
@@ -1502,8 +1614,8 @@ describe("Studio client", () => {
 
     expect(screen.queryByRole("radio", { name: /历史模板新版/ })).not.toBeInTheDocument();
     expect(screen.queryByText(/上一版有.*项已失效/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ title: "旧模板版本返工" }));
     expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty("template");
     expect(studioApi.templates).not.toHaveBeenCalled();
@@ -1559,10 +1671,10 @@ describe("Studio client", () => {
 
     expect(await screen.findByText(/上一版有 1 项已失效，暂不能开工/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /查看继承设置/ }));
-    await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
+    await user.click(screen.getByText("03 模型与高级设置"));
     await user.selectOptions(screen.getByRole("combobox", { name: "视觉审片员能力" }), "deepseek-visual-review-v1");
     await waitFor(() => expect(screen.queryByText(/上一版有.*项已失效/)).not.toBeInTheDocument());
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalled();
     expect(onSubmit.mock.calls[0]?.[0].providers).toMatchObject({ visualReview: "deepseek-visual-review-v1" });
   });
@@ -1582,7 +1694,7 @@ describe("Studio client", () => {
     render(<NewRunDialog open providers={providersWithPaidVisuals} onClose={() => undefined} onSubmit={onSubmit} />);
 
     await user.click(screen.getByRole("radio", { name: /允许 AI 生成画面，按实际镜头报价/ }));
-    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    await user.click(screen.getByText("03 模型与高级设置"));
     await user.click(screen.getByRole("checkbox", { name: /本地编辑画面/ }));
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeDisabled();
@@ -1590,7 +1702,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "证据图解能力测试");
     await user.type(screen.getByLabelText("内容角度"), "只开放正式排版能力");
     await user.type(screen.getByLabelText("目标受众"), "内容创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ visualReview: "deepseek-visual-review-v1" }),
@@ -1608,7 +1720,7 @@ describe("Studio client", () => {
     />);
 
     expect(screen.queryByRole("radio", { name: /照片故事/ })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByText("更多：素材来源与制作细节"));
+    await userEvent.click(screen.getByText("03 模型与高级设置"));
     expect(screen.getByRole("checkbox", { name: /本地编辑画面/ })).not.toBeChecked();
   });
 
@@ -1621,7 +1733,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "一条自定义时长的视频");
     await user.type(screen.getByLabelText("内容角度"), "验证显式时长不依赖模板");
     await user.type(screen.getByLabelText("目标受众"), "内容创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       durationSeconds: 27,
@@ -1647,7 +1759,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "动态时长合同测试");
     await user.type(screen.getByLabelText("内容角度"), "让完整表达决定最终时长");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       durationSeconds: 30,
@@ -1673,7 +1785,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "时长输入回归");
     await user.type(screen.getByLabelText("内容角度"), "清空不能改写已确认的时长");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       durationSeconds: 45,
       durationRange: { minSeconds: 30, maxSeconds: 180 },
@@ -1742,7 +1854,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "视觉审片必须进入生产单");
     await user.type(screen.getByLabelText("内容角度"), "验证可选模型角色的开关");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ visualReview: "deepseek-visual-review-v1" }),
     }));
@@ -1756,7 +1868,7 @@ describe("Studio client", () => {
     const onClose = vi.fn();
     render(<NewRunDialog open providers={providers} onClose={onClose} onSubmit={async () => undefined} />);
 
-    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    await user.click(screen.getByText("03 模型与高级设置"));
     const semanticRank = screen.getByRole("checkbox", { name: /AI 候选画面排序/ });
     const visualReview = screen.getByRole("checkbox", { name: /视觉审片/ });
 
@@ -1800,7 +1912,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "参考镜头语法生成新视频");
     await user.type(screen.getByLabelText("内容角度"), "借鉴制作语法但不复制内容");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       referenceVideo: { uploadId: "67d86948-5517-4b17-8da1-b0a695159d4d", label: "参考节奏.mp4" },
@@ -1894,7 +2006,7 @@ describe("Studio client", () => {
 
     expect(remove).not.toHaveBeenCalled();
     expect(screen.queryByText("参考节奏.mp4")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1", boundaryGates: "user-confirmed-v1" },
     }));
@@ -1958,16 +2070,16 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("radio", { name: /允许 AI 生成画面，按实际镜头报价/ }));
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeDisabled();
-    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    await user.click(screen.getByText("03 模型与高级设置"));
     await user.selectOptions(screen.getByRole("combobox", { name: "Seedance 视频生成 本次模型" }), "premium-model");
 
     expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
     expect(screen.getByText(/当前模型参考单价约 ¥3\/镜头/)).toBeInTheDocument();
-    expect(screen.getByLabelText("费用方式")).toHaveTextContent(/按实际方案报价.*逐项人工确认/);
+    expect(screen.getByLabelText("费用方式")).toHaveTextContent(/画面：按实际方案逐项报价，确认后才执行/);
     await user.type(screen.getByLabelText("视频标题"), "为这条视频选择生成模型");
     await user.type(screen.getByLabelText("内容角度"), "验证逐镜报价进入生产单");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ visualReview: "deepseek-visual-review-v1" }),
       economics: {
@@ -2003,13 +2115,13 @@ describe("Studio client", () => {
     render(<NewRunDialog open providers={providersWithModels} creatorSettings={creatorSettings} onClose={() => undefined} onSubmit={vi.fn()} />);
 
     await user.click(await screen.findByRole("radio", { name: /允许 AI 生成画面，按实际镜头报价/ }));
-    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    await user.click(screen.getByText("03 模型与高级设置"));
 
     const modelSelect = screen.getByRole("combobox", { name: "Seedance 视频生成 本次模型" });
     expect(modelSelect).toHaveValue("");
     expect(within(modelSelect).getAllByRole("option", { name: "使用推荐：economy-model" })).not.toHaveLength(0);
     expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("费用方式")).toHaveTextContent(/按实际方案报价.*逐项人工确认/);
+    expect(screen.getByLabelText("费用方式")).toHaveTextContent(/画面：按实际方案逐项报价，确认后才执行/);
   });
 
   it("treats DeepSeek visual review as a subscription without a cash quote and explains final dual review", async () => {
@@ -2025,7 +2137,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "按次审片预算");
     await user.type(screen.getByLabelText("内容角度"), "审片不占付费镜头额度");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ visualReview: "deepseek-visual-review-v1" }),
       economics: {
@@ -2058,11 +2170,14 @@ describe("Studio client", () => {
     render(<NewRunDialog open providers={providersWithMeteredVoice} onClose={() => undefined} onSubmit={onSubmit} />);
 
     expect(screen.queryByText("1 次付费配音")).not.toBeInTheDocument();
-    expect(screen.getByText(/配音自动计入已记录费用，不弹现金报价；失败会停在配音步骤/)).toBeInTheDocument();
+    expect(screen.getByText(/配音按量计费，执行时自动调用并记账，不另弹报价确认；失败会停在配音步骤/)).toBeInTheDocument();
+    expect(screen.getByLabelText("费用方式")).toHaveTextContent(/配音：.*自动按量计费/);
+    expect(screen.getByRole("button", { name: "开始前期构思" }).closest("footer")).toHaveTextContent(/配音：.*自动按量计费，不另弹逐笔报价/);
+    expect(screen.queryByText(/实际花费仍会在确认方案时逐次报价并等你确认/)).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("视频标题"), "按次配音预算");
     await user.type(screen.getByLabelText("内容角度"), "声音调用独立确认");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ voice: "minimax-tts-v1" }),
@@ -2086,7 +2201,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "系统旁白选择也要真正生效");
     await user.type(screen.getByLabelText("内容角度"), "确认所选音色进入制作参数");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ voice: "macos-say-v1" }),
@@ -2125,7 +2240,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "云端配音初始化不能产生竞态");
     await user.type(screen.getByLabelText("内容角度"), "即使音色目录仍在加载也应提交可执行配置");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ voice: "minimax-tts-v1" }),
@@ -2145,7 +2260,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "用编剧写出第一条真的能拍的脚本");
     await user.type(screen.getByLabelText("内容角度"), "把清单变成三个具体动作");
     await user.type(screen.getByLabelText("目标受众"), "普通上班族");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({
@@ -2181,15 +2296,15 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("radio", { name: /允许 AI 生成画面，按实际镜头报价/ }));
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeDisabled();
-    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    await user.click(screen.getByText("03 模型与高级设置"));
 
     expect(screen.getByRole("checkbox", { name: /Seedance 视频生成/ })).toBeChecked();
     const localBaseline = screen.getByRole("checkbox", { name: /本地编辑画面/ });
     expect(localBaseline).not.toBeChecked();
     expect(localBaseline).toBeEnabled();
     expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("费用方式")).toHaveTextContent(/按实际方案报价.*逐项人工确认/);
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(screen.getByLabelText("费用方式")).toHaveTextContent(/画面：按实际方案逐项报价，确认后才执行/);
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({
         assets: "ai-shot-router-v1",
@@ -2231,11 +2346,11 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("内容角度"), "模板要求真实来源时不能交给导演猜");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
     await user.click(screen.getByRole("radio", { name: /允许 AI 生成画面，按实际镜头报价/ }));
-    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    await user.click(screen.getByText("03 模型与高级设置"));
     await user.click(screen.getByRole("checkbox", { name: /Pexels 图库/ }));
 
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       director: expect.objectContaining({ assetProviderIds: ["seedance-video-v1"] }),
     }));
@@ -2249,11 +2364,11 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "没有画面来源不能开始制作");
     await user.type(screen.getByLabelText("内容角度"), "验证真正的制作能力边界");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    await user.click(screen.getByText("03 模型与高级设置"));
     await user.click(screen.getByRole("checkbox", { name: /Pexels 图库/ }));
 
     expect(screen.getByText(/当前素材池没有任何可用画面来源/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeDisabled();
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
@@ -2271,15 +2386,15 @@ describe("Studio client", () => {
     }];
     render(<NewRunDialog open providers={providersWithoutVisualReview} onClose={() => undefined} onSubmit={onSubmit} />);
 
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeDisabled();
     expect(onSubmit).not.toHaveBeenCalled();
     const riskChoice = screen.getByRole("checkbox", { name: /先生成首版，稍后审片/ });
     await user.click(riskChoice);
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeEnabled();
     await user.type(screen.getByLabelText("视频标题"), "视觉审片缺席时的首版");
     await user.type(screen.getByLabelText("内容角度"), "先生成可播放版本，再补充审片");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       visualReviewPolicy: "allow_unreviewed_first_cut",
       providers: expect.not.objectContaining({ visualReview: expect.anything() }),
@@ -2317,7 +2432,7 @@ describe("Studio client", () => {
       template: { templateId: "retired-template" }, durationSeconds: 30,
       voiceDirection: { profileId: "macos:Tingting", rate: 175, pauseScale: 1.2, masteringPreset: "natural" },
     }} onClose={() => undefined} onSubmit={onSubmit} />);
-    await userEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    await userEvent.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       angle: "全片为 AI 示意，不讲实验事实", durationSeconds: 30,
       voiceDirection: expect.objectContaining({ rate: 175, pauseScale: 1.2 }),
@@ -2376,9 +2491,9 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("radio", { name: /允许 AI 生成画面，按实际镜头报价/ }));
     expect(screen.getByRole("radio", { name: /仅免费画面/ })).toBeChecked();
     expect(screen.getByRole("radio", { name: /允许 AI 生成画面，按实际镜头报价/ })).toBeDisabled();
-    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    await user.click(screen.getByText("03 模型与高级设置"));
     expect(screen.getByRole("checkbox", { name: /本地编辑画面/ })).toBeChecked();
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       editorial: expect.objectContaining({ verdict: "produce_image_story" }),
       economics: expect.objectContaining({ allowMeteredProviders: false }),
@@ -2405,7 +2520,7 @@ describe("Studio client", () => {
       />,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    await userEvent.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       editorial: expect.objectContaining({ verdict: "produce_video" }),
     }));
@@ -2437,9 +2552,9 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
-    expect(await screen.findByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "开始前期构思" })).toBeEnabled();
     expect(screen.queryByText(/推荐模板当前不可用/)).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalled();
     expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty("template");
     expect(studioApi.templates).not.toHaveBeenCalled();
@@ -2462,9 +2577,9 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
-    expect(await screen.findByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "开始前期构思" })).toBeEnabled();
     expect(screen.queryByRole("heading", { name: "视频模板" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalled();
     expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty("template");
   });
@@ -2495,7 +2610,7 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("button", { name: /人物纪实/ }));
     expect(screen.getByRole("button", { name: /高级微调/ })).toHaveTextContent("170 字/分 · 停顿 1.2× · 贴近人声");
 
-    const start = screen.getByRole("button", { name: "开始制作" });
+    const start = screen.getByRole("button", { name: "开始前期构思" });
     expect(start).toBeEnabled();
     expect(start.closest("form")?.checkValidity()).toBe(true);
     await user.click(start);
@@ -2532,7 +2647,7 @@ describe("Studio client", () => {
     />);
 
     await waitFor(() => expect(screen.getByRole("button", { name: /高级微调/ })).toHaveTextContent("185 字/分 · 停顿 1.0× · 自然"));
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       voiceDirection: {
@@ -2580,7 +2695,7 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       voiceDirection: expect.objectContaining({ profileId: "minimax:Chinese (Mandarin)_News_Anchor" }),
@@ -2606,7 +2721,7 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       voiceDirection: {
@@ -2642,7 +2757,7 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       voiceDirection: {
@@ -2745,12 +2860,12 @@ describe("Studio client", () => {
     const assetInstruction = screen.getByRole("textbox", { name: "画面素材修改要求" });
     expect(assetInstruction).toHaveValue("只替换第三镜；没有合格素材时进入 人工补充素材，禁止使用带字素材和说明卡。");
     await user.click(screen.getByRole("button", { name: /查看继承设置/ }));
-    await user.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
+    await user.click(screen.getByText("03 模型与高级设置"));
     expect(screen.getByRole("combobox", { name: "编剧本次模型" })).toHaveValue("gpt-primary");
     await user.selectOptions(screen.getByRole("combobox", { name: "编剧本次模型" }), "deepseek-backup");
     await user.clear(assetInstruction);
     await user.type(assetInstruction, "第三镜改用无字实拍母片，其他镜头不得变化。");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({
@@ -2879,6 +2994,9 @@ describe("Studio client", () => {
     await userEvent.clear(scriptInstruction);
     await userEvent.type(scriptInstruction, "关闭弹窗后不应保留的本地编辑");
     await userEvent.click(screen.getByTitle("关闭"));
+    // 有修改时关闭受保护：必须显式放弃才会丢弃输入并关闭（误关保护）。
+    expect(await screen.findByText("要放弃本次填写吗？")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "放弃并关闭" }));
     await userEvent.click(await screen.findByRole("button", { name: "调整方案后重新制作" }));
     expect(await screen.findByRole("heading", { name: "调整方案后重新制作" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "脚本修改要求" })).toHaveValue(rework.nodeInstructions.script);
@@ -2889,7 +3007,7 @@ describe("Studio client", () => {
     fireEvent.blur(screen.getByLabelText("最长时长"));
     expect(screen.getByLabelText("最长时长")).toHaveValue(36);
 
-    await userEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    await userEvent.click(screen.getByRole("button", { name: "开始前期构思" }));
     await waitFor(() => expect(start).toHaveBeenCalledWith(expect.objectContaining({
       runPurpose: input.runPurpose ?? "production",
       durationRange: { minSeconds: 20, maxSeconds: 36 },
@@ -3042,7 +3160,7 @@ describe("Studio client", () => {
     expect(screen.getByText("本轮未选择需要重新规划 / 生成的镜头")).toBeInTheDocument();
     expect(screen.getByText("其余 3 个镜头计划沿用：1、2、3")).toBeInTheDocument();
 
-    const startButton = screen.getByRole("button", { name: "开始制作" });
+    const startButton = screen.getByRole("button", { name: "开始前期构思" });
     await waitFor(() => expect(startButton).toBeEnabled());
     await user.click(startButton);
     await waitFor(() => expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -3125,7 +3243,7 @@ describe("Studio client", () => {
     expect(within(scope).getByText(/本轮未选择/)).toBeInTheDocument();
     expect(within(scope).queryByText(/全片问题/)).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     await waitFor(() => expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
       rework: expect.objectContaining({ affectedScenePositions: [] }),
     })));
@@ -3152,7 +3270,7 @@ describe("Studio client", () => {
     expect(scriptInstruction).not.toBeRequired();
     expect(screen.getByText("脚本：沿用上一版脚本，本轮不重跑编剧。")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     await waitFor(() => expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
       rework: expect.objectContaining({
         affectedScenePositions: [5],
@@ -3196,7 +3314,7 @@ describe("Studio client", () => {
     expect(within(scope).getByText("本轮选择 4 个镜头：1、2、3、4")).toBeInTheDocument();
     expect(within(scope).getByText("其余 1 个镜头计划沿用：5")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     await waitFor(() => expect(onSubmit).toHaveBeenLastCalledWith(expect.objectContaining({
       rework: expect.objectContaining({ affectedScenePositions: [1, 2, 3, 4] }),
     })));
@@ -3659,12 +3777,12 @@ describe("Studio client", () => {
     expect(screen.getByRole("combobox", { name: "建议时长" })).toHaveValue("30");
     expect(screen.getByLabelText("终审模式")).toHaveTextContent("人工终审");
     expect(await screen.findByRole("button", { name: /高级微调/ })).toHaveTextContent("205 字/分");
-    await user.click(screen.getByText("更多：素材来源与制作细节"));
+    await user.click(screen.getByText("03 模型与高级设置"));
     expect(screen.getByRole("checkbox", { name: /Pexels 图库/ })).toBeChecked();
     await user.type(screen.getByLabelText("视频标题"), "默认值真实进入生产单");
     await user.type(screen.getByLabelText("内容角度"), "验证总配置不是展示页");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       platform: "bilibili",
       durationSeconds: 30,
@@ -3703,7 +3821,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "免费配方不能夹带付费素材");
     await user.type(screen.getByLabelText("内容角度"), "配置优先级必须与成本承诺一致");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       economics: expect.objectContaining({ allowMeteredProviders: false }),
@@ -3733,7 +3851,7 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "素材路由不能把自己当素材");
     await user.type(screen.getByLabelText("内容角度"), "验证编排器与素材来源的边界");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
-    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       director: expect.objectContaining({ assetProviderIds: ["pexels-stock-v1"] }),
@@ -3749,8 +3867,8 @@ describe("Studio client", () => {
 
     expect(screen.queryByRole("option", { name: "测试音轨" })).not.toBeInTheDocument();
     expect(screen.getByText(/缺少正式生产能力：配音/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
-    await userEvent.setup().click(screen.getByText("更多：素材来源与制作细节"));
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toBeDisabled();
+    await userEvent.setup().click(screen.getByText("03 模型与高级设置"));
     expect(screen.getByRole("button", { name: /04配音声音导演未配置/ })).toBeInTheDocument();
   });
 
@@ -3765,7 +3883,7 @@ describe("Studio client", () => {
     await waitFor(() => expect(screen.getByLabelText("视频标题")).toHaveFocus());
     screen.getByTitle("关闭").focus();
     await user.keyboard("{Shift>}{Tab}{/Shift}");
-    expect(screen.getByRole("button", { name: "开始制作" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "开始前期构思" })).toHaveFocus();
 
     rerender(<NewRunDialog open={false} providers={providers} onClose={() => undefined} onSubmit={async () => undefined} />);
     expect(trigger).toHaveFocus();
@@ -3848,7 +3966,7 @@ describe("Studio client", () => {
     expect(screen.getByText(/建议：把另外两个坑各补一句/)).toBeInTheDocument();
     // 审计自己的措辞是 blocking；对用户它始终只是建议，界面不能写成"阻断"。
     expect(screen.getByText("建议先改")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /做完了，进入下一步/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /确认当前步骤，进入下一步/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /批准进入发布包/ })).not.toBeInTheDocument();
   });
 
@@ -3868,7 +3986,9 @@ describe("Studio client", () => {
     };
     render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
 
-    await user.click(screen.getByRole("button", { name: /做完了，进入下一步/ }));
+    expect(screen.getByRole("status", { name: "当前决定" })).not.toHaveTextContent("下一节点如需付费，会先报价并等你授权");
+
+    await user.click(screen.getByRole("button", { name: /确认当前步骤，进入下一步/ }));
 
     expect(screen.getByRole("dialog", { name: /确认放行「内容简报」/ })).toBeInTheDocument();
     expect(screen.getByText(/这一步的结果就固定下来/)).toBeInTheDocument();
@@ -4000,7 +4120,7 @@ describe("Studio client", () => {
     const workspace = screen.getByRole("group", { name: "创作规划 · 创作规划制片" });
     expect(within(workspace).getByRole("region", { name: "创作规划阶段" })).toBeInTheDocument();
     // 阶段模型在这里就能换：停点上改的必须是它真正会用的那一项。
-    expect(within(workspace).getByRole("combobox", { name: /下次使用脚本模型/ })).toBeInTheDocument();
+    expect(within(workspace).getByRole("combobox", { name: /脚本阶段模型/ })).toBeInTheDocument();
     // 规划节点自己的"本次制作选择"只覆盖编剧一项能力，与阶段面板说法不同、还会显示成"已失效"。
     expect(within(workspace).queryByRole("region", { name: "创作规划制片本次制作选择" })).not.toBeInTheDocument();
     // 规划还没启动，没有可编辑的输入版本；不能给一个点了没反应的按钮。
@@ -4247,11 +4367,11 @@ describe("Studio client", () => {
 
     const dualReview = screen.getByRole("region", { name: "双模型审片结果" });
     const caveat = within(dualReview).getByRole("note");
-    expect(within(caveat).getByText("有 1 份意见自己的独立审计没通过")).toBeInTheDocument();
+    expect(within(caveat).getByText("有 1 份审片报告未通过报告质量复核")).toBeInTheDocument();
     expect(caveat).toHaveTextContent("AI 视觉审片 · gpt-5.6-sol");
     // 说清审计查的是什么，避免被读成对作品的判决。
-    expect(caveat).toHaveTextContent("这份审片报告本身站不站得住");
-    expect(caveat).toHaveTextContent("作品能不能发由你定");
+    expect(caveat).toHaveTextContent("需要重点核对的是报告的依据，不等于作品已被否决");
+    expect(caveat).toHaveTextContent("发布仍需满足页面列出的必要条件");
     // 逐分支标注：只有没过质检的那条被点名，另一条不受牵连。
     expect(within(dualReview).getByText(/gpt-5\.6-sol · 76 分 · 0 项问题 · 独立审计未通过/)).toBeInTheDocument();
     expect(within(dualReview).getByText(/deepseek-flash · 80 分 · 0 项问题/).textContent).toBe("deepseek-flash · 80 分 · 0 项问题");
@@ -4293,7 +4413,51 @@ describe("Studio client", () => {
     expect(within(singleReview).getByText(/deepseek-flash · 90 分 · 0 项问题/)).toBeInTheDocument();
     expect(within(singleReview).queryByText(/缺少.*独立审片结果/)).not.toBeInTheDocument();
     // 单审的独立复核不通过只提示这份意见需重点核对，不能因分支汇总遗漏而悄悄消失。
-    expect(within(singleReview).getByRole("note")).toHaveTextContent("有 1 份意见自己的独立审计没通过");
+    expect(within(singleReview).getByRole("note")).toHaveTextContent("有 1 份审片报告未通过报告质量复核");
+  });
+
+  it("collapses long review summaries behind a labeled excerpt with the full text expandable", () => {
+    const longSummary = "审片范围：rendered_video 成片。"
+      + "这一镜的采样帧显示双手在水流下搓洗，泡沫清晰可见，背景为厨房水槽，与脚本要求一致。".repeat(12);
+    const run: StudioRunDetail = {
+      ...runDetail,
+      nodes: [
+        ...runDetail.nodes.filter((node) => node.id !== "final-review"),
+        {
+          id: "visual-review",
+          label: "视觉审片",
+          role: "视觉审片员",
+          status: "succeeded",
+          artifactIds: [],
+          qualityGateResults: [],
+          output: { report: {
+            recommendation: "revise",
+            confidence: 0.72,
+            summary: longSummary,
+            scores: { composition: 77, continuity: 76, pacing: 76, legibility: 88, safety: 92 },
+            findings: [],
+            reviewScope: {
+              evidenceId: "b".repeat(64),
+              actualModels: [{ providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash" }],
+            },
+          } },
+        },
+        runDetail.nodes.find((node) => node.id === "final-review")!,
+      ],
+    };
+
+    render(<RunWorkbench run={run} providers={providers} decisionPending={false} onDecision={vi.fn()} />);
+
+    const region = screen.getByRole("region", { name: "独立质量复核结果" });
+    // 长结论默认收起：默认 DOM 里只有节选，完整原文在关闭的 details 里。
+    const details = within(region).getByText("查看完整结论原文").closest("details")!;
+    expect((details as HTMLDetailsElement).open).toBe(false);
+    expect(details).toHaveTextContent(longSummary);
+    // 节选带明确标注，不把截断文本伪装成完整结论（合并结论与分支各有一份）。
+    expect(within(region).getAllByText(/原文节选/).length).toBeGreaterThan(0);
+    // 展开后能读到全部原意见。
+    fireEvent.click(within(region).getByText("查看完整结论原文"));
+    expect((details as HTMLDetailsElement).open).toBe(true);
   });
 
   it("keeps an older workflow read-only and offers a new production instead of broken review actions", async () => {
@@ -4944,7 +5108,7 @@ describe("Studio client", () => {
 
     expect(screen.getByRole("heading", { name: "试片提出质量意见，等你决定" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "调整方案" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "承担这些质量意见后继续" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "接受所列质量风险，继续制作" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "终止制作" })).toBeEnabled();
 
     await user.click(screen.getByRole("button", { name: "调整方案" }));
@@ -4956,8 +5120,8 @@ describe("Studio client", () => {
     });
 
     onDecision.mockClear();
-    await user.click(screen.getByRole("button", { name: "承担这些质量意见后继续" }));
-    expect(screen.getByRole("dialog", { name: "确认承担这些质量意见后继续" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "接受所列质量风险，继续制作" }));
+    expect(screen.getByRole("dialog", { name: "接受所列质量风险，继续制作" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "确认承担并继续" }));
     expect(onDecision).toHaveBeenCalledWith({
       action: "approve",
@@ -6062,14 +6226,14 @@ describe("Studio client", () => {
     </MemoryRouter>);
 
     expect(await screen.findByText("配音连接中断")).toBeInTheDocument();
-    expect(screen.getByText(/按原预估费用计入已记录费用/)).toBeInTheDocument();
-    expect(screen.getByText(/再创建一条新的配音任务/)).toBeInTheDocument();
+    expect(screen.getByText(/先按预估金额登记上一笔，再创建新的配音任务/)).toBeInTheDocument();
+    expect(screen.getByText(/新任务可能再次产生费用/)).toBeInTheDocument();
     expect(screen.queryByText("0 个镜头")).not.toBeInTheDocument();
     expect(screen.queryByText(/按 taskId 核对/)).not.toBeInTheDocument();
     expect(screen.queryByRole("radio", { name: "未扣费" })).not.toBeInTheDocument();
 
     expect(screen.getByText("按预估费用保守记账")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "按预估记账并重新配音" }));
+    await userEvent.click(screen.getByRole("button", { name: "登记预估费用并新建配音任务" }));
     await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(retry).toHaveBeenCalledWith("run-1", "voice"));
     expect(reconcile.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
@@ -6134,7 +6298,7 @@ describe("Studio client", () => {
     expect(screen.getByText("按预估费用保守记账")).toBeInTheDocument();
     expect(screen.queryByText("服务商账单核对结果")).not.toBeInTheDocument();
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "按预估记账并重新配音" }));
+    await userEvent.click(screen.getByRole("button", { name: "登记预估费用并新建配音任务" }));
     expect(reconcile).toHaveBeenCalledWith("voice", expect.objectContaining({ outcome: "confirmed_charged" }));
   });
 });
@@ -6235,10 +6399,10 @@ describe("joint-v1 planning stages panel (B4)", () => {
     />);
 
     const panel = screen.getByLabelText("创作规划阶段");
-    const treatmentModelSelect = within(panel).getByLabelText(/下次使用构思模型/);
+    const treatmentModelSelect = within(panel).getByLabelText(/构思阶段模型/);
     await userEvent.selectOptions(treatmentModelSelect, "treatment-model-b");
     expect(configure).not.toHaveBeenCalled();
-    await userEvent.click(within(panel).getByRole("button", { name: "保存模型" }));
+    await userEvent.click(within(panel).getByRole("button", { name: "保存模型选择" }));
     expect(configure).toHaveBeenCalledWith("creative-planning", {
       expectedRunRevision: 3,
       planningStageId: "treatment",
@@ -6279,11 +6443,11 @@ describe("joint-v1 planning stages panel (B4)", () => {
     />);
 
     const panel = screen.getByLabelText("创作规划阶段");
-    await userEvent.selectOptions(within(panel).getByLabelText(/下次使用构思模型/), "treatment-model-b");
+    await userEvent.selectOptions(within(panel).getByLabelText(/构思阶段模型/), "treatment-model-b");
     const retryButton = screen.getByRole("button", { name: "重试失败步骤" });
     expect(retryButton).toBeDisabled();
     expect(screen.getByText(/模型选择尚未保存/)).toBeInTheDocument();
-    await userEvent.click(within(panel).getByRole("button", { name: "保存模型" }));
+    await userEvent.click(within(panel).getByRole("button", { name: "保存模型选择" }));
     expect(await within(panel).findByRole("alert")).toHaveTextContent("模型保存冲突");
     expect(within(panel).getByText("treatment-model-a")).toBeInTheDocument();
     expect(retryButton).toBeDisabled();
@@ -6366,12 +6530,12 @@ describe("planning stage model selection resolves the bound provider (B4-FIX)", 
     render(<RunWorkbench run={boundRun} providers={twoWriterProviders} decisionPending={false} onDecision={async () => undefined} onConfigureNode={configure} />);
 
     const panel = screen.getByLabelText("创作规划阶段");
-    const select = within(panel).getByLabelText(/下次使用脚本模型/) as HTMLSelectElement;
+    const select = within(panel).getByLabelText(/脚本阶段模型/) as HTMLSelectElement;
     const optionValues = Array.from(select.options).map((option) => option.value);
     expect(optionValues).toEqual(["screenwriter-model-one", "screenwriter-model-two"]);
     await userEvent.selectOptions(select, "screenwriter-model-two");
     expect(configure).not.toHaveBeenCalled();
-    await userEvent.click(within(panel).getByRole("button", { name: "保存模型" }));
+    await userEvent.click(within(panel).getByRole("button", { name: "保存模型选择" }));
     expect(configure).toHaveBeenCalledWith("creative-planning", {
       expectedRunRevision: 3,
       planningStageId: "script",

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { creatorContainerViewId, creatorViewId, isCreatorNestedField, isCreatorTopLevelField } from "../creator-document-policy.js";
 import { unsplashPublicUrl } from "./UnsplashAttribution.js";
 import { hasStockAttribution, StockAttribution, stockPublicUrl, stockSourceUrl } from "./StockAttribution.js";
-import { humanizeCreativeText, platformLabel, providerLabel } from "../presentation.js";
+import { platformLabel, providerLabel } from "../presentation.js";
 
 interface NodeDeliveryPreviewProps {
   nodeId: string;
@@ -234,33 +234,33 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
   return (
     <div className="node-readable-preview">
       {primary.length ? <dl className="node-preview-summary">{primary.map((key) => (
-        <div key={key}><dt>{fieldLabel(key)}</dt><dd>{formatScalar(record[key], key)}</dd></div>
+        <div key={key}><dt>{fieldLabel(key, viewId)}</dt><dd>{formatScalar(record[key], key)}</dd></div>
       ))}</dl> : null}
       {nested.map((entry) => <section className="node-preview-section" key={entry.key}>
-        <h4>{fieldLabel(entry.key)}</h4>
+        <h4>{fieldLabel(entry.key, viewId)}</h4>
         <dl className="node-preview-facts">{Object.entries(entry.value).filter(([key, item]) => {
           const nestedViewId = creatorContainerViewId(entry.key);
           return (nestedViewId ? isCreatorTopLevelField(nestedViewId, key, item) : isCreatorNestedField(key)) && hasDisplayScalar(item);
         }).map(([key, item]) => (
-          <div key={key}><dt>{fieldLabel(key)}</dt><dd>{formatScalar(item, key)}</dd></div>
+          <div key={key}><dt>{fieldLabel(key, viewId)}</dt><dd>{formatScalar(item, key)}</dd></div>
         ))}</dl>
       </section>)}
       {assetRoutes.length ? <AssetRoutingPreview routes={assetRoutes} /> : null}
       {candidateScenes.length ? <AssetCandidateScenePreview scenes={candidateScenes} /> : null}
       {rankingScenes.length ? <AssetRankingPreview scenes={rankingScenes} /> : null}
-      {collections.map((entry) => <CollectionPreview collectionKey={entry.key} items={entry.value} key={entry.key} />)}
+      {collections.map((entry) => <CollectionPreview collectionKey={entry.key} items={entry.value} viewId={viewId} key={entry.key} />)}
     </div>
   );
 }
 
-function CollectionPreview({ collectionKey, items }: { collectionKey: string; items: unknown[] }) {
+function CollectionPreview({ collectionKey, items, viewId }: { collectionKey: string; items: unknown[]; viewId: string }) {
   const initialCount = collectionKey === "findings" ? 5 : 8;
   const { expanded, hiddenCount, setExpanded, visibleItems } = useExpandedItems(items, initialCount);
-  const label = fieldLabel(collectionKey);
+  const label = fieldLabel(collectionKey, viewId);
 
   return <section className="node-preview-section">
     <h4>{label}<span>{items.length}</span></h4>
-    <div className="node-preview-items">{visibleItems.map((item, index) => <PreviewItem collectionKey={collectionKey} index={index} item={item} key={index} />)}</div>
+    <div className="node-preview-items">{visibleItems.map((item, index) => <PreviewItem collectionKey={collectionKey} index={index} item={item} viewId={viewId} key={index} />)}</div>
     <PreviewExpandButton expanded={expanded} hiddenCount={hiddenCount} initialCount={initialCount} label={label} totalCount={items.length} onToggle={() => setExpanded((current) => !current)} />
   </section>;
 }
@@ -273,13 +273,20 @@ function AssetCandidateScenePreview({ scenes }: { scenes: unknown[] }) {
       const scene = asRecord(item);
       if (!scene) return null;
       const candidates = Array.isArray(scene.candidates) ? scene.candidates : [];
-      return <article className="asset-routing-scene" key={index}>
-        <header><div><strong>镜头 {formatScalar(scene.scene_position ?? index + 1)}</strong><small>{formatScalar(scene.query)}</small></div><span>{candidates.length} 个候选</span></header>
-        <div className="asset-candidate-strip">{candidates.slice(0, 6).map((candidate, candidateIndex) => <AssetCandidate candidate={candidate} index={candidateIndex} key={candidateIndex} />)}</div>
-      </article>;
+      return <AssetCandidateScene scene={scene} candidates={candidates} index={index} key={index} />;
     })}</div>
     <PreviewExpandButton expanded={expanded} hiddenCount={hiddenCount} initialCount={12} label="候选镜头" totalCount={scenes.length} onToggle={() => setExpanded((current) => !current)} />
   </section>;
+}
+
+function AssetCandidateScene({ scene, candidates, index }: { scene: Record<string, unknown>; candidates: unknown[]; index: number }) {
+  const { expanded, hiddenCount, setExpanded, visibleItems } = useExpandedItems(candidates, 6);
+  const sceneLabel = sceneIdentity(scene.scene_position, index);
+  return <article className="asset-routing-scene">
+    <header><div><strong>{sceneLabel}</strong><small>{formatScalar(scene.query)}</small></div><span>{candidates.length} 个候选</span></header>
+    <div className="asset-candidate-strip">{visibleItems.map((candidate, candidateIndex) => <AssetCandidate candidate={candidate} index={candidateIndex} sceneLabel={sceneLabel} key={candidateIndex} />)}</div>
+    <PreviewExpandButton expanded={expanded} hiddenCount={hiddenCount} initialCount={6} label="候选" totalCount={candidates.length} onToggle={() => setExpanded((current) => !current)} />
+  </article>;
 }
 
 function AssetRankingPreview({ scenes }: { scenes: unknown[] }) {
@@ -293,16 +300,21 @@ function AssetRankingPreview({ scenes }: { scenes: unknown[] }) {
         const b = asRecord(right)?.rank;
         return (typeof a === "number" ? a : 999) - (typeof b === "number" ? b : 999);
       }) : [];
-      return <article key={index}>
-        <span>{String(scene?.scenePosition ?? index + 1).padStart(2, "0")}</span>
-        <div><strong>{formatScalar(scene?.summary)}</strong>{candidates.slice(0, 6).map((candidate, candidateIndex) => {
-          const row = asRecord(candidate);
-          return row ? <p key={candidateIndex}><b>#{formatScalar(row.rank)} · {formatScalar(row.provider, "provider")}</b>{formatScalar(row.semanticScore)} 分 · {formatScalar(row.rationale)}{row.locked === true ? " · 已锁定" : ""}</p> : null;
-        })}</div>
-      </article>;
+      return <AssetRankingScene scene={scene} candidates={candidates} index={index} key={index} />;
     })}</div>
     <PreviewExpandButton expanded={expanded} hiddenCount={hiddenCount} initialCount={12} label="语义排序" totalCount={scenes.length} onToggle={() => setExpanded((current) => !current)} />
   </section>;
+}
+
+function AssetRankingScene({ scene, candidates, index }: { scene: Record<string, unknown> | undefined; candidates: unknown[]; index: number }) {
+  const { expanded, hiddenCount, setExpanded, visibleItems } = useExpandedItems(candidates, 6);
+  return <article>
+    <span>{sceneIdentity(scene?.scenePosition, index)}</span>
+    <div><strong>{formatScalar(scene?.summary)}</strong>{visibleItems.map((candidate, candidateIndex) => {
+      const row = asRecord(candidate);
+      return row ? <p key={candidateIndex}><b>#{formatScalar(row.rank)} · {formatScalar(row.provider, "provider")}</b>{formatScalar(row.semanticScore)} 分 · {formatScalar(row.rationale)}{row.locked === true ? " · 已锁定" : ""}</p> : null;
+    })}<PreviewExpandButton expanded={expanded} hiddenCount={hiddenCount} initialCount={6} label="候选" totalCount={candidates.length} onToggle={() => setExpanded((current) => !current)} /></div>
+  </article>;
 }
 
 function AssetRoutingPreview({ routes }: { routes: unknown[] }) {
@@ -313,20 +325,28 @@ function AssetRoutingPreview({ routes }: { routes: unknown[] }) {
       const route = asRecord(item);
       if (!route) return null;
       const candidates = Array.isArray(route.candidate_shortlist) ? route.candidate_shortlist : [];
-      const scene = isScalar(route.scene_position) ? formatScalar(route.scene_position) : String(index + 1);
-      return <article className="asset-routing-scene" key={`${scene}-${index}`}>
-        <header>
-          <div><strong>镜头 {scene}</strong><small>{formatScalar(route.query)}</small></div>
-          <span>{formatScalar(route.actual_provider_id ?? route.actual_provider, "provider")}</span>
-        </header>
-        {isScalar(route.rationale) && route.rationale ? <p>{formatAssetRoutingRationale(route.rationale)}</p> : null}
-        {candidates.length ? <div className="asset-candidate-strip">{candidates.slice(0, 6).map((candidate, candidateIndex) => (
-          <AssetCandidate candidate={candidate} index={candidateIndex} key={candidateIndex} />
-        ))}</div> : <div className="asset-candidate-empty">{emptyCandidateMessage(route)}</div>}
-      </article>;
+      return <AssetRouteScene route={route} candidates={candidates} index={index} key={index} />;
     })}</div>
     <PreviewExpandButton expanded={expanded} hiddenCount={hiddenCount} initialCount={12} label="选材镜头" totalCount={routes.length} onToggle={() => setExpanded((current) => !current)} />
   </section>;
+}
+
+function AssetRouteScene({ route, candidates, index }: { route: Record<string, unknown>; candidates: unknown[]; index: number }) {
+  const { expanded, hiddenCount, setExpanded, visibleItems } = useExpandedItems(candidates, 6);
+  const sceneLabel = sceneIdentity(route.scene_position, index);
+  return <article className="asset-routing-scene">
+    <header><div><strong>{sceneLabel}</strong><small>{formatScalar(route.query)}</small></div><span>{formatScalar(route.actual_provider_id ?? route.actual_provider, "provider")}</span></header>
+    {isScalar(route.rationale) && route.rationale ? <p>{formatAssetRoutingRationale(route.rationale)}</p> : null}
+    {candidates.length ? <><div className="asset-candidate-strip">{visibleItems.map((candidate, candidateIndex) => (
+      <AssetCandidate candidate={candidate} index={candidateIndex} sceneLabel={sceneLabel} key={candidateIndex} />
+    ))}</div><PreviewExpandButton expanded={expanded} hiddenCount={hiddenCount} initialCount={6} label="候选" totalCount={candidates.length} onToggle={() => setExpanded((current) => !current)} /></> : <div className="asset-candidate-empty">{emptyCandidateMessage(route)}</div>}
+  </article>;
+}
+
+function sceneIdentity(position: unknown, index: number): string {
+  return typeof position === "number" && Number.isInteger(position) && position > 0
+    ? `镜头 ${position}`
+    : `镜头编号未记录 · 第 ${index + 1} 条记录`;
 }
 
 function useExpandedItems<T>(items: T[], initialCount: number) {
@@ -369,13 +389,10 @@ function emptyCandidateMessage(route: Record<string, unknown>): string {
 }
 
 function formatAssetRoutingRationale(value: unknown): string {
-  const formatted = formatScalar(value);
-  return typeof value === "string"
-    ? formatted.replace(/本地\s+Provider/gi, "本地编辑画面")
-    : formatted;
+  return formatScalar(value);
 }
 
-function AssetCandidate({ candidate, index }: { candidate: unknown; index: number }) {
+function AssetCandidate({ candidate, index, sceneLabel }: { candidate: unknown; index: number; sceneLabel: string }) {
   const record = asRecord(candidate);
   if (!record) return null;
   const selected = record.selected === true;
@@ -387,7 +404,7 @@ function AssetCandidate({ candidate, index }: { candidate: unknown; index: numbe
     : "尺寸待下载后核验";
   return <figure className={selected ? "is-selected" : undefined}>
     <div className="asset-candidate-media">
-      {previewUrl ? <img alt={`候选素材 ${index + 1}`} loading="lazy" src={previewUrl} /> : <span>暂无缩略图</span>}
+      {previewUrl ? <img alt={`${sceneLabel} 的候选素材 ${index + 1}`} loading="lazy" src={previewUrl} /> : <span>暂无缩略图</span>}
       {selected ? <b>当前采用</b> : null}
     </div>
     <figcaption>
@@ -398,25 +415,32 @@ function AssetCandidate({ candidate, index }: { candidate: unknown; index: numbe
         creatorUrl={typeof record.creator_url === "string" ? record.creator_url : undefined}
       /></small> : isScalar(record.creator) && record.creator ? <small>作者：{formatScalar(record.creator)}</small> : null}
       {isScalar(record.license_note) ? <small className="asset-license">{formatScalar(record.license_note)}</small> : null}
-      {sourceUrl ? <a href={sourceUrl} rel="noreferrer" target="_blank">核验原始来源</a> : null}
+      {sourceUrl ? <a aria-label={`核验原始来源：${sceneLabel}，候选 ${index + 1}，${provider ? formatScalar(provider, "provider") : "来源未记录"}（新窗口）`} href={sourceUrl} rel="noreferrer" target="_blank">核验原始来源</a> : null}
     </figcaption>
   </figure>;
 }
 
-function PreviewItem({ collectionKey, item, index }: { collectionKey: string; item: unknown; index: number }) {
+function PreviewItem({ collectionKey, item, index, viewId }: { collectionKey: string; item: unknown; index: number; viewId: string }) {
+  const [expanded, setExpanded] = useState(false);
   const record = asRecord(item);
   if (!record) return <article><strong>{String(index + 1).padStart(2, "0")}</strong><p>{formatScalar(item)}</p></article>;
   const titleKey = ["title", "purpose", "label", "name", "check", "timecodeMs"].find((key) => isScalar(record[key]));
-  const facts = Object.entries(record).filter(([key, value]) => key !== titleKey && isCreatorNestedField(key) && hasDisplayScalar(value)).slice(0, 5);
+  const facts = Object.entries(record).filter(([key, value]) => key !== titleKey && isCreatorNestedField(key) && hasDisplayScalar(value));
+  const visibleFacts = expanded ? facts : facts.slice(0, 5);
   return <article>
     <span>{String(index + 1).padStart(2, "0")}</span>
-    <div><strong>{titleKey ? formatScalar(record[titleKey], titleKey) : collectionItemTitle(collectionKey, index)}</strong>{facts.map(([key, value]) => <p key={key}><b>{fieldLabel(key)}</b>{formatScalar(value, key)}</p>)}</div>
+    <div><strong>{titleKey ? formatScalar(record[titleKey], titleKey) : collectionItemTitle(collectionKey, index, record)}</strong>{visibleFacts.map(([key, value]) => <p key={key}><b>{fieldLabel(key, viewId)}</b>{formatScalar(value, key)}</p>)}
+      {facts.length > 5 ? <button aria-expanded={expanded} className="node-preview-expand" type="button" onClick={() => setExpanded((current) => !current)}>{expanded ? "收起完整条目" : `查看完整条目（还有 ${facts.length - 5} 项信息）`}</button> : null}
+    </div>
   </article>;
 }
 
-function collectionItemTitle(collectionKey: string, index: number): string {
-  if (collectionKey === "shots") return `镜头 ${index + 1}`;
-  if (collectionKey === "scenes") return `分镜 ${index + 1}`;
+function collectionItemTitle(collectionKey: string, index: number, record: Record<string, unknown>): string {
+  if (collectionKey === "shots" || collectionKey === "scenes") {
+    const position = record.position ?? record.scenePosition ?? record.scene_position;
+    if (typeof position === "number" && Number.isInteger(position) && position > 0) return `${collectionKey === "shots" ? "镜头" : "分镜"} ${position}`;
+    return `${collectionKey === "shots" ? "镜头" : "分镜"}编号未记录 · 第 ${index + 1} 条记录`;
+  }
   if (collectionKey === "findings") return `问题 ${index + 1}`;
   return `第 ${index + 1} 项`;
 }
@@ -479,7 +503,7 @@ function formatScalar(value: unknown, key?: string): string {
   }
   if (key === "reviewMode" && value === "manual") return "人工终审";
   if (key === "recommendation" && typeof value === "string") return ({ approve: "通过", revise: "修改后再审", reject: "不通过" } as Record<string, string>)[value] ?? value;
-  if (key === "severity" && typeof value === "string") return ({ info: "提示", low: "轻微", medium: "需关注", warning: "需修改", high: "高风险", critical: "严重" } as Record<string, string>)[value] ?? value;
+  if (key === "severity" && typeof value === "string") return ({ info: "提示", low: "轻微", medium: "需关注", warning: "需你判断的质量问题", high: "高风险", critical: "严重" } as Record<string, string>)[value] ?? value;
   if (key === "category" && typeof value === "string") return ({ pacing: "节奏", composition: "构图", continuity: "连续性", legibility: "文字可读性", safety: "内容安全", other: "其他" } as Record<string, string>)[value] ?? value;
   if (key === "visual_strategy" && typeof value === "string") return ({ stock: "实拍视频素材", image: "图片素材", local: "本地编辑画面", generated: "AI 生成画面", screen: "屏幕录制", creator: "创作者素材" } as Record<string, string>)[value] ?? value;
   if (key === "authenticityPolicy" && typeof value === "string") return ({ evidence: "事实镜头", illustrative: "说明镜头", expressive: "表现镜头" } as Record<string, string>)[value] ?? value;
@@ -487,17 +511,19 @@ function formatScalar(value: unknown, key?: string): string {
   if ((key === "requestedProfileId" || key === "resolvedProfileId") && typeof value === "string") return directorProfileLabel(value);
   if (key === "voice" && typeof value === "string") return voiceProfileLabel(value);
   if (key === "narrativeRole" && typeof value === "string") return humanizeNarrativeRole(value);
-  if (typeof value === "string" && key && /(?:Path|_path)$/.test(key)) return "已连接上游产物";
-  if (typeof value === "string") return humanizeCreativeText(({
+  if (typeof value === "string" && key && /(?:Path|_path)$/.test(key)) return "已记录文件引用，尚未在此处核验可用性。";
+  if (typeof value === "string" && key && ["pacing", "tempo"].includes(key)) return ({
     measured: "舒缓克制",
     medium: "适中",
     fast: "明快",
     slow: "舒缓",
-  } as Record<string, string>)[value] ?? value);
+  } as Record<string, string>)[value] ?? value;
+  if (typeof value === "string") return value;
   if ((key === "durationSeconds" || key === "duration_target" || key === "duration") && typeof value === "number") return `${value} 秒`;
-  if (key === "rate" && typeof value === "number") return `${value} 字/分钟`;
+  if ((key === "durationMs" || key === "startMs" || key === "endMs") && typeof value === "number") return `${Number((value / 1000).toFixed(3))} 秒`;
+  if (key === "rate" && typeof value === "number") return `${value}（单位未记录）`;
   if (key === "timecodeMs" && typeof value === "number") return formatTimecode(value);
-  if (key === "confidence" && typeof value === "number") return `${Math.round(value * 100)}%`;
+  if (key === "confidence" && typeof value === "number") return Number.isFinite(value) && value >= 0 && value <= 1 ? `${Math.round(value * 100)}%` : "置信度值异常，暂不显示百分比";
   return String(value);
 }
 
@@ -539,9 +565,13 @@ function voiceProfileLabel(value: string): string {
     "macos:Tingting": "Tingting 中文女声",
     "kokoro:zf_xiaobei": "小北女声",
   } as Record<string, string>;
-  return labels[value] ?? labels[`minimax:${value}`] ?? labels[`kokoro:${value}`] ?? labels[`macos:${value}`] ?? humanizeCreativeText(value);
+  return labels[value] ?? labels[`minimax:${value}`] ?? labels[`kokoro:${value}`] ?? labels[`macos:${value}`] ?? value;
 }
 
-function fieldLabel(key: string): string {
-  return FIELD_LABELS[key] ?? key.replace(/[_-]+/g, " ");
+function fieldLabel(key: string, viewId?: string): string {
+  if (key === "summary") return ({ "reference-grammar": "参考视频分析摘要", "asset-semantic-rank": "候选排序摘要", "visual-review": "视觉审片摘要" } as Record<string, string>)[viewId ?? ""] ?? "摘要";
+  if (key === "provider") return viewId === "voice" ? "配音服务" : viewId === "assets" ? "素材来源" : "服务或来源";
+  if (key === "beats" && viewId === "reference-grammar") return "分段表达结构";
+  if (key === "canonFacts") return "拟加入系列设定的内容";
+  return FIELD_LABELS[key] ?? `附加信息（${key}）`;
 }

@@ -204,9 +204,8 @@ describe("creator tour routing", () => {
 
     const config = driverMock.factory.mock.calls[0]?.[0];
     const runHeader = config?.steps?.find((step) => step.element === '[data-tour="run-header"]');
-    expect(runHeader?.popover?.description).toMatch(/查看真实原因/);
-    expect(runHeader?.popover?.description).toMatch(/选择其他模型或调整配置后重试/);
-    expect(runHeader?.popover?.description).toMatch(/待重新生成/);
+    expect(runHeader?.popover?.description).toMatch(/失败时先查看恢复方式/);
+    expect(runHeader?.popover?.description).toMatch(/不要直接重复创建任务/);
   });
 
   it("includes the real candidate adoption action in the complete walkthrough", () => {
