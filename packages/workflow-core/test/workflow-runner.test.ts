@@ -4842,7 +4842,7 @@ describe("WorkflowRunner", () => {
       /distinct items/,
     );
     await assert.rejects(() => approve([{ itemKey: "  ", decision: "reject", reason: "维持现状" }]), /item key is required/);
-    await assert.rejects(() => approve([{ itemKey, decision: "maybe" }]), /must be accept or reject/);
+    await assert.rejects(() => approve([{ itemKey, decision: "maybe" }]), /must be accept, reject or accept_risk/);
     // 不采纳 = 维持现状，必须写明凭什么维持，否则事后无法复核。
     await assert.rejects(() => approve([{ itemKey, decision: "reject" }]), /requires a written reason/);
     await assert.rejects(() => approve([{ itemKey, decision: "reject", reason: "   " }]), /requires a written reason/);

@@ -366,6 +366,8 @@ export interface ProductionBrief {
   platform: string;
   reviewMode: "manual" | "automatic";
   runPurpose?: "production" | "test";
+  /** 视觉审片不可用时，只有用户明确选择先产出首版才允许正式制作继续。 */
+  visualReviewPolicy?: "required" | "allow_unreviewed_first_cut";
   templateSnapshot?: ProductionTemplateSnapshot;
   providers: ProductionProviderBindings;
   models?: Record<string, string>;
@@ -398,7 +400,7 @@ export interface ProductionBrief {
 
 const PRODUCTION_BRIEF_INPUT_KEYS = new Set([
   "protocolVersion", "title", "angle", "audience", "nicheSlug", "durationSeconds", "durationRange",
-  "platform", "reviewMode", "runPurpose", "providers", "models", "modelSelectionSources", "frozenModelSelections", "workflowFeatures",
+  "platform", "reviewMode", "runPurpose", "visualReviewPolicy", "providers", "models", "modelSelectionSources", "frozenModelSelections", "workflowFeatures",
   "referenceVideo", "director", "economics", "spendFeedback", "voiceDirection", "editorial", "visualProof",
   "visualIntent", "visualPlan", "visualPlanAdopted", "seriesContext", "creationContext", "rework", "taskContractDigests",
   "articleSources", "budgetIntentionCny",
@@ -480,6 +482,11 @@ export function parseBrief(value: unknown): ProductionBrief {
   if (value.runPurpose !== undefined && value.runPurpose !== "production" && value.runPurpose !== "test") {
     throw new Error("runPurpose must be 'production' or 'test'.");
   }
+  const visualReviewPolicy = value.visualReviewPolicy === undefined
+    ? undefined
+    : value.visualReviewPolicy === "required" || value.visualReviewPolicy === "allow_unreviewed_first_cut"
+      ? value.visualReviewPolicy
+      : (() => { throw new Error("visualReviewPolicy is invalid."); })();
 
   return {
     protocolVersion: BRIEF_PROTOCOL_VERSION,
@@ -492,6 +499,7 @@ export function parseBrief(value: unknown): ProductionBrief {
     platform: requireProductionPlatform(value.platform),
     reviewMode: value.reviewMode,
     runPurpose: value.runPurpose ?? "production",
+    ...(visualReviewPolicy ? { visualReviewPolicy } : {}),
     providers: {
       script: requireString(providers.script, "providers.script"),
       ...(director ? { director: requireString(providers.director, "providers.director") } : {}),

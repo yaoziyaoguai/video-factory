@@ -453,9 +453,12 @@ function completedDualVisualReview(
 function completedSingleVisualReview(
   input: pipeline.VisualReviewAgentInput,
   output: pipeline.VisualReviewReport,
+  identity: { providerId: string; modelId: string } = {
+    providerId: "deepseek-visual-review-v1",
+    modelId: "deepseek-visual",
+  },
 ): pipeline.VisualReviewExecution {
-  const providerId = "deepseek-visual-review-v1";
-  const modelId = "deepseek-visual";
+  const { providerId, modelId } = identity;
   const trace = {
     taskKind: "visual-review" as const,
     promptVersion: "visual-review-test-v1",
@@ -480,6 +483,23 @@ function completedSingleVisualReview(
 }
 
 describe("ProductionPipeline", () => {
+  it("allows a formal production to reach render when the user accepts an unavailable visual review", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-playable-first-cut-"));
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });
+
+    const run = await subject.start({
+      ...brief,
+      runPurpose: "production",
+      visualReviewPolicy: "allow_unreviewed_first_cut",
+    });
+
+    assert.equal(run.initialInput.visualReviewPolicy, "allow_unreviewed_first_cut");
+    assert.equal(run.nodeRuns.some((node) => node.nodeId === "visual-review"), false);
+    assert.equal(run.nodeRuns.find((node) => node.nodeId === "render")?.status, "succeeded");
+    assert.equal(run.nodeRuns.some((node) => node.nodeId === "publish-package" && node.status === "succeeded"), false);
+    assert.equal(run.nodeRuns.find((node) => node.nodeId === "final-review")?.status, "needs_human");
+  });
+
   it("carries a complete pilot rejection into a user decision and resumes the same asset operation only with its accepted evidence", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-pilot-decision-"));
     let evidenceId = "";
@@ -628,6 +648,14 @@ describe("ProductionPipeline", () => {
         const media = "materialized pilot media";
         await writeFile(mediaPath, media, "utf8");
         const mediaSha256 = createHash("sha256").update(media).digest("hex");
+        const evidenceId = createHash("sha256").update(JSON.stringify({
+          version: "video-factory/source-pilot-incomplete-v1",
+          kind: "incomplete",
+          mediaSha256,
+          inputFingerprint: "b".repeat(64),
+          operationId: String(request.commandId),
+          scenePosition: 1,
+        })).digest("hex");
         return {
           ...response,
           status: "failed",
@@ -642,10 +670,14 @@ describe("ProductionPipeline", () => {
           }],
           sourceReview: {
             kind: "incomplete",
+            evidenceId,
             mediaSha256,
             inputFingerprint: "b".repeat(64),
             operationId: String(request.commandId),
             scenePosition: 1,
+          },
+          diagnostics: {
+            providerOutcomeKnown: true,
           },
         };
       }
@@ -657,6 +689,10 @@ describe("ProductionPipeline", () => {
     const waitingAssets = waiting.nodeRuns.find((node) => node.nodeId === "assets");
     assert.equal(waiting.status, "needs_human");
     assert.equal(waitingAssets?.intervention?.kind, "source_review_retry");
+    assert.equal(waitingAssets?.intervention?.reviewStatus, "incomplete");
+    assert.equal(waitingAssets?.intervention?.providerOutcomeKnown, true);
+    const evidenceId = (waitingAssets?.output as { sourceReview?: { evidenceId?: string } } | undefined)?.sourceReview?.evidenceId;
+    assert.match(evidenceId ?? "", /^[a-f0-9]{64}$/);
     const firstOperationId = worker.assetRequests[0]?.commandId;
 
     await assert.rejects(
@@ -669,8 +705,15 @@ describe("ProductionPipeline", () => {
       /不能跳过审查继续制作/,
     );
 
-    const resumed = await subject.retryFailedNode(waiting.id, "assets");
-    assert.equal(resumed.status, "needs_human", "素材恢复后仍须保留成片终审停点");
+    const resumed = await subject.decide(waiting.id, {
+      interventionId: waitingAssets!.intervention!.id,
+      action: "approve",
+      acceptIncomplete: true,
+      actor: "studio-owner",
+      expectedRunRevision: waiting.revision,
+      reviewEvidenceId: evidenceId!,
+    });
+    assert.equal(resumed.status, "needs_human", `素材恢复后仍须保留成片终审停点: ${JSON.stringify(resumed.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error })))}`);
     assert.equal(resumed.nodeRuns.find((node) => node.nodeId === "assets")?.status, "succeeded");
     assert.equal(worker.assetRequests.length, 2);
     assert.equal(worker.assetRequests[1]?.commandId, firstOperationId, "重试审查必须复用原素材操作");
@@ -2058,7 +2101,7 @@ describe("ProductionPipeline", () => {
 
     await assert.rejects(
       () => new pipeline.ProductionPipeline({ workspaceRoot, worker }).dispatch(productionBrief),
-      /requires the configured DeepSeek visual reviewer before work can start/,
+      /视觉审片当前不可用.*先生成首版/,
     );
     assert.equal(worker.calls.length, 0);
 
@@ -2083,7 +2126,7 @@ describe("ProductionPipeline", () => {
         ...productionBrief,
         providers: { ...productionBrief.providers, visualReview: "deepseek-visual-review-v1" },
       }),
-      /Formal production requires one DeepSeek visual review with an independent role audit/,
+      /正式制作需要可用的视觉审片和独立质量复核.*先生成未审片首版/,
     );
     assert.equal(worker.calls.length, 0);
   });
@@ -2206,9 +2249,11 @@ describe("ProductionPipeline", () => {
       const reviews = visualReport.independentReviews as Array<Record<string, unknown>>;
       reviews[1]!.modelId = "unexpected-review-model";
     }, /reports do not match the actual model proof/);
+    // EB-01 后终审放行先对齐当前有效视觉证据，篡改的输出证据改由就绪校验以更精确的文案拒绝；
+    // 篡改同样被拦，只是拦截点后移。
     await assertTamperRejected((_visualReport, finalOutput) => {
       finalOutput.reviewEvidenceId = "e".repeat(64);
-    }, /Human decision is not bound to the current review evidence/);
+    }, /Final approval is not bound to the current visual evidence digest/);
     await assertTamperRejected((_visualReport, finalOutput) => {
       finalOutput.reviewArtifactIds = [...(finalOutput.reviewArtifactIds as string[])].reverse();
     }, /intervention is not bound to the current review artifacts/);
@@ -2299,6 +2344,340 @@ describe("ProductionPipeline", () => {
     );
     assert.equal(approved.status, "succeeded");
     assert.ok(approved.artifacts.some((artifact) => artifact.kind === "publish_package"));
+  });
+
+  it("publishes after a single DeepSeek review stamped with the broker execution identity", async () => {
+    // 真实环境里 DeepSeek 审片腿由 role-agent-assembly 以 broker 身份 "deepseek" 登记（primaryProviderId），
+    // 而 catalog/brief 的配置身份是 "deepseek-visual-review-v1"。终审门禁只认配置身份时，真实 run
+    // （run-1278，2026-09-23）在最后一步被 "Final publication requires the current single-review
+    // evidence to come from DeepSeek." 硬拒。两个身份都应被认作 DeepSeek 这条腿。
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-broker-identity-review-"));
+    const cleanReport: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1",
+      summary: "当前成片已完成独立质量复核，可进入人工终审。",
+      scores: { composition: 90, continuity: 90, pacing: 90, legibility: 92, safety: 96 },
+      findings: [],
+      confidence: 0.95,
+      recommendation: "approve",
+    };
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      providerRuntimeMetadata: [{
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek 视觉审片",
+        modelId: "deepseek-flash",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 1,
+      }],
+      visualReviewAgents: [{
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-flash",
+        finalReviewConfiguration: {
+          mode: "single",
+          reviewers: [{
+            providerId: "deepseek-visual-review-v1",
+            modelId: "deepseek-flash",
+            independentRoleAudit: true,
+          }],
+        },
+        review: async () => { throw new Error("Detailed review must be used."); },
+        reviewDetailed: async (input) => input.reviewStage === "source_assets"
+          ? { output: cleanReport, inspectedDurationMs: 10_000 }
+          : completedSingleVisualReview(input, cleanReport, { providerId: "deepseek", modelId: "deepseek-flash" }),
+      }],
+    });
+
+    const waiting = await subject.start({
+      ...brief,
+      runPurpose: "production",
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-flash" },
+    });
+    assert.equal(waiting.status, "needs_human");
+    const report = waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.output as {
+      report?: pipeline.VisualReviewReport;
+    } | undefined;
+    // 执行证据按 broker 身份登记，与真实 run-1278 相同。
+    assert.equal(report?.report?.reviewScope?.actualModels[0]?.providerId, "deepseek");
+
+    const approved = await subject.decide(
+      waiting.id,
+      humanDecisionFor(waiting, "approve", "director", "审片证据来自 DeepSeek broker 执行身份，批准发布。", "default"),
+    );
+    assert.equal(approved.status, "succeeded");
+    assert.ok(approved.artifacts.some((artifact) => artifact.kind === "publish_package"));
+  });
+
+  it("视觉审片证据绑定读取当前有效版本，不被 raw output 的滞后值遮挡（EB-01）", async () => {
+    // 补查/重跑后节点 raw output 可能滞后于 outputState 的有效版本。UI 与服务端都必须以
+    // 有效版本为准：raw 里的旧证据不得放行，有效证据不得被 raw 遮住。
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-eb01-effective-evidence-"));
+    const staleRawReport: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1",
+      summary: "单条待补查结论。",
+      scores: { composition: 77, continuity: 76, pacing: 76, legibility: 88, safety: 92 },
+      findings: [{
+        timecodeMs: 1_000,
+        startTimecodeMs: 0,
+        endTimecodeMs: 5_000,
+        scenePosition: 1,
+        targetNodeId: "assets",
+        claimType: "motion",
+        evidenceStatus: "not_observed",
+        evidenceFrameSha256: null,
+        nextAction: "inspect_existing_media",
+        category: "continuity",
+        severity: "info",
+        description: "第 1 镜的连续动作在稀疏采样帧里无法判定，需要补看成片。",
+        suggestion: "补查现有成片后再下结论。",
+      }],
+      confidence: 0.72,
+      recommendation: "revise",
+    };
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      providerRuntimeMetadata: [{
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek 视觉审片",
+        modelId: "deepseek-visual",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 1,
+      }],
+      visualReviewAgents: [{
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-visual",
+        finalReviewConfiguration: {
+          mode: "single",
+          reviewers: [{
+            providerId: "deepseek-visual-review-v1",
+            modelId: "deepseek-visual",
+            independentRoleAudit: true,
+          }],
+        },
+        review: async () => { throw new Error("Detailed review must be used."); },
+        reviewDetailed: async (input) => input.reviewStage === "source_assets"
+          ? { output: staleRawReport, inspectedDurationMs: 10_000 }
+          : completedSingleVisualReview(input, staleRawReport),
+      }],
+    });
+
+    let run = await subject.start({
+      ...brief,
+      runPurpose: "production",
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" as const },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-visual" },
+    });
+    for (let step = 0; step < 20 && run.status === "needs_human"; step += 1) {
+      const stopped = run.nodeRuns.find((node) => node.status === "needs_human");
+      if (!stopped || stopped.nodeId === "visual-review") break;
+      run = await subject.decide(run.id, {
+        interventionId: String(stopped.intervention?.id),
+        action: "approve",
+        actor: "owner",
+        expectedRunRevision: run.revision,
+        reviewEvidenceId: null,
+      });
+    }
+    const visualNode = run.nodeRuns.find((node) => node.nodeId === "visual-review")!;
+    assert.equal(visualNode.status, "needs_human");
+    const effectiveEvidenceId = ((visualNode.output as { report?: pipeline.VisualReviewReport }).report?.reviewScope?.evidenceId);
+    assert.ok(effectiveEvidenceId);
+
+    // 只篡改 raw output 的证据 id（模拟滞后）；outputState 有效版本保持 E。
+    const runPath = path.join(workspaceRoot, "runs", run.id, "run.json");
+    const persisted = JSON.parse(await readFile(runPath, "utf8")) as typeof run;
+    const persistedVisual = persisted.nodeRuns.find((node) => node.nodeId === "visual-review")!;
+    type PersistedReviewOutput = {
+      report: {
+        findings: Record<string, unknown>[];
+        reviewScope: { evidenceId: string };
+      };
+    };
+    const rawOutput = persistedVisual.output as PersistedReviewOutput;
+    rawOutput.report.reviewScope.evidenceId = "e".repeat(64);
+    const outputState = persistedVisual.outputState as {
+      effectiveVersionId: string;
+      versions: Array<{ id: string; output: PersistedReviewOutput }>;
+    };
+    const effectiveVersion = outputState.versions.find((version) => version.id === outputState.effectiveVersionId)!;
+    assert.notEqual(effectiveVersion.output.report.reviewScope.evidenceId, "e".repeat(64), "fixture 前置：有效版本未被篡改");
+    await writeFile(runPath, JSON.stringify(persisted), "utf8");
+
+    const dispositions = rawOutput.report.findings.map((finding) => ({
+      itemKey: pipeline.visualReviewFindingKey(finding as never),
+      decision: "accept_risk" as const,
+    }));
+    const baseDecision = {
+      interventionId: String(visualNode.intervention?.id),
+      action: "approve" as const,
+      actor: "owner",
+      expectedRunRevision: run.revision,
+    };
+    // raw 里的旧证据必须被拒：绑定对象是有效版本。
+    await assert.rejects(
+      () => subject.decide(run.id, { ...baseDecision, reviewEvidenceId: "e".repeat(64), reviewDispositions: dispositions }),
+      /not bound to the current review evidence/,
+    );
+    // 有效版本的证据应被接受，不能被 raw 滞后值遮住。
+    const approved = await subject.decide(run.id, {
+      ...baseDecision,
+      reviewEvidenceId: effectiveEvidenceId,
+      reviewDispositions: dispositions,
+    });
+    assert.equal(approved.nodeRuns.find((node) => node.nodeId === "visual-review")?.status, "succeeded");
+  });
+
+  it("非 DeepSeek 配置不能凭配置身份一致通过单审发布门禁（EB-02）", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-eb02-identity-whitelist-"));
+    const cleanReport: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1",
+      summary: "当前成片已完成独立质量复核，可进入人工终审。",
+      scores: { composition: 90, continuity: 90, pacing: 90, legibility: 92, safety: 96 },
+      findings: [],
+      confidence: 0.95,
+      recommendation: "approve",
+    };
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      visualReviewAgents: [{
+        id: "other-review-v1",
+        modelId: "other-review-model",
+        finalReviewConfiguration: {
+          mode: "single",
+          reviewers: [{
+            providerId: "other-review-v1",
+            modelId: "other-review-model",
+            independentRoleAudit: true,
+          }],
+        },
+        review: async () => { throw new Error("Detailed review must be used."); },
+        reviewDetailed: async (input) => input.reviewStage === "source_assets"
+          ? { output: cleanReport, inspectedDurationMs: 10_000 }
+          : completedSingleVisualReview(input, cleanReport, { providerId: "other-review-v1", modelId: "other-review-model" }),
+      }],
+    });
+
+    const waiting = await subject.start({
+      ...brief,
+      runPurpose: "test",
+      providers: { ...brief.providers, visualReview: "other-review-v1" },
+      models: { "other-review-v1": "other-review-model" },
+    });
+    assert.equal(waiting.status, "needs_human");
+    const scope = (waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.output as {
+      report?: pipeline.VisualReviewReport;
+    }).report?.reviewScope;
+    // 执行身份与配置身份一致，但都不是 DeepSeek：不能自己把自己列入单审白名单。
+    assert.equal(scope?.actualModels[0]?.providerId, "other-review-v1");
+    await assert.rejects(
+      () => subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "owner", "配置与执行一致，但非 DeepSeek。", "default")),
+      /Final publication requires the current single-review evidence to come from DeepSeek/,
+    );
+  });
+
+  it("自动终审通过分支的边界停点保留 review artifact 绑定（EB-04）", async () => {
+    // 审片结论为 approve 时终审走自动通过分支；边界包装必须把 boundInput 的 reviewArtifactIds
+    // 透传进 intervention，否则终审批准时的 artifact 绑定校验会把正确批准也拦下。
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-eb04-boundary-artifacts-"));
+    const cleanReport: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1",
+      summary: "当前成片已完成独立质量复核，可进入人工终审。",
+      scores: { composition: 90, continuity: 90, pacing: 90, legibility: 92, safety: 96 },
+      findings: [],
+      confidence: 0.95,
+      recommendation: "approve",
+    };
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      providerRuntimeMetadata: [{
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek 视觉审片",
+        modelId: "deepseek-visual",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 1,
+      }],
+      visualReviewAgents: [{
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-visual",
+        finalReviewConfiguration: {
+          mode: "single",
+          reviewers: [{
+            providerId: "deepseek-visual-review-v1",
+            modelId: "deepseek-visual",
+            independentRoleAudit: true,
+          }],
+        },
+        review: async () => { throw new Error("Detailed review must be used."); },
+        reviewDetailed: async (input) => input.reviewStage === "source_assets"
+          ? { output: cleanReport, inspectedDurationMs: 10_000 }
+          : completedSingleVisualReview(input, cleanReport),
+      }],
+    });
+
+    let run = await subject.start({
+      ...brief,
+      runPurpose: "production",
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" as const },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-visual" },
+    });
+    for (let step = 0; step < 20 && run.status === "needs_human"; step += 1) {
+      const stopped = run.nodeRuns.find((node) => node.status === "needs_human");
+      if (!stopped || stopped.nodeId === "visual-review") break;
+      run = await subject.decide(run.id, {
+        interventionId: String(stopped.intervention?.id),
+        action: "approve",
+        actor: "owner",
+        expectedRunRevision: run.revision,
+        reviewEvidenceId: null,
+      });
+    }
+    // 视觉审片停点本身按新合同绑定当前成片证据放行（无 findings，无需逐条表态）。
+    const visualStop = run.nodeRuns.find((node) => node.nodeId === "visual-review")!;
+    assert.equal(visualStop.status, "needs_human");
+    const visualEvidenceId = (visualStop.output as { report?: pipeline.VisualReviewReport }).report?.reviewScope?.evidenceId;
+    assert.ok(visualEvidenceId);
+    run = await subject.decide(run.id, {
+      interventionId: String(visualStop.intervention?.id),
+      action: "approve",
+      actor: "owner",
+      expectedRunRevision: run.revision,
+      reviewEvidenceId: visualEvidenceId,
+    });
+    const finalNode = run.nodeRuns.find((node) => node.nodeId === "final-review")!;
+    assert.equal(finalNode.status, "needs_human", "必须停在终审边界");
+    const outputArtifactIds = (finalNode.output as { reviewArtifactIds?: string[] }).reviewArtifactIds;
+    assert.ok(outputArtifactIds && outputArtifactIds.length > 0, "自动通过分支的输出必须绑定 review artifacts");
+    assert.deepEqual(finalNode.intervention?.artifactIds, outputArtifactIds, "边界 intervention 必须透传 artifact 绑定");
+
+    const approved = await subject.decide(
+      run.id,
+      humanDecisionFor(run, "approve", "owner", "审片通过，批准发布。", "default"),
+    );
+    assert.equal(approved.nodeRuns.find((node) => node.nodeId === "final-review")?.status, "succeeded");
+    // 发布包也是边界停点：按新合同绑定成片证据放行后 run 才收尾。
+    const publishStop = approved.nodeRuns.find((node) => node.nodeId === "publish-package")!;
+    assert.equal(publishStop.status, "needs_human");
+    const published = await subject.decide(approved.id, {
+      interventionId: String(publishStop.intervention?.id),
+      action: "approve",
+      actor: "owner",
+      expectedRunRevision: approved.revision,
+      reviewEvidenceId: visualEvidenceId,
+    });
+    assert.equal(published.status, "succeeded");
+    assert.ok(published.artifacts.some((artifact) => artifact.kind === "publish_package"));
   });
 
   it("fails closed when the DeepSeek visual reviewer has no subscription metadata", async () => {
@@ -3160,7 +3539,7 @@ describe("ProductionPipeline", () => {
     assert.equal(worker.calls.filter((call) => call.capability === "quality.review").length, 1);
   });
 
-  it("requires a recorded per-item disposition on every review finding before final approval", async () => {
+  for (const acceptedDecision of ["reject", "accept_risk"] as const) it(`requires per-item decisions before approval with ${acceptedDecision}`, async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-final-dispositions-"));
     const worker = new FakeWorker();
     const pendingReport: pipeline.VisualReviewReport = {
@@ -3282,12 +3661,12 @@ describe("ProductionPipeline", () => {
     );
 
     const approved = await subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "director", undefined, [
-      { itemKey, decision: "reject", reason },
+      { itemKey, decision: acceptedDecision, reason },
     ]));
 
     assert.equal(approved.status, "succeeded");
     assert.deepEqual(approved.decisions.map((decision) => decision.reviewDispositions), [[
-      { itemKey, decision: "reject", reason },
+      { itemKey, decision: acceptedDecision, reason },
     ]]);
     assert.ok(approved.artifacts.some((artifact) => artifact.kind === "publish_package"));
   });
@@ -4646,7 +5025,7 @@ describe("ProductionPipeline", () => {
         expectedRunRevision: 0,
         reviewEvidenceId: null,
       }),
-      /is not active for run/,
+      /intervention 'legacy' is not active/,
     );
   });
 
@@ -7746,6 +8125,64 @@ describe("ProductionPipeline", () => {
     assert.equal(idCounts.get("decision"), 1);
   });
 
+  it("executes the next worker once for concurrent and repeated boundary decisions", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-boundary-race-"));
+    const worker = new FakeWorker();
+    const options = { workspaceRoot, worker };
+    const subject = new pipeline.ProductionPipeline(options);
+    const waiting = await subject.start({
+      ...brief,
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" },
+    });
+    assert.equal(worker.calls.length, 0);
+    const intervention = waiting.nodeRuns.find((node) => node.nodeId === "brief")?.intervention;
+    assert.ok(intervention);
+    const decision = { interventionId: intervention.id, action: "approve" as const, actor: "director", expectedRunRevision: waiting.revision, reviewEvidenceId: null };
+    const results = await Promise.allSettled([
+      subject.decide(waiting.id, decision),
+      new pipeline.ProductionPipeline(options).decide(waiting.id, decision),
+    ]);
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+    assert.deepEqual(worker.calls.map((call) => call.capability), ["script.draft"]);
+    const saved = await subject.show(waiting.id);
+    assert.equal(saved.status, "needs_human");
+    assert.equal(saved.revision, waiting.revision + 1);
+    assert.equal(saved.decisions.length, 1);
+    assert.equal(saved.nodeRuns.find((node) => node.status === "needs_human")?.nodeId, "script");
+    await assert.rejects(() => subject.decide(waiting.id, decision));
+    assert.equal(worker.calls.length, 1);
+    assert.equal((await subject.show(waiting.id)).decisions.length, 1);
+  });
+
+  it("does not execute the next worker when the decision checkpoint cannot be persisted", async (context) => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-checkpoint-failure-"));
+    const worker = new FakeWorker();
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker,
+    });
+    const waiting = await subject.start({
+      ...brief,
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" },
+    });
+    const before = await readFile(path.join(workspaceRoot, "runs", waiting.id, "run.json"), "utf8");
+    const workerCallsBefore = worker.calls.length;
+    const intervention = waiting.nodeRuns.find((node) => node.nodeId === "brief")?.intervention;
+    assert.ok(intervention);
+    const save = context.mock.method(pipeline.FileRunStore.prototype, "save", async () => {
+      throw new Error("injected decision checkpoint persistence failure");
+    });
+    await assert.rejects(
+      () => subject.decide(waiting.id, { interventionId: intervention.id, action: "approve", actor: "director", expectedRunRevision: waiting.revision, reviewEvidenceId: null }),
+      /injected decision checkpoint persistence failure/,
+    );
+    save.mock.restore();
+    assert.equal(workerCallsBefore, 0);
+    assert.equal(worker.calls.length, workerCallsBefore);
+    assert.equal(await readFile(path.join(workspaceRoot, "runs", waiting.id, "run.json"), "utf8"), before);
+  });
+
   it("pauses before a metered worker and only calls it after the exact spend plan is approved", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
     const worker = new FakeWorker();
@@ -9611,6 +10048,187 @@ describe("ProductionPipeline", () => {
       reloaded.nodeRuns.find((node) => node.nodeId === "brief")?.intervention?.id,
       stoppedNode?.intervention?.id,
     );
+  });
+
+  it("视觉审片边界停点：放行必须绑定当前审片证据并携带逐条表态", async () => {
+    // 真实 UI（RunWorkbench.openDecision）在 visual-review 停点会把报告 reviewScope.evidenceId
+    // 与逐条表态一起提交；服务端 dispatchDecision 只认 source-review / final-review 证据时，
+    // 这个停点会永远 500（2026-09-23 run-1278 实测）。合同应是：有审片证据就必须绑定——
+    // 错证据与置空都要被拒，绑定当前证据且逐条 accept_risk 才放行，且不把 revise 洗成 approve。
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-boundary-evidence-"));
+    const reviewedReport: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1",
+      summary: "第 4 镜素材未命中方案，其余镜头与脚本一致。",
+      scores: { composition: 77, continuity: 76, pacing: 76, legibility: 88, safety: 92 },
+      findings: [{
+        timecodeMs: 1_000,
+        startTimecodeMs: 0,
+        endTimecodeMs: 5_000,
+        scenePosition: 1,
+        targetNodeId: "assets",
+        claimType: "motion",
+        evidenceStatus: "not_observed",
+        evidenceFrameSha256: null,
+        nextAction: "inspect_existing_media",
+        category: "continuity",
+        severity: "info",
+        description: "第 1 镜的连续动作在稀疏采样帧里无法判定，需要补看成片。",
+        suggestion: "补查现有成片后再下结论。",
+      }],
+      confidence: 0.72,
+      recommendation: "revise",
+    };
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: new FakeWorker(),
+      providerRuntimeMetadata: [{
+        id: "deepseek-visual-review-v1",
+        label: "DeepSeek 视觉审片",
+        modelId: "deepseek-visual",
+        transport: "unix_socket",
+        billing: "subscription",
+        approvalPolicy: "none",
+        maxAttempts: 1,
+      }],
+      visualReviewAgents: [{
+        id: "deepseek-visual-review-v1",
+        modelId: "deepseek-visual",
+        finalReviewConfiguration: {
+          mode: "single",
+          reviewers: [{
+            providerId: "deepseek-visual-review-v1",
+            modelId: "deepseek-visual",
+            independentRoleAudit: true,
+          }],
+        },
+        review: async () => { throw new Error("Detailed review must be used."); },
+        reviewDetailed: async (input) => input.reviewStage === "source_assets"
+          ? { output: reviewedReport, inspectedDurationMs: 10_000 }
+          : completedSingleVisualReview(input, reviewedReport),
+      }],
+    });
+
+    let run = await subject.start({
+      ...brief,
+      runPurpose: "production",
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" as const },
+      providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
+      models: { "deepseek-visual-review-v1": "deepseek-visual" },
+    });
+
+    // 逐个放行前置边界停点，直到停在 visual-review。
+    for (let step = 0; step < 20 && run.status === "needs_human"; step += 1) {
+      const stopped = run.nodeRuns.find((node) => node.status === "needs_human");
+      if (!stopped || stopped.nodeId === "visual-review") break;
+      run = await subject.decide(run.id, {
+        interventionId: String(stopped.intervention?.id),
+        action: "approve",
+        actor: "owner",
+        expectedRunRevision: run.revision,
+        reviewEvidenceId: null,
+      });
+    }
+    const visualNode = run.nodeRuns.find((node) => node.nodeId === "visual-review")!;
+    assert.equal(visualNode.status, "needs_human", "必须停在视觉审片边界");
+    const report = (visualNode.output as { report?: pipeline.VisualReviewReport }).report!;
+    const evidenceId = report.reviewScope?.evidenceId;
+    assert.ok(evidenceId, "审片报告必须带 reviewScope.evidenceId");
+    const dispositions = report.findings.map((finding) => ({
+      itemKey: pipeline.visualReviewFindingKey(finding),
+      decision: "accept_risk" as const,
+    }));
+    assert.ok(dispositions.length > 0, "fixture 必须带至少一条审片结论");
+
+    const baseDecision = {
+      interventionId: String(visualNode.intervention?.id),
+      action: "approve" as const,
+      actor: "owner",
+      expectedRunRevision: run.revision,
+    };
+    await assert.rejects(
+      () => subject.decide(run.id, { ...baseDecision, reviewEvidenceId: "0".repeat(64), reviewDispositions: dispositions }),
+      /not bound to the current review evidence/,
+    );
+    // 有审片证据时置空同样要被拒：绑定是硬要求，不是可选项。
+    await assert.rejects(
+      () => subject.decide(run.id, { ...baseDecision, reviewEvidenceId: null, reviewDispositions: dispositions }),
+      /not bound to the current review evidence/,
+    );
+    // 正确证据但缺逐条表态：服务端必须拒绝（EB-03），不能只靠客户端禁用按钮。
+    await assert.rejects(
+      () => subject.decide(run.id, { ...baseDecision, reviewEvidenceId: evidenceId }),
+      /批准前需要对全部 1 条审片结论逐条表态，当前还有 1 条未表态/,
+    );
+    // 采纳了审片结论但还没返修：同样拒绝，采纳与批准自相矛盾。
+    await assert.rejects(
+      () => subject.decide(run.id, {
+        ...baseDecision,
+        reviewEvidenceId: evidenceId,
+        reviewDispositions: report.findings.map((finding) => ({
+          itemKey: pipeline.visualReviewFindingKey(finding),
+          decision: "accept" as const,
+        })),
+      }),
+      /已采纳的审片结论尚未返修，不能批准发布/,
+    );
+
+    const approved = await subject.decide(run.id, {
+      ...baseDecision,
+      reviewEvidenceId: evidenceId,
+      reviewDispositions: dispositions,
+    });
+    assert.equal(approved.nodeRuns.find((node) => node.nodeId === "visual-review")?.status, "succeeded");
+    // 承担风险放行保留审片原文：不把 revise 洗成 approve。
+    const approvedReport = (approved.nodeRuns.find((node) => node.nodeId === "visual-review")?.output as { report?: pipeline.VisualReviewReport }).report!;
+    assert.equal(approvedReport.recommendation, "revise");
+    assert.deepEqual(
+      approved.decisions.at(-1)?.reviewDispositions?.map((disposition) => disposition.decision),
+      dispositions.map(() => "accept_risk"),
+    );
+    // 放行后停在下一个边界（final-review），而不是自动跑完整条 run。
+    assert.equal(approved.status, "needs_human");
+    assert.equal(approved.nodeRuns.find((node) => node.status === "needs_human")?.nodeId, "final-review");
+
+    // 终审：humanDecisionFor 读取 final-review 输出里的 reviewEvidenceId（与视觉审片证据同源）。
+    const finalApproved = await subject.decide(
+      approved.id,
+      humanDecisionFor(approved, "approve", "owner", "审片意见已知悉，批准成片。", "default"),
+    );
+    // 发布包停点：真实 UI 在视觉审片报告存在后，为每个放行都附上当前审片证据
+    // （RunWorkbench.openDecision），服务端也必须按同一合同绑定。
+    const publishNode = finalApproved.nodeRuns.find((node) => node.nodeId === "publish-package")!;
+    assert.equal(publishNode.status, "needs_human");
+    await assert.rejects(
+      () => subject.decide(finalApproved.id, {
+        interventionId: String(publishNode.intervention?.id),
+        action: "approve",
+        actor: "owner",
+        expectedRunRevision: finalApproved.revision,
+        reviewEvidenceId: null,
+      }),
+      /not bound to the current review evidence/,
+    );
+    // 发布包停点同样必须逐条表态（EB-03），但表态不解释为终审签字。
+    await assert.rejects(
+      () => subject.decide(finalApproved.id, {
+        interventionId: String(publishNode.intervention?.id),
+        action: "approve",
+        actor: "owner",
+        expectedRunRevision: finalApproved.revision,
+        reviewEvidenceId: evidenceId,
+      }),
+      /逐条表态/,
+    );
+    const published = await subject.decide(finalApproved.id, {
+      interventionId: String(publishNode.intervention?.id),
+      action: "approve",
+      actor: "owner",
+      expectedRunRevision: finalApproved.revision,
+      reviewEvidenceId: evidenceId,
+      reviewDispositions: dispositions,
+    });
+    assert.equal(published.status, "succeeded");
+    assert.ok(published.artifacts.some((artifact) => artifact.kind === "publish_package"));
   });
 
   it("边界闸门不会静默跳过声明了 qualityGates 的节点", async () => {

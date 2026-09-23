@@ -59,6 +59,18 @@ def stock_candidate(download_url):
 
 
 class PipelineTest(unittest.TestCase):
+    def test_explicit_empty_ranking_does_not_fall_back_to_all_candidates(self):
+        candidate = stock_candidate("mock://empty")
+        self.assertEqual(reorder_candidates([candidate], []), [])
+        self.assertEqual(reorder_candidates([candidate], None), [candidate])
+
+    def test_discarded_candidate_is_not_tried_again_even_with_quality_consent(self):
+        candidate = stock_candidate("mock://retired")
+        ranking = {"source": "model", "scenes": [{"scenePosition": 1,
+            "attemptedCandidateIds": [{"provider": candidate.provider, "assetId": candidate.asset_id}],
+            "candidates": [{"provider": candidate.provider, "assetId": candidate.asset_id, "rank": 1, "semanticScore": 20, "locked": False}]}]}
+        self.assertEqual(reorder_candidates([candidate], ranking_candidate_ids_by_scene(ranking, {1})[1]), [])
+
     def test_fallback_ranking_is_not_automatic_semantic_approval_but_human_lock_is(self):
         candidate = stock_candidate("mock://fallback")
         ranking = {

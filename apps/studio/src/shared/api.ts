@@ -1319,6 +1319,9 @@ export interface StudioIntervention {
   boundary?: "node-complete";
   reason: string;
   options: Array<"approve" | "request_changes" | "reject">;
+  reviewStatus?: "incomplete" | "unknown_or_unsafe";
+  providerOutcomeKnown?: boolean;
+  evidenceId?: string;
   createdAt: string;
   continuation?: {
     stage: StudioPlanningEditableStage;
@@ -1347,13 +1350,15 @@ export interface StudioCreativeReviewSnapshot {
   messages: Array<{ id: string; role: "user" | "assistant"; text: string; commandId: string }>;
   proposals: Array<{ proposalId: string; baseDraftSha256: string; document: unknown; changeSummary: string[] }>;
   effectiveUserInstructions: Array<{ commandId: string; message: string }>;
+  qualityAdvisories?: Array<{ scenePositions: number[]; reason: string }>;
   blockingIssues: Array<{
     target: "script" | "director" | "source" | "user";
     scenePositions: number[];
     reason: string;
     requiredChange: string;
   }>;
-  checkResult?: {
+  checkResult?: ({
+    status?: "completed";
     verdict: "pass" | "repair";
     score: number;
     summary: string;
@@ -1361,7 +1366,7 @@ export interface StudioCreativeReviewSnapshot {
     // 这一条复核的身份。确认时原样回传，服务端拿它和当前记录比对——"确认"必须指向界面上
     // 展示的那一条意见，而不是"当前这一版草稿碰巧存在的某条意见"。
     checkIdentity: string;
-  };
+  } | { status: "incomplete"; verdict?: never; score?: never; summary: string; issues: []; checkIdentity: string });
   /**
    * 停在这里是因为自动循环先停下了，而不是因为这一版做完了。理由要给人看：否则人以为一切
    * 正常，不知道该在哪一件事上拍板。它独立于 checkResult——那是确认时才跑的那一轮复核。
@@ -1379,7 +1384,7 @@ type StudioCreativeReviewCommandBase = {
 
 export type StudioCreativeReviewCommandInput = StudioCreativeReviewCommandBase & (
   // 独立复核是"提议"而非"否决"：repair 时人仍可继续，但必须显式承担（与 return_to_stage 的 acknowledgeImpact 同模式）。
-  | { action: "confirm"; acknowledgeRepair?: boolean; expectedCheckIdentity?: string }
+  | { action: "confirm"; acknowledgeRepair?: boolean; acknowledgeIncomplete?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string }
   | { action: "discuss"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
   | { action: "adopt_proposal"; proposalId: string }
   | { action: "edit_draft"; document: Record<string, unknown> }
@@ -1409,7 +1414,7 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
           : input.action === "confirm"
             // 这两个字段曾经漏在白名单外，于是"看过意见，仍然确认"在 HTTP 入口就被拒，
             // 整条链在界面后面断掉、只在图级单测里看着是通的。
-            ? ["acknowledgeRepair", "expectedCheckIdentity"]
+            ? ["acknowledgeRepair", "acknowledgeIncomplete", "acceptQualityFallback", "expectedCheckIdentity"]
         : [];
   const allowed = new Set([...commonFields, ...actionFields]);
   const unknown = Object.keys(input).find((key) => !allowed.has(key));
@@ -1463,6 +1468,13 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
   if (input.acknowledgeRepair !== undefined && input.acknowledgeRepair !== true) {
     throw new StudioInputError("确认意见承担标记不正确。");
   }
+  if (input.acknowledgeIncomplete !== undefined && input.acknowledgeIncomplete !== true) {
+    throw new StudioInputError("未完成复核的风险必须明确接受。");
+  }
+  if (input.acceptQualityFallback !== undefined
+    && (input.acceptQualityFallback !== true || input.stage !== "director")) {
+    throw new StudioInputError("示意素材质量风险只能在导演方案阶段明确接受。");
+  }
   const expectedCheckIdentity = input.expectedCheckIdentity;
   if (expectedCheckIdentity !== undefined
     && (typeof expectedCheckIdentity !== "string" || !/^[a-f0-9]{64}$/.test(expectedCheckIdentity))) {
@@ -1470,13 +1482,15 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
   }
   // "仍然确认"必须说出它承担的是哪一条复核。说不出就不算"看过意见"：服务端只能拿当前
   // 记录去凑，人确认的就不是他看到的那条意见了。
-  if (input.acknowledgeRepair === true && expectedCheckIdentity === undefined) {
+  if ((input.acknowledgeRepair === true || input.acknowledgeIncomplete === true) && expectedCheckIdentity === undefined) {
     throw new StudioInputError("确认前请先查看当前的独立复核意见。");
   }
   return {
     action: "confirm",
     ...common,
     ...(input.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
+    ...(input.acknowledgeIncomplete === true ? { acknowledgeIncomplete: true as const } : {}),
+    ...(input.acceptQualityFallback === true ? { acceptQualityFallback: true as const } : {}),
     ...(expectedCheckIdentity === undefined ? {} : { expectedCheckIdentity }),
   };
 }
@@ -1850,6 +1864,8 @@ export interface StudioProductionInput {
   platform: string;
   reviewMode: "manual" | "automatic";
   runPurpose?: "production" | "test";
+  /** 视觉审片不可用时，用户明确选择先生成可播放首版；不会伪造审片通过。 */
+  visualReviewPolicy?: "required" | "allow_unreviewed_first_cut";
   template?: StudioTemplateSelection;
   editorial?: {
     verdict: "produce_video" | "produce_image_story";
@@ -1953,7 +1969,7 @@ export interface StudioReferenceVideo {
  */
 export interface StudioReviewDisposition {
   itemKey: string;
-  decision: "accept" | "reject";
+  decision: "accept" | "reject" | "accept_risk";
   reason?: string;
 }
 
@@ -1974,7 +1990,13 @@ export type StudioDecisionInput = StudioDecisionInputBase & (
     };
   }
   | {
-    action: "approve" | "reject";
+    action: "approve";
+    /** 仅用于 source_review_retry + known incomplete；服务端还会绑定当前证据。 */
+    acceptIncomplete?: true;
+    voiceTiming?: never;
+  }
+  | {
+    action: "reject";
     voiceTiming?: never;
   }
 );
@@ -2411,6 +2433,10 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
   } else if (input.voiceTiming !== undefined) {
     throw new StudioInputError("只有调整方案时才能提交配音时长。");
   }
+  if (input.acceptIncomplete !== undefined
+    && (input.acceptIncomplete !== true || input.action !== "approve")) {
+    throw new StudioInputError("未完成审查风险只能在明确批准时接受。");
+  }
   const parsed = {
     expectedRunRevision: Number(input.expectedRunRevision),
     interventionId,
@@ -2427,6 +2453,7 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
   return {
     ...parsed,
     action: input.action,
+    ...(input.acceptIncomplete === true ? { acceptIncomplete: true as const } : {}),
     ...(reviewDispositions ? { reviewDispositions } : {}),
   };
 }
@@ -2445,8 +2472,8 @@ function parseReviewDispositions(
       throw new StudioInputError(`${label}格式不正确。`);
     }
     const record = entry as Record<string, unknown>;
-    if (record.decision !== "accept" && record.decision !== "reject") {
-      throw new StudioInputError(`${label}必须选择采纳或不采纳。`);
+    if (record.decision !== "accept" && record.decision !== "reject" && record.decision !== "accept_risk") {
+      throw new StudioInputError(`${label}必须选择返修、不采纳或接受风险保留本版。`);
     }
     const itemKey = requiredTrimmedString(record.itemKey, `${label}的条目编号`);
     if (!/^[a-f0-9]{64}$/.test(itemKey)) throw new StudioInputError(`${label}的条目编号格式不正确。`);
@@ -2457,6 +2484,10 @@ function parseReviewDispositions(
     // 采纳的含义就是"照这条结论返修"，返修指令本身就是那条结论，不需要再附理由；
     // 不采纳才是"我看了、我不同意"，那时候理由才是留痕的关键。
     if (record.decision === "accept") return { itemKey, decision: "accept" };
+    if (record.decision === "accept_risk") {
+      if (reason.length > 500) throw new StudioInputError(`${label}的理由不能超过 500 个字符。`);
+      return { itemKey, decision: "accept_risk", ...(reason ? { reason } : {}) };
+    }
     if (!reason) throw new StudioInputError(`${label}不采纳时必须写明理由。`);
     if (reason.length > 500) throw new StudioInputError(`${label}的理由不能超过 500 个字符。`);
     return { itemKey, decision: "reject", reason };

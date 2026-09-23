@@ -5,6 +5,7 @@ import type {
   ArtifactDraft,
   ArtifactKind,
   ExecutionConfigurationOverrideDraft,
+  ExecutionParameterValue,
   HumanDecision,
   HumanDecisionDraft,
   HumanIntervention,
@@ -345,10 +346,22 @@ export class WorkflowRunner {
     if (waitingNode.intervention?.kind === "creative_review") {
       throw new Error("Creative review cannot be approved through the generic decision endpoint; use the stage confirmation command.");
     }
-    // 试片重试暂停只有"终止(reject)"与专用重试继续两种出路：通用批准不得把它变成
-    // 普通节点成功——即使停点数据错误地声明了 approve 选项（R4-03）。
-    if (waitingNode.intervention?.kind === "source_review_retry" && decision.action !== "reject") {
+    // 试片重试暂停只有"终止(reject)"、专用重试和明确承担未完成审查风险三种出路。
+    // 风险承担仍走同一条重试/恢复链，不把 incomplete 伪装成 pass。
+    if (waitingNode.intervention?.kind === "source_review_retry"
+      && decision.action !== "reject"
+      && decision.acceptIncomplete !== true) {
       throw new Error("Source review retry stops can only be rejected here; continue them via the dedicated review retry command.");
+    }
+
+    if (waitingNode.intervention?.kind === "source_review_retry" && decision.acceptIncomplete === true) {
+      validateIncompleteSourceReviewDecision(waitingNode.intervention, decision);
+      run.decisions.push({
+        ...decision,
+        id: this.idFactory("decision"),
+        createdAt: this.clock(),
+      });
+      return this.retryFailedNode(definition, run, waitingNode.nodeId, { allowSourceReviewRetry: true });
     }
 
     if (waitingNode.intervention?.kind === "source_review_decision") {
@@ -1777,7 +1790,25 @@ function validateResumeRequest<TInitialInput>(
   if (!allowedActions.includes(decision.action)) {
     throw new Error(`Intervention '${decision.interventionId}' does not allow action '${decision.action}'.`);
   }
+  if (decision.acceptIncomplete === true) {
+    validateIncompleteSourceReviewDecision(waitingNode.intervention, decision);
+  }
   validateReviewDispositions(decision.reviewDispositions);
+}
+
+function validateIncompleteSourceReviewDecision(
+  intervention: HumanIntervention,
+  decision: HumanDecisionDraft,
+): void {
+  if (intervention.kind !== "source_review_retry"
+    || intervention.reviewStatus !== "incomplete"
+    || intervention.providerOutcomeKnown !== true
+    || !intervention.evidenceId) {
+    throw new Error("当前试片审查不是可承担风险的 incomplete 状态，只能补查或终止。");
+  }
+  if (decision.action !== "approve" || decision.reviewEvidenceId !== intervention.evidenceId) {
+    throw new Error("接受未完成审查必须绑定当前试片证据，并使用明确的承担风险动作。");
+  }
 }
 
 // 逐条表态是人工裁决的留痕，所以它的完整性由核心把关，而不是靠各调用方自觉。
@@ -1789,8 +1820,8 @@ function validateReviewDispositions(dispositions: HumanDecisionDraft["reviewDisp
   }
   for (const disposition of dispositions) {
     if (!disposition.itemKey.trim()) throw new Error("Review disposition item key is required.");
-    if (disposition.decision !== "accept" && disposition.decision !== "reject") {
-      throw new Error("Review disposition decision must be accept or reject.");
+    if (disposition.decision !== "accept" && disposition.decision !== "reject" && disposition.decision !== "accept_risk") {
+      throw new Error("Review disposition decision must be accept, reject or accept_risk.");
     }
     if (disposition.decision === "reject" && !disposition.reason?.trim()) {
       throw new Error("Rejecting a reviewed item requires a written reason.");
@@ -2123,9 +2154,17 @@ function createExecutionReceipt(
   status: NodeExecutionReceiptStatus,
   authorization?: SpendAuthorization,
 ): NodeExecutionReceipt {
+  const projectedParameters = draft.parameters === undefined
+    ? undefined
+    : projectReceiptParameters(draft.parameters);
   return {
     ...draft,
-    ...(draft.parameters ? { parameters: cloneExecutionParameters(draft.parameters) } : {}),
+    ...(projectedParameters
+      ? {
+          parameters: projectedParameters.parameters,
+          ...(projectedParameters.truncated ? { parametersTruncated: true } : {}),
+        }
+      : {}),
     ...(draft.actualModelIds ? { actualModelIds: [...draft.actualModelIds] } : {}),
     nodeId: node.id,
     ...(node.role ? { role: node.role } : {}),
@@ -2171,6 +2210,93 @@ function cloneExecutionParameters(
     if (typeof value === "boolean") return [key, value];
     throw new Error(`Provider execution parameter '${key}' is invalid.`);
   }));
+}
+
+const RECEIPT_PARAMETER_PRIORITY = [
+  "promptPack",
+  "producerRequestSchemaVersion",
+  "producerRequestDigest",
+  "agentLoop",
+  "agentLoopIterations",
+  "modelCallCount",
+  "producerModelCallCount",
+  "auditModelCallCount",
+  "discussionModelCallCount",
+  "structuredRepairModelCallCount",
+  "unknownModelExecutionCount",
+  "retryCount",
+  "reasoningEffort",
+  "auditReasoningEffort",
+  "queueWaitMs",
+  "providerWaitMs",
+  "producerMs",
+  "auditMs",
+  "discussionMs",
+  "providerValidationMs",
+  "loopValidationMs",
+  "firstOutputEventMs",
+  "toolMs",
+  "requestPayloadBytes",
+  "promptBytes",
+  "evidenceImageCount",
+  "evidenceImageBytes",
+  "evidenceImageSetSha256",
+  "evidenceImageMappingSha256",
+] as const;
+
+interface ReceiptParameterProjection {
+  parameters: NonNullable<NodeExecutionReceiptDraft["parameters"]>;
+  truncated: boolean;
+}
+
+/**
+ * Receipt 是观测边界，不应成为生产结果的单点故障。
+ * provider 配置/执行计划仍使用严格 cloneExecutionParameters；这里只有诊断字段可以有界裁剪，
+ * 完整 trace 已作为 artifact 保存，核心 provider/model/request/cost 字段仍在 receipt 顶层保留。
+ */
+function projectReceiptParameters(
+  parameters: NonNullable<NodeExecutionReceiptDraft["parameters"]>,
+): ReceiptParameterProjection {
+  const normalized = new Map<string, ExecutionParameterValue>();
+  let truncated = false;
+  for (const [key, value] of Object.entries(parameters)) {
+    if (!/^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(key)) {
+      truncated = true;
+      continue;
+    }
+    if (Array.isArray(value)) {
+      if (value.length > 32 || value.some((item) => typeof item !== "string" || item.length > 256)) {
+        truncated = true;
+        continue;
+      }
+      normalized.set(key, [...value]);
+      continue;
+    }
+    if (typeof value === "string" && value.length <= 512) {
+      normalized.set(key, value);
+      continue;
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      normalized.set(key, value);
+      continue;
+    }
+    if (typeof value === "boolean") {
+      normalized.set(key, value);
+      continue;
+    }
+    truncated = true;
+  }
+
+  const orderedKeys = [
+    ...RECEIPT_PARAMETER_PRIORITY.filter((key) => normalized.has(key)),
+    ...[...normalized.keys()].filter((key) => !RECEIPT_PARAMETER_PRIORITY.includes(key as typeof RECEIPT_PARAMETER_PRIORITY[number])),
+  ];
+  if (orderedKeys.length > 32) truncated = true;
+  const bounded = orderedKeys.slice(0, 32);
+  return {
+    parameters: Object.fromEntries(bounded.map((key) => [key, normalized.get(key)!])),
+    truncated,
+  };
 }
 
 function validateMeteredProvider(
@@ -2412,11 +2538,9 @@ function isFileReferenceKey(key: string): boolean {
 function sanitizeFailureReceiptDraft(receipt: NodeExecutionReceiptDraft): NodeExecutionReceiptDraft {
   const sanitized = { ...receipt };
   if (sanitized.parameters) {
-    try {
-      sanitized.parameters = cloneExecutionParameters(sanitized.parameters);
-    } catch {
-      delete sanitized.parameters;
-    }
+    const projected = projectReceiptParameters(sanitized.parameters);
+    sanitized.parameters = projected.parameters;
+    if (projected.truncated) sanitized.parametersTruncated = true;
   }
   if (sanitized.actualModelIds !== undefined) {
     if (
@@ -2455,9 +2579,17 @@ function sanitizeFailureReceiptDraft(receipt: NodeExecutionReceiptDraft): NodeEx
 }
 
 function cloneExecutionReceipt(receipt: NodeExecutionReceipt): NodeExecutionReceipt {
+  const projectedParameters = receipt.parameters === undefined
+    ? undefined
+    : projectReceiptParameters(receipt.parameters);
   return {
     ...receipt,
-    ...(receipt.parameters ? { parameters: cloneExecutionParameters(receipt.parameters) } : {}),
+    ...(projectedParameters
+      ? {
+          parameters: projectedParameters.parameters,
+          ...(projectedParameters.truncated ? { parametersTruncated: true } : {}),
+        }
+      : {}),
     ...(receipt.actualModelIds ? { actualModelIds: [...receipt.actualModelIds] } : {}),
   };
 }

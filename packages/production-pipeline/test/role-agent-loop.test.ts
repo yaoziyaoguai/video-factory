@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 import { CodexBridgeError, RoleAgentLoopError, runRoleAgentLoop, validateRoleAudit } from "../src/index.js";
 import type { ModelProviderFailureCategory } from "../src/codex-chat.js";
+import { fileRoleAgentLoopCheckpoint } from "../src/role-agent-checkpoint.js";
 
 describe("role agent loop audit boundary", () => {
   it("rejects more than 16 audit criteria before submitting a model task", async () => {
@@ -702,8 +706,10 @@ describe("role agent loop audit boundary", () => {
     { name: "contractVersion", contractVersion: "screenwriter-contract-v2", criteria: ["标题具体"] },
     { name: "criteria", contractVersion: "screenwriter-contract-v1", criteria: ["标题具体", "事实有来源"] },
   ]) {
-    it(`settles an old pending audit but re-audits after a ${changedContract.name} change and survives another interruption`, async () => {
-      let stored: unknown;
+    it(`settles an old pending audit but re-audits after a ${changedContract.name} change and survives another interruption`, async (t) => {
+      const directory = await mkdtemp(path.join(tmpdir(), "vf-audit-contract-"));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      const checkpointPath = path.join(directory, "checkpoint.json");
       let firstAudit = true;
       let currentAuditInterrupted = true;
       let produceCalls = 0;
@@ -715,11 +721,7 @@ describe("role agent loop audit boundary", () => {
         contractVersion,
         criteria,
         maxIterations: 3,
-        checkpoint: {
-          key: "pending-audit-contract-change",
-          load: async () => stored,
-          save: async (value) => { stored = structuredClone(value); },
-        },
+        checkpoint: fileRoleAgentLoopCheckpoint(checkpointPath, "pending-audit-contract-change"),
         produce: async () => {
           produceCalls += 1;
           return { output: { title: "沿用的候选" } };
@@ -752,7 +754,13 @@ describe("role agent loop audit boundary", () => {
       });
 
       await assert.rejects(() => execute("screenwriter-contract-v1", ["标题具体"]), /结果未知/);
+      const oldCheckpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+      assert.equal(oldCheckpoint.pendingOperation.contractDigest, oldCheckpoint.contractDigest);
       await assert.rejects(() => execute(changedContract.contractVersion, changedContract.criteria), /结果未知/);
+      const currentCheckpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+      assert.notEqual(currentCheckpoint.contractDigest, oldCheckpoint.contractDigest);
+      assert.equal(currentCheckpoint.pendingOperation.contractDigest, currentCheckpoint.contractDigest);
+      assert.notEqual(currentCheckpoint.pendingOperation.operation.requestId, oldCheckpoint.pendingOperation.operation.requestId);
       const result = await execute(changedContract.contractVersion, changedContract.criteria);
 
       assert.equal(produceCalls, 1, "contract-only changes retain the candidate");

@@ -73,7 +73,7 @@ const CAPABILITIES: CapabilityDefinition[] = [
   { key: "voice", capability: "voice.synthesize", label: "配音", role: "声音导演", description: "旁白音色与语速", preferred: "macos-say-v1", icon: Mic2 },
   { key: "render", capability: "video.render", label: "视频渲染", role: "剪辑师", description: "9:16 合成、字幕与音轨", preferred: "python-ffmpeg-v1", icon: Film },
   { key: "technicalReview", capability: "quality.review", label: "机器质检", role: "技术质检", description: "分辨率、时长与产物校验", preferred: "python-technical-review-v1", icon: ScanSearch },
-  { key: "visualReview", capability: "quality.review.visual", label: "视觉审片", role: "视觉审片员", description: "构图、连续性、节奏与文字可读性", preferred: "deepseek-visual-review-v1", icon: ScanSearch },
+  { key: "visualReview", capability: "quality.review.visual", label: "视觉审片", role: "视觉审片员", description: "构图、连续性、节奏与文字可读性（可选增强）", preferred: "deepseek-visual-review-v1", icon: ScanSearch, optional: true },
 ];
 
 const RECIPES: Array<{
@@ -134,6 +134,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [voiceDirection, setVoiceDirection] = useState<StudioProductionInput["voiceDirection"]>(() => defaultVoiceDirection(providers));
   const [budgetIntention, setBudgetIntention] = useState(String(initialValues?.budgetIntentionCny ?? ""));
   const [semanticRankEnabled, setSemanticRankEnabled] = useState(true);
+  const [acceptUnreviewedFirstCut, setAcceptUnreviewedFirstCut] = useState(false);
   const [referenceVideo, setReferenceVideo] = useState<ReferenceVideoSelection>();
   const releasedReferenceId = useRef<string | undefined>(undefined);
   const formScrollRef = useRef<HTMLDivElement>(null);
@@ -198,9 +199,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       && provider.available
       && provider.kind !== "test";
   });
-  // ChatGPT/Codex 套餐退役（N5）后，审片只剩 DeepSeek 单腿：可用即可开工，
-  // 不再要求两个不同模型的 Provider（旧双审合同已取消）。
-  const singleReviewAvailable = Boolean(visualReviewProvider) && Boolean(roleAuditProvider);
+  // 视觉审片是质量增强项，不是生成首版的核心能力。没有它时必须由用户明确承担
+  // “先生成首版、稍后审片”的风险；独立角色复核同样只提供建议，不是开工硬门。
+  const singleReviewAvailable = Boolean(visualReviewProvider);
+  const visualReviewUnavailable = !singleReviewAvailable;
   const semanticRankCompatible = Boolean(effectiveBindings.director && effectiveBindings.assets === "ai-shot-router-v1");
   const effectiveSemanticRank = semanticRankCompatible && semanticRankEnabled;
   const meteredSelected = selectedMeteredSources.length > 0 && selectedRecipe.allowMeteredProviders;
@@ -303,12 +305,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const missingProductionRoles = [
     ...missingCapabilities.map((item) => item.label),
     ...(assetProviderIds.length > 0 ? [] : ["导演画面来源"]),
-    ...(roleAuditProvider ? [] : ["独立质量复核"]),
-    
     ...(voiceSelectionAvailable === false && !initialValues?.rework ? ["可用声音演员"] : []),
   ];
   // 链接按现有分区优先：制作角色能力缺口落到制作分工；只剩画面来源缺口时落到画面来源分区，避免让创作者自己找。
-  const capabilitySettingsHref = missingCapabilities.length > 0 || !roleAuditProvider
+  const capabilitySettingsHref = missingCapabilities.length > 0
     || (voiceSelectionAvailable === false && !initialValues?.rework)
     ? "/resources#production-roles"
     : "/resources#visual-providers";
@@ -376,6 +376,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setModelSelections({ ...(initialValues?.models ?? {}) });
     setVoiceDirection(resolvedVoiceDirection);
     setBudgetIntention(String(initialValues?.budgetIntentionCny ?? ""));
+    setAcceptUnreviewedFirstCut(initialValues?.visualReviewPolicy === "allow_unreviewed_first_cut");
     setSemanticRankEnabled(initialValues?.workflowFeatures?.assetSemanticRank ?? Boolean(initialBindings.director));
     setReferenceVideo(inheritedReferenceVideo ? { ...inheritedReferenceVideo, inheritedFromRework: true } : undefined);
     setBriefSummaryValues({
@@ -515,7 +516,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       const { [field]: _removed, ...rest } = current;
       return rest;
     });
-    if (draft === undefined || !Number.isInteger(Number(draft))) return;
+    if (draft === undefined || draft.trim() === "" || !Number.isInteger(Number(draft))) return;
     changeDurationRange(field, Number(draft));
   }
 
@@ -573,11 +574,12 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       if (!isProductionPlatform(platform)) {
         throw new Error("请选择目标平台后再开始制作。");
       }
-      if (!singleReviewAvailable || !visualReviewProvider) {
-        throw new Error("正式制作需要视觉审片和独立质量复核；请先在创作设置中恢复这两项能力。");
+      const { visualReview: _visualReview, ...requiredProviderBindings } = effectiveBindings;
+      const providersForRun: StudioProductionInput["providers"] = { ...requiredProviderBindings };
+      if (visualReviewProvider) providersForRun.visualReview = visualReviewProvider.id;
+      else if (!acceptUnreviewedFirstCut) {
+        throw new Error("视觉审片当前不可用；请勾选“先生成首版，稍后审片”，明确承担未审片风险后再开始。");
       }
-      const providersForRun: StudioProductionInput["providers"] = { ...effectiveBindings };
-      providersForRun.visualReview = visualReviewProvider.id;
       const selectedProviderIds = new Set([
         ...Object.values(providersForRun).filter((providerId): providerId is string => Boolean(providerId)),
         ...assetProviderIds,
@@ -624,6 +626,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         platform,
         reviewMode: "manual",
         runPurpose: initialValues?.runPurpose ?? "production",
+        visualReviewPolicy: visualReviewProvider ? "required" : "allow_unreviewed_first_cut",
         ...(editorial ? { editorial } : {}),
         ...(visualProof ? { visualProof } : {}),
         ...(visualIntent ? { visualIntent } : {}),
@@ -1217,18 +1220,19 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <span><Sparkles aria-hidden="true" size={17} /><strong>AI 候选画面排序</strong></span>
                 <small>{semanticRankCompatible ? "先预览图库候选并给出逐镜排序；失败时保留素材源原顺序，下载前仍可人工调整" : "需要先启用 AI 视觉导演与逐镜画面选择"}</small>
               </label>
-              <label className={singleReviewAvailable ? "visual-review-control is-enabled" : "visual-review-control"}>
+              {visualReviewUnavailable ? <label className="visual-review-control is-optional-risk">
                 <input
                   type="checkbox"
-                  checked={singleReviewAvailable && Boolean(visualReviewProvider)}
-                  disabled
-                  readOnly
+                  checked={acceptUnreviewedFirstCut}
+                  onChange={(event) => setAcceptUnreviewedFirstCut(event.target.checked)}
                 />
+                <span><ScanSearch aria-hidden="true" size={17} /><strong>先生成首版，稍后审片</strong></span>
+                <small>视觉审片当前不可用。勾选后仍可生成和播放首版，但不会显示正式审片通过或发布包已通过。</small>
+              </label> : <label className="visual-review-control is-enabled">
+                <input type="checkbox" checked readOnly disabled />
                 <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片 · DeepSeek</strong></span>
-                <small>{singleReviewAvailable && visualReviewProvider
-                  ? `${creatorProviderName(visualReviewProvider)} 负责中途预检；最终成片由 DeepSeek 审片模型对同一组抽帧独立审查，不上传音轨`
-                  : "DeepSeek 审片模型当前不可用，正式制作不能开工"}</small>
-              </label>
+                <small>{`${creatorProviderName(visualReviewProvider!)} 负责中途预检；最终成片由视觉审片模型对同一组抽帧独立审查，不上传音轨`}</small>
+              </label>}
               <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>
               <div className="budget-control">
                 <span><strong>费用确认方式</strong></span>
@@ -1246,11 +1250,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
           </div>
 
           <footer className="dialog-actions recipe-dialog-actions">
-            <div><strong>{selectedRecipe.label}</strong><span>下一步：生成前期构思并等你确认。{meteredSelected ? "图片 / 视频另行报价授权。" : roleAuditProvider?.billing === "subscription" ? "订阅能力不产生现金报价。" : "图片 / 视频无现金报价。"}</span></div>
+            <div><strong>{selectedRecipe.label}</strong><span>下一步：生成前期构思并等你确认。{visualReviewUnavailable ? "当前已选择先生成首版，审片结果稍后补齐。" : meteredSelected ? "图片 / 视频另行报价授权。" : roleAuditProvider?.billing === "subscription" ? "订阅能力不产生现金报价。" : "图片 / 视频无现金报价。"}</span></div>
             <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
             <button className="button button-primary" type="button" onClick={(event) => {
               if (event.currentTarget.form?.reportValidity()) void submit(event.currentTarget.form);
-            }} disabled={submitting || referenceUploading || productionBlocked} data-tour="production-start">
+            }} disabled={submitting || referenceUploading || productionBlocked || (visualReviewUnavailable && !acceptUnreviewedFirstCut)} data-tour="production-start">
               <Check aria-hidden="true" size={17} />
               {submitting ? "正在创建..." : "开始制作"}
             </button>

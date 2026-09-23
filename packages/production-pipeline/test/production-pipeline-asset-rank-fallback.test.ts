@@ -210,7 +210,7 @@ describe("ProductionPipeline semantic ranking fallback", () => {
         modelId: "codex-default",
         rank: async (report) => deterministicAssetRanking(report),
         rankDetailed: async (report) => {
-          const output = deterministicAssetRanking(report);
+          const output = { ...deterministicAssetRanking(report), source: "model" as const };
           const trace = {
             taskKind: "asset-rank",
             promptVersion: "video-factory/asset-rank-v2",

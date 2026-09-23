@@ -16,6 +16,7 @@ import {
   CREATIVE_TREATMENT_PROVIDER_ID,
   effectiveProductionBrief,
   PaidOperationManualReconciliationError,
+  HumanDecisionConflictError,
   parseBrief,
   parsePersistedBrief,
   productionWorkflowVersion,
@@ -1413,6 +1414,7 @@ export class ProductionStudio {
       actor,
       expectedRunRevision: input.expectedRunRevision,
       reviewEvidenceId: input.reviewEvidenceId,
+      ...(input.action === "approve" && input.acceptIncomplete === true ? { acceptIncomplete: true as const } : {}),
       ...(input.note ? { note: input.note } : {}),
       ...(input.reviewDispositions ? { reviewDispositions: input.reviewDispositions } : {}),
     };
@@ -1430,6 +1432,11 @@ export class ProductionStudio {
     } catch (error) {
       if (error instanceof StaleRunRevisionError || (error instanceof Error && /locked by another writer/.test(error.message))) {
         throw new StudioConflictError("这条制作已被其他操作更新，请刷新页面后重试。");
+      }
+      // 决定前置条件不满足（证据错配/过期确认点/缺表态等）：文案面向操作员且可安全展示，
+      // 以 409 + 原文返回，而不是脱敏成 500（EB-05）。
+      if (error instanceof HumanDecisionConflictError) {
+        throw new StudioConflictError(error.message);
       }
       throw error;
     }
@@ -1486,7 +1493,10 @@ export class ProductionStudio {
       ? rawPlanningStop.detail
       : undefined;
     const rawCheckResult = isRecord(stageState?.checkResult) ? stageState.checkResult : undefined;
-    const checkResult: StudioCreativeReviewSnapshot["checkResult"] = rawCheckResult
+    const checkResult: StudioCreativeReviewSnapshot["checkResult"] = rawCheckResult?.status === "incomplete"
+      && typeof rawCheckResult.summary === "string" && typeof rawCheckResult.checkIdentity === "string"
+      ? { status: "incomplete", summary: rawCheckResult.summary, checkIdentity: rawCheckResult.checkIdentity, issues: [] }
+      : rawCheckResult
       && (rawCheckResult.verdict === "pass" || rawCheckResult.verdict === "repair")
       && typeof rawCheckResult.score === "number"
       && typeof rawCheckResult.summary === "string"
@@ -1542,6 +1552,11 @@ export class ProductionStudio {
       messages,
       proposals,
       blockingIssues,
+      qualityAdvisories: Array.isArray(output?.qualityAdvisories)
+        ? output.qualityAdvisories.filter(isRecord).flatMap(issue => typeof issue.reason === "string"
+          && Array.isArray(issue.scenePositions)
+          ? [{ reason: issue.reason, scenePositions: issue.scenePositions.filter((position): position is number => Number.isSafeInteger(position) && position > 0) }]
+          : []) : [],
       effectiveUserInstructions: Array.isArray(stageState?.effectiveUserInstructions)
         ? stageState.effectiveUserInstructions.filter(isRecord)
           .filter((instruction) => instruction.active === true)
@@ -2518,21 +2533,23 @@ export class ProductionStudio {
 
   private async assertProvidersAvailable(brief: ProductionBrief): Promise<StudioProvider[]> {
     const providers = await this.options.listProviders();
+    const deepseekReviewReady = providers.some((provider) => provider.id === "deepseek-visual-review-v1"
+      && provider.capability === "quality.review.visual"
+      && provider.available
+      && provider.kind !== "test");
+    const visualReviewReady = brief.providers.visualReview === "deepseek-visual-review-v1" && deepseekReviewReady;
+    const visualReviewEnabled = brief.runPurpose === "test" ? Boolean(brief.providers.visualReview) : visualReviewReady;
     if (brief.runPurpose !== "test") {
       const selectedReviewProvider = brief.providers.visualReview;
-      const deepseekReviewReady = providers.some((provider) => provider.id === "deepseek-visual-review-v1"
-        && provider.capability === "quality.review.visual"
-        && provider.available
-        && provider.kind !== "test");
-      const roleAuditReady = providers.some((provider) => provider.capability === "role.audit"
-        && provider.available
-        && provider.kind !== "test");
-      // ChatGPT/Codex 套餐退役（N5）：审片只要求 DeepSeek 单腿可用 + 独立审计就绪。
-      // codex-visual-review-v1 已退役，不再作为正式生产的必要条件。
-      if (selectedReviewProvider !== "deepseek-visual-review-v1"
-        || !deepseekReviewReady
-        || !roleAuditReady) {
-        throw new StudioInputError("正式制作需要视觉审片模型可用，且独立质量复核已配置。");
+      const reviewUnavailable = selectedReviewProvider === undefined || !deepseekReviewReady;
+      // 视觉审片和独立角色复核是质量增强项，不再把首版生成变成硬门。
+      // 只有用户明确选择 allow_unreviewed_first_cut，才允许在质量服务不可用时继续；
+      // 运行时仍保留未审片事实，最终发布包不会因此伪造通过。
+      if (reviewUnavailable && brief.visualReviewPolicy !== "allow_unreviewed_first_cut") {
+        throw new StudioInputError("视觉审片当前不可用；请明确选择先生成首版，之后再补审片。");
+      }
+      if (!reviewUnavailable && selectedReviewProvider !== "deepseek-visual-review-v1") {
+        throw new StudioInputError("当前视觉审片能力不是可用的正式审片模型。");
       }
     }
     const selectedVisualSources = new Set([
@@ -2544,7 +2561,7 @@ export class ProductionStudio {
       && provider.capability === "asset.prepare"
       && provider.billing === "metered"
     ));
-    if (usesMeteredVisualSource && !brief.providers.visualReview) {
+    if (usesMeteredVisualSource && !visualReviewEnabled && brief.visualReviewPolicy !== "allow_unreviewed_first_cut") {
       throw new StudioInputError("付费图片和视频必须启用视觉审片，不能跳过生成素材的文字与画面一致性检查。");
     }
     const selectedProviderIds = new Set([
@@ -2554,7 +2571,7 @@ export class ProductionStudio {
       brief.providers.voice,
       brief.providers.render,
       brief.providers.technicalReview,
-      ...(brief.providers.visualReview ? [brief.providers.visualReview] : []),
+      ...(visualReviewEnabled && brief.providers.visualReview ? [brief.providers.visualReview] : []),
       ...(brief.director?.assetProviderIds ?? []),
       ...(brief.workflowFeatures?.referenceGrammar ? ["codex-reference-grammar-v1"] : []),
       // joint-v1 规划包含前期构思阶段：构思能力键在模型选择校验范围内。
@@ -2564,7 +2581,7 @@ export class ProductionStudio {
       ...(brief.workflowFeatures?.boundaryGates === "user-confirmed-v1" ? [BRIEF_AUDIT_PROVIDER_ID] : []),
       "codex-publish-copy-v1",
       ...(brief.director ? ["codex-asset-ranker-v1"] : []),
-      ...(brief.providers.visualReview ? ["sound-review-v1"] : []),
+      ...(visualReviewEnabled ? ["sound-review-v1"] : []),
     ]);
     if (brief.workflowFeatures?.referenceGrammar) {
       const referenceProvider = providers.find((provider) => provider.id === "codex-reference-grammar-v1");
@@ -2591,7 +2608,7 @@ export class ProductionStudio {
       ["voice.synthesize", brief.providers.voice],
       ["video.render", brief.providers.render],
       ["quality.review", brief.providers.technicalReview],
-      ...(brief.providers.visualReview ? [["quality.review.visual", brief.providers.visualReview] as [string, string]] : []),
+      ...(visualReviewEnabled && brief.providers.visualReview ? [["quality.review.visual", brief.providers.visualReview] as [string, string]] : []),
     ];
     for (const [capability, id] of bindings) {
       const selected = providers.find((candidate) => candidate.capability === capability && candidate.id === id);
@@ -3102,6 +3119,10 @@ function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undef
   const maxIterations = Number(value.maxIterations);
   const role = typeof value.role === "string" && value.role.trim() ? value.role.trim() : undefined;
   const completed = Array.isArray(value.completed) ? value.completed : [];
+  const batch = isRecord(value.assetRankBatch) && value.assetRankBatch.version === "asset-rank-batches-v1"
+    && value.assetRankBatch.phase === "supplement" ? value.assetRankBatch : undefined;
+  const primary = batch && isRecord(batch.primaryCheckpoint)
+    ? parseAgentLoopProgress({ ...batch.primaryCheckpoint, assetRankBatch: undefined }) : undefined;
   const phaseAttempts = isRecord(value.phaseAttempts) ? value.phaseAttempts : {};
   const unacceptedPhaseAttempts = isRecord(value.unacceptedPhaseAttempts) ? value.unacceptedPhaseAttempts : {};
   const rawProducerAttempts = Number.isSafeInteger(phaseAttempts.produce) && Number(phaseAttempts.produce) >= 0
@@ -3168,13 +3189,13 @@ function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undef
               ? "repairing"
               : "producing";
   return {
-    ...(role ? { role } : {}),
+    ...(role ? { role: batch ? `${role}（补看候选，最多一批）` : role } : {}),
     iteration,
     maxIterations,
     completedIterations: completed.length,
-    producerModelCallCount,
-    auditModelCallCount,
-    structuredRepairModelCallCount,
+    producerModelCallCount: producerModelCallCount + (primary?.producerModelCallCount ?? 0),
+    auditModelCallCount: auditModelCallCount + (primary?.auditModelCallCount ?? 0),
+    structuredRepairModelCallCount: structuredRepairModelCallCount + (primary?.structuredRepairModelCallCount ?? 0),
     phase,
     ...(latestAudit ? { latestAudit } : {}),
     ...(failureSummary ? { failureSummary } : {}),
@@ -3622,6 +3643,9 @@ function toRunDetail(
     ...(active.boundary === "node-complete" ? { boundary: "node-complete" as const } : {}),
     reason: active.reason,
     options: [...(active.options ?? [active.requiredAction])],
+    ...(active.reviewStatus ? { reviewStatus: active.reviewStatus } : {}),
+    ...(active.providerOutcomeKnown !== undefined ? { providerOutcomeKnown: active.providerOutcomeKnown } : {}),
+    ...(active.evidenceId ? { evidenceId: active.evidenceId } : {}),
     createdAt: active.createdAt,
     ...(active.continuation ? { continuation: { ...active.continuation } } : {}),
   } : undefined;
@@ -4841,6 +4865,8 @@ function creativeReviewCommandDraft(
     baseDraftSha256: input.baseDraftSha256,
     action: "confirm",
     ...(input.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
+    ...(input.acknowledgeIncomplete === true ? { acknowledgeIncomplete: true as const } : {}),
+    ...(input.acceptQualityFallback === true ? { acceptQualityFallback: true as const } : {}),
     ...(input.expectedCheckIdentity === undefined ? {} : { expectedCheckIdentity: input.expectedCheckIdentity }),
   };
 }

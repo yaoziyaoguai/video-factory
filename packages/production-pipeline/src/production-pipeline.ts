@@ -43,7 +43,7 @@ import {
 } from "./asset-semantic-ranker.js";
 import { REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION, fallbackShotGrammar, validateShotGrammar, type ReferenceGrammarAgent, type ReferenceGrammarExecution, type ShotGrammar } from "./reference-grammar.js";
 import { CodexBridgeError, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, type AgentLoopTrace, type CodexTaskExecution, type CodexTaskKind, type CodexTaskTrace, type ModelCandidateAttempt, type RoleAudit } from "./codex-chat.js";
-import { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey } from "./role-agent-checkpoint.js";
+import { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey, roleAgentCheckpointRequestPhases as planningCheckpointRequestPhases } from "./role-agent-checkpoint.js";
 import { RoleAgentLoopError } from "./role-agent-loop.js";
 import {
   assetReuseSourceScenePosition,
@@ -91,6 +91,7 @@ import { PRODUCTION_AUTHORIZATION_VERSION, assessProductionSpendPlan, canonicalP
 import {
   AUTOMATIC_CANDIDATE_SEMANTIC_MINIMUM,
   createCreativePlanningGraph,
+  confirmedStockDeliveryAcceptance,
   executablePlanCompilePort,
   initialPlanningGraphState,
   planningArtifactId,
@@ -256,6 +257,8 @@ export interface ProductionCreativeReviewConfirmationDraft {
   // 这两个字段必须跟着确认一起走。确认入口虽然只有一份实现，但类型上少一个字段，
   // 走这几个窄入口的调用方就会把人的显式承担静默丢掉——那正是"仍然确认"曾经失效的样子。
   acknowledgeRepair?: true;
+  acknowledgeIncomplete?: true;
+  acceptQualityFallback?: true;
   expectedCheckIdentity?: string;
 }
 
@@ -267,7 +270,7 @@ export type ProductionCreativeReviewCommandDraft = {
   stage: CreativeStage;
   baseDraftSha256: string;
 } & (
-  | { action: "confirm"; acknowledgeRepair?: true; expectedCheckIdentity?: string }
+  | { action: "confirm"; acknowledgeRepair?: true; acknowledgeIncomplete?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string }
   | { action: "discuss"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
   | { action: "adopt_proposal"; proposalId: string }
   | { action: "edit_draft"; document: unknown }
@@ -521,6 +524,18 @@ export class PaidOperationManualReconciliationError extends Error {
   }
 }
 
+/**
+ * 人工决定的前置条件不满足（证据错配、过期 intervention、缺显式风险承担、缺逐条表态等）。
+ * 这类错误的文案面向操作员、可以安全展示，Studio 必须映射为 409 并保留原文；
+ * provider/存储等真实故障不允许借用这个类型，仍走脱敏的故障路径。
+ */
+export class HumanDecisionConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HumanDecisionConflictError";
+  }
+}
+
 interface ProviderConfig {
   id: string;
   capability: Capability;
@@ -712,11 +727,12 @@ export class ProductionPipeline {
 
   async dispatch(input: unknown, listener?: ProductionRunListener): Promise<DispatchedProductionRun> {
     const parsedBrief = parseBrief(input);
+    assertProductionVisualReviewReady(parsedBrief, this.options);
+    const executionBrief = normalizeUnavailableVisualReview(parsedBrief, this.options);
     const brief: ProductionBrief = {
-      ...parsedBrief,
+      ...executionBrief,
       taskContractDigests: { ...REQUIRED_CODEX_TASK_CONTRACT_DIGESTS },
     };
-    assertProductionVisualReviewReady(brief, this.options);
     const registry = this.createRegistry(brief);
     const runId = this.idFactory("run");
     let created = false;
@@ -1059,7 +1075,7 @@ export class ProductionPipeline {
         (node) => node.intervention?.id === decision.interventionId,
       );
       if (!activeInterventionNode || activeInterventionNode.status !== "needs_human") {
-        throw new Error(`Intervention '${decision.interventionId}' is not active for run '${runId}'.`);
+        throw new HumanDecisionConflictError(`你查看的确认点已经变化，请刷新页面后再确认。（intervention '${decision.interventionId}' is not active）`);
       }
       if (activeInterventionNode.intervention?.kind === "creative_review") {
         throw new Error(
@@ -1067,20 +1083,65 @@ export class ProductionPipeline {
         );
       }
       if (activeInterventionNode.intervention?.kind === "source_review_retry"
-        && decision.action !== "reject") {
-        // 试片审查还没完成：放行/调整都等于跳过审查继续付费生成（资金安全线）。
-        // 人只有两个出口：重试审查（复用已生成画面），或终止制作。
-        throw new Error(
+        && decision.action !== "reject"
+        && decision.acceptIncomplete !== true) {
+        // 试片审查还没完成：普通批准/调整都等于跳过审查；只有明确承担已知
+        // incomplete 风险的动作才可沿同一恢复链继续，未知付费/来源风险仍只能停住。
+        throw new HumanDecisionConflictError(
           "试片审查还没完成，不能跳过审查继续制作。请重试审查（复用已生成画面），或终止本次制作。",
         );
       }
-      const currentReviewEvidenceId = sourceReviewEvidenceId(activeInterventionNode) ?? finalReviewEvidenceId(activeInterventionNode);
+      if (activeInterventionNode.intervention?.kind === "source_review_retry"
+        && decision.acceptIncomplete === true) {
+        if (activeInterventionNode.intervention.reviewStatus !== "incomplete"
+          || activeInterventionNode.intervention.providerOutcomeKnown !== true
+          || !activeInterventionNode.intervention.evidenceId
+          || decision.action !== "approve"
+          || decision.reviewEvidenceId !== activeInterventionNode.intervention.evidenceId) {
+          throw new HumanDecisionConflictError("当前试片审查不是可承担风险的 incomplete 状态，只能补查或终止。");
+        }
+      }
+      // 证据按「停点 × 证据域」显式分派，不用 ?? 链兜底：源试片停点只认源证据，
+      // 消费成片审片证据的停点（视觉审片/终审/发布包）只认当前有效 rendered 证据，
+      // 其余停点不因历史成片报告存在而被迫携带无关证据（EB-01）。
+      const sourceReviewStop = activeInterventionNode.intervention?.kind === "source_review_decision"
+        || activeInterventionNode.intervention?.kind === "source_review_retry";
+      const renderedReviewStop = ["visual-review", "final-review", "publish-package"]
+        .includes(activeInterventionNode.nodeId);
+      const visualDelivery = currentVisualReviewDelivery(previous);
+      const effectiveVisualEvidenceId = visualReviewScopeEvidenceId(visualDelivery);
+      const currentReviewEvidenceId = sourceReviewStop
+        ? sourceReviewEvidenceId(activeInterventionNode)
+        : renderedReviewStop && effectiveVisualEvidenceId !== null
+          ? effectiveVisualEvidenceId
+          : activeInterventionNode.nodeId === "final-review"
+            ? finalReviewEvidenceId(activeInterventionNode)
+            : null;
+      // 报告已存在却解析不出有效的 rendered_video 证据范围，是状态损坏：不能让 null == null 放行。
+      if (renderedReviewStop && !sourceReviewStop
+        && effectiveVisualEvidenceId === null
+        && isObjectRecord(visualDelivery) && isObjectRecord(visualDelivery.report)) {
+        throw new HumanDecisionConflictError("当前视觉审片报告缺少有效的成片证据范围，不能放行；请补查现有成片或重跑审片。");
+      }
+      // 源试片停点：intervention 自带的证据身份必须与当前源交付一致，防止旧页面对新试片结果放行。
+      if (sourceReviewStop) {
+        const declaredEvidenceId = activeInterventionNode.intervention?.evidenceId;
+        if (typeof declaredEvidenceId === "string"
+          && /^[a-f0-9]{64}$/.test(declaredEvidenceId)
+          && declaredEvidenceId !== currentReviewEvidenceId) {
+          throw new HumanDecisionConflictError("Human decision is not bound to the current review evidence.");
+        }
+      }
       if (decision.reviewEvidenceId !== currentReviewEvidenceId) {
-        throw new Error("Human decision is not bound to the current review evidence.");
+        throw new HumanDecisionConflictError("Human decision is not bound to the current review evidence.");
       }
       if (decision.action === "approve" && activeInterventionNode?.nodeId === "final-review") {
         assertPersistedFinalApprovalReady(previous, brief, activeInterventionNode);
-        assertFinalReviewDispositions(currentVisualReviewDelivery(previous), decision.reviewDispositions);
+      }
+      // 消费成片审片证据的停点批准前必须逐条表态：这是服务端合同（EB-03），不能只靠客户端禁用按钮；
+      // publish-package 的表态只覆盖成片审片结论，不解释为终审签字。
+      if (decision.action === "approve" && renderedReviewStop) {
+        assertFinalReviewDispositions(visualDelivery, decision.reviewDispositions);
       }
       const registry = this.createRegistry(brief);
       const runner = new WorkflowRunner({
@@ -1220,13 +1281,13 @@ export class ProductionPipeline {
         || continuation.draftSha256 !== draft.baseDraftSha256) {
         throw new Error("Creative review confirmation is stale or belongs to another stage draft.");
       }
-      if (draft.action === "confirm" && draft.acknowledgeRepair === true && draft.expectedCheckIdentity === undefined) {
+      if (draft.action === "confirm" && (draft.acknowledgeRepair === true || draft.acknowledgeIncomplete === true) && draft.expectedCheckIdentity === undefined) {
         // "仍然确认"复用他看过的那一条复核，所以命令必须自己说出是哪一条。这里曾经替他造一个
         // identity：造出来的那个必然对不上记录里的那个，绑定就退化成一个永远失败的空检查，
         // 报错还把人指向"没有独立复核"这种错误方向。
         throw new Error("确认已经看过的复核意见时必须指明那一条复核的编号。");
       }
-      if (draft.action === "confirm" && draft.acknowledgeRepair === true
+      if (draft.action === "confirm" && (draft.acknowledgeRepair === true || draft.acknowledgeIncomplete === true)
         && recordedCreativeCheckIdentity(node, continuation.stage) !== draft.expectedCheckIdentity) {
         // 就在命令边界上证明他手上的编号就是记录里那一条。放进去让图来拒的话，形态会变成
         // "这个节点失败了"——整条制作直接 failed，而他只是拿着一个过期的页面按了按钮。
@@ -1251,6 +1312,8 @@ export class ProductionPipeline {
           // 人的显式承担必须跟着命令落到 resume 上：少了它，"仍然确认"就退化成再跑一轮复核，
           // 而新裁决照样是 repair 时人永远推不动这条制作。
           ...(draft.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
+          ...(draft.acknowledgeIncomplete === true ? { acknowledgeIncomplete: true as const } : {}),
+          ...(draft.acceptQualityFallback === true ? { acceptQualityFallback: true as const } : {}),
           // 走"确认即复核"这条路时，reviewGateNode 会用刚跑出来的那一条复核覆盖这里的值，
           // 所以缺省值只是个占位；复用已展示复核时必须由调用方带上，上面的守卫保证它存在。
           checkIdentity: draft.expectedCheckIdentity ?? contentSha256({
@@ -1892,7 +1955,19 @@ export class ProductionPipeline {
         JSON.parse(await readFile(rankingArtifact.uri!, "utf8")),
         "candidate ranking",
       );
-      const advance = advanceSceneCandidateRanking(ranking, scenePosition);
+      const assetsNode = previous.nodeRuns.find(node => node.nodeId === "assets");
+      const assetsVersion = assetsNode?.outputState?.versions.find(version => version.id === assetsNode.outputState?.effectiveVersionId);
+      const assetsArtifact = previous.artifacts.find(artifact => artifact.kind === "asset_plan"
+        && assetsVersion?.artifactIds.includes(artifact.id) && artifact.producer?.nodeId === "assets");
+      if (!assetsArtifact?.uri) throw new Error("Current asset plan artifact is unavailable.");
+      await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), assetsArtifact);
+      const assetsPlan = requireOutputRecord(JSON.parse(await readFile(assetsArtifact.uri, "utf8")), "current asset plan");
+      const actual = Array.isArray(assetsPlan.scene_assets) ? assetsPlan.scene_assets.filter(isObjectRecord)
+        .find(scene => scene.scene_position === scenePosition) : undefined;
+      if (typeof actual?.provider !== "string" || typeof actual.asset_id !== "string") {
+        throw new Error("Current scene asset identity is unavailable; refusing to guess rank one.");
+      }
+      const advance = advanceSceneCandidateRanking(ranking, scenePosition, { provider: actual.provider, assetId: actual.asset_id });
       const revisionDirectory = path.join(
         this.runsRoot,
         runId,
@@ -3777,6 +3852,8 @@ export class ProductionPipeline {
           assertSourceReviewWorkerBinding({ capability, response, sourceReview, context });
           const result = workerResponseToNodeResult(response, context, parentNodeIds);
           const reason = response.error?.message ?? "素材试片审查暂停。";
+          const providerOutcomeKnown = result.providerOutcomeKnown === true;
+          const canAcceptIncomplete = sourceReview.kind === "incomplete" && providerOutcomeKnown;
           return {
             status: "needs_human" as const,
             error: reason,
@@ -3791,8 +3868,13 @@ export class ProductionPipeline {
             } : {
               kind: "source_review_retry" as const,
               reason,
-              requiredAction: "reject" as const,
-              options: ["reject" as const],
+              requiredAction: canAcceptIncomplete ? "approve" as const : "reject" as const,
+              options: canAcceptIncomplete
+                ? ["approve" as const, "reject" as const]
+                : ["reject" as const],
+              reviewStatus: canAcceptIncomplete ? "incomplete" as const : "unknown_or_unsafe" as const,
+              providerOutcomeKnown,
+              evidenceId: sourceReview.evidenceId,
             },
             receipt,
           };
@@ -4323,6 +4405,13 @@ export function withBoundaryGate(node: NodeDefinition): NodeDefinition {
         status: "needs_human",
         intervention: {
           boundary: "node-complete",
+          // 终审的自动通过分支返回 succeeded + boundInput，里面带着 reviewArtifactIds；
+          // 边界包装必须原样透传，否则终审批准时的 artifact 绑定校验会把正确批准也拦下（EB-04）。
+          ...(node.id === "final-review"
+            && isObjectRecord(result.output)
+            && Array.isArray((result.output as Record<string, unknown>).reviewArtifactIds)
+            ? { artifactIds: finalReviewArtifactIdsFromOutput(result.output) }
+            : {}),
           // 刻意不拼 node.label：它是内部的英文标识（"Validate brief"），拼进来就成了
           // 「Validate brief已完成」这种半截中英混排。步骤名由界面按 nodeId 用它自己的中文表渲染。
           reason: "这一步已完成，等你确认后进入下一步。",
@@ -4349,17 +4438,43 @@ function currentPublishApproval(context: WorkflowContext): WorkflowContext["deci
   ));
 }
 
+// 节点当前有效输出：与 UI 的解析语义一致，先取 outputState 的有效版本，再回落 raw output。
+function effectiveNodeOutput(node: WorkflowRun<ProductionBrief>["nodeRuns"][number]): Record<string, unknown> | null {
+  const output = node.outputState?.versions.find(
+    (version) => version.id === node.outputState?.effectiveVersionId,
+  )?.output ?? node.output;
+  return isObjectRecord(output) ? output : null;
+}
+
 function finalReviewEvidenceId(node: WorkflowRun<ProductionBrief>["nodeRuns"][number]): string | null {
-  if (node.nodeId !== "final-review" || !isObjectRecord(node.output)) return null;
-  const value = node.output.reviewEvidenceId;
+  if (node.nodeId !== "final-review") return null;
+  const output = effectiveNodeOutput(node);
+  if (!output) return null;
+  const value = output.reviewEvidenceId;
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null;
 }
 
 function sourceReviewEvidenceId(node: WorkflowRun<ProductionBrief>["nodeRuns"][number]): string | null {
-  if (node.intervention?.kind !== "source_review_decision" || !isObjectRecord(node.output)) return null;
-  const sourceReview = node.output.sourceReview;
-  if (!isObjectRecord(sourceReview) || sourceReview.kind !== "complete_negative") return null;
+  if (!node.intervention) return null;
+  const output = effectiveNodeOutput(node);
+  if (!output) return null;
+  const sourceReview = output.sourceReview;
+  if (!isObjectRecord(sourceReview)
+    || (sourceReview.kind !== "complete_negative" && sourceReview.kind !== "incomplete")) return null;
   const evidenceId = sourceReview.evidenceId;
+  return typeof evidenceId === "string" && /^[a-f0-9]{64}$/.test(evidenceId) ? evidenceId : null;
+}
+
+// 视觉审片证据只认成片域（rendered_video）的当前有效报告范围：与 UI 的解析、
+// 补查接口（dispatchVisualReinspection）读取的是同一份交付。
+function visualReviewScopeEvidenceId(delivery: unknown): string | null {
+  if (!isObjectRecord(delivery)) return null;
+  const report = delivery.report;
+  if (!isObjectRecord(report)) return null;
+  const scope = report.reviewScope;
+  // 只认成片域证据：source_assets 阶段的试片报告不属于 rendered 停点的绑定对象。
+  if (!isObjectRecord(scope) || scope.reviewStage !== "rendered_video") return null;
+  const evidenceId = scope.evidenceId;
   return typeof evidenceId === "string" && /^[a-f0-9]{64}$/.test(evidenceId) ? evidenceId : null;
 }
 
@@ -4392,6 +4507,17 @@ function assertSourceReviewWorkerBinding(options: {
   if (sourceReview.kind === "incomplete") {
     if (response.status !== "failed") {
       throw new Error("An incomplete source review must keep the asset operation failed for dedicated retry.");
+    }
+    const expectedEvidenceId = createHash("sha256").update(JSON.stringify({
+      version: "video-factory/source-pilot-incomplete-v1",
+      kind: "incomplete",
+      mediaSha256: sourceReview.mediaSha256,
+      inputFingerprint: sourceReview.inputFingerprint,
+      operationId: sourceReview.operationId,
+      scenePosition: sourceReview.scenePosition,
+    })).digest("hex");
+    if (sourceReview.evidenceId !== expectedEvidenceId) {
+      throw new Error("Incomplete source review evidence does not match its materialized pilot media and operation.");
     }
     return;
   }
@@ -6850,6 +6976,7 @@ function creativePlanningNode(
       let candidatesArtifact: PlanningGraphState["candidatesArtifact"];
       let rankingArtifact: PlanningGraphState["ranking"];
       let executablePlanArtifact: PlanningGraphState["executablePlan"];
+      let stockAcceptance: ReturnType<typeof confirmedStockDeliveryAcceptance>;
       // 图库路线的额外端口单独注解：spread 表达式内部得不到上下文类型推导。
       const libraryPorts: Pick<CreativePlanningPorts, "searchCandidates" | "rank" | "integrateDirector"> = {
           searchCandidates: async (planningContext) => {
@@ -6945,14 +7072,14 @@ function creativePlanningNode(
                       recoverTextTask?.nodeId === "creative-planning" ? recoverTextTask.workflowOperationRequestId : undefined,
                     ),
                     currentBrief.models?.[ranker.id],
+                    () => mayStartAssetSupplement(runsRoot, context.runId),
                   )
                 : { output: await ranker.rank(currentRankingRequest) };
               const ranking = validateAssetSemanticRanking({
                 ...execution.output,
-                source: "model",
                 providerId: execution.trace?.providerId ?? ranker.id,
                 modelId: execution.trace?.modelId ?? ranker.modelId,
-              }, candidates.output);
+              }, candidates.output, { allowVisualEvidence: true });
               if (execution.trace?.modelId) {
                 modelTraces.rank = execution.trace.modelId;
                 providerTraces.rank = execution.trace.providerId;
@@ -7593,6 +7720,10 @@ function creativePlanningNode(
             output: {
               creativeReview: outcome.state.creativeReview,
               blockingIssues,
+              qualityAdvisories: (outcome.state.advisoryIssues ?? []).map(issue => ({
+                scenePositions: issue.scenePositions,
+                reason: issue.reason,
+              })),
               draftArtifactId: registered.id,
               stage,
               // 自动循环自停的理由随停点一起交给界面：人做决定时要知道是哪一件事把循环卡住了。
@@ -7670,6 +7801,7 @@ function creativePlanningNode(
         finalPlanArtifact = finalState.integratedPlan ?? finalState.directorPlan ?? null;
         candidatesArtifact = finalState.candidatesArtifact ?? null;
         rankingArtifact = finalState.ranking ?? null;
+        stockAcceptance = confirmedStockDeliveryAcceptance(finalState as PlanningGraphState);
         executablePlanArtifact = finalState.executablePlan ?? outcome.executablePlan;
         await recordExecutionTraces();
       } catch (error) {
@@ -7775,7 +7907,11 @@ function creativePlanningNode(
         ? `${JSON.stringify(candidatesArtifact.output, null, 2)}\n`
         : undefined;
       const rankingContent = libraryRoute && rankingArtifact
-        ? `${JSON.stringify(rankingArtifact.output, null, 2)}\n`
+        ? `${JSON.stringify({ ...rankingArtifact.output, ...(stockAcceptance ? { deliveryAcceptance: {
+          ...stockAcceptance,
+          scriptSha256: createHash("sha256").update(scriptContent).digest("hex"),
+          directorPlanSha256: createHash("sha256").update(directorPlanContent).digest("hex"),
+        } } : {}) }, null, 2)}\n`
         : undefined;
       const expectedKinds = jointPlanningExpectedKinds(libraryRoute);
       const expectedFormalContents: Array<{ kind: string; content: string }> = [
@@ -7797,6 +7933,7 @@ function creativePlanningNode(
           directorPlan: finalPlanArtifact.artifactId,
           ...(candidateContent !== undefined && candidatesArtifact ? { candidates: candidatesArtifact.artifactId } : {}),
           ...(rankingContent !== undefined && rankingArtifact ? { ranking: rankingArtifact.artifactId } : {}),
+          ...(stockAcceptance ? { stockAcceptance } : {}),
           executablePlan: executablePlanArtifact.artifactId,
         },
       })).digest("hex");
@@ -9543,6 +9680,41 @@ function validateVisualReviewInput(
   return request;
 }
 
+async function sourceQualityRiskAlreadyAccepted(
+  brief: ProductionBrief,
+  context: WorkflowContext,
+  request: VisualReviewAgentInput,
+  report: VisualReviewReport,
+): Promise<boolean> {
+  if (!usesJointCreativePlanning(brief)) return false;
+  const paths = planningOutputs(context);
+  if (!paths.candidateRankingPath || !paths.candidateInventoryPath) return false;
+  const readVerified = async (file: string): Promise<string> => {
+    const artifact = context.artifacts.find(item => item.uri === file);
+    if (!artifact) throw new Error("Current quality acceptance artifact is missing.");
+    await verifyStoredArtifactWithinRoot(request.runRoot!, artifact);
+    return readFile(file, "utf8");
+  };
+  const ranking = requireOutputRecord(JSON.parse(await readVerified(paths.candidateRankingPath)), "confirmed ranking");
+  const acceptance = isObjectRecord(ranking.deliveryAcceptance) ? ranking.deliveryAcceptance : undefined;
+  if (acceptance?.policyVersion !== "playable-first-v1" || !Array.isArray(acceptance.scenePositions)) return false;
+  const acceptedPositions = acceptance.scenePositions;
+  for (const [field, file] of [["scriptSha256", paths.scriptPath], ["directorPlanSha256", paths.directorPlanPath], ["inventorySha256", paths.candidateInventoryPath]] as const) {
+    if (!file || acceptance[field] !== createHash("sha256").update(await readFile(file)).digest("hex")) {
+      throw new Error("Current quality acceptance no longer matches the production inputs.");
+    }
+  }
+  const plan = requireOutputRecord(JSON.parse(await readVerified(request.assetPlanPath!)), "prepared assets");
+  const routes = Array.isArray(plan.director_routing) ? plan.director_routing.filter(isObjectRecord) : [];
+  const covered = routes.filter(route => route.selection_basis === "accepted_quality_risk"
+    && acceptedPositions.includes(route.scene_position)).map(route => route.scene_position);
+  // 新的安全意见不属于“示意素材匹配一般”的既有同意，仍交由用户处理。
+  if (report.findings.some(finding => finding.category === "safety")) return false;
+  const scope = report.findings.length > 0 ? report.findings.map(finding => finding.scenePosition)
+    : Array.isArray(plan.scene_assets) ? plan.scene_assets.filter(isObjectRecord).map(scene => scene.scene_position) : [];
+  return scope.length > 0 && scope.every(position => typeof position === "number" && covered.includes(position));
+}
+
 function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): NodeDefinition {
   const providerId = brief.providers.visualReview;
   if (!providerId) throw new Error("Source asset visual review provider is missing.");
@@ -9627,6 +9799,22 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
             provider,
             providerLabel: provider.label ?? "生成画面预检",
           });
+          if (error.sourceError instanceof CodexBridgeError && error.sourceError.stage === "completed_failure") {
+            const diagnosticPath = path.join(attempt.directory, "source_review_incomplete.json");
+            const diagnostic = { reviewStatus: "incomplete", reason: "预检服务已结束，但没有有效结论；无质量评分。", failure: error.agentLoop.failure };
+            const content = `${JSON.stringify(diagnostic, null, 2)}\n`;
+            await writeTextAtomically(diagnosticPath, content);
+            return {
+              status: "needs_human", providerOutcomeKnown: true,
+              output: { sourceVisualReviewPath: diagnosticPath, ...diagnostic },
+              artifacts: [...(failed.artifacts ?? []), fileArtifact("review_diagnostic", diagnosticPath, content,
+                "application/json", "video-factory/source-review-incomplete-v1", "asset-source-review", parentArtifactIds,
+                provider.id, "Incomplete consultation, not a visual review report.", attempt.attempt)],
+              ...(failed.receipt ? { receipt: failed.receipt } : {}),
+              intervention: { reason: "素材已准备，视觉预检未完成。可以接受未复核风险继续配音与渲染；这不代表预检通过，也不授权新增费用。",
+                requiredAction: "approve", options: ["approve", "request_changes", "reject"], artifactIds: parentArtifactIds },
+            };
+          }
           return { ...failed, error: `源素材视觉预检没有完成：${failed.error}` };
         }
         if (error instanceof VisualReviewFallbackError) {
@@ -9706,7 +9894,8 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
         attempt: attempt.attempt,
         parentArtifactIds,
       });
-      const output = { sourceVisualReviewPath: reportPath, report };
+      const qualityRiskAccepted = await sourceQualityRiskAlreadyAccepted(brief, context, request, report);
+      const output = { sourceVisualReviewPath: reportPath, report, reviewStatus: "completed", qualityRiskAccepted };
       const artifacts = [reportArtifact, traceArtifact, loopArtifact]
         .filter((artifact): artifact is ArtifactDraft => Boolean(artifact));
       const result = {
@@ -9717,7 +9906,7 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
       // 与试片闸门同一判据：源素材预检的咨询性发现（not_observed）不阻断配音与渲染，
       // 只有实质缺陷或评分/置信度未达门槛才交回用户。预检是意见不是判决——它能拦下自己，
       // 但不能替用户宣布这个作品不行。
-      return visualReviewBlocksContinuation(report)
+      return visualReviewBlocksContinuation(report) && !qualityRiskAccepted
         ? {
           ...result,
           status: "needs_human",
@@ -10178,16 +10367,16 @@ function assetSemanticRankNode(
                   context.operationRequestId,
                 ),
                 brief.models?.[ranker.id],
+                () => mayStartAssetSupplement(runsRoot, context.runId),
               )
             : { output: await ranker.rank(report) };
           const actualProviderId = execution.trace?.providerId ?? ranker.id;
           const actualModelId = execution.trace?.modelId ?? ranker.modelId;
           ranking = validateAssetSemanticRanking({
             ...execution.output,
-            source: "model",
             providerId: actualProviderId,
             modelId: actualModelId,
-          }, report);
+          }, report, { allowVisualEvidence: true });
           trace = execution.trace;
           agentLoop = execution.agentLoop;
         } catch (error) {
@@ -10284,7 +10473,7 @@ function assetSemanticRankNode(
       return {
         ...value,
         candidateRankingPath: requiredOutputString(value, "candidateRankingPath"),
-        ranking: validateAssetSemanticRanking(value.ranking, report, { allowLocks: true }),
+        ranking: validateAssetSemanticRanking(value.ranking, report, { allowLocks: true, allowVisualEvidence: true }),
       };
     },
   };
@@ -10598,10 +10787,20 @@ function assertProductionVisualReviewReady(
   options: ProductionPipelineOptions,
 ): void {
   if (brief.runPurpose === "test") return;
-  const providerId = brief.providers.visualReview;
-  if (providerId !== "deepseek-visual-review-v1") {
-    throw new Error("Formal production requires the configured DeepSeek visual reviewer before work can start.");
+  if (hasUsableProductionVisualReview(brief, options)) return;
+  if (brief.visualReviewPolicy === "allow_unreviewed_first_cut") return;
+  if (!brief.providers.visualReview) {
+    throw new Error("视觉审片当前不可用。请明确选择“先生成首版，之后再审片”后再开始制作。");
   }
+  throw new Error("正式制作需要可用的视觉审片和独立质量复核，或明确选择先生成未审片首版。");
+}
+
+function hasUsableProductionVisualReview(
+  brief: ProductionBrief,
+  options: ProductionPipelineOptions,
+): boolean {
+  const providerId = brief.providers.visualReview;
+  if (providerId !== "deepseek-visual-review-v1") return false;
   const agent = [
     ...(options.visualReviewAgents ?? []),
     ...(options.visualReviewAgent ? [options.visualReviewAgent] : []),
@@ -10615,9 +10814,23 @@ function assertProductionVisualReviewReady(
     && reviewers[0]?.providerId === providerId
     && reviewers[0]?.modelId === agent?.modelId
     && reviewers[0]?.independentRoleAudit === true) {
-    return;
+    return true;
   }
-  throw new Error("Formal production requires one DeepSeek visual review with an independent role audit.");
+  return false;
+}
+
+function normalizeUnavailableVisualReview(
+  brief: ProductionBrief,
+  options: ProductionPipelineOptions,
+): ProductionBrief {
+  if (brief.runPurpose !== "production"
+    || brief.visualReviewPolicy !== "allow_unreviewed_first_cut"
+    || hasUsableProductionVisualReview(brief, options)
+    || !brief.providers.visualReview) {
+    return brief;
+  }
+  const { visualReview: _visualReview, ...providers } = brief.providers;
+  return { ...brief, providers };
 }
 
 function roundCurrency(value: number): number {
@@ -10823,6 +11036,16 @@ async function assertNoUnresolvedPlanningTask(runDirectory: string, run: Workflo
   }
 }
 
+async function mayStartAssetSupplement(runsRoot: string, runId: string): Promise<boolean> {
+  try {
+    await stat(path.join(runsRoot, runId, ".pause-request.json"));
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
+}
+
 export async function summarizeJointPlanningExecution(
   runsRoot: string,
   runId: string,
@@ -10899,6 +11122,7 @@ function summarizePlanningCheckpoints(
   const unknownRequestIds = new Set<string>();
   const retryRequestIds = new Set<string>();
   const discussionRequestIds = new Set<string>();
+  const structuredRepairRequestIds = new Set<string>();
   let legacyProducerModelCallCount = 0;
   let legacyAuditModelCallCount = 0;
   let internalProducerModelCallCount = 0;
@@ -10908,8 +11132,17 @@ function summarizePlanningCheckpoints(
   let auditMs = 0;
   let validationMs = 0;
   let discussionMs = 0;
+  let unattributedStructuredRepairModelCallCount = 0;
+  let unattributedProducerMs = 0;
+  let unattributedAuditMs = 0;
+  let unattributedValidationMs = 0;
   const seenCheckpointEvidence = new Set<string>();
-  for (const value of checkpoints) {
+  const accountingCheckpoints = checkpoints.flatMap(value => {
+    const batch = isObjectRecord(value.assetRankBatch) ? value.assetRankBatch : undefined;
+    return batch?.version === "asset-rank-batches-v1" && batch.phase === "supplement" && isObjectRecord(batch.primaryCheckpoint)
+      ? [batch.primaryCheckpoint, value] : [value];
+  });
+  for (const value of accountingCheckpoints) {
     // 同一落盘证据可能存在重复副本，不能重复累计耗时和修复次数。
     const evidenceIdentity = JSON.stringify(value);
     if (seenCheckpointEvidence.has(evidenceIdentity)) continue;
@@ -10965,6 +11198,14 @@ function summarizePlanningCheckpoints(
     const mappedProduce = mapped.filter((request) => request.phase === "produce").length;
     const mappedAudit = mapped.filter((request) => request.phase === "audit").length;
     const legacyBucket = currentOperationRequestId === undefined || previous;
+    // 迁移前已丢失请求身份的旧文件不能反推 phase；有 owner 的请求仍须显式列为待核对，
+    // 不得因为新 key 无法重建旧 hash 就消失。无 owner 的旧计数继续走下方历史桶。
+    if (Object.keys(requestOwners).length > 0) {
+      const mappedIds = new Set(allMapped.map(request => request.requestId));
+      for (const requestId of attemptedRequestIds) {
+        if (!mappedIds.has(requestId) && (currentOperationRequestId === undefined || belongs(requestId))) unknownRequestIds.add(requestId);
+      }
+    }
     if (legacyBucket && Object.keys(requestOwners).length === 0) {
       legacyProducerModelCallCount += Math.max(0,
         safeCount(phaseAttempts.produce) - safeCount(unaccepted.produce) - allMapped.filter((request) => request.phase === "produce").length,
@@ -10973,9 +11214,21 @@ function summarizePlanningCheckpoints(
         safeCount(phaseAttempts.audit) - safeCount(unaccepted.audit) - allMapped.filter((request) => request.phase === "audit").length,
       );
     }
-    const allOwnersMatchBucket = allMapped.length > 0 && allMapped.every((request) => belongs(request.requestId));
+    const repairs = new Set(Array.isArray(value.structuredRepairRequestIds)
+      ? value.structuredRepairRequestIds.filter((id): id is string => typeof id === "string" && attemptedRequestIds.has(id)) : []);
+    for (const id of repairs) if (currentOperationRequestId === undefined || belongs(id)) structuredRepairRequestIds.add(id);
+    const unmappedRepairs = Math.max(0, safeCount(value.structuredRepairModelCallCount) - repairs.size);
+    const allOwnersMatchBucket = allMapped.length > 0 && allMapped.length === attemptedRequestIds.size
+      && allMapped.every((request) => belongs(request.requestId));
     if (currentOperationRequestId === undefined || allOwnersMatchBucket) {
-      structuredRepairModelCallCount += safeCount(value.structuredRepairModelCallCount);
+      structuredRepairModelCallCount += unmappedRepairs;
+    } else if (!previous && !(allMapped.length > 0 && allMapped.length === attemptedRequestIds.size
+      && allMapped.every(request => !belongs(request.requestId)))) {
+      // 旧聚合值不能可靠分摊给两个 owner，单独保留全局未归属量，不伪装成两边都是零。
+      unattributedStructuredRepairModelCallCount += unmappedRepairs;
+      unattributedProducerMs += safeCount(durations.produce);
+      unattributedAuditMs += safeCount(durations.audit);
+      unattributedValidationMs += safeCount(value.validationMs);
     }
     if (Array.isArray(value.retriedRequestIds)) {
       value.retriedRequestIds.forEach((entry) => {
@@ -11024,7 +11277,11 @@ function summarizePlanningCheckpoints(
     producerModelCallCount,
     auditModelCallCount,
     discussionModelCallCount,
-    structuredRepairModelCallCount,
+    structuredRepairModelCallCount: structuredRepairModelCallCount + structuredRepairRequestIds.size,
+    ...(unattributedStructuredRepairModelCallCount > 0 ? { unattributedStructuredRepairModelCallCount } : {}),
+    ...(unattributedProducerMs > 0 ? { unattributedProducerMs } : {}),
+    ...(unattributedAuditMs > 0 ? { unattributedAuditMs } : {}),
+    ...(unattributedValidationMs > 0 ? { unattributedValidationMs } : {}),
     retryCount: retryRequestIds.size,
     unknownModelExecutionCount: unknownRequestIds.size,
     producerMs,
@@ -11100,59 +11357,6 @@ async function readCreativeDiscussionExecutions(
     }
   }
   return records;
-}
-
-function planningCheckpointRequestPhases(
-  checkpoint: Record<string, unknown>,
-  attemptedRequestIds: ReadonlySet<string>,
-): Array<{ requestId: string; phase: "produce" | "audit"; iteration: number }> {
-  if (typeof checkpoint.key !== "string"
-    || typeof checkpoint.contractDigest !== "string"
-    || !Number.isSafeInteger(checkpoint.cycle)
-    || !isObjectRecord(checkpoint.operationGenerations)) return [];
-  const cycle = Number(checkpoint.cycle);
-  const operationKeys = new Set(Object.entries(checkpoint.operationGenerations)
-    .filter(([, generation]) => Number.isSafeInteger(generation) && Number(generation) >= 0)
-    .map(([operationKey]) => operationKey));
-  const configuredMaxIterations = Number.isSafeInteger(checkpoint.maxIterations)
-    && Number(checkpoint.maxIterations) >= 1
-    && Number(checkpoint.maxIterations) <= 3
-    ? Number(checkpoint.maxIterations)
-    : 0;
-  const persistedMaxIteration = Math.max(0, ...[...operationKeys].map((operationKey) => {
-    const match = /^(\d+):(\d+):(produce|audit)$/.exec(operationKey);
-    return match ? Number(match[2]) : 0;
-  }));
-  // generation=0 是正常首次调用，不会写进 operationGenerations；必须主动枚举，
-  // 再由 attemptedRequestIds 证明它是否真的提交过。
-  const maxIterations = Math.max(configuredMaxIterations, persistedMaxIteration);
-  for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
-    operationKeys.add(`${cycle}:${iteration}:produce`);
-    operationKeys.add(`${cycle}:${iteration}:audit`);
-  }
-  const requests: Array<{ requestId: string; phase: "produce" | "audit"; iteration: number }> = [];
-  for (const operationKey of operationKeys) {
-    const match = /^(\d+):(\d+):(produce|audit)$/.exec(operationKey);
-    if (!match || Number(match[1]) !== cycle) continue;
-    const iteration = Number(match[2]);
-    const phase = match[3] as "produce" | "audit";
-    const persistedGeneration = checkpoint.operationGenerations[operationKey];
-    const maxGeneration = Number.isSafeInteger(persistedGeneration) && Number(persistedGeneration) >= 0
-      ? Number(persistedGeneration)
-      : 0;
-    for (let generation = 0; generation <= maxGeneration; generation += 1) {
-      const requestId = `agent-${createHash("sha256").update(JSON.stringify({
-        scope: checkpoint.key,
-        contractDigest: checkpoint.contractDigest,
-        cycle,
-        iteration,
-        phase,
-        generation,
-      })).digest("hex")}`;
-      if (attemptedRequestIds.has(requestId)) requests.push({ requestId, phase, iteration });
-    }
-  }
-  return requests;
 }
 
 function safeCount(value: unknown): number {
@@ -11475,7 +11679,7 @@ function assertVisualReviewReady(reviewedDelivery: unknown, brief: ProductionBri
     const origin = brief.taskContractDigests?.["visual-review"] === requiredProducerContract
       ? ""
       : "（这个制作建立时用的是更早的审片合同）";
-    throw new Error(
+    throw new HumanDecisionConflictError(
       `这份${mode === "dual" ? "双模型" : "单模型"}审片证据是更早的审片合同产出的${origin}：`
       + staleContractModels
         .map((model) => `${model.providerId}/${model.modelId} 用 ${String(model.producerContractDigest).slice(0, 12)}…`)
@@ -11485,7 +11689,14 @@ function assertVisualReviewReady(reviewedDelivery: unknown, brief: ProductionBri
     );
   }
   if (mode === "single") {
-    if (scope.actualModels[0]?.providerId !== "deepseek-visual-review-v1") {
+    // DeepSeek 单审腿有两个合法身份：配置身份 "deepseek-visual-review-v1"（catalog/brief）与
+    // 执行身份 "deepseek"（role-agent-assembly 以 broker 身份登记 primaryProviderId）。只认其一
+    // 会把另一个永久锁在终审之外——run-1278 的真实 DeepSeek 审片就因只认配置身份被硬拒。
+    // 白名单只对 DeepSeek 配置开放：其它配置即使执行身份与配置一致，也不构成 DeepSeek 单审。
+    const configuredProviderId = brief.providers.visualReview;
+    const actualProviderId = scope.actualModels[0]?.providerId;
+    if (configuredProviderId !== "deepseek-visual-review-v1"
+      || (actualProviderId !== "deepseek-visual-review-v1" && actualProviderId !== "deepseek")) {
       throw new Error("Final publication requires the current single-review evidence to come from DeepSeek.");
     }
     if (report.independentReviews !== undefined) {
@@ -11580,8 +11791,10 @@ function assertPersistedFinalApprovalReady(
     if (visualNode?.status !== "succeeded") {
       throw new Error("Final approval requires a completed visual-review node.");
     }
-    assertVisualReviewReady(visualNode.output, brief);
-    const scope = finalVisualReviewScope(visualNode.output);
+    // 终审读当前有效视觉交付（与放行处的证据解析同源），不再读可能滞后的 raw output。
+    const visualDelivery = currentVisualReviewDelivery(run);
+    assertVisualReviewReady(visualDelivery, brief);
+    const scope = finalVisualReviewScope(visualDelivery);
     if (output.reviewEvidenceId !== scope.evidenceId) {
       throw new Error("Final approval is not bound to the current visual evidence digest.");
     }
@@ -11682,13 +11895,13 @@ function assertFinalReviewDispositions(delivery: unknown, dispositions: HumanRev
   const byKey = new Map((dispositions ?? []).map((disposition) => [disposition.itemKey, disposition]));
   const undecided = findings.filter((finding) => !byKey.has(visualReviewFindingKey(finding)));
   if (undecided.length > 0) {
-    throw new Error(
+    throw new HumanDecisionConflictError(
       `批准前需要对全部 ${findings.length} 条审片结论逐条表态，当前还有 ${undecided.length} 条未表态。`,
     );
   }
   const accepted = findings.filter((finding) => byKey.get(visualReviewFindingKey(finding))?.decision === "accept");
   if (accepted.length > 0) {
-    throw new Error(
+    throw new HumanDecisionConflictError(
       `有 ${accepted.length} 条你已采纳的审片结论尚未返修，不能批准发布；请先按它们返修，或改为不采纳并写明理由。`,
     );
   }
@@ -11785,6 +11998,7 @@ interface RankedStockCandidate {
 export function advanceSceneCandidateRanking(
   ranking: Record<string, unknown>,
   scenePosition: number,
+  actualCandidate: { provider: string; assetId: string },
 ): {
   ranking: Record<string, unknown>;
   replaced: { provider: string; assetId: string };
@@ -11801,6 +12015,14 @@ export function advanceSceneCandidateRanking(
   const scene = requireOutputRecord(scenes[sceneIndex], `candidate ranking scene ${scenePosition}`);
   const candidates = Array.isArray(scene.candidates) ? scene.candidates : undefined;
   if (!candidates) throw new Error(`Candidate ranking scene ${scenePosition} has no candidates.`);
+  const consent = isObjectRecord(ranking.deliveryAcceptance) ? ranking.deliveryAcceptance : undefined;
+  const acceptsRisk = consent?.policyVersion === "playable-first-v1" && Array.isArray(consent.scenePositions)
+    && consent.scenePositions.includes(scenePosition);
+  const attempted = Array.isArray(scene.attemptedCandidateIds) ? scene.attemptedCandidateIds.filter(isObjectRecord)
+    .map(item => ({ provider: String(item.provider), assetId: String(item.assetId) })) : [];
+  if (candidates.some(value => isObjectRecord(value) && value.locked === true)) {
+    throw new Error("Scene has a locked candidate; explicitly change the selection before switching.");
+  }
   const ordered: RankedStockCandidate[] = [];
   candidates.forEach((value, index) => {
     const entry = requireOutputRecord(value, `candidate ranking entry ${index}`);
@@ -11810,7 +12032,7 @@ export function advanceSceneCandidateRanking(
     const rank = Number(entry.rank);
     const locked = entry.locked === true;
     const semanticScore = scoresVerified ? Number(entry.semanticScore ?? 0) : 0;
-    if (!locked && semanticScore < MIN_STOCK_CANDIDATE_SEMANTIC_SCORE) return;
+    if (!locked && !acceptsRisk && semanticScore < MIN_STOCK_CANDIDATE_SEMANTIC_SCORE) return;
     ordered.push({
       entry,
       index,
@@ -11821,19 +12043,24 @@ export function advanceSceneCandidateRanking(
       semanticScore,
     });
   });
-  ordered.sort((left, right) => (Number(right.locked) - Number(left.locked)) || (left.rank - right.rank));
-  if (ordered.length < 2) {
+  ordered.sort((left, right) => (Number(right.locked) - Number(left.locked))
+    || (Number(right.semanticScore >= MIN_STOCK_CANDIDATE_SEMANTIC_SCORE) - Number(left.semanticScore >= MIN_STOCK_CANDIDATE_SEMANTIC_SCORE))
+    || (left.rank - right.rank));
+  const actualIndex = ordered.findIndex(candidate => candidate.provider === actualCandidate.provider && candidate.assetId === actualCandidate.assetId);
+  if (actualIndex < 0) throw new Error("Actual scene asset is not in the currently allowed ranking scope.");
+  const replaced = ordered[actualIndex]!;
+  const tried = [...attempted, { provider: replaced.provider, assetId: replaced.assetId }];
+  const rotated = [...ordered.slice(actualIndex + 1), ...ordered.slice(0, actualIndex)];
+  const replacement = rotated.find(candidate => !tried.some(item => item.provider === candidate.provider && item.assetId === candidate.assetId));
+  if (!replacement) {
     throw new Error(
       `Scene ${scenePosition} has no second qualified candidate to switch to; `
       + "rewrite this scene's narration or adjust the plan instead of taking an unreviewed asset.",
     );
   }
-  const replaced = ordered[0]!;
-  const replacement = ordered[1]!;
-  // 把换上的候选与其余候选按新次序重排名次，而不是只对调两个数值：
-  // 名次重复时对调等于没换，而名次是素材节点唯一的取舍依据。
-  const resequenced = [replacement, replaced, ...ordered.slice(2)];
-  const baseRank = replaced.rank;
+  // 推荐候选优先、同级按名次；已弃用的候选不能在下载失败后再次回流。
+  const resequenced = [replacement, ...ordered.filter(item => item !== replacement)];
+  const baseRank = Math.min(...ordered.map(item => item.rank));
   const ranks = new Map(resequenced.map((item, offset) => [item.index, baseRank + offset]));
   const revisedCandidates = candidates.map((value, index) => {
     const rank = ranks.get(index);
@@ -11844,7 +12071,7 @@ export function advanceSceneCandidateRanking(
     ranking: {
       ...ranking,
       scenes: scenes.map((value, index) => (
-        index === sceneIndex ? { ...scene, candidates: revisedCandidates } : value
+        index === sceneIndex ? { ...scene, candidates: revisedCandidates, attemptedCandidateIds: tried } : value
       )),
     },
     replaced: { provider: replaced.provider, assetId: replaced.assetId },

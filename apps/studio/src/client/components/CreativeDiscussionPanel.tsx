@@ -27,6 +27,9 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   // 复核是"提议"而不是"否决"：此时确认仍然可用，但必须由人显式承担，并把被接受的意见记进
   // confirmation.acknowledgedRepair，事后能查到是谁在什么结论下放行的。
   const awaitingRepair = review.checkResult?.verdict === "repair";
+  const incompleteCheck = review.checkResult?.status === "incomplete";
+  const qualityAdvisories = review.qualityAdvisories ?? [];
+  const needsStockConsent = review.stage === "director" && qualityAdvisories.length > 0;
   const commandBase = useMemo(() => ({
     expectedRunRevision: review.runRevision,
     expectedReviewRevision: review.reviewRevision,
@@ -82,11 +85,12 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
 
   function confirmDraft() {
     if (busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")) return;
-    if (awaitingRepair && !window.confirm(
-      "独立复核对当前这一版提出了意见，还没有通过。\n\n"
-      + "继续会让流程带着这些未处理的意见进入下一步，系统会记录是你确认放行的。\n\n"
-      + "确定仍然确认吗？",
-    )) return;
+    if ((awaitingRepair || incompleteCheck || needsStockConsent) && !window.confirm([
+      ...(awaitingRepair ? ["独立复核对当前这一版提出了意见，还没有通过。"] : []),
+      ...(incompleteCheck ? ["独立复核没有得到有效结论。这不是审查通过，也没有质量评分；你可以承担未完成复核的风险采用本版。"] : []),
+      ...(needsStockConsent ? ["当前示意素材匹配得分较低或视觉核验未完成。接受后先制作首版，原始评分与问题会保留；不会扩大费用授权，也不会将示意画面用作真实事件证据。"] : []),
+      "继续会保留你的采用决定。确定仍然确认吗？",
+    ].join("\n\n"))) return;
     void submit({
       action: "confirm",
       commandId: crypto.randomUUID(),
@@ -95,6 +99,8 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       // 此刻恰好记着的那一条。
       ...(review.checkResult ? { expectedCheckIdentity: review.checkResult.checkIdentity } : {}),
       ...(awaitingRepair ? { acknowledgeRepair: true } : {}),
+      ...(incompleteCheck ? { acknowledgeIncomplete: true as const } : {}),
+      ...(needsStockConsent ? { acceptQualityFallback: true as const } : {}),
     }).catch(() => undefined);
   }
 
@@ -124,7 +130,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       <header className="creative-discussion-header">
         <div>
           <h2 id="creative-review-title">{hasBlockingIssues ? "当前导演方案需要你决定" : `${STAGE_LABEL[review.stage]}已生成，等你确认`}</h2>
-          {hasBlockingIssues ? <p>素材暂不满足方案。已保留你确认的方案，不会自动改成生成画面；请在讨论区说明允许怎样调整，或补充素材。</p> : null}
+          {hasBlockingIssues ? <p>自动选材尚未通过，具体原因见下方。已保留你确认的方案，不会自动改成生成画面；请在讨论区说明允许怎样调整，或补充素材。</p> : null}
         </div>
         <span className={`creative-review-phase phase-${review.phase}`}>
           {review.phase === "checking" ? "正在处理原操作" : `第 ${review.reviewRevision} 版讨论`}
@@ -140,6 +146,12 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
         <article id="creative-draft" tabIndex={0} className={mobileTab === "draft" ? "creative-draft-surface is-mobile-active" : "creative-draft-surface"} aria-label={`当前${STAGE_LABEL[review.stage]}`}>
           <CreativeDraftEditor storageKey={`${storageKey}:edit`} draftIdentity={`${review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} />
           <CreativeDraft stage={review.stage} value={review.draft} />
+          {incompleteCheck ? <section className="creative-check-result" role="status"><strong>独立复核未完成 · 无评分</strong><p>{review.checkResult?.summary}</p></section> : null}
+          {needsStockConsent ? <section className="creative-check-result" role="status">
+            <strong>可以先制作首版，但请了解素材风险</strong>
+            <ul>{qualityAdvisories.map((issue, index) => <li key={index}>镜头 {issue.scenePositions.join("、")}：{issue.reason}</li>)}</ul>
+            <p>接受不会改分、不会伪装成已核验，也不增加费用授权。你仍可以先讨论调整方案。</p>
+          </section> : null}
           <details className="creative-selection-disclosure"><summary>指定讨论范围{selectedIds.length > 0 ? ` · 已选 ${selectedIds.length} 项` : "（可选）"}</summary><CreativeSelection
             stage={review.stage}
             draft={review.draft}
@@ -187,7 +199,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
             <p>{review.stopDetail}</p>
           </section> : null}
           {hasBlockingIssues ? <section className="creative-check-result" role="status">
-            <strong>当前素材条件无法满足方案</strong>
+            <strong>素材选择需要你处理</strong>
             <ul>{review.blockingIssues.map((issue, index) => <li key={`${issue.reason}:${index}`}>
               <strong>{issue.scenePositions.length > 0 ? `镜头 ${issue.scenePositions.join("、")}` : "当前方案"}</strong>
               <span>{issue.reason}。{issue.requiredChange}</span>
@@ -227,7 +239,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       <footer className="creative-review-actions">
         <div className="creative-confirm-context"><strong>{hasUnsavedEdits ? "有未保存的手动修改" : `确认对象：当前${STAGE_LABEL[review.stage]}`}</strong><small>{hasUnsavedEdits ? "先保存或放弃修改，再确认采用；不会提交编辑器里的未保存文字。" : "确认时独立复核，不会购买素材；有意见由你决定，后续步骤仍需确认。"}</small></div>
         <button type="button" className="button button-ghost" disabled={busy || hasUnsavedEdits || review.previousDraft === undefined || !review.allowedActions.includes("undo_draft")} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button>
-        <button type="button" className="button button-primary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{awaitingRepair ? "看过意见，仍然确认" : hasBlockingIssues ? "修改后重新检查" : "确认当前方案，继续"}</button>
+        <button type="button" className="button button-primary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{needsStockConsent ? "接受素材风险，先制作首版" : incompleteCheck ? "接受复核未完成，采用本版" : awaitingRepair ? "看过意见，仍然确认" : hasBlockingIssues ? "修改后重新检查" : "确认当前方案，继续"}</button>
       </footer>
     </section>
   );

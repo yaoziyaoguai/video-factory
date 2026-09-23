@@ -47,11 +47,11 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
   const [approvalNote, setApprovalNote] = useState("");
-  const [reviewDecisions, setReviewDecisions] = useState<Record<string, { decision: "accept" | "reject"; reason: string }>>({});
+  const [reviewDecisions, setReviewDecisions] = useState<Record<string, { decision: "accept" | "reject" | "accept_risk"; reason: string }>>({});
   const [replanningVoice, setReplanningVoice] = useState(false);
   const [voiceDurationSeconds, setVoiceDurationSeconds] = useState("");
   const [hasPendingPlanningConfiguration, setHasPendingPlanningConfiguration] = useState(false);
-  const [decisionSnapshot, setDecisionSnapshot] = useState<Pick<StudioDecisionInput, "expectedRunRevision" | "interventionId" | "reviewEvidenceId">>();
+  const [decisionSnapshot, setDecisionSnapshot] = useState<Pick<StudioDecisionInput, "expectedRunRevision" | "interventionId" | "reviewEvidenceId"> & { acceptIncomplete?: true }>();
   const previewRef = useRef<HTMLVideoElement>(null);
   const closeRejectDecision = () => {
     setRejecting(false);
@@ -88,9 +88,14 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const uncertainPaidNode = run.nodes.find((node) => node.outcomeUncertain === true);
   const visiblePaidNodeSummary = paidNodeSummary?.nodeId === uncertainPaidNode?.id ? paidNodeSummary : undefined;
   const uncertainPaidNodeProviderId = (uncertainPaidNode?.executionReceipt ?? uncertainPaidNode?.plannedExecution)?.providerId;
-  const visualReview = visualReviewDecision(run);
+  const sourcePreflightDecision = run.activeIntervention?.nodeId === "asset-source-review";
+  const visualReview = sourcePreflightDecision ? undefined : visualReviewDecision(run);
   const sourceReviewEvidenceId = sourceReviewDecisionEvidenceId(run);
   const sourceReviewDecision = run.activeIntervention?.kind === "source_review_decision";
+  const sourceReviewRetry = run.activeIntervention?.kind === "source_review_retry";
+  const sourceReviewIncompleteRisk = sourceReviewRetry
+    && run.activeIntervention?.reviewStatus === "incomplete"
+    && run.activeIntervention.providerOutcomeKnown === true;
   const voiceTiming = voiceTimingConflict(run);
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
   const singleVisualReview = visualReview?.mode === "single";
@@ -101,13 +106,17 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     ? run.nodes.find((node) => node.id === waitingNodeId)?.agentLoopProgress
     : undefined;
   const flawedReviewBranches = (visualReview?.independentReviews ?? []).filter((branch) => branch.auditVerdict === "repair");
-  const reviewItems = visualReview?.reviewItems ?? [];
+  // 逐条表态与成片证据只属于「消费成片审片证据」的停点（视觉审片/终审/发布包）；
+  // 其它停点（素材预检、配音等）不携带无关的成片证据，与服务端分派保持同一合同。
+  const renderedReviewStop = ["visual-review", "final-review", "publish-package"]
+    .includes(run.activeIntervention?.nodeId ?? "");
+  const reviewItems = renderedReviewStop ? visualReview?.reviewItems ?? [] : [];
   const undisposedReviewItems = reviewItems.filter((item) => item.itemKey && !reviewDecisions[item.itemKey]);
   const acceptedReviewItems = reviewItems.filter((item) => item.itemKey && reviewDecisions[item.itemKey]?.decision === "accept");
   const unexplainedReviewItems = reviewItems.filter((item) => (
     item.itemKey && reviewDecisions[item.itemKey]?.decision === "reject" && !reviewDecisions[item.itemKey]?.reason.trim()
   ));
-  const setReviewDecision = (itemKey: string, decision: "accept" | "reject") => {
+  const setReviewDecision = (itemKey: string, decision: "accept" | "reject" | "accept_risk") => {
     setReviewDecisions((previous) => ({ ...previous, [itemKey]: { decision, reason: previous[itemKey]?.reason ?? "" } }));
   };
   const setReviewReason = (itemKey: string, reason: string) => {
@@ -182,7 +191,13 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     setDecisionSnapshot({
       expectedRunRevision: run.revision,
       interventionId: run.activeIntervention.id,
-      reviewEvidenceId: sourceReviewDecision ? sourceReviewEvidenceId : visualReview?.evidenceId ?? null,
+      // 成片审片证据只在消费它的停点随决定提交；其余停点不携带无关证据（与服务端分派一致）。
+      reviewEvidenceId: sourceReviewDecision || sourceReviewRetry
+        ? sourceReviewEvidenceId ?? run.activeIntervention.evidenceId ?? null
+        : renderedReviewStop
+          ? visualReview?.evidenceId ?? null
+          : null,
+      ...(kind === "approve" && sourceReviewIncompleteRisk ? { acceptIncomplete: true as const } : {}),
     });
     if (kind === "approve") setApproving(true);
     else setRejecting(true);
@@ -234,6 +249,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
       <div id="run-current" className="run-current-workspace">
       {creativeDiscussion}
       {!creativeDiscussion && run.activeIntervention?.kind === "creative_review" ? <p className="workspace-loading" role="status">正在读取当前方案与讨论。读取完成后才能确认此版本。</p> : null}
+      {run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
       {activeSpendNode ? <section className="current-production-action" aria-labelledby="current-production-action-title">
         <header>
           <div><p className="eyebrow">当前需要处理</p><h2 id="current-production-action-title">现在需要你：确认{stepNameFor(activeSpendNode, activeSpendNode.label)}</h2></div>
@@ -276,7 +292,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
             )}
           </div>
           <p className="preview-provenance">当前成片 · {new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(video.createdAt))} 生成。先观看实际内容，再结合复核意见判断。</p>
-        </section> : currentArtifactNode ? <section className="current-artifact-surface" aria-label="当前步骤产物">
+          </section> : currentArtifactNode ? <section className="current-artifact-surface" aria-label="当前步骤产物">
           <header className="section-heading"><div><h2>{runNodeLabel(currentArtifactNode.id)}</h2><p>当前已保留的产物与设置。核对后再决定是否进入下一步。</p></div></header>
           {renderNodeWorkspace(currentArtifactNode)}
         </section> : null}
@@ -318,6 +334,10 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
             </div>
           </section> : null}
           {visualReview ? <AudioReviewPanel value={visualReview.audioReview} /> : null}
+          {!visualReview && video?.contentUrl ? <section className="review-advisory" role="status" aria-label="机器审片状态">
+            <strong>可播放首版</strong>
+            <p>机器视觉审片尚未完成。你可以播放和下载当前视频；这不代表正式发布已通过。</p>
+          </section> : null}
           {readOnly ? (
             <section className="run-state-panel" role="status">
               <p className="eyebrow">历史制作记录</p>
@@ -337,13 +357,21 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
             <section className="intervention-panel" aria-label="试片审查暂停">
               <div className="attention-heading">
                 <AlertTriangle aria-hidden="true" size={18} />
-                <h2>试片审查还没完成，制作已暂停</h2>
+                <h2>{sourceReviewIncompleteRisk ? "试片审查没有完成，等你决定" : "试片审查还没完成，制作已暂停"}</h2>
               </div>
               <p>{creatorFacingTechnicalText(run.activeIntervention.reason) ?? run.activeIntervention.reason}</p>
-              <p>已生成的画面与已花费的费用都保留。重试只续未完成的审查分支，不会重新购买成功素材；审查给出结论之前，不能跳过它继续付费生成。</p>
+              <p>{sourceReviewIncompleteRisk
+                ? "审查没有给出评分，但已生成画面、来源和费用事实已确认。你可以接受这个风险继续生成首版；这不会把审查改成通过，也不会重新购买已成功素材。"
+                : "已生成的画面与已花费的费用都保留。重试只续未完成的审查分支，不会重新购买成功素材；付费结果或来源事实不明确时，只能补查或终止。"}</p>
               <div className="decision-actions">
-                <button
+                {sourceReviewIncompleteRisk ? <button
                   className="button button-primary"
+                  type="button"
+                  disabled={decisionPending || !sourceReviewEvidenceId && !run.activeIntervention.evidenceId}
+                  onClick={() => openDecision("approve")}
+                ><Check aria-hidden="true" size={17} />接受未完成审查，继续生成首版</button> : null}
+                <button
+                  className="button button-secondary"
                   type="button"
                   disabled={nodeMutationPending || !onRetryFailedNode}
                   onClick={() => { if (onRetryFailedNode) void onRetryFailedNode(run.activeIntervention!.nodeId); }}
@@ -552,7 +580,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                 </> : <>
                   <p className="run-failure-summary">{run.failure.summary}</p>
                   {(["asset-source-review", "visual-review"].includes(run.failure.nodeId) || run.failure.category === "infrastructure" || /源素材视觉预检|媒体处理失败|ASSET_SEARCH_SOURCES_UNAVAILABLE|图库候选检索全部来源失败/.test(run.failure.technicalDetail ?? "")) && run.failure.technicalDetail
-                    ? <p className="run-failure-summary"><strong>失败原因：</strong>{creatorFacingTechnicalText(run.failure.technicalDetail)}</p>
+                    ? <details className="run-technical-details"><summary>查看技术详情</summary><p className="run-failure-summary"><strong>失败原因：</strong>{creatorFacingTechnicalText(run.failure.technicalDetail)}</p></details>
                     : null}
                   <div className="run-failure-impact">
                     <strong>{run.resultAvailability?.label ?? "前序结果已保留"}</strong>
@@ -666,7 +694,11 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
         <div className="dialog-backdrop" role="presentation">
           <section ref={approveDialogRef} className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="approve-title" tabIndex={-1}>
             <header className="dialog-header">
-              <div><p className="eyebrow">{sourceReviewDecision ? "试片质量意见" : boundaryGate ? "节点放行" : "最终决定"}</p><h2 id="approve-title">{sourceReviewDecision
+              <div><p className="eyebrow">{sourcePreflightDecision ? "素材预检" : sourceReviewIncompleteRisk ? "未完成审查" : sourceReviewDecision ? "试片质量意见" : boundaryGate ? "节点放行" : "最终决定"}</p><h2 id="approve-title">{sourcePreflightDecision
+                ? "接受当前素材风险，继续制作"
+                : sourceReviewIncompleteRisk
+                ? "接受未完成审查，继续生成首版"
+                : sourceReviewDecision
                 ? "确认承担这些质量意见后继续"
                 : boundaryGate
                 ? `确认放行「${runNodeLabel(run.activeIntervention?.nodeId ?? "")}」`
@@ -675,7 +707,11 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
             </header>
             {/* 边界停点批准的是"这一步的产出可以往下走"，不生成发布包、不结束终审，也和机器质检无关。
                 这里原来一律讲终审的话——用户点下去之前读到的最后一段话是错的。 */}
-            <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p>{sourceReviewDecision
+            <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p>{sourcePreflightDecision
+              ? <><strong>你接受的是当前素材预检的质量风险，不是宣布审查通过。</strong><span>若复核未完成，仍如实保留“未完成、无评分”。继续配音与渲染时仍受原费用授权限制；这不是成片定版。</span></>
+              : sourceReviewIncompleteRisk
+              ? <><strong>你接受的是“审查没有结论”的事实，不是把它改成通过。</strong><span>已生成画面和费用事实会保留，继续只运行后续配音与渲染；不会重新购买已成功素材，最终仍显示为可播放首版而非正式发布通过。</span></>
+              : sourceReviewDecision
               ? <><strong>你确认的是：已看过这份试片意见，愿意按当前方案继续。</strong><span>系统不会重新购买已生成试片；其它尚未生成的素材仍会先依据当前报价和授权处理。</span></>
               : boundaryGate
               ? <><strong>放行后这一步的结果就固定下来，制作按现在保存的设置继续往下走。</strong><span>想换模型、参数或输入，请先关掉这个窗口去配置；放行之后要改，就得让这一步连同下游重做。</span></>
@@ -684,9 +720,9 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                 : "批准后将生成发布包。"}</strong><span>这会结束人工终审；请确认已经完整观看画面、字幕并听过声音。</span></>}</p></div>
             {/* 逐条表态管的是审片结论。机器质检是判过或不过的闸门——它不通过时流程走不到终审，
                 所以这里没有它的条目，操作员不必怀疑自己漏签了什么。边界停点上两件事都不涉及。 */}
-            {boundaryGate ? null : <p className="review-disposition-note">技术质检不适用逐条表态：它由机器判定通过或不过，没过就到不了这一步，不在这里逐条签。</p>}
+            {boundaryGate || sourcePreflightDecision ? null : <p className="review-disposition-note">技术质检不适用逐条表态：它由机器判定通过或不过，没过就到不了这一步，不在这里逐条签。</p>}
             {reviewItems.length > 0 ? <div className="review-disposition-list">
-              <p className="review-disposition-guide">采纳=你要按这条结论返修，本轮就不能批准；不采纳=你看过并认为可以维持现状，需要写明理由留痕。</p>
+              <p className="review-disposition-guide">采纳=现在返修；不采纳=认为意见不成立，需写理由；接受风险=认可问题，但保留本版和原始评分。</p>
               {reviewItems.map((item, index) => {
                 const itemKey = item.itemKey!;
                 const choice = reviewDecisions[itemKey];
@@ -704,6 +740,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                   <small>{creatorFacingTechnicalText(item.suggestion)}</small>
                   <FindingVerdictChange finding={item} />
                   <div className="review-disposition-choices">
+                    <button className="button button-ghost" type="button" aria-pressed={choice?.decision === "accept_risk"}
+                      onClick={() => setReviewDecision(itemKey, "accept_risk")}>接受风险，保留本版</button>
                     <button
                       className="button button-ghost"
                       type="button"
@@ -759,13 +797,13 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                       const choice = reviewDecisions[item.itemKey!]!;
                       return choice.decision === "accept"
                         ? { itemKey: item.itemKey!, decision: "accept" as const }
-                        : { itemKey: item.itemKey!, decision: "reject" as const, reason: choice.reason.trim() };
+                        : { itemKey: item.itemKey!, decision: choice.decision, ...(choice.reason.trim() ? { reason: choice.reason.trim() } : {}) };
                     }),
                   } : {}),
                 })}
               ><Check aria-hidden="true" size={17} />{decisionPending
                 ? "正在批准..."
-                : sourceReviewDecision ? "确认承担并继续"
+                : sourceReviewDecision || sourcePreflightDecision || sourceReviewIncompleteRisk ? "确认承担并继续"
                   : boundaryGate ? "确认放行，进入下一步"
                   : reviewItems.length > 0 ? "逐条表态已完成，生成发布包" : "确认批准并生成发布包"}</button>
             </footer>
@@ -1311,7 +1349,11 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
 }
 
 function sourceReviewDecisionEvidenceId(run: StudioRunDetail): string | null {
-  if (run.activeIntervention?.kind !== "source_review_decision") return null;
+  if (run.activeIntervention?.kind !== "source_review_decision"
+    && run.activeIntervention?.kind !== "source_review_retry") return null;
+  if (run.activeIntervention.evidenceId && /^[a-f0-9]{64}$/.test(run.activeIntervention.evidenceId)) {
+    return run.activeIntervention.evidenceId;
+  }
   const node = run.nodes.find((candidate) => candidate.id === run.activeIntervention?.nodeId);
   const output = node?.outputState?.versions.find((version) => version.id === node?.outputState?.effectiveVersionId)?.output ?? node?.output;
   if (!isRecord(output) || !isRecord(output.sourceReview)) return null;
@@ -1515,6 +1557,34 @@ function ProductionProgress({ run }: { run: StudioRunDetail }) {
         <div><strong>{phase.label}</strong><small>{phase.completedNodes}/{phase.totalNodes} 步骤</small></div>
       </article>)}
     </div>
+  </section>;
+}
+
+function CurrentDecisionBar({ run }: { run: StudioRunDetail }) {
+  const intervention = run.activeIntervention;
+  if (!intervention) return null;
+  const nodeName = runNodeLabel(intervention.nodeId);
+  const incomplete = intervention.kind === "source_review_retry" && intervention.reviewStatus === "incomplete";
+  const hardStop = intervention.kind === "source_review_retry" && intervention.reviewStatus === "unknown_or_unsafe";
+  const state = incomplete ? "需要处理" : hardStop ? "需要处理" : "等你确认";
+  const consequence = incomplete
+    ? "接受后只继续后续制作，保留“审查未完成、无评分”事实。"
+    : hardStop
+      ? "付费、来源或媒体事实不明确，只能补查或终止。"
+      : intervention.boundary === "node-complete"
+        ? "放行后进入下一节点，不会重跑当前节点。"
+        : "你的决定会被记录，已生成的版本和费用事实会保留。";
+  return <section className={`current-decision-bar${hardStop ? " is-hard-stop" : incomplete ? " is-incomplete" : ""}`} aria-label="当前决定" role="status">
+    <div className="current-decision-heading">
+      <div><p className="eyebrow">当前决定</p><h2>{nodeName} · {state}</h2></div>
+      <span className="current-decision-status">{state}</span>
+    </div>
+    <p>{consequence}</p>
+    <dl>
+      <div><dt>是否重跑</dt><dd>{intervention.boundary === "node-complete" ? "不重跑当前节点" : incomplete ? "可只重试审查" : "按页面提供的补查/终止动作"}</dd></div>
+      <div><dt>费用影响</dt><dd>{hardStop ? "不自动新增费用" : "如需付费会重新报价并等你授权"}</dd></div>
+      <div><dt>当前版本</dt><dd>已生成内容保留</dd></div>
+    </dl>
   </section>;
 }
 

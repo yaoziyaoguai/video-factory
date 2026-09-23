@@ -140,6 +140,18 @@
 .studio-v3 .run-live-metrics strong { color: #2f3742; }
 .studio-v3 .run-connection-live i { width: 6px; height: 6px; background: #2c9a7d; border-radius: 50%; box-shadow: 0 0 0 4px rgb(44 154 125 / 10%); }
 .studio-v3 .current-production-action > .run-active-provider { margin-top: -6px; color: #6f7580; font-size: 10px; }
+.studio-v3 .current-decision-bar { margin: 0 0 14px; padding: 16px 18px; border: 1px solid #c7d8ef; border-radius: 10px; background: #f5f8fc; }
+.studio-v3 .current-decision-bar.is-incomplete { border-color: #e6c98a; background: #fffaf0; }
+.studio-v3 .current-decision-bar.is-hard-stop { border-color: #e1b5ab; background: #fff6f3; }
+.studio-v3 .current-decision-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.studio-v3 .current-decision-heading h2 { margin: 0; font-size: 18px; line-height: 1.35; }
+.studio-v3 .current-decision-heading .eyebrow { margin: 0 0 4px; }
+.studio-v3 .current-decision-status { flex: 0 0 auto; padding: 4px 8px; border-radius: 999px; color: #385d8c; background: #e6effb; font-size: 11px; font-weight: 740; }
+.studio-v3 .current-decision-bar p:not(.eyebrow) { max-width: 760px; margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.studio-v3 .current-decision-bar dl { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 12px 0 0; }
+.studio-v3 .current-decision-bar dl div { display: grid; gap: 2px; min-width: 150px; }
+.studio-v3 .current-decision-bar dt { color: var(--muted); font-size: 10px; }
+.studio-v3 .current-decision-bar dd { margin: 0; color: var(--ink); font-size: 11px; font-weight: 650; }
 
 .studio-v3 .run-state-panel.has-failure { display: grid; gap: 11px; }
 .studio-v3 .run-state-panel.has-failure > .eyebrow { margin: 0; color: #bd4f48; }
@@ -1966,7 +1978,8 @@ body:has(.studio-v3) {
   .studio-v3 .home-continuation { border-color: #dedfe6; }
   .studio-v3 .home-start-options > button,
   .studio-v3 .home-start-options > button:last-child { border-color: #e0e3e8; }
-  .studio-v3 .current-production-action { margin-block: 16px 24px; padding: 15px 12px; }
+  .studio-v3 .current-production-action, .studio-v3 .current-decision-bar { margin-block: 16px 24px; padding: 15px 12px; }
+  .studio-v3 .current-decision-bar { padding-bottom: calc(15px + env(safe-area-inset-bottom)); }
   .studio-v3 .current-production-action > header { align-items: flex-start; }
   .studio-v3 .current-production-action h2 { font-size: 18px; }
 }

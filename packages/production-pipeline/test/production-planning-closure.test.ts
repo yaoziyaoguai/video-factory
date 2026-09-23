@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import {
   CodexBridgeError,
+  RoleAgentLoopError,
   ProductionPipeline,
   sourceReviewIncompleteError,
   type CreativeTreatment,
@@ -23,6 +24,7 @@ import {
 } from "../src/index.js";
 import type { WorkflowRun } from "@video-factory/workflow-core";
 import { summarizeJointPlanningExecution } from "../src/production-pipeline.js";
+import { CodexAssetSemanticRanker, deterministicAssetRanking, type AssetCandidateReport } from "../src/asset-semantic-ranker.js";
 
 // ---------------------------------------------------------------------------
 // B4-REMAINDER：joint-v1 规划编辑合同的行为测试。
@@ -1318,6 +1320,90 @@ function closureLibraryDirector(spies: ClosureSpies): VisualDirectorAgent {
 }
 
 describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
+  for (const sourceReview of [false, true, "incomplete"] as const) it(`delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=${sourceReview})`, async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-stock-consent-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const ranker = closureRanker(spies);
+    const rank = ranker.rankDetailed!;
+    ranker.rankDetailed = async (...args) => {
+      const execution = await rank(...args);
+      for (const scene of execution.output.scenes) for (const candidate of scene.candidates) candidate.semanticScore = 20;
+      return execution;
+    };
+    const director = closureLibraryDirector(spies);
+    director.planDetailed = async input => input.creativeReviewExecution?.mode === "check"
+      ? passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "视觉导演", "fixture-director-contract-v1", "director-plan", "director-binding-model")
+      : { output: await director.plan(input) };
+    const worker = new ClosureLibraryWorker();
+    const execute = worker.run.bind(worker);
+    let prepared: Record<string, unknown> | undefined;
+    worker.run = async request => {
+      if (request.capability === "voice.synthesize") throw new Error("intentional stop at voice boundary");
+      if (request.capability === "asset.prepare") {
+        prepared = request;
+        if (!sourceReview) throw new Error("intentional stop at media boundary");
+        const response = await execute(request);
+        const content = JSON.stringify({ scene_assets: [1, 2, 3].map(scene_position => ({ scene_position, provider: "pexels-stock-v1", asset_id: `asset-${scene_position}` })),
+          director_routing: [1, 2, 3].map(scene_position => ({ scene_position, selection_basis: "accepted_quality_risk", quality_review_status: "unverified" })) });
+        await writeFile(String(response.output!.assetPlanPath), content);
+        response.artifacts[0]!.kind = "asset_plan";
+        response.artifacts[0]!.sha256 = createHash("sha256").update(content).digest("hex");
+        response.artifacts[0]!.sizeBytes = Buffer.byteLength(content);
+        return response;
+      }
+      return execute(request);
+    };
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker,
+      treatmentAgents: closureTreatmentAgents(spies), screenwriterAgent: closureScreenwriter(spies), directorAgent: director,
+      assetSemanticRanker: ranker, assetProviders: [{ id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] }, ...CLOSURE_ASSET_PROVIDERS],
+      providerRuntimeMetadata: sourceReview ? [{ id: "deepseek-visual-review-v1", label: "审片", modelId: "test-model", transport: "unix_socket", billing: "subscription", approvalPolicy: "none", maxAttempts: 1 }] : [],
+      visualReviewAgents: sourceReview ? [{ id: "deepseek-visual-review-v1", modelId: "test-model", review: async () => {
+        if (sourceReview === "incomplete") throw new RoleAgentLoopError("review completed without output", {
+          version: "video-factory/agent-loop-v1", role: "审片", contractVersion: "test", criteria: [], status: "failed", maxIterations: 3,
+          iterations: [], failure: { stage: "completed_failure" },
+        }, undefined, new CodexBridgeError("completed", false, "completed_failure", 502, "model_provider_no_output"));
+        return {
+        version: "video-factory/visual-review-v1", summary: "示意素材匹配一般", scores: { composition: 30, continuity: 30, pacing: 30, legibility: 30, safety: 90 }, confidence: 0.8, recommendation: "reject",
+        findings: [{ timecodeMs: 0, startTimecodeMs: 0, endTimecodeMs: 0, scenePosition: 1, targetNodeId: "assets", claimType: "static", evidenceStatus: "failed", evidenceFrameSha256: null, nextAction: "rework_asset", category: "composition", severity: "warning", description: "主体不够清楚", suggestion: "可替换更好素材" }],
+      }; } }] : [],
+    });
+    const brief = closureBrief({ assetSemanticRank: true, creativeReview: true });
+    if (sourceReview) brief.providers.visualReview = "deepseek-visual-review-v1";
+    let run = await pipeline.start(brief);
+    for (const stage of ["treatment", "script", "director"] as const) {
+      const gate = run.nodeRuns.find(node => node.nodeId === "creative-planning")?.intervention?.continuation;
+      assert.equal(gate?.stage, stage, JSON.stringify(run.nodeRuns));
+      run = await pipeline.confirmCreativeReview(run.id, { commandId: `accept-${stage}`, actor: "creator", stage,
+        expectedRunRevision: run.revision, expectedReviewRevision: gate!.reviewRevision, baseDraftSha256: gate!.draftSha256,
+        ...(stage === "director" ? { acceptQualityFallback: true } : {}),
+      });
+    }
+    assert.ok(prepared, "confirmation must reach the actual asset worker boundary");
+    const input = prepared.input as Record<string, string>;
+    const ranking = JSON.parse(await readFile(input.candidateRankingPath!, "utf8"));
+    assert.equal(ranking.deliveryAcceptance.policyVersion, "playable-first-v1");
+    for (const [field, key] of [["scriptSha256", "scriptPath"], ["directorPlanSha256", "directorPlanPath"], ["inventorySha256", "candidateInventoryPath"]]) {
+      assert.equal(ranking.deliveryAcceptance[field!], createHash("sha256").update(await readFile(input[key!]!)).digest("hex"));
+    }
+    assert.equal(ranking.scenes[0].candidates[0].semanticScore, 20);
+    assert.equal(ranking.scenes[0].candidates[0].locked, false);
+    assert.equal(spies.rankCalls, 1);
+    if (sourceReview) {
+      const review = run.nodeRuns.find(node => node.nodeId === "asset-source-review");
+      if (sourceReview === "incomplete") {
+        assert.equal(review?.status, "needs_human");
+        assert.equal((review?.output as { reviewStatus: string }).reviewStatus, "incomplete");
+        assert.equal((review?.output as { report?: unknown }).report, undefined);
+        const resumed = await pipeline.decide(run.id, { action: "approve", actor: "creator", expectedRunRevision: run.revision, interventionId: review!.intervention!.id, reviewEvidenceId: null });
+        assert.ok(resumed.nodeRuns.some(node => node.nodeId === "voice"));
+        return;
+      }
+      assert.equal(review?.status, "succeeded", JSON.stringify(run.nodeRuns));
+      assert.equal((review?.output as { qualityRiskAccepted?: boolean }).qualityRiskAccepted, true);
+      assert.equal((review?.output as { report: { scores: { composition: number } } }).report.scores.composition, 30);
+      assert.ok(run.nodeRuns.some(node => node.nodeId === "voice"));
+    }
+  });
   it("preserves valid treatment and script when editing after a partially failed plan", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-fix-partial-closure-"));
     const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
@@ -1590,6 +1676,96 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
     assert.equal(searchCalls, 1, "candidate evidence must be reused without a new search");
     assert.equal(spies.rankCalls, 1, "ranking evidence must be reused without a new rank call");
     void countSearchCalls;
+  });
+
+  for (const boundary of ["audit", "unchanged-producer"] as const) it(`recovers an expired real ranking ${boundary} into the joint planning human gate`, async (t) => {
+    t.mock.timers.enable({ apis: ["Date"], now: 1_800_000_000_000 });
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-rank-deadline-graph-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    let modelCalls = 0;
+    let observations = 0;
+    let searches = 0;
+    let candidateOutput: unknown;
+    const repair = {
+      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+      verdict: "repair", score: 50, summary: "需要补证",
+      assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"].map(dimension => ({ dimension, score: 50, evidence: "证据不足" })) }],
+      issues: [{ severity: "blocking", criterion: "可见证据", evidence: "不足", repairInstruction: "补齐证据" }], repairInstructions: ["补齐证据"],
+    };
+    const worker = new ClosureLibraryWorker();
+    const runWorker = worker.run.bind(worker);
+    worker.run = async request => {
+      assert.notEqual(request.capability, "asset.prepare", "human gate must precede media acquisition");
+      if (request.capability === "asset.search") searches++;
+      return runWorker(request);
+    };
+    const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+      client: { runTask: async () => { throw new Error("must use audited client"); },
+        runTaskDetailed: async (kind, payload, requestId, session, options) => {
+          modelCalls++;
+          const envelope = { requestId, kind, payload, session };
+          await options?.beforeSubmit?.({ version: "video-factory/codex-prepared-operation-v1", requestId: requestId!, kind,
+            envelope, serializedEnvelope: JSON.stringify(envelope), binding: {} as never, brokerBinding: {} as never,
+            route: { socketPath: "/tmp/unused.sock" }, taskFact: "accepted_unknown" });
+          if (modelCalls === (boundary === "audit" ? 2 : 3)) throw new Error("accepted ranking interrupted");
+          if (kind === "role-audit") return { output: repair };
+          candidateOutput = { ...deterministicAssetRanking(payload as AssetCandidateReport), source: "model" };
+          return { output: candidateOutput };
+        }, observePrepared: async () => {
+          observations++;
+          return { output: boundary === "audit" ? repair : candidateOutput };
+        },
+      },
+    });
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker,
+      treatmentAgents: closureTreatmentAgents(spies), screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureLibraryDirector(spies), assetSemanticRanker: ranker,
+      assetProviders: [{ id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] }, ...CLOSURE_ASSET_PROVIDERS],
+    });
+    let first = await pipeline.start(closureBrief({ assetSemanticRank: true, creativeReview: true }));
+    for (let i = 0; i < 6 && first.status === "needs_human"; i++) {
+      const gate = first.nodeRuns.find(node => node.nodeId === "creative-planning")?.intervention?.continuation;
+      assert.ok(gate);
+      first = await pipeline.confirmCreativeReview(first.id, { commandId: `confirm-${i}`, actor: "creator",
+        expectedRunRevision: first.revision, expectedReviewRevision: gate.reviewRevision,
+        stage: gate.stage, baseDraftSha256: gate.draftSha256 });
+    }
+    assert.equal(first.status, "failed");
+    t.mock.timers.tick(600_001);
+    const recovered = await pipeline.retryFailedNode(first.id, "creative-planning");
+    assert.equal(recovered.status, "needs_human", JSON.stringify(recovered.nodeRuns));
+    assert.equal(modelCalls, boundary === "audit" ? 2 : 3);
+    assert.equal(observations, 1);
+    assert.equal(searches, 1);
+    assert.equal(spies.treatmentTitles.length, 1);
+    assert.equal(spies.screenwriterCalls.length, 1);
+    const node = recovered.nodeRuns.find(item => item.nodeId === "creative-planning");
+    assert.equal(node?.intervention?.continuation?.stage, "director");
+    assert.match(JSON.stringify(node?.output), /视觉核验/);
+    const directory = path.join(workspaceRoot, "runs", first.id, "nodes", "creative-planning", "agent-loop-checkpoints");
+    const records = await Promise.all((await readdir(directory)).filter(name => name.endsWith(".json")).map(async name => JSON.parse(await readFile(path.join(directory, name), "utf8"))));
+    const ranking = records.find(value => value.assetRankBatch?.finished)?.assetRankBatch.finished.output;
+    assert.ok(ranking);
+    assert.equal(ranking.visualEvidence.stopReason, "deadline");
+    assert.equal(ranking.source, "fallback");
+    assert.equal(ranking.visualEvidence.reviewed.length, 0);
+    const gate = node!.intervention!.continuation!;
+    const review = node!.output as { creativeReview: { stages: { director: { currentDocument: Record<string, unknown> } } } };
+    const edited = await (await pipeline.dispatchCreativeReviewCommand(first.id, {
+      action: "edit_draft", commandId: "save-after-deadline", actor: "creator", stage: "director",
+      expectedRunRevision: recovered.revision, expectedReviewRevision: gate.reviewRevision, baseDraftSha256: gate.draftSha256,
+      document: { ...review.creativeReview.stages.director.currentDocument, profileRationale: "保留当前画面路线，等待核对素材证据。" },
+    })).completion;
+    assert.equal(edited.status, "needs_human");
+    const editedGate = edited.nodeRuns.find(item => item.nodeId === "creative-planning")!.intervention!.continuation!;
+    assert.equal(editedGate.stage, "director");
+    assert.notEqual(editedGate.draftSha256, gate.draftSha256);
+    const confirmed = await pipeline.confirmCreativeReview(first.id, { commandId: "confirm-after-deadline", actor: "creator", stage: "director",
+      expectedRunRevision: edited.revision, expectedReviewRevision: editedGate.reviewRevision, baseDraftSha256: editedGate.draftSha256 });
+    assert.equal(confirmed.status, "needs_human", "changing rationale must not bypass missing visual evidence");
+    assert.equal(modelCalls, boundary === "audit" ? 2 : 3, "a rationale-only save must not reset the ranking budget");
+    assert.equal(spies.treatmentTitles.length, 1);
+    assert.equal(spies.screenwriterCalls.length, 1);
   });
 
   it("uses the selected ranking model and invalidates only ranking evidence when that selection changes", async () => {

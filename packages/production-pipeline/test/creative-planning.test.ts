@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -214,6 +215,8 @@ function rankingFixture(options?: { sceneTwoSemanticScore?: number }): AssetSema
     providerId: "test-ranker",
     modelId: "test-rank-model",
     summary: "测试排序",
+    visualEvidence: { reportDigest: "fixture-for-direct-review", supplementaryBatches: 0,
+      reviewed: [1, 2, 3].map(scenePosition => ({ scenePosition, provider: "stock-free", assetId: `asset-${scenePosition}-a`, sha256: "a".repeat(64) })) },
     scenes: [1, 2, 3].map((position) => ({
       scenePosition: position,
       summary: `第${position}镜排序`,
@@ -378,11 +381,19 @@ function spyPorts(options: SpyPortsOptions = {}): { ports: CreativePlanningPorts
     ports.rank = async (context) => {
       calls.rank.push(context);
       const queued = rankingOutputs.shift();
-      if (queued) return { artifactId: `ranking:${calls.rank.length}`, output: queued };
       // 排序按当前候选证据投影，语义分可按输入内容覆盖：排序结果必须反映它实际排的是什么。
       const scores = options.rankScoresFromContext?.(context) ?? {};
       const report = context.candidates?.output;
       if (!report) throw new Error("spy rank requires a candidates artifact");
+      // 这些旧用例测试的是“已核验仍不匹配”的回退；显式提供视觉证据，不能用未知覆盖冒充。
+      const visualEvidence: NonNullable<AssetSemanticRanking["visualEvidence"]> = {
+        reportDigest: createHash("sha256").update(JSON.stringify({ version: report.version, scenes: report.scenes })).digest("hex"),
+        supplementaryBatches: 0,
+        reviewed: report.scenes.flatMap(scene => scene.candidates.map(candidate => ({
+          scenePosition: scene.scenePosition, provider: candidate.provider, assetId: candidate.assetId, sha256: "a".repeat(64),
+        }))),
+      };
+      if (queued) return { artifactId: `ranking:${calls.rank.length}`, output: { ...queued, visualEvidence } };
       const scenes = report.scenes.map((scene) => ({
         scenePosition: scene.scenePosition,
         summary: `第${scene.scenePosition}镜排序`,
@@ -404,6 +415,7 @@ function spyPorts(options: SpyPortsOptions = {}): { ports: CreativePlanningPorts
           providerId: "test-ranker",
           modelId: "test-rank-model",
           summary: "测试排序",
+          visualEvidence,
           scenes,
         },
       };
@@ -1057,6 +1069,18 @@ describe("B3 固定创作规划图", () => {
       assert.deepEqual(healthy, []);
       // 无排序证据时不臆造问题。
       assert.deepEqual(defaultAvailabilityReviewer({ script: scriptFixture(), directorPlan: plan, ranking: null }), []);
+    });
+
+    it("未看过的候选转人工补证，不声称全部素材不匹配；旧排序缺元数据也视为未知", () => {
+      const output = rankingFixture({ sceneTwoSemanticScore: 10 });
+      output.visualEvidence!.reviewed = output.visualEvidence!.reviewed.filter(item => item.scenePosition !== 2);
+      const input = { script: scriptFixture(), directorPlan: directorPlanFixture(), ranking: { artifactId: "ranking:partial", output } };
+      const issues = defaultAvailabilityReviewer(input);
+      assert.equal(issues[0]?.target, "user");
+      assert.match(issues[0]!.reason, /证据不足.*仅 0 个完成视觉核验/);
+      assert.equal(issues[0]?.availabilityBlocker?.evidence.reviewedCandidateCount, 0);
+      delete output.visualEvidence;
+      assert.match(defaultAvailabilityReviewer(input)[0]!.reason, /证据不足/);
     });
   });
 

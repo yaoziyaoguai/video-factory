@@ -242,7 +242,7 @@ export function TemplatesPage() {
   return (
     <main className="page template-studio-page">
       <header className="page-header template-page-header">
-        <div><p className="eyebrow">成片方法</p><h1>模板工坊</h1><p className="page-summary">模板已暂停用于制作。这里保留历史资料和编辑功能；新制作与返工按你的要求规划，不自动套模板。</p></div>
+        <div><p className="eyebrow">成片方法</p><h1>模板资料</h1><p className="page-summary">模板目前只作为资料和实验记录，不参与新制作或返工；新制作按你的要求重新规划，不自动套模板。</p></div>
         <div className="template-header-actions">
           <button className="icon-button" type="button" onClick={refreshTemplates} disabled={loading} title="刷新模板"><RefreshCw size={18} aria-hidden="true" /></button>
           <button className="button button-primary" type="button" onClick={() => { if (confirmDiscard()) setCreateOpen(true); }}><Plus size={17} aria-hidden="true" />新建空白模板</button>

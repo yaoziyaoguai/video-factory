@@ -113,7 +113,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
           <NavLink to="/" end><Radar aria-hidden="true" size={18} /><span>创作台</span></NavLink>
           <NavLink to="/projects" data-tour="projects-nav"><Layers3 aria-hidden="true" size={18} /><span>制作记录</span></NavLink>
           <NavLink to="/assets"><Images aria-hidden="true" size={18} /><span>素材库</span></NavLink>
-          <NavLink to="/templates"><LayoutTemplate aria-hidden="true" size={18} /><span>模板工坊</span></NavLink>
+          <NavLink to="/templates"><LayoutTemplate aria-hidden="true" size={18} /><span>模板资料</span></NavLink>
           <NavLink to="/resources"><Settings2 aria-hidden="true" size={18} /><span>创作设置</span></NavLink>
           <NavLink to="/experiments"><ChartNoAxesCombined aria-hidden="true" size={18} /><span>制作复盘</span></NavLink>
         </nav>
@@ -156,7 +156,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
         <NavLink to="/" end><Radar aria-hidden="true" size={19} /><span>首页</span></NavLink>
         <NavLink to="/projects" data-tour="projects-nav"><Layers3 aria-hidden="true" size={19} /><span>记录</span></NavLink>
         <NavLink to="/assets"><Images aria-hidden="true" size={19} /><span>素材</span></NavLink>
-        <NavLink to="/templates"><LayoutTemplate aria-hidden="true" size={19} /><span>模板</span></NavLink>
+        <NavLink to="/templates"><LayoutTemplate aria-hidden="true" size={19} /><span>模板资料</span></NavLink>
         <NavLink to="/resources"><Settings2 aria-hidden="true" size={19} /><span>配置</span></NavLink>
       </nav>
       <GuideDock
@@ -307,7 +307,7 @@ const SEARCH_DESTINATIONS = [
   { to: "/topics", label: "选题中心", description: "热点、系列与自主选题", keywords: "新闻 趋势 灵感", icon: Sparkles },
   { to: "/projects", label: "制作记录", description: "查看、继续、归档或恢复制作", keywords: "项目 视频 成片", icon: Layers3 },
   { to: "/assets", label: "素材库", description: "检索画面、声音与授权记录", keywords: "媒体 资产 来源", icon: Images },
-  { to: "/templates", label: "模板工坊", description: "管理暂不参与制作的模板资料", keywords: "栏目 风格", icon: LayoutTemplate },
+  { to: "/templates", label: "模板资料", description: "管理暂不参与制作的模板资料", keywords: "栏目 风格", icon: LayoutTemplate },
   { to: "/resources", label: "创作设置", description: "模型、素材、费用与发布平台", keywords: "总配置 API 方舟 MiniMax Codex", icon: Settings2 },
   { to: "/experiments", label: "制作复盘", description: "查看质量与费用表现", keywords: "数据 统计", icon: ChartNoAxesCombined },
 ] as const;

@@ -15,7 +15,7 @@ import type {
   ProductionSceneRevisionDraft,
   ProductionSpendRejectionDraft,
 } from "@video-factory/production-pipeline";
-import { CodexBridgeClient, effectiveProductionBrief, PaidOperationManualReconciliationError, productionWorkflowVersion, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, StaleRunRevisionError, type CodexPreparedOperation } from "@video-factory/production-pipeline";
+import { CodexBridgeClient, effectiveProductionBrief, HumanDecisionConflictError, PaidOperationManualReconciliationError, productionWorkflowVersion, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, StaleRunRevisionError, type CodexPreparedOperation } from "@video-factory/production-pipeline";
 import {
   StudioConflictError,
   StudioService as ProductionStudioService,
@@ -1659,7 +1659,7 @@ describe("StudioService", () => {
     assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot, undefined);
   });
 
-  it("requires DeepSeek single visual review and role audit before Studio dispatch", async () => {
+  it("requires an explicit unreviewed-first-cut decision when visual review is unavailable", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-dual-review-readiness-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const baseProviders = [
@@ -1684,34 +1684,19 @@ describe("StudioService", () => {
       listProviders: async () => [...baseProviders, ...extraProviders],
     });
 
-    await assert.rejects(() => studio().start(productionBrief), /正式制作需要视觉审片模型可用，且独立质量复核已配置/);
-    await studio([{
-      id: "codex-role-auditor-v1",
-      capability: "role.audit",
-      label: "独立质量复核",
-      available: true,
-      kind: "external",
-    }]).start(productionBrief);
-    assert.equal(pipeline.dispatchCount, 1);
-
-    await assert.rejects(() => studio([{
-      id: "codex-visual-review-v1",
-      capability: "quality.review.visual",
-      label: "Codex 审片",
-      available: true,
-      kind: "external",
-      defaultModelId: "gpt-5.6-sol",
-    }, {
-      id: "codex-role-auditor-v1",
-      capability: "role.audit",
-      label: "独立质量复核",
-      available: true,
-      kind: "external",
-    }]).start({
+    const { visualReview: _visualReview, ...providersWithoutReview } = productionBrief.providers;
+    await assert.rejects(() => studio().start({
       ...productionBrief,
-      providers: { ...productionBrief.providers, visualReview: "codex-visual-review-v1" },
-    }), /正式制作需要视觉审片模型可用/);
+      providers: providersWithoutReview,
+    }), /视觉审片当前不可用/);
+
+    await studio().start({
+      ...productionBrief,
+      providers: providersWithoutReview,
+      visualReviewPolicy: "allow_unreviewed_first_cut",
+    });
     assert.equal(pipeline.dispatchCount, 1);
+    assert.equal((pipeline.lastInput as ProductionBrief).visualReviewPolicy, "allow_unreviewed_first_cut");
   });
 
   it("allows an executable generation source to adapt a template's suggested stock slot", async () => {
@@ -1858,6 +1843,29 @@ describe("StudioService", () => {
       phase: "auditing",
       latestAudit: { verdict: "repair", score: 68, summary: "开场钩子仍需具体。" },
     });
+  });
+
+  it("labels a supplementary ranking batch and retains primary model counts without exposing its snapshot", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-supplement-progress-"));
+    try {
+      const directory = path.join(workspaceRoot, "runs/run-1/nodes/creative-planning/agent-loop-checkpoints");
+      await mkdir(directory, { recursive: true });
+      const primaryCheckpoint = { version: "video-factory/agent-loop-checkpoint-v9", maxIterations: 3,
+        status: "passed", phaseAttempts: { produce: 1, audit: 1 }, completed: [{ iteration: 1 }] };
+      await writeFile(path.join(directory, "rank.json"), JSON.stringify({
+        version: "video-factory/agent-loop-checkpoint-v9", maxIterations: 3, role: "候选画面复核", status: "running",
+        phaseAttempts: { produce: 1, audit: 1 }, completed: [], pendingCandidate: { iteration: 1 },
+        recoveryOwner: { runId: "run-1", nodeId: "creative-planning", workflowOperationRequestId: "operation-1" },
+        assetRankBatch: { version: "asset-rank-batches-v1", phase: "supplement", primaryCheckpoint, payload: { secretPrompt: "不公开快照" } },
+      }));
+      const progress = await loadAgentLoopProgress(workspaceRoot, "run-1", "creative-planning", "operation-1");
+      assert.equal(progress?.producerModelCallCount, 2);
+      assert.equal(progress?.auditModelCallCount, 2);
+      assert.match(progress?.role ?? "", /补看候选，最多一批/);
+      assert.doesNotMatch(JSON.stringify(progress), /不公开快照|secretPrompt/);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
   });
 
   it("shows a handover to the user as its own phase instead of dropping the checkpoint", async () => {
@@ -3067,6 +3075,26 @@ describe("StudioService", () => {
       requiredVisual: "用无字示意画面呈现前后变化，不声称实测。",
       payoff: `围绕“${brief.title}”给出明确答案或可执行判断`,
     });
+
+    // 历史文件与节点级旧 ID 仍存在，也不能替代当前有效版本的空交付。
+    for (const artifact of run.artifacts) {
+      if (!artifact.uri) continue;
+      await mkdir(path.dirname(artifact.uri), { recursive: true });
+      await writeFile(artifact.uri, "historical artifact remains on disk");
+    }
+    for (const node of run.nodeRuns.filter((node) => ["render", "publish-package"].includes(node.nodeId))) {
+      const current = node.outputState?.versions.find((version) => version.id === node.outputState?.effectiveVersionId);
+      assert.ok(current);
+      current.artifactIds = [];
+    }
+    const emptyDelivery = await service.getRun("run-1");
+    const [emptySummary] = await service.listRuns();
+    assert.equal(emptyDelivery?.videoArtifactId, undefined);
+    assert.equal(emptyDelivery?.publishPackageArtifactId, undefined);
+    assert.equal(emptyDelivery?.resultAvailability?.kind, "none");
+    assert.equal(emptySummary?.videoContentUrl, undefined);
+    assert.equal(await readFile(newVideoPath, "utf8"), "historical artifact remains on disk");
+    assert.equal(await readFile(newPackagePath, "utf8"), "historical artifact remains on disk");
   });
 
   it("does not expose a stale render or publish package as the current result", async () => {
@@ -5192,6 +5220,42 @@ describe("StudioService", () => {
         reviewEvidenceId: null,
       }, "director"),
       (error: unknown) => error instanceof StudioConflictError && /刷新/.test(error.message),
+    );
+  });
+
+  it("surfaces human decision precondition conflicts with their original guidance", async () => {
+    // EB-05：证据错配/缺表态等决定前置条件错误的文案面向操作员，必须以冲突形式保留原文，
+    // 而不是被脱敏成 500 通用文案；provider/存储等真实故障不允许借用这个类型。
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    const pipeline = new FakePipeline(executableWaitingRun(workspaceRoot));
+    const guidance = "Human decision is not bound to the current review evidence.";
+    pipeline.decide = async () => {
+      throw new HumanDecisionConflictError(guidance);
+    };
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await assert.rejects(
+      () => service.decide("run-1", {
+        action: "approve",
+        expectedRunRevision: 0,
+        interventionId: "intervention-1",
+        reviewEvidenceId: null,
+      }, "director"),
+      (error: unknown) => error instanceof StudioConflictError && error.message === guidance,
+    );
+
+    const internalFailure = new Error("provider socket exploded");
+    pipeline.decide = async () => {
+      throw internalFailure;
+    };
+    await assert.rejects(
+      () => service.decide("run-1", {
+        action: "approve",
+        expectedRunRevision: 0,
+        interventionId: "intervention-1",
+        reviewEvidenceId: null,
+      }, "director"),
+      (error: unknown) => error === internalFailure,
     );
   });
 

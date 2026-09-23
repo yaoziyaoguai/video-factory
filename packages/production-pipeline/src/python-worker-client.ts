@@ -53,8 +53,8 @@ export interface SourceReviewOutcome {
   inputFingerprint: string;
   operationId: string;
   scenePosition: number;
-  /** 完整负面报告才有可供用户承担的证据身份。 */
-  evidenceId?: string;
+  /** 两种结果都必须有证据身份；incomplete 的身份只绑定媒体和本次审查输入，不代表通过。 */
+  evidenceId: string;
   reviewArtifactSha256?: string;
 }
 
@@ -244,22 +244,23 @@ export function parseSourceReviewOutcome(value: unknown): SourceReviewOutcome {
   }
   const outcome: SourceReviewOutcome = {
     kind: value.kind,
+    evidenceId: typeof value.evidenceId === "string" ? value.evidenceId.toLowerCase() : "",
     mediaSha256: value.mediaSha256.toLowerCase(),
     inputFingerprint: value.inputFingerprint.toLowerCase(),
     operationId: value.operationId,
     scenePosition: Number(value.scenePosition),
   };
+  if (typeof value.evidenceId !== "string" || !/^[a-f0-9]{64}$/i.test(value.evidenceId)) {
+    throw new Error("SourceReview must include an evidenceId SHA-256 digest.");
+  }
+  outcome.evidenceId = value.evidenceId.toLowerCase();
   if (value.kind === "complete_negative") {
-    if (typeof value.evidenceId !== "string" || !/^[a-f0-9]{64}$/i.test(value.evidenceId)) {
-      throw new Error("Complete negative sourceReview must include an evidenceId SHA-256 digest.");
-    }
     if (typeof value.reviewArtifactSha256 !== "string" || !/^[a-f0-9]{64}$/i.test(value.reviewArtifactSha256)) {
       throw new Error("Complete negative sourceReview must include a reviewArtifactSha256 digest.");
     }
-    outcome.evidenceId = value.evidenceId.toLowerCase();
     outcome.reviewArtifactSha256 = value.reviewArtifactSha256.toLowerCase();
-  } else if (value.evidenceId !== undefined || value.reviewArtifactSha256 !== undefined) {
-    throw new Error("Incomplete sourceReview must not claim a review evidence identity.");
+  } else if (value.reviewArtifactSha256 !== undefined) {
+    throw new Error("Incomplete sourceReview must not claim a review report identity.");
   }
   return outcome;
 }

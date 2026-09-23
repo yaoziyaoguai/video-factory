@@ -146,6 +146,7 @@ export interface CreativeDraftRef {
 }
 
 export interface CreativeStageConfirmation {
+  libraryEvidenceDigest?: string;
   draftSha256: string;
   stageInputDigest: string;
   upstreamConfirmedDigests: Partial<Record<CreativeStage, string>>;
@@ -155,6 +156,19 @@ export interface CreativeStageConfirmation {
   commandId: string;
   // 记录"确认时独立复核给的是 repair 且被人接受"，留痕供事后核查是谁在什么结论下放行的。
   acknowledgedRepair?: { verdict: "repair"; score: number; issueCount: number };
+  acknowledgedIncomplete?: true;
+  deliveryAcceptance?: StockDeliveryAcceptance;
+}
+
+/** 宿主在导演确认后生成；质量采用范围不是付费授权，也不能由模型生成。 */
+export interface StockDeliveryAcceptance {
+  policyVersion: "playable-first-v1";
+  scopeDigest: string;
+  inventorySha256?: string;
+  scenePositions: number[];
+  actor: string;
+  commandId: string;
+  confirmedAt: string;
 }
 
 export interface CreativeStageReviewState {
@@ -171,14 +185,16 @@ export interface CreativeStageReviewState {
   checkResult: CreativeReviewCheckResult | null;
 }
 
-export interface CreativeReviewCheckResult {
+export type CreativeReviewCheckResult = {
   draftSha256: string;
   checkIdentity: string;
+  summary: string;
+} & ({
+  status?: "completed";
   verdict: "pass" | "repair";
   score: number;
-  summary: string;
   issues: Array<{ severity: "advisory" | "blocking"; criterion: string; evidence: string; repairInstruction: string }>;
-}
+} | { status: "incomplete"; verdict?: never; score?: never; issues: [] });
 
 export interface CreativeReviewState {
   version: typeof CREATIVE_REVIEW_VERSION;
@@ -206,6 +222,8 @@ export interface CreativeReviewConfirmResume {
   // 独立复核是"提议"而非"否决"：裁决为 repair 时默认仍拦住流程，但人可以显式承担后继续。
   // 与 return_to_stage 的 acknowledgeImpact 同一模式，取舍被记录进 confirmation 而不是被静默跳过。
   acknowledgeRepair?: true;
+  acknowledgeIncomplete?: true;
+  acceptQualityFallback?: true;
 }
 
 export type CreativeReviewResume =
@@ -365,7 +383,8 @@ export function confirmCreativeDraft(review: CreativeReviewState, raw: unknown):
     throw new Error("Creative review confirmation requires an independent check for the current draft.");
   }
   const check = current.checkResult;
-  if (check.verdict !== "pass" && command.acknowledgeRepair !== true) {
+  if (check.status === "incomplete" ? command.acknowledgeIncomplete !== true
+    : check.verdict !== "pass" && command.acknowledgeRepair !== true) {
     throw new Error("Creative review confirmation requires a passing independent check for the current draft.");
   }
   return {
@@ -384,6 +403,7 @@ export function confirmCreativeDraft(review: CreativeReviewState, raw: unknown):
           actor: command.actor,
           confirmedAt: command.confirmedAt,
           commandId: command.commandId,
+          ...(check.status === "incomplete" ? { acknowledgedIncomplete: true as const } : {}),
           ...(check.verdict === "repair"
             ? { acknowledgedRepair: { verdict: "repair" as const, score: check.score, issueCount: check.issues.length } }
             : {}),
@@ -691,7 +711,7 @@ export function parseCreativeReviewConfirmResume(value: unknown): CreativeReview
   if (!isRecord(value)) throw new Error("Creative review resume must be an object.");
   const allowed = new Set([
     "action", "stage", "commandId", "actor", "baseDraftSha256", "expectedReviewRevision", "checkIdentity", "confirmedAt",
-    "acknowledgeRepair",
+    "acknowledgeRepair", "acknowledgeIncomplete", "acceptQualityFallback",
   ]);
   const unknown = Object.keys(value).find((key) => !allowed.has(key));
   if (unknown) throw new Error(`Creative review resume field '${unknown}' is not allowed.`);
@@ -699,7 +719,14 @@ export function parseCreativeReviewConfirmResume(value: unknown): CreativeReview
   if (value.acknowledgeRepair !== undefined && value.acknowledgeRepair !== true) {
     throw new Error("Creative review acknowledgeRepair must be true when present.");
   }
+  if (value.acknowledgeIncomplete !== undefined && value.acknowledgeIncomplete !== true) {
+    throw new Error("Creative review acknowledgeIncomplete must be true when present.");
+  }
   const base = parseCreativeReviewCommandBase(value);
+  if (value.acceptQualityFallback !== undefined
+    && (value.acceptQualityFallback !== true || base.stage !== "director")) {
+    throw new Error("Quality fallback acceptance requires an explicit director confirmation.");
+  }
   const confirmedAt = requiredText(value.confirmedAt, "confirmedAt");
   if (!Number.isFinite(Date.parse(confirmedAt))) throw new Error("Creative review confirmedAt must be an ISO timestamp.");
   return {
@@ -708,6 +735,8 @@ export function parseCreativeReviewConfirmResume(value: unknown): CreativeReview
     checkIdentity: sha256(value.checkIdentity, "checkIdentity"),
     confirmedAt,
     ...(value.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
+    ...(value.acknowledgeIncomplete === true ? { acknowledgeIncomplete: true as const } : {}),
+    ...(value.acceptQualityFallback === true ? { acceptQualityFallback: true as const } : {}),
   };
 }
 

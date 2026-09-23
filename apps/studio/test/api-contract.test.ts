@@ -15,6 +15,37 @@ import {
 } from "../src/shared/api.js";
 
 describe("run intervention API contracts", () => {
+  it("accepts an explicit incomplete-review continuation and rejects an implicit bypass", () => {
+    const evidenceId = "a".repeat(64);
+    assert.deepEqual(parseStudioDecisionInput({
+      action: "approve",
+      expectedRunRevision: 7,
+      interventionId: "source-review-1",
+      reviewEvidenceId: evidenceId,
+      acceptIncomplete: true,
+    }), {
+      action: "approve",
+      expectedRunRevision: 7,
+      interventionId: "source-review-1",
+      reviewEvidenceId: evidenceId,
+      acceptIncomplete: true,
+    });
+    assert.throws(() => parseStudioDecisionInput({
+      action: "approve",
+      expectedRunRevision: 7,
+      interventionId: "source-review-1",
+      reviewEvidenceId: evidenceId,
+      acceptIncomplete: false,
+    }), /未完成审查风险只能在明确批准时接受/);
+    assert.throws(() => parseStudioDecisionInput({
+      action: "reject",
+      expectedRunRevision: 7,
+      interventionId: "source-review-1",
+      reviewEvidenceId: evidenceId,
+      acceptIncomplete: true,
+    }), /只能在.*批准|接受未完成审查/);
+  });
+
   it("accepts a bounded voice timing change without accepting a managed file path", () => {
     assert.deepEqual(parseStudioDecisionInput({
       action: "request_changes",
@@ -465,6 +496,20 @@ describe("creative review confirm API contract", () => {
     stage: "treatment",
     baseDraftSha256: "a".repeat(64),
   };
+
+  it("accepts explicit stock quality risk only at the director gate", () => {
+    const input = { ...base, stage: "director", acceptQualityFallback: true };
+    assert.deepEqual(parseStudioCreativeReviewCommandInput(input), input);
+    assert.throws(() => parseStudioCreativeReviewCommandInput({ ...input, stage: "script" }), StudioInputError);
+    assert.throws(() => parseStudioCreativeReviewCommandInput({ ...input, deliveryAcceptance: {} }), StudioInputError);
+  });
+
+  it("binds incomplete-review acknowledgement to the exact review and rejects a fabricated acceptance", () => {
+    const input = { ...base, acknowledgeIncomplete: true, expectedCheckIdentity: "b".repeat(64) };
+    assert.deepEqual(parseStudioCreativeReviewCommandInput(input), input);
+    assert.throws(() => parseStudioCreativeReviewCommandInput({ ...base, acknowledgeIncomplete: true }), StudioInputError);
+    assert.throws(() => parseStudioCreativeReviewCommandInput({ ...input, deliveryAcceptance: {} }), StudioInputError);
+  });
 
   it("keeps the acknowledgement together with the review it overrides", () => {
     assert.deepEqual(parseStudioCreativeReviewCommandInput({

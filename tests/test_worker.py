@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import hashlib
 import json
 import os
@@ -18,6 +19,50 @@ from video_factory.worker import WorkerProtocolError, handle_request, validate_r
 
 
 class WorkerContractTest(unittest.TestCase):
+    def test_ai_router_materializes_accepted_low_score_image_and_rejects_changed_scope(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = {"scenes": [{"position": 1, "duration": 3, "narration": "示意", "visual_strategy": "stock", "visual_prompt": "landscape", "search_terms": []}]}
+            director = {"shots": [{"scenePosition": 1, "preferredProviderId": "nasa-stock-v1", "alternativeProviderIds": [], "deliveryType": "stock_image", "authenticityPolicy": "illustrative", "query": "landscape"}]}
+            inventory = {"version": "video-factory/asset-candidate-inventory-v1", "scene_candidates": [{"scene_position": 1, "candidates": [{
+                "provider": "nasa", "provider_id": "nasa-stock-v1", "asset_id": "low", "media_type": "image", "width": 720, "height": 1280, "duration": 0,
+                "preview_url": "", "download_url": "https://images-assets.nasa.gov/fixture.png", "source_url": "https://images.nasa.gov/fixture", "creator": "NASA", "license_note": "Public domain test fixture", "query": "landscape", "score": 90,
+            }]}]}
+            paths = {}
+            for key, value in (("scriptPath", script), ("directorPlanPath", director), ("candidateInventoryPath", inventory)):
+                target = root / f"{key}.json"
+                target.write_text(json.dumps(value), encoding="utf-8")
+                paths[key] = str(target)
+            ranking = {"version": "video-factory/asset-ranking-v1", "source": "model", "scenes": [{"scenePosition": 1, "candidates": [{"provider": "nasa", "assetId": "low", "rank": 1, "semanticScore": 20, "locked": False}]}]}
+            ranking["deliveryAcceptance"] = {
+                "policyVersion": "playable-first-v1", "scopeDigest": "a" * 64, "scenePositions": [1], "actor": "creator", "commandId": "accept", "confirmedAt": "2026-09-22T00:00:00Z",
+                **{name: hashlib.sha256(Path(paths[key]).read_bytes()).hexdigest() for name, key in (("scriptSha256", "scriptPath"), ("directorPlanSha256", "directorPlanPath"), ("inventorySha256", "candidateInventoryPath"))},
+            }
+            ranking_path = root / "ranking.json"
+            ranking_path.write_text(json.dumps(ranking), encoding="utf-8")
+            request = self.valid_request("asset.prepare", root / "output")
+            request["input"] = {**paths, "candidateRankingPath": str(ranking_path)}
+            request["parameters"] = {"provider": "ai-router", "mediaType": "image"}
+            image_bytes = io.BytesIO()
+            Image.new("RGB", (720, 1280), "navy").save(image_bytes, format="PNG")
+            response_body = io.BytesIO(image_bytes.getvalue())
+            response_body.headers = {"Content-Type": "image/png"}
+            with patch("video_factory.stock_assets.open_asset_request", return_value=response_body) as download:
+                response = handle_request(request)
+            plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text())
+            with Image.open(plan["scene_assets"][0]["local_path"]) as decoded:
+                self.assertEqual(decoded.size, (720, 1280))
+            self.assertEqual(download.call_count, 1)
+            self.assertEqual(plan["director_routing"][0]["selection_basis"], "accepted_quality_risk")
+            self.assertEqual(plan["director_routing"][0]["quality_review_status"], "unverified")
+            self.assertEqual(json.loads(ranking_path.read_text())["scenes"][0]["candidates"][0]["semanticScore"], 20)
+            Path(paths["directorPlanPath"]).write_text(json.dumps({**director, "changed": True}))
+            with patch("video_factory.stock_assets.open_asset_request") as download:
+                with self.assertRaisesRegex(WorkerProtocolError, "acceptance.*match"):
+                    handle_request(request)
+                download.assert_not_called()
+
     def test_worker_module_is_available_as_the_machine_interface(self):
         self.assertIsNotNone(importlib.util.find_spec("video_factory.worker"))
 

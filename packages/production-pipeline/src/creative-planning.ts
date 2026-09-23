@@ -9,7 +9,7 @@ import { applyCreativeReviewEditDraft } from "./creative-review.js";
 import { planningThreadId } from "./creative-planning-store.js";
 import type { DurationRange } from "./executable-timeline.js";
 import { RoleAgentLoopError, RoleAgentPlanningHaltError } from "./role-agent-loop.js";
-import type { AgentLoopTrace, RoleAudit, RoleAuditPlanningDisposition } from "./codex-chat.js";
+import { CodexBridgeError, type AgentLoopTrace, type RoleAudit, type RoleAuditPlanningDisposition } from "./codex-chat.js";
 import {
   compileExecutableProductionPlan,
   parseExecutableProductionPlan,
@@ -33,6 +33,8 @@ import {
   type CreativeReviewGate,
   type CreativeReviewState,
   type CreativeStage,
+  type CreativeReviewConfirmResume,
+  type StockDeliveryAcceptance,
 } from "./creative-review.js";
 
 // B3 固定创作规划图：拓扑在构建期固定（模型不得生成任意节点/边），责任边界、有界回退与
@@ -73,6 +75,7 @@ export interface PlanningIssue {
       bestSemanticScore: number | null;
       lockedCandidateCount: number;
       automaticUseMinimum: number;
+      reviewedCandidateCount?: number;
     };
   };
 }
@@ -94,6 +97,7 @@ export interface CreativePlanningState {
   crossRoleRevisions: number;
   unresolvedIssueDigests: string[];
   issues: PlanningIssue[];
+  advisoryIssues?: PlanningIssue[];
   creativeReview?: CreativeReviewState;
   /** 本次停在人工确认关，是因为自动循环先停下了；理由必须一起带出来，否则人只看到"方案已生成"。 */
   planningStop?: PlanningHalt;
@@ -232,6 +236,7 @@ const PlanningGraphAnnotation = Annotation.Root({
   /** 同一叙事目标的最佳候选证据；用于区分真实改善与只换措辞、query 或 artifact。 */
   availabilityBlockerObservations: Annotation<AvailabilityBlockerObservation[]>(),
   issues: Annotation<PlanningIssue[]>(),
+  advisoryIssues: Annotation<PlanningIssue[]>(),
   // 产物字段用 null 而不是 undefined 初始：checkpoint 以 JSON 序列化，undefined 会丢字段。
   treatmentArtifact: Annotation<PlanningArtifact<CreativeTreatment> | null>(),
   scriptArtifact: Annotation<PlanningArtifact<ScriptDraft> | null>(),
@@ -280,6 +285,7 @@ export function initialPlanningGraphState(input: CreativePlanningInput): Plannin
     availabilityBlockerDigests: [],
     availabilityBlockerObservations: [],
     issues: [],
+    advisoryIssues: [],
     treatmentArtifact: null,
     scriptArtifact: null,
     directorPlan: null,
@@ -340,6 +346,7 @@ export function projectCreativePlanningState(state: PlanningGraphState): Creativ
     ) as Partial<Record<PlanningStageId, string[]>>,
     crossRoleRevisions: state.crossRoleRevisions,
     unresolvedIssueDigests: [...state.unresolvedIssueDigests],
+    advisoryIssues: structuredClone(state.advisoryIssues ?? []),
     issues: state.issues.map((issue) => ({
       ...issue,
       beatIds: [...issue.beatIds],
@@ -442,7 +449,6 @@ function planCreativeContractIdentity(plan: VisualDirectorPlan): unknown {
     version: plan.version,
     requestedProfileId: plan.requestedProfileId,
     resolvedProfileId: plan.resolvedProfileId,
-    profileRationale: plan.profileRationale,
     visualBible: plan.visualBible,
   };
 }
@@ -477,7 +483,7 @@ function planningContentDigest(value: unknown): string {
 function currentRankingInputFingerprint(state: PlanningGraphState): string {
   return planningContentDigest({
     script: state.scriptArtifact?.output ?? null,
-    directorPlan: state.directorPlan?.output ?? null,
+    directorPlan: state.directorPlan ? rankingSemanticIntent(state.directorPlan.output) : null,
     candidates: state.candidatesArtifact?.output ?? null,
   });
 }
@@ -524,26 +530,52 @@ export function defaultAvailabilityReviewer(input: AvailabilityReviewInput): Pla
     if (!stockScenes.has(scene.scenePosition)) continue;
     if (reuseShots.has(scene.scenePosition)) continue;
     const usable = scene.candidates.some(
-      (candidate) => candidate.locked || candidate.semanticScore >= AUTOMATIC_CANDIDATE_SEMANTIC_MINIMUM,
+      (candidate) => candidate.locked || (candidate.semanticScore >= AUTOMATIC_CANDIDATE_SEMANTIC_MINIMUM
+        && input.ranking!.output.source === "model"
+        && (input.ranking!.output.visualEvidence === undefined || input.ranking!.output.visualEvidence.reviewed.some(
+          evidence => evidence.scenePosition === scene.scenePosition && evidence.provider === candidate.provider && evidence.assetId === candidate.assetId,
+        ))),
     );
     if (usable) continue;
     const shot = stockShots.find((candidate) => candidate.scenePosition === scene.scenePosition)!;
+    const evidenceReuse = input.directorPlan.shots.some(dependent => {
+      if (dependent.authenticityPolicy !== "evidence") return false;
+      const visited = new Set<number>();
+      let source = shotReuseSource(dependent);
+      while (source !== undefined && !visited.has(source)) {
+        if (source === shot.scenePosition) return true;
+        visited.add(source);
+        const parent = input.directorPlan.shots.find(item => item.scenePosition === source);
+        source = parent ? shotReuseSource(parent) : undefined;
+      }
+      return false;
+    });
     const scriptScene = input.script.scenes.find((candidate) => candidate.position === scene.scenePosition);
     const semanticScores = scene.candidates.map((candidate) => candidate.semanticScore);
+    const reviewedCandidateCount = input.ranking.output.visualEvidence?.reviewed.filter(
+      candidate => candidate.scenePosition === scene.scenePosition,
+    ).length ?? 0;
+    const evidenceMissing = scene.candidates.length > reviewedCandidateCount;
     issues.push({
       id: `asset-availability-scene-${scene.scenePosition}`,
-      target: "director",
+      target: evidenceMissing ? "user" : "director",
       beatIds: [],
       scenePositions: [scene.scenePosition],
-      reason: "图库候选不足：该镜头没有达到自动采用语义阈值的候选",
-      requiredChange: "调整该镜头画面路线（检索词、生成或复用）；素材确实不可得时按 source/user 上报",
+      reason: evidenceMissing
+        ? `候选画面证据不足：${scene.candidates.length} 个候选中仅 ${reviewedCandidateCount} 个完成视觉核验，尚不能判定其余素材是否合适`
+        : "图库候选不足：该镜头没有达到自动采用语义阈值的候选",
+      requiredChange: evidenceMissing
+        ? input.ranking.output.visualEvidence?.stopReason === "deadline"
+          ? "本轮候选核验时间已用尽，未审查素材不会自动采用。请在导演讨论中调整画面要求或补充可核验素材后再确认；也可以停止，不会自动重置时限或购买素材。"
+          : "本轮自动核验已停止；请讨论调整画面要求或补充可核验素材后再决定是否继续，不会自动购买或降低质量要求。"
+        : "调整该镜头画面路线（检索词、生成或复用）；素材确实不可得时按 source/user 上报",
       evidenceArtifactIds: [input.ranking.artifactId],
       availabilityBlocker: {
         reasonCode: "stock_candidate_below_automatic_use_threshold",
         narrativeTarget: {
           scenePurpose: scriptScene?.purpose?.trim() ?? "",
           narrativeRole: shot.narrativeRole.trim(),
-          authenticityPolicy: shot.authenticityPolicy,
+          authenticityPolicy: evidenceReuse ? "evidence" : shot.authenticityPolicy,
           subject: shot.subject?.trim() ?? "",
           visibleAction: shot.visibleAction?.trim() ?? "",
           successCriteria: distinctSorted(shot.successCriteria ?? []),
@@ -554,11 +586,75 @@ export function defaultAvailabilityReviewer(input: AvailabilityReviewInput): Pla
           bestSemanticScore: semanticScores.length > 0 ? Math.max(...semanticScores) : null,
           lockedCandidateCount: scene.candidates.filter((candidate) => candidate.locked).length,
           automaticUseMinimum: AUTOMATIC_CANDIDATE_SEMANTIC_MINIMUM,
+          reviewedCandidateCount,
         },
       },
     });
   }
   return issues;
+}
+
+function isIllustrativeQualityIssue(issue: PlanningIssue): boolean {
+  const blocker = issue.availabilityBlocker;
+  return blocker?.reasonCode === "stock_candidate_below_automatic_use_threshold"
+    && blocker.narrativeTarget.authenticityPolicy === "illustrative"
+    && blocker.evidence.candidateCount > 0;
+}
+
+function currentStockQualityIssues(state: PlanningGraphState): PlanningIssue[] {
+  if (!state.scriptArtifact || !state.directorPlan || !state.ranking) return [];
+  return defaultAvailabilityReviewer({
+    script: state.scriptArtifact.output,
+    directorPlan: (state.integratedPlan ?? state.directorPlan).output,
+    ranking: state.ranking,
+  }).filter(isIllustrativeQualityIssue);
+}
+
+function stockDeliveryScopeDigest(state: PlanningGraphState): string {
+  return planningContentDigest({
+    inputDigest: state.inputDigest,
+    script: state.scriptArtifact?.output,
+    director: state.directorPlan ? rankingSemanticIntent(state.directorPlan.output) : null,
+    candidates: state.candidatesArtifact?.output,
+    ranking: state.ranking?.output,
+    inventorySha256: state.candidateInventorySha256,
+  });
+}
+
+export function confirmedStockDeliveryAcceptance(state: PlanningGraphState): StockDeliveryAcceptance | undefined {
+  const stage = state.creativeReview.stages.director;
+  const acceptance = stage.confirmation?.deliveryAcceptance;
+  if (!acceptance) return undefined;
+  if (stage.phase !== "confirmed" || stage.currentDraft?.sha256 !== stage.confirmation?.draftSha256
+    || acceptance.scopeDigest !== stockDeliveryScopeDigest(state)) {
+    throw new Error("当前示意素材采用范围已变化，请重新确认。");
+  }
+  return structuredClone(acceptance);
+}
+
+function confirmPlanningDraft(
+  state: PlanningGraphState,
+  review: CreativeReviewState,
+  command: CreativeReviewConfirmResume,
+): CreativeReviewState {
+  const confirmedAt = new Date().toISOString();
+  const confirmed = confirmCreativeDraft(review, { ...command, confirmedAt });
+  if (command.stage === "director") {
+    confirmed.stages.director.confirmation!.libraryEvidenceDigest = stockDeliveryScopeDigest(state);
+  }
+  if (command.stage === "director" && command.acceptQualityFallback === true) {
+    const deliveryAcceptance: StockDeliveryAcceptance = {
+      policyVersion: "playable-first-v1",
+      scopeDigest: stockDeliveryScopeDigest(state),
+      ...(state.candidateInventorySha256 ? { inventorySha256: state.candidateInventorySha256 } : {}),
+      scenePositions: currentStockQualityIssues(state).flatMap(issue => issue.scenePositions),
+      actor: command.actor,
+      commandId: command.commandId,
+      confirmedAt,
+    };
+    confirmed.stages.director.confirmation!.deliveryAcceptance = deliveryAcceptance;
+  }
+  return confirmed;
 }
 
 const STOCK_CANDIDATE_AVAILABILITY_REASON = "图库候选不足：该镜头没有达到自动采用语义阈值的候选";
@@ -568,6 +664,8 @@ const ILLUSTRATIVE_STOCK_CANDIDATE_REQUIRED_CHANGE =
   "调整检索词，改用已启用的生成或复用路线，或人工补充合适素材；也可以停止本次制作。";
 
 function stockCandidateRequiredChange(issue: PlanningIssue): string {
+  const evidence = issue.availabilityBlocker?.evidence;
+  if (evidence && (evidence.reviewedCandidateCount ?? 0) < evidence.candidateCount) return issue.requiredChange;
   return issue.availabilityBlocker?.narrativeTarget.authenticityPolicy === "evidence"
     ? FACTUAL_STOCK_CANDIDATE_REQUIRED_CHANGE
     : ILLUSTRATIVE_STOCK_CANDIDATE_REQUIRED_CHANGE;
@@ -629,6 +727,7 @@ function availabilityEvidenceImproved(
   current: AvailabilityBlockerObservation["evidence"],
   previous: AvailabilityBlockerObservation["evidence"],
 ): boolean {
+  if ((current.reviewedCandidateCount ?? 0) > (previous.reviewedCandidateCount ?? 0)) return true;
   if (current.lockedCandidateCount !== previous.lockedCandidateCount) {
     return current.lockedCandidateCount > previous.lockedCandidateCount;
   }
@@ -887,7 +986,7 @@ function planningNodeActions(
       // 重复 rank、模型凭空锁定都直接 fail closed——不走模型 fallback，也不给导演伪造
       // “换画面”反馈。lock 的现有 override（allowLocks）保留给宿主对已持久化人工锁定的
       // re-read 边界；本图的 rank 产物是排序角色输出，处于宿主人工锁定之前，不授予 lock。
-      validateAssetSemanticRanking(artifact.output, state.candidatesArtifact.output);
+      validateAssetSemanticRanking(artifact.output, state.candidatesArtifact.output, { allowVisualEvidence: true });
       return {
         stage: "rank" as const,
         ranking: artifact,
@@ -950,16 +1049,34 @@ function planningNodeActions(
           + "the ranking evidence does not cover them.",
         );
       }
+      const confirmed = state.creativeReview.stages.director.confirmation;
+      const preserveConfirmed = state.creativeReview.stages.director.phase === "confirmed"
+        && confirmed?.draftSha256 === contentSha256(draft.output)
+        && confirmed.stageInputDigest === directorReviewInputDigest(state)
+        && confirmed.libraryEvidenceDigest === stockDeliveryScopeDigest(state)
+        // 低分示意素材的接受记录本身就是对当前整合范围的决定，可以沿用；
+        // 普通导演确认在候选/整合完成后仍要给用户一次整合方案确认。
+        && (confirmed.deliveryAcceptance !== undefined || state.integratedPlan !== null);
+      // 旧人工停点缺整合产物时，只补确定性整合；不改用户刚确认的字节，也不重复要求确认。
+      const integratedArtifact = preserveConfirmed
+        ? { artifactId: planningArtifactId("director-plan-integrated", draft.output), output: structuredClone(draft.output) }
+        : artifact;
       return {
         stage: "integrate" as const,
-        integratedPlan: artifact,
-        artifactIds: withArtifactId(state, "integrate", artifact.artifactId),
-        ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE
-          ? { creativeReview: publishCreativeDraft(state.creativeReview, "director", artifact.artifactId, artifact.output, directorReviewInputDigest(state)) }
+        integratedPlan: integratedArtifact,
+        artifactIds: withArtifactId(state, "integrate", integratedArtifact.artifactId),
+        ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE && !preserveConfirmed
+          ? { creativeReview: publishCreativeDraft(state.creativeReview, "director", integratedArtifact.artifactId, integratedArtifact.output, directorReviewInputDigest(state)) }
           : {}),
       };
     },
     compile: async (state: PlanningGraphState) => {
+      if (state.base.creativeReview === CREATIVE_REVIEW_FEATURE && currentStockQualityIssues(state).length > 0) {
+        const acceptance = confirmedStockDeliveryAcceptance(state);
+        if (!acceptance) {
+          throw new Error("当前示意素材的质量风险尚未得到用户确认，不能开始制作。");
+        }
+      }
       const artifact = isolatedPlanningValue(await ports.compile(contextFor(state)));
       requireArtifact(artifact, "compile");
       return {
@@ -1000,7 +1117,13 @@ function routeAfterDirector(state: PlanningGraphState): "halt" | "candidates" | 
   if (current !== state.candidateSearchFingerprint) return "candidates";
   // 候选获取身份未变：候选报告可复用（不重搜）。排序是否有效看排序实际输入身份——稿件或
   // 方案内容变化会使记录的指纹失配，必须重排；两者都一致才直接复检。
-  if (state.ranking === null || state.rankingInputFingerprint !== currentRankingInputFingerprint(state)) {
+  const legacyFingerprint = planningContentDigest({
+    script: state.scriptArtifact?.output ?? null,
+    directorPlan: state.directorPlan?.output ?? null,
+    candidates: state.candidatesArtifact?.output ?? null,
+  });
+  if (state.ranking === null || (state.rankingInputFingerprint !== currentRankingInputFingerprint(state)
+    && state.rankingInputFingerprint !== legacyFingerprint)) {
     return "rank";
   }
   return "evaluate";
@@ -1190,6 +1313,9 @@ function routeFromEvaluate(state: PlanningGraphState): "halt" | "compile" | "rev
   // integrate 直连 compile 绕过可得性检查。
   if (state.issues.length === 0) {
     if (!state.integratedPlan) return "integrate";
+    if (state.creativeReview.stages.director.phase === "confirmed"
+      && state.creativeReview.stages.director.confirmation?.draftSha256 === contentSha256(state.integratedPlan.output)
+      && state.creativeReview.stages.director.confirmation?.libraryEvidenceDigest === stockDeliveryScopeDigest(state)) return "compile";
     return state.base.creativeReview === CREATIVE_REVIEW_FEATURE ? "review" : "compile";
   }
   return state.issues.some((issue) => issue.target === "script") ? "script" : "director";
@@ -1232,6 +1358,7 @@ export async function runCreativePlanning(
     if (incompleteLibraryCompletion(existing)) {
       await graph.updateState(config, {
         ...invalidateRankingEvidence(existing.artifactIds ?? {}),
+        executablePlan: null,
         ...(existing.candidatesArtifact === null
           ? {
               candidateSearchFingerprint: null,
@@ -1278,13 +1405,19 @@ function evaluateNode(availabilityReviewer: AvailabilityReviewer) {
     // 传入的 script/directorPlan/ranking 不影响图拥有的证据与后续 checkpoint——否则两轮复检
     // 放行后 integrate/compile 会携旧 ranking 消费被改写的画面语义。返回 issues 仍过
     // parsePlanningIssue 形状校验，不解析自然语言。
-    const pending = availabilityReviewer(
+    const observed = availabilityReviewer(
       isolatedPlanningValue<AvailabilityReviewInput>({
         script: state.scriptArtifact.output,
         directorPlan: reviewedPlan.output,
         ranking: state.ranking,
       }),
     ).map((issue) => parsePlanningIssue(issue));
+    // 仅宿主的可得性规则能把“有候选但不够好”分成建议；模型的标签不能豁免真实生产约束。
+    const advisoryIssues = state.base.creativeReview === CREATIVE_REVIEW_FEATURE
+      && availabilityReviewer === defaultAvailabilityReviewer
+      ? observed.filter(isIllustrativeQualityIssue) : [];
+    const advisoryIds = new Set(advisoryIssues.map(issue => issue.id));
+    const pending = observed.filter(issue => !advisoryIds.has(issue.id));
     const digests = pending.map((issue) => planningIssueDigest(issue));
     // 已见问题的 digest 合并保留（不替换）：跨阶段仍待验证的问题清单只增不减，直到整合方案
     // 复检确认无问题为止。
@@ -1310,6 +1443,7 @@ function evaluateNode(availabilityReviewer: AvailabilityReviewer) {
 
     // 只有用户能解决的问题（口径、取舍、授权范围）与素材确实不可得：停止自动重试。
     const availabilityFields = {
+      advisoryIssues,
       issues: pending,
       unresolvedIssueDigests: carriedUnresolved,
       availabilityBlockerDigests: carriedAvailabilityBlockers,
@@ -1409,8 +1543,8 @@ function evaluateNode(availabilityReviewer: AvailabilityReviewer) {
       // 确认，不得在这里清空——否则同一整合问题第二次出现会被当成新回退而不是 duplicate_issue。
       // 只有整合方案复检确认无问题、即将编译时才消解。
       return state.integratedPlan !== null
-        ? { issues: [], unresolvedIssueDigests: [], halt: null, manualDirectorReview: false }
-        : { issues: [], halt: null, manualDirectorReview: false };
+        ? { issues: [], advisoryIssues, unresolvedIssueDigests: [], halt: null, planningStop: null, manualDirectorReview: false }
+        : { issues: [], advisoryIssues, halt: null, planningStop: null, manualDirectorReview: false };
     }
     const duplicated = pending.filter((issue, index) => state.unresolvedIssueDigests.includes(digests[index]!));
     if (duplicated.length > 0) {
@@ -1551,6 +1685,20 @@ function reviewGateNode(
     const gate = creativeReviewGate(state.creativeReview, stage);
     const resume = parseCreativeReviewResume(interrupt(gate));
     if (resume.action === "confirm") {
+      if (resume.stage !== stage || resume.baseDraftSha256 !== gate.draft.sha256
+        || resume.expectedReviewRevision !== gate.reviewRevision) {
+        throw new Error("Creative review confirmation is stale：你确认的那一条已经不是当前这一条，请重新查看。");
+      }
+      const qualityIssues = stage === "director" ? currentStockQualityIssues(state) : [];
+      if (qualityIssues.length > 0 && resume.acceptQualityFallback !== true) {
+        return {
+          advisoryIssues: qualityIssues,
+          planningStop: { reason: "needs_user" as const, issueIds: qualityIssues.map(issue => issue.id),
+            detail: "当前有可用的示意素材，但匹配得分较低或视觉核验未完成。你可以接受这些风险先制作首版，也可以讨论调整；这不会授权新的费用。" },
+        };
+      }
+      // 制作合同先独立校验；咨询服务失败的采用权不能豁免坏稿或越权改镜头。
+      validateEditedDraft?.(stage, currentCreativeDocument(state, stage), state.scriptArtifact?.output ?? null);
       // 人已经看过这一版字节的复核意见并明确承担：用他看过的那一条复核放行，不另跑一轮。
       // 重跑会把"他承担的是哪条结论"换成一条新裁决，确认留痕就不再是当时那个决定；
       // 而且裁决一旦再给 repair，人只能在同一条意见上无限重试，决策权又回到模型手里。
@@ -1559,7 +1707,7 @@ function reviewGateNode(
       // 直接拿当前记录去覆盖 resume 里那三个期望值，等于把陈旧请求也重新绑到最新记录上，
       // 人确认的就成了他从没见过的意见。
       const recorded = state.creativeReview.stages[stage].checkResult;
-      if (resume.acknowledgeRepair === true) {
+      if (resume.acknowledgeRepair === true || resume.acknowledgeIncomplete === true) {
         if (!recorded
           || recorded.draftSha256 !== gate.draft.sha256
           || resume.expectedReviewRevision !== state.creativeReview.reviewRevision
@@ -1567,10 +1715,7 @@ function reviewGateNode(
           throw new Error("你确认的那一条独立复核意见已经不是当前这一条了，请重新查看当前的复核意见再确认。");
         }
         return {
-          creativeReview: confirmCreativeDraft(state.creativeReview, {
-            ...resume,
-            confirmedAt: new Date().toISOString(),
-          }),
+          creativeReview: confirmPlanningDraft(state, state.creativeReview, resume),
           // 人已经就"自动循环停下"这件事做了决定，理由随之作废：再留着它，下一个正常的
           // 阶段停点会顶着上一次"自动检查已停止"的牌子出现，人以为又停了。
           planningStop: null,
@@ -1589,7 +1734,20 @@ function reviewGateNode(
           // 进日志供操作员定位。
           console.error(`[creative-review] ${stage} check leg failed:`, error);
         }
-        const audit = error instanceof RoleAgentLoopError
+        const settledCheckFailure = validateEditedDraft && error instanceof RoleAgentLoopError
+          && error.sourceError instanceof CodexBridgeError && error.sourceError.stage === "completed_failure";
+        if (settledCheckFailure) {
+          const summary = "独立复核服务已结束，但没有得到有效结论。方案通过制作合同校验；你可以接受未完成复核的风险采用本版，或重试复核。";
+          return {
+            creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
+              status: "incomplete", draftSha256: gate.draft.sha256,
+              checkIdentity: contentSha256({ stage, draft: gate.draft, failure: error.agentLoop.failure, commandId: resume.commandId }),
+              summary, issues: [],
+            }),
+            planningStop: null,
+          };
+        }
+        const audit = error instanceof RoleAgentLoopError && !error.agentLoop.failure
           ? error.agentLoop.iterations.at(-1)?.audit
           : undefined;
         if (!audit) {
@@ -1654,7 +1812,7 @@ function reviewGateNode(
         issues: structuredClone(audit.issues),
       });
       return {
-        creativeReview: confirmCreativeDraft(reviewed, {
+        creativeReview: confirmPlanningDraft(state, reviewed, {
           ...resume,
           expectedReviewRevision: reviewed.reviewRevision,
           checkIdentity,
@@ -1764,6 +1922,7 @@ function creativeDocumentArtifactUpdate(
 ): Partial<PlanningGraphState> {
   const stageState = review.stages[stage];
   if (!stageState.currentDraft || stageState.currentDocument === null) return {};
+  if (state.creativeReview.stages[stage].currentDraft?.sha256 === stageState.currentDraft.sha256) return {};
   const artifact = { artifactId: stageState.currentDraft.artifactId, output: structuredClone(stageState.currentDocument) };
   if (stage === "treatment") return { treatmentArtifact: artifact as PlanningArtifact<CreativeTreatment> };
   if (stage === "script") {
@@ -1772,8 +1931,18 @@ function creativeDocumentArtifactUpdate(
       ...invalidateRankingEvidence(state.artifactIds),
     };
   }
+  const directorArtifact = artifact as PlanningArtifact<VisualDirectorPlan>;
+  if (state.directorPlan && planningContentDigest(rankingSemanticIntent(state.directorPlan.output))
+    === planningContentDigest(rankingSemanticIntent(directorArtifact.output))) {
+    return {
+      directorPlan: directorArtifact,
+      integratedPlan: state.integratedPlan ? directorArtifact : null,
+      executablePlan: null,
+      rankingInputFingerprint: state.ranking ? currentRankingInputFingerprint(state) : null,
+    };
+  }
   return {
-    directorPlan: artifact as PlanningArtifact<VisualDirectorPlan>,
+    directorPlan: directorArtifact,
     ...invalidateRankingEvidence(state.artifactIds),
   };
 }
@@ -1792,6 +1961,7 @@ function routeAfterLibraryDirectorReview(
   state: PlanningGraphState,
 ): "halt" | "wait" | "next" | "treatment" | "script" | "recheck" | "candidates" | "rank" | "evaluate" {
   const reviewRoute = routeAfterReview("director")(state);
+  if (reviewRoute === "recheck") return routeAfterDirector(state);
   if (reviewRoute !== "next") return reviewRoute;
   // 用户在导演讨论中可能改变素材路线或检索身份。讨论会使旧排序、整合与编译证据失效；
   // 只有当前确认稿仍有完整整合证据时才能直接编译，否则复用与正常导演节点相同的证据路由。
@@ -1953,11 +2123,10 @@ function parseAvailabilityBlocker(
     ["scenePositions", "beatIds"],
     "Planning issue availabilityBlocker impactScope",
   );
-  const evidence = exactRecord(
-    blocker.evidence,
-    ["candidateCount", "bestSemanticScore", "lockedCandidateCount", "automaticUseMinimum"],
-    "Planning issue availabilityBlocker evidence",
-  );
+  const evidence = record(blocker.evidence, "Planning issue availabilityBlocker evidence");
+  if (Object.keys(evidence).some(key => !["candidateCount", "bestSemanticScore", "lockedCandidateCount", "automaticUseMinimum", "reviewedCandidateCount"].includes(key))) {
+    throw new Error("Planning issue availabilityBlocker evidence contains unknown fields.");
+  }
   const candidateCount = nonNegativeInteger(evidence.candidateCount, "Planning issue availabilityBlocker candidateCount");
   const lockedCandidateCount = nonNegativeInteger(
     evidence.lockedCandidateCount,
@@ -1973,7 +2142,8 @@ function parseAvailabilityBlocker(
   return {
     reasonCode: blocker.reasonCode,
     narrativeTarget: {
-      scenePurpose: text(target.scenePurpose, "Planning issue availabilityBlocker scenePurpose"),
+      // ScriptScene.purpose 可省略；缺少描述应保留为缺失证据，不能让人工停点序列化失败。
+      scenePurpose: optionalText(target.scenePurpose, "Planning issue availabilityBlocker scenePurpose"),
       narrativeRole: text(target.narrativeRole, "Planning issue availabilityBlocker narrativeRole"),
       authenticityPolicy: text(target.authenticityPolicy, "Planning issue availabilityBlocker authenticityPolicy"),
       subject: optionalText(target.subject, "Planning issue availabilityBlocker subject"),
@@ -1989,6 +2159,9 @@ function parseAvailabilityBlocker(
       bestSemanticScore,
       lockedCandidateCount,
       automaticUseMinimum,
+      ...(evidence.reviewedCandidateCount === undefined ? {} : {
+        reviewedCandidateCount: nonNegativeInteger(evidence.reviewedCandidateCount, "Planning issue reviewedCandidateCount"),
+      }),
     },
   };
 }

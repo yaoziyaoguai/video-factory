@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import type { AssetCandidateReport } from "../src/asset-semantic-ranker.js";
 import { describe, it } from "node:test";
 import { MemorySaver } from "@langchain/langgraph";
 import {
@@ -8,12 +10,14 @@ import {
   createCreativePlanningGraph,
   executablePlanCompilePort,
   RoleAgentLoopError,
+  CodexBridgeError,
   runCreativePlanning,
   runRoleAgentLoop,
   type AvailabilityReviewer,
   type CreativePlanningPorts,
   type CreativeReviewGate,
   type CreativeTreatment,
+  type VisualDirectorPlan,
 } from "../src/index.js";
 import { planningThreadId } from "../src/creative-planning-store.js";
 import { initialCreativeReviewState, publishCreativeDraft, recordCreativeDiscussion, applyCreativeReviewDeterministicCommand, applyCreativeReviewEditDraft, recordCreativeReviewCheck, confirmCreativeDraft, creativeReturnTargets, returnCreativeReviewToStage, parseCreativeReviewResume } from "../src/creative-review.js";
@@ -22,6 +26,13 @@ import { initialCreativeReviewState, publishCreativeDraft, recordCreativeDiscuss
 // 维度固定为 attention/progression/payoff/expression。全部分数取同一个值，
 // 好让 score 恰好等于最低维度分这个归约成立。
 const CREATIVE_AUDIT_DIMENSIONS = ["attention", "progression", "payoff", "expression"] as const;
+
+function reviewedCandidates(report: AssetCandidateReport) {
+  return { reportDigest: createHash("sha256").update(JSON.stringify(report)).digest("hex"), supplementaryBatches: 0 as const,
+    reviewed: report.scenes.flatMap(scene => scene.candidates.map(candidate => ({
+      scenePosition: scene.scenePosition, provider: candidate.provider, assetId: candidate.assetId, sha256: "a".repeat(64),
+    }))) };
+}
 
 function auditAssessments(score: number) {
   return [{
@@ -104,6 +115,101 @@ function resume(gate: CreativeReviewGate, commandId: string) {
 }
 
 describe("three-stage creative review gates", () => {
+  it("lets the creator adopt a valid draft after a settled check failure without inventing a score", async () => {
+    let checks = 0;
+    const graph = createCreativePlanningGraph({ checkpointer: new MemorySaver(), ports: {
+      treatment: async context => {
+        if (context.creativeReviewExecution?.mode === "check") {
+          checks++;
+          throw new RoleAgentLoopError("model completed without output", {
+            version: "video-factory/agent-loop-v1", role: "构思", contractVersion: "test", criteria: [], status: "failed", maxIterations: 3, iterations: [],
+            failure: { stage: "completed_failure" },
+          }, undefined, new CodexBridgeError("completed", false, "completed_failure", 502, "model_provider_no_output"));
+        }
+        return { artifactId: "treatment", output: treatment };
+      },
+      screenwriter: async () => ({ artifactId: "script", output: script }), director: async () => ({ artifactId: "director", output: director }),
+      compile: executablePlanCompilePort,
+      validateEditedDraft: (_stage, value) => { assert.deepEqual(value, treatment); },
+    } });
+    const input = { runId: "settled-review", inputDigest: "settled-review", durationRange: { minSeconds: 20, maxSeconds: 30 }, creativeReview: CREATIVE_REVIEW_FEATURE };
+    const threadId = planningThreadId(input.runId, input.inputDigest);
+    const first = await runCreativePlanning(graph, { input, threadId });
+    if (first.status !== "waiting_user") throw new Error("missing gate");
+    const failed = await runCreativePlanning(graph, { input, threadId, resume: resume(first.gate, "check") });
+    if (failed.status !== "waiting_user") throw new Error("missing incomplete gate");
+    const result = failed.state.creativeReview!.stages.treatment.checkResult!;
+    assert.equal(result.status, "incomplete");
+    assert.equal(result.score, undefined);
+    const accepted = await runCreativePlanning(graph, { input, threadId, resume: {
+      ...resume(failed.gate, "accept-incomplete"), checkIdentity: result.checkIdentity, acknowledgeIncomplete: true,
+    } });
+    assert.equal(accepted.status, "waiting_user");
+    if (accepted.status === "waiting_user") assert.equal(accepted.gate.stage, "script");
+    assert.equal(checks, 1);
+    assert.equal(accepted.state.creativeReview!.stages.treatment.confirmation!.acknowledgedIncomplete, true);
+  });
+  for (const legacyStop of [false, true]) it(`lets the creator accept low-quality illustrative stock without rewriting or rescoring it (legacy=${legacyStop})`, async () => {
+    const stockDirector: VisualDirectorPlan = structuredClone(director);
+    stockDirector.shots[0] = { ...stockDirector.shots[0]!, deliveryType: "stock_video", query: "illustration" };
+    let searches = 0;
+    let ranks = 0;
+    let drafts = 0;
+    const checked = <T>(output: T) => ({ artifactId: contentSha256(output), output, reviewCheck: {
+      checkIdentity: contentSha256(output), audit: { version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v1" as const, verdict: "pass" as const, score: 90, summary: "可执行", issues: [], repairInstructions: [], assessments: auditAssessments(90) },
+    } });
+    const graph = createCreativePlanningGraph({ checkpointer: new MemorySaver(), ports: {
+      treatment: async () => checked(treatment), screenwriter: async () => checked(script),
+      director: async (context) => { if (context.creativeReviewExecution?.mode !== "check") drafts++; return checked(context.directorPlan?.output ?? stockDirector); },
+      searchCandidates: async () => { searches++; return { artifactId: "candidates", output: {
+        version: "video-factory/asset-candidates-v1", scenes: [{ scenePosition: 1, query: "illustration", intent: {}, candidates: [{
+          provider: "provider-1", assetId: "low", mediaType: "video", width: 1080, height: 1920, duration: 24,
+          previewUrl: "https://example.test/low.jpg", sourceUrl: "https://example.test/low", creator: "fixture", licenseNote: "test", query: "illustration", qualityScore: 60,
+        }] }],
+      } }; },
+      rank: async () => { ranks++; return { artifactId: "ranking", output: {
+        version: "video-factory/asset-ranking-v1", source: "model", providerId: "ranker", modelId: "ranker",
+        summary: "候选得分偏低，视觉核验未完成", scenes: [{ scenePosition: 1, summary: "低分", candidates: [{
+          provider: "provider-1", assetId: "low", originalRank: 1, rank: 1, semanticScore: 20, rationale: "匹配一般", locked: false,
+        }] }],
+      } }; },
+      integrateDirector: async (context) => ({ artifactId: "integrated", output: structuredClone(context.directorPlan!.output) }),
+      discuss: async () => ({ stage: "director", intent: "explain", reply: "只解释，不改画面", changeSummary: [], treatment: null, script: null, director: null, upstreamRequest: null }),
+      compile: executablePlanCompilePort,
+    } });
+    const input = { runId: "playable-first", inputDigest: "playable-first", durationRange: { minSeconds: 20, maxSeconds: 30 }, creativeReview: CREATIVE_REVIEW_FEATURE };
+    const threadId = planningThreadId(input.runId, input.inputDigest);
+    let outcome = await runCreativePlanning(graph, { input, threadId });
+    for (const stage of ["treatment", "script"] as const) {
+      assert.equal(outcome.status, "waiting_user");
+      if (outcome.status !== "waiting_user") throw new Error("missing user gate");
+      assert.equal(outcome.gate.stage, stage);
+      outcome = await runCreativePlanning(graph, { input, threadId, resume: resume(outcome.gate, `confirm-${stage}`) });
+    }
+    assert.equal(outcome.status, "waiting_user");
+    if (outcome.status !== "waiting_user") throw new Error("missing director gate");
+    if (legacyStop) await graph.updateState({ configurable: { thread_id: threadId } }, { integratedPlan: null, manualDirectorReview: true }, "evaluate");
+    outcome = await runCreativePlanning(graph, { input, threadId, resume: {
+      action: "discuss", stage: "director", commandId: "explain-stock", actor: "creator", message: "解释当前候选",
+      baseDraftSha256: outcome.gate.draft.sha256, expectedReviewRevision: outcome.gate.reviewRevision,
+    } });
+    if (outcome.status !== "waiting_user") throw new Error("explanation must preserve the gate");
+    outcome = await runCreativePlanning(graph, { input, threadId, resume: resume(outcome.gate, "without-stock-consent") });
+    assert.equal(outcome.status, "waiting_user", "质量建议不能自动转为采用授权");
+    if (outcome.status !== "waiting_user") throw new Error("missing quality consent gate");
+    assert.match(outcome.state.planningStop!.detail, /质量|匹配/);
+    const accepted = await runCreativePlanning(graph, { input, threadId, resume: {
+      ...resume(outcome.gate, "accept-current-stock"), acceptQualityFallback: true,
+    } });
+    assert.equal(accepted.status, "completed");
+    assert.equal(searches, 1);
+    assert.equal(ranks, 1);
+    assert.equal(drafts, 1);
+    const saved = (await graph.getState({ configurable: { thread_id: threadId } })).values;
+    assert.equal(saved.ranking.output.scenes[0].candidates[0].semanticScore, 20);
+    assert.equal(saved.ranking.output.scenes[0].candidates[0].locked, false);
+    assert.ok(saved.creativeReview.stages.director.confirmation.deliveryAcceptance.scopeDigest);
+  });
   it("swaps in a hand-edited draft as a new revision, clearing the old check binding", () => {
     // 人工修订与 AI 修订走同一条制度：换稿即新一版草稿（revision+1、sha256 按新文档重算、
     // checkResult/confirmation 清空、上一稿入 previousDraft 槽）。旧复核意见不能继续绑在新稿上，
@@ -876,7 +982,7 @@ describe("three-stage creative review gates", () => {
     assert.deepEqual(calls, { treatment: 1, script: 1, director: 2, checks: 3 });
   });
 
-  it("carries the complete previous director plan and only the newly affected scenes through successive availability revisions", async () => {
+  it("keeps low-scoring illustrative scenes as advice instead of automatically rewriting the director plan", async () => {
     const fiveSceneScript = {
       ...script,
       duration_seconds: 25,
@@ -964,6 +1070,7 @@ describe("three-stage creative review gates", () => {
           providerId: "ranker",
           modelId: "ranker-model",
           summary: "逐镜排序",
+          visualEvidence: reviewedCandidates(context.candidates!.output),
           scenes: context.candidates!.output.scenes.map((scene) => {
             const currentPlan = context.directorPlan!.output;
             const lowScoreScenes = currentPlan.shots[0]!.deliveryType === "stock_video"
@@ -1006,13 +1113,10 @@ describe("three-stage creative review gates", () => {
     if (directorGate.status !== "waiting_user") return;
     assert.equal(directorGate.gate.stage, "director");
     const draftContexts = directorContexts.filter((context) => context.creativeReviewExecution?.mode !== "check");
-    assert.equal(draftContexts.length, 3);
-    assert.deepEqual(draftContexts[1]!.issues.flatMap((issue) => issue.scenePositions), [1, 2]);
-    assert.deepEqual(draftContexts[2]!.issues.flatMap((issue) => issue.scenePositions), [4]);
-    assert.deepEqual(draftContexts[1]!.directorPlan?.output, plans[0]);
-    assert.deepEqual(draftContexts[2]!.directorPlan?.output, plans[1]);
-    assert.equal(draftContexts[2]!.availabilityHistory.some((entry) => entry.scenePositions?.includes(1)), true);
-    assert.equal(draftContexts[2]!.availabilityHistory.some((entry) => entry.scenePositions?.includes(4)), true);
+    assert.equal(draftContexts.length, 1);
+    assert.deepEqual(directorGate.state.issues, []);
+    assert.deepEqual(directorGate.state.advisoryIssues?.flatMap(issue => issue.scenePositions), [1, 2]);
+    assert.deepEqual(directorGate.state.creativeReview?.stages.director.currentDocument, plans[0]);
     assert.equal(directorGate.state.creativeReview?.stages.director.currentDocument !== null, true);
   });
 
@@ -1344,6 +1448,7 @@ describe("three-stage creative review gates", () => {
               locked: false,
             })),
           })),
+          visualEvidence: reviewedCandidates(context.candidates!.output),
         },
       }),
       integrateDirector: async (context) => ({
@@ -1404,7 +1509,8 @@ describe("three-stage creative review gates", () => {
     assert.equal(unavailable.gate.stage, "director");
     assert.equal(directorDraftCalls, 1, "availability failure must not invoke an automatic director rewrite");
     assert.equal(unavailable.gate.draft.sha256, contentSha256(stockDirector));
-    assert.equal(unavailable.state.issues[0]?.target, "source");
+    assert.equal(unavailable.state.advisoryIssues?.[0]?.availabilityBlocker?.evidence.bestSemanticScore, 20);
+    assert.equal(unavailable.state.creativeReview?.stages.director.confirmation, null);
 
     const adjusted = await runCreativePlanning(graph, {
       input,

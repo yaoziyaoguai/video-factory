@@ -366,6 +366,7 @@ def prepare_routed_scene_assets(
     limit: int = 6,
     candidate_ranking: Optional[dict] = None,
     candidate_inventory: Optional[dict] = None,
+    accepted_quality_scenes: Optional[set[int]] = None,
 ) -> Path:
     asset_dir = workspace / "assets" / f"job-{job_id}"
     asset_dir.mkdir(parents=True, exist_ok=True)
@@ -387,7 +388,7 @@ def prepare_routed_scene_assets(
                 f"Director plan scene {scene.position} must reuse an earlier existing scene, got {source_position}"
             )
         reuse_sources[scene.position] = source_position
-    ranking_by_scene = ranking_candidate_ids_by_scene(candidate_ranking)
+    ranking_by_scene = ranking_candidate_ids_by_scene(candidate_ranking, accepted_quality_scenes)
     inventory_by_scene = inventory_candidates_by_scene_provider(candidate_inventory)
     claimed_stock_assets: set[tuple[str, str]] = set()
     claim_lock = Lock()
@@ -467,7 +468,7 @@ def prepare_routed_scene_assets(
                     if candidate_inventory is not None
                     else search_stock_query_variants(provider, stock_query, scene.search_terms, route_media_type, limit)
                 )
-                candidates = reorder_candidates(discovered_candidates, ranking_by_scene.get(scene.position, []))
+                candidates = reorder_candidates(discovered_candidates, ranking_by_scene.get(scene.position, []) if candidate_ranking is not None else None)
                 if discovered_candidates and not candidates:
                     materialization_notes.append(
                         f"{provider_id}: semantic review rejected {len(discovered_candidates)} candidate(s)"
@@ -536,6 +537,16 @@ def prepare_routed_scene_assets(
             "director_shot": route,
             "candidate_shortlist": candidate_shortlist,
         }
+        preference = next((item for item in ranking_by_scene.get(scene.position, [])
+                           if (item.provider, item.asset_id) == (actual_asset.provider, actual_asset.asset_id)), None)
+        if preference is not None:
+            reviewed = (candidate_ranking or {}).get("visualEvidence", {}).get("reviewed", [])
+            verified = any(item.get("scenePosition") == scene.position and item.get("provider") == actual_asset.provider
+                           and item.get("assetId") == actual_asset.asset_id for item in reviewed)
+            routing_record["selection_basis"] = "user_locked" if preference.locked else (
+                "accepted_quality_risk" if not preference.enforce_score else "recommended_candidate")
+            routing_record["quality_review_status"] = "reviewed" if verified else "unverified"
+            routing_record["semantic_score"] = preference.semantic_score if (candidate_ranking or {}).get("source") == "model" else None
         if materialization_notes:
             routing_record["materialization_notes"] = list(dict.fromkeys(materialization_notes))
         return actual_asset, routing_record
@@ -620,7 +631,7 @@ def director_routes_for_scenes(shots: list, scenes: Iterable[Scene]) -> dict[int
     return routes
 
 
-def ranking_candidate_ids_by_scene(candidate_ranking: Optional[dict]) -> dict[int, list[RankedCandidatePreference]]:
+def ranking_candidate_ids_by_scene(candidate_ranking: Optional[dict], accepted_quality_scenes: Optional[set[int]] = None) -> dict[int, list[RankedCandidatePreference]]:
     if candidate_ranking is None:
         return {}
     scenes = candidate_ranking.get("scenes")
@@ -634,8 +645,10 @@ def ranking_candidate_ids_by_scene(candidate_ranking: Optional[dict]) -> dict[in
         candidates = scene.get("candidates")
         if not isinstance(candidates, list):
             raise ValueError("Candidate ranking candidates must be an array")
+        attempted = {(item.get("provider"), item.get("assetId")) for item in scene.get("attemptedCandidateIds", []) if isinstance(item, dict)}
         ordered = sorted(candidates, key=lambda item: (
             0 if isinstance(item, dict) and item.get("locked") is True else 1,
+            0 if isinstance(item, dict) and semantic_scores_verified and int(item.get("semanticScore", 0)) >= MIN_MODEL_SEMANTIC_SCORE else 1,
             int(item.get("rank", 1_000_000)) if isinstance(item, dict) else 1_000_000,
         ))
         result[int(scene["scenePosition"])] = [
@@ -644,10 +657,11 @@ def ranking_candidate_ids_by_scene(candidate_ranking: Optional[dict]) -> dict[in
                 asset_id=str(item.get("assetId") or ""),
                 semantic_score=int(item.get("semanticScore", 0)) if semantic_scores_verified else 0,
                 locked=item.get("locked") is True,
-                enforce_score=True,
+                enforce_score=int(scene["scenePosition"]) not in (accepted_quality_scenes or set()),
             )
             for item in ordered
             if isinstance(item, dict) and item.get("provider") and item.get("assetId")
+            and (item.get("provider"), item.get("assetId")) not in attempted
         ]
     return result
 
@@ -686,9 +700,9 @@ def inventory_candidates_by_scene_provider(candidate_inventory: Optional[dict]) 
 
 def reorder_candidates(
     candidates: List[StockAssetCandidate],
-    preferred: list[RankedCandidatePreference],
+    preferred: Optional[list[RankedCandidatePreference]],
 ) -> List[StockAssetCandidate]:
-    if not preferred:
+    if preferred is None:
         return candidates
     accepted = [
         item for item in preferred

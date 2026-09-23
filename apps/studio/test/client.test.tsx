@@ -999,7 +999,7 @@ describe("Studio client", () => {
     }));
   });
 
-  it("blocks production when the independent role auditor is unavailable", () => {
+  it("keeps production available when the advisory role auditor is unavailable", async () => {
     render(<NewRunDialog
       open
       providers={providers.filter((provider) => provider.id !== "codex-role-auditor-v1")}
@@ -1007,11 +1007,12 @@ describe("Studio client", () => {
       onSubmit={async () => undefined}
     />);
 
-    expect(screen.getByText(/缺少正式生产能力：独立质量复核/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
+    expect(screen.getByText("独立质量复核未接通")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
   });
 
-  it("links a missing production role straight to the production-roles settings section", () => {
+  it("does not treat the advisory role auditor as a missing production role", async () => {
     render(<NewRunDialog
       open
       providers={providers.filter((provider) => provider.id !== "codex-role-auditor-v1")}
@@ -1019,10 +1020,10 @@ describe("Studio client", () => {
       onSubmit={async () => undefined}
     />);
 
-    expect(screen.getByText(/缺少正式生产能力：独立质量复核/)).toBeInTheDocument();
-    const settingsLink = screen.getByRole("link", { name: "打开创作设置" });
-    expect(settingsLink).toHaveAttribute("href", "/resources#production-roles");
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: /更多：素材来源与制作细节/ }));
+    expect(screen.getByText("独立质量复核未接通")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "打开创作设置" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
   });
 
   it("links a missing director asset source to the visual-providers settings section", async () => {
@@ -1654,6 +1655,82 @@ describe("Studio client", () => {
     }));
   });
 
+  it("restores the accepted duration range when its maximum is cleared", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<NewRunDialog open providers={providers}
+      initialValues={{ durationSeconds: 45, durationRange: { minSeconds: 30, maxSeconds: 180 } }}
+      onClose={() => undefined} onSubmit={onSubmit} />);
+
+    const maximum = screen.getByLabelText("最长时长");
+    await user.clear(maximum);
+    expect(maximum).toHaveValue(null);
+    await user.tab();
+    expect(maximum).toHaveValue(180);
+    expect(screen.getByLabelText("最短时长")).toHaveValue(30);
+    expect(screen.getByLabelText("建议时长")).toHaveValue("45");
+
+    await user.type(screen.getByLabelText("视频标题"), "时长输入回归");
+    await user.type(screen.getByLabelText("内容角度"), "清空不能改写已确认的时长");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      durationSeconds: 45,
+      durationRange: { minSeconds: 30, maxSeconds: 180 },
+    }));
+  });
+
+  it("restores the accepted minimum on clearing and cancels without creating a run", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const onClose = vi.fn();
+    render(<NewRunDialog open providers={providers}
+      initialValues={{ durationSeconds: 60, durationRange: { minSeconds: 45, maxSeconds: 180 } }}
+      onClose={onClose} onSubmit={onSubmit} />);
+
+    const minimum = screen.getByLabelText("最短时长");
+    await user.clear(minimum);
+    expect(minimum).toHaveValue(null);
+    await user.tab();
+    expect(minimum).toHaveValue(45);
+    expect(screen.getByLabelText("最长时长")).toHaveValue(180);
+    expect(screen.getByLabelText("建议时长")).toHaveValue("60");
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("keeps multi-digit duration drafts until blur and still validates numeric bounds", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<NewRunDialog open providers={providers} onClose={vi.fn()} onSubmit={onSubmit} />);
+
+    const maximum = screen.getByLabelText("最长时长");
+    await user.clear(maximum);
+    await user.type(maximum, "4");
+    expect(maximum).toHaveValue(4);
+    await user.type(maximum, "5");
+    expect(maximum).toHaveValue(45);
+    await user.tab();
+    expect(maximum).toHaveValue(45);
+
+    await user.clear(maximum);
+    for (const digit of ["1", "8", "0"]) await user.type(maximum, digit);
+    expect(maximum).toHaveValue(180);
+    await user.tab();
+    expect(maximum).toHaveValue(180);
+    await user.clear(maximum);
+    await user.type(maximum, "1.5");
+    await user.tab();
+    expect(maximum).toHaveValue(180);
+    await user.clear(maximum);
+    await user.type(maximum, "200");
+    expect(maximum).toHaveValue(200);
+    await user.tab();
+    expect(maximum).toHaveValue(180);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("keeps mandatory dual visual review enabled for every production run", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
@@ -1942,7 +2019,7 @@ describe("Studio client", () => {
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
     expect(screen.queryByText("1 次付费审片")).not.toBeInTheDocument();
     expect(screen.getByText(/视觉审片使用订阅额度/)).toBeInTheDocument();
-    expect(screen.getByText(/负责中途预检；最终成片由 DeepSeek 审片模型对同一组抽帧独立审查，不上传音轨/)).toBeInTheDocument();
+    expect(screen.getByText(/负责中途预检；最终成片由视觉审片模型对同一组抽帧独立审查，不上传音轨/)).toBeInTheDocument();
     expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
     const user = userEvent.setup();
     await user.type(screen.getByLabelText("视频标题"), "按次审片预算");
@@ -2180,7 +2257,8 @@ describe("Studio client", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("blocks every production run when dual visual review is unavailable", async () => {
+  it("lets the user explicitly generate a first cut when visual review is unavailable", async () => {
+    const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const providersWithoutVisualReview: StudioProvider[] = [...providers.filter((provider) => provider.capability !== "quality.review.visual"), {
       id: "seedance-video-v1",
@@ -2195,7 +2273,17 @@ describe("Studio client", () => {
 
     expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(screen.getByText(/缺少正式生产能力/)).toHaveTextContent("视觉审片");
+    const riskChoice = screen.getByRole("checkbox", { name: /先生成首版，稍后审片/ });
+    await user.click(riskChoice);
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    await user.type(screen.getByLabelText("视频标题"), "视觉审片缺席时的首版");
+    await user.type(screen.getByLabelText("内容角度"), "先生成可播放版本，再补充审片");
+    await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
+    await user.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      visualReviewPolicy: "allow_unreviewed_first_cut",
+      providers: expect.not.objectContaining({ visualReview: expect.anything() }),
+    }));
   });
 
   it("prefills an editable production brief from a selected opportunity", () => {
@@ -5016,7 +5104,7 @@ describe("Studio client", () => {
     expect(screen.queryByText("技术诊断")).not.toBeInTheDocument();
   });
 
-  it("shows the real visual-review failure reason and a retry action", () => {
+  it("shows the real visual-review failure reason and a retry action", async () => {
     const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
     render(<RunWorkbench
       run={{
@@ -5040,6 +5128,7 @@ describe("Studio client", () => {
       onRetryFailedNode={async () => undefined}
     />);
 
+    await userEvent.click(screen.getByText("查看技术详情"));
     expect(screen.getByText((_, element) => element?.textContent === "失败原因：上游视觉模型返回空结果")).toBeVisible();
     expect(screen.getByRole("button", { name: "重试视觉审片" })).toBeInTheDocument();
   });

@@ -269,6 +269,10 @@ describe("node production workspaces", () => {
           previousModelCallCount: 6,
           previousDiscussionModelCallCount: 3,
           previousStructuredRepairModelCallCount: 1,
+          unattributedStructuredRepairModelCallCount: 2,
+          unattributedProducerMs: 9_000,
+          unattributedAuditMs: 8_000,
+          unattributedValidationMs: 1_000,
           retryCount: 1,
           requestPayloadBytes: 2_048,
           promptBytes: 1_024,
@@ -307,6 +311,10 @@ describe("node production workspaces", () => {
     expect(screen.getByText("此前执行累计").parentElement).toHaveTextContent("6 次");
     expect(screen.getByText("此前创作讨论").parentElement).toHaveTextContent("3 次");
     expect(screen.getByText("此前结构修复").parentElement).toHaveTextContent("1 次");
+    expect(screen.getByText("结构修复（归属待核对）").parentElement).toHaveTextContent("2 次");
+    expect(screen.getByText("生成耗时（跨操作，未分摊）").parentElement).toHaveTextContent("9.0 秒");
+    expect(screen.getByText("复核耗时（跨操作，未分摊）").parentElement).toHaveTextContent("8.0 秒");
+    expect(screen.getByText("校验耗时（跨操作，未分摊）").parentElement).toHaveTextContent("1.0 秒");
     expect(screen.getByText("任务恢复重试").parentElement).toHaveTextContent("1 次");
     expect(screen.getByText("发送数据").parentElement).toHaveTextContent("2.0 KB");
     expect(screen.getByText("模型指令").parentElement).toHaveTextContent("1.0 KB");

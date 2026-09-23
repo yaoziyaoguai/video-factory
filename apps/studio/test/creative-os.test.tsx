@@ -898,7 +898,7 @@ describe("Creative OS", () => {
     expect(navigation.getByRole("link", { name: /创作台/ })).toHaveAttribute("href", "/");
     expect(navigation.getByRole("link", { name: /制作记录/ })).toHaveAttribute("href", "/projects");
     expect(navigation.getByRole("link", { name: /素材库/ })).toHaveAttribute("href", "/assets");
-    expect(navigation.getByRole("link", { name: /模板工坊/ })).toHaveAttribute("href", "/templates");
+    expect(navigation.getByRole("link", { name: /模板资料/ })).toHaveAttribute("href", "/templates");
     expect(navigation.getByRole("link", { name: /创作设置/ })).toHaveAttribute("href", "/resources");
     expect(navigation.getByRole("link", { name: /制作复盘/ })).toHaveAttribute("href", "/experiments");
   });

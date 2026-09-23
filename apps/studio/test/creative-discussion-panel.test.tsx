@@ -52,6 +52,33 @@ afterEach(() => {
 });
 
 describe("CreativeDiscussionPanel", () => {
+  it("shows an incomplete review without a score and binds explicit consent to that check", async () => {
+    const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<CreativeDiscussionPanel review={review({ checkResult: {
+      status: "incomplete", summary: "请求已结清，但没有有效复核结论", issues: [], checkIdentity: "b".repeat(64),
+    } })} busy={false} onCommand={onCommand} />);
+    expect(screen.getByText("独立复核未完成 · 无评分")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "接受复核未完成，采用本版" }));
+    expect(onCommand).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    await userEvent.click(screen.getByRole("button", { name: "接受复核未完成，采用本版" }));
+    expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "confirm", acknowledgeIncomplete: true, expectedCheckIdentity: "b".repeat(64), baseDraftSha256: sha });
+  });
+
+  it("only sends stock risk consent after showing the risk and receiving confirmation", async () => {
+    const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<CreativeDiscussionPanel review={review({ stage: "director", qualityAdvisories: [
+      { scenePositions: [1], reason: "候选仅得20分，视觉核验未完成" },
+    ] })} busy={false} onCommand={onCommand} />);
+    expect(screen.getByText(/候选仅得20分/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "接受素材风险，先制作首版" }));
+    expect(onCommand).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    await userEvent.click(screen.getByRole("button", { name: "接受素材风险，先制作首版" }));
+    expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "confirm", acceptQualityFallback: true, baseDraftSha256: sha });
+  });
   it("preserves unsaved manual edits across a new server draft and refuses to overwrite it", async () => {
     const onCommand = vi.fn(async () => undefined);
     const rendered = render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);

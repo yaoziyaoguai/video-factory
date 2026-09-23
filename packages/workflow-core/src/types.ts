@@ -133,6 +133,10 @@ export interface HumanInterventionDraft {
   reason: string;
   requiredAction: HumanDecisionAction;
   options?: HumanDecisionAction[];
+  /** 试片审查停点的事实分类；incomplete 只有在 provider 结果已知时才允许承担风险继续。 */
+  reviewStatus?: "incomplete" | "unknown_or_unsafe";
+  providerOutcomeKnown?: boolean;
+  evidenceId?: string;
   artifactIds?: string[];
   continuation?: {
     stage: "treatment" | "script" | "director";
@@ -160,7 +164,7 @@ export interface HumanIntervention extends HumanInterventionDraft {
 export interface HumanReviewDisposition {
   /** 指向被表态的那一条问题。由问题内容算出，不含版本号与数组下标，重跑审片后同一问题仍是同一个键。 */
   itemKey: string;
-  decision: "accept" | "reject";
+  decision: "accept" | "reject" | "accept_risk";
   reason?: string;
 }
 
@@ -171,6 +175,8 @@ export interface HumanDecisionDraft {
   note?: string;
   expectedRunRevision?: number;
   reviewEvidenceId?: string | null;
+  /** 明确接受未完成审查风险继续生成首版；不能把审查状态改成通过。 */
+  acceptIncomplete?: true;
   /** 逐条表态，成片终审用它取代"整片一句理由"的粗表态。未表态的问题不属于任何一侧，由调用方决定是否必须覆盖。 */
   reviewDispositions?: HumanReviewDisposition[];
 }
@@ -210,6 +216,8 @@ export interface NodeExecutionReceiptDraft {
   billing: BillingType;
   configurationSource?: ExecutionConfigurationSource;
   parameters?: Record<string, ExecutionParameterValue>;
+  /** 诊断字段超过 receipt 边界时只裁剪非核心参数；不能让观测失败改写业务结果。 */
+  parametersTruncated?: boolean;
   estimatedCostCny?: number;
   actualCostCny?: number;
   actualCostSource?: "provider_reported" | "configured_rate" | "manual_reconciled";

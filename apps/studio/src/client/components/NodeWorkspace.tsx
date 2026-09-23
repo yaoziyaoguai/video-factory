@@ -1228,6 +1228,10 @@ function executionTimingDetails(
   const previousDiscussionModelCallCount = nonNegativeIntegerParameter(parameters.previousDiscussionModelCallCount);
   const previousStructuredRepairModelCallCount = nonNegativeIntegerParameter(parameters.previousStructuredRepairModelCallCount);
   const previousUnknownModelExecutionCount = nonNegativeIntegerParameter(parameters.previousUnknownModelExecutionCount);
+  const unattributedRepairs = nonNegativeIntegerParameter(parameters.unattributedStructuredRepairModelCallCount);
+  const unattributedProducerMs = timingParameter(parameters.unattributedProducerMs);
+  const unattributedAuditMs = timingParameter(parameters.unattributedAuditMs);
+  const unattributedValidationMs = timingParameter(parameters.unattributedValidationMs);
   const producerMs = timingParameter(parameters.producerMs);
   const auditMs = timingParameter(parameters.auditMs);
   const discussionMs = timingParameter(parameters.discussionMs);
@@ -1253,6 +1257,10 @@ function executionTimingDetails(
     && structuredRepairModelCallCount === undefined
     && unknownModelExecutionCount === undefined
     && previousModelCallCount === undefined
+    && unattributedRepairs === undefined
+    && unattributedProducerMs === undefined
+    && unattributedAuditMs === undefined
+    && unattributedValidationMs === undefined
     && fallbackCandidateCount === 0) return undefined;
 
   const items = [
@@ -1266,6 +1274,9 @@ function executionTimingDetails(
     auditMs === undefined ? undefined : { label: "确认时独立复核累计", value: formatDuration(auditMs) },
     discussionMs === undefined ? undefined : { label: "创作讨论累计", value: formatDuration(discussionMs) },
     validationMs === undefined ? undefined : { label: "结构与合同校验", value: formatDuration(validationMs) },
+    unattributedProducerMs === undefined ? undefined : { label: "生成耗时（跨操作，未分摊）", value: formatDuration(unattributedProducerMs) },
+    unattributedAuditMs === undefined ? undefined : { label: "复核耗时（跨操作，未分摊）", value: formatDuration(unattributedAuditMs) },
+    unattributedValidationMs === undefined ? undefined : { label: "校验耗时（跨操作，未分摊）", value: formatDuration(unattributedValidationMs) },
     fallbackCandidateCount > 0 ? { label: "候选切换", value: `${fallbackCandidateCount} 次` } : undefined,
     modelCallCount === undefined ? undefined : { label: "本次已证实模型执行", value: `${modelCallCount} 次` },
     parameters.audioReviewStatus === undefined ? undefined : { label: "其中声音审片", value: audioModelCallCount === undefined ? "调用次数待核实" : `${audioModelCallCount} 次` },
@@ -1278,6 +1289,7 @@ function executionTimingDetails(
     auditModelCallCount === undefined ? undefined : { label: "确认时独立复核", value: `${auditModelCallCount} 次` },
     discussionModelCallCount === undefined ? undefined : { label: "创作讨论", value: `${discussionModelCallCount} 次` },
     structuredRepairModelCallCount === undefined ? undefined : { label: "其中结构修复", value: `${structuredRepairModelCallCount} 次` },
+    unattributedRepairs === undefined ? undefined : { label: "结构修复（归属待核对）", value: `${unattributedRepairs} 次` },
     unknownModelExecutionCount === undefined || unknownModelExecutionCount === 0 ? undefined : { label: "执行情况待确认", value: `${unknownModelExecutionCount} 次` },
     previousModelCallCount === undefined ? undefined : { label: "此前执行累计", value: `${previousModelCallCount} 次` },
     previousDiscussionModelCallCount === undefined

@@ -14,6 +14,7 @@ from .stock_assets import (
     StockSearchUnavailableError,
     prepare_routed_scene_assets,
     prepare_scene_assets,
+    reuse_source_scene_position,
     search_routed_scene_asset_candidates,
 )
 from .technical_review import review_video
@@ -142,6 +143,34 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
         if inventory_path_value is not None:
             inventory_path = require_existing_path(request["input"], "candidateInventoryPath")
             candidate_inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        accepted_quality_scenes: set[int] = set()
+        acceptance = candidate_ranking.get("deliveryAcceptance") if isinstance(candidate_ranking, dict) else None
+        if acceptance is not None:
+            if not isinstance(acceptance, dict) or acceptance.get("policyVersion") != "playable-first-v1":
+                raise WorkerProtocolError("Stock delivery acceptance contract is invalid")
+            if candidate_inventory is None:
+                raise WorkerProtocolError("Stock delivery acceptance requires the confirmed inventory")
+            for field, target in (("scriptSha256", script_path), ("directorPlanSha256", director_plan_path), ("inventorySha256", inventory_path)):
+                if acceptance.get(field) != hashlib.sha256(target.read_bytes()).hexdigest():
+                    raise WorkerProtocolError(f"Stock delivery acceptance does not match {field}")
+            positions = acceptance.get("scenePositions")
+            if not isinstance(positions, list) or any(type(position) is not int or position <= 0 for position in positions):
+                raise WorkerProtocolError("Stock delivery acceptance scene scope is invalid")
+            accepted_quality_scenes = set(positions)
+            eligible = {shot.get("scenePosition") for shot in director_plan.get("shots", [])
+                        if shot.get("authenticityPolicy") == "illustrative" and shot.get("deliveryType") in {"stock_image", "stock_video"}}
+            routes = {shot.get("scenePosition"): shot for shot in director_plan.get("shots", [])}
+            for shot in routes.values():
+                if shot.get("authenticityPolicy") != "evidence":
+                    continue
+                source = reuse_source_scene_position(shot)
+                visited = set()
+                while source is not None and source not in visited:
+                    eligible.discard(source)
+                    visited.add(source)
+                    source = reuse_source_scene_position(routes[source]) if source in routes else None
+            if not accepted_quality_scenes.issubset(eligible):
+                raise WorkerProtocolError("Stock delivery acceptance cannot override evidence or non-stock routes")
         plan_path = prepare_routed_scene_assets(
             job_id=1,
             scenes=scenes,
@@ -151,6 +180,7 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
             limit=int(parameters.get("limit", 6)),
             candidate_ranking=candidate_ranking,
             candidate_inventory=candidate_inventory,
+            accepted_quality_scenes=accepted_quality_scenes,
         )
     else:
         plan_path = prepare_scene_assets(

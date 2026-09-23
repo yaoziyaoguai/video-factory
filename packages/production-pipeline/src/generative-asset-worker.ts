@@ -3478,8 +3478,17 @@ function completeNegativeSourceReview(options: {
 
 function incompleteSourceReview(item: PaidAssetOperationItem, operationId: string): SourceReviewOutcome {
   if (!item.sha256) throw new Error("Incomplete pilot review requires a materialized asset identity.");
+  const evidenceId = createHash("sha256").update(JSON.stringify({
+    version: "video-factory/source-pilot-incomplete-v1",
+    kind: "incomplete",
+    mediaSha256: item.sha256,
+    inputFingerprint: item.inputFingerprint,
+    operationId,
+    scenePosition: item.scenePosition,
+  })).digest("hex");
   return {
     kind: "incomplete",
+    evidenceId,
     mediaSha256: item.sha256,
     inputFingerprint: item.inputFingerprint,
     operationId,

@@ -241,7 +241,7 @@ export type {
   WorkerArtifactDescriptor,
   WorkerResponse,
 } from "./python-worker-client.js";
-export { advanceSceneCandidateRanking, canRetryRejectedReviewNode, effectiveProductionBrief, PaidOperationManualReconciliationError, planningFailureForCreators, ProductionPipeline, productionWorkflowVersion, summarizeReworkImpact, withBoundaryGate } from "./production-pipeline.js";
+export { advanceSceneCandidateRanking, canRetryRejectedReviewNode, effectiveProductionBrief, HumanDecisionConflictError, PaidOperationManualReconciliationError, planningFailureForCreators, ProductionPipeline, productionWorkflowVersion, summarizeReworkImpact, withBoundaryGate } from "./production-pipeline.js";
 export {
   PRODUCTION_AUTHORIZATION_VERSION,
   canonicalProductionAssetIntentDigest,

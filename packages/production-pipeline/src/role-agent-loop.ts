@@ -13,6 +13,7 @@ import type {
   RoleAuditPlanningDisposition,
 } from "./codex-chat.js";
 import { CodexBridgeError } from "./codex-chat.js";
+import { roleAgentCheckpointRequestPhases } from "./role-agent-checkpoint.js";
 
 const MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN = 2;
 export const ROLE_AUDIT_CRITERIA_MAX_ITEMS = 16;
@@ -160,6 +161,17 @@ export class RoleAgentLoopError extends Error {
   }
 }
 
+/** 宿主在物理请求提交前停止执行；不是模型运行失败，也不消耗模型调用次数。 */
+export class RoleAgentHostStop extends Error {
+  constructor(readonly reason: "paused" | "deadline" | "payload_limit", message: string) {
+    super(message);
+    this.name = "RoleAgentHostStop";
+  }
+}
+
+/** 已结清的修复没有改变候选；区别于存储故障、身份冲突及未知请求。 */
+export class RoleAgentNoProgressError extends Error {}
+
 export class RoleAgentPlanningHaltError extends RoleAgentLoopError {
   constructor(
     message: string,
@@ -222,8 +234,10 @@ interface PersistedLoopState {
   phaseDurationsMs: Record<"produce" | "audit", number>;
   validationMs: number;
   structuredRepairModelCallCount: number;
+  structuredRepairRequestIds: string[];
   retriedRequestIds: string[];
   requestOwners: Record<string, string>;
+  requestPhases: Record<string, { phase: "produce" | "audit"; iteration: number }>;
   failure?: NonNullable<AgentLoopTrace["failure"]>;
   /** C5：已确证未受理（409）触发的会话重建计数；持久化、有界，防止无界重建循环。 */
   sessionRebuilds: Record<"produce" | "audit", number>;
@@ -349,7 +363,6 @@ export async function runRoleAgentLoop<TOutput>(
       const operationKey = loopOperationKey(state, iteration, "produce");
       let structuredOutputAttempts = 0;
       while (true) {
-        if (structuredOutputAttempts > 0) state.structuredRepairModelCallCount += 1;
         try {
           candidateExecution = (await executeOperation(
             options,
@@ -411,7 +424,7 @@ export async function runRoleAgentLoop<TOutput>(
     if (iteration > 1 && candidateFingerprint === previousCandidate) {
       state.status = "exhausted";
       throw await failedLoopError(
-        new Error(`${options.role}按修改建议重做后内容没有变化。`),
+        new RoleAgentNoProgressError(`${options.role}按修改建议重做后内容没有变化。`),
         options,
         state,
         iterations,
@@ -434,7 +447,6 @@ export async function runRoleAgentLoop<TOutput>(
       ? state.auditValidationFailure
       : undefined;
     while (true) {
-      if (structuredAuditAttempts > 0) state.structuredRepairModelCallCount += 1;
       let auditContractDigest: string;
       try {
         const executedAudit = await executeOperation(
@@ -668,12 +680,6 @@ async function failedLoopError<TOutput>(
     : undefined;
   if (unacceptedPhase) {
     state.unacceptedPhaseAttempts[unacceptedPhase] += 1;
-    const wasStructuredRepair = unacceptedPhase === "produce"
-      ? state.validationFailure !== undefined
-      : state.auditValidationFailure !== undefined;
-    if (wasStructuredRepair && state.structuredRepairModelCallCount > 0) {
-      state.structuredRepairModelCallCount -= 1;
-    }
   }
   const { producerModelCallCount, auditModelCallCount } = actualPhaseModelCallCounts(state);
   const baseMessage = error instanceof CodexBridgeError
@@ -694,6 +700,8 @@ async function failedLoopError<TOutput>(
       // 说"请查看失败原因"，而那个原因在任何地方都不存在。
       summary: baseMessage,
     };
+  } else if (error instanceof RoleAgentHostStop) {
+    state.failure = { stage: "not_accepted", summary: error.message };
   } else {
     delete state.failure;
   }
@@ -751,8 +759,10 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
     phaseDurationsMs: { produce: 0, audit: 0 },
     validationMs: 0,
     structuredRepairModelCallCount: 0,
+    structuredRepairRequestIds: [],
     retriedRequestIds: [],
     requestOwners: {},
+    requestPhases: {},
     sessionRebuilds: { produce: 0, audit: 0 },
   });
   if (!options.checkpoint) return fresh();
@@ -904,6 +914,9 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
       && Number(candidate.structuredRepairModelCallCount) >= 0
       ? Number(candidate.structuredRepairModelCallCount)
       : 0,
+    structuredRepairRequestIds: Array.isArray(candidate.structuredRepairRequestIds)
+      ? candidate.structuredRepairRequestIds.filter((id): id is string => typeof id === "string" && candidate.attemptedRequestIds!.includes(id))
+      : [],
     retriedRequestIds: Array.isArray(candidate.retriedRequestIds)
       && candidate.retriedRequestIds.every((requestId) => typeof requestId === "string")
       ? [...candidate.retriedRequestIds]
@@ -913,6 +926,10 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
         ([requestId, owner]) => typeof requestId === "string" && typeof owner === "string" && owner.length > 0,
       )) as Record<string, string>
       : {},
+    // 在更改合同/循环key前固化历史物理请求映射，迁移后不再依赖可变身份反推。
+    requestPhases: Object.fromEntries(roleAgentCheckpointRequestPhases(
+      loaded as Record<string, unknown>, new Set(candidate.attemptedRequestIds!),
+    ).map(({ requestId, phase, iteration }) => [requestId, { phase, iteration }])),
     // C5：旧 checkpoint 没有该字段时按 0 恢复——不重置正在进行的循环，只给新预算字段初值。
     sessionRebuilds: isPhaseAttempts(candidate.sessionRebuilds)
       ? structuredClone(candidate.sessionRebuilds)
@@ -943,6 +960,8 @@ async function persistCheckpoint<TOutput>(
   options: RoleAgentLoopOptions<TOutput>,
   state: PersistedLoopState,
 ): Promise<void> {
+  // 原物理请求结清后才迁移位置身份；否则下次读取已完成结果会被误认成旧输入并重跑。
+  if (options.checkpoint && !state.pendingOperation) state.key = options.checkpoint.key;
   if (options.checkpoint) await options.checkpoint.save(state);
 }
 
@@ -1031,7 +1050,12 @@ async function executeOperation<TOutput>(
     // 否则一次纯查询会被误计为新的物理模型调用。
     const requestId = pending?.requestId
       ?? operationRequestId(scope, state.contractDigest, state.cycle, iteration, phase, generation);
-    const session: CodexTaskSession = state.sessions[phase] ?? {
+    const originalSession = pending?.envelope.session;
+    if (originalSession !== undefined && !isSessionState({ [phase]: originalSession })) {
+      throw new Error("Pending agent operation has an invalid original session.");
+    }
+    // 查询旧任务时请求与会话必须共同沿用原身份，不能用升级后的合同派生值拒收迟到结果。
+    const session: CodexTaskSession = (originalSession as CodexTaskSession | undefined) ?? state.sessions[phase] ?? {
       key: `agent-${valueHash({ scope, contractDigest: state.contractDigest, cycle: state.cycle, phase })}`,
     };
     const attemptLimit = options.maxPhaseAttempts?.[phase];
@@ -1049,6 +1073,11 @@ async function executeOperation<TOutput>(
         }
       }
       delete state.failedOperationRequestIds[operationKey];
+      if (pending && operationContractDigest !== state.contractDigest) {
+        delete state.sessions[phase];
+        const { session: _originalSession, ...execution } = result;
+        return { execution, contractDigest: operationContractDigest };
+      }
       return { execution: result, contractDigest: operationContractDigest };
     } catch (error) {
       if (error instanceof CodexBridgeError
@@ -1147,6 +1176,7 @@ function untrackUnacceptedOperation(
   phase: "produce" | "audit",
 ): void {
   state.attemptedRequestIds = state.attemptedRequestIds.filter((candidate) => candidate !== requestId);
+  delete state.requestPhases[requestId];
   state.phaseAttempts[phase] = Math.max(0, state.phaseAttempts[phase] - 1);
 }
 
@@ -1168,9 +1198,16 @@ async function executeTrackedOperation<TOutput>(
   isRetry: boolean,
   execute: (operation: RoleAgentOperation) => Promise<CodexTaskExecution<unknown>>,
 ): Promise<CodexTaskExecution<unknown>> {
+  let addedStructuredRepair = false;
   if (!state.attemptedRequestIds.includes(requestId)) {
     state.attemptedRequestIds.push(requestId);
+    state.requestPhases[requestId] = { phase, iteration };
     state.phaseAttempts[phase] += 1;
+    addedStructuredRepair = Boolean(phase === "produce" ? state.validationFailure : state.auditValidationFailure);
+    if (addedStructuredRepair) {
+      state.structuredRepairModelCallCount += 1;
+      state.structuredRepairRequestIds.push(requestId);
+    }
     if (isRetry) state.retriedRequestIds.push(requestId);
     await persistCheckpoint(options, state);
   }
@@ -1204,6 +1241,20 @@ async function executeTrackedOperation<TOutput>(
       },
       ...(pending ? { preparedOperation: pending } : {}),
     });
+  } catch (error) {
+    const unaccepted = error instanceof CodexBridgeError
+      && ["not_accepted", "rejected", "conflict"].includes(error.stage)
+      && error.failureDetails?.accepted !== true;
+    if (error instanceof RoleAgentHostStop && !state.pendingOperation) {
+      untrackUnacceptedOperation(state, requestId, phase);
+      state.retriedRequestIds = state.retriedRequestIds.filter(id => id !== requestId);
+    }
+    if ((unaccepted || error instanceof RoleAgentHostStop && !state.pendingOperation)
+      && state.structuredRepairRequestIds.includes(requestId)) {
+      state.structuredRepairRequestIds = state.structuredRepairRequestIds.filter(id => id !== requestId);
+      state.structuredRepairModelCallCount = Math.max(0, state.structuredRepairModelCallCount - 1);
+    }
+    throw error;
   } finally {
     state.phaseDurationsMs[phase] += elapsedMs(startedAt, nowMs(options));
     await persistCheckpoint(options, state);
