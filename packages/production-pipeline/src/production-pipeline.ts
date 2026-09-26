@@ -45,7 +45,7 @@ import {
 import { REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION, fallbackShotGrammar, validateShotGrammar, type ReferenceGrammarAgent, type ReferenceGrammarExecution, type ShotGrammar } from "./reference-grammar.js";
 import { CodexBridgeError, codexBridgeErrorFromCause, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, type AgentLoopTrace, type CodexTaskExecution, type CodexTaskKind, type CodexTaskTrace, type ModelCandidateAttempt, type RoleAudit } from "./codex-chat.js";
 import { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey, roleAgentCheckpointRequestPhases as planningCheckpointRequestPhases } from "./role-agent-checkpoint.js";
-import { RoleAgentLoopError } from "./role-agent-loop.js";
+import { RoleAgentLoopError, isCompletedRoleAgentFailure } from "./role-agent-loop.js";
 import {
   assetReuseSourceScenePosition,
   estimateVideoGenerationCostCny,
@@ -10559,7 +10559,7 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
           });
           // role loop 会给已结束的 Provider 错误补上创作者文案并保留 cause；
           // 与规划/持久化共用原异常链的终态提取，不能只看最外层 Error 类型。
-          if (codexBridgeErrorFromCause(error)?.stage === "completed_failure") {
+          if (isCompletedRoleAgentFailure(error) || codexBridgeErrorFromCause(error)?.stage === "not_accepted") {
             return incompleteSourceReviewResult(failed, attempt, parentArtifactIds, provider.id, error.agentLoop.failure);
           }
           return { ...failed, error: `源素材视觉预检没有完成：${failed.error}` };

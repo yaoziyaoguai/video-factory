@@ -116,6 +116,57 @@ const advisoryAudit = {
 };
 
 describe("CodexVisualReviewAgent", () => {
+  for (const correction of [
+    { misclassifiedIssueIds: ["foreign-issue"] },
+    { misclassifiedIssueIds: [], extra: "cannot hide a claim in an empty correction" },
+    { misclassifiedIssueIds: ["duplicate", "duplicate"] },
+  ]) {
+    it(`rejects unsupported correction ${JSON.stringify(correction)} once and preserves the report on recovery`, async () => {
+      let stored: unknown;
+      const calls: CodexTaskKind[] = [];
+      const checkpoint = { key: "invalid-visual-correction", load: async () => stored,
+        save: async (value: unknown) => { stored = structuredClone(value); } };
+      const createAgent = () => new CodexVisualReviewAgent({
+        media: { prepare: async () => media },
+        client: { runTask: async () => report, runTaskDetailed: async kind => {
+          calls.push(kind);
+          return { output: kind === "visual-review" ? report : {
+            ...passingAudit, planningDisposition: null, hostReadinessReview: correction,
+          } };
+        } },
+      });
+      for (let restart = 0; restart < 2; restart++) {
+        await assert.rejects(() => createAgent().reviewDetailed({ runRoot: "/run", reviewStage: "source_assets",
+          agentLoopCheckpoint: checkpoint }), (error: unknown) => {
+          assert.ok(error instanceof RoleAgentLoopError);
+          assert.equal(error.agentLoop.failure?.stage, "completed_failure");
+          assert.equal(error.agentLoop.iterations.length, 0, "拒收的审计不冒充通过");
+          assert.deepEqual(error.agentLoop.pendingCandidate?.candidate, report);
+          return true;
+        });
+        assert.deepEqual(calls, ["visual-review", "role-audit"], "无效意见和普通重入都不能追加模型调用");
+      }
+    });
+  }
+
+  it("accepts an empty host-readiness correction as no correction without changing audit scores", async () => {
+    const calls: CodexTaskKind[] = [];
+    const agent = new CodexVisualReviewAgent({
+      media: { prepare: async () => media },
+      client: { runTask: async () => report, runTaskDetailed: async kind => {
+        calls.push(kind);
+        return { output: kind === "visual-review" ? report : {
+          ...passingAudit, planningDisposition: null, hostReadinessReview: { misclassifiedIssueIds: [] },
+        } };
+      } },
+    });
+    const result = await agent.reviewDetailed({ runRoot: "/run", reviewStage: "source_assets" });
+    assert.deepEqual(calls, ["visual-review", "role-audit"]);
+    assert.equal(result.agentLoop?.iterations[0]?.audit.score, 92);
+    assert.equal(result.agentLoop?.iterations[0]?.audit.hostReadinessReview, null);
+    assert.deepEqual(result.output, report);
+  });
+
   for (const reviewStage of ["source_assets", "rendered_video"] as const) {
     it(`returns the first ${reviewStage} report and audit without automatic report revision`, async () => {
       let stored: unknown;

@@ -163,6 +163,14 @@ export class RoleAgentLoopError extends Error {
   }
 }
 
+/** 仅在已完整取回审计响应、宿主校验拒收时使用；不是在途失败或作品质量结论。 */
+export class RoleAuditOutputError extends Error {}
+
+export function isCompletedRoleAgentFailure(error: RoleAgentLoopError): boolean {
+  return codexBridgeErrorFromCause(error)?.stage === "completed_failure"
+    || error.sourceError instanceof RoleAuditOutputError;
+}
+
 /** 宿主在物理请求提交前停止执行；不是模型运行失败，也不消耗模型调用次数。 */
 export class RoleAgentHostStop extends Error {
   constructor(readonly reason: "paused" | "deadline" | "payload_limit", message: string) {
@@ -330,6 +338,13 @@ export async function runRoleAgentLoop<TOutput>(
     audit: entry.audit,
     ...(entry.hostReadiness ? { hostReadiness: structuredClone(entry.hostReadiness) } : {}),
   }));
+  if (options.stopAfterAudit && state.auditValidationFailure && !state.pendingOperation && state.pendingCandidate) {
+    // 旧版已收到但拒收的审计，普通恢复只交还未复核稿；不能每次恢复都再花两次审计。
+    // 主动再审会使用新的操作/checkpoint 身份，因此不借本分支重放旧意见。
+    throw await failedLoopError(new RoleAuditOutputError(
+      `复核已返回，但没有可用的结论；当前内容保留，等待你决定。\n诊断：${state.auditValidationFailure.validationError}`,
+    ), options, state, iterations, state.pendingCandidate.candidateTrace, "audit");
+  }
   if (persistedSourceGap) {
     const terminalStatus = terminalStatusForSourceGap(persistedFinal!.audit);
     state.status = terminalStatus;
@@ -527,12 +542,12 @@ export async function runRoleAgentLoop<TOutput>(
         state.auditValidationFailure = auditValidationFailure;
         clearPendingOperation(state, auditOperationKey);
         await persistCheckpoint(options, state);
-        if (structuredAuditAttempts >= MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN) {
+        if (options.stopAfterAudit || structuredAuditAttempts >= MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN) {
           throw await failedLoopError(
-            new Error(
-              `${options.role}的独立审计连续两次返回了无法使用的结果；本轮质量审计尚未消耗，`
+            new RoleAuditOutputError(
+              `${options.role}的独立审计已返回，但没有可用的结论；当前内容保留，等待你决定。`
               // 同上：诊断进「诊断：」段，界面剥掉，操作员保留。
-              + `可从已保存进度继续。\n诊断：${publicValidationError(error)}`,
+              + `\n诊断：${publicValidationError(error)}`,
             ),
             options,
             state,
@@ -722,6 +737,8 @@ async function failedLoopError<TOutput>(
       // 说"请查看失败原因"，而那个原因在任何地方都不存在。
       summary: baseMessage,
     };
+  } else if (error instanceof RoleAuditOutputError) {
+    state.failure = { stage: "completed_failure", summary: error.message };
   } else if (error instanceof RoleAgentHostStop) {
     state.failure = { stage: "not_accepted", summary: error.message };
   } else {
@@ -1659,9 +1676,6 @@ function validateHostReadinessReview(
   // 旧 checkpoint 和绕过 Broker 的历史测试可能没有该字段；规范化为 null。
   // 新物理请求由 Broker JSON Schema 强制显式输出该字段。
   if (value === undefined || value === null) return null;
-  if (!options.planningRole || !options.hostReadiness) {
-    throw new Error("Role audit hostReadinessReview is only valid for a planning role with host readiness evidence.");
-  }
   const review = record(value, "Role audit hostReadinessReview");
   if (Object.keys(review).some((key) => key !== "misclassifiedIssueIds")) {
     throw new Error("Role audit hostReadinessReview contains an unknown field.");
@@ -1670,6 +1684,12 @@ function validateHostReadinessReview(
     .map((entry, index) => text(entry, `Role audit hostReadinessReview.misclassifiedIssueIds[${index}]`));
   if (new Set(ids).size !== ids.length) {
     throw new Error("Role audit hostReadinessReview.misclassifiedIssueIds must be unique.");
+  }
+  if (!options.planningRole || !options.hostReadiness) {
+    // 空纠正列表没有事实主张，与 null 等价；仍先校验形状，不能借空列表夹带未知字段。
+    // 非规划角色只是不提出宿主纠正，不应为这种空值表示差异重发审计或判制作失败。
+    if (ids.length === 0) return null;
+    throw new Error("Role audit hostReadinessReview is only valid for a planning role with host readiness evidence.");
   }
   const available = new Set(options.hostReadiness.issues.map((issue) => issue.id));
   const unknown = ids.find((id) => !available.has(id));

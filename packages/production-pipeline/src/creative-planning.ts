@@ -8,7 +8,7 @@ import { validateAssetSemanticRanking, type AssetCandidateReport, type AssetSema
 import { applyCreativeReviewEditDraft } from "./creative-review.js";
 import { planningThreadId } from "./creative-planning-store.js";
 import type { DurationRange } from "./executable-timeline.js";
-import { RoleAgentLoopError, RoleAgentPlanningHaltError } from "./role-agent-loop.js";
+import { RoleAgentLoopError, RoleAgentPlanningHaltError, isCompletedRoleAgentFailure } from "./role-agent-loop.js";
 import { CodexBridgeError, codexBridgeErrorFromCause, type AgentLoopTrace, type RoleAudit, type RoleAuditPlanningDisposition } from "./codex-chat.js";
 import { ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
 import { isModelProviderFailure, isTransientRoleAuditProviderFailure } from "./model-fallback.js";
@@ -746,7 +746,7 @@ async function auditPublishedStageDraft(
       ? error.failures.length > 0 && error.failures.every((failure) =>
         isSettledAuditProviderFailure(failure.error, options.auditOperationId))
       : error instanceof RoleAgentLoopError
-        && codexBridgeErrorFromCause(error)?.stage === "completed_failure";
+        && isCompletedRoleAgentFailure(error);
     if (settledCheckFailure) {
       return { creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
         versionId: current.currentDraft.versionId,

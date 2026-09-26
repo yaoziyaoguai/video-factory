@@ -1237,7 +1237,7 @@ describe("ProductionPipeline", () => {
     assert.ok(reuse.every(item => /^[a-f0-9]{64}$/.test(item.sha256)));
   });
 
-  for (const failureStage of ["completed_failure", "uncertain", "rejected", "conflict"] as const) {
+  for (const failureStage of ["completed_failure", "not_accepted", "host_invalid", "uncertain", "rejected", "conflict"] as const) {
   it(`preserves a real source review draft and only offers user continuation for a settled audit (${failureStage})`, async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-source-audit-terminal-"));
     const worker = new FakeWorker();
@@ -1257,8 +1257,15 @@ describe("ProductionPipeline", () => {
         runTask: async () => { throw new Error("Detailed calls required"); },
         runTaskDetailed: async (kind) => {
           calls.push(kind);
+          if (kind === "role-audit" && failureStage === "host_invalid") return { output: {
+            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+            score: 90, verdict: "pass", summary: "不能采用这条无依据的宿主纠正", issues: [], repairInstructions: [],
+            assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"]
+              .map(dimension => ({ dimension, score: 90, evidence: "夹具证据" })) }],
+            planningDisposition: null, hostReadinessReview: { misclassifiedIssueIds: ["foreign-issue"] },
+          } };
           if (kind === "role-audit") throw new pipeline.CodexBridgeError(
-            "The model could not complete this step.", false, failureStage, 422, undefined,
+            "The model could not complete this step.", false, failureStage === "host_invalid" ? "completed_failure" : failureStage, 422, undefined,
             { category: "invalid_output", reasonCode: "task_semantics", taskKind: "role-audit",
               providerId: "fixture-provider", modelId: "fixture-review" },
           );
@@ -1274,7 +1281,7 @@ describe("ProductionPipeline", () => {
     const subject = new pipeline.ProductionPipeline(options);
     const run = await subject.start({ ...brief, providers: { ...brief.providers, visualReview: reviewer.id } });
     const sourceReview = run.nodeRuns.find(node => node.nodeId === "asset-source-review")!;
-    if (failureStage !== "completed_failure") {
+    if (!["completed_failure", "not_accepted", "host_invalid"].includes(failureStage)) {
       assert.equal(run.status, "failed");
       assert.equal(sourceReview.intervention, undefined, "未知请求与身份冲突不能伪装成可略过的意见");
       assert.deepEqual(calls, ["visual-review", "role-audit"]);
@@ -1290,7 +1297,7 @@ describe("ProductionPipeline", () => {
     assert.deepEqual(worker.calls.map(call => call.capability), ["script.draft", "asset.prepare"]);
     const traceArtifact = run.artifacts.find(artifact => artifact.kind === "agent_loop_trace")!;
     const trace = JSON.parse(await readFile(traceArtifact.uri!, "utf8")) as pipeline.AgentLoopTrace;
-    assert.equal(trace.failure?.stage, "completed_failure");
+    assert.equal(trace.failure?.stage, failureStage === "not_accepted" ? "not_accepted" : "completed_failure");
     assert.deepEqual(trace.pendingCandidate?.candidate, report);
     assert.equal(trace.iterations.length, 0, "没有虚构通过的审计轮次");
     const restarted = new pipeline.ProductionPipeline(options);
