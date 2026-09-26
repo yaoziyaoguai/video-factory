@@ -13,6 +13,7 @@ from urllib.error import HTTPError
 
 import video_factory.voiceover as voiceover_module
 from video_factory.voiceover import VoiceDoesNotFitError, synthesize_minimax_audio, synthesize_voiceover_plan
+from video_factory.worker import minimax_failure_diagnostics
 
 
 class _Response:
@@ -30,6 +31,42 @@ class _Response:
 
 
 class MiniMaxVoiceoverTest(unittest.TestCase):
+    def test_punctuation_only_narration_is_real_local_silence_without_paid_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": [
+                {"position": 1, "narration": "……", "duration": 0.3},
+                {"position": 2, "narration": " \n\t", "duration": 0.2},
+            ]}), encoding="utf-8")
+            output_dir = root / "nodes" / "voice" / "attempt-1"
+            with patch("video_factory.voiceover.urlopen", side_effect=AssertionError("Silence must not call TTS")), patch.dict(
+                "os.environ", {"MINIMAX_API_KEY": "test-key"}, clear=False
+            ):
+                plan_path = synthesize_voiceover_plan(
+                    script_path=script_path,
+                    output_dir=output_dir,
+                    provider="minimax",
+                    operation_id="local-silence",
+                    estimated_cost_cny=0.5,
+                )
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            self.assertEqual([scene["speech_duration"] for scene in plan["scenes"]], [0, 0])
+            for scene in plan["scenes"]:
+                self.assertAlmostEqual(
+                    voiceover_module.probe_audio_duration(Path(scene["audio_path"])), scene["duration"], delta=0.03
+                )
+            self.assertAlmostEqual(voiceover_module.probe_audio_duration(Path(plan["track_path"])), 0.5, delta=0.08)
+            decoded = subprocess.run([
+                "ffmpeg", "-v", "error", "-i", plan["track_path"], "-f", "s16le", "-",
+            ], check=True, capture_output=True)
+            self.assertTrue(decoded.stdout)
+            self.assertFalse(any(decoded.stdout))
+            diagnostics = minimax_failure_diagnostics(output_dir, "local-silence")
+            self.assertEqual(diagnostics["meteredAttemptCount"], 0)
+            self.assertEqual(diagnostics["actualCostCny"], 0)
+            self.assertTrue(diagnostics["providerOutcomeKnown"])
+
     def test_natural_voice_reports_a_timing_conflict_without_speeding_or_truncating_raw_audio(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -408,6 +445,72 @@ class MiniMaxVoiceoverTest(unittest.TestCase):
             self.assertIn("attempt-1", item["localPath"])
             self.assertEqual(item["stateHistory"], ["prepared", "unknown", "materialized"])
             self.assertTrue(plan_path.is_file())
+
+    def test_legacy_paid_pause_recovers_with_only_the_remaining_voice_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": [
+                {"position": 1, "narration": "杯中的银河。", "duration": 2},
+                {"position": 2, "narration": "……", "duration": 4},
+                {"position": 3, "narration": "留住这一刻。", "duration": 2},
+            ]}), encoding="utf-8")
+            first_dir = root / "nodes" / "voice" / "attempt-1"
+            operation_id = "legacy-paid-pause"
+            ledger_path = first_dir.parent / ".voice-operations" / (
+                hashlib.sha256(operation_id.encode("utf-8")).hexdigest() + ".json"
+            )
+            requested_texts = []
+            fail_normalization = True
+
+            def urlopen(request, timeout):
+                requested_texts.append(json.loads(request.data)["text"].strip())
+                return _Response({
+                    "data": {"audio": b"ID3-paid-voice".hex(), "status": 2},
+                    "base_resp": {"status_code": 0, "status_msg": "success"},
+                })
+
+            def ffmpeg(command, **_kwargs):
+                if fail_normalization:
+                    raise subprocess.CalledProcessError(1, command, stderr="normalization failed")
+                if "anullsrc=r=44100:cl=mono" in command:
+                    self.assertNotIn("-af", command)
+                Path(command[-1]).write_bytes(b"normalized-audio")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch("video_factory.voiceover.require_ffmpeg"), patch(
+                "video_factory.voiceover.urlopen", side_effect=urlopen
+            ), patch("video_factory.voiceover.probe_audio_duration", return_value=1.0), patch(
+                "video_factory.voiceover.subprocess.run", side_effect=ffmpeg
+            ), patch.dict("os.environ", {"MINIMAX_API_KEY": "test-key"}, clear=False):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    synthesize_voiceover_plan(script_path, first_dir, "minimax",
+                                              operation_id=operation_id, estimated_cost_cny=0.6)
+                # 旧版已付费合成纯标点后归一化失败的持久化现场；身份沿用正式入口生成的 ledger。
+                ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+                old_pause = first_dir / "scene_02_raw.mp3"
+                old_pause.write_bytes(b"ID3-legacy-tiny-pause")
+                ledger["items"][1].update({
+                    "state": "materialized", "stateHistory": ["prepared", "unknown", "materialized"],
+                    "localPath": str(old_pause), "sizeBytes": old_pause.stat().st_size,
+                    "sha256": hashlib.sha256(old_pause.read_bytes()).hexdigest(),
+                })
+                ledger["actualCostCny"] = 0.4
+                ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+                original_items = ledger["items"][:2]
+                fail_normalization = False
+                recovered_dir = first_dir.parent / "attempt-2"
+                plan_path = synthesize_voiceover_plan(script_path, recovered_dir, "minimax",
+                                                     operation_id=operation_id, estimated_cost_cny=0.6)
+
+            self.assertEqual(requested_texts, ["杯中的银河。", "留住这一刻。"])
+            recovered = json.loads(ledger_path.read_text(encoding="utf-8"))
+            self.assertEqual(recovered["items"][:2], original_items)
+            self.assertTrue(recovered["completed"])
+            self.assertEqual(recovered["actualCostCny"], 0.6)
+            self.assertEqual(old_pause.read_bytes(), b"ID3-legacy-tiny-pause")
+            self.assertEqual(json.loads(plan_path.read_text())["scenes"][1]["speech_duration"], 0)
+            self.assertEqual(minimax_failure_diagnostics(recovered_dir, operation_id)["meteredAttemptCount"], 3)
 
     def test_reuses_materialized_minimax_audio_after_an_explicit_timeline_change(self):
         with tempfile.TemporaryDirectory() as tmp:

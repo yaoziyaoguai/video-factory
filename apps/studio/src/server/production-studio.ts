@@ -4,7 +4,7 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { lock } from "proper-lockfile";
 import { NodeVersionConflictError } from "@video-factory/workflow-core";
-import type { ArtifactDraft, HumanDecisionDraft, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
+import type { ArtifactDraft, HumanDecisionDraft, NodeExecutionReceipt, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
 import type { ProductionTemplateSnapshot } from "@video-factory/template-core";
 import {
   canRetryRejectedReviewNode,
@@ -105,6 +105,7 @@ const PLANNING_DELIVERY_KINDS = new Set([
 ]);
 
 export interface StudioPipelinePort {
+  readPaidExecutionReceipts?: (runId: string) => Promise<NodeExecutionReceipt[]>;
   readTextExecutionUsage?: (runId: string) => Promise<Array<{ nodeId: string; providerId: string; modelId: string; modelCallCount: number }>>;
   list(): Promise<WorkflowRun<ProductionBrief>[]>;
   remove(runId: string): Promise<void>;

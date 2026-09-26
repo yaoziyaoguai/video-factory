@@ -1515,127 +1515,139 @@ describe("WorkflowRunner", () => {
     assert.equal(retry.status, "awaiting_spend_approval");
   });
 
-  it("reuses the persisted external operation id when retrying an interrupted node", async () => {
-    const observed: Array<string | undefined> = [];
-    const checkpoints: WorkflowRun[] = [];
-    const registry = new ProviderRegistry();
-    registry.register({
-      id: "idempotent-provider",
-      label: "Idempotent provider",
-      modelId: "voice-v1",
-      capability: "voice.synthesize",
-      transport: "http_api",
-      billing: "metered",
-      approvalPolicy: "automatic",
-      estimatedCostCny: 0.1,
-      maxCostCny: 0.1,
-      maxAttempts: 1,
-      run: (_input, context) => {
-        observed.push(context.operationRequestId);
-        return { audio: "voice.mp3" };
-      },
-    });
-    const definition: WorkflowDefinition = {
-      id: "retry-interrupted-node",
-      name: "Retry interrupted node",
-      version: "1.0.0",
-      nodes: [{
-        id: "voice",
-        label: "Voice",
-        capability: "voice.synthesize",
-        providerId: "idempotent-provider",
-        mode: "automatic",
-        execute: async (input, context) => {
-          const provider = context.resolveProvider({ capability: "voice.synthesize", providerId: "idempotent-provider" });
-          const output = await provider.run(input, context);
-          assert.ok(context.operationRequestId);
-          return {
-            output,
-            receipt: {
-              providerId: "idempotent-provider",
-              providerLabel: "Idempotent provider",
-              modelId: "voice-v1",
-              transport: "http_api",
-              billing: "metered",
-              estimatedCostCny: 0.1,
-              meteredAttemptCount: 1,
-              requestId: context.operationRequestId,
-            },
-          };
-        },
-      }],
-    };
-    const interrupted = {
-      id: "run-interrupted",
-      revision: 1,
-      workflowId: definition.id,
-      workflowVersion: definition.version,
-      status: "failed" as const,
-      initialInput: {},
-      startedAt: "2026-08-30T00:00:00.000Z",
-      finishedAt: "2026-08-30T00:01:00.000Z",
-      nodeRuns: [{
-        nodeId: "voice",
-        status: "failed" as const,
-        startedAt: "2026-08-30T00:00:00.000Z",
-        finishedAt: "2026-08-30T00:01:00.000Z",
-        operationRequestId: "persisted-operation-id",
-        interrupted: true,
-        outcomeUncertain: true,
-        artifactIds: [],
-        qualityGateResults: [],
-        error: "interrupted",
-      }],
-      executionReceipts: [{
-        nodeId: "voice",
-        capability: "voice.synthesize" as const,
-        providerId: "idempotent-provider",
-        providerLabel: "Idempotent provider",
+  for (const settlement of [
+    { label: "omitted cost", receipt: {}, expectedCost: 0.1, expectedSource: "configured_rate", expectedCalls: 1 },
+    { label: "zero new spend", receipt: { actualCostCny: 0, actualCostSource: "configured_rate", meteredAttemptCount: 0 },
+      expectedCost: 0.1, expectedSource: "configured_rate", expectedCalls: 1 },
+    { label: "provider correction", receipt: { actualCostCny: 0, actualCostSource: "provider_reported", meteredAttemptCount: 0 },
+      expectedCost: 0, expectedSource: "provider_reported", expectedCalls: 0 },
+    { label: "manual correction", receipt: { actualCostCny: 0, actualCostSource: "manual_reconciled", meteredAttemptCount: 0 },
+      expectedCost: 0, expectedSource: "manual_reconciled", expectedCalls: 0 },
+  ] as const) {
+    it(`reuses the persisted external operation id when retrying an interrupted node (${settlement.label})`, async () => {
+      const observed: Array<string | undefined> = [];
+      const checkpoints: WorkflowRun[] = [];
+      const registry = new ProviderRegistry();
+      registry.register({
+        id: "idempotent-provider",
+        label: "Idempotent provider",
         modelId: "voice-v1",
-        transport: "http_api" as const,
-        billing: "metered" as const,
-        status: "failed" as const,
+        capability: "voice.synthesize",
+        transport: "http_api",
+        billing: "metered",
+        approvalPolicy: "automatic",
         estimatedCostCny: 0.1,
-        actualCostCny: 0.1,
-        actualCostSource: "configured_rate" as const,
-        meteredAttemptCount: 1,
-        meteredFailedAttemptCount: 1,
-        requestId: "persisted-operation-id",
+        maxCostCny: 0.1,
+        maxAttempts: 1,
+        run: (_input, context) => {
+          observed.push(context.operationRequestId);
+          return { audio: "voice.mp3" };
+        },
+      });
+      const definition: WorkflowDefinition = {
+        id: "retry-interrupted-node",
+        name: "Retry interrupted node",
+        version: "1.0.0",
+        nodes: [{
+          id: "voice",
+          label: "Voice",
+          capability: "voice.synthesize",
+          providerId: "idempotent-provider",
+          mode: "automatic",
+          execute: async (input, context) => {
+            const provider = context.resolveProvider({ capability: "voice.synthesize", providerId: "idempotent-provider" });
+            const output = await provider.run(input, context);
+            assert.ok(context.operationRequestId);
+            return {
+              output,
+              receipt: {
+                providerId: "idempotent-provider",
+                providerLabel: "Idempotent provider",
+                modelId: "voice-v1",
+                transport: "http_api",
+                billing: "metered",
+                estimatedCostCny: 0.1,
+                meteredAttemptCount: 1,
+                requestId: context.operationRequestId,
+                ...settlement.receipt,
+              },
+            };
+          },
+        }],
+      };
+      const interrupted = {
+        id: "run-interrupted",
+        revision: 1,
+        workflowId: definition.id,
+        workflowVersion: definition.version,
+        status: "failed" as const,
+        initialInput: {},
         startedAt: "2026-08-30T00:00:00.000Z",
         finishedAt: "2026-08-30T00:01:00.000Z",
-      }],
-      artifacts: [],
-      interventions: [],
-      decisions: [],
-    };
+        nodeRuns: [{
+          nodeId: "voice",
+          status: "failed" as const,
+          startedAt: "2026-08-30T00:00:00.000Z",
+          finishedAt: "2026-08-30T00:01:00.000Z",
+          operationRequestId: "persisted-operation-id",
+          interrupted: true,
+          outcomeUncertain: true,
+          artifactIds: [],
+          qualityGateResults: [],
+          error: "interrupted",
+        }],
+        executionReceipts: [{
+          nodeId: "voice",
+          capability: "voice.synthesize" as const,
+          providerId: "idempotent-provider",
+          providerLabel: "Idempotent provider",
+          modelId: "voice-v1",
+          transport: "http_api" as const,
+          billing: "metered" as const,
+          status: "failed" as const,
+          estimatedCostCny: 0.1,
+          actualCostCny: 0.1,
+          actualCostSource: "configured_rate" as const,
+          meteredAttemptCount: 1,
+          meteredFailedAttemptCount: 1,
+          requestId: "persisted-operation-id",
+          startedAt: "2026-08-30T00:00:00.000Z",
+          finishedAt: "2026-08-30T00:01:00.000Z",
+        }],
+        artifacts: [],
+        interventions: [],
+        decisions: [],
+      };
 
-    const runner = new WorkflowRunner({
-      providers: registry,
-      checkpoint: (run) => { checkpoints.push(structuredClone(run)); },
+      const runner = new WorkflowRunner({
+        providers: registry,
+        checkpoint: (run) => { checkpoints.push(structuredClone(run)); },
+      });
+      await assert.rejects(
+        () => runner.retryFailedNode(definition, interrupted, "voice"),
+        /uncertain paid-provider outcome/,
+      );
+      const retried = await runner.retryFailedNode(
+        definition,
+        interrupted,
+        "voice",
+        { resumeUncertainOperation: true },
+      );
+
+      assert.equal(retried.status, "succeeded");
+      assert.deepEqual(observed, ["persisted-operation-id"]);
+      assert.equal(checkpoints.find((run) => run.nodeRuns[0]?.status === "pending")?.nodeRuns[0]?.outcomeUncertain, true);
+      assert.equal(checkpoints.find((run) => run.nodeRuns[0]?.status === "pending")?.nodeRuns[0]?.interrupted, true);
+      assert.equal(checkpoints.find((run) => run.nodeRuns[0]?.status === "running")?.nodeRuns[0]?.outcomeUncertain, true);
+      assert.equal(retried.nodeRuns[0]?.interrupted, undefined);
+      assert.equal(retried.nodeRuns[0]?.outcomeUncertain, undefined);
+      assert.equal(retried.executionReceipts?.length, 1);
+      assert.equal(retried.executionReceipts?.[0]?.status, "succeeded");
+      assert.equal(retried.executionReceipts?.[0]?.actualCostCny, settlement.expectedCost);
+      assert.equal(retried.executionReceipts?.[0]?.actualCostSource, settlement.expectedSource);
+      assert.equal(retried.executionReceipts?.[0]?.meteredAttemptCount, settlement.expectedCalls);
     });
-    await assert.rejects(
-      () => runner.retryFailedNode(definition, interrupted, "voice"),
-      /uncertain paid-provider outcome/,
-    );
-    const retried = await runner.retryFailedNode(
-      definition,
-      interrupted,
-      "voice",
-      { resumeUncertainOperation: true },
-    );
-
-    assert.equal(retried.status, "succeeded");
-    assert.deepEqual(observed, ["persisted-operation-id"]);
-    assert.equal(checkpoints.find((run) => run.nodeRuns[0]?.status === "pending")?.nodeRuns[0]?.outcomeUncertain, true);
-    assert.equal(checkpoints.find((run) => run.nodeRuns[0]?.status === "pending")?.nodeRuns[0]?.interrupted, true);
-    assert.equal(checkpoints.find((run) => run.nodeRuns[0]?.status === "running")?.nodeRuns[0]?.outcomeUncertain, true);
-    assert.equal(retried.nodeRuns[0]?.interrupted, undefined);
-    assert.equal(retried.nodeRuns[0]?.outcomeUncertain, undefined);
-    assert.equal(retried.executionReceipts?.length, 1);
-    assert.equal(retried.executionReceipts?.[0]?.status, "succeeded");
-    assert.equal(retried.executionReceipts?.[0]?.actualCostCny, 0.1);
-    assert.equal(retried.executionReceipts?.[0]?.actualCostSource, "configured_rate");
-  });
+  }
 
   it("keeps a resumed interrupted operation locked when reconciliation fails without a new provider attempt", async () => {
     const registry = new ProviderRegistry();

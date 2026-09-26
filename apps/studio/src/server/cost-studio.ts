@@ -27,6 +27,7 @@ export class CostStudio {
   constructor(
     private readonly listRuns: () => Promise<CostRunSource[]>,
     private readonly readModelUsage?: (runId: string) => Promise<NodeModelUsage[]>,
+    private readonly readPaidReceipts?: (runId: string) => Promise<unknown[]>,
   ) {}
 
   async dashboard(): Promise<StudioCostDashboard> {
@@ -47,7 +48,13 @@ export class CostStudio {
   }
 
   private async detail(run: CostRunSource): Promise<StudioCostRunDetail> {
-    const detail = toRunDetail(run);
+    const paidReceipts = await this.readPaidReceipts?.(run.id) ?? [];
+    const detail = toRunDetail({
+      ...run,
+      executionReceipts: [
+        ...(Array.isArray(run.executionReceipts) ? run.executionReceipts : []), ...paidReceipts,
+      ],
+    });
     for (const usage of await this.readModelUsage?.(run.id) ?? []) {
       const recorded = detail.lines.filter((line) => line.nodeId === usage.nodeId)
         .reduce((sum, line) => sum + (line.subscriptionCallCount ?? 0), 0);

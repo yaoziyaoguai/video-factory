@@ -3,6 +3,26 @@ import { describe, it } from "node:test";
 import { CostStudio } from "../src/server/cost-studio.js";
 
 describe("CostStudio", () => {
+  it("projects recovered paid ledger evidence once without rewriting stored receipts", async () => {
+    const receipt = {
+      nodeId: "assets", providerId: "wan", modelId: "wan3", billing: "metered",
+      startedAt: "2026-09-26T01:00:00Z", requestId: "original", actualCostCny: 0, meteredAttemptCount: 0,
+    };
+    const run = { id: "recovered-spend", nodeRuns: [], executionReceipts: [receipt, {
+      ...receipt, requestId: "remainder", actualCostCny: 6, meteredAttemptCount: 1,
+    }] };
+    const original = structuredClone(run);
+    const studio = new CostStudio(async () => [run], undefined, async () => [
+      { ...receipt, actualCostCny: 6, meteredAttemptCount: 1, actualCostSource: "configured_rate" },
+    ]);
+    const detail = await studio.runDetail(run.id);
+    assert.equal(detail?.totals.actualCostCny, 12);
+    assert.equal(detail?.totals.meteredCalls, 2);
+    assert.equal(detail?.lines.length, 2);
+    assert.deepEqual((await studio.runDetail(run.id))?.totals, detail?.totals);
+    assert.deepEqual(run, original);
+  });
+
   it("uses the bound quote rather than the catalog estimate and exposes running authorization", async () => {
     const run = { id: "run-quote", initialInput: {}, nodeRuns: [{ nodeId: "assets", status: "running", operationRequestId: "op", spendAuthorizationId: "spend", startedAt: "2026-09-26T01:00:00Z", spendPlan: { id: "quote", providerId: "wan", modelId: "wan3", estimatedCostCny: 12 } }],
       spendAuthorizations: [{ id: "spend", nodeId: "assets", spendPlanId: "quote", providerId: "wan", modelId: "wan3", maxCostCny: 12 }], executionReceipts: [] as Record<string, unknown>[],

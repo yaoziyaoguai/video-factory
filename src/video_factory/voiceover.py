@@ -1,11 +1,13 @@
 import fcntl
 import hashlib
+import io
 import json
 import math
 import os
 import shutil
 import subprocess
 import tempfile
+import wave
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -74,16 +76,23 @@ def synthesize_voiceover_plan(
     scene_entries = []
     for scene in scenes:
         position = int(scene["position"])
+        narration = str(scene["narration"])
+        scene_duration = float(scene["duration"])
+        # 纯标点/空白是留白，不把“无旁白”等自然语言说明猜成静音。
+        silent = not any(character.isalnum() for character in narration)
         if minimax_operation is not None:
             raw_path = _synthesize_minimax_operation_item(
                 operation=minimax_operation,
                 output_dir=output_dir,
                 position=position,
-                text=str(scene["narration"]),
+                text=narration,
                 voice=voice or "female-chengshu",
                 rate=rate,
                 pause_scale=pause_scale,
+                silence_duration=scene_duration if silent else None,
             )
+        elif silent:
+            raw_path = _synthesize_local_silence(output_dir, position, scene_duration)
         else:
             raw_path = synthesize_raw_audio(
                 text=str(scene["narration"]),
@@ -94,8 +103,7 @@ def synthesize_voiceover_plan(
                 rate=rate,
                 pause_scale=pause_scale,
             )
-        source_speech_duration = probe_audio_duration(raw_path)
-        scene_duration = float(scene["duration"])
+        source_speech_duration = 0.0 if silent else probe_audio_duration(raw_path)
         if source_speech_duration > scene_duration + 1e-6:
             raise VoiceDoesNotFitError(
                 scene_position=position,
@@ -111,10 +119,10 @@ def synthesize_voiceover_plan(
             [
                 "ffmpeg",
                 "-y",
-                "-i",
-                str(raw_path),
-                "-af",
-                f"{audio_filter},apad=pad_dur={target_duration:.3f}",
+                # 旧版可能已为“……”付费；保留原始文件与账本，只在成片中使用本地留白。
+                *(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono"] if silent else [
+                    "-i", str(raw_path), "-af", f"{audio_filter},apad=pad_dur={target_duration:.3f}",
+                ]),
                 "-t",
                 f"{target_duration:.3f}",
                 "-ar",
@@ -194,6 +202,20 @@ def synthesize_voiceover_plan(
     plan_path = output_dir / "voiceover_plan.json"
     plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return plan_path
+
+
+def _synthesize_local_silence(output_dir: Path, position: int, duration: float) -> Path:
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError("Silent scene duration must be finite and positive.")
+    raw_path = output_dir / f"scene_{position:02d}_silence.wav"
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(44100)
+        audio.writeframes(b"\0\0" * math.ceil(duration * 44100))
+    _write_bytes_durably(raw_path, buffer.getvalue())
+    return raw_path
 
 
 def _prepare_minimax_operation(
@@ -328,6 +350,7 @@ def _synthesize_minimax_operation_item(
     voice: str,
     rate: int,
     pause_scale: float,
+    silence_duration: Optional[float] = None,
 ) -> Path:
     ledger_path = Path(operation["ledgerPath"])
     with _minimax_operation_lock(ledger_path):
@@ -346,6 +369,11 @@ def _synthesize_minimax_operation_item(
             raise RuntimeError(
                 f"MiniMax paid item '{item['itemRequestId']}' is in state '{item['state']}' and cannot be submitted again."
             )
+        if silence_duration is not None:
+            result = _synthesize_local_silence(output_dir, position, silence_duration)
+            item["stateHistory"].append("local_silence")
+            _record_minimax_materialized(operation, item, result, ledger_path)
+            return result
         raw_path = output_dir / f"scene_{position:02d}_raw.mp3"
         request = _prepare_minimax_audio_request(
             text=text,
@@ -372,6 +400,13 @@ def _synthesize_minimax_operation_item(
         item["error"] = str(error)
         _write_json_durably(ledger_path, _ledger_without_private_fields(operation))
         raise
+    _record_minimax_materialized(operation, item, result, ledger_path)
+    return result
+
+
+def _record_minimax_materialized(
+    operation: dict[str, Any], item: dict[str, Any], result: Path, ledger_path: Path,
+) -> None:
     content = result.read_bytes()
     item.update({
         "state": "materialized",
@@ -392,7 +427,6 @@ def _synthesize_minimax_operation_item(
     )
     operation["actualCostSource"] = "configured_rate"
     _write_json_durably(ledger_path, _ledger_without_private_fields(operation))
-    return result
 
 
 def _verified_materialized_minimax_path(item: dict[str, Any], node_directory: Path) -> Path:

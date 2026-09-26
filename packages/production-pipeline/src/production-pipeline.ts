@@ -827,6 +827,27 @@ export class ProductionPipeline {
     return this.store.list<ProductionBrief>();
   }
 
+  async readPaidExecutionReceipts(runId: string): Promise<NodeExecutionReceipt[]> {
+    const run = await this.store.load<ProductionBrief>(runId);
+    const receipts = structuredClone(run.executionReceipts ?? []);
+    const missingSpend = receipts.filter((receipt) => receipt.nodeId === "assets" && receipt.requestId
+      && receipt.billing === "metered" && receipt.actualCostCny === 0 && receipt.meteredAttemptCount === 0
+      && receipt.actualCostSource !== "provider_reported" && receipt.actualCostSource !== "manual_reconciled");
+    if (missingSpend.length === 0) return receipts;
+    const ledger = await inspectPaidAssetLedger(path.join(this.runsRoot, runId, "nodes", "assets"));
+    for (const receipt of missingSpend) {
+      const items = ledger.filter((item) => item.operationId === receipt.requestId
+        && item.executorProviderId === receipt.providerId);
+      if (items.length === 0 || paidAssetOperationNeedsManualReconciliation(items)
+        || items.some((item) => item.state === "submitted" || item.state === "unknown")) continue;
+      const settlement = paidAssetSettlement(items);
+      if (settlement.meteredAttemptCount === 0) continue;
+      // 修正旧版“恢复新增零元”覆盖历史支出的展示；不回写 run，也不修改服务商账本。
+      Object.assign(receipt, settlement, { actualCostSource: "configured_rate" });
+    }
+    return receipts;
+  }
+
   async readTextExecutionUsage(runId: string): Promise<Array<{
     nodeId: string; providerId: string; modelId: string; modelCallCount: number;
   }>> {
@@ -2728,11 +2749,11 @@ export class ProductionPipeline {
           if (missingQueryableTask) {
             throw new PaidOperationManualReconciliationError(draft.nodeId, items);
           }
-          resumeOriginalOperation = items.some((item) => (
+          resumeOriginalOperation = !paidAssetRemainderNeedsNewOperation(items) && (items.some((item) => (
             item.state === "submitted"
             || item.state === "provider_succeeded"
             || item.state === "unknown"
-          )) || items.every((item) => item.state === "materialized");
+          )) || items.every((item) => item.state === "materialized"));
           if (trustedPreSubmissionRejection && items.length === 0) resumeOriginalOperation = false;
         } else if (draft.nodeId === "voice") {
           if (!voiceOperation || !canResumePaidVoiceOperation(voiceOperation)) {
@@ -3698,7 +3719,19 @@ export class ProductionPipeline {
         ? previous.nodeRuns.find((node) => node.nodeId === nodeId)?.operationRequestId
         : undefined;
       const creativeCommand = recoverableCreativeReviewCommand(previous, nodeId);
-      const recoveryBase = creativeCommand ? structuredClone(previous) : previous;
+      const failedNode = previous.nodeRuns.find((node) => node.nodeId === nodeId);
+      const voiceOperation = nodeId === "voice" && failedNode?.status === "failed"
+        && !failedNode.outcomeUncertain && failedNode.executionReceipt?.providerId === "minimax-tts-v1"
+        && failedNode.operationRequestId
+        ? await readPaidVoiceOperation(path.join(this.runsRoot, runId, "nodes", nodeId), failedNode.operationRequestId)
+        : undefined;
+      const resumeKnownVoice = voiceOperation && canResumePaidVoiceOperation(voiceOperation)
+        && voiceOperation.items.some((item) => item.state === "materialized");
+      const recoveryBase = creativeCommand || resumeKnownVoice ? structuredClone(previous) : previous;
+      if (resumeKnownVoice) {
+        // 本地归一化失败不撤销已合成音频；普通重试沿原身份，只补尚未提交的段落。
+        recoveryBase.nodeRuns.find((node) => node.nodeId === nodeId)!.interrupted = true;
+      }
       if (creativeCommand) {
         const operation = recoveryBase.creativeReviewOperations!.find((item) => item.commandId === creativeCommand.commandId)!;
         operation.status = "running";
@@ -14081,12 +14114,21 @@ function paidAssetItemNeedsManualReconciliation(item: PaidAssetLedgerItemSummary
 }
 
 function canResumePaidAssetOperation(items: readonly PaidAssetLedgerItemSummary[]): boolean {
-  if (paidAssetOperationNeedsManualReconciliation(items)) return false;
+  if (paidAssetOperationNeedsManualReconciliation(items) || paidAssetRemainderNeedsNewOperation(items)) return false;
   return items.some((item) => (
     item.state === "submitted"
     || item.state === "provider_succeeded"
     || item.state === "unknown"
   )) || items.every((item) => item.state === "materialized");
+}
+
+function paidAssetRemainderNeedsNewOperation(items: readonly PaidAssetLedgerItemSummary[]): boolean {
+  // 已成功的原任务可由新操作携带取回；未提交/明确失败的余项必须绑定新报价。
+  // 仍在途、结果不明或缺少结果地址的任务则只能先查询原操作，不能借机重新购买。
+  return items.some((item) => item.state === "prepared" || item.state === "terminal_failed")
+    && items.every((item) => item.state === "prepared" || item.state === "terminal_failed"
+      || item.state === "materialized"
+      || item.state === "provider_succeeded" && Boolean(item.taskId) && Boolean(item.resultUrl));
 }
 
 function paidVoiceSettlement(operation: PaidVoiceOperationLedger): {

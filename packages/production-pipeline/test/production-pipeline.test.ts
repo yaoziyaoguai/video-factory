@@ -276,6 +276,57 @@ class GeneratedScriptWorker extends FakeWorker {
   }
 }
 
+class RoutedAssetBaselineWorker extends GeneratedScriptWorker {
+  override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+    const response = await super.run(request);
+    if (request.capability !== "asset.prepare") return response;
+    const input = request.input as Record<string, unknown>;
+    const script = JSON.parse(await readFile(String(input.scriptPath), "utf8")) as {
+      scenes: Array<{ position: number; duration: number; visual_prompt: string }>;
+    };
+    const directorPlan = JSON.parse(await readFile(String(input.directorPlanPath), "utf8")) as {
+      shots: Array<Record<string, unknown> & { scenePosition: number; preferredProviderId: string; deliveryType: string }>;
+    };
+    const shots = new Map(directorPlan.shots.map((shot) => [shot.scenePosition, shot]));
+    const plan = JSON.stringify({
+      scene_assets: script.scenes.map((scene) => {
+        const shot = shots.get(scene.position)!;
+        return {
+          scene_position: scene.position,
+          provider: shot.preferredProviderId,
+          asset_id: `pending-${scene.position}`,
+          media_type: shot.deliveryType === "generated_image" ? "image" : "video",
+          width: 720,
+          height: 1280,
+          duration: scene.duration,
+          local_path: "",
+          source_url: `pending://scene-${scene.position}`,
+          creator: "VideoFactory pending generation",
+          license_note: "Generation pending.",
+          query: scene.visual_prompt,
+        };
+      }),
+      director_routing: directorPlan.shots.map((shot) => ({
+        scene_position: shot.scenePosition,
+        preferred_provider_id: shot.preferredProviderId,
+        actual_provider_id: shot.preferredProviderId,
+        actual_provider: shot.preferredProviderId,
+        fallback_used: false,
+        generation_pending: true,
+        director_shot: shot,
+      })),
+    });
+    const planPath = String(response.output?.assetPlanPath);
+    await writeFile(planPath, plan, "utf8");
+    response.artifacts[0] = {
+      ...response.artifacts[0]!,
+      sha256: createHash("sha256").update(plan).digest("hex"),
+      sizeBytes: Buffer.byteLength(plan),
+    };
+    return response;
+  }
+}
+
 async function assertCandidateFailureTrace(
   run: WorkflowRun<pipeline.ProductionBrief>,
   nodeId: string,
@@ -7765,100 +7816,107 @@ describe("ProductionPipeline", () => {
     assert.equal(receipts[0]?.actualCostCny, 0.1);
   });
 
-  it("resumes fully materialized automatic TTS under the original operation id", async () => {
-    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-tts-materialized-recovery-"));
-    let voiceCalls = 0;
-    class InterruptedVoiceWorker extends FakeWorker {
-      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
-        const response = await super.run(request);
-        if (request.capability !== "voice.synthesize") return response;
-        voiceCalls += 1;
-        if (voiceCalls === 1) {
-          return {
-            ...response,
-            status: "failed",
-            error: { code: "WORKER_REQUEST_FAILED", message: "voice normalization response was lost" },
-            artifacts: [],
-          };
+  for (const ordinaryRetry of [false, true]) {
+    it(`resumes materialized automatic TTS under the original operation id (${ordinaryRetry ? "ordinary retry with prepared remainder" : "explicit reconciliation"})`, async () => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-tts-materialized-recovery-"));
+      let voiceCalls = 0;
+      class InterruptedVoiceWorker extends FakeWorker {
+        override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+          const response = await super.run(request);
+          if (request.capability !== "voice.synthesize") return response;
+          voiceCalls += 1;
+          if (voiceCalls === 1) {
+            return {
+              ...response,
+              status: "failed",
+              error: { code: "WORKER_REQUEST_FAILED", message: "voice normalization response was lost" },
+              artifacts: [],
+              ...(ordinaryRetry ? { diagnostics: {
+                providerOutcomeKnown: true, actualCostCny: 0.05, actualCostSource: "configured_rate", meteredAttemptCount: 1,
+              } } : {}),
+            };
+          }
+          return ordinaryRetry ? { ...response, diagnostics: {
+            providerOutcomeKnown: true, actualCostCny: 0.1, actualCostSource: "configured_rate", meteredAttemptCount: 2,
+          } } : response;
         }
-        return response;
       }
-    }
-    const worker = new InterruptedVoiceWorker();
-    const subject = new pipeline.ProductionPipeline({
-      workspaceRoot,
-      worker,
-      providerRuntimeMetadata: [{
-        id: "minimax-tts-v1",
-        label: "MiniMax 中文声音演员",
-        modelId: "speech-2.8-turbo",
-        transport: "http_api",
-        billing: "metered",
-        approvalPolicy: "automatic",
-        estimatedCostCny: 0.1,
-        maxAttempts: 1,
-      }],
-    });
-    const failed = await subject.start({
-      ...brief,
-      providers: { ...brief.providers, voice: "minimax-tts-v1" },
-      voiceDirection: { ...brief.voiceDirection, profileId: "minimax:female-chengshu" },
-    });
-    const failedVoice = failed.nodeRuns.find((node) => node.nodeId === "voice");
-    const operationId = failedVoice?.operationRequestId;
-    assert.ok(operationId);
-    const voiceLedgerDirectory = path.join(workspaceRoot, "runs", failed.id, "nodes", "voice", ".voice-operations");
-    await mkdir(voiceLedgerDirectory, { recursive: true });
-    await writeFile(
-      path.join(voiceLedgerDirectory, `${createHash("sha256").update(operationId).digest("hex")}.json`),
-      `${JSON.stringify({
-        version: "video-factory/paid-operation-v2",
-        operationId,
-        completed: true,
-        providerId: "minimax-tts-v1",
-        modelId: "speech-2.8-turbo",
-        estimatedCostCny: 0.1,
-        actualCostCny: 0.1,
-        actualCostSource: "configured_rate",
-        items: [1, 2].map((scenePosition) => ({
-          itemRequestId: `voice-scene-${scenePosition}`,
-          quoteItemId: `scene-${scenePosition}`,
-          inputFingerprint: `voice-input-${scenePosition}`,
-          sourceFingerprint: "voice-source-fingerprint",
-          scenePosition,
-          executorProviderId: "minimax-tts-v1",
+      const worker = new InterruptedVoiceWorker();
+      const subject = new pipeline.ProductionPipeline({
+        workspaceRoot,
+        worker,
+        providerRuntimeMetadata: [{
+          id: "minimax-tts-v1",
+          label: "MiniMax 中文声音演员",
+          modelId: "speech-2.8-turbo",
+          transport: "http_api",
+          billing: "metered",
+          approvalPolicy: "automatic",
+          estimatedCostCny: 0.1,
+          maxAttempts: 1,
+        }],
+      });
+      const failed = await subject.start({
+        ...brief,
+        providers: { ...brief.providers, voice: "minimax-tts-v1" },
+        voiceDirection: { ...brief.voiceDirection, profileId: "minimax:female-chengshu" },
+      });
+      const failedVoice = failed.nodeRuns.find((node) => node.nodeId === "voice");
+      const operationId = failedVoice?.operationRequestId;
+      assert.ok(operationId);
+      const voiceLedgerDirectory = path.join(workspaceRoot, "runs", failed.id, "nodes", "voice", ".voice-operations");
+      await mkdir(voiceLedgerDirectory, { recursive: true });
+      await writeFile(
+        path.join(voiceLedgerDirectory, `${createHash("sha256").update(operationId).digest("hex")}.json`),
+        `${JSON.stringify({
+          version: "video-factory/paid-operation-v2",
+          operationId,
+          completed: !ordinaryRetry,
           providerId: "minimax-tts-v1",
           modelId: "speech-2.8-turbo",
-          parameters: { voice: "female-chengshu", rate: 190, pauseScale: 1 },
-          state: "materialized",
-          stateHistory: ["prepared", "unknown", "materialized"],
-          localPath: `/tmp/voice-scene-${scenePosition}.mp3`,
-          sha256: "a".repeat(64),
-          sizeBytes: 10,
-        })),
-      }, null, 2)}\n`,
-      "utf8",
-    );
+          estimatedCostCny: 0.1,
+          actualCostCny: 0.1,
+          actualCostSource: "configured_rate",
+          items: [1, 2].map((scenePosition) => ({
+            itemRequestId: `voice-scene-${scenePosition}`,
+            quoteItemId: `scene-${scenePosition}`,
+            inputFingerprint: `voice-input-${scenePosition}`,
+            sourceFingerprint: "voice-source-fingerprint",
+            scenePosition,
+            executorProviderId: "minimax-tts-v1",
+            providerId: "minimax-tts-v1",
+            modelId: "speech-2.8-turbo",
+            parameters: { voice: "female-chengshu", rate: 190, pauseScale: 1 },
+            state: ordinaryRetry && scenePosition === 2 ? "prepared" : "materialized",
+            stateHistory: ordinaryRetry && scenePosition === 2 ? ["prepared"] : ["prepared", "unknown", "materialized"],
+            localPath: `/tmp/voice-scene-${scenePosition}.mp3`,
+            sha256: "a".repeat(64),
+            sizeBytes: 10,
+          })),
+        }, null, 2)}\n`,
+        "utf8",
+      );
 
-    const summary = await subject.inspectPaidNode(failed.id, "voice");
-    assert.equal(summary.operationId, operationId);
-    assert.equal(summary.requiresManualReconciliation, false);
-    assert.equal(summary.recommendedOutcome, "resume_original");
+      const summary = await subject.inspectPaidNode(failed.id, "voice");
+      assert.equal(summary.operationId, operationId);
+      assert.equal(summary.requiresManualReconciliation, false);
+      assert.equal(summary.recommendedOutcome, "resume_original");
 
-    const resolved = await subject.reconcilePaidNode(failed.id, {
-      nodeId: "voice",
-      expectedRunRevision: failed.revision,
-      reconciliationId: "resume-materialized-voice",
-      outcome: "resume_original",
+      const resolved = ordinaryRetry ? await subject.retryFailedNode(failed.id, "voice") : await subject.reconcilePaidNode(failed.id, {
+        nodeId: "voice",
+        expectedRunRevision: failed.revision,
+        reconciliationId: "resume-materialized-voice",
+        outcome: "resume_original",
+      });
+
+      assert.equal(resolved.status, "needs_human");
+      assert.equal(worker.calls.filter((call) => call.capability === "voice.synthesize").at(-1)?.commandId, operationId);
+      assert.equal(voiceCalls, 2);
+      const receipts = resolved.executionReceipts?.filter((receipt) => receipt.requestId === operationId) ?? [];
+      assert.equal(receipts.length, 1);
+      assert.equal(receipts[0]?.actualCostCny, 0.1);
     });
-
-    assert.equal(resolved.status, "needs_human");
-    assert.equal(worker.calls.filter((call) => call.capability === "voice.synthesize").at(-1)?.commandId, operationId);
-    assert.equal(voiceCalls, 2);
-    const receipts = resolved.executionReceipts?.filter((receipt) => receipt.requestId === operationId) ?? [];
-    assert.equal(receipts.length, 1);
-    assert.equal(receipts[0]?.actualCostCny, 0.1);
-  });
+  }
 
   it("reports a voice-specific recovery instruction after a confirmed voice charge", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-tts-confirmed-charged-recovery-"));
@@ -8967,58 +9025,93 @@ describe("ProductionPipeline", () => {
     assert.equal(switchedPlan?.estimatedCostCny, 6.2);
   });
 
+  it("requotes only the unsubmitted shot after a completed provider result fails to download", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-mixed-paid-recovery-"));
+    let creates = 0;
+    let failDownload = true;
+    const recoveredTaskIds: string[] = [];
+    const worker = new pipeline.GenerativeAssetWorkerClient({
+      fallback: new RoutedAssetBaselineWorker(),
+      adapters: [{
+        estimatedCnyPerClip: 2.4,
+        defaultModelId: "seedance-v1",
+        modelPrices: { "seedance-v1": 2.4 },
+        adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({
+            providerId: "seedance-video-v1",
+            taskId: `paid-task-${++creates}`,
+            videoUrl: "https://example.com/generated.mp4",
+          }),
+          reconcile: async (taskId) => {
+            recoveredTaskIds.push(taskId);
+            return { providerId: "seedance-video-v1", taskId, videoUrl: "https://example.com/generated.mp4" };
+          },
+        },
+      }],
+      resolveHost: async () => ["93.184.216.34"],
+      fetch: async () => {
+        if (failDownload) throw new Error("simulated interrupted media download");
+        return new Response("generated-video", { headers: { "content-type": "video/mp4" } });
+      },
+    });
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot, worker, directorAgent: generatedShotDirector(),
+      assetProviders: [meteredSeedanceProvider()],
+      providerRuntimeMetadata: [seedanceRuntimeMetadata()],
+    });
+    const awaiting = await subject.start({
+      ...brief,
+      providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    });
+    const firstPlan = awaiting.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
+    assert.ok(firstPlan);
+    const failed = await subject.authorizeSpend(awaiting.id, { ...firstPlan, spendPlanId: firstPlan.id, approvedBy: "owner" });
+    assert.equal(failed.status, "failed");
+    assert.equal(creates, 1, failed.nodeRuns.find((node) => node.nodeId === "assets")?.error);
+    const oldOperationId = failed.nodeRuns.find((node) => node.nodeId === "assets")?.operationRequestId;
+    const summary = await subject.inspectPaidNode(failed.id, "assets");
+    assert.deepEqual(summary.items.map((item) => item.state), ["provider_succeeded", "terminal_failed"]);
+    assert.equal(summary.recommendedOutcome, "requote", "completed results are reusable; the unsubmitted shot needs a new operation");
+    failDownload = false;
+    const requoted = await subject.reconcilePaidNode(failed.id, {
+      nodeId: "assets", expectedRunRevision: failed.revision,
+      reconciliationId: "quote-only-unsubmitted-shot", outcome: "requote",
+    });
+    assert.equal(requoted.status, "awaiting_spend_approval");
+    assert.notEqual(requoted.nodeRuns.find((node) => node.nodeId === "assets")?.operationRequestId, oldOperationId);
+    assert.equal(creates, 1, "showing the new quote cannot create a paid task");
+    const nextPlan = requoted.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
+    assert.ok(nextPlan);
+    assert.deepEqual(nextPlan.items?.map((item) => item.id), ["scene-2"]);
+    const completed = await subject.authorizeSpend(requoted.id, { ...nextPlan, spendPlanId: nextPlan.id, approvedBy: "owner" });
+    assert.equal(completed.status, "needs_human", completed.nodeRuns.find((node) => node.status === "failed")?.error);
+    assert.equal(creates, 2, "the first paid task must never be purchased again");
+    assert.deepEqual(recoveredTaskIds, ["paid-task-1"]);
+    // 模拟旧版恢复回执覆盖为零；从真实 ledger 只读补证，不改历史 run/ledger。
+    const runPath = path.join(workspaceRoot, "runs", completed.id, "run.json");
+    const legacy = structuredClone(completed);
+    const oldReceipt = legacy.executionReceipts?.find((receipt) => receipt.requestId === oldOperationId);
+    assert.ok(oldReceipt);
+    oldReceipt.actualCostCny = 0;
+    oldReceipt.meteredAttemptCount = 0;
+    const legacyJson = JSON.stringify(legacy);
+    await writeFile(runPath, legacyJson);
+    const projected = await subject.readPaidExecutionReceipts(completed.id);
+    assert.equal(projected.find((receipt) => receipt.requestId === oldOperationId)?.actualCostCny, 2.4);
+    assert.equal(projected.filter((receipt) => receipt.nodeId === "assets").reduce((sum, receipt) => sum + (receipt.actualCostCny ?? 0), 0), 4.8,
+      "carried-forward media cannot be charged twice in the read-only projection");
+    assert.deepEqual(await subject.readPaidExecutionReceipts(completed.id), projected);
+    assert.equal(await readFile(runPath, "utf8"), legacyJson);
+    oldReceipt.actualCostSource = "manual_reconciled";
+    await writeFile(runPath, JSON.stringify(legacy));
+    assert.equal((await subject.readPaidExecutionReceipts(completed.id)).find((receipt) => receipt.requestId === oldOperationId)?.actualCostCny, 0);
+  });
+
   it("quotes mixed generated images and videos before calling either paid adapter", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-mixed-asset-approval-"));
-    class RoutedAssetBaselineWorker extends GeneratedScriptWorker {
-      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
-        const response = await super.run(request);
-        if (request.capability !== "asset.prepare") return response;
-        const input = request.input as Record<string, unknown>;
-        const script = JSON.parse(await readFile(String(input.scriptPath), "utf8")) as {
-          scenes: Array<{ position: number; duration: number; visual_prompt: string }>;
-        };
-        const directorPlan = JSON.parse(await readFile(String(input.directorPlanPath), "utf8")) as {
-          shots: Array<Record<string, unknown> & { scenePosition: number; preferredProviderId: string; deliveryType: string }>;
-        };
-        const shots = new Map(directorPlan.shots.map((shot) => [shot.scenePosition, shot]));
-        const plan = JSON.stringify({
-          scene_assets: script.scenes.map((scene) => {
-            const shot = shots.get(scene.position)!;
-            return {
-              scene_position: scene.position,
-              provider: shot.preferredProviderId,
-              asset_id: `pending-${scene.position}`,
-              media_type: shot.deliveryType === "generated_image" ? "image" : "video",
-              width: 720,
-              height: 1280,
-              duration: scene.duration,
-              local_path: "",
-              source_url: `pending://scene-${scene.position}`,
-              creator: "VideoFactory pending generation",
-              license_note: "Generation pending.",
-              query: scene.visual_prompt,
-            };
-          }),
-          director_routing: directorPlan.shots.map((shot) => ({
-            scene_position: shot.scenePosition,
-            preferred_provider_id: shot.preferredProviderId,
-            actual_provider_id: shot.preferredProviderId,
-            actual_provider: shot.preferredProviderId,
-            fallback_used: false,
-            generation_pending: true,
-            director_shot: shot,
-          })),
-        });
-        const planPath = String(response.output?.assetPlanPath);
-        await writeFile(planPath, plan, "utf8");
-        response.artifacts[0] = {
-          ...response.artifacts[0]!,
-          sha256: createHash("sha256").update(plan).digest("hex"),
-          sizeBytes: Buffer.byteLength(plan),
-        };
-        return response;
-      }
-    }
 
     const fallback = new RoutedAssetBaselineWorker();
     let imageCalls = 0;

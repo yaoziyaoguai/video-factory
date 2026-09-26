@@ -2622,16 +2622,21 @@ function mergeExecutionReceiptForSameRequest(
     };
   }
   const merged = cloneExecutionReceipt(current);
-  if (merged.actualCostCny === undefined && previous.actualCostCny !== undefined) {
+  // 同一请求只取回结果时的“本次新增零元/零次”不是退款；明确核账仍可向下纠正。
+  const zeroNewSpend = previous.billing === "metered" && current.billing === "metered"
+    && current.actualCostCny === 0 && current.meteredAttemptCount === 0
+    && current.actualCostSource !== "provider_reported" && current.actualCostSource !== "manual_reconciled";
+  if ((merged.actualCostCny === undefined || zeroNewSpend) && previous.actualCostCny !== undefined) {
     merged.actualCostCny = previous.actualCostCny;
     if (previous.actualCostSource) merged.actualCostSource = previous.actualCostSource;
   }
-  if (merged.meteredAttemptCount === undefined && previous.meteredAttemptCount !== undefined) {
+  if ((merged.meteredAttemptCount === undefined || zeroNewSpend) && previous.meteredAttemptCount !== undefined) {
     merged.meteredAttemptCount = previous.meteredAttemptCount;
   }
-  if (merged.meteredFailedAttemptCount === undefined && previous.meteredFailedAttemptCount !== undefined) {
+  if ((merged.meteredFailedAttemptCount === undefined || zeroNewSpend) && previous.meteredFailedAttemptCount !== undefined) {
     merged.meteredFailedAttemptCount = previous.meteredFailedAttemptCount;
   }
+  if (zeroNewSpend) merged.startedAt = previous.startedAt;
   return merged;
 }
 
