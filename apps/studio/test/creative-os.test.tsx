@@ -10,6 +10,7 @@ import { OpportunityDialog } from "../src/client/components/OpportunityDialog.js
 import { OpportunityRail } from "../src/client/components/OpportunityRail.js";
 import { ProductionStrip } from "../src/client/components/ProductionStrip.js";
 import { SeriesDialog } from "../src/client/components/SeriesDialog.js";
+import { SeriesEpisodeDialog } from "../src/client/components/SeriesEpisodeDialog.js";
 import { SourceSupplementDialog } from "../src/client/components/SourceSupplementDialog.js";
 import { TopicEntryWorkspace } from "../src/client/components/TopicEntryWorkspace.js";
 import { ExperimentsPage } from "../src/client/pages/ExperimentsPage.js";
@@ -747,12 +748,39 @@ describe("Creative OS", () => {
     expect(create).toHaveBeenCalledWith(expect.objectContaining({
       name: "AI 下班实验室",
       category: "technology",
-      pillars: ["真实问题拆解", "方法与结果复盘"],
+      pillars: [],
       platform: "douyin",
-      tone: "克制、具体、有结论",
+      tone: "",
+      visualStyle: "",
     }));
     expect(await screen.findByRole("option", { name: /AI 下班实验室/ })).toBeInTheDocument();
     await waitFor(() => expect(generate).toHaveBeenCalledWith("series-1"));
+  });
+
+  it("preserves explicitly supplied series directions rather than replacing them with defaults", async () => {
+    const user = userEvent.setup();
+    const submit = vi.fn().mockResolvedValue(undefined);
+    render(<SeriesDialog open onClose={() => undefined} onSubmit={submit} />);
+    await user.type(screen.getByLabelText("系列名称"), "城市微诗");
+    await user.type(screen.getByLabelText("系列承诺"), "让日常被重新看见");
+    await user.type(screen.getByLabelText("目标受众"), "下班的人");
+    fireEvent.click(document.querySelector(".series-dialog summary")!);
+    await user.type(screen.getByLabelText("内容支柱 1"), "城市情绪");
+    await user.type(screen.getByLabelText("表达语气"), "温暖、克制");
+    await user.type(screen.getByLabelText("视觉方向"), "无人空镜");
+    await user.click(screen.getByRole("button", { name: "创建系列" }));
+    expect(submit).toHaveBeenCalledWith(expect.objectContaining({ pillars: ["城市情绪"], tone: "温暖、克制", visualStyle: "无人空镜" }));
+  });
+
+  it("lets a creator edit an episode direction when the series did not constrain it", async () => {
+    const user = userEvent.setup();
+    const series = { ...seriesPublicAffairs(), pillars: [] };
+    const submit = vi.fn().mockResolvedValue(undefined);
+    render(<SeriesEpisodeDialog open series={series} episode={series.episodes[0]!} onClose={() => undefined} onSubmit={submit} />);
+    await user.clear(screen.getByRole("textbox", { name: "内容支柱" }));
+    await user.type(screen.getByRole("textbox", { name: "内容支柱" }), "理解来源");
+    await user.click(screen.getByRole("button", { name: "保存人工版本" }));
+    expect(submit).toHaveBeenCalledWith(expect.objectContaining({ pillar: "理解来源", expectedRevision: series.revision }));
   });
 
   it("keeps a legacy unsupported series readable but blocks new production", () => {

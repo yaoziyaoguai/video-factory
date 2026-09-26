@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from video_factory.domain import Scene
-from video_factory.renderer import attach_voiceover_plan, font_resource, probe_media_duration, render_asset_video, render_scene_clip, wrap_text_by_pixels as wrap_caption_text, write_caption_overlay, write_scene_frames
+from video_factory.renderer import attach_voiceover_plan, font_resource, probe_media_duration, render_asset_video, render_scene_clip, wrap_text_by_pixels as wrap_caption_text, write_caption_overlay, write_scene_frames, write_render_manifest
 from video_factory.stock_assets import local_card_content, local_card_semantic_style, local_card_spec, local_card_style, wrap_text_by_pixels as wrap_card_text
 
 
@@ -17,6 +17,19 @@ class FixedWidthDraw:
 
 
 class VisualRenderingTest(unittest.TestCase):
+    def test_silent_narration_markers_are_not_rendered_as_subtitles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"title": "留白", "duration_target": 8, "scenes": [
+                {"position": 1, "duration": 4, "narration": "……", "visual_strategy": "stock", "visual_prompt": "海面"},
+                {"position": 2, "duration": 4, "narration": "别急，故事还没结束。", "visual_strategy": "stock", "visual_prompt": "晚霞"},
+            ]}), encoding="utf-8")
+            manifest = json.loads(write_render_manifest(1, script_path, root / "render").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["slides"][0]["text"], "")
+            self.assertEqual(manifest["slides"][1]["text"], "别急，故事还没结束。")
+            self.assertEqual([slide["duration"] for slide in manifest["slides"]], [4, 4])
+
     def test_voiceover_cannot_rewrite_the_accepted_render_timeline(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

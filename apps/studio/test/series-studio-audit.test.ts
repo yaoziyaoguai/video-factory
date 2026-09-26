@@ -6,6 +6,31 @@ import { it } from "node:test";
 import { JsonSeriesStore } from "../src/server/series-store.js";
 import { SeriesStudio } from "../src/server/series-studio.js";
 
+it("an unspecified series style stays optional through creation, revision and human adoption", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "vf-series-open-style-"));
+  const studio = new SeriesStudio({
+    series: new JsonSeriesStore(path.join(root, "series.json")),
+    planningAgent: {
+      reviewEpisode: async () => { throw new Error("adoption must not audit"); },
+      reviseEpisode: async (_series, episode) => ({
+        draft: { episodeNumber: 1, pillar: "城市情绪", title: "停下的那几秒", viewerPromise: "感受日常里的片刻安静", hook: "走了一天", payoff: "停下来也算到达",
+          fromPrevious: episode.continuity.fromPrevious, toNext: [] },
+        planning: { ...episode.planning, source: "agent", auditStatus: "not_audited", auditIterations: 0 },
+      }),
+    },
+  });
+  const created = await studio.create({ name: "城市微诗", premise: "每集给观众一个日常的新感受", audience: "下班后的成年人", platform: "douyin",
+    category: "lifestyle", track: "city-poems", pillars: [], tone: "", visualStyle: "", targetEpisodeCount: 1 });
+  assert.deepEqual(created.bible.recurringElements, []);
+  assert.doesNotMatch(JSON.stringify(created.episodes), /真实任务实验|最省钱|三步清单/);
+  const revised = await studio.reviseEpisodeCurrent(created.id, 1, created.revision, "改成城市微诗");
+  assert.equal(revised.episodes[0]?.pillar, "城市情绪");
+  const adopted = await studio.advanceEpisode(created.id, 1);
+  assert.equal(adopted.episodes[0]?.status, "selected");
+  assert.equal(adopted.episodes[0]?.adoption?.auditId, null);
+  assert.deepEqual(adopted.pillars, [], "an episode suggestion must not silently become a series-wide requirement");
+});
+
 it("coalesces concurrent audits of one series version but permits a later explicit re-audit", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "vf-series-current-audit-"));
   const series = new JsonSeriesStore(path.join(root, "series.json"));

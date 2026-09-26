@@ -43,6 +43,11 @@ test("audio task travels through durable socket; same evidence resumes without n
     let wireFailure: unknown;
     const originalRun = client.runTaskDetailed.bind(client);
     client.runTaskDetailed = async (...args) => {
+      const expectedPayload = {
+        durationMs: 1000, audioSha256: sha(audio), audioBase64: audio.toString("base64"), frames: (await media.prepare()).frames,
+        reviewContext: { videoSha256: sha(Buffer.from("fixture-video")), evidenceBoundary: "实际成片混合音轨；画面仅为带时间码的抽帧，不支持确认逐帧口型同步。" },
+      };
+      assert.equal(args[2], `sound-${sha(Buffer.from(JSON.stringify({ model: model.id, payload: expectedPayload })))}`, "new diagnostics must preserve the legacy evidence identity and resume existing paid requests");
       try { return await originalRun(...args); } catch (error) { wireFailure = error; throw error; }
     };
     const connections: ConnectedModel[] = [{ model, client }];
@@ -92,10 +97,17 @@ test("real ffmpeg extraction sends the whole rendered soundtrack and does not ca
   const client = new CodexBridgeClient({ socketPath: "/unused/test" });
   client.runTaskDetailed = async (_kind, input) => {
     calls++;
-    const payload = input as { audioBase64: string; audioSha256: string };
+    const payload = input as { audioBase64: string; audioSha256: string; reviewContext: { audioEvidence: { lowLevelIntervals: Array<{ startMs: number; endMs: number }> } } };
     const bytes = Buffer.from(payload.audioBase64, "base64");
     assert.ok(bytes.length > 8000, "actual encoded soundtrack, not transcript");
     assert.equal(sha(bytes), payload.audioSha256);
+    const intervals = payload.reviewContext.audioEvidence.lowLevelIntervals;
+    if (calls === 1) assert.deepEqual(intervals, [], "a continuous tone is not reported as a silent gap");
+    else {
+      assert.equal(intervals.length, 1);
+      assert.ok(intervals[0]!.startMs >= 180 && intervals[0]!.startMs <= 260);
+      assert.ok(intervals[0]!.endMs >= 780 && intervals[0]!.endMs <= 850);
+    }
     return { output: { audioSha256: payload.audioSha256, summary: "提取测试", checks, findings: [] }, trace: { taskKind: "audio-review", providerId: "m-333333333333", modelId: "m-333333333333", promptVersion: "test", prompt: "test" } };
   };
   const service = new AudioReviewService({ media, connections: () => [{ client, model: { id: "m-333333333333", label: "测试", modelId: "audio", enabled: true, credentialConfigured: true, socketName: "m-333333333333.sock", protocol: "openai-chat-completions", baseUrl: "https://example.com", capabilities: ["audio", "image"], maxOutputTokens: 32000 } }] });
@@ -103,9 +115,12 @@ test("real ffmpeg extraction sends the whole rendered soundtrack and does not ca
     const video = path.join(directory, "video.mp4");
     await execFile("ffmpeg", ["-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=32x32:d=1", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:v", "libx264", "-c:a", "aac", "-shortest", video]);
     assert.equal((await service.review({ runRoot: directory, videoPath: video, selectedAudioModelId: "m-333333333333" })).status, "completed");
+    const gap = path.join(directory, "gap.mp4");
+    await execFile("ffmpeg", ["-nostdin", "-loglevel", "error", "-i", video, "-af", "volume=0:enable='between(t,0.2,0.8)'", "-c:v", "copy", "-c:a", "aac", gap]);
+    assert.equal((await service.review({ runRoot: directory, videoPath: gap, selectedAudioModelId: "m-333333333333" })).status, "completed");
     const silent = path.join(directory, "silent.mp4");
     await execFile("ffmpeg", ["-nostdin", "-loglevel", "error", "-i", video, "-an", "-c:v", "copy", silent]);
     assert.equal((await service.review({ runRoot: directory, videoPath: silent, selectedAudioModelId: "m-333333333333" })).status, "failed");
-    assert.equal(calls, 1);
+    assert.equal(calls, 2);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

@@ -12,7 +12,7 @@ import type { SeriesRecord } from "./series-store.js";
 
 const SERIES_SHOWRUNNER_CONTRACT_VERSION = "series-showrunner-v2|role-audit-v9|series-roadmap-validator-v1|single-initial-audit-v1";
 const SERIES_GREENLIGHT_CONTRACT_VERSION = "series-greenlight-v2|role-audit-v9|series-roadmap-validator-v1|single-initial-audit-v1";
-const SERIES_REVISION_CONTRACT_VERSION = "series-episode-revision-v1|series-roadmap-validator-v1";
+const SERIES_REVISION_CONTRACT_VERSION = "series-episode-revision-v2|series-roadmap-validator-v1";
 
 export interface SeriesPlanningResult {
   drafts: SeriesEpisodeDraft[];
@@ -232,15 +232,15 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
     const model = await this.selectedModel?.();
     const request = {
       series: seriesPlanningContext(series),
-      planningWindow: { startEpisodeNumber: episode.episodeNumber, count: 1 },
+      planningWindow: { startEpisodeNumber: episode.episodeNumber, count: 1, mode: "revise" },
       targetEpisode: {
         ...episodeDraft(episode),
-        contentVersionId: episode.contentVersionId,
         inheritedFromPrevious: [...(episode.continuity.inheritedFromPrevious ?? [])],
       },
-      revision: instruction,
+      revision: { instruction },
     };
-    const checkpointKey = roleAgentCheckpointKey({ request, model, contractVersion: SERIES_REVISION_CONTRACT_VERSION });
+    // 不可变版本用于宿主恢复身份，不是模型应改写的创作字段；不能泄漏进严格的 targetEpisode 合同。
+    const checkpointKey = roleAgentCheckpointKey({ request, model, contentVersionId: episode.contentVersionId, contractVersion: SERIES_REVISION_CONTRACT_VERSION });
     const execution = await runRoleAgentLoop<{ episodes: SeriesEpisodeDraft[] }>({
       role: "系列总编",
       contractVersion: SERIES_REVISION_CONTRACT_VERSION,
@@ -332,7 +332,7 @@ export function parseSeriesRoadmapOutput(
     const episodeNumber = integer(entry.episodeNumber, `episode ${index + 1} number`);
     if (episodeNumber !== startEpisodeNumber + index) throw new Error("Series roadmap episode numbers must match the requested window.");
     const pillar = text(entry.pillar, `episode ${episodeNumber} pillar`);
-    if (!allowedPillars.includes(pillar)) throw new Error(`Series roadmap episode ${episodeNumber} uses an unknown pillar.`);
+    if (allowedPillars.length > 0 && !allowedPillars.includes(pillar)) throw new Error(`Series roadmap episode ${episodeNumber} uses an unknown pillar.`);
     return {
       episodeNumber,
       pillar,

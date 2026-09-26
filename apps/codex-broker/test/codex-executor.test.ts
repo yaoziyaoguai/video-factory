@@ -854,7 +854,7 @@ describe("parseTaskRequest", () => {
 
     const mismatched = seriesRoadmapRequest();
     mismatched.payload.planningWindow = { startEpisodeNumber: 2, count: 1, mode: "greenlight" };
-    mismatched.payload.targetEpisode = {
+    const targetEpisode = {
       episodeNumber: 3,
       pillar: "成本复盘",
       title: "错误集数",
@@ -865,7 +865,16 @@ describe("parseTaskRequest", () => {
       toNext: [],
       inheritedFromPrevious: [],
     };
-    await assert.rejects(async () => parseTaskRequest(mismatched), (error: unknown) => assertTerminal(error, /must match the single greenlight/));
+    mismatched.payload.targetEpisode = targetEpisode;
+    await assert.rejects(async () => parseTaskRequest(mismatched), (error: unknown) => assertTerminal(error, /must match the single-episode/));
+    mismatched.payload.planningWindow = { startEpisodeNumber: 2, count: 1, mode: "revise" };
+    await assert.rejects(async () => parseTaskRequest(mismatched), (error: unknown) => assertTerminal(error, /must match the single-episode/));
+    mismatched.payload.targetEpisode = { ...targetEpisode, episodeNumber: 2 };
+    await assert.rejects(async () => parseTaskRequest(mismatched), (error: unknown) => assertTerminal(error, /revision.instruction is required/));
+    mismatched.payload.revision = { instruction: "调整本集标题" };
+    const revised = parseTaskRequest(mismatched);
+    assert.match(buildTaskPrompt(revised), /这是用户主动改稿，不是开拍审批/);
+    assert.doesNotMatch(buildTaskPrompt(revised), /greenlightInstruction/);
   });
 
   it("rejects wrong protocol versions, unknown kinds, and missing payload fields", async () => {

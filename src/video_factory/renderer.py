@@ -56,7 +56,8 @@ def write_render_manifest(
             {
                 "position": scene["position"],
                 "duration": scene["duration"],
-                "text": scene["narration"],
+                # 与配音一致：纯标点代表留白，不把它印成悬空的字幕。
+                "text": scene["narration"] if any(character.isalnum() for character in scene["narration"]) else "",
                 "visual_strategy": scene["visual_strategy"],
                 "visual_prompt": scene["visual_prompt"],
             }

@@ -95,6 +95,15 @@ export class SeriesPlanner {
   private ruleDrafts(series: SeriesRecord, count: number, firstNumber: number): SeriesEpisodeDraft[] {
     return Array.from({ length: count }, (_, offset) => {
       const episodeNumber = firstNumber + offset;
+      if (series.pillars.length === 0) return {
+        episodeNumber,
+        pillar: series.name,
+        title: `${series.name} ${String(episodeNumber).padStart(2, "0")}｜待策划`,
+        viewerPromise: series.premise,
+        hook: `第 ${episodeNumber} 集开场待创作，请生成路线图或手工填写。`,
+        payoff: "本集具体兑现待创作者确认，不把占位内容当成已完成策划。",
+        fromPrevious: [], toNext: [],
+      };
       const pillar = series.pillars[(episodeNumber - 1) % series.pillars.length] ?? series.premise;
       const lens = EPISODE_LENSES[(episodeNumber - 1) % EPISODE_LENSES.length] ?? EPISODE_LENSES[0]!;
       const episode = String(episodeNumber).padStart(2, "0");

@@ -37,7 +37,7 @@ export function configuredModelRequest(config: ModelConnectionInput, prompt: str
         ...images.map((image) => ({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${image.toString("base64")}` } })),
         ...(audioData ? [{ type: "input_audio", input_audio: { data: audioData, format: "mp3" } }] : []),
       ] : prompt }],
-      ...(audio ? { modalities: ["text"] } : {}),
+      ...(audio ? { modalities: ["text"], stream_options: { include_usage: true } } : {}),
       max_tokens: config.maxOutputTokens,
       ...(config.reasoningEffort ? { reasoning_effort: config.reasoningEffort } : {}),
       stream: true,

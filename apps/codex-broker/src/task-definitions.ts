@@ -52,6 +52,13 @@ export const CREATIVE_TREATMENT_BRIEF_FIELDS = [
 ] as const;
 
 export const BROKER_TASK_INPUT_CONTRACTS = {
+  "series-roadmap": {
+    version: "video-factory/series-roadmap-input-v2",
+    fields: ["series", "planningWindow", "targetEpisode", "revision"],
+    modes: ["greenlight", "revise"],
+    targetEpisodeFields: ["episodeNumber", "pillar", "title", "viewerPromise", "hook", "payoff", "fromPrevious", "toNext", "inheritedFromPrevious"],
+    revision: "bounded-object; revise mode requires instruction; contentVersionId is host-only",
+  },
   "audio-review": { version: "video-factory/audio-review-input-v1", fields: ["durationMs", "audioSha256", "audioBase64", "frames", "reviewContext"], format: "mp3", maxAudioBytes: 5242880 },
   "topic-ideas": {
     version: "video-factory/topic-ideas-input-v4",
@@ -139,6 +146,7 @@ const TOPIC_IDEAS_DIRECTIVE = [
 
 const SERIES_ROADMAP_DIRECTIVE = [
   "你是长期视频栏目的系列总编。交付有顺序、能持续制作的单集路线图，不是把一组标题批量换措辞。",
+  "series.pillars 为空表示创作者没有限定内容支柱，可以根据承诺和受众提出各集方向；非空时保留已确认支柱。tone、visualStyle 为空也表示未限定，不能后台补成固定的实验教程、纪实或人物近景套路；本次建议不是创作者已经确认的长期要求。",
   "series bible 是长期规则，canon 只包含已经内部定版的事实，roadmap 是未来创作意图。不得把计划、预告、悬念或未来人物状态写成已发生事实。",
   "每集同时具备独立的 viewerPromise 和对本季篇章的推进：只看本集也有完整收益，连续观看又有新的认识或情绪发展。不能靠‘下集再说’补完本集核心价值。",
   "fromPrevious 承接已知信息，toNext 提供后续可探索的问题；不得改写已经接受的系列受众、圣经、canon 或季目标。",
@@ -156,6 +164,8 @@ const SCREENWRITER_DIRECTIVE = [
   "每个 scene 承担一个主要叙事职责。一个需要连续观看才能成立的动作，可以在同镜内包含准备、变化和结果，不机械拆成多次独立素材调用。静态镜头需要足够阅读或有意停顿时可以保持，否则避免无新增信息地停留。",
   "关键 payoff 在 purpose、visible_action、visual_prompt、旁白与成功条件中形成一致的起点、推进和可见结果。表达类作品的推进不必伪装成可验证的现实实验。",
   "旁白按真实朗读组织：优先交代谁、什么东西、发生了什么，再给必要解释。一句尽量承担一个主要意思；连续出现抽象名词、三层以上定语或多个转折时，先改写成具体动作或分句。必要术语和事实限定保留，不用加速配音掩盖难读。",
+  "先形成连贯的整段旁白，再按自然语义分配到镜头：后一句推进或回应前一句，不能每切一镜就重新介绍眼前素材。不得机械重复'这是、然后、最后'来假装衔接，也不能把一个未完的分句切成两次孤立配音。",
+  "当前配音逐镜合成，并在每镜起点开始，剩余画面时长会补静音；不支持旁白自动跨镜或背景音乐填充。结合语速估计自然朗读长度，避免一两秒话配十秒空等；有意留白必须在 sound_cue 和 purpose 说明观看作用，纯静默镜 narration 只用省略号留白标记，该标记不朗读、不显示为字幕。不能通过额外废话、过快语速或取消用户明确留白来凑时长；预计空白不合理时先重配镜头时长与叙事。",
   "narration 只写观众应听到的话；purpose、success_criteria、failure_conditions 写制作与验收要求。不要把'建立认知、完成验证、形成闭环、提供可执行方法'等内部描述直接复制成旁白，除非它们就是本片需要解释的专业概念。",
   "读取 brief.voiceTiming 与 productionCapabilities.audio，把语速和停顿当作自然时长规划依据而非精确字秒公式；当前不支持的音乐、拟音和多轨不能写成必需执行项。",
   "屏幕文字在实际镜头时长内可读。需要观众先预测或选择时，在揭示之前给出提示并留出至少一秒阅读；不要在最后半秒同时放完整规则和提问。声音提示是后续制作意图，不是音轨已存在的证明。",

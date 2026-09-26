@@ -2921,9 +2921,8 @@ export function parseStudioSeriesInput(value: unknown): StudioSeriesInput {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(track)) {
     throw new StudioInputError("系列标识只能使用小写字母、数字和连字符。");
   }
-  if (!Array.isArray(input.pillars)) throw new StudioInputError("内容支柱格式不正确。");
-  const pillars = input.pillars.map((pillar, index) => requiredTrimmedString(pillar, `第 ${index + 1} 个内容支柱`));
-  if (pillars.length < 2) throw new StudioInputError("系列至少需要两个内容支柱。");
+  if (input.pillars !== undefined && !Array.isArray(input.pillars)) throw new StudioInputError("内容支柱格式不正确。");
+  const pillars = (input.pillars ?? []).map((pillar: unknown, index: number) => requiredTrimmedString(pillar, `第 ${index + 1} 个内容支柱`));
   if (pillars.length > 8) throw new StudioInputError("系列最多支持八个内容支柱。");
   const continuityRules = input.continuityRules === undefined
     ? undefined
@@ -2952,8 +2951,8 @@ export function parseStudioSeriesInput(value: unknown): StudioSeriesInput {
     category: category as StudioTopicCategory,
     track,
     pillars,
-    tone: requiredTrimmedString(input.tone, "表达语气"),
-    visualStyle: requiredTrimmedString(input.visualStyle, "视觉方向"),
+    tone: optionalString(input.tone) ?? "",
+    visualStyle: optionalString(input.visualStyle) ?? "",
     ...(input.seasonTitle === undefined ? {} : { seasonTitle: requiredTrimmedString(input.seasonTitle, "本季名称") }),
     ...(input.seasonArc === undefined ? {} : { seasonArc: requiredTrimmedString(input.seasonArc, "本季篇章") }),
     ...(input.planningPeriod === undefined ? {} : { planningPeriod: requiredTrimmedString(input.planningPeriod, "计划周期") }),

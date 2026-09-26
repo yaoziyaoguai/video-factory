@@ -12,15 +12,17 @@ export function AudioReviewPanel({ value }: { value: unknown }) {
   </section>;
   try {
     const report = validateAudioReviewReport(item.report, String(item.audioSha256), Number(item.durationMs));
+    const hasAudibleObservation = AUDIO_REVIEW_CHECKS.filter((key) => key !== "audiovisual_alignment")
+      .some((key) => report.checks[key] === "pass" || report.checks[key] === "issue");
     return <section className="independent-review-panel" aria-label="声音审片">
-      <header><strong>声音审片 · 报告已返回</strong><small>{String(item.modelLabel ?? item.modelId)}</small></header>
+      <header><strong>声音审片 · {hasAudibleObservation ? "报告已返回" : "未完成有效审听"}</strong><small>{String(item.modelLabel ?? item.modelId ?? "模型身份未记录")}</small></header>
       <p>{report.summary}</p>
       <dl>{AUDIO_REVIEW_CHECKS.map((key) => <div key={key}><dt>{LABELS[key]}</dt><dd>{RESULTS[report.checks[key]]}</dd></div>)}</dl>
       {report.findings.length ? <ul>{report.findings.map((finding, index) => <li key={index}>
         <strong>{(finding.startMs / 1000).toFixed(1)}–{(finding.endMs / 1000).toFixed(1)} 秒 · {LABELS[finding.category]}</strong>
         <p>{finding.observation}</p><p>建议：{finding.suggestion}</p>
       </li>)}</ul> : null}
-      <small>检查依据是本版成片混合音轨及抽帧，不代表逐帧口型已核实。采纳意见与继续制作由你决定。</small>
+      <small>{hasAudibleObservation ? "检查依据是本版成片混合音轨及抽帧，不代表逐帧口型已核实。" : "报告已保存，但没有可用的听觉观察，不能据此认定声音质量已检查。"}采纳意见与继续制作由你决定。</small>
     </section>;
   } catch {
     return <section className="independent-review-panel" aria-label="声音审片"><strong>声音报告不可验证</strong><p>音轨绑定或时间范围不合法，不能据此认定声音通过。</p></section>;

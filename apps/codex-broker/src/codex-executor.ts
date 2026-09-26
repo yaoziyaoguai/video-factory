@@ -264,7 +264,7 @@ export interface SeriesRoadmapPayload {
   planningWindow: {
     startEpisodeNumber: number;
     count: number;
-    mode?: "greenlight";
+    mode?: "greenlight" | "revise";
   };
   targetEpisode?: {
     episodeNumber: number;
@@ -701,19 +701,22 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
     };
   }
   if (kind === "series-roadmap") {
-    assertExactKeys(record, ["series", "planningWindow", "targetEpisode", "revision"], "payload");
+    assertExactKeys(record, BROKER_TASK_INPUT_CONTRACTS["series-roadmap"].fields, "payload");
     const planningWindow = requireSeriesPlanningWindow(record.planningWindow);
     const targetEpisode = record.targetEpisode === undefined ? undefined : requireSeriesTargetEpisode(record.targetEpisode);
-    if (planningWindow.mode === "greenlight" && !targetEpisode) {
-      throw new CodexExecutorError("payload.targetEpisode is required in greenlight mode.", false);
+    if (planningWindow.mode && !targetEpisode) {
+      throw new CodexExecutorError("payload.targetEpisode is required in greenlight or revise mode.", false);
     }
-    if (planningWindow.mode !== "greenlight" && targetEpisode) {
-      throw new CodexExecutorError("payload.targetEpisode is only allowed in greenlight mode.", false);
+    if (!planningWindow.mode && targetEpisode) {
+      throw new CodexExecutorError("payload.targetEpisode is only allowed in greenlight or revise mode.", false);
     }
     if (targetEpisode && (planningWindow.count !== 1 || targetEpisode.episodeNumber !== planningWindow.startEpisodeNumber)) {
-      throw new CodexExecutorError("payload.targetEpisode must match the single greenlight planning window.", false);
+      throw new CodexExecutorError("payload.targetEpisode must match the single-episode planning window.", false);
     }
     const revision = record.revision === undefined ? undefined : boundedRecord(record.revision, "payload.revision", 192 * 1024);
+    if (planningWindow.mode === "revise" && (typeof revision?.instruction !== "string" || !revision.instruction.trim())) {
+      throw new CodexExecutorError("payload.revision.instruction is required in revise mode.", false);
+    }
     return {
       kind,
       payload: {
@@ -1532,7 +1535,9 @@ export function buildTaskPrompt(
       planningWindow: task.payload.planningWindow,
       ...(task.payload.targetEpisode ? {
         targetEpisode: task.payload.targetEpisode,
-        greenlightInstruction: "先审原计划；仅在违反最新 Canon、Series Bible、前集正式交接或本集独立兑现时修订。fromPrevious 是创作者拥有的输入，必须逐字逐项返回，Agent 不得改写。",
+        ...(task.payload.planningWindow.mode === "revise"
+          ? { revisionInstruction: "按 revision.instruction 修改这一集的创作内容，保留未受影响内容；这是用户主动改稿，不是开拍审批，不要求原稿先有审计问题。fromPrevious 属于创作者，必须逐字逐项保留。" }
+          : { greenlightInstruction: "先审原计划；仅在违反最新 Canon、Series Bible、前集正式交接或本集独立兑现时修订。fromPrevious 是创作者拥有的输入，必须逐字逐项返回，Agent 不得改写。" }),
       } : {}),
       ...(task.payload.revision ? { revision: task.payload.revision } : {}),
     };
@@ -1930,15 +1935,15 @@ function requireSeriesPlanningWindow(value: unknown): SeriesRoadmapPayload["plan
   if (!Number.isSafeInteger(count) || count < 1 || count > 24) {
     throw new CodexExecutorError("payload.planningWindow.count must be an integer between 1 and 24.", false);
   }
-  if (record.mode !== undefined && record.mode !== "greenlight") {
-    throw new CodexExecutorError("payload.planningWindow.mode must be greenlight when provided.", false);
+  if (record.mode !== undefined && !BROKER_TASK_INPUT_CONTRACTS["series-roadmap"].modes.some((mode) => mode === record.mode)) {
+    throw new CodexExecutorError("payload.planningWindow.mode must be greenlight or revise when provided.", false);
   }
-  return { startEpisodeNumber, count, ...(record.mode === "greenlight" ? { mode: "greenlight" as const } : {}) };
+  return { startEpisodeNumber, count, ...(record.mode === "greenlight" || record.mode === "revise" ? { mode: record.mode } : {}) };
 }
 
 function requireSeriesTargetEpisode(value: unknown): NonNullable<SeriesRoadmapPayload["targetEpisode"]> {
   const record = requireRecord(value, "payload.targetEpisode");
-  assertExactKeys(record, ["episodeNumber", "pillar", "title", "viewerPromise", "hook", "payoff", "fromPrevious", "toNext", "inheritedFromPrevious"], "payload.targetEpisode");
+  assertExactKeys(record, BROKER_TASK_INPUT_CONTRACTS["series-roadmap"].targetEpisodeFields, "payload.targetEpisode");
   const episodeNumber = Number(record.episodeNumber);
   if (!Number.isSafeInteger(episodeNumber) || episodeNumber < 1 || episodeNumber > 10_000) {
     throw new CodexExecutorError("payload.targetEpisode.episodeNumber must be an integer between 1 and 10000.", false);

@@ -57,6 +57,8 @@ test(`configured audio executor sends actual MP3 bytes and timecoded frames usin
       assert.equal(body.model, "native-audio");
       const parts = body.messages[0].content;
       encodedAudio = parts.find((item: { type: string }) => item.type === "input_audio").input_audio.data;
+      assert.match(parts.find((item: { type: string }) => item.type === "text").text, /input_audio.*音频附件/);
+      assert.deepEqual(body.stream_options, { include_usage: true });
       assert.deepEqual(body.modalities, ["text"]);
       assert.ok(parts.some((item: { type: string }) => item.type === "image_url"));
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ audioSha256: sha(audio), summary: "证据传输测试", checks: Object.fromEntries(AUDIO_REVIEW_CHECKS.map((key) => [key, "not_observed"])), findings: [] }) }, finish_reason: "stop" }] }), { headers: { "content-type": "application/json" } });

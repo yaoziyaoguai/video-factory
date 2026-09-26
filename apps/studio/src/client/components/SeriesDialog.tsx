@@ -32,9 +32,9 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
         platform: valueOr(data, "platform", "douyin"),
         category: valueOr(data, "category", inferSeriesCategory(`${name} ${required(data, "premise")}`)),
         track: seriesTrack(name),
-        pillars: [valueOr(data, "pillar1", "真实问题拆解"), valueOr(data, "pillar2", "方法与结果复盘")],
-        tone: valueOr(data, "tone", "克制、具体、有结论"),
-        visualStyle: valueOr(data, "visualStyle", "真实操作、人物反应与环境细节"),
+        pillars: [valueOr(data, "pillar1", ""), valueOr(data, "pillar2", "")].filter(Boolean),
+        tone: valueOr(data, "tone", ""),
+        visualStyle: valueOr(data, "visualStyle", ""),
         seasonTitle: valueOr(data, "seasonTitle", "第一季"),
         seasonArc: valueOr(data, "seasonArc", required(data, "premise")),
         planningPeriod: valueOr(data, "planningPeriod", currentQuarterLabel()),
@@ -55,7 +55,7 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
     }}>
       <section ref={dialogRef} className="run-dialog series-dialog" role="dialog" aria-modal="true" aria-labelledby="series-dialog-title" tabIndex={-1}>
         <header className="dialog-header">
-          <div><p className="eyebrow">系列策划</p><h2 id="series-dialog-title">创建系列</h2><p>只填三项就能开始，系统会先补齐一套适合这个系列的制作默认值。</p></div>
+          <div><p className="eyebrow">系列策划</p><h2 id="series-dialog-title">创建系列</h2><p>只填三项就能开始。未填写的风格和内容方向交给角色提出建议，再由你决定。</p></div>
           <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
         <form
@@ -79,10 +79,10 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
               <label className="field"><span>本季目标集数</span><input name="targetEpisodeCount" type="number" min="1" max="100" defaultValue="12" /></label>
               <label className="field"><span>首发平台</span><select name="platform" defaultValue="douyin"><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option><option value="bilibili">哔哩哔哩</option></select></label>
               <label className="field"><span>内容分类</span><select name="category" defaultValue=""><option value="">自动判断</option><option value="technology">科技</option><option value="lifestyle">生活</option><option value="finance-career">财经职场</option><option value="society">社会</option><option value="health-sports">健康体育</option><option value="education">教育</option><option value="entertainment">文娱</option><option value="local-culture">华人地方</option><option value="food">美食</option><option value="travel">文旅出行</option><option value="gaming">游戏电竞</option><option value="automotive">汽车</option><option value="fashion-beauty">时尚美妆</option><option value="parenting">亲子家庭</option><option value="agriculture-rural">三农乡村</option></select></label>
-              <label className="field"><span>表达语气</span><input name="tone" defaultValue="克制、具体、有结论" /></label>
-              <label className="field"><span>内容支柱 1</span><input name="pillar1" defaultValue="真实问题拆解" /></label>
-              <label className="field"><span>内容支柱 2</span><input name="pillar2" defaultValue="方法与结果复盘" /></label>
-              <label className="field field-wide"><span>视觉方向</span><input name="visualStyle" defaultValue="真实操作、人物反应与环境细节" /></label>
+              <label className="field"><span>表达语气</span><input name="tone" placeholder="可不填，由角色根据系列承诺建议" /></label>
+              <label className="field"><span>内容支柱 1</span><input name="pillar1" placeholder="可选：系列长期想探索的方向" /></label>
+              <label className="field"><span>内容支柱 2</span><input name="pillar2" placeholder="可选：另一条内容方向" /></label>
+              <label className="field field-wide"><span>视觉方向</span><input name="visualStyle" placeholder="可不填；填写后作为你的明确要求" /></label>
               <label className="field field-wide"><span>连续性规则</span><textarea name="continuityRules" rows={3} placeholder={'每行一条，例如：每集必须承接上一集结论\n固定片头只保留 2 秒'} /></label>
             </div>
           </details>

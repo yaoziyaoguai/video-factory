@@ -9,12 +9,13 @@ import type { ConnectedModel } from "./model-connections.js";
 
 const execFile = promisify(execFileCallback);
 const sha = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
+type LowLevelInterval = { startMs: number; endMs: number };
 
 export class AudioReviewService {
   constructor(private readonly options: {
     connections: () => ConnectedModel[];
     media: VisualReviewMediaPreprocessor;
-    extract?: (video: string, output: string) => Promise<void>;
+    extract?: (video: string, output: string) => Promise<void | LowLevelInterval[]>;
   }) {}
 
   wrap(agent: VisualReviewAgent): VisualReviewAgent {
@@ -54,7 +55,7 @@ export class AudioReviewService {
       temporary = await mkdtemp(path.join(root, ".audio-review-"));
       const output = path.join(temporary, "soundtrack.mp3");
       phase = "提取成片音轨（检查 ffmpeg 和成片是否包含音轨）";
-      await (this.options.extract ?? extractAudio)(video, output);
+      const lowLevelIntervals = await (this.options.extract ?? extractAudio)(video, output);
       const size = (await stat(output)).size;
       if (size < 4 || size > 5 * 1024 * 1024) return { status: "not_reviewed", reason: "音轨为空或超过单次审听大小上限；没有截断音轨冒充全片已审听。" };
       const audio = await readFile(output);
@@ -65,11 +66,26 @@ export class AudioReviewService {
       if (scriptPath && !scriptPath.startsWith(`${root}${path.sep}`)) throw new Error("Unconfined script input.");
       if (scriptPath && (await stat(scriptPath)).size > 192 * 1024) throw new Error("Audio review context is too large.");
       const script = scriptPath ? JSON.parse(await readFile(scriptPath, "utf8")) as unknown : undefined;
-      const payload = {
+      const identityPayload = {
         durationMs: media.durationMs, audioSha256, audioBase64: audio.toString("base64"), frames: media.frames,
         reviewContext: { videoSha256, ...(script ? { script } : {}), evidenceBoundary: "实际成片混合音轨；画面仅为带时间码的抽帧，不支持确认逐帧口型同步。" },
       };
-      const requestId = `sound-${sha(JSON.stringify({ model: selected.model.id, payload }))}`;
+      // 新增的本地测量不能让部署后的恢复另开付费请求，旧证据身份仍优先查询原记录。
+      const requestId = `sound-${sha(JSON.stringify({ model: selected.model.id, payload: identityPayload }))}`;
+      const payload = {
+        ...identityPayload,
+        reviewContext: {
+          ...identityPayload.reviewContext,
+          audioEvidence: {
+            attachmentType: "input_audio", format: "mp3",
+            ...(lowLevelIntervals ? {
+              measurement: "ffmpeg silencedetect; noise=-40dB; minimum=0.5s; mixed soundtrack, not speech recognition",
+              lowLevelIntervals: lowLevelIntervals.map(({ startMs, endMs }) => ({ startMs, endMs: Math.min(endMs, media.durationMs) }))
+                .filter(({ startMs, endMs }) => endMs > startMs),
+            } : {}),
+          },
+        },
+      };
       const directory = path.join(root, ".audio-review-requests");
       await mkdir(directory, { recursive: true, mode: 0o700 });
       const checkpointPath = path.join(directory, `${requestId}.json`);
@@ -104,15 +120,27 @@ export class AudioReviewService {
     } catch (error) {
       if (error instanceof CodexBridgeError) return {
         status: error.stage === "uncertain" ? "uncertain" : "failed",
-        reason: error.stage === "uncertain" ? "声音审片请求结果待核实，已保存原请求；不会自动更换模型或重新消费。" : `声音审片未完成（${error.stage}）。原请求和证据已保留，不影响查看视觉意见。`,
+        reason: error.stage === "uncertain" ? "声音审片请求结果待核实，已保存原请求；不会自动更换模型或重新消费。" : "声音审片未完成，模型服务未返回可验证的报告。原请求和证据已保留，不影响查看视觉意见。",
       };
       return { status: "failed", reason: `${phase}失败；未判定审听通过。视觉意见仍可查看，不会自动重新生成素材。` };
     } finally { if (temporary) await rm(temporary, { recursive: true, force: true }); }
   }
 }
 
-async function extractAudio(video: string, output: string): Promise<void> {
-  await execFile("ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", video, "-map", "0:a:0", "-vn", "-c:a", "libmp3lame", "-b:a", "128k", output], {
+async function extractAudio(video: string, output: string): Promise<LowLevelInterval[]> {
+  // 检测滤镜不改变音轨或时间线；测量只辅助定位，不能代替听感或判定有意留白。
+  const { stderr } = await execFile("ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "info", "-i", video, "-map", "0:a:0", "-vn", "-af", "silencedetect=noise=-40dB:d=0.5", "-c:a", "libmp3lame", "-b:a", "128k", output], {
     timeout: 120_000, maxBuffer: 64 * 1024,
   });
+  const intervals: LowLevelInterval[] = [];
+  let startMs: number | undefined;
+  for (const match of stderr.matchAll(/silence_(start|end):\s*(\d+(?:\.\d+)?)/g)) {
+    const timeMs = Math.round(Number(match[2]) * 1000);
+    if (match[1] === "start") startMs = timeMs;
+    else if (startMs !== undefined && timeMs > startMs) {
+      intervals.push({ startMs, endMs: timeMs });
+      startMs = undefined;
+    }
+  }
+  return intervals;
 }

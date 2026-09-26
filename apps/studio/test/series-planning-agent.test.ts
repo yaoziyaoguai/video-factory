@@ -12,6 +12,9 @@ import {
 } from "@video-factory/production-pipeline";
 import { CodexSeriesPlanningAgent, parseSeriesRoadmapOutput } from "../src/server/series-planning-agent.js";
 import type { SeriesRecord } from "../src/server/series-store.js";
+import { SeriesPlanner } from "../src/server/series-planner.js";
+import { parseTaskRequest, CODEX_BRIDGE_PROTOCOL_VERSION } from "../../codex-broker/src/codex-executor.js";
+import { taskContractDescriptorFor } from "../../codex-broker/src/task-definitions.js";
 
 const series: SeriesRecord = {
   id: "series-1",
@@ -177,6 +180,9 @@ describe("CodexSeriesPlanningAgent", () => {
   });
 
   it("rejects duplicate promises and pillars outside the series bible", () => {
+    const suggested = draft(1, "城市情绪", "停下的那几秒", "重新感受日常");
+    assert.deepEqual(parseSeriesRoadmapOutput({ episodes: [suggested] }, [], 1, 1), { episodes: [suggested] });
+    assert.throws(() => parseSeriesRoadmapOutput({ episodes: [suggested] }, ["只做科普"], 1, 1), /unknown pillar/);
     assert.throws(() => parseSeriesRoadmapOutput({ episodes: [
       draft(1, "未定义支柱", "第一集", "同一个承诺"),
       draft(2, "真实任务实验", "第二集", "同一个承诺"),
@@ -485,6 +491,33 @@ function preparedOperation(kind: CodexTaskKind, payload: unknown, requestId: str
     taskFact: "not_submitted",
   };
 }
+
+it("episode revision crosses the real Broker input contract while version identity stays host-owned", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "vf-series-revision-contract-"));
+  const requestIds: string[] = [];
+  class ContractClient extends CodexBridgeClient {
+    constructor() { super({ socketPath: "/unused/contract-test" }); }
+    override async runTaskDetailed(kind: CodexTaskKind, payload: unknown, requestId?: string): Promise<CodexTaskExecution> {
+      assert.equal(kind, "series-roadmap", "revision must not silently trigger an audit");
+      const task = parseTaskRequest({ kind, payload, protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION, expectedContractDigest: taskContractDescriptorFor(kind).digest },
+        { profileId: "deepseek", providerId: "deepseek", modelId: "deepseek-flash", taskKinds: ["series-roadmap"] });
+      assert.equal(task.kind, "series-roadmap");
+      requestIds.push(requestId!);
+      return { output: { episodes: [draft(1, series.pillars[0]!, "改好的标题", "保留本集承诺")] } };
+    }
+  }
+  const episode = { ...new SeriesPlanner().planEpisodes(series, 1)[0]!, contentVersionId: "version-a" };
+  try {
+    const agent = new CodexSeriesPlanningAgent(new ContractClient(), directory);
+    const result = await agent.reviseEpisode(series, episode, "改标题");
+    assert.equal(result.draft.title, "改好的标题");
+    assert.equal(result.planning.auditIterations, 0);
+    await agent.reviseEpisode(series, episode, "改标题");
+    assert.equal(requestIds.length, 1, "same accepted request resumes without another call");
+    await agent.reviseEpisode(series, { ...episode, contentVersionId: "version-b" }, "改标题");
+    assert.equal(new Set(requestIds).size, 2, "another immutable version must not reuse an old revision result");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 function draft(episodeNumber: number, pillar: string, title: string, viewerPromise: string) {
   return {

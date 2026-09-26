@@ -13,6 +13,15 @@ test("invalid audio evidence cannot be displayed as heard", () => {
   expect(screen.getByText("声音报告不可验证")).toBeInTheDocument();
 });
 
+test("a valid report with no audible observations is explicitly marked unverified", () => {
+  const hash = "a".repeat(64);
+  render(<AudioReviewPanel value={{ status: "completed", audioSha256: hash, durationMs: 10000, report: {
+    audioSha256: hash, summary: "没有听觉证据", checks: Object.fromEntries(AUDIO_REVIEW_CHECKS.map((key) => [key, "not_observed"])), findings: [],
+  } }} />);
+  expect(screen.getByText("声音审片 · 未完成有效审听")).toBeInTheDocument();
+  expect(screen.queryByText(/检查依据是本版成片混合音轨/)).toBeNull();
+});
+
 test("completed report distinguishes observations, uncertainty and timed actionable findings", () => {
   const hash = "a".repeat(64);
   render(<AudioReviewPanel value={{ status: "completed", audioSha256: hash, durationMs: 10000, modelLabel: "审听模型", report: {

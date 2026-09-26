@@ -5,6 +5,17 @@ import { describe, expect, it } from "vitest";
 import { NodeDeliveryPreview } from "../src/client/components/NodeDeliveryPreview.js";
 
 describe("NodeDeliveryPreview", () => {
+  it("shows inserted silence separately from authored silent scenes without changing the cut", () => {
+    render(<NodeDeliveryPreview nodeId="voice" value={{ duration: 20, scenes: [
+      { position: 1, narration: "别急着喝。", duration: 10, speech_duration: 4.5 },
+      { position: 2, narration: "……", duration: 4, speech_duration: 0 },
+      { position: 3, narration: "把这一刻留长一点。", duration: 6, speech_duration: 3.7 },
+    ] }} />);
+    expect(screen.getByRole("region", { name: "配音与画面节奏" })).toBeInTheDocument();
+    expect(screen.getByText(/补齐画面的静音约 5.5 秒/)).toBeInTheDocument();
+    expect(screen.getByText(/脚本明确留白 4.0 秒/)).toBeInTheDocument();
+    expect(screen.getByText(/实际停顿还可能包含配音本身的首尾静音/)).toBeInTheDocument();
+  });
   it("shows new stock sources, original credits and unknown dimensions honestly", () => {
     const { container } = render(<NodeDeliveryPreview nodeId="asset-candidates" value={{ scene_candidates: [{
       scene_position: 1, candidates: [

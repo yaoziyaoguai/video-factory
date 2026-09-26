@@ -58,7 +58,9 @@ export function SeriesEpisodeDialog({ open, series, episode, onClose, onSubmit }
           <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
         <form className="run-form series-episode-form" onSubmit={submit}>
-          <label className="field"><span>内容支柱</span><select name="pillar" defaultValue={episode.pillar}>{series.pillars.map((pillar) => <option key={pillar} value={pillar}>{pillar}</option>)}</select></label>
+          <label className="field"><span>内容支柱</span>{series.pillars.length
+            ? <select name="pillar" defaultValue={episode.pillar}>{series.pillars.map((pillar) => <option key={pillar} value={pillar}>{pillar}</option>)}</select>
+            : <input name="pillar" defaultValue={episode.pillar} required />}</label>
           <label className="field field-wide"><span>单集标题</span><input name="title" defaultValue={episode.title} required data-dialog-initial-focus /></label>
           <label className="field field-wide"><span>这一集给观众什么</span><textarea name="viewerPromise" defaultValue={episode.viewerPromise} rows={2} required /></label>
           <label className="field field-wide"><span>开场钩子</span><textarea name="hook" defaultValue={episode.hook} rows={2} required /></label>

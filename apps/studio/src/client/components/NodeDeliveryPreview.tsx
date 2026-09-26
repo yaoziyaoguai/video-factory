@@ -233,6 +233,7 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
 
   return (
     <div className="node-readable-preview">
+      {viewId === "voice" && !inputPreview ? <VoiceTimingPreview scenes={record.scenes} /> : null}
       {primary.length ? <dl className="node-preview-summary">{primary.map((key) => (
         <div key={key}><dt>{fieldLabel(key, viewId)}</dt><dd>{formatScalar(record[key], key)}</dd></div>
       ))}</dl> : null}
@@ -251,6 +252,26 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
       {collections.map((entry) => <CollectionPreview collectionKey={entry.key} items={entry.value} viewId={viewId} key={entry.key} />)}
     </div>
   );
+}
+
+function VoiceTimingPreview({ scenes }: { scenes: unknown }) {
+  if (!Array.isArray(scenes) || scenes.length === 0) return null;
+  const timings = scenes.map(asRecord);
+  if (timings.some((scene) => !scene || typeof scene.duration !== "number" || !Number.isFinite(scene.duration) || scene.duration <= 0
+    || typeof scene.speech_duration !== "number" || !Number.isFinite(scene.speech_duration) || scene.speech_duration < 0
+    || scene.speech_duration > scene.duration || typeof scene.narration !== "string")) return null;
+  return <section className="node-preview-section" aria-label="配音与画面节奏">
+    <h4>配音与画面节奏</h4>
+    <ul>{timings.map((scene, index) => {
+      const duration = scene!.duration as number;
+      const speech = scene!.speech_duration as number;
+      const silent = !/[\p{L}\p{N}]/u.test(scene!.narration as string);
+      return <li key={index}>镜头 {index + 1}：{silent
+        ? `脚本明确留白 ${duration.toFixed(1)} 秒`
+        : `配音文件约 ${speech.toFixed(1)} 秒，画面 ${duration.toFixed(1)} 秒，补齐画面的静音约 ${(duration - speech).toFixed(1)} 秒`}</li>;
+    })}</ul>
+    <p>实际停顿还可能包含配音本身的首尾静音，请连续试听。若听起来断裂，可返回脚本调整句子与镜头时长；若是有意留白，可以保留并继续。系统不会擅自加速配音或缩短已确认的画面。</p>
+  </section>;
 }
 
 function CollectionPreview({ collectionKey, items, viewId }: { collectionKey: string; items: unknown[]; viewId: string }) {

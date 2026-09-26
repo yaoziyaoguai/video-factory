@@ -294,7 +294,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       if (current.revision !== input.expectedRevision) {
         throw new SeriesStoreConflictError("系列路线图已经更新，请刷新后重新编辑。");
       }
-      if (!current.pillars.includes(input.pillar)) {
+      if (current.pillars.length > 0 && !current.pillars.includes(input.pillar)) {
         throw new SeriesStoreConflictError("内容支柱必须来自这个系列已经确认的栏目定义。");
       }
       const episodeIndex = current.episodes.findIndex((episode) => episode.episodeNumber === episodeNumber);
@@ -418,7 +418,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       if ((episode.status !== "planned" && episode.status !== "selected") || episode.runId || episode.runReservation) {
         throw new SeriesStoreConflictError("只有尚未开拍的单集可以执行开拍审计。");
       }
-      if (draft.episodeNumber !== episodeNumber || !current.pillars.includes(draft.pillar)) {
+      if (draft.episodeNumber !== episodeNumber || (current.pillars.length > 0 && !current.pillars.includes(draft.pillar))) {
         throw new SeriesStoreConflictError("开拍审计返回了不属于当前路线图的单集。");
       }
       if (JSON.stringify(draft.fromPrevious) !== JSON.stringify(episode.continuity.fromPrevious)) {
@@ -497,7 +497,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       if (episode.status !== "planned" || episode.runId || episode.runReservation) {
         throw new SeriesStoreConflictError("只有尚未采用和开拍的单集可以修订。");
       }
-      if (draft.episodeNumber !== episodeNumber || !current.pillars.includes(draft.pillar)
+      if (draft.episodeNumber !== episodeNumber || (current.pillars.length > 0 && !current.pillars.includes(draft.pillar))
         || JSON.stringify(draft.fromPrevious) !== JSON.stringify(episode.continuity.fromPrevious)) {
         throw new SeriesStoreConflictError("修订提案与当前单集或已确认承接要求不符；旧稿保留不变。");
       }

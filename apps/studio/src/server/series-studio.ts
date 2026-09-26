@@ -66,7 +66,7 @@ export class SeriesStudio {
             `面向“${input.audience}”持续交付，不因单集热点改变栏目承诺。`,
             ...(continuityRules ?? []),
           ],
-          recurringElements: [input.tone, input.visualStyle],
+          recurringElements: [input.tone, input.visualStyle].filter(Boolean),
           forbiddenChanges: ["不得在没有说明的情况下改写已经建立的事实、人物关系或结论。"],
         },
         canon: { revision: 0, facts: [] },

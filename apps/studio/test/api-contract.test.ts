@@ -369,7 +369,7 @@ describe("series API contracts", () => {
     assert.equal(parsed.targetEpisodeCount, 12);
   });
 
-  it("requires at least two content pillars and a stable track slug", () => {
+  it("accepts unspecified or single-pillar creative directions while retaining structural validation", () => {
     const base = {
       name: "AI 下班实验室",
       premise: "验证真实方法",
@@ -381,7 +381,19 @@ describe("series API contracts", () => {
       tone: "克制",
       visualStyle: "真实操作",
     };
-    assert.throws(() => parseStudioSeriesInput({ ...base, pillars: ["只有一个"] }), /至少需要两个内容支柱/);
+    // 风格和支柱只有用户明确填写才是要求，不再强迫用户凑两个方向。
+    for (const pillars of [undefined, []]) {
+      const parsed = parseStudioSeriesInput({ ...base, pillars, tone: undefined, visualStyle: "  " });
+      assert.deepEqual(parsed.pillars, []);
+      assert.equal(parsed.tone, "");
+      assert.equal(parsed.visualStyle, "");
+    }
+    assert.deepEqual(parseStudioSeriesInput({ ...base, pillars: [" 城市微诗 "] }).pillars, ["城市微诗"]);
+    assert.throws(() => parseStudioSeriesInput({ ...base, pillars: "城市微诗" }), /内容支柱格式/);
+    assert.throws(() => parseStudioSeriesInput({ ...base, pillars: [""] }), /不能为空/);
+    assert.throws(() => parseStudioSeriesInput({ ...base, pillars: Array(9).fill("方向") }), /最多支持八个/);
+    assert.throws(() => parseStudioSeriesInput({ ...base, tone: 42 }), /必须是文字/);
+    assert.throws(() => parseStudioSeriesInput({ ...base, visualStyle: {} }), /必须是文字/);
     assert.throws(() => parseStudioSeriesInput({ ...base, track: "AI 下班" }), /系列标识/);
     assert.throws(() => parseStudioSeriesInput({ ...base, releaseCadence: "daily" }), /更新频率/);
     assert.throws(() => parseStudioSeriesInput({ ...base, targetEpisodeCount: 101 }), /最多支持 100 集/);

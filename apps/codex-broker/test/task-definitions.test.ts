@@ -22,6 +22,14 @@ import {
   paddedLegalCreativeTreatmentOutput,
 } from "./fixtures/creative-treatment.js";
 
+it("screenwriter plans a continuous narration and exposes the real per-shot voice timing boundary", () => {
+  const prompt = taskPromptFor("script-draft").directive;
+  assert.match(prompt, /连贯的整段旁白/);
+  assert.match(prompt, /逐镜合成/);
+  assert.match(prompt, /补静音/);
+  assert.match(prompt, /有意留白/);
+});
+
 function validDirectorPlan() {
   const shot = {
     scenePosition: 1,
