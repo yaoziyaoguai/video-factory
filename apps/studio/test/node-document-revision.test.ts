@@ -278,6 +278,88 @@ async function buildReferenceHarness() {
 }
 
 describe("reference-grammar document commands", () => {
+  it("returns an empty creative history before planning while unknown runs remain not-found", async () => {
+    const harness = await buildReferenceHarness();
+    const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));
+    await store.create(harness.run);
+    const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot,
+      pipeline: documentPipeline(harness.workspaceRoot, harness.runRoot), listProviders: async () => [],
+      archiveStore: { list: async () => ({}), archive: async () => {}, restore: async () => {} } });
+    assert.deepEqual(await studio.creativeReviewHistory(harness.run.id), {
+      runId: harness.run.id, legacyIncomplete: false, entries: [],
+    });
+    await assert.rejects(() => studio.creativeReviewHistory("missing-run"), StudioNotFoundError);
+  });
+
+  it("does not borrow an unrelated retained reference video when the current report has no source link", async () => {
+    const harness = await buildReferenceHarness();
+    const node = harness.run.nodeRuns[0]!;
+    node.artifactIds = ["reference-report"];
+    node.outputState!.versions[0]!.artifactIds = ["reference-report"];
+    const report = harness.run.artifacts.find((artifact) => artifact.id === "reference-report")!;
+    report.parentArtifactIds = [report.id, "missing-artifact"];
+    let calls = 0;
+    (harness.studio as unknown as { options: { referenceGrammarTools: unknown } }).options.referenceGrammarTools = {
+      revise: async () => { calls += 1; return harness.grammar; },
+      auditCurrent: async () => { calls += 1; throw new Error("不可调用"); },
+    };
+    const input = { expectedRunRevision: 7, expectedVersionId: "reference-v1", instruction: "改节奏" };
+    await assert.rejects(() => harness.studio.reviseNodeDocument(harness.run.id, "reference-grammar", input, "creator"), /没有完整留档/);
+    await assert.rejects(() => harness.studio.auditNodeDocumentCurrent(harness.run.id, "reference-grammar", input, "creator"), /没有完整留档/);
+    assert.equal(calls, 0);
+  });
+
+  it("revises and re-audits a joint-planning report whose retained video is a provenance ancestor", async () => {
+    const harness = await buildReferenceHarness();
+    const node = harness.run.nodeRuns[0]!;
+    // 正式 joint-v1 先登记参考视频，当前版本只列报告；修订报告再以旧报告为父产物。
+    node.artifactIds = ["reference-report"];
+    node.outputState!.versions[0]!.artifactIds = ["reference-report"];
+    harness.run.artifacts.find((artifact) => artifact.id === "reference-report")!.parentArtifactIds = ["reference-video"];
+    const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));
+    await store.create(harness.run);
+    const pipeline = documentPipeline(harness.workspaceRoot, harness.runRoot);
+    let revisions = 0;
+    let audits = 0;
+    const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline,
+      listProviders: async () => [],
+      archiveStore: { list: async () => ({}), archive: async () => {}, restore: async () => {} },
+      referenceGrammarTools: {
+        revise: async (input) => {
+          revisions += 1;
+          assert.equal(input.videoPath, harness.videoPath);
+          return { ...input.currentGrammar, summary: `第${revisions}次修订：先近后远。` };
+        },
+        auditCurrent: async (input) => {
+          audits += 1;
+          assert.equal(input.videoPath, harness.videoPath);
+          return { audit: {
+            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+            verdict: "pass", score: 90, summary: "画面顺序有依据。", issues: [], repairInstructions: [],
+            assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"].map(
+              (dimension) => ({ dimension, score: 90, evidence: "关键帧支持描述。" }),
+            ) }],
+          } };
+        },
+      },
+    });
+    for (let i = 0; i < 2; i += 1) {
+      const current = await pipeline.show(harness.run.id);
+      await studio.reviseNodeDocument(current.id, "reference-grammar", {
+        expectedRunRevision: current.revision, expectedVersionId: current.nodeRuns[0]!.outputState!.effectiveVersionId!,
+        instruction: "把画面推进说具体一些。",
+      }, "creator");
+    }
+    assert.equal(revisions, 2);
+    assert.equal(audits, 0, "修订不补审");
+    const revised = await pipeline.show(harness.run.id);
+    await studio.auditNodeDocumentCurrent(revised.id, "reference-grammar", {
+      expectedRunRevision: revised.revision, expectedVersionId: revised.nodeRuns[0]!.outputState!.effectiveVersionId!,
+    }, "creator");
+    assert.equal(audits, 1);
+    assert.deepEqual(JSON.parse(await readFile(harness.grammarPath, "utf8")), harness.grammar);
+  });
+
   it("refuses a changed reference video before revision or audit can call a model", async () => {
     const harness = await buildReferenceHarness();
     let calls = 0;

@@ -528,7 +528,7 @@ export class ProductionStudio {
   }> {
     const reference = brief.referenceVideo;
     if (!reference) throw new StudioConflictError("上一版没有可继承的参考视频，请重新上传。");
-    const artifact = effectiveNodeArtifact(run, "reference-grammar", (candidate) => candidate.kind === "reference_video");
+    const artifact = effectiveReferenceVideoArtifact(run);
     if (!artifact?.uri || !artifact.sha256 || artifact.sizeBytes === undefined) {
       throw new StudioConflictError("上一版参考视频没有完整留档，请重新上传后再制作。");
     }
@@ -1643,7 +1643,7 @@ export class ProductionStudio {
     const output = isRecord(node?.output) ? node.output : undefined;
     const review = isRecord(output?.creativeReviewHistory) ? output.creativeReviewHistory
       : isRecord(output?.creativeReview) ? output.creativeReview : undefined;
-    if (!review || !isRecord(review.stages)) return undefined;
+    if (!review || !isRecord(review.stages)) return { runId, legacyIncomplete: false, entries: [] };
     const entries: StudioCreativeReviewHistory["entries"] = [];
     let legacyIncomplete = false;
     for (const stage of ["treatment", "script", "director"] as const) {
@@ -4627,6 +4627,27 @@ function effectiveNodeArtifact(
   return undefined;
 }
 
+function effectiveReferenceVideoArtifact(run: WorkflowRun<ProductionBrief>): WorkflowRun<ProductionBrief>["artifacts"][number] | undefined {
+  const direct = effectiveNodeArtifact(run, "reference-grammar", (artifact) => artifact.kind === "reference_video");
+  if (direct) return direct;
+  const report = effectiveNodeArtifact(run, "reference-grammar", (artifact) => artifact.kind === "shot_grammar");
+  // joint-v1 的原片在报告前登记；人工/AI 修订以旧报告为父产物。只能沿当前报告的
+  // 真实来源链找原片，不能从整条制作随便取一个同名或历史视频来补齐证据。
+  const byId = new Map(run.artifacts.map((artifact) => [artifact.id, artifact]));
+  const pending = [...(report?.parentArtifactIds ?? [])];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const id = pending.pop()!;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    const artifact = byId.get(id);
+    if (artifact?.producer?.nodeId !== "reference-grammar") continue;
+    if (artifact.kind === "reference_video") return artifact;
+    if (artifact.kind === "shot_grammar") pending.push(...(artifact.parentArtifactIds ?? []));
+  }
+  return undefined;
+}
+
 function legacyNodeArtifact(
   run: WorkflowRun<ProductionBrief>,
   nodeId: string,
@@ -4974,7 +4995,9 @@ function auditIssueTexts(value: unknown): StudioAgentLoopAuditIssue[] {
     const evidence = typeof entry.evidence === "string" ? redactManagedPathText(entry.evidence) : "";
     const repairInstruction = typeof entry.repairInstruction === "string" ? redactManagedPathText(entry.repairInstruction) : "";
     if (!severity || !criterion || !evidence || !repairInstruction) continue;
-    issues.push({ severity, criterion, evidence, repairInstruction });
+    const creatorFields = Object.fromEntries(["creatorTitle", "creatorObservation", "creatorAction"].flatMap((key) =>
+      typeof entry[key] === "string" && entry[key].trim() ? [[key, redactManagedPathText(entry[key])]] : []));
+    issues.push({ severity, criterion, evidence, repairInstruction, ...creatorFields });
     if (issues.length === 12) break;
   }
   return issues;

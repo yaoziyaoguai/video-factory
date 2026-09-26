@@ -411,10 +411,10 @@ body { background: var(--canvas); }
 
 @media (max-width: 1360px) {
   .studio-v3 .director-workspace { grid-template-columns: 250px minmax(420px, 1fr); }
-  .studio-v3 .director-panel { position: static; grid-column: 1 / -1; display: grid; grid-template-columns: 1.1fr 1fr 1fr auto; align-items: start; gap: 0 18px; padding: 0 18px 18px; }
+  .studio-v3 .director-panel { position: static; grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; gap: 0 18px; padding: 0 18px 18px; }
   .studio-v3 .director-panel .panel-heading { grid-column: 1 / -1; }
   .studio-v3 .director-brief, .studio-v3 .capability-check, .studio-v3 .model-state { border-bottom: 0; }
-  .studio-v3 .director-actions { align-self: center; }
+  .studio-v3 .director-actions { grid-column: 1 / -1; align-self: center; }
 }
 
 @media (max-width: 900px) {

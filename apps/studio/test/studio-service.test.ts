@@ -1895,7 +1895,11 @@ describe("StudioService", () => {
         version: "video-factory/agent-loop-checkpoint-v9", role: "视觉审片员",
         maxIterations: 3, stopAfterAudit: true, status: "awaiting_user",
         phaseAttempts: { produce: 1, audit: 1 },
-        completed: [{ iteration: 1, audit: { verdict: "repair", score: 76, summary: "建议补充构图观察。" } }],
+        completed: [{ iteration: 1, audit: { verdict: "repair", score: 76, summary: "建议补充构图观察。",
+          issues: [{ severity: "advisory", criterion: "composition", evidence: "frames[1]",
+            repairInstruction: "revise framing", creatorTitle: "主体被遮住",
+            creatorObservation: "第二秒看不清人物手上的东西。", creatorAction: "换一个能看清手部的画面。" }],
+        } }],
         recoveryOwner: { runId: "run-1", nodeId: "visual-review", workflowOperationRequestId: "operation-review" },
       }));
       const progress = await loadAgentLoopProgress(workspaceRoot, "run-1", "visual-review", "operation-review");
@@ -1905,6 +1909,8 @@ describe("StudioService", () => {
       assert.equal(progress?.producerModelCallCount, 1);
       assert.equal(progress?.auditModelCallCount, 1);
       assert.equal(progress?.latestAudit?.score, 76);
+      assert.equal(progress?.latestAudit?.issues?.[0]?.creatorAction, "换一个能看清手部的画面。");
+      assert.equal(progress?.latestAudit?.issues?.[0]?.creatorObservation, "第二秒看不清人物手上的东西。");
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }

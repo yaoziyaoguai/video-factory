@@ -531,11 +531,11 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                   <span>独立复核 {waitingNodeProgress.latestAudit.score} 分：{waitingNodeProgress.latestAudit.summary}</span>
                   {waitingNodeProgress.latestAudit.issues?.length ? <ul className="agent-audit-issues">
                     {waitingNodeProgress.latestAudit.issues.map((issue, index) => <li key={`${issue.criterion}:${index}`}>
-                      <strong>{issue.repairInstruction}
+                      <strong>{issue.creatorAction ?? issue.repairInstruction}
                         {/* 审计自己的措辞是 blocking/advisory；对用户它始终只是建议，所以写"建议先改"而不是"阻断"。 */}
                         <span className="agent-audit-issue-severity">{issue.severity === "blocking" ? "建议先改" : "可选"}</span>
                       </strong>
-                      <span>{issue.evidence}</span>
+                      <span>{issue.creatorObservation ?? issue.evidence}</span>
                     </li>)}
                   </ul> : null}
                 </> : <span>{agentLoopPendingNote(waitingNodeProgress)}</span>}

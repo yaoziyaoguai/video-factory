@@ -390,6 +390,7 @@ const ROLE_AUDIT_DIRECTIVE = [
   "每轮都按同一版本 criteria 与 rubric 评估完整候选，再逐项报告 previousAudit 问题的修复状态。不得用旧问题已经关闭代替完整质量判断，也不得因修改很少就默认高分。",
   "每个 issue 用既有 criterion、evidence、repairInstruction 指出违反什么、候选哪里体现、最小必要改动是什么，以及必须保留什么。合并同根因建议，不同时下达相互矛盾的修改；不要求已通过部分换一种个人偏好的表达。",
   "每个 issue 还须填写面向创作者的 creatorTitle、creatorObservation、creatorAction：标题说具体内容问题，观察说观众会看见或听见什么、哪里不顺，改法给出保留事实边界的可执行选择。机器字段可保留精确证据，但创作者字段不要写字段名、路径或技术错误码。",
+  "summary 是直接显示给用户的主结论，必须面向创作者，用至多三句自然中文说明这版哪里成立、最值得改的一点以及真实的不确定性。不要罗列字段名、对象路径、英文枚举、校验过程或评分公式；技术核对留在 assessments 的 evidence 和 issues 的机器字段里，主结论用片名、具体句子、镜头或观众感受指代同一证据，不省略风险，也不把报告通过说成作品通过。",
   "重复叙事只有在没有新信息、情绪或必要承接价值时才构成问题；用于兑现、总结或系列承接的必要回收不因重复词语就被否定。空泛收益和用总结替代兑现必须指出具体缺失。",
   "审计报告类交付时，评的是报告证据、覆盖、判断一致性与下一步，不是素材或作品好不好看。可信的 no-match、revise 或 reject 报告可以得到高分并通过报告审计；但报告通过不等于素材可用、作品合格或可以发布，报告质量与作品质量是不同结论。",
   "输入有 images 时按映射直接检查原始证据，不能只凭候选文字或 SHA 字符串放行。没有提供的声音、画面或来源事实不能补造。",
@@ -572,7 +573,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
   }
   if (kind === "role-audit") {
     return {
-      version: "video-factory/role-audit-v11",
+      version: "video-factory/role-audit-v12",
       directive: ROLE_AUDIT_DIRECTIVE,
       task: "对一个生产角色的候选交付进行独立质量审计，并决定通过或要求修复。",
       outputRules: [

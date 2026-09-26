@@ -1067,7 +1067,7 @@ export interface StudioAgentLoopProgress {
   auditModelCallCount?: number;
   structuredRepairModelCallCount?: number;
   /** "failed"：角色调用终态失败（含 Provider/基础设施故障），不是审计轮次耗尽。 */
-  /** "awaiting_user"：自动重做轮次用尽仍未通过审计，候选与那轮审计已停在用户面前等裁决。 */
+  /** "awaiting_user"：本轮候选与复核建议已交给用户，不再自动重做。 */
   phase: "producing" | "auditing" | "repairing" | "passed" | "exhausted" | "awaiting_user" | "failed" | "halted";
   latestAudit?: {
     verdict: "pass" | "repair";
@@ -1092,6 +1092,9 @@ export interface StudioAgentLoopAuditIssue {
   criterion: string;
   evidence: string;
   repairInstruction: string;
+  creatorTitle?: string;
+  creatorObservation?: string;
+  creatorAction?: string;
 }
 
 export interface StudioNodeExecutionPlan {

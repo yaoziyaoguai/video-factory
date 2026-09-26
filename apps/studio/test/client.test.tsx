@@ -1292,8 +1292,9 @@ describe("Studio client", () => {
     expect(screen.getByRole("heading", { name: "自动制作设置" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "编剧能力" })).toHaveValue("codex-screenwriter-v1");
     expect(screen.getByText(/独立质量复核/)).toBeInTheDocument();
-    expect(screen.getByText(/深入质量复核.*有限轮次/)).toBeInTheDocument();
+    expect(screen.getByText(/初稿复核一次.*按需再审/)).toBeInTheDocument();
     await user.selectOptions(screen.getByRole("combobox", { name: "编剧本次模型" }), "deepseek-flash");
+    expect(within(screen.getByRole("combobox", { name: "编剧本次模型" })).getByRole("option", { name: "继承推荐：GPT-5.6 Terra" })).toBeInTheDocument();
     await user.type(screen.getByLabelText("视频标题"), "角色配置必须在开工前确认");
     await user.type(screen.getByLabelText("内容角度"), "验证编剧模型覆盖真实进入生产单");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
@@ -2210,7 +2211,7 @@ describe("Studio client", () => {
 
     const modelSelect = screen.getByRole("combobox", { name: "Seedance 视频生成 本次模型" });
     expect(modelSelect).toHaveValue("");
-    expect(within(modelSelect).getAllByRole("option", { name: "使用推荐：economy-model" })).not.toHaveLength(0);
+    expect(within(modelSelect).getAllByRole("option", { name: "使用推荐：经济模型" })).not.toHaveLength(0);
     expect(screen.queryByLabelText("预计成本上限")).not.toBeInTheDocument();
     expect(screen.getByLabelText("费用方式")).toHaveTextContent(/画面：按实际方案逐项报价，确认后才执行/);
   });
@@ -4059,8 +4060,11 @@ describe("Studio client", () => {
               issues: [{
                 severity: "blocking" as const,
                 criterion: "结尾兑现",
-                evidence: "标题说避开 3 个坑，结尾只讲了一个",
-                repairInstruction: "把另外两个坑各补一句",
+                evidence: "candidate.payoff coverage incomplete",
+                repairInstruction: "repair candidate.payoff",
+                creatorTitle: "结尾少了两个承诺过的答案",
+                creatorObservation: "标题说避开 3 个坑，结尾只讲了一个",
+                creatorAction: "把另外两个坑各补一句",
               }],
             },
           },
@@ -4074,6 +4078,8 @@ describe("Studio client", () => {
     expect(screen.queryByText("结尾兑现")).not.toBeInTheDocument();
     expect(screen.getByText("标题说避开 3 个坑，结尾只讲了一个")).toBeInTheDocument();
     expect(screen.getByText("把另外两个坑各补一句")).toBeInTheDocument();
+    expect(screen.queryByText(/candidate\.payoff/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/自动修订轮次已用尽/)).not.toBeInTheDocument();
     // 审计自己的措辞是 blocking；对用户它始终只是建议，界面不能写成"阻断"。
     expect(screen.getByText("建议先改")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /确认当前步骤，进入下一步/ })).toBeInTheDocument();

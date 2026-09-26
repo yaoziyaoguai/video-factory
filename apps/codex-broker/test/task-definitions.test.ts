@@ -30,6 +30,13 @@ it("screenwriter plans a continuous narration and exposes the real per-shot voic
   assert.match(prompt, /有意留白/);
 });
 
+it("addresses the audit summary to creators and keeps machine checks out of their main conclusion", () => {
+  const prompt = taskPromptFor("role-audit").directive;
+  assert.match(prompt, /summary.*面向创作者/);
+  assert.match(prompt, /不要.*字段名.*路径.*英文枚举/);
+  assert.match(prompt, /技术核对.*assessments.*evidence/);
+});
+
 function validDirectorPlan() {
   const shot = {
     scenePosition: 1,
@@ -275,7 +282,7 @@ describe("broker-owned task definitions", () => {
         "video-factory/asset-rank-v6",
         "video-factory/reference-grammar-v4",
         "video-factory/visual-review-v20",
-        "video-factory/role-audit-v11",
+        "video-factory/role-audit-v12",
       ],
     );
 

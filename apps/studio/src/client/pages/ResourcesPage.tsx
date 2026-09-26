@@ -891,7 +891,7 @@ function automaticRoleSummary(capability: string): string {
     "reference.grammar": "提炼参考片表达",
     "asset.rank.semantic": "逐镜比较素材",
     "publish.copy": "生成平台发布文案",
-    "role.audit": "独立复核 · 最多三轮",
+    "role.audit": "初稿复核一次 · 按需再审",
   };
   return labels[capability] ?? "自动执行 · 保留人工终审";
 }
@@ -915,7 +915,7 @@ function preferredAutomaticProvider(capability: string, providers: StudioProvide
 }
 
 function roleModeLabel(mode: ProductionRoleDefinition["mode"]): string {
-  if (mode === "agent") return "AI 创作 · 最多三轮质量修订";
+  if (mode === "agent") return "AI 创作 · 由你决定修改与继续";
   if (mode === "model") return "模型审片";
   return "本地处理 / 自动执行";
 }

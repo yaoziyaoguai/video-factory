@@ -3283,7 +3283,8 @@ describe("Creative OS", () => {
     expect(within(roleSection!).getByText("故障替补：GPT-5.6 Sol")).toBeInTheDocument();
     expect(within(roleSection!).getByText(/中途画面预检优先使用首选模型.*连接故障.*最终成片由所选模型基于抽帧证据完成独立质量复核/)).toBeInTheDocument();
     expect(screen.getByText("独立质量复核")).toBeInTheDocument();
-    expect(screen.getByText("独立复核 · 最多三轮")).toBeInTheDocument();
+    expect(screen.getByText("初稿复核一次 · 按需再审")).toBeInTheDocument();
+    expect(screen.queryByText(/最多三轮质量修订/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存角色配置" }));
 
     expect(update).toHaveBeenLastCalledWith({

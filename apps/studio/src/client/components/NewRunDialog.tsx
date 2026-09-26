@@ -23,7 +23,7 @@ import { visualSourceCompatibilityIssue } from "../../shared/visual-source-compa
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { VoiceStudio } from "./VoiceStudio.js";
 import { studioApi } from "../api.js";
-import { creatorFacingTechnicalText, providerLabel } from "../presentation.js";
+import { creatorFacingTechnicalText, providerLabel, providerModelLabel } from "../presentation.js";
 
 interface NewRunDialogProps {
   open: boolean;
@@ -1162,7 +1162,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                           value={selectedModelId ?? ""}
                           onChange={(event) => setModelSelections((current) => withModelSelection(current, selected.id, event.target.value))}
                         >
-                          <option value="">继承推荐：{effectiveModelId(selected) ?? "由系统按当前配置选择"}</option>
+                          <option value="">继承推荐：{providerModelLabel(selected, selected.defaultModelId)}</option>
                           {inheritedModelUnavailable && selectedModelId ? <option value={selectedModelId} disabled>上一版：{selectedModelId}（不可用）</option> : null}
                           {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
                         </select>
@@ -1179,7 +1179,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                           return <label className="field" key={provider.id}>
                           <span>{creatorProviderName(provider)}</span>
                           {models.length ? <select aria-label={`${creatorProviderName(provider)}开工模型`} value={selectedModelId ?? ""} onChange={(event) => setModelSelections((current) => withModelSelection(current, provider.id, event.target.value))}>
-                            <option value="">使用推荐：{effectiveModelId(provider) ?? "自动选择"}</option>
+                            <option value="">使用推荐：{providerModelLabel(provider, provider.defaultModelId)}</option>
                             {inheritedModelUnavailable && selectedModelId ? <option value={selectedModelId} disabled>上一版：{selectedModelId}（不可用）</option> : null}
                             {models.map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
                           </select> : <small>{providerBillingLabel(provider)}</small>}
@@ -1191,15 +1191,15 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                           ? meteredSelected
                             ? "此处不购买画面素材；付费生成按实际镜头报价并等待本次范围授权，规划模型按所选接入规则计费"
                             : "当前不购买付费画面素材；规划模型按所选接入规则计费"
-                          : `${providerBillingLabel(selected)} · ${effectiveModelId(selected) ?? "不使用模型"}`
+                          : `${providerBillingLabel(selected)} · ${effectiveModelId(selected) ? providerModelLabel(selected, effectiveModelId(selected)) : "不使用模型"}`
                         : "尚未选择制作方式"}</small>
                     </article>;
                   })}
                 </div>
                 <div className={roleAuditProvider ? "production-auditor" : "production-auditor is-unavailable"}>
                   <span><ScanSearch aria-hidden="true" size={18} /></span>
-                  <div><strong>{roleAuditProvider ? creatorProviderName(roleAuditProvider) : "独立质量复核未接通"}</strong><small>由独立 AI 逐步检查输入、交付格式和后续使用是否一致。</small></div>
-                  <em>{roleAuditProvider ? `${effectiveModelId(roleAuditProvider) ?? "所选模型"} · 深入质量复核 · 有限轮次` : "独立质量复核当前不可用；相关质量建议可能缺失"}</em>
+                  <div><strong>{roleAuditProvider ? creatorProviderName(roleAuditProvider) : "独立质量复核未接通"}</strong><small>初稿生成后提供内容建议；修改后由你决定是否再次审计或继续。</small></div>
+                  <em>{roleAuditProvider ? `${providerModelLabel(roleAuditProvider, effectiveModelId(roleAuditProvider))} · 初稿复核一次 · 按需再审` : "独立质量复核当前不可用；相关质量建议可能缺失"}</em>
                 </div>
               </section>
               <section className="workflow-config" aria-labelledby="workflow-config-title">
@@ -1304,7 +1304,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                         else delete next[provider.id];
                         return next;
                       })}>
-                        <option value="">使用推荐：{effectiveModelId(provider) ?? "自动选择"}</option>
+                        <option value="">使用推荐：{providerModelLabel(provider, provider.defaultModelId)}</option>
                         {selectableModelsForCapability(provider.modelProfiles, provider.capability).map((model) => <option value={model.id} key={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
                       </select>
                       <small>{selectedModel?.description}{selectedModel?.estimatedCnyPerClip !== undefined ? ` · 当前模型参考单价约 ¥${formatMoney(selectedModel.estimatedCnyPerClip)}/镜头，实际以逐项报价为准` : ""}</small>
@@ -1333,7 +1333,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <small>视觉审片当前不可用。勾选后仍可生成和播放首版，但不会显示正式审片通过或发布包已通过。</small>
               </label> : <label className="visual-review-control is-enabled">
                 <input type="checkbox" checked readOnly disabled />
-                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片 · {effectiveModelId(visualReviewProvider!) ?? "所选模型"}</strong></span>
+                <span><ScanSearch aria-hidden="true" size={17} /><strong>视觉审片 · {providerModelLabel(visualReviewProvider, effectiveModelId(visualReviewProvider!))}</strong></span>
                 <small>{`${creatorProviderName(visualReviewProvider!)} 负责中途预检；最终成片由视觉审片模型对同一组抽帧独立审查，不上传音轨`}</small>
               </label>}
               <div className="segmented-control review-control" aria-label="终审模式"><span>人工终审</span><small>发布前必须由你完整审片并批准</small></div>
@@ -1480,7 +1480,7 @@ function roleProviderCandidates(item: CapabilityDefinition, providers: StudioPro
 function roleExecutionLabel(item: CapabilityDefinition, provider: StudioProvider | undefined): string {
   if (!provider?.available) return "未配置";
   if (item.key === "visualReview") return "模型审片";
-  if (provider.id.startsWith("codex-") || provider.id === "api-visual-director-v1") return "AI 创作 · 最多 3 轮质量修订";
+  if (provider.id.startsWith("codex-") || provider.id === "api-visual-director-v1") return "AI 创作 · 由你决定修改与继续";
   if (provider.id === "ai-shot-router-v1") return "AI 逐镜选择画面来源";
   return "本地处理 / 自动执行";
 }

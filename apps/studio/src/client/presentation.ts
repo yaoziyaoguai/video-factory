@@ -304,7 +304,7 @@ export function agentLoopPhaseLabel(progress: StudioAgentLoopProgress): string {
         : progress.phase === "exhausted"
         ? "自动修订已停止"
           : progress.phase === "awaiting_user"
-            ? "自动修订轮次已用尽，这一版与复核意见交给你裁决"
+            ? "本轮复核有建议，是否修改或继续由你决定"
           : progress.phase === "halted"
             ? "发现当前角色无法解决的前提，已停住"
           : progress.phase === "failed"

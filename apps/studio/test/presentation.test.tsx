@@ -54,7 +54,7 @@ describe("creator-facing presentation labels", () => {
     const reviewer = catalog.find((provider) => provider.id === "codex-role-auditor-v1");
     expect(reviewer?.label).toBe("AI 独立质量复核");
     expect(reviewer?.description).toContain("创作依据");
-    expect(reviewer?.modes).toEqual(["独立复核", "深入核对", "最多三轮", "不通过则要求修改"]);
+    expect(reviewer?.modes).toEqual(["独立复核", "深入核对", "初稿复核一次", "按需再审"]);
     expect([reviewer?.label, reviewer?.description, ...(reviewer?.modes ?? [])].join(" "))
       .not.toMatch(/Codex|审计|xhigh|门禁|角色合同|下游边界/);
   });

@@ -1323,6 +1323,7 @@ body:has(.studio-v3) {
 }
 
 @media (max-width: 1080px) {
+  .studio-v3 .director-workspace { grid-template-columns: minmax(0, 1fr); }
   .studio-v3 .asset-library-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .studio-v3 .production-archive { grid-template-columns: 1fr; }
   .studio-v3 .review-layout { grid-template-columns: minmax(420px, 1fr) 300px; }
