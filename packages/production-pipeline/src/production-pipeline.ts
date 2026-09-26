@@ -827,6 +827,27 @@ export class ProductionPipeline {
     return this.store.list<ProductionBrief>();
   }
 
+  async readTextExecutionUsage(runId: string): Promise<Array<{
+    nodeId: string; providerId: string; modelId: string; modelCallCount: number;
+  }>> {
+    await this.store.load(runId);
+    const usage = [];
+    for (const nodeId of ["brief", "creative-planning"]) {
+      const checkpoints = await readNodeAccountingCheckpoints(this.runsRoot, runId, nodeId);
+      const discussions = nodeId === "creative-planning" ? await readCreativeDiscussionExecutions(this.runsRoot, runId) : [];
+      const summary = summarizePlanningCheckpoints(checkpoints, discussions);
+      if (!summary?.modelCallCount) continue;
+      const traces = checkpoints.flatMap((checkpoint) => [
+        ...(Array.isArray(checkpoint.completed) ? checkpoint.completed.flatMap((item) => isObjectRecord(item) ? [item.candidateTrace, item.auditTrace] : []) : []),
+        ...(isObjectRecord(checkpoint.pendingCandidate) ? [checkpoint.pendingCandidate.candidateTrace] : []),
+      ]).filter(isObjectRecord);
+      const providers = [...new Set(traces.flatMap((trace) => typeof trace.providerId === "string" ? [trace.providerId] : []))];
+      const models = [...new Set(traces.flatMap((trace) => typeof trace.modelId === "string" ? [trace.modelId] : []))];
+      usage.push({ nodeId, providerId: providers.join("、") || "unknown", modelId: models.join("、") || "unknown", modelCallCount: summary.modelCallCount });
+    }
+    return usage;
+  }
+
   async remove(runId: string): Promise<void> {
     await this.store.remove(runId);
   }
@@ -11488,30 +11509,7 @@ export async function summarizeJointPlanningExecution(
   workflowOperationRequestId: string | undefined,
 ): Promise<Record<string, number> | undefined> {
   if (!workflowOperationRequestId) return undefined;
-  const directory = path.join(runsRoot, runId, "nodes", "creative-planning", "agent-loop-checkpoints");
-  let names: string[];
-  try {
-    names = (await readdir(directory)).filter((name) => name.endsWith(".json"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") names = [];
-    else throw error;
-  }
-  const checkpoints: Record<string, unknown>[] = [];
-  for (const name of names) {
-    let value: unknown;
-    try {
-      value = JSON.parse(await readFile(path.join(directory, name), "utf8"));
-    } catch {
-      continue;
-    }
-    if (!isObjectRecord(value)
-      || (value.version !== "video-factory/agent-loop-checkpoint-v8"
-        && value.version !== "video-factory/agent-loop-checkpoint-v9")
-      || !isObjectRecord(value.recoveryOwner)
-      || value.recoveryOwner.runId !== runId
-      || value.recoveryOwner.nodeId !== "creative-planning") continue;
-    checkpoints.push(value);
-  }
+  const checkpoints = await readNodeAccountingCheckpoints(runsRoot, runId, "creative-planning");
   const discussionReceipts = await readCreativeDiscussionExecutions(runsRoot, runId);
   // 同一 checkpoint 会跨操作恢复；先按物理 requestId 的首次归属全局去重，再分本次/历史。
   // 没有 requestOwners 的旧记录不能证明属于本次，宁可列入历史也不虚增当前调用。
@@ -11544,6 +11542,34 @@ export async function summarizeJointPlanningExecution(
       previousLoopValidationMs: previous.loopValidationMs,
     } : {}),
   };
+}
+
+async function readNodeAccountingCheckpoints(runsRoot: string, runId: string, nodeId: string): Promise<Record<string, unknown>[]> {
+  const directory = path.join(runsRoot, runId, "nodes", nodeId, "agent-loop-checkpoints");
+  let names: string[];
+  try {
+    names = (await readdir(directory)).filter((name) => name.endsWith(".json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") names = [];
+    else throw error;
+  }
+  const checkpoints: Record<string, unknown>[] = [];
+  for (const name of names) {
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(path.join(directory, name), "utf8"));
+    } catch {
+      continue;
+    }
+    if (!isObjectRecord(value)
+      || (value.version !== "video-factory/agent-loop-checkpoint-v8"
+        && value.version !== "video-factory/agent-loop-checkpoint-v9")
+      || !isObjectRecord(value.recoveryOwner)
+      || value.recoveryOwner.runId !== runId
+      || value.recoveryOwner.nodeId !== nodeId) continue;
+    checkpoints.push(value);
+  }
+  return checkpoints;
 }
 
 function summarizePlanningCheckpoints(

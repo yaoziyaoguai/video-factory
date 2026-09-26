@@ -38,18 +38,22 @@ for (const protocol of ["openai-chat-completions", "anthropic-messages"] as cons
   });
 }
 
-test("configured audio executor sends actual MP3 bytes and timecoded frames, not just a transcript", async () => {
+for (const baseUrl of ["https://example.com/v1", "https://dashscope.aliyuncs.com/api/v1/workspaces/ws-test/compatible-mode/v1"]) {
+test(`configured audio executor sends actual MP3 bytes and timecoded frames using ${new URL(baseUrl).hostname}`, async () => {
   const audio = Buffer.from("ID3-test-audio");
   const image = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0xff, 0xd9]);
   const sha = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
   const executor = new ChatCompletionsExecutor({
     provider: DEEPSEEK_CHAT_COMPLETIONS_PROVIDER, env: {},
-    configuredModel: { id: "m-222222222222", connection: { label: "声音", protocol: "openai-chat-completions", baseUrl: "https://example.com/v1", modelId: "native-audio", apiKey: "test", capabilities: ["audio", "image"], maxOutputTokens: 32000 } },
+    configuredModel: { id: "m-222222222222", connection: { label: "声音", protocol: "openai-chat-completions", baseUrl, modelId: "native-audio", apiKey: "test", capabilities: ["audio", "image"], maxOutputTokens: 32000 } },
     fetchFn: async (_url, init) => {
       const body = JSON.parse(String(init?.body));
       assert.equal(body.model, "native-audio");
       const parts = body.messages[0].content;
-      assert.deepEqual(Buffer.from(parts.find((item: { type: string }) => item.type === "input_audio").input_audio.data, "base64"), audio);
+      const encoded = parts.find((item: { type: string }) => item.type === "input_audio").input_audio.data;
+      if (new URL(baseUrl).hostname === "dashscope.aliyuncs.com") assert.equal(encoded, `data:;base64,${audio.toString("base64")}`);
+      else assert.equal(encoded, audio.toString("base64"));
+      assert.deepEqual(body.modalities, ["text"]);
       assert.ok(parts.some((item: { type: string }) => item.type === "image_url"));
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ audioSha256: sha(audio), summary: "证据传输测试", checks: Object.fromEntries(AUDIO_REVIEW_CHECKS.map((key) => [key, "not_observed"])), findings: [] }) }, finish_reason: "stop" }] }), { headers: { "content-type": "application/json" } });
     },
@@ -61,3 +65,4 @@ test("configured audio executor sends actual MP3 bytes and timecoded frames, not
   assert.equal(result.trace?.modelAttemptCount, 1);
   assert.equal(JSON.parse(result.output).audioSha256, sha(audio));
 });
+}

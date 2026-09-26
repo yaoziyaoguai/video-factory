@@ -110,6 +110,9 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   // 用户看得到「进入下一步」，却找不到地方配置那一步怎么跑——简报之后最典型，创作规划
   // 用哪个模型只能等它自己跑起来才有地方改。带可调执行的下一步在停点上一并露出。
   const nextGateNode = boundaryGate ? nextConfigurableNode(run) : undefined;
+  const waitingNodeIndex = run.nodes.findIndex((node) => node.id === run.activeIntervention?.nodeId);
+  const nextPipelineNode = boundaryGate && waitingNodeIndex >= 0
+    ? run.nodes.slice(waitingNodeIndex + 1).find((node) => node.status === "pending") : undefined;
   const creatorNodes = run.nodes.filter((node) => node.id === nextGateNode?.id || nodeHasCreatorContent(node, run));
   const activeSpendNode = readOnly ? undefined : creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
   const currentArtifactNode = !video?.contentUrl && !creativeDiscussion && run.activeIntervention?.kind !== "creative_review"
@@ -598,9 +601,9 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                 ) : null}
                 <p className="agent-review-guidance">补查会重跑整轮审片、不会重新购买画面或配音，因此<strong>其它镜头（包括上一轮已通过的镜头）的结论也可能变化</strong>；判定与上一轮不同的条目会标出「判定变动」，并给出两轮原文。批准前你要对本轮每一条结论逐条表态：采纳的必须先返修，不采纳的要写明理由。</p>
               </div> : null}
-              {nextGateNode ? <div className="boundary-next-step">
-                <span>下一步「{stepNameFor(nextGateNode, nextGateNode.label)}」还没开始。放行后它会直接按现在保存的模型和设置开始跑；要改就在放行前改。</span>
-                <button className="button button-ghost" type="button" onClick={() => revealNodeWorkspace(nextGateNode.id)}>去配置「{stepNameFor(nextGateNode, nextGateNode.label)}」</button>
+              {nextPipelineNode ? <div className="boundary-next-step">
+                <span>下一步「{stepNameFor(nextPipelineNode, nextPipelineNode.label)}」还没开始。放行后它会按现在保存的设置执行。</span>
+                {nextGateNode ? <button className="button button-ghost" type="button" onClick={() => revealNodeWorkspace(nextGateNode.id)}>{nextGateNode.id === nextPipelineNode.id ? "去配置" : "提前配置后续步骤"}「{stepNameFor(nextGateNode, nextGateNode.label)}」</button> : null}
               </div> : null}
               <div className="decision-actions">
                 {boundaryGate ? <>
@@ -612,7 +615,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                       type="button"
                       disabled={decisionPending}
                       onClick={() => {
-                        if (contentDecisionNode) {
+                        if (contentDecisionNode && reviewItems.length === 0) {
                           const snapshot = decisionSnapshotFor("approve");
                           if (snapshot) void onDecision({ action: "approve", ...snapshot });
                         } else openDecision("approve");
@@ -650,7 +653,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                     disabled={decisionPending}
                     onClick={() => openDecision("approve")}
                   >
-                    <Check aria-hidden="true" size={17} />批准进入发布包
+                    <Check aria-hidden="true" size={17} />{sourcePreflightDecision ? "接受当前素材风险，继续制作" : sourceReviewDecision || sourceReviewIncompleteRisk ? "查看质量意见并继续制作" : "批准进入发布包"}
                   </button>
                   <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
                     <XCircle aria-hidden="true" size={17} />终止制作
@@ -852,7 +855,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                   <FindingVerdictChange finding={item} />
                   <div className="review-disposition-choices">
                     <button className="button button-ghost" type="button" aria-pressed={choice?.decision === "accept_risk"}
-                      onClick={() => setReviewDecision(itemKey, "accept_risk")}>接受风险，保留本版</button>
+                      onClick={() => setReviewDecision(itemKey, "accept_risk")}>{item.evidenceStatus === "satisfied" ? "已看过，保持现状" : "接受风险，保留本版"}</button>
                     <button
                       className="button button-ghost"
                       type="button"

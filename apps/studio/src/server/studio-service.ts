@@ -249,7 +249,8 @@ export class StudioService {
       now,
       loadRejectedVisualResources: (runId) => this.resourceGovernance.rejectedVisualItems(runId),
     });
-    this.costs = new CostStudio(() => options.pipeline.list());
+    this.costs = new CostStudio(() => options.pipeline.list(), options.pipeline.readTextExecutionUsage
+      ? (runId) => options.pipeline.readTextExecutionUsage!(runId) : undefined);
     this.publishing = new PublishingStudio({
       workspaceRoot: options.workspaceRoot,
       getRun: (runId) => this.production.get(runId),

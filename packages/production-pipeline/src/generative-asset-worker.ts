@@ -76,6 +76,7 @@ export interface GenerativeAssetWorkerClientOptions {
   resolveHost?: ResolveHost;
   maxDownloadBytes?: number;
   downloadTimeoutMs?: number;
+  downloadIdleTimeoutMs?: number;
   probeGeneratedMedia?: GeneratedMediaProbe;
   pilotReviewer?: AssetPilotReviewer;
 }
@@ -316,6 +317,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
   private readonly resolveHost: ResolveHost;
   private readonly maxDownloadBytes: number;
   private readonly downloadTimeoutMs: number;
+  private readonly downloadIdleTimeoutMs: number;
   private readonly probeGeneratedMedia: GeneratedMediaProbe | undefined;
 
   constructor(private readonly options: GenerativeAssetWorkerClientOptions) {
@@ -351,10 +353,14 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     this.fetch = options.fetch;
     this.resolveHost = options.resolveHost ?? resolveMediaHostname;
     this.maxDownloadBytes = options.maxDownloadBytes ?? 200 * 1024 * 1024;
-    this.downloadTimeoutMs = options.downloadTimeoutMs ?? 60_000;
+    this.downloadTimeoutMs = options.downloadTimeoutMs ?? 300_000;
+    this.downloadIdleTimeoutMs = options.downloadIdleTimeoutMs ?? 30_000;
     this.probeGeneratedMedia = options.probeGeneratedMedia;
     if (!Number.isInteger(this.downloadTimeoutMs) || this.downloadTimeoutMs <= 0) {
       throw new Error("downloadTimeoutMs must be a positive integer.");
+    }
+    if (!Number.isInteger(this.downloadIdleTimeoutMs) || this.downloadIdleTimeoutMs <= 0) {
+      throw new Error("downloadIdleTimeoutMs must be a positive integer.");
     }
   }
 
@@ -536,6 +542,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           this.maxDownloadBytes,
           this.resolveHost,
           this.downloadTimeoutMs,
+          this.downloadIdleTimeoutMs,
         );
         const mediaMetadata = await this.validateGeneratedMedia(media.path, binding.mediaType, scene.duration);
         applySucceeded(job, generated.taskId, generated.url);
@@ -1061,6 +1068,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           this.maxDownloadBytes,
           this.resolveHost,
           this.downloadTimeoutMs,
+          this.downloadIdleTimeoutMs,
         );
         const mediaMetadata = await this.validateGeneratedMedia(media.path, binding.mediaType, requiredUseDurationSeconds);
         applySucceeded(job, generated.taskId, generated.url);
@@ -2585,16 +2593,31 @@ async function downloadGeneratedAsset(
   maxBytes: number,
   resolveHost: ResolveHost,
   timeoutMs: number,
+  idleTimeoutMs: number,
 ): Promise<{ path: string; contentType: string }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let receivedBytes = 0;
+  const timer = setTimeout(() => controller.abort(new Error(
+    `Generated ${mediaType} download timed out after ${timeoutMs}ms (${receivedBytes} bytes received).`,
+  )), timeoutMs);
+  let idleTimer: ReturnType<typeof setTimeout>;
+  // 总预算容纳正常慢传输；停滞预算独立刷新，不能用无限等待掩盖断流。
+  const progress = (bytes = 0) => {
+    receivedBytes += bytes;
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => controller.abort(new Error(
+      `Generated ${mediaType} download stalled for ${idleTimeoutMs}ms (${receivedBytes} bytes received).`,
+    )), idleTimeoutMs);
+  };
+  progress();
   try {
-    let currentTarget = await validatedMediaTarget(url, resolveHost);
+    let currentTarget = await downloadStep(validatedMediaTarget(url, resolveHost), controller.signal);
     let response: Response | undefined;
     for (let redirects = 0; redirects <= 5; redirects += 1) {
-      response = fetcher
-        ? await fetcher(currentTarget.url, { redirect: "manual", signal: controller.signal })
-        : await fetchPinnedMedia(currentTarget, controller.signal);
+      response = await downloadStep(fetcher
+        ? fetcher(currentTarget.url, { redirect: "manual", signal: controller.signal })
+        : fetchPinnedMedia(currentTarget, controller.signal), controller.signal);
+      progress();
       if (![301, 302, 303, 307, 308].includes(response.status)) break;
       const location = response.headers.get("location");
       await response.body?.cancel();
@@ -2610,7 +2633,7 @@ async function downloadGeneratedAsset(
       } catch {
         throw new UnrecoverableGeneratedAssetDownloadError("Generated media URL is invalid.");
       }
-      currentTarget = await validatedMediaTarget(redirectUrl, resolveHost);
+      currentTarget = await downloadStep(validatedMediaTarget(redirectUrl, resolveHost), controller.signal);
     }
     if (!response) throw new Error(`Generated ${mediaType} download did not return a response.`);
     if (!response.ok) {
@@ -2636,7 +2659,8 @@ async function downloadGeneratedAsset(
       await response.body?.cancel();
       throw error;
     }
-    const bytes = await readLimitedBody(response, mediaType, maxBytes);
+    const bytes = await readLimitedBody(response, mediaType, maxBytes, controller.signal, progress);
+    controller.signal.throwIfAborted();
     const extension = mediaType === "video" ? "mp4" : imageExtension(contentType);
     const destination = `${destinationStem}.${extension}`;
     const temporary = `${destination}.partial`;
@@ -2644,11 +2668,22 @@ async function downloadGeneratedAsset(
     await rename(temporary, destination);
     return { path: destination, contentType };
   } catch (error) {
-    if (controller.signal.aborted) throw new Error(`Generated ${mediaType} download timed out after ${timeoutMs}ms.`);
+    if (controller.signal.aborted) throw controller.signal.reason;
     throw error;
   } finally {
     clearTimeout(timer);
+    clearTimeout(idleTimer!);
   }
+}
+
+// DNS 与流读取不一定原生消费 signal；每个等待点都受同一下载预算约束。
+function downloadStep<T>(step: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    step.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
 }
 
 async function validatedMediaTarget(value: string, resolveHost: ResolveHost): Promise<ValidatedMediaTarget> {
@@ -2776,24 +2811,33 @@ async function resolveMediaHostname(hostname: string): Promise<readonly string[]
   return (await lookup(hostname, { all: true, verbatim: true })).map((entry) => entry.address);
 }
 
-async function readLimitedBody(response: Response, mediaType: "image" | "video", maxBytes: number): Promise<Buffer> {
+async function readLimitedBody(
+  response: Response, mediaType: "image" | "video", maxBytes: number,
+  signal: AbortSignal, progress: (bytes: number) => void,
+): Promise<Buffer> {
   if (!response.body) throw new UnrecoverableGeneratedAssetDownloadError(
     `Generated ${mediaType} download returned an empty body.`,
   );
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
   let received = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    received += value.byteLength;
-    if (received > maxBytes) {
-      await reader.cancel();
-      throw new UnrecoverableGeneratedAssetDownloadError(
-        `Generated ${mediaType} exceeds the ${maxBytes}-byte download limit.`,
-      );
+  try {
+    while (true) {
+      const { done, value } = await downloadStep(reader.read(), signal);
+      if (done) break;
+      if (value.byteLength > 0) progress(value.byteLength);
+      received += value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel();
+        throw new UnrecoverableGeneratedAssetDownloadError(
+          `Generated ${mediaType} exceeds the ${maxBytes}-byte download limit.`,
+        );
+      }
+      chunks.push(Buffer.from(value));
     }
-    chunks.push(Buffer.from(value));
+  } finally {
+    if (signal.aborted) void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
   if (received === 0) throw new UnrecoverableGeneratedAssetDownloadError(
     `Generated ${mediaType} download returned an empty body.`,

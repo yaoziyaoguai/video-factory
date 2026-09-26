@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh explicit mainland service routes without changing overseas VPN
+After=network-online.target openvpn-client@proton.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/sbin/vf-refresh-domestic-routes.py --hosts /etc/proton-ovpn/vf-domestic-service-hosts.txt --apply
+TimeoutStartSec=55

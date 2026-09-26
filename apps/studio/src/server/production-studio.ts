@@ -105,6 +105,7 @@ const PLANNING_DELIVERY_KINDS = new Set([
 ]);
 
 export interface StudioPipelinePort {
+  readTextExecutionUsage?: (runId: string) => Promise<Array<{ nodeId: string; providerId: string; modelId: string; modelCallCount: number }>>;
   list(): Promise<WorkflowRun<ProductionBrief>[]>;
   remove(runId: string): Promise<void>;
   loadPersisted(runId: string): Promise<WorkflowRun<ProductionBrief>>;

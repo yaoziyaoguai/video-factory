@@ -16,11 +16,21 @@ interface CostRunSource {
   spendAuthorizations?: unknown;
 }
 
+interface NodeModelUsage {
+  nodeId: string;
+  providerId: string;
+  modelId: string;
+  modelCallCount: number;
+}
+
 export class CostStudio {
-  constructor(private readonly listRuns: () => Promise<CostRunSource[]>) {}
+  constructor(
+    private readonly listRuns: () => Promise<CostRunSource[]>,
+    private readonly readModelUsage?: (runId: string) => Promise<NodeModelUsage[]>,
+  ) {}
 
   async dashboard(): Promise<StudioCostDashboard> {
-    const details = (await this.listRuns()).map((run) => toRunDetail(run));
+    const details = await Promise.all((await this.listRuns()).map((run) => this.detail(run)));
     const lines = details.flatMap((detail) => detail.lines);
     return {
       currency: "CNY",
@@ -33,7 +43,27 @@ export class CostStudio {
 
   async runDetail(runId: string): Promise<StudioCostRunDetail | undefined> {
     const run = (await this.listRuns()).find((candidate) => candidate.id === runId);
-    return run ? toRunDetail(run) : undefined;
+    return run ? this.detail(run) : undefined;
+  }
+
+  private async detail(run: CostRunSource): Promise<StudioCostRunDetail> {
+    const detail = toRunDetail(run);
+    for (const usage of await this.readModelUsage?.(run.id) ?? []) {
+      const recorded = detail.lines.filter((line) => line.nodeId === usage.nodeId)
+        .reduce((sum, line) => sum + (line.subscriptionCallCount ?? 0), 0);
+      const missing = usage.modelCallCount - recorded;
+      if (missing <= 0) continue;
+      const node = Array.isArray(run.nodeRuns) ? run.nodeRuns.find((value) => isRecord(value) && value.nodeId === usage.nodeId) : undefined;
+      // checkpoint 是实际调用的补充证据，不是额外执行，更不能凭调用数杜撰现金账单。
+      detail.lines.push({
+        id: `checkpoint:${usage.nodeId}`, runId: run.id, runTitle: detail.title,
+        nodeId: usage.nodeId, capability: "model.execute", providerId: usage.providerId, modelId: usage.modelId,
+        billing: "subscription", status: "unknown", estimatedCostCny: 0,
+        subscriptionCallCount: missing, actualPending: false,
+        startedAt: isRecord(node) ? text(node.startedAt) : "",
+      });
+    }
+    return { ...detail, totals: totals(detail.lines) };
   }
 }
 
@@ -47,7 +77,7 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       : [])
     : [];
   const uncertainReceipts = Array.isArray(run.nodeRuns)
-    ? run.nodeRuns.flatMap((value) => uncertainReceipt(value, authorizations, run.executionPlan))
+    ? run.nodeRuns.flatMap((value) => uncertainReceipt(value, authorizations, run.executionPlan, run.executionReceipts))
     : [];
   const receipts = mergeReceipts(
     [...nestedReceipts, ...uncertainReceipts],
@@ -91,9 +121,12 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
     const subscriptionCallCount = billing === "subscription"
       ? nonNegativeInteger(parameters?.modelCallCount) ?? 1
       : undefined;
-    const estimatedCostCny = nonNegativeNumber(receipt.estimatedCostCny) ?? 0;
+    const quoteNode = Array.isArray(run.nodeRuns) ? run.nodeRuns.find((node) => isRecord(node) && node.nodeId === nodeId) : undefined;
+    const boundQuote = isRecord(quoteNode) && isRecord(quoteNode.spendPlan)
+      && isRecord(authorization) && authorization.spendPlanId === quoteNode.spendPlan.id ? quoteNode.spendPlan : undefined;
+    const estimatedCostCny = nonNegativeNumber(boundQuote?.estimatedCostCny) ?? nonNegativeNumber(receipt.estimatedCostCny) ?? 0;
     const currentNode = nodes.get(nodeId);
-    const definitiveNoSubmission = billing === "metered"
+    const definitiveNoSubmission = billing === "metered" && receipt.authorizationOnly !== true
       && reportedMeteredAttemptCount === 0
       && (reportedFailedAttemptCount ?? 0) === 0
       && (actualCost ?? 0) === 0;
@@ -167,8 +200,11 @@ function actualMediaProviderId(modelId: string): string | undefined {
   return undefined;
 }
 
-function uncertainReceipt(value: unknown, authorizations: unknown[], executionPlan: unknown): Record<string, unknown>[] {
-  if (!isRecord(value) || value.outcomeUncertain !== true || isRecord(value.executionReceipt)) return [];
+function uncertainReceipt(value: unknown, authorizations: unknown[], executionPlan: unknown, history: unknown): Record<string, unknown>[] {
+  if (!isRecord(value) || (value.outcomeUncertain !== true && value.status !== "running") || isRecord(value.executionReceipt)) return [];
+  const authorizationOnly = value.outcomeUncertain !== true;
+  if (authorizationOnly && Array.isArray(history) && history.some((receipt) => isRecord(receipt)
+    && receipt.nodeId === value.nodeId && receipt.requestId === value.operationRequestId)) return [];
   const nodeId = text(value.nodeId);
   const authorizationId = text(value.spendAuthorizationId);
   const authorization = authorizations.find((candidate) => isRecord(candidate) && candidate.id === authorizationId);
@@ -197,7 +233,9 @@ function uncertainReceipt(value: unknown, authorizations: unknown[], executionPl
     ...(authorizationId ? { spendAuthorizationId: authorizationId } : {}),
     ...(isRecord(authorization) ? { authorizedCostCny: nonNegativeNumber(authorization.maxCostCny) } : {}),
     estimatedCostCny: nonNegativeNumber(plan?.estimatedCostCny) ?? 0,
-    meteredAttemptCount: 1,
+    // 正在运行的授权只能证明有额度，不能反推已受理一次付费调用。
+    meteredAttemptCount: authorizationOnly ? 0 : 1,
+    ...(authorizationOnly ? { authorizationOnly: true } : {}),
     ...(requestId ? { requestId } : {}),
     startedAt,
   }];

@@ -1,5 +1,23 @@
 # 阿里云 VPN 恢复与素材复测 · 2026-09-21
 
+## 2026-09-26 补充：国内服务误入 VPN
+
+Wan 已生成的视频下载超过 60 秒。核实不是生成失败：同一 OSS 文件的 256KiB，经 VPN 用时 7.8–10.8 秒，国内直连只需 43–49 毫秒。修正分流后，正式容器同区间 39–53 毫秒；完整 7,959,313 字节只读传输 642 毫秒。后者 DNS 已切到另一个正常直连地址，不能将此数字视为同 IP 的固定吞吐承诺。
+
+根因是现有 APNIC 国别表未覆盖部分国内服务地址。百炼和 MiniMax 国内接口的部分 DNS 地址也走了 tun0；不应按品牌把其国际域名一并改成直连，更不能关闭海外 VPN。
+
+- `scripts/domestic-service-hosts.txt` 明确列出本次核实的国内模型/存储端点。
+- `scripts/refresh-domestic-routes.py` 只解析这些域名的公网 IPv4，沿物理默认出口添加 `/32`、metric49 路由；不改变 default、SSH 保护、DNS 或海外规则。默认只读，`--apply` 才写路由。
+- 云端安装为 `/usr/local/sbin/vf-refresh-domestic-routes.py`，域名表为 `/etc/proton-ovpn/vf-domestic-service-hosts.txt`；同名 service/timer 每五分钟刷新，并在开机后运行。原 ProtonVPN 服务未重启。
+- DNS 失败保留已有路由并记录失败，后续周期再查；不删除旧地址，以免切断在途结果下载。新增国内来源/新 OSS 主机须核实后加入，国际端点不继承同品牌国内路由。
+- 海外 OpenAI、Pexels、Pixabay、Wikimedia 仍经 tun0。前两者无凭据 HTTP 探针均返回预期 401，仅证明网络可达，不是模型/账号验收。
+
+检查：`systemctl status vf-domestic-routes.timer`、`journalctl -u vf-domestic-routes.service`、对实际目标 IP 执行 `ip route get`。每条输出包含域名/地址，不含 Key、签名下载 URL 或请求正文。
+
+回滚时先停止并禁用该 timer，按日志逐条删除本次添加的 `/32 metric49` 路由；不要 flush 主路由表，不改 ProtonVPN 和既有 metric50 中国网段。安装材料与变更证据留在 `/root/vf-domestic-route-fix-gcWbYi/` 及本地 `.local/dogfood-20260921/qa/cdf11-*`。
+
+本次仅修国内误分流；历史海外图库的 45 秒超时不能据此宣称全部解决。没有降低媒体清晰度、扩大自动重试或绕过付费授权。
+
 ## 当前结论
 
 用户提供 `jp-free-26.protonvpn.tcp.ovpn` 后，已从失联的旧节点切换到新节点。**2026-09-21 16:13:19（北京时间）VPN 初始化成功**，宿主机和 VideoFactory 容器的 OpenAI API 网络访问恢复，素材复测 11 项真实搜索/下载/解码通过。

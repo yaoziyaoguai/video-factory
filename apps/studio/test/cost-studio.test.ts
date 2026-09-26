@@ -3,6 +3,34 @@ import { describe, it } from "node:test";
 import { CostStudio } from "../src/server/cost-studio.js";
 
 describe("CostStudio", () => {
+  it("uses the bound quote rather than the catalog estimate and exposes running authorization", async () => {
+    const run = { id: "run-quote", initialInput: {}, nodeRuns: [{ nodeId: "assets", status: "running", operationRequestId: "op", spendAuthorizationId: "spend", startedAt: "2026-09-26T01:00:00Z", spendPlan: { id: "quote", providerId: "wan", modelId: "wan3", estimatedCostCny: 12 } }],
+      spendAuthorizations: [{ id: "spend", nodeId: "assets", spendPlanId: "quote", providerId: "wan", modelId: "wan3", maxCostCny: 12 }], executionReceipts: [] as Record<string, unknown>[],
+    };
+    const studio = new CostStudio(async () => [run]);
+    assert.equal((await studio.runDetail(run.id))?.totals.authorizedCostCny, 12);
+    assert.equal((await studio.runDetail(run.id))?.totals.meteredCalls, 0, "授权不代表已调用");
+    run.executionReceipts.push({ nodeId: "assets", providerId: "wan", modelId: "wan3", billing: "metered", startedAt: "2026-09-26T01:00:00Z", requestId: "op", spendAuthorizationId: "spend", estimatedCostCny: 1.2, actualCostCny: 6 });
+    assert.equal((await studio.runDetail(run.id))?.totals.estimatedCostCny, 12);
+  });
+
+  it("includes checkpoint-only brief and late planning calls once without inventing a cash bill", async () => {
+    const run = { id: "run-checkpoints", initialInput: { title: "恢复调用" }, nodeRuns: [], executionReceipts: [
+      { nodeId: "creative-planning", providerId: "deepseek", modelId: "deepseek-flash", billing: "subscription", startedAt: "2026-09-26T01:00:00Z", requestId: "old-operation", parameters: { modelCallCount: 7 } },
+    ] };
+    const studio = new CostStudio(async () => [run], async () => [
+      { nodeId: "brief", providerId: "deepseek", modelId: "deepseek-flash", modelCallCount: 2 },
+      { nodeId: "creative-planning", providerId: "deepseek", modelId: "deepseek-flash", modelCallCount: 8 },
+    ]);
+    const detail = await studio.runDetail(run.id);
+    assert.equal(detail?.totals.subscriptionCalls, 10);
+    assert.equal(detail?.lines.find((line) => line.nodeId === "brief")?.subscriptionCallCount, 2);
+    assert.equal(detail?.lines.find((line) => line.id === "checkpoint:creative-planning")?.subscriptionCallCount, 1);
+    assert.equal(detail?.lines.find((line) => line.id === "checkpoint:brief")?.actualCostCny, undefined);
+    assert.equal((await studio.runDetail(run.id))?.totals.subscriptionCalls, 10);
+    assert.equal(run.executionReceipts.length, 1, "成本投影不得改写历史回执");
+  });
+
   it("keeps test-run spend in the ledger while separating billing types", async () => {
     const studio = new CostStudio(async () => ([{
       id: "run-1",

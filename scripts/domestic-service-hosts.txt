@@ -1,0 +1,9 @@
+# 明确使用中国大陆接口的服务。国际接入域名不要按厂商品牌加入。
+api.deepseek.com
+open.bigmodel.cn
+dashscope.aliyuncs.com
+ark.cn-beijing.volces.com
+api.minimaxi.com
+api.minimax.chat
+# 实际 Wan 返回的国内 OSS 加速存储域名；新存储域名需先核实。
+dashscope-a717.oss-accelerate.aliyuncs.com

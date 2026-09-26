@@ -4221,6 +4221,89 @@ describe("GenerativeAssetWorkerClient", () => {
     assert.match(jobs.jobs[0].error, /private or unsafe/);
   });
 
+  it("stops a stalled media body and recovers the accepted task without buying it twice", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-stalled-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "恢复原视频下载" },
+    ] }));
+    let creates = 0;
+    let reconciles = 0;
+    let downloads = 0;
+    const result = { providerId: "seedance-video-v1", taskId: "already-generated", videoUrl: "https://media.example/slow.mp4" };
+    const subject = new GenerativeAssetWorkerClient({
+      fallback: new LocalAssetWorker(),
+      adapters: [{ estimatedCnyPerClip: 1, adapter: {
+        providerId: result.providerId,
+        generate: async () => { creates += 1; return result; },
+        reconcile: async (taskId) => { reconciles += 1; assert.equal(taskId, result.taskId); return result; },
+      } }],
+      resolveHost: resolvePublicHost,
+      downloadTimeoutMs: 200,
+      downloadIdleTimeoutMs: 30,
+      fetch: async (_input, init) => {
+        downloads += 1;
+        if (downloads > 1) return new Response("recovered-video", { headers: { "content-type": "video/mp4" } });
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1]));
+            init?.signal?.addEventListener("abort", () => controller.error(new Error("aborted")), { once: true });
+          },
+        }), { headers: { "content-type": "video/mp4" } });
+      },
+    });
+    const first = await subject.run(workerRequest(scriptPath, path.join(root, "attempt-1"), 1, 1));
+    assert.equal(first.status, "failed");
+    const jobs = JSON.parse(await readFile(path.join(root, "attempt-1/generation_jobs.json"), "utf8"));
+    assert.match(jobs.jobs[0].error, /download stalled.*30ms.*1 byte/);
+    const ledgerPath = path.join(root, ".generation-operations", `${createHash("sha256").update("command-1").digest("hex")}.json`);
+    const firstLedger = JSON.parse(await readFile(ledgerPath, "utf8"));
+    assert.equal(firstLedger.items[0].state, "provider_succeeded");
+    const recovered = await subject.run({ ...workerRequest(scriptPath, path.join(root, "attempt-2"), 0, 0), attempt: 2 });
+    assert.equal(recovered.status, "succeeded");
+    assert.equal(creates, 1);
+    assert.equal(reconciles, 1);
+    assert.equal(recovered.diagnostics?.actualCostCny, 0);
+    assert.equal(JSON.parse(await readFile(ledgerPath, "utf8")).items[0].state, "materialized");
+  });
+
+  it("lets a progressing download cross idle intervals but still enforces its total deadline", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-progress-"));
+    const scriptPath = path.join(root, "script.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [
+      { position: 1, duration: 5, visual_strategy: "generated", visual_prompt: "慢但持续有进度" },
+    ] }));
+    for (const [chunks, expected] of [[6, "succeeded"], [60, "failed"]] as const) {
+      const outputDir = path.join(root, `case-${chunks}`, "attempt-1");
+      const subject = new GenerativeAssetWorkerClient({
+        fallback: new LocalAssetWorker(),
+        adapters: [{ estimatedCnyPerClip: 1, adapter: {
+          providerId: "seedance-video-v1",
+          generate: async () => ({ providerId: "seedance-video-v1", taskId: "progress-task", videoUrl: "https://media.example/progress.mp4" }),
+        } }],
+        resolveHost: resolvePublicHost,
+        downloadTimeoutMs: 300,
+        downloadIdleTimeoutMs: 100,
+        fetch: async () => {
+          let sent = 0;
+          return new Response(new ReadableStream({
+            async pull(controller) {
+              await new Promise((resolve) => setTimeout(resolve, 25));
+              if (sent++ === chunks) controller.close();
+              else controller.enqueue(new Uint8Array([1]));
+            },
+          }), { headers: { "content-type": "video/mp4" } });
+        },
+      });
+      const response = await subject.run(workerRequest(scriptPath, outputDir, 1, 1));
+      assert.equal(response.status, expected);
+      if (expected === "failed") {
+        const jobs = JSON.parse(await readFile(path.join(outputDir, "generation_jobs.json"), "utf8"));
+        assert.match(jobs.jobs[0].error, /timed out after 300ms/);
+      }
+    }
+  });
+
   it("stops a generated-media download when the overall timeout expires", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-generative-assets-"));
     const scriptPath = path.join(root, "script.json");

@@ -483,6 +483,25 @@ function completedSingleVisualReview(
 }
 
 describe("ProductionPipeline", () => {
+  it("projects brief audit checkpoints into accounting without rewriting the run or double-counting copies", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-checkpoint-cost-"));
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });
+    const run = await subject.start(brief);
+    const runFile = path.join(workspaceRoot, "runs", run.id, "run.json");
+    const originalRun = await readFile(runFile, "utf8");
+    const directory = path.join(workspaceRoot, "runs", run.id, "nodes", "brief", "agent-loop-checkpoints");
+    await mkdir(directory, { recursive: true });
+    const checkpoint = {
+      version: "video-factory/agent-loop-checkpoint-v9", key: "brief-cost", recoveryOwner: { runId: run.id, nodeId: "brief", workflowOperationRequestId: "op-brief" },
+      phaseAttempts: { produce: 0, audit: 2 }, completed: [{ iteration: 1, auditTrace: { providerId: "deepseek", modelId: "deepseek-flash", modelAttemptCount: 1 } }],
+    };
+    await writeFile(path.join(directory, "one.json"), JSON.stringify(checkpoint));
+    await writeFile(path.join(directory, "copy.json"), JSON.stringify(checkpoint));
+    await writeFile(path.join(directory, "wrong-owner.json"), JSON.stringify({ ...checkpoint, recoveryOwner: { ...checkpoint.recoveryOwner, runId: "another-run" } }));
+    assert.deepEqual(await subject.readTextExecutionUsage(run.id), [{ nodeId: "brief", providerId: "deepseek", modelId: "deepseek-flash", modelCallCount: 2 }]);
+    assert.equal(await readFile(runFile, "utf8"), originalRun);
+  });
+
   it("allows a formal production to reach render when the user accepts an unavailable visual review", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-playable-first-cut-"));
     const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });

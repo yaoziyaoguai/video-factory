@@ -21,6 +21,10 @@ export function configuredModelRequest(config: ModelConnectionInput, prompt: str
       },
     };
   }
+  // 百炼兼容接口的音频 data 接受 URL / Data URI，OpenAI 原生接口接受裸 base64。
+  // 按接入协议方处理这一个传输差异，不能把模型名或内部路由 ID 当作协议。
+  const dashscope = /^dashscope(?:-[a-z]+)?\.aliyuncs\.com$/.test(new URL(base).hostname);
+  const audioData = audio ? `${dashscope ? "data:;base64," : ""}${audio.toString("base64")}` : undefined;
   return {
     endpoint: `${base}/chat/completions`,
     headers: { "content-type": "application/json", authorization: `Bearer ${config.apiKey}` },
@@ -29,8 +33,9 @@ export function configuredModelRequest(config: ModelConnectionInput, prompt: str
       messages: [{ role: "user", content: images.length || audio ? [
         { type: "text", text: prompt },
         ...images.map((image) => ({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${image.toString("base64")}` } })),
-        ...(audio ? [{ type: "input_audio", input_audio: { data: audio.toString("base64"), format: "mp3" } }] : []),
+        ...(audioData ? [{ type: "input_audio", input_audio: { data: audioData, format: "mp3" } }] : []),
       ] : prompt }],
+      ...(audio ? { modalities: ["text"] } : {}),
       max_tokens: config.maxOutputTokens,
       ...(config.reasoningEffort ? { reasoning_effort: config.reasoningEffort } : {}),
       stream: true,

@@ -89,6 +89,7 @@ export function RunPage() {
     };
   }, [runId]);
   const costRefreshTimer = useRef<number | undefined>(undefined);
+  const costRefreshRequest = useRef(0);
   const snapshotRefreshPending = useRef(false);
   const paidSummaryRequest = useRef(0);
   const reconciliationRequests = useRef(new Map<string, {
@@ -98,10 +99,14 @@ export function RunPage() {
   const uncertainPaidNodeId = run?.nodes.find((node) => node.outcomeUncertain === true)?.id;
 
   const refreshCosts = useCallback(async () => {
+    const requestId = ++costRefreshRequest.current;
     try {
-      setCostDetail(await studioApi.runCosts(runId));
+      const detail = await studioApi.runCosts(runId);
+      if (currentRunId.current !== runId || requestId !== costRefreshRequest.current) return;
+      setCostDetail(detail);
       setCostError(undefined);
     } catch (caught) {
+      if (currentRunId.current !== runId || requestId !== costRefreshRequest.current) return;
       setCostError(`调用与费用明细读取失败：${caught instanceof Error ? caught.message : String(caught)}`);
     }
   }, [runId]);
@@ -227,9 +232,10 @@ export function RunPage() {
         setConnectionHeartbeatAt(at);
         setConnectionWarning(undefined);
         void refreshRunSnapshot();
+        void refreshCosts();
       },
     );
-  }, [runId, run !== undefined, isTerminal(run?.status), refreshRunSnapshot]);
+  }, [runId, run !== undefined, isTerminal(run?.status), refreshRunSnapshot, refreshCosts]);
 
   useEffect(() => () => {
     if (costRefreshTimer.current !== undefined) window.clearTimeout(costRefreshTimer.current);

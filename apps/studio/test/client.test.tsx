@@ -137,6 +137,26 @@ const runDetail: StudioRunDetail = {
 };
 
 describe("Studio client", () => {
+  it("refreshes costs on a heartbeat even if a long provider operation emits no run event", async () => {
+    vi.restoreAllMocks();
+    const listeners = new Map<string, EventListener>();
+    vi.stubGlobal("EventSource", class {
+      addEventListener(name: string, listener: EventListener) { listeners.set(name, listener); }
+      close() {}
+    });
+    const { activeIntervention: _intervention, ...runningRun } = runDetail;
+    vi.spyOn(studioApi, "run").mockResolvedValue({ ...runningRun, status: "running" });
+    vi.spyOn(studioApi, "providers").mockResolvedValue([]);
+    const costs = vi.spyOn(studioApi, "runCosts").mockResolvedValue({ runId: "run-1", title: "费用刷新", lines: [], totals: { estimatedCostCny: 12, authorizedCostCny: 12, actualCostCny: 0, actualPendingCount: 1, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0 } });
+    render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
+    await waitFor(() => expect(listeners.has("heartbeat")).toBe(true));
+    expect(costs).toHaveBeenCalledTimes(1);
+    listeners.get("heartbeat")!(new MessageEvent("heartbeat", { data: JSON.stringify({ at: "2026-09-26T13:30:00Z" }) }));
+    await waitFor(() => expect(costs).toHaveBeenCalledTimes(2));
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
   it("binds an unaudited publish-copy adoption to the visible document version", async () => {
     const onDecision = vi.fn().mockResolvedValue(undefined);
     const current = { publishPackagePath: "/private/current.json", contentReview: { status: "not_audited", summary: "人工修改后的本版尚未重新审计。", suggestions: [] } };
@@ -155,6 +175,54 @@ describe("Studio client", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
       action: "approve", contentVersionId: "v2", acceptUnauditedContent: true, expectedRunRevision: 9,
+    }));
+  });
+
+  it("labels source preflight as continuing production instead of creating a publishing package", () => {
+    const run = { ...runDetail, activeIntervention: { ...runDetail.activeIntervention!, nodeId: "asset-source-review" } };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
+    expect(screen.getByRole("button", { name: "接受当前素材风险，继续制作" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批准进入发布包" })).not.toBeInTheDocument();
+  });
+
+  it("previews rendering as the immediate step after voice even when later review has configuration", () => {
+    const run: StudioRunDetail = { ...runDetail, activeIntervention: { ...runDetail.activeIntervention!, nodeId: "voice", boundary: "node-complete" }, nodes: [
+      { id: "voice", label: "配音", role: "声音导演", status: "needs_human", artifactIds: [], qualityGateResults: [] },
+      { id: "render", label: "渲染", role: "剪辑", status: "pending", artifactIds: [], qualityGateResults: [] },
+      { id: "visual-review", label: "视觉审片", role: "审片", status: "pending", artifactIds: [], qualityGateResults: [], executionConfiguration: { providerId: "review", modelSelections: {} } },
+    ] };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
+    expect(screen.getByText(/下一步「渲染」还没开始/)).toBeInTheDocument();
+    expect(screen.queryByText(/下一步「视觉审片」/)).not.toBeInTheDocument();
+  });
+
+  it("collects rendered review decisions before adopting publish copy and retains its document identity", async () => {
+    const user = userEvent.setup();
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const current = { contentReview: { status: "passed", summary: "文案已审", suggestions: [] } };
+    const itemKey = "9".repeat(64);
+    const run: StudioRunDetail = {
+      ...runDetail, currentNodeId: "publish-package", revision: 19,
+      activeIntervention: { id: "publish-stop", nodeId: "publish-package", boundary: "node-complete", reason: "采用文案", options: ["approve", "reject"], createdAt: "2026-09-26T00:00:00Z" },
+      nodes: [...runDetail.nodes.filter((node) => !["visual-review", "publish-package"].includes(node.id)), {
+        id: "visual-review", label: "成片审片", role: "审片员", status: "succeeded", artifactIds: [], qualityGateResults: [],
+        output: { report: { recommendation: "approve", summary: "保留质量建议", scores: { composition: 80, continuity: 80, pacing: 80, legibility: 80, safety: 90 }, reviewScope: { evidenceId: "a".repeat(64) }, findings: [{ itemKey, timecodeMs: 1000, scenePosition: 1, category: "composition", description: "主体略偏边缘", suggestion: "可保留", evidenceStatus: "failed", severity: "warning" }] } },
+      }, {
+        id: "publish-package", label: "发布文案与发布包", role: "发行编辑", status: "needs_human", artifactIds: [], qualityGateResults: [], output: current,
+        outputState: { generatedVersionId: "publish-v1", effectiveVersionId: "publish-v1", stale: false, versions: [{ id: "publish-v1", source: "generated", artifactIds: [], inputVersionIds: [], createdAt: "2026-09-26T00:00:00Z", createdBy: "agent", schemaVersion: "v1", output: current }] },
+      }],
+    };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
+    await user.click(screen.getByRole("button", { name: "采用当前稿，继续" }));
+    expect(onDecision).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("dialog");
+    const approve = within(dialog).getByRole("button", { name: "采用当前稿，继续" });
+    expect(approve).toBeDisabled();
+    await user.click(within(dialog).getByRole("button", { name: "接受风险，保留本版" }));
+    await user.click(approve);
+    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
+      action: "approve", expectedRunRevision: 19, interventionId: "publish-stop", contentVersionId: "publish-v1", reviewEvidenceId: "a".repeat(64),
+      reviewDispositions: [{ itemKey, decision: "accept_risk" }],
     }));
   });
 
