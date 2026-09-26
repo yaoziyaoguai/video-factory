@@ -478,6 +478,31 @@ export class CodexBridgeClient {
     );
   }
 
+  /** 只供显式恢复：再次核实同绑定确未受理，才把原序列化请求提交一次。 */
+  async submitPreparedIfUnaccepted(
+    operation: CodexPreparedOperation,
+    requestOptions: CodexTaskRequestOptions = {},
+  ): Promise<CodexTaskExecution> {
+    validatePreparedOperation(operation, this.options.socketPath);
+    const timeoutMs = requestOptions.timeoutMs === undefined ? this.timeoutMs : positiveRequestTimeout(requestOptions.timeoutMs);
+    const deadlineAtMs = Date.now() + timeoutMs;
+    const observation = await this.observePreparedOnce(operation, { timeoutMs });
+    if (observation.state === "completed_success") return observation.execution;
+    if (observation.state === "completed_failure") throw observation.error;
+    if (observation.state !== "not_accepted") {
+      throw new CodexBridgeError("原请求尚不能证明未受理，保留原身份等待核对，不重新提交。", false,
+        observation.state === "conflict" ? "conflict" : "uncertain");
+    }
+    const remainingMs = deadlineAtMs - Date.now();
+    if (remainingMs <= 0) throw new CodexBridgeError("核对窗口已结束，尚未重新提交原请求。", false, "uncertain");
+    const session = taskSessionFromEnvelope(operation.envelope);
+    const contractDigest = operation.binding.contractDigest ?? undefined;
+    const submission = await this.submit(operation.serializedEnvelope, operation.requestId, operation.kind,
+      session, remainingMs, contractDigest, operation.binding);
+    if (submission.kind === "completed") return submission.execution;
+    return this.awaitOutcome({ ...structuredClone(operation), taskFact: "running" }, session?.key, contractDigest, deadlineAtMs);
+  }
+
   // 用户主动查询只读取一次 durable 状态。running 是可信任务事实，不应被一个短 UI
   // 查询期限包装成超时或断连；查询本身失败也与原任务事实分开返回。
   async observePreparedOnce(

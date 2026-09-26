@@ -2,6 +2,7 @@ import type { CodexBridgeClient, CodexPreparedOperation, CodexTaskExecution, Rol
 import type { VisualReviewMediaPayload, VisualReviewMediaPreprocessor } from "./codex-visual-review.js";
 import { pendingRoleAgentOperation } from "./role-agent-checkpoint.js";
 import { runRoleAgentLoop, validateRoleAudit, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
+import { observeDocumentTask, runDocumentTask, validateDocumentResult, type DocumentTaskContext } from "./document-task.js";
 
 export interface ReferenceGrammarBeat {
   startMs: number;
@@ -48,6 +49,7 @@ export interface ReferenceGrammarExecution extends CodexTaskExecution<ShotGramma
 
 /** S4/reference-grammar（产品裁决 b）：AI 修订——单次产稿携带指令与当前报告，零审计。 */
 export interface ReferenceGrammarRevisionInput {
+  task?: DocumentTaskContext;
   selectedModelId?: string;
   videoPath: string;
   runRoot: string;
@@ -58,6 +60,7 @@ export interface ReferenceGrammarRevisionInput {
 
 /** S4/reference-grammar：主动再审——单次 role-audit 只审当前精确报告，零产稿。 */
 export interface ReferenceGrammarAuditInput {
+  task?: DocumentTaskContext;
   selectedModelId?: string;
   videoPath: string;
   runRoot: string;
@@ -76,6 +79,7 @@ export interface ReferenceGrammarAgent {
   analyzeDetailed?(input: ReferenceGrammarAgentInput): Promise<ReferenceGrammarExecution>;
   revise?(input: ReferenceGrammarRevisionInput): Promise<ShotGrammar>;
   auditCurrent?(input: ReferenceGrammarAuditInput): Promise<ReferenceGrammarAuditExecution>;
+  observeTask?(context: DocumentTaskContext): Promise<void>;
 }
 
 export interface CodexReferenceGrammarAgentOptions {
@@ -98,6 +102,10 @@ export const REFERENCE_GRAMMAR_AUDIT_CRITERIA = [
 export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
   readonly id: string;
   readonly modelId: string;
+
+  async observeTask(context: DocumentTaskContext): Promise<void> {
+    return observeDocumentTask(this.options.client, context);
+  }
 
   constructor(private readonly options: CodexReferenceGrammarAgentOptions) {
     this.id = options.providerId ?? "codex-reference-grammar-v1";
@@ -185,19 +193,19 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
     if (!instruction || [...instruction].length > 4_000) {
       throw new Error("Reference grammar revision instruction must be 1 to 4000 characters.");
     }
-    const taskPayload = await this.payload(input);
-    const rawGrammar = await this.options.client.runTask("reference-grammar", {
-      ...taskPayload,
+    const rawGrammar = await runDocumentTask(this.options.client, "reference-grammar", async () => ({
+      ...await this.payload(input),
       revision: { instruction, currentGrammar },
-    }, undefined, input.selectedModelId ? { model: input.selectedModelId } : {});
-    return validateShotGrammar(rawGrammar, taskPayload.durationMs);
+    }), input.task, input.selectedModelId);
+    return validateDocumentResult(input.task, () => validateShotGrammar(rawGrammar, currentGrammar.durationMs));
   }
 
   // 主动再审只审当前精确报告：单次 role-audit 与首审同一套标准，零产稿、零推进。
   async auditCurrent(input: ReferenceGrammarAuditInput): Promise<ReferenceGrammarAuditExecution> {
     const grammar = validateShotGrammar(input.grammar, input.grammar.durationMs);
-    const taskPayload = await this.payload(input);
-    const output = await this.options.client.runTask("role-audit", {
+    const output = await runDocumentTask(this.options.client, "role-audit", async () => {
+      const taskPayload = await this.payload(input);
+      return {
       role: "参考片分析师",
       iteration: 1,
       criteria: [...REFERENCE_GRAMMAR_AUDIT_CRITERIA],
@@ -211,8 +219,9 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
         ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
         ...(frame.phase ? { phase: frame.phase } : {}),
       })),
-    }, undefined, input.selectedModelId ? { model: input.selectedModelId } : {});
-    return { audit: validateRoleAudit(output, { role: "参考片分析师", candidate: grammar }) };
+      };
+    }, input.task, input.selectedModelId);
+    return validateDocumentResult(input.task, () => ({ audit: validateRoleAudit(output, { role: "参考片分析师", candidate: grammar }) }));
   }
 }
 

@@ -136,6 +136,14 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
       this.sessionAffinity.delete(this.sessionAffinity.keys().next().value as string);
     }
   }
+
+  override async submitPreparedIfUnaccepted(operation: CodexPreparedOperation, options: CodexTaskRequestOptions = {}): Promise<CodexTaskExecution> {
+    const candidate = this.candidates.find((item) => item.providerId === operation.brokerBinding.providerId);
+    if (!candidate) throw new CodexBridgeError("原文字任务的服务暂不可用，保留原请求等待核对。", false, "uncertain");
+    if (candidate.enabled === false) throw new CodexBridgeError("原模型已停用；不会重新提交尚未受理的请求，请核对后再选择新操作。", false, "rejected");
+    // 恢复只交回原客户端再次核实，绝不进入候选切换循环。
+    return candidate.client.submitPreparedIfUnaccepted(operation, options);
+  }
 }
 
 function modelForTask(candidate: FallbackTaskClientCandidate, kind: CodexTaskKind): string {

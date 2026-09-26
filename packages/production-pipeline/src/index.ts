@@ -334,5 +334,8 @@ export type {
   VideoGenerationAdapterBinding,
 } from "./generative-asset-worker.js";
 export { runCli } from "./cli.js";
+export type { DocumentTaskContext } from "./document-task.js";
+export { DocumentCommandStore, DocumentCommandConflictError, DocumentCommandPendingError, assertNoPendingDocumentCommands } from "./document-command.js";
+export type { DocumentCommandRecord } from "./document-command.js";
 export type { CliDependencies } from "./cli.js";
 export { SourceAssetPilotReviewer, type AssetPilotReviewer, type AssetPilotReviewInput, type AssetPilotReviewResult } from "./asset-pilot-review.js";

@@ -12,6 +12,11 @@ import {
   canonicalQualityContractDigest,
   CodexBridgeClient,
   CodexBridgeError,
+  DocumentCommandStore,
+  DocumentCommandConflictError,
+  DocumentCommandPendingError,
+  assertNoPendingDocumentCommands,
+  type DocumentCommandRecord,
   BRIEF_AUDIT_PROVIDER_ID,
   CREATIVE_TREATMENT_PROVIDER_ID,
   effectiveProductionBrief,
@@ -29,6 +34,7 @@ import {
   type DispatchedProductionRun,
   type CreativePlanningStageInspection,
   type CodexPreparedOperation,
+  type DocumentTaskContext,
   type ProductionBrief,
   type ProductionCreativeReviewConfirmationDraft,
   type ProductionCreativeReviewCommandDraft,
@@ -45,6 +51,8 @@ import {
   type ProductionAuthorizationScope,
   type PublishCopy,
   type PublishCopyAuditExecution,
+  type PublishCopyRevisionInput,
+  type PublishCopyAuditInput,
   type ReferenceGrammarAgent,
   type ShotGrammar,
   type VisualReviewFinding,
@@ -72,6 +80,7 @@ import {
   type StudioNodeExecutionConfigurationInput,
   type StudioNodeDocumentRevisionInput,
   type StudioNodeDocumentAuditInput,
+  type StudioDocumentCommand,
   type StudioPlanningEditableStage,
   type StudioProductionAmendmentInput,
   type StudioProductionAuthorizationInput,
@@ -105,6 +114,7 @@ const PLANNING_DELIVERY_KINDS = new Set([
 ]);
 
 export interface StudioPipelinePort {
+  readDocumentExecutionReceipts?: (runId: string) => Promise<unknown[]>;
   readPaidExecutionReceipts?: (runId: string) => Promise<NodeExecutionReceipt[]>;
   readTextExecutionUsage?: (runId: string) => Promise<Array<{ nodeId: string; providerId: string; modelId: string; modelCallCount: number }>>;
   list(): Promise<WorkflowRun<ProductionBrief>[]>;
@@ -228,23 +238,13 @@ export interface ProductionStudioOptions {
 }
 
 export type StudioReferenceGrammarTools = Required<Pick<ReferenceGrammarAgent, "revise" | "auditCurrent">>
-  & Partial<Pick<ReferenceGrammarAgent, "id">>;
+  & Partial<Pick<ReferenceGrammarAgent, "id" | "observeTask">>;
 
 /** 发布文案交付的修订与再审端口；由宿主用带审计配置的 CodexPublishCopyWriter 装配。 */
 export interface StudioDocumentCopyTools {
-  revise(input: {
-    platform: string;
-    brief: { title: string; angle: string; audience: string; nicheSlug: string };
-    narrations: string[];
-    currentCopy: PublishCopy;
-    instruction: string;
-  }): Promise<PublishCopy>;
-  auditCurrent(input: {
-    platform: string;
-    brief: { title: string; angle: string; audience: string; nicheSlug: string };
-    narrations: string[];
-    copy: PublishCopy;
-  }): Promise<PublishCopyAuditExecution>;
+  observeTask?(context: DocumentTaskContext): Promise<void>;
+  revise(input: PublishCopyRevisionInput): Promise<PublishCopy>;
+  auditCurrent(input: PublishCopyAuditInput): Promise<PublishCopyAuditExecution>;
 }
 
 export class ProductionStartDispatchedError extends Error {
@@ -672,6 +672,7 @@ export class ProductionStudio {
     try {
       await this.options.pipeline.withRunMaintenanceLease(uniqueIds, async () => {
         const runs = await Promise.all(uniqueIds.map((runId) => this.loadRequiredRun(runId)));
+        for (const runId of uniqueIds) await assertNoPendingDocumentCommands(path.join(this.options.workspaceRoot, "runs", runId));
         const active = runs.find((run) => !isTerminalRun(run.status));
         if (active) {
           throw new StudioConflictError(`“${active.initialInput.title}”仍在运行或等待确认，结束流程后才能归档。`);
@@ -709,6 +710,7 @@ export class ProductionStudio {
     try {
       await this.options.pipeline.withRunMaintenanceLease([runId], async () => {
         const current = await this.loadRequiredRun(runId);
+        await assertNoPendingDocumentCommands(path.join(this.options.workspaceRoot, "runs", runId));
         if (!isTerminalRun(current.status)) {
           throw new StudioConflictError("这条制作仍在运行或等待确认，结束流程后才能删除。");
         }
@@ -2023,12 +2025,37 @@ export class ProductionStudio {
     }
   }
 
+  async documentCommands(runId: string, nodeId: string): Promise<StudioDocumentCommand[]> {
+    await this.loadRequiredRun(runId);
+    if (nodeId !== "reference-grammar" && nodeId !== "publish-package") throw new StudioInputError("这个节点没有文字操作。");
+    const records = await new DocumentCommandStore(path.join(this.options.workspaceRoot, "runs", runId), nodeId).list();
+    return records.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((record) => ({
+      commandId: record.commandId, action: record.action, state: record.state,
+      expectedRunRevision: record.input.expectedRunRevision, expectedVersionId: record.input.expectedVersionId,
+      ...(record.input.instruction ? { instruction: record.input.instruction } : {}),
+      createdAt: record.createdAt, updatedAt: record.updatedAt,
+      ...(record.error ? { error: record.error.message } : {}),
+      ...(record.execution?.trace?.modelId ? { modelId: record.execution.trace.modelId } : {}),
+      ...(record.execution?.trace?.modelAttemptCount !== undefined ? { modelCallCount: record.execution.trace.modelAttemptCount } : {}),
+      ...(record.execution?.trace?.providerWaitMs !== undefined ? { providerWaitMs: record.execution.trace.providerWaitMs } : {}),
+      billingPending: Boolean(record.prepared || record.execution),
+    }));
+  }
+
   /** 文字交付修订只产未审新稿；原报告和参考片证据在验证完成前保持有效。 */
   async reviseNodeDocument(
     runId: string,
     nodeId: string,
     input: StudioNodeDocumentRevisionInput,
     actor: string,
+  ): Promise<StudioRunDetail> {
+    return this.withDocumentCommand(runId, nodeId, input, actor, "revise", (record, task) =>
+      this.reviseNodeDocumentWithTask(runId, nodeId, input, actor, record, task));
+  }
+
+  private async reviseNodeDocumentWithTask(
+    runId: string, nodeId: string, input: StudioNodeDocumentRevisionInput, actor: string,
+    record: DocumentCommandRecord, task: DocumentTaskContext,
   ): Promise<StudioRunDetail> {
     if (nodeId !== "publish-package" && nodeId !== "reference-grammar") {
       throw new StudioInputError("请选择发布文案或参考视频分析报告后再发送修订意见。");
@@ -2050,12 +2077,15 @@ export class ProductionStudio {
     });
     const brief = effectiveProductionBrief(context.run);
     let nextDocument: Record<string, unknown>;
+    await this.bindDocumentCommandSource(record, task, context, brief);
     if (context.content.kind === "reference-grammar") {
       const tools = this.options.referenceGrammarTools!;
-      const framesRoot = path.join(this.options.workspaceRoot, "runs", runId, "nodes", nodeId, "model-revisions", `frames-${randomUUID()}`);
+      const framesRoot = path.join(this.options.workspaceRoot, "runs", runId, "nodes", nodeId, "model-revisions", `frames-${record.commandId}`);
       try {
-        const videoPath = await stageReferenceDocumentVideo(framesRoot, context.content);
+        const videoPath = task.prepared || task.execution ? context.content.videoPath
+          : await stageReferenceDocumentVideo(framesRoot, context.content);
         const grammar = await tools.revise({
+          task,
           videoPath, sourceLabel: context.content.sourceLabel,
           runRoot: framesRoot, currentGrammar: context.content.grammar, instruction,
           ...(brief.models?.[tools.id ?? "codex-reference-grammar-v1"]
@@ -2063,11 +2093,13 @@ export class ProductionStudio {
         });
         nextDocument = { ...validateShotGrammar(grammar, context.content.grammar.durationMs) };
       } catch (error) {
-        await rm(framesRoot, { recursive: true, force: true });
+        if (!record.prepared && !record.execution) await rm(framesRoot, { recursive: true, force: true });
         throw error;
       }
     } else {
       const revisedCopy = await this.options.documentCopyTools!.revise({
+        task,
+        ...(brief.models?.["codex-publish-copy-v1"] ? { selectedModelId: brief.models["codex-publish-copy-v1"] } : {}),
         platform: brief.platform,
         brief: { title: brief.title, angle: brief.angle, audience: brief.audience, nicheSlug: brief.nicheSlug },
         narrations: context.content.narrations,
@@ -2088,8 +2120,11 @@ export class ProductionStudio {
       revisionSource: "model-revision",
     });
     if (prepared.unchanged) {
-      throw new StudioConflictError("修订结果与当前稿相同，没有创建新版本；可以直接采用当前稿。");
+      record.state = "unchanged";
+      return this.toDetail(await this.loadRequiredRun(runId));
     }
+    const resultSha256 = createHash("sha256").update(JSON.stringify(nextDocument)).digest("hex");
+    await task.beforeApply?.(resultSha256);
     validateNodeOverrideOutput({
       output: prepared.output,
       reference: { ...context.reference, contentReview: prepared.output.contentReview },
@@ -2097,6 +2132,7 @@ export class ProductionStudio {
       runRoot: path.join(this.options.workspaceRoot, "runs", runId),
       allowPathChanges: true,
     });
+    let persisted = false;
     try {
       const updated = await this.options.pipeline.applyNodeOverride(runId, {
         nodeId,
@@ -2104,14 +2140,26 @@ export class ProductionStudio {
         output: prepared.output,
         artifacts: prepared.artifacts,
         expectedVersionId: context.effectiveVersion.id,
+        expectedRunRevision: input.expectedRunRevision,
+        documentCommandId: record.commandId,
+        documentResultSha256: resultSha256,
         allowTerminalEdit: context.terminalConfirmed,
         schemaVersion: context.effectiveVersion.schemaVersion ?? "1",
       });
+      persisted = true;
       const detail = this.toDetail(updated);
       this.publish(detail);
       return detail;
     } catch (error) {
-      await Promise.all(prepared.cleanupPaths.map((candidate) => rm(candidate, { force: true }).catch(() => undefined)));
+      if (!persisted) {
+        // 保存可能已经完成，只是返回路径失败；无法确认时保留文件，不能删除已被新稿引用的产物。
+        const saved = await this.options.pipeline.loadPersisted(runId).catch(() => undefined);
+        if (saved) {
+          const referenced = new Set(saved.artifacts.map((artifact) => artifact.uri));
+          await Promise.all(prepared.cleanupPaths.filter((candidate) => !referenced.has(candidate))
+            .map((candidate) => rm(candidate, { force: true }).catch(() => undefined)));
+        }
+      }
       if (error instanceof StaleRunRevisionError || error instanceof NodeVersionConflictError || (error instanceof Error && /locked by another writer/.test(error.message))) {
         throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重新发送修订意见。");
       }
@@ -2125,6 +2173,14 @@ export class ProductionStudio {
     nodeId: string,
     input: StudioNodeDocumentAuditInput,
     actor: string,
+  ): Promise<StudioRunDetail> {
+    return this.withDocumentCommand(runId, nodeId, input, actor, "audit", (record, task) =>
+      this.auditNodeDocumentWithTask(runId, nodeId, input, actor, record, task));
+  }
+
+  private async auditNodeDocumentWithTask(
+    runId: string, nodeId: string, input: StudioNodeDocumentAuditInput, actor: string,
+    record: DocumentCommandRecord, task: DocumentTaskContext,
   ): Promise<StudioRunDetail> {
     if (nodeId !== "publish-package" && nodeId !== "reference-grammar") {
       throw new StudioInputError("请选择发布文案或参考视频分析报告后再审计当前版本。");
@@ -2142,34 +2198,41 @@ export class ProductionStudio {
     });
     const brief = effectiveProductionBrief(context.run);
     let execution: PublishCopyAuditExecution;
+    await this.bindDocumentCommandSource(record, task, context, brief);
     if (context.content.kind === "reference-grammar") {
       const tools = this.options.referenceGrammarTools!;
-      const framesRoot = path.join(this.options.workspaceRoot, "runs", runId, "nodes", nodeId, "audit-evidence", `frames-${randomUUID()}`);
+      const framesRoot = path.join(this.options.workspaceRoot, "runs", runId, "nodes", nodeId, "audit-evidence", `frames-${record.commandId}`);
       try {
-        const videoPath = await stageReferenceDocumentVideo(framesRoot, context.content);
+        const videoPath = task.prepared || task.execution ? context.content.videoPath
+          : await stageReferenceDocumentVideo(framesRoot, context.content);
         execution = await tools.auditCurrent({
+          task,
           videoPath, sourceLabel: context.content.sourceLabel,
           grammar: context.content.grammar, runRoot: framesRoot,
           ...(brief.models?.[tools.id ?? "codex-reference-grammar-v1"]
             ? { selectedModelId: brief.models[tools.id ?? "codex-reference-grammar-v1"] } : {}),
         });
       } catch (error) {
-        await rm(framesRoot, { recursive: true, force: true });
+        if (!record.prepared && !record.execution) await rm(framesRoot, { recursive: true, force: true });
         throw error;
       }
     } else {
       execution = await this.options.documentCopyTools!.auditCurrent({
+        task,
+        ...(brief.models?.["codex-publish-copy-v1"] ? { selectedModelId: brief.models["codex-publish-copy-v1"] } : {}),
         platform: brief.platform,
         brief: { title: brief.title, angle: brief.angle, audience: brief.audience, nicheSlug: brief.nicheSlug },
         narrations: context.content.narrations,
         copy: context.content.copy,
       });
     }
+    await task.beforeApply?.(createHash("sha256").update(JSON.stringify(execution.audit)).digest("hex"));
     try {
       const updated = await this.options.pipeline.recordNodeDocumentAudit(runId, {
         nodeId, actor, expectedRunRevision: input.expectedRunRevision,
         expectedVersionId: context.effectiveVersion.id,
-        auditId: `audit-${randomUUID()}`, audit: execution.audit,
+        auditId: `document-${record.commandId}`, audit: execution.audit,
+        documentCommandId: record.commandId,
       });
       const detail = this.toDetail(updated);
       this.publish(detail);
@@ -2180,6 +2243,102 @@ export class ProductionStudio {
       }
       throw error;
     }
+  }
+
+  private async withDocumentCommand(
+    runId: string, nodeId: string, input: StudioNodeDocumentRevisionInput | StudioNodeDocumentAuditInput,
+    actor: string, action: "revise" | "audit",
+    execute: (record: DocumentCommandRecord, task: DocumentTaskContext) => Promise<StudioRunDetail>,
+  ): Promise<StudioRunDetail> {
+    if (nodeId !== "publish-package" && nodeId !== "reference-grammar") {
+      throw new StudioInputError("请选择发布文案或参考视频分析报告。");
+    }
+    await this.loadRequiredRun(runId);
+    const store = new DocumentCommandStore(path.join(this.options.workspaceRoot, "runs", runId), nodeId);
+    let activeCommandId: string | undefined;
+    return store.withCommand<StudioRunDetail>({ ...(input.commandId ? { commandId: input.commandId } : {}), actor, action, input: {
+      expectedRunRevision: input.expectedRunRevision, expectedVersionId: input.expectedVersionId,
+      ...("instruction" in input ? { instruction: input.instruction.trim() } : {}),
+      ...("confirmTerminalEdit" in input && input.confirmTerminalEdit ? { confirmTerminalEdit: true } : {}),
+    } }, async (record, task) => {
+      activeCommandId = record.commandId;
+      task.waitTimeoutMs = 20_000;
+      const current = await this.loadRequiredRun(runId);
+      const versions = current.nodeRuns.find((node) => node.nodeId === nodeId)?.outputState?.versions ?? [];
+      const committed = versions.some((version) => {
+        const review = isRecord(version.output) && isRecord(version.output.contentReview) ? version.output.contentReview : undefined;
+        if (action === "revise" && version.documentCommand?.commandId === record.commandId
+          && version.documentCommand.resultSha256 !== record.resultSha256) {
+          throw new StudioConflictError("原文字操作与已保存结果不一致，请先核对记录。");
+        }
+        if (action === "revise") return version.documentCommand?.commandId === record.commandId;
+        const audit = [...(review ? [review] : []), ...(Array.isArray(review?.history) ? review.history.filter(isRecord) : [])]
+          .find((item) => item.auditId === `document-${record.commandId}`);
+        if (audit && (audit.versionId !== record.input.expectedVersionId
+          || createHash("sha256").update(JSON.stringify(audit.audit)).digest("hex") !== record.resultSha256)) {
+          throw new StudioConflictError("原审计操作与已保存结果不一致，请先核对记录。");
+        }
+        return Boolean(audit);
+      });
+      // 结果已写入制作、HTTP 回包丢失：直接读原提交，不再调用模型或创建第二个版本。
+      if (record.state === "applied" || record.state === "unchanged" || committed) return this.toDetail(current);
+      const currentVersionId = current.nodeRuns.find((node) => node.nodeId === nodeId)?.outputState?.effectiveVersionId;
+      if ((task.prepared || task.execution) && (currentVersionId !== record.input.expectedVersionId
+        || current.revision !== record.input.expectedRunRevision)) {
+        const tools = nodeId === "reference-grammar" ? this.options.referenceGrammarTools : this.options.documentCopyTools;
+        if (!task.execution) {
+          if (!tools?.observeTask) throw new StudioConflictError("稿件已变化，请先核对原文字任务结果，不能重复发送。");
+          await tools.observeTask(task);
+        }
+        record.state = "stale";
+        throw new StudioConflictError("原文字任务结果已保存，但稿件或制作状态已经变化；不会覆盖新稿。请查看记录后再决定是否重新修改。");
+      }
+      return execute(record, task);
+    }, async (persist) => this.options.pipeline.withRunMaintenanceLease([runId], async () => {
+      await assertNoPendingDocumentCommands(path.join(this.options.workspaceRoot, "runs", runId));
+      await this.prepareNodeDocumentContext(runId, nodeId, {
+        expectedRunRevision: input.expectedRunRevision, expectedVersionId: input.expectedVersionId,
+        confirmTerminalEdit: "confirmTerminalEdit" in input && input.confirmTerminalEdit === true,
+      });
+      await persist();
+    })).catch((error: unknown) => {
+      const bridgeError = error instanceof CodexBridgeError ? error
+        : error instanceof Error && error.cause instanceof CodexBridgeError ? error.cause : undefined;
+      if (bridgeError?.stage === "uncertain" && activeCommandId) {
+        throw new DocumentCommandPendingError(activeCommandId, bridgeError);
+      }
+      if (error instanceof DocumentCommandConflictError || hasCode(error, "ELOCKED")) {
+        throw new StudioConflictError(error instanceof DocumentCommandConflictError ? error.message
+          : "这个文字操作正在处理；请稍后取回原结果，不要重复发送。");
+      }
+      throw error;
+    });
+  }
+
+  private async bindDocumentCommandSource(
+    record: DocumentCommandRecord, task: DocumentTaskContext,
+    context: Awaited<ReturnType<ProductionStudio["prepareNodeDocumentContext"]>>,
+    brief: ProductionBrief,
+  ): Promise<void> {
+    const selectedModelId = brief.models?.[context.content.kind === "reference-grammar"
+      ? this.options.referenceGrammarTools?.id ?? "codex-reference-grammar-v1" : "codex-publish-copy-v1"];
+    const source = {
+      artifactId: context.artifact.id,
+      sha256: createHash("sha256").update(JSON.stringify(context.document)).digest("hex"),
+      contextDigest: createHash("sha256").update(JSON.stringify({ brief,
+        ...(context.content.kind === "publish-package" ? { narrations: context.content.narrations } : {}) })).digest("hex"),
+      ...(selectedModelId ? { selectedModelId } : {}),
+    };
+    if (record.source && !isDeepStrictEqual(record.source, source)) {
+      if (task.prepared && !task.execution) {
+        const tools = context.content.kind === "reference-grammar" ? this.options.referenceGrammarTools : this.options.documentCopyTools;
+        if (!tools?.observeTask) throw new StudioConflictError("原稿上下文已变化，请先核对原文字任务结果。");
+        await tools.observeTask(task);
+      }
+      record.state = "stale";
+      throw new StudioConflictError("原稿内容、上游信息或模型选择已变化；原结果保留，不会覆盖当前稿。");
+    }
+    record.source = source;
   }
 
   /** 文档级命令（AI 修订 / 主动再审）共用的前置校验与当前稿读取。 */

@@ -3,6 +3,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { CodexBridgeError, DocumentCommandPendingError, DocumentCommandConflictError } from "@video-factory/production-pipeline";
 import { buildStudioApp, type StudioServicePort } from "../src/server/app.js";
 import { StudioConflictError, StudioNotFoundError } from "../src/server/studio-service.js";
 import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
@@ -249,6 +250,35 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
 }
 
 describe("Studio API", () => {
+  it("preserves a document command identity through 202 waiting, 200 recovery and 409 conflict", async () => {
+    const ids: string[] = [];
+    const app = buildStudioApp({ service: fakeService({
+      documentCommands: async () => [],
+      reviseNodeDocument: async (_runId, _nodeId, input) => {
+        ids.push(input.commandId!);
+        if (input.instruction !== "改标题") throw new DocumentCommandConflictError("同一操作不能更换意见");
+        if (ids.length === 1) throw new DocumentCommandPendingError(input.commandId!, new CodexBridgeError("waiting", false, "uncertain"));
+        return runDetail();
+      },
+    }) });
+    try {
+      const request = { method: "POST" as const, url: "/api/runs/run-1/nodes/publish-package/document-revision",
+        headers: { "x-video-factory-request": "studio" },
+        payload: { commandId: "same-click", expectedRunRevision: 1, expectedVersionId: "v1", instruction: "改标题" } };
+      const waiting = await app.inject(request);
+      assert.equal(waiting.statusCode, 202);
+      assert.equal(waiting.json().documentCommandPending, true);
+      assert.equal(waiting.json().commandId, "same-click");
+      const resumed = await app.inject(request);
+      assert.equal(resumed.statusCode, 200);
+      assert.equal(resumed.json().id, "run-1");
+      const conflicting = await app.inject({ ...request, payload: { ...request.payload, instruction: "另一段意见" } });
+      assert.equal(conflicting.statusCode, 409);
+      assert.deepEqual(ids, ["same-click", "same-click", "same-click"]);
+      assert.equal((await app.inject({ method: "GET", url: "/api/runs/run-1/nodes/publish-package/document-commands" })).statusCode, 200);
+    } finally { await app.close(); }
+  });
+
   it("records resource reviews with the authenticated actor and validates revisions", async () => {
     const calls: Array<{ input: StudioResourceReviewInput; actor: string }> = [];
     const manifest = await fakeService().resourceManifest();

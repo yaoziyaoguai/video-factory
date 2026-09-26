@@ -29,7 +29,7 @@ export function RunCostDetailPanel({ detail, providers }: { detail: StudioCostRu
       <details className="cost-call-details">
         <summary><span><strong>调用与费用明细</strong><small>报价和授权不等于实际消费；结果不明确的调用要核对是否扣费，按配置费率登记的金额仍需与服务商账单核对。</small></span><b>{lines.length} 项</b></summary>
         <div className="cost-line-list">
-          {lines.length ? lines.map((line) => <article key={line.id}><span><strong>{line.role ?? runNodeLabel(line.nodeId)}</strong><small>{line.nodeId === "assets" ? "实际生成：" : ""}{capabilityLabel(line, providers)}</small></span><span><small>{line.callCount > 1 ? `${line.callCount} 次执行 · ` : ""}{costLineLabel(line)}</small><b>{line.actualPending ? `待确认是否扣费 · 预估 ¥${line.estimatedCostCny.toFixed(2)}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
+          {lines.length ? lines.map((line) => <article key={line.id}><span><strong>{line.role ?? runNodeLabel(line.nodeId)}</strong><small>{line.nodeId === "assets" ? "实际生成：" : ""}{capabilityLabel(line, providers)}</small></span><span><small>{line.callCount > 1 ? `${line.callCount} 次操作 · ` : ""}{costLineLabel(line)}</small><b>{line.billing === "unverified" ? "金额未核实" : line.actualPending ? `待确认是否扣费 · 预估 ¥${line.estimatedCostCny.toFixed(2)}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
         </div>
       </details>
     </section>
@@ -53,6 +53,8 @@ function groupCostLines(lines: StudioCostRunDetail["lines"]): GroupedCostLine[] 
     current.actualCostCny = (current.actualCostCny ?? 0) + (line.actualCostCny ?? 0);
     current.meteredAttemptCount = (current.meteredAttemptCount ?? 0) + (line.meteredAttemptCount ?? 0);
     current.meteredFailedAttemptCount = (current.meteredFailedAttemptCount ?? 0) + (line.meteredFailedAttemptCount ?? 0);
+    current.modelCallCount = (current.modelCallCount ?? 0) + (line.modelCallCount ?? 0);
+    current.callCountPending = current.callCountPending === true || line.callCountPending === true;
   }
   return [...grouped.values()];
 }
@@ -93,6 +95,7 @@ function actualCostLabel(totals: StudioCostTotals): string {
 }
 
 function costLineLabel(line: StudioCostRunDetail["lines"][number]): string {
+  if (line.billing === "unverified") return `${line.modelCallCount ?? 0} 次已确认模型调用${line.callCountPending ? "（计数尚未完整）" : ""} · 收费方式与金额待核账`;
   if ((line.meteredFailedAttemptCount ?? 0) > 0) {
     return line.meteredAttemptCount === undefined
       ? `${line.meteredFailedAttemptCount} 次计费调用明确失败`

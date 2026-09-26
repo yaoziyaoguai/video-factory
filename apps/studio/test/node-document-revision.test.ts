@@ -2,17 +2,19 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { describe, it } from "node:test";
 import type { NodeOverrideDraft, WorkflowRun } from "@video-factory/workflow-core";
-import { CodexReferenceGrammarAgent, ProductionPipeline, productionWorkflowVersion, validateShotGrammar, type ProductionBrief, type ProductionNodeDocumentAuditDraft } from "@video-factory/production-pipeline";
+import { CodexBridgeClient, CodexPublishCopyWriter, CodexBridgeError, CodexReferenceGrammarAgent, DocumentCommandStore, ProductionPipeline, productionWorkflowVersion, validateShotGrammar, type CodexPreparedOperation, type CodexTaskRequestOptions, type DocumentTaskContext, type ProductionBrief, type ProductionNodeDocumentAuditDraft } from "@video-factory/production-pipeline";
 import { PythonReviewMediaPreprocessor } from "../src/server/review-media-preprocessor.js";
 import { FileRunStore } from "../../../packages/production-pipeline/src/run-store.js";
 import { ProductionStudio, type StudioPipelinePort } from "../src/server/production-studio.js";
 import { StudioConflictError, StudioNotFoundError } from "../src/server/studio-errors.js";
 import { StudioInputError } from "../src/shared/api.js";
+import { documentSocket, killDocumentChild, startDocumentChild } from "./helpers/document-command-socket.js";
 
 // 「初稿审一次」合同 S4：发布文案（publish-package）的 AI 修订只产未审新稿、
 // 主动再审只审当前精确稿；两者都必须绑定用户看到的版本身份。
@@ -174,6 +176,7 @@ async function buildHarness(tools: HarnessOptions["contentReview"] extends never
     async loadPersisted() { return run; }
     async show() { return run; }
     async dispatch() { throw new Error("not expected in this test"); }
+    async withRunMaintenanceLease<T>(_ids: string[], operation: () => Promise<T>) { return operation(); }
     async decide() { return run; }
     async recordNodeDocumentAudit(_runId: string, draft: ProductionNodeDocumentAuditDraft) {
       this.lastAudit = draft;
@@ -219,6 +222,130 @@ const baseRevisionInput = {
   expectedRunRevision: 7,
   expectedVersionId: "publish-v1",
 };
+
+describe("durable document task boundaries", () => {
+  function revise(writer: CodexPublishCopyWriter, task: DocumentTaskContext) {
+    return writer.revise({ task, platform: "douyin", brief: productionBrief(), narrations: ["给今天留一点空白。", "从一件小事开始。", "先少做一个决定。"],
+      currentCopy: { title: "旧标题", description: "旧描述", hashtags: ["生活"] }, instruction: "标题具体一点" });
+  }
+  const identity = { commandId: "durable-command", actor: "creator", action: "revise" as const,
+    input: { ...baseRevisionInput, instruction: "标题具体一点" } };
+  it("sends zero POSTs if the atomic prepared record cannot replace its destination", async () => {
+    const workspace = await mkdtemp(path.join(tmpdir(), "vf-doc-write-"));
+    const journal = new DocumentCommandStore(workspace, "publish-package");
+    const bridge = await documentSocket(workspace, { title: "新的具体标题", description: "描述", hashtags: ["生活"] });
+    const writer = new CodexPublishCopyWriter({ socketPath: bridge.socketPath, maxAttempts: 1 });
+    try {
+      await assert.rejects(journal.withCommand(identity, async (_record, task) => {
+        const file = path.join(journal.directory, (await readdir(journal.directory)).find((name) => name.endsWith(".json"))!);
+        await rename(file, `${file}.backup`);
+        await mkdir(file); // 实际文件系统原子替换失败，不把异常放在HTTP调用之后。
+        try { return await revise(writer, task); }
+        finally { await rm(file, { recursive: true }); await rename(`${file}.backup`, file); }
+      }), /EISDIR/);
+      assert.equal(bridge.posts.length, 0);
+    } finally { await bridge.close(); }
+  });
+
+  it("keeps running, query failures and binding conflicts attached to one accepted request", async () => {
+    const workspace = await mkdtemp(path.join(tmpdir(), "vf-doc-query-"));
+    const journal = new DocumentCommandStore(workspace, "publish-package");
+    const bridge = await documentSocket(workspace, { title: "新的具体标题", description: "描述", hashtags: ["生活"] });
+    const writer = new CodexPublishCopyWriter({ client: new CodexBridgeClient({ socketPath: bridge.socketPath, timeoutMs: 500, pollIntervalMs: 10, maxAttempts: 1 }) });
+    const run = () => journal.withCommand(identity, (_record, task) => revise(writer, task));
+    try {
+      for (const mode of ["running", "unknown", "failure", "conflict"] as const) {
+        bridge.query(mode);
+        await assert.rejects(run(), (error: unknown) => error instanceof CodexBridgeError && error.stage === (mode === "conflict" ? "conflict" : "uncertain"));
+        assert.equal(bridge.posts.length, 1);
+        assert.equal((await journal.list())[0]!.state, "pending");
+      }
+      bridge.query("complete");
+      assert.equal((await run()).title, "新的具体标题");
+      assert.equal(bridge.posts.length, 1);
+      const saved = (await journal.list())[0]!;
+      assert.equal(saved.state, "applied");
+      assert.equal(saved.execution!.trace!.modelAttemptCount, 2);
+    } finally { await bridge.close(); }
+  });
+
+  it("persists completed execution before rejecting an invalid model result", async () => {
+    const workspace = await mkdtemp(path.join(tmpdir(), "vf-doc-invalid-"));
+    const journal = new DocumentCommandStore(workspace, "publish-package");
+    const bridge = await documentSocket(workspace, { title: "缺少其它必要字段" });
+    const writer = new CodexPublishCopyWriter({ socketPath: bridge.socketPath });
+    try {
+      await assert.rejects(journal.withCommand(identity, (_record, task) => revise(writer, task)), /description/);
+      const saved = (await journal.list())[0]!;
+      assert.equal(saved.state, "invalid");
+      assert.equal(saved.execution!.trace!.modelAttemptCount, 2);
+      await assert.rejects(journal.withCommand(identity, (_record, task) => revise(writer, task)));
+      assert.equal(bridge.posts.length, 1, "无效成稿不能伪装成没调用过并重新购买");
+    } finally { await bridge.close(); }
+  });
+});
+
+describe("document command real socket and killed Studio process", { concurrency: true }, () => {
+  for (const [nodeId, action, mode] of [
+    ["publish-package", "revise", "prepared"],
+    ["publish-package", "revise", "accepted"],
+    ["publish-package", "audit", "execution-after"],
+    ["reference-grammar", "revise", "commit"],
+    ["reference-grammar", "audit", "execution-before"],
+  ] as const) {
+    it(`${nodeId}/${action} resumes the original request after ${mode}`, { timeout: 90_000 }, async () => {
+      const harness = nodeId === "reference-grammar" ? await buildReferenceHarness() : await buildHarness(undefined);
+      const node = harness.run.nodeRuns.find((item) => item.nodeId === nodeId)!;
+      harness.run.initialInput.models = { [nodeId === "reference-grammar" ? "codex-reference-grammar-v1" : "codex-publish-copy-v1"]: "chosen-document-model" };
+      const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));
+      await store.create(harness.run);
+      const before = await store.load(harness.run.id);
+      const output = action === "revise"
+        ? ("grammar" in harness ? { ...harness.grammar, summary: "通过细节铺垫并揭示主体。" }
+          : { title: "让下班少一个决定", description: "用小动作留点空白。", hashtags: ["下班"] })
+        : { version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+          verdict: "pass", score: 90, summary: "叙事清楚。", issues: [], repairInstructions: [], assessments: [{
+            targetPath: "", dimensions: (nodeId === "reference-grammar" ? ["evidence", "coverage", "consistency", "actionability"]
+              : ["attention", "payoff", "expression"]).map((dimension) => ({ dimension, score: 90, evidence: "当前内容支持这一判断。" })),
+          }] };
+      const bridge = await documentSocket(harness.workspaceRoot, output);
+      if (mode === "accepted") bridge.hold();
+      const config = { workspaceRoot: harness.workspaceRoot, socketPath: bridge.socketPath, nodeId, action,
+        input: { commandId: `socket-${nodeId}-${action}`, expectedRunRevision: 7,
+          expectedVersionId: node.outputState!.effectiveVersionId, instruction: "让叙事更连贯。" } };
+      const first = await startDocumentChild({ ...config, mode });
+      let resumed: Awaited<ReturnType<typeof startDocumentChild>> | undefined;
+      try {
+        if (mode === "accepted") await Promise.race([bridge.accepted, first.message.then((message) => { throw new Error(JSON.stringify(message)); })]);
+        else assert.deepEqual(await first.message, { stage: mode }, first.output());
+        await killDocumentChild(first.child);
+        assert.equal(bridge.posts.length, mode === "prepared" ? 0 : 1);
+        // 真进程退出遗留的proper-lockfile租约：等待正式30秒过期，不删锁、不改mtime。
+        await delay(32_000);
+        resumed = await startDocumentChild({ ...config, mode: "recover" });
+        assert.deepEqual(await resumed.message, { stage: "done" }, resumed.output());
+        assert.equal((await resumed.exited)[0], 0, resumed.output());
+        assert.equal(bridge.posts.length, 1, "恢复只能GET原任务，绝不能第二次POST");
+        assert.equal((bridge.posts[0]!.brokerBinding as { modelId: string }).modelId, "chosen-document-model");
+        assert.equal(bridge.posts[0]!.kind, action === "audit" ? "role-audit" : nodeId === "reference-grammar" ? "reference-grammar" : "publish-copy");
+        const after = await store.load(harness.run.id);
+        const afterNode = after.nodeRuns.find((item) => item.nodeId === nodeId)!;
+        assert.equal(after.revision, before.revision + 1, "整个操作只采用一次，断点恢复不二次递增");
+        assert.equal(afterNode.outputState!.versions.length, node.outputState!.versions.length + (action === "revise" ? 1 : 0));
+        assert.equal((afterNode.output as { contentReview: { status: string } }).contentReview.status, action === "revise" ? "not_audited" : "passed");
+        if (nodeId === "reference-grammar") assert.equal(await readFile(path.join(harness.workspaceRoot, "sampling.txt"), "utf8"), "sample\n");
+        const receipts = await documentPipeline(harness.workspaceRoot, harness.runRoot).readDocumentExecutionReceipts(harness.run.id);
+        assert.equal(receipts.length, 1);
+        assert.equal(receipts[0]!.parameters?.modelCallCount, 2, "结构修复已在真实attemptCount里，不能再加一次");
+        assert.equal(receipts[0]!.parameters?.billingPending, true);
+      } finally {
+        await killDocumentChild(first.child);
+        if (resumed) await killDocumentChild(resumed.child);
+        await bridge.close();
+      }
+    });
+  }
+});
 
 function documentPipeline(workspaceRoot: string, runRoot: string) {
   return new ProductionPipeline({ workspaceRoot, referenceVideoRoot: runRoot,
@@ -286,6 +413,73 @@ async function buildReferenceHarness(realVideo = false) {
 }
 
 describe("reference-grammar document commands", () => {
+  it("recovers an accepted revision after Studio restart without resubmitting or resampling", async () => {
+    const harness = await buildReferenceHarness();
+    const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));
+    await store.create(harness.run);
+    let submissions = 0;
+    let samples = 0;
+    const observed: string[] = [];
+    const revised = { ...harness.grammar, summary: "先呈现问题，再通过细节完成揭示。" };
+    const submit = async () => {
+      submissions += 1;
+      if (submissions === 1) throw new CodexBridgeError("response lost after acceptance", false, "uncertain");
+      return revised;
+    };
+    const agent = new CodexReferenceGrammarAgent({
+      media: { prepare: async () => {
+        samples += 1;
+        return { durationMs: harness.grammar.durationMs, frames: [{ timecodeMs: 0, sha256: "a".repeat(64), jpegBase64: "/9j/2Q==" }] };
+      } },
+      client: {
+        runTask: submit,
+        runTaskDetailed: async (kind, payload, requestId, _session, options?: CodexTaskRequestOptions) => {
+          const brokerBinding = { version: "video-factory/task-binding-v1" as const,
+            storeId: `vfs_store_${"e".repeat(32)}`, providerId: "controlled", modelId: "reference-test" };
+          const envelope = { requestId, kind, payload };
+          const operation: CodexPreparedOperation = {
+            version: "video-factory/codex-prepared-operation-v1", requestId: requestId!, kind, envelope,
+            serializedEnvelope: JSON.stringify(envelope), brokerBinding,
+            binding: { ...brokerBinding, requestDigest: "a".repeat(64), kind, contractDigest: "b".repeat(64), sessionDigest: "c".repeat(64) },
+            route: { socketPath: "/tmp/document-revision.sock" }, taskFact: "not_submitted",
+          };
+          await options?.beforeSubmit?.(operation);
+          return { output: await submit() };
+        },
+        observePrepared: async (operation) => {
+          observed.push(operation.requestId);
+          return { output: revised };
+        },
+      },
+    });
+    const createStudio = () => new ProductionStudio({ workspaceRoot: harness.workspaceRoot,
+      pipeline: documentPipeline(harness.workspaceRoot, harness.runRoot), listProviders: async () => [],
+      archiveStore: { list: async () => ({}), archive: async () => {}, restore: async () => {} },
+      referenceGrammarTools: agent,
+    });
+    const input = { commandId: "document-restart-1", expectedRunRevision: 7,
+      expectedVersionId: "reference-v1", instruction: "让揭示与前面的细节相呼应。" };
+    await assert.rejects(createStudio().reviseNodeDocument(harness.run.id, "reference-grammar", input, "creator"),
+      (error: unknown) => error instanceof CodexBridgeError && error.stage === "uncertain");
+    await createStudio().reviseNodeDocument(harness.run.id, "reference-grammar", input, "creator");
+    assert.equal(submissions, 1, "重启恢复必须观察原任务，不能再次提交模型");
+    assert.equal(observed.length, 1);
+    assert.equal(samples, 1, "恢复复用已受理的完整帧证据，不重新抽帧改变绑定");
+    const saved = await store.load(harness.run.id);
+    assert.equal(saved.nodeRuns[0]!.outputState!.versions.length, 2);
+    assert.equal((saved.nodeRuns[0]!.output as { contentReview: { status: string } }).contentReview.status, "not_audited");
+    const pipeline = documentPipeline(harness.workspaceRoot, harness.runRoot);
+    const receipt = (await pipeline.readDocumentExecutionReceipts(harness.run.id))[0]!;
+    await delay(5);
+    await createStudio().reviseNodeDocument(harness.run.id, "reference-grammar", input, "creator");
+    assert.equal((await store.load(harness.run.id)).nodeRuns[0]!.outputState!.versions.length, 2, "丢失HTTP结果后重放不另建版本");
+    assert.equal((await pipeline.readDocumentExecutionReceipts(harness.run.id))[0]!.finishedAt, receipt.finishedAt,
+      "重放已完成操作不能延长费用回执中的完成时间");
+    await assert.rejects(createStudio().reviseNodeDocument(harness.run.id, "reference-grammar",
+      { ...input, instruction: "同编号换成另一条修改意见" }, "creator"), /同一文字操作不能更换/);
+    assert.equal(submissions, 1);
+  });
+
   it("revises then audits using the real Python evidence boundary without overwriting prior frames", async () => {
     const harness = await buildReferenceHarness(true);
     const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));
@@ -301,15 +495,17 @@ describe("reference-grammar document commands", () => {
         preparedRoots.push(input.runRoot);
         return media.prepare(input);
       } },
-      client: { runTask: async (kind) => {
+      client: { runTask: async () => { throw new Error("生产文档操作不得使用裸调用"); },
+        observePrepared: async () => { throw new Error("本测试没有恢复"); },
+        runTaskDetailed: async (kind) => {
         calls.push(kind);
-        return kind === "reference-grammar" ? { ...harness.grammar, summary: "先铺垫再揭示。" } : {
+        return { output: kind === "reference-grammar" ? { ...harness.grammar, summary: "先铺垫再揭示。" } : {
           version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
           verdict: "pass", score: 90, summary: "结构清楚。", issues: [], repairInstructions: [],
           assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"].map(
             (dimension) => ({ dimension, score: 90, evidence: "实际抽帧已送达。" }),
           ) }],
-        };
+        } };
       } },
     });
     const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline,
@@ -518,6 +714,107 @@ describe("reference-grammar document commands", () => {
 });
 
 describe("publish-package document revision and current-version audit", () => {
+  it("keeps the revision receipt after re-audit and replaying O1 never replaces O2", async () => {
+    const harness = await buildHarness(undefined);
+    const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));
+    await store.create(harness.run);
+    const pipeline = documentPipeline(harness.workspaceRoot, harness.runRoot);
+    const drafts: NodeOverrideDraft[] = [];
+    const auditDrafts: ProductionNodeDocumentAuditDraft[] = [];
+    const apply = pipeline.applyNodeOverride.bind(pipeline);
+    const audit = pipeline.recordNodeDocumentAudit.bind(pipeline);
+    pipeline.applyNodeOverride = async (runId, draft) => { drafts.push(structuredClone(draft)); return apply(runId, draft); };
+    pipeline.recordNodeDocumentAudit = async (runId, draft) => { auditDrafts.push(structuredClone(draft)); return audit(runId, draft); };
+    const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline,
+      listProviders: async () => [],
+      archiveStore: { list: async () => ({}), archive: async () => {}, restore: async () => {} },
+      documentCopyTools: {
+        revise: async (input) => ({ title: input.instruction, description: "下班后留点空白。", hashtags: ["下班"] }),
+        auditCurrent: async () => ({ audit: {
+          version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+          verdict: "pass", score: 90, summary: "内容清楚。", issues: [], repairInstructions: [], assessments: [],
+        } }),
+      },
+    });
+    const first = { ...baseRevisionInput, commandId: "revision-O1", instruction: "先少做一个决定" };
+    await studio.reviseNodeDocument(harness.run.id, "publish-package", first, "creator");
+    let current = await pipeline.show(harness.run.id);
+    const firstVersionId = current.nodeRuns[1]!.outputState!.effectiveVersionId;
+    await studio.auditNodeDocumentCurrent(harness.run.id, "publish-package", {
+      commandId: "audit-O1", expectedRunRevision: current.revision, expectedVersionId: firstVersionId,
+    }, "creator");
+    current = await pipeline.show(harness.run.id);
+    await studio.reviseNodeDocument(harness.run.id, "publish-package", {
+      commandId: "revision-O2", expectedRunRevision: current.revision, expectedVersionId: firstVersionId,
+      instruction: "让下班少一个决定",
+    }, "creator");
+    const second = await store.load(harness.run.id);
+    // 绕过外围journal重放实际提交点，模拟run已落盘、journal未标记完成的进程断点。
+    assert.deepEqual(await apply(harness.run.id, drafts[0]!), second);
+    await assert.rejects(apply(harness.run.id, { ...drafts[0]!, documentResultSha256: "f".repeat(64) }), /结果.*不一致/);
+    assert.deepEqual(await audit(harness.run.id, auditDrafts[0]!), second);
+    await assert.rejects(audit(harness.run.id, { ...auditDrafts[0]!, audit: { ...auditDrafts[0]!.audit, score: 50 } }), /结果.*不一致/);
+    assert.deepEqual(await store.load(harness.run.id), second);
+  });
+
+  it("rejects a new document operation while another document node has an unsettled command", async () => {
+    const harness = await buildHarness(undefined);
+    const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));
+    await store.create(harness.run);
+    let calls = 0;
+    const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot,
+      pipeline: documentPipeline(harness.workspaceRoot, harness.runRoot), listProviders: async () => [],
+      archiveStore: { list: async () => ({}), archive: async () => {}, restore: async () => {} },
+      documentCopyTools: {
+        revise: async () => { calls += 1; return { title: "新标题", description: "描述", hashtags: [] }; },
+        auditCurrent: async () => { throw new Error("不应补审"); },
+      },
+    });
+    const ready = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const pending = new DocumentCommandStore(harness.runRoot, "reference-grammar").withCommand({
+      commandId: "other-node-pending", actor: "creator", action: "audit", input: baseRevisionInput,
+    }, async () => { ready.resolve(); await finish.promise; });
+    await ready.promise;
+    try {
+      await assert.rejects(studio.reviseNodeDocument(harness.run.id, "publish-package",
+        { ...baseRevisionInput, commandId: "must-not-submit", instruction: "新标题" }, "creator"), /文字操作/);
+      assert.equal(calls, 0, "不能先调用模型再因另一个节点待结算而卡在结果写入");
+      assert.deepEqual(await studio.documentCommands(harness.run.id, "publish-package"), [], "未登记第二个相互阻塞的操作");
+    } finally { finish.resolve(); await pending; }
+  });
+
+  it("retains the committed revision if notifying the browser fails and replays without another model call", async () => {
+    const harness = await buildHarness(undefined);
+    const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));
+    await store.create(harness.run);
+    const pipeline = documentPipeline(harness.workspaceRoot, harness.runRoot);
+    let calls = 0;
+    const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline,
+      listProviders: async () => [],
+      archiveStore: { list: async () => ({}), archive: async () => {}, restore: async () => {} },
+      documentCopyTools: {
+        revise: async (input) => {
+          calls += 1;
+          const copy = { title: "先少做一个决定", description: "下班后留点空白。", hashtags: ["下班"] };
+          await input.task?.onCompleted({ output: copy });
+          return copy;
+        },
+        auditCurrent: async () => { throw new Error("不应自动补审"); },
+      },
+    });
+    const unsubscribe = studio.subscribe(harness.run.id, () => { throw new Error("browser disconnected after commit"); });
+    const input = { ...baseRevisionInput, commandId: "post-commit-revision", instruction: "标题更具体" };
+    await assert.rejects(studio.reviseNodeDocument(harness.run.id, "publish-package", input, "creator"), /browser disconnected/);
+    unsubscribe();
+    const committed = await pipeline.show(harness.run.id);
+    const output = committed.nodeRuns[1]!.output as { publishPackagePath: string };
+    assert.equal(JSON.parse(await readFile(output.publishPackagePath, "utf8")).copy.title, "先少做一个决定");
+    await studio.reviseNodeDocument(harness.run.id, "publish-package", input, "creator");
+    assert.equal(calls, 1);
+    assert.deepEqual(await pipeline.show(harness.run.id), committed, "恢复原已提交结果不得新增版本或改动有效稿");
+  });
+
   it("persists a publish audit on the original version and refuses late results under the write lease", async () => {
     const harness = await buildHarness(undefined);
     const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));

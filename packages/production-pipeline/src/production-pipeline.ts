@@ -62,6 +62,7 @@ import {
 } from "./generative-asset-worker.js";
 import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, type ScreenwriterAgent, type ScreenwriterAgentInput, type ScriptDraft } from "./codex-screenwriter.js";
 import { FallbackBriefAuditAgent, FallbackCreativeTreatmentAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
+import { assertNoPendingDocumentCommands, DocumentCommandConflictError, DocumentCommandStore, type DocumentExecutionReceipt } from "./document-command.js";
 import type { BriefAuditAgent } from "./codex-brief-audit.js";
 import { BRIEF_AUDIT_AGENT_CONTRACT_VERSION, BRIEF_AUDIT_PROVIDER_ID, briefAuditProjection } from "./codex-brief-audit.js";
 import {
@@ -175,6 +176,7 @@ export interface ProductionNodeDocumentAuditDraft {
   expectedRunRevision: number;
   expectedVersionId: string;
   auditId: string;
+  documentCommandId?: string;
   audit: RoleAudit;
 }
 
@@ -844,6 +846,39 @@ export class ProductionPipeline {
       if (settlement.meteredAttemptCount === 0) continue;
       // 修正旧版“恢复新增零元”覆盖历史支出的展示；不回写 run，也不修改服务商账本。
       Object.assign(receipt, settlement, { actualCostSource: "configured_rate" });
+    }
+    return receipts;
+  }
+
+  async readDocumentExecutionReceipts(runId: string): Promise<DocumentExecutionReceipt[]> {
+    await this.store.load(runId);
+    const receipts: DocumentExecutionReceipt[] = [];
+    for (const nodeId of ["reference-grammar", "publish-package"]) {
+      for (const command of await new DocumentCommandStore(this.store.runDirectory(runId), nodeId).list()) {
+        if (!command.prepared && !command.execution && !command.failureDetails) continue;
+        const trace = command.execution?.trace;
+        const count = trace?.modelAttemptCount ?? command.failureDetails?.modelAttemptCount;
+        const binding = command.prepared?.brokerBinding;
+        receipts.push({
+          nodeId, requestId: command.prepared?.requestId ?? `document-${command.commandId}`,
+          capability: "model.execute", providerId: trace?.providerId ?? command.failureDetails?.providerId ?? binding?.providerId ?? "unknown",
+          providerLabel: command.action === "revise" ? "主动文字修订" : "主动文字审计",
+          modelId: trace?.modelId ?? command.failureDetails?.modelId ?? binding?.modelId ?? "unknown",
+          transport: "unix_socket", billing: "unverified",
+          status: command.execution ? "succeeded" : command.state === "failed" ? "failed" : "unknown",
+          startedAt: command.createdAt,
+          ...(command.completedAt || command.execution || command.state === "failed"
+            ? { finishedAt: command.completedAt ?? command.updatedAt } : {}),
+          parameters: {
+            accountingSource: "document_operation", billingPending: true,
+            modelCallCount: count ?? 0, modelCallCountKnown: count !== undefined && !command.priorRequests?.length,
+            brokerTaskCount: 1 + (command.priorRequests?.length ?? 0),
+            ...(trace?.structuredRepairCount !== undefined ? { brokerStructuredRepairCount: trace.structuredRepairCount } : {}),
+            ...(trace?.providerWaitMs !== undefined ? { providerWaitMs: trace.providerWaitMs } : {}),
+            ...(trace?.queueWaitMs !== undefined ? { queueWaitMs: trace.queueWaitMs } : {}),
+          },
+        });
+      }
     }
     return receipts;
   }
@@ -1532,6 +1567,16 @@ export class ProductionPipeline {
         throw new Error("Only creator-facing document nodes support a document audit.");
       }
       if (!draft.actor.trim() || !draft.auditId.trim()) throw new Error("Document audit identity is required.");
+      const historicalAudit = previous.nodeRuns.find((item) => item.nodeId === draft.nodeId)?.outputState?.versions.flatMap((version) => {
+        const review = isObjectRecord(version.output) && isObjectRecord(version.output.contentReview) ? version.output.contentReview : undefined;
+        return [...(review ? [review] : []), ...(Array.isArray(review?.history) ? review.history.filter(isObjectRecord) : [])];
+      }).find((record) => record.auditId === draft.auditId);
+      if (draft.documentCommandId && historicalAudit) {
+        if (historicalAudit.versionId !== draft.expectedVersionId || JSON.stringify(historicalAudit.audit) !== JSON.stringify(draft.audit)) {
+          throw new DocumentCommandConflictError("同一审计操作的结果不一致，不能改写已保存记录。");
+        }
+        return previous;
+      }
       if (previous.revision !== draft.expectedRunRevision) {
         throw new StaleRunRevisionError(runId, draft.expectedRunRevision, previous.revision);
       }
@@ -1563,11 +1608,28 @@ export class ProductionPipeline {
       node.output = updatedOutput;
       next.revision += 1;
       return next;
-    });
+    }, draft.documentCommandId);
   }
 
   async applyNodeOverride(runId: string, override: NodeOverrideDraft): Promise<WorkflowRun<ProductionBrief>> {
     return this.runPersistedTransition(runId, async (previous) => {
+      if (override.documentCommandId) {
+        if (!override.documentResultSha256 || !/^[a-f0-9]{64}$/.test(override.documentResultSha256)) {
+          throw new DocumentCommandConflictError("文字操作缺少可核对的结果身份。");
+        }
+        const committed = previous.nodeRuns.find((node) => node.nodeId === override.nodeId)?.outputState?.versions.find(
+          (version) => version.documentCommand?.commandId === override.documentCommandId,
+        );
+        if (committed) {
+          if (committed.documentCommand?.resultSha256 !== override.documentResultSha256) {
+            throw new DocumentCommandConflictError("同一文字操作的结果不一致，不能覆盖已保存稿件。");
+          }
+          return previous;
+        }
+      }
+      if (override.expectedRunRevision !== undefined && override.expectedRunRevision !== previous.revision) {
+        throw new StaleRunRevisionError(runId, override.expectedRunRevision, previous.revision);
+      }
       await verifyNodeOverrideBoundary(this.store.runDirectory(runId), override);
       const brief = parsePersistedBrief(previous.initialInput);
       const effectiveOverride = override.nodeId === "visual-direction"
@@ -1578,8 +1640,15 @@ export class ProductionPipeline {
         clock: this.clock,
         idFactory: this.idFactory,
       });
-      return runner.applyNodeOverride(this.createWorkflow(brief), withExecutableBrief(previous, brief), effectiveOverride);
-    });
+      const next = runner.applyNodeOverride(this.createWorkflow(brief), withExecutableBrief(previous, brief), effectiveOverride);
+      if (override.documentCommandId && override.documentResultSha256) {
+        const state = next.nodeRuns.find((node) => node.nodeId === override.nodeId)!.outputState!;
+        state.versions.find((version) => version.id === state.effectiveVersionId)!.documentCommand = {
+          commandId: override.documentCommandId, resultSha256: override.documentResultSha256,
+        };
+      }
+      return next;
+    }, override.documentCommandId);
   }
 
   async requestVoiceTimingRevision(
@@ -3865,11 +3934,13 @@ export class ProductionPipeline {
       previous: WorkflowRun<ProductionBrief>,
       checkpoint: (run: WorkflowRun<ProductionBrief>) => Promise<void>,
     ) => Promise<WorkflowRun<ProductionBrief>>,
+    allowedDocumentCommandId?: string,
   ): Promise<WorkflowRun<ProductionBrief>> {
     const lease = await this.acquireExecutionLease(runId);
     try {
       await this.assertExecutionLease(lease);
       const previous = await this.store.load<ProductionBrief>(runId);
+      await assertNoPendingDocumentCommands(this.store.runDirectory(runId), allowedDocumentCommandId);
       let persisted = false;
       const checkpoint = async (run: WorkflowRun<ProductionBrief>) => {
         await this.assertExecutionLease(lease);
@@ -3881,6 +3952,7 @@ export class ProductionPipeline {
         await this.store.checkpoint(run);
       };
       const result = await transition(previous, checkpoint);
+      if (!persisted && allowedDocumentCommandId && result === previous) return previous;
       if (!persisted) {
         await this.assertExecutionLease(lease);
         await this.store.save(result, previous.revision);
@@ -3904,6 +3976,7 @@ export class ProductionPipeline {
     try {
       await this.assertExecutionLease(lease);
       previous = await this.store.load<ProductionBrief>(runId);
+      await assertNoPendingDocumentCommands(this.store.runDirectory(runId));
     } catch (error) {
       await this.releaseExecutionLease(lease);
       throw error;

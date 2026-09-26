@@ -265,6 +265,8 @@ export interface NodeOutputVersion<TOutput = unknown> {
   createdAt: string;
   createdBy: string;
   schemaVersion: string;
+  /** 与版本同事务保存，后续审计不能抹去改稿操作的采用凭据。 */
+  documentCommand?: { commandId: string; resultSha256: string };
 }
 
 export interface NodeOutputState<TOutput = unknown> {
@@ -313,6 +315,10 @@ export interface NodeOverrideDraft<TOutput = unknown> {
   output?: TOutput;
   artifacts?: ArtifactDraft[];
   expectedVersionId?: string;
+  /** 长时间文字操作提交时，同版本的其它修改也不能被旧快照覆盖。 */
+  expectedRunRevision?: number;
+  documentCommandId?: string;
+  documentResultSha256?: string;
   allowTerminalEdit?: boolean;
   schemaVersion?: string;
 }

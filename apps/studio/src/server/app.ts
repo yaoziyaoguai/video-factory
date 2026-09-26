@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import Fastify, { type FastifyInstance } from "fastify";
 import { parseProductionTemplate } from "@video-factory/template-core";
-import { CodexBridgeError, RoleAgentLoopError } from "@video-factory/production-pipeline";
+import { CodexBridgeError, DocumentCommandConflictError, DocumentCommandPendingError, RoleAgentLoopError } from "@video-factory/production-pipeline";
 import { StudioAuthenticator, type StudioAuthOptions } from "./auth.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-service.js";
 import type { CaseSearchQuery } from "./case-studio.js";
@@ -95,6 +95,7 @@ import {
   type StudioNodeInputOverrideInput,
   type StudioNodeDocumentRevisionInput,
   type StudioNodeDocumentAuditInput,
+  type StudioDocumentCommand,
   type StudioNodeExecutionConfigurationInput,
   type StudioNodeOverrideInput,
   type StudioPaidNodeSummary,
@@ -174,6 +175,7 @@ export interface StudioServicePort {
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
   reviseNodeDocument(runId: string, nodeId: string, input: StudioNodeDocumentRevisionInput, actor: string): Promise<StudioRunDetail>;
   auditNodeDocumentCurrent(runId: string, nodeId: string, input: StudioNodeDocumentAuditInput, actor: string): Promise<StudioRunDetail>;
+  documentCommands?(runId: string, nodeId: string): Promise<StudioDocumentCommand[]>;
   prepareProductionQuote(runId: string, input: StudioProductionQuoteInput, actor?: string): Promise<StudioProductionQuote>;
   authorizeProductionScope(runId: string, input: StudioProductionAuthorizationInput, actor?: string): Promise<StudioRunDetail>;
   amendProductionScope(runId: string, authorizationId: string, input: StudioProductionAmendmentInput, actor?: string): Promise<StudioRunDetail>;
@@ -662,6 +664,13 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     );
   });
 
+  app.get<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/document-commands", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.nodeId, "节点编号");
+    if (!options.service.documentCommands) throw new StudioNotFoundError("文字操作记录不可用。");
+    return options.service.documentCommands(request.params.runId, request.params.nodeId);
+  });
+
   app.post<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/document-revision", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     requireSafeRouteId(request.params.nodeId, "节点编号");
@@ -951,12 +960,17 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       void reply.code(404).send({ error: error.message });
       return;
     }
-    if (error instanceof StudioConflictError) {
+    if (error instanceof StudioConflictError || error instanceof DocumentCommandConflictError) {
       void reply.code(409).send({ error: error.message });
       return;
     }
     if (error instanceof StudioVoicePreviewUnavailableError) {
       void reply.code(503).send({ error: error.message });
+      return;
+    }
+    if (error instanceof DocumentCommandPendingError) {
+      void reply.code(202).send({ documentCommandPending: true, commandId: error.commandId,
+        error: "原文字任务仍在执行或等待核对。请取回原操作结果；不要重新生成，也不会自动推进。" });
       return;
     }
     const modelFailure = error instanceof RoleAgentLoopError ? error.agentLoop.failure : undefined;
@@ -1216,6 +1230,7 @@ function parseNodeDocumentRevisionInput(value: unknown): StudioNodeDocumentRevis
   const instruction = requireText(input.instruction, "instruction");
   return {
     instruction,
+    ...(input.commandId !== undefined ? { commandId: requireText(input.commandId, "commandId") } : {}),
     expectedRunRevision: requireExpectedRevision(input.expectedRunRevision),
     expectedVersionId: requireText(input.expectedVersionId, "expectedVersionId"),
     ...(input.confirmTerminalEdit === true ? { confirmTerminalEdit: true } : {}),
@@ -1225,6 +1240,7 @@ function parseNodeDocumentRevisionInput(value: unknown): StudioNodeDocumentRevis
 function parseNodeDocumentAuditInput(value: unknown): StudioNodeDocumentAuditInput {
   const input = requireRecord(value, "发布文案审计请求");
   return {
+    ...(input.commandId !== undefined ? { commandId: requireText(input.commandId, "commandId") } : {}),
     expectedRunRevision: requireExpectedRevision(input.expectedRunRevision),
     expectedVersionId: requireText(input.expectedVersionId, "expectedVersionId"),
   };

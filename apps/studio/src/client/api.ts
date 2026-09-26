@@ -56,6 +56,9 @@ import type {
   StudioTemplateMutation,
   StudioTemplateExperimentScorecard,
   StudioNodeOverrideInput,
+  StudioDocumentCommand,
+  StudioNodeDocumentRevisionInput,
+  StudioNodeDocumentAuditInput,
   StudioNodeInputOverrideInput,
   StudioNodeExecutionConfigurationInput,
   StudioPaidNodeSummary,
@@ -325,11 +328,14 @@ export const studioApi = {
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/input-override`,
     { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
-  reviseNodeDocument: (runId: string, nodeId: string, input: { instruction: string; expectedRunRevision: number; expectedVersionId: string; confirmTerminalEdit?: boolean }) => requestJson<StudioRunDetail>(
+  documentCommands: (runId: string, nodeId: string) => requestJson<StudioDocumentCommand[]>(
+    `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/document-commands`,
+  ),
+  reviseNodeDocument: (runId: string, nodeId: string, input: StudioNodeDocumentRevisionInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/document-revision`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
-  auditNodeDocument: (runId: string, nodeId: string, input: { expectedRunRevision: number; expectedVersionId: string }) => requestJson<StudioRunDetail>(
+  auditNodeDocument: (runId: string, nodeId: string, input: StudioNodeDocumentAuditInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/document-audit`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
@@ -476,7 +482,8 @@ function scopedCollectionPath(base: string, origin?: "trend" | "series" | "manua
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, studioRequest(init));
-  const body = await response.json().catch(() => undefined) as { error?: string } | undefined;
+  const body = await response.json().catch(() => undefined) as { error?: string; documentCommandPending?: boolean } | undefined;
+  if (body?.documentCommandPending) throw new Error(body.error ?? "原文字任务仍在执行，请取回原操作结果。");
   if (!response.ok) {
     notifyAuthenticationLoss(url, response.status);
     throw new Error(userFacingApiError(body?.error, response.status));

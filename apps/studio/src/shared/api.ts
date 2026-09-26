@@ -1202,6 +1202,7 @@ export interface StudioNodeOverrideInput {
 
 /** 发布文案 AI 修订：只产一次所授权的修订，产出为未审新稿并停下等人工决定。 */
 export interface StudioNodeDocumentRevisionInput {
+  commandId?: string;
   instruction: string;
   expectedRunRevision: number;
   expectedVersionId: string;
@@ -1210,8 +1211,25 @@ export interface StudioNodeDocumentRevisionInput {
 
 /** 发布文案主动再审：只审当前精确稿一次，不产稿、不推进。 */
 export interface StudioNodeDocumentAuditInput {
+  commandId?: string;
   expectedRunRevision: number;
   expectedVersionId: string;
+}
+
+export interface StudioDocumentCommand {
+  commandId: string;
+  action: "revise" | "audit";
+  state: "created" | "pending" | "completed" | "applied" | "failed" | "stale" | "unchanged" | "invalid";
+  expectedRunRevision: number;
+  expectedVersionId: string;
+  instruction?: string;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+  modelId?: string;
+  modelCallCount?: number;
+  providerWaitMs?: number;
+  billingPending: boolean;
 }
 
 /** joint-v1 创作规划里允许携带 planningStageId 的可编辑阶段白名单。 */
@@ -1818,7 +1836,7 @@ export interface StudioCostLine {
   capability: string;
   providerId: string;
   modelId: string;
-  billing: StudioBillingType;
+  billing: StudioBillingType | "unverified";
   status: "succeeded" | "failed" | "unknown";
   estimatedCostCny: number;
   authorizedCostCny?: number;
@@ -1828,6 +1846,9 @@ export interface StudioCostLine {
   meteredAttemptCount?: number;
   meteredFailedAttemptCount?: number;
   subscriptionCallCount?: number;
+  modelCallCount?: number;
+  accountingSource?: "document_operation";
+  callCountPending?: boolean;
   actualPending: boolean;
   startedAt: string;
   finishedAt?: string;
@@ -1840,6 +1861,7 @@ export interface StudioCostTotals {
   actualPendingCount: number;
   meteredCalls: number;
   subscriptionCalls: number;
+  unverifiedModelCalls?: number;
   freeCalls: number;
   failedMeteredCalls: number;
 }

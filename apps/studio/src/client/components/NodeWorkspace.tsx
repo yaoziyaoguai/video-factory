@@ -647,6 +647,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           {contentReview && !editing ? <NodeContentReview value={contentReview} /> : null}
           {contentReview && !editing && (node.id === "publish-package" || node.id === "reference-grammar") && onReviseDocument && onAuditDocument
             ? <NodeDocumentCommands
+              runId={runId}
               nodeId={node.id}
               runRevision={runRevision}
               effectiveVersionId={effectiveVersion?.id ?? ""}

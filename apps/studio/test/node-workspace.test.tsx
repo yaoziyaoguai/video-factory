@@ -111,6 +111,7 @@ const hailuoProvider: StudioProvider = {
 
 describe("node production workspaces", () => {
   it("offers reference-report revision and audit commands bound to the displayed document", async () => {
+    vi.spyOn(studioApi, "documentCommands").mockResolvedValue([]);
     const revise = vi.fn(async () => undefined);
     const audit = vi.fn(async () => undefined);
     const output = { grammar: { summary: "由局部揭示整体" },
@@ -122,10 +123,12 @@ describe("node production workspaces", () => {
       artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined}
       onReviseDocument={revise} onAuditDocument={audit} />);
     expect(screen.getByRole("region", { name: "参考报告修订与审计" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "审计当前版本" })).toBeEnabled());
     fireEvent.change(screen.getByRole("textbox", { name: "修订意见" }), { target: { value: "把景别变化说清楚。" } });
     fireEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
     await waitFor(() => expect(revise).toHaveBeenCalledWith("reference-grammar", {
       instruction: "把景别变化说清楚。", expectedRunRevision: 8, expectedVersionId: "reference-v1",
+      commandId: expect.any(String),
     }));
     expect(audit).not.toHaveBeenCalled();
   });

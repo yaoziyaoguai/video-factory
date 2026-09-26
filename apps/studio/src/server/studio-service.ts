@@ -253,6 +253,7 @@ export class StudioService {
       () => options.pipeline.list(),
       options.pipeline.readTextExecutionUsage ? (runId) => options.pipeline.readTextExecutionUsage!(runId) : undefined,
       options.pipeline.readPaidExecutionReceipts ? (runId) => options.pipeline.readPaidExecutionReceipts!(runId) : undefined,
+      options.pipeline.readDocumentExecutionReceipts ? (runId) => options.pipeline.readDocumentExecutionReceipts!(runId) : undefined,
     );
     this.publishing = new PublishingStudio({
       workspaceRoot: options.workspaceRoot,
@@ -791,12 +792,18 @@ export class StudioService {
     return this.withLease(runId, async () => this.production.applyNodeInputOverride(runId, nodeId, input, actor));
   }
 
-  reviseNodeDocument(runId: string, nodeId: string, input: StudioNodeDocumentRevisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
-    return this.withLease(runId, async () => this.production.reviseNodeDocument(runId, nodeId, input, actor));
+  documentCommands(runId: string, nodeId: string) {
+    return this.production.documentCommands(runId, nodeId);
+  }
+
+  async reviseNodeDocument(runId: string, nodeId: string, input: StudioNodeDocumentRevisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    const result = await this.production.reviseNodeDocument(runId, nodeId, input, actor);
+    if (result.seriesId) await this.reconcileSeriesRuns();
+    return result;
   }
 
   auditNodeDocumentCurrent(runId: string, nodeId: string, input: StudioNodeDocumentAuditInput, actor = "studio-owner"): Promise<StudioRunDetail> {
-    return this.withLease(runId, async () => this.production.auditNodeDocumentCurrent(runId, nodeId, input, actor));
+    return this.production.auditNodeDocumentCurrent(runId, nodeId, input, actor);
   }
 
   prepareProductionQuote(runId: string, input: StudioProductionQuoteInput, actor = "studio-owner"): Promise<StudioProductionQuote> {

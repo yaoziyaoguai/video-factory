@@ -1,6 +1,10 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import { NodeDocumentCommands } from "../src/client/components/NodeDocumentCommands.js";
+import { studioApi } from "../src/client/api.js";
+import { RunCostDetailPanel } from "../src/client/components/CostDashboard.js";
+
+afterEach(() => { vi.restoreAllMocks(); localStorage.clear(); });
 
 function setup(overrides: Partial<Parameters<typeof NodeDocumentCommands>[0]> = {}) {
   const props: Parameters<typeof NodeDocumentCommands>[0] = {
@@ -18,6 +22,78 @@ function setup(overrides: Partial<Parameters<typeof NodeDocumentCommands>[0]> = 
 }
 
 describe("NodeDocumentCommands", () => {
+  it("does not describe unverified API charges as free, subscription or a zero-price estimate", () => {
+    render(<RunCostDetailPanel detail={{ runId: "r", title: "待核账",
+      totals: { estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 1,
+        meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0, unverifiedModelCalls: 2 },
+      lines: [{ id: "doc", runId: "r", runTitle: "待核账", nodeId: "publish-package", providerId: "api", modelId: "m",
+        capability: "model.execute", status: "failed", billing: "unverified", modelCallCount: 2,
+        actualPending: true, estimatedCostCny: 0, startedAt: "now" }],
+    }} />);
+    expect(screen.getByText(/2 次已确认模型调用.*收费方式与金额待核账/)).toBeInTheDocument();
+    expect(screen.getByText("金额未核实")).toBeInTheDocument();
+    expect(screen.queryByText(/免费\/本地|订阅额度|预估 ¥0/)).not.toBeInTheDocument();
+  });
+  it("finds a pending server command after refresh and recovers its original identity and instruction", async () => {
+    let settled = false;
+    vi.spyOn(studioApi, "documentCommands").mockImplementation(async () => settled ? [] : [{
+      commandId: "saved-command", action: "revise", state: "pending", expectedRunRevision: 6,
+      expectedVersionId: "earlier-version", instruction: "用户原修改意见", createdAt: "now", updatedAt: "now", billingPending: true,
+    }]);
+    const onRevise = vi.fn(async () => { settled = true; });
+    setup({ runId: "run-one", onRevise });
+    const recover = await screen.findByRole("button", { name: "取回原操作结果" });
+    expect(screen.getByRole("button", { name: "审计当前版本" })).toBeDisabled();
+    fireEvent.click(recover);
+    await waitFor(() => expect(onRevise).toHaveBeenCalledWith("publish-package", {
+      commandId: "saved-command", expectedRunRevision: 6, expectedVersionId: "earlier-version", instruction: "用户原修改意见",
+    }));
+    expect(await screen.findByText(/原操作结果已取回/)).toBeInTheDocument();
+  });
+
+  it("does not attach an old recovery error to another run after navigation", async () => {
+    let rejectPending!: (error: Error) => void;
+    const pending = new Promise<void>((_resolve, reject) => { rejectPending = reject; });
+    vi.spyOn(studioApi, "documentCommands").mockImplementation(async (runId) => runId === "old-run" ? [{
+      commandId: "old-command", action: "revise", state: "pending", expectedRunRevision: 7,
+      expectedVersionId: "v1", instruction: "旧片修改意见", createdAt: "now", updatedAt: "now", billingPending: true,
+    }] : []);
+    const props = { runId: "old-run", nodeId: "publish-package", runRevision: 7, effectiveVersionId: "v1", busy: false,
+      contentReview: { status: "not_audited", summary: "", suggestions: [] },
+      onRevise: () => pending, onAudit: async () => undefined };
+    const { rerender } = render(<NodeDocumentCommands {...props} />);
+    fireEvent.click(await screen.findByRole("button", { name: "取回原操作结果" }));
+    rerender(<NodeDocumentCommands {...props} runId="new-run" />);
+    rejectPending(new Error("旧片的连接错误"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "审计当前版本" })).toBeEnabled());
+    expect(screen.queryByText("旧片的连接错误")).not.toBeInTheDocument();
+    expect(screen.queryByText(/原操作结果已取回/)).not.toBeInTheDocument();
+  });
+
+  it("does not send a new model command when durable browser storage fails", async () => {
+    vi.spyOn(studioApi, "documentCommands").mockResolvedValue([]);
+    const onRevise = vi.fn(async () => undefined);
+    setup({ runId: "run-storage", onRevise });
+    await waitFor(() => expect(screen.getByRole("button", { name: "审计当前版本" })).toBeEnabled());
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("quota"); });
+    fireEvent.change(screen.getByLabelText("修订意见"), { target: { value: "保留这段完整意见" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
+    expect(await screen.findByText(/尚未发送给模型/)).toBeInTheDocument();
+    expect(onRevise).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("修订意见")).toHaveValue("保留这段完整意见");
+  });
+
+  it("uses a new command identity only when the user intentionally audits again", async () => {
+    const onAudit = vi.fn<Parameters<typeof NodeDocumentCommands>[0]["onAudit"]>(async () => undefined);
+    setup({ onAudit });
+    fireEvent.click(screen.getByRole("button", { name: "审计当前版本" }));
+    await waitFor(() => expect(onAudit).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole("button", { name: "审计当前版本" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "审计当前版本" }));
+    await waitFor(() => expect(onAudit).toHaveBeenCalledTimes(2));
+    expect(onAudit.mock.calls[0]?.[1].commandId).not.toEqual(onAudit.mock.calls[1]?.[1].commandId);
+  });
+
   it("appends selected suggestions to the existing instruction without overwriting or sending", async () => {
     setup();
     const box = screen.getByLabelText("修订意见") as HTMLTextAreaElement;
@@ -33,7 +109,7 @@ describe("NodeDocumentCommands", () => {
   it("sends the instruction bound to the seen revision and version", async () => {
     const calls: Array<Record<string, unknown>> = [];
     setup({
-      onRevise: async (_nodeId, input) => { calls.push(input); },
+      onRevise: async (_nodeId, input) => { calls.push({ ...input }); },
     });
     fireEvent.change(screen.getByLabelText("修订意见"), { target: { value: "标题改得更具体。" } });
     fireEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
@@ -55,7 +131,7 @@ describe("NodeDocumentCommands", () => {
   it("audits the current exact version without producing a draft", async () => {
     const audits: Array<Record<string, unknown>> = [];
     setup({
-      onAudit: async (_nodeId, input) => { audits.push(input); },
+      onAudit: async (_nodeId, input) => { audits.push({ ...input }); },
     });
     fireEvent.click(screen.getByRole("button", { name: "审计当前版本" }));
     await waitFor(() => expect(audits).toHaveLength(1));

@@ -1,5 +1,6 @@
 import { CodexBridgeClient, type CodexTaskExecution, type RoleAudit } from "./codex-chat.js";
 import { runRoleAgentLoop, validateRoleAudit, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
+import { observeDocumentTask, runDocumentTask, validateDocumentResult, type DocumentTaskContext } from "./document-task.js";
 
 export interface PublishCopy {
   title: string;
@@ -36,6 +37,7 @@ export interface PublishCopyWriter {
 export type PublishCopyBrief = PublishCopyInput["brief"];
 
 export interface PublishCopyRevisionInput {
+  task?: DocumentTaskContext;
   selectedModelId?: string;
   platform: string;
   brief: PublishCopyBrief;
@@ -46,6 +48,7 @@ export interface PublishCopyRevisionInput {
 }
 
 export interface PublishCopyAuditInput {
+  task?: DocumentTaskContext;
   selectedModelId?: string;
   platform: string;
   brief: PublishCopyBrief;
@@ -82,6 +85,10 @@ const DEFAULT_PUBLISH_COPY_MAX_ATTEMPTS = 2;
 export class CodexPublishCopyWriter implements PublishCopyWriter {
   readonly id = "codex-publish-copy-v1";
   private readonly client: CodexBridgeClient;
+
+  async observeTask(context: DocumentTaskContext): Promise<void> {
+    return observeDocumentTask(this.client, context);
+  }
 
   constructor(options: CodexPublishCopyWriterOptions) {
     if (options.client) {
@@ -162,20 +169,20 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
     if (!instruction || [...instruction].length > 4_000) {
       throw new Error("Publish copy revision instruction must be 1 to 4000 characters.");
     }
-    const rawCopy = await this.client.runTask("publish-copy", {
+    const rawCopy = await runDocumentTask(this.client, "publish-copy", async () => ({
       platform: input.platform,
       brief: input.brief,
       narrations: input.narrations,
       revision: { instruction, currentCopy },
-    }, undefined, input.selectedModelId ? { model: input.selectedModelId } : {});
-    return validatePublishCopy(rawCopy);
+    }), input.task, input.selectedModelId);
+    return validateDocumentResult(input.task, () => validatePublishCopy(rawCopy));
   }
 
   // 主动再审只审当前精确稿：单次 role-audit 与首审同一套标准，零产稿、零推进。
   async auditCurrent(input: PublishCopyAuditInput): Promise<PublishCopyAuditExecution> {
     validatePublishCopyInput(input);
     const copy = validatePublishCopy(input.copy);
-    const output = await this.client.runTask("role-audit", {
+    const output = await runDocumentTask(this.client, "role-audit", async () => ({
       role: "发行编辑",
       iteration: 1,
       criteria: PUBLISH_COPY_AUDIT_CRITERIA,
@@ -193,8 +200,8 @@ export class CodexPublishCopyWriter implements PublishCopyWriter {
         downstreamBoundary: "只交付发布文案，不得改写脚本事实，也不得把尚未发布的数据作为通过条件。",
       },
       candidate: copy,
-    }, undefined, input.selectedModelId ? { model: input.selectedModelId } : {});
-    return { audit: validateRoleAudit(output, { role: "发行编辑", candidate: copy }) };
+    }), input.task, input.selectedModelId);
+    return validateDocumentResult(input.task, () => ({ audit: validateRoleAudit(output, { role: "发行编辑", candidate: copy }) }));
   }
 }
 

@@ -495,6 +495,35 @@ describe("CostStudio", () => {
     assert.equal(detail?.lines[0]?.modelId, "custom-router-selection");
   });
 
+  it("does not let independent document commands cancel missing checkpoint usage or look free", async () => {
+    const original = { nodeId: "reference-grammar", requestId: "initial", providerId: "text", modelId: "m",
+      billing: "subscription", startedAt: "2026-09-27T01:00:00Z", parameters: { modelCallCount: 1 } };
+    const command = { nodeId: "reference-grammar", requestId: "doc-1", providerId: "text", modelId: "m",
+      billing: "subscription", startedAt: "2026-09-27T01:01:00Z",
+      parameters: { accountingSource: "document_operation", modelCallCount: 2, billingPending: true } };
+    const studio = new CostStudio(async () => [{ id: "run-commands", executionReceipts: [original, command] }],
+      async () => [{ nodeId: "reference-grammar", providerId: "text", modelId: "m", modelCallCount: 3 }]);
+    const detail = await studio.runDetail("run-commands");
+    assert.equal(detail?.totals.subscriptionCalls, 5, "初稿3次和独立主动操作2次不能互相抵消");
+    assert.equal(detail?.totals.actualPendingCount, 1, "没有账单不能当成免费");
+    assert.equal(detail?.lines.find((line) => line.accountingSource === "document_operation")?.actualCostCny, undefined);
+  });
+
+  it("keeps unverified API billing separate from free and subscription usage while counting real attempts", async () => {
+    const studio = new CostStudio(async () => [{ id: "unverified", executionReceipts: [{
+      nodeId: "publish-package", requestId: "doc-api", providerId: "api-provider", modelId: "api-model",
+      billing: "unverified", status: "failed", startedAt: "2026-09-27T01:00:00Z",
+      parameters: { accountingSource: "document_operation", modelCallCount: 2, billingPending: true },
+    }] }]);
+    const detail = await studio.runDetail("unverified");
+    assert.equal(detail?.lines[0]?.billing, "unverified");
+    assert.equal(detail?.totals.freeCalls, 0);
+    assert.equal(detail?.totals.subscriptionCalls, 0);
+    assert.equal(detail?.totals.unverifiedModelCalls, 2);
+    assert.equal(detail?.totals.actualPendingCount, 1);
+    assert.equal(detail?.lines[0]?.actualCostCny, undefined);
+  });
+
   it("does not infer a historical receipt failure from the node's latest status", async () => {
     const studio = new CostStudio(async () => ([{
       id: "run-5",

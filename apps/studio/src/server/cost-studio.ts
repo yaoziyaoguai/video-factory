@@ -28,6 +28,7 @@ export class CostStudio {
     private readonly listRuns: () => Promise<CostRunSource[]>,
     private readonly readModelUsage?: (runId: string) => Promise<NodeModelUsage[]>,
     private readonly readPaidReceipts?: (runId: string) => Promise<unknown[]>,
+    private readonly readDocumentReceipts?: (runId: string) => Promise<unknown[]>,
   ) {}
 
   async dashboard(): Promise<StudioCostDashboard> {
@@ -49,14 +50,15 @@ export class CostStudio {
 
   private async detail(run: CostRunSource): Promise<StudioCostRunDetail> {
     const paidReceipts = await this.readPaidReceipts?.(run.id) ?? [];
+    const documentReceipts = await this.readDocumentReceipts?.(run.id) ?? [];
     const detail = toRunDetail({
       ...run,
       executionReceipts: [
-        ...(Array.isArray(run.executionReceipts) ? run.executionReceipts : []), ...paidReceipts,
+        ...(Array.isArray(run.executionReceipts) ? run.executionReceipts : []), ...paidReceipts, ...documentReceipts,
       ],
     });
     for (const usage of await this.readModelUsage?.(run.id) ?? []) {
-      const recorded = detail.lines.filter((line) => line.nodeId === usage.nodeId)
+      const recorded = detail.lines.filter((line) => line.nodeId === usage.nodeId && line.accountingSource !== "document_operation")
         .reduce((sum, line) => sum + (line.subscriptionCallCount ?? 0), 0);
       const missing = usage.modelCallCount - recorded;
       if (missing <= 0) continue;
@@ -125,6 +127,7 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       ? Math.min(reportedFailedAttemptCount, meteredAttemptCount ?? reportedFailedAttemptCount)
       : undefined;
     const parameters = isRecord(receipt.parameters) ? receipt.parameters : undefined;
+    const documentOperation = parameters?.accountingSource === "document_operation";
     const subscriptionCallCount = billing === "subscription"
       ? nonNegativeInteger(parameters?.modelCallCount) ?? 1
       : undefined;
@@ -133,7 +136,7 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       && isRecord(authorization) && authorization.spendPlanId === quoteNode.spendPlan.id ? quoteNode.spendPlan : undefined;
     const estimatedCostCny = nonNegativeNumber(boundQuote?.estimatedCostCny) ?? nonNegativeNumber(receipt.estimatedCostCny) ?? 0;
     const currentNode = nodes.get(nodeId);
-    const definitiveNoSubmission = billing === "metered" && receipt.authorizationOnly !== true
+    const definitiveNoSubmission = !documentOperation && billing === "metered" && receipt.authorizationOnly !== true
       && reportedMeteredAttemptCount === 0
       && (reportedFailedAttemptCount ?? 0) === 0
       && (actualCost ?? 0) === 0;
@@ -167,7 +170,10 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       ...(meteredAttemptCount !== undefined ? { meteredAttemptCount } : {}),
       ...(meteredFailedAttemptCount !== undefined ? { meteredFailedAttemptCount } : {}),
       ...(subscriptionCallCount !== undefined ? { subscriptionCallCount } : {}),
-      actualPending: billing === "metered"
+      ...(billing === "unverified" ? { modelCallCount: nonNegativeInteger(parameters?.modelCallCount) ?? 0 } : {}),
+      ...(documentOperation ? { accountingSource: "document_operation" as const,
+        ...(parameters?.modelCallCountKnown === false ? { callCountPending: true } : {}) } : {}),
+      actualPending: documentOperation && parameters?.billingPending === true || billing === "metered"
         && !definitiveNoSubmission
         && (actualCost === undefined || currentOperationPending),
       startedAt,
@@ -272,6 +278,8 @@ function totals(lines: StudioCostLine[]): StudioCostTotals {
     actualPendingCount: lines.filter((line) => line.actualPending).length,
     meteredCalls: sum(lines, (line) => line.billing === "metered" ? line.meteredAttemptCount ?? 0 : 0),
     subscriptionCalls: sum(lines, (line) => line.billing === "subscription" ? line.subscriptionCallCount ?? 1 : 0),
+    ...(lines.some((line) => line.billing === "unverified")
+      ? { unverifiedModelCalls: sum(lines, (line) => line.billing === "unverified" ? line.modelCallCount ?? 0 : 0) } : {}),
     freeCalls: lines.filter((line) => line.billing === "free" || line.billing === "local_compute").length,
     failedMeteredCalls: sum(lines, (line) => line.billing === "metered" ? line.meteredFailedAttemptCount ?? 0 : 0),
   };
@@ -285,6 +293,7 @@ function group(lines: StudioCostLine[], key: (line: StudioCostLine) => string): 
     label: id,
     calls: sum(items, (item) => item.billing === "metered"
       ? item.meteredAttemptCount ?? 0
+      : item.billing === "unverified" ? item.modelCallCount ?? 0
       : item.billing === "subscription"
         ? item.subscriptionCallCount ?? 1
         : 1),
@@ -334,8 +343,8 @@ function runTitle(value: unknown): string {
   return isRecord(value) && text(value.title) ? text(value.title) : "未命名制作";
 }
 
-function billingType(value: unknown): StudioBillingType {
-  return value === "subscription" || value === "metered" || value === "local_compute" || value === "human" ? value : "free";
+function billingType(value: unknown): StudioBillingType | "unverified" {
+  return value === "unverified" || value === "subscription" || value === "metered" || value === "local_compute" || value === "human" ? value : "free";
 }
 
 function nonNegativeInteger(value: unknown): number | undefined {
