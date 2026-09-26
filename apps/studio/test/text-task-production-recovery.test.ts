@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -7,7 +7,9 @@ import { describe, it } from "node:test";
 import {
   CodexBridgeClient,
   CodexBridgeError,
+  CodexAssetSemanticRanker,
   CodexScreenwriterAgent,
+  deterministicAssetRanking,
   ProductionPipeline,
   REQUIRED_CODEX_TASK_CONTRACT_DIGESTS,
   type CodexPreparedOperation,
@@ -15,6 +17,8 @@ import {
   type CodexTaskKind,
   type CodexTaskRequestOptions,
   type CodexTaskSession,
+  type AssetCandidateReport,
+  type AssetSemanticRanker,
   type CreativeTreatment,
   type ProductionBrief,
   type ProductionProviderRuntimeMetadata,
@@ -27,6 +31,7 @@ import {
   CodexExecutorError,
   type BrokerTaskExecutor,
   type CodexExecutionResult,
+  type CodexExecutionOptions,
   type ValidatedTask,
 } from "../../codex-broker/src/codex-executor.js";
 import { ProductionStudio } from "../src/server/production-studio.js";
@@ -165,6 +170,87 @@ class TrackingClient extends CodexBridgeClient {
   }
 }
 
+// 只在外部素材/模型边界替身；排序、持久化、Broker、Studio 恢复与规划图均走正式实现。
+class RankingRecoveryWorker extends RecoveryWorker {
+  override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+    if (request.capability !== "asset.search") return super.run(request);
+    this.calls.push("asset.search");
+    const outputDir = String(request.outputDir);
+    await mkdir(outputDir, { recursive: true });
+    const candidateSearchPath = path.join(outputDir, "candidates.json");
+    const candidateInventoryPath = path.join(outputDir, "inventory.json");
+    const content = JSON.stringify({
+      version: "video-factory/asset-candidates-v1",
+      scene_candidates: [1, 2, 3].map(position => ({
+        scene_position: position, intent: { query: `local-${position}` }, query: `local-${position}`,
+        candidates: Array.from({ length: 6 }, (_, index) => ({
+          provider: "pexels", provider_id: "pexels-stock-v1", asset_id: `${position}-${index}`,
+          media_type: "video", width: 1080, height: 1920, duration: 8,
+          preview_url: `https://images.pexels.com/${position}-${index}.jpg`,
+          source_url: `https://www.pexels.com/video/${position}-${index}`,
+          creator: "Fixture", license_note: "Integration fixture", query: `local-${position}`, score: 80,
+        })),
+      })),
+    });
+    await writeFile(candidateSearchPath, content);
+    await writeFile(candidateInventoryPath, JSON.stringify({ items: [] }));
+    return {
+      protocolVersion: "video-factory/worker-v1", commandId: String(request.commandId), status: "succeeded",
+      output: { candidateSearchPath, candidateInventoryPath },
+      artifacts: [{ kind: "asset_candidates", uri: candidateSearchPath,
+        sha256: createHash("sha256").update(content).digest("hex"), sizeBytes: Buffer.byteLength(content),
+        contentType: "application/json", provenance: { providerId: "asset-candidate-search-v1",
+          producerNodeId: String(request.nodeRunId), attempt: Number(request.attempt), licenseNote: "Integration fixture" } }],
+    };
+  }
+}
+
+class SupplementInterruptingClient extends TrackingClient {
+  private rankingAudits = 0;
+
+  override async runTaskDetailed(kind: CodexTaskKind, payload: unknown, requestId: string,
+    session?: CodexTaskSession, options: CodexTaskRequestOptions = {}): Promise<CodexTaskExecution> {
+    const isRankingAudit = kind === "role-audit" && (payload as { role?: string }).role === "候选画面复核";
+    if (isRankingAudit) this.rankingAudits++;
+    return super.runTaskDetailed(kind, payload, requestId, session,
+      isRankingAudit && this.rankingAudits === 2 ? { ...options, timeoutMs: 1_000 } : options);
+  }
+}
+
+class SupplementExecutor implements BrokerTaskExecutor {
+  readonly identity = { profileId: "openai" as const, providerId: "openai", modelId: "integration-model",
+    taskKinds: ["script-draft", "role-audit", "asset-rank"] };
+  readonly submissions: string[] = [];
+  private rankingAudits = 0;
+  private outcome: "completed_success" | "completed_failure" = "completed_success";
+  private release!: () => void;
+  private readonly gate = new Promise<void>(resolve => { this.release = resolve; });
+
+  complete(outcome: "completed_success" | "completed_failure"): void {
+    this.outcome = outcome;
+    this.release();
+  }
+
+  async runTask(task: ValidatedTask, options?: CodexExecutionOptions): Promise<CodexExecutionResult> {
+    this.submissions.push(task.kind);
+    const isRankingAudit = task.kind === "role-audit" && task.payload.role === "候选画面复核";
+    if (isRankingAudit && ++this.rankingAudits === 2) {
+      await this.gate;
+      if (this.outcome === "completed_failure") {
+        throw new CodexExecutorError("Provider timeout", true, { failureKind: "model_provider_no_output" });
+      }
+    }
+    const output = task.kind === "script-draft" ? SCRIPT
+      : task.kind === "asset-rank" ? { ...deterministicAssetRanking(task.payload as AssetCandidateReport), source: "model" }
+        : isRankingAudit ? { ...PASS_AUDIT, assessments: [{ targetPath: "", dimensions:
+          ["evidence", "coverage", "consistency", "actionability"].map(dimension => ({ dimension, score: 92, evidence: "保留候选并诚实标记缺证据。" })) }] }
+          : PASS_AUDIT;
+    return { output: JSON.stringify(output), sessionId: options?.sessionId ?? randomUUID(), trace: { taskKind: task.kind,
+      promptVersion: `integration/${task.kind}`, contractDigest: task.expectedContractDigest,
+      prompt: "integration fixture", providerId: "openai", modelId: "integration-model" } };
+  }
+}
+
 class ControlledExecutor implements BrokerTaskExecutor {
   readonly identity = {
     profileId: "openai" as const,
@@ -261,6 +347,25 @@ function treatment(counter: { calls: number }): CreativeTreatment {
   };
 }
 
+function auditedUpstream<T>(output: T, role: string): CodexTaskExecution<T> {
+  return { output, trace: {
+    taskKind: role === "导演前期构思" ? "creative-treatment" : "director-plan",
+    promptVersion: "integration/upstream", prompt: "integration fixture", providerId: "openai", modelId: "integration-model",
+  }, agentLoop: {
+    version: "video-factory/agent-loop-v1", role, contractVersion: "integration/upstream-review",
+    criteria: ["确认上游测试稿"], status: "passed", maxIterations: 1,
+    producerModelCallCount: 0, auditModelCallCount: 1,
+    iterations: [{ iteration: 1, candidate: output,
+      candidateHash: createHash("sha256").update(JSON.stringify(output)).digest("hex"),
+      auditTrace: { taskKind: "role-audit", promptVersion: "integration/role-audit",
+        prompt: "integration fixture", providerId: "openai", modelId: "integration-model" },
+      audit: { ...PASS_AUDIT, assessments: [{ targetPath: "", dimensions:
+        (["attention", "progression", "payoff", "expression"] as const).map(dimension => ({ dimension, score: 92, evidence: "上游测试稿保持不变。" })) }],
+      issues: [], repairInstructions: [] },
+    }],
+  } };
+}
+
 function brief(): ProductionBrief {
   return {
     protocolVersion: "video-factory/brief-v1",
@@ -296,6 +401,7 @@ function pipeline(
   capabilityOverrides: {
     assetProviders?: VisualAssetProviderCapability[];
     providerRuntimeMetadata?: ProductionProviderRuntimeMetadata[];
+    assetSemanticRanker?: AssetSemanticRanker;
   } = {},
 ): ProductionPipeline {
   const screenwriter = new CodexScreenwriterAgent({
@@ -323,7 +429,9 @@ function pipeline(
         id: "codex-creative-treatment-v1",
         modelId: "integration-model",
         treat: async () => treatment(treatmentCounter),
-        treatDetailed: async () => ({
+        treatDetailed: async (input) => input.creativeReviewExecution?.mode === "check"
+          ? auditedUpstream(input.creativeReviewExecution.candidate, "导演前期构思")
+          : ({
           output: treatment(treatmentCounter),
           trace: {
             taskKind: "creative-treatment" as const,
@@ -339,6 +447,11 @@ function pipeline(
     directorAgent: {
       id: "api-visual-director-v1",
       modelId: "integration-model",
+      async planDetailed(input) {
+        return input.creativeReviewExecution?.mode === "check"
+          ? auditedUpstream(input.creativeReviewExecution.candidate, "视觉导演")
+          : { output: await this.plan(input) };
+      },
       plan: async (input: VisualDirectorAgentInput) => ({
         version: "video-factory/director-plan-v1",
         requestedProfileId: input.brief.requestedProfileId,
@@ -349,8 +462,8 @@ function pipeline(
           scenePosition: scene.position,
           narrativeRole: "解释",
           authenticityPolicy: "illustrative" as const,
-          preferredProviderId: "local-editorial-v1",
-          deliveryType: "editorial_card" as const,
+          preferredProviderId: capabilityOverrides.assetSemanticRanker ? "pexels-stock-v1" : "local-editorial-v1",
+          deliveryType: capabilityOverrides.assetSemanticRanker ? "stock_video" as const : "editorial_card" as const,
           alternativeProviderIds: [],
           query: `local-${scene.position}`,
           generationPrompt: `第${scene.position}段真实动作`,
@@ -364,6 +477,7 @@ function pipeline(
     },
     assetProviders: capabilityOverrides.assetProviders
       ?? [{ id: "local-editorial-v1", label: "本地画面", billing: "free", modes: ["本地"], deliveryTypes: ["editorial_card"] }],
+    ...(capabilityOverrides.assetSemanticRanker ? { assetSemanticRanker: capabilityOverrides.assetSemanticRanker } : {}),
     ...(capabilityOverrides.providerRuntimeMetadata
       ? { providerRuntimeMetadata: capabilityOverrides.providerRuntimeMetadata }
       : {}),
@@ -418,6 +532,8 @@ async function movePendingToOldContractFile(workspaceRoot: string, runId: string
     if (!value.pendingOperation || value.role !== "编剧") continue;
     const oldKey = "f".repeat(64);
     value.key = oldKey;
+    // 旧合同文件必须具有一致的物理身份，不能留下原文件的 storageKey 来伪造迁移状态。
+    value.storageKey = oldKey;
     value.contractDigest = "e".repeat(64);
     const destination = path.join(directory, `${oldKey}.json`);
     await writeFile(destination, `${JSON.stringify(value, null, 2)}\n`);
@@ -428,6 +544,83 @@ async function movePendingToOldContractFile(workspaceRoot: string, runId: string
 }
 
 describe("formal text-task recovery through Studio and joint-v1 pipeline", () => {
+  for (const terminalState of ["completed_success", "completed_failure"] as const) {
+    it(`recovers a late supplementary ranking audit ${terminalState} through Studio without rerunning upstream`, async (t) => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-supplement-studio-"));
+      const executor = new SupplementExecutor();
+      const broker = await brokerWithExecutor(workspaceRoot, executor);
+      const counter = { calls: 0 };
+      const worker = new RankingRecoveryWorker();
+      const createPipeline = (client: CodexBridgeClient) => pipeline(workspaceRoot, client, counter, undefined, worker, {
+        assetSemanticRanker: new CodexAssetSemanticRanker({ client, modelId: "integration-model",
+          fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]) }),
+        assetProviders: [{ id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] }],
+      });
+      try {
+        const initialClient = new SupplementInterruptingClient({ socketPath: broker.socketPath, timeoutMs: 3_000, maxAttempts: 1, pollIntervalMs: 10 });
+        const initialPipeline = createPipeline(initialClient);
+        const input = brief();
+        input.providers.assets = "ai-shot-router-v1";
+        input.workflowFeatures!.assetSemanticRank = true;
+        input.workflowFeatures!.creativeReview = "user-confirmed-v1";
+        input.director!.assetProviderIds = ["pexels-stock-v1"];
+        let failed = await initialPipeline.start(input);
+        for (let stage = 0; stage < 3 && failed.status === "needs_human"; stage++) {
+          const node = failed.nodeRuns.find(n => n.nodeId === "creative-planning");
+          const gate = node?.intervention?.continuation;
+          assert.ok(gate);
+          const review = (node.output as { creativeReview: { stages: Record<string, {
+            checkResult?: { verdict: string; checkIdentity?: string };
+          }> } }).creativeReview.stages[gate.stage]?.checkResult;
+          failed = await initialPipeline.confirmCreativeReview(failed.id, {
+            commandId: `confirm-${stage}`, actor: "creator", stage: gate.stage,
+            expectedRunRevision: failed.revision, expectedReviewRevision: gate.reviewRevision,
+            baseDraftSha256: gate.draftSha256,
+            ...(review?.checkIdentity ? { expectedCheckIdentity: review.checkIdentity } : { acknowledgeUnaudited: true }),
+            ...(review?.verdict === "repair" ? { acknowledgeRepair: true } : {}),
+          });
+        }
+        assert.equal(failed.status, "failed");
+        assert.equal(initialClient.submissions.length, 6, JSON.stringify(failed.nodeRuns.map(n => ({ nodeId: n.nodeId, error: n.error }))));
+        const originalRequestId = initialClient.submissions.at(-1)!.requestId;
+        const upstreamCalls = counter.calls;
+        assert.deepEqual(worker.calls, ["asset.search"]);
+
+        const resumedClient = new TrackingClient({ socketPath: broker.socketPath, timeoutMs: 3_000, maxAttempts: 1, pollIntervalMs: 10 });
+        const resumedPipeline = createPipeline(resumedClient);
+        const studio = new ProductionStudio({ workspaceRoot, pipeline: resumedPipeline,
+          archiveStore: { list: async () => ({}) } as never, listProviders: async () => [] });
+        assert.deepEqual((await studio.get(failed.id))?.taskRecovery?.allowedActions, ["query_original_task"]);
+        await assert.rejects(studio.retryFailedNode(failed.id, "creative-planning"), /请先查询原任务/);
+        assert.equal((await studio.queryOriginalTextTask(failed.id)).taskRecovery?.taskState, "running");
+        assert.equal(executor.submissions.length, 6, "querying cannot submit another model request");
+
+        // 只推进时钟，不改写 checkpoint；恢复必须消费原结果并保留耗尽的补看预算。
+        t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 600_001 });
+        executor.complete(terminalState);
+        let queried = await studio.queryOriginalTextTask(failed.id);
+        for (let attempt = 0; attempt < 100 && queried.taskRecovery?.taskState !== terminalState; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+          queried = await studio.queryOriginalTextTask(failed.id);
+        }
+        assert.equal(queried.taskRecovery?.taskState, terminalState);
+        if (terminalState === "completed_success") await studio.retrieveOriginalTextTask(failed.id);
+        else await studio.retryFailedNode(failed.id, "creative-planning");
+        const recovered = await waitForStopped(resumedPipeline, failed.id);
+        assert.equal(recovered.status, "needs_human", JSON.stringify(recovered.nodeRuns.map(n => ({ nodeId: n.nodeId, status: n.status, error: n.error }))));
+        assert.equal(counter.calls, upstreamCalls, "accepted treatment is retained");
+        assert.deepEqual(worker.calls, ["asset.search"], "candidate search and media acquisition must not restart");
+        assert.deepEqual(resumedClient.submissions, [], "expired ranking budget must not submit replacement or follow-up tasks");
+        assert.deepEqual(resumedClient.observations, [originalRequestId]);
+        assert.equal(executor.submissions.length, 6);
+      } finally {
+        executor.complete(terminalState);
+        await broker.close();
+        await rm(workspaceRoot, { recursive: true, force: true });
+      }
+    });
+  }
+
   it("settles a first-produce terminal failure through the real socket and releases the run", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-f05-"));
     const broker = await brokerFixture(workspaceRoot);

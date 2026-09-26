@@ -3246,7 +3246,11 @@ async function loadPendingTextTask(
             && value.version !== "video-factory/agent-loop-checkpoint-v9")) continue;
         const checkpointKey = name.slice(0, -".json".length);
         const recoveryOwner = value.recoveryOwner;
-        if (value.key !== checkpointKey
+        // 补看批次的循环 key 带 supplement 后缀，文件身份由 checkpoint adapter 的
+        // storageKey 保存；旧记录未带 storageKey 时仍按原 key 核对，不能丢掉原任务。
+        const storageKey = value.storageKey === undefined ? value.key : value.storageKey;
+        if (storageKey !== checkpointKey
+          || typeof value.key !== "string"
           || typeof value.role !== "string"
           || !isRecord(recoveryOwner)
           || recoveryOwner.runId !== runId

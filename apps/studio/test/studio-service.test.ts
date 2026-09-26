@@ -2120,6 +2120,70 @@ describe("StudioService", () => {
       "normal in-flight execution without an observation failure is not a recovery incident");
   });
 
+  for (const version of ["video-factory/agent-loop-checkpoint-v8", "video-factory/agent-loop-checkpoint-v9"] as const) {
+    it(`projects a supplementary ranking audit by its storage identity and prevents ordinary retry (${version})`, async () => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-supplement-recovery-"));
+      try {
+        const checkpointKey = "d".repeat(64);
+        await writePendingTextCheckpoint(workspaceRoot, roleAuditOperation("supplement-audit"), {
+          version,
+          checkpointKey,
+          storageKey: checkpointKey,
+          loopKey: `${checkpointKey}:supplement:${"e".repeat(64)}`,
+          role: "候选画面复核",
+          phase: "audit",
+        });
+        const pipeline = new FakePipeline(textRecoveryRun(workspaceRoot, "failed"));
+        const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+        const detail = await service.getRun("run-1");
+
+        assert.equal(detail?.taskRecovery?.phase, "audit");
+        assert.deepEqual(detail?.taskRecovery?.allowedActions, ["query_original_task"]);
+        await assert.rejects(() => service.retryFailedNode("run-1", "creative-planning"), /请先查询原任务/);
+        assert.equal(pipeline.lastRetriedNodeId, undefined);
+        assert.doesNotMatch(JSON.stringify(detail), /supplement-audit|worker\.sock/);
+      } finally {
+        await rm(workspaceRoot, { recursive: true, force: true });
+      }
+    });
+  }
+
+  for (const invalid of ["storage-key", "null-storage-key", "run-owner", "node-owner", "operation-owner", "phase", "operation-key"] as const) {
+    it(`does not authorize supplementary task recovery with an invalid ${invalid}`, async () => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-invalid-supplement-"));
+      try {
+        const checkpointKey = "d".repeat(64);
+        await writePendingTextCheckpoint(workspaceRoot, roleAuditOperation("supplement-audit"), {
+          version: "video-factory/agent-loop-checkpoint-v9",
+          checkpointKey,
+          storageKey: checkpointKey,
+          loopKey: `${checkpointKey}:supplement:${"e".repeat(64)}`,
+          role: "候选画面复核",
+          phase: "audit",
+        });
+        const checkpointPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "creative-planning", "agent-loop-checkpoints", `${checkpointKey}.json`);
+        const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+        if (invalid === "storage-key") checkpoint.storageKey = "f".repeat(64);
+        if (invalid === "null-storage-key") checkpoint.storageKey = null;
+        if (invalid === "run-owner") checkpoint.recoveryOwner.runId = "another-run";
+        if (invalid === "node-owner") checkpoint.recoveryOwner.nodeId = "script";
+        if (invalid === "operation-owner") checkpoint.recoveryOwner.workflowOperationRequestId = "old-operation";
+        if (invalid === "phase") checkpoint.pendingOperation.phase = "produce";
+        if (invalid === "operation-key") checkpoint.pendingOperation.operationKey = "0:2:audit";
+        await writeFile(checkpointPath, JSON.stringify(checkpoint));
+        const pipeline = new FakePipeline(textRecoveryRun(workspaceRoot, "failed"));
+        const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+        assert.equal((await service.getRun("run-1"))?.taskRecovery, undefined);
+        await assert.rejects(() => service.retrieveOriginalTextTask("run-1"), /没有可取回/);
+        assert.equal(pipeline.lastRetriedNodeId, undefined);
+      } finally {
+        await rm(workspaceRoot, { recursive: true, force: true });
+      }
+    });
+  }
+
   it("still finds the stuck task when an earlier node left a settled checkpoint behind", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-settled-checkpoint-"));
     const run = textRecoveryRun(workspaceRoot, "failed");
@@ -6465,7 +6529,10 @@ async function writePendingTextCheckpoint(
   workspaceRoot: string,
   operation: CodexPreparedOperation,
   options: {
+    version?: "video-factory/agent-loop-checkpoint-v8" | "video-factory/agent-loop-checkpoint-v9";
     checkpointKey?: string;
+    storageKey?: string;
+    loopKey?: string;
     nodeId?: string;
     role?: string;
     phase?: "produce" | "audit";
@@ -6480,8 +6547,9 @@ async function writePendingTextCheckpoint(
   const checkpointKey = options.checkpointKey ?? "d".repeat(64);
   await mkdir(directory, { recursive: true });
   await writeFile(path.join(directory, `${checkpointKey}.json`), JSON.stringify({
-    version: "video-factory/agent-loop-checkpoint-v8",
-    key: checkpointKey,
+    version: options.version ?? "video-factory/agent-loop-checkpoint-v8",
+    key: options.loopKey ?? checkpointKey,
+    ...(options.storageKey !== undefined ? { storageKey: options.storageKey } : {}),
     contractDigest: "fixture-contract",
     role: options.role ?? "编剧",
     maxIterations: 3,
