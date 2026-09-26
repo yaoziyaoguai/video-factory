@@ -12,7 +12,7 @@ import type {
   RoleAuditIssue,
   RoleAuditPlanningDisposition,
 } from "./codex-chat.js";
-import { CodexBridgeError } from "./codex-chat.js";
+import { CodexBridgeError, codexBridgeErrorFromCause } from "./codex-chat.js";
 import { roleAgentCheckpointRequestPhases } from "./role-agent-checkpoint.js";
 
 const MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN = 2;
@@ -693,7 +693,7 @@ async function failedLoopError<TOutput>(
   lastTrace?: CodexTaskExecution["trace"],
   failedPhase?: "produce" | "audit",
 ): Promise<RoleAgentLoopError> {
-  const bridgeError = bridgeErrorFromCause(error);
+  const bridgeError = codexBridgeErrorFromCause(error);
   const confirmedUnaccepted = bridgeError !== undefined
     && (bridgeError.stage === "not_accepted" || bridgeError.stage === "rejected" || bridgeError.stage === "conflict")
     && bridgeError.failureDetails?.accepted !== true;
@@ -1474,16 +1474,6 @@ function isAgentLoopFailure(value: unknown): value is NonNullable<AgentLoopTrace
     || input.stage === "uncertain"
     || input.stage === "rejected"
     || input.stage === "conflict";
-}
-
-function bridgeErrorFromCause(error: unknown): CodexBridgeError | undefined {
-  let current = error;
-  for (let depth = 0; depth < 3; depth += 1) {
-    if (current instanceof CodexBridgeError) return current;
-    if (!(current instanceof Error) || !(current.cause instanceof Error)) return undefined;
-    current = current.cause;
-  }
-  return undefined;
 }
 
 function isPersistedPendingOperation(value: unknown): value is NonNullable<PersistedLoopState["pendingOperation"]> {

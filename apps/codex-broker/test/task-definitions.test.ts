@@ -12,6 +12,7 @@ import {
   providerOutputSchemaFor,
   outputSchemaValidationErrorFor,
   outputSemanticValidationErrorFor,
+  outputSemanticDiagnosticFor,
   outputValidationErrorFor,
   taskContractDescriptorFor,
   taskPromptFor,
@@ -21,6 +22,21 @@ import {
   legalCreativeTreatmentOutput,
   paddedLegalCreativeTreatmentOutput,
 } from "./fixtures/creative-treatment.js";
+
+it("keeps audit semantic diagnostics on an allowlist of fixed validator messages", () => {
+  for (const [message, reasonCode] of [
+    ["output.rubricVersion must be video-factory/role-quality-rubric-v1.", "audit_rubric_version"],
+    ["output.score must equal the lowest dimension score (72.5).", "audit_score_aggregation"],
+    ["output.verdict cannot pass with a score below 80, blocking issues, or repair instructions.", "audit_pass_contradiction"],
+    ["output.repairInstructions must contain at least one entry when verdict is repair.", "audit_repair_missing"],
+    ["output.planningDisposition must be null when verdict is pass.", "audit_pass_disposition"],
+    ["output.assessments must contain at least one dimension score.", "audit_dimensions_missing"],
+    ["output.assessments[0].targetPath duplicates an earlier target.", "audit_target_duplicate"],
+    ["output.assessments[0].dimensions[1].dimension duplicates an earlier dimension.", "audit_dimension_duplicate"],
+    ["output.assessments[0].dimensions must not be empty.", "audit_dimensions_missing"],
+  ]) assert.equal(outputSemanticDiagnosticFor("role-audit", message!).reasonCode, reasonCode);
+  assert.deepEqual(outputSemanticDiagnosticFor("role-audit", "private.key must be secret"), { reasonCode: "task_semantics" });
+});
 
 it("screenwriter plans a continuous narration and exposes the real per-shot voice timing boundary", () => {
   const prompt = taskPromptFor("script-draft").directive;

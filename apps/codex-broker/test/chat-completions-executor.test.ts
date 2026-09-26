@@ -803,6 +803,27 @@ describe("ChatCompletionsExecutor", () => {
     assert.equal(calls, 2);
   });
 
+  it("retains a safe audit semantic reason without retrying or exposing the returned content", async () => {
+    let calls = 0;
+    const executor = chatExecutor({ env: { DEEPSEEK_API_KEY: API_KEY }, fetchFn: async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+        ...validRoleAudit(), score: 95, summary: "private-audit-text-must-not-leak",
+      }) } }] }), { status: 200 });
+    } });
+    await assert.rejects(() => executor.runTask(roleAuditTask(false)), (error: unknown) => {
+      assert.ok(error instanceof CodexExecutorError);
+      assert.equal(error.details?.reasonCode, "audit_score_aggregation");
+      assert.equal(error.details?.fieldPath, "output.score");
+      assert.equal(error.details?.taskKind, "role-audit");
+      assert.equal(error.details?.modelAttemptCount, 1);
+      assert.equal(error.details?.structuredRepairCount, 0);
+      assert.doesNotMatch(JSON.stringify(error.details), /private-audit-text/);
+      return true;
+    });
+    assert.equal(calls, 1);
+  });
+
   it("sends a role audit without images to Coding Plan with the text model", async () => {
     let capturedUrl = "";
     let capturedBody: Record<string, unknown> | undefined;

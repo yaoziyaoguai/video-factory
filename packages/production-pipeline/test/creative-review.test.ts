@@ -422,16 +422,17 @@ describe("three-stage creative review gates", () => {
     assert.match(outcome.state.planningStop!.detail, /不一致.*未采用/);
   });
 
-  it("lets the creator adopt a valid draft after a settled check failure without inventing a score", async () => {
+  for (const wrapped of [false, true]) it(`lets the creator adopt a valid draft after a settled check failure without inventing a score (wrapped=${wrapped})`, async () => {
     let checks = 0;
     const graph = createCreativePlanningGraph({ checkpointer: new MemorySaver(), ports: {
       treatment: async context => {
         if (context.creativeReviewExecution?.mode === "check") {
           checks++;
+          const bridge = new CodexBridgeError("completed", false, "completed_failure", 502, "model_provider_no_output");
           throw new RoleAgentLoopError("model completed without output", {
             version: "video-factory/agent-loop-v1", role: "构思", contractVersion: "test", criteria: [], status: "failed", maxIterations: 3, iterations: [],
             failure: { stage: "completed_failure" },
-          }, undefined, new CodexBridgeError("completed", false, "completed_failure", 502, "model_provider_no_output"));
+          }, undefined, wrapped ? new Error("已结束的审计失败，原稿保留", { cause: bridge }) : bridge);
         }
         return { artifactId: "treatment", output: treatment };
       },

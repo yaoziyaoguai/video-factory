@@ -10,8 +10,31 @@ import {
   CodexBridgeClient,
   REQUIRED_CODEX_TASK_CONTRACT_DIGESTS,
   CodexBridgeError,
+  codexBridgeErrorFromCause,
   type CodexTaskKind,
 } from "../src/codex-chat.js";
+
+it("reads the nearest real broker failure through wrappers without trusting forged or older terminal state", () => {
+  const terminal = new CodexBridgeError("completed", false, "completed_failure", 422);
+  assert.equal(codexBridgeErrorFromCause(new Error("role", { cause: new Error("creator", { cause: terminal }) })), terminal);
+  const uncertain = new CodexBridgeError("still running", false, "uncertain");
+  Object.assign(uncertain, { cause: terminal });
+  assert.equal(codexBridgeErrorFromCause(new Error("role", { cause: uncertain })), uncertain);
+  assert.equal(codexBridgeErrorFromCause({ stage: "completed_failure", cause: terminal }), undefined);
+  const cycle = new Error("cycle");
+  Object.assign(cycle, { cause: cycle });
+  assert.equal(codexBridgeErrorFromCause(cycle), undefined);
+});
+
+it("describes invalid audit output as an unavailable opinion rather than a rejected work", () => {
+  const failure = new CodexBridgeError("private-provider-text", false, "completed_failure", 422, undefined, {
+    category: "invalid_output", reasonCode: "audit_score_aggregation", providerId: "fixture", modelId: "fixture",
+    taskKind: "role-audit", fieldPath: "output.score",
+  });
+  assert.match(failure.creatorMessage, /总分与各项评分不一致/);
+  assert.match(failure.creatorMessage, /不是对作品的否决/);
+  assert.doesNotMatch(failure.creatorMessage, /private-provider-text|output\.score|请先修正方案/);
+});
 
 interface CapturedRequest {
   method: string;

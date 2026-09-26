@@ -1306,6 +1306,22 @@ export function outputSemanticValidationErrorFor(kind: BrokerTaskKind, value: un
 
 export function outputSemanticDiagnosticFor(kind: BrokerTaskKind, error: string): { reasonCode: string; fieldPath?: string } {
   // 只映射校验器定义的固定句式，不将生成内容或任意属性名作为公开诊断。
+  if (kind === "role-audit") {
+    const rules: Array<[RegExp, string, string]> = [
+      [/^output\.rubricVersion must be video-factory\/role-quality-rubric-v1\.$/, "audit_rubric_version", "output.rubricVersion"],
+      [/^output\.score must equal the lowest dimension score \(\d+(?:\.\d+)?\)\.$/, "audit_score_aggregation", "output.score"],
+      [/^output\.verdict cannot pass with a score below 80, blocking issues, or repair instructions\.$/, "audit_pass_contradiction", "output.verdict"],
+      [/^output\.repairInstructions must contain at least one entry when verdict is repair\.$/, "audit_repair_missing", "output.repairInstructions"],
+      [/^output\.planningDisposition must be null when verdict is pass\.$/, "audit_pass_disposition", "output.planningDisposition"],
+      [/^output\.assessments must contain at least one dimension score\.$/, "audit_dimensions_missing", "output.assessments"],
+      [/^output\.assessments\[\d+\]\.targetPath duplicates an earlier target\.$/, "audit_target_duplicate", "output.assessments"],
+      [/^output\.assessments\[\d+\]\.dimensions\[\d+\]\.dimension duplicates an earlier dimension\.$/, "audit_dimension_duplicate", "output.assessments"],
+      [/^output\.assessments\[\d+\]\.dimensions must not be empty\.$/, "audit_dimensions_missing", "output.assessments"],
+    ];
+    for (const [pattern, reasonCode, fieldPath] of rules) {
+      if (pattern.test(error)) return { reasonCode, fieldPath };
+    }
+  }
   if (kind === "visual-review") {
     const approvalRules: Record<string, string> = {
       "output.recommendation cannot approve when a review score is below 75.": "visual_approval_score",

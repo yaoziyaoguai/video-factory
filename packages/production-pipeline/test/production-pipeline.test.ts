@@ -331,11 +331,12 @@ async function assertCandidateFailureTrace(
   run: WorkflowRun<pipeline.ProductionBrief>,
   nodeId: string,
   expectedAttempts: pipeline.ModelCandidateAttempt[],
+  expectedStatus: "failed" | "needs_human" = "failed",
 ): Promise<void> {
   const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
   const finalAttempt = expectedAttempts.at(-1)!;
-  assert.equal(run.status, "failed");
-  assert.equal(node?.status, "failed");
+  assert.equal(run.status, expectedStatus);
+  assert.equal(node?.status, expectedStatus);
   assert.equal(node?.executionReceipt?.providerId, finalAttempt.providerId);
   assert.equal(node?.executionReceipt?.modelId, finalAttempt.modelId);
   assert.deepEqual(node?.executionReceipt?.actualModelIds, expectedAttempts.map(({ modelId }) => modelId));
@@ -1236,6 +1237,71 @@ describe("ProductionPipeline", () => {
     assert.ok(reuse.every(item => /^[a-f0-9]{64}$/.test(item.sha256)));
   });
 
+  for (const failureStage of ["completed_failure", "uncertain", "rejected", "conflict"] as const) {
+  it(`preserves a real source review draft and only offers user continuation for a settled audit (${failureStage})`, async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-source-audit-terminal-"));
+    const worker = new FakeWorker();
+    const calls: pipeline.CodexTaskKind[] = [];
+    const report: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1", summary: "素材可供用户预览，独立复核尚无有效结论。",
+      scores: { composition: 85, continuity: 85, pacing: 85, legibility: 85, safety: 90 },
+      findings: [], confidence: 0.9, recommendation: "approve",
+    };
+    const reviewer = new pipeline.CodexVisualReviewAgent({
+      providerId: "deepseek-visual-review-v1", modelId: "fixture-review",
+      media: { prepare: async () => ({ durationMs: 10_000, frames: [
+        { timecodeMs: 0, sha256: "a".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 1 },
+        { timecodeMs: 5_000, sha256: "b".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 2 },
+      ] }) },
+      client: {
+        runTask: async () => { throw new Error("Detailed calls required"); },
+        runTaskDetailed: async (kind) => {
+          calls.push(kind);
+          if (kind === "role-audit") throw new pipeline.CodexBridgeError(
+            "The model could not complete this step.", false, failureStage, 422, undefined,
+            { category: "invalid_output", reasonCode: "task_semantics", taskKind: "role-audit",
+              providerId: "fixture-provider", modelId: "fixture-review" },
+          );
+          return { output: report, trace: { taskKind: kind, promptVersion: "fixture-v1", prompt: "fixture",
+            providerId: "fixture-provider", modelId: "fixture-review" } };
+        },
+      },
+    });
+    const options = { workspaceRoot, worker, visualReviewAgents: [reviewer], providerRuntimeMetadata: [{
+      id: reviewer.id, label: "画面预检", modelId: reviewer.modelId, transport: "unix_socket" as const,
+      billing: "subscription" as const, approvalPolicy: "none" as const, maxAttempts: 1,
+    }] };
+    const subject = new pipeline.ProductionPipeline(options);
+    const run = await subject.start({ ...brief, providers: { ...brief.providers, visualReview: reviewer.id } });
+    const sourceReview = run.nodeRuns.find(node => node.nodeId === "asset-source-review")!;
+    if (failureStage !== "completed_failure") {
+      assert.equal(run.status, "failed");
+      assert.equal(sourceReview.intervention, undefined, "未知请求与身份冲突不能伪装成可略过的意见");
+      assert.deepEqual(calls, ["visual-review", "role-audit"]);
+      assert.deepEqual(worker.calls.map(call => call.capability), ["script.draft", "asset.prepare"]);
+      return;
+    }
+    assert.equal(run.status, "needs_human", sourceReview.error);
+    assert.equal(sourceReview.status, "needs_human");
+    assert.equal(sourceReview.outcomeUncertain, undefined);
+    assert.equal((sourceReview.output as Record<string, unknown>).reviewStatus, "incomplete");
+    assert.equal((sourceReview.output as Record<string, unknown>).report, undefined, "复核失败不能冒充正式报告");
+    assert.deepEqual(calls, ["visual-review", "role-audit"]);
+    assert.deepEqual(worker.calls.map(call => call.capability), ["script.draft", "asset.prepare"]);
+    const traceArtifact = run.artifacts.find(artifact => artifact.kind === "agent_loop_trace")!;
+    const trace = JSON.parse(await readFile(traceArtifact.uri!, "utf8")) as pipeline.AgentLoopTrace;
+    assert.equal(trace.failure?.stage, "completed_failure");
+    assert.deepEqual(trace.pendingCandidate?.candidate, report);
+    assert.equal(trace.iterations.length, 0, "没有虚构通过的审计轮次");
+    const restarted = new pipeline.ProductionPipeline(options);
+    const resumed = await restarted.decide(run.id, { interventionId: sourceReview.intervention!.id,
+      action: "approve", actor: "owner", expectedRunRevision: run.revision, reviewEvidenceId: null });
+    assert.equal(resumed.nodeRuns.find(node => node.nodeId === "render")?.status, "succeeded");
+    assert.equal(calls.filter(kind => kind === "visual-review").length, 2, "只为成片新增审查，不重跑源素材审查");
+    assert.equal(worker.calls.filter(call => call.capability === "asset.prepare").length, 1);
+  });
+  }
+
   it("stops before voice and render when source assets fail the free visual gate, and hands the verdict to the user", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-source-asset-gate-"));
     class SourceAssetWorker extends FakeWorker {
@@ -1468,7 +1534,7 @@ describe("ProductionPipeline", () => {
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan, undefined);
   });
 
-  it("persists every failed visual-review model without fabricating an unavailable prompt", async () => {
+  it("hands settled visual-review candidate exhaustion to the user and preserves each failed attempt", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-review-exhausted-"));
     const failingReviewer = (id: string, modelId: string, error: Error): pipeline.VisualReviewAgent => ({
       id,
@@ -1535,7 +1601,11 @@ describe("ProductionPipeline", () => {
       outcome: "failed",
       failureStage: "not_accepted",
       failureReason: "请求过多",
-    }]);
+    }], "needs_human");
+    const source = run.nodeRuns.find(node => node.nodeId === "asset-source-review")!;
+    assert.equal((source.output as Record<string, unknown>).reviewStatus, "incomplete");
+    assert.equal(run.nodeRuns.some(node => node.nodeId === "voice"), false);
+    assert.equal(source.intervention?.requiredAction, "approve");
   });
 
   it("fails the source review node without switching models after an uncertain provider outcome", async () => {

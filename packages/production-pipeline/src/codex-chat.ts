@@ -315,6 +315,18 @@ export class CodexBridgeError extends Error {
   }
 }
 
+// 创作者文案和角色包装不能改变请求的受理/终态事实；只认最近的真实 Broker 错误，
+// 不从 HTTP 文案或最深层旧异常猜状态，也不信任普通对象伪造的 stage。
+export function codexBridgeErrorFromCause(error: unknown): CodexBridgeError | undefined {
+  let current = error;
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (current instanceof CodexBridgeError) return current;
+    if (!(current instanceof Error)) return undefined;
+    current = current.cause;
+  }
+  return undefined;
+}
+
 // transient=true 仅表示"可安全重试"：失败确证发生在任务被受理之前。
 // 超时与一切执行期错误都是 terminal，避免重复消耗有限的模型额度。
 
@@ -1647,6 +1659,14 @@ function creatorMessageFor(
   switch (details?.category) {
     case "invalid_output": {
       const reasons: Record<string, string> = {
+        audit_rubric_version: "使用了不匹配的复核标准",
+        audit_score_aggregation: "总分与各项评分不一致",
+        audit_pass_contradiction: "通过结论与评分或修改要求矛盾",
+        audit_repair_missing: "要求修改但没有说明改什么",
+        audit_pass_disposition: "通过结论同时要求停止或调整制作",
+        audit_dimensions_missing: "缺少必要的评分项目",
+        audit_target_duplicate: "同一内容被重复列入评分",
+        audit_dimension_duplicate: "同一评分项目被重复列出",
         duplicate_scene_position: "分镜编号重复",
         reference_reuse_conflict: "同一镜头不能同时设为母片复用和参考图生成",
         reference_must_be_earlier: "参考图必须来自前面的镜头",
@@ -1661,6 +1681,9 @@ function creatorMessageFor(
         visual_unobserved_inspection: "判定为 not_observed 的问题没有要求先补查已有素材",
         visual_nonfailing_rework: "未判定失败的问题却要求返修",
       };
+      if (details.taskKind === "role-audit") {
+        return `复核结果未通过一致性检查：${reasons[details.reasonCode] ?? "没有得到可用的复核意见"}。这不是对作品的否决；当前内容和诊断已保留，不会自动重试。`;
+      }
       return `模型输出未通过制作规则：${reasons[details.reasonCode] ?? "输出结构或语义不符合合同"}${details.fieldPath ? `（${details.fieldPath}）` : ""}。已保留当前进度，请先修正方案或对应规则，不要反复重试。`;
     }
     case "invalid_request":

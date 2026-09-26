@@ -43,7 +43,7 @@ import {
   type AssetSemanticRanking,
 } from "./asset-semantic-ranker.js";
 import { REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION, fallbackShotGrammar, validateShotGrammar, type ReferenceGrammarAgent, type ReferenceGrammarExecution, type ShotGrammar } from "./reference-grammar.js";
-import { CodexBridgeError, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, type AgentLoopTrace, type CodexTaskExecution, type CodexTaskKind, type CodexTaskTrace, type ModelCandidateAttempt, type RoleAudit } from "./codex-chat.js";
+import { CodexBridgeError, codexBridgeErrorFromCause, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, type AgentLoopTrace, type CodexTaskExecution, type CodexTaskKind, type CodexTaskTrace, type ModelCandidateAttempt, type RoleAudit } from "./codex-chat.js";
 import { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey, roleAgentCheckpointRequestPhases as planningCheckpointRequestPhases } from "./role-agent-checkpoint.js";
 import { RoleAgentLoopError } from "./role-agent-loop.js";
 import {
@@ -10557,21 +10557,10 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
             provider,
             providerLabel: provider.label ?? "生成画面预检",
           });
-          if (error.sourceError instanceof CodexBridgeError && error.sourceError.stage === "completed_failure") {
-            const diagnosticPath = path.join(attempt.directory, "source_review_incomplete.json");
-            const diagnostic = { reviewStatus: "incomplete", reason: "预检服务已结束，但没有有效结论；无质量评分。", failure: error.agentLoop.failure };
-            const content = `${JSON.stringify(diagnostic, null, 2)}\n`;
-            await writeTextAtomically(diagnosticPath, content);
-            return {
-              status: "needs_human", providerOutcomeKnown: true,
-              output: { sourceVisualReviewPath: diagnosticPath, ...diagnostic },
-              artifacts: [...(failed.artifacts ?? []), fileArtifact("review_diagnostic", diagnosticPath, content,
-                "application/json", "video-factory/source-review-incomplete-v1", "asset-source-review", parentArtifactIds,
-                provider.id, "Incomplete consultation, not a visual review report.", attempt.attempt)],
-              ...(failed.receipt ? { receipt: failed.receipt } : {}),
-              intervention: { reason: "素材已准备，视觉预检未完成。可以接受未复核风险继续配音与渲染；这不代表预检通过，也不授权新增费用。",
-                requiredAction: "approve", options: ["approve", "request_changes", "reject"], artifactIds: parentArtifactIds },
-            };
+          // role loop 会给已结束的 Provider 错误补上创作者文案并保留 cause；
+          // 与规划/持久化共用原异常链的终态提取，不能只看最外层 Error 类型。
+          if (codexBridgeErrorFromCause(error)?.stage === "completed_failure") {
+            return incompleteSourceReviewResult(failed, attempt, parentArtifactIds, provider.id, error.agentLoop.failure);
           }
           return { ...failed, error: `源素材视觉预检没有完成：${failed.error}` };
         }
@@ -10586,6 +10575,14 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
             provider,
             providerLabel: provider.label ?? "生成画面预检",
           });
+          // 候选摘要只作展示；准入必须逐个核实原异常。任一未知/冲突都不能借其它
+          // 候选的已结束状态放行，也不修改通用 fallback 的切模型/重试规则。
+          if (error.failures.length > 0 && error.failures.every(({ error: failure }) => {
+            const stage = codexBridgeErrorFromCause(failure)?.stage;
+            return stage === "completed_failure" || stage === "not_accepted";
+          })) {
+            return incompleteSourceReviewResult(failed, attempt, parentArtifactIds, provider.id, error.attempts);
+          }
           return { ...failed, error: `源素材视觉预检没有完成：${failed.error}` };
         }
         return {
@@ -10711,6 +10708,29 @@ function validateSourceAssetVisualReviewInput(
   if (executablePlanRequired) request.executablePlanPath = requiredOutputString(input, "executablePlanPath");
   if (input.selectedModelId !== undefined) request.selectedModelId = requiredOutputString(input, "selectedModelId");
   return request;
+}
+
+async function incompleteSourceReviewResult(
+  failed: NodeExecutionResult<Record<string, unknown>>,
+  attempt: { directory: string; attempt: number },
+  parentArtifactIds: string[],
+  providerId: string,
+  failure: AgentLoopTrace["failure"] | ModelCandidateAttempt[],
+): Promise<NodeExecutionResult<Record<string, unknown>>> {
+  const diagnosticPath = path.join(attempt.directory, "source_review_incomplete.json");
+  const diagnostic = { reviewStatus: "incomplete", reason: "预检请求均已核清，但没有有效结论；无质量评分。", failure };
+  const content = `${JSON.stringify(diagnostic, null, 2)}\n`;
+  await writeTextAtomically(diagnosticPath, content);
+  return {
+    status: "needs_human", providerOutcomeKnown: true,
+    output: { sourceVisualReviewPath: diagnosticPath, ...diagnostic },
+    artifacts: [...(failed.artifacts ?? []), fileArtifact("review_diagnostic", diagnosticPath, content,
+      "application/json", "video-factory/source-review-incomplete-v1", "asset-source-review", parentArtifactIds,
+      providerId, "Incomplete consultation, not a visual review report.", attempt.attempt)],
+    ...(failed.receipt ? { receipt: failed.receipt } : {}),
+    intervention: { reason: "素材已准备，视觉预检未完成。可以接受未复核风险继续配音与渲染；这不代表预检通过，也不授权新增费用。",
+      requiredAction: "approve", options: ["approve", "request_changes", "reject"], artifactIds: parentArtifactIds },
+  };
 }
 
 function sourceAssetReviewFailureMessage(report: VisualReviewReport): string {

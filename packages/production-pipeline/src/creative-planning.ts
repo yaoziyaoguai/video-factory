@@ -9,7 +9,7 @@ import { applyCreativeReviewEditDraft } from "./creative-review.js";
 import { planningThreadId } from "./creative-planning-store.js";
 import type { DurationRange } from "./executable-timeline.js";
 import { RoleAgentLoopError, RoleAgentPlanningHaltError } from "./role-agent-loop.js";
-import { CodexBridgeError, type AgentLoopTrace, type RoleAudit, type RoleAuditPlanningDisposition } from "./codex-chat.js";
+import { CodexBridgeError, codexBridgeErrorFromCause, type AgentLoopTrace, type RoleAudit, type RoleAuditPlanningDisposition } from "./codex-chat.js";
 import { ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
 import { isModelProviderFailure, isTransientRoleAuditProviderFailure } from "./model-fallback.js";
 import {
@@ -728,8 +728,7 @@ async function auditPublishedStageDraft(
   } catch (error) {
     // R11-01：outcome uncertain 的原异常恢复优先于一切转换（含异操作拒收的停点）——
     // 操作身份不同只能证明“不属于本次操作”，不能证明原请求已结束；必须沿原请求恢复。
-    if (error instanceof RoleAgentLoopError && error.sourceError instanceof CodexBridgeError
-      && error.sourceError.stage === "uncertain") throw error;
+    if (codexBridgeErrorFromCause(error)?.stage === "uncertain") throw error;
     // R7/R8-01：来源核验先于一切登记——异常携带的操作绑定存在且不属于本次操作时，
     // 无论它声称 completed_failure 还是携带意见，都不得成为本次的任何审计记录。
     const errorOperationId = (error as { auditOperationId?: string }).auditOperationId;
@@ -747,7 +746,7 @@ async function auditPublishedStageDraft(
       ? error.failures.length > 0 && error.failures.every((failure) =>
         isSettledAuditProviderFailure(failure.error, options.auditOperationId))
       : error instanceof RoleAgentLoopError
-        && error.sourceError instanceof CodexBridgeError && error.sourceError.stage === "completed_failure";
+        && codexBridgeErrorFromCause(error)?.stage === "completed_failure";
     if (settledCheckFailure) {
       return { creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
         versionId: current.currentDraft.versionId,
@@ -810,7 +809,7 @@ function isSettledAuditProviderFailure(error: unknown, auditOperationId: string)
     const bound = (error as RoleAgentLoopError & { auditOperationId?: string }).auditOperationId;
     if (bound !== undefined && bound !== auditOperationId) return false;
   }
-  const source = error instanceof RoleAgentLoopError ? error.sourceError : error;
+  const source = codexBridgeErrorFromCause(error);
   return source instanceof CodexBridgeError
     && (source.stage === "completed_failure" || source.stage === "not_accepted")
     && (isModelProviderFailure(error) || isTransientRoleAuditProviderFailure(error));
