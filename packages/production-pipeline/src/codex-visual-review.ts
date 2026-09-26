@@ -187,6 +187,8 @@ export interface VisualReviewAgent {
   finalReviewConfiguration?: {
     mode: "dual" | "single";
     reviewers: Array<{ providerId: string; modelId: string; independentRoleAudit: boolean }>;
+    /** 同一审片角色可执行的精确候选身份；不是额外审片腿，也不由报告自行声明。 */
+    executionCandidates?: Array<{ providerId: string; modelId: string; independentRoleAudit: boolean }>;
   };
   review(input: VisualReviewAgentInput): Promise<VisualReviewReport>;
   reviewDetailed?(input: VisualReviewAgentInput): Promise<VisualReviewExecution>;
@@ -253,7 +255,15 @@ export class FallbackVisualReviewAgent implements VisualReviewAgent {
     this.id = options.primary.id;
     this.modelId = options.primary.modelId;
     this.independentRoleAudit = [options.primary, ...options.backups.map(({ agent }) => agent)].every((agent) => agent.independentRoleAudit === true);
-    this.finalReviewConfiguration = { mode: "single", reviewers: [{ providerId: this.id, modelId: this.modelId, independentRoleAudit: this.independentRoleAudit }] };
+    this.finalReviewConfiguration = {
+      mode: "single",
+      reviewers: [{ providerId: this.id, modelId: this.modelId, independentRoleAudit: this.independentRoleAudit }],
+      executionCandidates: [
+        { agent: options.primary, providerId: options.primaryProviderId }, ...options.backups,
+      ].map(({ agent, providerId }) => ({
+        providerId, modelId: agent.modelId, independentRoleAudit: agent.independentRoleAudit === true,
+      })),
+    };
   }
 
   async review(input: VisualReviewAgentInput): Promise<VisualReviewReport> {

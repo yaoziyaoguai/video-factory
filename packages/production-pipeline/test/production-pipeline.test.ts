@@ -2364,7 +2364,7 @@ describe("ProductionPipeline", () => {
       const scope = visualReport.reviewScope as { actualModels: unknown[] };
       scope.actualModels = scope.actualModels.slice(0, 1);
       visualReport.independentReviews = (visualReport.independentReviews as unknown[]).slice(0, 1);
-    }, /one current DeepSeek review or two historical independent review proofs/);
+    }, /one current configured review or two historical independent review proofs/);
     await assertTamperRejected((visualReport) => {
       const scope = visualReport.reviewScope as { actualModels: Array<Record<string, unknown>> };
       scope.actualModels[1]!.providerId = scope.actualModels[0]!.providerId;
@@ -2558,6 +2558,72 @@ describe("ProductionPipeline", () => {
     assert.ok(approved.artifacts.some((artifact) => artifact.kind === "publish_package"));
   });
 
+  it("publishes an existing single-review delivery from its configured fallback without rerunning review", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-configured-review-fallback-"));
+    const report: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1", summary: "已审查现有成片。",
+      scores: { composition: 81, continuity: 80, pacing: 78, legibility: 85, safety: 90 },
+      findings: [], confidence: 0.8, recommendation: "approve",
+    };
+    let renderedReviewCalls = 0;
+    const primary: pipeline.VisualReviewAgent = {
+      id: "deepseek-visual-review-v1", modelId: "deepseek-flash", independentRoleAudit: true,
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async (input) => {
+        if (input.reviewStage === "source_assets") return completedSingleVisualReview(input, report, { providerId: "deepseek", modelId: "deepseek-flash" });
+        throw new pipeline.CodexBridgeError("No report body.", false, "completed_failure", 422, "model_provider_no_output");
+      },
+    };
+    const backup: pipeline.VisualReviewAgent = {
+      id: "deepseek-visual-review-v1", modelId: "m-123456789abc", independentRoleAudit: true,
+      review: async () => { throw new Error("Detailed review must be used."); },
+      reviewDetailed: async (input) => {
+        renderedReviewCalls += 1;
+        return completedSingleVisualReview(input, report, { providerId: "m-123456789abc", modelId: "m-123456789abc" });
+      },
+    };
+    const options = {
+      workspaceRoot, worker: new FakeWorker(),
+      providerRuntimeMetadata: [{
+        id: primary.id, label: "已配置视觉审片", modelId: primary.modelId, transport: "unix_socket" as const,
+        billing: "subscription" as const, approvalPolicy: "none" as const, maxAttempts: 1,
+      }],
+      visualReviewAgents: [new pipeline.FallbackVisualReviewAgent({
+        primary, primaryProviderId: "deepseek", backups: [{ agent: backup, providerId: backup.modelId }],
+      })],
+    };
+    const subject = new pipeline.ProductionPipeline(options);
+    const waiting = await subject.start({
+      ...brief, runPurpose: "production",
+      providers: { ...brief.providers, visualReview: primary.id }, models: { [primary.id]: primary.modelId },
+    });
+    assert.equal(waiting.status, "needs_human");
+    assert.equal(renderedReviewCalls, 1);
+    // 未登记、同provider不同model、同model不同provider、没有独立复核资格，都不能放行。
+    const configuration = options.visualReviewAgents[0]!.finalReviewConfiguration;
+    for (const executionCandidates of [
+      [],
+      [{ providerId: backup.modelId, modelId: "m-000000000000", independentRoleAudit: true }],
+      [{ providerId: "m-000000000000", modelId: backup.modelId, independentRoleAudit: true }],
+      [{ providerId: backup.modelId, modelId: backup.modelId, independentRoleAudit: false }],
+    ]) {
+      const untrusted = new pipeline.ProductionPipeline({
+        ...options,
+        visualReviewAgents: [{ ...primary, finalReviewConfiguration: { ...configuration, executionCandidates } }],
+      });
+      await assert.rejects(() => untrusted.decide(waiting.id,
+        humanDecisionFor(waiting, "approve", "owner", "不可自授候选资格。", "default")),
+      /当前审片的执行模型不属于已配置/);
+    }
+    // 重建管线后消费原报告，不能靠再审或重生成来绕过身份错误。
+    const restarted = new pipeline.ProductionPipeline(options);
+    const approved = await restarted.decide(waiting.id,
+      humanDecisionFor(waiting, "approve", "owner", "保留原审片与成片。", "default"));
+    assert.equal(approved.status, "succeeded");
+    assert.ok(approved.artifacts.some((artifact) => artifact.kind === "publish_package"));
+    assert.equal(renderedReviewCalls, 1);
+  });
+
   it("视觉审片证据绑定读取当前有效版本，不被 raw output 的滞后值遮挡（EB-01）", async () => {
     // 补查/重跑后节点 raw output 可能滞后于 outputState 的有效版本。UI 与服务端都必须以
     // 有效版本为准：raw 里的旧证据不得放行，有效证据不得被 raw 遮住。
@@ -2726,7 +2792,7 @@ describe("ProductionPipeline", () => {
     assert.equal(scope?.actualModels[0]?.providerId, "other-review-v1");
     await assert.rejects(
       () => subject.decide(waiting.id, humanDecisionFor(waiting, "approve", "owner", "配置与执行一致，但非 DeepSeek。", "default")),
-      /Final publication requires the current single-review evidence to come from DeepSeek/,
+      /当前审片的执行模型不属于已配置/,
     );
   });
 

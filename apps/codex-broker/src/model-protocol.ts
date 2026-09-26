@@ -21,10 +21,12 @@ export function configuredModelRequest(config: ModelConnectionInput, prompt: str
       },
     };
   }
-  // 百炼兼容接口的音频 data 接受 URL / Data URI，OpenAI 原生接口接受裸 base64。
+  // 百炼标准域名与工作空间 MaaS 域名的音频 data 均接受 URL / Data URI；OpenAI 接受裸 base64。
   // 按接入协议方处理这一个传输差异，不能把模型名或内部路由 ID 当作协议。
-  const dashscope = /^dashscope(?:-[a-z]+)?\.aliyuncs\.com$/.test(new URL(base).hostname);
-  const audioData = audio ? `${dashscope ? "data:;base64," : ""}${audio.toString("base64")}` : undefined;
+  const hostname = new URL(base).hostname;
+  const bailian = /^dashscope(?:-[a-z]+)?\.aliyuncs\.com$/.test(hostname)
+    || /^ws-[a-z0-9-]+\.[a-z0-9-]+\.maas\.aliyuncs\.com$/.test(hostname);
+  const audioData = audio ? `${bailian ? "data:;base64," : ""}${audio.toString("base64")}` : undefined;
   return {
     endpoint: `${base}/chat/completions`,
     headers: { "content-type": "application/json", authorization: `Bearer ${config.apiKey}` },

@@ -1192,7 +1192,7 @@ export class ProductionPipeline {
         throw new HumanDecisionConflictError("Human decision is not bound to the current review evidence.");
       }
       if (decision.action === "approve" && activeInterventionNode?.nodeId === "final-review") {
-        assertPersistedFinalApprovalReady(previous, brief, activeInterventionNode);
+        assertPersistedFinalApprovalReady(previous, brief, activeInterventionNode, this.options);
       }
       // 消费成片审片证据的停点批准前必须逐条表态：这是服务端合同（EB-03），不能只靠客户端禁用按钮；
       // publish-package 的表态只覆盖成片审片结论，不解释为终审签字。
@@ -4428,7 +4428,7 @@ export class ProductionPipeline {
           const packageInput = validatePublishPackageInput(input);
           const currentBrief = currentEffectiveBriefFromContext(context, brief);
           const publishBrief: ProductionBrief = { ...currentBrief, ...packageInput.brief };
-          assertPublishEvidenceReady(context, publishBrief);
+          assertPublishEvidenceReady(context, publishBrief, this.options);
           const currentArtifacts = await currentArtifactsForPackaging(context, currentBrief);
           await verifyStoredArtifacts(currentArtifacts);
           const artifactIds = currentArtifacts.map((artifact) => artifact.id);
@@ -12126,7 +12126,11 @@ function visualReviewModelProof(
   };
 }
 
-function assertVisualReviewReady(reviewedDelivery: unknown, brief: ProductionBrief): void {
+function assertVisualReviewReady(
+  reviewedDelivery: unknown,
+  brief: ProductionBrief,
+  options: ProductionPipelineOptions,
+): void {
   const delivery = requireOutputRecord(reviewedDelivery, "visual-review delivery");
   const report = requireOutputRecord(delivery.report, "visual-review report");
   const scope = finalVisualReviewScope(delivery);
@@ -12138,7 +12142,7 @@ function assertVisualReviewReady(reviewedDelivery: unknown, brief: ProductionBri
       ? "dual"
       : undefined;
   if (!mode) {
-    throw new Error("Final publication requires one current DeepSeek review or two historical independent review proofs.");
+    throw new Error("Final publication requires one current configured review or two historical independent review proofs.");
   }
   for (const model of scope.actualModels) {
     if (model.evidenceId !== scope.evidenceId
@@ -12184,15 +12188,22 @@ function assertVisualReviewReady(reviewedDelivery: unknown, brief: ProductionBri
     );
   }
   if (mode === "single") {
-    // DeepSeek 单审腿有两个合法身份：配置身份 "deepseek-visual-review-v1"（catalog/brief）与
-    // 执行身份 "deepseek"（role-agent-assembly 以 broker 身份登记 primaryProviderId）。只认其一
-    // 会把另一个永久锁在终审之外——run-1278 的真实 DeepSeek 审片就因只认配置身份被硬拒。
-    // 白名单只对 DeepSeek 配置开放：其它配置即使执行身份与配置一致，也不构成 DeepSeek 单审。
+    // 角色配置身份与实际候选不同。保留旧 DeepSeek 两种合法身份；新接入必须由正式装配
+    // 声明精确 provider/model，不能凭报告中的 m-* 名称或配置/执行相等就自授放行资格。
     const configuredProviderId = brief.providers.visualReview;
-    const actualProviderId = scope.actualModels[0]?.providerId;
+    const actual = scope.actualModels[0]!;
+    const agent = [
+      ...(options.visualReviewAgents ?? []),
+      ...(options.visualReviewAgent ? [options.visualReviewAgent] : []),
+    ].find((candidate) => candidate.id === configuredProviderId);
+    const configuredCandidate = agent?.finalReviewConfiguration?.executionCandidates?.some((candidate) => (
+      candidate.providerId === actual.providerId
+      && candidate.modelId === actual.modelId
+      && candidate.independentRoleAudit === true
+    ));
     if (configuredProviderId !== "deepseek-visual-review-v1"
-      || (actualProviderId !== "deepseek-visual-review-v1" && actualProviderId !== "deepseek")) {
-      throw new Error("Final publication requires the current single-review evidence to come from DeepSeek.");
+      || (actual.providerId !== "deepseek-visual-review-v1" && actual.providerId !== "deepseek" && !configuredCandidate)) {
+      throw new HumanDecisionConflictError("当前审片的执行模型不属于已配置且支持独立复核的审片候选；请核对模型接入后再确认，已生成成片和审片报告仍保留。");
     }
     if (report.independentReviews !== undefined) {
       throw new Error("Single visual-review evidence must not contain fabricated independent branch reports.");
@@ -12222,7 +12233,7 @@ function assertTechnicalReviewReady(output: unknown): void {
   }
 }
 
-function assertPublishEvidenceReady(context: WorkflowContext, brief: ProductionBrief): void {
+function assertPublishEvidenceReady(context: WorkflowContext, brief: ProductionBrief, options: ProductionPipelineOptions): void {
   assertTechnicalReviewReady(context.outputs.get("technical-review"));
   const finalReview = requireOutputRecord(context.outputs.get("final-review"), "final-review output");
   const currentArtifactIds = currentFinalReviewArtifactIds(context, brief, context.outputs.get("visual-review"));
@@ -12230,7 +12241,7 @@ function assertPublishEvidenceReady(context: WorkflowContext, brief: ProductionB
     throw new Error("Final approval is not bound to the current review artifact versions.");
   }
   if (brief.runPurpose !== "test" || brief.providers.visualReview) {
-    assertVisualReviewReady(context.outputs.get("visual-review"), brief);
+    assertVisualReviewReady(context.outputs.get("visual-review"), brief, options);
     const scope = finalVisualReviewScope(context.outputs.get("visual-review"));
     if (finalReview.reviewEvidenceId !== scope.evidenceId) {
       throw new Error("Final approval is not bound to the current visual evidence digest.");
@@ -12255,6 +12266,7 @@ function assertPersistedFinalApprovalReady(
   run: WorkflowRun<ProductionBrief>,
   brief: ProductionBrief,
   finalReviewNode: WorkflowRun["nodeRuns"][number],
+  options: ProductionPipelineOptions,
 ): void {
   const uncertain = run.nodeRuns.find((node) => node.outcomeUncertain === true);
   if (uncertain) {
@@ -12288,7 +12300,7 @@ function assertPersistedFinalApprovalReady(
     }
     // 终审读当前有效视觉交付（与放行处的证据解析同源），不再读可能滞后的 raw output。
     const visualDelivery = currentVisualReviewDelivery(run);
-    assertVisualReviewReady(visualDelivery, brief);
+    assertVisualReviewReady(visualDelivery, brief, options);
     const scope = finalVisualReviewScope(visualDelivery);
     if (output.reviewEvidenceId !== scope.evidenceId) {
       throw new Error("Final approval is not bound to the current visual evidence digest.");
