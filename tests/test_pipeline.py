@@ -476,7 +476,8 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(render_exit, 0)
             self.assertTrue((render_dir / "final.mp4").exists())
             self.assertTrue((render_dir / "frames" / "scene_01.png").exists())
-            self.assertEqual(sum(1 for line in concat_lines if line.startswith("file ")), 5)
+            # 五个镜头加末帧哨兵，concat 才能兑现最后一镜的时长。
+            self.assertEqual(sum(1 for line in concat_lines if line.startswith("file ")), 6)
             self.assertTrue(manifest["rendered"])
             self.assertEqual(manifest["probe"]["streams"][0]["height"], 1920)
             self.assertEqual(manifest["aigc"]["explicit_label"], "AI 辅助创作")

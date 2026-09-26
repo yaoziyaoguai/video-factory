@@ -3,6 +3,7 @@
 import hashlib
 import json
 import mimetypes
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -19,6 +20,11 @@ from .stock_assets import (
 )
 from .technical_review import review_video
 from .voiceover import VoiceDoesNotFitError, synthesize_voiceover_plan
+from .continuous_voiceover import NarrationGroupDoesNotFitError, assemble_narration_track
+from .narration_plan import validate_narration_plan
+from .group_voiceover import synthesize_minimax_groups, forecast_minimax_groups
+from .narration_subtitles import capture_subtitle_evidence
+from .voiceover import mastering_settings, _write_json_durably
 from .renderer import render_job_manifest
 from .diagnostics import diagnostic_context, diagnostic_span
 
@@ -30,6 +36,7 @@ SUPPORTED_CAPABILITIES = {
     "asset.search",
     "asset.prepare",
     "voice.synthesize",
+    "voice.quote",
     "video.render",
     "quality.review",
 }
@@ -71,6 +78,16 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
         return search_assets(request, output_dir, started_at)
     if capability == "voice.synthesize":
         return synthesize_voice(request, output_dir, started_at)
+    if capability == "voice.quote":
+        inputs, parameters = request["input"], request.get("parameters", {})
+        plan = inputs.get("narrationPlan")
+        if not isinstance(plan, dict) or plan.get("version") != "video-factory/narration-plan-v1":
+            raise WorkerProtocolError("Voice quote requires a confirmed-format narration plan.")
+        quote = forecast_minimax_groups(plan, output_dir.parent, voice=str(inputs.get("voice") or "female-chengshu"),
+            rate=int(inputs.get("rate", 190)), pause_scale=float(inputs.get("pause_scale", 1)),
+            model_id=str(parameters.get("modelId") or "speech-2.8-turbo"),
+            provider_id=str(parameters.get("providerId") or "minimax-tts-v1"))
+        return success_response(request, output=quote, artifacts=[], started_at=started_at)
     if capability == "video.render":
         return render_video(request, output_dir, started_at)
     if capability == "quality.review":
@@ -324,20 +341,53 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
         and configured_cost >= 0
     )
     try:
-        plan_path = synthesize_voiceover_plan(
-            script_path=script_path,
-            output_dir=output_dir,
-            provider=provider,
-            voice=voice,
-            rate=int(input_values.get("rate", parameters.get("rate", 190))),
-            profile_id=profile_id,
-            pause_scale=float(input_values.get("pause_scale", parameters.get("pauseScale", 1))),
-            mastering_preset=str(input_values.get("mastering_preset", parameters.get("masteringPreset", "natural"))),
-            operation_id=request["commandId"] if provider == "minimax" else None,
-            provider_id=str(parameters.get("providerId") or "minimax-tts-v1") if provider == "minimax" else None,
-            model_id=optional_string(parameters.get("modelId")) if provider == "minimax" else None,
-            estimated_cost_cny=float(configured_cost) if provider == "minimax" and valid_configured_cost else None,
+        if input_values.get("narrationPlanPath") is not None:
+            plan_path = synthesize_continuous_voice(request, script_path, output_dir, provider, voice, profile_id)
+        else:
+            plan_path = synthesize_voiceover_plan(
+                script_path=script_path,
+                output_dir=output_dir,
+                provider=provider,
+                voice=voice,
+                rate=int(input_values.get("rate", parameters.get("rate", 190))),
+                profile_id=profile_id,
+                pause_scale=float(input_values.get("pause_scale", parameters.get("pauseScale", 1))),
+                mastering_preset=str(input_values.get("mastering_preset", parameters.get("masteringPreset", "natural"))),
+                operation_id=request["commandId"] if provider == "minimax" else None,
+                provider_id=str(parameters.get("providerId") or "minimax-tts-v1") if provider == "minimax" else None,
+                model_id=optional_string(parameters.get("modelId")) if provider == "minimax" else None,
+                estimated_cost_cny=float(configured_cost) if provider == "minimax" and valid_configured_cost else None,
+            )
+    except NarrationGroupDoesNotFitError as error:
+        frame = 0
+        related_cuts = []
+        for scene in json.loads(script_path.read_text(encoding="utf-8"))["scenes"]:
+            frames = round(scene["duration"] * 30)
+            if scene["position"] in error.source_scene_positions:
+                related_cuts.append({"scenePosition": scene["position"], "startFrame": frame, "frameCount": frames})
+            frame += frames
+        # 恢复时音频可能属于前次 attempt。复制同字节证据到本次目录以满足产物边界，原件与账本不动。
+        evidence_audio = error.raw_audio_path
+        if evidence_audio.parent.resolve() != output_dir.resolve():
+            evidence_audio = output_dir / f"{error.group_id}-retained{error.raw_audio_path.suffix}"
+            shutil.copyfile(error.raw_audio_path, evidence_audio)
+        audio_artifact = describe_artifact(
+            path=evidence_audio, kind="voiceover_raw", content_type=media_content_type(evidence_audio),
+            request=request, license_note="Continuous narration retained for user-directed timing revision.",
         )
+        return {
+            "protocolVersion": WORKER_PROTOCOL_VERSION, "commandId": request["commandId"], "status": "rejected",
+            "error": {"code": error.code, "message": str(error)},
+            "output": {"conflict": {"code": error.code, "groupId": error.group_id,
+                "sourceScenePositions": error.source_scene_positions, "window": error.window,
+                "sourceAudioSamples": error.source_audio_samples, "requiredFrames": error.required_frames,
+                "cuts": related_cuts,
+                "audioArtifact": audio_artifact, "operationId": request["commandId"]}},
+            "artifacts": [audio_artifact], "diagnostics": {
+                "durationMs": round((time.monotonic() - started_at) * 1000, 3),
+                **minimax_failure_diagnostics(output_dir, request["commandId"]),
+            },
+        }
     except VoiceDoesNotFitError as error:
         audio_artifact = describe_artifact(
             path=error.raw_audio_path,
@@ -406,27 +456,73 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
         ),
     ]
     diagnostics: Dict[str, Any] = {}
-    if provider == "minimax" and valid_configured_cost:
+    if provider == "minimax" and (valid_configured_cost or plan.get("version") == "video-factory/voiceover-plan-v3"):
         synthesized_scenes = plan.get("scenes")
         metered_attempt_count = len(synthesized_scenes) if isinstance(synthesized_scenes, list) else 1
         persisted_diagnostics = minimax_failure_diagnostics(output_dir, request["commandId"])
-        diagnostics = persisted_diagnostics if persisted_diagnostics.get("providerOutcomeKnown") is True else {
+        diagnostics = persisted_diagnostics if plan.get("version") == "video-factory/voiceover-plan-v3" or persisted_diagnostics.get("providerOutcomeKnown") is True else {
             "actualCostCny": round(float(configured_cost), 2),
             "actualCostSource": "configured_rate",
             "meteredAttemptCount": metered_attempt_count,
             "meteredFailedAttemptCount": 0,
             "providerOutcomeKnown": True,
         }
+        if plan.get("version") == "video-factory/voiceover-plan-v3" and diagnostics.get("providerOutcomeKnown") is not True:
+            # 有可播放文件不等于收费请求已结清；保留产物，交给原操作恢复，不能成功放行或记作零元。
+            return {
+                "protocolVersion": WORKER_PROTOCOL_VERSION, "commandId": request["commandId"], "status": "failed",
+                "error": {"code": "VOICE_COST_EVIDENCE_UNAVAILABLE",
+                          "message": "配音已保留，但原请求的费用记录暂时无法核实。请先核查原任务，不要重新合成。"},
+                "artifacts": artifacts,
+                "diagnostics": {"durationMs": round((time.monotonic() - started_at) * 1000, 3), **diagnostics},
+            }
     return success_response(
         request,
         output={
             "voiceoverPlanPath": str(plan_path),
             "trackPath": str(plan["track_path"]),
+            **({"narrationMode": "continuous_groups", "subtitleStatus": plan["subtitles"]["status"]}
+               if plan.get("version") == "video-factory/voiceover-plan-v3" else {}),
         },
         artifacts=artifacts,
         started_at=started_at,
         diagnostics=diagnostics,
     )
+
+
+def synthesize_continuous_voice(request: Dict[str, Any], script_path: Path, output_dir: Path,
+                                provider: str, voice: str | None, profile_id: str | None) -> Path:
+    """只接受正式输入绑定的可选计划；旧 run 无此字段时完全保留 v2。"""
+    if provider != "minimax":
+        raise WorkerProtocolError("Continuous narration currently requires the MiniMax system-voice provider.")
+    inputs, parameters = request["input"], request.get("parameters", {})
+    narration_path = require_existing_path(inputs, "narrationPlanPath")
+    original_script = require_existing_path(inputs, "scriptPath")
+    visual_path = require_existing_path(inputs, "executablePlanPath")
+    scenes = json.loads(script_path.read_text(encoding="utf-8"))["scenes"]
+    narration = validate_narration_plan(json.loads(narration_path.read_text(encoding="utf-8")), scenes,
+        script_sha256=hashlib.sha256(original_script.read_bytes()).hexdigest(),
+        visual_sha256=hashlib.sha256(visual_path.read_bytes()).hexdigest())
+    rate = int(inputs.get("rate", parameters.get("rate", 190)))
+    pause_scale = float(inputs.get("pause_scale", parameters.get("pauseScale", 1)))
+    preset = str(inputs.get("mastering_preset", parameters.get("masteringPreset", "natural")))
+    mastering = mastering_settings(preset)
+    result = synthesize_minimax_groups(narration, output_dir, operation_id=request["commandId"],
+        voice=voice or "female-chengshu", rate=rate, pause_scale=pause_scale,
+        model_id=str(parameters.get("modelId") or "speech-2.8-turbo"),
+        authorization_cny=parameters.get("maxCostCny"),
+        provider_id=str(parameters.get("providerId") or "minimax-tts-v1"))
+    subtitles = capture_subtitle_evidence(Path(result["ledgerPath"]), output_dir.parent)
+    plan = assemble_narration_track(narration, result["rawAudio"], output_dir, mastering_filter=mastering["filter"])
+    plan.update({"provider": provider, "voice": voice, "rate": rate,
+        "direction": {"profile_id": profile_id, "rate": rate, "pause_scale": pause_scale, "mastering_preset": preset},
+        "mastering": {"preset": preset, **mastering},
+        # v3 的 scenes 仅索引视觉切点，不伪造逐镜音频或逐镜语音时长。
+        "scenes": [{"position": scene["position"], "duration": scene["duration"]} for scene in scenes],
+        "subtitles": subtitles})
+    target = output_dir / "voiceover_plan.json"
+    _write_json_durably(target, plan)
+    return target
 
 
 def minimax_failure_diagnostics(output_dir: Path, operation_id: str) -> Dict[str, Any]:

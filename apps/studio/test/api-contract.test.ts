@@ -52,13 +52,13 @@ describe("run intervention API contracts", () => {
       expectedRunRevision: 4,
       interventionId: "voice-timing-1",
       reviewEvidenceId: null,
-      voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
+      voiceTiming: { scenePosition: 1, durationSeconds: 8.2, groupId: "narration-1" },
     }), {
       action: "request_changes",
       expectedRunRevision: 4,
       interventionId: "voice-timing-1",
       reviewEvidenceId: null,
-      voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
+      voiceTiming: { scenePosition: 1, durationSeconds: 8.2, groupId: "narration-1" },
     });
     assert.throws(() => parseStudioDecisionInput({
       action: "request_changes",

@@ -1381,6 +1381,45 @@ function closureLibraryDirector(spies: ClosureSpies): VisualDirectorAgent {
 }
 
 describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
+  it("audits an edited director draft with optional null fields without changing its published identity", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-audit-exact-edited-director-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const pipeline = newClosurePipeline(workspaceRoot, spies);
+    let run = await pipeline.start(closureBrief({ creativeReview: true }));
+    const current = () => {
+      const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+      const gate = node.intervention!.continuation!;
+      const review = (node.output as { creativeReview: CreativeReviewState }).creativeReview;
+      return { gate, review, stage: review.stages[gate.stage] };
+    };
+    for (const stage of ["treatment", "script"] as const) {
+      const { gate, stage: state } = current();
+      run = await pipeline.confirmCreativeReview(run.id, { commandId: `confirm-${stage}`, actor: "creator", stage,
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision, baseDraftSha256: gate.draftSha256,
+        expectedCheckIdentity: state.checkResult!.checkIdentity });
+    }
+    const { gate, stage } = current();
+    const document = structuredClone(stage.currentDocument) as { visualBible: Record<string, unknown>; shots: Array<Record<string, unknown>> };
+    delete document.visualBible.viewerPromise;
+    for (const shot of document.shots) { shot.reuseFromScenePosition = null; shot.referenceFromScenePosition = null; }
+    run = await (await pipeline.dispatchCreativeReviewCommand(run.id, { action: "edit_draft", stage: "director", commandId: "edit-director", actor: "creator",
+      expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision, baseDraftSha256: gate.draftSha256, document })).completion;
+    const edited = current();
+    assert.equal(edited.stage.checkResult, null);
+    const hash = edited.gate.draftSha256;
+    run = await (await pipeline.dispatchCreativeReviewCommand(run.id, { action: "audit_current", stage: "director", commandId: "audit-edited-director", actor: "creator",
+      expectedRunRevision: run.revision, expectedReviewRevision: edited.gate.reviewRevision, baseDraftSha256: hash })).completion;
+    assert.equal(run.status, "needs_human");
+    const checked = current();
+    assert.deepEqual(checked.stage.currentDocument, document);
+    assert.equal(checked.gate.draftSha256, hash);
+    assert.equal(checked.stage.checkResult?.draftSha256, hash);
+    assert.equal(checked.stage.checkResult?.verdict, "pass");
+    assert.equal(spies.directorCalls, 1, "主动审计不重新产稿");
+    assert.equal(spies.directorAuditCalls, 2, "一次首审及一次用户主动再审");
+  });
+
   for (const sourceReview of [false, true, "incomplete"] as const) it(`delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=${sourceReview})`, async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-stock-consent-"));
     const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };

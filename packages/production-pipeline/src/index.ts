@@ -1,6 +1,8 @@
 export { BRIEF_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION, parseBrief, parsePersistedBrief, parseProductionSeriesContext, parseVoiceDoesNotFitConflict } from "./contracts.js";
 export { parseModelConnectionInput } from "./model-connection.js";
 export { diagnosticEvent } from "./diagnostics.js";
+export { buildNarrationPlan, validateNarrationPlan } from "./narration-plan.js";
+export type { NarrationPlan, NarrationPlanPreview } from "./narration-plan.js";
 export type { ModelConnectionInput, ModelConnection, ModelProtocol, ModelUnderstandingCapability } from "./model-connection.js";
 export { AUDIO_REVIEW_CHECKS, validateAudioReviewReport } from "./audio-review.js";
 export type { AudioReviewReport, AudioReviewResult } from "./audio-review.js";

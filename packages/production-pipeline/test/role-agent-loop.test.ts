@@ -1421,6 +1421,27 @@ describe("role agent loop audit boundary", () => {
     assert.equal((stored as { version: string }).version, "video-factory/agent-loop-checkpoint-v9");
   });
 
+  it("validates an existing draft without normalizing its audit identity, including replay", async () => {
+    let stored: unknown;
+    let audits = 0;
+    const candidate = { title: " 已确认的原稿 " };
+    const execute = () => runRoleAgentLoop<{ title: string }>({
+      role: "系列总编", contractVersion: "identity-preserved-v1", criteria: ["对原稿提意见"], maxIterations: 1,
+      initialCandidate: candidate,
+      checkpoint: { key: "exact-draft", load: async () => stored, save: async value => { stored = structuredClone(value); } },
+      produce: async () => { throw new Error("Audit must not create another draft"); },
+      validate: value => ({ title: titleCandidate(value).title.trim() }),
+      audit: async ({ candidate: audited }) => {
+        audits++;
+        assert.deepEqual(audited, candidate, "schema normalization must not change the version being audited");
+        return { output: passingAudit(REPORT_AUDIT_DIMENSIONS) };
+      },
+    });
+    assert.deepEqual((await execute()).output, candidate);
+    assert.deepEqual((await execute()).output, candidate);
+    assert.equal(audits, 1);
+  });
+
   it("audits an existing human candidate before asking the producer to repair it", async () => {
     let produceCalls = 0;
     let auditCalls = 0;

@@ -832,7 +832,7 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
   let restoredCandidateRejected = false;
   const validateRestoredCandidate = (value: unknown, iteration: number): TOutput => {
     try {
-      return options.validate(value, validationContext(iteration));
+      return validateCandidate(options, value, validationContext(iteration));
     } catch (error) {
       restoredCandidateRejected = true;
       throw error;
@@ -1356,10 +1356,23 @@ function timedValidate<TOutput>(
 ): TOutput {
   const startedAt = nowMs(options);
   try {
-    return options.validate(value, context);
+    return validateCandidate(options, value, context);
   } finally {
     state.validationMs += elapsedMs(startedAt, nowMs(options));
   }
+}
+
+function validateCandidate<TOutput>(
+  options: RoleAgentLoopOptions<TOutput>, value: unknown, context: RoleAgentValidationContext,
+): TOutput {
+  if (options.initialCandidate !== undefined && valueHash(value) === valueHash(options.initialCandidate)) {
+    // 审计已有稿件只校验，不标准化成另一份稿件；恢复时也必须保留同一身份。
+    // 模型新产稿、不同候选和旧检查点仍走原校验结果，不能借此认领别版意见。
+    const original = structuredClone(options.initialCandidate);
+    options.validate(structuredClone(value), context);
+    return original;
+  }
+  return options.validate(value, context);
 }
 
 function validationContext(iteration: number): RoleAgentValidationContext {

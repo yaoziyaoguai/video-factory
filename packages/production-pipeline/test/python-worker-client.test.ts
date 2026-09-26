@@ -4,8 +4,22 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { PythonWorkerClient } from "../src/index.js";
+import { buildNarrationPlan } from "../src/narration-plan.js";
 
 describe("PythonWorkerClient", () => {
+  it("quotes narration groups through the real Python boundary without a provider key or paid operation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "voice-quote-client-"));
+    const client = new PythonWorkerClient({ command: ["python3", "-m", "video_factory.worker"], cwd: process.cwd(),
+      env: { ...process.env, PYTHONPATH: path.join(process.cwd(), "src"), MINIMAX_API_KEY: "" }, timeoutMs: 10_000 });
+    const plan = buildNarrationPlan([{ position: 1, duration: 20, narration: "先放下手机。再看见今天。" }], "a".repeat(64), "b".repeat(64));
+    const quote = await client.forecastPaidVoiceSpend({ runId: "run-quote", nodeDirectory: root,
+      input: { narrationPlan: plan, voice: "female-chengshu", rate: 190, pause_scale: 1 },
+      parameters: { providerId: "minimax-tts-v1", modelId: "speech-2.8-turbo" } });
+    assert.equal(quote.items.length, 1);
+    assert.equal(quote.items[0]!.reused, false);
+    assert.equal(quote.maxCostCny, 0.01);
+    await assert.rejects(readFile(path.join(root, ".voice-operations", "quote-only")), { code: "ENOENT" });
+  });
   it("treats stderr flooding and a broken log sink as disposable diagnostics", async (t) => {
     t.mock.method(console, "error", () => { throw new Error("log disk unavailable"); });
     const wire = { protocolVersion: "video-factory/worker-v1", commandId: "flood", status: "succeeded", artifacts: [] };

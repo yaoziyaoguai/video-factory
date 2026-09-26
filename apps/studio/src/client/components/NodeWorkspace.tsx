@@ -7,6 +7,7 @@ import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, creatorFacingTechnicalText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
+import { NarrationPlanEditor } from "./NarrationPlanEditor.js";
 import { NodeDocumentCommands } from "./NodeDocumentCommands.js";
 import { NodeContentReview, nodeContentReview } from "./NodeContentReview.js";
 import { NodeDocumentHistory } from "./NodeDocumentHistory.js";
@@ -449,6 +450,12 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   }
 
   return (
+    <>
+    {!readOnly && node.status === "needs_human"
+      && node.id === (nodes.some((candidate) => candidate.id === "asset-source-review") ? "asset-source-review" : "assets")
+      && nodes.some((candidate) => candidate.id === "voice" && candidate.status === "pending"
+        && candidate.plannedExecution?.providerId === "minimax-tts-v1")
+      ? <NarrationPlanEditor key={runId} runId={runId} runRevision={runRevision} disabled={busy || runStatus === "running"} /> : null}
     <details
       id={`node-workspace-${node.id}`}
       className={`node-workspace is-${node.status}`}
@@ -717,6 +724,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         </section>
       </div> : null}
     </details>
+    </>
   );
 }
 

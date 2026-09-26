@@ -191,6 +191,7 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
   if (!record) return <p className="node-document-state">这一步暂时没有可查看的详细内容。</p>;
   const inputPreview = nodeId.endsWith("-input");
   const viewId = creatorViewId(nodeId);
+  const continuousVoice = viewId === "voice" && !inputPreview && record.version === "video-factory/voiceover-plan-v3";
   const assetRoutes = viewId === "assets" && Array.isArray(record.director_routing)
     ? record.director_routing
     : [];
@@ -223,6 +224,7 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
     .filter((key) => isCreatorTopLevelField(nodeId, key, record[key]))
     .map((key) => ({ key, value: Array.isArray(record[key]) ? record[key].filter(hasCreatorCollectionItem) : [] }))
     .filter((entry) => entry.value.length > 0
+      && !(continuousVoice && entry.key === "scenes")
       && !(viewId === "assets" && entry.key === "director_routing")
       && !(viewId === "asset-candidates" && entry.key === "scene_candidates")
       && !(viewId === "asset-semantic-rank" && entry.key === "scenes"));
@@ -233,7 +235,8 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
 
   return (
     <div className="node-readable-preview">
-      {viewId === "voice" && !inputPreview ? <VoiceTimingPreview scenes={record.scenes} /> : null}
+      {continuousVoice ? <ContinuousVoiceTimingPreview record={record} />
+        : viewId === "voice" && !inputPreview ? <VoiceTimingPreview scenes={record.scenes} /> : null}
       {primary.length ? <dl className="node-preview-summary">{primary.map((key) => (
         <div key={key}><dt>{fieldLabel(key, viewId)}</dt><dd>{formatScalar(record[key], key)}</dd></div>
       ))}</dl> : null}
@@ -252,6 +255,34 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
       {collections.map((entry) => <CollectionPreview collectionKey={entry.key} items={entry.value} viewId={viewId} key={entry.key} />)}
     </div>
   );
+}
+
+function ContinuousVoiceTimingPreview({ record }: { record: Record<string, unknown> }) {
+  const groups = Array.isArray(record.groups) ? record.groups.map(asRecord).filter((group) => group !== undefined) : [];
+  const rate = record.sampleRate;
+  if (rate !== 44100 || groups.some((group) => !Array.isArray(group.sourceScenePositions)
+    || typeof group.text !== "string" || ![group.startSample, group.endSample, group.unfilledWindowSamples]
+      .every((value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0))) {
+    return <p role="status">旁白时序暂时无法核对，请先试听，不以画面长度推测语音长度。</p>;
+  }
+  const plan = asRecord(record.narrationPlan);
+  const silences = Array.isArray(plan?.silences) ? plan.silences.map(asRecord).filter((silence) => silence
+    && typeof silence.startFrame === "number" && typeof silence.endFrame === "number") : [];
+  const subtitles = asRecord(record.subtitles);
+  return <section className="node-preview-section" aria-label="连贯旁白与画面节奏">
+    <h4>连贯旁白与画面节奏</h4>
+    <p>同组旁白跨镜连续播放，不因切换画面重新起句。请用本页播放器连听全片。</p>
+    <ul>{groups.map((group, index) => <li key={index}>
+      <strong>第 {index + 1} 组 · 镜头 {(group.sourceScenePositions as number[]).join("、")}</strong>
+      <p>{group.text as string}</p>
+      <p>声音从 {((group.startSample as number) / rate).toFixed(1)} 秒到 {((group.endSample as number) / rate).toFixed(1)} 秒；
+        这一段画面仍有 {((group.unfilledWindowSamples as number) / rate).toFixed(1)} 秒未铺旁白。</p>
+    </li>)}</ul>
+    {silences.length ? <p>脚本明确留白：{silences.map((silence) => `${((silence!.startFrame as number) / 30).toFixed(1)}–${((silence!.endFrame as number) / 30).toFixed(1)} 秒`).join("；")}。</p> : null}
+    <p>未铺旁白的时间不包括音频本身的停顿。若空档影响节奏，可返回脚本调整内容或画面时长；系统不会擅自补词、加速或延长素材。</p>
+    <p>{subtitles?.status === "ready" ? "已取得本次配音的句级同步字幕，请在成片中核对。"
+      : "同步字幕未就绪：本版不会烧录猜测的时间字幕。确认继续将生成无同步字幕版本，画面中的必要说明仍保留。"}</p>
+  </section>;
 }
 
 function VoiceTimingPreview({ scenes }: { scenes: unknown }) {

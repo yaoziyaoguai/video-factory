@@ -58,6 +58,7 @@ def write_render_manifest(
                 "duration": scene["duration"],
                 # 与配音一致：纯标点代表留白，不把它印成悬空的字幕。
                 "text": scene["narration"] if any(character.isalnum() for character in scene["narration"]) else "",
+                "on_screen_text": scene.get("on_screen_text") if isinstance(scene.get("on_screen_text"), str) else "",
                 "visual_strategy": scene["visual_strategy"],
                 "visual_prompt": scene["visual_prompt"],
             }
@@ -113,6 +114,13 @@ def attach_voiceover_plan(manifest_path: Path, voiceover_plan: Optional[dict]) -
             raise RuntimeError(
                 f"Voiceover scene {position} does not match the accepted render timeline."
             )
+    if voiceover_plan.get("version") == "video-factory/voiceover-plan-v3":
+        expected_samples = sum(timeline_frame_counts(manifest["slides"])) * 1470
+        if voiceover_plan.get("sampleRate") != 44100 or voiceover_plan.get("totalSamples") != expected_samples:
+            raise RuntimeError("Continuous narration must match the exact accepted render timeline.")
+        # 原来的逐镜长驻文字不是同步字幕。v3 只从全片的真实 cue 绘制，不退回旧字幕。
+        for slide in manifest["slides"]:
+            slide["text"] = slide.get("on_screen_text", "")
     manifest["voiceover_plan"] = voiceover_plan
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -149,7 +157,7 @@ def render_script_video(
         "1:a:0",
         "-vf",
         f"fps=30,format=yuv420p,scale={width}:{height}",
-        "-shortest",
+        *render_audio_duration_options(manifest),
         "-frames:v",
         str(frame_count),
         "-c:v",
@@ -257,7 +265,7 @@ def render_asset_video(
         "0:v:0",
         "-map",
         "1:a:0",
-        "-shortest",
+        *render_audio_duration_options(manifest),
         "-frames:v",
         str(sum(frame_counts)),
         "-c:v",
@@ -726,6 +734,9 @@ def write_concat_file(path: Path, frames: list[tuple[Path, float]]) -> Path:
     for frame_path, duration in frames:
         lines.append(f"file '{escape_concat_path(frame_path)}'")
         lines.append(f"duration {duration:.3f}")
+    # concat demuxer 需要末尾哨兵帧才会兑现最后一张图片的 duration；输出仍由正式帧数封顶。
+    if frames:
+        lines.append(f"file '{escape_concat_path(frames[-1][0])}'")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
@@ -795,6 +806,13 @@ def render_audio_input(manifest: dict) -> list[str]:
         "-i",
         "anullsrc=channel_layout=stereo:sample_rate=44100",
     ]
+
+
+def render_audio_duration_options(manifest: dict) -> list[str]:
+    if manifest.get("voiceover_plan", {}).get("version") == "video-factory/voiceover-plan-v3":
+        # v3 音轨已经按样本校验为完整片长，不以最短输入决定输出结束点。
+        return ["-t", f"{sum(timeline_frame_counts(manifest['slides'])) / RENDER_FPS:.9f}"]
+    return ["-shortest"]
 
 
 def run_atomic_ffmpeg(command: list[str], temporary_output: Path, output_file: Path) -> None:

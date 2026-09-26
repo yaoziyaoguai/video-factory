@@ -55,6 +55,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const [reviewDecisions, setReviewDecisions] = useState<Record<string, { decision: "accept" | "reject" | "accept_risk"; reason: string }>>({});
   const [replanningVoice, setReplanningVoice] = useState(false);
   const [voiceDurationSeconds, setVoiceDurationSeconds] = useState("");
+  const [voiceScenePosition, setVoiceScenePosition] = useState(0);
   const [hasPendingPlanningConfiguration, setHasPendingPlanningConfiguration] = useState(false);
   const [decisionSnapshot, setDecisionSnapshot] = useState<Pick<StudioDecisionInput, "expectedRunRevision" | "interventionId" | "reviewEvidenceId"> & {
     acceptIncomplete?: true;
@@ -105,6 +106,10 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   // 边界停点：这一步已做完、产物已存，只等用户决定是否进入下一步。按钮文案必须按
   // 它真正的后果说话——把中间节点的放行写成「批准进入发布包」会让用户以为点下去就发了。
   const boundaryGate = run.activeIntervention?.boundary === "node-complete";
+  const voiceOutput = run.nodes.find((node) => node.id === "voice")?.output;
+  const voiceWithoutSubtitles = boundaryGate && run.activeIntervention?.nodeId === "voice"
+    && typeof voiceOutput === "object" && voiceOutput !== null && "narrationMode" in voiceOutput
+    && voiceOutput.narrationMode === "continuous_groups" && "subtitleStatus" in voiceOutput && voiceOutput.subtitleStatus !== "ready";
   const boundaryOptions = boundaryGate ? run.activeIntervention?.options ?? [] : [];
   // 停点放行的是下一步，而下一步还没跑、没有任何产物，于是它从前落不进 creatorNodes：
   // 用户看得到「进入下一步」，却找不到地方配置那一步怎么跑——简报之后最典型，创作规划
@@ -132,6 +137,9 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     && run.activeIntervention?.reviewStatus === "incomplete"
     && run.activeIntervention.providerOutcomeKnown === true;
   const voiceTiming = voiceTimingConflict(run);
+  const selectedVoiceCut = voiceTiming?.cuts?.find((cut) => cut.scenePosition === voiceScenePosition);
+  const voiceMinimum = voiceTiming?.groupId ? (selectedVoiceCut ? selectedVoiceCut.frameCount / 30
+    + voiceTiming.requiredSeconds - voiceTiming.plannedSeconds : Infinity) : voiceTiming?.requiredSeconds ?? Infinity;
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
   const singleVisualReview = visualReview?.mode === "single";
   // 停下来的这一步的独立复核进度。SSE 载荷里没有它，由 preferRunSnapshot 从上一帧补回来，
@@ -294,7 +302,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
       interventionId: run.activeIntervention.id,
       reviewEvidenceId: null,
     });
-    setVoiceDurationSeconds(String(voiceTiming.requiredSeconds));
+    setVoiceScenePosition(voiceTiming.groupId ? 0 : voiceTiming.scenePosition);
+    setVoiceDurationSeconds(voiceTiming.groupId ? "" : String(voiceTiming.requiredSeconds));
     setReplanningVoice(true);
   };
 
@@ -621,7 +630,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                         } else openDecision("approve");
                       }}
                     >
-                      <Check aria-hidden="true" size={17} />{contentDecisionNode ? contentDecisionActionLabel : "确认当前步骤，进入下一步"}
+                      <Check aria-hidden="true" size={17} />{voiceWithoutSubtitles ? "查看无同步字幕版并确认" : contentDecisionNode ? contentDecisionActionLabel : "确认当前步骤，进入下一步"}
                     </button>
                   ) : null}
                   {boundaryOptions.includes("reject") ? (
@@ -744,12 +753,21 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               <div><p className="eyebrow">调整统一方案</p><h2 id="voice-timing-title">调整配音时长</h2></div>
               <button className="icon-button" type="button" onClick={closeVoiceTimingDecision} disabled={decisionPending} title="关闭"><X aria-hidden="true" size={19} /></button>
             </header>
-            <p>自然配音需要 {voiceTiming.requiredSeconds} 秒，当前镜头只有 {voiceTiming.plannedSeconds} 秒。接受新时长后，系统会重排统一时间轴并重新检查素材、画面和成片。</p>
+            <p>自然配音需要 {voiceTiming.requiredSeconds} 秒，当前{voiceTiming.groupId ? "整组画面" : "镜头"}只有 {voiceTiming.plannedSeconds} 秒。接受新时长后，系统会重排统一时间轴并重新检查素材、画面和成片。原音频保留；素材不够长时需要重新选材，新增购买仍须确认报价。</p>
+            {voiceTiming.groupId ? <label className="field field-wide"><span>选择要延长的镜头</span>
+              <select value={voiceScenePosition || ""} onChange={(event) => {
+                const position = Number(event.target.value);
+                const cut = voiceTiming.cuts?.find((candidate) => candidate.scenePosition === position);
+                setVoiceScenePosition(position);
+                setVoiceDurationSeconds(cut ? String(Number((cut.frameCount / 30 + voiceTiming.requiredSeconds - voiceTiming.plannedSeconds).toFixed(6))) : "");
+              }}><option value="">请自行选择，不会自动拉长第一镜</option>{voiceTiming.cuts?.map((cut) =>
+                <option key={cut.scenePosition} value={cut.scenePosition}>镜头 {cut.scenePosition}（现长 {(cut.frameCount / 30).toFixed(1)} 秒）</option>)}</select></label> : null}
             <label className="field field-wide">
-              <span>{`镜头 ${voiceTiming.scenePosition} 时长（秒）`}</span>
+              <span>{voiceScenePosition ? `镜头 ${voiceScenePosition} 时长（秒）` : "选中镜头的新时长（秒）"}</span>
               <input
                 type="number"
-                min={voiceTiming.requiredSeconds}
+                min={Number.isFinite(voiceMinimum) ? voiceMinimum : undefined}
+                disabled={!voiceScenePosition}
                 max={180}
                 step="0.001"
                 value={voiceDurationSeconds}
@@ -762,13 +780,14 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               <button
                 className="button button-primary"
                 type="button"
-                disabled={decisionPending || !decisionSnapshot || !Number.isFinite(Number(voiceDurationSeconds)) || Number(voiceDurationSeconds) < voiceTiming.requiredSeconds}
+                disabled={decisionPending || !decisionSnapshot || !voiceScenePosition || !Number.isFinite(Number(voiceDurationSeconds)) || Number(voiceDurationSeconds) < voiceMinimum - 1e-6 || Number(voiceDurationSeconds) > 180}
                 onClick={() => decisionSnapshot && void onDecision({
                   action: "request_changes",
                   ...decisionSnapshot,
                   voiceTiming: {
-                    scenePosition: voiceTiming.scenePosition,
+                    scenePosition: voiceScenePosition,
                     durationSeconds: Number(voiceDurationSeconds),
+                    ...(voiceTiming.groupId ? { groupId: voiceTiming.groupId } : {}),
                   },
                 })}
               ><RotateCcw aria-hidden="true" size={17} />接受新时长并继续制作</button>
@@ -827,6 +846,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               ? <><strong>你确认的是：已看过这份试片意见，愿意按当前方案继续。</strong><span>系统不会重新购买已生成试片；其它尚未生成的素材仍会先依据当前报价和授权处理。</span></>
               : contentDecisionNode
               ? <><strong>{contentDecisionUnaudited ? "你采用的是尚未取得独立审计结论的当前版本。" : contentDecisionHasSuggestions ? "你看过内容建议，决定保留建议并采用当前版本。" : "你采用的是当前已审计版本。"}</strong><span>本次决定会绑定当前文字版本；旧版建议不会自动写入当前稿。质量决定不会替代后续素材和费用确认。</span></>
+              : voiceWithoutSubtitles
+              ? <><strong>本次配音已保存，但同步字幕尚未就绪。</strong><span>你可以选择无同步字幕的版本继续渲染，必要的画面说明仍保留。系统不会用逐镜旁白冒充同步字幕，也不会为补字幕自动重买配音。请先试听整段声音。</span></>
               : boundaryGate
               ? <><strong>放行后这一步的结果就固定下来，制作按现在保存的设置继续往下走。</strong><span>想换模型、参数或输入，请先关掉这个窗口去配置；放行之后要改，就得让这一步连同下游重做。</span></>
               : <><strong>{reviewItems.length > 0
@@ -919,6 +940,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                 ? "正在批准..."
                 : sourceReviewDecision || sourcePreflightDecision || sourceReviewIncompleteRisk ? "确认承担并继续"
                   : contentDecisionNode ? contentDecisionActionLabel
+                  : voiceWithoutSubtitles ? "确认无同步字幕版，进入渲染"
                   : boundaryGate ? "确认放行，进入下一步"
                   : reviewItems.length > 0 ? "逐条表态已完成，生成发布包" : "确认批准并生成发布包"}</button>
             </footer>
@@ -947,6 +969,8 @@ function voiceTimingConflict(run: StudioRunDetail): {
   scenePosition: number;
   plannedSeconds: number;
   requiredSeconds: number;
+  groupId?: string;
+  cuts?: Array<{ scenePosition: number; frameCount: number }>;
 } | undefined {
   if (run.activeIntervention?.nodeId !== "voice"
     || !run.activeIntervention.options.includes("request_changes")) return undefined;
@@ -955,6 +979,16 @@ function voiceTimingConflict(run: StudioRunDetail): {
   const conflict = (node.output as Record<string, unknown>).conflict;
   if (typeof conflict !== "object" || conflict === null || Array.isArray(conflict)) return undefined;
   const value = conflict as Record<string, unknown>;
+  if (value.code === "NARRATION_GROUP_DOES_NOT_FIT" && typeof value.groupId === "string"
+    && typeof value.requiredFrames === "number" && Array.isArray(value.cuts)
+    && typeof value.window === "object" && value.window !== null) {
+    const window = value.window as { startFrame?: unknown; endFrame?: unknown };
+    if (typeof window.startFrame !== "number" || typeof window.endFrame !== "number"
+      || !value.cuts.length || value.cuts.some((cut) => !cut || !Number.isSafeInteger(cut.scenePosition)
+        || !Number.isSafeInteger(cut.frameCount) || cut.frameCount <= 0)) return undefined;
+    return { scenePosition: 0, groupId: value.groupId, cuts: value.cuts,
+      plannedSeconds: (window.endFrame - window.startFrame) / 30, requiredSeconds: value.requiredFrames / 30 };
+  }
   if (value.code !== "VOICE_DOES_NOT_FIT"
     || !Number.isInteger(value.scenePosition)
     || typeof value.plannedSeconds !== "number"

@@ -7882,8 +7882,9 @@ describe("ProductionPipeline", () => {
     assert.equal(receipts[0]?.actualCostCny, 0.1);
   });
 
-  for (const ordinaryRetry of [false, true]) {
-    it(`resumes materialized automatic TTS under the original operation id (${ordinaryRetry ? "ordinary retry with prepared remainder" : "explicit reconciliation"})`, async () => {
+  for (const { ordinaryRetry, grouped } of [{ ordinaryRetry: false, grouped: false }, { ordinaryRetry: true, grouped: false },
+    { ordinaryRetry: false, grouped: true }]) {
+    it(`resumes materialized automatic TTS under the original operation id (${ordinaryRetry ? "ordinary retry with prepared remainder" : "explicit reconciliation"}${grouped ? ", continuous groups" : ""})`, async () => {
       const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-tts-materialized-recovery-"));
       let voiceCalls = 0;
       class InterruptedVoiceWorker extends FakeWorker {
@@ -7902,7 +7903,8 @@ describe("ProductionPipeline", () => {
               } } : {}),
             };
           }
-          return ordinaryRetry ? { ...response, diagnostics: {
+          // 正式 v3 worker 会从原账本返回逐组提交次数，不能用裸 FakeWorker 回包覆盖真实累计数。
+          return ordinaryRetry || grouped ? { ...response, diagnostics: {
             providerOutcomeKnown: true, actualCostCny: 0.1, actualCostSource: "configured_rate", meteredAttemptCount: 2,
           } } : response;
         }
@@ -7932,10 +7934,20 @@ describe("ProductionPipeline", () => {
       assert.ok(operationId);
       const voiceLedgerDirectory = path.join(workspaceRoot, "runs", failed.id, "nodes", "voice", ".voice-operations");
       await mkdir(voiceLedgerDirectory, { recursive: true });
+      const groupFiles = await Promise.all([1, 2].map(async (position) => {
+        const audioPath = path.join(path.dirname(voiceLedgerDirectory), `group-${position}.mp3`);
+        const content = Buffer.from(`verified-group-${position}`);
+        const sha256 = createHash("sha256").update(content).digest("hex");
+        await writeFile(audioPath, content);
+        const metadataPath = `${audioPath}.json`;
+        await writeFile(metadataPath, JSON.stringify({ request: { itemRequestId: `voice-scene-${position}`, synthesisKey: "a".repeat(64) },
+          audio_sha256: sha256, audio_size_bytes: content.length }));
+        return { localPath: audioPath, sha256, sizeBytes: content.length, pendingRawPath: audioPath, metadataPath };
+      }));
       await writeFile(
         path.join(voiceLedgerDirectory, `${createHash("sha256").update(operationId).digest("hex")}.json`),
         `${JSON.stringify({
-          version: "video-factory/paid-operation-v2",
+          version: grouped ? "video-factory/voice-operation-v3" : "video-factory/paid-operation-v2",
           operationId,
           completed: !ordinaryRetry,
           providerId: "minimax-tts-v1",
@@ -7953,11 +7965,13 @@ describe("ProductionPipeline", () => {
             providerId: "minimax-tts-v1",
             modelId: "speech-2.8-turbo",
             parameters: { voice: "female-chengshu", rate: 190, pauseScale: 1 },
-            state: ordinaryRetry && scenePosition === 2 ? "prepared" : "materialized",
+            state: grouped && scenePosition === 1 ? "unknown" : ordinaryRetry && scenePosition === 2 ? "prepared" : "materialized",
             stateHistory: ordinaryRetry && scenePosition === 2 ? ["prepared"] : ["prepared", "unknown", "materialized"],
             localPath: `/tmp/voice-scene-${scenePosition}.mp3`,
             sha256: "a".repeat(64),
             sizeBytes: 10,
+            ...(grouped ? { ...groupFiles[scenePosition - 1], groupId: `narration-${scenePosition}`, synthesisKey: "a".repeat(64),
+              quote: { maxCostCny: 0.05, unitPriceCny: "2.00" }, actualCostCny: 0.05 } : {}),
           })),
         }, null, 2)}\n`,
         "utf8",
@@ -7981,6 +7995,7 @@ describe("ProductionPipeline", () => {
       const receipts = resolved.executionReceipts?.filter((receipt) => receipt.requestId === operationId) ?? [];
       assert.equal(receipts.length, 1);
       assert.equal(receipts[0]?.actualCostCny, 0.1);
+      if (grouped) assert.equal(receipts[0]?.meteredAttemptCount, 2, "two group submissions must not collapse to one operation");
     });
   }
 

@@ -95,6 +95,7 @@ class RecordingWorker {
 
 class VoiceConflictWorker extends RecordingWorker {
   private conflictReturned = false;
+  constructor(private readonly grouped = false) { super(); }
 
   override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
     if (request.capability !== "voice.synthesize" || this.conflictReturned) return super.run(request);
@@ -121,16 +122,22 @@ class VoiceConflictWorker extends RecordingWorker {
         scenePosition: 1,
       },
     };
+    const groupConflict = this.grouped ? {
+      code: "NARRATION_GROUP_DOES_NOT_FIT", groupId: "narration-1", sourceScenePositions: [1, 2, 3],
+      window: { startFrame: 0, endFrame: 945 }, sourceAudioSamples: 1415610, requiredFrames: 963,
+      cuts: [{ scenePosition: 1, startFrame: 0, frameCount: 300 }, { scenePosition: 2, startFrame: 300, frameCount: 300 },
+        { scenePosition: 3, startFrame: 600, frameCount: 345 }], operationId: String(request.commandId), audioArtifact,
+    } : undefined;
     return {
       protocolVersion: "video-factory/worker-v1",
       commandId: String(request.commandId),
       status: "rejected",
       error: {
-        code: "VOICE_DOES_NOT_FIT",
+        code: groupConflict?.code ?? "VOICE_DOES_NOT_FIT",
         message: "Scene 1 requires 10.2s for natural voice but the accepted cut is 10s.",
       },
       output: {
-        conflict: {
+        conflict: groupConflict ?? {
           code: "VOICE_DOES_NOT_FIT",
           scenePosition: 1,
           plannedSeconds: 10,
@@ -195,6 +202,123 @@ function directorAgent(): VisualDirectorAgent {
 }
 
 describe("ProductionPipeline production preflight", () => {
+  for (const mode of ["regular", "group-conflict", "upstream-edit"]) it(`confirms continuous narration before TTS without releasing the current user gate (${mode})`, async () => {
+    const groupedConflict = mode === "group-conflict";
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-narration-confirm-"));
+    const worker = groupedConflict ? new VoiceConflictWorker(true) : new RecordingWorker();
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker,
+      screenwriterAgent: { id: "codex-screenwriter-v1", draft: async () => ({ viewerPromise: "三个动作连成故事", scenes }) },
+      directorAgent: directorAgent(),
+      assetProviders: [{ id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["图库视频"], deliveryTypes: ["stock_video"] }],
+      providerRuntimeMetadata: [{ id: "minimax-tts-v1", label: "MiniMax", modelId: "speech-2.8-turbo", transport: "http_api",
+        billing: "metered", approvalPolicy: "automatic", estimatedCostCny: 0.5, maxAttempts: 1 }],
+    });
+    let run = await pipeline.start({ protocolVersion: "video-factory/brief-v1", title: "三个动作连成故事",
+      angle: "连续叙事", audience: "普通创作者", nicheSlug: "life-actions", durationSeconds: 24,
+      durationRange: { minSeconds: 20, maxSeconds: 34 }, platform: "douyin", runPurpose: "test", reviewMode: "manual",
+      workflowFeatures: { boundaryGates: "user-confirmed-v1", assetSemanticRank: false, referenceGrammar: false },
+      providers: { script: "codex-screenwriter-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1",
+        voice: "minimax-tts-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
+      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      voiceDirection: { profileId: "minimax:female-chengshu", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+    });
+    for (let step = 0; step < 8 && !run.nodeRuns.some((node) => node.nodeId === "assets" && node.status === "needs_human"); step += 1) {
+      const waiting = run.nodeRuns.find((node) => node.status === "needs_human")!;
+      assert.ok(waiting?.intervention, JSON.stringify(run));
+      run = await pipeline.decide(run.id, { interventionId: waiting.intervention.id, action: "approve", actor: "creator",
+        expectedRunRevision: run.revision, reviewEvidenceId: null });
+    }
+    let originalGate = run.nodeRuns.find((node) => node.nodeId === "assets")!.intervention!;
+    assert.ok(originalGate);
+    const preview = await pipeline.previewNarrationPlan(run.id);
+    assert.equal(preview.plan.groups.length, 1);
+    let chosen = structuredClone(preview.plan);
+    chosen.groups[0]!.placement.anchor = "end";
+    let saved = await pipeline.confirmNarrationPlan(run.id, { expectedRunRevision: run.revision, plan: chosen, actor: "creator" });
+    assert.equal(saved.status, "needs_human");
+    assert.deepEqual(saved.nodeRuns.find((node) => node.nodeId === "assets")!.intervention, originalGate);
+    assert.equal(worker.requests.some((request) => request.capability === "voice.synthesize"), false);
+    assert.equal((await pipeline.previewNarrationPlan(run.id)).confirmed, true);
+    await assert.rejects(() => pipeline.confirmNarrationPlan(run.id, { expectedRunRevision: run.revision, plan: chosen, actor: "creator" }), /revision/i);
+    if (mode === "upstream-edit") {
+      const preflight = saved.nodeRuns.find((node) => node.nodeId === "production-preflight")!;
+      const output = preflight.output as { executablePlanPath: string };
+      const changedVisual = JSON.parse(await readFile(output.executablePlanPath, "utf8"));
+      changedVisual.cuts[0].frameCount += 3;
+      for (const cut of changedVisual.cuts.slice(1)) cut.startFrame += 3;
+      changedVisual.totalFrames += 3;
+      const directory = path.join(workspaceRoot, "runs", run.id, "nodes", "production-preflight", "manual-narration-test");
+      await mkdir(directory, { recursive: true });
+      const file = path.join(directory, "executable_plan.json");
+      const content = JSON.stringify(changedVisual);
+      await writeFile(file, content);
+      const original = saved.artifacts.find((artifact) => artifact.uri === output.executablePlanPath)!;
+      await pipeline.applyNodeOverride(run.id, { nodeId: "production-preflight", actor: "creator",
+        expectedVersionId: preflight.outputState!.effectiveVersionId, output: { ...output, executablePlanPath: file },
+        artifacts: [{ ...original, uri: file, sha256: createHash("sha256").update(content).digest("hex"), sizeBytes: Buffer.byteLength(content) }] });
+      saved = await pipeline.resumeStale(run.id);
+      originalGate = saved.nodeRuns.find((node) => node.nodeId === "assets")!.intervention!;
+      await assert.rejects(() => pipeline.decide(run.id, { interventionId: originalGate.id, action: "approve", actor: "creator",
+        expectedRunRevision: saved.revision, reviewEvidenceId: null }), /旁白方案.*变化.*重新/);
+      assert.equal(worker.requests.some((request) => request.capability === "voice.synthesize"), false);
+      const refreshed = await pipeline.previewNarrationPlan(run.id);
+      assert.equal(refreshed.confirmed, false);
+      chosen = refreshed.plan;
+      chosen.groups[0]!.placement.anchor = "end";
+      saved = await pipeline.confirmNarrationPlan(run.id, { expectedRunRevision: saved.revision, plan: chosen, actor: "creator" });
+    }
+    const voiced = await pipeline.decide(run.id, { interventionId: originalGate.id, action: "approve", actor: "creator",
+      expectedRunRevision: saved.revision, reviewEvidenceId: null });
+    assert.equal(voiced.nodeRuns.find((node) => node.nodeId === "voice")?.status, "needs_human", JSON.stringify(voiced));
+    const voiceInput = worker.requests.find((request) => request.capability === "voice.synthesize")!.input;
+    assert.deepEqual(JSON.parse(await readFile(String(voiceInput.narrationPlanPath), "utf8")), chosen);
+    assert.equal(voiced.nodeRuns.some((node) => node.nodeId === "render"), false);
+    if (groupedConflict) {
+      const voiceNode = voiced.nodeRuns.find((node) => node.nodeId === "voice")!;
+      assert.equal((voiceNode.output as { conflict: { code: string } }).conflict.code, "NARRATION_GROUP_DOES_NOT_FIT");
+      assert.deepEqual(voiceNode.intervention?.options, ["request_changes", "reject"]);
+      assert.equal(voiceNode.outcomeUncertain, undefined);
+      await assert.rejects(() => pipeline.requestVoiceTimingRevision(run.id, { expectedRunRevision: voiced.revision,
+        interventionId: voiceNode.intervention!.id, groupId: "narration-1", scenePosition: 4, durationSeconds: 20, actor: "creator" }), /镜头|scene/i);
+      const revised = await pipeline.requestVoiceTimingRevision(run.id, { expectedRunRevision: voiced.revision,
+        interventionId: voiceNode.intervention!.id, groupId: "narration-1", scenePosition: 2, durationSeconds: 10.6, actor: "creator" });
+      assert.equal(revised.status, "needs_human", JSON.stringify(revised.nodeRuns.filter((node) => node.status === "failed")));
+      const output = revised.nodeRuns.find((node) => node.nodeId === "production-preflight")!.output as { executablePlanPath: string };
+      const newVisual = JSON.parse(await readFile(output.executablePlanPath, "utf8"));
+      assert.deepEqual(newVisual.cuts.map((cut: { frameCount: number }) => cut.frameCount), [300, 318, 345]);
+      const newNarration = revised.artifacts.filter((artifact) => artifact.kind === "narration_plan").at(-1)!;
+      const newPlan = JSON.parse(await readFile(newNarration.uri!, "utf8"));
+      assert.equal(newPlan.visualPlan.totalFrames, 963);
+      assert.equal(newPlan.groups[0].placement.anchor, "end");
+      assert.equal(newPlan.groups[0].text, chosen.groups[0]!.text);
+      assert.equal(worker.requests.filter((request) => request.capability === "voice.synthesize").length, 1, "changed materials must stop at their user gate before voice resumes");
+      let resumed = revised;
+      for (let step = 0; step < 4 && worker.requests.filter((request) => request.capability === "voice.synthesize").length < 2; step += 1) {
+        const waiting = resumed.nodeRuns.find((node) => node.status === "needs_human")!;
+        resumed = await pipeline.decide(run.id, { interventionId: waiting.intervention!.id, action: "approve", actor: "creator",
+          expectedRunRevision: resumed.revision, reviewEvidenceId: null });
+      }
+      const restoredVoiceInput = worker.requests.filter((request) => request.capability === "voice.synthesize").at(-1)!.input;
+      assert.equal(restoredVoiceInput.narrationPlanPath, newNarration.uri, "restore must not silently switch back to scene-locked voice");
+    } else if (mode === "regular") {
+      let final = voiced;
+      for (let step = 0; step < 5 && !final.nodeRuns.some((node) => node.nodeId === "final-review" && node.status === "needs_human"); step += 1) {
+        const waiting = final.nodeRuns.find((node) => node.status === "needs_human")!;
+        final = await pipeline.decide(run.id, { interventionId: waiting.intervention!.id, action: "approve", actor: "creator",
+          expectedRunRevision: final.revision, reviewEvidenceId: null });
+      }
+      const changed = await pipeline.requestNarrationRevision(run.id, { expectedRunRevision: final.revision,
+        scenePosition: 2, narration: "把城市的光留在这一刻。", actor: "creator", note: "只改这一句，保留连续声音和画面" });
+      assert.equal(changed.status, "needs_human", JSON.stringify(changed.nodeRuns.filter((node) => node.status === "failed")));
+      const updatedInput = worker.requests.filter((request) => request.capability === "voice.synthesize").at(-1)!.input;
+      assert.ok(updatedInput.narrationPlanPath);
+      const updatedPlan = JSON.parse(await readFile(String(updatedInput.narrationPlanPath), "utf8"));
+      assert.match(updatedPlan.groups[0].text, /把城市的光留在这一刻/);
+      assert.equal(updatedPlan.groups[0].placement.anchor, "end");
+      assert.equal(worker.requests.filter((request) => request.capability === "asset.prepare").length, 1, "a narration edit must not repurchase visuals");
+    }
+  });
+
   it("does not let a new executable-plan production fall back to the legacy timeline", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-missing-preflight-inputs-"));
     const worker = new RecordingWorker();

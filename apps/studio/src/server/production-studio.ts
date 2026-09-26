@@ -36,6 +36,7 @@ import {
   type CodexPreparedOperation,
   type DocumentTaskContext,
   type ProductionBrief,
+  type NarrationPlanPreview,
   type ProductionCreativeReviewConfirmationDraft,
   type ProductionCreativeReviewCommandDraft,
   type ProductionNodeDocumentAuditDraft,
@@ -169,6 +170,8 @@ export interface StudioPipelinePort {
   applyNodeOverride(runId: string, override: NodeOverrideDraft): Promise<WorkflowRun<ProductionBrief>>;
   recordNodeDocumentAudit(runId: string, draft: ProductionNodeDocumentAuditDraft): Promise<WorkflowRun<ProductionBrief>>;
   applyNodeInputOverride(runId: string, override: NodeInputOverrideDraft): Promise<WorkflowRun<ProductionBrief>>;
+  previewNarrationPlan?(runId: string): Promise<NarrationPlanPreview>;
+  confirmNarrationPlan?(runId: string, draft: { expectedRunRevision: number; plan: unknown; actor: string }): Promise<WorkflowRun<ProductionBrief>>;
   applyNodeExecutionConfiguration(
     runId: string,
     nodeId: string,
@@ -1448,6 +1451,7 @@ export class ProductionStudio {
           interventionId: input.interventionId,
           scenePosition: input.voiceTiming.scenePosition,
           durationSeconds: input.voiceTiming.durationSeconds,
+          ...(input.voiceTiming.groupId ? { groupId: input.voiceTiming.groupId } : {}),
           actor,
         });
         const detail = this.toDetail(updated);
@@ -2419,6 +2423,35 @@ export class ProductionStudio {
       effectiveVersion,
       terminalConfirmed,
     };
+  }
+
+  async previewNarrationPlan(runId: string): Promise<NarrationPlanPreview> {
+    const run = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(run);
+    if (!this.options.pipeline.previewNarrationPlan) throw new StudioConflictError("当前制作服务尚不支持连贯旁白方案。");
+    try {
+      return await this.options.pipeline.previewNarrationPlan(runId);
+    } catch (error) {
+      if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
+      throw error;
+    }
+  }
+
+  async confirmNarrationPlan(runId: string, input: { expectedRunRevision: number; plan: unknown }, actor: string): Promise<StudioRunDetail> {
+    const run = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(run);
+    if (!this.options.pipeline.confirmNarrationPlan) throw new StudioConflictError("当前制作服务尚不支持连贯旁白方案。");
+    if (!Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 0) throw new StudioInputError("请先查看最新旁白方案。");
+    try {
+      const updated = await this.options.pipeline.confirmNarrationPlan(runId, { ...input, actor });
+      const detail = this.toDetail(updated);
+      this.publish(detail);
+      return detail;
+    } catch (error) {
+      if (error instanceof StaleRunRevisionError) throw new StudioConflictError("制作记录已更新，请重新查看旁白方案后再确认。");
+      if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
+      throw error;
+    }
   }
 
   async applyNodeInputOverride(

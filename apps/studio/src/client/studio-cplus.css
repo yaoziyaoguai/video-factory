@@ -1464,6 +1464,12 @@ body:has(.studio-v3) {
   .studio-v3 .topic-mode-tab,
   .studio-search-dialog { animation: none !important; transform: none !important; transition-duration: 0.01ms !important; }
 }
+
+.studio-v3 .narration-plan-editor { padding: clamp(16px, 3vw, 28px); margin: 16px 0; border: 1px solid var(--control-border); border-radius: 16px; background: var(--paper); }
+.studio-v3 .narration-plan-editor fieldset { min-width: 0; margin: 18px 0; padding: 16px; border: 1px solid var(--control-border); border-radius: 12px; }
+.studio-v3 .narration-plan-editor legend { font-weight: 650; padding: 0 6px; }
+.studio-v3 .narration-plan-editor p { line-height: 1.75; overflow-wrap: anywhere; }
+.studio-v3 .narration-plan-editor .field { margin-top: 12px; }
 .studio-v3 .project-folio-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .studio-v3 .project-load-more { width: 100%; min-height: 48px; margin-top: 16px; color: var(--muted); background: var(--paper); border: 1px solid var(--line); border-radius: 6px; font-weight: 700; cursor: pointer; transition: color 160ms ease, border-color 160ms ease, transform 160ms ease; }
 .studio-v3 .project-load-more:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-2px); }

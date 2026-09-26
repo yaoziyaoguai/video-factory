@@ -698,13 +698,16 @@ async function auditPublishedStageDraft(
     if (!audit || !identity || !checked.reviewCheck) {
       throw new Error(`Creative review '${stage}' check returned no verifiable audit conclusion (missing audit or checkIdentity).`);
     }
-    if (contentSha256(checked.output) !== current.currentDraft.sha256) {
-      throw new Error(`Creative review '${stage}' check returned a different draft from the requested version.`);
-    }
     // R3-01：结果来源核验——装配层从本次持久化操作回传的绑定必须与发起时一致；
     // 不一致（旧 checkpoint 结果、任何同字节旧结论）不得登记为当前版本的审计。
     if (checked.reviewCheck.auditOperationId !== options.auditOperationId) {
       throw new Error(`Creative review '${stage}' check result does not belong to the requested audit operation.`);
+    }
+    if (contentSha256(checked.output) !== current.currentDraft.sha256) {
+      // 本次已结束的复核未审到原稿：拒收意见与分数，不把审计合同错误判作创作失败。
+      // 仍在处理/异操作的结果在上方或 catch 拒绝；此处只保留用户原稿，显式按未审版本处理。
+      return { planningStop: { reason: "needs_user", issueIds: [],
+        detail: "复核返回的稿件与当前版本不一致，已拒收且未采用该结论。原稿保留，你可以主动重新审计，或明确采用未审版本继续。" } };
     }
     return { creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
       versionId: current.currentDraft.versionId,

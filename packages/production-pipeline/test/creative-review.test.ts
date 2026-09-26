@@ -397,7 +397,7 @@ describe("three-stage creative review gates", () => {
       && staleUncertain.sourceError.stage === "uncertain", "sourceError 引用与 uncertain 状态保持");
   });
 
-  it("rejects an audit result for different draft bytes before binding it to the current version", async () => {
+  it("rejects different draft audit bytes while preserving the creator's current unaudited draft", async () => {
     const otherTreatment = { ...treatment, payoff: "另一份稿件的结尾" };
     const graph = createCreativePlanningGraph({ checkpointer: new MemorySaver(), ports: {
       treatment: async context => context.creativeReviewExecution?.mode === "check"
@@ -413,10 +413,13 @@ describe("three-stage creative review gates", () => {
       compile: executablePlanCompilePort,
     } });
     const input = { runId: "wrong-draft-audit", inputDigest: "wrong-draft-audit", durationRange: { minSeconds: 20, maxSeconds: 30 }, creativeReview: CREATIVE_REVIEW_FEATURE };
-    await assert.rejects(
-      runCreativePlanning(graph, { input, threadId: planningThreadId(input.runId, input.inputDigest) }),
-      /different draft|稿件.*不一致/,
-    );
+    const outcome = await runCreativePlanning(graph, { input, threadId: planningThreadId(input.runId, input.inputDigest) });
+    assert.equal(outcome.status, "waiting_user");
+    const stage = outcome.state.creativeReview!.stages.treatment;
+    assert.deepEqual(stage.currentDocument, treatment);
+    assert.equal(stage.checkResult, null, "不得把其他稿件的90分当作当前稿件的结论");
+    assert.equal(stage.auditHistory.length, 0);
+    assert.match(outcome.state.planningStop!.detail, /不一致.*未采用/);
   });
 
   it("lets the creator adopt a valid draft after a settled check failure without inventing a score", async () => {

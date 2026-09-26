@@ -636,13 +636,27 @@ def _prepare_minimax_audio_request(
     api_key: Optional[str] = None,
     model: Optional[str] = None,
     base_url: Optional[str] = None,
+    subtitle_enable: bool = False,
 ) -> Request:
     key = api_key or os.environ.get("MINIMAX_API_KEY")
     if not key:
         raise RuntimeError("The minimax voice provider requires MINIMAX_API_KEY.")
     endpoint = (base_url or os.environ.get("MINIMAX_TTS_BASE_URL") or "https://api.minimaxi.com/v1").rstrip("/")
-    payload = {
-        "model": model or os.environ.get("MINIMAX_TTS_MODEL_ID") or "speech-2.8-turbo",
+    payload = _minimax_audio_payload(text, voice, rate, pause_scale,
+                                     model or os.environ.get("MINIMAX_TTS_MODEL_ID") or "speech-2.8-turbo",
+                                     subtitle_enable=subtitle_enable)
+    return Request(
+        f"{endpoint}/t2a_v2",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+
+
+def _minimax_audio_payload(text: str, voice: str, rate: int, pause_scale: float, model: str,
+                           *, subtitle_enable: bool = False) -> dict[str, Any]:
+    return {
+        "model": model,
         "text": minimax_directed_text(text, pause_scale),
         "stream": False,
         "voice_setting": {
@@ -659,17 +673,13 @@ def _prepare_minimax_audio_request(
         },
         "language_boost": "Chinese",
         "output_format": "hex",
-        "subtitle_enable": False,
+        "subtitle_enable": subtitle_enable,
+        **({"subtitle_type": "sentence"} if subtitle_enable else {}),
     }
-    return Request(
-        f"{endpoint}/t2a_v2",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        method="POST",
-    )
 
 
-def _execute_minimax_audio_request(request: Request, output_path: Path) -> Path:
+def _execute_minimax_audio_request(request: Request, output_path: Path, metadata_path: Optional[Path] = None,
+                                   response_binding: Optional[dict[str, Any]] = None) -> Path:
     try:
         with urlopen(request, timeout=90) as response:
             response_bytes = response.read()
@@ -713,6 +723,13 @@ def _execute_minimax_audio_request(request: Request, output_path: Path) -> Path:
     except ValueError as error:
         raise RuntimeError("MiniMax speech synthesis returned invalid hex audio.") from error
     _write_bytes_durably(output_path, audio)
+    if metadata_path is not None:
+        _write_json_durably(metadata_path, {
+            "request": response_binding,
+            "audio_sha256": hashlib.sha256(audio).hexdigest(), "audio_size_bytes": len(audio),
+            "trace_id": result.get("trace_id"), "extra_info": result.get("extra_info"),
+            "subtitle_file": (result.get("data") or {}).get("subtitle_file"),
+        })
     return output_path
 
 

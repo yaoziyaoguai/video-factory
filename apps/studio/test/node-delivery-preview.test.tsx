@@ -5,6 +5,25 @@ import { describe, expect, it } from "vitest";
 import { NodeDeliveryPreview } from "../src/client/components/NodeDeliveryPreview.js";
 
 describe("NodeDeliveryPreview", () => {
+  it("shows continuous narration groups and real empty windows without inventing per-scene timing or subtitles", () => {
+    const { container } = render(<NodeDeliveryPreview nodeId="voice" value={{
+      version: "video-factory/voiceover-plan-v3", duration: 20, sampleRate: 44100,
+      narrationPlan: { silences: [{ startFrame: 300, endFrame: 420 }] },
+      groups: [{ id: "narration-1", text: "城市一直亮着，只是平时没看见。", sourceScenePositions: [1, 2],
+        window: { startFrame: 0, endFrame: 300 }, sourceAudioSamples: 264600, startSample: 44100, endSample: 308700,
+        unfilledWindowSamples: 176400, rawAudioPath: "/private/raw.mp3", rawAudioSha256: "a".repeat(64) }],
+      scenes: [{ position: 1, duration: 5 }, { position: 2, duration: 5 }, { position: 3, duration: 4 }],
+      subtitles: { status: "unavailable", cues: [], reason: "internal_provider_error" },
+    }} />);
+    expect(screen.getByRole("region", { name: "连贯旁白与画面节奏" })).toBeInTheDocument();
+    expect(screen.getByText(/镜头 1、2/)).toBeInTheDocument();
+    expect(screen.getByText(/声音从 1.0 秒到 7.0 秒/)).toBeInTheDocument();
+    expect(screen.getByText(/这一段画面仍有 4.0 秒未铺旁白/)).toBeInTheDocument();
+    expect(screen.getByText(/脚本明确留白：10.0–14.0 秒/)).toBeInTheDocument();
+    expect(screen.getByText(/同步字幕未就绪/)).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/private|Sha256|internal_provider_error|补齐画面的静音/);
+    expect(screen.queryByRole("heading", { name: /分镜/ })).not.toBeInTheDocument();
+  });
   it("shows inserted silence separately from authored silent scenes without changing the cut", () => {
     render(<NodeDeliveryPreview nodeId="voice" value={{ duration: 20, scenes: [
       { position: 1, narration: "别急着喝。", duration: 10, speech_duration: 4.5 },

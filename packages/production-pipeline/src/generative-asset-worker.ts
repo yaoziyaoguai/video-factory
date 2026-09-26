@@ -22,9 +22,11 @@ import { ProviderRequestRejectedError } from "./provider-request-error.js";
 import type { AssetPilotReviewer } from "./asset-pilot-review.js";
 import { visualReviewBlocksContinuation } from "./codex-visual-review.js";
 import { quantizeDurationsToFrames } from "./executable-timeline.js";
+import type { NarrationSpendQuote, NarrationSpendRequest } from "./narration-plan.js";
 
 interface WorkerClient {
   run(request: Record<string, unknown>): Promise<WorkerResponse>;
+  forecastPaidVoiceSpend?(request: NarrationSpendRequest): Promise<NarrationSpendQuote | undefined>;
 }
 
 export interface VideoGenerationAdapterBinding {
@@ -311,6 +313,9 @@ const KNOWN_FREE_ASSET_PROVIDERS = new Set([
 ]);
 
 export class GenerativeAssetWorkerClient implements WorkerClient {
+  async forecastPaidVoiceSpend(request: NarrationSpendRequest): Promise<NarrationSpendQuote | undefined> {
+    return this.options.fallback.forecastPaidVoiceSpend?.(request);
+  }
   private readonly adapters = new Map<string, VideoGenerationAdapterBinding>();
   private readonly imageAdapters = new Map<string, ImageGenerationAdapterBinding>();
   private readonly fetch: FetchLike | undefined;

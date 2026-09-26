@@ -51,6 +51,7 @@ export interface StudioVoicePreviewInput {
 }
 
 export type StudioVoiceDirection = Omit<StudioVoicePreviewInput, "text">;
+export type { NarrationPlan as StudioNarrationPlan, NarrationPlanPreview as StudioNarrationPlanPreview } from "@video-factory/production-pipeline";
 
 export type StudioProductionRecipeId = "economy-daily" | "free-stock" | "keyshot-ai" | "cinematic-ai" | "custom";
 
@@ -2105,6 +2106,7 @@ export type StudioDecisionInput = StudioDecisionInputBase & (
     voiceTiming?: {
       scenePosition: number;
       durationSeconds: number;
+      groupId?: string;
     };
   }
   | {
@@ -2536,7 +2538,7 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
         throw new StudioInputError("调整配音方案时必须填写镜头和新时长。");
       }
       const timing = input.voiceTiming as Record<string, unknown>;
-      if (Object.keys(timing).some((field) => field !== "scenePosition" && field !== "durationSeconds")) {
+      if (Object.keys(timing).some((field) => field !== "scenePosition" && field !== "durationSeconds" && field !== "groupId")) {
         throw new StudioInputError("配音时长调整包含不支持的字段。");
       }
       if (!Number.isSafeInteger(timing.scenePosition) || Number(timing.scenePosition) < 1) {
@@ -2546,9 +2548,13 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
         || timing.durationSeconds <= 0 || timing.durationSeconds > 180) {
         throw new StudioInputError("配音镜头时长必须大于 0 秒且不超过 180 秒。");
       }
+      if (timing.groupId !== undefined && (typeof timing.groupId !== "string" || !/^narration-[1-9]\d*$/.test(timing.groupId))) {
+        throw new StudioInputError("连续旁白分组编号不正确，请重新打开当前方案。");
+      }
       voiceTiming = {
         scenePosition: Number(timing.scenePosition),
         durationSeconds: timing.durationSeconds,
+        ...(typeof timing.groupId === "string" ? { groupId: timing.groupId } : {}),
       };
     }
   } else if (input.voiceTiming !== undefined) {

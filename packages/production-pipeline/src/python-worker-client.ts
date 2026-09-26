@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
+import type { NarrationSpendQuote, NarrationSpendRequest } from "./narration-plan.js";
 import { WORKER_PROTOCOL_VERSION } from "./contracts.js";
 import { diagnosticEvent } from "./diagnostics.js";
 
@@ -66,6 +68,23 @@ export class PythonWorkerClient {
     if (!Number.isInteger(options.timeoutMs) || options.timeoutMs < 1) {
       throw new Error("Python worker timeoutMs must be a positive integer.");
     }
+  }
+
+  async forecastPaidVoiceSpend(request: NarrationSpendRequest): Promise<NarrationSpendQuote> {
+    const response = await this.run({ protocolVersion: WORKER_PROTOCOL_VERSION, commandId: "voice-quote-only",
+      runId: request.runId, nodeRunId: "voice", attempt: 1, capability: "voice.quote",
+      outputDir: path.join(request.nodeDirectory, ".quote-preview"), input: request.input, parameters: request.parameters });
+    const value = response.output;
+    if (response.status !== "succeeded" || !value || value.source !== "configured_rate"
+      || ![value.estimatedCostCny, value.maxCostCny].every((cost) => typeof cost === "number" && Number.isFinite(cost) && cost >= 0)
+      || !["2.00", "3.50"].includes(String(value.unitPriceCny)) || !Array.isArray(value.items)
+      || value.items.some((item) => !item || typeof item.groupId !== "string" || !Number.isSafeInteger(item.estimatedUnits)
+        || item.estimatedUnits < 0 || typeof item.maxCostCny !== "number" || !Number.isFinite(item.maxCostCny)
+        || item.maxCostCny < 0 || typeof item.reused !== "boolean")
+      || Math.abs(value.items.reduce((sum, item) => sum + item.maxCostCny, 0) - Number(value.maxCostCny)) > 0.000001) {
+      throw new Error("无法核对连续旁白的逐组费用，请先检查配音服务与原任务账本。");
+    }
+    return value as unknown as NarrationSpendQuote;
   }
 
   async run(request: Record<string, unknown>): Promise<WorkerResponse> {

@@ -4259,7 +4259,22 @@ describe("Studio client", () => {
     expect(screen.queryByRole("button", { name: "去配置「创作规划」" })).not.toBeInTheDocument();
   });
 
-  it("offers the voice timing intervention action instead of publish approval", async () => {
+  it("asks the creator explicitly before rendering continuous narration without synchronized subtitles", async () => {
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const run: StudioRunDetail = { ...runDetail, activeIntervention: { id: "voice-ready", nodeId: "voice",
+      boundary: "node-complete", reason: "配音完成，等你试听", options: ["approve", "reject"], createdAt: runDetail.startedAt },
+      nodes: [...runDetail.nodes.filter((node) => node.id !== "voice"), { ...runDetail.nodes[0]!, id: "voice", label: "配音",
+        status: "needs_human", output: { narrationMode: "continuous_groups", subtitleStatus: "unavailable" } }] };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
+    await userEvent.click(screen.getByRole("button", { name: "查看无同步字幕版并确认" }));
+    expect(onDecision).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/不会用逐镜旁白冒充同步字幕/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "确认无同步字幕版，进入渲染" }));
+    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({ action: "approve", interventionId: "voice-ready" }));
+  });
+
+  for (const grouped of [false, true]) it(`offers the voice timing intervention action instead of publish approval (grouped ${grouped})`, async () => {
     const user = userEvent.setup();
     const onDecision = vi.fn().mockResolvedValue(undefined);
     const { videoArtifactId: _videoArtifactId, ...runWithoutVideo } = runDetail;
@@ -4279,7 +4294,11 @@ describe("Studio client", () => {
         label: "配音",
         role: "声音导演",
         status: "needs_human",
-        output: { conflict: {
+        output: { conflict: grouped ? {
+          code: "NARRATION_GROUP_DOES_NOT_FIT", groupId: "narration-1", sourceScenePositions: [1, 2],
+          window: { startFrame: 0, endFrame: 600 }, sourceAudioSamples: 970200, requiredFrames: 660,
+          cuts: [{ scenePosition: 1, startFrame: 0, frameCount: 240 }, { scenePosition: 2, startFrame: 240, frameCount: 360 }],
+        } : {
           code: "VOICE_DOES_NOT_FIT",
           scenePosition: 1,
           plannedSeconds: 8,
@@ -4296,14 +4315,18 @@ describe("Studio client", () => {
     expect(screen.queryByRole("button", { name: /批准|发布包/ })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "调整方案" }));
     const dialog = screen.getByRole("dialog", { name: "调整配音时长" });
-    expect(within(dialog).getByLabelText("镜头 1 时长（秒）")).toHaveValue(8.2);
+    if (grouped) {
+      expect(within(dialog).getByRole("button", { name: "接受新时长并继续制作" })).toBeDisabled();
+      await user.selectOptions(within(dialog).getByLabelText("选择要延长的镜头"), "2");
+      expect(within(dialog).getByLabelText("镜头 2 时长（秒）")).toHaveValue(14);
+    } else expect(within(dialog).getByLabelText("镜头 1 时长（秒）")).toHaveValue(8.2);
     await user.click(within(dialog).getByRole("button", { name: "接受新时长并继续制作" }));
     expect(onDecision).toHaveBeenCalledWith({
       action: "request_changes",
       expectedRunRevision: 4,
       interventionId: "voice-timing-1",
       reviewEvidenceId: null,
-      voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
+      voiceTiming: grouped ? { scenePosition: 2, durationSeconds: 14, groupId: "narration-1" } : { scenePosition: 1, durationSeconds: 8.2 },
     });
   });
 
