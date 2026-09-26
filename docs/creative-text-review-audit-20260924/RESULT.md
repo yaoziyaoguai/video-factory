@@ -1,6 +1,68 @@
 # 创作文字交付「初稿审一次」实施结果（执行者填写）
 
-当前状态：`IN_PROGRESS（S4 四类交付全链 + S6 确定性验收 + 受控 QA 部分完成。Oracle r13 裁决：PASS / SCOPED_CONVERGED——R11-V01、R11-V02、R11-E01 CLOSED，R9-01 联动回归收口结束，本轮阻断整改循环关闭。放行仅涵盖创作规划审计链的操作身份绑定、旧绑定不改签、异常归属拒收、uncertain 优先传播及异常引用保持与相关确定性回归；不涵盖 W3/W5、reference-grammar 产品裁决、适配器完整回执绑定增强、Provider 全候选耗尽 P2、部署或项目整体验收。总体仍 IN_PROGRESS）`。工作树 66 modified + 19 untracked（85 项）全部保留。未 commit/push/deploy。
+当前状态：`LOCAL_VERIFIED（2026-09-26 接手收尾的任务②③④均完成。基线 main / 0e5f615，保留原有修改。最终完整 npm test exit 0；W3/W5 恢复和 QA③空范围停点受控浏览器复验通过，证据已归档并经只读脚本复核。仅本地提交，不 push、不部署、不调用真实付费模型，暂停 oracle-web 外部复审。真实外部模型和完整视频 E2E 未验证；旧 r13 PASS / SCOPED_CONVERGED 仅针对其当轮范围，不代表本轮增量或项目整体验收。）`
+
+## 2026-09-26 收尾交接（停止点与下一执行者路径）
+
+**基线与交付定位**：`main / 0e5f615`（R3→r13 收敛点）。接手时已有 reference-grammar.ts / index.ts / reference-grammar-agent.test.ts 与本文修改，全部保留并纳入本次收尾。最终交付为包含本节及 `qa-20260926/` 证据的本地提交（提交主题 `fix: close creative text review delivery and recovery`），不推送。QA 替身环境端口为 stub 4390 / broker socket `/tmp/vf-qa/broker.sock` / studio 4318 / web 4319，后续使用前核对进程和构建版本。
+
+**用户已批准的任务清单与进度**：
+
+| # | 任务 | 状态 |
+| --- | --- | --- |
+| ① | 本地提交冻结收敛点（不 push） | ✅ `0e5f615` |
+| ② | reference-grammar 补齐 AI 修订+主动再审+历史（产品裁决选 b：与其他四类交付对齐） | ✅ 实现及完整回归通过；同时修正 publish 再审误换稿/失效下游偏差 |
+| ③ | Provider 全候选耗尽 P2（r13 登记的 B08 语义缺口） | ✅ 全部原始 failures 确定结束才登记 incomplete；真实 Pipeline 六例通过 |
+| ④ | W3/W5 恢复窗口 + QA ③ 返工空范围浏览器演示 | ✅ W3/W5 PASS；QA③真实编剧提前拒收范围冲突已修，同一受控 run 浏览器复验 PASS |
+
+**任务②已完成部分（先红后绿，全部验证过）**：
+
+- `packages/production-pipeline/src/reference-grammar.ts`：导出 `REFERENCE_GRAMMAR_AUDIT_CRITERIA`（首审/再审同一套标准，analyzeDetailed 原内联 criteria 改为引用它）；新增 `ReferenceGrammarRevisionInput` / `ReferenceGrammarAuditInput` / `ReferenceGrammarAuditExecution` 类型与接口方法 `revise?` / `auditCurrent?`；`CodexReferenceGrammarAgent.revise()`=单次 `reference-grammar` 任务经 revision 通道携带 `{instruction, currentGrammar}`（指令 1–4000 字门禁、越界零调用、输出过 `validateShotGrammar`）；`auditCurrent()`=单次 `role-audit` 携带同一套 criteria + `referenceAuditContext`（从 analyzeDetailed 抽出的共享证据上下文，含关键帧 upstreamFacts/images）+ 当前精确报告，输出过 `validateRoleAudit`。**注意**：参考片分析师的审计维度是报告型四维（evidence/coverage/consistency/actionability），不是创作型四维——测试夹具已按此构造。
+- `packages/production-pipeline/src/index.ts`：补导出新符号（已有导出块之外新增，无重复）。
+- `packages/production-pipeline/test/reference-grammar-agent.test.ts`：新增 describe「reference grammar revision and re-audit (S4/reference-grammar)」4 例——修订恰好一次产稿零审计（payload 携带指令与当前报告全文）、越界指令零调用、再审恰好一次 role-audit（criteria 深比较=criteria 常量、candidate 深比较=当前报告、upstreamFacts/images 在场、结论过校验）、非法审计输出拒绝。
+- 验证：该文件 7/7 exit 0；`npm run typecheck` exit 0；`production-pipeline.test.ts` 119/119 exit 0（消费方无回归）。broker 侧无需改动：`REFERENCE_GRAMMAR_DIRECTIVE` 已含 revision 规则、reference-grammar 无输入字段白名单。
+
+**接手主动审计与任务②当前证据（2026-09-26）**：
+
+- 发现既有 publish-package 再审走 `applyNodeOverride`，会换稿并使下游失效，偏离 A05；没有照搬。新增 `ProductionPipeline.recordNodeDocumentAudit` 持锁核对 run/version/stale，只追加本版完整审计记录，不换稿、不推进。publish/reference 共用此边界。
+- reference 修订/再审复用正式参考片分析 agent；每次先核参考片所属目录、SHA、字节数与格式，修订新文件不可变且未审，零自动审计。
+- 真实 Pipeline 集成已证明同稿再审两次后修订、再审新稿可连续使用；先红：仅发布文案支持、再审导致旧 version 冲突、再审后新稿托管审计字段校验失败。对应原因均已修复，旧稿与旧审计保持。
+- UI 先红后绿修正换稿后旧建议仍被索引选中、旧输入悄悄绑定新稿；保留草稿但要求明确改投当前稿。新增本版历次审计折叠回看，技术身份不展示。
+- 聚焦 UI 59/59、服务端 10/10、typecheck 均 exit 0（`/tmp/vf-20260926-task2-{ui,server,typecheck}.log`）。完整 `npm test` exit 0（`/tmp/vf-20260926-full-test.log`）：TS 1072 pass/0 fail/1 既有 skip，Broker 265/265，Studio Vitest 552/552，Studio node 645/645，package 4/4，包含 typecheck+正式 build。上述证据对应任务②③完成时的工作树；后续恢复修复需重新验证。
+- 下文“任务②接手时路径”是历史导航，以上当前进展覆盖其未开始描述；适配器侧完整回执绑定增强仍是 r13 单列非阻断留项（当前使用装配层宿主注入的绑定），不由本次元数据修复宣称闭合。
+
+**任务②接手时路径（保留导航）**：
+
+1. `apps/studio/src/server/production-studio.ts`：`reviseNodeDocument` / `auditNodeDocumentCurrent` 目前 `nodeId !== "publish-package"` 即拒——放开 `reference-grammar`；新增 `referenceGrammarTools?: {revise, auditCurrent}` 选项（类型镜像 `StudioDocumentCopyTools`）；`prepareNodeDocumentContext` 对 reference-grammar 分支（`extractPublishCopy` 会对 grammar JSON 抛错，需按节点分支；narrations 只属于 publish）。修订调用需要参考视频：从 run artifacts 找 `kind === "reference_video"` 且有 uri 的产物， containment 校验后作 videoPath，帧提取目录建议 `nodes/reference-grammar/model-revisions/frames-<uuid>/`（失败清理、成功保留作证据）；sourceLabel 取 brief.referenceVideo.label，建议按 reference.sha256 复核视频字节。修订产物走既有 `prepareDocumentOverride({revisionSource: "model-revision"})`（`EDITABLE_DOCUMENTS` 已有 reference-grammar 合同：pathField `referenceGrammarPath`/kind `shot_grammar`/embeddedField `grammar`，contentReview=not_audited 分支已含该节点）。再审走 `auditNodeDocumentCurrent` 模式（contentReview 更新+auditId/auditedAt/score，稿不变零新产物）。
+2. `apps/studio/src/server/main.ts`：`referenceGrammarAgent` 已实例化（auditedTaskClient + reviewMedia）——把它传给 StudioService 作 `referenceGrammarTools`（与首审同一 agent，同一模型配置）。
+3. `apps/studio/src/client/components/NodeWorkspace.tsx` 约 649 行：`NodeDocumentCommands` 渲染条件从 `node.id === "publish-package"` 扩到含 `reference-grammar`（`onReviseDocument`/`onAuditDocument` 与 API/RunPage 已按 nodeId 泛化，无需改）。
+4. 测试（先红）：`apps/studio/test/node-document-revision.test.ts` 加 reference-grammar 修订/再审服务端用例；`node-workspace.test.tsx` 加命令区渲染断言。完成后跑三件套+完整 `npm test`，并把本文件 A02 的 reference-grammar CONTRACT_CONFLICT 改为「已按产品裁决 b 实施闭合」。
+
+**任务③结果**：`ModelCandidatesExhaustedError.failures` 才保存原始异常（`attempts` 仅展示摘要，已修正交接中的误述）。规划审计消费边界逐候选核对可切换 Provider 错误与 `completed_failure/not_accepted`，任何 uncertain/conflict/rejected/缺失状态/旧操作绑定均不转 incomplete；通用 fallback 合同未修改。真实 Pipeline 先红后绿六例（`/tmp/vf-20260926-task3-{red,targeted}.log`），并纳入上面的完整回归。
+
+**任务④排查历史（2026-09-26，修复前；后续结果见下一段）**：
+
+- 受控样例 `run-45465ebc-f8be-40ca-ae72-94a75af178c3`，真实 Studio/Broker/持久化，Provider 为本地替身。隔离环境未读取 `.env`，Node HTTP/fetch 非回环被阻止；未调用真实模型/媒体，新增费用 0。
+- W3 PASS：`fd363fff-a3a7-459d-a1c2-283fa8024865` / `agent-d8fa6b6c86946f9b3063238b120984d01f4d2bd5dbb07906b10eb3e8e75c2095`。Studio 运行中被终止后 Broker 完成原任务，重启恢复到人工停点；命令 completed、同稿审计历史仅 +1、原请求仅一次，未进入下游。
+- W5：透明代理仅在真实 Broker 已返回 202 后丢弃回包及同 ID 查询回包；客户端真实进入 `accepted_unknown`，零新请求。释放原响应后经浏览器“查询原任务→取回结果并继续”恢复，当前稿不变、history +1；但原命令 `6e5f966f-2847-4ac8-891b-fd2a2b739518` 仍 failed。证据位于 `output/playwright/creative-review-20260926/W5-*`，不得标整项通过。
+- 当时根因及修复路径：`ProductionPipeline.dispatchRetryFailedNode()` 取回原任务后直接返回，未像 `dispatchCreativeReviewCommand()` 重放路径一样收口对应命令回执。随后已先写真实 Pipeline 失败测试，按当前恢复操作/目标稿/结果身份精确更新，不批量改历史失败记录；独立 W5 与 QA③最终结果见下。
+
+**任务④修复与最终验证（含 12:40 后的收尾）**：
+
+- 恢复回执已修：按 `continuationOperation` 的 commandId/action/requestDigest 恢复同一 `resume`；恢复期间回执先记 running，重复中断仍保留命令关联，图返回后仅收口对应回执。真实 Pipeline 用例先后复现终态未收口、二次中断丢身份、恢复中仍 failed 三个窗口并修复；聚焦 138/138、完整 npm test exit 0（`/tmp/vf-20260926-final-npm-test.log`，该轮尚不含下条新发现修复）。
+- W5 修后独立操作 `257a059a-1ae7-4ca9-b25c-33c6f2bf85df` / `agent-8f341a2a68efaca4273210006089423297f1627074bd8a07e8f8dcaf3ec87b28`：浏览器真实 unknown→查询→取回，命令 completed，Provider 审计 +1、产稿 +0、history +1，版本/决定/下游不变，所有旧回执不变；刷新和 Studio 重启后快照一致。证据 `W5-fixed-*`。
+- QA③源 `run-f6b837f1-324f-4d87-aceb-0708ab5c58c4`、返工 `run-e48e740c-6169-4747-bd23-25b622c30e8c`：通过公开 Pipeline/Studio 接口建立去标识化历史样例（源七镜、媒体 worker 在物化前拒绝；历史空范围通过底层入口重现，不冒充新建页正常放行）。子样例的人工作用均由浏览器按钮完成，不写 run.json。最初替身漏 Broker 必填字段，已修测试数据且保留失败；随后正式编剧适配层的空范围检查将合法越界候选重试两次后判 failed，证实原角色替身测试没有覆盖这一层。
+- 新根因修复：joint 的 `planningMode + creativeReviewExecution=draft` 在角色层只核结构，范围由已有图层在采用前核验并保留旧稿/越界提案；旧非人工定稿调用保留严格合并/拒绝。脚本全片承诺/叙事/事实也纳入宿主范围核验，避免移动校验后漏掉顶层意图。`production-planning-closure` 新增真实 `CodexScreenwriterAgent` 链路先红后绿，确证一产稿零自动修复/审计、旧七镜仍有效、五镜候选只作提案、媒体未启动。
+- 该增量之后已完成：新范围修复的完整 `npm test` exit 0（`/tmp/vf-20260926-final-scope-npm-test.log`）：TS 1075 pass / 0 fail / 1 既有 skip，Broker 265/265，Studio Vitest 552/552，Studio node 645/645，package 4/4，typecheck + 正式 build 全部通过。`graphify update .` exit 0，更新 7077 节点 / 16775 边；因超过 5000 节点跳过 HTML 可视化，不影响索引更新。
+- QA③最终 PASS：同一返工 run 恢复到 `needs_human` 的脚本停点，七镜旧稿全文保持、五镜新候选仅作提案，`scopeConflict` 覆盖镜头 1–7；恢复命令 completed，素材/配音/渲染未启动，音视频产物为 0。浏览器截图 `QA3-scope-stop.png` 显示范围提示、返回来源修改范围入口及“采用本版（未审计）”。未点击进入媒体阶段。
+- 范围复验中的一次身份拒收也已记录：曾试验性提高 `SCREENWRITER_AGENT_CONTRACT_VERSION`，既有线程正确拒绝恢复且模型零调用；因本次没有改变请求/输出协议，最终保持原 v20 身份后恢复成功，不修改历史 run。测试夹具缺字段导致的 422、产品提前判失败、身份拒收和最终通过分别保留，不混为一次成功。
+- 证据已归档到 [`qa-20260926/README.md`](qa-20260926/README.md)，含最终全量日志、故障红绿日志、截图、原始快照、请求计数和只读复核脚本。`node qa-20260926/verify-evidence.mjs`（相对此文目录）exit 0，W3/W5/QA③均通过。A02 和实施合同按用户裁决 b 同步闭合。真实成片、外部 Provider 可用性和适配器侧完整回执绑定增强仍不在本轮完成声明内。
+
+**任务④要求**：W5 需 broker 受理状态故障注入（替身 `/control` 已支持延迟/失败注入，需加「受理后不响应」模式）；W3 与 W1/W2 共享观察机制，按 EXECUTION_PACKAGE-ORACLE-r2.md 的 W1-W5 矩阵补证据；QA ③ 为返工空范围样例在真实浏览器停人的演示（C01–C04 已有确定性证据）。
+
+**约定**：oracle-web 外部复审按用户指示暂停（验证=本地确定性测试+受控 QA）；只本地提交不 push。QA 环境仍为独立 `/tmp/vf-qa`；后续使用前核对进程和构建版本；如需停止，先按端口/socket 核对 PID、命令和工作目录再精确终止，禁止宽泛 `pkill -f`。
+
+**验证缺口**：本轮未运行真实外部模型、媒体/TTS/渲染/成片审片，不宣称项目整体或付费 E2E 通过。浏览器规划建立前的 history 404、重启时的连接错误已如实记录，不声称 console 零错误。独立 `pytest` 本轮未重跑（无 Python 源码改动）；新增费用 `¥0.00`。以下按日期分节的记录是历史，不把其中旧“未开始/待确认”重新解释为当前计划。
 
 ## 2026-09-25 接手基线（Claude Code，先验证后实施）
 
@@ -29,7 +91,7 @@
 - **Studio 层**（`trend-studio.ts`）：`reviseCandidate(candidateId, expectedGenerationId, instruction)`——stale 校验（用户所见候选包版本不符即拒）；修订候选 `auditStatus:"not_audited"` + `revisedFrom` 溯源 + 独立 `generationId`，原子持久化进候选缓存，原候选与其审计状态不变。红绿证据：`trend-studio.test.ts` 新增 2 例（17/17 exit 0）。
 - **API/UI**：`POST /api/trend-candidates/revise`、client API、热点看板候选卡"修订"入口（展开输入、发送后提示"修订稿以本版未审进入收件箱"）。红绿证据：`hot-topic-board.test.tsx` 新增 2 例（5/5 exit 0）。
 
-### 本轮未完成（不得标 PASS）
+### 2026-09-25 当时未完成（历史记录，已被后续 S6 / R3–r13 / 顶部收尾状态替代）
 
 - **候选收件箱主列表**（TopicEntryWorkspace 内）的修订入口与 `not_audited` 标识投影尚未加；热点看板已覆盖。候选审计状态"六态文案"（D02）在收件箱场景的投影未逐项核对。
 - **S2 的 C01–C04 端到端验收证据**（费用门禁与旧失败 run 恢复的真实链路证明）仍在 S6 清单。
@@ -48,10 +110,10 @@
 | ID | 结论 | 证据（测试名 → 文件） |
 | --- | --- | --- |
 | A01 | PASS（七节点初稿均一产一审一停） | topic: "audits the first topic package once without automatically rewriting it"（S 批）；series: "returns the first roadmap with its independent advice without automatic rewriting"（R 批）；treatment/script/director: "waits without side effects, runs exactly one independent audit per draft publication"（P 批）；publish-copy: "returns the first publish draft and independent advice without automatic rewriting"（P 批）；reference-grammar: "audits the first reference report once without silently rewriting it"（P 批） |
-| A02 | PASS（publish/topic/series/三阶段）；**reference-grammar 的 AI 修订 NOT_VERIFIED** | publish: "revise produces exactly one publish-copy call … and no audit"（P 批）；topic: "sends exactly one topic-ideas call carrying the instruction and current candidate, and no audit"（S 批）；series: "revises one series episode without auditing or adopting it"（R 批）；三阶段：修订走 `publishCreativeDraft` 清 checkResult 停人（"swaps in a hand-edited draft as a new revision, clearing the old check binding"，P 批）。reference-grammar 修订：IMPLEMENTATION_CONTRACT §0 矩阵未要求该节点具备 AI 修订（仅"初稿审一次并供用户看/采用"），与 ACCEPTANCE A02 字面（含 reference-grammar）不一致，按矩阵从宽未实现；如按验收卡字面要求补齐，需产品确认 |
+| A02 | PASS（按用户产品裁决 b 补齐 reference-grammar，原 CONTRACT_CONFLICT 已闭合；证据为本地确定性验证） | publish: "revise produces exactly one publish-copy call … and no audit"；topic: "sends exactly one topic-ideas call carrying the instruction and current candidate, and no audit"；series: "revises one series episode without auditing or adopting it"；三阶段：修订走 `publishCreativeDraft` 清 checkResult 停人。reference-grammar：`reference-grammar-agent.test.ts` 的 revision and re-audit 四例 + `node-document-revision.test.ts` 的真实 Pipeline 服务层用例 + `node-workspace.test.tsx` 的控件接线；一产稿、零自动审计、新版未审，主动再审不换版本，旧报告/审计历史保留。最终完整回归见顶部；不等同于真实 Provider 验收。 |
 | A03 | PASS | "手工保存、采用备选与恢复旧稿都生成新版本，旧审计不能跟随"（P 批） |
 | A04 | PASS | "未审修订必须显式承认才能采用，且决定记为未审采用（A04）"（P 批）；发布文档：client "binds an unaudited publish-copy adoption to the visible document version"（U 批） |
-| A05 | PASS | "同版可多次审计并全部留痕：checkResult 取最新，auditHistory 完整（A05）"（P 批）；series 并发合并审计（R 批）；publish 文档 auditCurrent（P 批） |
+| A05 | PASS（确定性＋创作规划受控 QA） | 三阶段同版审计及 series 并发证据保留；2026-09-26 新增 publish/reference 真实 Pipeline 再审：原内容版本、文件、决定及下游不变，完整记录两次独立审计；W3/W5 新操作各新增一次 Provider 调用和历史，恢复同操作不重提。 |
 | A06 | PASS | "已审初稿确认时绑定当时的版本与审计身份（A06）"（P 批） |
 | A07 | PASS | series: "only audits the human episode and cannot auto-rewrite its continuity requirements"（R 批）；publish 旁路：production-pipeline-publish-copy 的 writeDetailed 优先与 write-only 拒绝（P 批） |
 | A08 | PASS | "keeps advisory content suggestions even when the topic package passes audit"（S 批）；组件 "shows creator-facing suggestions even when the first audit passed"（U 批） |
@@ -65,17 +127,17 @@
 | B03 | PASS | "审计记录绑定 versionId：V1 的审计不能回挂到同文字的 V3（B03）"（P 批） |
 | B04 | PASS | "rejects an audit result for different draft bytes before binding it to the current version"（P 批）；命令并发由回执竞态场景与 gate 幂等覆盖（R/S 批） |
 | B05 | PASS | receipt-race-scenario（text-task-recovery-receipt.cross，R 批 exit 0）：同 ID 同 body 重放零新请求、异 body 冲突 |
-| B06 | PASS | receipt-race-scenario 覆盖受理由到结果/确认的重启恢复（R 批）；"resumes the saved series generation result before starting its audit"（R 批） |
+| B06 | PASS（已列恢复场景，非所有适配器完整担保） | 既有 receipt-race-scenario 与 series 恢复测试；2026-09-26 创作规划 W3/W5 受控浏览器证据闭合：真实受理后失联、停机期间完成、取回回执收口、重启快照保持。适配器侧完整回执绑定增强仍按 r13 单列。 |
 | B07 | PASS | "target=script 时重跑编剧并重建导演；treatment 不再调用"（P 批）；series canon 硬校验（R 批） |
-| B08 | PASS | "lets the creator adopt a valid draft after a settled check failure without inventing a score" 与 "does not offer unaudited adoption while the original audit request is still unknown"（P 批） |
+| B08 | PASS（规划消费边界） | 原确定失败/未知请求两类测试保留；2026-09-26 新增全候选耗尽 6 例：仅所有原始失败都确定结束/未受理且可切换才登记无分数 incomplete；uncertain/conflict/rejected/缺状态/旧操作不降级。W5 浏览器 unknown 只允许查询原任务。 |
 | B09 | PASS | 旧 run 历史投影诚实降级（creativeReviewHistory legacy 路径，S 批 server.test） |
 
 ### C. 返工影响范围与费用安全
 
 | ID | 结论 | 证据 |
 | --- | --- | --- |
-| C01 | PASS | "keeps a model-generated out-of-scope director plan at a recoverable stop without reaching assets"（Studio→Pipeline 集成，R 批）；worker `REWORK_SCOPE_CONFLICT` 最后防线（generative-asset-worker，R 批） |
-| C02 | PASS | 逐镜 sound_cue/visibleAction/缺失旧脚本等范围反例（generative-asset-worker，R 批 exit 0） |
+| C01 | PASS（确定性＋受控历史事故样例） | 导演方案集成与 worker 最后防线保持；2026-09-26 真实 `CodexScreenwriterAgent → Pipeline → graph` 测试补齐适配层；QA③浏览器七镜旧稿保留、五镜提案未采用、未启动媒体。 |
+| C02 | PASS（确定性） | 原逐镜 sound_cue/visibleAction/缺失旧脚本等范围反例保留；本轮补全脚本全片承诺/叙事/事实意图的宿主范围核验，真实编剧适配层的结构变化和仅全片意图变化两例先红后绿。 |
 | C03 | PASS（确定性层；交互层由 E 节 QA 复核） | 不可变报价 + 幂等授权 + delta 追加授权（"prepares an immutable quote…"、"amends as a delta that supersedes…"，R 批）；needs_scope 扩围必须重新报价（studio-service "marks only a structured rework-scope failure as needing a fresh scope decision"） |
 | C04 | PASS | needs_scope 仅由结构化 `REWORK_SCOPE_CONFLICT` 触发（S 批）；"prefills the concrete failed-node reason instead of a generic rework summary"——无关异常不被吞成建议 |
 
@@ -92,6 +154,8 @@
 D 类为组件/服务级确定性证据；真实浏览器端到端复核见下节受控 QA。
 
 ## S6 受控真实本地浏览器 QA（2026-09-25，部分完成）
+
+> 历史记录：本节当时把同版重审复用旧 checkpoint 解释为正确的结论，已被 OA-01 审计证伪并修复，不能继续作为当前合同。恢复、QA③和当前剩余缺口以本文顶部及 `qa-20260926/README.md` 为准。
 
 **环境**（全部真实组件 + 可控本地 Provider 替身；无真实付费密钥、未伪造 run.json、未绕过人工按钮）：
 - 本地替身 Provider（`/tmp/vf-stub-provider.mjs`，127.0.0.1:4390）：chat-completions 协议 + 热点信号源（DailyHot/NewsNow 同形端点），提供 `/stats` 请求计数与 `/control` 延迟/失败注入

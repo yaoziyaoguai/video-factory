@@ -141,6 +141,7 @@ export interface StudioServiceOptions {
   cases?: CaseStudioPort;
   /** 发布文案 AI 修订与主动再审端口（复用带审计配置的发布编辑 writer）。 */
   documentCopyTools?: import("./production-studio.js").StudioDocumentCopyTools;
+  referenceGrammarTools?: import("./production-studio.js").StudioReferenceGrammarTools;
 }
 
 /** 案例参考在制作链里只被用到这几件事；其余（取数、缓存）留在 CaseStudio 内部。 */
@@ -244,6 +245,7 @@ export class StudioService {
       listProviders: () => this.capabilities.listProviders(),
       archiveStore: options.runArchive ?? new JsonRunArchiveStore(path.join(options.workspaceRoot, "archive", "runs.json")),
       ...(options.documentCopyTools ? { documentCopyTools: options.documentCopyTools } : {}),
+      ...(options.referenceGrammarTools ? { referenceGrammarTools: options.referenceGrammarTools } : {}),
       now,
       loadRejectedVisualResources: (runId) => this.resourceGovernance.rejectedVisualItems(runId),
     });

@@ -645,7 +645,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             publicationExpected={node.status === "succeeded"}
           /> : editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <p className="node-workspace-error" role="alert">详细内容读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? effectiveOutput(node) ?? node.output} />}
           {contentReview && !editing ? <NodeContentReview value={contentReview} /> : null}
-          {contentReview && !editing && node.id === "publish-package" && onReviseDocument && onAuditDocument
+          {contentReview && !editing && (node.id === "publish-package" || node.id === "reference-grammar") && onReviseDocument && onAuditDocument
             ? <NodeDocumentCommands
               nodeId={node.id}
               runRevision={runRevision}

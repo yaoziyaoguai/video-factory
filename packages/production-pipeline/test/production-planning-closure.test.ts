@@ -6,11 +6,15 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import {
   CodexBridgeError,
+  CodexBridgeClient,
+  CodexScreenwriterAgent,
+  type CodexTaskKind,
   RoleAgentLoopError,
   ProductionPipeline,
   contentSha256,
   planningReviewCheckpointIdentity,
   type CreativePlanningContext,
+  type CreativeReviewState,
   sourceReviewIncompleteError,
   withAuditOperationBinding,
   type CreativeTreatment,
@@ -103,6 +107,7 @@ interface ClosureSpies {
   treatmentCheckpointPresent: boolean[];
   treatmentInputs?: Array<{ visualIntent?: string; reworkInstruction?: string }>;
   treatmentAuditCalls?: number;
+  treatmentAuditModels?: string[];
   // R11-V01：替身入口记录每次 check 调用的操作身份与实际抛出的异常对象，
   // 证明重放确实进入真实 helper/图层拒收链，而不是被前置错误替代。
   treatmentCheckOperations?: string[];
@@ -250,9 +255,16 @@ function legalTreatment(title: string): CreativeTreatment {
 }
 
 // 两候选构思替身：记录每次调用实际使用的模型，可按候选制造 not_accepted 故障。
+interface ClosureTreatmentOptions {
+  failFirstCandidate?: boolean;
+  repairCheck?: boolean;
+  rethrowException?: RoleAgentLoopError;
+  auditFailure?: (modelId: string) => unknown;
+}
+
 function closureTreatmentAgents(
   spies: ClosureSpies,
-  options: { failFirstCandidate?: boolean; repairCheck?: boolean; rethrowException?: RoleAgentLoopError } = {},
+  options: ClosureTreatmentOptions = {},
 ): Array<{ providerId: string; agent: CreativeTreatmentAgent }> {
   const makeAgent = (modelId: string, providerLabel: string): { providerId: string; agent: CreativeTreatmentAgent } => ({
     providerId: providerLabel,
@@ -267,8 +279,11 @@ function closureTreatmentAgents(
       treatDetailed: async (input: CreativeTreatmentAgentInput) => {
         if (input.creativeReviewExecution?.mode === "check") {
           spies.treatmentAuditCalls = (spies.treatmentAuditCalls ?? 0) + 1;
+          spies.treatmentAuditModels?.push(modelId);
           spies.treatmentCheckOperations = [...(spies.treatmentCheckOperations ?? []),
             input.creativeReviewExecution.auditOperationId ?? "(initial)"];
+          const auditFailure = await options.auditFailure?.(modelId);
+          if (auditFailure) throw auditFailure;
           // R9-01：按需重抛异常对象（O1 时未绑定、O3 时已绑定 O1）——真实 helper 的
           // 首绑/不覆盖 guard 与图层归属核验按绑定状态分别走登记与拒收。非 Provider
           // 故障按既有合同不做候选切换，每次操作恰好一次角色调用。
@@ -516,7 +531,7 @@ function scriptStageTemplateSnapshot() {
 function newClosurePipeline(
   workspaceRoot: string,
   spies: ClosureSpies,
-  treatmentOptions: { failFirstCandidate?: boolean; repairCheck?: boolean; rethrowException?: RoleAgentLoopError } = {},
+  treatmentOptions: ClosureTreatmentOptions = {},
 ): ProductionPipeline {
   return new ProductionPipeline({
     workspaceRoot,
@@ -2621,6 +2636,195 @@ describe("joint planning physical execution summary (Revision 9)", () => {
     assert.equal(mixed?.producerMs, 15_000, "mixed-owner checkpoint duration must not be claimed by the current operation");
     assert.equal(mixed?.previousProducerMs, 2_000, "mixed-owner checkpoint duration must not be claimed by history either");
   });
+});
+
+describe("settled audit candidate exhaustion through the production pipeline", () => {
+  it("keeps the valid draft at a human gate when every audit candidate is definitively unavailable", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-audit-exhaustion-"));
+    const spies: ClosureSpies = {
+      treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], treatmentAuditModels: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+    };
+    const pipeline = newClosurePipeline(workspaceRoot, spies, { auditFailure: (modelId) =>
+      new CodexBridgeError("service temporarily unavailable", true,
+        modelId === "treatment-model-a" ? "not_accepted" : "completed_failure", 503, "model_provider_transient"),
+    });
+    const run = await pipeline.start(closureBrief({ creativeReview: true }));
+    assert.equal(run.status, "needs_human", "确定结束的审计故障不能剥夺用户采用现稿的机会");
+    const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+    const review = (node.output as { creativeReview: CreativeReviewState }).creativeReview;
+    assert.equal(review.stages.treatment.checkResult?.status, "incomplete");
+    assert.equal(review.stages.treatment.checkResult?.score, undefined);
+    assert.equal(review.stages.treatment.auditHistory.length, 1);
+    assert.ok(review.stages.treatment.currentDraft);
+    assert.equal(spies.treatmentModelCalls.length, 1, "不重新产稿");
+    assert.deepEqual(spies.treatmentAuditModels, ["treatment-model-a", "treatment-model-b"]);
+    assert.equal(spies.screenwriterCalls.length, 0, "不得自动推进");
+    const gate = node.intervention!.continuation!;
+    await pipeline.confirmCreativeReview(run.id, {
+      commandId: "adopt-with-incomplete-audit", actor: "creator", stage: gate.stage,
+      expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+      baseDraftSha256: gate.draftSha256,
+      expectedCheckIdentity: review.stages.treatment.checkResult!.checkIdentity, acknowledgeIncomplete: true,
+    });
+    assert.equal(spies.treatmentAuditCalls, 2, "明确采用不重复审本稿");
+    assert.equal(spies.treatmentModelCalls.length, 1);
+    assert.equal(spies.screenwriterCalls.length, 1, "只有人确认后才进入下个节点");
+  });
+
+  for (const failure of ["uncertain", "conflict", "rejected", "missing-state", "old-operation"] as const) {
+    it(`does not convert a mixed candidate failure into an incomplete audit (${failure})`, async () => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-audit-exhaustion-unsafe-"));
+      const spies: ClosureSpies = {
+        treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], treatmentAuditModels: [],
+        screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+      };
+      const pipeline = newClosurePipeline(workspaceRoot, spies, { auditFailure: (modelId) => {
+        if (modelId === "treatment-model-a" && failure !== "old-operation") {
+          return new CodexBridgeError("service unavailable", true, "not_accepted", 503);
+        }
+        if (failure === "old-operation") {
+          const error = new RoleAgentLoopError("old completed failure", {
+            version: "video-factory/agent-loop-v1", role: "构思", contractVersion: "fixture-v1",
+            criteria: [], status: "failed", maxIterations: 1, iterations: [],
+          }, undefined, new CodexBridgeError("service unavailable", false, "completed_failure", 503, "model_provider_transient"));
+          if (modelId === "treatment-model-a") Object.assign(error, { auditOperationId: "old-operation" });
+          return error;
+        }
+        return failure === "missing-state" ? new Error("unknown provider outcome")
+          : new CodexBridgeError("provider boundary requires recovery", false, failure);
+      } });
+      const run = await pipeline.start(closureBrief({ creativeReview: true }));
+      assert.equal(run.status, "failed", "不能把未知受理/身份冲突误报为可略过的审计失败");
+      const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+      const review = (node.output as { creativeReview?: CreativeReviewState } | undefined)?.creativeReview;
+      assert.equal(review?.stages.treatment.auditHistory.length ?? 0, 0);
+      assert.equal(review?.stages.treatment.checkResult ?? null, null);
+      assert.equal(spies.treatmentAuditCalls, 2);
+      assert.equal(spies.treatmentModelCalls.length, 1);
+      assert.equal(spies.screenwriterCalls.length, 0);
+    });
+  }
+});
+
+for (const scopeChange of ["scene structure", "global intent"] as const) {
+  it(`the real screenwriter adapter delivers out-of-scope ${scopeChange} to the human gate without repair loops`, async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-real-script-scope-gate-"));
+    const spies: ClosureSpies = {
+      treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+    };
+    const previousScript = { viewerPromise: "看完能避开三个决策坑", narrativeArc: "逐步解释", canonFacts: [],
+      scenes: [1, 2, 3, 4, 5, 6, 7].map((position) => ({ position, narration: `第${position}步核对。`,
+        duration: position <= 4 ? 3 : 4, visual_strategy: "local", visual_prompt: `旧画面 ${position}`, search_terms: ["核对"] })),
+    };
+    const candidate = scopeChange === "global intent" ? { ...previousScript, viewerPromise: "擅自换成另一种全片承诺" }
+      : { ...previousScript, scenes: previousScript.scenes.slice(0, 5).map((scene, i) => ({
+      ...scene, duration: i === 4 ? 4 : 5, visual_prompt: `新画面 ${scene.position}`,
+    })) };
+    const calls: CodexTaskKind[] = [];
+    class ScopeClient extends CodexBridgeClient {
+      override async runTaskDetailed(kind: CodexTaskKind) {
+        calls.push(kind);
+        return { output: candidate };
+      }
+    }
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new ClosureWorker(),
+      treatmentAgents: closureTreatmentAgents(spies), directorAgent: closureDirector(spies),
+      screenwriterAgent: new CodexScreenwriterAgent({ client: new ScopeClient({ socketPath: "/unused/controlled-scope.sock" }) }),
+      assetProviders: CLOSURE_ASSET_PROVIDERS,
+    });
+    const initial = await pipeline.start({ ...closureBrief({ creativeReview: true }), rework: {
+      sourceRunId: "deidentified-source", sourceRunRevision: 1, findings: [], affectedScenePositions: [],
+      previousScript, nodeInstructions: { script: "提出更紧凑的候选，但未扩大范围。", visualDirection: "保留旧方案", assets: "保留旧素材" },
+    } });
+    const firstNode = initial.nodeRuns.find(node => node.nodeId === "creative-planning")!;
+    const gate = firstNode.intervention!.continuation!;
+    const review = (firstNode.output as { creativeReview: CreativeReviewState }).creativeReview;
+    const current = await pipeline.confirmCreativeReview(initial.id, {
+      commandId: "scope-confirm-treatment", actor: "creator", expectedRunRevision: initial.revision,
+      expectedReviewRevision: gate.reviewRevision, stage: gate.stage, baseDraftSha256: gate.draftSha256,
+      expectedCheckIdentity: review.stages.treatment.checkResult!.checkIdentity,
+    });
+    assert.equal(current.status, "needs_human", JSON.stringify(current.nodeRuns.map(n => ({ id: n.nodeId, error: n.error }))));
+    const node = current.nodeRuns.find(n => n.nodeId === "creative-planning")!;
+    const output = node.output as { scopeConflict: { stage: string }; creativeReview: CreativeReviewState };
+    assert.equal(output.scopeConflict.stage, "script");
+    assert.deepEqual(output.creativeReview.stages.script.currentDocument, previousScript);
+    assert.deepEqual(output.creativeReview.stages.script.proposals[0]?.document, candidate);
+    assert.deepEqual(calls, ["script-draft"], "范围冲突不是结构错误，不能自动重写或审计");
+    assert.equal(spies.directorCalls, 0);
+    assert.equal(current.nodeRuns.some(n => n.nodeId === "assets" && n.status !== "pending"), false);
+  });
+}
+
+it("retrieving a late audit completes only its original creative command receipt", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-audit-retrieval-receipt-"));
+  const spies: ClosureSpies = {
+    treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+    screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+  };
+  let pending = false;
+  let recoveryBarrier: Promise<void> | undefined;
+  let signalRecovery: (() => void) | undefined;
+  const pipeline = newClosurePipeline(workspaceRoot, spies, {
+    auditFailure: async () => {
+      if (recoveryBarrier) { signalRecovery?.(); await recoveryBarrier; }
+      return pending ? new RoleAgentLoopError("original audit result is unknown", {
+        version: "video-factory/agent-loop-v1", role: "构思", contractVersion: "fixture-v1",
+        criteria: [], status: "failed", maxIterations: 1, iterations: [], failure: { stage: "uncertain" },
+      }, undefined, new CodexBridgeError("observe the original request", false, "uncertain")) : undefined;
+    },
+  });
+  const initial = await pipeline.start(closureBrief({ creativeReview: true }));
+  const nodeOf = (run: WorkflowRun<ProductionBrief>) => run.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+  const reviewOf = (run: WorkflowRun<ProductionBrief>) => (nodeOf(run).output as { creativeReview: CreativeReviewState }).creativeReview;
+  const before = reviewOf(initial).stages.treatment;
+  const gate = nodeOf(initial).intervention!.continuation!;
+  const command = {
+    action: "audit_current" as const, commandId: "late-audit", actor: "creator", stage: gate.stage,
+    expectedRunRevision: initial.revision, expectedReviewRevision: gate.reviewRevision,
+    baseDraftSha256: gate.draftSha256,
+  };
+  pending = true;
+  const failed = await (await pipeline.dispatchCreativeReviewCommand(initial.id, command)).completion;
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.creativeReviewOperations?.at(-1)?.status, "failed");
+  // 查询后发现原任务仍未落定，第二次恢复不能丢失原命令绑定。
+  const stillUnknown = await (await pipeline.dispatchRetryFailedNode(initial.id, "creative-planning", undefined, {
+    recoverOriginalTextTask: true,
+  })).completion;
+  assert.equal(stillUnknown.status, "failed");
+  assert.equal(stillUnknown.creativeReviewOperations?.at(-1)?.status, "failed");
+  pending = false;
+  let releaseRecovery!: () => void;
+  recoveryBarrier = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+  const enteredRecovery = new Promise<void>((resolve) => { signalRecovery = resolve; });
+  const recovering = await pipeline.dispatchRetryFailedNode(initial.id, "creative-planning", undefined, {
+    recoverOriginalTextTask: true,
+  });
+  await enteredRecovery;
+  try {
+    const inflight = await pipeline.loadPersisted(initial.id);
+    assert.equal(inflight.creativeReviewOperations?.at(-1)?.status, "running",
+      "恢复中的命令须可被重启扫描接管，不能保留 failed 终态");
+  } finally {
+    releaseRecovery();
+  }
+  const recovered = await recovering.completion;
+  assert.equal(recovered.status, "needs_human");
+  const after = reviewOf(recovered).stages.treatment;
+  assert.deepEqual(after.currentDraft, before.currentDraft);
+  assert.equal(after.auditHistory.length, before.auditHistory.length + 1);
+  assert.equal(recovered.creativeReviewOperations?.at(-1)?.status, "completed",
+    "取回并消费原审计后，命令不能继续显示失败");
+  assert.equal(spies.treatmentModelCalls.length, 1);
+  assert.equal(spies.screenwriterCalls.length, 0);
+  const audits = spies.treatmentAuditCalls;
+  const replay = await (await pipeline.dispatchCreativeReviewCommand(initial.id, command)).completion;
+  assert.equal(replay.revision, recovered.revision);
+  assert.deepEqual(reviewOf(replay), reviewOf(recovered));
+  assert.equal(spies.treatmentAuditCalls, audits, "原命令重放只读回执，不再审计");
 });
 
 // OA-01/E2E-AUDIT-01：审计操作身份必须进入装配层 checkpoint key——

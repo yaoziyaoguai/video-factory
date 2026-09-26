@@ -173,6 +173,7 @@ const service = new StudioService({
   // 发布文案 AI 修订与主动再审复用同一个带首审合同的发布编辑 writer：
   // revise 走单次 publish-copy 任务（零审计），auditCurrent 走单次 role-audit（零产稿）。
   ...(publishCopyWriter ? { documentCopyTools: publishCopyWriter } : {}),
+  referenceGrammarTools: referenceGrammarAgent,
   ...{
     trendAgent: new TrendOpportunityAgent({
       signals: new TrendGateway({ environment: process.env }),

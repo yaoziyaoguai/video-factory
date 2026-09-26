@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   CodexReferenceGrammarAgent,
+  REFERENCE_GRAMMAR_AUDIT_CRITERIA,
+  validateShotGrammar,
   type CodexPreparedOperation,
   type CodexTaskExecution,
   type CodexTaskKind,
@@ -37,6 +39,119 @@ function grammar(camera: string): Record<string, unknown> {
     confidence: 0.7,
   };
 }
+
+function validAudit(verdict: "pass" | "repair", score: number, issues: Array<Record<string, unknown>> = []): Record<string, unknown> {
+  return {
+    version: "video-factory/role-audit-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v1",
+    assessments: [{
+      targetPath: "",
+      dimensions: [
+        { dimension: "evidence", score, evidence: "结论都能对应到关键帧。" },
+        { dimension: "coverage", score, evidence: "节拍覆盖主要叙事结构。" },
+        { dimension: "consistency", score, evidence: "置信描述与静帧边界一致。" },
+        { dimension: "actionability", score, evidence: "可复用规则可直接执行。" },
+      ],
+    }],
+    verdict,
+    score,
+    summary: verdict === "pass" ? "报告与关键帧证据一致，边界清楚。" : "静帧无法证实的运动写成了确定事实。",
+    issues,
+    repairInstructions: verdict === "repair" ? ["把无法证实的相机运动改为低置信描述。"] : [],
+  };
+}
+
+// S4/reference-grammar（产品裁决 b）：参考报告补齐 AI 修订与主动再审，
+// 与发布文案同一合同——修订零审计、再审零产稿、各恰好一次模型调用。
+describe("reference grammar revision and re-audit (S4/reference-grammar)", () => {
+  const currentGrammar = validateShotGrammar(grammar("稳定推进"), 10_000);
+  const media = { prepare: async () => ({
+    durationMs: 10_000,
+    frames: [{ timecodeMs: 5_000, sha256: "a".repeat(64), jpegBase64: "/9j/2Q==" }],
+  }) };
+
+  it("revise sends exactly one reference-grammar call carrying the instruction and current report, and no audit", async () => {
+    const calls: Array<{ kind: CodexTaskKind; payload: Record<string, unknown> }> = [];
+    const agent = new CodexReferenceGrammarAgent({
+      client: { runTask: async (kind: CodexTaskKind, payload: unknown) => {
+        calls.push({ kind, payload: payload as Record<string, unknown> });
+        return grammar("修订后的运镜");
+      } },
+      media,
+    });
+    const revised = await agent.revise({
+      videoPath: "/tmp/reference.mp4", runRoot: "/tmp", sourceLabel: "用户参考片",
+      currentGrammar, instruction: "把节奏分析改得更具体，只修证据与结构问题",
+    });
+    assert.equal(calls.length, 1, "修订必须恰好一次 reference-grammar 调用");
+    assert.equal(calls[0]!.kind, "reference-grammar");
+    assert.deepEqual(calls[0]!.payload.revision, {
+      instruction: "把节奏分析改得更具体，只修证据与结构问题",
+      currentGrammar,
+    }, "修订通道携带用户指令与当前报告全文");
+    assert.equal(calls.filter((call) => call.kind === "role-audit").length, 0, "修订不触发任何独立审计");
+    assert.equal(revised.camera, "修订后的运镜");
+    assert.equal(revised.version, "video-factory/shot-grammar-v1");
+  });
+
+  it("rejects out-of-range revision instructions with zero model calls", async () => {
+    let calls = 0;
+    const agent = new CodexReferenceGrammarAgent({
+      client: { runTask: async () => { calls += 1; return grammar("不应被调用"); } },
+      media,
+    });
+    await assert.rejects(() => agent.revise({
+      videoPath: "/tmp/reference.mp4", runRoot: "/tmp", sourceLabel: "用户参考片",
+      currentGrammar, instruction: "",
+    }), /1 to 4000/);
+    await assert.rejects(() => agent.revise({
+      videoPath: "/tmp/reference.mp4", runRoot: "/tmp", sourceLabel: "用户参考片",
+      currentGrammar, instruction: "长".repeat(4_001),
+    }), /1 to 4000/);
+    assert.equal(calls, 0, "越界输入零调用");
+  });
+
+  it("auditCurrent sends exactly one role-audit with the first-audit criteria bound to the current report", async () => {
+    const calls: Array<{ kind: CodexTaskKind; payload: Record<string, unknown> }> = [];
+    const agent = new CodexReferenceGrammarAgent({
+      client: { runTask: async (kind: CodexTaskKind, payload: unknown) => {
+        calls.push({ kind, payload: payload as Record<string, unknown> });
+        return validAudit("pass", 88);
+      } },
+      media,
+    });
+    const execution = await agent.auditCurrent({
+      videoPath: "/tmp/reference.mp4", runRoot: "/tmp", sourceLabel: "用户参考片",
+      grammar: currentGrammar,
+    });
+    assert.deepEqual(calls.map((call) => call.kind), ["role-audit"], "再审只审当前稿，不产新报告");
+    const payload = calls[0]!.payload as {
+      role?: string; iteration?: number; criteria?: string[]; candidate?: Record<string, unknown>;
+      context?: { upstreamFacts?: { durationMs?: number; sourceLabel?: string }; roleScope?: { owns?: string[] } };
+      images?: unknown[];
+    };
+    assert.equal(payload.role, "参考片分析师");
+    assert.equal(payload.iteration, 1);
+    assert.deepEqual(payload.criteria, REFERENCE_GRAMMAR_AUDIT_CRITERIA, "再审与首审同一套标准");
+    assert.deepEqual(payload.candidate, currentGrammar, "审计对象就是当前精确报告");
+    assert.equal(payload.context?.upstreamFacts?.durationMs, 10_000);
+    assert.equal(payload.context?.upstreamFacts?.sourceLabel, "用户参考片");
+    assert.ok(Array.isArray(payload.images) && payload.images.length === 1, "关键帧证据随审计提交");
+    assert.equal(execution.audit.verdict, "pass");
+    assert.equal(execution.audit.score, 88);
+  });
+
+  it("auditCurrent rejects non-contract audit output without any fallback", async () => {
+    const agent = new CodexReferenceGrammarAgent({
+      client: { runTask: async () => ({ version: "video-factory/role-audit-v2", verdict: "pass" }) },
+      media,
+    });
+    await assert.rejects(() => agent.auditCurrent({
+      videoPath: "/tmp/reference.mp4", runRoot: "/tmp", sourceLabel: "用户参考片",
+      grammar: currentGrammar,
+    }));
+  });
+});
 
 describe("CodexReferenceGrammarAgent", () => {
   it("does not present a single unaudited model call as a detailed reviewed report", async () => {

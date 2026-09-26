@@ -335,6 +335,9 @@ function validateScreenwriterCandidate(
     requireCanonFacts: Boolean(input.brief.seriesContext),
   };
   const candidate = validateScriptDraft(value, validation);
+  // joint 人工定稿流程只在这里核结构；返工范围由图层在采用前核验，越界候选留为提案。
+  // 若在角色循环里拒绝范围，会误触结构重试并把整条制作打成 failed，用户拿不到原稿停点。
+  if (input.planningMode && input.creativeReviewExecution?.mode === "draft") return candidate;
   const rework = input.brief.rework;
   if (!rework?.previousScript || rework.affectedScenePositions === undefined) {
     return candidate;

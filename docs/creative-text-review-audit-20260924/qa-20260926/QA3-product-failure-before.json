@@ -1,0 +1,89 @@
+{
+  "at": "2026-09-26T04:39:35.477Z",
+  "runId": "run-e48e740c-6169-4747-bd23-25b622c30e8c",
+  "status": "failed",
+  "revision": 3,
+  "operations": [
+    {
+      "commandId": "df4745a4-a92f-4edc-ae75-26ebaf921483",
+      "requestDigest": "a9c04994778955fccfa7906aa065d013d18bb10b99bdf1c3c3b2a71a55ab7286",
+      "action": "confirm",
+      "stage": "treatment",
+      "status": "failed",
+      "acceptedAt": "2026-09-26T04:29:22.612Z",
+      "request": {
+        "commandId": "df4745a4-a92f-4edc-ae75-26ebaf921483",
+        "actor": "studio-owner",
+        "expectedRunRevision": 1,
+        "expectedReviewRevision": 2,
+        "stage": "treatment",
+        "baseDraftSha256": "524656da5fb4fa38a2f964cb5fdf06766ec028c11c6ee883187ed87b3b3bec3e",
+        "action": "confirm",
+        "expectedCheckIdentity": "d1b598debb58a8223417fd1c81cd3986a04fbc7a9e1f99c16bf8106798f43218"
+      },
+      "resume": {
+        "action": "confirm",
+        "stage": "treatment",
+        "commandId": "df4745a4-a92f-4edc-ae75-26ebaf921483",
+        "actor": "studio-owner",
+        "baseDraftSha256": "524656da5fb4fa38a2f964cb5fdf06766ec028c11c6ee883187ed87b3b3bec3e",
+        "expectedReviewRevision": 2,
+        "checkIdentity": "d1b598debb58a8223417fd1c81cd3986a04fbc7a9e1f99c16bf8106798f43218",
+        "confirmedAt": "2026-09-26T04:29:22.611Z"
+      },
+      "finishedAt": "2026-09-26T04:32:02.243Z"
+    }
+  ],
+  "node": {
+    "status": "failed",
+    "error": "编剧连续两次返回了无法使用的结果；本轮质量审计尚未消耗，可从已保存进度继续。\n诊断：Screenwriter rework with empty affectedScenePositions must reuse the verified previous script before model execution."
+  },
+  "otherNodeStatuses": [
+    [
+      "brief",
+      "succeeded"
+    ]
+  ],
+  "decisionCount": 1,
+  "artifactCount": 5,
+  "checkpoints": [
+    {
+      "file": "61c2fe6cee17c9a9ab9f5120253fae1cea59ebfb057326248b912015522926e1.json",
+      "status": "running",
+      "attemptedRequestIds": [
+        "agent-f21b4a25503f6e2e31a7b85d460a8377f6be13e29146b563837533db61e95680"
+      ],
+      "recoveryOwner": {
+        "runId": "run-e48e740c-6169-4747-bd23-25b622c30e8c",
+        "nodeId": "creative-planning",
+        "workflowOperationRequestId": "run-e48e740c-6169-4747-bd23-25b622c30e8c-creative-planning-operation-4f4e2670-7220-4ac7-b71f-bc257c359d2d"
+      }
+    },
+    {
+      "file": "bec8fe1f26fca9f740e9c5183b3a791837dd977b651001230a8cc3df432ab616.json",
+      "status": "failed",
+      "attemptedRequestIds": [
+        "agent-8d661d0f0d126c9d3d93b3aa1005c373c91290dad2ce597a48c83c1ffffc1b44",
+        "agent-6caf9aa760386021b57ad0eb89373b750f538fd6a127e45946424e95a8abded3",
+        "agent-87b9b5d24fa2ed1398fe6e3fcbbb374b86006af079c4d7ee39a69ee90c25c8d4"
+      ],
+      "recoveryOwner": {
+        "runId": "run-e48e740c-6169-4747-bd23-25b622c30e8c",
+        "nodeId": "creative-planning",
+        "workflowOperationRequestId": "run-e48e740c-6169-4747-bd23-25b622c30e8c-creative-planning-operation-f76003c0-58a0-491a-b43a-ff894a99896e"
+      }
+    },
+    {
+      "file": "f5e8c6abd1df9ae50c69b9f94fcfc9a1019588e6bf72269e2952cca15f23afae.json",
+      "status": "passed",
+      "attemptedRequestIds": [
+        "agent-07620b48fb14c30bee83ac51791dfdb80586e9dcbf29de868c9781e46bfdca84"
+      ],
+      "recoveryOwner": {
+        "runId": "run-e48e740c-6169-4747-bd23-25b622c30e8c",
+        "nodeId": "creative-planning",
+        "workflowOperationRequestId": "run-e48e740c-6169-4747-bd23-25b622c30e8c-creative-planning-operation-4f4e2670-7220-4ac7-b71f-bc257c359d2d"
+      }
+    }
+  ]
+}

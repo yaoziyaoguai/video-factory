@@ -168,6 +168,15 @@ export interface DispatchedProductionRun {
   completion: Promise<WorkflowRun<ProductionBrief>>;
 }
 
+export interface ProductionNodeDocumentAuditDraft {
+  nodeId: "publish-package" | "reference-grammar";
+  actor: string;
+  expectedRunRevision: number;
+  expectedVersionId: string;
+  auditId: string;
+  audit: RoleAudit;
+}
+
 export interface ProductionSpendRejectionDraft {
   nodeId: string;
   spendPlanId: string;
@@ -1362,6 +1371,10 @@ export class ProductionPipeline {
           ...(brief.rework.previousDirectorPlan ? { previousShots: brief.rework.previousDirectorPlan.shots } : {}),
           currentScenes: draft.stage === "script" ? document.scenes
             : shotsAsScenePositions(document.shots),
+          ...(draft.stage === "script" && brief.rework.previousScript ? {
+            previousGlobalIntent: scriptReworkGlobalIntent(brief.rework.previousScript),
+            currentGlobalIntent: scriptReworkGlobalIntent(document),
+          } : {}),
           ...(draft.stage === "director" ? {
             currentShots: document.shots,
             ...(brief.rework.previousDirectorPlan ? {
@@ -1465,6 +1478,47 @@ export class ProductionPipeline {
       await checkpoint(result);
       return result;
     }, listener);
+  }
+
+  /** 审计是当前稿的附属记录，不是换稿；不得增加内容版本、撤销下游或代替人工确认。 */
+  async recordNodeDocumentAudit(runId: string, draft: ProductionNodeDocumentAuditDraft): Promise<WorkflowRun<ProductionBrief>> {
+    return this.runPersistedTransition(runId, async (previous) => {
+      if (draft.nodeId !== "publish-package" && draft.nodeId !== "reference-grammar") {
+        throw new Error("Only creator-facing document nodes support a document audit.");
+      }
+      if (!draft.actor.trim() || !draft.auditId.trim()) throw new Error("Document audit identity is required.");
+      if (previous.revision !== draft.expectedRunRevision) {
+        throw new StaleRunRevisionError(runId, draft.expectedRunRevision, previous.revision);
+      }
+      if (previous.status === "running" || previous.nodeRuns.some((node) => node.outcomeUncertain)) {
+        throw new Error("Resolve the running or uncertain task before recording a document audit.");
+      }
+      const next = structuredClone(previous);
+      const node = next.nodeRuns.find((item) => item.nodeId === draft.nodeId);
+      const version = node?.outputState?.versions.find((item) => item.id === node.outputState?.effectiveVersionId);
+      if (!node || !version || version.id !== draft.expectedVersionId || node.outputState?.stale || node.inputState?.stale) {
+        throw new NodeVersionConflictError(draft.nodeId, draft.expectedVersionId, node?.outputState?.effectiveVersionId ?? "");
+      }
+      const output = version.output ?? node.output;
+      if (!isObjectRecord(output)) throw new Error("Document output is not available for auditing.");
+      const previousReview = isObjectRecord(output.contentReview) ? output.contentReview : undefined;
+      const history = Array.isArray(previousReview?.history) ? structuredClone(previousReview.history)
+        : previousReview && previousReview.status !== "not_audited"
+          ? [{ ...structuredClone(previousReview), versionId: version.id }]
+          : [];
+      const record = {
+        versionId: version.id, auditId: draft.auditId, auditedAt: this.clock(), actor: draft.actor,
+        status: draft.audit.verdict === "pass" ? "passed" : "has_suggestions",
+        score: draft.audit.score, summary: draft.audit.summary,
+        suggestions: draft.audit.issues.map((issue) => issue.creatorAction ?? issue.repairInstruction).filter(Boolean),
+        audit: structuredClone(draft.audit),
+      };
+      const updatedOutput = { ...output, contentReview: { ...record, history: [...history, record] } };
+      version.output = updatedOutput;
+      node.output = updatedOutput;
+      next.revision += 1;
+      return next;
+    });
   }
 
   async applyNodeOverride(runId: string, override: NodeOverrideDraft): Promise<WorkflowRun<ProductionBrief>> {
@@ -3593,6 +3647,13 @@ export class ProductionPipeline {
       const recoveryWorkflowOperationRequestId = options?.recoverOriginalTextTask
         ? previous.nodeRuns.find((node) => node.nodeId === nodeId)?.operationRequestId
         : undefined;
+      const creativeCommand = recoverableCreativeReviewCommand(previous, nodeId);
+      const recoveryBase = creativeCommand ? structuredClone(previous) : previous;
+      if (creativeCommand) {
+        const operation = recoveryBase.creativeReviewOperations!.find((item) => item.commandId === creativeCommand.commandId)!;
+        operation.status = "running";
+        delete operation.finishedAt;
+      }
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
         clock: this.clock,
@@ -3600,8 +3661,9 @@ export class ProductionPipeline {
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
         shouldPause: () => this.consumePauseRequest(runId),
       });
-      return runner.retryFailedNode(
+      const result = await runner.retryFailedNode(
         this.createWorkflow(brief, undefined, {
+          ...(creativeCommand ? { creativeReviewResume: creativeCommand.resume } : {}),
           ...(options?.resumeCompletedTextTask ? { resumeCompletedTextTaskNodeId: nodeId } : {}),
           ...(options?.resumeCompletedTextTaskRequestId
             ? { resumeCompletedTextTaskRequestId: options.resumeCompletedTextTaskRequestId }
@@ -3610,7 +3672,7 @@ export class ProductionPipeline {
             ? { recoverTextTask: { nodeId, workflowOperationRequestId: recoveryWorkflowOperationRequestId } }
             : {}),
         }),
-        withExecutableBrief(previous, brief),
+        withExecutableBrief(recoveryBase, brief),
         nodeId,
         retryRejectedReview
           ? { allowRejectedNode: true }
@@ -3618,6 +3680,24 @@ export class ProductionPipeline {
             ? { allowSourceReviewRetry: true }
             : undefined,
       );
+      // 取回原请求与重放原命令必须收口同一条回执，不能只恢复稿件却永久显示命令失败。
+      // 仅消费本次失败节点携带的命令身份，不扫改其他历史失败记录。
+      if (creativeCommand) {
+        const node = result.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+        const completed = isObjectRecord(node?.output) ? node.output.creativeReviewOperation : undefined;
+        const finished = node?.status !== "failed" && isObjectRecord(completed)
+          && completed.commandId === creativeCommand.commandId
+          && completed.action === creativeCommand.resume.action && completed.status === "completed";
+        if (finished || node?.status === "failed") {
+          result.creativeReviewOperations = (result.creativeReviewOperations ?? []).map((operation) => (
+            operation.commandId === creativeCommand.commandId
+              ? { ...operation, status: finished ? "completed" as const : "failed" as const, finishedAt: this.clock() }
+              : operation
+          ));
+          await checkpoint(result);
+        }
+      }
+      return result;
     }, listener);
     return this.continueCoveredSpendApproval(runId, dispatched, listener);
   }
@@ -4646,6 +4726,29 @@ function recordedCreativeCheckIdentity(
   const checkResult = stages[stage].checkResult;
   if (!isObjectRecord(checkResult) || typeof checkResult.checkIdentity !== "string") return undefined;
   return checkResult.checkIdentity;
+}
+
+function scriptReworkGlobalIntent(document: unknown) {
+  if (!isObjectRecord(document)) return undefined;
+  return { viewerPromise: document.viewerPromise ?? null, narrativeArc: document.narrativeArc ?? null,
+    canonFacts: document.canonFacts ?? [] };
+}
+
+function recoverableCreativeReviewCommand(run: WorkflowRun<ProductionBrief>, nodeId: string) {
+  if (nodeId !== "creative-planning") return undefined;
+  const node = run.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+  const metadata = isObjectRecord(node?.output) ? node.output.continuationOperation : undefined;
+  if (!isObjectRecord(metadata)) return undefined;
+  const operation = run.creativeReviewOperations?.find((candidate) => candidate.commandId === metadata.commandId);
+  if (!operation || operation.status === "completed" || operation.resume === undefined
+    || operation.requestDigest !== metadata.requestDigest || operation.action !== metadata.action) {
+    throw new Error("Creative review recovery cannot match the original command receipt.");
+  }
+  const resume = parseCreativeReviewResume(operation.resume);
+  if (resume.commandId !== operation.commandId || resume.action !== operation.action || resume.stage !== operation.stage) {
+    throw new Error("Creative review recovery has inconsistent command evidence.");
+  }
+  return { commandId: operation.commandId, resume };
 }
 
 function currentCreativeCheck(
@@ -7720,7 +7823,11 @@ function creativePlanningNode(
               });
               if (currentBrief.rework) reworkAffectedScenePositions({
                 findings: currentBrief.rework.findings,
-                ...(currentBrief.rework.previousScript ? { previousScenes: currentBrief.rework.previousScript.scenes } : {}),
+                ...(currentBrief.rework.previousScript ? {
+                  previousScenes: currentBrief.rework.previousScript.scenes,
+                  previousGlobalIntent: scriptReworkGlobalIntent(currentBrief.rework.previousScript),
+                  currentGlobalIntent: scriptReworkGlobalIntent(draft),
+                } : {}),
                 ...(currentBrief.rework.previousDirectorPlan ? { previousShots: currentBrief.rework.previousDirectorPlan.shots } : {}),
                 currentScenes: draft.scenes,
                 ...(currentBrief.rework.affectedScenePositions !== undefined

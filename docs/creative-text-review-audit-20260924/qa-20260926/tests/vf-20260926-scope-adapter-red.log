@@ -1,0 +1,34 @@
+TAP version 13
+# Subtest: the real screenwriter adapter delivers an out-of-scope draft to the human scope gate without repair loops
+not ok 1 - the real screenwriter adapter delivers an out-of-scope draft to the human scope gate without repair loops
+  ---
+  duration_ms: 227.830084
+  type: 'test'
+  location: '/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/test/production-planning-closure.test.ts:10:4721'
+  failureType: 'testCodeFailure'
+  error: |-
+    [{"id":"brief"},{"id":"creative-planning","error":"编剧连续两次返回了无法使用的结果；本轮质量审计尚未消耗，可从已保存进度继续。\n诊断：Screenwriter rework with empty affectedScenePositions must reuse the verified previous script before model execution."}]
+    + actual - expected
+
+    + 'failed'
+    - 'needs_human'
+
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'needs_human'
+  actual: 'failed'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (/Users/jinkun.wang/work_space/veidofactory/packages/production-pipeline/test/production-planning-closure.test.ts:2747:10)
+    async Test.run (node:internal/test_runner/test:1054:7)
+    async startSubtestAfterBootstrap (node:internal/test_runner/harness:296:3)
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 0
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1349.700458

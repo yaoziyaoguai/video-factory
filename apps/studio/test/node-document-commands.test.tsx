@@ -73,4 +73,24 @@ describe("NodeDocumentCommands", () => {
     // 草稿保留，方便用户刷新后重发。
     expect((screen.getByLabelText("修订意见") as HTMLTextAreaElement).value).toBe("标题改得更具体。");
   });
+
+  it("keeps an unsent instruction with its original version until the user explicitly retargets it", async () => {
+    let sent = 0;
+    const props = {
+      nodeId: "reference-grammar", runRevision: 7, effectiveVersionId: "v1", busy: false,
+      contentReview: { status: "has_suggestions", summary: "旧版意见", suggestions: ["旧版的改法"] },
+      onRevise: async () => { sent += 1; }, onAudit: async () => undefined,
+    };
+    const { rerender } = render(<NodeDocumentCommands {...props} />);
+    fireEvent.change(screen.getByLabelText("修订意见"), { target: { value: "我对旧稿的意见" } });
+    fireEvent.click(screen.getByLabelText("旧版的改法"));
+    rerender(<NodeDocumentCommands {...props} runRevision={8} effectiveVersionId="v2"
+      contentReview={{ status: "has_suggestions", summary: "新版意见", suggestions: ["新版的改法"] }} />);
+    expect(screen.getByLabelText("新版的改法")).not.toBeChecked();
+    expect(screen.getByLabelText("修订意见")).toHaveValue("我对旧稿的意见");
+    expect(screen.getByRole("button", { name: "发送修订意见" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "将这些意见用于当前稿" }));
+    fireEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
+    await waitFor(() => expect(sent).toBe(1));
+  });
 });

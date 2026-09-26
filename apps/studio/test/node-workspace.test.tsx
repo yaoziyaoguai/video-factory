@@ -110,6 +110,25 @@ const hailuoProvider: StudioProvider = {
 };
 
 describe("node production workspaces", () => {
+  it("offers reference-report revision and audit commands bound to the displayed document", async () => {
+    const revise = vi.fn(async () => undefined);
+    const audit = vi.fn(async () => undefined);
+    const output = { grammar: { summary: "由局部揭示整体" },
+      contentReview: { status: "has_suggestions", summary: "节奏可更具体", suggestions: ["说明开场景别"] } };
+    const node: StudioNode = { ...succeededNode, id: "reference-grammar", label: "参考视频风格分析",
+      output, outputState: { generatedVersionId: "reference-v1", effectiveVersionId: "reference-v1", stale: false,
+        versions: [{ ...succeededNode.outputState!.versions[0]!, id: "reference-v1", output }] } };
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-reference" runRevision={8} node={node} runStatus="needs_human"
+      artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined}
+      onReviseDocument={revise} onAuditDocument={audit} />);
+    expect(screen.getByRole("region", { name: "参考报告修订与审计" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "修订意见" }), { target: { value: "把景别变化说清楚。" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
+    await waitFor(() => expect(revise).toHaveBeenCalledWith("reference-grammar", {
+      instruction: "把景别变化说清楚。", expectedRunRevision: 8, expectedVersionId: "reference-v1",
+    }));
+    expect(audit).not.toHaveBeenCalled();
+  });
   it("reads a formal planning delivery even when the node output contains paths only", async () => {
     vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ viewerPromise: "清楚解释选择", progression: [{ purpose: "先展示差异" }] });
     render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2}

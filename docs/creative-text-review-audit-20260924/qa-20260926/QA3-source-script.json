@@ -1,0 +1,97 @@
+{
+  "title": "QA③空范围历史样例（七镜，无媒体）",
+  "viewerPromise": "七步核对后再分享",
+  "narrativeArc": "逐步核对",
+  "canonFacts": [],
+  "hook": "第1步，仔细核对。",
+  "duration_target": 24,
+  "duration_range": {
+    "minSeconds": 20,
+    "maxSeconds": 34
+  },
+  "disclosure_required": true,
+  "niche_slug": "qa-scope",
+  "structure": "AI 编剧短视频结构",
+  "quality_checks": [
+    "核验事实与数据",
+    "人工审片后再发布"
+  ],
+  "platform_notes": {
+    "platform": "douyin",
+    "audience": "本地测试",
+    "angle": "验证旧范围不被新稿绕过"
+  },
+  "hashtags": [],
+  "scenes": [
+    {
+      "position": 1,
+      "narration": "第1步，仔细核对。",
+      "duration": 3,
+      "visual_strategy": "local",
+      "visual_prompt": "旧方案第1步核对卡片",
+      "search_terms": [
+        "核对 1"
+      ]
+    },
+    {
+      "position": 2,
+      "narration": "第2步，仔细核对。",
+      "duration": 3,
+      "visual_strategy": "local",
+      "visual_prompt": "旧方案第2步核对卡片",
+      "search_terms": [
+        "核对 2"
+      ]
+    },
+    {
+      "position": 3,
+      "narration": "第3步，仔细核对。",
+      "duration": 3,
+      "visual_strategy": "local",
+      "visual_prompt": "旧方案第3步核对卡片",
+      "search_terms": [
+        "核对 3"
+      ]
+    },
+    {
+      "position": 4,
+      "narration": "第4步，仔细核对。",
+      "duration": 3,
+      "visual_strategy": "local",
+      "visual_prompt": "旧方案第4步核对卡片",
+      "search_terms": [
+        "核对 4"
+      ]
+    },
+    {
+      "position": 5,
+      "narration": "第5步，仔细核对。",
+      "duration": 4,
+      "visual_strategy": "local",
+      "visual_prompt": "旧方案第5步核对卡片",
+      "search_terms": [
+        "核对 5"
+      ]
+    },
+    {
+      "position": 6,
+      "narration": "第6步，仔细核对。",
+      "duration": 4,
+      "visual_strategy": "local",
+      "visual_prompt": "旧方案第6步核对卡片",
+      "search_terms": [
+        "核对 6"
+      ]
+    },
+    {
+      "position": 7,
+      "narration": "第7步，仔细核对。",
+      "duration": 4,
+      "visual_strategy": "local",
+      "visual_prompt": "旧方案第7步核对卡片",
+      "search_terms": [
+        "核对 7"
+      ]
+    }
+  ]
+}

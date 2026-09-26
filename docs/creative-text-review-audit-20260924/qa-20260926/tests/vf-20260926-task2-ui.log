@@ -1,0 +1,8 @@
+
+ RUN  v4.1.11 /Users/jinkun.wang/work_space/veidofactory/apps/studio
+
+
+ Test Files  3 passed (3)
+      Tests  59 passed (59)
+   Start at  11:42:50
+   Duration  3.14s (transform 441ms, setup 776ms, import 816ms, tests 1.64s, environment 3.09s)

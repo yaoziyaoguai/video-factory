@@ -1,10 +1,25 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { NodeContentReview } from "../src/client/components/NodeContentReview.js";
+import { NodeContentReview, nodeContentReview } from "../src/client/components/NodeContentReview.js";
 import { NodeWorkspace } from "../src/client/components/NodeWorkspace.js";
 import type { StudioNode } from "../src/shared/api.js";
 
 describe("NodeContentReview", () => {
+  it("lets the creator read every audit of this version without showing technical identities", () => {
+    const review = nodeContentReview({ contentReview: {
+      status: "passed", summary: "当前复核：叙述清楚", suggestions: [], auditId: "audit-current-private",
+      history: [
+        { status: "has_suggestions", summary: "初审：开头铺垫过长", suggestions: ["提前展示结果"] },
+        { status: "passed", summary: "当前复核：叙述清楚", suggestions: [], auditId: "audit-current-private" },
+      ],
+    } });
+    expect(review?.auditId).toBe("audit-current-private");
+    render(<NodeContentReview value={review!} />);
+    expect(screen.getByText("本版审计记录（2 次）")).toBeInTheDocument();
+    expect(screen.getByText("初审：开头铺垫过长")).toBeInTheDocument();
+    expect(screen.getByText("提前展示结果")).toBeInTheDocument();
+    expect(screen.queryByText("audit-current-private")).not.toBeInTheDocument();
+  });
   it("shows creator-facing suggestions even when the first audit passed", () => {
     render(<NodeContentReview value={{ status: "passed", summary: "整体可用", suggestions: ["开场先展示最终画面，再解释做法。"] }} />);
     expect(screen.getByText("本版已审计")).toBeInTheDocument();

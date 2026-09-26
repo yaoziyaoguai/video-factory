@@ -81,7 +81,15 @@ export type { FallbackTaskClientCandidate, FallbackTaskClientOptions } from "./f
 export { fileRoleAgentLoopCheckpoint, pendingRoleAgentOperation, roleAgentCheckpointKey } from "./role-agent-checkpoint.js";
 export { summarizeProductionCapabilities, type ProductionCapabilities, type ProductionCapabilityAssetProvider } from "./production-capabilities.js";
 export type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
-export { CodexReferenceGrammarAgent, fallbackShotGrammar, validateShotGrammar } from "./reference-grammar.js";
+export {
+  CodexReferenceGrammarAgent,
+  REFERENCE_GRAMMAR_AUDIT_CRITERIA,
+  fallbackShotGrammar,
+  validateShotGrammar,
+  type ReferenceGrammarAuditExecution,
+  type ReferenceGrammarAuditInput,
+  type ReferenceGrammarRevisionInput,
+} from "./reference-grammar.js";
 export type {
   CodexReferenceGrammarAgentOptions,
   ReferenceGrammarAgent,
@@ -273,6 +281,7 @@ export type {
   ProductionPaidNodeSummary,
   ProductionPaidNodeReconciliationDraft,
   ProductionCreativeReviewConfirmationDraft,
+  ProductionNodeDocumentAuditDraft,
   ProductionCreativeReviewCommandDraft,
   ProductionPaidOperationItemSummary,
   ProductionPipelineOptions,

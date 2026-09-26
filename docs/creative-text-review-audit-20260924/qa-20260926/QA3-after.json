@@ -1,0 +1,328 @@
+{
+  "at": "2026-09-26T04:42:36.795Z",
+  "runId": "run-e48e740c-6169-4747-bd23-25b622c30e8c",
+  "status": "needs_human",
+  "revision": 5,
+  "operations": [
+    {
+      "commandId": "df4745a4-a92f-4edc-ae75-26ebaf921483",
+      "requestDigest": "a9c04994778955fccfa7906aa065d013d18bb10b99bdf1c3c3b2a71a55ab7286",
+      "action": "confirm",
+      "stage": "treatment",
+      "status": "completed",
+      "acceptedAt": "2026-09-26T04:29:22.612Z",
+      "request": {
+        "commandId": "df4745a4-a92f-4edc-ae75-26ebaf921483",
+        "actor": "studio-owner",
+        "expectedRunRevision": 1,
+        "expectedReviewRevision": 2,
+        "stage": "treatment",
+        "baseDraftSha256": "524656da5fb4fa38a2f964cb5fdf06766ec028c11c6ee883187ed87b3b3bec3e",
+        "action": "confirm",
+        "expectedCheckIdentity": "d1b598debb58a8223417fd1c81cd3986a04fbc7a9e1f99c16bf8106798f43218"
+      },
+      "resume": {
+        "action": "confirm",
+        "stage": "treatment",
+        "commandId": "df4745a4-a92f-4edc-ae75-26ebaf921483",
+        "actor": "studio-owner",
+        "baseDraftSha256": "524656da5fb4fa38a2f964cb5fdf06766ec028c11c6ee883187ed87b3b3bec3e",
+        "expectedReviewRevision": 2,
+        "checkIdentity": "d1b598debb58a8223417fd1c81cd3986a04fbc7a9e1f99c16bf8106798f43218",
+        "confirmedAt": "2026-09-26T04:29:22.611Z"
+      },
+      "finishedAt": "2026-09-26T04:41:46.730Z"
+    }
+  ],
+  "node": {
+    "status": "needs_human",
+    "intervention": {
+      "kind": "creative_review",
+      "reason": "脚本草稿已生成，等你确认。",
+      "stopDetail": "自动检查已停止：返工方案增删或重排了镜头，原范围无法对应新方案；请保留旧方案或重新选择范围并报价。 越界新稿只保留为未采用提案；可保留旧方案继续，或重新选择返工范围并报价。",
+      "requiredAction": "approve",
+      "options": [
+        "approve",
+        "request_changes"
+      ],
+      "artifactIds": [
+        "artifact-254c2930-32cf-4587-83d6-5419f8b04eb8"
+      ],
+      "continuation": {
+        "stage": "script",
+        "reviewRevision": 4,
+        "draftSha256": "f080cfc1d4643e186a8305361ffff505defacb4431494b8c5d4a079c5c8b21d0"
+      },
+      "id": "intervention-f23be097-cacb-4f8c-812c-d347f8be8b7b",
+      "nodeId": "creative-planning",
+      "createdAt": "2026-09-26T04:41:46.721Z"
+    }
+  },
+  "activeStage": "script",
+  "treatment": {
+    "phase": "confirmed",
+    "currentDraft": {
+      "artifactId": "creative-treatment:7c012af5104f61cc07c8ec7f334a0dd83bbaeaa46ed02166ee015fd10020039b",
+      "sha256": "524656da5fb4fa38a2f964cb5fdf06766ec028c11c6ee883187ed87b3b3bec3e",
+      "revision": 1,
+      "versionId": "creative-treatment:7c012af5104f61cc07c8ec7f334a0dd83bbaeaa46ed02166ee015fd10020039b#v1",
+      "stageInputDigest": "2ecccf670bc514d9ad070435b0875a3a1c6355a2fe2a7505136498af100cfe3c",
+      "upstreamConfirmedDigests": {}
+    },
+    "previousDraft": null,
+    "confirmation": {
+      "versionId": "creative-treatment:7c012af5104f61cc07c8ec7f334a0dd83bbaeaa46ed02166ee015fd10020039b#v1",
+      "draftSha256": "524656da5fb4fa38a2f964cb5fdf06766ec028c11c6ee883187ed87b3b3bec3e",
+      "stageInputDigest": "2ecccf670bc514d9ad070435b0875a3a1c6355a2fe2a7505136498af100cfe3c",
+      "upstreamConfirmedDigests": {},
+      "checkIdentity": "d1b598debb58a8223417fd1c81cd3986a04fbc7a9e1f99c16bf8106798f43218",
+      "auditId": "audit-9e5b23b64d733017fbb4a5d74d0c9280f20140b16a5af197bcfd63c9d0c81db7",
+      "actor": "studio-owner",
+      "confirmedAt": "2026-09-26T04:29:22.657Z",
+      "commandId": "df4745a4-a92f-4edc-ae75-26ebaf921483"
+    },
+    "messages": [],
+    "currentDocument": {
+      "version": "video-factory/creative-treatment-v2",
+      "viewerPromise": "替身承诺：看完能独立完成热点三步核对。",
+      "hook": {
+        "narrationIntent": "替身开场：直接抛出转发前要不要核对的疑问。",
+        "visualIntent": "替身画面：热点标题卡片上叠加问号。"
+      },
+      "progression": [
+        {
+          "beatId": "b1",
+          "purpose": "建立核对必要性",
+          "viewerGain": "知道为什么不能直接转发"
+        },
+        {
+          "beatId": "b2",
+          "purpose": "给出三步方法",
+          "viewerGain": "学会三步核对"
+        },
+        {
+          "beatId": "b3",
+          "purpose": "收束行动",
+          "viewerGain": "带走可执行动作"
+        }
+      ],
+      "payoff": "替身兑现：观众能对任意热点完成三步核对。",
+      "visualPrinciples": [
+        "替身原则：文字卡片清晰可读。"
+      ],
+      "soundPrinciples": [
+        "替身原则：旁白承载信息，环境声轻量铺底。"
+      ],
+      "evidenceRequirements": [
+        {
+          "beatId": "b1",
+          "claim": "热点话题存在",
+          "requirement": "illustration_only",
+          "suppliedSourceIds": [],
+          "critical": false,
+          "acquisition": "not_needed",
+          "retrievalProviderId": null
+        },
+        {
+          "beatId": "b2",
+          "claim": "三步方法可执行",
+          "requirement": "illustration_only",
+          "suppliedSourceIds": [],
+          "critical": false,
+          "acquisition": "not_needed",
+          "retrievalProviderId": null
+        },
+        {
+          "beatId": "b3",
+          "claim": "行动指令明确",
+          "requirement": "illustration_only",
+          "suppliedSourceIds": [],
+          "critical": false,
+          "acquisition": "not_needed",
+          "retrievalProviderId": null
+        }
+      ],
+      "feasibilityQuestions": [
+        {
+          "beatId": "b2",
+          "question": "替身问题：三步是否需要画面演示？"
+        }
+      ]
+    },
+    "previousDocument": null,
+    "proposals": [],
+    "effectiveUserInstructions": [],
+    "checkResult": {
+      "versionId": "creative-treatment:7c012af5104f61cc07c8ec7f334a0dd83bbaeaa46ed02166ee015fd10020039b#v1",
+      "draftSha256": "524656da5fb4fa38a2f964cb5fdf06766ec028c11c6ee883187ed87b3b3bec3e",
+      "checkIdentity": "d1b598debb58a8223417fd1c81cd3986a04fbc7a9e1f99c16bf8106798f43218",
+      "verdict": "pass",
+      "score": 92,
+      "summary": "受控审计第 9 次：本版关键表达具体、可执行，通过。",
+      "issues": [],
+      "auditId": "audit-9e5b23b64d733017fbb4a5d74d0c9280f20140b16a5af197bcfd63c9d0c81db7"
+    },
+    "auditHistory": [
+      {
+        "auditId": "audit-9e5b23b64d733017fbb4a5d74d0c9280f20140b16a5af197bcfd63c9d0c81db7",
+        "versionId": "creative-treatment:7c012af5104f61cc07c8ec7f334a0dd83bbaeaa46ed02166ee015fd10020039b#v1",
+        "draftSha256": "524656da5fb4fa38a2f964cb5fdf06766ec028c11c6ee883187ed87b3b3bec3e",
+        "checkIdentity": "d1b598debb58a8223417fd1c81cd3986a04fbc7a9e1f99c16bf8106798f43218",
+        "recordedAt": "2026-09-26T04:28:33.961Z",
+        "source": "initial",
+        "result": {
+          "versionId": "creative-treatment:7c012af5104f61cc07c8ec7f334a0dd83bbaeaa46ed02166ee015fd10020039b#v1",
+          "draftSha256": "524656da5fb4fa38a2f964cb5fdf06766ec028c11c6ee883187ed87b3b3bec3e",
+          "checkIdentity": "d1b598debb58a8223417fd1c81cd3986a04fbc7a9e1f99c16bf8106798f43218",
+          "verdict": "pass",
+          "score": 92,
+          "summary": "受控审计第 9 次：本版关键表达具体、可执行，通过。",
+          "issues": [],
+          "auditId": "audit-9e5b23b64d733017fbb4a5d74d0c9280f20140b16a5af197bcfd63c9d0c81db7"
+        }
+      }
+    ],
+    "versionHistory": [
+      {
+        "draft": {
+          "artifactId": "creative-treatment:7c012af5104f61cc07c8ec7f334a0dd83bbaeaa46ed02166ee015fd10020039b",
+          "sha256": "524656da5fb4fa38a2f964cb5fdf06766ec028c11c6ee883187ed87b3b3bec3e",
+          "revision": 1,
+          "versionId": "creative-treatment:7c012af5104f61cc07c8ec7f334a0dd83bbaeaa46ed02166ee015fd10020039b#v1",
+          "stageInputDigest": "2ecccf670bc514d9ad070435b0875a3a1c6355a2fe2a7505136498af100cfe3c",
+          "upstreamConfirmedDigests": {}
+        },
+        "document": {
+          "version": "video-factory/creative-treatment-v2",
+          "viewerPromise": "替身承诺：看完能独立完成热点三步核对。",
+          "hook": {
+            "narrationIntent": "替身开场：直接抛出转发前要不要核对的疑问。",
+            "visualIntent": "替身画面：热点标题卡片上叠加问号。"
+          },
+          "progression": [
+            {
+              "beatId": "b1",
+              "purpose": "建立核对必要性",
+              "viewerGain": "知道为什么不能直接转发"
+            },
+            {
+              "beatId": "b2",
+              "purpose": "给出三步方法",
+              "viewerGain": "学会三步核对"
+            },
+            {
+              "beatId": "b3",
+              "purpose": "收束行动",
+              "viewerGain": "带走可执行动作"
+            }
+          ],
+          "payoff": "替身兑现：观众能对任意热点完成三步核对。",
+          "visualPrinciples": [
+            "替身原则：文字卡片清晰可读。"
+          ],
+          "soundPrinciples": [
+            "替身原则：旁白承载信息，环境声轻量铺底。"
+          ],
+          "evidenceRequirements": [
+            {
+              "beatId": "b1",
+              "claim": "热点话题存在",
+              "requirement": "illustration_only",
+              "suppliedSourceIds": [],
+              "critical": false,
+              "acquisition": "not_needed",
+              "retrievalProviderId": null
+            },
+            {
+              "beatId": "b2",
+              "claim": "三步方法可执行",
+              "requirement": "illustration_only",
+              "suppliedSourceIds": [],
+              "critical": false,
+              "acquisition": "not_needed",
+              "retrievalProviderId": null
+            },
+            {
+              "beatId": "b3",
+              "claim": "行动指令明确",
+              "requirement": "illustration_only",
+              "suppliedSourceIds": [],
+              "critical": false,
+              "acquisition": "not_needed",
+              "retrievalProviderId": null
+            }
+          ],
+          "feasibilityQuestions": [
+            {
+              "beatId": "b2",
+              "question": "替身问题：三步是否需要画面演示？"
+            }
+          ]
+        }
+      }
+    ],
+    "confirmationHistory": [
+      {
+        "versionId": "creative-treatment:7c012af5104f61cc07c8ec7f334a0dd83bbaeaa46ed02166ee015fd10020039b#v1",
+        "draftSha256": "524656da5fb4fa38a2f964cb5fdf06766ec028c11c6ee883187ed87b3b3bec3e",
+        "stageInputDigest": "2ecccf670bc514d9ad070435b0875a3a1c6355a2fe2a7505136498af100cfe3c",
+        "upstreamConfirmedDigests": {},
+        "checkIdentity": "d1b598debb58a8223417fd1c81cd3986a04fbc7a9e1f99c16bf8106798f43218",
+        "auditId": "audit-9e5b23b64d733017fbb4a5d74d0c9280f20140b16a5af197bcfd63c9d0c81db7",
+        "actor": "studio-owner",
+        "confirmedAt": "2026-09-26T04:29:22.657Z",
+        "commandId": "df4745a4-a92f-4edc-ae75-26ebaf921483"
+      }
+    ],
+    "previousEffectiveUserInstructions": []
+  },
+  "otherNodeStatuses": [
+    [
+      "brief",
+      "succeeded"
+    ]
+  ],
+  "decisionCount": 1,
+  "artifactCount": 6,
+  "checkpoints": [
+    {
+      "file": "61c2fe6cee17c9a9ab9f5120253fae1cea59ebfb057326248b912015522926e1.json",
+      "status": "running",
+      "attemptedRequestIds": [
+        "agent-f21b4a25503f6e2e31a7b85d460a8377f6be13e29146b563837533db61e95680"
+      ],
+      "recoveryOwner": {
+        "runId": "run-e48e740c-6169-4747-bd23-25b622c30e8c",
+        "nodeId": "creative-planning",
+        "workflowOperationRequestId": "run-e48e740c-6169-4747-bd23-25b622c30e8c-creative-planning-operation-4f4e2670-7220-4ac7-b71f-bc257c359d2d"
+      }
+    },
+    {
+      "file": "bec8fe1f26fca9f740e9c5183b3a791837dd977b651001230a8cc3df432ab616.json",
+      "status": "running",
+      "attemptedRequestIds": [
+        "agent-8d661d0f0d126c9d3d93b3aa1005c373c91290dad2ce597a48c83c1ffffc1b44",
+        "agent-6caf9aa760386021b57ad0eb89373b750f538fd6a127e45946424e95a8abded3",
+        "agent-87b9b5d24fa2ed1398fe6e3fcbbb374b86006af079c4d7ee39a69ee90c25c8d4",
+        "agent-e0b95d5290b3c7bd2d82013fd642f39f21f86f59a81ab3ef15f5591a18fe71cc"
+      ],
+      "recoveryOwner": {
+        "runId": "run-e48e740c-6169-4747-bd23-25b622c30e8c",
+        "nodeId": "creative-planning",
+        "workflowOperationRequestId": "run-e48e740c-6169-4747-bd23-25b622c30e8c-creative-planning-operation-c670cf8c-2ab0-47a6-8d05-ec5f6af9bd93"
+      }
+    },
+    {
+      "file": "f5e8c6abd1df9ae50c69b9f94fcfc9a1019588e6bf72269e2952cca15f23afae.json",
+      "status": "passed",
+      "attemptedRequestIds": [
+        "agent-07620b48fb14c30bee83ac51791dfdb80586e9dcbf29de868c9781e46bfdca84"
+      ],
+      "recoveryOwner": {
+        "runId": "run-e48e740c-6169-4747-bd23-25b622c30e8c",
+        "nodeId": "creative-planning",
+        "workflowOperationRequestId": "run-e48e740c-6169-4747-bd23-25b622c30e8c-creative-planning-operation-4f4e2670-7220-4ac7-b71f-bc257c359d2d"
+      }
+    }
+  ]
+}

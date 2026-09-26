@@ -1,0 +1,27 @@
+
+> video-factory@0.1.0 typecheck
+> tsc -p packages/template-core/tsconfig.json && tsc -p packages/workflow-core/tsconfig.json && tsc -p packages/production-pipeline/tsconfig.json && npm run build:pipeline && npm run typecheck --workspace @video-factory/studio && npm run typecheck:broker
+
+
+> video-factory@0.1.0 build:pipeline
+> npm run build:template && npm run build:core && node -e "require('node:fs').rmSync('packages/production-pipeline/dist',{recursive:true,force:true})" && tsc -p packages/production-pipeline/tsconfig.build.json
+
+
+> video-factory@0.1.0 build:template
+> node -e "require('node:fs').rmSync('packages/template-core/dist',{recursive:true,force:true})" && tsc -p packages/template-core/tsconfig.build.json
+
+
+> video-factory@0.1.0 build:core
+> node -e "require('node:fs').rmSync('packages/workflow-core/dist',{recursive:true,force:true})" && tsc -p packages/workflow-core/tsconfig.build.json
+
+
+> @video-factory/studio@0.1.0 typecheck
+> tsc -p tsconfig.server.json && tsc -p tsconfig.client.json
+
+
+> video-factory@0.1.0 typecheck:broker
+> npm run typecheck --workspace @video-factory/codex-broker
+
+
+> @video-factory/codex-broker@0.1.0 typecheck
+> tsc -p tsconfig.json --noEmit

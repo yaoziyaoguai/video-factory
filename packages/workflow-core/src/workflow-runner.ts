@@ -1261,7 +1261,13 @@ export class WorkflowRunner {
     const preserveInterruptedOperation = retryNode.interrupted === true || preserveSourceReviewAuthorization;
     retryNode.artifactIds = [];
     retryNode.qualityGateResults = [];
+    // 创作命令的恢复可能再次中断：只保留命令关联，不把旧稿当成本次执行输出。
+    const continuation = retryNode.output && typeof retryNode.output === "object"
+      ? (retryNode.output as Record<string, unknown>).continuationOperation : undefined;
     delete retryNode.output;
+    if (continuation && typeof continuation === "object") {
+      retryNode.output = { continuationOperation: structuredClone(continuation) };
+    }
     delete retryNode.finishedAt;
     delete retryNode.error;
     delete retryNode.errorCode;

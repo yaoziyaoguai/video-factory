@@ -25,12 +25,14 @@ import {
   RunLockedError,
   StaleRunRevisionError,
   validatePublishCopy,
+  validateShotGrammar,
   type DispatchedProductionRun,
   type CreativePlanningStageInspection,
   type CodexPreparedOperation,
   type ProductionBrief,
   type ProductionCreativeReviewConfirmationDraft,
   type ProductionCreativeReviewCommandDraft,
+  type ProductionNodeDocumentAuditDraft,
   type ProductionPaidNodeReconciliationDraft,
   type ProductionNarrationRevisionDraft,
   type ProductionPaidNodeSummary,
@@ -43,6 +45,8 @@ import {
   type ProductionAuthorizationScope,
   type PublishCopy,
   type PublishCopyAuditExecution,
+  type ReferenceGrammarAgent,
+  type ShotGrammar,
   type VisualReviewFinding,
   visualReviewFindingKey,
 } from "@video-factory/production-pipeline";
@@ -151,6 +155,7 @@ export interface StudioPipelinePort {
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun>;
   applyNodeOverride(runId: string, override: NodeOverrideDraft): Promise<WorkflowRun<ProductionBrief>>;
+  recordNodeDocumentAudit(runId: string, draft: ProductionNodeDocumentAuditDraft): Promise<WorkflowRun<ProductionBrief>>;
   applyNodeInputOverride(runId: string, override: NodeInputOverrideDraft): Promise<WorkflowRun<ProductionBrief>>;
   applyNodeExecutionConfiguration(
     runId: string,
@@ -217,7 +222,11 @@ export interface ProductionStudioOptions {
    * 未配置时如实报“没有可用的修订模型”，不退化成无审计的假成功。
    */
   documentCopyTools?: StudioDocumentCopyTools;
+  referenceGrammarTools?: StudioReferenceGrammarTools;
 }
+
+export type StudioReferenceGrammarTools = Required<Pick<ReferenceGrammarAgent, "revise" | "auditCurrent">>
+  & Partial<Pick<ReferenceGrammarAgent, "id">>;
 
 /** 发布文案交付的修订与再审端口；由宿主用带审计配置的 CodexPublishCopyWriter 装配。 */
 export interface StudioDocumentCopyTools {
@@ -513,6 +522,7 @@ export class ProductionStudio {
     label: string;
     mimeType: "video/mp4" | "video/quicktime" | "video/webm";
     bytes: Buffer;
+    videoPath: string;
   }> {
     const reference = brief.referenceVideo;
     if (!reference) throw new StudioConflictError("上一版没有可继承的参考视频，请重新上传。");
@@ -532,7 +542,7 @@ export class ProductionStudio {
     if (bytes.length !== reference.sizeBytes || actualSha256 !== reference.sha256) {
       throw new StudioConflictError("上一版参考视频内容已经变化，请重新上传后再制作。");
     }
-    return { label: reference.label, mimeType: reference.mimeType, bytes };
+    return { label: reference.label, mimeType: reference.mimeType, bytes, videoPath: artifact.uri };
   }
 
   // joint-v1 的正式脚本/导演方案由 creative-planning 节点产出；返工读取上一版文档时按拓扑
@@ -1961,11 +1971,11 @@ export class ProductionStudio {
       overrideArtifacts = prepared.artifacts;
       humanDocumentPaths = prepared.cleanupPaths;
     }
-    // 旧产物没有 contentReview；本次文档保存由服务端补上“本版未审”元数据。
-    // 仅该受控路径扩展校验基线，普通 output 编辑仍不能自行伪造审计状态。
+    // 文档修订由服务端重置为“本版未审”；上一版的审计身份与历史不属于新稿。
+    // 仅替换该托管字段的校验基线，普通 output 编辑仍不能自行伪造审计状态。
     const validationReference = editsDocument
       && (nodeId === "reference-grammar" || nodeId === "publish-package")
-      && isRecord(reference) && !("contentReview" in reference)
+      && isRecord(reference)
       && isRecord(overrideOutput) && isRecord(overrideOutput.contentReview)
       ? { ...reference, contentReview: overrideOutput.contentReview }
       : reference;
@@ -2011,38 +2021,57 @@ export class ProductionStudio {
     }
   }
 
-  /** S4：发布文案 AI 修订——只产一次所授权的修订，零独立审计；产出为未审新稿并停在人工决定。 */
+  /** 文字交付修订只产未审新稿；原报告和参考片证据在验证完成前保持有效。 */
   async reviseNodeDocument(
     runId: string,
     nodeId: string,
     input: StudioNodeDocumentRevisionInput,
     actor: string,
   ): Promise<StudioRunDetail> {
-    if (nodeId !== "publish-package") {
-      throw new StudioInputError("当前只有发布文案支持 AI 修订；请选择发布文案交付后再发送修订意见。");
+    if (nodeId !== "publish-package" && nodeId !== "reference-grammar") {
+      throw new StudioInputError("请选择发布文案或参考视频分析报告后再发送修订意见。");
     }
     const instruction = typeof input.instruction === "string" ? input.instruction.trim() : "";
     if (!instruction || [...instruction].length > 4_000) {
       throw new StudioInputError("修订意见需要 1 到 4000 字；超长时请删减后再发送，原文字不会被截断。");
     }
-    const tools = this.options.documentCopyTools;
-    if (!tools) throw new StudioConflictError("当前没有可用的发布文案修订模型；原稿保持不变。");
+    if (nodeId === "publish-package" && !this.options.documentCopyTools) {
+      throw new StudioConflictError("当前没有可用的发布文案修订模型；原稿保持不变。");
+    }
+    if (nodeId === "reference-grammar" && !this.options.referenceGrammarTools) {
+      throw new StudioConflictError("当前没有可用的参考视频分析修订模型；原报告保持不变。");
+    }
     const context = await this.prepareNodeDocumentContext(runId, nodeId, {
       expectedRunRevision: input.expectedRunRevision,
       expectedVersionId: input.expectedVersionId,
       confirmTerminalEdit: input.confirmTerminalEdit === true,
     });
     const brief = effectiveProductionBrief(context.run);
-    const [revisedCopy] = await Promise.all([
-      tools.revise({
+    let nextDocument: Record<string, unknown>;
+    if (context.content.kind === "reference-grammar") {
+      const tools = this.options.referenceGrammarTools!;
+      const framesRoot = path.join(this.options.workspaceRoot, "runs", runId, "nodes", nodeId, "model-revisions", `frames-${randomUUID()}`);
+      try {
+        const grammar = await tools.revise({
+          ...context.content, runRoot: framesRoot, currentGrammar: context.content.grammar, instruction,
+          ...(brief.models?.[tools.id ?? "codex-reference-grammar-v1"]
+            ? { selectedModelId: brief.models[tools.id ?? "codex-reference-grammar-v1"] } : {}),
+        });
+        nextDocument = { ...validateShotGrammar(grammar, context.content.grammar.durationMs) };
+      } catch (error) {
+        await rm(framesRoot, { recursive: true, force: true });
+        throw error;
+      }
+    } else {
+      const revisedCopy = await this.options.documentCopyTools!.revise({
         platform: brief.platform,
         brief: { title: brief.title, angle: brief.angle, audience: brief.audience, nicheSlug: brief.nicheSlug },
-        narrations: context.narrations,
-        currentCopy: context.copy,
+        narrations: context.content.narrations,
+        currentCopy: context.content.copy,
         instruction,
-      }),
-    ]);
-    const nextDocument = withRevisedPublishCopy(context.document, revisedCopy);
+      });
+      nextDocument = withRevisedPublishCopy(context.document, revisedCopy);
+    }
     const prepared = await this.prepareDocumentOverride({
       runId,
       nodeId,
@@ -2059,7 +2088,7 @@ export class ProductionStudio {
     }
     validateNodeOverrideOutput({
       output: prepared.output,
-      reference: context.reference,
+      reference: { ...context.reference, contentReview: prepared.output.contentReview },
       nodeId,
       runRoot: path.join(this.options.workspaceRoot, "runs", runId),
       allowPathChanges: true,
@@ -2086,76 +2115,56 @@ export class ProductionStudio {
     }
   }
 
-  /** S4：发布文案主动再审——只审当前精确稿一次，零产稿、零推进；审计身份写入 contentReview。 */
+  /** 文字交付主动再审只追加当前版本的审计记录，不换稿、不使下游失效。 */
   async auditNodeDocumentCurrent(
     runId: string,
     nodeId: string,
     input: StudioNodeDocumentAuditInput,
     actor: string,
   ): Promise<StudioRunDetail> {
-    if (nodeId !== "publish-package") {
-      throw new StudioInputError("当前只有发布文案支持主动再审；请选择发布文案交付后再审计当前版本。");
+    if (nodeId !== "publish-package" && nodeId !== "reference-grammar") {
+      throw new StudioInputError("请选择发布文案或参考视频分析报告后再审计当前版本。");
     }
-    const tools = this.options.documentCopyTools;
-    if (!tools) throw new StudioConflictError("当前没有可用的发布文案审计模型；原稿保持不变。");
+    if (nodeId === "publish-package" && !this.options.documentCopyTools) {
+      throw new StudioConflictError("当前没有可用的发布文案审计模型；原稿保持不变。");
+    }
+    if (nodeId === "reference-grammar" && !this.options.referenceGrammarTools) {
+      throw new StudioConflictError("当前没有可用的参考视频分析审计模型；原报告保持不变。");
+    }
     const context = await this.prepareNodeDocumentContext(runId, nodeId, {
       expectedRunRevision: input.expectedRunRevision,
       expectedVersionId: input.expectedVersionId,
       confirmTerminalEdit: false,
     });
     const brief = effectiveProductionBrief(context.run);
-    const execution = await tools.auditCurrent({
-      platform: brief.platform,
-      brief: { title: brief.title, angle: brief.angle, audience: brief.audience, nicheSlug: brief.nicheSlug },
-      narrations: context.narrations,
-      copy: context.copy,
-    });
-    const audit = execution.audit;
-    const previousReview = isRecord(context.reference) && isRecord(context.reference.contentReview)
-      ? context.reference.contentReview
-      : undefined;
-    const contentReview = {
-      status: audit.verdict === "pass" ? "passed" as const : "has_suggestions" as const,
-      summary: audit.summary,
-      suggestions: audit.issues
-        .map((issue) => issue.creatorAction ?? issue.repairInstruction)
-        .filter((value) => Boolean(value && value.trim())),
-      // 审计身份：用户在采用决定里引用的就是这组字段，不虚构、不沿用上一版。
-      auditId: `audit-${randomUUID()}`,
-      auditedAt: (this.options.now?.() ?? new Date()).toISOString(),
-      score: audit.score,
-      ...(previousReview?.auditId ? { previousAuditId: previousReview.auditId } : {}),
-    };
-    const reference = context.reference;
-    const output: Record<string, unknown> = { ...(reference as Record<string, unknown>), contentReview };
-    // 受控审计通道基线：contentReview 的字段集合由服务端本次审计决定（可能新增 auditId 等
-    // 托管字段），shape 校验以“reference 其它字段原样 + contentReview 本次写入”为准。
-    const validationReference = isRecord(reference)
-      ? {
-        ...reference,
-        ...(isRecord(output.contentReview)
-          ? { contentReview: {
-            ...(isRecord(reference.contentReview) ? reference.contentReview : {}),
-            ...output.contentReview,
-          } }
-          : {}),
+    let execution: PublishCopyAuditExecution;
+    if (context.content.kind === "reference-grammar") {
+      const tools = this.options.referenceGrammarTools!;
+      const framesRoot = path.join(this.options.workspaceRoot, "runs", runId, "nodes", nodeId, "audit-evidence", `frames-${randomUUID()}`);
+      try {
+        execution = await tools.auditCurrent({
+          videoPath: context.content.videoPath, sourceLabel: context.content.sourceLabel,
+          grammar: context.content.grammar, runRoot: framesRoot,
+          ...(brief.models?.[tools.id ?? "codex-reference-grammar-v1"]
+            ? { selectedModelId: brief.models[tools.id ?? "codex-reference-grammar-v1"] } : {}),
+        });
+      } catch (error) {
+        await rm(framesRoot, { recursive: true, force: true });
+        throw error;
       }
-      : reference;
-    validateNodeOverrideOutput({
-      output,
-      reference: validationReference,
-      nodeId,
-      runRoot: path.join(this.options.workspaceRoot, "runs", runId),
-      allowPathChanges: false,
-    });
+    } else {
+      execution = await this.options.documentCopyTools!.auditCurrent({
+        platform: brief.platform,
+        brief: { title: brief.title, angle: brief.angle, audience: brief.audience, nicheSlug: brief.nicheSlug },
+        narrations: context.content.narrations,
+        copy: context.content.copy,
+      });
+    }
     try {
-      const updated = await this.options.pipeline.applyNodeOverride(runId, {
-        nodeId,
-        actor,
-        output,
+      const updated = await this.options.pipeline.recordNodeDocumentAudit(runId, {
+        nodeId, actor, expectedRunRevision: input.expectedRunRevision,
         expectedVersionId: context.effectiveVersion.id,
-        allowTerminalEdit: false,
-        schemaVersion: context.effectiveVersion.schemaVersion ?? "1",
+        auditId: `audit-${randomUUID()}`, audit: execution.audit,
       });
       const detail = this.toDetail(updated);
       this.publish(detail);
@@ -2176,10 +2185,10 @@ export class ProductionStudio {
   ): Promise<{
     run: WorkflowRun<ProductionBrief>;
     node: WorkflowRun<ProductionBrief>["nodeRuns"][number];
-    reference: unknown;
+    reference: Record<string, unknown>;
     document: Record<string, unknown>;
-    copy: PublishCopy;
-    narrations: string[];
+    content: { kind: "publish-package"; copy: PublishCopy; narrations: string[] }
+      | { kind: "reference-grammar"; grammar: ShotGrammar; videoPath: string; sourceLabel: string };
     artifact: WorkflowRun<ProductionBrief>["artifacts"][number];
     nodeArtifactIds: string[];
     effectiveVersion: NonNullable<WorkflowRun<ProductionBrief>["nodeRuns"][number]["outputState"]>["versions"][number];
@@ -2225,15 +2234,22 @@ export class ProductionStudio {
       throw new StudioInputError("当前结构化产物无法读取，请先重新生成该节点。");
     }
     if (!isRecord(document)) throw new StudioInputError("当前结构化产物不是 JSON 对象，无法修订。");
-    const copy = extractPublishCopy(document);
-    const narrations = await readRunScriptNarrations(current, this.options.workspaceRoot, runId);
+    let content: { kind: "publish-package"; copy: PublishCopy; narrations: string[] }
+      | { kind: "reference-grammar"; grammar: ShotGrammar; videoPath: string; sourceLabel: string };
+    if (nodeId === "reference-grammar") {
+      const source = await this.verifiedReferenceVideoForRun(current, effectiveProductionBrief(current));
+      content = { kind: "reference-grammar", grammar: validateShotGrammar(document, Number(document.durationMs)),
+        videoPath: source.videoPath, sourceLabel: source.label };
+    } else {
+      content = { kind: "publish-package", copy: extractPublishCopy(document),
+        narrations: await readRunScriptNarrations(current, this.options.workspaceRoot, runId) };
+    }
     return {
       run: current,
       node,
       reference,
       document,
-      copy,
-      narrations,
+      content,
       artifact,
       nodeArtifactIds: node.artifactIds,
       effectiveVersion,

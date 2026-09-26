@@ -1,0 +1,513 @@
+TAP version 13
+# Subtest: joint-v1 rework routes back to the right stages (B5)
+    # Subtest: keeps a model-generated out-of-scope director plan at a recoverable stop without reaching assets
+    ok 1 - keeps a model-generated out-of-scope director plan at a recoverable stop without reaching assets
+      ---
+      duration_ms: 749.30225
+      type: 'test'
+      ...
+    # Subtest: keeps an out-of-scope global director edit unadopted at the human gate
+    ok 2 - keeps an out-of-scope global director edit unadopted at the human gate
+      ---
+      duration_ms: 511.087125
+      type: 'test'
+      ...
+    # Subtest: reads the previous script and director plan from the creative-planning artifacts
+    ok 3 - reads the previous script and director plan from the creative-planning artifacts
+      ---
+      duration_ms: 425.0665
+      type: 'test'
+      ...
+    # Subtest: feeds rework instructions to the script and director planning stages
+    ok 4 - feeds rework instructions to the script and director planning stages
+      ---
+      duration_ms: 570.056958
+      type: 'test'
+      ...
+    # Subtest: routes a rejected joint asset quote back to creative-planning with director cost feedback only
+    ok 5 - routes a rejected joint asset quote back to creative-planning with director cost feedback only
+      ---
+      duration_ms: 517.825292
+      type: 'test'
+      ...
+    1..5
+ok 1 - joint-v1 rework routes back to the right stages (B5)
+  ---
+  duration_ms: 2774.160083
+  type: 'suite'
+  ...
+# Subtest: CodexScreenwriterAgent
+    # Subtest: rejects a stale selected model before calling a single configured agent
+    ok 1 - rejects a stale selected model before calling a single configured agent
+      ---
+      duration_ms: 1.09175
+      type: 'test'
+      ...
+    # Subtest: routes stateless DeepSeek production and independent OpenAI audit to separate clients
+    ok 2 - routes stateless DeepSeek production and independent OpenAI audit to separate clients
+      ---
+      duration_ms: 5.226542
+      type: 'test'
+      ...
+    # Subtest: keeps revisions stateful while each full independent audit starts without inherited history
+    ok 3 - keeps revisions stateful while each full independent audit starts without inherited history
+      ---
+      duration_ms: 0.980834
+      type: 'test'
+      ...
+    # Subtest: keeps the previous script in the producer input without duplicating it into the independent audit
+    ok 4 - keeps the previous script in the producer input without duplicating it into the independent audit
+      ---
+      duration_ms: 0.541583
+      type: 'test'
+      ...
+    # Subtest: keeps unaffected scenes and top-level intent byte-for-byte through every scoped repair round
+    ok 5 - keeps unaffected scenes and top-level intent byte-for-byte through every scoped repair round
+      ---
+      duration_ms: 0.953542
+      type: 'test'
+      ...
+    # Subtest: rejects a changed candidate when an empty scope bypasses pre-call script reuse
+    ok 6 - rejects a changed candidate when an empty scope bypasses pre-call script reuse
+      ---
+      duration_ms: 0.37375
+      type: 'test'
+      ...
+    # Subtest: uses the shared wall-clock deadline as an admission gate without shortening accepted operations
+    ok 7 - uses the shared wall-clock deadline as an admission gate without shortening accepted operations
+      ---
+      duration_ms: 0.696458
+      type: 'test'
+      ...
+    # Subtest: allows three audit and repair rounds by default
+    ok 8 - allows three audit and repair rounds by default
+      ---
+      duration_ms: 2.793625
+      type: 'test'
+      ...
+    # Subtest: sends the script-draft payload and returns the validated draft
+    ok 9 - sends the script-draft payload and returns the validated draft
+      ---
+      duration_ms: 0.381792
+      type: 'test'
+      ...
+    # Subtest: uses the explicit duration range in production, validation, and audit context
+    ok 10 - uses the explicit duration range in production, validation, and audit context
+      ---
+      duration_ms: 0.897583
+      type: 'test'
+      ...
+    # Subtest: gives the auditor host-computed exact duration and canon boundary facts
+    ok 11 - gives the auditor host-computed exact duration and canon boundary facts
+      ---
+      duration_ms: 0.348834
+      type: 'test'
+      ...
+    # Subtest: rejects invalid brief targets before sending anything to codex
+    ok 12 - rejects invalid brief targets before sending anything to codex
+      ---
+      duration_ms: 0.169333
+      type: 'test'
+      ...
+    # Subtest: validateScriptDraft enforces its own target bounds
+    ok 13 - validateScriptDraft enforces its own target bounds
+      ---
+      duration_ms: 0.177292
+      type: 'test'
+      ...
+    # Subtest: requires an explicit 0-8 canon facts array for a series script
+    ok 14 - requires an explicit 0-8 canon facts array for a series script
+      ---
+      duration_ms: 0.700875
+      type: 'test'
+      ...
+    # Subtest: preserves the v2 viewer promise and inspectable shot intent
+    ok 15 - preserves the v2 viewer promise and inspectable shot intent
+      ---
+      duration_ms: 0.153625
+      type: 'test'
+      ...
+    # Subtest: keeps generated scenes inside an explicit illustration boundary
+    ok 16 - keeps generated scenes inside an explicit illustration boundary
+      ---
+      duration_ms: 0.741583
+      type: 'test'
+      ...
+    # Subtest: rejects non-contract drafts without any fallback
+    ok 17 - rejects non-contract drafts without any fallback
+      ---
+      duration_ms: 0.900042
+      type: 'test'
+      ...
+    1..17
+ok 2 - CodexScreenwriterAgent
+  ---
+  duration_ms: 18.318083
+  type: 'suite'
+  ...
+# Subtest: joint-v1 planning edit contract (B4-REMAINDER)
+    # Subtest: carries adopted article evidence through every planning role and invalidates all dependent stages when it changes
+    ok 1 - carries adopted article evidence through every planning role and invalidates all dependent stages when it changes
+      ---
+      duration_ms: 632.553542
+      type: 'test'
+      ...
+    # Subtest: lets only one of two concurrent confirmation command ids advance the current gate
+    ok 2 - lets only one of two concurrent confirmation command ids advance the current gate
+      ---
+      duration_ms: 149.92825
+      type: 'test'
+      ...
+    # Subtest: 只认当前那一份复核：过期页面上的“仍然确认”被拒，当前页面的复用不再新增审计
+    ok 3 - 只认当前那一份复核：过期页面上的“仍然确认”被拒，当前页面的复用不再新增审计
+      ---
+      duration_ms: 211.610917
+      type: 'test'
+      ...
+    # Subtest: projects three durable creative review waits and rejects generic approval
+    ok 4 - projects three durable creative review waits and rejects generic approval
+      ---
+      duration_ms: 442.240958
+      type: 'test'
+      ...
+    # Subtest: pauses paid generation on an unfinished source review; approve cannot skip it and retry only completes the review
+    ok 5 - pauses paid generation on an unfinished source review; approve cannot skip it and retry only completes the review
+      ---
+      duration_ms: 586.728625
+      type: 'test'
+      ...
+    # Subtest: feeds visual intent and script-owned rework into treatment identity and execution
+    ok 6 - feeds visual intent and script-owned rework into treatment identity and execution
+      ---
+      duration_ms: 350.355167
+      type: 'test'
+      ...
+    # Subtest: feeds the edited planning input (request.brief) into the next planning execution
+    ok 7 - feeds the edited planning input (request.brief) into the next planning execution
+      ---
+      duration_ms: 370.920833
+      type: 'test'
+      ...
+    # Subtest: strips a legacy template snapshot without invalidating accepted planning
+    ok 8 - strips a legacy template snapshot without invalidating accepted planning
+      ---
+      duration_ms: 326.265042
+      type: 'test'
+      ...
+    # Subtest: isolates joint script and director role checkpoints by the actual selected model
+    ok 9 - isolates joint script and director role checkpoints by the actual selected model
+      ---
+      duration_ms: 162.687583
+      type: 'test'
+      ...
+    # Subtest: keeps the valid treatment and script when only the director model changes
+    ok 10 - keeps the valid treatment and script when only the director model changes
+      ---
+      duration_ms: 345.360208
+      type: 'test'
+      ...
+    # Subtest: routes treatment model selection through the existing candidate ordering contract
+    ok 11 - routes treatment model selection through the existing candidate ordering contract
+      ---
+      duration_ms: 162.700958
+      type: 'test'
+      ...
+    # Subtest: fails over to the next treatment candidate on a confirmed not_accepted provider failure
+    ok 12 - fails over to the next treatment candidate on a confirmed not_accepted provider failure
+      ---
+      duration_ms: 168.461583
+      type: 'test'
+      ...
+    # Subtest: binds planning role traces to the current input digest only
+    ok 13 - binds planning role traces to the current input digest only
+      ---
+      duration_ms: 359.861292
+      type: 'test'
+      ...
+    1..13
+ok 3 - joint-v1 planning edit contract (B4-REMAINDER)
+  ---
+  duration_ms: 4271.055417
+  type: 'suite'
+  ...
+# Subtest: joint-v1 planning closure Oracle fixes (B4-FIX)
+    # Subtest: delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=false)
+    ok 1 - delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=false)
+      ---
+      duration_ms: 435.546583
+      type: 'test'
+      ...
+    # Subtest: delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=true)
+    ok 2 - delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=true)
+      ---
+      duration_ms: 478.586
+      type: 'test'
+      ...
+    # Subtest: delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=incomplete)
+    ok 3 - delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=incomplete)
+      ---
+      duration_ms: 496.9
+      type: 'test'
+      ...
+    # Subtest: preserves valid treatment and script when editing after a partially failed plan
+    ok 4 - preserves valid treatment and script when editing after a partially failed plan
+      ---
+      duration_ms: 351.846416
+      type: 'test'
+      ...
+    # Subtest: seeds from the most recently executed digest after an A→B→A replay
+    ok 5 - seeds from the most recently executed digest after an A→B→A replay
+      ---
+      duration_ms: 727.031083
+      type: 'test'
+      ...
+    # Subtest: carries model provenance for seeded stages into the new digest record
+    ok 6 - carries model provenance for seeded stages into the new digest record
+      ---
+      duration_ms: 388.354042
+      type: 'test'
+      ...
+    # Subtest: re-runs the director when the asset provider catalog changes under the same ids
+    ok 7 - re-runs the director when the asset provider catalog changes under the same ids
+      ---
+      duration_ms: 337.546166
+      type: 'test'
+      ...
+    # Subtest: fails closed instead of carrying a treatment across an unavailable model selection
+    ok 8 - fails closed instead of carrying a treatment across an unavailable model selection
+      ---
+      duration_ms: 222.4075
+      type: 'test'
+      ...
+    # Subtest: gives every treatment fallback candidate a durable role checkpoint
+    ok 9 - gives every treatment fallback candidate a durable role checkpoint
+      ---
+      duration_ms: 170.628875
+      type: 'test'
+      ...
+# (node:21659) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+    # Subtest: preserves library evidence across a director-stage edit on the library route
+    ok 10 - preserves library evidence across a director-stage edit on the library route
+      ---
+      duration_ms: 364.086625
+      type: 'test'
+      ...
+    # Subtest: recovers an expired real ranking audit into the joint planning human gate
+    ok 11 - recovers an expired real ranking audit into the joint planning human gate
+      ---
+      duration_ms: 550.444041
+      type: 'test'
+      ...
+    # Subtest: recovers an expired real ranking unchanged-producer into the joint planning human gate
+    ok 12 - recovers an expired real ranking unchanged-producer into the joint planning human gate
+      ---
+      duration_ms: 490.971584
+      type: 'test'
+      ...
+    # Subtest: uses the selected ranking model and invalidates only ranking evidence when that selection changes
+    ok 13 - uses the selected ranking model and invalidates only ranking evidence when that selection changes
+      ---
+      duration_ms: 383.591417
+      type: 'test'
+      ...
+    # Subtest: reranks with the new ranker identity when only the ranker changes, without re-searching
+    ok 14 - reranks with the new ranker identity when only the ranker changes, without re-searching
+      ---
+      duration_ms: 255.909625
+      type: 'test'
+      ...
+    # Subtest: invalidates a completed ranking cache when only the ranker identity changes
+    ok 15 - invalidates a completed ranking cache when only the ranker identity changes
+      ---
+      duration_ms: 505.280041
+      type: 'test'
+      ...
+    # Subtest: keeps provider and model identities separate in formal planning provenance
+    ok 16 - keeps provider and model identities separate in formal planning provenance
+      ---
+      duration_ms: 330.963333
+      type: 'test'
+      ...
+    # Subtest: sends the accepted series promise into the treatment role request
+    ok 17 - sends the accepted series promise into the treatment role request
+      ---
+      duration_ms: 341.555625
+      type: 'test'
+      ...
+    # Subtest: fails closed at the quote boundary when executable plan references do not resolve
+    ok 18 - fails closed at the quote boundary when executable plan references do not resolve
+      ---
+      duration_ms: 214.2835
+      type: 'test'
+      ...
+    # Subtest: revises narration without evicting the script its commit-registered executable plan references
+    ok 19 - revises narration without evicting the script its commit-registered executable plan references
+      ---
+      duration_ms: 262.880625
+      type: 'test'
+      ...
+    1..19
+ok 4 - joint-v1 planning closure Oracle fixes (B4-FIX)
+  ---
+  duration_ms: 7310.053875
+  type: 'suite'
+  ...
+# Subtest: planning failure creator copy (B4-FIX)
+    # Subtest: maps internal halt reasons to creator-facing text without leaking internals
+    ok 1 - maps internal halt reasons to creator-facing text without leaking internals
+      ---
+      duration_ms: 1.018083
+      type: 'test'
+      ...
+    # Subtest: keeps a creator-facing Chinese failure reason as written
+    ok 2 - keeps a creator-facing Chinese failure reason as written
+      ---
+      duration_ms: 0.18975
+      type: 'test'
+      ...
+    1..2
+ok 5 - planning failure creator copy (B4-FIX)
+  ---
+  duration_ms: 1.257875
+  type: 'suite'
+  ...
+# Subtest: same-digest replay fails closed when stage inputs drift (B-FIX)
+    # Subtest: rejects retrying a failed plan thread whose director inputs were built against a different catalog
+    ok 1 - rejects retrying a failed plan thread whose director inputs were built against a different catalog
+      ---
+      duration_ms: 99.554625
+      type: 'test'
+      ...
+    1..1
+ok 6 - same-digest replay fails closed when stage inputs drift (B-FIX)
+  ---
+  duration_ms: 99.649042
+  type: 'suite'
+  ...
+# Subtest: joint planning physical execution summary (Revision 9)
+    # Subtest: aggregates every role checkpoint by physical request identity without double-counting repairs or unknown work
+    ok 1 - aggregates every role checkpoint by physical request identity without double-counting repairs or unknown work
+      ---
+      duration_ms: 54.941166
+      type: 'test'
+      ...
+    1..1
+ok 7 - joint planning physical execution summary (Revision 9)
+  ---
+  duration_ms: 55.037208
+  type: 'suite'
+  ...
+# Subtest: settled audit candidate exhaustion through the production pipeline
+    # Subtest: keeps the valid draft at a human gate when every audit candidate is definitively unavailable
+    ok 1 - keeps the valid draft at a human gate when every audit candidate is definitively unavailable
+      ---
+      duration_ms: 134.961167
+      type: 'test'
+      ...
+    # Subtest: does not convert a mixed candidate failure into an incomplete audit (uncertain)
+    ok 2 - does not convert a mixed candidate failure into an incomplete audit (uncertain)
+      ---
+      duration_ms: 53.438417
+      type: 'test'
+      ...
+    # Subtest: does not convert a mixed candidate failure into an incomplete audit (conflict)
+    ok 3 - does not convert a mixed candidate failure into an incomplete audit (conflict)
+      ---
+      duration_ms: 47.843125
+      type: 'test'
+      ...
+    # Subtest: does not convert a mixed candidate failure into an incomplete audit (rejected)
+    ok 4 - does not convert a mixed candidate failure into an incomplete audit (rejected)
+      ---
+      duration_ms: 48.024084
+      type: 'test'
+      ...
+    # Subtest: does not convert a mixed candidate failure into an incomplete audit (missing-state)
+    ok 5 - does not convert a mixed candidate failure into an incomplete audit (missing-state)
+      ---
+      duration_ms: 46.824208
+      type: 'test'
+      ...
+    # Subtest: does not convert a mixed candidate failure into an incomplete audit (old-operation)
+    ok 6 - does not convert a mixed candidate failure into an incomplete audit (old-operation)
+      ---
+      duration_ms: 52.53
+      type: 'test'
+      ...
+    1..6
+ok 8 - settled audit candidate exhaustion through the production pipeline
+  ---
+  duration_ms: 383.976292
+  type: 'suite'
+  ...
+# Subtest: the real screenwriter adapter delivers out-of-scope scene structure to the human gate without repair loops
+ok 9 - the real screenwriter adapter delivers out-of-scope scene structure to the human gate without repair loops
+  ---
+  duration_ms: 139.667292
+  type: 'test'
+  ...
+# Subtest: the real screenwriter adapter delivers out-of-scope global intent to the human gate without repair loops
+ok 10 - the real screenwriter adapter delivers out-of-scope global intent to the human gate without repair loops
+  ---
+  duration_ms: 141.9035
+  type: 'test'
+  ...
+# Subtest: retrieving a late audit completes only its original creative command receipt
+ok 11 - retrieving a late audit completes only its original creative command receipt
+  ---
+  duration_ms: 234.982958
+  type: 'test'
+  ...
+# Subtest: planningReviewCheckpointIdentity (OA-01)
+    # Subtest: separates two new audit_current operations on the same draft
+    ok 1 - separates two new audit_current operations on the same draft
+      ---
+      duration_ms: 0.192167
+      type: 'test'
+      ...
+    # Subtest: keeps one operation stable across recovery replays
+    ok 2 - keeps one operation stable across recovery replays
+      ---
+      duration_ms: 0.041875
+      type: 'test'
+      ...
+    # Subtest: does not reuse the initial-draft audit for a re-created identical version (A→B→A)
+    ok 3 - does not reuse the initial-draft audit for a re-created identical version (A→B→A)
+      ---
+      duration_ms: 0.049625
+      type: 'test'
+      ...
+    # Subtest: keeps the legacy derivation when no operation id is present
+    ok 4 - keeps the legacy derivation when no operation id is present
+      ---
+      duration_ms: 0.043542
+      type: 'test'
+      ...
+    1..4
+ok 12 - planningReviewCheckpointIdentity (OA-01)
+  ---
+  duration_ms: 0.384542
+  type: 'suite'
+  ...
+# Subtest: 旧操作的异常经新操作重抛：helper 不改签、图层零登记、停点保留（R9-01）
+ok 13 - 旧操作的异常经新操作重抛：helper 不改签、图层零登记、停点保留（R9-01）
+  ---
+  duration_ms: 176.516458
+  type: 'test'
+  ...
+# Subtest: 旧操作绑定的 uncertain 异常经新操作重抛：原异常传播、零登记、不转停点（R11-V02）
+ok 14 - 旧操作绑定的 uncertain 异常经新操作重抛：原异常传播、零登记、不转停点（R11-V02）
+  ---
+  duration_ms: 126.250042
+  type: 'test'
+  ...
+1..14
+# tests 73
+# suites 9
+# pass 73
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 14091.35375

@@ -1,0 +1,933 @@
+TAP version 13
+# {"component":"videofactory","event":"model.started","timestamp":"2026-09-26T04:18:29.823Z","requestId":"agent-61d94120082c7215bf93f392b987ab896e37a373eef2a187790f655317be4c49","taskKind":"script-draft","providerId":"openai","modelId":"integration-model","queueWaitMs":0}
+# {"component":"videofactory","event":"model.finished","timestamp":"2026-09-26T04:18:29.823Z","category":"timeout","reasonCode":"provider_timeout","providerId":"openai","modelId":"integration-model","requestId":"agent-61d94120082c7215bf93f392b987ab896e37a373eef2a187790f655317be4c49","taskKind":"script-draft","queueWaitMs":0,"status":"failed","errorType":"CodexExecutorError","elapsedMs":0}
+# Subtest: formal text-task recovery through Studio and joint-v1 pipeline
+    # Subtest: settles a first-produce terminal failure through the real socket and releases the run
+    ok 1 - settles a first-produce terminal failure through the real socket and releases the run
+      ---
+      duration_ms: 172.59575
+      type: 'test'
+      ...
+    # Subtest: preserves a redacted Broker field diagnostic through the real node and Studio reload
+    ok 2 - preserves a redacted Broker field diagnostic through the real node and Studio reload
+      ---
+      duration_ms: 90.536958
+      type: 'test'
+      ...
+# {"component":"videofactory","event":"model.started","timestamp":"2026-09-26T04:18:30.035Z","requestId":"agent-82f93e3cd56ea1b72f419690e8f8afc6af59d3ee3250e828ebe89fb37cff20ca","taskKind":"script-draft","providerId":"openai","modelId":"integration-model","queueWaitMs":0}
+# {"component":"videofactory","event":"model.finished","timestamp":"2026-09-26T04:18:30.035Z","taskKind":"script-draft","providerId":"openai","modelId":"integration-model","requestId":"agent-82f93e3cd56ea1b72f419690e8f8afc6af59d3ee3250e828ebe89fb37cff20ca","queueWaitMs":0,"status":"succeeded","elapsedMs":0}
+# {"component":"videofactory","event":"model.started","timestamp":"2026-09-26T04:18:30.064Z","requestId":"agent-e0bbfd3758f9bd0383ae9685c74e7f651074cf5b103c2cdfb219a08606fa257b","taskKind":"role-audit","providerId":"openai","modelId":"integration-model","queueWaitMs":0}
+# {"component":"videofactory","event":"model.finished","timestamp":"2026-09-26T04:18:30.064Z","taskKind":"role-audit","providerId":"openai","modelId":"integration-model","requestId":"agent-e0bbfd3758f9bd0383ae9685c74e7f651074cf5b103c2cdfb219a08606fa257b","queueWaitMs":0,"status":"succeeded","elapsedMs":0}
+    # Subtest: carries a planning source gap as an advice and still reaches the human review
+    ok 3 - carries a planning source gap as an advice and still reaches the human review
+      ---
+      duration_ms: 260.900583
+      type: 'test'
+      ...
+# {"component":"videofactory","event":"model.started","timestamp":"2026-09-26T04:18:30.298Z","requestId":"agent-55e10e4379b2b93f9318e94ce897b05908c615d1855dc93e11f405dfab676581","taskKind":"script-draft","providerId":"openai","modelId":"integration-model","queueWaitMs":0}
+# {"component":"videofactory","event":"model.finished","timestamp":"2026-09-26T04:18:30.380Z","taskKind":"script-draft","providerId":"openai","modelId":"integration-model","requestId":"agent-55e10e4379b2b93f9318e94ce897b05908c615d1855dc93e11f405dfab676581","queueWaitMs":0,"status":"succeeded","elapsedMs":82}
+# {"component":"videofactory","event":"model.started","timestamp":"2026-09-26T04:18:30.450Z","requestId":"agent-a133b896e189e907b876b47f26b1500ada6fc8d379ae4648a39d94908e065de7","taskKind":"role-audit","providerId":"openai","modelId":"integration-model","queueWaitMs":0}
+# {"component":"videofactory","event":"model.finished","timestamp":"2026-09-26T04:18:30.450Z","taskKind":"role-audit","providerId":"openai","modelId":"integration-model","requestId":"agent-a133b896e189e907b876b47f26b1500ada6fc8d379ae4648a39d94908e065de7","queueWaitMs":0,"status":"succeeded","elapsedMs":0}
+    # Subtest: consumes one late completed_success result and advances the real workflow once
+    ok 4 - consumes one late completed_success result and advances the real workflow once
+      ---
+      duration_ms: 366.350375
+      type: 'test'
+      ...
+# {"component":"videofactory","event":"model.started","timestamp":"2026-09-26T04:18:30.663Z","requestId":"agent-54e0d71cf7aa0681a64428b5a5ce35de706e71b0d87389adfb6bf28f3f146de0","taskKind":"script-draft","providerId":"openai","modelId":"integration-model","queueWaitMs":0}
+# {"component":"videofactory","event":"model.finished","timestamp":"2026-09-26T04:18:30.744Z","category":"timeout","reasonCode":"provider_timeout","providerId":"openai","modelId":"integration-model","requestId":"agent-54e0d71cf7aa0681a64428b5a5ce35de706e71b0d87389adfb6bf28f3f146de0","taskKind":"script-draft","queueWaitMs":0,"status":"failed","errorType":"CodexExecutorError","elapsedMs":81}
+# {"component":"videofactory","event":"model.started","timestamp":"2026-09-26T04:18:30.800Z","requestId":"agent-1133632cb8d86b595afbc2480584828ca8379b2b8ae3cca6798da464540e2814","taskKind":"script-draft","providerId":"openai","modelId":"integration-model","queueWaitMs":0}
+# {"component":"videofactory","event":"model.finished","timestamp":"2026-09-26T04:18:30.800Z","taskKind":"script-draft","providerId":"openai","modelId":"integration-model","requestId":"agent-1133632cb8d86b595afbc2480584828ca8379b2b8ae3cca6798da464540e2814","queueWaitMs":0,"status":"succeeded","elapsedMs":0}
+# {"component":"videofactory","event":"model.started","timestamp":"2026-09-26T04:18:30.827Z","requestId":"agent-bf86378cc5458594162ab7a14b6a51dbc0b5503d9f76f42edb091851a34a5876","taskKind":"role-audit","providerId":"openai","modelId":"integration-model","queueWaitMs":0}
+# {"component":"videofactory","event":"model.finished","timestamp":"2026-09-26T04:18:30.827Z","taskKind":"role-audit","providerId":"openai","modelId":"integration-model","requestId":"agent-bf86378cc5458594162ab7a14b6a51dbc0b5503d9f76f42edb091851a34a5876","queueWaitMs":0,"status":"succeeded","elapsedMs":0}
+    # Subtest: consumes one late completed_failure result and advances the real workflow once
+    ok 5 - consumes one late completed_failure result and advances the real workflow once
+      ---
+      duration_ms: 366.0545
+      type: 'test'
+      ...
+    1..5
+ok 1 - formal text-task recovery through Studio and joint-v1 pipeline
+  ---
+  duration_ms: 1257.335792
+  type: 'suite'
+  ...
+# Subtest: joint-v1 planning edit contract (B4-REMAINDER)
+    # Subtest: carries adopted article evidence through every planning role and invalidates all dependent stages when it changes
+    ok 1 - carries adopted article evidence through every planning role and invalidates all dependent stages when it changes
+      ---
+      duration_ms: 618.256333
+      type: 'test'
+      ...
+    # Subtest: lets only one of two concurrent confirmation command ids advance the current gate
+    ok 2 - lets only one of two concurrent confirmation command ids advance the current gate
+      ---
+      duration_ms: 132.962917
+      type: 'test'
+      ...
+    # Subtest: 只认当前那一份复核：过期页面上的“仍然确认”被拒，当前页面的复用不再新增审计
+    ok 3 - 只认当前那一份复核：过期页面上的“仍然确认”被拒，当前页面的复用不再新增审计
+      ---
+      duration_ms: 193.80575
+      type: 'test'
+      ...
+    # Subtest: projects three durable creative review waits and rejects generic approval
+    ok 4 - projects three durable creative review waits and rejects generic approval
+      ---
+      duration_ms: 490.52025
+      type: 'test'
+      ...
+    # Subtest: pauses paid generation on an unfinished source review; approve cannot skip it and retry only completes the review
+    ok 5 - pauses paid generation on an unfinished source review; approve cannot skip it and retry only completes the review
+      ---
+      duration_ms: 381.650458
+      type: 'test'
+      ...
+    # Subtest: feeds visual intent and script-owned rework into treatment identity and execution
+    ok 6 - feeds visual intent and script-owned rework into treatment identity and execution
+      ---
+      duration_ms: 318.719167
+      type: 'test'
+      ...
+    # Subtest: feeds the edited planning input (request.brief) into the next planning execution
+    ok 7 - feeds the edited planning input (request.brief) into the next planning execution
+      ---
+      duration_ms: 315.532541
+      type: 'test'
+      ...
+    # Subtest: strips a legacy template snapshot without invalidating accepted planning
+    ok 8 - strips a legacy template snapshot without invalidating accepted planning
+      ---
+      duration_ms: 283.439709
+      type: 'test'
+      ...
+    # Subtest: isolates joint script and director role checkpoints by the actual selected model
+    ok 9 - isolates joint script and director role checkpoints by the actual selected model
+      ---
+      duration_ms: 151.67525
+      type: 'test'
+      ...
+    # Subtest: keeps the valid treatment and script when only the director model changes
+    ok 10 - keeps the valid treatment and script when only the director model changes
+      ---
+      duration_ms: 301.980291
+      type: 'test'
+      ...
+    # Subtest: routes treatment model selection through the existing candidate ordering contract
+    ok 11 - routes treatment model selection through the existing candidate ordering contract
+      ---
+      duration_ms: 150.421667
+      type: 'test'
+      ...
+    # Subtest: fails over to the next treatment candidate on a confirmed not_accepted provider failure
+    ok 12 - fails over to the next treatment candidate on a confirmed not_accepted provider failure
+      ---
+      duration_ms: 151.442375
+      type: 'test'
+      ...
+    # Subtest: binds planning role traces to the current input digest only
+    ok 13 - binds planning role traces to the current input digest only
+      ---
+      duration_ms: 324.133125
+      type: 'test'
+      ...
+    1..13
+ok 2 - joint-v1 planning edit contract (B4-REMAINDER)
+  ---
+  duration_ms: 3815.851542
+  type: 'suite'
+  ...
+# Subtest: joint-v1 planning closure Oracle fixes (B4-FIX)
+    # Subtest: delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=false)
+    ok 1 - delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=false)
+      ---
+      duration_ms: 710.045791
+      type: 'test'
+      ...
+    # Subtest: delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=true)
+    ok 2 - delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=true)
+      ---
+      duration_ms: 679.564
+      type: 'test'
+      ...
+    # Subtest: delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=incomplete)
+    ok 3 - delivers host-bound stock consent to the actual asset worker without changing scores (sourceReview=incomplete)
+      ---
+      duration_ms: 519.334084
+      type: 'test'
+      ...
+    # Subtest: preserves valid treatment and script when editing after a partially failed plan
+    ok 4 - preserves valid treatment and script when editing after a partially failed plan
+      ---
+      duration_ms: 210.546541
+      type: 'test'
+      ...
+    # Subtest: seeds from the most recently executed digest after an A→B→A replay
+    ok 5 - seeds from the most recently executed digest after an A→B→A replay
+      ---
+      duration_ms: 677.020959
+      type: 'test'
+      ...
+    # Subtest: carries model provenance for seeded stages into the new digest record
+    ok 6 - carries model provenance for seeded stages into the new digest record
+      ---
+      duration_ms: 431.302417
+      type: 'test'
+      ...
+    # Subtest: re-runs the director when the asset provider catalog changes under the same ids
+    ok 7 - re-runs the director when the asset provider catalog changes under the same ids
+      ---
+      duration_ms: 340.506333
+      type: 'test'
+      ...
+    # Subtest: fails closed instead of carrying a treatment across an unavailable model selection
+    ok 8 - fails closed instead of carrying a treatment across an unavailable model selection
+      ---
+      duration_ms: 249.282167
+      type: 'test'
+      ...
+    # Subtest: gives every treatment fallback candidate a durable role checkpoint
+    ok 9 - gives every treatment fallback candidate a durable role checkpoint
+      ---
+      duration_ms: 147.121958
+      type: 'test'
+      ...
+# (node:13848) ExperimentalWarning: The MockTimers API is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+    # Subtest: preserves library evidence across a director-stage edit on the library route
+    ok 10 - preserves library evidence across a director-stage edit on the library route
+      ---
+      duration_ms: 512.138292
+      type: 'test'
+      ...
+    # Subtest: recovers an expired real ranking audit into the joint planning human gate
+    ok 11 - recovers an expired real ranking audit into the joint planning human gate
+      ---
+      duration_ms: 992.892291
+      type: 'test'
+      ...
+    # Subtest: recovers an expired real ranking unchanged-producer into the joint planning human gate
+    ok 12 - recovers an expired real ranking unchanged-producer into the joint planning human gate
+      ---
+      duration_ms: 704.259542
+      type: 'test'
+      ...
+    # Subtest: uses the selected ranking model and invalidates only ranking evidence when that selection changes
+    ok 13 - uses the selected ranking model and invalidates only ranking evidence when that selection changes
+      ---
+      duration_ms: 384.089666
+      type: 'test'
+      ...
+    # Subtest: reranks with the new ranker identity when only the ranker changes, without re-searching
+    ok 14 - reranks with the new ranker identity when only the ranker changes, without re-searching
+      ---
+      duration_ms: 241.224166
+      type: 'test'
+      ...
+    # Subtest: invalidates a completed ranking cache when only the ranker identity changes
+    ok 15 - invalidates a completed ranking cache when only the ranker identity changes
+      ---
+      duration_ms: 223.961666
+      type: 'test'
+      ...
+    # Subtest: keeps provider and model identities separate in formal planning provenance
+    ok 16 - keeps provider and model identities separate in formal planning provenance
+      ---
+      duration_ms: 327.842125
+      type: 'test'
+      ...
+    # Subtest: sends the accepted series promise into the treatment role request
+    ok 17 - sends the accepted series promise into the treatment role request
+      ---
+      duration_ms: 314.41125
+      type: 'test'
+      ...
+    # Subtest: fails closed at the quote boundary when executable plan references do not resolve
+    ok 18 - fails closed at the quote boundary when executable plan references do not resolve
+      ---
+      duration_ms: 520.237417
+      type: 'test'
+      ...
+    # Subtest: revises narration without evicting the script its commit-registered executable plan references
+    ok 19 - revises narration without evicting the script its commit-registered executable plan references
+      ---
+      duration_ms: 362.11975
+      type: 'test'
+      ...
+    1..19
+ok 3 - joint-v1 planning closure Oracle fixes (B4-FIX)
+  ---
+  duration_ms: 8549.140791
+  type: 'suite'
+  ...
+# Subtest: planning failure creator copy (B4-FIX)
+    # Subtest: maps internal halt reasons to creator-facing text without leaking internals
+    ok 1 - maps internal halt reasons to creator-facing text without leaking internals
+      ---
+      duration_ms: 1.092542
+      type: 'test'
+      ...
+    # Subtest: keeps a creator-facing Chinese failure reason as written
+    ok 2 - keeps a creator-facing Chinese failure reason as written
+      ---
+      duration_ms: 0.198125
+      type: 'test'
+      ...
+    1..2
+ok 4 - planning failure creator copy (B4-FIX)
+  ---
+  duration_ms: 1.344208
+  type: 'suite'
+  ...
+# Subtest: same-digest replay fails closed when stage inputs drift (B-FIX)
+    # Subtest: rejects retrying a failed plan thread whose director inputs were built against a different catalog
+    ok 1 - rejects retrying a failed plan thread whose director inputs were built against a different catalog
+      ---
+      duration_ms: 86.302708
+      type: 'test'
+      ...
+    1..1
+ok 5 - same-digest replay fails closed when stage inputs drift (B-FIX)
+  ---
+  duration_ms: 86.403125
+  type: 'suite'
+  ...
+# Subtest: joint planning physical execution summary (Revision 9)
+    # Subtest: aggregates every role checkpoint by physical request identity without double-counting repairs or unknown work
+    ok 1 - aggregates every role checkpoint by physical request identity without double-counting repairs or unknown work
+      ---
+      duration_ms: 167.954041
+      type: 'test'
+      ...
+    1..1
+ok 6 - joint planning physical execution summary (Revision 9)
+  ---
+  duration_ms: 168.065292
+  type: 'suite'
+  ...
+# Subtest: settled audit candidate exhaustion through the production pipeline
+    # Subtest: keeps the valid draft at a human gate when every audit candidate is definitively unavailable
+    ok 1 - keeps the valid draft at a human gate when every audit candidate is definitively unavailable
+      ---
+      duration_ms: 116.413875
+      type: 'test'
+      ...
+    # Subtest: does not convert a mixed candidate failure into an incomplete audit (uncertain)
+    ok 2 - does not convert a mixed candidate failure into an incomplete audit (uncertain)
+      ---
+      duration_ms: 48.753084
+      type: 'test'
+      ...
+    # Subtest: does not convert a mixed candidate failure into an incomplete audit (conflict)
+    ok 3 - does not convert a mixed candidate failure into an incomplete audit (conflict)
+      ---
+      duration_ms: 47.508166
+      type: 'test'
+      ...
+    # Subtest: does not convert a mixed candidate failure into an incomplete audit (rejected)
+    ok 4 - does not convert a mixed candidate failure into an incomplete audit (rejected)
+      ---
+      duration_ms: 44.039208
+      type: 'test'
+      ...
+    # Subtest: does not convert a mixed candidate failure into an incomplete audit (missing-state)
+    ok 5 - does not convert a mixed candidate failure into an incomplete audit (missing-state)
+      ---
+      duration_ms: 47.123417
+      type: 'test'
+      ...
+    # Subtest: does not convert a mixed candidate failure into an incomplete audit (old-operation)
+    ok 6 - does not convert a mixed candidate failure into an incomplete audit (old-operation)
+      ---
+      duration_ms: 47.802542
+      type: 'test'
+      ...
+    1..6
+ok 7 - settled audit candidate exhaustion through the production pipeline
+  ---
+  duration_ms: 351.942709
+  type: 'suite'
+  ...
+# Subtest: retrieving a late audit completes only its original creative command receipt
+ok 8 - retrieving a late audit completes only its original creative command receipt
+  ---
+  duration_ms: 205.157125
+  type: 'test'
+  ...
+# Subtest: planningReviewCheckpointIdentity (OA-01)
+    # Subtest: separates two new audit_current operations on the same draft
+    ok 1 - separates two new audit_current operations on the same draft
+      ---
+      duration_ms: 0.21125
+      type: 'test'
+      ...
+    # Subtest: keeps one operation stable across recovery replays
+    ok 2 - keeps one operation stable across recovery replays
+      ---
+      duration_ms: 0.045541
+      type: 'test'
+      ...
+    # Subtest: does not reuse the initial-draft audit for a re-created identical version (A→B→A)
+    ok 3 - does not reuse the initial-draft audit for a re-created identical version (A→B→A)
+      ---
+      duration_ms: 0.051875
+      type: 'test'
+      ...
+    # Subtest: keeps the legacy derivation when no operation id is present
+    ok 4 - keeps the legacy derivation when no operation id is present
+      ---
+      duration_ms: 0.049083
+      type: 'test'
+      ...
+    1..4
+ok 9 - planningReviewCheckpointIdentity (OA-01)
+  ---
+  duration_ms: 0.416958
+  type: 'suite'
+  ...
+# Subtest: 旧操作的异常经新操作重抛：helper 不改签、图层零登记、停点保留（R9-01）
+ok 10 - 旧操作的异常经新操作重抛：helper 不改签、图层零登记、停点保留（R9-01）
+  ---
+  duration_ms: 162.082583
+  type: 'test'
+  ...
+# Subtest: 旧操作绑定的 uncertain 异常经新操作重抛：原异常传播、零登记、不转停点（R11-V02）
+ok 11 - 旧操作绑定的 uncertain 异常经新操作重抛：原异常传播、零登记、不转停点（R11-V02）
+  ---
+  duration_ms: 113.636666
+  type: 'test'
+  ...
+# Subtest: WorkflowRunner
+    # Subtest: persists a structured failure code and clears it on successful retry
+    ok 1 - persists a structured failure code and clears it on successful retry
+      ---
+      duration_ms: 2.375125
+      type: 'test'
+      ...
+    # Subtest: re-runs a paused source review only with the dedicated retry option
+    ok 2 - re-runs a paused source review only with the dedicated retry option
+      ---
+      duration_ms: 0.651375
+      type: 'test'
+      ...
+    # Subtest: continues a complete negative source review under the same operation only after the user accepts its evidence
+    ok 3 - continues a complete negative source review under the same operation only after the user accepts its evidence
+      ---
+      duration_ms: 1.082417
+      type: 'test'
+      ...
+    # Subtest: keeps a still-matching paid authorization for the remaining source-review operation
+    ok 4 - keeps a still-matching paid authorization for the remaining source-review operation
+      ---
+      duration_ms: 1.555667
+      type: 'test'
+      ...
+    # Subtest: requires a new approval when the quote changes after a complete source review
+    ok 5 - requires a new approval when the quote changes after a complete source review
+      ---
+      duration_ms: 0.8635
+      type: 'test'
+      ...
+    # Subtest: marks a complete negative source review stale when the user chooses to adjust instead of purchasing again
+    ok 6 - marks a complete negative source review stale when the user chooses to adjust instead of purchasing again
+      ---
+      duration_ms: 0.328
+      type: 'test'
+      ...
+    # Subtest: pauses between nodes on request and resumes without replaying completed work
+    ok 7 - pauses between nodes on request and resumes without replaying completed work
+      ---
+      duration_ms: 1.803791
+      type: 'test'
+      ...
+    # Subtest: runs nodes in dependency order and tracks topic artifacts
+    ok 8 - runs nodes in dependency order and tracks topic artifacts
+      ---
+      duration_ms: 0.523
+      type: 'test'
+      ...
+    # Subtest: preserves immutable artifact integrity and lineage metadata
+    ok 9 - preserves immutable artifact integrity and lineage metadata
+      ---
+      duration_ms: 0.425542
+      type: 'test'
+      ...
+    # Subtest: stops the workflow when a quality gate rejects output
+    ok 10 - stops the workflow when a quality gate rejects output
+      ---
+      duration_ms: 0.465125
+      type: 'test'
+      ...
+    # Subtest: treats human intervention as a first-class terminal state
+    ok 11 - treats human intervention as a first-class terminal state
+      ---
+      duration_ms: 0.154583
+      type: 'test'
+      ...
+    # Subtest: resolves and replaces providers by capability
+    ok 12 - resolves and replaces providers by capability
+      ---
+      duration_ms: 0.248958
+      type: 'test'
+      ...
+    # Subtest: records a safe execution receipt and immutable generated output version
+    ok 13 - records a safe execution receipt and immutable generated output version
+      ---
+      duration_ms: 0.541917
+      type: 'test'
+      ...
+    # Subtest: refreshes future execution plans on retry without rewriting completed history
+    ok 14 - refreshes future execution plans on retry without rewriting completed history
+      ---
+      duration_ms: 0.436584
+      type: 'test'
+      ...
+    # Subtest: snapshots custom receipt arrays independently from node results and receipt history
+    ok 15 - snapshots custom receipt arrays independently from node results and receipt history
+      ---
+      duration_ms: 0.284333
+      type: 'test'
+      ...
+    # Subtest: persists valid nested metered counts and rejects impossible failure totals
+    ok 16 - persists valid nested metered counts and rejects impossible failure totals
+      ---
+      duration_ms: 0.653042
+      type: 'test'
+      ...
+    # Subtest: keeps failed execution receipts and validates reported actual cost
+    ok 17 - keeps failed execution receipts and validates reported actual cost
+      ---
+      duration_ms: 0.21175
+      type: 'test'
+      ...
+    # Subtest: fails closed after an authorized metered call has an uncertain outcome
+    ok 18 - fails closed after an authorized metered call has an uncertain outcome
+      ---
+      duration_ms: 1.166
+      type: 'test'
+      ...
+    # Subtest: durably marks an automatic metered operation uncertain before the provider call
+    ok 19 - durably marks an automatic metered operation uncertain before the provider call
+      ---
+      duration_ms: 0.338709
+      type: 'test'
+      ...
+    # Subtest: keeps an automatic metered operation locked when the provider returns a structured failure
+    ok 20 - keeps an automatic metered operation locked when the provider returns a structured failure
+      ---
+      duration_ms: 0.21475
+      type: 'test'
+      ...
+    # Subtest: unlocks a metered failure when the receipt proves no request was submitted
+    ok 21 - unlocks a metered failure when the receipt proves no request was submitted
+      ---
+      duration_ms: 0.214167
+      type: 'test'
+      ...
+    # Subtest: does not unlock an explicitly unknown provider outcome even when the provisional receipt is zero
+    ok 22 - does not unlock an explicitly unknown provider outcome even when the provisional receipt is zero
+      ---
+      duration_ms: 0.180834
+      type: 'test'
+      ...
+    # Subtest: keeps a metered quality rejection definitive after the provider succeeded
+    ok 23 - keeps a metered quality rejection definitive after the provider succeeded
+      ---
+      duration_ms: 0.413916
+      type: 'test'
+      ...
+    # Subtest: does not make a settled paid result uncertain when a free post-check fails
+    ok 24 - does not make a settled paid result uncertain when a free post-check fails
+      ---
+      duration_ms: 0.372666
+      type: 'test'
+      ...
+    # Subtest: allows retry when an authorized node fails before invoking its metered provider
+    ok 25 - allows retry when an authorized node fails before invoking its metered provider
+      ---
+      duration_ms: 0.266334
+      type: 'test'
+      ...
+    # Subtest: reuses the persisted external operation id when retrying an interrupted node
+    ok 26 - reuses the persisted external operation id when retrying an interrupted node
+      ---
+      duration_ms: 0.49225
+      type: 'test'
+      ...
+    # Subtest: keeps a resumed interrupted operation locked when reconciliation fails without a new provider attempt
+    ok 27 - keeps a resumed interrupted operation locked when reconciliation fails without a new provider attempt
+      ---
+      duration_ms: 0.3055
+      type: 'test'
+      ...
+    # Subtest: records actual cost and fails the node when reported spending exceeds authorization
+    ok 28 - records actual cost and fails the node when reported spending exceeds authorization
+      ---
+      duration_ms: 0.561958
+      type: 'test'
+      ...
+    # Subtest: enforces the authorized attempt limit inside a custom metered node
+    ok 29 - enforces the authorized attempt limit inside a custom metered node
+      ---
+      duration_ms: 0.274458
+      type: 'test'
+      ...
+    # Subtest: does not expose the internal provider registry to custom nodes
+    ok 30 - does not expose the internal provider registry to custom nodes
+      ---
+      duration_ms: 0.127667
+      type: 'test'
+      ...
+    # Subtest: rejects non-finite metered limits before invoking the provider
+    ok 31 - rejects non-finite metered limits before invoking the provider
+      ---
+      duration_ms: 1.245959
+      type: 'test'
+      ...
+    # Subtest: blocks a custom executor from switching to another metered provider
+    ok 32 - blocks a custom executor from switching to another metered provider
+      ---
+      duration_ms: 0.288292
+      type: 'test'
+      ...
+    # Subtest: rejects a receipt that does not match the authorized provider and model
+    ok 33 - rejects a receipt that does not match the authorized provider and model
+      ---
+      duration_ms: 0.236125
+      type: 'test'
+      ...
+    # Subtest: validates human overrides before creating a new output version
+    ok 34 - validates human overrides before creating a new output version
+      ---
+      duration_ms: 0.553084
+      type: 'test'
+      ...
+    # Subtest: creates a human output version and marks only DAG descendants stale
+    ok 35 - creates a human output version and marks only DAG descendants stale
+      ---
+      duration_ms: 1.058792
+      type: 'test'
+      ...
+    # Subtest: keeps the human stop point and refuses whole-run success when later required nodes never ran
+    ok 36 - keeps the human stop point and refuses whole-run success when later required nodes never ran
+      ---
+      duration_ms: 0.480417
+      type: 'test'
+      ...
+    # Subtest: does not mark a terminal-edited failed run succeeded while later required nodes never ran
+    ok 37 - does not mark a terminal-edited failed run succeeded while later required nodes never ran
+      ---
+      duration_ms: 0.486458
+      type: 'test'
+      ...
+    # Subtest: does not resurrect an already-approved stop point on a later edit
+    ok 38 - does not resurrect an already-approved stop point on a later edit
+      ---
+      duration_ms: 0.352375
+      type: 'test'
+      ...
+    # Subtest: keeps an unrelated failed node's recovery entry when editing another node
+    ok 39 - keeps an unrelated failed node's recovery entry when editing another node
+      ---
+      duration_ms: 0.602917
+      type: 'test'
+      ...
+    # Subtest: does not execute a stale node when continuing after approving a stop (S04)
+    ok 40 - does not execute a stale node when continuing after approving a stop (S04)
+      ---
+      duration_ms: 0.346708
+      type: 'test'
+      ...
+    # Subtest: does not bypass an unrelated spend stop when continuing after approval
+    ok 41 - does not bypass an unrelated spend stop when continuing after approval
+      ---
+      duration_ms: 0.252875
+      type: 'test'
+      ...
+    # Subtest: rejects saving a human output over a stale input and completes after explicit input review (S07/R3-02)
+    ok 42 - rejects saving a human output over a stale input and completes after explicit input review (S07/R3-02)
+      ---
+      duration_ms: 0.536167
+      type: 'test'
+      ...
+    # Subtest: rejects generic output overrides on dedicated decision stops (R3-03)
+    ok 43 - rejects generic output overrides on dedicated decision stops (R3-03)
+      ---
+      duration_ms: 0.22075
+      type: 'test'
+      ...
+    # Subtest: rejects node edits while another node is still running (R3-05 stillness)
+    ok 44 - rejects node edits while another node is still running (R3-05 stillness)
+      ---
+      duration_ms: 0.234167
+      type: 'test'
+      ...
+    # Subtest: does not execute successors when an effective version pointer is dangling (R4-01)
+    ok 45 - does not execute successors when an effective version pointer is dangling (R4-01)
+      ---
+      duration_ms: 0.427375
+      type: 'test'
+      ...
+    # Subtest: keeps a paused run paused when editing an unrelated node
+    ok 46 - keeps a paused run paused when editing an unrelated node
+      ---
+      duration_ms: 0.253
+      type: 'test'
+      ...
+    # Subtest: rejects a two-step save that would bypass a waiting stop via input then output (R4-02)
+    ok 47 - rejects a two-step save that would bypass a waiting stop via input then output (R4-02)
+      ---
+      duration_ms: 0.176292
+      type: 'test'
+      ...
+    # Subtest: rejects a generic approve on a source_review_retry stop regardless of its declared options (R4-03)
+    ok 48 - rejects a generic approve on a source_review_retry stop regardless of its declared options (R4-03)
+      ---
+      duration_ms: 0.190208
+      type: 'test'
+      ...
+    # Subtest: rejects needs_human results without a usable intervention and blocks generic saves on them (R5-01)
+    ok 49 - rejects needs_human results without a usable intervention and blocks generic saves on them (R5-01)
+      ---
+      duration_ms: 0.245375
+      type: 'test'
+      ...
+    # Subtest: records request changes and reruns only the revised asset descendants
+    ok 50 - records request changes and reruns only the revised asset descendants
+      ---
+      duration_ms: 0.996541
+      type: 'test'
+      ...
+    # Subtest: rejects a node revision that invalidates a non-descendant
+    ok 51 - rejects a node revision that invalidates a non-descendant
+      ---
+      duration_ms: 0.233
+      type: 'test'
+      ...
+    # Subtest: rejects a node revision that leaves an invalidated node's descendants current
+    ok 52 - rejects a node revision that leaves an invalidated node's descendants current
+      ---
+      duration_ms: 0.221958
+      type: 'test'
+      ...
+    # Subtest: cannot mark a run succeeded by overriding one leaf while another node is stale
+    ok 53 - cannot mark a run succeeded by overriding one leaf while another node is stale
+      ---
+      duration_ms: 0.24125
+      type: 'test'
+      ...
+    # Subtest: requires explicit review before replacing a stale human output
+    ok 54 - requires explicit review before replacing a stale human output
+      ---
+      duration_ms: 0.27675
+      type: 'test'
+      ...
+    # Subtest: persists node inputs as versions and reruns from the effective human input
+    ok 55 - persists node inputs as versions and reruns from the effective human input
+      ---
+      duration_ms: 0.384667
+      type: 'test'
+      ...
+    # Subtest: bounds manual input versions and keeps file references immutable
+    ok 56 - bounds manual input versions and keeps file references immutable
+      ---
+      duration_ms: 3.014208
+      type: 'test'
+      ...
+    # Subtest: requires stale human inputs to be reviewed again after an upstream output changes
+    ok 57 - requires stale human inputs to be reviewed again after an upstream output changes
+      ---
+      duration_ms: 0.766333
+      type: 'test'
+      ...
+    # Subtest: new metered providers default to manual approval and pause for an exact spend plan
+    ok 58 - new metered providers default to manual approval and pause for an exact spend plan
+      ---
+      duration_ms: 1.374417
+      type: 'test'
+      ...
+    # Subtest: metered manual provider pauses for an immutable spend authorization
+    ok 59 - metered manual provider pauses for an immutable spend authorization
+      ---
+      duration_ms: 0.467333
+      type: 'test'
+      ...
+    # Subtest: rejects duplicate spend quote item ids before invoking a paid provider
+    ok 60 - rejects duplicate spend quote item ids before invoking a paid provider
+      ---
+      duration_ms: 0.173916
+      type: 'test'
+      ...
+    # Subtest: metered automatic provider executes without a spend plan and keeps a metered receipt
+    ok 61 - metered automatic provider executes without a spend plan and keeps a metered receipt
+      ---
+      duration_ms: 0.126292
+      type: 'test'
+      ...
+    # Subtest: metered automatic provider remains bounded by its declared attempt limit
+    ok 62 - metered automatic provider remains bounded by its declared attempt limit
+      ---
+      duration_ms: 0.175125
+      type: 'test'
+      ...
+    # Subtest: does not accept a stale manual authorization after a provider becomes automatic
+    ok 63 - does not accept a stale manual authorization after a provider becomes automatic
+      ---
+      duration_ms: 0.157709
+      type: 'test'
+      ...
+    # Subtest: metered none policy fails closed instead of bypassing spend approval
+    ok 64 - metered none policy fails closed instead of bypassing spend approval
+      ---
+      duration_ms: 0.076833
+      type: 'test'
+      ...
+    # Subtest: runs a metered-capable node without approval only when its resolved quote is explicitly free
+    ok 65 - runs a metered-capable node without approval only when its resolved quote is explicitly free
+      ---
+      duration_ms: 0.138333
+      type: 'test'
+      ...
+    # Subtest: gates a metered provider before a custom node executor can call it
+    ok 66 - gates a metered provider before a custom node executor can call it
+      ---
+      duration_ms: 0.179334
+      type: 'test'
+      ...
+    # Subtest: replans a stopped node after an execution configuration override without calling either provider
+    ok 67 - replans a stopped node after an execution configuration override without calling either provider
+      ---
+      duration_ms: 0.310416
+      type: 'test'
+      ...
+    # Subtest: does not fabricate actual usage when a successful metered provider omits it
+    ok 68 - does not fabricate actual usage when a successful metered provider omits it
+      ---
+      duration_ms: 0.148791
+      type: 'test'
+      ...
+    # Subtest: invalidates spend approval when any bound execution scope changes
+    ok 69 - invalidates spend approval when any bound execution scope changes
+      ---
+      duration_ms: 0.657041
+      type: 'test'
+      ...
+    # Subtest: requires separate approvals for consecutive metered nodes
+    ok 70 - requires separate approvals for consecutive metered nodes
+      ---
+      duration_ms: 0.549959
+      type: 'test'
+      ...
+    # Subtest: keeps provider capability indexes consistent when replacing providers
+    ok 71 - keeps provider capability indexes consistent when replacing providers
+      ---
+      duration_ms: 0.131
+      type: 'test'
+      ...
+    # Subtest: fails fast if a node returns skipped before skip semantics exist
+    ok 72 - fails fast if a node returns skipped before skip semantics exist
+      ---
+      duration_ms: 0.106042
+      type: 'test'
+      ...
+    # Subtest: fails if a node asks for human work without an actionable intervention
+    ok 73 - fails if a node asks for human work without an actionable intervention
+      ---
+      duration_ms: 0.085042
+      type: 'test'
+      ...
+    # Subtest: resumes an approved human intervention without rerunning completed nodes
+    ok 74 - resumes an approved human intervention without rerunning completed nodes
+      ---
+      duration_ms: 0.2215
+      type: 'test'
+      ...
+    # Subtest: normalizes legacy outputs before versioning resumed downstream inputs
+    ok 75 - normalizes legacy outputs before versioning resumed downstream inputs
+      ---
+      duration_ms: 0.338167
+      type: 'test'
+      ...
+    # Subtest: records rejection and refuses a decision for a run that is no longer waiting
+    ok 76 - records rejection and refuses a decision for a run that is no longer waiting
+      ---
+      duration_ms: 0.20025
+      type: 'test'
+      ...
+    # Subtest: rejects a human action that the intervention did not offer
+    ok 77 - rejects a human action that the intervention did not offer
+      ---
+      duration_ms: 0.142875
+      type: 'test'
+      ...
+    # Subtest: validates per-item review dispositions before recording a decision
+    ok 78 - validates per-item review dispositions before recording a decision
+      ---
+      duration_ms: 0.363042
+      type: 'test'
+      ...
+    1..78
+ok 12 - WorkflowRunner
+  ---
+  duration_ms: 39.468458
+  type: 'suite'
+  ...
+# Subtest: Topic Intelligence
+    # Subtest: scores compliance risk as a penalty instead of a growth signal
+    ok 1 - scores compliance risk as a penalty instead of a growth signal
+      ---
+      duration_ms: 0.529708
+      type: 'test'
+      ...
+    1..1
+ok 13 - Topic Intelligence
+  ---
+  duration_ms: 0.782292
+  type: 'suite'
+  ...
+# Subtest: WorkflowRunner pre-registered artifacts
+    # Subtest: attaches node-owned pre-registered artifacts to the current output version without re-registering
+    ok 1 - attaches node-owned pre-registered artifacts to the current output version without re-registering
+      ---
+      duration_ms: 0.26125
+      type: 'test'
+      ...
+    # Subtest: fails closed when a pre-registered artifact id does not exist
+    ok 2 - fails closed when a pre-registered artifact id does not exist
+      ---
+      duration_ms: 0.120292
+      type: 'test'
+      ...
+    # Subtest: fails closed when a pre-registered artifact belongs to another node
+    ok 3 - fails closed when a pre-registered artifact belongs to another node
+      ---
+      duration_ms: 0.179708
+      type: 'test'
+      ...
+    # Subtest: does not leave a valid pre-registered id attached when a later id fails validation
+    ok 4 - does not leave a valid pre-registered id attached when a later id fails validation
+      ---
+      duration_ms: 0.448541
+      type: 'test'
+      ...
+    # Subtest: keeps the existing result.artifacts contract alongside pre-registered ids
+    ok 5 - keeps the existing result.artifacts contract alongside pre-registered ids
+      ---
+      duration_ms: 0.143458
+      type: 'test'
+      ...
+    1..5
+ok 14 - WorkflowRunner pre-registered artifacts
+  ---
+  duration_ms: 1.225292
+  type: 'suite'
+  ...
+1..14
+# tests 138
+# suites 11
+# pass 138
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 14405.335

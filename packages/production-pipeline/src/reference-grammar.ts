@@ -1,7 +1,7 @@
-import type { CodexBridgeClient, CodexPreparedOperation, CodexTaskExecution } from "./codex-chat.js";
+import type { CodexBridgeClient, CodexPreparedOperation, CodexTaskExecution, RoleAudit } from "./codex-chat.js";
 import type { VisualReviewMediaPayload, VisualReviewMediaPreprocessor } from "./codex-visual-review.js";
 import { pendingRoleAgentOperation } from "./role-agent-checkpoint.js";
-import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
+import { runRoleAgentLoop, validateRoleAudit, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 
 export interface ReferenceGrammarBeat {
   startMs: number;
@@ -46,11 +46,36 @@ export interface ReferenceGrammarExecution extends CodexTaskExecution<ShotGramma
   inspectedDurationMs?: number;
 }
 
+/** S4/reference-grammar（产品裁决 b）：AI 修订——单次产稿携带指令与当前报告，零审计。 */
+export interface ReferenceGrammarRevisionInput {
+  selectedModelId?: string;
+  videoPath: string;
+  runRoot: string;
+  sourceLabel: string;
+  currentGrammar: ShotGrammar;
+  instruction: string;
+}
+
+/** S4/reference-grammar：主动再审——单次 role-audit 只审当前精确报告，零产稿。 */
+export interface ReferenceGrammarAuditInput {
+  selectedModelId?: string;
+  videoPath: string;
+  runRoot: string;
+  sourceLabel: string;
+  grammar: ShotGrammar;
+}
+
+export interface ReferenceGrammarAuditExecution {
+  audit: RoleAudit;
+}
+
 export interface ReferenceGrammarAgent {
   readonly id: string;
   readonly modelId: string;
   analyze(input: ReferenceGrammarAgentInput): Promise<ShotGrammar>;
   analyzeDetailed?(input: ReferenceGrammarAgentInput): Promise<ReferenceGrammarExecution>;
+  revise?(input: ReferenceGrammarRevisionInput): Promise<ShotGrammar>;
+  auditCurrent?(input: ReferenceGrammarAuditInput): Promise<ReferenceGrammarAuditExecution>;
 }
 
 export interface CodexReferenceGrammarAgentOptions {
@@ -61,6 +86,14 @@ export interface CodexReferenceGrammarAgentOptions {
 }
 
 export const REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION = "reference-grammar-v3|role-audit-v9|shot-grammar-validator-v1|single-initial-audit-v1";
+
+/** 首审与主动再审共用同一套标准（A05）：单独导出供合同测试固定其一致性。 */
+export const REFERENCE_GRAMMAR_AUDIT_CRITERIA = [
+  "节拍时间有序、互不重叠，并覆盖被观察视频的主要叙事结构",
+  "静帧不能证明的连续运动和声音被明确降置信，而不是写成确定事实",
+  "从实际观察中提炼顺序、构图、色彩、转换等可复用语法，并说明其可能承担的引导注意、对比、揭示或回收功能；作者意图与传播效果只可作为有边界的分析，不补造未观察的运动和声音。",
+  "avoidCopying 明确排除人物身份、对白、品牌、独特情节和标志性资产",
+] as const;
 
 export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
   readonly id: string;
@@ -91,12 +124,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
     const execution = await runRoleAgentLoop<ShotGrammar>({
       role: "参考片分析师",
       contractVersion: REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION,
-      criteria: [
-        "节拍时间有序、互不重叠，并覆盖被观察视频的主要叙事结构",
-        "静帧不能证明的连续运动和声音被明确降置信，而不是写成确定事实",
-        "从实际观察中提炼顺序、构图、色彩、转换等可复用语法，并说明其可能承担的引导注意、对比、揭示或回收功能；作者意图与传播效果只可作为有边界的分析，不补造未观察的运动和声音。",
-        "avoidCopying 明确排除人物身份、对白、品牌、独特情节和标志性资产",
-      ],
+      criteria: [...REFERENCE_GRAMMAR_AUDIT_CRITERIA],
       maxIterations: 1,
       produce: async (revision, { requestId, session, requestOptions, preparedOperation }) => {
         if (preparedOperation) {
@@ -119,25 +147,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
         role,
         iteration,
         criteria,
-        context: {
-          roleScope: {
-            owns: ["summary", "pacing", "composition", "camera", "color", "transitions", "sound", "beats", "reusableRules", "avoidCopying", "confidence"],
-            doesNotOwn: ["新视频脚本", "新视频镜头方案", "参考视频版权结论"],
-          },
-          upstreamFacts: {
-            durationMs: taskPayload.durationMs,
-            sourceLabel: taskPayload.sourceLabel,
-            frames: taskPayload.frames.map((frame, index) => ({
-              imageIndex: index + 1,
-              timecodeMs: frame.timecodeMs,
-              sha256: frame.sha256,
-              ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
-              ...(frame.phase ? { phase: frame.phase } : {}),
-            })),
-          },
-          currentRoleContract: { evidenceType: "sampled_keyframes", continuousMotionAndAudioAreNotProven: true },
-          downstreamBoundary: "只提炼可复用的抽象风格规则，不得复刻人物、对白、品牌、独特情节或要求后续画面已经生成。",
-        },
+        context: referenceAuditContext(taskPayload),
         candidate,
         ...(previousAudit ? { previousAudit } : {}),
         ...(validationFailure ? { validationFailure } : {}),
@@ -166,6 +176,67 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
     const media = await this.options.media.prepare({ videoPath: input.videoPath, runRoot: input.runRoot });
     return { durationMs: media.durationMs, frames: media.frames, sourceLabel: input.sourceLabel };
   }
+
+  // 明确修订只产稿：单次 reference-grammar 任务经 revision 通道携带当前报告与用户指令，
+  // 不进入产审循环，也不发任何 role-audit；结构无效直接抛错，不发布可采用稿。
+  async revise(input: ReferenceGrammarRevisionInput): Promise<ShotGrammar> {
+    const currentGrammar = validateShotGrammar(input.currentGrammar, input.currentGrammar.durationMs);
+    const instruction = input.instruction.trim();
+    if (!instruction || [...instruction].length > 4_000) {
+      throw new Error("Reference grammar revision instruction must be 1 to 4000 characters.");
+    }
+    const taskPayload = await this.payload(input);
+    const rawGrammar = await this.options.client.runTask("reference-grammar", {
+      ...taskPayload,
+      revision: { instruction, currentGrammar },
+    }, undefined, input.selectedModelId ? { model: input.selectedModelId } : {});
+    return validateShotGrammar(rawGrammar, taskPayload.durationMs);
+  }
+
+  // 主动再审只审当前精确报告：单次 role-audit 与首审同一套标准，零产稿、零推进。
+  async auditCurrent(input: ReferenceGrammarAuditInput): Promise<ReferenceGrammarAuditExecution> {
+    const grammar = validateShotGrammar(input.grammar, input.grammar.durationMs);
+    const taskPayload = await this.payload(input);
+    const output = await this.options.client.runTask("role-audit", {
+      role: "参考片分析师",
+      iteration: 1,
+      criteria: [...REFERENCE_GRAMMAR_AUDIT_CRITERIA],
+      context: referenceAuditContext(taskPayload),
+      candidate: grammar,
+      images: taskPayload.frames.map((frame, index) => ({
+        imageIndex: index + 1,
+        timecodeMs: frame.timecodeMs,
+        sha256: frame.sha256,
+        jpegBase64: frame.jpegBase64,
+        ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
+        ...(frame.phase ? { phase: frame.phase } : {}),
+      })),
+    }, undefined, input.selectedModelId ? { model: input.selectedModelId } : {});
+    return { audit: validateRoleAudit(output, { role: "参考片分析师", candidate: grammar }) };
+  }
+}
+
+/** 首审与主动再审共享的审计证据上下文：同一份关键帧事实与角色边界。 */
+function referenceAuditContext(taskPayload: VisualReviewMediaPayload & { sourceLabel: string }) {
+  return {
+    roleScope: {
+      owns: ["summary", "pacing", "composition", "camera", "color", "transitions", "sound", "beats", "reusableRules", "avoidCopying", "confidence"],
+      doesNotOwn: ["新视频脚本", "新视频镜头方案", "参考视频版权结论"],
+    },
+    upstreamFacts: {
+      durationMs: taskPayload.durationMs,
+      sourceLabel: taskPayload.sourceLabel,
+      frames: taskPayload.frames.map((frame, index) => ({
+        imageIndex: index + 1,
+        timecodeMs: frame.timecodeMs,
+        sha256: frame.sha256,
+        ...(frame.scenePosition !== undefined ? { scenePosition: frame.scenePosition } : {}),
+        ...(frame.phase ? { phase: frame.phase } : {}),
+      })),
+    },
+    currentRoleContract: { evidenceType: "sampled_keyframes", continuousMotionAndAudioAreNotProven: true },
+    downstreamBoundary: "只提炼可复用的抽象风格规则，不得复刻人物、对白、品牌、独特情节或要求后续画面已经生成。",
+  };
 }
 
 function recoveredReferenceGrammarPayload(

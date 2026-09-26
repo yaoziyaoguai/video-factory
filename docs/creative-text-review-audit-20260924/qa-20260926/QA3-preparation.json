@@ -1,0 +1,13 @@
+{
+  "sourceRunId": "run-f6b837f1-324f-4d87-aceb-0708ab5c58c4",
+  "runId": "run-e48e740c-6169-4747-bd23-25b622c30e8c",
+  "status": "needs_human",
+  "sourceScenes": 7,
+  "approvedScenePositions": [],
+  "sourceWorkerCalls": [
+    "asset.prepare"
+  ],
+  "sourceMediaRequests": 0,
+  "sourceMediaArtifacts": 0,
+  "preparation": "public APIs only; child confirmations still pending"
+}

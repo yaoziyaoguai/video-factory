@@ -10,6 +10,8 @@ import { planningThreadId } from "./creative-planning-store.js";
 import type { DurationRange } from "./executable-timeline.js";
 import { RoleAgentLoopError, RoleAgentPlanningHaltError } from "./role-agent-loop.js";
 import { CodexBridgeError, type AgentLoopTrace, type RoleAudit, type RoleAuditPlanningDisposition } from "./codex-chat.js";
+import { ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
+import { isModelProviderFailure, isTransientRoleAuditProviderFailure } from "./model-fallback.js";
 import {
   compileExecutableProductionPlan,
   parseExecutableProductionPlan,
@@ -738,8 +740,11 @@ async function auditPublishedStageDraft(
         },
       };
     }
-    const settledCheckFailure = error instanceof RoleAgentLoopError
-      && error.sourceError instanceof CodexBridgeError && error.sourceError.stage === "completed_failure";
+    const settledCheckFailure = error instanceof ModelCandidatesExhaustedError
+      ? error.failures.length > 0 && error.failures.every((failure) =>
+        isSettledAuditProviderFailure(failure.error, options.auditOperationId))
+      : error instanceof RoleAgentLoopError
+        && error.sourceError instanceof CodexBridgeError && error.sourceError.stage === "completed_failure";
     if (settledCheckFailure) {
       return { creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
         versionId: current.currentDraft.versionId,
@@ -793,6 +798,19 @@ async function auditPublishedStageDraft(
     }
     throw error;
   }
+}
+
+// attempts 是给 UI 的摘要，不能证明请求状态；必须逐个核对候选的原始异常。
+// 未知请求、旧操作、身份/合同冲突仍沿原恢复/报错路径，不能包装成可略过的质量意见。
+function isSettledAuditProviderFailure(error: unknown, auditOperationId: string): boolean {
+  if (error instanceof RoleAgentLoopError) {
+    const bound = (error as RoleAgentLoopError & { auditOperationId?: string }).auditOperationId;
+    if (bound !== undefined && bound !== auditOperationId) return false;
+  }
+  const source = error instanceof RoleAgentLoopError ? error.sourceError : error;
+  return source instanceof CodexBridgeError
+    && (source.stage === "completed_failure" || source.stage === "not_accepted")
+    && (isModelProviderFailure(error) || isTransientRoleAuditProviderFailure(error));
 }
 
 function stageAuditNode(
