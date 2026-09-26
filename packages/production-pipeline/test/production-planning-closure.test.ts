@@ -1779,7 +1779,8 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
     director.planDetailed = async input => input.creativeReviewExecution?.mode === "check"
       ? passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "视觉导演", "fixture-director-contract-v1", "director-plan", "director-binding-model")
       : { output: await director.plan(input) };
-    const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    // 恢复用例显式构造升级前的三轮合同，才能真实进入第二版已受理的窗口。
+    const ranker = new CodexAssetSemanticRanker({ maxReviewIterations: 3, fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
       client: { runTask: async () => { throw new Error("must use audited client"); },
         runTaskDetailed: async (kind, payload, requestId, session, options) => {
           modelCalls++;

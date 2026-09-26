@@ -2054,8 +2054,10 @@ export class ProductionStudio {
       const tools = this.options.referenceGrammarTools!;
       const framesRoot = path.join(this.options.workspaceRoot, "runs", runId, "nodes", nodeId, "model-revisions", `frames-${randomUUID()}`);
       try {
+        const videoPath = await stageReferenceDocumentVideo(framesRoot, context.content);
         const grammar = await tools.revise({
-          ...context.content, runRoot: framesRoot, currentGrammar: context.content.grammar, instruction,
+          videoPath, sourceLabel: context.content.sourceLabel,
+          runRoot: framesRoot, currentGrammar: context.content.grammar, instruction,
           ...(brief.models?.[tools.id ?? "codex-reference-grammar-v1"]
             ? { selectedModelId: brief.models[tools.id ?? "codex-reference-grammar-v1"] } : {}),
         });
@@ -2144,8 +2146,9 @@ export class ProductionStudio {
       const tools = this.options.referenceGrammarTools!;
       const framesRoot = path.join(this.options.workspaceRoot, "runs", runId, "nodes", nodeId, "audit-evidence", `frames-${randomUUID()}`);
       try {
+        const videoPath = await stageReferenceDocumentVideo(framesRoot, context.content);
         execution = await tools.auditCurrent({
-          videoPath: context.content.videoPath, sourceLabel: context.content.sourceLabel,
+          videoPath, sourceLabel: context.content.sourceLabel,
           grammar: context.content.grammar, runRoot: framesRoot,
           ...(brief.models?.[tools.id ?? "codex-reference-grammar-v1"]
             ? { selectedModelId: brief.models[tools.id ?? "codex-reference-grammar-v1"] } : {}),
@@ -2190,7 +2193,7 @@ export class ProductionStudio {
     reference: Record<string, unknown>;
     document: Record<string, unknown>;
     content: { kind: "publish-package"; copy: PublishCopy; narrations: string[] }
-      | { kind: "reference-grammar"; grammar: ShotGrammar; videoPath: string; sourceLabel: string };
+      | { kind: "reference-grammar"; grammar: ShotGrammar; videoPath: string; videoBytes: Buffer; sourceLabel: string };
     artifact: WorkflowRun<ProductionBrief>["artifacts"][number];
     nodeArtifactIds: string[];
     effectiveVersion: NonNullable<WorkflowRun<ProductionBrief>["nodeRuns"][number]["outputState"]>["versions"][number];
@@ -2237,11 +2240,11 @@ export class ProductionStudio {
     }
     if (!isRecord(document)) throw new StudioInputError("当前结构化产物不是 JSON 对象，无法修订。");
     let content: { kind: "publish-package"; copy: PublishCopy; narrations: string[] }
-      | { kind: "reference-grammar"; grammar: ShotGrammar; videoPath: string; sourceLabel: string };
+      | { kind: "reference-grammar"; grammar: ShotGrammar; videoPath: string; videoBytes: Buffer; sourceLabel: string };
     if (nodeId === "reference-grammar") {
       const source = await this.verifiedReferenceVideoForRun(current, effectiveProductionBrief(current));
       content = { kind: "reference-grammar", grammar: validateShotGrammar(document, Number(document.durationMs)),
-        videoPath: source.videoPath, sourceLabel: source.label };
+        videoPath: source.videoPath, videoBytes: source.bytes, sourceLabel: source.label };
     } else {
       content = { kind: "publish-package", copy: extractPublishCopy(document),
         narrations: await readRunScriptNarrations(current, this.options.workspaceRoot, runId) };
@@ -4625,6 +4628,18 @@ function effectiveNodeArtifact(
     if (artifact && matches(artifact)) return artifact;
   }
   return undefined;
+}
+
+async function stageReferenceDocumentVideo(
+  evidenceRoot: string,
+  source: { videoPath: string; videoBytes: Buffer },
+): Promise<string> {
+  // Python 的 runRoot 同时限制输入与输出。使用已核验字节的独立快照，
+  // 不放宽文件边界，也不覆盖前一版报告引用的抽帧证据。
+  await mkdir(evidenceRoot, { recursive: true });
+  const videoPath = path.join(evidenceRoot, `reference${path.extname(source.videoPath)}`);
+  await writeFile(videoPath, source.videoBytes, { flag: "wx", mode: 0o600 });
+  return videoPath;
 }
 
 function effectiveReferenceVideoArtifact(run: WorkflowRun<ProductionBrief>): WorkflowRun<ProductionBrief>["artifacts"][number] | undefined {

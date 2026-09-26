@@ -279,6 +279,9 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
         "没有把候选锁定，也没有新增、删除或替换候选素材",
       ],
       maxIterations: this.options.maxReviewIterations ?? 3,
+      // 与文字交付和正式审片一致：首轮意见交回用户，不自动改稿。
+      // 保留旧上限与请求身份，恢复旧在途调用时结清原请求，不重新付费。
+      stopAfterAudit: this.options.maxReviewIterations === undefined,
       produce: async (revision, { requestId, session, requestOptions, preparedOperation }) => {
         if (preparedOperation) {
           if (!observePrepared) throw new Error("Codex asset ranker cannot recover a prepared operation with this client.");

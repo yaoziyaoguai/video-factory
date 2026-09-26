@@ -8,6 +8,7 @@ import { summarizeJointPlanningExecution } from "../src/production-pipeline.js";
 import {
   CodexAssetSemanticRanker,
   CodexBridgeError,
+  RoleAgentLoopError,
   deterministicAssetRanking,
   parseAssetCandidateReport,
   type CodexTaskExecution,
@@ -47,6 +48,7 @@ describe("asset semantic ranking", () => {
         : { ...deterministicAssetRanking(report), source: "model", summary: `candidate ${calls}` } }; },
     } });
     const result = await ranker.rankDetailed(report, checkpoint);
+    assert.equal(calls, 2, "初稿排序与审计各一次；内容建议由用户决定，不自动修改排序");
     assert.notEqual(result.agentLoop?.status, "passed");
     assert.equal(result.output.visualEvidence?.reviewed.length, 0);
     assert.equal(result.output.scenes[0]!.candidates[0]!.locked, false);
@@ -54,6 +56,67 @@ describe("asset semantic ranking", () => {
     assert.deepEqual(await ranker.rankDetailed(report, checkpoint), result);
     assert.equal(calls, settledCalls);
   });
+  it("settles an accepted legacy second ranking with the new single-audit policy without resubmitting", async () => {
+    const report = parseAssetCandidateReport(rawReport);
+    let saved: unknown;
+    let producerCalls = 0;
+    let auditCalls = 0;
+    let downloads = 0;
+    let acceptedRequestId: string | undefined;
+    const observed: string[] = [];
+    const checkpoint = { key: "legacy-second-ranking", load: async () => structuredClone(saved),
+      save: async (value: unknown) => { saved = structuredClone(value); } };
+    const repair = { ...passingAudit(), verdict: "repair", score: 50,
+      assessments: passingAudit().assessments.map(a => ({ ...a, dimensions: a.dimensions.map(d => ({ ...d, score: 50 })) })),
+      issues: [{ severity: "blocking", criterion: "说明", evidence: "不够充分", repairInstruction: "说明依据" }],
+      repairInstructions: ["说明依据"],
+    };
+    const second = { ...deterministicAssetRanking(report), source: "model", summary: "旧请求已产出的第二版排序。" };
+    const client = {
+      runTask: async () => { throw new Error("use detailed transport"); },
+      runTaskDetailed: async (kind: CodexTaskKind, payload: unknown, requestId?: string,
+        _session?: unknown, options?: CodexTaskRequestOptions): Promise<CodexTaskExecution> => {
+        if (kind === "asset-rank") {
+          producerCalls++;
+          if (producerCalls === 2) {
+            acceptedRequestId = requestId;
+            await options?.beforeSubmit?.(preparedOperation(kind, payload, requestId!));
+            throw new CodexBridgeError("accepted second ranking response lost", false, "uncertain");
+          }
+          return { output: { ...deterministicAssetRanking(report), source: "model" } };
+        }
+        auditCalls++;
+        return { output: repair };
+      },
+      observePrepared: async (operation: CodexPreparedOperation) => {
+        observed.push(operation.requestId);
+        return { output: second };
+      },
+    };
+    const fetchThumbnail = async () => { downloads++; return Buffer.from([0xff, 0xd8, 0xff, 0xd9]); };
+    const legacy = new CodexAssetSemanticRanker({ client, fetchThumbnail, maxReviewIterations: 3 });
+    await assert.rejects(legacy.rankDetailed(report, checkpoint), (error: unknown) => {
+      assert.ok(error instanceof RoleAgentLoopError);
+      assert.equal(error.agentLoop.failure?.stage, "uncertain");
+      assert.ok(error.sourceError instanceof Error);
+      assert.equal(error.sourceError.message, "accepted second ranking response lost");
+      return true;
+    });
+    const priorDownloads = downloads;
+    const current = new CodexAssetSemanticRanker({ client, fetchThumbnail });
+    const result = await current.rankDetailed(report, checkpoint);
+    assert.deepEqual(observed, [acceptedRequestId]);
+    assert.equal(producerCalls, 2, "不重交已受理第二版，也不启动第三版");
+    assert.equal(auditCalls, 2, "仅补齐已受理第二版的审计");
+    assert.equal(downloads, priorDownloads);
+    assert.equal(result.output.summary, second.summary);
+    assert.equal(result.agentLoop?.status, "awaiting_user");
+    assert.deepEqual(await current.rankDetailed(report, checkpoint), result);
+    assert.equal(producerCalls, 2);
+    assert.equal(auditCalls, 2);
+    assert.equal(observed.length, 1);
+  });
+
   for (const phase of ["primary", "supplement"] as const) {
     it(`settles an unchanged late repair producer in ${phase} using a real checkpoint`, async () => {
       const directory = await mkdtemp(path.join(tmpdir(), "vf-unchanged-deadline-"));
@@ -70,7 +133,8 @@ describe("asset semantic ranking", () => {
           assessments: passingAudit().assessments.map(a => ({ ...a, dimensions: a.dimensions.map(d => ({ ...d, score: 50 })) })),
           issues: [{ severity: "blocking", criterion: "证据", evidence: "缺少证据", repairInstruction: "补齐证据" }], repairInstructions: ["补齐证据"],
         };
-        const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => { downloads++; return Buffer.from([0xff, 0xd8, 0xff, 0xd9]); },
+        // 显式重现旧三轮合同的恢复窗口；新默认不再自动进入这条路径。
+        const ranker = new CodexAssetSemanticRanker({ maxReviewIterations: 3, fetchThumbnail: async () => { downloads++; return Buffer.from([0xff, 0xd8, 0xff, 0xd9]); },
           client: { runTask: async () => ({}), runTaskDetailed: async (kind, payload, requestId, _session, options) => {
             const operation = preparedOperation(kind, payload, requestId!);
             operation.taskFact = "accepted_unknown";
@@ -113,7 +177,7 @@ describe("asset semantic ranking", () => {
         assessments: passingAudit().assessments.map(a => ({ ...a, dimensions: a.dimensions.map(d => ({ ...d, score: 50 })) })),
         issues: [{ severity: "blocking", criterion: "核验理由", evidence: "缺少证据", repairInstruction: "补齐证据" }], repairInstructions: ["补齐证据"],
       };
-      const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+      const ranker = new CodexAssetSemanticRanker({ maxReviewIterations: 3, fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
         client: { runTask: async () => ({}), runTaskDetailed: async (kind, payload, requestId, _session, options) => {
           const operation = preparedOperation(kind, payload, requestId!);
           operation.taskFact = "accepted_unknown";

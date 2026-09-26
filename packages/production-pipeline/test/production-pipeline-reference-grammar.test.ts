@@ -575,9 +575,10 @@ describe("ProductionPipeline joint-v1 creative planning", () => {
       referenceGrammarAgent: {
         id: "codex-reference-grammar-v1",
         modelId: "codex-default",
-        analyze: async () => {
+        analyze: async () => { throw new Error("正式链路应使用含复核记录的执行结果"); },
+        analyzeDetailed: async () => {
           grammarAnalyzeCalls += 1;
-          return {
+          return { output: {
             version: "video-factory/shot-grammar-v1",
             summary: "短促开场后稳定解释",
             durationMs: 6_000,
@@ -591,6 +592,15 @@ describe("ProductionPipeline joint-v1 creative planning", () => {
             reusableRules: ["用动作建立开场"],
             avoidCopying: ["不复制人物、对白和情节"],
             confidence: 0.82,
+          }, trace: {
+            taskKind: "reference-grammar", promptVersion: "reference-fixture-v1", prompt: "Reference fixture",
+            providerId: "deepseek", modelId: "deepseek-flash", providerWaitMs: 1400,
+          }, agentLoop: {
+            version: "video-factory/agent-loop-v1", role: "参考视频分析师", contractVersion: "reference-fixture-v1",
+            criteria: [], status: "passed", maxIterations: 1, iterations: [],
+            modelCallCount: 2, producerModelCallCount: 1, auditModelCallCount: 1,
+            producerMs: 1400, auditMs: 1700,
+          },
           };
         },
       },
@@ -624,6 +634,29 @@ describe("ProductionPipeline joint-v1 creative planning", () => {
     );
     const planning = run.nodeRuns.find((node) => node.nodeId === "creative-planning");
     assert.equal(planning?.status, "succeeded");
+    const receipt = run.nodeRuns.find((node) => node.nodeId === "reference-grammar")!.executionReceipt!;
+    assert.equal(receipt.parameters?.sampleMode, "keyframes");
+    assert.equal(receipt.parameters?.modelCallCount, 2, "参考分析与首审都必须计入，不能被节点参数覆盖掉");
+    assert.equal(receipt.parameters?.producerMs, 1400);
+    assert.equal(receipt.parameters?.auditMs, 1700);
+    const checkpointRoot = path.join(workspaceRoot, "runs", run.id, "nodes", "reference-grammar", "agent-loop-checkpoints");
+    await mkdir(checkpointRoot, { recursive: true });
+    const checkpoint = {
+      version: "video-factory/agent-loop-checkpoint-v9", key: "reference-cost",
+      recoveryOwner: { runId: run.id, nodeId: "reference-grammar", workflowOperationRequestId: "reference-operation" },
+      phaseAttempts: { produce: 1, audit: 1 }, completed: [{ iteration: 1,
+        candidateTrace: { providerId: "deepseek", modelId: "deepseek-flash", modelAttemptCount: 1 },
+        auditTrace: { providerId: "deepseek", modelId: "deepseek-flash", modelAttemptCount: 1 },
+      }],
+    };
+    await writeFile(path.join(checkpointRoot, "cost.json"), JSON.stringify(checkpoint));
+    await writeFile(path.join(checkpointRoot, "duplicate.json"), JSON.stringify(checkpoint));
+    const storedBefore = await readFile(path.join(workspaceRoot, "runs", run.id, "run.json"), "utf8");
+    const usage = await subject.readTextExecutionUsage(run.id);
+    assert.deepEqual(usage.find((item) => item.nodeId === "reference-grammar"), {
+      nodeId: "reference-grammar", providerId: "deepseek", modelId: "deepseek-flash", modelCallCount: 2,
+    }, "历史回执漏计时，参考节点的真实checkpoint仍提供完整且去重的计数");
+    assert.equal(await readFile(path.join(workspaceRoot, "runs", run.id, "run.json"), "utf8"), storedBefore);
   });
 
   it("adapts worker candidate search and the real semantic ranker into the planning graph", async () => {

@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFile as execFileCallback } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import type { NodeOverrideDraft, WorkflowRun } from "@video-factory/workflow-core";
-import { ProductionPipeline, productionWorkflowVersion, validateShotGrammar, type ProductionBrief, type ProductionNodeDocumentAuditDraft } from "@video-factory/production-pipeline";
+import { CodexReferenceGrammarAgent, ProductionPipeline, productionWorkflowVersion, validateShotGrammar, type ProductionBrief, type ProductionNodeDocumentAuditDraft } from "@video-factory/production-pipeline";
+import { PythonReviewMediaPreprocessor } from "../src/server/review-media-preprocessor.js";
 import { FileRunStore } from "../../../packages/production-pipeline/src/run-store.js";
 import { ProductionStudio, type StudioPipelinePort } from "../src/server/production-studio.js";
 import { StudioConflictError, StudioNotFoundError } from "../src/server/studio-errors.js";
@@ -228,11 +231,16 @@ function documentPipeline(workspaceRoot: string, runRoot: string) {
     worker: { run: async () => { throw new Error("再审不得启动制作"); } } });
 }
 
-async function buildReferenceHarness() {
+async function buildReferenceHarness(realVideo = false) {
   const harness = await buildHarness(undefined);
   const videoPath = path.join(harness.runRoot, "nodes", "reference-grammar", "reference.mp4");
   const grammarPath = path.join(path.dirname(videoPath), "grammar.json");
-  const video = Buffer.from("controlled-reference-video");
+  await mkdir(path.dirname(videoPath), { recursive: true });
+  if (realVideo) {
+    await promisify(execFileCallback)("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi",
+      "-i", "color=c=blue:s=160x90:r=2:d=10", "-c:v", "libx264", "-pix_fmt", "yuv420p", videoPath]);
+  }
+  const video = realVideo ? await readFile(videoPath) : Buffer.from("controlled-reference-video");
   const sha256 = createHash("sha256").update(video).digest("hex");
   const grammar = validateShotGrammar({
     version: "video-factory/shot-grammar-v1", summary: "由特写推进到全景。", durationMs: 10_000,
@@ -278,6 +286,54 @@ async function buildReferenceHarness() {
 }
 
 describe("reference-grammar document commands", () => {
+  it("revises then audits using the real Python evidence boundary without overwriting prior frames", async () => {
+    const harness = await buildReferenceHarness(true);
+    const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));
+    await store.create(harness.run);
+    const pipeline = documentPipeline(harness.workspaceRoot, harness.runRoot);
+    const repositoryRoot = path.resolve(import.meta.dirname, "../../..");
+    const calls: string[] = [];
+    const preparedRoots: string[] = [];
+    const media = new PythonReviewMediaPreprocessor({ repositoryRoot,
+      pythonPath: path.join(repositoryRoot, "src"), pythonCommand: "python3" });
+    const agent = new CodexReferenceGrammarAgent({
+      media: { prepare: async (input) => {
+        preparedRoots.push(input.runRoot);
+        return media.prepare(input);
+      } },
+      client: { runTask: async (kind) => {
+        calls.push(kind);
+        return kind === "reference-grammar" ? { ...harness.grammar, summary: "先铺垫再揭示。" } : {
+          version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+          verdict: "pass", score: 90, summary: "结构清楚。", issues: [], repairInstructions: [],
+          assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"].map(
+            (dimension) => ({ dimension, score: 90, evidence: "实际抽帧已送达。" }),
+          ) }],
+        };
+      } },
+    });
+    const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline,
+      listProviders: async () => [],
+      archiveStore: { list: async () => ({}), archive: async () => {}, restore: async () => {} },
+      referenceGrammarTools: agent,
+    });
+    await studio.reviseNodeDocument(harness.run.id, "reference-grammar", {
+      expectedRunRevision: 7, expectedVersionId: "reference-v1", instruction: "让叙事顺序更清楚。",
+    }, "creator");
+    assert.deepEqual(calls, ["reference-grammar"], "修订不补审");
+    const firstManifestPath = path.join(preparedRoots[0]!, "review_media", "review_media_manifest.json");
+    const firstManifest = await readFile(firstManifestPath, "utf8");
+    const current = await pipeline.show(harness.run.id);
+    await studio.auditNodeDocumentCurrent(current.id, "reference-grammar", {
+      expectedRunRevision: current.revision, expectedVersionId: current.nodeRuns[0]!.outputState!.effectiveVersionId!,
+    }, "creator");
+    assert.deepEqual(calls, ["reference-grammar", "role-audit"]);
+    assert.notEqual(preparedRoots[0], preparedRoots[1]);
+    assert.equal(await readFile(firstManifestPath, "utf8"), firstManifest, "主动再审不覆盖此前证据");
+    assert.equal((JSON.parse(firstManifest) as { frames: unknown[] }).frames.length > 0, true);
+    assert.deepEqual(JSON.parse(await readFile(harness.grammarPath, "utf8")), harness.grammar);
+  });
+
   it("returns an empty creative history before planning while unknown runs remain not-found", async () => {
     const harness = await buildReferenceHarness();
     const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));
@@ -327,12 +383,12 @@ describe("reference-grammar document commands", () => {
       referenceGrammarTools: {
         revise: async (input) => {
           revisions += 1;
-          assert.equal(input.videoPath, harness.videoPath);
+          assert.deepEqual(await readFile(input.videoPath), await readFile(harness.videoPath));
           return { ...input.currentGrammar, summary: `第${revisions}次修订：先近后远。` };
         },
         auditCurrent: async (input) => {
           audits += 1;
-          assert.equal(input.videoPath, harness.videoPath);
+          assert.deepEqual(await readFile(input.videoPath), await readFile(harness.videoPath));
           return { audit: {
             version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
             verdict: "pass", score: 90, summary: "画面顺序有依据。", issues: [], repairInstructions: [],
@@ -391,7 +447,7 @@ describe("reference-grammar document commands", () => {
     }, "creator-1");
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0]!.currentGrammar, harness.grammar);
-    assert.equal(calls[0]!.videoPath, harness.videoPath);
+    assert.deepEqual(await readFile(calls[0]!.videoPath), await readFile(harness.videoPath));
     assert.equal(calls[0]!.sourceLabel, "我的参考片");
     const output = harness.pipeline.lastOverride!.output as {
       referenceGrammarPath: string; grammar: { summary: string }; contentReview: { status: string };

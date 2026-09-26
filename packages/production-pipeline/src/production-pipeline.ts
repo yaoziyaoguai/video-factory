@@ -851,9 +851,11 @@ export class ProductionPipeline {
   async readTextExecutionUsage(runId: string): Promise<Array<{
     nodeId: string; providerId: string; modelId: string; modelCallCount: number;
   }>> {
-    await this.store.load(runId);
+    const run = await this.store.load(runId);
     const usage = [];
-    for (const nodeId of ["brief", "creative-planning"]) {
+    // 复核也发生在参考分析、选片、审片与发布等节点；按实际节点读取既有证据，
+    // 不能只统计创作规划，或为了补展示而回写历史回执。
+    for (const nodeId of new Set(run.nodeRuns.map((node) => node.nodeId))) {
       const checkpoints = await readNodeAccountingCheckpoints(this.runsRoot, runId, nodeId);
       const discussions = nodeId === "creative-planning" ? await readCreativeDiscussionExecutions(this.runsRoot, runId) : [];
       const summary = summarizePlanningCheckpoints(checkpoints, discussions);
@@ -5763,18 +5765,15 @@ function referenceGrammarNode(
         attempt: attempt.attempt,
         parentArtifactIds,
       });
+      const trace = execution?.trace ?? failedTrace;
+      const modelReceipt = trace ? modelTraceReceipt(trace, "Codex 参考视频分析", "subscription", execution?.agentLoop ?? failedAgentLoop) : undefined;
       return {
         status: "succeeded",
         output: { referenceGrammarPath: grammarPath, grammar, contentReview: contentReviewForCreator(execution?.agentLoop) },
         receipt: {
-          ...(execution?.trace ?? failedTrace
+          ...(modelReceipt
             ? {
-                ...modelTraceReceipt(
-                  (execution?.trace ?? failedTrace)!,
-                  "Codex 参考视频分析",
-                  "subscription",
-                  execution?.agentLoop ?? failedAgentLoop,
-                ),
+                ...modelReceipt,
                 ...(fallbackReason ? { fallbackReason } : {}),
               }
             : fallbackReason
@@ -5796,7 +5795,7 @@ function referenceGrammarNode(
                 billing: "subscription" as const,
                 configurationSource: "system_default" as const,
               }),
-          parameters: { sampleMode: "keyframes", promptPack: (execution?.trace ?? failedTrace)?.promptVersion ?? "video-factory/reference-grammar-v4" },
+          parameters: { ...modelReceipt?.parameters, sampleMode: "keyframes", promptPack: trace?.promptVersion ?? "video-factory/reference-grammar-v4" },
           estimatedCostCny: 0,
           requestId: context.nextId("reference-grammar"),
         },
