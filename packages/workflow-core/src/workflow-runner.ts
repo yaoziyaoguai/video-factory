@@ -473,6 +473,7 @@ export class WorkflowRunner {
     }
     delete nodeRun.finishedAt;
     delete nodeRun.error;
+    delete nodeRun.errorCode;
     delete nodeRun.intervention;
     delete nodeRun.executionReceipt;
     delete nodeRun.spendPlan;
@@ -1139,6 +1140,7 @@ export class WorkflowRunner {
         delete nodeRun.output;
         delete nodeRun.finishedAt;
         delete nodeRun.error;
+        delete nodeRun.errorCode;
         delete nodeRun.intervention;
         delete nodeRun.executionReceipt;
         delete nodeRun.spendPlan;
@@ -1262,6 +1264,7 @@ export class WorkflowRunner {
     delete retryNode.output;
     delete retryNode.finishedAt;
     delete retryNode.error;
+    delete retryNode.errorCode;
     delete retryNode.intervention;
     delete retryNode.executionReceipt;
     // 已物化试片后的暂停不是一次新的采购：只要同一 operation、同一输入和当前报价仍然
@@ -1336,6 +1339,7 @@ export class WorkflowRunner {
       delete nodeRun.output;
       delete nodeRun.finishedAt;
       delete nodeRun.error;
+      delete nodeRun.errorCode;
       delete nodeRun.intervention;
       delete nodeRun.executionReceipt;
       delete nodeRun.spendPlan;
@@ -1550,6 +1554,7 @@ export class WorkflowRunner {
       qualityGateResults: [],
     };
     nodeRun.status = "running";
+    delete nodeRun.errorCode;
     nodeRun.startedAt = context.now();
     nodeRun.operationRequestId ??= context.nextId(`${context.runId}-${node.id}-operation`);
     const resumingInterruptedOperation = nodeRun.interrupted === true;
@@ -1709,6 +1714,7 @@ export class WorkflowRunner {
         if (result.error !== undefined) {
           nodeRun.error = result.error;
         }
+        if (result.errorCode !== undefined) nodeRun.errorCode = result.errorCode;
         const intervention =
           result.status === "needs_human" ? createInterventionIfNeeded(node, result.intervention, context) : undefined;
         if (intervention) {
@@ -1735,6 +1741,10 @@ export class WorkflowRunner {
     } catch (error) {
       nodeRun.status = "failed";
       nodeRun.error = error instanceof Error ? error.message : String(error);
+      if (error && typeof error === "object" && "code" in error
+        && typeof error.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code)) {
+        nodeRun.errorCode = error.code;
+      }
       nodeRun.finishedAt = context.now();
       if (resumingInterruptedMeteredOperation
         || (authorization || automaticMeteredProvider) && meteredAttemptCount > 0) {

@@ -6,8 +6,10 @@ import type {
   StudioRunStatus,
   StudioSeries,
   StudioSeriesEpisode,
+  StudioSeriesEpisodeAuditRecord,
   StudioSeriesEpisodePlanning,
   StudioSeriesEpisodePlanInput,
+  StudioSeriesEpisodeVersion,
 } from "../shared/api.js";
 import type { SeriesEpisodeDraft } from "./series-planner.js";
 
@@ -33,6 +35,7 @@ export interface StudioSeriesRepository {
   list(): Promise<SeriesRecord[]>;
   get(id: string): Promise<SeriesRecord | undefined>;
   create(record: SeriesRecord): Promise<SeriesRecord>;
+  replaceInitialRoadmap(id: string, expectedRevision: number, episodes: StudioSeriesEpisode[], updatedAt: string): Promise<SeriesRecord>;
   appendPlannedEpisodes(id: string, expectedRevision: number, episodes: StudioSeriesEpisode[], updatedAt: string): Promise<SeriesRecord>;
   updateEpisodePlan(id: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput, updatedAt: string): Promise<SeriesRecord>;
   appendEpisodeSources(id: string, episodeNumber: number, evidenceUrls: string[], updatedAt: string): Promise<SeriesRecord>;
@@ -45,7 +48,16 @@ export interface StudioSeriesRepository {
     planning: StudioSeriesEpisodePlanning,
     updatedAt: string,
   ): Promise<SeriesRecord>;
-  adoptEpisode(id: string, episodeNumber: number, updatedAt: string): Promise<SeriesRecord>;
+  reviseEpisodePlan(
+    id: string,
+    episodeNumber: number,
+    expectedRevision: number,
+    expectedCanonRevision: number,
+    draft: SeriesEpisodeDraft,
+    planning: StudioSeriesEpisodePlanning,
+    updatedAt: string,
+  ): Promise<SeriesRecord>;
+  adoptEpisode(id: string, episodeNumber: number, updatedAt: string, expectedGenerationId?: string): Promise<SeriesRecord>;
   reserveRun(id: string, episodeId: string, opportunityId: string, reservationId: string, updatedAt: string): Promise<SeriesRecord>;
   confirmRunReservation(id: string, episodeId: string, reservationId: string, runId: string, updatedAt: string): Promise<SeriesRecord>;
   releaseRunReservation(id: string, episodeId: string, reservationId: string, updatedAt: string): Promise<SeriesRecord>;
@@ -69,6 +81,52 @@ const STALE_SERIES_LOCK_AGE_MS = 5 * 60 * 1_000;
 const STALE_RUN_RESERVATION_AGE_MS = 15 * 60 * 1_000;
 const STALE_RUN_EDIT_LEASE_AGE_MS = 15 * 60 * 1_000;
 
+function newEpisodeVersionId(episodeId: string): string {
+  return `${episodeId}#${randomUUID()}`;
+}
+
+function episodeVersion(episode: StudioSeriesEpisode, versionId: string, recordedAt: string): StudioSeriesEpisodeVersion {
+  return {
+    versionId, recordedAt, source: episode.planning.source,
+    pillar: episode.pillar, title: episode.title, viewerPromise: episode.viewerPromise,
+    hook: episode.hook, payoff: episode.payoff,
+    fromPrevious: [...episode.continuity.fromPrevious], toNext: [...episode.continuity.toNext],
+  };
+}
+
+function ensureEpisodeVersion(episode: StudioSeriesEpisode): StudioSeriesEpisode {
+  if (episode.contentVersionId) return episode;
+  // 旧数据只给当前内容建立新身份；缺失的过去版本和审计绝不推断补造。
+  const versionId = newEpisodeVersionId(episode.id);
+  return {
+    ...episode,
+    contentVersionId: versionId,
+    versionHistory: [...(episode.versionHistory ?? []), episodeVersion(episode, versionId, episode.updatedAt)],
+  };
+}
+
+function initialEpisodeWithReview(episode: StudioSeriesEpisode): StudioSeriesEpisode {
+  const versioned = ensureEpisodeVersion(episode);
+  if (episode.planning.source !== "agent" || episode.planning.auditIterations < 1 || !episode.planning.auditSummary
+    || versioned.auditHistory?.some((audit) => audit.targetVersionId === versioned.contentVersionId)) return versioned;
+  return {
+    ...versioned,
+    auditHistory: [...(versioned.auditHistory ?? []), episodeAudit(episode.planning, versioned.contentVersionId!, episode.updatedAt)],
+  };
+}
+
+function episodeAudit(planning: StudioSeriesEpisodePlanning, targetVersionId: string, recordedAt: string): StudioSeriesEpisodeAuditRecord {
+  return {
+    auditId: randomUUID(), targetVersionId, recordedAt,
+    status: planning.auditStatus,
+    ...(planning.auditSummary ? { summary: planning.auditSummary } : {}),
+    ...(planning.auditSuggestions?.length ? { suggestions: [...planning.auditSuggestions] } : {}),
+    ...(planning.auditScore !== undefined ? { score: planning.auditScore } : {}),
+    providerId: planning.providerId,
+    modelId: planning.modelId,
+  };
+}
+
 export class JsonSeriesStore implements StudioSeriesRepository {
   private writeQueue: Promise<void> = Promise.resolve();
 
@@ -90,9 +148,45 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       if (file.series.some((item) => item.id === record.id || item.track === record.track)) {
         throw new SeriesStoreConflictError("系列名称或系列标识已经存在。");
       }
-      file.series.push(structuredClone(record));
+      const stored = { ...record, episodes: record.episodes.map((episode) => initialEpisodeWithReview(episode)) };
+      file.series.push(structuredClone(stored));
       await this.write(file);
-      return structuredClone(record);
+      return structuredClone(stored);
+    });
+  }
+
+  async replaceInitialRoadmap(id: string, expectedRevision: number, episodes: StudioSeriesEpisode[], updatedAt: string): Promise<SeriesRecord> {
+    return this.withWriteLock(async () => {
+      const file = await this.read();
+      const index = file.series.findIndex((item) => item.id === id);
+      const current = file.series[index];
+      if (!current) throw new SeriesStoreNotFoundError("没有找到这个系列。");
+      if (current.revision !== expectedRevision) throw new SeriesStoreConflictError("路线图已被修改，模型初稿不会覆盖创作者的新版本。");
+      if (current.episodes.some((episode) => episode.status !== "planned" || episode.planning.source !== "rules" || episode.runId || episode.runReservation)) {
+        throw new SeriesStoreConflictError("路线图已被采用或修改，模型初稿不会覆盖创作者的决定。");
+      }
+      if (episodes.length !== current.episodes.length
+        || episodes.some((episode, episodeIndex) => episode.id !== current.episodes[episodeIndex]?.id
+          || episode.episodeNumber !== current.episodes[episodeIndex]?.episodeNumber
+          || episode.status !== "planned")) {
+        throw new SeriesStoreConflictError("模型路线图与当前规划窗口不一致，未保存到系列中。");
+      }
+      const generatedEpisodes = episodes.map((episode, episodeIndex) => {
+        const prior = ensureEpisodeVersion(current.episodes[episodeIndex]!);
+        const versionId = newEpisodeVersionId(episode.id);
+        return {
+          ...episode,
+          contentVersionId: versionId,
+          versionHistory: [...(prior.versionHistory ?? []), episodeVersion(episode, versionId, updatedAt)],
+          auditHistory: episode.planning.source === "agent" && episode.planning.auditIterations > 0 && episode.planning.auditSummary
+            ? [...(prior.auditHistory ?? []), episodeAudit(episode.planning, versionId, updatedAt)]
+            : [...(prior.auditHistory ?? [])],
+        };
+      });
+      const updated = { ...current, episodes: generatedEpisodes, revision: current.revision + 1, updatedAt };
+      file.series[index] = updated;
+      await this.write(file);
+      return structuredClone(updated);
     });
   }
 
@@ -117,7 +211,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       }
       const updated = {
         ...current,
-        episodes: [...current.episodes, ...structuredClone(episodes)].sort((left, right) => left.episodeNumber - right.episodeNumber),
+        episodes: [...current.episodes, ...episodes.map((episode) => initialEpisodeWithReview(episode))].sort((left, right) => left.episodeNumber - right.episodeNumber),
         revision: current.revision + 1,
         updatedAt,
       };
@@ -127,7 +221,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
     });
   }
 
-  async adoptEpisode(id: string, episodeNumber: number, updatedAt: string): Promise<SeriesRecord> {
+  async adoptEpisode(id: string, episodeNumber: number, updatedAt: string, expectedGenerationId?: string): Promise<SeriesRecord> {
     return this.withWriteLock(async () => {
       const file = await this.read();
       const index = file.series.findIndex((item) => item.id === id);
@@ -136,6 +230,9 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       const episodeIndex = current.episodes.findIndex((episode) => episode.episodeNumber === episodeNumber);
       const episode = current.episodes[episodeIndex];
       if (!episode) throw new SeriesStoreNotFoundError("没有找到这条单集计划。");
+      if (expectedGenerationId && expectedGenerationId !== `${id}:r${current.revision}:e${episodeNumber}`) {
+        throw new SeriesStoreConflictError("你看到的系列路线图版本已变化，请刷新后再决定是否采用。");
+      }
       if (episode.status === "selected" && episode.opportunityId === episode.id) {
         return structuredClone(current);
       }
@@ -156,8 +253,23 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       if (blocker) {
         throw new SeriesStoreConflictError(`请先完成第 ${blocker.episodeNumber} 集，再推进第 ${episodeNumber} 集。`);
       }
+      const selectedVersion = ensureEpisodeVersion(episode);
+      const selectedAudit = [...(selectedVersion.auditHistory ?? [])].reverse()
+        .find((audit) => audit.targetVersionId === selectedVersion.contentVersionId);
+      const adoptionAuditStatus: NonNullable<StudioSeriesEpisode["adoption"]>["auditStatus"] = selectedAudit?.status ?? "not_audited";
       const episodes = current.episodes.map((candidate, candidateIndex) => candidateIndex === episodeIndex
-        ? { ...candidate, status: "selected" as const, opportunityId: candidate.id, updatedAt }
+        ? {
+          ...selectedVersion,
+          status: "selected" as const,
+          opportunityId: candidate.id,
+          adoption: {
+            targetVersionId: selectedVersion.contentVersionId!,
+            auditId: selectedAudit?.auditId ?? null,
+            auditStatus: adoptionAuditStatus,
+            adoptedAt: updatedAt,
+          },
+          updatedAt,
+        }
         : candidate);
       const nextEpisodeNumber = episodes.find((candidate) => candidate.status === "planned")?.episodeNumber
         ?? episodeNumber + 1;
@@ -195,8 +307,10 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       const nextEpisode = current.episodes.find((candidate) => candidate.previousEpisodeId === episode.id);
       const episodes = current.episodes.map((candidate, candidateIndex) => {
         if (candidateIndex === episodeIndex) {
-          return {
-            ...candidate,
+          const currentVersion = ensureEpisodeVersion(candidate);
+          const versionId = newEpisodeVersionId(candidate.id);
+          const next = {
+            ...currentVersion,
             pillar: input.pillar,
             title: input.title,
             viewerPromise: input.viewerPromise,
@@ -217,8 +331,10 @@ export class JsonSeriesStore implements StudioSeriesRepository {
               modelId: "manual",
               promptVersion: "video-factory/series-episode-edit-v1",
             },
+            contentVersionId: versionId,
             updatedAt,
           };
+          return { ...next, versionHistory: [...(currentVersion.versionHistory ?? []), episodeVersion(next, versionId, updatedAt)] };
         }
         if (nextEpisode?.id === candidate.id && candidate.status === "planned") {
           return {
@@ -308,7 +424,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       if (JSON.stringify(draft.fromPrevious) !== JSON.stringify(episode.continuity.fromPrevious)) {
         throw new SeriesStoreConflictError("开拍审计不能改写创作者填写的本集承接要求；请由创作者确认后重新审计。");
       }
-      if (episode.planning.source === "human" && JSON.stringify({
+      if (JSON.stringify({
         pillar: draft.pillar,
         title: draft.title,
         viewerPromise: draft.viewerPromise,
@@ -323,16 +439,18 @@ export class JsonSeriesStore implements StudioSeriesRepository {
         payoff: episode.payoff,
         toNext: episode.continuity.toNext,
       })) {
-        throw new SeriesStoreConflictError("开拍审计不能改写创作者确认的标题、钩子或本集兑现；如需调整，请返回路线图手工修改后再审计。");
+        throw new SeriesStoreConflictError("审计不能改写当前稿；如需调整，请返回路线图明确修订后再审计。");
       }
       const upstreamEdit = current.episodes.find((candidate) => candidate.episodeNumber < episode.episodeNumber
         && activeEditLease(candidate, updatedAt));
       if (upstreamEdit) {
         throw new SeriesStoreConflictError(`第 ${upstreamEdit.episodeNumber} 集正在修改，不能完成第 ${episodeNumber} 集的开拍审计。`);
       }
+      const currentVersion = ensureEpisodeVersion(episode);
+      const audit = episodeAudit(planning, currentVersion.contentVersionId!, updatedAt);
       const episodes = current.episodes.map((candidate, candidateIndex) => candidateIndex === episodeIndex
         ? {
-            ...candidate,
+            ...currentVersion,
             pillar: draft.pillar,
             title: draft.title,
             viewerPromise: draft.viewerPromise,
@@ -345,9 +463,75 @@ export class JsonSeriesStore implements StudioSeriesRepository {
               toNext: [...draft.toNext],
             },
             planning: structuredClone(planning),
+            auditHistory: [...(currentVersion.auditHistory ?? []), audit],
             updatedAt,
           }
         : candidate);
+      const updated = { ...current, episodes, revision: current.revision + 1, updatedAt };
+      file.series[index] = updated;
+      await this.write(file);
+      return structuredClone(updated);
+    });
+  }
+
+  async reviseEpisodePlan(
+    id: string,
+    episodeNumber: number,
+    expectedRevision: number,
+    expectedCanonRevision: number,
+    draft: SeriesEpisodeDraft,
+    planning: StudioSeriesEpisodePlanning,
+    updatedAt: string,
+  ): Promise<SeriesRecord> {
+    return this.withWriteLock(async () => {
+      const file = await this.read();
+      const index = file.series.findIndex((item) => item.id === id);
+      const current = file.series[index];
+      if (!current) throw new SeriesStoreNotFoundError("没有找到这个系列。");
+      if (current.revision !== expectedRevision || current.canon.revision !== expectedCanonRevision) {
+        throw new SeriesStoreConflictError("系列路线图或正史已改变；修订提案未采用，请刷新后重新发送意见。");
+      }
+      const episodeIndex = current.episodes.findIndex((item) => item.episodeNumber === episodeNumber);
+      const episode = current.episodes[episodeIndex];
+      if (!episode) throw new SeriesStoreNotFoundError("没有找到这条单集计划。");
+      if (episode.status !== "planned" || episode.runId || episode.runReservation) {
+        throw new SeriesStoreConflictError("只有尚未采用和开拍的单集可以修订。");
+      }
+      if (draft.episodeNumber !== episodeNumber || !current.pillars.includes(draft.pillar)
+        || JSON.stringify(draft.fromPrevious) !== JSON.stringify(episode.continuity.fromPrevious)) {
+        throw new SeriesStoreConflictError("修订提案与当前单集或已确认承接要求不符；旧稿保留不变。");
+      }
+      const currentVersion = ensureEpisodeVersion(episode);
+      const versionId = newEpisodeVersionId(episode.id);
+      const revised = {
+        ...currentVersion,
+        pillar: draft.pillar,
+        title: draft.title,
+        viewerPromise: draft.viewerPromise,
+        hook: draft.hook,
+        payoff: draft.payoff,
+        continuity: { ...episode.continuity, toNext: [...draft.toNext] },
+        planning: { ...planning, auditStatus: "not_audited" as const, auditIterations: 0 },
+        auditHistory: [...(currentVersion.auditHistory ?? [])],
+        contentVersionId: versionId,
+        canonBaseRevision: current.canon.revision,
+        updatedAt,
+      };
+      const nextEpisode = current.episodes.find((candidate) => candidate.previousEpisodeId === episode.id);
+      const episodes = current.episodes.map((candidate, candidateIndex) => {
+        if (candidateIndex === episodeIndex) {
+          return { ...revised, versionHistory: [...(currentVersion.versionHistory ?? []), episodeVersion(revised, versionId, updatedAt)] };
+        }
+        if (nextEpisode?.id === candidate.id && candidate.status === "planned") {
+          return {
+            ...candidate,
+            continuity: { ...candidate.continuity, inheritedFromPrevious: [...draft.toNext] },
+            planning: { ...candidate.planning, auditStatus: "stale" as const },
+            updatedAt,
+          };
+        }
+        return candidate;
+      });
       const updated = { ...current, episodes, revision: current.revision + 1, updatedAt };
       file.series[index] = updated;
       await this.write(file);

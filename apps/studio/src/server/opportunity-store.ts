@@ -7,6 +7,8 @@ import type { StudioArticleFact, StudioCandidateOrigin, StudioCandidateVerificat
 
 export interface OpportunityRecord {
   title: string;
+  adoptedCandidateGenerationId?: string;
+  adoptedCandidateAuditStatus?: "passed" | "awaiting_user" | "not_audited";
   candidate: TopicCandidate;
   scoreProvenance?: {
     source: string;

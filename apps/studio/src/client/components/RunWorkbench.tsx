@@ -6,6 +6,7 @@ import { initialFilmArrival, nextFilmArrival } from "../film-arrival.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { agentLoopPendingNote, agentLoopPhaseLabel, creatorFacingTechnicalText, creatorRunStatusLabel, platformLabel, providerLabel, catalogModelLabel, runNodeLabel, RUN_NODE_LABELS, sourceAssetReviewBreakdown } from "../presentation.js";
 import { NodeWorkspace, revealNodeWorkspace } from "./NodeWorkspace.js";
+import { nodeContentReview } from "./NodeContentReview.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 import { AudioReviewPanel } from "./AudioReviewPanel.js";
 
@@ -29,6 +30,9 @@ interface RunWorkbenchProps {
   pausePending?: boolean;
   onOverrideNode?: (nodeId: string, input: StudioNodeOverrideInput) => Promise<void>;
   onOverrideNodeInput?: (nodeId: string, input: StudioNodeInputOverrideInput) => Promise<void>;
+  /** 发布文案 AI 修订（只产未审新稿）与主动再审（只审当前稿）。 */
+  onReviseNodeDocument?: (nodeId: string, input: { instruction: string; expectedRunRevision: number; expectedVersionId: string; confirmTerminalEdit?: boolean }) => Promise<void>;
+  onAuditNodeDocument?: (nodeId: string, input: { expectedRunRevision: number; expectedVersionId: string }) => Promise<void>;
   onConfigureNode?: (nodeId: string, input: StudioNodeExecutionConfigurationInput) => Promise<void>;
   onAuthorizeSpend?: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
@@ -43,7 +47,7 @@ interface RunWorkbenchProps {
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, creativeDiscussion, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, creativeDiscussion, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onReviseNodeDocument, onAuditNodeDocument, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
@@ -52,7 +56,12 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const [replanningVoice, setReplanningVoice] = useState(false);
   const [voiceDurationSeconds, setVoiceDurationSeconds] = useState("");
   const [hasPendingPlanningConfiguration, setHasPendingPlanningConfiguration] = useState(false);
-  const [decisionSnapshot, setDecisionSnapshot] = useState<Pick<StudioDecisionInput, "expectedRunRevision" | "interventionId" | "reviewEvidenceId"> & { acceptIncomplete?: true }>();
+  const [decisionSnapshot, setDecisionSnapshot] = useState<Pick<StudioDecisionInput, "expectedRunRevision" | "interventionId" | "reviewEvidenceId"> & {
+    acceptIncomplete?: true;
+    contentVersionId?: string;
+    acceptUnauditedContent?: true;
+    acceptContentSuggestions?: true;
+  }>();
   const previewRef = useRef<HTMLVideoElement>(null);
   const closeRejectDecision = () => {
     setRejecting(false);
@@ -125,6 +134,18 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   // 停下来的这一步的独立复核进度。SSE 载荷里没有它，由 preferRunSnapshot 从上一帧补回来，
   // 否则用户点开决策面板的瞬间看到的是一片空白，要等十秒心跳才出现建议。
   const waitingNodeId = run.activeIntervention?.nodeId;
+  const contentDecisionNode = boundaryGate && (waitingNodeId === "publish-package" || waitingNodeId === "reference-grammar")
+    ? run.nodes.find((node) => node.id === waitingNodeId) : undefined;
+  const contentDecisionVersion = contentDecisionNode?.outputState?.versions.find(
+    (version) => version.id === contentDecisionNode.outputState?.effectiveVersionId,
+  );
+  const contentDecisionReview = contentDecisionNode
+    ? nodeContentReview(contentDecisionVersion?.output ?? contentDecisionNode.output)
+    : undefined;
+  const contentDecisionUnaudited = Boolean(contentDecisionNode && (!contentDecisionReview || contentDecisionReview.status === "not_audited"));
+  const contentDecisionHasSuggestions = Boolean(contentDecisionReview?.suggestions.length);
+  const contentDecisionActionLabel = contentDecisionUnaudited ? "采用本版（未审计），继续"
+    : contentDecisionHasSuggestions ? "保留建议，采用当前稿" : "采用当前稿，继续";
   const waitingNodeProgress = waitingNodeId
     ? run.nodes.find((node) => node.id === waitingNodeId)?.agentLoopProgress
     : undefined;
@@ -217,6 +238,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     {...(onRequestPause ? { onRequestPause } : {})}
     onOverride={onOverrideNode ?? (async () => undefined)}
     onInputOverride={onOverrideNodeInput ?? (async () => undefined)}
+    {...(onReviseNodeDocument && onAuditNodeDocument ? { onReviseDocument: onReviseNodeDocument, onAuditDocument: onAuditNodeDocument } : {})}
     onConfigure={onConfigureNode ?? (async () => undefined)}
     onAuthorize={onAuthorizeSpend ?? (async () => undefined)}
     onRejectSpend={onRejectSpend ?? (async () => undefined)}
@@ -235,9 +257,9 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     }
   }, [run.activeIntervention]);
 
-  const openDecision = (kind: "approve" | "reject") => {
-    if (!run.activeIntervention) return;
-    setDecisionSnapshot({
+  const decisionSnapshotFor = (kind: "approve" | "reject") => {
+    if (!run.activeIntervention) return undefined;
+    return {
       expectedRunRevision: run.revision,
       interventionId: run.activeIntervention.id,
       // 成片审片证据只在消费它的停点随决定提交；其余停点不携带无关证据（与服务端分派一致）。
@@ -247,7 +269,17 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
           ? visualReview?.evidenceId ?? null
           : null,
       ...(kind === "approve" && sourceReviewIncompleteRisk ? { acceptIncomplete: true as const } : {}),
-    });
+      ...(kind === "approve" && contentDecisionNode?.outputState?.effectiveVersionId
+        ? { contentVersionId: contentDecisionNode.outputState.effectiveVersionId } : {}),
+      ...(kind === "approve" && contentDecisionUnaudited ? { acceptUnauditedContent: true as const } : {}),
+      ...(kind === "approve" && contentDecisionHasSuggestions ? { acceptContentSuggestions: true as const } : {}),
+    };
+  };
+
+  const openDecision = (kind: "approve" | "reject") => {
+    const snapshot = decisionSnapshotFor(kind);
+    if (!snapshot) return;
+    setDecisionSnapshot(snapshot);
     if (kind === "approve") setApproving(true);
     else setRejecting(true);
   };
@@ -496,12 +528,11 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                   <span>独立复核 {waitingNodeProgress.latestAudit.score} 分：{waitingNodeProgress.latestAudit.summary}</span>
                   {waitingNodeProgress.latestAudit.issues?.length ? <ul className="agent-audit-issues">
                     {waitingNodeProgress.latestAudit.issues.map((issue, index) => <li key={`${issue.criterion}:${index}`}>
-                      <strong>{issue.criterion}
+                      <strong>{issue.repairInstruction}
                         {/* 审计自己的措辞是 blocking/advisory；对用户它始终只是建议，所以写"建议先改"而不是"阻断"。 */}
                         <span className="agent-audit-issue-severity">{issue.severity === "blocking" ? "建议先改" : "可选"}</span>
                       </strong>
                       <span>{issue.evidence}</span>
-                      <span>建议：{issue.repairInstruction}</span>
                     </li>)}
                   </ul> : null}
                 </> : <span>{agentLoopPendingNote(waitingNodeProgress)}</span>}
@@ -580,9 +611,14 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                       className="button button-primary"
                       type="button"
                       disabled={decisionPending}
-                      onClick={() => openDecision("approve")}
+                      onClick={() => {
+                        if (contentDecisionNode) {
+                          const snapshot = decisionSnapshotFor("approve");
+                          if (snapshot) void onDecision({ action: "approve", ...snapshot });
+                        } else openDecision("approve");
+                      }}
                     >
-                      <Check aria-hidden="true" size={17} />确认当前步骤，进入下一步
+                      <Check aria-hidden="true" size={17} />{contentDecisionNode ? contentDecisionActionLabel : "确认当前步骤，进入下一步"}
                     </button>
                   ) : null}
                   {boundaryOptions.includes("reject") ? (
@@ -786,6 +822,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               ? <><strong>你接受的是“审查没有结论”的事实，不是把它改成通过。</strong><span>已生成画面和费用事实会保留，继续只运行后续配音与渲染；不会重新购买已成功素材，最终仍显示为可播放首版而非正式发布通过。</span></>
               : sourceReviewDecision
               ? <><strong>你确认的是：已看过这份试片意见，愿意按当前方案继续。</strong><span>系统不会重新购买已生成试片；其它尚未生成的素材仍会先依据当前报价和授权处理。</span></>
+              : contentDecisionNode
+              ? <><strong>{contentDecisionUnaudited ? "你采用的是尚未取得独立审计结论的当前版本。" : contentDecisionHasSuggestions ? "你看过内容建议，决定保留建议并采用当前版本。" : "你采用的是当前已审计版本。"}</strong><span>本次决定会绑定当前文字版本；旧版建议不会自动写入当前稿。质量决定不会替代后续素材和费用确认。</span></>
               : boundaryGate
               ? <><strong>放行后这一步的结果就固定下来，制作按现在保存的设置继续往下走。</strong><span>想换模型、参数或输入，请先关掉这个窗口去配置；放行之后要改，就得让这一步连同下游重做。</span></>
               : <><strong>{reviewItems.length > 0
@@ -877,6 +915,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               ><Check aria-hidden="true" size={17} />{decisionPending
                 ? "正在批准..."
                 : sourceReviewDecision || sourcePreflightDecision || sourceReviewIncompleteRisk ? "确认承担并继续"
+                  : contentDecisionNode ? contentDecisionActionLabel
                   : boundaryGate ? "确认放行，进入下一步"
                   : reviewItems.length > 0 ? "逐条表态已完成，生成发布包" : "确认批准并生成发布包"}</button>
             </footer>

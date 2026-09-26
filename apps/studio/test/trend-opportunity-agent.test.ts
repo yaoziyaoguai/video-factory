@@ -179,7 +179,7 @@ describe("TrendOpportunityAgent", () => {
     assert.match(auditPayload.context.downstreamBoundary, /来源不足.*保留为可补源候选/);
   });
 
-  it("lets the independent editor audit repair unsupported facts with the full article context", async () => {
+  it("audits the first topic package once without automatically rewriting it", async () => {
     const articleSource = {
       sourceId: "signal-ai",
       originalUrl: "https://example.com/ai",
@@ -208,11 +208,6 @@ describe("TrendOpportunityAgent", () => {
       monetization: 60,
       audienceDemand: 70,
     };
-    const safeIdea = {
-      ...unsafeIdea,
-      title: "下班后的 AI 时间账本",
-      hook: "同一页日程，调整前后到底差在哪里？",
-    };
     class RepairingClient extends CodexBridgeClient {
       readonly calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
       private topicCalls = 0;
@@ -226,7 +221,7 @@ describe("TrendOpportunityAgent", () => {
         this.calls.push({ kind, payload });
         if (kind === "topic-ideas") {
           this.topicCalls += 1;
-          return { output: { ideas: [this.topicCalls === 1 ? unsafeIdea : safeIdea] } };
+          return { output: { ideas: [unsafeIdea] } };
         }
         this.auditCalls += 1;
         return { output: this.auditCalls === 1 ? {
@@ -241,6 +236,7 @@ describe("TrendOpportunityAgent", () => {
             criterion: "事实必须由正文支持",
             evidence: "90% 未出现在任何可读段落。",
             repairInstruction: "删除比例断言，保留可验证的前后对照角度。",
+            creatorAction: "去掉没有来源的九成比例，保留能拍出来的前后对照。",
           }],
           repairInstructions: ["删除比例断言，保留可验证的前后对照角度。"],
         } : {
@@ -258,9 +254,9 @@ describe("TrendOpportunityAgent", () => {
     const client = new RepairingClient();
     const ideas = await new CodexTopicIdeaModel(client).generate([{ ...signals[0]!, relatedSignals: [], articleSources: [articleSource] }]);
 
-    assert.equal(ideas[0]?.title, safeIdea.title);
-    assert.equal(client.calls.filter((call) => call.kind === "topic-ideas").length, 2);
-    assert.equal(client.calls.filter((call) => call.kind === "role-audit").length, 2);
+    assert.equal(ideas[0]?.title, unsafeIdea.title);
+    assert.equal(client.calls.filter((call) => call.kind === "topic-ideas").length, 1);
+    assert.equal(client.calls.filter((call) => call.kind === "role-audit").length, 1);
     const firstAudit = client.calls.find((call) => call.kind === "role-audit")?.payload as {
       candidate: { ideas: Array<{ hook: string }> };
       context: { upstreamFacts: { signals: Array<{ articleSources: Array<{ paragraphs: Array<{ text: string }> }> }> } };
@@ -313,21 +309,23 @@ describe("TrendOpportunityAgent", () => {
             criterion: "事实必须由正文支持",
             evidence: "90% 未出现在任何可读段落。",
             repairInstruction: "删除比例断言，保留可验证的前后对照角度。",
+            creatorAction: "去掉没有来源的九成比例，保留能拍出来的前后对照。",
           }],
           repairInstructions: ["删除比例断言，保留可验证的前后对照角度。"],
         } };
       }
     }
-    const model = new CodexTopicIdeaModel(new NeverPassingClient(), 2);
+    const model = new CodexTopicIdeaModel(new NeverPassingClient());
 
     const ideas = await model.generate(modelSignals);
 
     // 轮次用尽不等于失败：候选照常返回、用户照常能开工，但审计要修的必须跟着一起交出去。
-    assert.equal(ideas[0]?.title, "下班后的 AI 时间账本");
+    assert.equal(ideas[0]?.title, unsupportedIdea.title);
     const advice = model.lastAuditAdvice();
     assert.equal(advice?.status, "awaiting_user");
     assert.equal(advice?.summary, "候选添加了正文不支持的比例。");
     assert.deepEqual(advice?.repairInstructions, ["删除比例断言，保留可验证的前后对照角度。"]);
+    assert.deepEqual(advice?.suggestions, ["去掉没有来源的九成比例，保留能拍出来的前后对照。"]);
   });
 
   it("carries the editor audit verdict and its advice on the generation receipt", async () => {
@@ -369,6 +367,32 @@ describe("TrendOpportunityAgent", () => {
     assert.equal(receipt?.auditStatus, "awaiting_user");
     assert.equal(receipt?.auditSummary, "候选添加了正文不支持的比例。");
     assert.deepEqual(receipt?.auditRepairInstructions, ["删除比例断言，保留可验证的前后对照角度。"]);
+  });
+
+  it("keeps advisory content suggestions even when the topic package passes audit", async () => {
+    class AdvisoryClient extends CodexBridgeClient {
+      constructor() { super({ socketPath: "/nonexistent/vf-codex.sock", sleep: async () => {} }); }
+      async runTaskDetailed(kind: CodexTaskKind): Promise<CodexTaskExecution> {
+        return kind === "topic-ideas"
+          ? { output: { ideas: [{
+            signalId: "signal-ai", title: "下班后的 AI 时间账本", track: "ai-daily-life",
+            audience: "上班族", painPoint: "时间分配不清", hook: "下班三小时去哪了？",
+            rationale: "用时间账本展示变化", facts: [], uncertainties: [],
+            visualPlan: MINIMAL_FIXTURE_VISUAL_PLAN, novelty: 82, seriesPotential: 84,
+            monetization: 65, audienceDemand: 75,
+          }] } }
+          : { output: {
+            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+            verdict: "pass", score: 90, assessments: ideaAssessments(90), summary: "可以交给创作者选择。",
+            issues: [{ severity: "advisory", criterion: "开头更具体", evidence: "当前只说三小时。",
+              repairInstruction: "开头展示时间账本中最大的一块去向。" }],
+            repairInstructions: [],
+          } };
+      }
+    }
+    const model = new CodexTopicIdeaModel(new AdvisoryClient());
+    await model.generate(modelSignals);
+    assert.deepEqual(model.lastAuditAdvice()?.suggestions, ["开头展示时间账本中最大的一块去向。"]);
   });
 
   it("serializes related reports under the canonical signal instead of flattening secondary ids", async () => {
@@ -1696,12 +1720,83 @@ describe("TrendOpportunityAgent", () => {
       seriesPotential: 88,
       monetization: 72,
     };
-    const model = new CodexTopicIdeaModel(new CapturingCodexClient(() => ({ ideas: [ideaWithoutDemand] })), 1);
+    const model = new CodexTopicIdeaModel(new CapturingCodexClient(() => ({ ideas: [ideaWithoutDemand] })));
 
     // 缺字段必须走校验失败：把"没回答"折成 0 会变成"没有人会看"这个具体结论。
     await assert.rejects(
       () => model.generate(modelSignals),
       /连续两次返回了无法使用的结果/,
     );
+  });
+});
+
+// 「初稿审一次」合同 S4：修订候选只产稿（零 role-audit），产出绑定原候选上下文。
+describe("CodexTopicIdeaModel.reviseCandidate", () => {
+  const revisedIdea = {
+    signalId: "trend-weather",
+    title: "台风路径变化：通勤前先核对这三条信息",
+    track: "breaking-news",
+    audience: "早晚通勤的普通上班族",
+    painPoint: "预警信息很多，不知道该信哪一条",
+    hook: "出门前，先看这三条已经确认的信息。",
+    rationale: "只保留官方已确认的路径变化，不猜测影响。",
+    facts: [],
+    uncertainties: ["具体降雨时段仍待气象台更新"],
+    visualPlan: { strategy: "信息卡对比", beats: [{ id: "b1", role: "开场", duration: "0-3 秒", description: "官方路径图", searchQuery: "台风路径 官方", source: "stock" }] },
+    novelty: 60,
+    seriesPotential: 55,
+    monetization: 40,
+    audienceDemand: 70,
+  };
+
+  const candidateForRevision = {
+    id: "trend-abc123",
+    title: "台风路径发生变化",
+    platform: "weibo",
+    track: "breaking-news",
+    audience: "关注天气的普通用户",
+    painPoint: "不知道该做什么",
+    hook: "台风正在上升。",
+    rationale: "原始线索。",
+    providerId: "api-topic-editor-v1",
+    generatedAt: "2026-09-24T08:00:00.000Z",
+    evidence: [{
+      source: "trend-weather",
+      platform: "weibo",
+      keyword: "台风路径发生变化",
+      strength: 80,
+      collectedAt: "2026-09-24T08:00:00.000Z",
+    }],
+    score: { final: 60 },
+  } as never;
+
+  it("sends exactly one topic-ideas call carrying the instruction and current candidate, and no audit", async () => {
+    const client = new CapturingCodexClient(() => ({ ideas: [revisedIdea] }));
+    const model = new CodexTopicIdeaModel(client);
+
+    const idea = await model.reviseCandidate!({
+      candidate: candidateForRevision,
+      instruction: "标题给出通勤者可以执行的信息核对动作。",
+    });
+
+    assert.equal(idea.title, "台风路径变化：通勤前先核对这三条信息");
+    assert.deepEqual(client.calls.map((call) => call.kind), ["topic-ideas"], "candidate revision must not call role-audit");
+    const payload = client.calls[0]!.payload as { revision?: { instruction?: string; candidate?: { id?: string } }; signals: Array<{ id: string }> };
+    assert.equal(payload.revision?.instruction, "标题给出通勤者可以执行的信息核对动作。");
+    assert.equal(payload.revision?.candidate?.id, "trend-abc123");
+    assert.equal(payload.signals[0]!.id, "trend-weather", "revision stays bound to the candidate's own signal");
+  });
+
+  it("rejects blank instructions and drifted signal bindings before publishing a revision", async () => {
+    const client = new CapturingCodexClient(() => ({ ideas: [{ ...revisedIdea, signalId: "trend-somewhere-else" }] }));
+    const model = new CodexTopicIdeaModel(client);
+    await assert.rejects(() => model.reviseCandidate!({ candidate: candidateForRevision, instruction: "   " }));
+    assert.equal(client.calls.length, 0);
+
+    await assert.rejects(
+      () => model.reviseCandidate!({ candidate: candidateForRevision, instruction: "改标题" }),
+      /signal/,
+    );
+    assert.equal(client.calls.length, 1, "the drifted output must not be published as a revision");
   });
 });

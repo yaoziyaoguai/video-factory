@@ -10,8 +10,9 @@ import type { StudioSeriesEpisode } from "../shared/api.js";
 import type { SeriesEpisodeDraft } from "./series-planner.js";
 import type { SeriesRecord } from "./series-store.js";
 
-const SERIES_SHOWRUNNER_CONTRACT_VERSION = "series-showrunner-v1|role-audit-v9|series-roadmap-validator-v1";
-const SERIES_GREENLIGHT_CONTRACT_VERSION = "series-greenlight-v1|role-audit-v9|series-roadmap-validator-v1";
+const SERIES_SHOWRUNNER_CONTRACT_VERSION = "series-showrunner-v2|role-audit-v9|series-roadmap-validator-v1|single-initial-audit-v1";
+const SERIES_GREENLIGHT_CONTRACT_VERSION = "series-greenlight-v2|role-audit-v9|series-roadmap-validator-v1|single-initial-audit-v1";
+const SERIES_REVISION_CONTRACT_VERSION = "series-episode-revision-v1|series-roadmap-validator-v1";
 
 export interface SeriesPlanningResult {
   drafts: SeriesEpisodeDraft[];
@@ -21,12 +22,12 @@ export interface SeriesPlanningResult {
 export interface SeriesPlanningAgent {
   generate(series: SeriesRecord, count: number): Promise<SeriesPlanningResult>;
   reviewEpisode(series: SeriesRecord, episode: StudioSeriesEpisode): Promise<{ draft: SeriesEpisodeDraft; planning: StudioSeriesEpisodePlanning }>;
+  reviseEpisode(series: SeriesRecord, episode: StudioSeriesEpisode, instruction: string): Promise<{ draft: SeriesEpisodeDraft; planning: StudioSeriesEpisodePlanning }>;
 }
 
 export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
   constructor(
     private readonly client: CodexBridgeClient,
-    private readonly maxReviewIterations = 3,
     private readonly checkpointDirectory?: string,
     private readonly selectedModel?: () => Promise<string | undefined>,
   ) {}
@@ -74,7 +75,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         "每集具备明确可见的短视频表达空间，能够在经济素材与必要的生成素材之间做逐镜选择",
         "集数连续、数量准确，且没有输入中不存在的事实、数字、经历、引用或来源",
       ],
-      maxIterations: this.maxReviewIterations,
+      maxIterations: 1,
       produce: (revision, { requestId, session, requestOptions, preparedOperation }) => preparedOperation
         ? this.client.observePrepared(preparedOperation, requestOptions)
         : this.client.runTaskDetailed("series-roadmap", {
@@ -117,7 +118,11 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         auditRole: "独立质量复核",
         auditStatus: seriesAuditStatus(execution.agentLoop?.status),
         auditIterations: execution.agentLoop?.iterations.length ?? 1,
-        ...(finalAudit ? { auditScore: finalAudit.score, auditSummary: finalAudit.summary } : {}),
+        ...(finalAudit ? {
+          auditScore: finalAudit.score,
+          auditSummary: finalAudit.summary,
+          ...(finalAudit.issues.length ? { auditSuggestions: finalAudit.issues.map((issue) => issue.creatorAction ?? issue.repairInstruction) } : {}),
+        } : {}),
         providerId: execution.trace?.providerId ?? "openai",
         modelId: execution.trace?.modelId ?? "codex-default",
         promptVersion: execution.trace?.promptVersion ?? "video-factory/series-showrunner-v1",
@@ -139,7 +144,8 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         inheritedFromPrevious: [...(episode.continuity.inheritedFromPrevious ?? [])],
       },
     };
-    const checkpointKey = roleAgentCheckpointKey({ request, model, contractVersion: SERIES_GREENLIGHT_CONTRACT_VERSION });
+    // 同一修订恢复原审计；审计写入后系列 revision 前进，下一次主动审计必须是新操作。
+    const checkpointKey = roleAgentCheckpointKey({ request, model, contractVersion: SERIES_GREENLIGHT_CONTRACT_VERSION, seriesRevision: series.revision });
     const execution = await runRoleAgentLoop<{ episodes: SeriesEpisodeDraft[] }>({
       role: "系列开拍总编",
       contractVersion: SERIES_GREENLIGHT_CONTRACT_VERSION,
@@ -151,7 +157,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         "fromPrevious 是创作者拥有的本集承接要求，必须与输入逐字逐项一致；只能修改 Agent 拥有的其他规划字段",
         "画面表达可实现，事实、数字、人物状态、引用和来源没有凭空新增",
       ],
-      maxIterations: this.maxReviewIterations,
+      maxIterations: 1,
       initialCandidate: { episodes: [episodeDraft(episode)] },
       produce: (revision, { requestId, session, requestOptions, preparedOperation }) => preparedOperation
         ? this.client.observePrepared(preparedOperation, requestOptions)
@@ -203,11 +209,68 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         auditRole: "独立质量复核",
         auditStatus: seriesAuditStatus(execution.agentLoop?.status),
         auditIterations: execution.agentLoop?.iterations.length ?? 1,
-        ...(finalIteration ? { auditScore: finalIteration.audit.score, auditSummary: finalIteration.audit.summary } : {}),
+        ...(finalIteration ? {
+          auditScore: finalIteration.audit.score,
+          auditSummary: finalIteration.audit.summary,
+          ...(finalIteration.audit.issues.length
+            ? { auditSuggestions: finalIteration.audit.issues.map((issue) => issue.creatorAction ?? issue.repairInstruction) }
+            : {}),
+        } : {}),
         providerId: trace?.providerId ?? "openai",
         modelId: trace?.modelId ?? "codex-default",
         promptVersion: trace?.promptVersion ?? "video-factory/series-greenlight-v1",
         ...(trace?.reasoningEffort ? { reasoningEffort: trace.reasoningEffort } : {}),
+      },
+    };
+  }
+
+  async reviseEpisode(
+    series: SeriesRecord,
+    episode: StudioSeriesEpisode,
+    instruction: string,
+  ): Promise<{ draft: SeriesEpisodeDraft; planning: StudioSeriesEpisodePlanning }> {
+    const model = await this.selectedModel?.();
+    const request = {
+      series: seriesPlanningContext(series),
+      planningWindow: { startEpisodeNumber: episode.episodeNumber, count: 1 },
+      targetEpisode: {
+        ...episodeDraft(episode),
+        contentVersionId: episode.contentVersionId,
+        inheritedFromPrevious: [...(episode.continuity.inheritedFromPrevious ?? [])],
+      },
+      revision: instruction,
+    };
+    const checkpointKey = roleAgentCheckpointKey({ request, model, contractVersion: SERIES_REVISION_CONTRACT_VERSION });
+    const execution = await runRoleAgentLoop<{ episodes: SeriesEpisodeDraft[] }>({
+      role: "系列总编",
+      contractVersion: SERIES_REVISION_CONTRACT_VERSION,
+      criteria: ["只修改当前单集，不改写已确认 Series Bible、Canon 和创作者填写的 fromPrevious。"],
+      maxIterations: 1,
+      deferAudit: true,
+      produce: (_revision, { requestId, session, requestOptions, preparedOperation }) => preparedOperation
+        ? this.client.observePrepared(preparedOperation, requestOptions)
+        : this.client.runTaskDetailed("series-roadmap", request, requestId, session, { ...requestOptions, ...(model ? { model } : {}) }),
+      audit: () => { throw new Error("单集修订不得自动审计。"); },
+      validate: (value) => {
+        const parsed = parseSeriesRoadmapOutput(value, series.pillars, episode.episodeNumber, 1);
+        if (JSON.stringify(parsed.episodes[0]?.fromPrevious) !== JSON.stringify(episode.continuity.fromPrevious)) {
+          throw new Error("单集修订不能改写创作者填写的承接要求。");
+        }
+        return parsed;
+      },
+      ...(this.checkpointDirectory ? {
+        checkpoint: fileRoleAgentLoopCheckpoint(path.join(this.checkpointDirectory, `${checkpointKey}.json`), checkpointKey),
+      } : {}),
+    });
+    return {
+      draft: execution.output.episodes[0]!,
+      planning: {
+        source: "agent", role: "系列总编", auditRole: "独立质量复核",
+        auditStatus: "not_audited", auditIterations: 0,
+        providerId: execution.trace?.providerId ?? "openai",
+        modelId: execution.trace?.modelId ?? "codex-default",
+        promptVersion: execution.trace?.promptVersion ?? "video-factory/series-episode-revision-v1",
+        ...(execution.trace?.reasoningEffort ? { reasoningEffort: execution.trace.reasoningEffort } : {}),
       },
     };
   }

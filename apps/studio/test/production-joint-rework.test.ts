@@ -306,6 +306,8 @@ async function confirmCreativeStages(
     const intervention = run.nodeRuns.find((node) => node.nodeId === "creative-planning")?.intervention;
     if (run.status !== "needs_human" || intervention?.kind !== "creative_review" || !intervention.continuation) break;
     const gate = intervention.continuation;
+    const gateNode = run.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    const shown = (gateNode.output as { creativeReview?: { stages?: Record<string, { checkResult?: { verdict?: string; checkIdentity?: string } }> } })?.creativeReview?.stages?.[gate.stage]?.checkResult;
     run = await pipeline.confirmCreativeReview(run.id, {
       commandId: `confirm-${gate.stage}-${index + 1}`,
       actor: "producer",
@@ -313,6 +315,8 @@ async function confirmCreativeStages(
       expectedReviewRevision: gate.reviewRevision,
       stage: gate.stage,
       baseDraftSha256: gate.draftSha256,
+      ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
+      ...(shown?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}),
     });
   }
   return run;
@@ -331,6 +335,8 @@ async function confirmGatedRework(
     const planning = run.nodeRuns.find((node) => node.status === "needs_human" && node.nodeId === "creative-planning")?.intervention;
     if (planning?.kind === "creative_review" && planning.continuation) {
       const gate = planning.continuation;
+    const gateNode = run.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    const shown = (gateNode.output as { creativeReview?: { stages?: Record<string, { checkResult?: { verdict?: string; checkIdentity?: string } }> } })?.creativeReview?.stages?.[gate.stage]?.checkResult;
       run = await pipeline.confirmCreativeReview(run.id, {
         commandId: `rework-confirm-${gate.stage}-${index + 1}`,
         actor: "producer",
@@ -338,6 +344,8 @@ async function confirmGatedRework(
         expectedReviewRevision: gate.reviewRevision,
         stage: gate.stage,
         baseDraftSha256: gate.draftSha256,
+        ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
+        ...(shown?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}),
       });
       continue;
     }
@@ -375,6 +383,118 @@ async function rejectedJointRun(harness: { studio: ProductionStudio; pipeline: P
 }
 
 describe("joint-v1 rework routes back to the right stages (B5)", () => {
+  it("keeps a model-generated out-of-scope director plan at a recoverable stop without reaching assets", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-rework-model-scope-"));
+    const spies: ReworkSpies = { treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] };
+    const source = newJointReworkStudio(workspaceRoot, spies);
+    const sourceRunId = await rejectedJointRun(source);
+    const draft = await source.studio.reworkDraft(sourceRunId);
+    assert.ok(draft?.input.rework);
+    const input: ProductionBrief = {
+      ...draft.input,
+      rework: { ...draft.input.rework, findings: [], affectedScenePositions: [] },
+    };
+    const agents = jointReworkAgents(spies);
+    const director = agents.directorAgent!;
+    const changedDirector: VisualDirectorAgent = {
+      ...director,
+      plan: async (request) => {
+        const plan = await director.plan(request) as Record<string, unknown>;
+        if (request.brief.rework) {
+          const bible = plan.visualBible as Record<string, unknown>;
+          plan.visualBible = { ...bible, pacing: "全片改成急促节奏" };
+        }
+        return plan;
+      },
+      planDetailed: async (request) => request.creativeReviewExecution?.mode === "check"
+        ? passingCreativeReviewExecution(request.creativeReviewExecution.candidate, "视觉导演", "director-plan", "director-model-one")
+        : {
+          output: await changedDirector.plan(request),
+          trace: { taskKind: "director-plan" as const, promptVersion: "v1", prompt: "fixture", providerId: "openai", modelId: "director-model-one" },
+        },
+    };
+    const pipeline = new ProductionPipeline({
+      workspaceRoot, worker: new ReworkWorker(),
+      treatmentAgents: agents.treatmentAgents, screenwriterAgent: agents.screenwriterAgent,
+      directorAgent: changedDirector, assetProviders: REWORK_ASSET_PROVIDERS,
+    });
+    const studio = new ProductionStudio({
+      workspaceRoot, pipeline,
+      archiveStore: { list: async () => [], add: async () => {}, remove: async () => {} },
+      listProviders: async () => ([] as StudioProvider[]),
+    });
+    let run = await pipeline.start(input);
+    for (let index = 0; index < 6; index += 1) {
+      const active = run.nodeRuns.find((node) => node.status === "needs_human")?.intervention;
+      if (run.status !== "needs_human" || !active) break;
+      if (active.kind === "creative_review" && active.continuation) {
+        if (active.continuation.stage === "director") break;
+        const gate = active.continuation;
+        run = await pipeline.confirmCreativeReview(run.id, {
+          commandId: `scope-model-upstream-${index}`, actor: "creator", expectedRunRevision: run.revision,
+          expectedReviewRevision: gate.reviewRevision, stage: gate.stage, baseDraftSha256: gate.draftSha256,
+        });
+      } else if (active.boundary === "node-complete") {
+        run = await pipeline.decide(run.id, {
+          interventionId: active.id, action: "approve", actor: "creator", expectedRunRevision: run.revision, reviewEvidenceId: null,
+        });
+      } else break;
+    }
+    assert.equal(run.status, "needs_human");
+    const current = await studio.creativeReview(run.id);
+    assert.equal(current?.stage, "director");
+    assert.ok(current?.scopeConflict);
+    assert.equal(current.scopeConflict.sourceRunId, sourceRunId);
+    assert.equal(current.proposals[0]?.proposalId, current.scopeConflict.proposalId);
+    assert.notDeepEqual(current.draft, current.proposals[0]?.document);
+    assert.equal(run.nodeRuns.some((node) => node.nodeId === "assets" && node.status !== "pending"), false,
+      "no asset node may start while the scope conflict is awaiting a human decision");
+  });
+
+  it("keeps an out-of-scope global director edit unadopted at the human gate", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-rework-global-scope-"));
+    const spies: ReworkSpies = { treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] };
+    const { pipeline, studio } = newJointReworkStudio(workspaceRoot, spies);
+    const sourceRunId = await rejectedJointRun({ pipeline, studio });
+    const draft = await studio.reworkDraft(sourceRunId);
+    assert.ok(draft?.input.rework);
+    // 去标识化事故：零媒体且用户明确批准空范围；没有未解决 finding 可掩盖内容变化。
+    const input: ProductionBrief = {
+      ...draft.input,
+      rework: { ...draft.input.rework, findings: [], affectedScenePositions: [] },
+    };
+    let run = await pipeline.start(input);
+    for (let index = 0; index < 6; index += 1) {
+      const active = run.nodeRuns.find((node) => node.status === "needs_human")?.intervention;
+      if (run.status !== "needs_human" || !active) break;
+      if (active.kind === "creative_review" && active.continuation) {
+        if (active.continuation.stage === "director") break;
+        const gate = active.continuation;
+        run = await pipeline.confirmCreativeReview(run.id, {
+          commandId: `scope-upstream-${index}`, actor: "creator", expectedRunRevision: run.revision,
+          expectedReviewRevision: gate.reviewRevision, stage: gate.stage, baseDraftSha256: gate.draftSha256,
+        });
+      } else if (active.boundary === "node-complete") {
+        run = await pipeline.decide(run.id, {
+          interventionId: active.id, action: "approve", actor: "creator", expectedRunRevision: run.revision, reviewEvidenceId: null,
+        });
+      } else break;
+    }
+    const current = await studio.creativeReview(run.id);
+    assert.equal(current?.stage, "director", JSON.stringify(run.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
+    const document = structuredClone(current.draft as Record<string, unknown>);
+    document.visualBible = { ...(document.visualBible as Record<string, unknown>), pacing: "全片改为急促节奏" };
+    await assert.rejects(async () => {
+      const operation = await pipeline.dispatchCreativeReviewCommand(run.id, {
+        action: "edit_draft", commandId: "scope-global-edit", actor: "creator", stage: "director",
+        expectedRunRevision: current.runRevision, expectedReviewRevision: current.reviewRevision,
+        baseDraftSha256: current.draftSha256, document,
+      });
+      await operation.completion;
+    }, /返工影响范围|重新确认返工范围/);
+    const after = await studio.creativeReview(run.id);
+    assert.equal(after?.draftSha256, current.draftSha256);
+  });
   it("reads the previous script and director plan from the creative-planning artifacts", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-b5-rework-docs-"));
     const spies: ReworkSpies = { treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] };

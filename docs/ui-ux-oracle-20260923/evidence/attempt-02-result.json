@@ -1,0 +1,19 @@
+{
+  "session": "vf-ui-ux-motion-20260923-02",
+  "authorization": "User explicitly requested a fresh consultation at the highest thinking strength",
+  "strengthRequested": "max",
+  "visibleOrdinal": "第 5 项，共 5 项",
+  "powerControlVerifiedByRuntime": true,
+  "result": "NOT_SUBMITTED",
+  "errorStage": "submit-prompt",
+  "errorCode": "trusted-target-mismatch",
+  "errorMessage": "Trusted send target failed hit testing (target-mismatch).",
+  "promptSubmitted": false,
+  "answerCaptured": false,
+  "ownedChromePid": 18400,
+  "ownedChromeAliveAfterExit": false,
+  "temporaryProfileExistsAfterExit": false,
+  "automaticRetryPerformed": false,
+  "manualBrowserInteractionPerformed": false,
+  "productCodeChanged": false
+}

@@ -1,0 +1,11 @@
+🧿 oracle 0.17.3 — Less mystique, more mergeability.
+Pruned 2 stored sessions older than 24h.
+[preview] Oracle (0.17.3) browser mode (picker=current; requested=gpt-5.6-sol) with ~127,567 tokens (prompt only; 1 attachment excluded).
+[preview] Browser control: launch visible Chrome; may focus/control the browser UI.
+[preview] Browser guidance: A visible automation Chrome window may take focus while Oracle controls ChatGPT.
+[preview] Browser guidance: Use --browser-hide-window, --browser-attach-running, or --remote-chrome to reduce desktop disruption.
+[preview] Bundled upload:
+  • /var/folders/0y/bqp593v95dqdf62qylfn92ch0000gq/T/oracle-browser-bundle-4ugkAY/attachments-bundle.zip (2.8 MB)
+  (bundled 16 files into /var/folders/0y/bqp593v95dqdf62qylfn92ch0000gq/T/oracle-browser-bundle-4ugkAY/attachments-bundle.zip)
+
+Wrapper exit code: 0

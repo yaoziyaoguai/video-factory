@@ -6,7 +6,26 @@ import { describe, it } from "node:test";
 import type { StudioTopicGenerationReceipt, StudioTrendCandidate } from "../src/shared/api.js";
 import { TrendStudio } from "../src/server/trend-studio.js";
 
+function withoutGenerationIdentity(values: StudioTrendCandidate[]) {
+  return values.map(({ generationId: _generationId, auditStatus: _auditStatus, ...candidate }) => candidate);
+}
+
 describe("TrendStudio", () => {
+  it("assigns distinct fallback package versions to two refreshes at the same clock time", async () => {
+    const studio = new TrendStudio({
+      repositoryRoot: "/repo",
+      environment: {},
+      now: () => new Date("2026-08-30T12:00:00.000Z"),
+      trendGateway: { listServices: async () => [], listSignals: async () => [] },
+      trendAgent: { listCandidates: async () => [{ id: "same-id", title: "候选" } as StudioTrendCandidate] },
+    });
+    const first = (await studio.listCandidates())[0]?.generationId;
+    const second = (await studio.listCandidates({ forceRefresh: true }))[0]?.generationId;
+    assert.ok(first);
+    assert.ok(second);
+    assert.notEqual(first, second);
+  });
+
   it("gives an explicit refresh a fresh generation nonce while ordinary reads generate none", async () => {
     // C3-E02：换一批必须有新的生成身份；普通读取/自动刷新不触发新一轮生成。
     const nonces: Array<string | undefined> = [];
@@ -147,7 +166,9 @@ describe("TrendStudio", () => {
           generationReceipt: () => generationReceipt,
         },
       });
-      assert.deepEqual(await first.listCandidates(), cached);
+      const firstCandidates = await first.listCandidates();
+      assert.equal(firstCandidates[0]?.generationId, generationReceipt.generationId);
+      assert.deepEqual(withoutGenerationIdentity(firstCandidates), cached);
       assert.equal(firstCalls, 1);
       const persisted = JSON.parse(await readFile(cachePath, "utf8"));
       assert.equal(persisted.schemaVersion, 6);
@@ -162,7 +183,7 @@ describe("TrendStudio", () => {
         trendGateway: { listServices: async () => [], listSignals: async () => [] },
         trendAgent: { listCandidates: async () => { restartedCalls += 1; return []; } },
       });
-      assert.deepEqual(await restarted.listCandidates(), cached);
+      assert.deepEqual(withoutGenerationIdentity(await restarted.listCandidates()), cached);
       assert.equal(restartedCalls, 0);
       assert.deepEqual(restarted.latestGenerationReceipt(), generationReceipt);
     } finally {
@@ -231,7 +252,7 @@ describe("TrendStudio", () => {
         trendAgent: { listCandidates: async () => { calls += 1; return refreshed; } },
       });
 
-      assert.deepEqual(await studio.listCandidates(), refreshed);
+      assert.deepEqual(withoutGenerationIdentity(await studio.listCandidates()), refreshed);
       assert.equal(calls, 1);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -444,7 +465,7 @@ describe("TrendStudio", () => {
         trendAgent: { listCandidates: () => new Promise((resolve) => { resolveRefresh = resolve; }) },
       });
 
-      assert.deepEqual(await restarted.listCandidates(), cached);
+      assert.deepEqual(withoutGenerationIdentity(await restarted.listCandidates()), cached);
       assert.ok(resolveRefresh, "stale read should schedule one background refresh");
       resolveRefresh(refreshed);
       let current = cached;
@@ -452,7 +473,7 @@ describe("TrendStudio", () => {
         await new Promise((resolve) => setTimeout(resolve, 5));
         current = await restarted.listCandidates();
       }
-      assert.deepEqual(current, refreshed);
+      assert.deepEqual(withoutGenerationIdentity(current), refreshed);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -485,7 +506,7 @@ describe("TrendStudio", () => {
         await new Promise((resolve) => setTimeout(resolve, 5));
         current = await studio.snapshotCandidates();
       }
-      assert.deepEqual(current, generated);
+      assert.deepEqual(withoutGenerationIdentity(current), generated);
       assert.equal(studio.isRefreshing(), false);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -516,7 +537,7 @@ describe("TrendStudio", () => {
         trendGateway: { listServices: async () => [], listSignals: async () => [] },
         trendAgent: { listCandidates: async () => [] },
       });
-      assert.deepEqual(await restarted.listCandidates(), cached);
+      assert.deepEqual(withoutGenerationIdentity(await restarted.listCandidates()), cached);
       await restarted.requestCandidateRefresh();
       assert.deepEqual(await restarted.listCandidates({ forceRefresh: true }), []);
 
@@ -558,16 +579,105 @@ describe("TrendStudio", () => {
         trendGateway: { listServices: async () => [], listSignals: async () => [] },
         trendAgent: { listCandidates: async () => { throw new Error("upstream unavailable"); } },
       });
-      assert.deepEqual(await restarted.listCandidates(), cached);
+      assert.deepEqual(withoutGenerationIdentity(await restarted.listCandidates()), cached);
       await restarted.requestCandidateRefresh();
       await assert.rejects(() => restarted.listCandidates({ forceRefresh: true }), /upstream unavailable/);
       await new Promise((resolve) => setImmediate(resolve));
 
       assert.equal(restarted.candidateRefreshStatus("refresh-failed-with-cache")?.state, "failed");
-      assert.deepEqual(await restarted.listCandidates(), cached);
-      assert.deepEqual(JSON.parse(await readFile(cachePath, "utf8")).values, cached);
+      assert.deepEqual(withoutGenerationIdentity(await restarted.listCandidates()), cached);
+      assert.deepEqual(withoutGenerationIdentity(JSON.parse(await readFile(cachePath, "utf8")).values), cached);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+// 「初稿审一次」合同 S4：修订候选只产稿（零审计），产出以未审身份进入收件箱，原候选保留。
+describe("TrendStudio.reviseCandidate", () => {
+  const baseCandidate = {
+    id: "trend-abc",
+    title: "台风路径发生变化",
+    platform: "weibo",
+    track: "breaking-news",
+    audience: "关注天气的普通用户",
+    painPoint: "不知道该做什么",
+    hook: "台风正在上升。",
+    rationale: "原始线索。",
+    providerId: "api-topic-editor-v1",
+    generatedAt: "2026-09-24T08:00:00.000Z",
+    evidence: [{ source: "trend-weather", platform: "weibo", keyword: "台风路径发生变化", strength: 80, collectedAt: "2026-09-24T08:00:00.000Z" }],
+    score: { final: 60 },
+    generationId: "topic-batch-1",
+    auditStatus: "passed",
+  } as never;
+
+  function revisionStudio(reviseCandidate: (input: { instruction: string }) => Promise<unknown>, cachePath?: string) {
+    return new TrendStudio({
+      repositoryRoot: "/repo",
+      environment: {},
+      now: () => new Date("2026-09-24T12:00:00.000Z"),
+      ...(cachePath ? { cachePath } : {}),
+      trendGateway: { listServices: async () => [], listSignals: async () => [] },
+      trendAgent: {
+        listCandidates: async () => [{ ...baseCandidate }],
+        reviseCandidate,
+      } as never,
+    });
+  }
+
+  it("appends the unaudited revision next to the untouched original candidate", async () => {
+    const revisionCalls: Array<{ instruction: string }> = [];
+    const studio = revisionStudio(async (input) => {
+      revisionCalls.push(input);
+      return {
+        title: "台风路径变化：通勤前先核对这三条信息",
+        audience: "早晚通勤的普通上班族",
+        painPoint: "预警信息很多，不知道该信哪一条",
+        hook: "出门前，先看这三条已经确认的信息。",
+        rationale: "只保留官方已确认的路径变化。",
+        track: "breaking-news",
+        signalId: "trend-weather",
+        facts: [],
+        uncertainties: [],
+        novelty: 60,
+        seriesPotential: 55,
+        monetization: 40,
+        audienceDemand: 70,
+      };
+    });
+    const listed = (await studio.listCandidates())[0]!;
+    const seenGenerationId = listed.generationId!;
+
+    const revised = await studio.reviseCandidate("trend-abc", seenGenerationId, "标题给出通勤者可执行的信息核对动作。");
+    const values = await studio.listCandidates();
+
+    assert.equal(revisionCalls.length, 1);
+    assert.equal(revised.auditStatus, "not_audited", "revised candidates must not look audited");
+    assert.deepEqual(revised.revisedFrom, { candidateId: "trend-abc", generationId: seenGenerationId, instruction: "标题给出通勤者可执行的信息核对动作。" });
+    assert.notEqual(revised.id, "trend-abc");
+    assert.notEqual(revised.generationId, seenGenerationId);
+    assert.equal(values.filter((candidate) => candidate.id === "trend-abc").length, 1, "original candidate must stay untouched");
+    assert.equal(values.filter((candidate) => candidate.id === revised.id).length, 1);
+  });
+
+  it("refuses stale generations, blank instructions and missing revision capability without calls", async () => {
+    const calls: unknown[] = [];
+    const studio = revisionStudio(async (input) => { calls.push(input); return {}; });
+    await studio.listCandidates();
+    await assert.rejects(() => studio.reviseCandidate("trend-abc", "topic-batch-old", "改标题"), /刷新/);
+    await assert.rejects(() => studio.reviseCandidate("trend-abc", "topic-batch-1", "   "));
+    await assert.rejects(() => studio.reviseCandidate("trend-ghost", "topic-batch-1", "改标题"));
+    assert.equal(calls.length, 0);
+
+    const incapable = new TrendStudio({
+      repositoryRoot: "/repo",
+      environment: {},
+      now: () => new Date("2026-09-24T12:00:00.000Z"),
+      trendGateway: { listServices: async () => [], listSignals: async () => [] },
+      trendAgent: { listCandidates: async () => [{ ...baseCandidate }] } as never,
+    });
+    await incapable.listCandidates();
+    await assert.rejects(() => incapable.reviseCandidate("trend-abc", "topic-batch-1", "改标题"), /没有可用的候选修订模型/);
   });
 });

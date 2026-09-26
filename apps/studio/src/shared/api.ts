@@ -392,6 +392,11 @@ export interface StudioVisualPlan {
 
 export interface StudioTrendCandidate {
   id: string;
+  /** 候选包的生成身份；同一个候选 id 刷新后也不能借用旧版采用决定。 */
+  generationId?: string;
+  auditStatus?: "passed" | "awaiting_user" | "not_audited";
+  /** 修订候选的来源追溯：修订只产未审新候选，原候选与其审计状态不变。 */
+  revisedFrom?: { candidateId: string; generationId: string; instruction: string };
   title: string;
   platform: string;
   track: string;
@@ -456,6 +461,8 @@ export interface StudioTopicGenerationReceipt {
   auditStatus?: "passed" | "awaiting_user";
   auditSummary?: string;
   auditRepairInstructions?: string[];
+  /** pass 下的 advisory 也属于用户可见建议，不能只在 repair 时出现。 */
+  auditSuggestions?: string[];
 }
 
 export interface StudioCandidateInboxItem extends StudioTrendCandidate {
@@ -536,15 +543,41 @@ export interface StudioSeriesEpisodePlanning {
   role: string;
   auditRole: string;
   // awaiting_user：自动复核跑完但没判通过，结论与建议留在记录里等用户裁决。
-  auditStatus: "passed" | "awaiting_user" | "fallback" | "human_override" | "stale";
+  auditStatus: "passed" | "awaiting_user" | "fallback" | "human_override" | "stale" | "not_audited";
   auditIterations: number;
   auditScore?: number;
   auditSummary?: string;
+  auditSuggestions?: string[];
   providerId: string;
   modelId: string;
   promptVersion: string;
   reasoningEffort?: string;
   fallbackReason?: string;
+}
+
+export interface StudioSeriesEpisodeVersion {
+  versionId: string;
+  recordedAt: string;
+  source: StudioSeriesEpisodePlanning["source"];
+  pillar: string;
+  title: string;
+  viewerPromise: string;
+  hook: string;
+  payoff: string;
+  fromPrevious: string[];
+  toNext: string[];
+}
+
+export interface StudioSeriesEpisodeAuditRecord {
+  auditId: string;
+  targetVersionId: string;
+  recordedAt: string;
+  status: StudioSeriesEpisodePlanning["auditStatus"];
+  summary?: string;
+  suggestions?: string[];
+  score?: number;
+  providerId: string;
+  modelId: string;
 }
 
 export interface StudioSeriesEpisode {
@@ -579,6 +612,11 @@ export interface StudioSeriesEpisode {
   attemptRunIds?: string[];
   continuity: StudioSeriesEpisodeContinuity;
   planning: StudioSeriesEpisodePlanning;
+  /** 旧记录可能没有版本证据；读取时不得补造其过去的审计身份。 */
+  contentVersionId?: string;
+  versionHistory?: StudioSeriesEpisodeVersion[];
+  auditHistory?: StudioSeriesEpisodeAuditRecord[];
+  adoption?: { targetVersionId: string; auditId: string | null; auditStatus: StudioSeriesEpisodePlanning["auditStatus"] | "not_audited"; adoptedAt: string };
   // 公共议题单集的人工补充原始来源：只追加、持久化，用于重算来源门禁。
   supplementSources?: {
     evidenceUrls: string[];
@@ -717,6 +755,8 @@ export interface StudioOpportunityScoreProvenance {
 
 export interface StudioOpportunity {
   id: string;
+  adoptedCandidateGenerationId?: string;
+  adoptedCandidateAuditStatus?: "passed" | "awaiting_user" | "not_audited";
   title: string;
   platform: string;
   track: string;
@@ -757,6 +797,8 @@ export interface StudioOpportunityInput {
   articleUncertainties?: string[];
   scores: Omit<StudioOpportunityScore, "final">;
   candidateId?: string;
+  adoptedCandidateGenerationId?: string;
+  adoptedCandidateAuditStatus?: "passed" | "awaiting_user" | "not_audited";
   origin?: "manual" | StudioCandidateOrigin;
   category?: StudioTopicCategory;
   seriesId?: string;
@@ -771,6 +813,7 @@ export interface StudioOpportunityInput {
 export interface StudioCandidateAdoptionInput {
   origin: StudioCandidateOrigin;
   verificationConfirmed?: boolean;
+  expectedGenerationId?: string;
 }
 
 export interface StudioCandidateSourcesInput {
@@ -1153,6 +1196,20 @@ export interface StudioNodeOverrideInput {
   confirmTerminalEdit?: boolean;
 }
 
+/** 发布文案 AI 修订：只产一次所授权的修订，产出为未审新稿并停下等人工决定。 */
+export interface StudioNodeDocumentRevisionInput {
+  instruction: string;
+  expectedRunRevision: number;
+  expectedVersionId: string;
+  confirmTerminalEdit?: boolean;
+}
+
+/** 发布文案主动再审：只审当前精确稿一次，不产稿、不推进。 */
+export interface StudioNodeDocumentAuditInput {
+  expectedRunRevision: number;
+  expectedVersionId: string;
+}
+
 /** joint-v1 创作规划里允许携带 planningStageId 的可编辑阶段白名单。 */
 export type StudioPlanningEditableStage = "treatment" | "script" | "director";
 
@@ -1339,10 +1396,11 @@ export interface StudioCreativeReviewSnapshot {
   reviewPurpose?: "direction" | "material_plan";
   reviewRevision: number;
   draftSha256: string;
+  draftVersionId?: string;
   draftArtifactId: string;
   draftContentUrl?: string;
   phase: "waiting_user" | "checking";
-  allowedActions: Array<"discuss" | "adopt_proposal" | "edit_draft" | "undo_draft" | "confirm" | "return_to_stage">;
+  allowedActions: Array<"discuss" | "revise" | "audit_current" | "adopt_proposal" | "edit_draft" | "undo_draft" | "confirm" | "return_to_stage">;
   returnTargets: Array<{
     stage: StudioPlanningEditableStage;
     label: string;
@@ -1365,7 +1423,7 @@ export interface StudioCreativeReviewSnapshot {
     verdict: "pass" | "repair";
     score: number;
     summary: string;
-    issues: Array<{ severity: "advisory" | "blocking"; criterion: string; evidence: string; repairInstruction: string }>;
+    issues: Array<{ severity: "advisory" | "blocking"; criterion: string; evidence: string; repairInstruction: string; creatorTitle?: string; creatorObservation?: string; creatorAction?: string }>;
     // 这一条复核的身份。确认时原样回传，服务端拿它和当前记录比对——"确认"必须指向界面上
     // 展示的那一条意见，而不是"当前这一版草稿碰巧存在的某条意见"。
     checkIdentity: string;
@@ -1375,6 +1433,19 @@ export interface StudioCreativeReviewSnapshot {
    * 正常，不知道该在哪一件事上拍板。它独立于 checkResult——那是确认时才跑的那一轮复核。
    */
   stopDetail?: string;
+  scopeConflict?: { proposalId: string; sourceRunId: string; requiredScenePositions: number[] };
+}
+
+export interface StudioCreativeReviewHistory {
+  runId: string;
+  legacyIncomplete: boolean;
+  entries: Array<{
+    stage: StudioPlanningEditableStage;
+    versionId: string;
+    document: unknown;
+    audits: Array<{ auditId: string; summary: string; status: "pass" | "repair" | "incomplete"; suggestions: string[] }>;
+    confirmation?: { actor: string; confirmedAt: string; unauditedAdoption: boolean; auditId: string | null };
+  }>;
 }
 
 type StudioCreativeReviewCommandBase = {
@@ -1388,8 +1459,9 @@ type StudioCreativeReviewCommandBase = {
 
 export type StudioCreativeReviewCommandInput = StudioCreativeReviewCommandBase & (
   // 独立复核是"提议"而非"否决"：repair 时人仍可继续，但必须显式承担（与 return_to_stage 的 acknowledgeImpact 同模式）。
-  | { action: "confirm"; acknowledgeRepair?: boolean; acknowledgeIncomplete?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string }
-  | { action: "discuss"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
+  | { action: "confirm"; acknowledgeRepair?: boolean; acknowledgeIncomplete?: true; acknowledgeUnaudited?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string }
+  | { action: "audit_current" }
+  | { action: "discuss" | "revise"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
   | { action: "adopt_proposal"; proposalId: string }
   | { action: "edit_draft"; document: Record<string, unknown> }
   | { action: "undo_draft" }
@@ -1407,7 +1479,7 @@ export interface StudioCreativeReviewCommandReceipt {
 export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCreativeReviewCommandInput {
   const input = requiredObject(value, "创作操作");
   const commonFields = ["action", "commandId", "expectedRunRevision", "expectedReviewRevision", "stage", "reviewPurpose", "baseDraftSha256"];
-  const actionFields = input.action === "discuss"
+  const actionFields = input.action === "discuss" || input.action === "revise"
     ? ["message", "selection"]
     : input.action === "adopt_proposal"
       ? ["proposalId"]
@@ -1418,12 +1490,12 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
           : input.action === "confirm"
             // 这两个字段曾经漏在白名单外，于是"看过意见，仍然确认"在 HTTP 入口就被拒，
             // 整条链在界面后面断掉、只在图级单测里看着是通的。
-            ? ["acknowledgeRepair", "acknowledgeIncomplete", "acceptQualityFallback", "expectedCheckIdentity"]
+            ? ["acknowledgeRepair", "acknowledgeIncomplete", "acknowledgeUnaudited", "acceptQualityFallback", "expectedCheckIdentity"]
         : [];
   const allowed = new Set([...commonFields, ...actionFields]);
   const unknown = Object.keys(input).find((key) => !allowed.has(key));
   if (unknown) throw new StudioInputError(`创作操作不支持字段“${unknown}”。`);
-  if (!["confirm", "discuss", "adopt_proposal", "edit_draft", "undo_draft", "return_to_stage"].includes(String(input.action))) {
+  if (!["confirm", "audit_current", "discuss", "revise", "adopt_proposal", "edit_draft", "undo_draft", "return_to_stage"].includes(String(input.action))) {
     throw new StudioInputError("创作操作类型不正确。");
   }
   const commandId = requiredTrimmedString(input.commandId, "操作编号");
@@ -1447,11 +1519,11 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
     ...(input.reviewPurpose === "direction" || input.reviewPurpose === "material_plan" ? { reviewPurpose: input.reviewPurpose } : {}),
     baseDraftSha256,
   };
-  if (input.action === "discuss") {
+  if (input.action === "discuss" || input.action === "revise") {
     const message = requiredTrimmedString(input.message, "讨论内容");
     if (message.length > 4_000) throw new StudioInputError("讨论内容不能超过 4000 个字符。");
     return {
-      action: "discuss",
+      action: input.action,
       ...common,
       message,
       ...(input.selection === undefined ? {} : { selection: parseStudioCreativeSelection(input.selection) }),
@@ -1467,6 +1539,7 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
     return { action: "edit_draft", ...common, document: input.document as Record<string, unknown> };
   }
   if (input.action === "undo_draft") return { action: "undo_draft", ...common };
+  if (input.action === "audit_current") return { action: "audit_current", ...common };
   if (input.action === "return_to_stage") {
     if (!STUDIO_PLANNING_EDITABLE_STAGES.includes(input.targetStage as StudioPlanningEditableStage)) {
       throw new StudioInputError("返回的创作阶段不正确。");
@@ -1479,6 +1552,12 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
   }
   if (input.acknowledgeIncomplete !== undefined && input.acknowledgeIncomplete !== true) {
     throw new StudioInputError("未完成复核的风险必须明确接受。");
+  }
+  if (input.acknowledgeUnaudited !== undefined && input.acknowledgeUnaudited !== true) {
+    throw new StudioInputError("未审采用必须明确选择。");
+  }
+  if (input.acknowledgeUnaudited === true && (input.acknowledgeRepair === true || input.acknowledgeIncomplete === true || input.expectedCheckIdentity !== undefined)) {
+    throw new StudioInputError("未审采用不能携带上一版的审计意见。");
   }
   if (input.acceptQualityFallback !== undefined
     && (input.acceptQualityFallback !== true || input.stage !== "director")) {
@@ -1499,6 +1578,7 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
     ...common,
     ...(input.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
     ...(input.acknowledgeIncomplete === true ? { acknowledgeIncomplete: true as const } : {}),
+    ...(input.acknowledgeUnaudited === true ? { acknowledgeUnaudited: true as const } : {}),
     ...(input.acceptQualityFallback === true ? { acceptQualityFallback: true as const } : {}),
     ...(expectedCheckIdentity === undefined ? {} : { expectedCheckIdentity }),
   };
@@ -1988,6 +2068,9 @@ interface StudioDecisionInputBase {
   reviewEvidenceId: string | null;
   note?: string;
   reviewDispositions?: StudioReviewDisposition[];
+  contentVersionId?: string;
+  acceptUnauditedContent?: true;
+  acceptContentSuggestions?: true;
 }
 
 export type StudioDecisionInput = StudioDecisionInputBase & (
@@ -2297,6 +2380,7 @@ export function parseStudioCandidateAdoptionInput(value: unknown): StudioCandida
   return {
     origin: input.origin,
     ...(input.verificationConfirmed === true ? { verificationConfirmed: true } : {}),
+    ...(optionalString(input.expectedGenerationId) ? { expectedGenerationId: optionalString(input.expectedGenerationId)! } : {}),
   };
 }
 
@@ -2448,6 +2532,14 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
     && (input.acceptIncomplete !== true || input.action !== "approve")) {
     throw new StudioInputError("未完成审查风险只能在明确批准时接受。");
   }
+  if (input.contentVersionId !== undefined && (typeof input.contentVersionId !== "string" || !input.contentVersionId.trim())) {
+    throw new StudioInputError("内容版本编号格式不正确。");
+  }
+  for (const field of ["acceptUnauditedContent", "acceptContentSuggestions"] as const) {
+    if (input[field] !== undefined && (input[field] !== true || input.action !== "approve")) {
+      throw new StudioInputError("内容建议只能在明确采用时承担。");
+    }
+  }
   const parsed = {
     expectedRunRevision: Number(input.expectedRunRevision),
     interventionId,
@@ -2465,6 +2557,9 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
     ...parsed,
     action: input.action,
     ...(input.acceptIncomplete === true ? { acceptIncomplete: true as const } : {}),
+    ...(typeof input.contentVersionId === "string" ? { contentVersionId: input.contentVersionId.trim() } : {}),
+    ...(input.acceptUnauditedContent === true ? { acceptUnauditedContent: true as const } : {}),
+    ...(input.acceptContentSuggestions === true ? { acceptContentSuggestions: true as const } : {}),
     ...(reviewDispositions ? { reviewDispositions } : {}),
   };
 }
@@ -2706,6 +2801,14 @@ export function parseStudioOpportunityInput(value: unknown): StudioOpportunityIn
   const visualPlan = input.visualPlan === undefined
     ? undefined
     : parseStudioVisualPlan(input.visualPlan);
+  const adoptedCandidateGenerationId = optionalString(input.adoptedCandidateGenerationId);
+  const adoptedCandidateAuditStatus = input.adoptedCandidateAuditStatus;
+  if (adoptedCandidateAuditStatus !== undefined
+    && adoptedCandidateAuditStatus !== "passed"
+    && adoptedCandidateAuditStatus !== "awaiting_user"
+    && adoptedCandidateAuditStatus !== "not_audited") {
+    throw new StudioInputError("候选审计状态无效。");
+  }
 
   return {
     title: requiredTrimmedString(input.title, "标题"),
@@ -2717,6 +2820,8 @@ export function parseStudioOpportunityInput(value: unknown): StudioOpportunityIn
     evidence,
     scores,
     ...(candidateId ? { candidateId } : {}),
+    ...(adoptedCandidateGenerationId ? { adoptedCandidateGenerationId } : {}),
+    ...(adoptedCandidateAuditStatus !== undefined ? { adoptedCandidateAuditStatus } : {}),
     ...(origin ? { origin: origin as "manual" | StudioCandidateOrigin } : {}),
     ...(category ? { category: category as StudioTopicCategory } : {}),
     ...(optionalString(input.seriesId) ? { seriesId: optionalString(input.seriesId)! } : {}),

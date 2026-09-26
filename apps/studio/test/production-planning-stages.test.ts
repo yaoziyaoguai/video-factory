@@ -4,7 +4,7 @@ import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { ProductionPipeline, RoleAgentLoopError, contentSha256, type CreativeTreatmentAgentInput, type ProductionBrief, type ProductionPipelineOptions, type VisualAssetProviderCapability, type VisualDirectorAgentInput, type WorkerResponse } from "@video-factory/production-pipeline";
+import { CodexBridgeError, ProductionPipeline, RoleAgentLoopError, contentSha256, type CreativeTreatmentAgentInput, type ProductionBrief, type ProductionPipelineOptions, type VisualAssetProviderCapability, type VisualDirectorAgentInput, type WorkerResponse } from "@video-factory/production-pipeline";
 import { ProductionStudio, loadAgentLoopProgress } from "../src/server/production-studio.js";
 import type { StudioRunDetail } from "../src/shared/api.js";
 
@@ -148,6 +148,33 @@ const CREATIVE_ASSESSMENTS = [{
   targetPath: "",
   dimensions: Object.entries(CREATIVE_DIMENSION_EVIDENCE).map(([dimension, evidence]) => ({ dimension, score: 92, evidence })),
 }];
+
+function checkedCreativeExecution<T>(output: T, role: string, taskKind: "creative-treatment" | "script-draft" | "director-plan", modelId: string) {
+  const audit = {
+    version: "video-factory/role-audit-v2" as const,
+    rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+    verdict: "pass" as const,
+    score: 92,
+    assessments: CREATIVE_ASSESSMENTS,
+    summary: `当前${role}可以确认。`,
+    issues: [], repairInstructions: [], planningDisposition: null, hostReadinessReview: null,
+  };
+  return {
+    output,
+    trace: { taskKind, promptVersion: "fixture-v1", prompt: "fixture check", providerId: "fixture-role", modelId },
+    agentLoop: {
+      version: "video-factory/agent-loop-v1" as const,
+      role, contractVersion: "fixture-creative-check-v1", criteria: ["当前稿件满足确认条件"],
+      status: "passed" as const, maxIterations: 1, producerModelCallCount: 0, auditModelCallCount: 1,
+      iterations: [{
+        iteration: 1, candidate: output,
+        candidateHash: createHash("sha256").update(JSON.stringify(output)).digest("hex"),
+        auditTrace: { taskKind: "role-audit" as const, promptVersion: "fixture-v1", prompt: "fixture independent review", providerId: "fixture-audit", modelId: "fixture-audit-model" },
+        audit,
+      }],
+    },
+  };
+}
 
 function planningAgents(
   spies: PlanningSpies,
@@ -296,53 +323,17 @@ function reviewCapablePlanningAgents(
         },
       };
     }
-    const output = input.creativeReviewExecution.candidate;
-    const audit = {
-      version: "video-factory/role-audit-v2" as const,
-      rubricVersion: "video-factory/role-quality-rubric-v1" as const,
-      verdict: "pass" as const,
-      score: 92,
-      assessments: CREATIVE_ASSESSMENTS,
-      summary: "当前构思可以确认。",
-      issues: [],
-      repairInstructions: [],
-      planningDisposition: null,
-      hostReadinessReview: null,
-    };
-    return {
-      output,
-      trace: {
-        taskKind: "creative-treatment" as const,
-        promptVersion: "fixture-v1",
-        prompt: "fixture treatment check",
-        providerId: "openai",
-        modelId: treatmentAgent.modelId,
-      },
-      agentLoop: {
-        version: "video-factory/agent-loop-v1" as const,
-        role: "导演前期构思",
-        contractVersion: "fixture-treatment-contract-v1",
-        criteria: ["当前构思满足确认条件"],
-        status: "passed" as const,
-        maxIterations: 1,
-        producerModelCallCount: 0,
-        auditModelCallCount: 1,
-        iterations: [{
-          iteration: 1,
-          candidate: output,
-          candidateHash: createHash("sha256").update(JSON.stringify(output)).digest("hex"),
-          auditTrace: {
-            taskKind: "role-audit" as const,
-            promptVersion: "fixture-v1",
-            prompt: "fixture independent review",
-            providerId: "fixture-audit",
-            modelId: "fixture-audit-model",
-          },
-          audit,
-        }],
-      },
-    };
+    return checkedCreativeExecution(input.creativeReviewExecution.candidate, "导演前期构思", "creative-treatment", treatmentAgent.modelId ?? "fixture-treatment");
   };
+  const screenwriter = agents.screenwriterAgent!;
+  const draftDetailed = screenwriter.draftDetailed!.bind(screenwriter);
+  screenwriter.draftDetailed = async (input) => input.creativeReviewExecution?.mode === "check"
+    ? checkedCreativeExecution(input.creativeReviewExecution.candidate, "编剧", "script-draft", screenwriter.modelId ?? "fixture-script")
+    : draftDetailed(input);
+  const director = agents.directorAgent!;
+  director.planDetailed = async (input) => input.creativeReviewExecution?.mode === "check"
+    ? checkedCreativeExecution(input.creativeReviewExecution.candidate, "视觉导演", "director-plan", director.modelId ?? "fixture-director")
+    : { output: await director.plan(input) };
   return agents;
 }
 
@@ -448,14 +439,50 @@ function assertStageShape(stage: StageRecord, context: string): void {
 }
 
 describe("joint-v1 planning stage DTO (read-only projection)", () => {
-  it("preserves an adopted, failed-check treatment across script model editing and process reconstruction", async () => {
+  it("keeps all treatment versions, audits and adoption visible after moving to script", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-creative-history-"));
+    const spies: PlanningSpies = { treatmentCalls: 0, screenwriterCalls: 0, directorCalls: 0, rankCalls: 0 };
+    const { pipeline, studio } = newPlanningStudio(workspaceRoot, new PlanningStagesWorker(), reviewCapablePlanningAgents(spies));
+    const run = await pipeline.start(planningBrief({ creativeReview: true }));
+    for (let index = 1; index <= 3; index += 1) {
+      const current = await studio.creativeReview(run.id);
+      assert.ok(current);
+      const document = { ...(current.draft as Record<string, unknown>), payoff: `第 ${index} 次手工修改` };
+      const operation = await pipeline.dispatchCreativeReviewCommand(run.id, {
+        action: "edit_draft", commandId: `history-edit-${index}`, actor: "creator", stage: current.stage,
+        expectedRunRevision: current.runRevision, expectedReviewRevision: current.reviewRevision,
+        baseDraftSha256: current.draftSha256, document,
+      });
+      await operation.completion;
+    }
+    const latest = await studio.creativeReview(run.id);
+    assert.ok(latest);
+    const operation = await pipeline.dispatchCreativeReviewCommand(run.id, {
+      action: "confirm", commandId: "history-confirm", actor: "creator", stage: latest.stage,
+      expectedRunRevision: latest.runRevision, expectedReviewRevision: latest.reviewRevision,
+      baseDraftSha256: latest.draftSha256, acknowledgeUnaudited: true,
+    });
+    await operation.completion;
+    assert.equal((await studio.creativeReview(run.id))?.stage, "script");
+    assert.equal(typeof (studio as unknown as { creativeReviewHistory?: unknown }).creativeReviewHistory, "function");
+    const history = await (studio as unknown as { creativeReviewHistory(runId: string): Promise<{ entries: Array<{ stage: string; versionId: string; document: unknown; confirmation?: { unauditedAdoption?: boolean } }> }> }).creativeReviewHistory(run.id);
+    const treatmentVersions = history.entries.filter((entry) => entry.stage === "treatment");
+    assert.equal(treatmentVersions.length, 4);
+    assert.equal(new Set(treatmentVersions.map((entry) => entry.versionId)).size, 4);
+    assert.equal(treatmentVersions.at(-1)?.confirmation?.unauditedAdoption, true);
+    assert.equal((treatmentVersions.at(-1)?.document as { payoff?: string }).payoff, "第 3 次手工修改");
+  });
+  it("preserves an adopted treatment and a settled failed audit across model editing and process reconstruction", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-r11-adopt-carry-"));
     const spies: PlanningSpies = { treatmentCalls: 0, screenwriterCalls: 0, directorCalls: 0, rankCalls: 0 };
     const agents = reviewCapablePlanningAgents(spies);
     const agent = agents.treatmentAgents![0]!.agent;
     const original = agent.treatDetailed!.bind(agent);
     agent.treatDetailed = async (input) => {
-      if (input.creativeReviewExecution?.mode === "check") throw new Error("构思独审请求合同被拒绝");
+      if (input.creativeReviewExecution?.mode === "check") throw new RoleAgentLoopError("构思独审已结清但无结论", {
+        version: "video-factory/agent-loop-v1", role: "导演前期构思", contractVersion: "fixture-v1",
+        criteria: ["独立审计"], status: "failed", maxIterations: 1, modelCallCount: 1, iterations: [],
+      }, undefined, new CodexBridgeError("构思独审请求合同被拒绝", false, "completed_failure"));
       assert.equal(input.brief.budgetIntentionCny, 35);
       return original(input);
     };
@@ -471,7 +498,7 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
     const { pipeline, studio } = newPlanningStudio(workspaceRoot, new PlanningStagesWorker(), agents);
     const input = { ...planningBrief({ creativeReview: true }), budgetIntentionCny: 35 };
     const run = await pipeline.start(input);
-    const command = async (action: "discuss" | "adopt_proposal" | "confirm", extras: Record<string, unknown> = {}) => {
+    const command = async (action: "discuss" | "adopt_proposal" | "audit_current", extras: Record<string, unknown> = {}) => {
       const review = await studio.creativeReview(run.id);
       assert.ok(review);
       const dispatched = await pipeline.dispatchCreativeReviewCommand(run.id, {
@@ -486,16 +513,10 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
     const proposal = (await studio.creativeReview(run.id))!.proposals[0]!;
     await command("adopt_proposal", { proposalId: proposal.proposalId });
     const adopted = (await studio.creativeReview(run.id))!;
-    const failed = await command("confirm");
-    // F14/F17 契约：复核腿故障（此处为审计请求合同被拒，无任何裁决）不再是节点 failed，
-    // 而是可恢复暂停——adopted 草稿与进度保留，等用户重试或修改。
+    const failed = await command("audit_current");
+    // 已结清的独审失败保留为「本版未取得结论」，不把修改稿或整条制作判成 failed。
     assert.equal(failed.status, "needs_human");
-    const failedNode = failed.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
-    assert.equal((failed.creativeReviewOperations ?? []).at(-1)?.status, "completed", "确认命令正常完成：暂停是停点，不是命令失败");
-    const stopDetail = failedNode.intervention?.stopDetail
-      ?? (failedNode.output as { planningStop?: { detail?: string } } | undefined)?.planningStop?.detail
-      ?? "";
-    assert.match(stopDetail, /构思独审请求合同被拒绝/, "停点必须带上复核失败的原因");
+    assert.equal((await studio.creativeReview(run.id))?.checkResult?.status, "incomplete");
     assert.equal((await pipeline.inspectCreativePlanningStages(run.id))?.find((stage) => stage.id === "treatment")?.status, "completed",
       "复核没跑成不是内容失败：adopted 草稿仍在，阶段不得标 failed");
     assert.equal((await pipeline.inspectCreativePlanningStages(run.id))?.find((stage) => stage.id === "treatment")?.decisionStatus, "waiting_user",
@@ -511,7 +532,7 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
     assert.deepEqual(restored.draft, adopted.draft);
     assert.deepEqual(restored.messages, adopted.messages);
     assert.deepEqual(restored.effectiveUserInstructions, adopted.effectiveUserInstructions);
-    assert.notEqual(restored.checkResult?.verdict, "pass");
+    assert.equal(restored.checkResult?.status, "incomplete");
     assert.equal(spies.treatmentCalls, 1);
     assert.equal(spies.screenwriterCalls, 0);
   });
@@ -538,13 +559,8 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
       actor: request.actor,
       baseDraftSha256: request.baseDraftSha256,
       expectedReviewRevision: request.expectedReviewRevision,
-      checkIdentity: contentSha256({
-        runId: run.id,
-        stage: request.stage,
-        draftSha256: request.baseDraftSha256,
-        reviewRevision: request.expectedReviewRevision,
-        contract: "creative-review-confirm-v1",
-      }),
+      // 恢复的确认命令携带用户当时看到的那一条真实复核身份（OA-03：不再有代填摘要）。
+      checkIdentity: review.checkResult!.checkIdentity,
       confirmedAt: "2026-09-14T08:00:00.000Z",
     };
     const interrupted = await harness.pipeline.loadPersisted(run.id);
@@ -607,6 +623,8 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
       expectedReviewRevision: review.reviewRevision,
       stage: review.stage,
       baseDraftSha256: review.draftSha256,
+      // 确认提交停点展示的那一条复核身份（OA-03 后服务端不再代填）。
+      expectedCheckIdentity: review.checkResult!.checkIdentity,
     };
 
     await harness.studio.commandCreativeReview(run.id, command, "creator");

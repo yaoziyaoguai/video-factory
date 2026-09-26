@@ -1497,6 +1497,9 @@ export function validateRoleAudit(
       criterion: text(issue.criterion, `Role audit issues[${index}].criterion`),
       evidence: text(issue.evidence, `Role audit issues[${index}].evidence`),
       repairInstruction: text(issue.repairInstruction, `Role audit issues[${index}].repairInstruction`),
+      ...(issue.creatorTitle !== undefined ? { creatorTitle: text(issue.creatorTitle, `Role audit issues[${index}].creatorTitle`) } : {}),
+      ...(issue.creatorObservation !== undefined ? { creatorObservation: text(issue.creatorObservation, `Role audit issues[${index}].creatorObservation`) } : {}),
+      ...(issue.creatorAction !== undefined ? { creatorAction: text(issue.creatorAction, `Role audit issues[${index}].creatorAction`) } : {}),
     };
   });
   const repairInstructions = array(audit.repairInstructions, "Role audit repairInstructions", 12)

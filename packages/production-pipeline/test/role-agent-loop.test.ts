@@ -1495,6 +1495,23 @@ describe("role agent loop audit boundary", () => {
     );
   });
 
+  it("preserves creator-facing observations and changes alongside machine audit fields", () => {
+    const parsed = validateRoleAudit({
+      ...repairingAudit(),
+      issues: [{
+        severity: "blocking", criterion: "attention", evidence: "scene-2.duration=8",
+        repairInstruction: "reduce scene-2 duration without changing factual scope",
+        creatorTitle: "第二段等得有点久",
+        creatorObservation: "观众看完第一段后，要等八秒才听到新信息。",
+        creatorAction: "把第二段缩短两秒，保留原来的事实限定。",
+      }],
+    });
+    assert.equal(parsed.issues[0]?.creatorTitle, "第二段等得有点久");
+    assert.equal(parsed.issues[0]?.creatorObservation, "观众看完第一段后，要等八秒才听到新信息。");
+    assert.equal(parsed.issues[0]?.creatorAction, "把第二段缩短两秒，保留原来的事实限定。");
+    assert.equal(parsed.issues[0]?.repairInstruction, "reduce scene-2 duration without changing factual scope");
+  });
+
   it("promotes disposition-flagged issues to blocking instead of discarding the whole audit", () => {
     // 审计模型偶发把处置指向的问题标成 advisory（合同要求处置只指 blocking）。为一处
     // severity 标错作废整轮审计，在真实 dogfood 里把整条制作打成了 failed——而处置本身

@@ -413,6 +413,28 @@ function fileIntegrity(content: string | Buffer): { sizeBytes: number; sha256: s
 }
 
 describe("StudioService", () => {
+  it("marks only a structured rework-scope failure as needing a fresh scope decision", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-rework-coded-failure-"));
+    const base = waitingRun(workspaceRoot);
+    const failed = {
+      ...base,
+      status: "failed" as const,
+      nodeRuns: [...base.nodeRuns, {
+        nodeId: "assets", status: "failed" as const, startedAt: base.startedAt,
+        finishedAt: base.startedAt, artifactIds: [], qualityGateResults: [],
+        error: "返工镜头超出已批准范围", errorCode: "REWORK_SCOPE_CONFLICT",
+      }],
+    };
+    const service = new StudioService({ workspaceRoot, pipeline: new FakePipeline(failed), commandAvailable: allCommandsAvailable, environment: {} });
+    const draft = await service.reworkDraft(base.id);
+    assert.equal(draft?.scopeState, "needs_scope");
+    assert.match(draft?.scopePrompt ?? "", /原失败记录已保留/);
+
+    const unrelated = { ...failed, nodeRuns: failed.nodeRuns.map((node) => node.nodeId === "assets" ? { ...node, errorCode: "PROVIDER_ERROR" } : node) };
+    const unrelatedService = new StudioService({ workspaceRoot, pipeline: new FakePipeline(unrelated), commandAvailable: allCommandsAvailable, environment: {} });
+    assert.equal((await unrelatedService.reworkDraft(base.id))?.scopeState, "resolved");
+  });
+
   it("rejects an ordinary retry after creative planning has escalated a source limitation to a manual gate", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-planning-source-gate-"));
     const base = executableWaitingRun(workspaceRoot);
@@ -656,8 +678,9 @@ describe("StudioService", () => {
     assert.match(draft?.input.rework?.nodeInstructions.script ?? "", /本次重做原因/);
     assert.deepEqual(draft?.input.rework?.previousScript, { viewerPromise: "原版承诺", scenes: [1, 2, 3, 4].map((position) => ({ position })) });
     assert.deepEqual(draft?.inheritedNodeIds, ["brief", "script", "visual-direction", "visual-review"]);
-    assert.deepEqual(draft?.requiredAffectedScenePositions, [2, 3, 4]);
-    assert.deepEqual(draft?.input.rework?.affectedScenePositions, [2, 3, 4]);
+    // 未形成素材任务不等于其余镜头没有内容影响：范围以旧脚本/分镜的四镜宇宙保守呈现。
+    assert.deepEqual(draft?.requiredAffectedScenePositions, [1, 2, 3, 4]);
+    assert.deepEqual(draft?.input.rework?.affectedScenePositions, [1, 2, 3, 4]);
 
     const tampered = structuredClone(draft!.input);
     tampered.providers.script = "codex-screenwriter-v1";
@@ -796,8 +819,8 @@ describe("StudioService", () => {
 
     const localized = await service.reworkDraft("run-1");
     assert.deepEqual(localized?.input.rework?.findings, []);
-    assert.deepEqual(localized?.requiredAffectedScenePositions, [2, 4]);
-    assert.deepEqual(localized?.input.rework?.affectedScenePositions, [2, 4]);
+    assert.deepEqual(localized?.requiredAffectedScenePositions, [1, 2, 3, 4]);
+    assert.deepEqual(localized?.input.rework?.affectedScenePositions, [1, 2, 3, 4]);
     assert.match(localized?.input.rework?.nodeInstructions.visualDirection ?? "", /第 2、4 镜构图没有兑现/);
     await assert.rejects(
       () => service.startRun({
@@ -1264,6 +1287,24 @@ describe("StudioService", () => {
       environment: {},
     }).reworkDraft("run-1");
     assert.deepEqual(jobsOnlyDraft?.requiredAffectedScenePositions, positions);
+
+    const beforeMediaRun: WorkflowRun<ProductionBrief> = {
+      ...failedRun,
+      nodeRuns: [
+        ...failedRun.nodeRuns.filter((node) => node.nodeId !== "assets"),
+        { nodeId: "asset-semantic-rank", status: "failed", artifactIds: [], qualityGateResults: [],
+          error: "候选素材尚未准备完成。" },
+      ],
+      artifacts: failedRun.artifacts.filter((artifact) => artifact.producer?.nodeId !== "assets"),
+    };
+    const beforeMediaDraft = await new StudioService({
+      workspaceRoot,
+      pipeline: new FakePipeline(beforeMediaRun),
+      commandAvailable: allCommandsAvailable,
+      environment: {},
+    }).reworkDraft("run-1");
+    assert.deepEqual(beforeMediaDraft?.requiredAffectedScenePositions, positions,
+      "没有媒体任务时，返工范围仍来自已确认的脚本与分镜，不能默认为空");
 
     const resumedPipeline = new FakePipeline(failedRun);
     resumedPipeline.inspectPaidNode = async (_runId: string, nodeId: string) => ({
@@ -3308,7 +3349,7 @@ describe("StudioService", () => {
     // 否则读到的是冷缓存快照（空集合 + refreshing）。
     await service.listTrendCandidates();
     const candidate = (await service.listCandidateInbox({ origins: ["trend"] })).items[0]!;
-    const opportunity = await service.adoptCandidate(candidate.id, { origin: "trend", verificationConfirmed: true });
+    const opportunity = await service.adoptCandidate(candidate.id, { origin: "trend", ...(candidate.generationId ? { expectedGenerationId: candidate.generationId } : {}), verificationConfirmed: true });
     assert.deepEqual(opportunity.articleSources, trustedSources);
 
     await service.startRun({
@@ -3457,7 +3498,7 @@ describe("StudioService", () => {
     assert.equal(afterDeletion?.editorialDecision.verdict, "produce_image_story");
     assert.equal(afterDeletion?.editorialDecision.recommendedTemplate, undefined);
     assert.equal((await service.templateExperiments()).some((item) => item.templateId === "photo-story"), false);
-    await service.adoptCandidate(afterDeletion!.id, { origin: "trend", verificationConfirmed: true });
+    await service.adoptCandidate(afterDeletion!.id, { origin: "trend", ...(afterDeletion!.generationId ? { expectedGenerationId: afterDeletion!.generationId } : {}), verificationConfirmed: true });
     assert.equal((await service.listOpportunities("trend")).length, 1);
   });
 
@@ -3526,7 +3567,7 @@ describe("StudioService", () => {
     assert.equal(dispatched.seriesContext?.episode.title, currentSeries.episodes[0]?.title);
     assert.equal(dispatched.seriesContext?.episode.viewerPromise, currentSeries.episodes[0]?.viewerPromise);
     assert.equal(dispatched.seriesContext?.episode.payoff, currentSeries.episodes[0]?.payoff);
-    assert.equal(dispatched.seriesContext?.episode.planning.role, "系列开拍总编");
+    assert.equal(dispatched.seriesContext?.episode.planning.role, "系列总编");
     assert.deepEqual(dispatched.seriesContext?.bible.rules, currentSeries.bible.rules);
     assert.notEqual(dispatched.seriesContext?.premise, maliciousContext.premise);
   });
@@ -3573,7 +3614,7 @@ describe("StudioService", () => {
     assert.match((pipeline.lastInput as ProductionBrief).seriesContext?.productionReservationId ?? "", /^series-run-/);
   });
 
-  it("replays a completed series start before running greenlight planning again", async () => {
+  it("replays a completed series start without implicitly reviewing the adopted episode", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-replay-before-greenlight-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     let reviews = 0;
@@ -3613,7 +3654,7 @@ describe("StudioService", () => {
       },
     });
     assert.deepEqual(await restarted.startRun(input, "series-replay-key"), first);
-    assert.equal(reviews, 1);
+    assert.equal(reviews, 0);
     assert.equal(pipeline.dispatchCount, 1);
   });
 
@@ -6326,8 +6367,10 @@ describe("StudioService", () => {
       now: () => new Date("2026-08-24T00:01:00.000Z"),
     });
 
-    assert.deepEqual(await service.listTrendCandidates(), [candidate]);
-    assert.deepEqual(await service.listTrendCandidates(), [candidate]);
+    const firstCandidates = await service.listTrendCandidates();
+    assert.ok(firstCandidates[0]?.generationId);
+    assert.deepEqual(firstCandidates.map(({ generationId: _generationId, ...value }) => value), [candidate]);
+    assert.deepEqual(await service.listTrendCandidates(), firstCandidates);
     assert.equal(calls, 1);
 
     const refresh = await service.refreshTrendCandidates();

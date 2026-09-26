@@ -166,18 +166,19 @@ const service = new StudioService({
   ...{
     seriesPlanningAgent: new CodexSeriesPlanningAgent(
       auditedTaskClient,
-      3,
       path.join(workspaceRoot, "checkpoints", "series-showrunner"),
       async () => (await creatorSettings.get()).modelDefaults?.["codex-series-showrunner-v1"],
     ),
   },
+  // 发布文案 AI 修订与主动再审复用同一个带首审合同的发布编辑 writer：
+  // revise 走单次 publish-copy 任务（零审计），auditCurrent 走单次 role-audit（零产稿）。
+  ...(publishCopyWriter ? { documentCopyTools: publishCopyWriter } : {}),
   ...{
     trendAgent: new TrendOpportunityAgent({
       signals: new TrendGateway({ environment: process.env }),
       articleReader: new TrendArticleReader({ cacheRoot: path.join(workspaceRoot, "cache", "trend-articles") }),
       model: new CodexTopicIdeaModel(
         auditedTaskClient,
-        3,
         path.join(workspaceRoot, "checkpoints", "topic-editor"),
         async () => (await creatorSettings.get()).modelDefaults?.["api-topic-editor-v1"],
       ),

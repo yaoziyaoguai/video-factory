@@ -76,6 +76,74 @@ function episode(episodeNumber: number, previousEpisodeId?: string): SeriesRecor
 }
 
 describe("JsonSeriesStore", () => {
+  it("keeps A to B to A as separate episode versions and binds audits and adoption to the current version", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-version-history-"));
+    const store = new JsonSeriesStore(path.join(root, "series.json"));
+    await store.create(record());
+    const edit = async (title: string, expectedRevision: number) => store.updateEpisodePlan("series-1", 1, {
+      expectedRevision,
+      pillar: "真实任务实验",
+      title,
+      viewerPromise: "给出可验证的结论",
+      hook: "先看真实结果",
+      payoff: "完成第 1 次验证",
+      fromPrevious: [],
+      toNext: ["留下一个边界问题"],
+    }, "2026-08-24T09:00:00.000Z");
+    const b = await edit("另一版标题", 1);
+    const aAgain = await edit("第 1 集", b.revision);
+    const episodeAfterEdit = aAgain.episodes[0]!;
+    assert.notEqual(episodeAfterEdit.contentVersionId, b.episodes[0]?.contentVersionId);
+    assert.deepEqual(episodeAfterEdit.versionHistory?.map((entry) => entry.title), ["第 1 集", "另一版标题", "第 1 集"]);
+
+    const audited = await store.rebaseEpisodePlan("series-1", 1, aAgain.revision, aAgain.canon.revision, {
+      episodeNumber: 1, pillar: episodeAfterEdit.pillar, title: episodeAfterEdit.title,
+      viewerPromise: episodeAfterEdit.viewerPromise, hook: episodeAfterEdit.hook,
+      payoff: episodeAfterEdit.payoff, fromPrevious: [], toNext: ["留下一个边界问题"],
+    }, { ...episodeAfterEdit.planning, auditStatus: "passed", auditIterations: 1, auditSummary: "当前稿可用。" }, "2026-08-24T09:01:00.000Z");
+    assert.equal(audited.episodes[0]?.contentVersionId, episodeAfterEdit.contentVersionId);
+    assert.equal(audited.episodes[0]?.auditHistory?.at(-1)?.targetVersionId, episodeAfterEdit.contentVersionId);
+
+    const reaudited = await store.rebaseEpisodePlan("series-1", 1, audited.revision, audited.canon.revision, {
+      episodeNumber: 1, pillar: episodeAfterEdit.pillar, title: episodeAfterEdit.title,
+      viewerPromise: episodeAfterEdit.viewerPromise, hook: episodeAfterEdit.hook,
+      payoff: episodeAfterEdit.payoff, fromPrevious: [], toNext: ["留下一个边界问题"],
+    }, { ...episodeAfterEdit.planning, auditStatus: "awaiting_user", auditIterations: 1, auditSummary: "仍有一条建议。" }, "2026-08-24T09:01:30.000Z");
+    assert.equal(reaudited.episodes[0]?.auditHistory?.length, 2);
+    assert.equal(reaudited.episodes[0]?.contentVersionId, episodeAfterEdit.contentVersionId);
+
+    const selected = await store.adoptEpisode("series-1", 1, "2026-08-24T09:02:00.000Z");
+    assert.equal(selected.episodes[0]?.adoption?.targetVersionId, episodeAfterEdit.contentVersionId);
+    assert.equal(selected.episodes[0]?.adoption?.auditId, reaudited.episodes[0]?.auditHistory?.at(-1)?.auditId);
+  });
+
+  it("does not let an audit rewrite an unselected agent episode under the same content version", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-audit-rewrite-"));
+    const store = new JsonSeriesStore(path.join(root, "series.json"));
+    const current = await store.create(record());
+    const episode = current.episodes[0]!;
+    await assert.rejects(() => store.rebaseEpisodePlan("series-1", 1, current.revision, current.canon.revision, {
+      episodeNumber: 1, pillar: episode.pillar, title: "审计擅自重写的标题",
+      viewerPromise: episode.viewerPromise, hook: episode.hook, payoff: episode.payoff,
+      fromPrevious: [...episode.continuity.fromPrevious], toNext: [...episode.continuity.toNext],
+    }, { ...episode.planning, auditStatus: "passed" }, "2026-08-24T09:00:00.000Z"), /审计不能改写当前稿/);
+    assert.equal((await store.get("series-1"))?.episodes[0]?.title, episode.title);
+  });
+
+  it("keeps the independent audit attached when an agent appends the next roadmap window", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-append-audit-"));
+    const store = new JsonSeriesStore(path.join(root, "series.json"));
+    const current = await store.create(record());
+    const planned = episode(3);
+    planned.planning = {
+      ...planned.planning, source: "agent", auditStatus: "awaiting_user", auditIterations: 1,
+      auditSummary: "第三集开场可以更具体。", auditSuggestions: ["先给观众看问题"],
+    };
+    const appended = await store.appendPlannedEpisodes("series-1", current.revision, [planned], "2026-08-24T09:00:00.000Z");
+    const third = appended.episodes.find((candidate) => candidate.episodeNumber === 3)!;
+    assert.equal(third.auditHistory?.[0]?.targetVersionId, third.contentVersionId);
+    assert.deepEqual(third.auditHistory?.[0]?.suggestions, ["先给观众看问题"]);
+  });
   it("links a creator-confirmed completed legacy run and keeps the migrated episode ready without invented Canon", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-series-legacy-link-"));
     const store = new JsonSeriesStore(path.join(root, "series.json"));
@@ -148,6 +216,25 @@ describe("JsonSeriesStore", () => {
       () => store.adoptEpisode("series-1", 2, "2026-08-24T09:02:00.000Z"),
       (error: unknown) => error instanceof SeriesStoreConflictError && /先完成第 1 集/.test(error.message),
     );
+  });
+
+  it("atomically rejects adoption when the visible series candidate version changed before the store write", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-adoption-race-"));
+    const store = new JsonSeriesStore(path.join(root, "series.json"));
+    const created = await store.create(record());
+    const visibleGenerationId = `${created.id}:r${created.revision}:e1`;
+    const edited = await store.updateEpisodePlan(created.id, 1, {
+      expectedRevision: created.revision, pillar: "真实任务实验", title: "刷新后的标题",
+      viewerPromise: "给出可验证的结论", hook: "先看真实结果", payoff: "完成第 1 次验证",
+      fromPrevious: [], toNext: ["留下一个边界问题"],
+    }, "2026-08-24T09:00:00.000Z");
+    await assert.rejects(
+      () => store.adoptEpisode(created.id, 1, "2026-08-24T09:01:00.000Z", visibleGenerationId),
+      /路线图版本已变化/,
+    );
+    assert.equal((await store.get(created.id))?.episodes[0]?.status, "planned");
+    const adopted = await store.adoptEpisode(created.id, 1, "2026-08-24T09:02:00.000Z", `${created.id}:r${edited.revision}:e1`);
+    assert.equal(adopted.episodes[0]?.title, "刷新后的标题");
   });
 
   it("appends episode source supplements idempotently and only before adoption", async () => {
@@ -281,7 +368,7 @@ describe("JsonSeriesStore", () => {
           auditStatus: "passed",
           auditIterations: 1,
         }, "2026-08-24T08:44:00.000Z"),
-        /不能改写创作者确认的标题、钩子或本集兑现/,
+        /审计不能改写当前稿/,
       );
     }
     assert.equal((await store.get("series-1"))?.episodes[0]?.title, editedEpisode.title);

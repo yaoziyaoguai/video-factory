@@ -44,7 +44,7 @@ function rawCopy(overrides: Record<string, unknown> = {}): Record<string, unknow
 }
 
 describe("CodexPublishCopyWriter", () => {
-  it("repairs publish copy after an independent audit before returning detailed output", async () => {
+  it("returns the first publish draft and independent advice without automatic rewriting", async () => {
     const calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
     let publishAttempt = 0;
     const client = new class extends CodexBridgeClient {
@@ -80,14 +80,14 @@ describe("CodexPublishCopyWriter", () => {
         } };
       }
     }();
-    const writer = new CodexPublishCopyWriter({ client, maxReviewIterations: 2 });
+    const writer = new CodexPublishCopyWriter({ client });
 
     const execution = await writer.writeDetailed(publishInput());
 
-    assert.equal(execution.output.title, "下班后先少做一个决定");
-    assert.equal(execution.agentLoop?.iterations.length, 2);
-    assert.deepEqual(calls.map((call) => call.kind), ["publish-copy", "role-audit", "publish-copy", "role-audit"]);
-    assert.equal("revision" in (calls[2]!.payload as Record<string, unknown>), true);
+    assert.equal(execution.output.title, "震惊所有人");
+    assert.equal(execution.agentLoop?.status, "awaiting_user");
+    assert.equal(execution.agentLoop?.iterations.length, 1);
+    assert.deepEqual(calls.map((call) => call.kind), ["publish-copy", "role-audit"]);
   });
 
   it("sends only publish-copy task data and normalizes output", async () => {
@@ -176,5 +176,95 @@ describe("CodexPublishCopyWriter", () => {
       await assert.rejects(() => writer.write(publishInput()), testCase.pattern);
       assert.equal(codexClient.calls.length, 1, testCase.name);
     }
+  });
+});
+
+// 「初稿审一次」合同：修订只产稿（零审计），主动再审只审当前精确稿（零产稿）。
+describe("CodexPublishCopyWriter revision and current-version audit", () => {
+  function validAudit(verdict: "pass" | "repair", score: number, issues: Array<Record<string, unknown>> = []): Record<string, unknown> {
+    return {
+      version: "video-factory/role-audit-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{
+        targetPath: "",
+        dimensions: [
+          { dimension: "attention", score, evidence: "标题能让人停下。" },
+          { dimension: "payoff", score, evidence: "看完能知道具体收益。" },
+          { dimension: "expression", score, evidence: "措辞自然。" },
+        ],
+      }],
+      verdict,
+      score,
+      summary: verdict === "pass" ? "文案与脚本和平台约束一致。" : "标题仍未落到具体收益。",
+      issues,
+      repairInstructions: verdict === "repair" ? ["把标题改成脚本已兑现的具体变化。"] : [],
+    };
+  }
+
+  it("revise produces exactly one publish-copy call with the instruction and current copy, and no audit", async () => {
+    const client = new CapturingCodexClient(() => rawCopy({ title: "下班后先少做一个决定" }));
+    const writer = new CodexPublishCopyWriter({ client });
+
+    const revised = await writer.revise({
+      ...publishInput(),
+      currentCopy: { title: "下班后别急着做这 3 件事", description: "三个动作，把下班后的决定变少。", hashtags: ["下班"] },
+      instruction: "标题改得更具体，突出“少做一个决定”这个动作。",
+    });
+
+    assert.equal(revised.title, "下班后先少做一个决定");
+    assert.deepEqual(client.calls.map((call) => call.kind), ["publish-copy"], "revision must not call role-audit");
+    const payload = client.calls[0]!.payload as { revision?: { instruction?: string; currentCopy?: { title?: string } } };
+    assert.equal(payload.revision?.instruction, "标题改得更具体，突出“少做一个决定”这个动作。");
+    assert.equal(payload.revision?.currentCopy?.title, "下班后别急着做这 3 件事");
+  });
+
+  it("revise rejects blank or overlong instructions and invalid current copy before any model call", async () => {
+    for (const instruction of ["", "   ", "改".repeat(4001)]) {
+      const client = new CapturingCodexClient(() => rawCopy());
+      const writer = new CodexPublishCopyWriter({ client });
+      await assert.rejects(() => writer.revise({ ...publishInput(), currentCopy: { title: "标题", description: "描述", hashtags: ["标签"] }, instruction }));
+      assert.equal(client.calls.length, 0, "rejected revisions must not consume model quota");
+    }
+    const client = new CapturingCodexClient(() => rawCopy());
+    const writer = new CodexPublishCopyWriter({ client });
+    await assert.rejects(() => writer.revise({
+      ...publishInput(),
+      currentCopy: { title: "这是一个远远超过三十个字符上限的标题，绝对不可能通过合同校验的字数", description: "描述", hashtags: ["标签"] },
+      instruction: "改标题",
+    }), /title must be 1 to 30 characters/);
+    assert.equal(client.calls.length, 0);
+  });
+
+  it("auditCurrent sends exactly one role-audit bound to the exact copy and parses a valid audit", async () => {
+    const client = new CapturingCodexClient(() => validAudit("repair", 62, [{
+      severity: "blocking",
+      criterion: "不制造额外承诺",
+      evidence: "标题承诺超出脚本。",
+      repairInstruction: "改为脚本中减少决策消耗的具体收益。",
+    }]));
+    const writer = new CodexPublishCopyWriter({ client });
+
+    const execution = await writer.auditCurrent({
+      ...publishInput(),
+      copy: { title: "下班后别急着做这 3 件事", description: "三个动作，把下班后的决定变少。", hashtags: ["下班"] },
+    });
+
+    assert.deepEqual(client.calls.map((call) => call.kind), ["role-audit"], "auditing the current version must not produce a new draft");
+    assert.equal(execution.audit.verdict, "repair");
+    assert.equal(execution.audit.score, 62);
+    const payload = client.calls[0]!.payload as { role?: string; candidate?: { title?: string }; context?: { upstreamFacts?: { platform?: string } } };
+    assert.equal(payload.role, "发行编辑");
+    assert.equal(payload.candidate?.title, "下班后别急着做这 3 件事");
+    assert.equal(payload.context?.upstreamFacts?.platform, "douyin");
+  });
+
+  it("auditCurrent rejects non-contract audit output without any fallback", async () => {
+    const client = new CapturingCodexClient(() => ({ version: "video-factory/role-audit-v2", verdict: "pass" }));
+    const writer = new CodexPublishCopyWriter({ client });
+    await assert.rejects(() => writer.auditCurrent({
+      ...publishInput(),
+      copy: { title: "标题", description: "描述", hashtags: ["标签"] },
+    }));
+    assert.equal(client.calls.length, 1);
   });
 });

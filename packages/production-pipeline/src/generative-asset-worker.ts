@@ -1455,24 +1455,63 @@ export interface ReworkAffectedSceneScope {
   findings: unknown;
   previousScenes?: unknown;
   previousShots?: unknown;
+  previousGlobalIntent?: unknown;
   currentScenes: unknown;
   currentShots?: unknown;
+  currentGlobalIntent?: unknown;
   // 新版 Studio 由创作者显式确认该范围；旧 run 缺少字段时无法可靠还原用户意图，
   // 因此保守按全片处理。
   affectedScenePositions?: readonly number[];
+}
+
+export class ReworkScopeConflictError extends Error {
+  readonly code = "REWORK_SCOPE_CONFLICT";
+  constructor(message: string, readonly requiredScenePositions: number[] = []) {
+    super(message);
+    this.name = "ReworkScopeConflictError";
+  }
 }
 
 // 人工确认的结构化范围是执行上界。审片定位、脚本差异或 reference/REUSE 依赖若在
 // 确认后扩大，必须回到确认页更新范围，不能在素材执行阶段静默扩大付费工作。
 export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): number[] {
   const currentSceneRecords = positionedRecords(scope.currentScenes, "position");
+  const previousSceneRecords = positionedRecords(scope.previousScenes, "position");
+  // 旧脚本缺失时，旧导演镜头仍是可核实的镜头宇宙；不能因此把删镜当作零影响。
+  if (previousSceneRecords.size === 0) {
+    for (const position of positionedRecords(scope.previousShots, "scenePosition").keys()) {
+      previousSceneRecords.set(position, { position });
+    }
+  }
+  const structureChanged = previousSceneRecords.size > 0 && (
+    !isDeepStrictEqual(
+      [...previousSceneRecords.keys()].sort((a, b) => a - b),
+      [...currentSceneRecords.keys()].sort((a, b) => a - b),
+    )
+    || [...currentSceneRecords].some(([position, current]) => {
+      const previous = previousSceneRecords.get(position);
+      if (!previous) return false;
+      const previousId = typeof previous.id === "string" ? previous.id : undefined;
+      const currentId = typeof current.id === "string" ? current.id : undefined;
+      return (previousId !== undefined || currentId !== undefined) && previousId !== currentId;
+    })
+  );
+  const structuralPositions = [...new Set([...previousSceneRecords.keys(), ...currentSceneRecords.keys()])].sort((a, b) => a - b);
+  if (structureChanged && scope.affectedScenePositions !== undefined
+    && structuralPositions.some((position) => !scope.affectedScenePositions!.includes(position))) {
+    throw new ReworkScopeConflictError(
+      "返工方案增删或重排了镜头，原范围无法对应新方案；请保留旧方案或重新选择范围并报价。",
+      structuralPositions,
+    );
+  }
   const validPositions = new Set(currentSceneRecords.keys());
   if (validPositions.size === 0) return [];
   if (scope.affectedScenePositions === undefined) {
     return [...validPositions].sort((left, right) => left - right);
   }
   const approved = new Set(scope.affectedScenePositions.filter((position) => (
-    Number.isInteger(position) && position > 0 && validPositions.has(position)
+    Number.isInteger(position) && position > 0
+    && (validPositions.has(position) || (structureChanged && previousSceneRecords.has(position)))
   )));
   if (approved.size !== scope.affectedScenePositions.length) {
     throw new Error("返工镜头范围与当前脚本不一致，请重新确认返工范围。");
@@ -1486,6 +1525,14 @@ export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): n
     && finding.nextAction !== "inspect_existing_media"
   ));
   const required = new Set<number>();
+  // 只有旧镜头编号而没有旧脚本全文，无法证明本轮旁白、字幕和声音仍是原内容。
+  // 已明确批准的范围是上界；缺证据时要求重新确认，而不是把“无法比较”当“没有影响”。
+  if (scope.affectedScenePositions !== undefined && !Array.isArray(scope.previousScenes)) {
+    for (const position of validPositions) required.add(position);
+  }
+  if (!isDeepStrictEqual(scope.previousGlobalIntent, scope.currentGlobalIntent)) {
+    for (const position of validPositions) required.add(position);
+  }
   for (const finding of visualFindings) {
     const position = Number(finding.scenePosition);
     if (!Number.isInteger(finding.scenePosition) || finding.scenePosition === undefined) {
@@ -1497,8 +1544,7 @@ export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): n
     }
     if (position > 0) required.add(position);
   }
-  const previousSceneRecords = positionedRecords(scope.previousScenes, "position");
-  if (previousSceneRecords.size > 0) {
+  if (Array.isArray(scope.previousScenes) && previousSceneRecords.size > 0) {
     for (const [position, scene] of currentSceneRecords) {
       if (!isDeepStrictEqual(
         scriptVisualIntent(scene),
@@ -1506,22 +1552,50 @@ export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): n
       )) required.add(position);
     }
   }
+  const previousShotRecords = positionedRecords(scope.previousShots, "scenePosition");
+  const currentShotRecords = positionedRecords(scope.currentShots, "scenePosition");
+  if (previousShotRecords.size > 0 && currentShotRecords.size > 0) {
+    for (const [position, shot] of currentShotRecords) {
+      if (!isDeepStrictEqual(reworkShotIntent(shot), reworkShotIntent(previousShotRecords.get(position)))) {
+        required.add(position);
+      }
+    }
+  }
   const requiredClosure = reworkSceneDependencyClosure([...required], scope.previousShots, scope.currentShots);
   const approvedClosure = reworkSceneDependencyClosure([...approved], scope.previousShots, scope.currentShots);
   const outsideApproval = [...new Set([...requiredClosure, ...approvedClosure])]
     .filter((position) => validPositions.has(position) && !approved.has(position));
   if (outsideApproval.length > 0) {
-    throw new Error(`返工影响范围新增了镜头 ${outsideApproval.sort((left, right) => left - right).join("、")}，请重新确认返工范围。`);
+    throw new ReworkScopeConflictError(`返工影响范围新增了镜头 ${outsideApproval.sort((left, right) => left - right).join("、")}，请重新确认返工范围。`,
+      outsideApproval.sort((left, right) => left - right));
   }
-  return [...approved].sort((left, right) => left - right);
+  return [...approved].filter((position) => validPositions.has(position)).sort((left, right) => left - right);
 }
 
 function scriptVisualIntent(scene: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   if (!scene) return undefined;
   return {
+    purpose: scene.purpose,
+    narration: scene.narration,
+    duration: scene.duration,
     visualStrategy: scene.visual_strategy,
     visualPrompt: scene.visual_prompt,
+    visibleAction: scene.visible_action,
+    onScreenText: scene.on_screen_text,
+    soundCue: scene.sound_cue,
+    searchTerms: scene.search_terms,
   };
+}
+
+function reworkShotIntent(shot: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!shot) return undefined;
+  const keys = [
+    "deliveryType", "preferredProviderId", "alternativeProviderIds", "query", "generationPrompt", "narrativeRole", "subject",
+    "environment", "action", "visibleAction", "authenticityPolicy", "shotSize", "camera", "cameraMovement", "lighting",
+    "continuityRequirements", "negativeConstraints", "continuityNote", "temporalBeats",
+    "reuseFromScenePosition", "referenceFromScenePosition", "sourceInSeconds", "referenceRequirements", "successCriteria",
+  ];
+  return Object.fromEntries(keys.filter((key) => shot[key] !== undefined).map((key) => [key, shot[key]]));
 }
 
 export function reworkSceneDependencyClosure(

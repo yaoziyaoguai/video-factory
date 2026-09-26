@@ -4,6 +4,7 @@ import type {
   StudioCreativeReviewConfirmInput,
   StudioCreativeReviewCommandInput,
   StudioCreativeReviewCommandReceipt,
+  StudioCreativeReviewHistory,
   StudioCreativeReviewSnapshot,
   StudioSceneRevisionInput,
   StudioSceneResourceRevisionInput,
@@ -151,6 +152,17 @@ export const studioApi = {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   }),
+  generateSeriesRoadmap: (seriesId: string) => requestJson<StudioSeries>(
+    `/api/series/${encodeURIComponent(seriesId)}/roadmap/generate`, { method: "POST" },
+  ),
+  auditSeriesEpisodeCurrent: (seriesId: string, episodeNumber: number, expectedRevision: number) => requestJson<StudioSeries>(
+    `/api/series/${encodeURIComponent(seriesId)}/episodes/${episodeNumber}/audit-current`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedRevision }) },
+  ),
+  reviseSeriesEpisodeCurrent: (seriesId: string, episodeNumber: number, expectedRevision: number, instruction: string) => requestJson<StudioSeries>(
+    `/api/series/${encodeURIComponent(seriesId)}/episodes/${episodeNumber}/revise-current`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedRevision, instruction }) },
+  ),
   updateSeriesEpisodePlan: (seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput) => requestJson<StudioSeries>(
     `/api/series/${encodeURIComponent(seriesId)}/episodes/${episodeNumber}`,
     { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
@@ -267,6 +279,9 @@ export const studioApi = {
   creativeReview: (runId: string) => requestJson<StudioCreativeReviewSnapshot>(
     `/api/runs/${encodeURIComponent(runId)}/creative-review`,
   ),
+  creativeReviewHistory: (runId: string) => requestJson<StudioCreativeReviewHistory>(
+    `/api/runs/${encodeURIComponent(runId)}/creative-review/history`,
+  ),
   commandCreativeReview: (runId: string, input: StudioCreativeReviewCommandInput) => requestJson<StudioCreativeReviewCommandReceipt>(
     `/api/runs/${encodeURIComponent(runId)}/creative-review/commands`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
@@ -298,6 +313,10 @@ export const studioApi = {
   deleteReferenceVideo: (uploadId: string) => requestEmpty(`/api/reference-videos/${encodeURIComponent(uploadId)}`, {
     method: "DELETE",
   }),
+  reviseTrendCandidate: (candidateId: string, expectedGenerationId: string, instruction: string) => requestJson<StudioTrendCandidate>(
+    "/api/trend-candidates/revise",
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ candidateId, expectedGenerationId, instruction }) },
+  ),
   overrideNode: (runId: string, nodeId: string, input: StudioNodeOverrideInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/override`,
     { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
@@ -305,6 +324,14 @@ export const studioApi = {
   overrideNodeInput: (runId: string, nodeId: string, input: StudioNodeInputOverrideInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/input-override`,
     { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  reviseNodeDocument: (runId: string, nodeId: string, input: { instruction: string; expectedRunRevision: number; expectedVersionId: string; confirmTerminalEdit?: boolean }) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/document-revision`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  auditNodeDocument: (runId: string, nodeId: string, input: { expectedRunRevision: number; expectedVersionId: string }) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/document-audit`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
   configureNode: (runId: string, nodeId: string, input: StudioNodeExecutionConfigurationInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/execution-configuration`,

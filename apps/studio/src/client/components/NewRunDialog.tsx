@@ -32,6 +32,7 @@ interface NewRunDialogProps {
   initialValues?: Partial<StudioProductionInput>;
   inheritedNodeIds?: StudioReworkDraft["inheritedNodeIds"];
   requiredAffectedScenePositions?: StudioReworkDraft["requiredAffectedScenePositions"];
+  scopePrompt?: StudioReworkDraft["scopePrompt"];
   inheritedReferenceVideo?: StudioReworkDraft["inheritedReferenceVideo"];
   creatorSettings?: StudioCreatorSettings;
   settingsError?: string;
@@ -108,7 +109,7 @@ function canonicalRecipeId(recipeId: RecipeId | undefined): RecipeId {
   return recipeId === "keyshot-ai" || recipeId === "cinematic-ai" ? "keyshot-ai" : "free-stock";
 }
 
-export function NewRunDialog({ open, providers, initialDataReady = true, initialValues, inheritedNodeIds, requiredAffectedScenePositions, inheritedReferenceVideo, creatorSettings, settingsError, onRetrySettings, onClose, onSubmit }: NewRunDialogProps) {
+export function NewRunDialog({ open, providers, initialDataReady = true, initialValues, inheritedNodeIds, requiredAffectedScenePositions, scopePrompt, inheritedReferenceVideo, creatorSettings, settingsError, onRetrySettings, onClose, onSubmit }: NewRunDialogProps) {
   const defaults = useMemo(
     () => providerDefaults(providers, creatorSettings?.roleProviderDefaults),
     [creatorSettings?.roleProviderDefaults, providers],
@@ -163,6 +164,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     initialValues?.rework,
     requiredAffectedScenePositions,
   ));
+  const [scopeDecisionConfirmed, setScopeDecisionConfirmed] = useState(false);
   const initializedForOpen = useRef(false);
   // 误关保护：以初始化完成后的表单快照为基线，只有用户实际修改才视为 dirty；
   // 异步初始化与后台 providers 更新不算修改，也不能覆盖已编辑值（AC-08）。
@@ -475,6 +477,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setError(undefined);
     setVoiceSelectionAvailable(undefined);
     setRework(creatorFacingRework(initialValues?.rework, requiredAffectedScenePositions));
+    setScopeDecisionConfirmed(false);
   }, [creatorSettings, defaults, imageStory, inheritedReferenceVideo, initialDataReady, initialValues, open, providers, requiredAffectedScenePositions]);
 
   useLayoutEffect(() => {
@@ -646,6 +649,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setSubmitting(true);
     setError(undefined);
     try {
+      if (scopePrompt && !scopeDecisionConfirmed) {
+        throw new Error("请先确认本轮返工范围；关闭窗口会保留原记录，不会开始新制作。");
+      }
       if (inheritedSelectionIssues.length > 0) {
         throw new Error("上一版仍有失效配置，请明确选择替代项后再开始制作。");
       }
@@ -772,6 +778,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <div><span>返工</span><h3 id="rework-scope-title">本轮变更范围</h3></div>
                 <small>先确认重做镜头，再填写怎么改</small>
               </div>
+              {scopePrompt ? <div className="rework-scope-guidance" role="alert">
+                <p>{scopePrompt}</p>
+                <button className="button button-ghost" type="button" onClick={requestClose}>保留原记录，不新建版本</button>
+              </div> : null}
               {reworkScope?.fullScenePositions ? <>
                 <p className="rework-scope-guidance" id="rework-scope-guidance">勾选决定哪些镜头进入本轮画面重新规划与生成，并直接影响图片 / 视频报价。审片或失败记录明确要求的镜头标为必改，不能移除；下方文字只说明怎么改，不代替这里的镜头选择。</p>
                 <fieldset className="rework-scene-scope" aria-describedby="rework-scope-guidance">
@@ -786,7 +796,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                           aria-label={`第 ${position} 镜`}
                           checked={reworkScope.adjustedScenePositions.includes(position)}
                           disabled={required}
-                          onChange={() => setRework((current) => toggleReworkScene(current, position))}
+                          onChange={() => { setScopeDecisionConfirmed(false); setRework((current) => toggleReworkScene(current, position)); }}
                         />
                         <span>第 {position} 镜</span>
                         {required ? <small aria-hidden="true">必改</small> : null}
@@ -805,6 +815,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <div className="rework-rejection-note"><strong>全片需复核；具体重做范围以重新规划后的方案为准。</strong></div>
                 <p className="rework-boundary-note">上一版没有可验证的完整镜头全集，因此这里不会猜测镜头编号。重新规划确认范围后，再对实际需要生成的图片 / 视频报价。</p>
               </div>}
+              {scopePrompt ? <label className="rework-scope-guidance"><input type="checkbox" checked={scopeDecisionConfirmed} onChange={(event) => setScopeDecisionConfirmed(event.target.checked)} />我已核对本轮选择的镜头范围；如需新购买，仍须重新查看并确认报价。</label> : null}
             </section> : null}
             {inheritedSelectionIssues.length > 0 ? <section className="rework-selection-alert" role="alert" aria-live="assertive" aria-labelledby="rework-selection-alert-title">
               <div>
@@ -1360,7 +1371,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 return;
               }
               void submit(form);
-            }} disabled={submitting || referenceUploading || productionBlocked || (visualReviewUnavailable && !acceptUnreviewedFirstCut)} data-tour="production-start">
+            }} disabled={submitting || referenceUploading || productionBlocked || (Boolean(scopePrompt) && !scopeDecisionConfirmed) || (visualReviewUnavailable && !acceptUnreviewedFirstCut)} data-tour="production-start">
               <Check aria-hidden="true" size={17} />
               {submitting ? "正在创建..." : "开始前期构思"}
             </button>

@@ -1,0 +1,17 @@
+🧿 oracle 0.17.3 — Because vibes aren't a deliverable.
+Session: vf-ui-ux-motion-20260923-02
+Mode: browser foreground
+Models: 1
+Detach: no
+Reattach: oracle session vf-ui-ux-motion-20260923-02
+Packed 16 files into 1 bundle (contents counted in token estimate).
+Launching browser mode (picker=current; requested=gpt-5.6-sol) with ~127,567 tokens.
+This run can take up to 45 minutes (usually ~10 minutes).
+[browser] Browser control: launch visible Chrome; may focus/control the browser UI.
+[browser] Browser guidance: A visible automation Chrome window may take focus while Oracle controls ChatGPT.
+[browser] Browser guidance: Use --browser-hide-window, --browser-attach-running, or --remote-chrome to reduce desktop disruption.
+[browser] Thinking time: 6Pro更快消耗使用额度Pro，第 5 项，共 5 项。使用左右方向键调整强度已锁定，打开访问权限选项最新GPT-5.6 SolGPT-5.5将于 10月14日下线 (already selected)
+ERROR: Trusted send target failed hit testing (target-mismatch).
+User error (browser-automation): Trusted send target failed hit testing (target-mismatch).
+
+Wrapper exit code: 1

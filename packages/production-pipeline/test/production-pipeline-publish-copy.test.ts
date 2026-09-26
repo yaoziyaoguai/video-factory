@@ -138,6 +138,10 @@ function stubWriter(behavior: () => unknown): { writer: PublishCopyWriter; calls
         calls.push(input);
         return behavior();
       },
+      writeDetailed: async (input) => {
+        calls.push(input);
+        return { output: behavior() };
+      },
     },
   };
 }
@@ -149,6 +153,19 @@ async function readPackage(run: { artifacts: Array<{ kind: string; uri?: string 
 }
 
 describe("ProductionPipeline publish copy", () => {
+  it("does not package a configured writer that cannot provide independent audit evidence", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publish-no-audit-"));
+    let calls = 0;
+    const writer: PublishCopyWriter = {
+      id: "codex-publish-copy-v1",
+      write: async () => { calls += 1; return publishCopy; },
+    };
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: screenwriter, publishCopyWriter: writer });
+    const run = await pipeline.start(brief);
+    assert.equal(run.status, "failed");
+    assert.equal(calls, 0);
+    assert.equal(run.artifacts.some((artifact) => artifact.kind === "publish_package"), false);
+  });
   it("embeds the codex copy and records provenance and integrity", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publish-copy-"));
     const worker = new RecordingWorker();
@@ -187,7 +204,7 @@ describe("ProductionPipeline publish copy", () => {
     assert.equal(copyArtifact.sizeBytes, bytes.byteLength);
   });
 
-  it("falls back to the brief title once when the writer throws or returns malformed output", async () => {
+  it("does not package an unaudited fallback when the configured writer fails", async () => {
     for (const behavior of [() => {
       throw new Error("codex backend unavailable");
     }, () => ({ title: "只有标题" })]) {
@@ -203,15 +220,10 @@ describe("ProductionPipeline publish copy", () => {
 
       const run = await pipeline.start(brief);
 
-      assert.equal(run.status, "succeeded");
+      assert.equal(run.status, "failed");
       assert.equal(calls.length, 1);
       assert.equal(run.artifacts.some((artifact) => artifact.kind === "publish_copy"), false);
-      const payload = await readPackage(run);
-      const copy = payload.copy as Record<string, unknown>;
-      assert.equal(copy.source, "brief-title");
-      assert.equal(copy.fallbackReason, "codex-publish-copy-unavailable");
-      assert.equal(payload.title, brief.title);
-      assert.deepEqual(copy.hashtags, []);
+      assert.equal(run.artifacts.some((artifact) => artifact.kind === "publish_package"), false);
     }
   });
 

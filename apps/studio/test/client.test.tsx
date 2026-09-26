@@ -73,6 +73,7 @@ function renderReworkDialog(
   title = "返工镜头全集与影响步骤",
   onSubmit = vi.fn(),
   requiredAffectedScenePositions?: number[],
+  scopePrompt?: string,
 ) {
   return render(<NewRunDialog
     open
@@ -89,6 +90,7 @@ function renderReworkDialog(
       rework,
     }}
     {...(requiredAffectedScenePositions ? { requiredAffectedScenePositions } : {})}
+    {...(scopePrompt ? { scopePrompt } : {})}
     onClose={() => undefined}
     onSubmit={onSubmit}
   />);
@@ -135,6 +137,27 @@ const runDetail: StudioRunDetail = {
 };
 
 describe("Studio client", () => {
+  it("binds an unaudited publish-copy adoption to the visible document version", async () => {
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const current = { publishPackagePath: "/private/current.json", contentReview: { status: "not_audited", summary: "人工修改后的本版尚未重新审计。", suggestions: [] } };
+    const publishNode: StudioNode = {
+      id: "publish-package", label: "发布文案与发布包", role: "发行编辑", status: "needs_human", artifactIds: [], qualityGateResults: [], output: current,
+      outputState: { generatedVersionId: "v1", effectiveVersionId: "v2", stale: false, versions: [
+        { id: "v1", source: "generated", artifactIds: [], inputVersionIds: [], createdAt: "2026-09-24T00:00:00Z", createdBy: "agent", schemaVersion: "v1", output: { contentReview: { status: "passed", summary: "旧版通过", suggestions: [] } } },
+        { id: "v2", source: "human", artifactIds: [], inputVersionIds: [], createdAt: "2026-09-24T00:01:00Z", createdBy: "creator", schemaVersion: "v1", output: current },
+      ] },
+    };
+    const run: StudioRunDetail = { ...runDetail, revision: 9, currentNodeId: "publish-package", nodes: [...runDetail.nodes.filter((node) => node.id !== "publish-package"), publishNode],
+      activeIntervention: { id: "publish-v2-stop", nodeId: "publish-package", boundary: "node-complete", reason: "等你决定", options: ["approve", "reject"], createdAt: "2026-09-24T00:01:00Z" },
+    };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
+    fireEvent.click(screen.getByRole("button", { name: "采用本版（未审计），继续" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
+      action: "approve", contentVersionId: "v2", acceptUnauditedContent: true, expectedRunRevision: 9,
+    }));
+  });
+
   it("reveals only the currently loaded new film, without remounting the player or replaying an earlier film", async () => {
     const { videoArtifactId: _initialVideo, ...withoutVideo } = runDetail;
     const a = { ...runDetail, videoArtifactId: "video", artifacts: runDetail.artifacts };
@@ -228,7 +251,7 @@ describe("Studio client", () => {
     render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
     await user.click(await screen.findByRole("button", { name: "采用这个备选" }));
     await waitFor(() => expect(within(screen.getByRole("article", { name: "当前前期构思" })).getByText("采用后的新结尾")).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "确认当前方案，继续" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeEnabled();
     expect(screen.queryByText("正在处理原操作")).not.toBeInTheDocument();
     expect(post).toHaveBeenCalledTimes(1);
     vi.restoreAllMocks();
@@ -3100,6 +3123,25 @@ describe("Studio client", () => {
     expect(screen.getByText(/下方文字只说明怎么改，不代替这里的镜头选择/)).toBeInTheDocument();
   });
 
+  it("requires an explicit scope decision before starting a recovered scope-conflict rework", async () => {
+    const user = userEvent.setup();
+    renderReworkDialog({
+      sourceRunId: "run-scope-conflict", sourceRunRevision: 3,
+      affectedScenePositions: [1],
+      nodeInstructions: { script: "保留事实。", visualDirection: "核对镜头。", assets: "按新范围报价。" },
+      findings: [],
+      previousScript: { scenes: [{ position: 1 }, { position: 2 }] },
+      previousDirectorPlan: { shots: [{ scenePosition: 1 }, { scenePosition: 2 }] },
+    }, "结构化范围冲突", vi.fn(), [1], "上一轮因实际改动超出已批准镜头范围而停止。");
+    const start = screen.getByRole("button", { name: "开始前期构思" });
+    expect(start).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保留原记录，不新建版本" })).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: /我已核对本轮选择的镜头范围/ }));
+    expect(start).toBeEnabled();
+    await user.click(screen.getByRole("checkbox", { name: "第 2 镜" }));
+    expect(start).toBeDisabled();
+  });
+
   it("locks server-confirmed failure scenes while keeping other preselected scenes editable", async () => {
     renderReworkDialog({
       sourceRunId: "run-explicit-scope-required",
@@ -3961,9 +4003,9 @@ describe("Studio client", () => {
 
     expect(screen.getByText("内容简报做完了，等你放行")).toBeInTheDocument();
     expect(screen.getByText(/独立复核 76 分/)).toBeInTheDocument();
-    expect(screen.getByText("结尾兑现")).toBeInTheDocument();
+    expect(screen.queryByText("结尾兑现")).not.toBeInTheDocument();
     expect(screen.getByText("标题说避开 3 个坑，结尾只讲了一个")).toBeInTheDocument();
-    expect(screen.getByText(/建议：把另外两个坑各补一句/)).toBeInTheDocument();
+    expect(screen.getByText("把另外两个坑各补一句")).toBeInTheDocument();
     // 审计自己的措辞是 blocking；对用户它始终只是建议，界面不能写成"阻断"。
     expect(screen.getByText("建议先改")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /确认当前步骤，进入下一步/ })).toBeInTheDocument();

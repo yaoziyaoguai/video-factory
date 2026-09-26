@@ -1,0 +1,11 @@
+{
+  "session": "vf-ui-ux-motion-20260923-01",
+  "reason": "Long wait; distinguish active generation UI from a visible login or upload error",
+  "method": "Read-only Runtime.evaluate through the exact chromePort/chromeTargetId recorded by this session; target URL matched before reading",
+  "conversationUrl": "https://chatgpt.com/c/6ab33e3a-d76c-83ea-bb11-ace7db41e1cb",
+  "assistantMessages": 0,
+  "visibleControls": [{"label": "停止", "text": ""}],
+  "visibleAlerts": [],
+  "interactionPerformed": false,
+  "caveat": "Visible active generation is not proof of backend progress or a completed answer. No refresh, click, resubmission, or other browser state change was performed."
+}

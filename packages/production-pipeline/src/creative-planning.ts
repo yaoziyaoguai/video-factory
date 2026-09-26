@@ -3,7 +3,7 @@ import { Annotation, Command, END, START, StateGraph, interrupt, type BaseCheckp
 import type { CreativeTreatment } from "./creative-treatment.js";
 import type { ScriptDraft } from "./codex-screenwriter.js";
 import type { ShotDecision, VisualDirectorPlan } from "./visual-director.js";
-import { assetReuseSourceScenePosition } from "./generative-asset-worker.js";
+import { assetReuseSourceScenePosition, ReworkScopeConflictError } from "./generative-asset-worker.js";
 import { validateAssetSemanticRanking, type AssetCandidateReport, type AssetSemanticRanking } from "./asset-semantic-ranker.js";
 import { applyCreativeReviewEditDraft } from "./creative-review.js";
 import { planningThreadId } from "./creative-planning-store.js";
@@ -101,6 +101,7 @@ export interface CreativePlanningState {
   creativeReview?: CreativeReviewState;
   /** 本次停在人工确认关，是因为自动循环先停下了；理由必须一起带出来，否则人只看到"方案已生成"。 */
   planningStop?: PlanningHalt;
+  scopeConflict?: { stage: "script" | "director"; proposalId: string; requiredScenePositions: number[] };
 }
 
 export type PlanningHaltReason =
@@ -126,7 +127,7 @@ export const AUTOMATIC_CANDIDATE_SEMANTIC_MINIMUM = 40;
 export interface PlanningArtifact<Output> {
   artifactId: string;
   output: Output;
-  reviewCheck?: { audit: RoleAudit; checkIdentity: string };
+  reviewCheck?: { audit: RoleAudit; checkIdentity: string; /** R3-01：装配层注入的宿主侧操作绑定（模型不经手），图层核验结果归属。 */ auditOperationId: string };
   /**
    * 角色产出时带上来的建议：来源缺口这类"当前拿不到材料"的判定只能出建议，不能拦下制作。
    * 它进 state.issues → 下游角色当输入收到、创作者在确认关看到（见 production-pipeline 的
@@ -160,7 +161,12 @@ export interface CreativePlanningContext {
   ranking: PlanningArtifact<AssetSemanticRanking> | null;
   integratedPlan: PlanningArtifact<VisualDirectorPlan> | null;
   availabilityHistory: AvailabilityBlockerObservation[];
-  creativeReviewExecution?: { mode: "draft" } | { mode: "check"; stage: CreativeStage };
+  /**
+   * OA-01：check 模式必须携带本次审计操作的持久化身份——
+   * initial 由当前精确版本稳定派生；manual（audit_current）由已持久化 commandId 稳定派生。
+   * 该身份进入装配层 checkpoint key：同一操作恢复命中同一请求（B06），新操作拿到新请求（A05）。
+   */
+  creativeReviewExecution?: { mode: "draft" } | { mode: "check"; stage: CreativeStage; auditOperationId: string };
 }
 
 export type PlanningPort<Output> = (context: CreativePlanningContext) => Promise<PlanningArtifact<Output>>;
@@ -189,6 +195,7 @@ export interface CreativePlanningPorts {
     runId: string;
     stage: CreativeStage;
     commandId: string;
+    requestMode: "discuss" | "revise";
     currentDocument: CreativeTreatment | ScriptDraft | VisualDirectorPlan;
     message: string;
     selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] };
@@ -202,6 +209,8 @@ export interface CreativePlanningPorts {
    * 不静默放行未校验的稿件）。upstreamScript 是当前已确认脚本（导演稿校验的 scenes 来源）。
    */
   validateEditedDraft?: (stage: CreativeStage, document: unknown, upstreamScript: unknown) => void;
+  /** 经来源 run 校验的旧稿；模型越界时只作为保留选项，不自动采用新候选。 */
+  reworkBaseline?: Partial<{ script: PlanningArtifact<ScriptDraft>; director: PlanningArtifact<VisualDirectorPlan> }>;
 }
 
 export interface AvailabilityReviewInput {
@@ -267,6 +276,7 @@ const PlanningGraphAnnotation = Annotation.Root({
   planningStop: Annotation<PlanningHalt | null>(),
   /** 自动图库调整达到止损边界后，转入现有导演讨论，而不是结束整条制作。 */
   manualDirectorReview: Annotation<boolean>(),
+  scopeConflict: Annotation<{ stage: "script" | "director"; proposalId: string; requiredScenePositions: number[] } | null>(),
   creativeReview: Annotation<CreativeReviewState>(),
 });
 
@@ -303,6 +313,7 @@ export function initialPlanningGraphState(input: CreativePlanningInput): Plannin
     halt: null,
     planningStop: null,
     manualDirectorReview: false,
+    scopeConflict: null,
     creativeReview: initialCreativeReviewState(),
   };
 }
@@ -357,6 +368,7 @@ export function projectCreativePlanningState(state: PlanningGraphState): Creativ
       ? { creativeReview: structuredClone(state.creativeReview) }
       : {}),
     ...(state.planningStop ? { planningStop: structuredClone(state.planningStop) } : {}),
+    ...(state.scopeConflict ? { scopeConflict: structuredClone(state.scopeConflict) } : {}),
   };
 }
 
@@ -660,6 +672,200 @@ function confirmPlanningDraft(
   return confirmed;
 }
 
+/**
+ * 初稿审一次（S3）：稿件发布后、人工停点前，对本版做一次独立审计并把结论一并带给用户。
+ * 审计腿失败不判稿失败：已核清失败记为「未取得结论」；未知/仍在处理的请求不记结论，
+ * 未知/仍在处理的请求不能变成未审采用停点，须沿既有 checkpoint / prepared-operation
+ * 恢复原物理请求（B08）。
+ * `source: "manual"` 用于用户在停点主动点「审计当前版本」（A05）。
+ */
+async function auditPublishedStageDraft(
+  state: PlanningGraphState,
+  stage: CreativeStage,
+  rolePort: PlanningPort<CreativeTreatment | ScriptDraft | VisualDirectorPlan>,
+  options: { source?: "initial" | "manual"; auditOperationId: string },
+): Promise<Partial<PlanningGraphState>> {
+  const current = state.creativeReview.stages[stage];
+  if (!current.currentDraft || current.phase !== "waiting_user") return {};
+  try {
+    const checked = isolatedPlanningValue(await rolePort(contextFor(state, { mode: "check", stage, auditOperationId: options.auditOperationId })));
+    const audit = checked.reviewCheck?.audit;
+    const identity = checked.reviewCheck?.checkIdentity;
+    // R3-01（P08）：审计返回缺少可核对的结论/身份时显式报合同错误，不得静默当作
+    // 初审完成——那会让节点正常结束却没有任何可解释的首审意见。
+    if (!audit || !identity || !checked.reviewCheck) {
+      throw new Error(`Creative review '${stage}' check returned no verifiable audit conclusion (missing audit or checkIdentity).`);
+    }
+    if (contentSha256(checked.output) !== current.currentDraft.sha256) {
+      throw new Error(`Creative review '${stage}' check returned a different draft from the requested version.`);
+    }
+    // R3-01：结果来源核验——装配层从本次持久化操作回传的绑定必须与发起时一致；
+    // 不一致（旧 checkpoint 结果、任何同字节旧结论）不得登记为当前版本的审计。
+    if (checked.reviewCheck.auditOperationId !== options.auditOperationId) {
+      throw new Error(`Creative review '${stage}' check result does not belong to the requested audit operation.`);
+    }
+    return { creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
+      versionId: current.currentDraft.versionId,
+      draftSha256: current.currentDraft.sha256,
+      checkIdentity: identity,
+      verdict: audit.verdict === "pass" ? "pass" : "repair",
+      score: audit.score,
+      summary: audit.summary,
+      issues: structuredClone(audit.issues),
+    }, {
+      source: options.source ?? "initial",
+      recordedAt: new Date().toISOString(),
+      // OA-04：auditId 由持久化操作身份 + 结果身份稳定派生——恢复窗口重放同一操作时
+      // 记账幂等（W4），不再产生随机 auditId 造成的重复追加。
+      // R5/P09：auditId 只绑持久化操作——同操作唯一 id；结果差异由记录器完整比较裁决。
+      auditId: `audit-${contentSha256({ auditOperationId: options.auditOperationId })}`,
+    }) };
+  } catch (error) {
+    // R11-01：outcome uncertain 的原异常恢复优先于一切转换（含异操作拒收的停点）——
+    // 操作身份不同只能证明“不属于本次操作”，不能证明原请求已结束；必须沿原请求恢复。
+    if (error instanceof RoleAgentLoopError && error.sourceError instanceof CodexBridgeError
+      && error.sourceError.stage === "uncertain") throw error;
+    // R7/R8-01：来源核验先于一切登记——异常携带的操作绑定存在且不属于本次操作时，
+    // 无论它声称 completed_failure 还是携带意见，都不得成为本次的任何审计记录。
+    const errorOperationId = (error as { auditOperationId?: string }).auditOperationId;
+    if (errorOperationId !== undefined && errorOperationId !== options.auditOperationId) {
+      // 旧操作的异常不得成为本次登记；转为人可处理的停点提示，节点保持可恢复。
+      return {
+        planningStop: {
+          reason: "needs_user" as const,
+          issueIds: [],
+          detail: "该次审计来自另一次已过期的操作，已被拒绝；请重新发起「审计当前版本」。",
+        },
+      };
+    }
+    const settledCheckFailure = error instanceof RoleAgentLoopError
+      && error.sourceError instanceof CodexBridgeError && error.sourceError.stage === "completed_failure";
+    if (settledCheckFailure) {
+      return { creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
+        versionId: current.currentDraft.versionId,
+        status: "incomplete",
+        draftSha256: current.currentDraft.sha256,
+        checkIdentity: contentSha256({ stage, draft: current.currentDraft, settled: true }),
+        summary: "独立复核服务已结束，但没有得到有效结论。你可以再点「审计当前版本」重试，或显式承担未审风险采用本版。",
+        issues: [],
+      }, {
+        source: options.source ?? "initial",
+        recordedAt: new Date().toISOString(),
+        // R3-02：失败记账同样绑定操作身份——同一已核清失败的重放幂等，不再随机出新 id。
+        auditId: `audit-${contentSha256({ auditOperationId: options.auditOperationId })}`,
+      }) };
+    }
+    // 在途/受理状态未知时保留原异常与 checkpoint（uncertain 已在 catch 顶部优先上抛）。
+    // R6 闭合：异常携带的意见必须证明审的是当前稿件字节才可登记——
+    // iteration.candidateHash 是本次 loop 实际审计的候选指纹；与当前稿不一致
+    // （外来/旧候选意见）一律保留原异常上抛，不组织成当前版本的审计结论。
+    const failedIteration = error instanceof RoleAgentLoopError
+      ? error.agentLoop.iterations.at(-1)
+      : undefined;
+    const audit = failedIteration?.audit;
+    if (audit) {
+      // R7：操作归属核验（装配层 withAuditOperationBinding 注入的宿主标记）——
+      // 异常意见必须来自本次持久化操作；旧操作（含同字节 A→B→A 的 O1 异常撞 O3）
+      // 或无标记的异常一律保留原异常上抛，零登记。
+      const errorOperationId = (error as { auditOperationId?: string }).auditOperationId;
+      if (errorOperationId !== options.auditOperationId) {
+        throw error;
+      }
+      if (failedIteration!.candidateHash !== current.currentDraft.sha256) {
+        throw error;
+      }
+    }
+    if (audit) {
+      return { creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
+        versionId: current.currentDraft.versionId,
+        draftSha256: current.currentDraft.sha256,
+        checkIdentity: contentSha256({ stage, draftSha256: current.currentDraft.sha256, stageInputDigest: current.currentDraft.stageInputDigest, audit }),
+        verdict: audit.verdict === "pass" ? "pass" : "repair",
+        score: audit.score,
+        summary: audit.summary,
+        issues: structuredClone(audit.issues),
+      }, {
+        source: options.source ?? "initial",
+        recordedAt: new Date().toISOString(),
+        // R3-02：异常出口不得落回随机记账；id 绑定本次操作与该意见自身的身份。
+        auditId: `audit-${contentSha256({ auditOperationId: options.auditOperationId })}`,
+      }) };
+    }
+    throw error;
+  }
+}
+
+function stageAuditNode(
+  stage: CreativeStage,
+  rolePort: PlanningPort<CreativeTreatment | ScriptDraft | VisualDirectorPlan>,
+) {
+  return async (state: PlanningGraphState) => {
+    if (state.base.creativeReview !== CREATIVE_REVIEW_FEATURE) return {};
+    const current = state.creativeReview.stages[stage];
+    if (!current.currentDraft || current.phase !== "waiting_user") return {};
+    // 越界模型候选只是提案；展示的旧有效稿并非本轮新初稿，不能为它多发一轮审计。
+    if (state.scopeConflict?.stage === stage) return {};
+    // 幂等：本版已有审计（含历史轮里最新一条对当前版本）就不重复调用模型。
+    if (current.checkResult && current.checkResult.versionId === current.currentDraft.versionId) return {};
+    return auditPublishedStageDraft(state, stage, rolePort, {
+      source: "initial",
+      // 初稿审计操作身份由当前精确版本稳定派生：中断恢复重进同一节点时命中同一请求（B06），
+      // 版本变化（含 A→B→A）得到新身份，旧结果不可能被复用或回挂（OA-01/OA-02）。
+      auditOperationId: contentSha256({
+        runId: state.runId,
+        stage,
+        versionId: current.currentDraft.versionId,
+        draftSha256: current.currentDraft.sha256,
+        stageInputDigest: current.currentDraft.stageInputDigest,
+        source: "initial",
+      }),
+    });
+  };
+}
+
+function scopeConflictProposalUpdate<T extends ScriptDraft | VisualDirectorPlan>(
+  state: PlanningGraphState,
+  stage: "script" | "director",
+  baseline: PlanningArtifact<T>,
+  candidate: PlanningArtifact<T>,
+  error: ReworkScopeConflictError,
+): Partial<PlanningGraphState> {
+  const safeBaseline = isolatedPlanningValue(baseline);
+  const review = publishCreativeDraft(
+    state.creativeReview, stage, safeBaseline.artifactId, safeBaseline.output,
+    stage === "script" ? scriptReviewInputDigest(state) : directorReviewInputDigest(state),
+  );
+  const current = review.stages[stage];
+  const candidateDraft = publishCreativeDraft(
+    review, stage, candidate.artifactId, candidate.output, current.currentDraft!.stageInputDigest,
+  ).stages[stage].currentDraft!;
+  const proposalId = `scope:${candidateDraft.sha256}`;
+  const proposal = {
+    proposalId,
+    baseDraftSha256: current.currentDraft!.sha256,
+    draft: candidateDraft,
+    document: structuredClone(candidate.output),
+    changeSummary: [error.message],
+    commandId: proposalId,
+  };
+  const nextReview: CreativeReviewState = {
+    ...review,
+    ...(stage === "director" ? { directorReviewPurpose: "direction" as const } : {}),
+    stages: {
+      ...review.stages,
+      [stage]: { ...current, proposals: [...current.proposals.filter((entry) => entry.proposalId !== proposalId), proposal] },
+    },
+  };
+  return {
+    stage,
+    ...stageArtifactUpdate(stage, safeBaseline),
+    artifactIds: withArtifactId(state, stage, safeBaseline.artifactId),
+    creativeReview: nextReview,
+    scopeConflict: { stage, proposalId, requiredScenePositions: [...error.requiredScenePositions] },
+    planningStop: { reason: "needs_user", issueIds: [], detail: `${error.message} 越界新稿只保留为未采用提案；可保留旧方案继续，或重新选择返工范围并报价。` },
+  };
+}
+
 const STOCK_CANDIDATE_AVAILABILITY_REASON = "图库候选不足：该镜头没有达到自动采用语义阈值的候选";
 const FACTUAL_STOCK_CANDIDATE_REQUIRED_CHANGE =
   "上传或实拍可追溯的真实素材；若不再主张实证，可改为非实证概念表达；也可以停止本次制作。AI 生成画面不能冒充真实实验证据。";
@@ -812,19 +1018,25 @@ export function createCreativePlanningGraph(options: CreateCreativePlanningGraph
     // “整合”名义对合格导演草案再调一次导演。
     return new StateGraph(PlanningGraphAnnotation)
       .addNode("treatment", actions.treatment)
+      .addNode("treatment_audit", actions.treatmentAudit)
       .addNode("treatment_review", actions.treatmentReview)
       .addNode("script", actions.script)
+      .addNode("script_audit", actions.scriptAudit)
       .addNode("script_review", actions.scriptReview)
       .addNode("director", actions.director)
+      .addNode("director_audit", actions.directorAudit)
       .addNode("director_review", actions.directorReview)
       .addNode("compile", actions.compile)
       .addEdge(START, "treatment")
-      .addConditionalEdges("treatment", routeAfterTreatment, { halt: END, review: "treatment_review", next: "script" })
+      .addEdge("treatment", "treatment_audit")
+      .addConditionalEdges("treatment_audit", routeAfterTreatment, { halt: END, review: "treatment_review", next: "script" })
       .addConditionalEdges("treatment_review", routeAfterReview("treatment"), { wait: "treatment_review", next: "script" })
-      .addConditionalEdges("script", routeAfterScript, { halt: END, review: "script_review", next: "director" })
-      .addConditionalEdges("script_review", routeAfterReview("script"), { wait: "script_review", treatment: "treatment_review", next: "director" })
-      .addConditionalEdges("director", routeAfterFinalDirector, { halt: END, review: "director_review", next: "compile" })
-      .addConditionalEdges("director_review", routeAfterReview("director"), { wait: "director_review", treatment: "treatment_review", script: "script_review", next: "compile" })
+      .addEdge("script", "script_audit")
+      .addConditionalEdges("script_audit", routeAfterScript, { halt: END, review: "script_review", next: "director" })
+      .addConditionalEdges("script_review", routeAfterReview("script"), { wait: "script_review", treatment: "treatment_audit", next: "director" })
+      .addEdge("director", "director_audit")
+      .addConditionalEdges("director_audit", routeAfterFinalDirector, { halt: END, review: "director_review", next: "compile" })
+      .addConditionalEdges("director_review", routeAfterReview("director"), { wait: "director_review", treatment: "treatment_audit", script: "script_audit", next: "compile" })
       .addEdge("compile", END)
       .compile(compileOptions);
   }
@@ -832,10 +1044,13 @@ export function createCreativePlanningGraph(options: CreateCreativePlanningGraph
   // 有图库固定路线：构思→稿件→导演→候选→排序→复检→（整合→复检→编译 | 回退 | 停止）。
   return new StateGraph(PlanningGraphAnnotation)
     .addNode("treatment", actions.treatment)
+    .addNode("treatment_audit", actions.treatmentAudit)
     .addNode("treatment_review", actions.treatmentReview)
     .addNode("script", actions.script)
+    .addNode("script_audit", actions.scriptAudit)
     .addNode("script_review", actions.scriptReview)
     .addNode("director", actions.director)
+    .addNode("director_audit", actions.directorAudit)
     .addNode("candidates", actions.candidates)
     .addNode("rank", actions.rank)
     .addNode("evaluate", actions.evaluate)
@@ -843,15 +1058,18 @@ export function createCreativePlanningGraph(options: CreateCreativePlanningGraph
     .addNode("director_review", actions.directorReview)
     .addNode("compile", actions.compile)
     .addEdge(START, "treatment")
-    .addConditionalEdges("treatment", routeAfterTreatment, { halt: END, review: "treatment_review", next: "script" })
+    .addEdge("treatment", "treatment_audit")
+    .addConditionalEdges("treatment_audit", routeAfterTreatment, { halt: END, review: "treatment_review", next: "script" })
     .addConditionalEdges("treatment_review", routeAfterReview("treatment"), { wait: "treatment_review", next: "script" })
-    .addConditionalEdges("script", routeAfterScript, { halt: END, review: "script_review", next: "director" })
-    .addConditionalEdges("script_review", routeAfterReview("script"), { wait: "script_review", treatment: "treatment_review", next: "director" })
-    // 导演初稿先交给创作者；确认后才可开始候选检索。旧 checkpoint 已在候选阶段的
-    // 继续按其真实位置恢复，不补写过去并未发生的初稿确认。
+    .addEdge("script", "script_audit")
+    .addConditionalEdges("script_audit", routeAfterScript, { halt: END, review: "script_review", next: "director" })
+    .addConditionalEdges("script_review", routeAfterReview("script"), { wait: "script_review", treatment: "treatment_audit", next: "director" })
+    // 导演初稿先经过初稿审计节点，再交给创作者；确认后才可开始候选检索。旧 checkpoint 已在
+    // 候选阶段的继续按其真实位置恢复，不补写过去并未发生的初稿确认。
+    .addEdge("director", "director_audit")
     .addConditionalEdges(
-      "director",
-      routeAfterDirector,
+      "director_audit",
+      routeAfterDirectorAudit,
       { halt: END, review: "director_review", candidates: "candidates", rank: "rank", evaluate: "evaluate" },
     )
     .addEdge("candidates", "rank")
@@ -861,7 +1079,7 @@ export function createCreativePlanningGraph(options: CreateCreativePlanningGraph
     .addConditionalEdges(
       "evaluate",
       routeFromEvaluate,
-      { halt: END, compile: "compile", review: "director_review", integrate: "integrate", script: "script", director: "director" },
+      { halt: END, compile: "compile", review: "director_audit", integrate: "integrate", script: "script", director: "director" },
     )
     // 整合方案回到同一 evaluate 复检（含确定性覆盖检查），复检通过才编译——integrate 不直连
     // compile，最终整合方案不能绕过可得性检查。
@@ -872,8 +1090,8 @@ export function createCreativePlanningGraph(options: CreateCreativePlanningGraph
       {
         halt: END,
         wait: "director_review",
-        treatment: "treatment_review",
-        script: "script_review",
+        treatment: "treatment_audit",
+        script: "script_audit",
         recheck: "candidates",
         candidates: "candidates",
         rank: "rank",
@@ -917,6 +1135,16 @@ function planningNodeActions(
       try {
         const artifact = isolatedPlanningValue(await ports.screenwriter(contextFor(state)));
         requireArtifact(artifact, "script");
+        if (ports.reworkBaseline?.script && ports.validateEditedDraft) {
+          try {
+            ports.validateEditedDraft("script", artifact.output, null);
+          } catch (error) {
+            if (error instanceof ReworkScopeConflictError && state.base.creativeReview === CREATIVE_REVIEW_FEATURE) {
+              return scopeConflictProposalUpdate(state, "script", ports.reworkBaseline.script, artifact, error);
+            }
+            throw error;
+          }
+        }
         const artifactIds = withArtifactId(state, "script", artifact.artifactId);
         // 稿件画面/语义内容实际变化时，依赖稿件语义的排序证据与下游整合/编译产物全部失效；
         // 内容未变（重跑得到同一输出）不失效——不通过一律重排掩盖问题，也不无故丢弃有效证据。
@@ -927,6 +1155,7 @@ function planningNodeActions(
           scriptArtifact: artifact,
           ...sourceAdvisoryUpdate(artifact),
           ...(changed ? invalidateRankingEvidence(artifactIds) : { artifactIds }),
+          scopeConflict: null,
           ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE
             ? { creativeReview: publishCreativeDraft(state.creativeReview, "script", artifact.artifactId, artifact.output, scriptReviewInputDigest(state)) }
             : {}),
@@ -939,6 +1168,16 @@ function planningNodeActions(
       try {
         const artifact = isolatedPlanningValue(await ports.director(contextFor(state)));
         requireArtifact(artifact, "director");
+        if (ports.reworkBaseline?.director && ports.validateEditedDraft) {
+          try {
+            ports.validateEditedDraft("director", artifact.output, state.scriptArtifact?.output ?? null);
+          } catch (error) {
+            if (error instanceof ReworkScopeConflictError && state.base.creativeReview === CREATIVE_REVIEW_FEATURE) {
+              return scopeConflictProposalUpdate(state, "director", ports.reworkBaseline.director, artifact, error);
+            }
+            throw error;
+          }
+        }
         const artifactIds = withArtifactId(state, "director", artifact.artifactId);
         // 导演方案内容实际变化时同样失效排序及下游产物（是否重搜由候选获取身份另行判断）。
         const changed = state.directorPlan !== null
@@ -948,6 +1187,7 @@ function planningNodeActions(
           directorPlan: artifact,
           ...sourceAdvisoryUpdate(artifact),
           ...(changed ? invalidateRankingEvidence(artifactIds) : { artifactIds }),
+          scopeConflict: null,
           ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE
             ? { creativeReview: {
               ...publishCreativeDraft(state.creativeReview, "director", artifact.artifactId, artifact.output, directorReviewInputDigest(state)),
@@ -959,6 +1199,11 @@ function planningNodeActions(
         return planningRoleHaltUpdate(error, "director", state);
       }
     },
+    // 初稿审一次（S3）：停点前的独立审计节点。幂等：当前版本已有审计时直接放行；
+    // 审计腿失败不判稿失败，按 B08 分类落盘或在停点如实显示。
+    treatmentAudit: stageAuditNode("treatment", ports.treatment),
+    scriptAudit: stageAuditNode("script", ports.screenwriter),
+    directorAudit: stageAuditNode("director", ports.director),
     candidates: async (state: PlanningGraphState) => {
       if (!searchCandidates) {
         throw new Error("Creative planning candidates node requires the searchCandidates port.");
@@ -1326,6 +1571,13 @@ function publishDirectorMaterialDraft(
   };
 }
 
+function routeAfterDirectorAudit(state: PlanningGraphState): "halt" | "review" | "candidates" | "rank" | "evaluate" {
+  // 整合/人工复审产出的选材方案（material_plan）在本审计节点后直达导演确认关；
+  // 导演初稿（direction）沿用原路由（候选检索在确认之后才开始）。
+  if (state.creativeReview.directorReviewPurpose === "material_plan") return "review";
+  return routeAfterDirector(state);
+}
+
 function routeFromEvaluate(state: PlanningGraphState): "halt" | "compile" | "review" | "integrate" | "script" | "director" {
   if (state.halt) return "halt";
   if (state.manualDirectorReview) return "review";
@@ -1690,6 +1942,9 @@ function reviewGateNode(
 ) {
   return async (state: PlanningGraphState) => {
     if (state.base.creativeReview !== CREATIVE_REVIEW_FEATURE) return {};
+    // 幂等重入：确认后的图回放（如 evaluate→复审路由的再进入）直接放行给条件边继续路由，
+    // 不把「已确认/已回到产稿中」误当异常。
+    if (state.creativeReview.stages[stage].phase !== "waiting_user") return {};
     const gate = creativeReviewGate(state.creativeReview, stage);
     const resume = parseCreativeReviewResume(interrupt(gate));
     if (resume.action === "confirm") {
@@ -1708,19 +1963,17 @@ function reviewGateNode(
       }
       // 制作合同先独立校验；咨询服务失败的采用权不能豁免坏稿或越权改镜头。
       validateEditedDraft?.(stage, currentCreativeDocument(state, stage), state.scriptArtifact?.output ?? null);
-      // 人已经看过这一版字节的复核意见并明确承担：用他看过的那一条复核放行，不另跑一轮。
-      // 重跑会把"他承担的是哪条结论"换成一条新裁决，确认留痕就不再是当时那个决定；
-      // 而且裁决一旦再给 repair，人只能在同一条意见上无限重试，决策权又回到模型手里。
-      //
-      // 但"他看过的那一条"必须真的对得上：草稿、复核版本、复核编号三者都要吻合。
-      // 直接拿当前记录去覆盖 resume 里那三个期望值，等于把陈旧请求也重新绑到最新记录上，
-      // 人确认的就成了他从没见过的意见。
+      // 初稿审计已在稿件发布时完成（S3）：确认只用「用户看过的那一条」放行，不再临时补审。
+      // 人看过的那一条必须真的对得上：草稿、版本、复核编号三者吻合；对不上按陈旧确认拒绝。
       const recorded = state.creativeReview.stages[stage].checkResult;
+      const recordedForCurrentDraft = recorded && recorded.draftSha256 === gate.draft.sha256
+        && (recorded.versionId === undefined || recorded.versionId === gate.draft.versionId)
+        ? recorded
+        : null;
       if (resume.acknowledgeRepair === true || resume.acknowledgeIncomplete === true) {
-        if (!recorded
-          || recorded.draftSha256 !== gate.draft.sha256
+        if (!recordedForCurrentDraft
           || resume.expectedReviewRevision !== state.creativeReview.reviewRevision
-          || resume.checkIdentity !== recorded.checkIdentity) {
+          || resume.checkIdentity !== recordedForCurrentDraft.checkIdentity) {
           throw new Error("你确认的那一条独立复核意见已经不是当前这一条了，请重新查看当前的复核意见再确认。");
         }
         return {
@@ -1728,114 +1981,79 @@ function reviewGateNode(
           // 人已经就"自动循环停下"这件事做了决定，理由随之作废：再留着它，下一个正常的
           // 阶段停点会顶着上一次"自动检查已停止"的牌子出现，人以为又停了。
           planningStop: null,
+          scopeConflict: null,
         };
       }
-      let checked: PlanningArtifact<CreativeTreatment | ScriptDraft | VisualDirectorPlan>;
-      try {
-        checked = await rolePort(contextFor(state, { mode: "check", stage }));
-      } catch (error) {
-        // 复核腿没跑出结论时一律转可恢复停点：服务故障、输出超限、甚至候选本身过不了
-        // 合同校验（例如讨论改稿越权改动了不受影响的镜头）——进度都已落盘，run 不能因为
-        // 「给建议的这一腿」出问题而被判死（审计故障不能判作品失败）。停点原样重现，人可以
-        // 再点确认重试，也可以用讨论修改稿件后重试。
-        if (!(error instanceof RoleAgentLoopError)) {
-          // 非 RoleAgentLoopError 说明是校验/服务层的裸异常：同样按可恢复处理，但保留诊断
-          // 进日志供操作员定位。
-          console.error(`[creative-review] ${stage} check leg failed:`, error);
+      if (!recordedForCurrentDraft) {
+        // 本版没有审计（含修订后的新稿）：只能显式承担未审采用，不能默认放行（A04）。
+        if (resume.acknowledgeUnaudited !== true) {
+          throw new Error("本版还没有审计结论。请点「审计当前版本」取得意见，或显式选择「采用本版（未审计）」。");
         }
-        const settledCheckFailure = validateEditedDraft && error instanceof RoleAgentLoopError
-          && error.sourceError instanceof CodexBridgeError && error.sourceError.stage === "completed_failure";
-        if (settledCheckFailure) {
-          const summary = "独立复核服务已结束，但没有得到有效结论。方案通过制作合同校验；你可以接受未完成复核的风险采用本版，或重试复核。";
-          return {
-            creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
-              status: "incomplete", draftSha256: gate.draft.sha256,
-              checkIdentity: contentSha256({ stage, draft: gate.draft, failure: error.agentLoop.failure, commandId: resume.commandId }),
-              summary, issues: [],
-            }),
-            planningStop: null,
-          };
-        }
-        const audit = error instanceof RoleAgentLoopError && !error.agentLoop.failure
-          ? error.agentLoop.iterations.at(-1)?.audit
-          : undefined;
-        if (!audit) {
-          // 带上失败原因的中文首句（截掉「诊断：」机读段）：人重试前有权知道上次为什么没跑成。
-          const reasonLead = error instanceof Error
-            ? (error.message.split("\n诊断：")[0] ?? "").slice(0, 200)
-            : "未知错误";
-          return {
-            planningStop: {
-              reason: "needs_user",
-              issueIds: [],
-              detail: `独立复核这一轮没有完成（${reasonLead}），方案与进度都已保留。点「确认当前方案，继续」可再试一次；若反复出现，请用讨论修改这份稿件（或返回上游）后再试。`,
-            },
-          };
-        }
-        const checkIdentity = contentSha256({
-          stage,
-          draftSha256: gate.draft.sha256,
-          stageInputDigest: gate.draft.stageInputDigest,
-          audit,
-        });
         return {
-          creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
-            draftSha256: gate.draft.sha256,
-            checkIdentity,
-            verdict: "repair",
-            score: audit.score,
-            summary: audit.summary,
-            issues: structuredClone(audit.issues),
-          }),
-          // 上一轮若留下"复核没跑成"的提示，此刻已被带结论的复核替代，跟着清掉。
+          creativeReview: confirmPlanningDraft(state, state.creativeReview, resume),
           planningStop: null,
+          scopeConflict: null,
         };
       }
-      const audit = checked.reviewCheck?.audit;
-      const checkIdentity = checked.reviewCheck?.checkIdentity;
-      if (!audit || !checkIdentity) {
-        throw new Error(`Creative review '${stage}' confirmation did not produce an independent check.`);
+      if (recordedForCurrentDraft.status === "incomplete" && resume.acknowledgeIncomplete !== true) {
+        throw new Error("独立复核未取得结论；请显式承担未完成复核的风险，或先点「审计当前版本」。");
       }
-      // 独立复核是"提议"而非"否决"：裁决为 repair 时把意见记成 checkResult，停在用户面前
-      // 由他决定是否"看过意见，仍然确认"，而不是替他宣布这次确认失败。
-      if (audit.verdict !== "pass") {
-        return {
-          creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
-            draftSha256: gate.draft.sha256,
-            checkIdentity,
-            verdict: "repair",
-            score: audit.score,
-            summary: audit.summary,
-            issues: structuredClone(audit.issues),
-          }),
-          // 上一轮若留下"复核没跑成"的提示，此刻已被带结论的复核替代，跟着清掉。
-          planningStop: null,
-        };
+      if (recordedForCurrentDraft.status !== "incomplete" && recordedForCurrentDraft.verdict !== "pass" && resume.acknowledgeRepair !== true) {
+        throw new Error("独立复核对本版有意见；请先处理意见，或显式选择「看过意见，仍然确认」。");
       }
-      const reviewed = recordCreativeReviewCheck(state.creativeReview, stage, {
-        draftSha256: gate.draft.sha256,
-        checkIdentity,
-        verdict: "pass",
-        score: audit.score,
-        summary: audit.summary,
-        issues: structuredClone(audit.issues),
-      });
+      // OA-03：确认绑定的是「用户看到并提交的那一条」复核身份。图层不得用服务端当前值
+      // 覆盖用户提交的 checkIdentity——那会让错误/伪造身份在这一层被静默接受
+      // （confirmCreativeDraft 自身的身份比对才是防线，绕过它等于防线不存在）。
       return {
-        creativeReview: confirmPlanningDraft(state, reviewed, {
-          ...resume,
-          expectedReviewRevision: reviewed.reviewRevision,
-          checkIdentity,
-          confirmedAt: new Date().toISOString(),
-        }),
+        creativeReview: confirmPlanningDraft(state, state.creativeReview, resume),
         planningStop: null,
+        scopeConflict: null,
       };
     }
+    if (resume.action === "audit_current") {
+      // 主动审计当前版本（A05）：只审不改、不推进；新旧审计都留痕。
+      if (resume.stage !== stage || resume.baseDraftSha256 !== gate.draft.sha256
+        || resume.expectedReviewRevision !== gate.reviewRevision) {
+        throw new Error("审计请求已过期：当前版本或复核轮次已变化，请刷新后重试。");
+      }
+      // OA-01：手动审计是新的显式操作——身份由已持久化的 commandId 稳定派生。
+      // 同一 commandId 因刷新/重试/重启再进入时命中同一 checkpoint（恢复原请求，不重复扣费）；
+      // 新 commandId 审同一版本会得到新身份，真正重新执行审计（A05：同版可多次审计并留痕）。
+      const update = await auditPublishedStageDraft(state, stage, rolePort, {
+        source: "manual",
+        auditOperationId: contentSha256({
+          runId: state.runId,
+          stage,
+          versionId: gate.draft.versionId,
+          draftSha256: gate.draft.sha256,
+          commandId: resume.commandId,
+          source: "manual",
+        }),
+      });
+      // 来源不匹配的旧操作异常：不登记、保留原停点，并把拒绝原因带给创作者。
+      if (update.planningStop && !update.creativeReview) {
+        return { planningStop: update.planningStop };
+      }
+      if (!update.creativeReview) {
+        throw new Error("当前稿件尚未进入可审计状态，请刷新后重试。");
+      }
+      return { creativeReview: update.creativeReview, planningStop: null };
+    }
     if (resume.action === "adopt_proposal" || resume.action === "undo_draft") {
+      const stageState = state.creativeReview.stages[stage];
+      const nextDocument = resume.action === "adopt_proposal"
+        ? stageState.proposals.find((proposal) => proposal.proposalId === resume.proposalId)?.document
+        : stageState.previousDocument;
+      if (nextDocument !== undefined && nextDocument !== null) {
+        // 备选与恢复旧稿都要成为新版本；在覆盖有效稿前重验结构和已批准返工范围。
+        validateEditedDraft?.(stage, structuredClone(nextDocument), state.scriptArtifact?.output ?? null);
+      }
       const creativeReview = applyCreativeReviewDeterministicCommand(state.creativeReview, resume);
       return {
         creativeReview,
         // 草稿被换成了另一版，"自动循环为什么停下"说的已经不是当前这一版，跟着一起放掉。
         planningStop: null,
+        scopeConflict: null,
         ...creativeDocumentArtifactUpdate(state, stage, creativeReview),
       };
     }
@@ -1850,6 +2068,7 @@ function reviewGateNode(
       return {
         creativeReview,
         planningStop: null,
+        scopeConflict: null,
         issues: [],
         ...creativeDocumentArtifactUpdate(state, stage, creativeReview),
       };
@@ -1862,6 +2081,7 @@ function reviewGateNode(
         issues: [],
         halt: null,
         planningStop: null,
+        scopeConflict: null,
         ...invalidateAfterCreativeReturn(state, resume.targetStage),
       };
     }
@@ -1870,6 +2090,7 @@ function reviewGateNode(
       runId: state.runId,
       stage,
       commandId: resume.commandId,
+      requestMode: resume.action,
       currentDocument: currentCreativeDocument(state, stage),
       message: resume.message,
       ...(resume.selection ? { selection: resume.selection } : {}),
@@ -1893,6 +2114,7 @@ function reviewGateNode(
             issues: [],
             halt: null,
             planningStop: null,
+            scopeConflict: null,
             ...(stage === "director" ? { manualDirectorReview: false } : {}),
           }
         : {}),

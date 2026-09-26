@@ -8,7 +8,11 @@ import {
   CodexBridgeError,
   RoleAgentLoopError,
   ProductionPipeline,
+  contentSha256,
+  planningReviewCheckpointIdentity,
+  type CreativePlanningContext,
   sourceReviewIncompleteError,
+  withAuditOperationBinding,
   type CreativeTreatment,
   type CreativeTreatmentAgent,
   type CreativeTreatmentAgentInput,
@@ -99,6 +103,10 @@ interface ClosureSpies {
   treatmentCheckpointPresent: boolean[];
   treatmentInputs?: Array<{ visualIntent?: string; reworkInstruction?: string }>;
   treatmentAuditCalls?: number;
+  // R11-V01：替身入口记录每次 check 调用的操作身份与实际抛出的异常对象，
+  // 证明重放确实进入真实 helper/图层拒收链，而不是被前置错误替代。
+  treatmentCheckOperations?: string[];
+  treatmentRethrown?: unknown[];
   treatmentSources?: unknown[][];
   screenwriterCalls: string[];
   screenwriterSources?: unknown[][];
@@ -244,7 +252,7 @@ function legalTreatment(title: string): CreativeTreatment {
 // 两候选构思替身：记录每次调用实际使用的模型，可按候选制造 not_accepted 故障。
 function closureTreatmentAgents(
   spies: ClosureSpies,
-  options: { failFirstCandidate?: boolean; repairCheck?: boolean } = {},
+  options: { failFirstCandidate?: boolean; repairCheck?: boolean; rethrowException?: RoleAgentLoopError } = {},
 ): Array<{ providerId: string; agent: CreativeTreatmentAgent }> {
   const makeAgent = (modelId: string, providerLabel: string): { providerId: string; agent: CreativeTreatmentAgent } => ({
     providerId: providerLabel,
@@ -259,6 +267,15 @@ function closureTreatmentAgents(
       treatDetailed: async (input: CreativeTreatmentAgentInput) => {
         if (input.creativeReviewExecution?.mode === "check") {
           spies.treatmentAuditCalls = (spies.treatmentAuditCalls ?? 0) + 1;
+          spies.treatmentCheckOperations = [...(spies.treatmentCheckOperations ?? []),
+            input.creativeReviewExecution.auditOperationId ?? "(initial)"];
+          // R9-01：按需重抛异常对象（O1 时未绑定、O3 时已绑定 O1）——真实 helper 的
+          // 首绑/不覆盖 guard 与图层归属核验按绑定状态分别走登记与拒收。非 Provider
+          // 故障按既有合同不做候选切换，每次操作恰好一次角色调用。
+          if (options.rethrowException) {
+            spies.treatmentRethrown = [...(spies.treatmentRethrown ?? []), options.rethrowException];
+            throw options.rethrowException;
+          }
           return (options.repairCheck ? repairingCreativeReviewExecution : passingCreativeReviewExecution)(
             input.creativeReviewExecution.candidate,
             "导演前期构思",
@@ -296,6 +313,9 @@ function closureTreatmentAgents(
       },
     },
   });
+  // 两个候选保持默认注册：重抛异常不是 Provider 故障，runCandidates 按既有合同原样
+  // 上抛、不切换候选，因此每次 check 操作仍只有一次角色调用（由测试的调用计数断言钉住，
+  // 不依赖构造期的候选数量判断——rethrowException 允许在 pipeline 启动后按需置位）。
   return [makeAgent("treatment-model-a", "openai"), makeAgent("treatment-model-b", "deepseek")];
 }
 
@@ -496,7 +516,7 @@ function scriptStageTemplateSnapshot() {
 function newClosurePipeline(
   workspaceRoot: string,
   spies: ClosureSpies,
-  treatmentOptions: { failFirstCandidate?: boolean; repairCheck?: boolean } = {},
+  treatmentOptions: { failFirstCandidate?: boolean; repairCheck?: boolean; rethrowException?: RoleAgentLoopError } = {},
 ): ProductionPipeline {
   return new ProductionPipeline({
     workspaceRoot,
@@ -591,12 +611,17 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
     const run = await pipeline.start(closureBrief({ creativeReview: true }));
     const gate = run.nodeRuns.find((node) => node.nodeId === "creative-planning")?.intervention?.continuation;
     assert.ok(gate);
+    // OA-03：pass/repair 确认都必须提交停点展示的那一条复核身份。
+    const gateNode = run.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    const shown = (gateNode.output as { creativeReview?: { stages?: Record<string, { checkResult?: { verdict?: string; checkIdentity?: string } }> } })?.creativeReview?.stages?.[gate.stage]?.checkResult;
     const common = {
       actor: "creator",
       expectedRunRevision: run.revision,
       expectedReviewRevision: gate.reviewRevision,
       stage: gate.stage,
       baseDraftSha256: gate.draftSha256,
+      ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
+      ...(shown?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}),
     };
     const outcomes = await Promise.allSettled([
       pipeline.confirmCreativeReview(run.id, { ...common, commandId: "confirm-race-a" }),
@@ -635,33 +660,37 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
 
     const opener = gateOf(started).continuation;
     assert.equal(opener.stage, "treatment");
-    // 旧页面上看到的那一版：草稿 H、复核版本 R。
+    // 初稿到达人时已经独立审计；旧页面看到的是草稿 H、复核版本 R。
     const stalePage = { expectedReviewRevision: opener.reviewRevision, baseDraftSha256: opener.draftSha256 };
+    assert.equal(spies.treatmentAuditCalls, 1);
+    assert.equal(checkIdentityOf(started).verdict, "repair");
 
-    // 用户点“确认” → 系统只跑这一轮独立复核 → 裁决是 repair → 记成建议停在他面前。
-    const checked = await pipeline.confirmCreativeReview(started.id, {
-      commandId: "confirm-opener",
+    // 用户主动再审当前稿；只审不改、不推进，新意见成为当前页面看到的一条。
+    const checked = (await pipeline.dispatchCreativeReviewCommand(started.id, {
+      action: "audit_current",
+      commandId: "audit-current",
       actor: "creator",
       stage: "treatment",
       expectedRunRevision: started.revision,
       ...stalePage,
-    });
-    assert.equal(spies.treatmentAuditCalls, 1);
-    assert.equal(checked.status, "needs_human");
-    const afterCheck = gateOf(checked).continuation;
+    })).completion;
+    const checkedRun = await checked;
+    assert.equal(spies.treatmentAuditCalls, 2);
+    assert.equal(checkedRun.status, "needs_human");
+    const afterCheck = gateOf(checkedRun).continuation;
     assert.equal(afterCheck.stage, "treatment");
     assert.equal(afterCheck.draftSha256, stalePage.baseDraftSha256, "裁决只给建议，不改草稿");
     assert.notEqual(afterCheck.reviewRevision, stalePage.expectedReviewRevision);
-    const shown = checkIdentityOf(checked);
+    const shown = checkIdentityOf(checkedRun);
     assert.equal(shown.verdict, "repair");
 
     // 旧页面提交：复核版本还停在 R，而记录已经前进。这份确认只能被拒。
     await assert.rejects(
-      () => pipeline.confirmCreativeReview(checked.id, {
+      () => pipeline.confirmCreativeReview(checkedRun.id, {
         commandId: "confirm-from-stale-page",
         actor: "creator",
         stage: "treatment",
-        expectedRunRevision: checked.revision,
+        expectedRunRevision: checkedRun.revision,
         ...stalePage,
         acknowledgeRepair: true,
         expectedCheckIdentity: shown.checkIdentity,
@@ -671,11 +700,11 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
 
     // 版本对上了、但编号指向另一条复核：同样不放行——人确认的必须是他看见的那一份。
     await assert.rejects(
-      () => pipeline.confirmCreativeReview(checked.id, {
+      () => pipeline.confirmCreativeReview(checkedRun.id, {
         commandId: "confirm-with-wrong-check",
         actor: "creator",
         stage: "treatment",
-        expectedRunRevision: checked.revision,
+        expectedRunRevision: checkedRun.revision,
         expectedReviewRevision: afterCheck.reviewRevision,
         baseDraftSha256: afterCheck.draftSha256,
         acknowledgeRepair: true,
@@ -685,13 +714,13 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
     );
 
     // 两次被拒都没有推走流程：仍停在同一个阶段，也没有偷偷多跑一轮审计。
-    const stillWaiting = await pipeline.show(checked.id);
+    const stillWaiting = await pipeline.show(checkedRun.id);
     assert.equal(stillWaiting.status, "needs_human");
     assert.equal(gateOf(stillWaiting).continuation.stage, "treatment");
-    assert.equal(spies.treatmentAuditCalls, 1);
+    assert.equal(spies.treatmentAuditCalls, 2);
 
     // 当前页面按他真正看到的那一条确认：复用，不新增审计。
-    const confirmed = await pipeline.confirmCreativeReview(checked.id, {
+    const confirmed = await pipeline.confirmCreativeReview(checkedRun.id, {
       commandId: "confirm-current-check",
       actor: "creator",
       stage: "treatment",
@@ -701,7 +730,7 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
       acknowledgeRepair: true,
       expectedCheckIdentity: shown.checkIdentity,
     });
-    assert.equal(spies.treatmentAuditCalls, 1, "“仍然确认”复用已展示的复核，不能悄悄再跑一轮");
+    assert.equal(spies.treatmentAuditCalls, 2, "确认复用已展示的复核，不能悄悄再跑一轮");
     assert.equal(gateOf(confirmed).continuation.stage, "script");
     assert.deepEqual(spies.screenwriterCalls, ["joint-v1 规划编辑闭环"]);
   });
@@ -741,6 +770,10 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
 
     const confirm = async (commandId: string) => {
       const gate = waiting();
+      // pass 确认提交的就是停点展示给用户的那一条复核身份（OA-03：图层不再代填）。
+      const gateNode = run.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+      const review = (gateNode.output as { creativeReview?: { stages?: Record<string, { checkResult?: { checkIdentity?: string } }> } })?.creativeReview;
+      const identity = review?.stages?.[gate.stage]?.checkResult?.checkIdentity;
       const command = {
         commandId,
         actor: "creator",
@@ -748,6 +781,7 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
         expectedReviewRevision: gate.reviewRevision,
         stage: gate.stage,
         baseDraftSha256: gate.draftSha256,
+        ...(identity ? { expectedCheckIdentity: identity } : {}),
       };
       run = await pipeline.confirmCreativeReview(run.id, command);
       return command;
@@ -826,6 +860,9 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
         return node.intervention!.continuation!;
       };
       const continuation = gate();
+      // 每个阶段的停点都会展示本版首审意见；确认提交用户看到的那一条身份（OA-03）。
+      const gateNode = run.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+      const shown = (gateNode.output as { creativeReview?: { stages?: Record<string, { checkResult?: { verdict?: string; checkIdentity?: string } }> } })?.creativeReview?.stages?.[continuation.stage]?.checkResult;
       run = await pipeline.confirmCreativeReview(run.id, {
         commandId: `confirm-${stage}`,
         actor: "creator",
@@ -833,6 +870,8 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
         expectedRunRevision: run.revision,
         expectedReviewRevision: continuation.reviewRevision,
         baseDraftSha256: continuation.draftSha256,
+        ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
+        ...(shown?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}),
       });
     }
     // 三个阶段确认完成后等待规划编译收尾并自动进入 assets（审查未完成处暂停）。
@@ -1385,8 +1424,12 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
       if (stage === "director" && purpose === "direction") {
         assert.equal(spies.searchCalls, 0, "the initial director gate must precede candidate search");
       }
+      const gateNode = run.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+      const shown = (gateNode.output as { creativeReview?: { stages?: Record<string, { checkResult?: { verdict?: string; checkIdentity?: string } }> } })?.creativeReview?.stages?.[stage]?.checkResult;
       run = await pipeline.confirmCreativeReview(run.id, { commandId: `accept-${stage}-${purpose ?? "draft"}`, actor: "creator", stage,
         expectedRunRevision: run.revision, expectedReviewRevision: gate!.reviewRevision, baseDraftSha256: gate!.draftSha256,
+        ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
+        ...(shown?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}),
         ...(purpose === "material_plan" ? { acceptQualityFallback: true } : {}),
       });
     }
@@ -1748,9 +1791,13 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
     for (let i = 0; i < 6 && first.status === "needs_human"; i++) {
       const gate = first.nodeRuns.find(node => node.nodeId === "creative-planning")?.intervention?.continuation;
       assert.ok(gate);
+      const stageNode = first.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+      const shown = (stageNode.output as { creativeReview?: { stages?: Record<string, { checkResult?: { verdict?: string; checkIdentity?: string } }> } })?.creativeReview?.stages?.[gate.stage]?.checkResult;
       first = await pipeline.confirmCreativeReview(first.id, { commandId: `confirm-${i}`, actor: "creator",
         expectedRunRevision: first.revision, expectedReviewRevision: gate.reviewRevision,
-        stage: gate.stage, baseDraftSha256: gate.draftSha256 });
+        stage: gate.stage, baseDraftSha256: gate.draftSha256,
+        ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
+        ...(shown?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}) });
     }
     assert.equal(first.status, "failed");
     t.mock.timers.tick(600_001);
@@ -1783,7 +1830,8 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
     assert.equal(editedGate.stage, "director");
     assert.notEqual(editedGate.draftSha256, gate.draftSha256);
     const confirmed = await pipeline.confirmCreativeReview(first.id, { commandId: "confirm-after-deadline", actor: "creator", stage: "director",
-      expectedRunRevision: edited.revision, expectedReviewRevision: editedGate.reviewRevision, baseDraftSha256: editedGate.draftSha256 });
+      expectedRunRevision: edited.revision, expectedReviewRevision: editedGate.reviewRevision, baseDraftSha256: editedGate.draftSha256,
+      acknowledgeUnaudited: true });
     assert.equal(confirmed.status, "needs_human", "changing rationale must not bypass missing visual evidence");
     assert.equal(modelCalls, boundary === "audit" ? 2 : 3, "a rationale-only save must not reset the ranking budget");
     assert.equal(spies.treatmentTitles.length, 1);
@@ -2573,4 +2621,245 @@ describe("joint planning physical execution summary (Revision 9)", () => {
     assert.equal(mixed?.producerMs, 15_000, "mixed-owner checkpoint duration must not be claimed by the current operation");
     assert.equal(mixed?.previousProducerMs, 2_000, "mixed-owner checkpoint duration must not be claimed by history either");
   });
+});
+
+// OA-01/E2E-AUDIT-01：审计操作身份必须进入装配层 checkpoint key——
+// 同一 commandId 恢复命中同一请求（B06，不重复扣费）；新 commandId 审同一版本
+// 拿到新请求（A05：同版可多次审计并留痕）；A→B→A 的版本轮回不得复用旧审计。
+describe("planningReviewCheckpointIdentity (OA-01)", () => {
+  const baseContext = {
+    runId: "run-oa01",
+    inputDigest: "digest",
+    base: { creativeReview: "user-confirmed-v1" },
+    stage: "treatment",
+    issues: [],
+  } as never as CreativePlanningContext;
+
+  function checkContext(auditOperationId: string, candidateOutput: unknown): CreativePlanningContext {
+    return {
+      ...baseContext,
+      treatment: { artifactId: "t", output: candidateOutput, schemaVersion: "1" } as never,
+      creativeReviewExecution: { mode: "check", stage: "treatment", auditOperationId },
+    };
+  }
+
+  it("separates two new audit_current operations on the same draft", () => {
+    const draft = { version: "v" };
+    const first = planningReviewCheckpointIdentity(checkContext("cmd-1", draft));
+    const second = planningReviewCheckpointIdentity(checkContext("cmd-2", draft));
+    assert.notDeepEqual(first, second, "two new operations must not share one checkpoint identity");
+  });
+
+  it("keeps one operation stable across recovery replays", () => {
+    const draft = { version: "v" };
+    const first = planningReviewCheckpointIdentity(checkContext("cmd-1", draft));
+    const replay = planningReviewCheckpointIdentity(checkContext("cmd-1", draft));
+    assert.deepEqual(first, replay, "the same persisted operation must keep its request identity");
+  });
+
+  it("does not reuse the initial-draft audit for a re-created identical version (A→B→A)", () => {
+    const initial = planningReviewCheckpointIdentity(checkContext(
+      contentSha256({ source: "initial", version: "A" }), { text: "A" },
+    ));
+    const recreated = planningReviewCheckpointIdentity(checkContext(
+      contentSha256({ source: "initial", version: "A2" }), { text: "A" },
+    ));
+    assert.notDeepEqual(initial, recreated, "identical bytes of a new version need a fresh audit request");
+  });
+
+  it("keeps the legacy derivation when no operation id is present", () => {
+    const legacy = planningReviewCheckpointIdentity({
+      ...baseContext,
+      treatment: { artifactId: "t", output: { version: "v" }, schemaVersion: "1" } as never,
+      creativeReviewExecution: { mode: "check", stage: "treatment" },
+    } as never);
+    assert.deepEqual(Object.keys(legacy).sort(), ["candidateSha256", "mode", "stage"],
+      "in-flight checkpoints from before OA-01 must keep their key shape");
+  });
+});
+
+// R9-01 联动回归：O1 主动审计经真实 ProductionPipeline 首绑并登记一次；O3 重放同一异常
+// 对象——生产 helper 不改签其 O1 绑定（R8-01 guard）、图层归属核验拒绝零登记、
+// 停点保持 needs_human 而非节点 failed。
+it("旧操作的异常经新操作重抛：helper 不改签、图层零登记、停点保留（R9-01）", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-r901-replay-"));
+  const spies: ClosureSpies = {
+    treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+    screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+  };
+  const rethrowBox: { value?: RoleAgentLoopError } = {};
+  const pipeline = newClosurePipeline(workspaceRoot, spies, {
+    get rethrowException() { return rethrowBox.value; },
+  } as never);
+  const started = await pipeline.start(closureBrief({ creativeReview: true }));
+  const gateOf = (r: any) => {
+    const node = r.nodeRuns.find((candidate: any) => candidate.nodeId === "creative-planning");
+    assert.ok(node?.intervention?.continuation, "创作规划必须停在复核停点上");
+    return node!.intervention!.continuation!;
+  };
+  const stateOf = (r: any) => {
+    const node = r.nodeRuns.find((candidate: any) => candidate.nodeId === "creative-planning");
+    const treatment = node?.output?.creativeReview?.stages?.treatment;
+    return {
+      history: treatment?.auditHistory?.length ?? 0,
+      checkResult: treatment?.checkResult ?? null,
+      operationStatuses: (r.creativeReviewOperations ?? []).map(
+        (operation: { commandId: string; status: string }) => `${operation.commandId}:${operation.status}`,
+      ),
+    };
+  };
+  const gate1 = gateOf(started);
+  assert.equal(spies.treatmentAuditCalls, 1, "initial draft audit ran once");
+  const initial = stateOf(started);
+  assert.equal(initial.history, 1, "初稿审计恰好登记一次");
+
+  // 旧操作异常：源错误不是 Provider 故障（runCandidates 按既有合同原样上抛，不做候选
+  // 切换包装），异常本身携带一份归属与字节核验都可通过的审计意见。
+  const staleException = new RoleAgentLoopError("携带旧操作意见的异常", {
+    version: "video-factory/agent-loop-v1", role: "构思", contractVersion: "fixture-v1",
+    criteria: [], status: "failed", maxIterations: 1,
+    iterations: [{
+      iteration: 1, candidate: { payoff: "旧操作审过的稿" }, candidateHash: gate1.draftSha256,
+      audit: {
+        version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+        verdict: "pass", score: 95, summary: "旧操作的 pass 意见", issues: [], repairInstructions: [],
+        assessments: [{ targetPath: "", dimensions: [
+          { dimension: "attention", score: 95, evidence: "旧操作证据" },
+          { dimension: "progression", score: 95, evidence: "旧操作证据" },
+          { dimension: "payoff", score: 95, evidence: "旧操作证据" },
+          { dimension: "expression", score: 95, evidence: "旧操作证据" },
+        ] }],
+      },
+    }],
+  }, undefined, new Error("settled non-provider failure"));
+  rethrowBox.value = staleException;
+
+  // O1：主动审计——异常在本次调用边界首绑 O1，图层归属/字节核验通过后登记该意见。
+  const o1 = await pipeline.dispatchCreativeReviewCommand(started.id, {
+    action: "audit_current", commandId: "audit-o1", actor: "creator", stage: gate1.stage,
+    expectedRunRevision: started.revision,
+    expectedReviewRevision: gate1.reviewRevision, baseDraftSha256: gate1.draftSha256,
+  });
+  const o1Run: any = await o1.completion;
+  assert.equal(spies.treatmentAuditCalls, 2, "O1 恰好发起一次新的审计调用");
+  assert.equal(o1Run.status, "needs_human", "O1 登记后停点保留");
+  const afterO1 = stateOf(o1Run);
+  assert.equal(afterO1.history, initial.history + 1, "O1 登记恰好一次");
+  assert.equal(afterO1.checkResult?.summary, "旧操作的 pass 意见");
+  assert.equal(afterO1.checkResult?.score, 95);
+  assert.deepEqual(afterO1.operationStatuses, ["audit-o1:completed"]);
+  // R11-V01 完整状态快照：O1 后深拷贝整个 creativeReview，O3 拒收后逐字段深比较——
+  // 条数/摘要/稿件 SHA 之外的审计历史改写、结论字段替换、版本或轮次推进都会被抓住。
+  const reviewAfterO1 = structuredClone(
+    o1Run.nodeRuns.find((candidate: any) => candidate.nodeId === "creative-planning")?.output?.creativeReview,
+  );
+
+  // O3：重放同一异常对象（已绑定 O1）。helper 原样上抛（不改签 R8-01 guard），
+  // 图层归属核验拒收为零登记，拒绝原因到达停点——原稿与 O1 登记保留。
+  const gate2 = gateOf(o1Run);
+  const o3 = await pipeline.dispatchCreativeReviewCommand(o1Run.id, {
+    action: "audit_current", commandId: "audit-o3", actor: "creator", stage: gate2.stage,
+    expectedRunRevision: o1Run.revision,
+    expectedReviewRevision: gate2.reviewRevision, baseDraftSha256: gate2.draftSha256,
+  });
+  const o3Run: any = await o3.completion;
+  assert.equal(spies.treatmentAuditCalls, 3, "O3 只发起一次审计调用");
+  assert.equal(o3Run.status, "needs_human", "旧操作异常不得把停点打成 failed");
+
+  const after = await pipeline.show(o3Run.id);
+  assert.equal(after.status, "needs_human");
+  assert.equal(gateOf(after).draftSha256, gate1.draftSha256, "旧意见不得改变稿件");
+  const afterO3 = stateOf(after);
+  assert.equal(afterO3.history, afterO1.history, "O3 零登记");
+  assert.equal(afterO3.checkResult?.summary, "旧操作的 pass 意见", "O1 的登记保持");
+  assert.deepEqual(afterO3.operationStatuses, ["audit-o1:completed", "audit-o3:completed"]);
+  const reviewAfterO3 = (after.nodeRuns.find((candidate: any) => candidate.nodeId === "creative-planning")?.output as any)
+    ?.creativeReview;
+  assert.deepEqual(reviewAfterO3, reviewAfterO1, "拒收后完整 creativeReview 逐字段不变（含历史/结论/版本/轮次）");
+  const stopDetail = (after.nodeRuns.find((candidate: any) => candidate.nodeId === "creative-planning")?.output as any)
+    ?.planningStop;
+  assert.ok(stopDetail?.detail?.includes("另一次已过期的操作"), "拒绝原因对创作者可见");
+
+  // R11-V01 仪器化证据：异常对象确实两次进入真实角色调用链（O1 首绑、O3 重放），
+  // 三次 check 调用对应三个互不相同的持久化操作身份，且 O3 后绑定仍属 O1（未改签）。
+  const checkOps = spies.treatmentCheckOperations ?? [];
+  assert.equal(checkOps.length, 3, "初稿、O1、O3 各恰好一次 check 调用");
+  assert.ok(new Set(checkOps).size === 3, "三次调用必须是三个不同的审计操作身份");
+  assert.ok(checkOps.every(op => op && op !== "(initial)"), "三次调用都必须携带有效操作身份");
+  const rethrown = spies.treatmentRethrown ?? [];
+  assert.equal(rethrown.length, 2, "异常只在 O1 与 O3 抛出");
+  assert.equal(rethrown[0], staleException, "O1 抛出的就是该异常对象本体");
+  assert.equal(rethrown[1], staleException, "O3 重放的是同一异常对象本体");
+  assert.equal((staleException as unknown as { auditOperationId?: string }).auditOperationId,
+    checkOps[1], "异常绑定保持 O1 的操作身份，未被 O3 改签");
+});
+
+// R11-V02（r11b 阻断项）：旧操作绑定的 uncertain 异常经新操作重放时，图层按 R11-01
+// 的优先顺序先传播原异常（uncertain 优先于异操作拒收），不把它转换成异操作的
+// needs_human 停点，零登记，原异常对象与旧绑定保持——真实 ProductionPipeline 全链。
+it("旧操作绑定的 uncertain 异常经新操作重抛：原异常传播、零登记、不转停点（R11-V02）", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-r1102-uncertain-"));
+  const spies: ClosureSpies = {
+    treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+    screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+  };
+  const rethrowBox: { value?: RoleAgentLoopError } = {};
+  const pipeline = newClosurePipeline(workspaceRoot, spies, {
+    get rethrowException() { return rethrowBox.value; },
+  } as never);
+  const started = await pipeline.start(closureBrief({ creativeReview: true }));
+  const nodeOf = (r: any) => r.nodeRuns.find((candidate: any) => candidate.nodeId === "creative-planning");
+  const gateOf = (r: any) => {
+    const node = nodeOf(r);
+    assert.ok(node?.intervention?.continuation, "创作规划必须停在复核停点上");
+    return node!.intervention!.continuation!;
+  };
+  const treatmentOf = (r: any) => nodeOf(r)?.output?.creativeReview?.stages?.treatment;
+  const gate = gateOf(started);
+  const historyAfterInitial = treatmentOf(started)?.auditHistory?.length ?? 0;
+  const checkResultAfterInitial = treatmentOf(started)?.checkResult ?? null;
+  assert.equal(historyAfterInitial, 1, "初稿审计恰好登记一次");
+
+  // 旧操作的 uncertain 异常：先经生产 helper 在旧操作边界建立绑定（与 guard 测试同一入口），
+  // 再经新操作 audit-o3 在真实 pipeline 中重放。
+  const staleUncertain = new RoleAgentLoopError("旧操作未决异常", {
+    version: "video-factory/agent-loop-v1", role: "构思", contractVersion: "fixture-v1",
+    criteria: [], status: "failed", maxIterations: 1, iterations: [],
+    failure: { stage: "uncertain" },
+  }, undefined, new CodexBridgeError("旧操作仍在观察原请求", false, "uncertain"));
+  const oldOperationId = "old-uncertain-operation-v1";
+  await assert.rejects(
+    withAuditOperationBinding(oldOperationId, async () => { throw staleUncertain; }),
+    (error: unknown) => error === staleUncertain,
+  );
+  assert.equal((staleUncertain as unknown as { auditOperationId?: string }).auditOperationId, oldOperationId);
+  rethrowBox.value = staleUncertain;
+
+  const o3 = await pipeline.dispatchCreativeReviewCommand(started.id, {
+    action: "audit_current", commandId: "audit-o3", actor: "creator", stage: gate.stage,
+    expectedRunRevision: started.revision,
+    expectedReviewRevision: gate.reviewRevision, baseDraftSha256: gate.draftSha256,
+  });
+  const o3Run: any = await o3.completion;
+  // uncertain 原异常传播：节点 failed 且错误正文就是原异常消息——不是异操作拒收的
+  // needs_human 停点（优先顺序回退后这里会变成 needs_human，用例随之失败）。
+  assert.equal(o3Run.status, "failed", "uncertain 必须原样传播，不得转成异操作停点");
+  const failedNode = nodeOf(o3Run);
+  assert.equal(failedNode?.status, "failed");
+  assert.equal(failedNode?.error, "旧操作未决异常", "节点错误就是原异常本体传播的结果");
+  assert.equal((failedNode?.output as any)?.planningStop, undefined, "不得留下异操作拒收停点");
+
+  const after = await pipeline.show(o3Run.id);
+  const treatment = treatmentOf(after);
+  assert.equal(treatment?.auditHistory?.length, historyAfterInitial, "O3 零登记");
+  assert.deepEqual(treatment?.checkResult ?? null, checkResultAfterInitial, "初稿审计结论保持不变");
+
+  // 异常对象与绑定保持：仍是同一对象，绑定仍属旧操作，sourceError 仍为 uncertain。
+  const rethrown = spies.treatmentRethrown ?? [];
+  assert.equal(rethrown.length, 1, "O3 恰好重放一次");
+  assert.equal(rethrown[0], staleUncertain);
+  assert.equal((staleUncertain as unknown as { auditOperationId?: string }).auditOperationId,
+    oldOperationId, "旧绑定未被新操作改签");
+  assert.ok(staleUncertain.sourceError instanceof CodexBridgeError
+    && staleUncertain.sourceError.stage === "uncertain", "sourceError.stage 仍为 uncertain");
 });

@@ -48,6 +48,7 @@ export function TodayPage() {
   const [opportunityDialogOpen, setOpportunityDialogOpen] = useState(false);
   const [opportunityDialogMode, setOpportunityDialogMode] = useState<"manual" | "json">("manual");
   const [seriesDialogOpen, setSeriesDialogOpen] = useState(false);
+  const [generatingSeriesId, setGeneratingSeriesId] = useState<string>();
   const [productionDialogOpen, setProductionDialogOpen] = useState(false);
   const [opportunitiesLoading, setOpportunitiesLoading] = useState(true);
   const [providersLoading, setProvidersLoading] = useState(true);
@@ -379,6 +380,7 @@ export function TodayPage() {
     try {
       const adopted = await studioApi.adoptCandidate(candidate.id, {
         origin: candidate.origin,
+        ...(candidate.generationId ? { expectedGenerationId: candidate.generationId } : {}),
         ...(verificationConfirmed ? { verificationConfirmed: true } : {}),
       });
       setOpportunities((current) => [adopted, ...current.filter((item) => item.id !== adopted.id)]);
@@ -398,6 +400,7 @@ export function TodayPage() {
       if (candidate.origin === "series") await loadSeriesWorkspace();
     } catch (caught) {
       setCandidateActionError(`采用候选失败：${errorMessage(caught)}`);
+      if (candidate.origin === "series") await loadSeriesWorkspace();
     } finally {
       setAdoptingCandidateId(undefined);
     }
@@ -416,7 +419,26 @@ export function TodayPage() {
     const created = await studioApi.createSeries(input);
     setSeries((current) => [created, ...current]);
     setSeriesDialogOpen(false);
+    setActiveSeriesId(created.id);
     await loadSeriesCandidates();
+    await generateSeriesRoadmap(created.id);
+  }
+
+  async function generateSeriesRoadmap(seriesId: string) {
+    setGeneratingSeriesId(seriesId);
+    setCandidateActionError(undefined);
+    try {
+      const generated = await studioApi.generateSeriesRoadmap(seriesId);
+      setSeries((current) => current.map((item) => item.id === generated.id ? generated : item));
+      await loadSeriesCandidates();
+      announceNotice(generated.episodes.some((episode) => episode.planning.source === "agent")
+        ? "系列路线图初稿和内容建议已生成。请逐集查看，决定是否采用。"
+        : "系列已保存为可编辑的规则路线图；模型初稿暂不可用，你仍可继续编辑和采用。");
+    } catch (caught) {
+      setCandidateActionError(`系列已保存，但模型路线图未完成：${errorMessage(caught)}。可稍后重试；现有规则路线图仍可编辑。`);
+    } finally {
+      setGeneratingSeriesId(undefined);
+    }
   }
 
   async function updateSeriesEpisode(seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput) {
@@ -428,6 +450,34 @@ export function TodayPage() {
       announceNotice(`第 ${episodeNumber} 集路线图已保存为人工版本，后续角色会基于这个版本重新审计。`);
     } catch (caught) {
       const message = `路线图保存失败：${errorMessage(caught)}`;
+      setCandidateActionError(message);
+      throw new Error(message);
+    }
+  }
+
+  async function auditSeriesEpisodeCurrent(seriesId: string, episodeNumber: number, expectedRevision: number) {
+    setCandidateActionError(undefined);
+    try {
+      const updated = await studioApi.auditSeriesEpisodeCurrent(seriesId, episodeNumber, expectedRevision);
+      setSeries((current) => current.map((item) => item.id === updated.id ? updated : item));
+      await loadSeriesCandidates();
+      announceNotice(`第 ${episodeNumber} 集当前版本已重新审计；路线图没有自动改稿或采用。`);
+    } catch (caught) {
+      const message = `审计当前版本失败：${errorMessage(caught)}`;
+      setCandidateActionError(message);
+      throw new Error(message);
+    }
+  }
+
+  async function reviseSeriesEpisodeCurrent(seriesId: string, episodeNumber: number, expectedRevision: number, instruction: string) {
+    setCandidateActionError(undefined);
+    try {
+      const updated = await studioApi.reviseSeriesEpisodeCurrent(seriesId, episodeNumber, expectedRevision, instruction);
+      setSeries((current) => current.map((item) => item.id === updated.id ? updated : item));
+      await loadSeriesCandidates();
+      announceNotice(`第 ${episodeNumber} 集已生成未审新稿。你可以直接采用，也可以主动审计。`);
+    } catch (caught) {
+      const message = `修订单集失败：${errorMessage(caught)}`;
       setCandidateActionError(message);
       throw new Error(message);
     }
@@ -521,7 +571,13 @@ export function TodayPage() {
           <button className="button button-secondary" type="button" onClick={() => void retrySettings()}><RefreshCw aria-hidden="true" size={16} />重新读取</button>
         </div>
       ) : null}
-      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} trendRefreshPending={trendRefreshPending} trendRefreshing={trendRefreshing} sourceBlockedOpportunities={sourceBlockedOpportunities} onFocusSourceBlocked={focusSourceBlockedOpportunity} {...(seriesAuditReady === undefined ? {} : { seriesAuditReady })} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onSupplementSources={(candidate) => setSourceSupplementTarget({ kind: "candidate", candidate })} onCreateSeries={() => setSeriesDialogOpen(true)} onSelectSeries={setActiveSeriesId} onUpdateSeriesEpisode={updateSeriesEpisode} onLinkLegacyRun={linkLegacySeriesRun} onRescanSeries={loadSeriesWorkspace} onViewProductionRecords={() => navigate("/projects")} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
+      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} trendRefreshPending={trendRefreshPending} trendRefreshing={trendRefreshing} sourceBlockedOpportunities={sourceBlockedOpportunities} onFocusSourceBlocked={focusSourceBlockedOpportunity} {...(seriesAuditReady === undefined ? {} : { seriesAuditReady })} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} {...(generatingSeriesId ? { generatingSeriesId } : {})} onGenerateSeriesRoadmap={generateSeriesRoadmap} onAuditSeriesEpisode={auditSeriesEpisodeCurrent} onReviseSeriesEpisode={reviseSeriesEpisodeCurrent} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onSupplementSources={(candidate) => setSourceSupplementTarget({ kind: "candidate", candidate })} onReviseTrendCandidate={async (candidate, instruction) => {
+              if (!candidate.generationId) {
+                throw new Error("这条候选缺少可核对的版本身份，请刷新候选列表后重试。");
+              }
+              await studioApi.reviseTrendCandidate(candidate.id, candidate.generationId, instruction);
+              await loadTrendInbox();
+            }} onCreateSeries={() => setSeriesDialogOpen(true)} onSelectSeries={setActiveSeriesId} onUpdateSeriesEpisode={updateSeriesEpisode} onLinkLegacyRun={linkLegacySeriesRun} onRescanSeries={loadSeriesWorkspace} onViewProductionRecords={() => navigate("/projects")} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
       {candidateActionError ? <div className="inline-error topic-action-error" role="alert"><AlertCircle aria-hidden="true" size={18} />{candidateActionError}</div> : null}
       {nextStepNotice ? <div className="next-step-notice" role="status"><CheckCircle2 aria-hidden="true" size={18} /><strong>{nextStepNotice}</strong>{nextStepNoticeAction ? <Link className="button button-secondary" to={nextStepNoticeAction.to}>{nextStepNoticeAction.label}</Link> : null}<button type="button" onClick={() => { setNextStepNotice(undefined); setNextStepNoticeAction(undefined); }} aria-label="关闭下一步提示">知道了</button></div> : null}
 
@@ -551,6 +607,13 @@ export function TodayPage() {
             onAdopt={adoptDirection}
             onSupplementSources={(candidate) => setSourceSupplementTarget({ kind: "candidate", candidate })}
             onRetry={() => void loadTrendInbox(true)}
+            onReviseCandidate={async (candidate, instruction) => {
+              if (!candidate.generationId) {
+                throw new Error("这条候选缺少可核对的版本身份，请刷新候选列表后重试。");
+              }
+              await studioApi.reviseTrendCandidate(candidate.id, candidate.generationId, instruction);
+              await loadTrendInbox();
+            }}
           />
         ) : null}
         {opportunitiesLoading ? <div className="today-loading"><RadioTower aria-hidden="true" size={22} />正在读取制作机会...</div> : opportunitiesError ? (

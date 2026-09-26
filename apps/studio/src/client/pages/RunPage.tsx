@@ -1,13 +1,14 @@
 import { AlertCircle, ArrowLeft, LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import type { StudioCostRunDetail, StudioCreativeReviewCommandInput, StudioCreativeReviewSnapshot, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProductionInput, StudioProvider, StudioReworkDraft, StudioRunDetail, StudioNarrationRevisionInput,
+import type { StudioCostRunDetail, StudioCreativeReviewCommandInput, StudioCreativeReviewHistory, StudioCreativeReviewSnapshot, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProductionInput, StudioProvider, StudioReworkDraft, StudioRunDetail, StudioNarrationRevisionInput,
   StudioSceneResourceRevisionInput, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
 import { studioApi, subscribeToRun } from "../api.js";
 import { currentScriptArtifact, sceneNarrationText } from "../scene-narration.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
 import { RunWorkbench } from "../components/RunWorkbench.js";
 import { CreativeDiscussionPanel } from "../components/CreativeDiscussionPanel.js";
+import { CreativeReviewHistoryPanel } from "../components/CreativeReviewHistoryPanel.js";
 import { MultiPlatformPublishDialog } from "../components/MultiPlatformPublishDialog.js";
 
 export function preferRunSnapshot(current: StudioRunDetail | undefined, next: StudioRunDetail): StudioRunDetail {
@@ -72,6 +73,7 @@ export function RunPage() {
   const [paidNodeSummary, setPaidNodeSummary] = useState<StudioPaidNodeSummary>();
   const [paidOperationError, setPaidOperationError] = useState<string>();
   const [creativeReview, setCreativeReview] = useState<StudioCreativeReviewSnapshot>();
+  const [creativeHistory, setCreativeHistory] = useState<StudioCreativeReviewHistory>();
   const [creativeCommandPending, setCreativeCommandPending] = useState(false);
   const creativeReviewRequest = useRef(0);
   const authoritativeRunRequest = useRef(0);
@@ -187,6 +189,17 @@ export function RunPage() {
     });
     return () => { active = false; };
   }, [runId, run]);
+
+  useEffect(() => {
+    if (!run) return;
+    let active = true;
+    void studioApi.creativeReviewHistory(runId).then((history) => {
+      if (active) setCreativeHistory(history);
+    }).catch(() => {
+      if (active) setCreativeHistory(undefined);
+    });
+    return () => { active = false; };
+  }, [runId, run?.revision]);
 
   useEffect(() => {
     void refreshPaidNode(uncertainPaidNodeId);
@@ -364,6 +377,36 @@ export function RunPage() {
     setError(undefined);
     try {
       const nextRun = await studioApi.overrideNode(runId, nodeId, input);
+      setRun((current) => preferRunSnapshot(current, nextRun));
+      await refreshCosts();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
+  async function reviseNodeDocument(nodeId: string, input: { instruction: string; expectedRunRevision: number; expectedVersionId: string; confirmTerminalEdit?: boolean }) {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      const nextRun = await studioApi.reviseNodeDocument(runId, nodeId, input);
+      setRun((current) => preferRunSnapshot(current, nextRun));
+      await refreshCosts();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
+  async function auditNodeDocument(nodeId: string, input: { expectedRunRevision: number; expectedVersionId: string }) {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      const nextRun = await studioApi.auditNodeDocument(runId, nodeId, input);
       setRun((current) => preferRunSnapshot(current, nextRun));
       await refreshCosts();
     } catch (caught) {
@@ -593,7 +636,8 @@ export function RunPage() {
       {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</div> : null}
       {costError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{costError}</div> : null}
       {paidOperationError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{paidOperationError}</div> : null}
-      <RunWorkbench run={run} creativeDiscussion={creativeReview ? <CreativeDiscussionPanel key={`${run.id}:${creativeReview.stage}:${creativeReview.reviewPurpose ?? "draft"}`} review={creativeReview} busy={creativeCommandPending || creativeReview.phase === "checking"} onCommand={commandCreativeReview} /> : undefined} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onRequestSceneResourceRevision={requestSceneResourceRevision} onRequestNarrationRevision={requestNarrationRevision} onLoadSceneNarration={loadSceneNarration} onReinspectVisualReview={reinspectVisualReview} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onQueryOriginalTextTask={queryOriginalTextTask} onRetrieveOriginalTextTask={retrieveOriginalTextTask} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
+      <RunWorkbench run={run} creativeDiscussion={creativeReview ? <CreativeDiscussionPanel key={`${run.id}:${creativeReview.stage}:${creativeReview.reviewPurpose ?? "draft"}`} review={creativeReview} busy={creativeCommandPending || creativeReview.phase === "checking"} onCommand={commandCreativeReview} /> : undefined} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onRequestSceneResourceRevision={requestSceneResourceRevision} onRequestNarrationRevision={requestNarrationRevision} onLoadSceneNarration={loadSceneNarration} onReinspectVisualReview={reinspectVisualReview} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onReviseNodeDocument={reviseNodeDocument} onAuditNodeDocument={auditNodeDocument} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onQueryOriginalTextTask={queryOriginalTextTask} onRetrieveOriginalTextTask={retrieveOriginalTextTask} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
+      {creativeHistory ? <CreativeReviewHistoryPanel history={creativeHistory} /> : null}
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}
       <NewRunDialog
         open={restarting}
@@ -603,6 +647,7 @@ export function RunPage() {
           initialValues: restartDraft.input,
           inheritedNodeIds: restartDraft.inheritedNodeIds,
           requiredAffectedScenePositions: restartDraft.requiredAffectedScenePositions,
+          ...(restartDraft.scopePrompt ? { scopePrompt: restartDraft.scopePrompt } : {}),
           ...(restartDraft.inheritedReferenceVideo ? { inheritedReferenceVideo: restartDraft.inheritedReferenceVideo } : {}),
         } : {})}
         onClose={() => setRestarting(false)}

@@ -172,6 +172,10 @@ export class SeriesPlanner {
     }, []);
     return {
       id: candidate.id,
+      generationId: `${series.id}:r${series.revision}:e${episode.episodeNumber}`,
+      ...(["passed", "awaiting_user"].includes(episode.planning.auditStatus)
+        ? { auditStatus: episode.planning.auditStatus as "passed" | "awaiting_user" }
+        : {}),
       origin: "series",
       category: series.category,
       freshness: "evergreen",

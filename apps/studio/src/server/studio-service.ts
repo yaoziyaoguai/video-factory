@@ -20,6 +20,7 @@ import type {
   StudioCreativeReviewConfirmInput,
   StudioCreativeReviewCommandInput,
   StudioCreativeReviewCommandReceipt,
+  StudioCreativeReviewHistory,
   StudioCreativeReviewSnapshot,
   StudioHealth,
   StudioLocalCapability,
@@ -62,6 +63,8 @@ import type {
   StudioProductionRoleBindingKey,
   StudioNodeInputOverrideInput,
   StudioNodeExecutionConfigurationInput,
+  StudioNodeDocumentRevisionInput,
+  StudioNodeDocumentAuditInput,
   StudioNodeOverrideInput,
   StudioPaidNodeSummary,
   StudioPaidReconciliationInput,
@@ -136,6 +139,8 @@ export interface StudioServiceOptions {
   runArchive?: RunArchiveRepository;
   publishers?: PlatformPublisher[];
   cases?: CaseStudioPort;
+  /** 发布文案 AI 修订与主动再审端口（复用带审计配置的发布编辑 writer）。 */
+  documentCopyTools?: import("./production-studio.js").StudioDocumentCopyTools;
 }
 
 /** 案例参考在制作链里只被用到这几件事；其余（取数、缓存）留在 CaseStudio 内部。 */
@@ -238,6 +243,7 @@ export class StudioService {
       pipeline: options.pipeline,
       listProviders: () => this.capabilities.listProviders(),
       archiveStore: options.runArchive ?? new JsonRunArchiveStore(path.join(options.workspaceRoot, "archive", "runs.json")),
+      ...(options.documentCopyTools ? { documentCopyTools: options.documentCopyTools } : {}),
       now,
       loadRejectedVisualResources: (runId) => this.resourceGovernance.rejectedVisualItems(runId),
     });
@@ -317,6 +323,11 @@ export class StudioService {
   listTrendServices(): Promise<StudioTrendService[]> { return this.trends.listServices(); }
   listTrendSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]> { return this.trends.listSignals(input); }
   listTrendCandidates(): Promise<StudioTrendCandidate[]> { return this.trends.listCandidates(); }
+
+  /** 修订热点候选：只产一版未审修订稿并追加进收件箱；原候选与其审计状态不变。 */
+  reviseTrendCandidate(candidateId: string, expectedGenerationId: string, instruction: string): Promise<StudioTrendCandidate> {
+    return this.trends.reviseCandidate(candidateId, expectedGenerationId, instruction);
+  }
   refreshTrendCandidates(): Promise<StudioTrendRefreshReceipt> { return this.trends.requestCandidateRefresh(); }
   async trendCandidateRefreshStatus(refreshId: string): Promise<StudioTrendRefreshStatus> {
     const status = this.trends.candidateRefreshStatus(refreshId);
@@ -354,6 +365,13 @@ export class StudioService {
     return this.series.list();
   }
   createSeries(input: StudioSeriesInput): Promise<StudioSeries> { return this.series.create(input); }
+  generateSeriesRoadmap(seriesId: string): Promise<StudioSeries> { return this.series.generateRoadmap(seriesId); }
+  auditSeriesEpisodeCurrent(seriesId: string, episodeNumber: number, expectedRevision: number): Promise<StudioSeries> {
+    return this.series.auditEpisodeCurrent(seriesId, episodeNumber, expectedRevision);
+  }
+  reviseSeriesEpisodeCurrent(seriesId: string, episodeNumber: number, expectedRevision: number, instruction: string): Promise<StudioSeries> {
+    return this.series.reviseEpisodeCurrent(seriesId, episodeNumber, expectedRevision, instruction);
+  }
   updateSeriesEpisodePlan(seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput): Promise<StudioSeries> {
     return this.series.updateEpisodePlan(seriesId, episodeNumber, input);
   }
@@ -739,6 +757,9 @@ export class StudioService {
   creativeReview(runId: string): Promise<StudioCreativeReviewSnapshot | undefined> {
     return this.production.creativeReview(runId);
   }
+  creativeReviewHistory(runId: string): Promise<StudioCreativeReviewHistory | undefined> {
+    return this.production.creativeReviewHistory(runId);
+  }
   commandCreativeReview(runId: string, input: StudioCreativeReviewCommandInput, actor = "studio-owner"): Promise<StudioCreativeReviewCommandReceipt> {
     return this.withLease(runId, async () => this.production.commandCreativeReview(runId, input, actor));
   }
@@ -762,6 +783,14 @@ export class StudioService {
   }
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor = "studio-owner"): Promise<StudioRunDetail> {
     return this.withLease(runId, async () => this.production.applyNodeInputOverride(runId, nodeId, input, actor));
+  }
+
+  reviseNodeDocument(runId: string, nodeId: string, input: StudioNodeDocumentRevisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    return this.withLease(runId, async () => this.production.reviseNodeDocument(runId, nodeId, input, actor));
+  }
+
+  auditNodeDocumentCurrent(runId: string, nodeId: string, input: StudioNodeDocumentAuditInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    return this.withLease(runId, async () => this.production.auditNodeDocumentCurrent(runId, nodeId, input, actor));
   }
 
   prepareProductionQuote(runId: string, input: StudioProductionQuoteInput, actor = "studio-owner"): Promise<StudioProductionQuote> {

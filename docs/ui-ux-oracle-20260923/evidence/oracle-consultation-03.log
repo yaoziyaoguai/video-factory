@@ -1,0 +1,72 @@
+🧿 oracle 0.17.3 — Your AI's swagger, audited.
+Session: vf-ui-ux-motion-20260923-03
+Mode: browser foreground
+Models: 1
+Detach: no
+Reattach: oracle session vf-ui-ux-motion-20260923-03
+Packed 17 files into 1 bundle (contents counted in token estimate).
+Launching browser mode (picker=current; requested=gpt-5.6-sol) with ~127,942 tokens.
+This run can take up to 45 minutes (usually ~10 minutes).
+[browser] Browser control: launch visible Chrome; may focus/control the browser UI.
+[browser] Browser guidance: A visible automation Chrome window may take focus while Oracle controls ChatGPT.
+[browser] Browser guidance: Use --browser-hide-window, --browser-attach-running, or --remote-chrome to reduce desktop disruption.
+[browser] Thinking time: 6Pro更快消耗使用额度Pro，第 5 项，共 5 项。使用左右方向键调整强度已锁定，打开访问权限选项最新GPT-5.6 SolGPT-5.5将于 10月14日下线 (already selected)
+[browser] ChatGPT thinking - 30s elapsed; status=response streaming; source=inline
+[browser] ChatGPT thinking - 1m 0s elapsed; status=response streaming; last change 29s ago; source=inline
+[browser] ChatGPT thinking - 1m 30s elapsed; status=response streaming; last change 59s ago; source=inline
+[browser] ChatGPT thinking - 2m 0s elapsed; status=response streaming; last change 1m 29s ago; source=inline
+[browser] ChatGPT thinking - 2m 30s elapsed; status=response streaming; last change 2m 0s ago; source=inline
+[browser] ChatGPT thinking - 3m 0s elapsed; status=response streaming; last change 2m 30s ago; source=inline
+[browser] ChatGPT thinking - 3m 30s elapsed; status=response streaming; last change 3m 0s ago; source=inline
+[browser] ChatGPT thinking - 4m 0s elapsed; status=response streaming; last change 3m 30s ago; source=inline
+[browser] ChatGPT thinking - 4m 30s elapsed; status=response streaming; last change 4m 0s ago; source=inline
+[browser] ChatGPT thinking - 5m 0s elapsed; status=response streaming; last change 4m 30s ago; source=inline
+[browser] ChatGPT thinking - 5m 30s elapsed; status=response streaming; last change 5m 0s ago; source=inline
+[browser] ChatGPT thinking - 6m 0s elapsed; status=response streaming; last change 5m 30s ago; source=inline
+[browser] ChatGPT thinking - 6m 30s elapsed; status=response streaming; last change 6m 0s ago; source=inline
+[browser] ChatGPT thinking - 7m 0s elapsed; status=response streaming; last change 6m 30s ago; source=inline
+[browser] ChatGPT thinking - 7m 30s elapsed; status=response streaming; last change 7m 0s ago; source=inline
+[browser] ChatGPT thinking - 8m 0s elapsed; status=response streaming; last change 7m 30s ago; source=inline
+[browser] ChatGPT thinking - 8m 30s elapsed; status=response streaming; last change 8m 0s ago; source=inline
+[browser] ChatGPT thinking - 9m 0s elapsed; status=response streaming; last change 8m 30s ago; source=inline
+[browser] ChatGPT thinking - 9m 30s elapsed; status=response streaming; last change 9m 0s ago; source=inline
+[browser] ChatGPT thinking - 10m 0s elapsed; status=response streaming; last change 9m 30s ago; source=inline
+[browser] ChatGPT thinking - 10m 30s elapsed; status=response streaming; last change 10m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 11m 0s elapsed; status=response streaming; last change 10m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 11m 30s elapsed; status=response streaming; last change 11m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 12m 0s elapsed; status=response streaming; last change 11m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 12m 30s elapsed; status=response streaming; last change 12m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 13m 0s elapsed; status=response streaming; last change 12m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 13m 30s elapsed; status=response streaming; last change 13m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 14m 0s elapsed; status=response streaming; last change 13m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 14m 30s elapsed; status=response streaming; last change 14m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 15m 0s elapsed; status=response streaming; last change 14m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 15m 30s elapsed; status=response streaming; last change 15m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 16m 0s elapsed; status=response streaming; last change 15m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 16m 30s elapsed; status=response streaming; last change 16m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 17m 0s elapsed; status=response streaming; last change 16m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 17m 30s elapsed; status=response streaming; last change 17m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 18m 0s elapsed; status=response streaming; last change 17m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 18m 30s elapsed; status=response streaming; last change 18m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 19m 0s elapsed; status=response streaming; last change 18m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 19m 30s elapsed; status=response streaming; last change 19m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 20m 0s elapsed; status=response streaming; last change 19m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 20m 30s elapsed; status=response streaming; last change 20m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 21m 0s elapsed; status=response streaming; last change 20m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 21m 30s elapsed; status=response streaming; last change 21m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 22m 0s elapsed; status=response streaming; last change 21m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 22m 30s elapsed; status=response streaming; last change 22m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 23m 0s elapsed; status=response streaming; last change 22m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 23m 30s elapsed; status=response streaming; last change 23m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 24m 0s elapsed; status=response streaming; last change 23m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 24m 30s elapsed; status=response streaming; last change 24m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 25m 0s elapsed; status=response streaming; last change 24m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 25m 30s elapsed; status=response streaming; last change 25m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 26m 0s elapsed; status=response streaming; last change 25m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 26m 30s elapsed; status=response streaming; last change 26m 0s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 27m 0s elapsed; status=response streaming; last change 26m 30s ago; stale-hint=no UI progress change; source=inline
+[browser] ChatGPT thinking - 27m 30s elapsed; status=response streaming; last change 27m 0s ago; stale-hint=no UI progress change; source=inline
+ERROR: Chrome window closed before oracle finished. Please keep it open until completion.
+User error (browser-automation): Chrome window closed before oracle finished. Please keep it open until completion.
+
+Wrapper exit code: 1

@@ -124,8 +124,134 @@ describe("CandidateInboxStudio", () => {
     assert.equal(reviewCalls, 0);
     assert.equal(created.episodes.length, 6);
     assert.equal(created.episodes.every((episode) => episode.planning.auditStatus === "fallback"), true);
-    assert.match(created.episodes[0]?.planning.fallbackReason ?? "", /独立复核/);
+    assert.match(created.episodes[0]?.planning.fallbackReason ?? "", /尚无模型首审/);
     assert.equal((await series.list())[0]?.id, created.id);
+  });
+
+  it("audits only the current human-edited series episode without replacing its text or adopting it", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-audit-current-"));
+    let audits = 0;
+    const series = new SeriesStudio({
+      series: new JsonSeriesStore(path.join(root, "series.json")),
+      planningAgent: { reviewEpisode: async (_series, episode) => {
+        audits += 1;
+        return {
+          draft: { episodeNumber: episode.episodeNumber, pillar: episode.pillar, title: episode.title, viewerPromise: episode.viewerPromise, hook: episode.hook, payoff: episode.payoff, fromPrevious: episode.continuity.fromPrevious, toNext: episode.continuity.toNext },
+          planning: { source: "human", role: "系列开拍总编", auditRole: "独立质量复核", auditStatus: "awaiting_user", auditIterations: 1, auditSummary: "开头可以更具体", auditSuggestions: ["先展示本集实际结果"], providerId: "test", modelId: "audit-only", promptVersion: "v1" },
+        };
+      } },
+    });
+    const created = await series.create({ name: "单集再审", premise: "验证一个方法", audience: "创作者", platform: "douyin", category: "education", track: "audit-current", pillars: ["验证"], tone: "具体", visualStyle: "纪实", targetEpisodeCount: 1 });
+    const original = created.episodes[0]!;
+    const edited = await series.updateEpisodePlan(created.id, 1, {
+      expectedRevision: created.revision, pillar: original.pillar, title: "用户自己的标题", viewerPromise: original.viewerPromise,
+      hook: original.hook, payoff: original.payoff, fromPrevious: original.continuity.fromPrevious, toNext: original.continuity.toNext,
+    });
+    await assert.rejects(() => series.auditEpisodeCurrent(created.id, 1, created.revision), /版本/);
+    assert.equal(audits, 0);
+    const audited = await series.auditEpisodeCurrent(created.id, 1, edited.revision);
+    assert.equal(audits, 1);
+    assert.equal(audited.episodes[0]?.title, "用户自己的标题");
+    assert.equal(audited.episodes[0]?.status, "planned");
+    assert.equal(audited.episodes[0]?.planning.auditSummary, "开头可以更具体");
+  });
+
+  it("generates and audits the first series roadmap after durable creation without auto-adopting an episode", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-initial-audit-"));
+    let generationCalls = 0;
+    const series = new SeriesStudio({
+      series: new JsonSeriesStore(path.join(root, "series.json")),
+      createId: () => "series-initial-audit",
+      planningAgent: {
+        generate: async (_series, count) => {
+          generationCalls += 1;
+          assert.equal(count, 2);
+          return {
+            drafts: [1, 2].map((number) => ({ episodeNumber: number, pillar: "验证", title: `模型第 ${number} 集`, viewerPromise: `第 ${number} 集的具体收益`, hook: `先看第 ${number} 集`, payoff: `兑现第 ${number} 集`, fromPrevious: [], toNext: [] })),
+            planning: { source: "agent", role: "系列总编", auditRole: "独立质量复核", auditStatus: "awaiting_user", auditIterations: 1, auditSummary: "第二集还可以更具体", auditSuggestions: ["请明确第二集的观众收益"], providerId: "deepseek", modelId: "deepseek-flash", promptVersion: "series-v1" },
+          };
+        },
+        reviewEpisode: async () => { throw new Error("selection has not happened"); },
+      },
+    });
+    const created = await series.create({ name: "短片实验", premise: "每集验证一个方法", audience: "创作者", platform: "douyin", category: "education", track: "short-film-lab", pillars: ["验证"], tone: "具体", visualStyle: "纪实", targetEpisodeCount: 2 });
+    assert.equal(generationCalls, 0, "系列身份先落盘，模型请求才能稳定恢复");
+    const planned = await series.generateRoadmap(created.id);
+    assert.equal(generationCalls, 1);
+    assert.deepEqual(planned.episodes.map((episode) => episode.title), ["模型第 1 集", "模型第 2 集"]);
+    assert.equal(planned.episodes[0]?.planning.auditStatus, "awaiting_user");
+    assert.equal(planned.episodes.every((episode) => episode.status === "planned"), true);
+    assert.equal((await series.generateRoadmap(created.id)).revision, planned.revision);
+    assert.equal(generationCalls, 1, "重放不得再次产稿或审计");
+  });
+
+  it("does not overwrite an episode edited while the initial model roadmap is running", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-initial-race-"));
+    let release!: () => void;
+    let started!: () => void;
+    const began = new Promise<void>((resolve) => { started = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    const series = new SeriesStudio({
+      series: new JsonSeriesStore(path.join(root, "series.json")),
+      createId: () => "series-initial-race",
+      planningAgent: {
+        generate: async () => {
+          calls += 1;
+          started();
+          await gate;
+          return {
+            drafts: [{ episodeNumber: 1, pillar: "验证", title: "模型标题", viewerPromise: "模型收益", hook: "模型开场", payoff: "模型兑现", fromPrevious: [], toNext: [] }],
+            planning: { source: "agent", role: "系列总编", auditRole: "独立质量复核", auditStatus: "passed", auditIterations: 1, providerId: "deepseek", modelId: "deepseek-flash", promptVersion: "series-v1" },
+          };
+        },
+        reviewEpisode: async () => { throw new Error("not used"); },
+      },
+    });
+    const created = await series.create({ name: "并发系列", premise: "验证", audience: "创作者", platform: "douyin", category: "education", track: "series-race", pillars: ["验证"], tone: "具体", visualStyle: "纪实", targetEpisodeCount: 1 });
+    const first = series.generateRoadmap(created.id);
+    const sameRequest = series.generateRoadmap(created.id);
+    await began;
+    const original = created.episodes[0]!;
+    await series.updateEpisodePlan(created.id, 1, {
+      expectedRevision: created.revision,
+      pillar: original.pillar,
+      title: "用户决定",
+      viewerPromise: original.viewerPromise,
+      hook: original.hook,
+      payoff: original.payoff,
+      fromPrevious: original.continuity.fromPrevious,
+      toNext: original.continuity.toNext,
+    });
+    release();
+    await assert.rejects(first, /路线图已被修改/);
+    await assert.rejects(sameRequest, /路线图已被修改/);
+    const persisted = (await series.list())[0];
+    assert.equal(persisted?.episodes[0]?.title, "用户决定");
+    assert.equal(calls, 1);
+  });
+
+  it("rejects adopting a series episode after its visible roadmap version changed", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-adopt-version-"));
+    const series = new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")), createId: () => "series-adopt-version" });
+    const opportunities = new OpportunityStudio({ opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")) });
+    const created = await series.create({ name: "逐集检验", premise: "每集一个检验", audience: "创作者", platform: "douyin", category: "education", track: "series-adopt-version", pillars: ["检验"], tone: "具体", visualStyle: "纪实", targetEpisodeCount: 1 });
+    const inbox = new CandidateInboxStudio({ trends: { listCandidates: async () => [] }, series, opportunities });
+    const visible = (await inbox.list({ origins: ["series"] })).items[0]!;
+    assert.ok(visible.generationId);
+    const original = created.episodes[0]!;
+    await series.updateEpisodePlan(created.id, 1, {
+      expectedRevision: created.revision,
+      pillar: original.pillar,
+      title: "用户更新的标题",
+      viewerPromise: original.viewerPromise,
+      hook: original.hook,
+      payoff: original.payoff,
+      fromPrevious: original.continuity.fromPrevious,
+      toNext: original.continuity.toNext,
+    });
+    await assert.rejects(() => inbox.adopt(visible.id, { origin: "series", expectedGenerationId: visible.generationId }), /版本已变化/);
+    assert.equal((await opportunities.list()).length, 0);
   });
 
   it("loads a series-only inbox without waiting for the trend model", async () => {
@@ -396,7 +522,7 @@ describe("CandidateInboxStudio", () => {
     assert.equal(episode?.planning.auditStatus, "fallback");
   });
 
-  it("adopts the title, hook, and viewer promise produced by the opening greenlight review", async () => {
+  it("keeps the creator's episode unchanged when opening greenlight returns an alternative", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-series-reviewed-adoption-"));
     const opportunities = new OpportunityStudio({
       opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
@@ -449,16 +575,53 @@ describe("CandidateInboxStudio", () => {
       opportunities,
       publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
-    const [beforeReview] = (await inbox.list({ origins: ["series"] })).items;
+    const beforeReview = (await inbox.list({ origins: ["series"] })).items.find((item) => item.episodeNumber === 1);
 
     const adopted = await inbox.adopt(beforeReview!.id, { origin: "series" });
 
-    assert.equal(adopted.title, reviewedTitle);
-    assert.equal(adopted.hook, reviewedHook);
-    assert.equal(adopted.painPoint, reviewedViewerPromise);
+    assert.equal(adopted.title, beforeReview!.title);
+    assert.equal(adopted.hook, beforeReview!.hook);
+    assert.equal(adopted.painPoint, beforeReview!.painPoint);
   });
 
-  it("keeps a reviewed high-risk series candidate adoptable while carrying the source advice into the opportunity", async () => {
+  it("does not repeat an explicitly requested advisory audit when adopting or reading the selected episode", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-advisory-once-"));
+    let audits = 0;
+    const series = new SeriesStudio({
+      series: new JsonSeriesStore(path.join(root, "series.json")),
+      createId: () => "series-advisory-once",
+      planningAgent: {
+        reviewEpisode: async (_series, episode) => {
+          audits += 1;
+          return {
+            draft: {
+              episodeNumber: episode.episodeNumber, pillar: episode.pillar,
+              title: episode.title, viewerPromise: episode.viewerPromise,
+              hook: episode.hook, payoff: episode.payoff,
+              fromPrevious: [...episode.continuity.fromPrevious], toNext: [...episode.continuity.toNext],
+            },
+            planning: {
+              source: "agent", role: "系列开拍总编", auditRole: "独立质量复核",
+              auditStatus: "awaiting_user", auditIterations: 1,
+              auditSummary: "标题可以更具体，但可由创作者决定。",
+              providerId: "fixture", modelId: "fixture", promptVersion: "fixture-v1",
+            },
+          };
+        },
+      },
+    });
+    const created = await series.create({
+      name: "观察日记", premise: "每集看一个生活问题。", audience: "普通观众", platform: "douyin",
+      category: "lifestyle", track: "observation", pillars: ["日常观察"], tone: "平实", visualStyle: "纪实",
+    });
+    await series.auditEpisodeCurrent(created.id, 1, created.revision);
+    const selected = await series.advanceEpisode(created.id, 1);
+    assert.equal(selected.episodes[0]?.planning.auditStatus, "awaiting_user");
+    await series.productionContextFor(created.id, 1);
+    assert.equal(audits, 1);
+  });
+
+  it("keeps a creator-edited high-risk series candidate adoptable while carrying source advice", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-series-reviewed-gate-"));
     const opportunities = new OpportunityStudio({
       opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")),
@@ -491,7 +654,7 @@ describe("CandidateInboxStudio", () => {
         }),
       },
     });
-    await series.create({
+    const created = await series.create({
       name: "每日事实实验室",
       premise: "每集验证一个公共信息判断方法。",
       audience: "希望辨别可靠信息的中文短视频用户",
@@ -502,17 +665,28 @@ describe("CandidateInboxStudio", () => {
       tone: "克制",
       visualStyle: "证据图解",
     });
+    const first = created.episodes[0]!;
+    await series.updateEpisodePlan(created.id, first.episodeNumber, {
+      expectedRevision: created.revision,
+      pillar: first.pillar,
+      title: "台风伤亡消息持续更新",
+      viewerPromise: first.viewerPromise,
+      hook: "台风伤亡消息不断更新，哪些说法真的有来源？",
+      payoff: first.payoff,
+      fromPrevious: [...first.continuity.fromPrevious],
+      toNext: [...first.continuity.toNext],
+    });
     const inbox = new CandidateInboxStudio({
       trends: { listCandidates: async () => [] },
       series,
       opportunities,
     });
-    const [beforeReview] = (await inbox.list({ origins: ["series"] })).items;
+    const beforeReview = (await inbox.list({ origins: ["series"] })).items.find((item) => item.episodeNumber === 1);
 
     // 来源不足只是建议：高风险公共题材不再拦下采用，决定权在创作者。
     const adopted = await inbox.adopt(beforeReview!.id, { origin: "series", verificationConfirmed: true });
 
-    // 采用的是开拍复核产出的稿件，而不是系列路线图草稿。
+    // 手工改写是创作者当前稿，不得被开拍复核的备选暗中覆盖。
     assert.equal(adopted.title, "台风伤亡消息持续更新");
     assert.equal(adopted.hook, "台风伤亡消息不断更新，哪些说法真的有来源？");
     assert.equal(adopted.origin, "series");
@@ -1157,6 +1331,29 @@ describe("CandidateInboxStudio", () => {
     assert.equal(adopted.id, trendCandidate.id);
     assert.equal(adopted.editorialDecision?.recommendedTemplate, undefined);
     await assert.rejects(() => inbox.adopt(visibleCandidate!.id, { origin: "trend" }), /已被采用|已经失效/);
+  });
+
+  it("adopts the exact topic package version the creator saw after a same-id refresh", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-topic-package-version-"));
+    const opportunities = new OpportunityStudio({ opportunities: new JsonOpportunityStore(path.join(root, "opportunities.json")) });
+    let currentCandidates = [{ ...trendCandidate, id: "topic-same-id", title: "旧版选题", generationId: "topic-batch-v1", auditStatus: "awaiting_user" as const }];
+    const inbox = new CandidateInboxStudio({
+      trends: { listCandidates: async () => currentCandidates },
+      series: new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) }),
+      opportunities,
+      publishedTemplates: async () => BUILTIN_TEMPLATES,
+    });
+    const [visible] = (await inbox.list({ origins: ["trend"] })).items;
+    currentCandidates = [{ ...currentCandidates[0]!, title: "新版选题", generationId: "topic-batch-v2", auditStatus: "passed" as const }];
+    await inbox.list({ origins: ["trend"] });
+
+    await assert.rejects(() => inbox.adopt(visible!.id, { origin: "trend" }), /版本|刷新/);
+    const adopted = await inbox.adopt(visible!.id, { origin: "trend", expectedGenerationId: "topic-batch-v1" });
+    assert.equal(adopted.title, "旧版选题");
+    assert.equal(adopted.adoptedCandidateGenerationId, "topic-batch-v1");
+    assert.equal(adopted.adoptedCandidateAuditStatus, "awaiting_user");
+    const reloaded = await opportunities.get(adopted.id);
+    assert.equal(reloaded?.adoptedCandidateGenerationId, "topic-batch-v1");
   });
 
   it("re-normalizes a remembered trend against the current stricter source policy instead of trusting the stale verdict", async () => {

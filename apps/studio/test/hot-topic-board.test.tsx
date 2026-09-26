@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { HotTopicBoard } from "../src/client/components/HotTopicBoard.js";
 import { decideEditorialFormat } from "../src/server/editorial-decision.js";
@@ -125,5 +125,53 @@ describe("hot topic board", () => {
     expect(board).toHaveTextContent("本轮总编没有给出选题建议");
     expect(board).toHaveTextContent("没有经过选题总编");
     expect(board).not.toHaveTextContent("每个热点已给出可用方向");
+  });
+});
+
+// 「初稿审一次」合同 S4：候选修订入口——只产未审修订稿，不自动审计、不自动发送。
+describe("HotTopicBoard candidate revision", () => {
+  it("sends the revision instruction bound to the candidate and surfaces the unaudited outcome", async () => {
+    const calls: Array<{ candidateId: string; instruction: string }> = [];
+    const revisions = render(
+      <HotTopicBoard
+        candidates={[boardItem("api-topic-editor-v1")]}
+        onAdopt={async () => undefined}
+        onReviseCandidate={async (candidate, instruction) => {
+          calls.push({ candidateId: candidate.id, instruction });
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /修订/ }));
+    fireEvent.change(screen.getByLabelText("修订意见"), { target: { value: "标题给出可执行的核对动作。" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
+    await waitFor(() => expect(calls).toEqual([{ candidateId: "trend-1", instruction: "标题给出可执行的核对动作。" }]));
+    expect(await screen.findByText(/未审/)).toBeInTheDocument();
+  });
+
+  it("keeps the send button disabled while the instruction is blank", () => {
+    render(
+      <HotTopicBoard
+        candidates={[boardItem("api-topic-editor-v1")]}
+        onAdopt={async () => undefined}
+        onReviseCandidate={async () => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /修订/ }));
+    const send = screen.getByRole("button", { name: "发送修订意见" }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+  });
+});
+
+describe("HotTopicBoard unaudited revision labeling", () => {
+  it("labels revised unaudited candidates on the direction row", () => {
+    const item = { ...boardItem("api-topic-editor-v1"), auditStatus: "not_audited" as const, revisedFrom: { candidateId: "trend-1", generationId: "gen-1", instruction: "改标题" } };
+    render(
+      <HotTopicBoard
+        candidates={[item]}
+        onAdopt={async () => undefined}
+        onReviseCandidate={async () => undefined}
+      />,
+    );
+    expect(screen.getAllByText(/修订稿 · 本版未审/).length).toBeGreaterThan(0);
   });
 });

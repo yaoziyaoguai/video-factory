@@ -39,7 +39,22 @@ function grammar(camera: string): Record<string, unknown> {
 }
 
 describe("CodexReferenceGrammarAgent", () => {
-  it("repairs abstract shot grammar before returning it to the director", async () => {
+  it("does not present a single unaudited model call as a detailed reviewed report", async () => {
+    let producerCalls = 0;
+    const agent = new CodexReferenceGrammarAgent({
+      client: { runTask: async () => { producerCalls += 1; return grammar("稳定推进"); } },
+      media: { prepare: async () => ({
+        durationMs: 10_000,
+        frames: [{ timecodeMs: 5_000, sha256: "a".repeat(64), jpegBase64: "/9j/2Q==" }],
+      }) },
+    });
+    await assert.rejects(() => agent.analyzeDetailed({
+      videoPath: "/tmp/reference.mp4", runRoot: "/tmp", sourceLabel: "用户参考片",
+    }), /independent audit/);
+    assert.equal(producerCalls, 0);
+  });
+
+  it("audits the first reference report once without silently rewriting it", async () => {
     const calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
     let analysisAttempt = 0;
     const client = {
@@ -84,7 +99,6 @@ describe("CodexReferenceGrammarAgent", () => {
     };
     const agent = new CodexReferenceGrammarAgent({
       client,
-      maxReviewIterations: 2,
       media: {
         prepare: async () => ({
           durationMs: 10_000,
@@ -95,10 +109,10 @@ describe("CodexReferenceGrammarAgent", () => {
 
     const execution = await agent.analyzeDetailed({ videoPath: "/tmp/reference.mp4", runRoot: "/tmp", sourceLabel: "用户参考片" });
 
-    assert.equal(execution.output.camera, "缓慢推进后稳定");
-    assert.equal(execution.agentLoop?.iterations.length, 2);
-    assert.deepEqual(calls.map((call) => call.kind), ["reference-grammar", "role-audit", "reference-grammar", "role-audit"]);
-    assert.equal("revision" in (calls[2]!.payload as Record<string, unknown>), true);
+    assert.equal(execution.output.camera, "复制原片标志性的环绕运镜");
+    assert.equal(execution.agentLoop?.status, "awaiting_user");
+    assert.equal(execution.agentLoop?.iterations.length, 1);
+    assert.deepEqual(calls.map((call) => call.kind), ["reference-grammar", "role-audit"]);
     const auditPayload = calls[1]!.payload as { images: Array<Record<string, unknown>>; context: { upstreamFacts: { frames: Array<Record<string, unknown>> } } };
     assert.equal(auditPayload.images.length, 1);
     assert.equal(auditPayload.images[0]?.imageIndex, 1);

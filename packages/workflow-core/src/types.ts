@@ -179,6 +179,11 @@ export interface HumanDecisionDraft {
   acceptIncomplete?: true;
   /** 逐条表态，成片终审用它取代"整片一句理由"的粗表态。未表态的问题不属于任何一侧，由调用方决定是否必须覆盖。 */
   reviewDispositions?: HumanReviewDisposition[];
+  /** 发布文案/参考报告的本版人工决定，和成片审片证据及费用授权彼此独立。 */
+  contentVersionId?: string;
+  contentAuditStatus?: "passed" | "has_suggestions" | "not_audited";
+  acceptUnauditedContent?: true;
+  acceptContentSuggestions?: true;
 }
 
 export interface HumanDecision extends HumanDecisionDraft {
@@ -409,6 +414,7 @@ interface NodeExecutionBase<TOutput = unknown> {
   artifacts?: ArtifactDraft[];
   receipt?: NodeExecutionReceiptDraft;
   error?: string;
+  errorCode?: string;
   // 计费执行已成功落定，但同一节点内的免费后置检查失败时，不应误锁为付费结果未知。
   providerOutcomeKnown?: boolean;
   // 节点 execute 内已通过 context.addArtifact 登记的全局产物（如崩溃恢复后已存在的正式产物）：
@@ -460,6 +466,7 @@ export interface NodeRun<TOutput = unknown> {
   // 供服务端投影给 C2；凭范围自动继续或重新报价时清除。
   spendAssessment?: Record<string, unknown>;
   error?: string;
+  errorCode?: string;
 }
 
 export interface WorkflowDefinition {
@@ -493,7 +500,7 @@ export interface WorkflowRun<TInitialInput = unknown> {
   creativeReviewOperations?: Array<{
     commandId: string;
     requestDigest: string;
-    action: "discuss" | "adopt_proposal" | "edit_draft" | "undo_draft" | "confirm" | "return_to_stage";
+    action: "discuss" | "revise" | "audit_current" | "adopt_proposal" | "edit_draft" | "undo_draft" | "confirm" | "return_to_stage";
     stage: "treatment" | "script" | "director";
     status: "running" | "completed" | "failed" | "unknown";
     acceptedAt: string;

@@ -167,14 +167,24 @@ export class CandidateInboxStudio {
       if (beforeReview.origin !== "series" || !beforeReview.seriesId || !beforeReview.episodeNumber) {
         throw new StudioConflictError("候选来源与当前创作入口不一致，请刷新后重试。");
       }
+      if (adoptionInput.expectedGenerationId && beforeReview.generationId !== adoptionInput.expectedGenerationId) {
+        throw new StudioConflictError("系列路线图版本已变化，请刷新并查看当前内容后重新决定是否采用。");
+      }
       if (beforeReview.seriesSequence?.status === "blocked") {
         throw new StudioConflictError(`请先完成第 ${beforeReview.seriesSequence.blockedByEpisodeNumber} 集，再推进当前单集。`);
       }
       await this.options.series.productionContextFor(beforeReview.seriesId, beforeReview.episodeNumber);
       matches = (await this.list({ origins: requestedOrigins, limit: 200 })).items.filter((item) => item.id === candidateId);
+      if (adoptionInput.expectedGenerationId && matches[0]?.generationId !== adoptionInput.expectedGenerationId) {
+        throw new StudioConflictError("系列路线图已更新，请刷新并查看当前稿后，再决定是否采用。");
+      }
     }
-    let rememberedTrend = requestedOrigins.includes("trend") ? this.recentTrendCandidate(candidateId) : undefined;
-    if (rememberedTrend && !matches.some((item) => item.origin === "trend")) {
+    let rememberedTrend = requestedOrigins.includes("trend")
+      ? this.recentTrendCandidate(candidateId, adoptionInput.expectedGenerationId)
+      : undefined;
+    const matchingCurrentTrend = matches.some((item) => item.origin === "trend"
+      && item.generationId === adoptionInput.expectedGenerationId);
+    if (rememberedTrend && !matchingCurrentTrend) {
       const [topicStrategy, publishedTemplates] = await Promise.all([
         this.options.topicStrategy?.().catch(() => undefined),
         this.options.publishedTemplates?.() ?? Promise.resolve([]),
@@ -189,14 +199,28 @@ export class CandidateInboxStudio {
       } = rememberedTrend;
       rememberedTrend = this.normalizeTrend(rememberedCandidate, publishedTemplates, topicStrategy?.sourcePolicy);
     }
-    const candidates = rememberedTrend && !matches.some((item) => item.origin === "trend")
-      ? [...matches, rememberedTrend]
-      : matches;
+    const candidates = adoptionInput.origin === "trend" && adoptionInput.expectedGenerationId
+      ? rememberedTrend && !matchingCurrentTrend
+        ? [rememberedTrend]
+        : matches.filter((item) => item.generationId === adoptionInput.expectedGenerationId)
+      : rememberedTrend && !matches.some((item) => item.origin === "trend")
+        ? [...matches, rememberedTrend]
+        : matches;
     if (candidates.length > 1) throw new StudioConflictError("候选编号同时出现在多个入口，请从原入口重新采用。");
     const candidate = candidates[0];
+    if (!candidate && adoptionInput.expectedGenerationId) {
+      throw new StudioConflictError("你看到的候选版本已不可用，请刷新后重新决定是否采用。");
+    }
     if (!candidate) throw new StudioNotFoundError("这条候选已被采用或已经失效，请刷新候选收件箱。");
     if (candidate.origin !== adoptionInput.origin) {
       throw new StudioConflictError("候选来源与当前创作入口不一致，请刷新后重试。");
+    }
+    if (candidate.origin === "trend" && candidate.generationId && !adoptionInput.expectedGenerationId) {
+      throw new StudioConflictError("请刷新候选并带上当时看到的版本后再采用，避免选中刷新后的另一版。");
+    }
+    if (candidate.origin === "trend" && adoptionInput.expectedGenerationId
+      && candidate.generationId !== adoptionInput.expectedGenerationId) {
+      throw new StudioConflictError("候选版本已经变化，请刷新后重新决定是否采用。");
     }
     // 来源标准与总编建议都只是建议：它们会在界面上醒目提示，但不构成采用闸门。
     // 采用与否由创作者决定，服务端只保留"候选存在、入口一致、系列顺序"这类事实性约束。
@@ -228,19 +252,25 @@ export class CandidateInboxStudio {
       editorialDecision: candidate.editorialDecision,
       ...(candidate.visualProof ? { visualProof: candidate.visualProof } : {}),
       ...(candidate.visualPlan ? { visualPlan: candidate.visualPlan } : {}),
+      ...(candidate.generationId ? {
+        adoptedCandidateGenerationId: candidate.generationId,
+        adoptedCandidateAuditStatus: candidate.auditStatus ?? "not_audited" as const,
+      } : {}),
       ...(candidate.seriesId ? { seriesId: candidate.seriesId } : {}),
       ...(candidate.seriesName ? { seriesName: candidate.seriesName } : {}),
       ...(candidate.episodeNumber ? { episodeNumber: candidate.episodeNumber } : {}),
     };
     if (candidate.origin === "series" && candidate.seriesId && candidate.episodeNumber) {
-      await this.options.series.advanceEpisode(candidate.seriesId, candidate.episodeNumber);
+      await this.options.series.advanceEpisode(candidate.seriesId, candidate.episodeNumber, candidate.generationId);
     }
     const existing = (await this.options.opportunities.list()).find((item) => item.id === candidate.id);
     if (existing && existing.origin !== candidate.origin) {
       throw new StudioConflictError("候选编号已被另一个创作入口使用，请刷新后重新选择。");
     }
     const opportunity = existing ?? await this.options.opportunities.create(input);
-    this.recentTrendCandidates.delete(candidateId);
+    for (const key of this.recentTrendCandidates.keys()) {
+      if (key.startsWith(`${candidateId}\u0000`)) this.recentTrendCandidates.delete(key);
+    }
     return opportunity;
   }
 
@@ -288,18 +318,18 @@ export class CandidateInboxStudio {
       if (entry.expiresAt <= now) this.recentTrendCandidates.delete(id);
     }
     for (const candidate of candidates) {
-      this.recentTrendCandidates.set(candidate.id, {
+      this.recentTrendCandidates.set(`${candidate.id}\u0000${candidate.generationId ?? "legacy"}`, {
         candidate: structuredClone(candidate),
         expiresAt: now + TREND_CANDIDATE_RETENTION_MS,
       });
     }
   }
 
-  private recentTrendCandidate(candidateId: string): StudioCandidateInboxItem | undefined {
-    const entry = this.recentTrendCandidates.get(candidateId);
+  private recentTrendCandidate(candidateId: string, generationId?: string): StudioCandidateInboxItem | undefined {
+    const entry = this.recentTrendCandidates.get(`${candidateId}\u0000${generationId ?? "legacy"}`);
     if (!entry) return undefined;
     if (entry.expiresAt <= this.now().getTime()) {
-      this.recentTrendCandidates.delete(candidateId);
+      this.recentTrendCandidates.delete(`${candidateId}\u0000${generationId ?? "legacy"}`);
       return undefined;
     }
     return structuredClone(entry.candidate);

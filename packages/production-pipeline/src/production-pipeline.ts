@@ -259,6 +259,7 @@ export interface ProductionCreativeReviewConfirmationDraft {
   // 走这几个窄入口的调用方就会把人的显式承担静默丢掉——那正是"仍然确认"曾经失效的样子。
   acknowledgeRepair?: true;
   acknowledgeIncomplete?: true;
+  acknowledgeUnaudited?: true;
   acceptQualityFallback?: true;
   expectedCheckIdentity?: string;
 }
@@ -272,8 +273,9 @@ export type ProductionCreativeReviewCommandDraft = {
   reviewPurpose?: "direction" | "material_plan";
   baseDraftSha256: string;
 } & (
-  | { action: "confirm"; acknowledgeRepair?: true; acknowledgeIncomplete?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string }
-  | { action: "discuss"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
+  | { action: "confirm"; acknowledgeRepair?: true; acknowledgeIncomplete?: true; acknowledgeUnaudited?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string }
+  | { action: "audit_current" }
+  | { action: "discuss" | "revise"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
   | { action: "adopt_proposal"; proposalId: string }
   | { action: "edit_draft"; document: unknown }
   | { action: "undo_draft" }
@@ -1145,6 +1147,27 @@ export class ProductionPipeline {
       if (decision.action === "approve" && renderedReviewStop) {
         assertFinalReviewDispositions(visualDelivery, decision.reviewDispositions);
       }
+      let boundDecision = decision;
+      if (decision.action === "approve"
+        && activeInterventionNode.intervention?.boundary === "node-complete"
+        && (activeInterventionNode.nodeId === "publish-package" || activeInterventionNode.nodeId === "reference-grammar")) {
+        const versionId = activeInterventionNode.outputState?.effectiveVersionId;
+        if (!versionId || decision.contentVersionId !== versionId) {
+          throw new HumanDecisionConflictError("这份文字交付的版本已经变化，请刷新并阅读当前稿后再采用。");
+        }
+        const output = effectiveNodeOutput(activeInterventionNode);
+        const rawReview = isObjectRecord(output?.contentReview) ? output.contentReview : undefined;
+        const status = rawReview?.status === "passed" || rawReview?.status === "has_suggestions"
+          ? rawReview.status : "not_audited";
+        const hasSuggestions = Array.isArray(rawReview?.suggestions) && rawReview.suggestions.length > 0;
+        if (status === "not_audited" && decision.acceptUnauditedContent !== true) {
+          throw new HumanDecisionConflictError("当前文字版本未审计；请明确选择采用本版（未审计）。");
+        }
+        if (hasSuggestions && decision.acceptContentSuggestions !== true) {
+          throw new HumanDecisionConflictError("当前文字版本有内容建议；请明确选择保留建议仍采用。");
+        }
+        boundDecision = { ...decision, contentVersionId: versionId, contentAuditStatus: status };
+      }
       const registry = this.createRegistry(brief);
       const runner = new WorkflowRunner({
         providers: registry,
@@ -1153,7 +1176,7 @@ export class ProductionPipeline {
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
         shouldPause: () => this.consumePauseRequest(runId),
       });
-      return runner.resume(this.createWorkflow(brief, decision), withExecutableBrief(previous, brief), decision);
+      return runner.resume(this.createWorkflow(brief, boundDecision), withExecutableBrief(previous, brief), boundDecision);
     }, listener);
   }
 
@@ -1304,9 +1327,52 @@ export class ProductionPipeline {
         // 图里那道同样的比对仍然保留：它守的是从 checkpoint 直接恢复的那条路。
         throw new Error("你确认的那一条独立复核意见已经不是当前这一条了，请重新查看当前的复核意见再确认。");
       }
+      if (draft.action === "confirm") {
+        const check = currentCreativeCheck(node, continuation.stage, continuation.draftSha256);
+        if (draft.acknowledgeUnaudited === true) {
+          if (check || draft.acknowledgeRepair || draft.acknowledgeIncomplete || draft.expectedCheckIdentity) {
+            throw new HumanDecisionConflictError("本版已有审计意见，或未审采用与其他确认不兼容；请刷新后重新选择。");
+          }
+        } else if (!check) {
+          throw new HumanDecisionConflictError("本版还没有审计结论。请先审计当前版本，或显式选择未审采用。");
+        } else if (check.status === "incomplete" && draft.acknowledgeIncomplete !== true) {
+          throw new HumanDecisionConflictError("本版审计未取得结论；请显式承担风险，或重新审计。");
+        } else if (check.status !== "incomplete" && check.verdict !== "pass" && draft.acknowledgeRepair !== true) {
+          throw new HumanDecisionConflictError("本版审计有修改建议；请先修改，或明确选择保留建议仍采用。");
+        }
+      }
       const brief = parsePersistedBrief(previous.initialInput);
       if (brief.workflowFeatures?.creativeReview !== "user-confirmed-v1") {
         throw new Error("This run does not use the user-confirmed creative review workflow.");
+      }
+      // 人工改稿在登记命令前先守返工范围：图内再次校验是恢复路径的防线，但若仅在那里
+      // 拒绝，WorkflowRunner 会把一次越界编辑记为节点失败，用户失去原停点。
+      const rawStageReview = isObjectRecord(nodeReview?.stages) ? nodeReview.stages[draft.stage] : undefined;
+      const stageReview: Record<string, unknown> | undefined = isObjectRecord(rawStageReview) ? rawStageReview : undefined;
+      const scopedDocument = draft.action === "edit_draft" ? draft.document
+        : draft.action === "adopt_proposal" && Array.isArray(stageReview?.proposals)
+          ? stageReview.proposals.find((proposal) => isObjectRecord(proposal) && proposal.proposalId === draft.proposalId)
+            ?.document
+          : draft.action === "undo_draft" ? stageReview?.previousDocument : undefined;
+      if (isObjectRecord(scopedDocument) && brief.rework && (draft.stage === "script" || draft.stage === "director")) {
+        const document = scopedDocument;
+        reworkAffectedScenePositions({
+          findings: brief.rework.findings,
+          ...(brief.rework.previousScript ? { previousScenes: brief.rework.previousScript.scenes } : {}),
+          ...(brief.rework.previousDirectorPlan ? { previousShots: brief.rework.previousDirectorPlan.shots } : {}),
+          currentScenes: draft.stage === "script" ? document.scenes
+            : shotsAsScenePositions(document.shots),
+          ...(draft.stage === "director" ? {
+            currentShots: document.shots,
+            ...(brief.rework.previousDirectorPlan ? {
+              previousGlobalIntent: brief.rework.previousDirectorPlan.visualBible,
+              currentGlobalIntent: document.visualBible,
+            } : {}),
+          } : {}),
+          ...(brief.rework.affectedScenePositions !== undefined
+            ? { affectedScenePositions: brief.rework.affectedScenePositions }
+            : {}),
+        });
       }
       const common = {
         stage: draft.stage,
@@ -1323,21 +1389,21 @@ export class ProductionPipeline {
           // 而新裁决照样是 repair 时人永远推不动这条制作。
           ...(draft.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
           ...(draft.acknowledgeIncomplete === true ? { acknowledgeIncomplete: true as const } : {}),
+          ...(draft.acknowledgeUnaudited === true ? { acknowledgeUnaudited: true as const } : {}),
           ...(draft.acceptQualityFallback === true ? { acceptQualityFallback: true as const } : {}),
-          // 走"确认即复核"这条路时，reviewGateNode 会用刚跑出来的那一条复核覆盖这里的值，
-          // 所以缺省值只是个占位；复用已展示复核时必须由调用方带上，上面的守卫保证它存在。
-          checkIdentity: draft.expectedCheckIdentity ?? contentSha256({
-            runId,
-            stage: draft.stage,
-            draftSha256: draft.baseDraftSha256,
-            reviewRevision: draft.expectedReviewRevision,
-            contract: "creative-review-confirm-v1",
-          }),
+          // 本节点确认不再触发审计；未审采用不伪造复核身份。
+          // OA-03 收口：有审计的确认必须携带用户看到的那一条编号，缺失即冲突拒绝——
+          // 图层不再接受任何代填的身份（此前这里会自造摘要，令 OA-03 的校验形同虚设）。
+          ...(draft.acknowledgeUnaudited === true ? {} : draft.expectedCheckIdentity
+            ? { checkIdentity: draft.expectedCheckIdentity }
+            : (() => { throw new HumanDecisionConflictError("缺少你看到的复核编号；请刷新停点后按当前意见确认。"); })()),
           confirmedAt: this.clock(),
         }
-        : draft.action === "discuss"
+        : draft.action === "audit_current"
+          ? { action: "audit_current", ...common }
+        : draft.action === "discuss" || draft.action === "revise"
           ? {
-            action: "discuss",
+            action: draft.action,
             ...common,
             message: draft.message,
             ...(draft.selection ? { selection: draft.selection } : {}),
@@ -1348,7 +1414,9 @@ export class ProductionPipeline {
               ? { action: "edit_draft", ...common, document: draft.document }
               : draft.action === "undo_draft"
               ? { action: "undo_draft", ...common }
-              : { action: "return_to_stage", ...common, targetStage: draft.targetStage, acknowledgeImpact: true };
+              : draft.action === "return_to_stage"
+                ? { action: "return_to_stage", ...common, targetStage: draft.targetStage, acknowledgeImpact: true }
+                : (() => { throw new Error("Creative review action is invalid."); })();
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
         clock: this.clock,
@@ -4347,7 +4415,7 @@ export class ProductionPipeline {
           await writeTextAtomically(packagePath, packageContent);
           return {
             status: "succeeded",
-            output: { publishPackagePath: packagePath, resourceManifestPath },
+            output: { publishPackagePath: packagePath, resourceManifestPath, contentReview: contentReviewForCreator(copyOutcome.agentLoop) },
             receipt: copyOutcome.trace
               ? {
                   ...modelTraceReceipt(copyOutcome.trace, "Codex 发行编辑", "subscription", copyOutcome.agentLoop),
@@ -4578,6 +4646,23 @@ function recordedCreativeCheckIdentity(
   const checkResult = stages[stage].checkResult;
   if (!isObjectRecord(checkResult) || typeof checkResult.checkIdentity !== "string") return undefined;
   return checkResult.checkIdentity;
+}
+
+function currentCreativeCheck(
+  node: WorkflowRun<ProductionBrief>["nodeRuns"][number],
+  stage: string,
+  draftSha256: string,
+): Record<string, unknown> | undefined {
+  if (!isObjectRecord(node.output) || !isObjectRecord(node.output.creativeReview)) return undefined;
+  const stages = node.output.creativeReview.stages;
+  if (!isObjectRecord(stages) || !isObjectRecord(stages[stage])) return undefined;
+  const stageState = stages[stage];
+  const check = stageState.checkResult;
+  const draft = stageState.currentDraft;
+  if (!isObjectRecord(check) || !isObjectRecord(draft)) return undefined;
+  if (check.draftSha256 !== draftSha256 || draft.sha256 !== draftSha256) return undefined;
+  if (typeof check.versionId === "string" && check.versionId !== draft.versionId) return undefined;
+  return check;
 }
 
 function currentVisualReviewDelivery(run: WorkflowRun<ProductionBrief>): unknown {
@@ -5486,7 +5571,7 @@ function referenceGrammarNode(
       });
       return {
         status: "succeeded",
-        output: { referenceGrammarPath: grammarPath, grammar },
+        output: { referenceGrammarPath: grammarPath, grammar, contentReview: contentReviewForCreator(execution?.agentLoop) },
         receipt: {
           ...(execution?.trace ?? failedTrace
             ? {
@@ -6873,7 +6958,8 @@ function createInspectionPlanningGraph(
   return createCreativePlanningGraph({ ports, checkpointer: store.saver });
 }
 
-function planningReviewCheckpointIdentity(context: CreativePlanningContext): Record<string, unknown> {
+/** OA-01：创作规划审计的装配层 checkpoint 身份（导出供合同测试固定其区分语义）。 */
+export function planningReviewCheckpointIdentity(context: CreativePlanningContext): Record<string, unknown> {
   const execution = context.creativeReviewExecution;
   if (!execution) return { mode: "legacy" };
   const candidate = execution.mode === "check"
@@ -6885,15 +6971,62 @@ function planningReviewCheckpointIdentity(context: CreativePlanningContext): Rec
     : undefined;
   return {
     mode: execution.mode,
-    ...(execution.mode === "check" ? { stage: execution.stage, candidateSha256: contentSha256(candidate) } : {}),
+    // OA-01：审计操作身份进入装配层 checkpoint key——同一操作（含恢复重放）命中同一请求，
+    // 新操作（新 commandId / 新版本）得到新请求；不携带时保持旧派生，兼容既有在途 checkpoint。
+    ...(execution.mode === "check"
+      ? {
+        stage: execution.stage,
+        candidateSha256: contentSha256(candidate),
+        ...(execution.auditOperationId ? { auditOperationId: execution.auditOperationId } : {}),
+      }
+      : {}),
   };
+}
+
+/**
+ * R7：异常携带 audit 的消费依赖“操作归属”绑定——宿主装配层在 check 模式的角色调用
+ * 抛出 RoleAgentLoopError 时，把本次持久化的 auditOperationId 附加到异常上；图层只
+ * 消费标记与本次操作一致的异常，旧操作（含同字节 A→B→A）的异常不得成为当前登记。
+ */
+export async function withAuditOperationBinding<T>(
+  auditOperationId: string | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (caught) {
+    if (auditOperationId) {
+      // R9：沿 cause 链标记每个 RoleAgentLoopError——候选切换的包装异常的内层
+      // loop 错误同样获得本次操作的标记；旧操作重放的异常保持原标记并原样上抛。
+      let current: unknown = caught;
+      let depth = 0;
+      while (current instanceof Error && depth < 6) {
+        if (current instanceof RoleAgentLoopError) {
+          const bound = current as RoleAgentLoopError & { auditOperationId?: string };
+          if (bound.auditOperationId === undefined) {
+            bound.auditOperationId = auditOperationId;
+          } else if (bound.auditOperationId !== auditOperationId) {
+            throw bound;
+          }
+        }
+        const cause = (current as { cause?: unknown }).cause;
+        if (!(cause instanceof Error)) break;
+        current = cause;
+        depth += 1;
+      }
+    }
+    throw caught;
+  }
 }
 
 function planningReviewCheckResult(
   context: CreativePlanningContext,
   execution: CodexTaskExecution<unknown>,
-): { reviewCheck?: { audit: RoleAudit; checkIdentity: string } } {
+): { reviewCheck?: { audit: RoleAudit; checkIdentity: string; auditOperationId: string } } {
   if (context.creativeReviewExecution?.mode !== "check") return {};
+  // R3-01：宿主在装配层把本次持久化的审计操作身份注入结果绑定——模型输出不经手
+  // 该字段，图层用它核验「这份结论确实属于本次操作」而非任何同字节旧结果。
+  const auditOperationId = context.creativeReviewExecution.auditOperationId;
   const audit = execution.agentLoop?.iterations.at(-1)?.audit;
   const agentLoop = execution.agentLoop;
   if (!audit || !agentLoop) {
@@ -6910,6 +7043,7 @@ function planningReviewCheckResult(
         auditModelId: agentLoop.iterations.at(-1)?.auditTrace?.modelId ?? "unknown",
         contractVersion: agentLoop.contractVersion,
       }),
+      auditOperationId,
     },
   };
 }
@@ -7025,6 +7159,7 @@ function creativePlanningNode(
       let rankingArtifact: PlanningGraphState["ranking"];
       let executablePlanArtifact: PlanningGraphState["executablePlan"];
       let stockAcceptance: ReturnType<typeof confirmedStockDeliveryAcceptance>;
+      let finalCreativeReview: CreativeReviewState | undefined;
       // 图库路线的额外端口单独注解：spread 表达式内部得不到上下文类型推导。
       const libraryPorts: Pick<CreativePlanningPorts, "searchCandidates" | "rank" | "integrateDirector"> = {
           searchCandidates: async (planningContext) => {
@@ -7161,6 +7296,16 @@ function creativePlanningNode(
       try {
         // 端口适配：图内角色调用沿用旧节点的真实 agent、provider 注册表与合同校验。
         const ports: CreativePlanningPorts = {
+          ...(currentBrief.rework ? { reworkBaseline: {
+            ...(currentBrief.rework.previousScript ? { script: {
+              artifactId: planningArtifactId("rework-source-script", currentBrief.rework.previousScript),
+              output: currentBrief.rework.previousScript as unknown as ScriptDraft,
+            } } : {}),
+            ...(currentBrief.rework.previousDirectorPlan ? { director: {
+              artifactId: planningArtifactId("rework-source-director", currentBrief.rework.previousDirectorPlan),
+              output: currentBrief.rework.previousDirectorPlan as unknown as VisualDirectorPlan,
+            } } : {}),
+          } } : {}),
           treatment: async (planningContext) => {
             const lockedViewerPromise = acceptedViewerPromise(currentBrief);
             const seriesContext = creativeTreatmentSeriesContext(currentBrief.seriesContext);
@@ -7191,7 +7336,7 @@ function creativePlanningNode(
               ...(planningContext.creativeReviewExecution?.mode === "draft"
                 ? { creativeReviewExecution: { mode: "draft" as const } }
                 : planningContext.creativeReviewExecution?.mode === "check" && planningContext.treatment
-                  ? { creativeReviewExecution: { mode: "check" as const, candidate: planningContext.treatment.output } }
+                  ? { creativeReviewExecution: { mode: "check" as const, candidate: planningContext.treatment.output, auditOperationId: planningContext.creativeReviewExecution.auditOperationId } }
                   : {}),
               // 参考语法是风格/结构参考（不冒充事实证据），与剧本/导演共用同一已接受语法。
               ...(referenceGrammar ? { referenceGrammar } : {}),
@@ -7242,7 +7387,10 @@ function creativePlanningNode(
                 ? { selectedModelId: currentBrief.models[CREATIVE_TREATMENT_PROVIDER_ID] }
                 : {}),
             };
-            const treatmentExecution = await treatmentAgent.treatDetailed(treatmentInput);
+            const treatmentExecution = await withAuditOperationBinding(
+              planningContext.creativeReviewExecution?.mode === "check" ? planningContext.creativeReviewExecution.auditOperationId : undefined,
+              async () => treatmentAgent.treatDetailed(treatmentInput),
+            );
             if (treatmentExecution.trace?.modelId) {
               modelTraces.treatment = treatmentExecution.trace.modelId;
               providerTraces.treatment = treatmentExecution.trace.providerId;
@@ -7275,13 +7423,15 @@ function creativePlanningNode(
               brief: requestBrief,
               treatmentArtifactId: planningContext.treatment?.artifactId,
             };
-            const execution = await provider.run({
+            const execution = await withAuditOperationBinding(
+              planningContext.creativeReviewExecution?.mode === "check" ? planningContext.creativeReviewExecution.auditOperationId : undefined,
+              async () => provider.run({
               brief: requestBrief,
               planningMode: true,
               ...(planningContext.creativeReviewExecution?.mode === "draft"
                 ? { creativeReviewExecution: { mode: "draft" as const } }
                 : planningContext.creativeReviewExecution?.mode === "check" && planningContext.script
-                  ? { creativeReviewExecution: { mode: "check" as const, candidate: planningContext.script.output } }
+                  ? { creativeReviewExecution: { mode: "check" as const, candidate: planningContext.script.output, auditOperationId: planningContext.creativeReviewExecution.auditOperationId } }
                   : {}),
               ...(selectedScriptModelId ? { selectedModelId: selectedScriptModelId } : {}),
               agentLoopCheckpoint: nodeAgentLoopCheckpoint(
@@ -7308,7 +7458,7 @@ function creativePlanningNode(
                 resumeCompletedTextTaskRequestId,
                 recoverTextTask?.nodeId === "creative-planning" ? recoverTextTask.workflowOperationRequestId : undefined,
               ),
-            }, context);
+              }, context));
             if (execution.trace?.modelId) {
               modelTraces.script = execution.trace.modelId;
               providerTraces.script = execution.trace.providerId;
@@ -7429,7 +7579,9 @@ function creativePlanningNode(
               ...(costFeedback?.length ? { costFeedback } : {}),
               ...(planningContext.issues.length ? { issues: planningContext.issues } : {}),
             };
-            const execution = await provider.run({
+            const execution = await withAuditOperationBinding(
+              planningContext.creativeReviewExecution?.mode === "check" ? planningContext.creativeReviewExecution.auditOperationId : undefined,
+              async () => provider.run({
               brief: producerBrief,
               scenes,
               assetProviders,
@@ -7438,7 +7590,7 @@ function creativePlanningNode(
               ...(planningContext.creativeReviewExecution?.mode === "draft"
                 ? { creativeReviewExecution: { mode: "draft" as const } }
                 : planningContext.creativeReviewExecution?.mode === "check" && planningContext.directorPlan
-                  ? { creativeReviewExecution: { mode: "check" as const, candidate: planningContext.integratedPlan?.output ?? planningContext.directorPlan.output } }
+                  ? { creativeReviewExecution: { mode: "check" as const, candidate: planningContext.integratedPlan?.output ?? planningContext.directorPlan.output, auditOperationId: planningContext.creativeReviewExecution.auditOperationId } }
                   : {}),
               selectedModelId: selectedDirectorModelId,
               ...(costFeedback?.length ? { costFeedback } : {}),
@@ -7466,7 +7618,7 @@ function creativePlanningNode(
                 resumeCompletedTextTaskRequestId,
                 recoverTextTask?.nodeId === "creative-planning" ? recoverTextTask.workflowOperationRequestId : undefined,
               ),
-            }, context);
+              }, context));
             if (execution.trace?.modelId) {
               modelTraces.director = execution.trace.modelId;
               providerTraces.director = execution.trace.providerId;
@@ -7506,6 +7658,7 @@ function creativePlanningNode(
             try {
               execution = await agent.discussDetailed({
                 stage: discussion.stage,
+                requestMode: discussion.requestMode,
                 currentDocument: discussion.currentDocument,
                 context: {
                   effectiveUserInstructions: discussion.effectiveUserInstructions,
@@ -7560,22 +7713,45 @@ function creativePlanningNode(
           // 放宽任何一边都会让"手改的稿"和"生成的稿"活在两套合同里。
           validateEditedDraft: (stage, document, upstreamScript) => {
             if (stage === "script") {
-              validateScriptDraft(document, {
+              const draft = validateScriptDraft(document, {
                 durationSeconds: currentBrief.durationSeconds,
                 ...(currentBrief.durationRange ? { durationRange: currentBrief.durationRange } : {}),
                 requireCanonFacts: Boolean(currentBrief.seriesContext),
+              });
+              if (currentBrief.rework) reworkAffectedScenePositions({
+                findings: currentBrief.rework.findings,
+                ...(currentBrief.rework.previousScript ? { previousScenes: currentBrief.rework.previousScript.scenes } : {}),
+                ...(currentBrief.rework.previousDirectorPlan ? { previousShots: currentBrief.rework.previousDirectorPlan.shots } : {}),
+                currentScenes: draft.scenes,
+                ...(currentBrief.rework.affectedScenePositions !== undefined
+                  ? { affectedScenePositions: currentBrief.rework.affectedScenePositions }
+                  : {}),
               });
               return;
             }
             if (stage === "director") {
               const scriptDocument = (upstreamScript ?? {}) as { scenes?: unknown; viewerPromise?: unknown };
-              validateVisualDirectorPlan(document, visualDirectorPlanValidation(
+              const plan = validateVisualDirectorPlan(document, visualDirectorPlanValidation(
                 currentBrief,
                 parseDirectorScenes(scriptDocument.scenes),
                 options.assetProviders ?? [],
                 options.providerRuntimeMetadata ?? [],
                 optionalOutputString(scriptDocument.viewerPromise),
               ));
+              if (currentBrief.rework) reworkAffectedScenePositions({
+                findings: currentBrief.rework.findings,
+                ...(currentBrief.rework.previousScript ? { previousScenes: currentBrief.rework.previousScript.scenes } : {}),
+                ...(currentBrief.rework.previousDirectorPlan ? {
+                  previousShots: currentBrief.rework.previousDirectorPlan.shots,
+                  previousGlobalIntent: currentBrief.rework.previousDirectorPlan.visualBible,
+                } : {}),
+                currentScenes: parseDirectorScenes(scriptDocument.scenes),
+                currentShots: plan.shots,
+                ...(currentBrief.rework.previousDirectorPlan ? { currentGlobalIntent: plan.visualBible } : {}),
+                ...(currentBrief.rework.affectedScenePositions !== undefined
+                  ? { affectedScenePositions: currentBrief.rework.affectedScenePositions }
+                  : {}),
+              });
               return;
             }
             parseCreativeTreatment(document, treatmentSuppliedSources(currentBrief).map((source) => source.sourceId));
@@ -7778,6 +7954,9 @@ function creativePlanningNode(
               ...(outcome.state.planningStop
                 ? { planningStop: structuredClone(outcome.state.planningStop) }
                 : {}),
+              ...(outcome.state.scopeConflict
+                ? { scopeConflict: structuredClone(outcome.state.scopeConflict) }
+                : {}),
               ...(creativeReviewResume ? {
                 creativeReviewOperation: {
                   commandId: creativeReviewResume.commandId,
@@ -7829,6 +8008,7 @@ function creativePlanningNode(
         // 完成态只携带 executable plan：稿件/导演方案/候选/排序从终态 checkpoint 读取，
         // 保证崩溃恢复（同 thread 重放）也能重建全部正式产物。
         const finalState = ((await graph.getState(threadConfig))?.values ?? {}) as Partial<PlanningGraphState>;
+        finalCreativeReview = finalState.creativeReview;
         // 私有库存绑定的权威来源是 checkpoint 状态（随候选持久化）：播种/崩溃恢复后
         // 不依赖尚未写入的 history；本地闭包变量只覆盖本次执行内的新搜索。
         if (finalState.candidateInventoryBinding) {
@@ -8034,6 +8214,7 @@ function creativePlanningNode(
               directorPlanPath: committedPath("storyboard"),
               executablePlanPath: committedPath("executable_plan"),
               canonFacts: scriptArtifact.output.canonFacts ?? [],
+              ...(finalCreativeReview ? { creativeReviewHistory: finalCreativeReview } : {}),
               ...(libraryRoute ? {
                 candidateSearchPath: committedPath("asset_candidates"),
                 candidateRankingPath: committedPath("asset_ranking"),
@@ -8191,6 +8372,7 @@ function creativePlanningNode(
             directorPlanPath: reusedPath("storyboard"),
             executablePlanPath: reusedPath("executable_plan"),
             canonFacts: scriptArtifact.output.canonFacts ?? [],
+            ...(finalCreativeReview ? { creativeReviewHistory: finalCreativeReview } : {}),
             ...(libraryRoute ? {
               candidateSearchPath: reusedPath("asset_candidates"),
               candidateRankingPath: reusedPath("asset_ranking"),
@@ -8352,6 +8534,7 @@ function creativePlanningNode(
             directorPlanPath,
             executablePlanPath,
             canonFacts: scriptArtifact.output.canonFacts ?? [],
+            ...(finalCreativeReview ? { creativeReviewHistory: finalCreativeReview } : {}),
             ...(creativeReviewResume ? {
               creativeReviewOperation: {
                 commandId: creativeReviewResume.commandId,
@@ -9356,6 +9539,20 @@ interface PublishCopyOutcome {
   agentLoop?: AgentLoopTrace;
 }
 
+function contentReviewForCreator(loop: AgentLoopTrace | undefined): {
+  status: "passed" | "has_suggestions" | "not_audited";
+  summary: string;
+  suggestions: string[];
+} {
+  const audit = loop?.iterations.at(-1)?.audit;
+  if (!audit) return { status: "not_audited", summary: "本版没有独立审计结论，采用前请自行检查。", suggestions: [] };
+  return {
+    status: loop?.status === "passed" ? "passed" : "has_suggestions",
+    summary: audit.summary,
+    suggestions: audit.issues.map((issue) => issue.creatorAction ?? issue.repairInstruction).filter(Boolean),
+  };
+}
+
 // 未配置模型或普通服务故障可使用保守标题；已配置 Agent 的审计失败必须阻断，不能伪装成成功。
 async function generatePublishCopy(input: {
   writer: PublishCopyWriter | undefined;
@@ -9364,6 +9561,9 @@ async function generatePublishCopy(input: {
   checkpoint: ReturnType<typeof fileRoleAgentLoopCheckpoint>;
 }): Promise<PublishCopyOutcome> {
   if (!input.writer) return fallbackCopyOutcome(input.brief);
+  if (!input.writer.writeDetailed) {
+    throw new Error("Configured publish-copy writer does not support the initial independent audit; publication package was not created.");
+  }
   try {
     const narrations = await readNarrations(input.scriptPath);
     const request = {
@@ -9378,9 +9578,7 @@ async function generatePublishCopy(input: {
       narrations,
       agentLoopCheckpoint: input.checkpoint,
     };
-    const execution = input.writer.writeDetailed
-      ? await input.writer.writeDetailed(request)
-      : { output: await input.writer.write(request) };
+    const execution = await input.writer.writeDetailed(request);
     const copy = validatePublishCopy(execution.output);
     return {
       copy,
@@ -9391,7 +9589,9 @@ async function generatePublishCopy(input: {
     };
   } catch (error) {
     if (error instanceof RoleAgentLoopError) throw error;
-    return fallbackCopyOutcome(input.brief);
+    // 已配置的发行编辑失败不能降级成“发布文案已完成”。未配置 writer 的保守
+    // 标题由上方显式分支处理；配置后的失败保留在节点上，供用户修复后恢复。
+    throw error;
   }
 }
 

@@ -1,0 +1,693 @@
+{
+  "head": "7eb7a84e56ebadeac4ffd774c427029fb9cc15a6",
+  "generatedAt": "2026-09-23T02:48:01.664Z",
+  "sources": [
+    {
+      "path": "package.json",
+      "sha256": "9d33d8c17952df09a72fa56ddc4baa5fed8ed010718345171b95bcab7ba6a622",
+      "bytes": 2474,
+      "lineCount": 38,
+      "ranges": [
+        [
+          1,
+          38
+        ]
+      ],
+      "omitted": [],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/package.json",
+      "sha256": "528f02c5776ee519a14f7dcb5e918dd9763323d0dddcd3495d9a5188a4f33049",
+      "bytes": 2882,
+      "lineCount": 47,
+      "ranges": [
+        [
+          1,
+          47
+        ]
+      ],
+      "omitted": [],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/main.tsx",
+      "sha256": "55531e08f67aed861a7444a4f75a9c627c028e1dcf510cfc85495a680ba8d157",
+      "bytes": 647,
+      "lineCount": 26,
+      "ranges": [
+        [
+          1,
+          26
+        ]
+      ],
+      "omitted": [],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/App.tsx",
+      "sha256": "93bbeeb599ae66b3876a3c003448222562c7701edad0a31e65e3c6a0dab589e9",
+      "bytes": 1874,
+      "lineCount": 49,
+      "ranges": [
+        [
+          1,
+          49
+        ]
+      ],
+      "omitted": [],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/components/AppShell.tsx",
+      "sha256": "a28c7c53ddf71346311dec0fe564215121405083024af529381ff354360ea973",
+      "bytes": 17788,
+      "lineCount": 314,
+      "ranges": [
+        [
+          1,
+          314
+        ]
+      ],
+      "omitted": [],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/pages/HomePage.tsx",
+      "sha256": "9a119a0db50a539a323ddb8f5111816d7c140362b6d13058f43f8119d9160462",
+      "bytes": 7533,
+      "lineCount": 128,
+      "ranges": [
+        [
+          1,
+          128
+        ]
+      ],
+      "omitted": [],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/pages/ProductionPage.tsx",
+      "sha256": "37ede3536e6f06b2e9cec9642b3fb295c79654f239617fc2b78a2aac1d5f16cd",
+      "bytes": 5109,
+      "lineCount": 107,
+      "ranges": [
+        [
+          1,
+          107
+        ]
+      ],
+      "omitted": [],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/components/ProductionQueue.tsx",
+      "sha256": "9634e99250a4d33eda33d22d0ca2fe4182c7a157cefc574020121f325a6c946d",
+      "bytes": 17107,
+      "lineCount": 289,
+      "ranges": [
+        [
+          1,
+          240
+        ]
+      ],
+      "omitted": [
+        [
+          241,
+          289
+        ]
+      ],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/pages/RunPage.tsx",
+      "sha256": "dfc466238e9ff05f1696214969eb5ff1cd64fb1ca6b07216b7deb884c4651a92",
+      "bytes": 27638,
+      "lineCount": 624,
+      "ranges": [
+        [
+          1,
+          624
+        ]
+      ],
+      "omitted": [],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/components/RunWorkbench.tsx",
+      "sha256": "2e34cefaee7d249eb5aaed3639cfaa47d84e4164508a1a49a10349768933c361",
+      "bytes": 117517,
+      "lineCount": 1781,
+      "ranges": [
+        [
+          1,
+          817
+        ],
+        [
+          1547,
+          1780
+        ]
+      ],
+      "omitted": [
+        [
+          818,
+          1546
+        ],
+        [
+          1781,
+          1781
+        ]
+      ],
+      "nulBytes": 1
+    },
+    {
+      "path": "apps/studio/src/client/components/CreativeDiscussionPanel.tsx",
+      "sha256": "8a789d63736773dea15da9db9022227110a4d7c8e1ed86480caacb8839e4eebb",
+      "bytes": 32601,
+      "lineCount": 507,
+      "ranges": [
+        [
+          1,
+          507
+        ]
+      ],
+      "omitted": [],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/components/NodeWorkspace.tsx",
+      "sha256": "8f0ea45ab46f274d05ac5a8d1ef90b2d6d5586c39084c823f70d8eee5e205311",
+      "bytes": 85788,
+      "lineCount": 1353,
+      "ranges": [
+        [
+          1,
+          120
+        ],
+        [
+          350,
+          721
+        ]
+      ],
+      "omitted": [
+        [
+          121,
+          349
+        ],
+        [
+          722,
+          1353
+        ]
+      ],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/components/NewRunDialog.tsx",
+      "sha256": "b2b8bb097756eae9185782d105789329f13abe1e965af161c2511be398c3f57e",
+      "bytes": 103904,
+      "lineCount": 1763,
+      "ranges": [
+        [
+          1,
+          180
+        ],
+        [
+          390,
+          450
+        ],
+        [
+          666,
+          1267
+        ]
+      ],
+      "omitted": [
+        [
+          181,
+          389
+        ],
+        [
+          451,
+          665
+        ],
+        [
+          1268,
+          1763
+        ]
+      ],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/pages/ResourcesPage.tsx",
+      "sha256": "406b9762cc26132a3ef2e7cc114c6d084c87676d40df8698573c6030daceab4e",
+      "bytes": 75659,
+      "lineCount": 1051,
+      "ranges": [
+        [
+          113,
+          215
+        ],
+        [
+          300,
+          548
+        ],
+        [
+          754,
+          865
+        ]
+      ],
+      "omitted": [
+        [
+          1,
+          112
+        ],
+        [
+          216,
+          299
+        ],
+        [
+          549,
+          753
+        ],
+        [
+          866,
+          1051
+        ]
+      ],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/components/ModelLibrary.tsx",
+      "sha256": "67ce2ea574240b8bad987a7eb0f1e721dae818be1488bbc00c3a02cae477596e",
+      "bytes": 11136,
+      "lineCount": 128,
+      "ranges": [
+        [
+          1,
+          128
+        ]
+      ],
+      "omitted": [],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/components/StatusBadge.tsx",
+      "sha256": "5befbc655e38ec93e9dc630233587a98e2c81a37d0623df3787fbef4b9e77fe9",
+      "bytes": 1330,
+      "lineCount": 40,
+      "ranges": [
+        [
+          1,
+          40
+        ]
+      ],
+      "omitted": [],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/pages/AssetsPage.tsx",
+      "sha256": "f3a2f37f2ac16575b408c9c7118d2fef2108fc995bd3c8eba30c668502c277f1",
+      "bytes": 23599,
+      "lineCount": 380,
+      "ranges": [
+        [
+          1,
+          380
+        ]
+      ],
+      "omitted": [],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/pages/TodayPage.tsx",
+      "sha256": "bc4c38a9f459fd631c138082628021be73f4a6e9021b6aaf81d9ce56babe1acf",
+      "bytes": 41846,
+      "lineCount": 737,
+      "ranges": [
+        [
+          275,
+          640
+        ]
+      ],
+      "omitted": [
+        [
+          1,
+          274
+        ],
+        [
+          641,
+          737
+        ]
+      ],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/styles.css",
+      "sha256": "a5c5550db73278887c41599a91e67a5ba1915e57d81310fd087b54343f8efcec",
+      "bytes": 108977,
+      "lineCount": 1204,
+      "ranges": [
+        [
+          1,
+          100
+        ],
+        [
+          775,
+          805
+        ]
+      ],
+      "omitted": [
+        [
+          101,
+          774
+        ],
+        [
+          806,
+          1204
+        ]
+      ],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/studio-v3.css",
+      "sha256": "ab5291a6288d91dd393810ce830f74aad04d31be5651f4dbcf8fbcb0de3a5338",
+      "bytes": 129747,
+      "lineCount": 1284,
+      "ranges": [
+        [
+          1,
+          180
+        ],
+        [
+          505,
+          535
+        ]
+      ],
+      "omitted": [
+        [
+          181,
+          504
+        ],
+        [
+          536,
+          1284
+        ]
+      ],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/src/client/studio-cplus.css",
+      "sha256": "5bec83598cb4dcd5b4dc74f5ba6a06cf07f67ebf4354de5478f8c572e1588c7c",
+      "bytes": 161583,
+      "lineCount": 3080,
+      "ranges": [
+        [
+          1,
+          180
+        ],
+        [
+          350,
+          425
+        ],
+        [
+          570,
+          635
+        ],
+        [
+          1270,
+          1455
+        ],
+        [
+          1680,
+          1745
+        ],
+        [
+          1818,
+          1833
+        ],
+        [
+          1980,
+          2055
+        ],
+        [
+          2886,
+          3079
+        ]
+      ],
+      "omitted": [
+        [
+          181,
+          349
+        ],
+        [
+          426,
+          569
+        ],
+        [
+          636,
+          1269
+        ],
+        [
+          1456,
+          1679
+        ],
+        [
+          1746,
+          1817
+        ],
+        [
+          1834,
+          1979
+        ],
+        [
+          2056,
+          2885
+        ],
+        [
+          3080,
+          3080
+        ]
+      ],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/test/creative-discussion-panel.test.tsx",
+      "sha256": "893f319fbd5e380daa827c8e0fb4b3aed625f28ff718fd52780fce7d96544b25",
+      "bytes": 19977,
+      "lineCount": 345,
+      "ranges": [
+        [
+          1,
+          100
+        ]
+      ],
+      "omitted": [
+        [
+          101,
+          345
+        ]
+      ],
+      "nulBytes": 0
+    },
+    {
+      "path": "apps/studio/test/node-workspace.test.tsx",
+      "sha256": "375b5e90ac4be09790e11593b2d578586ead534af556b9c03a2ef43c3c8b7a26",
+      "bytes": 81263,
+      "lineCount": 1863,
+      "ranges": [
+        [
+          1,
+          100
+        ]
+      ],
+      "omitted": [
+        [
+          101,
+          1863
+        ]
+      ],
+      "nulBytes": 0
+    }
+  ],
+  "screenshots": [
+    {
+      "name": "00-onboarding-desktop.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/00-onboarding-desktop.png",
+      "level": "CURRENT",
+      "send": false,
+      "sha256": "cc2f3f3ae47310691cea4ad854fedefcf6c866bbb9dc8152be1c998dd3ba667c",
+      "width": 1440,
+      "height": 900,
+      "bytes": 143520
+    },
+    {
+      "name": "01-home-desktop.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/01-home-desktop.png",
+      "level": "CURRENT",
+      "send": true,
+      "sha256": "e5239bb44264ca78c07cca7b9aaa86587243325efe211c1160adde86286fa20c",
+      "width": 1440,
+      "height": 900,
+      "bytes": 131714
+    },
+    {
+      "name": "02-projects-desktop.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/02-projects-desktop.png",
+      "level": "CURRENT",
+      "send": true,
+      "sha256": "c6b2aafaf01f69b275ee3c494a624c5c3f2ae92f29c9123f6257bdbfc83b1297",
+      "width": 1440,
+      "height": 900,
+      "bytes": 79779
+    },
+    {
+      "name": "03-workbench-desktop.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/03-workbench-desktop.png",
+      "level": "CURRENT",
+      "send": true,
+      "sha256": "c69382fc0d65564e34387161838328cd64b51084b7d485abd15999bc982d1111",
+      "width": 1440,
+      "height": 900,
+      "bytes": 340839
+    },
+    {
+      "name": "04-assets-desktop.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/04-assets-desktop.png",
+      "level": "CURRENT",
+      "send": true,
+      "sha256": "f0ba9ecc707d2114816017187a4e5b45080e92abd9d5386ef33bd082175dd1fd",
+      "width": 1440,
+      "height": 900,
+      "bytes": 233336
+    },
+    {
+      "name": "05-models-desktop.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/05-models-desktop.png",
+      "level": "CURRENT",
+      "send": true,
+      "sha256": "b9a50dc8b88e87d02ed2adf054418a390b618f4ce3ce1c42ac51f5321b9b5f50",
+      "width": 1440,
+      "height": 900,
+      "bytes": 124032
+    },
+    {
+      "name": "06-roles-desktop.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/06-roles-desktop.png",
+      "level": "CURRENT",
+      "send": false,
+      "sha256": "a1b30b787aaad58a3b08fc1a61ae7fad69703a997921b26d2cf01af893636afb",
+      "width": 1440,
+      "height": 900,
+      "bytes": 133394
+    },
+    {
+      "name": "07-home-mobile.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/07-home-mobile.png",
+      "level": "CURRENT",
+      "send": false,
+      "sha256": "29fc076ee532fb04f0113cce8f5d757e4a24019fb4dd77e14d5611a681f4dd9f",
+      "width": 390,
+      "height": 844,
+      "bytes": 57860
+    },
+    {
+      "name": "08-workbench-mobile.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/08-workbench-mobile.png",
+      "level": "CURRENT",
+      "send": true,
+      "sha256": "94d839d09a9271f14ea8dc91865a037338cfba2d95ec79a81420099f6bc0d79b",
+      "width": 390,
+      "height": 844,
+      "bytes": 95633
+    },
+    {
+      "name": "09-models-mobile.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/09-models-mobile.png",
+      "level": "CURRENT",
+      "send": true,
+      "sha256": "b984d73bfc141dedd58101d96d7529ed4f38a38c1e3786d4556c983a46622f96",
+      "width": 390,
+      "height": 844,
+      "bytes": 65776
+    },
+    {
+      "name": "10-recovery-desktop.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/10-recovery-desktop.png",
+      "level": "CURRENT",
+      "send": true,
+      "sha256": "49d084877841a1cd5d2f59ad24f71358521ce76cdeeec29e0a592e24c8463a55",
+      "width": 1440,
+      "height": 900,
+      "bytes": 125131
+    },
+    {
+      "name": "11-new-run-desktop.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/11-new-run-desktop.png",
+      "level": "CURRENT",
+      "send": true,
+      "sha256": "76d1a3fd1cd704f9244229a43c7fd1242f4d502a63c31f1dc6ee124e48c1c928",
+      "width": 1440,
+      "height": 900,
+      "bytes": 184427
+    },
+    {
+      "name": "12-new-run-mobile.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/12-new-run-mobile.png",
+      "level": "CURRENT",
+      "send": true,
+      "sha256": "40adf71fa94b8c74e22baf144ffd8745910cb655a044d216ddb4464504c0ae0c",
+      "width": 390,
+      "height": 844,
+      "bytes": 66502
+    },
+    {
+      "name": "13-discussion-desktop.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/13-discussion-desktop.png",
+      "level": "CURRENT",
+      "send": true,
+      "sha256": "8e01df01c200ba804610a7611cf27abf80ade393ad2fbcae42f04f57ba4d37d2",
+      "width": 1440,
+      "height": 900,
+      "bytes": 244169
+    },
+    {
+      "name": "14-discussion-mobile.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/14-discussion-mobile.png",
+      "level": "CURRENT",
+      "send": true,
+      "sha256": "5f6b365aefb24b9d8ecae2b34099595ed4702d766bb34fcda9ae34350595c4c1",
+      "width": 390,
+      "height": 844,
+      "bytes": 84336
+    },
+    {
+      "name": "15-discussion-tablet.png",
+      "origin": "output/playwright/ui-ux-audit-20260923/15-discussion-tablet.png",
+      "level": "CURRENT",
+      "send": false,
+      "sha256": "d4b44ac0db83ff2ab8c9f30a69fe29948b2bb22a721ff10bd01f45d8cfcfcb30",
+      "width": 768,
+      "height": 1024,
+      "bytes": 189953
+    },
+    {
+      "name": "H01-spend-gate.png",
+      "origin": ".local/dogfood-20260921/qa/20260922/run-1278-awaiting-spend.png",
+      "level": "HISTORICAL",
+      "send": true,
+      "sha256": "e14693b9d0528eabb273c4632796078f9c0f11cb796405b499e5d4830a110a92",
+      "width": 643,
+      "height": 2000,
+      "bytes": 412899
+    },
+    {
+      "name": "H02-node-confirm.png",
+      "origin": ".local/dogfood-20260921/qa/20260922/run-c769-content-brief-confirm-modal.png",
+      "level": "HISTORICAL",
+      "send": true,
+      "sha256": "b50e56ccc011e3a687242cc8211dea591ae2a11dbe35881591a29ab923123b7a",
+      "width": 1280,
+      "height": 1764,
+      "bytes": 289443
+    }
+  ]
+}

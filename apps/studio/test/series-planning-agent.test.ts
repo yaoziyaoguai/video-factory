@@ -77,7 +77,7 @@ class RepairingClient extends CodexBridgeClient {
         score: 72,
         assessments,
         summary: "两集承诺重复。",
-        issues: [{ severity: "blocking", criterion: "单集独立价值", evidence: "两集 viewerPromise 相同", repairInstruction: "让第二集兑现成本判断" }],
+        issues: [{ severity: "blocking", criterion: "单集独立价值", evidence: "两集 viewerPromise 相同", repairInstruction: "让第二集兑现成本判断", creatorAction: "第二集请给观众一个明确的成本判断，不要重复第一集的实验。" }],
         repairInstructions: ["让第二集兑现成本判断"],
       } : {
         version: "video-factory/role-audit-v2",
@@ -120,28 +120,60 @@ describe("CodexSeriesPlanningAgent", () => {
       defaultModel = "m-next";
       return original(kind, payload);
     };
-    const agent = new CodexSeriesPlanningAgent(client, 3, undefined, async () => defaultModel);
+    const agent = new CodexSeriesPlanningAgent(client, undefined, async () => defaultModel);
     await agent.generate(series, 2);
-    assert.deepEqual(selected, ["m-first", "m-first", "m-first", "m-first"]);
+    assert.deepEqual(selected, ["m-first", "m-first"]);
     selected.length = 0;
     await agent.generate(series, 2);
     assert.deepEqual(selected, ["m-next", "m-next"]);
   });
 
-  it("repairs a roadmap through an independent audit before returning it", async () => {
+  it("returns the first roadmap with its independent advice without automatic rewriting", async () => {
     const client = new RepairingClient();
-    const result = await new CodexSeriesPlanningAgent(client, 3).generate(series, 2);
+    const result = await new CodexSeriesPlanningAgent(client).generate(series, 2);
 
-    assert.deepEqual(client.calls.map((call) => call.kind), ["series-roadmap", "role-audit", "series-roadmap", "role-audit"]);
-    assert.equal(result.drafts[1]?.viewerPromise, "得到明确成本判断");
-    assert.equal(result.planning.auditStatus, "passed");
-    assert.equal(result.planning.auditIterations, 2);
-    assert.equal(result.planning.auditScore, 91);
-    assert.equal(result.planning.auditSummary, "路线图有独立价值并形成递进。");
+    assert.deepEqual(client.calls.map((call) => call.kind), ["series-roadmap", "role-audit"]);
+    assert.equal(result.drafts[1]?.viewerPromise, "看见另一项任务能否完成");
+    assert.equal(result.planning.auditStatus, "awaiting_user");
+    assert.equal(result.planning.auditIterations, 1);
+    assert.equal(result.planning.auditScore, 72);
+    assert.equal(result.planning.auditSummary, "两集承诺重复。");
+    assert.deepEqual(result.planning.auditSuggestions, ["第二集请给观众一个明确的成本判断，不要重复第一集的实验。"]);
     assert.equal(result.planning.modelId, "gpt-5.4");
     assert.equal(result.planning.reasoningEffort, "xhigh");
-    const repairPayload = client.calls[2]?.payload as { revision?: unknown };
-    assert.ok(repairPayload.revision);
+  });
+
+  it("revises only the selected episode and resumes its one production request without an audit", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "vf-series-revision-recovery-"));
+    const episode = {
+      id: "episode-1", seriesId: series.id, episodeNumber: 1, seasonNumber: 1,
+      arc: series.currentSeason.arc, pillar: "真实任务实验", title: "旧稿",
+      viewerPromise: "验证真实任务", hook: "原开场", payoff: "给出结论",
+      canonBaseRevision: 0, status: "planned" as const,
+      contentVersionId: "episode-1#v1",
+      continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: ["继续验证"], canonChecks: [] },
+      planning: {
+        source: "agent" as const, role: "系列总编", auditRole: "独立质量复核",
+        auditStatus: "passed" as const, auditIterations: 1,
+        providerId: "fixture", modelId: "fixture", promptVersion: "fixture",
+      },
+      createdAt: series.createdAt, updatedAt: series.updatedAt,
+    };
+    const client = new InterruptingSeriesClient("series-roadmap", {
+      episodes: [{ ...draft(1, "真实任务实验", "旧稿", "验证真实任务"), hook: "新开场" }],
+    });
+    try {
+      const agent = new CodexSeriesPlanningAgent(client, directory);
+      const current = { ...series, episodes: [episode] };
+      await assert.rejects(() => agent.reviseEpisode(current, episode, "改开场"), /series response interrupted/);
+      const revised = await agent.reviseEpisode(current, episode, "改开场");
+      assert.equal(revised.draft.hook, "新开场");
+      assert.equal(revised.planning.auditStatus, "not_audited");
+      assert.deepEqual(client.calls, ["series-roadmap"]);
+      assert.deepEqual(client.observedKinds, ["series-roadmap"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("rejects duplicate promises and pillars outside the series bible", () => {
@@ -217,7 +249,7 @@ describe("CodexSeriesPlanningAgent", () => {
       }],
     } satisfies SeriesRecord;
 
-    const result = await new CodexSeriesPlanningAgent(new PassingClient(), 3).reviewEpisode(current, current.episodes[0]);
+    const result = await new CodexSeriesPlanningAgent(new PassingClient()).reviewEpisode(current, current.episodes[0]);
 
     assert.deepEqual(calls, ["role-audit"]);
     assert.equal(result.draft.title, "人工标题");
@@ -226,8 +258,9 @@ describe("CodexSeriesPlanningAgent", () => {
     assert.equal(result.planning.modelId, "gpt-5.6-sol");
   });
 
-  it("rejects a greenlight agent that rewrites creator-owned continuity requirements", async () => {
+  it("only audits the human episode and cannot auto-rewrite its continuity requirements", async () => {
     let audits = 0;
+    let productions = 0;
     class OverreachingClient extends CodexBridgeClient {
       constructor() { super({ socketPath: "/nonexistent/series-overreach.sock" }); }
       async runTaskDetailed(kind: CodexTaskKind): Promise<CodexTaskExecution> {
@@ -249,6 +282,7 @@ describe("CodexSeriesPlanningAgent", () => {
             repairInstructions: audits === 1 ? ["修订计划"] : [],
           } };
         }
+        productions += 1;
         return { output: { episodes: [{
           episodeNumber: 1,
           pillar: "真实任务实验",
@@ -294,10 +328,11 @@ describe("CodexSeriesPlanningAgent", () => {
       updatedAt: series.updatedAt,
     };
 
-    await assert.rejects(
-      () => new CodexSeriesPlanningAgent(new OverreachingClient(), 3).reviewEpisode({ ...series, episodes: [episode] }, episode),
-      /changed creator-owned fromPrevious/,
-    );
+    const result = await new CodexSeriesPlanningAgent(new OverreachingClient()).reviewEpisode({ ...series, episodes: [episode] }, episode);
+    assert.equal(audits, 1);
+    assert.equal(productions, 0);
+    assert.deepEqual(result.draft.fromPrevious, episode.continuity.fromPrevious);
+    assert.equal(result.planning.auditStatus, "awaiting_user");
   });
 
   it("resumes the saved series generation result before starting its audit", async () => {
@@ -309,7 +344,7 @@ describe("CodexSeriesPlanningAgent", () => {
       ],
     });
     try {
-      const agent = new CodexSeriesPlanningAgent(client, 3, directory);
+      const agent = new CodexSeriesPlanningAgent(client, directory);
       await assert.rejects(() => agent.generate(series, 2), /series response interrupted/);
 
       const result = await agent.generate(series, 2);
@@ -354,7 +389,7 @@ describe("CodexSeriesPlanningAgent", () => {
     };
     const client = new InterruptingSeriesClient("role-audit", { episodes: [draft(1, "真实任务实验", "人工标题", "验证真实任务")] });
     try {
-      const agent = new CodexSeriesPlanningAgent(client, 3, directory);
+      const agent = new CodexSeriesPlanningAgent(client, directory);
       const current = { ...series, episodes: [episode] };
       await assert.rejects(() => agent.reviewEpisode(current, episode), /series response interrupted/);
 
@@ -364,6 +399,10 @@ describe("CodexSeriesPlanningAgent", () => {
       assert.deepEqual(client.calls, ["role-audit"]);
       assert.deepEqual(client.observedKinds, ["role-audit"]);
       assert.equal(result.draft.title, "人工标题");
+
+      // 同一版恢复原请求；用户在已保存的审计之后再次主动审计，则必须是新操作。
+      await agent.reviewEpisode({ ...current, revision: current.revision + 1 }, episode);
+      assert.deepEqual(client.calls, ["role-audit", "role-audit"]);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

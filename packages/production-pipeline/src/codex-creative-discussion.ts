@@ -14,6 +14,7 @@ import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 
 export interface CreativeDiscussionAgentInput {
   stage: CreativeStage;
+  requestMode?: "discuss" | "revise";
   currentDocument: unknown;
   context: Record<string, unknown>;
   message: string;
@@ -43,6 +44,7 @@ export async function runCreativeDiscussionTask(
     ? await client.observePrepared(input.preparedOperation, requestOptions)
     : await client.runTaskDetailed("creative-discussion", {
       stage: input.stage,
+      ...(input.requestMode ? { requestMode: input.requestMode } : {}),
       currentDocument: input.currentDocument,
       context: input.context,
       message: input.message,

@@ -731,6 +731,10 @@ describe("Creative OS", () => {
       createdAt: "2026-08-24T09:00:00.000Z",
       updatedAt: "2026-08-24T09:00:00.000Z",
     });
+    const generate = vi.spyOn(studioApi, "generateSeriesRoadmap").mockImplementation(async () => ({
+      ...await create.mock.results[0]!.value,
+      revision: 2,
+    }));
     render(<MemoryRouter initialEntries={["/topics?mode=series"]}><TodayPage /></MemoryRouter>);
 
     await user.click(await screen.findByRole("button", { name: "新建系列" }));
@@ -748,6 +752,7 @@ describe("Creative OS", () => {
       tone: "克制、具体、有结论",
     }));
     expect(await screen.findByRole("option", { name: /AI 下班实验室/ })).toBeInTheDocument();
+    await waitFor(() => expect(generate).toHaveBeenCalledWith("series-1"));
   });
 
   it("keeps a legacy unsupported series readable but blocks new production", () => {
@@ -815,6 +820,68 @@ describe("Creative OS", () => {
     expect(screen.getByText(/这个历史系列使用的首发平台已不再支持新制作/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "历史单集" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /请先迁移到支持的平台/ })).toBeDisabled();
+  });
+
+  it("shows immutable series drafts with only their own audit and adoption evidence", async () => {
+    const base = seriesPublicAffairs();
+    const episode = base.episodes[0]!;
+    const current = { ...base, episodes: [{ ...episode,
+      contentVersionId: "series-v2",
+      versionHistory: [
+        { versionId: "series-v1", recordedAt: episode.createdAt, source: "agent" as const,
+          pillar: episode.pillar, title: "旧单集标题", viewerPromise: episode.viewerPromise,
+          hook: "旧开场", payoff: episode.payoff, fromPrevious: [], toNext: [] },
+        { versionId: "series-v2", recordedAt: episode.updatedAt, source: "human" as const,
+          pillar: episode.pillar, title: episode.title, viewerPromise: episode.viewerPromise,
+          hook: episode.hook, payoff: episode.payoff, fromPrevious: [], toNext: [] },
+      ],
+      auditHistory: [{ auditId: "audit-v1", targetVersionId: "series-v1", recordedAt: episode.createdAt,
+        status: "awaiting_user" as const, summary: "旧版开场没有交代来源。", providerId: "model", modelId: "model-a" }],
+      adoption: { targetVersionId: "series-v2", auditId: null, auditStatus: "not_audited" as const, adoptedAt: episode.updatedAt },
+    }] };
+    const user = userEvent.setup();
+    render(<MemoryRouter><TopicEntryWorkspace initialMode="series" selectedSeriesId={current.id}
+      inbox={inbox([seriesPublicAffairsBlockedCandidate()])} series={[current]} historicalRuns={[]} loading={{}}
+      trendMeta={{ platformCount: 0, candidateCount: 1 }} seriesAuditReady
+      onRetry={vi.fn()} onRefreshTrends={vi.fn()} onAdopt={vi.fn()} onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()} onUpdateSeriesEpisode={vi.fn()} onLinkLegacyRun={vi.fn()}
+      onRescanSeries={vi.fn()} onViewProductionRecords={vi.fn()} onManual={vi.fn()} onImport={vi.fn()} />
+    </MemoryRouter>);
+    await user.click(screen.getByText("查看本集历次稿件（2 版）"));
+    expect(screen.getByText("旧单集标题 · 看懂每条消息背后的来源")).toBeInTheDocument();
+    expect(screen.getByText(/旧版开场没有交代来源/)).toBeInTheDocument();
+    expect(screen.getByText("这版没有可核实的独立审计结论。")).toBeInTheDocument();
+    expect(screen.getByText(/第 2 版 · 当前稿 · 已采用/)).toBeInTheDocument();
+  });
+
+  it("appends selected series audit advice to the creator's unsent revision without sending automatically", async () => {
+    const base = seriesPublicAffairs();
+    const episode = base.episodes[0]!;
+    const current = { ...base, episodes: [{ ...episode, contentVersionId: "series-current-v1", planning: {
+      ...episode.planning,
+      auditStatus: "awaiting_user" as const,
+      auditSuggestions: ["把开场写成具体问题。", "结尾兑现本集承诺。"],
+    } }] };
+    const onRevise = vi.fn(async () => {});
+    const user = userEvent.setup();
+    render(<MemoryRouter><TopicEntryWorkspace initialMode="series" selectedSeriesId={current.id}
+      inbox={inbox([seriesPublicAffairsBlockedCandidate()])} series={[current]} historicalRuns={[]} loading={{}}
+      trendMeta={{ platformCount: 0, candidateCount: 1 }} seriesAuditReady
+      onRetry={vi.fn()} onRefreshTrends={vi.fn()} onAdopt={vi.fn()} onCreateSeries={vi.fn()}
+      onSelectSeries={vi.fn()} onUpdateSeriesEpisode={vi.fn()} onReviseSeriesEpisode={onRevise}
+      onLinkLegacyRun={vi.fn()} onRescanSeries={vi.fn()} onViewProductionRecords={vi.fn()}
+      onManual={vi.fn()} onImport={vi.fn()} />
+    </MemoryRouter>);
+    const input = screen.getByLabelText("修改这集的意见");
+    await user.type(input, "我还想保留原本的事实限定。");
+    await user.click(screen.getByRole("checkbox", { name: "把开场写成具体问题。" }));
+    await user.click(screen.getByRole("checkbox", { name: "结尾兑现本集承诺。" }));
+    await user.click(screen.getByRole("button", { name: "加入修改意见（2）" }));
+    expect(input).toHaveValue("我还想保留原本的事实限定。\n把开场写成具体问题。\n结尾兑现本集承诺。");
+    expect(onRevise).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "发送修订意见" }));
+    expect(onRevise).toHaveBeenCalledWith(current.id, episode.episodeNumber, current.revision,
+      "我还想保留原本的事实限定。\n把开场写成具体问题。\n结尾兑现本集承诺。");
   });
 
   it("offers persisted source supplements for a source-blocked series episode before adoption", async () => {
@@ -1804,7 +1871,7 @@ describe("Creative OS", () => {
     expect(await screen.findByRole("region", { name: "本季策划摘要" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /E01.*候选提案 20/ })).toBeInTheDocument();
     expect(screen.getByText("AI 系列总编")).toBeInTheDocument();
-    expect(screen.getByText("独立复核 2/3 轮通过")).toBeInTheDocument();
+    expect(screen.getByText("独立复核已通过（记录 2 次）")).toBeInTheDocument();
     expect(screen.getByText(/路线图有独立价值并形成递进.*91 分/)).toBeInTheDocument();
     expect(screen.getByText("深入推理")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "编辑路线图" })).toBeInTheDocument();

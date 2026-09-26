@@ -45,12 +45,13 @@ function safeStorageGet(key: string): string | null {
 
 export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDiscussionPanelProps) {
   const purposeKey = review.reviewPurpose ?? "draft";
-  const storageKey = `vf:creative-draft:${review.runId}:${review.stage}:${purposeKey}`;
+  const storageKey = `vf:creative-draft:${review.runId}:${review.stage}:${purposeKey}${review.draftVersionId ? `:${review.draftVersionId}` : ""}`;
   const commandStorageKey = `vf:creative-command:${review.runId}:${review.stage}:${purposeKey}`;
   const currentStorageKey = useRef(storageKey);
   currentStorageKey.current = storageKey;
   const [message, setMessage] = useState(() => safeStorageGet(storageKey) ?? "");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [selectedAuditIndexes, setSelectedAuditIndexes] = useState<number[]>([]);
   const [error, setError] = useState<string>();
   const [completionNotice, setCompletionNotice] = useState<string>();
   const [pendingCommandId, setPendingCommandId] = useState<string | undefined>(() => {
@@ -90,7 +91,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   const seenDraftIdentityRef = useRef<string | null>(null);
   const stageHandoffTimerRef = useRef<number | undefined>(undefined);
   const stageHandoffFrameRef = useRef<number | undefined>(undefined);
-  const draftIdentity = `${review.stage}:${purposeKey}:${review.draftArtifactId}:${review.draftSha256}`;
+  const draftIdentity = `${review.stage}:${purposeKey}:${review.draftVersionId ?? review.draftArtifactId}:${review.draftSha256}`;
   useEffect(() => {
     if (seenRunIdRef.current !== review.runId) {
       seenRunIdRef.current = review.runId;
@@ -142,7 +143,9 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   // 复核是"提议"而不是"否决"：此时确认仍然可用，但必须由人显式承担，并把被接受的意见记进
   // confirmation.acknowledgedRepair，事后能查到是谁在什么结论下放行的。
   const awaitingRepair = review.checkResult?.verdict === "repair";
+  const hasContentSuggestions = (review.checkResult?.issues.length ?? 0) > 0;
   const incompleteCheck = review.checkResult?.status === "incomplete";
+  const auditIssueIdentity = `${review.runId}:${review.stage}:${purposeKey}:${review.draftVersionId ?? review.draftArtifactId}:${review.draftSha256}:${review.checkResult?.checkIdentity ?? "unreviewed"}`;
   const qualityAdvisories = review.qualityAdvisories ?? [];
   const needsStockConsent = review.stage === "director" && review.reviewPurpose !== "direction" && qualityAdvisories.length > 0;
   const commandBase = useMemo(() => ({
@@ -161,6 +164,23 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       setStorageBroken(true);
     }
   }, [storageKey]);
+
+  useEffect(() => setSelectedAuditIndexes([]), [auditIssueIdentity]);
+
+  function appendAuditSuggestions() {
+    if (!review.checkResult || review.checkResult.status === "incomplete" || selectedAuditIndexes.length === 0) return;
+    const additions = selectedAuditIndexes
+      .map((index) => review.checkResult?.issues[index]?.creatorAction ?? review.checkResult?.issues[index]?.repairInstruction)
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+    const next = [message.trimEnd(), ...additions.map((value) => `- ${value}`)].filter(Boolean).join("\n");
+    if (next.length > 4000) {
+      setError("加入后会超过 4,000 字，请删减当前文字或少选几条；原输入已保留。");
+      return;
+    }
+    setMessage(next);
+    setSelectedAuditIndexes([]);
+    setMobileTab("discussion");
+  }
 
   useEffect(() => {
     try {
@@ -262,11 +282,15 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
     }
   }
 
-  function sendMessage() {
+  function sendMessage(action: "discuss" | "revise" = "discuss") {
     const text = message.trim();
-    if (!text || busy || !review.allowedActions.includes("discuss")) return;
+    if (!text || busy || !review.allowedActions.includes(action)) return;
+    if (text.length > 4000) {
+      setError("修改意见不能超过 4,000 字；请删减后再发送，原输入已保留。");
+      return;
+    }
     void submit({
-      action: "discuss",
+      action,
       commandId: crypto.randomUUID(),
       ...commandBase,
       message: text,
@@ -277,7 +301,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing || event.key !== "Enter" || !event.ctrlKey) return;
     event.preventDefault();
-    sendMessage();
+    sendMessage("discuss");
   }
 
   function openConfirmRisk() {
@@ -290,9 +314,9 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
     setIdentityStale(false);
     setPendingRisk({
       kind: "confirm",
-      dialogLabel: awaitingRepair ? "看过意见，仍然确认这一版？" : incompleteCheck ? "接受复核未完成的风险并采用？" : "接受素材风险，先制作首版？",
+      dialogLabel: "接受素材风险，先制作首版？",
       lines,
-      actionLabel: awaitingRepair ? "看过意见，仍采用本版" : incompleteCheck ? "接受复核未完成的风险并采用本版" : "接受素材风险，先制作首版",
+      actionLabel: "接受素材风险，先制作首版",
       identity: {
         runId: review.runId,
         stage: review.stage,
@@ -319,7 +343,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
 
   function confirmDraft() {
     if (busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")) return;
-    if (awaitingRepair || incompleteCheck || needsStockConsent) {
+    if (needsStockConsent) {
       openConfirmRisk();
       return;
     }
@@ -328,7 +352,15 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       commandId: crypto.randomUUID(),
       ...commandBase,
       ...(review.checkResult ? { expectedCheckIdentity: review.checkResult.checkIdentity } : {}),
+      ...(!review.checkResult ? { acknowledgeUnaudited: true as const } : {}),
+      ...(awaitingRepair ? { acknowledgeRepair: true as const } : {}),
+      ...(incompleteCheck ? { acknowledgeIncomplete: true as const } : {}),
     }).catch(() => undefined);
+  }
+
+  function auditCurrent() {
+    if (busy || hasUnsavedEdits || !review.allowedActions.includes("audit_current")) return;
+    void submit({ action: "audit_current", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined);
   }
 
   function returnToStage(target: StudioCreativeReviewSnapshot["returnTargets"][number]) {
@@ -420,6 +452,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
         <article id="creative-draft" tabIndex={0} className={`${mobileTab === "draft" ? "creative-draft-surface is-mobile-active" : "creative-draft-surface"}${stageHandoffActive ? " stage-handoff" : ""}`} aria-label={`当前${STAGE_LABEL[review.stage]}`}>
           {stageHandoffActive ? <i className="stage-handoff-rule" aria-hidden="true" /> : null}
           <h3 className="creative-current-draft-title">当前{STAGE_LABEL[review.stage]}</h3>
+          <p>{review.checkResult?.status === "incomplete" ? "审计未取得结论" : review.checkResult ? "本版已审计" : "本版未审计"}</p>
           {handoffNotice ? <p className="creative-handoff-notice" role="status">当前稿件已更新</p> : null}
           <CreativeDraftEditor storageKey={`${storageKey}:edit`} draftIdentity={`${review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} />
           <CreativeDraft stage={review.stage} value={review.draft} />
@@ -436,44 +469,28 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
             onChange={setSelectedIds}
           /></details>
           {review.previousDraft !== undefined ? <details><summary>查看上一版</summary><CreativeDraft stage={review.stage} value={review.previousDraft} /></details> : null}
-          {review.checkResult?.verdict === "repair" ? <section className="creative-check-result" role="status">
-            <strong>有 {review.checkResult.issues.length} 处需要调整，尚未进入下一步</strong>
+          <a href="#creative-review-history">查看完整创作版本记录</a>
+          {review.checkResult && review.checkResult.status !== "incomplete" && review.checkResult.issues.length > 0 ? <section className="creative-check-result" role="status">
+            <strong>{review.checkResult.verdict === "repair" ? `有 ${review.checkResult.issues.length} 处需要调整，尚未进入下一步` : `本版已审计 · ${review.checkResult.issues.length} 条可选建议`}</strong>
             <p>{review.checkResult.summary}</p>
-            <ul>{review.checkResult.issues.map((issue, index) => <li key={`${issue.criterion}:${index}`}>
-              <strong>{issue.criterion}</strong><span>{issue.repairInstruction}</span>
-              {/* 复核已经定位到具体条目，人不必再把字段级意见翻译成散文重述一遍；
-                  只预填不发送，改不改、怎么改仍由人按下发送键决定。 */}
-              <div className="creative-check-actions">
-                <button type="button" className="button button-secondary" disabled={busy} onClick={() => {
-                  setMessage([
-                    "只按下面这一条意见修改，不要扩大改动范围。",
-                    "",
-                    `意见：${issue.criterion}`,
-                    `复核给的修复指令：${issue.repairInstruction}`,
-                    `依据：${issue.evidence}`,
-                    "",
-                    "如果这条指令给了多个可选分支，请按最保守的一支执行，并说明你选了哪一支。",
-                  ].join("\n"));
-                  setMobileTab("discussion");
-                }}>按这条意见改</button>
-                <button type="button" className="button button-ghost" disabled={busy} onClick={() => {
-                  setMessage([
-                    "这条意见我不接受，理由如下：",
-                    "",
-                    "",
-                    "请保留当前做法，不要按这条意见改；如果你认为该判断成立，请说明依据。",
-                    "",
-                    `（原意见：${issue.criterion}）`,
-                  ].join("\n"));
-                  setMobileTab("discussion");
-                }}>这条我不同意</button>
-              </div>
+            <ul>{review.checkResult.issues.map((issue, index) => <li key={`${review.checkResult?.checkIdentity}:${index}`}>
+              <label><input type="checkbox" checked={selectedAuditIndexes.includes(index)} disabled={busy} aria-label={issue.creatorAction ?? issue.repairInstruction} onChange={(event) => setSelectedAuditIndexes((current) => event.target.checked ? [...current, index] : current.filter((value) => value !== index))} />
+                <span>{issue.creatorTitle ?? issue.creatorAction ?? issue.repairInstruction}</span>
+              </label>
+              {issue.creatorObservation ? <small>{issue.creatorObservation}</small> : issue.evidence ? <small>{issue.evidence}</small> : null}
+              {issue.creatorTitle && issue.creatorAction ? <p>{issue.creatorAction}</p> : null}
             </li>)}</ul>
+            <button type="button" className="button button-secondary" disabled={busy || selectedAuditIndexes.length === 0} onClick={appendAuditSuggestions}>加入修改意见（{selectedAuditIndexes.length}）</button>
           </section> : null}
           {/* 停在这里是因为自动循环推不动了，不是这一版做完了。不说出来，人会以为一切正常。 */}
           {review.stopDetail ? <section className="creative-check-result" role="status">
             <strong>自动检查已停止，需要你决定</strong>
             <p>{review.stopDetail}</p>
+          </section> : null}
+          {review.scopeConflict ? <section className="creative-check-result" role="status">
+            <strong>新方案超出了这次批准的返工范围</strong>
+            <p>涉及镜头 {review.scopeConflict.requiredScenePositions.join("、") || "当前方案"}。当前仍是旧方案；你可以在下方采用旧方案继续，或回到来源制作重新选择范围。扩大范围后仍须查看新报价，不能沿用旧费用授权。</p>
+            <a className="button button-secondary" href={`/projects/${encodeURIComponent(review.scopeConflict.sourceRunId)}`}>返回来源制作，调整返工范围</a>
           </section> : null}
           {hasBlockingIssues ? <section className="creative-check-result" role="status">
             <strong>素材选择需要你处理</strong>
@@ -483,9 +500,10 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
             </li>)}</ul>
           </section> : null}
           {review.proposals.map((proposal) => <section className="creative-proposal" key={proposal.proposalId}>
-            <header><strong>备选方案</strong><small>{proposal.changeSummary.join("；") || "可与当前方案比较"}</small></header>
+            <header><strong>{review.scopeConflict?.proposalId === proposal.proposalId ? "越界新稿 · 仅供比较" : "备选方案"}</strong><small>{proposal.changeSummary.join("；") || "可与当前方案比较"}</small></header>
             <CreativeDraft stage={review.stage} value={proposal.document} />
-            <button type="button" className="button button-secondary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("adopt_proposal")} onClick={() => void submit({ action: "adopt_proposal", commandId: crypto.randomUUID(), ...commandBase, proposalId: proposal.proposalId }).catch(() => undefined)}>采用这个备选</button>
+            {review.scopeConflict?.proposalId === proposal.proposalId ? <p>这份新稿尚未被采用；调整返工范围并重新报价前不能使用。</p>
+              : <button type="button" className="button button-secondary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("adopt_proposal")} onClick={() => void submit({ action: "adopt_proposal", commandId: crypto.randomUUID(), ...commandBase, proposalId: proposal.proposalId }).catch(() => undefined)}>采用这个备选</button>}
           </section>)}
         </article>
 
@@ -507,14 +525,15 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
             setUnseenMessages(false);
           }}>有新消息，查看 ↓</button> : null}
           <div className="creative-quick-prompts" aria-label="讨论提示">
-            {["解释这个安排", "开头不够吸引", "给我另一个方向，但先不要替换"].map((text) => <button type="button" key={text} disabled={busy} onClick={() => setMessage(text)}>{text}</button>)}
+            {["解释这个安排", "开头不够吸引", "给我另一个方向，但先不要替换"].map((text) => <button type="button" key={text} disabled={busy} onClick={() => setMessage((current) => [current.trimEnd(), text].filter(Boolean).join("\n"))}>{text}</button>)}
           </div>
           <label className="creative-composer">
             <span>聊聊你的想法</span>
-            <textarea value={message} maxLength={4000} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="例如：为什么这样开场？或者：把开头改得更直接一些。" />
+            <textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="例如：为什么这样开场？或者：把开头改得更直接一些。" />
             <small>Ctrl + Enter 发送；普通换行不会发送。</small>
           </label>
-          <button type="button" className="button button-secondary" disabled={busy || !message.trim() || !review.allowedActions.includes("discuss")} onClick={sendMessage}><Send aria-hidden="true" size={16} />{busy ? "正在处理…" : "发送"}</button>
+          <button type="button" className="button button-secondary" disabled={busy || !message.trim() || !review.allowedActions.includes("discuss")} onClick={() => sendMessage("discuss")}><Send aria-hidden="true" size={16} />{busy ? "正在处理…" : "只讨论"}</button>
+          <button type="button" className="button button-primary" disabled={busy || !message.trim() || !review.allowedActions.includes("revise")} onClick={() => sendMessage("revise")}>发送修订意见</button>
         </section>
       </div>
 
@@ -532,9 +551,10 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
         {review.returnTargets.map((target) => <button key={target.stage} type="button" className="button button-secondary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("return_to_stage")} title={target.impact} onClick={() => returnToStage(target)}><ArrowLeft aria-hidden="true" size={16} />{target.label}</button>)}
       </aside> : null}
       <footer className="creative-review-actions" id="creative-confirm-footer">
-        <div className="creative-confirm-context" tabIndex={-1}><strong>{hasUnsavedEdits ? "有未保存的手动修改" : review.reviewPurpose === "direction" ? "确认对象：当前导演初稿" : review.reviewPurpose === "material_plan" ? "确认对象：当前选材方案" : `确认对象：当前${STAGE_LABEL[review.stage]}`}</strong><small>{hasUnsavedEdits ? "先保存或放弃修改，再确认采用；不会提交编辑器里的未保存文字。" : "确认时会调用模型独立复核，但不会授权购买素材；有意见由你决定，后续付费仍需单独确认。"}</small></div>
+        <div className="creative-confirm-context" tabIndex={-1}><strong>{hasUnsavedEdits ? "有未保存的手动修改" : review.reviewPurpose === "direction" ? "确认对象：当前导演初稿" : review.reviewPurpose === "material_plan" ? "确认对象：当前选材方案" : `确认对象：当前${STAGE_LABEL[review.stage]}`}</strong><small>{hasUnsavedEdits ? "先保存或放弃修改，再确认采用；不会提交编辑器里的未保存文字。" : review.checkResult ? "采用不会重复审计当前稿，也不会授权购买素材；后续付费仍需单独确认。" : "本版尚未审计。你可主动审计，也可明确采用未审稿；后续付费仍需单独确认。"}</small></div>
         <button type="button" className="button button-ghost" disabled={busy || hasUnsavedEdits || review.previousDraft === undefined || !review.allowedActions.includes("undo_draft")} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button>
-        <button type="button" className="button button-primary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{needsStockConsent ? "接受素材风险，先制作首版" : incompleteCheck ? "接受复核未完成，采用本版" : awaitingRepair ? "看过意见，仍然确认" : hasBlockingIssues ? "修改后重新检查" : review.reviewPurpose === "direction" ? "采用导演初稿，开始选材" : review.reviewPurpose === "material_plan" ? "采用选材方案，继续制作" : "确认当前方案，继续"}</button>
+        <button type="button" className="button button-secondary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("audit_current")} onClick={auditCurrent}>审计当前版本</button>
+        <button type="button" className="button button-primary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{needsStockConsent ? "接受素材风险，先制作首版" : incompleteCheck ? "接受复核未完成，采用本版" : hasContentSuggestions ? "保留这些建议，仍采用" : !review.checkResult ? "采用本版（未审计）" : hasBlockingIssues ? "修改后重新检查" : review.reviewPurpose === "direction" ? "采用导演初稿，开始选材" : review.reviewPurpose === "material_plan" ? "采用选材方案，继续制作" : "确认当前方案，继续"}</button>
       </footer>
 
       {pendingRisk ? <div className="dialog-backdrop" role="presentation">
@@ -598,7 +618,7 @@ function sameCommandBody(left: StudioCreativeReviewCommandInput, right: StudioCr
   return JSON.stringify(withoutCommandLeft) === JSON.stringify(rightWithoutId);
 }
 
-function CreativeDraft({ stage, value }: { stage: StudioCreativeReviewSnapshot["stage"]; value: unknown }) {
+export function CreativeDraft({ stage, value }: { stage: StudioCreativeReviewSnapshot["stage"]; value: unknown }) {
   if (!isRecord(value)) return <p>当前方案暂时无法读取，请刷新后重试。</p>;
   if (stage === "treatment") return <div className="creative-readable-draft">
     <DraftField label="观众看完能得到什么" value={value.viewerPromise} />
@@ -629,8 +649,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * 人工修订编辑器（v1）：只暴露各阶段合同里的**文字性字段**——叙述、承诺、视觉规则的措辞、
  * 每段/每镜的描述文字。镜头增删、路线更换这类结构性改动会牵动排序/报价/画面证据，仍然走
- * 讨论或重新生成；文字修订在这里改完保存，走与 AI 修订完全相同的制度：换稿 → 停点重现 →
- * 确认时自动跑一轮新的独立复核。
+ * 讨论或重新生成；文字修订在这里改完保存，走与 AI 修订相同的制度：换稿 → 停点重现。
+ * 需要新审计时由用户主动触发，确认当前稿不会临时补审。
  */
 function CreativeDraftEditor({ storageKey, draftIdentity, stage, draft, busy, onSave, onDirtyChange }: {
   storageKey: string;
@@ -679,7 +699,7 @@ function CreativeDraftEditor({ storageKey, draftIdentity, stage, draft, busy, on
     <summary><FilePenLine aria-hidden="true" size={14} />手动修订这份稿件{dirty ? " · 有未保存修改" : ""}</summary>
     {/* 收起时不渲染字段：可读稿和编辑器里会出现相同文字，展开才挂载避免同一屏两份同文。 */}
     {open ? <>
-      <p className="creative-edit-state" role="status">{stale ? "当前方案已更新。你的未保存文字仍在下方，可先复制留存；请放弃旧稿修改、重新读取当前版本后再编辑。旧稿不能覆盖新稿。" : saving ? "正在保存修订，等待服务端确认…" : saveState === "failed" ? "保存未完成，输入仍保留。请查看错误后重试。" : dirty ? "修改尚未生效；保存后仍等你确认采用，确认时重新独立复核。" : saveState === "saved" ? "修订已保存。请核对当前稿，再确认采用。" : "可直接修改文字。保存不会自动采用或购买素材；确认采用时重新独立复核。"}</p>
+      <p className="creative-edit-state" role="status">{stale ? "当前方案已更新。你的未保存文字仍在下方，可先复制留存；请放弃旧稿修改、重新读取当前版本后再编辑。旧稿不能覆盖新稿。" : saving ? "正在保存修订，等待服务端确认…" : saveState === "failed" ? "保存未完成，输入仍保留。请查看错误后重试。" : dirty ? "修改尚未生效；保存后会形成未审新稿，等你决定是否审计或采用。" : saveState === "saved" ? "修订已保存。请核对当前稿，再决定是否审计或采用。" : "可直接修改文字。保存不会自动审计、采用或购买素材。"}</p>
       {dirty && editStorageBroken ? <p className="creative-storage-note" role="status">手工修订无法在本机保存；当前页面仍保留输入，关闭页面前请复制留存。</p> : null}
       {fields.map((field) => <label key={field.key} className="creative-edit-field">
         <span>{field.label}</span>

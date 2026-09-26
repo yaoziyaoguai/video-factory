@@ -1090,7 +1090,10 @@ describe("node production workspaces", () => {
     render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
       runId="run-nw"
       runRevision={2}
-      node={{ ...succeededNode, id: "voice", label: "配音", role: "声音导演", output: { voice: "female-chengshu", rate: 185 } }}
+      node={{ ...succeededNode, id: "voice", label: "配音", role: "声音导演", output: { voice: "female-chengshu", rate: 185 }, outputState: {
+        ...succeededNode.outputState!,
+        versions: [{ ...succeededNode.outputState!.versions[0]!, output: { voice: "female-chengshu", rate: 185 } }],
+      } }}
       runStatus="succeeded"
       artifacts={[
         {
@@ -1245,6 +1248,13 @@ describe("node production workspaces", () => {
         output: {
           summary: "需要调整",
           findings: [{ category: "pacing", severity: "warning", description: "转场过亮", suggestion: "移除闪白" }],
+        },
+        outputState: {
+          ...succeededNode.outputState!,
+          versions: [{ ...succeededNode.outputState!.versions[0]!, output: {
+            summary: "需要调整",
+            findings: [{ category: "pacing", severity: "warning", description: "转场过亮", suggestion: "移除闪白" }],
+          } }],
         },
       }}
       runStatus="stale"

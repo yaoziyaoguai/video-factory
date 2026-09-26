@@ -50,13 +50,19 @@ interface TopicEntryWorkspaceProps {
   adoptingId?: string;
   trendMeta: { platformCount: number; candidateCount: number; collectedAt?: string; generatedAt?: string; refreshedAt?: string };
   seriesAuditReady?: boolean;
+  generatingSeriesId?: string;
+  onGenerateSeriesRoadmap?: (seriesId: string) => Promise<void>;
   onRetry: (origin: StudioCandidateOrigin) => void;
   onRefreshTrends: () => void;
   onAdopt: (candidate: StudioCandidateInboxItem, verificationConfirmed?: boolean) => Promise<void>;
   onSupplementSources?: (candidate: StudioCandidateInboxItem) => void;
+  /** 热点候选修订：只产一版未审修订稿并追加进收件箱；原候选不变。 */
+  onReviseTrendCandidate?: (candidate: StudioCandidateInboxItem, instruction: string) => Promise<void>;
   onCreateSeries: () => void;
   onSelectSeries: (seriesId: string) => void;
   onUpdateSeriesEpisode: (seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput) => Promise<void>;
+  onAuditSeriesEpisode?: (seriesId: string, episodeNumber: number, expectedRevision: number) => Promise<void>;
+  onReviseSeriesEpisode?: (seriesId: string, episodeNumber: number, expectedRevision: number, instruction: string) => Promise<void>;
   onLinkLegacyRun: (seriesId: string, episodeNumber: number, runId: string) => Promise<void>;
   onRescanSeries: () => Promise<void>;
   onViewProductionRecords: () => void;
@@ -204,9 +210,13 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
               onSelect={setSelectedId}
               onAdopt={adopt}
               onUpdate={props.onUpdateSeriesEpisode}
+              {...(props.onAuditSeriesEpisode ? { onAudit: props.onAuditSeriesEpisode } : {})}
+              {...(props.onReviseSeriesEpisode ? { onRevise: props.onReviseSeriesEpisode } : {})}
               onLinkLegacyRun={props.onLinkLegacyRun}
               onRescan={props.onRescanSeries}
               onViewProductionRecords={props.onViewProductionRecords}
+              {...(props.onGenerateSeriesRoadmap ? { onGenerateRoadmap: props.onGenerateSeriesRoadmap } : {})}
+              generatingRoadmap={props.generatingSeriesId === selectedSeries.id}
               {...(props.onSupplementSources ? { onSupplementSources: props.onSupplementSources } : {})}
               {...(props.seriesAuditReady === undefined ? {} : { seriesAuditReady: props.seriesAuditReady })}
             />
@@ -246,7 +256,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
                       </button>
                     ))}
                   </div>
-                  {selected ? <CandidateDetail item={selected} adopting={props.adoptingId === selected.id} disabled={props.adoptingId !== undefined} onAdopt={() => adopt(selected)} {...(props.onSupplementSources ? { onSupplementSources: props.onSupplementSources } : {})} /> : null}
+                  {selected ? <CandidateDetail item={selected} adopting={props.adoptingId === selected.id} disabled={props.adoptingId !== undefined} onAdopt={() => adopt(selected)} {...(props.onSupplementSources ? { onSupplementSources: props.onSupplementSources } : {})} {...(props.onReviseTrendCandidate && selected.origin === "trend" ? { onRevise: props.onReviseTrendCandidate } : {})} /> : null}
                 </div>
               ) : <div className="filtered-empty"><BookOpenText aria-hidden="true" size={22} /><span>当前筛选下没有候选。</span>{hasActiveFilters ? <button className="button button-secondary" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setDeskView("all"); }}>清除筛选</button> : null}</div>}
             </>
@@ -276,11 +286,15 @@ function SeriesRoadmap({
   onSelect,
   onAdopt,
   onUpdate,
+  onAudit,
+  onRevise,
   onLinkLegacyRun,
   onRescan,
   onViewProductionRecords,
   onSupplementSources,
   seriesAuditReady,
+  onGenerateRoadmap,
+  generatingRoadmap,
 }: {
   series: StudioSeries;
   candidates: StudioCandidateInboxItem[];
@@ -290,20 +304,35 @@ function SeriesRoadmap({
   onSelect: (id: string) => void;
   onAdopt: (candidate: StudioCandidateInboxItem) => Promise<void>;
   onUpdate: (seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput) => Promise<void>;
+  onAudit?: (seriesId: string, episodeNumber: number, expectedRevision: number) => Promise<void>;
+  onRevise?: (seriesId: string, episodeNumber: number, expectedRevision: number, instruction: string) => Promise<void>;
   onLinkLegacyRun: (seriesId: string, episodeNumber: number, runId: string) => Promise<void>;
   onRescan: () => Promise<void>;
   onViewProductionRecords: () => void;
   onSupplementSources?: (candidate: StudioCandidateInboxItem) => void;
   seriesAuditReady?: boolean;
+  onGenerateRoadmap?: (seriesId: string) => Promise<void>;
+  generatingRoadmap: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [legacyRunId, setLegacyRunId] = useState("");
   const [showAllLegacyRuns, setShowAllLegacyRuns] = useState(false);
   const [legacyPending, setLegacyPending] = useState(false);
   const [legacyError, setLegacyError] = useState<string>();
+  const [auditPending, setAuditPending] = useState(false);
+  const [auditError, setAuditError] = useState<string>();
+  const [revisionInstruction, setRevisionInstruction] = useState("");
+  const [revisionPending, setRevisionPending] = useState(false);
+  const [revisionError, setRevisionError] = useState<string>();
+  const [selectedSuggestions, setSelectedSuggestions] = useState<number[]>([]);
   const detailRef = useRef<HTMLElement>(null);
   const episodes = [...series.episodes].sort((left, right) => left.episodeNumber - right.episodeNumber);
   const selectedEpisode = episodes.find((episode) => episode.id === selectedId) ?? episodes[0];
+  useEffect(() => {
+    setRevisionInstruction("");
+    setRevisionError(undefined);
+    setSelectedSuggestions([]);
+  }, [selectedEpisode?.contentVersionId, selectedEpisode?.id]);
   const selectedCandidate = selectedEpisode
     ? candidates.find((candidate) => candidate.id === selectedEpisode.id)
     : undefined;
@@ -313,9 +342,7 @@ function SeriesRoadmap({
     && selectedCandidate?.verification.status === "blocked";
   const mayAdopt = selectedEpisode?.status === "planned"
     && selectedCandidate?.seriesSequence?.status === "ready";
-  const needsGreenlight = selectedEpisode?.planning.auditStatus !== "passed";
-  const auditAvailabilityPending = needsGreenlight && seriesAuditReady === undefined;
-  const auditUnavailable = needsGreenlight && seriesAuditReady === false;
+  const auditUnavailable = selectedEpisode?.planning.auditStatus !== "passed" && seriesAuditReady === false;
   const unsupportedProductionPlatform = !isProductionPlatform(series.platform);
   const linkedRunIds = new Set(series.episodes.flatMap((episode) => episode.runId ? [episode.runId] : []));
   const allLegacyCandidates = historicalRuns.filter((run) => run.status === "succeeded" && !linkedRunIds.has(run.id));
@@ -354,6 +381,16 @@ function SeriesRoadmap({
           <div><dt>固定规则</dt><dd>{series.bible.rules.slice(0, 2).join("；")}</dd></div>
         </dl>
       </section>
+
+      {onGenerateRoadmap && series.episodes.length > 0 && series.episodes.every((episode) => episode.status === "planned" && episode.planning.source === "rules") ? (
+        <div className="candidate-cache-warning" role="status">
+          <AlertCircle aria-hidden="true" size={17} />
+          <span>当前是可编辑的规则路线图，尚无模型初稿和首审。</span>
+          <button className="button button-secondary" type="button" disabled={generatingRoadmap} onClick={() => void onGenerateRoadmap(series.id)}>
+            {generatingRoadmap ? "正在生成并审计…" : "生成并审计路线图"}
+          </button>
+        </div>
+      ) : null}
 
       {unsupportedProductionPlatform ? (
         <p className="series-lock-note" role="alert"><ShieldAlert aria-hidden="true" size={15} />这个历史系列使用的首发平台已不再支持新制作。请点击右上角“新建系列”，选择抖音、小红书或哔哩哔哩后迁移内容；原路线图仍可查看。</p>
@@ -395,15 +432,61 @@ function SeriesRoadmap({
                 <div><dt>推理</dt><dd>{planningReasoningLabel(selectedEpisode.planning)}</dd></div>
               </dl>
               {selectedEpisode.planning.auditSummary ? <p><strong>复核结论：</strong>{creatorFacingTechnicalText(selectedEpisode.planning.auditSummary)}{selectedEpisode.planning.auditScore !== undefined ? `（${selectedEpisode.planning.auditScore} 分）` : ""}</p> : null}
+              {selectedEpisode.planning.auditSuggestions?.length ? <div>
+                <ul aria-label="本集内容建议">{selectedEpisode.planning.auditSuggestions.map((suggestion, index) => <li key={`${index}:${suggestion}`}>
+                  {selectedEpisode.status === "planned" && onRevise ? <label><input type="checkbox" checked={selectedSuggestions.includes(index)} onChange={(event) => setSelectedSuggestions((current) => event.target.checked ? [...current, index] : current.filter((item) => item !== index))} />{creatorFacingTechnicalText(suggestion)}</label>
+                    : creatorFacingTechnicalText(suggestion)}
+                </li>)}</ul>
+                {selectedEpisode.status === "planned" && onRevise ? <button className="button button-ghost" type="button" disabled={selectedSuggestions.length === 0} onClick={() => {
+                  const additions = [...selectedSuggestions].sort((left, right) => left - right).map((index) => selectedEpisode.planning.auditSuggestions?.[index]).filter((value): value is string => Boolean(value));
+                  setRevisionInstruction((current) => [current, ...additions].filter(Boolean).join("\n"));
+                  setSelectedSuggestions([]);
+                }}>加入修改意见（{selectedSuggestions.length}）</button> : null}
+              </div> : null}
+              {selectedEpisode.versionHistory?.length ? <details className="series-version-history">
+                <summary>查看本集历次稿件（{selectedEpisode.versionHistory.length} 版）</summary>
+                <p>旧稿和旧审计仅供回看，不会作为当前稿的确认依据。</p>
+                <ol>{selectedEpisode.versionHistory.map((version, index) => {
+                  const audits = selectedEpisode.auditHistory?.filter((audit) => audit.targetVersionId === version.versionId) ?? [];
+                  return <li key={version.versionId}>
+                    <strong>第 {index + 1} 版{version.versionId === selectedEpisode.contentVersionId ? " · 当前稿" : ""}{selectedEpisode.adoption?.targetVersionId === version.versionId ? " · 已采用" : ""}</strong>
+                    <p>{version.title} · {version.viewerPromise}</p>
+                    <p>开场：{version.hook}；兑现：{version.payoff}</p>
+                    {audits.length ? <ul>{audits.map((audit) => <li key={audit.auditId}>审计于 {audit.recordedAt}：{creatorFacingTechnicalText(audit.summary ?? "没有文字总结")}{audit.suggestions?.length ? `；建议：${audit.suggestions.map(creatorFacingTechnicalText).join("；")}` : ""}</li>)}</ul>
+                      : <p>这版没有可核实的独立审计结论。</p>}
+                  </li>;
+                })}</ol>
+              </details> : <p>这条历史路线图没有完整版本记录；无法补造过去的审计。</p>}
+              {selectedEpisode.status === "planned" && onAudit ? <button className="button button-ghost" type="button" disabled={auditPending || seriesAuditReady === false} onClick={() => {
+                setAuditPending(true);
+                setAuditError(undefined);
+                void onAudit(series.id, selectedEpisode.episodeNumber, series.revision).catch((caught: unknown) => {
+                  setAuditError(caught instanceof Error ? caught.message : String(caught));
+                }).finally(() => setAuditPending(false));
+              }}>{auditPending ? "正在审计当前版本…" : "审计当前版本"}</button> : null}
+              {selectedEpisode.status === "planned" && onRevise ? <div className="series-revision-input">
+                <label htmlFor="series-revision-instruction">修改这集的意见</label>
+                <textarea id="series-revision-instruction" value={revisionInstruction} onChange={(event) => setRevisionInstruction(event.target.value)} placeholder="写下你希望系列总编调整的内容；生成新稿后不会自动审计或采用。" />
+                {revisionInstruction.length > 4_000 ? <p role="alert">修改意见超过 4,000 字，请删减后发送；已输入内容会保留。</p> : null}
+                <button className="button button-secondary" type="button" disabled={revisionPending || !revisionInstruction.trim() || revisionInstruction.length > 4_000} onClick={() => {
+                  setRevisionPending(true);
+                  setRevisionError(undefined);
+                  void onRevise(series.id, selectedEpisode.episodeNumber, series.revision, revisionInstruction).catch((caught: unknown) => {
+                    setRevisionError(caught instanceof Error ? caught.message : String(caught));
+                  }).finally(() => setRevisionPending(false));
+                }}>{revisionPending ? "正在生成单集新稿…" : "发送修订意见"}</button>
+                {revisionError ? <p role="alert">{revisionError}</p> : null}
+              </div> : null}
+              {auditError ? <p role="alert">{auditError}</p> : null}
               {selectedEpisode.planning.fallbackReason ? <p>{creatorFacingTechnicalText(selectedEpisode.planning.fallbackReason)}</p> : null}
             </section>
-            {auditUnavailable ? <p className="series-lock-note"><ShieldAlert aria-hidden="true" size={15} />开拍前独立质量复核尚未就绪，仍然可以进入制作；配置系列主理人后可拿到复核建议。<Link to="/resources#production-roles">去配置系列主理人</Link></p> : null}
+            {auditUnavailable ? <p className="series-lock-note"><ShieldAlert aria-hidden="true" size={15} />独立质量复核尚未就绪，仍可采用本版进入制作；配置系列主理人后可主动获取建议。<Link to="/resources#production-roles">去配置系列主理人</Link></p> : null}
             {blockedBy ? <p className="series-lock-note"><LockKeyhole aria-hidden="true" size={15} />第 {blockedBy} 集尚未定版；完成审片后，本集会自动继承最新已确认内容再解锁。</p> : null}
             {sourceBlocked && selectedCandidate ? <p className="series-lock-note" role="note"><ShieldAlert aria-hidden="true" size={15} />来源提醒（不影响你开工）：{selectedCandidate.verification.reasons[0]}</p> : null}
             {selectedEpisode.status === "planned" ? (
               <div className="series-episode-actions">
                 <button className="button button-secondary" type="button" disabled={adoptingId !== undefined} onClick={() => setEditing(true)}><PencilLine aria-hidden="true" size={16} />编辑路线图</button>
-                <button className="button button-primary" type="button" disabled={!mayAdopt || adoptingId !== undefined || unsupportedProductionPlatform} onClick={() => selectedCandidate && void onAdopt(selectedCandidate)}>{adoptingId === selectedEpisode.id ? "正在复核..." : unsupportedProductionPlatform ? "请先迁移到支持的平台" : blockedBy ? `完成第 ${blockedBy} 集后解锁` : auditAvailabilityPending ? "正在确认复核能力" : auditUnavailable ? "复核未就绪，仍然进入制作" : needsGreenlight ? "先复核，再进入制作" : sourceBlocked ? "仍然进入制作" : "采用本集并进入制作"}<ArrowRight aria-hidden="true" size={16} /></button>
+                <button className="button button-primary" type="button" disabled={!mayAdopt || adoptingId !== undefined || unsupportedProductionPlatform} onClick={() => selectedCandidate && void onAdopt(selectedCandidate)}>{adoptingId === selectedEpisode.id ? "正在采用…" : unsupportedProductionPlatform ? "请先迁移到支持的平台" : blockedBy ? `完成第 ${blockedBy} 集后解锁` : sourceBlocked ? "来源待补，仍然进入制作" : selectedEpisode.planning.auditStatus === "passed" ? "采用本集并进入制作" : "采用本版（未审或有建议），进入制作"}<ArrowRight aria-hidden="true" size={16} /></button>
                 {sourceBlocked && selectedCandidate && onSupplementSources ? (
                   <button className="button button-secondary" type="button" disabled={adoptingId !== undefined} onClick={() => onSupplementSources(selectedCandidate)}><ShieldAlert aria-hidden="true" size={16} />补充原始来源</button>
                 ) : null}
@@ -438,10 +521,11 @@ function SeriesRoadmap({
 }
 
 function planningAuditLabel(planning: StudioSeries["episodes"][number]["planning"]): string {
-  if (planning.auditStatus === "passed") return `独立复核 ${planning.auditIterations}/3 轮通过`;
-  // 不说"通过"：轮次跑完仍没判 pass 时审计明确要求过修复，只是它无权否决，交给你裁决。
-  if (planning.auditStatus === "awaiting_user") return `独立复核 ${planning.auditIterations}/3 轮未通过 · 建议已附上`;
-  if (planning.auditStatus === "stale") return "已定版内容更新 · 采用时先重审";
+  if (planning.auditStatus === "passed") return `独立复核已通过（记录 ${planning.auditIterations} 次）`;
+  // 历史记录可能不止一次；当前首稿只审一次，不能再把固定三轮写成产品规则。
+  if (planning.auditStatus === "awaiting_user") return `独立复核有建议（记录 ${planning.auditIterations} 次）`;
+  if (planning.auditStatus === "stale") return "上游内容已更新 · 可主动再审";
+  if (planning.auditStatus === "not_audited") return "本版未审；可直接采用或主动审计";
   if (planning.auditStatus === "human_override") return "人工修订 · 待后续复核";
   return "规则保底";
 }
@@ -532,7 +616,29 @@ function normalizeMatchText(value: string): string {
   return value.toLocaleLowerCase("zh-CN").replace(/[\s\p{P}\p{S}]+/gu, "");
 }
 
-function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSources }: { item: StudioCandidateInboxItem; adopting: boolean; disabled: boolean; onAdopt: () => Promise<void>; onSupplementSources?: (candidate: StudioCandidateInboxItem) => void }) {
+function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSources, onRevise }: { item: StudioCandidateInboxItem; adopting: boolean; disabled: boolean; onAdopt: () => Promise<void>; onSupplementSources?: (candidate: StudioCandidateInboxItem) => void; onRevise?: (candidate: StudioCandidateInboxItem, instruction: string) => Promise<void> }) {
+  const [revising, setRevising] = useState(false);
+  const [revisionInstruction, setRevisionInstruction] = useState("");
+  const [revisionBusy, setRevisionBusy] = useState(false);
+  const [revisionNote, setRevisionNote] = useState<string>();
+  const [revisionError, setRevisionError] = useState<string>();
+
+  async function sendCandidateRevision() {
+    const trimmed = revisionInstruction.trim();
+    if (!trimmed || !onRevise) return;
+    setRevisionBusy(true);
+    setRevisionError(undefined);
+    try {
+      await onRevise(item, trimmed);
+      setRevisionInstruction("");
+      setRevising(false);
+      setRevisionNote("已提交修订：修订稿以「本版未审」进入候选收件箱，原候选保持不变。");
+    } catch (caught) {
+      setRevisionError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setRevisionBusy(false);
+    }
+  }
   const adviceSkip = item.editorialDecision.verdict === "skip";
   const sourceShort = item.verification.status === "blocked";
   // 规则保底候选未经总编评估：内容潜力继续作为参考分展示，不把“尚未评估”投影成“总编评分 0”。
@@ -560,6 +666,42 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
       <p className="candidate-creation-label">创作建议 · 不代表外部事实或播放量保证</p>
       <blockquote>{item.hook}</blockquote>
       <p>{item.rationale}</p>
+      {(item.revisedFrom || item.auditStatus === "not_audited") ? <p className="candidate-revision-flag"><small>修订稿 · 本版未审（不自动审计；可主动审计或核对后采用）</small></p> : null}
+      {onRevise && item.origin === "trend" ? (
+        <div className="candidate-revision">
+          {revising ? (
+            <>
+              <label>
+                <span>修订意见</span>
+                <textarea
+                  aria-label="修订意见"
+                  value={revisionInstruction}
+                  rows={2}
+                  disabled={revisionBusy || disabled}
+                  onChange={(event) => { setRevisionInstruction(event.target.value); setRevisionError(undefined); }}
+                  placeholder="这条候选要怎么改？只产一版未审修订稿，最终以这里的文字为准。"
+                />
+              </label>
+              <button
+                className="button button-primary"
+                type="button"
+                disabled={revisionBusy || disabled || !revisionInstruction.trim()}
+                onClick={() => void sendCandidateRevision()}
+              >发送修订意见</button>
+              {revisionError ? <p role="alert">{revisionError}</p> : null}
+            </>
+          ) : (
+            <button
+              className="button button-secondary"
+              type="button"
+              disabled={disabled || revisionBusy}
+              aria-label={`修订 ${item.title}`}
+              onClick={() => setRevising(true)}
+            >修订</button>
+          )}
+          {revisionNote ? <p><small>{revisionNote}</small></p> : null}
+        </div>
+      ) : null}
       {item.visualProof ? <p className="candidate-visual-proof"><small>画面构思 · 尚未生成</small>{item.visualProof}</p> : null}
       <div className={`editorial-decision is-${item.editorialDecision.verdict}`}>
         <span>总编建议</span>
@@ -650,10 +792,13 @@ function isClearForProduction(item: StudioCandidateInboxItem): boolean {
 // 审计只出建议，但建议不能只存在于服务端：复核没判通过时把它的原话摆出来，
 // 否则用户面对一屏真模型候选，无从知道审计正要修哪里。
 function topicAuditAdvice(receipt: StudioTopicGenerationReceipt | undefined): string | undefined {
-  if (receipt?.auditStatus !== "awaiting_user") return undefined;
-  const advice = (receipt.auditRepairInstructions ?? []).slice(0, 3);
+  if (!receipt?.auditStatus) return undefined;
+  const advice = (receipt.auditSuggestions?.length ? receipt.auditSuggestions : receipt.auditRepairInstructions ?? []).slice(0, 3);
+  if (receipt.auditStatus === "passed" && advice.length === 0) return undefined;
   return [
-    "选题总编这轮独立复核未判通过，候选仍然可以直接进入制作；这是复核建议修复的点：",
+    receipt.auditStatus === "passed"
+      ? "这组选题已完成独立复核；以下是可选的内容改进建议，不影响你直接选择："
+      : "选题总编这轮独立复核未判通过，候选仍然可以直接进入制作；这是复核建议修复的点：",
     receipt.auditSummary,
     ...advice,
   ].filter((line): line is string => Boolean(line)).join(" ");

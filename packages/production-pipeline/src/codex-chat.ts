@@ -24,8 +24,8 @@ export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
   "asset-rank": "8693ee66be5e7db08d20c1847786e015734cda4f63d1c369f2141336dd31723b",
   "reference-grammar": "f14b46d1b3e675d21973b6f6ae8daf594b010409007473cdfaa5adbecb1dea8e",
   "visual-review": "7fc682f73d5750ae7776ec9e42f52a043c17e4258d95f368e03937b964e1b73a",
-  "role-audit": "b7959cc68e5edef85fb9aafba755e55a6040234e80c5e1892f81ae7a4df20e1d",
-  "creative-discussion": "e9197cfbf9705f74f1454f74ee0794708922ddf528c25eb45545212d8cf033af",
+  "role-audit": "dd891f720480c771517eb58da68a9a8ad591fec6183b13d9b6467acd0ab600ae",
+  "creative-discussion": "6369aaf6f1a5d61fc4e6be67f61be9c252a6e8e0ead13e07721b8223a0c35192",
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。
@@ -165,6 +165,9 @@ export interface RoleAuditIssue {
   criterion: string;
   evidence: string;
   repairInstruction: string;
+  creatorTitle?: string;
+  creatorObservation?: string;
+  creatorAction?: string;
 }
 
 export type RoleAuditDimension =

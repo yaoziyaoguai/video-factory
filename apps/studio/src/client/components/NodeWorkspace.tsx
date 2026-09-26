@@ -7,6 +7,9 @@ import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, creatorFacingTechnicalText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
+import { NodeDocumentCommands } from "./NodeDocumentCommands.js";
+import { NodeContentReview, nodeContentReview } from "./NodeContentReview.js";
+import { NodeDocumentHistory } from "./NodeDocumentHistory.js";
 import { unsplashPublicUrl } from "./UnsplashAttribution.js";
 import { hasStockAttribution, StockAttribution } from "./StockAttribution.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
@@ -38,12 +41,15 @@ interface NodeWorkspaceProps {
   onRequestPause?: () => Promise<void>;
   onOverride: (nodeId: string, input: StudioNodeOverrideInput) => Promise<void>;
   onInputOverride?: (nodeId: string, input: StudioNodeInputOverrideInput) => Promise<void>;
+  /** 发布文案的 AI 修订与主动再审；未接线的宿主不传，交付区不显示这两个控件。 */
+  onReviseDocument?: (nodeId: string, input: { instruction: string; expectedRunRevision: number; expectedVersionId: string; confirmTerminalEdit?: boolean }) => Promise<void>;
+  onAuditDocument?: (nodeId: string, input: { expectedRunRevision: number; expectedVersionId: string }) => Promise<void>;
   onConfigure?: (nodeId: string, input: StudioNodeExecutionConfigurationInput) => Promise<void>;
   onAuthorize: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, acceptedPlanDigest, artifacts, busy, readOnly = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, acceptedPlanDigest, artifacts, busy, readOnly = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
   const shouldOpenForAttention = node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
@@ -59,7 +65,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   // C2：已向服务端取得、正在向用户展示的报价；授权只接受这份报价。
   const [pendingQuote, setPendingQuote] = useState<{ quote: StudioProductionQuote; preparedAtRevision: number }>();
   const [spendRejectionNote, setSpendRejectionNote] = useState("");
-  const [draft, setDraft] = useState(() => pretty(node.output ?? effectiveOutput(node) ?? {}));
+  const [draft, setDraft] = useState(() => pretty(effectiveOutput(node) ?? node.output ?? {}));
   const [inputDraft, setInputDraft] = useState(() => pretty(effectiveInput(node) ?? {}));
   const [editingPlanningStageId, setEditingPlanningStageId] = useState<StudioPlanningEditableStage>();
   // 输入草稿基线绑定打开编辑器时观察到的 run revision 与输入版本：保存时使用基线，
@@ -152,7 +158,10 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     () => providers.filter((provider) => assetProviderIds.includes(provider.id)),
     [assetProviderIds, providers],
   );
-  const deliveryValue = documentPreview ?? node.output ?? effectiveOutput(node);
+  const deliveryValue = documentPreview ?? effectiveOutput(node) ?? node.output;
+  const contentReview = node.id === "reference-grammar" || node.id === "publish-package"
+    ? nodeContentReview(effectiveOutput(node) ?? node.output)
+    : undefined;
   const planningVersionArtifactIds = node.id === "creative-planning" ? effectiveVersion?.artifactIds ?? [] : [];
   const verifiedPlanningArtifactIds = new Set(planningStages?.flatMap((stage) => stage.artifactIds) ?? []);
   const planningArtifactIds = planningVersionArtifactIds.filter((id) => verifiedPlanningArtifactIds.has(id));
@@ -168,7 +177,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const canRequestPause = !readOnly && runStatus === "running" && node.status === "succeeded" && (hasDelivery || hasReviewableInput) && onRequestPause !== undefined;
 
   useEffect(() => {
-    if (!editing) setDraft(pretty(documentPreview ?? node.output ?? effectiveOutput(node) ?? {}));
+    if (!editing) setDraft(pretty(documentPreview ?? effectiveOutput(node) ?? node.output ?? {}));
   }, [documentPreview, editing, node]);
 
   useEffect(() => {
@@ -214,7 +223,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     const usesDocument = Boolean(editableArtifact && documentPreview !== undefined);
     setError(undefined);
     setEditingDocument(usesDocument);
-    setDraft(pretty(usesDocument ? documentPreview : node.output ?? effectiveOutput(node) ?? {}));
+    setDraft(pretty(usesDocument ? documentPreview : effectiveOutput(node) ?? node.output ?? {}));
     setEditing(true);
   }
 
@@ -634,7 +643,22 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             artifactIds={planningArtifactIds}
             artifacts={artifacts}
             publicationExpected={node.status === "succeeded"}
-          /> : editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <p className="node-workspace-error" role="alert">详细内容读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? node.output ?? effectiveOutput(node)} />}
+          /> : editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <p className="node-workspace-error" role="alert">详细内容读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? effectiveOutput(node) ?? node.output} />}
+          {contentReview && !editing ? <NodeContentReview value={contentReview} /> : null}
+          {contentReview && !editing && node.id === "publish-package" && onReviseDocument && onAuditDocument
+            ? <NodeDocumentCommands
+              nodeId={node.id}
+              runRevision={runRevision}
+              effectiveVersionId={effectiveVersion?.id ?? ""}
+              contentReview={contentReview}
+              busy={busy || readOnly}
+              onRevise={onReviseDocument}
+              onAudit={onAuditDocument}
+            />
+            : null}
+          {(node.id === "reference-grammar" || node.id === "publish-package") && !editing
+            ? <NodeDocumentHistory nodeId={node.id} outputState={node.outputState} artifacts={artifacts} />
+            : null}
           {audioArtifact?.contentUrl ? <div className={audioIsCurrent ? "node-audio-preview" : "node-audio-preview is-stale"}><div><strong>{audioIsCurrent ? "实际配音试听" : "上次生成的配音"}</strong>{!audioIsCurrent ? <small>当前文字已修改或上游已变化；继续生成后会更新声音。</small> : null}</div><audio aria-label={audioIsCurrent ? "实际配音试听" : "上次生成的配音试听"} src={audioArtifact.contentUrl} controls preload="metadata" /></div> : null}
           {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
         </section>

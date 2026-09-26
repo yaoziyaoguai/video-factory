@@ -11,9 +11,9 @@ import type {
   StudioTrendRefreshStatus,
   StudioTopicGenerationReceipt,
 } from "../shared/api.js";
-import { canonicalizeSourceUrl, manualSupplementEvidence } from "../shared/api.js";
+import { canonicalizeSourceUrl, manualSupplementEvidence, StudioInputError } from "../shared/api.js";
 import { buildTrendSourceCatalog } from "./provider-catalog.js";
-import { StudioNotFoundError } from "./studio-errors.js";
+import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 import { TrendGateway } from "./trend-gateway.js";
 import { TrendOpportunityAgent } from "./trend-opportunity-agent.js";
 
@@ -24,7 +24,7 @@ export interface TrendStudioOptions {
   cachePath?: string;
   cacheTtlMs?: number;
   trendGateway?: Pick<TrendGateway, "listServices" | "listSignals">;
-  trendAgent?: Pick<TrendOpportunityAgent, "listCandidates"> & Partial<Pick<TrendOpportunityAgent, "generationReceipt">>;
+  trendAgent?: Pick<TrendOpportunityAgent, "listCandidates"> & Partial<Pick<TrendOpportunityAgent, "generationReceipt" | "reviseCandidate">>;
   createRefreshId?: () => string;
   /** C3-E02：“换一批”的生成身份来源（默认随机 UUID）。 */
   createGenerationNonce?: () => string;
@@ -36,8 +36,8 @@ export interface TrendCandidateReadOptions {
 
 export class TrendStudio {
   private readonly gateway: Pick<TrendGateway, "listServices" | "listSignals">;
-  private readonly agent: (Pick<TrendOpportunityAgent, "listCandidates"> & Partial<Pick<TrendOpportunityAgent, "generationReceipt">>) | undefined;
-  private candidateCache: { expiresAt: number; values: StudioTrendCandidate[] } | undefined;
+  private readonly agent: (Pick<TrendOpportunityAgent, "listCandidates"> & Partial<Pick<TrendOpportunityAgent, "generationReceipt" | "reviseCandidate">>) | undefined;
+  private candidateCache: { expiresAt: number; cachedAt: string; values: StudioTrendCandidate[] } | undefined;
   private candidateLoading: Promise<StudioTrendCandidate[]> | undefined;
   private candidateLoadingForced = false;
   private queuedRefresh: Promise<StudioTrendCandidate[]> | undefined;
@@ -181,6 +181,48 @@ export class TrendStudio {
     });
   }
 
+  // 修订候选只产稿：调用模型的单次修订（零审计），修订稿以「本版未审」身份追加进收件箱，
+  // 原候选与其审计状态保持不变。必须绑定用户看到的候选包版本，刷新后旧目标失效。
+  async reviseCandidate(candidateId: string, expectedGenerationId: string, instruction: string): Promise<StudioTrendCandidate> {
+    if (this.options.cachePath) await this.hydrateCache();
+    if (this.sourceSupplementsPath()) await this.hydrateSupplements();
+    const trimmed = typeof instruction === "string" ? instruction.trim() : "";
+    if (!trimmed || [...trimmed].length > 4_000) {
+      throw new StudioInputError("修订意见需要 1 到 4000 字；超长时请删减后再发送，原文字不会被截断。");
+    }
+    if (!this.agent?.reviseCandidate) {
+      throw new StudioConflictError("当前没有可用的候选修订模型；原候选保持不变。");
+    }
+    const current = this.candidateCache?.values.find((item) => item.id === candidateId);
+    if (!current) {
+      throw new StudioNotFoundError("这条候选已经不在收件箱中，请刷新候选列表后再试。");
+    }
+    if (current.generationId !== expectedGenerationId) {
+      throw new StudioConflictError("候选列表已经刷新，你看到的这版候选已被替换；请刷新后对最新候选重新发送修订意见。");
+    }
+    const revised = await this.agent.reviseCandidate({ candidate: current, instruction: trimmed });
+    const entry: StudioTrendCandidate = {
+      ...revised,
+      generationId: `topic-rev-${(this.options.createGenerationNonce ?? randomUUID)()}`,
+      auditStatus: "not_audited",
+      revisedFrom: { candidateId, generationId: expectedGenerationId, instruction: trimmed },
+    };
+    // 缓存写盘与读取共用同一队列：先持久化整包，成功后才把修订候选发布进内存缓存。
+    await this.queueFileMutation(async () => {
+      const cache = this.candidateCache;
+      if (!cache) return;
+      const next = { ...cache, values: [...cache.values, entry] };
+      await this.persistCache({
+        schemaVersion: CANDIDATE_CACHE_SCHEMA_VERSION,
+        cachedAt: cache.cachedAt,
+        values: next.values,
+        ...(this.lastGenerationReceipt ? { generationReceipt: this.lastGenerationReceipt } : {}),
+      });
+      this.candidateCache = next;
+    });
+    return entry;
+  }
+
   private mergeCandidateSupplements(values: StudioTrendCandidate[]): StudioTrendCandidate[] {
     if (this.sourceSupplements.size === 0) return values;
     return values.map((candidate) => {
@@ -287,13 +329,18 @@ export class TrendStudio {
         ?? generationReceiptFromCandidates(values, cachedAt, this.agent
           ? undefined
           : "选题总编任务在本次启动时没有就绪，本轮只生成了本地规则保底线索。");
+      const versionedValues = values.map((candidate) => ({
+        ...candidate,
+        generationId: generationReceipt.generationId,
+        ...(generationReceipt.auditStatus ? { auditStatus: generationReceipt.auditStatus } : {}),
+      }));
       // 缓存写入与人工来源写入共用同一进程内文件队列，避免两套原子写交错。
-      await this.queueFileMutation(() => this.persistCache({ schemaVersion: CANDIDATE_CACHE_SCHEMA_VERSION, cachedAt, values, generationReceipt }));
+      await this.queueFileMutation(() => this.persistCache({ schemaVersion: CANDIDATE_CACHE_SCHEMA_VERSION, cachedAt, values: versionedValues, generationReceipt }));
       // 只有持久化生命周期结束后才发布新缓存，避免调用方看到新值时后台仍在改文件。
-      this.candidateCache = { expiresAt: Date.parse(cachedAt) + (this.options.cacheTtlMs ?? DAILY_CACHE_TTL_MS), values };
+      this.candidateCache = { expiresAt: Date.parse(cachedAt) + (this.options.cacheTtlMs ?? DAILY_CACHE_TTL_MS), cachedAt, values: versionedValues };
       this.lastGenerationReceipt = generationReceipt;
       this.nextAutomaticRefreshAt = 0;
-      return this.mergeCandidateSupplements(values);
+      return this.mergeCandidateSupplements(versionedValues);
     })();
     const loading = work.finally(() => {
       if (this.candidateLoading === loading) {
@@ -326,6 +373,7 @@ export class TrendStudio {
       if (!isPersistedCandidateCache(parsed)) return;
       this.candidateCache = {
         expiresAt: Date.parse(parsed.cachedAt) + (this.options.cacheTtlMs ?? DAILY_CACHE_TTL_MS),
+        cachedAt: parsed.cachedAt,
         values: parsed.values,
       };
       this.lastGenerationReceipt = parsed.generationReceipt;
@@ -408,7 +456,8 @@ function generationReceiptFromCandidates(
   const modelCandidate = values.find((candidate) => candidate.providerId !== "trend-heuristic-v1");
   const fallback = values.find((candidate) => candidate.generationFallback)?.generationFallback;
   return {
-    generationId: `topic-${Date.parse(generatedAt)}`,
+    // 固定时钟下的两次刷新也必须是不同候选包；时间戳不能当不可变版本身份。
+    generationId: `topic-${randomUUID()}`,
     generatedAt,
     modelInvoked: Boolean(modelCandidate || fallback),
     source: modelCandidate ? "editor-model" : "rule-fallback",

@@ -24,6 +24,7 @@ import {
   summarizeReworkImpact,
   RunLockedError,
   StaleRunRevisionError,
+  validatePublishCopy,
   type DispatchedProductionRun,
   type CreativePlanningStageInspection,
   type CodexPreparedOperation,
@@ -40,6 +41,8 @@ import {
   type ProductionVoiceTimingRevisionDraft,
   type ProductionVisualReinspectionDraft,
   type ProductionAuthorizationScope,
+  type PublishCopy,
+  type PublishCopyAuditExecution,
   type VisualReviewFinding,
   visualReviewFindingKey,
 } from "@video-factory/production-pipeline";
@@ -57,11 +60,14 @@ import {
   type StudioDecisionInput,
   type StudioCreativeReviewCommandInput,
   type StudioCreativeReviewCommandReceipt,
+  type StudioCreativeReviewHistory,
   type StudioCreativeReviewSnapshot,
   type StudioIntervention,
   type StudioNode,
   type StudioNodeInputOverrideInput,
   type StudioNodeExecutionConfigurationInput,
+  type StudioNodeDocumentRevisionInput,
+  type StudioNodeDocumentAuditInput,
   type StudioPlanningEditableStage,
   type StudioProductionAmendmentInput,
   type StudioProductionAuthorizationInput,
@@ -206,6 +212,28 @@ export interface ProductionStudioOptions {
   archiveStore: RunArchiveRepository;
   now?: () => Date;
   loadRejectedVisualResources?: (runId: string) => Promise<RejectedVisualResource[]>;
+  /**
+   * 「初稿审一次」合同 S4：发布文案的 AI 修订（只产稿）与主动再审（只审当前稿）。
+   * 未配置时如实报“没有可用的修订模型”，不退化成无审计的假成功。
+   */
+  documentCopyTools?: StudioDocumentCopyTools;
+}
+
+/** 发布文案交付的修订与再审端口；由宿主用带审计配置的 CodexPublishCopyWriter 装配。 */
+export interface StudioDocumentCopyTools {
+  revise(input: {
+    platform: string;
+    brief: { title: string; angle: string; audience: string; nicheSlug: string };
+    narrations: string[];
+    currentCopy: PublishCopy;
+    instruction: string;
+  }): Promise<PublishCopy>;
+  auditCurrent(input: {
+    platform: string;
+    brief: { title: string; angle: string; audience: string; nicheSlug: string };
+    narrations: string[];
+    copy: PublishCopy;
+  }): Promise<PublishCopyAuditExecution>;
 }
 
 export class ProductionStartDispatchedError extends Error {
@@ -311,7 +339,9 @@ export class ProductionStudio {
     const rejectedResources = this.options.loadRejectedVisualResources
       ? await this.options.loadRejectedVisualResources(run.id)
       : [];
-    const failedNodeError = [...run.nodeRuns].reverse().find((node) => node.status === "failed" && node.error)?.error;
+    const failedNode = [...run.nodeRuns].reverse().find((node) => node.status === "failed" && node.error);
+    const failedNodeError = failedNode?.error;
+    const failedScopeConflict = failedNode?.errorCode === "REWORK_SCOPE_CONFLICT";
     const failedNodeReason = failedNodeError ? redactManagedPathText(failedNodeError) : undefined;
     const manualRejectionReason = latestManualRejectionReason(run);
     const rejectionReason = manualRejectionReason
@@ -351,7 +381,7 @@ export class ProductionStudio {
     };
     // B5-R1：无法定位的拒绝说明进入 needs_scope——草稿打开等待用户选择范围，
     // 不默认全片，也不以空范围静默开跑。
-    const needsScope = reworkScopeUnresolved(draftScope);
+    const needsScope = failedScopeConflict || reworkScopeUnresolved(draftScope);
     // 历史运行可能把热点来源误存成目标平台；返工页仍需打开，让创作者明确重选。
     const brief = effectiveProductionBrief(run);
     const inheritedReferenceVideo = brief.workflowFeatures?.referenceGrammar && brief.referenceVideo
@@ -431,7 +461,9 @@ export class ProductionStudio {
       ],
       requiredAffectedScenePositions,
       scopeState: needsScope ? "needs_scope" as const : "resolved" as const,
-      ...(needsScope ? { scopePrompt: "这条返工还无法确定影响范围。请选择要重做的镜头，或确认整片重做。" } : {}),
+      ...(needsScope ? { scopePrompt: failedScopeConflict
+        ? "上一轮因实际改动超出已批准镜头范围而停止，原失败记录已保留。请先对照旧方案明确调整范围；不想扩大范围可关闭，不会发起新制作。扩大范围后仍须重新报价和确认费用。"
+        : "这条返工还无法确定影响范围。请选择要重做的镜头，或确认整片重做。" } : {}),
       ...(inheritedReferenceVideo ? {
         inheritedReferenceVideo: {
           label: inheritedReferenceVideo.label,
@@ -545,7 +577,9 @@ export class ProductionStudio {
     previousDirectorPlan: unknown,
   ): Promise<number[]> {
     const document = await this.readReworkDocument(run, "assets", "generation_jobs");
-    if (!document) return [];
+    // 尚未形成素材任务不代表内容影响为零。用已留档的脚本/分镜镜头宇宙给出保守范围，
+    // 仍需创作者确认范围，且后续报价/费用授权独立进行。
+    if (!document) return verifiedReworkScenePositions(previousScript, previousDirectorPlan) ?? [];
     const paidSummary = await this.options.pipeline.inspectPaidNode(run.id, "assets");
     const materializedLedgerPositions = new Set(paidSummary.items.flatMap((item) => (
       item.state === "materialized" ? [item.scenePosition] : []
@@ -1418,6 +1452,9 @@ export class ProductionStudio {
       expectedRunRevision: input.expectedRunRevision,
       reviewEvidenceId: input.reviewEvidenceId,
       ...(input.action === "approve" && input.acceptIncomplete === true ? { acceptIncomplete: true as const } : {}),
+      ...(input.contentVersionId ? { contentVersionId: input.contentVersionId } : {}),
+      ...(input.action === "approve" && input.acceptUnauditedContent === true ? { acceptUnauditedContent: true as const } : {}),
+      ...(input.action === "approve" && input.acceptContentSuggestions === true ? { acceptContentSuggestions: true as const } : {}),
       ...(input.note ? { note: input.note } : {}),
       ...(input.reviewDispositions ? { reviewDispositions: input.reviewDispositions } : {}),
     };
@@ -1495,6 +1532,8 @@ export class ProductionStudio {
     const stopDetail = rawPlanningStop && typeof rawPlanningStop.detail === "string"
       ? rawPlanningStop.detail
       : undefined;
+    const rawScopeConflict = isRecord(output?.scopeConflict) ? output.scopeConflict : undefined;
+    const reworkSourceRunId = effectiveProductionBrief(current).rework?.sourceRunId;
     const rawCheckResult = isRecord(stageState?.checkResult) ? stageState.checkResult : undefined;
     const checkResult: StudioCreativeReviewSnapshot["checkResult"] = rawCheckResult?.status === "incomplete"
       && typeof rawCheckResult.summary === "string" && typeof rawCheckResult.checkIdentity === "string"
@@ -1519,6 +1558,9 @@ export class ProductionStudio {
               criterion: issue.criterion,
               evidence: issue.evidence,
               repairInstruction: issue.repairInstruction,
+              ...(typeof issue.creatorTitle === "string" ? { creatorTitle: issue.creatorTitle } : {}),
+              ...(typeof issue.creatorObservation === "string" ? { creatorObservation: issue.creatorObservation } : {}),
+              ...(typeof issue.creatorAction === "string" ? { creatorAction: issue.creatorAction } : {}),
             }]
             : []
         )) : [],
@@ -1544,12 +1586,14 @@ export class ProductionStudio {
       } : {}),
       reviewRevision: continuation.reviewRevision,
       draftSha256: continuation.draftSha256,
+      ...(isRecord(stageState?.currentDraft) && typeof stageState.currentDraft.versionId === "string"
+        ? { draftVersionId: stageState.currentDraft.versionId } : {}),
       draftArtifactId,
       ...(artifact.id ? { draftContentUrl: `/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifact.id)}` } : {}),
       phase: current.creativeReviewOperations?.some((operation) => operation.stage === continuation.stage && operation.status === "running")
         ? "checking"
         : "waiting_user",
-      allowedActions: ["discuss", "adopt_proposal", "edit_draft", "undo_draft", "confirm", "return_to_stage"],
+      allowedActions: ["discuss", "revise", "audit_current", "adopt_proposal", "edit_draft", "undo_draft", "confirm", "return_to_stage"],
       returnTargets,
       draft: structuredClone(stageState?.currentDocument),
       ...(stageState?.previousDocument !== null && stageState?.previousDocument !== undefined
@@ -1570,7 +1614,66 @@ export class ProductionStudio {
         : [],
       ...(checkResult ? { checkResult } : {}),
       ...(stopDetail ? { stopDetail } : {}),
+      ...(rawScopeConflict && reworkSourceRunId && rawScopeConflict.stage === continuation.stage
+        && typeof rawScopeConflict.proposalId === "string"
+        && Array.isArray(rawScopeConflict.requiredScenePositions)
+        ? { scopeConflict: {
+          proposalId: rawScopeConflict.proposalId,
+          sourceRunId: reworkSourceRunId,
+          requiredScenePositions: rawScopeConflict.requiredScenePositions.filter((position): position is number => Number.isSafeInteger(position) && position > 0),
+        } } : {}),
     };
+  }
+
+  async creativeReviewHistory(runId: string): Promise<StudioCreativeReviewHistory | undefined> {
+    const current = await this.loadRequiredRun(runId);
+    const node = current.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning");
+    const output = isRecord(node?.output) ? node.output : undefined;
+    const review = isRecord(output?.creativeReviewHistory) ? output.creativeReviewHistory
+      : isRecord(output?.creativeReview) ? output.creativeReview : undefined;
+    if (!review || !isRecord(review.stages)) return undefined;
+    const entries: StudioCreativeReviewHistory["entries"] = [];
+    let legacyIncomplete = false;
+    for (const stage of ["treatment", "script", "director"] as const) {
+      const state = isRecord(review.stages[stage]) ? review.stages[stage] : undefined;
+      if (!state) continue;
+      const versions = Array.isArray(state.versionHistory) ? state.versionHistory : [];
+      if (!Array.isArray(state.versionHistory) && isRecord(state.currentDraft)) legacyIncomplete = true;
+      const audits = Array.isArray(state.auditHistory) ? state.auditHistory.filter(isRecord) : [];
+      const confirmations = Array.isArray(state.confirmationHistory)
+        ? state.confirmationHistory.filter(isRecord) : [];
+      for (const item of versions) {
+        if (!isRecord(item) || !isRecord(item.draft) || typeof item.draft.versionId !== "string") continue;
+        const versionId = item.draft.versionId;
+        const versionAudits = audits.filter((audit) => audit.versionId === versionId).flatMap((audit) => {
+          if (typeof audit.auditId !== "string" || !isRecord(audit.result)) return [];
+          const result = audit.result;
+          const status = result.status === "incomplete" ? "incomplete" as const
+            : result.verdict === "pass" ? "pass" as const
+              : result.verdict === "repair" ? "repair" as const : undefined;
+          if (!status) return [];
+          return [{
+            auditId: audit.auditId,
+            summary: typeof result.summary === "string" ? result.summary : "未留下可读结论",
+            status,
+            suggestions: Array.isArray(result.issues) ? result.issues.filter(isRecord)
+              .flatMap((issue) => typeof issue.creatorAction === "string" ? [issue.creatorAction] : typeof issue.repairInstruction === "string" ? [issue.repairInstruction] : []) : [],
+          }];
+        });
+        const decision = confirmations.find((confirmation) => confirmation.versionId === versionId);
+        entries.push({
+          stage, versionId, document: structuredClone(item.document), audits: versionAudits,
+          ...(decision && typeof decision.actor === "string" && typeof decision.confirmedAt === "string"
+            ? { confirmation: {
+              actor: decision.actor,
+              confirmedAt: decision.confirmedAt,
+              unauditedAdoption: decision.unauditedAdoption === true,
+              auditId: typeof decision.auditId === "string" ? decision.auditId : null,
+            } } : {}),
+        });
+      }
+    }
+    return { runId, legacyIncomplete, entries };
   }
 
   async commandCreativeReview(
@@ -1858,9 +1961,23 @@ export class ProductionStudio {
       overrideArtifacts = prepared.artifacts;
       humanDocumentPaths = prepared.cleanupPaths;
     }
+    // 旧产物没有 contentReview；本次文档保存由服务端补上“本版未审”元数据。
+    // 仅该受控路径扩展校验基线，普通 output 编辑仍不能自行伪造审计状态。
+    const validationReference = editsDocument
+      && (nodeId === "reference-grammar" || nodeId === "publish-package")
+      && isRecord(reference) && !("contentReview" in reference)
+      && isRecord(overrideOutput) && isRecord(overrideOutput.contentReview)
+      ? { ...reference, contentReview: overrideOutput.contentReview }
+      : reference;
+    // 审计状态由系统托管：普通 output 编辑与 reference 的 contentReview 不一致时直接拒绝。
+    // 主动再审走 auditNodeDocumentCurrent 专用通道，人工编辑不能把任何版本宣布为已审。
+    if (editsOutput && isRecord(reference) && "contentReview" in reference
+      && !isDeepStrictEqual((overrideOutput as Record<string, unknown>).contentReview, reference.contentReview)) {
+      throw new StudioInputError("审计状态由系统托管，不能在编辑交付时修改；请使用“审计当前版本”。");
+    }
     validateNodeOverrideOutput({
       output: overrideOutput,
-      reference,
+      reference: validationReference,
       nodeId,
       runRoot: path.join(this.options.workspaceRoot, "runs", runId),
       allowPathChanges: editsDocument,
@@ -1892,6 +2009,236 @@ export class ProductionStudio {
       }
       throw error;
     }
+  }
+
+  /** S4：发布文案 AI 修订——只产一次所授权的修订，零独立审计；产出为未审新稿并停在人工决定。 */
+  async reviseNodeDocument(
+    runId: string,
+    nodeId: string,
+    input: StudioNodeDocumentRevisionInput,
+    actor: string,
+  ): Promise<StudioRunDetail> {
+    if (nodeId !== "publish-package") {
+      throw new StudioInputError("当前只有发布文案支持 AI 修订；请选择发布文案交付后再发送修订意见。");
+    }
+    const instruction = typeof input.instruction === "string" ? input.instruction.trim() : "";
+    if (!instruction || [...instruction].length > 4_000) {
+      throw new StudioInputError("修订意见需要 1 到 4000 字；超长时请删减后再发送，原文字不会被截断。");
+    }
+    const tools = this.options.documentCopyTools;
+    if (!tools) throw new StudioConflictError("当前没有可用的发布文案修订模型；原稿保持不变。");
+    const context = await this.prepareNodeDocumentContext(runId, nodeId, {
+      expectedRunRevision: input.expectedRunRevision,
+      expectedVersionId: input.expectedVersionId,
+      confirmTerminalEdit: input.confirmTerminalEdit === true,
+    });
+    const brief = effectiveProductionBrief(context.run);
+    const [revisedCopy] = await Promise.all([
+      tools.revise({
+        platform: brief.platform,
+        brief: { title: brief.title, angle: brief.angle, audience: brief.audience, nicheSlug: brief.nicheSlug },
+        narrations: context.narrations,
+        currentCopy: context.copy,
+        instruction,
+      }),
+    ]);
+    const nextDocument = withRevisedPublishCopy(context.document, revisedCopy);
+    const prepared = await this.prepareDocumentOverride({
+      runId,
+      nodeId,
+      actor,
+      reference: context.reference,
+      nodeArtifactIds: context.nodeArtifactIds,
+      runArtifacts: context.run.artifacts,
+      document: { artifactId: context.artifact.id, content: nextDocument },
+      authorizedRunFiles: [],
+      revisionSource: "model-revision",
+    });
+    if (prepared.unchanged) {
+      throw new StudioConflictError("修订结果与当前稿相同，没有创建新版本；可以直接采用当前稿。");
+    }
+    validateNodeOverrideOutput({
+      output: prepared.output,
+      reference: context.reference,
+      nodeId,
+      runRoot: path.join(this.options.workspaceRoot, "runs", runId),
+      allowPathChanges: true,
+    });
+    try {
+      const updated = await this.options.pipeline.applyNodeOverride(runId, {
+        nodeId,
+        actor,
+        output: prepared.output,
+        artifacts: prepared.artifacts,
+        expectedVersionId: context.effectiveVersion.id,
+        allowTerminalEdit: context.terminalConfirmed,
+        schemaVersion: context.effectiveVersion.schemaVersion ?? "1",
+      });
+      const detail = this.toDetail(updated);
+      this.publish(detail);
+      return detail;
+    } catch (error) {
+      await Promise.all(prepared.cleanupPaths.map((candidate) => rm(candidate, { force: true }).catch(() => undefined)));
+      if (error instanceof StaleRunRevisionError || error instanceof NodeVersionConflictError || (error instanceof Error && /locked by another writer/.test(error.message))) {
+        throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重新发送修订意见。");
+      }
+      throw error;
+    }
+  }
+
+  /** S4：发布文案主动再审——只审当前精确稿一次，零产稿、零推进；审计身份写入 contentReview。 */
+  async auditNodeDocumentCurrent(
+    runId: string,
+    nodeId: string,
+    input: StudioNodeDocumentAuditInput,
+    actor: string,
+  ): Promise<StudioRunDetail> {
+    if (nodeId !== "publish-package") {
+      throw new StudioInputError("当前只有发布文案支持主动再审；请选择发布文案交付后再审计当前版本。");
+    }
+    const tools = this.options.documentCopyTools;
+    if (!tools) throw new StudioConflictError("当前没有可用的发布文案审计模型；原稿保持不变。");
+    const context = await this.prepareNodeDocumentContext(runId, nodeId, {
+      expectedRunRevision: input.expectedRunRevision,
+      expectedVersionId: input.expectedVersionId,
+      confirmTerminalEdit: false,
+    });
+    const brief = effectiveProductionBrief(context.run);
+    const execution = await tools.auditCurrent({
+      platform: brief.platform,
+      brief: { title: brief.title, angle: brief.angle, audience: brief.audience, nicheSlug: brief.nicheSlug },
+      narrations: context.narrations,
+      copy: context.copy,
+    });
+    const audit = execution.audit;
+    const previousReview = isRecord(context.reference) && isRecord(context.reference.contentReview)
+      ? context.reference.contentReview
+      : undefined;
+    const contentReview = {
+      status: audit.verdict === "pass" ? "passed" as const : "has_suggestions" as const,
+      summary: audit.summary,
+      suggestions: audit.issues
+        .map((issue) => issue.creatorAction ?? issue.repairInstruction)
+        .filter((value) => Boolean(value && value.trim())),
+      // 审计身份：用户在采用决定里引用的就是这组字段，不虚构、不沿用上一版。
+      auditId: `audit-${randomUUID()}`,
+      auditedAt: (this.options.now?.() ?? new Date()).toISOString(),
+      score: audit.score,
+      ...(previousReview?.auditId ? { previousAuditId: previousReview.auditId } : {}),
+    };
+    const reference = context.reference;
+    const output: Record<string, unknown> = { ...(reference as Record<string, unknown>), contentReview };
+    // 受控审计通道基线：contentReview 的字段集合由服务端本次审计决定（可能新增 auditId 等
+    // 托管字段），shape 校验以“reference 其它字段原样 + contentReview 本次写入”为准。
+    const validationReference = isRecord(reference)
+      ? {
+        ...reference,
+        ...(isRecord(output.contentReview)
+          ? { contentReview: {
+            ...(isRecord(reference.contentReview) ? reference.contentReview : {}),
+            ...output.contentReview,
+          } }
+          : {}),
+      }
+      : reference;
+    validateNodeOverrideOutput({
+      output,
+      reference: validationReference,
+      nodeId,
+      runRoot: path.join(this.options.workspaceRoot, "runs", runId),
+      allowPathChanges: false,
+    });
+    try {
+      const updated = await this.options.pipeline.applyNodeOverride(runId, {
+        nodeId,
+        actor,
+        output,
+        expectedVersionId: context.effectiveVersion.id,
+        allowTerminalEdit: false,
+        schemaVersion: context.effectiveVersion.schemaVersion ?? "1",
+      });
+      const detail = this.toDetail(updated);
+      this.publish(detail);
+      return detail;
+    } catch (error) {
+      if (error instanceof StaleRunRevisionError || error instanceof NodeVersionConflictError || (error instanceof Error && /locked by another writer/.test(error.message))) {
+        throw new StudioConflictError("这条制作已被其他操作更新，请刷新后再审计当前版本。");
+      }
+      throw error;
+    }
+  }
+
+  /** 文档级命令（AI 修订 / 主动再审）共用的前置校验与当前稿读取。 */
+  private async prepareNodeDocumentContext(
+    runId: string,
+    nodeId: string,
+    input: { expectedRunRevision: number; expectedVersionId: string; confirmTerminalEdit: boolean },
+  ): Promise<{
+    run: WorkflowRun<ProductionBrief>;
+    node: WorkflowRun<ProductionBrief>["nodeRuns"][number];
+    reference: unknown;
+    document: Record<string, unknown>;
+    copy: PublishCopy;
+    narrations: string[];
+    artifact: WorkflowRun<ProductionBrief>["artifacts"][number];
+    nodeArtifactIds: string[];
+    effectiveVersion: NonNullable<WorkflowRun<ProductionBrief>["nodeRuns"][number]["outputState"]>["versions"][number];
+    terminalConfirmed: boolean;
+  }> {
+    const current = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(current);
+    if (current.status === "running") {
+      throw new StudioConflictError("制作仍在执行，暂时不能修改交付。请等待它停在确认点后再操作。");
+    }
+    const terminalConfirmed = isTerminalRun(current.status) && input.confirmTerminalEdit;
+    if (isTerminalRun(current.status) && !terminalConfirmed) {
+      throw new StudioConflictError("这条制作已经结束。请刷新后明确确认再创建新版本。");
+    }
+    if (current.nodeRuns.some((candidate) => candidate.outcomeUncertain)) {
+      throw new StudioConflictError("这条制作还有付费结果尚未核对，暂时不能修改内容。请先完成任务与账单核对。");
+    }
+    if (current.revision !== input.expectedRunRevision) {
+      throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
+    }
+    const node = current.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
+    if (!node) throw new StudioInputError(`没有找到制作步骤“${nodeId}”。`);
+    const effectiveVersion = node.outputState?.versions.find((version) => version.id === node.outputState?.effectiveVersionId);
+    if (!effectiveVersion || effectiveVersion.id !== input.expectedVersionId) {
+      throw new StudioConflictError("你查看的交付版本已经更新，请刷新页面后重试。");
+    }
+    const reference = effectiveVersion.output ?? node.output;
+    if (!isRecord(reference)) throw new StudioInputError("当前交付还没有可编辑的详细内容。");
+    const contract = EDITABLE_DOCUMENTS[nodeId];
+    const artifact = current.artifacts.find((candidate) => (
+      effectiveVersion.artifactIds.includes(candidate.id)
+      && candidate.kind === contract?.kind
+      && candidate.contentType === "application/json"
+      && Boolean(candidate.uri)
+    ));
+    if (!artifact?.uri) throw new StudioInputError("当前交付的详细内容无法定位，请刷新后重试。");
+    const runRoot = path.join(this.options.workspaceRoot, "runs", runId);
+    await assertContainedFile(runRoot, artifact.uri);
+    let document: unknown;
+    try {
+      document = JSON.parse(await readFile(artifact.uri, "utf8"));
+    } catch {
+      throw new StudioInputError("当前结构化产物无法读取，请先重新生成该节点。");
+    }
+    if (!isRecord(document)) throw new StudioInputError("当前结构化产物不是 JSON 对象，无法修订。");
+    const copy = extractPublishCopy(document);
+    const narrations = await readRunScriptNarrations(current, this.options.workspaceRoot, runId);
+    return {
+      run: current,
+      node,
+      reference,
+      document,
+      copy,
+      narrations,
+      artifact,
+      nodeArtifactIds: node.artifactIds,
+      effectiveVersion,
+      terminalConfirmed,
+    };
   }
 
   async applyNodeInputOverride(
@@ -2007,8 +2354,9 @@ export class ProductionStudio {
     runArtifacts: WorkflowRun<ProductionBrief>["artifacts"];
     document: NonNullable<StudioNodeOverrideInput["document"]>;
     authorizedRunFiles: string[];
-  }): Promise<
-    | { unchanged: true }
+    /** 修订来源决定落盘目录、产物出处与“本版未审”文案；人工编辑与 AI 修订都产未审新稿。 */
+    revisionSource?: "human" | "model-revision";
+  }): Promise<| { unchanged: true }
     | { unchanged: false; output: Record<string, unknown>; artifacts: ArtifactDraft[]; cleanupPaths: string[] }
   > {
     const contract = EDITABLE_DOCUMENTS[options.nodeId];
@@ -2059,10 +2407,20 @@ export class ProductionStudio {
     });
 
     const revisionId = randomUUID();
+    const revisionSource = options.revisionSource ?? "human";
     const content = `${JSON.stringify(mediaRevision.document, null, 2)}\n`;
-    const destination = path.join(runRoot, "nodes", options.nodeId, "human-revisions", `${revisionId}.json`);
+    const destination = path.join(runRoot, "nodes", options.nodeId, revisionSource === "model-revision" ? "model-revisions" : "human-revisions", `${revisionId}.json`);
     const output = structuredClone(options.reference);
     output[contract.pathField] = destination;
+    if (options.nodeId === "reference-grammar" || options.nodeId === "publish-package") {
+      output.contentReview = {
+        status: "not_audited",
+        summary: revisionSource === "model-revision"
+          ? "AI 修订后的本版尚未重新审计，可以主动审计或直接采用。"
+          : "人工修改后的本版尚未重新审计。",
+        suggestions: [],
+      };
+    }
     const privateRevision = options.nodeId === "asset-candidates"
       ? await prepareCandidateInventoryRevision(runRoot, options.reference, mediaRevision.document, revisionId)
       : undefined;
@@ -2096,12 +2454,19 @@ export class ProductionStudio {
         ...(artifact.schemaVersion ? { schemaVersion: artifact.schemaVersion } : {}),
         parentArtifactIds: [artifact.id],
         producer: { nodeId: options.nodeId, attempt: artifact.producer?.attempt ?? 1 },
-        provenance: {
-          providerId: "human-editor",
-          providerVersion: "1",
-          creator: options.actor,
-          licenseNote: "Human-edited derivative retained as an immutable revision.",
-        },
+        provenance: revisionSource === "model-revision"
+          ? {
+            providerId: "ai-revision",
+            providerVersion: "1",
+            creator: options.actor,
+            licenseNote: "Model-revised derivative retained as an immutable unaudited revision.",
+          }
+          : {
+            providerId: "human-editor",
+            providerVersion: "1",
+            creator: options.actor,
+            licenseNote: "Human-edited derivative retained as an immutable revision.",
+          },
       }, ...mediaRevision.artifacts, ...(privateRevision ? [{
         kind: "candidate_inventory_private",
         uri: privateRevision.destination,
@@ -4658,6 +5023,61 @@ function requiredEditableText(value: unknown, label: string, maximum: number): s
   return value.trim();
 }
 
+/** 发布包文档中的有效文案；以硬校验兜底，避免把旧版手工字段当成可修订的当前稿。 */
+function extractPublishCopy(document: Record<string, unknown>): PublishCopy {
+  const copy = isRecord(document.copy) ? document.copy : document;
+  return validatePublishCopy({
+    title: copy.title,
+    description: copy.description,
+    hashtags: copy.hashtags,
+  });
+}
+
+/** AI 修订只替换标题与文案三件套；授权、产物、审批和 AI 标识等托管字段原样保留。 */
+function withRevisedPublishCopy(document: Record<string, unknown>, revised: PublishCopy): Record<string, unknown> {
+  const next = structuredClone(document);
+  next.title = revised.title;
+  next.copy = isRecord(next.copy)
+    ? { ...next.copy, title: revised.title, description: revised.description, hashtags: [...revised.hashtags] }
+    : { ...revised };
+  return next;
+}
+
+/** 与 production-pipeline 的 readNarrations 同一语义：3–24 条非空旁白，修订与再审共用同一输入。 */
+async function readRunScriptNarrations(
+  run: WorkflowRun<ProductionBrief>,
+  workspaceRoot: string,
+  runId: string,
+): Promise<string[]> {
+  const scriptNode = run.nodeRuns.find((candidate) => candidate.nodeId === "script");
+  const scriptVersion = scriptNode?.outputState?.versions.find((version) => version.id === scriptNode.outputState?.effectiveVersionId);
+  const scriptArtifact = run.artifacts.find((candidate) => (
+    (scriptVersion?.artifactIds.includes(candidate.id) || scriptNode?.artifactIds.includes(candidate.id) === true)
+    && candidate.kind === "script"
+    && candidate.contentType === "application/json"
+    && Boolean(candidate.uri)
+  ));
+  if (!scriptArtifact?.uri) throw new StudioInputError("找不到当前脚本的旁白内容；请先确认脚本交付存在。");
+  await assertContainedFile(path.join(workspaceRoot, "runs", runId), scriptArtifact.uri);
+  let script: unknown;
+  try {
+    script = JSON.parse(await readFile(scriptArtifact.uri, "utf8"));
+  } catch {
+    throw new StudioInputError("当前脚本无法读取，请先重新生成该节点。");
+  }
+  const scenes = isRecord(script) && Array.isArray(script.scenes) ? script.scenes : [];
+  const narrations = scenes.map((scene, index) => {
+    if (!isRecord(scene) || typeof scene.narration !== "string" || !scene.narration.trim()) {
+      throw new StudioInputError(`脚本第 ${index + 1} 场缺少旁白，无法为发布文案提供事实输入。`);
+    }
+    return scene.narration.trim();
+  });
+  if (narrations.length < 3 || narrations.length > 24) {
+    throw new StudioInputError("发布文案的修订与审计需要 3 到 24 条脚本旁白。");
+  }
+  return narrations;
+}
+
 function rewriteArtifactBackedMediaProvenance(
   value: unknown,
   artifacts: WorkflowRun<ProductionBrief>["artifacts"],
@@ -4887,6 +5307,7 @@ function creativeReviewCommandDraft(
     action: "confirm",
     ...(input.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
     ...(input.acknowledgeIncomplete === true ? { acknowledgeIncomplete: true as const } : {}),
+    ...(input.acknowledgeUnaudited === true ? { acknowledgeUnaudited: true as const } : {}),
     ...(input.acceptQualityFallback === true ? { acceptQualityFallback: true as const } : {}),
     ...(input.expectedCheckIdentity === undefined ? {} : { expectedCheckIdentity: input.expectedCheckIdentity }),
   };

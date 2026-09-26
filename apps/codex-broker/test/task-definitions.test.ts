@@ -264,7 +264,7 @@ describe("broker-owned task definitions", () => {
         "video-factory/asset-rank-v6",
         "video-factory/reference-grammar-v4",
         "video-factory/visual-review-v20",
-        "video-factory/role-audit-v10",
+        "video-factory/role-audit-v11",
       ],
     );
 
@@ -375,6 +375,10 @@ describe("broker-owned task definitions", () => {
     }
     assert.ok(JSON.stringify(outputSchemaFor("topic-ideas")).includes('"uniqueItems":true'));
     assert.ok(JSON.stringify(outputSchemaFor("role-audit")).includes('"uniqueItems":true'));
+    const creatorIssueSchema = (((outputSchemaFor("role-audit").properties as Record<string, unknown>).issues as { items: { properties: Record<string, unknown> } }).items.properties);
+    assert.ok(creatorIssueSchema.creatorTitle);
+    assert.ok(creatorIssueSchema.creatorObservation);
+    assert.ok(creatorIssueSchema.creatorAction);
     assert.match(outputSchemaValidationErrorFor("role-audit", {
       version: "video-factory/role-audit-v2",
       rubricVersion: "video-factory/role-quality-rubric-v1",

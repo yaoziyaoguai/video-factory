@@ -58,10 +58,9 @@ export interface CodexReferenceGrammarAgentOptions {
   media: VisualReviewMediaPreprocessor;
   providerId?: string;
   modelId?: string;
-  maxReviewIterations?: number;
 }
 
-export const REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION = "reference-grammar-v2|role-audit-v9|shot-grammar-validator-v1";
+export const REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION = "reference-grammar-v3|role-audit-v9|shot-grammar-validator-v1|single-initial-audit-v1";
 
 export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
   readonly id: string;
@@ -80,8 +79,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
   async analyzeDetailed(input: ReferenceGrammarAgentInput): Promise<ReferenceGrammarExecution> {
     const client = this.options.client;
     if (typeof client.runTaskDetailed !== "function") {
-      const payload = await this.payload(input);
-      return { output: validateShotGrammar(await client.runTask("reference-grammar", payload), payload.durationMs), inspectedDurationMs: payload.durationMs };
+      throw new Error("Configured reference-grammar agent does not support the initial independent audit.");
     }
     const runTaskDetailed = client.runTaskDetailed.bind(client);
     const observePrepared = typeof client.observePrepared === "function" ? client.observePrepared.bind(client) : undefined;
@@ -99,7 +97,7 @@ export class CodexReferenceGrammarAgent implements ReferenceGrammarAgent {
         "从实际观察中提炼顺序、构图、色彩、转换等可复用语法，并说明其可能承担的引导注意、对比、揭示或回收功能；作者意图与传播效果只可作为有边界的分析，不补造未观察的运动和声音。",
         "avoidCopying 明确排除人物身份、对白、品牌、独特情节和标志性资产",
       ],
-      maxIterations: this.options.maxReviewIterations ?? 3,
+      maxIterations: 1,
       produce: async (revision, { requestId, session, requestOptions, preparedOperation }) => {
         if (preparedOperation) {
           if (!observePrepared) throw new Error("Codex reference grammar cannot recover a prepared operation with this client.");

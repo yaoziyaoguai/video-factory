@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export const CREATIVE_REVIEW_VERSION = "video-factory/creative-review-v1" as const;
 export const CREATIVE_REVIEW_FEATURE = "user-confirmed-v1" as const;
@@ -86,7 +86,7 @@ function parseCreativeUpstreamRequest(value: unknown): NonNullable<CreativeDiscu
 }
 
 export interface CreativeReviewDiscussResume {
-  action: "discuss";
+  action: "discuss" | "revise";
   stage: CreativeStage;
   commandId: string;
   actor: string;
@@ -141,16 +141,36 @@ export interface CreativeDraftRef {
   artifactId: string;
   sha256: string;
   revision: number;
+  /** 不可变版本身份：A→B→A 的第三版与第一版文字相同，但 versionId 不同（TX-03/B03）。 */
+  versionId: string;
   stageInputDigest: string;
   upstreamConfirmedDigests: Partial<Record<CreativeStage, string>>;
 }
 
+/** 一条不可变的独立审计记录：绑定它所审的那个精确版本（A05）。 */
+export interface CreativeAuditRecord {
+  auditId: string;
+  versionId: string;
+  draftSha256: string;
+  checkIdentity: string;
+  recordedAt: string;
+  source: "initial" | "manual";
+  result: CreativeReviewCheckResult;
+}
+
 export interface CreativeStageConfirmation {
   libraryEvidenceDigest?: string;
+  /** 用户采用的那一版；与 draftSha256 共同构成决定目标。 */
+  versionId: string;
   draftSha256: string;
   stageInputDigest: string;
   upstreamConfirmedDigests: Partial<Record<CreativeStage, string>>;
-  checkIdentity: string;
+  /** 本版有审计时是所看那条审计的身份；未审采用时不存在，绝不虚构。 */
+  checkIdentity?: string;
+  /** 本版采用的审计记录 id；未审采用为 null。 */
+  auditId: string | null;
+  /** 用户明确承担「本版未经审计」的采用；与 repair 承担、费用授权是三件事。 */
+  unauditedAdoption?: true;
   actor: string;
   confirmedAt: string;
   commandId: string;
@@ -183,12 +203,22 @@ export interface CreativeStageReviewState {
   effectiveUserInstructions: EffectiveUserInstruction[];
   previousEffectiveUserInstructions?: EffectiveUserInstruction[];
   checkResult: CreativeReviewCheckResult | null;
+  /** 本版累积的全部审计记录（含历史轮）；checkResult 指向最新一条。 */
+  auditHistory: CreativeAuditRecord[];
+  /** 每版全文快照；旧 run 缺失时由投影层如实标记历史不足。 */
+  versionHistory: Array<{ draft: CreativeDraftRef; document: unknown }>;
+  /** 已作出的采用决定；不能因返回上游或改稿而抹除。 */
+  confirmationHistory: CreativeStageConfirmation[];
 }
 
 export type CreativeReviewCheckResult = {
   draftSha256: string;
   checkIdentity: string;
   summary: string;
+  /** 审计绑定的精确版本；缺失时按当前版本解释（旧数据兼容），新记录必须携带。 */
+  versionId?: string;
+  /** 本条审计的记录 id；与 auditHistory 对齐。 */
+  auditId?: string;
 } & ({
   status?: "completed";
   verdict: "pass" | "repair";
@@ -221,13 +251,25 @@ export interface CreativeReviewConfirmResume {
   actor: string;
   baseDraftSha256: string;
   expectedReviewRevision: number;
-  checkIdentity: string;
+  /** 本版有审计时必填（用户看过的那条）；未审采用不得携带。 */
+  checkIdentity?: string;
   confirmedAt: string;
+  /** 显式承担「本版未经审计」；与 repair/incomplete 承认互斥。 */
+  acknowledgeUnaudited?: true;
   // 独立复核是"提议"而非"否决"：裁决为 repair 时默认仍拦住流程，但人可以显式承担后继续。
   // 与 return_to_stage 的 acknowledgeImpact 同一模式，取舍被记录进 confirmation 而不是被静默跳过。
   acknowledgeRepair?: true;
   acknowledgeIncomplete?: true;
   acceptQualityFallback?: true;
+}
+
+export interface CreativeReviewAuditCurrentResume {
+  action: "audit_current";
+  stage: CreativeStage;
+  commandId: string;
+  actor: string;
+  baseDraftSha256: string;
+  expectedReviewRevision: number;
 }
 
 export type CreativeReviewResume =
@@ -236,7 +278,8 @@ export type CreativeReviewResume =
   | CreativeReviewAdoptResume
   | CreativeReviewEditDraftResume
   | CreativeReviewUndoResume
-  | CreativeReviewReturnResume;
+  | CreativeReviewReturnResume
+  | CreativeReviewAuditCurrentResume;
 
 const CREATIVE_STAGE_ORDER: CreativeStage[] = ["treatment", "script", "director"];
 
@@ -262,6 +305,14 @@ export function returnCreativeReviewToStage(
     current.confirmation = null;
     current.checkResult = null;
     current.phase = stage === command.targetStage ? "waiting_user" : "drafting";
+    if (stage === command.targetStage && current.currentDraft) {
+      // 被退回的这一版草稿内容未变：versionId 相同的历史审计仍然适用，恢复最新一条，
+      // 避免对同一份文字重复烧一轮审计（审计适用性随版本，不随确认状态失效）。
+      const applicable = [...current.auditHistory]
+        .reverse()
+        .find((record) => record.versionId === current.currentDraft!.versionId);
+      if (applicable) current.checkResult = structuredClone(applicable.result);
+    }
   }
   stages[command.targetStage].messages.push({
     id: `${command.commandId}:assistant`,
@@ -302,6 +353,9 @@ function emptyStage(): CreativeStageReviewState {
     proposals: [],
     effectiveUserInstructions: [],
     checkResult: null,
+    auditHistory: [],
+    versionHistory: [],
+    confirmationHistory: [],
   };
 }
 
@@ -318,6 +372,11 @@ export function contentSha256(value: unknown): string {
   return createHash("sha256").update(stableJson(value)).digest("hex");
 }
 
+/** 版本身份只由逻辑 artifact 与单调 revision 构成：相同文字的不同版本 id 不同（B03）。 */
+export function creativeVersionId(artifactId: string, revision: number): string {
+  return `${artifactId}#v${revision}`;
+}
+
 export function publishCreativeDraft(
   review: CreativeReviewState,
   stage: CreativeStage,
@@ -327,12 +386,15 @@ export function publishCreativeDraft(
 ): CreativeReviewState {
   const current = review.stages[stage];
   const sha256 = contentSha256(output);
-  const sameDraft = current.currentDraft?.sha256 === sha256
+  const sameDraft = current.currentDraft?.artifactId === artifactId
+    && current.currentDraft.sha256 === sha256
     && current.currentDraft.stageInputDigest === stageInputDigest;
+  const revision = sameDraft ? current.currentDraft!.revision : (current.currentDraft?.revision ?? 0) + 1;
   const nextDraft: CreativeDraftRef = {
     artifactId,
     sha256,
-    revision: sameDraft ? current.currentDraft!.revision : (current.currentDraft?.revision ?? 0) + 1,
+    revision,
+    versionId: creativeVersionId(artifactId, revision),
     stageInputDigest,
     upstreamConfirmedDigests: upstreamDigests(review, stage),
   };
@@ -348,6 +410,10 @@ export function publishCreativeDraft(
         ...current,
         phase: "waiting_user",
         currentDraft: nextDraft,
+        versionHistory: sameDraft ? (current.versionHistory ?? []) : [
+          ...(current.versionHistory ?? []),
+          { draft: structuredClone(nextDraft), document: structuredClone(output) },
+        ],
         previousDraft: sameDraft ? current.previousDraft : current.currentDraft,
         currentDocument: structuredClone(output),
         previousDocument: sameDraft ? current.previousDocument : current.currentDocument,
@@ -388,12 +454,51 @@ export function confirmCreativeDraft(review: CreativeReviewState, raw: unknown):
   if (command.baseDraftSha256 !== draft.sha256) {
     throw new Error("Creative review confirmation is stale: draft content changed.");
   }
-  if (!current.checkResult
-    || current.checkResult.draftSha256 !== draft.sha256
-    || current.checkResult.checkIdentity !== command.checkIdentity) {
-    throw new Error("Creative review confirmation requires an independent check for the current draft.");
+  // 本版审计必须绑定当前版本才算数；修订后的未审稿没有这条记录，只能走显式未审采用。
+  const check = current.checkResult && current.checkResult.draftSha256 === draft.sha256
+    && (current.checkResult.versionId === undefined || current.checkResult.versionId === draft.versionId)
+    ? current.checkResult
+    : null;
+  if (!check) {
+    if (command.acknowledgeUnaudited !== true) {
+      throw new Error("Creative review confirmation requires an independent check for the current draft; adopt explicitly as unaudited to proceed.");
+    }
+    return {
+      ...review,
+      reviewRevision: review.reviewRevision + 1,
+      stages: {
+        ...review.stages,
+        [command.stage]: {
+          ...current,
+          phase: "confirmed",
+          confirmation: {
+            versionId: draft.versionId,
+            draftSha256: draft.sha256,
+            stageInputDigest: draft.stageInputDigest,
+            upstreamConfirmedDigests: { ...draft.upstreamConfirmedDigests },
+            auditId: null,
+            unauditedAdoption: true,
+            actor: command.actor,
+            confirmedAt: command.confirmedAt,
+            commandId: command.commandId,
+          },
+          confirmationHistory: [
+            ...(current.confirmationHistory ?? []),
+            {
+              versionId: draft.versionId, draftSha256: draft.sha256,
+              stageInputDigest: draft.stageInputDigest,
+              upstreamConfirmedDigests: { ...draft.upstreamConfirmedDigests },
+              auditId: null, unauditedAdoption: true,
+              actor: command.actor, confirmedAt: command.confirmedAt, commandId: command.commandId,
+            },
+          ],
+        },
+      },
+    };
   }
-  const check = current.checkResult;
+  if (command.checkIdentity !== check.checkIdentity) {
+    throw new Error("Creative review confirmation is stale: the recorded check is not the one the creator saw.");
+  }
   if (check.status === "incomplete" ? command.acknowledgeIncomplete !== true
     : check.verdict !== "pass" && command.acknowledgeRepair !== true) {
     throw new Error("Creative review confirmation requires a passing independent check for the current draft.");
@@ -407,10 +512,12 @@ export function confirmCreativeDraft(review: CreativeReviewState, raw: unknown):
         ...current,
         phase: "confirmed",
         confirmation: {
+          versionId: draft.versionId,
           draftSha256: draft.sha256,
           stageInputDigest: draft.stageInputDigest,
           upstreamConfirmedDigests: { ...draft.upstreamConfirmedDigests },
-          checkIdentity: command.checkIdentity,
+          checkIdentity: check.checkIdentity,
+          auditId: check.auditId ?? null,
           actor: command.actor,
           confirmedAt: command.confirmedAt,
           commandId: command.commandId,
@@ -419,6 +526,20 @@ export function confirmCreativeDraft(review: CreativeReviewState, raw: unknown):
             ? { acknowledgedRepair: { verdict: "repair" as const, score: check.score, issueCount: check.issues.length } }
             : {}),
         },
+        confirmationHistory: [
+          ...(current.confirmationHistory ?? []),
+          {
+            versionId: draft.versionId, draftSha256: draft.sha256,
+            stageInputDigest: draft.stageInputDigest,
+            upstreamConfirmedDigests: { ...draft.upstreamConfirmedDigests },
+            checkIdentity: check.checkIdentity, auditId: check.auditId ?? null,
+            actor: command.actor, confirmedAt: command.confirmedAt, commandId: command.commandId,
+            ...(check.status === "incomplete" ? { acknowledgedIncomplete: true as const } : {}),
+            ...(check.verdict === "repair"
+              ? { acknowledgedRepair: { verdict: "repair" as const, score: check.score, issueCount: check.issues.length } }
+              : {}),
+          },
+        ],
       },
     },
   };
@@ -428,6 +549,7 @@ export function recordCreativeReviewCheck(
   review: CreativeReviewState,
   stage: CreativeStage,
   result: CreativeReviewCheckResult,
+  options: { auditId?: string; source?: "initial" | "manual"; recordedAt?: string } = {},
 ): CreativeReviewState {
   const current = review.stages[stage];
   if (review.activeStage !== stage || current.phase !== "waiting_user" || !current.currentDraft) {
@@ -436,6 +558,63 @@ export function recordCreativeReviewCheck(
   if (result.draftSha256 !== current.currentDraft.sha256) {
     throw new Error("Creative review check belongs to another draft.");
   }
+  // 版本绑定：携带 versionId 的结果必须属于当前版本；A→B→A 的 V1 审计不能回挂 V3，
+  // 相同文字不等于同一版本（TX-03/B03）。缺省（旧数据）按当前版本解释。
+  if (result.versionId !== undefined && result.versionId !== current.currentDraft.versionId) {
+    throw new Error("Creative review check belongs to another draft version.");
+  }
+  // R3-02：auditId 绑定持久化操作而非返回结果——生产路径必须由调用方传入
+  // H(auditOperationId) 派生的稳定 id；缺失（测试/旧数据）才退回随机，但随机 id
+  // 不参与幂等（找不到重放即正常追加）。
+  const explicitAuditId = result.auditId ?? options?.auditId;
+  const auditId = explicitAuditId ?? `audit-${randomUUID()}`;
+  // R3-02 记账幂等（严格 no-op）：同一 auditId 再次登记时——
+  // · 已应用（无论之后是否有更新的审计）：返回原状态，不回退 checkResult、
+  //   不追加历史、不推进 reviewRevision（P12：A 后 B 再重放 A，当前必须仍是 B）；
+  // · 完整比较（verdict/score/summary/draftSha256/versionId/checkIdentity/issues/source）
+  //   任一不同 → 明确冲突（P09/P11：同操作异结果、同字节跨版本复用 auditId 均不放行）。
+  const replayed = (current.auditHistory ?? []).find((entry) => entry.auditId === auditId);
+  if (replayed) {
+    const sameTarget = replayed.versionId === current.currentDraft.versionId
+      && replayed.draftSha256 === result.draftSha256;
+    const sameResult = replayed.result.verdict === result.verdict
+      && replayed.result.score === result.score
+      && replayed.result.summary === result.summary
+      && replayed.result.checkIdentity === result.checkIdentity
+      && replayed.result.issues.length === (result.issues?.length ?? 0)
+      && replayed.result.issues.every((issue, index) => {
+        const next = result.issues?.[index];
+        return next !== undefined
+          && issue.severity === next.severity
+          && issue.criterion === next.criterion
+          && issue.evidence === next.evidence
+          && issue.repairInstruction === next.repairInstruction;
+      })
+      && replayed.source === (options?.source ?? "initial");
+    if (!sameTarget || !sameResult) {
+      throw new Error(
+        sameTarget
+          ? "同一审计操作的恢复结论与已记账结论不一致；请刷新后重新核对，不覆盖既有审计。"
+          : "该审计编号属于另一版本的审计操作，不能登记到当前版本。",
+      );
+    }
+    // 严格 no-op：已应用操作的重放只返回原回执（原状态原样），当前 checkResult 保持不变。
+    return review;
+  }
+  const stamped: CreativeReviewCheckResult = {
+    ...structuredClone(result),
+    versionId: current.currentDraft.versionId,
+    auditId,
+  };
+  const record: CreativeAuditRecord = {
+    auditId,
+    versionId: current.currentDraft.versionId,
+    draftSha256: stamped.draftSha256,
+    checkIdentity: stamped.checkIdentity,
+    recordedAt: options?.recordedAt ?? new Date().toISOString(),
+    source: options?.source ?? "initial",
+    result: stamped,
+  };
   return {
     ...review,
     reviewRevision: review.reviewRevision + 1,
@@ -444,7 +623,9 @@ export function recordCreativeReviewCheck(
       [stage]: {
         ...current,
         phase: "waiting_user",
-        checkResult: structuredClone(result),
+        checkResult: stamped,
+        // 全部审计轮次留痕；checkResult 只指向最新一条（A05）。
+        auditHistory: [...(current.auditHistory ?? []), record],
       },
     },
   };
@@ -467,6 +648,17 @@ export function recordCreativeDiscussion(
     { id: `${command.commandId}:user`, role: "user" as const, text: command.message, commandId: command.commandId },
     { id: `${command.commandId}:assistant`, role: "assistant" as const, text: result.reply.trim(), commandId: command.commandId },
   ];
+  if (command.action === "discuss" && result.intent === "revise") {
+    messages[messages.length - 1] = {
+      ...messages[messages.length - 1]!,
+      text: `模型返回了修改稿，但你只请求讨论；当前稿未修改。${result.reply.trim()}`,
+    };
+    return {
+      ...review,
+      reviewRevision: review.reviewRevision + 1,
+      stages: { ...review.stages, [command.stage]: { ...current, phase: "waiting_user", messages } },
+    };
+  }
   if (result.intent === "propose") {
     if (document === null) throw new Error("Creative discussion proposal is missing its stage document.");
     const draft = draftRefForDocument(current.currentDraft!, document);
@@ -548,7 +740,19 @@ export function applyCreativeReviewDeterministicCommand(
           previousDraft: current.currentDraft,
           previousDocument: current.currentDocument,
           previousEffectiveUserInstructions: structuredClone(current.effectiveUserInstructions),
-          currentDraft: { ...proposal.draft, revision: current.currentDraft!.revision + 1 },
+          currentDraft: {
+            ...proposal.draft,
+            revision: current.currentDraft!.revision + 1,
+            versionId: creativeVersionId(proposal.draft.artifactId, current.currentDraft!.revision + 1),
+          },
+          versionHistory: [
+            ...(current.versionHistory ?? []),
+            { draft: {
+              ...proposal.draft,
+              revision: current.currentDraft!.revision + 1,
+              versionId: creativeVersionId(proposal.draft.artifactId, current.currentDraft!.revision + 1),
+            }, document: structuredClone(proposal.document) },
+          ],
           currentDocument: structuredClone(proposal.document),
           confirmation: null,
           checkResult: null,
@@ -575,7 +779,19 @@ export function applyCreativeReviewDeterministicCommand(
       [command.stage]: {
         ...current,
         phase: "waiting_user",
-        currentDraft: { ...current.previousDraft, revision: current.currentDraft!.revision + 1 },
+        currentDraft: {
+          ...current.previousDraft,
+          revision: current.currentDraft!.revision + 1,
+          versionId: creativeVersionId(current.previousDraft.artifactId, current.currentDraft!.revision + 1),
+        },
+        versionHistory: [
+          ...(current.versionHistory ?? []),
+          { draft: {
+            ...current.previousDraft,
+            revision: current.currentDraft!.revision + 1,
+            versionId: creativeVersionId(current.previousDraft.artifactId, current.currentDraft!.revision + 1),
+          }, document: structuredClone(current.previousDocument) },
+        ],
         currentDocument: structuredClone(current.previousDocument),
         previousDraft: current.currentDraft,
         previousDocument: current.currentDocument,
@@ -593,7 +809,8 @@ export function applyCreativeReviewDeterministicCommand(
  * 只做状态迁移）——校验与迁移分离，是因为阶段合同校验需要 brief/脚本上下文，那是组合根的职责。
  *
  * 与 AI 讨论改稿同一条制度：换稿即新一版草稿（revision+1、checkResult 清空），随后停点重现，
- * 人点确认时对改后的稿自动跑一轮新的独立复核——通过直接放行，有问题把意见摆出来由人承担。
+ * 确认不再补审（A06）：改稿形成未审新稿并停人；人可以主动审计，或看意见后显式承担，
+ * 或未审采用。确认动作本身零模型调用。
  */
 export function applyCreativeReviewEditDraft(
   review: CreativeReviewState,
@@ -618,7 +835,17 @@ export function applyCreativeReviewEditDraft(
           ...current.currentDraft!,
           sha256: contentSha256(validatedDocument),
           revision: current.currentDraft!.revision + 1,
+          versionId: creativeVersionId(current.currentDraft!.artifactId, current.currentDraft!.revision + 1),
         },
+        versionHistory: [
+          ...(current.versionHistory ?? []),
+          { draft: {
+            ...current.currentDraft!,
+            sha256: contentSha256(validatedDocument),
+            revision: current.currentDraft!.revision + 1,
+            versionId: creativeVersionId(current.currentDraft!.artifactId, current.currentDraft!.revision + 1),
+          }, document: structuredClone(validatedDocument) },
+        ],
         currentDocument: structuredClone(validatedDocument),
         confirmation: null,
         checkResult: null,
@@ -680,7 +907,13 @@ export function parseCreativeReviewResume(value: unknown): CreativeReviewResume 
     if (value.acknowledgeImpact !== true) throw new Error("Creative review return requires acknowledgeImpact=true.");
     return { action: "return_to_stage", ...base, targetStage: value.targetStage, acknowledgeImpact: true };
   }
-  if (value.action !== "discuss") throw new Error("Creative review resume action is invalid.");
+  if (value.action === "audit_current") {
+    const allowed = new Set(["action", "stage", "commandId", "actor", "baseDraftSha256", "expectedReviewRevision"]);
+    const unknown = Object.keys(value).find((key) => !allowed.has(key));
+    if (unknown) throw new Error(`Creative review resume field '${unknown}' is not allowed.`);
+    return { action: "audit_current", ...parseCreativeReviewCommandBase(value) };
+  }
+  if (value.action !== "discuss" && value.action !== "revise") throw new Error("Creative review resume action is invalid.");
   const allowed = new Set([
     "action", "stage", "commandId", "actor", "baseDraftSha256", "expectedReviewRevision", "message", "selection",
   ]);
@@ -689,7 +922,7 @@ export function parseCreativeReviewResume(value: unknown): CreativeReviewResume 
   const base = parseCreativeReviewCommandBase(value);
   const message = requiredText(value.message, "message");
   const selection = value.selection === undefined ? undefined : parseDiscussionSelection(value.selection);
-  return { action: "discuss", ...base, message, ...(selection ? { selection } : {}) };
+  return { action: value.action, ...base, message, ...(selection ? { selection } : {}) };
 }
 
 function discussionDocument(result: CreativeDiscussionResult): unknown | null {
@@ -710,11 +943,13 @@ function discussionDocument(result: CreativeDiscussionResult): unknown | null {
 }
 
 function draftRefForDocument(base: CreativeDraftRef, document: unknown): CreativeDraftRef {
+  const revision = base.revision + 1;
   return {
     ...base,
     artifactId: `creative-proposal:${contentSha256(document)}`,
     sha256: contentSha256(document),
-    revision: base.revision + 1,
+    revision,
+    versionId: creativeVersionId(`creative-proposal:${contentSha256(document)}`, revision),
   };
 }
 
@@ -722,7 +957,7 @@ export function parseCreativeReviewConfirmResume(value: unknown): CreativeReview
   if (!isRecord(value)) throw new Error("Creative review resume must be an object.");
   const allowed = new Set([
     "action", "stage", "commandId", "actor", "baseDraftSha256", "expectedReviewRevision", "checkIdentity", "confirmedAt",
-    "acknowledgeRepair", "acknowledgeIncomplete", "acceptQualityFallback",
+    "acknowledgeRepair", "acknowledgeIncomplete", "acceptQualityFallback", "acknowledgeUnaudited",
   ]);
   const unknown = Object.keys(value).find((key) => !allowed.has(key));
   if (unknown) throw new Error(`Creative review resume field '${unknown}' is not allowed.`);
@@ -738,16 +973,27 @@ export function parseCreativeReviewConfirmResume(value: unknown): CreativeReview
     && (value.acceptQualityFallback !== true || base.stage !== "director")) {
     throw new Error("Quality fallback acceptance requires an explicit director confirmation.");
   }
+  if (value.acknowledgeUnaudited !== undefined && value.acknowledgeUnaudited !== true) {
+    throw new Error("Creative review acknowledgeUnaudited must be true when present.");
+  }
+  if (value.acknowledgeUnaudited === true && (value.acknowledgeRepair === true || value.acknowledgeIncomplete === true)) {
+    throw new Error("Creative review unaudited adoption cannot be combined with check acknowledgements.");
+  }
   const confirmedAt = requiredText(value.confirmedAt, "confirmedAt");
   if (!Number.isFinite(Date.parse(confirmedAt))) throw new Error("Creative review confirmedAt must be an ISO timestamp.");
   return {
     action: "confirm",
     ...base,
-    checkIdentity: sha256(value.checkIdentity, "checkIdentity"),
+    // 未审采用没有「用户看过的那条复核」；checkIdentity 只在存在审计时允许携带。
+    ...(value.checkIdentity === undefined && value.acknowledgeUnaudited !== true
+      ? (() => { throw new Error("Creative review confirmation requires checkIdentity or an explicit unaudited adoption."); })()
+      : {}),
+    ...(value.checkIdentity !== undefined ? { checkIdentity: sha256(value.checkIdentity, "checkIdentity") } : {}),
     confirmedAt,
     ...(value.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
     ...(value.acknowledgeIncomplete === true ? { acknowledgeIncomplete: true as const } : {}),
     ...(value.acceptQualityFallback === true ? { acceptQualityFallback: true as const } : {}),
+    ...(value.acknowledgeUnaudited === true ? { acknowledgeUnaudited: true as const } : {}),
   };
 }
 

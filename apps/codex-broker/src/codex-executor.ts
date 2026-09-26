@@ -459,6 +459,7 @@ export interface ReferenceGrammarPayload {
 
 export interface CreativeDiscussionPayload {
   stage: "treatment" | "script" | "director";
+  requestMode?: "discuss" | "revise";
   currentDocument: Record<string, unknown>;
   context: Record<string, unknown>;
   message: string;
@@ -750,9 +751,12 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
     };
   }
   if (kind === "creative-discussion") {
-    assertExactKeys(record, ["stage", "currentDocument", "context", "message", "selection", "recentMessages"], "payload");
+    assertExactKeys(record, ["stage", "requestMode", "currentDocument", "context", "message", "selection", "recentMessages"], "payload");
     if (record.stage !== "treatment" && record.stage !== "script" && record.stage !== "director") {
       throw new CodexExecutorError("payload.stage is invalid.", false);
+    }
+    if (record.requestMode !== undefined && record.requestMode !== "discuss" && record.requestMode !== "revise") {
+      throw new CodexExecutorError("payload.requestMode is invalid.", false);
     }
     const message = requiredText(record.message, "payload.message").trim();
     if (message.length > BROKER_TASK_INPUT_CONTRACTS["creative-discussion"].messageMaxLength) {
@@ -772,6 +776,7 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
       kind,
       payload: {
         stage: record.stage,
+        ...(record.requestMode ? { requestMode: record.requestMode } : {}),
         currentDocument,
         context,
         message,
@@ -1606,6 +1611,7 @@ export function buildTaskPrompt(
   } else if (task.kind === "creative-discussion") {
     data = {
       stage: task.payload.stage,
+      ...(task.payload.requestMode ? { requestMode: task.payload.requestMode } : {}),
       currentDocument: task.payload.currentDocument,
       context: task.payload.context,
       message: task.payload.message,

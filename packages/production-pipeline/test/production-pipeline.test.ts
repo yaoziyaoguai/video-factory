@@ -2669,12 +2669,15 @@ describe("ProductionPipeline", () => {
     // 发布包也是边界停点：按新合同绑定成片证据放行后 run 才收尾。
     const publishStop = approved.nodeRuns.find((node) => node.nodeId === "publish-package")!;
     assert.equal(publishStop.status, "needs_human");
+    assert.ok(publishStop.outputState?.effectiveVersionId);
     const published = await subject.decide(approved.id, {
       interventionId: String(publishStop.intervention?.id),
       action: "approve",
       actor: "owner",
       expectedRunRevision: approved.revision,
       reviewEvidenceId: visualEvidenceId,
+      contentVersionId: publishStop.outputState.effectiveVersionId,
+      acceptUnauditedContent: true,
     });
     assert.equal(published.status, "succeeded");
     assert.ok(published.artifacts.some((artifact) => artifact.kind === "publish_package"));
@@ -2998,6 +3001,10 @@ describe("ProductionPipeline", () => {
         write: async (input) => {
           publishInputs.push(input);
           return { title: input.brief.title, description: input.brief.angle, hashtags: ["生活方法"] };
+        },
+        writeDetailed: async (input) => {
+          publishInputs.push(input);
+          return { output: { title: input.brief.title, description: input.brief.angle, hashtags: ["生活方法"] } };
         },
       },
       assetProviders: [{
@@ -4469,8 +4476,8 @@ describe("ProductionPipeline", () => {
             targetNodeIds: ["visual-direction", "assets"],
           },
         ],
-        affectedScenePositions: [2],
-        previousDirectorPlan: { version: "video-factory/director-plan-v1", shots: [{ scenePosition: 2 }] },
+        affectedScenePositions: [1, 2],
+        previousDirectorPlan: { version: "video-factory/director-plan-v1", shots: [{ scenePosition: 1 }, { scenePosition: 2 }] },
       },
       providers: {
         ...brief.providers,
@@ -4483,6 +4490,8 @@ describe("ProductionPipeline", () => {
       },
     });
 
+    assert.equal(run.status, "needs_human");
+    assert.equal(run.nodeRuns.find((node) => node.nodeId === "final-review")?.status, "needs_human");
     assert.deepEqual(["brief", "script", "visual-direction", "assets"].map((id) => {
       const node = run.nodeRuns.find((item) => item.nodeId === id);
       return [node?.nodeId, node?.role];
@@ -4521,10 +4530,10 @@ describe("ProductionPipeline", () => {
           targetNodeIds: ["visual-direction", "assets"],
         },
       ],
-      affectedScenePositions: [2],
+      affectedScenePositions: [1, 2],
       previousDirectorPlan: {
         version: "video-factory/director-plan-v1",
-        shots: [{ scenePosition: 2 }],
+        shots: [{ scenePosition: 1 }, { scenePosition: 2 }],
       },
     });
     assert.equal(
@@ -4561,8 +4570,8 @@ describe("ProductionPipeline", () => {
         suggestion: "调整构图并替换素材。",
         targetNodeIds: ["visual-direction", "assets"],
       }],
-      affectedScenePositions: [2],
-      previousDirectorPlan: { version: "video-factory/director-plan-v1", shots: [{ scenePosition: 2 }] },
+      affectedScenePositions: [1, 2],
+      previousDirectorPlan: { version: "video-factory/director-plan-v1", shots: [{ scenePosition: 1 }, { scenePosition: 2 }] },
     });
     assert.equal(directorInput?.scenes[0]?.onScreenText, "早餐第一步");
     assert.equal(directorInput?.scenes[0]?.soundCue, "摊位环境声");
@@ -10017,6 +10026,10 @@ describe("ProductionPipeline", () => {
           actor: "owner",
           expectedRunRevision: run.revision,
           reviewEvidenceId: null,
+          ...(stopped.nodeId === "publish-package" ? {
+            contentVersionId: stopped.outputState?.effectiveVersionId,
+            acceptUnauditedContent: true as const,
+          } : {}),
         };
       run = await subject.decide(run.id, decision);
 
@@ -10219,6 +10232,18 @@ describe("ProductionPipeline", () => {
       }),
       /逐条表态/,
     );
+    const publishVersionId = publishNode.outputState?.effectiveVersionId;
+    assert.ok(publishVersionId);
+    await assert.rejects(() => subject.decide(finalApproved.id, {
+      interventionId: String(publishNode.intervention?.id), action: "approve", actor: "owner",
+      expectedRunRevision: finalApproved.revision, reviewEvidenceId: evidenceId,
+      reviewDispositions: dispositions, contentVersionId: "older-version", acceptUnauditedContent: true,
+    }), /文字交付的版本已经变化/);
+    await assert.rejects(() => subject.decide(finalApproved.id, {
+      interventionId: String(publishNode.intervention?.id), action: "approve", actor: "owner",
+      expectedRunRevision: finalApproved.revision, reviewEvidenceId: evidenceId,
+      reviewDispositions: dispositions, contentVersionId: publishVersionId,
+    }), /未审计/);
     const published = await subject.decide(finalApproved.id, {
       interventionId: String(publishNode.intervention?.id),
       action: "approve",
@@ -10226,8 +10251,12 @@ describe("ProductionPipeline", () => {
       expectedRunRevision: finalApproved.revision,
       reviewEvidenceId: evidenceId,
       reviewDispositions: dispositions,
+      contentVersionId: publishVersionId,
+      acceptUnauditedContent: true,
     });
     assert.equal(published.status, "succeeded");
+    assert.equal(published.decisions.at(-1)?.contentVersionId, publishVersionId);
+    assert.equal(published.decisions.at(-1)?.contentAuditStatus, "not_audited");
     assert.ok(published.artifacts.some((artifact) => artifact.kind === "publish_package"));
   });
 

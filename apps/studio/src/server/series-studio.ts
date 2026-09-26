@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { CodexBridgeError, RoleAgentLoopError } from "@video-factory/production-pipeline";
 import type {
   StudioCandidateInboxItem,
   StudioSeries,
@@ -20,7 +19,7 @@ import {
 export interface SeriesStudioOptions {
   series: StudioSeriesRepository;
   planner?: Pick<SeriesPlanner, "plan" | "planEpisodes">;
-  planningAgent?: Pick<SeriesPlanningAgent, "reviewEpisode">;
+  planningAgent?: Pick<SeriesPlanningAgent, "reviewEpisode"> & Partial<Pick<SeriesPlanningAgent, "generate" | "reviseEpisode">>;
   now?: () => Date;
   createId?: () => string;
 }
@@ -29,6 +28,9 @@ export class SeriesStudio {
   private readonly planner: Pick<SeriesPlanner, "plan" | "planEpisodes">;
   private readonly now: () => Date;
   private readonly createId: () => string;
+  private readonly roadmapGeneration = new Map<string, Promise<StudioSeries>>();
+  private readonly episodeAudits = new Map<string, Promise<StudioSeries>>();
+  private readonly episodeRevisions = new Map<string, { instruction: string; operation: Promise<StudioSeries> }>();
 
   constructor(private readonly options: SeriesStudioOptions) {
     this.planner = options.planner ?? new SeriesPlanner(options.now ? { now: options.now } : {});
@@ -74,10 +76,43 @@ export class SeriesStudio {
         updatedAt: timestamp,
       };
       // 先持久化可编辑路线图，避免外部 Agent 的排队或断线阻塞系列创建。
-      // 真正开拍前仍由 greenlightEpisode 执行最多三轮独立 Agent 审计。
+      // 初稿审计由显式生成动作完成；采用不暗中发起模型调用。
       record.episodes = this.ruleEpisodes(record, Math.min(6, record.currentSeason.targetEpisodeCount ?? 12));
       return await this.options.series.create(record);
     } catch (error) {
+      if (error instanceof SeriesStoreConflictError) throw new StudioConflictError(error.message);
+      throw error;
+    }
+  }
+
+  async generateRoadmap(seriesId: string): Promise<StudioSeries> {
+    const running = this.roadmapGeneration.get(seriesId);
+    if (running) return running;
+    const operation = this.generateInitialRoadmap(seriesId);
+    this.roadmapGeneration.set(seriesId, operation);
+    try {
+      return await operation;
+    } finally {
+      this.roadmapGeneration.delete(seriesId);
+    }
+  }
+
+  private async generateInitialRoadmap(seriesId: string): Promise<StudioSeries> {
+    try {
+      const current = await this.options.series.get(seriesId);
+      if (!current) throw new SeriesStoreNotFoundError("没有找到这个系列。");
+      if (current.episodes.every((episode) => episode.planning.source === "agent")) return current;
+      if (!this.options.planningAgent?.generate) return current;
+      if (current.episodes.some((episode) => episode.status !== "planned" || episode.planning.source !== "rules")) {
+        throw new SeriesStoreConflictError("路线图已被修改，不能用模型初稿覆盖创作者的决定。");
+      }
+      // 初建时先保存的规则窗口只承担恢复占位；模型初稿仍从第一集开始。
+      const initialWindow = { ...current, episodes: [], nextEpisodeNumber: 1 };
+      const generated = await this.options.planningAgent.generate(initialWindow, current.episodes.length);
+      const episodes = this.planner.planEpisodes(initialWindow, current.episodes.length, generated.drafts, generated.planning);
+      return await this.options.series.replaceInitialRoadmap(current.id, current.revision, episodes, this.now().toISOString());
+    } catch (error) {
+      if (error instanceof SeriesStoreNotFoundError) throw new StudioNotFoundError(error.message);
       if (error instanceof SeriesStoreConflictError) throw new StudioConflictError(error.message);
       throw error;
     }
@@ -89,18 +124,16 @@ export class SeriesStudio {
       .flatMap((series) => this.planner.plan(series, 6));
   }
 
-  async advanceEpisode(seriesId: string, expectedEpisodeNumber: number): Promise<StudioSeries> {
+  async advanceEpisode(seriesId: string, expectedEpisodeNumber: number, expectedGenerationId?: string): Promise<StudioSeries> {
     try {
-      let current = await this.options.series.get(seriesId);
+      const current = await this.options.series.get(seriesId);
       if (!current) throw new SeriesStoreNotFoundError("没有找到这个系列。");
       const episode = current.episodes.find((candidate) => candidate.episodeNumber === expectedEpisodeNumber);
       if (!episode) throw new SeriesStoreNotFoundError("没有找到这条单集计划。");
-      current = await this.greenlightEpisode(current, episode.episodeNumber);
-      const greenlitEpisode = current.episodes.find((candidate) => candidate.episodeNumber === expectedEpisodeNumber);
-      if (greenlitEpisode?.status === "selected" && greenlitEpisode.opportunityId === greenlitEpisode.id) {
+      if (episode.status === "selected" && episode.opportunityId === episode.id) {
         return await this.topUpRoadmap(current);
       }
-      const adopted = await this.options.series.adoptEpisode(current.id, expectedEpisodeNumber, this.now().toISOString());
+      const adopted = await this.options.series.adoptEpisode(current.id, expectedEpisodeNumber, this.now().toISOString(), expectedGenerationId);
       return await this.topUpRoadmap(adopted);
     } catch (error) {
       if (error instanceof SeriesStoreNotFoundError) throw new StudioNotFoundError(error.message);
@@ -116,6 +149,99 @@ export class SeriesStudio {
   ): Promise<StudioSeries> {
     try {
       return await this.options.series.updateEpisodePlan(seriesId, episodeNumber, input, this.now().toISOString());
+    } catch (error) {
+      if (error instanceof SeriesStoreNotFoundError) throw new StudioNotFoundError(error.message);
+      if (error instanceof SeriesStoreConflictError) throw new StudioConflictError(error.message);
+      throw error;
+    }
+  }
+
+  async auditEpisodeCurrent(seriesId: string, episodeNumber: number, expectedRevision: number): Promise<StudioSeries> {
+    const key = `${seriesId}:${episodeNumber}:${expectedRevision}`;
+    const running = this.episodeAudits.get(key);
+    if (running) return running;
+    const operation = this.performEpisodeAudit(seriesId, episodeNumber, expectedRevision);
+    this.episodeAudits.set(key, operation);
+    try {
+      return await operation;
+    } finally {
+      this.episodeAudits.delete(key);
+    }
+  }
+
+  async reviseEpisodeCurrent(
+    seriesId: string,
+    episodeNumber: number,
+    expectedRevision: number,
+    instruction: string,
+  ): Promise<StudioSeries> {
+    const key = `${seriesId}:${episodeNumber}:${expectedRevision}`;
+    const running = this.episodeRevisions.get(key);
+    if (running) {
+      if (running.instruction !== instruction) throw new StudioConflictError("当前单集已有不同的修改意见在执行，请等待结果后刷新。");
+      return running.operation;
+    }
+    const operation = this.performEpisodeRevision(seriesId, episodeNumber, expectedRevision, instruction);
+    this.episodeRevisions.set(key, { instruction, operation });
+    try {
+      return await operation;
+    } finally {
+      this.episodeRevisions.delete(key);
+    }
+  }
+
+  private async performEpisodeRevision(
+    seriesId: string,
+    episodeNumber: number,
+    expectedRevision: number,
+    instruction: string,
+  ): Promise<StudioSeries> {
+    try {
+      const current = await this.options.series.get(seriesId);
+      if (!current) throw new SeriesStoreNotFoundError("没有找到这个系列。");
+      if (current.revision !== expectedRevision) throw new SeriesStoreConflictError("系列路线图版本已变化，请刷新后重新发送修改意见。");
+      const episode = current.episodes.find((candidate) => candidate.episodeNumber === episodeNumber);
+      if (!episode) throw new SeriesStoreNotFoundError("没有找到这条单集计划。");
+      if (episode.status !== "planned") throw new SeriesStoreConflictError("已采用的单集不能在路线图中改稿。");
+      if (!this.options.planningAgent?.reviseEpisode) throw new StudioConflictError("当前没有可用的系列修订模型；旧稿保留不变。");
+      const revised = await this.options.planningAgent.reviseEpisode(current, episode, instruction);
+      return await this.options.series.reviseEpisodePlan(
+        seriesId, episodeNumber, expectedRevision, current.canon.revision,
+        revised.draft, revised.planning, this.now().toISOString(),
+      );
+    } catch (error) {
+      if (error instanceof SeriesStoreNotFoundError) throw new StudioNotFoundError(error.message);
+      if (error instanceof SeriesStoreConflictError) throw new StudioConflictError(error.message);
+      throw error;
+    }
+  }
+
+  private async performEpisodeAudit(seriesId: string, episodeNumber: number, expectedRevision: number): Promise<StudioSeries> {
+    try {
+      const current = await this.options.series.get(seriesId);
+      if (!current) throw new SeriesStoreNotFoundError("没有找到这个系列。");
+      if (current.revision !== expectedRevision) throw new SeriesStoreConflictError("系列路线图版本已经变化，请刷新后再审计当前版本。");
+      const episode = current.episodes.find((candidate) => candidate.episodeNumber === episodeNumber);
+      if (!episode) throw new SeriesStoreNotFoundError("没有找到这条单集计划。");
+      if (episode.status !== "planned") throw new SeriesStoreConflictError("只有尚未采用的单集可以主动审计当前版本。");
+      if (!this.options.planningAgent) throw new StudioConflictError("当前未配置系列审计能力，请配置后重试；原路线图保留不变。");
+      // reviewEpisode 使用当前稿作 initialCandidate：只审计，不请求新稿，也不推进单集。
+      const reviewed = await this.options.planningAgent.reviewEpisode(current, episode);
+      return await this.options.series.rebaseEpisodePlan(
+        current.id, episodeNumber, expectedRevision, current.canon.revision,
+        {
+          episodeNumber,
+          pillar: episode.pillar,
+          title: episode.title,
+          viewerPromise: episode.viewerPromise,
+          hook: episode.hook,
+          payoff: episode.payoff,
+          fromPrevious: [...episode.continuity.fromPrevious],
+          toNext: [...episode.continuity.toNext],
+        },
+        reviewed.planning,
+        this.now().toISOString(),
+      );
     } catch (error) {
       if (error instanceof SeriesStoreNotFoundError) throw new StudioNotFoundError(error.message);
       if (error instanceof SeriesStoreConflictError) throw new StudioConflictError(error.message);
@@ -322,44 +448,9 @@ export class SeriesStudio {
   }
 
   async productionContextFor(seriesId: string, episodeNumber: number): Promise<StudioSeriesProductionContext> {
-    let series = await this.options.series.get(seriesId);
+    const series = await this.options.series.get(seriesId);
     if (!series) throw new StudioNotFoundError("系列已经不存在，请返回系列路线图重新选择。");
-    try {
-      series = await this.greenlightEpisode(series, episodeNumber);
-    } catch (error) {
-      if (error instanceof SeriesStoreNotFoundError) throw new StudioNotFoundError(error.message);
-      if (error instanceof SeriesStoreConflictError) throw new StudioConflictError(error.message);
-      throw error;
-    }
     return this.productionContext(series, episodeNumber);
-  }
-
-  private async greenlightEpisode(series: StudioSeries, episodeNumber: number): Promise<StudioSeries> {
-    const episode = series.episodes.find((candidate) => candidate.episodeNumber === episodeNumber);
-    if (!episode) throw new SeriesStoreNotFoundError("没有找到这条单集计划。");
-    const needsGreenlight = episode.canonBaseRevision !== series.canon.revision
-      || episode.planning.auditStatus !== "passed";
-    if (!needsGreenlight) return series;
-    // 开拍前复核是建议，不是闸门。没有配置复核能力、或模型这轮不可用时，沿用现有路线图继续，
-    // 不把用户挡在制作之外；这集的 planning 会如实显示它没拿到通过的复核（规则保底/待裁决），
-    // 采用与否由用户决定。真正还会拦住他的是 store 里"计划基于旧版已定版内容"那条一致性事实。
-    if (!this.options.planningAgent) return series;
-    let reviewed: Awaited<ReturnType<SeriesPlanningAgent["reviewEpisode"]>>;
-    try {
-      reviewed = await this.options.planningAgent.reviewEpisode(series, episode);
-    } catch (error) {
-      if (!isModelUnavailable(error)) throw error;
-      return series;
-    }
-    return this.options.series.rebaseEpisodePlan(
-      series.id,
-      episode.episodeNumber,
-      series.revision,
-      series.canon.revision,
-      reviewed.draft,
-      reviewed.planning,
-      this.now().toISOString(),
-    );
   }
 
   private async ensureRoadmap(series: StudioSeries): Promise<StudioSeries> {
@@ -392,27 +483,17 @@ export class SeriesStudio {
     return this.planner.planEpisodes(series, count, undefined, {
       source: "rules",
       role: "系列总编",
-      auditRole: "开拍前独立质量复核",
+      auditRole: "按需独立质量复核",
       auditStatus: "fallback",
       auditIterations: 0,
       providerId: "series-roadmap-v2",
       modelId: "deterministic",
       promptVersion: "video-factory/series-rules-v2",
-      fallbackReason: "已先保存可编辑路线图；采用单集前会基于最新已定版内容完成独立复核。",
+      fallbackReason: "当前仅有可编辑的规则路线图，尚无模型首审；可以主动审计，也可以明确采用当前稿。",
     });
   }
 }
 
 function currentQuarterLabel(now: Date): string {
   return `${now.getFullYear()} Q${Math.floor(now.getMonth() / 3) + 1}`;
-}
-
-/**
- * 只把"模型这轮拿不到结果"当作可以降级的情形。循环会把底层桥接错误包进 RoleAgentLoopError 并
- * 在 failure 上留下 stage；没有 failure 的那种（合同不匹配、校验重试耗尽）是真缺陷，必须照常
- * 抛出去，不能被这里吞成"继续用旧路线图"，否则排查时线索全没了。
- */
-function isModelUnavailable(error: unknown): boolean {
-  if (error instanceof CodexBridgeError) return true;
-  return error instanceof RoleAgentLoopError && error.agentLoop.failure !== undefined;
 }

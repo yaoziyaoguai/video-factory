@@ -121,7 +121,8 @@ export interface CreativeTreatmentAgentInput {
   planningMode?: boolean;
   wallClockDeadlineAtMs?: number;
   /** R11 创作确认：初稿只生成；确认时只审传入的当前稿。 */
-  creativeReviewExecution?: { mode: "draft" } | { mode: "check"; candidate: CreativeTreatment };
+  /** OA-01：check 携带持久化的审计操作身份（进装配层 checkpoint key，恢复/新操作可区分）。 */
+  creativeReviewExecution?: { mode: "draft" } | { mode: "check"; candidate: CreativeTreatment; auditOperationId: string };
 }
 
 export interface CreativeTreatmentAgent {

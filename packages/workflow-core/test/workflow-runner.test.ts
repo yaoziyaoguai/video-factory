@@ -21,6 +21,27 @@ function deterministicIds(): (prefix: string) => string {
 const clock = (): string => "2026-08-21T10:00:00.000Z";
 
 describe("WorkflowRunner", () => {
+  it("persists a structured failure code and clears it on successful retry", async () => {
+    let calls = 0;
+    const definition: WorkflowDefinition = {
+      id: "coded-failure", name: "Coded failure", version: "1.0.0",
+      nodes: [{
+        id: "scope", label: "Scope", capability: "script.draft", mode: "automatic",
+        execute: () => {
+          calls += 1;
+          if (calls === 1) throw Object.assign(new Error("需要重新确定范围"), { code: "REWORK_SCOPE_CONFLICT" });
+          return { output: { accepted: true } };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: new ProviderRegistry() });
+    const failed = await runner.run(definition, {});
+    assert.equal(failed.nodeRuns[0]?.errorCode, "REWORK_SCOPE_CONFLICT");
+    const retried = await runner.retryFailedNode(definition, failed, "scope");
+    assert.equal(retried.status, "succeeded");
+    assert.equal(retried.nodeRuns[0]?.errorCode, undefined);
+  });
+
   it("re-runs a paused source review only with the dedicated retry option", async () => {
     // 试片审查没跑出结论（复核服务故障）→ 节点停在 needs_human（source_review_retry），
     // run 不判死。重试必须显式带 allowSourceReviewRetry：不带时 needs_human 不可重试，

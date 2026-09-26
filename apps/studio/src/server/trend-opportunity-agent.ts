@@ -26,7 +26,7 @@ import { classifyTopicCategory, topicRiskLevel } from "./topic-taxonomy.js";
 import { topicIdeasModelPayload } from "./topic-ideas-payload.js";
 import type { TrendArticleReader, TrendArticleSnapshot } from "./trend-article-reader.js";
 
-const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v10|role-audit-v9|topic-ideas-validator-v7|complete-role-scope-v1|canonical-signal-groups-v1|downstream-source-gate-v1|visual-plan-v2|angle-identity-v1|cited-facts-v2";
+const TOPIC_EDITOR_AGENT_CONTRACT_VERSION = "topic-editor-v11|role-audit-v9|topic-ideas-validator-v7|complete-role-scope-v1|canonical-signal-groups-v1|downstream-source-gate-v1|visual-plan-v2|angle-identity-v1|cited-facts-v2|single-initial-audit-v1";
 
 export interface TrendSignalPort {
   listSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]>;
@@ -62,6 +62,15 @@ export interface TrendAuditAdvice {
   status: "passed" | "awaiting_user";
   summary?: string;
   repairInstructions?: string[];
+  suggestions?: string[];
+}
+
+export interface TrendCandidateRevisionInput {
+  candidate: StudioTrendCandidate;
+  /** 用户实际发送的修订意见；最终修订要求只以这份文本为准。 */
+  instruction: string;
+  strategy?: StudioTopicStrategy;
+  selectedModelId?: string;
 }
 
 export interface TrendIdeaModel {
@@ -69,6 +78,8 @@ export interface TrendIdeaModel {
   generate(signals: TrendModelSignal[], strategy?: StudioTopicStrategy, generationNonce?: string): Promise<TrendModelIdea[]>;
   lastExecutionIdentity?(): { providerId: string; modelId: string } | undefined;
   lastAuditAdvice?(): TrendAuditAdvice | undefined;
+  /** 修订单个候选：只产一版修订，不触发任何审计（审计由宿主显式发起）。 */
+  reviseCandidate?(input: TrendCandidateRevisionInput): Promise<TrendModelIdea>;
 }
 
 export interface TrendOpportunityAgentOptions {
@@ -181,6 +192,7 @@ export class TrendOpportunityAgent {
             auditStatus: auditAdvice.status,
             ...(auditAdvice.summary ? { auditSummary: auditAdvice.summary } : {}),
             ...(auditAdvice.repairInstructions?.length ? { auditRepairInstructions: auditAdvice.repairInstructions } : {}),
+            ...(auditAdvice.suggestions?.length ? { auditSuggestions: auditAdvice.suggestions } : {}),
           } : {}),
         };
         return selected;
@@ -210,6 +222,19 @@ export class TrendOpportunityAgent {
       } : {}),
     };
     return selected;
+  }
+
+  // 修订候选：调模型的单次修订（零审计），并把修订稿构造为新的收件箱候选。
+  // 修订没有新的可读正文来源，facts 的来源引用无法重新核验，保守清空而不是冒充已核验。
+  async reviseCandidate(input: { candidate: StudioTrendCandidate; instruction: string }): Promise<StudioTrendCandidate> {
+    if (!this.options.model?.reviseCandidate) {
+      throw new Error("当前没有可用的候选修订模型。");
+    }
+    const idea = await this.options.model.reviseCandidate(input);
+    const signals = candidateSignalProjection(input.candidate);
+    const revised = this.fromModelIdea({ ...idea, facts: [] }, signals, undefined);
+    if (!revised) throw new Error("Candidate revision produced an invalid candidate; the original stays unchanged.");
+    return revised;
   }
 
   generationReceipt(): StudioTopicGenerationReceipt | undefined {
@@ -387,7 +412,6 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
 
   constructor(
     client: CodexBridgeClient,
-    private readonly maxReviewIterations = 3,
     private readonly checkpointDirectory?: string,
     private readonly selectedModel?: () => Promise<string | undefined>,
   ) {
@@ -411,7 +435,8 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
         "榜单排名、热度与链接只是来源线索，不得把热度当作事实或结论引用",
         "先评内容潜力与适合的视频形态；来源数量门槛由下游执行，不得仅因来源暂时不足删除有潜力且可补源的角度",
       ],
-      maxIterations: this.maxReviewIterations,
+      // 选题包是交给创作者决定的内容初稿；审计意见不得驱动第二次自动产稿。
+      maxIterations: 1,
       produce: (revision, { requestId, session, requestOptions, preparedOperation }) => preparedOperation
         ? this.client.observePrepared(preparedOperation, requestOptions)
         : this.client.runTaskDetailed("topic-ideas", {
@@ -473,9 +498,60 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
           status,
           ...(audit?.summary ? { summary: audit.summary } : {}),
           ...(audit?.repairInstructions.length ? { repairInstructions: audit.repairInstructions.slice(0, 4) } : {}),
+          ...(audit?.issues.length ? { suggestions: audit.issues.map((issue) => issue.creatorAction ?? issue.repairInstruction).slice(0, 12) } : {}),
         }
       : undefined;
     return execution.output.ideas;
+  }
+
+  // 修订候选只产稿：单次 topic-ideas 任务经 revision 通道携带当前候选与用户指令，
+  // 零 role-audit。输出必须仍然绑定原候选的 signal，否则视为漂移拒收。
+  async reviseCandidate(input: TrendCandidateRevisionInput): Promise<TrendModelIdea> {
+    const model = await this.selectedModel?.();
+    const instruction = input.instruction.trim();
+    if (!instruction || [...instruction].length > 4_000) {
+      throw new Error("Candidate revision instruction must be 1 to 4000 characters.");
+    }
+    const candidate = input.candidate;
+    const signals = candidate.evidence.map((evidence, index) => ({
+      id: evidence.source,
+      sourceId: evidence.source,
+      platform: evidence.platform,
+      rank: index + 1,
+      title: evidence.keyword,
+      collectedAt: evidence.collectedAt,
+      ...(evidence.evidenceUrl ? { url: evidence.evidenceUrl } : {}),
+    }));
+    if (signals.length === 0) {
+      throw new Error("Candidate revision requires the candidate's own signal evidence.");
+    }
+    const request = {
+      signals,
+      ...(input.strategy ? { strategy: input.strategy } : {}),
+      revision: {
+        instruction,
+        candidate: {
+          id: candidate.id,
+          title: candidate.title,
+          track: candidate.track,
+          audience: candidate.audience,
+          painPoint: candidate.painPoint,
+          hook: candidate.hook,
+          rationale: candidate.rationale,
+          ...(candidate.visualProof ? { visualProof: candidate.visualProof } : {}),
+          ...(candidate.visualPlan ? { visualPlan: candidate.visualPlan } : {}),
+        },
+      },
+      ...(model ? { selectedModelId: model } : {}),
+    };
+    const execution = await this.client.runTaskDetailed("topic-ideas", request);
+    const parsed = parseTopicIdeasOutput(execution.output);
+    const idea = parsed.ideas[0];
+    if (!idea) throw new Error("Candidate revision returned no usable idea.");
+    if (idea.signalId !== signals[0]!.id) {
+      throw new Error(`Candidate revision drifted to an unrelated signal (got ${idea.signalId}).`);
+    }
+    return idea;
   }
 
   lastExecutionIdentity(): { providerId: string; modelId: string } | undefined {
@@ -484,7 +560,10 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
 
   lastAuditAdvice(): TrendAuditAdvice | undefined {
     return this.auditAdvice
-      ? { ...this.auditAdvice, ...(this.auditAdvice.repairInstructions ? { repairInstructions: [...this.auditAdvice.repairInstructions] } : {}) }
+      ? { ...this.auditAdvice,
+          ...(this.auditAdvice.repairInstructions ? { repairInstructions: [...this.auditAdvice.repairInstructions] } : {}),
+          ...(this.auditAdvice.suggestions ? { suggestions: [...this.auditAdvice.suggestions] } : {}),
+        }
       : undefined;
   }
 }
@@ -863,6 +942,19 @@ function directionMatches(candidate: StudioTrendCandidate, direction: string): b
   return [...terms].every((term) => contentTerms.has(term));
 }
 
+
+function candidateSignalProjection(candidate: StudioTrendCandidate): TrendModelSignal[] {
+  return candidate.evidence.map((evidence, index) => ({
+    id: evidence.source,
+    sourceId: evidence.source as StudioTrendSignal["sourceId"],
+    platform: evidence.platform,
+    rank: index + 1,
+    title: evidence.keyword,
+    collectedAt: evidence.collectedAt ?? "",
+    ...(evidence.evidenceUrl ? { url: evidence.evidenceUrl } : {}),
+    relatedSignals: [],
+  }));
+}
 
 export interface RuleFallbackDiagnostic {
   reason: string;

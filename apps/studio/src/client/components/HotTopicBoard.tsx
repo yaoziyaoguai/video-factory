@@ -1,5 +1,5 @@
 import { AlertCircle, ArrowRight, Link2, ShieldAlert, Sparkles, XCircle } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { StudioCandidateInboxItem, StudioTopicGenerationReceipt } from "../../shared/api.js";
 import { canonicalizeSourceUrl } from "../../shared/api.js";
 import { creatorFacingTechnicalText, platformLabel, proposalSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
@@ -12,6 +12,8 @@ interface HotTopicBoardProps {
   refreshBusy?: boolean;
   onAdopt: (candidate: StudioCandidateInboxItem) => Promise<void>;
   onSupplementSources?: (candidate: StudioCandidateInboxItem) => void;
+  /** 修订候选：只产一版未审修订稿并追加进收件箱；原候选不变。 */
+  onReviseCandidate?: (candidate: StudioCandidateInboxItem, instruction: string) => Promise<void>;
   onRetry?: () => void;
 }
 
@@ -27,7 +29,7 @@ interface HotTopic {
   directions: StudioCandidateInboxItem[];
 }
 
-export function HotTopicBoard({ candidates, topicGeneration, adoptingId, refreshBusy, onAdopt, onSupplementSources, onRetry }: HotTopicBoardProps) {
+export function HotTopicBoard({ candidates, topicGeneration, adoptingId, refreshBusy, onAdopt, onSupplementSources, onReviseCandidate, onRetry }: HotTopicBoardProps) {
   const topics = useMemo(() => buildHotTopics(candidates), [candidates]);
   // 总编模型轮失败时整块看板都是规则线索：这时"每个热点已给出可用方向"是假话，
   // 必须在不依赖用户逐行辨认的前提下先说清整块看板的性质。
@@ -78,6 +80,7 @@ export function HotTopicBoard({ candidates, topicGeneration, adoptingId, refresh
                   disabled={adoptingId !== undefined}
                   onAdopt={onAdopt}
                   {...(onSupplementSources ? { onSupplementSources } : {})}
+                  {...(onReviseCandidate ? { onRevise: onReviseCandidate } : {})}
                 />
               ))}
             </ul>
@@ -88,13 +91,37 @@ export function HotTopicBoard({ candidates, topicGeneration, adoptingId, refresh
   );
 }
 
-function DirectionRow({ item, adopting, disabled, onAdopt, onSupplementSources }: {
+function DirectionRow({ item, adopting, disabled, onAdopt, onSupplementSources, onRevise }: {
   item: StudioCandidateInboxItem;
   adopting: boolean;
   disabled: boolean;
   onAdopt: (candidate: StudioCandidateInboxItem) => Promise<void>;
   onSupplementSources?: (candidate: StudioCandidateInboxItem) => void;
+  onRevise?: (candidate: StudioCandidateInboxItem, instruction: string) => Promise<void>;
 }) {
+  const [revising, setRevising] = useState(false);
+  const [revisionInstruction, setRevisionInstruction] = useState("");
+  const [revisionBusy, setRevisionBusy] = useState(false);
+  const [revisionNote, setRevisionNote] = useState<string>();
+  const [revisionError, setRevisionError] = useState<string>();
+
+  async function sendRevision() {
+    const trimmed = revisionInstruction.trim();
+    if (!trimmed || !onRevise) return;
+    setRevisionBusy(true);
+    setRevisionError(undefined);
+    try {
+      await onRevise(item, trimmed);
+      setRevisionInstruction("");
+      setRevising(false);
+      setRevisionNote("已提交修订：修订稿以「本版未审」进入候选收件箱，原候选保持不变。");
+    } catch (caught) {
+      setRevisionError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setRevisionBusy(false);
+    }
+  }
+
   const action = directionAction(item, onSupplementSources !== undefined);
   return (
     <li className="hot-direction">
@@ -107,6 +134,8 @@ function DirectionRow({ item, adopting, disabled, onAdopt, onSupplementSources }
           : <p>{item.hook}</p>}
         <small>
           {editorialVerdictLabel(item)} · {TOPIC_CATEGORY_LABELS[item.category]} · {item.audience}
+          {item.revisedFrom ? " · 修订稿" : ""}
+          {item.auditStatus === "not_audited" ? " · 本版未审" : ""}
           {item.score.audienceDemand === undefined ? null : ` · 观众需求 ${Math.round(item.score.audienceDemand)}`}
           {" · "}<Sparkles aria-hidden="true" size={11} />{proposalSourceLabel(item.providerId)}
         </small>
@@ -118,6 +147,17 @@ function DirectionRow({ item, adopting, disabled, onAdopt, onSupplementSources }
         {action.supplement && onSupplementSources ? (
           <button className="button button-secondary" type="button" disabled={disabled} onClick={() => onSupplementSources(item)}>
             <Link2 aria-hidden="true" size={15} />补充来源
+          </button>
+        ) : null}
+        {onRevise && !isRuleLead(item) ? (
+          <button
+            className="button button-secondary"
+            type="button"
+            disabled={disabled || revisionBusy}
+            aria-label={`修订 ${item.title}`}
+            onClick={() => setRevising((current) => !current)}
+          >
+            <Sparkles aria-hidden="true" size={15} />{revising ? "收起修订" : "修订"}
           </button>
         ) : null}
         <button
@@ -133,6 +173,29 @@ function DirectionRow({ item, adopting, disabled, onAdopt, onSupplementSources }
         </button>
       </div>
       {action.note ? <p className="hot-direction-note"><ShieldAlert aria-hidden="true" size={13} />{action.note}</p> : null}
+      {revising && onRevise ? (
+        <div className="hot-direction-revision">
+          <label>
+            <span>修订意见</span>
+            <textarea
+              aria-label="修订意见"
+              value={revisionInstruction}
+              rows={2}
+              disabled={revisionBusy || disabled}
+              onChange={(event) => { setRevisionInstruction(event.target.value); setRevisionError(undefined); }}
+              placeholder="这条候选要怎么改？只产一版未审修订稿，最终以这里的文字为准。"
+            />
+          </label>
+          <button
+            className="button button-primary"
+            type="button"
+            disabled={revisionBusy || disabled || !revisionInstruction.trim()}
+            onClick={() => void sendRevision()}
+          >发送修订意见</button>
+          {revisionError ? <p role="alert">{revisionError}</p> : null}
+        </div>
+      ) : null}
+      {revisionNote ? <p className="hot-direction-note"><small>{revisionNote}</small></p> : null}
     </li>
   );
 }

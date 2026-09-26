@@ -158,6 +158,15 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     createSeries: async () => {
       throw new Error("not configured");
     },
+    generateSeriesRoadmap: async () => {
+      throw new Error("not configured");
+    },
+    auditSeriesEpisodeCurrent: async () => {
+      throw new Error("not configured");
+    },
+    reviseSeriesEpisodeCurrent: async () => {
+      throw new Error("not configured");
+    },
     updateSeriesEpisodePlan: async () => {
       throw new Error("not configured");
     },
@@ -197,6 +206,9 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     requestSceneRevision: async () => runDetail("needs_human"),
     requestNarrationRevision: async () => runDetail("needs_human"),
     requestSceneResourceRevision: async () => runDetail("needs_human"),
+    reviseTrendCandidate: async () => { throw new Error("not expected in route tests"); },
+    reviseNodeDocument: async () => { throw new Error("not expected in route tests"); },
+    auditNodeDocumentCurrent: async () => { throw new Error("not expected in route tests"); },
     applyNodeOverride: async () => runDetail("stale"),
     applyNodeInputOverride: async () => runDetail("stale"),
     applyNodeExecutionConfiguration: async () => runDetail("stale"),
@@ -1082,6 +1094,25 @@ describe("Studio API", () => {
       createdAt: "2026-08-24T09:00:00.000Z",
       updatedAt: "2026-08-24T09:00:00.000Z",
     });
+    let generatedRoadmapSeriesId: string | undefined;
+    service.generateSeriesRoadmap = async (seriesId) => {
+      generatedRoadmapSeriesId = seriesId;
+      return service.createSeries({
+        name: "AI 下班实验室", premise: "每集验证一个普通人真能用上的 AI 方法。",
+        audience: "普通上班族", platform: "douyin", category: "technology",
+        track: "ai-after-work", pillars: ["真实任务实验"], tone: "克制", visualStyle: "纪实",
+      });
+    };
+    let auditedEpisode: unknown;
+    service.auditSeriesEpisodeCurrent = async (seriesId, episodeNumber, expectedRevision) => {
+      auditedEpisode = { seriesId, episodeNumber, expectedRevision };
+      return service.generateSeriesRoadmap(seriesId);
+    };
+    let revisedEpisode: unknown;
+    service.reviseSeriesEpisodeCurrent = async (seriesId, episodeNumber, expectedRevision, instruction) => {
+      revisedEpisode = { seriesId, episodeNumber, expectedRevision, instruction };
+      return service.generateSeriesRoadmap(seriesId);
+    };
     let episodePlanInput: unknown;
     let linkedLegacyInput: unknown;
     service.updateSeriesEpisodePlan = async (seriesId, episodeNumber, input) => {
@@ -1142,6 +1173,17 @@ describe("Studio API", () => {
         visualStyle: "真实桌面操作与生活空镜",
       },
     });
+    const generatedRoadmap = await app.inject({ method: "POST", url: "/api/series/series-1/roadmap/generate" });
+    const auditedEpisodeResponse = await app.inject({
+      method: "POST",
+      url: "/api/series/series-1/episodes/2/audit-current",
+      payload: { expectedRevision: 3 },
+    });
+    const revisedEpisodeResponse = await app.inject({
+      method: "POST",
+      url: "/api/series/series-1/episodes/2/revise-current",
+      payload: { expectedRevision: 3, instruction: "把开场写成具体问题" },
+    });
     const updatedEpisode = await app.inject({
       method: "PATCH",
       url: "/api/series/series-1/episodes/2",
@@ -1163,6 +1205,12 @@ describe("Studio API", () => {
     });
 
     assert.equal(inbox.statusCode, 200);
+    assert.equal(generatedRoadmap.statusCode, 200);
+    assert.equal(auditedEpisodeResponse.statusCode, 200);
+    assert.equal(revisedEpisodeResponse.statusCode, 200);
+    assert.deepEqual(revisedEpisode, { seriesId: "series-1", episodeNumber: 2, expectedRevision: 3, instruction: "把开场写成具体问题" });
+    assert.deepEqual(auditedEpisode, { seriesId: "series-1", episodeNumber: 2, expectedRevision: 3 });
+    assert.equal(generatedRoadmapSeriesId, "series-1");
     assert.deepEqual(receivedQuery, {
       origins: ["trend"],
       categories: ["technology"],

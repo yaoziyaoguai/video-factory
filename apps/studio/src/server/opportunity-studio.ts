@@ -59,6 +59,8 @@ export class OpportunityStudio {
       });
       return toOpportunity(await this.options.opportunities.create({
         title: input.title,
+        ...(input.adoptedCandidateGenerationId ? { adoptedCandidateGenerationId: input.adoptedCandidateGenerationId } : {}),
+        ...(input.adoptedCandidateAuditStatus ? { adoptedCandidateAuditStatus: input.adoptedCandidateAuditStatus } : {}),
         candidate,
         scoreProvenance: {
           source: input.origin === "series"
@@ -145,6 +147,8 @@ function toOpportunity(record: OpportunityRecord): StudioOpportunity {
   });
   return {
     id: record.candidate.id,
+    ...(record.adoptedCandidateGenerationId ? { adoptedCandidateGenerationId: record.adoptedCandidateGenerationId } : {}),
+    ...(record.adoptedCandidateAuditStatus ? { adoptedCandidateAuditStatus: record.adoptedCandidateAuditStatus } : {}),
     title: record.title,
     platform: record.candidate.platform,
     track: record.candidate.track,

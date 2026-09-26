@@ -188,6 +188,10 @@ export {
   projectCreativePlanningState,
   runCreativePlanning,
 } from "./creative-planning.js";
+export {
+  planningReviewCheckpointIdentity,
+  withAuditOperationBinding,
+} from "./production-pipeline.js";
 export type {
   AvailabilityReviewInput,
   AvailabilityReviewer,
@@ -231,7 +235,11 @@ export {
 export type {
   CodexPublishCopyWriterOptions,
   PublishCopy,
+  PublishCopyAuditExecution,
+  PublishCopyAuditInput,
+  PublishCopyBrief,
   PublishCopyInput,
+  PublishCopyRevisionInput,
   PublishCopyWriter,
 } from "./codex-publish-copy.js";
 export { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";

@@ -4800,6 +4800,98 @@ describe("reworkAffectedScenePositions", () => {
     }), /新增了镜头 2、4.*重新确认返工范围/);
   });
 
+  it("rejects a seven-shot to five-shot plan before media, even when unchanged script positions look harmless", () => {
+    const previousScenes = Array.from({ length: 7 }, (_, index) => scene(index + 1));
+    const currentScenes = previousScenes.slice(0, 5).map((entry) => structuredClone(entry));
+    assert.throws(() => reworkAffectedScenePositions({
+      findings: [], previousScenes, currentScenes,
+      previousShots: previousScenes.map((entry) => ({ scenePosition: entry.position, deliveryType: "stock_video", query: `old ${entry.position}` })),
+      currentShots: currentScenes.map((entry) => ({ scenePosition: entry.position, deliveryType: "generated_video", generationPrompt: `new ${entry.position}` })),
+      affectedScenePositions: [],
+    }), (error: unknown) => error instanceof Error && "code" in error && error.code === "REWORK_SCOPE_CONFLICT");
+  });
+
+  it("allows a seven-to-five rewrite only after the creator explicitly covers old and new positions", () => {
+    const previousScenes = Array.from({ length: 7 }, (_, index) => scene(index + 1));
+    const currentScenes = previousScenes.slice(0, 5).map((entry) => structuredClone(entry));
+    const scope = {
+      findings: [], previousScenes, currentScenes,
+      previousShots: previousScenes.map((entry) => ({ scenePosition: entry.position, deliveryType: "stock_video", query: `old ${entry.position}` })),
+      currentShots: currentScenes.map((entry) => ({ scenePosition: entry.position, deliveryType: "generated_video", generationPrompt: `new ${entry.position}` })),
+    };
+    assert.throws(() => reworkAffectedScenePositions({ ...scope, affectedScenePositions: [1, 2, 3, 4, 5] }), /重新选择范围|重新确认返工范围/);
+    assert.deepEqual(reworkAffectedScenePositions({ ...scope, affectedScenePositions: [1, 2, 3, 4, 5, 6, 7] }), [1, 2, 3, 4, 5]);
+  });
+
+  it("does not treat reordered stable scene identities as unchanged positions", () => {
+    const previousScenes = [{ ...scene(1), id: "opening" }, { ...scene(2), id: "payoff" }];
+    const currentScenes = [{ ...scene(1), id: "payoff" }, { ...scene(2), id: "opening" }];
+    assert.throws(() => reworkAffectedScenePositions({
+      findings: [], previousScenes, currentScenes, affectedScenePositions: [],
+    }), (error: unknown) => error instanceof Error && "code" in error && error.code === "REWORK_SCOPE_CONFLICT");
+  });
+
+  it("detects a changed shot universe when only the previous director plan survived", () => {
+    assert.throws(() => reworkAffectedScenePositions({
+      findings: [],
+      previousShots: [1, 2, 3].map((scenePosition) => ({ scenePosition })),
+      currentScenes: [1, 2].map((position) => ({ position })),
+      currentShots: [1, 2].map((scenePosition) => ({ scenePosition })),
+      affectedScenePositions: [],
+    }), (error: unknown) => error instanceof Error && "code" in error && error.code === "REWORK_SCOPE_CONFLICT");
+  });
+
+  it("does not claim unchanged script content when only old shot positions survived", () => {
+    const currentScenes = [scene(1), scene(2)];
+    assert.throws(() => reworkAffectedScenePositions({
+      findings: [],
+      previousShots: currentScenes.map((entry) => ({ scenePosition: entry.position })),
+      currentScenes,
+      currentShots: currentScenes.map((entry) => ({ scenePosition: entry.position })),
+      affectedScenePositions: [],
+    }), (error: unknown) => error instanceof Error && "code" in error && error.code === "REWORK_SCOPE_CONFLICT"
+      && "requiredScenePositions" in error && JSON.stringify(error.requiredScenePositions) === JSON.stringify([1, 2]));
+  });
+
+  it("requires a whole-film scope when global visual or sound rules change before media exists", () => {
+    const scenes = [scene(1), scene(2), scene(3)];
+    assert.throws(() => reworkAffectedScenePositions({
+      findings: [], previousScenes: scenes, currentScenes: scenes.map((entry) => structuredClone(entry)),
+      previousShots: scenes.map((entry) => ({ scenePosition: entry.position })),
+      currentShots: scenes.map((entry) => ({ scenePosition: entry.position })),
+      previousGlobalIntent: { pacing: "舒缓", sound: "环境声" },
+      currentGlobalIntent: { pacing: "急促", sound: "鼓点" },
+      affectedScenePositions: [],
+    }), (error: unknown) => error instanceof Error && "code" in error && error.code === "REWORK_SCOPE_CONFLICT"
+      && "requiredScenePositions" in error && JSON.stringify(error.requiredScenePositions) === JSON.stringify([1, 2, 3]));
+  });
+
+  it("treats per-scene sound and visible text changes as affected content before any media exists", () => {
+    const previousScenes = [scene(1), scene(2), scene(3)].map((entry) => ({
+      ...entry,
+      sound_cue: "安静的环境声",
+      on_screen_text: "旧字幕",
+    }));
+    const currentScenes = previousScenes.map((entry) => ({ ...entry }));
+    currentScenes[1] = { ...currentScenes[1]!, sound_cue: "节奏鼓点" };
+    currentScenes[2] = { ...currentScenes[2]!, on_screen_text: "新字幕" };
+    assert.throws(() => reworkAffectedScenePositions({
+      findings: [], previousScenes, currentScenes, affectedScenePositions: [],
+    }), (error: unknown) => error instanceof Error && "code" in error && error.code === "REWORK_SCOPE_CONFLICT"
+      && "requiredScenePositions" in error && JSON.stringify(error.requiredScenePositions) === JSON.stringify([2, 3]));
+  });
+
+  it("treats a changed director shot action as affected content", () => {
+    const scenes = [scene(1), scene(2)];
+    assert.throws(() => reworkAffectedScenePositions({
+      findings: [], previousScenes: scenes, currentScenes: scenes.map((entry) => ({ ...entry })),
+      previousShots: [{ scenePosition: 1, visibleAction: "打开盒子" }, { scenePosition: 2, visibleAction: "关上盒子" }],
+      currentShots: [{ scenePosition: 1, visibleAction: "打开盒子" }, { scenePosition: 2, visibleAction: "把盒子扔掉" }],
+      affectedScenePositions: [],
+    }), (error: unknown) => error instanceof Error && "code" in error && error.code === "REWORK_SCOPE_CONFLICT"
+      && "requiredScenePositions" in error && JSON.stringify(error.requiredScenePositions) === JSON.stringify([2]));
+  });
+
   it("rejects a structured finding outside the current scene universe", () => {
     assert.throws(() => reworkAffectedScenePositions({
       findings: [finding(4)],

@@ -48,6 +48,7 @@ import {
   type StudioDecisionInput,
   type StudioCreativeReviewCommandInput,
   type StudioCreativeReviewCommandReceipt,
+  type StudioCreativeReviewHistory,
   type StudioCreativeReviewSnapshot,
   type StudioNarrationRevisionInput,
   type StudioSceneRevisionInput,
@@ -92,6 +93,8 @@ import {
   type StudioTemplateMutation,
   type StudioTemplateExperimentScorecard,
   type StudioNodeInputOverrideInput,
+  type StudioNodeDocumentRevisionInput,
+  type StudioNodeDocumentAuditInput,
   type StudioNodeExecutionConfigurationInput,
   type StudioNodeOverrideInput,
   type StudioPaidNodeSummary,
@@ -124,6 +127,7 @@ export interface StudioServicePort {
   listTrendServices(): Promise<StudioTrendService[]>;
   listTrendSignals(input: StudioTrendSignalQuery): Promise<StudioTrendSignal[]>;
   listTrendCandidates(): Promise<StudioTrendCandidate[]>;
+  reviseTrendCandidate(candidateId: string, expectedGenerationId: string, instruction: string): Promise<StudioTrendCandidate>;
   refreshTrendCandidates(): Promise<StudioTrendRefreshReceipt>;
   trendCandidateRefreshStatus(refreshId: string): Promise<StudioTrendRefreshStatus>;
   listCandidateInbox(input: StudioCandidateInboxQuery): Promise<StudioCandidateInbox>;
@@ -132,6 +136,9 @@ export interface StudioServicePort {
   supplementOpportunitySources?(opportunityId: string, input: StudioCandidateSourcesInput): Promise<StudioOpportunity>;
   listSeries(): Promise<StudioSeries[]>;
   createSeries(input: StudioSeriesInput): Promise<StudioSeries>;
+  generateSeriesRoadmap(seriesId: string): Promise<StudioSeries>;
+  auditSeriesEpisodeCurrent(seriesId: string, episodeNumber: number, expectedRevision: number): Promise<StudioSeries>;
+  reviseSeriesEpisodeCurrent(seriesId: string, episodeNumber: number, expectedRevision: number, instruction: string): Promise<StudioSeries>;
   updateSeriesEpisodePlan(seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput): Promise<StudioSeries>;
   linkLegacySeriesRun(seriesId: string, episodeNumber: number, runId: string): Promise<StudioSeries>;
   listOpportunities(origin?: "trend" | "series" | "manual"): Promise<StudioOpportunity[]>;
@@ -156,6 +163,7 @@ export interface StudioServicePort {
   deleteReferenceVideo?(uploadId: string): Promise<void>;
   decide(runId: string, input: StudioDecisionInput, actor: string): Promise<StudioRunDetail>;
   creativeReview?(runId: string): Promise<StudioCreativeReviewSnapshot | undefined>;
+  creativeReviewHistory?(runId: string): Promise<StudioCreativeReviewHistory | undefined>;
   commandCreativeReview?(runId: string, input: StudioCreativeReviewCommandInput, actor: string): Promise<StudioCreativeReviewCommandReceipt>;
   creativeReviewCommand?(runId: string, commandId: string): Promise<StudioCreativeReviewCommandReceipt | undefined>;
   requestSceneRevision(runId: string, input: StudioSceneRevisionInput, actor: string): Promise<StudioRunDetail>;
@@ -164,6 +172,8 @@ export interface StudioServicePort {
   reinspectVisualReview(runId: string, input: StudioVisualReinspectionInput): Promise<StudioRunDetail>;
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
+  reviseNodeDocument(runId: string, nodeId: string, input: StudioNodeDocumentRevisionInput, actor: string): Promise<StudioRunDetail>;
+  auditNodeDocumentCurrent(runId: string, nodeId: string, input: StudioNodeDocumentAuditInput, actor: string): Promise<StudioRunDetail>;
   prepareProductionQuote(runId: string, input: StudioProductionQuoteInput, actor?: string): Promise<StudioProductionQuote>;
   authorizeProductionScope(runId: string, input: StudioProductionAuthorizationInput, actor?: string): Promise<StudioRunDetail>;
   amendProductionScope(runId: string, authorizationId: string, input: StudioProductionAmendmentInput, actor?: string): Promise<StudioRunDetail>;
@@ -342,6 +352,14 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     });
   });
   app.get("/api/trend-candidates", async () => options.service.listTrendCandidates());
+  app.post("/api/trend-candidates/revise", async (request) => {
+    const input = requireRecord(request.body, "候选修订请求");
+    const instruction = requireText(input.instruction, "instruction");
+    const candidateId = requireText(input.candidateId, "candidateId");
+    const expectedGenerationId = requireText(input.expectedGenerationId, "expectedGenerationId");
+    return options.service.reviseTrendCandidate(candidateId, expectedGenerationId, instruction);
+  });
+
   app.post("/api/trend-candidates/refresh", async (_request, reply) => {
     return reply.code(202).send(await options.service.refreshTrendCandidates());
   });
@@ -380,6 +398,10 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   app.post("/api/series", async (request, reply) => {
     return reply.code(201).send(await options.service.createSeries(parseStudioSeriesInput(request.body)));
   });
+  app.post<{ Params: { seriesId: string } }>("/api/series/:seriesId/roadmap/generate", async (request) => {
+    requireSafeRouteId(request.params.seriesId, "系列编号");
+    return options.service.generateSeriesRoadmap(request.params.seriesId);
+  });
   app.patch<{ Params: { seriesId: string; episodeNumber: string } }>(
     "/api/series/:seriesId/episodes/:episodeNumber",
     async (request) => {
@@ -391,6 +413,32 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
         episodeNumber,
         parseStudioSeriesEpisodePlanInput(request.body),
       );
+    },
+  );
+  app.post<{ Params: { seriesId: string; episodeNumber: string }; Body: { expectedRevision?: unknown } }>(
+    "/api/series/:seriesId/episodes/:episodeNumber/audit-current",
+    async (request) => {
+      requireSafeRouteId(request.params.seriesId, "系列编号");
+      const episodeNumber = Number(request.params.episodeNumber);
+      if (!Number.isSafeInteger(episodeNumber) || episodeNumber <= 0) throw new StudioInputError("单集编号必须是正整数。");
+      const expectedRevision = request.body?.expectedRevision;
+      if (!Number.isSafeInteger(expectedRevision) || Number(expectedRevision) < 0) throw new StudioInputError("系列版本必须是非负整数。");
+      return options.service.auditSeriesEpisodeCurrent(request.params.seriesId, episodeNumber, Number(expectedRevision));
+    },
+  );
+  app.post<{ Params: { seriesId: string; episodeNumber: string }; Body: { expectedRevision?: unknown; instruction?: unknown } }>(
+    "/api/series/:seriesId/episodes/:episodeNumber/revise-current",
+    async (request) => {
+      requireSafeRouteId(request.params.seriesId, "系列编号");
+      const episodeNumber = Number(request.params.episodeNumber);
+      if (!Number.isSafeInteger(episodeNumber) || episodeNumber <= 0) throw new StudioInputError("单集编号必须是正整数。");
+      const expectedRevision = request.body?.expectedRevision;
+      if (!Number.isSafeInteger(expectedRevision) || Number(expectedRevision) < 0) throw new StudioInputError("系列版本必须是非负整数。");
+      const instruction = request.body?.instruction;
+      if (typeof instruction !== "string" || instruction.trim().length === 0 || instruction.length > 4_000) {
+        throw new StudioInputError("请填写不超过 4,000 字的单集修改意见。");
+      }
+      return options.service.reviseSeriesEpisodeCurrent(request.params.seriesId, episodeNumber, Number(expectedRevision), instruction.trim());
     },
   );
   app.post<{ Params: { seriesId: string; episodeNumber: string }; Body: { runId?: unknown } }>(
@@ -544,6 +592,13 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     return review ?? reply.code(404).send({ error: "这条制作当前没有等待讨论的创作方案。" });
   });
 
+  app.get<{ Params: { runId: string } }>("/api/runs/:runId/creative-review/history", async (request, reply) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    if (!options.service.creativeReviewHistory) return reply.code(404).send({ error: "当前服务不支持创作历史。" });
+    const history = await options.service.creativeReviewHistory(request.params.runId);
+    return history ?? reply.code(404).send({ error: "这条制作没有创作版本历史。" });
+  });
+
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/creative-review/commands", async (request, reply) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     const input = parseStudioCreativeReviewCommandInput(request.body);
@@ -603,6 +658,28 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       request.params.runId,
       request.params.nodeId,
       parseNodeInputOverrideInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
+
+  app.post<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/document-revision", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.nodeId, "节点编号");
+    return options.service.reviseNodeDocument(
+      request.params.runId,
+      request.params.nodeId,
+      parseNodeDocumentRevisionInput(request.body),
+      trustedStudioActor(auth, request.headers.cookie),
+    );
+  });
+
+  app.post<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/document-audit", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.nodeId, "节点编号");
+    return options.service.auditNodeDocumentCurrent(
+      request.params.runId,
+      request.params.nodeId,
+      parseNodeDocumentAuditInput(request.body),
       trustedStudioActor(auth, request.headers.cookie),
     );
   });
@@ -1132,6 +1209,32 @@ function parseNodeInputOverrideInput(value: unknown): StudioNodeInputOverrideInp
     ...(planningStageId ? { planningStageId } : {}),
     ...(input.confirmTerminalEdit === true ? { confirmTerminalEdit: true } : {}),
   };
+}
+
+function parseNodeDocumentRevisionInput(value: unknown): StudioNodeDocumentRevisionInput {
+  const input = requireRecord(value, "发布文案修订请求");
+  const instruction = requireText(input.instruction, "instruction");
+  return {
+    instruction,
+    expectedRunRevision: requireExpectedRevision(input.expectedRunRevision),
+    expectedVersionId: requireText(input.expectedVersionId, "expectedVersionId"),
+    ...(input.confirmTerminalEdit === true ? { confirmTerminalEdit: true } : {}),
+  };
+}
+
+function parseNodeDocumentAuditInput(value: unknown): StudioNodeDocumentAuditInput {
+  const input = requireRecord(value, "发布文案审计请求");
+  return {
+    expectedRunRevision: requireExpectedRevision(input.expectedRunRevision),
+    expectedVersionId: requireText(input.expectedVersionId, "expectedVersionId"),
+  };
+}
+
+function requireExpectedRevision(value: unknown): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new StudioInputError("请求需要携带你当前看到的制作版本号。");
+  }
+  return Number(value);
 }
 
 function parseNodeExecutionConfigurationInput(value: unknown): StudioNodeExecutionConfigurationInput {
