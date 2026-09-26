@@ -1089,6 +1089,83 @@ describe("ProductionPipeline", () => {
     assert.ok(failed.artifacts.some((artifact) => artifact.kind === "model_trace" && artifact.provenance.model === "deepseek-flash"));
   });
 
+  it("repairs short free stock through the normal retry action without rerunning upstream and stops for asset confirmation", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-stock-range-recovery-"));
+    class StockWorker extends FakeWorker {
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const response = await super.run(request);
+        if (request.capability !== "asset.prepare") return response;
+        const assets = await Promise.all([1, 2].map(async position => {
+          const uri = path.join(String(request.outputDir), `scene-${position}.mp4`);
+          const content = `real-boundary-fixture-${position}`;
+          await writeFile(uri, content);
+          response.artifacts.push({ ...response.artifacts[0]!, kind: "media_asset", uri,
+            sha256: createHash("sha256").update(content).digest("hex"), sizeBytes: Buffer.byteLength(content),
+            provenance: { ...response.artifacts[0]!.provenance, scenePosition: position },
+          });
+          return { scene_position: position, provider: "pexels", asset_id: String(position), media_type: "video", local_path: uri };
+        }));
+        const content = JSON.stringify({ scene_assets: assets });
+        await writeFile(String(response.output!.assetPlanPath), content);
+        response.artifacts[0] = { ...response.artifacts[0]!, kind: "asset_plan", sizeBytes: Buffer.byteLength(content), sha256: createHash("sha256").update(content).digest("hex") };
+        return response;
+      }
+    }
+    const worker = new StockWorker();
+    let directorCalls = 0;
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker,
+      providerRuntimeMetadata: [{ id: "deepseek-visual-review-v1", label: "审片", modelId: "fixture",
+        transport: "unix_socket", billing: "subscription", approvalPolicy: "none", maxAttempts: 1 }],
+      directorAgent: { id: "api-visual-director-v1", modelId: "fixture", plan: async input => {
+        directorCalls += 1;
+        return { version: "video-factory/director-plan-v1", requestedProfileId: input.brief.requestedProfileId,
+          resolvedProfileId: "documentary-observer", profileRationale: "海景", visualBible: {
+            narrativeApproach: "平静", pacing: "舒缓", composition: "开阔", camera: "固定", color: "自然", continuity: "海景", sound: "海浪",
+          }, shots: input.scenes.map(scene => ({ scenePosition: scene.position, narrativeRole: "海景",
+            authenticityPolicy: "illustrative", preferredProviderId: "pexels-stock-v1", deliveryType: "stock_video",
+            alternativeProviderIds: [], temporalBeats: [`[0s-${scene.duration}s] 看海`], query: "sea",
+            generationPrompt: "sea", rationale: "免费", continuityNote: "海景", confidence: 0.8, estimatedCostCny: 0,
+          })) };
+      } },
+      assetProviders: [{ id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["video"], deliveryTypes: ["stock_video"] }],
+      visualReviewAgents: [{ id: "deepseek-visual-review-v1", modelId: "fixture", review: async () => {
+        throw new pipeline.PlanContractError("SOURCE_RANGE_TOO_SHORT", [2], "local input failure");
+      } }],
+    });
+    let run = await subject.start({ ...brief, providers: { ...brief.providers, assets: "ai-shot-router-v1",
+      director: "api-visual-director-v1", visualReview: "deepseek-visual-review-v1" },
+      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" },
+    });
+    for (let i = 0; i < 5 && run.status === "needs_human"; i += 1) {
+      run = await subject.decide(run.id, { interventionId: run.nodeRuns.find(node => node.status === "needs_human")!.intervention!.id,
+        action: "approve", actor: "owner", expectedRunRevision: run.revision, reviewEvidenceId: null });
+    }
+    assert.equal(run.status, "failed");
+    const failed = run.nodeRuns.find(node => node.nodeId === "asset-source-review")!;
+    assert.equal(failed.errorCode, "SOURCE_RANGE_TOO_SHORT");
+    assert.doesNotMatch(failed.error!, /更换视觉审片模型|服务暂时不可用/);
+    assert.deepEqual(failed.output, { sourceMediaFailure: { code: "SOURCE_RANGE_TOO_SHORT", scenePositions: [2], canRematch: true } });
+    const upstream = run.nodeRuns.filter(node => ["brief", "script", "visual-direction"].includes(node.nodeId));
+    const planPath = (run.nodeRuns.find(node => node.nodeId === "assets")!.output as { assetPlanPath: string }).assetPlanPath;
+    const savedPlan = await readFile(planPath, "utf8");
+    await writeFile(planPath, savedPlan + " ");
+    await assert.rejects(() => subject.retryFailedNode(run.id, "asset-source-review"), /SHA|size|integrity|match/i);
+    assert.equal(worker.calls.length, 2);
+    await writeFile(planPath, savedPlan);
+    const attempts = await Promise.allSettled([subject.retryFailedNode(run.id, "asset-source-review"), subject.retryFailedNode(run.id, "asset-source-review")]);
+    assert.equal(attempts.filter(item => item.status === "fulfilled").length, 1);
+    const recovered = (attempts.find(item => item.status === "fulfilled") as PromiseFulfilledResult<typeof run>).value;
+    assert.equal(recovered.status, "needs_human");
+    assert.equal(recovered.nodeRuns.find(node => node.nodeId === "assets")!.status, "needs_human");
+    assert.deepEqual(recovered.nodeRuns.filter(node => ["brief", "script", "visual-direction"].includes(node.nodeId)), upstream);
+    assert.equal(directorCalls, 1);
+    assert.deepEqual(worker.calls.map(call => call.capability), ["script.draft", "asset.prepare", "asset.prepare"]);
+    const reuse = (worker.calls.at(-1)!.input as { reusableStockAssets: Array<{ scenePosition: number; sha256: string }> }).reusableStockAssets;
+    assert.deepEqual(reuse.map(item => item.scenePosition), [1, 2]);
+    assert.ok(reuse.every(item => /^[a-f0-9]{64}$/.test(item.sha256)));
+  });
+
   it("stops before voice and render when source assets fail the free visual gate, and hands the verdict to the user", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-source-asset-gate-"));
     class SourceAssetWorker extends FakeWorker {

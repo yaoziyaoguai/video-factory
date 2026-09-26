@@ -19,6 +19,17 @@ function node(
 }
 
 describe("run observability", () => {
+  it("offers stock rematching for short material instead of retrying or changing review models", () => {
+    const result = buildRunObservability({ status: "failed", startedAt: "2026-09-26T08:39:00Z", now: "2026-09-26T08:40:00Z",
+      nodes: [node("assets", "画面", "succeeded"), node("asset-source-review", "预检", "failed", {
+        error: "第 3 镜素材过短。",
+        output: { sourceMediaFailure: { code: "SOURCE_RANGE_TOO_SHORT", scenePositions: [3], canRematch: true } },
+      })], videoAvailable: false, publishPackageAvailable: false });
+    expect(result.failure).toMatchObject({ summary: "第 3 镜素材长度不够，不能覆盖已确认的镜头时段",
+      retryable: true, retryLabel: "重新匹配过短素材" });
+    expect(result.failure?.recoveryActions.join("；")).not.toMatch(/切换.*模型|稍后重试/);
+  });
+
   it("groups the production line into five creator-facing phases and reports truthful progress", () => {
     const result = buildRunObservability({
       status: "running",

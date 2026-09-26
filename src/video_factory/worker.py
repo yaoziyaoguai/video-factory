@@ -126,6 +126,10 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
     ]
     if not scenes:
         raise WorkerProtocolError("asset.prepare requires a script with scenes")
+    source_ends = {
+        position: (timing["source_in_frame"] + timing["duration_frames"]) / 30
+        for position, timing in validate_executable_plan(executable_plan).items()
+    } if executable_plan is not None else None
     parameters = request.get("parameters", {})
     provider = str(parameters.get("provider", "local"))
     if provider not in {"local", "pexels", "pixabay", "unsplash", "coverr", "wikimedia", "met", "nasa", "openverse", "cleveland", "archive", "flickr", "mock", "ai-router"}:
@@ -187,6 +191,8 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
             candidate_ranking=candidate_ranking,
             candidate_inventory=candidate_inventory,
             accepted_quality_scenes=accepted_quality_scenes,
+            required_source_ends=source_ends,
+            reusable_assets=request["input"].get("reusableStockAssets"),
         )
     else:
         plan_path = prepare_scene_assets(
@@ -196,6 +202,7 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
             provider=provider,
             media_type=str(parameters.get("mediaType", "video")),
             limit=int(parameters.get("limit", 6)),
+            required_source_ends=source_ends,
         )
     if executable_plan is not None:
         project_executable_timings_into_asset_plan(plan_path, executable_plan)

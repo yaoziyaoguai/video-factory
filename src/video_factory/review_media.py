@@ -29,6 +29,12 @@ SCENE_SCAN_TIMEOUT_SECONDS = 180
 FRAME_TIMEOUT_SECONDS = 30
 
 
+class SourceRangeTooShortError(ValueError):
+    def __init__(self, scene_positions: List[int]):
+        self.scene_positions = scene_positions
+        super().__init__(f"asset plan scene {scene_positions} source does not cover the planned source range")
+
+
 def prepare_review_media(
     video_path: Path,
     run_root: Path,
@@ -242,6 +248,7 @@ def prepare_asset_review_media(
         })
 
     _require_media_tools()
+    short_positions = []
     for asset in normalized_assets:
         if asset["mediaType"] != "video":
             continue
@@ -249,10 +256,10 @@ def prepare_asset_review_media(
         source_end_seconds = asset["sourceEndSeconds"]
         source_start_ms = int(round(asset["sourceInFrame"] * 1000 / 30))
         if source_end_seconds > source_duration_seconds + 1e-6:
-            raise ValueError(
-                f"asset plan scene {asset['scenePosition']} source does not cover the planned source range"
-            )
+            short_positions.append(asset["scenePosition"])
         asset["sourceStartMs"] = source_start_ms
+    if short_positions:
+        raise SourceRangeTooShortError(short_positions)
     sample_counts = [1] * len(normalized_assets)
     remaining = max_frames - len(normalized_assets)
     video_indexes = [index for index, asset in enumerate(normalized_assets) if asset["mediaType"] == "video"]
@@ -398,20 +405,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--script")
     parser.add_argument("--executable-plan")
     args = parser.parse_args(argv)
-    manifest = (
-        prepare_asset_review_media(
-            Path(args.asset_plan), Path(args.run_root), args.max_frames,
-            args.scene_positions, Path(args.script) if args.script else None,
-            Path(args.executable_plan) if args.executable_plan else None,
+    try:
+        manifest = (
+            prepare_asset_review_media(
+                Path(args.asset_plan), Path(args.run_root), args.max_frames,
+                args.scene_positions, Path(args.script) if args.script else None,
+                Path(args.executable_plan) if args.executable_plan else None,
+            )
+            if args.asset_plan
+            else prepare_review_media(
+                Path(args.video), Path(args.run_root), args.max_frames,
+                Path(args.render_manifest) if args.render_manifest else None,
+            )
         )
-        if args.asset_plan
-        else prepare_review_media(
-            Path(args.video),
-            Path(args.run_root),
-            args.max_frames,
-            Path(args.render_manifest) if args.render_manifest else None,
-        )
-    )
+    except SourceRangeTooShortError as error:
+        print(json.dumps({"version": "video-factory/review-media-error-v1", "code": "SOURCE_RANGE_TOO_SHORT",
+                          "scenePositions": error.scene_positions}))
+        return 2
     print(json.dumps({"manifestPath": str(manifest)}, ensure_ascii=False))
     return 0
 

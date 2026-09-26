@@ -1,7 +1,9 @@
 import json
+import hashlib
 import math
 import os
 import re
+import shutil
 import subprocess
 import time
 import urllib.parse
@@ -307,6 +309,7 @@ def prepare_scene_assets(
     provider: str,
     media_type: str = "video",
     limit: int = 3,
+    required_source_ends: Optional[dict[int, float]] = None,
 ) -> Path:
     asset_dir = workspace / "assets" / f"job-{job_id}"
     asset_dir.mkdir(parents=True, exist_ok=True)
@@ -322,37 +325,12 @@ def prepare_scene_assets(
         )
         if not candidates:
             raise RuntimeError(f"No {provider} {media_type} asset found for scene {scene.position}: {query}")
-        last_error: Optional[RuntimeError] = None
-        for candidate in candidates:
-            local_path = asset_dir / local_filename(scene.position, candidate)
-            try:
-                actual_path = materialize_candidate(candidate, local_path)
-                candidate = inspect_open_stock_file(candidate, actual_path)
-            except RuntimeError as error:
-                last_error = error
-                continue
-            scene_assets.append(
-                SceneAsset(
-                    scene_position=scene.position,
-                    provider=candidate.provider,
-                    asset_id=candidate.asset_id,
-                    media_type=candidate.media_type,
-                    width=candidate.width,
-                    height=candidate.height,
-                    duration=scene.duration if candidate.media_type == "image" else candidate.duration,
-                    local_path=str(actual_path),
-                    source_url=candidate.source_url,
-                    creator=candidate.creator,
-                    creator_url=candidate.creator_url,
-                    preview_url=candidate.preview_url if candidate.provider == "unsplash" else "",
-                    license_note=candidate.license_note,
-                    query=candidate.query,
-                )
-            )
-            break
-        else:
-            detail = f" Last error: {last_error}" if last_error else ""
-            raise RuntimeError(f"No downloadable {provider} {media_type} asset found for scene {scene.position}: {query}.{detail}")
+        failures: list[str] = []
+        asset = materialize_first_candidate(scene, candidates, asset_dir, failures=failures,
+                                            required_source_end=required_source_ends.get(scene.position) if required_source_ends else None)
+        if asset is None:
+            raise RuntimeError(f"No downloadable {provider} {media_type} asset found for scene {scene.position}: {'; '.join(failures)}")
+        scene_assets.append(asset)
 
     return write_asset_plan(default_asset_plan_path(workspace, job_id), job_id, scene_assets)
 
@@ -367,6 +345,8 @@ def prepare_routed_scene_assets(
     candidate_ranking: Optional[dict] = None,
     candidate_inventory: Optional[dict] = None,
     accepted_quality_scenes: Optional[set[int]] = None,
+    required_source_ends: Optional[dict[int, float]] = None,
+    reusable_assets: Optional[list[dict]] = None,
 ) -> Path:
     asset_dir = workspace / "assets" / f"job-{job_id}"
     asset_dir.mkdir(parents=True, exist_ok=True)
@@ -388,6 +368,15 @@ def prepare_routed_scene_assets(
                 f"Director plan scene {scene.position} must reuse an earlier existing scene, got {source_position}"
             )
         reuse_sources[scene.position] = source_position
+    source_ends = {
+        scene.position: (required_source_ends[scene.position] if required_source_ends is not None
+                         else float(routes[scene.position].get("sourceInSeconds", 0)) + scene.duration)
+        for scene in scene_list
+    }
+    # 一段母片可能被多个镜头截取，下载前需覆盖所有复用镜头的最远源时间。
+    for position in sorted(reuse_sources, reverse=True):
+        parent = reuse_sources[position]
+        source_ends[parent] = max(source_ends[parent], source_ends[position])
     ranking_by_scene = ranking_candidate_ids_by_scene(candidate_ranking, accepted_quality_scenes)
     inventory_by_scene = inventory_candidates_by_scene_provider(candidate_inventory)
     claimed_stock_assets: set[tuple[str, str]] = set()
@@ -427,6 +416,11 @@ def prepare_routed_scene_assets(
         generation_pending = False
         errors = []
         materialization_notes: list[str] = []
+        reusable = {(item["provider"], item["assetId"]): item for item in (reusable_assets or [])
+                    if item["scenePosition"] == scene.position}
+        provider_ids.sort(key=lambda provider_id: provider_id not in {
+            f"{provider}-stock-v1" for provider, _ in reusable
+        })
         duplicate_options: list[tuple[str, List[StockAssetCandidate]]] = []
         editorial_card = is_explicit_editorial_card(preferred_id, delivery_type)
 
@@ -469,6 +463,7 @@ def prepare_routed_scene_assets(
                     else search_stock_query_variants(provider, stock_query, scene.search_terms, route_media_type, limit)
                 )
                 candidates = reorder_candidates(discovered_candidates, ranking_by_scene.get(scene.position, []) if candidate_ranking is not None else None)
+                candidates.sort(key=lambda item: (item.provider, item.asset_id) not in reusable)
                 if discovered_candidates and not candidates:
                     materialization_notes.append(
                         f"{provider_id}: semantic review rejected {len(discovered_candidates)} candidate(s)"
@@ -481,6 +476,8 @@ def prepare_routed_scene_assets(
                     claim=claim_candidate,
                     release=release_candidate,
                     failures=materialization_notes,
+                    required_source_end=source_ends[scene.position],
+                    reusable_assets=reusable,
                 )
                 if actual_asset is not None:
                     actual_provider_id = provider_id
@@ -496,6 +493,8 @@ def prepare_routed_scene_assets(
                     candidates,
                     asset_dir,
                     failures=materialization_notes,
+                    required_source_end=source_ends[scene.position],
+                    reusable_assets=reusable,
                 )
                 if actual_asset is not None:
                     actual_provider_id = provider_id
@@ -764,15 +763,42 @@ def materialize_first_candidate(
     claim: Optional[Callable[[StockAssetCandidate], bool]] = None,
     release: Optional[Callable[[StockAssetCandidate], None]] = None,
     failures: Optional[list[str]] = None,
+    required_source_end: Optional[float] = None,
+    reusable_assets: Optional[dict[tuple[str, str], dict]] = None,
 ) -> Optional[SceneAsset]:
+    source_end = scene.duration if required_source_end is None else required_source_end
+    if not math.isfinite(source_end) or source_end < scene.duration:
+        raise ValueError("Required source interval is invalid")
     for candidate in candidates:
-        if claim is not None and not claim(candidate):
+        # 图库整秒元数据可能向下取整；仅明确不够的先排除，其余由下载后的真实媒体复核。
+        reported_duration = candidate.duration
+        if (candidate.media_type == "video" and reported_duration > 0
+                and (reported_duration + 1 <= source_end if float(reported_duration).is_integer()
+                     else reported_duration + 1e-6 < source_end)):
+            if failures is not None:
+                failures.append(f"{candidate.provider}:{candidate.asset_id}: 素材时长不足以覆盖镜头所需区间")
+            continue
+        reusable = (reusable_assets or {}).get((candidate.provider, candidate.asset_id))
+        claimed = claim(candidate) if claim is not None else False
+        if claim is not None and not claimed and reusable is None:
             continue
         try:
-            actual_path = materialize_candidate(candidate, asset_dir / local_filename(scene.position, candidate))
+            target = asset_dir / local_filename(scene.position, candidate)
+            if reusable is not None:
+                source = Path(reusable["localPath"])
+                if hashlib.sha256(source.read_bytes()).hexdigest() != reusable["sha256"]:
+                    raise RuntimeError("已保存素材的内容校验不一致，不能复用")
+                shutil.copyfile(source, target)
+                if hashlib.sha256(target.read_bytes()).hexdigest() != reusable["sha256"]:
+                    raise RuntimeError("素材复用期间内容发生变化，不能采用")
+                actual_path = target
+            else:
+                actual_path = materialize_candidate(candidate, target)
             candidate = inspect_open_stock_file(candidate, actual_path)
+            if candidate.media_type == "video" and candidate.duration + 1e-6 < source_end:
+                raise RuntimeError(f"素材实际时长 {candidate.duration:g} 秒不足以覆盖所需 {source_end:g} 秒")
         except RuntimeError as error:
-            if release is not None:
+            if release is not None and claimed:
                 release(candidate)
             if failures is not None:
                 failures.append(f"{candidate.provider}:{candidate.asset_id}: {error}")
@@ -785,6 +811,7 @@ def materialize_first_candidate(
             width=candidate.width,
             height=candidate.height,
             duration=scene.duration,
+            source_duration=candidate.duration if candidate.media_type == "video" else None,
             local_path=str(actual_path),
             source_url=candidate.source_url,
             creator=candidate.creator,
@@ -802,7 +829,8 @@ def inspect_open_stock_file(candidate: StockAssetCandidate, path: Path) -> Stock
 
 
 def _inspect_open_stock_file(candidate: StockAssetCandidate, path: Path) -> StockAssetCandidate:
-    if candidate.provider not in {"met", "nasa", "openverse", "cleveland", "archive", "flickr"}:
+    check_resolution_floor = candidate.provider in {"met", "nasa", "openverse", "cleveland", "archive", "flickr"}
+    if candidate.media_type != "video" and not check_resolution_floor:
         return candidate
     try:
         duration = 0
@@ -819,7 +847,7 @@ def _inspect_open_stock_file(candidate: StockAssetCandidate, path: Path) -> Stoc
             duration = float(stream.get("duration") or probe.get("format", {}).get("duration") or 0)
             if not math.isfinite(duration) or duration <= 0:
                 raise ValueError("invalid duration")
-        if min(width, height) < 720:
+        if min(width, height) <= 0 or (check_resolution_floor and min(width, height) < 720):
             raise ValueError(f"actual resolution {width}x{height} below 720p floor")
         return replace(candidate, width=width, height=height, duration=duration)
     except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError) as error:

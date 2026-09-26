@@ -226,6 +226,7 @@ function buildFailure(nodes: StudioNode[], videoAvailable: boolean): StudioRunFa
     summary: normalized.summary,
     impact: preserved,
     retryable: !outcomeUncertain && normalized.retryable,
+    ...(!outcomeUncertain && normalized.retryLabel ? { retryLabel: normalized.retryLabel } : {}),
     recoveryActions: outcomeUncertain
       ? ["先到服务商控制台核对任务状态与账单", "确认没有重复扣费后再决定是否重试"]
       : normalized.recoveryActions,
@@ -309,7 +310,24 @@ function buildControlledDetail(raw: string, nodeId: string): { technicalDetail: 
   return { technicalDetail: parts.join("；") };
 }
 
-function normalizeFailure(raw: string, node: StudioNode, provider?: string): Pick<StudioRunFailure, "category" | "summary" | "retryable" | "recoveryActions"> {
+function normalizeFailure(raw: string, node: StudioNode, provider?: string): Pick<StudioRunFailure, "category" | "summary" | "retryable" | "retryLabel" | "recoveryActions"> {
+  const materialFailure = node.output && typeof node.output === "object" && "sourceMediaFailure" in node.output
+    ? node.output.sourceMediaFailure : undefined;
+  if (node.id === "asset-source-review" && materialFailure && typeof materialFailure === "object"
+    && "code" in materialFailure && materialFailure.code === "SOURCE_RANGE_TOO_SHORT"
+    && "scenePositions" in materialFailure && Array.isArray(materialFailure.scenePositions)
+    && materialFailure.scenePositions.length > 0 && materialFailure.scenePositions.length <= 24
+    && materialFailure.scenePositions.every(position => Number.isInteger(position) && position > 0 && position <= 10_000)) {
+    const canRematch = "canRematch" in materialFailure && materialFailure.canRematch === true;
+    return { category: "node_failure",
+      summary: `第 ${materialFailure.scenePositions.join("、")} 镜素材长度不够，不能覆盖已确认的镜头时段`,
+      retryable: canRematch,
+      ...(canRematch ? { retryLabel: "重新匹配过短素材" } : {}),
+      recoveryActions: canRematch
+        ? ["保留合格素材和上游方案，从已允许的免费来源重新匹配；更换后由你确认", "这次在本地素材检查时停止，没有提交审片模型"]
+        : ["调整该镜素材或剪辑方案；如需新购买，仍要确认费用", "更换审片模型不能修复素材长度不足"],
+    };
+  }
   const service = provider ?? node.role ?? node.label;
   const planningHalt = node.id === "creative-planning"
     ? /Joint creative planning stopped \((needs_user|needs_source|duplicate_issue|cross_role_revisions_exhausted)\):/.exec(raw)

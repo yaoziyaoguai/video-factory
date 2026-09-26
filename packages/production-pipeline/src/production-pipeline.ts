@@ -72,6 +72,7 @@ import {
   type ExecutableProductionPlan,
 } from "./executable-production-plan.js";
 import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.js";
+import { PlanContractError } from "./executable-timeline.js";
 import { assertCurrentVisualReviewContract, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport, visualReviewBlocksContinuation, type IndependentVisualReviewExecution, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewFinding, type VisualReviewReport, type VisualReviewScope } from "./codex-visual-review.js";
 import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, parseVoiceDoesNotFitConflict, WORKER_PROTOCOL_VERSION, type ProductionBrief, type ProductionReworkFinding } from "./contracts.js";
 import { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
@@ -3641,6 +3642,34 @@ export class ProductionPipeline {
     listener?: ProductionRunListener,
     options?: { recoverOriginalTextTask?: boolean; resumeCompletedTextTask?: boolean; resumeCompletedTextTaskRequestId?: string },
   ): Promise<DispatchedProductionRun> {
+    const observed = await this.store.load<ProductionBrief>(runId);
+    const failedReview = observed.nodeRuns.find(node => node.nodeId === nodeId);
+    if (nodeId === "asset-source-review" && observed.status === "failed" && failedReview?.status === "failed"
+      && failedReview.errorCode === "SOURCE_RANGE_TOO_SHORT" && !failedReview.outcomeUncertain) {
+      await this.runPersistedTransition(runId, async previous => {
+        if (previous.revision !== observed.revision) throw new StaleRunRevisionError(runId, observed.revision, previous.revision);
+        const brief = parsePersistedBrief(previous.initialInput);
+        const assets = previous.nodeRuns.find(node => node.nodeId === "assets");
+        const inputVersion = assets?.inputState?.versions.find(version => version.id === assets.inputState?.effectiveVersionId);
+        const assetInput = requireOutputRecord(inputVersion?.value, "saved asset input");
+        if (!await supportsFreeStockRematch(brief, assetInput.directorPlanPath)) {
+          throw new Error("当前路线不能自动重新匹配免费素材；请调整素材方案，涉及新购买仍须重新确认费用。");
+        }
+        const version = assets?.outputState?.versions.find(item => item.id === assets.outputState?.effectiveVersionId);
+        const planPath = requiredOutputString(version?.output ?? assets?.output, "assetPlanPath");
+        const plan = previous.artifacts.find(item => version?.artifactIds.includes(item.id)
+          && item.kind === "asset_plan" && item.uri === planPath && item.producer?.nodeId === "assets");
+        if (!plan) throw new Error("当前素材方案缺少可核对的产物记录，不能重新匹配。");
+        await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), plan);
+        const runner = new WorkflowRunner({ providers: this.createRegistry(brief), clock: this.clock, idFactory: this.idFactory });
+        // 使用同一正式编辑/失效合同，只重开素材及其后代；规划版本和已有文件保持不动。
+        return runner.applyNodeInputOverride(this.createWorkflow(brief), withExecutableBrief(previous, brief), {
+          nodeId: "assets", actor: "creator", expectedVersionId: inputVersion!.id, allowTerminalEdit: true,
+          input: { ...assetInput, reuseAssetPlanArtifactId: plan.id },
+        });
+      });
+      return this.dispatchResumeStale(runId, listener);
+    }
     const dispatched = await this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
       const retryRejectedReview = canRetryRejectedReviewNode(previous, nodeId);
       const brief = parsePersistedBrief(previous.initialInput);
@@ -5060,6 +5089,14 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
 
   async run(input: Record<string, unknown>, context: WorkflowContext): Promise<WorkerResponse> {
     await verifyExecutablePlanInput(input, context, this.runsRoot);
+    if (this.config.capability === "asset.prepare") {
+      // 复用描述只能由已登记产物派生，不能接受客户端伪造的路径或 SHA。
+      const { reusableStockAssets: _untrusted, ...assetInput } = input;
+      input = assetInput;
+      if (input.reuseAssetPlanArtifactId !== undefined) {
+        input = { ...input, reusableStockAssets: await verifiedReusableStockAssets(input.reuseAssetPlanArtifactId, context, this.runsRoot) };
+      }
+    }
     const attempt = await reserveAttemptDirectory(path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId));
     const outputDir = attempt.directory;
     const parameters: Record<string, unknown> = { ...this.config.parameters, providerId: this.config.id };
@@ -10067,6 +10104,43 @@ async function sourceQualityRiskAlreadyAccepted(
   return scope.length > 0 && scope.every(position => typeof position === "number" && covered.includes(position));
 }
 
+const FREE_STOCK_REMATCH_PROVIDERS = new Set([
+  "pexels-stock-v1", "pixabay-stock-v1", "unsplash-stock-v1", "coverr-stock-v1", "wikimedia-stock-v1",
+  "met-stock-v1", "nasa-stock-v1", "openverse-stock-v1", "cleveland-stock-v1", "archive-stock-v1", "flickr-stock-v1",
+]);
+
+async function supportsFreeStockRematch(brief: ProductionBrief, directorPlanPath: unknown): Promise<boolean> {
+  if (brief.providers.assets !== "ai-shot-router-v1" || typeof directorPlanPath !== "string") return false;
+  const plan = requireOutputRecord(JSON.parse(await readFile(directorPlanPath, "utf8")), "director plan");
+  return Array.isArray(plan.shots) && plan.shots.length > 0 && plan.shots.every(shot => isObjectRecord(shot)
+    && ["stock_video", "stock_image"].includes(String(shot.deliveryType))
+    && [shot.preferredProviderId, ...(Array.isArray(shot.alternativeProviderIds) ? shot.alternativeProviderIds : [])]
+      .every(id => typeof id === "string" && FREE_STOCK_REMATCH_PROVIDERS.has(id)));
+}
+
+async function verifiedReusableStockAssets(planArtifactId: unknown, context: WorkflowContext, runsRoot: string) {
+  const runRoot = path.join(runsRoot, context.runId);
+  const planArtifact = context.artifacts.find(item => item.id === planArtifactId && item.kind === "asset_plan"
+    && item.producer?.nodeId === "assets");
+  if (!planArtifact?.uri) throw new Error("Stock reuse requires a registered asset plan from this run.");
+  await verifyStoredArtifactWithinRoot(runRoot, planArtifact);
+  const plan = requireOutputRecord(JSON.parse(await readFile(planArtifact.uri, "utf8")), "reuse asset plan");
+  if (!Array.isArray(plan.scene_assets)) throw new Error("Stock reuse plan has no scene assets.");
+  return Promise.all(plan.scene_assets.map(async raw => {
+    const scene = requireOutputRecord(raw, "reuse scene");
+    if (!Number.isInteger(scene.scene_position) || Number(scene.scene_position) < 1
+      || !FREE_STOCK_REMATCH_PROVIDERS.has(`${scene.provider}-stock-v1`)) {
+      throw new Error("Stock reuse scene is not a free library asset.");
+    }
+    const media = context.artifacts.find(item => item.uri === scene.local_path && item.kind === "media_asset"
+      && item.producer?.nodeId === "assets");
+    if (!media?.uri) throw new Error("Stock reuse requires a registered media artifact.");
+    await verifyStoredArtifactWithinRoot(runRoot, media);
+    return { scenePosition: Number(scene.scene_position), provider: requiredOutputString(scene, "provider"),
+      assetId: requiredOutputString(scene, "asset_id"), localPath: media.uri, sha256: media.sha256 };
+  }));
+}
+
 function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): NodeDefinition {
   const providerId = brief.providers.visualReview;
   if (!providerId) throw new Error("Source asset visual review provider is missing.");
@@ -10141,6 +10215,16 @@ function sourceAssetVisualReviewNode(brief: ProductionBrief, runsRoot: string): 
           ),
         }, context);
       } catch (error) {
+        if (error instanceof PlanContractError && error.code === "SOURCE_RANGE_TOO_SHORT") {
+          const canRematch = await supportsFreeStockRematch(brief, request.directorPlanPath);
+          return {
+            status: "failed", providerOutcomeKnown: true, errorCode: error.code,
+            output: { sourceMediaFailure: { code: error.code, scenePositions: error.scenePositions, canRematch } },
+            error: `第 ${error.scenePositions.join("、")} 镜素材不足以覆盖已确认的时段。`
+              + (canRematch ? "可重新匹配免费素材；合格素材和上游方案保留，更换后仍需确认。" : "请调整该镜素材方案；新购买仍需确认费用。")
+              + "这不是审片模型故障。",
+          };
+        }
         if (error instanceof RoleAgentLoopError) {
           const failed = await failedAgentLoopNodeResult({
             error,

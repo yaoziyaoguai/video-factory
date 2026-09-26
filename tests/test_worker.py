@@ -10,12 +10,22 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 from pathlib import Path
 
 from video_factory.domain import SceneAsset, StockAssetCandidate
 from video_factory.voiceover import VoiceDoesNotFitError
 from video_factory.worker import WorkerProtocolError, handle_request, validate_request
+
+
+def materialize_stock_test_video(candidate, target):
+    # 路由测试也交付可探测的真实媒体，避免用 b"video" 掩盖素材覆盖校验。
+    target.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=blue:s=720x1280:r=25",
+                    "-t", "30", "-an", "-c:v", "libx264", "-preset", "ultrafast", str(target)],
+                   check=True, capture_output=True, timeout=30)
+    return target
 
 
 class WorkerContractTest(unittest.TestCase):
@@ -227,7 +237,11 @@ class WorkerContractTest(unittest.TestCase):
                 "mediaType": "video",
             }
 
-            response = handle_request(request)
+            from video_factory.stock_assets import mock_asset_candidates
+            with patch("video_factory.stock_assets.search_stock_assets", side_effect=lambda **kwargs: [
+                replace(item, duration=30) for item in mock_asset_candidates(kwargs["query"], "video", 1)
+            ]), patch("video_factory.stock_assets.materialize_candidate", side_effect=materialize_stock_test_video):
+                response = handle_request(request)
 
             plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text(encoding="utf-8"))
             self.assertEqual(plan["duration_target"], 31.5)
@@ -402,7 +416,7 @@ class WorkerContractTest(unittest.TestCase):
                         media_type="video",
                         width=1080,
                         height=1920,
-                        duration=5,
+                        duration=30,
                         preview_url="https://example.com/preview-2.jpg",
                         download_url="https://example.com/video-2.mp4?temporary=secret",
                         source_url="https://pexels.com/video/2",
@@ -417,7 +431,7 @@ class WorkerContractTest(unittest.TestCase):
                         media_type="video",
                         width=720,
                         height=1280,
-                        duration=7,
+                        duration=30,
                         preview_url="https://example.com/preview-3.jpg",
                         download_url="https://example.com/video-3.mp4?temporary=secret",
                         source_url="https://pexels.com/video/3",
@@ -429,8 +443,7 @@ class WorkerContractTest(unittest.TestCase):
                 ]
 
             def materialize(_candidate, target):
-                target.write_bytes(b"video")
-                return target
+                return materialize_stock_test_video(_candidate, target)
 
             with patch("video_factory.stock_assets.search_stock_assets", side_effect=candidate) as search_assets, patch(
                 "video_factory.stock_assets.materialize_candidate", side_effect=materialize
@@ -706,13 +719,13 @@ class WorkerContractTest(unittest.TestCase):
                     "candidates": [
                         {
                             "provider": "pexels", "provider_id": "pexels-stock-v1", "asset_id": "candidate-1",
-                            "media_type": "video", "width": 1080, "height": 1920, "duration": 5,
+                            "media_type": "video", "width": 1080, "height": 1920, "duration": 30,
                             "preview_url": "", "download_url": "mock://one", "source_url": "", "creator": "",
                             "license_note": "", "query": "q", "score": 100,
                         },
                         {
                             "provider": "pexels", "provider_id": "pexels-stock-v1", "asset_id": "candidate-2",
-                            "media_type": "video", "width": 1080, "height": 1920, "duration": 5,
+                            "media_type": "video", "width": 1080, "height": 1920, "duration": 30,
                             "preview_url": "", "download_url": "mock://two", "source_url": "", "creator": "",
                             "license_note": "", "query": "q", "score": 90,
                         },
@@ -728,8 +741,7 @@ class WorkerContractTest(unittest.TestCase):
             }
             request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router", "mediaType": "video"}
             def materialize(_candidate, target):
-                target.write_bytes(b"video")
-                return target
+                return materialize_stock_test_video(_candidate, target)
 
             def materialize_local(scene, query, asset_dir, _director_shot=None):
                 target = asset_dir / f"scene_{scene.position:02d}_local.png"
@@ -786,7 +798,7 @@ class WorkerContractTest(unittest.TestCase):
                     "scene_position": 1,
                     "candidates": [{
                         "provider": "pexels", "provider_id": "pexels-stock-v1", "asset_id": "best",
-                        "media_type": "video", "width": 1080, "height": 1920, "duration": 5,
+                        "media_type": "video", "width": 1080, "height": 1920, "duration": 30,
                         "preview_url": "", "download_url": "mock://best", "source_url": "",
                         "creator": "", "license_note": "", "query": "q", "score": 90,
                     }],
@@ -1038,7 +1050,7 @@ class WorkerContractTest(unittest.TestCase):
                         media_type=media_type,
                         width=720,
                         height=1280,
-                        duration=5,
+                        duration=30,
                         preview_url="https://example.com/shared.jpg",
                         download_url="https://example.com/shared.mp4",
                         source_url="https://pexels.com/shared",
@@ -1053,7 +1065,7 @@ class WorkerContractTest(unittest.TestCase):
                         media_type=media_type,
                         width=720,
                         height=1280,
-                        duration=5,
+                        duration=30,
                         preview_url=f"https://example.com/{unique_id}.jpg",
                         download_url=f"https://example.com/{unique_id}.mp4",
                         source_url=f"https://pexels.com/{unique_id}",
@@ -1065,7 +1077,9 @@ class WorkerContractTest(unittest.TestCase):
                 ]
 
             def materialize(_candidate, target):
-                target.write_bytes(b"video")
+                if _candidate.media_type == "video":
+                    return materialize_stock_test_video(_candidate, target)
+                target.write_bytes(b"image")
                 return target
 
             with patch("video_factory.stock_assets.search_stock_assets", side_effect=candidates), patch(

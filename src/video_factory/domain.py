@@ -152,3 +152,4 @@ class SceneAsset:
     query: str
     creator_url: str = ""
     preview_url: str = ""
+    source_duration: Optional[float] = None

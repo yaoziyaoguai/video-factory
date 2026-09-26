@@ -903,6 +903,7 @@ export interface StudioRunFailure {
   summary: string;
   impact: string;
   retryable: boolean;
+  retryLabel?: string;
   recoveryActions: string[];
   savedNodeCount: number;
   technicalDetail?: string;

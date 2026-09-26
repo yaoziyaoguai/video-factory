@@ -5360,6 +5360,22 @@ describe("Studio client", () => {
     expect(screen.getByRole("region", { name: "成片预览" }).compareDocumentPosition(creativeSummary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("labels short-stock recovery as rematching and dispatches the existing recovery action only after a click", async () => {
+    const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
+    const retry = vi.fn().mockResolvedValue(undefined);
+    render(<RunWorkbench run={{ ...withoutIntervention, status: "failed",
+      failure: { nodeId: "asset-source-review", nodeLabel: "预检", category: "node_failure",
+        summary: "第 3 镜素材长度不够", impact: "上游方案保留", retryable: true, retryLabel: "重新匹配过短素材",
+        recoveryActions: ["保留合格素材；更换后由你确认"], savedNodeCount: 3 },
+      nodes: withoutIntervention.nodes.map((node, index) => index === 0
+        ? { ...node, id: "asset-source-review", label: "预检", status: "failed" } : node),
+    }} decisionPending={false} onDecision={async () => undefined} onRetryFailedNode={retry} />);
+    expect(retry).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "重新匹配过短素材" }));
+    expect(retry).toHaveBeenCalledExactlyOnceWith("asset-source-review");
+    expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
+  });
+
   it("shows a source-asset review failure reason on the main failure panel", () => {
     const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
     const reason = "源素材视觉预检服务暂时不可用。已保留生成结果，请切换视觉审片模型。";

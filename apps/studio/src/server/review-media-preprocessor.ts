@@ -4,6 +4,7 @@ import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { VisualReviewMediaPayload, VisualReviewMediaPreprocessor } from "@video-factory/production-pipeline";
+import { PlanContractError } from "@video-factory/production-pipeline";
 import { buildStudioChildEnvironment } from "./studio-child-environment.js";
 
 const execFile = promisify(execFileCallback);
@@ -80,6 +81,20 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
       // 这里曾经是裸 catch：退出码和 stderr 全丢，对外只剩一句"调用失败"，排查只能靠猜。
       // 子进程文本可能含本地绝对路径，所以只送服务端日志；错误消息里不带任何子进程产物。
       (this.options.logChildFailure ?? defaultChildFailureLog)(describeChildFailure(this.options.pythonCommand, error));
+      const failure = error as { code?: unknown; stdout?: unknown };
+      if (failure.code === 2 && typeof failure.stdout === "string") {
+        let payload: unknown;
+        try { payload = JSON.parse(failure.stdout.trim()); } catch { /* 非协议输出仍走通用预处理错误。 */ }
+        if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+          const value = payload as Record<string, unknown>;
+          if (value.version === "video-factory/review-media-error-v1" && value.code === "SOURCE_RANGE_TOO_SHORT"
+            && Array.isArray(value.scenePositions) && value.scenePositions.length > 0 && value.scenePositions.length <= 24
+            && value.scenePositions.every(position => Number.isInteger(position) && Number(position) > 0 && Number(position) <= 10_000)) {
+            throw new PlanContractError("SOURCE_RANGE_TOO_SHORT", [...new Set(value.scenePositions as number[])],
+              "实际素材不足以覆盖已确认的镜头时段；需要重新匹配素材，不是审片模型故障。");
+          }
+        }
+      }
       throw new Error(`Visual-review media preprocessing failed (${childFailureReason(error)}). The source video and local paths were not sent to the client.`);
     }
     const response = parseRecord(JSON.parse(stdout.trim()) as unknown, "review media response");

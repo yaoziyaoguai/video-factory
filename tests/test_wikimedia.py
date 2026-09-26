@@ -3,6 +3,7 @@ import json
 import unittest
 import urllib.parse
 import tempfile
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -57,9 +58,14 @@ class WikimediaCommonsTest(unittest.TestCase):
             script = root / "script.json"
             script.write_text(json.dumps({"scenes": [{"position": 1, "narration": "城市", "duration": 4,
                 "visual_strategy": "stock", "visual_prompt": "city"}]}))
+            source = root / "fixture.webm"
+            subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=blue:s=720x1280:r=25",
+                            "-t", "10", "-an", "-c:v", "libvpx", "-deadline", "realtime", str(source)],
+                           check=True, capture_output=True, timeout=30)
+            body = source.read_bytes()
             def media(request, timeout):
-                response = io.BytesIO(b"test-video-bytes")
-                response.headers = {"Content-Type": "video/webm", "Content-Length": "16"}
+                response = io.BytesIO(body)
+                response.headers = {"Content-Type": "video/webm", "Content-Length": str(len(body))}
                 return response
             with patch("urllib.request.OpenerDirector.open", side_effect=lambda *a, **kw: io.BytesIO(json.dumps({"query": {"pages": [video_page()]}}).encode())), \
                  patch("video_factory.stock_assets.open_asset_request", side_effect=media), \

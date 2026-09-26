@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { PythonReviewMediaPreprocessor } from "../src/server/review-media-preprocessor.js";
+import { PlanContractError } from "@video-factory/production-pipeline";
 
 const MAX_FRAME_BYTES = 256 * 1024;
 
@@ -344,6 +345,26 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
       } finally {
         await rm(harness.root, { recursive: true, force: true });
       }
+    }
+  });
+
+  it("preserves a structured source-range failure without exposing subprocess text", async () => {
+    const harness = await createHarness();
+    const commandPath = path.join(harness.root, "short-source-fixture");
+    try {
+      await writeFile(commandPath, `#!/bin/sh\nprintf '%s\\n' '{"version":"video-factory/review-media-error-v1","code":"SOURCE_RANGE_TOO_SHORT","scenePositions":[3]}'\nprintf '%s\\n' "$SENSITIVE_FIXTURE_VALUE" >&2\nexit 2\n`);
+      await chmod(commandPath, 0o700);
+      harness.preprocessor = createPreprocessor(harness, harness.manifestPath, commandPath, () => {});
+      await assert.rejects(() => harness.preprocessor.prepare({ assetPlanPath: "assets.json", runRoot: harness.runRoot }),
+        (error: unknown) => {
+          assert.ok(error instanceof PlanContractError);
+          assert.equal(error.code, "SOURCE_RANGE_TOO_SHORT");
+          assert.deepEqual(error.scenePositions, [3]);
+          assert.doesNotMatch(error.message, /must-not-appear|fixture|\/Users\//);
+          return true;
+        });
+    } finally {
+      await rm(harness.root, { recursive: true, force: true });
     }
   });
 
