@@ -17,7 +17,7 @@ export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
   "audio-review": "938ffad01a5b608729d01e582734369158361fc3a08464402888f0552a34e75c",
   "topic-ideas": "bdae923579b878af2e99612cca071a661d3fd39f7c382a42442c36645b0e0f73",
   "series-roadmap": "7a6b2dcac3856e429bcaf4eef69c98ea9917b43ef0750b3b1cb1987dc42c48df",
-  "creative-treatment": "ce01a42e3b9bbf84b97cdae810d498cf6514b94615c18856794cf6d34a754c8c",
+  "creative-treatment": "8bb3ecfafd5d4721f53f35c8463af9d0f9459f5c1861c4ecd5364b53d76ce19f",
   "director-plan": "1fb8d802d23bac9e21a0999a5774aceed3b3331a01ff229d462573f9b36696a7",
   "script-draft": "9fdfdc99e648aa0a0be779bc371d2e658cc9a550add46638c3df8f7bffc34d20",
   "publish-copy": "321a9b07d9eeb6bd1bb1e075a16c7d3bc65948983be11b3c082834aa8a030dd4",
@@ -25,7 +25,7 @@ export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
   "reference-grammar": "f14b46d1b3e675d21973b6f6ae8daf594b010409007473cdfaa5adbecb1dea8e",
   "visual-review": "7fc682f73d5750ae7776ec9e42f52a043c17e4258d95f368e03937b964e1b73a",
   "role-audit": "dd891f720480c771517eb58da68a9a8ad591fec6183b13d9b6467acd0ab600ae",
-  "creative-discussion": "6369aaf6f1a5d61fc4e6be67f61be9c252a6e8e0ead13e07721b8223a0c35192",
+  "creative-discussion": "cf9d77193dae275f257b115dcb6a8f7a11afe27d8861dc531d1b7d90d9c8827c",
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。

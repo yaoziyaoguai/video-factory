@@ -1886,6 +1886,30 @@ describe("StudioService", () => {
     });
   });
 
+  it("shows the actual single-pass review limit without changing the saved request identity budget", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-review-single-pass-progress-"));
+    try {
+      const directory = path.join(workspaceRoot, "runs/run-1/nodes/visual-review/agent-loop-checkpoints");
+      await mkdir(directory, { recursive: true });
+      await writeFile(path.join(directory, "review.json"), JSON.stringify({
+        version: "video-factory/agent-loop-checkpoint-v9", role: "视觉审片员",
+        maxIterations: 3, stopAfterAudit: true, status: "awaiting_user",
+        phaseAttempts: { produce: 1, audit: 1 },
+        completed: [{ iteration: 1, audit: { verdict: "repair", score: 76, summary: "建议补充构图观察。" } }],
+        recoveryOwner: { runId: "run-1", nodeId: "visual-review", workflowOperationRequestId: "operation-review" },
+      }));
+      const progress = await loadAgentLoopProgress(workspaceRoot, "run-1", "visual-review", "operation-review");
+      assert.equal(progress?.phase, "awaiting_user");
+      assert.equal(progress?.iteration, 1);
+      assert.equal(progress?.maxIterations, 1);
+      assert.equal(progress?.producerModelCallCount, 1);
+      assert.equal(progress?.auditModelCallCount, 1);
+      assert.equal(progress?.latestAudit?.score, 76);
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("labels a supplementary ranking batch and retains primary model counts without exposing its snapshot", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-supplement-progress-"));
     try {

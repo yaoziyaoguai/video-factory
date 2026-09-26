@@ -59,6 +59,8 @@ export interface RoleAgentLoopOptions<TOutput> {
   criteria: string[];
   contractVersion: string;
   maxIterations: number;
+  /** 完成当前报告及独立审计后交给用户，不因质量建议自动开启下一轮。 */
+  stopAfterAudit?: boolean;
   /** 只有创作规划的 treatment/script/director 可把独立审计处置路由到规划控制流。 */
   planningRole?: boolean;
   /** 宿主只核对当前流水线能否取得核心制作前提；不替代独立模型审计。 */
@@ -219,6 +221,8 @@ interface PersistedLoopState {
   contractDigest: string;
   role: string;
   maxIterations: number;
+  /** 仅用于进度投影；实际停止策略由当前调用方决定，不改变已受理请求身份。 */
+  stopAfterAudit?: boolean;
   cycle: number;
   status: "running" | "passed" | "awaiting_user" | "exhausted" | "failed";
   completed: PersistedLoopIteration[];
@@ -338,6 +342,18 @@ export async function runRoleAgentLoop<TOutput>(
   if (state.status === "passed" || state.status === "awaiting_user") {
     // awaiting_user 表示上一轮已经审完并停在用户面前；恢复时原样交还，不重跑审计。
     return completedExecution(options, state, iterations, state.status);
+  }
+  // 旧进程可能已落盘终轮却未写终态；也可能在审后停点退出。直接交还真实稿件和建议。
+  // 已提交的请求或待审候选仍须走原恢复链结清，不能丢弃在途调用或重造请求身份。
+  if (persistedFinal && (options.stopAfterAudit || state.completed.length === options.maxIterations)
+    && !state.pendingOperation && !state.pendingCandidate
+    && !state.validationFailure && !state.auditValidationFailure) {
+    const status = persistedFinal.audit.verdict === "pass"
+      && (!persistedFinal.hostReadiness || persistedFinal.hostReadiness.status === "ready")
+      ? "passed" : "awaiting_user";
+    state.status = status;
+    await persistCheckpoint(options, state);
+    return completedExecution(options, state, iterations, status);
   }
 
   const lastCompleted = state.completed.at(-1);
@@ -571,6 +587,12 @@ export async function runRoleAgentLoop<TOutput>(
       throw planningHaltError(options, state, iterations, nonLocalDisposition);
     }
     if (hostReadiness && hostReadiness.status !== "ready") {
+      // 就绪建议不能越过用户约定的审后停点；终轮也必须交还已有稿件，不能 continue 到循环外抛错。
+      if (options.stopAfterAudit || iteration === options.maxIterations) {
+        state.status = "awaiting_user";
+        await persistCheckpoint(options, state);
+        return completedExecution(options, state, iterations, "awaiting_user");
+      }
       await persistCheckpoint(options, state);
       revision = { candidate, audit: revisionAuditForHost(audit, hostReadiness) };
       continue;
@@ -580,8 +602,8 @@ export async function runRoleAgentLoop<TOutput>(
       await persistCheckpoint(options, state);
       return completedExecution(options, state, iterations);
     }
-    if (iteration === options.maxIterations) {
-      // 自动重做轮次用尽仍未通过。审计只出建议，不改判成败：候选、审计与全部轮次都留在
+    if (options.stopAfterAudit || iteration === options.maxIterations) {
+      // 调用方要求审后停下，或自动重做轮次用尽。审计只出建议，不改判成败：候选、审计与全部轮次都留在
       // checkpoint 里，原地停在用户面前由他裁决——直接采用，或带着建议去跟生产模型谈下一版。
       state.status = "awaiting_user";
       await persistCheckpoint(options, state);
@@ -960,6 +982,8 @@ async function persistCheckpoint<TOutput>(
   options: RoleAgentLoopOptions<TOutput>,
   state: PersistedLoopState,
 ): Promise<void> {
+  if (options.stopAfterAudit) state.stopAfterAudit = true;
+  else delete state.stopAfterAudit;
   // 原物理请求结清后才迁移位置身份；否则下次读取已完成结果会被误认成旧输入并重跑。
   if (options.checkpoint && !state.pendingOperation) state.key = options.checkpoint.key;
   if (options.checkpoint) await options.checkpoint.save(state);
@@ -1014,6 +1038,8 @@ function pendingCandidateExecution<TOutput>(
 }
 
 function roleContractDigest<TOutput>(options: RoleAgentLoopOptions<TOutput>): string {
+  // stopAfterAudit 只控制拿到结果后是否继续，不改变模型输入、校验或物理请求。
+  // 不纳入 digest，确保收紧自动轮次时仍能观察旧请求、复用已完成审计，不重复计费。
   return valueHash({
     contractVersion: options.contractVersion,
     role: options.role,

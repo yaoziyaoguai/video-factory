@@ -33,6 +33,7 @@ const FIELD_LABELS: Record<string, string> = {
 const VALUE_LABELS: Record<string, string> = {
   factual_support: "需要真实来源支持", illustration_only: "仅用于示意",
   external_required: "需要你提供或核实", pipeline_retrievable: "可由素材库获取",
+  pipeline_generated: "可由 AI 生成，制作前需确认报价",
   not_needed: "不需要额外素材",
   generated_video: "生成画面", stock_video: "素材库视频", stock_image: "素材库图片",
   reuse: "复用已有画面", illustrative: "示意画面", factual: "真实取证",

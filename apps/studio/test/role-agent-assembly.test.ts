@@ -491,6 +491,37 @@ describe("buildRoleAgentAssembly", () => {
     assert.deepEqual(deepseek.sessions, [undefined, undefined, undefined, undefined]);
   });
 
+  for (const reviewStage of ["source_assets", "rendered_video"] as const) {
+    it(`stops the production ${reviewStage} review after its first advisory audit`, async () => {
+      const advisory = {
+        ...passingReportAudit,
+        verdict: "repair",
+        score: 76,
+        assessments: [{ targetPath: "", dimensions: scoredDimensions(REPORT_DIMENSION_EVIDENCE, 76) }],
+        summary: "补充构图观察可让报告更完整。",
+        issues: [{ severity: "advisory", criterion: "观察完整", evidence: "缺少水平线位置描述。", repairInstruction: "补充水平线位置。" }],
+        repairInstructions: ["补充水平线位置。"],
+      };
+      const deepseek = new ControlledCodexClient("deepseek", "deepseek-review", (kind) => {
+        if (kind === "visual-review") return passingVisualReport;
+        if (kind === "role-audit") return advisory;
+        throw new Error(`Unexpected review task ${kind}`);
+      });
+      const result = buildRoleAgentAssembly({
+        deepseekCodexSettings: settings("deepseek", ["visual-review", "role-audit"], { "visual-review": "deepseek-review" }),
+        deepseekCodexClient: deepseek,
+        reviewMedia,
+        environment: {},
+      });
+      const execution = await result.visualReviewAgents[0]?.reviewDetailed?.({ runRoot: "/run", reviewStage });
+      assert.deepEqual(deepseek.calls, ["visual-review", "role-audit"]);
+      assert.equal(execution?.agentLoop?.status, "awaiting_user");
+      assert.equal(execution?.agentLoop?.iterations.length, 1);
+      assert.equal(execution?.agentLoop?.iterations[0]?.audit.score, 76);
+      assert.deepEqual(execution?.output, passingVisualReport);
+    });
+  }
+
   it("runs the single DeepSeek review leg for the pilot review while preprocessing evidence once", async () => {
     // 双模型审片随 ChatGPT/Codex 套餐退役取消：只剩 DeepSeek 单腿，抽帧预处理一次。
     let prepareCalls = 0;

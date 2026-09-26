@@ -26,7 +26,8 @@ export interface CreativeTreatment {
     requirement: "factual_support" | "illustration_only";
     suppliedSourceIds: string[];
     critical: boolean;
-    acquisition: "supplied" | "pipeline_retrievable" | "external_required" | "not_needed";
+    acquisition: "supplied" | "pipeline_retrievable" | "pipeline_generated" | "external_required" | "not_needed";
+    // 保留既有字段名；检索与生成两种路线都显式绑定 Provider，不把可生成误写为已取得素材。
     retrievalProviderId: string | null;
   }>;
   feasibilityQuestions: Array<{ beatId: string; question: string }>;
@@ -82,11 +83,15 @@ export function parseCreativeTreatment(
         entry.retrievalProviderId,
         `Creative treatment evidenceRequirements[${index}].retrievalProviderId`,
       );
-      if (acquisition === "pipeline_retrievable" && retrievalProviderId === null) {
-        throw new Error(`Creative treatment evidenceRequirements[${index}].retrievalProviderId is required for pipeline_retrievable.`);
+      const pipelineAcquisition = acquisition === "pipeline_retrievable" || acquisition === "pipeline_generated";
+      if (pipelineAcquisition && retrievalProviderId === null) {
+        throw new Error(`Creative treatment evidenceRequirements[${index}].retrievalProviderId is required for ${acquisition}.`);
       }
-      if (acquisition !== "pipeline_retrievable" && retrievalProviderId !== null) {
-        throw new Error(`Creative treatment evidenceRequirements[${index}].retrievalProviderId must be null unless acquisition is pipeline_retrievable.`);
+      if (!pipelineAcquisition && retrievalProviderId !== null) {
+        throw new Error(`Creative treatment evidenceRequirements[${index}].retrievalProviderId must be null unless acquisition is pipeline_retrievable or pipeline_generated.`);
+      }
+      if (requirement === "factual_support" && acquisition === "pipeline_generated") {
+        throw new Error(`Creative treatment evidenceRequirements[${index}] cannot use pipeline_generated for factual_support.`);
       }
       if (requirement === "factual_support" && acquisition === "not_needed") {
         throw new Error(`Creative treatment evidenceRequirements[${index}] cannot mark factual_support as not_needed.`);
@@ -193,6 +198,7 @@ function acquisitionValue(
 ): CreativeTreatment["evidenceRequirements"][number]["acquisition"] {
   if (value !== "supplied"
     && value !== "pipeline_retrievable"
+    && value !== "pipeline_generated"
     && value !== "external_required"
     && value !== "not_needed") {
     throw new Error(`${field} is invalid.`);

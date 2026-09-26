@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { REQUIRED_CODEX_TASK_CONTRACT_DIGESTS } from "../../../packages/production-pipeline/src/codex-chat.js";
+import { parseCreativeTreatment } from "../../../packages/production-pipeline/src/creative-treatment.js";
+import { assessTreatmentReadiness } from "../../../packages/production-pipeline/src/treatment-readiness.js";
+import { summarizeProductionCapabilities } from "../../../packages/production-pipeline/src/production-capabilities.js";
 import { CODEX_BRIDGE_PROTOCOL_VERSION } from "../src/codex-executor.js";
 import {
   BROKER_TASK_KINDS,
@@ -252,7 +255,7 @@ describe("broker-owned task definitions", () => {
       [
         "video-factory/topic-editor-v11",
         "video-factory/series-showrunner-v3",
-        "video-factory/treatment-director-v6",
+        "video-factory/treatment-director-v7",
         "video-factory/screenwriter-v18",
         "video-factory/director-v29",
       ],
@@ -707,9 +710,52 @@ describe("broker-owned task definitions", () => {
     assert.equal(typeof outputValidationErrorFor("series-roadmap", { episodes: [{ ...episode, canon: "planned fact" }] }), "string");
   });
 
+  it("accepts an available generated illustration route consistently across broker, parser and readiness", () => {
+    const generated = {
+      ...validCreativeTreatment(),
+      evidenceRequirements: [{ beatId: "evidence", claim: "虚构的杯中星河", requirement: "illustration_only",
+        critical: true, acquisition: "pipeline_generated", retrievalProviderId: "wan-video-v1", suppliedSourceIds: [] }],
+    };
+    assert.equal(outputValidationErrorFor("creative-treatment", generated), undefined);
+    const treatment = parseCreativeTreatment(generated, []);
+    const capabilities = summarizeProductionCapabilities([{
+      id: "wan-video-v1", deliveryTypes: ["generated_video"], strengths: [], constraints: [],
+    }]);
+    assert.equal(assessTreatmentReadiness(treatment, [], capabilities).status, "ready");
+    assert.equal(assessTreatmentReadiness(treatment, [], summarizeProductionCapabilities([])).status, "revise_here");
+    assert.equal(assessTreatmentReadiness(treatment, [], summarizeProductionCapabilities([{
+      id: "wan-video-v1", deliveryTypes: ["stock_video"], strengths: [], constraints: [],
+    }])).status, "revise_here");
+    const factual = { ...generated, evidenceRequirements: [{ ...generated.evidenceRequirements[0], requirement: "factual_support" }] };
+    assert.match(outputValidationErrorFor("creative-treatment", factual) ?? "", /factual_support/);
+    assert.throws(() => parseCreativeTreatment(factual, []), /factual_support/);
+    const missingProvider = { ...generated, evidenceRequirements: [{ ...generated.evidenceRequirements[0], retrievalProviderId: null }] };
+    assert.match(outputValidationErrorFor("creative-treatment", missingProvider) ?? "", /retrievalProviderId/);
+    assert.throws(() => parseCreativeTreatment(missingProvider, []), /retrievalProviderId/);
+  });
+
+  it("keeps image and video capabilities within their stock or generation route", () => {
+    for (const deliveryType of ["generated_video", "generated_image", "stock_video", "stock_image"]) {
+      const acquisition = deliveryType.startsWith("generated_") ? "pipeline_generated" : "pipeline_retrievable";
+      const value = { ...validCreativeTreatment(), evidenceRequirements: [{
+        beatId: "evidence", claim: "仅用于虚构画面", requirement: "illustration_only", critical: true,
+        acquisition, retrievalProviderId: "current-provider", suppliedSourceIds: [],
+      }] };
+      assert.equal(outputValidationErrorFor("creative-treatment", value), undefined);
+      const capabilities = summarizeProductionCapabilities([{
+        id: "current-provider", deliveryTypes: [deliveryType], strengths: [], constraints: [],
+      }]);
+      assert.equal(assessTreatmentReadiness(parseCreativeTreatment(value, []), [], capabilities).status, "ready", deliveryType);
+      const wrongRoute = { ...value, evidenceRequirements: [{ ...value.evidenceRequirements[0],
+        acquisition: acquisition === "pipeline_generated" ? "pipeline_retrievable" : "pipeline_generated",
+      }] };
+      assert.equal(assessTreatmentReadiness(parseCreativeTreatment(wrongRoute, []), [], capabilities).status, "revise_here", deliveryType);
+    }
+  });
+
   it("pins the creative-treatment prompt pack and enforces beat-reference semantics", () => {
     const prompt = taskPromptFor("creative-treatment");
-    assert.equal(prompt.version, "video-factory/treatment-director-v6");
+    assert.equal(prompt.version, "video-factory/treatment-director-v7");
     assert.match(prompt.directive, /不输出完整逐镜分镜.*不报价.*不声称画面或配音已完成/);
     assert.match(prompt.directive, /lockedViewerPromise.*保持其实际收益与事实边界/);
     assert.match(prompt.directive, /suppliedSourceIds 只能引用 suppliedSources 中的 id/);
@@ -761,7 +807,7 @@ describe("broker-owned task definitions", () => {
   it("pins the creative-treatment semantic rules version that owns the whitespace contract", () => {
     assert.equal(
       taskContractDescriptorFor("creative-treatment").semanticRulesVersion,
-      "creative-treatment-semantics-v11|production-capabilities-v3|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
+      "creative-treatment-semantics-v12|production-capabilities-v3|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
     );
   });
 });

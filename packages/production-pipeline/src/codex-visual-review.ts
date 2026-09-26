@@ -768,6 +768,9 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
         "审片报告只判断当前成片并给出可执行修复建议；不得擅自改写脚本、导演方案或掩盖需要人工终审的问题",
       ],
       maxIterations: this.maxReviewIterations,
+      // 默认只交付一份报告及一次独立复核，是否补查由用户决定。保留旧轮次上限作为
+      // checkpoint/请求身份的一部分；显式多轮调用仍可用于旧合同恢复，不改通用角色策略。
+      stopAfterAudit: this.options.maxReviewIterations === undefined,
       ...(this.options.maxProducerCalls ? { maxPhaseAttempts: { produce: this.options.maxProducerCalls } } : {}),
       produce: (revision, operation) => {
         if (operation.preparedOperation) {

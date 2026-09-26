@@ -8,6 +8,99 @@ import type { ModelProviderFailureCategory } from "../src/codex-chat.js";
 import { fileRoleAgentLoopCheckpoint } from "../src/role-agent-checkpoint.js";
 
 describe("role agent loop audit boundary", () => {
+  it("recovers a legacy completed final audit with readiness advice without model calls", async () => {
+    let stored: unknown;
+    let producerCalls = 0;
+    let auditCalls = 0;
+    const execute = () => runRoleAgentLoop({
+      role: "导演前期构思", planningRole: true,
+      contractVersion: "readiness-recovery", criteria: ["可制作"], maxIterations: 1,
+      checkpoint: { key: "readiness-recovery", load: async () => stored, save: async (value) => { stored = structuredClone(value); } },
+      produce: async () => { producerCalls++; return { output: { title: "保留的杯中宇宙" } }; },
+      audit: async () => {
+        auditCalls++;
+        return { output: { ...repairingAudit(), planningDisposition: { action: "revise_here", issueIndexes: [0] } } };
+      },
+      validate: titleCandidate,
+      assessPlanningReadiness: () => ({
+        status: "revise_here" as const,
+        issues: [{ id: "route-1", target: "director" as const, beatIds: ["coffee"], scenePositions: [],
+          reason: "请明确生成路线", requiredChange: "确认可用画面来源", evidenceArtifactIds: [] }],
+      }),
+    });
+    const first = await execute();
+    // 线上旧版本已落盘终轮，但 continue 分支未写终态；重建同样的合法旧记录来验证恢复。
+    stored = { ...(stored as Record<string, unknown>), status: "running" };
+    const resumed = await execute();
+    assert.equal(resumed.output.title, first.output.title);
+    assert.equal(resumed.agentLoop?.status, "awaiting_user");
+    assert.deepEqual(resumed.agentLoop?.iterations, first.agentLoop?.iterations);
+    assert.equal(producerCalls, 1);
+    assert.equal(auditCalls, 1);
+  });
+
+  it("returns the draft and readiness advice after the final permitted audit", async () => {
+    let producerCalls = 0;
+    let auditCalls = 0;
+    const result = await runRoleAgentLoop({
+      role: "导演前期构思", planningRole: true,
+      contractVersion: "readiness-advice", criteria: ["可制作"], maxIterations: 1,
+      produce: async () => { producerCalls++; return { output: { title: "杯中宇宙" } }; },
+      audit: async () => {
+        auditCalls++;
+        return { output: { ...repairingAudit(), planningDisposition: { action: "revise_here", issueIndexes: [0] } } };
+      },
+      validate: titleCandidate,
+      assessPlanningReadiness: () => ({
+        status: "revise_here",
+        issues: [{ id: "route-1", target: "director", beatIds: ["coffee"], scenePositions: [],
+          reason: "请明确生成路线", requiredChange: "确认可用画面来源", evidenceArtifactIds: [] }],
+      }),
+    });
+    assert.equal(result.output.title, "杯中宇宙");
+    assert.equal(result.agentLoop?.status, "awaiting_user");
+    assert.equal(result.agentLoop?.iterations[0]?.audit.verdict, "repair");
+    assert.equal(result.agentLoop?.iterations[0]?.hostReadiness?.status, "revise_here");
+    assert.equal(producerCalls, 1);
+    assert.equal(auditCalls, 1);
+  });
+
+  it("hands a completed legacy audit to the user after a crash without another model call", async () => {
+    let stored: unknown;
+    let interruptSave = true;
+    let producerCalls = 0;
+    let auditCalls = 0;
+    const execute = (stopAfterAudit: boolean) => runRoleAgentLoop({
+      role: "编剧", contractVersion: "stop-at-audit", criteria: ["具体"], maxIterations: 3,
+      stopAfterAudit,
+      checkpoint: {
+        key: "stop-at-audit",
+        load: async () => stored,
+        save: async (value) => {
+          stored = structuredClone(value);
+          if (interruptSave && value !== null && typeof value === "object"
+            && "completed" in value && Array.isArray(value.completed) && value.completed.length === 1) {
+            interruptSave = false;
+            throw new Error("crash after persisted audit");
+          }
+        },
+      },
+      produce: async () => { producerCalls++; return { output: { title: `候选${producerCalls}` } }; },
+      audit: async () => { auditCalls++; return { output: repairingAudit() }; },
+      validate: titleCandidate,
+    });
+    await assert.rejects(() => execute(false), /crash after persisted audit/);
+    const resumed = await execute(true);
+    assert.equal(resumed.agentLoop?.status, "awaiting_user");
+    assert.equal(resumed.output.title, "候选1");
+    assert.equal(producerCalls, 1);
+    assert.equal(auditCalls, 1);
+    const replay = await execute(true);
+    assert.equal(replay.agentLoop?.status, "awaiting_user");
+    assert.equal(producerCalls, 1);
+    assert.equal(auditCalls, 1);
+  });
+
   it("rejects more than 16 audit criteria before submitting a model task", async () => {
     let modelCalls = 0;
     await assert.rejects(() => runRoleAgentLoop({

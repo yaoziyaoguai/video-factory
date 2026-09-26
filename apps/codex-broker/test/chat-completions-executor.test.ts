@@ -881,7 +881,7 @@ describe("ChatCompletionsExecutor", () => {
     assert.match(capturedPrompt, /source-1/);
     assert.deepEqual(JSON.parse(result.output), output);
     assert.equal(result.trace?.taskKind, "creative-treatment");
-    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v6");
+    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v7");
 
     await assert.rejects(
       async () => executor.runTask(creativeTreatmentTask([])),

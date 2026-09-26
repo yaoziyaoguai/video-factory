@@ -13,6 +13,16 @@ const artifact = (id: string, kind: string): StudioArtifact => ({
 afterEach(() => vi.restoreAllMocks());
 
 describe("PlanningDeliveryPanel", () => {
+  it("describes a generated route as a capability rather than acquired or paid media", async () => {
+    vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ evidenceRequirements: [{
+      claim: "虚构的杯中星河", requirement: "illustration_only", acquisition: "pipeline_generated",
+    }] });
+    render(<PlanningDeliveryPanel runId="run-generated" versionId="version-one" artifactIds={["treatment-generated"]}
+      artifacts={[artifact("treatment-generated", "creative_treatment")]} publicationExpected />);
+    expect(await screen.findByText("可由 AI 生成，制作前需确认报价")).toBeInTheDocument();
+    expect(screen.queryByText("pipeline_generated")).not.toBeInTheDocument();
+  });
+
   it("reads only the current registered version and keeps all six entries visible", async () => {
     const read = vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ viewerPromise: "让观众学会判断", progression: [{ purpose: "先解释问题" }] });
     render(<PlanningDeliveryPanel runId="run-one" versionId="version-two" artifactIds={["treatment-new"]}

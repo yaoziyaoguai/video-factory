@@ -23,6 +23,9 @@ import {
 } from "../src/index.js";
 import { planningThreadId } from "../src/creative-planning-store.js";
 import { ReworkScopeConflictError } from "../src/generative-asset-worker.js";
+import { parseCreativeTreatment } from "../src/creative-treatment.js";
+import { assessTreatmentReadiness } from "../src/treatment-readiness.js";
+import { summarizeProductionCapabilities } from "../src/production-capabilities.js";
 import { initialCreativeReviewState, publishCreativeDraft, recordCreativeDiscussion, applyCreativeReviewDeterministicCommand, applyCreativeReviewEditDraft, recordCreativeReviewCheck, confirmCreativeDraft, creativeReturnTargets, creativeReviewGate, returnCreativeReviewToStage, parseCreativeReviewResume } from "../src/creative-review.js";
 
 // 构思、脚本、导演方案都是创作交付：宿主规定的评估对象是当前完整候选（根路径 ""），
@@ -2089,6 +2092,83 @@ describe("自动循环停下时把决定交还给人", () => {
       hostReadinessReview: null,
     },
     checkIdentity: contentSha256({ stage, output }),
+  });
+
+  it("终轮路线建议通过真实角色循环到达构思停点，用户接受后进入脚本且不重复构思产审", async () => {
+    const calls = { treatment: 0, treatmentAudit: 0, script: 0 };
+    // 保留旧模型已经给出的路线错误，不能修改历史稿件或把它改判为无风险来通过恢复。
+    const draft: CreativeTreatment = { ...treatment, evidenceRequirements: [{
+      beatId: "beat-1", claim: "虚构杯中星河", requirement: "illustration_only", critical: true,
+      acquisition: "pipeline_retrievable", retrievalProviderId: "wan-video-v1", suppliedSourceIds: [],
+    }] };
+    const capabilities = summarizeProductionCapabilities([{
+      id: "wan-video-v1", deliveryTypes: ["generated_video"], strengths: [], constraints: [],
+    }]);
+    let stored: unknown;
+    const ports: CreativePlanningPorts = {
+      treatment: async context => {
+        if (context.creativeReviewExecution?.mode !== "check") {
+          calls.treatment++;
+          return { artifactId: "treatment-route", output: draft };
+        }
+        const execution = await runRoleAgentLoop({
+          role: "导演前期构思", planningRole: true, contractVersion: "route-advice-graph",
+          criteria: ["画面获取路线与现有能力相容"], maxIterations: 1,
+          initialCandidate: context.treatment!.output,
+          checkpoint: { key: "route-advice-graph", load: async () => stored, save: async value => { stored = structuredClone(value); } },
+          produce: async () => { throw new Error("已有初稿，审计不能重新生成"); },
+          validate: value => parseCreativeTreatment(value, []),
+          assessPlanningReadiness: candidate => assessTreatmentReadiness(candidate, [], capabilities),
+          audit: async () => {
+            calls.treatmentAudit++;
+            return { output: {
+              ...passingCheck("treatment", draft, context).audit,
+              verdict: "repair", score: 78, assessments: auditAssessments(78),
+              summary: "建议把虚构画面明确为生成路线",
+              issues: [{ severity: "blocking", criterion: "画面路线", evidence: "Wan 不是图库",
+                repairInstruction: "导演方案使用生成画面，不使用图库检索" }],
+              repairInstructions: ["导演方案使用生成画面，不使用图库检索"],
+              planningDisposition: { action: "revise_here", issueIndexes: [0] },
+            } };
+          },
+        });
+        assert.equal(execution.agentLoop?.status, "awaiting_user");
+        const iteration = execution.agentLoop!.iterations.at(-1)!;
+        assert.equal(iteration.hostReadiness?.status, "revise_here");
+        return { artifactId: "treatment-route", output: execution.output, reviewCheck: {
+          auditOperationId: context.creativeReviewExecution.auditOperationId,
+          audit: iteration.audit, checkIdentity: contentSha256(iteration),
+        } };
+      },
+      screenwriter: async context => {
+        if (context.creativeReviewExecution?.mode !== "check") calls.script++;
+        return { artifactId: "script-route", output: script,
+          ...(context.creativeReviewExecution?.mode === "check" ? { reviewCheck: passingCheck("script", script, context) } : {}) };
+      },
+      director: async () => { throw new Error("未确认脚本，不能提前调用导演"); },
+      compile: executablePlanCompilePort,
+    };
+    const graph = createCreativePlanningGraph({ ports, checkpointer: new MemorySaver() });
+    const input = { runId: "run-route-advice", inputDigest: "route-advice", creativeReview: CREATIVE_REVIEW_FEATURE,
+      durationRange: { minSeconds: 20, maxSeconds: 30 } };
+    const threadId = planningThreadId(input.runId, input.inputDigest);
+    const first = await runCreativePlanning(graph, { input, threadId });
+    assert.equal(first.status, "waiting_user");
+    if (first.status !== "waiting_user") return;
+    assert.equal(first.gate.stage, "treatment");
+    assert.deepEqual(first.state.creativeReview?.stages.treatment.currentDocument, draft);
+    assert.equal(first.state.creativeReview?.stages.treatment.checkResult?.score, 78);
+    assert.equal(first.state.creativeReview?.stages.treatment.checkResult?.verdict, "repair");
+    await runCreativePlanning(graph, { input, threadId });
+    assert.deepEqual(calls, { treatment: 1, treatmentAudit: 1, script: 0 });
+    const advanced = await runCreativePlanning(graph, { input, threadId,
+      resume: { ...resume(first, "accept-route-advice"), acknowledgeRepair: true } });
+    assert.equal(advanced.status, "waiting_user");
+    if (advanced.status !== "waiting_user") return;
+    assert.equal(advanced.gate.stage, "script");
+    assert.deepEqual(calls, { treatment: 1, treatmentAudit: 1, script: 1 });
+    assert.deepEqual(advanced.state.creativeReview?.stages.treatment.confirmation?.acknowledgedRepair,
+      { verdict: "repair", score: 78, issueCount: 1 });
   });
 
   // 直接构造 RoleAgentPlanningHaltError 会把"生产里到底抛出什么"变成测试的假设，所以这里跑

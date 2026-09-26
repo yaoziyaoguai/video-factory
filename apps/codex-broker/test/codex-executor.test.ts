@@ -1383,7 +1383,7 @@ describe("CodexExecutor.runTask", () => {
 
     assert.equal(JSON.parse(result.output).viewerPromise, "学会识别资料支持的结论边界");
     assert.equal(result.trace?.taskKind, "creative-treatment");
-    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v6");
+    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v7");
 
     const noSources = creativeTreatmentContractRequest();
     noSources.payload.suppliedSources = [];

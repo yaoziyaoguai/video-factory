@@ -97,7 +97,62 @@ const passingAudit = {
   repairInstructions: [],
 } as const;
 
+const advisoryAudit = {
+  ...passingAudit,
+  verdict: "repair",
+  score: 76,
+  assessments: passingAudit.assessments.map((assessment) => ({
+    ...assessment,
+    dimensions: assessment.dimensions.map((dimension) => ({ ...dimension, score: 76 })),
+  })),
+  summary: "建议补充第三镜的构图观察，当前报告和原评分保留供用户判断。",
+  issues: [{
+    severity: "advisory",
+    criterion: "构图观察完整",
+    evidence: "报告没有明确第三镜水平线的位置。",
+    repairInstruction: "补充第三镜的水平线位置。",
+  }],
+  repairInstructions: ["补充第三镜的水平线位置。"],
+};
+
 describe("CodexVisualReviewAgent", () => {
+  for (const reviewStage of ["source_assets", "rendered_video"] as const) {
+    it(`returns the first ${reviewStage} report and audit without automatic report revision`, async () => {
+      let stored: unknown;
+      const calls: CodexTaskKind[] = [];
+      const checkpoint = {
+        key: `single-review-${reviewStage}`,
+        load: async () => stored,
+        save: async (value: unknown) => { stored = structuredClone(value); },
+      };
+      const agent = new CodexVisualReviewAgent({
+        media: { prepare: async () => media },
+        client: {
+          runTask: async () => report,
+          runTaskDetailed: async (kind) => {
+            calls.push(kind);
+            return { output: kind === "visual-review" ? report : advisoryAudit };
+          },
+        },
+      });
+      const input = { runRoot: "/run", reviewStage, agentLoopCheckpoint: checkpoint };
+      const execution = await agent.reviewDetailed(input);
+      assert.deepEqual(calls, ["visual-review", "role-audit"]);
+      assert.deepEqual(execution.output, report, "不为凑分改写原始审片报告");
+      assert.equal(execution.agentLoop?.status, "awaiting_user");
+      assert.equal(execution.agentLoop?.iterations.length, 1);
+      assert.equal(execution.agentLoop?.iterations[0]?.audit.score, 76);
+      assert.equal(execution.agentLoop?.iterations[0]?.audit.issues[0]?.repairInstruction, "补充第三镜的水平线位置。");
+      assert.equal(execution.agentLoop?.producerModelCallCount, 1);
+      assert.equal(execution.agentLoop?.auditModelCallCount, 1);
+
+      const replay = await agent.reviewDetailed(input);
+      assert.deepEqual(replay.output, execution.output);
+      assert.equal(replay.agentLoop?.status, "awaiting_user");
+      assert.deepEqual(calls, ["visual-review", "role-audit"], "重启/重入复用已审结果，不重发模型");
+    });
+  }
+
   it("includes source timecodes in the image context and evidence snapshot identity", async () => {
     const calls: Array<{ kind: CodexTaskKind; payload: Record<string, unknown> }> = [];
     const subject = new CodexVisualReviewAgent({
@@ -662,7 +717,7 @@ describe("CodexVisualReviewAgent", () => {
     assert.notEqual(requestIds[0], requestIds[1]);
   });
 
-  it("repairs a visual report against an independent audit for at most three semantic rounds", async () => {
+  it("preserves explicitly requested legacy report-repair rounds", async () => {
     const calls: Array<{ kind: CodexTaskKind; payload: Record<string, unknown> }> = [];
     let producerCalls = 0;
     let auditCalls = 0;
@@ -671,6 +726,7 @@ describe("CodexVisualReviewAgent", () => {
       summary: "画面证据与评分一致，字幕密度问题定位明确。",
     };
     const agent = new CodexVisualReviewAgent({
+      maxReviewIterations: 3,
       media: { prepare: async () => media },
       client: {
         runTask: async () => report,
@@ -766,6 +822,7 @@ describe("CodexVisualReviewAgent", () => {
     let auditCalls = 0;
     const repairedReport = { ...report, summary: "修订后的视觉审片报告忠于抽样证据。" };
     const agent = new CodexVisualReviewAgent({
+      maxReviewIterations: 3,
       media: { prepare: async () => media },
       producerSessionMode: "stateless",
       client: {
@@ -824,6 +881,7 @@ describe("CodexVisualReviewAgent", () => {
   it("never exceeds the configured paid visual-producer call budget", async () => {
     let producerCalls = 0;
     const agent = new CodexVisualReviewAgent({
+      maxReviewIterations: 3,
       media: { prepare: async () => media },
       maxProducerCalls: 1,
       client: {
@@ -1639,6 +1697,66 @@ describe("CodexVisualReviewAgent", () => {
       assert.equal(visualReviewBlocksContinuation({ ...clean, confidence: 0.6, recommendation: "revise" }), true,
         "confidence 跌破 0.7 必须阻断");
     });
+  });
+
+  it("settles an already accepted legacy second review before stopping, without another submission", async () => {
+    let stored: unknown;
+    let producerCalls = 0;
+    let auditCalls = 0;
+    let mediaCalls = 0;
+    let acceptedRequestId: string | undefined;
+    const observed: string[] = [];
+    const secondReport = { ...report, summary: "旧版本已受理的第二份报告，保留真实结果和剩余建议。" };
+    const checkpoint = {
+      key: "visual-legacy-second-review",
+      load: async () => stored,
+      save: async (value: unknown) => { stored = structuredClone(value); },
+    };
+    const client = {
+      runTask: async () => report,
+      runTaskDetailed: async (kind: CodexTaskKind, payload: unknown, requestId?: string,
+        _session?: unknown, requestOptions?: CodexTaskRequestOptions): Promise<CodexTaskExecution> => {
+        if (kind === "visual-review") {
+          producerCalls++;
+          if (producerCalls === 2) {
+            acceptedRequestId = requestId;
+            await requestOptions?.beforeSubmit?.(preparedOperation(kind, payload, requestId!));
+            throw new CodexBridgeError("legacy second review response lost", false, "uncertain");
+          }
+          return { output: report };
+        }
+        auditCalls++;
+        return { output: advisoryAudit };
+      },
+      observePrepared: async (operation: CodexPreparedOperation): Promise<CodexTaskExecution> => {
+        observed.push(operation.requestId);
+        return { output: secondReport };
+      },
+    };
+    const reviewMedia = { prepare: async () => { mediaCalls++; return media; } };
+    const input = { runRoot: "/run", agentLoopCheckpoint: checkpoint };
+    const legacy = new CodexVisualReviewAgent({ client, media: reviewMedia, maxReviewIterations: 3 });
+    await assert.rejects(() => legacy.reviewDetailed(input), (error: unknown) => {
+      assert.ok(error instanceof RoleAgentLoopError);
+      assert.equal(error.agentLoop.failure?.stage, "uncertain");
+      assert.ok(error.sourceError instanceof Error);
+      assert.equal(error.sourceError.message, "legacy second review response lost");
+      return true;
+    });
+
+    const current = new CodexVisualReviewAgent({ client, media: reviewMedia });
+    const result = await current.reviewDetailed(input);
+    assert.deepEqual(observed, [acceptedRequestId]);
+    assert.equal(producerCalls, 2, "既不重交第二轮，也不开第三轮");
+    assert.equal(auditCalls, 2, "只补齐已受理第二轮的独立复核");
+    assert.equal(mediaCalls, 1, "从原请求恢复相同媒体证据");
+    assert.deepEqual(result.output, secondReport);
+    assert.equal(result.agentLoop?.status, "awaiting_user");
+    assert.equal(result.agentLoop?.iterations.length, 2);
+    await current.reviewDetailed(input);
+    assert.equal(producerCalls, 2);
+    assert.equal(auditCalls, 2);
+    assert.equal(observed.length, 1);
   });
 
   it("resumes a saved visual-review request without preprocessing the same media again", async () => {

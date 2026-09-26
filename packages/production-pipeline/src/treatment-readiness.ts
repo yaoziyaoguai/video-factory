@@ -23,14 +23,16 @@ export function assessTreatmentReadiness(
     const missingBoundSources = requirement.acquisition === "supplied"
       && (requirement.suppliedSourceIds.length === 0
         || requirement.suppliedSourceIds.some((sourceId) => !suppliedSourceIds.has(sourceId)));
-    const retrievableProvider = requirement.retrievalProviderId === null
+    const generated = requirement.acquisition === "pipeline_generated";
+    const deliveryTypes = generated ? ["generated_video", "generated_image"] : ["stock_video", "stock_image"];
+    const routeProvider = requirement.retrievalProviderId === null
       ? undefined
       : capabilities.assetProviders.find((provider) => (
         provider.id === requirement.retrievalProviderId
-        && provider.deliveryTypes.includes("stock_video")
+        && provider.deliveryTypes.some((type) => deliveryTypes.includes(type))
       ));
-    const invalidRetrieval = requirement.acquisition === "pipeline_retrievable"
-      && (requirement.requirement !== "illustration_only" || !retrievableProvider);
+    const invalidRetrieval = (requirement.acquisition === "pipeline_retrievable" || generated)
+      && (requirement.requirement !== "illustration_only" || !routeProvider);
     const unavailableExternalSource = requirement.acquisition === "external_required";
 
     if (!requirement.critical || (!missingBoundSources && !invalidRetrieval && !unavailableExternalSource)) return;
@@ -41,7 +43,7 @@ export function assessTreatmentReadiness(
         ? `核心兑现“${requirement.claim}”声明已有来源，但当前输入没有可证明的来源绑定。`
         : requirement.requirement === "factual_support"
           ? `核心事实“${requirement.claim}”不能由通用图库或生成画面代替证据。`
-          : `核心示意“${requirement.claim}”指定的图库来源当前不可用或不支持视频检索。`;
+          : `核心示意“${requirement.claim}”指定的${generated ? "生成" : "图库"}来源当前不可用，或不支持${generated ? "画面生成" : "素材检索"}。`;
     const routeCanBeRevised = invalidRetrieval && requirement.requirement === "illustration_only";
     issues.push({
       id: `treatment-readiness-${index + 1}`,

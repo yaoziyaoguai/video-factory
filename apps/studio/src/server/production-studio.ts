@@ -3550,10 +3550,12 @@ function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undef
   if (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 3) return undefined;
   if (status !== "running" && status !== "passed" && status !== "exhausted"
     && status !== "awaiting_user" && status !== "failed") return undefined;
-  const pending = isRecord(value.pendingCandidate) ? Number(value.pendingCandidate.iteration) : undefined;
+  const pending = isRecord(value.pendingCandidate) ? Number(value.pendingCandidate.iteration)
+    : value.stopAfterAudit === true && isRecord(value.pendingOperation) ? Number(value.pendingOperation.iteration)
+      : undefined;
   const iteration = Number.isInteger(pending)
     ? Math.min(maxIterations, Math.max(1, Number(pending)))
-    : Math.min(maxIterations, Math.max(1, completed.length + (status === "running" ? 1 : 0)));
+    : Math.min(maxIterations, Math.max(1, completed.length + (status === "running" && value.stopAfterAudit !== true ? 1 : 0)));
   const latest = completed.at(-1);
   const audit = isRecord(latest) && isRecord(latest.audit) ? latest.audit : undefined;
   const hostReadiness = isRecord(latest) && isRecord(latest.hostReadiness) ? latest.hostReadiness : undefined;
@@ -3596,7 +3598,8 @@ function parseAgentLoopProgress(value: unknown): StudioAgentLoopProgress | undef
   return {
     ...(role ? { role: batch ? `${role}（补看候选，最多一批）` : role } : {}),
     iteration,
-    maxIterations,
+    // 单次审片不再预告自动跑三轮；恢复旧在途第二轮时仍如实展示已发生的轮次。
+    maxIterations: value.stopAfterAudit === true ? iteration : maxIterations,
     completedIterations: completed.length,
     producerModelCallCount: producerModelCallCount + (primary?.producerModelCallCount ?? 0),
     auditModelCallCount: auditModelCallCount + (primary?.auditModelCallCount ?? 0),

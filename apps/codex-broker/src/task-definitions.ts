@@ -102,7 +102,7 @@ const SEMANTIC_RULES_VERSION: Record<BrokerTaskKind, string> = {
   "audio-review": "audio-evidence-sha-time-ranges-v1",
   "topic-ideas": "topic-ideas-semantics-v10|canonical-strategy-v1|article-sources-v2|cited-facts-v2",
   "series-roadmap": "series-roadmap-semantics-v2",
-  "creative-treatment": "creative-treatment-semantics-v11|production-capabilities-v3|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
+  "creative-treatment": "creative-treatment-semantics-v12|production-capabilities-v3|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
   "director-plan": "director-plan-semantics-v13|production-capabilities-v3|voice-timing-v1|article-sources-v1|planning-revision-v1",
   "script-draft": "script-draft-semantics-v9|production-capabilities-v3|voice-timing-v1|creative-treatment-v2|canon-facts-v2|article-sources-v1",
   "publish-copy": "publish-copy-semantics-v4",
@@ -187,7 +187,7 @@ const CREATIVE_TREATMENT_DIRECTIVE = [
   "evidenceRequirements 区分事实依据和示意表达，并完整标注 critical、acquisition、retrievalProviderId；suppliedSourceIds 只能引用 suppliedSources 中的 id。缺材料是合法构思缺口，不能逼迫编造来源。",
   "factual_support 只用于本片要求观众相信的现实事实、因果、实验结果、数字或具体事件。主观观察、创作启发、构图选择若明确只是示意且不冒充实证，应使用 illustration_only 与 not_needed。",
   "“示意不能证明普遍结论”是创作边界声明，不自动升级为外部来源要求；边界声明本身不是 factual_support。专属实验、真实记录或具体事件材料仍按实际获取责任标记 external_required。",
-  "当前不要求预先下载普通素材，但每个核心兑现依赖必须说明获取责任。流水线不能取得的用户专属实验或拍摄标记 external_required；只有通用示意图库可标记 pipeline_retrievable，且必须填写当前 Provider id，不能用图库或生成画面证明事实。",
+  "当前不要求预先下载普通素材，但每个核心兑现依赖必须说明获取责任。流水线不能取得的用户专属实验或拍摄标记 external_required；图库示意用 pipeline_retrievable，AI生成示意用 pipeline_generated，两者均以 retrievalProviderId 填写当前允许的对应 Provider id。生成视频须绑定 generated_video，生成图片须绑定 generated_image；不能把 Wan 等生成模型当图库，也不能用图库或生成画面证明事实。可生成不代表已取得或已获付款授权。",
   "feasibilityQuestions 聚焦会影响核心承诺的真实风险，说明哪段需要什么能力或素材；不把正常的构图、措辞等本角色判断推给用户。",
   "效果和真实性能够满足时再考虑复用与成本；不以无关图库、说明卡或伪造实证替代必要画面。无法兑现的核心约束要明确保留给现有规划干预，不编造完成状态。",
   "brief.budgetIntentionCny 是用户的费用意向，不是硬上限或付款授权；0 表示尽量零现金，省略表示无偏好。在保质量前提下据此规划，无法满足时说明取舍，不删弱核心承诺。",
@@ -476,7 +476,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
   }
   if (kind === "creative-treatment") {
     return {
-      version: "video-factory/treatment-director-v6",
+      version: "video-factory/treatment-director-v7",
       directive: CREATIVE_TREATMENT_DIRECTIVE,
       task: "在脚本写定前形成本片的创作构思：观众承诺、开头吸引点、内容推进、结尾兑现与画面声音原则。",
       outputRules: [
@@ -485,7 +485,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
         "progression 输出 1 到 12 项，beatId 唯一；evidenceRequirements 与 feasibilityQuestions 的 beatId 只能引用这些 beatId。",
         "visualPrinciples 与 soundPrinciples 各输出 1 到 8 项。",
         "requirement 只能是 factual_support 或 illustration_only；每项还必须输出 critical、acquisition、retrievalProviderId。",
-        "pipeline_retrievable 只用于当前图库可取得的 illustration_only，并填写 Provider id；其它 acquisition 的 retrievalProviderId 必须为 null。",
+        "pipeline_retrievable 只用于图库示意，pipeline_generated 只用于AI生成示意，两者的 requirement 均为 illustration_only，retrievalProviderId 必须绑定当前允许且支持对应交付类型的 Provider；其它 acquisition 的 retrievalProviderId 必须为 null。",
         "brief.reworkInstruction 存在时只落实这项有界构思返工要求，保留未受影响的观众承诺、叙事职责与事实边界，不扩大为跨角色重写。",
       ],
       examples: [
@@ -789,7 +789,7 @@ const CREATIVE_TREATMENT_OUTPUT_SCHEMA = {
           requirement: { type: "string", enum: ["factual_support", "illustration_only"] },
           suppliedSourceIds: { type: "array", maxItems: 24, items: { type: "string", minLength: 1, maxLength: 128 } },
           critical: { type: "boolean" },
-          acquisition: { type: "string", enum: ["supplied", "pipeline_retrievable", "external_required", "not_needed"] },
+          acquisition: { type: "string", enum: ["supplied", "pipeline_retrievable", "pipeline_generated", "external_required", "not_needed"] },
           retrievalProviderId: { type: ["string", "null"], minLength: 1, maxLength: 128 },
         },
       },
@@ -1390,15 +1390,15 @@ function semanticValidationErrorFor(kind: BrokerTaskKind, value: unknown): strin
     if (Array.isArray(value.evidenceRequirements)) {
       for (const [index, item] of value.evidenceRequirements.entries()) {
         if (!isRecord(item)) continue;
-        if (item.acquisition === "pipeline_retrievable") {
+        if (item.acquisition === "pipeline_retrievable" || item.acquisition === "pipeline_generated") {
           if (item.requirement !== "illustration_only") {
-            return `output.evidenceRequirements[${index}].acquisition cannot retrieve factual_support from stock media.`;
+            return `output.evidenceRequirements[${index}].acquisition cannot obtain factual_support from stock or generated media.`;
           }
           if (typeof item.retrievalProviderId !== "string" || !item.retrievalProviderId.trim()) {
-            return `output.evidenceRequirements[${index}].retrievalProviderId is required for pipeline_retrievable.`;
+            return `output.evidenceRequirements[${index}].retrievalProviderId is required for ${item.acquisition}.`;
           }
         } else if (item.retrievalProviderId !== null) {
-          return `output.evidenceRequirements[${index}].retrievalProviderId must be null unless acquisition is pipeline_retrievable.`;
+          return `output.evidenceRequirements[${index}].retrievalProviderId must be null unless acquisition is pipeline_retrievable or pipeline_generated.`;
         }
         if (item.requirement === "factual_support" && item.acquisition === "not_needed") {
           return `output.evidenceRequirements[${index}] cannot mark factual_support as not_needed.`;
