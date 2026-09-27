@@ -985,10 +985,9 @@ export class WorkflowRunner {
     normalizeLegacyVersionStates(definition, run, context.publicContext());
     run.executionPlan = refreshMutableExecutionPlan(definition, run, context as InMemoryWorkflowContext<unknown>);
     run.revision += 1;
-    if (target) {
-      run.status = "stale";
-      delete run.finishedAt;
-    }
+    // 只失效改配置的节点及其下游；仍有效的上游人审/费用停点必须继续可操作。
+    // 否则配置下一步会把 run 写成 stale，却留下 needs_human 节点，确认和重跑两端都拒绝。
+    this.mergeRunStatus(definition, run);
     return run;
   }
 

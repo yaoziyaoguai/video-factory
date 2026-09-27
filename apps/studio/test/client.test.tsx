@@ -5406,6 +5406,25 @@ describe("Studio client", () => {
     expect(screen.queryByRole("button", { name: "重新审查当前成片" })).not.toBeInTheDocument();
   });
 
+  it("describes an inconclusive visual review as continuing to human review, not publishing", async () => {
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    render(<RunWorkbench run={{ ...runDetail, revision: 16, status: "needs_human", currentNodeId: "visual-review",
+      activeIntervention: { id: "visual-incomplete", nodeId: "visual-review", reason: "审片已结束但无有效结论",
+        options: ["approve", "reject"], createdAt: runDetail.startedAt },
+      nodes: [{ id: "visual-review", label: "视觉审片", status: "needs_human", artifactIds: [], qualityGateResults: [],
+        output: { reviewStatus: "incomplete", providerOutcomeKnown: true } },
+        { id: "final-review", label: "人工终审", status: "pending", artifactIds: [], qualityGateResults: [] }],
+    }} decisionPending={false} onDecision={onDecision} />);
+    expect(screen.queryByRole("button", { name: "批准进入发布包" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "接受未复核风险，进入人工终审" }));
+    const dialog = screen.getByRole("dialog", { name: "接受未复核风险，进入人工终审" });
+    expect(within(dialog).getByText(/不会生成发布包，也不代表审片通过/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/这会结束人工终审/)).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认继续到人工终审" }));
+    await waitFor(() => expect(onDecision).toHaveBeenCalledTimes(1));
+    expect(onDecision.mock.calls[0]?.[0]).toMatchObject({ action: "approve", interventionId: "visual-incomplete", expectedRunRevision: 16 });
+  });
+
   it("does not offer reinspection when the first cut has no configured review node", () => {
     render(<RunWorkbench run={{ ...runDetail, revision: 9, currentNodeId: "final-review",
       activeIntervention: { id: "final", nodeId: "final-review", reason: "未配置成片审查，尚未发起审片",

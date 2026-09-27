@@ -153,6 +153,10 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const incompleteReviewOutput = run.nodes.find((node) => node.id === "visual-review")?.output;
   const incompleteAudioReview = !sourcePreflightDecision && incompleteReviewOutput && typeof incompleteReviewOutput === "object"
     ? (incompleteReviewOutput as Record<string, unknown>).audioReview : undefined;
+  const visualReviewIncompleteDecision = run.activeIntervention?.nodeId === "visual-review"
+    && incompleteReviewOutput !== null && typeof incompleteReviewOutput === "object"
+    && "reviewStatus" in incompleteReviewOutput && incompleteReviewOutput.reviewStatus === "incomplete"
+    && "providerOutcomeKnown" in incompleteReviewOutput && incompleteReviewOutput.providerOutcomeKnown === true;
   const sourceReviewEvidenceId = sourceReviewDecisionEvidenceId(run);
   const sourceReviewDecision = run.activeIntervention?.kind === "source_review_decision";
   const sourceReviewRetry = run.activeIntervention?.kind === "source_review_retry";
@@ -699,7 +703,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                     disabled={decisionPending}
                     onClick={() => openDecision("approve")}
                   >
-                    <Check aria-hidden="true" size={17} />{sourcePreflightDecision ? "接受当前素材风险，继续制作" : sourceReviewDecision || sourceReviewIncompleteRisk ? "查看质量意见并继续制作" : finalReviewIncompleteRisk ? "接受未复核风险并内部定版" : "批准进入发布包"}
+                    <Check aria-hidden="true" size={17} />{sourcePreflightDecision ? "接受当前素材风险，继续制作" : sourceReviewDecision || sourceReviewIncompleteRisk ? "查看质量意见并继续制作" : visualReviewIncompleteDecision ? "接受未复核风险，进入人工终审" : finalReviewIncompleteRisk ? "接受未复核风险并内部定版" : "批准进入发布包"}
                   </button>
                   <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
                     <XCircle aria-hidden="true" size={17} />终止制作
@@ -862,12 +866,14 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
         <div className="dialog-backdrop" role="presentation">
           <section ref={approveDialogRef} className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="approve-title" tabIndex={-1}>
             <header className="dialog-header">
-              <div><p className="eyebrow">{sourcePreflightDecision ? "素材预检" : sourceReviewIncompleteRisk ? "未完成审查" : sourceReviewDecision ? "试片质量意见" : finalReviewIncompleteRisk ? "未复核交付" : boundaryGate ? "节点放行" : "最终决定"}</p><h2 id="approve-title">{sourcePreflightDecision
+              <div><p className="eyebrow">{sourcePreflightDecision ? "素材预检" : sourceReviewIncompleteRisk || visualReviewIncompleteDecision ? "未完成审查" : sourceReviewDecision ? "试片质量意见" : finalReviewIncompleteRisk ? "未复核交付" : boundaryGate ? "节点放行" : "最终决定"}</p><h2 id="approve-title">{sourcePreflightDecision
                 ? "接受当前素材风险，继续制作"
                 : sourceReviewIncompleteRisk
                 ? "接受未完成审查，继续生成首版"
                 : sourceReviewDecision
                 ? "接受所列质量风险，继续制作"
+                : visualReviewIncompleteDecision
+                ? "接受未复核风险，进入人工终审"
                 : finalReviewIncompleteRisk
                 ? "接受未复核风险，完成内部定版"
                 : boundaryGate
@@ -883,6 +889,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               ? <><strong>你接受的是“审查没有结论”的事实，不是把它改成通过。</strong><span>已生成画面和费用事实会保留，继续只运行后续配音与渲染；不会重新购买已成功素材，最终仍显示为可播放首版而非正式发布通过。</span></>
               : sourceReviewDecision
               ? <><strong>你确认的是：已看过这份试片意见，愿意按当前方案继续。</strong><span>系统不会重新购买已生成试片；其它尚未生成的素材仍会先依据当前报价和授权处理。</span></>
+              : visualReviewIncompleteDecision
+              ? <><strong>这次机器审片没有有效结论；继续只会进入人工终审。</strong><span>不会生成发布包，也不代表审片通过。当前成片和未复核记录保留，不会因此重买素材、配音或再调用审片模型；内部定版仍需下一步明确确认。</span></>
               : finalReviewIncompleteRisk
               ? <><strong>机器审片这次没有给出可用结论；你接受的是这个未复核事实，不是宣布审查通过。</strong><span>内部定版会绑定当前成片与这份风险签字。成片仍可查看；若之后重新取得审片结论，这里不会自动改写。</span></>
               : contentDecisionNode
@@ -896,7 +904,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                 : "批准后将生成发布包。"}</strong><span>这会结束人工终审；请确认已经完整观看画面、字幕并听过声音。</span></>}</p></div>
             {/* 逐条表态管的是审片结论。机器质检是判过或不过的闸门——它不通过时流程走不到终审，
                 所以这里没有它的条目，操作员不必怀疑自己漏签了什么。边界停点上两件事都不涉及。 */}
-            {boundaryGate || sourcePreflightDecision ? null : <p className="review-disposition-note">技术质检不适用逐条表态：它由机器判定通过或不过，没过就到不了这一步，不在这里逐条签。</p>}
+            {boundaryGate || sourcePreflightDecision || visualReviewIncompleteDecision ? null : <p className="review-disposition-note">技术质检不适用逐条表态：它由机器判定通过或不过，没过就到不了这一步，不在这里逐条签。</p>}
             {reviewItems.length > 0 ? <div className="review-disposition-list">
               <p className="review-disposition-guide">采纳=现在返修；不采纳=认为意见不成立，需写理由；接受风险=认可问题，但保留本版和原始评分。</p>
               {reviewItems.map((item, index) => {
@@ -980,6 +988,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               ><Check aria-hidden="true" size={17} />{decisionPending
                 ? "正在批准..."
                 : sourceReviewDecision || sourcePreflightDecision || sourceReviewIncompleteRisk ? "确认承担并继续"
+                  : visualReviewIncompleteDecision ? "确认继续到人工终审"
                   : finalReviewIncompleteRisk ? "确认承担风险并内部定版"
                   : contentDecisionNode ? contentDecisionActionLabel
                   : voiceWithoutSubtitles ? "确认无同步字幕版，进入渲染"

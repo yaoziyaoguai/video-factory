@@ -4238,6 +4238,50 @@ describe("WorkflowRunner", () => {
     assert.equal(paidCalls, 0);
   });
 
+  it("preserves an upstream confirmation when a downstream model is changed after rework", async () => {
+    const calls: string[] = [];
+    const registry = new ProviderRegistry();
+    for (const id of ["review-a", "review-b"]) registry.register({
+      id, capability: "quality.review", billing: "free",
+      run: () => { calls.push(id); return { reviewedBy: id }; },
+    });
+    const definition = (providerId: string): WorkflowDefinition => ({
+      id: "configure-after-rework", name: "Configure after rework", version: "1",
+      nodes: [
+        { id: "media", label: "Media", capability: "asset.prepare", mode: "automatic",
+          execute: () => { calls.push("media"); return { output: { file: "kept.mp4" } }; } },
+        { id: "technical", label: "Technical", capability: "quality.technical", mode: "automatic", dependsOn: ["media"],
+          execute: () => { calls.push("technical"); return {
+            status: "needs_human" as const, output: { passed: true },
+            intervention: { boundary: "node-complete" as const, reason: "确认后进入审片", requiredAction: "approve" as const, options: ["approve" as const] },
+          }; } },
+        { id: "review", label: "Review", capability: "quality.review", mode: "automatic", dependsOn: ["technical"], providerId },
+      ],
+    });
+    const runner = new WorkflowRunner({ providers: registry, clock, idFactory: deterministicIds() });
+    const first = await runner.run(definition("review-a"), { selected: "review-a" });
+    const finished = await runner.resume(definition("review-a"), first, {
+      interventionId: first.nodeRuns.find(n => n.nodeId === "technical")!.intervention!.id,
+      action: "approve", actor: "owner",
+    });
+    const waiting = await runner.rerunFromNode(definition("review-a"), finished, "technical");
+    const stop = waiting.nodeRuns.find(n => n.nodeId === "technical")!.intervention!;
+    const updated = runner.applyExecutionConfigurationOverride(definition("review-b"), waiting, {
+      nodeId: "review", actor: "owner", initialInput: { selected: "review-b" },
+    });
+    assert.equal(updated.status, "needs_human", "换下游模型不能隐藏仍有效的上游确认点");
+    assert.deepEqual(updated.nodeRuns.find(n => n.nodeId === "technical"), waiting.nodeRuns.find(n => n.nodeId === "technical"));
+    assert.deepEqual(calls, ["media", "technical", "review-a", "technical"], "保存配置不启动模型或重买媒体");
+    const approved = await runner.resume(definition("review-b"), updated, {
+      interventionId: stop.id, action: "approve", actor: "owner",
+    });
+    assert.equal(approved.status, "stale", "下游旧结果仍需通过明确的重新生成入口处理");
+    const completed = await runner.resumeStale(definition("review-b"), approved);
+    assert.equal(completed.status, "succeeded");
+    assert.deepEqual(calls, ["media", "technical", "review-a", "technical", "review-b"]);
+    assert.deepEqual(completed.nodeRuns.find(n => n.nodeId === "review")?.output, { reviewedBy: "review-b" });
+  });
+
   it("does not fabricate actual usage when a successful metered provider omits it", async () => {
     const registry = new ProviderRegistry();
     registry.register({
