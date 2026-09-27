@@ -244,6 +244,25 @@ describe("Studio client", () => {
     expect(screen.queryByText(/下一步「视觉审片」/)).not.toBeInTheDocument();
   });
 
+  it("keeps a stale review visible as the next step instead of skipping to publication", () => {
+    const onDecision = vi.fn();
+    const onRegenerateStale = vi.fn();
+    const run: StudioRunDetail = { ...runDetail,
+      activeIntervention: { ...runDetail.activeIntervention!, nodeId: "technical-review", boundary: "node-complete" }, nodes: [
+        { id: "technical-review", label: "机器质检", role: "技术质检", status: "needs_human", artifactIds: [], qualityGateResults: [] },
+        { id: "visual-review", label: "视觉审片", role: "审片", status: "stale", artifactIds: [], qualityGateResults: [], executionConfiguration: { providerId: "review", modelSelections: {} } },
+        { id: "final-review", label: "人工终审", role: "总导演", status: "stale", artifactIds: [], qualityGateResults: [] },
+        { id: "publish-package", label: "发布文案与发布包", role: "发行编辑", status: "pending", artifactIds: [], qualityGateResults: [] },
+      ],
+    };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} onRegenerateStale={onRegenerateStale} />);
+    expect(screen.getByText(/下一步「视觉审片」需要重新生成/)).toBeInTheDocument();
+    expect(screen.getByText(/放行当前步骤后，再由你明确继续/)).toBeInTheDocument();
+    expect(screen.queryByText(/下一步「发布文案与发布包」/)).not.toBeInTheDocument();
+    expect(onDecision).not.toHaveBeenCalled();
+    expect(onRegenerateStale).not.toHaveBeenCalled();
+  });
+
   it("collects rendered review decisions before adopting publish copy and retains its document identity", async () => {
     const user = userEvent.setup();
     const onDecision = vi.fn().mockResolvedValue(undefined);
@@ -6198,6 +6217,28 @@ describe("Studio client", () => {
 
     expect(screen.getByText("当前能力：AI 视觉导演 · 模型名称未记录")).toBeInTheDocument();
     expect(screen.queryByText(/internal-director-model-x/)).not.toBeInTheDocument();
+  });
+
+  it("labels a configured running model as a selection until an actual receipt is available", () => {
+    const { activeIntervention: _activeIntervention, videoArtifactId: _videoArtifactId, ...base } = runDetail;
+    const providerId = "deepseek-visual-review-v1";
+    const catalog: StudioProvider[] = providers.map(provider => provider.id === providerId ? { ...provider,
+      modelProfiles: ["selected-model", "actual-model"].map(id => ({ id, label: id === "selected-model" ? "新选择模型" : "实际执行模型",
+        providerId, providerFamily: "test", available: true, description: "configured model", taskTypes: ["visual-review" as const] })),
+    } : provider);
+    const node: StudioNode = { id: "visual-review", label: "视觉审片", role: "审片员", status: "running", artifactIds: [], qualityGateResults: [],
+      executionConfiguration: { providerId, modelSelections: { [providerId]: "selected-model" } },
+      plannedExecution: { providerId, providerLabel: "旧默认审片", modelId: "old-model", transport: "unix_socket", billing: "subscription", snapshotSource: "reconstructed" },
+    };
+    const run: StudioRunDetail = { ...base, status: "running", currentNodeId: node.id, nodes: [node], artifacts: [] };
+    const { rerender } = render(<RunWorkbench run={run} providers={catalog} decisionPending={false} onDecision={async () => undefined} />);
+    expect(screen.getByText("当前能力：视觉审片 · 新选择模型（本次选择）")).toBeInTheDocument();
+    expect(screen.queryByText(/当前能力：旧默认审片/)).not.toBeInTheDocument();
+    rerender(<RunWorkbench run={{ ...run, nodes: [{ ...node, executionReceipt: {
+      providerId, providerLabel: "实际审片", modelId: "actual-model", transport: "unix_socket", billing: "subscription",
+      status: "succeeded", startedAt: "2026-09-27T00:00:00Z", finishedAt: "2026-09-27T00:00:01Z",
+    } }] }} providers={catalog} decisionPending={false} onDecision={async () => undefined} />);
+    expect(screen.getByText("当前能力：实际审片 · 实际执行模型")).toBeInTheDocument();
   });
 
   it("keeps the internal record revision out of the creator-facing run header", () => {

@@ -4282,6 +4282,77 @@ describe("WorkflowRunner", () => {
     assert.deepEqual(completed.nodeRuns.find(n => n.nodeId === "review")?.output, { reviewedBy: "review-b" });
   });
 
+  for (const stopKind of ["spend", "failure"] as const) {
+    it(`preserves an upstream ${stopKind} recovery after changing a downstream model`, async () => {
+      const calls: string[] = [];
+      let failCheckpoint = false;
+      const registry = new ProviderRegistry();
+      registry.register({
+        id: "checkpoint", modelId: "checkpoint-v1", transport: "http_api", capability: "asset.prepare", billing: "metered",
+        estimatedCostCny: 1, maxCostCny: 1, maxAttempts: 1,
+        run: () => { calls.push("checkpoint"); return { file: "kept.mp4" }; },
+      });
+      for (const id of ["review-a", "review-b"]) registry.register({
+        id, capability: "quality.review", billing: "free",
+        run: () => { calls.push(id); return { reviewedBy: id }; },
+      });
+      const definition = (providerId: string): WorkflowDefinition => ({
+        id: `configure-${stopKind}-recovery`, name: "Configuration recovery", version: "1",
+        nodes: [
+          { id: "source", label: "Source", capability: "script.draft", mode: "automatic",
+            execute: () => { calls.push("source"); return { output: { text: "kept" } }; } },
+          { id: "checkpoint", label: "Checkpoint", capability: "asset.prepare", mode: "automatic", dependsOn: ["source"],
+            ...(stopKind === "spend" ? { providerId: "checkpoint" } : {
+              execute: () => {
+                calls.push("checkpoint");
+                if (failCheckpoint) throw new Error("recoverable transport failure");
+                return { output: { file: "kept.mp4" } };
+              },
+            }) },
+          { id: "review", label: "Review", capability: "quality.review", mode: "automatic", dependsOn: ["checkpoint"], providerId },
+        ],
+      });
+      const runner = new WorkflowRunner({ providers: registry, clock, idFactory: deterministicIds() });
+      const authorizeCheckpoint = (run: WorkflowRun, providerId: string) => {
+        const plan = run.nodeRuns.find(n => n.nodeId === "checkpoint")!.spendPlan!;
+        return runner.authorizeSpend(definition(providerId), run, {
+          spendPlanId: plan.id, nodeId: plan.nodeId, inputVersionIds: plan.inputVersionIds,
+          providerId: plan.providerId, modelId: plan.modelId,
+          maxCostCny: plan.maxCostCny, maxAttempts: plan.maxAttempts, approvedBy: "owner",
+        });
+      };
+      let first: WorkflowRun = await runner.run(definition("review-a"), {});
+      if (stopKind === "spend") {
+        assert.equal(first.status, "awaiting_spend_approval");
+        first = await authorizeCheckpoint(first, "review-a");
+      }
+      assert.equal(first.status, "succeeded");
+      failCheckpoint = true;
+      const stopped = await runner.rerunFromNode(definition("review-a"), first, "checkpoint");
+      const expectedStatus = stopKind === "spend" ? "awaiting_spend_approval" : "failed";
+      assert.equal(stopped.status, expectedStatus);
+      const beforeCalls = [...calls];
+      const updated = runner.applyExecutionConfigurationOverride(definition("review-b"), stopped, {
+        nodeId: "review", actor: "owner", initialInput: {},
+      });
+      assert.equal(updated.status, expectedStatus, "修改下游不能隐藏上游报价或失败恢复入口");
+      assert.deepEqual(updated.nodeRuns.find(n => n.nodeId === "checkpoint"), stopped.nodeRuns.find(n => n.nodeId === "checkpoint"));
+      assert.deepEqual(updated.spendAuthorizations, stopped.spendAuthorizations);
+      assert.deepEqual(calls, beforeCalls, "保存配置不能触发任何生产调用");
+      failCheckpoint = false;
+      const recovered = stopKind === "spend"
+        ? await authorizeCheckpoint(updated, "review-b")
+        : await runner.retryFailedNode(definition("review-b"), updated, "checkpoint");
+      assert.equal(recovered.status, "stale");
+      assert.equal(calls.filter(id => id === "review-b").length, 0);
+      const completed = await runner.resumeStale(definition("review-b"), recovered);
+      assert.equal(completed.status, "succeeded");
+      assert.equal(calls.filter(id => id === "source").length, 1);
+      assert.equal(calls.filter(id => id === "review-a").length, 1);
+      assert.equal(calls.filter(id => id === "review-b").length, 1);
+    });
+  }
+
   it("does not fabricate actual usage when a successful metered provider omits it", async () => {
     const registry = new ProviderRegistry();
     registry.register({

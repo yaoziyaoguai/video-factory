@@ -137,7 +137,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const nextGateNode = boundaryGate ? nextConfigurableNode(run) : undefined;
   const waitingNodeIndex = run.nodes.findIndex((node) => node.id === run.activeIntervention?.nodeId);
   const nextPipelineNode = boundaryGate && waitingNodeIndex >= 0
-    ? run.nodes.slice(waitingNodeIndex + 1).find((node) => node.status === "pending") : undefined;
+    ? run.nodes.slice(waitingNodeIndex + 1).find((node) => !["succeeded", "skipped"].includes(node.status)) : undefined;
   const creatorNodes = run.nodes.filter((node) => node.id === nextGateNode?.id || nodeHasCreatorContent(node, run));
   const activeSpendNode = readOnly ? undefined : creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
   const currentArtifactNode = !video?.contentUrl && !creativeDiscussion && run.activeIntervention?.kind !== "creative_review"
@@ -652,7 +652,11 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                 <p className="agent-review-guidance">补查会重跑整轮审片、不会重新购买画面或配音，因此<strong>其它镜头（包括上一轮已通过的镜头）的结论也可能变化</strong>；判定与上一轮不同的条目会标出「判定变动」，并给出两轮原文。批准前你要对本轮每一条结论逐条表态：采纳的必须先返修，不采纳的要写明理由。</p>
               </div> : null}
               {nextPipelineNode ? <div className="boundary-next-step">
-                <span>下一步「{stepNameFor(nextPipelineNode, nextPipelineNode.label)}」还没开始。放行后它会按现在保存的设置执行。</span>
+                <span>下一步「{stepNameFor(nextPipelineNode, nextPipelineNode.label)}」{nextPipelineNode.status === "stale"
+                  ? "需要重新生成。放行当前步骤后，再由你明确继续；不会重做仍然有效的素材和配音。"
+                  : nextPipelineNode.status === "pending"
+                    ? "还没开始。放行后它会按现在保存的设置执行。"
+                    : "仍需处理。放行当前步骤不会跳过它，请按该步骤的提示继续。"}</span>
                 {nextGateNode ? <button className="button button-ghost" type="button" onClick={() => revealNodeWorkspace(nextGateNode.id)}>{nextGateNode.id === nextPipelineNode.id ? "去配置" : "提前配置后续步骤"}「{stepNameFor(nextGateNode, nextGateNode.label)}」</button> : null}
               </div> : null}
               <div className="decision-actions">
@@ -1852,6 +1856,12 @@ function activeNodeModel(run: StudioRunDetail, providers: StudioProvider[]): str
   const current = run.nodes.find((node) => node.id === run.currentAction?.nodeId)
     ?? run.nodes.find((node) => node.status === "running");
   if (!current) return undefined;
+  const configuration = current.executionConfiguration;
+  const selectedModelId = configuration?.modelSelections[configuration.providerId]?.trim();
+  // 重建的执行计划可能仍带角色的默认模型；回执到达前只能展示本次选择，不能冒称实际执行。
+  if (!current.executionReceipt && selectedModelId) {
+    return `${stepNameFor(current, current.label)} · ${recordedModelName(selectedModelId, providers) ?? "模型名称未记录"}（本次选择）`;
+  }
   const execution = current.executionReceipt ?? current.plannedExecution;
   if (!execution) return undefined;
   const name = stepNameFor(current, execution.providerLabel);
@@ -1947,7 +1957,7 @@ function nextConfigurableNode(run: StudioRunDetail): StudioRunDetail["nodes"][nu
   if (waitingIndex < 0) return undefined;
   return run.nodes
     .slice(waitingIndex + 1)
-    .find((node) => node.status === "pending" && node.executionConfiguration !== undefined);
+    .find((node) => ["pending", "stale"].includes(node.status) && node.executionConfiguration !== undefined);
 }
 
 function nodeHasCreatorContent(node: StudioRunDetail["nodes"][number], run: StudioRunDetail): boolean {
