@@ -19,6 +19,7 @@ import {
 import { ProductionStudio } from "../src/server/production-studio.js";
 import { StudioService } from "../src/server/studio-service.js";
 import { buildStudioApp } from "../src/server/app.js";
+import { studioApi } from "../src/client/api.js";
 import type { StudioProvider } from "../src/shared/api.js";
 
 // ---------------------------------------------------------------------------
@@ -385,7 +386,7 @@ async function rejectedJointRun(harness: { studio: ProductionStudio; pipeline: P
 }
 
 describe("joint-v1 rework routes back to the right stages (B5)", () => {
-  it("serves and confirms narration through the real HTTP facade without starting TTS or releasing the gate", async () => {
+  it("serves and confirms narration through the browser client and real HTTP facade without starting TTS or releasing the gate", async (t) => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-narration-http-"));
     let voiceCalls = 0;
     class VoiceGuardWorker extends ReworkWorker {
@@ -418,23 +419,26 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: async () => true, environment: {} });
     const app = buildStudioApp({ service });
     try {
-      const url = `/api/runs/${run.id}/narration-plan`;
-      const response = await app.inject({ method: "GET", url });
-      assert.equal(response.statusCode, 200, response.body);
-      const preview = response.json();
+      const origin = await app.listen({ host: "127.0.0.1", port: 0 });
+      const nativeFetch = globalThis.fetch;
+      // 只把浏览器相对地址接到本地服务器；请求头、序列化与响应读取均走正式客户端。
+      // app.inject 的对象 payload 会自动补 JSON 头，无法捕获浏览器实际发送文本的缺陷。
+      t.mock.method(globalThis, "fetch", (input: string | URL | Request, init?: RequestInit) =>
+        nativeFetch(typeof input === "string" ? new URL(input, origin) : input, init));
+      const preview = await studioApi.narrationPlan(run.id);
       assert.equal(preview.confirmed, false);
       assert.ok(preview.plan.groups.length > 0);
-      const confirmed = await app.inject({ method: "PUT", url,
-        payload: { expectedRunRevision: preview.expectedRunRevision, plan: preview.plan } });
-      assert.equal(confirmed.statusCode, 200, confirmed.body);
-      assert.equal(confirmed.json().status, "needs_human");
+      const confirmed = await studioApi.confirmNarrationPlan(run.id, {
+        expectedRunRevision: preview.expectedRunRevision, plan: preview.plan,
+      });
+      assert.equal(confirmed.status, "needs_human");
       const saved = await pipeline.loadPersisted(run.id);
       assert.deepEqual(saved?.nodeRuns.find(node => node.nodeId === "assets")?.intervention, assetGate);
       assert.equal(voiceCalls, 0, "确认方案不能隐式合成付费声音");
-      assert.equal((await app.inject({ method: "GET", url })).json().confirmed, true);
-      const stale = await app.inject({ method: "PUT", url,
-        payload: { expectedRunRevision: preview.expectedRunRevision, plan: preview.plan } });
-      assert.equal(stale.statusCode, 409, stale.body);
+      assert.equal((await studioApi.narrationPlan(run.id)).confirmed, true);
+      await assert.rejects(studioApi.confirmNarrationPlan(run.id, {
+        expectedRunRevision: preview.expectedRunRevision, plan: preview.plan,
+      }), /制作记录已更新/);
       assert.equal(voiceCalls, 0);
     } finally {
       await app.close();

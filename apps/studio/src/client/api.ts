@@ -326,7 +326,7 @@ export const studioApi = {
   ),
   narrationPlan: (runId: string) => requestJson<import("../shared/api.js").StudioNarrationPlanPreview>(`/api/runs/${encodeURIComponent(runId)}/narration-plan`),
   confirmNarrationPlan: (runId: string, input: { expectedRunRevision: number; plan: import("../shared/api.js").StudioNarrationPlan }) => requestJson<StudioRunDetail>(
-    `/api/runs/${encodeURIComponent(runId)}/narration-plan`, { method: "PUT", body: JSON.stringify(input) },
+    `/api/runs/${encodeURIComponent(runId)}/narration-plan`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
   overrideNodeInput: (runId: string, nodeId: string, input: StudioNodeInputOverrideInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/input-override`,
