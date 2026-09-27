@@ -1453,7 +1453,7 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
       }
       return execute(request);
     };
-    const pipeline = new ProductionPipeline({ workspaceRoot, worker,
+    const pipelineOptions: ProductionPipelineOptions = { workspaceRoot, worker,
       treatmentAgents: closureTreatmentAgents(spies), screenwriterAgent: closureScreenwriter(spies), directorAgent: director,
       assetSemanticRanker: ranker, assetProviders: [{ id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] }, ...CLOSURE_ASSET_PROVIDERS],
       providerRuntimeMetadata: sourceReview ? [{ id: "deepseek-visual-review-v1", label: "审片", modelId: "test-model", transport: "unix_socket", billing: "subscription", approvalPolicy: "none", maxAttempts: 1 }] : [],
@@ -1466,7 +1466,8 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
         version: "video-factory/visual-review-v1", summary: "示意素材匹配一般", scores: { composition: 30, continuity: 30, pacing: 30, legibility: 30, safety: 90 }, confidence: 0.8, recommendation: "reject",
         findings: [{ timecodeMs: 0, startTimecodeMs: 0, endTimecodeMs: 0, scenePosition: 1, targetNodeId: "assets", claimType: "static", evidenceStatus: "failed", evidenceFrameSha256: null, nextAction: "rework_asset", category: "composition", severity: "warning", description: "主体不够清楚", suggestion: "可替换更好素材" }],
       }; } }] : [],
-    });
+    };
+    let pipeline = new ProductionPipeline(pipelineOptions);
     const brief = closureBrief({ assetSemanticRank: true, creativeReview: true });
     if (sourceReview) brief.providers.visualReview = "deepseek-visual-review-v1";
     let run = await pipeline.start(brief);
@@ -1480,6 +1481,9 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
       }
       const gateNode = run.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
       const shown = (gateNode.output as { creativeReview?: { stages?: Record<string, { checkResult?: { verdict?: string; checkIdentity?: string } }> } })?.creativeReview?.stages?.[stage]?.checkResult;
+      // 选材确认跨部署恢复：目录描述更新不能让用户已看过的素材风险与稿件失效。
+      if (purpose === "material_plan") pipeline = new ProductionPipeline({ ...pipelineOptions,
+        assetProviders: pipelineOptions.assetProviders!.map(provider => ({ ...provider, label: `${provider.label} 新目录说明` })) });
       run = await pipeline.confirmCreativeReview(run.id, { commandId: `accept-${stage}-${purpose ?? "draft"}`, actor: "creator", stage,
         expectedRunRevision: run.revision, expectedReviewRevision: gate!.reviewRevision, baseDraftSha256: gate!.draftSha256,
         ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
@@ -2460,6 +2464,58 @@ describe("planning failure creator copy (B4-FIX)", () => {
 });
 
 describe("same-digest replay fails closed when stage inputs drift (B-FIX)", () => {
+  it("keeps valid human-reviewed drafts across runtime catalog changes without recreating or reauditing them", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-human-gate-runtime-change-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    let pipeline = newClosurePipeline(workspaceRoot, spies);
+    let run = await pipeline.start(closureBrief({ creativeReview: true }));
+    for (const stage of ["treatment", "script", "director"] as const) {
+      const node = run.nodeRuns.find(candidate => candidate.nodeId === "creative-planning")!;
+      const gate = node.intervention!.continuation!;
+      const review = (node.output as { creativeReview: CreativeReviewState }).creativeReview;
+      assert.equal(gate.stage, stage);
+      const draft = structuredClone(review.stages[stage].currentDraft);
+      // 默认运行模型/目录说明可以随部署更新，但用户 brief 与当前稿件没有变化。
+      const treatmentAgents = closureTreatmentAgents(spies);
+      const screenwriter = closureScreenwriter(spies);
+      const director = closureDirector(spies);
+      for (const [index, binding] of treatmentAgents.entries()) binding.agent.modelId = `runtime-${stage}-treatment-${index}`;
+      screenwriter.modelId = `runtime-${stage}-script`;
+      director.modelId = `runtime-${stage}-director`;
+      const runtimeOptions: ProductionPipelineOptions = { workspaceRoot, worker: new ClosureWorker(), treatmentAgents,
+        screenwriterAgent: screenwriter, directorAgent: director,
+        assetProviders: CLOSURE_ASSET_PROVIDERS.map(provider => ({ ...provider, label: `${provider.label} 更新说明 ${stage}` })) };
+      pipeline = new ProductionPipeline(runtimeOptions);
+      const command = { commandId: `after-deploy-${stage}`, actor: "creator", stage,
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision, baseDraftSha256: gate.draftSha256,
+        expectedCheckIdentity: review.stages[stage].checkResult!.checkIdentity };
+      if (stage === "director") {
+        const incompatible = new ProductionPipeline({ ...runtimeOptions,
+          assetProviders: runtimeOptions.assetProviders!.map(provider => ({ ...provider, deliveryTypes: ["stock_image"] })) });
+        const rejected = await incompatible.confirmCreativeReview(run.id, command);
+        assert.equal(rejected.nodeRuns.find(node => node.nodeId === "creative-planning")?.status, "failed");
+        assert.match(rejected.nodeRuns.find(node => node.nodeId === "creative-planning")!.error!, /cannot deliver/);
+        // 恢复能力后重试原确认，不换任务/命令，也不重跑任何已有文字阶段。
+        run = await pipeline.retryFailedNode(run.id, "creative-planning");
+      } else {
+        run = await pipeline.confirmCreativeReview(run.id, command);
+      }
+      const after = run.nodeRuns.find(candidate => candidate.nodeId === "creative-planning")!;
+      assert.notEqual(after.status, "failed", after.error);
+      const nextOutput = after.output as { creativeReview?: CreativeReviewState; creativeReviewHistory?: CreativeReviewState };
+      const nextReview = nextOutput.creativeReview ?? nextOutput.creativeReviewHistory!;
+      assert.deepEqual(nextReview.stages[stage].currentDraft, draft, "运行环境更新不得改写原稿身份");
+      assert.equal(nextReview.stages[stage].phase, "confirmed");
+    }
+    assert.equal(spies.treatmentTitles.length, 1);
+    assert.equal(spies.screenwriterCalls.length, 1);
+    assert.equal(spies.directorCalls, 1);
+    assert.equal(spies.treatmentAuditCalls, 1);
+    assert.equal(spies.screenwriterAuditCalls, 1);
+    assert.equal(spies.directorAuditCalls, 1);
+  });
+
   it("rejects retrying a failed plan thread whose director inputs were built against a different catalog", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-fix-thread-drift-"));
     const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };

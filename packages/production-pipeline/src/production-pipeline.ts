@@ -92,7 +92,7 @@ import {
 import type { CreativeTreatmentAgent, CreativeTreatmentAgentInput } from "./codex-creative-treatment.js";
 import { CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION, creativeTreatmentSeriesContext } from "./codex-creative-treatment.js";
 import { CREATIVE_TREATMENT_PROVIDER_ID, parseCreativeTreatment } from "./creative-treatment.js";
-import { contentSha256, parseCreativeReviewResume, type CreativeDiscussionResult, type CreativeReviewConfirmResume, type CreativeReviewResume, type CreativeReviewState, type CreativeStage } from "./creative-review.js";
+import { CREATIVE_REVIEW_FEATURE, contentSha256, parseCreativeReviewResume, type CreativeDiscussionResult, type CreativeReviewConfirmResume, type CreativeReviewResume, type CreativeReviewState, type CreativeStage } from "./creative-review.js";
 import { PRODUCTION_AUTHORIZATION_VERSION, assessProductionSpendPlan, canonicalProductionAssetIntentDigest, canonicalQualityContractDigest, foldProductionSpendLedger, parseProductionAuthorizationScope, resolveProductionSpendDecision, scopeCoversSpendPlan, type ProductionAuthorizationScope, type ProductionSpendPlanAssessment } from "./production-authorization.js";
 import {
   AUTOMATIC_CANDIDATE_SEMANTIC_MINIMUM,
@@ -8517,29 +8517,40 @@ function creativePlanningNode(
         const existingValues = (existingSnapshot?.values ?? {}) as Partial<PlanningGraphState>;
         if (existingValues.inputDigest != null) {
           const carriedStageInputs = existingValues.carriedStageInputIdentities ?? {};
-          for (const stage of ["treatment", "script", "director"] as const) {
-            const carriedIdentity = carriedStageInputs[stage];
-            if (carriedIdentity !== undefined && carriedIdentity !== stageInputs[stage]) {
-              throw new Error(`Creative planning cannot resume this thread: carried ${stage} evidence is incompatible with the current stage contract.`);
+          const recorded = existingHistory.find((entry) => entry.inputDigest === inputDigest);
+          const runtimeDrift = (["treatment", "script", "director"] as const).some(stage => (
+            carriedStageInputs[stage] !== undefined && carriedStageInputs[stage] !== stageInputs[stage]
+            || recorded !== undefined && recorded.stageInputs[stage] !== stageInputs[stage]
+          ));
+          if (runtimeDrift) {
+            const review = existingValues.creativeReview;
+            // 生成环境不是已交付稿件的失效条件。部署更新能力说明/默认模型后，人工停点
+            // 按当前制作合同重新校验原稿，保留其版本、审计及真实模型来源；不重产、不补审。
+            // 仅允许真实人工 interrupt：在途模型/自动失败 checkpoint 仍不能换合同重放。
+            const humanGate = currentBrief.workflowFeatures?.creativeReview === CREATIVE_REVIEW_FEATURE
+              && existingValues.runId === context.runId && existingValues.inputDigest === inputDigest
+              && review && review.stages[review.activeStage].phase === "waiting_user"
+              && existingSnapshot.next.length === 1 && existingSnapshot.next[0] === `${review.activeStage}_review`
+              && existingSnapshot.tasks.some(task => task.interrupts?.length);
+            if (!humanGate) {
+              throw new Error("Creative planning cannot resume this thread: runtime inputs changed during automatic execution; recover the original operation before changing its configuration.");
+            }
+            for (const stage of ["treatment", "script", "director"] as const) {
+              const artifact = stage === "treatment" ? existingValues.treatmentArtifact
+                : stage === "script" ? existingValues.scriptArtifact
+                : existingValues.integratedPlan ?? existingValues.directorPlan;
+              if (!artifact) continue;
+              const current = review.stages[stage];
+              if (!current.currentDraft || current.currentDraft.artifactId !== artifact.artifactId
+                || current.currentDraft.sha256 !== contentSha256(artifact.output)
+                || current.currentDraft.sha256 !== contentSha256(current.currentDocument)) {
+                throw new Error("已保存稿件与当前确认版本不一致，请先核对原稿；不会重新生成或收费。");
+              }
+              ports.validateEditedDraft!(stage, artifact.output, existingValues.scriptArtifact?.output ?? null);
             }
           }
           Object.assign(modelTraces, existingValues.carriedModelTraces ?? {});
           Object.assign(providerTraces, existingValues.carriedProviderTraces ?? {});
-          // 线索 B 守卫：同 digest 重放前比对执行记录的阶段输入身份与当前计算值——素材目录
-          // 或运行环境在 digest 不变的情况下变化（重启换目录条目等），旧 thread 的产物基于
-          // 不同真实输入构建，不得静默重放；fail closed，由用户修改输入开新 thread。
-          const recorded = existingHistory.find((entry) => entry.inputDigest === inputDigest);
-          if (recorded && (
-            recorded.stageInputs.treatment !== stageInputs.treatment
-            || recorded.stageInputs.script !== stageInputs.script
-            || recorded.stageInputs.director !== stageInputs.director
-          )) {
-            throw new Error(
-              "Creative planning cannot resume this thread: the real inputs of a planning stage "
-              + "(asset catalog, runtime models, or role bindings) changed while the planning input stayed the same. "
-              + "Edit the planning input to open a new planning thread.",
-            );
-          }
           // ranker 身份（provider/model/合同版本/语义投影规则）变化：只失效排序证据及其下游，
           // 候选与未变阶段保留。游标重置回 director 之后，图路由因 ranking=null 走真实重排
           // （不重搜）——不得重放 completed graph 的旧排序。旧记录无 rank 身份时按"身份未知"
