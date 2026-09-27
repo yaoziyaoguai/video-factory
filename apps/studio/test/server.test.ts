@@ -65,6 +65,8 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
       curated: true,
     }]),
     previewVoice: async () => undefined,
+    previewNarrationPlan: async () => { throw new Error("not configured"); },
+    confirmNarrationPlan: async () => { throw new Error("not configured"); },
     prepareProductionQuote: async () => ({
       quoteId: "quote-1",
       acceptedPlanDigest: "a".repeat(64),

@@ -31,6 +31,7 @@ describe("role agent loop audit boundary", () => {
         await assert.rejects(() => execute(true), (error: unknown) => {
           assert.ok(error instanceof RoleAgentLoopError);
           assert.equal(error.agentLoop.failure?.stage, "completed_failure");
+          assert.doesNotMatch(error.agentLoop.failure?.summary ?? "", /诊断|Role audit/, "面向用户的摘要不能带机器诊断");
           assert.deepEqual(error.agentLoop.pendingCandidate?.candidate, { title: "保留原稿" });
           assert.equal(error.agentLoop.iterations.length, 0);
           assert.equal(error.agentLoop.producerModelCallCount, 1);
@@ -1716,8 +1717,10 @@ describe("role agent loop audit boundary", () => {
     });
 
     await assert.rejects(execute, (error: Error) => {
+      assert.ok(error instanceof RoleAgentLoopError);
       assert.match(error.message, /编剧的独立审计已返回，但没有可用的结论/);
       assert.match(error.message, /当前内容保留，等待你决定/);
+      assert.doesNotMatch(error.agentLoop.failure?.summary ?? "", /诊断|Role audit/);
       // 机器诊断挪进「诊断：」段：界面把这一整段剥掉，创作者只读到中文句；
       // 原文留在 checkpoint 与日志里给操作员定位。曾经裸拼在中文句号后面，
       // 屏幕上是半句英文（真实 dogfood 反馈）。

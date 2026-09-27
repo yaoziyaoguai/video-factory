@@ -173,8 +173,8 @@ export interface StudioServicePort {
   reinspectVisualReview(runId: string, input: StudioVisualReinspectionInput): Promise<StudioRunDetail>;
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
-  previewNarrationPlan?(runId: string): Promise<import("../shared/api.js").StudioNarrationPlanPreview>;
-  confirmNarrationPlan?(runId: string, input: { expectedRunRevision: number; plan: unknown }, actor: string): Promise<StudioRunDetail>;
+  previewNarrationPlan(runId: string): Promise<import("../shared/api.js").StudioNarrationPlanPreview>;
+  confirmNarrationPlan(runId: string, input: { expectedRunRevision: number; plan: unknown }, actor: string): Promise<StudioRunDetail>;
   reviseNodeDocument(runId: string, nodeId: string, input: StudioNodeDocumentRevisionInput, actor: string): Promise<StudioRunDetail>;
   auditNodeDocumentCurrent(runId: string, nodeId: string, input: StudioNodeDocumentAuditInput, actor: string): Promise<StudioRunDetail>;
   documentCommands?(runId: string, nodeId: string): Promise<StudioDocumentCommand[]>;
@@ -657,13 +657,11 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
 
   app.get<{ Params: { runId: string } }>("/api/runs/:runId/narration-plan", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
-    if (!options.service.previewNarrationPlan) throw new StudioNotFoundError("旁白方案服务尚未就绪。");
     return options.service.previewNarrationPlan(request.params.runId);
   });
 
   app.put<{ Params: { runId: string }; Body: { expectedRunRevision: number; plan: unknown } }>("/api/runs/:runId/narration-plan", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
-    if (!options.service.confirmNarrationPlan) throw new StudioNotFoundError("旁白方案服务尚未就绪。");
     if (!request.body || !Number.isSafeInteger(request.body.expectedRunRevision) || request.body.expectedRunRevision < 0
       || !request.body.plan || typeof request.body.plan !== "object") throw new StudioInputError("请先查看最新旁白方案。");
     return options.service.confirmNarrationPlan(request.params.runId, request.body, trustedStudioActor(auth, request.headers.cookie));

@@ -792,6 +792,14 @@ export class StudioService {
     return this.withLease(runId, async () => this.production.applyNodeInputOverride(runId, nodeId, input, actor));
   }
 
+  previewNarrationPlan(runId: string) {
+    return this.production.previewNarrationPlan(runId);
+  }
+
+  confirmNarrationPlan(runId: string, input: { expectedRunRevision: number; plan: unknown }, actor = "studio-owner"): Promise<StudioRunDetail> {
+    return this.withLease(runId, async () => this.production.confirmNarrationPlan(runId, input, actor));
+  }
+
   documentCommands(runId: string, nodeId: string) {
     return this.production.documentCommands(runId, nodeId);
   }

@@ -17,6 +17,8 @@ import {
   type WorkerResponse,
 } from "@video-factory/production-pipeline";
 import { ProductionStudio } from "../src/server/production-studio.js";
+import { StudioService } from "../src/server/studio-service.js";
+import { buildStudioApp } from "../src/server/app.js";
 import type { StudioProvider } from "../src/shared/api.js";
 
 // ---------------------------------------------------------------------------
@@ -383,6 +385,62 @@ async function rejectedJointRun(harness: { studio: ProductionStudio; pipeline: P
 }
 
 describe("joint-v1 rework routes back to the right stages (B5)", () => {
+  it("serves and confirms narration through the real HTTP facade without starting TTS or releasing the gate", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-narration-http-"));
+    let voiceCalls = 0;
+    class VoiceGuardWorker extends ReworkWorker {
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        if (request.capability === "voice.synthesize") voiceCalls++;
+        return super.run(request);
+      }
+    }
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new VoiceGuardWorker(),
+      ...jointReworkAgents({ treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] }),
+      assetProviders: REWORK_ASSET_PROVIDERS,
+      providerRuntimeMetadata: [{ id: "minimax-tts-v1", label: "MiniMax", modelId: "speech-2.8-turbo",
+        transport: "http_api", billing: "metered", approvalPolicy: "automatic", estimatedCostCny: 0.5, maxAttempts: 1 }],
+    });
+    const brief = jointReworkBrief();
+    let run = await pipeline.start({ ...brief,
+      providers: { ...brief.providers, voice: "minimax-tts-v1" },
+      voiceDirection: { ...brief.voiceDirection, profileId: "minimax:female-chengshu" },
+      workflowFeatures: { ...brief.workflowFeatures, boundaryGates: "user-confirmed-v1" },
+    });
+    for (let step = 0; step < 10 && !run.nodeRuns.some(node => node.nodeId === "assets" && node.status === "needs_human"); step++) {
+      const gate = run.nodeRuns.find(node => node.status === "needs_human")?.intervention;
+      assert.ok(gate, JSON.stringify({ status: run.status, failure: run.failure }));
+      run = gate.kind === "creative_review" ? await confirmCreativeStages(pipeline, run)
+        : await pipeline.decide(run.id, { interventionId: gate.id, action: "approve", actor: "creator",
+          expectedRunRevision: run.revision, reviewEvidenceId: null });
+    }
+    const assetGate = run.nodeRuns.find(node => node.nodeId === "assets")!.intervention;
+    assert.ok(assetGate);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: async () => true, environment: {} });
+    const app = buildStudioApp({ service });
+    try {
+      const url = `/api/runs/${run.id}/narration-plan`;
+      const response = await app.inject({ method: "GET", url });
+      assert.equal(response.statusCode, 200, response.body);
+      const preview = response.json();
+      assert.equal(preview.confirmed, false);
+      assert.ok(preview.plan.groups.length > 0);
+      const confirmed = await app.inject({ method: "PUT", url,
+        payload: { expectedRunRevision: preview.expectedRunRevision, plan: preview.plan } });
+      assert.equal(confirmed.statusCode, 200, confirmed.body);
+      assert.equal(confirmed.json().status, "needs_human");
+      const saved = await pipeline.loadPersisted(run.id);
+      assert.deepEqual(saved?.nodeRuns.find(node => node.nodeId === "assets")?.intervention, assetGate);
+      assert.equal(voiceCalls, 0, "确认方案不能隐式合成付费声音");
+      assert.equal((await app.inject({ method: "GET", url })).json().confirmed, true);
+      const stale = await app.inject({ method: "PUT", url,
+        payload: { expectedRunRevision: preview.expectedRunRevision, plan: preview.plan } });
+      assert.equal(stale.statusCode, 409, stale.body);
+      assert.equal(voiceCalls, 0);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("keeps a model-generated out-of-scope director plan at a recoverable stop without reaching assets", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-rework-model-scope-"));
     const spies: ReworkSpies = { treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] };

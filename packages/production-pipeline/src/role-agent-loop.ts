@@ -164,7 +164,12 @@ export class RoleAgentLoopError extends Error {
 }
 
 /** 仅在已完整取回审计响应、宿主校验拒收时使用；不是在途失败或作品质量结论。 */
-export class RoleAuditOutputError extends Error {}
+export class RoleAuditOutputError extends Error {
+  constructor(readonly creatorMessage: string, diagnostic: string) {
+    super(`${creatorMessage}\n诊断：${diagnostic}`);
+    this.name = "RoleAuditOutputError";
+  }
+}
 
 export function isCompletedRoleAgentFailure(error: RoleAgentLoopError): boolean {
   return codexBridgeErrorFromCause(error)?.stage === "completed_failure"
@@ -342,7 +347,8 @@ export async function runRoleAgentLoop<TOutput>(
     // 旧版已收到但拒收的审计，普通恢复只交还未复核稿；不能每次恢复都再花两次审计。
     // 主动再审会使用新的操作/checkpoint 身份，因此不借本分支重放旧意见。
     throw await failedLoopError(new RoleAuditOutputError(
-      `复核已返回，但没有可用的结论；当前内容保留，等待你决定。\n诊断：${state.auditValidationFailure.validationError}`,
+      "复核已返回，但没有可用的结论；当前内容保留，等待你决定。",
+      state.auditValidationFailure.validationError,
     ), options, state, iterations, state.pendingCandidate.candidateTrace, "audit");
   }
   if (persistedSourceGap) {
@@ -545,9 +551,9 @@ export async function runRoleAgentLoop<TOutput>(
         if (options.stopAfterAudit || structuredAuditAttempts >= MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN) {
           throw await failedLoopError(
             new RoleAuditOutputError(
-              `${options.role}的独立审计已返回，但没有可用的结论；当前内容保留，等待你决定。`
+              `${options.role}的独立审计已返回，但没有可用的结论；当前内容保留，等待你决定。`,
               // 同上：诊断进「诊断：」段，界面剥掉，操作员保留。
-              + `\n诊断：${publicValidationError(error)}`,
+              publicValidationError(error),
             ),
             options,
             state,
@@ -738,7 +744,7 @@ async function failedLoopError<TOutput>(
       summary: baseMessage,
     };
   } else if (error instanceof RoleAuditOutputError) {
-    state.failure = { stage: "completed_failure", summary: error.message };
+    state.failure = { stage: "completed_failure", summary: error.creatorMessage };
   } else if (error instanceof RoleAgentHostStop) {
     state.failure = { stage: "not_accepted", summary: error.message };
   } else {
