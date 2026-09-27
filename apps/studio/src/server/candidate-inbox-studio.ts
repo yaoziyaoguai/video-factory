@@ -21,7 +21,7 @@ import { decideEditorialFormat, type EditorialTemplateOption } from "./editorial
 export interface CandidateInboxStudioOptions {
   trends: {
     listCandidates(): Promise<StudioTrendCandidate[]>;
-    /** 非阻塞快照：HTTP 读取用它，冷缓存时不等待生成。缺省时退回 listCandidates。 */
+    /** 只读快照：HTTP 读取用它，不触发生成。缺省时退回只读的 listCandidates。 */
     snapshotCandidates?(): Promise<StudioTrendCandidate[]>;
     isRefreshing?(): boolean;
     appendCandidateSources?(candidateId: string, evidenceUrls: string[]): Promise<StudioTrendCandidate>;
@@ -44,8 +44,8 @@ export class CandidateInboxStudio {
     this.now = options.now ?? (() => new Date());
   }
 
-  // awaitTrendGeneration=false 只用于收件箱读取：拿当前缓存快照，不等待生成。
-  // 采用与补充来源仍走默认的阻塞读取，避免在候选尚未落盘时误判"候选已失效"。
+  // 读取和采用都只使用已生成的候选，不能因为缓存空/过期而另起收费任务。
+  // 保留适配器的快照入口，生成由用户的显式刷新操作单独发起。
   async list(query: StudioCandidateInboxQuery, options: { awaitTrendGeneration?: boolean } = {}): Promise<StudioCandidateInbox> {
     const includeTrends = !query.origins?.length || query.origins.includes("trend");
     const includeSeries = !query.origins?.length || query.origins.includes("series");

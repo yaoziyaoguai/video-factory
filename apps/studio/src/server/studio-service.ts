@@ -343,7 +343,7 @@ export class StudioService {
     return status;
   }
   async listCandidateInbox(input: StudioCandidateInboxQuery): Promise<StudioCandidateInbox> {
-    // 读取接口不许等待一次完整的热点生成：冷缓存先返回空快照，生成在后台推进。
+    // 只读已生成候选；空缓存/过期缓存不能在页面读取时启动收费生成。
     const inbox = await this.candidateInbox.list(input, { awaitTrendGeneration: false });
     const includesTrend = input.origins === undefined || input.origins.includes("trend");
     const topicGeneration = includesTrend ? this.trends.latestGenerationReceipt() : undefined;

@@ -22,7 +22,6 @@ export interface TrendStudioOptions {
   environment: NodeJS.ProcessEnv;
   now: () => Date;
   cachePath?: string;
-  cacheTtlMs?: number;
   trendGateway?: Pick<TrendGateway, "listServices" | "listSignals">;
   trendAgent?: Pick<TrendOpportunityAgent, "listCandidates"> & Partial<Pick<TrendOpportunityAgent, "generationReceipt" | "reviseCandidate">>;
   createRefreshId?: () => string;
@@ -37,12 +36,9 @@ export interface TrendCandidateReadOptions {
 export class TrendStudio {
   private readonly gateway: Pick<TrendGateway, "listServices" | "listSignals">;
   private readonly agent: (Pick<TrendOpportunityAgent, "listCandidates"> & Partial<Pick<TrendOpportunityAgent, "generationReceipt" | "reviseCandidate">>) | undefined;
-  private candidateCache: { expiresAt: number; cachedAt: string; values: StudioTrendCandidate[] } | undefined;
+  private candidateCache: { cachedAt: string; values: StudioTrendCandidate[] } | undefined;
   private candidateLoading: Promise<StudioTrendCandidate[]> | undefined;
-  private candidateLoadingForced = false;
-  private queuedRefresh: Promise<StudioTrendCandidate[]> | undefined;
   private cacheHydration: Promise<void> | undefined;
-  private nextAutomaticRefreshAt = 0;
   private readonly candidateRefreshes = new Map<string, StudioTrendRefreshStatus>();
   private activeRefreshId: string | undefined;
   private lastGenerationReceipt: StudioTopicGenerationReceipt | undefined;
@@ -69,48 +65,22 @@ export class TrendStudio {
   }
 
   async listCandidates(options: TrendCandidateReadOptions = {}): Promise<StudioTrendCandidate[]> {
+    if (!options.forceRefresh) return this.snapshotCandidates();
     if (this.options.cachePath) await this.hydrateCache();
     if (this.sourceSupplementsPath()) await this.hydrateSupplements();
-    const now = this.options.now().getTime();
-    if (!options.forceRefresh && this.candidateCache) {
-      if (this.candidateCache.expiresAt <= now && !this.candidateLoading && now >= this.nextAutomaticRefreshAt) {
-        this.nextAutomaticRefreshAt = now + AUTOMATIC_REFRESH_RETRY_MS;
-        void this.startCandidateLoad(false).catch(() => undefined);
-      }
-      return this.mergeCandidateSupplements(this.candidateCache.values);
-    }
-    if (this.candidateLoading) {
-      if (!options.forceRefresh || this.candidateLoadingForced) return this.candidateLoading;
-      if (this.queuedRefresh) return this.queuedRefresh;
-      const current = this.candidateLoading;
-      const queued = current.catch(() => undefined).then(() => this.startCandidateLoad(true));
-      this.queuedRefresh = queued;
-      try {
-        return await queued;
-      } finally {
-        if (this.queuedRefresh === queued) this.queuedRefresh = undefined;
-      }
-    }
-    return this.startCandidateLoad(Boolean(options.forceRefresh));
+    return this.candidateLoading ?? this.startCandidateLoad();
   }
 
-  // 收件箱读取路径专用：只返回当前缓存快照，绝不等待一次完整生成。
-  // 冷缓存时后台启动生成并立即返回空集合，调用方用 isRefreshing() 决定是否轮询；
-  // 缓存过期时先返回旧缓存，把刷新放后台——读取接口不能因为生成耗时变成十分之一小时的空转。
+  // 页面读取不是收费授权：空缓存返回空集合，过期缓存仍可查看和采用。
+  // 只有用户显式刷新才调用模型；已有刷新进行中时，读取也不追加或等待新请求。
   async snapshotCandidates(): Promise<StudioTrendCandidate[]> {
     if (this.options.cachePath) await this.hydrateCache();
     if (this.sourceSupplementsPath()) await this.hydrateSupplements();
-    const now = this.options.now().getTime();
-    const stale = !this.candidateCache || this.candidateCache.expiresAt <= now;
-    if (stale && !this.candidateLoading && now >= this.nextAutomaticRefreshAt) {
-      this.nextAutomaticRefreshAt = now + AUTOMATIC_REFRESH_RETRY_MS;
-      void this.startCandidateLoad(false).catch(() => undefined);
-    }
     return this.candidateCache ? this.mergeCandidateSupplements(this.candidateCache.values) : [];
   }
 
   isRefreshing(): boolean {
-    return Boolean(this.candidateLoading || this.queuedRefresh);
+    return Boolean(this.candidateLoading);
   }
 
   async requestCandidateRefresh(): Promise<StudioTrendRefreshReceipt> {
@@ -126,9 +96,9 @@ export class TrendStudio {
     this.recordRefresh(status);
     this.activeRefreshId = refreshId;
 
-    // 手动刷新如果撞上自动刷新，只跟踪并复用当前任务，不再追加第二套昂贵 Agent Loop。
-    const alreadyRunning = Boolean(this.candidateLoading || this.queuedRefresh);
-    const loading = this.candidateLoading ?? this.queuedRefresh ?? this.startCandidateLoad(true);
+    // 多个显式刷新入口只跟踪并复用当前任务，不追加第二套昂贵 Agent Loop。
+    const alreadyRunning = Boolean(this.candidateLoading);
+    const loading = this.candidateLoading ?? this.startCandidateLoad();
     void loading.then((values) => {
       this.finishRefresh(refreshId, { state: "succeeded", candidateCount: values.length });
     }).catch(() => {
@@ -317,13 +287,10 @@ export class TrendStudio {
     }
   }
 
-  private startCandidateLoad(forceRefresh: boolean): Promise<StudioTrendCandidate[]> {
+  private startCandidateLoad(): Promise<StudioTrendCandidate[]> {
     const work = (async () => {
-      // C3-E02：显式刷新（换一批）携带新的生成身份——同信号下真正重出一批提案；
-      // 普通读取/自动刷新不带 nonce，命中缓存或既有 checkpoint，不重复生成。
-      const values = await this.loadCandidates(forceRefresh
-        ? (this.options.createGenerationNonce ?? randomUUID)()
-        : undefined);
+      // C3-E02：只有显式刷新（换一批）能到这里，同信号下使用新的生成身份。
+      const values = await this.loadCandidates((this.options.createGenerationNonce ?? randomUUID)());
       const cachedAt = this.options.now().toISOString();
       const generationReceipt = this.agent?.generationReceipt?.()
         ?? generationReceiptFromCandidates(values, cachedAt, this.agent
@@ -337,20 +304,17 @@ export class TrendStudio {
       // 缓存写入与人工来源写入共用同一进程内文件队列，避免两套原子写交错。
       await this.queueFileMutation(() => this.persistCache({ schemaVersion: CANDIDATE_CACHE_SCHEMA_VERSION, cachedAt, values: versionedValues, generationReceipt }));
       // 只有持久化生命周期结束后才发布新缓存，避免调用方看到新值时后台仍在改文件。
-      this.candidateCache = { expiresAt: Date.parse(cachedAt) + (this.options.cacheTtlMs ?? DAILY_CACHE_TTL_MS), cachedAt, values: versionedValues };
+      this.candidateCache = { cachedAt, values: versionedValues };
       this.lastGenerationReceipt = generationReceipt;
-      this.nextAutomaticRefreshAt = 0;
       return this.mergeCandidateSupplements(versionedValues);
     })();
     const loading = work.finally(() => {
       if (this.candidateLoading === loading) {
         this.candidateLoading = undefined;
-        this.candidateLoadingForced = false;
       }
     });
     // candidateLoading 代表“生成、持久化并发布”完整生命周期，调用方等待后即可安全读取刷新状态。
     this.candidateLoading = loading;
-    this.candidateLoadingForced = forceRefresh;
     return loading;
   }
 
@@ -372,7 +336,6 @@ export class TrendStudio {
       const parsed = JSON.parse(await readFile(this.options.cachePath, "utf8")) as unknown;
       if (!isPersistedCandidateCache(parsed)) return;
       this.candidateCache = {
-        expiresAt: Date.parse(parsed.cachedAt) + (this.options.cacheTtlMs ?? DAILY_CACHE_TTL_MS),
         cachedAt: parsed.cachedAt,
         values: parsed.values,
       };
@@ -396,8 +359,6 @@ export class TrendStudio {
   }
 }
 
-const DAILY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const AUTOMATIC_REFRESH_RETRY_MS = 60 * 60 * 1000;
 
 interface PersistedCandidateCache {
   // schema 6：选题总编新合同增加 audienceDemand（观众需求）评分，旧候选没有这个分，

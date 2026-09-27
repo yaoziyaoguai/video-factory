@@ -24,6 +24,7 @@ import {
 import { JsonOpportunityStore } from "../src/server/opportunity-store.js";
 import { JsonRunArchiveStore } from "../src/server/run-archive-store.js";
 import { loadAgentLoopProgress, ProductionStudio } from "../src/server/production-studio.js";
+import { buildStudioApp } from "../src/server/app.js";
 import type { StudioDecisionInput, StudioOpportunityInput, StudioProvider, StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
 
 class StudioService extends ProductionStudioService {
@@ -412,7 +413,65 @@ function fileIntegrity(content: string | Buffer): { sizeBytes: number; sha256: s
   };
 }
 
+async function completeTrendRefresh(service: StudioService, refreshId?: string): Promise<void> {
+  const id = refreshId ?? (await service.refreshTrendCandidates()).refreshId;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const status = await service.trendCandidateRefreshStatus(id);
+    if (status.state !== "running") {
+      assert.equal(status.state, "succeeded");
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail("explicit trend refresh did not complete");
+}
+
 describe("StudioService", () => {
+  it("keeps real HTTP candidate GETs read-only across cold cache, active refresh and restart", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-trend-readonly-http-"));
+    let calls = 0;
+    let release: (() => void) | undefined;
+    const makeService = (now: string) => new StudioService({
+      workspaceRoot, pipeline: new FakePipeline(waitingRun(workspaceRoot)),
+      environment: {}, commandAvailable: allCommandsAvailable, now: () => new Date(now),
+      trendGateway: { listServices: async () => [], listSignals: async () => [] },
+      trendAgent: { listCandidates: () => {
+        calls += 1;
+        return new Promise((resolve) => { release = () => resolve([]); });
+      } },
+    });
+    const service = makeService("2026-09-27T11:00:00Z");
+    const app = buildStudioApp({ service });
+    try {
+      for (const url of ["/api/candidate-inbox?origins=trend", "/api/trend-candidates"]) {
+        const response = await app.inject({ method: "GET", url });
+        assert.equal(response.statusCode, 200);
+      }
+      assert.equal(calls, 0);
+      const started = await app.inject({ method: "POST", url: "/api/trend-candidates/refresh" });
+      assert.equal(started.statusCode, 202);
+      const duplicate = await app.inject({ method: "POST", url: "/api/trend-candidates/refresh" });
+      assert.equal(duplicate.json().refreshId, started.json().refreshId);
+      assert.equal(duplicate.json().status, "already_running");
+      const active = await app.inject({ method: "GET", url: "/api/candidate-inbox?origins=trend" });
+      assert.equal(active.json().refreshing, true);
+      assert.equal(calls, 1);
+      release!();
+      await completeTrendRefresh(service, started.json().refreshId);
+      const restarted = buildStudioApp({ service: makeService("2026-09-30T11:00:00Z") });
+      try {
+        const after = await restarted.inject({ method: "GET", url: "/api/candidate-inbox?origins=trend" });
+        assert.equal(after.statusCode, 200);
+        assert.equal(after.json().refreshing, false);
+        assert.equal((await restarted.inject({ method: "GET", url: "/api/trend-candidates" })).statusCode, 200);
+        assert.equal(calls, 1, "重启、缓存过期和轮询都不能增加生成调用");
+      } finally { await restarted.close(); }
+    } finally {
+      await app.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("marks only a structured rework-scope failure as needing a fresh scope decision", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-rework-coded-failure-"));
     const base = waitingRun(workspaceRoot);
@@ -3439,9 +3498,8 @@ describe("StudioService", () => {
       trendAgent: { listCandidates: async () => [trendCandidate] },
     });
 
-    // 收件箱读取不再等待生成：这里先走一次阻塞读取把候选落盘，模拟"生成已完成"的状态，
-    // 否则读到的是冷缓存快照（空集合 + refreshing）。
-    await service.listTrendCandidates();
+    // 先模拟用户显式刷新；普通读取不再授权生成。
+    await completeTrendRefresh(service);
     const candidate = (await service.listCandidateInbox({ origins: ["trend"] })).items[0]!;
     const opportunity = await service.adoptCandidate(candidate.id, { origin: "trend", ...(candidate.generationId ? { expectedGenerationId: candidate.generationId } : {}), verificationConfirmed: true });
     assert.deepEqual(opportunity.articleSources, trustedSources);
@@ -3570,7 +3628,7 @@ describe("StudioService", () => {
     });
 
     // 同上：先完成一次生成，收件箱读取才拿得到候选与生成回执。
-    await service.listTrendCandidates();
+    await completeTrendRefresh(service);
     const trendInbox = await service.listCandidateInbox({ origins: ["trend"] });
     const beforeDeletion = trendInbox.items[0];
     assert.equal(beforeDeletion?.editorialDecision.recommendedTemplate, undefined);
@@ -6461,6 +6519,9 @@ describe("StudioService", () => {
       now: () => new Date("2026-08-24T00:01:00.000Z"),
     });
 
+    assert.deepEqual(await service.listTrendCandidates(), []);
+    assert.equal(calls, 0);
+    await completeTrendRefresh(service);
     const firstCandidates = await service.listTrendCandidates();
     assert.ok(firstCandidates[0]?.generationId);
     assert.deepEqual(firstCandidates.map(({ generationId: _generationId, ...value }) => value), [candidate]);

@@ -92,7 +92,7 @@ export function TodayPage() {
     return scoped;
   }, []);
 
-  // 收件箱读取不再等待生成：冷缓存时服务端先返回空快照并标记 refreshing。
+  // 只轮询用户已启动的生成；空缓存读取不会自动创建模型任务。
   // 这里持续重读，直到后台生成落地，否则界面会停在"暂无候选"而实际仍在生成。
   const scheduleTrendGenerationPoll = useCallback(function poll(attempt: number) {
     if (trendGenerationPollRef.current !== undefined) window.clearTimeout(trendGenerationPollRef.current);
