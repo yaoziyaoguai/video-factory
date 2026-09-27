@@ -991,6 +991,7 @@ describe("CodexBrokerServer POST /v1/tasks", () => {
         category: "invalid_request",
         reasonCode: "1308",
         requestIdHash: "a".repeat(64),
+        brokerRequestIdHash: createHash("sha256").update("topic-credential-diagnostic").digest("hex"),
         providerId: "deepseek",
         modelId: "deepseek-flash",
         providerWaitMs: 37,

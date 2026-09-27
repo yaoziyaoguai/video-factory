@@ -177,14 +177,20 @@ class BrokerTaskQueue {
         next.settle({
           ok: true,
           output: result.output,
-          ...(result.trace ? { trace: { ...result.trace, queueWaitMs } } : {}),
+          ...(result.trace ? { trace: { ...result.trace, queueWaitMs,
+            ...(next.requestId ? { brokerRequestIdHash: createHash("sha256").update(next.requestId).digest("hex") } : {}),
+          } } : {}),
           ...(result.sessionId ? { sessionId: result.sessionId } : {}),
         });
       } catch (error) {
         this.failedTasks += 1;
         diagnosticEvent("model.finished", { ...(error instanceof CodexExecutorError ? error.details : {}), ...diagnostic,
           status: "failed", errorType: error instanceof Error ? error.name : "UnknownError", elapsedMs: Date.now() - next.submittedAtMs });
-        next.settle(failureOutcome(error, queueWaitMs));
+        const outcome = failureOutcome(error, queueWaitMs);
+        if (!outcome.ok && outcome.failureDetails && next.requestId) {
+          outcome.failureDetails.brokerRequestIdHash = createHash("sha256").update(next.requestId).digest("hex");
+        }
+        next.settle(outcome);
       } finally {
         next.active = false;
         this.activeTasks -= 1;
@@ -531,7 +537,7 @@ export class CodexBrokerServer {
           ...executionOptions,
           ...(sessionId ? { sessionId } : {}),
           persistSession: session !== undefined,
-        });
+        }, requestId);
         const cancelIfDisconnected = (): void => {
           if (!response.writableEnded) submission.cancel();
         };
@@ -1006,6 +1012,7 @@ function rejectedRequestFailureDetails(
       ?? identity.modelId
       ?? "unknown",
     ...(requestId ? { requestIdHash: createHash("sha256").update(requestId).digest("hex") } : {}),
+    ...(requestId ? { brokerRequestIdHash: createHash("sha256").update(requestId).digest("hex") } : {}),
     ...(taskKind ? { taskKind } : {}),
     ...(fieldPath ? { fieldPath } : {}),
     accepted: false,

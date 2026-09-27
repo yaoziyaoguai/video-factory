@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import { CodexBridgeError, ProductionPipeline, RoleAgentLoopError, contentSha256, type CreativeTreatmentAgentInput, type ProductionBrief, type ProductionPipelineOptions, type VisualAssetProviderCapability, type VisualDirectorAgentInput, type WorkerResponse } from "@video-factory/production-pipeline";
 import { ProductionStudio, loadAgentLoopProgress } from "../src/server/production-studio.js";
 import type { StudioRunDetail } from "../src/shared/api.js";
+import { StudioConflictError } from "../src/server/studio-errors.js";
 
 // ---------------------------------------------------------------------------
 // joint-v1 planning stage DTO（只读投影）的行为测试。
@@ -647,6 +648,25 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
       () => harness.studio.commandCreativeReview(run.id, command, "another-creator"),
       /当前方案已经更新/,
     );
+  });
+
+  it("reports rejected creative consent without a server failure and proves absence only with the execution lease", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-creative-rejection-"));
+    const spies: PlanningSpies = { treatmentCalls: 0, screenwriterCalls: 0, directorCalls: 0, rankCalls: 0 };
+    const harness = newPlanningStudio(workspaceRoot, new PlanningStagesWorker(), reviewCapablePlanningAgents(spies));
+    const run = await harness.pipeline.start(planningBrief({ creativeReview: true }));
+    const review = (await harness.studio.creativeReview(run.id))!;
+    const before = structuredClone(spies);
+    const command = { action: "confirm" as const, commandId: "rejected-confirm", expectedRunRevision: review.runRevision,
+      expectedReviewRevision: review.reviewRevision, stage: review.stage, baseDraftSha256: review.draftSha256,
+      acknowledgeUnaudited: true as const };
+    await assert.rejects(harness.studio.commandCreativeReview(run.id, command, "creator"), StudioConflictError);
+    await harness.pipeline.withRunMaintenanceLease([run.id], async () => {
+      assert.equal((await harness.studio.creativeReviewCommand(run.id, command.commandId))?.status, "unknown");
+    });
+    assert.equal((await harness.studio.creativeReviewCommand(run.id, command.commandId))?.status, "not_accepted");
+    assert.deepEqual(await harness.pipeline.show(run.id), run);
+    assert.deepEqual(spies, before);
   });
 
   it("marks only checkpoint-completed stages as completed when a mid-chain role fails", async () => {

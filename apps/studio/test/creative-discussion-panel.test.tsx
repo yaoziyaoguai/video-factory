@@ -108,6 +108,17 @@ describe("CreativeDiscussionPanel", () => {
     expect(onCommand).not.toHaveBeenCalled();
   });
 
+  it("clears only a server-proven unaccepted command and leaves the next choice to the user", async () => {
+    window.localStorage.setItem("vf:creative-command:run-creative:script:draft", JSON.stringify({ commandId: "unaccepted-command", action: "confirm" }));
+    vi.spyOn(studioApi, "creativeReviewCommand").mockResolvedValue({ commandId: "unaccepted-command", status: "not_accepted", observationUrl: "/same-command" });
+    const onCommand = vi.fn(async () => undefined);
+    render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
+    await userEvent.click(screen.getByRole("button", { name: "核对上一条操作" }));
+    expect(await screen.findByText(/已核实上一条操作未受理/)).toBeInTheDocument();
+    expect(window.localStorage.getItem("vf:creative-command:run-creative:script:draft")).toBeNull();
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
   it("does not call a completed command unknown when local reconciliation cleanup fails", async () => {
     window.localStorage.setItem("vf:creative-command:run-creative:script:draft", JSON.stringify({ commandId: "saved-command", action: "discuss" }));
     vi.spyOn(studioApi, "creativeReviewCommand").mockResolvedValue({ commandId: "saved-command", status: "completed", observationUrl: "/done" });
@@ -311,6 +322,7 @@ describe("CreativeDiscussionPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: "接受素材风险，先制作首版" }));
     // 应用内弹窗出现，先看风险再决定；关闭不发送。
     const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/本版尚未审计/)).toBeInTheDocument();
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(onCommand).not.toHaveBeenCalled();
     await userEvent.click(within(dialog).getByRole("button", { name: "返回查看" }));
@@ -318,7 +330,7 @@ describe("CreativeDiscussionPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: "接受素材风险，先制作首版" }));
     await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /接受素材风险，先制作首版/ }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
-    expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "confirm", acceptQualityFallback: true, baseDraftSha256: sha });
+    expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "confirm", acceptQualityFallback: true, acknowledgeUnaudited: true, baseDraftSha256: sha });
   });
   it("preserves unsaved manual edits across a new server draft and refuses to overwrite it", async () => {
     const onCommand = vi.fn(async () => undefined);

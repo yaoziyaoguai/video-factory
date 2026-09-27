@@ -296,6 +296,9 @@ function RunPageContent({ runId }: { runId: string }) {
           if (currentRunId.current !== runId) throw new Error("已离开原作品；请返回查看操作结果。");
           if (requestId === creativeReviewRequest.current) setCreativeReview(review);
           setRun((current) => preferRunSnapshot(current, nextRun));
+          if (operation.status === "not_accepted") {
+            throw Object.assign(new Error("这次操作未受理，没有执行；当前稿件已保留，请查看当前方案后重新选择。"), { commandCompleted: true });
+          }
           if (operation.status === "failed") {
             throw Object.assign(new Error("这次创作操作未成功，当前稿已保留。请查看失败原因和恢复选项；不会自动重复生成。"), { commandCompleted: true });
           }

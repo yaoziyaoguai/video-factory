@@ -967,9 +967,10 @@ def ffmpeg_filter_available(name: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         _FFmpegFilterAvailability[name] = False
         return False
+    # 输出列为“能力标志 滤镜名 输入->输出 描述”；描述和标志长度随版本变化。
     available = any(
-        line.split()[-1:] == [name] or line.rstrip().endswith(f" {name}")
-        for line in listing.splitlines()
+        len(fields) >= 3 and fields[1] == name and "->" in fields[2]
+        for fields in (line.split() for line in listing.splitlines())
     )
     _FFmpegFilterAvailability[name] = available
     return available

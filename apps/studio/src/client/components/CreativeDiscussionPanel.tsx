@@ -272,7 +272,9 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
         return;
       }
       setPendingCommandId(undefined);
-      setCompletionNotice(receipt.status === "completed"
+      setCompletionNotice(receipt.status === "not_accepted"
+        ? "已核实上一条操作未受理，没有执行；当前稿件保留，请查看后重新选择。"
+        : receipt.status === "completed"
         ? "上一条操作已完成。请刷新查看当前方案，再继续讨论。"
         : "上一条操作已失败，当前稿件保留。请刷新查看失败原因后决定下一步。");
     } catch {
@@ -306,6 +308,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
 
   function openConfirmRisk() {
     const lines = [
+      ...(!review.checkResult ? ["本版尚未审计。继续表示采用未审稿，同时接受下列素材风险；不会自动补审。"] : []),
       ...(awaitingRepair ? ["独立复核对当前这一版提出了意见，还没有通过。"] : []),
       ...(incompleteCheck ? ["独立复核没有得到有效结论。这不是审查通过，也没有质量评分；你可以承担未完成复核的风险采用本版。"] : []),
       ...(needsStockConsent ? ["当前示意素材匹配得分较低或视觉核验未完成。接受后先制作首版，原始评分与问题会保留；不会扩大费用授权，也不会将示意画面用作真实事件证据。"] : []),
@@ -334,6 +337,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
         // 把界面上这一条复核的身份原样带回去：确认要指向人看到的意见，不能指向服务端
         // 此刻恰好记着的那一条。
         ...(review.checkResult ? { expectedCheckIdentity: review.checkResult.checkIdentity } : {}),
+        ...(!review.checkResult ? { acknowledgeUnaudited: true as const } : {}),
         ...(awaitingRepair ? { acknowledgeRepair: true } : {}),
         ...(incompleteCheck ? { acknowledgeIncomplete: true as const } : {}),
         ...(needsStockConsent ? { acceptQualityFallback: true as const } : {}),

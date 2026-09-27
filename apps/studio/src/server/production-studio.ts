@@ -1725,6 +1725,7 @@ export class ProductionStudio {
         observationUrl: `/api/runs/${encodeURIComponent(runId)}/creative-review/commands/${encodeURIComponent(input.commandId)}`,
       };
     } catch (error) {
+      if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
       if (error instanceof StaleRunRevisionError || (error instanceof Error && /stale|another stage|locked by another writer|already used with different content/i.test(error.message))) {
         throw new StudioConflictError("当前方案已经更新，请查看最新版后重试。");
       }
@@ -1733,6 +1734,28 @@ export class ProductionStudio {
   }
 
   async creativeReviewCommand(
+    runId: string,
+    commandId: string,
+  ): Promise<StudioCreativeReviewCommandReceipt | undefined> {
+    const existing = await this.readCreativeReviewCommand(runId, commandId);
+    if (existing) return existing;
+    const receipt = (status: "unknown" | "not_accepted"): StudioCreativeReviewCommandReceipt => ({ commandId, status,
+      observationUrl: `/api/runs/${encodeURIComponent(runId)}/creative-review/commands/${encodeURIComponent(commandId)}` });
+    try {
+      // 404不证明未受理：可能正处于登记窗口。与执行使用同一租约，排除在途写入后再核对。
+      return await this.options.pipeline.withRunMaintenanceLease([runId], async () => {
+        const settled = await this.readCreativeReviewCommand(runId, commandId);
+        if (settled) return settled;
+        const current = await this.loadRequiredRun(runId);
+        return receipt(current.status === "running" || current.nodeRuns.some(node => node.outcomeUncertain) ? "unknown" : "not_accepted");
+      });
+    } catch (error) {
+      if (error instanceof Error && /locked by another writer/i.test(error.message)) return receipt("unknown");
+      throw error;
+    }
+  }
+
+  private async readCreativeReviewCommand(
     runId: string,
     commandId: string,
   ): Promise<StudioCreativeReviewCommandReceipt | undefined> {
@@ -5313,14 +5336,10 @@ async function readRunScriptNarrations(
   workspaceRoot: string,
   runId: string,
 ): Promise<string[]> {
-  const scriptNode = run.nodeRuns.find((candidate) => candidate.nodeId === "script");
-  const scriptVersion = scriptNode?.outputState?.versions.find((version) => version.id === scriptNode.outputState?.effectiveVersionId);
-  const scriptArtifact = run.artifacts.find((candidate) => (
-    (scriptVersion?.artifactIds.includes(candidate.id) || scriptNode?.artifactIds.includes(candidate.id) === true)
-    && candidate.kind === "script"
-    && candidate.contentType === "application/json"
-    && Boolean(candidate.uri)
-  ));
+  // 合并规划的脚本归属于creative-planning；不能退回历史script节点或非有效版本。
+  const scriptNodeId = run.nodeRuns.some((candidate) => candidate.nodeId === "creative-planning") ? "creative-planning" : "script";
+  const scriptArtifact = effectiveNodeArtifact(run, scriptNodeId, (candidate) =>
+    candidate.kind === "script" && candidate.contentType === "application/json" && Boolean(candidate.uri));
   if (!scriptArtifact?.uri) throw new StudioInputError("找不到当前脚本的旁白内容；请先确认脚本交付存在。");
   await assertContainedFile(path.join(workspaceRoot, "runs", runId), scriptArtifact.uri);
   let script: unknown;

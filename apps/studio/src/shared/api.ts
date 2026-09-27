@@ -1495,7 +1495,7 @@ export type StudioCreativeReviewConfirmInput = StudioCreativeReviewCommandInput 
 
 export interface StudioCreativeReviewCommandReceipt {
   commandId: string;
-  status: "running" | "completed" | "failed" | "unknown";
+  status: "running" | "completed" | "failed" | "unknown" | "not_accepted";
   observationUrl: string;
 }
 

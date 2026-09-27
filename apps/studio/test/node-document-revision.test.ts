@@ -718,6 +718,43 @@ describe("reference-grammar document commands", () => {
 });
 
 describe("publish-package document revision and current-version audit", () => {
+  it("revises publishing from the effective joint-planning script, never a historical or stale script", async () => {
+    let calls = 0;
+    const harness = await buildHarness(undefined);
+    const tools = {
+      revise: async (input: { narrations: string[] }) => {
+        calls++;
+        assert.deepEqual(input.narrations, ["第一场旁白", "第二场旁白", "第三场旁白"]);
+        return { title: "把路上的灯看清", description: "陪你放慢一次。", hashtags: ["下班"] };
+      },
+    };
+    const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline: harness.pipeline,
+      listProviders: async () => [], archiveStore: { list: async () => ({}), archive: async () => {}, restore: async () => {} },
+      documentCopyTools: { ...tools, auditCurrent: async () => { throw new Error("修订不得自动再审"); } } });
+    const script = harness.run.nodeRuns[0]!;
+    script.nodeId = "creative-planning";
+    script.outputState = { effectiveVersionId: "script-current", versions: [{
+      id: "script-current", nodeId: script.nodeId, source: "generated", artifactIds: ["artifact-script"],
+      inputVersionIds: [], createdAt: STARTED_AT, createdBy: "director", schemaVersion: "1",
+    }] };
+    const stalePath = path.join(harness.runRoot, "old-script.json");
+    await writeFile(stalePath, JSON.stringify({ scenes: [{ narration: "旧稿不能用于修订" }] }));
+    const original = harness.run.artifacts.find(a => a.id === "artifact-script")!;
+    harness.run.artifacts.unshift({ ...original, id: "old-script", uri: stalePath });
+    script.artifactIds.unshift("old-script");
+    script.status = "stale";
+    await assert.rejects(studio.reviseNodeDocument(harness.run.id, "publish-package", {
+      ...baseRevisionInput, instruction: "去掉制作说明，按现有事实改写。",
+    }, "creator"), /脚本/);
+    assert.equal(calls, 0);
+    script.status = "succeeded";
+    // 恢复原命令；不另建命令掩盖首轮上下文错误，不应重审或重买媒体。
+    await studio.reviseNodeDocument(harness.run.id, "publish-package", {
+      ...baseRevisionInput, instruction: "去掉制作说明，按现有事实改写。",
+    }, "creator");
+    assert.equal(calls, 1);
+    assert.equal((harness.pipeline.lastOverride?.output as { contentReview: { status: string } }).contentReview.status, "not_audited");
+  });
   it("keeps the revision receipt after re-audit and replaying O1 never replaces O2", async () => {
     const harness = await buildHarness(undefined);
     const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));

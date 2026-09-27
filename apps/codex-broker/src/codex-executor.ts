@@ -224,6 +224,8 @@ export interface CodexExecutorFailureDetails {
   queueWaitMs?: number;
   providerWaitMs?: number;
   requestIdHash?: string;
+  /** Broker任务身份；requestIdHash保留服务商回执编号，不混为同一层。 */
+  brokerRequestIdHash?: string;
   finishReason?: string;
   promptTokens?: number;
   completionTokens?: number;
@@ -619,6 +621,7 @@ export interface CodexTaskTrace {
   toolMs?: number;
   validationMs?: number;
   requestIdHash?: string;
+  brokerRequestIdHash?: string;
   finishReason?: string;
   promptTokens?: number;
   completionTokens?: number;

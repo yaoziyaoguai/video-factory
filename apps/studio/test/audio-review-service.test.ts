@@ -30,6 +30,7 @@ async function recoveryHarness() {
         if (task.kind !== "audio-review") throw new Error("wrong task");
         return { output: JSON.stringify({ audioSha256: task.payload.audioSha256, summary: "恢复证据", checks, findings: [] }),
           trace: { taskKind: task.kind, providerId: entry.id, modelId: entry.id, prompt: "test",
+            requestIdHash: sha(Buffer.from("provider-issued-request-id")),
             contractDigest: taskContractDescriptorFor(task.kind).digest, promptVersion: taskContractDescriptorFor(task.kind).promptVersion } };
       },
     }),
@@ -62,6 +63,25 @@ test("completed sound recovery validates full binding and avoids repeated prepro
       assert.equal((await h.newService().review(h.input)).status, "uncertain", `错绑${field}不能冒充已核清失败或正常报告`);
       assert.equal(h.counts.model, 1);
     }
+  } finally { await h.close(); }
+});
+
+test("provider receipt identity stays separate from broker identity on sound recovery", async () => {
+  const h = await recoveryHarness();
+  try {
+    assert.equal((await h.newService().review(h.input)).status, "completed");
+    const file = await h.resultPath(), saved = JSON.parse(await readFile(file, "utf8"));
+    assert.equal(saved.trace.requestIdHash, sha(Buffer.from("provider-issued-request-id")));
+    assert.equal(saved.trace.brokerRequestIdHash, sha(Buffer.from(saved.requestId)));
+    assert.equal((await h.newService().review(h.input)).status, "completed");
+    // 已有生产记录没有新字段；仍由保存的请求、模型、成片和音轨身份绑定，不将供应方编号当宿主编号。
+    const legacy = structuredClone(saved);
+    delete legacy.trace.brokerRequestIdHash;
+    await writeFile(file, JSON.stringify(legacy));
+    assert.equal((await h.newService().review(h.input)).status, "completed");
+    await writeFile(file, JSON.stringify({ ...saved, trace: { ...saved.trace, brokerRequestIdHash: "0".repeat(64) } }));
+    assert.equal((await h.newService().review(h.input)).status, "uncertain");
+    assert.deepEqual(h.counts, { model: 1, extract: 1, prepare: 1 });
   } finally { await h.close(); }
 });
 

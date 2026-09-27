@@ -5,6 +5,19 @@ import { describe, expect, it } from "vitest";
 import { NodeDeliveryPreview } from "../src/client/components/NodeDeliveryPreview.js";
 
 describe("NodeDeliveryPreview", () => {
+  it("recognizes verified subtitles from the continuous voice worker as available", () => {
+    render(<NodeDeliveryPreview nodeId="voice" value={{
+      version: "video-factory/voiceover-plan-v3", duration: 26, sampleRate: 44100,
+      groups: [{ text: "今天你又一直在赶路。", sourceScenePositions: [1, 2],
+        startSample: 0, endSample: 689681, unfilledWindowSamples: 456919 }],
+      subtitles: { version: "video-factory/narration-subtitles-v1", status: "verified",
+        adapterVersion: "minimax-subtitles-v1",
+        cues: [{ text: "今天你又一直在赶路。", startSample: 0, endSample: 96454 }] },
+    }} />);
+    expect(screen.getByText("已取得本次配音的句级同步字幕，请在成片中核对。")).toBeInTheDocument();
+    expect(screen.queryByText(/同步字幕未就绪/)).not.toBeInTheDocument();
+  });
+
   it("shows continuous narration groups and real empty windows without inventing per-scene timing or subtitles", () => {
     const { container } = render(<NodeDeliveryPreview nodeId="voice" value={{
       version: "video-factory/voiceover-plan-v3", duration: 20, sampleRate: 44100,

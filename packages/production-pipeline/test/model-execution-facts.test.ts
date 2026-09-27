@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { projectCheckpointExecutions, mergeModelExecutionFacts, summarizeModelExecutionFacts, projectRequestExecution } from "../src/model-execution-facts.js";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
-const trace = (requestId: string, attempts = 1) => ({ providerId: "provider", modelId: "model", requestIdHash: hash(requestId), modelAttemptCount: attempts, providerWaitMs: 100, queueWaitMs: 20, structuredRepairCount: 1 });
+const trace = (requestId: string, attempts = 1) => ({ providerId: "provider", modelId: "model", brokerRequestIdHash: hash(requestId), requestIdHash: hash(`provider-${requestId}`), modelAttemptCount: attempts, providerWaitMs: 100, queueWaitMs: 20, structuredRepairCount: 1 });
 function checkpoint() {
   return { key: "loop", cycle: 0, recoveryOwner: { workflowOperationRequestId: "original" },
     attemptedRequestIds: ["produce", "audit-1", "audit-2", "audit-3"],
@@ -15,6 +15,20 @@ function checkpoint() {
 }
 
 describe("read-only model execution facts", () => {
+  it("does not confuse provider receipts with broker identities and still rejects a mismatched broker hash", () => {
+    const input = { nodeId: "visual-review", requestId: "sound-1", purpose: "audio", state: "completed" as const, evidenceSource: "sound.result" };
+    const legacy = { providerId: "provider", modelId: "model", requestIdHash: hash("upstream-receipt"), modelAttemptCount: 1 };
+    assert.equal(projectRequestExecution({ ...input, trace: legacy }).conflict, undefined);
+    assert.equal(projectRequestExecution({ ...input, trace: { ...legacy, brokerRequestIdHash: hash("sound-1") } }).conflict, undefined);
+    const wrong = projectRequestExecution({ ...input, trace: { ...legacy, brokerRequestIdHash: hash("other") } });
+    assert.equal(wrong.conflict, true);
+    assert.equal(wrong.modelAttemptCount, null);
+    const old = { key: "legacy", attemptedRequestIds: ["sound-1"], requestPhases: { "sound-1": { phase: "produce", iteration: 1 } },
+      completed: [{ iteration: 1, candidateTrace: legacy }] };
+    assert.equal(projectCheckpointExecutions("node", old, "legacy.json")[0]?.modelAttemptCount, 1);
+    const ambiguous = { ...old, attemptedRequestIds: ["sound-1", "sound-2"], requestPhases: { ...old.requestPhases, "sound-2": { phase: "produce", iteration: 1 } } };
+    assert.ok(projectCheckpointExecutions("node", ambiguous, "legacy.json").every(fact => fact.modelAttemptCount === null));
+  });
   it("deduplicates changing snapshots and keeps internal repairs inside authoritative attempts", () => {
     const first = projectCheckpointExecutions("creative-planning", checkpoint(), "first.json");
     const later = checkpoint();

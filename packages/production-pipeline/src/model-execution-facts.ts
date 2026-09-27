@@ -40,7 +40,8 @@ export function projectRequestExecution(input: {
   const trace = record(input.trace), binding = record(input.binding);
   const providerId = string(trace.providerId) || string(binding.providerId) || "unknown";
   const modelId = string(trace.modelId) || string(binding.modelId) || "unknown";
-  const hashMismatch = typeof trace.requestIdHash === "string" && trace.requestIdHash !== hash(input.requestId);
+  // requestIdHash是供应方回执编号；只有Broker显式签出的字段可核对宿主请求。
+  const hashMismatch = typeof trace.brokerRequestIdHash === "string" && trace.brokerRequestIdHash !== hash(input.requestId);
   const accepted = input.state === "completed" || input.state === "completed_failure" || input.state === "accepted_unknown"
     ? true : input.state === "not_accepted" ? false : null;
   return {
@@ -76,11 +77,12 @@ export function projectCheckpointExecutions(nodeId: string, checkpoint: RecordVa
       .filter((item) => Object.keys(item).length) : [];
     const peers = phases.filter((item) => item.phase === phase?.phase && item.iteration === phase?.iteration);
     // 多次尝试同一阶段时，只有hash能指认是哪次返回；绝不能把最后一份trace复制给所有请求。
-    const trace = candidates.find((item) => item.requestIdHash === hash(requestId))
-      ?? (peers.length === 1 ? candidates.find((item) => item.requestIdHash === undefined) : undefined);
+    const trace = candidates.find((item) => item.brokerRequestIdHash === hash(requestId))
+      ?? (peers.length === 1 ? candidates.find((item) => item.brokerRequestIdHash === undefined) : undefined);
     const isPending = pending.requestId === requestId;
-    const failed = details.requestIdHash === hash(requestId)
-      || isPending && typeof details.requestIdHash !== "string";
+    const failureHash = details.brokerRequestIdHash ?? (details.requestIdHash === hash(requestId) ? details.requestIdHash : undefined);
+    const failed = failureHash === hash(requestId)
+      || isPending && failureHash === undefined;
     let state: ModelRequestState = trace ? "completed" : "unknown";
     if (!trace && failed && failure.stage === "not_accepted" && details.accepted !== true) state = "not_accepted";
     else if (!trace && failed && failure.stage === "completed_failure") state = "completed_failure";

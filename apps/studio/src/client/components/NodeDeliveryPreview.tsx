@@ -280,7 +280,7 @@ function ContinuousVoiceTimingPreview({ record }: { record: Record<string, unkno
     </li>)}</ul>
     {silences.length ? <p>脚本明确留白：{silences.map((silence) => `${((silence!.startFrame as number) / 30).toFixed(1)}–${((silence!.endFrame as number) / 30).toFixed(1)} 秒`).join("；")}。</p> : null}
     <p>未铺旁白的时间不包括音频本身的停顿。若空档影响节奏，可返回脚本调整内容或画面时长；系统不会擅自补词、加速或延长素材。</p>
-    <p>{subtitles?.status === "ready" ? "已取得本次配音的句级同步字幕，请在成片中核对。"
+    <p>{subtitles?.status === "verified" ? "已取得本次配音的句级同步字幕，请在成片中核对。"
       : "同步字幕未就绪：本版不会烧录猜测的时间字幕。确认继续将生成无同步字幕版本，画面中的必要说明仍保留。"}</p>
   </section>;
 }

@@ -680,6 +680,7 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
           reasonCode: "provider_timeout",
           providerId: "openai",
           modelId: "integration-model",
+          brokerRequestIdHash: createHash("sha256").update(client.submissions[0]!.requestId).digest("hex"),
           queueWaitMs: "measured",
         },
       });

@@ -10,12 +10,61 @@ from PIL import Image
 
 from video_factory.continuous_voiceover import assemble_narration_track
 from video_factory.narration_plan import build_narration_plan
-from video_factory.renderer import attach_voiceover_plan, burn_verified_subtitles, render_script_video, render_asset_video, write_render_manifest
+from video_factory.renderer import attach_voiceover_plan, burn_verified_subtitles, ffmpeg_filter_available, render_script_video, render_asset_video, write_render_manifest
 from video_factory.narration_subtitles import cues_to_ass
 from test_continuous_voiceover import tone
 
 
 class ContinuousRenderingTest(unittest.TestCase):
+    def test_detects_subtitle_filter_from_real_ffmpeg_columns_not_description(self):
+        # FFmpeg 7/8分别有三位/两位能力标志；滤镜名在第二列，不在描述末尾。
+        for flags in ("...", ".."):
+            with self.subTest(flags=flags), patch.dict("video_factory.renderer._FFmpegFilterAvailability", {}, clear=True), \
+                    patch("video_factory.renderer.subprocess.run", return_value=subprocess.CompletedProcess(
+                        [], 0, stdout=f"Filters:\n {flags} ass V->V Render ASS subtitles onto input video using the libass library.\n"
+                        f" {flags} scale V->V Scale the input video size.\n", stderr="")):
+                self.assertTrue(ffmpeg_filter_available("ass"))
+                self.assertFalse(ffmpeg_filter_available("subtitles"))
+
+    def test_burns_real_timed_subtitle_pixels_when_libass_is_installed(self):
+        # 独立询问FFmpeg，避免用待测能力检测决定是否跳过；Linux CI必须实际烧录。
+        help_result = subprocess.run(["ffmpeg", "-hide_banner", "-h", "filter=ass"],
+                                     check=True, capture_output=True, text=True)
+        if "Filter ass\n" not in help_result.stdout:
+            self.skipTest("Installed FFmpeg has no ass filter; Linux CI covers real subtitle burning")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "render"
+            output.mkdir()
+            track = root / "narration.wav"
+            tone(track, 1)
+            cues = [{"text": "真实字幕", "startSample": 0, "endSample": 22050}]
+            ass = root / "narration.ass"
+            ass.write_text(cues_to_ass(cues))
+            plan = {"layoutKey": "a" * 64, "track_path": str(track),
+                "trackSha256": hashlib.sha256(track.read_bytes()).hexdigest(),
+                "subtitles": {"version": "video-factory/narration-subtitles-v1", "status": "verified",
+                    "layoutKey": "a" * 64, "cues": cues, "sidecar": {"ass": ass.name},
+                    "sidecarSha256": {"ass": hashlib.sha256(ass.read_bytes()).hexdigest()}}}
+            clip = root / "plain.mp4"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=navy:s=180x320:r=30",
+                            "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip)], check=True)
+            concat = root / "concat.txt"
+            concat.write_text(f"file '{clip.as_posix()}'\n")
+            manifest = {"slides": [{"duration": 1}], "resolution": "180x320", "voiceover_plan": plan}
+            burned, result = burn_verified_subtitles(manifest, output, concat, output / "final.mp4")
+            self.assertEqual(result["status"], "burned")
+            self.assertTrue(burned.is_file())
+            white_pixels = []
+            for timestamp in ("0.25", "0.75"):
+                frame = subprocess.run(["ffmpeg", "-v", "error", "-ss", timestamp, "-i", str(burned),
+                    "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                    check=True, capture_output=True).stdout
+                self.assertEqual(len(frame), 180 * 320 * 3)
+                white_pixels.append(sum(min(frame[index:index + 3]) > 200 for index in range(0, len(frame), 3)))
+            self.assertGreater(white_pixels[0], 0, "字幕有效时间内必须有真实白色字形")
+            self.assertEqual(white_pixels[1], 0, "字幕结束后不能仍残留在画面上")
+
     def test_subtitle_burn_checks_sidecar_identity_and_derives_output_geometry_without_mutating_original(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

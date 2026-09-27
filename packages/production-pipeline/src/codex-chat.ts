@@ -68,6 +68,8 @@ export interface CodexTaskTrace {
   toolMs?: number;
   validationMs?: number;
   requestIdHash?: string;
+  /** 与宿主requestId绑定；旧requestIdHash属于服务商编号，不能用来核对宿主身份。 */
+  brokerRequestIdHash?: string;
   finishReason?: string;
   promptTokens?: number;
   completionTokens?: number;
@@ -140,6 +142,7 @@ export interface ModelProviderFailureDetails {
   queueWaitMs?: number;
   providerWaitMs?: number;
   requestIdHash?: string;
+  brokerRequestIdHash?: string;
   finishReason?: string;
   promptTokens?: number;
   completionTokens?: number;
@@ -1091,6 +1094,7 @@ function parseEnvelope(
     || trace.taskKind !== operation.kind
     || trace.providerId !== operation.binding.providerId
     || trace.modelId !== operation.binding.modelId
+    || trace.brokerRequestIdHash !== undefined && trace.brokerRequestIdHash !== createHash("sha256").update(operation.requestId).digest("hex")
     || trace.contractDigest !== (operation.binding.contractDigest ?? undefined))) {
     throw new CodexBridgeError(
       "Codex bridge result trace does not match the immutable task binding.",
@@ -1373,6 +1377,10 @@ function parseTrace(value: unknown): CodexTaskTrace {
     && (typeof trace.requestIdHash !== "string" || !/^[a-f0-9]{64}$/.test(trace.requestIdHash))) {
     throw new CodexBridgeError("Codex bridge trace requestIdHash is invalid.", false);
   }
+  if (trace.brokerRequestIdHash !== undefined
+    && (typeof trace.brokerRequestIdHash !== "string" || !/^[a-f0-9]{64}$/.test(trace.brokerRequestIdHash))) {
+    throw new CodexBridgeError("Codex bridge trace brokerRequestIdHash is invalid.", false);
+  }
   if (trace.contractDigest !== undefined
     && (typeof trace.contractDigest !== "string" || !/^[a-f0-9]{64}$/.test(trace.contractDigest))) {
     throw new CodexBridgeError("Codex bridge trace contractDigest is invalid.", false);
@@ -1408,6 +1416,7 @@ function parseTrace(value: unknown): CodexTaskTrace {
     ...(toolMs !== undefined ? { toolMs } : {}),
     ...(validationMs !== undefined ? { validationMs } : {}),
     ...(typeof trace.requestIdHash === "string" ? { requestIdHash: trace.requestIdHash } : {}),
+    ...(typeof trace.brokerRequestIdHash === "string" ? { brokerRequestIdHash: trace.brokerRequestIdHash } : {}),
     ...(typeof trace.finishReason === "string" ? { finishReason: trace.finishReason } : {}),
     ...(promptTokens !== undefined ? { promptTokens } : {}),
     ...(completionTokens !== undefined ? { completionTokens } : {}),
@@ -1565,6 +1574,8 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       || (details.providerWaitMs !== undefined && optionalDurationMs(details.providerWaitMs, "providerWaitMs") === undefined)
       || (details.requestIdHash !== undefined
         && (typeof details.requestIdHash !== "string" || !/^[a-f0-9]{64}$/.test(details.requestIdHash)))
+      || (details.brokerRequestIdHash !== undefined
+        && (typeof details.brokerRequestIdHash !== "string" || !/^[a-f0-9]{64}$/.test(details.brokerRequestIdHash)))
       || (details.finishReason !== undefined && !isBoundedIdentifier(details.finishReason, 64))
       || !isOptionalTokenCount(details.promptTokens)
       || !isOptionalTokenCount(details.completionTokens)
@@ -1586,6 +1597,7 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       ...(details.queueWaitMs !== undefined ? { queueWaitMs: Number(details.queueWaitMs) } : {}),
       ...(details.providerWaitMs !== undefined ? { providerWaitMs: Number(details.providerWaitMs) } : {}),
       ...(typeof details.requestIdHash === "string" ? { requestIdHash: details.requestIdHash } : {}),
+      ...(typeof details.brokerRequestIdHash === "string" ? { brokerRequestIdHash: details.brokerRequestIdHash } : {}),
       ...(typeof details.finishReason === "string" ? { finishReason: details.finishReason } : {}),
       ...(typeof details.promptTokens === "number" ? { promptTokens: details.promptTokens } : {}),
       ...(typeof details.completionTokens === "number" ? { completionTokens: details.completionTokens } : {}),

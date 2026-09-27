@@ -31,7 +31,7 @@ interface PersistedAudioReviewResult {
 }
 
 type SafeAudioFailureDetails = Pick<NonNullable<CodexBridgeError["failureDetails"]>,
-  "providerId" | "modelId" | "requestIdHash" | "accepted" | "modelAttemptCount" | "structuredRepairCount" | "providerWaitMs" | "queueWaitMs">;
+  "providerId" | "modelId" | "requestIdHash" | "brokerRequestIdHash" | "accepted" | "modelAttemptCount" | "structuredRepairCount" | "providerWaitMs" | "queueWaitMs">;
 
 interface AudioInputBinding {
   version: "video-factory/audio-review-input-v1";
@@ -62,7 +62,7 @@ function completedAudioResult(saved: PersistedAudioReviewResult, binding: AudioI
   if (saved.requestId !== binding.requestId || saved.modelId !== binding.modelId || saved.videoSha256 !== binding.videoSha256
     || saved.audioSha256 !== binding.audioSha256 || saved.durationMs !== binding.durationMs
     || saved.kind !== "request_failed" && (!saved.trace || saved.trace.providerId !== binding.modelId || saved.trace.modelId !== binding.modelId)
-    || saved.trace?.requestIdHash && saved.trace.requestIdHash !== sha(binding.requestId)) bindingConflict();
+    || saved.trace?.brokerRequestIdHash && saved.trace.brokerRequestIdHash !== sha(binding.requestId)) bindingConflict();
   if (saved.kind === "request_failed") {
     if (saved.requestState !== "settled" && saved.requestState !== "not_accepted") bindingConflict();
     return { status: "failed", reason: "原声音审片请求已核清，但未取得有效报告。普通恢复不会重新消费；可在确认当前配置后主动发起新的审听。" };
@@ -391,8 +391,11 @@ function boundFailureDetails(error: unknown, binding: AudioInputBinding): SafeAu
     seen.add(current);
     const details = current instanceof CodexBridgeError ? current.failureDetails : undefined;
     if (!details || details.providerId !== binding.modelId || details.modelId !== binding.modelId
-      || details.requestIdHash !== sha(binding.requestId)) continue;
-    const safe: SafeAudioFailureDetails = { providerId: details.providerId, modelId: details.modelId, requestIdHash: details.requestIdHash };
+      || (details.brokerRequestIdHash ?? details.requestIdHash) !== sha(binding.requestId)) continue;
+    const safe: SafeAudioFailureDetails = { providerId: details.providerId, modelId: details.modelId,
+      ...(details.requestIdHash ? { requestIdHash: details.requestIdHash } : {}) };
+    // 旧拒收回执只有requestIdHash；仅在恰好匹配原请求时沿用，不把供应方编号猜成宿主编号。
+    safe.brokerRequestIdHash = sha(binding.requestId);
     if (typeof details.accepted === "boolean") safe.accepted = details.accepted;
     for (const key of ["modelAttemptCount", "structuredRepairCount", "providerWaitMs", "queueWaitMs"] as const) {
       const value = details[key];

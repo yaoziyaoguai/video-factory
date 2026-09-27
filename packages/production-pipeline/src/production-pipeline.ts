@@ -12455,7 +12455,7 @@ interface CreativeDiscussionExecutionRecord {
   requestId: string;
   stage: CreativeStage;
   state: "completed" | "completed_failure" | "accepted_unknown" | "not_accepted";
-  trace?: Pick<CodexTaskTrace, "providerId" | "modelId" | "modelAttemptCount" | "requestIdHash" | "providerWaitMs" | "queueWaitMs">;
+  trace?: Pick<CodexTaskTrace, "providerId" | "modelId" | "modelAttemptCount" | "requestIdHash" | "brokerRequestIdHash" | "providerWaitMs" | "queueWaitMs">;
   queueWaitMs?: number;
   providerWaitMs?: number;
   validationMs?: number;
@@ -12484,6 +12484,7 @@ async function recordCreativeDiscussionExecution(
       providerId: input.trace.providerId, modelId: input.trace.modelId,
       ...(input.trace.modelAttemptCount !== undefined ? { modelAttemptCount: input.trace.modelAttemptCount } : {}),
       ...(input.trace.requestIdHash ? { requestIdHash: input.trace.requestIdHash } : {}),
+      ...(input.trace.brokerRequestIdHash ? { brokerRequestIdHash: input.trace.brokerRequestIdHash } : {}),
       ...(input.trace.providerWaitMs !== undefined ? { providerWaitMs: input.trace.providerWaitMs } : {}),
       ...(input.trace.queueWaitMs !== undefined ? { queueWaitMs: input.trace.queueWaitMs } : {}),
     } } : {}),
