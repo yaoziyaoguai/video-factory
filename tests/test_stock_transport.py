@@ -10,7 +10,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
-from video_factory.stock_assets import open_asset_request, materialize_candidate
+from video_factory.stock_assets import open_asset_request, materialize_candidate, write_response_body
 from video_factory.domain import StockAssetCandidate
 from video_factory.asset_transport import AssetNetworkError
 
@@ -45,6 +45,38 @@ class WireSocket:
 
 
 class StockTransportTest(unittest.TestCase):
+    def test_download_uses_remaining_request_budget_without_resetting_it_for_body(self):
+        candidate = StockAssetCandidate(provider='pexels', asset_id='a', media_type='video', width=720, height=1280,
+            duration=23, preview_url='', download_url='https://media.example/a.mp4', source_url='', creator='',
+            license_note='', query='', score=0)
+        for header_seconds, body_seconds, succeeds in [(2, 60, True), (2, 95, False), (65, 30, False)]:
+            with self.subTest(header_seconds=header_seconds, body_seconds=body_seconds):
+                elapsed = [0.0]
+                class Response(io.BytesIO):
+                    headers = {'Content-Type': 'video/mp4', 'Content-Length': '5'}
+                    def read1(self, size):
+                        if self.tell() == 0:
+                            elapsed[0] += body_seconds
+                        return super().read1(size)
+                def opener(request, timeout):
+                    elapsed[0] += header_seconds
+                    return Response(b'media')
+                # 只替换网络和时钟，正文写盘/超时/完整性仍执行正式实现。
+                def write_with_clock(*args, **kwargs):
+                    return write_response_body(*args, **kwargs, clock=lambda: elapsed[0])
+                with tempfile.TemporaryDirectory() as tmp, \
+                     patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('93.184.216.34', 443))]), \
+                     patch('video_factory.stock_assets.time.monotonic', side_effect=lambda: elapsed[0]), \
+                     patch('video_factory.stock_assets.write_response_body', side_effect=write_with_clock):
+                    target = Path(tmp) / 'a.mp4'
+                    if succeeds:
+                        self.assertEqual(materialize_candidate(candidate, target, opener=opener), target)
+                        self.assertEqual(target.read_bytes(), b'media')
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'timed out'):
+                            materialize_candidate(candidate, target, opener=opener)
+                        self.assertFalse(target.exists())
+
     def test_slow_proxy_body_respects_total_deadline_and_removes_partial_file(self):
         class Proxy(BaseHTTPRequestHandler):
             protocol_version = 'HTTP/1.1'

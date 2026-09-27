@@ -1729,8 +1729,9 @@ def _materialize_candidate(
                     raise RuntimeError(
                         f"Asset download is too large ({content_length} bytes) for {candidate.provider}:{candidate.asset_id}"
                     )
+                # 连接、重试与正文共用原请求期限；不在正文层提前丢弃仍有预算的有效下载。
                 write_response_body(response, local_path, max_bytes,
-                                    max_seconds=min(MAX_ASSET_DOWNLOAD_SECONDS, remaining(deadline)))
+                                    max_seconds=remaining(deadline))
                 if content_length > 0 and local_path.stat().st_size != content_length:
                     local_path.unlink(missing_ok=True)
                     raise RuntimeError(f'Asset download is incomplete for {candidate.provider}:{candidate.asset_id}')
