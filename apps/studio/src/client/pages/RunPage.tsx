@@ -1,9 +1,10 @@
 import { AlertCircle, ArrowLeft, LoaderCircle } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import type { StudioCostRunDetail, StudioCreativeReviewCommandInput, StudioCreativeReviewHistory, StudioCreativeReviewSnapshot, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProductionInput, StudioProvider, StudioReworkDraft, StudioRunDetail, StudioNarrationRevisionInput,
   StudioSceneResourceRevisionInput, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
 import { studioApi, subscribeToRun } from "../api.js";
+import { createRunRead } from "../run-read-coalescer.js";
 import { currentScriptArtifact, sceneNarrationText } from "../scene-narration.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
 import { RunWorkbench } from "../components/RunWorkbench.js";
@@ -12,7 +13,7 @@ import { CreativeReviewHistoryPanel } from "../components/CreativeReviewHistoryP
 import { MultiPlatformPublishDialog } from "../components/MultiPlatformPublishDialog.js";
 
 export function preferRunSnapshot(current: StudioRunDetail | undefined, next: StudioRunDetail): StudioRunDetail {
-  if (!current) return next;
+  if (!current || current.id !== next.id) return next;
   if (next.revision < current.revision) return current;
   const adopted = next.revision > current.revision ? next : {
     ...next,
@@ -53,8 +54,15 @@ function withCarriedAgentLoopProgress(current: StudioRunDetail, next: StudioRunD
 
 export function RunPage() {
   const { runId = "" } = useParams();
+  // 切作品时所有本页状态/异步回调归原实例；旧请求不能覆盖新作品或带入旧费用/编辑框。
+  return <RunPageContent key={runId} runId={runId} />;
+}
+
+function RunPageContent({ runId }: { runId: string }) {
   const navigate = useNavigate();
   const [run, setRun] = useState<StudioRunDetail>();
+  const latestRun = useRef(run);
+  latestRun.current = run;
   const [loading, setLoading] = useState(true);
   const [decisionPending, setDecisionPending] = useState(false);
   const [error, setError] = useState<string>();
@@ -76,7 +84,6 @@ export function RunPage() {
   const [creativeHistory, setCreativeHistory] = useState<StudioCreativeReviewHistory>();
   const [creativeCommandPending, setCreativeCommandPending] = useState(false);
   const creativeReviewRequest = useRef(0);
-  const authoritativeRunRequest = useRef(0);
   const currentRunId = useRef(runId);
   currentRunId.current = runId;
   useEffect(() => {
@@ -85,12 +92,11 @@ export function RunPage() {
     return () => {
       currentRunId.current = "";
       creativeReviewRequest.current += 1;
-      authoritativeRunRequest.current += 1;
     };
   }, [runId]);
-  const costRefreshTimer = useRef<number | undefined>(undefined);
-  const costRefreshRequest = useRef(0);
-  const snapshotRefreshPending = useRef(false);
+  const eventRefreshTimer = useRef<number | undefined>(undefined);
+  const lastRunEventAt = useRef(Date.now());
+  const lastRunEvent = useRef<string | undefined>(undefined);
   const paidSummaryRequest = useRef(0);
   const reconciliationRequests = useRef(new Map<string, {
     reconciliationId: string;
@@ -98,18 +104,27 @@ export function RunPage() {
   }>());
   const uncertainPaidNodeId = run?.nodes.find((node) => node.outcomeUncertain === true)?.id;
 
-  const refreshCosts = useCallback(async () => {
-    const requestId = ++costRefreshRequest.current;
-    try {
-      const detail = await studioApi.runCosts(runId);
-      if (currentRunId.current !== runId || requestId !== costRefreshRequest.current) return;
+  const reads = useMemo(() => ({
+    run: createRunRead(() => studioApi.run(runId), (nextRun) => {
+      if (nextRun.id !== runId) throw new Error("制作详情与当前作品不匹配");
+      setRun(current => preferRunSnapshot(current, nextRun));
+    }, (caught, surfaceError) => {
+      if (surfaceError) setError(`${isTerminal(latestRun.current?.status) ? "最终状态" : "制作"}详情读取失败：${caught instanceof Error ? caught.message : String(caught)}。请刷新页面重读，不会重新执行模型或付费任务。`);
+    }),
+    cost: createRunRead(() => studioApi.runCosts(runId), (detail) => {
+      if (detail.runId !== runId) throw new Error("费用明细与当前作品不匹配");
       setCostDetail(detail);
       setCostError(undefined);
-    } catch (caught) {
-      if (currentRunId.current !== runId || requestId !== costRefreshRequest.current) return;
-      setCostError(`调用与费用明细读取失败：${caught instanceof Error ? caught.message : String(caught)}`);
-    }
-  }, [runId]);
+    }, caught => setCostError(`调用与费用明细读取失败：${caught instanceof Error ? caught.message : String(caught)}`)),
+  }), [runId]);
+  const refreshCosts = useCallback(() => reads.cost.request(), [reads]);
+  const refreshRunSnapshot = useCallback((surfaceError = false) => reads.run.request(surfaceError), [reads]);
+
+  useEffect(() => {
+    reads.run.activate();
+    reads.cost.activate();
+    return () => { reads.run.dispose(); reads.cost.dispose(); };
+  }, [reads]);
 
   const refreshPaidNode = useCallback(async (nodeId: string | undefined) => {
     const requestId = ++paidSummaryRequest.current;
@@ -131,56 +146,31 @@ export function RunPage() {
     }
   }, [runId]);
 
-  const refreshRunSnapshot = useCallback(async (surfaceError = false) => {
-    if (snapshotRefreshPending.current) return;
-    snapshotRefreshPending.current = true;
-    const requestId = ++authoritativeRunRequest.current;
-    try {
-      const nextRun = await studioApi.run(runId);
-      if (currentRunId.current !== runId || requestId !== authoritativeRunRequest.current) return;
-      setRun((current) => preferRunSnapshot(current, nextRun));
-    } catch (caught) {
-      // 心跳补偿仍保持安静；终态事件关闭 SSE 后若权威详情读取失败，必须让用户知道可以重读，
-      // 不能继续展示可能缺少诊断的轻量事件快照。
-      if (surfaceError && currentRunId.current === runId) {
-        setError(`最终状态详情读取失败：${caught instanceof Error ? caught.message : String(caught)}。请刷新页面重读，不会重新执行模型或付费任务。`);
-      }
-    } finally {
-      snapshotRefreshPending.current = false;
-    }
-  }, [runId]);
-
   useEffect(() => {
     if (!run || !isTerminal(run.status)) return;
+    if (eventRefreshTimer.current !== undefined) {
+      window.clearTimeout(eventRefreshTimer.current);
+      eventRefreshTimer.current = undefined;
+    }
     // 终态事件会关闭 SSE；关闭前立即补读一次权威详情，避免诊断只在手动刷新后出现。
     void refreshRunSnapshot(true);
     void refreshCosts();
   }, [runId, isTerminal(run?.status), refreshRunSnapshot, refreshCosts]);
 
-  const load = useCallback(async () => {
+  useEffect(() => {
+    let active = true;
     setLoading(true);
     setError(undefined);
-    try {
-      const [runResult, costResult, providerResult] = await Promise.allSettled([studioApi.run(runId), studioApi.runCosts(runId), studioApi.providers()]);
-      if (runResult.status === "rejected") throw runResult.reason;
-      setRun(runResult.value);
-      setCostDetail(costResult.status === "fulfilled" ? costResult.value : undefined);
-      setRunProviders(providerResult.status === "fulfilled" ? providerResult.value : []);
-      setCostError(costResult.status === "rejected"
-        ? `调用与费用明细读取失败：${costResult.reason instanceof Error ? costResult.reason.message : String(costResult.reason)}`
-        : undefined);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setLoading(false);
-    }
-  }, [runId]);
+    void refreshRunSnapshot(true).finally(() => { if (active) setLoading(false); });
+    void refreshCosts();
+    void studioApi.providers().then(value => { if (active) setRunProviders(value); }).catch(() => {});
+    return () => { active = false; };
+  }, [refreshRunSnapshot, refreshCosts]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
-
-  useEffect(() => {
+    // 命令在途的 running 事件可能暂时不含人工停点。保留原讨论组件与输入，
+    // 由原 commandId 的完成回执更新稿件；卸载重挂会抢先读取尚未清理的恢复记录。
+    if (creativeCommandPending && run?.id === runId) return;
     if (run?.activeIntervention?.kind !== "creative_review") {
       setCreativeReview(undefined);
       return;
@@ -193,10 +183,10 @@ export function RunPage() {
       if (active) setError(`创作方案读取失败：${caught instanceof Error ? caught.message : String(caught)}`);
     });
     return () => { active = false; };
-  }, [runId, run]);
+  }, [runId, run, creativeCommandPending]);
 
   useEffect(() => {
-    if (!run) return;
+    if (!run || creativeCommandPending) return;
     let active = true;
     void studioApi.creativeReviewHistory(runId).then((history) => {
       if (active) setCreativeHistory(history);
@@ -204,7 +194,7 @@ export function RunPage() {
       if (active) setCreativeHistory(undefined);
     });
     return () => { active = false; };
-  }, [runId, run?.revision]);
+  }, [runId, run?.revision, creativeReview?.reviewRevision, creativeCommandPending]);
 
   useEffect(() => {
     void refreshPaidNode(uncertainPaidNodeId);
@@ -217,11 +207,17 @@ export function RunPage() {
     return subscribeToRun(
       runId,
       (nextRun) => {
+        if (currentRunId.current !== runId || nextRun.id !== runId) return;
+        const eventIdentity = JSON.stringify(nextRun);
+        if (lastRunEvent.current === eventIdentity) return;
+        lastRunEvent.current = eventIdentity;
         setRun((current) => preferRunSnapshot(current, nextRun));
+        lastRunEventAt.current = Date.now();
         setConnectionHeartbeatAt(new Date().toISOString());
-        if (costRefreshTimer.current === undefined) {
-          costRefreshTimer.current = window.setTimeout(() => {
-            costRefreshTimer.current = undefined;
+        if (!isTerminal(nextRun.status) && eventRefreshTimer.current === undefined) {
+          eventRefreshTimer.current = window.setTimeout(() => {
+            eventRefreshTimer.current = undefined;
+            void refreshRunSnapshot();
             void refreshCosts();
           }, 1_000);
         }
@@ -231,15 +227,37 @@ export function RunPage() {
       (at) => {
         setConnectionHeartbeatAt(at);
         setConnectionWarning(undefined);
-        void refreshRunSnapshot();
-        void refreshCosts();
       },
     );
   }, [runId, run !== undefined, isTerminal(run?.status), refreshRunSnapshot, refreshCosts]);
 
   useEffect(() => () => {
-    if (costRefreshTimer.current !== undefined) window.clearTimeout(costRefreshTimer.current);
+    if (eventRefreshTimer.current !== undefined) window.clearTimeout(eventRefreshTimer.current);
   }, [runId]);
+
+  const executionPending = run?.status === "running" || decisionPending || nodeMutationPending || creativeCommandPending;
+  useEffect(() => {
+    if (!executionPending) return;
+    // SSE 有实际进度时让事件触发更新；无事件时详情按 2/4/8/10s 退避，费用只作 10s 兜底。
+    // 定时器不提交任何制作命令，也不因读取失败改变服务端任务状态。
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      if (Date.now() - lastRunEventAt.current >= 2_000 && reads.run.due(reads.run.retryDelay())) void refreshRunSnapshot();
+      if (reads.cost.due(10_000)) void refreshCosts();
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [executionPending, reads, refreshRunSnapshot, refreshCosts]);
+
+  // T10.4：页面隐藏暂停兜底读取；恢复可见时补一轮权威快照与费用。
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.hidden || currentRunId.current !== runId) return;
+      void refreshRunSnapshot();
+      void refreshCosts();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [runId, refreshRunSnapshot, refreshCosts]);
 
   async function decide(input: StudioDecisionInput) {
     setDecisionPending(true);
@@ -271,7 +289,8 @@ export function RunPage() {
             continue;
           }
           const requestId = ++creativeReviewRequest.current;
-          const nextRun = await studioApi.run(runId);
+          const nextRun = await refreshRunSnapshot(true);
+          if (!nextRun) throw new Error("操作结果已保存，但详情暂时读不到；请查询原操作，不要重复生成。");
           const review = nextRun.activeIntervention?.kind === "creative_review"
             ? await studioApi.creativeReview(runId) : undefined;
           if (currentRunId.current !== runId) throw new Error("已离开原作品；请返回查看操作结果。");
@@ -288,7 +307,10 @@ export function RunPage() {
     } catch (caught) {
       throw caught;
     } finally {
-      if (currentRunId.current === runId) setCreativeCommandPending(false);
+      if (currentRunId.current === runId) {
+        setCreativeCommandPending(false);
+        void refreshCosts();
+      }
     }
   }
 
@@ -298,7 +320,6 @@ export function RunPage() {
     try {
       const nextRun = await withMutationProgress(() => studioApi.requestSceneRevision(runId, input));
       setRun((current) => preferRunSnapshot(current, nextRun));
-      await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -312,7 +333,6 @@ export function RunPage() {
     try {
       const nextRun = await withMutationProgress(() => studioApi.requestSceneResourceRevision(runId, input));
       setRun((current) => preferRunSnapshot(current, nextRun));
-      await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -326,7 +346,6 @@ export function RunPage() {
     try {
       const nextRun = await withMutationProgress(() => studioApi.requestNarrationRevision(runId, input));
       setRun((current) => preferRunSnapshot(current, nextRun));
-      await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -347,9 +366,10 @@ export function RunPage() {
     try {
       const nextRun = await withMutationProgress(() => studioApi.reinspectVisualReview(runId, input));
       setRun((current) => preferRunSnapshot(current, nextRun));
-      await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+      // 确认框须收到拒绝，保留当前决定并显示原因，不能将失败当作已提交而关闭。
+      throw caught;
     } finally {
       setNodeMutationPending(false);
     }
@@ -459,7 +479,6 @@ export function RunPage() {
     try {
       const nextRun = await withMutationProgress(() => studioApi.authorizeSpend(runId, nodeId, input));
       setRun((current) => preferRunSnapshot(current, nextRun));
-      await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       throw caught;
@@ -474,7 +493,6 @@ export function RunPage() {
     try {
       const nextRun = await withMutationProgress(() => studioApi.rejectSpend(runId, nodeId, input));
       setRun((current) => preferRunSnapshot(current, nextRun));
-      await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       throw caught;
@@ -489,7 +507,6 @@ export function RunPage() {
     try {
       const nextRun = await withMutationProgress(() => studioApi.regenerateStale(runId));
       setRun((current) => preferRunSnapshot(current, nextRun));
-      await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       throw caught;
@@ -518,7 +535,6 @@ export function RunPage() {
     try {
       const nextRun = await withMutationProgress(() => studioApi.resumePaused(runId));
       setRun((current) => preferRunSnapshot(current, nextRun));
-      await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       throw caught;
@@ -534,7 +550,6 @@ export function RunPage() {
       const nextRun = await withMutationProgress(() => studioApi.retryFailedNode(runId, nodeId));
       setRun((current) => preferRunSnapshot(current, nextRun));
       setConnectionWarning(undefined);
-      await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       throw caught;
@@ -565,7 +580,6 @@ export function RunPage() {
       const nextRun = await withMutationProgress(() => studioApi.retrieveOriginalTextTask(runId));
       setRun((current) => preferRunSnapshot(current, nextRun));
       setConnectionWarning(undefined);
-      await refreshCosts();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       throw caught;
@@ -599,10 +613,7 @@ export function RunPage() {
       }
       setRun((current) => preferRunSnapshot(current, nextRun));
       setConnectionWarning(undefined);
-      await Promise.all([
-        refreshCosts(),
-        refreshPaidNode(nextRun.nodes.find((node) => node.outcomeUncertain === true)?.id),
-      ]);
+      await refreshPaidNode(nextRun.nodes.find((node) => node.outcomeUncertain === true)?.id);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -611,14 +622,11 @@ export function RunPage() {
   }
 
   async function withMutationProgress(operation: () => Promise<StudioRunDetail>): Promise<StudioRunDetail> {
-    const poll = window.setInterval(() => {
-      void refreshRunSnapshot();
-      void refreshCosts();
-    }, 750);
     try {
       return await operation();
     } finally {
-      window.clearInterval(poll);
+      // 失败回包也可能已有费用；结束只刷新账务，不重放 mutation。
+      void refreshCosts();
     }
   }
 

@@ -254,6 +254,7 @@ export class StudioService {
       options.pipeline.readTextExecutionUsage ? (runId) => options.pipeline.readTextExecutionUsage!(runId) : undefined,
       options.pipeline.readPaidExecutionReceipts ? (runId) => options.pipeline.readPaidExecutionReceipts!(runId) : undefined,
       options.pipeline.readDocumentExecutionReceipts ? (runId) => options.pipeline.readDocumentExecutionReceipts!(runId) : undefined,
+      options.pipeline.readModelExecutionFacts ? (runId) => options.pipeline.readModelExecutionFacts!(runId) : undefined,
     );
     this.publishing = new PublishingStudio({
       workspaceRoot: options.workspaceRoot,

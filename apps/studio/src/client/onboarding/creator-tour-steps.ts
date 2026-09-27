@@ -22,14 +22,14 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
   {
     popover: {
       title: "欢迎来到今日创作",
-      description: "完整流程有六步：挑选题、定方案、跑制作、做审片、多端发布、看复盘。有可用候选时会跟随页面实际控件走到制作弹窗；空状态会说明下一步。导览不会替你启动生产或花钱。",
+      description: "从选题和方案开始，逐步确认制作与审片，最后导出交付、查看复盘。发布到外部平台由你操作。有可用候选时会跟随页面实际控件；空状态会说明下一步。导览不会替你启动生产或花钱。",
     },
   },
   {
     element: '[data-tour="topic-inbox"]',
     popover: {
       title: "第一步：选择选题入口",
-      description: "热点、系列和自定义创作是三个并列入口。热点候选可按分类与平台筛选；系列会持续给出下一集；采用后统一进入下方制作区。",
+      description: "你可以从热点、系列、自己的想法或案例开始。这里可筛选热点候选、继续系列；案例入口在创作台。采用后再由你确认制作要求。",
       side: "bottom",
       align: "start",
     },
@@ -60,7 +60,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
     element: '[data-tour="visual-direction"]',
     popover: {
       title: "先看镜头方向",
-      description: "三段镜头计划依次负责停留、语境和收束。它是开拍前的可执行视觉草图，不是最终成片。",
+      description: "镜头方向是开拍前的视觉草图，不是固定模板或最终成片。你可以提出自己的要求，再与导演讨论推进和收束。",
       side: "top",
       align: "center",
     },
@@ -69,7 +69,7 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
     element: '[data-tour="director-panel"]',
     popover: {
       title: "导演台检查能否开拍",
-      description: "这里确认叙事、制作能力与成本边界。缺少必要能力时，系统会明确阻止开拍。",
+      description: "这里核对叙事、制作能力与费用。内容建议由你决定是否采用；若当前能力无法制作，页面会说明需要补充或更换什么，付费画面仍需单独确认。",
       side: "left",
       align: "start",
     },
@@ -130,8 +130,8 @@ export const FULL_CREATOR_TOUR_STEPS: DriveStep[] = [
   },
   {
     popover: {
-      title: "第五步：发布或取包",
-      description: "批准后可下载发布包，也可准备各平台发布材料。导出后由你到目标平台确认发布；只有已接入并授权的平台才会提供直接发送。",
+      title: "第五步：导出并自己发布",
+      description: "内部定版后可下载成片和交付包，也可准备各平台的文案材料。下载不等于外部发布，请由你到目标平台上传并确认。",
     },
   },
   {
@@ -163,7 +163,7 @@ const HOME_TOUR_STEPS: DriveStep[] = [
   {
     popover: {
       title: "今天从哪里开始",
-      description: "先在热点、系列或自定义创作中选择入口；采用候选后，核对证据和镜头方向，再在导演台创建制作配方。",
+      description: "从热点、系列、自己的想法或案例开始；采用后核对来源和镜头方向，再确认制作要求。",
     },
   },
   FULL_CREATOR_TOUR_STEPS[1]!,
@@ -220,7 +220,7 @@ const PROJECT_TOUR_STEPS: DriveStep[] = [
   {
     popover: {
       title: "完整闭环还剩三步",
-      description: "进入记录做人工终审 → 批准后下载发布包或发往已接通的平台 → 再到制作复盘比较表现。",
+      description: "进入记录做人工终审 → 内部定版后下载交付包，自行到平台发布 → 再到制作复盘查看已有证据。",
     },
   },
 ];
@@ -302,7 +302,7 @@ const RESOURCE_TOUR_STEPS: DriveStep[] = [
   },
   {
     element: '[data-tour="configuration-publishing"]',
-    popover: { title: "发布能力以官方权限为准", description: "能自动发布、需要授权或只能导出发布包都会如实显示；系统不会绕过平台审核。", side: "top", align: "center" },
+    popover: { title: "准备交付材料", description: "这里查看交付包与平台材料设置。内部定版不是外部发布；成片导出后，由你在目标平台上传和确认。", side: "top", align: "center" },
   },
 ];
 

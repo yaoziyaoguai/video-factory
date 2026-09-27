@@ -1839,7 +1839,7 @@ export interface StudioCostLine {
   modelId: string;
   billing: StudioBillingType | "unverified";
   status: "succeeded" | "failed" | "unknown";
-  estimatedCostCny: number;
+  estimatedCostCny: number | null;
   authorizedCostCny?: number;
   spendAuthorizationId?: string;
   actualCostCny?: number;
@@ -1848,8 +1848,16 @@ export interface StudioCostLine {
   meteredFailedAttemptCount?: number;
   subscriptionCallCount?: number;
   modelCallCount?: number;
-  accountingSource?: "document_operation";
+  accountingSource?: "document_operation" | "execution_fact";
+  executionKeys?: string[];
   callCountPending?: boolean;
+  /** 产生这份回执的物理请求身份；旧回执可能没有。 */
+  requestId?: string;
+  /** AC-06b：同身份回执存在互斥终态或无依据金额矛盾；先到账保留、冲突显式提示。 */
+  countConflict?: boolean;
+  /** T04：无请求身份、但有 checkpoint 权威计数的旧累计快照；不并入精确总数。 */
+  legacyUnattributed?: true;
+  legacySnapshotCount?: number;
   actualPending: boolean;
   startedAt: string;
   finishedAt?: string;
@@ -1865,6 +1873,23 @@ export interface StudioCostTotals {
   unverifiedModelCalls?: number;
   freeCalls: number;
   failedMeteredCalls: number;
+  /** T04：按物理执行归并的可核实调用（订阅+按量+未核实的权威计数之和）。CostStudio 始终填充。 */
+  verifiedModelAttempts?: number;
+  /** 有明确请求身份的已证实 Broker 请求/任务数；不是上游模型尝试总数。 */
+  verifiedBrokerRequests?: number;
+  /** 未能关联到请求身份的旧累计快照份数；不计入精确总数。 */
+  legacyUnattributedReceipts?: number;
+  /** 覆盖完整且关联无歧义才为 true。 */
+  countExact?: boolean;
+  /** 同身份回执的互斥终态/无依据金额矛盾数。 */
+  countConflicts?: number;
+  /** null表示无法区分同一操作内的恢复与新增，不能当0。 */
+  newBrokerRequestsThisAttempt?: number | null;
+  newModelAttemptsThisAttempt?: number | null;
+  cumulativeProviderMs?: number | null;
+  cumulativeQueueMs?: number | null;
+  cumulativeRequestMs?: number | null;
+  requestWallUnionMs?: number | null;
 }
 
 export interface StudioCostGroup {
@@ -1892,6 +1917,14 @@ export interface StudioCostDashboard {
 
 export interface StudioCostRunDetail extends StudioCostRunSummary {
   lines: StudioCostLine[];
+  timing?: {
+    observedAt: string;
+    wallElapsedMs: number | null;
+    humanWaitMs: number | null;
+    /** 缺少独立恢复批次的起止证据时保持null，不能用请求累计时长冒充。 */
+    recoveryMs: number | null;
+  };
+  executionFacts?: import("@video-factory/production-pipeline").ModelExecutionFact[];
 }
 
 export interface StudioReworkFinding {
@@ -2152,10 +2185,23 @@ export interface StudioSceneResourceRevisionInput {
  * 画面已经付过钱，而旁白与字幕是脚本里的一行字——改字不该让任何一帧画面重新生成。
  * 代价是脚本同时是配音的输入：这条路径会重跑配音，配音按字符计费。
  */
-export interface StudioNarrationRevisionInput {
+export type StudioNarrationRevisionInput = StudioSubtitleRecoveryInput | {
+  action?: "revise_narration";
   expectedRunRevision: number;
   scenePosition: number;
   narration: string;
+  note: string;
+};
+
+export interface StudioSubtitleRecoveryInput {
+  action: "recover_subtitles";
+  requestId: string;
+  expectedRunRevision: number;
+  expectedVoiceVersionId: string;
+  expectedNarrationPlanSha256: string;
+  expectedLayoutKey: string;
+  expectedAudioSha256: string;
+  refetchReason?: string;
   note: string;
 }
 
@@ -2676,6 +2722,24 @@ export function parseStudioNarrationRevisionInput(value: unknown): StudioNarrati
   if (!Number.isSafeInteger(input.expectedRunRevision) || Number(input.expectedRunRevision) < 0) {
     throw new StudioInputError("制作版本必须是非负整数。");
   }
+  if (input.action === "recover_subtitles") {
+    const requestId = requiredTrimmedString(input.requestId, "字幕恢复操作编号");
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) throw new StudioInputError("字幕恢复操作编号无效。");
+    const digest = (key: string) => {
+      const value = requiredTrimmedString(input[key], "当前声音与字幕版本");
+      if (!/^[a-f0-9]{64}$/.test(value)) throw new StudioInputError("当前声音与字幕版本无法核对，请刷新后再试。");
+      return value;
+    };
+    const note = requiredTrimmedString(input.note, "恢复说明");
+    if (note.length > 2_000) throw new StudioInputError("恢复说明不能超过 2000 个字符。");
+    const refetchReason = input.refetchReason === undefined ? undefined : requiredTrimmedString(input.refetchReason, "重取原字幕的新依据");
+    if (refetchReason && refetchReason.length > 500) throw new StudioInputError("重取依据不能超过 500 个字符。");
+    return { action: "recover_subtitles", requestId, expectedRunRevision: Number(input.expectedRunRevision),
+      expectedVoiceVersionId: requiredTrimmedString(input.expectedVoiceVersionId, "当前声音版本"),
+      expectedNarrationPlanSha256: digest("expectedNarrationPlanSha256"), expectedLayoutKey: digest("expectedLayoutKey"),
+      expectedAudioSha256: digest("expectedAudioSha256"), note, ...(refetchReason ? { refetchReason } : {}) };
+  }
+  if (input.action !== undefined && input.action !== "revise_narration") throw new StudioInputError("不支持的旁白字幕操作。");
   const narration = requiredTrimmedString(input.narration, "旁白字幕");
   // 上限按"一句话"来定：放宽会让操作员把整篇稿子塞进一镜，收紧了拦不住真正要改的长句。
   if (narration.length > 600) throw new StudioInputError("单镜旁白字幕不能超过 600 个字符。");

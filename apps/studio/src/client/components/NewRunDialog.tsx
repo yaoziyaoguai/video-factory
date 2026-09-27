@@ -1353,7 +1353,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
           </div>
 
           <footer className="dialog-actions recipe-dialog-actions">
-            <div><strong>{selectedRecipe.label}</strong><span>下一步：生成前期构思并等你确认。{visualReviewUnavailable ? "当前已选择先生成首版，审片结果稍后补齐。" : meteredSelected ? "图片 / 视频另行报价授权。" : "图片 / 视频当前无现金报价。"} {voiceCostSummary}。订阅模型依供应商账号计费。</span></div>
+            <div><strong>{selectedRecipe.label}</strong><span>下一步：生成前期构思并等你确认。{visualReviewUnavailable ? acceptUnreviewedFirstCut ? "当前已选择先生成未审片首版；后续是否审片由你决定。" : "机器审片当前不可用；请先决定是否生成未审片首版。" : meteredSelected ? "图片 / 视频另行报价授权。" : "图片 / 视频当前无现金报价。"} {voiceCostSummary}。订阅模型依供应商账号计费。</span></div>
             <button className="button button-ghost" type="button" onClick={requestClose} disabled={submitting}>取消</button>
             <button className="button button-primary" type="button" onClick={(event) => {
               const form = event.currentTarget.form;

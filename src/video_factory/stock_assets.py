@@ -9,6 +9,7 @@ import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from urllib.error import HTTPError, URLError
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -185,6 +186,7 @@ def search_routed_scene_asset_candidates(
     director_plan: dict,
     media_type: str = "video",
     limit: int = 6,
+    *, deadline: Optional[float] = None,
 ) -> tuple[Path, Path]:
     scene_list = list(scenes)
     shots = director_plan.get("shots")
@@ -207,6 +209,8 @@ def search_routed_scene_asset_candidates(
         "created_at": report["created_at"],
         "scene_candidates": [],
     }
+    # 只在本次检索内共享完全相同的只读查询；不跨制作留存，不缓存失败或空结果。
+    query_cache: dict[tuple[str, str, str, int], List[StockAssetCandidate]] = {}
     for scene in scene_list:
         route = routes.get(scene.position)
         if route is None:
@@ -236,7 +240,8 @@ def search_routed_scene_asset_candidates(
             stock_query = resolve_director_stock_query(scene, director_query)
             provider_search_attempts += 1
             try:
-                candidates = search_stock_query_variants(provider, stock_query, scene.search_terms, route_media_type, limit)
+                candidates = search_stock_query_variants(provider, stock_query, scene.search_terms, route_media_type, limit,
+                                                        query_cache=query_cache, deadline=deadline)
             except Exception as error:
                 # 单一可替代来源的任何异常都只记为该来源失败，其余来源的候选照常交付（DF-03）。
                 # 公开报告只携带受控投影字段（类型/HTTP 状态/缺密钥提示），不带异常原文（R3-06）。
@@ -921,9 +926,10 @@ def search_stock_assets(
     limit: int = 3,
     opener: Optional[Callable] = None,
     environ: Optional[dict] = None,
+    *, deadline: Optional[float] = None,
 ) -> List[StockAssetCandidate]:
     with diagnostic_span('stock.search', provider=provider, mediaType=media_type) as facts:
-        candidates = _search_stock_assets(provider, query, media_type, limit, opener, environ)
+        candidates = _search_stock_assets(provider, query, media_type, limit, opener, environ, deadline=deadline)
         facts['candidateCount'] = len(candidates)
         return candidates
 
@@ -935,44 +941,46 @@ def _search_stock_assets(
     limit: int = 3,
     opener: Optional[Callable] = None,
     environ: Optional[dict] = None,
+    *, deadline: Optional[float] = None,
 ) -> List[StockAssetCandidate]:
     provider = provider.lower()
     media_type = media_type.lower()
     if limit <= 0:
         return []
     if provider == 'flickr':
-        return search_flickr(query, media_type, min(limit, 6), flickr_api_client(opener, environ))
+        return search_flickr(query, media_type, min(limit, 6), flickr_api_client(opener, environ, operation_deadline=deadline))
     if provider == 'archive':
-        deadline = time.monotonic() + 30
+        detail_deadline = time.monotonic() + 30
         return search_archive(query, media_type, min(limit, 6), lambda url: fetch_json(
             urllib.request.Request(url, headers=api_headers()),
             opener or urllib.request.build_opener(NoProviderRedirect()).open,
-            deadline=deadline,
+            deadline=detail_deadline, operation_deadline=deadline,
         ), MAX_ASSET_DOWNLOAD_BYTES)
     if provider in {"met", "nasa", "openverse", "cleveland"}:
         search = {"met": search_met, "nasa": search_nasa, "openverse": search_openverse, "cleveland": search_cleveland}[provider]
-        deadline = time.monotonic() + 30
+        detail_deadline = time.monotonic() + 30
         return search(query, media_type, min(limit, 12), lambda url: fetch_json(
             urllib.request.Request(url, headers=api_headers()),
             opener or urllib.request.build_opener(NoProviderRedirect()).open,
-            deadline=deadline,
+            deadline=detail_deadline, operation_deadline=deadline,
         ))
     if provider == "mock":
         return mock_asset_candidates(query, media_type, limit)
     if provider == "pexels":
-        return search_pexels(query, media_type, limit, opener=opener, environ=environ)
+        return search_pexels(query, media_type, limit, opener=opener, environ=environ, deadline=deadline)
     if provider == "pixabay":
-        return search_pixabay(query, media_type, limit, opener=opener, environ=environ)
+        return search_pixabay(query, media_type, limit, opener=opener, environ=environ, deadline=deadline)
     if provider == "unsplash":
-        return search_unsplash(query, media_type, limit, opener=opener, environ=environ)
+        return search_unsplash(query, media_type, limit, opener=opener, environ=environ, deadline=deadline)
     if provider == "coverr":
-        return search_coverr(query, media_type, limit, opener=opener, environ=environ)
+        return search_coverr(query, media_type, limit, opener=opener, environ=environ, deadline=deadline)
     if provider == "wikimedia":
-        return search_wikimedia(query, media_type, limit, opener=opener)
+        return search_wikimedia(query, media_type, limit, opener=opener, deadline=deadline)
     raise ValueError(f"Unsupported asset provider: {provider}")
 
 
-def search_wikimedia(query: str, media_type: str, limit: int, opener: Optional[Callable] = None) -> List[StockAssetCandidate]:
+def search_wikimedia(query: str, media_type: str, limit: int, opener: Optional[Callable] = None,
+                     *, deadline: Optional[float] = None) -> List[StockAssetCandidate]:
     if media_type not in {"image", "video"}:
         raise ValueError("Wikimedia supports image or video only.")
     if limit <= 0:
@@ -992,7 +1000,7 @@ def search_wikimedia(query: str, media_type: str, limit: int, opener: Optional[C
     candidates = {}
     for _ in range(2):
         request = urllib.request.Request("https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode(params), headers=api_headers())
-        payload = fetch_json(request, opener or urllib.request.build_opener(NoProviderRedirect()).open)
+        payload = fetch_json(request, opener or urllib.request.build_opener(NoProviderRedirect()).open, operation_deadline=deadline)
         if not isinstance(payload, dict) or "error" in payload or "batchcomplete" not in payload and "query" not in payload:
             raise RuntimeError("Wikimedia search returned an API error or invalid response.")
         query_result = payload.get("query", {})
@@ -1030,6 +1038,7 @@ def search_unsplash(
     limit: int,
     opener: Optional[Callable] = None,
     environ: Optional[dict] = None,
+    *, deadline: Optional[float] = None,
 ) -> List[StockAssetCandidate]:
     if media_type != "image":
         raise ValueError("Unsplash only provides stock images, not video.")
@@ -1040,7 +1049,7 @@ def search_unsplash(
     })
     payload = fetch_json(urllib.request.Request(url, headers=api_headers({
         "Authorization": f"Client-ID {key}", "Accept-Version": "v1",
-    })), opener or urllib.request.build_opener(NoProviderRedirect()).open)
+    })), opener or urllib.request.build_opener(NoProviderRedirect()).open, operation_deadline=deadline)
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         raise RuntimeError("Unsplash search returned an invalid response.")
     candidates = []
@@ -1082,6 +1091,7 @@ def search_coverr(
     limit: int,
     opener: Optional[Callable] = None,
     environ: Optional[dict] = None,
+    *, deadline: Optional[float] = None,
 ) -> List[StockAssetCandidate]:
     if media_type != "video":
         raise ValueError("Coverr only provides stock video in VideoFactory.")
@@ -1097,7 +1107,7 @@ def search_coverr(
         })
         payload = fetch_json(urllib.request.Request(url, headers=api_headers({
             "Authorization": f"Bearer {key}",
-        })), opener or urllib.request.build_opener(NoProviderRedirect()).open)
+        })), opener or urllib.request.build_opener(NoProviderRedirect()).open, operation_deadline=deadline)
         if not isinstance(payload, dict) or not isinstance(payload.get("hits"), list):
             raise RuntimeError("Coverr search returned an invalid response.")
         for candidate in normalize_coverr_videos(payload, query):
@@ -1189,6 +1199,7 @@ def search_pexels(
     limit: int,
     opener: Optional[Callable] = None,
     environ: Optional[dict] = None,
+    *, deadline: Optional[float] = None,
 ) -> List[StockAssetCandidate]:
     key = provider_key("pexels", environ)
     if media_type == "video":
@@ -1210,7 +1221,7 @@ def search_pexels(
     else:
         raise ValueError(f"Unsupported media_type for Pexels: {media_type}")
     request = urllib.request.Request(url, headers=api_headers({"Authorization": key}))
-    payload = fetch_json(request, opener)
+    payload = fetch_json(request, opener, operation_deadline=deadline)
     if media_type == "video":
         return normalize_pexels_videos(payload, query, limit)
     return normalize_pexels_images(payload, query, limit)
@@ -1222,6 +1233,7 @@ def search_pixabay(
     limit: int,
     opener: Optional[Callable] = None,
     environ: Optional[dict] = None,
+    *, deadline: Optional[float] = None,
 ) -> List[StockAssetCandidate]:
     key = provider_key("pixabay", environ)
     request_limit = max(limit, 3)
@@ -1251,7 +1263,7 @@ def search_pixabay(
     environment = os.environ if environ is None else environ
     cache_home = Path(environment.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     request = urllib.request.Request(url, headers=api_headers())
-    payload = cached_pixabay_response(url, lambda: fetch_json(request, opener), cache_home)
+    payload = cached_pixabay_response(url, lambda: fetch_json(request, opener, operation_deadline=deadline), cache_home)
     if media_type == "video":
         return normalize_pixabay_videos(payload, query, limit)
     return normalize_pixabay_images(payload, query, limit)
@@ -1496,14 +1508,24 @@ def public_provider_error_fields(error: Exception) -> dict:
     return fields
 
 
-def search_stock_query_variants(provider: str, query: str, search_terms: list[str], media_type: str, limit: int):
+def search_stock_query_variants(provider: str, query: str, search_terms: list[str], media_type: str, limit: int,
+                               *, query_cache: Optional[dict] = None, deadline: Optional[float] = None):
     queries = list(dict.fromkeys(value.strip() for value in [query, *search_terms] if isinstance(value, str) and value.strip()))[:3]
     candidates = {}
     errors: list[Exception] = []
     succeeded_queries = 0
     for term in queries:
         try:
-            results = search_stock_assets(provider=provider, query=term, media_type=media_type, limit=limit)
+            key = (provider, term, media_type, limit)
+            if query_cache is not None and key in query_cache:
+                results = deepcopy(query_cache[key])
+            else:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise RuntimeError("素材检索总时限已耗尽；已有候选保留，可调整来源后继续。")
+                results = search_stock_assets(provider=provider, query=term, media_type=media_type, limit=limit,
+                                              **({"deadline": deadline} if deadline is not None else {}))
+                if query_cache is not None and results:
+                    query_cache[key] = deepcopy(results)
         except Exception as error:
             # 单个变体查询失败不能抹掉前面查询已经拿到的合法候选（同来源内部的局部隔离）。
             errors.append(error)
@@ -1535,7 +1557,7 @@ def semantic_query_for_scene(scene: Scene) -> str:
     return ""
 
 
-def flickr_api_client(opener=None, environ=None):
+def flickr_api_client(opener=None, environ=None, *, operation_deadline=None):
     key = provider_key('flickr', environ)
     deadline = time.monotonic() + 30
     active_opener = opener or urllib.request.build_opener(NoProviderRedirect()).open
@@ -1546,7 +1568,7 @@ def flickr_api_client(opener=None, environ=None):
                                        'nojsoncallback': 1, **parameters}).encode(),
             headers=api_headers({'Content-Type': 'application/x-www-form-urlencoded'}))
         try:
-            payload = fetch_json(request, active_opener, deadline=deadline)
+            payload = fetch_json(request, active_opener, deadline=deadline, operation_deadline=operation_deadline)
         except RuntimeError as error:
             message = str(error)
             http_match = re.match(r"Provider request failed with HTTP (\d+)", message)
@@ -1587,27 +1609,44 @@ def _is_timeout_error(error: BaseException) -> bool:
     return False
 
 
-def fetch_json(request: urllib.request.Request, opener: Optional[Callable] = None, *, deadline: Optional[float] = None) -> dict:
+def _read_provider_chunk(response, size: int, deadline: float) -> bytes:
+    budget = remaining(deadline)
+    # urllib 的 HTTPResponse 没有公开的逐次读取 timeout 接口。只调整其现有 socket，
+    # read1 最多发起一次底层读取，避免后续慢分块继续使用连接时的整段剩余预算。
+    raw = getattr(getattr(response, "fp", None), "raw", None)
+    sock = getattr(raw, "_sock", None)
+    if sock is not None:
+        previous = sock.gettimeout()
+        sock.settimeout(min(previous, budget) if previous is not None else budget)
+    chunk = (getattr(response, "read1", None) or response.read)(size)
+    remaining(deadline)
+    return chunk
+
+
+def fetch_json(request: urllib.request.Request, opener: Optional[Callable] = None, *, deadline: Optional[float] = None,
+               operation_deadline: Optional[float] = None) -> dict:
     active_opener = opener or urllib.request.urlopen
     # 聚合搜索的一组详情请求共用预算，不能每条详情再启动三轮重试。
     attempts = 1 if deadline is not None else PROVIDER_REQUEST_ATTEMPTS
+    attempt_timeout = 10 if deadline is not None else 20
+    bounded_metadata = deadline is not None
+    # 保留供应方原有单请求重试策略，只限制其不能超出原任务剩余期限。
+    if operation_deadline is not None:
+        deadline = min(deadline, operation_deadline) if deadline is not None else operation_deadline
     for attempt in range(1, attempts + 1):
         try:
-            timeout = min(10, remaining(deadline)) if deadline is not None else 20
+            timeout = min(attempt_timeout, remaining(deadline)) if deadline is not None else attempt_timeout
             with active_opener(request, timeout=timeout) as response:
                 if deadline is None:
                     body = response.read()
                 else:
                     chunks, size = [], 0
-                    read = getattr(response, 'read1', None) or response.read
                     while True:
-                        remaining(deadline)
-                        chunk = read(64 * 1024)
-                        remaining(deadline)
+                        chunk = _read_provider_chunk(response, 64 * 1024, deadline)
                         if not chunk:
                             break
                         size += len(chunk)
-                        if size > 2_000_000:
+                        if bounded_metadata and size > 2_000_000:
                             raise RuntimeError('Provider metadata exceeds the 2MB limit.')
                         chunks.append(chunk)
                     body = b''.join(chunks)
@@ -1617,7 +1656,8 @@ def fetch_json(request: urllib.request.Request, opener: Optional[Callable] = Non
                 return payload
         except HTTPError as error:
             with error:
-                detail = error.read(300).decode("utf-8", errors="replace")
+                # 有总期限时无需再等错误正文；公开诊断只使用状态码。
+                detail = "" if deadline is not None else error.read(300).decode("utf-8", errors="replace")
             raise RuntimeError(f"Provider request failed with HTTP {error.code}: {detail}") from error
         except (URLError, ConnectionError, TimeoutError) as error:
             if deadline is not None and isinstance(error, AssetNetworkError):
@@ -1630,7 +1670,8 @@ def fetch_json(request: urllib.request.Request, opener: Optional[Callable] = Non
                 raise RuntimeError(
                     f"Provider request failed after {attempt} attempts: {type(error).__name__}"
                 ) from error
-            time.sleep(NETWORK_RETRY_DELAY_SECONDS * attempt)
+            delay = NETWORK_RETRY_DELAY_SECONDS * attempt
+            time.sleep(min(delay, max(0, deadline - time.monotonic())) if deadline is not None else delay)
     raise AssertionError("Provider request retry loop exited unexpectedly")
 
 

@@ -385,7 +385,7 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
     }
   });
 
-  it("runs one child process for concurrent identical requests and hands each caller its own copy", async () => {
+  it("serves concurrent identical requests with isolated copies; extraction dedup now lives in the Python content-key cache", async () => {
     const harness = await createHarness();
     try {
       const jpeg = makeJpeg(64);
@@ -402,14 +402,14 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
         scenePositions: [3],
       };
 
-      // 试片双分支复审正是这样并发要同一份证据：以前两个子进程会同时发布同一个目录，
-      // 一个以 "Directory not empty" 失败，再被报成模型调用失败。
+      // 试片双分支复审正是这样并发要同一份证据。路径级 inFlight 合并已移除：
+      // 路径相同不等于内容相同；实际抽取的去重由 Python 内容键 + 跨进程锁完成
+      //（test_review_media 的缓存测试覆盖），这里保证两个调用方都成功且互不串改。
       const [left, right] = await Promise.all([
         harness.preprocessor.prepare(input),
         harness.preprocessor.prepare(input),
       ]);
 
-      assert.equal(await childRunCount(harness), 1, "并发相同请求只应跑一次预处理");
       assert.deepEqual(left, right);
       assert.notEqual(left, right);
       assert.notEqual(left.frames, right.frames);
@@ -480,10 +480,13 @@ describe("PythonReviewMediaPreprocessor trust boundary", () => {
         assert.equal(message.includes(harness.root), false);
         assert.equal(message.includes("must-not-appear-in-errors"), false);
       }
-      assert.equal(logged.length, 1, "并发相同请求只应触发一次子进程");
-      assert.match(logged[0]!, /exit code 23/);
-      assert.match(logged[0]!, /must-not-appear-in-errors -m/);
-      assert.match(logged[0]!, /command: failing-python-fixture/);
+      // inFlight 合并已移除：每次失败各自记录服务端日志；对操作员的文案卫生不变。
+      assert.equal(logged.length, 2);
+      for (const entry of logged) {
+        assert.match(entry, /exit code 23/);
+        assert.match(entry, /must-not-appear-in-errors -m/);
+        assert.match(entry, /command: failing-python-fixture/);
+      }
     } finally {
       await rm(harness.root, { recursive: true, force: true });
     }

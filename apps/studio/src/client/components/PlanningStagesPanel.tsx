@@ -42,7 +42,9 @@ const STAGE_STATUS_LABELS: Record<StudioPlanningStage["status"], string> = {
 
 function stageStateLabel(stage: StudioPlanningStage): string {
   if (stage.decisionStatus === "waiting_user") return stage.reviewPurpose === "direction" ? "初稿已生成 · 等你确认" : "方案已生成 · 等你确认";
-  if (stage.decisionStatus === "checking") return "正在复核你采用的这一版";
+  // 首轮独立复核针对当前刚生成的稿子进行，此时用户还没有采用任何版本；
+  // 不能写成"复核你采用的这一版"（那是确认之后才会发生的语义）。
+  if (stage.decisionStatus === "checking") return stage.reviewPurpose === "direction" ? "初稿已生成 · 正在整理首轮建议" : "方案已生成 · 正在整理独立建议";
   if (stage.decisionStatus === "confirmed") return stage.reviewPurpose === "direction" ? "初稿已采用 · 接下来选材" : "已由你采用";
   return STAGE_STATUS_LABELS[stage.status];
 }

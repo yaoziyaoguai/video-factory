@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 import subprocess
@@ -7,6 +8,8 @@ from typing import Optional
 
 from .stock_assets import default_asset_plan_path, load_asset_plan
 from .stock_images import prepare_render_image
+from .narration_subtitles import cues_to_ass
+from .voiceover import _write_bytes_durably
 
 
 FONT_CANDIDATES = [
@@ -141,31 +144,23 @@ def render_script_video(
 
     audio_input = render_audio_input(manifest)
     temporary_output = output_file.with_name(f"{output_file.stem}.partial{output_file.suffix}")
+    burned_clip, subtitle_burn = burn_verified_subtitles(manifest, output_dir, concat_path, output_file)
+    picture_input = ["-i", str(burned_clip)] if burned_clip else ["-f", "concat", "-safe", "0", "-i", str(concat_path)]
+    picture_output = ["-c:v", "copy"] if burned_clip else [
+        "-vf", f"fps=30,format=yuv420p,scale={width}:{height}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
     command = [
         "ffmpeg",
         "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(concat_path),
+        *picture_input,
         *audio_input,
         "-map",
         "0:v:0",
         "-map",
         "1:a:0",
-        "-vf",
-        f"fps=30,format=yuv420p,scale={width}:{height}",
+        *picture_output,
         *render_audio_duration_options(manifest),
         "-frames:v",
         str(frame_count),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "23",
         "-c:a",
         "aac",
         "-b:a",
@@ -182,6 +177,8 @@ def render_script_video(
     manifest["visual_quality"] = manifest.get("visual_quality", "preview")
     manifest["frames_dir"] = str(frames_dir)
     manifest["concat_file"] = str(concat_path)
+    if subtitle_burn is not None:
+        manifest["subtitle_burn"] = subtitle_burn
     manifest["ffmpeg_command"] = command
     manifest["probe"] = probe_video(output_file)
     manifest_path.write_text(
@@ -251,15 +248,18 @@ def render_asset_video(
     output_file = Path(str(manifest["output_file"]))
     audio_input = render_audio_input(manifest)
     temporary_output = output_file.with_name(f"{output_file.stem}.partial{output_file.suffix}")
+    # T05：同步字幕的唯一烧录路径——已有画面结果 → 一次本地 ASS 烧录中间视频 →
+    # 现有最终音画封装。-c:v copy 的最终封装不承担字幕滤镜；滤镜或旁挂缺失时
+    # 如实记录 blocked，不回退到逐镜文字冒充同步字幕。
+    burned_clip, subtitle_burn = burn_verified_subtitles(manifest, output_dir, clips_concat_path, output_file)
+    if burned_clip is not None:
+        concat_input = ["-i", str(burned_clip)]
+    else:
+        concat_input = ["-f", "concat", "-safe", "0", "-i", str(clips_concat_path)]
     final_command = [
         "ffmpeg",
         "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(clips_concat_path),
+        *concat_input,
         *audio_input,
         "-map",
         "0:v:0",
@@ -289,6 +289,8 @@ def render_asset_video(
     manifest["captions_dir"] = str(captions_dir)
     manifest["clips_dir"] = str(clips_dir)
     manifest["clips_concat_file"] = str(clips_concat_path)
+    if subtitle_burn is not None:
+        manifest["subtitle_burn"] = subtitle_burn
     manifest["ffmpeg_scene_commands"] = scene_commands
     manifest['image_processing'] = image_processing
     manifest["ffmpeg_command"] = final_command
@@ -862,6 +864,115 @@ def render_job_manifest(
         return manifest_path
     render_script_video(manifest_path, output_dir, resolution=resolution)
     return manifest_path
+
+
+def burn_verified_subtitles(
+    manifest: dict,
+    output_dir: Path,
+    clips_concat_path: Path,
+    output_file: Path,
+) -> tuple[Optional[Path], Optional[dict]]:
+    """只有 verified 的同次字幕才烧录；校验 plan 绑定，滤镜缺失如实 blocked。
+
+    返回 (烧录后的中间视频路径或 None, 记录到 manifest 的烧录状态或 None)。
+    """
+    voiceover_plan = manifest.get("voiceover_plan")
+    if not isinstance(voiceover_plan, dict):
+        return None, None
+    subtitles = voiceover_plan.get("subtitles")
+    if not isinstance(subtitles, dict):
+        return None, None
+    if subtitles.get("status") != "verified":
+        return None, None
+    if not subtitles.get("layoutKey") or subtitles.get("layoutKey") != voiceover_plan.get("layoutKey"):
+        return None, {"status": "blocked", "reason": "subtitle_layout_binding_mismatch"}
+    track_path = voiceover_plan.get("track_path")
+    ass_path = None
+    sidecar = subtitles.get("sidecar")
+    if isinstance(sidecar, dict) and isinstance(sidecar.get("ass"), str):
+        candidate = (Path(str(track_path)).parent / sidecar["ass"]).resolve() if track_path else None
+        if candidate and candidate.parent != Path(str(track_path)).resolve().parent:
+            return None, {"status": "blocked", "reason": "subtitle_path_binding_mismatch"}
+        ass_path = candidate if candidate and candidate.is_file() else None
+    if ass_path is None:
+        return None, {"status": "blocked", "reason": "ass_sidecar_missing"}
+    if (hashlib.sha256(ass_path.read_bytes()).hexdigest() != subtitles.get("sidecarSha256", {}).get("ass")
+            or hashlib.sha256(Path(str(track_path)).read_bytes()).hexdigest() != voiceover_plan.get("trackSha256")):
+        return None, {"status": "blocked", "reason": "subtitle_content_binding_mismatch"}
+    if not ffmpeg_filter_available("ass"):
+        # 本机 FFmpeg 无 libass：不回退逐镜文字冒充同步字幕，如实 blocked。
+        return None, {"status": "blocked", "reason": "ffmpeg_missing_libass"}
+    burned = output_file.with_name(f"{output_file.stem}.subtitled{output_file.suffix}")
+    burned_temporary = burned.with_name(f"{burned.stem}.partial{burned.suffix}")
+    frame_count = sum(timeline_frame_counts(manifest["slides"]))
+    width, height = parse_resolution(str(manifest.get("resolution", "1080x1920")))
+    font_path = find_font_file()
+    if font_path is None:
+        return None, {"status": "blocked", "reason": "subtitle_font_unavailable"}
+    from PIL import ImageFont
+    font_name = ImageFont.truetype(str(font_path), 16).getname()[0]
+    # 原旁挂文件是不可变证据；按当前成片尺寸派生本次烧录用ASS，不覆盖已批准的文件。
+    ass_path = output_dir / "narration-render.ass"
+    _write_bytes_durably(ass_path, cues_to_ass(subtitles.get("cues", []), width=width, height=height,
+        font_name=font_name, font_size=max(12, round(56 * height / 1920))).encode("utf-8"))
+    burn_command = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(clips_concat_path),
+        "-vf",
+        f"fps=30,scale={width}:{height},ass={_ass_filter_path(ass_path)}:fontsdir={_ass_filter_path(font_path.parent)},format=yuv420p",
+        "-an",
+        "-frames:v",
+        str(frame_count),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        str(burned_temporary),
+    ]
+    run_atomic_ffmpeg(burn_command, burned_temporary, burned)
+    return burned, {
+        "status": "burned",
+        "assPath": str(ass_path),
+        "cueCount": len(subtitles.get("cues", [])),
+        "contractVersion": subtitles.get("version"),
+    }
+
+
+def _ass_filter_path(ass_path: Path) -> str:
+    # subtitles/ass 滤镜参数里的路径要转义滤镜转义层；单引号包裹并转义内部引号与冒号。
+    text = str(ass_path.resolve()).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    return f"'{text}'"
+
+
+_FFmpegFilterAvailability: dict[str, bool] = {}
+
+
+def ffmpeg_filter_available(name: str) -> bool:
+    cached = _FFmpegFilterAvailability.get(name)
+    if cached is not None:
+        return cached
+    try:
+        listing = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            check=True, capture_output=True, text=True, timeout=20,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        _FFmpegFilterAvailability[name] = False
+        return False
+    available = any(
+        line.split()[-1:] == [name] or line.rstrip().endswith(f" {name}")
+        for line in listing.splitlines()
+    )
+    _FFmpegFilterAvailability[name] = available
+    return available
 
 
 def validate_asset_plan(asset_plan: dict, path: Path) -> None:

@@ -34,6 +34,7 @@ interface NodeWorkspaceProps {
   artifacts: StudioArtifact[];
   busy: boolean;
   readOnly?: boolean;
+  currentDelivery?: boolean;
   pauseBusy?: boolean;
   pauseRequested?: boolean;
   /** joint-v1 创作规划节点的真实阶段投影；其他节点不传。 */
@@ -50,8 +51,8 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, acceptedPlanDigest, artifacts, busy, readOnly = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
-  const shouldOpenForAttention = node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, acceptedPlanDigest, artifacts, busy, readOnly = false, currentDelivery = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
+  const shouldOpenForAttention = currentDelivery || node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
   const [editing, setEditing] = useState(false);
@@ -1238,7 +1239,7 @@ function creatorCapabilityLabel(
   return [
     `本次使用 ${providerName}${!modelName || modelId === providerId || modelName === providerName ? "" : ` · ${modelName}`}`,
     typeof reasoningEffort === "string" ? reasoningEffortLabel(reasoningEffort) : undefined,
-    typeof loopIterations === "number" ? `AI 创作与独立质量复核 · ${loopIterations}/3 轮` : undefined,
+    typeof loopIterations === "number" ? `AI 创作与独立质量复核 · 已记录 ${loopIterations} 轮` : undefined,
     typeof auditEffort === "string" ? `质量复核：${reasoningEffortLabel(auditEffort)}` : undefined,
   ].filter(Boolean).join(" · ");
 }
@@ -1320,7 +1321,7 @@ function executionTimingDetails(
       ? undefined
       : { label: "未细分等待 / 处理", value: formatDuration(unclassifiedMs) },
     producerMs === undefined ? undefined : { label: "内容生成累计", value: formatDuration(producerMs) },
-    auditMs === undefined ? undefined : { label: "确认时独立复核累计", value: formatDuration(auditMs) },
+    auditMs === undefined ? undefined : { label: "独立复核累计（审一次的耗时）", value: formatDuration(auditMs) },
     discussionMs === undefined ? undefined : { label: "创作讨论累计", value: formatDuration(discussionMs) },
     validationMs === undefined ? undefined : { label: "输出格式与使用要求检查", value: formatDuration(validationMs) },
     unattributedProducerMs === undefined ? undefined : { label: "生成耗时（跨操作，未分摊）", value: formatDuration(unattributedProducerMs) },
@@ -1335,7 +1336,7 @@ function executionTimingDetails(
       ? undefined
       : { label: "任务内结构修正", value: `${brokerStructuredRepairCount} 次` },
     producerModelCallCount === undefined ? undefined : { label: "内容生成调用", value: `${producerModelCallCount} 次` },
-    auditModelCallCount === undefined ? undefined : { label: "确认时独立复核", value: `${auditModelCallCount} 次` },
+    auditModelCallCount === undefined ? undefined : { label: "独立复核（初稿一轮建议）", value: `${auditModelCallCount} 次` },
     discussionModelCallCount === undefined ? undefined : { label: "创作讨论", value: `${discussionModelCallCount} 次` },
     structuredRepairModelCallCount === undefined ? undefined : { label: "其中结构修复", value: `${structuredRepairModelCallCount} 次` },
     unattributedRepairs === undefined ? undefined : { label: "结构修复（归属待核对）", value: `${unattributedRepairs} 次` },

@@ -1816,14 +1816,15 @@ function validateIncompleteSourceReviewDecision(
   intervention: HumanIntervention,
   decision: HumanDecisionDraft,
 ): void {
-  if (intervention.kind !== "source_review_retry"
-    || intervention.reviewStatus !== "incomplete"
+  // 内部交付合同（T03）：成片终审的无结论停点与试片重试停点同形——宿主声明的
+  // incomplete + providerOutcomeKnown + evidenceId。承担风险都必须绑定当前证据。
+  if (intervention.reviewStatus !== "incomplete"
     || intervention.providerOutcomeKnown !== true
     || !intervention.evidenceId) {
-    throw new Error("当前试片审查不是可承担风险的 incomplete 状态，只能补查或终止。");
+    throw new Error("当前审查停点不是可承担风险的 incomplete 状态，只能补查或终止。");
   }
   if (decision.action !== "approve" || decision.reviewEvidenceId !== intervention.evidenceId) {
-    throw new Error("接受未完成审查必须绑定当前试片证据，并使用明确的承担风险动作。");
+    throw new Error("接受未完成审查必须绑定当前证据，并使用明确的承担风险动作。");
   }
 }
 

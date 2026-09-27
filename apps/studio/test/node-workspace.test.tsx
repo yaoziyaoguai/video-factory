@@ -349,11 +349,11 @@ describe("node production workspaces", () => {
     expect(screen.getByText("未细分等待 / 处理").parentElement).toHaveTextContent("8.4 秒");
     expect(screen.queryByText("首次响应")).not.toBeInTheDocument();
     expect(screen.getByText("内容生成累计").parentElement).toHaveTextContent("13 秒");
-    expect(screen.getByText("确认时独立复核累计").parentElement).toHaveTextContent("8.2 秒");
+    expect(screen.getByText("独立复核累计（审一次的耗时）").parentElement).toHaveTextContent("8.2 秒");
     expect(screen.getByText("创作讨论累计").parentElement).toHaveTextContent("3.1 秒");
     expect(screen.getByText("本次已证实模型执行").parentElement).toHaveTextContent("5 次");
     expect(screen.getByText("内容生成调用").parentElement).toHaveTextContent("2 次");
-    expect(screen.getByText("确认时独立复核").parentElement).toHaveTextContent("1 次");
+    expect(screen.getByText("独立复核（初稿一轮建议）").parentElement).toHaveTextContent("1 次");
     expect(screen.getByText("创作讨论").parentElement).toHaveTextContent("2 次");
     expect(screen.getByText("此前执行累计").parentElement).toHaveTextContent("6 次");
     expect(screen.getByText("此前创作讨论").parentElement).toHaveTextContent("3 次");
@@ -744,6 +744,19 @@ describe("node production workspaces", () => {
     } finally {
       delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
     }
+  });
+
+  it("shows recorded creator rounds without inventing an automatic three-round target", () => {
+    const node: StudioNode = {
+      ...succeededNode,
+      executionReceipt: {
+        ...succeededNode.executionReceipt!,
+        parameters: { ...succeededNode.executionReceipt!.parameters, agentLoopIterations: 1 },
+      },
+    };
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} runStatus="succeeded" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    expect(screen.getByText(/AI 创作与独立质量复核 · 已记录 1 轮/)).toBeInTheDocument();
+    expect(screen.queryByText(/1\/3 轮/)).not.toBeInTheDocument();
   });
 
   it("discloses a failed agent audit and its public rule fallback reason", () => {

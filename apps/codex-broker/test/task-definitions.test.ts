@@ -4,8 +4,9 @@ import { REQUIRED_CODEX_TASK_CONTRACT_DIGESTS } from "../../../packages/producti
 import { parseCreativeTreatment } from "../../../packages/production-pipeline/src/creative-treatment.js";
 import { assessTreatmentReadiness } from "../../../packages/production-pipeline/src/treatment-readiness.js";
 import { summarizeProductionCapabilities } from "../../../packages/production-pipeline/src/production-capabilities.js";
-import { CODEX_BRIDGE_PROTOCOL_VERSION } from "../src/codex-executor.js";
+import { CODEX_BRIDGE_PROTOCOL_VERSION, requireProductionCapabilities } from "../src/codex-executor.js";
 import {
+  SCREENWRITER_DIRECTIVE,
   BROKER_TASK_KINDS,
   COMMON_ROLE_PREAMBLE,
   outputSchemaFor,
@@ -41,9 +42,16 @@ it("keeps audit semantic diagnostics on an allowlist of fixed validator messages
 it("screenwriter plans a continuous narration and exposes the real per-shot voice timing boundary", () => {
   const prompt = taskPromptFor("script-draft").directive;
   assert.match(prompt, /连贯的整段旁白/);
-  assert.match(prompt, /逐镜合成/);
+  assert.match(prompt, /逐镜模式/);
   assert.match(prompt, /补静音/);
   assert.match(prompt, /有意留白/);
+});
+
+it("keeps optional pacing and voice settings distinct from the creator's adopted plan", () => {
+  assert.doesNotMatch(taskPromptFor("topic-ideas").outputRules.join("\n"), /前两秒|前六秒/);
+  assert.doesNotMatch(SCREENWRITER_DIRECTIVE, /已确认的旁白方案（brief.voiceTiming）/);
+  assert.match(SCREENWRITER_DIRECTIVE, /voiceTiming.*仅.*语速.*停顿/);
+  assert.match(SCREENWRITER_DIRECTIVE, /未.*采用.*不能|不能.*已.*采用/);
 });
 
 it("addresses the audit summary to creators and keeps machine checks out of their main conclusion", () => {
@@ -284,10 +292,10 @@ describe("broker-owned task definitions", () => {
     assert.deepEqual(
       [topic.version, series.version, treatment.version, script.version, director.version],
       [
-        "video-factory/topic-editor-v11",
+        "video-factory/topic-editor-v12",
         "video-factory/series-showrunner-v3",
         "video-factory/treatment-director-v7",
-        "video-factory/screenwriter-v18",
+        "video-factory/screenwriter-v19",
         "video-factory/director-v29",
       ],
     );
@@ -838,7 +846,44 @@ describe("broker-owned task definitions", () => {
   it("pins the creative-treatment semantic rules version that owns the whitespace contract", () => {
     assert.equal(
       taskContractDescriptorFor("creative-treatment").semanticRulesVersion,
-      "creative-treatment-semantics-v12|production-capabilities-v3|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
+      "creative-treatment-semantics-v12|production-capabilities-v4|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
     );
   });
+});
+
+// T08：连续旁白能力语义——提示词不再误述能力，角色与审计读取同一能力事实。
+it("describes the confirmed continuous-narration capability instead of the old cross-scene prohibition", () => {
+  assert.match(SCREENWRITER_DIRECTIVE, /productionCapabilities\.audio/);
+  assert.match(SCREENWRITER_DIRECTIVE, /continuousNarrationGroups/);
+  assert.match(SCREENWRITER_DIRECTIVE, /由用户在后续声音方案中明确确认/);
+  assert.match(SCREENWRITER_DIRECTIVE, /未声明支持或尚未确认采用时.*逐镜模式/);
+  assert.match(SCREENWRITER_DIRECTIVE, /明确留白必须保留/);
+  assert.doesNotMatch(SCREENWRITER_DIRECTIVE, /不支持旁白自动跨镜/);
+  // 开场节奏不强制绝对秒数；用户明确指定的开场时间要求不被通用节奏建议覆盖。
+  assert.doesNotMatch(SCREENWRITER_DIRECTIVE, /前两秒/);
+  assert.match(SCREENWRITER_DIRECTIVE, /用户明确指定时间点时按用户要求执行/);
+});
+
+// T08：Broker 严格白名单接受可选能力布尔；旧持久化输入缺失仍可读；未知键仍拒绝。
+it("parses the optional continuousNarrationGroups capability with bounded compatibility", () => {
+  const base = {
+    assetProviders: [],
+    editing: { sourceRangeReuse: true, staticEditorialCard: true },
+    audio: { narration: true, pauseControl: "text_hint", musicTrack: false, soundEffectsTrack: false },
+  };
+  const declared = requireProductionCapabilities({
+    ...base,
+    audio: { ...base.audio, continuousNarrationGroups: true },
+  }, "payload.brief.productionCapabilities");
+  assert.equal(declared.audio.continuousNarrationGroups, true);
+  const legacy = requireProductionCapabilities(structuredClone(base), "payload.brief.productionCapabilities");
+  assert.equal(legacy.audio.continuousNarrationGroups, undefined, "旧输入缺失时消费为未声明支持");
+  assert.throws(() => requireProductionCapabilities({
+    ...base,
+    audio: { ...base.audio, continuousNarrationGroups: "yes" },
+  }, "payload.brief.productionCapabilities"), /must be a boolean/);
+  assert.throws(() => requireProductionCapabilities({
+    ...base,
+    audio: { ...base.audio, spatialAudio: true },
+  }, "payload.brief.productionCapabilities"), /not allowed/);
 });

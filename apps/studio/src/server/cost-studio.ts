@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import { summarizeModelExecutionFacts, type ModelExecutionProjection } from "@video-factory/production-pipeline";
 import type {
   StudioBillingType,
   StudioCostDashboard,
@@ -9,6 +11,11 @@ import type {
 
 interface CostRunSource {
   id: string;
+  status?: unknown;
+  startedAt?: unknown;
+  finishedAt?: unknown;
+  interventions?: unknown;
+  decisions?: unknown;
   initialInput?: unknown;
   nodeRuns?: unknown;
   executionPlan?: unknown;
@@ -23,12 +30,16 @@ interface NodeModelUsage {
   modelCallCount: number;
 }
 
+// T04：行直接携带请求身份（公开字段），用于按物理执行归并、去重计数与旧快照折叠。
+type CostLineBuild = StudioCostLine;
+
 export class CostStudio {
   constructor(
     private readonly listRuns: () => Promise<CostRunSource[]>,
     private readonly readModelUsage?: (runId: string) => Promise<NodeModelUsage[]>,
     private readonly readPaidReceipts?: (runId: string) => Promise<unknown[]>,
     private readonly readDocumentReceipts?: (runId: string) => Promise<unknown[]>,
+    private readonly readExecutionFacts?: (runId: string) => Promise<ModelExecutionProjection>,
   ) {}
 
   async dashboard(): Promise<StudioCostDashboard> {
@@ -36,7 +47,7 @@ export class CostStudio {
     const lines = details.flatMap((detail) => detail.lines);
     return {
       currency: "CNY",
-      totals: totals(lines),
+      totals: { ...totals(lines), ...aggregateExecutionTotals(details.map((detail) => detail.totals)) },
       byProvider: group(lines, (line) => line.providerId).map((item) => ({ ...item, providerId: item.id })),
       byNode: group(lines, (line) => line.nodeId).map((item) => ({ ...item, nodeId: item.id })),
       runs: details.map(({ lines: _lines, ...summary }) => summary),
@@ -51,13 +62,12 @@ export class CostStudio {
   private async detail(run: CostRunSource): Promise<StudioCostRunDetail> {
     const paidReceipts = await this.readPaidReceipts?.(run.id) ?? [];
     const documentReceipts = await this.readDocumentReceipts?.(run.id) ?? [];
-    const detail = toRunDetail({
-      ...run,
-      executionReceipts: [
-        ...(Array.isArray(run.executionReceipts) ? run.executionReceipts : []), ...paidReceipts, ...documentReceipts,
-      ],
-    });
-    for (const usage of await this.readModelUsage?.(run.id) ?? []) {
+    const projection = await this.readExecutionFacts?.(run.id);
+    const usageList = projection ? [] : await this.readModelUsage?.(run.id) ?? [];
+    const usageByNode = new Map(usageList.map((usage) => [usage.nodeId, usage]));
+    const detail = { ...toRunDetail(run, usageByNode, paidReceipts, documentReceipts), timing: runTiming(run) };
+    if (projection) return withExecutionFacts(detail, projection);
+    for (const usage of usageList) {
       const recorded = detail.lines.filter((line) => line.nodeId === usage.nodeId && line.accountingSource !== "document_operation")
         .reduce((sum, line) => sum + (line.subscriptionCallCount ?? 0), 0);
       const missing = usage.modelCallCount - recorded;
@@ -67,8 +77,8 @@ export class CostStudio {
       detail.lines.push({
         id: `checkpoint:${usage.nodeId}`, runId: run.id, runTitle: detail.title,
         nodeId: usage.nodeId, capability: "model.execute", providerId: usage.providerId, modelId: usage.modelId,
-        billing: "subscription", status: "unknown", estimatedCostCny: 0,
-        subscriptionCallCount: missing, actualPending: false,
+        billing: "unverified", status: "unknown", estimatedCostCny: null,
+        modelCallCount: missing, actualPending: true, callCountPending: true,
         startedAt: isRecord(node) ? text(node.startedAt) : "",
       });
     }
@@ -76,7 +86,101 @@ export class CostStudio {
   }
 }
 
-function toRunDetail(run: CostRunSource): StudioCostRunDetail {
+function runTiming(run: CostRunSource): NonNullable<StudioCostRunDetail["timing"]> {
+  const time = (value: unknown): number | null => {
+    const parsed = typeof value === "string" ? Date.parse(value) : NaN;
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const observedAt = new Date().toISOString();
+  const started = time(run.startedAt);
+  const ongoing = ["running", "needs_human", "awaiting_spend_approval", "approval_invalidated"].includes(String(run.status));
+  // runner 在每次到达人工停点时也写 finishedAt，它不是整次制作的终止时间。
+  const ended = ongoing ? Date.parse(observedAt) : time(run.finishedAt);
+  const wallElapsedMs = started !== null && ended !== null && ended >= started ? ended - started : null;
+  const base = { observedAt, wallElapsedMs, humanWaitMs: null, recoveryMs: null };
+  if (wallElapsedMs === null || !Array.isArray(run.interventions) || !Array.isArray(run.decisions)) return base;
+  const intervals: Array<[number, number]> = [];
+  for (const value of run.interventions) {
+    if (!isRecord(value) || typeof value.id !== "string") return base;
+    const from = time(value.createdAt);
+    const replies = run.decisions.filter((decision) => isRecord(decision) && decision.interventionId === value.id);
+    const times = replies.map((decision) => time((decision as Record<string, unknown>).createdAt));
+    if (times.some((timestamp) => timestamp === null)) return base;
+    const active = ongoing && Array.isArray(run.nodeRuns) && run.nodeRuns.some((node) => isRecord(node)
+      && node.status === "needs_human" && isRecord(node.intervention) && node.intervention.id === value.id);
+    const to = times.length ? Math.min(...times as number[]) : active ? ended : null;
+    // 无法闭合的旧停点明确未知，不将总时长减模型时间伪装成人工/网络等待。
+    if (from === null || to === null || from < started! || to < from || to > ended!) return base;
+    intervals.push([from, to]);
+  }
+  let humanWaitMs = 0, cursor = -Infinity;
+  for (const [from, to] of intervals.sort((a, b) => a[0] - b[0])) {
+    humanWaitMs += Math.max(0, to - Math.max(from, cursor));
+    cursor = Math.max(cursor, to);
+  }
+  return { ...base, humanWaitMs };
+}
+
+function withExecutionFacts(detail: StudioCostRunDetail, projection: ModelExecutionProjection): StudioCostRunDetail {
+  const covered = new Set<string>();
+  const lines = detail.lines.map((line) => {
+    if (!isModelLine(line)) return line;
+    const related = projection.facts.filter((fact) => fact.nodeId === line.nodeId && fact.providerId === line.providerId
+      && !!line.requestId && (fact.requestId === line.requestId || fact.operationId === line.requestId));
+    if (!related.length) return { ...line, legacyUnattributed: true as const, legacySnapshotCount: 1 };
+    related.forEach((fact) => covered.add(fact.executionKey));
+    return { ...line, executionKeys: related.map((fact) => fact.executionKey) };
+  });
+  for (const fact of projection.facts) {
+    if (covered.has(fact.executionKey) || fact.accepted === false) continue;
+    // 没有原账单的独立声音/文字请求保留待核金额，不从调用数或provider名字推断免费。
+    lines.push({ id: `execution:${fact.executionKey}`, runId: detail.runId, runTitle: detail.title,
+      nodeId: fact.nodeId, capability: "model.execute", providerId: fact.providerId, modelId: fact.modelId,
+      requestId: fact.requestId, accountingSource: "execution_fact", executionKeys: [fact.executionKey],
+      billing: "unverified", status: fact.state === "completed" ? "succeeded" : fact.state === "completed_failure" ? "failed" : "unknown",
+      estimatedCostCny: null, actualPending: true, startedAt: fact.startedAt ?? "",
+      modelCallCount: fact.modelAttemptCount ?? 0, callCountPending: fact.modelAttemptCount === null,
+    });
+  }
+  const summary = summarizeModelExecutionFacts(projection.facts, projection.issues, projection.currentOperationIds);
+  const cash = totals(lines);
+  const countExact = summary.countExact && (cash.legacyUnattributedReceipts ?? 0) === 0 && (cash.countConflicts ?? 0) === 0;
+  return { ...detail, lines, executionFacts: projection.facts, totals: {
+    ...cash, ...summary, legacyUnattributedReceipts: cash.legacyUnattributedReceipts ?? 0,
+    countConflicts: (cash.countConflicts ?? 0) + summary.countConflicts, countExact,
+    newBrokerRequestsThisAttempt: countExact ? summary.newBrokerRequestsThisAttempt : null,
+    newModelAttemptsThisAttempt: countExact ? summary.newModelAttemptsThisAttempt : null,
+  } };
+}
+
+function aggregateExecutionTotals(items: StudioCostTotals[]): Partial<StudioCostTotals> {
+  const knownSum = (field: "newBrokerRequestsThisAttempt" | "newModelAttemptsThisAttempt" | "cumulativeProviderMs" | "cumulativeQueueMs" | "cumulativeRequestMs") =>
+    items.every((item) => typeof item[field] === "number") ? sum(items, (item) => item[field] as number) : null;
+  return {
+    verifiedBrokerRequests: sum(items, (item) => item.verifiedBrokerRequests ?? 0),
+    verifiedModelAttempts: sum(items, (item) => item.verifiedModelAttempts ?? 0),
+    countExact: items.every((item) => item.countExact === true),
+    countConflicts: sum(items, (item) => item.countConflicts ?? 0),
+    legacyUnattributedReceipts: sum(items, (item) => item.legacyUnattributedReceipts ?? 0),
+    newBrokerRequestsThisAttempt: knownSum("newBrokerRequestsThisAttempt"),
+    newModelAttemptsThisAttempt: knownSum("newModelAttemptsThisAttempt"),
+    cumulativeProviderMs: knownSum("cumulativeProviderMs"), cumulativeQueueMs: knownSum("cumulativeQueueMs"),
+    cumulativeRequestMs: knownSum("cumulativeRequestMs"),
+    // 各run的并集不能直接相加充当全局墙钟；明细里才有同run的区间证据。
+    requestWallUnionMs: null,
+  };
+}
+
+function isModelLine(line: StudioCostLine): boolean {
+  return ["subscription", "unverified"].includes(line.billing) || line.capability === "model.execute";
+}
+
+function toRunDetail(
+  run: CostRunSource,
+  usageByNode: Map<string, NodeModelUsage> = new Map(),
+  paidReceipts: unknown[] = [],
+  documentReceipts: unknown[] = [],
+): StudioCostRunDetail {
   const title = runTitle(run.initialInput);
   const nodes = nodeMap(run.nodeRuns);
   const authorizations = Array.isArray(run.spendAuthorizations) ? run.spendAuthorizations : [];
@@ -91,6 +195,7 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
   const receipts = mergeReceipts(
     [...nestedReceipts, ...uncertainReceipts],
     Array.isArray(run.executionReceipts) ? run.executionReceipts : [],
+    [...paidReceipts, ...documentReceipts],
   );
   const lines = receipts.flatMap((value, index): StudioCostLine[] => {
     const receipt = isRecord(value) ? value : undefined;
@@ -149,6 +254,7 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       // 旧回执没有固化授权上限；按已执行的预估额恢复保守基线，并沿用旧版去重规则。
       ?? (billing === "metered" && estimatedCostCny > 0 ? estimatedCostCny : undefined);
     const spendAuthorizationId = receiptAuthorizationId || (isRecord(authorization) ? text(authorization.id) : "");
+    const lineRequestId = text(receipt.requestId);
     return [{
       id,
       runId: run.id,
@@ -173,14 +279,56 @@ function toRunDetail(run: CostRunSource): StudioCostRunDetail {
       ...(billing === "unverified" ? { modelCallCount: nonNegativeInteger(parameters?.modelCallCount) ?? 0 } : {}),
       ...(documentOperation ? { accountingSource: "document_operation" as const,
         ...(parameters?.modelCallCountKnown === false ? { callCountPending: true } : {}) } : {}),
-      actualPending: documentOperation && parameters?.billingPending === true || billing === "metered"
+      ...(receipt.countConflict === true ? { countConflict: true } : {}),
+      ...(lineRequestId ? { requestId: lineRequestId } : {}),
+      actualPending: billing === "unverified" && actualCost === undefined || documentOperation && parameters?.billingPending === true || billing === "metered"
         && !definitiveNoSubmission
         && (actualCost === undefined || currentOperationPending),
       startedAt,
       ...(text(receipt.finishedAt) ? { finishedAt: text(receipt.finishedAt) } : {}),
     }];
   }).sort((left, right) => left.startedAt.localeCompare(right.startedAt));
-  return { runId: run.id, title, totals: totals(lines), lines };
+  const attributedLines = foldLegacySubscriptionSnapshots(lines, usageByNode);
+  return { runId: run.id, title, totals: totals(attributedLines), lines: attributedLines };
+}
+
+// T04/AC-06a：同一节点存在 checkpoint 权威计数时，没有请求身份的旧订阅累计快照
+// 不能再逐份相加（2/4/4 变 10 的根因）。折叠为每节点一份未归属桶：保留最近一份
+// 快照的展示字段，不并入精确总数；权威计数由 checkpoint 补齐行给出。
+function foldLegacySubscriptionSnapshots(
+  lines: CostLineBuild[],
+  usageByNode: Map<string, NodeModelUsage>,
+): CostLineBuild[] {
+  const bucketKeyOf = (line: CostLineBuild) => `${line.nodeId}:${line.providerId}:${line.modelId}`;
+  const isFoldable = (line: CostLineBuild) => line.billing === "subscription"
+    && !line.requestId
+    && line.accountingSource !== "document_operation"
+    && (usageByNode.get(line.nodeId)?.modelCallCount ?? 0) > 0;
+  const buckets = new Map<string, CostLineBuild[]>();
+  for (const line of lines) {
+    if (!isFoldable(line)) continue;
+    const key = bucketKeyOf(line);
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(line);
+    else buckets.set(key, [line]);
+  }
+  const emitted = new Set<string>();
+  const result: CostLineBuild[] = [];
+  for (const line of lines) {
+    if (!isFoldable(line)) { result.push(line); continue; }
+    const key = bucketKeyOf(line);
+    if (emitted.has(key)) continue;
+    emitted.add(key);
+    const bucket = buckets.get(key)!;
+    const latest = bucket.reduce((left, right) => left.startedAt.localeCompare(right.startedAt) >= 0 ? left : right);
+    const { subscriptionCallCount: _foldedCount, ...withoutCount } = latest;
+    result.push({
+      ...withoutCount,
+      legacyUnattributed: true,
+      legacySnapshotCount: bucket.length,
+    });
+  }
+  return result;
 }
 
 function actualMediaAttribution(
@@ -254,34 +402,136 @@ function uncertainReceipt(value: unknown, authorizations: unknown[], executionPl
   }];
 }
 
-function mergeReceipts(current: unknown[], history: unknown[]): unknown[] {
+function mergeReceipts(current: unknown[], history: unknown[], cash: unknown[] = []): unknown[] {
   const merged = new Map<string, Record<string, unknown>>();
-  for (const [index, value] of [...current, ...history].entries()) {
-    if (!isRecord(value)) continue;
+  const put = (value: unknown, index: number, kind: "current" | "history" | "cash") => {
+    if (!isRecord(value)) return;
     const requestId = text(value.requestId);
     const key = requestId
-      ? `request:${text(value.nodeId)}:${requestId}`
+      ? `request:${text(value.providerId)}:${requestId}`
       : [value.nodeId, value.startedAt, value.providerId, value.modelId ?? value.model]
         .map(text)
         .filter(Boolean)
         .join(":") || `receipt:${index}`;
-    merged.set(key, { ...(merged.get(key) ?? {}), ...value });
-  }
+    const existing = merged.get(key);
+    merged.set(key, existing ? mergeReceiptPair(existing, value, kind) : { ...value });
+  };
+  // 宿主当前事实最先入基线；历史执行回执只补缺；现金/文档账本最后到达，
+  // 是实付与终态的权威更正（AC-06b：合法更正不是冲突）。
+  current.forEach((value, index) => put(value, index, "current"));
+  history.forEach((value, index) => put(value, index, "history"));
+  cash.forEach((value, index) => put(value, index, "cash"));
   return [...merged.values()];
 }
 
-function totals(lines: StudioCostLine[]): StudioCostTotals {
+// AC-06b：同身份回执合并保留事实来源权威。终态不倒退（unknown→终态、failed→succeeded
+// 是合法推进）；现金账本可更正占位实付；两个互斥实付保留先到账并显式标记冲突。
+function mergeReceiptPair(
+  base: Record<string, unknown>,
+  next: Record<string, unknown>,
+  kind: "current" | "history" | "cash",
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...base };
+  const baseObservedAt = Date.parse(text(base.finishedAt) || text(base.startedAt));
+  const nextObservedAt = Date.parse(text(next.finishedAt) || text(next.startedAt));
+  const olderFailedObservation = kind === "history" && base.status === "succeeded" && next.status === "failed"
+    && Number.isFinite(baseObservedAt) && Number.isFinite(nextObservedAt) && nextObservedAt < baseObservedAt;
+  const CASH_AUTHORITY_FIELDS = new Set(["actualCostSource", "finishedAt"]);
+  for (const [field, value] of Object.entries(next)) {
+    if (value === undefined || value === "" || value === null) continue;
+    const previous = merged[field];
+    if (previous === undefined || previous === "" || previous === null) {
+      merged[field] = value;
+      continue;
+    }
+    if (isDeepStrictEqual(previous, value)) continue;
+    if (kind === "cash" && CASH_AUTHORITY_FIELDS.has(field) && merged.countConflict !== true) {
+      merged[field] = value;
+      continue;
+    }
+    if (field === "parameters" && isRecord(previous) && isRecord(value)) {
+      // 同一个物理请求的累计尝试只前进，不把1、3、3相加，也不让旧快照覆盖3。
+      merged[field] = { ...value, ...previous };
+      const parameters = merged[field] as Record<string, unknown>;
+      for (const countKey of ["modelCallCount", "modelAttemptCount"]) {
+        const counts = [previous[countKey], value[countKey]].map(nonNegativeInteger)
+          .filter((count): count is number => count !== undefined);
+        if (counts.length) parameters[countKey] = Math.max(...counts);
+      }
+      continue;
+    }
+    if (["meteredAttemptCount", "meteredFailedAttemptCount"].includes(field)) {
+      if (field === "meteredFailedAttemptCount") {
+        if (olderFailedObservation) continue;
+        if (base.status === "failed" && next.status === "succeeded" && nextObservedAt >= baseObservedAt) {
+          merged[field] = value;
+          continue;
+        }
+      }
+      const counts = [previous, value].map(nonNegativeInteger).filter((count): count is number => count !== undefined);
+      if (counts.length) merged[field] = Math.max(...counts);
+      continue;
+    }
+    if (field === "status") {
+      if (olderFailedObservation) continue;
+      // 终态单调：unknown 让位给任一终态；failed 可因恢复观察推进为 succeeded；
+      // 其余方向（如 succeeded→failed）是互斥终态冲突。
+      if (previous === "unknown") { merged[field] = value; continue; }
+      if (previous === "failed" && value === "succeeded") { merged[field] = value; continue; }
+      if (value === "unknown") continue;
+      merged.countConflict = true;
+      continue;
+    }
+    if (field === "actualCostCny") {
+      const previousCost = nonNegativeNumber(previous);
+      const nextCost = nonNegativeNumber(value);
+      if (previousCost === undefined) { merged[field] = value; continue; }
+      if (nextCost === undefined || nextCost === previousCost) continue;
+      const authoritativeBase = base.actualCostSource === "provider_reported" || base.actualCostSource === "manual_reconciled";
+      const authoritativeNext = next.actualCostSource === "provider_reported" || next.actualCostSource === "manual_reconciled";
+      if (kind === "cash" && !authoritativeBase
+        && (authoritativeNext || nonNegativeInteger(base.meteredAttemptCount) === 0 && (nonNegativeInteger(next.meteredAttemptCount) ?? 0) > 0)) {
+        merged[field] = value;
+        continue;
+      }
+      // 无更正依据的实付矛盾：保留先到账，显式提示。
+      merged.countConflict = true;
+      continue;
+    }
+    // 其余字段：当前事实保留，历史不改写当前值；身份字段矛盾显式提示。
+    if (["requestId", "nodeId", "providerId", "modelId", "model"].includes(field)) merged.countConflict = true;
+  }
+  return merged;
+}
+
+function totals(lines: CostLineBuild[]): StudioCostTotals {
+  const unverifiedModelCalls = lines.some((line) => line.billing === "unverified")
+    ? sum(lines, (line) => line.billing === "unverified" ? line.modelCallCount ?? 0 : 0)
+    : undefined;
+  const subscriptionCalls = sum(lines, (line) => line.billing === "subscription"
+    ? line.legacyUnattributed ? 0 : line.subscriptionCallCount ?? 1
+    : 0);
+  const meteredCalls = sum(lines, (line) => line.billing === "metered" ? line.meteredAttemptCount ?? 0 : 0);
+  const legacyUnattributedReceipts = sum(lines, (line) => line.legacySnapshotCount ?? 0);
+  const countConflicts = lines.filter((line) => line.countConflict === true).length;
+  // 已核实的 Broker 请求：有明确请求身份的去重计数。checkpoint 补齐行与旧快照
+  // 没有请求身份，不计入；此时的精确度由 countExact 表达。
   return {
-    estimatedCostCny: money(sum(lines, (line) => line.estimatedCostCny)),
+    estimatedCostCny: money(sum(lines, (line) => line.estimatedCostCny ?? 0)),
     authorizedCostCny: uniqueAuthorizedCost(lines),
     actualCostCny: money(sum(lines, (line) => line.actualCostCny ?? 0)),
     actualPendingCount: lines.filter((line) => line.actualPending).length,
-    meteredCalls: sum(lines, (line) => line.billing === "metered" ? line.meteredAttemptCount ?? 0 : 0),
-    subscriptionCalls: sum(lines, (line) => line.billing === "subscription" ? line.subscriptionCallCount ?? 1 : 0),
-    ...(lines.some((line) => line.billing === "unverified")
-      ? { unverifiedModelCalls: sum(lines, (line) => line.billing === "unverified" ? line.modelCallCount ?? 0 : 0) } : {}),
+    meteredCalls,
+    subscriptionCalls,
+    ...(unverifiedModelCalls !== undefined ? { unverifiedModelCalls } : {}),
     freeCalls: lines.filter((line) => line.billing === "free" || line.billing === "local_compute").length,
     failedMeteredCalls: sum(lines, (line) => line.billing === "metered" ? line.meteredFailedAttemptCount ?? 0 : 0),
+    // workflow operation和媒体采购编号不是Broker物理请求证据；由只读投影补充精确统计。
+    verifiedModelAttempts: 0,
+    verifiedBrokerRequests: 0,
+    legacyUnattributedReceipts,
+    countExact: !lines.some(isModelLine) && legacyUnattributedReceipts === 0 && countConflicts === 0,
+    countConflicts,
   };
 }
 
@@ -297,7 +547,7 @@ function group(lines: StudioCostLine[], key: (line: StudioCostLine) => string): 
       : item.billing === "subscription"
         ? item.subscriptionCallCount ?? 1
         : 1),
-    estimatedCostCny: money(sum(items, (item) => item.estimatedCostCny)),
+    estimatedCostCny: money(sum(items, (item) => item.estimatedCostCny ?? 0)),
     actualCostCny: money(sum(items, (item) => item.actualCostCny ?? 0)),
     actualPendingCount: items.filter((item) => item.actualPending).length,
   })).sort((left, right) => right.actualCostCny - left.actualCostCny || right.estimatedCostCny - left.estimatedCostCny);

@@ -44,24 +44,28 @@ test("配音能力按真实 Provider 投影且不虚构音乐或音效轨", () =
   assert.deepEqual(summarizeProductionCapabilities(providers, "macos-say-v1").audio, {
     narration: true,
     pauseControl: "punctuation",
+    continuousNarrationGroups: false,
     musicTrack: false,
     soundEffectsTrack: false,
   });
   assert.deepEqual(summarizeProductionCapabilities(providers, "minimax-tts-v1").audio, {
     narration: true,
     pauseControl: "text_hint",
+    continuousNarrationGroups: true,
     musicTrack: false,
     soundEffectsTrack: false,
   });
   assert.deepEqual(summarizeProductionCapabilities(providers, "kokoro-local-v1").audio, {
     narration: true,
     pauseControl: "unsupported",
+    continuousNarrationGroups: false,
     musicTrack: false,
     soundEffectsTrack: false,
   });
   assert.deepEqual(summarizeProductionCapabilities(providers).audio, {
     narration: false,
     pauseControl: "unsupported",
+    continuousNarrationGroups: false,
     musicTrack: false,
     soundEffectsTrack: false,
   });
@@ -325,6 +329,11 @@ test("producer 将合同 fixture 转换为 CreativeTreatment 并复用 role-audi
   assert.equal(execution.output.version, "video-factory/creative-treatment-v2");
   assert.equal(execution.output.progression.length, 3);
   assert.equal(execution.agentLoop?.status, "passed");
+  const context = (client.calls[1]!.payload as { context: {
+    upstreamFacts: Record<string, unknown>; currentRoleContract: Record<string, unknown>;
+  } }).context;
+  assert.equal("productionCapabilities" in context.upstreamFacts, false);
+  assert.ok(context.currentRoleContract.productionCapabilities, "完整能力仍供审计使用");
 });
 
 test("构思返工要求同时进入 producer 与独立 audit 上下文", async () => {

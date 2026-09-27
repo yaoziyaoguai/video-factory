@@ -128,6 +128,50 @@ function validDraft(): { scenes: Array<Record<string, unknown>> } {
 }
 
 describe("CodexScreenwriterAgent", () => {
+  for (const sample of [
+    { kind: "解释", promise: "看懂冰在水中为什么浮起", opening: "先比较冰块与水，不虚构实验测量", payoff: "回到密度这个判断", facts: ["这里只展示现象，不给测量数字"] },
+    { kind: "叙事", promise: "看见一次迟到的道歉", opening: "以人物犹豫而不是旁白讲道理开场", payoff: "递出信后停在回应之前，不补鸡汤", facts: [] },
+    { kind: "氛围", promise: "留出一小段不被催促的时间", opening: "开头明确4秒静默，不加提问、不加CTA", payoff: "回扣光落在桌面的意象，不升华", facts: [] },
+    { kind: "事实", promise: "区分报道事实与网上猜测", opening: "保留来源时间与适用范围，不作绝对断言", payoff: "结尾仍保留未核验项，不引流", facts: ["来源只支持限定时段的观察"] },
+  ]) it(`carries the adopted ${sample.kind} intent through draft, explicit check and draft-only revision without imposing a timed hook`, async () => {
+    const input = screenwriterInput();
+    const treatment = { version: "video-factory/creative-treatment-v2" as const, viewerPromise: sample.promise,
+      hook: { narrationIntent: sample.opening, visualIntent: "按当前用户要求构图" },
+      progression: [{ beatId: "b1", purpose: "建立观看动机", viewerGain: sample.promise }, { beatId: "b2", purpose: "推进而非重复介绍素材", viewerGain: sample.payoff }],
+      payoff: sample.payoff, visualPrinciples: ["示意不冒充真实取证"], soundPrinciples: [sample.opening], evidenceRequirements: [], feasibilityQuestions: [] };
+    input.brief.creativeTreatment = treatment;
+    input.brief.angle = sample.opening;
+    input.brief.voiceTiming = { rate: 175, pauseScale: 1 };
+    const draft = { ...validDraft(), viewerPromise: sample.promise, narrativeArc: `${sample.opening}→${sample.payoff}`, canonFacts: sample.facts };
+    if (sample.kind === "氛围") {
+      draft.scenes[0] = validScene(1, { narration: "…", duration: 4, purpose: "用户明确4秒静默", sound_cue: "明确静默" });
+      draft.scenes[1]!.duration = 10; draft.scenes[2]!.duration = 10;
+    }
+    const revised = structuredClone(draft);
+    revised.scenes[2]!.narration = "这一句承接前一句，不重新介绍素材。";
+    const client = new SequencedCodexClient([draft, revised], "deepseek", "writer");
+    const auditor = new SequencedCodexClient([{
+      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{ targetPath: "", dimensions: ["attention", "progression", "payoff", "expression"].map(dimension => ({ dimension, score: 85, evidence: "受控样例只证明当前意图可达，不证明真实质量改善。" })) }],
+      verdict: "pass", score: 85, summary: "按当前作品目标给建议。", issues: [], repairInstructions: [],
+    }], "zai", "auditor");
+    const agent = new CodexScreenwriterAgent({ client, auditClient: auditor, maxReviewIterations: 1 });
+    const originalBytes = JSON.stringify(treatment);
+    const first = await agent.draftDetailed({ ...input, creativeReviewExecution: { mode: "draft" } });
+    assert.equal(auditor.calls.length, 0);
+    await agent.draftDetailed({ ...input, creativeReviewExecution: { mode: "check", candidate: first.output, auditOperationId: `check-${sample.kind}` } });
+    assert.equal(client.calls.length, 1, "主动审计不得重写稿件");
+    const check = auditor.calls[0]!.payload as { criteria: string[]; context: { upstreamFacts: { creativeTreatment: unknown; angle: string; voiceTiming: unknown } }; candidate: unknown };
+    assert.deepEqual(check.context.upstreamFacts.creativeTreatment, treatment);
+    assert.equal(check.context.upstreamFacts.angle, sample.opening);
+    assert.deepEqual(check.candidate, first.output);
+    assert.doesNotMatch(check.criteria.join("\n"), /前两秒|前六秒|两秒内/);
+    assert.match(check.criteria.join("\n"), /用户.*留白|留白.*用户/);
+    await agent.draftDetailed({ ...input, brief: { ...input.brief, rework: { sourceRunId: "fixture", instruction: "保留全部意见，并只调整最后一句承接；不要补CTA。", findings: [], previousScript: { ...first.output } } }, creativeReviewExecution: { mode: "draft" } });
+    assert.equal(auditor.calls.length, 1, "用户修订只产新稿，不自动再审");
+    assert.equal(JSON.stringify(treatment), originalBytes, "构造下游上下文不能改写原稿字节");
+  });
+
   it("rejects a stale selected model before calling a single configured agent", async () => {
     const client = new CapturingCodexClient(() => validDraft());
     const agent = new CodexScreenwriterAgent({ client, modelId: "gpt-current" });
@@ -269,6 +313,8 @@ describe("CodexScreenwriterAgent", () => {
     assert.deepEqual(firstProducerPayload.brief.articleSources, articleSources);
     const auditContext = firstAuditPayload.context as Record<string, unknown>;
     assert.equal("brief" in auditContext, false);
+    assert.equal("productionCapabilities" in (auditContext.upstreamFacts as Record<string, unknown>), false,
+      "能力清单只在当前角色合同保留一份，不机械重复到上游事实");
     assert.deepEqual(auditContext.roleScope, {
       owns: ["viewerPromise", "narrativeArc", "canonFacts", "scenes"],
       doesNotOwn: ["素材实际命中", "画面生成结果", "配音成品", "渲染与终审结果"],
@@ -282,11 +328,11 @@ describe("CodexScreenwriterAgent", () => {
       visualPlan,
       articleSources,
       voiceTiming: { rate: 187, pauseScale: 1.15 },
-      productionCapabilities: {
+    });
+    assert.deepEqual((auditContext.currentRoleContract as Record<string, unknown>).productionCapabilities, {
         assetProviders: [],
         editing: { sourceRangeReuse: true, staticEditorialCard: false },
-        audio: { narration: false, pauseControl: "unsupported", musicTrack: false, soundEffectsTrack: false },
-      },
+        audio: { narration: false, pauseControl: "unsupported", continuousNarrationGroups: false, musicTrack: false, soundEffectsTrack: false },
     });
     assert.deepEqual((auditClient.calls[1]!.payload as Record<string, unknown>).previousAudit, repairAudit);
   });
@@ -625,7 +671,7 @@ describe("CodexScreenwriterAgent", () => {
         productionCapabilities: {
           assetProviders: [],
           editing: { sourceRangeReuse: true, staticEditorialCard: false },
-          audio: { narration: false, pauseControl: "unsupported", musicTrack: false, soundEffectsTrack: false },
+          audio: { narration: false, pauseControl: "unsupported", continuousNarrationGroups: false, musicTrack: false, soundEffectsTrack: false },
         },
       },
     });

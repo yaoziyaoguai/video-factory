@@ -187,7 +187,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     listRuns: async () => ([runDetail()]),
     costDashboard: async () => ({
       currency: "CNY",
-      totals: { estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 0, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0 },
+      totals: { estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 0, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0 , verifiedModelAttempts: 0, verifiedBrokerRequests: 0, legacyUnattributedReceipts: 0, countExact: true, countConflicts: 0 },
       byProvider: [],
       byNode: [],
       runs: [],
@@ -195,7 +195,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     runCostDetail: async (runId) => ({
       runId,
       title: "第一条视频",
-      totals: { estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 0, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0 },
+      totals: { estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 0, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0 , verifiedModelAttempts: 0, verifiedBrokerRequests: 0, legacyUnattributedReceipts: 0, countExact: true, countConflicts: 0 },
       lines: [],
     }),
     getRun: async (runId) => runId === "run-1"
@@ -613,7 +613,7 @@ describe("Studio API", () => {
     const service = fakeService({
       costDashboard: async () => ({
         currency: "CNY",
-        totals: { estimatedCostCny: 2.4, authorizedCostCny: 3, actualCostCny: 0, actualPendingCount: 1, meteredCalls: 1, subscriptionCalls: 0, freeCalls: 1, failedMeteredCalls: 0 },
+        totals: { estimatedCostCny: 2.4, authorizedCostCny: 3, actualCostCny: 0, actualPendingCount: 1, meteredCalls: 1, subscriptionCalls: 0, freeCalls: 1, failedMeteredCalls: 0 , verifiedModelAttempts: 0, verifiedBrokerRequests: 0, legacyUnattributedReceipts: 0, countExact: true, countConflicts: 0 },
         byProvider: [],
         byNode: [],
         runs: [],

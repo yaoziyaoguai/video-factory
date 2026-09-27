@@ -1,5 +1,5 @@
 import { AlertCircle, Check, SlidersHorizontal, X } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { parseStudioSeriesInput, type StudioSeriesInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 
@@ -12,10 +12,24 @@ interface SeriesDialogProps {
 export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
+  const formRef = useRef<HTMLFormElement>(null);
+  const baseline = useRef("");
+  const [discardPromptOpen, setDiscardPromptOpen] = useState(false);
   useEffect(() => {
-    if (open) setError(undefined);
+    if (open) {
+      setError(undefined);
+      setDiscardPromptOpen(false);
+      baseline.current = formRef.current ? JSON.stringify([...new FormData(formRef.current)]) : "";
+    }
   }, [open]);
-  const dialogRef = useDialogFocus<HTMLElement>(open, onClose, submitting);
+  function requestClose() {
+    if (submitting) return;
+    if (discardPromptOpen) { setDiscardPromptOpen(false); return; }
+    const current = formRef.current ? JSON.stringify([...new FormData(formRef.current)]) : "";
+    if (current !== baseline.current) setDiscardPromptOpen(true);
+    else onClose();
+  }
+  const dialogRef = useDialogFocus<HTMLElement>(open, requestClose, submitting, discardPromptOpen);
   if (!open) return null;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -51,14 +65,16 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
 
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget && !submitting) onClose();
+      if (event.target === event.currentTarget) requestClose();
     }}>
       <section ref={dialogRef} className="run-dialog series-dialog" role="dialog" aria-modal="true" aria-labelledby="series-dialog-title" tabIndex={-1}>
-        <header className="dialog-header">
+        <header className="dialog-header" inert={discardPromptOpen}>
           <div><p className="eyebrow">系列策划</p><h2 id="series-dialog-title">创建系列</h2><p>只填三项就能开始。未填写的风格和内容方向交给角色提出建议，再由你决定。</p></div>
-          <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
+          <button className="icon-button" type="button" onClick={requestClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
         <form
+          ref={formRef}
+          inert={discardPromptOpen}
           className="run-form series-form"
           onSubmit={submit}
           onChange={() => {
@@ -88,10 +104,20 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
           </details>
           {error ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}
           <footer className="dialog-actions">
-            <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
+            <button className="button button-ghost" type="button" onClick={requestClose} disabled={submitting}>取消</button>
             <button className="button button-primary" type="submit" disabled={submitting}><Check aria-hidden="true" size={17} />{submitting ? "正在创建..." : "创建系列"}</button>
           </footer>
         </form>
+        {discardPromptOpen ? <div className="dialog-backdrop new-run-discard-backdrop" role="presentation">
+          <section className="decision-dialog" aria-labelledby="series-discard-title">
+            <header className="dialog-header"><div><p className="eyebrow">未保存的修改</p><h2 id="series-discard-title">要放弃本次系列填写吗？</h2></div></header>
+            <div className="decision-dialog-copy"><AlertCircle aria-hidden="true" size={22} /><div><p>尚未保存的系列名称、承诺和设置会丢失。</p><p>不会创建系列或调用模型。</p></div></div>
+            <footer className="dialog-actions">
+              <button className="button button-primary" type="button" data-dialog-initial-focus onClick={() => setDiscardPromptOpen(false)}>返回填写</button>
+              <button className="button button-danger-ghost" type="button" onClick={onClose}>放弃并关闭</button>
+            </footer>
+          </section>
+        </div> : null}
       </section>
     </div>
   );

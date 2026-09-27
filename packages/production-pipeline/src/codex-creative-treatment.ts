@@ -149,7 +149,7 @@ export interface CodexCreativeTreatmentAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_TREATMENT_TIMEOUT_MS = 660_000;
 const DEFAULT_TREATMENT_MAX_ATTEMPTS = 2;
-export const CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION = "creative-treatment-v8|role-audit-v9|treatment-validator-v2|production-capabilities-v3|visual-plan-v2|planning-disposition-v1|host-readiness-v2|rework-instruction-v1|series-context-v1";
+export const CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION = "creative-treatment-v8|role-audit-v9|treatment-validator-v2|production-capabilities-v4|visual-plan-v2|planning-disposition-v1|host-readiness-v2|rework-instruction-v1|series-context-v1|audit-capabilities-once-v1";
 
 // id 固定为 codex-creative-treatment-v1：构思产物登记来源时按该 id 标注。
 export class CodexCreativeTreatmentAgent implements CreativeTreatmentAgent {
@@ -361,7 +361,6 @@ function treatmentAuditContext(
       ...(brief.reworkInstruction ? { reworkInstruction: brief.reworkInstruction } : {}),
       ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
       ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
-      productionCapabilities: brief.productionCapabilities ?? summarizeProductionCapabilities([]),
       ...(hostReadiness ? { hostReadiness } : {}),
       ...(input.referenceGrammar
         ? { referenceGrammar: { ...input.referenceGrammar, evidenceStatus: "style_structure_reference" } }

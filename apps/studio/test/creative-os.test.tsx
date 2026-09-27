@@ -783,6 +783,41 @@ describe("Creative OS", () => {
     expect(submit).toHaveBeenCalledWith(expect.objectContaining({ pillar: "理解来源", expectedRevision: series.revision }));
   });
 
+  it.each(["escape", "close", "cancel", "backdrop"])("protects an episode draft through %s without saving it", async (entry) => {
+    const user = userEvent.setup();
+    const series = seriesPublicAffairs();
+    const close = vi.fn();
+    const submit = vi.fn();
+    render(<SeriesEpisodeDialog open series={series} episode={series.episodes[0]!} onClose={close} onSubmit={submit} />);
+    await user.clear(screen.getByLabelText("单集标题"));
+    await user.type(screen.getByLabelText("单集标题"), "未保存的单集改稿");
+    if (entry === "escape") await user.keyboard("{Escape}");
+    if (entry === "close") await user.click(screen.getByRole("button", { name: "关闭" }));
+    if (entry === "cancel") await user.click(screen.getByRole("button", { name: "取消" }));
+    if (entry === "backdrop") fireEvent.mouseDown(screen.getByRole("dialog").parentElement!);
+    expect(close).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "返回填写" }));
+    expect(screen.getByLabelText("单集标题")).toHaveValue("未保存的单集改稿");
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "放弃并关闭" }));
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("keeps an episode draft on a concurrent revision and refuses a stale save", async () => {
+    const user = userEvent.setup();
+    const series = seriesPublicAffairs();
+    const submit = vi.fn();
+    const props = { open: true, series, episode: series.episodes[0]!, onClose: vi.fn(), onSubmit: submit };
+    const { rerender } = render(<SeriesEpisodeDialog {...props} />);
+    await user.type(screen.getByLabelText("单集标题"), "保留我的补充");
+    rerender(<SeriesEpisodeDialog {...props} series={{ ...series, revision: series.revision + 1 }} />);
+    expect(screen.getByLabelText("单集标题")).toHaveValue(`${props.episode.title}保留我的补充`);
+    expect(screen.getByRole("alert")).toHaveTextContent("路线图已更新");
+    expect(screen.getByRole("button", { name: "保存人工版本" })).toBeDisabled();
+    expect(submit).not.toHaveBeenCalled();
+  });
+
   it("keeps a legacy unsupported series readable but blocks new production", () => {
     const legacySeries: StudioSeries = {
       id: "series-legacy-platform",
@@ -2734,6 +2769,38 @@ describe("Creative OS", () => {
 
     await user.type(screen.getByLabelText("选题标题"), "继续填写选题");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it.each(["escape", "close", "cancel", "backdrop"])("protects unsaved series fields through %s and preserves them after returning", async (entry) => {
+    const user = userEvent.setup();
+    const close = vi.fn();
+    const submit = vi.fn();
+    render(<SeriesDialog open onClose={close} onSubmit={submit} />);
+    await user.type(screen.getByLabelText("系列名称"), "保留这份系列草稿");
+    const dialog = screen.getByRole("dialog");
+    if (entry === "escape") await user.keyboard("{Escape}");
+    if (entry === "close") await user.click(screen.getByRole("button", { name: "关闭" }));
+    if (entry === "cancel") await user.click(screen.getByRole("button", { name: "取消" }));
+    if (entry === "backdrop") fireEvent.mouseDown(dialog.parentElement!);
+    expect(close).not.toHaveBeenCalled();
+    expect(screen.getByText("要放弃本次系列填写吗？")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回填写" }));
+    expect(screen.getByLabelText("系列名称")).toHaveValue("保留这份系列草稿");
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "放弃并关闭" }));
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("does not ask to discard unchanged series defaults or a reverted field", async () => {
+    const user = userEvent.setup();
+    const close = vi.fn();
+    render(<SeriesDialog open onClose={close} onSubmit={async () => undefined} />);
+    await user.type(screen.getByLabelText("系列名称"), "撤销");
+    await user.clear(screen.getByLabelText("系列名称"));
+    await user.keyboard("{Escape}");
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("要放弃本次系列填写吗？")).not.toBeInTheDocument();
   });
 
   it("names the missing series field when creation is incomplete", async () => {

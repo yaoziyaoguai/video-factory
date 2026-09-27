@@ -444,6 +444,19 @@ describe("voice preview API contracts", () => {
 });
 
 describe("scene narration revision API contracts", () => {
+  it("distinguishes pure subtitle recovery from narration rewrites and binds the current audio version", () => {
+    const recovery = { action: "recover_subtitles", requestId: "subtitle-recovery-1", expectedRunRevision: 7,
+      expectedVoiceVersionId: "voice-v1", expectedNarrationPlanSha256: "a".repeat(64),
+      expectedLayoutKey: "b".repeat(64), expectedAudioSha256: "c".repeat(64),
+      note: "仅重解析已保存字幕", refetchReason: "已修复字幕服务的下载路由" };
+    assert.deepEqual(parseStudioNarrationRevisionInput(recovery), recovery);
+    for (const invalid of [
+      { ...recovery, expectedAudioSha256: "" }, { ...recovery, requestId: "../invalid" },
+      { ...recovery, expectedVoiceVersionId: "" }, { ...recovery, expectedLayoutKey: "bad" },
+      { ...recovery, refetchReason: " " }, { ...recovery, action: "retry_all_audio" },
+    ]) assert.throws(() => parseStudioNarrationRevisionInput(invalid), StudioInputError);
+  });
+
   it("accepts one scene's narration rewrite and rejects text that is not a single line", () => {
     assert.deepEqual(
       parseStudioNarrationRevisionInput({

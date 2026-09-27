@@ -115,6 +115,7 @@ const PLANNING_DELIVERY_KINDS = new Set([
 ]);
 
 export interface StudioPipelinePort {
+  readModelExecutionFacts?: (runId: string) => Promise<import("@video-factory/production-pipeline").ModelExecutionProjection>;
   readDocumentExecutionReceipts?: (runId: string) => Promise<unknown[]>;
   readPaidExecutionReceipts?: (runId: string) => Promise<NodeExecutionReceipt[]>;
   readTextExecutionUsage?: (runId: string) => Promise<Array<{ nodeId: string; providerId: string; modelId: string; modelCallCount: number }>>;
@@ -414,13 +415,19 @@ export class ProductionStudio {
       profileId: "auto",
       assetProviderIds: [brief.providers.assets === "ai-shot-router-v1" ? "local-editorial-v1" : brief.providers.assets],
     };
+    // 尚未形成镜头的早期失败不是“用户批准改零镜头”。保留来源链，但让新脚本
+    // 建立首次范围；后续规划/报价仍逐步确认。已有材料或人工打回不走这条路。
+    const beforeFirstShotPlan = !previousScript && !previousDirectorPlan
+      && findings.length === 0 && !manualRejectionReason
+      && !run.nodeRuns.some((node) => ["assets", "voice", "render"].includes(node.nodeId)
+        && node.status !== "pending");
     const rework = {
       sourceRunId: run.id,
       sourceRunRevision: run.revision,
       ...(rejectionReason ? { rejectionReason } : {}),
       nodeInstructions: buildReworkNodeInstructions(findings, rejectionReason, affectedScenePositions),
       findings,
-      affectedScenePositions,
+      ...(beforeFirstShotPlan ? {} : { affectedScenePositions }),
       ...(previousScript ? { previousScript } : {}),
       ...(previousDirectorPlan ? { previousDirectorPlan } : {}),
     };
@@ -1808,7 +1815,7 @@ export class ProductionStudio {
       throw new StudioConflictError("这条制作当前不在人工终审阶段。");
     }
     if (!this.options.pipeline.dispatchNarrationRevision) {
-      throw new StudioConflictError("当前制作引擎不支持改单镜旁白字幕。");
+      throw new StudioConflictError("当前制作引擎不支持这项旁白字幕操作，原成片仍可查看与确认。");
     }
     try {
       const dispatched = await this.options.pipeline.dispatchNarrationRevision(
@@ -1818,6 +1825,7 @@ export class ProductionStudio {
       );
       return await this.dispatchedDetail(dispatched);
     } catch (error) {
+      if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
       if (
         error instanceof StaleRunRevisionError
         || error instanceof NodeVersionConflictError
@@ -1892,6 +1900,7 @@ export class ProductionStudio {
       );
       return await this.dispatchedDetail(dispatched);
     } catch (error) {
+      if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
       if (error instanceof StaleRunRevisionError || (error instanceof Error && /locked by another writer/.test(error.message))) {
         throw new StudioConflictError("你查看的审片意见已经更新，请刷新后再补查。");
       }

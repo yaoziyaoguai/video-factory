@@ -332,6 +332,8 @@ describe("CodexVisualDirectorAgent", () => {
     assert.deepEqual(auditPayload.context.upstreamFacts.brief.voiceTiming, { rate: 192, pauseScale: 1.2 });
     assert.deepEqual(auditPayload.context.upstreamFacts.brief.articleSources, articleSources);
     const contract = auditPayload.context.currentRoleContract;
+    assert.equal("productionCapabilities" in auditPayload.context.upstreamFacts.brief, false);
+    assert.deepEqual(contract.productionCapabilities, producerBrief.productionCapabilities);
     assert.deepEqual(contract.durationRange, { minSeconds: 20, maxSeconds: 34 });
     const auditCriteria = (auditClient.calls[0]!.payload as { criteria: string[] }).criteria.join("\n");
     assert.match(
@@ -1453,7 +1455,7 @@ describe("CodexVisualDirectorAgent", () => {
           constraints: ["不包含真实人物动作或现场环境"],
         }],
         editing: { sourceRangeReuse: true, staticEditorialCard: true },
-        audio: { narration: false, pauseControl: "unsupported", musicTrack: false, soundEffectsTrack: false },
+        audio: { narration: false, pauseControl: "unsupported", continuousNarrationGroups: false, musicTrack: false, soundEffectsTrack: false },
       },
     });
     assert.deepEqual(payload.scenes, input.scenes);

@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -131,6 +132,78 @@ class ContinuousVoiceWorkerTest(unittest.TestCase):
             self.assertEqual(plan["subtitles"]["status"], "unavailable")
             self.assertEqual(response["diagnostics"]["meteredAttemptCount"], 1)
             self.assertEqual(response["diagnostics"]["actualCostCny"], 0.01)
+
+    def test_verified_subtitle_evidence_becomes_a_contract_with_sidecars_and_recovery_never_rebuys_audio(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request = voice_request(root)
+            group_audio_seconds = 17
+
+            def synthesize(http_request, audio, metadata_path=None, response_binding=None):
+                tone(audio, group_audio_seconds)
+                metadata_path.write_text(json.dumps({
+                    "request": response_binding,
+                    "audio_sha256": hashlib.sha256(audio.read_bytes()).hexdigest(),
+                    "audio_size_bytes": audio.stat().st_size,
+                    "subtitle_file": "https://public.example/subtitles/group-1.json",
+                }))
+                return audio
+
+            # 服务商返回的原始字幕 JSON 只能是已核实 adapter 的形状；这里以内部规范
+            # 夹具代表"已核实文档"，绝不把未知字段猜成时间轴。
+            sample_cues = json.dumps({"version": "video-factory/internal-sample-cues-v1", "cues": [
+                {"start": 0.5, "end": 2.0, "text": "相邻镜头连成一句。"},
+                {"start": 2.0, "end": 3.0, "text": "说完收束。"},
+            ]}).encode()
+
+            with patch("video_factory.group_voiceover._execute_minimax_audio_request", side_effect=synthesize) as provider, \
+                    patch("video_factory.narration_subtitles.open_asset_request", return_value=io.BytesIO(sample_cues)) as subtitle_download, \
+                    patch.dict("os.environ", {"MINIMAX_API_KEY": "test-key"}):
+                request["input"]["subtitle_adapter"] = "video-factory/internal-sample-cues-v1"
+                response = handle_request(request)
+                self.assertEqual(response["status"], "succeeded", response)
+                plan = json.loads(Path(response["output"]["voiceoverPlanPath"]).read_text())
+                subtitles = plan["subtitles"]
+                self.assertEqual(subtitles["version"], "video-factory/narration-subtitles-v1")
+                self.assertEqual(subtitles["status"], "verified")
+                self.assertEqual(subtitles["adapterVersion"], "video-factory/internal-sample-cues-v1")
+                self.assertEqual(subtitles["clock"], {"sampleRate": 44100})
+                first_group = subtitles["groups"][0]
+                self.assertEqual(first_group["status"], "verified")
+                self.assertEqual(first_group["cues"][0]["startSample"], first_group["cues"][0]["localStartSample"] + plan["groups"][0]["startSample"])
+                self.assertLessEqual(first_group["cues"][-1]["endSample"], plan["groups"][0]["endSample"])
+                voice_dir = Path(response["output"]["voiceoverPlanPath"]).parent
+                self.assertTrue((voice_dir / "narration.vtt").is_file())
+                self.assertTrue((voice_dir / "narration.ass").is_file())
+                self.assertEqual(subtitles["sidecar"], {"vtt": "narration.vtt", "ass": "narration.ass"})
+                self.assertIn("WEBVTT", (voice_dir / "narration.vtt").read_text(encoding="utf-8"))
+                self.assertIn("Dialogue: 0,", (voice_dir / "narration.ass").read_text(encoding="utf-8"))
+                # 纯字幕恢复：同一已采用计划上重跑，只重解析字幕，不重购音频、不重下载缓存。
+                request["input"]["recover_subtitles"] = True
+                request["input"].update({
+                    "voiceoverPlanPath": response["output"]["voiceoverPlanPath"],
+                    "voiceoverPlanSha256": hashlib.sha256(Path(response["output"]["voiceoverPlanPath"]).read_bytes()).hexdigest(),
+                    "trackSha256": hashlib.sha256(Path(plan["track_path"]).read_bytes()).hexdigest(),
+                    "layoutKey": plan["layoutKey"],
+                    "sourceOperationId": request["commandId"],
+                })
+                original_bytes = Path(response["output"]["voiceoverPlanPath"]).read_bytes()
+                with patch("video_factory.worker.synthesize_minimax_groups", side_effect=AssertionError("纯字幕恢复不得进入合成")) as no_synthesis, \
+                        patch("video_factory.worker.assemble_narration_track", side_effect=AssertionError("纯字幕恢复不得重新排轨")) as no_assembly:
+                    recovered = handle_request({**request, "commandId": "subtitle-only-1", "attempt": 1,
+                        "outputDir": str(root / "voice" / "recovery")})
+                no_synthesis.assert_not_called()
+                no_assembly.assert_not_called()
+                self.assertEqual(recovered["status"], "succeeded", recovered)
+                self.assertEqual(provider.call_count, 1, "恢复不得新增 TTS")
+                self.assertEqual(subtitle_download.call_count, 1, "已缓存字幕证据直接复用")
+                recovered_plan = json.loads(Path(recovered["output"]["voiceoverPlanPath"]).read_text())
+                self.assertEqual(recovered_plan["subtitles"]["status"], "verified")
+                self.assertEqual(recovered_plan["subtitles"]["cues"], subtitles["cues"])
+                self.assertEqual(Path(recovered_plan["track_path"]).read_bytes(), Path(plan["track_path"]).read_bytes())
+                self.assertEqual(Path(response["output"]["voiceoverPlanPath"]).read_bytes(), original_bytes)
+                self.assertEqual(recovered["diagnostics"]["meteredAttemptCount"], 0)
+                self.assertEqual(recovered["diagnostics"]["actualCostCny"], 0)
 
 
 if __name__ == "__main__":

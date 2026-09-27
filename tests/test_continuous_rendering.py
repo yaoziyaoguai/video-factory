@@ -1,18 +1,57 @@
 import json
+import hashlib
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
 from video_factory.continuous_voiceover import assemble_narration_track
 from video_factory.narration_plan import build_narration_plan
-from video_factory.renderer import attach_voiceover_plan, render_script_video, render_asset_video, write_render_manifest
+from video_factory.renderer import attach_voiceover_plan, burn_verified_subtitles, render_script_video, render_asset_video, write_render_manifest
+from video_factory.narration_subtitles import cues_to_ass
 from test_continuous_voiceover import tone
 
 
 class ContinuousRenderingTest(unittest.TestCase):
+    def test_subtitle_burn_checks_sidecar_identity_and_derives_output_geometry_without_mutating_original(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            voice_dir = root / "voice"
+            output = root / "render"
+            voice_dir.mkdir()
+            output.mkdir()
+            track = voice_dir / "narration.m4a"
+            tone(track, 1)
+            cues = [{"text": "有时间的字幕", "startSample": 0, "endSample": 22050}]
+            ass = voice_dir / "narration.ass"
+            ass.write_text(cues_to_ass(cues))
+            original = ass.read_bytes()
+            plan = {"layoutKey": "a" * 64, "track_path": str(track),
+                "trackSha256": hashlib.sha256(track.read_bytes()).hexdigest(),
+                "subtitles": {"version": "video-factory/narration-subtitles-v1", "status": "verified",
+                    "layoutKey": "a" * 64, "cues": cues, "sidecar": {"ass": ass.name},
+                    "sidecarSha256": {"ass": hashlib.sha256(original).hexdigest()}}}
+            manifest = {"slides": [{"duration": 1}], "resolution": "180x320", "voiceover_plan": plan}
+            with patch("video_factory.renderer.ffmpeg_filter_available", return_value=True), \
+                    patch("video_factory.renderer.run_atomic_ffmpeg") as render:
+                ass.write_text("changed")
+                burned, result = burn_verified_subtitles(manifest, output, root / "concat.txt", output / "final.mp4")
+                self.assertIsNone(burned)
+                self.assertEqual(result["reason"], "subtitle_content_binding_mismatch")
+                render.assert_not_called()
+                ass.write_bytes(original)
+                burned, result = burn_verified_subtitles(manifest, output, root / "concat.txt", output / "final.mp4")
+                self.assertEqual(result["status"], "burned")
+                derived = Path(result["assPath"])
+                self.assertTrue(derived.is_relative_to(output))
+                self.assertIn("PlayResX: 180\nPlayResY: 320", derived.read_text())
+                self.assertEqual(ass.read_bytes(), original)
+                command = render.call_args.args[0]
+                self.assertIn("fps=30", command[command.index("-vf") + 1])
+
     def test_both_render_paths_keep_visual_cuts_and_do_not_display_scene_locked_subtitles(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

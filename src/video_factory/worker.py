@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import mimetypes
 import shutil
 import sys
@@ -23,8 +24,8 @@ from .voiceover import VoiceDoesNotFitError, synthesize_voiceover_plan
 from .continuous_voiceover import NarrationGroupDoesNotFitError, assemble_narration_track
 from .narration_plan import validate_narration_plan
 from .group_voiceover import synthesize_minimax_groups, forecast_minimax_groups
-from .narration_subtitles import capture_subtitle_evidence
-from .voiceover import mastering_settings, _write_json_durably
+from .narration_subtitles import build_group_subtitles, cues_to_ass, cues_to_vtt, recover_subtitles
+from .voiceover import mastering_settings, _write_bytes_durably, _write_json_durably
 from .renderer import render_job_manifest
 from .diagnostics import diagnostic_context, diagnostic_span
 
@@ -270,6 +271,13 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
 
 
 def search_assets(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
+    # 同机宿主传入绝对期限，在入口转换一次为单调时钟。最多留两秒落盘，
+    # 不为每个来源重新分配20分钟；旧客户端未传预算时保持原行为。
+    expires = request.get("executionDeadlineUnixMs")
+    deadline = None
+    if isinstance(expires, (int, float)) and not isinstance(expires, bool) and math.isfinite(expires):
+        seconds = max(0.0, expires / 1000 - time.time())
+        deadline = time.monotonic() + max(0.0, seconds - min(2.0, seconds * 0.02))
     script_path = require_existing_path(request["input"], "scriptPath")
     director_plan_path = require_existing_path(request["input"], "directorPlanPath")
     script = json.loads(script_path.read_text(encoding="utf-8"))
@@ -296,6 +304,7 @@ def search_assets(request: Dict[str, Any], output_dir: Path, started_at: float) 
             director_plan=director_plan,
             media_type=str(parameters.get("mediaType", "video")),
             limit=int(parameters.get("limit", 6)),
+            **({"deadline": deadline} if deadline is not None else {}),
         )
     except StockSearchUnavailableError as error:
         # 这条 message 只由来源标识与错误类型构成（未受控异常原文不进入），可以直达界面；
@@ -326,6 +335,9 @@ def search_assets(request: Dict[str, Any], output_dir: Path, started_at: float) 
 
 def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
     input_values = request["input"]
+    # 必须在任何合成/排轨/报价入口前分流，缓存碰巧命中不是“不会重新购买”的保证。
+    if input_values.get("recover_subtitles") is True or request.get("parameters", {}).get("recoverSubtitles") is True:
+        return recover_voice_subtitles(request, output_dir, started_at)
     script_path, _executable_plan = materialize_executable_script(input_values, output_dir)
     parameters = request.get("parameters", {})
     provider = str(parameters.get("provider", "macos-say"))
@@ -455,6 +467,7 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
             license_note="VideoFactory voice timeline metadata.",
         ),
     ]
+    artifacts.extend(subtitle_artifacts(request, plan_path, plan))
     diagnostics: Dict[str, Any] = {}
     if provider == "minimax" and (valid_configured_cost or plan.get("version") == "video-factory/voiceover-plan-v3"):
         synthesized_scenes = plan.get("scenes")
@@ -512,9 +525,17 @@ def synthesize_continuous_voice(request: Dict[str, Any], script_path: Path, outp
         model_id=str(parameters.get("modelId") or "speech-2.8-turbo"),
         authorization_cny=parameters.get("maxCostCny"),
         provider_id=str(parameters.get("providerId") or "minimax-tts-v1"))
-    subtitles = capture_subtitle_evidence(Path(result["ledgerPath"]), output_dir.parent)
     plan = assemble_narration_track(narration, result["rawAudio"], output_dir, mastering_filter=mastering["filter"])
+    narration_plan_sha256 = hashlib.sha256(narration_path.read_bytes()).hexdigest()
+    # T05：已捕获的字幕证据经已核实 adapter 解析并映射到总时轴；恢复动作可指定
+    # 新 adapter 重解析（纯字幕恢复，TTS 新增恒为 0）。未核实协议保持 unavailable。
+    subtitle_adapter = str(inputs.get("subtitle_adapter") or parameters.get("subtitleAdapter") or "minimax-subtitles-v1")
+    subtitles = build_group_subtitles(Path(result["ledgerPath"]), output_dir.parent, plan,
+        narration_plan_sha256=narration_plan_sha256, adapter_version=subtitle_adapter)
+    write_subtitle_sidecars(subtitles, output_dir)
     plan.update({"provider": provider, "voice": voice, "rate": rate,
+        "voiceOperationId": request["commandId"],
+        "trackSha256": hashlib.sha256(Path(plan["track_path"]).read_bytes()).hexdigest(),
         "direction": {"profile_id": profile_id, "rate": rate, "pause_scale": pause_scale, "mastering_preset": preset},
         "mastering": {"preset": preset, **mastering},
         # v3 的 scenes 仅索引视觉切点，不伪造逐镜音频或逐镜语音时长。
@@ -523,6 +544,93 @@ def synthesize_continuous_voice(request: Dict[str, Any], script_path: Path, outp
     target = output_dir / "voiceover_plan.json"
     _write_json_durably(target, plan)
     return target
+
+
+def write_subtitle_sidecars(subtitles: dict, output_dir: Path) -> None:
+    if subtitles["status"] != "verified":
+        return
+    vtt_path, ass_path = output_dir / "narration.vtt", output_dir / "narration.ass"
+    _write_bytes_durably(vtt_path, cues_to_vtt(subtitles["cues"]).encode("utf-8"))
+    _write_bytes_durably(ass_path, cues_to_ass(subtitles["cues"]).encode("utf-8"))
+    subtitles["sidecar"] = {"vtt": vtt_path.name, "ass": ass_path.name}
+    subtitles["sidecarSha256"] = {kind: hashlib.sha256(file.read_bytes()).hexdigest()
+        for kind, file in (("vtt", vtt_path), ("ass", ass_path))}
+
+
+def subtitle_artifacts(request: dict, plan_path: Path, plan: dict) -> list[dict]:
+    subtitles = plan.get("subtitles") or {}
+    if subtitles.get("status") != "verified":
+        return []
+    return [describe_artifact(path=plan_path.parent / subtitles["sidecar"][kind],
+        kind=f"narration_{kind}", content_type=content_type, request=request,
+        license_note="Subtitles derived from the same retained narration audio.")
+        for kind, content_type in (("vtt", "text/vtt"), ("ass", "text/x-ssa"))]
+
+
+def recover_voice_subtitles(request: dict, output_dir: Path, started_at: float) -> dict:
+    """复核原声音与布局后只写字幕新版本；不能进入 TTS、排轨或重买声音的路径。"""
+    inputs = request["input"]
+    source_path = require_existing_path(inputs, "voiceoverPlanPath").resolve()
+    node_root = output_dir.parent.resolve()
+    if not source_path.is_relative_to(node_root) or source_path.parent == output_dir:
+        raise WorkerProtocolError("Subtitle recovery requires a retained voice plan and a new output directory.")
+    source_bytes = source_path.read_bytes()
+    if hashlib.sha256(source_bytes).hexdigest() != inputs.get("voiceoverPlanSha256"):
+        raise WorkerProtocolError("The retained voice plan has changed; refresh before recovering subtitles.")
+    plan = json.loads(source_bytes)
+    if plan.get("version") != "video-factory/voiceover-plan-v3" or plan.get("layoutKey") != inputs.get("layoutKey"):
+        raise WorkerProtocolError("Subtitle recovery layout no longer matches the retained audio.")
+    narration_path = require_existing_path(inputs, "narrationPlanPath")
+    narration_sha = hashlib.sha256(narration_path.read_bytes()).hexdigest()
+    if (json.loads(narration_path.read_bytes()) != plan.get("narrationPlan")
+            or plan.get("subtitles", {}).get("acceptedNarrationPlanSha256") != narration_sha):
+        raise WorkerProtocolError("Subtitle recovery requires the same accepted narration plan.")
+    for input_key, plan_key in (("scriptPath", "script"), ("executablePlanPath", "visualPlan")):
+        if hashlib.sha256(require_existing_path(inputs, input_key).read_bytes()).hexdigest() != plan["narrationPlan"][plan_key]["sha256"]:
+            raise WorkerProtocolError("Subtitle recovery source binding has changed.")
+    track = Path(plan["track_path"]).resolve()
+    if not track.is_relative_to(node_root):
+        raise WorkerProtocolError("Subtitle recovery audio is outside the retained node.")
+    audio_bytes = track.read_bytes()
+    audio_sha = hashlib.sha256(audio_bytes).hexdigest()
+    if audio_sha != inputs.get("trackSha256") or (plan.get("trackSha256") and audio_sha != plan["trackSha256"]):
+        raise WorkerProtocolError("Subtitle recovery audio content has changed.")
+    operation_id = inputs.get("sourceOperationId")
+    if not isinstance(operation_id, str) or not operation_id or (plan.get("voiceOperationId") and operation_id != plan["voiceOperationId"]):
+        raise WorkerProtocolError("Subtitle recovery must retain the original audio request.")
+    ledger_path = node_root / ".voice-operations" / (hashlib.sha256(operation_id.encode()).hexdigest() + ".json")
+    ledger = json.loads(ledger_path.read_text())
+    items = ledger.get("items")
+    if not isinstance(items, list) or not items or any(item.get("state") != "materialized" for item in items):
+        raise WorkerProtocolError("Original audio requests are not settled; recover those requests before subtitles.")
+    items_by_id = {item["groupId"]: item for item in items}
+    if set(items_by_id) != {group["id"] for group in plan["groups"]}:
+        raise WorkerProtocolError("Subtitle recovery does not cover the retained narration groups.")
+    for group in plan["groups"]:
+        if group["rawAudioSha256"] != items_by_id[group["id"]].get("sha256"):
+            raise WorkerProtocolError("Subtitle recovery raw audio binding has changed.")
+    adapter = str(inputs.get("subtitle_adapter") or "minimax-subtitles-v1")
+    subtitles = recover_subtitles(ledger_path, node_root, plan,
+        narration_plan_sha256=narration_sha, adapter_version=adapter,
+        refetch=inputs.get("subtitle_refetch") is True, refetch_reason=inputs.get("subtitle_refetch_reason"))
+    # 写新目录，不修改已经确认的声音或稿件。复制的音轨字节必须完全一致。
+    target_track = output_dir / track.name
+    _write_bytes_durably(target_track, audio_bytes)
+    write_subtitle_sidecars(subtitles, output_dir)
+    plan.update({"subtitles": subtitles, "track_path": str(target_track), "trackSha256": audio_sha,
+        "subtitleRecovery": {"commandId": request["commandId"], "sourceOperationId": operation_id,
+            "sourcePlanSha256": inputs["voiceoverPlanSha256"]}})
+    target = output_dir / "voiceover_plan.json"
+    _write_json_durably(target, plan)
+    artifacts = [describe_artifact(path=target_track, kind="voiceover", content_type="audio/mp4", request=request,
+        license_note="Retained original narration bytes; no new synthesis."),
+        describe_artifact(path=target, kind="voiceover_plan", content_type="application/json", request=request,
+            license_note="Pure subtitle recovery; original narration retained."), *subtitle_artifacts(request, target, plan)]
+    return success_response(request, output={"voiceoverPlanPath": str(target), "trackPath": str(target_track),
+        "narrationMode": "continuous_groups", "subtitleStatus": subtitles["status"]}, artifacts=artifacts,
+        started_at=started_at, diagnostics={"meteredAttemptCount": 0, "meteredFailedAttemptCount": 0,
+            "actualCostCny": 0, "actualCostSource": "local_subtitle_recovery", "providerOutcomeKnown": True,
+            "reusedVoiceOperationId": operation_id})
 
 
 def minimax_failure_diagnostics(output_dir: Path, operation_id: str) -> Dict[str, Any]:
@@ -608,10 +716,35 @@ def render_video(request: Dict[str, Any], output_dir: Path, started_at: float) -
     ]
     return success_response(
         request,
-        output={"videoPath": str(video_path), "renderManifestPath": str(manifest_path)},
+        output={"videoPath": str(video_path), "renderManifestPath": str(manifest_path),
+            **render_subtitle_summary(manifest, voiceover_plan_path)},
         artifacts=artifacts,
         started_at=started_at,
     )
+
+
+def render_subtitle_summary(manifest: dict, voiceover_plan_path: Path) -> dict:
+    """仅投影已核对的字幕摘要，浏览器用登记的产物URL，不接收本地路径。"""
+    plan = manifest.get("voiceover_plan") or {}
+    subtitles = plan.get("subtitles") or {}
+    result = {"subtitleStatus": subtitles.get("status", "unavailable"),
+        "subtitleBurnStatus": (manifest.get("subtitle_burn") or {}).get("status", "not_burned")}
+    if subtitles.get("status") != "verified":
+        return result
+    filename = (subtitles.get("sidecar") or {}).get("vtt")
+    if not isinstance(filename, str):
+        return result
+    candidate = (voiceover_plan_path.parent / filename).resolve()
+    try:
+        if candidate.parent != voiceover_plan_path.parent.resolve():
+            raise ValueError("Subtitle sidecar path is outside the voice version.")
+        sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        if sha != (subtitles.get("sidecarSha256") or {}).get("vtt"):
+            raise ValueError("Subtitle sidecar content changed.")
+        result["subtitleVttSha256"] = sha
+    except (OSError, ValueError):
+        result["subtitleStatus"] = "invalid_binding"
+    return result
 
 
 def run_technical_review(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:

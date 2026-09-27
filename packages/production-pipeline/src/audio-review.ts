@@ -15,8 +15,24 @@ export type AudioReviewResult = {
   audioSha256: string;
   durationMs: number;
   report: AudioReviewReport;
+  /** 有效观察覆盖度：全 not_observed/not_applicable 时为 0，不能当作声音通过。 */
+  observationCoverage?: { observed: number; total: number };
   trace?: import("./codex-chat.js").CodexTaskTrace;
 } | { status: "not_configured" | "not_reviewed" | "failed" | "uncertain"; reason: string };
+
+/** 视觉已结束无结论时携带独立声音事实；不把声音结果伪装成视觉报告。 */
+export class VisualReviewWithAudioError extends Error {
+  constructor(readonly visualError: unknown, readonly audioReview: AudioReviewResult) {
+    super("视觉审片未形成有效结论，声音审片事实已保留。", { cause: visualError });
+    this.name = "VisualReviewWithAudioError";
+  }
+}
+
+export function audioReviewObservationCoverage(report: AudioReviewReport): { observed: number; total: number } {
+  const total = AUDIO_REVIEW_CHECKS.length;
+  const observed = AUDIO_REVIEW_CHECKS.filter((key) => report.checks[key] === "pass" || report.checks[key] === "issue").length;
+  return { observed, total };
+}
 
 export function validateAudioReviewReport(value: unknown, audioSha256: string, durationMs: number): AudioReviewReport {
   if (!Number.isInteger(durationMs) || durationMs <= 0) throw new Error("声音证据时长无效。");

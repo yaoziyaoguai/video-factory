@@ -178,7 +178,11 @@ export class PythonWorkerClient {
         }
       });
 
-      child.stdin.end(`${JSON.stringify(request)}\n`);
+      // 搜索的全部来源/变体共享宿主原有期限；仅传输预算，不写入操作身份或延长任务。
+      const wireRequest = request.capability === "asset.search" ? { ...request,
+        executionDeadlineUnixMs: Date.now() + Math.max(0, this.options.timeoutMs - (performance.now() - startedAt)),
+      } : request;
+      child.stdin.end(`${JSON.stringify(wireRequest)}\n`);
     });
   }
 }

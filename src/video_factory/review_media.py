@@ -2,6 +2,7 @@
 
 import hashlib
 import argparse
+import fcntl
 import io
 import json
 import os
@@ -9,13 +10,15 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Callable, Iterable, List, Optional
 
 from PIL import Image, ImageDraw, ImageOps
 
 
 MANIFEST_VERSION = "video-factory/review-media-v1"
+CACHE_SCHEMA = "video-factory/review-media-cache-v2"
 MAX_FRAMES = 24
 MAX_SCENE_CHANGE_FRAMES = 12
 MAX_FRAME_BYTES = 256 * 1024
@@ -35,24 +38,262 @@ class SourceRangeTooShortError(ValueError):
         super().__init__(f"asset plan scene {scene_positions} source does not cover the planned source range")
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _dependency_identity(root: Path, files: dict) -> dict:
+    # 先核边界，再读字节；哈希时也不能碰到 run 以外的输入。
+    resolved = {name: _resolve_run_file(filename, root, "asset local_path" if name.startswith("asset local_path ") else name) if filename is not None else None
+                for name, filename in files.items()}
+    digests = {filename: _file_sha256(filename) for filename in set(resolved.values()) if filename is not None}
+    return {name: {"path": filename.relative_to(root).as_posix(), "sha256": digests[filename]}
+            if filename is not None else None for name, filename in resolved.items()}
+
+
+def _cache_identity(root: Path, mode: str, files: dict, max_frames: int,
+                    scene_positions: Optional[List[int]] = None) -> dict:
+    return {"schema": CACHE_SCHEMA, "runRoot": str(root), "mode": mode,
+            "files": _dependency_identity(root, files), "maxFrames": max_frames,
+            "scenePositions": sorted(scene_positions) if scene_positions is not None else None,
+            "sampling": [MAX_SCENE_CHANGE_FRAMES, SCENE_CHANGE_THRESHOLD, SAMPLE_END_MARGIN_MS,
+                         FRAME_MAX_WIDTH, FRAME_MAX_HEIGHT, MAX_FRAME_BYTES, MAX_TOTAL_FRAME_BYTES]}
+
+
+def _cache_entry(root: Path, key: str) -> Path:
+    return root / ".media-review-cache" / key
+
+
+def _cache_directory(root: Path) -> Path:
+    directory = root / ".media-review-cache"
+    _assert_confined(directory, root, "review cache")
+    if directory.is_symlink():
+        raise ValueError("review cache must not be a symbolic link")
+    directory.mkdir(exist_ok=True)
+    return directory
+
+
+def _validated_cached_manifest(root: Path, version: Path, identity: dict) -> Optional[Path]:
+    try:
+        _assert_confined(version, root, "cached evidence")
+        if version.is_symlink() or not version.is_dir():
+            return None
+
+        def confined_file(filename: Path) -> Path:
+            resolved = _resolve_run_file(filename, root, "cached evidence")
+            resolved.relative_to(version.resolve())
+            return resolved
+
+        binding_file = confined_file(version / "binding.json")
+        manifest_path = confined_file(version / "review_media_manifest.json")
+        if binding_file.stat().st_size > 512 * 1024 or manifest_path.stat().st_size > 512 * 1024:
+            return None
+        binding = json.loads(binding_file.read_text(encoding="utf-8"))
+        if binding.get("identity") != identity or binding.get("manifestSha256") != _file_sha256(manifest_path):
+            return None
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        duration = manifest.get("durationMs")
+        frames, sheet = manifest.get("frames"), manifest.get("contactSheet")
+        if (manifest.get("version") != MANIFEST_VERSION or not isinstance(duration, int)
+                or isinstance(duration, bool) or duration <= 0 or not isinstance(frames, list)
+                or not 1 <= len(frames) <= identity["maxFrames"] or not isinstance(sheet, dict)):
+            return None
+        total, previous = 0, -1
+        for index, descriptor in enumerate([*frames, sheet]):
+            relative = descriptor.get("path")
+            if not isinstance(relative, str) or Path(relative).is_absolute():
+                return None
+            filename = confined_file(root / relative)
+            if filename.stat().st_size > (MAX_FRAME_BYTES if index < len(frames) else MAX_TOTAL_FRAME_BYTES):
+                return None
+            content = filename.read_bytes()
+            if hashlib.sha256(content).hexdigest() != descriptor.get("sha256"):
+                return None
+            with Image.open(filename) as image:
+                if image.format != "JPEG" or list(image.size) != [descriptor.get("width"), descriptor.get("height")]:
+                    return None
+                if index < len(frames) and (image.width > FRAME_MAX_WIDTH or image.height > FRAME_MAX_HEIGHT):
+                    return None
+                image.verify()
+            if index < len(frames):
+                timestamp = descriptor.get("timestampMs")
+                if (not isinstance(timestamp, int) or isinstance(timestamp, bool)
+                        or not previous < timestamp < duration or len(content) > MAX_FRAME_BYTES):
+                    return None
+                previous = timestamp
+                total += len(content)
+                if total > MAX_TOTAL_FRAME_BYTES:
+                    return None
+                if "sourceTimecodeMs" in descriptor and (not isinstance(descriptor["sourceTimecodeMs"], int)
+                        or isinstance(descriptor["sourceTimecodeMs"], bool) or descriptor["sourceTimecodeMs"] < 0):
+                    return None
+        sampling = manifest.get("sampling")
+        if not isinstance(sampling, dict):
+            return None
+        if "sceneCount" in sampling:
+            count = sampling["sceneCount"]
+            covered = sorted({frame["scenePosition"] for frame in frames})
+            if (not isinstance(count, int) or isinstance(count, bool) or count < 1
+                    or any(not isinstance(p, int) or isinstance(p, bool) or not 1 <= p <= count for p in covered)
+                    or sampling.get("coveredScenePositions") != covered
+                    or sampling.get("missingScenePositions") != [p for p in range(1, count + 1) if p not in covered]):
+                return None
+        return manifest_path
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _cache_lookup(root: Path, key: str, identity: dict) -> Optional[Path]:
+    try:
+        entry = _cache_entry(root, key)
+        _assert_confined(entry, root, "cached evidence")
+        if entry.is_symlink() or not entry.is_dir():
+            return None
+        # v1 的可变目录不改写；v2 每次只发布全新的证据版本，损坏版本也保留给旧诊断。
+        for version in sorted(entry.glob("v-*"), reverse=True):
+            manifest = _validated_cached_manifest(root, version, identity)
+            if manifest is not None:
+                return manifest
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+class _KeyLock:
+    """缓存不可写/不可信只取消复用；不取消原本安全的本地预处理。"""
+
+    def __init__(self, root: Path, key: str):
+        self.root, self.key = root, key
+        self._handle = None
+
+    def __enter__(self):
+        try:
+            filename = _cache_directory(self.root) / f"{self.key}.lock"
+            fd = os.open(filename, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            self._handle = os.fdopen(fd, "a+")
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+        except (OSError, ValueError):
+            if self._handle is not None:
+                self._handle.close()
+                self._handle = None
+        return self
+
+    def __exit__(self, *_args):
+        if self._handle is not None:
+            try:
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._handle.close()
+        return False
+
+
+def _prepare_cached(root: Path, identity_for: Callable[[], dict],
+                    build: Callable[[Path, dict, Callable[[], None]], Path]) -> Path:
+    identity = identity_for()
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+    def verify_source():
+        if identity_for() != identity:
+            raise ValueError("review media source or dependencies changed during preprocessing; retry with the current source")
+
+    with _KeyLock(root, key) as lock:
+        verify_source()
+        if lock._handle is not None:
+            hit = _cache_lookup(root, key, identity)
+            if hit is not None:
+                verify_source()
+                return hit
+        output_dir = root / f"prepared-review-{uuid.uuid4().hex}"
+        if lock._handle is not None:
+            try:
+                entry = _cache_entry(root, key)
+                _assert_confined(entry, root, "cached evidence")
+                if entry.is_symlink():
+                    raise ValueError("cache entry is a symbolic link")
+                entry.mkdir(exist_ok=True)
+                output_dir = entry / f"v-{uuid.uuid4().hex}"
+            except (OSError, ValueError):
+                pass
+        return build(output_dir, identity, verify_source)
+
+
+def _publish_evidence(stage: Path, output_dir: Path, manifest: dict, identity: dict,
+                      verify_source: Callable[[], None]) -> Path:
+    root = Path(identity["runRoot"])
+
+    def publish(target: Path):
+        _assert_confined(target, root, "review evidence")
+        for parent in [target, *target.parents]:
+            if parent == root:
+                break
+            if parent.is_symlink():
+                raise ValueError("review evidence must not traverse a symbolic link")
+        verify_source()
+        _publish_directory(stage, target)
+
+    manifest_path = stage / "review_media_manifest.json"
+    def write_manifest():
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (stage / "binding.json").write_text(json.dumps({
+            "identity": identity, "manifestSha256": _file_sha256(manifest_path),
+        }, sort_keys=True) + "\n", encoding="utf-8")
+
+    write_manifest()
+    try:
+        publish(output_dir)
+    except OSError:
+        if not output_dir.is_relative_to(root / ".media-review-cache") or not stage.is_dir():
+            raise
+        # 缓存发布失败只换本地存放位置，不重抽帧、不覆盖旧证据。源变化仍由 publish 拒绝。
+        fallback = root / f"prepared-review-{uuid.uuid4().hex}"
+        for descriptor in [*manifest["frames"], manifest["contactSheet"]]:
+            relative = (root / descriptor["path"]).relative_to(output_dir)
+            descriptor["path"] = (fallback.relative_to(root) / relative).as_posix()
+        write_manifest()
+        publish(fallback)
+        output_dir = fallback
+    return output_dir / "review_media_manifest.json"
+
+
 def prepare_review_media(
     video_path: Path,
     run_root: Path,
     max_frames: int = MAX_FRAMES,
     render_manifest_path: Optional[Path] = None,
+    script_path: Optional[Path] = None,
+    executable_plan_path: Optional[Path] = None,
+    scene_positions: Optional[List[int]] = None,
 ) -> Path:
-    """Create deterministic keyframes, a contact sheet, and a safe manifest."""
+    """内容绑定的不可变审片证据；缓存不可用时仍执行一次原预处理。"""
     root = Path(run_root).expanduser().resolve(strict=True)
     if not root.is_dir():
         raise ValueError("run_root must be a directory")
     if not isinstance(max_frames, int) or isinstance(max_frames, bool) or not 1 <= max_frames <= MAX_FRAMES:
         raise ValueError(f"max_frames must be an integer between 1 and {MAX_FRAMES}")
-
     video = _resolve_run_file(video_path, root)
     if video.suffix.lower() != ".mp4":
         raise ValueError("video_path must point to an MP4 file")
-    _require_media_tools()
+    files = {"video": video_path, "renderManifest": render_manifest_path,
+             "script": script_path, "executablePlan": executable_plan_path}
+    return _prepare_cached(root, lambda: _cache_identity(root, "video", files, max_frames, scene_positions),
+                           lambda output, identity, verify: _prepare_review_media_uncached(
+                               video, root, max_frames, render_manifest_path, output, identity, verify))
 
+
+def _prepare_review_media_uncached(
+    video: Path,
+    root: Path,
+    max_frames: int,
+    render_manifest_path: Optional[Path],
+    output_dir: Path,
+    identity: dict,
+    verify_source: Callable[[], None],
+) -> Path:
+    _require_media_tools()
     probe = _probe_video(video)
     duration_ms = max(1, int(round(float(probe["duration"]) * 1000)))
     scene_count = None
@@ -78,7 +319,6 @@ def prepare_review_media(
         ]
     timestamps = [sample["timestampMs"] for sample in samples]
 
-    output_dir = root / "review_media"
     _assert_confined(output_dir, root, "review media output")
     if output_dir.is_symlink() or (output_dir.exists() and not output_dir.is_dir()):
         raise ValueError("review media output must be a real directory within run_root")
@@ -104,7 +344,7 @@ def prepare_review_media(
             frame_paths.append(frame_path)
             entry = _image_entry(
                 frame_path,
-                f"review_media/frames/{filename}",
+                f"{output_dir.relative_to(root).as_posix()}/frames/{filename}",
                 timestamp_ms=timestamp_ms,
             )
             entry.update({key: value for key, value in sample.items() if key != "timestampMs"})
@@ -120,19 +360,14 @@ def prepare_review_media(
             "frames": frame_entries,
             "contactSheet": _image_entry(
                 contact_sheet_path,
-                "review_media/contact_sheet.jpg",
+                f"{output_dir.relative_to(root).as_posix()}/contact_sheet.jpg",
             ),
         }
-        manifest_path = stage / "review_media_manifest.json"
-        manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        _publish_directory(stage, output_dir)
+        manifest_path = _publish_evidence(stage, output_dir, manifest, identity, verify_source)
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
         raise
-    return output_dir / "review_media_manifest.json"
+    return manifest_path
 
 
 def prepare_asset_review_media(
@@ -142,6 +377,43 @@ def prepare_asset_review_media(
     scene_positions: Optional[List[int]] = None,
     script_path: Optional[Path] = None,
     executable_plan_path: Optional[Path] = None,
+) -> Path:
+    root = Path(run_root).expanduser().resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("run_root must be a directory")
+    if not isinstance(max_frames, int) or isinstance(max_frames, bool) or not 1 <= max_frames <= MAX_FRAMES:
+        raise ValueError(f"max_frames must be an integer between 1 and {MAX_FRAMES}")
+
+    def identity_for():
+        plan_path = _resolve_run_file(asset_plan_path, root, "asset_plan_path")
+        if plan_path.stat().st_size > 512 * 1024:
+            raise ValueError("asset plan exceeds 524288 bytes")
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        assets = plan.get("scene_assets") if isinstance(plan, dict) else None
+        if not isinstance(assets, list) or not assets or len(assets) > max_frames:
+            raise ValueError("asset plan must contain one reviewable asset per scene within the frame limit")
+        files = {"assetPlan": asset_plan_path, "script": script_path, "executablePlan": executable_plan_path}
+        for index, asset in enumerate(assets):
+            if not isinstance(asset, dict):
+                raise ValueError(f"asset plan scene {index + 1} must be an object")
+            if scene_positions is None or asset.get("scene_position") in scene_positions:
+                files[f"asset local_path {index + 1}"] = Path(str(asset.get("local_path") or ""))
+        return _cache_identity(root, "assets", files, max_frames, scene_positions)
+
+    return _prepare_cached(root, identity_for, lambda output, identity, verify:
+                           _prepare_asset_review_media_uncached(
+                               asset_plan_path, root, max_frames, scene_positions, script_path,
+                               executable_plan_path, output_dir=output, identity=identity, verify_source=verify))
+
+
+def _prepare_asset_review_media_uncached(
+    asset_plan_path: Path,
+    run_root: Path,
+    max_frames: int,
+    scene_positions: Optional[List[int]],
+    script_path: Optional[Path],
+    executable_plan_path: Optional[Path],
+    *, output_dir: Path, identity: dict, verify_source: Callable[[], None],
 ) -> Path:
     """Create bounded evidence frames from every materialized source asset."""
     root = Path(run_root).expanduser().resolve(strict=True)
@@ -249,10 +521,13 @@ def prepare_asset_review_media(
 
     _require_media_tools()
     short_positions = []
+    probes = {}
     for asset in normalized_assets:
         if asset["mediaType"] != "video":
             continue
-        source_duration_seconds = float(_probe_video(asset["mediaPath"])["duration"])
+        if asset["mediaPath"] not in probes:
+            probes[asset["mediaPath"]] = _probe_video(asset["mediaPath"])
+        source_duration_seconds = float(probes[asset["mediaPath"]]["duration"])
         source_end_seconds = asset["sourceEndSeconds"]
         source_start_ms = int(round(asset["sourceInFrame"] * 1000 / 30))
         if source_end_seconds > source_duration_seconds + 1e-6:
@@ -276,7 +551,6 @@ def prepare_asset_review_media(
     sequence_sampling = any(count > 3 for count in sample_counts)
 
     total_duration_ms = sum(asset["durationMs"] for asset in normalized_assets)
-    output_dir = root / "asset_review_media"
     _assert_confined(output_dir, root, "asset review media output")
     if output_dir.is_symlink() or (output_dir.exists() and not output_dir.is_dir()):
         raise ValueError("asset review media output must be a real directory within run_root")
@@ -318,13 +592,15 @@ def prepare_asset_review_media(
                         source_start_ms + asset["durationMs"] - 1,
                         source_start_ms + int(round(asset["durationMs"] * fraction)),
                     )
-                    _extract_frame_from_range(
+                    extracted_timecode = _extract_frame_from_range(
                         asset["mediaPath"],
                         asset["sourceStartSeconds"],
                         asset["sourceEndSeconds"],
                         source_timestamp_ms,
                         frame_path,
                     )
+                    if extracted_timecode is not None:
+                        source_timestamp_ms = extracted_timecode
                 _bound_jpeg(frame_path, MAX_FRAME_BYTES)
                 frame_size = frame_path.stat().st_size
                 total_frame_bytes += frame_size
@@ -334,7 +610,7 @@ def prepare_asset_review_media(
                 timeline_timestamps.append(timestamp_ms)
                 entry = _image_entry(
                     frame_path,
-                    f"asset_review_media/frames/{filename}",
+                    f"{output_dir.relative_to(root).as_posix()}/frames/{filename}",
                     timestamp_ms=timestamp_ms,
                 )
                 entry.update({
@@ -357,18 +633,13 @@ def prepare_asset_review_media(
                 "missingScenePositions": [p for p in range(1, scene_count + 1) if p not in seen_positions],
             },
             "frames": frame_entries,
-            "contactSheet": _image_entry(contact_sheet_path, "asset_review_media/contact_sheet.jpg"),
+            "contactSheet": _image_entry(contact_sheet_path, f"{output_dir.relative_to(root).as_posix()}/contact_sheet.jpg"),
         }
-        manifest_path = stage / "review_media_manifest.json"
-        manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        _publish_directory(stage, output_dir)
+        manifest_path = _publish_evidence(stage, output_dir, manifest, identity, verify_source)
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
         raise
-    return output_dir / "review_media_manifest.json"
+    return manifest_path
 
 
 def _sampling_metadata(samples: List[dict], scene_count: Optional[int], has_render_manifest: bool) -> dict:
@@ -416,6 +687,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             else prepare_review_media(
                 Path(args.video), Path(args.run_root), args.max_frames,
                 Path(args.render_manifest) if args.render_manifest else None,
+                Path(args.script) if args.script else None,
+                Path(args.executable_plan) if args.executable_plan else None,
+                args.scene_positions,
             )
         )
     except SourceRangeTooShortError as error:
@@ -697,13 +971,12 @@ def _extract_frame_from_range(
     source_end_seconds: float,
     timestamp_ms: int,
     output_path: Path,
-) -> None:
+) -> int:
     target_seconds = timestamp_ms / 1000
     if (source_start_seconds < 0 or source_end_seconds <= source_start_seconds
             or target_seconds < source_start_seconds or target_seconds >= source_end_seconds):
         raise ValueError("source review timestamp must stay inside the selected source range")
-    subprocess.run(
-        [
+    command = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel",
@@ -730,13 +1003,39 @@ def _extract_frame_from_range(
             "-map_metadata",
             "-1",
             str(output_path),
-        ],
-        check=True,
-        capture_output=True,
-        timeout=FRAME_TIMEOUT_SECONDS,
-    )
+        ]
+    failure = None
+    try:
+        subprocess.run(command, check=True, capture_output=True, timeout=FRAME_TIMEOUT_SECONDS)
+    except subprocess.CalledProcessError as error:
+        failure = error
     if not output_path.is_file() or output_path.stat().st_size == 0:
+        # 低帧率/VFR素材末帧的显示区间可跨过采样点。仅在确实没有后续源帧时
+        # 取区间内最后一张真实帧；不越过剪辑边界，不复制/合成新帧或隐瞒时间码。
+        probe = subprocess.run([
+            "ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe",
+            "-select_streams", "v:0", "-read_intervals",
+            f"{source_start_seconds:.9f}%{source_end_seconds:.9f}",
+            "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(video_path),
+        ], check=True, capture_output=True, text=True, timeout=PROBE_TIMEOUT_SECONDS)
+        frame_times = [float(frame["best_effort_timestamp_time"])
+                       for frame in json.loads(probe.stdout).get("frames", [])
+                       if "best_effort_timestamp_time" in frame]
+        inside = [value for value in frame_times if source_start_seconds <= value < source_end_seconds]
+        if inside and max(inside) < target_seconds:
+            actual_seconds = max(inside)
+            filters_index = command.index("-vf") + 1
+            command[filters_index] = command[filters_index].replace(
+                f"gte(t,{target_seconds:.9f})", f"gte(t,{actual_seconds - 0.000001:.9f})")
+            subprocess.run(command, check=True, capture_output=True, timeout=FRAME_TIMEOUT_SECONDS)
+            if output_path.is_file() and output_path.stat().st_size > 0:
+                return int(round(actual_seconds * 1000))
+        if failure is not None:
+            raise failure
         raise RuntimeError(f"FFmpeg did not produce a frame at {timestamp_ms}ms inside the selected source range")
+    if failure is not None:
+        raise failure
+    return timestamp_ms
 
 
 def _copy_image_frame(source_path: Path, output_path: Path) -> None:
@@ -832,20 +1131,10 @@ def _image_entry(path: Path, relative_path: str, timestamp_ms: Optional[int] = N
 
 
 def _publish_directory(stage: Path, output_dir: Path) -> None:
-    backup = output_dir.parent / f".{output_dir.name}.backup-{os.getpid()}"
-    if backup.exists():
-        shutil.rmtree(backup)
-    had_output = output_dir.exists()
-    if had_output:
-        os.replace(output_dir, backup)
-    try:
-        os.replace(stage, output_dir)
-    except Exception:
-        if had_output and backup.exists():
-            os.replace(backup, output_dir)
-        raise
-    if backup.exists():
-        shutil.rmtree(backup)
+    # 新证据永远写新版本；缓存损坏不能覆盖旧报告仍引用的帧。
+    if output_dir.exists() or output_dir.is_symlink():
+        raise ValueError("review evidence version already exists")
+    os.replace(stage, output_dir)
 
 
 if __name__ == "__main__":

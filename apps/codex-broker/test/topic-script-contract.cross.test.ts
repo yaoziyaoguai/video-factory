@@ -340,7 +340,7 @@ describe("creative-treatment adapter × Broker parser", () => {
     const initial = client.calls[0]!.payload as unknown as Record<string, unknown>;
     const repaired = client.calls[1]!.payload as unknown as Record<string, unknown>;
     const audit = client.calls[2]!.payload as unknown as {
-      context: { upstreamFacts: Record<string, unknown> };
+      context: { upstreamFacts: Record<string, unknown>; currentRoleContract: Record<string, unknown> };
     };
     assert.equal((initial.referenceGrammar as { evidenceStatus?: string }).evidenceStatus, "style_structure_reference");
     assert.equal((repaired.revision as { mode?: string }).mode, "validation-repair");
@@ -353,7 +353,8 @@ describe("creative-treatment adapter × Broker parser", () => {
     assert.deepEqual((initial.brief as { productionCapabilities: unknown }).productionCapabilities, productionCapabilities);
     assert.equal(audit.context.upstreamFacts.visualIntent, "以来源截图和通用示意解释核对方法。");
     assert.equal(audit.context.upstreamFacts.templateGuidance, undefined);
-    assert.deepEqual(audit.context.upstreamFacts.productionCapabilities, productionCapabilities);
+    assert.equal(audit.context.upstreamFacts.productionCapabilities, undefined);
+    assert.deepEqual(audit.context.currentRoleContract.productionCapabilities, productionCapabilities);
   });
 });
 

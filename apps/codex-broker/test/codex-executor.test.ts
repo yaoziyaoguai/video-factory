@@ -1845,7 +1845,7 @@ describe("CodexExecutor.runTask", () => {
 
     const prompt = Buffer.concat(childRef?.stdinChunks ?? []).toString("utf8");
     assert.equal(result.trace?.taskKind, "topic-ideas");
-    assert.equal(result.trace?.promptVersion, "video-factory/topic-editor-v11");
+    assert.equal(result.trace?.promptVersion, "video-factory/topic-editor-v12");
     assert.equal(result.trace?.providerId, "openai");
     assert.equal(result.trace?.modelId, "gpt-5.3-codex");
     assert.equal(result.trace?.prompt, prompt);

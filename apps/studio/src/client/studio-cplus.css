@@ -1278,6 +1278,20 @@ body:has(.studio-v3) {
   border-top: 1px solid var(--line);
 }
 
+/* 调用说明是整行的次级信息，不与六个费用指标挤在同一网格。 */
+.studio-v3 .cost-execution-details > p,
+.studio-v3 .cost-time-summary,
+.studio-v3 .cost-conflict-note {
+  margin: 12px 16px;
+  font-size: 14px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+@media (min-width: 900px) {
+  .studio-v3 .cost-metrics,
+  .studio-v3 .cost-metrics.is-compact { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
 .studio-v3 .cost-call-details > summary {
   display: flex;
   align-items: center;

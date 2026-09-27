@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, act } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { StudioNarrationPlanPreview, StudioRunDetail } from "../src/shared/api.js";
 import { studioApi } from "../src/client/api.js";
@@ -55,4 +55,38 @@ it("does not carry another run's preview into a run with the same revision", asy
   view.rerender(<NarrationPlanEditor runId="run-two" runRevision={5} disabled={false} />);
   expect(screen.getByRole("button", { name: "采用这份旁白方案" })).toBeDisabled();
   expect(confirm).not.toHaveBeenCalled();
+});
+
+// T01 保护：真实组件确认遇到服务端失败时，不显示保存成功，且保留用户当前选择。
+it("keeps the creator's placement and hides the saved state when the server rejects a confirm", async () => {
+  vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(structuredClone(preview));
+  vi.spyOn(studioApi, "confirmNarrationPlan").mockRejectedValue(new Error("制作记录已更新，请重新查看旁白方案后再确认。"));
+  render(<NarrationPlanEditor runId="run-example" runRevision={5} disabled={false} />);
+  fireEvent.click(screen.getByRole("button", { name: "查看连贯旁白方案" }));
+  await screen.findByText("先停一下。");
+  fireEvent.change(screen.getByLabelText("第 1 组落点"), { target: { value: "end" } });
+  fireEvent.click(screen.getByRole("button", { name: "采用这份旁白方案" }));
+  await screen.findByRole("alert");
+  expect(screen.getByRole("alert")).toHaveTextContent("制作记录已更新");
+  expect(screen.queryByText(/已采用旁白方案/)).not.toBeInTheDocument();
+  expect((screen.getByLabelText("第 1 组落点") as HTMLSelectElement).value).toBe("end");
+  expect(screen.getByRole("button", { name: "采用这份旁白方案" })).toBeEnabled();
+});
+
+// T01 保护：确认请求在途时切换 run，迟到的成功响应不能把旧 run 的保存反馈写进新 run。
+it("does not mark the new run saved when an in-flight confirm resolves after switching runs", async () => {
+  vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(structuredClone(preview));
+  let resolveConfirm: (detail: StudioRunDetail) => void = () => {};
+  vi.spyOn(studioApi, "confirmNarrationPlan").mockImplementation(
+    () => new Promise<StudioRunDetail>((resolve) => { resolveConfirm = resolve; }));
+  const view = render(<NarrationPlanEditor runId="run-one" runRevision={5} disabled={false} />);
+  fireEvent.click(screen.getByRole("button", { name: "查看连贯旁白方案" }));
+  await screen.findByText("先停一下。");
+  fireEvent.click(screen.getByRole("button", { name: "采用这份旁白方案" }));
+  view.rerender(<NarrationPlanEditor runId="run-two" runRevision={5} disabled={false} />);
+  await act(async () => {
+    resolveConfirm({ revision: 6 } as StudioRunDetail);
+  });
+  expect(screen.queryByText(/已采用旁白方案/)).not.toBeInTheDocument();
+  expect(screen.getByText(/制作记录已更新/)).toBeInTheDocument();
 });

@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -11,10 +11,37 @@ import { VoiceStudio } from "../src/client/components/VoiceStudio.js";
 import { VOICE_PRESETS } from "../src/shared/template-voice-recommendation.js";
 import { studioApi, subscribeToRun } from "../src/client/api.js";
 import { ProductionQueue } from "../src/client/components/ProductionQueue.js";
-import { RunWorkbench } from "../src/client/components/RunWorkbench.js";
+import { RunCostDetailPanel } from "../src/client/components/CostDashboard.js";
+import { currentSubtitlePreview, RunWorkbench } from "../src/client/components/RunWorkbench.js";
 import { MultiPlatformPublishDialog } from "../src/client/components/MultiPlatformPublishDialog.js";
 import { preferRunSnapshot, RunPage } from "../src/client/pages/RunPage.js";
 import type { StudioCreatorSettings, StudioDecisionInput, StudioNode, StudioProvider, StudioRunDetail, StudioRunSummary, StudioTemplate } from "../src/shared/api.js";
+
+it("shows separately verified requests, model attempts and unknown money without inventing a free recovery", () => {
+  render(<RunCostDetailPanel detail={{ runId: "cost-facts", title: "统计", totals: {
+    estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 1,
+    meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0,
+    verifiedBrokerRequests: 2, verifiedModelAttempts: 4, countExact: false, legacyUnattributedReceipts: 3,
+    newBrokerRequestsThisAttempt: null, newModelAttemptsThisAttempt: null, cumulativeProviderMs: null, cumulativeQueueMs: 10,
+  }, lines: [{ id: "physical", runId: "cost-facts", runTitle: "统计", nodeId: "visual-review", capability: "model.execute",
+    providerId: "provider", modelId: "model", billing: "unverified", status: "unknown", estimatedCostCny: null,
+    actualPending: true, startedAt: "", modelCallCount: 4, callCountPending: true, accountingSource: "execution_fact",
+  }] }} />);
+  expect(screen.getByText("已核实模型请求")).toBeTruthy();
+  expect(screen.getByText(/本次新增：未核定 个请求/)).toBeTruthy();
+  expect(screen.getByText(/累计模型处理：未记录完整/)).toBeTruthy();
+  expect(screen.getByText("金额未核实")).toBeTruthy();
+  expect(screen.queryByText(/无需核账|覆盖完整。|预估 ¥0.00/)).toBeNull();
+});
+
+it("labels human waiting and elapsed time separately without making unknown recovery free or instant", () => {
+  render(<RunCostDetailPanel detail={{ runId: "time-facts", title: "耗时", lines: [], totals: {
+    estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 0,
+    meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0,
+  }, timing: { observedAt: "2026-09-27T00:01:00Z", wallElapsedMs: 60000, humanWaitMs: 20000, recoveryMs: null } }} />);
+  expect(screen.getByText(/制作经过时间：60.0 秒（含人工停点）/)).toHaveTextContent("等待你决定：20.0 秒");
+  expect(screen.getByText(/本次恢复耗时：未记录完整/)).toBeInTheDocument();
+});
 
 const runSummary: StudioRunSummary = {
   id: "run-1",
@@ -137,7 +164,28 @@ const runDetail: StudioRunDetail = {
 };
 
 describe("Studio client", () => {
-  it("refreshes costs on a heartbeat even if a long provider operation emits no run event", async () => {
+  it("previews only the subtitle sidecar bound to this exact film and never doubles burned captions", () => {
+    const run: StudioRunDetail = { ...runDetail, nodes: [
+      { id: "voice", label: "配音", status: "succeeded", artifactIds: ["vtt"], qualityGateResults: [],
+        outputState: { effectiveVersionId: "voice-v1", generatedVersionId: "voice-v1", stale: false, versions: [{
+          id: "voice-v1", source: "generated", artifactIds: ["vtt"], inputVersionIds: [], createdAt: runDetail.startedAt,
+          createdBy: "worker", schemaVersion: "v1" }] } },
+      { id: "render", label: "成片", status: "succeeded", artifactIds: ["video"], qualityGateResults: [],
+        outputState: { effectiveVersionId: "render-v1", generatedVersionId: "render-v1", stale: false, versions: [{
+          id: "render-v1", source: "generated", artifactIds: ["video"], inputVersionIds: ["voice-v1"], createdAt: runDetail.startedAt,
+          createdBy: "worker", schemaVersion: "v1", output: { subtitleStatus: "verified", subtitleBurnStatus: "blocked", subtitleVttSha256: "a".repeat(64) } }] } },
+    ], artifacts: [...runDetail.artifacts, { id: "vtt", kind: "narration_vtt", sha256: "a".repeat(64),
+      createdAt: runDetail.startedAt, contentUrl: "/api/vtt" }] };
+    expect(currentSubtitlePreview(run)?.contentUrl).toBe("/api/vtt");
+    const renderVersion = run.nodes[1]!.outputState!.versions[0]!;
+    renderVersion.output = { ...(renderVersion.output as Record<string, unknown>), subtitleBurnStatus: "burned" };
+    expect(currentSubtitlePreview(run)).toBeUndefined();
+    renderVersion.output = { ...(renderVersion.output as Record<string, unknown>), subtitleBurnStatus: "blocked" };
+    renderVersion.inputVersionIds = ["voice-old"];
+    expect(currentSubtitlePreview(run)).toBeUndefined();
+  });
+
+  it("does not rescan costs for a pure heartbeat", async () => {
     vi.restoreAllMocks();
     const listeners = new Map<string, EventListener>();
     vi.stubGlobal("EventSource", class {
@@ -147,12 +195,12 @@ describe("Studio client", () => {
     const { activeIntervention: _intervention, ...runningRun } = runDetail;
     vi.spyOn(studioApi, "run").mockResolvedValue({ ...runningRun, status: "running" });
     vi.spyOn(studioApi, "providers").mockResolvedValue([]);
-    const costs = vi.spyOn(studioApi, "runCosts").mockResolvedValue({ runId: "run-1", title: "费用刷新", lines: [], totals: { estimatedCostCny: 12, authorizedCostCny: 12, actualCostCny: 0, actualPendingCount: 1, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0 } });
+    const costs = vi.spyOn(studioApi, "runCosts").mockResolvedValue({ runId: "run-1", title: "费用刷新", lines: [], totals: { estimatedCostCny: 12, authorizedCostCny: 12, actualCostCny: 0, actualPendingCount: 1, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0, verifiedModelAttempts: 0, verifiedBrokerRequests: 0, legacyUnattributedReceipts: 0, countExact: true, countConflicts: 0 } });
     render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
     await waitFor(() => expect(listeners.has("heartbeat")).toBe(true));
     expect(costs).toHaveBeenCalledTimes(1);
-    listeners.get("heartbeat")!(new MessageEvent("heartbeat", { data: JSON.stringify({ at: "2026-09-26T13:30:00Z" }) }));
-    await waitFor(() => expect(costs).toHaveBeenCalledTimes(2));
+    await act(async () => listeners.get("heartbeat")!(new MessageEvent("heartbeat", { data: JSON.stringify({ at: "2026-09-26T13:30:00Z" }) })));
+    expect(costs).toHaveBeenCalledTimes(1);
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -304,6 +352,10 @@ describe("Studio client", () => {
       proposals: [{ proposalId: "alternative", baseDraftSha256: "a".repeat(64), document: { payoff: "采用后的新结尾" }, changeSummary: ["替换结尾"] }],
     };
     let adopted = false;
+    vi.spyOn(studioApi, "creativeReviewHistory").mockImplementation(async () => ({ runId: initial.id, legacyIncomplete: false,
+      entries: [{ stage: "treatment", versionId: "old", document: oldReview.draft, audits: [] },
+        ...(adopted ? [{ stage: "treatment" as const, versionId: "new", document: { payoff: "采用后的新结尾" }, audits: [] }] : [])],
+    }));
     vi.spyOn(studioApi, "run").mockImplementation(async () => structuredClone(initial));
     vi.spyOn(studioApi, "runCosts").mockRejectedValue(new Error("no cost fixture"));
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
@@ -321,9 +373,76 @@ describe("Studio client", () => {
     await waitFor(() => expect(within(screen.getByRole("article", { name: "当前前期构思" })).getByText("采用后的新结尾")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeEnabled();
     expect(screen.queryByText("正在处理原操作")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("前期构思 · 第 2 版 · 未审计")).toBeInTheDocument());
     expect(post).toHaveBeenCalledTimes(1);
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+  it("keeps an in-flight creative panel mounted across transient running events and clears only the settled command", async () => {
+    vi.restoreAllMocks();
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    let receiveRun: EventListener | undefined;
+    vi.stubGlobal("EventSource", class {
+      addEventListener(name: string, callback: EventListener) { if (name === "run") receiveRun = callback; }
+      close() {}
+    });
+    const initial: StudioRunDetail = {
+      ...runDetail, currentNodeId: "creative-planning", artifacts: [],
+      nodes: [{ id: "creative-planning", label: "创作规划", status: "needs_human", artifactIds: [], qualityGateResults: [] }],
+      activeIntervention: { id: "review", nodeId: "creative-planning", kind: "creative_review", reason: "等你确认", options: ["approve", "request_changes"], createdAt: runDetail.startedAt },
+    };
+    delete initial.videoArtifactId;
+    const review: import("../src/shared/api.js").StudioCreativeReviewSnapshot = {
+      runId: initial.id, runRevision: initial.revision, stage: "treatment", reviewRevision: 1,
+      draftSha256: "a".repeat(64), draftArtifactId: "draft", phase: "waiting_user",
+      allowedActions: ["revise", "confirm"], returnTargets: [],
+      draft: { payoff: "当前结尾" }, messages: [], effectiveUserInstructions: [], blockingIssues: [], proposals: [],
+    };
+    let finish!: () => void;
+    const completion = new Promise<void>((resolve) => { finish = resolve; });
+    let settled = false;
+    vi.spyOn(studioApi, "run").mockImplementation(async () => ({ ...initial, revision: initial.revision + (settled ? 2 : 0) }));
+    vi.spyOn(studioApi, "runCosts").mockRejectedValue(new Error("no cost fixture"));
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "creativeReviewHistory").mockRejectedValue(new Error("no history fixture"));
+    vi.spyOn(studioApi, "creativeReview").mockImplementation(async () => settled
+      ? { ...review, reviewRevision: 2, draftSha256: "b".repeat(64), draft: { payoff: "修改后的结尾" } } : review);
+    const post = vi.spyOn(studioApi, "commandCreativeReview").mockImplementation(async (_id, input) => {
+      await completion;
+      settled = true;
+      return { commandId: input.commandId, status: "completed", observationUrl: "/unused" };
+    });
+    vi.spyOn(studioApi, "creativeReviewCommand").mockImplementation(async (_id, commandId) => ({ commandId, status: "completed", observationUrl: "/unused" }));
+    const user = userEvent.setup();
+    try {
+      render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
+      const composer = await screen.findByPlaceholderText("例如：为什么这样开场？或者：把开头改得更直接一些。");
+      await user.type(composer, "保留安静，不追加口号");
+      await user.click(screen.getByRole("button", { name: "发送修订意见" }));
+      await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        receiveRun?.(new MessageEvent("run", { data: JSON.stringify({ ...initial, status: "running", revision: initial.revision + 1, activeIntervention: undefined }) }));
+      });
+      expect(screen.getByPlaceholderText("例如：为什么这样开场？或者：把开头改得更直接一些。")).toBe(composer);
+      expect(composer).toHaveValue("保留安静，不追加口号");
+      expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeDisabled();
+      expect(storage.has("vf:creative-command:run-1:treatment:draft")).toBe(true);
+      await act(async () => { finish(); });
+      await waitFor(() => expect(screen.getByText("修改后的结尾")).toBeInTheDocument());
+      await waitFor(() => expect(storage.has("vf:creative-command:run-1:treatment:draft")).toBe(false));
+      expect(screen.queryByText("上一条操作结果尚未核清。")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeEnabled();
+      expect(post).toHaveBeenCalledTimes(1);
+    } finally {
+      finish();
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
   });
   it("types voice timing as an optional request-changes detail", () => {
     const requestChanges: StudioDecisionInput = {
@@ -2481,7 +2600,9 @@ describe("Studio client", () => {
     expect(screen.getByRole("button", { name: "开始前期构思" })).toBeDisabled();
     expect(onSubmit).not.toHaveBeenCalled();
     const riskChoice = screen.getByRole("checkbox", { name: /先生成首版，稍后审片/ });
+    expect(screen.queryByText(/当前已选择先生成首版/)).not.toBeInTheDocument();
     await user.click(riskChoice);
+    expect(screen.getByText(/当前已选择先生成未审片首版/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "开始前期构思" })).toBeEnabled();
     await user.type(screen.getByLabelText("视频标题"), "视觉审片缺席时的首版");
     await user.type(screen.getByLabelText("内容角度"), "先生成可播放版本，再补充审片");
@@ -3047,7 +3168,7 @@ describe("Studio client", () => {
     vi.spyOn(studioApi, "runCosts").mockResolvedValue({
       runId: rejectedRun.id,
       title: rejectedRun.title,
-      totals: { estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 0, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0 },
+      totals: { estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 0, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0, verifiedModelAttempts: 0, verifiedBrokerRequests: 0, legacyUnattributedReceipts: 0, countExact: true, countConflicts: 0 },
       lines: [],
     });
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
@@ -4274,6 +4395,16 @@ describe("Studio client", () => {
     expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({ action: "approve", interventionId: "voice-ready" }));
   });
 
+  it("does not label verified continuous subtitles as missing at the voice gate", () => {
+    const run: StudioRunDetail = { ...runDetail, activeIntervention: { id: "voice-ready", nodeId: "voice",
+      boundary: "node-complete", reason: "配音完成，等你试听", options: ["approve", "reject"], createdAt: runDetail.startedAt },
+      nodes: [...runDetail.nodes.filter(node => node.id !== "voice"), { ...runDetail.nodes[0]!, id: "voice", label: "配音",
+        status: "needs_human", output: { narrationMode: "continuous_groups", subtitleStatus: "verified" } }] };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "确认当前步骤，进入下一步" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "查看无同步字幕版并确认" })).not.toBeInTheDocument();
+  });
+
   for (const grouped of [false, true]) it(`offers the voice timing intervention action instead of publish approval (grouped ${grouped})`, async () => {
     const user = userEvent.setup();
     const onDecision = vi.fn().mockResolvedValue(undefined);
@@ -4599,6 +4730,14 @@ describe("Studio client", () => {
     expect((details as HTMLDetailsElement).open).toBe(true);
   });
 
+  it("opens the current delivery and does not duplicate the creative discussion decision bar", () => {
+    const run: StudioRunDetail = { ...runDetail, artifacts:[], activeIntervention: { id:"brief-stop", nodeId:"brief", boundary:"node-complete", reason:"等待确认", options:["approve","reject"], createdAt:"2026-09-27T00:00:00.000Z" } };
+    const view = render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} />);
+    expect(screen.getByRole("region", {name:"当前步骤产物"}).querySelector("details")).toHaveAttribute("open");
+    view.rerender(<RunWorkbench run={run} creativeDiscussion={<section>当前稿件和采用动作</section>} decisionPending={false} onDecision={vi.fn()} />);
+    expect(screen.queryByRole("status", {name:"当前决定"})).not.toBeInTheDocument();
+  });
+
   it("keeps an older workflow read-only and offers a new production instead of broken review actions", async () => {
     const user = userEvent.setup();
     const onDecision = vi.fn().mockResolvedValue(undefined);
@@ -4625,6 +4764,7 @@ describe("Studio client", () => {
 
     expect(screen.getByText("历史只读")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "这条旧版制作仅供查看" })).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "当前决定" })).not.toBeInTheDocument();
     expect(screen.getByText(reason)).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "制作进度" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "生产工作流" })).not.toBeInTheDocument();
@@ -4716,6 +4856,40 @@ describe("Studio client", () => {
       reuseFromScenePosition: 1,
       note: "第二镜复用第一镜母片",
     });
+  });
+
+  it("offers pure subtitle recovery with current version bindings and no automatic request", async () => {
+    const user = userEvent.setup();
+    const onRecover = vi.fn().mockResolvedValue(undefined);
+    const resource = vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ version: "video-factory/voiceover-plan-v3",
+      layoutKey: "b".repeat(64), trackSha256: "c".repeat(64),
+      subtitles: { status: "unavailable", acceptedNarrationPlanSha256: "a".repeat(64) } });
+    const run: StudioRunDetail = { ...runDetail, revision: 7,
+      nodes: [...runDetail.nodes.filter(node => node.id !== "voice"), {
+        id: "voice", label: "配音", status: "succeeded", artifactIds: ["voice-plan"], qualityGateResults: [],
+        outputState: { effectiveVersionId: "voice-current", generatedVersionId: "voice-current", stale: false, versions: [{
+          id: "voice-current", source: "generated", artifactIds: ["voice-plan"], inputVersionIds: [],
+          createdAt: "2026-09-27T00:00:00Z", createdBy: "provider", schemaVersion: "voice-v3",
+        }] },
+      }], artifacts: [...runDetail.artifacts, { id: "voice-plan", kind: "voiceover_plan", producerNodeId: "voice",
+        createdAt: "2026-09-27T00:00:00Z", contentUrl: "/api/voice-plan" }] };
+    const view = (current: StudioRunDetail) => <RunWorkbench run={current} decisionPending={false} onDecision={async () => undefined} onRequestNarrationRevision={onRecover} />;
+    const { rerender } = render(view({ ...run, artifacts: run.artifacts.map(a => a.id === "voice-plan" ? { ...a, providerId: "macos-say-v1" } : a) }));
+    expect(screen.queryByRole("button", { name: "恢复同步字幕" })).not.toBeInTheDocument();
+    expect(resource).not.toHaveBeenCalled();
+    rerender(view(run));
+    expect(onRecover).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "恢复同步字幕" }));
+    expect(await screen.findByText(/保留原声音，不重新合成/)).toBeInTheDocument();
+    await user.click(screen.getByLabelText("有新依据，重取一次原字幕"));
+    expect(screen.getByRole("button", { name: "仅恢复字幕并生成新版成片" })).toBeDisabled();
+    await user.type(screen.getByLabelText("重取依据"), "已修复字幕下载网络");
+    await user.click(screen.getByRole("button", { name: "仅恢复字幕并生成新版成片" }));
+    expect(onRecover).toHaveBeenCalledOnce();
+    expect(onRecover).toHaveBeenCalledWith(expect.objectContaining({ action: "recover_subtitles", expectedRunRevision: 7,
+      expectedVoiceVersionId: "voice-current", expectedNarrationPlanSha256: "a".repeat(64),
+      expectedLayoutKey: "b".repeat(64), expectedAudioSha256: "c".repeat(64), refetchReason: "已修复字幕下载网络" }));
+    resource.mockRestore();
   });
 
   it("offers a narration rewrite on every located finding, next to the asset-reuse option", async () => {
@@ -5199,6 +5373,95 @@ describe("Studio client", () => {
 
     fireEvent.click(retry);
     expect(onRetryFailedNode).toHaveBeenCalledWith("assets");
+  });
+
+  it("offers an explicit current-film reinspection for an incomplete review and freezes its confirmation", async () => {
+    const onReinspect = vi.fn().mockResolvedValue(undefined);
+    const evidenceId = "e".repeat(64);
+    const current: StudioRunDetail = { ...runDetail, revision: 9, currentNodeId: "final-review",
+      activeIntervention: { id: "final", nodeId: "final-review", reason: "视觉和声音已结清，但暂无有效建议",
+        options: ["approve", "reject"], reviewStatus: "incomplete", providerOutcomeKnown: true,
+        evidenceId, createdAt: runDetail.startedAt },
+      nodes: [{ id: "visual-review", label: "审片", status: "succeeded", artifactIds: [], qualityGateResults: [],
+        output: { reviewStatus: "incomplete", providerOutcomeKnown: true, audioReview: { status: "failed", reason: "无有效声音意见" } } },
+        { id: "final-review", label: "内部定版", status: "needs_human", artifactIds: [], qualityGateResults: [] }],
+    };
+    const view = (run: StudioRunDetail) => <RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} onReinspectVisualReview={onReinspect} />;
+    const { rerender } = render(view(current));
+    fireEvent.click(screen.getByRole("button", { name: "重新审查当前成片" }));
+    const dialog = screen.getByRole("dialog", { name: "重新审查这一版成片？" });
+    expect(within(dialog).getByText(/新的模型调用.*费用/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/画面和声音/)).toBeInTheDocument();
+    expect(onReinspect).not.toHaveBeenCalled();
+    rerender(view({ ...current, revision: 10 }));
+    expect(within(dialog).getByRole("button", { name: "确认重新审查" })).toBeDisabled();
+    expect(within(dialog).getByText(/当前版本已变化/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "先不审查" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新审查当前成片" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认重新审查" }));
+    await waitFor(() => expect(onReinspect).toHaveBeenCalledTimes(1));
+    expect(onReinspect).toHaveBeenCalledWith({ expectedRunRevision: 10, reviewEvidenceId: evidenceId });
+    rerender(view({ ...current, nodes: current.nodes.map(node => node.id === "visual-review"
+      ? { ...node, outcomeUncertain: true } : node) }));
+    expect(screen.queryByRole("button", { name: "重新审查当前成片" })).not.toBeInTheDocument();
+  });
+
+  it("does not offer reinspection when the first cut has no configured review node", () => {
+    render(<RunWorkbench run={{ ...runDetail, revision: 9, currentNodeId: "final-review",
+      activeIntervention: { id: "final", nodeId: "final-review", reason: "未配置成片审查，尚未发起审片",
+        options: ["approve", "reject"], reviewStatus: "incomplete", providerOutcomeKnown: true,
+        evidenceId: "e".repeat(64), createdAt: runDetail.startedAt },
+      nodes: [{ id: "final-review", label: "内部定版", status: "needs_human", artifactIds: [], qualityGateResults: [] }],
+    }} decisionPending={false} onDecision={vi.fn()} onReinspectVisualReview={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "接受未复核风险并内部定版" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "重新审查当前成片" })).not.toBeInTheDocument();
+  });
+
+  // T03：终审无结论停点——UI 必须如实展示未复核事实，且风险签字绑定宿主交付证据 ID。
+  it("binds the internal delivery evidence when accepting an unfinished final review", async () => {
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const deliveryEvidenceId = "e".repeat(64);
+    const { activeIntervention: _a, videoArtifactId: _v, ...withoutReview } = runDetail;
+    render(<RunWorkbench
+      run={{
+        ...withoutReview,
+        status: "needs_human",
+        currentNodeId: "final-review",
+        revision: 9,
+        activeIntervention: {
+          id: "intervention-final-incomplete",
+          nodeId: "final-review",
+          reason: "机器视觉审片未取得有效结论。成片可以播放；你可以接受未复核风险并完成内部定版，或先补查/重新审片。这不代表审片通过。",
+          options: ["approve", "request_changes", "reject"],
+          reviewStatus: "incomplete",
+          providerOutcomeKnown: true,
+          evidenceId: deliveryEvidenceId,
+          createdAt: "2026-09-27T00:00:00.000Z",
+        },
+        nodes: [{
+          id: "final-review",
+          label: "Human final review",
+          role: "总导演",
+          status: "needs_human",
+          artifactIds: [],
+          qualityGateResults: [],
+        }],
+        artifacts: [],
+      }}
+      decisionPending={false}
+      onDecision={onDecision}
+    />);
+
+    expect(screen.getByText(/机器视觉审片未取得有效结论/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "接受未复核风险并内部定版" }));
+    expect(await screen.findByRole("dialog", { name: "接受未复核风险，完成内部定版" })).toBeInTheDocument();
+    expect(screen.getByText(/你接受的是这个未复核事实，不是宣布审查通过/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认承担风险并内部定版" }));
+    await waitFor(() => expect(onDecision).toHaveBeenCalledTimes(1));
+    const payload = onDecision.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.action).toBe("approve");
+    expect(payload.reviewEvidenceId).toBe(deliveryEvidenceId);
+    expect(payload.acceptIncomplete).toBe(true);
   });
 
   it("lets the user adjust, accept, or terminate a complete pilot review with the server-issued evidence", async () => {
@@ -6075,7 +6338,7 @@ describe("Studio client", () => {
     vi.spyOn(studioApi, "runCosts").mockResolvedValue({
       runId: initialRun.id,
       title: initialRun.title,
-      totals: { estimatedCostCny: 8.4, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 0, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0 },
+      totals: { estimatedCostCny: 8.4, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 0, meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0, verifiedModelAttempts: 0, verifiedBrokerRequests: 0, legacyUnattributedReceipts: 0, countExact: true, countConflicts: 0 },
       lines: [],
     });
     vi.spyOn(studioApi, "providers").mockResolvedValue([{
@@ -6169,6 +6432,11 @@ describe("Studio client", () => {
         subscriptionCalls: 0,
         freeCalls: 0,
         failedMeteredCalls: 0,
+        verifiedModelAttempts: 0,
+        verifiedBrokerRequests: 0,
+        legacyUnattributedReceipts: 0,
+        countExact: true,
+        countConflicts: 0,
       },
       lines: [],
     });
@@ -6228,6 +6496,11 @@ describe("Studio client", () => {
         subscriptionCalls: 0,
         freeCalls: 0,
         failedMeteredCalls: 1,
+        verifiedModelAttempts: 0,
+        verifiedBrokerRequests: 0,
+        legacyUnattributedReceipts: 0,
+        countExact: true,
+        countConflicts: 0,
       },
       lines: [],
     });
@@ -6287,6 +6560,11 @@ describe("Studio client", () => {
         subscriptionCalls: 0,
         freeCalls: 0,
         failedMeteredCalls: 1,
+        verifiedModelAttempts: 0,
+        verifiedBrokerRequests: 0,
+        legacyUnattributedReceipts: 0,
+        countExact: true,
+        countConflicts: 0,
       },
       lines: [],
     });
@@ -6358,6 +6636,11 @@ describe("Studio client", () => {
         subscriptionCalls: 0,
         freeCalls: 0,
         failedMeteredCalls: 1,
+        verifiedModelAttempts: 0,
+        verifiedBrokerRequests: 0,
+        legacyUnattributedReceipts: 0,
+        countExact: true,
+        countConflicts: 0,
       },
       lines: [],
     });

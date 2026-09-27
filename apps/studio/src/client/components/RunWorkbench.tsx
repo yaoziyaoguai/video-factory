@@ -9,6 +9,24 @@ import { NodeWorkspace, revealNodeWorkspace } from "./NodeWorkspace.js";
 import { nodeContentReview } from "./NodeContentReview.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 import { AudioReviewPanel } from "./AudioReviewPanel.js";
+import { CurrentFilmReinspection } from "./CurrentFilmReinspection.js";
+import { SubtitleRecoveryPanel } from "./SubtitleRecoveryPanel.js";
+
+export function currentSubtitlePreview(run: StudioRunDetail) {
+  const voice = run.nodes.find(node => node.id === "voice");
+  const render = run.nodes.find(node => node.id === "render");
+  const voiceVersion = voice?.outputState?.versions.find(version => version.id === voice.outputState?.effectiveVersionId);
+  const renderVersion = render?.outputState?.versions.find(version => version.id === render.outputState?.effectiveVersionId);
+  const output = renderVersion?.output;
+  if (!voiceVersion || !renderVersion || voice?.outputState?.stale || render?.outputState?.stale
+    || !renderVersion.inputVersionIds.includes(voiceVersion.id) || !renderVersion.artifactIds.includes(run.videoArtifactId ?? "")
+    || !output || typeof output !== "object" || Array.isArray(output)) return undefined;
+  const summary = output as Record<string, unknown>;
+  if (summary.subtitleStatus !== "verified" || summary.subtitleBurnStatus === "burned"
+    || typeof summary.subtitleVttSha256 !== "string") return undefined;
+  return run.artifacts.find(artifact => artifact.kind === "narration_vtt" && voiceVersion.artifactIds.includes(artifact.id)
+    && artifact.sha256 === summary.subtitleVttSha256);
+}
 
 interface RunWorkbenchProps {
   creativeDiscussion?: ReactNode;
@@ -81,6 +99,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const voiceTimingDialogRef = useDialogFocus<HTMLElement>(replanningVoice, closeVoiceTimingDecision, decisionPending);
   const readOnly = run.continuation?.supported === false;
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
+  const subtitlePreview = currentSubtitlePreview(run);
   // loadeddata 的资格属于具体媒体源；同一个播放器换片时不能借用旧片的 ready 状态。
   const videoIdentity = video?.contentUrl ? `${run.id}\0${video.id}\0${video.contentUrl}` : undefined;
   const [filmArrival, setFilmArrival] = useState(initialFilmArrival);
@@ -109,7 +128,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const voiceOutput = run.nodes.find((node) => node.id === "voice")?.output;
   const voiceWithoutSubtitles = boundaryGate && run.activeIntervention?.nodeId === "voice"
     && typeof voiceOutput === "object" && voiceOutput !== null && "narrationMode" in voiceOutput
-    && voiceOutput.narrationMode === "continuous_groups" && "subtitleStatus" in voiceOutput && voiceOutput.subtitleStatus !== "ready";
+    && voiceOutput.narrationMode === "continuous_groups" && "subtitleStatus" in voiceOutput
+    && voiceOutput.subtitleStatus !== "verified" && voiceOutput.subtitleStatus !== "ready";
   const boundaryOptions = boundaryGate ? run.activeIntervention?.options ?? [] : [];
   // 停点放行的是下一步，而下一步还没跑、没有任何产物，于是它从前落不进 creatorNodes：
   // 用户看得到「进入下一步」，却找不到地方配置那一步怎么跑——简报之后最典型，创作规划
@@ -130,12 +150,30 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const uncertainPaidNodeProviderId = (uncertainPaidNode?.executionReceipt ?? uncertainPaidNode?.plannedExecution)?.providerId;
   const sourcePreflightDecision = run.activeIntervention?.nodeId === "asset-source-review";
   const visualReview = sourcePreflightDecision ? undefined : visualReviewDecision(run);
+  const incompleteReviewOutput = run.nodes.find((node) => node.id === "visual-review")?.output;
+  const incompleteAudioReview = !sourcePreflightDecision && incompleteReviewOutput && typeof incompleteReviewOutput === "object"
+    ? (incompleteReviewOutput as Record<string, unknown>).audioReview : undefined;
   const sourceReviewEvidenceId = sourceReviewDecisionEvidenceId(run);
   const sourceReviewDecision = run.activeIntervention?.kind === "source_review_decision";
   const sourceReviewRetry = run.activeIntervention?.kind === "source_review_retry";
   const sourceReviewIncompleteRisk = sourceReviewRetry
     && run.activeIntervention?.reviewStatus === "incomplete"
     && run.activeIntervention.providerOutcomeKnown === true;
+  // T03 内部交付：终审的无结论停点同样是可显式承担风险的 incomplete 停点，
+  // 证据绑定的是宿主交付快照 ID，而不是成片审片的 evidence digest。
+  const finalReviewIncompleteRisk = run.activeIntervention?.nodeId === "final-review"
+    && run.activeIntervention?.reviewStatus === "incomplete"
+    && run.activeIntervention.providerOutcomeKnown === true
+    && Boolean(run.activeIntervention.evidenceId);
+  const audioForReinspection = visualReview?.audioReview ?? incompleteAudioReview;
+  const audioResultUnknown = audioForReinspection && typeof audioForReinspection === "object"
+    && "status" in audioForReinspection && audioForReinspection.status === "uncertain";
+  const reinspectionEvidenceId = visualReview?.evidenceId
+    ?? (finalReviewIncompleteRisk ? run.activeIntervention?.evidenceId : undefined);
+  const canReinspect = !readOnly && !uncertainPaidNode && !audioResultUnknown && video?.contentUrl
+    && run.nodes.some((node) => node.id === "visual-review")
+    && ["needs_human", "rejected"].includes(run.status)
+    && ["visual-review", "final-review"].includes(run.activeIntervention?.nodeId ?? run.currentNodeId ?? "");
   const voiceTiming = voiceTimingConflict(run);
   const selectedVoiceCut = voiceTiming?.cuts?.find((cut) => cut.scenePosition === voiceScenePosition);
   const voiceMinimum = voiceTiming?.groupId ? (selectedVoiceCut ? selectedVoiceCut.frameCount / 30
@@ -242,6 +280,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     runRevision={run.revision}
     acceptedPlanDigest={run.productionPlanDigest ?? ""}
     readOnly={readOnly}
+    currentDelivery={node.id === currentArtifactNode?.id}
     {...(node.id === "creative-planning" && run.planningStages ? { planningStages: run.planningStages } : {})}
     {...(node.id === "creative-planning" ? { onPendingPlanningConfigurationChange: setHasPendingPlanningConfiguration } : {})}
     pauseBusy={pausePending}
@@ -274,12 +313,14 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
       expectedRunRevision: run.revision,
       interventionId: run.activeIntervention.id,
       // 成片审片证据只在消费它的停点随决定提交；其余停点不携带无关证据（与服务端分派一致）。
+      // 终审无结论停点绑定的是 intervention.evidenceId（宿主交付快照 ID）。
       reviewEvidenceId: sourceReviewDecision || sourceReviewRetry
         ? sourceReviewEvidenceId ?? run.activeIntervention.evidenceId ?? null
         : renderedReviewStop
-          ? visualReview?.evidenceId ?? null
+          ? visualReview?.evidenceId ?? run.activeIntervention.evidenceId ?? null
           : null,
-      ...(kind === "approve" && sourceReviewIncompleteRisk ? { acceptIncomplete: true as const } : {}),
+      ...(kind === "approve" && (sourceReviewIncompleteRisk || finalReviewIncompleteRisk)
+        ? { acceptIncomplete: true as const } : {}),
       ...(kind === "approve" && contentDecisionNode?.outputState?.effectiveVersionId
         ? { contentVersionId: contentDecisionNode.outputState.effectiveVersionId } : {}),
       ...(kind === "approve" && contentDecisionUnaudited ? { acceptUnauditedContent: true as const } : {}),
@@ -342,8 +383,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
 
       <div id="run-current" className="run-current-workspace">
       {creativeDiscussion}
-      {!creativeDiscussion && run.activeIntervention?.kind === "creative_review" ? <p className="workspace-loading" role="status">正在读取当前方案与讨论。读取完成后才能确认此版本。</p> : null}
-      {run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
+      {!readOnly && !creativeDiscussion && run.activeIntervention?.kind === "creative_review" ? <p className="workspace-loading" role="status">正在读取当前方案与讨论。读取完成后才能确认此版本。</p> : null}
+      {!readOnly && !creativeDiscussion && run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
       {activeSpendNode ? <section className="current-production-action" aria-labelledby="current-production-action-title">
         <header>
           <div><p className="eyebrow">当前需要处理</p><h2 id="current-production-action-title">现在需要你：确认{stepNameFor(activeSpendNode, activeSpendNode.label)}</h2></div>
@@ -351,7 +392,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
         </header>
         <p>先核对当前方案、可复用素材与服务端报价，再单独确认本次费用。授权只针对本次制作范围，后续仍保留逐步确认。</p>
         {renderNodeWorkspace(activeSpendNode)}
-      </section> : run.status === "running" ? <section className="current-production-action is-running" aria-live="polite">
+      </section> : !readOnly && run.status === "running" ? <section className="current-production-action is-running" aria-live="polite">
         <header><div><p className="eyebrow">自动制作中</p><h2>{runningNodeLabel(run)}</h2></div><StatusBadge status={run.status} /></header>
         <p>{creatorFacingTechnicalText(run.currentAction?.label) ?? runStateMessage(run)}</p>
         {run.progress ? <div className="run-live-metrics">
@@ -386,7 +427,10 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                   if (event.currentTarget.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
                     && event.currentTarget.getAttribute("src") === `${video.contentUrl}#t=0.1`) setReadyVideoIdentity(videoIdentity);
                 }}
-                onError={() => setReadyVideoIdentity(undefined)} />
+                onError={() => setReadyVideoIdentity(undefined)}>
+                {subtitlePreview?.contentUrl ? <track kind="subtitles" src={subtitlePreview.contentUrl}
+                  srcLang="zh" label="同步字幕" default /> : null}
+              </video>
             ) : (
               <div className="video-unavailable">视频将在渲染完成后出现在这里</div>
             )}
@@ -450,7 +494,13 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               {!singleVisualReview && visualReview.independentReviews.length < 2 ? <p role="status">缺少 {2 - visualReview.independentReviews.length} 个可验证的独立审片结果，请重新审查当前成片。</p> : null}
             </div>
           </section> : null}
-          {visualReview ? <AudioReviewPanel value={visualReview.audioReview} /> : null}
+          {visualReview || incompleteAudioReview ? <AudioReviewPanel value={visualReview?.audioReview ?? incompleteAudioReview} /> : null}
+          {canReinspect && reinspectionEvidenceId && onReinspectVisualReview ? <CurrentFilmReinspection
+            input={{ expectedRunRevision: run.revision, reviewEvidenceId: reinspectionEvidenceId }}
+            busy={nodeMutationPending || decisionPending} onConfirm={onReinspectVisualReview} /> : null}
+          {run.activeIntervention?.nodeId === "final-review" && !readOnly && onRequestNarrationRevision
+            ? <SubtitleRecoveryPanel key={`${run.id}:${run.revision}`} run={run}
+              busy={decisionPending || nodeMutationPending} onRecover={onRequestNarrationRevision} /> : null}
           {!visualReview && video?.contentUrl ? <section className="review-advisory" role="status" aria-label="机器审片状态">
             <strong>可播放首版</strong>
             <p>机器视觉审片尚未完成。你可以播放和下载当前视频；这不代表正式发布已通过。</p>
@@ -595,19 +645,6 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                     />)}
                   </div>
                   : null}
-                {visualReview.pendingInspectionCount > 0 && visualReview.evidenceId && onReinspectVisualReview ? (
-                  <button
-                    className="button button-secondary"
-                    type="button"
-                    disabled={nodeMutationPending || decisionPending}
-                    onClick={() => void onReinspectVisualReview({
-                      expectedRunRevision: run.revision,
-                      reviewEvidenceId: visualReview.evidenceId!,
-                    })}
-                  >
-                    <RotateCcw aria-hidden="true" size={17} />补查现有成片（不重买素材）
-                  </button>
-                ) : null}
                 <p className="agent-review-guidance">补查会重跑整轮审片、不会重新购买画面或配音，因此<strong>其它镜头（包括上一轮已通过的镜头）的结论也可能变化</strong>；判定与上一轮不同的条目会标出「判定变动」，并给出两轮原文。批准前你要对本轮每一条结论逐条表态：采纳的必须先返修，不采纳的要写明理由。</p>
               </div> : null}
               {nextPipelineNode ? <div className="boundary-next-step">
@@ -662,7 +699,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                     disabled={decisionPending}
                     onClick={() => openDecision("approve")}
                   >
-                    <Check aria-hidden="true" size={17} />{sourcePreflightDecision ? "接受当前素材风险，继续制作" : sourceReviewDecision || sourceReviewIncompleteRisk ? "查看质量意见并继续制作" : "批准进入发布包"}
+                    <Check aria-hidden="true" size={17} />{sourcePreflightDecision ? "接受当前素材风险，继续制作" : sourceReviewDecision || sourceReviewIncompleteRisk ? "查看质量意见并继续制作" : finalReviewIncompleteRisk ? "接受未复核风险并内部定版" : "批准进入发布包"}
                   </button>
                   <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
                     <XCircle aria-hidden="true" size={17} />终止制作
@@ -825,12 +862,14 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
         <div className="dialog-backdrop" role="presentation">
           <section ref={approveDialogRef} className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="approve-title" tabIndex={-1}>
             <header className="dialog-header">
-              <div><p className="eyebrow">{sourcePreflightDecision ? "素材预检" : sourceReviewIncompleteRisk ? "未完成审查" : sourceReviewDecision ? "试片质量意见" : boundaryGate ? "节点放行" : "最终决定"}</p><h2 id="approve-title">{sourcePreflightDecision
+              <div><p className="eyebrow">{sourcePreflightDecision ? "素材预检" : sourceReviewIncompleteRisk ? "未完成审查" : sourceReviewDecision ? "试片质量意见" : finalReviewIncompleteRisk ? "未复核交付" : boundaryGate ? "节点放行" : "最终决定"}</p><h2 id="approve-title">{sourcePreflightDecision
                 ? "接受当前素材风险，继续制作"
                 : sourceReviewIncompleteRisk
                 ? "接受未完成审查，继续生成首版"
                 : sourceReviewDecision
                 ? "接受所列质量风险，继续制作"
+                : finalReviewIncompleteRisk
+                ? "接受未复核风险，完成内部定版"
                 : boundaryGate
                 ? `确认放行「${runNodeLabel(run.activeIntervention?.nodeId ?? "")}」`
                 : reviewItems.length > 0 ? "逐条表态后批准成片" : "确认批准成片"}</h2></div>
@@ -844,6 +883,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               ? <><strong>你接受的是“审查没有结论”的事实，不是把它改成通过。</strong><span>已生成画面和费用事实会保留，继续只运行后续配音与渲染；不会重新购买已成功素材，最终仍显示为可播放首版而非正式发布通过。</span></>
               : sourceReviewDecision
               ? <><strong>你确认的是：已看过这份试片意见，愿意按当前方案继续。</strong><span>系统不会重新购买已生成试片；其它尚未生成的素材仍会先依据当前报价和授权处理。</span></>
+              : finalReviewIncompleteRisk
+              ? <><strong>机器审片这次没有给出可用结论；你接受的是这个未复核事实，不是宣布审查通过。</strong><span>内部定版会绑定当前成片与这份风险签字。成片仍可查看；若之后重新取得审片结论，这里不会自动改写。</span></>
               : contentDecisionNode
               ? <><strong>{contentDecisionUnaudited ? "你采用的是尚未取得独立审计结论的当前版本。" : contentDecisionHasSuggestions ? "你看过内容建议，决定保留建议并采用当前版本。" : "你采用的是当前已审计版本。"}</strong><span>本次决定会绑定当前文字版本；旧版建议不会自动写入当前稿。质量决定不会替代后续素材和费用确认。</span></>
               : voiceWithoutSubtitles
@@ -939,6 +980,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               ><Check aria-hidden="true" size={17} />{decisionPending
                 ? "正在批准..."
                 : sourceReviewDecision || sourcePreflightDecision || sourceReviewIncompleteRisk ? "确认承担并继续"
+                  : finalReviewIncompleteRisk ? "确认承担风险并内部定版"
                   : contentDecisionNode ? contentDecisionActionLabel
                   : voiceWithoutSubtitles ? "确认无同步字幕版，进入渲染"
                   : boundaryGate ? "确认放行，进入下一步"
@@ -1553,7 +1595,7 @@ function SceneNarrationRevision({ scenePosition, busy, onLoad, onSubmit }: {
   scenePosition: number;
   busy: boolean;
   onLoad: (scenePosition: number) => Promise<string>;
-  onSubmit: (input: Pick<StudioNarrationRevisionInput, "scenePosition" | "narration" | "note">) => Promise<void>;
+  onSubmit: (input: Pick<Extract<StudioNarrationRevisionInput, { scenePosition: number }>, "scenePosition" | "narration" | "note">) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const [original, setOriginal] = useState<string>();
@@ -1620,7 +1662,7 @@ function SceneRevisionFinding({ finding, busy, onSeek, onSubmit, onReselectAsset
   onSubmit: (input: Pick<StudioSceneRevisionInput, "reuseFromScenePosition" | "note">) => Promise<void>;
   onReselectAsset?: (input: Pick<StudioSceneResourceRevisionInput, "note">) => Promise<void>;
   onLoadNarration?: (scenePosition: number) => Promise<string>;
-  onSubmitNarration?: (input: Pick<StudioNarrationRevisionInput, "scenePosition" | "narration" | "note">) => Promise<void>;
+  onSubmitNarration?: (input: Pick<Extract<StudioNarrationRevisionInput, { scenePosition: number }>, "scenePosition" | "narration" | "note">) => Promise<void>;
 }) {
   const [sourcePosition, setSourcePosition] = useState("");
   const [note, setNote] = useState("");

@@ -7,7 +7,11 @@
 import io
 import json
 import tempfile
+import threading
+import time
 import unittest
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -37,6 +41,145 @@ def pexels_opener(request, timeout):
 
 
 class StockSearchIsolationTest(unittest.TestCase):
+    def test_worker_deadline_reaches_real_search_and_publishes_partial_inventory(self):
+        clock, requests = [100.0], []
+        def opener(request, timeout):
+            requests.append((request.full_url, timeout))
+            if len(requests) == 1:
+                return pexels_opener(request, timeout)
+            clock[0] = 109.8
+            raise TimeoutError("remaining operation budget exhausted")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "script.json").write_text(json.dumps({"scenes": [{"position": 1, "narration": "海",
+                "duration": 6, "visual_strategy": "stock", "visual_prompt": "sea", "search_terms": ["slow"]}]}))
+            (root / "director.json").write_text(json.dumps(sea_route()))
+            with patch("video_factory.worker.time.time", return_value=1000.0), \
+                    patch.object(stock_assets.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.object(stock_assets.urllib.request, "urlopen", side_effect=opener), \
+                    patch.dict(stock_assets.os.environ, {"PEXELS_API_KEY": "dummy", "PIXABAY_API_KEY": "dummy"}):
+                result = handle_request({"protocolVersion": WORKER_PROTOCOL_VERSION, "commandId": "deadline",
+                    "runId": "local-deadline", "nodeRunId": "creative-planning", "attempt": 1,
+                    "capability": "asset.search", "executionDeadlineUnixMs": 1010000,
+                    "input": {"scriptPath": str(root / "script.json"), "directorPlanPath": str(root / "director.json")},
+                    "parameters": {"provider": "ai-router"}, "outputDir": str(root / "output")})
+            self.assertEqual(result["status"], "succeeded")
+            self.assertEqual(len(requests), 2, "期限到后不能再请求其它查询或来源")
+            self.assertAlmostEqual(requests[0][1], 9.8)
+            row = json.loads(Path(result["output"]["candidateSearchPath"]).read_text())["scene_candidates"][0]
+            self.assertEqual(len(row["candidates"]), 1)
+            self.assertIn("总时限", row["search_errors"][0]["message"])
+            self.assertTrue(Path(result["output"]["candidateInventoryPath"]).is_file())
+
+    def test_slow_second_response_chunk_uses_remaining_operation_budget(self):
+        release = threading.Event()
+        class SlowResponse(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "12")
+                self.end_headers()
+                time.sleep(0.25)
+                self.wfile.write(b'{"ok":')
+                self.wfile.flush()
+                release.wait(2)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), SlowResponse)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            started = time.monotonic()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+            with self.assertRaises(RuntimeError):
+                stock_assets.fetch_json(urllib.request.Request(f"http://127.0.0.1:{server.server_port}/"),
+                    opener, operation_deadline=started + 0.5)
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.68, "下一块必须用剩余期限，不重新等待首次打开时的0.5秒")
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(2)
+
+    def test_one_deadline_covers_all_variants_and_keeps_existing_candidates(self):
+        clock = [100.0]
+        calls = []
+        real_search = stock_assets.search_stock_assets
+
+        def search(provider, query, media_type, limit, **kwargs):
+            calls.append((provider, query, kwargs.get("deadline")))
+            if query == "slow":
+                clock[0] = 110.0
+                raise TimeoutError("controlled timeout")
+            return real_search(provider, query, media_type, limit, pexels_opener, {"PEXELS_API_KEY": "dummy"})
+
+        scene = Scene(position=1, narration="海", duration=6, visual_strategy="stock",
+                      visual_prompt="sea", search_terms=["slow", "must not run"])
+        with tempfile.TemporaryDirectory() as tmp, patch.object(stock_assets.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(stock_assets, "search_stock_assets", side_effect=search):
+            report, _ = search_routed_scene_asset_candidates(1, [scene], Path(tmp), sea_route(), deadline=110.0)
+            row = json.loads(report.read_text())["scene_candidates"][0]
+        self.assertEqual(len(row["candidates"]), 1)
+        self.assertEqual(calls, [("pexels", "sea waves", 110.0), ("pexels", "slow", 110.0)])
+        self.assertEqual(row["search_errors"][0]["provider_id"], "pixabay-stock-v1")
+        self.assertIn("总时限", row["search_errors"][0]["message"])
+
+    def test_operation_deadline_limits_retries_without_removing_existing_retry_policy(self):
+        clock, timeouts = [100.0], []
+        def opener(request, timeout):
+            timeouts.append(timeout)
+            if len(timeouts) == 1:
+                clock[0] += 20
+                raise TimeoutError("first request timed out")
+            return response({"ok": True})
+        def sleep(delay):
+            clock[0] += delay
+        with patch.object(stock_assets.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(stock_assets.time, "sleep", side_effect=sleep):
+            value = stock_assets.fetch_json(stock_assets.urllib.request.Request("https://example.com/search"),
+                opener, operation_deadline=125.0)
+        self.assertEqual(value, {"ok": True})
+        self.assertEqual(timeouts, [20, 4.75])
+
+    def test_identical_queries_are_reused_only_within_one_candidate_search(self):
+        scenes = [Scene(position=p, narration="海", duration=6, visual_strategy="stock", visual_prompt="sea")
+                  for p in [1, 2]]
+        route = {"shots": [{**sea_route(alternatives=())["shots"][0], "scenePosition": p} for p in [1, 2]]}
+        real_search = stock_assets.search_stock_assets
+
+        def search(provider, query, media_type, limit, opener=None, environ=None):
+            return real_search(provider, query, media_type, limit, pexels_opener, {"PEXELS_API_KEY": "dummy"})
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(stock_assets, "search_stock_assets", side_effect=search) as calls:
+            first, _ = search_routed_scene_asset_candidates(1, scenes, Path(tmp), route, limit=3)
+            rows = json.loads(first.read_text())["scene_candidates"]
+            self.assertEqual(calls.call_count, 1)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["candidates"], rows[1]["candidates"])
+            search_routed_scene_asset_candidates(2, scenes, Path(tmp), route, limit=3)
+            self.assertEqual(calls.call_count, 2, "不同搜索操作不沿用临时缓存或改变供应方TTL政策")
+
+    def test_query_reuse_does_not_collapse_different_media_or_hide_a_failed_source(self):
+        scenes = [Scene(position=p, narration="海", duration=6, visual_strategy="stock", visual_prompt="sea")
+                  for p in [1, 2]]
+        route = {"shots": [{**sea_route()["shots"][0], "scenePosition": p,
+                            "deliveryType": "stock_image" if p == 2 else "stock_video"} for p in [1, 2]]}
+        calls = []
+
+        def search(provider, query, media_type, limit, opener=None, environ=None):
+            calls.append((provider, media_type))
+            if provider == "pixabay":
+                raise OSError("source offline")
+            return []
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(stock_assets, "search_stock_assets", side_effect=search):
+            result, _ = search_routed_scene_asset_candidates(1, scenes, Path(tmp), route, limit=3)
+            rows = json.loads(result.read_text())["scene_candidates"]
+        self.assertEqual(calls, [("pexels", "video"), ("pixabay", "video"), ("pexels", "image"), ("pixabay", "image")])
+        self.assertTrue(all(row["search_errors"][0]["provider_id"] == "pixabay-stock-v1" for row in rows))
+
     def test_one_source_oserror_keeps_the_other_sources_candidates(self):
         scene = Scene(position=1, narration="海", duration=6, visual_strategy="stock", visual_prompt="sea")
         real_search = stock_assets.search_stock_assets

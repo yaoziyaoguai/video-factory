@@ -316,6 +316,8 @@ export interface ProductionCapabilitiesPayload {
   audio: {
     narration: boolean;
     pauseControl: "punctuation" | "text_hint" | "unsupported";
+    /** T08：可选能力声明；旧持久化输入缺失时为“未声明支持”，不推断已启用。 */
+    continuousNarrationGroups?: boolean;
     musicTrack: boolean;
     soundEffectsTrack: boolean;
   };
@@ -2378,7 +2380,7 @@ function decodeJpegBase64(value: unknown, field: string): Buffer {
   return decoded;
 }
 
-function requireProductionCapabilities(value: unknown, field: string): ProductionCapabilitiesPayload {
+export function requireProductionCapabilities(value: unknown, field: string): ProductionCapabilitiesPayload {
   const record = requireRecord(value, field);
   assertExactKeys(record, ["assetProviders", "editing", "audio"], field);
   if (!Array.isArray(record.assetProviders) || record.assetProviders.length > 32) {
@@ -2448,7 +2450,12 @@ function requireProductionCapabilities(value: unknown, field: string): Productio
     throw new CodexExecutorError(`${field}.editing fields must be booleans.`, false);
   }
   const audio = requireRecord(record.audio, `${field}.audio`);
-  assertExactKeys(audio, ["narration", "pauseControl", "musicTrack", "soundEffectsTrack"], `${field}.audio`);
+  // T08：continuousNarrationGroups 为可选布尔——缺失（旧持久化输入）消费为未声明支持；
+  // 出现时必须是布尔；其余未知键仍被精确键校验拒绝。
+  assertExactKeys(audio, ["narration", "pauseControl", "continuousNarrationGroups", "musicTrack", "soundEffectsTrack"], `${field}.audio`);
+  if (audio.continuousNarrationGroups !== undefined && typeof audio.continuousNarrationGroups !== "boolean") {
+    throw new CodexExecutorError(`${field}.audio.continuousNarrationGroups must be a boolean.`, false);
+  }
   if (typeof audio.narration !== "boolean" || typeof audio.musicTrack !== "boolean" || typeof audio.soundEffectsTrack !== "boolean"
     || (audio.pauseControl !== "punctuation" && audio.pauseControl !== "text_hint" && audio.pauseControl !== "unsupported")) {
     throw new CodexExecutorError(`${field}.audio fields are invalid.`, false);
@@ -2462,6 +2469,7 @@ function requireProductionCapabilities(value: unknown, field: string): Productio
     audio: {
       narration: audio.narration,
       pauseControl: audio.pauseControl,
+      ...(audio.continuousNarrationGroups !== undefined ? { continuousNarrationGroups: audio.continuousNarrationGroups } : {}),
       musicTrack: audio.musicTrack,
       soundEffectsTrack: audio.soundEffectsTrack,
     },

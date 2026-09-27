@@ -8,14 +8,18 @@ export function AudioReviewPanel({ value }: { value: unknown }) {
   if (item?.status !== "completed") return <section className="independent-review-panel" aria-label="声音审片">
     <strong>声音审片 · {item?.status === "uncertain" ? "结果待核实" : item?.status === "failed" ? "未完成" : "未审听"}</strong>
     <p>{typeof item?.reason === "string" ? item.reason : "这份报告没有真实音轨审听证据；视觉意见不能证明声音质量。"}</p>
-    <small>是否继续由你决定；不会自动重新购买或生成素材。</small>
+    <small>{item?.status === "uncertain" ? "先查询原声音请求，核清后再定版；现有成片仍可查看，不会重复购买。" : "是否继续由你决定；不会自动重新购买或生成素材。"}</small>
   </section>;
   try {
     const report = validateAudioReviewReport(item.report, String(item.audioSha256), Number(item.durationMs));
     const hasAudibleObservation = AUDIO_REVIEW_CHECKS.filter((key) => key !== "audiovisual_alignment")
       .some((key) => report.checks[key] === "pass" || report.checks[key] === "issue");
+    const coverage = item.observationCoverage && typeof item.observationCoverage === "object"
+      ? item.observationCoverage as { observed?: unknown; total?: unknown } : undefined;
+    const coverageLabel = coverage && typeof coverage.observed === "number" && typeof coverage.total === "number"
+      ? ` · 有效观察 ${coverage.observed}/${coverage.total} 项` : "";
     return <section className="independent-review-panel" aria-label="声音审片">
-      <header><strong>声音审片 · {hasAudibleObservation ? "报告已返回" : "未完成有效审听"}</strong><small>{String(item.modelLabel ?? item.modelId ?? "模型身份未记录")}</small></header>
+      <header><strong>声音审片 · {hasAudibleObservation ? "报告已返回" : "未完成有效审听"}</strong><small>{String(item.modelLabel ?? item.modelId ?? "模型身份未记录")}{coverageLabel}</small></header>
       <p>{report.summary}</p>
       <dl>{AUDIO_REVIEW_CHECKS.map((key) => <div key={key}><dt>{LABELS[key]}</dt><dd>{RESULTS[report.checks[key]]}</dd></div>)}</dl>
       {report.findings.length ? <ul>{report.findings.map((finding, index) => <li key={index}>

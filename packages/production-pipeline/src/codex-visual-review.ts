@@ -36,6 +36,8 @@ export interface VisualReviewMediaPayload {
 }
 
 export interface VisualReviewAgentInput {
+  /** 宿主持久化的主动再审轮次；普通恢复保持不变，不进入模型payload。 */
+  reviewCycleId?: string;
   selectedAudioModelId?: string;
   videoPath?: string;
   assetPlanPath?: string;

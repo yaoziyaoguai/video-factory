@@ -35,27 +35,15 @@ export interface PythonReviewMediaPreprocessorOptions {
 }
 
 export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreprocessor {
-  // 双分支复审会并发请求同一份素材证据。同一份证据只需预处理一次：各跑一次既白付一倍
-  // ffmpeg，又让两个临时目录去抢同一个发布目标（Python 侧 os.replace 交错时以
-  // "Directory not empty" 失败，且这个失败会伪装成模型调用失败）。只合并同时进行的
-  // 相同请求，落地即删，不做跨次缓存——素材变了必须重新采帧。
-  private readonly inFlight = new Map<string, Promise<VisualReviewMediaPayload>>();
-
+  // T10.3：路径级 inFlight 合并已移除——路径相同不代表内容相同（源在途被替换时，
+  // 合并会把旧证据发给第二个调用方）。同内容的实际抽取去重由 Python 侧内容键 +
+  // 跨进程锁 + 原子发布完成：第二个调用方命中缓存，不重复 ffmpeg，也不会半写目录。
   constructor(private readonly options: PythonReviewMediaPreprocessorOptions) {}
 
   async prepare(input: ReviewMediaPrepareInput): Promise<VisualReviewMediaPayload> {
-    const key = mediaPreparationKey(input);
-    let pending = this.inFlight.get(key);
-    if (!pending) {
-      pending = this.prepareFresh(input);
-      this.inFlight.set(key, pending);
-    }
-    try {
-      // 每个调用方拿自己的副本：分支内的原地改写不能泄漏给另一分支，也不能改写共同快照。
-      return structuredClone(await pending);
-    } finally {
-      if (this.inFlight.get(key) === pending) this.inFlight.delete(key);
-    }
+    const payload = await this.prepareFresh(input);
+    // 每个调用方拿自己的副本：分支内的原地改写不能泄漏给另一分支，也不能改写共同快照。
+    return structuredClone(payload);
   }
 
   private async prepareFresh(input: ReviewMediaPrepareInput): Promise<VisualReviewMediaPayload> {
@@ -66,8 +54,8 @@ export class PythonReviewMediaPreprocessor implements VisualReviewMediaPreproces
       "--max-frames", String(MAX_REVIEW_FRAMES),
       ...(input.renderManifestPath ? ["--render-manifest", input.renderManifestPath] : []),
       ...(input.scenePositions ? ["--scene-positions", ...input.scenePositions.map(String)] : []),
-      ...(input.assetPlanPath && input.scriptPath ? ["--script", input.scriptPath] : []),
-      ...(input.assetPlanPath && input.executablePlanPath ? ["--executable-plan", input.executablePlanPath] : []),
+      ...(input.scriptPath ? ["--script", input.scriptPath] : []),
+      ...(input.executablePlanPath ? ["--executable-plan", input.executablePlanPath] : []),
     ];
     let stdout: string;
     try {
@@ -156,20 +144,9 @@ function requiredVideoPath(value: string | undefined): string {
 }
 
 /**
- * 预处理身份。命令里出现的每个字段都会改变产出的证据，所以全部入键：只要有一个不同就
- * 各跑各的。宁可少合并也不能把两份不同证据当成一份发出去。
+ * 预处理身份说明：命令里出现的每个字段都会改变产出的证据。与 Python 内容键
+ * （video/plan/renderManifest 的内容 SHA + 采样参数）互补，这里不再维护路径级合并键。
  */
-function mediaPreparationKey(input: ReviewMediaPrepareInput): string {
-  return JSON.stringify([
-    input.runRoot,
-    input.assetPlanPath ?? null,
-    input.videoPath ?? null,
-    input.renderManifestPath ?? null,
-    input.scenePositions ?? null,
-    input.scriptPath ?? null,
-    input.executablePlanPath ?? null,
-  ]);
-}
 
 function childFailureReason(error: unknown): string {
   const failure = error as { killed?: unknown; signal?: unknown; code?: unknown };

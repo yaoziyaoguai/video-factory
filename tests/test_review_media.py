@@ -2,6 +2,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +25,39 @@ FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None and shutil.which("ffprobe"
 
 @unittest.skipUnless(FFMPEG_AVAILABLE, "FFmpeg and ffprobe are required")
 class ReviewMediaTest(unittest.TestCase):
+    def test_low_fps_closing_sample_uses_the_last_real_frame_inside_the_cut(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "low-fps.mp4"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=red:s=160x90:d=1:r=6",
+                "-f", "lavfi", "-i", "color=c=green:s=160x90:d=1:r=6",
+                "-f", "lavfi", "-i", "color=c=blue:s=160x90:d=1:r=6",
+                "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0,format=yuv420p",
+                "-c:v", "libx264", str(video),
+            ], check=True, capture_output=True)
+            plan = root / "asset_plan.json"
+            plan.write_text(json.dumps({"scene_assets": [{
+                "scene_position": 1, "duration_frames": 30, "source_in_frame": 30,
+                "media_type": "video", "local_path": str(video),
+            }]}))
+            result = prepare_asset_review_media(plan, root, max_frames=3)
+            manifest = json.loads(result.read_text())
+            self.assertEqual(len(manifest["frames"]), 3)
+            closing = manifest["frames"][-1]
+            self.assertEqual(closing["timestampMs"], 850)
+            self.assertEqual(closing["sourceTimecodeMs"], 1833)
+            for frame in manifest["frames"]:
+                self.assertTrue(1000 <= frame["sourceTimecodeMs"] < 2000)
+                with Image.open(root / frame["path"]) as image:
+                    red, green, blue = image.resize((1, 1)).getpixel((0, 0))
+                self.assertGreater(green, red * 2)
+                self.assertGreater(green, blue * 2)
+            with patch("video_factory.review_media.subprocess.run") as run:
+                self.assertEqual(prepare_asset_review_media(plan, root, max_frames=3), result)
+                run.assert_not_called()
+
     def test_source_review_binds_nonzero_sampling_to_the_executable_cut(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -404,10 +438,8 @@ class ReviewMediaTest(unittest.TestCase):
             first_manifest_bytes = manifest_path.read_bytes()
             manifest = json.loads(first_manifest_bytes)
 
-            self.assertEqual(
-                manifest_path,
-                (run_root / "review_media" / "review_media_manifest.json").resolve(),
-            )
+            self.assertTrue(manifest_path.is_relative_to((run_root / ".media-review-cache").resolve()))
+            self.assertEqual(manifest_path.name, "review_media_manifest.json")
             self.assertEqual(manifest["version"], "video-factory/review-media-v1")
             self.assertEqual(manifest["sampling"], {"mode": "scene_change_keyframes"})
             self.assertGreater(manifest["durationMs"], 0)
@@ -652,7 +684,7 @@ class ReviewMediaTest(unittest.TestCase):
             self.assertEqual(stable_manifest_path.read_bytes(), stable_manifest_bytes)
             self.assertEqual(list(run_root.glob(".review-media-*")), [])
 
-    def test_rejects_a_review_output_symlink_that_escapes_the_run_root(self):
+    def test_untrusted_cache_symlink_falls_back_without_touching_external_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_root = root / "run-1"
@@ -662,12 +694,16 @@ class ReviewMediaTest(unittest.TestCase):
             outside_output.mkdir()
             marker = outside_output / "keep.txt"
             marker.write_text("untouched", encoding="utf-8")
-            (run_root / "review_media").symlink_to(outside_output, target_is_directory=True)
+            (run_root / ".media-review-cache").symlink_to(outside_output, target_is_directory=True)
 
-            with self.assertRaisesRegex(ValueError, "must stay within run_root"):
-                prepare_review_media(video_path=video_path, run_root=run_root)
+            manifest = prepare_review_media(video_path=video_path, run_root=run_root, max_frames=1)
+            self.assertTrue(manifest.is_relative_to(run_root.resolve()))
+            self.assertTrue(manifest.parent.name.startswith("prepared-review-"))
+            for frame in json.loads(manifest.read_text())["frames"]:
+                assert_manifest_image(run_root, frame)
 
             self.assertEqual(marker.read_text(encoding="utf-8"), "untouched")
+            self.assertEqual(list(outside_output.iterdir()), [marker])
             self.assertEqual(list(run_root.glob(".review-media-*")), [])
 
 
@@ -755,3 +791,283 @@ def assert_manifest_image(run_root: Path, image_entry: dict) -> None:
 
 if __name__ == "__main__":
     unittest.main()
+
+@unittest.skipUnless(FFMPEG_AVAILABLE, "FFmpeg and ffprobe are required")
+class ReviewMediaCacheTest(unittest.TestCase):
+    """T10.3：内容绑定的审片预处理复用。命中零抽取；换内容必 miss；损坏即重建。"""
+
+    def test_distinct_sources_and_sampling_preserve_previous_evidence_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            make_test_video(video)
+            first = prepare_review_media(video, root, 2)
+            original = first.read_bytes()
+            frames = {entry["path"]: (root / entry["path"]).read_bytes()
+                      for entry in json.loads(original)["frames"]}
+            second = prepare_review_media(video, root, 3)
+            self.assertNotEqual(first, second)
+            self.assertEqual(first.read_bytes(), original)
+            for filename, content in frames.items():
+                self.assertEqual((root / filename).read_bytes(), content)
+
+    def test_asset_warm_and_restarted_reads_do_not_probe_or_extract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_color_range_video(root / "clip.mp4")
+            plan = root / "assets.json"
+            plan.write_text(json.dumps({"scene_assets": [
+                {"scene_position": p, "duration": 1, "media_type": "video", "local_path": "clip.mp4"}
+                for p in [1, 2]]}))
+            with patch("video_factory.review_media._probe_video", wraps=_probe_video) as probe:
+                first = prepare_asset_review_media(plan, root, 4)
+                self.assertEqual(probe.call_count, 1, "相同源视频本次只probe一次")
+            with patch("video_factory.review_media.subprocess.run", side_effect=AssertionError("warm must not extract")):
+                second = prepare_asset_review_media(plan, root, 4)
+            self.assertEqual(first, second)
+
+    def test_source_changed_during_extraction_cannot_publish_old_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            make_test_video(video)
+            first = prepare_review_media(video, root, 1)
+            original = first.read_bytes()
+
+            def change_source(_source, _timestamp, target):
+                video.write_bytes(b"changed during extraction")
+                Image.new("RGB", (16, 16), "red").save(target, format="JPEG")
+
+            with patch("video_factory.review_media._extract_frame", side_effect=change_source):
+                with self.assertRaisesRegex(ValueError, "source.*changed"):
+                    prepare_review_media(video, root, 2)
+            self.assertEqual(first.read_bytes(), original)
+
+    def test_render_dependency_is_confined_before_hashing(self):
+        from video_factory import review_media
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "run"
+            root.mkdir()
+            video = root / "clip.mp4"
+            make_test_video(video)
+            outside = base / "outside.json"
+            outside.write_text('{"slides":[{"duration":4}]}')
+            hashes = []
+            original_hash = review_media._file_sha256
+
+            def digest(filename):
+                hashes.append(filename.resolve())
+                return original_hash(filename)
+
+            with patch("video_factory.review_media._file_sha256", side_effect=digest):
+                with self.assertRaisesRegex(ValueError, "within run_root"):
+                    prepare_review_media(video, root, render_manifest_path=outside)
+            self.assertNotIn(outside, hashes)
+
+    def test_video_script_dependency_change_misses_without_mutating_old_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            make_test_video(video)
+            script = root / "script.json"
+            script.write_text('{"scenes":[{"position":1,"duration":4}]}')
+            first = prepare_review_media(video, root, 2, script_path=script)
+            before = first.read_bytes()
+            script.write_text('{"scenes":[{"position":1,"duration":4,"narration":"new"}]}')
+            second = prepare_review_media(video, root, 2, script_path=script)
+            self.assertNotEqual(first, second)
+            self.assertEqual(first.read_bytes(), before)
+
+    def test_same_source_prepare_reuses_cache_without_new_extraction_processes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            make_test_video(video)
+            first = json.loads(prepare_review_media(video, root).read_text(encoding="utf-8"))
+            with patch("video_factory.review_media.subprocess.run", side_effect=AssertionError("hit must not spawn ffmpeg/ffprobe")):
+                second_manifest = prepare_review_media(video, root)
+            second = json.loads(second_manifest.read_text(encoding="utf-8"))
+            self.assertEqual([f["sha256"] for f in first["frames"]], [f["sha256"] for f in second["frames"]])
+            self.assertEqual(first["durationMs"], second["durationMs"])
+            self.assertEqual(first["sampling"], second["sampling"])
+
+    def test_legacy_output_is_not_required_or_overwritten_by_immutable_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            make_test_video(video)
+            legacy = root / "review_media"
+            legacy.mkdir()
+            marker = legacy / "review_media_manifest.json"
+            marker.write_text("old evidence must remain readable")
+            first = prepare_review_media(video, root)
+            with patch("video_factory.review_media.subprocess.run", side_effect=AssertionError("hit must not spawn ffmpeg/ffprobe")):
+                manifest_path = prepare_review_media(video, root)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(first, manifest_path)
+            self.assertEqual(marker.read_text(), "old evidence must remain readable")
+            self.assertTrue((root / manifest["contactSheet"]["path"]).is_file())
+            self.assertGreaterEqual(len(manifest["frames"]), 1)
+
+    def test_same_path_content_change_misses_cache_and_never_serves_stale_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            make_test_video(video)
+            first = json.loads(prepare_review_media(video, root).read_text(encoding="utf-8"))
+            make_color_range_video(video)
+            second = json.loads(prepare_review_media(video, root).read_text(encoding="utf-8"))
+            first_shas = [f["sha256"] for f in first["frames"]]
+            second_shas = [f["sha256"] for f in second["frames"]]
+            self.assertNotEqual(first_shas, second_shas, "同一文件路径换内容后不得返回旧证据")
+            entries = list((root / ".media-review-cache").glob("*"))
+            self.assertGreaterEqual(len([e for e in entries if e.is_dir()]), 2, "两个内容键各留一份缓存")
+
+    def test_corrupted_cache_entry_is_rejected_and_rebuilt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            make_test_video(video)
+            first = prepare_review_media(video, root)
+            cache_entries = [e for e in (root / ".media-review-cache").glob("*") if e.is_dir()]
+            self.assertEqual(len(cache_entries), 1)
+            frame = root / json.loads(first.read_text())["frames"][0]["path"]
+            frame.write_bytes(frame.read_bytes()[:-8] + b"corrupted")
+            damaged = frame.read_bytes()
+            real_run = subprocess.run
+
+            def counting_run(*args, **kwargs):
+                return real_run(*args, **kwargs)
+
+            with patch("video_factory.review_media.subprocess.run", side_effect=counting_run) as runs:
+                rebuilt = prepare_review_media(video, root)
+                manifest = json.loads(rebuilt.read_text(encoding="utf-8"))
+                self.assertGreater(runs.call_count, 0, "缓存损坏时必须退回原安全路径重建")
+            self.assertNotEqual(first, rebuilt)
+            self.assertEqual(frame.read_bytes(), damaged, "旧证据即使损坏也不能被覆盖")
+            with patch("video_factory.review_media.subprocess.run", side_effect=AssertionError("repaired hit must not extract")):
+                restored = json.loads(prepare_review_media(video, root).read_text(encoding="utf-8"))
+            self.assertEqual([f["sha256"] for f in manifest["frames"]], [f["sha256"] for f in restored["frames"]])
+
+    def test_two_processes_publish_one_complete_version_and_restart_reuses_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_test_video(root / "clip.mp4")
+            script = """
+import os, sys
+from pathlib import Path
+from unittest.mock import patch
+from video_factory import review_media as media
+root = Path(sys.argv[1])
+original = media._extract_frame
+def extract(*args):
+    with (root / f'extractions-{os.getpid()}.txt').open('a') as log:
+        log.write('frame\\n')
+    return original(*args)
+sys.stdin.read(1)
+with patch.object(media, '_extract_frame', side_effect=extract):
+    print(media.prepare_review_media(root / 'clip.mp4', root, 2))
+"""
+            children = [subprocess.Popen([sys.executable, "-c", script, str(root)], text=True,
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(2)]
+            try:
+                for child in children:
+                    child.stdin.write("x")
+                    child.stdin.flush()
+                outputs = [child.communicate(timeout=30) for child in children]
+                for child, (_, error) in zip(children, outputs):
+                    self.assertEqual(child.returncode, 0, error)
+                self.assertEqual(outputs[0][0], outputs[1][0])
+                manifest = Path(outputs[0][0].strip())
+                self.assertEqual(sum(len(p.read_text().splitlines()) for p in root.glob("extractions-*.txt")), 2)
+                self.assertEqual(len(list((root / ".media-review-cache").glob("*/v-*"))), 1)
+                restart = """
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from video_factory.review_media import prepare_review_media
+root = Path(sys.argv[1])
+with patch('video_factory.review_media.subprocess.run', side_effect=AssertionError('unexpected extraction')):
+    print(prepare_review_media(root / 'clip.mp4', root, 2))
+"""
+                self.assertEqual(subprocess.check_output([sys.executable, "-c", restart, str(root)], text=True).strip(), str(manifest))
+            finally:
+                for child in children:
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait()
+
+    def test_failed_publication_keeps_old_evidence_and_leaves_no_partial_cache_hit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            make_test_video(video)
+            old = prepare_review_media(video, root, 1)
+            old_bytes = old.read_bytes()
+            with patch("video_factory.review_media._publish_directory", side_effect=RuntimeError("interrupted publish")):
+                with self.assertRaisesRegex(RuntimeError, "interrupted publish"):
+                    prepare_review_media(video, root, 2)
+            self.assertEqual(old.read_bytes(), old_bytes)
+            self.assertEqual(list(root.glob(".review-media-*")), [])
+            self.assertEqual(len(list((root / ".media-review-cache").glob("*/v-*"))), 1)
+            self.assertNotEqual(prepare_review_media(video, root, 2), old)
+
+    def test_cache_publish_permission_failure_keeps_prepared_frames_without_reextracting(self):
+        from video_factory import review_media
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            make_test_video(video)
+            original = review_media._publish_directory
+
+            def publish(stage, target):
+                if ".media-review-cache" in target.parts:
+                    raise PermissionError("cache became read-only")
+                return original(stage, target)
+
+            with patch("video_factory.review_media._publish_directory", side_effect=publish), patch(
+                "video_factory.review_media._extract_frame", wraps=review_media._extract_frame
+            ) as extraction:
+                manifest = prepare_review_media(video, root, 2)
+            self.assertEqual(extraction.call_count, 2)
+            self.assertTrue(manifest.parent.name.startswith("prepared-review-"))
+            for frame in json.loads(manifest.read_text())["frames"]:
+                assert_manifest_image(root, frame)
+
+    def test_invalid_metadata_and_external_frame_are_not_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "run"
+            video = root / "clip.mp4"
+            make_test_video(video)
+            outside = Path(tmp) / "outside.jpg"
+            outside.write_bytes(b"must not be read")
+            for change in ["dimensions", "timestamp", "coverage", "external_path"]:
+                with self.subTest(change=change):
+                    first = prepare_review_media(video, root, 2)
+                    manifest = json.loads(first.read_text())
+                    if change == "dimensions":
+                        manifest["frames"][0]["width"] += 1
+                    elif change == "timestamp":
+                        manifest["frames"][0]["timestampMs"] = manifest["durationMs"]
+                    elif change == "coverage":
+                        manifest["sampling"].update(sceneCount=2, coveredScenePositions=[1, 2], missingScenePositions=[])
+                    else:
+                        link = first.parent / "escaped.jpg"
+                        link.symlink_to(outside)
+                        manifest["frames"][0]["path"] = str(link.relative_to(root.resolve()))
+                    first.write_text(json.dumps(manifest))
+                    binding_file = first.parent / "binding.json"
+                    binding = json.loads(binding_file.read_text())
+                    binding["manifestSha256"] = hashlib.sha256(first.read_bytes()).hexdigest()
+                    binding_file.write_text(json.dumps(binding))
+                    original_read = Path.read_bytes
+
+                    def read_bytes(path):
+                        self.assertNotEqual(path.resolve(), outside.resolve())
+                        return original_read(path)
+
+                    with patch.object(Path, "read_bytes", read_bytes):
+                        rebuilt = prepare_review_media(video, root, 2)
+                    self.assertNotEqual(first, rebuilt)
+                    self.assertEqual(json.loads(first.read_text()), manifest)

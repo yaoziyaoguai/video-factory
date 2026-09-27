@@ -503,7 +503,7 @@ function SeriesRoadmap({
               </section>
             ) : <p className="series-progress-note">{seriesEpisodeProgressNote(selectedEpisode)}</p>}
             <SeriesEpisodeDialog
-              key={`${selectedEpisode.id}-${series.revision}`}
+              key={selectedEpisode.id}
               open={editing}
               series={series}
               episode={selectedEpisode}

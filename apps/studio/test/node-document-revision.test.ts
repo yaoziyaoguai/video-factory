@@ -517,7 +517,11 @@ describe("reference-grammar document commands", () => {
       expectedRunRevision: 7, expectedVersionId: "reference-v1", instruction: "让叙事顺序更清楚。",
     }, "creator");
     assert.deepEqual(calls, ["reference-grammar"], "修订不补审");
-    const firstManifestPath = path.join(preparedRoots[0]!, "review_media", "review_media_manifest.json");
+    // 预处理证据已改为不可变版本目录；验证原文件不被覆盖，不依赖旧固定目录名。
+    const manifests = (await readdir(preparedRoots[0]!, { recursive: true }))
+      .filter(file => path.basename(file) === "review_media_manifest.json");
+    assert.equal(manifests.length, 1);
+    const firstManifestPath = path.join(preparedRoots[0]!, manifests[0]!);
     const firstManifest = await readFile(firstManifestPath, "utf8");
     const current = await pipeline.show(harness.run.id);
     await studio.auditNodeDocumentCurrent(current.id, "reference-grammar", {
