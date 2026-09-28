@@ -6,6 +6,7 @@ export const RUN_NODE_LABELS: Record<string, string> = {
   script: "脚本",
   "reference-grammar": "参考视频风格分析",
   "visual-direction": "导演方案",
+  "production-preflight": "制作预检",
   "asset-candidates": "候选素材",
   "asset-semantic-rank": "候选画面排序",
   assets: "画面",

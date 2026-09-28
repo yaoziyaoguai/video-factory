@@ -39,6 +39,12 @@ describe("creator-facing presentation labels", () => {
     expect(RUN_NODE_ORDER.indexOf("voice")).toBe(RUN_NODE_ORDER.indexOf("asset-source-review") + 1);
   });
 
+  it("names the executable-plan preflight stop instead of falling back to 当前步骤", () => {
+    // durationRange+director 的现代流程会在报价/可执行方案编译处停下；停点标题不能退回「当前步骤」。
+    expect(runNodeLabel("production-preflight")).toBe("制作预检");
+    expect(creatorRunStatusLabel({ status: "needs_human", currentNodeId: "production-preflight" })).toBe("等你确认制作预检");
+  });
+
   it("turns system diagnostics into creator language without rewriting creative copy", () => {
     const technical = creatorFacingTechnicalText("Agent Provider Broker schema manifest fallback taskId api-visual-director-v1 primary provider timed out blocking");
     expect(technical).toBe("AI 服务 AI 服务 数据格式 资源清单 备用方案 任务编号 内部能力 首选服务响应超时 blocking");
