@@ -1,7 +1,7 @@
 import { CircleDollarSign, Clock3, Gauge, ReceiptText, RotateCcw } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { StudioCostDashboard, StudioCostGroup, StudioCostRunDetail, StudioCostTotals, StudioProvider } from "../../shared/api.js";
-import { catalogModelLabel, providerLabel, runNodeLabel } from "../presentation.js";
+import { catalogModelLabel, costProviderLabel, providerLabel, runNodeLabel } from "../presentation.js";
 
 export function CostDashboard({ dashboard }: { dashboard: StudioCostDashboard }) {
   return (
@@ -97,7 +97,7 @@ function CostRanking({ title, groups, kind }: { title: string; groups: StudioCos
 const UNRECORDED_MODEL_LABEL = "模型名称未记录";
 
 function capabilityLabel(line: StudioCostRunDetail["lines"][number], providers?: StudioProvider[]): string {
-  const provider = providerLabel(line.providerId) ?? "自动制作能力";
+  const provider = costProviderLabel(line.providerId, providers);
   if (!line.modelId || line.modelId === "inline" || line.modelId === line.providerId) return provider;
   // 主界面始终由 RunWorkbench 注入 Provider 目录；未注入目录的旧调用保留原样展示。
   if (providers === undefined) return `${provider} · ${line.modelId}`;

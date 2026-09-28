@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildProviderCatalog } from "../src/server/provider-catalog.js";
-import { RUN_NODE_ORDER, agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, creatorFacingTechnicalText, creatorRunStatusLabel, proposalSourceLabel, providerLabel, providerModelLabel, reasoningEffortLabel, runNodeLabel } from "../src/client/presentation.js";
+import { RUN_NODE_ORDER, agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, costProviderLabel, creatorFacingTechnicalText, creatorRunStatusLabel, proposalSourceLabel, providerLabel, providerModelLabel, reasoningEffortLabel, runNodeLabel } from "../src/client/presentation.js";
 
 describe("creator-facing presentation labels", () => {
   it("does not expose internal provider ids or director routing codes", () => {
@@ -43,6 +43,18 @@ describe("creator-facing presentation labels", () => {
     // durationRange+director 的现代流程会在报价/可执行方案编译处停下；停点标题不能退回「当前步骤」。
     expect(runNodeLabel("production-preflight")).toBe("制作预检");
     expect(creatorRunStatusLabel({ status: "needs_human", currentNodeId: "production-preflight" })).toBe("等你确认制作预检");
+  });
+
+  it("resolves cost service labels from the model catalog only when the match is unambiguous", () => {
+    const catalog = [
+      { id: "codex-creative-treatment-v1", label: "AI 前期构思" },
+      { id: "codex-screenwriter-v1", label: "AI 编剧", modelProfiles: [{ id: "deepseek-flash", label: "deepseek-flash" }] },
+    ];
+    expect(costProviderLabel("codex-creative-treatment-v1", catalog)).toBe("AI 前期构思");
+    expect(costProviderLabel("codex-screenwriter-v1", catalog)).toBe("AI 编剧");
+    expect(costProviderLabel("deepseek", catalog)).toBe("服务名称未收录（deepseek）");
+    expect(costProviderLabel("m-793ad8b15bed", catalog)).toBe("服务名称未收录（m-793ad8b15bed）");
+    expect(costProviderLabel("codex-screenwriter-v1", undefined)).toBe("AI 编剧");
   });
 
   it("turns system diagnostics into creator language without rewriting creative copy", () => {

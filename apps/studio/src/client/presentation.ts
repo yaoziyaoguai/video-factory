@@ -209,6 +209,22 @@ export function reviewProviderLabel(
   return providerLabel(providerId) ?? providerId;
 }
 
+/**
+ * 账务行的服务名：静态目录未收录、但模型目录里有同 id 直接条目（如 codex-creative-treatment-v1）
+ * 时按条目还原。只做直接匹配——m- 连接号和旧会话身份（deepseek）被多个服务共享，按归属猜
+ * 服务名会把别的工位写到这里；还原不了就如实保留“未收录”。
+ */
+export function costProviderLabel(
+  providerId: string,
+  providers: Array<{ id: string; label: string }> | undefined,
+): string {
+  const known = providerLabel(providerId);
+  if (known === undefined) return providerId; // providerId 非空时 providerLabel 恒有返回；此处只为类型收窄。
+  if (!known.startsWith("服务名称未收录（")) return known;
+  const direct = providers?.find((provider) => provider.id === providerId);
+  return direct ? direct.label : known;
+}
+
 function displayIdentifier(value: string): string {
   return value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 80) || "标识未记录";
 }
