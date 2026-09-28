@@ -263,6 +263,107 @@ describe("Studio client", () => {
     expect(onRegenerateStale).not.toHaveBeenCalled();
   });
 
+  it("prefills only on an explicit click, requires current-node confirmation, and discards old local choices when evidence changes", async () => {
+    const user = userEvent.setup();
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const key = "9".repeat(64);
+    const prefill = vi.spyOn(studioApi, "reviewPrefill").mockResolvedValue({ expectedRunRevision: 19,
+      basis: "b".repeat(64), reviewEvidenceId: "a".repeat(64), sourceDecisionId: "prior",
+      dispositions: [{ itemKey: key, decision: "accept_risk" }] });
+    const report = { recommendation: "revise", summary: "保留建议", findings: [{ itemKey: key,
+      timecodeMs: 1000, scenePosition: 1, category: "composition", description: "主体略偏", suggestion: "可保留", evidenceStatus: "failed", severity: "warning" }],
+      reviewScope: { evidenceId: "a".repeat(64) } };
+    const run: StudioRunDetail = { ...runDetail, revision: 19, nodes: [
+      ...runDetail.nodes.filter(node => node.id !== "visual-review"),
+      { id: "visual-review", label: "成片审片", role: "审片员", status: "succeeded", artifactIds: [], qualityGateResults: [], output: { report } },
+    ] };
+    const view = render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
+    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
+    const dialog = screen.getByRole("dialog");
+    const approve = within(dialog).getByRole("button", { name: "逐条表态已完成，生成发布包" });
+    expect(approve).toBeDisabled();
+    expect(prefill).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole("button", { name: "沿用上一停点的逐条表态" }));
+    await within(dialog).findByText("已预填，尚未确认本节点；你仍可修改。") ;
+    expect(onDecision).not.toHaveBeenCalled();
+    expect(approve).toBeEnabled();
+    await user.click(approve);
+    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({ expectedRunRevision: 19,
+      interventionId: run.activeIntervention!.id, reviewDispositions: [{ itemKey: key, decision: "accept_risk" }] }));
+    const next = structuredClone(run);
+    next.revision++;
+    next.nodes.at(-1)!.executionReceipt = { requestId: "new-review-same-report", providerId: "review-provider",
+      providerLabel: "审片", modelId: "review-model", transport: "http_api", billing: "subscription", status: "succeeded",
+      startedAt: "2026-09-28T00:00:00Z", finishedAt: "2026-09-28T00:01:00Z" };
+    view.rerender(<RunWorkbench run={next} decisionPending={false} onDecision={onDecision} />);
+    expect(approve).toBeDisabled();
+    expect(within(dialog).getByText("还有 1 条没有表态。")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "接受风险，保留本版" }));
+    expect(approve).toBeEnabled();
+    next.revision++;
+    next.nodes.at(-1)!.output = { report: { ...report, reviewScope: { evidenceId: "c".repeat(64) } } };
+    view.rerender(<RunWorkbench run={next} decisionPending={false} onDecision={onDecision} />);
+    expect(approve).toBeDisabled();
+    expect(within(dialog).getByText("还有 1 条没有表态。")).toBeInTheDocument();
+    prefill.mockRestore();
+  });
+
+  it("does not replace newer manual choices or another run with a late prefill response", async () => {
+    const user = userEvent.setup();
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const key = "9".repeat(64);
+    const report = { recommendation: "revise", summary: "保留建议", findings: [{ itemKey: key,
+      timecodeMs: 1000, scenePosition: 1, category: "composition", description: "主体略偏", suggestion: "可保留", evidenceStatus: "failed", severity: "warning" }],
+      reviewScope: { evidenceId: "a".repeat(64) } };
+    const run: StudioRunDetail = { ...runDetail, revision: 19, nodes: [
+      ...runDetail.nodes.filter(node => node.id !== "visual-review"),
+      { id: "visual-review", label: "成片审片", role: "审片员", status: "succeeded", artifactIds: [], qualityGateResults: [], output: { report } },
+    ] };
+    let complete!: (value: Awaited<ReturnType<typeof studioApi.reviewPrefill>>) => void;
+    const prefill = vi.spyOn(studioApi, "reviewPrefill").mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    const response = { expectedRunRevision: 19, basis: "b".repeat(64), reviewEvidenceId: "a".repeat(64), sourceDecisionId: "prior",
+      dispositions: [{ itemKey: key, decision: "accept_risk" as const }] };
+    const view = render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
+    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
+    let dialog = within(screen.getByRole("dialog"));
+    await user.click(dialog.getByRole("button", { name: "沿用上一停点的逐条表态" }));
+    await user.click(dialog.getByRole("button", { name: "不采纳，维持现状" }));
+    await user.type(dialog.getByLabelText("不采纳理由"), "这是当前手填判断");
+    await act(async () => complete(response));
+    expect(dialog.getByLabelText("不采纳理由")).toHaveValue("这是当前手填判断");
+    expect(dialog.getByRole("button", { name: "不采纳，维持现状" })).toHaveAttribute("aria-pressed", "true");
+    expect(dialog.queryByText("已预填，尚未确认本节点；你仍可修改。")).toBeNull();
+    await user.click(dialog.getByRole("button", { name: "沿用上一停点的逐条表态" }));
+    view.rerender(<RunWorkbench run={{ ...run, id: "different-run" }} decisionPending={false} onDecision={onDecision} />);
+    await act(async () => complete(response));
+    dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByRole("button", { name: "接受风险，保留本版" })).toHaveAttribute("aria-pressed", "false");
+    expect(dialog.getByText("还有 1 条没有表态。")).toBeInTheDocument();
+    expect(onDecision).not.toHaveBeenCalled();
+    prefill.mockRestore();
+  });
+
+  it("keeps manual confirmation available when prior dispositions cannot be loaded", async () => {
+    const user = userEvent.setup();
+    const key = "9".repeat(64);
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const prefill = vi.spyOn(studioApi, "reviewPrefill").mockRejectedValue(new Error("offline"));
+    const run: StudioRunDetail = { ...runDetail, nodes: [...runDetail.nodes.filter(node => node.id !== "visual-review"),
+      { id: "visual-review", label: "成片审片", role: "审片员", status: "succeeded", artifactIds: [], qualityGateResults: [], output: {
+        report: { recommendation: "revise", summary: "可带建议继续", findings: [{ itemKey: key, timecodeMs: 1000, scenePosition: 1,
+          category: "composition", description: "主体略偏", suggestion: "可保留", evidenceStatus: "failed", severity: "warning" }],
+          reviewScope: { evidenceId: "a".repeat(64) } } } }] };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
+    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
+    const dialog = within(screen.getByRole("dialog"));
+    await user.click(dialog.getByRole("button", { name: "沿用上一停点的逐条表态" }));
+    expect(await dialog.findByText(/暂时无法读取上一停点表态/)).toBeInTheDocument();
+    await user.click(dialog.getByRole("button", { name: "接受风险，保留本版" }));
+    await user.click(dialog.getByRole("button", { name: "逐条表态已完成，生成发布包" }));
+    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({ reviewDispositions: [{ itemKey: key, decision: "accept_risk" }] }));
+    prefill.mockRestore();
+  });
+
   it("collects rendered review decisions before adopting publish copy and retains its document identity", async () => {
     const user = userEvent.setup();
     const onDecision = vi.fn().mockResolvedValue(undefined);

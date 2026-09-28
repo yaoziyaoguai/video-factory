@@ -6,6 +6,8 @@ export { summarizeModelExecutionFacts } from "./model-execution-facts.js";
 export type { ModelExecutionFact, ModelExecutionProjection } from "./model-execution-facts.js";
 export { buildNarrationPlan, validateNarrationPlan } from "./narration-plan.js";
 export type { NarrationPlan, NarrationPlanPreview } from "./narration-plan.js";
+export { reviewDecisionPrefill } from "./review-decision-prefill.js";
+export type { ReviewDecisionPrefill } from "./review-decision-prefill.js";
 export type { ModelConnectionInput, ModelConnection, ModelProtocol, ModelUnderstandingCapability } from "./model-connection.js";
 export { AUDIO_REVIEW_CHECKS, audioReviewObservationCoverage, validateAudioReviewReport, VisualReviewWithAudioError } from "./audio-review.js";
 export type { AudioReviewReport, AudioReviewResult } from "./audio-review.js";

@@ -443,6 +443,7 @@ export class StudioService {
       : runs;
   }
   getRun(runId: string): Promise<StudioRunDetail | undefined> { return this.production.get(runId); }
+  reviewPrefill(runId: string, actor: string) { return this.production.reviewPrefill(runId, actor); }
   reworkDraft(runId: string): Promise<StudioReworkDraft | undefined> { return this.production.reworkDraft(runId); }
   archiveRuns(runIds: string[]): Promise<void> { return this.production.archive(runIds); }
   restoreRuns(runIds: string[]): Promise<void> { return this.production.restore(runIds); }

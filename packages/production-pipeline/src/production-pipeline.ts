@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { reviewDecisionBasis } from "./review-decision-prefill.js";
 import * as nodeFs from "node:fs";
 import { copyFile, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -1349,7 +1350,12 @@ export class ProductionPipeline {
       if (decision.action === "approve" && renderedReviewStop) {
         assertFinalReviewDispositions(visualDelivery, decision.reviewDispositions);
       }
-      let boundDecision = decision;
+      // 客户端不能提供历史签字身份；只在当前证据与逐条表态都已校验后由宿主取快照。
+      const basis = decision.action === "approve" && renderedReviewStop && decision.reviewDispositions?.length
+        ? reviewDecisionBasis(previous) : undefined;
+      let boundDecision: HumanDecisionDraft & { reviewDispositionBasis?: string } = { ...decision };
+      delete boundDecision.reviewDispositionBasis;
+      if (basis) boundDecision.reviewDispositionBasis = basis;
       if (decision.action === "approve"
         && activeInterventionNode.intervention?.boundary === "node-complete"
         && (activeInterventionNode.nodeId === "publish-package" || activeInterventionNode.nodeId === "reference-grammar")) {
@@ -1368,7 +1374,7 @@ export class ProductionPipeline {
         if (hasSuggestions && decision.acceptContentSuggestions !== true) {
           throw new HumanDecisionConflictError("当前文字版本有内容建议；请明确选择保留建议仍采用。");
         }
-        boundDecision = { ...decision, contentVersionId: versionId, contentAuditStatus: status };
+        boundDecision = { ...boundDecision, contentVersionId: versionId, contentAuditStatus: status };
       }
       const registry = this.createRegistry(brief);
       const runner = new WorkflowRunner({

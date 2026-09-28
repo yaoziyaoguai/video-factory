@@ -1645,6 +1645,8 @@ export interface StudioDecision {
   createdAt: string;
 }
 
+export type { ReviewDecisionPrefill as StudioReviewDecisionPrefill } from "@video-factory/production-pipeline";
+
 export interface StartRunResponse {
   runId: string;
   status: "running";

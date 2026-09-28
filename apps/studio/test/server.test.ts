@@ -252,6 +252,19 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
 }
 
 describe("Studio API", () => {
+  it("projects review prefill through a read-only route using the trusted actor, never a query actor", async () => {
+    const calls: string[][] = [];
+    const app = buildStudioApp({ service: fakeService({ reviewPrefill: async (runId, actor) => {
+      calls.push([runId, actor]);
+      return { expectedRunRevision: 4, basis: null, dispositions: [] };
+    } }) });
+    try {
+      const response = await app.inject({ method: "GET", url: "/api/runs/run-1/review-prefill?actor=other" });
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(calls, [["run-1", "studio-owner"]]);
+      assert.deepEqual(response.json().dispositions, []);
+    } finally { await app.close(); }
+  });
   it("preserves a document command identity through 202 waiting, 200 recovery and 409 conflict", async () => {
     const ids: string[] = [];
     const app = buildStudioApp({ service: fakeService({

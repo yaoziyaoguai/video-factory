@@ -44,7 +44,7 @@ export function NarrationPlanEditor({ runId, runRevision, disabled }: { runId: s
 
   return <section className="node-preview-section narration-plan-editor" aria-label="连贯旁白方案">
     <h3>让旁白连成故事</h3>
-    <p>相邻镜头的旁白连起来说，换镜时不断句；保留脚本中明确的留白。不改原稿、不改变画面时长。</p>
+    <p>相邻镜头的旁白连起来说，换镜时不断句；无旁白的镜头保留留白。不改原稿、不改变画面时长。创意说明里写的“停两秒”等要求，目前不会自动转成精确停顿。</p>
     <button type="button" className="button button-secondary" disabled={busy || disabled} onClick={() => void load()}>
       {preview ? "重新查看旁白方案" : "查看连贯旁白方案"}
     </button>

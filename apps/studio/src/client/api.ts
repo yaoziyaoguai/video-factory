@@ -325,6 +325,7 @@ export const studioApi = {
     { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
   narrationPlan: (runId: string) => requestJson<import("../shared/api.js").StudioNarrationPlanPreview>(`/api/runs/${encodeURIComponent(runId)}/narration-plan`),
+  reviewPrefill: (runId: string) => requestJson<import("../shared/api.js").StudioReviewDecisionPrefill>(`/api/runs/${encodeURIComponent(runId)}/review-prefill`),
   confirmNarrationPlan: (runId: string, input: { expectedRunRevision: number; plan: import("../shared/api.js").StudioNarrationPlan }) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/narration-plan`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),

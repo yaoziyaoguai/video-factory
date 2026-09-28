@@ -163,6 +163,7 @@ export interface StudioServicePort {
   uploadReferenceVideo?(input: { label: string; mimeType: string; bytes: Buffer }): Promise<StudioReferenceVideo>;
   deleteReferenceVideo?(uploadId: string): Promise<void>;
   decide(runId: string, input: StudioDecisionInput, actor: string): Promise<StudioRunDetail>;
+  reviewPrefill?(runId: string, actor: string): Promise<import("../shared/api.js").StudioReviewDecisionPrefill>;
   creativeReview?(runId: string): Promise<StudioCreativeReviewSnapshot | undefined>;
   creativeReviewHistory?(runId: string): Promise<StudioCreativeReviewHistory | undefined>;
   commandCreativeReview?(runId: string, input: StudioCreativeReviewCommandInput, actor: string): Promise<StudioCreativeReviewCommandReceipt>;
@@ -587,6 +588,12 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       return reply.code(404).send({ error: "没有找到这条制作记录。" });
     }
     return run;
+  });
+
+  app.get<{ Params: { runId: string } }>("/api/runs/:runId/review-prefill", async (request, reply) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    if (!options.service.reviewPrefill) return reply.code(404).send({ error: "当前没有可沿用的表态，请直接填写。" });
+    return options.service.reviewPrefill(request.params.runId, trustedStudioActor(auth, request.headers.cookie));
   });
 
   app.get<{ Params: { runId: string } }>("/api/runs/:runId/creative-review", async (request, reply) => {

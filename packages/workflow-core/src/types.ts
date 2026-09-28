@@ -189,6 +189,8 @@ export interface HumanDecisionDraft {
 export interface HumanDecision extends HumanDecisionDraft {
   id: string;
   createdAt: string;
+  /** 仅由宿主持久化：表态时有效音画及审片版本的身份摘要，不是可复用的批准。 */
+  reviewDispositionBasis?: string;
 }
 
 export interface ExecutionConfigurationOverrideDraft<TInitialInput = unknown> {

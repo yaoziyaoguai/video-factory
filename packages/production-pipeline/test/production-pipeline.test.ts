@@ -3521,6 +3521,16 @@ describe("ProductionPipeline", () => {
       reviewDispositions: dispositions,
     });
     assert.equal(approved.nodeRuns.find((node) => node.nodeId === "visual-review")?.status, "succeeded");
+    assert.match(approved.decisions.at(-1)?.reviewDispositionBasis ?? "", /^[a-f0-9]{64}$/, "正式批准持久化同版表态身份");
+    assert.deepEqual(pipeline.reviewDecisionPrefill(approved, "owner").dispositions, dispositions,
+      "下一停点可读取已保存的同版表态，但仍未放行");
+    assert.deepEqual(pipeline.reviewDecisionPrefill(approved, "another-actor").dispositions, []);
+    const reloaded = await subject.show(run.id);
+    assert.deepEqual(pipeline.reviewDecisionPrefill(reloaded, "owner").dispositions, dispositions,
+      "重读持久化记录后仍能找到表态");
+    assert.equal(reloaded.status, "needs_human");
+    assert.equal(reloaded.nodeRuns.find((node) => node.status === "needs_human")?.nodeId, "final-review");
+    assert.equal(reloaded.decisions.length, approved.decisions.length, "预填读取不增加批准事件");
   });
 
   it("非 DeepSeek 配置不能凭配置身份一致通过单审发布门禁（EB-02）", async () => {

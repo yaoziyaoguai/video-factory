@@ -11,6 +11,7 @@ import { RunCostDetailPanel } from "./CostDashboard.js";
 import { AudioReviewPanel } from "./AudioReviewPanel.js";
 import { CurrentFilmReinspection } from "./CurrentFilmReinspection.js";
 import { SubtitleRecoveryPanel } from "./SubtitleRecoveryPanel.js";
+import { studioApi } from "../api.js";
 
 export function currentSubtitlePreview(run: StudioRunDetail) {
   const voice = run.nodes.find(node => node.id === "voice");
@@ -70,7 +71,10 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
   const [approvalNote, setApprovalNote] = useState("");
-  const [reviewDecisions, setReviewDecisions] = useState<Record<string, { decision: "accept" | "reject" | "accept_risk"; reason: string }>>({});
+  const [reviewDraft, setReviewDraft] = useState<{ basis: string; values: Record<string, { decision: "accept" | "reject" | "accept_risk"; reason: string }> }>({ basis: "", values: {} });
+  const [prefillBusy, setPrefillBusy] = useState(false);
+  const [prefillNotice, setPrefillNotice] = useState<{ basis: string; text: string }>();
+  const reviewEditGeneration = useRef(0);
   const [replanningVoice, setReplanningVoice] = useState(false);
   const [voiceDurationSeconds, setVoiceDurationSeconds] = useState("");
   const [voiceScenePosition, setVoiceScenePosition] = useState(0);
@@ -208,17 +212,48 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const renderedReviewStop = ["visual-review", "final-review", "publish-package"]
     .includes(run.activeIntervention?.nodeId ?? "");
   const reviewItems = renderedReviewStop ? visualReview?.reviewItems ?? [] : [];
+  const reviewDraftBasis = JSON.stringify([run.id, run.activeIntervention?.id, run.videoArtifactId, visualReview?.evidenceId, reviewItems,
+    run.nodes.filter(node => ["voice", "render", "visual-review"].includes(node.id)).map(node =>
+      [node.id, node.outputState?.effectiveVersionId, node.outputState?.stale, node.executionReceipt?.requestId, node.output])]);
+  const currentReviewIdentity = useRef({ basis: reviewDraftBasis, revision: run.revision });
+  currentReviewIdentity.current = { basis: reviewDraftBasis, revision: run.revision };
+  // 在渲染时隔离不同证据的草稿，不能等effect清理后才禁止使用旧选择。
+  const reviewDecisions = reviewDraft.basis === reviewDraftBasis ? reviewDraft.values : {};
   const undisposedReviewItems = reviewItems.filter((item) => item.itemKey && !reviewDecisions[item.itemKey]);
   const acceptedReviewItems = reviewItems.filter((item) => item.itemKey && reviewDecisions[item.itemKey]?.decision === "accept");
   const unexplainedReviewItems = reviewItems.filter((item) => (
     item.itemKey && reviewDecisions[item.itemKey]?.decision === "reject" && !reviewDecisions[item.itemKey]?.reason.trim()
   ));
   const setReviewDecision = (itemKey: string, decision: "accept" | "reject" | "accept_risk") => {
-    setReviewDecisions((previous) => ({ ...previous, [itemKey]: { decision, reason: previous[itemKey]?.reason ?? "" } }));
+    reviewEditGeneration.current++;
+    setReviewDraft({ basis: reviewDraftBasis, values: { ...reviewDecisions, [itemKey]: { decision, reason: reviewDecisions[itemKey]?.reason ?? "" } } });
   };
   const setReviewReason = (itemKey: string, reason: string) => {
-    setReviewDecisions((previous) => ({ ...previous, [itemKey]: { decision: previous[itemKey]?.decision ?? "reject", reason } }));
+    reviewEditGeneration.current++;
+    setReviewDraft({ basis: reviewDraftBasis, values: { ...reviewDecisions, [itemKey]: { decision: reviewDecisions[itemKey]?.decision ?? "reject", reason } } });
   };
+  async function prefillReview() {
+    const source = { basis: reviewDraftBasis, revision: run.revision, edit: reviewEditGeneration.current };
+    setPrefillBusy(true);
+    try {
+      const result = await studioApi.reviewPrefill(run.id);
+      if (currentReviewIdentity.current.basis !== source.basis || currentReviewIdentity.current.revision !== source.revision
+        || reviewEditGeneration.current !== source.edit) return;
+      if (result.expectedRunRevision !== source.revision || result.reviewEvidenceId !== visualReview?.evidenceId
+        || !result.basis || !result.sourceDecisionId || result.dispositions.length !== reviewItems.length
+        || new Set(result.dispositions.map(item => item.itemKey)).size !== reviewItems.length
+        || !reviewItems.every(item => result.dispositions.some(choice => choice.itemKey === item.itemKey))) {
+        setPrefillNotice({ basis: source.basis, text: "没有可核实的同版表态，或成片与审片已变化，请直接填写。" });
+        return;
+      }
+      setReviewDraft({ basis: source.basis, values: Object.fromEntries(result.dispositions.map(item =>
+        [item.itemKey, { decision: item.decision, reason: item.reason ?? "" }])) });
+      setPrefillNotice({ basis: source.basis, text: "已预填，尚未确认本节点；你仍可修改。" });
+    } catch {
+      if (currentReviewIdentity.current.basis === source.basis) setPrefillNotice({ basis: source.basis,
+        text: "暂时无法读取上一停点表态，你可以直接填写；不会影响当前确认。" });
+    } finally { setPrefillBusy(false); }
+  }
   const assetVersionId = run.nodes.find((node) => node.id === "assets")?.outputState?.effectiveVersionId;
   const isCostReplan = run.status === "stale" && hasDirectorCostFeedback(run);
   const sourceAssetFailure = run.failure && isSourceAssetReviewFailure(run.failure)
@@ -304,7 +339,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
       setRejecting(false);
       setRejectNote("");
       setApprovalNote("");
-      setReviewDecisions({});
+      setReviewDraft({ basis: "", values: {} });
       setReplanningVoice(false);
       setVoiceDurationSeconds("");
       setDecisionSnapshot(undefined);
@@ -910,6 +945,9 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                 所以这里没有它的条目，操作员不必怀疑自己漏签了什么。边界停点上两件事都不涉及。 */}
             {boundaryGate || sourcePreflightDecision || visualReviewIncompleteDecision ? null : <p className="review-disposition-note">技术质检不适用逐条表态：它由机器判定通过或不过，没过就到不了这一步，不在这里逐条签。</p>}
             {reviewItems.length > 0 ? <div className="review-disposition-list">
+              <button type="button" className="button button-secondary" disabled={prefillBusy || decisionPending}
+                onClick={() => void prefillReview()}>沿用上一停点的逐条表态</button>
+              {prefillNotice?.basis === reviewDraftBasis ? <p role="status">{prefillNotice.text}</p> : null}
               <p className="review-disposition-guide">采纳=现在返修；不采纳=认为意见不成立，需写理由；接受风险=认可问题，但保留本版和原始评分。</p>
               {reviewItems.map((item, index) => {
                 const itemKey = item.itemKey!;

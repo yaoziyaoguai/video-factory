@@ -7,6 +7,7 @@ import { NodeVersionConflictError } from "@video-factory/workflow-core";
 import type { ArtifactDraft, HumanDecisionDraft, NodeExecutionReceipt, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
 import type { ProductionTemplateSnapshot } from "@video-factory/template-core";
 import {
+  reviewDecisionPrefill,
   canRetryRejectedReviewNode,
   canonicalProductionAssetIntentDigest,
   canonicalQualityContractDigest,
@@ -334,6 +335,11 @@ export class ProductionStudio {
       if (hasCode(error, "ENOENT")) return undefined;
       throw error;
     }
+  }
+
+  async reviewPrefill(runId: string, actor: string) {
+    const run = await this.options.pipeline.show(runId);
+    return reviewDecisionPrefill(run, actor);
   }
 
   async reworkDraft(runId: string): Promise<StudioReworkDraft | undefined> {
