@@ -4,7 +4,7 @@ import type { StudioCostRunDetail, StudioDecisionInput, StudioNarrationRevisionI
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { initialFilmArrival, nextFilmArrival } from "../film-arrival.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { agentLoopPendingNote, agentLoopPhaseLabel, creatorFacingTechnicalText, creatorRunStatusLabel, platformLabel, providerLabel, catalogModelLabel, runNodeLabel, RUN_NODE_LABELS, sourceAssetReviewBreakdown } from "../presentation.js";
+import { agentLoopPendingNote, agentLoopPhaseLabel, creatorFacingTechnicalText, creatorRunStatusLabel, platformLabel, providerLabel, reviewProviderLabel, catalogModelLabel, runNodeLabel, RUN_NODE_LABELS, sourceAssetReviewBreakdown } from "../presentation.js";
 import { NodeWorkspace, revealNodeWorkspace } from "./NodeWorkspace.js";
 import { nodeContentReview } from "./NodeContentReview.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
@@ -480,13 +480,13 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
             </div>
             {flawedReviewBranches.length > 0 ? <p className="review-audit-caveat" role="note">
               <strong>有 {flawedReviewBranches.length} 份审片报告未通过报告质量复核</strong>
-              <span>{flawedReviewBranches.map((branch) => `${providerLabel(branch.providerId) ?? branch.providerId} · ${catalogModelLabel(providers, branch.modelId) ?? branch.modelId}`).join("、")}。需要重点核对的是报告的依据，不等于作品已被否决。请结合成片判断各条意见；发布仍需满足页面列出的必要条件。</span>
+              <span>{flawedReviewBranches.map((branch) => `${reviewProviderLabel(branch.providerId, providers)} · ${catalogModelLabel(providers, branch.modelId) ?? branch.modelId}`).join("、")}。需要重点核对的是报告的依据，不等于作品已被否决。请结合成片判断各条意见；发布仍需满足页面列出的必要条件。</span>
             </p> : null}
             <div className="independent-review-list">
               {visualReview.independentReviews.map((review) => {
                 const branch = reviewSummaryExcerpt(review.summary);
                 return <article key={`${review.providerId}:${review.modelId}`}>
-                <header><strong>{providerLabel(review.providerId) ?? review.providerId}</strong><span>{visualReviewRecommendationLabel(review.recommendation)}</span></header>
+                <header><strong>{reviewProviderLabel(review.providerId, providers)}</strong><span>{visualReviewRecommendationLabel(review.recommendation)}</span></header>
                 <small>{catalogModelLabel(providers, review.modelId) ?? review.modelId}{review.score !== undefined ? ` · ${review.score} 分` : ""}{` · ${review.findingCount} 项问题`}{review.auditVerdict === "repair" ? " · 独立审计未通过" : ""}</small>
                 <p>{branch.excerpt}{branch.truncated ? <small>（原文节选）</small> : null}</p>
                 {branch.truncated ? <details className="review-full-summary">

@@ -4610,6 +4610,53 @@ describe("Studio client", () => {
     });
   });
 
+  // 真实回执把模型接入编号（m-…）同时记为 providerId/modelId；审片面板必须经角色目录还原显示名，
+  // 不能把"服务名称未收录（m-…）"这种技术串暴露给创作者（2026-09-28 三条真实审片均如此）。
+  it("names the review service for connection-id receipts instead of an unregistered internal id", () => {
+    const run: StudioRunDetail = {
+      ...runDetail,
+      nodes: [
+        ...runDetail.nodes.filter((node) => node.id !== "final-review"),
+        {
+          id: "visual-review",
+          label: "视觉审片",
+          role: "视觉审片员",
+          status: "succeeded",
+          artifactIds: [],
+          qualityGateResults: [],
+          output: { report: {
+            recommendation: "revise",
+            confidence: 0.8,
+            summary: "素材与导演要求存在偏差。",
+            scores: { composition: 64 },
+            findings: [],
+            reviewScope: {
+              evidenceId: "a".repeat(64),
+              actualModels: [{ providerId: "m-793ad8b15bed", modelId: "m-793ad8b15bed", auditVerdict: "pass" }],
+            },
+          } },
+        },
+        runDetail.nodes.find((node) => node.id === "final-review")!,
+      ],
+    };
+    const providersWithConnection: StudioProvider[] = providers.map((provider) =>
+      provider.id === "deepseek-visual-review-v1"
+        ? { ...provider, modelProfiles: [{
+            id: "m-793ad8b15bed", label: "qwen3.8-omni-flash · qwen3.8-omni-flash", providerId: provider.id,
+            providerFamily: "m-793ad8b15bed", available: true, description: "用户配置的模型接入。",
+            taskTypes: ["visual-review" as const] }] }
+        : provider);
+
+    render(<RunWorkbench run={run} providers={providersWithConnection} decisionPending={false} onDecision={vi.fn().mockResolvedValue(undefined)} />);
+
+    const review = screen.getByRole("region", { name: "独立质量复核结果" });
+    expect(within(review).getByText("DeepSeek 视觉审片")).toBeInTheDocument();
+    expect(within(review).getByText(/qwen3\.8-omni-flash/)).toBeInTheDocument();
+    expect(within(review).getByText(/· 64 分/)).toBeInTheDocument();
+    expect(screen.queryByText(/服务名称未收录/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/m-793ad8b15bed/)).not.toBeInTheDocument();
+  });
+
   it("labels a review branch whose own audit did not pass without calling the work failed", () => {
     // 分支审计判 repair，说的是"这份审片报告本身站不住"，不是"作品不行"。发布闸门因此不再拦它，
     // 但界面必须如实说出来——否则用户会拿着一条没过质检的意见去返修一个其实没问题的镜头。
@@ -4657,7 +4704,8 @@ describe("Studio client", () => {
     const dualReview = screen.getByRole("region", { name: "双模型审片结果" });
     const caveat = within(dualReview).getByRole("note");
     expect(within(caveat).getByText("有 1 份审片报告未通过报告质量复核")).toBeInTheDocument();
-    expect(caveat).toHaveTextContent("AI 视觉审片 · gpt-5.6-sol");
+    // 角色目录里配置的名称优先于静态目录（与全应用其它服务名显示一致）。
+    expect(caveat).toHaveTextContent("Codex 视觉审片 · gpt-5.6-sol");
     // 说清审计查的是什么，避免被读成对作品的判决。
     expect(caveat).toHaveTextContent("需要重点核对的是报告的依据，不等于作品已被否决");
     expect(caveat).toHaveTextContent("发布仍需满足页面列出的必要条件");

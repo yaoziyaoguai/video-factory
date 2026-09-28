@@ -53,7 +53,8 @@ export function NarrationPlanEditor({ runId, runRevision, disabled }: { runId: s
       {preview.plan.groups.map((group, index) => <fieldset key={group.id} disabled={busy || disabled || saved || stale}>
         <legend>第 {index + 1} 组 · 镜头 {group.sourceScenePositions.join("、")}</legend>
         <p>{group.text}</p>
-        <small>画面区间 {(group.window.startFrame / 30).toFixed(1)}–{(group.window.endFrame / 30).toFixed(1)} 秒</small>
+        <small>画面区间 {(group.window.startFrame / 30).toFixed(1)}–{(group.window.endFrame / 30).toFixed(1)} 秒
+          {(group.text.match(/[\p{L}\p{N}]/gu) || []).length ? ` · ${group.text.match(/[\p{L}\p{N}]/gu)!.length} 字` : ""}</small>
         <label className="field"><span>声音落点</span><select aria-label={`第 ${index + 1} 组落点`} value={group.placement.anchor} onChange={(event) => {
           const next = structuredClone(preview);
           next.plan.groups[index]!.placement.anchor = event.target.value === "end" ? "end" : "start";
@@ -72,7 +73,7 @@ export function NarrationPlanEditor({ runId, runRevision, disabled }: { runId: s
       </fieldset>)}
       {preview.plan.silences.length ? <p>明确留白：{preview.plan.silences.map((silence) =>
         `${(silence.startFrame / 30).toFixed(1)}–${(silence.endFrame / 30).toFixed(1)} 秒`).join("；")}，不会放入旁白。</p> : null}
-      <p>实际声音长度在配音后才能确定。多余空档会列出，过长时保留原音频等你调整，不截词、不加速。同步字幕取决于本次服务返回，未取得时会明确提醒。</p>
+      <p>实际声音长度在配音后才能确定。中文旁白常见语速约每秒 3–5 字，可按各组字数与画面时长先粗估空档；多余空档会列出，过长时保留原音频等你调整，不截词、不加速。同步字幕取决于本次服务返回，未取得时会明确提醒。</p>
       <p>采用方案本身不收费，也不开始制作。下一步配音按已配置的按量费用与限额执行；旧配音模式不会被自动替换。</p>
       {preview.quote ? <section aria-label="旁白费用预估"><p>本次需新合成 {preview.quote.items.filter((item) => !item.reused).length} 组，
         可复用 {preview.quote.items.filter((item) => item.reused).length} 组；保守预估 ¥{preview.quote.maxCostCny.toFixed(2)}。</p>

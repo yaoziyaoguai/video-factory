@@ -35,6 +35,20 @@ it("previews without adoption and saves the creator's placement without starting
   expect(screen.getByText(/制作记录已更新/)).toBeInTheDocument();
 });
 
+// 旁白方案采用点必须给出字数与画面的密度事实，避免配音后才首次发现长空档。
+it("shows per-group text density against the picture window before adoption", async () => {
+  vi.spyOn(studioApi, "narrationPlan").mockResolvedValue({ ...structuredClone(preview),
+    plan: { ...structuredClone(preview).plan, groups: [{
+      id: "narration-1", sourceScenePositions: [1], text: "先停一下，等光再挪一段。",
+      window: { startFrame: 0, endFrame: 450 }, placement: { anchor: "start", offsetFrames: 0 } }] } });
+  render(<NarrationPlanEditor runId="run-example" runRevision={5} disabled={false} />);
+  fireEvent.click(screen.getByRole("button", { name: "查看连贯旁白方案" }));
+  await screen.findByText("先停一下，等光再挪一段。");
+  expect(screen.getByText(/10 字/)).toBeInTheDocument();
+  expect(screen.getByText(/15.0 秒/)).toBeInTheDocument();
+  expect(screen.getByText(/每秒 3–5 字/)).toBeInTheDocument();
+});
+
 it("does not submit a preview after the run changes", async () => {
   vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(structuredClone(preview));
   const confirm = vi.spyOn(studioApi, "confirmNarrationPlan");

@@ -16,6 +16,44 @@ describe("NodeDeliveryPreview", () => {
     }} />);
     expect(screen.getByText("已取得本次配音的句级同步字幕，请在成片中核对。")).toBeInTheDocument();
     expect(screen.queryByText(/同步字幕未就绪/)).not.toBeInTheDocument();
+    // 旧计划没有 scenes 时轴，不能编造逐句对位。
+    expect(screen.queryByText(/画面处于/)).not.toBeInTheDocument();
+  });
+
+  it("maps verified narration cues onto the confirmed visual timeline so drift and gaps are visible", () => {
+    const { container } = render(<NodeDeliveryPreview nodeId="voice" value={{
+      version: "video-factory/voiceover-plan-v3", duration: 14, sampleRate: 44100,
+      groups: [{ id: "narration-1", text: "第一句。 第二句。", sourceScenePositions: [1, 2, 3],
+        window: { startFrame: 0, endFrame: 420 }, sourceAudioSamples: 264600, startSample: 0, endSample: 264600,
+        unfilledWindowSamples: 352800 }],
+      scenes: [{ position: 1, duration: 5 }, { position: 2, duration: 5 }, { position: 3, duration: 4 }],
+      subtitles: { status: "verified", cues: [
+        { groupId: "narration-1", text: "第一句。", startSample: 0, endSample: 96454 },
+        { groupId: "narration-1", text: "第二句。", startSample: 200000, endSample: 290000 },
+      ] },
+    }} />);
+    expect(screen.getByText(/第 1 句/)).toHaveTextContent("0.0–2.2 秒");
+    expect(screen.getByText(/第 1 句/)).toHaveTextContent("画面处于镜头 1");
+    expect(screen.getByText(/第 2 句/)).toHaveTextContent("4.5–6.6 秒");
+    expect(screen.getByText(/第 2 句/)).toHaveTextContent("画面处于镜头 1–2");
+    expect(screen.getByText(/镜头 3（10.0–14.0 秒）没有旁白覆盖/)).toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/startSample|groupId/);
+  });
+
+  it("keeps the timing preview unchanged when verified cues cannot be mapped to a valid scene timeline", () => {
+    render(<NodeDeliveryPreview nodeId="voice" value={{
+      version: "video-factory/voiceover-plan-v3", duration: 14, sampleRate: 44100,
+      groups: [{ id: "narration-1", text: "第一句。", sourceScenePositions: [1],
+        window: { startFrame: 0, endFrame: 420 }, sourceAudioSamples: 264600, startSample: 0, endSample: 264600,
+        unfilledWindowSamples: 352800 }],
+      scenes: [{ position: 2, duration: 5 }],
+      subtitles: { status: "verified", cues: [
+        { groupId: "narration-1", text: "第一句。", startSample: -5, endSample: 96454 },
+      ] },
+    }} />);
+    expect(screen.getByText(/这一段画面仍有 8.0 秒未铺旁白/)).toBeInTheDocument();
+    expect(screen.queryByText(/画面处于/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/没有旁白覆盖/)).not.toBeInTheDocument();
   });
 
   it("shows continuous narration groups and real empty windows without inventing per-scene timing or subtitles", () => {

@@ -257,6 +257,38 @@ export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps)
   );
 }
 
+// 连续配音的逐句事实：cue 与画面窗口都用全片 sample 坐标，重叠即可对位；数据不完整时整体跳过，不编造对位。
+function sceneWindowList(scenes: unknown, samplesPerFrame: number): Array<{ position: number; startSample: number; endSample: number }> | null {
+  if (!Array.isArray(scenes) || scenes.length === 0) return null;
+  const windows: Array<{ position: number; startSample: number; endSample: number }> = [];
+  let cursor = 0;
+  for (const [index, scene] of scenes.entries()) {
+    const record = asRecord(scene);
+    if (!record || typeof record.position !== "number" || !Number.isSafeInteger(record.position)
+      || record.position !== index + 1 || typeof record.duration !== "number"
+      || !Number.isFinite(record.duration) || record.duration <= 0) return null;
+    const frames = Math.round(record.duration * 30);
+    if (frames <= 0) return null;
+    windows.push({ position: record.position, startSample: cursor, endSample: cursor + frames * samplesPerFrame });
+    cursor += frames * samplesPerFrame;
+  }
+  return windows;
+}
+
+function validCueList(subtitles: Record<string, unknown> | undefined): Array<{ text: string; startSample: number; endSample: number }> | null {
+  const cues = subtitles?.cues;
+  if (!Array.isArray(cues) || cues.length === 0) return null;
+  const parsed: Array<{ text: string; startSample: number; endSample: number }> = [];
+  for (const cue of cues) {
+    const record = asRecord(cue);
+    if (!record || typeof record.text !== "string" || !record.text.trim()
+      || typeof record.startSample !== "number" || !Number.isSafeInteger(record.startSample) || record.startSample < 0
+      || typeof record.endSample !== "number" || !Number.isSafeInteger(record.endSample) || record.endSample <= record.startSample) return null;
+    parsed.push({ text: record.text, startSample: record.startSample, endSample: record.endSample });
+  }
+  return parsed;
+}
+
 function ContinuousVoiceTimingPreview({ record }: { record: Record<string, unknown> }) {
   const groups = Array.isArray(record.groups) ? record.groups.map(asRecord).filter((group) => group !== undefined) : [];
   const rate = record.sampleRate;
@@ -269,6 +301,20 @@ function ContinuousVoiceTimingPreview({ record }: { record: Record<string, unkno
   const silences = Array.isArray(plan?.silences) ? plan.silences.map(asRecord).filter((silence) => silence
     && typeof silence.startFrame === "number" && typeof silence.endFrame === "number") : [];
   const subtitles = asRecord(record.subtitles);
+  const windows = sceneWindowList(record.scenes, Math.round(rate / 30));
+  const cues = subtitles?.status === "verified" ? validCueList(subtitles) : null;
+  const cuePlacements = windows && cues ? cues.map((cue, index) => {
+    const overlaps = windows.filter((window) => window.startSample < cue.endSample && cue.startSample < window.endSample);
+    const label = overlaps.map((window) => window.position).join("–");
+    return {
+      key: index,
+      line: `第 ${index + 1} 句（${(cue.startSample / rate).toFixed(1)}–${(cue.endSample / rate).toFixed(1)} 秒）`
+        + `画面处于${overlaps.length ? `镜头 ${label}` : "无对应画面区间"}：${cue.text}`,
+    };
+  }) : null;
+  const uncoveredScenes = windows && cues ? windows.filter((window) => !cues.some((cue) =>
+    window.startSample < cue.endSample && cue.startSample < window.endSample)).map((window) =>
+    `镜头 ${window.position}（${(window.startSample / rate).toFixed(1)}–${(window.endSample / rate).toFixed(1)} 秒）没有旁白覆盖`) : null;
   return <section className="node-preview-section" aria-label="连贯旁白与画面节奏">
     <h4>连贯旁白与画面节奏</h4>
     <p>同组旁白跨镜连续播放，不因切换画面重新起句。请用本页播放器连听全片。</p>
@@ -278,6 +324,11 @@ function ContinuousVoiceTimingPreview({ record }: { record: Record<string, unkno
       <p>声音从 {((group.startSample as number) / rate).toFixed(1)} 秒到 {((group.endSample as number) / rate).toFixed(1)} 秒；
         这一段画面仍有 {((group.unfilledWindowSamples as number) / rate).toFixed(1)} 秒未铺旁白。</p>
     </li>)}</ul>
+    {cuePlacements ? <>
+      <p>逐句与画面对位（按本次同步字幕，句子可能整体早于或晚于它的镜头）：</p>
+      <ul>{cuePlacements.map((placement) => <li key={placement.key}>{placement.line}</li>)}</ul>
+      {uncoveredScenes?.length ? <p>{uncoveredScenes.join("；")}。</p> : null}
+    </> : null}
     {silences.length ? <p>脚本明确留白：{silences.map((silence) => `${((silence!.startFrame as number) / 30).toFixed(1)}–${((silence!.endFrame as number) / 30).toFixed(1)} 秒`).join("；")}。</p> : null}
     <p>未铺旁白的时间不包括音频本身的停顿。若空档影响节奏，可返回脚本调整内容或画面时长；系统不会擅自补词、加速或延长素材。</p>
     <p>{subtitles?.status === "verified" ? "已取得本次配音的句级同步字幕，请在成片中核对。"

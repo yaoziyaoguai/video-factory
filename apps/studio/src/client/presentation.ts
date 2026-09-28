@@ -192,6 +192,22 @@ export function providerModelLabel(
   return provider?.modelProfiles?.find((model) => model.id === modelId)?.label ?? `模型名称未收录（${displayIdentifier(modelId)}）`;
 }
 
+/**
+ * 审片回执把模型接入编号（m-…）同时记为 providerId/modelId，它不在静态目录里。
+ * 显示时先按角色目录还原服务名；还原不了才退回静态目录，而不是给创作者看"未收录"技术串。
+ */
+export function reviewProviderLabel(
+  providerId: string,
+  providers: Array<{ id: string; label: string; modelProfiles?: Array<{ id: string; label: string }> }>,
+): string {
+  const direct = providers.find((provider) => provider.id === providerId);
+  if (direct) return direct.label;
+  const owner = providers.find((provider) => provider.modelProfiles?.some((model) => model.id === providerId));
+  if (owner) return owner.label;
+  // providerId 非空时 providerLabel 恒有返回；这里的兜底只为类型完整，实际不可达。
+  return providerLabel(providerId) ?? providerId;
+}
+
 function displayIdentifier(value: string): string {
   return value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 80) || "标识未记录";
 }
