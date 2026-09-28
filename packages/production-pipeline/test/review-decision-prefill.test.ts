@@ -18,6 +18,11 @@ function fixture(): WorkflowRun<unknown> {
 
 it("only prefills saved same-actor decisions with complete current media and audit identity", () => {
   const run = fixture();
+  // 审查执行身份是身份合同的一部分：正例必须带有效审查 requestId（F01）。
+  run.nodeRuns.find(node => node.nodeId === "visual-review")!.executionReceipt = {
+    requestId: "audit-request-original", providerId: "test-review", providerLabel: "Test review",
+    modelId: "test-model", transport: "http_api", billing: "subscription", status: "succeeded",
+  } as NonNullable<WorkflowRun<unknown>["nodeRuns"][number]["executionReceipt"]>;
   const basis = reviewDecisionBasis(run);
   assert.match(basis ?? "", /^[a-f0-9]{64}$/);
   const dispositions = [{ itemKey: "c".repeat(64), decision: "accept_risk" as const }];
@@ -27,6 +32,14 @@ it("only prefills saved same-actor decisions with complete current media and aud
   assert.deepEqual(reviewDecisionPrefill(run, "creator").dispositions, dispositions);
   assert.equal(reviewDecisionPrefill(run, "creator").sourceDecisionId, "accepted");
   assert.deepEqual(reviewDecisionPrefill(run, "someone-else").dispositions, []);
+  for (const requestId of [undefined, "", "   "]) {
+    const missingAudit = structuredClone(run);
+    const receipt = missingAudit.nodeRuns.find(node => node.nodeId === "visual-review")!.executionReceipt;
+    if (requestId === undefined) delete (receipt as unknown as Record<string, unknown>).requestId;
+    else (receipt as unknown as { requestId: string }).requestId = requestId;
+    assert.equal(reviewDecisionBasis(missingAudit), undefined, `审查 requestId 无效（${String(requestId)}）时不得生成可沿用身份`);
+    assert.deepEqual(reviewDecisionPrefill(missingAudit, "creator").dispositions, [], "身份不完整一律退回手填");
+  }
   for (const id of ["voice", "render", "visual-review"]) {
     const changed = structuredClone(run);
     const state = changed.nodeRuns.find(node => node.nodeId === id)!.outputState!;

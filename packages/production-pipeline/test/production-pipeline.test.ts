@@ -3452,7 +3452,7 @@ describe("ProductionPipeline", () => {
         review: async () => { throw new Error("Detailed review must be used."); },
         reviewDetailed: async (input) => input.reviewStage === "source_assets"
           ? { output: staleRawReport, inspectedDurationMs: 10_000 }
-          : completedSingleVisualReview(input, staleRawReport),
+          : { ...completedSingleVisualReview(input, staleRawReport), requestId: "eb01-audit-request" },
       }],
     });
 

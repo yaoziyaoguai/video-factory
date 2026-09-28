@@ -20,8 +20,12 @@ export function reviewDecisionBasis(run: WorkflowRun<unknown>): string | undefin
       || !["succeeded", "needs_human"].includes(node!.status) || !version.artifactIds.length) return undefined;
     const artifacts = version.artifactIds.map(artifactId => run.artifacts.find(artifact => artifact.id === artifactId));
     if (artifacts.some(artifact => !artifact?.sha256 || !/^[a-f0-9]{64}$/.test(artifact.sha256))) return undefined;
+    const requestId = node?.executionReceipt?.requestId;
+    // 审查执行身份不完整时不得生成可沿用身份：requestId 缺失/空白即退回手填（F01）。
+    // 声音/本地渲染节点没有供应商回执不在此列；只约束机器审片执行本身。
+    if (id === "visual-review" && (typeof requestId !== "string" || !requestId.trim())) return undefined;
     identities.push({ nodeId: id, versionId: version.id, inputVersionIds: version.inputVersionIds,
-      requestId: node?.executionReceipt?.requestId,
+      requestId,
       // 包含完整有效输出：声音布局/字幕/审计操作身份改变时不可仅靠相同文件SHA借用旧表态。
       output: version.output, artifacts: artifacts.map(artifact => ({ id: artifact!.id, sha256: artifact!.sha256 }))
         .sort((a, b) => a.id.localeCompare(b.id)) });

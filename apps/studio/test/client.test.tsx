@@ -308,8 +308,45 @@ describe("Studio client", () => {
     prefill.mockRestore();
   });
 
-  it("does not replace newer manual choices or another run with a late prefill response", async () => {
+  it("never applies a prefill response after the user left and returned to the same context (A→B→A)", async () => {
     const user = userEvent.setup();
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const key = "9".repeat(64);
+    const report = { recommendation: "revise", summary: "保留建议", findings: [{ itemKey: key,
+      timecodeMs: 1000, scenePosition: 1, category: "composition", description: "主体略偏", suggestion: "可保留", evidenceStatus: "failed", severity: "warning" }],
+      reviewScope: { evidenceId: "a".repeat(64) } };
+    const runA: StudioRunDetail = { ...runDetail, revision: 19, nodes: [
+      ...runDetail.nodes.filter(node => node.id !== "visual-review"),
+      { id: "visual-review", label: "成片审片", role: "审片员", status: "succeeded", artifactIds: [], qualityGateResults: [], output: { report } },
+    ] };
+    const runB = structuredClone(runA);
+    runB.nodes.at(-1)!.output = { report: { ...report, reviewScope: { evidenceId: "c".repeat(64) } } };
+    let complete!: (value: Awaited<ReturnType<typeof studioApi.reviewPrefill>>) => void;
+    const prefill = vi.spyOn(studioApi, "reviewPrefill").mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    const response = { expectedRunRevision: 19, basis: "b".repeat(64), reviewEvidenceId: "a".repeat(64), sourceDecisionId: "prior",
+      dispositions: [{ itemKey: key, decision: "accept_risk" as const }] };
+    const view = render(<RunWorkbench run={runA} decisionPending={false} onDecision={onDecision} />);
+    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
+    let dialog = within(screen.getByRole("dialog"));
+    await user.click(dialog.getByRole("button", { name: "沿用上一停点的逐条表态" }));
+    // 在途请求期间离开 A，再回到未发生业务变化的 A（revision 不变、无手填）。
+    view.rerender(<RunWorkbench run={runB} decisionPending={false} onDecision={onDecision} />);
+    view.rerender(<RunWorkbench run={runA} decisionPending={false} onDecision={onDecision} />);
+    await act(async () => complete(response));
+    dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByRole("button", { name: "接受风险，保留本版" })).toHaveAttribute("aria-pressed", "false");
+    expect(dialog.getByText("还有 1 条没有表态。")).toBeInTheDocument();
+    expect(dialog.queryByText("已预填，尚未确认本节点；你仍可修改。")).toBeNull();
+    expect(onDecision).not.toHaveBeenCalled();
+    // 返回后重新主动点击仍可预填：失效的是旧请求，不是预填能力。
+    prefill.mockResolvedValue(response);
+    await user.click(dialog.getByRole("button", { name: "沿用上一停点的逐条表态" }));
+    expect(await dialog.findByText("已预填，尚未确认本节点；你仍可修改。")).toBeInTheDocument();
+    expect(dialog.getByRole("button", { name: "接受风险，保留本版" })).toHaveAttribute("aria-pressed", "true");
+    prefill.mockRestore();
+  });
+
+  it("does not replace newer manual choices or another run with a late prefill response", async () => {    const user = userEvent.setup();
     const onDecision = vi.fn().mockResolvedValue(undefined);
     const key = "9".repeat(64);
     const report = { recommendation: "revise", summary: "保留建议", findings: [{ itemKey: key,

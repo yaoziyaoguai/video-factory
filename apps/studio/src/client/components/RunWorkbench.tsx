@@ -217,6 +217,12 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
       [node.id, node.outputState?.effectiveVersionId, node.outputState?.stale, node.executionReceipt?.requestId, node.output])]);
   const currentReviewIdentity = useRef({ basis: reviewDraftBasis, revision: run.revision });
   currentReviewIdentity.current = { basis: reviewDraftBasis, revision: run.revision };
+  // 单调上下文代次：每次停点/证据身份切换都让在途预填请求永久失效；
+  // A→B→A 后即使 basis/revision 复原，旧响应也不得恢复写入资格（F02）。
+  const contextGenerationRef = useRef({ basis: reviewDraftBasis, generation: 0 });
+  if (contextGenerationRef.current.basis !== reviewDraftBasis) {
+    contextGenerationRef.current = { basis: reviewDraftBasis, generation: contextGenerationRef.current.generation + 1 };
+  }
   // 在渲染时隔离不同证据的草稿，不能等effect清理后才禁止使用旧选择。
   const reviewDecisions = reviewDraft.basis === reviewDraftBasis ? reviewDraft.values : {};
   const undisposedReviewItems = reviewItems.filter((item) => item.itemKey && !reviewDecisions[item.itemKey]);
@@ -233,11 +239,13 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     setReviewDraft({ basis: reviewDraftBasis, values: { ...reviewDecisions, [itemKey]: { decision: reviewDecisions[itemKey]?.decision ?? "reject", reason } } });
   };
   async function prefillReview() {
-    const source = { basis: reviewDraftBasis, revision: run.revision, edit: reviewEditGeneration.current };
+    const source = { basis: reviewDraftBasis, revision: run.revision, edit: reviewEditGeneration.current,
+      generation: contextGenerationRef.current.generation };
     setPrefillBusy(true);
     try {
       const result = await studioApi.reviewPrefill(run.id);
-      if (currentReviewIdentity.current.basis !== source.basis || currentReviewIdentity.current.revision !== source.revision
+      if (contextGenerationRef.current.generation !== source.generation
+        || currentReviewIdentity.current.basis !== source.basis || currentReviewIdentity.current.revision !== source.revision
         || reviewEditGeneration.current !== source.edit) return;
       if (result.expectedRunRevision !== source.revision || result.reviewEvidenceId !== visualReview?.evidenceId
         || !result.basis || !result.sourceDecisionId || result.dispositions.length !== reviewItems.length
@@ -250,7 +258,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
         [item.itemKey, { decision: item.decision, reason: item.reason ?? "" }])) });
       setPrefillNotice({ basis: source.basis, text: "已预填，尚未确认本节点；你仍可修改。" });
     } catch {
-      if (currentReviewIdentity.current.basis === source.basis) setPrefillNotice({ basis: source.basis,
+      if (contextGenerationRef.current.generation === source.generation
+        && currentReviewIdentity.current.basis === source.basis) setPrefillNotice({ basis: source.basis,
         text: "暂时无法读取上一停点表态，你可以直接填写；不会影响当前确认。" });
     } finally { setPrefillBusy(false); }
   }
