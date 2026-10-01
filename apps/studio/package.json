@@ -22,7 +22,7 @@
     "@video-factory/template-core": "0.1.0",
     "@video-factory/workflow-core": "0.1.0",
     "driver.js": "^1.8.0",
-    "fastify": "^5.12.1",
+    "fastify": "^5.12.5",
     "jsdom": "^29.1.1",
     "lucide-react": "^1.33.0",
     "proper-lockfile": "^4.1.2",
