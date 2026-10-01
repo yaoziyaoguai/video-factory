@@ -4309,6 +4309,83 @@ describe("Studio client", () => {
     });
   });
 
+  it("does not offer a success approval when a first-fit voice conflict has no successful track", () => {
+    vi.spyOn(studioApi, "narrationPlan").mockReturnValue(new Promise(() => undefined));
+    const { videoArtifactId: _noFinalVideo, ...baseRunDetail } = runDetail;
+    const run: StudioRunDetail = {
+      ...baseRunDetail,
+      artifacts: [],
+      currentNodeId: "voice",
+      activeIntervention: {
+        id: "voice-fit-conflict",
+        nodeId: "voice",
+        reason: "第一段配音放不进当前窗口，请调整时间后重新试听。",
+        options: ["request_changes", "reject"],
+        createdAt: "2026-09-30T09:00:00.000Z",
+      },
+      nodes: [{
+        id: "voice",
+        label: "配音",
+        status: "needs_human",
+        artifactIds: [],
+        qualityGateResults: [],
+        output: {
+          conflict: {
+            code: "NARRATION_GROUP_DOES_NOT_FIT_V2",
+            groupId: "ng-a",
+            requiredFrames: 135,
+            availableFrames: 90,
+          },
+        },
+      }],
+    };
+
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: "批准进入发布包" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "终止制作" })).toBeInTheDocument();
+  });
+
+  it("keeps the narration timing editor reachable on the final-review video surface", () => {
+    vi.spyOn(studioApi, "narrationPlan").mockReturnValue(new Promise(() => undefined));
+    const voiceNode: StudioNode = {
+      id: "voice",
+      label: "配音",
+      status: "succeeded",
+      artifactIds: ["voice-plan", "voice-track"],
+      qualityGateResults: [],
+      output: { layoutKey: "layout-current", voiceOperationId: "voice-operation-current" },
+      outputState: {
+        effectiveVersionId: "voice-version-current",
+        generatedVersionId: "voice-version-current",
+        stale: false,
+        versions: [{
+          id: "voice-version-current",
+          source: "generated",
+          artifactIds: ["voice-plan", "voice-track"],
+          inputVersionIds: [],
+          createdAt: "2026-09-30T09:00:00.000Z",
+          createdBy: "controlled-voice",
+          schemaVersion: "video-factory/voiceover-plan-v3",
+        }],
+      },
+    };
+    const run: StudioRunDetail = {
+      ...runDetail,
+      nodes: [voiceNode, ...runDetail.nodes],
+      artifacts: [
+        ...runDetail.artifacts,
+        { id: "voice-plan", kind: "voiceover_plan", sha256: "a".repeat(64), producerNodeId: "voice", createdAt: "2026-09-30T09:00:00.000Z" },
+        { id: "voice-track", kind: "voiceover", sha256: "b".repeat(64), producerNodeId: "voice", createdAt: "2026-09-30T09:00:00.000Z" },
+      ],
+    };
+
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} />);
+
+    expect(screen.getByRole("region", { name: "只调整配音时间" })).toBeInTheDocument();
+    expect(screen.getByText("正在读取当前声音方案…")).toBeInTheDocument();
+  });
+
   it("shows the audit's actionable advice at the stop point instead of only a score", () => {
     const run: StudioRunDetail = {
       ...runDetail,

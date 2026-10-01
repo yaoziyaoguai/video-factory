@@ -39,6 +39,9 @@ import type {
   StudioRunDetail,
   StudioRunSummary,
   StudioNarrationRevisionInput,
+  StudioNarrationPreviewV2Input,
+  StudioNarrationConfirmV2Input,
+  StudioNarrationConfirmV2Result,
   StudioSceneRevisionInput,
   StudioSceneResourceRevisionInput,
   StudioVisualReinspectionInput,
@@ -781,6 +784,11 @@ export class StudioService {
   requestNarrationRevision(runId: string, input: StudioNarrationRevisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.requestNarrationRevision(runId, input, actor);
   }
+
+  /** §2.5/§4.2.6 只读查询时间调整操作：不启动 worker、不暴露路径；GET 仅重读。 */
+  readNarrationRelayoutOperation(runId: string, requestId: string) {
+    return this.production.readNarrationRelayoutOperation(runId, requestId);
+  }
   requestSceneResourceRevision(runId: string, input: StudioSceneResourceRevisionInput, actor = "studio-owner"): Promise<StudioRunDetail> {
     return this.production.requestSceneResourceRevision(runId, input, actor);
   }
@@ -796,6 +804,14 @@ export class StudioService {
 
   previewNarrationPlan(runId: string) {
     return this.production.previewNarrationPlan(runId);
+  }
+
+  previewNarrationPlanV2(runId: string, input: StudioNarrationPreviewV2Input, actor = "studio-owner") {
+    return this.production.previewNarrationPlanV2(runId, input, actor);
+  }
+
+  confirmNarrationPlanV2(runId: string, input: StudioNarrationConfirmV2Input, actor = "studio-owner"): Promise<StudioNarrationConfirmV2Result> {
+    return this.withLease(runId, async () => this.production.confirmNarrationPlanV2(runId, input, actor));
   }
 
   confirmNarrationPlan(runId: string, input: { expectedRunRevision: number; plan: unknown }, actor = "studio-owner"): Promise<StudioRunDetail> {
@@ -993,8 +1009,9 @@ export class StudioService {
       if (error instanceof TemplateRevisionConflictError || (error instanceof Error && /locked by another writer/.test(error.message))) {
         throw new StudioConflictError("模板已被其他操作更新，请刷新后重试。");
       }
-      if (error instanceof StudioInputError || (error instanceof Error && isTemplateInputError(error.message))) {
-        throw error instanceof StudioInputError ? error : new StudioInputError(`模板参数不正确：${error.message}`);
+      if (error instanceof StudioInputError) throw error;
+      if (error instanceof Error && isTemplateInputError(error.message)) {
+        throw new StudioInputError(`模板参数不正确：${error.message}`);
       }
       throw error;
     }

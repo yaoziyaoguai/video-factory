@@ -202,7 +202,7 @@ function directorAgent(): VisualDirectorAgent {
 }
 
 describe("ProductionPipeline production preflight", () => {
-  for (const mode of ["regular", "group-conflict", "upstream-edit"]) it(`confirms continuous narration before TTS without releasing the current user gate (${mode})`, async () => {
+  for (const mode of ["regular", "group-conflict", "upstream-edit", "upstream-edit-v2"]) it(`confirms continuous narration before TTS without releasing the current user gate (${mode})`, async () => {
     const groupedConflict = mode === "group-conflict";
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-narration-confirm-"));
     const worker = groupedConflict ? new VoiceConflictWorker(true) : new RecordingWorker();
@@ -234,13 +234,29 @@ describe("ProductionPipeline production preflight", () => {
     assert.equal(preview.plan.groups.length, 1);
     let chosen = structuredClone(preview.plan);
     chosen.groups[0]!.placement.anchor = "end";
-    let saved = await pipeline.confirmNarrationPlan(run.id, { expectedRunRevision: run.revision, plan: chosen, actor: "creator" });
+    let saved: typeof run;
+    if (mode === "upstream-edit-v2") {
+      const ticket = await pipeline.previewNarrationPlanV2(run.id, {
+        expectedRunRevision: run.revision, sourceContextId: preview.sourceContextId!,
+        editorSessionId: "stale-source-v2", editSequence: 1, actor: "creator",
+        candidate: { version: "video-factory/narration-plan-v2", groups: [], userSilences: [] },
+      });
+      chosen = ticket.plan;
+      saved = (await pipeline.confirmNarrationPlanV2(run.id, {
+        requestId: "stale-source-save-v2", expectedRunRevision: run.revision,
+        sourceContextId: preview.sourceContextId!, editorSessionId: ticket.editorSessionId,
+        editSequence: ticket.editSequence, candidateId: ticket.candidateId, ticketId: ticket.ticketId,
+        planSha256: ticket.planSha256, acknowledgeQuoteUnavailable: true, actor: "creator",
+      })).run;
+    } else {
+      saved = await pipeline.confirmNarrationPlan(run.id, { expectedRunRevision: run.revision, plan: chosen, actor: "creator" });
+    }
     assert.equal(saved.status, "needs_human");
     assert.deepEqual(saved.nodeRuns.find((node) => node.nodeId === "assets")!.intervention, originalGate);
     assert.equal(worker.requests.some((request) => request.capability === "voice.synthesize"), false);
     assert.equal((await pipeline.previewNarrationPlan(run.id)).confirmed, true);
     await assert.rejects(() => pipeline.confirmNarrationPlan(run.id, { expectedRunRevision: run.revision, plan: chosen, actor: "creator" }), /revision/i);
-    if (mode === "upstream-edit") {
+    if (mode === "upstream-edit" || mode === "upstream-edit-v2") {
       const preflight = saved.nodeRuns.find((node) => node.nodeId === "production-preflight")!;
       const output = preflight.output as { executablePlanPath: string };
       const changedVisual = JSON.parse(await readFile(output.executablePlanPath, "utf8"));
@@ -263,6 +279,18 @@ describe("ProductionPipeline production preflight", () => {
       assert.equal(worker.requests.some((request) => request.capability === "voice.synthesize"), false);
       const refreshed = await pipeline.previewNarrationPlan(run.id);
       assert.equal(refreshed.confirmed, false);
+      assert.equal(refreshed.editorContext.savedPlanStatus, "stale");
+      assert.deepEqual(refreshed.editorContext.stalePlan, chosen, "旧计划必须按保存时的来源核验并只读保留");
+      assert.notEqual(refreshed.plan.visualPlan.sha256, chosen.visualPlan.sha256);
+      assert.equal(refreshed.plan.visualPlan.totalFrames, chosen.visualPlan.totalFrames + 3);
+      const archivedVoiceInput = saved.nodeRuns.find((node) => node.nodeId === "voice")!.inputState!;
+      const archivedInput = archivedVoiceInput.versions.find((version) => version.id === archivedVoiceInput.effectiveVersionId)!.value as Record<string, unknown>;
+      const oldVisualPath = String(archivedInput.executablePlanPath);
+      const oldVisualBytes = await readFile(oldVisualPath);
+      await writeFile(oldVisualPath, Buffer.concat([oldVisualBytes, Buffer.from(" ")]));
+      await assert.rejects(pipeline.previewNarrationPlan(run.id), /留档|核验|来源|sha256/i,
+        "历史来源也必须核验真实文件，不得为恢复出口放松摘要守卫");
+      await writeFile(oldVisualPath, oldVisualBytes);
       chosen = refreshed.plan;
       chosen.groups[0]!.placement.anchor = "end";
       saved = await pipeline.confirmNarrationPlan(run.id, { expectedRunRevision: saved.revision, plan: chosen, actor: "creator" });

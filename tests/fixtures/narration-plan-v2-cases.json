@@ -1,0 +1,561 @@
+{
+  "comment": "narration-plan-v2 共享正反例（TS/Python 同判）。scenes 为输入原稿；expect 决定判定。§4.1 增补：分段间隙、码点 trim、秒/帧单位、句界、canonical 字节、完整计划合同。",
+  "cases": [
+    {
+      "case_id": "V2-POS-BASE-DERIVE",
+      "kind": "build",
+      "scenes": [
+        { "position": 1, "narration": "甲。", "duration": 2 },
+        { "position": 2, "narration": "乙。", "duration": 2 }
+      ],
+      "script_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "visual_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "expect": {
+        "mode": "ok",
+        "base_groups": [
+          { "source_scene_positions": [1, 2], "canonical_text": "甲。 乙。", "scene_text_ranges": [[0, 3], [3, 5]] }
+        ],
+        "frame_ranges": [[0, 120]],
+        "total_frames": 120
+      }
+    },
+    {
+      "case_id": "V2-POS-SAME-SCENE-TWO-SLICES",
+      "kind": "validate_slices",
+      "scenes": [
+        { "position": 1, "narration": "甲。 乙。", "duration": 4 }
+      ],
+      "script_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "visual_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "slices": [
+        { "start": 0, "end": 3 },
+        { "start": 3, "end": 5 }
+      ],
+      "expect_scenes": [[1], [1]],
+      "expect": { "mode": "ok", "total_frames": 120 }
+    },
+    {
+      "case_id": "V2-POS-SLICE-THREE-CONTIGUOUS",
+      "kind": "validate_slices",
+      "scenes": [
+        { "position": 1, "narration": "甲。乙。丙。", "duration": 4 }
+      ],
+      "script_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "visual_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "slices": [
+        { "start": 0, "end": 2 },
+        { "start": 2, "end": 4 },
+        { "start": 4, "end": 6 }
+      ],
+      "expect_scenes": [[1], [1], [1]],
+      "expect": { "mode": "ok" }
+    },
+    {
+      "case_id": "V2-NEG-SLICE-GAP-DROPS-MIDDLE-TEXT",
+      "kind": "validate_slices",
+      "scenes": [
+        { "position": 1, "narration": "甲。乙。丙。", "duration": 4 }
+      ],
+      "script_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "visual_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "slices": [
+        { "start": 0, "end": 2 },
+        { "start": 4, "end": 6 }
+      ],
+      "expect": { "mode": "error", "error_contains": "间隙" }
+    },
+    {
+      "case_id": "V2-NEG-SLICE-UNORDERED",
+      "kind": "validate_slices",
+      "scenes": [
+        { "position": 1, "narration": "甲。乙。", "duration": 4 }
+      ],
+      "script_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "visual_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "slices": [
+        { "start": 3, "end": 5 },
+        { "start": 0, "end": 3 }
+      ],
+      "expect": { "mode": "error" }
+    },
+    {
+      "case_id": "V2-NEG-SLICE-ILLEGAL-CUTPOINT",
+      "kind": "validate_slices",
+      "scenes": [
+        { "position": 1, "narration": "甲乙。丙丁。", "duration": 4 }
+      ],
+      "script_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "visual_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "slices": [
+        { "start": 0, "end": 2 },
+        { "start": 2, "end": 6 }
+      ],
+      "expect": { "mode": "error", "error_contains": "切点" }
+    },
+    {
+      "case_id": "V2-NEG-SLICE-NOT-COVER",
+      "kind": "validate_slices",
+      "scenes": [
+        { "position": 1, "narration": "甲。 乙。", "duration": 4 }
+      ],
+      "script_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "visual_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "slices": [
+        { "start": 0, "end": 2 }
+      ],
+      "expect": { "mode": "error", "error_contains": "覆盖" }
+    },
+    {
+      "case_id": "V2-NEG-SLICE-OVERLAP",
+      "kind": "validate_slices",
+      "scenes": [
+        { "position": 1, "narration": "甲。 乙。", "duration": 4 }
+      ],
+      "script_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "visual_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "slices": [
+        { "start": 0, "end": 4 },
+        { "start": 3, "end": 5 }
+      ],
+      "expect": { "mode": "error", "error_contains": "重叠" }
+    },
+    {
+      "case_id": "V2-NEG-SLICE-OUT-OF-RANGE",
+      "kind": "validate_slices",
+      "scenes": [
+        { "position": 1, "narration": "甲。", "duration": 4 }
+      ],
+      "script_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "visual_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "slices": [
+        { "start": 0, "end": 4, "expect_scenes": [1] },
+        { "start": 5, "end": 9 }
+      ],
+      "expect": { "mode": "error", "error_contains": "范围" }
+    },
+    {
+      "case_id": "V2-NEG-LONE-SURROGATE",
+      "kind": "trim_reject",
+      "text": "\uD800abc",
+      "expect": { "mode": "error", "error_contains": "surrogate" }
+    },
+    {
+      "case_id": "V2-POS-TRIM-SET",
+      "kind": "trim",
+      "text": "　  甲。  ",
+      "expect": { "mode": "ok", "trimmed": "甲。" }
+    },
+    {
+      "case_id": "V2-POS-TRIM-ASTRAL-NO-DROPPED-SPACE",
+      "kind": "trim",
+      "text": "甲😀乙  ",
+      "expect": { "mode": "ok", "trimmed": "甲😀乙" }
+    },
+    {
+      "case_id": "V2-POS-ID-STABLE",
+      "kind": "build",
+      "scenes": [
+        { "position": 1, "narration": "甲。", "duration": 2 },
+        { "position": 2, "narration": "乙。", "duration": 2 }
+      ],
+      "script_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "visual_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "expect": {
+        "mode": "ok",
+        "base_group_id_prefix": "nb-",
+        "base_group_id_len": 67,
+        "frame_ranges": [[0, 120]]
+      }
+    },
+    {
+      "case_id": "V2-NEG-STRING-FRAMES",
+      "kind": "frames",
+      "seconds": "invalid",
+      "expect": { "mode": "error" }
+    },
+    {
+      "case_id": "V2-NEG-BOOL-FRAMES",
+      "kind": "frames",
+      "seconds": true,
+      "expect": { "mode": "error" }
+    },
+    {
+      "case_id": "V2-NEG-NUMBER-FRAMES-IS-NOT-SECONDS-OR-PASSTHROUGH",
+      "kind": "frames",
+      "seconds": 2,
+      "expect": { "mode": "error" }
+    },
+    {
+      "case_id": "V2-NEG-NEGATIVE-NUMBER-FRAMES",
+      "kind": "frames",
+      "seconds": -1,
+      "expect": { "mode": "error" }
+    },
+    {
+      "case_id": "V2-NEG-FLOAT-FRAMES",
+      "kind": "frames",
+      "seconds": 1.5,
+      "expect": { "mode": "error" }
+    },
+    {
+      "case_id": "V2-POS-FRAMES-HALF-UP",
+      "kind": "frames",
+      "seconds": "0.5",
+      "expect": { "mode": "ok", "frames": 15 }
+    },
+    {
+      "case_id": "V2-POS-FRAMES-HALF-UP-MILLISECOND",
+      "kind": "frames",
+      "seconds": "0.050000",
+      "expect": { "mode": "ok", "frames": 2 }
+    },
+    {
+      "case_id": "V2-POS-FRAMES-STRING-SECONDS",
+      "kind": "frames",
+      "seconds": "2",
+      "expect": { "mode": "ok", "frames": 60 }
+    },
+    {
+      "case_id": "V2-NEG-FRAMES-OVERFLOW-SAFE-INTEGER",
+      "kind": "frames",
+      "seconds": "99999999999999999",
+      "expect": { "mode": "error" }
+    },
+    {
+      "case_id": "V2-POS-SENTENCE-BOUNDARIES",
+      "kind": "sentence_boundaries",
+      "cases": [
+        { "text": "甲。 乙。 3.14 是数。", "boundaries": [3, 6] },
+        { "text": "甲。乙。", "boundaries": [2] },
+        { "text": "甲。”乙。", "boundaries": [3] },
+        { "text": "版本3.14。", "boundaries": [] },
+        { "text": "甲。", "boundaries": [] }
+      ]
+    },
+    {
+      "case_id": "V2-CANONICAL-JSON",
+      "kind": "canonical_json",
+      "cases": [
+        { "value": { "b": 1, "a": [2, 1], "c": "甲" }, "canonical": "{\"a\":[2,1],\"b\":1,\"c\":\"甲\"}" },
+        { "value": [1, "x", true], "canonical": "[1,\"x\",true]" },
+        { "value": { "甲": 1 }, "error": true, "error_contains": "ASCII" },
+        { "value": { "\u0001": 1 }, "error": true, "error_contains": "ASCII" }
+      ]
+    },
+    {
+      "case_id": "V2-POS-FULL-PLAN",
+      "kind": "full_plan",
+      "build_input": {
+        "scenes": [
+          { "position": 1, "duration": 2, "narration": "甲。" },
+          { "position": 2, "duration": 2, "narration": "乙。" }
+        ],
+        "scriptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "visualSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sourceContextId": "sc-full-plan-main",
+        "segments": [
+          {
+            "baseGroupIndex": 0,
+            "slices": [
+              { "start": 0, "end": 3, "window": { "startFrame": 0, "endFrame": 60 }, "placement": { "anchor": "start", "offsetFrames": 0 } },
+              { "start": 3, "end": 5, "window": { "startFrame": 60, "endFrame": 120 }, "placement": { "anchor": "start", "offsetFrames": 0 } }
+            ]
+          }
+        ],
+        "userSilences": []
+      },
+      "expect": {
+        "mode": "ok",
+        "version": "video-factory/narration-plan-v2",
+        "total_frames": 120,
+        "canonical_source_sha256": "d1c8b7db58732dbcaa056784d61e4399d412f4c7de2498f13275f7685e09376a",
+        "groups": [
+          { "id": "ng-8dd9bfbc8a50759333f0b317413e458bd103707eed9376886a7c11c1c8680b45", "sourceRange": { "baseGroupId": "nb-763b6673f0459428a86e52126fe79a4330ccac55d2feeeb8371bc50b539ff728", "startCodePoint": 0, "endCodePoint": 3 }, "sourceScenePositions": [1], "text": "甲。 ", "window": { "startFrame": 0, "endFrame": 60 }, "placement": { "anchor": "start", "offsetFrames": 0 } },
+          { "id": "ng-8523b65c2ffc322f6c7f47056eb106a8101dbb07edab7bdf6cd6327a33f8daca", "sourceRange": { "baseGroupId": "nb-763b6673f0459428a86e52126fe79a4330ccac55d2feeeb8371bc50b539ff728", "startCodePoint": 3, "endCodePoint": 5 }, "sourceScenePositions": [2], "text": "乙。", "window": { "startFrame": 60, "endFrame": 120 }, "placement": { "anchor": "start", "offsetFrames": 0 } }
+        ],
+        "silences": []
+      }
+    },
+    {
+      "case_id": "V2-POS-FULL-PLAN-SILENCES",
+      "kind": "full_plan",
+      "build_input": {
+        "scenes": [
+          { "position": 1, "duration": 3, "narration": "甲。" },
+          { "position": 2, "duration": 2, "narration": "　" },
+          { "position": 3, "duration": 3, "narration": "乙。" }
+        ],
+        "scriptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "visualSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sourceContextId": "sc-full-plan-silence",
+        "segments": [
+          {
+            "baseGroupIndex": 0,
+            "slices": [
+              { "start": 0, "end": 2, "window": { "startFrame": 0, "endFrame": 60 }, "placement": { "anchor": "start", "offsetFrames": 0 } }
+            ]
+          }
+        ],
+        "userSilences": [{ "startFrame": 60, "endFrame": 90 }]
+      },
+      "expect": {
+        "mode": "ok",
+        "version": "video-factory/narration-plan-v2",
+        "total_frames": 240,
+        "canonical_source_sha256": "a6ee44dc90e61b213727ff66a0851c0c6c431b140d4f7aedb8dcbb3033d62c16",
+        "groups": [
+          { "id": "ng-a232549d8c066062d560ca8094b7f4d7e831023662d3df45b9d148e42bf45aeb", "sourceRange": { "baseGroupId": "nb-0adb864ab91053b92b72825a1a6a08261028d0a3a93c06551f8b4cf91c266c6e", "startCodePoint": 0, "endCodePoint": 2 }, "sourceScenePositions": [1], "text": "甲。", "window": { "startFrame": 0, "endFrame": 60 }, "placement": { "anchor": "start", "offsetFrames": 0 } },
+          { "id": "ng-79919feed51112e8ddcc438940100df7c66e196e45b734dd108df8c662130eee", "sourceRange": { "baseGroupId": "nb-e19a9ac12cf24edc114c6cba761a5b3f0dfc9d104b6fddd1853666a14308137e", "startCodePoint": 0, "endCodePoint": 2 }, "sourceScenePositions": [3], "text": "乙。", "window": { "startFrame": 150, "endFrame": 240 }, "placement": { "anchor": "start", "offsetFrames": 0 } }
+        ],
+        "silences": [
+          { "id": "ns-user-60-90", "startFrame": 60, "endFrame": 90, "source": "user" },
+          { "id": "silence-2", "startFrame": 90, "endFrame": 150, "source": "legacy_silent_scene" }
+        ]
+      }
+    },
+    {
+      "case_id": "V2-POS-FULL-PLAN-EMPTY-NO-NARRATION",
+      "kind": "full_plan",
+      "build_input": {
+        "scenes": [
+          { "position": 1, "duration": 2, "narration": "　" }
+        ],
+        "scriptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "visualSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sourceContextId": "sc-full-plan-empty",
+        "segments": [],
+        "userSilences": []
+      },
+      "expect": {
+        "mode": "ok",
+        "version": "video-factory/narration-plan-v2",
+        "total_frames": 60,
+        "canonical_source_sha256": "2580c25bebb37c870b1d651081281b9c726dc652d0c98598fd7bdbb4fde2579d",
+        "groups": [],
+        "silences": [
+          { "id": "silence-1", "startFrame": 0, "endFrame": 60, "source": "legacy_silent_scene" }
+        ]
+      }
+    },
+    {
+      "case_id": "V2-NEG-FULL-PLAN-TEXT-BYPASS",
+      "kind": "full_plan",
+      "build_input": {
+        "scenes": [
+          { "position": 1, "duration": 2, "narration": "甲。" },
+          { "position": 2, "duration": 2, "narration": "乙。" }
+        ],
+        "scriptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "visualSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sourceContextId": "sc-full-plan-main",
+        "segments": [
+          {
+            "baseGroupIndex": 0,
+            "slices": [
+              { "start": 0, "end": 3, "window": { "startFrame": 0, "endFrame": 60 }, "placement": { "anchor": "start", "offsetFrames": 0 } },
+              { "start": 3, "end": 5, "window": { "startFrame": 60, "endFrame": 120 }, "placement": { "anchor": "start", "offsetFrames": 0 } }
+            ]
+          }
+        ],
+        "userSilences": []
+      },
+      "mutate_plan": { "path": "groups.0.text", "value": "偷偷改。" },
+      "expect": { "mode": "error", "error_contains": "文字" }
+    },
+    {
+      "case_id": "V2-NEG-FULL-PLAN-WINDOW-CROSSES-SILENCE",
+      "kind": "full_plan",
+      "build_input": {
+        "scenes": [
+          { "position": 1, "duration": 3, "narration": "甲。" },
+          { "position": 2, "duration": 2, "narration": "　" },
+          { "position": 3, "duration": 3, "narration": "乙。" }
+        ],
+        "scriptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "visualSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sourceContextId": "sc-full-plan-silence",
+        "segments": [
+          {
+            "baseGroupIndex": 0,
+            "slices": [
+              { "start": 0, "end": 2, "window": { "startFrame": 0, "endFrame": 60 }, "placement": { "anchor": "start", "offsetFrames": 0 } }
+            ]
+          }
+        ],
+        "userSilences": [{ "startFrame": 60, "endFrame": 90 }]
+      },
+      "mutate_input": { "path": "segments.0.slices.0.window", "value": { "startFrame": 0, "endFrame": 90 } },
+      "expect": { "mode": "error", "error_contains": "静默" }
+    },
+    {
+      "case_id": "V2-NEG-FULL-PLAN-SLICE-GAP","kind": "full_plan",
+      "build_input": {
+        "scenes": [
+          { "position": 1, "duration": 2, "narration": "甲。" },
+          { "position": 2, "duration": 2, "narration": "乙。" }
+        ],
+        "scriptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "visualSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sourceContextId": "sc-full-plan-main",
+        "segments": [
+          {
+            "baseGroupIndex": 0,
+            "slices": [
+              { "start": 0, "end": 3, "window": { "startFrame": 0, "endFrame": 60 }, "placement": { "anchor": "start", "offsetFrames": 0 } },
+              { "start": 3, "end": 5, "window": { "startFrame": 60, "endFrame": 120 }, "placement": { "anchor": "start", "offsetFrames": 0 } }
+            ]
+          }
+        ],
+        "userSilences": []
+      },
+      "mutate_input": { "path": "segments.0.slices.0.end", "value": 2 },
+      "expect": { "mode": "error", "error_contains": "间隙" }
+    },
+    {
+      "case_id": "V2-NEG-FULL-PLAN-UNKNOWN-VERSION-NO-DOWNGRADE",
+      "kind": "full_plan",
+      "build_input": {
+        "scenes": [
+          { "position": 1, "duration": 2, "narration": "甲。" },
+          { "position": 2, "duration": 2, "narration": "乙。" }
+        ],
+        "scriptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "visualSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sourceContextId": "sc-full-plan-main",
+        "segments": [
+          {
+            "baseGroupIndex": 0,
+            "slices": [
+              { "start": 0, "end": 3, "window": { "startFrame": 0, "endFrame": 60 }, "placement": { "anchor": "start", "offsetFrames": 0 } },
+              { "start": 3, "end": 5, "window": { "startFrame": 60, "endFrame": 120 }, "placement": { "anchor": "start", "offsetFrames": 0 } }
+            ]
+          }
+        ],
+        "userSilences": []
+      },
+      "mutate_plan": { "path": "version", "value": "video-factory/narration-plan-v3" },
+      "expect": { "mode": "error", "error_contains": "版本" }
+    },
+    {
+      "case_id": "V2-NEG-FULL-PLAN-BOOL-SCENE-POSITIONS",
+      "kind": "full_plan",
+      "bool_masquerade": true,
+      "build_input": {
+        "scenes": [
+          { "position": 1, "duration": 2, "narration": "甲。" },
+          { "position": 2, "duration": 2, "narration": "乙。" }
+        ],
+        "scriptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "visualSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sourceContextId": "sc-full-plan-main",
+        "segments": [
+          {
+            "baseGroupIndex": 0,
+            "slices": [
+              { "start": 0, "end": 3, "window": { "startFrame": 0, "endFrame": 60 }, "placement": { "anchor": "start", "offsetFrames": 0 } },
+              { "start": 3, "end": 5, "window": { "startFrame": 60, "endFrame": 120 }, "placement": { "anchor": "start", "offsetFrames": 0 } }
+            ]
+          }
+        ],
+        "userSilences": []
+      },
+      "mutate_plan": { "path": "groups.0.sourceScenePositions", "value": [true] },
+      "expect": { "mode": "error", "error_contains": "整数" }
+    },
+    {
+      "case_id": "V2-NEG-FULL-PLAN-BOOL-WINDOW-START",
+      "kind": "full_plan",
+      "bool_masquerade": true,
+      "build_input": {
+        "scenes": [
+          { "position": 1, "duration": 2, "narration": "甲。" },
+          { "position": 2, "duration": 2, "narration": "乙。" }
+        ],
+        "scriptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "visualSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sourceContextId": "sc-full-plan-main",
+        "segments": [
+          {
+            "baseGroupIndex": 0,
+            "slices": [
+              { "start": 0, "end": 3, "window": { "startFrame": 0, "endFrame": 60 }, "placement": { "anchor": "start", "offsetFrames": 0 } },
+              { "start": 3, "end": 5, "window": { "startFrame": 60, "endFrame": 120 }, "placement": { "anchor": "start", "offsetFrames": 0 } }
+            ]
+          }
+        ],
+        "userSilences": []
+      },
+      "mutate_plan": { "path": "groups.0.window.startFrame", "value": false },
+      "expect": { "mode": "error", "error_contains": "整数" }
+    },
+    {
+      "case_id": "V2-NEG-FULL-PLAN-BOOL-PLACEMENT-OFFSET",
+      "kind": "full_plan",
+      "bool_masquerade": true,
+      "build_input": {
+        "scenes": [
+          { "position": 1, "duration": 2, "narration": "甲。" },
+          { "position": 2, "duration": 2, "narration": "乙。" }
+        ],
+        "scriptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "visualSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sourceContextId": "sc-full-plan-main",
+        "segments": [
+          {
+            "baseGroupIndex": 0,
+            "slices": [
+              { "start": 0, "end": 3, "window": { "startFrame": 0, "endFrame": 60 }, "placement": { "anchor": "start", "offsetFrames": 0 } },
+              { "start": 3, "end": 5, "window": { "startFrame": 60, "endFrame": 120 }, "placement": { "anchor": "start", "offsetFrames": 0 } }
+            ]
+          }
+        ],
+        "userSilences": []
+      },
+      "mutate_plan": { "path": "groups.0.placement.offsetFrames", "value": false },
+      "expect": { "mode": "error", "error_contains": "整数" }
+    },
+    {
+      "case_id": "V2-NEG-FULL-PLAN-BOOL-SOURCE-RANGE-START",
+      "kind": "full_plan",
+      "bool_masquerade": true,
+      "build_input": {
+        "scenes": [
+          { "position": 1, "duration": 2, "narration": "甲。" },
+          { "position": 2, "duration": 2, "narration": "乙。" }
+        ],
+        "scriptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "visualSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sourceContextId": "sc-full-plan-main",
+        "segments": [
+          {
+            "baseGroupIndex": 0,
+            "slices": [
+              { "start": 0, "end": 3, "window": { "startFrame": 0, "endFrame": 60 }, "placement": { "anchor": "start", "offsetFrames": 0 } },
+              { "start": 3, "end": 5, "window": { "startFrame": 60, "endFrame": 120 }, "placement": { "anchor": "start", "offsetFrames": 0 } }
+            ]
+          }
+        ],
+        "userSilences": []
+      },
+      "mutate_plan": { "path": "groups.0.sourceRange.startCodePoint", "value": false },
+      "expect": { "mode": "error", "error_contains": "整数" }
+    },
+    {
+      "case_id": "V2-NEG-FULL-PLAN-BOOL-SILENCE-START",
+      "kind": "full_plan",
+      "bool_masquerade": true,
+      "build_input": {
+        "scenes": [
+          { "position": 1, "duration": 2, "narration": "　" }
+        ],
+        "scriptSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "visualSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "sourceContextId": "sc-full-plan-empty",
+        "segments": [],
+        "userSilences": []
+      },
+      "mutate_plan": { "path": "silences.0.startFrame", "value": false },
+      "expect": { "mode": "error", "error_contains": "整数" }
+    }
+  ]
+}

@@ -22,7 +22,11 @@ tmp/
 .ua/
 graphify-out/
 
-# QA 过程产物一律不进版本库：截图与录屏体量大且可本地重放，
-# 报告与证据属于单个运行环境的现场记录，对代码库没有约束力。
-# 需要留档时对外发布，不要塞进仓库。
-docs/qa/
+# 公开文档只包含产品、使用与运维说明；历史研发记录与现场证据保留本地。
+docs/*
+!docs/guides/
+docs/guides/*
+!docs/guides/production-deployment.md
+!docs/guides/stock-sources.md
+!docs/guides/model-configuration.md
+!docs/guides/production-workflow.md

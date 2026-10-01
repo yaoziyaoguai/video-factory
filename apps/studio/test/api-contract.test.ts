@@ -6,13 +6,13 @@ import {
   parseStudioCreatorSettingsPatch,
   parseStudioOpportunityInput,
   parseStudioOpportunityStatusInput,
-  parseStudioNarrationRevisionInput,
   parseStudioPublishInput,
   parseStudioCreativeReviewCommandInput,
   parseStudioSeriesInput,
   parseStudioDecisionInput,
   parseStudioVoicePreviewInput,
 } from "../src/shared/api.js";
+import { parseStudioNarrationRevisionInput } from "../src/server/narration-revision-input.js";
 
 describe("run intervention API contracts", () => {
   it("accepts an explicit incomplete-review continuation and rejects an implicit bypass", () => {
@@ -444,6 +444,23 @@ describe("voice preview API contracts", () => {
 });
 
 describe("scene narration revision API contracts", () => {
+  it("解析时间调整 DTO 但不接受客户端伪造 actor", () => {
+    const parsed = parseStudioNarrationRevisionInput({
+      action: "relayout_narration", intent: "apply", requestId: "relayout-api-1",
+      expectedRunRevision: 7, interventionId: "intervention-1", sourceContextId: "sc-1",
+      note: "向后移动一段", actor: "spoofed-browser-user",
+      source: { kind: "voice_version", voiceVersionId: "voice-v1", voicePlanArtifactId: "artifact-plan",
+        voicePlanSha256: "a".repeat(64), expectedNarrationPlanSha256: "b".repeat(64),
+        expectedLayoutKey: "layout-1", expectedAudioSha256: "c".repeat(64),
+        sourceVoiceOperationId: "voice-op-1" },
+      layout: { narrationPlanVersion: "video-factory/narration-plan-v2",
+        groups: [{ groupId: "ng-1", window: { startFrame: 0, endFrame: 90 },
+          placement: { anchor: "start", offsetFrames: 0 } }], userSilences: [] },
+    });
+    assert.equal(parsed.action, "relayout_narration");
+    assert.equal("actor" in parsed, false, "actor 由登录会话给出，不读浏览器字段");
+  });
+
   it("distinguishes pure subtitle recovery from narration rewrites and binds the current audio version", () => {
     const recovery = { action: "recover_subtitles", requestId: "subtitle-recovery-1", expectedRunRevision: 7,
       expectedVoiceVersionId: "voice-v1", expectedNarrationPlanSha256: "a".repeat(64),

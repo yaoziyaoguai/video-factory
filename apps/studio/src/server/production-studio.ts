@@ -38,6 +38,9 @@ import {
   type DocumentTaskContext,
   type ProductionBrief,
   type NarrationPlanPreview,
+  type NarrationPreviewTicketResponseV2,
+  type NarrationConfirmReceiptV2,
+  NarrationTextV2Error,
   type ProductionCreativeReviewConfirmationDraft,
   type ProductionCreativeReviewCommandDraft,
   type ProductionNodeDocumentAuditDraft,
@@ -98,6 +101,9 @@ import {
   type StudioRunDetail,
   type StudioRunSummary,
   type StudioNarrationRevisionInput,
+  type StudioNarrationPreviewV2Input,
+  type StudioNarrationConfirmV2Input,
+  type StudioNarrationConfirmV2Result,
   type StudioSceneResourceRevisionInput,
   type StudioSceneRevisionInput,
   type StudioSpendRejectionInput,
@@ -159,6 +165,12 @@ export interface StudioPipelinePort {
     draft: ProductionNarrationRevisionDraft,
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun>;
+  readNarrationRelayoutOperation?(runId: string, requestId: string): Promise<{
+    requestId: string; state: "reserved" | "completed" | "applied" | "failed" | "discarded";
+    requestDigest?: string;
+    sourceOperationId?: string; relayoutSource?: string; layoutOperationId?: string;
+    resultVoiceVersionId?: string; isCurrent: boolean; failureReason?: string; createdAt?: string;
+  }>;
   dispatchSceneResourceRevision?(
     runId: string,
     draft: ProductionSceneResourceRevisionDraft,
@@ -174,6 +186,10 @@ export interface StudioPipelinePort {
   applyNodeInputOverride(runId: string, override: NodeInputOverrideDraft): Promise<WorkflowRun<ProductionBrief>>;
   previewNarrationPlan?(runId: string): Promise<NarrationPlanPreview>;
   confirmNarrationPlan?(runId: string, draft: { expectedRunRevision: number; plan: unknown; actor: string }): Promise<WorkflowRun<ProductionBrief>>;
+  previewNarrationPlanV2?(runId: string, draft: StudioNarrationPreviewV2Input & { actor: string }): Promise<NarrationPreviewTicketResponseV2>;
+  confirmNarrationPlanV2?(runId: string, draft: StudioNarrationConfirmV2Input & { actor: string }): Promise<{
+    receipt: NarrationConfirmReceiptV2; run: WorkflowRun<ProductionBrief>;
+  }>;
   applyNodeExecutionConfiguration(
     runId: string,
     nodeId: string,
@@ -1866,6 +1882,25 @@ export class ProductionStudio {
     }
   }
 
+  /** §2.5/§4.2.6 只读查询时间调整操作：不启动 worker、不暴露路径；GET 仅重读。 */
+  async readNarrationRelayoutOperation(runId: string, requestId: string): Promise<{
+    requestId: string; state: "reserved" | "completed" | "applied" | "failed" | "discarded";
+    requestDigest?: string;
+    sourceOperationId?: string; relayoutSource?: string; layoutOperationId?: string;
+    resultVoiceVersionId?: string; isCurrent: boolean; failureReason?: string; createdAt?: string;
+  }> {
+    await this.loadRequiredRun(runId);
+    if (!this.options.pipeline.readNarrationRelayoutOperation) {
+      throw new StudioConflictError("当前制作引擎不支持时间调整查询。");
+    }
+    try {
+      return await this.options.pipeline.readNarrationRelayoutOperation(runId, requestId);
+    } catch (error) {
+      if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
+      throw error;
+    }
+  }
+
   async requestSceneResourceRevision(
     runId: string,
     input: StudioSceneResourceRevisionInput,
@@ -2471,6 +2506,56 @@ export class ProductionStudio {
       return await this.options.pipeline.previewNarrationPlan(runId);
     } catch (error) {
       if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
+      throw error;
+    }
+  }
+
+  /** §2.2 候选预览：本地核价并签发票据；读取与核价不发起 TTS、不消费、不放行素材。 */
+  async previewNarrationPlanV2(runId: string, input: StudioNarrationPreviewV2Input, actor: string): Promise<NarrationPreviewTicketResponseV2> {
+    const run = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(run);
+    if (!this.options.pipeline.previewNarrationPlanV2) throw new StudioConflictError("当前制作服务尚不支持分段旁白候选预览。");
+    if (!Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 0
+      || typeof input.sourceContextId !== "string" || !input.sourceContextId.trim()
+      || typeof input.editorSessionId !== "string" || !input.editorSessionId.trim()
+      || !Number.isSafeInteger(input.editSequence) || input.editSequence < 0
+      || !input.candidate || typeof input.candidate !== "object") {
+      throw new StudioInputError("请先查看最新旁白方案再提交候选。");
+    }
+    try {
+      return await this.options.pipeline.previewNarrationPlanV2(runId, { ...input, actor });
+    } catch (error) {
+      if (error instanceof StaleRunRevisionError) throw new StudioConflictError("制作记录已更新，请重新查看旁白方案后再提交候选。");
+      if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
+      // 候选形状错误属于客户端输入问题，返回可用错误而不是 500。
+      if (error instanceof NarrationTextV2Error) throw new StudioInputError(error.message);
+      throw error;
+    }
+  }
+
+  async confirmNarrationPlanV2(runId: string, input: StudioNarrationConfirmV2Input, actor: string): Promise<StudioNarrationConfirmV2Result> {
+    const run = await this.loadRequiredRun(runId);
+    assertExecutableRunContinuation(run);
+    if (!this.options.pipeline.confirmNarrationPlanV2) throw new StudioConflictError("当前制作服务尚不支持分段旁白计划保存。");
+    if (!Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 0
+      || typeof input.requestId !== "string" || !input.requestId.trim()
+      || typeof input.sourceContextId !== "string" || !input.sourceContextId.trim()
+      || typeof input.editorSessionId !== "string" || !input.editorSessionId.trim()
+      || !Number.isSafeInteger(input.editSequence) || input.editSequence < 0
+      || typeof input.candidateId !== "string" || !input.candidateId.trim()
+      || typeof input.ticketId !== "string" || !input.ticketId.trim()
+      || typeof input.planSha256 !== "string" || !/^[a-f0-9]{64}$/.test(input.planSha256)) {
+      throw new StudioInputError("保存旁白计划的身份不完整，请重新预览后再保存。");
+    }
+    try {
+      const { receipt, run: updated } = await this.options.pipeline.confirmNarrationPlanV2(runId, { ...input, actor });
+      const detail = this.toDetail(updated);
+      this.publish(detail);
+      return { receipt, run: detail };
+    } catch (error) {
+      if (error instanceof StaleRunRevisionError) throw new StudioConflictError("制作记录已更新，请重新查看旁白方案后再保存。");
+      if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
+      if (error instanceof NarrationTextV2Error) throw new StudioConflictError(error.message);
       throw error;
     }
   }

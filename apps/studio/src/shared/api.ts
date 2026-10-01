@@ -52,6 +52,46 @@ export interface StudioVoicePreviewInput {
 
 export type StudioVoiceDirection = Omit<StudioVoicePreviewInput, "text">;
 export type { NarrationPlan as StudioNarrationPlan, NarrationPlanPreview as StudioNarrationPlanPreview } from "@video-factory/production-pipeline";
+import type { NarrationConfirmReceiptV2 as StudioNarrationConfirmReceiptV2Base } from "@video-factory/production-pipeline";
+import type {
+  NarrationRelayoutRequest as StudioNarrationRelayoutRequest,
+  RelayoutNarrationSource as StudioRelayoutNarrationSource,
+} from "@video-factory/production-pipeline";
+// parseNarrationRelayoutRequest 属服务端校验（依赖包内 Node 模块）；
+// 由 server/narration-revision-input.ts 导入，客户端 bundle 不引入包根。
+export type { StudioNarrationRelayoutRequest, StudioRelayoutNarrationSource };
+export type {
+  NarrationConfirmReceiptV2 as StudioNarrationConfirmReceiptV2,
+  NarrationPreviewTicketResponseV2 as StudioNarrationPreviewTicketV2,
+} from "@video-factory/production-pipeline";
+
+/** §2.2 v2 候选预览：只带候选（分段范围/窗口/落点/静默），文字与归属由服务端派生。 */
+export type StudioNarrationPreviewV2Input = {
+  expectedRunRevision: number;
+  sourceContextId: string;
+  editorSessionId: string;
+  editSequence: number;
+  candidateId?: string;
+  candidate: unknown;
+};
+
+/** §2.2 v2 采用：只凭同身份票据保存，不另收计划本体。 */
+export type StudioNarrationConfirmV2Input = {
+  requestId: string;
+  expectedRunRevision: number;
+  sourceContextId: string;
+  editorSessionId: string;
+  editSequence: number;
+  candidateId: string;
+  ticketId: string;
+  planSha256: string;
+  acknowledgeQuoteUnavailable?: boolean;
+};
+
+export type StudioNarrationConfirmV2Result = {
+  receipt: StudioNarrationConfirmReceiptV2Base;
+  run: StudioRunDetail;
+};
 
 export type StudioProductionRecipeId = "economy-daily" | "free-stock" | "keyshot-ai" | "cinematic-ai" | "custom";
 
@@ -2187,13 +2227,27 @@ export interface StudioSceneResourceRevisionInput {
  * 画面已经付过钱，而旁白与字幕是脚本里的一行字——改字不该让任何一帧画面重新生成。
  * 代价是脚本同时是配音的输入：这条路径会重跑配音，配音按字符计费。
  */
+/** §2.5/§4.2.6 只读查询本地时间调整操作：状态、结果版本与是否当前；GET 绝不启动 worker。 */
+export interface StudioNarrationRelayoutOperation {
+  requestId: string;
+  state: "reserved" | "completed" | "applied" | "failed" | "discarded";
+  requestDigest?: string;
+  sourceOperationId?: string;
+  relayoutSource?: string;
+  layoutOperationId?: string;
+  resultVoiceVersionId?: string;
+  isCurrent: boolean;
+  failureReason?: string;
+  createdAt?: string;
+}
+
 export type StudioNarrationRevisionInput = StudioSubtitleRecoveryInput | {
   action?: "revise_narration";
   expectedRunRevision: number;
   scenePosition: number;
   narration: string;
   note: string;
-};
+} | StudioNarrationRelayoutRequest;
 
 export interface StudioSubtitleRecoveryInput {
   action: "recover_subtitles";
@@ -2719,46 +2773,8 @@ export function parseStudioSceneResourceRevisionInput(value: unknown): StudioSce
   };
 }
 
-export function parseStudioNarrationRevisionInput(value: unknown): StudioNarrationRevisionInput {
-  const input = requiredObject(value, "旁白字幕返修请求");
-  if (!Number.isSafeInteger(input.expectedRunRevision) || Number(input.expectedRunRevision) < 0) {
-    throw new StudioInputError("制作版本必须是非负整数。");
-  }
-  if (input.action === "recover_subtitles") {
-    const requestId = requiredTrimmedString(input.requestId, "字幕恢复操作编号");
-    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) throw new StudioInputError("字幕恢复操作编号无效。");
-    const digest = (key: string) => {
-      const value = requiredTrimmedString(input[key], "当前声音与字幕版本");
-      if (!/^[a-f0-9]{64}$/.test(value)) throw new StudioInputError("当前声音与字幕版本无法核对，请刷新后再试。");
-      return value;
-    };
-    const note = requiredTrimmedString(input.note, "恢复说明");
-    if (note.length > 2_000) throw new StudioInputError("恢复说明不能超过 2000 个字符。");
-    const refetchReason = input.refetchReason === undefined ? undefined : requiredTrimmedString(input.refetchReason, "重取原字幕的新依据");
-    if (refetchReason && refetchReason.length > 500) throw new StudioInputError("重取依据不能超过 500 个字符。");
-    return { action: "recover_subtitles", requestId, expectedRunRevision: Number(input.expectedRunRevision),
-      expectedVoiceVersionId: requiredTrimmedString(input.expectedVoiceVersionId, "当前声音版本"),
-      expectedNarrationPlanSha256: digest("expectedNarrationPlanSha256"), expectedLayoutKey: digest("expectedLayoutKey"),
-      expectedAudioSha256: digest("expectedAudioSha256"), note, ...(refetchReason ? { refetchReason } : {}) };
-  }
-  if (input.action !== undefined && input.action !== "revise_narration") throw new StudioInputError("不支持的旁白字幕操作。");
-  const narration = requiredTrimmedString(input.narration, "旁白字幕");
-  // 上限按"一句话"来定：放宽会让操作员把整篇稿子塞进一镜，收紧了拦不住真正要改的长句。
-  if (narration.length > 600) throw new StudioInputError("单镜旁白字幕不能超过 600 个字符。");
-  // 旁白是一句口播、字幕是一行字：换行在成片里没有对应语义，配音会把它读成两段，
-  // 与其让它在渲染时才显出怪样子，不如在这里就说清它只能是一行。
-  if (/[\r\n\u2028\u2029]/.test(narration)) {
-    throw new StudioInputError("单镜旁白字幕只能是一行，不能包含换行。");
-  }
-  const note = requiredTrimmedString(input.note, "修改说明");
-  if (note.length > 2_000) throw new StudioInputError("修改说明不能超过 2000 个字符。");
-  return {
-    expectedRunRevision: Number(input.expectedRunRevision),
-    scenePosition: positiveInteger(input.scenePosition, "镜头位置"),
-    narration,
-    note,
-  };
-}
+// parseStudioNarrationRevisionInput 已移至 server/narration-revision-input.ts（服务端校验）。
+
 
 export function parseStudioVisualReinspectionInput(value: unknown): StudioVisualReinspectionInput {
   const input = requiredObject(value, "成片补查请求");
@@ -3094,14 +3110,14 @@ export class StudioInputError extends Error {
   }
 }
 
-function requiredObject(value: unknown, label: string): Record<string, unknown> {
+export function requiredObject(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new StudioInputError(`${label}格式不正确。`);
   }
   return value as Record<string, unknown>;
 }
 
-function requiredTrimmedString(value: unknown, label: string): string {
+export function requiredTrimmedString(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new StudioInputError(`${label}不能为空。`);
   }
@@ -3137,7 +3153,7 @@ function boundedRange(value: unknown, label: string, minimum: number, maximum: n
   return value;
 }
 
-function positiveInteger(value: unknown, label: string): number {
+export function positiveInteger(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
     throw new StudioInputError(`${label}必须是正整数。`);
   }

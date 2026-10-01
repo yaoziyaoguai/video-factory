@@ -6,7 +6,12 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { VisualReviewWithAudioError, type AudioReviewResult } from "./audio-review.js";
 import { mergeModelExecutionFacts, projectCheckpointExecutions, projectRequestExecution, type ModelExecutionProjection } from "./model-execution-facts.js";
-import { buildNarrationPlan, parseNarrationGroupConflict, validateNarrationPlan, type NarrationPlan, type NarrationPlanPreview, type NarrationSpendRequest, type NarrationSpendQuote } from "./narration-plan.js";
+import { buildNarrationPlan, buildNarrationPlanV2FromCandidate, candidateIdV2, candidateToBuildInput, canonicalJsonV2, deriveV2SourceFacts, NARRATION_CONFIRM_RECEIPT_VERSION, NARRATION_PREVIEW_TICKET_VERSION,
+  NarrationTextV2Error, narrationEditSequence, narrationEditorSessionId, narrationPlanVersion, narrationPlanV2StandaloneInput, narrationRequestId, narrationTicketId, parseNarrationCandidate,
+  parseNarrationGroupConflict, planCanonicalSha256V2, sentenceBoundaryCandidatesV2, validateNarrationPlan, validateNarrationPlanV2,
+  type NarrationConfirmReceiptV2, type NarrationPlan, type NarrationPlanPreview, type NarrationPreviewQuoteV2,
+  type NarrationPreviewTicketResponseV2, type NarrationSpendRequest, type NarrationSpendQuote, type SupportedNarrationPlan } from "./narration-plan.js";
+import { NARRATION_FIT_CONFLICT_V2_VERSION, parseNarrationFitConflictV2, parseNarrationRelayoutCompletion, parseNarrationRelayoutRequest, RELAYOUT_COMPLETION_VERSION, RELAYOUT_OPERATION_VERSION, type NarrationRelayoutCompletion, type NarrationRelayoutRequest } from "./narration-relayout.js";
 import { check as checkFileLock, lock as lockFile } from "proper-lockfile";
 import {
   NodeVersionConflictError,
@@ -162,6 +167,19 @@ export interface ProductionPipelineOptions {
     /** 闭包播种 checkpoint 成功后、执行记录落盘前：模型 provenance 必须随 checkpoint 存活。 */
     afterSeed?: () => void;
   };
+  /** 仅声音计划持久化故障测试使用；生产装配不得配置。 */
+  narrationPlanFailpoints?: {
+    afterAdoptionReservation?: () => Promise<void> | void;
+    afterAdoptionCheckpoint?: () => Promise<void> | void;
+    afterConfirmationGenerationLock?: () => Promise<void> | void;
+    beforePreviewGenerationLock?: () => Promise<void> | void;
+  };
+  /** 仅声音本地排轨的真实独立进程崩溃测试使用；生产装配不得配置。 */
+  narrationRelayoutFailpoints?: {
+    afterReservation?: () => Promise<void> | void;
+    afterWorkerCompletion?: () => Promise<void> | void;
+    afterAdoptionCheckpoint?: () => Promise<void> | void;
+  };
   clock?: () => string;
   idFactory?: (prefix: string) => string;
   executionLeaseHeartbeatMs?: number;
@@ -252,7 +270,7 @@ export type ProductionNarrationRevisionDraft = ProductionSubtitleRecoveryDraft |
   narration: string;
   actor: string;
   note: string;
-};
+} | (NarrationRelayoutRequest & { actor: string });
 
 export interface ProductionVoiceTimingRevisionDraft {
   expectedRunRevision: number;
@@ -536,6 +554,8 @@ interface PaidNodeReconciliationRecord {
 interface PaidVoiceOperationItem {
   itemRequestId: string;
   state: PaidAssetLedgerItemSummary["state"];
+  /** 读取时保留账本原状态；metadata 只可帮助通用查询，不可把 unknown 升格为完整归档资格。 */
+  persistedState?: PaidAssetLedgerItemSummary["state"];
   stateHistory: string[];
   reusedFromOperationId?: string;
 }
@@ -550,6 +570,11 @@ interface PaidVoiceOperationLedger {
   actualCostCny?: number;
   actualCostSource?: "configured_rate";
   items: PaidVoiceOperationItem[];
+}
+
+interface VoiceManifestRecovery {
+  sourceOperationId: string;
+  manifestPath?: string;
 }
 
 export class PaidOperationManualReconciliationError extends Error {
@@ -743,6 +768,36 @@ interface ExecutionLeaseHandle {
   release?: (removeLock: boolean) => Promise<void>;
   active: boolean;
   failure?: Error;
+}
+
+/** §4.2.3 在途编辑代次预留（plan-preview-tickets/reservations.json 单条）：reserved=已预留未签票，ticketed=已签发票据。 */
+interface NarrationEditReservationRecord {
+  actor: string; editorSessionId: string; editSequence: number; candidateId: string;
+  state: "reserved" | "ticketed"; ticketId?: string | undefined; updatedAt: string;
+}
+
+const NARRATION_CONFIRM_OPERATION_VERSION = "video-factory/narration-confirm-operation-v1";
+
+interface NarrationConfirmOperationRecord {
+  version: typeof NARRATION_CONFIRM_OPERATION_VERSION;
+  state: "reserved" | "projected";
+  runId: string;
+  requestId: string;
+  requestDigest: string;
+  actor: string;
+  expectedRunRevision: number;
+  sourceContextId: string;
+  editorSessionId: string;
+  editSequence: number;
+  candidateId: string;
+  ticketId: string;
+  planSha256: string;
+  acknowledgeQuoteUnavailable: boolean;
+  artifactId: string;
+  inputVersionId: string;
+  createdAt: string;
+  updatedAt: string;
+  resultingRunRevision?: number;
 }
 
 export class ProductionPipeline {
@@ -1384,7 +1439,18 @@ export class ProductionPipeline {
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
         shouldPause: () => this.consumePauseRequest(runId),
       });
-      return runner.resume(this.createWorkflow(brief, boundDecision), withExecutableBrief(previous, brief), boundDecision);
+      const definition = this.createWorkflow(brief, boundDecision);
+      const approvingLocalRelayout = decision.action === "approve"
+        && activeInterventionNode.nodeId === "voice"
+        && isObjectRecord(effectiveNodeOutput(activeInterventionNode)?.relayoutAdoption);
+      // 本地排轨采用会把 render 及审片后代真实标为 stale，并另建声音试听停点。
+      // 用户批准时在同一正式决定事务内把这些后代转回 pending，再由 resume 继续；不能
+      // 先落一次批准、再另起 revision 调 resumeStale，否则一笔命令会跨两个 CAS 版本。
+      // 首次配音的普通声音停点没有 relayoutAdoption，不走这条专用恢复。
+      const resumeBase = approvingLocalRelayout
+        ? prepareLocalRelayoutApprovalRun(previous, definition)
+        : previous;
+      return runner.resume(definition, withExecutableBrief(resumeBase, brief), boundDecision);
     }, listener);
   }
 
@@ -1772,21 +1838,105 @@ export class ProductionPipeline {
 
   async previewNarrationPlan(runId: string): Promise<NarrationPlanPreview> {
     const run = await this.store.load<ProductionBrief>(runId);
-    const context = await this.narrationPlanContext(run);
+    const context = await this.narrationPlanContext(run, { readOnly: true });
     const voiceConfig = providerConfigs(parsePersistedBrief(run.initialInput), this.options).find((config) => config.nodeId === "voice")!;
-    const quote = await this.options.worker.forecastPaidVoiceSpend?.({ runId, nodeDirectory: path.join(this.runsRoot, runId, "nodes", "voice"),
-      input: { ...context.voiceInput, narrationPlan: context.plan },
-      parameters: { ...voiceConfig.parameters, providerId: voiceConfig.id, modelId: voiceConfig.metadata?.modelId } });
+    const quoteFor = async (plan: SupportedNarrationPlan) => {
+      try {
+        return await this.options.worker.forecastPaidVoiceSpend?.({ runId, nodeDirectory: path.join(this.runsRoot, runId, "nodes", "voice"),
+          input: { ...context.voiceInput, narrationPlan: plan },
+          parameters: { ...voiceConfig.parameters, providerId: voiceConfig.id, modelId: voiceConfig.metadata?.modelId } });
+      } catch {
+        // 只把本地forecast边界的不可用降级为未知价；来源、文件与身份错误仍在此前/下方明确抛出。
+        return undefined;
+      }
+    };
     const node = run.nodeRuns.find((candidate) => candidate.nodeId === "voice");
-    const input = node?.inputState?.versions.find((version) => version.id === node.inputState?.effectiveVersionId)?.value;
-    if (isObjectRecord(input) && typeof input.narrationPlanPath === "string" && !node?.inputState?.stale) {
+    const inputVersion = node?.inputState?.versions.find((version) => version.id === node.inputState?.effectiveVersionId);
+    const input = inputVersion?.value;
+    const providerConfigDigest = this.voiceProviderConfigDigest(run, context);
+    const sourceContextId = this.narrationSourceContextIdV2(run, context, providerConfigDigest);
+    const sourceFacts = deriveV2SourceFacts(context.scenes);
+    const baseGroups = sourceFacts.baseGroups.map((group) => ({
+      baseGroupId: group.baseGroupId,
+      text: group.canonicalText,
+      endCodePoint: group.endCodePoint,
+      frameRange: { ...group.frameRange },
+      allowedBoundaries: sentenceBoundaryCandidatesV2(group.canonicalText)
+        .filter((boundary) => boundary > 0 && boundary < group.endCodePoint),
+    }));
+    let savedPlanStatus: "none" | "current" | "stale" = "none";
+    let savedPlan: SupportedNarrationPlan | undefined;
+    if (isObjectRecord(input) && typeof input.narrationPlanPath === "string") {
       const artifact = run.artifacts.find((candidate) => candidate.kind === "narration_plan" && candidate.uri === input.narrationPlanPath);
       if (!artifact) throw new HumanDecisionConflictError("已确认旁白方案的留档缺失，请先核查原记录。");
-      await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), artifact);
-      return { expectedRunRevision: run.revision, confirmed: true, ...(quote ? { quote } : {}),
-        plan: validateNarrationPlan(JSON.parse(await readFile(input.narrationPlanPath, "utf8")), context.plan) };
+      const savedSourceContextId = typeof input.sourceContextId === "string" ? input.sourceContextId : "";
+      const identityCurrent = !node?.inputState?.stale
+        && isDeepStrictEqual(inputVersion?.upstreamVersionIds ?? [], context.upstreamVersionIds)
+        && (inputVersion?.schemaVersion !== "video-factory/narration-plan-v2" || savedSourceContextId === sourceContextId);
+      savedPlanStatus = identityCurrent ? "current" : "stale";
+      try {
+        await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), artifact);
+        const persistedPlan: unknown = JSON.parse(await readFile(input.narrationPlanPath, "utf8"));
+        let savedSources = {
+          scenes: context.scenes, scriptSha256: context.scriptArtifact.sha256,
+          visualSha256: context.visualArtifact.sha256,
+        };
+        if (!identityCurrent) {
+          // 旧计划只能按其输入版本绑定的历史来源核验；用新来源比较会把正常失效误判成损坏，
+          // 堵住重新确认出口。历史文件仍须通过同一 run 内的路径、字节与摘要核验。
+          const oldScript = run.artifacts.find((item) => item.kind === "script" && item.uri === input.scriptPath);
+          const oldVisual = run.artifacts.find((item) => item.kind === "executable_plan" && item.uri === input.executablePlanPath);
+          if (!oldScript?.sha256 || !oldVisual?.sha256) {
+            throw new HumanDecisionConflictError("旧旁白方案的历史稿件或画面留档缺失，请先核查原记录。");
+          }
+          await Promise.all([oldScript, oldVisual].map((item) => verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), item)));
+          const script = requireOutputRecord(JSON.parse(await readFile(oldScript.uri!, "utf8")), "saved narration script");
+          const visual = parseExecutableProductionPlan(JSON.parse(await readFile(oldVisual.uri!, "utf8")));
+          if (!Array.isArray(script.scenes) || script.scenes.length !== visual.cuts.length) {
+            throw new HumanDecisionConflictError("旧旁白方案的历史稿件与画面镜头数量不一致。");
+          }
+          const scenes = script.scenes.map((value, index) => {
+            const scene = requireOutputRecord(value, "saved narration scene");
+            const cut = visual.cuts[index]!;
+            if (scene.position !== cut.scenePosition || typeof scene.narration !== "string") {
+              throw new HumanDecisionConflictError("旧旁白方案的历史稿件与画面顺序不一致。");
+            }
+            return { position: cut.scenePosition, narration: scene.narration, duration: cut.frameCount / 30 };
+          });
+          savedSources = { scenes, scriptSha256: oldScript.sha256, visualSha256: oldVisual.sha256 };
+        }
+        if (narrationPlanVersion(persistedPlan) === "video-factory/narration-plan-v2") {
+          if (!savedSourceContextId.trim()) {
+            throw new HumanDecisionConflictError("已保存旁白方案的来源身份缺失，请重新确认方案。");
+          }
+          savedPlan = validateNarrationPlanV2(persistedPlan, narrationPlanV2StandaloneInput(persistedPlan, {
+            ...savedSources, sourceContextId: savedSourceContextId,
+          }));
+        } else {
+          savedPlan = validateNarrationPlan(persistedPlan, identityCurrent ? context.plan
+            : buildNarrationPlan(savedSources.scenes, savedSources.scriptSha256, savedSources.visualSha256));
+        }
+      } catch (error) {
+        if (error instanceof HumanDecisionConflictError || error instanceof NarrationTextV2Error) throw error;
+        throw new HumanDecisionConflictError("已确认旁白方案的留档无法核验（可能已损坏或来源已变化），请先核查原记录后重新确认。");
+      }
     }
-    return { expectedRunRevision: run.revision, confirmed: false, plan: context.plan, ...(quote ? { quote } : {}) };
+    const plan = savedPlanStatus === "current" && savedPlan ? savedPlan : context.plan;
+    const quote = await quoteFor(plan);
+    return {
+      expectedRunRevision: run.revision,
+      confirmed: savedPlanStatus === "current",
+      sourceContextId,
+      plan,
+      ...(quote ? { quote } : {}),
+      editorContext: {
+        mode: context.editorMode,
+        defaultPlan: context.plan,
+        baseGroups,
+        savedPlanStatus,
+        ...(savedPlanStatus === "stale" && savedPlan ? { stalePlan: savedPlan } : {}),
+      },
+    };
   }
 
   async confirmNarrationPlan(runId: string, draft: {
@@ -1820,7 +1970,7 @@ export class ProductionPipeline {
         ...(node.inputState?.versions ?? []), { id: versionId, nodeId: "voice", source: "derived", createdAt: this.clock(),
           createdBy: draft.actor, schemaVersion: plan.version, upstreamVersionIds: context.upstreamVersionIds,
           ...(node.inputState ? { parentVersionId: node.inputState.effectiveVersionId } : {}),
-          value: { ...context.voiceInput, narrationPlanPath: planPath } },
+          value: { ...context.voiceInput, narrationPlanPath: planPath, voiceInputVersionId: versionId } },
       ] };
       // 只保存下一步的声音输入，不批准当前素材停点，也不触发配音或任何付费请求。
       next.revision += 1;
@@ -1828,13 +1978,32 @@ export class ProductionPipeline {
     });
   }
 
-  private async narrationPlanContext(run: WorkflowRun<ProductionBrief>): Promise<{
-    plan: NarrationPlan; voiceInput: Record<string, unknown>; parentArtifactIds: string[]; upstreamVersionIds: string[];
+  private async narrationPlanContext(run: WorkflowRun<ProductionBrief>, options?: { readOnly?: boolean }): Promise<{
+    plan: NarrationPlan; scenes: Array<{ position: number; narration: string; duration: number }>;
+    scriptArtifact: { id: string; sha256: string; outputVersionId: string };
+    visualArtifact: { id: string; sha256: string; outputVersionId: string };
+    voiceInput: Record<string, unknown>; parentArtifactIds: string[]; upstreamVersionIds: string[];
+    editorMode: "pre_generation" | "voice_stop" | "final_review";
   }> {
     const voice = run.nodeRuns.find((node) => node.nodeId === "voice");
+    const finalReview = run.nodeRuns.find((node) => node.nodeId === "final-review");
+    let editorMode: "pre_generation" | "voice_stop" | "final_review" = "pre_generation";
+    const upstreamRevisionCanReconfirm = ["needs_human", "paused", "stale"].includes(run.status)
+      && voice?.status === "stale"
+      && !voice.operationRequestId && (!voice.outputState || voice.outputState.stale);
     if (!["needs_human", "paused", "stale"].includes(run.status) || run.nodeRuns.some((node) => node.status === "running" || node.outcomeUncertain)
-      || voice && (voice.status !== "pending" || voice.operationRequestId || voice.outputState && !voice.outputState.stale)) {
-      throw new HumanDecisionConflictError("请在素材确认后、尚未开始配音时查看和采用旁白方案；原有配音不会被静默替换。");
+      || voice && !upstreamRevisionCanReconfirm
+        && (voice.status !== "pending" || voice.operationRequestId || voice.outputState && !voice.outputState.stale)) {
+      // §6 首次 fit 冲突恢复：voice 停在可恢复冲突时，时间调整编辑器仍需只读读取已保存计划
+      // （不签发新票据、不保存、不发 TTS——那些路径各有更严的守卫）。这里按只读放行 GET。
+      if (options?.readOnly && voice?.status === "needs_human" && voice.intervention) {
+        editorMode = "voice_stop";
+      } else if (options?.readOnly && finalReview?.status === "needs_human" && finalReview.intervention
+        && voice?.status === "succeeded" && voice.outputState && !voice.outputState.stale) {
+        editorMode = "final_review";
+      } else {
+        throw new HumanDecisionConflictError("请在素材确认后、尚未开始配音时查看和采用旁白方案；原有配音不会被静默替换。");
+      }
     }
     const brief = parsePersistedBrief(run.initialInput);
     if (brief.providers.voice !== "minimax-tts-v1") throw new HumanDecisionConflictError("连贯旁白当前支持 MiniMax 系统音色，请先选择对应的配音服务。");
@@ -1851,6 +2020,17 @@ export class ProductionPipeline {
     const scriptArtifact = run.artifacts.find((artifact) => artifact.kind === "script" && artifact.uri === planning.scriptPath);
     const visualArtifact = run.artifacts.find((artifact) => artifact.kind === "executable_plan" && artifact.uri === planning.executablePlanPath);
     if (!scriptArtifact?.sha256 || !visualArtifact?.sha256) throw new HumanDecisionConflictError("正式稿件缺少可核对的产物身份。");
+    const effectiveProducerVersionId = (artifact: Artifact, label: string): string => {
+      const producerNode = run.nodeRuns.find((node) => node.nodeId === artifact.producer?.nodeId);
+      const version = producerNode?.outputState?.versions.find((candidate) =>
+        candidate.id === producerNode.outputState?.effectiveVersionId);
+      if (!version || !version.artifactIds.includes(artifact.id)) {
+        throw new HumanDecisionConflictError(`${label}产物已不属于其当前有效输出版本，请刷新后重新确认旁白方案。`);
+      }
+      return version.id;
+    };
+    const scriptOutputVersionId = effectiveProducerVersionId(scriptArtifact, "正式稿件");
+    const visualOutputVersionId = effectiveProducerVersionId(visualArtifact, "正式画面方案");
     await verifyStoredArtifactWithinRoot(this.store.runDirectory(run.id), scriptArtifact);
     const script = requireOutputRecord(JSON.parse(await readFile(planning.scriptPath, "utf8")), "narration script");
     const visual = parseExecutableProductionPlan(JSON.parse(await readFile(planning.executablePlanPath, "utf8")));
@@ -1859,13 +2039,468 @@ export class ProductionPipeline {
       const scene = requireOutputRecord(value, "narration scene");
       const cut = visual.cuts[index]!;
       if (scene.position !== cut.scenePosition) throw new HumanDecisionConflictError("脚本与画面顺序不一致。");
-      return { ...scene, duration: cut.frameCount / 30 };
+      if (typeof scene.narration !== "string") throw new HumanDecisionConflictError("旁白场景缺少文本。");
+      return { position: scene.position as number, narration: scene.narration, duration: cut.frameCount / 30 };
     });
+    const parentArtifactIds = [scriptArtifact.id, visualArtifact.id];
+    const upstreamVersionIds = dependencies.map((node) => node!.outputState!.effectiveVersionId);
     return { plan: buildNarrationPlan(scenes, scriptArtifact.sha256, visualArtifact.sha256),
-      parentArtifactIds: [scriptArtifact.id, visualArtifact.id],
-      upstreamVersionIds: dependencies.map((node) => node!.outputState!.effectiveVersionId),
+      scenes, scriptArtifact: { id: scriptArtifact.id, sha256: scriptArtifact.sha256, outputVersionId: scriptOutputVersionId },
+      visualArtifact: { id: visualArtifact.id, sha256: visualArtifact.sha256, outputVersionId: visualOutputVersionId },
+      parentArtifactIds,
+      upstreamVersionIds,
       voiceInput: { ...planning, voice: brief.voiceDirection.profileId.split(":").slice(1).join(":"),
-        rate: brief.voiceDirection.rate, pause_scale: brief.voiceDirection.pauseScale, mastering_preset: brief.voiceDirection.masteringPreset } };
+        rate: brief.voiceDirection.rate, pause_scale: brief.voiceDirection.pauseScale, mastering_preset: brief.voiceDirection.masteringPreset,
+        scriptArtifactId: scriptArtifact.id, scriptOutputVersionId,
+        visualArtifactId: visualArtifact.id, visualOutputVersionId,
+        parentArtifactIds, upstreamVersionIds },
+      editorMode };
+  }
+
+  // ══ §2.2 候选预览与采用 v2（S2）：本地核价、受控票据、只凭同身份票据保存 ══
+
+  private voiceProviderConfigDigest(run: WorkflowRun<ProductionBrief>, context: Awaited<ReturnType<ProductionPipeline["narrationPlanContext"]>>): string {
+    const voiceConfig = providerConfigs(parsePersistedBrief(run.initialInput), this.options).find((config) => config.nodeId === "voice")!;
+    const parts = ["providerId", voiceConfig.id, "modelId", String(voiceConfig.metadata?.modelId ?? ""),
+      "voice", String(context.voiceInput.voice ?? ""), "rate", String(context.voiceInput.rate ?? ""),
+      "pause_scale", String(context.voiceInput.pause_scale ?? ""), "mastering_preset", String(context.voiceInput.mastering_preset ?? "")];
+    return createHash("sha256").update(JSON.stringify(parts), "utf8").digest("hex");
+  }
+
+  /** sourceContextId 由宿主按有效输出版本/产物身份/上游依赖与配音配置派生；同内容新版本也不同。 */
+  private narrationSourceContextIdV2(run: WorkflowRun<ProductionBrief>, context: Awaited<ReturnType<ProductionPipeline["narrationPlanContext"]>>, providerConfigDigest: string): string {
+    return "sc-" + createHash("sha256").update(JSON.stringify([
+      run.id, context.scriptArtifact.id, context.scriptArtifact.sha256,
+      context.visualArtifact.id, context.visualArtifact.sha256,
+      context.upstreamVersionIds, providerConfigDigest,
+    ]), "utf8").digest("hex");
+  }
+
+  private async latestNarrationTicketSequence(ticketsDirectory: string, actor: string, editorSessionId: string): Promise<number> {
+    let names: string[] = [];
+    try {
+      names = await readdir(ticketsDirectory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    let latest = -1;
+    for (const name of names) {
+      if (!name.endsWith(".json") || name === "reservations.json") continue;
+      try {
+        const ticket = JSON.parse(await readFile(path.join(ticketsDirectory, name), "utf8")) as Record<string, unknown>;
+        if (isObjectRecord(ticket) && ticket.actor === actor && ticket.editorSessionId === editorSessionId
+          && typeof ticket.editSequence === "number" && Number.isSafeInteger(ticket.editSequence)) {
+          latest = Math.max(latest, ticket.editSequence);
+        }
+      } catch {
+        // 损坏票据不参与代次比较；签发与保存核对都以可读票据为准。
+      }
+    }
+    return latest;
+  }
+
+  /**
+   * §4.2.3 在途代次预留：复用 proper-lockfile 文件锁（与执行租约同一原语家族）对
+   * `plan-preview-tickets/reservations.json` 做短临界区读改写。不加 DB、后台任务或新锁架构。
+   */
+  private async updateNarrationEditReservations(
+    runId: string,
+    mutate: (records: NarrationEditReservationRecord[], ticketsDirectory: string) => Promise<void>,
+  ): Promise<void> {
+    const ticketsDirectory = path.join(this.store.runDirectory(runId), "nodes", "voice", "plan-preview-tickets");
+    await mkdir(ticketsDirectory, { recursive: true });
+    const target = path.join(ticketsDirectory, "reservations.json");
+    let release: (() => Promise<void>) | undefined;
+    for (let attempts = 0; !release; attempts += 1) {
+      try {
+        release = await lockFile(target, { realpath: false, stale: 30_000, update: 1_000, retries: 0 });
+      } catch (error) {
+        // 短临界区：并发预览排队等待而不是失败；锁陈旧 30s 后可重新获取。
+        if (hasCode(error, "ELOCKED") && attempts < 600) {
+          await new Promise((resolve) => { setTimeout(resolve, 20); });
+          continue;
+        }
+        throw error;
+      }
+    }
+    try {
+      let records: NarrationEditReservationRecord[] = [];
+      try {
+        const parsed = JSON.parse(await readFile(target, "utf8")) as unknown;
+        if (!Array.isArray(parsed)) throw new Error("reservations must be a list");
+        records = parsed.filter((entry): entry is NarrationEditReservationRecord => isObjectRecord(entry)
+          && typeof entry.actor === "string" && typeof entry.editorSessionId === "string"
+          && typeof entry.editSequence === "number" && Number.isSafeInteger(entry.editSequence)
+          && typeof entry.candidateId === "string" && (entry.state === "reserved" || entry.state === "ticketed"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw new HumanDecisionConflictError("旁白预览的代次预留记录不可读，请核查该运行的编辑历史后再试。");
+        }
+      }
+      await mutate(records, ticketsDirectory);
+      await writeTextAtomically(target, `${JSON.stringify(records, null, 2)}\n`);
+    } finally {
+      await release();
+    }
+  }
+
+  /** 签发/保存前的代次防护：预留（在途）与已签票据共同决定该会话的最高编辑代次。 */
+  private async assertNarrationEditGenerationFresh(
+    records: NarrationEditReservationRecord[],
+    ticketsDirectory: string,
+    actor: string,
+    editorSessionId: string,
+    editSequence: number,
+    candidateId: string,
+  ): Promise<void> {
+    const reserved = records.filter((entry) => entry.actor === actor && entry.editorSessionId === editorSessionId);
+    const latest = Math.max(editSequence - 1, await this.latestNarrationTicketSequence(ticketsDirectory, actor, editorSessionId),
+      ...reserved.map((entry) => entry.editSequence));
+    if (editSequence < latest) {
+      throw new HumanDecisionConflictError("这份编辑已经过期（同一会话已有更新的编辑），请基于最新方案继续。");
+    }
+    const sameSequence = reserved.find((entry) => entry.editSequence === editSequence);
+    if (sameSequence && sameSequence.candidateId !== candidateId) {
+      throw new HumanDecisionConflictError("同一编辑代次已用于不同的候选，请基于最新方案继续或刷新重试。");
+    }
+  }
+
+  async previewNarrationPlanV2(runId: string, draft: {
+    expectedRunRevision: number; sourceContextId: string; editorSessionId: string; editSequence: number;
+    candidateId?: string; candidate: unknown; actor: string;
+  }): Promise<NarrationPreviewTicketResponseV2> {
+    const run = await this.store.load<ProductionBrief>(runId);
+    if (run.revision !== draft.expectedRunRevision) {
+      throw new StaleRunRevisionError(runId, draft.expectedRunRevision, run.revision);
+    }
+    if (!draft.actor.trim()) throw new HumanDecisionConflictError("预览旁白候选需要创作者身份。");
+    const context = await this.narrationPlanContext(run);
+    const editorSessionId = narrationEditorSessionId(draft.editorSessionId);
+    const editSequence = narrationEditSequence(draft.editSequence);
+    const candidate = parseNarrationCandidate(draft.candidate);
+    const candidateId = candidateIdV2(candidate);
+    if (draft.candidateId !== undefined && draft.candidateId !== candidateId) {
+      throw new HumanDecisionConflictError("候选身份与候选内容不一致，请刷新后重新编辑。");
+    }
+    const providerConfigDigest = this.voiceProviderConfigDigest(run, context);
+    const sourceContextId = this.narrationSourceContextIdV2(run, context, providerConfigDigest);
+    if (draft.sourceContextId !== sourceContextId) {
+      throw new HumanDecisionConflictError("旁白来源或配音配置已变化，请刷新方案后重新编辑。");
+    }
+    const reloadCurrentSource = async () => {
+      const currentRun = await this.store.load<ProductionBrief>(runId);
+      if (currentRun.revision !== draft.expectedRunRevision) {
+        throw new StaleRunRevisionError(runId, draft.expectedRunRevision, currentRun.revision);
+      }
+      const currentContext = await this.narrationPlanContext(currentRun);
+      const currentProviderConfigDigest = this.voiceProviderConfigDigest(currentRun, currentContext);
+      const currentSourceContextId = this.narrationSourceContextIdV2(
+        currentRun,
+        currentContext,
+        currentProviderConfigDigest,
+      );
+      if (currentProviderConfigDigest !== providerConfigDigest
+        || currentSourceContextId !== sourceContextId
+        || !isDeepStrictEqual(currentContext.upstreamVersionIds, context.upstreamVersionIds)) {
+        throw new HumanDecisionConflictError("旁白来源或配音配置在核价期间发生变化，请刷新后重新编辑。");
+      }
+      return { currentRun, currentContext };
+    };
+    // §4.2.3 阶段1：forecast 前用现有文件锁原语耐久预留 (actor, session, sequence, candidate)；
+    // 旧序拒绝、同序异候选拒绝、同序同候选复用。短临界区后释放，再进行可能缓慢的核价。
+    await this.options.narrationPlanFailpoints?.beforePreviewGenerationLock?.();
+    await this.updateNarrationEditReservations(runId, async (records, ticketsDirectory) => {
+      // 等待短锁期间，正式采用可能已经提交。必须在锁内重读 run，避免给旧 revision
+      // 留下代次预留；preview 不持 run lease，因此不会形成反向锁等待。
+      await reloadCurrentSource();
+      await this.assertNarrationEditGenerationFresh(records, ticketsDirectory, draft.actor, editorSessionId, editSequence, candidateId);
+      const record = records.find((entry) => entry.actor === draft.actor
+        && entry.editorSessionId === editorSessionId && entry.editSequence === editSequence);
+      if (record) {
+        record.candidateId = candidateId;
+        record.state = "reserved";
+        record.ticketId = undefined;
+        record.updatedAt = this.clock();
+      } else {
+        records.push({ actor: draft.actor, editorSessionId, editSequence, candidateId,
+          state: "reserved", updatedAt: this.clock() });
+      }
+    });
+    const plan = buildNarrationPlanV2FromCandidate(
+      { scenes: context.scenes, scriptSha256: context.scriptArtifact.sha256, visualSha256: context.visualArtifact.sha256, sourceContextId },
+      candidate);
+    const voiceConfig = providerConfigs(parsePersistedBrief(run.initialInput), this.options).find((config) => config.nodeId === "voice")!;
+    // §4.2.3 阶段2：仅核价阶段的可恢复失败转为 quote 不可得（不带金额）；
+    // 来源/CAS/输入校验错误已经在此前抛出，不会被吞成价格未知。
+    let rawQuote: NarrationSpendQuote | undefined;
+    try {
+      rawQuote = await this.options.worker.forecastPaidVoiceSpend?.({ runId, nodeDirectory: path.join(this.runsRoot, runId, "nodes", "voice"),
+        input: { ...context.voiceInput, narrationPlan: plan },
+        parameters: { ...voiceConfig.parameters, providerId: voiceConfig.id, modelId: voiceConfig.metadata?.modelId } });
+    } catch {
+      rawQuote = undefined;
+    }
+    const quote: NarrationPreviewQuoteV2 = rawQuote
+      ? { status: "estimated", source: "configured_rate", estimatedCostCny: rawQuote.estimatedCostCny,
+        maxCostCny: rawQuote.maxCostCny, unitPriceCny: rawQuote.unitPriceCny, items: rawQuote.items }
+      : { status: "unavailable", source: "configured_rate" };
+    const planSha256 = planCanonicalSha256V2(plan);
+    // §4.2.3 阶段3：签票前重新核最高代次与 run/source/config；迟到旧代次不得签发票据。
+    const ticketId = `npt-${randomUUID().replaceAll("-", "")}`;
+    const relativePlanPath = `nodes/voice/plans/${planSha256}.json`;
+    await this.updateNarrationEditReservations(runId, async (records, ticketsDirectory) => {
+      const { currentRun, currentContext } = await reloadCurrentSource();
+      await this.assertNarrationEditGenerationFresh(records, ticketsDirectory, draft.actor, editorSessionId, editSequence, candidateId);
+      await mkdir(path.join(this.store.runDirectory(runId), "nodes", "voice", "plans"), { recursive: true });
+      // §4.2.2 字节口径：v2 计划落盘即待保存规范 JSON 字节（无 pretty、无换行），
+      // planSha256 / artifact.sha256 / 文件字节 SHA 三者一致；旧 v1 pretty 格式不改。
+      await writeTextAtomically(path.join(this.store.runDirectory(runId), relativePlanPath), canonicalJsonV2(plan));
+      const ticket = {
+        version: NARRATION_PREVIEW_TICKET_VERSION, ticketId, runId, actor: draft.actor, createdAt: this.clock(),
+        editorSessionId, editSequence, candidateId, sourceContextId, expectedRunRevision: currentRun.revision,
+        providerConfigDigest, planSha256, planPath: relativePlanPath, quoteStatus: quote.status,
+        upstreamVersionIds: currentContext.upstreamVersionIds, parentArtifactIds: currentContext.parentArtifactIds, candidate,
+      };
+      await mkdir(ticketsDirectory, { recursive: true });
+      await writeTextAtomically(path.join(ticketsDirectory, `${ticketId}.json`), `${JSON.stringify(ticket, null, 2)}\n`);
+      const record = records.find((entry) => entry.actor === draft.actor
+        && entry.editorSessionId === editorSessionId && entry.editSequence === editSequence)!;
+      record.state = "ticketed";
+      record.ticketId = ticketId;
+      record.updatedAt = this.clock();
+    });
+    return { expectedRunRevision: run.revision, sourceContextId, editorSessionId, editSequence,
+      candidateId, ticketId, plan, planSha256, providerConfigDigest, quote };
+  }
+
+  async confirmNarrationPlanV2(runId: string, draft: {
+    requestId: string; expectedRunRevision: number; sourceContextId: string;
+    editorSessionId: string; editSequence: number; candidateId: string;
+    ticketId: string; planSha256: string; acknowledgeQuoteUnavailable?: boolean; actor: string;
+  }): Promise<{ receipt: NarrationConfirmReceiptV2; run: WorkflowRun<ProductionBrief> }> {
+    let receiptOut: NarrationConfirmReceiptV2 | undefined;
+    const run = await this.runPersistedTransition(runId, async (previous, checkpoint) => {
+      if (!draft.actor.trim()) throw new HumanDecisionConflictError("采用旁白方案需要创作者身份。");
+      const requestId = narrationRequestId(draft.requestId);
+      const editorSessionId = narrationEditorSessionId(draft.editorSessionId);
+      const editSequence = narrationEditSequence(draft.editSequence);
+      const ticketId = narrationTicketId(draft.ticketId);
+      if (typeof draft.candidateId !== "string" || !draft.candidateId.trim()
+        || typeof draft.planSha256 !== "string" || !/^[a-f0-9]{64}$/.test(draft.planSha256)
+        || typeof draft.sourceContextId !== "string" || !draft.sourceContextId.trim()) {
+        throw new HumanDecisionConflictError("保存旁白计划的编辑身份不完整。");
+      }
+      const runDirectory = this.store.runDirectory(runId);
+      const receiptsDirectory = path.join(runDirectory, "nodes", "voice", "plan-confirm-receipts");
+      const operationPath = path.join(receiptsDirectory, `${requestId}.json`);
+      // 请求摘要绑定 action/run/actor 与原编辑身份；跨actor或任一字段变化均不可复用原ID。
+      const requestDigest = createHash("sha256").update(JSON.stringify([
+        "video-factory/narration-confirm-v2", runId, draft.actor, requestId, draft.expectedRunRevision,
+        draft.sourceContextId, editorSessionId, editSequence, draft.candidateId, ticketId,
+        draft.planSha256, draft.acknowledgeQuoteUnavailable === true,
+      ]), "utf8").digest("hex");
+      let nextOut: WorkflowRun<ProductionBrief> | undefined;
+      let replay = false;
+      await this.updateNarrationEditReservations(runId, async (records, ticketsDirectory) => {
+        let operation: NarrationConfirmOperationRecord | undefined;
+        try {
+          const stored = JSON.parse(await readFile(operationPath, "utf8")) as Record<string, unknown>;
+          if (stored.requestDigest !== requestDigest) {
+            throw new HumanDecisionConflictError("同一保存请求身份已被不同内容使用，请换新的请求后重试。");
+          }
+          if (stored.version === NARRATION_CONFIRM_OPERATION_VERSION
+            && (stored.state === "reserved" || stored.state === "projected")
+            && stored.runId === runId && stored.requestId === requestId
+            && typeof stored.artifactId === "string" && typeof stored.inputVersionId === "string") {
+            operation = stored as unknown as NarrationConfirmOperationRecord;
+          } else if (stored.version === NARRATION_CONFIRM_RECEIPT_VERSION
+            && typeof stored.artifactId === "string" && typeof stored.inputVersionId === "string") {
+            // 读取当前功能早期写出的v1收据；run仍是权威，后续投影为新operation格式。
+            operation = {
+              version: NARRATION_CONFIRM_OPERATION_VERSION, state: "projected", runId, requestId, requestDigest,
+              actor: draft.actor, expectedRunRevision: draft.expectedRunRevision,
+              sourceContextId: draft.sourceContextId, editorSessionId, editSequence,
+              candidateId: draft.candidateId, ticketId, planSha256: draft.planSha256,
+              acknowledgeQuoteUnavailable: draft.acknowledgeQuoteUnavailable === true,
+              artifactId: stored.artifactId, inputVersionId: stored.inputVersionId,
+              createdAt: typeof stored.createdAt === "string" ? stored.createdAt : this.clock(),
+              updatedAt: this.clock(),
+              ...(typeof stored.resultingRunRevision === "number" ? { resultingRunRevision: stored.resultingRunRevision } : {}),
+            };
+          } else {
+            throw new HumanDecisionConflictError("旁白保存操作记录不可核对，请保留当前制作并检查原请求。");
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+
+        const voiceForReplay = previous.nodeRuns.find((node) => node.nodeId === "voice");
+        const adoptions = (voiceForReplay?.inputState?.versions ?? []).flatMap((version) => {
+          const value = isObjectRecord(version.value) ? version.value : undefined;
+          const adoption = value && isObjectRecord(value.narrationPlanAdoption) ? value.narrationPlanAdoption : undefined;
+          return adoption?.requestId === requestId ? [{ version, adoption }] : [];
+        });
+        if (adoptions.length > 1) throw new HumanDecisionConflictError("同一旁白保存请求出现了多个正式采用版本，请先核查运行记录。");
+        const adopted = adoptions[0];
+        const legacyAdoptedVersion = !adopted && operation
+          ? voiceForReplay?.inputState?.versions.find((version) => version.id === operation!.inputVersionId)
+          : undefined;
+        const adoptedVersion = adopted?.version ?? legacyAdoptedVersion;
+        const adoptedArtifactId = adopted?.adoption.artifactId ?? operation?.artifactId;
+        const adoptedArtifact = typeof adoptedArtifactId === "string"
+          ? previous.artifacts.find((artifact) => artifact.id === adoptedArtifactId) : undefined;
+        if (adoptedVersion && adoptedArtifact) {
+          if (adopted && adopted.adoption.requestDigest !== requestDigest) {
+            throw new HumanDecisionConflictError("同一保存请求身份已被不同内容使用，请换新的请求后重试。");
+          }
+          if (operation && (operation.inputVersionId !== adoptedVersion.id || operation.artifactId !== adoptedArtifact.id)) {
+            throw new HumanDecisionConflictError("旁白保存投影与正式采用版本不一致，请先核查运行记录。");
+          }
+          const resultingRunRevision = typeof adopted?.adoption.resultingRunRevision === "number"
+            ? adopted.adoption.resultingRunRevision : operation?.resultingRunRevision;
+          if (!Number.isSafeInteger(resultingRunRevision)) {
+            throw new HumanDecisionConflictError("旁白保存缺少正式结果版本，请先核查运行记录。");
+          }
+          receiptOut = {
+            accepted: true, requestId, planSha256: draft.planSha256,
+            artifactId: adoptedArtifact.id, inputVersionId: adoptedVersion.id,
+            expectedRunRevision: draft.expectedRunRevision,
+            resultingRunRevision: resultingRunRevision as number,
+            replay: true, current: voiceForReplay?.inputState?.effectiveVersionId === adoptedVersion.id,
+          };
+          const repaired: NarrationConfirmOperationRecord = {
+            version: NARRATION_CONFIRM_OPERATION_VERSION, state: "projected", runId, requestId, requestDigest,
+            actor: draft.actor, expectedRunRevision: draft.expectedRunRevision,
+            sourceContextId: draft.sourceContextId, editorSessionId, editSequence,
+            candidateId: draft.candidateId, ticketId, planSha256: draft.planSha256,
+            acknowledgeQuoteUnavailable: draft.acknowledgeQuoteUnavailable === true,
+            artifactId: adoptedArtifact.id, inputVersionId: adoptedVersion.id,
+            createdAt: operation?.createdAt ?? this.clock(), updatedAt: this.clock(),
+            resultingRunRevision: resultingRunRevision as number,
+          };
+          await mkdir(receiptsDirectory, { recursive: true });
+          await writeTextAtomically(operationPath, `${JSON.stringify(repaired, null, 2)}\n`);
+          replay = true;
+          return;
+        }
+
+        await this.options.narrationPlanFailpoints?.afterConfirmationGenerationLock?.();
+        if (previous.revision !== draft.expectedRunRevision) {
+          throw new StaleRunRevisionError(runId, draft.expectedRunRevision, previous.revision);
+        }
+        let ticket: Record<string, unknown>;
+        try {
+          ticket = JSON.parse(await readFile(path.join(ticketsDirectory, `${ticketId}.json`), "utf8")) as Record<string, unknown>;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            throw new HumanDecisionConflictError("预览票据不存在或已过期，请重新预览后再保存。");
+          }
+          throw error;
+        }
+        if (!isObjectRecord(ticket) || ticket.version !== NARRATION_PREVIEW_TICKET_VERSION
+          || ticket.runId !== runId || ticket.actor !== draft.actor
+          || ticket.editorSessionId !== editorSessionId || ticket.editSequence !== editSequence
+          || ticket.candidateId !== draft.candidateId || ticket.planSha256 !== draft.planSha256
+          || ticket.sourceContextId !== draft.sourceContextId || typeof ticket.planPath !== "string") {
+          throw new HumanDecisionConflictError("预览票据与本次保存不匹配，请重新预览后再保存。");
+        }
+        await this.assertNarrationEditGenerationFresh(records, ticketsDirectory,
+          draft.actor, editorSessionId, editSequence, draft.candidateId);
+        const context = await this.narrationPlanContext(previous);
+        if (ticket.providerConfigDigest !== this.voiceProviderConfigDigest(previous, context)) {
+          throw new HumanDecisionConflictError("配音配置在预览后发生了变化，请重新预览核价。");
+        }
+        if (draft.sourceContextId !== this.narrationSourceContextIdV2(previous, context, ticket.providerConfigDigest as string)
+          || !isDeepStrictEqual(ticket.upstreamVersionIds, context.upstreamVersionIds)) {
+          throw new HumanDecisionConflictError("旁白来源在预览后发生了变化，请重新预览后再保存。");
+        }
+        const requestedPlanPath = path.resolve(runDirectory, ticket.planPath);
+        const [resolvedPlanPath, resolvedRunDirectory] = await Promise.all([
+          realpath(requestedPlanPath), realpath(runDirectory),
+        ]);
+        if (!resolvedPlanPath.startsWith(resolvedRunDirectory + path.sep)) {
+          throw new HumanDecisionConflictError("预览票据引用了运行目录之外的路径。");
+        }
+        const planBytes = await readFile(resolvedPlanPath);
+        const actualPlanSha256 = createHash("sha256").update(planBytes).digest("hex");
+        if (actualPlanSha256 !== draft.planSha256 || actualPlanSha256 !== ticket.planSha256) {
+          throw new HumanDecisionConflictError("待保存计划的实际文件字节摘要与预览票据不一致，请重新预览。");
+        }
+        let planContent: string;
+        try {
+          planContent = new TextDecoder("utf-8", { fatal: true }).decode(planBytes);
+        } catch {
+          throw new HumanDecisionConflictError("待保存计划不是有效的 UTF-8 文件，请重新预览。");
+        }
+        const ticketCandidate = parseNarrationCandidate(ticket.candidate);
+        const plan = validateNarrationPlanV2(JSON.parse(planContent), candidateToBuildInput(
+          { scenes: context.scenes, scriptSha256: context.scriptArtifact.sha256,
+            visualSha256: context.visualArtifact.sha256, sourceContextId: draft.sourceContextId },
+          ticketCandidate));
+        if (planCanonicalSha256V2(plan) !== draft.planSha256 || canonicalJsonV2(plan) !== planContent) {
+          throw new HumanDecisionConflictError("待保存计划的规范字节与票据不一致，请重新预览。");
+        }
+        if (ticket.quoteStatus === "unavailable" && draft.acknowledgeQuoteUnavailable !== true) {
+          throw new HumanDecisionConflictError("当前核价不可用：请知情确认后保存，或稍后重新核价。");
+        }
+
+        if (!operation) {
+          operation = {
+            version: NARRATION_CONFIRM_OPERATION_VERSION, state: "reserved", runId, requestId, requestDigest,
+            actor: draft.actor, expectedRunRevision: draft.expectedRunRevision,
+            sourceContextId: draft.sourceContextId, editorSessionId, editSequence,
+            candidateId: draft.candidateId, ticketId, planSha256: draft.planSha256,
+            acknowledgeQuoteUnavailable: draft.acknowledgeQuoteUnavailable === true,
+            artifactId: this.idFactory("artifact"), inputVersionId: this.idFactory("input-version"),
+            createdAt: this.clock(), updatedAt: this.clock(),
+          };
+          await mkdir(receiptsDirectory, { recursive: true });
+          await writeTextAtomically(operationPath, `${JSON.stringify(operation, null, 2)}\n`);
+        }
+        await this.options.narrationPlanFailpoints?.afterAdoptionReservation?.();
+
+        const next = structuredClone(previous);
+        const node = next.nodeRuns.find((candidate) => candidate.nodeId === "voice") ?? {
+          nodeId: "voice", role: "声音导演", status: "pending" as const, startedAt: this.clock(), artifactIds: [], qualityGateResults: [],
+        };
+        if (!next.nodeRuns.includes(node)) next.nodeRuns.push(node);
+        if (next.artifacts.some((artifact) => artifact.id === operation!.artifactId)
+          || node.inputState?.versions.some((version) => version.id === operation!.inputVersionId)) {
+          throw new HumanDecisionConflictError("旁白保存预留身份已被其他版本占用，请先核查运行记录。");
+        }
+        const resultingRunRevision = previous.revision + 1;
+        next.artifacts.push({ id: operation.artifactId, kind: "narration_plan", uri: resolvedPlanPath, sha256: draft.planSha256,
+          sizeBytes: planBytes.byteLength, contentType: "application/json", schemaVersion: plan.version,
+          parentArtifactIds: context.parentArtifactIds, createdAt: this.clock(), producer: { nodeId: "voice", attempt: 0 },
+          provenance: { providerId: "creator-narration-plan-v1", providerVersion: "1" } });
+        node.inputState = { nodeId: "voice", effectiveVersionId: operation.inputVersionId, stale: false, versions: [
+          ...(node.inputState?.versions ?? []), { id: operation.inputVersionId, nodeId: "voice", source: "derived", createdAt: this.clock(),
+            createdBy: draft.actor, schemaVersion: plan.version, upstreamVersionIds: context.upstreamVersionIds,
+            ...(node.inputState ? { parentVersionId: node.inputState.effectiveVersionId } : {}),
+            value: { ...context.voiceInput, narrationPlanPath: resolvedPlanPath, sourceContextId: draft.sourceContextId,
+              voiceInputVersionId: operation.inputVersionId, scriptArtifactId: context.scriptArtifact.id,
+              visualArtifactId: context.visualArtifact.id, parentArtifactIds: context.parentArtifactIds,
+              narrationPlanAdoption: {
+                requestId, requestDigest, artifactId: operation.artifactId, inputVersionId: operation.inputVersionId,
+                expectedRunRevision: draft.expectedRunRevision, resultingRunRevision, actor: draft.actor,
+              } } },
+        ] };
+        next.revision = resultingRunRevision;
+        await checkpoint(next);
+        await this.options.narrationPlanFailpoints?.afterAdoptionCheckpoint?.();
+        operation = { ...operation, state: "projected", resultingRunRevision, updatedAt: this.clock() };
+        await writeTextAtomically(operationPath, `${JSON.stringify(operation, null, 2)}\n`);
+        receiptOut = {
+          accepted: true, requestId, planSha256: draft.planSha256,
+          artifactId: operation.artifactId, inputVersionId: operation.inputVersionId,
+          expectedRunRevision: draft.expectedRunRevision, resultingRunRevision,
+          replay: false, current: true,
+        };
+        nextOut = next;
+      });
+      return replay ? previous : nextOut!;
+    }, undefined, true);
+    return { receipt: receiptOut!, run };
   }
 
   async requestVoiceTimingRevision(
@@ -1888,15 +2523,45 @@ export class ProductionPipeline {
       const voiceOutput = requireOutputRecord(voiceNode.output, "voice output");
       const groupConflict = isObjectRecord(voiceOutput.conflict) && voiceOutput.conflict.code === "NARRATION_GROUP_DOES_NOT_FIT"
         ? parseNarrationGroupConflict(voiceOutput.conflict) : undefined;
-      const conflict = groupConflict ? undefined : parseVoiceDoesNotFitConflict(voiceOutput.conflict);
+      // §4.2.7 v2 首次 fit 冲突的改画面适配：v2 冲突不携带 cuts（不伪装完整时间线），
+      // 场景时长从当前正式 executable plan 取；旧 parser 不吞 v2 事实。
+      const v2ConflictRecord = isObjectRecord(voiceOutput.conflict)
+        && voiceOutput.conflict.code === "NARRATION_GROUP_DOES_NOT_FIT_V2" ? voiceOutput.conflict : undefined;
+      const conflict = groupConflict || v2ConflictRecord ? undefined : parseVoiceDoesNotFitConflict(voiceOutput.conflict);
       if (groupConflict ? draft.groupId !== groupConflict.groupId || !groupConflict.sourceScenePositions.includes(draft.scenePosition)
-        : draft.groupId !== undefined || draft.scenePosition !== conflict!.scenePosition) {
+        : v2ConflictRecord
+          ? draft.groupId !== v2ConflictRecord.groupId
+            || !Array.isArray(v2ConflictRecord.sourceScenePositions)
+            || !v2ConflictRecord.sourceScenePositions.includes(draft.scenePosition)
+          : draft.groupId !== undefined || draft.scenePosition !== conflict!.scenePosition) {
         throw new Error("Voice timing revision scene is no longer current.");
       }
-      const requiredSeconds = groupConflict
-        ? (groupConflict.cuts.find((cut) => cut.scenePosition === draft.scenePosition)!.frameCount
-          + groupConflict.requiredFrames - (groupConflict.window.endFrame - groupConflict.window.startFrame)) / 30
-        : conflict!.requiredSeconds;
+      // v2 的必需时长 = 当前镜头 cut + 缺口帧（availableFrames 不足以容纳 requiredFrames 的部分）。
+      let requiredSeconds: number;
+      if (groupConflict) {
+        requiredSeconds = (groupConflict.cuts.find((cut) => cut.scenePosition === draft.scenePosition)!.frameCount
+          + groupConflict.requiredFrames - (groupConflict.window.endFrame - groupConflict.window.startFrame)) / 30;
+      } else if (v2ConflictRecord) {
+        const briefForPlan = parsePersistedBrief(previous.initialInput);
+        const planOwner = usesJointCreativePlanning(briefForPlan) ? "creative-planning" : "production-preflight";
+        const ownerNode = previous.nodeRuns.find((node) => node.nodeId === planOwner);
+        const ownerVersion = ownerNode?.outputState?.versions.find(
+          (version) => version.id === ownerNode.outputState?.effectiveVersionId);
+        const ownerOutput = ownerVersion ? requireOutputRecord(ownerVersion.output ?? ownerNode?.output, `${planOwner} output`) : undefined;
+        const v2PlanPath = ownerOutput ? requiredOutputString(ownerOutput, "executablePlanPath") : undefined;
+        const v2PlanArtifact = v2PlanPath
+          ? previous.artifacts.find((artifact) => ownerVersion?.artifactIds.includes(artifact.id)
+            && artifact.kind === "executable_plan" && artifact.uri === v2PlanPath)
+          : undefined;
+        if (!v2PlanArtifact?.uri) throw new Error("Current executable production plan artifact is unavailable.");
+        const v2CurrentPlan = parseExecutableProductionPlan(JSON.parse(await readFile(v2PlanArtifact.uri, "utf8")));
+        const sceneCut = v2CurrentPlan.cuts.find((cut) => cut.scenePosition === draft.scenePosition);
+        if (!sceneCut) throw new Error("Voice timing revision scene is missing from the executable production plan.");
+        requiredSeconds = (sceneCut.frameCount
+          + Number(v2ConflictRecord.shortfallFrames ?? v2ConflictRecord.requiredFrames)) / 30;
+      } else {
+        requiredSeconds = conflict!.requiredSeconds;
+      }
       if (!Number.isFinite(draft.durationSeconds) || draft.durationSeconds < requiredSeconds - 1e-8
         || draft.durationSeconds > 180) {
         throw new Error("Voice timing revision must cover the complete natural speech and remain within 180 seconds.");
@@ -2019,6 +2684,11 @@ export class ProductionPipeline {
     if (!oldArtifact) throw new HumanDecisionConflictError("原连续旁白方案缺少留档，不能静默退回逐镜配音。");
     await verifyStoredArtifactWithinRoot(root, oldArtifact);
     const oldPlan = JSON.parse(await readFile(oldArtifact.uri!, "utf8")) as NarrationPlan;
+    if ((oldPlan as { version?: string }).version === "video-factory/narration-plan-v2") {
+      // §3：上游变化不自动重建/降级 v2——分段与显式静默是否仍适配由用户重新确认，
+      // 旧计划保留为过期参考；voice 输入已由本次修订的后代失效标记 stale。
+      return;
+    }
     const context = (run: WorkflowRun<ProductionBrief>) => ({ outputs: new Map(run.nodeRuns.map((node) => [node.nodeId, effectiveNodeOutput(node)])) });
     const buildFor = async (run: WorkflowRun<ProductionBrief>) => {
       const paths = currentPlanningOutputPaths(context(run), parsePersistedBrief(run.initialInput));
@@ -2597,6 +3267,10 @@ export class ProductionPipeline {
     draft: ProductionNarrationRevisionDraft,
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun> {
+    if (draft.action === "relayout_narration") {
+      const parsed = parseNarrationRelayoutRequest(draft);
+      return this.dispatchNarrationRelayout(runId, { ...parsed, actor: draft.actor.trim() }, listener);
+    }
     if (draft.action === "recover_subtitles") return this.dispatchSubtitleRecovery(runId, draft, listener);
     await this.runPersistedTransition(runId, async (previous) => {
       if (previous.revision !== draft.expectedRunRevision) {
@@ -2760,6 +3434,733 @@ export class ProductionPipeline {
     return this.dispatchResumeStale(runId, listener);
   }
 
+  /** §2.4/§2.5 纯本地排轨：核清单→原raw→本地assemble→字幕重映射；零 TTS、零素材购买。 */
+  private async dispatchNarrationRelayout(
+    runId: string, draft: NarrationRelayoutRequest & { actor: string }, listener?: ProductionRunListener,
+  ): Promise<DispatchedProductionRun> {
+    return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
+      if (!draft.actor.trim()) throw new HumanDecisionConflictError("时间调整需要创作者身份。");
+      const brief = parsePersistedBrief(previous.initialInput);
+      const voice = previous.nodeRuns.find((node) => node.nodeId === "voice");
+      if (!voice?.outputState) throw new HumanDecisionConflictError("这条制作还没有可调整的声音版本。");
+      const runDirectory = this.store.runDirectory(runId);
+      const operationsDirectory = path.join(runDirectory, "nodes", "voice", "relayout-operations");
+      const requestDigest = contentSha256(draft.intent === "apply" ? {
+        runId, action: draft.action, intent: draft.intent, requestId: draft.requestId,
+        actor: draft.actor, expectedRunRevision: draft.expectedRunRevision,
+        interventionId: draft.interventionId, sourceContextId: draft.sourceContextId,
+        source: draft.source, layout: draft.layout, note: draft.note,
+      } : {
+        runId, action: draft.action, intent: draft.intent, requestId: draft.requestId,
+        actor: draft.actor, expectedRunRevision: draft.expectedRunRevision,
+        interventionId: draft.interventionId, targetRequestId: draft.targetRequestId,
+        note: draft.note,
+      });
+      // §2.5/§4.2.6：同ID同内容重放返回原结果；同ID异内容拒绝；操作文件是去重锚的一部分。
+      // 采用权威是 run 本身（appliedRequestId + voice 版本），旁边操作 JSON 不能单独宣布成功。
+      let reservedOperation: Record<string, unknown> | undefined;
+      try {
+        const saved = JSON.parse(await readFile(path.join(operationsDirectory, `${draft.requestId}.json`), "utf8")) as Record<string, unknown>;
+        if (isObjectRecord(saved) && saved.version === RELAYOUT_OPERATION_VERSION) {
+          if (saved.requestDigest !== requestDigest) {
+            throw new HumanDecisionConflictError("同一时间调整请求身份已被不同内容使用，请换新的请求。");
+          }
+          if (saved.state === "discarded") {
+            // discard 请求自身的重放，或已被撤销 apply 的原 ID 重放，都只返回
+            // 当前权威 run；discarded 是终态，不得重启 worker 把旧意图复活。
+            return { replay: previous };
+          }
+          if (saved.state === "applied") {
+            const adopted = voice.outputState?.versions.find((candidate) =>
+              isObjectRecord(candidate.output)
+              && candidate.output.appliedRequestId === draft.requestId
+              && candidate.output.requestDigest === requestDigest);
+            if (adopted) {
+              const adoption = isObjectRecord(adopted.output) && isObjectRecord(adopted.output.relayoutAdoption)
+                ? adopted.output.relayoutAdoption : undefined;
+              await writeTextAtomically(path.join(operationsDirectory, `${draft.requestId}.json`),
+                `${JSON.stringify({ ...saved, state: "applied", resultVoiceVersionId: adopted.id,
+                  ...(typeof adoption?.resultingRunRevision === "number"
+                    ? { resultingRunRevision: adoption.resultingRunRevision } : {}) }, null, 2)}\n`);
+              return { replay: previous };
+            }
+            if (draft.intent === "apply" && isObjectRecord(saved.output)
+              && Array.isArray(saved.artifacts)
+              && typeof saved.output.completionReceiptPath === "string") {
+              // 旧进程可能在 run 保存前错误地先投影 applied；按完成收据重新核验后才允许采用。
+              reservedOperation = { ...saved, state: "completed" };
+            } else {
+              throw new HumanDecisionConflictError("操作记录声称已采用，但制作中没有对应的声音版本（记录超前），请核查原记录。");
+            }
+          }
+          if (saved.state === "completed") {
+            const adopted = voice.outputState?.versions.find((candidate) => isObjectRecord(candidate.output)
+              && candidate.output.appliedRequestId === draft.requestId
+              && candidate.output.requestDigest === requestDigest);
+            if (adopted) {
+            // §4.2.6 侧文件落后（操作记录停在 completed，run 已采用）：先对照真实采用，
+              // 显式原 ID 重放修复侧投影，但不重复采用、不制造重复版本。
+              const adoption = isObjectRecord(adopted.output) && isObjectRecord(adopted.output.relayoutAdoption)
+                ? adopted.output.relayoutAdoption : undefined;
+              await writeTextAtomically(path.join(operationsDirectory, `${draft.requestId}.json`),
+                `${JSON.stringify({ ...saved, state: "applied", appliedAt: saved.appliedAt ?? this.clock(),
+                  resultVoiceVersionId: adopted.id,
+                  ...(typeof adoption?.resultingRunRevision === "number"
+                    ? { resultingRunRevision: adoption.resultingRunRevision } : {}) }, null, 2)}\n`);
+              return { replay: previous };
+            }
+          }
+          if (draft.intent === "apply" && (saved.state === "reserved" || saved.state === "completed")) {
+            // 同一 requestId 的恢复沿用原预留（attempt 目录/输入版本身份），不再预留新目录。
+            reservedOperation = saved;
+          }
+          if (draft.intent === "apply" && saved.state === "failed") {
+            // 确定性 fit/非法布局失败不得用原 ID 自动重跑。当前 worker 尚未生产
+            // 有限的“已结束且可恢复本地 IO”错误码，所以 failed 保守地终止；用户
+            // 可先显式撤销，再以新 requestId 提交新布局。
+            throw new HumanDecisionConflictError("这次时间调整已明确失败，原请求不会自动重跑；请先撤销后再提交新布局。");
+          }
+        }
+      } catch (error) {
+        // 仅"尚无操作记录"继续首次执行；同 ID 异内容等一切其他错误都向上抛。
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      // §2.5：重放识别完成后才判断旧 revision；首次执行在这里做 CAS。
+      if (previous.revision !== draft.expectedRunRevision) {
+        throw new StaleRunRevisionError(runId, draft.expectedRunRevision, previous.revision);
+      }
+      const planning = currentPlanningOutputPaths(
+        { outputs: new Map(previous.nodeRuns.map((node) => [node.nodeId, effectiveNodeOutput(node)])) }, brief);
+      if (!planning.executablePlanPath) throw new HumanDecisionConflictError("正式画面方案不可读，无法调整声音时间。");
+      const definition = this.createWorkflow(brief);
+
+      // 首次 apply/discard 都必须来自当前真实停点；历史终态重放已在 CAS 之前返回。
+      const stopOwner = previous.nodeRuns.find((node) => node.status === "needs_human"
+        && node.intervention?.id === draft.interventionId
+        && (node.nodeId === "voice" || node.nodeId === "final-review"));
+      if (!stopOwner) {
+        throw new HumanDecisionConflictError("时间调整必须从当前有效的声音试听或成片返工停点发起；请刷新后重试。");
+      }
+
+      const discardUnapplied = async (discard: Extract<NarrationRelayoutRequest,
+        { intent: "discard_unapplied" }>): Promise<WorkflowRun<ProductionBrief>> => {
+        // 只撤销尚未采用的本地调整意图：保留原有效声音与可用停点，不触碰任何产物版本。
+        // §4.2.6 discard 有自己的耐久请求；先把 target 写成终态，再写 discard
+        // 结果。若两次原子写之间中断，同 discard ID 可根据 target 上的摘要补齐。
+        const targetPath = path.join(operationsDirectory, `${discard.targetRequestId}.json`);
+        const discardPath = path.join(operationsDirectory, `${discard.requestId}.json`);
+        let target: Record<string, unknown>;
+        try {
+          target = JSON.parse(await readFile(targetPath, "utf8")) as Record<string, unknown>;
+        } catch {
+          throw new HumanDecisionConflictError("要撤销的时间调整不存在或已结束；原声音与停点保持不变。");
+        }
+        if (!isObjectRecord(target) || target.version !== RELAYOUT_OPERATION_VERSION
+          || target.intent !== "apply" || target.actor !== draft.actor) {
+          throw new HumanDecisionConflictError("该时间调整身份不符，不能撤销；原声音保留。");
+        }
+        if (target.state === "reserved"
+          && typeof target.attemptDirectory === "string"
+          && typeof target.commandId === "string"
+          && typeof target.attempt === "number"
+          && typeof target.workerExecutionToken === "string") {
+          await assertNarrationRelayoutWorkerInactive(target.attemptDirectory, {
+            commandId: target.commandId,
+            attempt: target.attempt,
+            workerExecutionToken: target.workerExecutionToken,
+          });
+        }
+        const adopted = voice.outputState?.versions.some((candidate) => isObjectRecord(candidate.output)
+          && (candidate.output as Record<string, unknown>).appliedRequestId === discard.targetRequestId);
+        if (adopted) {
+          throw new HumanDecisionConflictError("该时间调整已被制作记录采用，不能撤销；原声音保留。");
+        }
+        if (target.state === "discarded"
+          && (target.discardRequestId !== discard.requestId || target.discardRequestDigest !== requestDigest)) {
+          throw new HumanDecisionConflictError("该时间调整已由另一条撤销请求结束；不会改写原记录。");
+        }
+        const discardedAt = typeof target.discardedAt === "string" ? target.discardedAt : this.clock();
+        const previousTargetState = target.state === "discarded"
+          ? (typeof target.previousState === "string" ? target.previousState : "unknown") : target.state;
+        if (target.state !== "discarded") {
+          await writeTextAtomically(targetPath, `${JSON.stringify({
+            ...target, state: "discarded", previousState: previousTargetState,
+            discardedBy: draft.actor, discardedAt, discardRequestId: discard.requestId,
+            discardRequestDigest: requestDigest,
+          }, null, 2)}\n`);
+        }
+        const discardRecord = {
+          version: RELAYOUT_OPERATION_VERSION, requestId: discard.requestId, requestDigest,
+          actor: draft.actor, state: "discarded" as const, intent: discard.intent,
+          expectedRunRevision: discard.expectedRunRevision, interventionId: discard.interventionId,
+          targetRequestId: discard.targetRequestId, note: discard.note,
+          createdAt: discardedAt, discardedAt,
+          result: { targetRequestId: discard.targetRequestId, targetState: "discarded", previousTargetState },
+        };
+        await writeTextAtomically(discardPath, `${JSON.stringify(discardRecord, null, 2)}\n`);
+        return previous;
+      };
+
+      if (draft.intent === "discard_unapplied") {
+        // 丢弃未采用的意图后 run 不变：走重放通道，不产生新版本或重复保存。
+        return { replay: await discardUnapplied(draft) };
+      }
+      const apply = draft;
+      await assertNoOtherPendingNarrationRelayout(operationsDirectory, apply.requestId);
+
+      // ── apply：先解析来源（两类身份不可混淆），再调用本地 worker ──
+      type OriginVoiceSourceIdentity = {
+        voiceInputVersionId: string;
+        sourceContextId?: string;
+        narrationPlanPath: string;
+        scriptArtifactId: string;
+        scriptOutputVersionId: string;
+        visualArtifactId: string;
+        visualOutputVersionId: string;
+        parentArtifactIds: string[];
+        upstreamVersionIds: string[];
+      };
+      const resolveOriginVoiceSourceIdentity = async (
+        manifest: Record<string, unknown>, sourceOperationId: string,
+      ): Promise<OriginVoiceSourceIdentity> => {
+        if (manifest.sourceOperationId !== sourceOperationId) {
+          throw new HumanDecisionConflictError("来源清单与原声音操作身份不一致，请核查原记录。");
+        }
+        const voiceInputVersionId = requiredOutputString(manifest, "voiceInputVersionId");
+        const inputVersion = voice.inputState?.versions.find((candidate) => candidate.id === voiceInputVersionId);
+        const input = requireOutputRecord(inputVersion?.value, "original voice input");
+        if (input.voiceInputVersionId !== voiceInputVersionId) {
+          throw new HumanDecisionConflictError("原声音输入版本缺少可核对的正式采用身份。");
+        }
+        const narrationPlanPath = requiredOutputString(input, "narrationPlanPath");
+        const narrationPlan = requireOutputRecord(manifest.narrationPlan, "manifest narration plan");
+        const voiceNodeRoot = path.join(runDirectory, "nodes", "voice");
+        const voiceNodeRootReal = await realpath(voiceNodeRoot);
+        const planReal = await realpath(narrationPlanPath);
+        const manifestPlanReal = await realpath(path.join(voiceNodeRoot,
+          requiredOutputString(narrationPlan, "relativePath")));
+        if (planReal !== manifestPlanReal || path.relative(voiceNodeRootReal, planReal).startsWith("..")) {
+          throw new HumanDecisionConflictError("原声音计划不在当前 run 的声音目录内，不能据此调整时间。");
+        }
+        const planBytes = await readFile(planReal);
+        if (createHash("sha256").update(planBytes).digest("hex") !== narrationPlan.sha256) {
+          throw new HumanDecisionConflictError("原声音计划的实际文件字节已变化，不能据此调整时间。");
+        }
+        const planArtifact = previous.artifacts.find((artifact) => artifact.kind === "narration_plan"
+          && path.resolve(artifact.uri ?? "") === path.resolve(narrationPlanPath));
+        if (!planArtifact || planArtifact.sha256 !== narrationPlan.sha256) {
+          throw new HumanDecisionConflictError("原声音计划缺少与实际字节一致的正式产物记录。");
+        }
+        await verifyStoredArtifactWithinRoot(runDirectory, planArtifact);
+
+        const parentArtifactIds = Array.isArray(input.parentArtifactIds)
+          && input.parentArtifactIds.every((value): value is string => typeof value === "string")
+          ? [...input.parentArtifactIds] : [];
+        const upstreamVersionIds = Array.isArray(inputVersion?.upstreamVersionIds)
+          && inputVersion.upstreamVersionIds.every((value): value is string => typeof value === "string")
+          ? [...inputVersion.upstreamVersionIds] : [];
+        if (!isDeepStrictEqual(parentArtifactIds, manifest.parentArtifactIds)
+          || !isDeepStrictEqual(upstreamVersionIds, manifest.upstreamVersionIds)) {
+          throw new HumanDecisionConflictError("原声音输入与来源清单的上游版本或父产物绑定不一致。");
+        }
+        const sourceContextId = typeof input.sourceContextId === "string" ? input.sourceContextId : undefined;
+        if ((typeof manifest.sourceContextId === "string" ? manifest.sourceContextId : undefined) !== sourceContextId) {
+          throw new HumanDecisionConflictError("原声音输入与来源清单的来源上下文不一致。");
+        }
+
+        const verifyUpstreamArtifact = async (options: {
+          manifestField: "script" | "visualPlan";
+          inputArtifactField: "scriptArtifactId" | "visualArtifactId";
+          inputVersionField: "scriptOutputVersionId" | "visualOutputVersionId";
+          label: string;
+        }): Promise<{ artifactId: string; outputVersionId: string }> => {
+          const recorded = requireOutputRecord(manifest[options.manifestField], options.label);
+          const artifactId = requiredOutputString(input, options.inputArtifactField);
+          const outputVersionId = requiredOutputString(input, options.inputVersionField);
+          if (recorded.artifactId !== artifactId || recorded.outputVersionId !== outputVersionId) {
+            throw new HumanDecisionConflictError(`${options.label}的来源身份与原声音输入不一致。`);
+          }
+          const artifact = previous.artifacts.find((candidate) => candidate.id === artifactId);
+          if (!artifact?.sha256 || artifact.sha256 !== recorded.sha256) {
+            throw new HumanDecisionConflictError(`${options.label}的正式产物摘要与来源清单不一致。`);
+          }
+          await verifyStoredArtifactWithinRoot(runDirectory, artifact);
+          const producer = previous.nodeRuns.find((node) => node.nodeId === artifact.producer?.nodeId);
+          const effective = producer?.outputState?.versions.find((version) =>
+            version.id === producer.outputState?.effectiveVersionId);
+          if (!effective || effective.id !== outputVersionId || !effective.artifactIds.includes(artifactId)) {
+            throw new HumanDecisionConflictError(`${options.label}已不是当前有效输出版本，请先重新确认声音来源。`);
+          }
+          return { artifactId, outputVersionId };
+        };
+        const script = await verifyUpstreamArtifact({ manifestField: "script", inputArtifactField: "scriptArtifactId",
+          inputVersionField: "scriptOutputVersionId", label: "正式稿件" });
+        const visual = await verifyUpstreamArtifact({ manifestField: "visualPlan", inputArtifactField: "visualArtifactId",
+          inputVersionField: "visualOutputVersionId", label: "正式画面方案" });
+
+        const ledger = requireOutputRecord(manifest.ledger, "manifest ledger");
+        const snapshot = requireOutputRecord(ledger.snapshot, "manifest ledger snapshot");
+        const snapshotReal = await realpath(path.join(voiceNodeRoot, requiredOutputString(snapshot, "relativePath")));
+        if (path.relative(voiceNodeRootReal, snapshotReal).startsWith("..")) {
+          throw new HumanDecisionConflictError("来源账本快照越出了当前 run 的声音目录。");
+        }
+        const snapshotBytes = await readFile(snapshotReal);
+        if (createHash("sha256").update(snapshotBytes).digest("hex") !== snapshot.sha256
+          || snapshotBytes.byteLength !== snapshot.byteSize || snapshot.contentType !== "application/json") {
+          throw new HumanDecisionConflictError("来源账本快照的实际字节、大小或类型与登记不一致。");
+        }
+        const snapshotDoc = requireOutputRecord(JSON.parse(snapshotBytes.toString("utf8")), "voice ledger snapshot");
+        if (snapshotDoc.operationId !== sourceOperationId || snapshotDoc.completed !== true) {
+          throw new HumanDecisionConflictError("原声音账本尚未证明全部组已完成，不能进入本地排轨。");
+        }
+        return {
+          voiceInputVersionId, ...(sourceContextId ? { sourceContextId } : {}), narrationPlanPath,
+          scriptArtifactId: script.artifactId, scriptOutputVersionId: script.outputVersionId,
+          visualArtifactId: visual.artifactId, visualOutputVersionId: visual.outputVersionId,
+          parentArtifactIds, upstreamVersionIds,
+        };
+      };
+
+      const resolveMaterializedSource = async (
+        source: Extract<NarrationRelayoutRequest, { intent: "apply" }>["source"] & { kind: "materialized_operation" },
+      ): Promise<{ manifestPath: string; sourceOperationId: string; relayoutSource: string;
+        sourceIdentity: OriginVoiceSourceIdentity;
+        sourceManifestIdentity: { artifactId: string; sha256: string } }> => {
+        if (voice.inputState?.effectiveVersionId !== source.voiceInputVersionId) {
+          throw new HumanDecisionConflictError("声音输入版本已变化，请重新查看首次配音的来源。");
+        }
+        const manifestArtifact = previous.artifacts.find((artifact) => artifact.id === source.sourceManifestArtifactId
+          && artifact.kind === "voice_source_manifest");
+        if (!manifestArtifact?.uri) throw new HumanDecisionConflictError("首次配音的来源清单留档缺失，请核查原记录。");
+        await verifyStoredArtifactWithinRoot(runDirectory, manifestArtifact);
+        const manifest = requireOutputRecord(JSON.parse(await readFile(manifestArtifact.uri, "utf8")), "voice source manifest");
+        if (manifest.manifestSha256 !== source.sourceManifestSha256) {
+          throw new HumanDecisionConflictError("来源清单与收据摘要不一致，不能据此调整时间。");
+        }
+        // §4.2.6.1 sourceContextId 消费校验：v2 来源必须与清单内登记的来源上下文一致。
+        if (typeof manifest.sourceContextId === "string" && manifest.sourceContextId !== apply.sourceContextId) {
+          throw new HumanDecisionConflictError("时间调整的来源上下文与清单不一致，请刷新后重试。");
+        }
+        const receiptArtifact = previous.artifacts.find((artifact) => artifact.id === source.sourceReceiptArtifactId);
+        if (!receiptArtifact || receiptArtifact.kind !== "voice_source_receipt" || !receiptArtifact.uri) {
+          throw new HumanDecisionConflictError("首次排轨失败的来源收据缺失或类型不符，请核查原记录。");
+        }
+        // §4.2.4 恢复侧收据核验：文件字节 SHA + 正文与 manifest/operation/input/sourceContext 的绑定。
+        await verifyStoredArtifactWithinRoot(runDirectory, receiptArtifact);
+        const receiptDoc = requireOutputRecord(JSON.parse(await readFile(receiptArtifact.uri, "utf8")), "voice source receipt");
+        if (receiptDoc.version !== "video-factory/voice-source-receipt-v1"
+          || !["first_fit_conflict", "layout_incomplete"].includes(String(receiptDoc.reason))
+          || receiptDoc.manifestArtifactId !== manifestArtifact.id
+          || receiptDoc.manifestSha256 !== source.sourceManifestSha256
+          || receiptDoc.sourceOperationId !== source.sourceVoiceOperationId
+          || receiptDoc.voiceInputVersionId !== source.voiceInputVersionId
+          || (typeof manifest.sourceContextId === "string" && receiptDoc.sourceContextId !== manifest.sourceContextId)) {
+          throw new HumanDecisionConflictError("来源收据与本次恢复请求的绑定不一致，不能据此调整时间。");
+        }
+        const sourceIdentity = await resolveOriginVoiceSourceIdentity(manifest, source.sourceVoiceOperationId);
+        return { manifestPath: manifestArtifact.uri, sourceOperationId: source.sourceVoiceOperationId,
+          relayoutSource: "materialized_operation", sourceIdentity,
+          sourceManifestIdentity: { artifactId: manifestArtifact.id, sha256: source.sourceManifestSha256 } };
+      };
+      const resolveVoiceVersionSource = async (
+        source: Extract<NarrationRelayoutRequest, { intent: "apply" }>["source"] & { kind: "voice_version" },
+      ): Promise<{ manifestPath: string; sourceOperationId: string; relayoutSource: string;
+        sourceIdentity: OriginVoiceSourceIdentity;
+        sourceManifestIdentity: { artifactId: string; sha256: string } }> => {
+        const voiceState = voice.outputState;
+        if (!voiceState) throw new HumanDecisionConflictError("这条制作还没有可调整的声音版本。");
+        if (voiceState.stale) throw new HumanDecisionConflictError("有效声音已过期，请先复核声音输入。");
+        const version = voiceState.versions.find((candidate) => candidate.id === source.voiceVersionId);
+        if (!version || version.id !== voiceState.effectiveVersionId) {
+          throw new HumanDecisionConflictError("指定的声音版本已不是当前有效版本，请刷新后重试。");
+        }
+        const planArtifact = previous.artifacts.find((artifact) => artifact.id === source.voicePlanArtifactId
+          && version.artifactIds.includes(artifact.id));
+        if (!planArtifact?.uri || planArtifact.sha256 !== source.voicePlanSha256) {
+          throw new HumanDecisionConflictError("有效声音的计划留档缺失或摘要不符。");
+        }
+        const planDoc = requireOutputRecord(JSON.parse(await readFile(planArtifact.uri, "utf8")), "voiceover plan");
+        if (planDoc.voiceOperationId !== source.sourceVoiceOperationId
+          || planDoc.layoutKey !== source.expectedLayoutKey
+          || planCanonicalSha256V2(requireOutputRecord(planDoc.narrationPlan, "layout plan") as unknown as Parameters<typeof planCanonicalSha256V2>[0]) !== source.expectedNarrationPlanSha256) {
+          throw new HumanDecisionConflictError("有效声音的计划或布局已变化，请重新查看后调整。");
+        }
+        const trackBound = previous.artifacts.some((artifact) => version.artifactIds.includes(artifact.id)
+          && artifact.kind === "voiceover" && artifact.sha256 === source.expectedAudioSha256);
+        if (!trackBound) throw new HumanDecisionConflictError("有效声音的音轨身份不匹配，不能据此调整时间。");
+        // §4.2.6.1 sourceContextId 消费校验：有效输入固化了来源上下文时必须一致（v2）。
+        const inputSourceContext = requireOutputRecord(
+          voice.inputState?.versions.find((candidate) => candidate.id === voice.inputState?.effectiveVersionId)?.value,
+          "voice input").sourceContextId;
+        if (typeof inputSourceContext === "string" && inputSourceContext !== apply.sourceContextId) {
+          throw new HumanDecisionConflictError("时间调整的来源上下文与当前声音输入不一致，请刷新后重试。");
+        }
+        // §4.2.5 origin manifest 显式引用：新 relayout 输出携带 originManifest（节点根相对路径 +
+        // 文件字节 SHA + 正文摘要），不再从当前 attempt 同目录猜路径；旧成功版本无该引用时
+        // 保留同目录探测作为 legacy 回退（不封已有路径）。
+        const originReference = isObjectRecord(planDoc.originManifest)
+          && typeof planDoc.originManifest.relativePath === "string" ? planDoc.originManifest : undefined;
+        if (originReference) {
+          const voiceNodeRoot = path.resolve(path.dirname(planArtifact.uri!), "..");
+          const originPath = path.resolve(voiceNodeRoot, String(originReference.relativePath));
+          // 词法包含检查：relativePath 由 Python 端 relative_to 保证为节点根内的相对路径；
+          // 不用绝对前缀比较（macOS 临时目录 /var 与 /private/var 的符号链接会误判越根）。
+          const relativeToNode = path.relative(voiceNodeRoot, originPath);
+          if (!relativeToNode || relativeToNode.startsWith("..") || path.isAbsolute(relativeToNode)) {
+            throw new HumanDecisionConflictError("origin manifest 引用越出了运行目录，不能据此调整时间。");
+          }
+          const originBytes = await readFile(originPath);
+          if (createHash("sha256").update(originBytes).digest("hex") !== originReference.fileSha256) {
+            throw new HumanDecisionConflictError("origin manifest 与其登记的字节摘要不一致，请核查原记录。");
+          }
+          const originManifest = requireOutputRecord(JSON.parse(originBytes.toString("utf8")), "origin voice manifest");
+          const originArtifact = previous.artifacts.find((artifact) => artifact.kind === "voice_source_manifest"
+            && artifact.uri && path.resolve(artifact.uri) === originPath
+            && artifact.sha256 === originReference.fileSha256);
+          if (!originArtifact || typeof originReference.manifestSha256 !== "string") {
+            throw new HumanDecisionConflictError("origin manifest 缺少正式产物身份，不能据此调整时间。");
+          }
+          const sourceIdentity = await resolveOriginVoiceSourceIdentity(originManifest, source.sourceVoiceOperationId);
+          return { manifestPath: originPath, sourceOperationId: source.sourceVoiceOperationId,
+            relayoutSource: "voice_version", sourceIdentity,
+            sourceManifestIdentity: { artifactId: originArtifact.id, sha256: originReference.manifestSha256 } };
+        }
+        const candidateManifestPath = path.join(path.dirname(planArtifact.uri), "materialized_voice_source.json");
+        try {
+          await readFile(candidateManifestPath);
+        } catch {
+          throw new HumanDecisionConflictError("这一版声音缺少来源清单；请按既有恢复出口核对原请求，本动作不改写历史。");
+        }
+        const originManifest = requireOutputRecord(JSON.parse(await readFile(candidateManifestPath, "utf8")),
+          "legacy origin voice manifest");
+        const manifestBytes = await readFile(candidateManifestPath);
+        const manifestFileSha256 = createHash("sha256").update(manifestBytes).digest("hex");
+        const originArtifact = previous.artifacts.find((artifact) => artifact.kind === "voice_source_manifest"
+          && artifact.uri && path.resolve(artifact.uri) === path.resolve(candidateManifestPath)
+          && artifact.sha256 === manifestFileSha256);
+        if (!originArtifact || typeof originManifest.manifestSha256 !== "string") {
+          throw new HumanDecisionConflictError("这一版声音的来源清单没有正式产物身份；请按既有恢复出口核对原请求。");
+        }
+        const sourceIdentity = await resolveOriginVoiceSourceIdentity(originManifest, source.sourceVoiceOperationId);
+        return { manifestPath: candidateManifestPath, sourceOperationId: source.sourceVoiceOperationId,
+          relayoutSource: "voice_version", sourceIdentity,
+          sourceManifestIdentity: { artifactId: originArtifact.id, sha256: originManifest.manifestSha256 } };
+      };
+      const resolvedSource = apply.source.kind === "materialized_operation"
+        ? await resolveMaterializedSource(apply.source)
+        : await resolveVoiceVersionSource(apply.source);
+      const { manifestPath, sourceOperationId, relayoutSource, sourceIdentity, sourceManifestIdentity } = resolvedSource;
+
+      // §4.2.6 执行前耐久预留完整请求：actor、原 CAS/停点/source 快照、目标布局与说明、
+      // 固定 command/layout operation、attempt 目录与输入/输出版本身份；同一 requestId 的恢复
+      // 沿用原预留，不再新预留目录或版本。
+      await mkdir(operationsDirectory, { recursive: true });
+      const freshAttempt = reservedOperation ? undefined
+        : await reserveAttemptDirectory(path.join(this.runsRoot, runId, "nodes", "voice"));
+      const attemptDirectory = typeof reservedOperation?.attemptDirectory === "string"
+        ? reservedOperation.attemptDirectory : freshAttempt!.directory;
+      const attempt = typeof reservedOperation?.attempt === "number"
+        && Number.isSafeInteger(reservedOperation.attempt) && reservedOperation.attempt >= 1
+        ? reservedOperation.attempt : freshAttempt?.attempt;
+      if (!attempt || path.basename(attemptDirectory) !== `attempt-${attempt}`) {
+        throw new HumanDecisionConflictError("时间调整的预留 attempt 身份不完整，不能更换目录继续。");
+      }
+      const voiceNodeRoot = await realpath(path.join(runDirectory, "nodes", "voice"));
+      const attemptRoot = await realpath(attemptDirectory);
+      const attemptRelative = path.relative(voiceNodeRoot, attemptRoot);
+      if (!attemptRelative || attemptRelative.startsWith(`..${path.sep}`) || path.isAbsolute(attemptRelative)) {
+        throw new HumanDecisionConflictError("时间调整的预留 attempt 越出了当前声音目录。");
+      }
+      const reservedInputVersionId = typeof reservedOperation?.reservedInputVersionId === "string"
+        ? reservedOperation.reservedInputVersionId : this.idFactory("input-version");
+      const reservedOutputVersionId = typeof reservedOperation?.reservedOutputVersionId === "string"
+        ? reservedOperation.reservedOutputVersionId : this.idFactory("version");
+      const workerExecutionToken = typeof reservedOperation?.workerExecutionToken === "string"
+        ? reservedOperation.workerExecutionToken : randomUUID();
+      const commandId = typeof reservedOperation?.commandId === "string"
+        ? reservedOperation.commandId : `relayout-${draft.requestId}`;
+      const layoutOperationId = typeof reservedOperation?.layoutOperationId === "string"
+        ? reservedOperation.layoutOperationId : `relayout-${commandId}`;
+      if (commandId !== `relayout-${draft.requestId}` || layoutOperationId !== `relayout-${commandId}`) {
+        throw new HumanDecisionConflictError("时间调整的预留命令身份不一致，不能沿原请求继续。");
+      }
+      const reservation: Record<string, unknown> = {
+        version: RELAYOUT_OPERATION_VERSION, requestId: draft.requestId, requestDigest,
+        actor: draft.actor, runId, state: reservedOperation?.state === "completed" ? "completed" : "reserved",
+        intent: draft.intent, interventionId: draft.interventionId,
+        expectedRunRevision: draft.expectedRunRevision, sourceContextId: draft.sourceContextId,
+        source: apply.source, layout: apply.layout,
+        note: draft.note, sourceOperationId, relayoutSource, sourceKind: apply.source.kind,
+        commandId, layoutOperationId, attempt, attemptDirectory,
+        reservedInputVersionId, reservedOutputVersionId, workerExecutionToken,
+        ...(typeof reservedOperation?.createdAt === "string" ? { createdAt: reservedOperation.createdAt }
+          : { createdAt: this.clock() }),
+        ...(Array.isArray(reservedOperation?.artifacts) ? { artifacts: reservedOperation.artifacts } : {}),
+        ...(isObjectRecord(reservedOperation?.output) ? { output: reservedOperation.output } : {}),
+      };
+      await writeTextAtomically(path.join(operationsDirectory, `${draft.requestId}.json`),
+        `${JSON.stringify(reservation, null, 2)}\n`);
+      // 测试故障点 W1：预留已经耐久，但正式 worker 尚未接收请求。
+      // 生产装配不提供该回调；独立进程测试会在这里真实结束父进程。
+      await this.options.narrationRelayoutFailpoints?.afterReservation?.();
+      let response: WorkerResponse;
+      if (reservedOperation?.state === "completed") {
+        // §4.2.6 窗口2：worker 产物与完成回执已落盘、run 未采用——恢复只按回执核验产物后
+        // 进入采用，不再调用 worker（总 worker 次数不增加）。
+        const recordedArtifacts = (Array.isArray(reservedOperation.artifacts)
+          ? reservedOperation.artifacts : []) as Array<Record<string, unknown>>;
+        for (const artifact of recordedArtifacts) {
+          if (typeof artifact.uri !== "string" || typeof artifact.sha256 !== "string") {
+            throw new HumanDecisionConflictError("完成回执的产物事实不完整，请核查原记录后重试。");
+          }
+          const bytes = await readFile(artifact.uri);
+          if (createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) {
+            throw new HumanDecisionConflictError("完成回执的产物与登记摘要不一致，不能直接采用。");
+          }
+        }
+        response = { protocolVersion: WORKER_PROTOCOL_VERSION, commandId,
+          status: "succeeded", output: requireOutputRecord(reservedOperation.output, "completed relayout output"),
+          artifacts: recordedArtifacts as unknown as WorkerResponse["artifacts"] };
+      } else {
+        // 父进程可能在 detached worker 写完后、收到 stdout 前退出。此时 worker 自身的
+        // 完成收据是权威事实：先尝试从同一 attempt 恢复正式响应，不能再次启动 worker。
+        const completedByWorker = await narrationRelayoutResponseFromCompletion(attemptDirectory);
+        if (completedByWorker) {
+          response = completedByWorker;
+        } else {
+          await assertNarrationRelayoutWorkerInactive(attemptDirectory, {
+            commandId, attempt, workerExecutionToken,
+          });
+          response = await this.options.worker.run({
+            protocolVersion: WORKER_PROTOCOL_VERSION, commandId,
+            runId, nodeRunId: "voice", attempt, capability: "voice.synthesize",
+            input: { relayout: true, manifestPath, layout: apply.layout, sourceOperationId, relayoutSource,
+              sourceIdentity, sourceManifestIdentity,
+              relayoutReservation: { requestDigest, commandId, layoutOperationId,
+                reservedInputVersionId, reservedOutputVersionId, workerExecutionToken, attempt },
+              scriptPath: planning.scriptPath, executablePlanPath: planning.executablePlanPath },
+            parameters: { providerId: "local-relayout-v1", maxCostCny: 0, maxAttempts: 0 },
+            outputDir: attemptDirectory,
+          });
+        }
+      }
+      if (response.status !== "succeeded") {
+        // §4.2.7 最小失败设计：保留原 run 与原活动停点，失败事实写操作记录；
+        // 不强行新增 request_changes/reject 声音停点盖住旧入口，来源与旧版都不动。
+        const conflict = isObjectRecord(response.output) && isObjectRecord(response.output.conflict)
+          ? response.output.conflict : undefined;
+        const v2Conflict = response.error?.code === "NARRATION_GROUP_DOES_NOT_FIT_V2"
+          ? parseNarrationFitConflictV2(conflict) : undefined;
+        const requiredFrames = v2Conflict?.requiredFrames
+          ?? (conflict && typeof conflict.requiredFrames === "number" ? conflict.requiredFrames : undefined);
+        const availableFrames = v2Conflict?.availableFrames
+          ?? (conflict && typeof conflict.availableFrames === "number" ? conflict.availableFrames : undefined);
+        await writeTextAtomically(path.join(operationsDirectory, `${draft.requestId}.json`),
+          `${JSON.stringify({ ...reservation, state: "failed",
+            errorCode: response.error?.code ?? "UNKNOWN", failedAt: this.clock(),
+            failureClass: response.error?.code === "NARRATION_GROUP_DOES_NOT_FIT_V2"
+              || response.error?.code === "NARRATION_GROUP_DOES_NOT_FIT" ? "deterministic_fit" : "deterministic_local",
+            ...(v2Conflict ? { conflict: v2Conflict } : {}),
+            failureReason: requiredFrames !== undefined
+              ? `分段仍需要 ${requiredFrames} 帧，当前窗口只有 ${availableFrames} 帧。`
+              : "本地处理失败。" }, null, 2)}\n`);
+        throw new HumanDecisionConflictError(`时间调整没有完成：${requiredFrames !== undefined
+          ? `分段仍需要 ${requiredFrames} 帧，当前窗口只有 ${availableFrames} 帧。`
+          : "本地处理失败。"}原有效声音、草稿与当前停点保持不变，可继续调整或撤销这次修改。`);
+      }
+      await verifyWorkerArtifacts(response, attemptDirectory);
+      await verifyNarrationRelayoutCompletion({ response, attemptDirectory, requestDigest, commandId,
+        layoutOperationId, runId, attempt, reservedInputVersionId, reservedOutputVersionId,
+        sourceOperationId, relayoutSource, sourceIdentity, sourceManifestIdentity });
+      // §4.2.6.3 worker 完整输出先写耐久完成回执（产物根/类型/SHA/大小 + 预留身份），再进入采用；
+      // applied 在 completed 记录上追加（保留 output/artifacts 供侧文件落后时的真实采用对照）。
+      const completionRecord = { ...reservation, state: "completed" as const, completedAt: this.clock(),
+        output: requireOutputRecord(response.output, "relayout output"),
+        artifacts: response.artifacts.map((artifact) => ({
+          kind: artifact.kind, uri: artifact.uri, sha256: artifact.sha256,
+          sizeBytes: artifact.sizeBytes, contentType: artifact.contentType,
+          provenance: artifact.provenance })) };
+      await writeTextAtomically(path.join(operationsDirectory, `${draft.requestId}.json`),
+        `${JSON.stringify(completionRecord, null, 2)}\n`);
+      // 测试故障点 W2：worker 的完成收据、全部产物和 completed 投影均已耐久，
+      // 但正式 run 还没有采用这次调整。
+      await this.options.narrationRelayoutFailpoints?.afterWorkerCompletion?.();
+      const output = requireOutputRecord(response.output, "relayout output");
+      // 目标计划和完成收据必须来自 worker 已耐久的本次 attempt；父进程只核验和登记，
+      // 不在收到 response 后补造唯一计划或完成事实。
+      const currentVersion = voice.outputState.versions.find(
+        (candidate) => candidate.id === voice.outputState!.effectiveVersionId)!;
+      const currentParentArtifactIds = currentVersion.artifactIds.filter((artifactId) =>
+        previous.artifacts.some((artifact) => artifact.id === artifactId));
+      const planDoc = requireOutputRecord(JSON.parse(
+        await readFile(requiredOutputString(output, "voiceoverPlanPath"), "utf8")), "relayout voiceover plan");
+      const targetPlanPath = requiredOutputString(output, "narrationPlanPath");
+      const targetNarrationPlan = requireOutputRecord(JSON.parse(
+        await readFile(targetPlanPath, "utf8")), "target narration plan");
+      if (!isDeepStrictEqual(planDoc.narrationPlan, targetNarrationPlan)) {
+        throw new HumanDecisionConflictError("本地排轨的目标旁白计划与声音时间线不一致。");
+      }
+      const targetPlanVersion = targetNarrationPlan.version;
+      if (targetPlanVersion !== "video-factory/narration-plan-v1"
+        && targetPlanVersion !== "video-factory/narration-plan-v2") {
+        throw new HumanDecisionConflictError("本地排轨返回了未知的目标旁白计划版本。");
+      }
+      const targetInputVersionId = reservedInputVersionId;
+      const previousInputValue = requireOutputRecord(
+        voice.inputState?.versions.find((candidate) => candidate.id === voice.inputState?.effectiveVersionId)?.value,
+        "voice input");
+      // §4.2.7 首次 fit 冲突恢复的换版：applyNodeOverride 的通用文件引用守卫要求新输出不删除
+      // 旧输出里的文件引用（conflict.audioArtifact.uri 指向保留的原始音频，产物与引用继续有效）。
+      // 成功换版输出原样保留该引用并加 conflictResolved 标记；消费者以停点与标记判断冲突已恢复。
+      const adoptionBase = structuredClone(previous);
+      const adoptionVoice = adoptionBase.nodeRuns.find((node) => node.nodeId === "voice")!;
+      const staleConflict = adoptionVoice.output && isObjectRecord(adoptionVoice.output)
+        && isObjectRecord((adoptionVoice.output as Record<string, unknown>).conflict)
+        ? (adoptionVoice.output as Record<string, unknown>).conflict : undefined;
+      const previousInputVersion = adoptionVoice.inputState?.versions.find(
+        (candidate) => candidate.id === adoptionVoice.inputState?.effectiveVersionId);
+      const targetSourceContextId = isObjectRecord(targetNarrationPlan.source)
+        && typeof targetNarrationPlan.source.sourceContextId === "string"
+        ? targetNarrationPlan.source.sourceContextId : previousInputValue.sourceContextId;
+      adoptionVoice.inputState = { nodeId: "voice", effectiveVersionId: targetInputVersionId, stale: false,
+        versions: [...(adoptionVoice.inputState?.versions ?? []), {
+          id: targetInputVersionId, nodeId: "voice", source: "derived", createdAt: this.clock(),
+          createdBy: draft.actor, schemaVersion: targetPlanVersion,
+          upstreamVersionIds: previousInputVersion?.upstreamVersionIds ?? [],
+          ...(previousInputVersion ? { parentVersionId: previousInputVersion.id } : {}),
+          value: { ...previousInputValue, narrationPlanPath: targetPlanPath,
+            ...(typeof targetSourceContextId === "string" ? { sourceContextId: targetSourceContextId } : {}),
+            voiceInputVersionId: targetInputVersionId } }] };
+      let reservedOutputIssued = false;
+      const runner = new WorkflowRunner({
+        providers: this.createRegistry(brief), clock: this.clock,
+        idFactory: (prefix) => {
+          if (prefix === "version" && !reservedOutputIssued) {
+            reservedOutputIssued = true;
+            return reservedOutputVersionId;
+          }
+          return this.idFactory(prefix);
+        },
+      });
+      const resultingRunRevision = adoptionBase.revision + 1;
+      const next = runner.applyNodeOverride(definition, withExecutableBrief(adoptionBase, brief), {
+        nodeId: "voice", actor: draft.actor,
+        expectedVersionId: voice.outputState.effectiveVersionId,
+        output: { voiceoverPlanPath: requiredOutputString(output, "voiceoverPlanPath"),
+          trackPath: requiredOutputString(output, "trackPath"),
+          narrationMode: "continuous_groups", subtitleStatus: output.subtitleStatus,
+          ...(typeof output.layoutKey === "string" ? { layoutKey: output.layoutKey } : {}),
+          ...(typeof output.voiceOperationId === "string" ? { voiceOperationId: output.voiceOperationId } : {}),
+          layoutOperationId: requiredOutputString(output, "layoutOperationId"),
+          externalSendCount: 0, appliedRequestId: draft.requestId,
+          requestDigest,
+          voiceInputVersionId: targetInputVersionId,
+          relayoutAdoption: { actor: draft.actor, requestId: draft.requestId, requestDigest,
+            layoutOperationId, inputVersionId: targetInputVersionId,
+            voiceVersionId: reservedOutputVersionId, resultingRunRevision },
+          ...(staleConflict ? { conflict: staleConflict, conflictResolved: "relayout" as const } : {}) },
+        artifacts: response.artifacts.map((artifact) => ({
+          kind: artifact.kind, uri: artifact.uri, sha256: artifact.sha256, sizeBytes: artifact.sizeBytes,
+          contentType: artifact.contentType,
+          ...(artifact.kind === "narration_plan" ? { schemaVersion: targetPlanVersion } : {}),
+          parentArtifactIds: currentParentArtifactIds,
+          producer: { nodeId: "voice", attempt },
+          provenance: { ...artifact.provenance, providerId: "local-relayout-v1",
+            licenseNote: artifact.provenance.licenseNote || "Relocated original narration audio; no new synthesis." },
+        })) as ArtifactDraft[],
+        ...(currentVersion.schemaVersion ? { schemaVersion: currentVersion.schemaVersion } : {}),
+      });
+      const adoptedVoice = next.nodeRuns.find((node) => node.nodeId === "voice")!;
+      const adoptedVersion = adoptedVoice.outputState?.versions.find(
+        (candidate) => candidate.id === adoptedVoice.outputState?.effectiveVersionId);
+      if (!reservedOutputIssued || adoptedVersion?.id !== reservedOutputVersionId
+        || !adoptedVersion.inputVersionIds.includes(targetInputVersionId)) {
+        throw new HumanDecisionConflictError("本地排轨的预留版本未被正式声音版本事务采用。");
+      }
+      // 有界声音 helper：applyNodeOverride 之后明确建立新的声音试听停点（approve/reject），
+      // 不沿用任何 fit 冲突的 request_changes 停点，也不自动恢复渲染。
+      const voiceRun = next.nodeRuns.find((node) => node.nodeId === "voice")!;
+      voiceRun.status = "needs_human";
+      voiceRun.intervention = {
+        id: this.idFactory("intervention"), nodeId: "voice", createdAt: this.clock(),
+        boundary: "node-complete" as const,
+        reason: "已用原配音完成本地时间调整（未重新购买）。请试听新的声音时间线；确认后才继续渲染，旧版本保留可回退。",
+        requiredAction: "approve",
+        options: ["approve", "reject"],
+      };
+      next.interventions = next.interventions.filter((intervention) => intervention.nodeId !== "voice");
+      next.interventions.push(voiceRun.intervention);
+      next.status = "needs_human";
+      if (next.revision !== resultingRunRevision) {
+        throw new HumanDecisionConflictError("本地排轨采用产生了未预期的制作版本变化。");
+      }
+      // 正式 run 是采用权威；只有 run.json 已成功持久保存后，侧索引才可投影 applied。
+      await checkpoint(next);
+      // 测试故障点 W3：run 已正式采用，sidecar/HTTP 尚未完成。
+      await this.options.narrationRelayoutFailpoints?.afterAdoptionCheckpoint?.();
+      await writeTextAtomically(path.join(operationsDirectory, `${draft.requestId}.json`),
+        `${JSON.stringify({ ...completionRecord, state: "applied", appliedAt: this.clock(),
+          layoutOperationId: requiredOutputString(output, "layoutOperationId"),
+          resultVoiceVersionId: reservedOutputVersionId,
+          resultingRunRevision: next.revision }, null, 2)}\n`);
+      return next;
+    }, listener);
+  }
+
+  /** §2.5/§4.2.6 只读查询：本地时间调整的操作状态与是否当前；绝不启动 worker，不暴露磁盘路径。 */
+  async readNarrationRelayoutOperation(runId: string, requestId: string): Promise<{
+    requestId: string; state: "reserved" | "completed" | "applied" | "failed" | "discarded";
+    requestDigest?: string;
+    sourceOperationId?: string; relayoutSource?: string; layoutOperationId?: string;
+    resultVoiceVersionId?: string; isCurrent: boolean; failureReason?: string; createdAt?: string;
+  }> {
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(requestId)) {
+      throw new HumanDecisionConflictError("时间调整编号无效。");
+    }
+    const run = await this.store.load<ProductionBrief>(runId);
+    const operationPath = path.join(this.store.runDirectory(runId), "nodes", "voice",
+      "relayout-operations", `${requestId}.json`);
+    let operation: Record<string, unknown>;
+    try {
+      operation = requireOutputRecord(JSON.parse(await readFile(operationPath, "utf8")), "narration relayout operation");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new HumanDecisionConflictError("没有这条时间调整的记录；请从声音入口重新发起。");
+      }
+      throw error;
+    }
+    if (operation.version !== RELAYOUT_OPERATION_VERSION
+      || typeof operation.state !== "string"
+      || !["reserved", "completed", "applied", "failed", "discarded"].includes(operation.state)) {
+      throw new HumanDecisionConflictError("时间调整记录不可读，请核查原记录。");
+    }
+    const voice = run.nodeRuns.find((node) => node.nodeId === "voice");
+    const adoptedVersion = voice?.outputState?.versions.find((candidate) =>
+      isObjectRecord(candidate.output)
+      && candidate.output.appliedRequestId === requestId
+      && candidate.output.requestDigest === operation.requestDigest);
+    // GET 只投影正式 run，不写侧索引：run 已采用即 applied；侧索引超前却没有
+    // 对应版本时最多是 completed，不能向界面谎报已经生效。
+    const projectedState = adoptedVersion ? "applied"
+      : operation.state === "applied" ? "completed"
+        : operation.state as "reserved" | "completed" | "failed" | "discarded";
+    const resultVoiceVersionId = adoptedVersion?.id
+      ?? (typeof operation.resultVoiceVersionId === "string" ? operation.resultVoiceVersionId : undefined);
+    return {
+      requestId,
+      state: projectedState,
+      ...(typeof operation.requestDigest === "string" && /^[a-f0-9]{64}$/u.test(operation.requestDigest)
+        ? { requestDigest: operation.requestDigest } : {}),
+      ...(typeof operation.sourceOperationId === "string" ? { sourceOperationId: operation.sourceOperationId } : {}),
+      ...(typeof operation.relayoutSource === "string" ? { relayoutSource: operation.relayoutSource } : {}),
+      ...(typeof operation.layoutOperationId === "string" ? { layoutOperationId: operation.layoutOperationId } : {}),
+      ...(resultVoiceVersionId ? { resultVoiceVersionId } : {}),
+      isCurrent: adoptedVersion?.id === voice?.outputState?.effectiveVersionId,
+      ...(typeof operation.failureReason === "string" ? { failureReason: operation.failureReason } : {}),
+      ...(typeof operation.createdAt === "string" ? { createdAt: operation.createdAt } : {}),
+    };
+  }
+
   private async dispatchSubtitleRecovery(
     runId: string, draft: ProductionSubtitleRecoveryDraft, listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun> {
@@ -2824,7 +4225,7 @@ export class ProductionPipeline {
         || !response.artifacts.some(artifact => artifact.kind === "voiceover" && artifact.sha256 === audioArtifact.sha256)) {
         throw new HumanDecisionConflictError("字幕恢复没有完成，原声音和成片均保留；请查看原因后再处理，不要重新合成。");
       }
-      const result = workerResponseToNodeResult(response, { artifacts: currentArtifacts }, ["voice"]);
+      const result = await workerResponseToNodeResult(response, { artifacts: currentArtifacts }, ["voice"]);
       const runner = new WorkflowRunner({ providers: this.createRegistry(brief), clock: this.clock, idFactory: this.idFactory });
       return runner.applyNodeRevision(this.createWorkflow(brief), withExecutableBrief(previous, brief), {
         nodeId: "voice", actor: draft.actor, expectedVersionId: version.id, schemaVersion: version.schemaVersion,
@@ -3123,6 +4524,21 @@ export class ProductionPipeline {
       }
       let voiceOperation = operationId && draft.nodeId === "voice"
         ? await readPaidVoiceOperation(nodeDirectory, operationId)
+        : undefined;
+      const discoveredVoiceManifest = draft.outcome === "resume_original"
+        && operationId
+        && voiceOperation
+        && canRebuildPaidVoiceManifest(voiceOperation)
+        ? await discoverPaidVoiceManifest(nodeDirectory, operationId)
+        : undefined;
+      const voiceManifestRecovery = draft.outcome === "resume_original"
+        && operationId
+        && voiceOperation
+        && canRebuildPaidVoiceManifest(voiceOperation)
+        ? {
+            sourceOperationId: operationId,
+            ...(discoveredVoiceManifest ? { manifestPath: discoveredVoiceManifest } : {}),
+          }
         : undefined;
       let manualAssetItem: PaidAssetLedgerItemSummary | undefined;
       let manualAssetItemAlreadyResolved = false;
@@ -3430,7 +4846,7 @@ export class ProductionPipeline {
         await this.store.checkpoint(run);
       };
       const runner = new WorkflowRunner({
-        providers: this.createRegistry(brief),
+        providers: this.createRegistry(brief, voiceManifestRecovery),
         clock: this.clock,
         idFactory: this.idFactory,
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
@@ -4159,10 +5575,25 @@ export class ProductionPipeline {
         && failedNode.operationRequestId
         ? await readPaidVoiceOperation(path.join(this.runsRoot, runId, "nodes", nodeId), failedNode.operationRequestId)
         : undefined;
+      const voiceManifestPath = voiceOperation && failedNode?.operationRequestId
+        && canRebuildPaidVoiceManifest(voiceOperation)
+        ? await discoverPaidVoiceManifest(
+            path.join(this.runsRoot, runId, "nodes", nodeId),
+            failedNode.operationRequestId,
+          )
+        : undefined;
+      const voiceManifestRecovery = voiceOperation && failedNode?.operationRequestId
+        && canRebuildPaidVoiceManifest(voiceOperation)
+        ? {
+            sourceOperationId: failedNode.operationRequestId,
+            ...(voiceManifestPath ? { manifestPath: voiceManifestPath } : {}),
+          }
+        : undefined;
       const resumeKnownVoice = voiceOperation && canResumePaidVoiceOperation(voiceOperation)
         && voiceOperation.items.some((item) => item.state === "materialized");
-      const recoveryBase = creativeCommand || resumeKnownVoice ? structuredClone(previous) : previous;
-      if (resumeKnownVoice) {
+      const recoverKnownVoice = Boolean(voiceManifestRecovery) || Boolean(resumeKnownVoice);
+      const recoveryBase = creativeCommand || recoverKnownVoice ? structuredClone(previous) : previous;
+      if (recoverKnownVoice) {
         // 本地归一化失败不撤销已合成音频；普通重试沿原身份，只补尚未提交的段落。
         recoveryBase.nodeRuns.find((node) => node.nodeId === nodeId)!.interrupted = true;
       }
@@ -4172,7 +5603,7 @@ export class ProductionPipeline {
         delete operation.finishedAt;
       }
       const runner = new WorkflowRunner({
-        providers: this.createRegistry(brief),
+        providers: this.createRegistry(brief, voiceManifestRecovery),
         clock: this.clock,
         idFactory: this.idFactory,
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
@@ -4454,7 +5885,10 @@ export class ProductionPipeline {
     }
   }
 
-  private createRegistry(brief: ProductionBrief): ProviderRegistry {
+  private createRegistry(
+    brief: ProductionBrief,
+    voiceManifestRecovery?: VoiceManifestRecovery,
+  ): ProviderRegistry {
     const registry = new ProviderRegistry();
     if (brief.providers.script === "codex-screenwriter-v1") {
       const screenwriterAgent = this.options.screenwriterAgent;
@@ -4490,7 +5924,12 @@ export class ProductionPipeline {
         : new UnavailableVisualReviewProvider(brief.providers.visualReview, metadata));
     }
     for (const config of providerConfigs(brief, this.options)) {
-      registry.register(new WorkerProvider(config, this.options.worker, this.runsRoot));
+      registry.register(new WorkerProvider(
+        config,
+        this.options.worker,
+        this.runsRoot,
+        config.nodeId === "voice" ? voiceManifestRecovery : undefined,
+      ));
     }
     return registry;
   }
@@ -4583,7 +6022,7 @@ export class ProductionPipeline {
           : parseSourceReviewOutcome(response.sourceReview);
         if (sourceReview) {
           assertSourceReviewWorkerBinding({ capability, response, sourceReview, context });
-          const result = workerResponseToNodeResult(response, context, parentNodeIds);
+          const result = await workerResponseToNodeResult(response, context, parentNodeIds);
           const reason = response.error?.message ?? "素材试片审查暂停。";
           const providerOutcomeKnown = result.providerOutcomeKnown === true;
           const canAcceptIncomplete = sourceReview.kind === "incomplete" && providerOutcomeKnown;
@@ -4612,8 +6051,14 @@ export class ProductionPipeline {
             receipt,
           };
         }
+        const nodeResult = await workerResponseToNodeResult(response, context, parentNodeIds);
+        if (capability === "voice.synthesize") {
+          // §4.2.4：首次 fit 冲突的可恢复来源收据由宿主在正式登记 manifest 产物、
+          // 取得真实 artifactId 后写不可变 receipt 并登记；恢复输出同时引用两件真实产物。
+          await registerVoiceSourceReceiptArtifacts(nodeResult, context, parentNodeIds);
+        }
         return {
-          ...workerResponseToNodeResult(response, context, parentNodeIds),
+          ...nodeResult,
           receipt,
         };
       },
@@ -5235,6 +6680,46 @@ function currentPublishApproval(context: WorkflowContext): WorkflowContext["deci
   ));
 }
 
+function prepareLocalRelayoutApprovalRun(
+  run: WorkflowRun<ProductionBrief>,
+  definition: WorkflowDefinition,
+): WorkflowRun<ProductionBrief> {
+  const prepared = structuredClone(run);
+  const descendants = new Set<string>();
+  const queue = ["voice"];
+  while (queue.length) {
+    const parent = queue.shift()!;
+    for (const node of definition.nodes) {
+      if (!node.dependsOn?.includes(parent) || descendants.has(node.id)) continue;
+      descendants.add(node.id);
+      queue.push(node.id);
+    }
+  }
+  for (const node of prepared.nodeRuns) {
+    if (!descendants.has(node.nodeId) || node.status !== "stale") continue;
+    if (node.outcomeUncertain) {
+      throw new HumanDecisionConflictError(
+        `声音调整后的步骤 '${node.nodeId}' 仍有未核实的付费结果，不能直接重跑。`,
+      );
+    }
+    node.status = "pending";
+    node.artifactIds = [];
+    node.qualityGateResults = [];
+    delete node.output;
+    delete node.finishedAt;
+    delete node.error;
+    delete node.errorCode;
+    delete node.intervention;
+    delete node.executionReceipt;
+    delete node.spendPlan;
+    delete node.spendAuthorizationId;
+    delete node.operationRequestId;
+    delete node.interrupted;
+  }
+  prepared.interventions = prepared.interventions.filter((intervention) => !descendants.has(intervention.nodeId));
+  return prepared;
+}
+
 // 节点当前有效输出：与 UI 的解析语义一致，先取 outputState 的有效版本，再回落 raw output。
 function effectiveNodeOutput(node: WorkflowRun<ProductionBrief>["nodeRuns"][number]): Record<string, unknown> | null {
   const output = node.outputState?.versions.find(
@@ -5416,6 +6901,7 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
     private readonly config: ProviderConfig,
     private readonly worker: WorkerClient,
     private readonly runsRoot: string,
+    private readonly voiceManifestRecovery?: VoiceManifestRecovery,
   ) {
     this.id = config.id;
     this.capability = config.capability;
@@ -5465,6 +6951,9 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
 
   async quoteSpend(input: Record<string, unknown>, context: WorkflowContext): Promise<SpendQuote> {
     await verifyExecutablePlanInput(input, context, this.runsRoot);
+    if (this.config.capability === "voice.synthesize" && this.voiceManifestRecovery) {
+      return { estimatedCostCny: 0, maxCostCny: 0, requiresAuthorization: false };
+    }
     if (this.capability === "voice.synthesize" && typeof input.narrationPlanPath === "string") {
       const quote = await this.worker.forecastPaidVoiceSpend?.({ runId: context.runId,
         nodeDirectory: path.join(this.runsRoot, context.runId, "nodes", "voice"),
@@ -5711,6 +7200,16 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
         input = { ...input, reusableStockAssets: await verifiedReusableStockAssets(input.reuseAssetPlanArtifactId, context, this.runsRoot) };
       }
     }
+    if (this.config.capability === "voice.synthesize" && this.voiceManifestRecovery) {
+      input = {
+        ...input,
+        rebuild_manifest: true,
+        sourceOperationId: this.voiceManifestRecovery.sourceOperationId,
+        ...(this.voiceManifestRecovery.manifestPath
+          ? { manifestPath: this.voiceManifestRecovery.manifestPath }
+          : {}),
+      };
+    }
     const attempt = await reserveAttemptDirectory(path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId));
     const outputDir = attempt.directory;
     const parameters: Record<string, unknown> = { ...this.config.parameters, providerId: this.config.id };
@@ -5746,6 +7245,41 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
         // 超预算的 create 在越过付费边界前 fail closed（停在可操作状态，不静默降级）。
         if (authorization.itemCreateBudgets) {
           parameters.itemCreateBudgets = { ...authorization.itemCreateBudgets };
+        }
+      }
+    }
+    if (this.config.capability === "voice.synthesize" && typeof input.narrationPlanPath === "string") {
+      // §4.2.3：来源身份优先取自 input version 固化的 value（不可变、不按 plan SHA 覆盖）；
+      // 旧版本没有内嵌身份时回退读取采用时写的 sidecar；两者都没有则由 worker 如实降级处理。
+      if (typeof input.voiceInputVersionId === "string") {
+        input = { ...input, voiceInputIdentity: {
+          voiceInputVersionId: input.voiceInputVersionId,
+          ...(typeof input.sourceContextId === "string" ? { sourceContextId: input.sourceContextId } : {}),
+          ...(typeof input.scriptArtifactId === "string" ? { scriptArtifactId: input.scriptArtifactId } : {}),
+          ...(typeof input.scriptOutputVersionId === "string" ? { scriptOutputVersionId: input.scriptOutputVersionId } : {}),
+          ...(typeof input.visualArtifactId === "string" ? { visualArtifactId: input.visualArtifactId } : {}),
+          ...(typeof input.visualOutputVersionId === "string" ? { visualOutputVersionId: input.visualOutputVersionId } : {}),
+          ...(Array.isArray(input.parentArtifactIds) ? { parentArtifactIds: input.parentArtifactIds } : {}),
+          ...(Array.isArray(input.upstreamVersionIds) ? { upstreamVersionIds: input.upstreamVersionIds } : {}),
+        } };
+      } else {
+        try {
+          const planPath = path.resolve(String(input.narrationPlanPath));
+          const sidecar = JSON.parse(await readFile(`${planPath.slice(0, -".json".length)}.input.json`, "utf8")) as Record<string, unknown>;
+          if (isObjectRecord(sidecar) && typeof sidecar.voiceInputVersionId === "string") {
+            input = { ...input, voiceInputIdentity: {
+              voiceInputVersionId: sidecar.voiceInputVersionId,
+              ...(typeof sidecar.sourceContextId === "string" ? { sourceContextId: sidecar.sourceContextId } : {}),
+              ...(typeof sidecar.scriptArtifactId === "string" ? { scriptArtifactId: sidecar.scriptArtifactId } : {}),
+              ...(typeof sidecar.scriptOutputVersionId === "string" ? { scriptOutputVersionId: sidecar.scriptOutputVersionId } : {}),
+              ...(typeof sidecar.visualArtifactId === "string" ? { visualArtifactId: sidecar.visualArtifactId } : {}),
+              ...(typeof sidecar.visualOutputVersionId === "string" ? { visualOutputVersionId: sidecar.visualOutputVersionId } : {}),
+              ...(Array.isArray(sidecar.parentArtifactIds) ? { parentArtifactIds: sidecar.parentArtifactIds } : {}),
+              ...(Array.isArray(sidecar.upstreamVersionIds) ? { upstreamVersionIds: sidecar.upstreamVersionIds } : {}),
+            } };
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
       }
     }
@@ -12006,11 +13540,196 @@ function excludedItemsField(notes: ReadonlyMap<number, string>): { excludedItems
   };
 }
 
-function workerResponseToNodeResult(
+/**
+ * §4.2.4 receipt 正式登记：v2 首次 fit 冲突的来源收据不是成功声音输出，
+ * 但必须是不可变且可核验的正式产物——宿主先经 context.addArtifact 登记 manifest
+ * 取得真实 artifactId，再写 receipt 文件并登记（kind=voice_source_receipt），
+ * 恢复侧按 output.voiceSourceReceipt 的两个真实 artifactId 引用对账。
+ */
+async function registerVoiceSourceReceiptArtifacts(
+  result: NodeExecutionResult<Record<string, unknown>>,
+  context: Pick<WorkflowContext, "artifacts"> & Pick<WorkflowContext, "addArtifact">,
+  parentNodeIds: string[],
+): Promise<void> {
+  const output = result.output;
+  if (!isObjectRecord(output) || !isObjectRecord(output.voiceSourceReceipt)) return;
+  const receiptFacts = output.voiceSourceReceipt;
+  if ((receiptFacts.reason !== "first_fit_conflict" && receiptFacts.reason !== "layout_incomplete")
+    || typeof receiptFacts.sourceOperationId !== "string") return;
+  if (!result.artifacts?.length) return;
+  const manifestIndex = result.artifacts.findIndex((artifact) => artifact.kind === "voice_source_manifest");
+  if (manifestIndex < 0) {
+    throw new Error("v2 首次排轨冲突缺少来源清单产物，不能建立可恢复收据。");
+  }
+  const parentArtifactIds = context.artifacts
+    .filter((artifact) => artifact.producer && parentNodeIds.includes(artifact.producer.nodeId))
+    .map((artifact) => artifact.id);
+  const manifestDraft = result.artifacts[manifestIndex];
+  if (!manifestDraft) throw new Error("v2 首次排轨冲突的来源清单产物缺失。");
+  if (!manifestDraft.uri || !manifestDraft.sha256 || manifestDraft.sizeBytes === undefined) {
+    throw new Error("v2 声音来源清单缺少文件完整性信息。");
+  }
+  const manifestBytes = await readFile(manifestDraft.uri);
+  if (createHash("sha256").update(manifestBytes).digest("hex") !== manifestDraft.sha256
+    || manifestBytes.byteLength !== manifestDraft.sizeBytes) {
+    throw new Error("v2 声音来源清单的文件字节与产物登记不一致。");
+  }
+  const manifest = requireOutputRecord(JSON.parse(manifestBytes.toString("utf8")), "voice source manifest");
+  if (manifest.version !== "video-factory/voice-source-manifest-v1"
+    || manifest.manifestSha256 !== receiptFacts.manifestSha256
+    || manifest.allAudioMaterialized !== true) {
+    throw new Error("v2 声音来源清单与收据身份不一致。");
+  }
+  if (!Array.isArray(manifest.groups)) {
+    throw new Error("v2 声音来源清单的分组记录无效。");
+  }
+  const manifestPath = await realpath(manifestDraft.uri);
+  const attemptDirectory = path.dirname(manifestPath);
+  if (!/^attempt-\d+$/.test(path.basename(attemptDirectory))) {
+    throw new Error("v2 声音来源清单不在受核的声音 attempt 目录内。");
+  }
+  const voiceNodeRoot = await realpath(path.dirname(attemptDirectory));
+  const manifestRelative = path.relative(voiceNodeRoot, manifestPath);
+  if (!manifestRelative || manifestRelative.startsWith(`..${path.sep}`) || path.isAbsolute(manifestRelative)) {
+    throw new Error("v2 声音来源清单越出声音节点根目录。");
+  }
+
+  const resultRawDrafts = new Map<string, ArtifactDraft>();
+  for (const artifact of result.artifacts) {
+    if (artifact.kind !== "voiceover_raw" || !artifact.uri) continue;
+    const resolved = await realpath(artifact.uri);
+    const existing = resultRawDrafts.get(resolved);
+    if (existing && (existing.sha256 !== artifact.sha256 || existing.sizeBytes !== artifact.sizeBytes
+      || existing.contentType !== artifact.contentType)) {
+      throw new Error("同一路径的声音原文件出现互相矛盾的产物身份。");
+    }
+    resultRawDrafts.set(resolved, artifact);
+  }
+  const existingRawArtifacts = new Map<string, Artifact>();
+  for (const artifact of context.artifacts) {
+    if (artifact.kind !== "voiceover_raw" || !artifact.uri) continue;
+    let resolved: string;
+    try {
+      resolved = await realpath(artifact.uri);
+    } catch {
+      continue;
+    }
+    const existing = existingRawArtifacts.get(resolved);
+    if (existing && (existing.sha256 !== artifact.sha256 || existing.sizeBytes !== artifact.sizeBytes
+      || existing.contentType !== artifact.contentType)) {
+      throw new Error("既有声音原文件在同一路径存在互相矛盾的产物身份。");
+    }
+    existingRawArtifacts.set(resolved, artifact);
+  }
+
+  const verifiedGroups: Array<{
+    groupId: string;
+    resolvedPath: string;
+    sha256: string;
+    sizeBytes: number;
+    contentType: string;
+    draft?: ArtifactDraft;
+    existing?: Artifact;
+  }> = [];
+  for (const [index, candidate] of manifest.groups.entries()) {
+    const group = requireOutputRecord(candidate, `voice source manifest group ${index + 1}`);
+    const groupId = requiredOutputString(group, "groupId");
+    const raw = requireOutputRecord(group.raw, `voice source manifest group ${index + 1} raw`);
+    const relativePath = requiredOutputString(raw, "relativePath");
+    const sha256 = requiredOutputString(raw, "sha256");
+    const sizeBytes = raw.byteSize;
+    const contentType = requiredOutputString(raw, "contentType");
+    if (!/^[a-f0-9]{64}$/.test(sha256) || !Number.isInteger(sizeBytes) || Number(sizeBytes) <= 0
+      || !contentType.startsWith("audio/")) {
+      throw new Error(`v2 声音来源清单第 ${index + 1} 组的音频完整性字段无效。`);
+    }
+    const resolvedPath = await realpath(path.resolve(voiceNodeRoot, relativePath));
+    const relative = path.relative(voiceNodeRoot, resolvedPath);
+    if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error(`v2 声音来源清单第 ${index + 1} 组的音频越出声音节点根目录。`);
+    }
+    await verifyArtifactBytes(resolvedPath, sha256, Number(sizeBytes));
+    const draft = resultRawDrafts.get(resolvedPath);
+    if (draft && (draft.sha256 !== sha256 || draft.sizeBytes !== sizeBytes
+      || draft.contentType !== contentType)) {
+      throw new Error(`v2 声音来源清单第 ${index + 1} 组与 worker 原音频产物不一致。`);
+    }
+    const existing = existingRawArtifacts.get(resolvedPath);
+    if (existing && (existing.sha256 !== sha256 || existing.sizeBytes !== sizeBytes
+      || existing.contentType !== contentType)) {
+      throw new Error(`v2 声音来源清单第 ${index + 1} 组与既有原音频产物不一致。`);
+    }
+    verifiedGroups.push({ groupId, resolvedPath, sha256, sizeBytes: Number(sizeBytes), contentType,
+      ...(draft ? { draft } : {}), ...(existing ? { existing } : {}) });
+  }
+
+  // 先完成全部文件与身份核验，再登记任何产物；失败时不能留下半套试听来源。
+  result.artifacts.splice(manifestIndex, 1);
+  const manifestArtifact = context.addArtifact({ ...manifestDraft, parentArtifactIds });
+  const registeredByPath = new Map<string, Artifact>();
+  const groupAudioArtifacts = verifiedGroups.map((group) => {
+    let artifact = group.existing ?? registeredByPath.get(group.resolvedPath);
+    if (!artifact) {
+      const source = group.draft ?? manifestDraft;
+      artifact = context.addArtifact({
+        kind: "voiceover_raw",
+        uri: group.resolvedPath,
+        sha256: group.sha256,
+        sizeBytes: group.sizeBytes,
+        contentType: group.contentType,
+        schemaVersion: group.draft?.schemaVersion ?? "video-factory/voiceover_raw-v1",
+        parentArtifactIds,
+        ...(source.producer ? { producer: source.producer } : {}),
+        ...(source.provenance ? { provenance: source.provenance } : {}),
+      });
+      registeredByPath.set(group.resolvedPath, artifact);
+    }
+    return { groupId: group.groupId, artifactId: artifact.id };
+  });
+  const consumedRawDrafts = new Set(verifiedGroups.flatMap((group) => group.draft ? [group.draft] : []));
+  result.artifacts = result.artifacts.filter((artifact) => !consumedRawDrafts.has(artifact));
+  const rawArtifactIds = [...new Set(groupAudioArtifacts.map((item) => item.artifactId))];
+  const receiptBody = { ...receiptFacts, manifestArtifactId: manifestArtifact.id, groupAudioArtifacts };
+  const receiptPath = path.join(path.dirname(manifestArtifact.uri!),
+    `voice-source-receipt-${receiptFacts.sourceOperationId}.json`);
+  const receiptContent = `${JSON.stringify(receiptBody, null, 2)}\n`;
+  await writeTextAtomically(receiptPath, receiptContent);
+  const receiptArtifact = context.addArtifact({
+    kind: "voice_source_receipt",
+    uri: receiptPath,
+    sha256: createHash("sha256").update(receiptContent, "utf8").digest("hex"),
+    sizeBytes: Buffer.byteLength(receiptContent),
+    contentType: "application/json",
+    parentArtifactIds: [...new Set([manifestArtifact.id, ...rawArtifactIds, ...parentArtifactIds])],
+    ...(manifestDraft.producer ? { producer: manifestDraft.producer } : {}),
+    provenance: {
+      providerId: "video-factory-voice-source-receipt",
+      providerVersion: "1",
+      licenseNote: "Recoverable zero-repurchase voice source receipt; not a successful voice output.",
+    },
+  });
+  // 已在 execute 内登记的产物走 preRegisteredArtifactIds 去重挂载，不重复登记。
+  result.preRegisteredArtifactIds = [...(result.preRegisteredArtifactIds ?? []),
+    manifestArtifact.id, ...rawArtifactIds, receiptArtifact.id];
+  output.voiceSourceReceipt = { ...receiptBody,
+    manifestArtifactId: manifestArtifact.id, receiptArtifactId: receiptArtifact.id };
+  if (isObjectRecord(output.conflict) && output.conflict.code === "NARRATION_GROUP_DOES_NOT_FIT_V2") {
+    output.conflict = parseNarrationFitConflictV2({
+      ...output.conflict,
+      version: NARRATION_FIT_CONFLICT_V2_VERSION,
+      sourceOperationId: receiptFacts.sourceOperationId,
+      sourceContextId: receiptFacts.sourceContextId,
+      manifestArtifactId: manifestArtifact.id,
+      manifestSha256: receiptFacts.manifestSha256,
+    });
+  }
+}
+
+async function workerResponseToNodeResult(
   response: WorkerResponse,
   context: Pick<WorkflowContext, "artifacts">,
   parentNodeIds: string[],
-): NodeExecutionResult<Record<string, unknown>> {
+): Promise<NodeExecutionResult<Record<string, unknown>>> {
   // 结构化错误码随 message 贯通：展示层按稳定码分类，不依赖英文包装前缀（R3-07）。
   const rawError = response.error?.message ?? "Worker execution failed without an error message.";
   const error = response.error?.code ? `${rawError} [${response.error.code}]` : rawError;
@@ -12080,6 +13799,29 @@ function workerResponseToNodeResult(
       },
     };
   }
+  if (response.status === "rejected" && response.error?.code === "NARRATION_GROUP_DOES_NOT_FIT_V2") {
+    // §2.3：首次排轨失败登记完整来源（manifest+receipt），转为可恢复停点；不是成功输出。
+    const output = requireOutputRecord(response.output, "voice v2 group conflict output");
+    const conflict = requireOutputRecord(output.conflict, "voice v2 group conflict");
+    const receipt = requireOutputRecord(output.voiceSourceReceipt, "voice source receipt");
+    const manifestArtifact = response.artifacts.find((artifact) => artifact.kind === "voice_source_manifest"
+      && typeof artifact.uri === "string" && artifact.sha256);
+    if (receipt.reason !== "first_fit_conflict" || !manifestArtifact
+      || !conflict.groupId
+      || !isObjectRecord(conflict.window) || !isObjectRecord(conflict.placement)) {
+      throw new Error("v2 首次排轨冲突缺少可核对的完整来源登记。");
+    }
+    const manifest = requireOutputRecord(JSON.parse(await readFile(manifestArtifact.uri!, "utf8")), "voice source manifest");
+    if (manifest.manifestSha256 !== receipt.manifestSha256 || manifest.allAudioMaterialized !== true) {
+      throw new Error("来源清单与收据绑定不一致，不能进入恢复停点。");
+    }
+    return { status: "needs_human", output, artifacts,
+      ...(providerOutcomeKnown !== undefined ? { providerOutcomeKnown } : {}),
+      intervention: { reason: `分段「${String(conflict.groupId).slice(0, 12)}…」的完整旁白需要 ${conflict.requiredFrames} 帧，`
+        + `目前窗口只有 ${conflict.availableFrames} 帧。全部原音频与来源已保留，可以在声音入口只调整时间（不重新购买），`
+        + `或撤销这段留白；不会自动截音、加速或重新合成。`,
+        requiredAction: "request_changes", options: ["request_changes", "reject"] } };
+  }
   if (response.status === "rejected" && response.error?.code === "NARRATION_GROUP_DOES_NOT_FIT") {
     const conflict = parseNarrationGroupConflict(requireOutputRecord(response.output, "voice group conflict output").conflict);
     if (conflict.operationId !== response.commandId || !response.artifacts.some((artifact) => artifact.kind === "voiceover_raw"
@@ -12092,6 +13834,39 @@ function workerResponseToNodeResult(
       intervention: { reason: `镜头 ${conflict.sourceScenePositions.join("、")} 的连续旁白需要 ${(conflict.requiredFrames / 30).toFixed(2)} 秒，`
         + `目前这一段画面只有 ${((conflict.window.endFrame - conflict.window.startFrame) / 30).toFixed(2)} 秒。原音频已保留，请选择要延长的镜头或返回脚本精简旁白；不会自动截音、加速或购买新素材。`,
         requiredAction: "request_changes", options: ["request_changes", "reject"] } };
+  }
+  if (response.status === "succeeded" && isObjectRecord(response.output)
+    && isObjectRecord(response.output.voiceSourceReceipt)
+    && response.output.voiceSourceReceipt.reason === "layout_incomplete") {
+    const receipt = response.output.voiceSourceReceipt;
+    const manifestArtifact = response.artifacts.find((artifact) => artifact.kind === "voice_source_manifest"
+      && typeof artifact.uri === "string" && artifact.sha256);
+    if (!manifestArtifact
+      || receipt.sourceOperationId !== response.commandId
+      || response.artifacts.some((artifact) => artifact.kind === "voiceover" || artifact.kind === "voiceover_plan")) {
+      throw new Error("纯本地声音来源恢复没有绑定原操作，或错误地产生了成功音轨。");
+    }
+    const manifest = requireOutputRecord(
+      JSON.parse(await readFile(manifestArtifact.uri!, "utf8")),
+      "recovered voice source manifest",
+    );
+    if (manifest.version !== "video-factory/voice-source-manifest-v1"
+      || manifest.sourceOperationId !== response.commandId
+      || manifest.manifestSha256 !== receipt.manifestSha256
+      || manifest.allAudioMaterialized !== true) {
+      throw new Error("恢复的声音来源清单与原操作收据不一致。");
+    }
+    return {
+      status: "needs_human",
+      output: response.output,
+      artifacts,
+      ...(providerOutcomeKnown !== undefined ? { providerOutcomeKnown } : {}),
+      intervention: {
+        reason: "已从原配音请求找回全部声音片段，没有重新购买。请只调整分段时间与留白，试听满意后再继续。",
+        requiredAction: "request_changes",
+        options: ["request_changes", "reject"],
+      },
+    };
   }
   if (response.status === "rejected") {
     return {
@@ -14587,6 +16362,232 @@ async function verifyWorkerArtifacts(response: WorkerResponse, outputDir: string
   }
 }
 
+const NARRATION_RELAYOUT_WORKER_MARKER = ".narration-relayout-worker-active.json";
+
+async function assertNoOtherPendingNarrationRelayout(
+  operationsDirectory: string,
+  currentRequestId: string,
+): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(operationsDirectory);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".json") || entry === `${currentRequestId}.json`) continue;
+    let operation: Record<string, unknown>;
+    try {
+      operation = requireOutputRecord(JSON.parse(
+        await readFile(path.join(operationsDirectory, entry), "utf8")), "narration relayout operation");
+    } catch (error) {
+      throw new HumanDecisionConflictError(`另一条时间调整记录不可读（${entry}），请先核查后再继续。`);
+    }
+    if (operation.version !== RELAYOUT_OPERATION_VERSION
+      || (operation.state !== "reserved" && operation.state !== "completed")) continue;
+    if (operation.state === "reserved"
+      && typeof operation.attemptDirectory === "string"
+      && typeof operation.commandId === "string"
+      && typeof operation.attempt === "number"
+      && typeof operation.workerExecutionToken === "string") {
+      await assertNarrationRelayoutWorkerInactive(operation.attemptDirectory, {
+        commandId: operation.commandId,
+        attempt: operation.attempt,
+        workerExecutionToken: operation.workerExecutionToken,
+      });
+    }
+    throw new HumanDecisionConflictError("已有一条尚未采用的声音时间调整，请先继续或撤销原请求，不能并行发起另一条。");
+  }
+}
+
+async function assertNarrationRelayoutWorkerInactive(
+  attemptDirectory: string,
+  expected: { commandId: string; attempt: number; workerExecutionToken: string },
+): Promise<void> {
+  const markerPath = path.join(attemptDirectory, NARRATION_RELAYOUT_WORKER_MARKER);
+  let marker: Record<string, unknown>;
+  try {
+    marker = requireOutputRecord(JSON.parse(await readFile(markerPath, "utf8")), "narration relayout worker marker");
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return;
+    throw new HumanDecisionConflictError("本地排轨的 worker 归属记录不可读，请先核查原操作。");
+  }
+  if (marker.version !== "video-factory/narration-relayout-worker-v1"
+    || marker.commandId !== expected.commandId
+    || marker.attempt !== expected.attempt
+    || marker.workerExecutionToken !== expected.workerExecutionToken
+    || typeof marker.pid !== "number" || !Number.isSafeInteger(marker.pid) || marker.pid < 1) {
+    throw new HumanDecisionConflictError("本地排轨的 worker 归属与预留身份不一致，拒绝重复执行。");
+  }
+  let active = true;
+  try {
+    process.kill(marker.pid, 0);
+  } catch (error) {
+    if (hasCode(error, "ESRCH")) active = false;
+    else if (!hasCode(error, "EPERM")) throw error;
+  }
+  if (active) {
+    throw new HumanDecisionConflictError("原时间调整仍在本地处理中；当前只能查询，不能重复执行或假取消。");
+  }
+  // 当前调用已持有 run 租约；标记绑定的 worker 已不存在，删除的只是 attempt 侧归属索引，
+  // 不改 run、完成收据或任何媒体。随后仍沿原 request/attempt 继续。
+  await rm(markerPath, { force: true });
+}
+
+async function narrationRelayoutResponseFromCompletion(
+  attemptDirectory: string,
+): Promise<WorkerResponse | undefined> {
+  const attemptRoot = await realpath(attemptDirectory);
+  const completionPath = path.join(attemptRoot, "narration-relayout-completion.json");
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(completionPath);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return undefined;
+    throw error;
+  }
+  const receipt = parseNarrationRelayoutCompletion(JSON.parse(bytes.toString("utf8")));
+  const provenance = (licenseNote: string) => ({
+    providerId: "local-relayout-v1",
+    producerNodeId: "voice",
+    attempt: receipt.attempt,
+    licenseNote,
+  });
+  const artifacts: WorkerResponse["artifacts"] = receipt.artifacts.map((artifact) => ({
+    kind: artifact.kind,
+    uri: path.join(attemptRoot, artifact.relativePath),
+    sha256: artifact.sha256,
+    sizeBytes: artifact.sizeBytes,
+    contentType: artifact.contentType,
+    provenance: provenance("Recovered from the worker's durable local relayout completion receipt."),
+  }));
+  const completionSha256 = createHash("sha256").update(bytes).digest("hex");
+  artifacts.push({
+    kind: "narration_relayout_completion",
+    uri: completionPath,
+    sha256: completionSha256,
+    sizeBytes: bytes.byteLength,
+    contentType: "application/json",
+    provenance: provenance("Durable completion receipt for this local relayout attempt."),
+  });
+  return {
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    commandId: receipt.commandId,
+    status: "succeeded",
+    output: {
+      narrationPlanPath: path.join(attemptRoot, receipt.output.narrationPlanRelativePath),
+      pcmPath: path.join(attemptRoot, receipt.output.pcmRelativePath),
+      trackPath: path.join(attemptRoot, receipt.output.trackRelativePath),
+      voiceoverPlanPath: path.join(attemptRoot, receipt.output.voiceoverPlanRelativePath),
+      completionReceiptPath: completionPath,
+      completionReceiptSha256: completionSha256,
+      narrationMode: receipt.output.narrationMode,
+      subtitleStatus: receipt.output.subtitleStatus,
+      layoutKey: receipt.output.layoutKey,
+      voiceOperationId: receipt.output.voiceOperationId,
+      layoutOperationId: receipt.output.layoutOperationId,
+      externalSendCount: 0,
+    },
+    artifacts,
+  };
+}
+
+async function verifyNarrationRelayoutCompletion(options: {
+  response: WorkerResponse;
+  attemptDirectory: string;
+  requestDigest: string;
+  commandId: string;
+  layoutOperationId: string;
+  runId: string;
+  attempt: number;
+  reservedInputVersionId: string;
+  reservedOutputVersionId: string;
+  sourceOperationId: string;
+  relayoutSource: string;
+  sourceIdentity: Record<string, unknown>;
+  sourceManifestIdentity: { artifactId: string; sha256: string };
+}): Promise<NarrationRelayoutCompletion> {
+  const output = requireOutputRecord(options.response.output, "relayout output");
+  const completionPath = requiredOutputString(output, "completionReceiptPath");
+  const completionBytes = await readFile(completionPath);
+  const completionSha256 = createHash("sha256").update(completionBytes).digest("hex");
+  if (output.completionReceiptSha256 !== completionSha256) {
+    throw new HumanDecisionConflictError("本地排轨完成收据的实际字节与返回摘要不一致。");
+  }
+  const completionArtifact = options.response.artifacts.find((artifact) =>
+    artifact.kind === "narration_relayout_completion");
+  if (!completionArtifact || path.resolve(completionArtifact.uri) !== path.resolve(completionPath)
+    || completionArtifact.sha256 !== completionSha256
+    || completionArtifact.sizeBytes !== completionBytes.byteLength
+    || completionArtifact.contentType !== "application/json") {
+    throw new HumanDecisionConflictError("本地排轨完成收据缺少正式 worker 产物身份。");
+  }
+  const receipt = parseNarrationRelayoutCompletion(JSON.parse(completionBytes.toString("utf8")));
+  if (receipt.version !== RELAYOUT_COMPLETION_VERSION
+    || receipt.requestDigest !== options.requestDigest
+    || receipt.commandId !== options.commandId
+    || receipt.layoutOperationId !== options.layoutOperationId
+    || receipt.runId !== options.runId || receipt.attempt !== options.attempt
+    || receipt.reservedInputVersionId !== options.reservedInputVersionId
+    || receipt.reservedOutputVersionId !== options.reservedOutputVersionId) {
+    throw new HumanDecisionConflictError("本地排轨完成收据与宿主预留身份不一致。");
+  }
+  const safeSourceIdentity = Object.fromEntries([
+    "voiceInputVersionId", "sourceContextId", "scriptArtifactId", "scriptOutputVersionId",
+    "visualArtifactId", "visualOutputVersionId", "parentArtifactIds", "upstreamVersionIds",
+  ].filter((key) => options.sourceIdentity[key] !== undefined)
+    .map((key) => [key, options.sourceIdentity[key]]));
+  const expectedSource = {
+    sourceOperationId: options.sourceOperationId,
+    relayoutSource: options.relayoutSource,
+    sourceIdentity: safeSourceIdentity,
+    sourceManifestIdentity: options.sourceManifestIdentity,
+  };
+  if (!isDeepStrictEqual(receipt.source, expectedSource)) {
+    throw new HumanDecisionConflictError("本地排轨完成收据与受核原声音来源不一致。");
+  }
+  const attemptRoot = await realpath(options.attemptDirectory);
+  const workerArtifacts = options.response.artifacts.filter((artifact) =>
+    artifact.kind !== "narration_relayout_completion");
+  if (workerArtifacts.length !== receipt.artifacts.length) {
+    throw new HumanDecisionConflictError("本地排轨完成收据与 worker 产物数量不一致。");
+  }
+  for (const recorded of receipt.artifacts) {
+    const artifactPath = await realpath(path.join(attemptRoot, recorded.relativePath));
+    const relative = path.relative(attemptRoot, artifactPath);
+    if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new HumanDecisionConflictError("本地排轨完成收据引用了 attempt 目录外的产物。");
+    }
+    const workerArtifact = workerArtifacts.find((artifact) => artifact.kind === recorded.kind);
+    if (!workerArtifact || path.resolve(workerArtifact.uri) !== artifactPath
+      || workerArtifact.sha256 !== recorded.sha256 || workerArtifact.sizeBytes !== recorded.sizeBytes
+      || workerArtifact.contentType !== recorded.contentType) {
+      throw new HumanDecisionConflictError("本地排轨完成收据与 worker 返回的产物身份不一致。");
+    }
+    await verifyArtifactBytes(artifactPath, recorded.sha256, recorded.sizeBytes);
+  }
+  const expectedOutputPaths = {
+    narrationPlanPath: path.join(attemptRoot, receipt.output.narrationPlanRelativePath),
+    pcmPath: path.join(attemptRoot, receipt.output.pcmRelativePath),
+    trackPath: path.join(attemptRoot, receipt.output.trackRelativePath),
+    voiceoverPlanPath: path.join(attemptRoot, receipt.output.voiceoverPlanRelativePath),
+  };
+  for (const [field, expectedPath] of Object.entries(expectedOutputPaths)) {
+    if (path.resolve(requiredOutputString(output, field)) !== path.resolve(expectedPath)) {
+      throw new HumanDecisionConflictError(`本地排轨完成收据的 ${field} 与 worker 输出不一致。`);
+    }
+  }
+  if (output.layoutOperationId !== receipt.output.layoutOperationId
+    || output.layoutKey !== receipt.output.layoutKey
+    || output.voiceOperationId !== receipt.output.voiceOperationId
+    || output.subtitleStatus !== receipt.output.subtitleStatus
+    || output.externalSendCount !== 0) {
+    throw new HumanDecisionConflictError("本地排轨完成收据的安全输出与 worker 返回不一致。");
+  }
+  return receipt;
+}
+
 async function verifyWorkerPrivateOutputPath(value: unknown, outputDir: string): Promise<void> {
   if (typeof value !== "string" || !value) throw new Error("Asset search did not produce a private candidate inventory.");
   const resolvedRoot = await realpath(outputDir);
@@ -15084,6 +17085,53 @@ function canResumePaidVoiceOperation(operation: PaidVoiceOperationLedger): boole
   ));
 }
 
+function canRebuildPaidVoiceManifest(operation: PaidVoiceOperationLedger): boolean {
+  return operation.version === "video-factory/voice-operation-v3"
+    && operation.completed === true
+    && operation.items.every((item) => (item.persistedState ?? item.state) === "materialized");
+}
+
+async function discoverPaidVoiceManifest(
+  nodeDirectory: string,
+  sourceOperationId: string,
+): Promise<string | undefined> {
+  const nodeRoot = await realpath(nodeDirectory);
+  const entries = await readdir(nodeRoot, { withFileTypes: true });
+  const matches: Array<{ attempt: number; pathname: string; manifestSha256: string }> = [];
+  for (const entry of entries) {
+    const match = /^attempt-(\d+)$/.exec(entry.name);
+    if (!entry.isDirectory() || !match) continue;
+    const candidate = path.join(nodeRoot, entry.name, "materialized_voice_source.json");
+    let resolved: string;
+    try {
+      resolved = await realpath(candidate);
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) continue;
+      throw error;
+    }
+    const relative = path.relative(nodeRoot, resolved);
+    if (relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+      || path.dirname(relative) !== entry.name) {
+      throw new Error("Recovered voice manifest must remain in a direct attempt directory of the voice node.");
+    }
+    const document = requireOutputRecord(
+      JSON.parse(await readFile(resolved, "utf8")),
+      "recoverable voice source manifest",
+    );
+    if (document.sourceOperationId !== sourceOperationId) continue;
+    if (document.version !== "video-factory/voice-source-manifest-v1"
+      || typeof document.manifestSha256 !== "string"
+      || !/^[a-f0-9]{64}$/.test(document.manifestSha256)) {
+      throw new Error("The original voice manifest is incompatible or corrupted.");
+    }
+    matches.push({ attempt: Number(match[1]), pathname: resolved, manifestSha256: document.manifestSha256 });
+  }
+  if (new Set(matches.map((item) => item.manifestSha256)).size > 1) {
+    throw new Error("The original voice operation has conflicting materialized manifests.");
+  }
+  return matches.sort((left, right) => right.attempt - left.attempt)[0]?.pathname;
+}
+
 async function assertReadableFileWithin(root: string, filename: string): Promise<void> {
   const [resolvedRoot, resolvedFile] = await Promise.all([realpath(root), realpath(filename)]);
   const relative = path.relative(resolvedRoot, resolvedFile);
@@ -15124,6 +17172,7 @@ async function readPaidVoiceOperation(
       || item.stateHistory.some((state) => typeof state !== "string")) {
       throw new Error("Paid voice operation ledger is incompatible or corrupted.");
     }
+    Object.defineProperty(item, "persistedState", { value: item.state, enumerable: false });
     if (value.version === "video-factory/voice-operation-v3") {
       if (typeof item.groupId !== "string" || typeof item.synthesisKey !== "string" || !/^[a-f0-9]{64}$/.test(item.synthesisKey)
         || !isObjectRecord(item.quote) || typeof item.quote.maxCostCny !== "number" || !Number.isFinite(item.quote.maxCostCny)
@@ -15162,7 +17211,10 @@ async function readPaidVoiceOperation(
     }
   }
   if (value.version === "video-factory/voice-operation-v3") {
-    value.completed = value.items.every((item) => isObjectRecord(item) && item.state === "materialized");
+    // completed 是 worker 耐久写下的“整批已闭合”事实。读取时可以用 metadata 把
+    // unknown 还原为 materialized，但不能把原本未闭合（尤其 0 组）的账本凭空升级。
+    value.completed = value.completed === true
+      && value.items.every((item) => isObjectRecord(item) && item.state === "materialized");
     value.actualCostCny = roundCurrency(value.items.reduce((total: number, item: Record<string, unknown>) =>
       total + (typeof item.actualCostCny === "number" ? item.actualCostCny : 0), 0));
   }

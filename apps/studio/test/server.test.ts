@@ -7,7 +7,7 @@ import { CodexBridgeError, DocumentCommandPendingError, DocumentCommandConflictE
 import { buildStudioApp, type StudioServicePort } from "../src/server/app.js";
 import { StudioConflictError, StudioNotFoundError } from "../src/server/studio-service.js";
 import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
-import type { StudioDecisionInput, StudioOpportunity, StudioPaidReconciliationInput, StudioResourceReviewInput, StudioRunDetail } from "../src/shared/api.js";
+import type { StudioDecisionInput, StudioNarrationPlanPreview, StudioOpportunity, StudioPaidReconciliationInput, StudioResourceReviewInput, StudioRunDetail } from "../src/shared/api.js";
 
 function runDetail(status: StudioRunDetail["status"] = "needs_human"): StudioRunDetail {
   return {
@@ -67,6 +67,8 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     previewVoice: async () => undefined,
     previewNarrationPlan: async () => { throw new Error("not configured"); },
     confirmNarrationPlan: async () => { throw new Error("not configured"); },
+    previewNarrationPlanV2: async () => { throw new Error("not configured"); },
+    confirmNarrationPlanV2: async () => { throw new Error("not configured"); },
     prepareProductionQuote: async () => ({
       quoteId: "quote-1",
       acceptedPlanDigest: "a".repeat(64),
@@ -1502,6 +1504,85 @@ describe("Studio API", () => {
     await app.close();
   });
 
+  it("serves narration editor facts through GET without widening the read-only write boundary", async () => {
+    const defaultPlan: StudioNarrationPlanPreview["editorContext"]["defaultPlan"] = {
+      version: "video-factory/narration-plan-v1",
+      mode: "continuous_groups",
+      script: { sha256: "a".repeat(64) },
+      visualPlan: { sha256: "b".repeat(64), fps: 30, totalFrames: 30 },
+      edgeTrim: "none",
+      subtitleMode: "provider_sentence",
+      silences: [],
+      groups: [{ id: "group-1", sourceScenePositions: [1], text: "旁白。",
+        window: { startFrame: 0, endFrame: 30 }, placement: { anchor: "start", offsetFrames: 0 } }],
+    };
+    const preview: StudioNarrationPlanPreview = {
+      expectedRunRevision: 7,
+      confirmed: false,
+      sourceContextId: "source-context-1",
+      plan: defaultPlan,
+      editorContext: {
+        mode: "final_review",
+        defaultPlan,
+        baseGroups: [{ baseGroupId: "base-1", text: "旁白。", endCodePoint: 3,
+          frameRange: { startFrame: 0, endFrame: 30 }, allowedBoundaries: [] }],
+        savedPlanStatus: "stale",
+        stalePlan: defaultPlan,
+      },
+    };
+    const writeActors: string[] = [];
+    const app = buildStudioApp({ service: fakeService({
+      previewNarrationPlan: async () => preview,
+      previewNarrationPlanV2: async (_runId, _input, actor) => {
+        writeActors.push(actor);
+        throw new StudioConflictError("当前页面只允许读取旁白方案。");
+      },
+      confirmNarrationPlan: async (_runId, _input, actor) => {
+        writeActors.push(actor);
+        throw new StudioConflictError("当前页面只允许读取旁白方案。");
+      },
+    }) });
+    try {
+      const read = await app.inject({ method: "GET", url: "/api/runs/run-1/narration-plan" });
+      assert.equal(read.statusCode, 200);
+      assert.equal(read.json().editorContext.mode, "final_review");
+      assert.equal(read.json().editorContext.savedPlanStatus, "stale");
+      const previewWrite = await app.inject({ method: "POST", url: "/api/runs/run-1/narration-plan/preview",
+        payload: { expectedRunRevision: 7, sourceContextId: "source-context-1",
+          editorSessionId: "read-only", editSequence: 0,
+          candidate: { version: "video-factory/narration-plan-v2", groups: [], userSilences: [] } } });
+      const confirmWrite = await app.inject({ method: "PUT", url: "/api/runs/run-1/narration-plan",
+        payload: { expectedRunRevision: 7, plan: defaultPlan } });
+      assert.equal(previewWrite.statusCode, 409);
+      assert.equal(confirmWrite.statusCode, 409);
+      assert.deepEqual(writeActors, ["studio-owner", "studio-owner"]);
+    } finally { await app.close(); }
+  });
+
+  it("serializes the relayout request digest needed for browser-side adoption reconciliation", async () => {
+    const digest = "d".repeat(64);
+    const app = buildStudioApp({ service: fakeService({
+      readNarrationRelayoutOperation: async (runId, requestId) => ({
+        requestId,
+        requestDigest: digest,
+        state: "applied",
+        resultVoiceVersionId: `voice-${runId}`,
+        isCurrent: true,
+      }),
+    }) });
+    try {
+      const response = await app.inject({ method: "GET", url: "/api/runs/run-1/narration-revisions/relayout-1" });
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(response.json(), {
+        requestId: "relayout-1",
+        requestDigest: digest,
+        state: "applied",
+        resultVoiceVersionId: "voice-run-1",
+        isCurrent: true,
+      });
+    } finally { await app.close(); }
+  });
+
   it("forwards a complete pilot-review decision only with its server-issued evidence id", async () => {
     let received: StudioDecisionInput | undefined;
     const app = buildStudioApp({ service: fakeService({
@@ -1773,6 +1854,25 @@ describe("Studio API", () => {
       },
     });
     assert.equal(rejected.statusCode, 400);
+    await app.close();
+  });
+
+  it("通过 HTTP 为时间调整注入可信会话身份，忽略浏览器 actor", async () => {
+    let received: { input: unknown; actor: string } | undefined;
+    const app = buildStudioApp({ service: fakeService({
+      requestNarrationRevision: async (_runId, input, actor) => {
+        received = { input, actor };
+        return runDetail("needs_human");
+      },
+    }) });
+    const response = await app.inject({ method: "POST", url: "/api/runs/run-1/narration-revisions", payload: {
+      action: "relayout_narration", intent: "discard_unapplied", requestId: "discard-http-1",
+      expectedRunRevision: 3, interventionId: "intervention-1", targetRequestId: "relayout-1",
+      note: "撤销未生效调整", actor: "spoofed-browser-user",
+    } });
+    assert.equal(response.statusCode, 200);
+    assert.equal(received?.actor, "studio-owner");
+    assert.equal("actor" in (received?.input as Record<string, unknown>), false);
     await app.close();
   });
 

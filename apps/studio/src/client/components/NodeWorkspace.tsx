@@ -8,6 +8,7 @@ import { agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, creatorFa
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
 import { NarrationPlanEditor } from "./NarrationPlanEditor.js";
+import { NarrationTimingEditor } from "./NarrationTimingEditor.js";
 import { NodeDocumentCommands } from "./NodeDocumentCommands.js";
 import { NodeContentReview, nodeContentReview } from "./NodeContentReview.js";
 import { NodeDocumentHistory } from "./NodeDocumentHistory.js";
@@ -32,6 +33,10 @@ interface NodeWorkspaceProps {
   runRevision: number;
   acceptedPlanDigest: string;
   artifacts: StudioArtifact[];
+  /** 整个 run 的产物（声音时间编辑需要跨节点的 voice 产物身份）。 */
+  runArtifacts?: StudioArtifact[];
+  /** 当前活动停点编号（声音试听/首次冲突/成片返工）。 */
+  activeInterventionId?: string;
   busy: boolean;
   readOnly?: boolean;
   currentDelivery?: boolean;
@@ -51,7 +56,7 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, acceptedPlanDigest, artifacts, busy, readOnly = false, currentDelivery = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, currentDelivery = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
   const shouldOpenForAttention = currentDelivery || node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
@@ -457,6 +462,17 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       && nodes.some((candidate) => candidate.id === "voice" && candidate.status === "pending"
         && candidate.plannedExecution?.providerId === "minimax-tts-v1")
       ? <NarrationPlanEditor key={runId} runId={runId} runRevision={runRevision} disabled={busy || runStatus === "running"} /> : null}
+    {!readOnly && activeInterventionId
+        && ((nodes.some((candidate) => candidate.id === "voice" && candidate.status === "needs_human")
+              && (node.id === "voice" || node.id === "render"))
+          || (node.id === "final-review" && node.status === "needs_human"
+              && nodes.some((candidate) => candidate.id === "voice" && candidate.status === "succeeded")))
+      ? <NarrationTimingEditor key={`${runId}-timing`}
+          runId={runId} revision={runRevision}
+          voiceNode={nodes.find((candidate) => candidate.id === "voice")!}
+          artifacts={runArtifacts ?? artifacts}
+          interventionId={activeInterventionId}
+          disabled={busy || runStatus === "running"} /> : null}
     <details
       id={`node-workspace-${node.id}`}
       className={`node-workspace is-${node.status}`}

@@ -1,3 +1,4 @@
+import { parseStudioNarrationRevisionInput } from "./narration-revision-input.js";
 import { createReadStream } from "node:fs";
 import Fastify, { type FastifyInstance } from "fastify";
 import { parseProductionTemplate } from "@video-factory/template-core";
@@ -26,7 +27,7 @@ import {
   parseStudioDecisionInput,
   parseStudioCreativeReviewCommandInput,
   parseStudioSceneRevisionInput,
-  parseStudioNarrationRevisionInput,
+
   parseStudioSceneResourceRevisionInput,
   parseStudioVisualReinspectionInput,
   parseStudioPublishInput,
@@ -170,12 +171,20 @@ export interface StudioServicePort {
   creativeReviewCommand?(runId: string, commandId: string): Promise<StudioCreativeReviewCommandReceipt | undefined>;
   requestSceneRevision(runId: string, input: StudioSceneRevisionInput, actor: string): Promise<StudioRunDetail>;
   requestNarrationRevision(runId: string, input: StudioNarrationRevisionInput, actor: string): Promise<StudioRunDetail>;
+  readNarrationRelayoutOperation?(runId: string, requestId: string): Promise<{
+    requestId: string; state: "reserved" | "completed" | "applied" | "failed" | "discarded";
+    requestDigest?: string;
+    sourceOperationId?: string; relayoutSource?: string; layoutOperationId?: string;
+    resultVoiceVersionId?: string; isCurrent: boolean; failureReason?: string; createdAt?: string;
+  }>;
   requestSceneResourceRevision(runId: string, input: StudioSceneResourceRevisionInput, actor: string): Promise<StudioRunDetail>;
   reinspectVisualReview(runId: string, input: StudioVisualReinspectionInput): Promise<StudioRunDetail>;
   applyNodeOverride(runId: string, nodeId: string, input: StudioNodeOverrideInput, actor: string): Promise<StudioRunDetail>;
   applyNodeInputOverride(runId: string, nodeId: string, input: StudioNodeInputOverrideInput, actor: string): Promise<StudioRunDetail>;
   previewNarrationPlan(runId: string): Promise<import("../shared/api.js").StudioNarrationPlanPreview>;
   confirmNarrationPlan(runId: string, input: { expectedRunRevision: number; plan: unknown }, actor: string): Promise<StudioRunDetail>;
+  previewNarrationPlanV2(runId: string, input: import("../shared/api.js").StudioNarrationPreviewV2Input, actor: string): Promise<import("../shared/api.js").StudioNarrationPreviewTicketV2>;
+  confirmNarrationPlanV2(runId: string, input: import("../shared/api.js").StudioNarrationConfirmV2Input, actor: string): Promise<import("../shared/api.js").StudioNarrationConfirmV2Result>;
   reviseNodeDocument(runId: string, nodeId: string, input: StudioNodeDocumentRevisionInput, actor: string): Promise<StudioRunDetail>;
   auditNodeDocumentCurrent(runId: string, nodeId: string, input: StudioNodeDocumentAuditInput, actor: string): Promise<StudioRunDetail>;
   documentCommands?(runId: string, nodeId: string): Promise<StudioDocumentCommand[]>;
@@ -667,8 +676,38 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     return options.service.previewNarrationPlan(request.params.runId);
   });
 
+  // §2.2 v2 候选预览：本地核价并签发票据；不发起 TTS、不消费、不放行素材。
+  app.post<{ Params: { runId: string }; Body: Record<string, unknown> }>("/api/runs/:runId/narration-plan/preview", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    return options.service.previewNarrationPlanV2(request.params.runId, {
+      expectedRunRevision: body.expectedRunRevision as number,
+      sourceContextId: body.sourceContextId as string,
+      editorSessionId: body.editorSessionId as string,
+      editSequence: body.editSequence as number,
+      ...(body.candidateId !== undefined ? { candidateId: body.candidateId as string } : {}),
+      candidate: body.candidate,
+    }, trustedStudioActor(auth, request.headers.cookie));
+  });
+
   app.put<{ Params: { runId: string }; Body: { expectedRunRevision: number; plan: unknown } }>("/api/runs/:runId/narration-plan", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    // §2.2：v2 只凭同身份票据保存（不另收 plan）；旧 v1 PUT 原样保留。
+    if (body.version === "video-factory/narration-plan-v2") {
+      return options.service.confirmNarrationPlanV2(request.params.runId, {
+        requestId: body.requestId as string,
+        expectedRunRevision: body.expectedRunRevision as number,
+        sourceContextId: body.sourceContextId as string,
+        editorSessionId: body.editorSessionId as string,
+        editSequence: body.editSequence as number,
+        candidateId: body.candidateId as string,
+        ticketId: body.ticketId as string,
+        planSha256: body.planSha256 as string,
+        ...(body.acknowledgeQuoteUnavailable !== undefined
+          ? { acknowledgeQuoteUnavailable: body.acknowledgeQuoteUnavailable as boolean } : {}),
+      }, trustedStudioActor(auth, request.headers.cookie));
+    }
     if (!request.body || !Number.isSafeInteger(request.body.expectedRunRevision) || request.body.expectedRunRevision < 0
       || !request.body.plan || typeof request.body.plan !== "object") throw new StudioInputError("请先查看最新旁白方案。");
     return options.service.confirmNarrationPlan(request.params.runId, request.body, trustedStudioActor(auth, request.headers.cookie));
@@ -845,6 +884,15 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       parseStudioSceneRevisionInput(request.body),
       trustedStudioActor(auth, request.headers.cookie),
     );
+  });
+
+  app.get<{ Params: { runId: string; requestId: string } }>("/api/runs/:runId/narration-revisions/:requestId", async (request) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.requestId, "时间调整编号");
+    if (!options.service.readNarrationRelayoutOperation) {
+      throw new StudioConflictError("当前制作服务尚不支持时间调整查询。");
+    }
+    return options.service.readNarrationRelayoutOperation(request.params.runId, request.params.requestId);
   });
 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/narration-revisions", async (request) => {

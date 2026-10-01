@@ -325,6 +325,16 @@ export const studioApi = {
     { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
   narrationPlan: (runId: string) => requestJson<import("../shared/api.js").StudioNarrationPlanPreview>(`/api/runs/${encodeURIComponent(runId)}/narration-plan`),
+  narrationPlanPreviewV2: (runId: string, input: import("../shared/api.js").StudioNarrationPreviewV2Input) => requestJson<import("../shared/api.js").StudioNarrationPreviewTicketV2>(
+    `/api/runs/${encodeURIComponent(runId)}/narration-plan/preview`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  confirmNarrationPlanV2: (runId: string, input: import("../shared/api.js").StudioNarrationConfirmV2Input) => requestJson<import("../shared/api.js").StudioNarrationConfirmV2Result>(
+    `/api/runs/${encodeURIComponent(runId)}/narration-plan`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...input, version: "video-factory/narration-plan-v2" }) },
+  ),
+  narrationRelayoutOperation: (runId: string, requestId: string) => requestJson<import("../shared/api.js").StudioNarrationRelayoutOperation>(
+    `/api/runs/${encodeURIComponent(runId)}/narration-revisions/${encodeURIComponent(requestId)}`,
+  ),
   reviewPrefill: (runId: string) => requestJson<import("../shared/api.js").StudioReviewDecisionPrefill>(`/api/runs/${encodeURIComponent(runId)}/review-prefill`),
   confirmNarrationPlan: (runId: string, input: { expectedRunRevision: number; plan: import("../shared/api.js").StudioNarrationPlan }) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/narration-plan`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },

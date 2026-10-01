@@ -2,9 +2,7 @@
 
 ## Product Character
 
-VideoFactory 是为单人创作者设计的 Light Curated Studio。产品气质来自电影刊物、当代剪辑台和中文内容编辑室：清晰的纸面、明确的编排、可触摸的真实素材与声音选择，同时保留工业系统所需的证据、状态和审计能力。
-
-它不是营销页、通用节点编辑器，也不是 AI 玩具。热点证据、选题判断、声音角色、画面来源、成片和人的最终决定才是视觉中心。工作流存在于产品结构中，不把用户包围在“流水线仪表盘”的视觉语言里。
+VideoFactory 面向单人创作者。界面以可读稿件、真实素材、声音和成片为主，制作状态与费用记录放在容易查找的位置。用清晰的纸面、栏线和留白组织信息，不让流程图挤占创作内容。
 
 ## Experience Principles
 
@@ -17,7 +15,7 @@ VideoFactory 是为单人创作者设计的 Light Curated Studio。产品气质�
 
 ## Selected Direction
 
-本轮先比较了 Soft Editorial Atelier、Luminous Media Studio 和 Curated Gallery Grid。最终由用户确认采用 C+：保留 Luminous Media Studio 清晰、可操作的生产结构，吸收 Curated Gallery Grid 的开放排版、素材尺度、细分隔线和画廊式留白。
+采用浅色工作区：稿件易读，素材保留足够的预览尺寸，操作与状态层级明确。页面用细分隔线和留白区分内容，不按制作入口或角色堆叠不同主题。
 
 这个方向称为 Light Curated Studio。它不是营销型画廊，也不是传统后台：真实画面、声音、选题证据和人的判断是视觉主体；导航、状态和 Agent 只提供安静的秩序。设计参考包括 [Runway](https://runwayml.com/product/ai-video-editor) 的媒体工作区、[Frame.io](https://frame.io/creative-management-platform) 的审片清晰度和 [Descript](https://help.descript.com/hc/en-us/articles/37585546799757-The-editor-interface) 的编辑层级。它们只提供产品模式参考，不复制品牌外观。
 
@@ -114,7 +112,7 @@ Series uses a master-detail editorial layout. Season promise, canon, completed e
 
 已有成片时视频优先，复核与局部返工在相邻面板；900px 以下改为上下布局，避免审片意见横向溢出。复核是建议，用户承担 repair 的入口保留，版本、审计身份及资金权限仍由服务端校验。历史双审只读展示不意味着恢复已退役的生产模型。
 
-本次参考 Cue Kit 的 Minimal AI Dev Workspace（稿件与讨论层级）和 Expandable Share Card（可选信息逐步展开）；沿用现有字体、冷白纸面与钴蓝变量，不复制参考里的模拟消息或业务逻辑。含运行现场信息的 QA 证据留在本地，不随公开仓库发布。
+声音规划与时间调整沿用现有字体、纸面和钴蓝变量。生成前保存不推进；生成后调整成功回试听。旧来源、待确认请求和未保存草稿分别说明，换源或关闭不能悄悄丢失编辑内容。含运行现场信息的验证证据留在本地，不随公开仓库发布。
 
 ## Responsive Rules
 

@@ -180,7 +180,7 @@ async function uncertainPaidVoiceFixture(prefix: string) {
     `${JSON.stringify(failed, null, 2)}\n`,
     "utf8",
   );
-  return { subject, worker, failed, failedVoice };
+  return { workspaceRoot, subject, worker, failed, failedVoice };
 }
 
 /** 让每一镜都成为 AI 导演选定的付费生成镜头，报价才有条目可谈。 */
@@ -8545,6 +8545,48 @@ describe("ProductionPipeline", () => {
     assert.equal(voiceNode?.spendPlan, undefined);
     assert.match(voiceNode?.error ?? "", /历史付费任务已完成账单结算.*创建新版本/);
     assert.equal(worker.calls.filter((call) => call.capability === "voice.synthesize").length, 1);
+  });
+
+  it("does not promote an incomplete zero-group v3 ledger into a recoverable voice manifest", async () => {
+    const { workspaceRoot, subject, worker, failed, failedVoice } = await uncertainPaidVoiceFixture(
+      "video-factory-zero-group-ledger-recovery-",
+    );
+    const operationId = failedVoice.operationRequestId!;
+    const ledgerDirectory = path.join(
+      workspaceRoot,
+      "runs",
+      failed.id,
+      "nodes",
+      "voice",
+      ".voice-operations",
+    );
+    await mkdir(ledgerDirectory, { recursive: true });
+    await writeFile(path.join(
+      ledgerDirectory,
+      `${createHash("sha256").update(operationId).digest("hex")}.json`,
+    ), `${JSON.stringify({
+      version: "video-factory/voice-operation-v3",
+      operationId,
+      completed: false,
+      providerId: "minimax-tts-v1",
+      modelId: "speech-2.8-turbo",
+      estimatedCostCny: 0,
+      actualCostCny: 0,
+      actualCostSource: "configured_rate",
+      items: [],
+    }, null, 2)}\n`);
+
+    const summary = await subject.inspectPaidNode(failed.id, "voice");
+    assert.equal(summary.requiresManualReconciliation, true);
+    assert.equal(summary.recommendedOutcome, undefined);
+    await assert.rejects(() => subject.reconcilePaidNode(failed.id, {
+      nodeId: "voice",
+      expectedRunRevision: failed.revision,
+      reconciliationId: "zero-group-ledger-must-be-completed",
+      outcome: "resume_original",
+    }), pipeline.PaidOperationManualReconciliationError);
+    assert.equal(worker.calls.filter((call) => call.capability === "voice.synthesize").length, 1,
+      "损坏的空组账本不能触发合成或本地来源登记");
   });
 
   it("settles an explicitly rejected automatic TTS call without retrying before configuration changes", async () => {

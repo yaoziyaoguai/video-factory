@@ -23,8 +23,23 @@ class NarrationGroupDoesNotFitError(RuntimeError):
         self.source_audio_samples = samples
         self.required_frames = math.ceil(samples / SAMPLES_PER_FRAME) + group["placement"]["offsetFrames"]
         self.raw_audio_path = raw_audio_path
+        self.manifest: dict[str, Any] | None = None
+        self.manifest_path: Path | None = None
         super().__init__(f"{self.code}: {self.group_id} needs {self.required_frames} frames; "
                          "original audio retained without truncation or automatic synthesis retry.")
+
+
+class NarrationGroupDoesNotFitV2Error(NarrationGroupDoesNotFitError):
+    """v2 首次排轨冲突：窗口不收窄音频的完整事实，恢复走纯本地时间调整。"""
+
+    code = "NARRATION_GROUP_DOES_NOT_FIT_V2"
+
+    def __init__(self, group: dict[str, Any], samples: int, raw_audio_path: Path):
+        super().__init__(group, samples, raw_audio_path)
+        self.source_range = dict(group["sourceRange"])
+        self.placement = dict(group["placement"])
+        self.available_frames = group["window"]["endFrame"] - group["window"]["startFrame"]
+        self.shortfall_frames = max(0, self.required_frames - self.available_frames)
 
 
 def assemble_narration_track(
@@ -55,7 +70,10 @@ def assemble_narration_track(
                 if samples <= 0:
                     raise RuntimeError(f"Narration group {group['id']} has no decoded audio samples.")
                 if start < window_start or start + samples > window_end:
-                    raise NarrationGroupDoesNotFitError(group, samples, raw_path)
+                    error_class = (NarrationGroupDoesNotFitV2Error
+                                   if plan.get("version") == "video-factory/narration-plan-v2"
+                                   else NarrationGroupDoesNotFitError)
+                    raise error_class(group, samples, raw_path)
                 track[start * 2:(start + samples) * 2] = decoded.readframes(samples)
             groups.append({
                 **group, "rawAudioPath": str(raw_path),

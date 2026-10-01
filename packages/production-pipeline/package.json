@@ -21,6 +21,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./narration-text": {
+      "types": "./dist/narration-text.d.ts",
+      "import": "./dist/narration-text.js"
     }
   },
   "bin": {

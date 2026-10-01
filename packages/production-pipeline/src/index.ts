@@ -6,6 +6,56 @@ export { summarizeModelExecutionFacts } from "./model-execution-facts.js";
 export type { ModelExecutionFact, ModelExecutionProjection } from "./model-execution-facts.js";
 export { buildNarrationPlan, validateNarrationPlan } from "./narration-plan.js";
 export type { NarrationPlan, NarrationPlanPreview } from "./narration-plan.js";
+export {
+  buildNarrationPlanV2,
+  buildNarrationPlanV2FromCandidate,
+  candidateIdV2,
+  candidateToBuildInput,
+  canonicalJsonV2,
+  canonicalSourceSha256V2,
+  deriveBaseGroupsV2,
+  deriveV2SourceFacts,
+  narrationPlanVersion,
+  narrationPlanV2StandaloneInput,
+  parseNarrationCandidate,
+  planCanonicalSha256V2,
+  secondsToFramesV2,
+  sentenceBoundaryCandidatesV2,
+  trimV2,
+  userSilencesV2,
+  validateNarrationPlanV2,
+  validateSlicesV2,
+} from "./narration-plan.js";
+export type {
+  NarrationBaseGroupV2,
+  NarrationCandidate,
+  NarrationConfirmReceiptV2,
+  NarrationPlanV2,
+  NarrationPlanV2BuildInput,
+  NarrationPreviewQuoteV2,
+  NarrationPreviewTicketResponseV2,
+  NarrationV2SourceFacts,
+  SupportedNarrationPlan,
+} from "./narration-plan.js";
+export { NARRATION_CONFIRM_RECEIPT_VERSION, NARRATION_PREVIEW_TICKET_VERSION, NarrationTextV2Error } from "./narration-plan.js";
+export {
+  NARRATION_FIT_CONFLICT_V2_VERSION,
+  parseNarrationRelayoutCompletion,
+  parseNarrationFitConflictV2,
+  parseNarrationRelayoutRequest,
+  parseRelayoutSource,
+  RELAYOUT_OPERATION_VERSION,
+  RELAYOUT_COMPLETION_VERSION,
+} from "./narration-relayout.js";
+export type {
+  DiscardUnappliedRelayoutDraft,
+  NarrationFitConflictV2,
+  NarrationRelayoutCompletion,
+  NarrationRelayoutCompletionArtifact,
+  NarrationRelayoutRequest,
+  RelayoutNarrationDraft,
+  RelayoutNarrationSource,
+} from "./narration-relayout.js";
 export { reviewDecisionPrefill } from "./review-decision-prefill.js";
 export type { ReviewDecisionPrefill } from "./review-decision-prefill.js";
 export type { ModelConnectionInput, ModelConnection, ModelProtocol, ModelUnderstandingCapability } from "./model-connection.js";

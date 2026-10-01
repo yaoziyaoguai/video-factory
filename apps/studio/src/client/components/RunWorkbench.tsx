@@ -11,6 +11,7 @@ import { RunCostDetailPanel } from "./CostDashboard.js";
 import { AudioReviewPanel } from "./AudioReviewPanel.js";
 import { CurrentFilmReinspection } from "./CurrentFilmReinspection.js";
 import { SubtitleRecoveryPanel } from "./SubtitleRecoveryPanel.js";
+import { NarrationTimingEditor } from "./NarrationTimingEditor.js";
 import { studioApi } from "../api.js";
 
 export function currentSubtitlePreview(run: StudioRunDetail) {
@@ -129,7 +130,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   // 边界停点：这一步已做完、产物已存，只等用户决定是否进入下一步。按钮文案必须按
   // 它真正的后果说话——把中间节点的放行写成「批准进入发布包」会让用户以为点下去就发了。
   const boundaryGate = run.activeIntervention?.boundary === "node-complete";
-  const voiceOutput = run.nodes.find((node) => node.id === "voice")?.output;
+  const voiceNode = run.nodes.find((node) => node.id === "voice");
+  const voiceOutput = voiceNode?.output;
   const voiceWithoutSubtitles = boundaryGate && run.activeIntervention?.nodeId === "voice"
     && typeof voiceOutput === "object" && voiceOutput !== null && "narrationMode" in voiceOutput
     && voiceOutput.narrationMode === "continuous_groups" && "subtitleStatus" in voiceOutput
@@ -327,6 +329,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     runId={run.id}
     runRevision={run.revision}
     acceptedPlanDigest={run.productionPlanDigest ?? ""}
+    runArtifacts={run.artifacts}
+    {...(run.activeIntervention?.id ? { activeInterventionId: run.activeIntervention.id } : {})}
     readOnly={readOnly}
     currentDelivery={node.id === currentArtifactNode?.id}
     {...(node.id === "creative-planning" && run.planningStages ? { planningStages: run.planningStages } : {})}
@@ -549,6 +553,12 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
           {run.activeIntervention?.nodeId === "final-review" && !readOnly && onRequestNarrationRevision
             ? <SubtitleRecoveryPanel key={`${run.id}:${run.revision}`} run={run}
               busy={decisionPending || nodeMutationPending} onRecover={onRequestNarrationRevision} /> : null}
+          {video?.contentUrl && run.activeIntervention?.nodeId === "final-review" && !readOnly
+            && voiceNode?.status === "succeeded" && voiceNode.outputState?.stale !== true
+            && voiceNode.outputState?.effectiveVersionId
+            ? <NarrationTimingEditor key={`${run.id}-final-review-timing`} runId={run.id} revision={run.revision}
+              voiceNode={voiceNode} artifacts={run.artifacts} interventionId={run.activeIntervention.id}
+              disabled={decisionPending || nodeMutationPending} /> : null}
           {!visualReview && video?.contentUrl ? <section className="review-advisory" role="status" aria-label="机器审片状态">
             <strong>可播放首版</strong>
             <p>机器视觉审片尚未完成。你可以播放和下载当前视频；这不代表正式发布已通过。</p>
@@ -745,14 +755,14 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                     <Check aria-hidden="true" size={17} />仍要批准（说明理由）
                   </button>
                 </> : <>
-                  <button
+                  {run.activeIntervention.options.includes("approve") ? <button
                     className="button button-primary"
                     type="button"
                     disabled={decisionPending}
                     onClick={() => openDecision("approve")}
                   >
                     <Check aria-hidden="true" size={17} />{sourcePreflightDecision ? "接受当前素材风险，继续制作" : sourceReviewDecision || sourceReviewIncompleteRisk ? "查看质量意见并继续制作" : visualReviewIncompleteDecision ? "接受未复核风险，进入人工终审" : finalReviewIncompleteRisk ? "接受未复核风险并内部定版" : "批准进入发布包"}
-                  </button>
+                  </button> : null}
                   <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
                     <XCircle aria-hidden="true" size={17} />终止制作
                   </button>
