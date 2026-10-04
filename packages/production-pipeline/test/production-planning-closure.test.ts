@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import {
   CodexBridgeError,
   CodexBridgeClient,
+  ModelCandidatesExhaustedError,
   CodexScreenwriterAgent,
   type CodexTaskKind,
   RoleAgentLoopError,
+  HumanDecisionConflictError,
   ProductionPipeline,
   contentSha256,
   planningReviewCheckpointIdentity,
@@ -32,7 +34,12 @@ import {
 } from "../src/index.js";
 import type { WorkflowRun } from "@video-factory/workflow-core";
 import { summarizeJointPlanningExecution } from "../src/production-pipeline.js";
+import { CodexBrokerServer } from "../../../apps/codex-broker/src/broker-server.js";
+import { runCreativeDiscussionTask } from "../src/codex-creative-discussion.js";
+import type { ValidatedTask } from "../../../apps/codex-broker/src/codex-executor.js";
 import { CodexAssetSemanticRanker, deterministicAssetRanking, type AssetCandidateReport } from "../src/asset-semantic-ranker.js";
+import { ProductionStudio } from "../../../apps/studio/src/server/production-studio.js";
+import { JsonRunArchiveStore } from "../../../apps/studio/src/server/run-archive-store.js";
 
 // ---------------------------------------------------------------------------
 // B4-REMAINDER：joint-v1 规划编辑合同的行为测试。
@@ -45,6 +52,7 @@ import { CodexAssetSemanticRanker, deterministicAssetRanking, type AssetCandidat
 // 全部走真实 ProductionPipeline（SQLite checkpoint + planning commit）；创作角色为本地替身。
 // ---------------------------------------------------------------------------
 
+import { parseCreativeTreatment } from "../src/creative-treatment.js";
 const TREATMENT_PROVIDER_ID = "codex-creative-treatment-v1";
 
 class ClosureWorker {
@@ -417,17 +425,30 @@ function closureDirector(spies: ClosureSpies): VisualDirectorAgent {
         resolvedProfileId: "documentary-observer",
         profileRationale: "用真实动作解释。",
         visualBible: {
-          narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
-          camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
+          narrativeApproach: "逐步展示", motif: "窗边光影", pacing: "均匀", composition: "稳定中景",
+          camera: "固定机位", color: "自然色", continuity: "同一时段", transitionGrammar: "硬切配字幕",
+          sound: "环境声", antiPatterns: ["不用电影感运镜"],
         },
         shots: input.scenes.map((scene) => ({
           scenePosition: scene.position,
+          reuseFromScenePosition: null,
+          referenceFromScenePosition: null,
           narrativeRole: "解释",
           authenticityPolicy: "illustrative",
           preferredProviderId: "local-editorial-v1",
           deliveryType: "editorial_card",
           alternativeProviderIds: [],
+          subject: `第${scene.position}段示意主体`,
+          environment: "桌面一角，自然光",
+          visibleAction: `第${scene.position}段标注动作`,
           temporalBeats: [`[0s-4s] 建立动作`, `[4s-8s] 完成动作`],
+          shotSize: "中景卡片",
+          sourceInSeconds: 0,
+          camera: "固定",
+          lighting: "自然光",
+          negativeConstraints: ["不冒充真实事件"],
+          referenceRequirements: [],
+          successCriteria: ["卡面文字可读"],
           query: `editorial-${scene.position}`,
           generationPrompt: `第${scene.position}个真实生活动作`,
           rationale: "本地说明卡可以执行。",
@@ -1317,17 +1338,30 @@ function flakyDirector(spies: ClosureSpies, options: { failFirstCall?: boolean }
         resolvedProfileId: "documentary-observer",
         profileRationale: "用真实动作解释。",
         visualBible: {
-          narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
-          camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
+          narrativeApproach: "逐步展示", motif: "窗边光影", pacing: "均匀", composition: "稳定中景",
+          camera: "固定机位", color: "自然色", continuity: "同一时段", transitionGrammar: "硬切配字幕",
+          sound: "环境声", antiPatterns: ["不用电影感运镜"],
         },
         shots: input.scenes.map((scene) => ({
           scenePosition: scene.position,
+          reuseFromScenePosition: null,
+          referenceFromScenePosition: null,
           narrativeRole: "解释",
           authenticityPolicy: "illustrative",
           preferredProviderId: "local-editorial-v1",
           deliveryType: "editorial_card",
           alternativeProviderIds: [],
+          subject: `第${scene.position}段示意主体`,
+          environment: "桌面一角，自然光",
+          visibleAction: `第${scene.position}段标注动作`,
           temporalBeats: [`[0s-4s] 建立动作`, `[4s-8s] 完成动作`],
+          shotSize: "中景卡片",
+          sourceInSeconds: 0,
+          camera: "固定",
+          lighting: "自然光",
+          negativeConstraints: ["不冒充真实事件"],
+          referenceRequirements: [],
+          successCriteria: ["卡面文字可读"],
           query: `editorial-${scene.position}`,
           generationPrompt: `第${scene.position}个真实生活动作`,
           rationale: "本地说明卡可以执行。",
@@ -1357,8 +1391,9 @@ function closureLibraryDirector(spies: ClosureSpies): VisualDirectorAgent {
         resolvedProfileId: "documentary-observer",
         profileRationale: "用真实动作解释。",
         visualBible: {
-          narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
-          camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
+          narrativeApproach: "逐步展示", motif: "窗边光影", pacing: "均匀", composition: "稳定中景",
+          camera: "固定机位", color: "自然色", continuity: "同一时段", transitionGrammar: "硬切配字幕",
+          sound: "环境声", antiPatterns: ["不用电影感运镜"],
         },
         shots: input.scenes.map((scene) => ({
           scenePosition: scene.position,
@@ -2493,11 +2528,13 @@ describe("same-digest replay fails closed when stage inputs drift (B-FIX)", () =
       if (stage === "director") {
         const incompatible = new ProductionPipeline({ ...runtimeOptions,
           assetProviders: runtimeOptions.assetProviders!.map(provider => ({ ...provider, deliveryTypes: ["stock_image"] })) });
-        const rejected = await incompatible.confirmCreativeReview(run.id, command);
-        assert.equal(rejected.nodeRuns.find(node => node.nodeId === "creative-planning")?.status, "failed");
-        assert.match(rejected.nodeRuns.find(node => node.nodeId === "creative-planning")!.error!, /cannot deliver/);
-        // 恢复能力后重试原确认，不换任务/命令，也不重跑任何已有文字阶段。
-        run = await pipeline.retryFailedNode(run.id, "creative-planning");
+        const preserved = await pipeline.loadPersisted(run.id);
+        // D05：不可执行的当前方案在确认边界拒绝，工作台仍在；不是制造 failed 再补救。
+        await assert.rejects(incompatible.confirmCreativeReview(run.id, command), /cannot deliver/);
+        assert.deepEqual(await pipeline.loadPersisted(run.id), preserved);
+        assert.equal(preserved.nodeRuns.find(node => node.nodeId === "creative-planning")?.status, "needs_human");
+        // 恢复能力后显式确认原稿，不换任务/命令，也不重跑或补审已有文字阶段。
+        run = await pipeline.confirmCreativeReview(run.id, command);
       } else {
         run = await pipeline.confirmCreativeReview(run.id, command);
       }
@@ -2791,11 +2828,14 @@ describe("settled audit candidate exhaustion through the production pipeline", (
           : new CodexBridgeError("provider boundary requires recovery", false, failure);
       } });
       const run = await pipeline.start(closureBrief({ creativeReview: true }));
-      assert.equal(run.status, "failed", "不能把未知受理/身份冲突误报为可略过的审计失败");
+      // F03（2026-10-02 执行包）：未知受理/身份冲突不再把 run 打成 failed；它们转成
+      // 人工停点＋续接诊断。仍不得被误报为「已核清无结论」的 incomplete 审计。
+      assert.equal(run.status, "needs_human", "未知受理/身份冲突停在用户面前，保留工作台");
       const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
       const review = (node.output as { creativeReview?: CreativeReviewState } | undefined)?.creativeReview;
       assert.equal(review?.stages.treatment.auditHistory.length ?? 0, 0);
       assert.equal(review?.stages.treatment.checkResult ?? null, null);
+      assert.ok(review?.stages.treatment.continuation, "异常事实进入续接诊断");
       assert.equal(spies.treatmentAuditCalls, 2);
       assert.equal(spies.treatmentModelCalls.length, 1);
       assert.equal(spies.screenwriterCalls.length, 0);
@@ -2883,27 +2923,27 @@ it("retrieving a late audit completes only its original creative command receipt
     baseDraftSha256: gate.draftSha256,
   };
   pending = true;
-  const failed = await (await pipeline.dispatchCreativeReviewCommand(initial.id, command)).completion;
-  assert.equal(failed.status, "failed");
-  assert.equal(failed.creativeReviewOperations?.at(-1)?.status, "failed");
-  // 查询后发现原任务仍未落定，第二次恢复不能丢失原命令绑定。
-  const stillUnknown = await (await pipeline.dispatchRetryFailedNode(initial.id, "creative-planning", undefined, {
-    recoverOriginalTextTask: true,
-  })).completion;
-  assert.equal(stillUnknown.status, "failed");
-  assert.equal(stillUnknown.creativeReviewOperations?.at(-1)?.status, "failed");
+  // F03（2026-10-02 执行包）：unknown 审计停在人面前（needs_human＋unknown 回执＋续接诊断），
+  // 而不是 run failed；同一 commandId 的重放走幂等接续，不丢失原命令绑定。
+  const unknownStop = await (await pipeline.dispatchCreativeReviewCommand(initial.id, command)).completion;
+  assert.equal(unknownStop.status, "needs_human");
+  assert.equal(unknownStop.creativeReviewOperations?.at(-1)?.status, "unknown",
+    "原请求未核清时回执保持 unknown，不宣称 completed");
+  assert.equal(reviewOf(unknownStop).stages.treatment.continuation?.status, "unknown");
+  // 查询后发现原任务仍未落定，第二次同命令接续不能丢失原命令绑定。
+  const stillUnknown = await (await pipeline.dispatchCreativeReviewCommand(initial.id, command)).completion;
+  assert.equal(stillUnknown.status, "needs_human");
+  assert.equal(stillUnknown.creativeReviewOperations?.at(-1)?.status, "unknown");
   pending = false;
   let releaseRecovery!: () => void;
   recoveryBarrier = new Promise<void>((resolve) => { releaseRecovery = resolve; });
   const enteredRecovery = new Promise<void>((resolve) => { signalRecovery = resolve; });
-  const recovering = await pipeline.dispatchRetryFailedNode(initial.id, "creative-planning", undefined, {
-    recoverOriginalTextTask: true,
-  });
+  const recovering = await pipeline.dispatchCreativeReviewCommand(initial.id, command);
   await enteredRecovery;
   try {
     const inflight = await pipeline.loadPersisted(initial.id);
-    assert.equal(inflight.creativeReviewOperations?.at(-1)?.status, "running",
-      "恢复中的命令须可被重启扫描接管，不能保留 failed 终态");
+    assert.ok(["running", "unknown"].includes(String(inflight.creativeReviewOperations?.at(-1)?.status)),
+      "恢复中的命令保持可接管状态（running/unknown），不能落成 completed/failed 终态");
   } finally {
     releaseRecovery();
   }
@@ -3075,7 +3115,13 @@ it("旧操作的异常经新操作重抛：helper 不改签、图层零登记、
   assert.deepEqual(afterO3.operationStatuses, ["audit-o1:completed", "audit-o3:completed"]);
   const reviewAfterO3 = (after.nodeRuns.find((candidate: any) => candidate.nodeId === "creative-planning")?.output as any)
     ?.creativeReview;
-  assert.deepEqual(reviewAfterO3, reviewAfterO1, "拒收后完整 creativeReview 逐字段不变（含历史/结论/版本/轮次）");
+  // F03：拒收会新增 rejected_operation 续接诊断；除此之外逐字段不变（含历史/结论/版本/轮次）。
+  const { continuation: _continuation, ...treatmentAfterO3 } = reviewAfterO3?.stages?.treatment ?? {};
+  const { continuation: _continuationBefore, ...treatmentAfterO1 } = reviewAfterO1?.stages?.treatment ?? {};
+  assert.deepEqual({ ...reviewAfterO3, stages: { ...reviewAfterO3.stages, treatment: treatmentAfterO3 } },
+    { ...reviewAfterO1, stages: { ...reviewAfterO1.stages, treatment: treatmentAfterO1 } },
+    "拒收后除续接诊断外逐字段不变");
+  assert.equal(reviewAfterO3?.stages?.treatment?.continuation?.status, "rejected_operation");
   const stopDetail = (after.nodeRuns.find((candidate: any) => candidate.nodeId === "creative-planning")?.output as any)
     ?.planningStop;
   assert.ok(stopDetail?.detail?.includes("另一次已过期的操作"), "拒绝原因对创作者可见");
@@ -3141,13 +3187,14 @@ it("旧操作绑定的 uncertain 异常经新操作重抛：原异常传播、�
     expectedReviewRevision: gate.reviewRevision, baseDraftSha256: gate.draftSha256,
   });
   const o3Run: any = await o3.completion;
-  // uncertain 原异常传播：节点 failed 且错误正文就是原异常消息——不是异操作拒收的
-  // needs_human 停点（优先顺序回退后这里会变成 needs_human，用例随之失败）。
-  assert.equal(o3Run.status, "failed", "uncertain 必须原样传播，不得转成异操作停点");
-  const failedNode = nodeOf(o3Run);
-  assert.equal(failedNode?.status, "failed");
-  assert.equal(failedNode?.error, "旧操作未决异常", "节点错误就是原异常本体传播的结果");
-  assert.equal((failedNode?.output as any)?.planningStop, undefined, "不得留下异操作拒收停点");
+  // F03（2026-10-02 执行包）替代旧断言：旧绑定 uncertain 不再以节点 failed 锁死制作；
+  // 转成 unknown 人工停点＋续接诊断，零登记，初稿审计结论保持，原请求事实可查询。
+  assert.equal(o3Run.status, "needs_human", "uncertain 转人工停点，不再以节点失败锁死");
+  const stoppedNode = nodeOf(o3Run);
+  assert.equal(stoppedNode?.status, "needs_human");
+  const treatmentStop = treatmentOf(o3Run);
+  assert.equal(treatmentStop?.continuation?.status, "unknown", "原请求事实进入 unknown 续接诊断");
+  assert.match(String(stoppedNode?.output?.planningStop?.detail ?? ""), /仍在核实/);
 
   const after = await pipeline.show(o3Run.id);
   const treatment = treatmentOf(after);
@@ -3162,4 +3209,1049 @@ it("旧操作绑定的 uncertain 异常经新操作重抛：原异常传播、�
     oldOperationId, "旧绑定未被新操作改签");
   assert.ok(staleUncertain.sourceError instanceof CodexBridgeError
     && staleUncertain.sourceError.stage === "uncertain", "sourceError.stage 仍为 uncertain");
+});
+
+// F03/D05（2026-10-02 执行包）：不可执行稿的完整服务端行为——审计异常转人工停点并给
+// 字段级诊断；确认在命令边界被拒绝且保留停点；修正后合法继续。复现事故形态：
+// 已发布稿缺 retrievalProviderId，审计重读时结构校验失败。
+it("F03：不可执行稿审计停点、确认边界拒绝、修正后续跑（真实 Pipeline）", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-f03-nonexec-draft-"));
+  const spies: ClosureSpies = {
+    treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+    screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+  };
+  const invalidTreatment = {
+    ...legalTreatment("F03 不可执行稿"),
+    evidenceRequirements: [{
+      beatId: "beat-1", claim: "需要一个生成画面", requirement: "illustration_only" as const,
+      suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" as const,
+      retrievalProviderId: null,
+    }],
+  };
+  // 事故同款装配：check 模式的角色端口先按真实合同校验候选再审计——结构不过即抛普通 Error。
+  const treatmentPort: CreativeTreatmentAgent = {
+    id: TREATMENT_PROVIDER_ID,
+    modelId: "treatment-model-a",
+    treat: async () => invalidTreatment as CreativeTreatment,
+    treatDetailed: async (input: CreativeTreatmentAgentInput) => {
+      if (input.creativeReviewExecution?.mode === "check") {
+        spies.treatmentAuditCalls = (spies.treatmentAuditCalls ?? 0) + 1;
+        parseCreativeTreatment(input.creativeReviewExecution.candidate, []);
+        throw new Error("Creative treatment evidenceRequirements[0].retrievalProviderId is required for pipeline_generated.");
+      }
+      spies.treatmentModelCalls.push("treatment-model-a");
+      return { output: invalidTreatment as CreativeTreatment, trace: {
+        taskKind: "creative-treatment" as const, promptVersion: "v1", prompt: "fixture",
+        providerId: "openai", modelId: "treatment-model-a" } };
+    },
+  };
+  const pipeline = new ProductionPipeline({
+    workspaceRoot, worker: new ClosureWorker(),
+    treatmentAgents: [{ providerId: "openai", agent: treatmentPort }],
+    screenwriterAgent: closureScreenwriter(spies),
+    directorAgent: closureDirector(spies),
+    assetProviders: CLOSURE_ASSET_PROVIDERS,
+  });
+  const run = await pipeline.start(closureBrief({ creativeReview: true }));
+  assert.equal(run.status, "needs_human", "审计异常必须停在用户面前");
+  const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+  const review = (node.output as { creativeReview: CreativeReviewState }).creativeReview;
+  const stage = review.stages.treatment;
+  assert.equal(stage.checkResult, null, "不得伪造结论");
+  assert.equal(stage.continuation?.status, "error");
+  assert.equal(stage.continuation?.reasonCode, "draft_validation_failed");
+  assert.ok(stage.continuation?.validationIssues?.some((issue) => issue.path.includes("evidenceRequirements[0].retrievalProviderId")),
+    "字段级问题指向具体字段");
+  assert.deepEqual(stage.currentDocument, invalidTreatment, "工作台全文保留");
+  const gate = node.intervention!.continuation!;
+
+  // 确认被命令边界拒绝（保留停点），不是节点 failed。
+  await assert.rejects(
+    pipeline.confirmCreativeReview(run.id, {
+      commandId: "confirm-invalid", actor: "creator", stage: gate.stage,
+      expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+      baseDraftSha256: gate.draftSha256, acknowledgeUnaudited: true,
+    }),
+    (error: unknown) => error instanceof HumanDecisionConflictError && /缺必需结构.*retrievalProviderId/u.test(error.message),
+  );
+  const afterReject = await pipeline.show(run.id);
+  assert.equal(afterReject.status, "needs_human", "拒绝后停点保留");
+  assert.equal(afterReject.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")?.status, "needs_human");
+
+  // 修正后续跑：把稿改成合法结构（编辑换版），再显式未审采用，进入脚本停点。
+  const fixed = legalTreatment("F03 不可执行稿");
+  const edited = await pipeline.dispatchCreativeReviewCommand(afterReject.id, {
+    action: "edit_draft", commandId: "fix-draft", actor: "creator", stage: gate.stage,
+    expectedRunRevision: afterReject.revision, expectedReviewRevision: gate.reviewRevision,
+    baseDraftSha256: gate.draftSha256, document: fixed,
+  });
+  const editedRun = await edited.completion;
+  assert.equal(editedRun.status, "needs_human");
+  const editedGate = editedRun.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!.intervention!.continuation!;
+  const adopted = await pipeline.confirmCreativeReview(editedRun.id, {
+    commandId: "adopt-fixed", actor: "creator", stage: editedGate.stage,
+    expectedRunRevision: editedRun.revision, expectedReviewRevision: editedGate.reviewRevision,
+    baseDraftSha256: editedGate.draftSha256, acknowledgeUnaudited: true,
+  });
+  const planningAfter = adopted.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+  assert.notEqual(planningAfter.status, "failed", planningAfter.error);
+  const reviewAfter = (planningAfter.output as { creativeReview?: CreativeReviewState; creativeReviewHistory?: CreativeReviewState }).creativeReview
+    ?? (planningAfter.output as { creativeReviewHistory: CreativeReviewState }).creativeReviewHistory;
+  assert.equal(reviewAfter.stages.treatment.phase, "confirmed", "修正后的稿能正常采用");
+});
+
+// ---------------------------------------------------------------------------
+// DG-UX-04（新前端 Dogfood 修复执行包 R2）：讨论输入合同与失败作用域。
+// 已核清的 discuss/revise 咨询失败只属于这条命令：主 run 回到原人工停点，
+// 已保存稿/版本/讨论不动，回执按 not_accepted / failed / unknown 分别落账，
+// 零后续生成、零重发（重放只回原结果，同 ID 异 body 拒绝）。
+// ---------------------------------------------------------------------------
+
+describe("creative discussion failure isolation (DG-UX-04)", () => {
+  type BridgeCase = {
+    bridgeStage: "completed_failure" | "rejected" | "not_accepted" | "uncertain";
+    transient: boolean;
+    receipt: "failed" | "not_accepted" | "unknown";
+  };
+  const bridgeCases: BridgeCase[] = [
+    { bridgeStage: "completed_failure", transient: false, receipt: "failed" },
+    { bridgeStage: "rejected", transient: false, receipt: "not_accepted" },
+    { bridgeStage: "not_accepted", transient: true, receipt: "not_accepted" },
+    { bridgeStage: "uncertain", transient: false, receipt: "unknown" },
+  ];
+
+  it("keeps the run at the human stop with the saved draft untouched when a consultation fails", async () => {
+    for (const gateStage of ["treatment", "script", "director"] as const) {
+      for (const testCase of bridgeCases) {
+        const workspaceRoot = await mkdtemp(path.join(tmpdir(), `vf-discuss-${gateStage}-${testCase.receipt}-`));
+        const spies: ClosureSpies = {
+          treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+          screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+        };
+        const discussCalls: Array<Record<string, unknown>> = [];
+        const failingDiscuss = async (input: Record<string, unknown>) => {
+          discussCalls.push(input);
+          throw new CodexBridgeError(
+            `受控讨论失败（${testCase.bridgeStage}）`,
+            testCase.transient,
+            testCase.bridgeStage,
+          );
+        };
+        const pipeline = new ProductionPipeline({
+          workspaceRoot,
+          worker: new ClosureWorker(),
+          treatmentAgents: closureTreatmentAgents(spies).map((entry) => ({
+            providerId: entry.providerId,
+            agent: Object.assign(entry.agent, { discussDetailed: failingDiscuss }),
+          })),
+          screenwriterAgent: Object.assign(closureScreenwriter(spies), { discussDetailed: failingDiscuss }) as ScreenwriterAgent,
+          directorAgent: Object.assign(closureDirector(spies), { discussDetailed: failingDiscuss }) as VisualDirectorAgent,
+          assetProviders: CLOSURE_ASSET_PROVIDERS,
+        });
+        const gateOf = (run: WorkflowRun<ProductionBrief>) => {
+          const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+          assert.ok(node.intervention?.continuation, `制作必须停在创作停点上（${gateStage}/${testCase.receipt}）`);
+          return { node, continuation: node.intervention.continuation };
+        };
+        const confirmCurrent = async (run: WorkflowRun<ProductionBrief>): Promise<WorkflowRun<ProductionBrief>> => {
+          const { node, continuation } = gateOf(run);
+          const shown = (node.output as { creativeReview?: { stages?: Record<string, { checkResult?: { verdict?: string; checkIdentity?: string } }> } })
+            .creativeReview?.stages?.[continuation.stage]?.checkResult;
+          return await pipeline.confirmCreativeReview(run.id, {
+            commandId: `confirm-${continuation.stage}-${testCase.receipt}-${Math.random().toString(36).slice(2, 8)}`,
+            actor: "creator",
+            stage: continuation.stage,
+            expectedRunRevision: run.revision,
+            expectedReviewRevision: continuation.reviewRevision,
+            baseDraftSha256: continuation.draftSha256,
+            ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
+            ...(shown?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}),
+            ...(!shown ? { acknowledgeUnaudited: true as const } : {}),
+          });
+        };
+        let run = await pipeline.start(closureBrief({ creativeReview: true }));
+        if (gateStage !== "treatment") run = await confirmCurrent(run);
+        if (gateStage === "director") run = await confirmCurrent(run);
+        const gate = gateOf(run).continuation;
+        assert.equal(gate.stage, gateStage, `应停在 ${gateStage} 停点`);
+        const reviewBefore = (gateOf(run).node.output as { creativeReview: CreativeReviewState }).creativeReview;
+        const stageBefore = reviewBefore.stages[gateStage];
+        const documentBefore = structuredClone(stageBefore.currentDocument);
+        const versionBefore = stageBefore.currentDraft!.versionId;
+        const messagesBefore = stageBefore.messages.length;
+        const generationBefore = {
+          treatment: spies.treatmentTitles.length,
+          script: spies.screenwriterCalls.length,
+          director: spies.directorCalls,
+        };
+
+        // 重放必须逐字复用同一命令体（digest 覆盖全部字段，包括 expectedRunRevision）。
+        const discussionCommand = {
+          action: "discuss" as const,
+          commandId: `discuss-${testCase.receipt}`,
+          actor: "creator",
+          stage: gateStage,
+          expectedRunRevision: run.revision,
+          expectedReviewRevision: gate.reviewRevision,
+          baseDraftSha256: gate.draftSha256,
+          message: "解释这个安排",
+        };
+        const dispatched = await pipeline.dispatchCreativeReviewCommand(run.id, discussionCommand);
+        const settled = await dispatched.completion;
+
+        // 失败只属于命令：主 run 回到原人工停点，稿/版本/讨论原样。
+        assert.equal(settled.status, "needs_human", `咨询失败不能把主制作打成 failed（${gateStage}/${testCase.receipt}）：${settled.nodeRuns.map((node) => node.error).join(";")}`);
+        const settledGate = gateOf(settled).continuation;
+        assert.equal(settledGate.stage, gateStage);
+        assert.equal(settledGate.draftSha256, gate.draftSha256);
+        assert.equal(settledGate.reviewRevision, gate.reviewRevision, "失败咨询不推进复核轮次");
+        const reviewAfter = (gateOf(settled).node.output as { creativeReview: CreativeReviewState }).creativeReview;
+        const stageAfter = reviewAfter.stages[gateStage];
+        assert.deepEqual(stageAfter.currentDocument, documentBefore, "已保存稿未改动");
+        assert.equal(stageAfter.currentDraft!.versionId, versionBefore);
+        assert.equal(stageAfter.messages.length, messagesBefore, "失败不伪造模型回复");
+        const operation = settled.creativeReviewOperations?.find((candidate) => candidate.commandId === "discuss-" + testCase.receipt);
+        assert.ok(operation, "命令必须有持久回执");
+        assert.equal(operation!.status, testCase.receipt, `回执应为 ${testCase.receipt}`);
+        // 零后续生成：咨询失败不得触发任何阶段重新生成。
+        assert.equal(spies.treatmentTitles.length, generationBefore.treatment);
+        assert.equal(spies.screenwriterCalls.length, generationBefore.script);
+        assert.equal(spies.directorCalls, generationBefore.director);
+
+        // 同 commandId 同 body 重放：不再执行第二次（unknown 的恢复重放也必须复用同一 requestId）。
+        const callsAfterFirst = discussCalls.length;
+        const replay = await pipeline.dispatchCreativeReviewCommand(run.id, discussionCommand);
+        const replayed = await replay.completion;
+        assert.equal(replayed.status, "needs_human");
+        const replayOperation = replayed.creativeReviewOperations?.find((candidate) => candidate.commandId === "discuss-" + testCase.receipt);
+        assert.equal(replayOperation!.status, testCase.receipt, "重放回原结果");
+        for (const call of discussCalls) {
+          assert.equal(call.requestId, discussCalls[0]!.requestId, "所有执行/恢复都必须指向同一原请求身份");
+        }
+        if (testCase.receipt !== "unknown") {
+          assert.equal(discussCalls.length, callsAfterFirst, "已核清结果的重放不得再次执行");
+        }
+        // 同 commandId 异 body 拒绝。
+        await assert.rejects(
+          () => pipeline.dispatchCreativeReviewCommand(replayed.id, {
+            action: "discuss",
+            commandId: `discuss-${testCase.receipt}`,
+            actor: "creator",
+            stage: gateStage,
+            expectedRunRevision: replayed.revision,
+            expectedReviewRevision: gate.reviewRevision,
+            baseDraftSha256: gate.draftSha256,
+            message: "不同的内容",
+          }),
+          /already used with different content/,
+        );
+      }
+    }
+  });
+
+  it("isolates a failed revise without adopting its proposal or advancing the gate", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-revise-failure-"));
+    const spies: ClosureSpies = {
+      treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+    };
+    const pipeline = new ProductionPipeline({
+      workspaceRoot,
+      worker: new ClosureWorker(),
+      treatmentAgents: closureTreatmentAgents(spies),
+      screenwriterAgent: Object.assign(closureScreenwriter(spies), {
+        discussDetailed: async () => {
+          throw new CodexBridgeError("受控修订失败", false, "completed_failure");
+        },
+      }) as ScreenwriterAgent,
+      directorAgent: closureDirector(spies),
+      assetProviders: CLOSURE_ASSET_PROVIDERS,
+    });
+    let run = await pipeline.start(closureBrief({ creativeReview: true }));
+    const gateOf = (candidate: WorkflowRun<ProductionBrief>) => candidate.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    const treatment = gateOf(run);
+    const shown = (treatment.output as { creativeReview: { stages: { treatment: { checkResult: { checkIdentity?: string; verdict?: string } } } } })
+      .creativeReview.stages.treatment.checkResult;
+    run = await pipeline.confirmCreativeReview(run.id, {
+      commandId: "adopt-treatment-for-revise", actor: "creator", stage: "treatment",
+      expectedRunRevision: run.revision,
+      expectedReviewRevision: treatment.intervention!.continuation!.reviewRevision,
+      baseDraftSha256: treatment.intervention!.continuation!.draftSha256,
+      ...(shown.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
+      ...(shown.verdict === "repair" ? { acknowledgeRepair: true as const } : {}),
+    });
+    const scriptNode = gateOf(run);
+    const gate = scriptNode.intervention!.continuation!;
+    assert.equal(gate.stage, "script");
+    const stageBefore = (scriptNode.output as { creativeReview: CreativeReviewState }).creativeReview.stages.script;
+    const documentBefore = structuredClone(stageBefore.currentDocument);
+
+    const dispatched = await pipeline.dispatchCreativeReviewCommand(run.id, {
+      action: "revise", commandId: "revise-fail-1", actor: "creator", stage: "script",
+      expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+      baseDraftSha256: gate.draftSha256, message: "把开头改得更直接",
+    });
+    const settled = await dispatched.completion;
+    assert.equal(settled.status, "needs_human", `修订失败不得把主制作打成 failed：${gateOf(settled).error}`);
+    const settledGate = gateOf(settled).intervention!.continuation!;
+    assert.equal(settledGate.stage, "script");
+    assert.equal(settledGate.draftSha256, gate.draftSha256);
+    const stageAfter = (gateOf(settled).output as { creativeReview: CreativeReviewState }).creativeReview.stages.script;
+    assert.deepEqual(stageAfter.currentDocument, documentBefore, "失败修订不改旧稿");
+    assert.equal(stageAfter.proposals.length, stageBefore.proposals.length, "失败不落非法提案");
+    assert.deepEqual(stageAfter.effectiveUserInstructions, stageBefore.effectiveUserInstructions, "失败意见不当成长期要求");
+    const operation = settled.creativeReviewOperations?.find((candidate) => candidate.commandId === "revise-fail-1");
+    assert.equal(operation!.status, "failed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C2（收尾包 2026-10-04）：统一讨论错误事实分类。
+// conflict 不得并入 not_accepted；多候选必须读全部 failures 而非最后一个 cause；
+// 执行记录（discussion-executions）与 planning 续接诊断、operation 回执同源一致；
+// 未受理/失败/未知任何一类都不得在无全链证据时承诺零费用。
+// ---------------------------------------------------------------------------
+
+describe("creative consultation fact classification (C2)", () => {
+  type Shape =
+    | { kind: "bridge"; stage: "completed_failure" | "rejected" | "not_accepted" | "uncertain" | "conflict" }
+    | { kind: "wrapped"; stage: "uncertain" }
+    | { kind: "plain" }
+    | { kind: "candidates"; stages: Array<"completed_failure" | "not_accepted" | "uncertain">; wrapDepth?: number; wrapFailures?: boolean }
+    | { kind: "schema-rejected" };
+  type Expect = {
+    continuationStatus: "rejected_operation" | "error" | "unknown";
+    reasonCode: string;
+    receipt: "not_accepted" | "failed" | "unknown";
+    executionState: "not_accepted" | "completed_failure" | "accepted_unknown";
+  };
+  const cases: Array<{ label: string; shape: Shape; expect: Expect; action: "discuss" | "revise" }> = [
+    { label: "conflict-is-unknown", shape: { kind: "bridge", stage: "conflict" }, action: "discuss",
+      expect: { continuationStatus: "unknown", reasonCode: "discussion_identity_conflict", receipt: "unknown", executionState: "accepted_unknown" } },
+    { label: "wrapped-uncertain-is-unknown", shape: { kind: "wrapped", stage: "uncertain" }, action: "discuss",
+      expect: { continuationStatus: "unknown", reasonCode: "discussion_request_unknown", receipt: "unknown", executionState: "accepted_unknown" } },
+    { label: "plain-error-is-unknown", shape: { kind: "plain" }, action: "revise",
+      expect: { continuationStatus: "unknown", reasonCode: "discussion_request_unknown", receipt: "unknown", executionState: "accepted_unknown" } },
+    { label: "mixed-failed-then-not-accepted-is-failed", shape: { kind: "candidates", stages: ["completed_failure", "not_accepted"] }, action: "discuss",
+      expect: { continuationStatus: "error", reasonCode: "discussion_failed", receipt: "failed", executionState: "completed_failure" } },
+    { label: "wrapped-candidates-preserve-failure", shape: { kind: "candidates", stages: ["completed_failure", "not_accepted"], wrapDepth: 1 }, action: "discuss",
+      expect: { continuationStatus: "error", reasonCode: "discussion_failed", receipt: "failed", executionState: "completed_failure" } },
+    { label: "mixed-failed-then-uncertain-is-unknown", shape: { kind: "candidates", stages: ["completed_failure", "uncertain"] }, action: "revise",
+      expect: { continuationStatus: "unknown", reasonCode: "discussion_request_unknown", receipt: "unknown", executionState: "accepted_unknown" } },
+    { label: "twice-wrapped-candidates-preserve-unknown", shape: { kind: "candidates", stages: ["completed_failure", "uncertain"], wrapDepth: 2, wrapFailures: true }, action: "revise",
+      expect: { continuationStatus: "unknown", reasonCode: "discussion_request_unknown", receipt: "unknown", executionState: "accepted_unknown" } },
+    { label: "all-candidates-not-accepted", shape: { kind: "candidates", stages: ["not_accepted", "not_accepted"] }, action: "discuss",
+      expect: { continuationStatus: "rejected_operation", reasonCode: "discussion_not_accepted", receipt: "not_accepted", executionState: "not_accepted" } },
+    { label: "wrapped-all-not-accepted-retain-identities", shape: { kind: "candidates", stages: ["not_accepted", "not_accepted"], wrapDepth: 2 }, action: "discuss",
+      expect: { continuationStatus: "rejected_operation", reasonCode: "discussion_not_accepted", receipt: "not_accepted", executionState: "not_accepted" } },
+    { label: "schema-rejected-result-is-failed", shape: { kind: "schema-rejected" }, action: "revise",
+      expect: { continuationStatus: "error", reasonCode: "discussion_failed", receipt: "failed", executionState: "completed_failure" } },
+  ];
+
+  const buildError = (shape: Shape): unknown => {
+    if (shape.kind === "bridge") return new CodexBridgeError(`受控（${shape.stage}）`, shape.stage === "not_accepted", shape.stage);
+    if (shape.kind === "wrapped") return new Error("外层普通错误", { cause: new CodexBridgeError("受控（uncertain）", false, "uncertain") });
+    if (shape.kind === "plain") return new Error("没有任何 Bridge 证据的普通错误");
+    if (shape.kind === "candidates") {
+      let error: Error = new ModelCandidatesExhaustedError(shape.stages.map((stage, index) => ({
+        modelId: `candidate-model-${index + 1}`,
+        providerId: `candidate-provider-${index + 1}`,
+        error: shape.wrapFailures
+          ? new Error("受控候选包装", { cause: new CodexBridgeError(`受控候选（${stage}）`, stage === "not_accepted", stage) })
+          : new CodexBridgeError(`受控候选（${stage}）`, stage === "not_accepted", stage),
+      })));
+      for (let depth = 0; depth < (shape.wrapDepth ?? 0); depth += 1) error = new Error("受控角色包装", { cause: error });
+      return error;
+    }
+    return undefined;
+  };
+
+  it("classifies consistently across continuation, operation receipt and durable execution record on all three stages", async () => {
+    for (const gateStage of ["treatment", "script", "director"] as const) {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), `vf-c2-${gateStage}-`));
+      const spies: ClosureSpies = {
+        treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+        screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+      };
+      let schemaRejected = false;
+      let callIndex = 0;
+      const discussImpl = async (input: Record<string, unknown>) => {
+        callIndex += 1;
+        const current = cases.find((entry) => entry.label === order[callIndex - 1])!;
+        if (current.shape.kind === "schema-rejected") {
+          schemaRejected = true;
+          // 已受理并返回结果，但 revise 缺少阶段文档 → recordCreativeDiscussion 拒绝。
+          return {
+            output: { stage: input.stage, intent: "revise", reply: "已按意见修改", changeSummary: ["改写结尾"], treatment: null, script: null, director: null, upstreamRequest: null },
+            trace: { taskKind: "creative-discussion", promptVersion: "v3", providerId: "c2-provider", modelId: "c2-model", prompt: "c2" },
+          };
+        }
+        throw buildError(current.shape);
+      };
+      const order = cases.map((entry) => entry.label);
+      const pipeline = new ProductionPipeline({
+        workspaceRoot,
+        worker: new ClosureWorker(),
+        treatmentAgents: closureTreatmentAgents(spies).map((entry) => ({
+          providerId: entry.providerId,
+          agent: Object.assign(entry.agent, { discussDetailed: discussImpl }),
+        })),
+        screenwriterAgent: Object.assign(closureScreenwriter(spies), { discussDetailed: discussImpl }) as ScreenwriterAgent,
+        directorAgent: Object.assign(closureDirector(spies), { discussDetailed: discussImpl }) as VisualDirectorAgent,
+        assetProviders: CLOSURE_ASSET_PROVIDERS,
+      });
+      const gateOf = (run: WorkflowRun<ProductionBrief>) => {
+        const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+        assert.ok(node.intervention?.continuation, "制作必须停在创作停点上");
+        return { node, continuation: node.intervention.continuation };
+      };
+      const confirmCurrent = async (run: WorkflowRun<ProductionBrief>): Promise<WorkflowRun<ProductionBrief>> => {
+        const { node, continuation } = gateOf(run);
+        const shown = (node.output as { creativeReview?: { stages?: Record<string, { checkResult?: { verdict?: string; checkIdentity?: string } }> } })
+          .creativeReview?.stages?.[continuation.stage]?.checkResult;
+        return await pipeline.confirmCreativeReview(run.id, {
+          commandId: `confirm-${continuation.stage}-${Math.random().toString(36).slice(2, 8)}`,
+          actor: "creator",
+          stage: continuation.stage,
+          expectedRunRevision: run.revision,
+          expectedReviewRevision: continuation.reviewRevision,
+          baseDraftSha256: continuation.draftSha256,
+          ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
+          ...(shown?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}),
+          ...(!shown ? { acknowledgeUnaudited: true as const } : {}),
+        });
+      };
+      for (const testCase of cases) {
+        // 每种故障使用独立制作；unknown未核清时不应允许下一条新模型咨询。
+        let run = await pipeline.start(closureBrief({ creativeReview: true }));
+        if (gateStage !== "treatment") run = await confirmCurrent(run);
+        if (gateStage === "director") run = await confirmCurrent(run);
+        const draftBefore = structuredClone((gateOf(run).node.output as { creativeReview: CreativeReviewState }).creativeReview.stages[gateStage].currentDocument);
+        const versionBefore = (gateOf(run).node.output as { creativeReview: CreativeReviewState }).creativeReview.stages[gateStage].currentDraft!.versionId;
+        const gate = gateOf(run).continuation;
+        const dispatched = await pipeline.dispatchCreativeReviewCommand(run.id, {
+          action: testCase.action,
+          commandId: `c2-${gateStage}-${testCase.label}-${Math.random().toString(36).slice(2, 8)}`,
+          actor: "creator",
+          stage: gateStage,
+          expectedRunRevision: run.revision,
+          expectedReviewRevision: gate.reviewRevision,
+          baseDraftSha256: gate.draftSha256,
+          message: "C2 分类意见",
+        });
+        const settled = await dispatched.completion;
+        assert.equal(settled.status, "needs_human", `${gateStage}/${testCase.label} 不能把主制作打成 failed`);
+        const review = (gateOf(settled).node.output as { creativeReview: CreativeReviewState }).creativeReview;
+        const stageState = review.stages[gateStage];
+        // 事实一：planning 续接诊断
+        const continuation = stageState.continuation;
+        assert.ok(continuation, `${gateStage}/${testCase.label} 必须留下续接诊断`);
+        assert.equal(continuation!.status, testCase.expect.continuationStatus, `${gateStage}/${testCase.label} 续接状态`);
+        assert.equal(continuation!.reasonCode, testCase.expect.reasonCode, `${gateStage}/${testCase.label} reasonCode`);
+        // 未受理/失败/未知都不得承诺零费用或“没有执行”零调用（除非全链证据）
+        if (testCase.expect.continuationStatus !== "rejected_operation") {
+          assert.ok(!/不会产生模型调用或费用/.test(continuation!.detail), `${gateStage}/${testCase.label} 不得承诺零费用：${continuation!.detail}`);
+        }
+        // 事实二：operation 回执
+        const operation = settled.creativeReviewOperations?.at(-1);
+        assert.equal(operation?.status, testCase.expect.receipt, `${gateStage}/${testCase.label} operation 回执`);
+        const studio = new ProductionStudio({ workspaceRoot, pipeline, listProviders: async () => [],
+          archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive.json")) });
+        assert.equal((await studio.creativeReviewCommand(settled.id, operation!.commandId))?.status, testCase.expect.receipt,
+          `${gateStage}/${testCase.label} 正式Studio耐久读取与operation同事实`);
+        // 事实三：原稿不动
+        assert.deepEqual(stageState.currentDocument, draftBefore, `${gateStage}/${testCase.label} 原稿不变`);
+        assert.equal(stageState.currentDraft!.versionId, versionBefore, `${gateStage}/${testCase.label} 版本不变`);
+        // 事实四：durable 执行记录与分类同源（按 commandId 定位，不依赖目录顺序）
+        const recordDir = path.join(workspaceRoot, "runs", settled.id, "nodes", "creative-planning", "discussion-executions");
+        const recordFiles = await readdir(recordDir).catch(() => [] as string[]);
+        const parsed = await Promise.all(recordFiles.filter((name) => name.endsWith(".json"))
+          .map(async (name) => JSON.parse(await readFile(path.join(recordDir, name), "utf8")) as Record<string, unknown>));
+        const commandId = operation!.commandId;
+        const record = parsed.find((entry) => entry.commandId === commandId);
+        assert.ok(record, `${gateStage}/${testCase.label} 必须有 durable 执行记录`);
+        assert.equal(record!.state, testCase.expect.executionState, `${gateStage}/${testCase.label} 执行记录状态：${JSON.stringify(record)}`);
+        if (testCase.shape.kind === "candidates" && testCase.shape.stages.length > 1) {
+          // 每个物理候选的事实必须保留，后一个候选不能抹掉前一个已受理失败
+          const candidateStates = (record!.candidates as Array<{ state: string }> | undefined)?.map((entry) => entry.state);
+          assert.deepEqual(candidateStates, testCase.shape.stages.map((stage) => stage === "completed_failure" ? "failed" : stage === "not_accepted" ? "not_accepted" : "unknown"),
+            `${gateStage}/${testCase.label} 候选事实保留`);
+        }
+        // 各故障保留原停点；unknown不能借此自动开启另一条咨询。
+        assert.equal(gateOf(settled).continuation.stage, gateStage);
+      }
+      // schema-rejected 场景确实走的是“返回结果但被拒”路径
+      assert.ok(schemaRejected, "schema-rejected 用例必须真实返回过结果");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C1（收尾包 2026-10-04）：unknown 讨论的原请求取回与原稿独立处理。
+// 真实 Broker（受控执行器）+ 真实 Store/Pipeline；prepared 快照先存后发；
+// 恢复只观察原物理请求（executor 物理提交计数不增加）；迟到结果只归档原命令。
+// ---------------------------------------------------------------------------
+
+describe("creative discussion unknown recovery (C1)", () => {
+  class ControllableDiscussionExecutor {
+    submits = 0;
+    private held: Array<() => void> = [];
+    private mode: "hold" | "complete" = "complete";
+    identity = { profileId: "deepseek", providerId: "c1-provider", modelId: "c1-model", taskKinds: ["creative-discussion"] };
+    modelCandidates = ["c1-provider"];
+    hold() { this.mode = "hold"; }
+    release() { this.mode = "complete"; for (const resolve of this.held) resolve(); this.held = []; }
+    get pending() { return this.held.length; }
+
+    async runTask(task: ValidatedTask, _options?: unknown): Promise<{ output: string; sessionId: string; trace: Record<string, unknown> }> {
+      this.submits += 1;
+      const payload = task.payload as Record<string, any>;
+      if (task.kind !== "creative-discussion") throw new Error(`unexpected kind ${task.kind}`);
+      if (this.mode === "hold" && this.submits > 0) await new Promise<void>(resolve => this.held.push(resolve));
+      const isRevise = payload.requestMode === "revise";
+      const revised = structuredClone(payload.currentDocument);
+      if (isRevise && payload.stage === "treatment") revised.payoff = "C1 修订后的结尾";
+      if (isRevise && payload.stage === "script") revised.scenes.at(-1).narration = "C1 修订后的最后一段旁白。";
+      if (isRevise && payload.stage === "director") revised.visualBible = { ...revised.visualBible, pacing: "C1 修订后的节奏" };
+      const result = {
+        stage: payload.stage, intent: isRevise ? "revise" : "explain",
+        reply: isRevise ? "已按意见修订；未审，等你决定。" : "C1 受控解释：当前稿从观察到行动再到收束。",
+        changeSummary: isRevise ? ["修订结尾"] : [],
+        treatment: isRevise && payload.stage === "treatment" ? revised : null,
+        script: isRevise && payload.stage === "script" ? revised : null,
+        director: isRevise && payload.stage === "director" ? revised : null,
+        upstreamRequest: null,
+      };
+      return {
+        output: JSON.stringify(result),
+        sessionId: "019c-c1-0000-7000-8000-000000000001",
+        trace: { taskKind: task.kind, providerId: "c1-provider", modelId: "c1-model", promptVersion: "controlled-c1", contractDigest: task.expectedContractDigest, prompt: "C1 受控执行器" },
+      };
+    }
+  }
+
+  async function startRecoveryHarness(options: { holdInitially?: boolean } = {}) {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-c1-"));
+    const sockets = path.join(workspaceRoot, "sockets");
+    await mkdir(sockets, { recursive: true });
+    const executor = new ControllableDiscussionExecutor();
+    if (options.holdInitially) executor.hold();
+    const broker = new CodexBrokerServer({
+      socketPath: path.join(sockets, "c1.sock"),
+      executor: executor as unknown as ConstructorParameters<typeof CodexBrokerServer>[0]["executor"],
+      concurrency: 2,
+      maxBacklog: 8,
+      idempotencyDirectory: path.join(workspaceRoot, "broker-idempotency"),
+      sessionDirectory: path.join(workspaceRoot, "broker-sessions"),
+    });
+    await broker.start();
+    const client = new CodexBridgeClient({ socketPath: path.join(sockets, "c1.sock"), timeoutMs: 400, pollIntervalMs: 20, maxAttempts: 1 });
+    const spies: ClosureSpies = {
+      treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+    };
+    const discussionViaBroker = (input: import("../src/codex-creative-discussion.js").CreativeDiscussionAgentInput) => runCreativeDiscussionTask(client, input);
+    const buildPipeline = () => new ProductionPipeline({
+      workspaceRoot,
+      worker: new ClosureWorker(),
+      treatmentAgents: closureTreatmentAgents(spies).map((entry) => ({
+        providerId: entry.providerId,
+        agent: Object.assign(entry.agent, { discussDetailed: discussionViaBroker }),
+      })),
+      screenwriterAgent: Object.assign(closureScreenwriter(spies), { discussDetailed: discussionViaBroker }) as ScreenwriterAgent,
+      directorAgent: Object.assign(closureDirector(spies), { discussDetailed: discussionViaBroker }) as VisualDirectorAgent,
+      assetProviders: CLOSURE_ASSET_PROVIDERS,
+    });
+    return { workspaceRoot, executor, broker, client, spies, buildPipeline };
+  }
+
+  const gateOf = (run: WorkflowRun<ProductionBrief>) => {
+    const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+    assert.ok(node.intervention?.continuation, "必须停在创作停点");
+    return { node, continuation: node.intervention.continuation };
+  };
+  const stageReview = (run: WorkflowRun<ProductionBrief>, stage: string) =>
+    (gateOf(run).node.output as { creativeReview: CreativeReviewState }).creativeReview.stages[stage as "treatment"];
+
+  async function confirmTo(pipeline: ProductionPipeline, run: WorkflowRun<ProductionBrief>, target: "treatment" | "script" | "director"): Promise<WorkflowRun<ProductionBrief>> {
+    let current = run;
+    while (gateOf(current).continuation.stage !== target) {
+      const { node, continuation } = gateOf(current);
+      const shown = (node.output as { creativeReview?: { stages?: Record<string, { checkResult?: { verdict?: string; checkIdentity?: string } }> } })
+        .creativeReview?.stages?.[continuation.stage]?.checkResult;
+      current = await pipeline.confirmCreativeReview(current.id, {
+        commandId: `c1-confirm-${continuation.stage}-${Math.random().toString(36).slice(2, 8)}`,
+        actor: "creator",
+        stage: continuation.stage,
+        expectedRunRevision: current.revision,
+        expectedReviewRevision: continuation.reviewRevision,
+        baseDraftSha256: continuation.draftSha256,
+        ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
+        ...(shown?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}),
+        ...(!shown ? { acknowledgeUnaudited: true as const } : {}),
+      });
+    }
+    return current;
+  }
+
+  it("C1-B allows hand-editing the saved draft while the original request stays unknown, and the late result never overwrites", async () => {
+    const harness = await startRecoveryHarness({ holdInitially: true });
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "script");
+      const gate = gateOf(run).continuation;
+      const dispatched = await pipeline.dispatchCreativeReviewCommand(run.id, {
+        action: "revise", commandId: "c1b-original", actor: "creator", stage: "script",
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, baseDraftVersionId: stageReview(run, "script").currentDraft!.versionId, message: "C1-B 原修订意见",
+      });
+      let settled = await dispatched.completion;
+      assert.equal(settled.status, "needs_human");
+      assert.equal(harness.executor.submits, 1);
+      let review = stageReview(settled, "script");
+      assert.equal(review.continuation?.status, "unknown");
+
+      // unknown 期间：服务端证明后，用户手改当前稿（新 commandId，正常 CAS）
+      const editedDocument = structuredClone(review.currentDocument) as { scenes: Array<{ narration: string }> };
+      editedDocument.scenes[0]!.narration = "C1-B 用户在 unknown 期间的手改第一段。";
+      const editDispatched = await pipeline.dispatchCreativeReviewCommand(settled.id, {
+        action: "edit_draft", commandId: "c1b-user-edit", actor: "creator", stage: "script",
+        expectedRunRevision: settled.revision,
+        expectedReviewRevision: gateOf(settled).continuation.reviewRevision,
+        baseDraftSha256: gateOf(settled).continuation.draftSha256,
+        document: editedDocument,
+      });
+      const edited = await editDispatched.completion;
+      assert.equal(edited.status, "needs_human", "unknown 期间手改不被挡");
+      const editedReview = stageReview(edited, "script");
+      const userVersion = editedReview.currentDraft!.versionId;
+      assert.notEqual(editedReview.currentDraft!.sha256, review.currentDraft!.sha256, "用户手改形成有效新版本");
+      const originalOperation = edited.creativeReviewOperations?.find(op => op.commandId === "c1b-original");
+      assert.equal(originalOperation?.status, "unknown", "旧命令仍 unknown、费用待核");
+
+      // 原请求此后完成：迟到结果不覆盖用户手改，只归档原命令
+      harness.executor.release();
+      const replay = await pipeline.dispatchCreativeReviewCommand(edited.id, {
+        action: "revise", commandId: "c1b-original", actor: "creator", stage: "script",
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, baseDraftVersionId: stageReview(run, "script").currentDraft!.versionId, message: "C1-B 原修订意见",
+      });
+      const replayed = await replay.completion;
+      assert.equal(replayed.status, "needs_human");
+      assert.equal(harness.executor.submits, 1, "迟到取回仍零物理重发");
+      const lateReview = stageReview(replayed, "script");
+      assert.equal(lateReview.currentDraft!.versionId, userVersion, "用户手改版本不被覆盖");
+      assert.equal(lateReview.currentDraft!.sha256, editedReview.currentDraft!.sha256);
+      assert.deepEqual(lateReview, editedReview, "迟到结果只归原命令，不污染当前稿的续接/审计/意见");
+      const lateOperation = replayed.creativeReviewOperations?.find(op => op.commandId === "c1b-original");
+      assert.equal(lateOperation?.status, "completed");
+      assert.equal(lateOperation?.resultDisposition, "recorded_not_applied");
+      // 无新增模型生成：只有最初一次 executor 提交
+      assert.equal(harness.spies.screenwriterCalls.length, 1, "unknown/迟到链不触发重新生成");
+    } finally {
+      await harness.broker.close();
+    }
+  });
+
+  it("C1-F same-content A-prime does not let the late result re-apply as current", async () => {
+    const harness = await startRecoveryHarness({ holdInitially: true });
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "script");
+      const gate = gateOf(run).continuation;
+      const originalDocument = structuredClone(stageReview(run, "script").currentDocument);
+      const dispatched = await pipeline.dispatchCreativeReviewCommand(run.id, {
+        action: "discuss", commandId: "c1f-original", actor: "creator", stage: "script",
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, baseDraftVersionId: stageReview(run, "script").currentDraft!.versionId, message: "C1-F 原讨论",
+      });
+      const settled = await dispatched.completion;
+      assert.equal(harness.executor.submits, 1);
+      // A→B→A：手改成 B 再改回同内容 A′（同 SHA、不同 versionId）
+      let current = settled;
+      for (const [commandId, narration] of [["c1f-edit-b", "C1-F B 版旁白。"], ["c1f-edit-a-prime", (originalDocument as { scenes: Array<{ narration: string }> }).scenes[0]!.narration]] as const) {
+        const doc = structuredClone(stageReview(current, "script").currentDocument) as { scenes: Array<{ narration: string }> };
+        doc.scenes[0]!.narration = narration;
+        const edit = await pipeline.dispatchCreativeReviewCommand(current.id, {
+          action: "edit_draft", commandId, actor: "creator", stage: "script",
+          expectedRunRevision: current.revision,
+          expectedReviewRevision: gateOf(current).continuation.reviewRevision,
+          baseDraftSha256: gateOf(current).continuation.draftSha256,
+          document: doc,
+        });
+        current = await edit.completion;
+      }
+      const aprimeVersion = stageReview(current, "script").currentDraft!.versionId;
+      harness.executor.release();
+      const replay = await pipeline.dispatchCreativeReviewCommand(current.id, {
+        action: "discuss", commandId: "c1f-original", actor: "creator", stage: "script",
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, baseDraftVersionId: stageReview(run, "script").currentDraft!.versionId, message: "C1-F 原讨论",
+      });
+      const replayed = await replay.completion;
+      const lateReview = stageReview(replayed, "script");
+      assert.equal(lateReview.currentDraft!.versionId, aprimeVersion, "A′ 不被历史结果回滚");
+      assert.equal(lateReview.currentDraft!.sha256, stageReview(run, "script").currentDraft!.sha256, "确实回到同内容A′");
+      assert.notEqual(aprimeVersion, stageReview(run, "script").currentDraft!.versionId, "A′有独立版本身份");
+      assert.deepEqual(lateReview, stageReview(current, "script"), "当前稿和旧选择/确认不被污染");
+      assert.equal(replayed.creativeReviewOperations?.find(op => op.commandId === "c1f-original")?.resultDisposition, "recorded_not_applied");
+    } finally {
+      await harness.broker.close();
+    }
+  });
+
+  it("C1-D rejects conflicting bodies and stale identities without any new model call", async () => {
+    const harness = await startRecoveryHarness({ holdInitially: true });
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "treatment");
+      const gate = gateOf(run).continuation;
+      const dispatched = await pipeline.dispatchCreativeReviewCommand(run.id, {
+        action: "discuss", commandId: "c1d-original", actor: "creator", stage: "treatment",
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, message: "C1-D 原命令",
+      });
+      const settled = await dispatched.completion;
+      assert.equal(harness.executor.submits, 1);
+      // 同 ID 异 body 拒绝
+      await assert.rejects(
+        () => pipeline.dispatchCreativeReviewCommand(settled.id, {
+          action: "discuss", commandId: "c1d-original", actor: "creator", stage: "treatment",
+          expectedRunRevision: settled.revision, expectedReviewRevision: gate.reviewRevision,
+          baseDraftSha256: gate.draftSha256, message: "不同的内容",
+        }),
+        /already used with different content/,
+      );
+      // 错 stage/过期 SHA 由命令边界拒绝（既有 CAS 合同）
+      await assert.rejects(
+        () => pipeline.dispatchCreativeReviewCommand(settled.id, {
+          action: "discuss", commandId: "c1d-other", actor: "creator", stage: "treatment",
+          expectedRunRevision: settled.revision, expectedReviewRevision: gate.reviewRevision,
+          baseDraftSha256: "0".repeat(64), message: "错 SHA",
+        }),
+        /stale|another stage|Creative review/,
+      );
+      assert.equal(harness.executor.submits, 1, "负例零新物理请求");
+    } finally {
+      await harness.broker.close();
+    }
+  });
+
+  it("C1-C observes a late revision after adoption without reopening the old stage or changing the next stop", async () => {
+    const harness = await startRecoveryHarness({ holdInitially: true });
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "script");
+      const gate = gateOf(run).continuation;
+      const original = {
+        action: "revise" as const, commandId: "c1c-original", actor: "creator", stage: "script" as const,
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, baseDraftVersionId: stageReview(run, "script").currentDraft!.versionId!, message: "只修订收束",
+      };
+      const unknown = await (await pipeline.dispatchCreativeReviewCommand(run.id, original)).completion;
+      const adopted = await confirmTo(pipeline, unknown, "director");
+      const stop = structuredClone(gateOf(adopted).node.intervention);
+      const beforeReview = structuredClone((gateOf(adopted).node.output as { creativeReview: CreativeReviewState }).creativeReview);
+      const generated = harness.spies.directorCalls;
+      harness.executor.release();
+      const recovered = await (await pipeline.dispatchCreativeReviewCommand(adopted.id, original)).completion;
+      assert.equal(recovered.status, "needs_human");
+      assert.deepEqual(gateOf(recovered).node.intervention, stop, "旧回复不能抢占导演停点");
+      assert.deepEqual((gateOf(recovered).node.output as { creativeReview: CreativeReviewState }).creativeReview, beforeReview, "原稿/确认/审计不被污染");
+      assert.equal(harness.spies.directorCalls, generated, "取回原请求不重新生成后继");
+      assert.equal(harness.executor.submits, 1);
+      assert.equal(recovered.creativeReviewOperations?.find(op => op.commandId === original.commandId)?.resultDisposition, "recorded_not_applied");
+      const replay = await (await harness.buildPipeline().dispatchCreativeReviewCommand(recovered.id, original)).completion;
+      assert.deepEqual(replay, recovered, "服务重建后的重复核对仍返回同一结果");
+    } finally { harness.executor.release(); await harness.broker.close(); }
+  });
+
+  it("C1-C keeps a returned upstream stop and rediscovers the original command from durable Studio state", async () => {
+    const harness = await startRecoveryHarness({ holdInitially: true });
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "script");
+      const gate = gateOf(run).continuation;
+      const original = { action: "revise" as const, commandId: "c1c-return-original", actor: "creator", stage: "script" as const,
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, baseDraftVersionId: stageReview(run, "script").currentDraft!.versionId!, message: "修订最后一段" };
+      const unknown = await (await pipeline.dispatchCreativeReviewCommand(run.id, original)).completion;
+      const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline, listProviders: async () => [],
+        archiveStore: new JsonRunArchiveStore(path.join(harness.workspaceRoot, "archive.json")) });
+      const snapshot = await studio.creativeReview(unknown.id);
+      assert.deepEqual(snapshot?.pendingConsultation?.allowedActions, ["edit_draft", "confirm", "return_to_stage"]);
+      assert.equal(snapshot?.consultationOperations?.[0]?.command.commandId, original.commandId);
+      await assert.rejects(() => pipeline.dispatchCreativeReviewCommand(unknown.id, { ...original, commandId: "new-consultation", expectedRunRevision: unknown.revision }), /尚未核清/);
+      await pipeline.withRunMaintenanceLease([unknown.id], async () => {
+        assert.equal((await studio.creativeReviewCommand(unknown.id, original.commandId))?.independentDraftActions, undefined, "活跃租约不给独立许可");
+        await assert.rejects(() => pipeline.dispatchCreativeReviewCommand(unknown.id, original), /locked by another writer/);
+      });
+      const returned = await (await pipeline.dispatchCreativeReviewCommand(unknown.id, { action: "return_to_stage", commandId: "explicit-return", actor: "creator",
+        stage: "script", expectedRunRevision: unknown.revision, expectedReviewRevision: gateOf(unknown).continuation.reviewRevision,
+        baseDraftSha256: gateOf(unknown).continuation.draftSha256, targetStage: "treatment", acknowledgeImpact: true })).completion;
+      const stop = structuredClone(gateOf(returned).node.intervention);
+      const beforeReview = structuredClone((gateOf(returned).node.output as { creativeReview: CreativeReviewState }).creativeReview);
+      const rediscovered = await studio.creativeReview(returned.id);
+      const { actor: _actor, ...body } = original;
+      assert.deepEqual(rediscovered?.consultationOperations?.[0]?.command, body, "无需本机key便可找回原完整body");
+      // 比较同一耐久JSON域；run保存会正常省略undefined可选字段。
+      const durableReview = JSON.parse(JSON.stringify(beforeReview)) as CreativeReviewState;
+      harness.executor.release();
+      const recovered = await (await pipeline.dispatchCreativeReviewCommand(returned.id, original)).completion;
+      assert.deepEqual(gateOf(recovered).node.intervention, stop);
+      assert.deepEqual((gateOf(recovered).node.output as { creativeReview: CreativeReviewState }).creativeReview, durableReview);
+      assert.equal(harness.executor.submits, 1);
+      assert.equal(recovered.creativeReviewOperations?.find(op => op.commandId === original.commandId)?.resultDisposition, "recorded_not_applied");
+      assert.match((await studio.creativeReview(recovered.id))?.consultationOperations?.[0]?.reply ?? "", /已按意见修订/);
+    } finally { harness.executor.release(); await harness.broker.close(); }
+  });
+
+  it("C1-A background receipt proof does not reject explicit recovery, but an external active writer still does", async () => {
+    const harness = await startRecoveryHarness({ holdInitially: true });
+    let unblockProof = () => {};
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "script");
+      const gate = gateOf(run).continuation;
+      const original = { action: "discuss" as const, commandId: "c1a-background-proof", actor: "creator", stage: "script" as const,
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, baseDraftVersionId: stageReview(run, "script").currentDraft!.versionId!, message: "核对原讨论" };
+      const unknown = await (await pipeline.dispatchCreativeReviewCommand(run.id, original)).completion;
+      const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline, listProviders: async () => [],
+        archiveStore: new JsonRunArchiveStore(path.join(harness.workspaceRoot, "archive.json")) });
+      const { actor, ...body } = original;
+      await pipeline.withRunMaintenanceLease([unknown.id], async () => {
+        await assert.rejects(() => studio.commandCreativeReview(unknown.id, body, actor), /最新版/,
+          "外部活跃写者仍由真实租约拒绝，不排队抢占");
+        assert.equal((await studio.creativeReviewCommand(unknown.id, original.commandId))?.independentDraftActions, undefined);
+      });
+      harness.executor.release();
+      let proofEntered!: () => void;
+      const entered = new Promise<void>(resolve => { proofEntered = resolve; });
+      const proofGate = new Promise<void>(resolve => { unblockProof = resolve; });
+      const realMaintenance = pipeline.withRunMaintenanceLease.bind(pipeline);
+      let delayOnce = true;
+      // 仅注入读取时序：真实维护租约/Store/恢复通道仍全部执行。
+      const delayed = mock.method(pipeline, "withRunMaintenanceLease", (ids: string[], action: () => Promise<unknown>) =>
+        realMaintenance(ids, async () => {
+          if (delayOnce) { delayOnce = false; proofEntered(); await proofGate; }
+          return action();
+        }));
+      try {
+        const backgroundRead = studio.creativeReview(unknown.id);
+        await entered;
+        const explicitRecovery = studio.commandCreativeReview(unknown.id, body, actor)
+          .then(receipt => ({ receipt }), error => ({ error }));
+        await new Promise<void>(resolve => setImmediate(resolve));
+        unblockProof();
+        await backgroundRead;
+        const result = await explicitRecovery;
+        assert.ok("receipt" in result, `后台只读证明不能制造命令冲突：${"error" in result ? result.error : ""}`);
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          if ((await studio.creativeReviewCommand(unknown.id, original.commandId))?.status === "completed") break;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        const recovered = await studio.creativeReview(unknown.id);
+        assert.equal((await studio.creativeReviewCommand(unknown.id, original.commandId))?.status, "completed");
+        assert.equal(recovered?.messages.length, 2, "原讨论只应用一次");
+        assert.equal(recovered?.draftVersionId, original.baseDraftVersionId);
+        await studio.commandCreativeReview(unknown.id, body, actor);
+        assert.equal((await studio.creativeReview(unknown.id))?.messages.length, 2);
+        assert.equal(harness.executor.submits, 1, "查询只观察原物理请求，零重投");
+      } finally { delayed.mock.restore(); }
+    } finally { unblockProof(); harness.executor.release(); await harness.broker.close(); }
+  });
+
+  it("RF4 never rebuilds an existing unknown request when its recovery records are missing or unreadable", async () => {
+    for (const damage of ["malformed", "missing", "prepared-only"] as const) {
+      const harness = await startRecoveryHarness({ holdInitially: true });
+      const fresh = mock.method(harness.client, "runTaskDetailed", harness.client.runTaskDetailed.bind(harness.client));
+      const prepare = mock.method(harness.client, "prepareTask", harness.client.prepareTask.bind(harness.client));
+      const submit = mock.method(harness.client, "submitPreparedIfUnaccepted", harness.client.submitPreparedIfUnaccepted.bind(harness.client));
+      try {
+        const pipeline = harness.buildPipeline();
+        const run = await pipeline.start(closureBrief({ creativeReview: true }));
+        const gate = gateOf(run).continuation;
+        const body = { action: "discuss" as const, commandId: `rf4-${damage}`, actor: "creator", stage: "treatment" as const,
+          expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+          baseDraftSha256: gate.draftSha256, baseDraftVersionId: stageReview(run, "treatment").currentDraft!.versionId!, message: "查询原讨论" };
+        const first = await (await pipeline.dispatchCreativeReviewCommand(run.id, body)).completion;
+        assert.equal(first.creativeReviewOperations?.at(-1)?.status, "unknown");
+        assert.equal(harness.executor.submits, 1);
+        const callsBefore = fresh.mock.callCount();
+        const prepareBefore = prepare.mock.callCount();
+        const submitBefore = submit.mock.callCount();
+        const draftBefore = structuredClone(stageReview(first, "treatment").currentDocument);
+        for (const directoryName of ["discussion-prepared", ...(damage === "prepared-only" ? [] : ["discussion-executions"])]) {
+          const directory = path.join(harness.workspaceRoot, "runs", run.id, "nodes", "creative-planning", directoryName);
+          for (const name of (await readdir(directory)).filter(name => name.endsWith(".json"))) {
+            const file = path.join(directory, name);
+            await rename(file, `${file}.test-backup`);
+            if (damage !== "missing") await writeFile(file, "{invalid isolated fixture", "utf8");
+          }
+        }
+        harness.executor.release();
+        const rebuilt = harness.buildPipeline();
+        const recovered = await (await rebuilt.dispatchCreativeReviewCommand(run.id, body)).completion;
+        assert.equal(fresh.mock.callCount(), callsBefore, `${damage}: 原命令不得重进新信封/提交入口`);
+        assert.equal(prepare.mock.callCount(), prepareBefore);
+        assert.equal(submit.mock.callCount(), submitBefore);
+        assert.equal(harness.executor.submits, 1);
+        assert.equal(recovered.status, "needs_human");
+        assert.equal(recovered.creativeReviewOperations?.find(op => op.commandId === body.commandId)?.status, "unknown");
+        assert.deepEqual(stageReview(recovered, "treatment").currentDocument, draftBefore);
+        const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline: rebuilt,
+          listProviders: async () => [], archiveStore: new JsonRunArchiveStore(path.join(harness.workspaceRoot, "archive.json")) });
+        assert.equal((await studio.creativeReviewCommand(run.id, body.commandId))?.status, "unknown");
+        assert.deepEqual((await studio.creativeReview(run.id))?.pendingConsultation?.allowedActions, ["edit_draft", "confirm", "return_to_stage"]);
+        assert.match((await studio.creativeReview(run.id))?.reviewContinuation?.detail ?? "", /缺少可核.*不会重新发送/);
+        const replay = await (await rebuilt.dispatchCreativeReviewCommand(run.id, body)).completion;
+        assert.equal(replay.revision, recovered.revision, "同一缺证据查询不重复修改诊断或稿件");
+        const document = { ...(draftBefore as Record<string, unknown>), payoff: "用户保留原成果后明确修改结尾" };
+        const edited = await (await rebuilt.dispatchCreativeReviewCommand(run.id, { action: "edit_draft", commandId: `rf4-edit-${damage}`,
+          actor: "creator", stage: "treatment", expectedRunRevision: recovered.revision,
+          expectedReviewRevision: gateOf(recovered).continuation.reviewRevision, baseDraftSha256: gateOf(recovered).continuation.draftSha256,
+          baseDraftVersionId: stageReview(recovered, "treatment").currentDraft!.versionId!, document })).completion;
+        assert.equal(edited.status, "needs_human");
+        assert.equal((stageReview(edited, "treatment").currentDocument as Record<string, unknown>).payoff, document.payoff);
+        assert.equal(edited.creativeReviewOperations?.find(op => op.commandId === body.commandId)?.status, "unknown");
+        assert.equal(fresh.mock.callCount(), callsBefore);
+      } finally { fresh.mock.restore(); prepare.mock.restore(); submit.mock.restore(); harness.executor.release(); await harness.broker.close(); }
+    }
+  });
+
+  it("C1-E prepared-save failure means zero external submit; rebuild after completion applies once", async () => {
+    // 窗口1：提交前耐久保存失败 → 零外部提交，命令按 unknown 事实记录
+    const harness = await startRecoveryHarness({ holdInitially: true });
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "treatment");
+      const gate = gateOf(run).continuation;
+      const preparedDir = path.join(harness.workspaceRoot, "runs", run.id, "nodes", "creative-planning", "discussion-prepared");
+      await mkdir(path.dirname(preparedDir), { recursive: true });
+      await writeFile(preparedDir, "not-a-directory", "utf8"); // 让 mkdir 失败＝保存失败
+      const dispatched = await pipeline.dispatchCreativeReviewCommand(run.id, {
+        action: "discuss", commandId: "c1e-save-fail", actor: "creator", stage: "treatment",
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, message: "C1-E 保存失败窗口",
+      });
+      const settled = await dispatched.completion;
+      assert.equal(settled.status, "needs_human");
+      assert.equal(harness.executor.submits, 0, "保存失败＝零外部提交");
+      assert.equal(stageReview(settled, "treatment").continuation?.status, "unknown");
+      assert.equal(settled.creativeReviewOperations?.find(op => op.commandId === "c1e-save-fail")?.status, "unknown");
+    } finally {
+      await harness.broker.close();
+    }
+    // 窗口3：远端完成但本地应用前重建服务 → 同 commandId 重放只观察、应用一次
+    const harness2 = await startRecoveryHarness({ holdInitially: true });
+    try {
+      const pipeline = harness2.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "treatment");
+      const gate = gateOf(run).continuation;
+      const body = {
+        action: "discuss" as const, commandId: "c1e-rebuild", actor: "creator", stage: "treatment" as const,
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, message: "C1-E 重建窗口",
+      };
+      const first = await (await pipeline.dispatchCreativeReviewCommand(run.id, body)).completion;
+      assert.equal(harness2.executor.submits, 1);
+      harness2.executor.release();
+      const rebuilt = harness2.buildPipeline(); // 服务重建：同一持久 workspace/broker
+      const replay = await (await rebuilt.dispatchCreativeReviewCommand(first.id, body)).completion;
+      assert.equal(harness2.executor.submits, 1, "重建后重放零物理重发");
+      const review = stageReview(replay, "treatment");
+      assert.equal(review.continuation, null, "应用成功清诊断");
+      assert.ok(review.messages.length >= 2);
+      // 窗口4：结果已应用但响应丢失 → 再次重放回原结果，不重复应用
+      const replay2 = await (await rebuilt.dispatchCreativeReviewCommand(replay.id, body)).completion;
+      assert.equal(harness2.executor.submits, 1);
+      assert.equal(stageReview(replay2, "treatment").messages.length, review.messages.length, "应用最多一次");
+    } finally {
+      await harness2.broker.close();
+    }
+  });
+
+  it("C1-A retrieves the original result by observing the same physical request exactly once", async () => {
+    for (const gateStage of ["treatment", "script", "director"] as const) {
+      for (const action of ["discuss", "revise"] as const) {
+        const harness = await startRecoveryHarness({ holdInitially: true });
+        try {
+          const pipeline = harness.buildPipeline();
+          let run = await pipeline.start(closureBrief({ creativeReview: true }));
+          run = await confirmTo(pipeline, run, gateStage);
+          const gate = gateOf(run).continuation;
+          const dispatched = await pipeline.dispatchCreativeReviewCommand(run.id, {
+            action,
+            commandId: `c1a-${gateStage}-${action}`,
+            actor: "creator",
+            stage: gateStage,
+            expectedRunRevision: run.revision,
+            expectedReviewRevision: gate.reviewRevision,
+            baseDraftSha256: gate.draftSha256,
+            message: `C1 原请求意见（${gateStage}/${action}）`,
+          });
+          let settled = await dispatched.completion;
+          assert.equal(settled.status, "needs_human", `${gateStage}/${action} 超时后不失败`);
+          let review = stageReview(settled, gateStage);
+          assert.equal(harness.executor.submits, 1, `首次提交恰好一次物理请求；continuation=${JSON.stringify(review.continuation)}`);
+          assert.equal(review.continuation?.status, "unknown", "超时归 unknown");
+          const operation = settled.creativeReviewOperations?.find(op => op.commandId === `c1a-${gateStage}-${action}`);
+          assert.equal(operation?.status, "unknown");
+
+          // release 原物理请求后，同 ID 同 body 重放＝只观察原请求
+          harness.executor.release();
+          const replay = await pipeline.dispatchCreativeReviewCommand(settled.id, {
+            action,
+            commandId: `c1a-${gateStage}-${action}`,
+            actor: "creator",
+            stage: gateStage,
+            expectedRunRevision: run.revision,
+            expectedReviewRevision: gate.reviewRevision,
+            baseDraftSha256: gate.draftSha256,
+            message: `C1 原请求意见（${gateStage}/${action}）`,
+          });
+          const replayed = await replay.completion;
+          assert.equal(harness.executor.submits, 1, `${gateStage}/${action} 恢复不得再次物理提交`);
+          const replayNode = replayed.nodeRuns.find(candidate => candidate.nodeId === "creative-planning")!;
+          assert.ok(replayNode.intervention?.continuation, `重放后必须仍有停点：status=${replayed.status} node=${replayNode.status} err=${replayNode.error ?? ""} output=${JSON.stringify(replayNode.output).slice(0, 200)}`);
+          review = stageReview(replayed, gateStage);
+          assert.equal(review.continuation, null, "应用后清诊断");
+          assert.ok(review.messages.length >= 2, "原结果只应用一次：真实消息落账");
+          const replayOperation = replayed.creativeReviewOperations?.find(op => op.commandId === `c1a-${gateStage}-${action}`);
+          assert.equal(replayOperation?.status, "completed");
+          assert.equal(replayOperation?.resultDisposition, "applied");
+          if (action === "discuss") {
+            assert.equal(review.currentDraft!.sha256, gate.draftSha256, "discuss 不换稿");
+          } else {
+            assert.notEqual(review.currentDraft!.sha256, gate.draftSha256, "revise 形成新未审稿");
+          }
+          // 再次重放：幂等回放，不重复应用
+          const replay2 = await pipeline.dispatchCreativeReviewCommand(replayed.id, {
+            action,
+            commandId: `c1a-${gateStage}-${action}`,
+            actor: "creator",
+            stage: gateStage,
+            expectedRunRevision: run.revision,
+            expectedReviewRevision: gate.reviewRevision,
+            baseDraftSha256: gate.draftSha256,
+            message: `C1 原请求意见（${gateStage}/${action}）`,
+          });
+          const replayed2 = await replay2.completion;
+          assert.equal(harness.executor.submits, 1, "重放不触发第三次物理请求");
+          assert.equal(stageReview(replayed2, gateStage).messages.length, review.messages.length, "重复核对不重复应用");
+        } finally {
+          await harness.broker.close();
+        }
+      }
+    }
+  });
 });

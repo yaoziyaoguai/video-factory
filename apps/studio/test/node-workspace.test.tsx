@@ -1930,3 +1930,33 @@ describe("node production workspaces", () => {
     expect(screen.getByText("订阅任务失败 · 不产生按量费用")).toBeInTheDocument();
   });
 });
+
+describe("F05 prior-step viewing on review stops", () => {
+  it("explains why render/technical-review have no workspace card instead of silently doing nothing", async () => {
+    const renderSource: StudioNode = {
+      id: "render", label: "渲染", role: "渲染", status: "succeeded", artifactIds: [], qualityGateResults: [],
+      output: { videoPath: "/managed/final.mp4" },
+      outputState: { generatedVersionId: "render-v1", effectiveVersionId: "render-v1", stale: false, versions: [{
+        id: "render-v1", source: "generated", artifactIds: [], inputVersionIds: [],
+        createdAt: "2026-10-02T00:00:00.000Z", createdBy: "python-ffmpeg-v1", schemaVersion: "render-v1",
+      }] },
+    };
+    const reviewNode: StudioNode = {
+      id: "visual-review", label: "视觉审片", role: "视觉审片员", status: "needs_human", artifactIds: [],
+      qualityGateResults: [], output: {},
+      inputState: { effectiveVersionId: "review-input", stale: false, versions: [{
+        id: "review-input", source: "derived", value: {}, upstreamVersionIds: ["render-v1"],
+        createdAt: "2026-10-02T00:00:00.000Z", createdBy: "workflow:visual-review", schemaVersion: "review-input-v1",
+      }] },
+    };
+    render(<MemoryRouter><NodeWorkspace node={reviewNode} nodes={[reviewNode, renderSource]} runStatus="needs_human"
+      runId="run-f05" runRevision={3} artifacts={[]} runArtifacts={[]} acceptedPlanDigest={TEST_PLAN_DIGEST}
+      busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined}
+      currentDelivery /></MemoryRouter>);
+    const inputReview = screen.getByText("查看和调整这个角色收到的内容").closest("details")!;
+    await userEvent.click(within(inputReview.parentElement ?? inputReview).getByText("查看和调整这个角色收到的内容"));
+    const viewButton = await screen.findByRole("button", { name: /查看 渲染/ });
+    await userEvent.click(viewButton);
+    expect(await screen.findByRole("note")).toHaveTextContent(/没有单独的正文卡片/);
+  });
+});

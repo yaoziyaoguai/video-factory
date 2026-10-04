@@ -1502,7 +1502,7 @@ describe("StudioService", () => {
         },
         findings: [],
       },
-    }), /付费结果尚未核对/);
+    }), (error: unknown) => error instanceof StudioConflictError && /查询原请求/.test(error.message));
     assert.equal(pipeline.dispatchCount, 0);
   });
 
@@ -5552,14 +5552,14 @@ describe("StudioService", () => {
         output: { hook: "新钩子" },
         confirmTerminalEdit: true,
       }, "trusted-owner"),
-      /先完成任务与账单核对/,
+      (error: unknown) => error instanceof StudioConflictError && /查询原请求/.test(error.message),
     );
     await assert.rejects(
       () => service.applyNodeInputOverride("run-1", "script", {
         input: { title: "新题目" },
         confirmTerminalEdit: true,
       }, "trusted-owner"),
-      /先完成任务与账单核对/,
+      (error: unknown) => error instanceof StudioConflictError && /查询原请求/.test(error.message),
     );
     await assert.rejects(
       () => service.applyNodeExecutionConfiguration("run-1", "script", {
@@ -5567,7 +5567,7 @@ describe("StudioService", () => {
         modelSelections: {},
         confirmTerminalEdit: true,
       }, "trusted-owner"),
-      /先完成任务与账单核对/,
+      (error: unknown) => error instanceof StudioConflictError && /查询原请求/.test(error.message),
     );
     assert.equal(pipeline.lastOverride, undefined);
     assert.equal(pipeline.lastInputOverride, undefined);

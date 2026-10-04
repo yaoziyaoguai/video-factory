@@ -23,6 +23,7 @@ import {
   effectiveProductionBrief,
   PaidOperationManualReconciliationError,
   HumanDecisionConflictError,
+  independentCreativeConsultationActions,
   parseBrief,
   parsePersistedBrief,
   productionWorkflowVersion,
@@ -48,6 +49,9 @@ import {
   type ProductionNarrationRevisionDraft,
   type ProductionPaidNodeSummary,
   type ProductionRunListener,
+  type ProductionReviewContinuationInput,
+  type OriginalOptionalReviewTask,
+  type OptionalReviewObservation,
   type ProductionSceneRevisionDraft,
   type ProductionSceneResourceRevisionDraft,
   type ProductionSpendRejectionDraft,
@@ -65,6 +69,7 @@ import {
 } from "@video-factory/production-pipeline";
 import {
   StudioInputError,
+  parseStudioCreativeReviewCommandInput,
   STUDIO_PLANNING_EDITABLE_STAGES,
   assertStudioExecutableProductionInput,
   defaultStudioDurationRange,
@@ -75,6 +80,7 @@ import {
   type StudioAgentLoopProgress,
   type StudioDecision,
   type StudioDecisionInput,
+  type StudioOptionalReviewTarget,
   type StudioCreativeReviewCommandInput,
   type StudioCreativeReviewCommandReceipt,
   type StudioCreativeReviewHistory,
@@ -99,6 +105,7 @@ import {
   type StudioReworkDraft,
   type StudioReworkFinding,
   type StudioRunDetail,
+  type StudioReviewContinuationReceipt,
   type StudioRunSummary,
   type StudioNarrationRevisionInput,
   type StudioNarrationPreviewV2Input,
@@ -141,6 +148,10 @@ export interface StudioPipelinePort {
     runId: string,
     draft: ProductionCreativeReviewConfirmationDraft,
   ): Promise<WorkflowRun<ProductionBrief>>;
+  prepareReviewContinuation?(runId: string, input: ProductionReviewContinuationInput, actor?: string): Promise<WorkflowRun<ProductionBrief>>;
+  originalOptionalReviewTasks?(runId: string): Promise<OriginalOptionalReviewTask[]>;
+  assertOptionalReviewContinuationSafe?(runId: string): Promise<void>;
+  recordOptionalReviewObservation?(runId: string, observation: OptionalReviewObservation): Promise<WorkflowRun<ProductionBrief>>;
   dispatchCreativeReviewCommand?(
     runId: string,
     draft: ProductionCreativeReviewCommandDraft,
@@ -256,6 +267,7 @@ export interface ProductionStudioOptions {
    */
   documentCopyTools?: StudioDocumentCopyTools;
   referenceGrammarTools?: StudioReferenceGrammarTools;
+  audioReviewObserver?: Pick<import("./audio-review-service.js").AudioReviewService, "observe">;
 }
 
 export type StudioReferenceGrammarTools = Required<Pick<ReferenceGrammarAgent, "revise" | "auditCurrent">>
@@ -311,6 +323,7 @@ export class ProductionStudio {
   private readonly completions = new Set<Promise<void>>();
   private readonly startsInFlight = new Map<string, { digest: string; operation: Promise<StartRunResponse> }>();
   private readonly textTaskRetrievals = new Map<string, Promise<StudioRunDetail>>();
+  private readonly creativeLeaseEntries = new Map<string, Promise<void>>();
   private historicalNodeDurations: Record<string, number[]> = {};
 
   constructor(private readonly options: ProductionStudioOptions) {}
@@ -334,10 +347,44 @@ export class ProductionStudio {
       ]);
       this.historicalNodeDurations = collectNodeDurationHistory(historyRuns);
       const productionPlanDigest = await currentExecutablePlanDigest(run, this.options.workspaceRoot);
+      const originalTasks = await this.options.pipeline.originalOptionalReviewTasks?.(runId);
+      const reviewContinuationTargets: import("../shared/api.js").StudioReviewContinuationTarget[] = [];
+      if (run.status === "failed") {
+        const planning = run.nodeRuns.find(node => node.nodeId === "creative-planning" && node.status === "failed");
+        const review = isRecord(planning?.output) && isRecord(planning.output.creativeReview) ? planning.output.creativeReview : undefined;
+        const stage = review?.activeStage;
+        const gate = typeof stage === "string" && isRecord(review?.stages) && isRecord(review.stages[stage]) ? review.stages[stage] : undefined;
+        const draft = isRecord(gate?.currentDraft) ? gate.currentDraft : undefined;
+        if (["treatment", "script", "director"].includes(String(stage)) && draft
+          && typeof draft.artifactId === "string" && typeof draft.versionId === "string" && typeof draft.sha256 === "string") {
+          reviewContinuationTargets.push({ nodeId: "creative-planning", stage: stage as "treatment" | "script" | "director",
+            ...(stage === "director" ? { reviewPurpose: review?.directorReviewPurpose === "direction" ? "direction" : "material_plan" } : {}),
+            targetArtifactId: draft.artifactId, targetVersionId: draft.versionId, targetSha256: draft.sha256 });
+        }
+        const render = run.nodeRuns.find(node => node.nodeId === "render" && node.status === "succeeded" && !node.outputState?.stale);
+        const renderVersion = render?.outputState?.versions.find(version => version.id === render.outputState?.effectiveVersionId);
+        const video = run.artifacts.find(artifact => renderVersion?.artifactIds.includes(artifact.id) && artifact.contentType === "video/mp4");
+        if (run.nodeRuns.some(node => node.nodeId === "visual-review" && node.status === "failed") && video?.sha256 && renderVersion) {
+          reviewContinuationTargets.push({ nodeId: "visual-review", targetArtifactId: video.id,
+            targetVersionId: renderVersion.id, targetSha256: video.sha256 });
+        }
+      }
+      let optionalReviewUncertaintySafe = false;
+      if (run.nodeRuns.some(node => node.outcomeUncertain) && this.options.pipeline.assertOptionalReviewContinuationSafe) {
+        try { await this.options.pipeline.assertOptionalReviewContinuationSafe(runId); optionalReviewUncertaintySafe = true; }
+        catch (error) { if (!(error instanceof HumanDecisionConflictError)) throw error; }
+      }
       const detail = {
         ...withArchiveState(this.toDetail(run), archived[run.id]),
         ...(pauseRequested ? { pauseRequested: true } : {}),
         ...(productionPlanDigest ? { productionPlanDigest } : {}),
+        ...(reviewContinuationTargets.length ? { reviewContinuationTargets } : {}),
+        ...(optionalReviewUncertaintySafe ? { optionalReviewUncertaintySafe: true as const } : {}),
+        ...(originalTasks?.length ? { optionalReviewTasks: originalTasks.map(({ prepared: _privateOperation, inputDigest: _binding, ...task }) => ({
+          ...task, summary: task.requestState === "unknown"
+            ? "当前成果可以由你决定采用；原审片结果和费用仍待核。本次查询不会重新提交。"
+            : "原审计事实已保留；查询不会改变当前采用或终审决定。",
+        })) } : {}),
       };
       return await withTaskRecovery(
         await withPlanningStages(
@@ -369,9 +416,8 @@ export class ProductionStudio {
     if (!canCreateReworkFrom(run)) {
       throw new StudioConflictError("只有失败、已打回或已完成的制作才能生成新版本草稿。");
     }
-    if (run.nodeRuns.some((node) => node.outcomeUncertain)) {
-      throw new StudioConflictError("这条制作还有付费结果尚未核对，完成账单核对后才能重新制作。");
-    }
+    // F04/D18（2026-10-02 执行包）：可选审片 unknown 不挡显式返工；生成/采购 unknown 仍守。
+    await this.assertReworkUncertaintySafe(run);
     const detail = this.toDetail(run);
     const rejectedResources = this.options.loadRejectedVisualResources
       ? await this.options.loadRejectedVisualResources(run.id)
@@ -515,6 +561,18 @@ export class ProductionStudio {
         },
       } : {}),
     };
+  }
+
+  private async assertReworkUncertaintySafe(run: WorkflowRun<ProductionBrief>): Promise<void> {
+    if (!run.nodeRuns.some(node => node.outcomeUncertain)) return;
+    if (!this.options.pipeline.assertOptionalReviewContinuationSafe) {
+      throw new StudioConflictError("这条制作还有结果尚未核对，请先查询原请求，再决定如何返工。");
+    }
+    try { await this.options.pipeline.assertOptionalReviewContinuationSafe(run.id); }
+    catch (error) {
+      if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
+      throw error;
+    }
   }
 
   async loadInheritedReferenceVideo(input: unknown): Promise<{
@@ -870,9 +928,7 @@ export class ProductionStudio {
     if (!canCreateReworkFrom(source)) {
       throw new StudioConflictError("只有失败、已打回或已完成的制作才能作为新版本来源。");
     }
-    if (source.nodeRuns.some((node) => node.outcomeUncertain)) {
-      throw new StudioConflictError("这条制作还有付费结果尚未核对，完成账单核对后才能重新制作。");
-    }
+    await this.assertReworkUncertaintySafe(source);
     const rejectedResources = this.options.loadRejectedVisualResources
       ? await this.options.loadRejectedVisualResources(source.id)
       : [];
@@ -1463,18 +1519,21 @@ export class ProductionStudio {
 
   async decide(runId: string, input: StudioDecisionInput, actor: string): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
-    assertExecutableRunContinuation(current);
-    if (current.status !== "needs_human") throw new StudioConflictError("这条制作当前不在人工终审阶段。");
+    // 耐久本地命令先交给Pipeline核同ID/body；HTTP前置CAS不能挡住原回执重放。
+    const existingCommand = input.commandId?.trim()
+      ? current.reviewContinuationOperations?.find(operation => operation.commandId === input.commandId!.trim()) : undefined;
+    if (!existingCommand) assertExecutableRunContinuation(current);
+    if (!existingCommand && current.status !== "needs_human") throw new StudioConflictError("这条制作当前不在人工终审阶段。");
     const intervention = current.nodeRuns.find((node) => node.status === "needs_human")?.intervention;
-    if (!intervention) throw new StudioConflictError("这条制作没有待处理的人工决定。");
-    if (input.interventionId !== intervention.id || input.expectedRunRevision !== current.revision) {
+    if (!existingCommand && !intervention) throw new StudioConflictError("这条制作没有待处理的人工决定。");
+    if (!existingCommand && (input.interventionId !== intervention!.id || input.expectedRunRevision !== current.revision)) {
       throw new StudioConflictError("你查看的成片或审片意见已经更新，请重新查看后再确认。");
     }
-    if (!intervention.options?.includes(input.action)) {
+    if (!existingCommand && !intervention!.options?.includes(input.action)) {
       throw new StudioConflictError("当前确认点不支持这个操作，请刷新后重试。");
     }
-    if (input.action === "request_changes") {
-      if (intervention.nodeId === "voice" && input.voiceTiming) {
+    if (!existingCommand && input.action === "request_changes") {
+      if (intervention!.nodeId === "voice" && input.voiceTiming) {
         const updated = await this.options.pipeline.requestVoiceTimingRevision(runId, {
           expectedRunRevision: input.expectedRunRevision,
           interventionId: input.interventionId,
@@ -1487,17 +1546,18 @@ export class ProductionStudio {
         this.publish(detail);
         return detail;
       }
-      if (intervention.kind !== "source_review_decision" || input.voiceTiming) {
+      if (intervention!.kind !== "source_review_decision" || input.voiceTiming) {
         throw new StudioConflictError("当前确认点没有可调整的方案。");
       }
     }
-    if (input.action === "reject" && !input.note?.trim()) throw new StudioConflictError("打回时必须填写原因。");
+    if (!existingCommand && input.action === "reject" && !input.note?.trim()) throw new StudioConflictError("打回时必须填写原因。");
     const decision: HumanDecisionDraft = {
       interventionId: input.interventionId,
       action: input.action,
       actor,
       expectedRunRevision: input.expectedRunRevision,
       reviewEvidenceId: input.reviewEvidenceId,
+      ...(input.commandId ? { commandId: input.commandId } : {}),
       ...(input.action === "approve" && input.acceptIncomplete === true ? { acceptIncomplete: true as const } : {}),
       ...(input.contentVersionId ? { contentVersionId: input.contentVersionId } : {}),
       ...(input.action === "approve" && input.acceptUnauditedContent === true ? { acceptUnauditedContent: true as const } : {}),
@@ -1661,6 +1721,24 @@ export class ProductionStudio {
         : [],
       ...(checkResult ? { checkResult } : {}),
       ...(stopDetail ? { stopDetail } : {}),
+      ...(isRecord(stageState?.continuation) && typeof stageState.continuation.status === "string"
+        && typeof stageState.continuation.reasonCode === "string"
+        && typeof stageState.continuation.detail === "string"
+        && typeof stageState.continuation.recordedAt === "string"
+        ? { reviewContinuation: {
+          status: stageState.continuation.status as "unknown" | "error" | "rejected_operation" | "completed_not_applied",
+          reasonCode: stageState.continuation.reasonCode,
+          detail: stageState.continuation.detail,
+          ...(Array.isArray(stageState.continuation.validationIssues)
+            ? { validationIssues: stageState.continuation.validationIssues.filter(isRecord).flatMap((issue) => (
+              typeof issue.path === "string" && typeof issue.code === "string" && typeof issue.message === "string"
+                ? [{ path: issue.path, code: issue.code, message: issue.message }]
+                : []
+            )) }
+            : {}),
+          recordedAt: stageState.continuation.recordedAt,
+        } } : {}),
+      ...await this.consultationSnapshot(current),
       ...(rawScopeConflict && reworkSourceRunId && rawScopeConflict.stage === continuation.stage
         && typeof rawScopeConflict.proposalId === "string"
         && Array.isArray(rawScopeConflict.requiredScenePositions)
@@ -1670,6 +1748,28 @@ export class ProductionStudio {
           requiredScenePositions: rawScopeConflict.requiredScenePositions.filter((position): position is number => Number.isSafeInteger(position) && position > 0),
         } } : {}),
     };
+  }
+
+  private async consultationSnapshot(current: WorkflowRun<ProductionBrief>): Promise<Pick<StudioCreativeReviewSnapshot, "pendingConsultation" | "consultationOperations">> {
+    const operations: NonNullable<StudioCreativeReviewSnapshot["consultationOperations"]> = [];
+    for (const op of current.creativeReviewOperations ?? []) {
+      if ((op.action !== "discuss" && op.action !== "revise") || !op.request
+        || !(op.status === "unknown" || (op.status === "completed" && op.resultDisposition === "recorded_not_applied"))) continue;
+      const { actor: _actor, ...body } = op.request;
+      try {
+        const command = parseStudioCreativeReviewCommandInput(body);
+        operations.push({ commandId: op.commandId, command, status: op.status,
+          ...(op.resultDisposition === "recorded_not_applied" ? { resultDisposition: op.resultDisposition } : {}),
+          ...(isRecord(op.result) && typeof op.result.reply === "string" ? { reply: op.result.reply } : {}) });
+      } catch { /* 损坏的旧命令不能拼成新body；不提供可能重发的恢复操作。 */ }
+    }
+    const pending = operations.find(op => op.status === "unknown");
+    if (!pending) return operations.length ? { consultationOperations: operations } : {};
+    // 回执在同一维护租约下重读；活跃写者时仅展示原命令，不给独立写许可。
+    const receipt = await this.creativeReviewCommand(current.id, pending.commandId);
+    return { consultationOperations: operations,
+      ...(receipt?.independentDraftActions ? { pendingConsultation: { commandId: pending.commandId,
+        allowedActions: receipt.independentDraftActions.actions, targetDraft: receipt.independentDraftActions.targetDraft } } : {}) };
   }
 
   async creativeReviewHistory(runId: string): Promise<StudioCreativeReviewHistory | undefined> {
@@ -1732,11 +1832,11 @@ export class ProductionStudio {
       throw new StudioConflictError("当前制作引擎不支持创作讨论操作。");
     }
     try {
-      const dispatched = await this.options.pipeline.dispatchCreativeReviewCommand(
+      const dispatched = await this.withCreativeLeaseEntry(runId, () => this.options.pipeline.dispatchCreativeReviewCommand!(
         runId,
         creativeReviewCommandDraft(input, actor),
         (run) => this.publish(this.toDetail(run)),
-      );
+      ));
       void dispatched.completion.then(
         (run) => this.publish(this.toDetail(run)),
         () => undefined,
@@ -1755,12 +1855,98 @@ export class ProductionStudio {
     }
   }
 
+  /**
+   * F03/D06（§2.3）：历史 failed 记录的显式准备——恢复本地人工停点，不签字、不补审。
+   */
+  async prepareReviewContinuation(runId: string, input: ProductionReviewContinuationInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    if (!this.options.pipeline.prepareReviewContinuation) {
+      throw new StudioConflictError("当前制作引擎不支持失败记录恢复。");
+    }
+    try {
+      const run = await this.options.pipeline.prepareReviewContinuation(runId, {
+        ...input,
+        commandId: input.commandId.trim(),
+      }, actor);
+      return this.toDetail(run);
+    } catch (error) {
+      if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
+      if (error instanceof StaleRunRevisionError
+        || (error instanceof Error && /locked by another writer|already used with different content/i.test(error.message))) {
+        throw new StudioConflictError("这条制作已被其他操作更新，请刷新页面后重试。");
+      }
+      throw error;
+    }
+  }
+
+  /** §2.3 只读回执：不返回本地路径/凭据，不启动 worker。 */
+  async reviewContinuationReceipt(runId: string, commandId: string): Promise<StudioReviewContinuationReceipt | undefined> {
+    const current = await this.loadRequiredRun(runId);
+    const operation = current.reviewContinuationOperations?.find((item) => item.commandId === commandId);
+    if (!operation) return undefined;
+    const resultStop = current.nodeRuns.find(node => node.status === "needs_human" && node.intervention?.id === operation.resultInterventionId);
+    const creative = operation.nodeId === "creative-planning" && operation.stage
+      ? current.nodeRuns.find(node => node.nodeId === "creative-planning") : undefined;
+    const review = isRecord(creative?.output) && isRecord(creative.output.creativeReview) ? creative.output.creativeReview : undefined;
+    const rawGate = operation.stage && isRecord(review?.stages) ? review.stages[operation.stage] : undefined;
+    const gate = isRecord(rawGate) ? rawGate : undefined;
+    const render = current.nodeRuns.find(node => node.nodeId === "render");
+    const targetCurrent = operation.nodeId === "creative-planning"
+      ? review?.activeStage === operation.stage && isRecord(gate?.currentDraft) && gate.currentDraft.versionId === operation.target?.versionId
+        && gate.currentDraft.sha256 === operation.target?.sha256
+      : render?.outputState?.effectiveVersionId === operation.target?.versionId
+        && current.artifacts.some(artifact => artifact.id === operation.target?.artifactId && artifact.sha256 === operation.target?.sha256);
+    return {
+      commandId: operation.commandId,
+      action: operation.action,
+      nodeId: operation.nodeId,
+      ...(operation.stage ? { stage: operation.stage } : {}),
+      state: operation.status === "applied" ? "applied" : operation.status === "accepted" ? "accepted" : "failed",
+      ...(operation.target ? { target: structuredClone(operation.target) } : {}),
+      ...(operation.resultEvidenceId ? { resultEvidenceId: operation.resultEvidenceId } : {}),
+      ...(operation.resultInterventionId ? { resultInterventionId: operation.resultInterventionId } : {}),
+      ...(operation.resultRunRevision !== undefined ? { resultRunRevision: operation.resultRunRevision } : {}),
+      isCurrent: current.status === "needs_human" && Boolean(resultStop && targetCurrent),
+      ...(operation.error ? { error: operation.error } : {}),
+    };
+  }
+
   async creativeReviewCommand(
     runId: string,
     commandId: string,
   ): Promise<StudioCreativeReviewCommandReceipt | undefined> {
+    return this.withCreativeLeaseEntry(runId, () => this.creativeReviewCommandWithProof(runId, commandId));
+  }
+
+  // 只协调本实例的短维护读取与dispatch首个checkpoint，不能等待或抢占真实后台写者。
+  private async withCreativeLeaseEntry<T>(runId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.creativeLeaseEntries.get(runId) ?? Promise.resolve();
+    const operation = previous.then(action);
+    const settled = operation.then(() => undefined, () => undefined);
+    this.creativeLeaseEntries.set(runId, settled);
+    try {
+      return await operation;
+    } finally {
+      if (this.creativeLeaseEntries.get(runId) === settled) this.creativeLeaseEntries.delete(runId);
+    }
+  }
+
+  private async creativeReviewCommandWithProof(
+    runId: string,
+    commandId: string,
+  ): Promise<StudioCreativeReviewCommandReceipt | undefined> {
     const existing = await this.readCreativeReviewCommand(runId, commandId);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.status !== "unknown") return existing;
+      try {
+        // unknown 不能仅凭 run 的人工状态放开页面：先排除仍在处理的本地写者，再核精确审计。
+        return await this.options.pipeline.withRunMaintenanceLease([runId], async () => (
+          await this.readCreativeReviewCommand(runId, commandId, true) ?? existing
+        ));
+      } catch (error) {
+        if (error instanceof Error && /locked by another writer/i.test(error.message)) return existing;
+        throw error;
+      }
+    }
     const receipt = (status: "unknown" | "not_accepted"): StudioCreativeReviewCommandReceipt => ({ commandId, status,
       observationUrl: `/api/runs/${encodeURIComponent(runId)}/creative-review/commands/${encodeURIComponent(commandId)}` });
     try {
@@ -1780,14 +1966,20 @@ export class ProductionStudio {
   private async readCreativeReviewCommand(
     runId: string,
     commandId: string,
+    independentActionsVerified = false,
   ): Promise<StudioCreativeReviewCommandReceipt | undefined> {
     const current = await this.loadRequiredRun(runId);
     const durableOperation = current.creativeReviewOperations?.find((operation) => operation.commandId === commandId);
     if (durableOperation) {
+      const consultActions = independentActionsVerified ? independentCreativeConsultationActions(current, durableOperation) : undefined;
       return {
         commandId,
         status: durableOperation.status,
         observationUrl: `/api/runs/${encodeURIComponent(runId)}/creative-review/commands/${encodeURIComponent(commandId)}`,
+        ...(independentActionsVerified && allowsIndependentCreativeDraftActions(current, durableOperation)
+          ? { independentDraftActionsAllowed: true as const } : {}),
+        ...(consultActions ? { independentDraftActions: consultActions } : {}),
+        ...(durableOperation.resultDisposition !== undefined ? { resultDisposition: durableOperation.resultDisposition } : {}),
       };
     }
     const node = current.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning");
@@ -1805,11 +1997,16 @@ export class ProductionStudio {
       ));
       if (!found) return undefined;
     }
+    // F03（2026-10-02 执行包）：审计命令状态与 run 状态分开——needs_human 不等于原审计
+    // 已完成。audit_current 停在「原请求仍在核实」的续接诊断上时保持 unknown，可查询、
+    // 不宣称 completed；只有取得结论（含已核清失败）或节点失败才落 completed/failed。
     const status = operation?.status === "running"
       ? "running"
       : node?.status === "failed"
         ? "failed"
-        : "completed";
+        : isCreativeAuditUnknown(current, commandId)
+          ? "unknown"
+          : "completed";
     return {
       commandId,
       status,
@@ -2021,9 +2218,7 @@ export class ProductionStudio {
     if (isTerminalRun(current.status) && input.confirmTerminalEdit !== true) {
       throw new StudioConflictError("这条制作已经结束。请明确确认创建人工修订版后再保存。");
     }
-    if (current.nodeRuns.some((candidate) => candidate.outcomeUncertain)) {
-      throw new StudioConflictError("这条制作还有付费结果尚未核对，暂时不能修改内容。请先完成任务与账单核对。");
-    }
+    await this.assertReworkUncertaintySafe(current);
     const node = current.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
     if (!node) throw new StudioInputError(`没有找到制作步骤“${nodeId}”。`);
     const editsOutput = input.output !== undefined;
@@ -2444,9 +2639,7 @@ export class ProductionStudio {
     if (isTerminalRun(current.status) && !terminalConfirmed) {
       throw new StudioConflictError("这条制作已经结束。请刷新后明确确认再创建新版本。");
     }
-    if (current.nodeRuns.some((candidate) => candidate.outcomeUncertain)) {
-      throw new StudioConflictError("这条制作还有付费结果尚未核对，暂时不能修改内容。请先完成任务与账单核对。");
-    }
+    await this.assertReworkUncertaintySafe(current);
     if (current.revision !== input.expectedRunRevision) {
       throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
     }
@@ -2592,9 +2785,7 @@ export class ProductionStudio {
     if (isTerminalRun(current.status) && input.confirmTerminalEdit !== true) {
       throw new StudioConflictError("这条制作已经结束。请明确确认创建人工修订版后再保存输入。");
     }
-    if (current.nodeRuns.some((candidate) => candidate.outcomeUncertain)) {
-      throw new StudioConflictError("这条制作还有付费结果尚未核对，暂时不能修改输入。请先完成任务与账单核对。");
-    }
+    await this.assertReworkUncertaintySafe(current);
     if (!current.nodeRuns.some((candidate) => candidate.nodeId === nodeId)) {
       throw new StudioInputError(`没有找到制作步骤“${nodeId}”。`);
     }
@@ -2647,9 +2838,7 @@ export class ProductionStudio {
     if (isTerminalRun(current.status) && input.confirmTerminalEdit !== true) {
       throw new StudioConflictError("这条制作已经结束。请明确确认重新生成后再修改执行配置。");
     }
-    if (current.nodeRuns.some((candidate) => candidate.outcomeUncertain)) {
-      throw new StudioConflictError("这条制作还有付费结果尚未核对，暂时不能修改模型或画面来源。请先完成任务与账单核对。");
-    }
+    await this.assertReworkUncertaintySafe(current);
     if (input.expectedRunRevision !== current.revision) {
       throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
     }
@@ -2954,7 +3143,8 @@ export class ProductionStudio {
     return this.retryFailedNodeInternal(runId, nodeId, false);
   }
 
-  async queryOriginalTextTask(runId: string): Promise<StudioRunDetail> {
+  async queryOriginalTextTask(runId: string, target?: StudioOptionalReviewTarget): Promise<StudioRunDetail> {
+    if (target) return this.queryOptionalReviewTasks(runId, target);
     const current = await this.loadRequiredRun(runId);
     const detail = this.toDetail(current);
     const pending = await loadPendingTextTask(this.options.workspaceRoot, runId, detail.nodes, current.nodeRuns);
@@ -3040,6 +3230,39 @@ export class ProductionStudio {
       );
       await writePrivateTextAtomically(receiptPath, `${JSON.stringify(mergedReceipt, null, 2)}\n`);
     });
+    return (await this.get(runId))!;
+  }
+
+  private async queryOptionalReviewTasks(runId: string, target: StudioOptionalReviewTarget): Promise<StudioRunDetail> {
+    const tasks = (await this.options.pipeline.originalOptionalReviewTasks?.(runId) ?? []).filter(task =>
+      task.nodeId === target.nodeId && task.purpose === target.purpose && task.operationId === target.operationId);
+    if (!tasks.length || !this.options.pipeline.recordOptionalReviewObservation) {
+      throw new StudioConflictError("没有找到与此版本绑定的原审计操作，请刷新后核对。");
+    }
+    for (const task of tasks) {
+      if (!task.prepared || !task.requestId) {
+        throw new StudioConflictError("原接入没有登记可查询的远端请求编号；已保存成果可继续处理，但不能重新提交来冒充查询。");
+      }
+      const { prepared, ...identity } = task;
+      let observation: OptionalReviewObservation;
+      if (task.purpose === "audio_review") {
+        if (!this.options.audioReviewObserver) throw new StudioConflictError("原声音审片查询接入暂不可用；没有发出新请求。");
+        const result = await this.options.audioReviewObserver.observe({ runRoot: path.join(this.options.workspaceRoot, "runs", runId), requestId: task.requestId });
+        observation = { ...identity, requestState: result.requestState,
+          resultState: result.status === "completed" ? "valid" : result.status === "uncertain" ? "absent" : "unusable", result };
+      } else {
+        const client = new CodexBridgeClient({ socketPath: prepared.route.socketPath, timeoutMs: 3_000, maxAttempts: 1 });
+        const result = await client.observePreparedOnce(prepared, { timeoutMs: 3_000 });
+        observation = { ...identity,
+          requestState: result.state === "not_accepted" ? "not_accepted"
+            : result.state === "completed_success" || result.state === "completed_failure" ? "settled" : "unknown",
+          resultState: result.state === "completed_success" ? "valid" : result.state === "completed_failure" ? "unusable"
+            : result.state === "conflict" ? "conflict" : "absent",
+          ...(result.state === "completed_success" ? { result: result.execution.output } : {}),
+        };
+      }
+      await this.options.pipeline.recordOptionalReviewObservation(runId, observation);
+    }
     return (await this.get(runId))!;
   }
 
@@ -3471,6 +3694,55 @@ interface TextTaskRecoveryReceipt {
   failureKind?: "model_provider_transient" | "model_provider_no_output" | "contract_rejected" | "binding_conflict";
 }
 
+function allowsIndependentCreativeDraftActions(
+  run: WorkflowRun<ProductionBrief>,
+  operation: NonNullable<WorkflowRun["creativeReviewOperations"]>[number],
+): boolean {
+  if (run.status !== "needs_human" || operation.status !== "unknown" || operation.action !== "audit_current"
+    || run.creativeReviewOperations?.some(item => item.status === "running" || (item.status === "unknown" && item.action !== "audit_current"))) return false;
+  const node = run.nodeRuns.find(item => item.nodeId === "creative-planning");
+  if (node?.status !== "needs_human" || node.intervention?.kind !== "creative_review"
+    || node.intervention.continuation?.stage !== operation.stage) return false;
+  const output = isRecord(node.output) ? node.output : undefined;
+  const review = isRecord(output?.creativeReview) ? output.creativeReview : undefined;
+  const stages = isRecord(review?.stages) ? review.stages : undefined;
+  const rawStage = stages?.[operation.stage];
+  const stage: Record<string, unknown> | undefined = isRecord(rawStage) ? rawStage : undefined;
+  const continuation = isRecord(stage?.continuation) ? stage.continuation : undefined;
+  const draft = isRecord(stage?.currentDraft) ? stage.currentDraft : undefined;
+  const request = isRecord(operation.request) ? operation.request : undefined;
+  const purpose = operation.stage === "director" ? review?.directorReviewPurpose ?? "material_plan" : undefined;
+  return review?.activeStage === operation.stage
+    && continuation?.status === "unknown" && continuation.source === "manual" && continuation.commandId === operation.commandId
+    && request?.action === "audit_current" && request.stage === operation.stage && request.reviewPurpose === purpose
+    && typeof draft?.versionId === "string" && typeof draft.sha256 === "string"
+    && request.baseDraftSha256 === draft.sha256 && node.intervention.continuation?.draftSha256 === draft.sha256
+    // artifact.sha256 是落盘字节摘要，draft.sha256 是规范内容摘要，不能跨版本域直接比较。
+    && run.artifacts.some(artifact => artifact.kind === "creative_draft" && artifact.id === output?.draftArtifactId
+      && node.intervention?.artifactIds?.includes(artifact.id) === true);
+}
+
+// F03：审计命令是否停在「原请求仍在核实」的续接诊断上（unknown 不可被 completed 投影吞掉）。
+function isCreativeAuditUnknown(run: WorkflowRun<ProductionBrief>, commandId: string): boolean {
+  const planning = run.nodeRuns.find((node) => node.nodeId === "creative-planning");
+  const output = isRecord(planning?.output) ? planning.output : undefined;
+  const review = isRecord(output?.creativeReview) ? output.creativeReview : undefined;
+  const stages = review && isRecord(review.stages) ? review.stages : undefined;
+  if (!stages) return false;
+  for (const stage of ["treatment", "script", "director"]) {
+    const stageState = stages[stage];
+    if (!isRecord(stageState)) continue;
+    const continuation = isRecord(stageState.continuation) ? stageState.continuation : undefined;
+    if (continuation?.status === "unknown"
+      && (continuation.commandId === undefined || continuation.commandId === commandId)) {
+      // 只把 commandId 匹配的 manual 审计（或 initial 阶段的无主诊断）算作该命令的 unknown。
+      if (continuation.source === "manual") return continuation.commandId === commandId;
+      return true;
+    }
+  }
+  return false;
+}
+
 async function withTaskRecovery(
   detail: StudioRunDetail,
   workspaceRoot: string,
@@ -3478,6 +3750,8 @@ async function withTaskRecovery(
 ): Promise<StudioRunDetail> {
   const pending = await loadPendingTextTask(workspaceRoot, detail.id, detail.nodes, nodeRuns);
   if (!pending) return detail;
+  // 可选审计用独立查询清单；人工采用后的旧审计不能出现“取回并继续生产”。
+  if (detail.optionalReviewTasks?.some(task => task.nodeId === pending.nodeId && task.operationId === pending.workflowOperationRequestId)) return detail;
   // 节点已经成功（或跳过）时，挂在它上面的未决任务只是历史账：那条路当时被人工放行，产出已经用上了，
   // 而 checkpoint 是只增不减的对账凭据，不会被回收。在一条已经走完的 run 上弹出「有未决付费任务」，
   // 只会让人以为还有事要处理；何况下面所有恢复动作都被 detail.status === "failed" 挡着，一个都点不动。
@@ -4373,6 +4647,7 @@ function toRunDetail(
     options: [...(active.options ?? [active.requiredAction])],
     ...(active.reviewStatus ? { reviewStatus: active.reviewStatus } : {}),
     ...(active.providerOutcomeKnown !== undefined ? { providerOutcomeKnown: active.providerOutcomeKnown } : {}),
+    ...(active.continuationScope ? { continuationScope: active.continuationScope } : {}),
     ...(active.evidenceId ? { evidenceId: active.evidenceId } : {}),
     createdAt: active.createdAt,
     ...(active.continuation ? { continuation: { ...active.continuation } } : {}),
@@ -5011,6 +5286,7 @@ function productionInputMessage(error: unknown): string {
   if (message.includes("platform must be one of")) return "目标平台只支持抖音、小红书或哔哩哔哩，请重新选择。";
   if (message.includes("reviewMode")) return "人工终审设置无效。";
   if (message.includes("protocolVersion")) return "制作参数版本不受支持，请刷新页面后重试。";
+  if (message.includes("seriesContext")) return "系列单集上下文与当前路线图不一致，请刷新系列页面后重新开始制作。";
   if (/\b(title|angle|audience|nicheSlug|platform)\b/.test(message)) return "请完整填写标题、内容角度、目标受众、系列标识和平台。";
   if (message.includes("providers")) return "制作能力配置不完整，请重新选择制作配方。";
   if (message.includes("economics")) return "付费能力设置不符合要求。";
@@ -5678,6 +5954,7 @@ function creativeReviewCommandDraft(
     stage: input.stage,
     ...(input.reviewPurpose ? { reviewPurpose: input.reviewPurpose } : {}),
     baseDraftSha256: input.baseDraftSha256,
+    ...(input.baseDraftVersionId ? { baseDraftVersionId: input.baseDraftVersionId } : {}),
     action: "confirm",
     ...(input.acknowledgeRepair === true ? { acknowledgeRepair: true as const } : {}),
     ...(input.acknowledgeIncomplete === true ? { acknowledgeIncomplete: true as const } : {}),

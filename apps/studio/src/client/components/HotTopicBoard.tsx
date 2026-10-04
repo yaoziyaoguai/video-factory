@@ -38,8 +38,11 @@ export function HotTopicBoard({ candidates, topicGeneration, adoptingId, refresh
   const ruleFallback = topicGeneration?.source === "rule-fallback"
     || (candidates.length > 0 && candidates.every(isRuleLead));
   if (topics.length === 0) return null;
+  // DG-UX-05：同一批候选默认只在上方收件箱铺开；这里降为辅助排序视图，默认收起。
+  // 规则兜底（缓存错误）时默认展开——唯一的错误说明与重试出口不能被折叠藏没。
   return (
-    <section className="hot-topic-board" aria-labelledby="hot-topic-board-title" data-tour="hot-topic-board">
+    <details className="hot-topic-board" {...(ruleFallback ? { open: true } : {})} data-tour="hot-topic-board">
+      <summary className="hot-topic-board-summary">按综合分浏览热点</summary>
       <header className="hot-topic-board-heading">
         <div>
           <p className="eyebrow">今日热点机会</p>
@@ -87,7 +90,7 @@ export function HotTopicBoard({ candidates, topicGeneration, adoptingId, refresh
           </li>
         ))}
       </ol>
-    </section>
+    </details>
   );
 }
 
@@ -171,6 +174,8 @@ function DirectionRow({ item, adopting, disabled, onAdopt, onSupplementSources, 
           {adopting ? "正在采用..." : action.label}
           {action.kind === "blocked" ? <XCircle aria-hidden="true" size={15} /> : <ArrowRight aria-hidden="true" size={15} />}
         </button>
+        {/* DG-UX-05：与收件箱同一说明——采用只入待制作区，不是开工。 */}
+        <small className="hot-direction-adopt-note">采用后加入待制作区，不会开始生成或付费。</small>
       </div>
       {action.note ? <p className="hot-direction-note"><ShieldAlert aria-hidden="true" size={13} />{action.note}</p> : null}
       {revising && onRevise ? (
@@ -219,22 +224,22 @@ function directionAction(item: StudioCandidateInboxItem, canSupplement: boolean)
   if (item.verification.status === "blocked") {
     return {
       kind: "adopt",
-      label: "仍然进入制作",
+      label: "仍然采用到制作区",
       note: `建议先补来源：${item.verification.reasons[0] ?? "当前有效来源不足。"}（只是建议，不影响你现在开工）`,
       supplement: canSupplement,
     };
   }
   // 规则线索没有总编结论，不能把"还没评估"说成"总编不建议生产"——那样等于替总编表态。
   if (isRuleLead(item)) {
-    return { kind: "adopt", label: "仍然进入制作", note: `总编本轮没有评估这条：${item.editorialDecision.reasons[0] ?? "未经选题总编判断。"}（是否开工由你决定）` };
+    return { kind: "adopt", label: "仍然采用到制作区", note: `总编本轮没有评估这条：${item.editorialDecision.reasons[0] ?? "未经选题总编判断。"}（是否开工由你决定）` };
   }
   if (item.editorialDecision.verdict === "skip") {
-    return { kind: "adopt", label: "仍然进入制作", note: `总编不建议生产：${item.editorialDecision.reasons[0] ?? "未给出理由。"}（是否开工由你决定）` };
+    return { kind: "adopt", label: "仍然采用到制作区", note: `总编不建议生产：${item.editorialDecision.reasons[0] ?? "未给出理由。"}（是否开工由你决定）` };
   }
   if (item.verification.status === "review_required") {
-    return { kind: "adopt", label: "核验后进入制作", note: item.verification.reasons[0] };
+    return { kind: "adopt", label: "查看来源并采用", note: item.verification.reasons[0] };
   }
-  return { kind: "adopt", label: "进入制作" };
+  return { kind: "adopt", label: "采用到制作区" };
 }
 
 function editorialScoreLabel(item: StudioCandidateInboxItem): string {

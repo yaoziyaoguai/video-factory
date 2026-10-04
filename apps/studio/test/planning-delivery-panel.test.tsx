@@ -60,3 +60,13 @@ describe("PlanningDeliveryPanel", () => {
     expect(screen.getByText("treatment-one")).toBeVisible();
   });
 });
+
+describe("PlanningDeliveryPanel D19", () => {
+  it("falls back to the registered effective version when stage verification is empty", async () => {
+    vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ viewerPromise: "当前采用稿正文" });
+    render(<PlanningDeliveryPanel runId="run-d19" versionId="version-current" artifactIds={["treatment-current"]}
+      artifacts={[artifact("treatment-current", "creative_treatment")]} publicationExpected={false} />);
+    expect(await screen.findByText("当前采用稿正文")).toBeInTheDocument();
+    expect(screen.queryByText(/正式规划尚未交付/)).not.toBeInTheDocument();
+  });
+});

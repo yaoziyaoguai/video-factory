@@ -79,6 +79,7 @@ import {
   type StudioTrendRefreshReceipt,
   type StudioTrendRefreshStatus,
   type StudioRunDetail,
+  type StudioReviewContinuationInput,
   type StudioRunSummary,
   type StudioSeries,
   type StudioSeriesInput,
@@ -155,6 +156,16 @@ export interface StudioServicePort {
   listRuns(origin?: "trend" | "series" | "manual" | "case"): Promise<StudioRunSummary[]>;
   getRun(runId: string): Promise<StudioRunDetail | undefined>;
   reworkDraft(runId: string): Promise<StudioReworkDraft | undefined>;
+  prepareReviewContinuation(runId: string, input: StudioReviewContinuationInput, actor?: string): Promise<StudioRunDetail>;
+  reviewContinuationReceipt(runId: string, commandId: string): Promise<{
+    commandId: string;
+    action: string;
+    nodeId: string;
+    stage?: string;
+    state: string;
+    isCurrent: boolean;
+    error?: string;
+  } | undefined>;
   archiveRuns(runIds: string[]): Promise<void>;
   restoreRuns(runIds: string[]): Promise<void>;
   deleteRun(runId: string): Promise<void>;
@@ -197,7 +208,7 @@ export interface StudioServicePort {
   requestPause(runId: string): Promise<StudioRunDetail>;
   resumePaused(runId: string): Promise<StudioRunDetail>;
   resumeStale(runId: string): Promise<StudioRunDetail>;
-  queryOriginalTextTask(runId: string): Promise<StudioRunDetail>;
+  queryOriginalTextTask(runId: string, target?: import("../shared/api.js").StudioOptionalReviewTarget): Promise<StudioRunDetail>;
   retrieveOriginalTextTask(runId: string): Promise<StudioRunDetail>;
   retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail>;
   inspectPaidNode(runId: string, nodeId: string): Promise<StudioPaidNodeSummary>;
@@ -648,6 +659,56 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     return draft;
   });
 
+  // F03/D06（2026-10-02 执行包 §2.3）：历史审计异常 failed 记录的显式准备。
+  // 只恢复本地人工停点；同 commandId 同 body 幂等重放，异 body 409。
+  app.post<{ Params: { runId: string } }>("/api/runs/:runId/review-continuations", async (request, reply) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    const body = isRecord(request.body) ? request.body : {};
+    const commandId = typeof body.commandId === "string" ? body.commandId.trim() : "";
+    if (!commandId || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(commandId)) {
+      throw new StudioInputError("请提供有效的恢复操作编号。");
+    }
+    if (body.nodeId !== "creative-planning" && body.nodeId !== "visual-review") {
+      throw new StudioInputError("只能恢复创作规划或成片审看停点。");
+    }
+    const expectedRunRevision = body.expectedRunRevision;
+    if (!Number.isSafeInteger(expectedRunRevision) || Number(expectedRunRevision) < 0) {
+      throw new StudioInputError("制作版本必须是非负整数。");
+    }
+    const stage = body.stage;
+    if (stage !== undefined && stage !== "treatment" && stage !== "script" && stage !== "director") {
+      throw new StudioInputError("恢复阶段必须是构思、脚本或导演。");
+    }
+    if (body.nodeId === "creative-planning" && !stage
+      || body.nodeId === "visual-review" && (stage !== undefined || body.reviewPurpose !== undefined)
+      || body.reviewPurpose !== undefined && (stage !== "director"
+        || body.reviewPurpose !== "direction" && body.reviewPurpose !== "material_plan")) {
+      throw new StudioInputError("恢复阶段与用途不匹配，请重新查看当前成果。");
+    }
+    const targetArtifactId = typeof body.targetArtifactId === "string" ? body.targetArtifactId.trim() : "";
+    const targetVersionId = typeof body.targetVersionId === "string" ? body.targetVersionId.trim() : "";
+    const targetSha256 = typeof body.targetSha256 === "string" ? body.targetSha256 : "";
+    if (!targetArtifactId || !targetVersionId || !/^[a-f0-9]{64}$/.test(targetSha256)) {
+      throw new StudioInputError("恢复操作必须绑定当前成果及其版本，请刷新页面后重试。");
+    }
+    const detail = await options.service.prepareReviewContinuation(request.params.runId, {
+      commandId,
+      expectedRunRevision: Number(expectedRunRevision),
+      nodeId: body.nodeId,
+      ...(stage ? { stage } : {}),
+      ...(body.reviewPurpose ? { reviewPurpose: body.reviewPurpose as "direction" | "material_plan" } : {}),
+      targetArtifactId, targetVersionId, targetSha256,
+    }, trustedStudioActor(auth, request.headers.cookie));
+    return reply.code(200).send(detail);
+  });
+
+  app.get<{ Params: { runId: string; commandId: string } }>("/api/runs/:runId/review-continuations/:commandId", async (request, reply) => {
+    requireSafeRouteId(request.params.runId, "制作编号");
+    requireSafeRouteId(request.params.commandId, "操作编号");
+    const receipt = await options.service.reviewContinuationReceipt(request.params.runId, request.params.commandId);
+    return receipt ?? reply.code(404).send({ error: "没有找到这条恢复操作。" });
+  });
+
   app.delete<{ Params: { runId: string } }>("/api/runs/:runId", async (request, reply) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     await options.service.deleteRun(request.params.runId);
@@ -840,7 +901,19 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/task-recovery/query", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
-    return options.service.queryOriginalTextTask(request.params.runId);
+    const body = request.body;
+    if (body === undefined || body === null) return options.service.queryOriginalTextTask(request.params.runId);
+    if (!isRecord(body) || Object.keys(body).some(key => !["nodeId", "purpose", "operationId"].includes(key))
+      || body.nodeId !== "creative-planning" && body.nodeId !== "visual-review"
+      || !["creative_audit", "visual_review", "audio_review"].includes(String(body.purpose))
+      || body.nodeId === "creative-planning" && body.purpose !== "creative_audit"
+      || body.nodeId === "visual-review" && body.purpose === "creative_audit"
+      || typeof body.operationId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/.test(body.operationId)) {
+      throw new StudioInputError("请选择这条制作已登记的原审计操作；不能指定其它接入或文件。");
+    }
+    return options.service.queryOriginalTextTask(request.params.runId, {
+      nodeId: body.nodeId, purpose: body.purpose as "creative_audit" | "visual_review" | "audio_review", operationId: body.operationId,
+    });
   });
 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/task-recovery/retrieve", async (request) => {
@@ -1489,6 +1562,10 @@ function parseOpportunityOrigin(value: string | undefined): "trend" | "series" |
 
 function isTerminal(status: StudioRunDetail["status"]): boolean {
   return status === "succeeded" || status === "failed" || status === "rejected";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function requireSafeRouteId(value: string, label: string): void {

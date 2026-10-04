@@ -13,6 +13,7 @@ import { CurrentFilmReinspection } from "./CurrentFilmReinspection.js";
 import { SubtitleRecoveryPanel } from "./SubtitleRecoveryPanel.js";
 import { NarrationTimingEditor } from "./NarrationTimingEditor.js";
 import { studioApi } from "../api.js";
+import { videoDownloadFilename } from "../download-filename.js";
 
 export function currentSubtitlePreview(run: StudioRunDetail) {
   const voice = run.nodes.find(node => node.id === "voice");
@@ -59,7 +60,8 @@ interface RunWorkbenchProps {
   onRegenerateStale?: () => Promise<void>;
   onRequestPause?: () => Promise<void>;
   onResumePaused?: () => Promise<void>;
-  onQueryOriginalTextTask?: () => Promise<void>;
+  onQueryOriginalTextTask?: (target?: import("../../shared/api.js").StudioOptionalReviewTarget) => Promise<void>;
+  onPrepareReviewContinuation?: (input: import("../../shared/api.js").StudioReviewContinuationInput) => Promise<void>;
   onRetrieveOriginalTextTask?: () => Promise<void>;
   onRetryFailedNode?: (nodeId: string) => Promise<void>;
   paidNodeSummary?: StudioPaidNodeSummary;
@@ -67,8 +69,10 @@ interface RunWorkbenchProps {
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, creativeDiscussion, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onReviseNodeDocument, onAuditNodeDocument, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, creativeDiscussion, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onReviseNodeDocument, onAuditNodeDocument, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onPrepareReviewContinuation, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
+  const [prepareSnapshot, setPrepareSnapshot] = useState<import("../../shared/api.js").StudioReviewContinuationInput>();
+  const prepareDialogRef = useDialogFocus<HTMLElement>(Boolean(prepareSnapshot), () => setPrepareSnapshot(undefined), nodeMutationPending);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
   const [approvalNote, setApprovalNote] = useState("");
@@ -80,13 +84,16 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const [voiceDurationSeconds, setVoiceDurationSeconds] = useState("");
   const [voiceScenePosition, setVoiceScenePosition] = useState(0);
   const [hasPendingPlanningConfiguration, setHasPendingPlanningConfiguration] = useState(false);
-  const [decisionSnapshot, setDecisionSnapshot] = useState<Pick<StudioDecisionInput, "expectedRunRevision" | "interventionId" | "reviewEvidenceId"> & {
+  const [decisionSnapshot, setDecisionSnapshot] = useState<Pick<StudioDecisionInput, "expectedRunRevision" | "interventionId" | "reviewEvidenceId" | "commandId"> & {
     acceptIncomplete?: true;
     contentVersionId?: string;
     acceptUnauditedContent?: true;
     acceptContentSuggestions?: true;
   }>();
   const previewRef = useRef<HTMLVideoElement>(null);
+  const [viewingFocusIdentity, setViewingFocusIdentity] = useState<string>();
+  const viewingFocusToggleRef = useRef<HTMLButtonElement>(null);
+  const costDetailsRef = useRef<HTMLDetailsElement>(null);
   const closeRejectDecision = () => {
     setRejecting(false);
     setDecisionSnapshot(undefined);
@@ -104,9 +111,28 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const voiceTimingDialogRef = useDialogFocus<HTMLElement>(replanningVoice, closeVoiceTimingDecision, decisionPending);
   const readOnly = run.continuation?.supported === false;
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
+  // 下载名始终绑定 run.videoArtifactId 选中的这份产物，不取数组最后一个。
+  const videoDownloadName = video ? videoDownloadFilename(run.title, video.id) : undefined;
   const subtitlePreview = currentSubtitlePreview(run);
   // loadeddata 的资格属于具体媒体源；同一个播放器换片时不能借用旧片的 ready 状态。
   const videoIdentity = video?.contentUrl ? `${run.id}\0${video.id}\0${video.contentUrl}` : undefined;
+  const viewingFocused = Boolean(videoIdentity && viewingFocusIdentity === videoIdentity);
+  useEffect(() => {
+    setViewingFocusIdentity(undefined);
+  }, [videoIdentity]);
+  useEffect(() => {
+    if (!viewingFocused) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      // 弹窗独占 Escape，包括提交中暂时不允许关闭的弹窗；观看布局不抢走它的焦点。
+      if (document.querySelector('[role="dialog"][aria-modal="true"], dialog[open]')) return;
+      event.preventDefault();
+      setViewingFocusIdentity(undefined);
+      viewingFocusToggleRef.current?.focus();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [viewingFocused]);
   const [filmArrival, setFilmArrival] = useState(initialFilmArrival);
   const [readyVideoIdentity, setReadyVideoIdentity] = useState<string>();
   const [filmRevealIdentity, setFilmRevealIdentity] = useState<string>();
@@ -150,6 +176,9 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     ? creatorNodes.find((node) => node.id === run.activeIntervention?.nodeId && node.id !== activeSpendNode?.id)
     : undefined;
   const remainingCreatorNodes = creatorNodes.filter((node) => node.id !== activeSpendNode?.id && node.id !== currentArtifactNode?.id);
+  // D20：技术成果不属于可编辑创作卡，但人工审看仍需能定位其当前只读交付。
+  const reviewResultNodes = run.nodes.filter(node => ["render", "technical-review"].includes(node.id)
+    && (hasContent(node.output) || node.artifactIds.length > 0));
   const showReviewSurface = Boolean(readOnly || video?.contentUrl || (run.activeIntervention && run.activeIntervention.kind !== "creative_review") || isStoppedStatus(run.status));
   const uncertainPaidNode = run.nodes.find((node) => node.outcomeUncertain === true);
   const visiblePaidNodeSummary = paidNodeSummary?.nodeId === uncertainPaidNode?.id ? paidNodeSummary : undefined;
@@ -159,10 +188,11 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const incompleteReviewOutput = run.nodes.find((node) => node.id === "visual-review")?.output;
   const incompleteAudioReview = !sourcePreflightDecision && incompleteReviewOutput && typeof incompleteReviewOutput === "object"
     ? (incompleteReviewOutput as Record<string, unknown>).audioReview : undefined;
+  const scopedOptionalReview = run.activeIntervention?.continuationScope === "rendered_video_optional_review";
   const visualReviewIncompleteDecision = run.activeIntervention?.nodeId === "visual-review"
     && incompleteReviewOutput !== null && typeof incompleteReviewOutput === "object"
     && "reviewStatus" in incompleteReviewOutput && incompleteReviewOutput.reviewStatus === "incomplete"
-    && "providerOutcomeKnown" in incompleteReviewOutput && incompleteReviewOutput.providerOutcomeKnown === true;
+    && (scopedOptionalReview || "providerOutcomeKnown" in incompleteReviewOutput && incompleteReviewOutput.providerOutcomeKnown === true);
   const sourceReviewEvidenceId = sourceReviewDecisionEvidenceId(run);
   const sourceReviewDecision = run.activeIntervention?.kind === "source_review_decision";
   const sourceReviewRetry = run.activeIntervention?.kind === "source_review_retry";
@@ -173,7 +203,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   // 证据绑定的是宿主交付快照 ID，而不是成片审片的 evidence digest。
   const finalReviewIncompleteRisk = run.activeIntervention?.nodeId === "final-review"
     && run.activeIntervention?.reviewStatus === "incomplete"
-    && run.activeIntervention.providerOutcomeKnown === true
+    && (scopedOptionalReview || run.activeIntervention.providerOutcomeKnown === true)
     && Boolean(run.activeIntervention.evidenceId);
   const audioForReinspection = visualReview?.audioReview ?? incompleteAudioReview;
   const audioResultUnknown = audioForReinspection && typeof audioForReinspection === "object"
@@ -270,10 +300,11 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const sourceAssetFailure = run.failure && isSourceAssetReviewFailure(run.failure)
     ? sourceAssetReviewBreakdown(run.failure)
     : undefined;
+  const canRestorePreservedWork = Boolean(run.reviewContinuationTargets?.length && onPrepareReviewContinuation);
   const localRecoveryActions = (run.status === "failed" || run.status === "rejected") && run.taskRecovery && !hasUncertainPaidOutcome(run)
     ? <>
       {run.taskRecovery.allowedActions.includes("retry_failed_step") && onRetryFailedNode && retryableNodeId(run) ? <button
-        className={`button ${run.taskRecovery.taskState === "completed_failure" ? "button-primary" : "button-secondary"}`}
+        className={`button ${run.taskRecovery.taskState === "completed_failure" && !canRestorePreservedWork ? "button-primary" : "button-secondary"}`}
         type="button"
         disabled={nodeMutationPending || hasPendingPlanningConfiguration}
         onClick={() => void onRetryFailedNode(retryableNodeId(run)!)}
@@ -332,6 +363,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     runArtifacts={run.artifacts}
     {...(run.activeIntervention?.id ? { activeInterventionId: run.activeIntervention.id } : {})}
     readOnly={readOnly}
+    {...(run.optionalReviewUncertaintySafe ? { optionalReviewUncertaintySafe: true as const } : {})}
     currentDelivery={node.id === currentArtifactNode?.id}
     {...(node.id === "creative-planning" && run.planningStages ? { planningStages: run.planningStages } : {})}
     {...(node.id === "creative-planning" ? { onPendingPlanningConfigurationChange: setHasPendingPlanningConfiguration } : {})}
@@ -364,14 +396,15 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     return {
       expectedRunRevision: run.revision,
       interventionId: run.activeIntervention.id,
+      ...(kind === "approve" && scopedOptionalReview ? { commandId: crypto.randomUUID() } : {}),
       // 成片审片证据只在消费它的停点随决定提交；其余停点不携带无关证据（与服务端分派一致）。
       // 终审无结论停点绑定的是 intervention.evidenceId（宿主交付快照 ID）。
       reviewEvidenceId: sourceReviewDecision || sourceReviewRetry
         ? sourceReviewEvidenceId ?? run.activeIntervention.evidenceId ?? null
         : renderedReviewStop
-          ? visualReview?.evidenceId ?? run.activeIntervention.evidenceId ?? null
+          ? scopedOptionalReview ? run.activeIntervention.evidenceId ?? null : visualReview?.evidenceId ?? run.activeIntervention.evidenceId ?? null
           : null,
-      ...(kind === "approve" && (sourceReviewIncompleteRisk || finalReviewIncompleteRisk)
+      ...(kind === "approve" && (sourceReviewIncompleteRisk || visualReviewIncompleteDecision || finalReviewIncompleteRisk)
         ? { acceptIncomplete: true as const } : {}),
       ...(kind === "approve" && contentDecisionNode?.outputState?.effectiveVersionId
         ? { contentVersionId: contentDecisionNode.outputState.effectiveVersionId } : {}),
@@ -400,8 +433,21 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     setReplanningVoice(true);
   };
 
+  const originalReviewRecords = run.optionalReviewTasks?.length ? <section id="run-original-reviews" tabIndex={-1} className="task-recovery-panel original-review-records" aria-label="原审计与费用待核">
+    <strong>{run.status === "succeeded" ? "作品已完成，原审片事实独立保留" : "原审计请求独立保留"}</strong>
+    {run.optionalReviewTasks.map(task => <div key={`${task.nodeId}:${task.purpose}:${task.operationId}`}>
+      <p>{task.summary}</p>
+      <p>{task.purpose === "creative_audit" ? "文字审计" : task.purpose === "audio_review" ? "声音审片" : "视觉审片"}：{task.requestState === "unknown" ? "结果与费用仍待核" : task.requestState === "settled" ? "原任务已结束" : "未提交或未受理"}</p>
+      {onQueryOriginalTextTask ? <button type="button" className="button button-secondary" disabled={nodeMutationPending}
+        onClick={() => void onQueryOriginalTextTask({ nodeId: task.nodeId, purpose: task.purpose, operationId: task.operationId })}>
+        查询原{task.purpose === "creative_audit" ? "文字审计" : task.purpose === "audio_review" ? "声音审片" : "视觉审片"}
+      </button> : null}
+    </div>)}
+    <p>查询不会重新生成、重新审片，也不会改写当前采用或终审决定；费用未核实不表示免费。</p>
+  </section> : null;
+
   return (
-    <main className={`page run-page${creativeDiscussion ? " has-creative-discussion" : ""}`}>
+    <main className={`page run-page${creativeDiscussion ? " has-creative-discussion" : ""}${viewingFocused ? " is-viewing-focused" : ""}`}>
       <header className="run-header" data-tour="run-header">
         <div>
           <h1>{run.title}</h1>
@@ -416,7 +462,14 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
         {run.nodes.some((node) => node.id === "creative-planning" && node.outputState?.versions.some((version) => version.id === node.outputState?.effectiveVersionId && version.artifactIds.length > 0))
           ? <a href="#node-workspace-creative-planning" onClick={() => revealNodeWorkspace("creative-planning")}>查看规划交付</a> : null}
         {remainingCreatorNodes.length > 0 ? <a href="#run-artifacts">已保留的内容与设置</a> : null}
-        {costDetail ? <a href="#run-costs">调用与费用</a> : null}
+        {costDetail ? <a href="#run-costs" onClick={(event) => {
+          const details = costDetailsRef.current;
+          if (!details) return;
+          event.preventDefault();
+          details.open = true;
+          details.querySelector("summary")?.focus();
+          details.scrollIntoView?.({ block: "start" });
+        }}>调用与费用</a> : null}
       </nav>
 
       {!readOnly && run.phases && run.progress ? <ProductionProgress run={run} /> : null}
@@ -460,17 +513,50 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
       </section> : null}
 
       {taskRecoveryPanel}
+      {run.reviewContinuationTargets?.length && onPrepareReviewContinuation ? <section className="task-recovery-panel" aria-label="恢复已有成果">
+        <strong>已保留当前成果，可以恢复处理</strong>
+        <p>这里只整理已有成果，不会重新生成或审计，也不会采用或签字。恢复后仍由你查看、修改并明确决定。</p>
+        {run.reviewContinuationTargets.map(target => <button key={`${target.nodeId}:${target.targetVersionId}`} type="button"
+          className="button button-primary" disabled={nodeMutationPending}
+          onClick={() => setPrepareSnapshot({ ...target, commandId: crypto.randomUUID(), expectedRunRevision: run.revision })}>
+          {target.nodeId === "creative-planning" ? "恢复当前稿，继续处理" : "查看成片，进入人工审看"}
+        </button>)}
+      </section> : null}
+      {video?.contentUrl && run.optionalReviewTasks?.some(task => task.requestState === "unknown") ? <div className="original-review-notice" role="note">
+        <AlertTriangle aria-hidden="true" size={16} />
+        <span>{run.optionalReviewTasks.filter(task => task.requestState === "unknown").length} 项原审计的结果与费用待核；费用未核实不表示免费。</span>
+        <a href="#run-original-reviews" onClick={event => {
+          event.preventDefault();
+          const target = document.getElementById("run-original-reviews");
+          target?.focus();
+          target?.scrollIntoView?.({ block: "start" });
+        }}>查看原请求与查询</a>
+      </div> : null}
+
+      {!video?.contentUrl ? originalReviewRecords : null}
 
       {showReviewSurface ? <div className={`review-layout${!video?.contentUrl && !currentArtifactNode ? " review-layout-no-media" : ""}`}>
         {video?.contentUrl ? <section className="video-stage" aria-labelledby="preview-title" data-tour="run-preview">
           <div className="section-heading stage-heading">
             <div><p className="eyebrow">最终画面</p><h2 id="preview-title">成片预览</h2></div>
-            {video?.contentUrl ? (
-              <a className="icon-button" href={video.contentUrl} download title="下载成片">
-                <Download aria-hidden="true" size={18} />
-              </a>
-            ) : null}
+            <div className="video-stage-actions">
+              <button ref={viewingFocusToggleRef} className="button button-secondary viewing-focus-toggle" type="button" aria-pressed={viewingFocused}
+                onClick={() => setViewingFocusIdentity(viewingFocused ? undefined : videoIdentity)}>
+                {viewingFocused ? "退出专注观看" : "专注观看"}
+              </button>
+              {/* DG-UX-06：下载名带作品标题与真实产物身份；身份不可核对时不给可点击下载。 */}
+              {videoDownloadName ? (
+                <a className="icon-button" href={video.contentUrl} download={videoDownloadName} title="下载成片">
+                  <Download aria-hidden="true" size={18} />
+                </a>
+              ) : (
+                <span className="icon-button" title="产物身份不可核对，暂不提供下载" aria-label="产物身份不可核对，暂不提供下载">
+                  <Download aria-hidden="true" size={18} />
+                </span>
+              )}
+            </div>
           </div>
+          {viewingFocused ? <p className="viewing-focus-hint">按 Esc 退出专注观看；审片意见与决定保留在下方。</p> : null}
           <div className={`video-frame${videoIdentity && filmRevealIdentity === videoIdentity ? " film-reveal-active" : ""}`}>
             {video?.contentUrl ? (
               <video ref={previewRef} title="成片预览" src={`${video.contentUrl}#t=0.1`} controls playsInline preload="auto"
@@ -560,8 +646,10 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               voiceNode={voiceNode} artifacts={run.artifacts} interventionId={run.activeIntervention.id}
               disabled={decisionPending || nodeMutationPending} /> : null}
           {!visualReview && video?.contentUrl ? <section className="review-advisory" role="status" aria-label="机器审片状态">
-            <strong>可播放首版</strong>
-            <p>机器视觉审片尚未完成。你可以播放和下载当前视频；这不代表正式发布已通过。</p>
+            <strong>机器视觉审片尚无完整结论</strong>
+            <p>{run.status === "succeeded" && run.finalReviewOutcome === "approved"
+              ? "人工终审已确认，内部制作已完成；未完成的机器审片状态独立保留。当前视频可以播放和下载。"
+              : "当前视频可以播放和下载；是否采用由你决定，机器审片状态不等于人工终审或外部平台发布状态。"}</p>
           </section> : null}
           {readOnly ? (
             <section className="run-state-panel" role="status">
@@ -825,7 +913,7 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />准备各平台发布包</button> : null}
               {run.status === "succeeded" && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
               {hasPendingPlanningConfiguration && (run.status === "failed" || run.status === "rejected") ? <p className="run-failure-summary">模型选择尚未保存。请先保存模型，或恢复为当前模型后再重试。</p> : null}
-              {(run.status === "failed" || run.status === "rejected") && !run.taskRecovery && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && retryableNodeId(run) ? <button className="button button-primary" type="button" disabled={nodeMutationPending || hasPendingPlanningConfiguration} onClick={() => void onRetryFailedNode(retryableNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{run.failure?.retryLabel ?? (sourceAssetFailure && run.status === "rejected" ? "重新检查已有试片" : run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤")}</button> : null}
+              {(run.status === "failed" || run.status === "rejected") && !run.taskRecovery && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && retryableNodeId(run) ? <button className={`button ${canRestorePreservedWork ? "button-secondary" : "button-primary"}`} type="button" disabled={nodeMutationPending || hasPendingPlanningConfiguration} onClick={() => void onRetryFailedNode(retryableNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{run.failure?.retryLabel ?? (sourceAssetFailure && run.status === "rejected" ? "重新检查已有试片" : run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤")}</button> : null}
               {(run.status === "failed" || run.status === "rejected") && !run.taskRecovery && !hasUncertainPaidOutcome(run) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
               {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />{isCostReplan ? "按降本意见重新规划并报价" : "按人工版本继续生成"}</button> : null}
               {run.status === "paused" && onResumePaused ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onResumePaused()}><Play aria-hidden="true" size={16} />继续自动制作</button> : null}
@@ -835,7 +923,17 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
         </aside>
       </div> : null}
 
+      {video?.contentUrl ? originalReviewRecords : null}
+
       </div>
+      {reviewResultNodes.length ? <section className="role-workspaces" aria-label="成片与机器检查">
+        <header className="section-heading"><div><h2>成片与机器检查</h2><p>查看这次审看的成果；技术结果只读，调整请从上游返工。</p></div></header>
+        <div className="action-row">{reviewResultNodes.map(node => <button key={node.id} type="button"
+          className="button button-ghost" onClick={() => revealNodeWorkspace(node.id)}>
+          {node.id === "render" ? "查看渲染结果" : "查看机器质检"}
+        </button>)}</div>
+        <div className="node-workspace-list">{reviewResultNodes.map(renderNodeWorkspace)}</div>
+      </section> : null}
       {remainingCreatorNodes.length ? <section id="run-artifacts" className="role-workspaces" aria-labelledby="role-workspaces-title">
         <header className="section-heading"><div><p className="eyebrow">创作内容</p><h2 id="role-workspaces-title">逐项预览与修改</h2><p>这里只呈现会影响作品、并且适合人工调整的内容。路径、版本和运行参数不会占用你的注意力。</p></div><span>{remainingCreatorNodes.length} 项</span></header>
         <div className="node-workspace-list">
@@ -843,7 +941,10 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
         </div>
       </section> : null}
 
-      {costDetail ? <div id="run-costs"><RunCostDetailPanel detail={costDetail} providers={providers} /></div> : null}
+      {costDetail ? <details id="run-costs" ref={costDetailsRef} className="secondary-cost-details run-cost-disclosure">
+        <summary><span><strong>本片调用与费用</strong><small>已记录 ¥{costDetail.totals.actualCostCny.toFixed(2)} · {costDetail.totals.actualPendingCount} 笔待确认是否扣费</small></span><b>展开</b></summary>
+        <RunCostDetailPanel detail={costDetail} providers={providers} />
+      </details> : null}
 
       {replanningVoice && voiceTiming ? (
         <div className="dialog-backdrop" role="presentation">
@@ -1059,6 +1160,19 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
           </section>
         </div>
       ) : null}
+      {prepareSnapshot ? <div className="dialog-backdrop" onMouseDown={event => {
+        if (event.target === event.currentTarget && !nodeMutationPending) setPrepareSnapshot(undefined);
+      }}><section className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="prepare-review-title" ref={prepareDialogRef}>
+        <header className="dialog-header"><h2 id="prepare-review-title">恢复已有成果</h2></header>
+        <p>不会采用或签字，不会重新生成、采购或审片。只恢复你正在查看的这一版；恢复后还需要你另行确认采用。</p>
+        <footer className="dialog-actions">
+          <button type="button" className="button button-ghost" disabled={nodeMutationPending} onClick={() => setPrepareSnapshot(undefined)}>取消</button>
+          <button type="button" className="button button-primary" disabled={nodeMutationPending}
+            onClick={() => void onPrepareReviewContinuation?.(prepareSnapshot).then(() => setPrepareSnapshot(undefined), () => undefined)}>
+            {nodeMutationPending ? "正在恢复…" : prepareSnapshot.nodeId === "creative-planning" ? "确认恢复工作台" : "确认进入人工审看"}
+          </button>
+        </footer>
+      </section></div> : null}
     </main>
   );
 }
@@ -1207,7 +1321,7 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, settleme
       <p><strong>发生了什么：</strong>{providerLookupBlocked
         ? "系统保留了服务商任务编号，但服务商已明确拒绝继续查询，无法再自动确认结果。"
         : isVoiceCall ? "请求发出后连接中断，系统没有收到明确结果。" : "服务商可能已经收到请求，但系统没有拿到足够的任务证据。"}</p>
-      <p><strong>为什么需要核对：</strong>直接重试可能产生重复任务和重复扣费，所以系统已经停住，不会自动重试或重新制作。</p>
+      <p><strong>为什么需要核对：</strong>直接重试可能产生重复任务和重复扣费。这项原请求不会自动重试或重新提交；制作进行到哪一步，以上方制作状态为准。</p>
       <p><strong>下一步：</strong>{settlementOnly
         ? "旧版制作只保存本次账单核对结果，不会恢复服务商任务、重新报价或继续下游制作。"
         : providerLookupBlocked
@@ -1874,6 +1988,7 @@ function retryableNodeId(run: StudioRunDetail): string | undefined {
 }
 
 function hasUncertainPaidOutcome(run: StudioRunDetail): boolean {
+  if (run.optionalReviewUncertaintySafe === true) return false;
   return run.nodes.some((node) => node.outcomeUncertain === true);
 }
 
@@ -1978,7 +2093,7 @@ function formatClock(value: string): string {
 
 function runStateMessage(run: StudioRunDetail): string {
   if (run.status === "succeeded") {
-    return "制作已完成，发布包可以下载使用。";
+    return "制作已完成，发布包可以下载使用。这里表示内部交付完成，外部平台发布仍需你自行操作。";
   }
   if (run.status === "rejected") {
     const humanDecision = run.decisions.at(-1);

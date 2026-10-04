@@ -97,11 +97,15 @@ export const BROKER_TASK_INPUT_CONTRACTS = {
     imageFields: ["imageIndex", "sha256", "jpegBase64", "scenePosition", "timecodeMs", "sourceTimecodeMs", "phase", "provider", "assetId"],
   },
   "creative-discussion": {
-    version: "video-factory/creative-discussion-input-v2",
+    version: "video-factory/creative-discussion-input-v3",
     fields: ["stage", "requestMode", "currentDocument", "context", "message", "selection", "recentMessages"],
     messageMaxLength: 4_000,
     recentMessagesMaxItems: 20,
     boundedRecordBytes: 196_608,
+    // DG-UX-04：讨论输入的 script currentDocument 使用「已保存稿」合同（与宿主
+    // validateScriptDraft 同源），不是新模型产出的严格 script-draft 输出 schema——
+    // 允许保存路径允许缺省的字段；存在时仍验证类型、值与已有稿上界。
+    currentDocumentScript: "existing-saved-script-v1",
   },
 } as const;
 

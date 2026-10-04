@@ -21,6 +21,7 @@ import {
   type AssetSemanticRanker,
   type CreativeTreatment,
   type ProductionBrief,
+  type ProductionPipelineOptions,
   type ProductionProviderRuntimeMetadata,
   type VisualAssetProviderCapability,
   type VisualDirectorAgentInput,
@@ -332,6 +333,17 @@ class PlanningHaltExecutor implements BrokerTaskExecutor {
   }
 }
 
+class LateOptionalAuditExecutor extends PlanningHaltExecutor {
+  private release!: () => void;
+  private auditGate = new Promise<void>(resolve => { this.release = resolve; });
+  completeAudit(): void { this.release(); }
+  holdNextAudit(): void { this.auditGate = new Promise<void>(resolve => { this.release = resolve; }); }
+  override async runTask(task: ValidatedTask): Promise<CodexExecutionResult> {
+    if (task.kind === "role-audit") await this.auditGate;
+    return super.runTask(task);
+  }
+}
+
 function treatment(counter: { calls: number }): CreativeTreatment {
   counter.calls += 1;
   return {
@@ -402,6 +414,7 @@ function pipeline(
     assetProviders?: VisualAssetProviderCapability[];
     providerRuntimeMetadata?: ProductionProviderRuntimeMetadata[];
     assetSemanticRanker?: AssetSemanticRanker;
+    reviewContinuationFailpoints?: ProductionPipelineOptions["reviewContinuationFailpoints"];
   } = {},
 ): ProductionPipeline {
   const screenwriter = new CodexScreenwriterAgent({
@@ -414,6 +427,7 @@ function pipeline(
   return new ProductionPipeline({
     workspaceRoot,
     worker,
+    ...(capabilityOverrides.reviewContinuationFailpoints ? { reviewContinuationFailpoints: capabilityOverrides.reviewContinuationFailpoints } : {}),
     screenwriterAgent: checkpointRecoveryRequestIds ? {
       id: screenwriter.id,
       modelId: screenwriter.modelId,
@@ -923,7 +937,7 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
         assert.equal(broker.executor.submissions.filter((entry) => entry.kind === "role-audit").length, 1);
         if (terminalState === "completed_failure") {
           assert.equal(recoveryDispatchOptions?.resumeCompletedTextTaskRequestId, originalRequestId);
-          assert.ok(checkpointRecoveryRequestIds.includes(originalRequestId), JSON.stringify({
+        assert.ok(checkpointRecoveryRequestIds.includes(originalRequestId), JSON.stringify({
             checkpointRecoveryRequestIds,
             originalRequestId,
             recoveryDispatchOptions,
@@ -936,3 +950,159 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
     });
   }
 });
+
+for (const source of ["initial", "manual"] as const) for (const adoptedFirst of [false, true]) {
+  it(`late original script audit stays on its version (${source}, ${adoptedFirst ? "adoption first" : "audit first"})`, async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-optional-script-late-"));
+    const executor = new LateOptionalAuditExecutor();
+    const broker = await brokerWithExecutor(workspaceRoot, executor);
+    const client = new TrackingClient({ socketPath: broker.socketPath, timeoutMs: 150, maxAttempts: 1, pollIntervalMs: 10 });
+    const submit = client.runTaskDetailed.bind(client);
+    client.runTaskDetailed = (kind, payload, requestId, session, options) => submit(kind, payload, requestId, session,
+      { ...options, timeoutMs: kind === "role-audit" ? 150 : 3_000 });
+    let interruptObservation = source === "initial" && !adoptedFirst;
+    let producer = pipeline(workspaceRoot, client, { calls: 0 }, undefined, new RecoveryWorker(), {
+      reviewContinuationFailpoints: { afterObservationCheckpoint: () => {
+        if (interruptObservation) { interruptObservation = false; throw new Error("Controlled observation interrupted after durable run, before SQLite sync."); }
+      } },
+    });
+    let studio = new StudioService({ workspaceRoot, pipeline: producer, commandAvailable: () => false, environment: {} });
+    const gateOf = (run: Awaited<ReturnType<ProductionPipeline["show"]>>) => run.nodeRuns.find(node => node.nodeId === "creative-planning")!;
+    try {
+      const input = brief();
+      input.workflowFeatures!.creativeReview = "user-confirmed-v1";
+      let run = await producer.start(input);
+      const treatment = gateOf(run);
+      const shown = (treatment.output as { creativeReview: { stages: { treatment: { checkResult: { checkIdentity: string } } } } }).creativeReview.stages.treatment.checkResult;
+      run = await producer.confirmCreativeReview(run.id, { commandId: "adopt-treatment", actor: "creator", stage: "treatment",
+        expectedRunRevision: run.revision, expectedReviewRevision: treatment.intervention!.continuation!.reviewRevision,
+        baseDraftSha256: treatment.intervention!.continuation!.draftSha256, expectedCheckIdentity: shown.checkIdentity });
+      if (source === "manual") {
+        const initial = (await producer.originalOptionalReviewTasks(run.id)).find(task => task.purpose === "creative_audit" && task.requestId)!;
+        executor.completeAudit();
+        for (const deadline = Date.now() + 10_000; Date.now() < deadline;) {
+          await studio.queryOriginalTextTask(run.id, { nodeId: initial.nodeId, purpose: initial.purpose, operationId: initial.operationId });
+          if ((await producer.originalOptionalReviewTasks(run.id)).find(task => task.requestId === initial.requestId)?.requestState === "settled") break;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        run = await producer.loadPersisted(run.id);
+        const initialVersion = initial.targetVersionId;
+        const edit = async (commandId: string, document: typeof SCRIPT) => {
+          const node = gateOf(run);
+          run = await (await producer.dispatchCreativeReviewCommand(run.id, { commandId, actor: "creator", action: "edit_draft", stage: "script",
+            expectedRunRevision: run.revision, expectedReviewRevision: node.intervention!.continuation!.reviewRevision,
+            baseDraftSha256: node.intervention!.continuation!.draftSha256, document })).completion;
+        };
+        await edit("edit-to-B", { ...SCRIPT, narrativeArc: "B版本的推进顺序" });
+        const versionB = (await studio.creativeReview(run.id))!.draftVersionId;
+        await edit("edit-back-to-A-prime", SCRIPT);
+        const versionAPrime = (await studio.creativeReview(run.id))!.draftVersionId;
+        assert.notEqual(versionAPrime, initialVersion, "同字节A′不能复活A的审计或采用身份");
+        assert.notEqual(versionAPrime, versionB);
+        assert.equal((await studio.creativeReview(run.id))!.checkResult, undefined);
+        executor.holdNextAudit();
+        const node = gateOf(run);
+        run = await (await producer.dispatchCreativeReviewCommand(run.id, { commandId: "manual-audit-A-prime", actor: "creator", action: "audit_current", stage: "script",
+          expectedRunRevision: run.revision, expectedReviewRevision: node.intervention!.continuation!.reviewRevision,
+          baseDraftSha256: node.intervention!.continuation!.draftSha256 })).completion;
+      }
+      const script = gateOf(run);
+      assert.equal(script.intervention?.continuation?.stage, "script", JSON.stringify({ status: run.status, error: script.error }));
+      const original = (await producer.originalOptionalReviewTasks(run.id)).find(task => task.purpose === "creative_audit" && task.requestId && task.requestState === "unknown")!;
+      assert.ok(original?.prepared, "真实role-audit的prepared信封随停点可查询");
+      if (source === "manual") {
+        const receipt = await studio.creativeReviewCommand(run.id, "manual-audit-A-prime");
+        assert.equal(receipt?.status, "unknown", "可选审计仍待核，不能伪称完成");
+        assert.ok(receipt && "independentDraftActionsAllowed" in receipt && receipt.independentDraftActionsAllowed === true,
+          "本地写者退出后的精确可选审计应允许用户独立修订或采用已有稿件");
+        const lockedReceipt = await producer.withRunMaintenanceLease([run.id], () => studio.creativeReviewCommand(run.id, "manual-audit-A-prime"));
+        assert.equal(lockedReceipt?.independentDraftActionsAllowed, undefined, "本地仍有写者时不能释放页面命令");
+        const unknownCommand = await studio.creativeReviewCommand(run.id, "never-accepted-command");
+        assert.equal(unknownCommand?.independentDraftActionsAllowed, undefined, "404/来源不明的unknown不授予独立处理资格");
+      }
+      const target = { nodeId: original.nodeId, purpose: original.purpose, operationId: original.operationId };
+      if (source === "initial" && adoptedFirst) {
+        const edit = async (commandId: string, document: typeof SCRIPT) => {
+          const current = gateOf(run);
+          run = await (await producer.dispatchCreativeReviewCommand(run.id, { commandId, actor: "creator", action: "edit_draft", stage: "script",
+            expectedRunRevision: run.revision, expectedReviewRevision: current.intervention!.continuation!.reviewRevision,
+            baseDraftSha256: current.intervention!.continuation!.draftSha256, document })).completion;
+        };
+        await edit("unknown-A-to-B", { ...SCRIPT, narrativeArc: "待核期间明确修订B" });
+        const versionB = (await studio.creativeReview(run.id))!.draftVersionId;
+        await edit("unknown-B-to-A-prime", SCRIPT);
+        const current = (await studio.creativeReview(run.id))!;
+        assert.notEqual(current.draftVersionId, original.targetVersionId);
+        assert.notEqual(current.draftVersionId, versionB);
+        assert.equal(current.checkResult, undefined, "同字节A′不能挂回仍待核的A审计");
+      }
+      const shownScript = gateOf(run);
+      const unsigned = { commandId: "adopt-script", actor: "creator", stage: "script" as const,
+        expectedRunRevision: run.revision, expectedReviewRevision: shownScript.intervention!.continuation!.reviewRevision,
+        baseDraftSha256: shownScript.intervention!.continuation!.draftSha256, acknowledgeUnaudited: true as const };
+      if (adoptedFirst) run = await producer.confirmCreativeReview(run.id, unsigned);
+      if (source === "manual" && adoptedFirst) {
+        assert.equal((await studio.creativeReviewCommand(run.id, "manual-audit-A-prime"))?.independentDraftActionsAllowed, undefined,
+          "原稿停点已离开时不能把旧审计资格投影到新阶段");
+      }
+      const beforeQuery = await producer.loadPersisted(run.id);
+      executor.completeAudit();
+      if (interruptObservation) {
+        // release仅解除执行器等待，不代表Broker已耐久完成。崩溃窗口要注入在有效报告
+        // 落盘之后，先只读等原请求完成；否则会错误断言一次unknown观察已经有审计。
+        let state: string | undefined;
+        for (const deadline = Date.now() + 10_000; Date.now() < deadline;) {
+          state = (await client.observePreparedOnce(original.prepared!, { timeoutMs: 3_000 })).state;
+          if (state === "completed_success") break;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        assert.equal(state, "completed_success", "原请求真实完成后才注入有效报告耐久窗口，零重新发送");
+      }
+      let detail;
+      try { detail = await studio.queryOriginalTextTask(run.id, target); }
+      catch (error) {
+        assert.match(String(error), /Controlled observation interrupted/);
+        const saved = await producer.loadPersisted(run.id);
+        const savedReview = (gateOf(saved).output as { creativeReview: { stages: { script: { checkResult: unknown } } } }).creativeReview;
+        assert.ok(savedReview.stages.script.checkResult, "已耐久的观察先保存在run，不能只留SQLite幽灵意见");
+        producer = pipeline(workspaceRoot, client, { calls: 0 });
+        studio = new StudioService({ workspaceRoot, pipeline: producer, commandAvailable: () => false, environment: {} });
+        detail = await studio.queryOriginalTextTask(run.id, target);
+      }
+      for (const deadline = Date.now() + 10_000; detail.optionalReviewTasks?.find(task => task.requestId === original.requestId)?.requestState !== "settled" && Date.now() < deadline;) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        detail = await studio.queryOriginalTextTask(run.id, target);
+      }
+      const after = await producer.loadPersisted(run.id);
+      const review = (gateOf(after).output as { creativeReview: { stages: { script: { auditHistory: Array<{ source: string; versionId: string }>; checkResult: unknown } } } }).creativeReview;
+      assert.equal(review.stages.script.auditHistory.length, source === "initial" ? 1 : 2, "迟到有效报告只能登记原版本历史一次");
+      assert.equal(review.stages.script.auditHistory.at(-1)!.source, source, "主动再审不得伪记为初审");
+      assert.equal(review.stages.script.auditHistory.at(-1)!.versionId, original.targetVersionId);
+      const observed = { nodeId: original.nodeId, purpose: original.purpose, operationId: original.operationId,
+        requestId: original.requestId, targetVersionId: original.targetVersionId, inputDigest: original.inputDigest,
+        requestState: "settled" as const, resultState: "valid" as const, result: NEEDS_SOURCE_AUDIT };
+      assert.equal((await producer.recordOptionalReviewObservation(run.id, observed)).revision, after.revision,
+        "原操作同结果再次观察是严格重放，不重复登记或推进版本");
+      await assert.rejects(() => producer.recordOptionalReviewObservation(run.id,
+        { ...observed, result: { ...NEEDS_SOURCE_AUDIT, summary: "同一操作返回另一份不同结论" } }), /同一审计操作|不一致/u,
+      "同操作异结果必须拒绝，不能静默吞掉或改写已采用记录");
+      assert.deepEqual(after.decisions, beforeQuery.decisions, "查询不是重新采用");
+      assert.equal(executor.submissions.filter(kind => kind === "script-draft").length, 1);
+      assert.equal(executor.submissions.filter(kind => kind === "role-audit").length, source === "initial" ? 1 : 2, "只查原请求，不补审或换模型");
+      if (adoptedFirst) {
+        assert.deepEqual(gateOf(after).outputState, gateOf(beforeQuery).outputState, "迟到报告不覆盖已采用成果版本");
+        assert.equal(gateOf(after).intervention?.continuation?.stage, "director");
+      } else {
+        assert.ok(review.stages.script.checkResult, "采用前已核实的本版意见同步到正式图和工作台");
+        await assert.rejects(() => producer.confirmCreativeReview(run.id, { ...unsigned, expectedRunRevision: after.revision }), /当前|stale|复核/u);
+        const refreshed = await studio.creativeReview(run.id);
+        assert.ok(refreshed?.checkResult);
+        const adopted = await producer.confirmCreativeReview(run.id, { ...unsigned, commandId: "adopt-audited-script", acknowledgeUnaudited: undefined,
+          expectedRunRevision: after.revision, expectedReviewRevision: gateOf(after).intervention!.continuation!.reviewRevision,
+          expectedCheckIdentity: refreshed.checkResult!.checkIdentity,
+          acknowledgeRepair: refreshed.checkResult!.verdict === "repair" ? true : undefined });
+        assert.equal(gateOf(adopted).intervention?.continuation?.stage, "director", "登记迟到意见后仍能从真实图继续下一停点");
+      }
+    } finally { executor.completeAudit(); await broker.close(); await rm(workspaceRoot, { recursive: true, force: true }); }
+  });
+}

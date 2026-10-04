@@ -140,7 +140,6 @@ export function AssetsPage() {
     <main className="page asset-library-page">
       <header className="page-header asset-library-header">
         <div>
-          <p className="eyebrow">创作资产</p>
           <h1>素材库</h1>
           <p className="page-summary">{collection === "creative" ? "可再次用于创作的画面与声音，按内容去重并保留授权和入片记录。" : "最终成片、脚本与质检记录独立归档，不混入可复用素材。"}</p>
           <Link to="/resources#visual-providers">配置外部素材来源</Link>
@@ -246,8 +245,11 @@ function AssetCard({ asset, usage, run, grouped = false, onMediaPlay }: { asset:
       <p className="asset-provider">{hasStockAttribution(resolvedUsage?.providerId ?? asset.providerId)
         ? <StockAttribution provider={resolvedUsage?.providerId ?? asset.providerId} creator={resolvedUsage?.creator ?? creator} creatorUrl={resolvedUsage?.creatorUrl ?? asset.creatorUrl} licenseNote={resolvedUsage?.licenseNote ?? asset.licenseNote} />
         : <>{providerLabel(asset.providerId) ?? "其他制作服务"}{creator ? ` · ${creator}` : ""}</>}</p>
-      {metadata.length ? <ul className="asset-metadata" aria-label="素材规格">{metadata.map((item) => <li key={item}>{item}</li>)}</ul> : null}
-      {visibleTags.length ? <div className="asset-tags">{visibleTags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
+      {metadata.length || visibleTags.length ? <details className="asset-card-details">
+        <summary>规格与标签<ChevronDown aria-hidden="true" size={14} /></summary>
+        {metadata.length ? <ul className="asset-metadata" aria-label="素材规格">{metadata.map((item) => <li key={item}>{item}</li>)}</ul> : null}
+        {visibleTags.length ? <div className="asset-tags">{visibleTags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
+      </details> : null}
       <footer>
         <span>{grouped ? identity : asset.useCount > 1 ? `已用于 ${asset.useCount} 个镜头` : resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? identity : "未归属"}</span>
         <div>{asset.reuseStatus === "review_required" ? <Link to="/resources#resource-manifest" aria-label={`去确认授权：${assetTitle(asset, resolvedUsage)}`}>去确认授权</Link> : null}{resolvedUsage ? <Link to={`/projects/${resolvedUsage.runId}`} aria-label={`查看作品：${assetTitle(asset, resolvedUsage)}`}>查看作品</Link> : null}{asset.sourceUrl ? <a href={asset.sourceUrl} target="_blank" rel="noreferrer" aria-label={`查看素材原始来源：${assetTitle(asset, resolvedUsage)}（新窗口）`}><ExternalLink aria-hidden="true" size={14} /></a> : null}</div>

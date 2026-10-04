@@ -25,6 +25,10 @@
     "./narration-text": {
       "types": "./dist/narration-text.d.ts",
       "import": "./dist/narration-text.js"
+    },
+    "./visual-evidence-boundary": {
+      "types": "./dist/visual-evidence-boundary.d.ts",
+      "import": "./dist/visual-evidence-boundary.js"
     }
   },
   "bin": {

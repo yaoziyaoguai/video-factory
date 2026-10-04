@@ -3,12 +3,27 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { stageHandoffIdentityChanged } from "../film-arrival.js";
 import { studioApi } from "../api.js";
-import type { StudioCreativeReviewCommandInput, StudioCreativeReviewSnapshot } from "../../shared/api.js";
+import {
+  clearCreativeSessionFields,
+  creativeSessionSlotKey,
+  creativeSessionStorage,
+  importLegacyCreativeEdit,
+  importLegacyCreativeMessage,
+  readCreativeSessionRecord,
+  readCreativeSessionSlot,
+  writeCreativeSessionFields,
+  type CreativeDraftSessionBase,
+} from "../creative-draft-session.js";
+import { CreativeDraft, CreativeDraftReader } from "./CreativeDraftReader.js";
+import type { StudioCreativeReviewCommandInput, StudioCreativeReviewCommandReceipt, StudioCreativeReviewSnapshot } from "../../shared/api.js";
+import { parseStudioCreativeReviewCommandInput } from "../../shared/api.js";
+
+export { CreativeDraft } from "./CreativeDraftReader.js";
 
 interface CreativeDiscussionPanelProps {
   review: StudioCreativeReviewSnapshot;
   busy: boolean;
-  onCommand(input: StudioCreativeReviewCommandInput): Promise<void>;
+  onCommand(input: StudioCreativeReviewCommandInput): Promise<void | StudioCreativeReviewCommandReceipt>;
 }
 
 // 与 PlanningStagesPanel 的阶段名保持一致。这里曾经把 treatment 写成"导演方案"、
@@ -35,21 +50,35 @@ interface PendingRiskConfirm {
   command: StudioCreativeReviewCommandInput;
 }
 
-function safeStorageGet(key: string): string | null {
-  try {
-    return window.localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-
 export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDiscussionPanelProps) {
   const purposeKey = review.reviewPurpose ?? "draft";
+  // 旧版按版本号写 localStorage 的草稿 key：只作一次性只读导入来源，不再写入。
   const storageKey = `vf:creative-draft:${review.runId}:${review.stage}:${purposeKey}${review.draftVersionId ? `:${review.draftVersionId}` : ""}`;
   const commandStorageKey = `vf:creative-command:${review.runId}:${review.stage}:${purposeKey}`;
-  const currentStorageKey = useRef(storageKey);
-  currentStorageKey.current = storageKey;
-  const [message, setMessage] = useState(() => safeStorageGet(storageKey) ?? "");
+  const currentCommandStorageKey = useRef(commandStorageKey);
+  currentCommandStorageKey.current = commandStorageKey;
+  // 未保存意见/编辑文字按标签会话保存：key 不含版本号，标签之间互不可见。
+  const sessionSlotKey = creativeSessionSlotKey(review.runId, review.stage, purposeKey);
+  const sessionBase: CreativeDraftSessionBase = {
+    runId: review.runId,
+    stage: review.stage,
+    purposeKey,
+    ...(review.draftVersionId ? { versionId: review.draftVersionId } : {}),
+    ...(review.draftArtifactId ? { artifactId: review.draftArtifactId } : {}),
+    ...(review.draftSha256 ? { draftSha256: review.draftSha256 } : {}),
+  };
+  const currentStorageKey = useRef(sessionSlotKey);
+  currentStorageKey.current = sessionSlotKey;
+  const [message, setMessage] = useState(() => {
+    const { storage } = creativeSessionStorage();
+    // C3：导入写失败不谎报持久成功——如实提示本机草稿无法保存。
+    if (importLegacyCreativeMessage({ session: storage, legacy: window.localStorage, sessionKey: sessionSlotKey, base: sessionBase, legacyKey: storageKey }) === "failed") {
+      queueMicrotask(() => setStorageBroken(true));
+    }
+    return readCreativeSessionSlot(storage, sessionSlotKey)?.message ?? "";
+  });
+  const messageSequence = useRef(0);
+  useEffect(() => { messageSequence.current += 1; }, [message, sessionSlotKey]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedAuditIndexes, setSelectedAuditIndexes] = useState<number[]>([]);
   const [error, setError] = useState<string>();
@@ -62,6 +91,10 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
     } catch { return undefined; }
   });
   const [reconcilingCommand, setReconcilingCommand] = useState(false);
+  // 待核原请求不接受新模型操作；文字仍可编辑，服务端证明的三类稿件决定另行核验。
+  // 本机指针整理后仍以耐久记录为准，不能因刷新或独立手改就重新开放讨论。
+  const hasUnresolvedOperation = pendingCommandId !== undefined || review.pendingConsultation !== undefined
+    || review.consultationOperations?.some(operation => operation.status === "unknown") === true;
   const [hasUnsavedEdits, setHasUnsavedEdits] = useState(false);
   const [mobileTab, setMobileTab] = useState<"draft" | "discussion">("draft");
   const [storageBroken, setStorageBroken] = useState(false);
@@ -82,6 +115,20 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   }, [pendingRisk]);
   const [identityStale, setIdentityStale] = useState(false);
   const messageListRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const discussionFocusFrameRef = useRef<number | undefined>(undefined);
+  useEffect(() => () => {
+    if (discussionFocusFrameRef.current !== undefined) window.cancelAnimationFrame(discussionFocusFrameRef.current);
+  }, []);
+  function focusRevisionDiscussion() {
+    setMobileTab("discussion");
+    if (discussionFocusFrameRef.current !== undefined) window.cancelAnimationFrame(discussionFocusFrameRef.current);
+    discussionFocusFrameRef.current = window.requestAnimationFrame(() => {
+      composerRef.current?.focus({ preventScroll: true });
+      composerRef.current?.scrollIntoView?.({ block: "center" });
+      discussionFocusFrameRef.current = undefined;
+    });
+  }
   const followMessagesRef = useRef(true);
   const [unseenMessages, setUnseenMessages] = useState(false);
   // 只让当前 run 内的新稿件触发交接；切换 run 是新的观察基线。
@@ -154,18 +201,42 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
     stage: review.stage,
     ...(review.reviewPurpose ? { reviewPurpose: review.reviewPurpose } : {}),
     baseDraftSha256: review.draftSha256,
+    ...(review.draftVersionId ? { baseDraftVersionId: review.draftVersionId } : {}),
   }), [review]);
 
-  useEffect(() => {
-    try {
-      setMessage(window.localStorage.getItem(storageKey) ?? "");
-      setSelectedIds([]);
-    } catch {
-      setStorageBroken(true);
+  function releaseCompletedConsultation(command: StudioCreativeReviewCommandInput, key = commandStorageKey) {
+    const saved = readPendingCommand(key);
+    if (saved && !sameCommandIdentity(saved, command)) {
+      if (currentCommandStorageKey.current === key) setPendingCommandId(current => current === command.commandId ? saved.commandId : current);
+      throw new Error("本机操作记录已变化，请核对正确的操作；不会覆盖或发送另一条命令。");
     }
-  }, [storageKey]);
+    // 核对和删除之间没有await；完成A不能整理后来B或同ID异body的记录。
+    if (saved) window.localStorage.removeItem(key);
+    if (currentCommandStorageKey.current === key) setPendingCommandId(current => current === command.commandId ? undefined : current);
+  }
+
+  useEffect(() => {
+    // 原结果查询期间父页面可能重挂面板；完成态也要从耐久证明同步，不能仅依赖旧实例回调。
+    // 此处只整理匹配的本机指针，不查询/发送请求，不把unknown当completed。
+    const completed = review.consultationOperations?.find(operation => operation.commandId === pendingCommandId && operation.status === "completed");
+    if (!completed) return;
+    try { releaseCompletedConsultation(completed.command); }
+    catch { setCompletionNotice("原请求已完成，但本机恢复记录尚未整理；请核对原操作，不需要重新生成。当前输入已保留。"); }
+  }, [pendingCommandId, commandStorageKey, review.consultationOperations]);
+
+  useEffect(() => {
+    // 换 run/阶段/用途是新的讨论上下文，读该上下文自己的会话槽；
+    // 同一上下文内服务端换版本不重置用户输入（DG-UX-01）。
+    const { storage } = creativeSessionStorage();
+    setMessage(readCreativeSessionSlot(storage, sessionSlotKey)?.message ?? "");
+    setSelectedIds([]);
+  }, [sessionSlotKey]);
 
   useEffect(() => setSelectedAuditIndexes([]), [auditIssueIdentity]);
+  // C4（收尾包）：selection 生命周期与意见持久槽分离——绑定 run/stage/purpose 与完整
+  // 稿件身份同时核版本、产物与内容；缺版本明确留在legacy域。身份任一变化（含同 SHA 的
+  // A→B→A′）清空旧 scene/beat 范围；同身份的普通 rerender/SSE revision 不清用户选择。
+  useEffect(() => setSelectedIds([]), [`${review.runId}:${review.stage}:${purposeKey}:${review.draftVersionId ?? "legacy"}:${review.draftArtifactId}:${review.draftSha256}`]);
 
   function appendAuditSuggestions() {
     if (!review.checkResult || review.checkResult.status === "incomplete" || selectedAuditIndexes.length === 0) return;
@@ -183,14 +254,14 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   }
 
   useEffect(() => {
-    try {
-      if (message) window.localStorage.setItem(storageKey, message);
-      else window.localStorage.removeItem(storageKey);
-    } catch {
-      // 存储不可用时内存里的文字仍然可用，但要告诉用户关闭页面会丢。
-      setStorageBroken(true);
-    }
-  }, [message, storageKey]);
+    // 意见文字写进本标签会话槽；无法持久时明确提示，不承诺刷新后可恢复。
+    const { storage, durable } = creativeSessionStorage();
+    const ok = message
+      ? writeCreativeSessionFields(storage, sessionSlotKey, sessionBase, { message })
+      : clearCreativeSessionFields(storage, sessionSlotKey, ["message"]);
+    if (!ok || !durable) setStorageBroken(true);
+    // sessionBase 是每次渲染的派生值，仅在写入时取当次身份，不作为触发条件。
+  }, [message, sessionSlotKey]);
 
   // 新消息只在用户本就靠近底部时跟随滚动；否则提供入口，不抢走正在阅读的位置。
   useEffect(() => {
@@ -201,25 +272,34 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   }, [review.messages.length]);
 
   async function submit(input: StudioCreativeReviewCommandInput, clearMessage = false) {
+    const sentMessageSequence = messageSequence.current;
     setError(undefined);
     setCompletionNotice(undefined);
     // 待发命令的读取失败不能当成"没有未决命令"：此时发出命令可能无法可靠重放。
     let pending: StudioCreativeReviewCommandInput | undefined;
     try {
-      const raw = window.localStorage.getItem(commandStorageKey);
-      const parsed: unknown = raw ? JSON.parse(raw) : null;
-      pending = parsed && typeof parsed === "object" && typeof (parsed as { commandId?: unknown }).commandId === "string"
-        ? parsed as StudioCreativeReviewCommandInput
-        : undefined;
+      pending = readPendingCommand(commandStorageKey) ?? undefined;
     } catch {
       setError("本机存储暂不可用，无法可靠记录待发命令；请恢复浏览器存储后再发送。");
       throw new Error("本机存储暂不可用，无法可靠记录待发命令。");
     }
-    if (pending && !sameCommandBody(pending, input)) {
+    // C1（收尾包 §5.4）：原 unknown 讨论/修订命令仍在时，服务端证明过的用户确定性
+    // 动作（手改/采用/返回）用新 commandId 放行——执行时服务端仍按完整身份与 CAS
+    // 重新核；其余新命令继续等待原命令核清，不能用本地指针冒充服务端证明。
+    const pendingConsultation = review.pendingConsultation;
+    const independentlyAllowed = pendingConsultation !== undefined && pendingConsultation.commandId === pending?.commandId
+      && (input.action === "edit_draft" || input.action === "confirm" || input.action === "return_to_stage")
+      && pendingConsultation.allowedActions.includes(input.action) === true;
+    if (pending && !independentlyAllowed && !sameCommandBody(pending, input)) {
       setError("上一条操作的结果尚未核清，不能用新操作覆盖它。请先核对上一条操作。");
       throw new Error("上一条创作操作尚未核清。");
     }
-    const command = pending ?? input;
+    if (pending && independentlyAllowed) {
+      // 先保存只查询引用，再释放当前指针；整理失败不发送新动作。
+      try { window.localStorage.setItem(`vf:creative-consultation-command:${review.runId}:${pending.commandId}`, JSON.stringify(pending)); }
+      catch { setError("原讨论恢复记录未能保存，新动作没有发送；当前输入已保留。"); throw new Error("原命令恢复记录未保存。"); }
+    }
+    const command = independentlyAllowed ? input : pending ?? input;
     try {
       window.localStorage.setItem(commandStorageKey, JSON.stringify(command));
       setPendingCommandId(command.commandId);
@@ -228,20 +308,28 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       throw new Error("本机存储暂不可用，命令没有发送。");
     }
     try {
-      await onCommand(command);
+      const receipt = await onCommand(command);
+      if (receipt && receipt.commandId !== command.commandId) throw new Error("返回的操作编号不一致，原命令仍待核实。请核对原操作，不要重复发送。");
+      if (canRetainIndependentAudit(command, receipt)) {
+        retainIndependentAudit(command);
+        return;
+      }
+      if (receipt?.status === "unknown" || receipt?.status === "running") {
+        setCompletionNotice("原操作结果仍未确定；原命令与输入已保留，请核对原请求，不要重复发送。原请求与费用保持待核。");
+        return;
+      }
     } catch (caught) {
       if (caught instanceof Error && "commandCompleted" in caught && caught.commandCompleted === true) {
         try {
-          window.localStorage.removeItem(commandStorageKey);
-          setPendingCommandId(undefined);
-        } catch { /* 服务器已确认完成；本机清理失败单独提示，不影响这条结论。 */ }
+          releaseCompletedConsultation(command);
+        } catch { setCompletionNotice("操作已完成，但本机恢复记录尚未整理；当前输入已保留，不需要重新生成。"); }
       }
       setError(caught instanceof Error ? caught.message : String(caught));
       throw caught;
     }
     let cleaned = true;
     try {
-      window.localStorage.removeItem(commandStorageKey);
+      releaseCompletedConsultation(command);
     } catch {
       cleaned = false;
     }
@@ -249,8 +337,20 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       setCompletionNotice("操作已完成，本机恢复记录未清理；不需要重发。");
       return;
     }
-    setPendingCommandId(undefined);
-    if (clearMessage && currentStorageKey.current === storageKey) setMessage((current) => current === message ? "" : current);
+    if (clearMessage && currentStorageKey.current === sessionSlotKey && messageSequence.current === sentMessageSequence) {
+      setMessage((current) => current === message ? "" : current);
+    }
+  }
+
+  function retainIndependentAudit(command: StudioCreativeReviewCommandInput) {
+    try {
+      // 原未知审计的完整命令留作恢复记录；只释放当前命令指针，不宣称原请求完成或取消。
+      window.localStorage.setItem(`vf:creative-audit-command:${review.runId}:${command.commandId}`, JSON.stringify(command));
+      releaseCompletedConsultation(command);
+      setCompletionNotice("原审计结果仍待核，记录已保留。你可以修订或采用当前稿件；原请求和费用请在待核审计区查询，不会自动重发。");
+    } catch {
+      setError("原审计仍待核，本机恢复记录未能整理；请先核对上一条操作，不要覆盖或重发。当前输入已保留。");
+    }
   }
 
   async function reconcilePendingCommand() {
@@ -258,20 +358,68 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
     setReconcilingCommand(true);
     setError(undefined);
     try {
-      const receipt = await studioApi.creativeReviewCommand(review.runId, pendingCommandId);
-      if (receipt.status === "running" || receipt.status === "unknown") {
-        setCompletionNotice("上一条操作仍在处理或结果未确定；请稍后核对，不要再次发送。");
+      // 查询前冻结原完整body；返回后不从共享槽借用另一条命令。
+      const saved = readPendingCommand(commandStorageKey);
+      if (!saved || saved.commandId !== pendingCommandId || saved.stage !== review.stage || (saved.reviewPurpose ?? "draft") !== purposeKey) {
+        setError("本机操作记录已变化或缺少原命令，请刷新核对正确的操作；不会重新发送。");
+        return;
+      }
+      const receipt = await studioApi.creativeReviewCommand(review.runId, saved.commandId);
+      if (receipt.commandId !== saved.commandId) throw new Error("返回的操作编号与原命令不一致。");
+      if (currentCommandStorageKey.current !== commandStorageKey) return;
+      const current = readPendingCommand(commandStorageKey);
+      if (current && !sameCommandIdentity(current, saved)) {
+        setPendingCommandId(current.commandId);
+        setError("本机操作记录已变化，请核对正确的操作；不会覆盖或发送另一条命令。");
+        return;
+      }
+      if (current && canRetainIndependentAudit(saved, receipt)) {
+        retainIndependentAudit(saved);
+        return;
+      }
+      if (receipt.status === "running") {
+        setCompletionNotice("上一条操作仍在处理；请稍后核对，不要再次发送。");
+        return;
+      }
+      if (receipt.status === "unknown") {
+        // C1（收尾包 §5.4.1）：显式核对用保存的原完整命令（含原 revision）走恢复
+        // 入口；服务端该分支只观察原物理请求（observePrepared），不重建信封、不重投。
+        if (!current) {
+          setCompletionNotice("本机没有保存原命令，无法发起核对；请刷新页面重新发现原操作。");
+          return;
+        }
+        try {
+          // 同 ID 同 body：走恢复入口（服务端只观察原物理请求），不经新命令构造。
+          const resolved = await onCommand(saved);
+          if (resolved && resolved.commandId !== saved.commandId) throw new Error("返回的操作编号与原命令不一致。");
+          if (resolved && (resolved.status === "completed" || resolved.status === "failed" || resolved.status === "not_accepted")) {
+            setCompletionNotice(resolved.status !== "completed" ? "原操作已核清但未完成，当前稿件与输入保留，请查看后决定下一步。"
+              : resolved.resultDisposition === "recorded_not_applied"
+              ? "原请求此后已完成；结果只保留在原命令记录里，未应用到当前稿。"
+              : "原请求已完成并应用到当前稿；请查看最新方案。");
+            try {
+              releaseCompletedConsultation(saved);
+            } catch { setCompletionNotice("原操作已核清，但本机恢复记录尚未整理；当前输入已保留，不需要重新生成。"); }
+          } else {
+            setCompletionNotice("原操作结果仍未确定；当前稿可独立处理（手动修改/采用/返回），原请求与费用保持待核。");
+          }
+        } catch (caught) {
+          // onCommand 内部已展示错误；原命令与输入保留，不重发。
+          if (caught instanceof Error && "commandCompleted" in caught && caught.commandCompleted === true) {
+            try { releaseCompletedConsultation(saved); }
+            catch { setCompletionNotice("原操作已完成，但本机恢复记录尚未整理；不需要重新生成。"); }
+          }
+        }
         return;
       }
       try {
-        window.localStorage.removeItem(commandStorageKey);
+        releaseCompletedConsultation(saved);
       } catch {
         setCompletionNotice(receipt.status === "completed"
           ? "上一条操作已完成，但本机恢复记录未清理；不需要重发，请刷新查看当前方案。"
           : "上一条操作已失败，但本机恢复记录未清理；请刷新查看失败原因，不要直接重发。");
         return;
       }
-      setPendingCommandId(undefined);
       setCompletionNotice(receipt.status === "not_accepted"
         ? "已核实上一条操作未受理，没有执行；当前稿件保留，请查看后重新选择。"
         : receipt.status === "completed"
@@ -284,9 +432,27 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
     }
   }
 
+  async function reconcileConsultation(command: StudioCreativeReviewCommandInput) {
+    if (busy || reconcilingCommand) return;
+    setReconcilingCommand(true);
+    setError(undefined);
+    try {
+      // 服务端耐久记录返回的原body；此POST只观察原请求，绝不构造当前revision的新信封。
+      const receipt = await onCommand(command);
+      if (receipt && receipt.commandId !== command.commandId) throw new Error("返回的操作编号与原命令不一致。");
+      if (receipt?.status === "completed") {
+        setCompletionNotice(receipt.resultDisposition === "recorded_not_applied"
+          ? "原请求已完成，回复已归档；当前稿件和你的决定没有改变。"
+          : "原讨论已完成，请查看最新回复。");
+        releaseCompletedConsultation(command);
+      } else setCompletionNotice("原请求与费用仍待核；记录已保留，不会重复发送。");
+    } catch { setError("暂时无法取回原讨论结果，原命令与当前输入已保留；请稍后核对。"); }
+    finally { setReconcilingCommand(false); }
+  }
+
   function sendMessage(action: "discuss" | "revise" = "discuss") {
     const text = message.trim();
-    if (!text || busy || !review.allowedActions.includes(action)) return;
+    if (!text || busy || hasUnresolvedOperation || !review.allowedActions.includes(action)) return;
     if (text.length > 4000) {
       setError("修改意见不能超过 4,000 字；请删减后再发送，原输入已保留。");
       return;
@@ -363,7 +529,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
   }
 
   function auditCurrent() {
-    if (busy || hasUnsavedEdits || !review.allowedActions.includes("audit_current")) return;
+    if (busy || hasUnresolvedOperation || hasUnsavedEdits || !review.allowedActions.includes("audit_current")) return;
     void submit({ action: "audit_current", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined);
   }
 
@@ -436,30 +602,46 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
           {review.reviewPurpose === "direction" ? <p>你可以和导演继续讨论；只有采用这版初稿后，才会开始寻找候选画面。</p> : null}
           {review.reviewPurpose === "material_plan" ? <p>请查看选材结果与风险；这次决定不会自动扩大素材采购授权。</p> : null}
         </div>
-        {/* 只定位到确认区，不发送任何命令；真正的批准仍在随页滚动的底部确认区。 */}
-        <button type="button" className="button button-ghost creative-confirm-jump" onClick={() => {
-          const target = document.getElementById("creative-confirm-footer");
-          target?.scrollIntoView?.({ behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ? "auto" : "smooth", block: "center" });
-          target?.querySelector<HTMLElement>(".creative-confirm-context")?.focus();
-        }}>查看确认 ↓</button>
         <span className={`creative-review-phase phase-${review.phase}`}>
           {review.phase === "checking" ? "正在处理原操作" : "等你决定"}
         </span>
       </header>
 
+      <section className="creative-review-actions creative-decision-bar" id="creative-confirm-footer" aria-label="当前稿件决定">
+        <div className="creative-confirm-context" tabIndex={-1}><strong>{hasUnsavedEdits ? "有未保存的手动修改" : review.reviewPurpose === "direction" ? "确认对象：当前导演初稿" : review.reviewPurpose === "material_plan" ? "确认对象：当前选材方案" : `确认对象：当前${STAGE_LABEL[review.stage]}`}</strong><small>{hasUnsavedEdits ? "先保存或放弃修改，再确认采用；不会提交编辑器里的未保存文字。" : review.checkResult ? "采用不会重复审计当前稿，也不会授权购买素材；后续付费仍需单独确认。" : "本版尚未审计。你可主动审计，也可明确采用未审稿；后续付费仍需单独确认。"}</small></div>
+        <div className="creative-decision-buttons">
+          <button type="button" className="button button-primary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{needsStockConsent ? "接受素材风险，先制作首版" : incompleteCheck ? "接受复核未完成，采用本版" : hasContentSuggestions ? "保留这些建议，仍采用" : !review.checkResult ? "采用本版（未审计）" : hasBlockingIssues ? "修改后重新检查" : review.reviewPurpose === "direction" ? "采用导演初稿，开始选材" : review.reviewPurpose === "material_plan" ? "采用选材方案，继续制作" : "确认当前方案，继续"}</button>
+          <button type="button" className="button button-secondary" onClick={focusRevisionDiscussion}><MessageCircle aria-hidden="true" size={16} />提出修改</button>
+        </div>
+        <div className="creative-secondary-decisions">
+          <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || review.previousDraft === undefined || !review.allowedActions.includes("undo_draft")} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button>
+          <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || !review.allowedActions.includes("audit_current")} onClick={auditCurrent}>审计当前版本</button>
+        </div>
+      </section>
+
       <div className="creative-mobile-tabs" role="group" aria-label="方案与讨论">
         <button type="button" aria-pressed={mobileTab === "draft"} aria-controls="creative-draft" onClick={() => setMobileTab("draft")}>当前方案</button>
-        <button type="button" aria-pressed={mobileTab === "discussion"} aria-controls="creative-chat" onClick={() => setMobileTab("discussion")}>讨论{review.messages.length > 0 ? ` · ${review.messages.length}` : ""}</button>
+        <button type="button" aria-pressed={mobileTab === "discussion"} aria-controls="creative-chat" onClick={() => setMobileTab("discussion")}>建议与讨论{review.messages.length > 0 ? ` · ${review.messages.length}` : ""}</button>
       </div>
 
       <div className="creative-discussion-layout">
         <article id="creative-draft" tabIndex={0} className={`${mobileTab === "draft" ? "creative-draft-surface is-mobile-active" : "creative-draft-surface"}${stageHandoffActive ? " stage-handoff" : ""}`} aria-label={`当前${STAGE_LABEL[review.stage]}`}>
           {stageHandoffActive ? <i className="stage-handoff-rule" aria-hidden="true" /> : null}
-          <h3 className="creative-current-draft-title">当前{STAGE_LABEL[review.stage]}</h3>
-          <p>{review.checkResult?.status === "incomplete" ? "审计未取得结论" : review.checkResult ? "本版已审计" : "本版未审计"}</p>
+          <div className="creative-draft-masthead">
+            <div><h3 className="creative-current-draft-title">当前{STAGE_LABEL[review.stage]}</h3>
+              <p>{review.checkResult?.status === "incomplete" ? "审计未取得结论" : review.checkResult ? "本版已审计" : "本版未审计"}</p></div>
+            {review.checkResult && review.checkResult.status !== "incomplete" && review.checkResult.issues.length > 0 ? <button type="button" className="button button-ghost creative-advice-jump" onClick={() => {
+              setMobileTab("discussion");
+              window.requestAnimationFrame(() => {
+                const target = document.getElementById("creative-advice-title");
+                target?.focus();
+                target?.scrollIntoView?.({ block: "nearest" });
+              });
+            }}>查看 {review.checkResult.issues.length} 条建议</button> : null}
+          </div>
           {handoffNotice ? <p className="creative-handoff-notice" role="status">当前稿件已更新</p> : null}
-          <CreativeDraftEditor storageKey={`${storageKey}:edit`} draftIdentity={`${review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} />
-          <CreativeDraft stage={review.stage} value={review.draft} />
+          <CreativeDraftEditor sessionSlotKey={sessionSlotKey} sessionBase={sessionBase} legacyEditStorageKey={`${storageKey}:edit`} draftIdentity={`${review.draftVersionId ?? review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} />
+          <CreativeDraftReader key={`${review.runId}:${draftIdentity}:${review.draftArtifactId}`} stage={review.stage} value={review.draft} />
           {incompleteCheck ? <section className="creative-check-result" role="status"><strong>独立复核未完成 · 无评分</strong><p>{review.checkResult?.summary}</p></section> : null}
           {needsStockConsent ? <section className="creative-check-result" role="status">
             <strong>可以先制作首版，但请了解素材风险</strong>
@@ -474,26 +656,27 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
           /></details>
           {review.previousDraft !== undefined ? <details><summary>查看上一版</summary><CreativeDraft stage={review.stage} value={review.previousDraft} /></details> : null}
           <a href="#creative-review-history">查看完整创作版本记录</a>
-          {review.checkResult && review.checkResult.status !== "incomplete" && review.checkResult.issues.length > 0 ? <section className="creative-check-result" role="status">
-            <strong>{review.checkResult.verdict === "repair" ? `有 ${review.checkResult.issues.length} 处需要调整，尚未进入下一步` : `本版已审计 · ${review.checkResult.issues.length} 条可选建议`}</strong>
-            <p>{review.checkResult.summary}</p>
-            <ul>{review.checkResult.issues.map((issue, index) => <li key={`${review.checkResult?.checkIdentity}:${index}`}>
-              <label><input type="checkbox" checked={selectedAuditIndexes.includes(index)} disabled={busy} aria-label={issue.creatorAction ?? issue.repairInstruction} onChange={(event) => setSelectedAuditIndexes((current) => event.target.checked ? [...current, index] : current.filter((value) => value !== index))} />
-                <span>{issue.creatorTitle ?? issue.creatorAction ?? issue.repairInstruction}</span>
-              </label>
-              {issue.creatorObservation ? <small>{issue.creatorObservation}</small> : issue.evidence ? <small>{issue.evidence}</small> : null}
-              {issue.creatorTitle && issue.creatorAction ? <p>{issue.creatorAction}</p> : null}
-            </li>)}</ul>
-            <button type="button" className="button button-secondary" disabled={busy || selectedAuditIndexes.length === 0} onClick={appendAuditSuggestions}>加入修改意见（{selectedAuditIndexes.length}）</button>
-          </section> : null}
           {/* 停在这里是因为自动循环推不动了，不是这一版做完了。不说出来，人会以为一切正常。 */}
           {review.stopDetail ? <section className="creative-check-result" role="status">
             <strong>自动检查已停止，需要你决定</strong>
             <p>{review.stopDetail}</p>
           </section> : null}
+          {review.reviewContinuation?.reasonCode.startsWith("discussion_") ? <section className="creative-check-result" role="status">
+            <strong>{review.reviewContinuation.status === "unknown"
+              ? "原讨论或修改仍在核实"
+              : review.reviewContinuation.status === "completed_not_applied"
+                ? "原讨论或修改此后已完成，未应用到当前稿"
+                : "这次讨论或修改没有完成"}</strong>
+            <p>{review.reviewContinuation.detail}</p>
+            {review.reviewContinuation.status === "unknown" && review.pendingConsultation
+              ? <p>原请求待核期间，你可以先处理当前稿：手动修改、采用或返回（原请求与费用保持待核，核对原操作只查询、不重发）；不会自动重试或换模型。</p>
+              : review.reviewContinuation.status === "unknown"
+                ? <p>原请求待核；请稍后核对原操作。当前稿的独立处理入口待服务端确认本地无活跃写者后开放；不会自动重试或换模型。</p>
+                : <p>当前稿件未改动，仍可编辑、讨论或采用；不会自动重试或换模型。</p>}
+          </section> : null}
           {review.scopeConflict ? <section className="creative-check-result" role="status">
             <strong>新方案超出了这次批准的返工范围</strong>
-            <p>涉及镜头 {review.scopeConflict.requiredScenePositions.join("、") || "当前方案"}。当前仍是旧方案；你可以在下方采用旧方案继续，或回到来源制作重新选择范围。扩大范围后仍须查看新报价，不能沿用旧费用授权。</p>
+            <p>涉及镜头 {review.scopeConflict.requiredScenePositions.join("、") || "当前方案"}。当前仍是旧方案；你可以采用旧方案继续，或回到来源制作重新选择范围。扩大范围后仍须查看新报价，不能沿用旧费用授权。</p>
             <a className="button button-secondary" href={`/projects/${encodeURIComponent(review.scopeConflict.sourceRunId)}`}>返回来源制作，调整返工范围</a>
           </section> : null}
           {hasBlockingIssues ? <section className="creative-check-result" role="status">
@@ -507,11 +690,25 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
             <header><strong>{review.scopeConflict?.proposalId === proposal.proposalId ? "越界新稿 · 仅供比较" : "备选方案"}</strong><small>{proposal.changeSummary.join("；") || "可与当前方案比较"}</small></header>
             <CreativeDraft stage={review.stage} value={proposal.document} />
             {review.scopeConflict?.proposalId === proposal.proposalId ? <p>这份新稿尚未被采用；调整返工范围并重新报价前不能使用。</p>
-              : <button type="button" className="button button-secondary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("adopt_proposal")} onClick={() => void submit({ action: "adopt_proposal", commandId: crypto.randomUUID(), ...commandBase, proposalId: proposal.proposalId }).catch(() => undefined)}>采用这个备选</button>}
+              : <button type="button" className="button button-secondary" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || !review.allowedActions.includes("adopt_proposal")} onClick={() => void submit({ action: "adopt_proposal", commandId: crypto.randomUUID(), ...commandBase, proposalId: proposal.proposalId }).catch(() => undefined)}>采用这个备选</button>}
           </section>)}
         </article>
 
         <section id="creative-chat" className={mobileTab === "discussion" ? "creative-chat-surface is-mobile-active" : "creative-chat-surface"} aria-label="与当前角色讨论">
+          {review.checkResult && review.checkResult.status !== "incomplete" && review.checkResult.issues.length > 0 ? <section className="creative-check-result creative-advice-panel" aria-labelledby="creative-advice-title">
+            <header><h3 id="creative-advice-title" tabIndex={-1}>本版建议</h3><span>{review.checkResult.issues.length} 条</span></header>
+            <p className="creative-advice-scope">全稿建议</p>
+            <strong>{review.checkResult.verdict === "repair" ? `有 ${review.checkResult.issues.length} 处需要调整，尚未进入下一步` : `本版已审计 · ${review.checkResult.issues.length} 条可选建议`}</strong>
+            <p>{review.checkResult.summary}</p>
+            <ul>{review.checkResult.issues.map((issue, index) => <li key={`${review.checkResult?.checkIdentity}:${index}`}>
+              <label><input type="checkbox" checked={selectedAuditIndexes.includes(index)} disabled={busy} aria-label={issue.creatorAction ?? issue.repairInstruction} onChange={(event) => setSelectedAuditIndexes((current) => event.target.checked ? [...current, index] : current.filter((value) => value !== index))} />
+                <span>{issue.creatorTitle ?? issue.creatorAction ?? issue.repairInstruction}</span>
+              </label>
+              {issue.creatorObservation ? <small>{issue.creatorObservation}</small> : issue.evidence ? <small>{issue.evidence}</small> : null}
+              {issue.creatorTitle && issue.creatorAction ? <p>{issue.creatorAction}</p> : null}
+            </li>)}</ul>
+            <button type="button" className="button button-secondary" disabled={busy || selectedAuditIndexes.length === 0} onClick={appendAuditSuggestions}>加入修改意见（{selectedAuditIndexes.length}）</button>
+          </section> : null}
           <header className="creative-chat-heading"><MessageCircle aria-hidden="true" size={17} /><strong>一起打磨这一版</strong></header>
           <div className="creative-message-list" aria-live="polite" ref={messageListRef}
             onScroll={(event) => {
@@ -533,11 +730,13 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
           </div>
           <label className="creative-composer">
             <span>聊聊你的想法</span>
-            <textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="例如：为什么这样开场？或者：把开头改得更直接一些。" />
+            <textarea ref={composerRef} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="例如：为什么这样开场？或者：把开头改得更直接一些。" />
             <small>Ctrl + Enter 发送；普通换行不会发送。</small>
           </label>
-          <button type="button" className="button button-secondary" disabled={busy || !message.trim() || !review.allowedActions.includes("discuss")} onClick={() => sendMessage("discuss")}><Send aria-hidden="true" size={16} />{busy ? "正在处理…" : "只讨论"}</button>
-          <button type="button" className="button button-primary" disabled={busy || !message.trim() || !review.allowedActions.includes("revise")} onClick={() => sendMessage("revise")}>发送修订意见</button>
+          <div className="creative-composer-actions">
+            <button type="button" className="button button-secondary" disabled={busy || hasUnresolvedOperation || !message.trim() || !review.allowedActions.includes("discuss")} onClick={() => sendMessage("discuss")}><Send aria-hidden="true" size={16} />{busy ? "正在处理…" : "只讨论"}</button>
+            <button type="button" className="button button-primary" disabled={busy || hasUnresolvedOperation || !message.trim() || !review.allowedActions.includes("revise")} onClick={() => sendMessage("revise")}>发送修订意见</button>
+          </div>
         </section>
       </div>
 
@@ -548,19 +747,20 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
         </button>
       </div> : null}
       {completionNotice ? <p className="creative-storage-note" role="status">{completionNotice}</p> : null}
-      {storageBroken ? <p className="creative-storage-note" role="status">本机草稿无法保存，关闭页面前请复制内容；待发命令也需要浏览器存储恢复后才能发送。</p> : null}
+      {review.consultationOperations?.length ? <aside className="creative-storage-note" aria-label="原讨论与修改请求">
+        {review.consultationOperations.map(operation => <div key={operation.commandId}>
+          <p>{operation.status === "unknown" ? "原讨论或修改请求仍待核，费用尚未核清；当前稿与原请求分开处理。" : "原请求已完成，回复只归档于原稿；当前稿和决定未改变。"}</p>
+          {operation.reply ? <p>{operation.reply}</p> : null}
+          {operation.status === "unknown" ? <button type="button" className="button button-secondary" disabled={busy || reconcilingCommand}
+            onClick={() => void reconcileConsultation(operation.command)}>核对原讨论结果</button> : null}
+        </div>)}
+      </aside> : null}
+      {storageBroken ? <p className="creative-storage-note" role="status">本机草稿无法保存；当前页面内已保留，刷新或关闭可能丢失，请先复制。待发命令也需要浏览器存储恢复后才能发送。</p> : null}
       {review.returnTargets.length > 0 ? <aside className="creative-return-actions" aria-label="返回前期方案">
         <strong>需要调整更早的决定？</strong>
         <p>返回后只让受影响的后续方案失效，历史稿件和已可用素材会保留。</p>
         {review.returnTargets.map((target) => <button key={target.stage} type="button" className="button button-secondary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("return_to_stage")} title={target.impact} onClick={() => returnToStage(target)}><ArrowLeft aria-hidden="true" size={16} />{target.label}</button>)}
       </aside> : null}
-      <footer className="creative-review-actions" id="creative-confirm-footer">
-        <div className="creative-confirm-context" tabIndex={-1}><strong>{hasUnsavedEdits ? "有未保存的手动修改" : review.reviewPurpose === "direction" ? "确认对象：当前导演初稿" : review.reviewPurpose === "material_plan" ? "确认对象：当前选材方案" : `确认对象：当前${STAGE_LABEL[review.stage]}`}</strong><small>{hasUnsavedEdits ? "先保存或放弃修改，再确认采用；不会提交编辑器里的未保存文字。" : review.checkResult ? "采用不会重复审计当前稿，也不会授权购买素材；后续付费仍需单独确认。" : "本版尚未审计。你可主动审计，也可明确采用未审稿；后续付费仍需单独确认。"}</small></div>
-        <button type="button" className="button button-ghost" disabled={busy || hasUnsavedEdits || review.previousDraft === undefined || !review.allowedActions.includes("undo_draft")} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button>
-        <button type="button" className="button button-secondary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("audit_current")} onClick={auditCurrent}>审计当前版本</button>
-        <button type="button" className="button button-primary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{needsStockConsent ? "接受素材风险，先制作首版" : incompleteCheck ? "接受复核未完成，采用本版" : hasContentSuggestions ? "保留这些建议，仍采用" : !review.checkResult ? "采用本版（未审计）" : hasBlockingIssues ? "修改后重新检查" : review.reviewPurpose === "direction" ? "采用导演初稿，开始选材" : review.reviewPurpose === "material_plan" ? "采用选材方案，继续制作" : "确认当前方案，继续"}</button>
-      </footer>
-
       {pendingRisk ? <div className="dialog-backdrop" role="presentation">
         <section ref={riskDialogRef} className="decision-dialog creative-risk-dialog" role="dialog" aria-modal="true" aria-labelledby="creative-risk-title" tabIndex={-1}>
           <header className="dialog-header">
@@ -585,6 +785,14 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
       </div> : null}
     </section>
   );
+}
+
+function canRetainIndependentAudit(
+  command: StudioCreativeReviewCommandInput,
+  receipt: void | StudioCreativeReviewCommandReceipt,
+): boolean {
+  return command.action === "audit_current" && receipt?.commandId === command.commandId
+    && receipt.status === "unknown" && receipt.independentDraftActionsAllowed === true;
 }
 
 function CreativeSelection({ stage, draft, selectedIds, onChange }: {
@@ -622,28 +830,17 @@ function sameCommandBody(left: StudioCreativeReviewCommandInput, right: StudioCr
   return JSON.stringify(withoutCommandLeft) === JSON.stringify(rightWithoutId);
 }
 
-export function CreativeDraft({ stage, value }: { stage: StudioCreativeReviewSnapshot["stage"]; value: unknown }) {
-  if (!isRecord(value)) return <p>当前方案暂时无法读取，请刷新后重试。</p>;
-  if (stage === "treatment") return <div className="creative-readable-draft">
-    <DraftField label="观众看完能得到什么" value={value.viewerPromise} />
-    <DraftField label="开头" value={isRecord(value.hook) ? `${String(value.hook.narrationIntent ?? "")} ${String(value.hook.visualIntent ?? "")}` : value.hook} />
-    <DraftList label="内容推进" value={Array.isArray(value.progression) ? value.progression.map((beat) => isRecord(beat) ? `${String(beat.purpose ?? "")}：${String(beat.viewerGain ?? "")}` : String(beat)) : []} />
-    <DraftField label="结尾兑现" value={value.payoff} />
-    <DraftList label="视觉方向" value={value.visualPrinciples} />
-    <DraftList label="声音方向" value={value.soundPrinciples} />
-  </div>;
-  if (stage === "script") return <div className="creative-readable-draft"><DraftField label="叙事推进（制作参考）" value={value.narrativeArc} />{Array.isArray(value.scenes) ? value.scenes.map((scene, index) => isRecord(scene) ? <section className="creative-scene" key={String(scene.id ?? index)}><strong>第 {Number(scene.position ?? index + 1)} 段 · {Number(scene.duration ?? 0)} 秒</strong><div className="creative-audience-copy"><small>旁白 · 观众听到的内容</small><p>{String(scene.narration ?? "")}</p></div><div className="creative-production-note"><small>画面描述 · 制作参考，尚未生成</small><p>{String(scene.visual_prompt ?? "")}</p></div></section> : null) : null}</div>;
-  return <div className="creative-readable-draft">{isRecord(value.visualBible) ? <DraftField label="全片视觉规则" value={`${String(value.visualBible.narrativeApproach ?? "")} · ${String(value.visualBible.pacing ?? "")} · ${String(value.visualBible.continuity ?? "")}`} /> : null}{Array.isArray(value.shots) ? value.shots.map((shot, index) => isRecord(shot) ? <section className="creative-scene" key={String(shot.scenePosition ?? index)}><strong>镜头 {Number(shot.scenePosition ?? index + 1)} · {String(shot.deliveryType ?? "待定路线")}</strong><p>{String(shot.visibleAction ?? shot.generationPrompt ?? shot.query ?? "")}</p><small>预计时长与获取路线将在当前方案确认后进入报价；画面尚未生成。</small></section> : null) : null}</div>;
+function sameCommandIdentity(left: StudioCreativeReviewCommandInput, right: StudioCreativeReviewCommandInput): boolean {
+  return left.commandId === right.commandId && sameCommandBody(left, right);
 }
 
-function DraftField({ label, value }: { label: string; value: unknown }) {
-  if (value === undefined || value === null || String(value).trim() === "") return null;
-  return <section><strong>{label}</strong><p>{String(value)}</p></section>;
-}
-
-function DraftList({ label, value }: { label: string; value: unknown }) {
-  if (!Array.isArray(value) || value.length === 0) return null;
-  return <section><strong>{label}</strong><ul>{value.map((item, index) => <li key={index}>{String(item)}</li>)}</ul></section>;
+function readPendingCommand(key: string): StudioCreativeReviewCommandInput | null {
+  const raw = window.localStorage.getItem(key);
+  if (raw === null) return null;
+  const parsed: unknown = JSON.parse(raw);
+  // 验证沿用HTTP合同，但恢复保留原字段顺序和原revision，不构造新body。
+  parseStudioCreativeReviewCommandInput(parsed);
+  return parsed as StudioCreativeReviewCommandInput;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -656,8 +853,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * 讨论或重新生成；文字修订在这里改完保存，走与 AI 修订相同的制度：换稿 → 停点重现。
  * 需要新审计时由用户主动触发，确认当前稿不会临时补审。
  */
-function CreativeDraftEditor({ storageKey, draftIdentity, stage, draft, busy, onSave, onDirtyChange }: {
-  storageKey: string;
+function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey, draftIdentity, stage, draft, busy, onSave, onDirtyChange }: {
+  sessionSlotKey: string;
+  sessionBase: CreativeDraftSessionBase;
+  legacyEditStorageKey: string;
   draftIdentity: string;
   stage: StudioCreativeReviewSnapshot["stage"];
   draft: unknown;
@@ -665,30 +864,29 @@ function CreativeDraftEditor({ storageKey, draftIdentity, stage, draft, busy, on
   onSave(document: Record<string, unknown>): Promise<void>;
   onDirtyChange(dirty: boolean): void;
 }) {
+  const draftKey = JSON.stringify({ stage, draftIdentity, draft });
   const [edited, setEdited] = useState<{ baseKey: string; document: Record<string, unknown> } | null>(() => {
-    try {
-      const stored: unknown = JSON.parse(window.localStorage.getItem(storageKey) ?? "null");
-      return isRecord(stored) && typeof stored.baseKey === "string" && isRecord(stored.document)
-        ? { baseKey: stored.baseKey, document: stored.document } : null;
-    } catch { return null; }
+    // 旧 localStorage 草稿一次性导入会话槽；此后读写都走本标签会话。
+    const { storage } = creativeSessionStorage();
+    if (importLegacyCreativeEdit({ session: storage, legacy: window.localStorage, sessionKey: sessionSlotKey, base: sessionBase, legacyEditKey: legacyEditStorageKey, currentBaseKey: draftKey, currentDraft: draft }) === "failed") {
+      queueMicrotask(() => setEditStorageBroken(true));
+    }
+    return readCreativeSessionSlot(storage, sessionSlotKey)?.document ?? null;
   });
   const [open, setOpen] = useState(edited !== null);
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"saved" | "failed">();
   const [editStorageBroken, setEditStorageBroken] = useState(false);
-  const draftKey = JSON.stringify({ stage, draftIdentity, draft });
   const stale = edited !== null && edited.baseKey !== draftKey;
   useEffect(() => {
     onDirtyChange(edited !== null);
     // 本地文字只用于恢复编辑，不作为服务端采用版本或确认依据。
-    try {
-      if (edited) window.localStorage.setItem(storageKey, JSON.stringify(edited));
-      else window.localStorage.removeItem(storageKey);
-      setEditStorageBroken(false);
-    } catch {
-      setEditStorageBroken(true);
-    }
-  }, [edited, onDirtyChange, storageKey]);
+    const { storage, durable } = creativeSessionStorage();
+    const ok = edited
+      ? writeCreativeSessionFields(storage, sessionSlotKey, sessionBase, { document: edited })
+      : clearCreativeSessionFields(storage, sessionSlotKey, ["document"]);
+    setEditStorageBroken(!ok || !durable);
+  }, [edited, onDirtyChange, sessionSlotKey]);
   useEffect(() => {
     if (!edited) return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
@@ -704,7 +902,7 @@ function CreativeDraftEditor({ storageKey, draftIdentity, stage, draft, busy, on
     {/* 收起时不渲染字段：可读稿和编辑器里会出现相同文字，展开才挂载避免同一屏两份同文。 */}
     {open ? <>
       <p className="creative-edit-state" role="status">{stale ? "当前方案已更新。你的未保存文字仍在下方，可先复制留存；请放弃旧稿修改、重新读取当前版本后再编辑。旧稿不能覆盖新稿。" : saving ? "正在保存修订，等待服务端确认…" : saveState === "failed" ? "保存未完成，输入仍保留。请查看错误后重试。" : dirty ? "修改尚未生效；保存后会形成未审新稿，等你决定是否审计或采用。" : saveState === "saved" ? "修订已保存。请核对当前稿，再决定是否审计或采用。" : "可直接修改文字。保存不会自动审计、采用或购买素材。"}</p>
-      {dirty && editStorageBroken ? <p className="creative-storage-note" role="status">手工修订无法在本机保存；当前页面仍保留输入，关闭页面前请复制留存。</p> : null}
+      {dirty && editStorageBroken ? <p className="creative-storage-note" role="status">手工修订无法在本机保存；当前页面内已保留，刷新或关闭可能丢失，请先复制。</p> : null}
       {fields.map((field) => <label key={field.key} className="creative-edit-field">
         <span>{field.label}</span>
         <textarea

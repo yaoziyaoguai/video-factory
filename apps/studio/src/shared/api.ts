@@ -1,5 +1,22 @@
 import type { ProductionBlueprintPatch, ProductionTemplateInput } from "@video-factory/template-core";
-import type { ProductionArticleSourceSnapshot } from "@video-factory/production-pipeline";
+import type { ProductionArticleSourceSnapshot, ProductionReviewContinuationInput } from "@video-factory/production-pipeline";
+
+export type StudioReviewContinuationInput = ProductionReviewContinuationInput;
+export type StudioReviewContinuationTarget = Omit<StudioReviewContinuationInput, "commandId" | "expectedRunRevision">;
+
+export interface StudioReviewContinuationReceipt {
+  commandId: string;
+  action: "prepare" | "enter_manual_review" | "approve_internal_delivery";
+  nodeId: "creative-planning" | "visual-review";
+  stage?: "treatment" | "script" | "director";
+  state: "accepted" | "applied" | "failed";
+  target?: { artifactId: string; versionId: string; sha256: string };
+  resultEvidenceId?: string;
+  resultInterventionId?: string;
+  resultRunRevision?: number;
+  isCurrent: boolean;
+  error?: string;
+}
 
 export type StudioRunStatus =
   | "pending"
@@ -688,6 +705,8 @@ export interface StudioSeriesProductionContext {
     viewerPromise: string;
     hook: string;
     payoff: string;
+    /** F01：采用绑定的内容版本；由服务端从当前 Store 携带并交叉验证，客户端不可自报。 */
+    contentVersionId?: string;
     planning: StudioSeriesEpisodePlanning;
   };
   bible: StudioSeriesBible;
@@ -972,6 +991,20 @@ export interface StudioTaskRecovery {
   terminalError?: string;
 }
 
+export interface StudioOptionalReviewTarget {
+  nodeId: "creative-planning" | "visual-review";
+  purpose: "creative_audit" | "visual_review" | "audio_review";
+  operationId: string;
+}
+
+export interface StudioOptionalReviewTask extends StudioOptionalReviewTarget {
+  requestId?: string;
+  targetVersionId: string;
+  requestState: "not_submitted" | "not_accepted" | "settled" | "unknown";
+  resultState: "valid" | "unusable" | "absent" | "conflict";
+  summary: string;
+}
+
 export interface StudioRunArchiveInput {
   runIds: string[];
 }
@@ -992,6 +1025,10 @@ export interface StudioRunDetail extends StudioRunSummary {
   failure?: StudioRunFailure;
   resultAvailability?: StudioRunResultAvailability;
   taskRecovery?: StudioTaskRecovery;
+  optionalReviewTasks?: StudioOptionalReviewTask[];
+  reviewContinuationTargets?: StudioReviewContinuationTarget[];
+  /** 宿主逐条核实 unknown 仅来自已登记的可选审计；不凭节点名放开采购。 */
+  optionalReviewUncertaintySafe?: true;
   activeIntervention?: StudioIntervention;
   videoArtifactId?: string;
   publishPackageArtifactId?: string;
@@ -1443,6 +1480,8 @@ export interface StudioIntervention {
   options: Array<"approve" | "request_changes" | "reject">;
   reviewStatus?: "incomplete" | "unknown_or_unsafe";
   providerOutcomeKnown?: boolean;
+  /** 仅宿主证明已核实的成片；请求待核不等于机器审片通过。 */
+  continuationScope?: "rendered_video_optional_review";
   evidenceId?: string;
   createdAt: string;
   continuation?: {
@@ -1496,6 +1535,36 @@ export interface StudioCreativeReviewSnapshot {
    * 正常，不知道该在哪一件事上拍板。它独立于 checkResult——那是确认时才跑的那一轮复核。
    */
   stopDetail?: string;
+  /**
+   * F03（2026-10-02 执行包）：本轮审计没有取得结论的事实。unknown=原请求待核（可查询）；
+   * error/rejected_operation=已核清失败或字段问题（validationIssues 指向具体字段）。
+   * 它不是审计结论；当前版本已有真实 check 时不出现。
+   */
+  reviewContinuation?: {
+    status: "unknown" | "error" | "rejected_operation" | "completed_not_applied";
+    reasonCode: string;
+    detail: string;
+    validationIssues?: Array<{ path: string; code: string; message: string }>;
+    recordedAt: string;
+  };
+  /**
+   * C1（收尾包）：当前停点上原 discuss/revise 仍 unknown 的命令，及其经服务端证明
+   * 可用的当前稿独立动作（手动修改/采用/返回）。原请求与费用待核不受影响；此处为
+   * 展示事实，执行时服务端仍按完整身份/CAS 重新证明。
+   */
+  pendingConsultation?: {
+    commandId: string;
+    allowedActions: Array<"edit_draft" | "confirm" | "return_to_stage">;
+    targetDraft: { versionId?: string; artifactId?: string; sha256: string };
+  };
+  /** 耐久原命令查询引用；换稿/推进后仍可发现，不依赖本机pending指针。 */
+  consultationOperations?: Array<{
+    commandId: string;
+    command: StudioCreativeReviewCommandInput;
+    status: "unknown" | "completed";
+    resultDisposition?: "recorded_not_applied";
+    reply?: string;
+  }>;
   scopeConflict?: { proposalId: string; sourceRunId: string; requiredScenePositions: number[] };
 }
 
@@ -1518,6 +1587,8 @@ type StudioCreativeReviewCommandBase = {
   stage: StudioPlanningEditableStage;
   reviewPurpose?: "direction" | "material_plan";
   baseDraftSha256: string;
+  /** C1（收尾包）：原命令指向的完整版本身份；迟到结果隔离用，缺省按 legacy 身份。 */
+  baseDraftVersionId?: string;
 };
 
 export type StudioCreativeReviewCommandInput = StudioCreativeReviewCommandBase & (
@@ -1537,11 +1608,24 @@ export interface StudioCreativeReviewCommandReceipt {
   commandId: string;
   status: "running" | "completed" | "failed" | "unknown" | "not_accepted";
   observationUrl: string;
+  /** 原可选审计仍未知，但宿主已核实本地写者退出、当前稿可独立处理；不表示审计完成。 */
+  independentDraftActionsAllowed?: true;
+  /**
+   * C1（收尾包）：原 discuss/revise 仍 unknown 时，服务端在维护租约下核实后允许的
+   * 用户确定性动作及其针对的当前稿身份。原请求与费用保持待核；这只是当前稿的
+   * 独立处理出口，不是对原命令的取消或完成。
+   */
+  independentDraftActions?: {
+    actions: Array<"edit_draft" | "confirm" | "return_to_stage">;
+    targetDraft: { versionId?: string; artifactId?: string; sha256: string };
+  };
+  /** C1：discuss/revise 完成时的结果处置——applied=已应用到当前稿；recorded_not_applied=结果只归档原命令。 */
+  resultDisposition?: "applied" | "recorded_not_applied";
 }
 
 export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCreativeReviewCommandInput {
   const input = requiredObject(value, "创作操作");
-  const commonFields = ["action", "commandId", "expectedRunRevision", "expectedReviewRevision", "stage", "reviewPurpose", "baseDraftSha256"];
+  const commonFields = ["action", "commandId", "expectedRunRevision", "expectedReviewRevision", "stage", "reviewPurpose", "baseDraftSha256", "baseDraftVersionId"];
   const actionFields = input.action === "discuss" || input.action === "revise"
     ? ["message", "selection"]
     : input.action === "adopt_proposal"
@@ -1581,6 +1665,7 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
     stage: input.stage as StudioPlanningEditableStage,
     ...(input.reviewPurpose === "direction" || input.reviewPurpose === "material_plan" ? { reviewPurpose: input.reviewPurpose } : {}),
     baseDraftSha256,
+    ...(input.baseDraftVersionId !== undefined ? { baseDraftVersionId: requiredTrimmedString(input.baseDraftVersionId, "稿件版本") } : {}),
   };
   if (input.action === "discuss" || input.action === "revise") {
     const message = requiredTrimmedString(input.message, "讨论内容");
@@ -2173,6 +2258,8 @@ interface StudioDecisionInputBase {
   contentVersionId?: string;
   acceptUnauditedContent?: true;
   acceptContentSuggestions?: true;
+  /** F04（§2.4）：成片可选审片续看停点的风险采用要求非空 commandId（幂等身份）。 */
+  commandId?: string;
 }
 
 export type StudioDecisionInput = StudioDecisionInputBase & (
@@ -2674,11 +2761,16 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
       throw new StudioInputError("内容建议只能在明确采用时承担。");
     }
   }
+  if (input.commandId !== undefined
+    && (typeof input.commandId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.commandId))) {
+    throw new StudioInputError("决定操作编号格式不正确。");
+  }
   const parsed = {
     expectedRunRevision: Number(input.expectedRunRevision),
     interventionId,
     reviewEvidenceId,
     ...(typeof input.note === "string" && input.note.trim() ? { note: input.note.trim() } : {}),
+    ...(typeof input.commandId === "string" ? { commandId: input.commandId } : {}),
   };
   if (input.action === "request_changes") {
     if (input.reviewDispositions !== undefined) {
@@ -2852,7 +2944,9 @@ const SCORE_KEYS: Array<keyof StudioOpportunityInput["scores"]> = [
 export function parseStudioOpportunityInput(value: unknown): StudioOpportunityInput {
   const input = requiredObject(value, "机会");
   const evidenceValue = input.evidence;
-  if (!Array.isArray(evidenceValue) || evidenceValue.length === 0) {
+  // DG-UX-02：显式 manual 的想法允许零来源——没有参考链接不是伪造占位信号的理由；
+  // 其余创建路径（缺省 origin / trend / series）保持至少一条来源信号的旧合同。
+  if (!Array.isArray(evidenceValue) || (evidenceValue.length === 0 && input.origin !== "manual")) {
     throw new StudioInputError("机会至少需要一条来源信号。");
   }
   const evidence = evidenceValue.map((entry, index): StudioOpportunityEvidence => {

@@ -46,6 +46,10 @@ interface AudioInputBinding {
 
 type PersistedAudioOperation = CodexPreparedOperation & { audioInputBinding?: AudioInputBinding };
 
+export type AudioReviewObservation = AudioReviewResult & {
+  requestState: "settled" | "not_accepted" | "unknown";
+};
+
 function validateInputBinding(value: AudioInputBinding, requestId: string): void {
   if (value.version !== "video-factory/audio-review-input-v1" || value.requestId !== requestId
     || !/^sound-[a-f0-9]{64}$/.test(value.requestId) || !/^[a-f0-9]{64}$/.test(value.inputIdentity)
@@ -195,7 +199,38 @@ export class AudioReviewService {
     } finally { await release?.(); }
   }
 
-  private async restore(directory: string, binding: AudioInputBinding, selected: ConnectedModel, assertOwned: () => void): Promise<AudioReviewResult> {
+  /** 用户查询只观察已登记的原信封，不抽轨、不重建输入，也不补提交未受理请求。 */
+  async observe(input: { runRoot: string; requestId: string }): Promise<AudioReviewObservation> {
+    if (!/^sound-[a-f0-9]{64}$/.test(input.requestId)) throw new Error("Invalid original sound request identity.");
+    let release: (() => Promise<void>) | undefined;
+    let compromised = false;
+    try {
+      const root = await realpath(input.runRoot);
+      const directory = await realpath(path.join(root, ".audio-review-requests"));
+      if (!directory.startsWith(`${root}${path.sep}`)) bindingConflict();
+      release = await lock(directory, { realpath: false, stale: 30_000, update: 10_000, retries: 0,
+        onCompromised: () => { compromised = true; } });
+      const operationPath = await realpath(path.join(directory, `${input.requestId}.json`));
+      if (!operationPath.startsWith(`${directory}${path.sep}`)) bindingConflict();
+      const operation = JSON.parse(await readFile(operationPath, "utf8")) as PersistedAudioOperation;
+      const binding = operation.audioInputBinding;
+      if (!binding) bindingConflict();
+      validateInputBinding(binding, input.requestId);
+      const selected = this.options.connections().find(({ model }) => model.id === binding.modelId);
+      if (!selected) return { status: "uncertain", requestState: "unknown", reason: "原声音审片接入暂不可用；没有向其它模型提交。" };
+      const result = await this.restore(directory, binding, selected, () => { if (compromised) bindingConflict(); }, false);
+      const saved = await readPersistedResult(path.join(directory, `${binding.requestId}.result.json`));
+      return { ...result, requestState: saved?.kind === "request_failed" ? saved.requestState! : "settled" };
+    } catch (error) {
+      const disposition = classifyReviewDisposition(error);
+      return disposition.requestState === "not_accepted" || disposition.requestState === "settled"
+        ? { status: "failed", requestState: disposition.requestState, reason: "原声音请求已核清但没有有效结论；本次仅查询，没有补提交。" }
+        : { status: "uncertain", requestState: "unknown", reason: "原声音请求或绑定仍待核；本次仅查询，没有补提交。" };
+    } finally { await release?.(); }
+  }
+
+  private async restore(directory: string, binding: AudioInputBinding, selected: ConnectedModel, assertOwned: () => void,
+    allowResubmission = true): Promise<AudioReviewResult> {
     const resultPath = path.join(directory, `${binding.requestId}.result.json`);
     const saved = await readPersistedResult(resultPath);
     if (saved) return completedAudioResult(saved, binding, selected);
@@ -206,7 +241,7 @@ export class AudioReviewService {
     try { execution = await selected.client.observePrepared(operation); }
     catch (error) {
       const disposition = classifyReviewDisposition(error);
-      if (disposition.reasonCode !== "bridge_not_accepted" || !selected.model.enabled) {
+      if (!allowResubmission || disposition.reasonCode !== "bridge_not_accepted" || !selected.model.enabled) {
         await persistRequestFailure(directory, binding, error, false);
         throw error;
       }

@@ -374,11 +374,14 @@ function SeriesRoadmap({
   return (
     <div className="series-roadmap">
       <section className="series-season-summary" aria-label="本季策划摘要">
-          <div><span>第 {series.currentSeason.number} 季 · {seasonPlanLabel(series)}</span><strong>{series.currentSeason.title}</strong><p>{series.currentSeason.arc}</p></div>
+          <div><span>第 {series.currentSeason.number} 季 · {seasonPlanLabel(series)}</span><strong>{series.currentSeason.title}</strong>{series.currentSeason.arc.trim() !== series.premise.trim() ? <p>{series.currentSeason.arc}</p> : null}</div>
         <dl>
           <div><dt>栏目承诺</dt><dd>{series.premise}</dd></div>
-          <div><dt>已定版内容</dt><dd>第 {series.canon.revision} 版 · {series.canon.facts.length} 条后续可依赖事实</dd></div>
-          <div><dt>固定规则</dt><dd>{series.bible.rules.slice(0, 2).join("；")}</dd></div>
+          <div><dt>栏目背景</dt><dd><details>
+            <summary>查看栏目规则与定版记录</summary>
+            <p>第 {series.canon.revision} 版 · {series.canon.facts.length} 条后续可依赖事实</p>
+            <p>{series.bible.rules.slice(0, 2).join("；")}</p>
+          </details></dd></div>
         </dl>
       </section>
 
@@ -405,7 +408,7 @@ function SeriesRoadmap({
               <li key={episode.id}>
                 <button type="button" className={`${selectedEpisode?.id === episode.id ? "is-active" : ""}${locked ? " is-locked" : ""}`} onClick={() => selectEpisode(episode.id)}>
                   <span className="series-episode-index">E{String(episode.episodeNumber).padStart(2, "0")}</span>
-                  <span className="series-episode-copy"><small>{episode.pillar}</small><strong>{seriesEpisodeTitle(episode)}</strong><span>{episode.viewerPromise}</span></span>
+                  <span className="series-episode-copy"><small>{episode.pillar}</small><strong>{seriesEpisodeTitle(episode)}</strong>{episode.viewerPromise.trim() !== series.premise.trim() && episode.id !== selectedEpisode?.id ? <span>{episode.viewerPromise}</span> : null}</span>
                   <span className={`series-episode-status is-${episode.status}`}>{locked ? <LockKeyhole aria-hidden="true" size={13} /> : episode.status === "ready" || episode.status === "published" ? <CheckCircle2 aria-hidden="true" size={13} /> : <Clapperboard aria-hidden="true" size={13} />}{seriesEpisodeStatusLabel(episode, locked)}</span>
                 </button>
               </li>
@@ -415,9 +418,9 @@ function SeriesRoadmap({
 
         {selectedEpisode ? (
           <article ref={detailRef} className="series-episode-detail">
-            <header><span>第 {selectedEpisode.episodeNumber} 集 · {selectedEpisode.arc}</span><strong>{seriesEpisodeStatusLabel(selectedEpisode, Boolean(blockedBy))}</strong></header>
+            <header><span>第 {selectedEpisode.episodeNumber} 集{selectedEpisode.arc.trim() !== series.currentSeason.arc.trim() && selectedEpisode.arc.trim() !== series.premise.trim() ? ` · ${selectedEpisode.arc}` : ""}</span><strong>{seriesEpisodeStatusLabel(selectedEpisode, Boolean(blockedBy))}</strong></header>
             <h3>{seriesEpisodeTitle(selectedEpisode)}</h3>
-            <p className="series-viewer-promise">{selectedEpisode.viewerPromise}</p>
+            {selectedEpisode.viewerPromise.trim() !== series.premise.trim() ? <p className="series-viewer-promise">{selectedEpisode.viewerPromise}</p> : null}
             <div className="series-continuity-grid">
               <section><span>前集定版交接</span><p>{(selectedEpisode.continuity.inheritedFromPrevious ?? []).join("；") || "暂无前集定版交接。"}</p></section>
               <section><span>本集承接要求</span><p>{selectedEpisode.continuity.fromPrevious.join("；") || "没有额外创作约束。"}</p></section>
@@ -750,8 +753,10 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
         {canSupplementSources ? (
           <button className="button button-secondary" type="button" aria-label={`补充来源 ${item.title}`} disabled={disabled} onClick={() => onSupplementSources?.(item)}>保存来源并重新评估</button>
         ) : null}
-        <button className="button button-primary candidate-adopt" data-tour="candidate-adopt" type="button" aria-label={`采用候选 ${item.title}`} disabled={disabled} onClick={() => void onAdopt()}>{adopting ? "正在采用..." : advice ? "仍然采用" : item.verification.status === "review_required" ? "核验后采用" : "采用到制作区"}<ArrowRight aria-hidden="true" size={16} /></button>
+        <button className="button button-primary candidate-adopt" data-tour="candidate-adopt" type="button" aria-label={`采用候选 ${item.title}`} disabled={disabled} onClick={() => void onAdopt()}>{adopting ? "正在采用..." : advice ? "仍然采用到制作区" : item.verification.status === "review_required" ? "查看来源并采用" : "采用到制作区"}<ArrowRight aria-hidden="true" size={16} /></button>
       </div>
+      {/* DG-UX-05：采用动作只把候选放进待制作区；真实开工仍由制作准备/新建制作表单负责。 */}
+      <p className="candidate-adopt-note">采用后加入待制作区，不会开始生成或付费。</p>
     </article>
   );
 }

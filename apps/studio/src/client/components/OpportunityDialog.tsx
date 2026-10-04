@@ -1,5 +1,5 @@
 import { AlertCircle, Braces, Check, PenLine, X } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { parseStudioOpportunityInput, type StudioOpportunityInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 
@@ -24,14 +24,28 @@ export function OpportunityDialog({ open, initialMode = "manual", onClose, onSub
   const [mode, setMode] = useState<"manual" | "json">(initialMode);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
+  const [discardPromptOpen, setDiscardPromptOpen] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  const baseline = useRef("");
+  const snapshot = () => JSON.stringify(formRef.current ? [...new FormData(formRef.current).entries()] : []);
+
+  useLayoutEffect(() => {
+    if (open) baseline.current = snapshot();
+  }, [open]);
+  const requestClose = () => {
+    if (submitting) return;
+    if (snapshot() !== baseline.current) setDiscardPromptOpen(true);
+    else onClose();
+  };
 
   useEffect(() => {
     if (open) {
       setMode(initialMode);
       setError(undefined);
+      setDiscardPromptOpen(false);
     }
   }, [initialMode, open]);
-  const dialogRef = useDialogFocus<HTMLElement>(open, onClose, submitting, mode);
+  const dialogRef = useDialogFocus<HTMLElement>(open, discardPromptOpen ? () => setDiscardPromptOpen(false) : requestClose, submitting, `${mode}:${discardPromptOpen}`);
 
   if (!open) return null;
 
@@ -57,21 +71,27 @@ export function OpportunityDialog({ open, initialMode = "manual", onClose, onSub
 
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget && !submitting) onClose();
+      if (event.target === event.currentTarget && !discardPromptOpen) {
+        // 弹出放弃确认后，原鼠标事件不能再把焦点移回背景。
+        event.preventDefault();
+        requestClose();
+      }
     }}>
-      <section ref={dialogRef} className="run-dialog opportunity-dialog" role="dialog" aria-modal="true" aria-labelledby="opportunity-dialog-title" tabIndex={-1}>
+      <section ref={dialogRef} className="run-dialog opportunity-dialog" role="dialog" aria-modal="true" aria-labelledby={discardPromptOpen ? "opportunity-discard-title" : "opportunity-dialog-title"} tabIndex={-1}>
+        <div inert={discardPromptOpen} aria-hidden={discardPromptOpen || undefined}>
         <header className="dialog-header">
           <div>
             <p className="eyebrow">选题草稿</p>
             <h2 id="opportunity-dialog-title">录入机会</h2>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
+          <button className="icon-button" type="button" onClick={requestClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
         <div className="dialog-mode-tabs" role="tablist" aria-label="录入方式">
-          <button type="button" role="tab" aria-selected={mode === "manual"} onClick={() => switchMode("manual")}><PenLine aria-hidden="true" size={15} />手动录入</button>
-          <button type="button" role="tab" aria-selected={mode === "json"} onClick={() => switchMode("json")}><Braces aria-hidden="true" size={15} />JSON 导入</button>
+          <button type="button" role="tab" disabled={submitting} aria-selected={mode === "manual"} onClick={() => switchMode("manual")}><PenLine aria-hidden="true" size={15} />手动录入</button>
+          <button type="button" role="tab" disabled={submitting} aria-selected={mode === "json"} onClick={() => switchMode("json")}><Braces aria-hidden="true" size={15} />JSON 导入</button>
         </div>
         <form
+          ref={formRef}
           className="run-form opportunity-form"
           onSubmit={submit}
           onChange={() => {
@@ -79,19 +99,31 @@ export function OpportunityDialog({ open, initialMode = "manual", onClose, onSub
           }}
           noValidate
         >
-          {mode === "manual" ? <ManualFields /> : (
+          <div className="field-wide" hidden={mode !== "manual"}><ManualFields /></div>
+          <div className="field-wide" hidden={mode !== "json"}>
             <label className="field field-wide json-field">
               <span>机会数据</span>
               <textarea name="json" required data-dialog-initial-focus rows={18} spellCheck={false} placeholder={'{"title":"...","evidence":[...],"scores":{...}}'} />
               <small>请使用选题导入格式；提交后系统仍会检查字段和内容。</small>
             </label>
-          )}
+          </div>
           {error ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}
           <footer className="dialog-actions">
-            <button className="button button-ghost" type="button" onClick={onClose} disabled={submitting}>取消</button>
+            <button className="button button-ghost" type="button" onClick={requestClose} disabled={submitting}>取消</button>
             <button className="button button-primary" type="submit" disabled={submitting}><Check aria-hidden="true" size={17} />{submitting ? "正在保存..." : "保存机会"}</button>
           </footer>
         </form>
+        </div>
+        {discardPromptOpen ? <div className="dialog-backdrop new-run-discard-backdrop" role="presentation">
+          <section className="decision-dialog" aria-labelledby="opportunity-discard-title">
+            <header className="dialog-header"><h2 id="opportunity-discard-title">要放弃本次填写吗？</h2></header>
+            <div className="decision-dialog-copy"><AlertCircle aria-hidden="true" size={22} /><p>尚未保存的选题和导入内容都会丢失；不会创建机会或制作。</p></div>
+            <footer className="dialog-actions">
+              <button className="button button-primary" type="button" data-dialog-initial-focus onClick={() => setDiscardPromptOpen(false)}>返回填写</button>
+              <button className="button button-danger-ghost" type="button" onClick={() => { setDiscardPromptOpen(false); onClose(); }}>放弃并关闭</button>
+            </footer>
+          </section>
+        </div> : null}
       </section>
     </div>
   );
@@ -132,14 +164,17 @@ function formInput(data: FormData): StudioOpportunityInput {
     audience: required(data, "audience"),
     painPoint: required(data, "painPoint"),
     hook: required(data, "hook"),
-    evidence: [{
+    // DG-UX-02：来源表达必须真实——用户没填参考链接就是零来源；填了链接才落一条
+    // 用户参考记录，不伪造热榜信号或“已补充来源”的假象。
+    origin: "manual",
+    ...(evidenceUrl ? { evidence: [{
       source: "manual-supplement",
       platform: "manual",
       keyword: title,
       strength: 0,
-      ...(evidenceUrl ? { evidenceUrl } : {}),
+      evidenceUrl,
       collectedAt: new Date().toISOString(),
-    }],
+    }] } : { evidence: [] }),
     scores: { ...SYSTEM_SCORE_DEFAULTS },
   };
 }

@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
+// 内容安全基础约束直接复用宿主同一份规则（讨论输入不另造一份可能漂移的关键词清单）。
+import { assertGeneratedVisualDoesNotClaimEvidence } from "@video-factory/production-pipeline/visual-evidence-boundary";
 import {
   BROKER_TASK_INPUT_CONTRACTS,
   BROKER_TASK_KINDS,
@@ -1678,11 +1680,15 @@ function requireCreativeDiscussionDocument(
   value: unknown,
 ): Record<string, unknown> {
   const document = boundedRecord(value, "payload.currentDocument", 192 * 1024);
+  if (stage === "script") {
+    // DG-UX-04：讨论的是宿主已保存的脚本稿。它按「已有稿」合同校验（与宿主
+    // validateScriptDraft 同源），不是新模型产出的严格 script-draft 输出 schema——
+    // 保存路径允许缺省的字段这里同样允许缺省；缺省不补造，存在时仍验类型/值/上界。
+    return requireExistingScriptDiscussionDocument(document);
+  }
   const kind = stage === "treatment"
     ? "creative-treatment"
-    : stage === "script"
-      ? "script-draft"
-      : "director-plan";
+    : "director-plan";
   // 导演稿经过宿主校验后会补入锁定的观众承诺；这是讨论输入的一部分，
   // 但不是模型首次生成 director-plan 时应拥有的字段，因此只在此边界单独校验。
   let documentForOutputValidation = document;
@@ -1715,6 +1721,111 @@ function requireCreativeDiscussionDocument(
     throw new CodexExecutorError(`payload.currentDocument${error.slice("output".length)}`, false);
   }
   return document;
+}
+
+/**
+ * DG-UX-04：讨论输入的“已保存脚本稿”合同。基础必需结构齐全（scenes 3..24、
+ * position/narration/duration/visual_strategy/visual_prompt/search_terms，位置连续），
+ * 可选字段缺省合法、存在时校验类型/值/上界（criteria 1..8、search_terms 1..8 且
+ * trim 后不重复等）。依赖真实 brief 的规则（总时长区间、系列 canon 要求）不在
+ * Broker 凭空校验，仍由宿主保存/采用路径把关。
+ */
+function requireExistingScriptDiscussionDocument(
+  document: Record<string, unknown>,
+): Record<string, unknown> {
+  const field = "payload.currentDocument";
+  // C6：字段白名单与正式 ScriptDraft 归一输出同源——顶层 viewerPromise/narrativeArc/
+  // canonFacts/scenes；scene 为 position/purpose/narration/duration/visual_strategy/
+  // visual_prompt/visible_action/on_screen_text/sound_cue/success_criteria/
+  // failure_conditions/search_terms。任意额外字段不属于宿主已有稿合同，直接拒绝。
+  const topLevelAllowed = new Set(["viewerPromise", "narrativeArc", "canonFacts", "scenes"]);
+  for (const key of Object.keys(document)) {
+    if (!topLevelAllowed.has(key)) throw new CodexExecutorError(`${field}.${key} is not part of the saved script contract.`, false);
+  }
+  const sceneAllowed = new Set([
+    "position", "purpose", "narration", "duration", "visual_strategy", "visual_prompt",
+    "visible_action", "on_screen_text", "sound_cue", "success_criteria", "failure_conditions", "search_terms",
+  ]);
+  if (Array.isArray(document.scenes)) {
+    document.scenes.forEach((entry, index) => {
+      const sceneRecord = requireRecord(entry, `${field}.scenes[${index}]`);
+      for (const key of Object.keys(sceneRecord)) {
+        if (!sceneAllowed.has(key)) throw new CodexExecutorError(`${field}.scenes[${index}].${key} is not part of the saved script scene contract.`, false);
+      }
+    });
+  }
+  optionalNonEmptyText(document.viewerPromise, `${field}.viewerPromise`);
+  optionalNonEmptyText(document.narrativeArc, `${field}.narrativeArc`);
+  if (document.canonFacts !== undefined
+    && stringArray(document.canonFacts, `${field}.canonFacts`).length > 8) {
+    throw new CodexExecutorError(`${field}.canonFacts must contain at most 8 entries.`, false);
+  }
+  if (!Array.isArray(document.scenes) || document.scenes.length < 3 || document.scenes.length > 24) {
+    throw new CodexExecutorError(`${field}.scenes must contain 3 to 24 entries.`, false);
+  }
+  const positions: number[] = [];
+  document.scenes.forEach((entry, index) => {
+    const sceneField = `${field}.scenes[${index}]`;
+    const scene = requireRecord(entry, sceneField);
+    if (!Number.isInteger(scene.position) || Number(scene.position) < 1) {
+      throw new CodexExecutorError(`${sceneField}.position must be a positive integer.`, false);
+    }
+    optionalNonEmptyText(scene.purpose, `${sceneField}.purpose`);
+    requiredText(scene.narration, `${sceneField}.narration`);
+    if (typeof scene.duration !== "number" || !Number.isFinite(scene.duration) || scene.duration <= 0) {
+      throw new CodexExecutorError(`${sceneField}.duration must be a finite positive number.`, false);
+    }
+    if (scene.visual_strategy !== "stock" && scene.visual_strategy !== "image"
+      && scene.visual_strategy !== "generated" && scene.visual_strategy !== "local") {
+      throw new CodexExecutorError(`${sceneField}.visual_strategy must be one of stock, image, generated, local.`, false);
+    }
+    requiredText(scene.visual_prompt, `${sceneField}.visual_prompt`);
+    optionalNonEmptyText(scene.visible_action, `${sceneField}.visible_action`);
+    if (scene.on_screen_text !== undefined && typeof scene.on_screen_text !== "string") {
+      throw new CodexExecutorError(`${sceneField}.on_screen_text must be a string.`, false);
+    }
+    optionalNonEmptyText(scene.sound_cue, `${sceneField}.sound_cue`);
+    optionalBoundedTextList(scene.success_criteria, `${sceneField}.success_criteria`);
+    optionalBoundedTextList(scene.failure_conditions, `${sceneField}.failure_conditions`);
+    const searchTerms = stringArray(scene.search_terms, `${sceneField}.search_terms`);
+    if (searchTerms.length < 1 || searchTerms.length > 8) {
+      throw new CodexExecutorError(`${sceneField}.search_terms must contain 1 to 8 entries.`, false);
+    }
+    if (new Set(searchTerms.map((term) => term.trim())).size !== searchTerms.length) {
+      throw new CodexExecutorError(`${sceneField}.search_terms must not contain duplicate terms after trimming.`, false);
+    }
+    // 内容安全基础约束与宿主保存路径同源（含 success_criteria/failure_conditions，
+    // 与 validateScriptDraft 的检查数组一致）：生成路线的文案不得宣称真实证据。
+    if (scene.visual_strategy === "generated") {
+      assertGeneratedVisualDoesNotClaimEvidence([
+        typeof scene.purpose === "string" ? scene.purpose : undefined,
+        typeof scene.narration === "string" ? scene.narration : undefined,
+        typeof scene.visual_prompt === "string" ? scene.visual_prompt : undefined,
+        typeof scene.visible_action === "string" ? scene.visible_action : undefined,
+        typeof scene.on_screen_text === "string" ? scene.on_screen_text : undefined,
+        ...(Array.isArray(scene.success_criteria) ? scene.success_criteria.filter((value): value is string => typeof value === "string") : []),
+        ...(Array.isArray(scene.failure_conditions) ? scene.failure_conditions.filter((value): value is string => typeof value === "string") : []),
+      ], sceneField);
+    }
+    positions.push(Number(scene.position));
+  });
+  const sorted = [...positions].sort((left, right) => left - right);
+  if (sorted.some((position, index) => position !== index + 1)) {
+    throw new CodexExecutorError(`${field}.scenes positions must be contiguous integers starting at 1.`, false);
+  }
+  return document;
+}
+
+function optionalNonEmptyText(value: unknown, field: string): void {
+  if (value !== undefined) requiredText(value, field);
+}
+
+function optionalBoundedTextList(value: unknown, field: string): void {
+  if (value === undefined) return;
+  const entries = stringArray(value, field);
+  if (entries.length < 1 || entries.length > 8) {
+    throw new CodexExecutorError(`${field} must contain 1 to 8 entries.`, false);
+  }
 }
 
 function requireCreativeDiscussionSelection(value: unknown): NonNullable<CreativeDiscussionPayload["selection"]> {

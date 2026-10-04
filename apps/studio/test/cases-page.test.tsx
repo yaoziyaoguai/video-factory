@@ -227,3 +227,27 @@ describe("CasesPage", () => {
     expect(screen.getByRole("button", { name: /用它开始创作/ })).toBeDisabled();
   });
 });
+
+// DG-UX-03（新前端 Dogfood 修复执行包 R4）：搜索框要有稳定可访问名称。
+// 键盘/读屏/自动化都按用途识别；仅 placeholder 不算名称。
+
+describe("case search accessible name (DG-UX-03)", () => {
+  it("keeps the searchbox named 搜索案例 across empty, filled and cleared states", async () => {
+    mockApi();
+    renderPage();
+    await waitFor(() => expect(screen.getByText(transcriptItem.title)).toBeInTheDocument());
+
+    const search = screen.getByRole("searchbox", { name: "搜索案例" });
+    expect(search).toHaveAttribute("placeholder", "搜索标题、作者或话题");
+    fireEvent.change(search, { target: { value: "逐字稿" } });
+    expect(screen.getByRole("searchbox", { name: "搜索案例" })).toBe(search);
+    expect(screen.getByRole("button", { name: "清空搜索" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "清空搜索" }));
+    expect(screen.getByRole("searchbox", { name: "搜索案例" })).toHaveValue("");
+    expect(screen.queryByRole("button", { name: "清空搜索" })).not.toBeInTheDocument();
+    // 键盘直达：聚焦后输入仍驱动同一筛选。
+    search.focus();
+    fireEvent.change(search, { target: { value: "不存在的关键词" } });
+    await waitFor(() => expect(screen.getByText("没有符合条件的参考内容，换一个关键词或筛选项试试。")).toBeInTheDocument());
+  });
+});

@@ -149,6 +149,7 @@ const service = new StudioService({
   repositoryRoot,
   workspaceRoot,
   pipeline,
+  audioReviewObserver: soundReview,
   opportunities,
   codexAvailability: {
     available: false,

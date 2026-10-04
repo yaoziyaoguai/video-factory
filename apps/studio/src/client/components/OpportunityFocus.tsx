@@ -1,7 +1,7 @@
 import { AlertTriangle, ArrowUpRight, Clock3, Link2, Search, Target } from "lucide-react";
 import type { StudioOpportunity, StudioVisualSource } from "../../shared/api.js";
 import { resolveOpportunityVisualPlan } from "../../shared/visual-plan.js";
-import { platformLabel, scoreSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
+import { platformLabel, presentableOpportunityEvidence, scoreSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
 
 interface OpportunityFocusProps {
   opportunity: StudioOpportunity;
@@ -82,10 +82,11 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
             <span className="eyebrow">依据</span>
             <h2 id="evidence-heading">来源线索与已读事实</h2>
           </div>
-          <span>{opportunity.evidence.length} 条</span>
+          {/* DG-UX-02：计数与列表同一口径；无链接的旧 manual 占位不是来源。 */}
+          <span>{presentableOpportunityEvidence(opportunity).length === 0 ? "尚未添加参考来源" : `${presentableOpportunityEvidence(opportunity).length} 条`}</span>
         </div>
         <div className="evidence-list">
-          {opportunity.evidence.map((evidence, index) => (
+          {presentableOpportunityEvidence(opportunity).map((evidence, index) => (
             <article className="evidence-row" key={`${evidence.source}-${evidence.keyword}-${index}`}>
               <span className="evidence-strength" aria-label={isManualEvidence(evidence) ? "用户补充来源" : `榜单热度或排名信号 ${evidence.strength}`}>{isManualEvidence(evidence) ? "补" : evidence.strength}</span>
               <div>

@@ -21,6 +21,45 @@ function deterministicIds(): (prefix: string) => string {
 const clock = (): string => "2026-08-21T10:00:00.000Z";
 
 describe("WorkflowRunner", () => {
+  it("preserves original optional audit uncertainty across a successful local continuation", async () => {
+    let executions = 0;
+    const definition: WorkflowDefinition = { id: "optional-audit-history", name: "Optional audit", version: "1", nodes: [{
+      id: "planning", label: "Planning", capability: "script.draft", mode: "automatic",
+      execute: (_input, context) => {
+        executions++;
+        if (executions > 1) return { output: { adopted: true }, providerOutcomeKnown: true };
+        return { status: "needs_human", output: { draft: "当前有效稿" }, providerOutcomeKnown: false,
+          optionalReviewOperationRefs: [{ purpose: "creative_audit", operationId: context.operationRequestId!,
+            requestId: "original-audit", targetVersionId: "draft-A", inputDigest: "original-input", continuationEvidenceArtifactId: "host-proof" }],
+          intervention: { kind: "creative_review", reason: "审计待核", requiredAction: "approve", options: ["approve"] } };
+      },
+    }] };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers: new ProviderRegistry() });
+    const waiting = await runner.run(definition, {});
+    const originalId = waiting.nodeRuns[0]!.operationRequestId!;
+    assert.equal(waiting.nodeRuns[0]?.outcomeUncertain, true);
+    const continued = await runner.continueWaitingNode(definition, waiting, "planning");
+    assert.equal(continued.status, "succeeded");
+    assert.equal(continued.nodeRuns[0]?.outcomeUncertain, true, "本地命令成功不结清旧审计");
+    assert.equal(continued.nodeRuns[0]?.optionalReviewOperationRefs?.[0]?.operationId, originalId, "原请求索引不能随新命令丢失");
+    const input = continued.nodeRuns[0]!.inputState!.versions.find(item => item.id === continued.nodeRuns[0]!.inputState!.effectiveVersionId)!;
+    const override = { nodeId: "planning", actor: "creator", expectedVersionId: input.id,
+      input: { note: "显式修订新版本" }, allowTerminalEdit: true };
+    assert.throws(() => runner.applyNodeInputOverride(definition, continued, override), /uncertain paid-provider/,
+      "core默认不能仅凭optional索引自行授予免核许可");
+    const verifiedRunner = new WorkflowRunner({ clock, idFactory: deterministicIds(),
+      optionalReviewInvalidationOperations: [{ nodeId: "planning", operationId: originalId,
+        targetVersionId: "draft-A", inputDigest: "original-input" }] });
+    assert.equal(verifiedRunner.applyNodeInputOverride(definition, continued, override).status, "stale");
+    const mixed = structuredClone(continued);
+    mixed.nodeRuns[0]!.outcomeUncertainOperationIds!.push("unknown-generation");
+    assert.throws(() => verifiedRunner.applyNodeInputOverride(definition, mixed, override), /uncertain paid-provider/,
+      "同节点混入未核生成操作仍必须拒绝，不能被一条optional索引掩盖");
+    const wrongBindingRunner = new WorkflowRunner({ optionalReviewInvalidationOperations: [{ nodeId: "planning",
+      operationId: originalId, targetVersionId: "draft-B", inputDigest: "original-input" }] });
+    assert.throws(() => wrongBindingRunner.applyNodeInputOverride(definition, continued, override), /uncertain paid-provider/);
+  });
+
   it("persists a structured failure code and clears it on successful retry", async () => {
     let calls = 0;
     const definition: WorkflowDefinition = {

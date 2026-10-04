@@ -563,14 +563,14 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
         input: planningInput,
         planningStageId: "director",
       }, "producer"),
-      /付费结果尚未核对/,
+      (error: unknown) => error instanceof StudioConflictError && /查询原请求/.test(error.message),
     );
     await assert.rejects(
       () => harness.studio.applyNodeExecutionConfiguration(runId, "creative-planning", {
         planningStageId: "director",
         modelSelections: { "api-visual-director-v1": "director-model-two" },
       }, "producer"),
-      /付费结果尚未核对/,
+      (error: unknown) => error instanceof StudioConflictError && /查询原请求/.test(error.message),
     );
   });
 

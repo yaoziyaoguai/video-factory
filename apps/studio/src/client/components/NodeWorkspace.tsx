@@ -39,6 +39,8 @@ interface NodeWorkspaceProps {
   activeInterventionId?: string;
   busy: boolean;
   readOnly?: boolean;
+  /** 仅使用宿主逐条核实后的事实，不能凭节点名称或风险按钮推断未知请求安全。 */
+  optionalReviewUncertaintySafe?: true;
   currentDelivery?: boolean;
   pauseBusy?: boolean;
   pauseRequested?: boolean;
@@ -56,13 +58,15 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, currentDelivery = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
   const shouldOpenForAttention = currentDelivery || node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
   const [editing, setEditing] = useState(false);
   const [editingInput, setEditingInput] = useState(false);
   const [editingDocument, setEditingDocument] = useState(false);
+  // F05：前序步骤没有挂载正文卡片时，记录被点开的那一条，用于就地说明原因。
+  const [unavailableSource, setUnavailableSource] = useState<string | undefined>();
   const [authorizing, setAuthorizing] = useState(false);
   const [rejectingSpend, setRejectingSpend] = useState(false);
   const [spendRejectionReason, setSpendRejectionReason] = useState<StudioSpendRejectionInput["reason"]>("too_expensive");
@@ -139,7 +143,8 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const hasStructuredOutput = node.output !== undefined || effectiveOutput(node) !== undefined;
   const outputReadOnly = READ_ONLY_OUTPUT_NODE_IDS.has(node.id);
   const nodeReadOnly = READ_ONLY_NODE_IDS.has(node.id);
-  const paidRecoveryLocked = nodes.some((candidate) => candidate.outcomeUncertain === true);
+  const paidRecoveryLocked = nodes.some((candidate) => candidate.outcomeUncertain === true)
+    && optionalReviewUncertaintySafe !== true;
   const canEdit = !readOnly && !paidRecoveryLocked && !outputReadOnly && node.id !== "creative-planning" && (hasStructuredOutput || documentPreview !== undefined) && runStatus !== "running" && node.status !== "pending" && node.status !== "running" && node.status !== "awaiting_spend_approval";
   const canEditInput = !readOnly && !paidRecoveryLocked && !nodeReadOnly && effectiveInputVersion !== undefined && runStatus !== "running" && node.status !== "running" && node.status !== "pending";
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
@@ -171,7 +176,13 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     : undefined;
   const planningVersionArtifactIds = node.id === "creative-planning" ? effectiveVersion?.artifactIds ?? [] : [];
   const verifiedPlanningArtifactIds = new Set(planningStages?.flatMap((stage) => stage.artifactIds) ?? []);
-  const planningArtifactIds = planningVersionArtifactIds.filter((id) => verifiedPlanningArtifactIds.has(id));
+  const planningVerifiedArtifactIds = planningVersionArtifactIds.filter((id) => verifiedPlanningArtifactIds.has(id));
+  // D19（2026-10-02 执行包）：正式登记的有效版本是当前交付的权威。阶段投影的 commit
+  // 核验为空（上游修订后 commit 身份变化、投影读取失败）时，不能把已登记的正式产物
+  // 说成「尚未交付」并指向可能已不在的创作工作台；回退按有效版本登记解析，正文仍可读。
+  const planningArtifactIds = planningVerifiedArtifactIds.length > 0
+    ? planningVerifiedArtifactIds
+    : planningVersionArtifactIds;
   const hasDelivery = node.id === "creative-planning"
     ? planningVersionArtifactIds.length > 0
     : hasCreatorDocumentContent(node.id, deliveryValue);
@@ -560,7 +571,18 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
               <div>
                 {inputSources.map((source) => <article key={source.node.id}>
                   <span><strong>{source.node.role ?? "制作角色"} · {source.node.label}</strong><small>{source.versionLabel}{source.node.outputState?.stale ? " · 前序内容已变化" : ""}</small></span>
-                  <button className="button button-ghost" type="button" aria-label={`${source.canEdit ? "查看与修改" : "查看"} ${source.node.role ?? "制作角色"} · ${source.node.label}`} onClick={() => revealNodeWorkspace(source.node.id)}>{source.canEdit ? "查看与修改" : "查看"}</button>
+                  <button className="button button-ghost" type="button" aria-label={`${source.canEdit ? "查看与修改" : "查看"} ${source.node.role ?? "制作角色"} · ${source.node.label}`} onClick={() => {
+                    if (revealNodeWorkspace(source.node.id)) {
+                      setUnavailableSource(undefined);
+                      return;
+                    }
+                    // F05：该步骤没有单独的正文卡片——定位成片预览，或说明原因。
+                    setUnavailableSource(revealNonWorkspaceSource(source.node.id) === "film"
+                      ? undefined : source.node.id);
+                  }}>{source.canEdit ? "查看与修改" : "查看"}</button>
+                  {unavailableSource === source.node.id ? <small role="note" className="node-source-unavailable">
+                    这一步没有单独的正文卡片：渲染结果在页面成片预览中播放，机器质检结论随当前停点展示；历史版本请到制作记录查看。
+                  </small> : null}
                 </article>)}
               </div>
             </section> : null}
@@ -773,13 +795,28 @@ function revealExpandedWorkspace(workspace: HTMLDetailsElement): void {
   window.requestAnimationFrame(() => workspace.scrollIntoView({ block: "start" }));
 }
 
-export function revealNodeWorkspace(nodeId: string): void {
-  if (typeof document === "undefined") return;
+export function revealNodeWorkspace(nodeId: string): boolean {
+  if (typeof document === "undefined") return false;
   const workspace = document.getElementById(`node-workspace-${nodeId}`);
-  if (!(workspace instanceof HTMLDetailsElement)) return;
+  if (!(workspace instanceof HTMLDetailsElement)) return false;
   if (!workspace.open) workspace.querySelector<HTMLElement>(":scope > summary")?.click();
   if (typeof workspace.scrollIntoView === "function") workspace.scrollIntoView({ behavior: "smooth", block: "start" });
   window.requestAnimationFrame(() => workspace.querySelector<HTMLElement>("summary")?.focus());
+  return true;
+}
+
+// F05（2026-10-02 执行包）：render/technical-review/final-review 没有挂载的正文工作台。
+// 「查看」不能无响应：优先定位页面上的成片预览；都没有时给出可读说明，
+// 不跳到无关历史，也不假装展开了一个不存在的卡片。
+function revealNonWorkspaceSource(nodeId: string): "film" | "none" {
+  const film = document.getElementById("preview-title");
+  if (film instanceof HTMLElement && typeof film.scrollIntoView === "function") {
+    film.scrollIntoView({ behavior: "smooth", block: "start" });
+    window.requestAnimationFrame(() => film.focus({ preventScroll: true }));
+    return "film";
+  }
+  void nodeId;
+  return "none";
 }
 
 function safeParse(value: string): unknown {

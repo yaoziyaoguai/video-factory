@@ -87,6 +87,7 @@ class FakeWorker {
         })
       : JSON.stringify({ capability });
     await writeFile(primaryPath, content, "utf8");
+    if (capability === "voice.synthesize") await writeFile(String(output.trackPath), "controlled audio fixture");
     if (capability === "video.render") {
       await writeFile(String(output.renderManifestPath), JSON.stringify({
         duration_target: 10,
@@ -102,21 +103,22 @@ class FakeWorker {
       commandId: String(request.commandId),
       status: capability === this.rejectedCapability ? "rejected" : "succeeded",
       output,
-      artifacts: [
-        {
+      artifacts: await Promise.all(Object.values(output).filter(value => typeof value === "string").map(async uri => {
+        const bytes = await readFile(String(uri));
+        return {
           kind: capability.replace(".", "_"),
-          uri: primaryPath,
-          sha256: createHash("sha256").update(content).digest("hex"),
-          sizeBytes: Buffer.byteLength(content),
-          contentType: capability === "video.render" ? "video/mp4" : "application/json",
+          uri: String(uri),
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          sizeBytes: bytes.length,
+          contentType: uri === output.videoPath ? "video/mp4" : uri === output.trackPath ? "audio/mp4" : "application/json",
           provenance: {
             providerId,
             producerNodeId: String(request.nodeRunId),
             attempt: Number(request.attempt),
             licenseNote: "Fake worker artifact for integration testing.",
           },
-        },
-      ],
+        };
+      })),
     };
   }
 }
@@ -1290,19 +1292,32 @@ describe("ProductionPipeline", () => {
     const withSound = await subject.start({ ...brief, providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" } });
     assert.equal(withSound.status, "needs_human");
     assert.deepEqual((withSound.nodeRuns.find((item) => item.nodeId === "visual-review")?.output as Record<string, unknown>).audioReview, attachedAudio);
+    // F04（2026-10-02 执行包）：声音请求 unknown 时成片保留并进入人工续看停点——
+    // 原声音事实保持 uncertain、不重发；用户明确承担风险后才进入独立终审。
     attachedAudio = { status: "uncertain", reason: "原声音请求待核实。" };
     const pendingSound = await subject.start({ ...brief, providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" } });
-    assert.equal(pendingSound.status, "failed");
-    assert.equal(pendingSound.nodeRuns.find((item) => item.nodeId === "visual-review")?.intervention, undefined, "未知声音不能靠接受视觉风险绕过");
+    assert.equal(pendingSound.status, "needs_human", "未知声音不再把 run 打成 failed");
+    const pendingNode = pendingSound.nodeRuns.find((item) => item.nodeId === "visual-review");
+    assert.equal(pendingNode?.status, "needs_human");
+    const continuationIntervention = pendingNode?.intervention;
+    assert.equal(continuationIntervention?.continuationScope, "rendered_video_optional_review");
+    assert.equal(continuationIntervention?.providerOutcomeKnown, false);
+    assert.equal(typeof continuationIntervention?.evidenceId, "string");
+    const pendingVideo = pendingSound.artifacts.find((candidate) => candidate.kind === "video_render" && candidate.contentType === "video/mp4");
+    assert.ok(pendingVideo, "成片在续看停点仍可播放/下载");
+    const pendingOutput = pendingNode?.output as Record<string, unknown>;
+    assert.deepEqual(pendingOutput.audioReview, attachedAudio, "声音 unknown 事实如实保留");
+    // 原请求不重发：重新检查（reinspection）在人工停点上仍不可用——它不是“等待重试”。
     await assert.rejects(subject.dispatchVisualReinspection(pendingSound.id, {
       expectedRunRevision: pendingSound.revision, reviewEvidenceId: "a".repeat(64),
-    }), /not waiting/);
+    }), /原请求结果仍待核实|not waiting/);
     await assert.rejects(readFile(path.join(workspaceRoot, "runs", pendingSound.id, "nodes", "visual-review", ".reinspection-cycle")), { code: "ENOENT" });
   });
 
-  // T02 保护：结果未知的审片请求只能保持失败、由恢复观察原请求；
-  // 不得借"无结论"转成可承担风险的人工停点。
-  it("does not convert an uncertain rendered-video audit into an accepted-risk stop", async () => {
+  // F04（2026-10-02 执行包，替代旧 T02 断言）：成片独立有效时，可选审片的 unknown
+  // 转为宿主续看停点——原请求只查询、零重发；用户必须带 commandId 显式承担风险；
+  // 采用审片停点后仍独立停在人工终审，签字后才有内部交付包。
+  it("converts an uncertain rendered-video audit into the scoped manual-review stop with independent final review and delivery", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-uncertain-visual-review-"));
     const uncertainLoop = {
       version: "video-factory/agent-loop-v1" as const,
@@ -1356,16 +1371,184 @@ describe("ProductionPipeline", () => {
     });
 
     const node = run.nodeRuns.find((candidate) => candidate.nodeId === "visual-review");
-    assert.equal(run.status, "failed", "an unknown outcome must not become a human stop");
-    assert.equal(node?.status, "failed");
-    assert.equal(node?.intervention, undefined, "no accept-risk option may be offered for an unknown request");
-    assert.equal(run.artifacts.some((candidate) => (
-      candidate.kind === "review_diagnostic" && candidate.producer?.nodeId === "visual-review"
-    )), false);
-    assert.doesNotMatch(node?.error ?? "", /已核清/);
+    assert.equal(run.status, "needs_human", "未知审片在真实成片上转人工续看停点");
+    assert.equal(node?.status, "needs_human");
+    const intervention = node?.intervention;
+    assert.equal(intervention?.continuationScope, "rendered_video_optional_review");
+    assert.equal(intervention?.providerOutcomeKnown, false);
+    assert.equal(intervention?.reviewStatus, "incomplete");
+    const evidenceId = intervention?.evidenceId;
+    assert.equal(typeof evidenceId, "string");
+    assert.ok(intervention?.options?.includes("approve"));
+    const video = run.artifacts.find((candidate) => candidate.kind === "video_render" && candidate.contentType === "video/mp4");
+    assert.ok(video, "成片在续看停点保留");
+    const diagnostic = run.artifacts.find((candidate) => (
+      candidate.kind === "review_diagnostic" && candidate.producer?.nodeId === "visual-review"));
+    assert.ok(diagnostic, "宿主续看诊断落盘");
+    const payload = JSON.parse(await readFile(diagnostic.uri!, "utf8")) as Record<string, unknown>;
+    assert.equal(payload.providerOutcomeKnown, false);
+    assert.equal(payload.scores, undefined);
+
+    // 缺 commandId 的风险采用被拒绝——这次决定必须有幂等身份。
+    await assert.rejects(subject.decide(run.id, {
+      interventionId: intervention!.id, action: "approve", actor: "creator",
+      expectedRunRevision: run.revision, reviewEvidenceId: evidenceId!, acceptIncomplete: true,
+    }), /操作编号/);
+    // 不绑当前证据的确认被拒绝。
+    await assert.rejects(subject.decide(run.id, {
+      interventionId: intervention!.id, action: "approve", actor: "creator", commandId: "adopt-unknown-visual",
+      expectedRunRevision: run.revision, reviewEvidenceId: "b".repeat(64), acceptIncomplete: true,
+    }), /not bound to the current review evidence/);
+
+    // 已登记的风险诊断不能替后来改变的成片背书；拒绝必须在耐久签字之前。
+    const originalVideo = await readFile(video!.uri!);
+    await writeFile(video!.uri!, Buffer.alloc(originalVideo.length, 120));
+    try {
+      await assert.rejects(subject.decide(run.id, {
+        interventionId: intervention!.id, action: "approve", actor: "creator", commandId: "tampered-video-adoption",
+        expectedRunRevision: run.revision, reviewEvidenceId: evidenceId!, acceptIncomplete: true,
+      }), /integrity|SHA|digest|bytes|成片|身份/i);
+      const unchanged = await subject.loadPersisted(run.id);
+      assert.equal(unchanged.revision, run.revision);
+      assert.equal(unchanged.decisions.length, run.decisions.length);
+      assert.equal(unchanged.nodeRuns.find(item => item.nodeId === "visual-review")?.intervention?.id, intervention!.id);
+    } finally { await writeFile(video!.uri!, originalVideo); }
+
+    // 必需音轨不能被“该节点已有一份计划”代替；失败先拒绝，不签字或推进。
+    const voiceOutput = run.nodeRuns.find(item => item.nodeId === "voice")!.output as { trackPath: string };
+    const voiceBytes = await readFile(voiceOutput.trackPath).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return undefined;
+    });
+    await rm(voiceOutput.trackPath, { force: true });
+    try {
+      await assert.rejects(subject.decide(run.id, {
+        interventionId: intervention!.id, action: "approve", actor: "creator", commandId: "missing-voice-adoption",
+        expectedRunRevision: run.revision, reviewEvidenceId: evidenceId!, acceptIncomplete: true,
+      }), /音轨|配音|voice|成果|登记/i);
+      const unchanged = await subject.loadPersisted(run.id);
+      assert.equal(unchanged.decisions.length, run.decisions.length);
+      assert.equal(unchanged.revision, run.revision);
+    } finally { if (voiceBytes) await writeFile(voiceOutput.trackPath, voiceBytes); }
+
+    // 明确风险采用：审片停点完成，独立进入人工终审（不是自动通过）。
+    const afterAdopt = await subject.decide(run.id, {
+      interventionId: intervention!.id, action: "approve", actor: "creator", commandId: "adopt-unknown-visual",
+      expectedRunRevision: run.revision, reviewEvidenceId: evidenceId!, acceptIncomplete: true,
+    });
+    const replayAdopt = await subject.decide(run.id, {
+      interventionId: intervention!.id, action: "approve", actor: "creator", commandId: "adopt-unknown-visual",
+      expectedRunRevision: run.revision, reviewEvidenceId: evidenceId!, acceptIncomplete: true,
+    });
+    assert.equal(replayAdopt.revision, afterAdopt.revision, "同编号重放先于CAS，不能重复批准");
+    assert.equal(replayAdopt.decisions.length, afterAdopt.decisions.length);
+    await assert.rejects(subject.decide(run.id, {
+      interventionId: intervention!.id, action: "approve", actor: "creator", commandId: "adopt-unknown-visual",
+      expectedRunRevision: run.revision, reviewEvidenceId: evidenceId!, acceptIncomplete: true, note: "不同内容",
+    }), /different content/);
+    assert.equal(afterAdopt.status, "needs_human", "采用审片停点后必须独立停在人工终审");
+    const finalNode = afterAdopt.nodeRuns.find((candidate) => candidate.nodeId === "final-review");
+    assert.equal(finalNode?.status, "needs_human", "终审停人");
+    assert.equal(finalNode?.intervention?.reviewStatus, "incomplete");
+    const adoptionReceipt = afterAdopt.reviewContinuationOperations?.find(item => item.commandId === "adopt-unknown-visual");
+    assert.equal(adoptionReceipt?.resultInterventionId, finalNode?.intervention?.id,
+      "风险采用回执必须指向实际产生的下一人工停点，不把已经消费的审片停点当当前停点");
+    assert.equal(adoptionReceipt?.resultRunRevision, afterAdopt.revision);
+    const deliveryEvidenceId = finalNode?.intervention?.evidenceId;
+    assert.equal(typeof deliveryEvidenceId, "string");
+    const finalOutput = finalNode?.output as Record<string, unknown>;
+    const delivery = finalOutput.deliveryEvidence as Record<string, unknown>;
+    assert.equal(delivery.version, "video-factory/internal-delivery-evidence-v2");
+    assert.equal(delivery.completionBasis, "human_approved_existing_artifacts");
+    assert.ok(Array.isArray(delivery.optionalReviewEvidenceIds) && delivery.optionalReviewEvidenceIds.length > 0,
+      "人工内部交付必须引用不可变的原审计风险快照");
+    const continuationProof = afterAdopt.artifacts.find(artifact => artifact.schemaVersion === "video-factory/optional-review-continuation-v1");
+    const proofFacts = (continuationProof?.data as { requestFacts?: Array<{ evidenceArtifactIds: string[] }> }).requestFacts;
+    assert.ok(proofFacts?.length && proofFacts.every(fact => fact.evidenceArtifactIds.length > 0), "每条可选审计必须可追溯到宿主登记的原操作，不能只凭节点名称豁免unknown");
+    assert.equal(finalNode?.intervention?.continuationScope, "rendered_video_optional_review");
+    assert.equal(finalNode?.intervention?.providerOutcomeKnown, false, "进入终审不谎称原请求已结清");
+    await assert.rejects(subject.decide(run.id, {
+      interventionId: finalNode!.intervention!.id, action: "approve", actor: "creator",
+      expectedRunRevision: afterAdopt.revision, reviewEvidenceId: deliveryEvidenceId!, acceptIncomplete: true,
+    }), /操作编号/, "终审必须使用独立的新操作编号");
+    // 原审片 unknown 事实不因人工签字结清。
+    const visualNode = afterAdopt.nodeRuns.find((candidate) => candidate.nodeId === "visual-review");
+    assert.equal((visualNode?.output as Record<string, unknown>).providerOutcomeKnown, false);
+
+    // 终审签字后发布包可读；不写 machine_pass。
+    const delivered = await subject.decide(afterAdopt.id, {
+      interventionId: finalNode!.intervention!.id, action: "approve", actor: "creator",
+      commandId: "final-signoff-u3", expectedRunRevision: afterAdopt.revision,
+      reviewEvidenceId: deliveryEvidenceId!, acceptIncomplete: true,
+    });
+    assert.equal(delivered.status, "succeeded", JSON.stringify(delivered.nodeRuns.map((n) => ({ id: n.nodeId, s: n.status, e: n.error }))));
+    const publishNode = delivered.nodeRuns.find((candidate) => candidate.nodeId === "publish-package");
+    assert.equal(publishNode?.status, "succeeded");
+
+    // D18：原可选审计保持待核，但不能永久剥夺用户修改已有成果的权利。
+    const renderBefore = delivered.nodeRuns.find(item => item.nodeId === "render")!;
+    const inputVersion = renderBefore.inputState!.versions.find(item => item.id === renderBefore.inputState!.effectiveVersionId)!;
+    const revised = await subject.applyNodeInputOverride(delivered.id, {
+      nodeId: "render", actor: "creator", expectedRunRevision: delivered.revision,
+      expectedVersionId: inputVersion.id, allowTerminalEdit: true,
+      input: { ...(inputVersion.value as Record<string, unknown>), creatorNote: "重新确认成片，保留原素材与配音" },
+    });
+    assert.equal(revised.status, "stale", "显式返工使下游确认失效，而不是被可选审片未知锁死");
+    assert.equal(revised.nodeRuns.find(item => item.nodeId === "visual-review")?.outcomeUncertain, true);
+    assert.equal(revised.nodeRuns.find(item => item.nodeId === "voice")?.outputState?.effectiveVersionId,
+      delivered.nodeRuns.find(item => item.nodeId === "voice")?.outputState?.effectiveVersionId);
+    assert.equal(revised.nodeRuns.find(item => item.nodeId === "final-review")?.status, "stale");
   });
 
-  // T02 保护：fallback 候选一条已核清、一条结果未知时，整体不得按已核清放行。
+  it("explicitly prepares a persisted rendered-review failure without signing or resending", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-rendered-prepare-"));
+    const worker = new FakeWorker();
+    let reviewCalls = 0;
+    const options: pipeline.ProductionPipelineOptions = {
+      workspaceRoot, worker,
+      providerRuntimeMetadata: [{ id: "deepseek-visual-review-v1", label: "受控审片", modelId: "deepseek-flash",
+        transport: "unix_socket", billing: "subscription", approvalPolicy: "none", maxAttempts: 1 }],
+      visualReviewAgents: [{ id: "deepseek-visual-review-v1", modelId: "deepseek-flash",
+        review: async () => { throw new Error("Detailed review required."); },
+        reviewDetailed: async input => {
+          reviewCalls++;
+          if (input.reviewStage === "source_assets") return { output: { version: "video-factory/visual-review-v1", summary: "源画面可用",
+            scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 90 },
+            findings: [], confidence: 0.95, recommendation: "approve" }, inspectedDurationMs: 20_000 };
+          throw new Error("Optional rendered-review consumer could not read its report.");
+        } }],
+    };
+    const subject = new pipeline.ProductionPipeline(options);
+    const failed = await subject.start({ ...brief, providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" } });
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.nodeRuns.find(node => node.nodeId === "visual-review")?.status, "failed");
+    const render = failed.nodeRuns.find(node => node.nodeId === "render")!;
+    const video = failed.artifacts.find(artifact => artifact.producer?.nodeId === "render" && artifact.contentType === "video/mp4")!;
+    assert.ok(video?.sha256);
+    const beforeCalls = worker.calls.length;
+    const reloaded = new pipeline.ProductionPipeline(options);
+    const input: pipeline.ProductionReviewContinuationInput = { commandId: "prepare-rendered", expectedRunRevision: failed.revision,
+      nodeId: "visual-review", targetArtifactId: video.id, targetVersionId: render.outputState!.effectiveVersionId, targetSha256: video.sha256! };
+    const prepared = await reloaded.prepareReviewContinuation(failed.id, input, "creator");
+    assert.equal(prepared.status, "needs_human");
+    const visual = prepared.nodeRuns.find(node => node.nodeId === "visual-review")!;
+    assert.equal(visual.intervention?.continuationScope, "rendered_video_optional_review");
+    assert.equal(visual.intervention?.reviewStatus, "incomplete");
+    assert.deepEqual(prepared.decisions, failed.decisions, "准备不签字");
+    assert.deepEqual(prepared.nodeRuns.find(node => node.nodeId === "render")?.outputState, render.outputState);
+    assert.equal(worker.calls.length, beforeCalls, "本地恢复不重发媒体或审片请求");
+    assert.equal(reviewCalls, 2);
+    const replay = await reloaded.prepareReviewContinuation(failed.id, input, "creator");
+    assert.equal(replay.revision, prepared.revision);
+    assert.equal(replay.nodeRuns.find(node => node.nodeId === "visual-review")!.intervention!.id, visual.intervention!.id);
+    await assert.rejects(reloaded.prepareReviewContinuation(failed.id, { ...input, targetSha256: "a".repeat(64) }, "creator"), /different content|已经/u);
+    const adopted = await reloaded.decide(failed.id, { commandId: "adopt-prepared-rendered", actor: "creator", action: "approve",
+      interventionId: visual.intervention!.id, expectedRunRevision: prepared.revision, acceptIncomplete: true,
+      reviewEvidenceId: visual.intervention!.evidenceId! });
+    assert.equal(adopted.nodeRuns.find(node => node.nodeId === "final-review")!.status, "needs_human", "采用仍停独立人工终审");
+  });
+
+  // D09：混合候选不能伪装全部已核清；已有成片仍可交回用户决定。
   it("keeps a mixed fallback (settled plus uncertain) from passing as settled", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-mixed-visual-review-"));
     const sourceReviewOutput: pipeline.VisualReviewReport = {
@@ -1431,12 +1614,12 @@ describe("ProductionPipeline", () => {
     });
 
     const node = run.nodeRuns.find((candidate) => candidate.nodeId === "visual-review");
-    assert.equal(run.status, "failed", "a mixed candidate group must not pass as settled");
-    assert.equal(node?.status, "failed");
-    assert.equal(node?.intervention, undefined);
-    assert.equal(run.artifacts.some((candidate) => (
-      candidate.kind === "review_diagnostic" && candidate.producer?.nodeId === "visual-review"
-    )), false);
+    assert.equal(run.status, "needs_human", "混合可选审计不能判整条制作无路可走");
+    assert.equal(node?.status, "needs_human");
+    assert.equal(node?.intervention?.continuationScope, "rendered_video_optional_review");
+    assert.equal(node?.intervention?.providerOutcomeKnown, false, "混合候选的unknown必须保留");
+    assert.equal(node?.outcomeUncertain, true);
+    assert.ok(run.artifacts.some(candidate => candidate.schemaVersion === "video-factory/optional-review-continuation-v1"));
   });
 
   // T03：内部交付完整路径——已核清无结论的成片审片 → 用户承担未复核风险 →
@@ -1576,7 +1759,7 @@ describe("ProductionPipeline", () => {
     assert.equal(finalIntervention.providerOutcomeKnown, true);
     const deliveryEvidenceId = finalIntervention.evidenceId;
     assert.ok(deliveryEvidenceId && /^[a-f0-9]{64}$/.test(deliveryEvidenceId), "the stop must bind the internal delivery evidence id");
-    assert.match(finalIntervention.reason, /未取得有效结论/);
+    assert.match(finalIntervention.reason, /未取得(?:完整)?有效结论/);
     assert.equal((finalReview?.output as Record<string, unknown>).deliveryEvidenceId, deliveryEvidenceId);
     // 自动模式也不能静默放行无结论的成片：本用例的 manual 配置下同样必须停。
     assert.equal(brief.reviewMode, "manual");
@@ -1769,18 +1952,29 @@ describe("ProductionPipeline", () => {
       providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
     });
     const finalReview = run.nodeRuns.find((candidate) => candidate.nodeId === "final-review");
-    assert.equal(run.status, "failed", JSON.stringify(run.nodeRuns.map((n) => ({ id: n.nodeId, status: n.status, error: n.error }))));
+    // 2026-10-02 F04 替代旧“未知审听一律失败”：保留原请求未知及零重发守卫，
+    // 已独立核实的成片回到用户审看；进入人工终审仍须另一次明确采用。
+    assert.equal(run.status, "needs_human", JSON.stringify(run.nodeRuns.map((n) => ({ id: n.nodeId, status: n.status, error: n.error }))));
     assert.equal(finalReview?.status ?? "pending", "pending");
-    assert.equal(run.nodeRuns.find((node) => node.nodeId === "visual-review")?.status, "failed");
-    assert.match(run.nodeRuns.find((node) => node.nodeId === "visual-review")?.error ?? "", /原声音请求/);
+    const pendingReview = run.nodeRuns.find(node => node.nodeId === "visual-review")!;
+    assert.equal(pendingReview.status, "needs_human");
+    assert.equal(pendingReview.intervention?.continuationScope, "rendered_video_optional_review");
+    assert.equal(pendingReview.intervention?.providerOutcomeKnown, false);
+    assert.equal((pendingReview.output as Record<string, unknown>).audioReview &&
+      ((pendingReview.output as Record<string, unknown>).audioReview as Record<string, unknown>).status, "uncertain");
     const after = await subject.loadPersisted(run.id);
-    assert.equal(after.status, "failed", "已有重试入口能恢复原请求，不把用户卡在只能点批准却必失败的终审");
+    assert.equal(after.status, "needs_human", "审听待核与人工采用是两种事实，不因准备自动签字");
     assert.ok(after.artifacts.some((candidate) => candidate.kind === "video_render"), "the rendered video stays viewable");
     assert.equal(after.nodeRuns.find((candidate) => candidate.nodeId === "publish-package")?.status ?? "pending", "pending");
-    audioPending = false;
-    const resumed = await subject.retryFailedNode(run.id, "visual-review");
+    await assert.rejects(subject.retryFailedNode(run.id, "visual-review"), /not.*failed|原请求|不是|only/i,
+      "未知审听不能借旧retry重发");
+    const resumed = await subject.decide(run.id, { commandId: "pending-audio-adoption", actor: "creator", action: "approve",
+      interventionId: pendingReview.intervention!.id, expectedRunRevision: after.revision,
+      acceptIncomplete: true, reviewEvidenceId: pendingReview.intervention!.evidenceId! });
     assert.equal(resumed.status, "needs_human");
     assert.equal(resumed.nodeRuns.find((node) => node.nodeId === "final-review")?.status, "needs_human");
+    assert.match(resumed.nodeRuns.find((node) => node.nodeId === "final-review")!.intervention!.reason,
+      /机器审片未取得完整有效结论/u, "声音未知不能被描述为已有视觉意见也不存在");
   });
 
   it("persists completed final-review branches when the other reviewer fails", async () => {
@@ -2464,6 +2658,7 @@ describe("ProductionPipeline", () => {
             slides: [{ position: 1, duration: 5 }, { position: 2, duration: 5 }, { position: 3, duration: 5 }],
           });
           await writeFile(manifestPath, manifestContent, "utf8");
+          response.artifacts = response.artifacts.filter(artifact => artifact.uri !== manifestPath);
           response.artifacts.push({
             kind: "render_manifest",
             uri: manifestPath,
@@ -6340,7 +6535,7 @@ describe("ProductionPipeline", () => {
       );
       await assert.rejects(
         () => subject.applyNodeExecutionConfiguration(runId, "assets", recovered.initialInput, "owner"),
-        /uncertain paid-provider outcome/,
+        error => error instanceof pipeline.HumanDecisionConflictError && /原请求结果仍在核实（assets）/.test(error.message),
       );
     }
     assert.equal(worker.calls.length, 0);
@@ -7372,7 +7567,7 @@ describe("ProductionPipeline", () => {
         stillLocked.initialInput,
         "owner",
       ),
-      /uncertain paid-provider outcome/,
+      error => error instanceof pipeline.HumanDecisionConflictError && /原请求结果仍在核实（assets）/.test(error.message),
     );
 
     const resolved = await subject.reconcilePaidNode(interrupted.id, {

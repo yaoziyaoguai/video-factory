@@ -330,7 +330,9 @@ describe("初稿审一次的版本与动作合同", () => {
 });
 
 describe("three-stage creative review gates", () => {
-  it("does not offer unaudited adoption while the original audit request is still unknown", async () => {
+  // F03（2026-10-02 执行包）：可选审计 unknown 不再锁死制作。原请求事实（checkpoint/
+  // prepared operation）原样保留待查询；工作台、稿件、讨论不动；未审采用是显式入口。
+  it("keeps the workbench and allows explicit unaudited adoption while the original audit request is unknown", async () => {
     const graph = createCreativePlanningGraph({ checkpointer: new MemorySaver(), ports: {
       treatment: async context => {
         if (context.creativeReviewExecution?.mode === "check") {
@@ -346,18 +348,151 @@ describe("three-stage creative review gates", () => {
       compile: executablePlanCompilePort,
     } });
     const input = { runId: "unknown-audit", inputDigest: "unknown-audit", durationRange: { minSeconds: 20, maxSeconds: 30 }, creativeReview: CREATIVE_REVIEW_FEATURE };
-    await assert.rejects(
-      runCreativePlanning(graph, { input, threadId: planningThreadId(input.runId, input.inputDigest) }),
-      (error: unknown) => error instanceof RoleAgentLoopError && error.sourceError instanceof CodexBridgeError
-        && error.sourceError.stage === "uncertain",
-    );
+    const outcome = await runCreativePlanning(graph, { input, threadId: planningThreadId(input.runId, input.inputDigest) });
+    assert.equal(outcome.status, "waiting_user", "unknown 审计必须停在用户面前，不是节点失败");
+    const stage = outcome.state.creativeReview!.stages.treatment;
+    assert.ok(stage.currentDraft, "当前稿保留");
+    assert.deepEqual(stage.currentDocument, treatment, "稿件内容不变");
+    assert.equal(stage.checkResult, null, "unknown 不产生任何伪造结论");
+    assert.equal(stage.continuation?.status, "unknown");
+    assert.equal(stage.continuation?.reasonCode, "audit_request_unknown");
+    assert.match(outcome.state.planningStop!.detail, /仍在核实/);
+
+    // 未审采用实走下游：下一阶段（脚本）真正使用这一版构思，而不是退回上一版。
+    const adopted = await runCreativePlanning(graph, {
+      input, threadId: planningThreadId(input.runId, input.inputDigest),
+      resume: {
+        action: "confirm", stage: outcome.gate.stage, commandId: "adopt-unknown", actor: "creator",
+        baseDraftSha256: outcome.gate.draft.sha256, expectedReviewRevision: outcome.gate.reviewRevision,
+        acknowledgeUnaudited: true, confirmedAt: "2026-10-02T00:00:00.000Z",
+      },
+    });
+    assert.equal(adopted.status, "waiting_user");
+    assert.equal(adopted.gate.stage, "script", "采用后进入脚本停点");
+    assert.equal(adopted.state.creativeReview!.stages.treatment.phase, "confirmed");
+    assert.equal(adopted.state.creativeReview!.stages.treatment.confirmation?.unauditedAdoption, true,
+      "采用事实如实记为未审采用");
   });
 
-  // R11-V02（r12b 余项）：旧操作绑定的 uncertain 异常进入新操作时，图执行 rejection
-  // 边界拿到的必须是原异常对象本体——图层若把它复制成同类型、同消息、同 sourceError
-  // 的新对象再抛出，本用例的引用同一性断言会失败。调用边界经生产
-  // withAuditOperationBinding（与装配层同一入口），不导出私有审计函数。
-  it("propagates the original old-bound uncertain exception object at the graph rejection boundary (R11-V02)", async () => {
+  // F03（2026-10-02 执行包）正例：audit_current 重读已发布稿抛普通校验错误（事故形态：
+  // evidenceRequirements[i].retrievalProviderId is required for pipeline_generated）时，
+  // 当前稿身份/SHA 不动、字段级问题进诊断、工作台保持可看可编辑，既有真实审计不被覆盖。
+  it("keeps the published draft and records field-level issues when re-reading the draft fails the audit (F03 incident path)", async () => {
+    const legacyTreatment = {
+      ...treatment,
+      evidenceRequirements: [{
+        beatId: "beat-1", claim: "需要一个生成画面", requirement: "illustration_only" as const,
+        suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" as const,
+        retrievalProviderId: null,
+      }],
+    };
+    let draftShaBefore = "";
+    const graph = createCreativePlanningGraph({ checkpointer: new MemorySaver(), ports: {
+      treatment: async context => {
+        if (context.creativeReviewExecution?.mode === "check") {
+          // 事故同款：审计重读已发布稿时结构校验失败（普通 Error，不是模型协议错误）。
+          parseCreativeTreatment(legacyTreatment, []);
+          throw new Error("Creative treatment evidenceRequirements[0].retrievalProviderId is required for pipeline_generated.");
+        }
+        return { artifactId: "treatment-legacy", output: legacyTreatment };
+      },
+      screenwriter: async () => ({ artifactId: "script", output: script }),
+      director: async () => ({ artifactId: "director", output: director }),
+      compile: executablePlanCompilePort,
+    } });
+    const input = { runId: "f03-incident", inputDigest: "f03-incident", durationRange: { minSeconds: 20, maxSeconds: 30 }, creativeReview: CREATIVE_REVIEW_FEATURE };
+    const initial = await runCreativePlanning(graph, { input, threadId: planningThreadId(input.runId, input.inputDigest) });
+    assert.equal(initial.status, "waiting_user");
+    draftShaBefore = initial.gate.draft.sha256;
+    const reAudited = await runCreativePlanning(graph, {
+      input, threadId: planningThreadId(input.runId, input.inputDigest),
+      resume: {
+        action: "audit_current", stage: initial.gate.stage, commandId: "audit-f03", actor: "creator",
+        baseDraftSha256: initial.gate.draft.sha256, expectedReviewRevision: initial.gate.reviewRevision,
+      },
+    });
+    assert.equal(reAudited.status, "waiting_user", "审计异常必须保留人工停点，不是节点失败");
+    const stage = reAudited.state.creativeReview!.stages.treatment;
+    assert.equal(stage.currentDraft?.sha256, draftShaBefore, "稿件身份与字节不动");
+    assert.deepEqual(stage.currentDocument, legacyTreatment, "工作台仍能看全文");
+    assert.equal(stage.checkResult, null, "不得伪造审计结论");
+    assert.equal(stage.continuation?.status, "error");
+    assert.equal(stage.continuation?.reasonCode, "draft_validation_failed");
+    assert.ok(stage.continuation?.validationIssues?.some((issue) => (
+      issue.path.includes("evidenceRequirements[0].retrievalProviderId")
+      && issue.code === "invalid_field"
+    )), `字段级问题须指向具体字段：${JSON.stringify(stage.continuation?.validationIssues)}`);
+    assert.match(reAudited.state.planningStop!.detail, /缺必需结构/);
+  });
+
+  // 参数化：当前版已有真实审计 → 主动再审 unknown/普通错误不覆盖原 check；无有效本版
+  // check 时才保持未审。两种情况都不把新异常变成 completed。
+  for (const failure of ["unknown", "plain"] as const) {
+    it(`preserves the prior valid check when a later manual re-audit ${failure === "unknown" ? "stays unknown" : "fails to consume"} (F03)`, async () => {
+      let auditCalls = 0;
+      const graph = createCreativePlanningGraph({ checkpointer: new MemorySaver(), ports: {
+        treatment: async context => {
+          if (context.creativeReviewExecution?.mode === "check") {
+            auditCalls += 1;
+            if (auditCalls === 1) {
+              return { artifactId: "treatment", output: treatment, reviewCheck: {
+                auditOperationId: context.creativeReviewExecution.auditOperationId,
+                checkIdentity: contentSha256({ fixture: "first-valid-check" }),
+                audit: {
+                  version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+                  verdict: "pass", score: 88, summary: "初稿意见仍有效。", issues: [], repairInstructions: [],
+                  assessments: auditAssessments(88), planningDisposition: null, hostReadinessReview: null,
+                },
+              } };
+            }
+            if (failure === "unknown") {
+              throw new RoleAgentLoopError("re-audit still observed", {
+                version: "video-factory/agent-loop-v1", role: "构思", contractVersion: "test", criteria: [],
+                status: "failed", maxIterations: 1, iterations: [], failure: { stage: "uncertain" },
+              }, undefined, new CodexBridgeError("observing", false, "uncertain"));
+            }
+            throw new Error("复核服务返回了不可解析的响应。");
+          }
+          return { artifactId: "treatment", output: treatment };
+        },
+        screenwriter: async () => ({ artifactId: "script", output: script }),
+        director: async () => ({ artifactId: "director", output: director }),
+        compile: executablePlanCompilePort,
+      } });
+      const input = { runId: `f03-reaudit-${failure}`, inputDigest: `f03-reaudit-${failure}`, durationRange: { minSeconds: 20, maxSeconds: 30 }, creativeReview: CREATIVE_REVIEW_FEATURE };
+      const initial = await runCreativePlanning(graph, { input, threadId: planningThreadId(input.runId, input.inputDigest) });
+      assert.equal(initial.status, "waiting_user");
+      const before = initial.state.creativeReview!.stages.treatment.checkResult;
+      assert.equal(before?.checkIdentity, contentSha256({ fixture: "first-valid-check" }));
+      const reAudited = await runCreativePlanning(graph, {
+        input, threadId: planningThreadId(input.runId, input.inputDigest),
+        resume: {
+          action: "audit_current", stage: initial.gate.stage, commandId: `reaudit-${failure}`, actor: "creator",
+          baseDraftSha256: initial.gate.draft.sha256, expectedReviewRevision: initial.gate.reviewRevision,
+        },
+      });
+      assert.equal(reAudited.status, "waiting_user");
+      const stage = reAudited.state.creativeReview!.stages.treatment;
+      assert.deepEqual(stage.checkResult, before, "原有效意见保留可供采用，不被异常覆盖");
+      assert.equal(stage.continuation?.status, failure === "unknown" ? "unknown" : "error");
+      // 已有有效本版 check 时，采用走原 checkIdentity，不需要 acknowledgeUnaudited。
+      const adopted = await runCreativePlanning(graph, {
+        input, threadId: planningThreadId(input.runId, input.inputDigest),
+        resume: {
+          action: "confirm", stage: reAudited.gate.stage, commandId: `adopt-after-${failure}`, actor: "creator",
+          baseDraftSha256: reAudited.gate.draft.sha256, expectedReviewRevision: reAudited.gate.reviewRevision,
+          checkIdentity: before!.checkIdentity, confirmedAt: "2026-10-02T00:00:00.000Z",
+        },
+      });
+      assert.equal(adopted.status, "waiting_user");
+      assert.equal(adopted.gate.stage, "script");
+    });
+  }
+
+  // R11-V02（r12b 余项，2026-10-02 执行包替代）：旧操作绑定的 uncertain 异常进入新操作时，
+  // guard 不改签绑定（引用同一性）；图层不再原样上抛锁死制作，而是转 unknown 人工停点、
+  // 零登记、原请求事实保留待查询。调用边界经生产 withAuditOperationBinding。
+  it("keeps the old binding and converts the old-bound uncertain exception into a queryable human stop (R11-V02, F03)", async () => {
     const staleUncertain = new RoleAgentLoopError("旧操作未决异常", {
       version: "video-factory/agent-loop-v1", role: "构思", contractVersion: "test", criteria: [],
       status: "failed", maxIterations: 1, iterations: [], failure: { stage: "uncertain" },
@@ -373,7 +508,7 @@ describe("three-stage creative review gates", () => {
       treatment: async context => {
         if (context.creativeReviewExecution?.mode === "check") {
           // 模拟装配层的调用边界：新操作身份经生产 helper 包裹角色调用；
-          // 已绑定旧操作的异常按 guard 原样上抛，交由图层 uncertain 优先分支传播。
+          // 已绑定旧操作的异常按 guard 原样交还，图层按 F03 转 unknown 停点。
           return await withAuditOperationBinding(
             context.creativeReviewExecution.auditOperationId ?? "(initial)",
             async (): Promise<never> => { throw staleUncertain; },
@@ -386,11 +521,11 @@ describe("three-stage creative review gates", () => {
       compile: executablePlanCompilePort,
     } });
     const input = { runId: "old-bound-uncertain", inputDigest: "old-bound-uncertain", durationRange: { minSeconds: 20, maxSeconds: 30 }, creativeReview: CREATIVE_REVIEW_FEATURE };
-    await assert.rejects(
-      runCreativePlanning(graph, { input, threadId: planningThreadId(input.runId, input.inputDigest) }),
-      (error: unknown) => error === staleUncertain,
-      "图执行边界必须原样交还旧操作绑定的 uncertain 异常对象",
-    );
+    const outcome = await runCreativePlanning(graph, { input, threadId: planningThreadId(input.runId, input.inputDigest) });
+    assert.equal(outcome.status, "waiting_user", "旧绑定 uncertain 转人工停点，不再以节点失败锁死");
+    const stage = outcome.state.creativeReview!.stages.treatment;
+    assert.equal(stage.continuation?.status, "unknown");
+    assert.equal(stage.auditHistory.length, 0, "零登记");
     assert.equal((staleUncertain as unknown as { auditOperationId?: string }).auditOperationId,
       oldOperationId, "旧绑定在图执行后保持");
     assert.ok(staleUncertain.sourceError instanceof CodexBridgeError

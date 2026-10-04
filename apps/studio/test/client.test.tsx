@@ -493,6 +493,12 @@ describe("Studio client", () => {
       removeItem: (key: string) => storage.delete(key),
       clear: () => storage.clear(),
     });
+    const sessionStub = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => sessionStub.get(key) ?? null,
+      setItem: (key: string, value: string) => sessionStub.set(key, value),
+      removeItem: (key: string) => sessionStub.delete(key),
+    });
     vi.stubGlobal("EventSource", class { addEventListener() {} close() {} });
     const user = userEvent.setup();
     const initial: StudioRunDetail = {
@@ -542,6 +548,12 @@ describe("Studio client", () => {
       getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => storage.set(key, value),
       removeItem: (key: string) => storage.delete(key),
+    });
+    const sessionStub = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => sessionStub.get(key) ?? null,
+      setItem: (key: string, value: string) => sessionStub.set(key, value),
+      removeItem: (key: string) => sessionStub.delete(key),
     });
     let receiveRun: EventListener | undefined;
     vi.stubGlobal("EventSource", class {
@@ -599,6 +611,163 @@ describe("Studio client", () => {
       finish();
       vi.restoreAllMocks();
       vi.unstubAllGlobals();
+    }
+  });
+  it("recovers this tab's unsaved words when another tab saves and the stop returns as a new version", async () => {
+    vi.restoreAllMocks();
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    const tabSession = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => tabSession.get(key) ?? null,
+      setItem: (key: string, value: string) => tabSession.set(key, value),
+      removeItem: (key: string) => tabSession.delete(key),
+    });
+    let receiveRun: EventListener | undefined;
+    vi.stubGlobal("EventSource", class {
+      addEventListener(name: string, callback: EventListener) { if (name === "run") receiveRun = callback; }
+      close() {}
+    });
+    const intervention = { id: "review", nodeId: "creative-planning", kind: "creative_review" as const, reason: "等你确认", options: ["approve", "request_changes"] as Array<"approve" | "request_changes">, createdAt: runDetail.startedAt };
+    const initial: StudioRunDetail = {
+      ...runDetail, currentNodeId: "creative-planning", artifacts: [],
+      nodes: [{ id: "creative-planning", label: "创作规划", status: "needs_human", artifactIds: [], qualityGateResults: [] }],
+      activeIntervention: intervention,
+    };
+    delete initial.videoArtifactId;
+    const v1Review: import("../src/shared/api.js").StudioCreativeReviewSnapshot = {
+      runId: "run-1", runRevision: initial.revision, stage: "script", reviewRevision: 3,
+      draftSha256: "a".repeat(64), draftArtifactId: "script-a", draftVersionId: "script-a#v1", phase: "waiting_user",
+      allowedActions: ["discuss", "revise", "edit_draft", "confirm"], returnTargets: [],
+      draft: { narrativeArc: "问题到答案", scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "第一版旁白。", visual_prompt: "对照" }] },
+      messages: [], effectiveUserInstructions: [], blockingIssues: [], proposals: [],
+    };
+    const v2Review: import("../src/shared/api.js").StudioCreativeReviewSnapshot = {
+      ...v1Review, runRevision: initial.revision + 2, reviewRevision: 4, draftSha256: "b".repeat(64), draftVersionId: "script-a#v2",
+      draft: { narrativeArc: "问题到答案", scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "B标签保存的新旁白。", visual_prompt: "对照" }] },
+    };
+    // phase: v1 → running（他页保存中，停点暂时消失）→ v2（新版本人工停点）。
+    let phase: "v1" | "running" | "v2" = "v1";
+    vi.spyOn(studioApi, "run").mockImplementation(async () => {
+      if (phase === "running") { const { activeIntervention: _removed, ...runningSnapshot } = initial; return { ...runningSnapshot, revision: initial.revision + 1, status: "running" as const }; }
+      if (phase === "v2") return { ...initial, revision: initial.revision + 2 };
+      return { ...initial };
+    });
+    vi.spyOn(studioApi, "runCosts").mockRejectedValue(new Error("no cost fixture"));
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "creativeReviewHistory").mockRejectedValue(new Error("no history fixture"));
+    // 首次读取可稍晚返回；被后续读取取代后不得覆盖新版本。
+    const reviewReads: Array<(value: import("../src/shared/api.js").StudioCreativeReviewSnapshot) => void> = [];
+    vi.spyOn(studioApi, "creativeReview").mockImplementation(async () => new Promise(resolve => { reviewReads.push(resolve); }));
+    const post = vi.spyOn(studioApi, "commandCreativeReview").mockResolvedValue({ commandId: "unused", status: "completed", observationUrl: "/unused" });
+    const user = userEvent.setup();
+    try {
+      render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
+      // 初始 V1 停点：本页没有发任何命令，只是输入未保存文字。
+      await waitFor(() => expect(reviewReads.length).toBeGreaterThanOrEqual(1));
+      reviewReads.shift()!(structuredClone(v1Review));
+      const field = await (async () => {
+        if (!screen.queryByLabelText("分镜 1 · 旁白")) await user.click(await screen.findByText("手动修订这份稿件"));
+        return screen.findByLabelText("分镜 1 · 旁白");
+      })();
+      await user.clear(field);
+      await user.type(field, "A-未保存旁白");
+      fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "A的意见" } });
+      // 另一标签保存：本页收到 running 中间快照，讨论面板随停点消失而卸载。
+      await act(async () => {
+        phase = "running";
+        receiveRun?.(new MessageEvent("run", { data: JSON.stringify({ ...initial, revision: initial.revision + 1, status: "running", activeIntervention: undefined }) }));
+      });
+      expect(screen.queryByPlaceholderText(/为什么这样开场/)).not.toBeInTheDocument();
+      // 新版本人工停点回来；再补一条同 revision 事件让前一条读取被替代。
+      await act(async () => {
+        phase = "v2";
+        receiveRun?.(new MessageEvent("run", { data: JSON.stringify({ ...initial, revision: initial.revision + 2 }) }));
+      });
+      await act(async () => {
+        receiveRun?.(new MessageEvent("run", { data: JSON.stringify({ ...initial, revision: initial.revision + 2,
+          activeIntervention: { ...intervention, createdAt: "2026-08-21T10:02:00.000Z" } }) }));
+      });
+      // 等新一轮读取发起：除最后一条外都是已被替代的旧读取，晚到也不能把当前稿覆盖回 V1。
+      await waitFor(() => expect(reviewReads.length).toBeGreaterThanOrEqual(1));
+      for (const superseded of reviewReads.splice(0, reviewReads.length - 1)) superseded(structuredClone(v1Review));
+      reviewReads.shift()!(structuredClone(v2Review));
+      const recovered = await screen.findByLabelText("分镜 1 · 旁白");
+      await waitFor(() => expect(recovered).toHaveValue("A-未保存旁白"));
+      expect(screen.getByText(/旧稿不能覆盖新稿/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "保存修订" })).toBeDisabled();
+      expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue("A的意见");
+      // 明确放弃旧编辑后，编辑器回到服务端当前稿（V2），不能被晚到的 V1 读取翻回去。
+      await user.click(screen.getByRole("button", { name: "放弃修改" }));
+      expect(screen.getByLabelText("分镜 1 · 旁白")).toHaveValue("B标签保存的新旁白。");
+      expect(post).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
+  });
+  it("releases only a host-acknowledged optional audit and lets the user revise without settling it", async () => {
+    vi.restoreAllMocks();
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", { getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
+    const releaseSession = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => releaseSession.get(key) ?? null,
+      setItem: (key: string, value: string) => releaseSession.set(key, value),
+      removeItem: (key: string) => releaseSession.delete(key),
+    });
+    vi.stubGlobal("EventSource", class { addEventListener() {} close() {} });
+    const initial: StudioRunDetail = { ...runDetail, currentNodeId: "creative-planning", artifacts: [],
+      nodes: [{ id: "creative-planning", label: "创作规划", status: "needs_human", artifactIds: [], qualityGateResults: [] }],
+      activeIntervention: { id: "review", nodeId: "creative-planning", kind: "creative_review", reason: "等你确认", options: ["approve", "request_changes"], createdAt: runDetail.startedAt } };
+    delete initial.videoArtifactId;
+    const review: import("../src/shared/api.js").StudioCreativeReviewSnapshot = {
+      runId: initial.id, runRevision: initial.revision, stage: "treatment", reviewRevision: 1,
+      draftSha256: "a".repeat(64), draftArtifactId: "draft", phase: "waiting_user",
+      allowedActions: ["audit_current", "revise", "confirm"], returnTargets: [], draft: { payoff: "原结尾" },
+      messages: [], effectiveUserInstructions: [], blockingIssues: [], proposals: [],
+    };
+    let action: "initial" | "audit_current" | "revise" = "initial";
+    let finished = false;
+    vi.spyOn(studioApi, "run").mockImplementation(async () => ({ ...initial, revision: initial.revision + (action === "initial" ? 0 : action === "audit_current" ? 1 : 2) }));
+    vi.spyOn(studioApi, "runCosts").mockRejectedValue(new Error("no cost fixture"));
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "creativeReviewHistory").mockRejectedValue(new Error("no history fixture"));
+    vi.spyOn(studioApi, "creativeReview").mockImplementation(async () => ({ ...review,
+      runRevision: initial.revision + (action === "initial" ? 0 : action === "audit_current" ? 1 : 2),
+      draftSha256: action === "revise" ? "b".repeat(64) : review.draftSha256,
+      draft: action === "revise" ? { payoff: "用户明确修订后的结尾" } : review.draft,
+    }));
+    const post = vi.spyOn(studioApi, "commandCreativeReview").mockImplementation(async (_id, input) => {
+      action = input.action as "audit_current" | "revise";
+      return { commandId: input.commandId, status: input.action === "audit_current" ? "unknown" : "completed", observationUrl: "/original" };
+    });
+    vi.spyOn(studioApi, "creativeReviewCommand").mockImplementation(async (_id, commandId) => action === "audit_current" && !finished
+      ? { commandId, status: "unknown", observationUrl: "/original", independentDraftActionsAllowed: true }
+      : { commandId, status: "completed", observationUrl: "/original" });
+    const user = userEvent.setup();
+    try {
+      render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
+      await user.click(await screen.findByRole("button", { name: "审计当前版本" }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeEnabled(), { timeout: 700 });
+      expect(storage.has("vf:creative-command:run-1:treatment:draft")).toBe(false);
+      const auditCommand = post.mock.calls[0]![1];
+      expect(JSON.parse(storage.get(`vf:creative-audit-command:run-1:${auditCommand.commandId}`)!)).toMatchObject({ action: "audit_current", commandId: auditCommand.commandId });
+      expect(screen.getByText(/原审计结果仍待核/)).toBeInTheDocument();
+      fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "我选择先修订结尾" } });
+      await user.click(screen.getByRole("button", { name: "发送修订意见" }));
+      await screen.findByText("用户明确修订后的结尾");
+      expect(post.mock.calls.map(call => call[1].action)).toEqual(["audit_current", "revise"]);
+      expect(storage.has(`vf:creative-audit-command:run-1:${auditCommand.commandId}`)).toBe(true);
+    } finally {
+      finished = true;
+      await waitFor(() => expect(storage.has("vf:creative-command:run-1:treatment:draft")).toBe(false), { timeout: 2000 });
+      vi.restoreAllMocks(); vi.unstubAllGlobals();
     }
   });
   it("types voice timing as an optional request-changes detail", () => {

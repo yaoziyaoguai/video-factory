@@ -37,6 +37,7 @@ import type {
   StudioPublishReadiness,
   StudioPublishTarget,
   StudioRunDetail,
+  StudioReviewContinuationInput,
   StudioRunSummary,
   StudioNarrationRevisionInput,
   StudioNarrationPreviewV2Input,
@@ -145,6 +146,7 @@ export interface StudioServiceOptions {
   /** 发布文案 AI 修订与主动再审端口（复用带审计配置的发布编辑 writer）。 */
   documentCopyTools?: import("./production-studio.js").StudioDocumentCopyTools;
   referenceGrammarTools?: import("./production-studio.js").StudioReferenceGrammarTools;
+  audioReviewObserver?: Pick<import("./audio-review-service.js").AudioReviewService, "observe">;
 }
 
 /** 案例参考在制作链里只被用到这几件事；其余（取数、缓存）留在 CaseStudio 内部。 */
@@ -249,6 +251,7 @@ export class StudioService {
       archiveStore: options.runArchive ?? new JsonRunArchiveStore(path.join(options.workspaceRoot, "archive", "runs.json")),
       ...(options.documentCopyTools ? { documentCopyTools: options.documentCopyTools } : {}),
       ...(options.referenceGrammarTools ? { referenceGrammarTools: options.referenceGrammarTools } : {}),
+      ...(options.audioReviewObserver ? { audioReviewObserver: options.audioReviewObserver } : {}),
       now,
       loadRejectedVisualResources: (runId) => this.resourceGovernance.rejectedVisualItems(runId),
     });
@@ -354,6 +357,13 @@ export class StudioService {
   }
   adoptCandidate(candidateId: string, input: StudioCandidateAdoptionInput): Promise<StudioOpportunity> {
     return this.candidateInbox.adopt(candidateId, input);
+  }
+  /** F03/D06（§2.3）：历史 failed 记录的显式准备入口（恢复本地停点，不签字、不补审）。 */
+  prepareReviewContinuation(runId: string, input: StudioReviewContinuationInput, actor = "studio-owner"): Promise<StudioRunDetail> {
+    return this.production.prepareReviewContinuation(runId, input, actor);
+  }
+  reviewContinuationReceipt(runId: string, commandId: string) {
+    return this.production.reviewContinuationReceipt(runId, commandId);
   }
   supplementCandidateSources(candidateId: string, input: StudioCandidateSourcesInput): Promise<StudioCandidateInboxItem> {
     return this.candidateInbox.supplementCandidateSources(candidateId, input);
@@ -855,7 +865,9 @@ export class StudioService {
   requestPause(runId: string): Promise<StudioRunDetail> { return this.production.requestPause(runId); }
   resumePaused(runId: string): Promise<StudioRunDetail> { return this.production.resumePaused(runId); }
   resumeStale(runId: string): Promise<StudioRunDetail> { return this.production.resumeStale(runId); }
-  queryOriginalTextTask(runId: string): Promise<StudioRunDetail> { return this.production.queryOriginalTextTask(runId); }
+  queryOriginalTextTask(runId: string, target?: import("../shared/api.js").StudioOptionalReviewTarget): Promise<StudioRunDetail> {
+    return this.production.queryOriginalTextTask(runId, target);
+  }
   async retrieveOriginalTextTask(runId: string): Promise<StudioRunDetail> {
     const current = await this.production.get(runId);
     if (!current) throw new StudioNotFoundError("没有找到这条制作记录。");

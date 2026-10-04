@@ -1,6 +1,13 @@
 import { render, screen } from "@testing-library/react";
 import { expect, test } from "vitest";
 import { AudioReviewPanel } from "../src/client/components/AudioReviewPanel.js";
+
+test("keeps unknown audio requests separate from the current work's adoption decision", () => {
+  render(<AudioReviewPanel value={{ status: "uncertain", reason: "原声音审片请求仍待核" }} />);
+  expect(screen.getByText(/原声音结果与费用仍待核/)).toBeInTheDocument();
+  expect(screen.getByText(/以当前步骤提供的操作为准/)).toBeInTheDocument();
+  expect(screen.queryByText(/核清后再定版/)).not.toBeInTheDocument();
+});
 import { AUDIO_REVIEW_CHECKS } from "@video-factory/production-pipeline/audio-review";
 
 test("missing real audio evidence is never displayed as a passed sound review", () => {

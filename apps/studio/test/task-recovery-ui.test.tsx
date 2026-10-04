@@ -1,9 +1,9 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { RunWorkbench } from "../src/client/components/RunWorkbench.js";
-import type { StudioRunDetail } from "../src/shared/api.js";
+import type { StudioDecisionInput, StudioRunDetail } from "../src/shared/api.js";
 
 function failedRun(taskState: NonNullable<StudioRunDetail["taskRecovery"]>["taskState"]): StudioRunDetail {
   return {
@@ -68,6 +68,186 @@ function runningRun(): StudioRunDetail {
 }
 
 describe("text task recovery UI", () => {
+  it("puts the playable film before original-review details while keeping uncertainty and queries visible", async () => {
+    const { taskRecovery: _taskRecovery, failure: _failure, ...base } = failedRun("accepted_unknown");
+    const query = vi.fn(async () => undefined);
+    const decide = vi.fn(async () => undefined);
+    const run: StudioRunDetail = { ...base, status: "succeeded", videoArtifactId: "film-current",
+      artifacts: [{ id: "film-current", kind: "render", contentUrl: "/media/film.mp4", contentType: "video/mp4",
+        createdAt: "2026-10-02T00:00:00Z", producerNodeId: "render" }],
+      optionalReviewTasks: [{ nodeId: "visual-review", purpose: "audio_review", operationId: "original-audio",
+        targetVersionId: "render-current", requestState: "unknown", resultState: "absent", summary: "原声音审片结果仍待核。" }],
+    };
+    render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={decide} onQueryOriginalTextTask={query} /></MemoryRouter>);
+    const film = screen.getByRole("region", { name: "成片预览" });
+    const original = screen.getByRole("region", { name: "原审计与费用待核" });
+    expect(film.compareDocumentPosition(original) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText("1 项原审计的结果与费用待核；费用未核实不表示免费。" )).toBeVisible();
+    await userEvent.click(screen.getByRole("link", { name: "查看原请求与查询" }));
+    expect(original).toHaveFocus();
+    expect(query).not.toHaveBeenCalled();
+    expect(decide).not.toHaveBeenCalled();
+    await userEvent.click(within(original).getByRole("button", { name: "查询原声音审片" }));
+    expect(query).toHaveBeenCalledWith({ nodeId: "visual-review", purpose: "audio_review", operationId: "original-audio" });
+  });
+
+  it("keeps recorded and unknown fees visible with details collapsed and reachable from the workspace link", async () => {
+    const run = failedRun("completed_failure");
+    render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()}
+      costDetail={{ runId: run.id, title: run.title, lines: [], totals: {
+        estimatedCostCny: 4, authorizedCostCny: 4, actualCostCny: 1.25, actualPendingCount: 2,
+        meteredCalls: 1, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0,
+      } }} /></MemoryRouter>);
+    const summary = screen.getByText("本片调用与费用").closest("summary")!;
+    const details = summary.closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    expect(summary).toHaveTextContent("已记录 ¥1.25");
+    expect(summary).toHaveTextContent("2 笔待确认是否扣费");
+    expect(screen.getByRole("heading", { name: "调用与费用明细" })).not.toBeVisible();
+    await userEvent.click(screen.getByRole("link", { name: "调用与费用" }));
+    expect(details).toHaveAttribute("open");
+    expect(summary).toHaveFocus();
+    expect(screen.getByRole("heading", { name: "调用与费用明细" })).toBeVisible();
+    await userEvent.click(summary);
+    expect(details).not.toHaveAttribute("open");
+  });
+
+  it.each([true, false])("prioritizes preservation over retry only when restoration is available (taskRecovery=%s)", async (taskRecovery) => {
+    const base = failedRun("completed_failure");
+    if (!taskRecovery) delete base.taskRecovery;
+    const target = { nodeId: "creative-planning" as const, stage: "script" as const,
+      targetArtifactId: "draft-A", targetVersionId: "version-A", targetSha256: "a".repeat(64) };
+    const retry = vi.fn(async () => undefined);
+    const prepare = vi.fn(async () => undefined);
+    const props = { decisionPending: false, onDecision: vi.fn(), onRetryFailedNode: retry, onPrepareReviewContinuation: prepare };
+    const { rerender } = render(<MemoryRouter><RunWorkbench run={{ ...base, reviewContinuationTargets: [target] }} {...props} /></MemoryRouter>);
+    expect(screen.getByRole("button", { name: "恢复当前稿，继续处理" })).toHaveClass("button-primary");
+    expect(screen.getByRole("button", { name: "重试失败步骤" })).toHaveClass("button-secondary");
+    expect(screen.getByRole("button", { name: "重试失败步骤" })).not.toHaveClass("button-primary");
+    await userEvent.click(screen.getByRole("button", { name: "重试失败步骤" }));
+    expect(retry).toHaveBeenCalledWith("script");
+    expect(prepare).not.toHaveBeenCalled();
+    rerender(<MemoryRouter><RunWorkbench run={base} {...props} /></MemoryRouter>);
+    expect(screen.getByRole("button", { name: "重试失败步骤" })).toHaveClass("button-primary");
+  });
+
+  it.each([true, false])("separates completed delivery from optional review and external publication (approved=%s)", (approved) => {
+    const { taskRecovery: _taskRecovery, failure: _failure, ...base } = failedRun("completed_failure");
+    const run: StudioRunDetail = { ...base, status: "succeeded",
+      nodes: [{ id: "visual-review", label: "视觉审片", status: "succeeded", outcomeUncertain: true, artifactIds: [], qualityGateResults: [] }],
+      ...(approved ? { finalReviewOutcome: "approved" as const } : {}), videoArtifactId: "film",
+      artifacts: [{ id: "film", kind: "render", producerNodeId: "render", createdAt: base.startedAt,
+        contentType: "video/mp4", contentUrl: "/api/film" }] };
+    render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()}
+      paidNodeSummary={{ nodeId: "visual-review", requiresManualReconciliation: true, failureKind: "unknown_outcome", items: [] }} /></MemoryRouter>);
+    const review = screen.getByRole("status", { name: "机器审片状态" });
+    expect(review).toHaveTextContent("机器视觉审片尚无完整结论");
+    expect(review).not.toHaveTextContent("正式发布已通过");
+    expect(review).not.toHaveTextContent("可播放首版");
+    if (approved) expect(review).toHaveTextContent("人工终审已确认");
+    else expect(review).not.toHaveTextContent("人工终审已确认");
+    expect(screen.getByText(/制作已完成，发布包可以下载使用/)).toHaveTextContent("外部平台发布仍需你自行操作");
+    expect(screen.getByRole("link", { name: "下载成片" })).toHaveAttribute("href", "/api/film");
+    const fee = screen.getByRole("region", { name: "付费任务证据" });
+    expect(fee).not.toHaveTextContent("系统已经停住");
+    expect(fee).toHaveTextContent("原请求不会自动重试或重新提交");
+    expect(fee).toHaveTextContent("这次请求是否扣费还不确定");
+  });
+
+  for (const [safe, uncertainNodeId] of [[true, "visual-review"], [undefined, "visual-review"], [undefined, "voice"]] as const) {
+    it(`allows local draft editing only with the host optional-review safety fact (${safe}/${uncertainNodeId})`, async () => {
+      const { taskRecovery: _taskRecovery, failure: _failure, ...base } = failedRun("accepted_unknown");
+      const run: StudioRunDetail = { ...base, status: "needs_human", currentNodeId: "final-review",
+        ...(safe ? { optionalReviewUncertaintySafe: true as const } : {}),
+        nodes: [{ id: "brief", label: "内容简报", status: "succeeded", artifactIds: [], qualityGateResults: [],
+          output: { title: "保留的简报", angle: "窗边观察", audience: "创作者", durationSeconds: 20, platform: "douyin" } },
+        { id: uncertainNodeId, label: "待核原请求", status: "succeeded", outcomeUncertain: true, artifactIds: [], qualityGateResults: [] }],
+      };
+      const override = vi.fn(async () => undefined);
+      const decide = vi.fn(async () => undefined);
+      render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={decide} onOverrideNode={override} /></MemoryRouter>);
+      const brief = document.getElementById("node-workspace-brief")!;
+      await userEvent.click(brief.querySelector(":scope > summary")!);
+      if (safe) {
+        await userEvent.click(within(brief).getByRole("button", { name: "编辑交付" }));
+        expect(within(brief).getByRole("button", { name: "保存为人工版本" })).toBeEnabled();
+        await userEvent.click(within(brief).getByRole("button", { name: /^取消$/ }));
+      } else {
+        expect(within(brief).queryByRole("button", { name: "编辑交付" })).not.toBeInTheDocument();
+      }
+      expect(override).not.toHaveBeenCalled();
+      expect(decide).not.toHaveBeenCalled();
+    });
+  }
+  for (const [nodeId, buttonLabel] of [["render", "查看渲染结果"], ["technical-review", "查看机器质检"]] as const) {
+    it(`opens the current ${nodeId} delivery with focus at an optional-review stop`, async () => {
+      const base = failedRun("accepted_unknown");
+      const run: StudioRunDetail = { ...base, status: "needs_human", currentNodeId: "visual-review",
+        nodes: [{ id: nodeId, label: nodeId === "render" ? "渲染" : "机器质检", status: "succeeded",
+          artifactIds: [], qualityGateResults: [], output: { status: "passed", checks: [{ name: "可解码", passed: true }] } }],
+      };
+      const decide = vi.fn(async () => undefined);
+      render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={decide} /></MemoryRouter>);
+      await userEvent.click(screen.getByRole("button", { name: buttonLabel }));
+      const delivery = document.getElementById(`node-workspace-${nodeId}`);
+      expect(delivery).toBeInstanceOf(HTMLDetailsElement);
+      expect(delivery).toHaveAttribute("open");
+      await waitFor(() => expect(delivery?.querySelector(":scope > summary")).toHaveFocus());
+      expect(within(delivery!).queryByRole("button", { name: "编辑交付" })).not.toBeInTheDocument();
+      expect(decide).not.toHaveBeenCalled();
+    });
+  }
+  it("prepares a preserved failed draft only after explicit confirmation and keeps the frozen target", async () => {
+    const prepare = vi.fn(async () => undefined);
+    const target = { nodeId: "creative-planning" as const, stage: "script" as const,
+      targetArtifactId: "draft-A", targetVersionId: "version-A", targetSha256: "a".repeat(64) };
+    render(<MemoryRouter><RunWorkbench run={{ ...failedRun("accepted_unknown"), reviewContinuationTargets: [target] }}
+      decisionPending={false} onDecision={async () => undefined} onPrepareReviewContinuation={prepare} /></MemoryRouter>);
+    await userEvent.click(screen.getByRole("button", { name: "恢复当前稿，继续处理" }));
+    await userEvent.keyboard("{Escape}");
+    expect(prepare).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "恢复当前稿，继续处理" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("不会采用或签字");
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "确认恢复工作台" }));
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ ...target, commandId: expect.any(String), expectedRunRevision: 4 }));
+  });
+
+  it("keeps every original optional review queryable after internal delivery without a retrieve action", async () => {
+    const { taskRecovery: _taskRecovery, ...baseRun } = failedRun("accepted_unknown");
+    const run: StudioRunDetail = { ...baseRun, status: "succeeded",
+      optionalReviewTasks: ["visual_review", "audio_review"].map((purpose, index) => ({ nodeId: "visual-review",
+        purpose: purpose as "visual_review" | "audio_review", operationId: `original-${index}`, targetVersionId: "render-A",
+        requestState: "unknown", resultState: "absent", summary: "作品已采用；原审片结果与费用待核，查询不会重发。" })) };
+    const query = vi.fn(async () => undefined);
+    render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined}
+      onQueryOriginalTextTask={query} /></MemoryRouter>);
+    const buttons = screen.getAllByRole("button", { name: /查询原.*审片/ });
+    expect(buttons).toHaveLength(2);
+    await userEvent.click(buttons[1]!);
+    expect(query).toHaveBeenCalledWith({ nodeId: "visual-review", purpose: "audio_review", operationId: "original-1" });
+    expect(screen.queryByRole("button", { name: "取回结果并继续" })).not.toBeInTheDocument();
+  });
+
+  for (const nodeId of ["visual-review", "final-review"]) it(`offers a scoped unknown risk decision at ${nodeId} with a stable independent command`, async () => {
+    const { taskRecovery: _taskRecovery, ...baseRun } = failedRun("accepted_unknown");
+    const run: StudioRunDetail = { ...baseRun, status: "needs_human",
+      currentNodeId: nodeId, activeIntervention: { id: `stop-${nodeId}`, nodeId, reason: "原审计仍待核", options: ["approve", "reject"],
+        reviewStatus: "incomplete", providerOutcomeKnown: false, continuationScope: "rendered_video_optional_review",
+        evidenceId: "a".repeat(64), createdAt: "2026-10-02T00:00:00Z" },
+      nodes: [{ id: nodeId, label: "审看", status: "needs_human", artifactIds: [], qualityGateResults: [],
+        output: { reviewStatus: "incomplete", providerOutcomeKnown: false } }] };
+    const decide = vi.fn(async (_input: StudioDecisionInput) => undefined);
+    render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={decide} /></MemoryRouter>);
+    await userEvent.click(screen.getByRole("button", { name: nodeId === "visual-review" ? "接受未复核风险，进入人工终审" : "接受未复核风险并内部定版" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: nodeId === "visual-review" ? "确认继续到人工终审" : "确认承担风险并内部定版" }));
+    expect(decide).toHaveBeenCalledWith(expect.objectContaining({ commandId: expect.any(String), action: "approve",
+      reviewEvidenceId: "a".repeat(64), acceptIncomplete: true, expectedRunRevision: 4 }));
+    const original = decide.mock.calls[0]![0];
+    await userEvent.click(within(dialog).getByRole("button", { name: nodeId === "visual-review" ? "确认继续到人工终审" : "确认承担风险并内部定版" }));
+    expect(decide.mock.calls[1]![0]).toEqual(original);
+  });
+
   it("keeps a paused local run distinct from an accepted unknown original task", () => {
     const run = { ...failedRun("accepted_unknown"), status: "paused" as const };
     render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} /></MemoryRouter>);

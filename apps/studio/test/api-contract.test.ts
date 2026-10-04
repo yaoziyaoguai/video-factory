@@ -1,4 +1,10 @@
 import assert from "node:assert/strict";
+
+it("preserves the complete draft version on a creative command", () => {
+  const input = { action: "discuss", commandId: "version-bound-command", expectedRunRevision: 2, expectedReviewRevision: 5,
+    stage: "script", baseDraftSha256: "a".repeat(64), baseDraftVersionId: "script-draft:original#v1", message: "解释结尾" };
+  assert.deepEqual(parseStudioCreativeReviewCommandInput(input), input);
+});
 import { describe, it } from "node:test";
 import {
   StudioInputError,
@@ -606,5 +612,43 @@ describe("creative review confirm API contract", () => {
 
   it("still accepts a plain confirmation that overrides nothing", () => {
     assert.deepEqual(parseStudioCreativeReviewCommandInput(base), base);
+  });
+});
+
+// DG-UX-02（新前端 Dogfood 修复执行包 R3）：显式 manual 允许空来源数组；
+// 其余创建路径的“至少一条来源信号”合同不放宽。
+
+describe("manual opportunity source contract (DG-UX-02)", () => {
+  it("accepts an explicit manual opportunity with no reference links", () => {
+    const parsed = parseStudioOpportunityInput({ ...validOpportunity, origin: "manual", evidence: [] });
+    assert.deepEqual(parsed.evidence, []);
+    assert.equal(parsed.origin, "manual");
+  });
+
+  it("keeps the at-least-one-signal rule for omitted or non-manual origins", () => {
+    assert.throws(
+      () => parseStudioOpportunityInput({ ...validOpportunity, evidence: [] }),
+      (error: unknown) => error instanceof StudioInputError && /至少需要一条来源信号/.test(error.message),
+    );
+    assert.throws(
+      () => parseStudioOpportunityInput({ ...validOpportunity, origin: "trend", evidence: [] }),
+      (error: unknown) => error instanceof StudioInputError && /至少需要一条来源信号/.test(error.message),
+    );
+    // evidence 仍必须是数组：非数组输入不允许。
+    assert.throws(
+      () => parseStudioOpportunityInput({ ...validOpportunity, origin: "manual", evidence: "none" }),
+      (error: unknown) => error instanceof StudioInputError && /至少需要一条来源信号/.test(error.message),
+    );
+  });
+
+  it("still rejects unsafe manual reference links with non-http protocols", () => {
+    assert.throws(
+      () => parseStudioOpportunityInput({
+        ...validOpportunity,
+        origin: "manual",
+        evidence: [{ source: "manual-supplement", platform: "manual", keyword: "参考", strength: 0, evidenceUrl: "javascript:alert(1)" }],
+      }),
+      (error: unknown) => error instanceof StudioInputError && /HTTP 或 HTTPS/.test(error.message),
+    );
   });
 });

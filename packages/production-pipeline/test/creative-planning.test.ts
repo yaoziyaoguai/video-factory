@@ -1327,6 +1327,8 @@ describe("B3 固定创作规划图", () => {
             "rank",
             "compile",
             "discuss",
+            // C1：planning 侧咨询事实同步（纯持久化记录，无付费/媒体依赖面）。
+            "noteDiscussionFact",
             // 人工修订稿的阶段合同校验：纯校验闭包，无付费/媒体依赖面。
             "validateEditedDraft",
             // 返工范围预检只读取旧规划基线；不接触媒体 Provider 或费用授权。

@@ -137,6 +137,12 @@ export interface HumanInterventionDraft {
   reviewStatus?: "incomplete" | "unknown_or_unsafe";
   providerOutcomeKnown?: boolean;
   evidenceId?: string;
+  /**
+   * F04（2026-10-02 执行包）：成片可选审片 unknown 的人工续看停点。仅由宿主在
+   * 已核实的真实成片上建立；这个精确 scope 下风险确认可接受未知「审片」请求，但
+   * 素材/TTS/渲染等生成 unknown 不属于该 scope，仍走原守卫。
+   */
+  continuationScope?: "rendered_video_optional_review";
   artifactIds?: string[];
   continuation?: {
     stage: "treatment" | "script" | "director";
@@ -172,6 +178,11 @@ export interface HumanDecisionDraft {
   interventionId: string;
   action: HumanDecisionAction;
   actor: string;
+  /**
+   * F04（§2.4）：宿主成片可选审片续看/终审停点要求非空 commandId（幂等身份）。
+   * 其它历史/正常确认不强制迁移；客户端错误/双击重放沿原 commandId。
+   */
+  commandId?: string;
   note?: string;
   expectedRunRevision?: number;
   reviewEvidenceId?: string | null;
@@ -417,6 +428,15 @@ export interface ProviderSelector {
   providerId?: string;
 }
 
+export interface OptionalReviewOperationRef {
+  purpose: "creative_audit" | "visual_review" | "audio_review";
+  operationId: string;
+  requestId?: string;
+  targetVersionId: string;
+  inputDigest: string;
+  continuationEvidenceArtifactId: string;
+}
+
 interface NodeExecutionBase<TOutput = unknown> {
   output?: TOutput;
   artifacts?: ArtifactDraft[];
@@ -425,6 +445,7 @@ interface NodeExecutionBase<TOutput = unknown> {
   errorCode?: string;
   // 计费执行已成功落定，但同一节点内的免费后置检查失败时，不应误锁为付费结果未知。
   providerOutcomeKnown?: boolean;
+  optionalReviewOperationRefs?: OptionalReviewOperationRef[];
   // 节点 execute 内已通过 context.addArtifact 登记的全局产物（如崩溃恢复后已存在的正式产物）：
   // 由 runner 校验归属（producer.nodeId 必须精确等于当前节点）后去重挂入 nodeRun.artifactIds，
   // 不重复登记。服务幂等恢复场景，不改变 result.artifacts 的既有合同。
@@ -460,6 +481,9 @@ export interface NodeRun<TOutput = unknown> {
   operationRequestId?: string;
   interrupted?: boolean;
   outcomeUncertain?: boolean;
+  /** 可选审计待核的原执行身份；后续本地命令不得替它结清，也不豁免其它未知来源。 */
+  outcomeUncertainOperationIds?: string[];
+  optionalReviewOperationRefs?: OptionalReviewOperationRef[];
   finishedAt?: string;
   output?: TOutput;
   artifactIds: string[];
@@ -510,12 +534,43 @@ export interface WorkflowRun<TInitialInput = unknown> {
     requestDigest: string;
     action: "discuss" | "revise" | "audit_current" | "adopt_proposal" | "edit_draft" | "undo_draft" | "confirm" | "return_to_stage";
     stage: "treatment" | "script" | "director";
-    status: "running" | "completed" | "failed" | "unknown";
+    // not_accepted：任务在受理前被拒（零提交）——DG-UX-04 把它从 failed 里分开，
+    // 用户可以安全地修改输入后重新发起，不会误以为已核清的执行失败。
+    status: "running" | "completed" | "failed" | "unknown" | "not_accepted";
     acceptedAt: string;
     finishedAt?: string;
+    /**
+     * C1（收尾包）：discuss/revise 完成时的结果处置——applied=已应用到当前稿；
+     * recorded_not_applied=原请求完成但当前稿已被用户独立处理，结果只归档原命令。
+     * completed 不再冒称当前稿已修改。
+     */
+    resultDisposition?: "applied" | "recorded_not_applied";
+    /** 已核清的旧咨询回复，仅与原命令关联；不代表应用到当前版本。 */
+    result?: unknown;
     /** 原始用户命令与图恢复输入；用于进程重启后观察/续接同一物理请求。 */
     request?: Record<string, unknown>;
     resume?: unknown;
+  }>;
+  /**
+   * F03/F04（2026-10-02 执行包）：历史审计异常 failed 记录的显式准备回执。prepare 只
+   * 恢复本地人工停点（不签字、不发模型）；同 commandId 同 body 幂等重放，异 body 拒绝。
+   */
+  reviewContinuationOperations?: Array<{
+    commandId: string;
+    requestDigest: string;
+    action: "prepare" | "enter_manual_review" | "approve_internal_delivery";
+    nodeId: "creative-planning" | "visual-review";
+    stage?: "treatment" | "script" | "director";
+    actor?: string;
+    target?: { artifactId: string; versionId: string; sha256: string };
+    resultEvidenceId?: string;
+    resultInterventionId?: string;
+    resultRunRevision?: number;
+    targetRunRevision: number;
+    status: "accepted" | "applied" | "failed";
+    acceptedAt: string;
+    finishedAt?: string;
+    error?: string;
   }>;
 }
 

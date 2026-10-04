@@ -214,6 +214,7 @@ export function CasesPage() {
           <input
             type="search"
             value={keyword}
+            aria-label="搜索案例"
             placeholder="搜索标题、作者或话题"
             onChange={(event) => setKeyword(event.target.value)}
           />

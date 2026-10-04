@@ -50,6 +50,10 @@ export interface WorkflowRunnerOptions {
   idFactory?: (prefix: string) => string;
   checkpoint?: <TInitialInput>(run: WorkflowRun<TInitialInput>) => Promise<void> | void;
   shouldPause?: <TInitialInput>(run: WorkflowRun<TInitialInput>) => Promise<boolean> | boolean;
+  // 仅宿主逐条核对原操作后传入；默认未配置仍按采购未知拒绝失效。
+  optionalReviewInvalidationOperations?: ReadonlyArray<{
+    nodeId: string; operationId: string; targetVersionId: string; inputDigest: string;
+  }>;
 }
 
 class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitialInput> {
@@ -252,6 +256,7 @@ export class WorkflowRunner {
   private readonly idFactory: (prefix: string) => string;
   private readonly checkpoint?: WorkflowRunnerOptions["checkpoint"];
   private readonly shouldPause?: WorkflowRunnerOptions["shouldPause"];
+  private readonly optionalReviewInvalidationOperations: WorkflowRunnerOptions["optionalReviewInvalidationOperations"];
 
   constructor(options: WorkflowRunnerOptions = {}) {
     this.providers = options.providers ?? new ProviderRegistry();
@@ -259,6 +264,7 @@ export class WorkflowRunner {
     this.idFactory = options.idFactory ?? createIncrementingIdFactory();
     this.checkpoint = options.checkpoint;
     this.shouldPause = options.shouldPause;
+    this.optionalReviewInvalidationOperations = options.optionalReviewInvalidationOperations;
   }
 
   async run<TInitialInput>(definition: WorkflowDefinition, initialInput: TInitialInput): Promise<WorkflowRun<TInitialInput>> {
@@ -441,6 +447,29 @@ export class WorkflowRunner {
     return this.continueRun(definition, run, context);
   }
 
+  /** 恢复已落盘的批准之后尚未开始的后继；不重复决定，也不重试在途生成。 */
+  async continuePersistedDecision<TInitialInput>(
+    definition: WorkflowDefinition, previousRun: WorkflowRun<TInitialInput>, commandId: string,
+  ): Promise<WorkflowRun<TInitialInput>> {
+    validateWorkflowDefinition(definition);
+    const decision = previousRun.decisions.find(item => item.commandId === commandId);
+    const consumed = previousRun.nodeRuns.find(node => node.intervention?.id === decision?.interventionId);
+    if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version
+      || previousRun.status !== "running" || decision?.action !== "approve" || consumed?.status !== "succeeded") {
+      throw new Error("没有可接续的已保存批准，请查看当前停点或原操作状态。");
+    }
+    if (previousRun.nodeRuns.some(node => node.status === "running")) {
+      throw new Error("后续原请求已受理，不能重发；请先查询原任务状态。");
+    }
+    const run = cloneWorkflowRun(previousRun);
+    const outputs = new Map(run.nodeRuns.filter(node => node.status === "succeeded" && node.output !== undefined)
+      .map(node => [node.nodeId, node.output]));
+    const context = new InMemoryWorkflowContext(run.id, definition.id, run.initialInput,
+      this.providers, this.clock, this.idFactory, run.artifacts, outputs, run.decisions);
+    normalizeLegacyVersionStates(definition, run, context.publicContext());
+    return this.continueRun(definition, run, context);
+  }
+
   async continueWaitingNode<TInitialInput>(
     definition: WorkflowDefinition,
     previousRun: WorkflowRun<TInitialInput>,
@@ -568,7 +597,7 @@ export class WorkflowRunner {
       throw new Error(`Node '${override.nodeId}' is waiting for a dedicated '${previousNodeRun.intervention.kind}' decision; use its dedicated command instead of a generic output override.`);
     }
     const descendants = descendantNodeIds(definition.nodes, override.nodeId);
-    assertNoUncertainPaidOutcomeInvalidated(previousRun, new Set([override.nodeId, ...descendants]));
+    assertNoUncertainPaidOutcomeInvalidated(previousRun, new Set([override.nodeId, ...descendants]), this.optionalReviewInvalidationOperations);
 
     const run = cloneWorkflowRun(previousRun);
     const nodeRun = run.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId)!;
@@ -747,7 +776,7 @@ export class WorkflowRunner {
       throw new Error(`Node '${override.nodeId}' is waiting for spend approval; use the spend authorization flow instead of editing inputs.`);
     }
     const descendants = descendantNodeIds(definition.nodes, override.nodeId);
-    assertNoUncertainPaidOutcomeInvalidated(previousRun, new Set([override.nodeId, ...descendants]));
+    assertNoUncertainPaidOutcomeInvalidated(previousRun, new Set([override.nodeId, ...descendants]), this.optionalReviewInvalidationOperations);
 
     const run = cloneWorkflowRun(previousRun);
     const nodeRun = run.nodeRuns.find((candidate) => candidate.nodeId === override.nodeId)!;
@@ -947,7 +976,7 @@ export class WorkflowRunner {
       throw new Error(`Node '${override.nodeId}' has an uncertain paid-provider outcome and cannot be reconfigured.`);
     }
     const descendants = descendantNodeIds(definition.nodes, override.nodeId);
-    assertNoUncertainPaidOutcomeInvalidated(previousRun, new Set([override.nodeId, ...descendants]));
+    assertNoUncertainPaidOutcomeInvalidated(previousRun, new Set([override.nodeId, ...descendants]), this.optionalReviewInvalidationOperations);
 
     const run = cloneWorkflowRun(previousRun);
     run.initialInput = structuredClone(override.initialInput);
@@ -1095,10 +1124,9 @@ export class WorkflowRunner {
     if (previousRun.status !== "stale") {
       throw new Error(`Run '${previousRun.id}' has no stale nodes to regenerate.`);
     }
-    const uncertainNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.status === "stale" && nodeRun.outcomeUncertain);
-    if (uncertainNode) {
-      throw new Error(`Node '${uncertainNode.nodeId}' has an uncertain paid-provider outcome and cannot be regenerated before reconciliation.`);
-    }
+    assertNoUncertainPaidOutcomeInvalidated(previousRun,
+      new Set(previousRun.nodeRuns.filter(node => node.status === "stale").map(node => node.nodeId)),
+      this.optionalReviewInvalidationOperations);
     // 状态与失效标记不一致的历史数据（succeeded/failed 但带 stale 标记）不能被空恢复
     // 静默“洗白”：必须先经对应编辑入口复核，否则恢复会跳过内容复核（R3-02，S07）。
     const inconsistentNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.status !== "stale"
@@ -1327,7 +1355,7 @@ export class WorkflowRunner {
       throw new Error(`Node '${nodeId}' cannot be rerun.`);
     }
     const invalidatedNodeIds = new Set([nodeId, ...descendantNodeIds(definition.nodes, nodeId)]);
-    assertNoUncertainPaidOutcomeInvalidated(previousRun, invalidatedNodeIds);
+    assertNoUncertainPaidOutcomeInvalidated(previousRun, invalidatedNodeIds, this.optionalReviewInvalidationOperations);
 
     const run = cloneWorkflowRun(previousRun);
     const outputs = new Map<string, unknown>();
@@ -1646,15 +1674,31 @@ export class WorkflowRunner {
         };
       }
       validateReceiptCosts(receiptDraft, authorization, automaticMeteredProvider);
+      if (result.optionalReviewOperationRefs?.length) {
+        const refs = nodeRun.optionalReviewOperationRefs ??= [];
+        for (const ref of result.optionalReviewOperationRefs) {
+          if (!refs.some(saved => saved.operationId === ref.operationId && saved.requestId === ref.requestId
+            && saved.targetVersionId === ref.targetVersionId)) refs.push(structuredClone(ref));
+        }
+      }
+      if (result.providerOutcomeKnown === false && nodeRun.optionalReviewOperationRefs?.length) {
+        const uncertainIds = nodeRun.outcomeUncertainOperationIds ??= [];
+        if (!uncertainIds.includes(nodeRun.operationRequestId!)) uncertainIds.push(nodeRun.operationRequestId!);
+      }
       if (status === "failed" && receiptDraft.billing === "metered" && result.providerOutcomeKnown === false) {
         // Provider 结果未知（如 create 请求已可能被受理但响应在 ECONNRESET/超时中丢失）：
         // 无论回执是否呈现零次尝试，都不得删除 outcomeUncertain 去解锁重试，
         // 账目只能由人工核账闭环。
         nodeRun.outcomeUncertain = true;
+      } else if (status === "needs_human" && result.providerOutcomeKnown === false) {
+        // F04/D10（2026-10-02 执行包）：人工停点不结清未知请求。宿主声明的
+        // rendered_video_optional_review 续看停点保留 outcomeUncertain——原请求仍待核，
+        // 后续本地确认（含风险采用）不能把它清除；仅当全部原操作有真实终态才解除。
+        nodeRun.outcomeUncertain = true;
       } else if (status !== "failed"
         || result.providerOutcomeKnown === true
         || (isDefinitiveZeroAttemptFailure(receiptDraft) && !resumingInterruptedMeteredOperation)) {
-        delete nodeRun.outcomeUncertain;
+        if (!nodeRun.outcomeUncertainOperationIds?.length) delete nodeRun.outcomeUncertain;
       } else if (resumingInterruptedMeteredOperation) {
         nodeRun.outcomeUncertain = true;
       }
@@ -1815,6 +1859,23 @@ function validateIncompleteSourceReviewDecision(
   intervention: HumanIntervention,
   decision: HumanDecisionDraft,
 ): void {
+  // F04（2026-10-02 执行包 §2.4）：成片可选审片 unknown 的续看停点在这个精确 scope 下
+  // 可由用户显式承担——原请求仍 unknown、只可查询；确认必须带 commandId（幂等身份）、
+  // 明确 approve、acceptIncomplete 与匹配 evidenceId。素材/TTS/渲染生成 unknown 不属于
+  // 该 scope，仍走原 providerOutcomeKnown=true 守卫。
+  if (intervention.continuationScope === "rendered_video_optional_review") {
+    if (intervention.reviewStatus !== "incomplete" || !intervention.evidenceId) {
+      throw new Error("当前审片续看停点缺少可绑定的宿主证据，只能补查或终止。");
+    }
+    if (typeof decision.commandId !== "string" || !decision.commandId.trim()) {
+      throw new Error("接受成片审片未知风险必须携带操作编号，作为这次决定的幂等身份。");
+    }
+    if (decision.action !== "approve" || decision.acceptIncomplete !== true
+      || decision.reviewEvidenceId !== intervention.evidenceId) {
+      throw new Error("接受成片审片未知风险必须绑定当前证据，并使用明确的承担风险动作。");
+    }
+    return;
+  }
   // 内部交付合同（T03）：成片终审的无结论停点与试片重试停点同形——宿主声明的
   // incomplete + providerOutcomeKnown + evidenceId。承担风险都必须绑定当前证据。
   if (intervention.reviewStatus !== "incomplete"
@@ -2856,9 +2917,15 @@ function descendantNodeIds(nodes: NodeDefinition[], rootNodeId: string): Set<str
 function assertNoUncertainPaidOutcomeInvalidated(
   run: WorkflowRun,
   invalidatedNodeIds: ReadonlySet<string>,
+  verifiedOperations?: WorkflowRunnerOptions["optionalReviewInvalidationOperations"],
 ): void {
   const uncertainNode = run.nodeRuns.find((nodeRun) => (
     invalidatedNodeIds.has(nodeRun.nodeId) && nodeRun.outcomeUncertain
+    && (!nodeRun.outcomeUncertainOperationIds?.length || nodeRun.outcomeUncertainOperationIds.some(id => {
+      const ref = nodeRun.optionalReviewOperationRefs?.find(item => item.operationId === id);
+      return !ref || !verifiedOperations?.some(item => item.nodeId === nodeRun.nodeId && item.operationId === id
+        && item.targetVersionId === ref.targetVersionId && item.inputDigest === ref.inputDigest);
+    }))
   ));
   if (uncertainNode) {
     throw new Error(

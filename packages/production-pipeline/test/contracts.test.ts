@@ -242,6 +242,73 @@ describe("ProductionBrief", () => {
     }), /rework\.sourceRunId is invalid/);
   });
 
+  // F01（2026-10-02 用户决定权执行包）：planning.auditStatus 是审计描述，不是开拍许可。
+  // Studio 侧的六值状态域必须能进入正式制作合同；开拍资格由系列 Store 的事实校验决定，
+  // 不由这里的枚举替用户否决。任意其它取值仍拒绝。
+  it("accepts the studio audit-description statuses and the episode content version in series context", () => {
+    const seriesContextBase = {
+      seriesId: "series-1",
+      episodeId: "episode-1",
+      seriesName: "下班实验室",
+      seriesRevision: 4,
+      episodeNumber: 1,
+      seasonNumber: 1,
+      canonBaseRevision: 1,
+      premise: "每集验证一个真实方法。",
+      audience: "普通上班族",
+      platform: "douyin",
+      track: "after-work",
+      arc: "从尝试走向稳定流程",
+      episode: {
+        updatedAt: "2026-10-02T00:00:00.000Z",
+        pillar: "真实验证",
+        title: "第一集",
+        viewerPromise: "验证一个真实方法",
+        hook: "先看结果",
+        payoff: "给出适用边界",
+        planning: {
+          source: "agent",
+          role: "系列总编",
+          auditRole: "独立质量审计 Agent",
+          auditStatus: "not_audited",
+          auditIterations: 0,
+          providerId: "openai",
+          modelId: "codex",
+          promptVersion: "series-v1",
+        },
+      },
+      bible: { rules: ["必须真实验证"], recurringElements: [], forbiddenChanges: [] },
+      canon: { revision: 1, facts: [] },
+      continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: [], canonChecks: [] },
+    };
+    for (const auditStatus of ["passed", "awaiting_user", "fallback", "human_override", "stale", "not_audited"] as const) {
+      const parsed = pipeline.parseBrief({
+        ...validBrief,
+        seriesContext: {
+          ...seriesContextBase,
+          episode: {
+            ...seriesContextBase.episode,
+            contentVersionId: "version-f01-current",
+            planning: { ...seriesContextBase.episode.planning, auditStatus },
+          },
+        },
+      });
+      assert.equal(parsed.seriesContext?.episode.planning.auditStatus, auditStatus);
+      assert.equal(parsed.seriesContext?.episode.contentVersionId, "version-f01-current");
+    }
+    assert.throws(() => pipeline.parseBrief({
+      ...validBrief,
+      seriesContext: {
+        ...seriesContextBase,
+        episode: { ...seriesContextBase.episode, planning: { ...seriesContextBase.episode.planning, auditStatus: "definitely_passed" } },
+      },
+    }), /seriesContext\.episode\.planning\.auditStatus is invalid/);
+    assert.equal(pipeline.parseBrief({
+      ...validBrief,
+      seriesContext: { ...seriesContextBase, episode: { ...seriesContextBase.episode } },
+    }).seriesContext?.episode.contentVersionId, undefined, "旧上下文没有 contentVersionId 时保持可选");
+  });
+
   it("preserves the formally approved previous-episode handoff in series context", () => {
     const parsed = pipeline.parseBrief({
       ...validBrief,

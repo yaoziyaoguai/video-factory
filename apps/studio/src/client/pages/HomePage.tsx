@@ -1,4 +1,4 @@
-import { ArrowRight, Clapperboard, Flame, Lightbulb, ListVideo, Play, Plus, RefreshCw } from "lucide-react";
+import { ArrowRight, Clapperboard, Flame, Lightbulb, ListVideo, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
@@ -10,13 +10,17 @@ export function HomePage() {
   const navigate = useNavigate();
   const [runs, setRuns] = useState<StudioRunSummary[]>([]);
   const [error, setError] = useState<string>();
+  const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     setError(undefined);
+    setLoading(true);
     try {
       setRuns(await studioApi.runs());
     } catch {
       setError("创作台暂时没有连接到制作服务。");
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -42,62 +46,63 @@ export function HomePage() {
     <main className="home-page">
       <header className="home-intro">
         <div>
-          <p className="eyebrow">今日创作台</p>
-          <h1>从一个想法，到一条成片。</h1>
-          <p>选择一种开始方式。系统会沿同一条制作线推进；需要生成付费图片或视频时，会先报价并等你确认。</p>
+          <h1>创作台</h1>
+          <p>把想法写下来，把作品继续完成。</p>
         </div>
         <time>{new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "short" }).format(new Date())}</time>
       </header>
 
       {error ? <div className="home-error" role="alert"><span>{error}</span><button className="button button-secondary" type="button" onClick={() => void load()}><RefreshCw aria-hidden="true" size={16} />重新连接</button></div> : null}
+      {loading ? <p className="home-loading" role="status">正在读取你的作品…你也可以先选择下面的创作入口。</p> : null}
+
+      {currentRun ? (
+        <section className={`home-continuation${currentRun.videoContentUrl ? " has-preview" : ""}`} aria-labelledby="continue-title">
+          {currentRun.videoContentUrl ? <div className="home-work-preview"><video controls muted playsInline preload="metadata" src={`${currentRun.videoContentUrl}#t=0.1`} aria-label={`${currentRun.title} 预览`} /></div> : null}
+          <div className="home-continuation-copy">
+            <p className="home-work-label">{currentRun.status === "succeeded" ? "最近完成" : "继续上次工作"}</p>
+            <h2 id="continue-title">{currentRun.title}</h2>
+            <div className="home-work-status"><StatusBadge status={currentRun.status} {...(creatorRunStatusLabel(currentRun) ? { label: creatorRunStatusLabel(currentRun)! } : {})} /></div>
+            <p className="home-work-message">{continueMessage(currentRun)}</p>
+            <Link className="button button-primary" to={`/projects/${currentRun.id}`}>{continueAction(currentRun)}<ArrowRight aria-hidden="true" size={16} /></Link>
+          </div>
+        </section>
+      ) : null}
 
       {runs.length ? <section className="home-production-overview" aria-label="制作概况">
         <span><small>待你处理</small><strong>{overview.attention}</strong></span>
         <span><small>自动制作</small><strong>{overview.active}</strong></span>
         <span><small>已完成</small><strong>{overview.completed}</strong></span>
         <span><small>已归档</small><strong>{overview.archived}</strong></span>
+        <Link to="/projects">全部制作<ArrowRight aria-hidden="true" size={15} /></Link>
       </section> : null}
-
-      {currentRun ? (
-        <section className="home-continuation" aria-labelledby="continue-title">
-          <div className="home-section-number">01</div>
-          <div className="home-continuation-copy">
-            <p className="eyebrow">继续上次工作</p>
-            <h2 id="continue-title">{currentRun.title}</h2>
-            <div><StatusBadge status={currentRun.status} {...(creatorRunStatusLabel(currentRun) ? { label: creatorRunStatusLabel(currentRun)! } : {})} /><span>{continueMessage(currentRun)}</span></div>
-          </div>
-          {currentRun.videoContentUrl ? <video muted playsInline preload="metadata" src={`${currentRun.videoContentUrl}#t=0.1`} aria-hidden="true" /> : <div className="home-run-mark" aria-hidden="true"><Play size={24} /></div>}
-          <Link className="button button-primary" to={`/projects/${currentRun.id}`}>{continueAction(currentRun)}<ArrowRight aria-hidden="true" size={16} /></Link>
-        </section>
-      ) : null}
 
       <section className="home-start" aria-labelledby="start-title">
         <header>
-          <div className="home-section-number">{currentRun ? "02" : "01"}</div>
-          <div><p className="eyebrow">开始一条新视频</p><h2 id="start-title">你今天从哪里出发？</h2></div>
+          <div><h2 id="start-title">你今天从哪里出发？</h2><p>开始一条新视频</p></div>
         </header>
         <div className="home-start-options">
           <button type="button" onClick={() => navigate("/topics")}>
             <span className="home-option-icon is-hot"><Flame aria-hidden="true" size={21} /></span>
-            <span><strong>从热点开始</strong><small>先看值得做、能拍出来的实时机会</small></span>
+            <span><strong>从热点开始</strong><small>发现值得讲的当下话题</small></span>
             <ArrowRight aria-hidden="true" size={18} />
           </button>
           <button type="button" onClick={() => navigate("/topics?mode=series")}>
             <span className="home-option-icon is-series"><ListVideo aria-hidden="true" size={21} /></span>
-            <span><strong>继续一个系列</strong><small>沿固定栏目与观众承诺持续更新</small></span>
+            <span><strong>继续一个系列</strong><small>延续栏目，创作下一集</small></span>
             <ArrowRight aria-hidden="true" size={18} />
           </button>
           <button type="button" onClick={() => navigate("/topics?mode=manual")}>
             <span className="home-option-icon is-idea"><Lightbulb aria-hidden="true" size={21} /></span>
-            <span><strong>从自己的想法开始</strong><small>输入主题，需要时添加参考视频</small></span>
+            <span><strong>从自己的想法开始</strong><small>写下主题，加入你的参考</small></span>
             <Plus aria-hidden="true" size={18} />
           </button>
           <button type="button" onClick={() => navigate("/cases")}>
             <span className="home-option-icon is-case"><Clapperboard aria-hidden="true" size={21} /></span>
-            <span><strong>从案例 / 脚本开始</strong><small>发现值得借鉴的视频和脚本，开始自己的创作</small></span>
+            <span><strong>从案例 / 脚本开始</strong><small>借鉴好作品，写自己的版本</small></span>
             <ArrowRight aria-hidden="true" size={18} />
           </button>
         </div>
+        <p className="home-start-note">选择一种开始方式。系统会沿同一条制作线推进；需要生成付费图片或视频时，会先报价并等你确认。</p>
       </section>
     </main>
   );

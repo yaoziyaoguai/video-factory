@@ -18,7 +18,8 @@ import { ProductionPage } from "../src/client/pages/ProductionPage.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
 import { HomePage } from "../src/client/pages/HomePage.js";
 import { TodayPage } from "../src/client/pages/TodayPage.js";
-import type { StudioCandidateInboxItem, StudioCostDashboard, StudioLocalCapability, StudioOpportunity, StudioProvider, StudioRunSummary, StudioSeries, StudioTemplate, StudioTrendSource } from "../src/shared/api.js";
+import type { StudioCandidateInboxItem, StudioCostDashboard, StudioLocalCapability, StudioOpportunity, StudioProvider, StudioRunSummary, StudioSeries, StudioTemplate, StudioTopicGenerationReceipt, StudioTrendSource,
+} from "../src/shared/api.js";
 import { planVisualDirection } from "../src/shared/visual-plan.js";
 
 const opportunity: StudioOpportunity = {
@@ -883,6 +884,30 @@ describe("Creative OS", () => {
     expect(screen.getByText(/这个历史系列使用的首发平台已不再支持新制作/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "历史单集" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /请先迁移到支持的平台/ })).toBeDisabled();
+  });
+
+  it("shows a shared series promise once while preserving distinct episode content and collapsed rules", async () => {
+    const user = userEvent.setup();
+    const series = seriesPublicAffairs();
+    series.currentSeason.arc = series.premise;
+    series.episodes[0]!.arc = series.premise;
+    series.episodes[0]!.viewerPromise = series.premise;
+    const props = { initialMode: "series" as const, selectedSeriesId: series.id, inbox: inbox([]), historicalRuns: [],
+      loading: {}, trendMeta: { platformCount: 0, candidateCount: 0 }, seriesAuditReady: true,
+      onRetry: vi.fn(), onRefreshTrends: vi.fn(), onAdopt: vi.fn(), onCreateSeries: vi.fn(), onSelectSeries: vi.fn(),
+      onUpdateSeriesEpisode: vi.fn(), onLinkLegacyRun: vi.fn(), onRescanSeries: vi.fn(),
+      onViewProductionRecords: vi.fn(), onManual: vi.fn(), onImport: vi.fn() };
+    const { rerender } = render(<MemoryRouter><TopicEntryWorkspace {...props} series={[series]} /></MemoryRouter>);
+    expect(screen.getAllByText(series.premise)).toHaveLength(1);
+    const summary = screen.getByText("查看栏目规则与定版记录");
+    expect(summary.closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText(series.bible.rules[0]!)).not.toBeVisible();
+    await user.click(summary);
+    expect(screen.getByText(series.bible.rules[0]!)).toBeVisible();
+    expect(screen.getByRole("button", { name: "编辑路线图" })).toBeVisible();
+    const distinct = { ...series, episodes: [{ ...series.episodes[0]!, viewerPromise: "本集独有的具体收益" }] };
+    rerender(<MemoryRouter><TopicEntryWorkspace {...props} series={[distinct]} /></MemoryRouter>);
+    expect(screen.getAllByText("本集独有的具体收益").some(element => element.classList.contains("series-viewer-promise"))).toBe(true);
   });
 
   it("shows immutable series drafts with only their own audit and adoption evidence", async () => {
@@ -2709,7 +2734,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("button", { name: "保存机会" })).toBeEnabled();
   });
 
-  it("creates a quick opportunity with sensible evidence and score defaults", async () => {
+  it("creates a quick opportunity with honest zero sources and score defaults", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<OpportunityDialog open onClose={() => undefined} onSubmit={onSubmit} />);
@@ -2720,14 +2745,11 @@ describe("Creative OS", () => {
     await user.type(screen.getByLabelText("开场钩子"), "真正让人恢复的，可能不是继续刷手机。");
     await user.click(screen.getByRole("button", { name: "保存机会" }));
 
+    // DG-UX-02：不填参考链接就是零来源（origin manual），不再伪造 manual-supplement 占位。
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       track: "ordinary-life",
-      evidence: [expect.objectContaining({
-        source: "manual-supplement",
-        platform: "manual",
-        keyword: "下班后的十分钟如何真正休息",
-        strength: 0,
-      })],
+      origin: "manual",
+      evidence: [],
       scores: expect.objectContaining({ audienceReach: 70, complianceRisk: 20 }),
     }));
   });
@@ -2864,6 +2886,24 @@ describe("Creative OS", () => {
     expect(screen.getAllByText("需要配置").length).toBeGreaterThan(0);
     expect(screen.getByRole("heading", { name: "还不能判断是否成为爆款" })).toBeInTheDocument();
     expect(screen.queryByText(/播放量/)).not.toBeInTheDocument();
+  });
+
+  it.each([0, 2])("distinguishes no final-review samples from all approved (%s)", async (approved) => {
+    vi.spyOn(studioApi, "runs").mockResolvedValue([
+      ...Array.from({ length: approved }, (_, index): StudioRunSummary => ({ ...runningRun, id: `approved-${index}`, status: "succeeded", finalReviewOutcome: "approved" })),
+      { ...runningRun, id: "test-only", runPurpose: "test", status: "succeeded", finalReviewOutcome: "approved" },
+    ]);
+    vi.spyOn(studioApi, "templateExperiments").mockResolvedValue([]);
+    render(<MemoryRouter><ExperimentsPage /></MemoryRouter>);
+    await screen.findByRole("heading", { name: "这一轮最该改什么" });
+    if (approved) {
+      expect(within(screen.getByLabelText("制作统计")).getByText("100%")).toBeVisible();
+      expect(screen.getByText("已终审 2 条，全部通过")).toBeVisible();
+      expect(screen.queryByText("先积累终审样本")).not.toBeInTheDocument();
+    } else {
+      expect(within(screen.getByLabelText("制作统计")).getByText("待样本")).toBeVisible();
+      expect(screen.getByText("先积累终审样本")).toBeVisible();
+    }
   });
 
   it("puts content learning before the secondary cost ledger on the review page", async () => {
@@ -3376,4 +3416,135 @@ function knowledgeTemplate(): StudioTemplate {
     capabilityRequirements: [{ capability: "script.draft", required: true }],
     createdAt: "2026-08-27T00:00:00.000Z", updatedAt: "2026-08-27T00:00:00.000Z", builtIn: true,
   };
+}
+
+// DG-UX-02（新前端 Dogfood 修复执行包 R3）：旧 manual 占位只做读侧归一——
+// 列表/详情同一口径显示真实来源数；无链接占位不再冒充来源，真实链接与
+// 无链接的外部榜单信号都保留。
+
+describe("opportunity source display honesty (DG-UX-02)", () => {
+  const legacyPlaceholder = {
+    source: "manual-supplement",
+    platform: "manual",
+    keyword: "窗边三分钟，找回注意力",
+    strength: 0,
+    collectedAt: "2026-10-03T07:16:40.000Z",
+  };
+
+  it("shows zero sources for a manual opportunity with only a legacy placeholder", () => {
+    const manual = { ...opportunity, origin: "manual" as const, evidence: [legacyPlaceholder] };
+    render(<div>
+      <OpportunityRail opportunities={[manual]} selectedId={manual.id} onSelect={() => undefined} onCreate={() => undefined} />
+      <OpportunityFocus opportunity={manual} />
+    </div>);
+    expect(screen.getAllByText(/尚未添加参考来源/).length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText(/1 条来源线索/)).toBeNull();
+    // 无链接占位不渲染假来源卡，也不把 manual 平台当“热榜”。
+    expect(screen.queryByText("用户补充来源")).toBeNull();
+    expect(screen.queryByText("热榜")).toBeNull();
+  });
+
+  it("counts one real manual link alongside a legacy placeholder and keeps linkless trend signals", () => {
+    const mixed = { ...opportunity, origin: "manual" as const, evidence: [
+      legacyPlaceholder,
+      { ...legacyPlaceholder, keyword: "用户提供的链接", evidenceUrl: "https://qa-reference.invalid/article" },
+    ] };
+    const { unmount } = render(<div>
+      <OpportunityRail opportunities={[mixed]} selectedId={mixed.id} onSelect={() => undefined} onCreate={() => undefined} />
+      <OpportunityFocus opportunity={mixed} />
+    </div>);
+    expect(screen.getAllByText(/1 条来源线索/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("link", { name: /查看 用户提供的链接 来源/ })).toHaveAttribute("href", "https://qa-reference.invalid/article");
+    expect(screen.queryByText(/2 条来源线索/)).toBeNull();
+    unmount();
+
+    const trend = { ...opportunity, origin: "trend" as const, evidence: [{
+      source: "hot-board", platform: "ithome", keyword: "无链接的热榜信号", strength: 70, collectedAt: "2026-10-03T07:16:40.000Z",
+    }] };
+    render(<div>
+      <OpportunityRail opportunities={[trend]} selectedId={trend.id} onSelect={() => undefined} onCreate={() => undefined} />
+      <OpportunityFocus opportunity={trend} />
+    </div>);
+    expect(screen.getAllByText(/1 条来源线索/).length).toBeGreaterThan(0);
+    expect(screen.getByText("无链接的热榜信号")).toBeInTheDocument();
+  });
+});
+
+// DG-UX-05（新前端 Dogfood 修复执行包 R5）：默认不重复铺开同一批候选——
+// 上方收件箱是默认选择/阅读界面；下方按综合分的排序视图默认收起、可键盘展开；
+// 0 候选不出现空折叠区；规则线索的兜底提示不被折叠藏没；两处采用文案统一且只入待制作区。
+
+describe("hot topic board collapse (DG-UX-05)", () => {
+  async function renderTrendPage(inboxValue: ReturnType<typeof inbox>) {
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inboxValue);
+    render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
+    if (inboxValue.items.length > 0) await screen.findAllByRole("button", { name: /查看候选提案/ });
+    else await screen.findByRole("main");
+  }
+
+  it("collapses the auxiliary ranking view by default and expands it by keyboard", async () => {
+    const user = userEvent.setup();
+    await renderTrendPage(inbox([candidate(1, "technology")]));
+    const board = document.querySelector("details.hot-topic-board") as HTMLDetailsElement | null;
+    expect(board).not.toBeNull();
+    expect(board!.open).toBe(false);
+    const summary = screen.getByText("按综合分浏览热点");
+    summary.focus();
+    expect(summary).toHaveFocus();
+    await user.click(summary);
+    expect(board!.open).toBe(true);
+    // 展开后是明确的另一个排序视图，同候选仍可从这里采用。
+    expect(withinBoard().getByText(/综合选题分最高/)).toBeInTheDocument();
+    await user.click(summary);
+    expect(board!.open).toBe(false);
+  });
+
+  it("renders no board without candidates and keeps rule fallback notices out of the collapse", async () => {
+    await renderTrendPage(inbox([]));
+    expect(document.querySelector("details.hot-topic-board")).toBeNull();
+
+    // 缓存错误（规则线索兜底）：唯一错误说明与重试出口不能被默认折叠藏没。
+    const fallback: ReturnType<typeof inbox> & { topicGeneration?: StudioTopicGenerationReceipt } = inbox([candidate(7, "technology")]);
+    fallback.topicGeneration = {
+      generationId: "topic-uxr-fallback",
+      generatedAt: "2026-10-03T00:00:00.000Z",
+      modelInvoked: false,
+      source: "rule-fallback",
+      candidateCount: 1,
+      failureCategory: "model_unavailable",
+      failureReason: "选题总编本轮不可用",
+    };
+    await renderTrendPage(fallback);
+    const board = document.querySelector("details.hot-topic-board") as HTMLDetailsElement | null;
+    expect(board).not.toBeNull();
+    expect(board!.open).toBe(true);
+    expect(screen.getByText("本轮总编没有给出选题建议")).toBeInTheDocument();
+  });
+
+  it("names adoption the same way in both views and states it only enters the backlog", async () => {
+    const user = userEvent.setup();
+    await renderTrendPage(inbox([candidate(1, "technology"), unselectedCandidate(2)]));
+    // 上方收件箱：普通采用 + 明确说明不会自动开工。
+    const primary = withinTrendInbox().getAllByRole("button", { name: /采用候选 候选提案 1/ })[0]!;
+    expect(primary).toHaveTextContent("采用到制作区");
+    expect(screen.getAllByText(/采用后加入待制作区，不会开始生成或付费/).length).toBeGreaterThan(0);
+    // 展开 board 后：同一候选的排序视图按钮同一文案。
+    await user.click(screen.getByText("按综合分浏览热点"));
+    const boardView = withinBoard();
+    expect(boardView.getByRole("button", { name: "采用到制作区 候选提案 1" })).toBeInTheDocument();
+    // 全部仅建议（skip）时默认收起不丢候选：总编建议仍按原规则显式采用。
+    const advisory = boardView.queryAllByRole("button", { name: /仍然采用到制作区/ });
+    expect(advisory.length).toBeGreaterThan(0);
+    expect(boardView.getAllByText(/总编不建议生产/).length).toBeGreaterThan(0);
+  });
+});
+
+function withinBoard() {
+  const surface = document.querySelector("details.hot-topic-board");
+  if (!surface) throw new Error("hot topic board is not rendered");
+  return within(surface as HTMLElement);
 }

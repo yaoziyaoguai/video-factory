@@ -52,6 +52,7 @@ export function ExperimentsPage() {
     const rejected = learningRuns.filter((run) => run.finalReviewOutcome === "rejected").length;
     const reviewed = approved + rejected;
     return {
+      reviewed,
       rejected,
       needsReview: learningRuns.filter((run) => !isHistoricalReadOnlyRun(run) && run.status === "needs_human" && run.currentNodeId === "final-review").length,
       interrupted: learningRuns.filter((run) => run.status === "failed").length,
@@ -86,7 +87,7 @@ export function ExperimentsPage() {
       <section className="learning-focus" aria-labelledby="learning-focus-title">
         <header className="section-heading"><div><p className="eyebrow">下一轮行动</p><h2 id="learning-focus-title">这一轮最该改什么</h2></div><span>来自真实制作记录</span></header>
         <div className="learning-focus-grid">
-          <article><strong>{stats.rejected ? `${stats.rejected} 条成片被打回` : "先积累终审样本"}</strong><p>{stats.rejected ? "返工时沿用可用母片，只重做审片明确指出的镜头，并检查建议是否真正进入脚本、导演和画面节点。" : "完成终审后，才有依据比较作品通过情况与具体返工原因。"}</p></article>
+          <article><strong>{stats.rejected ? `${stats.rejected} 条成片被打回` : stats.reviewed ? `已终审 ${stats.reviewed} 条，全部通过` : "先积累终审样本"}</strong><p>{stats.rejected ? "返工时沿用可用母片，只重做审片明确指出的镜头，并检查建议是否真正进入脚本、导演和画面节点。" : stats.reviewed ? "当前非测试制作的终审记录中没有被打回的作品。可以回看具体作品继续改进；终审通过不代表传播效果已验证。" : "完成终审后，才有依据比较作品通过情况与具体返工原因。"}</p></article>
           <article><strong>{bottleneck ? `${runNodeLabel(bottleneck[0])}出现 ${bottleneck[1]} 次问题` : "当前没有集中故障步骤"}</strong><p>{bottleneck ? "先解决重复出现的制作阻塞，避免把技术失败误当作内容失败。" : "先完成作品并审片，关注开头承诺是否兑现、视觉连续性与观众能否看懂；无样本不推断效果。"}</p></article>
         </div>
       </section>

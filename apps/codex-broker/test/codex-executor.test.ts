@@ -766,6 +766,113 @@ describe("parseTaskRequest", () => {
     );
   });
 
+  it("accepts a saved script draft with optional fields absent for discussion without loosening the new-output schema", async () => {
+    // 与正式 validateScriptDraft 同源的“已保存稿”：顶层 viewerPromise/narrativeArc/canonFacts 与
+    // scene 的 purpose/visible_action/on_screen_text/sound_cue/success_criteria/failure_conditions
+    // 都允许缺省（DG-UX-04：讨论已有有效稿不能复用新模型产出的严格输出 schema）。
+    const savedScript = {
+      scenes: [1, 2, 3].map((position) => ({
+        position,
+        narration: `第${position}段旁白`,
+        duration: 8,
+        visual_strategy: "stock",
+        visual_prompt: `第${position}个真实生活动作`,
+        search_terms: [`生活动作 ${position}`],
+      })),
+    };
+    const discussionPayload = (currentDocument: unknown) => ({
+      stage: "script",
+      currentDocument,
+      context: {
+        effectiveUserInstructions: [],
+        upstreamConfirmed: {},
+        productionCapabilities: { assetProviders: ["pexels-stock-v1"] },
+      },
+      message: "解释这个安排",
+      recentMessages: [],
+    });
+    const parseDiscussion = (currentDocument: unknown) => parseTaskRequest({
+      protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+      kind: "creative-discussion",
+      payload: discussionPayload(currentDocument),
+      expectedContractDigest: taskContractDescriptorFor("creative-discussion").digest,
+    });
+
+    const accepted = parseDiscussion(savedScript);
+    assert.equal(accepted.kind, "creative-discussion");
+    if (accepted.kind !== "creative-discussion") throw new Error("expected creative-discussion task");
+    // 输出给讨论模型的文档未被填造字段或改写。
+    assert.deepEqual(accepted.payload.currentDocument, savedScript);
+
+    // 已有稿合法上界（1..8 条 criteria）必须可讨论：新模型输出 schema 的 1..6 不属于已有稿合同。
+    parseDiscussion({
+      ...savedScript,
+      scenes: savedScript.scenes.map((scene) => ({
+        ...scene,
+        success_criteria: Array.from({ length: 7 }, (_, index) => `验收标准 ${index + 1}`),
+        failure_conditions: Array.from({ length: 8 }, (_, index) => `失败条件 ${index + 1}`),
+      })),
+    });
+    // 保存过的 viewerPromise/narrativeArc 不再套新模型 200/500 字符门槛（只受 192KiB 整体上界）。
+    parseDiscussion({ ...savedScript, viewerPromise: "长".repeat(500), narrativeArc: "推进".repeat(400) });
+
+    // 完整模型稿仍可讨论。
+    parseDiscussion({
+      viewerPromise: "看完能避开三个决策坑",
+      narrativeArc: "问题-方法-清单",
+      canonFacts: ["步骤可执行"],
+      scenes: savedScript.scenes.map((scene) => ({
+        ...scene,
+        purpose: `第${scene.position}段的职责`,
+        visible_action: "真实生活动作",
+        on_screen_text: "",
+        sound_cue: "环境声",
+        success_criteria: ["动作可见"],
+        failure_conditions: ["画面缺失"],
+      })),
+    });
+
+    // 基础必需结构与类型/值/上界反例仍拒绝。
+    await assert.rejects(async () => parseDiscussion({
+      ...savedScript,
+      scenes: savedScript.scenes.map((scene, index) => index === 0 ? { ...scene, purpose: 7 } : scene),
+    }), /purpose/);
+    await assert.rejects(async () => parseDiscussion({
+      ...savedScript,
+      scenes: savedScript.scenes.map((scene, index) => index === 0 ? { ...scene, narration: undefined } : scene),
+    }), /narration/);
+    await assert.rejects(async () => parseDiscussion({
+      ...savedScript,
+      scenes: savedScript.scenes.map((scene, index) => index === 0 ? { ...scene, duration: -1 } : scene),
+    }), /duration/);
+    // 位置纪律与保存路径同源：排序后必须从 1 连续；重复或不连续都拒绝（乱序数组本身按
+    // validateScriptDraft 语义先排序，属合法形态）。
+    await assert.rejects(async () => parseDiscussion({
+      ...savedScript,
+      scenes: savedScript.scenes.map((scene, index) => index === 0 ? { ...scene, position: 2 } : scene),
+    }), /position/);
+    await assert.rejects(async () => parseDiscussion({
+      ...savedScript,
+      scenes: savedScript.scenes.map((scene, index) => index === 0 ? { ...scene, position: 4 } : scene),
+    }), /position/);
+    await assert.rejects(async () => parseDiscussion({
+      ...savedScript,
+      scenes: savedScript.scenes.map((scene, index) => index === 0
+        ? { ...scene, success_criteria: Array.from({ length: 9 }, (_, i) => `标准 ${i}`) }
+        : scene),
+    }), /success_criteria/);
+    await assert.rejects(async () => parseDiscussion({
+      ...savedScript,
+      scenes: savedScript.scenes.map((scene, index) => index === 0
+        ? { ...scene, search_terms: ["重复词", "重复词"] }
+        : scene),
+    }), /search_terms/);
+
+    // 新模型 script-draft 输出 schema 不放松：缺 purpose 的产出仍不通过输出校验。
+    const { outputValidationErrorFor } = await import("../src/task-definitions.js");
+    assert.match(String(outputValidationErrorFor("script-draft", savedScript)), /purpose|required/);
+  });
+
   it("rejects retired template guidance on every new planning-role request", async () => {
     const requests = [
       creativeTreatmentContractRequest(),
@@ -2378,5 +2485,47 @@ describe("CodexExecutor.runTask", () => {
     });
     assert.deepEqual(killedPids, [4242]);
     assert.deepEqual(await readdir(workspaceRoot), []);
+  });
+});
+
+// C6（收尾包 2026-10-04）：已有脚本讨论输入的准确边界。
+// 未知顶层/scene 字段拒绝；generated 路线的 success_criteria/failure_conditions
+// 与宿主同一份证据边界检查；合法“示意”正例不误伤。
+
+describe("existing script discussion exact boundary (C6)", () => {
+  const savedScript = {
+    scenes: [1, 2, 3].map((position) => ({
+      position,
+      narration: `第${position}段旁白`,
+      duration: 8,
+      visual_strategy: "generated",
+      visual_prompt: `第${position}个机制示意画面`,
+      search_terms: [`示意 ${position}`],
+    })),
+  };
+  const parseDiscussion = (currentDocument: unknown) => parseTaskRequest({
+    protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+    kind: "creative-discussion",
+    payload: { stage: "script", currentDocument, context: {}, message: "解释", recentMessages: [] },
+    expectedContractDigest: taskContractDescriptorFor("creative-discussion").digest,
+  });
+
+  it("rejects unknown top-level and scene fields instead of accepting arbitrary JSON", async () => {
+    await assert.rejects(async () => parseDiscussion({ ...savedScript, extraTopLevel: 1 }), /extraTopLevel/);
+    await assert.rejects(async () => parseDiscussion({ ...savedScript, scenes: savedScript.scenes.map((scene, index) => index === 0 ? { ...scene, surpriseField: "x" } : scene) }), /surpriseField/);
+  });
+
+  it("applies the host evidence boundary to success_criteria and failure_conditions for generated visuals", async () => {
+    await assert.rejects(async () => parseDiscussion({ ...savedScript, scenes: savedScript.scenes.map((scene, index) => index === 0
+      ? { ...scene, success_criteria: ["现场证据证明了效果"] } : scene) }), /generated visual|证据|evidence/i);
+    await assert.rejects(async () => parseDiscussion({ ...savedScript, scenes: savedScript.scenes.map((scene, index) => index === 0
+      ? { ...scene, failure_conditions: ["画面被证实为真实结果"] } : scene) }), /generated visual|证据|evidence/i);
+  });
+
+  it("accepts honest illustrative wording in criteria and does not modify the document bytes", async () => {
+    const withCriteria = { ...savedScript, scenes: savedScript.scenes.map((scene, index) => index === 0
+      ? { ...scene, success_criteria: ["示意画面可读"], failure_conditions: ["卡面缺失标注"] } : scene) };
+    const task = parseDiscussion(withCriteria);
+    assert.deepEqual((task.payload as { currentDocument: unknown }).currentDocument, withCriteria);
   });
 });

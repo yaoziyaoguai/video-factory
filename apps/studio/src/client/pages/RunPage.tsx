@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import type { StudioCostRunDetail, StudioCreativeReviewCommandInput, StudioCreativeReviewHistory, StudioCreativeReviewSnapshot, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProductionInput, StudioProvider, StudioReworkDraft, StudioRunDetail, StudioNarrationRevisionInput,
   StudioSceneResourceRevisionInput, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
 import { studioApi, subscribeToRun } from "../api.js";
+import { pendingLocalReviewCommand, observePendingLocalReviewCommand, submitLocalReviewCommand } from "../review-continuation-command.js";
 import { createRunRead } from "../run-read-coalescer.js";
 import { currentScriptArtifact, sceneNarrationText } from "../scene-narration.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
@@ -24,6 +25,12 @@ export function preferRunSnapshot(current: StudioRunDetail | undefined, next: St
     ...(next.taskRecovery === undefined && current.taskRecovery !== undefined
       ? { taskRecovery: current.taskRecovery }
       : {}),
+    ...(next.optionalReviewTasks === undefined && current.optionalReviewTasks !== undefined
+      ? { optionalReviewTasks: current.optionalReviewTasks } : {}),
+    ...(next.reviewContinuationTargets === undefined && current.reviewContinuationTargets !== undefined
+      ? { reviewContinuationTargets: current.reviewContinuationTargets } : {}),
+    ...(next.optionalReviewUncertaintySafe === undefined && current.optionalReviewUncertaintySafe !== undefined
+      ? { optionalReviewUncertaintySafe: current.optionalReviewUncertaintySafe } : {}),
     ...(next.productionPlanDigest === undefined && current.productionPlanDigest !== undefined
       ? { productionPlanDigest: current.productionPlanDigest }
       : {}),
@@ -263,7 +270,9 @@ function RunPageContent({ runId }: { runId: string }) {
     setDecisionPending(true);
     setError(undefined);
     try {
-      const nextRun = await withMutationProgress(() => studioApi.decide(runId, input));
+      const nextRun = await withMutationProgress(() => input.commandId
+        ? submitLocalReviewCommand(runId, { kind: "decision", input: { ...input, commandId: input.commandId } })
+        : studioApi.decide(runId, input));
       setRun((current) => preferRunSnapshot(current, nextRun));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -284,7 +293,14 @@ function RunPageContent({ runId }: { runId: string }) {
         for (let attempt = 0; attempt < 900; attempt += 1) {
           if (currentRunId.current !== runId) throw new Error("已离开原作品；操作仍保留在原作品中，请返回查询。");
           const operation = await studioApi.creativeReviewCommand(runId, input.commandId);
-          if (operation.status === "running" || operation.status === "unknown") {
+          const independentAudit = input.action === "audit_current" && operation.commandId === input.commandId
+            && operation.status === "unknown" && operation.independentDraftActionsAllowed === true;
+          // C1（收尾包 §5.4.3）：原 discuss/revise 已 unknown 且服务端证明当前稿可独立
+          // 处理时，结束本页无效 busy 轮询——原请求走“核对上一条操作”查询，不再等它。
+          const independentConsultation = (input.action === "discuss" || input.action === "revise")
+            && operation.commandId === input.commandId && operation.status === "unknown"
+            && operation.independentDraftActions?.actions?.length;
+          if (operation.status === "running" || (operation.status === "unknown" && !independentAudit && !independentConsultation)) {
             await new Promise((resolve) => window.setTimeout(resolve, 1_000));
             continue;
           }
@@ -302,11 +318,11 @@ function RunPageContent({ runId }: { runId: string }) {
           if (operation.status === "failed") {
             throw Object.assign(new Error("这次创作操作未成功，当前稿已保留。请查看失败原因和恢复选项；不会自动重复生成。"), { commandCompleted: true });
           }
-          return;
+          return operation;
         }
         throw new Error("原创作任务仍在处理。请稍后查询，不要重复生成。");
       };
-      await observe();
+      return await observe();
     } catch (caught) {
       throw caught;
     } finally {
@@ -561,11 +577,31 @@ function RunPageContent({ runId }: { runId: string }) {
     }
   }
 
-  async function queryOriginalTextTask() {
+  async function prepareReviewContinuation(input: import("../../shared/api.js").StudioReviewContinuationInput) {
+    setNodeMutationPending(true); setError(undefined);
+    try {
+      const next = await submitLocalReviewCommand(runId, { kind: "prepare", input });
+      setRun(current => preferRunSnapshot(current, next));
+      await refreshRunSnapshot();
+    } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); throw caught; }
+    finally { setNodeMutationPending(false); }
+  }
+
+  async function observeLocalReviewCommand(continueOriginal = false) {
+    setNodeMutationPending(true); setError(undefined);
+    try {
+      const next = await observePendingLocalReviewCommand(runId, continueOriginal);
+      if (next) setRun(current => preferRunSnapshot(current, next));
+      else setError("原本地操作仍已受理，尚未完成；请稍后查看。不会自动重发模型或媒体请求。");
+    } catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
+    finally { setNodeMutationPending(false); }
+  }
+
+  async function queryOriginalTextTask(target?: import("../../shared/api.js").StudioOptionalReviewTarget) {
     setNodeMutationPending(true);
     setError(undefined);
     try {
-      const nextRun = await studioApi.queryOriginalTextTask(runId);
+      const nextRun = await studioApi.queryOriginalTextTask(runId, target);
       setRun((current) => preferRunSnapshot(current, nextRun));
       setConnectionWarning(undefined);
     } catch (caught) {
@@ -651,9 +687,14 @@ function RunPageContent({ runId }: { runId: string }) {
       <div className="run-back-row"><Link to="/projects"><ArrowLeft aria-hidden="true" size={16} />制作记录</Link></div>
       {connectionWarning && !isTerminal(run.status) ? <div className="inline-error" role="status"><AlertCircle aria-hidden="true" size={16} />{connectionWarning}</div> : null}
       {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</div> : null}
+      {pendingLocalReviewCommand(runId) ? <section className="task-recovery-panel" aria-label="原本地决定状态">
+        <p>上一条准备或风险决定已保留原编号与输入；先查看状态，不要换编号重复确认。</p>
+        <button type="button" className="button button-secondary" disabled={nodeMutationPending || decisionPending} onClick={() => void observeLocalReviewCommand()}>查看上次决定状态</button>
+        <button type="button" className="button button-secondary" disabled={nodeMutationPending || decisionPending} onClick={() => void observeLocalReviewCommand(true)}>按原操作继续</button>
+      </section> : null}
       {costError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{costError}</div> : null}
       {paidOperationError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{paidOperationError}</div> : null}
-      <RunWorkbench run={run} creativeDiscussion={creativeReview ? <CreativeDiscussionPanel key={`${run.id}:${creativeReview.stage}:${creativeReview.reviewPurpose ?? "draft"}`} review={creativeReview} busy={creativeCommandPending || creativeReview.phase === "checking"} onCommand={commandCreativeReview} /> : undefined} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onRequestSceneResourceRevision={requestSceneResourceRevision} onRequestNarrationRevision={requestNarrationRevision} onLoadSceneNarration={loadSceneNarration} onReinspectVisualReview={reinspectVisualReview} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onReviseNodeDocument={reviseNodeDocument} onAuditNodeDocument={auditNodeDocument} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onQueryOriginalTextTask={queryOriginalTextTask} onRetrieveOriginalTextTask={retrieveOriginalTextTask} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
+      <RunWorkbench run={run} creativeDiscussion={creativeReview ? <CreativeDiscussionPanel key={`${run.id}:${creativeReview.stage}:${creativeReview.reviewPurpose ?? "draft"}`} review={creativeReview} busy={creativeCommandPending || creativeReview.phase === "checking"} onCommand={commandCreativeReview} /> : undefined} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onRequestSceneResourceRevision={requestSceneResourceRevision} onRequestNarrationRevision={requestNarrationRevision} onLoadSceneNarration={loadSceneNarration} onReinspectVisualReview={reinspectVisualReview} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onReviseNodeDocument={reviseNodeDocument} onAuditNodeDocument={auditNodeDocument} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onQueryOriginalTextTask={queryOriginalTextTask} onPrepareReviewContinuation={prepareReviewContinuation} onRetrieveOriginalTextTask={retrieveOriginalTextTask} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
       {creativeHistory ? <CreativeReviewHistoryPanel history={creativeHistory} /> : null}
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}
       <NewRunDialog

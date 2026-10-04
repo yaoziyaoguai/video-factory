@@ -1,6 +1,6 @@
 import { Plus, RadioTower } from "lucide-react";
 import type { StudioOpportunity } from "../../shared/api.js";
-import { platformLabel, scoreSourceLabel } from "../presentation.js";
+import { opportunityEvidenceCountLabel, platformLabel, scoreSourceLabel } from "../presentation.js";
 
 interface OpportunityRailProps {
   opportunities: StudioOpportunity[];
@@ -37,7 +37,7 @@ export function OpportunityRail({ opportunities, selectedId, onSelect, onCreate 
               <span className="opportunity-card-copy">
                 <strong>{opportunity.title}</strong>
                 <small>{platformLabel(opportunity.platform)} · {statusLabel(opportunity.status)} · {formatFreshness(opportunity.updatedAt)}</small>
-                <small>{sourceBlocked ? "待补来源 · 仍可开工" : `${opportunity.evidence.length} 条来源线索 · ${scoreSourceLabel(opportunity.scoreProvenance.source)}`}</small>
+                <small>{sourceBlocked ? "待补来源 · 仍可开工" : `${opportunityEvidenceCountLabel(opportunity)} · ${scoreSourceLabel(opportunity.scoreProvenance.source)}`}</small>
               </span>
               <span className="opportunity-card-score">{sourceBlocked ? <small className="opportunity-card-score-label">历史内容潜力</small> : null}{opportunity.score.final}分</span>
             </button>

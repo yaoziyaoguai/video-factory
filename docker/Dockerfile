@@ -76,6 +76,7 @@ COPY packages/production-pipeline/package.json apps/codex-broker/node_modules/@v
 COPY --from=builder /app/packages/production-pipeline/dist/model-connection.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/model-connection.js
 COPY --from=builder /app/packages/production-pipeline/dist/audio-review.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/audio-review.js
 COPY --from=builder /app/packages/production-pipeline/dist/diagnostics.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/diagnostics.js
+COPY --from=builder /app/packages/production-pipeline/dist/visual-evidence-boundary.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/visual-evidence-boundary.js
 COPY apps/codex-broker/deploy apps/codex-broker/deploy
 
 # 宿主机的私密 umask 可能让源码为 0600；镜像应用文件必须可被非 root 用户读取。

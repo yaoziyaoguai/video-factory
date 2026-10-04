@@ -20,7 +20,9 @@ const PLATFORM_LABELS: Record<string, string> = {
   guokr: "果壳",
 };
 
-// 兜底不能退回原值：未知平台恰恰最可能是采集器内部 id，那正是要藏起来的东西。
+// manual 是用户自己补充的参考来源，不是任何外部榜单；未知平台也不能默认当“热榜”
+// （DG-UX-02：把自己的输入或未知来源误标成热榜，用户无法判断哪些事实有依据）。
 export function platformLabel(platform: string): string {
-  return PLATFORM_LABELS[platform] ?? "热榜";
+  if (platform === "manual") return "用户补充";
+  return PLATFORM_LABELS[platform] ?? "其他来源";
 }

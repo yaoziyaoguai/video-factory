@@ -84,6 +84,8 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     authorizeProductionScope: async () => runDetail(),
     amendProductionScope: async () => runDetail(),
     reworkDraft: async () => undefined,
+    prepareReviewContinuation: async () => { throw new StudioConflictError("stub"); },
+    reviewContinuationReceipt: async () => undefined,
     reinspectVisualReview: async () => runDetail(),
     getCreatorSettings: async () => ({
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },

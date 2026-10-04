@@ -4,6 +4,9 @@ import type {
   StudioCreativeReviewConfirmInput,
   StudioCreativeReviewCommandInput,
   StudioCreativeReviewCommandReceipt,
+  StudioReviewContinuationInput,
+  StudioReviewContinuationReceipt,
+  StudioOptionalReviewTarget,
   StudioCreativeReviewHistory,
   StudioCreativeReviewSnapshot,
   StudioSceneRevisionInput,
@@ -390,9 +393,16 @@ export const studioApi = {
     `/api/runs/${encodeURIComponent(runId)}/resume`,
     { method: "POST" },
   ),
-  queryOriginalTextTask: (runId: string) => requestJson<StudioRunDetail>(
+  prepareReviewContinuation: (runId: string, input: StudioReviewContinuationInput) => requestJson<StudioRunDetail>(
+    `/api/runs/${encodeURIComponent(runId)}/review-continuations`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
+  ),
+  reviewContinuationReceipt: (runId: string, commandId: string) => requestJson<StudioReviewContinuationReceipt>(
+    `/api/runs/${encodeURIComponent(runId)}/review-continuations/${encodeURIComponent(commandId)}`,
+  ),
+  queryOriginalTextTask: (runId: string, target?: StudioOptionalReviewTarget) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/task-recovery/query`,
-    { method: "POST" },
+    { method: "POST", ...(target ? { headers: { "content-type": "application/json" }, body: JSON.stringify(target) } : {}) },
   ),
   retrieveOriginalTextTask: (runId: string) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/task-recovery/retrieve`,
@@ -501,9 +511,13 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   if (body?.documentCommandPending) throw new Error(body.error ?? "原文字任务仍在执行，请取回原操作结果。");
   if (!response.ok) {
     notifyAuthenticationLoss(url, response.status);
-    throw new Error(userFacingApiError(body?.error, response.status));
+    throw new StudioApiError(userFacingApiError(body?.error, response.status), response.status);
   }
   return body as T;
+}
+
+export class StudioApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message); this.name = "StudioApiError"; }
 }
 
 async function requestEmpty(url: string, init?: RequestInit): Promise<void> {

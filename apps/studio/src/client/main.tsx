@@ -10,6 +10,9 @@ import "./studio-v3.css";
 import "./creator-tour.css";
 import "./auth.css";
 import "./studio-cplus.css";
+import "./studio-foundation.css";
+import "./studio-library.css";
+import "./studio-workspace.css";
 
 const root = document.getElementById("root");
 if (!root) {

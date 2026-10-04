@@ -361,6 +361,14 @@ export class SeriesStudio {
     if (opportunityId && episode.opportunityId !== opportunityId) {
       throw new StudioConflictError("制作机会与系列单集不匹配，请返回系列路线图重新采用。");
     }
+    // F01：开拍边界核对采用绑定的就是当前稿。当前稿已换版而采用仍旧版的遗留不一致
+    // 必须停在可刷新的冲突上，不能带着旧身份开拍；旧数据缺 contentVersionId 时不加新硬门。
+    if (episode.contentVersionId && episode.adoption && episode.adoption.targetVersionId !== episode.contentVersionId) {
+      throw new StudioConflictError("这条单集的当前稿已经更新，早前的采用不再对应当前版本；请刷新系列路线图重新采用。");
+    }
+    if (context.episode.contentVersionId !== undefined && context.episode.contentVersionId !== episode.contentVersionId) {
+      throw new StudioConflictError("单集携带的内容版本已过期，请刷新系列路线图后重新开始。");
+    }
     if (episode.canonBaseRevision !== series.canon.revision || context.canonBaseRevision !== series.canon.revision) {
       throw new StudioConflictError("系列 canon 已经更新，请刷新单集上下文并重新审计后再制作。");
     }
@@ -439,6 +447,8 @@ export class SeriesStudio {
         viewerPromise: episode.viewerPromise,
         hook: episode.hook,
         payoff: episode.payoff,
+        // F01：创建携带真实内容版本，开拍边界用它核对「采用绑定的就是当前稿」。
+        ...(episode.contentVersionId ? { contentVersionId: episode.contentVersionId } : {}),
         planning: structuredClone(episode.planning),
       },
       bible: structuredClone(series.bible),

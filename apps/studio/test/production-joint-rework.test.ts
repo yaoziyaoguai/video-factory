@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, mock } from "node:test";
 import {
   ProductionPipeline,
+  FileRunStore,
   canonicalJsonV2,
+  CodexBridgeError,
+  RoleAgentLoopError,
   HumanDecisionConflictError,
   type CreativeTreatmentAgent,
   type ProductionBrief,
@@ -21,6 +24,7 @@ import {
   type VisualDirectorAgentInput,
   type WorkerResponse,
 } from "@video-factory/production-pipeline";
+import { ProviderRegistry, WorkflowRunner } from "@video-factory/workflow-core";
 import { ProductionStudio } from "../src/server/production-studio.js";
 import { StudioService } from "../src/server/studio-service.js";
 import { buildStudioApp } from "../src/server/app.js";
@@ -28,6 +32,91 @@ import { studioApi } from "../src/client/api.js";
 import type { StudioProvider } from "../src/shared/api.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
+
+it("replays scoped approval through the formal HTTP consumer before stale-page guards and allows local rework", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-decision-http-"));
+  const pipeline = new ProductionPipeline({ workspaceRoot, worker: new ReworkWorker(),
+    ...jointReworkAgents({ treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] }),
+    assetProviders: REWORK_ASSET_PROVIDERS,
+    providerRuntimeMetadata: [{ id: "deepseek-visual-review-v1", label: "受控视觉", modelId: "deepseek-flash",
+      transport: "unix_socket", billing: "subscription", approvalPolicy: "none", maxAttempts: 1 }],
+    visualReviewAgents: [{ id: "deepseek-visual-review-v1", modelId: "deepseek-flash", review: async input => {
+      if (input.reviewStage === "rendered_video") throw new RoleAgentLoopError("受控原请求待核", {
+        version: "video-factory/agent-loop-v1", role: "视觉审片员", contractVersion: "controlled",
+        criteria: [], status: "failed", maxIterations: 1, iterations: [], failure: { stage: "uncertain" },
+      }, undefined, new CodexBridgeError("受控原请求待核", false, "uncertain"));
+      return { version: "video-factory/visual-review-v1", summary: "受控源素材", scores: {
+        composition: 80, continuity: 80, pacing: 80, legibility: 80, safety: 80 }, findings: [], confidence: .9, recommendation: "approve" };
+    } }] });
+  const input = jointReworkBrief();
+  input.providers.visualReview = "deepseek-visual-review-v1";
+  let run = await confirmCreativeStages(pipeline, await pipeline.start(input));
+  run = await confirmCreativeStages(pipeline, run);
+  const service = new StudioService({ repositoryRoot, workspaceRoot, pipeline });
+  const app = buildStudioApp({ service, logger: false });
+  const visual = run.nodeRuns.find(node => node.nodeId === "visual-review")!;
+  assert.equal(run.status, "needs_human", JSON.stringify(run.nodeRuns.map(node => ({ id: node.nodeId, status: node.status, error: node.error }))));
+  const payload = { commandId: "http-same-approval", interventionId: visual.intervention!.id, expectedRunRevision: run.revision,
+    action: "approve", acceptIncomplete: true, reviewEvidenceId: visual.intervention!.evidenceId };
+  const preserved = await pipeline.loadPersisted(run.id);
+  try {
+    for (const [nodeId, field, mode] of [
+      ["voice", "trackPath", "missing"], ["render", "videoPath", "missing"],
+      ["render", "renderManifestPath", "bytes"], ["voice", "trackPath", "outside"],
+    ] as const) {
+      const uri = (run.nodeRuns.find(node => node.nodeId === nodeId)!.output as Record<string, string>)[field]!;
+      const backup = `${uri}.controlled-backup`;
+      const original = await readFile(uri);
+      await rename(uri, backup);
+      const outside = path.join(workspaceRoot, "controlled-outside-audio");
+      try {
+        if (mode === "bytes") await writeFile(uri, Buffer.alloc(original.length, 120));
+        if (mode === "outside") { await writeFile(outside, original); await symlink(outside, uri); }
+        const rejected = await app.inject({ method: "POST", url: `/api/runs/${run.id}/decisions`,
+          payload: { ...payload, commandId: `invalid-${nodeId}-${field}-${mode}` } });
+        assert.equal(rejected.statusCode, 409, rejected.body);
+        assert.deepEqual(await pipeline.loadPersisted(run.id), preserved, "媒体拒绝不能先签字或消耗确认点");
+      } finally { await rm(uri, { force: true }); await rename(backup, uri); }
+    }
+    const first = await app.inject({ method: "POST", url: `/api/runs/${run.id}/decisions`, payload });
+    assert.equal(first.statusCode, 200, first.body.slice(0, 200));
+    // 停点checkpoint早于后台租约释放；只读等原写者结束，不重发决定抢锁。
+    const leasePath = path.join(workspaceRoot, "runs", run.id, ".execution-lease.json.lock");
+    let writerFinished = false;
+    for (let i = 0; i < 100; i++) {
+      try { await access(leasePath); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        writerFinished = true;
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(writerFinished, true, "原HTTP决定的后台写者必须已结束");
+    const adopted = await pipeline.loadPersisted(run.id);
+    assert.equal(adopted.nodeRuns.find(node => node.nodeId === "final-review")?.status, "needs_human");
+    const replay = await app.inject({ method: "POST", url: `/api/runs/${run.id}/decisions`, payload });
+    assert.equal(replay.statusCode, 200, replay.body.slice(0, 200));
+    assert.deepEqual(await pipeline.loadPersisted(run.id), adopted);
+    const changed = await app.inject({ method: "POST", url: `/api/runs/${run.id}/decisions`, payload: { ...payload, note: "异body" } });
+    assert.equal(changed.statusCode, 409, changed.body);
+    const render = adopted.nodeRuns.find(node => node.nodeId === "render")!;
+    const version = render.inputState!.versions.find(item => item.id === render.inputState!.effectiveVersionId)!;
+    const edited = await app.inject({ method: "PUT", url: `/api/runs/${run.id}/nodes/render/input-override`, payload: {
+      expectedRunRevision: adopted.revision, expectedVersionId: version.id, allowTerminalEdit: true,
+      input: { ...version.value as Record<string, unknown>, creatorNote: "显式修改，保持原声音素材" } } });
+    assert.equal(edited.statusCode, 200, edited.body);
+    const revised = await pipeline.loadPersisted(run.id);
+    assert.equal(revised.status, "stale");
+    assert.equal(revised.nodeRuns.find(node => node.nodeId === "final-review")?.status, "stale");
+    assert.equal(revised.nodeRuns.find(node => node.nodeId === "voice")?.outputState?.effectiveVersionId,
+      adopted.nodeRuns.find(node => node.nodeId === "voice")?.outputState?.effectiveVersionId);
+    const staleApprove = await app.inject({ method: "POST", url: `/api/runs/${run.id}/decisions`,
+      payload: { ...payload, commandId: "new-command-old-version" } });
+    assert.equal(staleApprove.statusCode, 409);
+    assert.deepEqual(await pipeline.loadPersisted(run.id), revised);
+  } finally { await app.close(); }
+});
 const relayoutCrashChildPath = fileURLToPath(new URL(
   "./helpers/narration-relayout-crash-child.ts", import.meta.url));
 
@@ -249,6 +338,11 @@ class ReworkWorker {
           attempt: Number(request.attempt),
           licenseNote: "Integration fixture.",
         },
+      }] : []), ...(capability === "voice.synthesize" ? [{
+        kind: "narration_track", uri: String(output.trackPath),
+        sha256: createHash("sha256").update("audio").digest("hex"), sizeBytes: 5,
+        contentType: "audio/mp4", provenance: { providerId: String((request.parameters as Record<string, unknown>).providerId),
+          producerNodeId: String(request.nodeRunId), attempt: Number(request.attempt) },
       }] : [])],
     };
   }
@@ -3286,4 +3380,500 @@ describe("SND19 series normal entry through the real service chain", () => {
   }
   it("SND19 series normal POST creates one bound run", () => assertSeriesCreation(false));
   it("SND19 series normal POST with assetSemanticRank enabled creates one bound run", () => assertSeriesCreation(true));
+});
+
+describe("F01 series unaudited revision can enter normal production (2026-10-02)", () => {
+  // 事故链复现：正式 Store 建栏目 → 正式 revise-current（未审状态）→ 收件箱显式采用 →
+  // 正常 POST /api/runs（Idempotency-Key + 受控真实 Pipeline）。修复前：服务端可信
+  // seriesContext 携带 not_audited 被 parseBrief 拒绝，返回笼统 400「制作参数不符合要求」。
+  function f01SeriesInput(suffix: string) {
+    return {
+      name: `F01 未审修订系列 ${suffix}`,
+      premise: `每集围绕一个可核对的小问题（${suffix}）`,
+      audience: "普通观众",
+      platform: "douyin",
+      category: "education",
+      track: `f01-${suffix}`,
+      pillars: ["可核对"],
+      tone: "具体",
+      visualStyle: "本地示意卡",
+      targetEpisodeCount: 2,
+    };
+  }
+
+  function f01RunInput(opportunity: { id: string; title: string; hook: string; audience: string; track: string }) {
+    return {
+      protocolVersion: "video-factory/brief-v1",
+      title: opportunity.title,
+      angle: opportunity.hook,
+      audience: opportunity.audience,
+      nicheSlug: opportunity.track,
+      durationSeconds: 20,
+      durationRange: { minSeconds: 20, maxSeconds: 34 },
+      platform: "douyin",
+      reviewMode: "manual",
+      runPurpose: "production",
+      visualReviewPolicy: "allow_unreviewed_first_cut",
+      creationContext: { origin: "series", opportunityId: opportunity.id },
+      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      providers: {
+        script: "codex-screenwriter-v1",
+        director: "api-visual-director-v1",
+        assets: "local-editorial-v1",
+        voice: "macos-say-v1",
+        render: "python-ffmpeg-v1",
+        technicalReview: "python-technical-review-v1",
+      },
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true,
+        creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1", boundaryGates: "user-confirmed-v1" },
+      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
+    };
+  }
+
+  async function f01BuildApp(workspaceRoot: string) {
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new ReworkWorker(),
+      ...jointReworkAgents({ treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] }),
+      assetProviders: REWORK_ASSET_PROVIDERS });
+    let seriesCounter = 0;
+    const service = new StudioService({
+      repositoryRoot,
+      workspaceRoot,
+      pipeline,
+      commandAvailable: async () => true,
+      environment: {},
+      codexAvailability: { available: true, reason: "受控测试：固定本地角色，不连接 Codex broker。",
+        taskKinds: ["script-draft", "creative-treatment", "director-plan", "role-audit"],
+        modelId: "controlled-f01", modelCandidates: [] },
+      createSeriesId: () => `f01-series-${++seriesCounter}`,
+      seriesPlanningAgent: {
+        reviewEpisode: async () => { throw new Error("adopting an unaudited revision must not audit"); },
+        reviseEpisode: async (_series, episode) => ({
+          draft: {
+            episodeNumber: episode.episodeNumber, pillar: episode.pillar, title: episode.title,
+            viewerPromise: episode.viewerPromise, hook: "先给一个可核对的问题", payoff: episode.payoff,
+            fromPrevious: [...episode.continuity.fromPrevious], toNext: [...episode.continuity.toNext],
+          },
+          planning: { ...episode.planning, source: "agent" as const, auditStatus: "not_audited" as const, auditIterations: 0 },
+        }),
+      },
+    });
+    const app = buildStudioApp({ service, logger: false });
+    return { app, pipeline };
+  }
+
+  // 正式路径到「未审采用后的正常创建」；返回 POST 响应与系列事实，供主链与负例复用。
+  async function f01ReviseAndAdopt(app: ReturnType<typeof buildStudioApp>, suffix: string) {
+    const created = await app.inject({ method: "POST", url: "/api/series", payload: f01SeriesInput(suffix) });
+    assert.equal(created.statusCode, 201, created.body);
+    const series = created.json();
+    const revised = await app.inject({ method: "POST", url: `/api/series/${series.id}/episodes/1/revise-current`,
+      payload: { expectedRevision: series.revision, instruction: "把开场写成一个具体问题" } });
+    assert.equal(revised.statusCode, 200, revised.body);
+    const revisedSeries = revised.json();
+    const episode = revisedSeries.episodes.find((item: { episodeNumber: number }) => item.episodeNumber === 1);
+    assert.equal(episode.planning.auditStatus, "not_audited", "修订后的单集必须保持真实未审事实");
+    assert.ok(episode.contentVersionId, "修订必须建立新的内容版本");
+    const inbox = await app.inject({ method: "GET", url: "/api/candidate-inbox?origins=series&limit=100" });
+    assert.equal(inbox.statusCode, 200, inbox.body);
+    const candidate = inbox.json().items.find((item: { seriesId?: string; episodeNumber?: number }) =>
+      item.seriesId === series.id && item.episodeNumber === 1);
+    assert.ok(candidate, `系列 ${series.id} 的第 1 集候选必须出现在收件箱`);
+    const adopted = await app.inject({ method: "POST", url: `/api/candidate-inbox/${candidate.id}/adopt`,
+      payload: { origin: "series", ...(candidate.generationId ? { expectedGenerationId: candidate.generationId } : {}) } });
+    assert.equal(adopted.statusCode, 201, adopted.body);
+    return { series: revisedSeries, opportunity: adopted.json() };
+  }
+
+  it("creates the run from a series episode adopted while genuinely unaudited", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-f01-series-create-"));
+    const { app, pipeline } = await f01BuildApp(workspaceRoot);
+    const errors: string[] = [];
+    const errorCapture = mock.method(app.log, "error", (error: unknown) => {
+      errors.push(error instanceof Error ? error.stack ?? error.message : String(error));
+    });
+    try {
+      const { series, opportunity } = await f01ReviseAndAdopt(app, "main");
+      const listed = (await app.inject({ method: "GET", url: "/api/series" })).json()
+        .find((item: { id: string }) => item.id === series.id);
+      const adopted = listed.episodes.find((item: { episodeNumber: number }) => item.episodeNumber === 1);
+      assert.equal(adopted.status, "selected");
+      assert.equal(adopted.adoption.auditStatus, "not_audited", "采用记录必须保留未审事实");
+      const response = await app.inject({ method: "POST", url: "/api/runs",
+        headers: { "idempotency-key": "f01-series-run-main-1" }, payload: f01RunInput(opportunity) });
+      assert.equal(response.statusCode, 202, `${response.body}\n${errors.join("\n")}`);
+      const started = response.json();
+      assert.ok(started.runId, "202 必须返回真实 runId");
+      const detail = (await app.inject({ method: "GET", url: `/api/runs/${started.runId}` })).json();
+      assert.equal(detail.creationOrigin, "series");
+      assert.equal(detail.seriesId, series.id);
+      assert.equal(detail.episodeNumber, 1);
+      assert.ok(detail.productionReservationId, "run 必须绑定系列生产预留");
+      // 未审事实不因开拍被改写：run 的正式 brief 仍携带 not_audited。
+      const persisted = await pipeline.loadPersisted(started.runId);
+      assert.equal(persisted.initialInput.seriesContext.episode.planning.auditStatus, "not_audited");
+      assert.equal(persisted.initialInput.seriesContext.episode.contentVersionId, adopted.contentVersionId,
+        "创建必须携带采用绑定的内容版本");
+      // 创建后停在第一个人工节点（brief 边界闸门或创作规划），不是 failed。
+      let settled = detail;
+      for (let poll = 0; poll < 100 && settled.status === "running"; poll += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        settled = (await app.inject({ method: "GET", url: `/api/runs/${started.runId}` })).json();
+      }
+      assert.equal(settled.status, "needs_human",
+        `run 必须停在首个人工停点，而不是 ${settled.status}（${settled.nodes?.map((node: { nodeId: string; status: string; error?: string }) => `${node.nodeId}:${node.status}`).join(",")}）`);
+      assert.ok(settled.nodes.some((node: { status: string }) => node.status === "needs_human"));
+      const seriesAfter = (await app.inject({ method: "GET", url: "/api/series" })).json()
+        .find((item: { id: string }) => item.id === series.id);
+      const episodeAfter = seriesAfter.episodes.find((item: { episodeNumber: number }) => item.episodeNumber === 1);
+      assert.equal(episodeAfter.status, "in_production");
+      assert.equal(episodeAfter.runId, started.runId);
+      assert.equal(episodeAfter.planning.auditStatus, "not_audited", "开拍不等于补审");
+
+      // 同幂等键同 body 重放返回原 run；不产生第二条。
+      const replay = await app.inject({ method: "POST", url: "/api/runs",
+        headers: { "idempotency-key": "f01-series-run-main-1" }, payload: f01RunInput(opportunity) });
+      assert.equal(replay.statusCode, 202, replay.body);
+      assert.equal(replay.json().runId, started.runId);
+      const runs = (await app.inject({ method: "GET", url: "/api/runs" })).json();
+      assert.equal(runs.filter((run: { seriesId?: string }) => run.seriesId === series.id).length, 1);
+    } finally {
+      errorCapture.mock.restore();
+      await app.close();
+    }
+  });
+
+  it("keeps the identity and reservation negatives for unaudited series creation (D02)", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-f01-series-negative-"));
+    const { app } = await f01BuildApp(workspaceRoot);
+    try {
+      // 未采用：没有机会记录，创建被拒且不产生 run。
+      const notAdopted = (await app.inject({ method: "GET", url: "/api/series" })).json().at(0)
+        ?? (await app.inject({ method: "POST", url: "/api/series", payload: f01SeriesInput("neg-noadopt") })).json();
+      const bare = f01RunInput({ id: "missing-opportunity", title: notAdopted.episodes[0].title,
+        hook: notAdopted.episodes[0].hook, audience: notAdopted.audience, track: notAdopted.track });
+      bare.creationContext = { origin: "series", opportunityId: "missing-opportunity" };
+      const missing = await app.inject({ method: "POST", url: "/api/runs",
+        headers: { "idempotency-key": "f01-neg-missing-1" }, payload: bare });
+      assert.equal(missing.statusCode, 400);
+      assert.match(missing.json().error, /没有找到与这次制作对应的机会/);
+
+      const { opportunity } = await f01ReviseAndAdopt(app, "neg");
+      const payload = f01RunInput(opportunity);
+      // 同幂等键异 body：409，不新增 run。
+      const first = await app.inject({ method: "POST", url: "/api/runs",
+        headers: { "idempotency-key": "f01-neg-clash-1" }, payload });
+      assert.equal(first.statusCode, 202, first.body);
+      const clash = await app.inject({ method: "POST", url: "/api/runs",
+        headers: { "idempotency-key": "f01-neg-clash-1" }, payload: { ...payload, durationSeconds: 24 } });
+      assert.equal(clash.statusCode, 409);
+      assert.match(clash.json().error, /已被另一组参数使用/);
+      const runs = (await app.inject({ method: "GET", url: "/api/runs" })).json();
+      assert.equal(runs.filter((run: { opportunityId?: string }) => run.opportunityId === opportunity.id).length, 1,
+        "幂等冲突不能产生第二条 run");
+
+      // 已占用单集：再次用同一机会创建被拒（预留/绑定事实由 Store 裁决）。
+      const occupied = await app.inject({ method: "POST", url: "/api/runs",
+        headers: { "idempotency-key": "f01-neg-occupied-1" }, payload });
+      assert.equal(occupied.statusCode, 409, occupied.body);
+      assert.match(occupied.json().error, /已经被其他制作占用|尚未采用/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects a creation whose adoption no longer matches the current content version (D02 stale adoption)", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-f01-series-stale-"));
+    const { app } = await f01BuildApp(workspaceRoot);
+    try {
+      const { series } = await f01ReviseAndAdopt(app, "stale");
+      // 构造遗留漂移形态：持久化 Store 中采用记录指向旧内容版本（正式路由无法产生，
+      // 直接以既有 JSON 文件接缝写入，模拟历史写者留下的不一致）。
+      const storePath = path.join(workspaceRoot, "series", "series.json");
+      const stored = JSON.parse(await readFile(storePath, "utf8"));
+      const storedSeries = stored.series.find((item: { id: string }) => item.id === series.id);
+      const storedEpisode = storedSeries.episodes.find((item: { episodeNumber: number }) => item.episodeNumber === 1);
+      storedEpisode.adoption = { ...storedEpisode.adoption, targetVersionId: "version-stale-legacy" };
+      await writeFile(storePath, `${JSON.stringify(stored, null, 2)}\n`);
+      // 用已采用机会的创建必须被采用版本一致性检查拒绝。
+      const adoptedOpportunity = (await app.inject({ method: "GET", url: "/api/opportunities?origin=series" })).json()
+        .find((item: { seriesId?: string }) => item.seriesId === series.id);
+      assert.ok(adoptedOpportunity, "采用后必须能查到机会");
+      const response = await app.inject({ method: "POST", url: "/api/runs",
+        headers: { "idempotency-key": "f01-stale-1" }, payload: f01RunInput(adoptedOpportunity) });
+      assert.equal(response.statusCode, 409, response.body);
+      assert.match(response.json().error, /当前稿已经更新|不再对应当前版本/);
+      const runs = (await app.inject({ method: "GET", url: "/api/runs" })).json();
+      assert.equal(runs.filter((run: { seriesId?: string }) => run.seriesId === series.id).length, 0,
+        "拒绝不能留下预留泄漏或半成品 run");
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("F03 explicit preparation restores a historically failed creative stop (D06)", () => {
+  it("recovers the preserved workbench through the formal route with idempotent receipts", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-f03-prepare-"));
+    const spies: ReworkSpies = { treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] };
+    const worker = new ReworkWorker();
+    const baseOptions = {
+      workspaceRoot, worker,
+      ...jointReworkAgents(spies),
+      assetProviders: REWORK_ASSET_PROVIDERS,
+    };
+    const pipeline = new ProductionPipeline(baseOptions);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: async () => true, environment: {} });
+    const app = buildStudioApp({ service, logger: false });
+    try {
+      const input = jointReworkBrief();
+      input.workflowFeatures = { ...input.workflowFeatures, boundaryGates: "user-confirmed-v1" };
+      let run = await pipeline.start(input);
+      // 放行 brief 边界闸门，再确认构思与脚本；停在导演创作确认关——那里有保留的当前稿。
+      for (let index = 0; index < 8; index += 1) {
+        if (run.status !== "needs_human") break;
+        const planning = run.nodeRuns.find((node) => node.status === "needs_human" && node.nodeId === "creative-planning")?.intervention;
+        if (planning?.kind === "creative_review" && planning.continuation?.stage === "director") break;
+        if (planning?.kind === "creative_review" && planning.continuation) {
+          const gateNode = run.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+          const shown = (gateNode.output as { creativeReview?: { stages?: Record<string, { checkResult?: { verdict?: string; checkIdentity?: string } }> } })?.creativeReview?.stages?.[planning.continuation.stage]?.checkResult;
+          run = await pipeline.confirmCreativeReview(run.id, {
+            commandId: `d06-confirm-${planning.continuation.stage}-${index + 1}`,
+            actor: "tester",
+            expectedRunRevision: run.revision,
+            expectedReviewRevision: planning.continuation.reviewRevision,
+            stage: planning.continuation.stage,
+            baseDraftSha256: planning.continuation.draftSha256,
+            ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
+            ...(shown?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}),
+          });
+          continue;
+        }
+        const boundary = run.nodeRuns.find((node) => node.status === "needs_human"
+          && node.nodeId !== "creative-planning"
+          && node.intervention?.boundary === "node-complete")?.intervention;
+        if (!boundary) break;
+        run = await pipeline.decide(run.id, {
+          interventionId: boundary.id, action: "approve", actor: "tester",
+          expectedRunRevision: run.revision, reviewEvidenceId: null,
+        });
+      }
+      const gate = run.nodeRuns.find((node) => node.nodeId === "creative-planning")?.intervention;
+      assert.equal(run.status, "needs_human", JSON.stringify(run.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
+      assert.equal(gate?.kind, "creative_review", "必须停在导演创作确认关");
+      assert.equal(gate.continuation?.stage, "director");
+      // 当前合同：目录漂移拒绝这次采用，但不把保留的导演稿和工作台判死。
+      const incompatible = new ProductionPipeline({
+        ...baseOptions,
+        assetProviders: REWORK_ASSET_PROVIDERS.map((provider) => ({ ...provider, deliveryTypes: ["stock_image"] })),
+      });
+      const directorShown = (run.nodeRuns.find((node) => node.nodeId === "creative-planning")!.output as {
+        creativeReview?: { stages?: Record<string, { checkResult?: { checkIdentity?: string } }> };
+      })?.creativeReview?.stages?.director?.checkResult;
+      await assert.rejects(() => incompatible.confirmCreativeReview(run.id, {
+        commandId: "confirm-drift", actor: "tester", stage: gate.continuation!.stage,
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.continuation!.reviewRevision,
+        baseDraftSha256: gate.continuation!.draftSha256,
+        ...(directorShown?.checkIdentity ? { expectedCheckIdentity: directorShown.checkIdentity } : {}),
+      }), HumanDecisionConflictError);
+      assert.deepEqual(await pipeline.loadPersisted(run.id), run, "字段拒绝不能消耗确认点或改写原稿");
+      // 兼容旧失败形态：用正式runner在审计消费边界抛错并真实checkpoint，
+      // 不直接改run.json/status。它保留旧版工作台，供新准备动作恢复。
+      const store = new FileRunStore(path.join(workspaceRoot, "runs"));
+      const historicalRunner = new WorkflowRunner({ providers: new ProviderRegistry(), checkpoint: async snapshot => {
+        const current = await store.load(snapshot.id);
+        if (snapshot.revision === current.revision) await store.checkpoint(snapshot);
+        else await store.save(snapshot, current.revision);
+      } });
+      const failedRun = await historicalRunner.continueWaitingNode({ id: run.workflowId, version: run.workflowVersion,
+        name: "历史审计异常兼容fixture", nodes: [{ id: "creative-planning", label: "创作规划", capability: "storyboard.plan", mode: "automatic",
+          execute: () => { throw new Error("Historical optional audit consumer failed after preserving its draft."); } }] }, run, "creative-planning", { action: "audit_current" });
+      assert.equal(failedRun.status, "failed", failedRun.nodeRuns.map((n) => n.error).join(";"));
+
+      // 显式准备：恢复保留的创作工作台，不签字、不补审、无新模型调用。
+      const beforeCalls = JSON.stringify(spies);
+      const origin = await app.listen({ host: "127.0.0.1", port: 0 });
+      const preservedDraft = (failedRun.nodeRuns.find((node) => node.nodeId === "creative-planning")!.output as {
+        creativeReview: { stages: { director: { currentDraft: { artifactId: string; versionId: string; sha256: string } } } };
+      }).creativeReview.stages.director.currentDraft;
+      const prepareInput = {
+        commandId: "prepare-d06", expectedRunRevision: failedRun.revision,
+        nodeId: "creative-planning", stage: "director",
+        targetArtifactId: preservedDraft.artifactId,
+        targetVersionId: preservedDraft.versionId,
+        targetSha256: preservedDraft.sha256,
+      };
+      const failedDetail = (await fetch(`${origin}/api/runs/${failedRun.id}`));
+      assert.equal(failedDetail.status, 200);
+      const failedProjection = await failedDetail.json();
+      assert.deepEqual(failedProjection.reviewContinuationTargets?.[0], { nodeId: "creative-planning", stage: "director",
+        reviewPurpose: "direction", targetArtifactId: preservedDraft.artifactId,
+        targetVersionId: preservedDraft.versionId, targetSha256: preservedDraft.sha256 },
+      "失败页从正式详情获得当前恢复目标，不猜历史最后文件或自行制造采用资格");
+      const stale = await fetch(`${origin}/api/runs/${failedRun.id}/review-continuations`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...prepareInput, commandId: "prepare-d06-stale", expectedRunRevision: failedRun.revision + 1 }),
+      });
+      assert.equal(stale.status, 409, "过期页面不能恢复或消耗当前确认点");
+      assert.equal((await pipeline.loadPersisted(failedRun.id)).revision, failedRun.revision);
+      const wrongVersion = await fetch(`${origin}/api/runs/${failedRun.id}/review-continuations`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...prepareInput, commandId: "prepare-d06-wrong-version", targetVersionId: "version-not-current" }),
+      });
+      assert.equal(wrongVersion.status, 409, "恢复必须绑定用户实际查看的不可变稿版本");
+      assert.equal((await pipeline.loadPersisted(failedRun.id)).revision, failedRun.revision);
+      const prepared = await fetch(`${origin}/api/runs/${failedRun.id}/review-continuations`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(prepareInput),
+      });
+      const preparedText = await prepared.text();
+      assert.equal(prepared.status, 200, preparedText);
+      const detail = JSON.parse(preparedText);
+      assert.equal(detail.status, "needs_human", "准备后 run 回到人工停点");
+      assert.equal(JSON.stringify(spies), beforeCalls, "准备动作零模型调用");
+      const savedPreparation = await pipeline.loadPersisted(failedRun.id);
+      const diagnostic = savedPreparation.artifacts.find(artifact =>
+        artifact.schemaVersion === "video-factory/optional-review-continuation-v1");
+      assert.ok(diagnostic?.uri, "恢复停点必须有不可变宿主诊断，不只是一条可变提示");
+      const proof = JSON.parse(await readFile(diagnostic.uri, "utf8"));
+      assert.equal(proof.scope, "creative_stage");
+      assert.equal(proof.target.versionId, preservedDraft.versionId);
+      assert.equal(proof.target.sha256, preservedDraft.sha256);
+      assert.equal(proof.adoptionEligibility, "eligible");
+      assert.equal(savedPreparation.decisions.length, failedRun.decisions.length, "准备不是采用签字");
+      const workbench = await fetch(`${origin}/api/runs/${failedRun.id}/creative-review`);
+      assert.equal(workbench.status, 200);
+      const snapshot = await workbench.json();
+      assert.ok(snapshot.stage, "创作工作台恢复");
+      assert.equal(snapshot.phase, "waiting_user");
+      assert.ok(snapshot.draft, "保留的当前稿可读");
+
+      // 同 commandId 同 body：幂等返回同一停点，不新建确认点。
+      const readOnlyReceiptRevision = (await pipeline.loadPersisted(failedRun.id)).revision;
+      await service.getRun(failedRun.id);
+      assert.equal((await pipeline.loadPersisted(failedRun.id)).revision, readOnlyReceiptRevision, "读取详情不隐式准备或推进");
+      const replay = await fetch(`${origin}/api/runs/${failedRun.id}/review-continuations`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(prepareInput),
+      });
+      const replayText = await replay.text();
+      assert.equal(replay.status, 200, replayText);
+      assert.equal(JSON.parse(replayText).revision, detail.revision, "幂等重放不推进 revision");
+      assert.equal((await pipeline.loadPersisted(failedRun.id)).artifacts.filter(artifact =>
+        artifact.schemaVersion === "video-factory/optional-review-continuation-v1").length, 1);
+
+      // 同 commandId 异 body：409。
+      const clash = await fetch(`${origin}/api/runs/${failedRun.id}/review-continuations`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...prepareInput, expectedRunRevision: failedRun.revision + 1 }),
+      });
+      assert.equal(clash.status, 409);
+
+      // 只读回执：applied + isCurrent。
+      const preparedDetail = await service.getRun(failedRun.id);
+      assert.equal(preparedDetail?.activeIntervention?.nodeId, "creative-planning");
+      const receipt = await fetch(`${origin}/api/runs/${failedRun.id}/review-continuations/prepare-d06`);
+      assert.equal(receipt.status, 200);
+      const receiptBody = await receipt.json();
+      assert.equal(receiptBody.state, "applied");
+      assert.equal(receiptBody.isCurrent, true);
+      assert.deepEqual(receiptBody.target, { artifactId: preservedDraft.artifactId, versionId: preservedDraft.versionId, sha256: preservedDraft.sha256 });
+      assert.equal(receiptBody.resultEvidenceId, diagnostic.sha256);
+      assert.equal(receiptBody.resultRunRevision, savedPreparation.revision);
+      assert.equal(receiptBody.resultInterventionId, savedPreparation.nodeRuns.find(node => node.nodeId === "creative-planning")!.intervention!.id);
+      const alreadyWaiting = await fetch(`${origin}/api/runs/${failedRun.id}/review-continuations`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...prepareInput, commandId: "prepare-existing-stop", expectedRunRevision: savedPreparation.revision }),
+      });
+      assert.equal(alreadyWaiting.status, 200, await alreadyWaiting.text());
+      const existingReceipt = await fetch(`${origin}/api/runs/${failedRun.id}/review-continuations/prepare-existing-stop`);
+      assert.equal(existingReceipt.status, 200, "已在相同停点的准备仍登记原操作回执，HTTP未知可查");
+      assert.equal((await pipeline.loadPersisted(failedRun.id)).revision, savedPreparation.revision, "不重复开停点或推进制作版本");
+      const missing = await fetch(`${origin}/api/runs/${failedRun.id}/review-continuations/unknown-cmd`);
+      assert.equal(missing.status, 404);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DG-UX-04（新前端 Dogfood 修复执行包 R2）：讨论失败只属于命令，不属于制作。
+// 走正式 Studio 命令/回执链：POST discuss → 主 run 回原人工停点、稿/版本不变，
+// GET 回执 failed；重放同命令返回原结果不再执行；服务重建后结论一致。
+// ---------------------------------------------------------------------------
+
+it("keeps a failed discussion command at the human stop through the studio command chain", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-discuss-studio-"));
+  const spies: ReworkSpies = { treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] };
+  const agents = jointReworkAgents(spies);
+  let discussCalls = 0;
+  const pipeline = new ProductionPipeline({ workspaceRoot, worker: new ReworkWorker(),
+    assetProviders: REWORK_ASSET_PROVIDERS,
+    ...agents,
+    screenwriterAgent: { ...agents.screenwriterAgent!, discussDetailed: async () => {
+      discussCalls += 1;
+      throw new CodexBridgeError("受控讨论失败（completed_failure）", false, "completed_failure");
+    } } as ScreenwriterAgent,
+  });
+  const studio = new ProductionStudio({ workspaceRoot, pipeline,
+    archiveStore: { list: async () => [], add: async () => {}, remove: async () => {} }, listProviders: async () => [] });
+  let run = await pipeline.start(jointReworkBrief());
+  // 推进到 script 停点（确认 treatment）。
+  {
+    const intervention = run.nodeRuns.find((node) => node.nodeId === "creative-planning")?.intervention;
+    assert.ok(intervention?.continuation && intervention.kind === "creative_review");
+    const gateNode = run.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    const shown = (gateNode.output as { creativeReview?: { stages?: Record<string, { checkResult?: { checkIdentity?: string } }> } })
+      ?.creativeReview?.stages?.[intervention.continuation.stage]?.checkResult;
+    run = await pipeline.confirmCreativeReview(run.id, {
+      commandId: "adopt-treatment-before-discuss", actor: "creator", stage: intervention.continuation.stage,
+      expectedRunRevision: run.revision, expectedReviewRevision: intervention.continuation.reviewRevision,
+      baseDraftSha256: intervention.continuation.draftSha256,
+      ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
+    });
+  }
+  const before = (await studio.creativeReview(run.id))!;
+  assert.equal(before.stage, "script");
+  assert.ok(before.draftVersionId, "脚本停点必须携带版本身份");
+
+  const discussionCommand = {
+    action: "discuss" as const, commandId: "discuss-studio-1", stage: "script" as const,
+    expectedRunRevision: before.runRevision, expectedReviewRevision: before.reviewRevision,
+    baseDraftSha256: before.draftSha256, message: "解释这个安排",
+  };
+  const firstReceipt = await studio.commandCreativeReview(run.id, discussionCommand, "creator");
+  assert.ok(firstReceipt);
+  let finalReceipt = firstReceipt;
+  for (let index = 0; index < 500 && finalReceipt.status === "running"; index += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+    finalReceipt = (await studio.creativeReviewCommand(run.id, "discuss-studio-1"))!;
+  }
+  assert.equal(finalReceipt.status, "failed", "已核清讨论失败的回执是 failed");
+
+  const after = (await studio.creativeReview(run.id))!;
+  const detailAfter = await studio.get(run.id);
+  assert.equal(detailAfter!.status, "needs_human", `主制作不能因讨论失败变 failed：${detailAfter!.nodes.map(node => node.error).join(";")}`);
+  assert.equal(after.stage, "script");
+  assert.equal(after.draftSha256, before.draftSha256);
+  assert.equal(after.draftVersionId, before.draftVersionId);
+  assert.equal(after.reviewRevision, before.reviewRevision, "失败讨论不推进复核轮次");
+  assert.equal(after.messages.length, before.messages.length, "失败不伪造助手回复");
+  assert.equal(after.allowedActions.includes("discuss"), true, "讨论入口保留");
+  assert.equal(after.allowedActions.includes("edit_draft"), true, "人工编辑入口保留");
+  assert.equal(after.allowedActions.includes("confirm"), true, "采用入口保留");
+
+  // 同命令重放：返回原结果，不再执行第二次。
+  const replayReceipt = await studio.commandCreativeReview(run.id, discussionCommand, "creator");
+  assert.equal(replayReceipt.status, "failed");
+  assert.equal(discussCalls, 1, "重放不得再次调用讨论执行");
+
+  // 服务重建（同工作树重开 Studio）后结论一致。
+  const reloaded = new ProductionStudio({ workspaceRoot, pipeline,
+    archiveStore: { list: async () => [], add: async () => {}, remove: async () => {} }, listProviders: async () => [] });
+  const reloadedReceipt = await reloaded.creativeReviewCommand(run.id, "discuss-studio-1");
+  assert.equal(reloadedReceipt!.status, "failed");
+  const reloadedSnapshot = await reloaded.creativeReview(run.id);
+  assert.equal(reloadedSnapshot!.draftSha256, before.draftSha256);
+  assert.equal(reloadedSnapshot!.draftVersionId, before.draftVersionId);
 });

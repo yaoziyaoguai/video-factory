@@ -87,7 +87,10 @@ describe("hot topic board", () => {
   it("shows the editor's real angle when the round came from the editor model", () => {
     render(<HotTopicBoard candidates={[boardItem("api-topic-editor-v1")]} topicGeneration={receipt} onAdopt={noop} />);
 
-    const board = screen.getByRole("region", { name: /热点/ });
+    // DG-UX-05：board 由 section(region) 改为默认收起的 details(group)；
+    // 文字断言仍对整个容器做，收起不等于内容不存在。
+    const board = document.querySelector("details.hot-topic-board") as HTMLDetailsElement;
+    expect(board).not.toBeNull();
     expect(board).toHaveTextContent("别先看演示，先看它能不能替你完成一件真任务。");
     expect(board).toHaveTextContent("每个热点已给出可用方向");
     expect(board).not.toHaveTextContent("本轮总编没有给出选题建议");
@@ -104,7 +107,10 @@ describe("hot topic board", () => {
       />,
     );
 
-    const board = screen.getByRole("region", { name: /热点/ });
+    // DG-UX-05：board 由 section(region) 改为默认收起的 details(group)；
+    // 文字断言仍对整个容器做，收起不等于内容不存在。
+    const board = document.querySelector("details.hot-topic-board") as HTMLDetailsElement;
+    expect(board).not.toBeNull();
     expect(board).toHaveTextContent("本轮总编没有给出选题建议");
     expect(board).toHaveTextContent("总编模型当前不可用。原因：总编任务未就绪。");
     // 规则线索的 hook 是模板套出来的问句，不能当"总编给的方向"印出来。
@@ -121,7 +127,10 @@ describe("hot topic board", () => {
   it("still names the board as rule leads when the receipt is missing from a restored cache", () => {
     render(<HotTopicBoard candidates={[boardItem("trend-heuristic-v1")]} onAdopt={noop} />);
 
-    const board = screen.getByRole("region", { name: /热点/ });
+    // DG-UX-05：board 由 section(region) 改为默认收起的 details(group)；
+    // 文字断言仍对整个容器做，收起不等于内容不存在。
+    const board = document.querySelector("details.hot-topic-board") as HTMLDetailsElement;
+    expect(board).not.toBeNull();
     expect(board).toHaveTextContent("本轮总编没有给出选题建议");
     expect(board).toHaveTextContent("没有经过选题总编");
     expect(board).not.toHaveTextContent("每个热点已给出可用方向");

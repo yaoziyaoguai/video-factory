@@ -25,7 +25,7 @@ export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
   "reference-grammar": "f14b46d1b3e675d21973b6f6ae8daf594b010409007473cdfaa5adbecb1dea8e",
   "visual-review": "7fc682f73d5750ae7776ec9e42f52a043c17e4258d95f368e03937b964e1b73a",
   "role-audit": "657142f6b41c5689214667bcdade73e9143126c069160be28d6df52584719303",
-  "creative-discussion": "cf9d77193dae275f257b115dcb6a8f7a11afe27d8861dc531d1b7d90d9c8827c",
+  "creative-discussion": "a1b700304705f21539a35e55e1a0304a23505707d7a3a3913277dd819fdb9803",
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。

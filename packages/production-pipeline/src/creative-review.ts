@@ -91,6 +91,8 @@ export interface CreativeReviewDiscussResume {
   commandId: string;
   actor: string;
   baseDraftSha256: string;
+  /** C1（收尾包）：原命令指向的完整版本身份；缺失按 legacy 身份只比 SHA+轮次。 */
+  baseDraftVersionId?: string;
   expectedReviewRevision: number;
   message: string;
   selection?: CreativeDiscussionSelection;
@@ -203,12 +205,35 @@ export interface CreativeStageReviewState {
   effectiveUserInstructions: EffectiveUserInstruction[];
   previousEffectiveUserInstructions?: EffectiveUserInstruction[];
   checkResult: CreativeReviewCheckResult | null;
+  /**
+   * F03（2026-10-02 执行包）：可选审计异常的续接诊断。它不是审计结论——没有 score/verdict，
+   * 只记录「这次审计为什么没有有效结论」与原请求事实（unknown/已核清失败/字段问题）。
+   * DG-UX-04（2026-10-03 执行包）扩展到 discuss/revise 咨询：reasonCode discussion_* 的
+   * 记录表示「这次讨论/修改为什么没有完成」，原稿与讨论历史不受影响。
+   * 当前版本已有真实 check 时不被覆盖；换版后随 checkResult 一起清空。
+   */
+  continuation?: CreativeReviewContinuationDiagnostic | null;
   /** 本版累积的全部审计记录（含历史轮）；checkResult 指向最新一条。 */
   auditHistory: CreativeAuditRecord[];
   /** 每版全文快照；旧 run 缺失时由投影层如实标记历史不足。 */
   versionHistory: Array<{ draft: CreativeDraftRef; document: unknown }>;
   /** 已作出的采用决定；不能因返回上游或改稿而抹除。 */
   confirmationHistory: CreativeStageConfirmation[];
+}
+
+export interface CreativeReviewContinuationDiagnostic {
+  /** unknown=原请求仍未核清（只可查询）；error=已核清但无可登记结论或重读失败；rejected_operation=旧操作结果被拒收；completed_not_applied=原请求此后完成但当前稿已被用户独立处理，结果只归档原命令（C1 迟到隔离）。 */
+  status: "unknown" | "error" | "rejected_operation" | "completed_not_applied";
+  /** 稳定 reasonCode：audit_request_unknown / audit_settled_no_result / draft_validation_failed / foreign_operation_result。 */
+  reasonCode: string;
+  detail: string;
+  /** 稿件本身缺必需结构时的字段级问题（机器 path＋可读 message）。 */
+  validationIssues?: Array<{ path: string; code: string; message: string }>;
+  /** 产生该诊断的审计操作身份（initial 派生或 manual commandId 派生）。 */
+  auditOperationId: string;
+  source: "initial" | "manual";
+  commandId?: string;
+  recordedAt: string;
 }
 
 export type CreativeReviewCheckResult = {
@@ -312,6 +337,9 @@ export function returnCreativeReviewToStage(
         .reverse()
         .find((record) => record.versionId === current.currentDraft!.versionId);
       if (applicable) current.checkResult = structuredClone(applicable.result);
+      // F03：适用审计恢复时，同版的异常续接诊断随 checkResult 一起回到 null——
+      // 当前版本已有有效意见，旧诊断不再描述当前事实。
+      current.continuation = null;
     }
   }
   stages[command.targetStage].messages.push({
@@ -422,6 +450,8 @@ export function publishCreativeDraft(
           : structuredClone(current.effectiveUserInstructions),
         confirmation: null,
         checkResult: sameDraft ? current.checkResult : null,
+        // F03：换版后旧版的审计异常诊断不跟随——A→B 的 B 没有 A 的请求事实。
+        continuation: sameDraft ? current.continuation ?? null : null,
       },
     },
   };
@@ -624,8 +654,40 @@ export function recordCreativeReviewCheck(
         ...current,
         phase: "waiting_user",
         checkResult: stamped,
+        // F03：本版取得真实结论后，之前的「无结论」续接诊断不再描述当前事实。
+        continuation: null,
         // 全部审计轮次留痕；checkResult 只指向最新一条（A05）。
         auditHistory: [...(current.auditHistory ?? []), record],
+      },
+    },
+  };
+}
+
+/**
+ * F03：登记审计消费边界的续接诊断。它不触碰 checkResult——当前版本已有真实审计时，
+ * 后来主动再审失败/unknown 只新增诊断，不抹除原意见；未审版本也只是多了一条
+ * 「为什么这轮没有结论」的事实。同一 auditOperationId 的重放是幂等 no-op。
+ */
+export function recordCreativeReviewContinuation(
+  review: CreativeReviewState,
+  stage: CreativeStage,
+  diagnostic: CreativeReviewContinuationDiagnostic,
+): CreativeReviewState {
+  const current = review.stages[stage];
+  if (review.activeStage !== stage || current.phase !== "waiting_user" || !current.currentDraft) {
+    throw new Error(`Creative review stage '${stage}' is not awaiting a continuation.`);
+  }
+  if (current.continuation?.auditOperationId === diagnostic.auditOperationId
+    && current.continuation.status === diagnostic.status) {
+    return review;
+  }
+  return {
+    ...review,
+    stages: {
+      ...review.stages,
+      [stage]: {
+        ...current,
+        continuation: structuredClone(diagnostic),
       },
     },
   };
@@ -656,7 +718,7 @@ export function recordCreativeDiscussion(
     return {
       ...review,
       reviewRevision: review.reviewRevision + 1,
-      stages: { ...review.stages, [command.stage]: { ...current, phase: "waiting_user", messages } },
+      stages: { ...review.stages, [command.stage]: { ...current, phase: "waiting_user", messages, continuation: null } },
     };
   }
   if (result.intent === "propose") {
@@ -671,6 +733,7 @@ export function recordCreativeDiscussion(
           ...current,
           phase: "waiting_user",
           messages,
+          continuation: null,
           proposals: [...current.proposals, {
             proposalId: `proposal:${command.commandId}`,
             baseDraftSha256: current.currentDraft!.sha256,
@@ -699,6 +762,7 @@ export function recordCreativeDiscussion(
         [command.stage]: {
           ...revised.stages[command.stage],
           messages,
+          continuation: null,
           effectiveUserInstructions: [
             ...current.effectiveUserInstructions,
             { commandId: command.commandId, message: command.message, active: true },
@@ -713,7 +777,7 @@ export function recordCreativeDiscussion(
     reviewRevision: review.reviewRevision + 1,
     stages: {
       ...review.stages,
-      [command.stage]: { ...current, phase: "waiting_user", messages },
+      [command.stage]: { ...current, phase: "waiting_user", messages, continuation: null },
     },
   };
 }
@@ -756,6 +820,7 @@ export function applyCreativeReviewDeterministicCommand(
           currentDocument: structuredClone(proposal.document),
           confirmation: null,
           checkResult: null,
+          continuation: null,
           effectiveUserInstructions: [
             ...current.effectiveUserInstructions,
             { commandId: command.commandId, message: `采用备选 ${proposal.proposalId}`, active: true },
@@ -799,6 +864,7 @@ export function applyCreativeReviewDeterministicCommand(
         previousEffectiveUserInstructions: structuredClone(current.effectiveUserInstructions),
         confirmation: null,
         checkResult: null,
+        continuation: null,
       },
     },
   };
@@ -849,6 +915,7 @@ export function applyCreativeReviewEditDraft(
         currentDocument: structuredClone(validatedDocument),
         confirmation: null,
         checkResult: null,
+        continuation: null,
         effectiveUserInstructions: [
           ...current.effectiveUserInstructions,
           { commandId: command.commandId, message: "人工修订这一阶段的稿件", active: true },
@@ -915,7 +982,7 @@ export function parseCreativeReviewResume(value: unknown): CreativeReviewResume 
   }
   if (value.action !== "discuss" && value.action !== "revise") throw new Error("Creative review resume action is invalid.");
   const allowed = new Set([
-    "action", "stage", "commandId", "actor", "baseDraftSha256", "expectedReviewRevision", "message", "selection",
+    "action", "stage", "commandId", "actor", "baseDraftSha256", "baseDraftVersionId", "expectedReviewRevision", "message", "selection",
   ]);
   const unknown = Object.keys(value).find((key) => !allowed.has(key));
   if (unknown) throw new Error(`Creative review resume field '${unknown}' is not allowed.`);
@@ -1009,6 +1076,8 @@ function parseCreativeReviewCommandBase(value: Record<string, unknown>): Omit<Cr
     commandId: requiredText(value.commandId, "commandId"),
     actor: requiredText(value.actor, "actor"),
     baseDraftSha256: sha256(value.baseDraftSha256, "baseDraftSha256"),
+    // C1（收尾包）：完整版本身份可选持久化；缺省按 legacy 身份只比 SHA+轮次。
+    ...(typeof value.baseDraftVersionId === "string" ? { baseDraftVersionId: value.baseDraftVersionId } : {}),
     expectedReviewRevision: Number(value.expectedReviewRevision),
   };
 }
@@ -1078,7 +1147,7 @@ function requiredText(value: unknown, field: string): string {
   return value.trim();
 }
 
-function stableJson(value: unknown): string {
+export function stableJson(value: unknown): string {
   if (value === undefined) return "null";
   if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;

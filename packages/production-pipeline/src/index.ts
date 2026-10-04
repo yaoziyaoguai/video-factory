@@ -128,7 +128,7 @@ export {
   CodexBridgeClient,
   CodexBridgeError,
 } from "./codex-chat.js";
-export type { CodexBridgeClientOptions, CodexPreparedOperation, CodexTaskExecution, CodexTaskKind, CodexTaskRequestOptions, CodexTaskSession, CodexTaskTrace, ModelCandidateAttempt } from "./codex-chat.js";
+export type { CodexBridgeClientOptions, CodexPreparedOperation, CodexPreparedObservation, CodexTaskExecution, CodexTaskKind, CodexTaskRequestOptions, CodexTaskSession, CodexTaskTrace, ModelCandidateAttempt } from "./codex-chat.js";
 export { brokerModelCandidates } from "./codex-task-binding.js";
 export type { AgentLoopTrace, AgentLoopIterationTrace, RoleAudit, RoleAuditIssue } from "./codex-chat.js";
 export { RoleAgentLoopError, runRoleAgentLoop, validateRoleAudit } from "./role-agent-loop.js";
@@ -314,7 +314,7 @@ export type {
   WorkerArtifactDescriptor,
   WorkerResponse,
 } from "./python-worker-client.js";
-export { advanceSceneCandidateRanking, canRetryRejectedReviewNode, effectiveProductionBrief, HumanDecisionConflictError, PaidOperationManualReconciliationError, planningFailureForCreators, ProductionPipeline, productionWorkflowVersion, summarizeReworkImpact, withBoundaryGate } from "./production-pipeline.js";
+export { advanceSceneCandidateRanking, canRetryRejectedReviewNode, effectiveProductionBrief, independentCreativeConsultationActions, HumanDecisionConflictError, PaidOperationManualReconciliationError, planningFailureForCreators, ProductionPipeline, productionWorkflowVersion, summarizeReworkImpact, withBoundaryGate } from "./production-pipeline.js";
 export {
   PRODUCTION_AUTHORIZATION_VERSION,
   canonicalProductionAssetIntentDigest,
@@ -342,6 +342,10 @@ export type {
   ProductionCreativeReviewCommandDraft,
   ProductionPaidOperationItemSummary,
   ProductionPipelineOptions,
+  ProductionReviewContinuationInput,
+  OptionalReviewContinuationEvidence,
+  OriginalOptionalReviewTask,
+  OptionalReviewObservation,
   ProductionNarrationRevisionDraft,
   ProductionReworkImpactSummary,
   ProductionProviderRuntimeMetadata,

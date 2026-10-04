@@ -314,11 +314,15 @@ export interface ProductionSeriesContext {
     viewerPromise: string;
     hook: string;
     payoff: string;
+    /** F01：采用绑定的内容版本。新创建由服务端携带真实值交叉验证；旧上下文可缺省。 */
+    contentVersionId?: string;
     planning: {
       source: "agent" | "rules" | "human";
       role: string;
       auditRole: string;
-      auditStatus: "passed" | "fallback" | "human_override";
+      // F01（2026-10-02）：与 Studio 状态域对齐——auditStatus 是审计描述，不是开拍许可。
+      // 是否可开拍由系列 Store 事实（selected/采用版本/canon/预留）决定，不由这里替用户否决。
+      auditStatus: "passed" | "awaiting_user" | "fallback" | "human_override" | "stale" | "not_audited";
       auditIterations: number;
       auditScore?: number;
       auditSummary?: string;
@@ -1099,6 +1103,9 @@ export function parseProductionSeriesContext(value: unknown): ProductionSeriesCo
       viewerPromise: requireString(episode.viewerPromise, "seriesContext.episode.viewerPromise"),
       hook: requireString(episode.hook, "seriesContext.episode.hook"),
       payoff: requireString(episode.payoff, "seriesContext.episode.payoff"),
+      ...(episode.contentVersionId === undefined
+        ? {}
+        : { contentVersionId: requireString(episode.contentVersionId, "seriesContext.episode.contentVersionId") }),
       planning: parseSeriesEpisodePlanning(planning),
     },
     bible: {
@@ -1149,18 +1156,25 @@ function parseCanonFacts(value: unknown): ProductionSeriesContext["canon"]["fact
   });
 }
 
+const SERIES_EPISODE_PLANNING_AUDIT_STATUSES = new Set<string>([
+  "passed", "awaiting_user", "fallback", "human_override", "stale", "not_audited",
+]);
+
 function parseSeriesEpisodePlanning(value: Record<string, unknown>): ProductionSeriesContext["episode"]["planning"] {
   if (value.source !== "agent" && value.source !== "rules" && value.source !== "human") {
     throw new Error("seriesContext.episode.planning.source is invalid.");
   }
-  if (value.auditStatus !== "passed" && value.auditStatus !== "fallback" && value.auditStatus !== "human_override") {
+  const auditStatus = SERIES_EPISODE_PLANNING_AUDIT_STATUSES.has(String(value.auditStatus))
+    ? value.auditStatus as ProductionSeriesContext["episode"]["planning"]["auditStatus"]
+    : undefined;
+  if (auditStatus === undefined) {
     throw new Error("seriesContext.episode.planning.auditStatus is invalid.");
   }
   return {
     source: value.source,
     role: requireString(value.role, "seriesContext.episode.planning.role"),
     auditRole: requireString(value.auditRole, "seriesContext.episode.planning.auditRole"),
-    auditStatus: value.auditStatus,
+    auditStatus,
     auditIterations: boundedNumber(value.auditIterations, "seriesContext.episode.planning.auditIterations", 0, 3, true),
     ...(value.auditScore === undefined ? {} : { auditScore: boundedNumber(value.auditScore, "seriesContext.episode.planning.auditScore", 0, 100, true) }),
     ...(value.auditSummary === undefined ? {} : { auditSummary: requireString(value.auditSummary, "seriesContext.episode.planning.auditSummary") }),

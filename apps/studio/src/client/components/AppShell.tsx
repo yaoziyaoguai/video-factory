@@ -20,7 +20,8 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
   const searchReturnFocusRef = useRef<HTMLElement | null>(null);
   const location = useLocation();
   const { startFullTour, startPageTour } = useCreatorTour();
-  const today = new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(new Date());
+  const workspaceLabel = location.pathname.startsWith("/projects/") ? "作品工作区"
+    : ({ "/": "创作台", "/projects": "制作记录", "/assets": "素材库", "/templates": "模板资料", "/resources": "创作设置", "/experiments": "制作复盘", "/topics": "选题与构思", "/cases": "案例与脚本" }[location.pathname] ?? "创作空间");
   useEffect(() => {
     void studioApi.health().then((health) => setHealthy(health.status === "ok")).catch(() => setHealthy(false));
   }, []);
@@ -105,10 +106,6 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
           <span className="brand-mark"><Clapperboard aria-hidden="true" size={19} /></span>
           <span><strong>VideoFactory</strong><small>影像创作工作室</small></span>
         </NavLink>
-        <div className="sidebar-pulse">
-          <Sparkles aria-hidden="true" size={15} />
-          <span><small>{today} · 今日创作</small><strong>从证据走到成片</strong></span>
-        </div>
         <nav className="primary-nav" aria-label="主导航" data-tour="primary-nav">
           <NavLink to="/" end aria-label="创作台" title="创作台"><Radar aria-hidden="true" size={18} /><span>创作台</span></NavLink>
           <NavLink to="/projects" data-tour="projects-nav" aria-label="制作记录" title="制作记录"><Layers3 aria-hidden="true" size={18} /><span>制作记录</span></NavLink>
@@ -129,15 +126,12 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
         </div>
       </aside>
       <header className="studio-topbar">
+        <div className="studio-workspace-context" aria-label="当前工作区"><span>工作室</span><span aria-hidden="true">/</span><strong>{workspaceLabel}</strong></div>
         <button className="studio-search-trigger" type="button" onClick={openSearch} aria-label="搜索项目、选题、模板或功能">
           <Search aria-hidden="true" size={17} />
           <span>搜索项目、选题、模板或功能</span>
           <kbd>{navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl"} K</kbd>
         </button>
-        <div className="studio-topbar-context">
-          <span className={`health-dot ${healthy === false ? "health-down" : ""}`} />
-          <span>{username ? `${username} 的创作空间` : "个人创作空间"}</span>
-        </div>
       </header>
       <header className="mobile-studio-header">
         <NavLink className="brand" to="/" aria-label="VideoFactory 创作台">

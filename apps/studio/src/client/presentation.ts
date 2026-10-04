@@ -127,6 +127,30 @@ function uniqueText(values: string[]): string[] {
 
 export { platformLabel } from "../shared/platform-label.js";
 
+/**
+ * DG-UX-02：来源展示的统一口径。manual（或旧数据缺省 origin）机会里“无链接的
+ * manual-supplement 占位”不是真实来源，只从展示计数排除——持久记录不迁移不删除；
+ * 有链接的用户参考、以及 trend/series 机会里真正无链接的外部榜单信号都保留。
+ */
+export function presentableOpportunityEvidence(
+  opportunity: Pick<StudioOpportunity, "origin" | "evidence">,
+): StudioOpportunity["evidence"] {
+  if (opportunity.origin && opportunity.origin !== "manual") return opportunity.evidence;
+  return opportunity.evidence.filter((entry) => !(
+    entry.source === "manual-supplement"
+    && entry.platform === "manual"
+    && !entry.evidenceUrl
+  ));
+}
+
+/** 来源计数的人话文案：零来源如实说“尚未添加”，不伪造线索数。 */
+export function opportunityEvidenceCountLabel(
+  opportunity: Pick<StudioOpportunity, "origin" | "evidence">,
+): string {
+  const count = presentableOpportunityEvidence(opportunity).length;
+  return count === 0 ? "尚未添加参考来源" : `${count} 条来源线索`;
+}
+
 export function providerLabel(providerId?: string): string | undefined {
   if (!providerId) return undefined;
   return ({

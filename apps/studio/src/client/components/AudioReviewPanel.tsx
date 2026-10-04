@@ -8,7 +8,7 @@ export function AudioReviewPanel({ value }: { value: unknown }) {
   if (item?.status !== "completed") return <section className="independent-review-panel" aria-label="声音审片">
     <strong>声音审片 · {item?.status === "uncertain" ? "结果待核实" : item?.status === "failed" ? "未完成" : "未审听"}</strong>
     <p>{typeof item?.reason === "string" ? item.reason : "这份报告没有真实音轨审听证据；视觉意见不能证明声音质量。"}</p>
-    <small>{item?.status === "uncertain" ? "先查询原声音请求，核清后再定版；现有成片仍可查看，不会重复购买。" : "是否继续由你决定；不会自动重新购买或生成素材。"}</small>
+    <small>{item?.status === "uncertain" ? "请查询原声音请求，原声音结果与费用仍待核；是否能进入人工终审，请以当前步骤提供的操作为准。现有成片仍可查看，不会重复购买。" : "是否继续由你决定；不会自动重新购买或生成素材。"}</small>
   </section>;
   try {
     const report = validateAudioReviewReport(item.report, String(item.audioSha256), Number(item.durationMs));
