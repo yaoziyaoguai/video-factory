@@ -12,6 +12,7 @@ import type {
   StudioResourceManifestItem,
   StudioResourceReviewInput,
   StudioTemplateExperimentScorecard,
+  StudioVoiceVersionInfo,
 } from "../shared/api.js";
 import { StudioInputError } from "../shared/api.js";
 import { ResourceReviewStore, type ResourceReviewDecision } from "./resource-review-store.js";
@@ -74,6 +75,7 @@ export class ResourceGovernanceStudio {
           runId: run.id,
           runTitle: run.initialInput.title,
           ...resourceContentUrl(run, item.id, item.sha256),
+          ...voiceVersionAttachment(run, item),
         })));
       } catch {
         unreadableManifestCount += 1;
@@ -322,7 +324,72 @@ function hasMeteredExecution(run: WorkflowRun<ProductionBrief>): boolean {
 function reconstructManifestItems(run: WorkflowRun<ProductionBrief>): StudioResourceManifestItem[] {
   return run.artifacts
     .filter((artifact) => artifact.kind !== "resource_manifest")
-    .map((artifact) => reconstructManifestItem(run, artifact));
+    .map((artifact) => ({
+      ...reconstructManifestItem(run, artifact),
+      ...voiceVersionAttachment(run, { category: reconstructedCategory(artifact.kind, artifact.contentType, artifact.producer?.nodeId), sha256: artifact.sha256, providerId: artifact.provenance.providerId ?? "unknown", id: `reconstructed:${artifact.id}` } as Pick<StudioResourceManifestItem, "category" | "sha256" | "providerId" | "id">),
+    }));
+}
+
+/**
+ * CLOUD-10/P4.2＋CR2：声音条目的 usage 级版本事实（只读）。
+ * 1) 存在 artifact:/reconstructed: 显式 ID 时只按该身份核音频与版本：找不到、类型不是
+ *    voiceover、或与声明 SHA 冲突，都不附版本事实，不换另一个 ID（AP2c）。
+ * 2) 仅真正无显式 ID 的旧 SHA 条目，在唯一可验证音频映射时补身份；零解/多解保持未核实。
+ * 3) 以 voice 节点 outputState.versions 的 artifactIds 关联；effectiveVersionId 存在、该版可寻、
+ *    input/output 均未 stale 才是 current；有效版失效标 stale，其余为 historical。
+ * 4) 找不到身份/版本不返回信息（前端显示“版本归属未核实”），不默认最新/当前。
+ * 5) 版本事实逐 usage 生成，同一 SHA 在不同 run/不同版本各自归属。
+ * 6) 该投影只说明声音版本，不推断“已入当前成片”或“通过终审”。
+ */
+function voiceVersionAttachment(
+  run: WorkflowRun<ProductionBrief>,
+  item: Pick<StudioResourceManifestItem, "id" | "category" | "sha256" | "providerId">,
+): { voiceVersionInfo?: StudioVoiceVersionInfo } {
+  if (item.category !== "voice") return {};
+  const voice = run.nodeRuns.find((node) => node.nodeId === "voice");
+  const outputState = voice?.outputState;
+  if (!outputState?.versions.length) return {};
+  let artifactId: string | undefined;
+  const explicit = /^(?:artifact|reconstructed):(.+)$/u.exec(item.id);
+  if (explicit) {
+    // 显式 ID 只按该身份解析；损坏的显式引用不能被 SHA 解释成另一个当前音频。
+    const candidate = run.artifacts.find((artifact) => artifact.id === explicit[1]);
+    if (!candidate || candidate.kind !== "voiceover") return {};
+    if (item.sha256 && candidate.sha256 && candidate.sha256 !== item.sha256) return {};
+    artifactId = candidate.id;
+  } else if (item.sha256) {
+    const bySha = run.artifacts.filter((artifact) => artifact.kind === "voiceover" && artifact.sha256 === item.sha256);
+    if (bySha.length === 1) artifactId = bySha[0]!.id;
+  }
+  if (!artifactId) return {};
+  const versions = outputState.versions
+    .filter((version) => version.artifactIds.includes(artifactId!))
+    .map((version) => ({
+      versionId: version.id,
+      ...(version.createdAt ? { createdAt: version.createdAt } : {}),
+      state: voiceVersionState(voice!, version.id),
+    }));
+  if (!versions.length) return {};
+  const artifact = run.artifacts.find((candidate) => candidate.id === artifactId);
+  const providerId = artifact?.provenance.providerId ?? item.providerId;
+  const operation: StudioVoiceVersionInfo["operation"] = providerId === "local-relayout-v1"
+    ? "relayout"
+    : providerId === "local-subtitle-recovery-v1"
+      ? "subtitle_recovery"
+      : artifact?.producer?.nodeId === "voice"
+        ? "synthesis"
+        : "unknown";
+  return { voiceVersionInfo: { artifactId, operation, versions } };
+}
+
+function voiceVersionState(
+  voice: NonNullable<WorkflowRun<ProductionBrief>["nodeRuns"][number]>,
+  versionId: string,
+): "current" | "historical" | "stale" {
+  const effective = voice.outputState?.effectiveVersionId === versionId;
+  if (!effective) return "historical";
+  // 有效版本失效（输入或输出已 stale）：仍是该版身份，但不能再称“当前”。
+  return voice.outputState?.stale === true || voice.inputState?.stale === true ? "stale" : "current";
 }
 
 function reconstructManifestItem(run: WorkflowRun<ProductionBrief>, artifact: Artifact): StudioResourceManifestItem {
@@ -462,6 +529,7 @@ function buildAssetIndex(items: StudioResourceManifestItem[]): StudioAssetIndex 
       ...(item.licenseNote ? { licenseNote: item.licenseNote } : {}),
       ...(item.scenePosition !== undefined ? { scenePosition: item.scenePosition } : {}),
       ...(item.selectedInFinal !== undefined ? { selectedInFinal: item.selectedInFinal } : {}),
+      ...(item.voiceVersionInfo ? { voiceVersionInfo: item.voiceVersionInfo } : {}),
     };
     const existing = indexed.get(key);
     if (existing) {

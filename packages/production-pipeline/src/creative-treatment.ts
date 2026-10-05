@@ -157,6 +157,106 @@ export function lockCreativeTreatmentViewerPromise(
   return { ...treatment, viewerPromise: locked };
 }
 
+/** CLOUD-11/P5.1：素材安排缺画面服务的结构化问题码；path/index 参数化，不硬编码数组位。 */
+export type CreativeTreatmentIssueCode = "missing_retrieval_provider";
+
+export interface CreativeTreatmentIssue {
+  code: CreativeTreatmentIssueCode;
+  /** 结构化定位，如 evidenceRequirements[4].retrievalProviderId。 */
+  path: string;
+  /** 该项在 evidenceRequirements 中的 0 基序号；界面用它说“第 N 项”。 */
+  index: number;
+  /** 该项的素材主张，作为定位线索；原稿缺失时省略。 */
+  claim?: string;
+  acquisition: "pipeline_generated" | "pipeline_retrievable";
+  /** 人话说明：告诉用户缺什么、能做什么，不把代码 path 当主说明。 */
+  message: string;
+  /** 原英文诊断（parseCreativeTreatment 同款），供开发者详情/日志使用。 */
+  technicalDetail: string;
+}
+
+/**
+ * 只读诊断（不抛错）：列出 evidenceRequirements 中 acquisition 为
+ * pipeline_generated/pipeline_retrievable 而 retrievalProviderId 为 null/缺失的项。
+ * null（"is required for"腿）与 undefined/缺失（"must be null or a valid provider id"腿）
+ * 都覆盖。解析不出的稿（缺数组/非对象）返回空——那是整体结构问题，交给硬校验拒绝。
+ */
+export function missingRetrievalProviderIssues(value: unknown): CreativeTreatmentIssue[] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return [];
+  const requirements = (value as Record<string, unknown>).evidenceRequirements;
+  if (!Array.isArray(requirements)) return [];
+  const issues: CreativeTreatmentIssue[] = [];
+  requirements.forEach((entry, index) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return;
+    const record = entry as Record<string, unknown>;
+    const acquisition = record.acquisition;
+    if (acquisition !== "pipeline_generated" && acquisition !== "pipeline_retrievable") return;
+    const providerId = record.retrievalProviderId;
+    if (providerId !== null && providerId !== undefined && providerId !== "") return;
+    const claim = typeof record.claim === "string" && record.claim.trim() ? record.claim.trim() : "";
+    issues.push({
+      code: "missing_retrieval_provider",
+      path: `evidenceRequirements[${index}].retrievalProviderId`,
+      index,
+      ...(claim ? { claim } : {}),
+      acquisition,
+      message: `第 ${index + 1} 项素材安排还没选择画面服务，暂不能采用这版。当前稿件和讨论已保留，请在素材安排里补齐后保存。`,
+      technicalDetail: `Creative treatment evidenceRequirements[${index}].retrievalProviderId is required for ${acquisition}.`,
+    });
+  });
+  return issues;
+}
+
+export interface RetrievalProviderSelectionChange {
+  index: number;
+  from: string | null;
+  to: string | null;
+  acquisition: "pipeline_generated" | "pipeline_retrievable";
+}
+
+/**
+ * P5.2：比较两版 treatment 的 evidenceRequirements，列出本次编辑里 retrievalProviderId
+ * 实际发生变化的项（按数组位置对齐；结构变化交给硬校验，这里不做猜测）。服务端边界
+ * 只对“本次新补/改动”的字段核对目录兼容，不给旧有效稿追加新门禁。
+ * CR3（2026-10-05 复审）：末尾新增行带出的新选择、以及取得方式改变（同一服务的交付
+ * 类型兼容需重核）同样属于本次编辑引入的选择，不得绕过同一限制；新增行未选服务仍由
+ * 结构校验拒绝，这里不产生记录。
+ */
+export function retrievalProviderSelectionChanges(current: unknown, next: unknown): RetrievalProviderSelectionChange[] {
+  const currentRequirements = treatmentRequirementArray(current);
+  const nextRequirements = treatmentRequirementArray(next);
+  if (!currentRequirements || !nextRequirements) return [];
+  const changes: RetrievalProviderSelectionChange[] = [];
+  nextRequirements.forEach((entry, index) => {
+    const acquisition = entry.acquisition;
+    if (acquisition !== "pipeline_generated" && acquisition !== "pipeline_retrievable") return;
+    const to = normalizedProviderValue(entry.retrievalProviderId);
+    const previous = currentRequirements[index];
+    if (!previous) {
+      // 本次编辑新增的行：带服务的新选择受同一来源限制约束。
+      if (to) changes.push({ index, from: null, to, acquisition });
+      return;
+    }
+    const previousAcquisition = previous.acquisition;
+    const from = normalizedProviderValue(previous.retrievalProviderId);
+    if (from === to && previousAcquisition === acquisition) return;
+    changes.push({ index, from, to, acquisition });
+  });
+  return changes;
+}
+
+function treatmentRequirementArray(value: unknown): Array<Record<string, unknown>> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const requirements = (value as Record<string, unknown>).evidenceRequirements;
+  if (!Array.isArray(requirements)) return undefined;
+  return requirements.filter((entry): entry is Record<string, unknown> =>
+    typeof entry === "object" && entry !== null && !Array.isArray(entry));
+}
+
+function normalizedProviderValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 function referenceArray<T>(
   value: unknown,
   field: string,

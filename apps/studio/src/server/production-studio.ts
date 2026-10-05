@@ -65,6 +65,7 @@ import {
   type ReferenceGrammarAgent,
   type ShotGrammar,
   type VisualReviewFinding,
+  missingRetrievalProviderIssues,
   visualReviewFindingKey,
 } from "@video-factory/production-pipeline";
 import {
@@ -1684,6 +1685,30 @@ export class ProductionStudio {
           ? "脚本、导演方案和后续确认会失效；历史稿件与已经可用的素材会保留，重新确认后再生成后续方案。"
           : "导演方案和后续确认会失效；前期构思、历史稿件与已经可用的素材会保留。",
       }));
+    // CLOUD-11/P5.2：treatment 当前稿的只读校验投影——缺画面服务项给结构化定位；
+    // issues 为空表示该缺陷类无问题，不冒充“全部校验通过”。
+    // CR3（2026-10-05 复审）：附带本制作有效画面来源集合（director.assetProviderIds，
+    // 非路由旧路径为 providers.assets），手动补齐的候选只在该集合与可用目录的交集内；
+    // 浏览器禁选不替代服务端命令边界的同一核验。
+    const draftValidation = continuation.stage === "treatment" && isRecord(stageState?.currentDocument)
+      ? (() => {
+        const brief = parsePersistedBrief(current.initialInput);
+        const allowedRetrievalProviderIds = [...(brief.director?.assetProviderIds ?? [brief.providers.assets])];
+        return {
+          ...(isRecord(stageState?.currentDraft) && typeof stageState.currentDraft.versionId === "string"
+            ? { draftVersionId: stageState.currentDraft.versionId } : {}),
+          draftArtifactId: artifact.id,
+          draftSha256: continuation.draftSha256,
+          allowedRetrievalProviderIds,
+          issues: missingRetrievalProviderIssues(stageState.currentDocument).map((issue) => ({
+            code: issue.code, path: issue.path, index: issue.index,
+            ...(issue.claim ? { claim: issue.claim } : {}),
+            acquisition: issue.acquisition,
+            message: issue.message, technicalDetail: issue.technicalDetail,
+          })),
+        };
+      })()
+      : undefined;
     return {
       runId,
       runRevision: current.revision,
@@ -1720,6 +1745,7 @@ export class ProductionStudio {
           .map((instruction) => ({ commandId: String(instruction.commandId ?? ""), message: String(instruction.message ?? "") }))
         : [],
       ...(checkResult ? { checkResult } : {}),
+      ...(draftValidation ? { draftValidation } : {}),
       ...(stopDetail ? { stopDetail } : {}),
       ...(isRecord(stageState?.continuation) && typeof stageState.continuation.status === "string"
         && typeof stageState.continuation.reasonCode === "string"

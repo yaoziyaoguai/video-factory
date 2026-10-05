@@ -24,6 +24,15 @@ interface CreativeDiscussionPanelProps {
   review: StudioCreativeReviewSnapshot;
   busy: boolean;
   onCommand(input: StudioCreativeReviewCommandInput): Promise<void | StudioCreativeReviewCommandReceipt>;
+  /** CLOUD-11/P5.2：run 的服务目录（来自 RunPage runProviders），供“素材安排待补齐”筛选兼容来源。 */
+  providers?: Array<{
+    id: string;
+    capability: string;
+    label: string;
+    available: boolean;
+    kind?: string;
+    deliveryTypes?: string[];
+  }>;
 }
 
 // 与 PlanningStagesPanel 的阶段名保持一致。这里曾经把 treatment 写成"导演方案"、
@@ -50,7 +59,7 @@ interface PendingRiskConfirm {
   command: StudioCreativeReviewCommandInput;
 }
 
-export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDiscussionPanelProps) {
+export function CreativeDiscussionPanel({ review, busy, onCommand, providers = [] }: CreativeDiscussionPanelProps) {
   const purposeKey = review.reviewPurpose ?? "draft";
   // 旧版按版本号写 localStorage 的草稿 key：只作一次性只读导入来源，不再写入。
   const storageKey = `vf:creative-draft:${review.runId}:${review.stage}:${purposeKey}${review.draftVersionId ? `:${review.draftVersionId}` : ""}`;
@@ -607,6 +616,14 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
         </span>
       </header>
 
+      {review.draftValidation && review.draftValidation.issues.length > 0 ? <section className="creative-validation-notice" role="alert">
+        <strong>素材安排待补齐</strong>
+        <p>{review.draftValidation.issues.map((issue) => `第 ${issue.index + 1} 项素材安排还没选择画面服务，暂不能采用这版`).join("；")}。当前稿件和讨论已保留，请在下方“素材安排待补齐”里选择服务后保存。</p>
+        <details className="creative-validation-tech"><summary>技术详情</summary>
+          <ul>{review.draftValidation.issues.map((issue) => <li key={issue.path}>{issue.technicalDetail}</li>)}</ul>
+        </details>
+      </section> : null}
+
       <section className="creative-review-actions creative-decision-bar" id="creative-confirm-footer" aria-label="当前稿件决定">
         <div className="creative-confirm-context" tabIndex={-1}><strong>{hasUnsavedEdits ? "有未保存的手动修改" : review.reviewPurpose === "direction" ? "确认对象：当前导演初稿" : review.reviewPurpose === "material_plan" ? "确认对象：当前选材方案" : `确认对象：当前${STAGE_LABEL[review.stage]}`}</strong><small>{hasUnsavedEdits ? "先保存或放弃修改，再确认采用；不会提交编辑器里的未保存文字。" : review.checkResult ? "采用不会重复审计当前稿，也不会授权购买素材；后续付费仍需单独确认。" : "本版尚未审计。你可主动审计，也可明确采用未审稿；后续付费仍需单独确认。"}</small></div>
         <div className="creative-decision-buttons">
@@ -640,7 +657,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand }: CreativeDis
             }}>查看 {review.checkResult.issues.length} 条建议</button> : null}
           </div>
           {handoffNotice ? <p className="creative-handoff-notice" role="status">当前稿件已更新</p> : null}
-          <CreativeDraftEditor sessionSlotKey={sessionSlotKey} sessionBase={sessionBase} legacyEditStorageKey={`${storageKey}:edit`} draftIdentity={`${review.draftVersionId ?? review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} />
+          <CreativeDraftEditor sessionSlotKey={sessionSlotKey} sessionBase={sessionBase} legacyEditStorageKey={`${storageKey}:edit`} draftIdentity={`${review.draftVersionId ?? review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} evidenceRepairs={review.stage === "treatment" ? review.draftValidation?.issues ?? [] : []} providers={providers} allowedRetrievalProviderIds={review.stage === "treatment" ? review.draftValidation?.allowedRetrievalProviderIds : undefined} />
           <CreativeDraftReader key={`${review.runId}:${draftIdentity}:${review.draftArtifactId}`} stage={review.stage} value={review.draft} />
           {incompleteCheck ? <section className="creative-check-result" role="status"><strong>独立复核未完成 · 无评分</strong><p>{review.checkResult?.summary}</p></section> : null}
           {needsStockConsent ? <section className="creative-check-result" role="status">
@@ -853,7 +870,48 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * 讨论或重新生成；文字修订在这里改完保存，走与 AI 修订相同的制度：换稿 → 停点重现。
  * 需要新审计时由用户主动触发，确认当前稿不会临时补审。
  */
-function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey, draftIdentity, stage, draft, busy, onSave, onDirtyChange }: {
+interface EvidenceRepairIssue {
+  code: string;
+  path: string;
+  index: number;
+  claim?: string;
+  acquisition?: string;
+  message: string;
+  technicalDetail: string;
+}
+
+/** CLOUD-11/P5.2 的兼容来源筛选：capability=asset.prepare、可用、非测试、非 AI 路由器，
+ * deliveryTypes 与该素材的取得方式匹配（generated→生成画面；retrievable→图库画面）。
+ * 目录缺 deliveryTypes 时不猜兼容，按待配置处理。
+ * CR3（2026-10-05 复审）：候选还必须在本制作已选来源集合（allowedRetrievalProviderIds，
+ * 来自当前制作的有效 brief）内；集合未投影时不默认全开。浏览器禁选只是第一道筛选，
+ * 服务端命令边界对同一集合做权威核验。 */
+function compatibleEvidenceProviders<E extends { id: string; capability: string; available: boolean; kind?: string; deliveryTypes?: string[] }>(
+  providers: E[], acquisition: string, allowedRetrievalProviderIds: string[] | undefined,
+): { options: E[]; catalogIncomplete: boolean } {
+  const allowed = acquisition === "pipeline_generated"
+    ? ["generated_image", "generated_video"]
+    : ["stock_image", "stock_video"];
+  const runScope = allowedRetrievalProviderIds ? new Set(allowedRetrievalProviderIds) : undefined;
+  let catalogIncomplete = false;
+  const options = providers.filter((provider) => {
+    if (provider.capability !== "asset.prepare" || !provider.available || provider.kind === "test" || provider.id === "ai-shot-router-v1") return false;
+    if (runScope && !runScope.has(provider.id)) return false;
+    if (!provider.deliveryTypes || provider.deliveryTypes.length === 0) {
+      catalogIncomplete = true;
+      return false;
+    }
+    return provider.deliveryTypes.some((deliveryType) => allowed.includes(deliveryType));
+  });
+  return { options, catalogIncomplete };
+}
+
+const ACQUISITION_LABEL: Record<string, string> = {
+  pipeline_generated: "AI 生成画面",
+  pipeline_retrievable: "图库检索画面",
+};
+
+function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey, draftIdentity, stage, draft, busy, onSave, onDirtyChange, evidenceRepairs = [], providers = [], allowedRetrievalProviderIds }: {
   sessionSlotKey: string;
   sessionBase: CreativeDraftSessionBase;
   legacyEditStorageKey: string;
@@ -863,6 +921,11 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
   busy: boolean;
   onSave(document: Record<string, unknown>): Promise<void>;
   onDirtyChange(dirty: boolean): void;
+  /** 服务端投影的当前稿缺项（CLOUD-11）；按保存稿列出，选择后随完整文档一起保存。 */
+  evidenceRepairs?: EvidenceRepairIssue[];
+  providers?: CreativeDiscussionPanelProps["providers"];
+  /** CR3：本制作有效画面来源集合的只读投影；缺投影时不默认全开。 */
+  allowedRetrievalProviderIds?: string[] | undefined;
 }) {
   const draftKey = JSON.stringify({ stage, draftIdentity, draft });
   const [edited, setEdited] = useState<{ baseKey: string; document: Record<string, unknown> } | null>(() => {
@@ -902,6 +965,33 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
     {/* 收起时不渲染字段：可读稿和编辑器里会出现相同文字，展开才挂载避免同一屏两份同文。 */}
     {open ? <>
       <p className="creative-edit-state" role="status">{stale ? "当前方案已更新。你的未保存文字仍在下方，可先复制留存；请放弃旧稿修改、重新读取当前版本后再编辑。旧稿不能覆盖新稿。" : saving ? "正在保存修订，等待服务端确认…" : saveState === "failed" ? "保存未完成，输入仍保留。请查看错误后重试。" : dirty ? "修改尚未生效；保存后会形成未审新稿，等你决定是否审计或采用。" : saveState === "saved" ? "修订已保存。请核对当前稿，再决定是否审计或采用。" : "可直接修改文字。保存不会自动审计、采用或购买素材。"}</p>
+      {evidenceRepairs.length > 0 ? <fieldset className="creative-evidence-repairs">
+        <legend>素材安排待补齐</legend>
+        <p>以下素材安排还没选择画面服务；选择不会调用外部服务、不报价、不签费用，保存后形成未审新稿。</p>
+        {evidenceRepairs.map((issue) => {
+          const requirements = Array.isArray(current.evidenceRequirements) ? current.evidenceRequirements : [];
+          const entry = requirements[issue.index];
+          const selectedValue = typeof entry === "object" && entry !== null && typeof (entry as Record<string, unknown>).retrievalProviderId === "string"
+            ? (entry as Record<string, unknown>).retrievalProviderId as string : "";
+          const acquisition = issue.acquisition ?? "pipeline_generated";
+          const { options, catalogIncomplete } = compatibleEvidenceProviders(providers, acquisition, allowedRetrievalProviderIds);
+          return <div key={issue.path} className="creative-evidence-repair-row">
+            <span className="creative-evidence-repair-claim">第 {issue.index + 1} 项{issue.claim ? ` · ${issue.claim}` : ""} · {ACQUISITION_LABEL[acquisition] ?? "画面服务"}</span>
+            {options.length > 0 ? <label>
+              <span>画面服务</span>
+              <select aria-label={`第 ${issue.index + 1} 项画面服务`} value={selectedValue} disabled={busy || saving}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setSaveState(undefined);
+                  setEdited({ baseKey: edited?.baseKey ?? draftKey, document: applyEvidenceProviderSelection(structuredClone(current), issue.index, value) });
+                }}>
+                <option value="">未选择</option>
+                {options.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
+              </select>
+            </label> : <p className="creative-evidence-repair-missing" role="note">当前制作未配置可用的对应画面服务{catalogIncomplete ? "（部分来源目录缺少画面类型信息，按待配置处理，不猜测兼容）" : ""}；稿件与讨论保留，可到制作设置配置来源，或用“提出修改”让 AI 调整素材安排。</p>}
+          </div>;
+        })}
+      </fieldset> : null}
       {dirty && editStorageBroken ? <p className="creative-storage-note" role="status">手工修订无法在本机保存；当前页面内已保留，刷新或关闭可能丢失，请先复制。</p> : null}
       {fields.map((field) => <label key={field.key} className="creative-edit-field">
         <span>{field.label}</span>
@@ -928,6 +1018,16 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
       </div>
     </> : null}
   </details>;
+}
+
+/** 把选择写进编辑中的文档：只改该行的 retrievalProviderId，其余字段与用户文字保持原样。 */
+function applyEvidenceProviderSelection(document: Record<string, unknown>, index: number, providerId: string): Record<string, unknown> {
+  const requirements = Array.isArray(document.evidenceRequirements) ? [...document.evidenceRequirements] : [];
+  const entry = requirements[index];
+  if (typeof entry === "object" && entry !== null) {
+    requirements[index] = { ...(entry as Record<string, unknown>), retrievalProviderId: providerId === "" ? null : providerId };
+  }
+  return { ...document, evidenceRequirements: requirements };
 }
 
 interface EditableTextField {

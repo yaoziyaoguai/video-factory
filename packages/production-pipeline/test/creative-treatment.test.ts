@@ -5,6 +5,8 @@ import { CodexBridgeClient } from "../src/codex-chat.js";
 import {
   parseCreativeTreatment,
   lockCreativeTreatmentViewerPromise,
+  missingRetrievalProviderIssues,
+  retrievalProviderSelectionChanges,
   type CreativeTreatment,
 } from "../src/creative-treatment.js";
 import { CodexCreativeTreatmentAgent } from "../src/codex-creative-treatment.js";
@@ -448,4 +450,107 @@ test("producer 输入合同：来源与时长边界先于模型调用被校验",
     /sourceId/,
   );
   assert.deepEqual(client.calls, []);
+});
+
+
+// CLOUD-11/P5.1：缺画面服务字段的结构化诊断——index 参数化（第 1 项与第 5 项），
+// null 与缺失（undefined）两种缺项都覆盖；非 pipeline 取得不误报。
+test("missingRetrievalProviderIssues 参数化定位 null 与缺失两种缺项", () => {
+  const requirements = [
+    { beatId: "evidence", claim: "已提供素材", requirement: "factual_support", suppliedSourceIds: ["source-1"], critical: true, acquisition: "supplied", retrievalProviderId: null },
+    { beatId: "question", claim: "第 1 项生成画面", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated", retrievalProviderId: null },
+    { beatId: "evidence", claim: "已配置检索", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "pipeline_retrievable", retrievalProviderId: "pexels-stock-v1" },
+    { beatId: "payoff", claim: "无需画面", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "not_needed", retrievalProviderId: null },
+    { beatId: "payoff", claim: "第 5 项生成画面", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" },
+  ];
+  const issues = missingRetrievalProviderIssues({ ...valid, evidenceRequirements: requirements });
+  assert.equal(issues.length, 2);
+  assert.deepEqual(issues.map((issue) => issue.index), [1, 4], "index 参数化：第 2 项（0 基 1）与第 5 项（0 基 4）");
+  assert.equal(issues[0]!.path, "evidenceRequirements[1].retrievalProviderId");
+  assert.equal(issues[0]!.acquisition, "pipeline_generated");
+  assert.equal(issues[0]!.claim, "第 1 项生成画面");
+  assert.equal(issues[1]!.path, "evidenceRequirements[4].retrievalProviderId");
+  assert.match(issues[1]!.technicalDetail, /evidenceRequirements\[4\]\.retrievalProviderId is required for pipeline_generated/);
+  assert.match(issues[1]!.message, /第 5 项素材安排还没选择画面服务/);
+  // undefined 与 null 都覆盖：上面第 5 项即缺失（无该字段）。
+  assert.equal(issues.some((issue) => issue.code === "missing_retrieval_provider"), true);
+  // 形状不对/没有该缺陷类时返回空。
+  assert.deepEqual(missingRetrievalProviderIssues(undefined), []);
+  assert.deepEqual(missingRetrievalProviderIssues({ evidenceRequirements: "not-array" }), []);
+  assert.deepEqual(missingRetrievalProviderIssues(valid), []);
+});
+
+test("retrievalProviderSelectionChanges 只列实际改动的字段", () => {
+  const base = {
+    evidenceRequirements: [
+      { acquisition: "pipeline_retrievable", retrievalProviderId: null },
+      { acquisition: "pipeline_generated", retrievalProviderId: "seedream-image-v1" },
+      { acquisition: "supplied", retrievalProviderId: null },
+    ],
+  };
+  const next = {
+    evidenceRequirements: [
+      { acquisition: "pipeline_retrievable", retrievalProviderId: "pexels-stock-v1" },
+      { acquisition: "pipeline_generated", retrievalProviderId: "seedream-image-v1" },
+      { acquisition: "supplied", retrievalProviderId: null },
+    ],
+  };
+  const changes = retrievalProviderSelectionChanges(base, next);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0]!.index, 0);
+  assert.equal(changes[0]!.from, null);
+  assert.equal(changes[0]!.to, "pexels-stock-v1");
+  assert.equal(changes[0]!.acquisition, "pipeline_retrievable");
+  // 长度不一致/形状不完整不猜测。
+  assert.deepEqual(retrievalProviderSelectionChanges(base, { evidenceRequirements: [] }), []);
+  assert.deepEqual(retrievalProviderSelectionChanges(null, next), []);
+});
+
+// CR3（2026-10-05 复审）：新增行与取得方式改变引入的新选择不得绕过同一限制——
+// 否则“先删掉旧行再在末尾补一行带任意服务”或“把取得方式改成 generated”就能
+// 绕过本制作来源范围核对。
+test("retrievalProviderSelectionChanges 覆盖新增行与取得方式改变（CR3）", () => {
+  const base = {
+    evidenceRequirements: [
+      { acquisition: "pipeline_generated", retrievalProviderId: "seedream-image-v1" },
+    ],
+  };
+  // 1) 末尾新增一行 pipeline_generated 且选了服务：属于本次编辑引入的新选择。
+  const withNewRow = {
+    evidenceRequirements: [
+      ...base.evidenceRequirements,
+      { acquisition: "pipeline_retrievable", retrievalProviderId: "pexels-stock-v1" },
+    ],
+  };
+  const newRowChanges = retrievalProviderSelectionChanges(base, withNewRow);
+  assert.equal(newRowChanges.length, 1);
+  assert.equal(newRowChanges[0]!.index, 1);
+  assert.equal(newRowChanges[0]!.from, null);
+  assert.equal(newRowChanges[0]!.to, "pexels-stock-v1");
+  // 新增行未选服务（null）由结构校验拒绝，这里不产生选择改动记录。
+  const withNewEmptyRow = {
+    evidenceRequirements: [
+      ...base.evidenceRequirements,
+      { acquisition: "pipeline_generated", retrievalProviderId: null },
+    ],
+  };
+  assert.deepEqual(retrievalProviderSelectionChanges(base, withNewEmptyRow), []);
+
+  // 2) 同一 provider 但取得方式改变（generated → retrievable）：交付类型兼容必须重新核对。
+  const acquisitionChanged = {
+    evidenceRequirements: [
+      { acquisition: "pipeline_retrievable", retrievalProviderId: "seedream-image-v1" },
+    ],
+  };
+  const acquisitionChanges = retrievalProviderSelectionChanges(base, acquisitionChanged);
+  assert.equal(acquisitionChanges.length, 1);
+  assert.equal(acquisitionChanges[0]!.index, 0);
+  assert.equal(acquisitionChanges[0]!.from, "seedream-image-v1");
+  assert.equal(acquisitionChanges[0]!.to, "seedream-image-v1");
+  assert.equal(acquisitionChanges[0]!.acquisition, "pipeline_retrievable");
+
+  // 3) 取得方式与服务都没动的旧行不产生记录（旧有效稿不加新硬门）。
+  assert.deepEqual(retrievalProviderSelectionChanges(base, {
+    evidenceRequirements: [{ acquisition: "pipeline_generated", retrievalProviderId: "seedream-image-v1" }],
+  }), []);
 });

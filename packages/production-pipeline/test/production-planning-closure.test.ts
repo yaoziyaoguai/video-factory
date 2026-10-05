@@ -491,7 +491,7 @@ const CLOSURE_ASSET_PROVIDERS: VisualAssetProviderCapability[] = [
   { id: "local-editorial-v1", label: "本地编辑卡片", billing: "free", modes: ["本地"], deliveryTypes: ["editorial_card"] },
 ];
 
-function closureBrief(overrides: { models?: Record<string, string>; title?: string; assetSemanticRank?: boolean; creativeReview?: boolean } = {}): ProductionBrief {
+function closureBrief(overrides: { models?: Record<string, string>; title?: string; assetSemanticRank?: boolean; creativeReview?: boolean; assetProviderIds?: string[] } = {}): ProductionBrief {
   return {
     protocolVersion: "video-factory/brief-v1",
     title: overrides.title ?? "joint-v1 规划编辑闭环",
@@ -520,7 +520,10 @@ function closureBrief(overrides: { models?: Record<string, string>; title?: stri
     },
     director: {
       profileId: "auto",
-      assetProviderIds: overrides.assetSemanticRank ? ["pexels-stock-v1"] : ["local-editorial-v1"],
+      // CR3：显式覆盖时按覆盖值（正例须把受控生成来源放进本制作集合）；
+      // 默认维持原口径。
+      assetProviderIds: overrides.assetProviderIds
+        ?? (overrides.assetSemanticRank ? ["pexels-stock-v1"] : ["local-editorial-v1"]),
     },
     ...(overrides.models ? { models: overrides.models } : {}),
     economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
@@ -2487,6 +2490,24 @@ describe("planning failure creator copy (B4-FIX)", () => {
     // 补一句中文说明这是什么，原文一字不动地跟在后面：既不藏信息，也不把机器的话冒充成界面的话。
     assert.match(unregistered, /^这一步没有完成。/);
     assert.match(unregistered, /机器给出的原文：simulated publication failure/);
+
+    // CR3/AP3b（2026-10-05 复审）：旧 run 的缺画面服务错误（null 与缺失两种历史英文格式）
+    // 是字段问题，不是服务/模型故障——不得引导重试或检查模型配置，要指向恢复当前稿后
+    // 在素材安排里补画面服务。窄范围显示翻译，原文保留在技术详情，不驱动任何状态。
+    const nullForm = planningFailureForCreators(
+      "Creative treatment evidenceRequirements[4].retrievalProviderId is required for pipeline_generated.",
+    );
+    assert.doesNotMatch(nullForm, /可以重试|检查这一步使用的服务与模型配置/);
+    assert.match(nullForm, /素材安排|画面服务/);
+    assert.match(nullForm, /恢复当前稿/);
+    assert.match(nullForm, /机器给出的原文：Creative treatment evidenceRequirements\[4\]/);
+    const missingForm = planningFailureForCreators(
+      "Creative treatment evidenceRequirements[0].retrievalProviderId must be null or a valid provider id.",
+    );
+    assert.doesNotMatch(missingForm, /可以重试|检查这一步使用的服务与模型配置/);
+    assert.match(missingForm, /素材安排|画面服务/);
+    assert.match(missingForm, /恢复当前稿/);
+    assert.match(missingForm, /机器给出的原文：Creative treatment evidenceRequirements\[0\]/);
   });
 
   it("keeps a creator-facing Chinese failure reason as written", async () => {
@@ -3298,6 +3319,243 @@ it("F03：不可执行稿审计停点、确认边界拒绝、修正后续跑（�
   const reviewAfter = (planningAfter.output as { creativeReview?: CreativeReviewState; creativeReviewHistory?: CreativeReviewState }).creativeReview
     ?? (planningAfter.output as { creativeReviewHistory: CreativeReviewState }).creativeReviewHistory;
   assert.equal(reviewAfter.stages.treatment.phase, "confirmed", "修正后的稿能正常采用");
+});
+
+// CLOUD-11/P5（2026-10-05 云端修复包）：构思缺画面服务字段的可修正链。
+// 坏稿（第 5 项 pipeline_generated 缺 retrievalProviderId，index 参数化）停在 needs_human 后：
+// 文本编辑不补服务 → 命令边界拒绝、停点/稿件/讨论不变、零外部调用；
+// 补不兼容服务 → 同一边界按 acquisition/deliveryTypes 拒绝；
+// 补兼容服务保存 → 新未审版本；显式采用 → 进入脚本初稿及其一次初稿审计停点。
+it("P5：坏稿可补齐——边界拒绝保停点、兼容校验、补齐保存、采用进脚本（真实 Pipeline）", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-p5-retrieval-repair-"));
+  const spies: ClosureSpies = {
+    treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+    screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+  };
+  // 5 项素材安排：第 1/3 项合法（supplied / 已配置检索），第 5 项 pipeline_generated 缺服务。
+  const badTreatment = {
+    ...legalTreatment("P5 缺画面服务稿"),
+    evidenceRequirements: [
+      { beatId: "beat-1", claim: "已提供素材", requirement: "factual_support" as const, suppliedSourceIds: [], critical: true, acquisition: "supplied" as const, retrievalProviderId: null },
+      { beatId: "beat-1", claim: "第 2 项图库画面", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "pipeline_retrievable" as const, retrievalProviderId: "pexels-stock-v1" },
+      { beatId: "beat-2", claim: "无需画面", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "not_needed" as const, retrievalProviderId: null },
+      { beatId: "beat-1", claim: "第 4 项生成画面", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" as const, retrievalProviderId: "seedream-image-v1" },
+      { beatId: "beat-2", claim: "第 5 项生成画面", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" as const, retrievalProviderId: null },
+    ],
+  };
+  const treatmentPort: CreativeTreatmentAgent = {
+    id: TREATMENT_PROVIDER_ID,
+    modelId: "treatment-model-p5",
+    treat: async () => badTreatment as CreativeTreatment,
+    treatDetailed: async (input: CreativeTreatmentAgentInput) => {
+      if (input.creativeReviewExecution?.mode === "check") {
+        parseCreativeTreatment(input.creativeReviewExecution.candidate, []);
+        throw new Error("Creative treatment evidenceRequirements[4].retrievalProviderId is required for pipeline_generated.");
+      }
+      spies.treatmentModelCalls.push("treatment-model-p5");
+      return { output: badTreatment as CreativeTreatment, trace: {
+        taskKind: "creative-treatment" as const, promptVersion: "v1", prompt: "fixture",
+        providerId: "openai", modelId: "treatment-model-p5" } };
+    },
+  };
+  const pipeline = new ProductionPipeline({
+    workspaceRoot, worker: new ClosureWorker(),
+    treatmentAgents: [{ providerId: "openai", agent: treatmentPort }],
+    screenwriterAgent: closureScreenwriter(spies),
+    directorAgent: closureDirector(spies),
+    assetProviders: [
+      { id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["图库"], deliveryTypes: ["stock_video", "stock_image"] },
+      { id: "seedream-image-v1", label: "Seedream", billing: "metered", modes: ["生成"], deliveryTypes: ["generated_image"] },
+      { id: "local-editorial-v1", label: "本地编辑卡片", billing: "free", modes: ["本地"], deliveryTypes: ["editorial_card"] },
+    ],
+  });
+  // CR3：正例配置显式包含受控生成来源（seedream 在本制作 director.assetProviderIds 里），
+  // 也包含图库来源 pexels——这样下方“图库来源用于生成画面”的反例命中的是交付类型不匹配，
+  // 而不是来源范围门（范围门的拒绝由 AP3 反例单独覆盖）。
+  const run = await pipeline.start(closureBrief({ creativeReview: true, assetProviderIds: ["local-editorial-v1", "seedream-image-v1", "pexels-stock-v1"] }));
+  assert.equal(run.status, "needs_human", "坏稿审计异常停在用户面前");
+  const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+  const review0 = (node.output as { creativeReview: CreativeReviewState }).creativeReview;
+  const gate = node.intervention!.continuation!;
+  assert.equal(review0.stages.treatment.continuation?.reasonCode, "draft_validation_failed");
+  assert.ok(review0.stages.treatment.continuation?.validationIssues?.some((issue) => issue.path.includes("evidenceRequirements[4].retrievalProviderId")));
+  const modelCallsBefore = spies.treatmentModelCalls.length;
+  const auditCallsBefore = spies.treatmentAuditCalls ?? 0;
+  const screenwriterCallsBefore = spies.screenwriterCalls.length;
+  const screenwriterAuditCallsBefore = spies.screenwriterAuditCalls ?? 0;
+  const directorCallsBefore = spies.directorCalls;
+  const artifactsBefore = run.artifacts.length;
+  const decisionsBefore = run.decisions.length;
+
+  // 1) 手动改文字但不补服务：保存被命令边界拒绝，停点与全部事实保留，零外部调用。
+  const textOnlyEdit = { ...badTreatment, viewerPromise: "改了承诺但没补服务" };
+  await assert.rejects(
+    pipeline.dispatchCreativeReviewCommand(run.id, {
+      action: "edit_draft", commandId: "p5-text-only", actor: "creator", stage: gate.stage,
+      expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+      baseDraftSha256: gate.draftSha256, document: textOnlyEdit,
+    }),
+    (error: unknown) => error instanceof HumanDecisionConflictError
+      && /保存被拒绝.*第 5 项素材安排还没选择画面服务/u.test(error.message)
+      && /技术详情.*evidenceRequirements\[4\]\.retrievalProviderId/u.test(error.message),
+  );
+  const afterTextReject = await pipeline.show(run.id);
+  assert.equal(afterTextReject.status, "needs_human", "拒绝后停点保留");
+  assert.equal(afterTextReject.revision, run.revision, "拒绝不产生新版本");
+  assert.equal(afterTextReject.artifacts.length, artifactsBefore, "稿件/工件不变");
+  assert.equal(afterTextReject.decisions.length, decisionsBefore, "决定不变");
+  assert.equal(spies.treatmentModelCalls.length, modelCallsBefore, "拒绝阶段零生成调用");
+  assert.equal((spies.treatmentAuditCalls ?? 0), auditCallsBefore, "拒绝阶段零审计调用");
+  assert.equal(spies.screenwriterCalls.length, screenwriterCallsBefore, "拒绝阶段零编剧调用");
+
+  // 2) 补不兼容服务（图库来源用于生成画面）：同一边界拒绝，兼容说明可读。
+  const incompatibleEdit = {
+    ...badTreatment,
+    evidenceRequirements: badTreatment.evidenceRequirements.map((entry, index) =>
+      index === 4 ? { ...entry, retrievalProviderId: "pexels-stock-v1" } : entry),
+  };
+  await assert.rejects(
+    pipeline.dispatchCreativeReviewCommand(run.id, {
+      action: "edit_draft", commandId: "p5-incompatible", actor: "creator", stage: gate.stage,
+      expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+      baseDraftSha256: gate.draftSha256, document: incompatibleEdit,
+    }),
+    (error: unknown) => error instanceof HumanDecisionConflictError && /第 5 项选择的画面服务（pexels-stock-v1）.*不匹配/u.test(error.message),
+  );
+  const afterCompatReject = await pipeline.show(run.id);
+  assert.equal(afterCompatReject.status, "needs_human");
+  assert.equal(spies.treatmentModelCalls.length, modelCallsBefore, "兼容拒绝也零调用");
+
+  // 3) 旧有效稿不加新硬门：不动服务字段的编辑（文本微调＋补齐第 5 项兼容服务）成功。
+  const repaired = {
+    ...badTreatment,
+    viewerPromise: "补齐服务后的承诺",
+    evidenceRequirements: badTreatment.evidenceRequirements.map((entry, index) =>
+      index === 4 ? { ...entry, retrievalProviderId: "seedream-image-v1" } : entry),
+  };
+  const edited = await pipeline.dispatchCreativeReviewCommand(run.id, {
+    action: "edit_draft", commandId: "p5-repair", actor: "creator", stage: gate.stage,
+    expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+    baseDraftSha256: gate.draftSha256, document: repaired,
+  });
+  const editedRun = await edited.completion;
+  assert.equal(editedRun.status, "needs_human", "补齐保存后回到人工停点");
+  const editedNode = editedRun.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+  const editedReview = (editedNode.output as { creativeReview: CreativeReviewState }).creativeReview;
+  assert.equal(editedReview.stages.treatment.checkResult, null, "新版本未审，不自动审计");
+  assert.equal(editedReview.stages.treatment.currentDraft?.sha256 !== gate.draftSha256, true, "形成新版本");
+  assert.equal(spies.treatmentModelCalls.length, modelCallsBefore, "保存本身零生成调用");
+  assert.equal(spies.screenwriterCalls.length, screenwriterCallsBefore, "保存本身零编剧调用");
+
+  // 4) 用户显式采用：恰好进入脚本初稿＋一次初稿审计停点，不补审旧 treatment。
+  const editedGate = editedNode.intervention!.continuation!;
+  const adopted = await pipeline.confirmCreativeReview(editedRun.id, {
+    commandId: "p5-adopt", actor: "creator", stage: editedGate.stage,
+    expectedRunRevision: editedRun.revision, expectedReviewRevision: editedGate.reviewRevision,
+    baseDraftSha256: editedGate.draftSha256, acknowledgeUnaudited: true,
+  });
+  assert.equal(adopted.status, "needs_human");
+  const adoptedNode = adopted.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+  const adoptedReview = ((adoptedNode.output as { creativeReview?: CreativeReviewState; creativeReviewHistory?: CreativeReviewState }).creativeReview
+    ?? (adoptedNode.output as { creativeReviewHistory: CreativeReviewState }).creativeReviewHistory);
+  assert.equal(adoptedReview.activeStage, "script", "采用后停在脚本阶段");
+  assert.equal(adoptedReview.stages.treatment.phase, "confirmed");
+  // CR3：精确计数——保存/采用链路上 treatment 不补生成不补审；恰好一次脚本初稿生成
+  // ＋恰好一次脚本初稿审计；停在 script，不自动推进 director。
+  assert.equal(spies.treatmentModelCalls.length, modelCallsBefore, "链路全程零补 treatment 生成");
+  assert.equal((spies.treatmentAuditCalls ?? 0), auditCallsBefore, "采用不补审旧 treatment");
+  assert.equal(spies.screenwriterCalls.length, screenwriterCallsBefore + 1, "恰好一次脚本初稿生成");
+  assert.equal((spies.screenwriterAuditCalls ?? 0), screenwriterAuditCallsBefore + 1, "恰好一次脚本初稿审计");
+  assert.equal(spies.directorCalls, directorCallsBefore, "停在 script 不自动 director");
+});
+
+// CR3/AP3（2026-10-05 复审反例）：全局目录里有、但本制作未选择的画面来源，不能通过
+// 手动补字段进入稿件——服务端命令边界按本制作有效来源集合（director.assetProviderIds，
+// 非路由旧路径为 providers.assets）拒绝，保留停点，零外部调用。
+it("CR3/AP3：本制作来源范围外的服务在命令边界被拒绝（真实 Pipeline）", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-cr3-run-scope-"));
+  const spies: ClosureSpies = {
+    treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+    screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+  };
+  const badTreatment = {
+    ...legalTreatment("CR3 来源范围稿"),
+    evidenceRequirements: [
+      { beatId: "beat-2", claim: "生成画面缺服务", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" as const, retrievalProviderId: null },
+    ],
+  };
+  const treatmentPort: CreativeTreatmentAgent = {
+    id: TREATMENT_PROVIDER_ID,
+    modelId: "treatment-model-cr3",
+    treat: async () => badTreatment as CreativeTreatment,
+    treatDetailed: async (input: CreativeTreatmentAgentInput) => {
+      if (input.creativeReviewExecution?.mode === "check") {
+        parseCreativeTreatment(input.creativeReviewExecution.candidate, []);
+        throw new Error("Creative treatment evidenceRequirements[0].retrievalProviderId is required for pipeline_generated.");
+      }
+      spies.treatmentModelCalls.push("treatment-model-cr3");
+      return { output: badTreatment as CreativeTreatment, trace: {
+        taskKind: "creative-treatment" as const, promptVersion: "v1", prompt: "fixture",
+        providerId: "openai", modelId: "treatment-model-cr3" } };
+    },
+  };
+  const pipeline = new ProductionPipeline({
+    workspaceRoot, worker: new ClosureWorker(),
+    treatmentAgents: [{ providerId: "openai", agent: treatmentPort }],
+    screenwriterAgent: closureScreenwriter(spies),
+    directorAgent: closureDirector(spies),
+    assetProviders: [
+      { id: "seedream-image-v1", label: "Seedream", billing: "metered", modes: ["生成"], deliveryTypes: ["generated_image"] },
+      { id: "local-editorial-v1", label: "本地编辑卡片", billing: "free", modes: ["本地"], deliveryTypes: ["editorial_card"] },
+    ],
+  });
+  // 本制作只选了 local-editorial（默认口径）；seedream 在全局目录但不在本制作集合里。
+  const run = await pipeline.start(closureBrief({ creativeReview: true }));
+  assert.equal(run.status, "needs_human");
+  const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+  const gate = node.intervention!.continuation!;
+  const modelCallsBefore = spies.treatmentModelCalls.length;
+  const revisionBefore = run.revision;
+
+  await assert.rejects(
+    pipeline.dispatchCreativeReviewCommand(run.id, {
+      action: "edit_draft", commandId: "cr3-outside-run-scope", actor: "creator", stage: gate.stage,
+      expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+      baseDraftSha256: gate.draftSha256,
+      document: {
+        ...badTreatment,
+        evidenceRequirements: badTreatment.evidenceRequirements.map((entry) => ({ ...entry, retrievalProviderId: "seedream-image-v1" })),
+      },
+    }),
+    (error: unknown) => error instanceof HumanDecisionConflictError
+      && /不在本制作已配置的画面来源/u.test(error.message),
+    "全局有、本制作未选的来源必须被命令边界拒绝",
+  );
+  const after = await pipeline.show(run.id);
+  assert.equal(after.status, "needs_human", "拒绝后停点保留");
+  assert.equal(after.revision, revisionBefore, "拒绝不产生新版本");
+  assert.equal(spies.treatmentModelCalls.length, modelCallsBefore, "拒绝零外部调用");
+  assert.equal(spies.screenwriterCalls.length, 0, "未进入脚本");
+
+  // CR3：被拒命令不登记——同 ID 同体重放、同 ID 异体都再次被同一边界拒绝，不产生新版本。
+  const rejectedDocument = {
+    ...badTreatment,
+    evidenceRequirements: badTreatment.evidenceRequirements.map((entry) => ({ ...entry, retrievalProviderId: "seedream-image-v1" })),
+  };
+  for (const [label, replayDocument] of [["同体", rejectedDocument], ["异体", { ...rejectedDocument, viewerPromise: "换个承诺仍越范围" }]] as const) {
+    await assert.rejects(
+      pipeline.dispatchCreativeReviewCommand(run.id, {
+        action: "edit_draft", commandId: "cr3-outside-run-scope", actor: "creator", stage: gate.stage,
+        expectedRunRevision: after.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, document: replayDocument,
+      }),
+      (error: unknown) => error instanceof HumanDecisionConflictError,
+      `${label}重放必须再次被拒绝`,
+    );
+  }
+  const afterReplay = await pipeline.show(run.id);
+  assert.equal(afterReplay.revision, revisionBefore, "重放拒绝不产生新版本");
+  assert.equal(spies.treatmentModelCalls.length, modelCallsBefore, "重放拒绝零外部调用");
 });
 
 // ---------------------------------------------------------------------------

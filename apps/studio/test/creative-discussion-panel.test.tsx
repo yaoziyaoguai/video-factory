@@ -69,6 +69,121 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// CLOUD-11/P5.2（V15/V16 UI 面）：人话问题＋折叠技术详情；补齐区只列兼容可用来源、
+// 不默认选值；选择写入完整文档随 edit_draft 保存；无兼容来源给真实出口。
+describe("evidence retrieval repair UI", () => {
+  const badTreatment = {
+    version: "video-factory/creative-treatment-v2",
+    viewerPromise: "看完能避开三个决策坑",
+    hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
+    progression: [
+      { beatId: "beat-1", purpose: "建立问题", viewerGain: "识别坑" },
+      { beatId: "beat-2", purpose: "给出方法", viewerGain: "可执行步骤" },
+    ],
+    payoff: "低风险决策清单",
+    visualPrinciples: ["真实动作"],
+    soundPrinciples: ["环境声先行"],
+    evidenceRequirements: [
+      { beatId: "beat-1", claim: "已提供素材", requirement: "factual_support", suppliedSourceIds: [], critical: true, acquisition: "supplied", retrievalProviderId: null },
+      { beatId: "beat-2", claim: "结尾生成画面", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated", retrievalProviderId: null },
+    ],
+    feasibilityQuestions: [],
+  };
+  const repairProviders = [
+    { id: "seedream-image-v1", capability: "asset.prepare", label: "Seedream 图片生成", available: true, kind: "external", deliveryTypes: ["generated_image"] },
+    { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external", deliveryTypes: ["stock_video", "stock_image"] },
+    { id: "unavailable-gen-v1", capability: "asset.prepare", label: "不可用生成", available: false, kind: "external", deliveryTypes: ["generated_image"] },
+    { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" },
+    { id: "minimax-tts-v1", capability: "voice.synthesize", label: "MiniMax 中文配音", available: true, kind: "external" },
+  ];
+
+  function treatmentReview(allowedRetrievalProviderIds: string[] = ["seedream-image-v1"]): StudioCreativeReviewSnapshot {
+    return review({
+      stage: "treatment",
+      draft: badTreatment,
+      draftValidation: {
+        draftArtifactId: "treatment-draft-1",
+        draftSha256: sha,
+        allowedRetrievalProviderIds,
+        issues: [{
+          code: "missing_retrieval_provider",
+          path: "evidenceRequirements[1].retrievalProviderId",
+          index: 1,
+          claim: "结尾生成画面",
+          acquisition: "pipeline_generated",
+          message: "第 2 项素材安排还没选择画面服务，暂不能采用这版。当前稿件和讨论已保留，请在素材安排里补齐后保存。",
+          technicalDetail: "Creative treatment evidenceRequirements[1].retrievalProviderId is required for pipeline_generated.",
+        }],
+      },
+    });
+  }
+
+  it("shows the human problem with collapsed technical details and lists only compatible sources without defaults", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async () => undefined);
+    render(<CreativeDiscussionPanel review={treatmentReview()} busy={false} onCommand={onCommand} providers={repairProviders} />);
+    expect(screen.getByText(/第 2 项素材安排还没选择画面服务，暂不能采用这版/)).toBeInTheDocument();
+    const tech = screen.getByText("技术详情");
+    await user.click(tech);
+    expect(screen.getByText(/evidenceRequirements\[1\]\.retrievalProviderId is required for pipeline_generated/)).toBeInTheDocument();
+
+    // 展开手动修订：补齐区显示第 2 项的 claim 与取得方式人话；select 只列兼容可用来源。
+    await user.click(screen.getByText(/手动修订这份稿件/));
+    expect(screen.getByText(/第 2 项 · 结尾生成画面 · AI 生成画面/)).toBeInTheDocument();
+    const select = screen.getByLabelText("第 2 项画面服务") as HTMLSelectElement;
+    const optionValues = Array.from(select.options).map((option) => option.value);
+    expect(optionValues).toEqual(["", "seedream-image-v1"]);
+    expect(select.value).toBe("");
+    expect(screen.queryByText(/保存被拒绝/)).toBeNull();
+  });
+
+  it("saves the full document with the selected provider and preserves other fields", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
+    render(<CreativeDiscussionPanel review={treatmentReview()} busy={false} onCommand={onCommand} providers={repairProviders} />);
+    await user.click(screen.getByText(/手动修订这份稿件/));
+    await user.selectOptions(screen.getByLabelText("第 2 项画面服务"), "seedream-image-v1");
+    await user.click(screen.getByRole("button", { name: /保存修订/ }));
+    await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
+    const command = onCommand.mock.calls[0]![0];
+    expect(command.action).toBe("edit_draft");
+    if (command.action !== "edit_draft") throw new Error("expected edit_draft command");
+    expect(command.stage).toBe("treatment");
+    const document = command.document as typeof badTreatment;
+    expect(document.evidenceRequirements[1]!.retrievalProviderId).toBe("seedream-image-v1");
+    expect(document.evidenceRequirements[0]!.retrievalProviderId).toBeNull();
+    expect(document.viewerPromise).toBe("看完能避开三个决策坑");
+  });
+
+  it("offers a real exit when no compatible source is configured and keeps the draft", async () => {
+    const user = userEvent.setup();
+    render(<CreativeDiscussionPanel review={treatmentReview()} busy={false} onCommand={vi.fn(async () => undefined)} providers={[]} />);
+    await user.click(screen.getByText(/手动修订这份稿件/));
+    // 无兼容来源：如实说明并给出口，不默认选服务、不改 not_needed。
+    expect(screen.getByText(/当前制作未配置可用的对应画面服务/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("第 2 项画面服务")).toBeNull();
+  });
+
+  // CR3（2026-10-05 复审 AP3 的 UI 面）：补齐候选必须是“本制作已选来源 ∩ 可用目录 ∩
+  // 交付类型匹配”。全局目录里可用且类型匹配、但本制作未选择的服务不得出现；缺投影
+  // 的来源集合也不默认全开。浏览器禁选不替代服务端核验（服务端拒绝由正式 Pipeline 反例覆盖）。
+  it("restricts repair options to this run's configured sources even when the global catalog has more", async () => {
+    const user = userEvent.setup();
+    // 本制作只配置了 local-editorial（editorial_card，与 generated 不匹配）；
+    // seedream 在全局目录可用且类型匹配，但不在本制作集合里。
+    render(<CreativeDiscussionPanel review={treatmentReview(["local-editorial-v1"])} busy={false} onCommand={vi.fn(async () => undefined)} providers={[
+      ...repairProviders,
+      { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑卡片", available: true, kind: "local", deliveryTypes: ["editorial_card"] },
+    ]} />);
+    await user.click(screen.getByText(/手动修订这份稿件/));
+    const select = screen.queryByLabelText("第 2 项画面服务") as HTMLSelectElement | null;
+    if (select) {
+      expect(Array.from(select.options).map((option) => option.value)).toEqual([""]);
+    }
+    expect(screen.getByText(/当前制作未配置可用的对应画面服务/)).toBeInTheDocument();
+  });
+});
+
 describe("CreativeDiscussionPanel", () => {
   it("RF1 does not clear later input even if the creator changed it back to the sent text", async () => {
     let resolve!: () => void;

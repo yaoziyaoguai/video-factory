@@ -179,7 +179,7 @@ function checkedCreativeExecution<T>(output: T, role: string, taskKind: "creativ
 
 function planningAgents(
   spies: PlanningSpies,
-  failure: { treatment?: boolean; screenwriter?: boolean } = {},
+  failure: { treatment?: boolean | string; screenwriter?: boolean } = {},
 ): Pick<ProductionPipelineOptions, "treatmentAgents" | "screenwriterAgent" | "directorAgent" | "assetSemanticRanker"> {
   return {
     treatmentAgents: [{
@@ -189,7 +189,7 @@ function planningAgents(
         modelId: "treatment-primary-model",
         treat: async () => {
           spies.treatmentCalls += 1;
-          if (failure.treatment) throw new Error("构思审计失败：三轮未通过");
+          if (failure.treatment) throw new Error(failure.treatment === true ? "构思审计失败：三轮未通过" : failure.treatment);
           return {
             version: "video-factory/creative-treatment-v2",
             viewerPromise: "看完能避开三个决策坑",
@@ -692,6 +692,27 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
     assert.equal(script?.issue, undefined, "the top-level failure must not be copied onto later stages");
     assert.equal(director?.issue, undefined);
     assert.equal(compile?.issue, undefined);
+  });
+
+  // CR3/AP3b（2026-10-05 复审）：历史 run 的缺画面服务英文诊断到达节点 error 时，阶段
+  // issue 走窄范围人话翻译——指向恢复当前稿后补画面服务，不引导重试或检查模型配置，
+  // 原文保留在“机器给出的原文”里。当前稿不可核（角色抛错无稿）时不断言行号。
+  it("translates the historical missing-provider failure for creators without retry or model-config guidance", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-stage-missing-provider-"));
+    const spies: PlanningSpies = { treatmentCalls: 0, screenwriterCalls: 0, directorCalls: 0, rankCalls: 0 };
+    const harness = newPlanningStudio(workspaceRoot, new PlanningStagesWorker(), planningAgents(spies, {
+      treatment: "Creative treatment evidenceRequirements[4].retrievalProviderId is required for pipeline_generated.",
+    }));
+    const run = await harness.pipeline.start(planningBrief());
+    assert.equal(run.status, "failed");
+    const stages = await planningStagesOf(harness.studio, run.id);
+    const treatment = stages?.find((stage) => stage.id === "treatment");
+    assert.equal(treatment?.status, "failed");
+    const issue = treatment?.issue ?? "";
+    assert.doesNotMatch(issue, /可以重试|检查这一步使用的服务与模型配置/);
+    assert.match(issue, /素材安排|画面服务/);
+    assert.match(issue, /恢复当前稿/);
+    assert.match(issue, /机器给出的原文：Creative treatment evidenceRequirements\[4\]/);
   });
 
   it("keeps earlier checkpoint evidence completed when the screenwriter role fails", async () => {

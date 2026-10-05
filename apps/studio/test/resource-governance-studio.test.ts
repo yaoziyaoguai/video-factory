@@ -635,6 +635,156 @@ describe("ResourceGovernanceStudio", () => {
   });
 });
 
+// CLOUD-10/P4.2：usage 级声音版本事实的投影合同。版本归属只用显式 artifact 身份或唯一
+// SHA 映射；current 需要 effectiveVersionId 可寻且 input/output 未 stale；逐 usage 保留。
+describe("ResourceGovernanceStudio voice version facts", () => {
+  const voiceArtifacts = [
+    { id: "art-voice-a", kind: "voiceover", uri: "/tmp/voice-a.mp4", sha256: "a".repeat(64), sizeBytes: 10, contentType: "audio/mp4", createdAt: "2026-10-01T02:00:00.000Z", producer: { nodeId: "voice", attempt: 1 }, provenance: { providerId: "minimax-tts-v1" } },
+    { id: "art-voice-b", kind: "voiceover", uri: "/tmp/voice-b.mp4", sha256: "b".repeat(64), sizeBytes: 11, contentType: "audio/mp4", createdAt: "2026-10-01T04:00:00.000Z", producer: { nodeId: "voice", attempt: 2 }, provenance: { providerId: "local-relayout-v1" } },
+  ];
+  function voiceRun(manifestPath: string, overrides: { staleOutput?: boolean; multiShaArtifacts?: boolean } = {}): WorkflowRun<ProductionBrief> {
+    const base = completedRun(manifestPath, "run-voice", "声音版本样本");
+    const artifacts = [...voiceArtifacts, ...(overrides.multiShaArtifacts
+      ? [{ id: "art-voice-c", kind: "voiceover", uri: "/tmp/voice-c.mp4", sha256: "a".repeat(64), sizeBytes: 12, contentType: "audio/mp4", createdAt: "2026-10-01T05:00:00.000Z", producer: { nodeId: "voice", attempt: 1 }, provenance: { providerId: "minimax-tts-v1" } }]
+      : []), base.artifacts[0]!];
+    return {
+      ...base,
+      nodeRuns: [
+        ...base.nodeRuns,
+        {
+          nodeId: "voice", status: "succeeded", startedAt: "2026-10-01T02:00:00.000Z", artifactIds: ["art-voice-a", "art-voice-b"],
+          qualityGateResults: [],
+          outputState: {
+            nodeId: "voice", generatedVersionId: "voice-v1", effectiveVersionId: "voice-v2", stale: overrides.staleOutput === true,
+            versions: [
+              { id: "voice-v1", nodeId: "voice", source: "generated", artifactIds: ["art-voice-a"], inputVersionIds: [], createdAt: "2026-10-01T02:05:00.000Z", createdBy: "model", schemaVersion: "1" },
+              { id: "voice-v2", nodeId: "voice", source: "human", artifactIds: ["art-voice-b", "art-voice-a"], inputVersionIds: ["voice-v1"], createdAt: "2026-10-01T04:05:00.000Z", createdBy: "owner", schemaVersion: "1" },
+            ],
+          },
+        },
+      ],
+      artifacts,
+    };
+  }
+  async function writeVoiceManifest(root: string, items: unknown[]): Promise<string> {
+    const manifestPath = path.join(root, "resource_manifest.json");
+    await writeFile(manifestPath, JSON.stringify({ version: "video-factory/resource-manifest-v1", runId: "run-voice", items }));
+    return manifestPath;
+  }
+  const voiceItem = (id: string, sha256?: string) => ({
+    id, category: "voice", kind: "voiceover", providerId: "minimax-tts-v1", contentType: "audio/mp4",
+    ...(sha256 ? { sha256 } : {}),
+    commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "recorded",
+  });
+
+  it("projects current/historical voice versions per usage from explicit artifact ids and provenance", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-voice-version-"));
+    const manifestPath = await writeVoiceManifest(root, [
+      voiceItem("artifact:art-voice-a", "a".repeat(64)),
+      voiceItem("artifact:art-voice-b", "b".repeat(64)),
+    ]);
+    const studio = new ResourceGovernanceStudio(root, async () => [voiceRun(manifestPath)]);
+    const manifest = await studio.manifest();
+    const byArtifact = new Map(manifest.assetIndex.assets.map((asset) => [asset.sha256, asset]));
+    const currentAsset = byArtifact.get("b".repeat(64))!;
+    assert.equal(currentAsset.usages[0]?.voiceVersionInfo?.artifactId, "art-voice-b");
+    assert.equal(currentAsset.usages[0]?.voiceVersionInfo?.operation, "relayout");
+    assert.deepEqual(currentAsset.usages[0]?.voiceVersionInfo?.versions, [
+      { versionId: "voice-v2", createdAt: "2026-10-01T04:05:00.000Z", state: "current" },
+    ]);
+    // 同一字节在 A→B→A 里同时属于当前版与历史版：全部绑定都保留，不静默丢 usage。
+    const historicalAsset = byArtifact.get("a".repeat(64))!;
+    assert.deepEqual(historicalAsset.usages[0]?.voiceVersionInfo?.versions, [
+      { versionId: "voice-v1", createdAt: "2026-10-01T02:05:00.000Z", state: "historical" },
+      { versionId: "voice-v2", createdAt: "2026-10-01T04:05:00.000Z", state: "current" },
+    ]);
+    assert.equal(historicalAsset.usages[0]?.voiceVersionInfo?.operation, "synthesis");
+  });
+
+  it("marks the effective version stale instead of current when the voice output is stale", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-voice-stale-"));
+    const manifestPath = await writeVoiceManifest(root, [voiceItem("artifact:art-voice-b", "b".repeat(64))]);
+    const studio = new ResourceGovernanceStudio(root, async () => [voiceRun(manifestPath, { staleOutput: true })]);
+    const manifest = await studio.manifest();
+    const asset = manifest.assetIndex.assets.find((candidate) => candidate.sha256 === "b".repeat(64))!;
+    assert.deepEqual(asset.usages[0]?.voiceVersionInfo?.versions, [
+      { versionId: "voice-v2", createdAt: "2026-10-01T04:05:00.000Z", state: "stale" },
+    ]);
+  });
+
+  it("keeps unverified attribution honest: no explicit id needs a unique sha mapping, multi-match stays unverified", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-voice-unverified-"));
+    // 无显式 id、SHA 唯一命中 art-voice-a：允许补身份。
+    const uniquePath = await writeVoiceManifest(root, [voiceItem("scene:9:voice", "a".repeat(64))]);
+    const uniqueStudio = new ResourceGovernanceStudio(root, async () => [voiceRun(uniquePath)]);
+    const uniqueManifest = await uniqueStudio.manifest();
+    assert.equal(uniqueManifest.assetIndex.assets[0]?.usages[0]?.voiceVersionInfo?.artifactId, "art-voice-a");
+
+    // 同一 SHA 存在两个 voiceover 产物（art-voice-a/art-voice-c）：多解不猜，
+    // 无显式 id 的 item 保持未核实（不携带 voiceVersionInfo）。
+    const multiRoot = await mkdtemp(path.join(tmpdir(), "video-factory-voice-multi-"));
+    const multiManifestPath = await writeVoiceManifest(multiRoot, [voiceItem("scene:9:voice", "a".repeat(64))]);
+    const multiStudio = new ResourceGovernanceStudio(multiRoot, async () => [voiceRun(multiManifestPath, { multiShaArtifacts: true })]);
+    const multiManifest = await multiStudio.manifest();
+    const multiAsset = multiManifest.assetIndex.assets.find((candidate) => candidate.sha256 === "a".repeat(64))!;
+    assert.equal(multiAsset.usages[0]?.voiceVersionInfo, undefined);
+  });
+
+  it("does not attach voice facts to non-voice categories or runs without voice versions", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-voice-none-"));
+    const manifestPath = await writeVoiceManifest(root, [
+      { id: "scene:1:pexels-stock-v1", category: "visual", kind: "stock_video", providerId: "pexels-stock-v1", sha256: "d".repeat(64), commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "recorded" },
+      voiceItem("artifact:art-voice-a"),
+    ]);
+    const run = voiceRun(manifestPath);
+    run.nodeRuns = run.nodeRuns.filter((node) => node.nodeId !== "voice");
+    const studio = new ResourceGovernanceStudio(root, async () => [run]);
+    const manifest = await studio.manifest();
+    for (const asset of manifest.assetIndex.assets) {
+      for (const usage of asset.usages) {
+        assert.equal(usage.voiceVersionInfo, undefined);
+      }
+    }
+  });
+
+  // CR2（2026-10-05 复审反例 AP2c）：显式 artifact ID 损坏/类型不符/与声明 SHA 冲突时
+  // 不附版本事实，不能偷用 SHA 换绑另一个当前音频；只有无显式 ID 的旧条目才允许
+  // 唯一 SHA 补身份（持久清单与重建清单共用同一判定）。
+  it("keeps a broken explicit artifact id unverified instead of re-binding the same sha to another audio", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "video-factory-voice-broken-id-"));
+    // 显式 ID art-voice-x 不存在；该 item 的 SHA 唯一命中当前音频 art-voice-b。
+    const manifestPath = await writeVoiceManifest(root, [voiceItem("artifact:art-voice-x", "b".repeat(64))]);
+    const studio = new ResourceGovernanceStudio(root, async () => [voiceRun(manifestPath)]);
+    const manifest = await studio.manifest();
+    const asset = manifest.assetIndex.assets.find((candidate) => candidate.sha256 === "b".repeat(64))!;
+    assert.equal(asset.usages[0]?.voiceVersionInfo, undefined);
+  });
+
+  it("does not attach facts when the explicit id hits a non-voiceover artifact or conflicts with the declared sha", async () => {
+    // 显式 ID 指向 resource_manifest 产物：类型不符，不附版本事实。
+    const kindRoot = await mkdtemp(path.join(tmpdir(), "video-factory-voice-kind-id-"));
+    const kindPath = await writeVoiceManifest(kindRoot, [voiceItem("artifact:manifest-1")]);
+    const kindStudio = new ResourceGovernanceStudio(kindRoot, async () => [voiceRun(kindPath)]);
+    const kindManifest = await kindStudio.manifest();
+    for (const asset of kindManifest.assetIndex.assets) {
+      for (const usage of asset.usages) {
+        if (usage.itemId === "artifact:manifest-1") assert.equal(usage.voiceVersionInfo, undefined);
+      }
+    }
+
+    // 显式 ID art-voice-a 与声明 SHA（唯一命中 art-voice-b）冲突：不换绑、不附事实。
+    const conflictRoot = await mkdtemp(path.join(tmpdir(), "video-factory-voice-conflict-id-"));
+    const conflictPath = await writeVoiceManifest(conflictRoot, [voiceItem("artifact:art-voice-a", "b".repeat(64))]);
+    const conflictStudio = new ResourceGovernanceStudio(conflictRoot, async () => [voiceRun(conflictPath)]);
+    const conflictManifest = await conflictStudio.manifest();
+    for (const asset of conflictManifest.assetIndex.assets) {
+      for (const usage of asset.usages) {
+        if (usage.itemId === "artifact:art-voice-a") assert.equal(usage.voiceVersionInfo, undefined);
+      }
+    }
+  });
+});
+
 function completedRun(manifestPath: string, runId = "run-1", title = "知识解释样本"): WorkflowRun<ProductionBrief> {
   return {
     id: runId,

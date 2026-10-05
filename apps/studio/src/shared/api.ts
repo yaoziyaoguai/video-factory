@@ -1566,6 +1566,28 @@ export interface StudioCreativeReviewSnapshot {
     reply?: string;
   }>;
   scopeConflict?: { proposalId: string; sourceRunId: string; requiredScenePositions: number[] };
+  /**
+   * CLOUD-11/P5.2：当前稿的只读校验投影，绑定当前 draftVersionId/artifactId/SHA。
+   * 旧记录没有此字段时服务端校验仍是权威；“没有投影”不等于已校验通过。
+   * CR3（2026-10-05 复审）：allowedRetrievalProviderIds 是本制作有效画面来源集合
+   * （director.assetProviderIds，非路由旧路径为 providers.assets）的只读投影；
+   * 手动补齐的候选来源只在“本制作已选 ∩ 可用目录”内，浏览器禁选不替代服务端核验。
+   */
+  draftValidation?: {
+    draftVersionId?: string;
+    draftArtifactId: string;
+    draftSha256: string;
+    allowedRetrievalProviderIds?: string[];
+    issues: Array<{
+      code: string;
+      path: string;
+      index: number;
+      claim?: string;
+      acquisition?: string;
+      message: string;
+      technicalDetail: string;
+    }>;
+  };
 }
 
 export interface StudioCreativeReviewHistory {
@@ -1845,6 +1867,18 @@ export interface StudioResourceManifestItem {
   semanticTags?: string[];
   selectedInFinal?: boolean;
   reviewDecision?: { action: "confirmed" | "rejected"; reviewedAt: string; reviewedBy: string; note?: string };
+  /** CLOUD-10/P4.2：usage 级声音版本事实，只读投影，由服务端从 run 的声音版本状态推导；旧清单没有此字段。 */
+  voiceVersionInfo?: StudioVoiceVersionInfo;
+}
+
+export interface StudioVoiceVersionInfo {
+  artifactId: string;
+  operation: "synthesis" | "relayout" | "subtitle_recovery" | "unknown";
+  versions: Array<{
+    versionId: string;
+    createdAt?: string;
+    state: "current" | "historical" | "stale";
+  }>;
 }
 
 export interface StudioResourceReviewInput {
@@ -1874,6 +1908,8 @@ export interface StudioIndexedAssetUsage {
   licenseNote?: string;
   scenePosition?: number;
   selectedInFinal?: boolean;
+  /** CLOUD-10/P4.2：本条使用记录的声音版本事实；不同作品/版本各自携带，不合并猜测。 */
+  voiceVersionInfo?: StudioVoiceVersionInfo;
 }
 
 export interface StudioIndexedAsset {

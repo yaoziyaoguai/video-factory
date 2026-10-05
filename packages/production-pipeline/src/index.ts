@@ -191,9 +191,11 @@ export {
   CREATIVE_TREATMENT_TASK_KIND,
   CREATIVE_TREATMENT_VERSION,
   lockCreativeTreatmentViewerPromise,
+  missingRetrievalProviderIssues,
   parseCreativeTreatment,
+  retrievalProviderSelectionChanges,
 } from "./creative-treatment.js";
-export type { CreativeTreatment } from "./creative-treatment.js";
+export type { CreativeTreatment, CreativeTreatmentIssue, CreativeTreatmentIssueCode, RetrievalProviderSelectionChange } from "./creative-treatment.js";
 export {
   CREATIVE_REVIEW_FEATURE,
   CREATIVE_REVIEW_VERSION,

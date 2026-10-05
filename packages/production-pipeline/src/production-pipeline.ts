@@ -97,7 +97,7 @@ import {
 } from "./visual-director.js";
 import type { CreativeTreatmentAgent, CreativeTreatmentAgentInput } from "./codex-creative-treatment.js";
 import { CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION, creativeTreatmentSeriesContext } from "./codex-creative-treatment.js";
-import { CREATIVE_TREATMENT_PROVIDER_ID, parseCreativeTreatment } from "./creative-treatment.js";
+import { CREATIVE_TREATMENT_PROVIDER_ID, missingRetrievalProviderIssues, parseCreativeTreatment, retrievalProviderSelectionChanges } from "./creative-treatment.js";
 import { CREATIVE_REVIEW_FEATURE, contentSha256, stableJson, parseCreativeDiscussionResult, parseCreativeReviewResume, recordCreativeReviewCheck, type CreativeDiscussionResult, type CreativeReviewConfirmResume, type CreativeReviewResume, type CreativeReviewState, type CreativeStage } from "./creative-review.js";
 import { PRODUCTION_AUTHORIZATION_VERSION, assessProductionSpendPlan, canonicalProductionAssetIntentDigest, canonicalQualityContractDigest, foldProductionSpendLedger, parseProductionAuthorizationScope, resolveProductionSpendDecision, scopeCoversSpendPlan, type ProductionAuthorizationScope, type ProductionSpendPlanAssessment } from "./production-authorization.js";
 import {
@@ -879,7 +879,35 @@ export class ProductionPipeline {
    * F03/D05：与图内 validateEditedDraft 同一阶段合同（逐字同源），供命令边界在登记前
    * 校验当前稿。校验失败是"人可处理的字段问题"，不是制作失败——调用方把它转成保留
    * 停点的拒绝，而不是节点 failed。
+   * CR3（2026-10-05 复审）：本次新补/改动的选择先核“本制作有效来源集合”（遵从原执行
+   * 路径 director.assetProviderIds，非路由旧路径按 providers.assets 口径），再核目录
+   * 存在与 acquisition 交付类型兼容。全局目录里有、本制作未选的服务不得经手动补字段
+   * 进入稿件；只查改动字段，不给旧有效稿追加新硬门。
    */
+  private assertTreatmentProviderSelectionsCompatible(brief: ProductionBrief, currentDocument: unknown, nextDocument: Record<string, unknown>): void {
+    const changes = retrievalProviderSelectionChanges(currentDocument, nextDocument);
+    if (!changes.length) return;
+    const catalog = new Map((this.options.assetProviders ?? []).map((provider) => [provider.id, provider]));
+    const configuredIds = new Set(brief.director?.assetProviderIds ?? [brief.providers.assets]);
+    for (const change of changes) {
+      if (change.to === null) continue; // 清空成缺项由上面的结构校验拒绝。
+      if (!configuredIds.has(change.to)) {
+        throw new HumanDecisionConflictError(
+          `第 ${change.index + 1} 项选择的画面服务（${change.to}）不在本制作已配置的画面来源里；请在本次制作可选的来源中重新选择，或先在本制作的制作设置里选择该来源。已保存内容与讨论不受影响。`,
+        );
+      }
+      const provider = catalog.get(change.to);
+      const allowedDelivery = change.acquisition === "pipeline_generated"
+        ? ["generated_image", "generated_video"]
+        : ["stock_image", "stock_video"];
+      if (!provider || !provider.deliveryTypes.some((deliveryType) => allowedDelivery.includes(deliveryType))) {
+        throw new HumanDecisionConflictError(
+          `第 ${change.index + 1} 项选择的画面服务（${change.to}）不在本制作可用的对应画面来源目录里，或与该素材的取得方式不匹配；请重新选择。已保存内容与讨论不受影响。`,
+        );
+      }
+    }
+  }
+
   private assertCreativeStageDocumentExecutable(
     brief: ProductionBrief,
     stage: "treatment" | "script" | "director",
@@ -1930,8 +1958,14 @@ export class ProductionPipeline {
               scriptStage?.currentDocument ?? scriptDocument ?? null);
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
+            // CLOUD-11/P5.1：缺画面服务字段给结构化人话定位，不把英文 path 当主说明；
+            // 原诊断仍作为技术详情保留。决策不由此驱动，只改善可读性。
+            const issues = draft.stage === "treatment" ? missingRetrievalProviderIssues(stageDocument) : [];
+            const humanDetail = issues.length
+              ? issues.map((issue) => `第 ${issue.index + 1} 项素材安排还没选择画面服务`).join("；")
+              : message;
             throw new HumanDecisionConflictError(
-              `当前稿件缺必需结构，先修改再采用：${message} 你仍可以查看全文、编辑或修订；已保存内容与讨论不受影响。`,
+              `当前稿件缺必需结构，先修改再采用：${humanDetail}。当前稿件和讨论已保留，请在素材安排里补齐后保存。技术详情：${message}`,
             );
           }
         }
@@ -1945,6 +1979,26 @@ export class ProductionPipeline {
           ? stageReview.proposals.find((proposal) => isObjectRecord(proposal) && proposal.proposalId === draft.proposalId)
             ?.document
           : draft.action === "undo_draft" ? stageReview?.previousDocument : undefined;
+      // P5.3（2026-10-05 云端修复包）：treatment 的非法编辑（缺必需结构）同样在命令边界
+      // 拒绝并保留停点——图内 validateEditedDraft 仍是恢复防线，但它抛错会把节点打成
+      // failed，用户失去工作台。P5.2：本次新补/改动的 retrievalProviderId 在同一边界与
+      // run 的可选画面来源核对 acquisition 兼容（deliveryTypes）；只查改动字段，不把
+      // “目录现在不可用”扩成旧有效稿的新硬门。
+      if (draft.action === "edit_draft" && draft.stage === "treatment" && isObjectRecord(draft.document)) {
+        try {
+          this.assertCreativeStageDocumentExecutable(brief, "treatment", draft.document, null);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const issues = missingRetrievalProviderIssues(draft.document);
+          const humanDetail = issues.length
+            ? issues.map((issue) => `第 ${issue.index + 1} 项素材安排还没选择画面服务`).join("；")
+            : message;
+          throw new HumanDecisionConflictError(
+            `保存被拒绝：${humanDetail}。当前稿件和讨论已保留，请在素材安排里补齐后保存。技术详情：${message}`,
+          );
+        }
+        this.assertTreatmentProviderSelectionsCompatible(brief, stageReview?.currentDocument, draft.document);
+      }
       if (isObjectRecord(scopedDocument) && brief.rework && (draft.stage === "script" || draft.stage === "director")) {
         const document = scopedDocument;
         reworkAffectedScenePositions({
@@ -6219,6 +6273,11 @@ export class ProductionPipeline {
         : undefined;
       const issue = status === "failed"
         ? structuredIssueByStage.get(stage)
+          // CR3（2026-10-05 复审）：失败的前期构思若还能核对当前稿，优先只读结构化诊断
+          //（第 N 项＋claim）；当前稿不可核时不断言行号，走 planningFailureForCreators
+          // 的窄范围翻译兜底。
+          ?? (stage === "treatment" && isObjectRecord(reviewState?.currentDocument)
+            ? treatmentMissingProviderIssueText(reviewState.currentDocument) : undefined)
           ?? (commitVerificationFailed && stage === "compile"
             ? "正式交付记录暂未核对成功；已产出的内容会保留，请先检查交付记录。"
             : planningFailureForCreators(planningNode.error ?? ""))
@@ -10067,6 +10126,18 @@ function qualityContractProjection(brief: ProductionBrief) {
   };
 }
 
+/**
+ * CR3（2026-10-05 复审）：失败的前期构思阶段若还能核对当前稿，用只读结构化诊断说明
+ * 缺画面服务的项（第 N 项＋claim），并指向恢复当前稿后的补齐出口；不是服务/模型故障，
+ * 不引导重试。无该缺陷类问题返回 undefined，交回通用兜底。
+ */
+function treatmentMissingProviderIssueText(currentDocument: Record<string, unknown>): string | undefined {
+  const issues = missingRetrievalProviderIssues(currentDocument);
+  if (!issues.length) return undefined;
+  const items = issues.map((issue) => `第 ${issue.index + 1} 项素材安排${issue.claim ? `（${issue.claim}）` : ""}还没选择画面服务`).join("；");
+  return `${items}。这不是服务或模型配置的问题，重试解决不了；请恢复当前稿后检查素材安排，补齐画面服务再保存。`;
+}
+
 export function planningFailureForCreators(error: string): string {
   const redacted = redactAbsolutePaths(error);
   const halt = /Joint creative planning stopped \((needs_user|needs_source|duplicate_issue|cross_role_revisions_exhausted)\):\s*(.*?)(?:\s*不回退旧规划流程。)?$/.exec(redacted);
@@ -10086,6 +10157,14 @@ export function planningFailureForCreators(error: string): string {
   // 通用说明等于把它藏起来，创作者就只剩一句"这一步没有完成"。已经上过屏的那几句按句登记在
   // KNOWN_ENGLISH_FAILURE_NARRATIVES 里逐条替换；再发现新的泄漏就再加一条，而不是放宽匹配。
   if (KNOWN_ENGLISH_FAILURE_NARRATIVES.some((pattern) => pattern.test(redacted))) return UNTRANSLATED_PLANNING_FAILURE;
+  // CR3/AP3b（2026-10-05 复审）：旧 run 缺画面服务的两种历史英文诊断（null 报 is required
+  // for、缺失/undefined 报 must be null or a valid provider id）是可修正的字段问题，不是
+  // 服务/模型故障。这里只做窄范围**显示翻译**：不引导重试或换模型，指向恢复当前稿后在
+  // 素材安排里补画面服务；原文保留在技术详情。无法核对当前稿时不断言精确行号，也绝不
+  // 用错误字符串决定可恢复、采用、费用或节点状态。
+  if (/^Creative treatment evidenceRequirements\[\d+\]\.retrievalProviderId (?:is required for pipeline_generated|is required for pipeline_retrievable|must be null or a valid provider id)\.$/.test(redacted)) {
+    return `构思的素材安排不完整：有素材安排还没选择画面服务。这不是服务或模型配置的问题，重试或换模型解决不了；请恢复当前稿后检查素材安排，补齐画面服务再保存。\n机器给出的原文：${redacted}`;
+  }
   const cleaned = redacted
     .replace(/\s*不回退旧规划流程。/g, "")
     .replace(/Joint creative planning/g, "创作规划");
