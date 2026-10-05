@@ -195,6 +195,11 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, providers = [
   const closeRiskDialog = () => { setPendingRisk(null); setIdentityStale(false); };
   const riskDialogRef = useDialogFocus<HTMLDivElement>(pendingRisk !== null, closeRiskDialog);
   const hasBlockingIssues = review.blockingIssues.length > 0;
+  const evidenceRepairs = review.stage === "treatment" ? review.draftValidation?.issues ?? [] : [];
+  const hasMissingEvidenceProvider = evidenceRepairs.length > 0;
+  const hasUnavailableEvidenceProvider = evidenceRepairs.some((issue) => compatibleEvidenceProviders(
+    providers, issue.acquisition ?? "pipeline_generated", review.draftValidation?.allowedRetrievalProviderIds,
+  ).options.length === 0);
   // 草稿一变 publishCreativeDraft 必然清空 checkResult，所以在场的 repair 一定是针对当前草稿的。
   // 复核是"提议"而不是"否决"：此时确认仍然可用，但必须由人显式承担，并把被接受的意见记进
   // confirmation.acknowledgedRepair，事后能查到是谁在什么结论下放行的。
@@ -521,7 +526,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, providers = [
   }
 
   function confirmDraft() {
-    if (busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")) return;
+    if (busy || hasMissingEvidenceProvider || hasUnsavedEdits || !review.allowedActions.includes("confirm")) return;
     if (needsStockConsent) {
       openConfirmRisk();
       return;
@@ -616,19 +621,21 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, providers = [
         </span>
       </header>
 
-      {review.draftValidation && review.draftValidation.issues.length > 0 ? <section className="creative-validation-notice" role="alert">
+      {hasMissingEvidenceProvider ? <section className="creative-validation-notice" role="alert">
         <strong>素材安排待补齐</strong>
-        <p>{review.draftValidation.issues.map((issue) => `第 ${issue.index + 1} 项素材安排还没选择画面服务，暂不能采用这版`).join("；")}。当前稿件和讨论已保留，请在下方“素材安排待补齐”里选择服务后保存。</p>
+        <p>{evidenceRepairs.map((issue) => `第 ${issue.index + 1} 项素材安排还没选择画面服务，暂不能采用这版`).join("；")}。当前稿件和讨论已保留。{hasUnavailableEvidenceProvider
+          ? "部分素材在本制作没有可选的对应画面服务，请用“提出修改”调整素材安排，优先使用本制作已启用的来源。"
+          : "请展开“手动修订这份稿件”，在“素材安排待补齐”里选择服务后保存。"}</p>
         <details className="creative-validation-tech"><summary>技术详情</summary>
-          <ul>{review.draftValidation.issues.map((issue) => <li key={issue.path}>{issue.technicalDetail}</li>)}</ul>
+          <ul>{evidenceRepairs.map((issue) => <li key={issue.path}>{issue.technicalDetail}</li>)}</ul>
         </details>
       </section> : null}
 
       <section className="creative-review-actions creative-decision-bar" id="creative-confirm-footer" aria-label="当前稿件决定">
-        <div className="creative-confirm-context" tabIndex={-1}><strong>{hasUnsavedEdits ? "有未保存的手动修改" : review.reviewPurpose === "direction" ? "确认对象：当前导演初稿" : review.reviewPurpose === "material_plan" ? "确认对象：当前选材方案" : `确认对象：当前${STAGE_LABEL[review.stage]}`}</strong><small>{hasUnsavedEdits ? "先保存或放弃修改，再确认采用；不会提交编辑器里的未保存文字。" : review.checkResult ? "采用不会重复审计当前稿，也不会授权购买素材；后续付费仍需单独确认。" : "本版尚未审计。你可主动审计，也可明确采用未审稿；后续付费仍需单独确认。"}</small></div>
+        <div className="creative-confirm-context" tabIndex={-1}><strong>{hasUnsavedEdits ? "有未保存的手动修改" : hasMissingEvidenceProvider ? "先补齐素材安排，再决定采用" : review.reviewPurpose === "direction" ? "确认对象：当前导演初稿" : review.reviewPurpose === "material_plan" ? "确认对象：当前选材方案" : `确认对象：当前${STAGE_LABEL[review.stage]}`}</strong><small>{hasUnsavedEdits ? "先保存或放弃修改，再确认采用；不会提交编辑器里的未保存文字。" : hasMissingEvidenceProvider ? "这里只缺画面服务安排，不是审计建议在阻止采用。修订保存后，由你决定是否审计或采用。" : review.checkResult ? "采用不会重复审计当前稿，也不会授权购买素材；后续付费仍需单独确认。" : "本版尚未审计。你可主动审计，也可明确采用未审稿；后续付费仍需单独确认。"}</small></div>
         <div className="creative-decision-buttons">
-          <button type="button" className="button button-primary" disabled={busy || hasUnsavedEdits || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{needsStockConsent ? "接受素材风险，先制作首版" : incompleteCheck ? "接受复核未完成，采用本版" : hasContentSuggestions ? "保留这些建议，仍采用" : !review.checkResult ? "采用本版（未审计）" : hasBlockingIssues ? "修改后重新检查" : review.reviewPurpose === "direction" ? "采用导演初稿，开始选材" : review.reviewPurpose === "material_plan" ? "采用选材方案，继续制作" : "确认当前方案，继续"}</button>
-          <button type="button" className="button button-secondary" onClick={focusRevisionDiscussion}><MessageCircle aria-hidden="true" size={16} />提出修改</button>
+          <button type="button" className={`button ${hasMissingEvidenceProvider ? "button-secondary" : "button-primary"}`} disabled={busy || hasMissingEvidenceProvider || hasUnsavedEdits || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{hasMissingEvidenceProvider ? "补齐画面服务后再采用" : needsStockConsent ? "接受素材风险，先制作首版" : incompleteCheck ? "接受复核未完成，采用本版" : hasContentSuggestions ? "保留这些建议，仍采用" : !review.checkResult ? "采用本版（未审计）" : hasBlockingIssues ? "修改后重新检查" : review.reviewPurpose === "direction" ? "采用导演初稿，开始选材" : review.reviewPurpose === "material_plan" ? "采用选材方案，继续制作" : "确认当前方案，继续"}</button>
+          <button type="button" className={`button ${hasMissingEvidenceProvider ? "button-primary" : "button-secondary"}`} onClick={focusRevisionDiscussion}><MessageCircle aria-hidden="true" size={16} />提出修改</button>
         </div>
         <div className="creative-secondary-decisions">
           <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || review.previousDraft === undefined || !review.allowedActions.includes("undo_draft")} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button>
@@ -657,7 +664,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, providers = [
             }}>查看 {review.checkResult.issues.length} 条建议</button> : null}
           </div>
           {handoffNotice ? <p className="creative-handoff-notice" role="status">当前稿件已更新</p> : null}
-          <CreativeDraftEditor sessionSlotKey={sessionSlotKey} sessionBase={sessionBase} legacyEditStorageKey={`${storageKey}:edit`} draftIdentity={`${review.draftVersionId ?? review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} evidenceRepairs={review.stage === "treatment" ? review.draftValidation?.issues ?? [] : []} providers={providers} allowedRetrievalProviderIds={review.stage === "treatment" ? review.draftValidation?.allowedRetrievalProviderIds : undefined} />
+          <CreativeDraftEditor sessionSlotKey={sessionSlotKey} sessionBase={sessionBase} legacyEditStorageKey={`${storageKey}:edit`} draftIdentity={`${review.draftVersionId ?? review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} evidenceRepairs={evidenceRepairs} providers={providers} allowedRetrievalProviderIds={review.stage === "treatment" ? review.draftValidation?.allowedRetrievalProviderIds : undefined} />
           <CreativeDraftReader key={`${review.runId}:${draftIdentity}:${review.draftArtifactId}`} stage={review.stage} value={review.draft} />
           {incompleteCheck ? <section className="creative-check-result" role="status"><strong>独立复核未完成 · 无评分</strong><p>{review.checkResult?.summary}</p></section> : null}
           {needsStockConsent ? <section className="creative-check-result" role="status">
@@ -892,11 +899,11 @@ function compatibleEvidenceProviders<E extends { id: string; capability: string;
   const allowed = acquisition === "pipeline_generated"
     ? ["generated_image", "generated_video"]
     : ["stock_image", "stock_video"];
-  const runScope = allowedRetrievalProviderIds ? new Set(allowedRetrievalProviderIds) : undefined;
+  const runScope = new Set(allowedRetrievalProviderIds ?? []);
   let catalogIncomplete = false;
   const options = providers.filter((provider) => {
     if (provider.capability !== "asset.prepare" || !provider.available || provider.kind === "test" || provider.id === "ai-shot-router-v1") return false;
-    if (runScope && !runScope.has(provider.id)) return false;
+    if (!runScope.has(provider.id)) return false;
     if (!provider.deliveryTypes || provider.deliveryTypes.length === 0) {
       catalogIncomplete = true;
       return false;
@@ -988,7 +995,7 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
                 <option value="">未选择</option>
                 {options.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
               </select>
-            </label> : <p className="creative-evidence-repair-missing" role="note">当前制作未配置可用的对应画面服务{catalogIncomplete ? "（部分来源目录缺少画面类型信息，按待配置处理，不猜测兼容）" : ""}；稿件与讨论保留，可到制作设置配置来源，或用“提出修改”让 AI 调整素材安排。</p>}
+            </label> : <p className="creative-evidence-repair-missing" role="note">当前制作未配置可用的对应画面服务{catalogIncomplete ? "（部分来源信息不完整，暂不能选用）" : ""}；稿件与讨论保留。请用“提出修改”调整素材安排，优先使用本制作已启用的来源；修改全局设置不会自动改变本制作的来源范围。</p>}
           </div>;
         })}
       </fieldset> : null}

@@ -329,6 +329,8 @@ describe("JsonSeriesStore", () => {
     assert.deepEqual(updated.episodes[1]?.continuity.fromPrevious, ["承接上一集"]);
     assert.deepEqual(updated.episodes[1]?.continuity.inheritedFromPrevious, ["下一集验证多人协作时是否仍然成立"]);
     assert.equal(updated.episodes[1]?.planning.auditStatus, "stale");
+    assert.match(updated.episodes[1]?.planning.auditSummary ?? "", /原复核已过期.*可主动重新审计.*自行决定是否采用/);
+    assert.doesNotMatch(updated.episodes[1]?.planning.auditSummary ?? "", /采用本集前需要重新审计/);
     await assert.rejects(
       () => store.updateEpisodePlan("series-1", 1, {
         expectedRevision: 1,

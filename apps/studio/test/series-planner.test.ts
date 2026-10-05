@@ -70,6 +70,6 @@ describe("SeriesPlanner", () => {
     assert.equal(candidates[0]?.verification.status, "blocked");
     assert.equal(candidates[0]?.editorialDecision.verdict, "produce_image_story");
     assert.equal((candidates[0]?.editorialDecision.score ?? 0) > 0, true);
-    assert.match(candidates[0]?.editorialDecision.guardrails[0] ?? "", /开工门槛.*至少 2 个独立原始来源/);
+    assert.match(candidates[0]?.editorialDecision.guardrails[0] ?? "", /来源核验建议.*至少 2 个独立原始来源.*是否采用由你决定/);
   });
 });

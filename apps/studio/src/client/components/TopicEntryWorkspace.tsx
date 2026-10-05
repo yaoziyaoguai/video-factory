@@ -342,7 +342,7 @@ function SeriesRoadmap({
     ? candidates.find((candidate) => candidate.id === selectedEpisode.id)
     : undefined;
   const blockedBy = selectedCandidate?.seriesSequence?.blockedByEpisodeNumber;
-  // 来源不足只是提醒，不再参与解锁判断；集序与开拍审计由服务端强制，客户端如实镜像。
+  // 来源与复核只出建议；前集定版顺序仍由服务端核验，客户端如实镜像。
   const sourceBlocked = selectedEpisode?.status === "planned"
     && selectedCandidate?.verification.status === "blocked";
   const mayAdopt = selectedEpisode?.status === "planned"
@@ -439,7 +439,9 @@ function SeriesRoadmap({
                 <div><dt>复核</dt><dd>{planningAuditLabel(selectedEpisode.planning)}</dd></div>
                 <div><dt>推理</dt><dd>{planningReasoningLabel(selectedEpisode.planning)}</dd></div>
               </dl>
-              {selectedEpisode.planning.auditSummary ? <p><strong>复核结论：</strong>{creatorFacingTechnicalText(selectedEpisode.planning.auditSummary)}{selectedEpisode.planning.auditScore !== undefined ? `（${selectedEpisode.planning.auditScore} 分）` : ""}</p> : null}
+              {selectedEpisode.planning.auditStatus === "stale"
+                ? <p><strong>复核状态：</strong>上游内容已更新，原复核已过期。是否重新审计由你决定；满足前集定版条件后，也可采用当前稿。</p>
+                : selectedEpisode.planning.auditSummary ? <p><strong>复核结论：</strong>{creatorFacingTechnicalText(selectedEpisode.planning.auditSummary)}{selectedEpisode.planning.auditScore !== undefined ? `（${selectedEpisode.planning.auditScore} 分）` : ""}</p> : null}
               {selectedEpisode.planning.auditSuggestions?.length ? <div>
                 <ul aria-label="本集内容建议">{selectedEpisode.planning.auditSuggestions.map((suggestion, index) => <li key={`${index}:${suggestion}`}>
                   {selectedEpisode.status === "planned" && onRevise ? <label><input type="checkbox" checked={selectedSuggestions.includes(index)} onChange={(event) => setSelectedSuggestions((current) => event.target.checked ? [...current, index] : current.filter((item) => item !== index))} />{creatorFacingTechnicalText(suggestion)}</label>
@@ -844,9 +846,27 @@ function auditExcerpt(text: string): { excerpt: string; truncated: boolean } {
   return { excerpt: `${codePoints.slice(0, AUDIT_EXCERPT_CODEPOINTS).join("")}…`, truncated: true };
 }
 
+// 只解释选题复核的已知术语，不改结论、数字或约束。编号不是数组位置，不把 b5
+// 冒充“第五镜”；原始说明另行保留，URL 和较长标识不参与替换。
+function topicRepairAdvice(text: string): string {
+  const fieldLabels: Record<string, string> = { hook: "开场表达", sourceId: "来源编号", paragraphIds: "引用段落编号" };
+  return text.split(/(https?:\/\/[^\s<>“”，。；]+)/g).map((part) => {
+    if (/^https?:\/\//.test(part)) return part;
+    return part
+      .replace(/\b(hook|sourceId|paragraphIds)\b/g, (field) => fieldLabels[field] ?? field)
+      .replace(/(?<![\w./-])b(\d+)(?![\w.-])/g, "画面段落（编号 $1）")
+      .replace(/(?<![\w./-])p\d+(?:\s*[/、,，]\s*p\d+)*(?![\w.-])/g, (references) => references.replace(/p(\d+)/g, "引用段落（编号 $1）"))
+      .replace(/按合同留候选/g, "按选题要求保留候选")
+      .replace(/按合同在候选里补来源/g, "保留候选并补充来源")
+      .replace(/重新绑定\s*来源编号/g, "重新关联来源");
+  }).join("");
+}
+
 function TopicAuditAdvicePanel({ receipt, visibleCount }: { receipt: StudioTopicGenerationReceipt; visibleCount: number }) {
   const suggestions = receipt.auditSuggestions?.length ? receipt.auditSuggestions : [];
-  const repairs = (receipt.auditRepairInstructions ?? []).filter((line) => !suggestions.includes(line));
+  const repairs = (receipt.auditRepairInstructions ?? []).filter((line) => !suggestions.includes(line))
+    .map((original) => ({ original, advice: topicRepairAdvice(original) }));
+  const explainedRepairs = repairs.filter((line) => line.advice !== line.original);
   const statusLine = receipt.auditStatus === "passed"
     ? "本批次已完成独立复核；以下是可选的内容改进建议，不阻止你采用任何候选。"
     : "本批次独立复核未判通过；复核建议不阻止你采用任何候选。";
@@ -860,7 +880,9 @@ function TopicAuditAdvicePanel({ receipt, visibleCount }: { receipt: StudioTopic
       <p>{scopeLine}</p>
       {receipt.auditSummary ? <p><strong>复核摘要全文：</strong>{receipt.auditSummary}</p> : null}
       {suggestions.length ? <div><strong>全部复核建议（{suggestions.length} 条）</strong><ul>{suggestions.map((line, index) => <li key={`s-${index}`}>{line}</li>)}</ul></div> : null}
-      {repairs.length ? <div><strong>补充修复说明</strong><ul>{repairs.map((line, index) => <li key={`r-${index}`}>{line}</li>)}</ul></div> : null}
+      {repairs.length ? <div><strong>补充内容建议</strong><ul aria-label="补充内容建议">{repairs.map((line, index) => <li key={`r-${index}`}>{line.advice}</li>)}</ul>
+        {explainedRepairs.length ? <details><summary>查看原始复核说明（含技术标识）</summary><ul>{explainedRepairs.map((line, index) => <li key={`raw-${index}`}>{line.original}</li>)}</ul></details> : null}
+      </div> : null}
       {!hasExpandable ? <p>复核没有留下更多文字说明；批次事实以上方数字为准，不从自然语言里抽取数量。</p> : null}
     </div>
   </details>;

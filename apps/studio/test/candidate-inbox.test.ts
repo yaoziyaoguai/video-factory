@@ -332,7 +332,7 @@ describe("CandidateInboxStudio", () => {
     // 新语义：内容潜力 verdict 与开工门禁分离——生产建议保留，门禁作为前置 guardrail。
     assert.equal(listed?.editorialDecision.verdict, "produce_video");
     assert.equal(listed?.editorialDecision.recommendedTemplate, undefined);
-    assert.match(listed?.editorialDecision.guardrails[0] ?? "", /开工门槛/);
+    assert.match(listed?.editorialDecision.guardrails[0] ?? "", /来源核验建议.*是否采用由你决定/);
     assert.match(listed?.editorialDecision.guardrails[0] ?? "", /系列证据尚未达到开拍标准/);
     assert.equal(listed?.verification.status, "blocked");
   });
@@ -419,7 +419,7 @@ describe("CandidateInboxStudio", () => {
     assert.equal(candidate?.risk, "high");
     assert.equal(candidate?.verification.status, "blocked");
     assert.equal(candidate?.editorialDecision.verdict, "produce_image_story");
-    assert.match(candidate?.editorialDecision.guardrails[0] ?? "", /开工门槛/);
+    assert.match(candidate?.editorialDecision.guardrails[0] ?? "", /来源核验建议.*是否采用由你决定/);
   });
 
   it("does not recommend templates for skipped or sequence-blocked series candidates", async () => {
@@ -727,7 +727,7 @@ describe("CandidateInboxStudio", () => {
     const listed = await inbox.list({ origins: ["trend"] });
     assert.equal(listed.items.find((item) => item.id === highRisk.id)?.verification.status, "blocked");
     assert.equal(listed.items.find((item) => item.id === highRisk.id)?.editorialDecision.verdict, "produce_image_story");
-    assert.match(listed.items.find((item) => item.id === highRisk.id)?.editorialDecision.guardrails[0] ?? "", /开工门槛/);
+    assert.match(listed.items.find((item) => item.id === highRisk.id)?.editorialDecision.guardrails[0] ?? "", /来源核验建议.*是否采用由你决定/);
     assert.equal(listed.items.find((item) => item.id === review.id)?.verification.status, "review_required");
     assert.equal(listed.items.find((item) => item.id === review.id)?.editorialDecision.verdict, "produce_image_story");
     assert.equal(listed.items.find((item) => item.id === review.id)?.editorialDecision.recommendedTemplate, undefined);
@@ -809,7 +809,7 @@ describe("CandidateInboxStudio", () => {
 
     assert.equal(strict?.verification.status, "blocked");
     assert.equal(strict?.editorialDecision.verdict, "produce_video");
-    assert.match(strict?.editorialDecision.guardrails[0] ?? "", /开工门槛/);
+    assert.match(strict?.editorialDecision.guardrails[0] ?? "", /来源核验建议.*是否采用由你决定/);
     assert.match(strict?.verification.reasons[0] ?? "", /至少 2 个不同域名的有效原始来源链接/);
     assert.equal(relaxed?.verification.status, "ready");
   });
@@ -970,7 +970,7 @@ describe("CandidateInboxStudio", () => {
     assert.equal(adoptedWhileBlocked.verification?.independentSources, 1);
     // 创作方向不因门禁消失，也不通过模板锁定制作方式。
     assert.equal(blocked?.editorialDecision.recommendedTemplate, undefined);
-    assert.match(blocked?.editorialDecision.guardrails[0] ?? "", /开工门槛/);
+    assert.match(blocked?.editorialDecision.guardrails[0] ?? "", /来源核验建议.*是否采用由你决定/);
 
     const supplemented = await inbox.supplementTrendCandidateSources("trend-supplement", {
       evidenceUrls: ["https://news.example.org/report"],
@@ -980,7 +980,7 @@ describe("CandidateInboxStudio", () => {
     assert.equal(supplemented.verification.status, "ready");
     assert.equal(supplemented.verification.independentSources, 2);
     assert.equal(supplemented.evidence.length, 2);
-    assert.doesNotMatch(supplemented.editorialDecision.guardrails[0] ?? "", /开工门槛/);
+    assert.doesNotMatch(supplemented.editorialDecision.guardrails[0] ?? "", /来源核验建议/);
 
     const [listed] = (await inbox.list({ origins: ["trend"] })).items;
     assert.equal(listed?.verification.status, "ready");

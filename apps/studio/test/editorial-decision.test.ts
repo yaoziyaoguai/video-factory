@@ -111,6 +111,9 @@ describe("editorial production decision", () => {
     assert.equal(decision.score > 0, true);
     assert.equal(decision.recommendedTemplate, undefined);
     assert.match(decision.guardrails.join(" "), /高风险热点至少需要 2 个独立来源/);
+    assert.match(decision.guardrails[0] ?? "", /来源核验建议/);
+    assert.match(decision.guardrails[0] ?? "", /是否采用由你决定/);
+    assert.doesNotMatch(decision.guardrails.join(" "), /开工门槛/);
   });
 
   it("scores a blocked series candidate independently from its evidence gate", () => {

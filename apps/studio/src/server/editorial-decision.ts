@@ -55,7 +55,7 @@ export function decideEditorialFormat(
   return {
     ...marked,
     guardrails: [
-      `开工门槛：${input.verification.reasons[0] ?? "当前证据未达到生产标准。"}`,
+      `来源核验建议：${input.verification.reasons[0] ?? "当前来源仍需补充核验。"} 这些建议不阻止采用，是否采用由你决定。`,
       ...marked.guardrails,
     ],
   };

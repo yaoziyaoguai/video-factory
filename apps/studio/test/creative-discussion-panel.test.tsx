@@ -128,7 +128,7 @@ describe("evidence retrieval repair UI", () => {
     expect(screen.getByText(/evidenceRequirements\[1\]\.retrievalProviderId is required for pipeline_generated/)).toBeInTheDocument();
 
     // 展开手动修订：补齐区显示第 2 项的 claim 与取得方式人话；select 只列兼容可用来源。
-    await user.click(screen.getByText(/手动修订这份稿件/));
+    await user.click(screen.getByText(/手动修订这份稿件/, { selector: "summary" }));
     expect(screen.getByText(/第 2 项 · 结尾生成画面 · AI 生成画面/)).toBeInTheDocument();
     const select = screen.getByLabelText("第 2 项画面服务") as HTMLSelectElement;
     const optionValues = Array.from(select.options).map((option) => option.value);
@@ -141,7 +141,7 @@ describe("evidence retrieval repair UI", () => {
     const user = userEvent.setup();
     const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
     render(<CreativeDiscussionPanel review={treatmentReview()} busy={false} onCommand={onCommand} providers={repairProviders} />);
-    await user.click(screen.getByText(/手动修订这份稿件/));
+    await user.click(screen.getByText(/手动修订这份稿件/, { selector: "summary" }));
     await user.selectOptions(screen.getByLabelText("第 2 项画面服务"), "seedream-image-v1");
     await user.click(screen.getByRole("button", { name: /保存修订/ }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
@@ -157,11 +157,22 @@ describe("evidence retrieval repair UI", () => {
 
   it("offers a real exit when no compatible source is configured and keeps the draft", async () => {
     const user = userEvent.setup();
-    render(<CreativeDiscussionPanel review={treatmentReview()} busy={false} onCommand={vi.fn(async () => undefined)} providers={[]} />);
+    const onCommand = vi.fn(async () => undefined);
+    render(<CreativeDiscussionPanel review={treatmentReview()} busy={false} onCommand={onCommand} providers={[]} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(/本制作没有可选的对应画面服务.*提出修改/);
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/选择服务后保存/);
+    expect(screen.getByRole("button", { name: "补齐画面服务后再采用" })).toBeDisabled();
+    const revise = screen.getByRole("button", { name: "提出修改" });
+    expect(revise).toHaveClass("button-primary");
+    await user.click(revise);
+    await waitFor(() => expect(screen.getByRole("textbox", { name: /聊聊你的想法/ })).toHaveFocus());
+    expect(onCommand).not.toHaveBeenCalled();
     await user.click(screen.getByText(/手动修订这份稿件/));
     // 无兼容来源：如实说明并给出口，不默认选服务、不改 not_needed。
     expect(screen.getByText(/当前制作未配置可用的对应画面服务/)).toBeInTheDocument();
     expect(screen.queryByLabelText("第 2 项画面服务")).toBeNull();
+    expect(screen.queryByText(/可到制作设置配置来源/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("观众看完能得到什么")).toHaveValue("看完能避开三个决策坑");
   });
 
   // CR3（2026-10-05 复审 AP3 的 UI 面）：补齐候选必须是“本制作已选来源 ∩ 可用目录 ∩
@@ -181,6 +192,16 @@ describe("evidence retrieval repair UI", () => {
       expect(Array.from(select.options).map((option) => option.value)).toEqual([""]);
     }
     expect(screen.getByText(/当前制作未配置可用的对应画面服务/)).toBeInTheDocument();
+  });
+
+  it("does not promise a selector when the current run has no verified source scope", async () => {
+    const current = treatmentReview();
+    delete current.draftValidation!.allowedRetrievalProviderIds;
+    render(<CreativeDiscussionPanel review={current} busy={false} onCommand={vi.fn(async () => undefined)} providers={repairProviders} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(/本制作没有可选的对应画面服务/);
+    await userEvent.click(screen.getByText(/手动修订这份稿件/));
+    expect(screen.queryByLabelText("第 2 项画面服务")).toBeNull();
+    expect(screen.getByRole("button", { name: "提出修改" })).toBeEnabled();
   });
 });
 

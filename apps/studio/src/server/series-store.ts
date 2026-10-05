@@ -343,7 +343,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
             planning: {
               ...candidate.planning,
               auditStatus: "stale" as const,
-              auditSummary: `第 ${episodeNumber} 集的交接已修改，采用本集前需要重新审计。`,
+              auditSummary: `第 ${episodeNumber} 集的交接已修改，原复核已过期。可主动重新审计，也可核对当前稿后自行决定是否采用。`,
             },
             updatedAt,
           };

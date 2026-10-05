@@ -85,6 +85,31 @@ function renderTrendWorkspace(inbox: StudioCandidateInbox, trendMeta: Parameters
 
 // CLOUD-05/P2.1（V06、V07）：复核建议默认紧凑、全文可展开、批次与列表范围分开。
 describe("topic audit advice panel", () => {
+  it("explains repair fields without losing content constraints or changing the original receipt", async () => {
+    const original = "把标题、hook 与 b6 改成现在能兑现的承诺；b5 标注为官方原文到位后执行。保留 p11/p12/p13 的引用，不写未经核对的数字；按合同留候选。sourceId 仍指向 https://example.com/p11。维生素 B6 与 abc_b5 不是稿件编号。";
+    const receipt = { ...auditReceipt, auditRepairInstructions: [original] };
+    const before = JSON.stringify(receipt);
+    renderTrendWorkspace(buildInbox([trendCandidate(1)], receipt), { platformCount: 1, candidateCount: 1 });
+    const panel = document.querySelector("details.candidate-audit-advice") as HTMLDetailsElement;
+    await userEvent.click(panel.querySelector("summary")!);
+    const advice = screen.getByRole("list", { name: "补充内容建议" });
+    expect(advice).toHaveTextContent("开场表达");
+    expect(advice).toHaveTextContent("画面段落（编号 6）");
+    expect(advice).toHaveTextContent("引用段落（编号 11）");
+    expect(advice).toHaveTextContent("引用段落（编号 13）");
+    expect(advice).toHaveTextContent("官方原文到位后执行");
+    expect(advice).toHaveTextContent("不写未经核对的数字");
+    expect(advice).toHaveTextContent("按选题要求保留候选");
+    expect(advice).toHaveTextContent("https://example.com/p11");
+    expect(advice).toHaveTextContent("维生素 B6 与 abc_b5");
+    expect(advice).not.toHaveTextContent(/\bhook\b|\bsourceId\b|按合同/);
+    const rawSummary = screen.getByText("查看原始复核说明（含技术标识）");
+    expect((rawSummary.parentElement as HTMLDetailsElement).open).toBe(false);
+    await userEvent.click(rawSummary);
+    expect(screen.getByText(original)).toBeVisible();
+    expect(JSON.stringify(receipt)).toBe(before);
+  });
+
   it("keeps the advice collapsed by default with a marked excerpt, and expands to the full text and all suggestions", async () => {
     const items = Array.from({ length: 5 }, (_, index) => trendCandidate(index + 1));
     renderTrendWorkspace(buildInbox(items, auditReceipt), { platformCount: 2, candidateCount: 5 });
@@ -104,7 +129,7 @@ describe("topic audit advice panel", () => {
     expect(within(panel).getByText(/^复核摘要全文：/)).toBeInTheDocument();
     expect(within(panel).getAllByText(/^建议[一二三四]：/).length).toBe(4);
     // repairInstructions 中与建议相同的文字不重复；不同的补在完整区。
-    expect(within(panel).getByText("修复说明：重新绑定 sourceId。")).toBeInTheDocument();
+    expect(within(panel).getByRole("list", { name: "补充内容建议" })).toHaveTextContent("修复说明：重新关联来源。");
     expect(within(panel).getByText(/这份意见针对该批次（6 条候选，生成于/)).toBeInTheDocument();
     expect(within(panel).getByText(/现在可见 5 条/)).toBeInTheDocument();
   });
