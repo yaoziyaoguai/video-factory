@@ -11,7 +11,8 @@ import { RunCostDetailPanel } from "./CostDashboard.js";
 import { AudioReviewPanel } from "./AudioReviewPanel.js";
 import { CurrentFilmReinspection } from "./CurrentFilmReinspection.js";
 import { SubtitleRecoveryPanel } from "./SubtitleRecoveryPanel.js";
-import { NarrationTimingEditor } from "./NarrationTimingEditor.js";
+import { NarrationTimingEditor, type NarrationTimingToolSummary } from "./NarrationTimingEditor.js";
+import { decisionConsequenceView } from "./decision-consequence.js";
 import { studioApi } from "../api.js";
 import { videoDownloadFilename } from "../download-filename.js";
 
@@ -94,6 +95,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const [viewingFocusIdentity, setViewingFocusIdentity] = useState<string>();
   const viewingFocusToggleRef = useRef<HTMLButtonElement>(null);
   const costDetailsRef = useRef<HTMLDetailsElement>(null);
+  // 终审可选时间工具的折叠摘要状态（CLOUD-03）：组件保持挂载，折叠只藏表单不丢未保存输入。
+  const [timingToolSummary, setTimingToolSummary] = useState<NarrationTimingToolSummary>();
   const closeRejectDecision = () => {
     setRejecting(false);
     setDecisionSnapshot(undefined);
@@ -639,12 +642,6 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
           {run.activeIntervention?.nodeId === "final-review" && !readOnly && onRequestNarrationRevision
             ? <SubtitleRecoveryPanel key={`${run.id}:${run.revision}`} run={run}
               busy={decisionPending || nodeMutationPending} onRecover={onRequestNarrationRevision} /> : null}
-          {video?.contentUrl && run.activeIntervention?.nodeId === "final-review" && !readOnly
-            && voiceNode?.status === "succeeded" && voiceNode.outputState?.stale !== true
-            && voiceNode.outputState?.effectiveVersionId
-            ? <NarrationTimingEditor key={`${run.id}-final-review-timing`} runId={run.id} revision={run.revision}
-              voiceNode={voiceNode} artifacts={run.artifacts} interventionId={run.activeIntervention.id}
-              disabled={decisionPending || nodeMutationPending} /> : null}
           {!visualReview && video?.contentUrl ? <section className="review-advisory" role="status" aria-label="机器审片状态">
             <strong>机器视觉审片尚无完整结论</strong>
             <p>{run.status === "succeeded" && run.finalReviewOutcome === "approved"
@@ -919,6 +916,18 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               {run.status === "paused" && onResumePaused ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onResumePaused()}><Play aria-hidden="true" size={16} />继续自动制作</button> : null}
             </section>
           )}
+
+          {/* 终审的可选时间工具默认收起、排在主决定之后（CLOUD-03）。组件保持挂载——
+              details 折叠只隐藏表单，不卸载，未保存输入/未决请求/刷新保护都在。 */}
+          {video?.contentUrl && run.activeIntervention?.nodeId === "final-review" && !readOnly
+            && voiceNode?.status === "succeeded" && voiceNode.outputState?.stale !== true
+            && voiceNode.outputState?.effectiveVersionId
+            ? <details className="optional-timing-tool">
+              <summary>复用原配音调整时间，完成后回到试听确认{timingToolNotice(timingToolSummary)}</summary>
+              <NarrationTimingEditor key={`${run.id}-final-review-timing`} runId={run.id} revision={run.revision}
+                voiceNode={voiceNode} artifacts={run.artifacts} interventionId={run.activeIntervention.id}
+                disabled={decisionPending || nodeMutationPending} onStateSummary={setTimingToolSummary} />
+            </details> : null}
 
         </aside>
       </div> : null}
@@ -1939,28 +1948,45 @@ function reviewSummaryExcerpt(text: string): { excerpt: string; truncated: boole
   return { excerpt: `${clean.slice(0, 160)}…`, truncated: true };
 }
 
+/** 折叠摘要上的待处理提示（CLOUD-03）：有未决操作/失败/冲突时不能把状态藏起来。 */
+function timingToolNotice(summary: NarrationTimingToolSummary | undefined): string {
+  if (!summary) return "";
+  const notices: string[] = [];
+  if (summary.pending) notices.push("有待处理的时间调整");
+  if (summary.error) notices.push("有错误待处理");
+  if (summary.storageFailed) notices.push("本机草稿保存失败");
+  if (summary.busy) notices.push("正在处理");
+  if (summary.conflict) notices.push("有时间段待调整");
+  if (summary.stale) notices.push("声音版本已更新，草稿待重读");
+  if (summary.dirty) notices.push("有未保存修改");
+  return notices.length ? `（${notices.join(" · ")}）` : "";
+}
+
 function CurrentDecisionBar({ run }: { run: StudioRunDetail }) {  const intervention = run.activeIntervention;
   if (!intervention) return null;
   const nodeName = runNodeLabel(intervention.nodeId);
   const incomplete = intervention.kind === "source_review_retry" && intervention.reviewStatus === "incomplete";
   const hardStop = intervention.kind === "source_review_retry" && intervention.reviewStatus === "unknown_or_unsafe";
   const state = incomplete ? "需要处理" : hardStop ? "需要处理" : "等你确认";
-  const consequence = incomplete
-    ? "接受后只继续后续制作，保留“审查未完成、无评分”事实；不会扩大已有的费用授权。"
-    : hardStop
-      ? "付费、来源或媒体事实不明确，只能补查或终止。"
-      : intervention.boundary === "node-complete"
-        ? "放行后进入下一节点，不会重跑当前节点。付费画面按既有流程报价；自动按量配音和模型依已选服务规则计费。"
-        : "你的决定会被记录，已生成的版本和费用事实会保留。";
+  // 后果/费用/重跑说明按结构化停点表驱动（CLOUD-02）：视觉审片采用原片、人工终审、
+  // 发布文案采用是三种不同后果，不能用一句通用计费文案互相冒充。
+  const view = decisionConsequenceView({
+    nodeId: intervention.nodeId,
+    kind: intervention.kind,
+    boundary: intervention.boundary,
+    reviewStatus: intervention.reviewStatus,
+    continuationScope: intervention.continuationScope,
+    hasPublishPackageNode: run.nodes.some((node) => node.id === "publish-package"),
+  });
   return <section className={`current-decision-bar${hardStop ? " is-hard-stop" : incomplete ? " is-incomplete" : ""}`} aria-label="当前决定" role="status">
     <div className="current-decision-heading">
       <div><p className="eyebrow">当前决定</p><h2>{nodeName} · {state}</h2></div>
       <span className="current-decision-status">{state}</span>
     </div>
-    <p>{consequence}</p>
+    <p>{view.consequence}</p>
     <dl>
-      <div><dt>是否重跑</dt><dd>{intervention.boundary === "node-complete" ? "不重跑当前节点" : incomplete ? "可只重试审查" : "按页面提供的补查/终止动作"}</dd></div>
-      <div><dt>费用影响</dt><dd>{hardStop ? "不自动新增费用" : incomplete ? "继续不扩大已有费用授权" : "画面按报价授权；自动配音与模型依已选服务规则计费"}</dd></div>
+      <div><dt>是否重跑</dt><dd>{view.rerunNote}</dd></div>
+      <div><dt>费用影响</dt><dd>{view.costNote}</dd></div>
       <div><dt>当前版本</dt><dd>已生成内容保留</dd></div>
     </dl>
   </section>;

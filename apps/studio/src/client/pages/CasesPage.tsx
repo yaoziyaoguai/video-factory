@@ -386,7 +386,9 @@ export function CasesPage() {
           {...(settingsError ? { settingsError } : {})}
           onRetrySettings={() => void retrySettings()}
           initialValues={{
-            title: selection.intent,
+            // CLOUD-08：案例入口标题留空由用户命名；完整创作意图保存在内容角度里，
+            // 不再让同一段文字同时充当标题与角度。
+            title: "",
             angle: selection.intent,
             ...(creatorSettings?.productionDefaults.platform ? { platform: creatorSettings.productionDefaults.platform } : {}),
             ...(creatorSettings?.productionDefaults.durationSeconds ? { durationSeconds: creatorSettings.productionDefaults.durationSeconds } : {}),

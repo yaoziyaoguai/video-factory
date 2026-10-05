@@ -23,7 +23,7 @@ import type {
   StudioRunSummary,
 } from "../../shared/api.js";
 import { studioApi } from "../api.js";
-import { creatorFacingTechnicalText, providerLabel } from "../presentation.js";
+import { beijingDateTime, creatorFacingTechnicalText, providerLabel } from "../presentation.js";
 import { statusLabel } from "../components/StatusBadge.js";
 import { unsplashPublicUrl } from "../components/UnsplashAttribution.js";
 import { hasStockAttribution, StockAttribution } from "../components/StockAttribution.js";
@@ -197,7 +197,7 @@ export function AssetsPage() {
             if (next.has(group.key)) next.delete(group.key); else next.add(group.key);
             return next;
           })}><ChevronDown aria-hidden="true" size={18} /><div><small>{index === 0 ? "最近制作" : "历史制作"} · {group.items.length} 项素材</small><h2 id={`asset-work-${group.key}`}>{group.runTitle}</h2></div></button>{group.runId ? <Link to={`/projects/${group.runId}`}>打开制作</Link> : null}</header>
-          {expanded ? <div id={`asset-work-items-${group.key}`} className="asset-library-grid">{group.items.map(({ asset, usage }) => <AssetCard onMediaPlay={handleMediaPlay} asset={asset} usage={usage} run={runsById.get(group.runId ?? "")} grouped key={`${asset.key}:${usage?.itemId ?? "unassigned"}`} />)}</div> : null}
+          {expanded ? <div id={`asset-work-items-${group.key}`} className="asset-library-grid">{group.items.map(({ asset, usage, workUsages }) => <AssetCard onMediaPlay={handleMediaPlay} asset={asset} usage={usage} workUsages={workUsages} run={runsById.get(group.runId ?? "")} grouped key={`${asset.key}:${usage?.itemId ?? "unassigned"}`} />)}</div> : null}
           </section>;
         })}
       </section> : null}
@@ -205,22 +205,27 @@ export function AssetsPage() {
   );
 }
 
-function groupAssetsByWork(assets: StudioIndexedAsset[], runs: StudioRunSummary[]): Array<{ key: string; runId?: string; runTitle: string; items: Array<{ asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage }> }> {
-  const groups = new Map<string, { key: string; runId?: string; runTitle: string; items: Array<{ asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage }> }>();
-  const seenAssetRuns = new Set<string>();
+function groupAssetsByWork(assets: StudioIndexedAsset[], runs: StudioRunSummary[]): Array<{ key: string; runId?: string; runTitle: string; items: Array<{ asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage; workUsages?: StudioIndexedAssetUsage[] }> }> {
+  const groups = new Map<string, { key: string; runId?: string; runTitle: string; items: Array<{ asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage; workUsages?: StudioIndexedAssetUsage[] }> }>();
   for (const asset of assets) {
     if (!asset.usages.length) {
       const group = groups.get("unassigned") ?? { key: "unassigned", runTitle: "未归属项目", items: [] };
       group.items.push({ asset });
       groups.set("unassigned", group);
     }
+    // 同一资产在同一作品里可能有多条 usage（如同字节的旧/新声音记录）：卡片仍然
+    // 一张，但完整保留本作品全部 usage 供版本徽标聚合，不能只留第一条（CR2/AP2a）。
+    const usagesByRun = new Map<string, StudioIndexedAssetUsage[]>();
     for (const usage of asset.usages) {
-      const assetRunKey = `${asset.key}\u0000${usage.runId}`;
-      if (seenAssetRuns.has(assetRunKey)) continue;
-      seenAssetRuns.add(assetRunKey);
-      const group = groups.get(usage.runId) ?? { key: usage.runId, runId: usage.runId, runTitle: usage.runTitle, items: [] };
-      group.items.push({ asset, usage });
-      groups.set(usage.runId, group);
+      const list = usagesByRun.get(usage.runId) ?? [];
+      list.push(usage);
+      usagesByRun.set(usage.runId, list);
+    }
+    for (const [runId, runUsages] of usagesByRun) {
+      const group = groups.get(runId) ?? { key: runId, runId, runTitle: runUsages[0]!.runTitle, items: [] };
+      const usage = runUsages[0];
+      group.items.push({ asset, ...(usage ? { usage } : {}), workUsages: runUsages });
+      groups.set(runId, group);
     }
   }
   const runOrder = new Map(runs.map((run, index) => [run.id, index]));
@@ -231,31 +236,91 @@ function groupAssetsByWork(assets: StudioIndexedAsset[], runs: StudioRunSummary[
   });
 }
 
-function AssetCard({ asset, usage, run, grouped = false, onMediaPlay }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; run?: StudioRunSummary | undefined; grouped?: boolean; onMediaPlay?: (element: HTMLMediaElement) => void }) {
+function AssetCard({ asset, usage, run, grouped = false, workUsages, onMediaPlay }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; run?: StudioRunSummary | undefined; grouped?: boolean; workUsages?: StudioIndexedAssetUsage[] | undefined; onMediaPlay?: (element: HTMLMediaElement) => void }) {
   const resolvedUsage = usage ?? asset.usages.at(-1);
   const identity = assetUsageIdentity(asset, resolvedUsage, grouped);
   const metadata = assetMetadata(asset, run);
   const creator = creatorFacingTechnicalText(asset.creator);
   const visibleTags = asset.tags.filter((tag) => tag !== "studio-owner" && tag !== asset.creator);
+  const isAudio = asset.mediaKind === "audio";
+  const distinctWorks = isAudio ? new Set(asset.usages.map((item) => item.runId)).size : 0;
+  // 徽标范围（CR2/AP2a/AP2b）：按作品视图聚合本作品该资产全部 usage；按资产视图单作品
+  // 聚合全部 usage；多作品不输出无作品限定的 current，改为中性的按作品分别查看。
+  const voiceBadge = isAudio
+    ? !grouped && distinctWorks > 1
+      ? { label: `用于 ${distinctWorks} 个作品，版本状态分别查看`, state: "unverified" as const }
+      : voiceVersionBadge(grouped ? (workUsages ?? (resolvedUsage ? [resolvedUsage] : [])) : asset.usages)
+    : undefined;
+  const voiceWorks = isAudio && !grouped ? distinctWorks : 0;
+  // 详情的声音版本归属按同样范围列明：按作品只列本作品；缺投影 usage 如实标未核实。
+  const voiceDetailUsages = grouped ? (workUsages ?? (resolvedUsage ? [resolvedUsage] : [])) : asset.usages;
   return <article className="asset-card">
     <AssetPreview asset={asset} usage={resolvedUsage} identity={identity} {...(onMediaPlay ? { onMediaPlay } : {})} />
     <div className="asset-card-copy">
       <header><span>{originLabel(asset.origin)} · {mediaKindLabel(asset.mediaKind)}</span><b className={`reuse-${asset.reuseStatus}`}>{reuseStatusLabel(asset.reuseStatus)}</b></header>
       <h3>{assetTitle(asset, resolvedUsage)}</h3>
+      {voiceBadge ? <p className="asset-voice-version" data-voice-state={voiceBadge.state}>{voiceBadge.label}{voiceBadge.operation ? ` · ${voiceBadge.operation}` : ""}{voiceBadge.time ? ` · ${voiceBadge.time}` : ""}</p> : null}
       <p className="asset-provider">{hasStockAttribution(resolvedUsage?.providerId ?? asset.providerId)
         ? <StockAttribution provider={resolvedUsage?.providerId ?? asset.providerId} creator={resolvedUsage?.creator ?? creator} creatorUrl={resolvedUsage?.creatorUrl ?? asset.creatorUrl} licenseNote={resolvedUsage?.licenseNote ?? asset.licenseNote} />
         : <>{providerLabel(asset.providerId) ?? "其他制作服务"}{creator ? ` · ${creator}` : ""}</>}</p>
-      {metadata.length || visibleTags.length ? <details className="asset-card-details">
+      {metadata.length || visibleTags.length || (isAudio && voiceDetailUsages.length) ? <details className="asset-card-details">
         <summary>规格与标签<ChevronDown aria-hidden="true" size={14} /></summary>
         {metadata.length ? <ul className="asset-metadata" aria-label="素材规格">{metadata.map((item) => <li key={item}>{item}</li>)}</ul> : null}
+        {isAudio && voiceDetailUsages.length ? <ul className="asset-metadata" aria-label="声音版本归属">
+          {voiceDetailUsages.map((item) => <li key={`${item.runId}:${item.itemId}`}>
+            {`${item.runTitle} · ${item.voiceVersionInfo ? voiceVersionBadge([item]).label : "版本归属未核实"}`}
+            {item.voiceVersionInfo ? item.voiceVersionInfo.versions.map((version) => <span key={version.versionId} className="asset-voice-version-id" title={version.versionId}>{`版本 ${version.versionId.slice(0, 8)}…`}</span>) : null}
+          </li>)}
+        </ul> : null}
         {visibleTags.length ? <div className="asset-tags">{visibleTags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}</div> : null}
       </details> : null}
       <footer>
-        <span>{grouped ? identity : asset.useCount > 1 ? `已用于 ${asset.useCount} 个镜头` : resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? identity : "未归属"}</span>
+        <span>{voiceWorks > 1 ? `用于 ${voiceWorks} 个作品，展开看版本` : grouped ? identity : asset.useCount > 1 ? `已用于 ${asset.useCount} 个镜头` : resolvedUsage?.scenePosition ? `镜头 ${resolvedUsage.scenePosition}` : resolvedUsage ? identity : "未归属"}</span>
         <div>{asset.reuseStatus === "review_required" ? <Link to="/resources#resource-manifest" aria-label={`去确认授权：${assetTitle(asset, resolvedUsage)}`}>去确认授权</Link> : null}{resolvedUsage ? <Link to={`/projects/${resolvedUsage.runId}`} aria-label={`查看作品：${assetTitle(asset, resolvedUsage)}`}>查看作品</Link> : null}{asset.sourceUrl ? <a href={asset.sourceUrl} target="_blank" rel="noreferrer" aria-label={`查看素材原始来源：${assetTitle(asset, resolvedUsage)}（新窗口）`}><ExternalLink aria-hidden="true" size={14} /></a> : null}</div>
       </footer>
     </div>
   </article>;
+}
+
+/**
+ * CLOUD-10/P4.2＋CR2：声音版本的可区分信息。徽标聚合传入范围内全部 usage 的版本事实，
+ * 按完整 versionId 去重，不按数组顺序或时间挑一条：有效版=当前、有效版失效=已失效、
+ * 其余绑定=历史；范围内没有投影信息=归属未核实。操作类型只在全部 usage 同一操作时
+ * 展示（多操作并存时不挑一个冒充）；时间取可信绑定中最新 createdAt，缺失不显示。
+ * 当前声音版本只说明声音版本归属，不等于已入当前成片或通过人工终审。
+ */
+function voiceVersionBadge(usages: StudioIndexedAssetUsage[]): { label: string; state: "current" | "historical" | "stale" | "unverified"; operation?: string | undefined; time?: string | undefined } {
+  const infos = usages
+    .map((usage) => usage.voiceVersionInfo)
+    .filter((info): info is NonNullable<StudioIndexedAssetUsage["voiceVersionInfo"]> => Boolean(info));
+  if (!infos.length) return { label: "版本归属未核实", state: "unverified" };
+  const versionsById = new Map<string, NonNullable<StudioIndexedAssetUsage["voiceVersionInfo"]>["versions"][number]>();
+  for (const info of infos) {
+    for (const version of info.versions) {
+      if (!versionsById.has(version.versionId)) versionsById.set(version.versionId, version);
+    }
+  }
+  const versions = [...versionsById.values()];
+  if (!versions.length) return { label: "版本归属未核实", state: "unverified" };
+  const operations = new Set(infos.map((info) => info.operation));
+  const operation = operations.size === 1 ? voiceOperationLabel([...operations][0]!) : undefined;
+  const latest = versions.reduce((newest, version) => !newest || (version.createdAt ?? "") > (newest.createdAt ?? "") ? version : newest, versions[0]!);
+  const time = latest.createdAt ? `${beijingDateTime(latest.createdAt)}（北京时间）` : undefined;
+  if (versions.some((version) => version.state === "current")) {
+    const historical = versions.filter((version) => version.state !== "current").length;
+    return { label: historical > 0 ? `当前声音版本，另有 ${historical} 个历史版本` : "当前声音版本", state: "current", operation, time };
+  }
+  if (versions.some((version) => version.state === "stale")) return { label: "已失效的声音版本", state: "stale", operation, time };
+  return { label: "历史声音版本", state: "historical", operation, time };
+}
+
+function voiceOperationLabel(operation: NonNullable<StudioIndexedAssetUsage["voiceVersionInfo"]>["operation"]): string {
+  return ({
+    synthesis: "配音生成",
+    relayout: "配音时间调整",
+    subtitle_recovery: "字幕同步恢复",
+    unknown: "来源操作未识别",
+  })[operation];
 }
 
 function AssetPreview({ asset, usage = asset.usages.at(-1), identity, onMediaPlay }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; identity: string; onMediaPlay?: (element: HTMLMediaElement) => void }) {

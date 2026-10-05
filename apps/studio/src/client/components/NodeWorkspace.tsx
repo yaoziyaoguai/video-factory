@@ -1287,7 +1287,7 @@ function creatorCapabilityLabel(
   const auditEffort = execution?.parameters?.auditReasoningEffort;
   const knownProviderName = providerLabel(providerId);
   const providerName = providers.find((provider) => provider.id === providerId)?.label
-    ?? (knownProviderName && !knownProviderName.startsWith("服务名称未收录（") ? knownProviderName : "AI 创作服务");
+    ?? (knownProviderName && !knownProviderName.startsWith("来源服务未识别（") ? knownProviderName : "AI 创作服务");
   const modelName = catalogModelLabel(providers, modelId);
   return [
     `本次使用 ${providerName}${!modelName || modelId === providerId || modelName === providerName ? "" : ` · ${modelName}`}`,

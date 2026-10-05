@@ -527,10 +527,6 @@ function buildResultAvailability(
     return { kind: "publish_package", usable: true, label: "发布包已准备", detail: "成片与平台发布资料都已保留。" };
   }
   if (input.videoAvailable) {
-    const reviewPassed = nodeEffectivelyDone(input.nodes, "final-review");
-    const reviewFailed = input.nodes.some((node) =>
-      ["technical-review", "visual-review", "final-review"].includes(node.id)
-      && (node.status === "failed" || node.status === "rejected" || node.status === "stale"));
     if (!nodeEffectivelyDone(input.nodes, "render")) {
       return {
         kind: "draft_video",
@@ -539,11 +535,13 @@ function buildResultAvailability(
         detail: "历史成片文件仍可预览，但它对应的结果已失效，需要重新生成后才能进入审查。",
       };
     }
-    return reviewPassed
-      ? { kind: "reviewed_video", usable: true, label: "已有审片成片", detail: "成片已通过终审，发布包尚未生成。" }
-      : reviewFailed
-        ? { kind: "draft_video", usable: false, label: "成片需修复", detail: "文件仍可预览，但没有通过当前审查，不能作为可发布结果。" }
-        : { kind: "draft_video", usable: false, label: "已有待审片成片", detail: failure ? "后置节点失败，文件仍可预览但尚未通过审查。" : "成片正在等待后续审查。" };
+    if (nodeEffectivelyDone(input.nodes, "final-review")) {
+      return { kind: "reviewed_video", usable: true, label: "已有审片成片", detail: "成片已通过终审，发布包尚未生成。" };
+    }
+    // 审片节点异常时先按结构化事实分类（CLOUD-01）：审查没有结论≠成片文件损坏。
+    const reviewPending = reviewPendingAvailability(input.nodes);
+    if (reviewPending) return reviewPending;
+    return { kind: "draft_video", usable: false, label: "已有待审片成片", detail: failure ? "后置节点失败，文件仍可预览但尚未通过审查。" : "成片正在等待后续审查。" };
   }
   if (input.publishPackageAvailable) {
     return {
@@ -565,6 +563,47 @@ function nodeEffectivelyDone(nodes: StudioNode[], nodeId: string): boolean {
   if (node.inputState && !node.inputState.versions.some((version) => version.id === node.inputState!.effectiveVersionId)) return false;
   if (node.outputState && !node.outputState.versions.some((version) => version.id === node.outputState!.effectiveVersionId)) return false;
   return true;
+}
+
+const REVIEW_NODE_IDS = ["technical-review", "visual-review", "final-review"];
+
+/**
+ * 有效成片在、终审未完成时，审片节点的异常只说明“审查层”的状态，不推断媒体文件本身
+ * 损坏（CLOUD-01）。分类只用结构化事实：outcomeUncertain=审查请求无结论；stale=审查
+ * 不再对应当前版本；qualityGateResults=机器质检的具体不合格证据；其余（人工拒绝、
+ * 带意见的失败、尚不能细分的审查异常）统一为保守的“审查待处理”，不笼统称坏片或已通过。
+ */
+function reviewPendingAvailability(nodes: StudioNode[]): StudioRunResultAvailability | undefined {
+  const problematic = nodes.filter((node) =>
+    REVIEW_NODE_IDS.includes(node.id)
+    && (node.status === "failed" || node.status === "rejected" || node.status === "stale"));
+  if (problematic.length === 0) return undefined;
+  const technicalReasons = problematic.flatMap((node) => node.qualityGateResults
+    .filter((gate) => gate.status !== "passed" && gate.reasons.length > 0)
+    .map((gate) => gate.reasons.join("；")));
+  const noConclusion = problematic.some((node) => node.outcomeUncertain === true || node.status === "stale");
+  if (technicalReasons.length > 0) {
+    return {
+      kind: "draft_video",
+      usable: false,
+      label: "机器质检有待处理项",
+      detail: `成片文件已生成、仍可预览；机器质检列出了待处理项：${technicalReasons.slice(0, 3).join("；")}。这不代表文件损坏，处理后再进入后续审查。`,
+    };
+  }
+  if (noConclusion) {
+    return {
+      kind: "draft_video",
+      usable: false,
+      label: "已有成片，审片未完成",
+      detail: "成片文件已生成、仍可预览；审查尚未给出结论。审片未完成不等于成片文件损坏，你可以先观看已生成的成片，再按页面提供的人工处理入口继续。",
+    };
+  }
+  return {
+    kind: "draft_video",
+    usable: false,
+    label: "已有成片，审查待处理",
+    detail: "成片文件已生成、仍可预览，但审查提出了待处理意见。请结合审片意见决定返修或继续；这既不是成片文件损坏，也不代表已经通过审查。",
+  };
 }
 
 function latestTimestamp(startedAt: string, nodes: StudioNode[]): string {

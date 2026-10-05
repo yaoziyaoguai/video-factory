@@ -9,7 +9,11 @@ describe("creator-facing presentation labels", () => {
     expect(providerLabel("human-validated-director-plan-v1")).toBe("人工确认导演方案");
     expect(providerLabel("multiple")).toBe("多来源制作记录");
     expect(providerLabel("codex-role-auditor-v1")).toBe("AI 独立质量复核");
-    expect(providerLabel("unknown-provider-v1")).toBe("服务名称未收录（unknown-provider-v1）");
+    expect(providerLabel("unknown-provider-v1")).toBe("来源服务未识别（unknown-provider-v1）");
+    // CLOUD-09：两个本地声音能力是人话名；未知服务显示“来源服务未识别”并保留可追溯 ID。
+    expect(providerLabel("local-relayout-v1")).toBe("配音时间调整（复用原声）");
+    expect(providerLabel("local-subtitle-recovery-v1")).toBe("字幕同步恢复（复用原声）");
+    expect(providerLabel("minimax-tts-v1")).toBe("MiniMax 中文配音");
     expect(providerModelLabel(undefined, "internal-model-id")).toBe("模型名称未收录（internal-model-id）");
   });
 
@@ -52,8 +56,8 @@ describe("creator-facing presentation labels", () => {
     ];
     expect(costProviderLabel("codex-creative-treatment-v1", catalog)).toBe("AI 前期构思");
     expect(costProviderLabel("codex-screenwriter-v1", catalog)).toBe("AI 编剧");
-    expect(costProviderLabel("deepseek", catalog)).toBe("服务名称未收录（deepseek）");
-    expect(costProviderLabel("m-793ad8b15bed", catalog)).toBe("服务名称未收录（m-793ad8b15bed）");
+    expect(costProviderLabel("deepseek", catalog)).toBe("来源服务未识别（deepseek）");
+    expect(costProviderLabel("m-793ad8b15bed", catalog)).toBe("来源服务未识别（m-793ad8b15bed）");
     expect(costProviderLabel("codex-screenwriter-v1", undefined)).toBe("AI 编剧");
   });
 

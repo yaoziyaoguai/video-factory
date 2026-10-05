@@ -1,4 +1,4 @@
-import type { StudioAgentLoopProgress, StudioCandidateInboxItem, StudioOpportunity, StudioRunFailure, StudioRunSummary } from "../shared/api.js";
+import type { StudioAgentLoopProgress, StudioCandidateInboxItem, StudioOpportunity, StudioOpportunityEvidence, StudioRunFailure, StudioRunSummary } from "../shared/api.js";
 
 export const RUN_NODE_LABELS: Record<string, string> = {
   brief: "内容简报",
@@ -143,12 +143,111 @@ export function presentableOpportunityEvidence(
   ));
 }
 
-/** 来源计数的人话文案：零来源如实说“尚未添加”，不伪造线索数。 */
+export interface DisplayEvidenceGroup {
+  /** 组内首条记录（保持原有出现顺序），渲染标题/链接用它。 */
+  primary: StudioOpportunityEvidence;
+  /** 与首条同 URL 同标题的其他记录；可展开查看各自平台/采集时间/热度。 */
+  duplicates: StudioOpportunityEvidence[];
+  /** duplicates 的可见元信息（平台/采集时间/热度）是否与首条完全一致。 */
+  duplicatesShareVisibleMeta: boolean;
+}
+
+/** 只去首尾空白并做 URL 标准化（主机大小写等）；保留 path/query/hash，不删追踪参数。 */
+function normalizedEvidenceUrl(url: string | undefined): string | undefined {
+  const trimmed = url?.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+    return parsed.href;
+  } catch {
+    return undefined;
+  }
+}
+
+function evidenceVisibleMeta(entry: StudioOpportunityEvidence): string {
+  return JSON.stringify([entry.platform, entry.collectedAt ?? null, entry.strength]);
+}
+
+/**
+ * CLOUD-06：展示层去重——合法 http(s) URL 规范化后相同、且线索标题（keyword trim 后）
+ * 相同的多条记录合成一组；无链接、非法链接、同 URL 不同标题都保持独立。只影响展示
+ * 分组，不改持久 evidence、来源判定或独立域名计数。
+ */
+export function groupDisplayEvidence(entries: StudioOpportunityEvidence[]): DisplayEvidenceGroup[] {
+  const groups: Array<{ url: string | undefined; keyword: string; group: DisplayEvidenceGroup }> = [];
+  for (const entry of entries) {
+    const keyword = entry.keyword.trim();
+    const url = normalizedEvidenceUrl(entry.evidenceUrl);
+    const existing = url
+      ? groups.find((candidate) => candidate.url === url && candidate.keyword === keyword)
+      : undefined;
+    if (existing && url) {
+      existing.group.duplicates.push(entry);
+      if (evidenceVisibleMeta(entry) !== evidenceVisibleMeta(existing.group.primary)) {
+        existing.group.duplicatesShareVisibleMeta = false;
+      }
+      continue;
+    }
+    groups.push({ url, keyword, group: { primary: entry, duplicates: [], duplicatesShareVisibleMeta: true } });
+  }
+  return groups.map((candidate) => candidate.group);
+}
+
+/**
+ * 来源计数的展示口径：优先报去重后的组数；发生合并时注明原始记录数，零来源如实说
+ * “尚未添加”。独立来源域名仍用服务端 verification 的原值，不在展示层重算。
+ */
+export function evidenceGroupCountLabel(entries: StudioOpportunityEvidence[]): string {
+  const groups = groupDisplayEvidence(entries);
+  if (groups.length === 0) return "尚未添加参考来源";
+  const merged = groups.reduce((total, group) => total + group.duplicates.length, 0);
+  return merged > 0 ? `${groups.length} 组来源线索（原始 ${entries.length} 条记录）` : `${groups.length} 条来源线索`;
+}
+
+/** P2.3/CLOUD-07：北京时间完整时间（YYYY-MM-DD HH:mm，含年份）；非法/缺失返回 undefined，不抛错。 */
+export function beijingDateTime(value: string | undefined): string | undefined {
+  if (!value || !Number.isFinite(Date.parse(value))) return undefined;
+  const date = new Date(value);
+  const day = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(date);
+  const time = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(date);
+  return `${day} ${time}`;
+}
+
+export interface TrendStatusMeta {
+  platformCount: number;
+  candidateCount: number;
+  collectedAt?: string;
+  generatedAt?: string;
+  refreshedAt?: string;
+}
+
+/**
+ * CLOUD-07：顶栏时间带完整日期并区分语义——来源采集、候选生成、本页刷新是三件事；
+ * 缺失/非法时间写“未记录”，不把生成时间冒充采集时间，也不让旧数据看似今天更新。
+ */
+export function trendStatusText(meta: TrendStatusMeta): string {
+  const collected = beijingDateTime(meta.collectedAt);
+  const generated = beijingDateTime(meta.generatedAt);
+  const refreshed = beijingDateTime(meta.refreshedAt);
+  const source = collected
+    ? `来源采集 ${collected}（北京时间）`
+    : generated
+      ? `候选生成 ${generated}（北京时间）· 来源采集时间未记录`
+      : "来源采集时间未记录";
+  const refresh = refreshed ? ` · 本页刷新 ${refreshed}（北京时间）` : "";
+  return `${source}${refresh} · ${meta.platformCount} 个平台 · ${meta.candidateCount} 条`;
+}
+
+/** 来源计数的人话文案（CLOUD-06 口径）：零来源如实说“尚未添加”，去重后报组数。 */
 export function opportunityEvidenceCountLabel(
   opportunity: Pick<StudioOpportunity, "origin" | "evidence">,
 ): string {
-  const count = presentableOpportunityEvidence(opportunity).length;
-  return count === 0 ? "尚未添加参考来源" : `${count} 条来源线索`;
+  return evidenceGroupCountLabel(presentableOpportunityEvidence(opportunity));
 }
 
 export function providerLabel(providerId?: string): string | undefined {
@@ -186,6 +285,9 @@ export function providerLabel(providerId?: string): string | undefined {
     "wan-video-v1": "百炼 · 通义万相视频",
     "hailuo-video-v1": "MiniMax 视频生成",
     "macos-say-v1": "macOS 系统配音",
+    // CLOUD-09：两个本地声音能力是复用原声的本地操作，不是新的 TTS 供应商。
+    "local-relayout-v1": "配音时间调整（复用原声）",
+    "local-subtitle-recovery-v1": "字幕同步恢复（复用原声）",
     "python-ffmpeg-v1": "FFmpeg 本地渲染",
     "python-technical-review-v1": "本地机器质检",
     "codex-visual-review-v1": "AI 视觉审片",
@@ -206,7 +308,7 @@ export function providerLabel(providerId?: string): string | undefined {
     minimax: "MiniMax",
     "minimax-tts-v1": "MiniMax 中文配音",
     seedance: "Seedance",
-  } as Record<string, string>)[providerId] ?? `服务名称未收录（${displayIdentifier(providerId)}）`;
+  } as Record<string, string>)[providerId] ?? `来源服务未识别（${displayIdentifier(providerId)}）`;
 }
 
 export function providerModelLabel(
@@ -244,7 +346,7 @@ export function costProviderLabel(
 ): string {
   const known = providerLabel(providerId);
   if (known === undefined) return providerId; // providerId 非空时 providerLabel 恒有返回；此处只为类型收窄。
-  if (!known.startsWith("服务名称未收录（")) return known;
+  if (!known.startsWith("来源服务未识别（")) return known;
   const direct = providers?.find((provider) => provider.id === providerId);
   return direct ? direct.label : known;
 }

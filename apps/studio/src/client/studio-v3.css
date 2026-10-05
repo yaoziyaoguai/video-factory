@@ -663,9 +663,15 @@ body { background: var(--canvas); }
 .studio-v3 .candidate-meta span.is-risk { color: #a32f26; background: #fff0ed; border-color: #efc0b9; }
 .studio-v3 .candidate-evidence { display: grid; gap: 6px; margin-top: 18px; }
 .studio-v3 .candidate-evidence > span { color: #8b8f87; font-size: 9px; font-weight: 780; }
-.studio-v3 .candidate-evidence > a, .studio-v3 .candidate-evidence > div { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; color: inherit; background: rgb(255 255 255 / 74%); border: 1px solid #dcddd5; border-radius: 4px; text-decoration: none; }
+.studio-v3 .candidate-evidence > a, .studio-v3 .candidate-evidence > div, .studio-v3 .candidate-evidence .evidence-group { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; color: inherit; background: rgb(255 255 255 / 74%); border: 1px solid #dcddd5; border-radius: 4px; text-decoration: none; }
+.studio-v3 .candidate-evidence .evidence-group { display: grid; gap: 4px; }
+.studio-v3 .candidate-evidence .evidence-group > a, .studio-v3 .candidate-evidence .evidence-group > div { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 0; background: transparent; border: 0; border-radius: 0; }
 .studio-v3 .candidate-evidence strong { min-width: 0; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .studio-v3 .candidate-evidence small { flex: 0 0 auto; color: #8a8e87; font-size: 8px; }
+.studio-v3 .candidate-evidence .evidence-group-others { font-size: 8px; color: #8a8e87; }
+.studio-v3 .candidate-evidence .evidence-group-others summary { cursor: pointer; }
+.studio-v3 .candidate-evidence .evidence-group-others ul { margin: 4px 0 0; padding-left: 14px; }
+.studio-v3 .candidate-evidence .evidence-group-merged, .studio-v3 .candidate-evidence .evidence-group-overflow { color: #9a9d96; font-size: 8px; }
 .studio-v3 .candidate-adopt { width: 100%; margin-top: auto; }
 
 .studio-v3 .candidate-loading, .studio-v3 .candidate-error, .studio-v3 .series-empty, .studio-v3 .filtered-empty, .studio-v3 .awaiting-adoption { display: flex; min-height: 126px; align-items: center; justify-content: center; gap: 16px; padding: 22px; color: #737770; background: #fafaf7; }

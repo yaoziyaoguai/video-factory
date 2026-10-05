@@ -31,7 +31,7 @@ import type {
   StudioTopicGenerationReceipt,
 } from "../../shared/api.js";
 import { creatorFacingTechnicalText, reasoningEffortLabel } from "../presentation.js";
-import { platformLabel, proposalSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
+import { beijingDateTime, evidenceGroupCountLabel, groupDisplayEvidence, platformLabel, proposalSourceLabel, TOPIC_CATEGORY_LABELS, trendStatusText, type DisplayEvidenceGroup, type TrendStatusMeta } from "../presentation.js";
 import { CandidateVerificationDialog } from "./CandidateVerificationDialog.js";
 import { SeriesEpisodeDialog } from "./SeriesEpisodeDialog.js";
 
@@ -48,7 +48,7 @@ interface TopicEntryWorkspaceProps {
   loading: Partial<Record<StudioCandidateOrigin, boolean>>;
   error?: Partial<Record<StudioCandidateOrigin, string>>;
   adoptingId?: string;
-  trendMeta: { platformCount: number; candidateCount: number; collectedAt?: string; generatedAt?: string; refreshedAt?: string };
+  trendMeta: TrendStatusMeta;
   seriesAuditReady?: boolean;
   generatingSeriesId?: string;
   onGenerateSeriesRoadmap?: (seriesId: string) => Promise<void>;
@@ -103,8 +103,13 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const editorFailureReason = ruleBaselineCount > 0
     ? seriesItems.find((item) => item.generationFallback)?.generationFallback?.reason
     : undefined;
-  // 总编这轮真跑了、但独立复核没判通过时，审计的建议必须跟着候选一起出现。
-  const auditAdvice = mode === "trend" ? topicAuditAdvice(props.inbox?.topicGeneration) : undefined;
+  // 总编这轮真跑了、但独立复核没判通过时，审计的建议必须跟着候选一起出现（CLOUD-05：
+  // 紧凑默认＋可展开全文；generationId 变化时重新收起，筛选/采用不重置折叠）。
+  const showAuditAdvice = mode === "trend"
+    && props.inbox?.topicGeneration?.auditStatus !== undefined
+    && (props.inbox.topicGeneration.auditStatus !== "passed"
+      || (props.inbox.topicGeneration.auditSuggestions?.length ?? 0) > 0
+      || (props.inbox.topicGeneration.auditRepairInstructions?.length ?? 0) > 0);
   const clearCount = seriesItems.filter(isClearForProduction).length;
   const visibleItems = deskItems
     .filter((item) => category === "all" || item.category === category)
@@ -174,7 +179,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
           </header>
 
           {modeError && modeItems.length > 0 ? <div className="candidate-cache-warning" role="status"><AlertCircle aria-hidden="true" size={17} /><span>本次更新失败，继续展示上次缓存：{modeError}</span></div> : null}
-          {auditAdvice ? <div className="candidate-audit-advice" role="note"><ShieldAlert aria-hidden="true" size={17} /><span>{auditAdvice}</span></div> : null}
+          {showAuditAdvice && props.inbox?.topicGeneration ? <TopicAuditAdvicePanel key={props.inbox.topicGeneration.generationId} receipt={props.inbox.topicGeneration} visibleCount={visibleItems.length} /> : null}
           {modeError && modeItems.length === 0 ? (
             <div className="candidate-error" role="alert"><AlertCircle aria-hidden="true" size={20} /><div><strong>{mode === "trend" ? "热点候选暂时不可用" : "系列候选暂时不可用"}</strong><span>{modeError}</span></div><button className="button button-secondary" type="button" onClick={() => props.onRetry(candidateMode)}><RefreshCw aria-hidden="true" size={15} />重试</button></div>
           ) : modeBusy && modeItems.length === 0 ? (
@@ -662,6 +667,8 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
       : adviceSkip
         ? `总编不建议生产：${item.editorialDecision.reasons[0] ?? "未给出理由。"}`
         : undefined;
+  // CLOUD-06：展示层同链接同标题合并为一组；独立域名计数仍用服务端 verification 原值。
+  const evidenceGroups = groupDisplayEvidence(item.evidence);
   return (
     <article className="candidate-detail" aria-labelledby="candidate-detail-title">
       <header><span>{item.origin === "series" ? `${item.seriesName} · 第 ${item.episodeNumber} 集` : `${TOPIC_CATEGORY_LABELS[item.category]}观察`}</span><strong aria-label={`${scoreLabel} ${scoreValue} 分`}><small>{scoreLabel}</small>{scoreValue}</strong></header>
@@ -732,7 +739,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
           ? "内容潜力分只反映选题机会与制作可行性；来源不足只是提醒，是否开工由你决定。证据强度表示当前信号热度或排名，不等同于事实可信度。"
           : "总分以观众需求为主：它回答“具体是谁、在什么场景下会因为什么点开”，由选题总编单独判断，热度不参与。风险分越低越安全。证据强度表示当前信号热度或排名，不等同于事实可信度。"}</p>
       </details>
-      <div className="candidate-evidence"><span>来源线索</span>{item.evidence.slice(0, 2).map((evidence, index) => evidence.evidenceUrl ? <a key={`${item.id}-${index}`} href={evidence.evidenceUrl} target="_blank" rel="noreferrer"><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong><small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${platformLabel(evidence.platform)} · 榜单热度或排名信号 ${evidence.strength}`}</small></a> : <div key={`${item.id}-${index}`}><strong>{evidence.keyword}</strong><small>{platformLabel(evidence.platform)} · 榜单热度或排名信号 {evidence.strength}</small></div>)}</div>
+      <div className="candidate-evidence"><span>来源线索</span><EvidenceGroupList groups={evidenceGroups.slice(0, 2)} totalGroups={evidenceGroups.length} idPrefix={item.id} /></div>
       {item.origin === "trend" && item.articleSources?.length ? <details className="candidate-score-explainer candidate-article-reading" open>
         <summary>原文阅读与事实依据</summary>
         <div>{item.articleSources.map((source, index) => <span key={source.sourceId}>{index + 1}. {articleReadStatusLabel(source.readStatus)} · {source.pageTitle || source.finalUrl}{source.readStatus === "failed" ? "。读取服务未能完成，不代表文章没有事实依据。" : null}</span>)}</div>
@@ -748,7 +755,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
         ? "来源不足 · 仍可由你决定开工"
         : item.verification.status === "review_required"
           ? "建议采用前先核验"
-          : "来源已达标"}</strong><small>{item.verification.reasons[0]}</small></span><output>{item.evidence.length} 条来源线索 · {item.verification.independentSources} 个有效来源域名（需 {item.verification.requiredSources} 个）</output></div>
+          : "来源已达标"}</strong><small>{item.verification.reasons[0]}</small></span><output>{evidenceGroupCountLabel(item.evidence)} · {item.verification.independentSources} 个有效来源域名（需 {item.verification.requiredSources} 个）</output></div>
       <div className="candidate-actions">
         {canSupplementSources ? (
           <button className="button button-secondary" type="button" aria-label={`补充来源 ${item.title}`} disabled={disabled} onClick={() => onSupplementSources?.(item)}>保存来源并重新评估</button>
@@ -769,6 +776,39 @@ function articleReadStatusLabel(status: NonNullable<StudioCandidateInboxItem["ar
     blocked: "原文受限",
     failed: "原文读取失败",
   }[status];
+}
+
+/**
+ * CLOUD-06：同 URL 同标题的展示组。一组渲染一份标题/链接；其他记录默认折叠，
+ * 可见元信息完全相同时合并说明，不再把同一条线索重复显示两遍。
+ */
+export function EvidenceGroupList({ groups, totalGroups, idPrefix }: {
+  groups: DisplayEvidenceGroup[];
+  totalGroups: number;
+  idPrefix: string;
+}) {
+  const hiddenGroups = Math.max(0, totalGroups - groups.length);
+  return <>
+    {groups.map((group, index) => {
+      const evidence = group.primary;
+      const link = evidence.evidenceUrl?.trim();
+      const heading = <><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong>
+        <small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${platformLabel(evidence.platform)} · 榜单热度或排名信号 ${evidence.strength}`}</small></>;
+      return <div key={`${idPrefix}-eg-${index}`} className="evidence-group">
+        {link ? <a href={link} target="_blank" rel="noreferrer">{heading}</a> : <div>{heading}</div>}
+        {group.duplicates.length > 0 ? (
+          group.duplicatesShareVisibleMeta
+            ? <small className="evidence-group-merged">合并 {group.duplicates.length + 1} 条相同链接记录</small>
+            : <details className="evidence-group-others"><summary>同一链接的其他 {group.duplicates.length} 条记录</summary>
+              <ul>{group.duplicates.map((other, otherIndex) => <li key={`${idPrefix}-eg-${index}-${otherIndex}`}>
+                <span>{platformLabel(other.platform)}{beijingDateTime(other.collectedAt) ? ` · ${beijingDateTime(other.collectedAt)}` : ""} · 信号 {other.strength}</span>
+              </li>)}</ul>
+            </details>
+        ) : null}
+      </div>;
+    })}
+    {hiddenGroups > 0 ? <small className="evidence-group-overflow">另有 {hiddenGroups} 组来源线索未展开</small> : null}
+  </>;
 }
 
 // 事实出处写给读者看：sourceId 和 p1 是内部标识，用户看不动它们。改用上面来源列表的序号
@@ -794,19 +834,36 @@ function isClearForProduction(item: StudioCandidateInboxItem): boolean {
     && item.seriesSequence?.status !== "blocked";
 }
 
-// 审计只出建议，但建议不能只存在于服务端：复核没判通过时把它的原话摆出来，
-// 否则用户面对一屏真模型候选，无从知道审计正要修哪里。
-function topicAuditAdvice(receipt: StudioTopicGenerationReceipt | undefined): string | undefined {
-  if (!receipt?.auditStatus) return undefined;
-  const advice = (receipt.auditSuggestions?.length ? receipt.auditSuggestions : receipt.auditRepairInstructions ?? []).slice(0, 3);
-  if (receipt.auditStatus === "passed" && advice.length === 0) return undefined;
-  return [
-    receipt.auditStatus === "passed"
-      ? "这组选题已完成独立复核；以下是可选的内容改进建议，不影响你直接选择："
-      : "选题总编这轮独立复核未判通过，候选仍然可以直接进入制作；这是复核建议修复的点：",
-    receipt.auditSummary,
-    ...advice,
-  ].filter((line): line is string => Boolean(line)).join(" ");
+// CLOUD-05：复核意见默认只占紧凑一行；完整摘要/全部建议可展开。意见属于“这一批”，
+// 与当前列表的筛选/采用状态分开说明，不把审计原文里的数量改写成当前列表数量。
+const AUDIT_EXCERPT_CODEPOINTS = 120;
+
+function auditExcerpt(text: string): { excerpt: string; truncated: boolean } {
+  const codePoints = Array.from(text);
+  if (codePoints.length <= AUDIT_EXCERPT_CODEPOINTS) return { excerpt: text, truncated: false };
+  return { excerpt: `${codePoints.slice(0, AUDIT_EXCERPT_CODEPOINTS).join("")}…`, truncated: true };
+}
+
+function TopicAuditAdvicePanel({ receipt, visibleCount }: { receipt: StudioTopicGenerationReceipt; visibleCount: number }) {
+  const suggestions = receipt.auditSuggestions?.length ? receipt.auditSuggestions : [];
+  const repairs = (receipt.auditRepairInstructions ?? []).filter((line) => !suggestions.includes(line));
+  const statusLine = receipt.auditStatus === "passed"
+    ? "本批次已完成独立复核；以下是可选的内容改进建议，不阻止你采用任何候选。"
+    : "本批次独立复核未判通过；复核建议不阻止你采用任何候选。";
+  const generated = beijingDateTime(receipt.generatedAt);
+  const scopeLine = `这份意见针对该批次（${receipt.candidateCount} 条候选${generated ? `，生成于 ${generated}（北京时间）` : ""}）；当前列表可能因筛选、已采用或内容修订而与批次不同，现在可见 ${visibleCount} 条。`;
+  const summary = receipt.auditSummary ? auditExcerpt(receipt.auditSummary) : undefined;
+  const hasExpandable = Boolean(receipt.auditSummary || suggestions.length || repairs.length);
+  return <details className="candidate-audit-advice" role="note">
+    <summary>{statusLine}{summary ? ` ${summary.excerpt}${summary.truncated ? "（原文节选）" : ""}` : ""}</summary>
+    <div className="candidate-audit-advice-body">
+      <p>{scopeLine}</p>
+      {receipt.auditSummary ? <p><strong>复核摘要全文：</strong>{receipt.auditSummary}</p> : null}
+      {suggestions.length ? <div><strong>全部复核建议（{suggestions.length} 条）</strong><ul>{suggestions.map((line, index) => <li key={`s-${index}`}>{line}</li>)}</ul></div> : null}
+      {repairs.length ? <div><strong>补充修复说明</strong><ul>{repairs.map((line, index) => <li key={`r-${index}`}>{line}</li>)}</ul></div> : null}
+      {!hasExpandable ? <p>复核没有留下更多文字说明；批次事实以上方数字为准，不从自然语言里抽取数量。</p> : null}
+    </div>
+  </details>;
 }
 
 // 排序必须用界面上显示的那个分，否则列表顺序会和行上显示的数字自相矛盾。
@@ -925,11 +982,4 @@ function countVerdicts(items: StudioCandidateInboxItem[]): Partial<Record<Studio
   }, {});
 }
 
-function trendStatusText(meta: TopicEntryWorkspaceProps["trendMeta"]): string {
-  const updatedAt = meta.collectedAt ?? meta.generatedAt;
-  const time = updatedAt ? new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(updatedAt)) : "--:--";
-  const refreshed = meta.refreshedAt
-    ? ` · 本页刷新 ${new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(meta.refreshedAt))}`
-    : "";
-  return `源数据 ${time}${refreshed} · ${meta.platformCount} 个平台 · ${meta.candidateCount} 条`;
-}
+// CLOUD-07 的顶栏时间文案统一在 presentation.trendStatusText（纯函数，可表驱动测试）。

@@ -4995,7 +4995,7 @@ describe("Studio client", () => {
   });
 
   // 真实回执把模型接入编号（m-…）同时记为 providerId/modelId；审片面板必须经角色目录还原显示名，
-  // 不能把"服务名称未收录（m-…）"这种技术串暴露给创作者（2026-09-28 三条真实审片均如此）。
+  // 不能把"来源服务未识别（m-…）"这种技术串暴露给创作者（2026-09-28 三条真实审片均如此）。
   it("names the review service for connection-id receipts instead of an unregistered internal id", () => {
     const run: StudioRunDetail = {
       ...runDetail,
@@ -5037,7 +5037,7 @@ describe("Studio client", () => {
     expect(within(review).getByText("DeepSeek 视觉审片")).toBeInTheDocument();
     expect(within(review).getByText(/qwen3\.8-omni-flash/)).toBeInTheDocument();
     expect(within(review).getByText(/· 64 分/)).toBeInTheDocument();
-    expect(screen.queryByText(/服务名称未收录/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/来源服务未识别/)).not.toBeInTheDocument();
     expect(screen.queryByText(/m-793ad8b15bed/)).not.toBeInTheDocument();
   });
 

@@ -173,6 +173,12 @@
 .studio-v3 .asset-card-copy header b.reuse-review_required { color: var(--amber, var(--yellow)); }
 .studio-v3 .asset-card-copy h3 { margin: 8px 0; font-size: 16px; font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; }
 .studio-v3 .asset-provider { overflow: visible; color: var(--muted); font-size: 12px; line-height: 1.75; white-space: normal; overflow-wrap: anywhere; }
+/* CLOUD-10：声音卡默认区分当前/历史/失效/未核实版本；操作来源与可信时间同行。 */
+.studio-v3 .asset-voice-version { margin: 2px 0 0; color: var(--ink, var(--muted)); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.studio-v3 .asset-voice-version[data-voice-state="current"] { color: var(--green, var(--muted)); font-weight: 600; }
+.studio-v3 .asset-voice-version[data-voice-state="stale"] { color: var(--amber, var(--muted)); font-weight: 600; }
+.studio-v3 .asset-voice-version[data-voice-state="unverified"] { color: var(--muted); font-style: italic; }
+.studio-v3 .asset-voice-version-id { margin-left: 8px; padding: 1px 6px; color: var(--muted); background: var(--paper-soft); border-radius: 4px; font-family: ui-monospace, monospace; font-size: 10px; }
 .studio-v3 .asset-card-details { margin-top: 8px; }
 .studio-v3 .asset-card-details summary { display: flex; width: fit-content; min-height: 44px; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; cursor: pointer; list-style: none; }
 .studio-v3 .asset-card-details summary::-webkit-details-marker { display: none; }

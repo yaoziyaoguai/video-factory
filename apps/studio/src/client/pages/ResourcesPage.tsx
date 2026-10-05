@@ -463,7 +463,7 @@ export function ResourcesPage() {
 
       <section id="visual-providers" className="resource-section visual-library" data-resource-section data-active={activeSection === "visual-providers" ? "true" : undefined} data-tour="resource-visual">
         <ResourceHeading eyebrow="画面资源" title="图库与画面生成" meta={`${readyVisual} 项已配置 · 图库搜索与 AI 生成分开展示`} />
-        <p className="resource-note">免费图库可以减少生成费用，但仍须核对素材内容和授权。密钥在本机配置，不会显示在网页中；新来源配置后需重新启动本地服务。</p>
+        <p className="resource-note">免费图库可以减少生成费用，但仍须核对素材内容和授权。密钥由部署此工作室的管理员配置，不会在网页中显示；新增来源后由管理员按部署方式重启对应服务。</p>
         {providerLoading ? <div className="region-loading">正在读取画面能力...</div> : providerError ? (
           <ResourceError title="画面能力状态未知" message={providerError} retry={load} />
         ) : <>
@@ -760,7 +760,7 @@ function creatorFacingProviderKind(provider: StudioProvider): string {
 
 function creatorProviderLabel(provider: StudioProvider): string {
   const normalized = providerLabel(provider.id);
-  return !normalized || normalized === provider.id || normalized.startsWith("服务名称未收录（") ? provider.label : normalized;
+  return !normalized || normalized === provider.id || normalized.startsWith("来源服务未识别（") ? provider.label : normalized;
 }
 
 function ModelDefaultCard({ provider, selectedModelId, onChange }: {

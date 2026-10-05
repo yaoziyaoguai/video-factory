@@ -1,7 +1,7 @@
 import { AlertTriangle, ArrowUpRight, Clock3, Link2, Search, Target } from "lucide-react";
 import type { StudioOpportunity, StudioVisualSource } from "../../shared/api.js";
 import { resolveOpportunityVisualPlan } from "../../shared/visual-plan.js";
-import { platformLabel, presentableOpportunityEvidence, scoreSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
+import { beijingDateTime, evidenceGroupCountLabel, groupDisplayEvidence, platformLabel, presentableOpportunityEvidence, scoreSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
 
 interface OpportunityFocusProps {
   opportunity: StudioOpportunity;
@@ -82,24 +82,36 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
             <span className="eyebrow">依据</span>
             <h2 id="evidence-heading">来源线索与已读事实</h2>
           </div>
-          {/* DG-UX-02：计数与列表同一口径；无链接的旧 manual 占位不是来源。 */}
-          <span>{presentableOpportunityEvidence(opportunity).length === 0 ? "尚未添加参考来源" : `${presentableOpportunityEvidence(opportunity).length} 条`}</span>
+          {/* DG-UX-02/CLOUD-06：计数与列表同一口径（去重后的组数）；无链接的旧 manual 占位不是来源。 */}
+          <span>{evidenceGroupCountLabel(presentableOpportunityEvidence(opportunity))}</span>
         </div>
         <div className="evidence-list">
-          {presentableOpportunityEvidence(opportunity).map((evidence, index) => (
-            <article className="evidence-row" key={`${evidence.source}-${evidence.keyword}-${index}`}>
-              <span className="evidence-strength" aria-label={isManualEvidence(evidence) ? "用户补充来源" : `榜单热度或排名信号 ${evidence.strength}`}>{isManualEvidence(evidence) ? "补" : evidence.strength}</span>
-              <div>
-                <strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong>
-                <small><Clock3 aria-hidden="true" size={12} />{formatEvidenceTime(evidence.collectedAt)}</small>
-              </div>
-              {evidence.evidenceUrl ? (
-                <a href={evidence.evidenceUrl} target="_blank" rel="noreferrer" aria-label={`查看 ${evidence.keyword} 来源`}>
-                  <Link2 aria-hidden="true" size={14} />{isManualEvidence(evidence) ? "用户补充" : platformLabel(evidence.platform)}<ArrowUpRight aria-hidden="true" size={13} />
-                </a>
-              ) : <span className="evidence-source">{platformLabel(evidence.platform)}</span>}
-            </article>
-          ))}
+          {groupDisplayEvidence(presentableOpportunityEvidence(opportunity)).map((group, index) => {
+            const evidence = group.primary;
+            return (
+              <article className="evidence-row" key={`${evidence.source}-${evidence.keyword}-${index}`}>
+                <span className="evidence-strength" aria-label={isManualEvidence(evidence) ? "用户补充来源" : `榜单热度或排名信号 ${evidence.strength}`}>{isManualEvidence(evidence) ? "补" : evidence.strength}</span>
+                <div>
+                  <strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong>
+                  <small><Clock3 aria-hidden="true" size={12} />{formatEvidenceTime(evidence.collectedAt)}</small>
+                  {group.duplicates.length > 0 ? (
+                    group.duplicatesShareVisibleMeta
+                      ? <small className="evidence-group-merged">合并 {group.duplicates.length + 1} 条相同链接记录</small>
+                      : <details className="evidence-group-others"><summary>同一链接的其他 {group.duplicates.length} 条记录</summary>
+                        <ul>{group.duplicates.map((other, otherIndex) => <li key={otherIndex}>
+                          <span>{platformLabel(other.platform)}{beijingDateTime(other.collectedAt) ? ` · ${beijingDateTime(other.collectedAt)}` : ""} · 信号 {other.strength}</span>
+                        </li>)}</ul>
+                      </details>
+                  ) : null}
+                </div>
+                {evidence.evidenceUrl ? (
+                  <a href={evidence.evidenceUrl} target="_blank" rel="noreferrer" aria-label={`查看 ${evidence.keyword} 来源`}>
+                    <Link2 aria-hidden="true" size={14} />{isManualEvidence(evidence) ? "用户补充" : platformLabel(evidence.platform)}<ArrowUpRight aria-hidden="true" size={13} />
+                  </a>
+                ) : <span className="evidence-source">{platformLabel(evidence.platform)}</span>}
+              </article>
+            );
+          })}
         </div>
         {opportunity.articleSources?.length ? <div className="candidate-score-explainer candidate-article-reading">
           <strong>原文阅读</strong>
@@ -143,9 +155,11 @@ function Score({ label, value }: { label: string; value: number }) {
   return <div><span>{label}</span><strong>{Math.round(value)}%</strong></div>;
 }
 
+// CLOUD-07：采集时间带完整日期（北京时间），不把采集时间冒充文章发布时间；
+// 缺失/非法时间如实写“未记录”，不输出 Invalid Date。
 function formatEvidenceTime(value?: string): string {
-  if (!value) return "未记录采集时间";
-  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
+  const formatted = beijingDateTime(value);
+  return formatted ? `来源采集 ${formatted}（北京时间）` : "未记录采集时间";
 }
 
 function formatScoreTime(value: string): string {

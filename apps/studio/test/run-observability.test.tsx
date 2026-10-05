@@ -406,9 +406,94 @@ describe("run observability", () => {
     expect(result.resultAvailability).toMatchObject({
       kind: "draft_video",
       usable: false,
-      label: "成片需修复",
+      label: "已有成片，审查待处理",
     });
+    expect(result.resultAvailability?.label).not.toContain("修复");
     expect(result.failure?.impact).toContain("成片已保留");
+  });
+
+  it("does not call a video broken when the optional review has no conclusion (CLOUD-01)", () => {
+    // 云端实测形态：render 有效、成片可播，visual-review 因原审片请求 unknown 而失败。
+    const unknownReview = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-10-04T12:00:00Z",
+      finishedAt: "2026-10-04T12:20:00Z",
+      now: "2026-10-04T12:20:00Z",
+      nodes: [
+        node("render", "渲染", "succeeded"),
+        node("visual-review", "视觉审片", "failed", { outcomeUncertain: true, error: "审片请求结果未知" }),
+        node("final-review", "人工终审", "pending"),
+      ],
+      videoAvailable: true,
+      publishPackageAvailable: false,
+    });
+    expect(unknownReview.resultAvailability).toMatchObject({ kind: "draft_video", usable: false, label: "已有成片，审片未完成" });
+    expect(unknownReview.resultAvailability?.detail).toContain("审片未完成不等于成片文件损坏");
+    expect(unknownReview.resultAvailability?.label).not.toContain("修复");
+
+    // 结论过期的审片同样不能冒充当前版本已有结论。
+    const staleReview = buildRunObservability({
+      status: "stale",
+      startedAt: "2026-10-04T12:00:00Z",
+      now: "2026-10-04T12:20:00Z",
+      nodes: [
+        node("render", "渲染", "succeeded"),
+        node("visual-review", "视觉审片", "stale"),
+      ],
+      videoAvailable: true,
+      publishPackageAvailable: false,
+    });
+    expect(staleReview.resultAvailability?.label).toBe("已有成片，审片未完成");
+  });
+
+  it("lists concrete technical gate problems instead of a generic broken-video label", () => {
+    const result = buildRunObservability({
+      status: "failed",
+      startedAt: "2026-10-04T12:00:00Z",
+      now: "2026-10-04T12:20:00Z",
+      nodes: [
+        node("render", "渲染", "succeeded"),
+        node("technical-review", "机器质检", "failed", {
+          error: "audio loudness check failed",
+          qualityGateResults: [{ gateId: "loudness", status: "failed", reasons: ["音频响度超出目标范围"] }],
+        }),
+      ],
+      videoAvailable: true,
+      publishPackageAvailable: false,
+    });
+    expect(result.resultAvailability).toMatchObject({ kind: "draft_video", usable: false, label: "机器质检有待处理项" });
+    expect(result.resultAvailability?.detail).toContain("音频响度超出目标范围");
+    expect(result.resultAvailability?.detail).toContain("这不代表文件损坏");
+  });
+
+  it("keeps a completed final review above historical audit failures and a human rejection separate from damage", () => {
+    const approvedWithFailedAudit = buildRunObservability({
+      status: "needs_human",
+      startedAt: "2026-10-04T12:00:00Z",
+      now: "2026-10-04T12:30:00Z",
+      nodes: [
+        node("render", "渲染", "succeeded"),
+        node("visual-review", "视觉审片", "failed", { outcomeUncertain: true }),
+        node("final-review", "人工终审", "succeeded"),
+      ],
+      videoAvailable: true,
+      publishPackageAvailable: false,
+    });
+    expect(approvedWithFailedAudit.resultAvailability).toMatchObject({ kind: "reviewed_video", usable: true, label: "已有审片成片" });
+
+    const humanRejected = buildRunObservability({
+      status: "stale",
+      startedAt: "2026-10-04T12:00:00Z",
+      now: "2026-10-04T12:30:00Z",
+      nodes: [
+        node("render", "渲染", "succeeded"),
+        node("final-review", "人工终审", "rejected"),
+      ],
+      videoAvailable: true,
+      publishPackageAvailable: false,
+    });
+    expect(humanRejected.resultAvailability).toMatchObject({ kind: "draft_video", usable: false, label: "已有成片，审查待处理" });
+    expect(humanRejected.resultAvailability?.label).not.toContain("修复");
   });
 
   it("explains a source-asset visual gate failure as a review failure with an editable recovery", () => {
@@ -691,7 +776,7 @@ describe("run observability", () => {
       videoAvailable: true,
       publishPackageAvailable: false,
     });
-    expect(validRender.resultAvailability).toMatchObject({ kind: "draft_video", usable: false, label: "成片需修复" });
+    expect(validRender.resultAvailability).toMatchObject({ kind: "draft_video", usable: false, label: "已有成片，审查待处理" });
   });
 
   it("keeps human rejection separate from technical failure in mixed states (R4-07)", () => {

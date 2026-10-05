@@ -118,6 +118,12 @@
 .studio-v3 .run-page .review-panel { position: static; padding: 22px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); box-shadow: none; }
 .studio-v3 .run-page .current-decision-bar { padding: 18px 22px; margin-bottom: 22px; border-radius: 6px; box-shadow: none; }
 .studio-v3 .run-page .current-decision-bar h2 { font-size: 18px; font-weight: 600; }
+/* CLOUD-03：终审可选时间工具默认收起的一行摘要；主决定区排在它之前。 */
+.optional-timing-tool { margin: 18px 0 0; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-soft); }
+.optional-timing-tool > summary { padding: 12px 14px; font-size: 13px; font-weight: 600; cursor: pointer; list-style-position: inside; }
+.optional-timing-tool[open] > summary { border-bottom: 1px solid var(--line); }
+.optional-timing-tool > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.optional-timing-tool .narration-timing-editor { margin: 0; border: 0; border-radius: 0 0 6px 6px; }
 .studio-v3 .original-review-notice { display: flex; align-items: start; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; color: var(--amber); font-size: 13px; line-height: 1.8; }
 .studio-v3 .original-review-notice > svg { flex: 0 0 auto; margin-top: 3px; }
 .studio-v3 .original-review-notice a { margin-left: auto; color: var(--accent-strong); text-underline-offset: 3px; }
@@ -201,4 +207,9 @@
 @media (prefers-reduced-motion: reduce) {
   .studio-v3 .run-page { scroll-behavior: auto; }
   .studio-v3 .creative-segment-indicator { transition: none; }
+}
+.studio-v3 .creative-validation-notice,
+.studio-v3 .creative-check-result {
+  /* 保留完整诊断；长结构字段名也能在窄屏面板内换行。 */
+  overflow-wrap: anywhere;
 }

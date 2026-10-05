@@ -238,6 +238,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   ), [initialValues?.rework, requiredAffectedScenePositions]);
   const reworkTargetStepLabels = useMemo(() => reworkFindingTargetStepLabels(groupedReworkFindings), [groupedReworkFindings]);
   const editorial = initialValues?.editorial;
+  // CLOUD-08/P3：案例入口的摘要只展示已填写的创作目标，不再把角度推导成三段相似说明。
+  const caseEntryOrigin = initialValues?.creationContext?.origin === "case";
   const imageStory = editorial?.verdict === "produce_image_story";
   const activeProviders = providers.filter((provider) => {
     if (provider.capability !== activeCapability.capability || provider.kind === "test") return false;
@@ -904,13 +906,15 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <small>所有字段都可在生产前调整</small>
               </div>
               <div className="brief-fields">
-                <label className="field field-wide">
-                  <span>视频标题</span>
-                  <input name="title" required data-dialog-initial-focus={rework ? undefined : true} defaultValue={initialValues?.title ?? ""} placeholder="一句能让人停下来的具体承诺" onChange={(event) => {
+                <div className="field field-wide">
+                  <label htmlFor="new-run-brief-title"><span>视频标题</span></label>
+                  <input id="new-run-brief-title" name="title" required data-dialog-initial-focus={rework ? undefined : true} defaultValue={initialValues?.title ?? ""} placeholder="一句能让人停下来的具体承诺" onChange={(event) => {
                     const title = event.target.value;
                     setBriefSummaryValues((current) => ({ ...current, title }));
                   }} />
-                </label>
+                  {/* CLOUD-08：案例入口标题留空由用户命名；提示放在 label 外，避免污染输入的可访问名。 */}
+                  {caseEntryOrigin ? <small className="field-hint">给这次创作起个标题；完整想法已放在内容角度</small> : null}
+                </div>
                 <label className="field field-wide">
                   <span>内容角度</span>
                   <input name="angle" required defaultValue={initialValues?.angle ?? ""} placeholder="这条视频用什么独特角度讲清问题" onChange={(event) => {
@@ -989,7 +993,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   </div>
                 </details>
               </div>
-              {Object.values(briefSummaryValues).some((value) => value.trim()) || visualBriefValues.visualProof.trim() || visualBriefValues.strategy.trim() ? <CreativeSummary summary={creativeSummary} /> : null}
+              {caseEntryOrigin
+                ? <CaseCreativeSummary title={briefSummaryValues.title} audience={briefSummaryValues.audience} angle={briefSummaryValues.angle} visualProof={visualBriefValues.visualProof} strategy={visualBriefValues.strategy} />
+                : Object.values(briefSummaryValues).some((value) => value.trim()) || visualBriefValues.visualProof.trim() || visualBriefValues.strategy.trim() ? <CreativeSummary summary={creativeSummary} /> : null}
               {imageStory ? (
                 <div className="editorial-brief-note" role="note">
                   <strong>总编建议 · 图文成片</strong>
@@ -1414,6 +1420,37 @@ function CreativeSummary({ summary }: {
       <div><dt>开头承诺</dt><dd>{summary.openingPromise}</dd></div>
       <div><dt>画面方向参考</dt><dd>{summary.requiredVisual}</dd></div>
       <div><dt>结尾收益</dt><dd>{summary.payoff}</dd></div>
+    </dl>
+  </section>;
+}
+
+const CASE_ANGLE_EXCERPT_CODEPOINTS = 120;
+
+/**
+ * CLOUD-08/P3：案例入口的摘要只陈述已填写的创作目标——标题、受众、完整角度的一次
+ * 节选（可展开原文）与显式填写的画面依据；留空项如实写“待填写”，不把角度推导成
+ * 开头承诺/核心画面/结尾收益三段重复。
+ */
+function CaseCreativeSummary({ title, audience, angle, visualProof, strategy }: {
+  title: string;
+  audience: string;
+  angle: string;
+  visualProof: string;
+  strategy: string;
+}) {
+  const codePoints = Array.from(angle.trim());
+  const truncated = codePoints.length > CASE_ANGLE_EXCERPT_CODEPOINTS;
+  const excerpt = truncated ? `${codePoints.slice(0, CASE_ANGLE_EXCERPT_CODEPOINTS).join("")}…` : angle.trim();
+  const hasAny = title.trim() || audience.trim() || angle.trim() || visualProof.trim() || strategy.trim();
+  if (!hasAny) return null;
+  return <section className="creative-summary" aria-label="已填写的创作目标">
+    <header><strong>已填写的创作目标</strong><small>只展示你已填写的内容；留空项继续在上方补充</small></header>
+    <dl>
+      <div><dt>视频标题</dt><dd>{title.trim() || "待填写"}</dd></div>
+      <div><dt>目标受众</dt><dd>{audience.trim() || "待填写"}</dd></div>
+      <div><dt>内容角度{truncated ? "（节选）" : ""}</dt><dd>{excerpt || "待填写"}</dd></div>
+      {truncated ? <div><dt>内容角度全文</dt><dd><details className="case-angle-full"><summary>展开原文</summary><p>{angle.trim()}</p></details></dd></div> : null}
+      {visualProof.trim() || strategy.trim() ? <div><dt>画面依据</dt><dd>{[visualProof.trim(), strategy.trim()].filter(Boolean).join("；")}</dd></div> : null}
     </dl>
   </section>;
 }
@@ -1897,5 +1934,5 @@ function providerBillingLabel(provider: StudioProvider): string {
 
 function creatorProviderName(provider: StudioProvider): string {
   const normalized = providerLabel(provider.id);
-  return !normalized || normalized === provider.id || normalized.startsWith("服务名称未收录（") ? provider.label : normalized;
+  return !normalized || normalized === provider.id || normalized.startsWith("来源服务未识别（") ? provider.label : normalized;
 }

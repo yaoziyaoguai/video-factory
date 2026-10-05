@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { StudioVoiceDirection, StudioVoiceProfile } from "../../shared/api.js";
 import { VOICE_PRESETS } from "../../shared/template-voice-recommendation.js";
 import { studioApi } from "../api.js";
+import { providerLabel } from "../presentation.js";
 
 interface VoiceStudioProps {
   value: StudioVoiceDirection;
@@ -200,7 +201,7 @@ export function VoiceStudio({
               <span>高级微调</span><small>{rateValue} · {pauseSupported ? `停顿 ${direction.pauseScale.toFixed(1)}×` : "当前音色不执行停顿微调"} · {masteringPresetLabel(direction.masteringPreset)}</small><ChevronDown aria-hidden="true" size={16} />
             </button>
             {selected ? <p className="voice-filter-note">
-              当前演员：{selected.label} · {selected.providerId} · {selected.engine === "macos" ? "本机配音，无服务调用费" : selected.engine === "minimax" ? "MiniMax 服务，按量自动执行并记账" : "已配置配音服务，费用以服务配置为准"}。
+              当前演员：{selected.label} · {providerLabel(selected.providerId) ?? selected.providerId} · {selected.engine === "macos" ? "本机配音，无服务调用费" : selected.engine === "minimax" ? "MiniMax 服务，按量自动执行并记账" : "已配置配音服务，费用以服务配置为准"}。
               {selected.engine === "minimax" ? "语速为相对档位，不保证精准字/分。" : null}
               {pauseSupported ? "停顿设置参与配音。" : "当前演员不执行停顿微调。"}声音质感由本地后处理执行。
             </p> : null}

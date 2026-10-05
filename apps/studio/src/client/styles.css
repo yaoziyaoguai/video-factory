@@ -157,6 +157,10 @@ a { color: inherit; }
 .evidence-row > div { display: grid; min-width: 0; gap: 4px; }
 .evidence-row strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .evidence-row small { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
+.evidence-group-others { color: var(--muted); font-size: 11px; }
+.evidence-group-others summary { cursor: pointer; }
+.evidence-group-others ul { margin: 4px 0; padding-left: 16px; }
+.evidence-group-merged { color: var(--muted); font-size: 11px; }
 .evidence-row a, .evidence-source { display: inline-flex; align-items: center; gap: 4px; color: var(--blue); font-size: 12px; font-weight: 700; text-decoration: none; }
 
 .director-panel { padding: 0 18px 20px; color: var(--ink); border-left: 1px solid var(--line-strong); }

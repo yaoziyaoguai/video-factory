@@ -52,9 +52,11 @@ function statusLabel(status: StudioOpportunity["status"]): string {
   return ({ draft: "待制作", shortlisted: "待制作", approved: "制作中", rejected: "已放弃", tested: "已复盘" })[status];
 }
 
+// CLOUD-07：这里的时间是选题记录自身的更新时间，不是来源更新；邻近来源线索展示时
+// 明说“选题记录更新”，避免被读成“来源刚刚更新”。持久时间不改。
 function formatFreshness(value: string): string {
   const elapsedHours = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 3_600_000));
-  if (elapsedHours < 1) return "刚刚更新";
-  if (elapsedHours < 24) return `${elapsedHours} 小时前`;
-  return `${Math.floor(elapsedHours / 24)} 天前`;
+  if (elapsedHours < 1) return "选题记录更新";
+  if (elapsedHours < 24) return `选题记录更新于 ${elapsedHours} 小时前`;
+  return `选题记录更新于 ${Math.floor(elapsedHours / 24)} 天前`;
 }

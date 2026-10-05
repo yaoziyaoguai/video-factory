@@ -1,9 +1,10 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { studioApi } from "../src/client/api.js";
 import { AssetsPage } from "../src/client/pages/AssetsPage.js";
+import type { StudioIndexedAsset, StudioIndexedAssetUsage, StudioResourceManifest } from "../src/shared/api.js";
 
 describe("AssetsPage", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -31,6 +32,124 @@ describe("AssetsPage", () => {
     expect(screen.getByRole("img", { name: "Coverr" })).toHaveAttribute("src", "/media/coverr-logo.svg");
     expect(screen.getByRole("link", { name: "Wikimedia Commons" })).toBeInTheDocument();
     expect(screen.getByText(/改编须按相同许可分享/)).toBeInTheDocument();
+  });
+
+  // CLOUD-10/P4.2（V14）：声音卡默认区分当前/历史/失效/未核实版本，操作来源与可信时间可见；
+  // 当前声音版本不冒充“已入当前成片”。
+  it("labels voice assets with version facts per usage without claiming final-cut inclusion", async () => {
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    const voiceAsset = (key: string, usage: Partial<StudioIndexedAssetUsage>): StudioIndexedAsset => ({
+      key, mediaKind: "audio", origin: "voice_synthesis", reuseStatus: "not_reusable", category: "voice",
+      kind: "voiceover", providerId: "minimax-tts-v1", tags: [],
+      commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "recorded",
+      useCount: 1, usages: [{ runId: "run-1", runTitle: "作品一", itemId: `artifact:${key}`, providerId: "minimax-tts-v1", commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "recorded", ...usage }],
+    });
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({
+      generatedAt: "2026-10-05T00:00:00Z", totalItems: 3, needsReviewCount: 0,
+      legacyRunsWithoutManifest: 0, reconstructedRunCount: 0, unreadableManifestCount: 0,
+      truncatedRunCount: 0, truncatedItemCount: 0,
+      categories: { visual: 0, voice: 3, font: 0, document: 0, other: 0 }, items: [],
+      assetIndex: { version: "video-factory/asset-index-v1", totalAssets: 3, duplicateUses: 0,
+        reusableCount: 0, needsReviewCount: 0, facets: { mediaKinds: {}, origins: {}, providers: {}, reuseStatuses: {} },
+        assets: [
+          voiceAsset("current", { voiceVersionInfo: { artifactId: "art-c", operation: "relayout", versions: [{ versionId: "v2", createdAt: "2026-10-01T04:05:00.000Z", state: "current" }] } }),
+          voiceAsset("historical", { voiceVersionInfo: { artifactId: "art-h", operation: "synthesis", versions: [{ versionId: "v1", createdAt: "2026-10-01T02:05:00.000Z", state: "historical" }] } }),
+          voiceAsset("unverified", {}),
+        ],
+      },
+    });
+    render(<MemoryRouter><AssetsPage /></MemoryRouter>);
+    expect(await screen.findByText(/当前声音版本 · 配音时间调整 · 2026-10-01 12:05（北京时间）/)).toBeInTheDocument();
+    expect(screen.getByText(/历史声音版本 · 配音生成/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("首次配音");
+    expect(screen.getByText("版本归属未核实")).toBeInTheDocument();
+    expect(document.querySelectorAll(".asset-voice-version").length).toBe(3);
+    // 不把声音版本说成已入当前成片或通过终审。
+    expect(document.body.textContent).not.toMatch(/已入当前片|通过.*终审/);
+  });
+
+  // CLOUD-10/CR2（V14 复审反例 AP2a/AP2b）：徽标必须按本作品聚合该资产全部 usage 的
+  // 版本事实（按完整 versionId 去重），不按出现顺序挑一条；按资产视图遇到多作品不输出
+  // 无作品限定的 current；缺投影 usage 在详情中如实显示未核实，不能过滤丢掉。
+  const voiceUsage = (runId: string, runTitle: string, artifactId: string, state: "current" | "historical"): StudioIndexedAssetUsage => ({
+    runId, runTitle, itemId: `artifact:${artifactId}`, providerId: "minimax-tts-v1",
+    commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "recorded",
+    voiceVersionInfo: { artifactId, operation: "synthesis", versions: [{ versionId: `v-${artifactId}`, createdAt: "2026-10-05T00:00:00.000Z", state }] },
+  });
+
+  function voiceManifest(usages: StudioIndexedAssetUsage[]): StudioResourceManifest {
+    return {
+      generatedAt: "2026-10-05T00:00:00Z", totalItems: usages.length, needsReviewCount: 0,
+      legacyRunsWithoutManifest: 0, reconstructedRunCount: 0, unreadableManifestCount: 0,
+      truncatedRunCount: 0, truncatedItemCount: 0,
+      categories: { visual: 0, voice: usages.length, font: 0, document: 0, other: 0 }, items: [],
+      assetIndex: {
+        version: "video-factory/asset-index-v1", totalAssets: 1, duplicateUses: 0,
+        reusableCount: 0, needsReviewCount: 0, facets: { mediaKinds: {}, origins: {}, providers: {}, reuseStatuses: {} },
+        assets: [{
+          key: "sha256:same-audio", sha256: "a".repeat(64), mediaKind: "audio", origin: "voice_synthesis", reuseStatus: "not_reusable", category: "voice",
+          kind: "voiceover", providerId: "minimax-tts-v1", tags: [], commercialUse: "provider_terms", attributionRequirement: "provider_terms",
+          reviewStatus: "recorded", useCount: usages.length, usages,
+        } satisfies StudioIndexedAsset],
+      },
+    };
+  }
+
+  it("aggregates same-work same-sha voice records so the current binding stays visible regardless of order", async () => {
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    // 旧记录（historical）先出现、同字节新记录（current）后出现：默认按作品卡聚合后必须含当前。
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue(voiceManifest([
+      voiceUsage("run-1", "作品一", "old", "historical"),
+      voiceUsage("run-1", "作品一", "new", "current"),
+    ]));
+    render(<MemoryRouter><AssetsPage /></MemoryRouter>);
+    expect(await screen.findByText(/当前声音版本，另有 1 个历史版本/)).toBeInTheDocument();
+
+    // 换 usages 顺序结果不变：current 先出现、historical 后出现仍是同一聚合事实。
+    cleanup();
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue(voiceManifest([
+      voiceUsage("run-1", "作品一", "new", "current"),
+      voiceUsage("run-1", "作品一", "old", "historical"),
+    ]));
+    render(<MemoryRouter><AssetsPage /></MemoryRouter>);
+    expect(await screen.findByText(/当前声音版本，另有 1 个历史版本/)).toBeInTheDocument();
+  });
+
+  it("does not label a multi-work asset as globally current in the asset view and lists per-work attribution", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    // 同字节在作品A是历史版、在作品B是当前版：按资产视图的默认徽标不得无作品限定地标 current。
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue(voiceManifest([
+      voiceUsage("run-a", "作品A", "old", "historical"),
+      voiceUsage("run-b", "作品B", "new", "current"),
+    ]));
+    render(<MemoryRouter><AssetsPage /></MemoryRouter>);
+    await user.click(await screen.findByRole("button", { name: "按资产" }));
+    const badge = document.querySelector(".asset-voice-version")!;
+    expect(badge).not.toBeNull();
+    expect(badge.getAttribute("data-voice-state")).not.toBe("current");
+    expect(badge.textContent).toContain("用于 2 个作品");
+    // 展开详情逐作品列明归属；缺投影 usage 也如实显示，不过滤。
+    await user.click(screen.getByText("规格与标签"));
+    const rows = document.querySelectorAll('ul[aria-label="声音版本归属"] li');
+    expect(rows.length).toBe(2);
+    expect(document.querySelector('ul[aria-label="声音版本归属"]')!.textContent).toContain("作品A · 历史声音版本");
+    expect(document.querySelector('ul[aria-label="声音版本归属"]')!.textContent).toContain("作品B · 当前声音版本");
+  });
+
+  it("shows unprojected voice usages as unverified in the details instead of dropping them", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue(voiceManifest([
+      voiceUsage("run-1", "作品一", "new", "current"),
+      { runId: "run-1", runTitle: "作品一", itemId: "artifact:legacy", providerId: "minimax-tts-v1",
+        commercialUse: "provider_terms", attributionRequirement: "provider_terms", reviewStatus: "recorded" },
+    ]));
+    render(<MemoryRouter><AssetsPage /></MemoryRouter>);
+    await user.click(await screen.findByText("规格与标签"));
+    const list = document.querySelector('ul[aria-label="声音版本归属"]')!;
+    expect(list.textContent).toContain("当前声音版本");
+    expect(list.textContent).toContain("版本归属未核实");
   });
 
   it("displays Unsplash CDN previews with linked photographer credit and a source configuration entry", async () => {

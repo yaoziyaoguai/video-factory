@@ -109,14 +109,29 @@ function readTimingDraft(runId: string, identity: string): { draft?: TimingDraft
   }
 }
 
+/**
+ * 折叠摘要用的展示状态（CLOUD-03）：只上报“有没有事”这类标志，不复制命令身份——
+ * 请求编号、版本与恢复语义仍唯一保存在本组件内。
+ */
+export interface NarrationTimingToolSummary {
+  dirty: boolean;
+  pending: boolean;
+  error: boolean;
+  storageFailed: boolean;
+  busy: boolean;
+  conflict: boolean;
+  stale: boolean;
+}
+
 /** 生成后只调窗口、落点和显式留白；文本、音色、分组和原声音来源保持不变。 */
-export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, interventionId, disabled }: {
+export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, interventionId, disabled, onStateSummary }: {
   runId: string;
   revision: number;
   voiceNode: StudioNode;
   artifacts: StudioArtifact[];
   interventionId: string;
   disabled: boolean;
+  onStateSummary?: (summary: NarrationTimingToolSummary) => void;
 }) {
   const [plan, setPlan] = useState<SupportedNarrationPlan>();
   const [groups, setGroups] = useState<GroupDraft[]>([]);
@@ -212,6 +227,19 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
   const outputRecord = isRecord(voiceNode.output) ? voiceNode.output : {};
   const outputConflict = isRecord(outputRecord.conflict) && !isConflictResolved(outputRecord.conflictResolved) ? outputRecord.conflict : undefined;
   const receipt = isRecord(outputRecord.voiceSourceReceipt) ? outputRecord.voiceSourceReceipt : undefined;
+
+  // 折叠时摘要处仍要显露未决操作/未保存修改（CLOUD-03）；仅展示标志，不搬运命令状态。
+  useEffect(() => {
+    onStateSummary?.({
+      dirty,
+      pending: Boolean(pendingEnvelope),
+      error: Boolean(error),
+      storageFailed: Boolean(storageWarning),
+      busy: Boolean(busyToken),
+      conflict: Boolean(outputConflict),
+      stale,
+    });
+  }, [dirty, pendingEnvelope, error, storageWarning, busyToken, outputConflict, stale, onStateSummary]);
 
   const listenArtifacts = (() => {
     if (receipt && outputConflict?.code === "NARRATION_GROUP_DOES_NOT_FIT_V2" && Array.isArray(receipt.groupAudioArtifacts)) {
