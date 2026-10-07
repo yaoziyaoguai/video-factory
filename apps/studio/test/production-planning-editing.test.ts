@@ -636,6 +636,71 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
     assert.deepEqual(await pipeline.loadPersisted(runId), persisted, "a stale tab cannot revert the current selection");
   });
 
+  it("saves brief content after a free-to-AI source switch without restoring old configuration", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-brief-after-source-switch-"));
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };
+    const workerCalls: string[] = [];
+    const worker = new EditingWorker();
+    const pipeline = new ProductionPipeline({ workspaceRoot, ...editingAgents(spies),
+      worker: { run: async (request) => { workerCalls.push(request.capability); return worker.run(request); } },
+      assetProviders: [...EDITING_ASSET_PROVIDERS, { id: "wan-video-v1", label: "受控 AI 视频", billing: "metered", modes: ["AI"], deliveryTypes: ["generated_video"], estimatedCnyPerClip: 1 }],
+    });
+    const studio = new ProductionStudio({ workspaceRoot, pipeline,
+      archiveStore: { list: async () => [], add: async () => {}, remove: async () => {} },
+      listProviders: async () => [...editingProviders(), { id: "wan-video-v1", label: "受控 AI 视频", capability: "asset.prepare", kind: "external", available: true, billing: "metered", deliveryTypes: ["generated_video"], estimatedCnyPerClip: 1 }],
+    });
+    const first = await pipeline.start({ ...editingBrief(),
+      visualReviewPolicy: "allow_unreviewed_first_cut",
+      workflowFeatures: { ...editingBrief().workflowFeatures, boundaryGates: "user-confirmed-v1" },
+    });
+    assert.equal(first.status, "needs_human");
+    assert.equal(first.nodeRuns.find(node => node.nodeId === "brief")?.status, "needs_human");
+    await studio.applyNodeExecutionConfiguration(first.id, "assets", {
+      expectedRunRevision: first.revision, assetProviderIds: ["wan-video-v1"],
+      modelSelections: { "wan-video-v1": null }, economics: { allowMeteredProviders: true },
+    }, "producer");
+    const configured = await pipeline.loadPersisted(first.id);
+    const detail = await studio.get(first.id);
+    const briefNode = detail?.nodes.find(node => node.id === "brief");
+    const displayed = briefNode?.outputState?.versions.find(version => version.id === briefNode.outputState?.effectiveVersionId)?.output;
+    assert.ok(displayed && typeof displayed === "object");
+    const priorVersions = structuredClone(configured.nodeRuns.find(node => node.nodeId === "brief")?.outputState?.versions);
+    const callsBefore = structuredClone({ spies, workerCalls });
+    for (const configurationChange of [
+      { director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] } },
+      { economics: { recipeId: "custom", allowMeteredProviders: true, maxCostCny: 999 } },
+      { frozenModelSelections: { "wan-video-v1": { modelId: "untrusted-model", source: "run_override" } } },
+      { reviewMode: "automatic" },
+    ]) {
+      await assert.rejects(() => pipeline.applyNodeOverride(first.id, {
+        nodeId: "brief", actor: "producer", expectedRunRevision: configured.revision,
+        output: { ...displayed, title: "禁止夹带配置", ...configurationChange },
+      }), /requires starting a new run/);
+      assert.deepEqual(await pipeline.loadPersisted(first.id), configured, "rejected configuration edits leave no partial write");
+    }
+    // 页面载入的交付仍带有生成当时的配置快照；这里只改正文，不让它回滚当前选择。
+    await studio.applyNodeOverride(first.id, "brief", {
+      output: { ...displayed, title: "换源后修改的标题", angle: "换源后修改的角度" },
+    }, "producer");
+    const saved = await pipeline.loadPersisted(first.id);
+    const state = saved.nodeRuns.find(node => node.nodeId === "brief")?.outputState;
+    const output = state?.versions.find(version => version.id === state.effectiveVersionId)?.output as ProductionBrief;
+    assert.equal(output.title, "换源后修改的标题");
+    assert.equal(output.angle, "换源后修改的角度");
+    assert.deepEqual(output.director, configured.initialInput.director);
+    assert.deepEqual(output.providers, configured.initialInput.providers);
+    assert.deepEqual(output.economics, configured.initialInput.economics);
+    assert.deepEqual(saved.initialInput, configured.initialInput);
+    assert.deepEqual(state?.versions.slice(0, -1), priorVersions, "immutable delivery history is preserved");
+    assert.deepEqual(saved.decisions, configured.decisions, "editing is not adoption or spending authorization");
+    assert.deepEqual({ spies, workerCalls }, callsBefore, "content saving must not generate or purchase anything");
+    await assert.rejects(() => pipeline.applyNodeOverride(first.id, {
+      nodeId: "brief", actor: "stale-tab", expectedRunRevision: configured.revision,
+      output: { ...output, title: "过期页面的标题" },
+    }), StaleRunRevisionError);
+    assert.deepEqual(await pipeline.loadPersisted(first.id), saved, "a stale content edit cannot overwrite the saved delivery");
+  });
+
   it("rejects a stale caller revision at the locked mutation point with zero state change", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-editing-locked-"));
     const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };

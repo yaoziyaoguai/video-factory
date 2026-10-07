@@ -2844,9 +2844,17 @@ export class ProductionPipeline {
       }
       await verifyNodeOverrideBoundary(this.store.runDirectory(runId), override);
       const brief = parsePersistedBrief(previous.initialInput);
-      const effectiveOverride = override.nodeId === "visual-direction"
+      let effectiveOverride = override.nodeId === "visual-direction"
         ? await this.prepareVisualDirectionOverride(previous, override)
         : override;
+      if (override.nodeId === "brief" && override.output !== undefined) {
+        const node = previous.nodeRuns.find((candidate) => candidate.nodeId === "brief");
+        const base = node ? effectiveNodeOutput(node) : null;
+        // 内容编辑只能沿用当前交付的配置快照；保存时再绑定已单独确认的新配置，
+        // 避免换源后无法改文，或让旧快照回滚供应商、模型和费用限制。
+        const content = validateBriefInputOverride(override.output, base ? parsePersistedBrief(base) : brief);
+        effectiveOverride = { ...override, output: mergeCurrentBrief(content, brief) };
+      }
       const runner = new WorkflowRunner({
         optionalReviewInvalidationOperations: await verifiedOptionalReviewInvalidationOperations(previous, this.store.runDirectory(runId)),
         providers: this.createRegistry(brief),
