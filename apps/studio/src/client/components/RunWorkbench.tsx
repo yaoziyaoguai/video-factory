@@ -255,9 +255,11 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   const contentDecisionHasSuggestions = Boolean(contentDecisionReview?.suggestions.length);
   const contentDecisionActionLabel = contentDecisionUnaudited ? "采用本版（未审计），继续"
     : contentDecisionHasSuggestions ? "保留建议，采用当前稿" : "采用当前稿，继续";
-  const waitingNodeProgress = waitingNodeId
-    ? run.nodes.find((node) => node.id === waitingNodeId)?.agentLoopProgress
-    : undefined;
+  const waitingNode = waitingNodeId ? run.nodes.find((node) => node.id === waitingNodeId) : undefined;
+  const waitingNodeProgress = waitingNode?.agentLoopProgress;
+  const waitingAuditHistorical = waitingNode?.status !== "running" && waitingNode?.outputState?.versions.find(
+    (version) => version.id === waitingNode.outputState?.effectiveVersionId,
+  )?.source === "human";
   const flawedReviewBranches = (visualReview?.independentReviews ?? []).filter((branch) => branch.auditVerdict === "repair");
   // 逐条表态与成片证据只属于「消费成片审片证据」的停点（视觉审片/终审/发布包）；
   // 其它停点（素材预检、配音等）不携带无关的成片证据，与服务端分派保持同一合同。
@@ -764,9 +766,9 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               </div>
               <p>{creatorFacingTechnicalText(run.activeIntervention.reason)}</p>
               {waitingNodeProgress ? <div className={`agent-loop-progress is-stacked is-${waitingNodeProgress.phase}`} role="status">
-                <strong>{agentLoopPhaseLabel(waitingNodeProgress)}</strong>
+                <strong>{agentLoopPhaseLabel(waitingNodeProgress, waitingAuditHistorical)}</strong>
                 {waitingNodeProgress.latestAudit ? <>
-                  <span>独立复核 {waitingNodeProgress.latestAudit.score} 分：{waitingNodeProgress.latestAudit.summary}</span>
+                  <span>{waitingAuditHistorical ? "修改前复核" : "独立复核"} {waitingNodeProgress.latestAudit.score} 分：{waitingNodeProgress.latestAudit.summary}</span>
                   {waitingNodeProgress.latestAudit.issues?.length ? <ul className="agent-audit-issues">
                     {waitingNodeProgress.latestAudit.issues.map((issue, index) => <li key={`${issue.criterion}:${index}`}>
                       <strong>{issue.creatorAction ?? issue.repairInstruction}

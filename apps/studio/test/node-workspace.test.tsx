@@ -827,6 +827,18 @@ describe("node production workspaces", () => {
     expect(screen.getByText("上一轮 68 分：generated_image的on_screen_text仍有blocking。")).toBeInTheDocument();
   });
 
+  it("labels the model audit as historical after a human delivery edit", () => {
+    const node: StudioNode = { ...succeededNode, outputState: {
+      ...succeededNode.outputState!, effectiveVersionId: "human-v2",
+      versions: [...succeededNode.outputState!.versions, { ...succeededNode.outputState!.versions[0]!, id: "human-v2", source: "human" }],
+    }, agentLoopProgress: { iteration: 1, maxIterations: 1, completedIterations: 1, phase: "passed",
+      latestAudit: { verdict: "pass", score: 92, summary: "原稿的建议" } } };
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2} node={node} runStatus="needs_human" artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    expect(screen.getByText("修改前的模型复核记录")).toBeInTheDocument();
+    expect(screen.queryByText(/独立复核已通过/)).not.toBeInTheDocument();
+    expect(screen.getByText(/92 分：原稿的建议/)).toBeInTheDocument();
+  });
+
   it("keeps the role workspace open while live run data rerenders", async () => {
     const props = {
       node: succeededNode,

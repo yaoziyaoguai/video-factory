@@ -453,7 +453,8 @@ export function creatorFacingTechnicalText(value?: string): string | undefined {
  * 角色循环的轮次与阶段说明。停在用户面前的那一版和节点工作区里显示的是同一件事，
  * 两处必须说同一句话——各写一份迟早会漂移成两种说法。
  */
-export function agentLoopPhaseLabel(progress: StudioAgentLoopProgress): string {
+export function agentLoopPhaseLabel(progress: StudioAgentLoopProgress, historical = false): string {
+  if (historical) return "修改前的模型复核记录";
   const phase = progress.phase === "auditing"
     ? "独立复核中"
     : progress.phase === "repairing"

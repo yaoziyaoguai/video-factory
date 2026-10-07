@@ -510,7 +510,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         {readOnly ? <p className="node-workspace-warning"><AlertTriangle aria-hidden="true" size={16} />旧版工作流结果只读；要继续修改，请基于这版重新制作。</p> : null}
         {showPlanningStages && capability ? <details className="node-capability-details"><summary>本次使用的创作服务</summary><p>{capability}</p></details> : null}
         {node.agentLoopProgress ? <div className={`agent-loop-progress is-${node.agentLoopProgress.phase}`} role="status">
-          <strong>{agentLoopPhaseLabel(node.agentLoopProgress)}</strong>
+          <strong>{agentLoopPhaseLabel(node.agentLoopProgress, node.status !== "running" && effectiveVersion?.source === "human")}</strong>
           {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{node.agentLoopProgress.latestAudit.summary}</span> : <span>{agentLoopPendingNote(node.agentLoopProgress)}</span>}
           <span>实际模型调用：创作 {node.agentLoopProgress.producerModelCallCount ?? 0} 次，审计 {node.agentLoopProgress.auditModelCallCount ?? 0} 次{(node.agentLoopProgress.structuredRepairModelCallCount ?? 0) > 0 ? `（其中结构修复 ${node.agentLoopProgress.structuredRepairModelCallCount} 次）` : ""}。查询、刷新和等待不计为新调用。</span>
         </div> : null}

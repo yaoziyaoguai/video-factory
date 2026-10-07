@@ -4610,6 +4610,25 @@ describe("Studio client", () => {
     expect(screen.queryByRole("button", { name: /批准进入发布包/ })).not.toBeInTheDocument();
   });
 
+  it("does not present an old audit as approval of a human-edited brief", () => {
+    const run: StudioRunDetail = { ...runDetail,
+      activeIntervention: { id: "boundary-1", nodeId: "brief", boundary: "node-complete",
+        reason: "等你确认", options: ["approve", "reject"], createdAt: "2026-08-21T10:05:00.000Z" },
+      nodes: runDetail.nodes.map(node => node.id !== "brief" ? node : { ...node,
+        outputState: { effectiveVersionId: "human-v2", generatedVersionId: "generated-v1", stale: false,
+          versions: [{ id: "human-v2", source: "human", output: node.output, artifactIds: [], inputVersionIds: [],
+            createdAt: "2026-08-21T10:06:00.000Z", createdBy: "producer", schemaVersion: "1" }] },
+        agentLoopProgress: { iteration: 1, maxIterations: 1, completedIterations: 1, phase: "passed",
+          latestAudit: { verdict: "pass", score: 92, summary: "原稿的建议" } },
+      }),
+    };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} />);
+    expect(screen.getAllByText("修改前的模型复核记录")).toHaveLength(2);
+    expect(screen.getByText("修改前复核 92 分：原稿的建议")).toBeInTheDocument();
+    expect(screen.queryByText(/独立复核已通过/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /确认当前步骤，进入下一步/ })).toBeEnabled();
+  });
+
   it("speaks about releasing one step, not the final review, in the boundary confirm dialog", async () => {
     const user = userEvent.setup();
     const run: StudioRunDetail = {
