@@ -9105,6 +9105,108 @@ describe("ProductionPipeline", () => {
     assert.equal(worker.calls.filter((call) => call.capability === "voice.synthesize").length, 1);
   });
 
+  it("preserves a human or spend stop reached after the recovery scan took its running snapshot", async (context) => {
+    for (const expectedStatus of ["awaiting_spend_approval", "needs_human"] as const) {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-recovery-stale-scan-"));
+      let enteredResolve!: () => void;
+      let releaseResolve!: () => void;
+      let scannedResolve!: () => void;
+      let inspectResolve!: () => void;
+      const entered = new Promise<void>(resolve => { enteredResolve = resolve; });
+      const release = new Promise<void>(resolve => { releaseResolve = resolve; });
+      const scanned = new Promise<void>(resolve => { scannedResolve = resolve; });
+      const inspect = new Promise<void>(resolve => { inspectResolve = resolve; });
+      class BlockingWorker extends FakeWorker {
+        override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+          if (request.capability === "script.draft") {
+            enteredResolve();
+            await release;
+          }
+          return super.run(request);
+        }
+      }
+      const worker = new BlockingWorker();
+      const options = {
+        workspaceRoot, worker,
+        providerRuntimeMetadata: [{
+          id: "hailuo-video-v1", label: "海螺", modelId: "MiniMax-Hailuo-02",
+          transport: "http_api" as const, billing: "metered" as const,
+          estimatedCostCny: 2.4, maxAttempts: 1,
+        }],
+      };
+      const owner = new pipeline.ProductionPipeline(options);
+      const observer = new pipeline.ProductionPipeline(options);
+      const dispatched = await owner.dispatch({
+        ...brief,
+        providers: { ...brief.providers, assets: expectedStatus === "awaiting_spend_approval" ? "hailuo-video-v1" : "local-editorial-v1" },
+        economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 5 },
+      });
+      await entered;
+      const originalList = pipeline.FileRunStore.prototype.list;
+      const scan = context.mock.method(pipeline.FileRunStore.prototype, "list", async function (this: pipeline.FileRunStore) {
+        const snapshot = await originalList.call(this);
+        scannedResolve();
+        await inspect;
+        return snapshot;
+      });
+      const recovery = observer.recoverInterruptedRuns();
+      try {
+        await scanned;
+        releaseResolve();
+        const paused = await dispatched.completion;
+        assert.equal(paused.status, expectedStatus);
+        const before = await readFile(path.join(workspaceRoot, "runs", paused.id, "run.json"), "utf8");
+        const callsAtStop = [...worker.calls];
+        inspectResolve();
+        assert.equal(await recovery, 0);
+        assert.equal(await readFile(path.join(workspaceRoot, "runs", paused.id, "run.json"), "utf8"), before);
+        assert.deepEqual(worker.calls, callsAtStop);
+      } finally {
+        releaseResolve();
+        inspectResolve();
+        await recovery;
+        scan.mock.restore();
+      }
+    }
+  });
+
+  it("returns an interrupted downstream retry to the unchanged unpaid quote without calling providers", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-recovery-quote-stop-"));
+    const worker = new FakeWorker();
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot, worker,
+      visualReviewAgents: [{ id: "codex-visual-review-v1", modelId: "controlled", review: async () => { throw new Error("Review must not start before assets."); } }],
+      providerRuntimeMetadata: [{ id: "hailuo-video-v1", label: "海螺", modelId: "MiniMax-Hailuo-02",
+        transport: "http_api", billing: "metered", estimatedCostCny: 2.4, maxAttempts: 1 }],
+    });
+    const paused = await subject.start({ ...brief,
+      providers: { ...brief.providers, assets: "hailuo-video-v1", visualReview: "codex-visual-review-v1" },
+      economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 5 },
+    });
+    assert.equal(paused.status, "awaiting_spend_approval");
+    const store = new pipeline.FileRunStore(path.join(workspaceRoot, "runs"));
+    // 故障注入复刻旧扫描器追加的未执行失败节点；生产数据不作旁路修改。
+    await store.update(paused.id, async current => ({ ...current, revision: current.revision + 1, status: "failed",
+      nodeRuns: [...current.nodeRuns, { nodeId: "asset-source-review", status: "failed", startedAt: "2026-10-07T13:31:24.773Z",
+        artifactIds: [], qualityGateResults: [], error: "Interrupted recovery fixture" }],
+    }));
+    const resumed = await subject.retryFailedNode(paused.id, "asset-source-review");
+    assert.equal(resumed.status, "awaiting_spend_approval");
+    assert.deepEqual(resumed.nodeRuns.find(node => node.nodeId === "assets"), paused.nodeRuns.find(node => node.nodeId === "assets"));
+    assert.deepEqual(resumed.artifacts, paused.artifacts);
+    assert.equal(resumed.nodeRuns.find(node => node.nodeId === "asset-source-review")?.status, "pending");
+    assert.deepEqual(worker.calls.map(call => call.capability), ["script.draft"]);
+
+    await store.update(paused.id, async current => ({ ...current, revision: current.revision + 1, status: "failed",
+      nodeRuns: current.nodeRuns.map(node => node.nodeId === "asset-source-review"
+        ? { ...node, status: "failed", outcomeUncertain: true, operationRequestId: "existing-review-request" } : node),
+    }));
+    const before = await subject.show(paused.id);
+    await assert.rejects(() => subject.retryFailedNode(paused.id, "asset-source-review"), /uncertain paid-provider outcome/);
+    assert.deepEqual(await subject.show(paused.id), before);
+    assert.deepEqual(worker.calls.map(call => call.capability), ["script.draft"]);
+  });
+
   it("does not recover a run owned by a live execution lease", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-production-"));
     let enteredResolve!: () => void;

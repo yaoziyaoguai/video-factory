@@ -1264,19 +1264,23 @@ export class ProductionPipeline {
     let recovered = 0;
     for (const run of interrupted) {
       if (await this.hasFreshExecutionLease(run.id, leaseStaleAfterMs)) continue;
-      const creativeRecoveryRequest = run.nodeRuns.some((node) => (
-        node.nodeId === "creative-planning" && (node.status === "running" || node.status === "pending")
-      ))
-        ? [...(run.creativeReviewOperations ?? [])].reverse().find((operation) => (
-            (operation.status === "running" || operation.status === "unknown")
-            && isObjectRecord(operation.request)
-          ))?.request
-        : undefined;
+      let creativeRecoveryRequest: unknown;
       let recoveryLease: ExecutionLeaseHandle | undefined;
       try {
         recoveryLease = await this.acquireExecutionLease(run.id);
         await this.assertExecutionLease(recoveryLease);
         const current = await this.store.load<ProductionBrief>(run.id);
+        // 列表扫描到取得租约之间，原执行者可能已完成并停在人工/费用确认。
+        // 只恢复锁内仍在执行的状态，不能用旧快照给已完成的停点追加失败节点。
+        if (current.status !== "pending" && current.status !== "running") continue;
+        creativeRecoveryRequest = current.nodeRuns.some((node) => (
+          node.nodeId === "creative-planning" && (node.status === "running" || node.status === "pending")
+        ))
+          ? [...(current.creativeReviewOperations ?? [])].reverse().find((operation) => (
+              (operation.status === "running" || operation.status === "unknown")
+              && isObjectRecord(operation.request)
+            ))?.request
+          : undefined;
         // 批准已落盘、后继尚未开始的W3不是一次未知生成；保留原受理命令供显式接续。
         if (current.status === "running" && !current.nodeRuns.some(node => node.status === "running")
           && current.reviewContinuationOperations?.some(operation => operation.status === "accepted"
@@ -1742,11 +1746,11 @@ export class ProductionPipeline {
     draft: ProductionCreativeReviewCommandDraft,
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun> {
+    const normalizedActor = draft.actor.trim();
+    const normalizedCommandId = draft.commandId.trim();
+    const requestDigest = contentSha256({ ...draft, commandId: normalizedCommandId, actor: normalizedActor });
     return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
       await this.syncObservedCreativeAuditHistory(previous);
-      const normalizedActor = draft.actor.trim();
-      const normalizedCommandId = draft.commandId.trim();
-      const requestDigest = contentSha256({ ...draft, commandId: normalizedCommandId, actor: normalizedActor });
       const existingOperation = previous.creativeReviewOperations?.find(
         (operation) => operation.commandId === normalizedCommandId,
       );
@@ -2146,7 +2150,19 @@ export class ProductionPipeline {
       ));
       await checkpoint(result);
       return result;
-    }, listener);
+    }, listener).catch(async (error: unknown) => {
+      if (!(error instanceof RunLockedError)) throw error;
+      // 完成回执先于执行租约释放落盘；发生争锁后读取最新回执，避免再次使用锁前快照。
+      // 只有身份完全相同的已结束命令可只读返回；新命令、unknown 和异内容仍受租约保护。
+      const current = await this.store.load<ProductionBrief>(runId);
+      const settled = current.creativeReviewOperations?.find(operation => operation.commandId === normalizedCommandId
+        && operation.status !== "running" && operation.status !== "unknown");
+      if (!settled) throw error;
+      if (settled.requestDigest !== requestDigest) {
+        throw new Error(`Creative review command '${normalizedCommandId}' was already used with different content.`);
+      }
+      return { runId, completion: Promise.resolve(current) };
+    });
   }
 
   /**

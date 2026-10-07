@@ -4,7 +4,7 @@ import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { CodexBridgeError, ProductionPipeline, RoleAgentLoopError, contentSha256, type CreativeTreatmentAgentInput, type ProductionBrief, type ProductionPipelineOptions, type VisualAssetProviderCapability, type VisualDirectorAgentInput, type WorkerResponse } from "@video-factory/production-pipeline";
+import { CodexBridgeError, FileRunStore, ProductionPipeline, RoleAgentLoopError, contentSha256, type CreativeTreatmentAgentInput, type ProductionBrief, type ProductionPipelineOptions, type VisualAssetProviderCapability, type VisualDirectorAgentInput, type WorkerResponse } from "@video-factory/production-pipeline";
 import { ProductionStudio, loadAgentLoopProgress } from "../src/server/production-studio.js";
 import type { StudioRunDetail } from "../src/shared/api.js";
 import { StudioConflictError } from "../src/server/studio-errors.js";
@@ -610,7 +610,7 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
     );
   });
 
-  it("replays a completed creative command through ProductionStudio without re-running the role", async () => {
+  it("replays a completed creative command through ProductionStudio without re-running the role", async (context) => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-command-replay-"));
     const spies: PlanningSpies = { treatmentCalls: 0, screenwriterCalls: 0, directorCalls: 0, rankCalls: 0 };
     const harness = newPlanningStudio(workspaceRoot, new PlanningStagesWorker(), reviewCapablePlanningAgents(spies));
@@ -628,12 +628,23 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
       expectedCheckIdentity: review.checkResult!.checkIdentity,
     };
 
+    let completedResolve!: () => void;
+    let releaseResolve!: () => void;
+    const completed = new Promise<void>(resolve => { completedResolve = resolve; });
+    const release = new Promise<void>(resolve => { releaseResolve = resolve; });
+    const originalCheckpoint = FileRunStore.prototype.checkpoint;
+    const checkpoint = context.mock.method(FileRunStore.prototype, "checkpoint", async function (
+      this: FileRunStore, state: Parameters<FileRunStore["checkpoint"]>[0],
+    ) {
+      await originalCheckpoint.call(this, state);
+      if (state.creativeReviewOperations?.some(operation => operation.commandId === command.commandId && operation.status === "completed")) {
+        // 确定性保留“完成回执已落盘、原执行租约尚未释放”的真实窗口。
+        completedResolve();
+        await release;
+      }
+    });
     await harness.studio.commandCreativeReview(run.id, command, "creator");
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const receipt = await harness.studio.creativeReviewCommand(run.id, command.commandId);
-      if (receipt?.status !== "running") break;
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
+    await completed;
     assert.equal(
       (await harness.studio.creativeReviewCommand(run.id, command.commandId))?.status,
       "completed",
@@ -641,13 +652,26 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
     );
     const screenwriterCallsAfterCompletion = spies.screenwriterCalls;
 
-    const replay = await harness.studio.commandCreativeReview(run.id, command, "creator");
-    assert.equal(replay.status, "completed");
-    assert.equal(spies.screenwriterCalls, screenwriterCallsAfterCompletion);
-    await assert.rejects(
-      () => harness.studio.commandCreativeReview(run.id, command, "another-creator"),
-      /当前方案已经更新/,
-    );
+    try {
+      const before = await harness.pipeline.show(run.id);
+      const replay = await harness.studio.commandCreativeReview(run.id, command, "creator");
+      assert.equal(replay.status, "completed");
+      assert.equal(spies.screenwriterCalls, screenwriterCallsAfterCompletion);
+      assert.deepEqual(await harness.pipeline.show(run.id), before);
+      await assert.rejects(
+        () => harness.studio.commandCreativeReview(run.id, command, "another-creator"),
+        /当前方案已经更新/,
+      );
+      await assert.rejects(
+        () => harness.studio.commandCreativeReview(run.id, { ...command, commandId: "new-command-during-active-lease", expectedRunRevision: before.revision }, "creator"),
+        /当前方案已经更新/,
+      );
+      assert.deepEqual(await harness.pipeline.show(run.id), before);
+      assert.equal(spies.screenwriterCalls, screenwriterCallsAfterCompletion);
+    } finally {
+      releaseResolve();
+      checkpoint.mock.restore();
+    }
   });
 
   it("reports rejected creative consent without a server failure and proves absence only with the execution lease", async () => {
