@@ -426,7 +426,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       ? await preparePaidAssetOperation(path.dirname(outputDir), operationId, baseItems)
       : undefined;
     const priorCreateAttemptsByQuoteItem = preparedOperation?.priorCreateAttemptsByQuoteItem ?? {};
-    const estimatedCost = preparedOperation?.createCostCny ?? 0;
+    const estimatedCost = assetExecutionEstimatedCost(preparedOperation, parameters);
     if (estimatedCost > 0 && maxCostCny <= 0) {
       throw new Error("Paid asset execution requires a positive spend authorization.");
     }
@@ -467,6 +467,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const jobs: GenerationJob[] = [];
     const mediaArtifacts: WorkerArtifactDescriptor[] = [];
     const approvedPilotGroups = new Set<string>();
+    let acceptedPilotContinuation = false;
 
     const preparedItems = preparedOperation?.items ?? [];
     const openedLedger = ledgerPath
@@ -505,7 +506,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
               ledgerPath,
               ledger: openedLedger?.ledger,
               ledgerItem,
-              allowCreate: openedLedger?.created !== false,
+              allowCreate: openedLedger?.created !== false || acceptedPilotContinuation,
               ...(Object.keys(itemCreateBudgets).length ? {
                 itemCreateBudgets,
                 priorCreateAttempts: priorCreateAttemptsByQuoteItem[`scene-${scene.position}`],
@@ -539,7 +540,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
             scene.position,
             "Inherited verified materialized media from an earlier paid operation.",
           ));
-          await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts });
+          acceptedPilotContinuation = await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts }) || acceptedPilotContinuation;
           continue;
         }
         const media = await downloadGeneratedAsset(
@@ -578,7 +579,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           `AI-generated ${binding.mediaType}; review provider terms, likeness rights, and AIGC disclosure before publishing.`,
           scene.position,
         ));
-        await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts });
+        acceptedPilotContinuation = await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts }) || acceptedPilotContinuation;
       } catch (error) {
         job.status = "failed";
         job.error = safeGenerationDiagnostic(error);
@@ -908,7 +909,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       ? await preparePaidAssetOperation(path.dirname(outputDir), operationId, baseItems, reworkCarryForwardItems)
       : undefined;
     const priorCreateAttemptsByQuoteItem = preparedOperation?.priorCreateAttemptsByQuoteItem ?? {};
-    const estimatedCost = preparedOperation?.createCostCny ?? 0;
+    const estimatedCost = assetExecutionEstimatedCost(preparedOperation, parameters);
     if (estimatedCost > 0 && maxCostCny <= 0) {
       throw new Error("Paid asset execution requires a positive spend authorization.");
     }
@@ -953,6 +954,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       : undefined;
 
     const approvedPilotGroups = new Set<string>();
+    let acceptedPilotContinuation = false;
     const pilotPositions = new Set<number>();
     if (this.options.pilotReviewer) {
       const candidates = [...generatedRoutes].filter(({ route }) => route.referenceFromScenePosition === undefined)
@@ -1031,7 +1033,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
               ledgerPath,
               ledger: openedLedger?.ledger,
               ledgerItem,
-              allowCreate: openedLedger?.created !== false,
+              allowCreate: openedLedger?.created !== false || acceptedPilotContinuation,
               ...(referenceImages ? { referenceImages } : {}),
               ...(Object.keys(itemCreateBudgets).length ? {
                 itemCreateBudgets,
@@ -1066,7 +1068,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
             scene.position,
             "Inherited verified materialized media from the rework source run.",
           ));
-          await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts });
+          acceptedPilotContinuation = await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts }) || acceptedPilotContinuation;
           continue;
         }
         const media = await downloadGeneratedAsset(
@@ -1105,7 +1107,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           `AI-generated ${binding.mediaType} selected by the director plan; review terms, likeness rights, and AIGC disclosure.`,
           scene.position,
         ));
-        await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts });
+        acceptedPilotContinuation = await this.reviewPilot({ request, parameters, plan, planPath, ledgerItem, job, approvedPilotGroups, mediaArtifacts }) || acceptedPilotContinuation;
       } catch (error) {
         job.status = "failed";
         job.error = safeGenerationDiagnostic(error);
@@ -1251,19 +1253,32 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     job: GenerationJob;
     approvedPilotGroups: Set<string>;
     mediaArtifacts: WorkerArtifactDescriptor[];
-  }): Promise<void> {
+  }): Promise<boolean> {
     const reviewer = this.options.pilotReviewer;
-    if (!reviewer) return;
+    if (!reviewer) return false;
     const { request, parameters, plan, planPath, ledgerItem: item, job } = options;
     if (!item?.sha256) throw new Error("Pilot review requires a materialized asset identity.");
     // 每个方案内，不同模型和参考图生成路线分别试片；先审首个镜头再提交后续付费任务。
     const group = JSON.stringify([item.providerId, item.modelId, item.parameters.mediaType,
       item.parameters.ratio, item.parameters.referenceFromScenePosition !== undefined]);
-    if (options.approvedPilotGroups.has(group)) return;
+    if (options.approvedPilotGroups.has(group)) return false;
     const input = requiredRecord(request.input, "Worker input");
     const scriptPath = requiredString(input.scriptPath, "scriptPath");
     const outputDir = requiredString(request.outputDir, "outputDir");
     await writeJsonAtomically(planPath, plan);
+    const acceptedEvidenceIds = new Set(optionalStringArray(
+      parameters.acceptedSourceReviewEvidenceIds,
+      "acceptedSourceReviewEvidenceIds",
+    ));
+    const incomplete = incompleteSourceReview(item, requiredString(request.commandId, "commandId"));
+    // 决定来自管线已校验并持久化的人审记录；当前媒体先经物化校验，再按操作/方案/镜头重算身份。
+    // 用户接受未完成审查不是要求再审，也不能把这一事实改成审查通过。
+    if (acceptedEvidenceIds.has(incomplete.evidenceId!)) {
+      job.pilotReview = "unavailable";
+      job.sourceReview = incomplete;
+      options.approvedPilotGroups.add(group);
+      return true;
+    }
     try {
       const result = await reviewer.review({
         runRoot: this.options.runsRoot
@@ -1298,13 +1313,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         job.sourceReview = sourceReview;
         // 人的「承担继续」只接受这份服务端已生成、且仍与当前素材/方案绑定的证据。
         // 确认后仍会重新走当前报价守卫；这里只允许同一试片组越过已经看过的质量建议。
-        const acceptedEvidenceIds = new Set(optionalStringArray(
-          parameters.acceptedSourceReviewEvidenceIds,
-          "acceptedSourceReviewEvidenceIds",
-        ));
         if (acceptedEvidenceIds.has(sourceReview.evidenceId!)) {
           options.approvedPilotGroups.add(group);
-          return;
+          return true;
         }
         const rejected = new AssetPilotReviewError(
           `镜头 ${item.scenePosition} 试片提出质量问题，已停止后续付费生成。已保留试片与审查报告。`
@@ -1316,6 +1327,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       }
       job.pilotReview = "approved";
       options.approvedPilotGroups.add(group);
+      return false;
     } catch (error) {
       if (error instanceof AssetPilotReviewError) throw error;
       job.pilotReview = "unavailable";
@@ -2982,6 +2994,19 @@ function createPaidAssetOperationItem(
     state: "prepared",
     estimatedCostCny: binding.estimateCny(request),
   };
+}
+
+function assetExecutionEstimatedCost(
+  operation: { existing: boolean; items: PaidAssetOperationItem[]; createCostCny: number } | undefined,
+  parameters: Record<string, unknown>,
+): number {
+  // 接受试片的恢复会继续 prepared 镜头，须先按所有未提交项核额度，不能沿用“仅查询旧任务”的零报价。
+  // 此处只核价；能否继续仍由当前试片身份、人审决定及逐项 unknown/create-budget 守卫共同决定。
+  if (operation?.existing && optionalStringArray(parameters.acceptedSourceReviewEvidenceIds,
+    "acceptedSourceReviewEvidenceIds").length) {
+    return roundMoney(operation.items.reduce((sum, item) => sum + (item.state === "prepared" ? item.estimatedCostCny : 0), 0));
+  }
+  return operation?.createCostCny ?? 0;
 }
 
 async function preparePaidAssetOperation(

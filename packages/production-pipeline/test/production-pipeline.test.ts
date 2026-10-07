@@ -10243,6 +10243,57 @@ describe("ProductionPipeline", () => {
     assert.equal(switchedPlan?.estimatedCostCny, 6.2);
   });
 
+  it("carries explicit incomplete acceptance through the real asset executor and the remaining quote", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-real-pilot-acceptance-"));
+    let creates = 0;
+    let reviews = 0;
+    const worker = new pipeline.GenerativeAssetWorkerClient({
+      fallback: new RoutedAssetBaselineWorker(),
+      pilotReviewer: new pipeline.SourceAssetPilotReviewer([{
+        id: "controlled-reviewer", modelId: "controlled-model",
+        review: async () => { reviews += 1; throw new Error("completed review failure"); },
+      }]),
+      adapters: [{ estimatedCnyPerClip: 2.4, defaultModelId: "seedance-v1", modelPrices: { "seedance-v1": 2.4 },
+        adapter: { providerId: "seedance-video-v1", generate: async () => ({
+          providerId: "seedance-video-v1", taskId: `paid-task-${++creates}`, videoUrl: "https://example.com/generated.mp4",
+        }) },
+      }],
+      resolveHost: async () => ["93.184.216.34"],
+      fetch: async () => new Response("controlled-video", { headers: { "content-type": "video/mp4" } }),
+    });
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker, directorAgent: generatedShotDirector(),
+      assetProviders: [meteredSeedanceProvider()], providerRuntimeMetadata: [seedanceRuntimeMetadata()] });
+    const awaiting = await subject.start({ ...brief,
+      providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+    });
+    const firstPlan = awaiting.nodeRuns.find((node) => node.nodeId === "assets")!.spendPlan!;
+    const stopped = await subject.authorizeSpend(awaiting.id, { ...firstPlan, spendPlanId: firstPlan.id, approvedBy: "owner" });
+    const assets = stopped.nodeRuns.find((node) => node.nodeId === "assets")!;
+    assert.equal(assets.intervention?.kind, "source_review_retry", assets.error);
+    assert.equal(creates, 1);
+    assert.equal(reviews, 1);
+    const requoted = await subject.decide(stopped.id, {
+      interventionId: assets.intervention!.id, expectedRunRevision: stopped.revision, action: "approve",
+      actor: "owner", acceptIncomplete: true, reviewEvidenceId: assets.intervention!.evidenceId!,
+    });
+    assert.equal(requoted.status, "approval_invalidated");
+    assert.equal(creates, 1, "接受质量风险不代签新的费用报价");
+    const remaining = requoted.nodeRuns.find((node) => node.nodeId === "assets")!.spendPlan!;
+    assert.equal(remaining.estimatedCostCny, 2.4);
+    const resumed = await subject.authorizeSpend(requoted.id, { ...remaining, spendPlanId: remaining.id, approvedBy: "owner" });
+    const resumedAssets = resumed.nodeRuns.find((node) => node.nodeId === "assets")!;
+    assert.equal(resumedAssets.status, "succeeded", resumedAssets.error);
+    assert.equal(resumedAssets.operationRequestId, assets.operationRequestId);
+    assert.equal(creates, 2, "首镜不得重购，只生成剩余镜头");
+    assert.equal(reviews, 1, "明确接受未完成后不暗中再审");
+    assert.equal(resumed.status, "needs_human", "后续人工终审仍保留");
+    const receipts = await subject.readPaidExecutionReceipts(resumed.id);
+    assert.equal(receipts.find((receipt) => receipt.nodeId === "assets")?.actualCostCny, 4.8,
+      "恢复后展示同一操作的累计已发生费用，不仅是本次新增");
+  });
+
   it("requotes only the unsubmitted shot after a completed provider result fails to download", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-mixed-paid-recovery-"));
     let creates = 0;

@@ -1072,7 +1072,7 @@ export class ProductionPipeline {
     const run = await this.store.load<ProductionBrief>(runId);
     const receipts = structuredClone(run.executionReceipts ?? []);
     const missingSpend = receipts.filter((receipt) => receipt.nodeId === "assets" && receipt.requestId
-      && receipt.billing === "metered" && receipt.actualCostCny === 0 && receipt.meteredAttemptCount === 0
+      && receipt.billing === "metered"
       && receipt.actualCostSource !== "provider_reported" && receipt.actualCostSource !== "manual_reconciled");
     if (missingSpend.length === 0) return receipts;
     const ledger = await inspectPaidAssetLedger(path.join(this.runsRoot, runId, "nodes", "assets"));
@@ -1083,8 +1083,9 @@ export class ProductionPipeline {
         || items.some((item) => item.state === "submitted" || item.state === "unknown")) continue;
       const settlement = paidAssetSettlement(items);
       if (settlement.meteredAttemptCount === 0) continue;
-      // 修正旧版“恢复新增零元”覆盖历史支出的展示；不回写 run，也不修改服务商账本。
-      Object.assign(receipt, settlement, { actualCostSource: "configured_rate" });
+      // 恢复回执只含本次新增，展示须按同操作的完整已知账本累计；不回写 run 或服务商账本。
+      Object.assign(receipt, settlement, { actualCostSource: "configured_rate",
+        parameters: { ...receipt.parameters, paidAssetLedgerCumulative: true } });
     }
     return receipts;
   }

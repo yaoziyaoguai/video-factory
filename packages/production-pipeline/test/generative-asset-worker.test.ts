@@ -211,6 +211,78 @@ describe("GenerativeAssetWorkerClient", () => {
   }
 
   for (const routed of [false, true]) {
+    it(`honors acceptance of an incomplete pilot without reviewing or buying it again (${routed ? "director" : "direct"})`, async () => {
+      const harness = await pilotHarness(routed, "unavailable");
+      const stopped = await harness.worker.run(harness.request);
+      assert.equal(stopped.sourceReview?.kind, "incomplete");
+      assert.deepEqual(harness.events, ["generate-1", "review-1"]);
+
+      const resumed = await harness.worker.run({
+        ...harness.request,
+        outputDir: path.join(harness.root, "attempt-accepted"),
+        parameters: {
+          ...harness.request.parameters,
+          maxCostCny: 4,
+          acceptedSourceReviewEvidenceIds: [stopped.sourceReview!.evidenceId],
+        },
+      });
+      assert.equal(resumed.status, "succeeded", `承担当前未完成审查后应继续未生成镜头，而不是自动再审: ${JSON.stringify(resumed.error)}; ${harness.events.join(",")}`);
+      assert.deepEqual(harness.events, ["generate-1", "review-1", "generate-2", "generate-3"]);
+      assert.equal(resumed.diagnostics?.actualCostCny, 4);
+      const { jobs } = JSON.parse(await readFile(String(resumed.output?.generationJobsPath), "utf8"));
+      assert.equal(jobs[0].sourceReview?.kind, "incomplete", "保留未完成事实，不能伪装审查通过");
+      assert.equal(jobs[0].sourceReview?.evidenceId, stopped.sourceReview!.evidenceId);
+    });
+
+    it(`continues only the authorized remainder after accepting a negative pilot (${routed ? "director" : "direct"})`, async () => {
+      const harness = await pilotHarness(routed, "revise");
+      const stopped = await harness.worker.run(harness.request);
+      assert.equal(stopped.sourceReview?.kind, "complete_negative");
+      const resumed = await harness.worker.run({ ...harness.request,
+        outputDir: path.join(harness.root, "attempt-accepted"),
+        parameters: { ...harness.request.parameters, maxCostCny: 4,
+          acceptedSourceReviewEvidenceIds: [stopped.sourceReview!.evidenceId] },
+      });
+      assert.equal(resumed.status, "succeeded", JSON.stringify(resumed.error));
+      assert.deepEqual(harness.events, ["generate-1", "review-1", "generate-2", "generate-3"]);
+      assert.equal(resumed.diagnostics?.actualCostCny, 4);
+    });
+
+    for (const changed of ["evidence", "operation", "script", "media", "unknown", "budget"] as const) {
+      it(`does not reuse incomplete acceptance after ${changed} changes (${routed ? "director" : "direct"})`, async () => {
+        const harness = await pilotHarness(routed, "unavailable");
+        const stopped = await harness.worker.run(harness.request);
+        assert.equal(stopped.sourceReview?.kind, "incomplete");
+        const retry = { ...harness.request, outputDir: path.join(harness.root, "attempt-changed"),
+          parameters: { ...harness.request.parameters, maxCostCny: changed === "budget" ? 3 : 4,
+            acceptedSourceReviewEvidenceIds: [changed === "evidence" ? "f".repeat(64) : stopped.sourceReview!.evidenceId] },
+        };
+        if (changed === "operation") retry.commandId = "different-operation";
+        if (changed === "script") {
+          const scriptPath = harness.request.input.scriptPath;
+          const script = JSON.parse(await readFile(scriptPath, "utf8"));
+          script.scenes[0].visual_prompt = "a different plan";
+          await writeFile(scriptPath, JSON.stringify(script));
+        }
+        if (changed === "media" || changed === "unknown") {
+          const directory = path.join(harness.root, ".generation-operations");
+          const ledgerPath = path.join(directory, (await readdir(directory))[0]!);
+          const ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+          if (changed === "media") await writeFile(ledger.items[0].localPath, "changed media");
+          else {
+            ledger.items[0].state = "unknown";
+            await writeFile(ledgerPath, JSON.stringify(ledger));
+          }
+        }
+        // 输入/物化身份冲突可直接拒绝，其余返回原失败事实；两者都不能自动跨过旧决定。
+        const result = await harness.worker.run(retry).catch((error: unknown) => ({ status: "failed", error }));
+        assert.equal(result.status, "failed");
+        assert.equal(harness.events.filter((event) => event.startsWith("generate-")).length, 1);
+        assert.equal(harness.events.filter((event) => event.startsWith("review-")).length,
+          changed === "evidence" || changed === "operation" ? 2 : 1);
+      });
+    }
+
     it(`retains the materialized pilot when review is unavailable and resumes without buying it again (${routed ? "director" : "direct"})`, async () => {
       const harness = await pilotHarness(routed, "unavailable");
       const result = await harness.worker.run(harness.request);

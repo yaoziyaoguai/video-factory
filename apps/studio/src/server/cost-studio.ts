@@ -404,8 +404,20 @@ function uncertainReceipt(value: unknown, authorizations: unknown[], executionPl
 
 function mergeReceipts(current: unknown[], history: unknown[], cash: unknown[] = []): unknown[] {
   const merged = new Map<string, Record<string, unknown>>();
-  const put = (value: unknown, index: number, kind: "current" | "history" | "cash") => {
-    if (!isRecord(value)) return;
+  const cumulativeAssetCosts = cash.filter((value) => isRecord(value) && value.nodeId === "assets"
+    && value.actualCostSource === "configured_rate" && isRecord(value.parameters)
+    && value.parameters.paidAssetLedgerCumulative === true) as Record<string, unknown>[];
+  const put = (entry: unknown, index: number, kind: "current" | "history" | "cash") => {
+    if (!isRecord(entry)) return;
+    let value = entry;
+    // 已校验的整项账本统一“本次新增”快照口径，避免先制造金额冲突再尝试清掉冲突。
+    // 真实实付/人工核账不覆盖；模型、请求和终态等其他冲突仍按原规则保留。
+    const cumulative = value.actualCostSource !== "provider_reported" && value.actualCostSource !== "manual_reconciled"
+      ? cumulativeAssetCosts.find((item) => item.requestId === value.requestId && item.providerId === value.providerId
+        && item.nodeId === value.nodeId && Boolean(text(item.requestId))) : undefined;
+    if (cumulative) value = { ...value, actualCostCny: cumulative.actualCostCny,
+      actualCostSource: cumulative.actualCostSource, meteredAttemptCount: cumulative.meteredAttemptCount,
+      meteredFailedAttemptCount: cumulative.meteredFailedAttemptCount };
     const requestId = text(value.requestId);
     const key = requestId
       ? `request:${text(value.providerId)}:${requestId}`

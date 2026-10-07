@@ -147,6 +147,27 @@ describe("CostStudio", () => {
     assert.deepEqual(run, original);
   });
 
+  it("uses verified cumulative asset-ledger costs across same-operation recovery snapshots", async () => {
+    const receipt = { nodeId: "assets", providerId: "wan", modelId: "wan3", billing: "metered",
+      requestId: "same-operation", status: "needs_human", startedAt: "2026-10-07T00:00:00Z",
+      actualCostCny: 3, actualCostSource: "configured_rate", meteredAttemptCount: 1, meteredFailedAttemptCount: 0 };
+    for (const addedCost of [0, 0.75]) {
+      const current = { ...receipt, actualCostCny: addedCost, meteredAttemptCount: addedCost ? 3 : 0 };
+      const run = { id: "pilot-recovery", nodeRuns: [{ nodeId: "assets", executionReceipt: current }],
+        executionReceipts: [receipt, current] };
+      const original = structuredClone(run);
+      const projection = { ...receipt, actualCostCny: 3 + addedCost, meteredAttemptCount: addedCost ? 4 : 1,
+        parameters: { paidAssetLedgerCumulative: true } };
+      const studio = new CostStudio(async () => [run], undefined, async () => [projection]);
+      const detail = await studio.runDetail(run.id);
+      assert.equal(detail?.totals.actualCostCny, 3 + addedCost);
+      assert.equal(detail?.totals.meteredCalls, addedCost ? 4 : 1);
+      assert.equal(detail?.totals.countConflicts, 0);
+      assert.equal(detail?.lines.length, 1);
+      assert.deepEqual(run, original, "只读投影不得回写任何旧回执");
+    }
+  });
+
   it("uses the bound quote rather than the catalog estimate and exposes running authorization", async () => {
     const run = { id: "run-quote", initialInput: {}, nodeRuns: [{ nodeId: "assets", status: "running", operationRequestId: "op", spendAuthorizationId: "spend", startedAt: "2026-09-26T01:00:00Z", spendPlan: { id: "quote", providerId: "wan", modelId: "wan3", estimatedCostCny: 12 } }],
       spendAuthorizations: [{ id: "spend", nodeId: "assets", spendPlanId: "quote", providerId: "wan", modelId: "wan3", maxCostCny: 12 }], executionReceipts: [] as Record<string, unknown>[],
