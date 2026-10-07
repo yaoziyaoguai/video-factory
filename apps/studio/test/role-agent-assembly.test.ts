@@ -150,6 +150,17 @@ const unavailable: CodexProviderSettings = {
 };
 
 describe("buildRoleAgentAssembly", () => {
+  it("declares the exact trusted identity for a single registered review model", () => {
+    const model = { id: "m-123456789abc", label: "受控审片", protocol: "openai-chat-completions" as const,
+      baseUrl: "https://model.invalid/v1", modelId: "provider-model", capabilities: ["text", "image"] as Array<"text" | "image">,
+      enabled: true, socketName: "m-123456789abc.sock", maxOutputTokens: 32000, credentialConfigured: true };
+    const result = buildRoleAgentAssembly({ connectedModels: [{ model, client }], deepseekCodexSettings: unavailable,
+      reviewMedia, environment: {} });
+    assert.deepEqual(result.visualReviewAgents[0]!.finalReviewConfiguration?.executionCandidates,
+      [{ providerId: model.id, modelId: model.id, independentRoleAudit: true }],
+      "单候选也必须声明可信执行身份；不能依赖两候选fallback包装器才允许人工终审");
+  });
+
   it("assembles the DeepSeek broker using health-reported role models", () => {
     const result = buildRoleAgentAssembly({
       deepseekCodexSettings: settings("deepseek", ["script-draft", "director-plan", "visual-review", "role-audit"], {

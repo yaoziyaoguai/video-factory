@@ -1,0 +1,35 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { canonicalJsonV2 } from "../src/narration-plan.js";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+import { allocateCharacterTurnFrames, buildCharacterNarrationPlan, validateCharacterNarrationPlan, characterCandidateFromPlan } from "../src/character-narration-plan.js";
+import type { CharacterScript } from "../src/character-script.js";
+const fixture = JSON.parse(readFileSync(new URL("../../../tests/fixtures/character-drama-cases.json", import.meta.url), "utf8")) as { script: CharacterScript };
+const shared = JSON.parse(readFileSync(new URL("../../../tests/fixtures/character-narration-cases.json", import.meta.url), "utf8"));
+const allocationCases = shared.allocations;
+const input = () => ({ script: structuredClone(fixture.script), scriptSha256: "a".repeat(64), visualSha256: "b".repeat(64), sourceContextId: "ctx-four-characters" });
+test("MC-A14 shared integer allocation preserves codepoints, explicit pauses and turn order", () => {
+  for (const c of allocationCases) assert.deepEqual(allocateCharacterTurnFrames(c.frames, c.turns), c.expected, c.name);
+  assert.throws(() => allocateCharacterTurnFrames(2, [{ text: "甲", after_pause_frames: 2 }]), /放不下/);
+});
+test("MC-A14 v3 binds every turn and validates edits without accepting replacement text or voice", () => {
+  const context = input();
+  const plan = buildCharacterNarrationPlan(context);
+  assert.equal(plan.source.canonicalSourceSha256, shared.canonicalSourceSha256);
+  assert.equal(createHash("sha256").update(canonicalJsonV2(plan)).digest("hex"), shared.planSha256);
+  assert.equal(plan.version, "video-factory/narration-plan-v3");
+  assert.equal(plan.groups.length, 8);
+  assert.deepEqual(plan.groups.map((g) => g.speakerId), fixture.script.scenes.flatMap((s) => s.dialogue.map((t) => t.speaker_id)));
+  assert.deepEqual(plan.groups.map((g) => g.text), fixture.script.scenes.flatMap((s) => s.dialogue.map((t) => t.text)));
+  assert.equal(plan.visualPlan.totalFrames, 720);
+  assert.deepEqual(validateCharacterNarrationPlan(plan, context), plan);
+  const changed = structuredClone(plan);
+  changed.groups[0]!.voiceProfileId = "minimax:female-tianmei";
+  assert.throws(() => validateCharacterNarrationPlan(changed, context), /当前剧本|不一致/);
+  const candidate = characterCandidateFromPlan(plan);
+  candidate.groups[0]!.window.endFrame -= 5;
+  assert.equal(buildCharacterNarrationPlan(context, candidate).groups[0]!.window.endFrame, plan.groups[0]!.window.endFrame - 5);
+  candidate.groups[0]!.window.endFrame = 190;
+  assert.throws(() => buildCharacterNarrationPlan(context, candidate), /越界|重叠/);
+});

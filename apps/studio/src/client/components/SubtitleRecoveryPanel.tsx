@@ -39,7 +39,7 @@ export function SubtitleRecoveryPanel({ run, busy, onRecover }: Props) {
       if (!live.current) return;
       const plan = record(document);
       const subtitles = record(plan?.subtitles);
-      if (plan?.version !== "video-factory/voiceover-plan-v3"
+      if (!plan || !["video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4"].includes(String(plan.version))
         || !digest(plan.layoutKey) || !digest(plan.trackSha256) || !digest(subtitles?.acceptedNarrationPlanSha256)) {
         setError("这版声音没有完整的同步字幕记录，暂不能单独恢复。你仍可查看、采用现有成片。");
         return;

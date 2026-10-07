@@ -142,7 +142,8 @@ describe("narration-plan-v2 共享用例（与 Python 同判）", () => {
           assert.equal(narrationPlanVersion(buildNarrationPlan(
             [{ position: 1, duration: 2, narration: "甲。" }], "a".repeat(64), "b".repeat(64),
           )), "video-factory/narration-plan-v1", id);
-          assert.throws(() => narrationPlanVersion({ version: "video-factory/narration-plan-v3" }), /版本/, id);
+          assert.equal(narrationPlanVersion({ version: "video-factory/narration-plan-v3" }), "video-factory/narration-plan-v3", id);
+          assert.throws(() => narrationPlanVersion({ version: "video-factory/narration-plan-v99" }), /版本/, id);
           assert.equal(plan.version, expect.version, id);
           assert.equal(plan.mode, "continuous_groups", id);
           assert.equal(plan.edgeTrim, "none", id);

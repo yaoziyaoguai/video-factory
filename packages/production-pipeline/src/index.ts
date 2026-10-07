@@ -5,6 +5,11 @@ export { classifyReviewDisposition, dispositionAllowsHumanStop } from "./review-
 export { summarizeModelExecutionFacts } from "./model-execution-facts.js";
 export type { ModelExecutionFact, ModelExecutionProjection } from "./model-execution-facts.js";
 export { buildNarrationPlan, validateNarrationPlan } from "./narration-plan.js";
+export { CHARACTER_NARRATION_PLAN_VERSION, buildCharacterNarrationPlan, validateCharacterNarrationPlan,
+  characterCandidateFromPlan, characterCandidateId, characterPlanSha256, parseCharacterNarrationCandidate } from "./character-narration-plan.js";
+export type { CharacterNarrationPlan, CharacterNarrationCandidate, CharacterNarrationContext } from "./character-narration-plan.js";
+export { CHARACTER_RELAYOUT_COMPLETION_VERSION, NARRATION_FIT_CONFLICT_V3_VERSION, parseNarrationFitConflictV3 } from "./narration-relayout.js";
+export type { NarrationFitConflictV3 } from "./narration-relayout.js";
 export type { NarrationPlan, NarrationPlanPreview } from "./narration-plan.js";
 export {
   buildNarrationPlanV2,
@@ -292,9 +297,12 @@ export type {
   ScreenwriterAgent,
   ScreenwriterAgentInput,
   ScriptDraft,
+  NarrationScriptDraft,
   ScriptScene,
   ScriptVisualStrategy,
 } from "./codex-screenwriter.js";
+export { CHARACTER_SCRIPT_VERSION, isCharacterScript, validateCharacterScript, validateCharacterScriptStructure, scriptSceneText } from "./character-script.js";
+export type { CharacterScript, CharacterScriptScene, ScriptCharacter, CharacterDialogueTurn, PresentationMode, CharacterVoiceProfile } from "./character-script.js";
 export {
   CodexPublishCopyWriter,
   validatePublishCopy,

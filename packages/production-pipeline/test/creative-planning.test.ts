@@ -7,7 +7,8 @@ import { describe, it } from "node:test";
 import type { DurationRange } from "../src/executable-timeline.js";
 import { compileExecutableProductionPlan, parseExecutableProductionPlan } from "../src/executable-production-plan.js";
 import type { CreativeTreatment } from "../src/creative-treatment.js";
-import type { ScriptDraft } from "../src/codex-screenwriter.js";
+import type { ScriptDraft, NarrationScriptDraft } from "../src/codex-screenwriter.js";
+import { isCharacterScript } from "../src/character-script.js";
 import type { VisualDirectorPlan } from "../src/visual-director.js";
 import { assetReuseSourceScenePosition } from "../src/generative-asset-worker.js";
 import type { AssetCandidateReport, AssetSemanticRanking } from "../src/asset-semantic-ranker.js";
@@ -68,7 +69,12 @@ function treatmentFixture(): CreativeTreatment {
   };
 }
 
-function scriptFixture(): ScriptDraft {
+function narrationScript(value: ScriptDraft | undefined): NarrationScriptDraft {
+  assert.ok(value && !isCharacterScript(value), "旧解说图必须保留解说稿分支");
+  return value;
+}
+
+function scriptFixture(): NarrationScriptDraft {
   return {
     viewerPromise: "看完能掌握测试主题的三个要点",
     narrativeArc: "问题-方法-结论",
@@ -121,7 +127,7 @@ function directorPlanFixture(
 }
 
 // 第二版稿件：第 2 段画面语义变化（旁白与画面提示），用于证明排序证据必须跟随语义输入身份。
-function scriptV2Fixture(): ScriptDraft {
+function scriptV2Fixture(): NarrationScriptDraft {
   const script = scriptFixture();
   const sceneTwo = script.scenes[1]!;
   sceneTwo.narration = "第2段旁白内容（v2：证据口径已改）";
@@ -2660,7 +2666,7 @@ describe("B3 固定创作规划图", () => {
           const values = (snapshot?.values ?? {}) as Partial<PlanningGraphState>;
           assert.equal(values.directorPlan?.output.shots[1]!.subject, undefined);
           assert.equal(values.directorPlan?.output.shots[1]!.visibleAction, undefined);
-          assert.equal(values.scriptArtifact?.output.scenes[0]!.narration, "第1段旁白内容");
+          assert.equal(narrationScript(values.scriptArtifact?.output).scenes[0]!.narration, "第1段旁白内容");
           assert.equal(values.candidatesArtifact?.artifactId, "candidates:1");
           assert.equal(values.ranking?.artifactId, "ranking:1");
           assert.equal(values.integratedPlan, null);
@@ -2680,7 +2686,7 @@ describe("B3 固定创作规划图", () => {
             ...spy.ports,
             integrateDirector: async (context) => {
               context.directorPlan!.output.shots[0]!.rationale = "被 port 原地污染的说明";
-              context.script!.output.scenes[0]!.narration = "被 port 原地污染的旁白";
+              narrationScript(context.script!.output).scenes[0]!.narration = "被 port 原地污染的旁白";
               throw new Error("SIMULATED_INTERRUPTION_after_pollution");
             },
           };
@@ -2708,7 +2714,7 @@ describe("B3 固定创作规划图", () => {
           assert.equal(spy.calls.integrate.length, 1, "只补做被中断的整合");
           assert.equal(spy.calls.compile.length, 1);
           // 恢复后消费的已接受证据是原始内容，不是 port 污染过的对象。
-          assert.equal(spy.calls.compile[0]!.script?.output.scenes[0]!.narration, "第1段旁白内容");
+          assert.equal(narrationScript(spy.calls.compile[0]!.script?.output).scenes[0]!.narration, "第1段旁白内容");
           assert.equal(spy.calls.compile[0]!.directorPlan?.output.shots[0]!.rationale, "测试");
         } finally {
           resumedStore.close();
@@ -2727,7 +2733,7 @@ describe("B3 固定创作规划图", () => {
           const malicious: CreativePlanningPorts = {
             ...spy.ports,
             integrateDirector: async (context) => {
-              context.script!.output.scenes[0]!.narration = "被 port 原地污染的旁白";
+              narrationScript(context.script!.output).scenes[0]!.narration = "被 port 原地污染的旁白";
               return { artifactId: "integrate:1", output: integratedPlanFromDraft(context.directorPlan!.output) };
             },
           };
@@ -2755,7 +2761,7 @@ describe("B3 固定创作规划图", () => {
           assert.equal(spy.calls.rank.length, 0);
           assert.equal(spy.calls.compile.length, 1);
           // 恢复后编译消费的稿件是原始内容——污染没有进入任何已落库 checkpoint。
-          assert.equal(spy.calls.compile[0]!.script?.output.scenes[0]!.narration, "第1段旁白内容");
+          assert.equal(narrationScript(spy.calls.compile[0]!.script?.output).scenes[0]!.narration, "第1段旁白内容");
         } finally {
           resumedStore.close();
         }
@@ -2914,7 +2920,7 @@ describe("B3 固定创作规划图", () => {
             // integrate 在污染后的画面语义上自我通过，compile 携旧 ranking 消费变更内容。
             input.directorPlan.shots[1]!.subject = "被 reviewer 原地改写的主体";
             input.directorPlan.shots[1]!.visibleAction = "被 reviewer 原地改写的动作";
-            input.script.scenes[0]!.narration = "被 reviewer 原地污染的旁白";
+            narrationScript(input.script).scenes[0]!.narration = "被 reviewer 原地污染的旁白";
             if (input.ranking) {
               input.ranking.output.scenes[1]!.candidates[0]!.semanticScore = 100;
             }
@@ -2951,7 +2957,7 @@ describe("B3 固定创作规划图", () => {
           assert.equal(spy.calls.compile.length, 1);
           // 检查后续 compile 实际消费的内容（不是 reviewer 收到的副本）：
           // 稿件旁白、草案/整合方案画面语义、排序分数都保持原始 accepted 值。
-          assert.equal(spy.calls.compile[0]!.script?.output.scenes[0]!.narration, "第1段旁白内容");
+          assert.equal(narrationScript(spy.calls.compile[0]!.script?.output).scenes[0]!.narration, "第1段旁白内容");
           assert.equal(spy.calls.compile[0]!.directorPlan?.output.shots[1]!.subject, undefined);
           assert.equal(spy.calls.compile[0]!.integratedPlan?.output.shots[1]!.visibleAction, undefined);
           assert.equal(spy.calls.compile[0]!.ranking?.output.scenes[1]!.candidates[0]!.semanticScore, 80);
@@ -2969,7 +2975,7 @@ describe("B3 固定创作规划图", () => {
           const spy = spyPorts({ withLibrary: true });
           const maliciousReviewer: AvailabilityReviewer = (input) => {
             input.directorPlan.shots[0]!.rationale = "被 reviewer 原地污染的说明";
-            input.script.scenes[0]!.narration = "被 reviewer 原地污染的旁白";
+            narrationScript(input.script).scenes[0]!.narration = "被 reviewer 原地污染的旁白";
             throw new Error("SIMULATED_INTERRUPTION_reviewer_pollution");
           };
           const graph = createCreativePlanningGraph({
@@ -2999,7 +3005,7 @@ describe("B3 固定创作规划图", () => {
           assert.equal(spy.calls.rank.length, 0);
           assert.equal(spy.calls.integrate.length, 1, "只补做草案复检之后的整合");
           assert.equal(spy.calls.compile.length, 1);
-          assert.equal(spy.calls.compile[0]!.script?.output.scenes[0]!.narration, "第1段旁白内容");
+          assert.equal(narrationScript(spy.calls.compile[0]!.script?.output).scenes[0]!.narration, "第1段旁白内容");
           assert.equal(spy.calls.compile[0]!.directorPlan?.output.shots[0]!.rationale, "测试");
         } finally {
           resumedStore.close();
@@ -3144,7 +3150,7 @@ describe("B3 固定创作规划图", () => {
           const values = (snapshot?.values ?? {}) as Partial<PlanningGraphState>;
           assert.equal(values.directorPlan, null);
           assert.equal(values.executablePlan, null);
-          assert.equal(values.scriptArtifact?.output.scenes[0]!.narration, "第1段旁白内容");
+          assert.equal(narrationScript(values.scriptArtifact?.output).scenes[0]!.narration, "第1段旁白内容");
         } finally {
           firstStore.close();
         }

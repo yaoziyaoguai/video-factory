@@ -23,7 +23,9 @@ from .stock_assets import (
 )
 from .technical_review import review_video
 from .voiceover import VoiceDoesNotFitError, synthesize_voiceover_plan
-from .continuous_voiceover import NarrationGroupDoesNotFitError, NarrationGroupDoesNotFitV2Error, assemble_narration_track
+from .character_script import script_scene_text
+from .continuous_voiceover import NarrationGroupDoesNotFitError, NarrationGroupDoesNotFitV2Error, NarrationTurnDoesNotFitError, assemble_narration_track
+from .character_narration_plan import VERSION as CHARACTER_PLAN_VERSION, validate_character_narration_plan
 from .materialized_voice_source import (
     build_materialized_manifest,
     build_source_receipt,
@@ -37,6 +39,7 @@ from .narration_relayout import perform_relayout
 from .narration_subtitles import (
     SUBTITLES_CONTRACT_VERSION,
     build_group_subtitles,
+    capture_subtitle_evidence,
     cues_to_ass,
     cues_to_vtt,
     recover_subtitles,
@@ -99,7 +102,7 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
         inputs, parameters = request["input"], request.get("parameters", {})
         plan = inputs.get("narrationPlan")
         if not isinstance(plan, dict) or plan.get("version") not in (
-                "video-factory/narration-plan-v1", "video-factory/narration-plan-v2"):
+                "video-factory/narration-plan-v1", "video-factory/narration-plan-v2", CHARACTER_PLAN_VERSION):
             raise WorkerProtocolError("Voice quote requires a confirmed-format narration plan.")
         quote = forecast_minimax_groups(plan, output_dir.parent, voice=str(inputs.get("voice") or "female-chengshu"),
             rate=int(inputs.get("rate", 190)), pause_scale=float(inputs.get("pause_scale", 1)),
@@ -151,7 +154,7 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
     scenes = [
         Scene(
             position=int(scene["position"]),
-            narration=str(scene["narration"]),
+            narration=script_scene_text(script, scene),
             duration=float(scene["duration"]),
             visual_strategy=str(scene["visual_strategy"]),
             visual_prompt=str(scene["visual_prompt"]),
@@ -302,7 +305,7 @@ def search_assets(request: Dict[str, Any], output_dir: Path, started_at: float) 
     scenes = [
         Scene(
             position=int(scene["position"]),
-            narration=str(scene["narration"]),
+            narration=script_scene_text(script, scene),
             duration=float(scene["duration"]),
             visual_strategy=str(scene["visual_strategy"]),
             visual_prompt=str(scene["visual_prompt"]),
@@ -395,8 +398,9 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
                 estimated_cost_cny=float(configured_cost) if provider == "minimax" and valid_configured_cost else None,
             )
     except NarrationGroupDoesNotFitError as error:
-        is_v2 = isinstance(error, NarrationGroupDoesNotFitV2Error)
-        if not is_v2:
+        is_turn = isinstance(error, NarrationTurnDoesNotFitError)
+        has_source_receipt = is_turn or isinstance(error, NarrationGroupDoesNotFitV2Error)
+        if not has_source_receipt:
             frame = 0
             related_cuts = []
             for scene in json.loads(script_path.read_text(encoding="utf-8"))["scenes"]:
@@ -419,10 +423,11 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
             "audioArtifact": audio_artifact, "operationId": request["commandId"]}
         artifacts = [audio_artifact]
         receipt = None
-        if is_v2:
+        if has_source_receipt:
             # v2 不伪造完整 cuts：冲突只描述窗口/落点事实，恢复走纯本地时间调整。
-            conflict.update({"version": "video-factory/narration-fit-conflict-v2",
-                "sourceRange": error.source_range, "placement": error.placement,
+            conflict.update({"version": "video-factory/narration-fit-conflict-v3" if is_turn else "video-factory/narration-fit-conflict-v2",
+                **({"turnId": error.turn_id, "speakerId": error.speaker_id, "voiceProfileId": error.voice_profile_id}
+                   if is_turn else {"sourceRange": error.source_range}), "placement": error.placement,
                 "sourceSamples": error.source_audio_samples,
                 "availableFrames": error.available_frames, "shortfallFrames": error.shortfall_frames,
                 "sourceOperationId": request["commandId"],
@@ -527,7 +532,7 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
         ),
     ]
     source_manifest_path = output_dir / "materialized_voice_source.json"
-    if plan.get("version") == "video-factory/voiceover-plan-v3" and source_manifest_path.is_file():
+    if plan.get("version") in ("video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4") and source_manifest_path.is_file():
         artifacts.append(describe_artifact(
             path=source_manifest_path,
             kind="voice_source_manifest",
@@ -537,18 +542,18 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
         ))
     artifacts.extend(subtitle_artifacts(request, plan_path, plan))
     diagnostics: Dict[str, Any] = {}
-    if provider == "minimax" and (valid_configured_cost or plan.get("version") == "video-factory/voiceover-plan-v3"):
+    if provider == "minimax" and (valid_configured_cost or plan.get("version") in ("video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4")):
         synthesized_scenes = plan.get("scenes")
         metered_attempt_count = len(synthesized_scenes) if isinstance(synthesized_scenes, list) else 1
         persisted_diagnostics = minimax_failure_diagnostics(output_dir, request["commandId"])
-        diagnostics = persisted_diagnostics if plan.get("version") == "video-factory/voiceover-plan-v3" or persisted_diagnostics.get("providerOutcomeKnown") is True else {
+        diagnostics = persisted_diagnostics if plan.get("version") in ("video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4") or persisted_diagnostics.get("providerOutcomeKnown") is True else {
             "actualCostCny": round(float(configured_cost), 2),
             "actualCostSource": "configured_rate",
             "meteredAttemptCount": metered_attempt_count,
             "meteredFailedAttemptCount": 0,
             "providerOutcomeKnown": True,
         }
-        if plan.get("version") == "video-factory/voiceover-plan-v3" and diagnostics.get("providerOutcomeKnown") is not True:
+        if plan.get("version") in ("video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4") and diagnostics.get("providerOutcomeKnown") is not True:
             # 有可播放文件不等于收费请求已结清；保留产物，交给原操作恢复，不能成功放行或记作零元。
             return {
                 "protocolVersion": WORKER_PROTOCOL_VERSION, "commandId": request["commandId"], "status": "failed",
@@ -562,9 +567,9 @@ def synthesize_voice(request: Dict[str, Any], output_dir: Path, started_at: floa
         output={
             "voiceoverPlanPath": str(plan_path),
             "trackPath": str(plan["track_path"]),
-            **({"narrationMode": "continuous_groups", "subtitleStatus": plan["subtitles"]["status"],
+            **({"narrationMode": plan["narrationPlan"]["mode"], "subtitleStatus": plan["subtitles"]["status"],
                 "layoutKey": plan["layoutKey"], "voiceOperationId": plan["voiceOperationId"]}
-               if plan.get("version") == "video-factory/voiceover-plan-v3" else {}),
+               if plan.get("version") in ("video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4") else {}),
         },
         artifacts=artifacts,
         started_at=started_at,
@@ -581,13 +586,18 @@ def synthesize_continuous_voice(request: Dict[str, Any], script_path: Path, outp
     narration_path = require_existing_path(inputs, "narrationPlanPath")
     original_script = require_existing_path(inputs, "scriptPath")
     visual_path = require_existing_path(inputs, "executablePlanPath")
-    scenes = json.loads(script_path.read_text(encoding="utf-8"))["scenes"]
+    script = json.loads(script_path.read_text(encoding="utf-8"))
+    scenes = script["scenes"]
     script_sha256 = hashlib.sha256(original_script.read_bytes()).hexdigest()
     visual_sha256 = hashlib.sha256(visual_path.read_bytes()).hexdigest()
     raw_plan = json.loads(narration_path.read_text(encoding="utf-8"))
     if not isinstance(raw_plan, dict):
         raise WorkerProtocolError("Narration plan must be a JSON object.")
-    if raw_plan.get("version") == "video-factory/narration-plan-v2":
+    if raw_plan.get("version") == CHARACTER_PLAN_VERSION:
+        narration = validate_character_narration_plan(raw_plan, {
+            "script": script, "scriptSha256": script_sha256, "visualSha256": visual_sha256,
+            "sourceContextId": (raw_plan.get("source") or {}).get("sourceContextId")})
+    elif raw_plan.get("version") == "video-factory/narration-plan-v2":
         # v2 只消费与本次脚本/画面 SHA 绑定的计划；来源身份取自计划自身的 source 字段，
         # 宿主在采用时已按有效产物核对过同一身份，worker 侧由 SHA 一致性保证绑定。
         source = raw_plan.get("source") or {}
@@ -613,6 +623,10 @@ def synthesize_continuous_voice(request: Dict[str, Any], script_path: Path, outp
     narration_plan_sha256 = hashlib.sha256(narration_path.read_bytes()).hexdigest()
     ledger_data = json.loads(Path(result["ledgerPath"]).read_text(encoding="utf-8"))
     subtitle_adapter = str(inputs.get("subtitle_adapter") or parameters.get("subtitleAdapter") or "minimax-subtitles-v1")
+    if narration["version"] == CHARACTER_PLAN_VERSION and narration["groups"]:
+        # 原响应字幕先落盘，再尝试排轨；首次放不下也能零外发恢复字幕。
+        # 此处仅捕获原证据，不猜时间；协议与时轴仍在排轨成功后核验。
+        capture_subtitle_evidence(Path(result["ledgerPath"]), output_dir.parent)
     manifest = build_materialized_manifest(
         run_id=request["runId"], node_id=str(request.get("nodeRunId") or "voice"),
         source_operation_id=request["commandId"],
@@ -627,7 +641,8 @@ def synthesize_continuous_voice(request: Dict[str, Any], script_path: Path, outp
         parent_artifact_ids=identity.get("parentArtifactIds") or [],
         upstream_version_ids=identity.get("upstreamVersionIds") or [],
         synthesis={"provider": provider, "providerId": str(parameters.get("providerId") or "minimax-tts-v1"),
-                   "model": str(parameters.get("modelId") or "speech-2.8-turbo"), "voice": voice or "female-chengshu",
+                   "model": str(parameters.get("modelId") or "speech-2.8-turbo"),
+                   **({"voice": voice or "female-chengshu"} if narration["version"] != CHARACTER_PLAN_VERSION else {}),
                    "rate": rate, "pauseScale": pause_scale, "masteringPreset": preset,
                    "adapterVersion": subtitle_adapter},
         ledger=ledger_data, ledger_path=Path(result["ledgerPath"]),
@@ -646,7 +661,8 @@ def synthesize_continuous_voice(request: Dict[str, Any], script_path: Path, outp
     # 新 adapter 重解析（纯字幕恢复，TTS 新增恒为 0）。未核实协议保持 unavailable。
     if narration["groups"]:
         subtitles = build_group_subtitles(Path(result["ledgerPath"]), output_dir.parent, plan,
-            narration_plan_sha256=narration_plan_sha256, adapter_version=subtitle_adapter)
+            narration_plan_sha256=narration_plan_sha256, adapter_version=subtitle_adapter,
+            allow_initial_download=narration["version"] != CHARACTER_PLAN_VERSION)
     else:
         # §4.2.4 合法无旁白 0 组：不请求 TTS、不尝试字幕证据；“不需要旁白字幕”不是失败。
         subtitles = {"version": SUBTITLES_CONTRACT_VERSION, "status": "not_required",
@@ -655,7 +671,7 @@ def synthesize_continuous_voice(request: Dict[str, Any], script_path: Path, outp
                      "layoutKey": plan.get("layoutKey"), "clock": {"sampleRate": 44_100},
                      "groups": [], "reason": "no_narration_groups", "cues": []}
     write_subtitle_sidecars(subtitles, output_dir)
-    plan.update({"provider": provider, "voice": voice, "rate": rate,
+    plan.update({"provider": provider, **({"voice": voice} if narration["version"] != CHARACTER_PLAN_VERSION else {}), "rate": rate,
         "voiceOperationId": request["commandId"],
         "trackSha256": hashlib.sha256(Path(plan["track_path"]).read_bytes()).hexdigest(),
         "direction": {"profile_id": profile_id, "rate": rate, "pause_scale": pause_scale, "mastering_preset": preset},
@@ -693,7 +709,13 @@ def rebuild_voice_source_manifest(request: Dict[str, Any], output_dir: Path, sta
     raw_plan = json.loads(narration_path.read_text(encoding="utf-8"))
     if not isinstance(raw_plan, dict):
         raise WorkerProtocolError("Narration plan must be a JSON object.")
-    if raw_plan.get("version") == "video-factory/narration-plan-v2":
+    if raw_plan.get("version") == CHARACTER_PLAN_VERSION:
+        projected_path, _ = materialize_executable_script(inputs, output_dir)
+        narration = validate_character_narration_plan(raw_plan, {
+            "script": json.loads(projected_path.read_text(encoding="utf-8")),
+            "scriptSha256": script_sha256, "visualSha256": visual_sha256,
+            "sourceContextId": (raw_plan.get("source") or {}).get("sourceContextId")})
+    elif raw_plan.get("version") == "video-factory/narration-plan-v2":
         source_context_id = (raw_plan.get("source") or {}).get("sourceContextId")
         if not isinstance(source_context_id, str) or not source_context_id:
             raise WorkerProtocolError("A narration-plan-v2 plan requires its host-derived sourceContextId.")
@@ -708,7 +730,7 @@ def rebuild_voice_source_manifest(request: Dict[str, Any], output_dir: Path, sta
     if ledger_data.get("operationId") != source_operation_id:
         raise WorkerProtocolError("账本与原声音操作身份不一致。")
     source_context_id = (narration.get("source") or {}).get("sourceContextId") \
-        if narration.get("version") == "video-factory/narration-plan-v2" else identity.get("sourceContextId")
+        if narration.get("version") in ("video-factory/narration-plan-v2", CHARACTER_PLAN_VERSION) else identity.get("sourceContextId")
     existing = inputs.get("manifestPath")
     if isinstance(existing, str) and existing and Path(existing).is_file():
         # 写后崩溃：既有清单按完整对账核验后原样登记，不与重建结果强行比对。
@@ -886,7 +908,8 @@ def _relayout_voice_claimed(request: Dict[str, Any], output_dir: Path, started_a
     script_path, executable_plan = materialize_executable_script(inputs, output_dir)
     visual_path = require_existing_path(inputs, "executablePlanPath")
     node_root = output_dir.parent.resolve()
-    script_scenes = json.loads(script_path.read_text(encoding="utf-8"))["scenes"]
+    script_document = json.loads(script_path.read_text(encoding="utf-8"))
+    script_scenes = script_document["scenes"]
     if executable_plan is not None:
         cut_frames = {cut["scenePosition"]: cut["frameCount"] for cut in executable_plan["cuts"]}
         scenes = [{**scene, "duration": cut_frames.get(scene["position"], scene["duration"]) / 30}
@@ -896,7 +919,7 @@ def _relayout_voice_claimed(request: Dict[str, Any], output_dir: Path, started_a
     try:
         plan = perform_relayout(
             manifest_path=manifest_path, layout=inputs.get("layout"),
-            scenes=scenes,
+            scenes=scenes, script=script_document,
             script_sha256=hashlib.sha256(Path(inputs["scriptPath"]).read_bytes()).hexdigest(),
             visual_sha256=hashlib.sha256(Path(inputs["executablePlanPath"]).read_bytes()).hexdigest(),
             output_dir=output_dir, node_root=node_root,
@@ -907,13 +930,15 @@ def _relayout_voice_claimed(request: Dict[str, Any], output_dir: Path, started_a
             layout_operation_id=reservation["layoutOperationId"])
     except NarrationGroupDoesNotFitError as error:
         # 时间调整仍放不下：旧有效声音保持不动，用户继续调整窗口或撤销留白。
-        if isinstance(error, NarrationGroupDoesNotFitV2Error):
+        if isinstance(error, (NarrationGroupDoesNotFitV2Error, NarrationTurnDoesNotFitError)):
+            is_turn = isinstance(error, NarrationTurnDoesNotFitError)
             manifest_identity = inputs.get("sourceManifestIdentity")
             if not isinstance(manifest_identity, dict):
                 raise WorkerProtocolError("v2 本地排轨冲突缺少宿主核定的来源清单身份。")
-            conflict = {"version": "video-factory/narration-fit-conflict-v2",
+            conflict = {"version": "video-factory/narration-fit-conflict-v3" if is_turn else "video-factory/narration-fit-conflict-v2",
                 "code": error.code, "groupId": error.group_id,
-                "sourceRange": error.source_range,
+                **({"turnId": error.turn_id, "speakerId": error.speaker_id, "voiceProfileId": error.voice_profile_id}
+                   if is_turn else {"sourceRange": error.source_range}),
                 "sourceScenePositions": error.source_scene_positions,
                 "window": error.window, "placement": error.placement,
                 "sourceSamples": error.source_audio_samples,
@@ -966,7 +991,8 @@ def _relayout_voice_claimed(request: Dict[str, Any], output_dir: Path, started_a
         if key in source_identity
     }
     completion = {
-        "version": "video-factory/narration-relayout-completion-v1",
+        "version": ("video-factory/narration-relayout-completion-v2" if plan["narrationPlan"]["version"] == CHARACTER_PLAN_VERSION
+                    else "video-factory/narration-relayout-completion-v1"),
         "requestDigest": reservation["requestDigest"],
         "commandId": request["commandId"],
         "layoutOperationId": reservation["layoutOperationId"],
@@ -986,7 +1012,7 @@ def _relayout_voice_claimed(request: Dict[str, Any], output_dir: Path, started_a
             "pcmRelativePath": Path(plan["pcm_path"]).name,
             "trackRelativePath": Path(plan["track_path"]).name,
             "voiceoverPlanRelativePath": target.name,
-            "narrationMode": "continuous_groups",
+            "narrationMode": plan["narrationPlan"]["mode"],
             "subtitleStatus": plan["subtitles"]["status"],
             "layoutKey": plan["layoutKey"],
             "voiceOperationId": plan["voiceOperationId"],
@@ -1006,7 +1032,7 @@ def _relayout_voice_claimed(request: Dict[str, Any], output_dir: Path, started_a
                 "pcmPath": str(plan["pcm_path"]), "narrationPlanPath": str(target_plan),
                 "completionReceiptPath": str(completion_path),
                 "completionReceiptSha256": completion_artifact["sha256"],
-                "narrationMode": "continuous_groups", "subtitleStatus": plan["subtitles"]["status"],
+                "narrationMode": plan["narrationPlan"]["mode"], "subtitleStatus": plan["subtitles"]["status"],
                 "layoutKey": plan["layoutKey"], "voiceOperationId": plan["voiceOperationId"],
                 "layoutOperationId": plan["layoutOperationId"], "externalSendCount": 0},
         artifacts=artifacts, started_at=started_at,
@@ -1047,7 +1073,7 @@ def recover_voice_subtitles(request: dict, output_dir: Path, started_at: float) 
     if hashlib.sha256(source_bytes).hexdigest() != inputs.get("voiceoverPlanSha256"):
         raise WorkerProtocolError("The retained voice plan has changed; refresh before recovering subtitles.")
     plan = json.loads(source_bytes)
-    if plan.get("version") != "video-factory/voiceover-plan-v3" or plan.get("layoutKey") != inputs.get("layoutKey"):
+    if plan.get("version") not in ("video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4") or plan.get("layoutKey") != inputs.get("layoutKey"):
         raise WorkerProtocolError("Subtitle recovery layout no longer matches the retained audio.")
     narration_path = require_existing_path(inputs, "narrationPlanPath")
     narration_sha = hashlib.sha256(narration_path.read_bytes()).hexdigest()
@@ -1096,7 +1122,8 @@ def recover_voice_subtitles(request: dict, output_dir: Path, started_at: float) 
         describe_artifact(path=target, kind="voiceover_plan", content_type="application/json", request=request,
             license_note="Pure subtitle recovery; original narration retained."), *subtitle_artifacts(request, target, plan)]
     return success_response(request, output={"voiceoverPlanPath": str(target), "trackPath": str(target_track),
-        "narrationMode": "continuous_groups", "subtitleStatus": subtitles["status"]}, artifacts=artifacts,
+        "narrationMode": "character_turns" if plan["version"] == "video-factory/voiceover-plan-v4" else "continuous_groups",
+        "subtitleStatus": subtitles["status"]}, artifacts=artifacts,
         started_at=started_at, diagnostics={"meteredAttemptCount": 0, "meteredFailedAttemptCount": 0,
             "actualCostCny": 0, "actualCostSource": "local_subtitle_recovery", "providerOutcomeKnown": True,
             "reusedVoiceOperationId": operation_id})
@@ -1456,12 +1483,25 @@ def describe_artifact(
     preview_url: str | None = None,
 ) -> Dict[str, Any]:
     content = path.read_bytes()
+    # 新声音合同由产物正文声明版本；旧产物不迁移，宿主保留原登记行为。
+    character_versions = {
+        "voice_source_manifest": "video-factory/voice-source-manifest-v2",
+        "voiceover_plan": "video-factory/voiceover-plan-v4",
+        "narration_plan": CHARACTER_PLAN_VERSION,
+        "narration_relayout_completion": "video-factory/narration-relayout-completion-v2",
+    }
+    schema_version = None
+    if kind in character_versions and content_type == "application/json":
+        version = json.loads(content).get("version")
+        if version == character_versions[kind]:
+            schema_version = version
     return {
         "kind": kind,
         "uri": str(path.resolve()),
         "sha256": hashlib.sha256(content).hexdigest(),
         "sizeBytes": len(content),
         "contentType": content_type,
+        **({"schemaVersion": schema_version} if schema_version else {}),
         "provenance": {
             "providerId": provider_id or str(request.get("parameters", {}).get("providerId", "unknown")),
             "producerNodeId": request["nodeRunId"],

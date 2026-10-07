@@ -333,7 +333,7 @@ export const studioApi = {
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
   confirmNarrationPlanV2: (runId: string, input: import("../shared/api.js").StudioNarrationConfirmV2Input) => requestJson<import("../shared/api.js").StudioNarrationConfirmV2Result>(
-    `/api/runs/${encodeURIComponent(runId)}/narration-plan`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...input, version: "video-factory/narration-plan-v2" }) },
+    `/api/runs/${encodeURIComponent(runId)}/narration-plan`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...input, version: input.version ?? "video-factory/narration-plan-v2" }) },
   ),
   narrationRelayoutOperation: (runId: string, requestId: string) => requestJson<import("../shared/api.js").StudioNarrationRelayoutOperation>(
     `/api/runs/${encodeURIComponent(runId)}/narration-revisions/${encodeURIComponent(requestId)}`,

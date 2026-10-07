@@ -201,6 +201,8 @@ export interface CodexVisualReviewAgentOptions {
   auditClient?: Pick<CodexBridgeClient, "runTaskDetailed"> & Partial<Pick<CodexBridgeClient, "observePrepared">>;
   media: VisualReviewMediaPreprocessor;
   providerId?: string;
+  /** 正式装配提供的执行来源身份；不能从模型返回的审片报告推导信任。 */
+  executionProviderId?: string;
   modelId?: string;
   maxReviewIterations?: number;
   producerSessionMode?: "stateful" | "stateless";
@@ -713,6 +715,13 @@ export class CodexVisualReviewAgent implements VisualReviewAgent {
           modelId: this.modelId,
           independentRoleAudit: this.independentRoleAudit,
         }],
+        ...(options.executionProviderId ? {
+          executionCandidates: [{
+            providerId: options.executionProviderId,
+            modelId: this.modelId,
+            independentRoleAudit: this.independentRoleAudit,
+          }],
+        } : {}),
       };
     }
   }

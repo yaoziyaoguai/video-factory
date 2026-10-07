@@ -8,6 +8,9 @@ import type { ArtifactDraft, HumanDecisionDraft, NodeExecutionReceipt, NodeInput
 import type { ProductionTemplateSnapshot } from "@video-factory/template-core";
 import {
   reviewDecisionPrefill,
+  isCharacterScript,
+  validateCharacterScriptStructure,
+  scriptSceneText,
   canRetryRejectedReviewNode,
   canonicalProductionAssetIntentDigest,
   canonicalQualityContractDigest,
@@ -502,6 +505,7 @@ export class ProductionStudio {
     };
     const input: StudioProductionInput = {
       protocolVersion: "video-factory/brief-v1",
+      ...(brief.presentationMode !== undefined ? { presentationMode: brief.presentationMode } : {}),
       title: brief.title,
       angle: brief.angle,
       audience: brief.audience,
@@ -2725,6 +2729,7 @@ export class ProductionStudio {
       return await this.options.pipeline.previewNarrationPlan(runId);
     } catch (error) {
       if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
+      if (error instanceof NarrationTextV2Error) throw new StudioInputError(error.message);
       throw error;
     }
   }
@@ -4703,9 +4708,23 @@ function toRunDetail(
     publishPackageAvailable: Boolean(publishPackageArtifactId),
   });
   const continuationSupported = supportsRunContinuation(run);
+  const planning = run.nodeRuns.find(node => node.nodeId === "creative-planning");
+  const planningOutput = planning?.outputState?.versions.find(v => v.id === planning.outputState!.effectiveVersionId)?.output ?? planning?.output;
+  const scriptReview = isRecord(planningOutput) && isRecord(planningOutput.creativeReviewHistory)
+    && isRecord(planningOutput.creativeReviewHistory.stages) && isRecord(planningOutput.creativeReviewHistory.stages.script)
+    ? planningOutput.creativeReviewHistory.stages.script : undefined;
+  const characterDraft = isRecord(scriptReview?.currentDraft) ? scriptReview.currentDraft : undefined;
+  const characterScriptEditTarget = continuationSupported && brief.presentationMode === "character_drama" && run.status === "needs_human"
+    && !planning?.outputState?.stale && !planning?.inputState?.stale
+    && (planning?.status === "succeeded" || planning?.status === "needs_human" && planning.intervention?.kind !== "creative_review")
+    && characterDraft && typeof characterDraft.artifactId === "string" && typeof characterDraft.versionId === "string" && typeof characterDraft.sha256 === "string"
+    ? { nodeId: "creative-planning" as const, stage: "script" as const, targetArtifactId: characterDraft.artifactId,
+      targetVersionId: characterDraft.versionId, targetSha256: characterDraft.sha256 } : undefined;
   return {
     ...toRunSummary(run),
+    ...(characterScriptEditTarget ? { characterScriptEditTarget } : {}),
     revision: run.revision,
+    ...(brief.presentationMode ? { presentationMode: brief.presentationMode } : {}),
     angle: brief.angle,
     audience: brief.audience,
     nicheSlug: brief.nicheSlug,
@@ -5723,7 +5742,7 @@ function withRevisedPublishCopy(document: Record<string, unknown>, revised: Publ
   return next;
 }
 
-/** 与 production-pipeline 的 readNarrations 同一语义：3–24 条非空旁白，修订与再审共用同一输入。 */
+/** 与管线同一只读文字投影；角色台词不能因此回写为旁白或进入旧 TTS。 */
 async function readRunScriptNarrations(
   run: WorkflowRun<ProductionBrief>,
   workspaceRoot: string,
@@ -5742,6 +5761,7 @@ async function readRunScriptNarrations(
     throw new StudioInputError("当前脚本无法读取，请先重新生成该节点。");
   }
   const scenes = isRecord(script) && Array.isArray(script.scenes) ? script.scenes : [];
+  if (isCharacterScript(script)) return validateCharacterScriptStructure(script).scenes.map(scriptSceneText);
   const narrations = scenes.map((scene, index) => {
     if (!isRecord(scene) || typeof scene.narration !== "string" || !scene.narration.trim()) {
       throw new StudioInputError(`脚本第 ${index + 1} 场缺少旁白，无法为发布文案提供事实输入。`);

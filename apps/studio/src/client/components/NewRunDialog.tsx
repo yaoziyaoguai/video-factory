@@ -123,6 +123,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [recipeId, setRecipeId] = useState<RecipeId>("free-stock");
   const [directorProfileId, setDirectorProfileId] = useState<StudioDirectorProfileId>("auto");
   const [platform, setPlatform] = useState("douyin");
+  const [presentationMode, setPresentationMode] = useState<NonNullable<StudioProductionInput["presentationMode"]>>("narration");
   const [durationSeconds, setDurationSeconds] = useState(24);
   const [durationRange, setDurationRange] = useState<StudioProductionInput["durationRange"]>(() => (
     initialValues?.durationRange ?? defaultStudioDurationRange(initialValues?.durationSeconds ?? 24)
@@ -200,11 +201,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   }, [discardPromptOpen]);
   const [visualGroupOpen, setVisualGroupOpen] = useState(false);
   const formSnapshot = useMemo(() => JSON.stringify({
-    bindings, recipeId, directorProfileId, platform, durationSeconds, durationRange, durationRangeDrafts,
+    bindings, recipeId, directorProfileId, platform, presentationMode, durationSeconds, durationRange, durationRangeDrafts,
     assetProviderIds: [...assetProviderIds].sort(), modelSelections, voiceDirection, budgetIntention,
     semanticRankEnabled, acceptUnreviewedFirstCut, briefSummaryValues, visualBriefValues,
     referenceVideo: referenceVideo ? { ...referenceVideo } : null, rework,
-  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, directorProfileId, durationRange, durationRangeDrafts, durationSeconds, modelSelections, platform, recipeId, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection]);
+  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, directorProfileId, durationRange, durationRangeDrafts, durationSeconds, modelSelections, platform, presentationMode, recipeId, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection]);
   useLayoutEffect(() => {
     if (!open || !initialDataReady || !initializedForOpen.current) return;
     if (baselineSnapshotRef.current === null) baselineSnapshotRef.current = formSnapshot;
@@ -417,6 +418,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     baselineSnapshotRef.current = null;
     setDiscardPromptOpen(false);
     if (formScrollRef.current) formScrollRef.current.scrollTop = 0;
+    setPresentationMode(initialValues?.presentationMode ?? "narration");
     durationRangeTouched.current = false;
     const initialVoiceDirection = initialValues?.voiceDirection
       ?? (creatorSettings && !creatorVoiceIsShippedDefault(creatorSettings) ? creatorSettings.voiceDirection : undefined)
@@ -705,6 +707,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       }
       await onSubmit({
         protocolVersion: "video-factory/brief-v1",
+        presentationMode,
         title: requiredString(data, "title"),
         angle: requiredString(data, "angle"),
         audience: requiredString(data, "audience"),
@@ -934,6 +937,15 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                     <option value="xiaohongshu">小红书</option>
                     <option value="bilibili">哔哩哔哩</option>
                   </select>
+                </label>
+                <label className="field field-compact">
+                  <span>视频形式</span>
+                  <select aria-label="视频形式" value={presentationMode} disabled={Boolean(rework)} onChange={(event) => setPresentationMode(event.target.value as NonNullable<StudioProductionInput["presentationMode"]>)}>
+                    <option value="narration">解说视频</option>
+                    <option value="character_drama">角色剧情</option>
+                  </select>
+                  {presentationMode === "character_drama" ? <small>按角色分别配音；不包含口型同步或模型原声对白。</small> : null}
+                  {rework ? <small>沿用原制作形式；若要更换形式，请新建制作。</small> : null}
                 </label>
                 <label className="field field-compact">
                   <span>建议时长</span>

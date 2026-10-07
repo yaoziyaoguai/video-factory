@@ -153,6 +153,38 @@ async function readPackage(run: { artifacts: Array<{ kind: string; uri?: string 
 }
 
 describe("ProductionPipeline publish copy", () => {
+  for (const version of ["video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4"]) {
+    it(`includes verified subtitles in the package for ${version}`, async () => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-package-subtitles-"));
+      class SubtitleWorker extends RecordingWorker {
+        override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+          const result = await super.run(request);
+          if (request.capability !== "voice.synthesize") return result;
+          const sidecar: Record<string, string> = {}, sidecarSha256: Record<string, string> = {};
+          for (const format of ["vtt", "ass"]) {
+            sidecar[format] = `narration.${format}`;
+            const uri = path.join(String(request.outputDir), sidecar[format]!);
+            const content = `controlled ${format} subtitle`;
+            await writeFile(uri, content);
+            sidecarSha256[format] = createHash("sha256").update(content).digest("hex");
+            result.artifacts!.push({ ...result.artifacts![0]!, kind: `narration_${format}`, uri,
+              sha256: sidecarSha256[format]!, sizeBytes: Buffer.byteLength(content), contentType: "text/plain" });
+          }
+          const content = JSON.stringify({ version, subtitles: { status: "verified", sidecar, sidecarSha256 } });
+          await writeFile(result.artifacts![0]!.uri, content);
+          Object.assign(result.artifacts![0]!, { sha256: createHash("sha256").update(content).digest("hex"), sizeBytes: Buffer.byteLength(content) });
+          return result;
+        }
+      }
+      const pipeline = new ProductionPipeline({ workspaceRoot, worker: new SubtitleWorker(), screenwriterAgent: screenwriter });
+      const run = await pipeline.start(brief);
+      assert.equal(run.status, "succeeded", JSON.stringify(run.nodeRuns.map(n => n.error)));
+      const payload = await readPackage(run);
+      const kinds = (payload.artifacts as Array<{ kind: string }>).map(a => a.kind);
+      assert.ok(kinds.includes("narration_vtt"));
+      assert.ok(kinds.includes("narration_ass"));
+    });
+  }
   it("does not package a configured writer that cannot provide independent audit evidence", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-publish-no-audit-"));
     let calls = 0;

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { StudioCreativeReviewSnapshot } from "../../shared/api.js";
+import { CharacterScriptReader, isCharacterDocument } from "./CharacterScriptEditor.js";
 
 type CreativeStage = StudioCreativeReviewSnapshot["stage"];
 
@@ -98,6 +99,7 @@ export function CreativeDraftReader({ stage, value }: { stage: CreativeStage; va
 }
 
 export function CreativeDraft({ stage, value }: { stage: CreativeStage; value: unknown }) {
+  if (stage === "script" && isCharacterDocument(value)) return <CharacterScriptReader value={value} />;
   if (!isRecord(value)) return <p>当前方案暂时无法读取，请刷新后重试。</p>;
   if (stage === "treatment") return <div className="creative-readable-draft">
     <DraftField label="观众看完能得到什么" value={value.viewerPromise} />

@@ -13,6 +13,7 @@ import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { ShotGrammar } from "./reference-grammar.js";
 import type { VideoAspectRatio } from "./video-generation.js";
 import type { CreativeTreatment } from "./creative-treatment.js";
+import type { CharacterDialogueTurn, ScriptCharacter, PresentationMode } from "./character-script.js";
 import type { PlanningIssue } from "./creative-planning.js";
 import type { ProductionCapabilities } from "./production-capabilities.js";
 import type { CreativeDiscussionAgentInput } from "./codex-creative-discussion.js";
@@ -27,6 +28,7 @@ import {
 } from "./visual-evidence-boundary.js";
 
 export const DIRECTOR_PLAN_VERSION = "video-factory/director-plan-v1" as const;
+export const CHARACTER_DIRECTOR_PLAN_VERSION = "video-factory/director-plan-v2" as const;
 
 export interface VisualDirectorProfileDefinition {
   id: Exclude<ProductionDirectorProfileId, "auto">;
@@ -181,7 +183,7 @@ export function reuseSourceEndFrame(
   return Math.round(sourceInSeconds * 30) + frameCounts[sceneIndex]!;
 }
 
-export interface VisualDirectorPlan {
+export interface NarrationVisualDirectorPlan {
   version: typeof DIRECTOR_PLAN_VERSION;
   requestedProfileId: ProductionDirectorProfileId;
   resolvedProfileId: Exclude<ProductionDirectorProfileId, "auto">;
@@ -190,7 +192,19 @@ export interface VisualDirectorPlan {
   shots: ShotDecision[];
 }
 
+export interface CharacterSceneBinding {
+  characterIds: string[];
+  speakingTurnIds: string[];
+}
+export interface CharacterVisualDirectorPlan extends Omit<NarrationVisualDirectorPlan, "version" | "shots"> {
+  version: typeof CHARACTER_DIRECTOR_PLAN_VERSION;
+  shots: Array<ShotDecision & CharacterSceneBinding>;
+}
+export type VisualDirectorPlan = NarrationVisualDirectorPlan | CharacterVisualDirectorPlan;
+
 export interface VisualDirectorPlanValidation {
+  presentationMode?: "narration" | "character_drama";
+  characterSceneBindings?: Record<number, CharacterSceneBinding>;
   scenePositions: number[];
   viewerPromise?: string;
   sceneDurations?: Record<number, number>;
@@ -210,8 +224,34 @@ export interface VisualDirectorEconomics {
   allowMeteredProviders: boolean;
 }
 
+interface DirectorSceneVisual {
+  position: number;
+  purpose?: string;
+  duration: number;
+  visualPrompt: string;
+  visualStrategy: "stock" | "image" | "generated" | "local";
+  visibleAction: string;
+  onScreenText?: string;
+  soundCue?: string;
+  successCriteria: string[];
+  failureConditions: string[];
+  searchTerms: string[];
+}
+export type VisualDirectorScene = DirectorSceneVisual & (
+  { narration: string } | { characterIds: string[]; dialogue: CharacterDialogueTurn[] }
+);
+
+export function directorCharacterBindings(scenes: VisualDirectorScene[]): Record<number, CharacterSceneBinding> {
+  return Object.fromEntries(scenes.map((scene) => {
+    if (!("dialogue" in scene)) throw new Error("角色导演输入必须保留 dialogue，不能使用单旁白投影。");
+    return [scene.position, { characterIds: [...scene.characterIds], speakingTurnIds: scene.dialogue.map((turn) => turn.id) }];
+  }));
+}
+
 export interface VisualDirectorAgentInput {
   brief: {
+    presentationMode?: PresentationMode;
+    characters?: ScriptCharacter[];
     title: string;
     angle: string;
     audience: string;
@@ -261,20 +301,7 @@ export interface VisualDirectorAgentInput {
       previousDirectorPlan?: Record<string, unknown>;
     };
   };
-  scenes: Array<{
-    position: number;
-    purpose?: string;
-    narration: string;
-    duration: number;
-    visualPrompt: string;
-    visualStrategy: "stock" | "image" | "generated" | "local";
-    visibleAction: string;
-    onScreenText?: string;
-    soundCue?: string;
-    successCriteria: string[];
-    failureConditions: string[];
-    searchTerms: string[];
-  }>;
+  scenes: VisualDirectorScene[];
   assetProviders: Array<{
     id: string;
     label: string;
@@ -331,8 +358,9 @@ export interface VisualDirectorAgent {
 
 export function validateVisualDirectorPlan(value: unknown, options: VisualDirectorPlanValidation): VisualDirectorPlan {
   const input = record(value, "Director plan");
-  if (input.version !== DIRECTOR_PLAN_VERSION) {
-    throw new Error(`Director plan version must be '${DIRECTOR_PLAN_VERSION}'.`);
+  const expectedVersion = options.presentationMode === "character_drama" ? CHARACTER_DIRECTOR_PLAN_VERSION : DIRECTOR_PLAN_VERSION;
+  if (input.version !== expectedVersion) {
+    throw new Error(`Director plan version must be '${expectedVersion}'.`);
   }
   const requestedProfileId = profileId(input.requestedProfileId, "requestedProfileId", true);
   const resolvedProfileId = profileId(input.resolvedProfileId, "resolvedProfileId", false) as Exclude<ProductionDirectorProfileId, "auto">;
@@ -372,6 +400,9 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
   const seen = new Set<number>();
   const shots = input.shots.map((entry, index): ShotDecision => {
     const shot = record(entry, `shots[${index}]`);
+    if (expectedVersion === DIRECTOR_PLAN_VERSION && ("characterIds" in shot || "speakingTurnIds" in shot)) {
+      throw new Error("Director plan v1 cannot contain character bindings.");
+    }
     const scenePosition = integer(shot.scenePosition, `shots[${index}].scenePosition`);
     if (seen.has(scenePosition)) throw new Error(`Director plan contains duplicate scene ${scenePosition}.`);
     seen.add(scenePosition);
@@ -594,14 +625,32 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
   if (paidShots.length > 0 && !options.economics.allowMeteredProviders) {
     throw new Error("Director plan selected a metered provider while paid providers are disabled.");
   }
-  return {
-    version: DIRECTOR_PLAN_VERSION,
+  const common = {
     requestedProfileId,
     resolvedProfileId,
     profileRationale: text(input.profileRationale, "profileRationale"),
     visualBible,
-    shots,
   };
+  if (expectedVersion === CHARACTER_DIRECTOR_PLAN_VERSION) {
+    const rawShots = new Map(input.shots.map((entry) => {
+      const raw = record(entry, "shot");
+      return [Number(raw.scenePosition), raw];
+    }));
+    return { ...common, version: CHARACTER_DIRECTOR_PLAN_VERSION, shots: shots.map((shot) => {
+      const expected = options.characterSceneBindings?.[shot.scenePosition];
+      if (!expected) throw new Error(`Director plan scene ${shot.scenePosition} has no accepted character binding.`);
+      const raw = rawShots.get(shot.scenePosition)!;
+      for (const key of ["characterIds", "speakingTurnIds"] as const) {
+        const actual = raw[key];
+        if (!Array.isArray(actual) || actual.length !== expected[key].length
+          || actual.some((id, index) => id !== expected[key][index])) {
+          throw new Error(`Director plan scene ${shot.scenePosition} ${key} must match the accepted script exactly.`);
+        }
+      }
+      return { ...shot, characterIds: [...expected.characterIds], speakingTurnIds: [...expected.speakingTurnIds] };
+    }) };
+  }
+  return { ...common, version: DIRECTOR_PLAN_VERSION, shots };
 }
 
 function resolveReuseRoot(

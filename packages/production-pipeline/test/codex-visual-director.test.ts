@@ -179,6 +179,26 @@ function validPlan(): Record<string, unknown> {
 }
 
 describe("CodexVisualDirectorAgent", () => {
+  it("MC-A05 consumes character dialogue in the actual director model path without fake narration", async () => {
+    const input = directorInput();
+    input.brief.presentationMode = "character_drama";
+    input.brief.characters = [{ id: "shop", name: "店主", kind: "character", appearance: "蓝围裙",
+      personality: "耐心", voice_intent: "平静", voice_profile_id: null }];
+    const { narration: _oldNarration, ...scene } = input.scenes[0]! as { narration: string } & typeof input.scenes[number];
+    input.scenes = [{ ...scene, characterIds: ["shop"], dialogue: [{ id: "hello", speaker_id: "shop", text: "钥匙在这里。", delivery: "", after_pause_frames: 0 }] }];
+    const output = validPlan();
+    output.version = "video-factory/director-plan-v2";
+    output.shots = (output.shots as Record<string, unknown>[]).map((s) => ({ ...s, characterIds: ["shop"], speakingTurnIds: ["hello"] }));
+    const client = new CapturingCodexClient(() => output);
+    const agent = new CodexVisualDirectorAgent({ client });
+    const result = await agent.plan(input);
+    assert.equal((result as { version: string }).version, output.version);
+    const payload = client.calls[0]!.payload as VisualDirectorAgentInput;
+    assert.deepEqual(payload.brief.characters, input.brief.characters);
+    assert.deepEqual(payload.scenes, input.scenes);
+    assert.equal("narration" in payload.scenes[0]!, false);
+  });
+
   it("rejects a stale selected model before calling a single configured agent", async () => {
     const client = new CapturingCodexClient(() => validPlan());
     const agent = new CodexVisualDirectorAgent({ client, modelId: "gpt-current" });

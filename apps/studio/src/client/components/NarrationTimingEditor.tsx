@@ -44,12 +44,13 @@ const frameSeconds = (frames: number) => (frames / 30).toFixed(3).replace(/0+$/u
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const isConflictResolved = (marker: unknown) => marker === true || marker === "relayout";
+const isFirstFitConflict = (code: unknown) => code === "NARRATION_GROUP_DOES_NOT_FIT_V2" || code === "NARRATION_TURN_DOES_NOT_FIT";
 
 function voiceSourceDescriptor(voiceNode: StudioNode) {
   const output = isRecord(voiceNode.output) ? voiceNode.output : {};
   const receipt = isRecord(output.voiceSourceReceipt) ? output.voiceSourceReceipt : undefined;
   const conflict = isRecord(output.conflict) && !isConflictResolved(output.conflictResolved) ? output.conflict : undefined;
-  return receipt && conflict?.code === "NARRATION_GROUP_DOES_NOT_FIT_V2"
+  return receipt && isFirstFitConflict(conflict?.code)
     ? { kind: "materialized_operation", input: receipt.voiceInputVersionId, operation: receipt.sourceOperationId,
         manifest: receipt.manifestArtifactId, receipt: receipt.receiptArtifactId }
     : { kind: "voice_version", version: voiceNode.outputState?.effectiveVersionId,
@@ -61,7 +62,7 @@ function sourceIdentity(runId: string, revision: number, interventionId: string,
     runId,
     revision,
     interventionId,
-    sourceContextId: plan.version === "video-factory/narration-plan-v2" ? plan.source.sourceContextId : "sc-legacy-v1",
+    sourceContextId: plan.version !== "video-factory/narration-plan-v1" ? plan.source.sourceContextId : "sc-legacy-v1",
     source: voiceSourceDescriptor(voiceNode),
   });
 }
@@ -134,6 +135,7 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
   onStateSummary?: (summary: NarrationTimingToolSummary) => void;
 }) {
   const [plan, setPlan] = useState<SupportedNarrationPlan>();
+  const [characters, setCharacters] = useState<Array<{ id: string; name: string }>>([]);
   const [groups, setGroups] = useState<GroupDraft[]>([]);
   const [userSilences, setUserSilences] = useState<Array<{ startFrame: number; endFrame: number }>>([]);
   const [secondsInputs, setSecondsInputs] = useState<Record<string, string>>({});
@@ -175,25 +177,45 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
     (async () => {
       try {
         const response: StudioNarrationPlanPreview = await studioApi.narrationPlan(runId);
-        const props = currentProps.current;
-        if (cancelled || activeRequest.current !== token || props.runId !== runId || props.revision !== revision
-          || props.interventionId !== interventionId || props.voiceSourceKey !== voiceSourceKey) return;
+        const isCurrentLoad = () => {
+          const props = currentProps.current;
+          return !cancelled && activeRequest.current === token && props.runId === runId && props.revision === revision
+            && props.interventionId === interventionId && props.voiceSourceKey === voiceSourceKey;
+        };
+        if (!isCurrentLoad()) return;
         const identity = sourceIdentity(runId, revision, interventionId, response.plan, voiceNode);
+        let appliedOperation: StudioNarrationRelayoutOperation | undefined;
+        const pending = pendingEnvelopeRef.current;
+        // SSE可能先于POST响应带回本次新声音。只查询原请求，并核对当前有效版本；
+        // 其他标签/其他请求的版本变更仍保留旧草稿，绝不把迟到响应套到新版本。
+        if (pending && snapshot?.runId === runId && snapshot.sourceIdentity !== identity) {
+          try {
+            const receipt = await studioApi.narrationRelayoutOperation(runId, pending.request.requestId);
+            if (!isCurrentLoad()) return;
+            if (receipt.requestId === pending.request.requestId && receipt.state === "applied" && receipt.isCurrent
+              && receipt.resultVoiceVersionId === voiceNode.outputState?.effectiveVersionId
+              && receipt.resultVoiceVersionId && /^[a-f0-9]{64}$/u.test(receipt.requestDigest ?? "")) {
+              appliedOperation = receipt;
+            }
+          } catch { /* 查询失败仍按旧草稿处理，不推断成功，也不重发。 */ }
+          if (!isCurrentLoad()) return;
+        }
         if (!discardingDraftRef.current && (dirtyRef.current || pendingEnvelopeRef.current)
-          && snapshot?.sourceIdentity && snapshot.sourceIdentity !== identity) {
+          && snapshot?.sourceIdentity && snapshot.sourceIdentity !== identity && !appliedOperation) {
           setStatus("制作记录或声音版本已更新。旧草稿保持只读，请先决定是否放弃并重新读取。");
           return;
         }
         const baseGroups = initialGroups(response.plan);
-        const baseSilences = response.plan.version === "video-factory/narration-plan-v2"
+        const baseSilences = response.plan.version !== "video-factory/narration-plan-v1"
           ? response.plan.silences.filter((item) => item.source === "user")
             .map((item) => ({ startFrame: item.startFrame, endFrame: item.endFrame })) : [];
         const baseSeconds = initialSeconds(baseGroups, baseSilences);
-        const ignoreStoredDraft = discardingDraftRef.current || ignoredDraftRunRef.current === runId;
+        const ignoreStoredDraft = discardingDraftRef.current || ignoredDraftRunRef.current === runId || Boolean(appliedOperation);
         const stored = ignoreStoredDraft ? {} : readTimingDraft(runId, identity);
         setPlan(response.plan);
+        setCharacters(response.editorContext?.characters ?? []);
         setSnapshot({ runId, revision, interventionId,
-          sourceContextId: response.plan.version === "video-factory/narration-plan-v2" ? response.plan.source.sourceContextId : "sc-legacy-v1",
+          sourceContextId: response.plan.version !== "video-factory/narration-plan-v1" ? response.plan.source.sourceContextId : "sc-legacy-v1",
           sourceIdentity: identity });
         setBaseline(draftSignature(baseGroups, baseSilences, baseSeconds));
         setGroups(stored.draft?.groups ?? baseGroups);
@@ -202,7 +224,13 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
         setPendingEnvelope(stored.draft?.pendingEnvelope);
         if (ignoredDraftRunRef.current !== runId) setStorageWarning(stored.warning);
         setError(undefined);
-        setStatus(undefined);
+        setStatus(appliedOperation ? "已用原配音完成本地时间调整（未重新购买）。请试听新声音；确认后才继续渲染。" : undefined);
+        if (appliedOperation) {
+          setOperation(appliedOperation);
+          try { window.localStorage.removeItem(timingStorageKey(runId)); } catch {
+            setStorageWarning("服务端已采用新声音；本机旧草稿未能清理，下次先按服务端版本对账。");
+          }
+        }
         setReloadPrompt(false);
         discardingDraftRef.current = false;
       } catch (caught) {
@@ -223,7 +251,7 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
 
   const currentVoiceVersion = voiceNode.outputState?.effectiveVersionId;
   const stale = Boolean(snapshot && snapshot.sourceIdentity !== liveSourceIdentity);
-  const isV2 = plan?.version === "video-factory/narration-plan-v2";
+  const editableWindows = plan?.version === "video-factory/narration-plan-v2" || plan?.version === "video-factory/narration-plan-v3";
   const outputRecord = isRecord(voiceNode.output) ? voiceNode.output : {};
   const outputConflict = isRecord(outputRecord.conflict) && !isConflictResolved(outputRecord.conflictResolved) ? outputRecord.conflict : undefined;
   const receipt = isRecord(outputRecord.voiceSourceReceipt) ? outputRecord.voiceSourceReceipt : undefined;
@@ -242,7 +270,7 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
   }, [dirty, pendingEnvelope, error, storageWarning, busyToken, outputConflict, stale, onStateSummary]);
 
   const listenArtifacts = (() => {
-    if (receipt && outputConflict?.code === "NARRATION_GROUP_DOES_NOT_FIT_V2" && Array.isArray(receipt.groupAudioArtifacts)) {
+    if (receipt && isFirstFitConflict(outputConflict?.code) && Array.isArray(receipt.groupAudioArtifacts)) {
       const ids = receipt.groupAudioArtifacts.flatMap((item) => isRecord(item) && typeof item.artifactId === "string" ? [item.artifactId] : []);
       return ids.flatMap((id) => artifacts.find((artifact) => artifact.id === id) ?? []);
     }
@@ -320,8 +348,8 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
   const materialize = () => {
     if (!plan) throw new Error("当前声音方案尚未读取完成。");
     const resolvedGroups = groups.map((group, index) => {
-      const windowStart = isV2 ? secondsToFramesV2(secondsInputs[`w${index}s`] ?? frameSeconds(group.windowStart)) : group.windowStart;
-      const windowEnd = isV2 ? secondsToFramesV2(secondsInputs[`w${index}e`] ?? frameSeconds(group.windowEnd)) : group.windowEnd;
+      const windowStart = editableWindows ? secondsToFramesV2(secondsInputs[`w${index}s`] ?? frameSeconds(group.windowStart)) : group.windowStart;
+      const windowEnd = editableWindows ? secondsToFramesV2(secondsInputs[`w${index}e`] ?? frameSeconds(group.windowEnd)) : group.windowEnd;
       const offsetFrames = secondsToFramesV2(secondsInputs[`o${index}`] ?? frameSeconds(group.offsetFrames));
       if (windowEnd <= windowStart || offsetFrames >= windowEnd - windowStart) {
         throw new Error(`第 ${index + 1} 段的结束时间必须晚于开始时间，且段内留空必须小于窗口。`);
@@ -353,14 +381,14 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
         groups: resolved.groups.map((group) => {
           const original = plan.groups.find((item) => item.id === group.groupId)!;
           return { groupId: group.groupId,
-            window: isV2 ? { startFrame: group.windowStart, endFrame: group.windowEnd } : { ...original.window },
+            window: editableWindows ? { startFrame: group.windowStart, endFrame: group.windowEnd } : { ...original.window },
             placement: { anchor: group.anchor, offsetFrames: group.offsetFrames } };
         }),
-        userSilences: isV2 ? resolved.userSilences : [],
+        userSilences: editableWindows ? resolved.userSilences : [],
       },
     };
     let request: StudioNarrationRelayoutRequest;
-    if (receipt && outputConflict?.code === "NARRATION_GROUP_DOES_NOT_FIT_V2") {
+    if (receipt && isFirstFitConflict(outputConflict?.code)) {
       const manifest = artifacts.find((artifact) => artifact.id === receipt.manifestArtifactId);
       const receiptArtifact = artifacts.find((artifact) => artifact.id === receipt.receiptArtifactId);
       if (!manifest || !receiptArtifact || typeof receipt.voiceInputVersionId !== "string"
@@ -531,9 +559,9 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
     {groups.map((group, index) => {
       const original = plan.groups.find((candidate) => candidate.id === group.groupId)!;
       return <fieldset key={group.groupId} disabled={locked}>
-        <legend>第 {index + 1} 段 · 镜头 {original.sourceScenePositions.join("、")}</legend>
+        <legend>{"speakerId" in original ? `台词 ${index + 1} · ${characters.find((item) => item.id === original.speakerId)?.name ?? "角色"}` : `第 ${index + 1} 段`} · 镜头 {original.sourceScenePositions.join("、")}</legend>
         <p>{original.text}</p>
-        {isV2 ? <>
+        {editableWindows ? <>
           <label className="field"><span>窗口开始（秒）</span><input type="text" inputMode="decimal" aria-label={`第 ${index + 1} 段窗口开始秒`}
             value={secondsInputs[`w${index}s`] ?? frameSeconds(group.windowStart)} onChange={(event) => changeSeconds(`w${index}s`, event.target.value)}
             onBlur={() => quantize(`w${index}s`, (frames) => setGroups((current) => current.map((item, position) => position === index ? { ...item, windowStart: frames } : item)))} /></label>
@@ -550,7 +578,7 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
           onBlur={() => quantize(`o${index}`, (frames) => setGroups((current) => current.map((item, position) => position === index ? { ...item, offsetFrames: frames } : item)))} /></label>
       </fieldset>;
     })}
-    {isV2 ? <fieldset disabled={locked}>
+    {editableWindows ? <fieldset disabled={locked}>
       <legend>显式留白</legend>
       {userSilences.map((silence, index) => <div key={index} className="narration-silence-inputs">
         <label className="field"><span>留白 {index + 1} 开始（秒）</span><input type="text" inputMode="decimal" aria-label={`留白 ${index + 1} 开始秒`}

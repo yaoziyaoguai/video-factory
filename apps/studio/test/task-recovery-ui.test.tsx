@@ -68,6 +68,32 @@ function runningRun(): StudioRunDetail {
 }
 
 describe("text task recovery UI", () => {
+  it("downloads only the adopted publish package without publishing or approving a draft", () => {
+    const { taskRecovery: _recovery, failure: _failure, ...base } = failedRun("completed_failure");
+    const decide = vi.fn();
+    const publish = vi.fn();
+    const run: StudioRunDetail = { ...base, status: "succeeded", publishPackageArtifactId: "package-current",
+      artifacts: [
+        { id: "package-current", kind: "publish_package", contentType: "application/json", contentUrl: "/api/current-package", createdAt: base.startedAt },
+        { id: "package-old", kind: "publish_package", contentType: "application/json", contentUrl: "/api/old-package", createdAt: base.startedAt },
+      ] };
+    const props = { decisionPending: false, onDecision: decide, onOpenPublish: publish };
+    const { rerender } = render(<MemoryRouter><RunWorkbench run={run} {...props} /></MemoryRouter>);
+    expect(screen.getByRole("link", { name: "下载发布包" })).toHaveAttribute("href", "/api/current-package");
+    expect(screen.getByRole("link", { name: "下载发布包" })).toHaveAttribute("download", "恢复测试__package-current.json");
+    expect(publish).not.toHaveBeenCalled();
+    expect(decide).not.toHaveBeenCalled();
+    for (const changed of [
+      { ...run, status: "needs_human" as const },
+      { ...run, publishPackageArtifactId: "missing" },
+      { ...run, artifacts: run.artifacts.map(a => ({ ...a, kind: "script" })) },
+      { ...run, publishPackageArtifactId: "../invalid", artifacts: [{ ...run.artifacts[0]!, id: "../invalid" }] },
+    ]) {
+      rerender(<MemoryRouter><RunWorkbench run={changed} {...props} /></MemoryRouter>);
+      expect(screen.queryByRole("link", { name: "下载发布包" })).toBeNull();
+    }
+  });
+
   it("puts the playable film before original-review details while keeping uncertainty and queries visible", async () => {
     const { taskRecovery: _taskRecovery, failure: _failure, ...base } = failedRun("accepted_unknown");
     const query = vi.fn(async () => undefined);

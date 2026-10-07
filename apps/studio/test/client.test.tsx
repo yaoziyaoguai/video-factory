@@ -5309,10 +5309,10 @@ describe("Studio client", () => {
     });
   });
 
-  it("offers pure subtitle recovery with current version bindings and no automatic request", async () => {
+  it.each(["video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4"])("offers pure subtitle recovery for %s with current version bindings and no automatic request", async (version) => {
     const user = userEvent.setup();
     const onRecover = vi.fn().mockResolvedValue(undefined);
-    const resource = vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ version: "video-factory/voiceover-plan-v3",
+    const resource = vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ version,
       layoutKey: "b".repeat(64), trackSha256: "c".repeat(64),
       subtitles: { status: "unavailable", acceptedNarrationPlanSha256: "a".repeat(64) } });
     const run: StudioRunDetail = { ...runDetail, revision: 7,
@@ -5419,7 +5419,7 @@ describe("Studio client", () => {
       ],
     };
 
-    render(<RunWorkbench
+    const { rerender } = render(<RunWorkbench
       run={run}
       decisionPending={false}
       onDecision={async () => undefined}
@@ -5461,6 +5461,36 @@ describe("Studio client", () => {
       narration: "改过的第一镜旁白",
       note: "第一镜口播与画面主张不一致",
     });
+    const restart = vi.fn();
+    onLoadSceneNarration.mockClear();
+    onRequestNarrationRevision.mockClear();
+    rerender(<RunWorkbench run={{ ...run, presentationMode: "character_drama", nodes: [...run.nodes,
+      { id: "script", label: "脚本", role: "编剧", status: "succeeded", artifactIds: ["script"], qualityGateResults: [] }] }} decisionPending={false}
+      onDecision={async () => undefined} onRequestSceneRevision={async () => undefined}
+      onRequestNarrationRevision={onRequestNarrationRevision} onLoadSceneNarration={onLoadSceneNarration} onRestart={restart} />);
+    expect(screen.queryByRole("button", { name: "改这一镜的字幕/旁白" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("镜头 1 的旁白字幕")).not.toBeInTheDocument();
+    const characterRework = screen.getAllByRole("button", { name: "修改角色或台词" });
+    await user.click(characterRework[0]!);
+    expect(document.getElementById("node-workspace-script")).toHaveAttribute("open");
+    expect(restart).not.toHaveBeenCalled();
+    expect(onLoadSceneNarration).not.toHaveBeenCalled();
+    expect(onRequestNarrationRevision).not.toHaveBeenCalled();
+    const prepare = vi.fn().mockResolvedValue(undefined);
+    const target = { nodeId: "creative-planning" as const, stage: "script" as const,
+      targetArtifactId: "role-script", targetVersionId: "script-version-4", targetSha256: "a".repeat(64) };
+    rerender(<RunWorkbench run={{ ...run, presentationMode: "character_drama", characterScriptEditTarget: target }}
+      decisionPending={false} onDecision={async () => undefined} onPrepareReviewContinuation={prepare}
+      onRequestSceneRevision={async () => undefined} />);
+    await user.click(screen.getAllByRole("button", { name: "修改角色或台词" })[0]!);
+    expect(screen.getByRole("dialog", { name: "返回角色与台词" })).toHaveTextContent("已有画面、声音和历史稿保留");
+    expect(prepare).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    expect(prepare).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "修改角色与台词" }));
+    await user.click(screen.getByRole("button", { name: "确认返回编辑" }));
+    expect(prepare).toHaveBeenCalledWith({ ...target, commandId: expect.any(String), expectedRunRevision: run.revision,
+      intent: "edit_character_script", acknowledgeImpact: true });
   });
 
   it("keeps technical execution nodes out of the editable creative deliverables", () => {
@@ -6963,6 +6993,25 @@ describe("Studio client", () => {
       reconciliationId: expect.any(String),
       outcome: "resume_original",
     });
+  });
+
+  it("MC-A19 character unknown voice only checks original evidence, then resumes the same operation", async () => {
+    const { activeIntervention: _gate, ...base } = runDetail;
+    const run: StudioRunDetail = { ...base, presentationMode: "character_drama", status: "failed",
+      continuation: { supported: true }, nodes: base.nodes.map((node, index) => index === 0
+        ? { ...node, id: "voice", label: "配音", status: "failed", outcomeUncertain: true } : node) };
+    const query = vi.spyOn(studioApi, "paidOperation").mockResolvedValue({
+      nodeId: "voice", operationId: "original", recommendedOutcome: "resume_original", requiresManualReconciliation: false, items: [] });
+    const reconcile = vi.fn().mockResolvedValue(undefined);
+    render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()}
+      paidNodeSummary={{ nodeId: "voice", operationId: "original", failureKind: "unknown_outcome", requiresManualReconciliation: true, items: [] }}
+      onReconcilePaidNode={reconcile} /></MemoryRouter>);
+    expect(screen.queryByRole("button", { name: "登记预估费用并新建配音任务" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "核对原配音结果" }));
+    expect(query).toHaveBeenCalledWith(run.id, "voice");
+    expect(reconcile).not.toHaveBeenCalled();
+    await userEvent.click(await screen.findByRole("button", { name: "继续获取原任务结果" }));
+    expect(reconcile).toHaveBeenCalledWith("voice", { outcome: "resume_original" });
   });
 
   it("shows legacy paid failures as settlement-only and never retries after charge settlement", async () => {

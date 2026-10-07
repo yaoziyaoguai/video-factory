@@ -10,6 +10,7 @@ from .stock_assets import default_asset_plan_path, load_asset_plan
 from .stock_images import prepare_render_image
 from .narration_subtitles import cues_to_ass
 from .voiceover import _write_bytes_durably
+from .character_script import CHARACTER_SCRIPT_VERSION, validate_character_script
 
 
 FONT_CANDIDATES = [
@@ -34,6 +35,7 @@ def write_render_manifest(
     resolution: str = "1080x1920",
 ) -> Path:
     script = json.loads(script_path.read_text(encoding="utf-8"))
+    character_script = validate_character_script(script) if script.get("version") == CHARACTER_SCRIPT_VERSION else None
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "render_manifest.json"
     font_path = find_font_file()
@@ -55,12 +57,17 @@ def write_render_manifest(
         },
         "font_resource": font_resource(font_path),
         "output_file": str(output_dir / "final.mp4"),
+        **({"characterTurns": [
+            {"turnId": turn["id"], "speakerId": turn["speaker_id"], "text": turn["text"],
+             "voiceProfileId": next(c["voice_profile_id"] for c in character_script["characters"] if c["id"] == turn["speaker_id"]),
+             "sourceScenePositions": [scene["position"]]}
+            for scene in character_script["scenes"] for turn in scene["dialogue"]]} if character_script else {}),
         "slides": [
             {
                 "position": scene["position"],
                 "duration": scene["duration"],
                 # 与配音一致：纯标点代表留白，不把它印成悬空的字幕。
-                "text": scene["narration"] if any(character.isalnum() for character in scene["narration"]) else "",
+                "text": "" if character_script else scene["narration"] if any(character.isalnum() for character in scene["narration"]) else "",
                 "on_screen_text": scene.get("on_screen_text") if isinstance(scene.get("on_screen_text"), str) else "",
                 "visual_strategy": scene["visual_strategy"],
                 "visual_prompt": scene["visual_prompt"],
@@ -117,7 +124,26 @@ def attach_voiceover_plan(manifest_path: Path, voiceover_plan: Optional[dict]) -
             raise RuntimeError(
                 f"Voiceover scene {position} does not match the accepted render timeline."
             )
-    if voiceover_plan.get("version") == "video-factory/voiceover-plan-v3":
+    is_character = "characterTurns" in manifest
+    if is_character != (voiceover_plan.get("version") == "video-factory/voiceover-plan-v4"):
+        raise RuntimeError("Character scenes require their own v4 turn-bound voice track.")
+    if is_character:
+        narration = voiceover_plan.get("narrationPlan") or {}
+        groups = voiceover_plan.get("groups") or []
+        if narration.get("version") != "video-factory/narration-plan-v3" or narration.get("mode") != "character_turns":
+            raise RuntimeError("Character voice track requires its accepted v3 plan.")
+        expected = manifest["characterTurns"]
+        if len(groups) != len(expected) or len(narration.get("groups", [])) != len(expected):
+            raise RuntimeError("Character voice track is missing turns.")
+        for turn, group, planned in zip(expected, groups, narration["groups"]):
+            if group.get("id") != turn["turnId"] or planned.get("id") != turn["turnId"] or any(
+                    group.get(key) != value or planned.get(key) != value for key, value in turn.items()):
+                raise RuntimeError("Character voice track turn, speaker or voice binding changed.")
+        turns = {turn["turnId"]: turn for turn in expected}
+        for cue in (voiceover_plan.get("subtitles") or {}).get("cues", []):
+            if cue.get("turnId") not in turns or cue.get("speakerId") != turns[cue["turnId"]]["speakerId"]:
+                raise RuntimeError("Character subtitle speaker binding changed.")
+    if voiceover_plan.get("version") in ("video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4"):
         expected_samples = sum(timeline_frame_counts(manifest["slides"])) * 1470
         if voiceover_plan.get("sampleRate") != 44100 or voiceover_plan.get("totalSamples") != expected_samples:
             raise RuntimeError("Continuous narration must match the exact accepted render timeline.")
@@ -811,7 +837,7 @@ def render_audio_input(manifest: dict) -> list[str]:
 
 
 def render_audio_duration_options(manifest: dict) -> list[str]:
-    if manifest.get("voiceover_plan", {}).get("version") == "video-factory/voiceover-plan-v3":
+    if manifest.get("voiceover_plan", {}).get("version") in ("video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4"):
         # v3 音轨已经按样本校验为完整片长，不以最短输入决定输出结束点。
         return ["-t", f"{sum(timeline_frame_counts(manifest['slides'])) / RENDER_FPS:.9f}"]
     return ["-shortest"]

@@ -27,6 +27,22 @@ const validBrief = {
 } as const;
 
 describe("ProductionBrief", () => {
+  it("MC-A01 preserves explicit presentation mode for four origins and does not migrate old briefs", () => {
+    const legacy = pipeline.parseBrief(validBrief);
+    assert.equal(Object.hasOwn(legacy, "presentationMode"), false);
+    for (const origin of ["manual", "trend", "case", "series"]) {
+      const brief = pipeline.parseBrief({ ...validBrief, presentationMode: "character_drama",
+        creationContext: { origin, opportunityId: origin === "case" ? "" : "op-1", ...(origin === "case" ? { caseSelectionId: "case-1" } : {}) } });
+      assert.equal(brief.presentationMode, "character_drama");
+      assert.equal(pipeline.parsePersistedBrief(JSON.parse(JSON.stringify(brief))).presentationMode, "character_drama");
+      assert.equal(brief.creationContext?.origin, origin);
+      assert.deepEqual(brief.providers, legacy.providers);
+    }
+    assert.equal(pipeline.parseBrief({ ...validBrief, presentationMode: "narration" }).presentationMode, "narration");
+    for (const presentationMode of [null, "dialogue", 1, ""]) {
+      assert.throws(() => pipeline.parseBrief({ ...validBrief, presentationMode }), /presentationMode/);
+    }
+  });
   it("round-trips budget intention without creating authorization or swallowing invalid inputs", () => {
     for (const value of [undefined, 0, 35, 35.25, 100_000]) {
       const input = { ...validBrief, ...(value !== undefined ? { budgetIntentionCny: value } : {}) };

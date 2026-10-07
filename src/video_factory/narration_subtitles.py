@@ -144,6 +144,7 @@ def map_cues_to_narration_timeline(
             raise ValueError("cue extends beyond the confirmed narration window")
         mapped.append({
             "groupId": group.get("id"),
+            **({key: group[key] for key in ("turnId", "speakerId")} if "turnId" in group else {}),
             "text": cue["text"],
             "localStartSample": local_start,
             "localEndSample": local_end,
@@ -242,6 +243,8 @@ def build_group_subtitles(
             entry["status"] = "unavailable"
             contract["groups"].append(entry)
             continue
+        if "turnId" in group:
+            entry.update({key: group[key] for key in ("turnId", "speakerId", "voiceProfileId")})
         if evidence.get("status") != "captured_unverified":
             contract["groups"].append(entry)
             continue
@@ -361,6 +364,7 @@ def _capture_group(item: dict, node_root: Path, *, refetch_reason: str | None,
     # 复用同一文件锁和原子落盘合同，先消耗重取次数再联网，崩溃/并发不能重置上限。
     with _subtitle_evidence_lock(receipt):
         saved = None
+        explicit_refetch = isinstance(refetch_reason, str) and bool(refetch_reason.strip())
         if receipt.is_file():
             saved = json.loads(receipt.read_text())
             if saved.get("binding") != binding:
@@ -371,12 +375,14 @@ def _capture_group(item: dict, node_root: Path, *, refetch_reason: str | None,
                 return {**source_binding, "groupId": item["groupId"], "status": "captured_unverified", "path": str(target), "sha256": saved["sha256"]}
             if saved.get("status") not in ("unavailable", "downloading"):
                 return unavailable
-            if not isinstance(refetch_reason, str) or not refetch_reason.strip() or saved.get("refetchCount", 0) != 0:
+            if not explicit_refetch or saved.get("refetchCount", 0) != 0:
                 return unavailable
-        elif not allow_initial_download:
+        elif not allow_initial_download and not explicit_refetch:
             return unavailable
-        record = {"binding": binding, "status": "downloading", "refetchCount": 1 if saved else 0}
-        if saved:
+        # 首次fit可能早于任何字幕回执；明确恢复可核取原响应一次，也须先消耗重取额度。
+        # 普通恢复/时间调整没有新依据，仍不得下载。
+        record = {"binding": binding, "status": "downloading", "refetchCount": 1 if explicit_refetch else 0}
+        if explicit_refetch:
             record["refetchReason"] = refetch_reason.strip()[:500]
         _write_json_durably(receipt, record)
         try:

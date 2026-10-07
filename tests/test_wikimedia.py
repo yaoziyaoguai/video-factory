@@ -59,8 +59,9 @@ class WikimediaCommonsTest(unittest.TestCase):
             script.write_text(json.dumps({"scenes": [{"position": 1, "narration": "城市", "duration": 4,
                 "visual_strategy": "stock", "visual_prompt": "city"}]}))
             source = root / "fixture.webm"
+            # 此夹具验证真实WebM与来源保留；固定单线程，避免色块编码的内部并行开销耗尽时限。
             subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=blue:s=720x1280:r=25",
-                            "-t", "10", "-an", "-c:v", "libvpx", "-deadline", "realtime", str(source)],
+                            "-t", "10", "-an", "-c:v", "libvpx", "-deadline", "realtime", "-threads", "1", str(source)],
                            check=True, capture_output=True, timeout=30)
             body = source.read_bytes()
             def media(request, timeout):

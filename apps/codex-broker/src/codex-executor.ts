@@ -16,6 +16,8 @@ import {
   outputSemanticValidationErrorFor,
   outputSemanticDiagnosticFor,
   outputValidationErrorFor,
+  savedCharacterScriptValidationError,
+  taskPresentationMode,
   taskContractDescriptorFor,
   taskPromptFor,
   type BrokerTaskKind,
@@ -328,6 +330,8 @@ export interface ProductionCapabilitiesPayload {
 }
 
 export interface ScriptBrief {
+  presentationMode?: "narration" | "character_drama";
+  characterVoiceProfiles?: Array<{ id: string; providerId: string; label: string }>;
   title: string;
   angle: string;
   audience: string;
@@ -1109,7 +1113,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
     const imagePaths = await writeTaskImages(task, taskDir);
     // schema 与提示词都由 broker 自己拥有；容器 payload 只能携带任务数据。
     // schema 文件位于 taskDir 内，随 finally 的 rm 一起清理。
-    await writeFile(schemaPath, `${JSON.stringify(providerOutputSchemaFor(task.kind))}\n`, "utf8");
+    await writeFile(schemaPath, `${JSON.stringify(providerOutputSchemaFor(task.kind, taskPresentationMode(task.kind, task.payload)))}\n`, "utf8");
     const { command, args } = buildCodexExecCommand({
       codexBin: this.codexBin,
       workspaceDir,
@@ -1733,6 +1737,11 @@ function requireCreativeDiscussionDocument(
 function requireExistingScriptDiscussionDocument(
   document: Record<string, unknown>,
 ): Record<string, unknown> {
+  if (document.version === "video-factory/character-script-v1") {
+    const error = savedCharacterScriptValidationError(document);
+    if (error) throw new CodexExecutorError(error, false);
+    return document;
+  }
   const field = "payload.currentDocument";
   // C6：字段白名单与正式 ScriptDraft 归一输出同源——顶层 viewerPromise/narrativeArc/
   // canonFacts/scenes；scene 为 position/purpose/narration/duration/visual_strategy/
@@ -2139,7 +2148,10 @@ function validateBudgetIntention(value: unknown): void {
 
 function requireDirectorBrief(value: unknown): Record<string, unknown> {
   const brief = requireRecord(value, "payload.brief");
+  optionalPresentationMode(brief.presentationMode);
+  if (brief.presentationMode === "character_drama") arrayValue(brief.characters, "payload.brief.characters");
   assertExactKeys(brief, [
+    "presentationMode", "characters",
     "title", "angle", "audience", "platform", "durationSeconds", "durationRange", "viewerPromise", "narrativeArc",
     "requestedProfileId", "editorial", "visualProof", "visualIntent", "visualPlan", "voiceTiming", "budgetIntentionCny",
     "referenceGrammar", "seriesContext", "articleSources", "creativeTreatment", "planningIssues", "planningRevision", "productionCapabilities", "rework",
@@ -2703,6 +2715,7 @@ function requireArticleTimestamp(value: unknown, field: string): string {
 
 function requireCreativeTreatmentBrief(value: unknown): Record<string, unknown> {
   const record = requireRecord(value, "payload.brief");
+  optionalPresentationMode(record.presentationMode);
   assertExactKeys(record, [...CREATIVE_TREATMENT_BRIEF_FIELDS], "payload.brief");
   validateBudgetIntention(record.budgetIntentionCny);
   const brief: Record<string, unknown> = {
@@ -2748,6 +2761,17 @@ function requireScriptBrief(value: unknown): ScriptBrief {
     durationSeconds: Number(durationSeconds),
     productionCapabilities: requireProductionCapabilities(record.productionCapabilities, "payload.brief.productionCapabilities"),
   };
+  const presentationMode = optionalPresentationMode(record.presentationMode);
+  if (presentationMode !== undefined) brief.presentationMode = presentationMode;
+  if (record.characterVoiceProfiles !== undefined) {
+    const catalog = arrayValue(record.characterVoiceProfiles, "payload.brief.characterVoiceProfiles");
+    if (JSON.stringify(catalog).length > 192 * 1024) throw new CodexExecutorError("characterVoiceProfiles exceeds input limit.", false);
+    brief.characterVoiceProfiles = catalog.map((entry) => {
+      const voice = requireRecord(entry, "character voice");
+      assertExactKeys(voice, ["id", "providerId", "label"], "character voice");
+      return { id: requiredText(voice.id, "voice.id"), providerId: requiredText(voice.providerId, "voice.providerId"), label: requiredText(voice.label, "voice.label") };
+    });
+  }
   if (record.durationRange !== undefined) {
     const range = requireRecord(record.durationRange, "payload.brief.durationRange");
     assertExactKeys(range, ["minSeconds", "maxSeconds"], "payload.brief.durationRange");
@@ -2824,6 +2848,11 @@ function requireScriptRework(value: unknown): NonNullable<ScriptBrief["rework"]>
     ...(affectedScenePositions ? { affectedScenePositions } : {}),
     ...(previousScript ? { previousScript } : {}),
   };
+}
+
+function optionalPresentationMode(value: unknown): "narration" | "character_drama" | undefined {
+  if (value === undefined || value === "narration" || value === "character_drama") return value;
+  throw new CodexExecutorError("payload.brief.presentationMode is invalid.", false);
 }
 
 function requireReworkSourceRunId(value: unknown, field: string): string {

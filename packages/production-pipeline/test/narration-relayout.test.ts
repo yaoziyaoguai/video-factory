@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { NARRATION_FIT_CONFLICT_V2_VERSION, parseNarrationFitConflictV2, parseNarrationRelayoutRequest, parseRelayoutSource, RELAYOUT_OPERATION_VERSION } from "../src/narration-relayout.js";
+import { NARRATION_FIT_CONFLICT_V2_VERSION, parseNarrationFitConflictV2, parseNarrationFitConflictV3, parseNarrationRelayoutRequest, parseRelayoutSource, RELAYOUT_OPERATION_VERSION } from "../src/narration-relayout.js";
 
 describe("narration-relayout 合同解析（§2.4）", () => {
   const validVoiceVersion = {
@@ -79,6 +79,34 @@ describe("narration-relayout 合同解析（§2.4）", () => {
 
   it("操作记录版本常量已冻结", () => {
     assert.equal(RELAYOUT_OPERATION_VERSION, "video-factory/narration-relayout-operation-v1");
+  });
+
+  it("角色 v3 的台词布局与冲突显式分派，拒绝把角色或正文塞进时间调整", () => {
+    const request = { action: "relayout_narration", intent: "apply", requestId: "character-layout",
+      expectedRunRevision: 1, interventionId: "stop", sourceContextId: "source", note: "调整第一句时间",
+      source: validVoiceVersion, layout: { ...validLayout, narrationPlanVersion: "video-factory/narration-plan-v3" } };
+    const parsed = parseNarrationRelayoutRequest(request);
+    assert.ok(parsed.intent === "apply");
+    assert.equal(parsed.layout.narrationPlanVersion, "video-factory/narration-plan-v3");
+    assert.throws(() => parseNarrationRelayoutRequest({ ...request, layout: { ...request.layout,
+      groups: [{ ...validLayout.groups[0], speakerId: "replace-speaker" }] } }), /角色|字段/);
+    for (const level of ["root", "window", "placement", "silence"]) {
+      const layout: any = structuredClone(request.layout);
+      const target = level === "root" ? layout : level === "silence" ? (layout.userSilences[0] = { startFrame: 0, endFrame: 1 }) : layout.groups[0][level];
+      target.voiceProfileId = "minimax:female-tianmei";
+      assert.throws(() => parseNarrationRelayoutRequest({ ...request, layout }), /字段|角色/, level);
+    }
+    const conflict = { version: "video-factory/narration-fit-conflict-v3", code: "NARRATION_TURN_DOES_NOT_FIT",
+      groupId: "turn_1", turnId: "turn_1", speakerId: "shopkeeper", voiceProfileId: "minimax:male-qn-jingying",
+      sourceScenePositions: [1], window: { startFrame: 0, endFrame: 15 },
+      placement: { anchor: "start", offsetFrames: 0 }, sourceSamples: 44_100,
+      requiredFrames: 30, availableFrames: 15, shortfallFrames: 15,
+      sourceOperationId: "voice-op-1", sourceContextId: "sc-1",
+      manifestArtifactId: "artifact-manifest-1", manifestSha256: "d".repeat(64) };
+    assert.equal(parseNarrationFitConflictV3(conflict).speakerId, "shopkeeper");
+    assert.throws(() => parseNarrationFitConflictV2(conflict), /版本|错误码/);
+    assert.throws(() => parseNarrationFitConflictV3({ ...conflict, turnId: "another" }), /台词/);
+    assert.throws(() => parseNarrationFitConflictV3({ ...conflict, requiredFrames: 29 }), /帧数/);
   });
 
   it("用同一完整合同解析首次与再次 v2 fit 冲突", () => {

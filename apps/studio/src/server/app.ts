@@ -686,6 +686,10 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       throw new StudioInputError("恢复阶段与用途不匹配，请重新查看当前成果。");
     }
     const targetArtifactId = typeof body.targetArtifactId === "string" ? body.targetArtifactId.trim() : "";
+    if (body.intent !== undefined && (body.intent !== "edit_character_script" || body.nodeId !== "creative-planning"
+      || stage !== "script" || body.acknowledgeImpact !== true || body.reviewPurpose !== undefined)) {
+      throw new StudioInputError("返回角色与台词前，请确认下游方案需要重新确认；已有媒体不会删除，也不会自动购买。");
+    }
     const targetVersionId = typeof body.targetVersionId === "string" ? body.targetVersionId.trim() : "";
     const targetSha256 = typeof body.targetSha256 === "string" ? body.targetSha256 : "";
     if (!targetArtifactId || !targetVersionId || !/^[a-f0-9]{64}$/.test(targetSha256)) {
@@ -698,6 +702,7 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       ...(stage ? { stage } : {}),
       ...(body.reviewPurpose ? { reviewPurpose: body.reviewPurpose as "direction" | "material_plan" } : {}),
       targetArtifactId, targetVersionId, targetSha256,
+      ...(body.intent === "edit_character_script" ? { intent: "edit_character_script" as const, acknowledgeImpact: true } : {}),
     }, trustedStudioActor(auth, request.headers.cookie));
     return reply.code(200).send(detail);
   });
@@ -741,7 +746,11 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   app.post<{ Params: { runId: string }; Body: Record<string, unknown> }>("/api/runs/:runId/narration-plan/preview", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     const body = (request.body ?? {}) as Record<string, unknown>;
+    if (body.version !== undefined && body.version !== "video-factory/narration-plan-v2" && body.version !== "video-factory/narration-plan-v3") {
+      throw new StudioInputError("声音候选版本未知，请刷新后再试。");
+    }
     return options.service.previewNarrationPlanV2(request.params.runId, {
+      ...(body.version ? { version: body.version } : {}),
       expectedRunRevision: body.expectedRunRevision as number,
       sourceContextId: body.sourceContextId as string,
       editorSessionId: body.editorSessionId as string,
@@ -755,8 +764,10 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     requireSafeRouteId(request.params.runId, "制作编号");
     const body = (request.body ?? {}) as Record<string, unknown>;
     // §2.2：v2 只凭同身份票据保存（不另收 plan）；旧 v1 PUT 原样保留。
-    if (body.version === "video-factory/narration-plan-v2") {
+    if (body.version === "video-factory/narration-plan-v2" || body.version === "video-factory/narration-plan-v3") {
+      if (body.plan !== undefined) throw new StudioInputError("声音计划只凭预览票据保存，不能另传替换计划。");
       return options.service.confirmNarrationPlanV2(request.params.runId, {
+        version: body.version,
         requestId: body.requestId as string,
         expectedRunRevision: body.expectedRunRevision as number,
         sourceContextId: body.sourceContextId as string,
@@ -769,6 +780,7 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
           ? { acknowledgeQuoteUnavailable: body.acknowledgeQuoteUnavailable as boolean } : {}),
       }, trustedStudioActor(auth, request.headers.cookie));
     }
+    if (body.version !== undefined) throw new StudioInputError("声音保存版本未知，请刷新后再试。");
     if (!request.body || !Number.isSafeInteger(request.body.expectedRunRevision) || request.body.expectedRunRevision < 0
       || !request.body.plan || typeof request.body.plan !== "object") throw new StudioInputError("请先查看最新旁白方案。");
     return options.service.confirmNarrationPlan(request.params.runId, request.body, trustedStudioActor(auth, request.headers.cookie));

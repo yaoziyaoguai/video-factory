@@ -10,8 +10,10 @@ import {
   ProductionPipeline,
   FileRunStore,
   canonicalJsonV2,
+  buildCharacterNarrationPlan,
   CodexBridgeError,
   RoleAgentLoopError,
+  runRoleAgentLoop,
   HumanDecisionConflictError,
   type CreativeTreatmentAgent,
   type ProductionBrief,
@@ -28,10 +30,410 @@ import { ProviderRegistry, WorkflowRunner } from "@video-factory/workflow-core";
 import { ProductionStudio } from "../src/server/production-studio.js";
 import { StudioService } from "../src/server/studio-service.js";
 import { buildStudioApp } from "../src/server/app.js";
+import { createPasswordHash } from "../src/server/auth.js";
 import { studioApi } from "../src/client/api.js";
 import type { StudioProvider } from "../src/shared/api.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
+
+it("MC-A08/24 character script reopens after planning without generation; edits resume the real graph", async (t) => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-character-reopen-"));
+  const { script } = JSON.parse(await readFile(path.join(repositoryRoot, "tests/fixtures/character-drama-cases.json"), "utf8"));
+  script.characters[3].voice_profile_id = null;
+  const counters: ReworkSpies = { treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] };
+  const agents = jointReworkAgents(counters);
+  let writes = 0, audits = 0, media = 0, crashAfterGraph = false, crashAfterRun = false;
+  const writer = { ...agents.screenwriterAgent!, draft: async () => structuredClone(script), draftDetailed: async (input: ScreenwriterAgentInput) => {
+    if (input.creativeReviewExecution?.mode === "check") {
+      audits++;
+      return passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "编剧", "script-draft", "screenwriter-model-one");
+    }
+    writes++;
+    return { output: structuredClone(script), trace: { taskKind: "script-draft" as const, promptVersion: "v1", prompt: "controlled", providerId: "openai", modelId: "screenwriter-model-one" } };
+  } };
+  const direct = async (input: VisualDirectorAgentInput) => {
+    const old = await agents.directorAgent!.plan(input);
+    return { ...old, version: "video-factory/director-plan-v2" as const, shots: old.shots.map((shot, i) => ({ ...shot,
+      temporalBeats: ["[0s-3s] 建立人物动作", "[3s-6s] 回应台词"],
+      characterIds: script.scenes[i].character_ids, speakingTurnIds: script.scenes[i].dialogue.map((turn: { id: string }) => turn.id) })) };
+  };
+  const worker = new class extends ReworkWorker { override async run(request: Record<string, unknown>) { media++; return super.run(request); } }();
+  const pipeline = new ProductionPipeline({ workspaceRoot, worker, ...agents, screenwriterAgent: writer,
+    reviewContinuationFailpoints: {
+      afterEvidence: () => { if (crashAfterGraph) { crashAfterGraph = false; throw new Error("controlled graph/run gap"); } },
+      afterDecisionCheckpoint: () => { if (crashAfterRun) { crashAfterRun = false; throw new Error("controlled run/response gap"); } },
+    },
+    directorAgent: { ...agents.directorAgent!, plan: direct, planDetailed: async input => input.creativeReviewExecution?.mode === "check"
+      ? passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "视觉导演", "director-plan", "director-model-one")
+      : { output: await direct(input), trace: { taskKind: "director-plan", promptVersion: "v1", prompt: "controlled", providerId: "openai", modelId: "director-model-one" } } },
+    assetProviders: REWORK_ASSET_PROVIDERS });
+  let run = await pipeline.start({ ...jointReworkBrief(), presentationMode: "character_drama" });
+  run = await confirmCreativeStages(pipeline, run);
+  assert.notEqual(run.nodeRuns.find(n => n.nodeId === "creative-planning")!.status, "needs_human");
+  const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: async () => true, environment: {} });
+  const app = buildStudioApp({ service, logger: false });
+  t.after(() => app.close());
+  const original = await pipeline.loadPersisted(run.id);
+  assert.equal((original.initialInput as ProductionBrief).providers.voice, "macos-say-v1");
+  await assert.rejects(pipeline.previewNarrationPlan(run.id), /MiniMax/,
+    "旧本地声音配置可以保存角色稿，但不能暗换供应商执行角色配音");
+  assert.deepEqual(await pipeline.loadPersisted(run.id), original);
+  const detail = (await app.inject({ method: "GET", url: `/api/runs/${run.id}` })).json();
+  assert.ok(detail.characterScriptEditTarget, "下游必须有绑定当前角色稿的可执行返工入口，而非只读跳转");
+  const request = { ...detail.characterScriptEditTarget, commandId: "reopen-characters", expectedRunRevision: run.revision,
+    intent: "edit_character_script", acknowledgeImpact: true };
+  const counts = { writes, audits, media, director: counters.directorInputs.length };
+  const denied = await app.inject({ method: "POST", url: `/api/runs/${run.id}/review-continuations`, payload: { ...request, acknowledgeImpact: false } });
+  assert.equal(denied.statusCode, 400);
+  const uncertain = structuredClone(original);
+  uncertain.nodeRuns.find(n => n.nodeId === "voice")!.outcomeUncertain = true;
+  const runStore = new FileRunStore(path.join(workspaceRoot, "runs"));
+  await runStore.checkpoint(uncertain);
+  const blocked = await app.inject({ method: "POST", url: `/api/runs/${run.id}/review-continuations`, payload: { ...request, commandId: "unknown-reopen" } });
+  assert.equal(blocked.statusCode, 409, blocked.body);
+  assert.deepEqual(await pipeline.loadPersisted(run.id), uncertain);
+  await runStore.checkpoint(original);
+  crashAfterGraph = true;
+  const interrupted = await app.inject({ method: "POST", url: `/api/runs/${run.id}/review-continuations`, payload: request });
+  assert.equal(interrupted.statusCode, 500);
+  assert.equal((await pipeline.loadPersisted(run.id)).revision, original.revision);
+  crashAfterRun = true;
+  const lostResponse = await app.inject({ method: "POST", url: `/api/runs/${run.id}/review-continuations`, payload: request });
+  assert.equal(lostResponse.statusCode, 500);
+  const appliedRevision = (await pipeline.loadPersisted(run.id)).revision;
+  const opened = await app.inject({ method: "POST", url: `/api/runs/${run.id}/review-continuations`, payload: request });
+  assert.equal(opened.statusCode, 200, opened.body);
+  assert.equal(opened.json().revision, appliedRevision, "HTTP丢失恢复不增加第二个版本");
+  const reopened = await pipeline.loadPersisted(run.id);
+  assert.equal(reopened.status, "needs_human");
+  assert.equal(reopened.nodeRuns.find(n => n.nodeId === "creative-planning")!.intervention?.kind, "creative_review");
+  assert.deepEqual({ writes, audits, media, director: counters.directorInputs.length }, counts);
+  assert.deepEqual(reopened.artifacts, original.artifacts, "返回编辑保留所有已完成文件，不生成新媒体");
+  assert.ok(reopened.nodeRuns.find(n => n.nodeId === "assets")!.outputState?.stale);
+  const replay = await app.inject({ method: "POST", url: `/api/runs/${run.id}/review-continuations`, payload: request });
+  assert.equal(replay.statusCode, 200, replay.body);
+  assert.equal(replay.json().revision, reopened.revision);
+  assert.equal((await app.inject({ method: "POST", url: `/api/runs/${run.id}/review-continuations`, payload: { ...request, targetSha256: "f".repeat(64) } })).statusCode, 409);
+  assert.equal((await app.inject({ method: "POST", url: `/api/runs/${run.id}/review-continuations`, payload: { ...request, commandId: "stale-reopen" } })).statusCode, 409);
+  const review = (await service.creativeReview(run.id))!;
+  assert.equal(review.stage, "script");
+  assert.deepEqual(review.draft, script);
+  const changed = structuredClone(script);
+  changed.characters[3].voice_profile_id = script.characters[0].voice_profile_id;
+  const saved = await pipeline.dispatchCreativeReviewCommand(run.id, { action: "edit_draft", commandId: "fix-voice", actor: "creator", stage: "script",
+    expectedRunRevision: review.runRevision, expectedReviewRevision: review.reviewRevision, baseDraftSha256: review.draftSha256,
+    baseDraftVersionId: review.draftVersionId, document: changed });
+  run = await saved.completion;
+  assert.deepEqual({ writes, audits, media, director: counters.directorInputs.length }, counts, "保存也不生成或自动审计");
+  assert.deepEqual((await service.creativeReview(run.id))!.draft, changed);
+  for (let index = 0; index < 3; index++) {
+    const current = await service.creativeReview(run.id);
+    if (!current) break;
+    run = await pipeline.confirmCreativeReview(run.id, { commandId: `rework-adopt-${index}`, actor: "creator", stage: current.stage,
+      expectedRunRevision: current.runRevision, expectedReviewRevision: current.reviewRevision, baseDraftSha256: current.draftSha256,
+      ...(current.checkResult ? { expectedCheckIdentity: current.checkResult.checkIdentity } : { acknowledgeUnaudited: true as const }) });
+  }
+  assert.equal(writes, 1, "不重新生成已有脚本");
+  assert.equal(audits, 1, "修改后不自动审计脚本");
+  assert.ok(counters.directorInputs.length > counts.director, "重新采用后才进入真实导演节点");
+  const finalReview = (run.nodeRuns.find(n => n.nodeId === "creative-planning")!.output as any).creativeReviewHistory;
+  assert.deepEqual(finalReview.stages.script.currentDocument, changed);
+  const formalScript = (run.nodeRuns.find(n => n.nodeId === "creative-planning")!.output as { scriptPath: string }).scriptPath;
+  assert.deepEqual(JSON.parse(await readFile(formalScript, "utf8")).characters, changed.characters,
+    "实际声音消费者读取的正式文件也必须属于新稿，不能只更新UI快照");
+  assert.ok(original.artifacts.every(a => run.artifacts.some(b => b.id === a.id)));
+});
+
+it("MC-A17/21/22 character HTTP tickets, durable first-fit and crash recovery reuse original audio", async (t) => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-character-transaction-"));
+  const { script } = JSON.parse(await readFile(path.join(repositoryRoot, "tests/fixtures/character-drama-cases.json"), "utf8"));
+  const agents = jointReworkAgents({ treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] });
+  const writer = { ...agents.screenwriterAgent!, draft: async () => structuredClone(script), draftDetailed: async (input: ScreenwriterAgentInput) =>
+    input.creativeReviewExecution?.mode === "check"
+      ? passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "编剧", "script-draft", "screenwriter-model-one")
+      : { output: structuredClone(script), trace: { taskKind: "script-draft" as const, promptVersion: "v1", prompt: "controlled", providerId: "openai", modelId: "screenwriter-model-one" } } };
+  const direct = async (input: VisualDirectorAgentInput) => {
+    const old = await agents.directorAgent!.plan(input);
+    return { ...old, version: "video-factory/director-plan-v2" as const, shots: old.shots.map((shot, i) => ({ ...shot,
+      temporalBeats: ["[0s-3s] 建立人物动作", "[3s-6s] 回应台词"],
+      characterIds: script.scenes[i].character_ids, speakingTurnIds: script.scenes[i].dialogue.map((turn: { id: string }) => turn.id) })) };
+  };
+  const director = { ...agents.directorAgent!, plan: direct, planDetailed: async (input: VisualDirectorAgentInput) =>
+    input.creativeReviewExecution?.mode === "check"
+      ? passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "视觉导演", "director-plan", "director-model-one")
+      : { output: await direct(input), trace: { taskKind: "director-plan" as const, promptVersion: "v1", prompt: "controlled", providerId: "openai", modelId: "director-model-one" } } };
+  let synthesis = 0, layouts = 0;
+  const worker = new class extends ReworkWorker {
+    forecastUnavailable = false;
+    async forecastPaidVoiceSpend(request: Record<string, unknown>) {
+      if (this.forecastUnavailable) throw new Error("controlled character quote unavailable");
+      const response = await formalPythonVoiceQuote({ protocolVersion: "video-factory/worker-v1", commandId: "character-quote",
+        runId: String(request.runId), nodeRunId: "voice", attempt: 1, capability: "voice.quote",
+        outputDir: path.join(String(request.nodeDirectory), ".quote-preview"), input: request.input, parameters: request.parameters });
+      if (response.status !== "succeeded" || !response.output) throw new Error(JSON.stringify(response.error));
+      return response.output as Record<string, unknown>;
+    }
+    override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+      if (request.capability === "voice.quote") return formalPythonVoiceQuote(request);
+      if (request.capability !== "voice.synthesize") return super.run(request);
+      if ((request.input as Record<string, unknown>).relayout) layouts++; else synthesis++;
+      return controlledVoiceWorker(request, synthesis === 1);
+    }
+  }();
+  const pipeline = new ProductionPipeline({ workspaceRoot, worker, ...agents, screenwriterAgent: writer, directorAgent: director,
+    assetProviders: REWORK_ASSET_PROVIDERS,
+    characterVoiceProfiles: script.characters.map((c: { name: string; voice_profile_id: string }) => ({ id: c.voice_profile_id, label: c.name + "音色", providerId: "minimax-tts-v1" })),
+    providerRuntimeMetadata: [{ id: "minimax-tts-v1", label: "MiniMax", modelId: "speech-2.8-turbo",
+      transport: "http_api", billing: "metered", approvalPolicy: "automatic", estimatedCostCny: .5, maxAttempts: 1 }] });
+  const brief = jointReworkBrief();
+  let run = await pipeline.start({ ...brief, presentationMode: "character_drama",
+    providers: { ...brief.providers, voice: "minimax-tts-v1" },
+    voiceDirection: { ...brief.voiceDirection, profileId: "minimax:female-chengshu" },
+    economics: { ...brief.economics, allowMeteredProviders: true, maxCostCny: 5 },
+    workflowFeatures: { ...brief.workflowFeatures, boundaryGates: "user-confirmed-v1" } });
+  for (let step = 0; step < 15 && !run.nodeRuns.some(n => n.nodeId === "assets" && n.status === "needs_human"); step++) {
+    const gate = run.nodeRuns.find(n => n.status === "needs_human")?.intervention;
+    assert.ok(gate, JSON.stringify(run.nodeRuns.map(n => ({ node: n.nodeId, status: n.status, error: n.error }))));
+    run = gate.kind === "creative_review" ? await confirmCreativeStages(pipeline, run)
+      : await pipeline.decide(run.id, { interventionId: gate.id, action: "approve", actor: "creator", expectedRunRevision: run.revision, reviewEvidenceId: null });
+  }
+  const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: async () => true, environment: {} });
+  const app = buildStudioApp({ service, logger: false });
+  t.after(() => app.close());
+  const origin = await app.listen({ host: "127.0.0.1", port: 0 });
+  const nativeFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", (input: string | URL | Request, init?: RequestInit) => nativeFetch(typeof input === "string" ? new URL(input, origin) : input, init));
+  const detail = await app.inject({ method: "GET", url: `/api/runs/${run.id}` });
+  assert.equal(detail.json().presentationMode, "character_drama");
+  const missingVoiceScript = structuredClone(script);
+  missingVoiceScript.characters[0].voice_profile_id = null;
+  const missingVoicePreview = t.mock.method(pipeline, "previewNarrationPlan", async () => {
+    return buildCharacterNarrationPlan({ script: missingVoiceScript, scriptSha256: "a".repeat(64),
+      visualSha256: "b".repeat(64), sourceContextId: "missing-voice" }) as never;
+  });
+  const beforeInvalid = await pipeline.loadPersisted(run.id);
+  const missingVoice = await app.inject({ method: "GET", url: `/api/runs/${run.id}/narration-plan` });
+  missingVoicePreview.mock.restore();
+  assert.equal(missingVoice.statusCode, 400, missingVoice.body);
+  assert.match(missingVoice.body, /音色/);
+  await assert.rejects(pipeline.requestNarrationRevision(run.id, { action: "revise_narration",
+    expectedRunRevision: run.revision, scenePosition: 1, narration: "不能写回单旁白", actor: "creator", note: "角色保护" }), /角色剧情不能保存为单旁白/);
+  assert.deepEqual(await pipeline.loadPersisted(run.id), beforeInvalid);
+  assert.equal(synthesis, 0);
+  const initial = await studioApi.narrationPlan(run.id);
+  assert.equal(initial.plan.version, "video-factory/narration-plan-v3");
+  const plan = initial.plan;
+  if (plan.version !== "video-factory/narration-plan-v3") throw new Error("wrong plan");
+  const candidate = { version: plan.version, groups: plan.groups.map(g => ({ turnId: g.turnId, window: { ...g.window }, placement: { ...g.placement } })), userSilences: [] };
+  candidate.groups[0]!.window.endFrame = 15;
+  const previewInput = { version: plan.version, expectedRunRevision: run.revision, sourceContextId: initial.sourceContextId!, editorSessionId: "character-tab", editSequence: 1, candidate };
+  const invalid = await app.inject({ method: "POST", url: `/api/runs/${run.id}/narration-plan/preview`, payload: {
+    ...previewInput, candidate: { ...candidate, groups: candidate.groups.map((g, i) => i ? g : { ...g, voiceProfileId: "different" }) } } });
+  assert.equal(invalid.statusCode, 400, invalid.body);
+  const ticket = await studioApi.narrationPlanPreviewV2(run.id, { ...previewInput, editSequence: 2 });
+  const save = { ...previewInput, editSequence: 2, requestId: "character-plan", ticketId: ticket.ticketId, candidateId: ticket.candidateId,
+    planSha256: ticket.planSha256, acknowledgeQuoteUnavailable: true };
+  const saved = await studioApi.confirmNarrationPlanV2(run.id, save);
+  // 新v3合同仍由原身份认证保护；匿名读、核价、保存与排轨均不得进入消费者。
+  const protectedApp = buildStudioApp({ service, logger: false, auth: {
+    username: "local-character-test", passwordHash: createPasswordHash("local-character-test-only"),
+    sessionSecret: "local-character-test-session-secret-at-least-32", secureCookie: false,
+  } });
+  t.after(() => protectedApp.close());
+  const beforeUnauthorized = await pipeline.loadPersisted(run.id);
+  for (const deniedRequest of [
+    { method: "GET" as const, url: `/api/runs/${run.id}/narration-plan` },
+    { method: "POST" as const, url: `/api/runs/${run.id}/narration-plan/preview`, payload: previewInput },
+    { method: "PUT" as const, url: `/api/runs/${run.id}/narration-plan`, payload: save },
+    { method: "POST" as const, url: `/api/runs/${run.id}/narration-revisions`, payload: {
+      action: "relayout_narration", layout: { narrationPlanVersion: plan.version },
+    } },
+  ]) {
+    const denied = await protectedApp.inject(deniedRequest);
+    assert.equal(denied.statusCode, 401, denied.body);
+  }
+  assert.deepEqual(await pipeline.loadPersisted(run.id), beforeUnauthorized);
+  assert.equal(synthesis, 0);
+  const replay = await studioApi.confirmNarrationPlanV2(run.id, save);
+  assert.equal(replay.receipt.replay, true);
+  assert.equal(replay.run.revision, saved.run.revision);
+  assert.equal(synthesis, 0, "核价和保存均不合成");
+  // 同内容 A→B→A 也有独立有效版本；价格不可得的保存不是付费授权。
+  run = await pipeline.loadPersisted(run.id);
+  const versionA = structuredClone(run.nodeRuns.find(n => n.nodeId === "voice")!.inputState!.versions
+    .find(v => v.id === saved.receipt.inputVersionId));
+  const candidateB = structuredClone(candidate);
+  candidateB.groups[0]!.window.endFrame = 16;
+  worker.forecastUnavailable = true;
+  const ticketB = await studioApi.narrationPlanPreviewV2(run.id, { ...previewInput, candidate: candidateB,
+    expectedRunRevision: run.revision, editSequence: 3 });
+  assert.equal(ticketB.quote.status, "unavailable");
+  const saveB = { ...save, expectedRunRevision: run.revision, requestId: "character-plan-b", editSequence: 3,
+    ticketId: ticketB.ticketId, candidateId: ticketB.candidateId, planSha256: ticketB.planSha256 };
+  await assert.rejects(studioApi.confirmNarrationPlanV2(run.id, { ...saveB, acknowledgeQuoteUnavailable: false }), /核价不可用/);
+  assert.deepEqual(await pipeline.loadPersisted(run.id), run);
+  const savedB = await studioApi.confirmNarrationPlanV2(run.id, saveB);
+  assert.equal(synthesis, 0);
+  worker.forecastUnavailable = false;
+  const ticketA2 = await studioApi.narrationPlanPreviewV2(run.id, { ...previewInput,
+    expectedRunRevision: savedB.run.revision, editSequence: 4 });
+  assert.equal(ticketA2.quote.status, "estimated");
+  assert.equal(ticketA2.quote.items?.length, 8, "按八句实际正文和音色核价");
+  assert.equal(ticketA2.planSha256, saved.receipt.planSha256);
+  const savedA2 = await studioApi.confirmNarrationPlanV2(run.id, { ...save, requestId: "character-plan-a2",
+    expectedRunRevision: savedB.run.revision, editSequence: 4, ticketId: ticketA2.ticketId,
+    candidateId: ticketA2.candidateId, planSha256: ticketA2.planSha256 });
+  assert.notEqual(savedA2.receipt.inputVersionId, saved.receipt.inputVersionId);
+  run = await pipeline.loadPersisted(run.id);
+  assert.deepEqual(run.nodeRuns.find(n => n.nodeId === "voice")!.inputState!.versions
+    .find(v => v.id === saved.receipt.inputVersionId), versionA);
+  const historicReplay = await studioApi.confirmNarrationPlanV2(run.id, save);
+  assert.equal(historicReplay.receipt.current, false);
+  assert.equal(historicReplay.run.revision, run.revision);
+  await assert.rejects(studioApi.confirmNarrationPlanV2(run.id, { ...save, requestId: "late-character-a" }), /更新|过期|版本/);
+  assert.deepEqual(await pipeline.loadPersisted(run.id), run);
+  assert.equal(synthesis, 0, "全部候选核价、知情保存、历史重放都不批准配音");
+  assert.equal((await studioApi.narrationPlan(run.id)).confirmed, true);
+  run = await pipeline.loadPersisted(run.id);
+  run = await pipeline.decide(run.id, { interventionId: run.nodeRuns.find(n => n.nodeId === "assets")!.intervention!.id,
+    action: "approve", actor: "creator", expectedRunRevision: run.revision, reviewEvidenceId: null });
+  const heldVoice = run.nodeRuns.find(n => n.nodeId === "voice")!;
+  assert.equal(heldVoice.outcomeUncertain, true);
+  const operationId = heldVoice.operationRequestId!;
+  const voiceRoot = path.join(workspaceRoot, "runs", run.id, "nodes", "voice");
+  const submits = path.join(voiceRoot, "controlled-submissions.jsonl");
+  assert.equal(await jsonLineCount(submits), 3);
+  const frozen = await pipeline.loadPersisted(run.id);
+  for (let index = 0; index < 2; index++) {
+    const summary = await app.inject({ method: "GET", url: `/api/runs/${run.id}/nodes/voice/paid-operation` });
+    assert.equal(summary.statusCode, 200, summary.body);
+    assert.equal(summary.json().failureKind, "unknown_outcome");
+  }
+  for (const outcome of ["confirmed_charged", "confirmed_not_charged"] as const) {
+    await assert.rejects(pipeline.reconcilePaidNode(run.id, { nodeId: "voice", expectedRunRevision: run.revision,
+      reconciliationId: "unsafe-" + outcome, outcome, actor: "creator", note: "cannot replace an unknown request" }), /原请求/);
+  }
+  assert.deepEqual(await pipeline.loadPersisted(run.id), frozen);
+  assert.equal(await jsonLineCount(submits), 3, "查询与禁止的重新购买都不得发送");
+  const ledger = JSON.parse(await readFile(path.join(voiceRoot, ".voice-operations", createHash("sha256").update(operationId).digest("hex") + ".json"), "utf8"));
+  const pending = ledger.items[2].metadataPath as string;
+  await rename(pending + ".pending", pending);
+  assert.equal((await pipeline.inspectPaidNode(run.id, "voice")).recommendedOutcome, "resume_original");
+  run = await pipeline.reconcilePaidNode(run.id, { nodeId: "voice", expectedRunRevision: run.revision,
+    reconciliationId: "original-character-response", outcome: "resume_original" });
+  assert.equal(run.nodeRuns.find(n => n.nodeId === "voice")!.operationRequestId, operationId);
+  assert.equal(await jsonLineCount(submits), 8, "只买未发送的后五句，前两句与迟到第三句复用");
+  const voice = run.nodeRuns.find(n => n.nodeId === "voice")!;
+  assert.equal(voice.status, "needs_human", JSON.stringify({ status: voice.status, error: voice.error, output: voice.output }));
+  const output = voice.output as Record<string, any>;
+  assert.equal(output.conflict.code, "NARRATION_TURN_DOES_NOT_FIT");
+  const receipt = output.voiceSourceReceipt;
+  assert.equal(receipt.groupAudioArtifacts.length, 8);
+  const manifest = run.artifacts.find(a => a.id === receipt.manifestArtifactId)!;
+  const manifestBytes = await readFile(manifest.uri!);
+  assert.equal(JSON.parse(manifestBytes.toString()).version, "video-factory/voice-source-manifest-v2");
+  assert.equal(manifest.schemaVersion, "video-factory/voice-source-manifest-v2");
+  const request = { action: "relayout_narration" as const, intent: "apply" as const, requestId: "character-fit",
+    expectedRunRevision: run.revision, interventionId: voice.intervention!.id, sourceContextId: initial.sourceContextId!, actor: "creator", note: "复用原声调整时间",
+    source: { kind: "materialized_operation" as const, voiceInputVersionId: receipt.voiceInputVersionId,
+      sourceVoiceOperationId: receipt.sourceOperationId, sourceManifestArtifactId: manifest.id,
+      sourceManifestSha256: receipt.manifestSha256, sourceReceiptArtifactId: receipt.receiptArtifactId },
+    layout: { narrationPlanVersion: plan.version, groups: plan.groups.map(g => ({ groupId: g.id, window: g.window, placement: g.placement })), userSilences: [] } };
+  run = await pipeline.requestNarrationRevision(run.id, request);
+  const resultVoice = run.nodeRuns.find(n => n.nodeId === "voice")!;
+  assert.equal(run.status, "needs_human");
+  assert.equal(resultVoice.status, "needs_human");
+  assert.equal(synthesis, 2);
+  assert.equal(layouts, 1);
+  assert.deepEqual(await readFile(manifest.uri!), manifestBytes);
+  const versions = resultVoice.outputState!.versions.length;
+  assert.equal((await pipeline.requestNarrationRevision(run.id, request)).nodeRuns.find(n => n.nodeId === "voice")!.outputState!.versions.length, versions);
+  await assert.rejects(pipeline.requestNarrationRevision(run.id, { ...request, note: "different" }), /不同内容/);
+  await assert.rejects(pipeline.requestNarrationRevision(run.id, { ...request, requestId: "different-id" }), /更新|版本|停点|stale/i);
+  const crashDir = path.join(workspaceRoot, "character-crashes");
+  await mkdir(crashDir);
+  const countPath = path.join(crashDir, "worker.jsonl"), eventPath = path.join(crashDir, "events.jsonl");
+  for (const [i, crashPoint] of (["afterWorkerCompletion", "afterAdoptionCheckpoint"] as const).entries()) {
+    run = await pipeline.loadPersisted(run.id);
+    const v = run.nodeRuns.find(n => n.nodeId === "voice")!;
+    const artifact = run.artifacts.find(a => v.outputState!.versions.find(o => o.id === v.outputState!.effectiveVersionId)!.artifactIds.includes(a.id) && a.kind === "voiceover_plan")!;
+    const doc = JSON.parse(await readFile(artifact.uri!, "utf8"));
+    const audio = run.artifacts.find(a => a.uri === doc.track_path)!;
+    const crashRequest = { ...request, requestId: `character-crash-${i}`, expectedRunRevision: run.revision, interventionId: v.intervention!.id,
+      source: { kind: "voice_version" as const, voiceVersionId: v.outputState!.effectiveVersionId, voicePlanArtifactId: artifact.id,
+        voicePlanSha256: artifact.sha256!, expectedNarrationPlanSha256: createHash("sha256").update(canonicalJsonV2(doc.narrationPlan)).digest("hex"),
+        expectedLayoutKey: doc.layoutKey, expectedAudioSha256: audio.sha256!, sourceVoiceOperationId: doc.voiceOperationId },
+      layout: { ...request.layout, groups: request.layout.groups.map((g, index) => index ? g : { ...g, placement: { anchor: "start" as const, offsetFrames: i + 1 } }) } };
+    const requestPath = path.join(crashDir, `request-${i}.json`);
+    await writeFile(requestPath, JSON.stringify(crashRequest));
+    const opts = { workspaceRoot, runId: run.id, requestId: crashRequest.requestId, action: "apply" as const, requestPath,
+      countPath, eventPath, caseDirectory: crashDir };
+    await runRelayoutCrashChild({ ...opts, label: `crash-${i}`, crashPoint, expectedExit: 86 + i });
+    assert.equal(await jsonLineCount(countPath), i + 1);
+    await new Promise(resolve => setTimeout(resolve, 2800));
+    await runRelayoutCrashChild({ ...opts, label: `recover-${i}` });
+    assert.equal(await jsonLineCount(countPath), i + 1, "恢复只采用原完成事实，不再启动worker");
+    assert.equal((await pipeline.readNarrationRelayoutOperation(run.id, crashRequest.requestId)).state, "applied");
+    const recovered = await pipeline.loadPersisted(run.id);
+    const recoveredVoice = recovered.nodeRuns.find(n => n.nodeId === "voice")!;
+    const current = recoveredVoice.outputState!.versions.find(v => v.id === recoveredVoice.outputState!.effectiveVersionId)!;
+    assert.equal(recovered.artifacts.find(a => current.artifactIds.includes(a.id) && a.kind === "voiceover_plan")!.schemaVersion,
+      "video-factory/voiceover-plan-v4", "恢复登记仍必须保留角色音轨版本");
+  }
+  assert.equal(synthesis, 2);
+  assert.deepEqual(await readFile(manifest.uri!), manifestBytes);
+});
+
+it("MC-A03/08 invalid character edits keep the current stop; six roles save and read back without audit", async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-character-edit-"));
+  const { script } = JSON.parse(await readFile(path.join(repositoryRoot, "tests/fixtures/character-drama-cases.json"), "utf8"));
+  const agents = jointReworkAgents({ treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] });
+  let audits = 0;
+  const pipeline = new ProductionPipeline({ workspaceRoot, worker: new ReworkWorker(), ...agents,
+    assetProviders: REWORK_ASSET_PROVIDERS,
+    screenwriterAgent: { ...agents.screenwriterAgent!, draft: async () => script, draftDetailed: async input => {
+      if (input.creativeReviewExecution?.mode === "check") {
+        audits++;
+        return passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "编剧", "script-draft", "screenwriter-model-one");
+      }
+      return { output: script, trace: { taskKind: "script-draft", promptVersion: "v1", prompt: "controlled", providerId: "openai", modelId: "screenwriter-model-one" } };
+    } },
+  });
+  const studio = new ProductionStudio({ workspaceRoot, pipeline,
+    archiveStore: { list: async () => [], add: async () => {}, remove: async () => {} }, listProviders: async () => [] });
+  let run = await pipeline.start({ ...jointReworkBrief(), presentationMode: "character_drama" });
+  let current = (await studio.creativeReview(run.id))!;
+  assert.equal(current.stage, "treatment");
+  run = await pipeline.confirmCreativeReview(run.id, { commandId: "mc-treatment", actor: "creator", stage: current.stage,
+    expectedRunRevision: current.runRevision, expectedReviewRevision: current.reviewRevision, baseDraftSha256: current.draftSha256,
+    expectedCheckIdentity: current.checkResult!.checkIdentity });
+  current = (await studio.creativeReview(run.id))!;
+  assert.equal(current.stage, "script");
+  const original = await pipeline.loadPersisted(run.id);
+  const command = (document: unknown, commandId: string) => ({ action: "edit_draft" as const, commandId, actor: "creator", stage: "script" as const,
+    expectedRunRevision: current.runRevision, expectedReviewRevision: current.reviewRevision, baseDraftSha256: current.draftSha256,
+    baseDraftVersionId: current.draftVersionId, document });
+  for (const fault of ["missing-speaker", "empty-appearance", "wrong-mode"] as const) {
+    const invalid = structuredClone(script);
+    if (fault === "missing-speaker") invalid.scenes[0].dialogue[0].speaker_id = "no-such-role";
+    if (fault === "empty-appearance") invalid.characters[0].appearance = "";
+    if (fault === "wrong-mode") delete invalid.version;
+    await assert.rejects(async () => { const dispatched = await pipeline.dispatchCreativeReviewCommand(run.id, command(invalid, "invalid-" + fault)); await dispatched.completion; });
+    assert.deepEqual(await pipeline.loadPersisted(run.id), original, "无效稿不得消耗版本或把主制作打为失败");
+  }
+  const six = structuredClone(script);
+  six.characters.push(...[5, 6].map(n => ({ id: "role_" + n, name: "新增角色" + n, kind: "character",
+    appearance: "蓝色外套", personality: "", voice_intent: "", voice_profile_id: null })));
+  six.scenes[0].dialogue[0].speaker_id = "role_6";
+  const saved = await pipeline.dispatchCreativeReviewCommand(run.id, command(six, "six-roles"));
+  await saved.completion;
+  const readback = (await studio.creativeReview(run.id))!;
+  assert.deepEqual(readback.draft, six);
+  assert.notEqual(readback.draftVersionId, current.draftVersionId);
+  assert.equal(audits, 1, "手改不自动再次审计");
+  assert.equal((await pipeline.loadPersisted(run.id))!.status, "needs_human");
+  assert.deepEqual(current.draft, script, "旧稿只读保留");
+});
 
 it("replays scoped approval through the formal HTTP consumer before stale-page guards and allows local rework", async () => {
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-decision-http-"));
@@ -219,17 +621,23 @@ async function jsonLineCount(file: string): Promise<number> {
 }
 
 // 只替换付费网络边界。声音生成、真实FFmpeg排轨、字幕回执/恢复与worker协议均为生产实现。
-async function controlledVoiceWorker(request: Record<string, unknown>): Promise<WorkerResponse> {
+async function controlledVoiceWorker(request: Record<string, unknown>, holdThird = false): Promise<WorkerResponse> {
   const script = `
 import sys, json, hashlib, subprocess, io
+from pathlib import Path
 from unittest.mock import patch
 from video_factory.worker import handle_request
 request = json.load(sys.stdin)
 recover = request['input'].get('recover_subtitles') is True
 def synthesize(http_request, audio, metadata_path=None, response_binding=None):
     if recover: raise AssertionError('subtitle recovery entered paid synthesis')
+    counts = Path(request['outputDir']).parent / 'controlled-submissions.jsonl'
+    with counts.open('a') as log: log.write(json.dumps(response_binding) + '\\n')
     subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', str(audio)], check=True)
     metadata_path.write_text(json.dumps({'request': response_binding, 'audio_sha256': hashlib.sha256(audio.read_bytes()).hexdigest(), 'audio_size_bytes': audio.stat().st_size, 'subtitle_file': 'https://example.org/original-subtitles.json'}))
+    if ${holdThird ? "True" : "False"} and len(counts.read_text().splitlines()) == 3:
+        metadata_path.rename(str(metadata_path) + '.pending')
+        raise TimeoutError('accepted without response')
     return audio
 def download(*args, **kwargs):
     if not recover: raise OSError('controlled initial subtitle transport failure')
@@ -3611,6 +4019,121 @@ describe("F01 series unaudited revision can enter normal production (2026-10-02)
     }
   });
 });
+
+for (const failureMode of ["current", "invalid_returned", "legacy_trace_only", "legacy_prepared", "unknown"] as const) {
+it(`keeps a preserved script editable after downstream generation failure (${failureMode})`, async () => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-planning-generation-recovery-"));
+  const spies: ReworkSpies = { treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] };
+  const agents = jointReworkAgents(spies);
+  const original = agents.directorAgent!.planDetailed!;
+  let directorAttempts = 0;
+  agents.directorAgent!.planDetailed = async (...args) => {
+    if (args[0].creativeReviewExecution?.mode !== "check" && ++directorAttempts === 1) {
+      if (failureMode === "invalid_returned") {
+        await runRoleAgentLoop({ role: "导演", contractVersion: "controlled", criteria: ["来源必须可用"], maxIterations: 1,
+          produce: async () => ({ output: { invalid: true } }),
+          audit: async () => { throw new Error("无效生成不得调用审计"); },
+          validate: () => { throw new Error("unavailable source in returned plan"); } });
+        throw new Error("应拒绝已返回的无效导演方案");
+      }
+      throw new RoleAgentLoopError("受控导演结构不符合合同", {
+        version: "video-factory/agent-loop-v1", role: "视觉导演", contractVersion: "controlled",
+        criteria: [], status: "failed", maxIterations: 1, iterations: [], failure: { stage: failureMode === "unknown" ? "uncertain" : "completed_failure" },
+      }, undefined, failureMode.startsWith("legacy_") ? undefined : new CodexBridgeError("受控导演结构不符合合同", false,
+        failureMode === "unknown" ? "uncertain" : "completed_failure", 422,
+        undefined, { category: "invalid_output", reasonCode: "task_schema", providerId: "controlled", modelId: "controlled" }));
+    }
+    return original(...args);
+  };
+  const pipeline = new ProductionPipeline({ workspaceRoot, worker: new ReworkWorker(), ...agents,
+    assetProviders: REWORK_ASSET_PROVIDERS });
+  const studio = new ProductionStudio({ workspaceRoot, pipeline,
+    archiveStore: { list: async () => [], add: async () => {}, remove: async () => {} }, listProviders: async () => [] });
+  let run = await pipeline.start(jointReworkBrief());
+  for (const stage of ["treatment", "script"] as const) {
+    const shown = (await studio.creativeReview(run.id))!;
+    assert.equal(shown.stage, stage);
+    run = await pipeline.confirmCreativeReview(run.id, { commandId: `adopt-${stage}`, actor: "creator", stage,
+      expectedRunRevision: run.revision, expectedReviewRevision: shown.reviewRevision,
+      baseDraftSha256: shown.draftSha256, expectedCheckIdentity: shown.checkResult!.checkIdentity });
+  }
+  assert.equal(directorAttempts, 1);
+  if (failureMode === "current" || failureMode === "invalid_returned") {
+    assert.equal(run.status, "needs_human", "已核清的生成失败应保留可操作停点，无须先把制作判死");
+    const saved = run.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as {
+      creativeReview: { stages: { script: { confirmationHistory: unknown[] }; director: { currentDocument: unknown } } }; planningStop: { detail: string } };
+    assert.equal(saved.creativeReview.stages.script.confirmationHistory.length, 1, "原采用记录保留");
+    assert.equal(saved.creativeReview.stages.director.currentDocument, null, "失败不能虚构导演稿");
+    assert.match(saved.planningStop.detail, /导演方案生成没有完成/);
+  }
+  // 兼容云端已发生的 failed→显式恢复形态；新执行可以直接保留人工停点。
+  if (run.status === "failed") {
+    const output = run.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as {
+      creativeReview: { reviewRevision: number; stages: { script: { currentDraft: { artifactId: string; versionId: string; sha256: string } } } };
+    };
+    const draft = output.creativeReview.stages.script.currentDraft;
+    const preparation = {
+      commandId: "prepare-failed-director", expectedRunRevision: run.revision, nodeId: "creative-planning", stage: "script",
+      targetArtifactId: draft.artifactId, targetVersionId: draft.versionId, targetSha256: draft.sha256,
+    } as const;
+    if (failureMode === "unknown") {
+      await assert.rejects(() => pipeline.prepareReviewContinuation(run.id, preparation), /原结果尚未核清/);
+      assert.equal(directorAttempts, 1, "unknown 不能被恢复动作换成新生成");
+      assert.deepEqual(await pipeline.loadPersisted(run.id), run, "拒绝恢复不能破坏原稿或请求身份");
+      return;
+    }
+    if (failureMode === "legacy_prepared") {
+      // 历史持久化夹具：旧prepare只恢复run的人工停点，未动图。不能调用新版prepare，
+      // 否则它会先修好图，遗漏用户已在旧版点击恢复后直接保存的实际故障入口。
+      const legacy = structuredClone(run);
+      legacy.status = "needs_human";
+      legacy.revision += 1;
+      const node = legacy.nodeRuns.find(item => item.nodeId === "creative-planning")!;
+      assert.ok(node.error, "旧恢复保留原失败与当前trace，不能凭空构造失败豁免");
+      node.status = "needs_human";
+      node.intervention = {
+        id: "legacy-prepared-gate", nodeId: "creative-planning", kind: "creative_review",
+        reason: "历史版本已恢复保留稿", requiredAction: "approve", options: ["approve", "request_changes"],
+        createdAt: "2026-10-06T00:00:00.000Z",
+        continuation: { stage: "script", reviewRevision: output.creativeReview.reviewRevision, draftSha256: draft.sha256 },
+      };
+      legacy.interventions = [...legacy.interventions.filter(item => item.nodeId !== "creative-planning"), node.intervention];
+      await new FileRunStore(path.join(workspaceRoot, "runs")).save(legacy, run.revision);
+      run = await pipeline.loadPersisted(run.id);
+    } else {
+      run = await pipeline.prepareReviewContinuation(run.id, preparation);
+      assert.deepEqual(await pipeline.prepareReviewContinuation(run.id, preparation), run, "准备同体重放不再次移动图游标");
+    }
+  }
+  assert.equal(run.status, "needs_human");
+  const snapshot = (await studio.creativeReview(run.id))!;
+  assert.equal(snapshot.stage, "script");
+  const document = structuredClone(snapshot.draft) as { scenes: Array<{ narration: string }> };
+  document.scenes[0]!.narration = "用户保存的新开头";
+  const editing = await pipeline.dispatchCreativeReviewCommand(run.id, {
+    action: "edit_draft", commandId: "edit-after-director-failure", actor: "creator", stage: "script",
+    expectedRunRevision: run.revision, expectedReviewRevision: snapshot.reviewRevision,
+    baseDraftSha256: snapshot.draftSha256, document,
+  });
+  run = await editing.completion;
+  assert.equal(directorAttempts, 1, "保存上游脚本不能暗中重发下游导演生成");
+  const edited = (await studio.creativeReview(run.id))!;
+  assert.equal(edited.stage, "script");
+  assert.deepEqual(edited.draft, document, "本次修改必须应用到真实图停点，不能被吞掉");
+  assert.equal(edited.checkResult, undefined, "手动修改后不得自动补审");
+  assert.equal(spies.treatmentCalls, 1);
+  assert.equal(spies.screenwriterBodies.length, 1);
+  const adoption = { commandId: "continue-after-edit", actor: "creator", stage: "script" as const,
+    expectedRunRevision: run.revision, expectedReviewRevision: edited.reviewRevision,
+    baseDraftSha256: edited.draftSha256, acknowledgeUnaudited: true as const };
+  run = await pipeline.confirmCreativeReview(run.id, adoption);
+  assert.equal(directorAttempts, 2, "只有用户明确采用才重新生成下游");
+  assert.equal((await studio.creativeReview(run.id))!.stage, "director", "恢复后能到达真实导演稿确认，不跳过它");
+  assert.equal(spies.directorInputs.at(-1)!.scenes[0]!.narration, "用户保存的新开头", "导演必须使用修改后的脚本");
+  assert.deepEqual(await pipeline.confirmCreativeReview(run.id, adoption), run, "同一采用重放不再次生成");
+  assert.equal(directorAttempts, 2);
+});
+}
 
 describe("F03 explicit preparation restores a historically failed creative stop (D06)", () => {
   it("recovers the preserved workbench through the formal route with idempotent receipts", async () => {

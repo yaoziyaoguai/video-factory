@@ -1,0 +1,38 @@
+{
+  "invalid": [
+    {"name":"unknown_version","path":["version"],"value":"video-factory/character-script-v9"},
+    {"name":"duplicate_character","path":["characters",1,"id"],"value":"shopkeeper"},
+    {"name":"unsafe_id","path":["characters",0,"id"],"value":"../shopkeeper"},
+    {"name":"unknown_visible_character","path":["scenes",0,"character_ids"],"value":["missing"]},
+    {"name":"duplicate_visible_character","path":["scenes",0,"character_ids"],"value":["shopkeeper","shopkeeper"]},
+    {"name":"narrator_on_screen","path":["characters",0,"kind"],"value":"narrator"},
+    {"name":"unknown_speaker","path":["scenes",0,"dialogue",0,"speaker_id"],"value":"missing"},
+    {"name":"duplicate_turn","path":["scenes",1,"dialogue",0,"id"],"value":"turn_01"},
+    {"name":"negative_pause","path":["scenes",0,"dialogue",0,"after_pause_frames"],"value":-1},
+    {"name":"fractional_pause","path":["scenes",0,"dialogue",0,"after_pause_frames"],"value":0.5},
+    {"name":"unsafe_pause","path":["scenes",0,"dialogue",0,"after_pause_frames"],"value":9007199254740992},
+    {"name":"pause_overflows_scene","path":["scenes",0,"dialogue",0,"after_pause_frames"],"value":180},
+    {"name":"no_speech_text","path":["scenes",0,"dialogue",0,"text"],"value":"   "},
+    {"name":"fake_narration","path":["scenes",0,"narration"],"value":"不能回退为单旁白"},
+    {"name":"dialogue_evidence_claim","path":["scenes",0,"dialogue",0,"text"],"value":"这个生成画面证明了实验效果。"},
+    {"name":"noncontiguous_position","path":["scenes",1,"position"],"value":3}
+  ],
+  "script": {
+    "version": "video-factory/character-script-v1",
+    "viewerPromise": "四个人找一把钥匙。",
+    "narrativeArc": "丢失、线索、找到、收束。",
+    "canonFacts": [],
+    "characters": [
+      {"id":"shopkeeper","name":"店主","kind":"character","appearance":"短发，深蓝围裙，白衬衫。","personality":"着急但愿意道歉。","voice_intent":"沉稳男声。","voice_profile_id":"minimax:male-qn-jingying"},
+      {"id":"courier","name":"快递员","kind":"character","appearance":"灰色外套，黑色配送包。","personality":"冷静。","voice_intent":"年轻男声。","voice_profile_id":"minimax:male-qn-daxuesheng"},
+      {"id":"neighbor","name":"邻居","kind":"character","appearance":"短卷发，米色针织衫。","personality":"直率。","voice_intent":"成年女声。","voice_profile_id":"minimax:female-chengshu"},
+      {"id":"student","name":"学生","kind":"character","appearance":"马尾，绿色运动外套。","personality":"善于观察。","voice_intent":"年轻女声。","voice_profile_id":"minimax:female-shaonv"}
+    ],
+    "scenes": [
+      {"position":1,"purpose":"提出问题。","duration":6,"visual_strategy":"generated","visual_prompt":"虚构小店，店主找钥匙，快递员在门边。","visible_action":"店主摸空口袋。","search_terms":["虚构小店柜台"],"character_ids":["shopkeeper","courier"],"dialogue":[{"id":"turn_01","speaker_id":"shopkeeper","text":"钥匙不见了。","delivery":"着急。","after_pause_frames":3},{"id":"turn_02","speaker_id":"courier","text":"谁碰过柜台？","delivery":"询问。","after_pause_frames":0}]},
+      {"position":2,"purpose":"线索。","duration":6,"visual_strategy":"generated","visual_prompt":"邻居指向杯子，学生俯身听。","visible_action":"学生轻推杯子。","search_terms":["虚构杯垫钥匙"],"character_ids":["neighbor","student"],"dialogue":[{"id":"turn_03","speaker_id":"neighbor","text":"我挪过杯子。","delivery":"说明。","after_pause_frames":3},{"id":"turn_04","speaker_id":"student","text":"杯垫下有声音。","delivery":"提醒。","after_pause_frames":0}]},
+      {"position":3,"purpose":"解决误会。","duration":6,"visual_strategy":"generated","visual_prompt":"店主取出钥匙，快递员摆手。","visible_action":"店主举起钥匙。","search_terms":["虚构找到钥匙"],"character_ids":["shopkeeper","courier"],"dialogue":[{"id":"turn_05","speaker_id":"shopkeeper","text":"找到了，对不起。","delivery":"道歉。","after_pause_frames":3},{"id":"turn_06","speaker_id":"courier","text":"是她听见的。","delivery":"说明。","after_pause_frames":0}]},
+      {"position":4,"purpose":"收束。","duration":6,"visual_strategy":"generated","visual_prompt":"邻居指向挂钩，学生挂好钥匙。","visible_action":"学生回头微笑。","search_terms":["虚构钥匙挂钩"],"character_ids":["neighbor","student"],"dialogue":[{"id":"turn_07","speaker_id":"neighbor","text":"给它固定位置。","delivery":"建议。","after_pause_frames":3},{"id":"turn_08","speaker_id":"student","text":"别再躲猫猫了。","delivery":"玩笑。","after_pause_frames":0}]}
+    ]
+  }
+}

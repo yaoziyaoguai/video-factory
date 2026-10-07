@@ -1260,8 +1260,6 @@ body { background: var(--canvas); }
 .studio-v3 .message-user { margin-left: 24px; background: #eee9df; }
 .studio-v3 .message-assistant { margin-right: 24px; background: var(--surface); border: 1px solid var(--line); }
 .studio-v3 .creative-empty-chat { color: var(--muted); display: flex; gap: 8px; align-items: center; }
-.studio-v3 .creative-quick-prompts { display: flex; gap: 7px; flex-wrap: wrap; margin: 14px 0; }
-.studio-v3 .creative-quick-prompts button { border: 1px solid var(--line); border-radius: 999px; background: var(--surface); padding: 6px 10px; }
 .studio-v3 .creative-composer { display: grid; gap: 6px; }
 .studio-v3 .creative-composer textarea { min-height: 110px; resize: vertical; }
 .studio-v3 .creative-composer small { color: var(--muted); }

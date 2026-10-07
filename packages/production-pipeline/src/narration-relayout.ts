@@ -2,7 +2,15 @@
 
 export const RELAYOUT_OPERATION_VERSION = "video-factory/narration-relayout-operation-v1";
 export const RELAYOUT_COMPLETION_VERSION = "video-factory/narration-relayout-completion-v1";
+export const CHARACTER_RELAYOUT_COMPLETION_VERSION = "video-factory/narration-relayout-completion-v2";
 export const NARRATION_FIT_CONFLICT_V2_VERSION = "video-factory/narration-fit-conflict-v2";
+export const NARRATION_FIT_CONFLICT_V3_VERSION = "video-factory/narration-fit-conflict-v3";
+
+export function voiceSourceManifestVersionFor(planVersion: unknown): string {
+  if (planVersion === "video-factory/narration-plan-v3") return "video-factory/voice-source-manifest-v2";
+  if (planVersion === "video-factory/narration-plan-v1" || planVersion === "video-factory/narration-plan-v2") return "video-factory/voice-source-manifest-v1";
+  throw new Error("声音来源清单的计划版本未知。");
+}
 
 export interface NarrationRelayoutCompletionArtifact {
   kind: string;
@@ -13,7 +21,7 @@ export interface NarrationRelayoutCompletionArtifact {
 }
 
 export interface NarrationRelayoutCompletion {
-  version: typeof RELAYOUT_COMPLETION_VERSION;
+  version: typeof RELAYOUT_COMPLETION_VERSION | typeof CHARACTER_RELAYOUT_COMPLETION_VERSION;
   requestDigest: string;
   commandId: string;
   layoutOperationId: string;
@@ -28,7 +36,7 @@ export interface NarrationRelayoutCompletion {
     pcmRelativePath: string;
     trackRelativePath: string;
     voiceoverPlanRelativePath: string;
-    narrationMode: "continuous_groups";
+    narrationMode: "continuous_groups" | "character_turns";
     subtitleStatus: string;
     layoutKey: string;
     voiceOperationId: string;
@@ -54,6 +62,14 @@ export interface NarrationFitConflictV2 {
   sourceContextId: string;
   manifestArtifactId: string;
   manifestSha256: string;
+}
+
+export interface NarrationFitConflictV3 extends Omit<NarrationFitConflictV2, "version" | "code" | "sourceRange"> {
+  version: typeof NARRATION_FIT_CONFLICT_V3_VERSION;
+  code: "NARRATION_TURN_DOES_NOT_FIT";
+  turnId: string;
+  speakerId: string;
+  voiceProfileId: string;
 }
 
 export type RelayoutNarrationSource = {
@@ -84,7 +100,7 @@ export interface RelayoutNarrationDraft {
   note: string;
   source: RelayoutNarrationSource;
   layout: {
-    narrationPlanVersion: "video-factory/narration-plan-v1" | "video-factory/narration-plan-v2";
+    narrationPlanVersion: "video-factory/narration-plan-v1" | "video-factory/narration-plan-v2" | "video-factory/narration-plan-v3";
     groups: Array<{ groupId: string;
       window: { startFrame: number; endFrame: number };
       placement: { anchor: "start" | "end"; offsetFrames: number } }>;
@@ -139,13 +155,14 @@ export function parseNarrationRelayoutCompletion(value: unknown): NarrationRelay
     throw new Error("本地排轨完成收据必须是对象。");
   }
   const receipt = value as Record<string, unknown>;
-  if (receipt.version !== RELAYOUT_COMPLETION_VERSION || receipt.nodeId !== "voice") {
+  if ((receipt.version !== RELAYOUT_COMPLETION_VERSION && receipt.version !== CHARACTER_RELAYOUT_COMPLETION_VERSION) || receipt.nodeId !== "voice") {
     throw new Error("本地排轨完成收据版本或节点无效。");
   }
   const attempt = safeInt(receipt.attempt, "本地排轨 attempt");
   if (attempt < 1) throw new Error("本地排轨 attempt 必须从 1 开始。");
   const output = receipt.output as Record<string, unknown> | undefined;
-  if (!output || output.narrationMode !== "continuous_groups" || output.externalSendCount !== 0) {
+  const narrationMode = receipt.version === CHARACTER_RELAYOUT_COMPLETION_VERSION ? "character_turns" : "continuous_groups";
+  if (!output || output.narrationMode !== narrationMode || output.externalSendCount !== 0) {
     throw new Error("本地排轨完成收据的安全输出不完整。");
   }
   const artifactsValue = receipt.artifacts;
@@ -185,7 +202,7 @@ export function parseNarrationRelayoutCompletion(value: unknown): NarrationRelay
     throw new Error("本地排轨完成收据的布局操作身份不一致。");
   }
   return {
-    version: RELAYOUT_COMPLETION_VERSION,
+    version: receipt.version,
     requestDigest: sha256Hex(receipt.requestDigest, "排轨请求摘要"),
     commandId,
     layoutOperationId,
@@ -200,7 +217,7 @@ export function parseNarrationRelayoutCompletion(value: unknown): NarrationRelay
       pcmRelativePath: relativeArtifactPath(output.pcmRelativePath, "未 mastering PCM 路径"),
       trackRelativePath: relativeArtifactPath(output.trackRelativePath, "音轨路径"),
       voiceoverPlanRelativePath: relativeArtifactPath(output.voiceoverPlanRelativePath, "声音时间线路径"),
-      narrationMode: "continuous_groups",
+      narrationMode,
       subtitleStatus: safeId(output.subtitleStatus, "字幕状态", 100),
       layoutKey: safeId(output.layoutKey, "布局键", 200),
       voiceOperationId: safeId(output.voiceOperationId, "原声音操作", 200),
@@ -265,6 +282,38 @@ export function parseNarrationFitConflictV2(value: unknown): NarrationFitConflic
 }
 
 /** source.kind 穷尽分派：不靠 optional 字段堆出一个分不清来源的对象。 */
+export function parseNarrationFitConflictV3(value: unknown): NarrationFitConflictV3 {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("角色声音冲突必须是对象。");
+  const c = value as Record<string, unknown>;
+  if (c.version !== NARRATION_FIT_CONFLICT_V3_VERSION || c.code !== "NARRATION_TURN_DOES_NOT_FIT" || "sourceRange" in c) {
+    throw new Error("角色声音冲突版本或错误码无效。");
+  }
+  const groupId = safeId(c.groupId, "台词身份", 64);
+  const turnId = safeId(c.turnId, "台词身份", 64);
+  const speakerId = safeId(c.speakerId, "角色身份", 64);
+  if (groupId !== turnId || ![turnId, speakerId].every((id) => /^[A-Za-z0-9_-]{1,64}$/.test(id))) throw new Error("台词与角色身份不一致。");
+  const voiceProfileId = safeId(c.voiceProfileId, "角色音色", 200);
+  const window = c.window as Record<string, unknown> | undefined;
+  const placement = c.placement as Record<string, unknown> | undefined;
+  if (!window || !placement) throw new Error("角色声音冲突缺少窗口或落点。");
+  const startFrame = safeInt(window.startFrame, "窗口起点"), endFrame = safeInt(window.endFrame, "窗口终点");
+  const offsetFrames = safeInt(placement.offsetFrames, "落点偏移");
+  const sourceSamples = safeInt(c.sourceSamples, "原声样本数");
+  const requiredFrames = safeInt(c.requiredFrames, "需要帧数"), availableFrames = safeInt(c.availableFrames, "可用帧数");
+  const shortfallFrames = safeInt(c.shortfallFrames, "缺口帧数"), positions = c.sourceScenePositions;
+  if (endFrame <= startFrame || sourceSamples <= 0 || requiredFrames !== Math.ceil(sourceSamples / 1470) + offsetFrames
+    || availableFrames !== endFrame - startFrame || shortfallFrames !== Math.max(0, requiredFrames - availableFrames)
+    || !Array.isArray(positions) || positions.length !== 1 || !Number.isSafeInteger(positions[0]) || Number(positions[0]) < 1
+    || !voiceProfileId.startsWith("minimax:") || (placement.anchor !== "start" && placement.anchor !== "end")) {
+    throw new Error("角色声音冲突的范围或帧数事实不一致。");
+  }
+  return { version: NARRATION_FIT_CONFLICT_V3_VERSION, code: "NARRATION_TURN_DOES_NOT_FIT", groupId, turnId, speakerId,
+    voiceProfileId, sourceScenePositions: positions.map(Number), window: { startFrame, endFrame },
+    placement: { anchor: placement.anchor, offsetFrames }, sourceSamples, requiredFrames, availableFrames, shortfallFrames,
+    sourceOperationId: safeId(c.sourceOperationId, "原声音操作", 200), sourceContextId: safeId(c.sourceContextId, "来源上下文", 200),
+    manifestArtifactId: safeId(c.manifestArtifactId, "来源清单产物", 200), manifestSha256: sha256Hex(c.manifestSha256, "来源清单摘要") };
+}
+
 export function parseRelayoutSource(value: unknown): RelayoutNarrationSource {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("relayout 来源必须是对象。");
@@ -322,11 +371,27 @@ export function parseNarrationRelayoutRequest(value: unknown): NarrationRelayout
   if (!note || note.length > 2_000) throw new Error("时间调整说明必须是 1–2000 字。");
   const layout = draft.layout as Record<string, unknown> | undefined;
   if (!layout || typeof layout !== "object") throw new Error("时间调整缺少新布局。");
+  const characterLayout = layout.narrationPlanVersion === "video-factory/narration-plan-v3";
+  const onlyFields = (candidate: unknown, fields: string[]) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)
+      || Object.keys(candidate).some((key) => !fields.includes(key))) {
+      throw new Error("角色时间调整不能包含正文、角色或音色字段。");
+    }
+  };
+  if (characterLayout) onlyFields(layout, ["narrationPlanVersion", "groups", "userSilences"]);
   const groups = layout.groups;
-  if (!Array.isArray(groups) || !groups.length) throw new Error("新布局必须以原顺序列出全部分组。");
+  if (!Array.isArray(groups) || (!groups.length && layout.narrationPlanVersion !== "video-factory/narration-plan-v3")) throw new Error("新布局必须以原顺序列出全部分组。");
   for (const entry of groups as Array<Record<string, unknown>>) {
+    if (layout.narrationPlanVersion === "video-factory/narration-plan-v3" && entry
+      && Object.keys(entry).some((key) => !["groupId", "window", "placement"].includes(key))) {
+      throw new Error("角色时间调整不能包含正文、角色或音色字段。");
+    }
     const window = entry?.window as Record<string, unknown> | undefined;
     const placement = entry?.placement as Record<string, unknown> | undefined;
+    if (characterLayout) {
+      onlyFields(window, ["startFrame", "endFrame"]);
+      onlyFields(placement, ["anchor", "offsetFrames"]);
+    }
     if (typeof entry?.groupId !== "string" || !entry.groupId.trim()
       || !Number.isSafeInteger(window?.startFrame) || !Number.isSafeInteger(window?.endFrame)
       || (placement?.anchor !== "start" && placement?.anchor !== "end")
@@ -337,12 +402,13 @@ export function parseNarrationRelayoutRequest(value: unknown): NarrationRelayout
   const userSilences = layout.userSilences;
   if (!Array.isArray(userSilences)) throw new Error("新布局的显式留白必须是列表。");
   for (const silence of userSilences as Array<Record<string, unknown>>) {
+    if (characterLayout) onlyFields(silence, ["startFrame", "endFrame"]);
     if (!Number.isSafeInteger(silence?.startFrame) || !Number.isSafeInteger(silence?.endFrame)) {
       throw new Error("显式留白必须是整数帧区间。");
     }
   }
   const layoutVersion = layout.narrationPlanVersion;
-  if (layoutVersion !== "video-factory/narration-plan-v1" && layoutVersion !== "video-factory/narration-plan-v2") {
+  if (layoutVersion !== "video-factory/narration-plan-v1" && layoutVersion !== "video-factory/narration-plan-v2" && layoutVersion !== "video-factory/narration-plan-v3") {
     throw new Error("新布局的计划版本未知。");
   }
   return {

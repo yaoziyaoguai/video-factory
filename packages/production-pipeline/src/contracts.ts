@@ -361,6 +361,7 @@ export interface ProductionSeriesContext {
 
 export interface ProductionBrief {
   protocolVersion: typeof BRIEF_PROTOCOL_VERSION;
+  presentationMode?: "narration" | "character_drama";
   title: string;
   angle: string;
   audience: string;
@@ -407,7 +408,7 @@ const PRODUCTION_BRIEF_INPUT_KEYS = new Set([
   "platform", "reviewMode", "runPurpose", "visualReviewPolicy", "providers", "models", "modelSelectionSources", "frozenModelSelections", "workflowFeatures",
   "referenceVideo", "director", "economics", "spendFeedback", "voiceDirection", "editorial", "visualProof",
   "visualIntent", "visualPlan", "visualPlanAdopted", "seriesContext", "creationContext", "rework", "taskContractDigests",
-  "articleSources", "budgetIntentionCny",
+  "articleSources", "budgetIntentionCny", "presentationMode",
   // 模板字段只为旧调用方提供明确的弃用剥离；它们不会进入有效 brief。
   "template", "templateSnapshot",
 ]);
@@ -423,6 +424,9 @@ export function parseBrief(value: unknown): ProductionBrief {
   }
   const unknownField = Object.keys(value).find((key) => !PRODUCTION_BRIEF_INPUT_KEYS.has(key));
   if (unknownField) throw new Error(`Brief field '${unknownField}' is not allowed.`);
+  if (value.presentationMode !== undefined && value.presentationMode !== "narration" && value.presentationMode !== "character_drama") {
+    throw new Error("presentationMode must be narration or character_drama.");
+  }
 
   const providers = requireRecord(value.providers, "providers");
   const models = parseModelSelections(value.models);
@@ -494,6 +498,7 @@ export function parseBrief(value: unknown): ProductionBrief {
 
   return {
     protocolVersion: BRIEF_PROTOCOL_VERSION,
+    ...(value.presentationMode !== undefined ? { presentationMode: value.presentationMode } : {}),
     title: requireString(value.title, "title"),
     angle: requireString(value.angle, "angle"),
     audience: requireString(value.audience, "audience"),

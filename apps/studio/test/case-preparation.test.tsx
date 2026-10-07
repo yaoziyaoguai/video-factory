@@ -50,6 +50,21 @@ afterEach(() => {
 
 // CLOUD-08/P3（V10）：案例入口标题留空由用户命名，角度保留完整意图；摘要不再三重推导。
 describe("case preparation form", () => {
+  it.each(["manual", "trend", "case", "series"] as const)("MC-A01 submits character_drama from the shared %s entry without changing source settings", async (origin) => {
+    const onSubmit = vi.fn(async (_input: StudioProductionInput) => undefined);
+    const creationContext = { origin, opportunityId: origin === "case" ? "" : "op-1", ...(origin === "case" ? { caseSelectionId: "case-1" } : {}) };
+    render(<NewRunDialog open providers={providers} initialValues={{ title: "找钥匙", angle: "四人短剧", audience: "年轻观众", creationContext }} onClose={() => undefined} onSubmit={onSubmit} />);
+    expect(screen.getByLabelText("视频形式")).toHaveValue("narration");
+    await userEvent.selectOptions(screen.getByLabelText("视频形式"), "character_drama");
+    expect(screen.getByText("按角色分别配音；不包含口型同步或模型原声对白。" )).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /开始前期构思/ }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    const input = onSubmit.mock.calls[0]![0];
+    expect(input.presentationMode).toBe("character_drama");
+    expect(input.creationContext).toEqual(creationContext);
+    expect(input.providers.voice).toBe("macos-say-v1");
+    expect(input.economics.allowMeteredProviders).toBe(false);
+  });
   it("opens with an empty required title, the full intent as angle, and a naming hint", () => {
     renderCaseDialog();
     const title = screen.getByLabelText(/视频标题/) as HTMLInputElement;

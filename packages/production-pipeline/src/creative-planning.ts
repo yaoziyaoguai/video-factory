@@ -250,7 +250,7 @@ export interface CreateCreativePlanningGraphOptions {
 export type CreativePlanningRunOutcome =
   | { status: "completed"; state: CreativePlanningState; executablePlan: PlanningArtifact<ExecutableProductionPlan> }
   | { status: "halted"; state: CreativePlanningState; halt: PlanningHalt }
-  | { status: "waiting_user"; state: CreativePlanningState; gate: CreativeReviewGate };
+  | { status: "waiting_user"; state: CreativePlanningState; gate: CreativeReviewGate; generationError?: RoleAgentLoopError };
 
 const PlanningGraphAnnotation = Annotation.Root({
   runId: Annotation<string>(),
@@ -1106,7 +1106,7 @@ function availabilityBlockerObservation(
     // 目标变化必须来自已接受稿件中的画面/动作/成功条件，而不是导演本轮同义改写。
     return {
       purpose: scene.purpose ?? "",
-      narration: scene.narration,
+      ...("dialogue" in scene ? { dialogue: scene.dialogue, characterIds: scene.character_ids } : { narration: scene.narration }),
       visualStrategy: scene.visual_strategy,
       visualPrompt: scene.visual_prompt,
       visibleAction: scene.visible_action ?? "",
@@ -1837,16 +1837,95 @@ export async function runCreativePlanning(
       }, "director");
     }
     // 恢复：invoke(null) 从 checkpoint 继续，不重跑已完成节点，也不重置跨角色计数。
-    finalState = await graph.invoke(
-      options.resume ? new Command({ resume: options.resume }) : null,
-      config,
-    ) as PlanningGraphState;
+    try {
+      finalState = await graph.invoke(
+        options.resume ? new Command({ resume: options.resume }) : null,
+        config,
+      ) as PlanningGraphState;
+    } catch (error) {
+      // 只有已核清的生成失败才能退回真实人工停点；unknown 保持原请求恢复语义。
+      if (!(error instanceof RoleAgentLoopError) || !isCompletedRoleAgentFailure(error)) throw error;
+      const recovered = await reopenPlanningGenerationGate(graph, canonicalInput.runId, canonicalInput.inputDigest);
+      if (!recovered) throw error;
+      return { status: "waiting_user", gate: creativeReviewGate(recovered.creativeReview, recovered.creativeReview.activeStage),
+        state: projectCreativePlanningState(recovered), generationError: error };
+    }
   } else {
     // 首次运行只消费入口已校验的 canonical 快照：options.input 是调用方可变对象，在上方
     // 首个 await 之后被原地改写或整体替换时，不得把变化后的值写进按入口身份计算的 thread。
     finalState = await graph.invoke(initialPlanningGraphState(canonicalInput), config) as PlanningGraphState;
   }
   return planningOutcome(finalState);
+}
+
+/** 已核清的下游生成失败：恢复的是图中的人工停点，不只是页面上的旧快照。调用方负责终态证明。 */
+export async function reopenPlanningGenerationGate(
+  graph: CreativePlanningGraph, runId: string, inputDigest: string,
+  target?: { stage: CreativeStage; versionId: string; sha256: string },
+): Promise<PlanningGraphState | undefined> {
+  const config = { configurable: { thread_id: planningThreadId(runId, inputDigest) } };
+  const snapshot = await graph.getState(config);
+  const state = snapshot.values as PlanningGraphState;
+  if (state.runId !== runId || state.inputDigest !== inputDigest || state.base.creativeReview !== CREATIVE_REVIEW_FEATURE) return undefined;
+  const review = state.creativeReview;
+  const stage = review.activeStage;
+  const current = review.stages[stage];
+  const draft = current.currentDraft;
+  if (!draft || contentSha256(current.currentDocument) !== draft.sha256
+    || target && (target.stage !== stage || target.versionId !== draft.versionId || target.sha256 !== draft.sha256)) return undefined;
+  // 图先落盘、run尚未落盘时的幂等恢复：不重复增加轮次或抹掉已应用的编辑。
+  if (snapshot.next.length === 1 && snapshot.next[0] === `${stage}_review` && current.phase === "waiting_user") {
+    return await graph.invoke(null, config) as PlanningGraphState;
+  }
+  const downstream = stage === "treatment" ? "script" : stage === "script" ? "director" : undefined;
+  if (!downstream || snapshot.next.length !== 1 || snapshot.next[0] !== downstream
+    || current.phase !== "confirmed" || review.stages[downstream].currentDraft || state.executablePlan) return undefined;
+  const name = downstream === "script" ? "脚本" : "导演方案";
+  const upstreamName = stage === "treatment" ? "构思" : "脚本";
+  await graph.updateState(config, {
+    stage,
+    creativeReview: { ...review, reviewRevision: review.reviewRevision + 1,
+      stages: { ...review.stages, [stage]: { ...current, phase: "waiting_user", confirmation: null } } },
+    planningStop: { reason: "needs_user", issueIds: [],
+      detail: `${name}生成没有完成，尚无可采用的${name}。已保留你的${upstreamName}及采用记录；你可以先修改，也可以采用当前稿重新生成${name}。不会自动重试或重做已完成的上游内容。` },
+  }, `${stage}_review`);
+  return await graph.invoke(null, config) as PlanningGraphState;
+}
+
+/** 已完成规划的显式返工：只重开人工脚本停点；双存储之间崩溃时按原命令恢复。 */
+export async function reopenCharacterScriptGate(
+  graph: CreativePlanningGraph, runId: string, inputDigest: string,
+  target: { artifactId: string; versionId: string; sha256: string }, commandId: string, actor: string,
+): Promise<PlanningGraphState> {
+  const config = { configurable: { thread_id: planningThreadId(runId, inputDigest) } };
+  const snapshot = await graph.getState(config);
+  const state = snapshot.values as PlanningGraphState;
+  const review = state.creativeReview;
+  const script = review?.stages.script;
+  if (state.runId !== runId || state.inputDigest !== inputDigest || state.base.creativeReview !== CREATIVE_REVIEW_FEATURE
+    || script?.currentDraft?.artifactId !== target.artifactId || script.currentDraft.versionId !== target.versionId
+    || script.currentDraft.sha256 !== target.sha256 || contentSha256(script.currentDocument) !== target.sha256) {
+    throw new Error("角色稿与后台版本不一致，请刷新后重新查看。");
+  }
+  const ownReturn = script.messages.some(message => message.commandId === commandId);
+  if (ownReturn && review.activeStage === "script" && script.phase === "waiting_user"
+    && snapshot.next.length === 1 && snapshot.next[0] === "script_review") {
+    return await graph.invoke(null, config) as PlanningGraphState;
+  }
+  if (snapshot.next.length || !state.executablePlan || review.stages[review.activeStage].phase !== "confirmed") {
+    throw new Error("规划尚未完成或已有另一项编辑，请查看当前停点。");
+  }
+  const waiting = structuredClone(review);
+  waiting.stages[waiting.activeStage].phase = "waiting_user";
+  const returned = returnCreativeReviewToStage(waiting, {
+    action: "return_to_stage", commandId, actor, stage: waiting.activeStage, targetStage: "script", acknowledgeImpact: true,
+    expectedReviewRevision: waiting.reviewRevision, baseDraftSha256: waiting.stages[waiting.activeStage].currentDraft!.sha256,
+  });
+  await graph.updateState(config, { ...invalidateAfterCreativeReturn(state, "script"), stage: "script", creativeReview: returned,
+    issues: [], halt: null, scopeConflict: null,
+    planningStop: { reason: "needs_user", issueIds: [], detail: "已返回角色与台词。已有媒体保留；保存不会生成，重新采用后才核对下游方案与费用。" },
+  }, "script_review");
+  return await graph.invoke(null, config) as PlanningGraphState;
 }
 
 function incompleteLibraryCompletion(state: Partial<PlanningGraphState>): boolean {

@@ -110,6 +110,33 @@ const hailuoProvider: StudioProvider = {
 };
 
 describe("node production workspaces", () => {
+  it("shows preserved planning drafts and their decisions when the latest attempt only registered diagnostics", async () => {
+    const read = vi.spyOn(studioApi, "resourceJson");
+    const output = { creativeReview: { activeStage: "script", stages: {
+      treatment: { phase: "confirmed", currentDraft: { versionId: "treatment#v1", sha256: "a".repeat(64) },
+        currentDocument: { viewerPromise: "已采用的真实构思", progression: [] },
+        confirmation: { versionId: "treatment#v1", draftSha256: "a".repeat(64) } },
+      script: { phase: "waiting_user", currentDraft: { versionId: "script#v4", sha256: "b".repeat(64) },
+        currentDocument: { scenes: [{ position: 1, narration: "保留的当前脚本", duration: 5 }] }, confirmation: null },
+      director: { phase: "drafting", currentDraft: null, currentDocument: null },
+    } } };
+    const node: StudioNode = { ...planningNode, status: "needs_human", output, artifactIds: ["diagnostic"],
+      outputState: { ...planningNode.outputState!, versions: [{ ...planningNode.outputState!.versions[0]!,
+        artifactIds: ["diagnostic"], output }] } };
+    render(<NodeWorkspace acceptedPlanDigest="" runId="run-partial" runRevision={9} node={node}
+      runStatus="needs_human" artifacts={[{ id: "diagnostic", kind: "agent_loop_trace", producerNodeId: "creative-planning",
+        createdAt: "2026-10-06T14:13:28Z", contentType: "application/json", contentUrl: "/diagnostic", sha256: "c".repeat(64) }]}
+      busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    await userEvent.click(screen.getByLabelText("创作规划 · 创作规划制片").querySelector("summary")!);
+    await userEvent.click(screen.getByRole("button", { name: /前期构思.*已采用/ }));
+    expect(await screen.findByText("已采用的真实构思")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /脚本.*待确认/ }));
+    expect((await screen.findAllByText("保留的当前脚本")).find(element => !element.closest("details:not([open])"))).toBeVisible();
+    expect(screen.getByRole("button", { name: /导演方案.*待生成/ })).toBeInTheDocument();
+    expect(screen.queryByText("当前版本未登记此项")).not.toBeInTheDocument();
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("offers reference-report revision and audit commands bound to the displayed document", async () => {
     vi.spyOn(studioApi, "documentCommands").mockResolvedValue([]);
     const revise = vi.fn(async () => undefined);

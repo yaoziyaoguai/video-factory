@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { isCharacterScript } from "../src/character-script.js";
 import {
   CodexBridgeClient,
   CodexScreenwriterAgent,
@@ -21,6 +23,18 @@ class CapturingCodexClient extends CodexBridgeClient {
     return this.respond();
   }
 }
+
+it("MC-A05 enforces selected presentation mode at the actual model consumer", async () => {
+  const draft = JSON.parse(readFileSync(new URL("../../../tests/fixtures/character-drama-cases.json", import.meta.url), "utf8")).script;
+  const client = new CapturingCodexClient(() => draft);
+  const agent = new CodexScreenwriterAgent({ client });
+  await assert.rejects(agent.draft(screenwriterInput()), /不匹配/);
+  const input = screenwriterInput();
+  input.brief.presentationMode = "character_drama";
+  input.brief.characterVoiceProfiles = [{ id: "minimax:female-chengshu", providerId: "minimax-tts-v1", label: "成熟女声" }];
+  assert.deepEqual(await agent.draft(input), draft);
+  assert.deepEqual((client.calls.at(-1)!.payload as { brief: Record<string, unknown> }).brief.characterVoiceProfiles, input.brief.characterVoiceProfiles);
+});
 
 class SequencedCodexClient extends CodexBridgeClient {
   readonly calls: Array<{
@@ -274,6 +288,7 @@ describe("CodexScreenwriterAgent", () => {
 
     const execution = await agent.draftDetailed({ ...input, selectedModelId: "deepseek-flash" });
 
+    assert.ok(!isCharacterScript(execution.output));
     assert.equal(execution.output.scenes[0]?.narration, "别眨眼，先看结果。");
     assert.deepEqual(producerClient.calls.map((call) => call.kind), ["script-draft", "script-draft"]);
     assert.deepEqual(auditClient.calls.map((call) => call.kind), ["role-audit", "role-audit"]);

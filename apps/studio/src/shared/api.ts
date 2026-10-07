@@ -84,6 +84,7 @@ export type {
 
 /** §2.2 v2 候选预览：只带候选（分段范围/窗口/落点/静默），文字与归属由服务端派生。 */
 export type StudioNarrationPreviewV2Input = {
+  version?: "video-factory/narration-plan-v2" | "video-factory/narration-plan-v3";
   expectedRunRevision: number;
   sourceContextId: string;
   editorSessionId: string;
@@ -94,6 +95,7 @@ export type StudioNarrationPreviewV2Input = {
 
 /** §2.2 v2 采用：只凭同身份票据保存，不另收计划本体。 */
 export type StudioNarrationConfirmV2Input = {
+  version?: "video-factory/narration-plan-v2" | "video-factory/narration-plan-v3";
   requestId: string;
   expectedRunRevision: number;
   sourceContextId: string;
@@ -1011,6 +1013,7 @@ export interface StudioRunArchiveInput {
 
 export interface StudioRunDetail extends StudioRunSummary {
   revision: number;
+  presentationMode?: "narration" | "character_drama";
   angle: string;
   audience: string;
   nicheSlug: string;
@@ -1027,6 +1030,7 @@ export interface StudioRunDetail extends StudioRunSummary {
   taskRecovery?: StudioTaskRecovery;
   optionalReviewTasks?: StudioOptionalReviewTask[];
   reviewContinuationTargets?: StudioReviewContinuationTarget[];
+  characterScriptEditTarget?: StudioReviewContinuationTarget;
   /** 宿主逐条核实 unknown 仅来自已登记的可选审计；不凭节点名放开采购。 */
   optionalReviewUncertaintySafe?: true;
   activeIntervention?: StudioIntervention;
@@ -2167,6 +2171,7 @@ export interface StudioReworkDraft {
 
 export interface StudioProductionInput {
   protocolVersion: "video-factory/brief-v1";
+  presentationMode?: "narration" | "character_drama";
   title: string;
   angle: string;
   audience: string;

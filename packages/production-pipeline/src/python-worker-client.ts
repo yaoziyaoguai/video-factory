@@ -20,6 +20,7 @@ export interface WorkerArtifactDescriptor {
   sha256: string;
   sizeBytes: number;
   contentType: string;
+  schemaVersion?: string;
   provenance: {
     providerId: string;
     producerNodeId: string;
@@ -327,6 +328,8 @@ function parseArtifactDescriptor(value: unknown, index: number): WorkerArtifactD
     sha256: value.sha256,
     sizeBytes: Number(value.sizeBytes),
     contentType: value.contentType,
+    ...(optionalArtifactText(value.schemaVersion, `${prefix} schemaVersion`)
+      ? { schemaVersion: optionalArtifactText(value.schemaVersion, `${prefix} schemaVersion`)! } : {}),
     provenance: {
       providerId: provenance.providerId,
       producerNodeId: provenance.producerNodeId,

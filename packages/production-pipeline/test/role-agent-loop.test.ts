@@ -1330,7 +1330,13 @@ describe("role agent loop audit boundary", () => {
       validate: titleCandidate,
     });
 
-    await assert.rejects(execute, /本轮质量审计尚未消耗/);
+    await assert.rejects(execute, (error: unknown) => {
+      assert.ok(error instanceof RoleAgentLoopError);
+      assert.match(error.message, /本轮质量审计尚未消耗/);
+      assert.equal(error.agentLoop.failure?.stage, "completed_failure",
+        "两份响应均已返回且被结构校验拒绝，不是原结果未知");
+      return true;
+    });
     assert.equal((stored as { status?: string }).status, "failed");
 
     const resumed = await execute();

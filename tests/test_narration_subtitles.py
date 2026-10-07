@@ -264,6 +264,35 @@ class GroupSubtitlesContractTest(unittest.TestCase):
                 self.assertEqual(download.call_count, 2)
                 self.assertTrue(all(result["status"] == "unavailable" for result in results))
 
+    def test_explicit_recovery_can_capture_missing_first_fit_evidence_only_once(self):
+        payload = json.dumps({"version": INTERNAL_ADAPTER,
+            "cues": [{"start": 0.0, "end": 0.8, "text": "同步句。"}]}).encode()
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                ledger = self._prepare(root, payload)
+                def fetch(*args, **kwargs):
+                    if failed:
+                        raise OSError("still unavailable")
+                    return io.BytesIO(payload)
+                with patch("video_factory.narration_subtitles.open_asset_request", side_effect=fetch) as download:
+                    for reason in (None, "   "):
+                        recover_subtitles(ledger, root, self._assembled(), narration_plan_sha256="c" * 64,
+                            adapter_version=INTERNAL_ADAPTER, refetch=True, refetch_reason=reason)
+                    download.assert_not_called()
+                    def recover(_):
+                        return recover_subtitles(ledger, root, self._assembled(), narration_plan_sha256="c" * 64,
+                            adapter_version=INTERNAL_ADAPTER, refetch=True,
+                            refetch_reason="首次排轨在字幕捕获前停止；原响应字幕现可读取")
+                    with ThreadPoolExecutor(max_workers=4) as pool:
+                        results = list(pool.map(recover, range(4)))
+                    self.assertEqual(download.call_count, 1, "显式恢复只核取原字幕一次，失败或并发不增加次数")
+                    self.assertTrue(all(r["status"] == ("unavailable" if failed else "verified") for r in results))
+                    capture_subtitle_evidence(ledger, root)
+                    self.assertEqual(download.call_count, 1)
+                receipt = json.loads(next((root / ".subtitle-evidence").glob("*.receipt.json")).read_text())
+                self.assertEqual(receipt["refetchCount"], 1)
+
     def test_incomplete_group_coverage_and_wrong_audio_binding_cannot_claim_verified(self):
         payload = json.dumps({"version": INTERNAL_ADAPTER,
             "cues": [{"start": 0.0, "end": 0.8, "text": "同步句。"}]}).encode()

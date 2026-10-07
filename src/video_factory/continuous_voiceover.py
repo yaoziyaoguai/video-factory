@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .narration_plan import SAMPLE_RATE, SAMPLES_PER_FRAME
+from .character_narration_plan import VERSION as CHARACTER_PLAN_VERSION
 
 
 class NarrationGroupDoesNotFitError(RuntimeError):
@@ -27,6 +28,21 @@ class NarrationGroupDoesNotFitError(RuntimeError):
         self.manifest_path: Path | None = None
         super().__init__(f"{self.code}: {self.group_id} needs {self.required_frames} frames; "
                          "original audio retained without truncation or automatic synthesis retry.")
+
+
+class NarrationTurnDoesNotFitError(NarrationGroupDoesNotFitError):
+    """角色台词的完整音频放不下；保留稳定台词/角色/音色用于就地调整。"""
+
+    code = "NARRATION_TURN_DOES_NOT_FIT"
+
+    def __init__(self, group: dict[str, Any], samples: int, raw_audio_path: Path):
+        super().__init__(group, samples, raw_audio_path)
+        self.turn_id = group["turnId"]
+        self.speaker_id = group["speakerId"]
+        self.voice_profile_id = group["voiceProfileId"]
+        self.placement = dict(group["placement"])
+        self.available_frames = group["window"]["endFrame"] - group["window"]["startFrame"]
+        self.shortfall_frames = max(0, self.required_frames - self.available_frames)
 
 
 class NarrationGroupDoesNotFitV2Error(NarrationGroupDoesNotFitError):
@@ -70,8 +86,8 @@ def assemble_narration_track(
                 if samples <= 0:
                     raise RuntimeError(f"Narration group {group['id']} has no decoded audio samples.")
                 if start < window_start or start + samples > window_end:
-                    error_class = (NarrationGroupDoesNotFitV2Error
-                                   if plan.get("version") == "video-factory/narration-plan-v2"
+                    error_class = (NarrationTurnDoesNotFitError if plan.get("version") == CHARACTER_PLAN_VERSION
+                                   else NarrationGroupDoesNotFitV2Error if plan.get("version") == "video-factory/narration-plan-v2"
                                    else NarrationGroupDoesNotFitError)
                     raise error_class(group, samples, raw_path)
                 track[start * 2:(start + samples) * 2] = decoded.readframes(samples)
@@ -99,7 +115,8 @@ def assemble_narration_track(
         os.replace(temporary_track, track_path)
     layout = {"plan": plan, "audio": [group["rawAudioSha256"] for group in groups], "mastering": mastering_filter}
     return {
-        "version": "video-factory/voiceover-plan-v3", "narrationPlan": plan,
+        "version": ("video-factory/voiceover-plan-v4" if plan.get("version") == CHARACTER_PLAN_VERSION
+                    else "video-factory/voiceover-plan-v3"), "narrationPlan": plan,
         "sampleRate": SAMPLE_RATE, "totalSamples": total_samples,
         "duration": total_samples / SAMPLE_RATE, "groups": groups,
         "layoutKey": hashlib.sha256(json.dumps(layout, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),

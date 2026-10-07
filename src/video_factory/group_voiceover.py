@@ -8,6 +8,8 @@ from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 from typing import Any
 
+from .character_narration_plan import VERSION as CHARACTER_PLAN_VERSION
+
 from .voiceover import (
     _MiniMaxTerminalError, _execute_minimax_audio_request, _minimax_audio_payload,
     _minimax_operation_lock, _minimax_reuse_lock, _prepare_minimax_audio_request,
@@ -33,16 +35,30 @@ def _estimate(units: int, unit_price: str) -> float:
     return float((Decimal(units) * Decimal(unit_price) / 10_000).quantize(Decimal("0.01"), rounding=ROUND_CEILING))
 
 
+def _group_voice(plan: dict[str, Any], group: dict[str, Any], default_voice: str) -> str:
+    if plan.get("version") == CHARACTER_PLAN_VERSION:
+        profile = group.get("voiceProfileId")
+        if (not isinstance(profile, str) or not profile.startswith("minimax:")
+                or group.get("turnId") != group.get("id") or not group.get("speakerId")):
+            raise ValueError("Character turn requires its own valid speaker and MiniMax system voice.")
+        voice = profile.removeprefix("minimax:")
+    else:
+        voice = default_voice
+    if voice not in SYSTEM_VOICES:
+        raise ValueError("Continuous narration currently requires a reviewed system voice; cloning fees are not authorized.")
+    return voice
+
+
 def _group_items(plan: dict[str, Any], *, operation_id: str, voice: str, rate: int,
                  pause_scale: float, model_id: str, provider_id: str) -> list[dict[str, Any]]:
     if model_id not in UNIT_PRICES:
         raise ValueError("This voice model has no reviewed group pricing; configure a supported quote before synthesis.")
-    if voice not in SYSTEM_VOICES:
+    if plan.get("version") != CHARACTER_PLAN_VERSION and voice not in SYSTEM_VOICES:
         raise ValueError("Continuous narration currently requires a reviewed system voice; cloning fees are not authorized.")
     endpoint = (os.environ.get("MINIMAX_TTS_BASE_URL") or "https://api.minimaxi.com/v1").rstrip("/")
     items = []
     for group in plan["groups"]:
-        payload = _minimax_audio_payload(group["text"], voice, rate, pause_scale, model_id, subtitle_enable=True)
+        payload = _minimax_audio_payload(group["text"], _group_voice(plan, group, voice), rate, pause_scale, model_id, subtitle_enable=True)
         key = _digest({"provider": provider_id, "endpoint": endpoint, "payload": payload})
         # 汉字按2、其他字符按1计费；统一按每个输入字符2计，作为发送前的保守上界。
         units = len(payload["text"]) * 2
@@ -53,6 +69,8 @@ def _group_items(plan: dict[str, Any], *, operation_id: str, voice: str, rate: i
             "quote": {"unit": "10000_characters", "unitPriceCny": UNIT_PRICES[model_id],
                       "estimatedUnits": units, "maxCostCny": _estimate(units, UNIT_PRICES[model_id])},
             "state": "prepared", "stateHistory": ["prepared"],
+            **({key: group[key] for key in ("turnId", "speakerId", "voiceProfileId")}
+               if plan.get("version") == CHARACTER_PLAN_VERSION else {}),
         })
     return items
 
@@ -66,7 +84,9 @@ def forecast_minimax_groups(plan: dict[str, Any], node_root: Path, *, voice: str
     _reuse_groups(preview, node_root.resolve() / ".voice-operations" / "quote-only", node_root.resolve())
     result = [{"groupId": item["groupId"], "estimatedUnits": item["quote"]["estimatedUnits"],
                "maxCostCny": 0 if item["state"] == "materialized" else item["quote"]["maxCostCny"],
-               "reused": item["state"] == "materialized"} for item in items]
+               "reused": item["state"] == "materialized",
+               **({key: item[key] for key in ("turnId", "speakerId", "voiceProfileId")}
+                  if plan.get("version") == CHARACTER_PLAN_VERSION else {})} for item in items]
     total = round(sum(item["maxCostCny"] for item in result), 2)
     return {"estimatedCostCny": total, "maxCostCny": total, "unitPriceCny": UNIT_PRICES[model_id],
             "source": "configured_rate", "items": result}
@@ -93,13 +113,16 @@ def synthesize_minimax_groups(
             if (ledger.get("version") != VERSION or ledger.get("identity") != identity
                     or not isinstance(ledger.get("items"), list) or len(ledger["items"]) != len(items)
                     or any(not isinstance(saved, dict) or any(saved.get(key) != expected[key]
-                           for key in ("groupId", "itemRequestId", "synthesisKey", "quote"))
+                           for key in ("groupId", "itemRequestId", "synthesisKey", "quote", "providerId", "modelId",
+                                       *(("turnId", "speakerId", "voiceProfileId") if plan.get("version") == CHARACTER_PLAN_VERSION else ())))
                            for saved, expected in zip(ledger["items"], items))):
                 raise RuntimeError("The original voice operation is bound to a different confirmed plan.")
         else:
             ledger = {"version": VERSION, "operationId": operation_id, "identity": identity,
                       "providerId": provider_id, "modelId": model_id, "authorizationCny": authorization_cny,
                       "estimatedCostCny": 0, "items": items, "completed": False}
+            if plan.get("version") == CHARACTER_PLAN_VERSION:
+                ledger["narrationPlanVersion"] = CHARACTER_PLAN_VERSION
             with _minimax_reuse_lock(ledger_path.parent):
                 _reuse_groups(ledger, ledger_path, node_root)
                 ledger["estimatedCostCny"] = round(sum(item["quote"]["maxCostCny"] for item in items
@@ -121,7 +144,7 @@ def synthesize_minimax_groups(
                 raise RuntimeError("The original voice request is unsettled or failed; refusing another paid request.")
             if round(ledger.get("actualCostCny", 0) + item["quote"]["maxCostCny"], 2) > authorization_cny:
                 raise RuntimeError("The remaining voice authorization is insufficient; keep existing audio and request approval.")
-            request = _prepare_minimax_audio_request(group["text"], voice, rate, pause_scale,
+            request = _prepare_minimax_audio_request(group["text"], _group_voice(plan, group, voice), rate, pause_scale,
                                                      model=model_id, base_url=endpoint, subtitle_enable=True)
             raw = output_dir / f"{item['itemRequestId']}.mp3"
             metadata = raw.with_suffix(".response.json")
@@ -149,10 +172,18 @@ def _reuse_groups(ledger: dict[str, Any], ledger_path: Path, node_root: Path) ->
         candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
         if not isinstance(candidate, dict) or not isinstance(candidate.get("items"), list):
             raise RuntimeError("Cannot verify an existing voice operation; do not create another paid request.")
+        # 角色请求已明确拒绝后，后续 prepared 组从未发送。新的人工作业可复用前组并重试；
+        # unknown/在途组仍一律阻止新作业，原作业也不会自动越过 terminal_failed。
+        terminal_character_operation = (candidate.get("version") == VERSION
+            and candidate.get("narrationPlanVersion") == CHARACTER_PLAN_VERSION
+            and all(isinstance(item, dict) and item.get("state") in ("materialized", "terminal_failed", "prepared")
+                    for item in candidate["items"])
+            and any(item.get("state") == "terminal_failed" for item in candidate["items"]))
         for prior in candidate["items"]:
             if not isinstance(prior, dict):
                 raise RuntimeError("Cannot verify an existing voice item.")
-            if prior.get("state") in ("unknown", "submitted", "provider_succeeded", "prepared"):
+            if (prior.get("state") in ("unknown", "submitted", "provider_succeeded")
+                    or (prior.get("state") == "prepared" and not terminal_character_operation)):
                 raise RuntimeError("An earlier voice operation is unsettled; do not bypass it with a new plan.")
             if candidate.get("version") != VERSION or prior.get("state") != "materialized":
                 continue

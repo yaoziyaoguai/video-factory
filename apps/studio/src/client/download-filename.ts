@@ -36,9 +36,17 @@ export function safeVideoDownloadTitle(rawTitle: string): string {
  * 返回 undefined 表示产物身份不合法，调用方不得提供可点击下载。
  */
 export function videoDownloadFilename(rawTitle: string, artifactId: string): string | undefined {
+  return artifactDownloadFilename(rawTitle, artifactId, "mp4");
+}
+
+export function publishPackageDownloadFilename(rawTitle: string, artifactId: string): string | undefined {
+  return artifactDownloadFilename(rawTitle, artifactId, "json");
+}
+
+function artifactDownloadFilename(rawTitle: string, artifactId: string, extension: "mp4" | "json"): string | undefined {
   if (!SAFE_ARTIFACT_ID.test(artifactId)) return undefined;
   const title = safeVideoDownloadTitle(rawTitle);
-  const suffix = `__${artifactId}.mp4`;
+  const suffix = `__${artifactId}.${extension}`;
   let budget = MAX_TOTAL_UTF8_BYTES - encoder.encode(suffix).length;
   const chars: string[] = [];
   for (const character of Array.from(title)) {

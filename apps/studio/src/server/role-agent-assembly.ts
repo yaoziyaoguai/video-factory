@@ -180,6 +180,7 @@ export function buildRoleAgentAssembly(options: RoleAgentAssemblyOptions): RoleA
     ...(options.connectedModels ?? []).filter(({ model }) => model.enabled && model.capabilities.includes("image"))
       .map(({ model, client }) => ({ providerId: model.id, agent: new CodexVisualReviewAgent({
         client, media: options.reviewMedia, providerId: "deepseek-visual-review-v1", modelId: model.id, producerSessionMode: "stateless",
+        executionProviderId: model.id,
       }) })),
   ];
   const primary = reviews[0];

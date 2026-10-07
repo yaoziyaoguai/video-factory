@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUp, Trash2 } from "lucide-react";
 import type { StudioProvider } from "../../shared/api.js";
 import { creatorContainerViewId, creatorViewId, isCreatorNestedField, isCreatorTopLevelField } from "../creator-document-policy.js";
 import { providerLabel } from "../presentation.js";
+import { CharacterScriptEditor, isCharacterDocument } from "./CharacterScriptEditor.js";
 
 interface NodeStructuredEditorProps {
   nodeId: string;
@@ -154,6 +155,7 @@ const ENUM_OPTIONS: Record<string, Array<{ value: string; label: string }>> = {
 };
 
 export function NodeStructuredEditor({ nodeId, value, assetProviderIds = [], assetProviders = [], onChange }: NodeStructuredEditorProps) {
+  if (creatorViewId(nodeId) === "script" && isCharacterDocument(value)) return <CharacterScriptEditor value={value} onChange={onChange} />;
   const record = asRecord(value);
   if (!record) return <p className="node-document-state">这个交付没有适合手工修改的内容。</p>;
   const entries = Object.entries(record).filter(([key, fieldValue]) => hasEditableValue(fieldValue) && isCreatorTopLevelField(nodeId, key, fieldValue));

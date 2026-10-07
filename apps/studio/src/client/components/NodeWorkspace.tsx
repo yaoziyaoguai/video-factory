@@ -31,6 +31,8 @@ interface NodeWorkspaceProps {
   /** C2：制作范围授权需要 run 身份与当前方案 digest。 */
   runId: string;
   runRevision: number;
+  characterDrama?: boolean;
+  onEditCharacters?: () => void;
   acceptedPlanDigest: string;
   artifacts: StudioArtifact[];
   /** 整个 run 的产物（声音时间编辑需要跨节点的 voice 产物身份）。 */
@@ -42,6 +44,8 @@ interface NodeWorkspaceProps {
   /** 仅使用宿主逐条核实后的事实，不能凭节点名称或风险按钮推断未知请求安全。 */
   optionalReviewUncertaintySafe?: true;
   currentDelivery?: boolean;
+  /** 画面来源由制作页统一展示时，不在节点内重复挂载编辑会话。 */
+  hideExecutionConfiguration?: boolean;
   pauseBusy?: boolean;
   pauseRequested?: boolean;
   /** joint-v1 创作规划节点的真实阶段投影；其他节点不传。 */
@@ -58,7 +62,7 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, characterDrama: propsCharacterDrama = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, hideExecutionConfiguration = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
   const shouldOpenForAttention = currentDelivery || node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
@@ -472,7 +476,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       && node.id === (nodes.some((candidate) => candidate.id === "asset-source-review") ? "asset-source-review" : "assets")
       && nodes.some((candidate) => candidate.id === "voice" && candidate.status === "pending"
         && candidate.plannedExecution?.providerId === "minimax-tts-v1")
-      ? <NarrationPlanEditor key={runId} runId={runId} runRevision={runRevision} disabled={busy || runStatus === "running"} /> : null}
+      ? <NarrationPlanEditor key={runId} runId={runId} runRevision={runRevision} characterDrama={propsCharacterDrama} disabled={busy || runStatus === "running"} {...(onEditCharacters ? { onEditCharacters } : {})} /> : null}
     {!readOnly && activeInterventionId
         && ((nodes.some((candidate) => candidate.id === "voice" && candidate.status === "needs_human")
               && (node.id === "voice" || node.id === "render"))
@@ -512,7 +516,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>{fallbackHeading}</strong>：{fallbackReason}</span></p> : null}
         {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />这一步的结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成；仍然适用的部分会自动保留，不会全部重做。</p> : null}
-        {node.executionConfiguration && !showPlanningStages ? <NodeExecutionConfigurationEditor
+        {node.executionConfiguration && !showPlanningStages && !hideExecutionConfiguration ? <NodeExecutionConfigurationEditor
           node={node}
           providers={providers}
           runStatus={runStatus}
@@ -670,7 +674,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         ) : null}
 
         <section className="node-output-preview node-creator-delivery">
-          <header><div><strong>{node.id === "creative-planning" ? "规划交付目录" : `${node.role ?? "制作角色"}的交付`}</strong><small>{node.id === "creative-planning" ? "当前正式版本 · 逐项阅读，不在这里修改历史产物" : deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
+          <header><div><strong>{node.id === "creative-planning" ? "规划交付目录" : `${node.role ?? "制作角色"}的交付`}</strong><small>{node.id === "creative-planning" ? "逐项查看已保存的阶段稿和正式交付；修改与确认在创作工作台进行" : deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
           {node.id === "assets" && visualArtifacts.length ? <div className={visualsAreCurrent ? "node-visual-preview" : "node-visual-preview is-stale"}>
             <header><strong>{visualsAreCurrent ? "实际素材画面" : "上次生成的素材画面"}</strong><small>{visualArtifacts.length} 个可预览素材{visualsAreCurrent ? "" : " · 将重新检查适用性，只重做不再适用的部分"}</small></header>
             <div>
@@ -689,6 +693,8 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             artifactIds={planningArtifactIds}
             artifacts={artifacts}
             publicationExpected={node.status === "succeeded"}
+            creativeReview={asRecord(effectiveOutput(node) ?? (node.outputState ? undefined : node.output))?.creativeReview}
+            stale={node.outputState?.stale === true}
           /> : editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <p className="node-workspace-error" role="alert">详细内容读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? effectiveOutput(node) ?? node.output} />}
           {contentReview && !editing ? <NodeContentReview value={contentReview} /> : null}
           {contentReview && !editing && (node.id === "publish-package" || node.id === "reference-grammar") && onReviseDocument && onAuditDocument
@@ -960,7 +966,7 @@ function configuredAssetProviderIds(nodes: StudioNode[]): string[] {
     : [];
 }
 
-function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevision, busy, readOnly, paidRecoveryLocked, onSave }: {
+export function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevision, busy, readOnly, paidRecoveryLocked, editingBlockedReason, onSave }: {
   node: StudioNode;
   providers: StudioProvider[];
   runStatus: StudioRunStatus;
@@ -969,6 +975,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
   busy: boolean;
   readOnly: boolean;
   paidRecoveryLocked: boolean;
+  editingBlockedReason?: string;
   onSave: (input: StudioNodeExecutionConfigurationInput) => Promise<void>;
 }) {
   const configuration = node.executionConfiguration!;
@@ -980,7 +987,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
   const [error, setError] = useState<string>();
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
   const failedRecovery = runStatus === "failed" && node.status === "failed";
-  const canEdit = !readOnly && !paidRecoveryLocked && providers.length > 0 && (!terminal || failedRecovery) && runStatus !== "running" && node.status !== "running";
+  const canEdit = !readOnly && !paidRecoveryLocked && !editingBlockedReason && providers.length > 0 && (!terminal || failedRecovery) && runStatus !== "running" && node.status !== "running";
   const capability = configurableNodeCapability(node.id);
   const roleProviders = capability
     ? providers.filter((provider) => provider.available && provider.kind !== "test" && provider.capability === capability)
@@ -1027,6 +1034,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
   }
 
   async function save() {
+    if (busy || !canEdit) return;
     setError(undefined);
     if (node.id === "assets" && assetProviderIds.length === 0) {
       setError("至少保留一个画面来源。");
@@ -1050,7 +1058,8 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
         ...(node.id === "assets" ? {
           assetProviderIds,
           economics: {
-            allowMeteredProviders: meteredSources.length > 0,
+            // 此标志也覆盖已选配音服务；画面来源编辑不能撤销其它节点的既有许可。
+            allowMeteredProviders: configuration.economics?.allowMeteredProviders === true || meteredSources.length > 0,
           },
         } : {}),
         ...(failedRecovery ? { confirmTerminalEdit: true } : {}),
@@ -1062,17 +1071,18 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
     }
   }
 
-  return <section className="node-execution-config" aria-label={`${node.role ?? node.label}本次制作选择`}>
+  return <section className={`node-execution-config${node.id === "assets" ? " is-assets" : ""}`} aria-label={node.id === "assets" ? "本片画面来源" : `${node.role ?? node.label}本次制作选择`}>
     <header>
       <span><Settings2 aria-hidden="true" size={16} /></span>
-      <div><strong>本次制作选择</strong><small>{editing
+      <div><strong>{node.id === "assets" ? "本片画面来源" : "本次制作选择"}</strong><small>{editing
         ? node.id === "assets"
           ? "更换画面来源，或切换到时长、任务能力不同的视频模型，会让导演重新规划；同一来源下，只有能力兼容的模型切换才从画面素材继续。保存后旧费用确认会自动失效。"
           : "保存后继续制作才会生效，旧费用确认会自动失效"
         : executionConfigurationSummary(node, providers)}</small></div>
-      {canEdit && !editing ? <button className="button button-ghost" type="button" onClick={() => { setEditBaselineRevision(runRevision); setEditing(true); }}>调整</button> : null}
+      {canEdit && !editing ? <button className="button button-ghost" type="button" disabled={busy} onClick={() => { setEditBaselineRevision(runRevision); setEditing(true); }}>调整</button> : null}
     </header>
-    {editing ? <div className="node-execution-config-editor">
+    {editingBlockedReason ? <p className="node-workspace-warning" role="status">{editingBlockedReason}</p> : null}
+    {editing ? <fieldset className="node-execution-config-editor" disabled={busy || !canEdit}>
       {node.id === "visual-review" ? <label className="field"><span>声音审片模型</span><select aria-label="声音审片模型"
         value={modelSelections["sound-review-v1"] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, "sound-review-v1": event.target.value }))}>
         <option value="">继承本条制作的声音选择</option>
@@ -1096,6 +1106,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
           </div> : null}
         </> : null}
       </> : <>
+        <p>只修改本片，不改变新建默认值。保存不会开始生成或付费；更换来源后需重新规划并由你确认。可保留免费来源混用，也可只选 AI 视频。尚未发送的意见不会用于重新规划。</p>
         <div className="node-asset-source-options">
           {inheritedUnavailableAssetSources.map((provider) => <article key={provider.id} className="is-selected">
             <label><input type="checkbox" checked onChange={(event) => updateAssetSource(provider.id, event.target.checked)} /><span><strong>{provider.label}</strong><small>已失效 · 取消选择后保存</small></span></label>
@@ -1104,7 +1115,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
             const selected = assetProviderIds.includes(provider.id);
             const compatibleModels = selectableModelsForCapability(provider.modelProfiles, provider.capability);
             return <article key={provider.id} className={selected ? "is-selected" : ""}>
-              <label><input type="checkbox" checked={selected} onChange={(event) => updateAssetSource(provider.id, event.target.checked)} /><span><strong>{provider.label}</strong><small>{provider.billing === "metered" ? "按镜头计费" : "免费来源"}</small></span></label>
+              <label><input type="checkbox" checked={selected} onChange={(event) => updateAssetSource(provider.id, event.target.checked)} /><span><strong>{provider.label}</strong><small>{provider.deliveryTypes?.includes("generated_video") ? "AI 视频 · " : provider.deliveryTypes?.includes("generated_image") ? "AI 图片 · " : ""}{provider.billing === "metered" ? "按镜头计费" : "免费来源"}</small></span></label>
               {selected && compatibleModels.length ? <select aria-label={`${provider.label}模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, [provider.id]: event.target.value }))}>
                 <option value="">使用推荐：{providerModelLabel(provider, provider.defaultModelId)}</option>
                 {compatibleModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
@@ -1118,7 +1129,7 @@ function NodeExecutionConfigurationEditor({ node, providers, runStatus, runRevis
       </>}
       {error ? <p className="node-workspace-error" role="alert">{error}</p> : null}
       <footer><button className="button button-ghost" type="button" disabled={busy} onClick={() => { setError(undefined); setEditing(false); setEditBaselineRevision(undefined); }}>取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void save()}><Save aria-hidden="true" size={15} />保存选择</button></footer>
-    </div> : null}
+    </fieldset> : null}
   </section>;
 }
 

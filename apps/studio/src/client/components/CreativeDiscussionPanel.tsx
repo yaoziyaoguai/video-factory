@@ -15,6 +15,7 @@ import {
   type CreativeDraftSessionBase,
 } from "../creative-draft-session.js";
 import { CreativeDraft, CreativeDraftReader } from "./CreativeDraftReader.js";
+import { CharacterScriptEditor, isCharacterDocument } from "./CharacterScriptEditor.js";
 import type { StudioCreativeReviewCommandInput, StudioCreativeReviewCommandReceipt, StudioCreativeReviewSnapshot } from "../../shared/api.js";
 import { parseStudioCreativeReviewCommandInput } from "../../shared/api.js";
 
@@ -23,6 +24,7 @@ export { CreativeDraft } from "./CreativeDraftReader.js";
 interface CreativeDiscussionPanelProps {
   review: StudioCreativeReviewSnapshot;
   busy: boolean;
+  onDraftDirtyChange?: (dirty: boolean) => void;
   onCommand(input: StudioCreativeReviewCommandInput): Promise<void | StudioCreativeReviewCommandReceipt>;
   /** CLOUD-11/P5.2：run 的服务目录（来自 RunPage runProviders），供“素材安排待补齐”筛选兼容来源。 */
   providers?: Array<{
@@ -59,7 +61,7 @@ interface PendingRiskConfirm {
   command: StudioCreativeReviewCommandInput;
 }
 
-export function CreativeDiscussionPanel({ review, busy, onCommand, providers = [] }: CreativeDiscussionPanelProps) {
+export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyChange, providers = [] }: CreativeDiscussionPanelProps) {
   const purposeKey = review.reviewPurpose ?? "draft";
   // 旧版按版本号写 localStorage 的草稿 key：只作一次性只读导入来源，不再写入。
   const storageKey = `vf:creative-draft:${review.runId}:${review.stage}:${purposeKey}${review.draftVersionId ? `:${review.draftVersionId}` : ""}`;
@@ -105,6 +107,8 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, providers = [
   const hasUnresolvedOperation = pendingCommandId !== undefined || review.pendingConsultation !== undefined
     || review.consultationOperations?.some(operation => operation.status === "unknown") === true;
   const [hasUnsavedEdits, setHasUnsavedEdits] = useState(false);
+  useEffect(() => { onDraftDirtyChange?.(hasUnsavedEdits); }, [hasUnsavedEdits, onDraftDirtyChange]);
+  useEffect(() => () => onDraftDirtyChange?.(false), [onDraftDirtyChange]);
   const [mobileTab, setMobileTab] = useState<"draft" | "discussion">("draft");
   const [storageBroken, setStorageBroken] = useState(false);
   const [pendingRisk, setPendingRisk] = useState<PendingRiskConfirm | null>(null);
@@ -264,7 +268,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, providers = [
     }
     setMessage(next);
     setSelectedAuditIndexes([]);
-    setMobileTab("discussion");
+    focusRevisionDiscussion();
   }
 
   useEffect(() => {
@@ -682,7 +686,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, providers = [
           <a href="#creative-review-history">查看完整创作版本记录</a>
           {/* 停在这里是因为自动循环推不动了，不是这一版做完了。不说出来，人会以为一切正常。 */}
           {review.stopDetail ? <section className="creative-check-result" role="status">
-            <strong>自动检查已停止，需要你决定</strong>
+            <strong>需要你决定下一步</strong>
             <p>{review.stopDetail}</p>
           </section> : null}
           {review.reviewContinuation?.reasonCode.startsWith("discussion_") ? <section className="creative-check-result" role="status">
@@ -722,7 +726,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, providers = [
           {review.checkResult && review.checkResult.status !== "incomplete" && review.checkResult.issues.length > 0 ? <section className="creative-check-result creative-advice-panel" aria-labelledby="creative-advice-title">
             <header><h3 id="creative-advice-title" tabIndex={-1}>本版建议</h3><span>{review.checkResult.issues.length} 条</span></header>
             <p className="creative-advice-scope">全稿建议</p>
-            <strong>{review.checkResult.verdict === "repair" ? `有 ${review.checkResult.issues.length} 处需要调整，尚未进入下一步` : `本版已审计 · ${review.checkResult.issues.length} 条可选建议`}</strong>
+            <strong>{review.checkResult.verdict === "repair" ? `有 ${review.checkResult.issues.length} 条修改建议，由你决定是否采用` : `本版已审计 · ${review.checkResult.issues.length} 条可选建议`}</strong>
             <p>{review.checkResult.summary}</p>
             <ul>{review.checkResult.issues.map((issue, index) => <li key={`${review.checkResult?.checkIdentity}:${index}`}>
               <label><input type="checkbox" checked={selectedAuditIndexes.includes(index)} disabled={busy} aria-label={issue.creatorAction ?? issue.repairInstruction} onChange={(event) => setSelectedAuditIndexes((current) => event.target.checked ? [...current, index] : current.filter((value) => value !== index))} />
@@ -733,7 +737,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, providers = [
             </li>)}</ul>
             <button type="button" className="button button-secondary" disabled={busy || selectedAuditIndexes.length === 0} onClick={appendAuditSuggestions}>加入修改意见（{selectedAuditIndexes.length}）</button>
           </section> : null}
-          <header className="creative-chat-heading"><MessageCircle aria-hidden="true" size={17} /><strong>一起打磨这一版</strong></header>
+          <header className="creative-chat-heading"><MessageCircle aria-hidden="true" size={17} /><strong>交互记录</strong></header>
           <div className="creative-message-list" aria-live="polite" ref={messageListRef}
             onScroll={(event) => {
               const el = event.currentTarget;
@@ -749,13 +753,10 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, providers = [
             followMessagesRef.current = true;
             setUnseenMessages(false);
           }}>有新消息，查看 ↓</button> : null}
-          <div className="creative-quick-prompts" aria-label="讨论提示">
-            {["解释这个安排", "开头不够吸引", "给我另一个方向，但先不要替换"].map((text) => <button type="button" key={text} disabled={busy} onClick={() => setMessage((current) => [current.trimEnd(), text].filter(Boolean).join("\n"))}>{text}</button>)}
-          </div>
           <label className="creative-composer">
             <span>聊聊你的想法</span>
             <textarea ref={composerRef} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="例如：为什么这样开场？或者：把开头改得更直接一些。" />
-            <small>Ctrl + Enter 发送；普通换行不会发送。</small>
+            <small>只讨论不改稿；发送修订意见才会修改。Ctrl + Enter 只讨论。</small>
           </label>
           <div className="creative-composer-actions">
             <button type="button" className="button button-secondary" disabled={busy || hasUnresolvedOperation || !message.trim() || !review.allowedActions.includes("discuss")} onClick={() => sendMessage("discuss")}><Send aria-hidden="true" size={16} />{busy ? "正在处理…" : "只讨论"}</button>
@@ -964,7 +965,7 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
     return () => window.removeEventListener("beforeunload", warn);
   }, [edited]);
   const fields = useMemo(() => editableTextFields(stage, edited?.document ?? draft), [stage, edited, draft]);
-  if (!isRecord(draft) || fields.length === 0) return null;
+  if (!isRecord(draft) || (fields.length === 0 && !isCharacterDocument(draft))) return null;
   const current = edited?.document ?? draft;
   const dirty = edited !== null;
   return <details className="creative-draft-editor" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
@@ -1000,7 +1001,10 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
         })}
       </fieldset> : null}
       {dirty && editStorageBroken ? <p className="creative-storage-note" role="status">手工修订无法在本机保存；当前页面内已保留，刷新或关闭可能丢失，请先复制。</p> : null}
-      {fields.map((field) => <label key={field.key} className="creative-edit-field">
+      {isCharacterDocument(current) ? <CharacterScriptEditor value={current} disabled={busy || saving || stale} onChange={(document) => {
+        setSaveState(undefined); setEdited({ baseKey: edited?.baseKey ?? draftKey, document: { ...document } });
+      }} /> : null}
+      {fields.filter((field) => !isCharacterDocument(current) || !field.key.startsWith("scenes.")).map((field) => <label key={field.key} className="creative-edit-field">
         <span>{field.label}</span>
         <textarea
           value={field.value}

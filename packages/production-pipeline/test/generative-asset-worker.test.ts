@@ -60,6 +60,45 @@ const summaryBrief: ProductionBrief = {
 };
 
 describe("GenerativeAssetWorkerClient", () => {
+  it("MC-A10/11 sends visible character appearances to the adapter and reuses unchanged requests", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-character-assets-"));
+    try {
+      const { script } = JSON.parse(await readFile(new URL("../../../tests/fixtures/character-drama-cases.json", import.meta.url), "utf8"));
+      script.scenes[0].character_ids = ["shopkeeper"];
+      const scriptPath = path.join(root, "script.json");
+      const directorPath = path.join(root, "director.json");
+      await writeFile(scriptPath, JSON.stringify(script));
+      await writeFile(directorPath, JSON.stringify({ version: "video-factory/director-plan-v2", shots: script.scenes.map((s: Record<string, unknown>) => ({
+        scenePosition: s.position, preferredProviderId: "seedream-image-v1", alternativeProviderIds: [], deliveryType: "generated_image",
+        query: s.visual_prompt, generationPrompt: s.visual_prompt, characterIds: s.character_ids,
+        speakingTurnIds: (s.dialogue as { id: string }[]).map((t) => t.id),
+      })) }));
+      const prompts: string[] = [];
+      const subject = new GenerativeAssetWorkerClient({ fallback: new LocalAssetWorker(), adapters: [],
+        imageAdapters: [{ estimatedCnyPerImage: 0.25, adapter: { providerId: "seedream-image-v1", generate: async (request) => {
+          prompts.push(request.prompt);
+          return { providerId: "seedream-image-v1", taskId: `character-image-${prompts.length}`, imageUrl: `https://example.com/${prompts.length}.png` };
+        } } }], resolveHost: resolvePublicHost, fetch: async () => new Response("unit-image", { headers: { "content-type": "image/png" } }) });
+      const run = (attempt: number) => subject.run({ ...routedWorkerRequest(scriptPath, directorPath, path.join(root, `attempt-${attempt}`), 4, 10), commandId: `characters-${attempt}` });
+      assert.equal((await run(1)).status, "succeeded");
+      assert.equal(prompts.length, 4);
+      // 现有画面提示清洗器将句号规范为分号；验证外观内容，不要求原句末标点。
+      assert.match(prompts[0]!, /短发，深蓝围裙，白衬衫/);
+      assert.doesNotMatch(prompts[0]!, /灰色外套，黑色配送包/, "场外发言不自动入画");
+      assert.match(prompts[1]!, /短卷发，米色针织衫/);
+      assert.match(prompts[1]!, /马尾，绿色运动外套/);
+      script.characters[0].name = "改名不重买";
+      await writeFile(scriptPath, JSON.stringify(script));
+      assert.equal((await run(2)).status, "succeeded");
+      assert.equal(prompts.length, 4, "只有显示名变更不影响实际视觉请求");
+      script.characters[0].appearance = "短发，红围裙，白衬衫。";
+      await writeFile(scriptPath, JSON.stringify(script));
+      assert.equal((await run(3)).status, "succeeded");
+      assert.equal(prompts.length, 6, "仅两处出场镜头需要新素材");
+      assert.ok(prompts.slice(4).every((p) => p.includes("红围裙")));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("accepts a non-zero source range for a materialized video after range rendering is enabled", async () => {
     const response = await runCraftedAssetPlan({
       asset: { media_type: "video", duration: 12 },
@@ -4836,6 +4875,24 @@ function reuseSourceForTest(shot: { query?: string; reuseFromScenePosition?: num
 }
 
 describe("reworkAffectedScenePositions", () => {
+  it("MC-A11 follows changed visible appearances through references but not names, voices or dialogue text", async () => {
+    const { script } = JSON.parse(await readFile(new URL("../../../tests/fixtures/character-drama-cases.json", import.meta.url), "utf8"));
+    const current = structuredClone(script);
+    const shots = [{ scenePosition: 1 }, { scenePosition: 2, referenceFromScenePosition: 1 }, { scenePosition: 3 }, { scenePosition: 4 }];
+    const scope = () => ({ findings: [], previousScenes: script.scenes, previousCharacters: script.characters,
+      currentScenes: current.scenes, currentCharacters: current.characters, previousShots: shots, currentShots: shots, affectedScenePositions: [] });
+    current.characters[0].name = "店长";
+    current.characters[0].voice_profile_id = "minimax:male-qn-daxuesheng";
+    current.scenes[0].dialogue[0].text = "只是修改台词";
+    assert.deepEqual(reworkAffectedScenePositions(scope()), []);
+    current.characters[0].appearance = "红围裙";
+    assert.throws(() => reworkAffectedScenePositions(scope()), /镜头 1、2、3/);
+    assert.throws(() => reworkAffectedScenePositions({ ...scope(), affectedScenePositions: [1, 3] }), /镜头 2/);
+    assert.deepEqual(reworkAffectedScenePositions({ ...scope(), affectedScenePositions: [1, 2, 3] }), [1, 2, 3]);
+    current.characters[0].appearance = script.characters[0].appearance;
+    current.scenes[3].character_ids = ["shopkeeper"];
+    assert.throws(() => reworkAffectedScenePositions(scope()), /镜头 4/);
+  });
   const scene = (position: number, narration = `第${position}幕`) => ({
     position,
     narration,

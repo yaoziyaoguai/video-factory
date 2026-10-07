@@ -17,15 +17,15 @@ export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
   "audio-review": "30edc48c2ca0ee91a02a3a744c06e00142dad6a724a7739f2e4b022470865249",
   "topic-ideas": "c60a44f2760233060b547f40603608719586c486969bd46e3bbfcfd323bd7840",
   "series-roadmap": "0ebde2d2a1edfabce73498e9b3ed78fd20d1a979da2cd4d4cc6c09b5db53435f",
-  "creative-treatment": "458403328eabc81d48b040fa4ed2828f96c8e6db3850e81aede7290a3f704df5",
-  "director-plan": "7777830452faa17bac38e98b92af09d1d6e10951c945403decb204d37910f8f3",
-  "script-draft": "3e6784ee1c7cbaefad8e0a0a74b24922728c053b1c3a41ae18b56c4457acf7ef",
+  "creative-treatment": "becac7cd6d7d2cac570fa52fc4cbd593e23d51b25474184136cd042c1d17e076",
+  "director-plan": "51163428e2133794a1fd515aa12fa0213eb7f4f0ce53756fb923e1ba9f77136e",
+  "script-draft": "6e93e10caa3eff66d97ff9fdfb3aba15f1ed0bf0cb3049a8ddd25775ad49fcc5",
   "publish-copy": "321a9b07d9eeb6bd1bb1e075a16c7d3bc65948983be11b3c082834aa8a030dd4",
   "asset-rank": "8693ee66be5e7db08d20c1847786e015734cda4f63d1c369f2141336dd31723b",
   "reference-grammar": "f14b46d1b3e675d21973b6f6ae8daf594b010409007473cdfaa5adbecb1dea8e",
   "visual-review": "7fc682f73d5750ae7776ec9e42f52a043c17e4258d95f368e03937b964e1b73a",
   "role-audit": "657142f6b41c5689214667bcdade73e9143126c069160be28d6df52584719303",
-  "creative-discussion": "a1b700304705f21539a35e55e1a0304a23505707d7a3a3913277dd819fdb9803",
+  "creative-discussion": "7af622c7ad3b709d9bc4f54826555a652c23c92c0d8e36940c76656b4255d75e",
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。

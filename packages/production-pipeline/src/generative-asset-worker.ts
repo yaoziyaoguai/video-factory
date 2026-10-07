@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isCharacterScript, validateCharacterScriptStructure } from "./character-script.js";
 import { lookup } from "node:dns/promises";
 import { copyFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
@@ -99,6 +100,8 @@ interface ScriptScene {
   duration: number;
   visualStrategy: string;
   visualPrompt: string;
+  characterVisuals?: Array<{ id: string; appearance: string }>;
+  visibleAction?: string;
 }
 
 const METERED_CREATE_ATTEMPTED = Symbol("meteredCreateAttempted");
@@ -398,7 +401,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const scriptPath = requiredString(input.scriptPath, "scriptPath");
     const outputDir = requiredString(request.outputDir, "outputDir");
     const script = requiredRecord(JSON.parse(await readFile(scriptPath, "utf8")), "Script");
-    const allScenes = parseScenes(script.scenes);
+    const allScenes = parseScenes(script);
     if (allScenes.some((scene) => scene.visualStrategy === "local")) {
       throw new Error(
         "Direct local scenes require an explicit director route selecting local-editorial-v1 + editorial_card.",
@@ -433,7 +436,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     await mkdir(outputDir, { recursive: true });
     const directPlanPath = path.join(outputDir, "direct_generation_plan.json");
     await writeJsonAtomically(directPlanPath, {
-      version: "video-factory/director-plan-v1",
+      version: isCharacterScript(script) ? "video-factory/director-plan-v2" : "video-factory/director-plan-v1",
       shots: scenes.map((scene) => ({
         scenePosition: scene.position,
         preferredProviderId: providerId,
@@ -714,9 +717,10 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     generatedRoutes: DirectorGeneratedRoute[];
   }> {
     const script = requiredRecord(JSON.parse(await readFile(options.scriptPath, "utf8")), "Script");
-    const scenes = parseScenes(script.scenes);
+    const scenes = parseScenes(script);
     const sceneByPosition = new Map(scenes.map((scene) => [scene.position, scene]));
     const directorPlan = requiredRecord(JSON.parse(await readFile(options.directorPlanPath, "utf8")), "Director plan");
+    assertCharacterDirectorBindings(script, directorPlan);
     const routedShots = parseRoutedShots(directorPlan.shots);
     assertExactScenePositions("Director plan", routedShots.map((shot) => shot.scenePosition), scenes);
     const modelSelections = options.modelSelections;
@@ -1467,9 +1471,11 @@ export async function inspectReworkCarriedAssetScenePositions(
 export interface ReworkAffectedSceneScope {
   findings: unknown;
   previousScenes?: unknown;
+  previousCharacters?: unknown;
   previousShots?: unknown;
   previousGlobalIntent?: unknown;
   currentScenes: unknown;
+  currentCharacters?: unknown;
   currentShots?: unknown;
   currentGlobalIntent?: unknown;
   // 新版 Studio 由创作者显式确认该范围；旧 run 缺少字段时无法可靠还原用户意图，
@@ -1560,8 +1566,8 @@ export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): n
   if (Array.isArray(scope.previousScenes) && previousSceneRecords.size > 0) {
     for (const [position, scene] of currentSceneRecords) {
       if (!isDeepStrictEqual(
-        scriptVisualIntent(scene),
-        scriptVisualIntent(previousSceneRecords.get(position)),
+        scriptVisualIntent(scene, scope.currentCharacters),
+        scriptVisualIntent(previousSceneRecords.get(position), scope.previousCharacters),
       )) required.add(position);
     }
   }
@@ -1585,8 +1591,23 @@ export function reworkAffectedScenePositions(scope: ReworkAffectedSceneScope): n
   return [...approved].filter((position) => validPositions.has(position)).sort((left, right) => left - right);
 }
 
-function scriptVisualIntent(scene: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+function scriptVisualIntent(scene: Record<string, unknown> | undefined, characters?: unknown): Record<string, unknown> | undefined {
   if (!scene) return undefined;
+  if (Array.isArray(scene.dialogue)) {
+    const cast = scene.character_ids ?? scene.characterIds;
+    const catalog = Array.isArray(characters) ? characters.filter(isRecord) : [];
+    return {
+      purpose: scene.purpose, duration: scene.duration,
+      visualStrategy: scene.visual_strategy ?? scene.visualStrategy,
+      visualPrompt: scene.visual_prompt ?? scene.visualPrompt,
+      visibleAction: scene.visible_action ?? scene.visibleAction,
+      onScreenText: scene.on_screen_text ?? scene.onScreenText,
+      searchTerms: scene.search_terms ?? scene.searchTerms,
+      // 显示名、音色和台词文字不是画面身份；出场关系和外观才沿参考链传播。
+      cast: Array.isArray(cast) ? cast.map((id) => ({ id,
+        appearance: catalog.find((character) => character.id === id)?.appearance ?? null })) : [],
+    };
+  }
   return {
     purpose: scene.purpose,
     narration: scene.narration,
@@ -1607,6 +1628,7 @@ function reworkShotIntent(shot: Record<string, unknown> | undefined): Record<str
     "environment", "action", "visibleAction", "authenticityPolicy", "shotSize", "camera", "cameraMovement", "lighting",
     "continuityRequirements", "negativeConstraints", "continuityNote", "temporalBeats",
     "reuseFromScenePosition", "referenceFromScenePosition", "sourceInSeconds", "referenceRequirements", "successCriteria",
+    "characterIds",
   ];
   return Object.fromEntries(keys.filter((key) => shot[key] !== undefined).map((key) => [key, shot[key]]));
 }
@@ -1940,7 +1962,16 @@ function optionalNumberRecord(value: unknown, field: string): Record<string, num
   }));
 }
 
-function parseScenes(value: unknown): ScriptScene[] {
+function parseScenes(script: Record<string, unknown>): ScriptScene[] {
+  if (isCharacterScript(script)) {
+    const accepted = validateCharacterScriptStructure(script);
+    return accepted.scenes.map((scene) => ({ position: scene.position, duration: scene.duration,
+      visualStrategy: scene.visual_strategy, visualPrompt: scene.visual_prompt,
+      characterVisuals: scene.character_ids.map((id) => ({ id, appearance: accepted.characters.find((c) => c.id === id)!.appearance })),
+      visibleAction: scene.visible_action ?? scene.visual_prompt,
+    }));
+  }
+  const value = script.scenes;
   if (!Array.isArray(value)) {
     throw new Error("Script scenes must be an array.");
   }
@@ -2216,7 +2247,7 @@ async function assertCompletedWorkerResponse(
   const input = requiredRecord(request.input, "Worker input");
   const scriptPath = requiredString(input.scriptPath, "scriptPath");
   const script = requiredRecord(JSON.parse(await readFile(scriptPath, "utf8")), "Script");
-  const scenes = parseScenes(script.scenes);
+  const scenes = parseScenes(script);
   const directorPlanPath = optionalString(input.directorPlanPath);
   const routedShots = directorPlanPath
     ? parseRoutedShots(requiredRecord(JSON.parse(await readFile(directorPlanPath, "utf8")), "Director plan").shots)
@@ -2404,7 +2435,31 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
 const NO_RENDERED_TEXT_CONSTRAINT = "画面中不得出现任何可读文字、字幕、标题、界面、标牌、徽标、水印、乱码或内部制作术语；所有文字与披露只由后期叠加。";
 
 function compileDirectGenerationPrompt(scene: ScriptScene): string {
-  return withNoRenderedTextConstraint(sanitizePrompt(scene.visualPrompt));
+  return withNoRenderedTextConstraint([sanitizePrompt(scene.visualPrompt), characterVisualPrompt(scene)].filter(Boolean).join("\n"));
+}
+
+function characterVisualPrompt(scene: ScriptScene): string {
+  if (!scene.characterVisuals) return "";
+  return [
+    ...scene.characterVisuals.map((c) => `出场角色 ${c.id}：${sanitizePrompt(c.appearance)}`),
+    scene.characterVisuals.length ? "仅呈现上述出场角色；场外对白不增加画面人物。" : "本镜无角色出场。",
+    promptClause("角色动作", scene.visibleAction),
+  ].filter(Boolean).join("\n");
+}
+
+function assertCharacterDirectorBindings(script: Record<string, unknown>, director: Record<string, unknown>): void {
+  if (!isCharacterScript(script)) {
+    if (director.version === "video-factory/director-plan-v2") throw new Error("角色导演方案必须绑定角色剧本。");
+    return;
+  }
+  if (director.version !== "video-factory/director-plan-v2" || !Array.isArray(director.shots)) throw new Error("角色剧本须绑定 director-plan-v2。");
+  for (const scene of script.scenes) {
+    const shot = director.shots.find((s) => s?.scenePosition === scene.position);
+    if (!shot || !isDeepStrictEqual(shot.characterIds, scene.character_ids)
+      || !isDeepStrictEqual(shot.speakingTurnIds, scene.dialogue.map((t) => t.id))) {
+      throw new Error(`角色导演镜头 ${scene.position} 与当前剧本的角色或台词不一致。`);
+    }
+  }
 }
 
 function withNoRenderedTextConstraint(prompt: string): string {
@@ -2414,11 +2469,12 @@ function withNoRenderedTextConstraint(prompt: string): string {
 function compileGenerationPrompt(providerId: string, route: RoutedShot, scene: ScriptScene): string {
   const hasShotSpec = Boolean(route.subject || route.environment || route.visibleAction || route.temporalBeats.length
     || route.shotSize || route.camera || route.lighting || route.negativeConstraints.length || route.successCriteria.length);
-  if (!hasShotSpec) return withNoRenderedTextConstraint(sanitizePrompt(route.generationPrompt || scene.visualPrompt));
+  if (!hasShotSpec) return withNoRenderedTextConstraint([sanitizePrompt(route.generationPrompt || scene.visualPrompt), characterVisualPrompt(scene)].filter(Boolean).join("\n"));
 
   const timeline = route.temporalBeats.map(sanitizePrompt).filter(Boolean);
   const directorExecution = sanitizePrompt(route.generationPrompt);
   const common = [
+    characterVisualPrompt(scene),
     promptClause("导演执行描述", directorExecution),
     promptClause("主体", route.subject),
     promptClause("环境", route.environment),

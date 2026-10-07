@@ -34,6 +34,7 @@ import { TrendArticleReader } from "./trend-article-reader.js";
 import { CodexTopicIdeaModel, TrendOpportunityAgent } from "./trend-opportunity-agent.js";
 import { ModelConnections } from "./model-connections.js";
 import { AudioReviewService } from "./audio-review-service.js";
+import { LocalCapabilityService } from "./local-capabilities.js";
 
 const repositoryRoot = await findRepositoryRoot(process.cwd());
 loadLocalEnvironment(repositoryRoot);
@@ -111,8 +112,10 @@ const assembleRoles = () => {
   return { ...assembly, visualReviewAgents: assembly.visualReviewAgents.map((agent) => soundReview.wrap(agent)) };
 };
 const { screenwriterAgent, directorAgent, visualReviewAgents, treatmentAgents, briefAuditAgents } = assembleRoles();
+const localCapabilities = new LocalCapabilityService({ repositoryRoot, workspaceRoot, environment: process.env });
 const pipelineOptions: ProductionPipelineOptions = {
   workspaceRoot,
+  characterVoiceProfiles: (await localCapabilities.listVoices()).filter((voice) => voice.providerId === "minimax-tts-v1"),
   worker: buildProductionWorker({
     repositoryRoot,
     pythonPath,
@@ -145,6 +148,7 @@ modelConnections.onChange = () => {
 await pipeline.recoverInterruptedRuns();
 const opportunities = new JsonOpportunityStore(path.join(workspaceRoot, "opportunities", "opportunities.json"));
 const service = new StudioService({
+  localCapabilities,
   registeredModels: () => modelConnections.connections.map(({ model }) => model),
   repositoryRoot,
   workspaceRoot,

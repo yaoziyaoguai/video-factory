@@ -56,6 +56,29 @@ function shot(scenePosition: number, preferredProviderId: string): VisualDirecto
 }
 
 describe("validateVisualDirectorPlan", () => {
+  it("MC-A10 preserves four-character director bindings and refuses changed or omitted turns", () => {
+    const bindings = Object.fromEntries([1, 2, 3, 4].map((position) => [position, {
+      characterIds: ["shop", "courier", "neighbor", "student"].slice(0, position),
+      speakingTurnIds: [`line-${position}-a`, `line-${position}-b`],
+    }]));
+    const candidate = { ...plan([]), version: "video-factory/director-plan-v2", shots: [1, 2, 3, 4].map((position) => ({
+      ...shot(position, "pexels-stock-v1"), ...bindings[position],
+    })) };
+    const options = { scenePositions: [1, 2, 3, 4], presentationMode: "character_drama" as const,
+      characterSceneBindings: bindings, allowedProviderIds: ["pexels-stock-v1"], generativeProviderIds: [],
+      estimatedCnyPerClip: {}, economics };
+    const result = validateVisualDirectorPlan(candidate, options);
+    assert.equal(result.version, candidate.version);
+    assert.deepEqual(result.shots.map((s) => "characterIds" in s ? s.characterIds : undefined), Object.values(bindings).map((b) => b.characterIds));
+    const changed = structuredClone(candidate);
+    changed.shots[0]!.speakingTurnIds = ["line-1-b", "line-1-a"];
+    assert.throws(() => validateVisualDirectorPlan(changed, options), /speakingTurnIds/);
+    changed.shots[0]!.speakingTurnIds = [];
+    assert.throws(() => validateVisualDirectorPlan(changed, options), /speakingTurnIds/);
+    assert.throws(() => validateVisualDirectorPlan(candidate, { ...options, presentationMode: "narration" }), /version/);
+    assert.throws(() => validateVisualDirectorPlan({ ...candidate, version: "video-factory/director-plan-v1" }, options), /version/);
+  });
+
   it("copies the accepted viewer promise when the director omits it and rejects an attempted rewrite", () => {
     const options: VisualDirectorPlanValidation = {
       scenePositions: [1],

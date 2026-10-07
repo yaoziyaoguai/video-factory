@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { VoiceDoesNotFitConflict } from "./contracts.js";
+import type { CharacterNarrationPlan } from "./character-narration-plan.js";
 
 export interface NarrationGroupConflict {
   code: "NARRATION_GROUP_DOES_NOT_FIT";
@@ -64,7 +65,8 @@ export interface NarrationPlanPreview {
   quote?: NarrationSpendQuote;
   editorContext: {
     mode: "pre_generation" | "voice_stop" | "final_review";
-    defaultPlan: NarrationPlan;
+    defaultPlan: NarrationPlan | CharacterNarrationPlan;
+    characters?: Array<{ id: string; name: string; voiceProfileId: string | null; voiceLabel?: string }>;
     baseGroups: Array<{
       baseGroupId: string;
       text: string;
@@ -368,7 +370,7 @@ export interface NarrationPlanV2 {
 }
 
 /** 消费者按此联合显式分派；未知版本不降级（见 narrationPlanVersion）。 */
-export type SupportedNarrationPlan = NarrationPlan | NarrationPlanV2;
+export type SupportedNarrationPlan = NarrationPlan | NarrationPlanV2 | CharacterNarrationPlan;
 
 /**
  * §4.2.2 GET 读回：从保存的 v2 计划反推 segments/userSilences 再走整体校验。
@@ -617,9 +619,9 @@ export function validateNarrationPlanV2(value: unknown, expected: NarrationPlanV
 }
 
 /** 消费者入口按版本显式分派；未知版本一律拒绝，不静默降级到 v1。 */
-export function narrationPlanVersion(value: unknown): "video-factory/narration-plan-v1" | "video-factory/narration-plan-v2" {
+export function narrationPlanVersion(value: unknown): SupportedNarrationPlan["version"] {
   const version = (value as { version?: unknown } | null | undefined)?.version;
-  if (version === "video-factory/narration-plan-v1" || version === "video-factory/narration-plan-v2") return version;
+  if (version === "video-factory/narration-plan-v1" || version === "video-factory/narration-plan-v2" || version === "video-factory/narration-plan-v3") return version;
   throw new NarrationTextV2Error("未知旁白计划版本，拒绝降级。");
 }
 
@@ -757,7 +759,7 @@ export interface NarrationPreviewTicketResponseV2 {
   editSequence: number;
   candidateId: string;
   ticketId: string;
-  plan: NarrationPlanV2;
+  plan: NarrationPlanV2 | CharacterNarrationPlan;
   planSha256: string;
   providerConfigDigest: string;
   quote: NarrationPreviewQuoteV2;

@@ -5,6 +5,18 @@ import { describe, expect, it } from "vitest";
 import { NodeDeliveryPreview } from "../src/client/components/NodeDeliveryPreview.js";
 
 describe("NodeDeliveryPreview", () => {
+  it("shows character turn timing without describing it as a single continuous narrator", () => {
+    render(<NodeDeliveryPreview nodeId="voice" value={{
+      version: "video-factory/voiceover-plan-v4", duration: 24, sampleRate: 44100,
+      groups: [{ id: "turn-1", turnId: "turn-1", speakerId: "shopkeeper", voiceProfileId: "minimax:male-qn-jingying",
+        text: "钥匙不见了。", sourceScenePositions: [1], startSample: 0, endSample: 88200, unfilledWindowSamples: 44100 }],
+      subtitles: { status: "verified", cues: [{ turnId: "turn-1", speakerId: "shopkeeper", text: "钥匙不见了。", startSample: 0, endSample: 88200 }] },
+    }} />);
+    expect(screen.getByRole("region", { name: "角色台词与画面节奏" })).toBeInTheDocument();
+    expect(screen.getByText("钥匙不见了。")).toBeInTheDocument();
+    expect(screen.getByText(/声音从 0.0 秒到 2.0 秒/)).toBeInTheDocument();
+    expect(screen.queryByText(/同组旁白跨镜连续播放/)).not.toBeInTheDocument();
+  });
   it("recognizes verified subtitles from the continuous voice worker as available", () => {
     render(<NodeDeliveryPreview nodeId="voice" value={{
       version: "video-factory/voiceover-plan-v3", duration: 26, sampleRate: 44100,

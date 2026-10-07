@@ -9,6 +9,7 @@ import { summarizeProductionCapabilities, type ProductionCapabilities } from "./
 import { assertGeneratedVisualDoesNotClaimEvidence } from "./visual-evidence-boundary.js";
 import { runCreativeDiscussionTask, type CreativeDiscussionAgentInput } from "./codex-creative-discussion.js";
 import type { CreativeDiscussionResult } from "./creative-review.js";
+import { CHARACTER_SCRIPT_VERSION, validateCharacterScript, type CharacterScript, type PresentationMode, type CharacterVoiceProfile } from "./character-script.js";
 
 export type ScriptVisualStrategy = "stock" | "image" | "generated" | "local";
 
@@ -28,15 +29,18 @@ export interface ScriptScene {
   search_terms: string[];
 }
 
-export interface ScriptDraft {
+export interface NarrationScriptDraft {
   viewerPromise?: string;
   narrativeArc?: string;
   canonFacts?: string[];
   scenes: ScriptScene[];
 }
+export type ScriptDraft = NarrationScriptDraft | CharacterScript;
 
 export interface ScreenwriterAgentInput {
   brief: {
+    presentationMode?: PresentationMode;
+    characterVoiceProfiles?: CharacterVoiceProfile[];
     title: string;
     angle: string;
     audience: string;
@@ -104,7 +108,7 @@ export interface CodexScreenwriterAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_SCREENWRITER_TIMEOUT_MS = 660_000;
 const DEFAULT_SCREENWRITER_MAX_ATTEMPTS = 2;
-export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v21|role-audit-v9|script-validator-v5|visual-plan-v2|production-capabilities-v4|voice-timing-v1|creative-treatment-v2|canon-facts-v2|article-sources-v1|creator-paced-opening-v1|audit-capabilities-once-v1";
+export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v21|role-audit-v9|script-validator-v5|visual-plan-v2|production-capabilities-v4|voice-timing-v1|creative-treatment-v2|canon-facts-v2|article-sources-v1|creator-paced-opening-v1|audit-capabilities-once-v1|character-script-v1";
 
 // id 固定为 codex-screenwriter-v1：brief.providers.script 持久化该 id，registry 按 id 匹配 provider。
 export class CodexScreenwriterAgent implements ScreenwriterAgent {
@@ -158,6 +162,7 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
       planningRole: input.planningMode === true,
       contractVersion: SCREENWRITER_AGENT_CONTRACT_VERSION,
       criteria: [
+        ...(input.brief.presentationMode === "character_drama" ? ["角色动机与关系清楚，台词有来有往并推动情节；角色与台词 ID 在修改时稳定，出场与场外发言分开。内容意见不能要求把多人剧情降成单旁白。"] : []),
         "保持 creativeTreatment 的观众承诺、段落责任与 payoff；落实本次 planningIssues，事实边界一致。",
         "开场让具体对象、问题、动作或感受逐步成立，按片型与用户要求判断观看动机，不强迫统一秒数、冲突或提问。保留用户明确的静默与留白；逐段说明信息、行动或情绪如何推进，结尾兑现原承诺，不强加CTA或升华。重复导语不能冒充推进，有意审美停留不等于没有价值。",
         "脚本动作、旁白、屏幕文字、声音提示与时长协调；旁白可自然朗读，内部制作术语不进入观众表达。必要事实限定保留，冗长句先改写而不是加速或增加无职责镜头。",
@@ -248,6 +253,8 @@ function screenwriterAuditContext(
     },
     upstreamFacts: {
       title: brief.title,
+      ...(brief.presentationMode ? { presentationMode: brief.presentationMode } : {}),
+      ...(brief.characterVoiceProfiles ? { characterVoiceProfiles: brief.characterVoiceProfiles } : {}),
       angle: brief.angle,
       audience: brief.audience,
       nicheSlug: brief.nicheSlug,
@@ -280,7 +287,7 @@ function screenwriterAuditContext(
           rule: "只记录已建立事实；没有新增事实时必须是空数组，不能为凑数量编造。",
         },
       },
-      requiredSceneFields: ["position", "narration", "duration", "visual_strategy", "visual_prompt", "search_terms"],
+      requiredSceneFields: ["position", ...(brief.presentationMode === "character_drama" ? ["character_ids", "dialogue"] : ["narration"]), "duration", "visual_strategy", "visual_prompt", "search_terms"],
       assetExecutionBoundary: {
         sourceRangeReuse: brief.productionCapabilities?.editing.sourceRangeReuse === true,
         crossSceneReuse: "允许导演把同一母片中已知且完整覆盖的不同源区间分配给多个 scene；不能凭复用创造母片不存在的状态。",
@@ -330,6 +337,7 @@ function validateScreenwriterCandidate(
 ): ScriptDraft {
   const validation = {
     durationSeconds: input.brief.durationSeconds,
+    presentationMode: input.brief.presentationMode ?? "narration",
     ...(input.brief.durationRange ? { durationRange: input.brief.durationRange } : {}),
     requireCanonFacts: Boolean(input.brief.seriesContext),
   };
@@ -376,7 +384,19 @@ export function validateScriptDraft(value: unknown, options: {
   durationSeconds: number;
   durationRange?: DurationRange;
   requireCanonFacts?: boolean;
+  presentationMode?: PresentationMode;
 }): ScriptDraft {
+  const candidate = record(value, "Script draft");
+  if (candidate.version !== undefined && candidate.version !== CHARACTER_SCRIPT_VERSION) throw new Error("Unsupported script version.");
+  if (candidate.version === CHARACTER_SCRIPT_VERSION) {
+    if (options.presentationMode === "narration") throw new Error("角色剧本与解说视频形式不匹配。");
+    return validateCharacterScript(value, options);
+  }
+  if (candidate.characters !== undefined || (Array.isArray(candidate.scenes) && candidate.scenes.some((s) =>
+    typeof s === "object" && s !== null && ("dialogue" in s || "character_ids" in s)))) {
+    throw new Error("角色字段必须携带明确的 character-script-v1 版本。");
+  }
+  if (options.presentationMode === "character_drama") throw new Error("角色剧情需要 character-script-v1，不能退回单旁白。");
   if (!Number.isInteger(options.durationSeconds)
     || options.durationSeconds < 20
     || options.durationSeconds > 180) {

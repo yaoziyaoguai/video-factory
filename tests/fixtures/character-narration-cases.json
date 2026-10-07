@@ -1,0 +1,11 @@
+{
+  "canonicalSourceSha256": "e94bb99bcc6ad3141f339b2088d1d605a44532374641073d2a763801e4e7ac67",
+  "planSha256": "7dbeffae4f17aefbb1cc6dbbc41419e0742a2dad5662276d3e636b05c5b1e6a3",
+  "allocations": [
+    {"name":"equal-remainders-follow-order","frames":10,"turns":[{"text":"甲","after_pause_frames":0},{"text":"乙","after_pause_frames":0},{"text":"丙","after_pause_frames":0}],"expected":[4,3,3]},
+    {"name":"unicode-codepoints-not-utf16","frames":11,"turns":[{"text":"😀甲","after_pause_frames":1},{"text":"乙","after_pause_frames":0}],"expected":[6,4]},
+    {"name":"keep-one-frame-first","frames":7,"turns":[{"text":"一二三四五","after_pause_frames":2},{"text":"六","after_pause_frames":0}],"expected":[4,1]},
+    {"name":"exact-minimum","frames":4,"turns":[{"text":"甲","after_pause_frames":1},{"text":"乙","after_pause_frames":1}],"expected":[1,1]},
+    {"name":"no-turns","frames":30,"turns":[],"expected":[]}
+  ]
+}

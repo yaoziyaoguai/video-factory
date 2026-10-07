@@ -51,14 +51,29 @@ interface PlanningDeliveryPanelProps {
   artifactIds: string[];
   artifacts: StudioArtifact[];
   publicationExpected: boolean;
+  creativeReview?: unknown;
+  stale?: boolean;
 }
 
-export function PlanningDeliveryPanel({ runId, versionId, artifactIds, artifacts, publicationExpected }: PlanningDeliveryPanelProps) {
+// 阶段稿来自当前有效输出，不能按历史产物的时间顺序猜当前稿。
+function preservedStageDraft(review: unknown, kind: string, stale: boolean) {
+  const stage = ({ creative_treatment: "treatment", script: "script", storyboard: "director" } as Record<string, string>)[kind];
+  const record = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  const state = record(record(record(review)?.stages)?.[stage ?? ""]);
+  const draft = record(state?.currentDraft);
+  if (!draft || typeof draft.versionId !== "string" || typeof draft.sha256 !== "string" || !record(state?.currentDocument)) return undefined;
+  const confirmation = record(state?.confirmation);
+  const adopted = state?.phase === "confirmed" && confirmation?.versionId === draft.versionId && confirmation?.draftSha256 === draft.sha256;
+  return { document: state!.currentDocument, status: stale ? "待更新" : adopted ? "已采用" : "待确认" };
+}
+
+export function PlanningDeliveryPanel({ runId, versionId, artifactIds, artifacts, publicationExpected, creativeReview, stale = false }: PlanningDeliveryPanelProps) {
   const current = DELIVERIES.map((entry) => ({
     ...entry,
     artifact: artifacts.find((artifact) => artifactIds.includes(artifact.id) && artifact.kind === entry.kind),
+    draft: preservedStageDraft(creativeReview, entry.kind, stale),
   }));
-  const [selectedKind, setSelectedKind] = useState<string>(() => current.find((entry) => entry.artifact)?.kind ?? DELIVERIES[0].kind);
+  const [selectedKind, setSelectedKind] = useState<string>(() => current.find((entry) => entry.artifact || entry.draft)?.kind ?? DELIVERIES[0].kind);
   const selected = current.find((entry) => entry.kind === selectedKind) ?? current[0]!;
   const [reading, setReading] = useState<{ identity: string; status: "loading" | "ready" | "invalid" | "unavailable"; document?: unknown }>();
   const identity = `${runId}:${versionId}:${selected.artifact?.id ?? selected.kind}:${selected.artifact?.sha256 ?? ""}`;
@@ -83,7 +98,7 @@ export function PlanningDeliveryPanel({ runId, versionId, artifactIds, artifacts
     return () => controller.abort();
   }, [identity, selected.artifact?.contentUrl, selected.artifact?.contentType, selected.artifact?.sha256]);
 
-  if (artifactIds.length === 0) {
+  if (artifactIds.length === 0 && !current.some(entry => entry.draft)) {
     return <p className="node-document-state">{publicationExpected
       ? "正式交付记录暂未核对成功。已有文件不会被当作新方案使用；请查看制作记录，不要为此重新规划。"
       : "正式规划尚未交付。当前可讨论的初稿请在上方创作工作台查看。"}</p>;
@@ -92,24 +107,29 @@ export function PlanningDeliveryPanel({ runId, versionId, artifactIds, artifacts
     <div className="planning-delivery-index" aria-label="规划产物目录">
       {current.map((entry) => <button key={entry.kind} type="button" className={entry.kind === selectedKind ? "is-selected" : ""}
         aria-pressed={entry.kind === selectedKind} onClick={() => setSelectedKind(entry.kind)}>
-        <span>{entry.label}</span><small>{entry.artifact ? "已交付" : "未产出"}</small>
+        <span>{entry.label}</span><small>{entry.artifact ? stale ? "待更新" : "已交付" : entry.draft?.status ?? (publicationExpected ? "未产出" : "待生成")}</small>
       </button>)}
     </div>
     <div className="planning-delivery-document" aria-live="polite">
-      <header><strong>{selected.label}</strong><small>{selected.artifact ? "当前正式版本 · 只读" : "当前版本未登记此项"}</small></header>
-      {reading?.identity !== identity || reading.status === "loading" ? <p>正在读取当前交付…</p>
+      <header><strong>{selected.label}</strong><small>{stale ? "上次保存版本 · 待更新 · 只读" : selected.artifact ? "当前正式版本 · 只读" : selected.draft ? `当前阶段稿 · ${selected.draft.status} · 只读` : "尚未生成"}</small></header>
+      {!selected.artifact && selected.draft ? <PlanningPreview kind={selected.kind} value={selected.draft.document} />
+        : reading?.identity !== identity || reading.status === "loading" ? <p>正在读取当前交付…</p>
         : reading.status === "unavailable" ? <p>这一项尚未产出，其他已交付内容仍可查看。</p>
           : reading.status === "invalid" ? <p role="alert">交付已登记，但正文暂时无法核验或读取。已保留现有成果，请查看制作记录；不要为此重新规划。</p>
-            : PREVIEW_NODE_IDS[selected.kind]
-              ? <><NodeDeliveryPreview nodeId={PREVIEW_NODE_IDS[selected.kind]!} value={reading.document} />
-                <details className="planning-delivery-complete"><summary>查看完整业务内容</summary><PlanningDocument value={reading.document} /></details></>
-              : <PlanningDocument value={reading.document} />}
+            : <PlanningPreview kind={selected.kind} value={reading.document} />}
       {selected.artifact ? <details className="planning-document-records"><summary>查看产物登记信息</summary>
         <dl className="planning-document-fields"><div><dt>登记编号</dt><dd>{selected.artifact.id}</dd></div>
           <div><dt>内容校验值</dt><dd>{selected.artifact.sha256 ?? "未登记"}</dd></div></dl>
       </details> : null}
     </div>
   </section>;
+}
+
+function PlanningPreview({ kind, value }: { kind: string; value: unknown }) {
+  return PREVIEW_NODE_IDS[kind]
+    ? <><NodeDeliveryPreview nodeId={PREVIEW_NODE_IDS[kind]!} value={value} />
+      <details className="planning-delivery-complete"><summary>查看完整业务内容</summary><PlanningDocument value={value} /></details></>
+    : <PlanningDocument value={value} />;
 }
 
 function PlanningDocument({ value }: { value: unknown }) {

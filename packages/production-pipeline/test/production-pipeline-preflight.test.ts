@@ -4,6 +4,9 @@ import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { characterCandidateFromPlan } from "../src/character-narration-plan.js";
+import type { CharacterScript } from "../src/character-script.js";
+import type { NarrationVisualDirectorPlan } from "../src/visual-director.js";
 import {
   ProductionPipeline,
   type ScriptDraft,
@@ -202,18 +205,27 @@ function directorAgent(): VisualDirectorAgent {
 }
 
 describe("ProductionPipeline production preflight", () => {
-  for (const mode of ["regular", "group-conflict", "upstream-edit", "upstream-edit-v2"]) it(`confirms continuous narration before TTS without releasing the current user gate (${mode})`, async () => {
+  for (const mode of ["regular", "group-conflict", "upstream-edit", "upstream-edit-v2", "character-v3"]) it(`confirms continuous narration before TTS without releasing the current user gate (${mode})`, async () => {
     const groupedConflict = mode === "group-conflict";
+    const character = mode === "character-v3";
+    const characterScript = JSON.parse(await readFile(new URL("../../../tests/fixtures/character-drama-cases.json", import.meta.url), "utf8")).script as CharacterScript;
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-narration-confirm-"));
     const worker = groupedConflict ? new VoiceConflictWorker(true) : new RecordingWorker();
     const pipeline = new ProductionPipeline({ workspaceRoot, worker,
-      screenwriterAgent: { id: "codex-screenwriter-v1", draft: async () => ({ viewerPromise: "三个动作连成故事", scenes }) },
-      directorAgent: directorAgent(),
+      screenwriterAgent: { id: "codex-screenwriter-v1", draft: async () => character ? structuredClone(characterScript) : ({ viewerPromise: "三个动作连成故事", scenes }) },
+      directorAgent: { ...directorAgent(), plan: async (input) => {
+        const plan = await directorAgent().plan(input) as NarrationVisualDirectorPlan;
+        return character ? { ...plan, version: "video-factory/director-plan-v2",
+          shots: plan.shots.map((shot, index) => ({ ...shot, authenticityPolicy: "illustrative",
+            characterIds: characterScript.scenes[index]!.character_ids,
+            speakingTurnIds: characterScript.scenes[index]!.dialogue.map((t) => t.id) })) } : plan;
+      } },
       assetProviders: [{ id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["图库视频"], deliveryTypes: ["stock_video"] }],
       providerRuntimeMetadata: [{ id: "minimax-tts-v1", label: "MiniMax", modelId: "speech-2.8-turbo", transport: "http_api",
         billing: "metered", approvalPolicy: "automatic", estimatedCostCny: 0.5, maxAttempts: 1 }],
     });
     let run = await pipeline.start({ protocolVersion: "video-factory/brief-v1", title: "三个动作连成故事",
+      ...(character ? { presentationMode: "character_drama" } : {}),
       angle: "连续叙事", audience: "普通创作者", nicheSlug: "life-actions", durationSeconds: 24,
       durationRange: { minSeconds: 20, maxSeconds: 34 }, platform: "douyin", runPurpose: "test", reviewMode: "manual",
       workflowFeatures: { boundaryGates: "user-confirmed-v1", assetSemanticRank: false, referenceGrammar: false },
@@ -231,11 +243,33 @@ describe("ProductionPipeline production preflight", () => {
     let originalGate = run.nodeRuns.find((node) => node.nodeId === "assets")!.intervention!;
     assert.ok(originalGate);
     const preview = await pipeline.previewNarrationPlan(run.id);
-    assert.equal(preview.plan.groups.length, 1);
+    assert.equal(preview.plan.groups.length, character ? 8 : 1);
     let chosen = structuredClone(preview.plan);
     chosen.groups[0]!.placement.anchor = "end";
     let saved: typeof run;
-    if (mode === "upstream-edit-v2") {
+    if (character) {
+      assert.equal(preview.plan.version, "video-factory/narration-plan-v3");
+      if (preview.plan.version !== "video-factory/narration-plan-v3") throw new Error("requires v3");
+      const ticket = await pipeline.previewNarrationPlanV2(run.id, {
+        version: "video-factory/narration-plan-v3", expectedRunRevision: run.revision, sourceContextId: preview.sourceContextId!,
+        editorSessionId: "character-edit", editSequence: 1, actor: "creator",
+        candidate: characterCandidateFromPlan(preview.plan),
+      });
+      chosen = ticket.plan;
+      const adoption = { version: "video-factory/narration-plan-v3" as const, requestId: "character-save", expectedRunRevision: run.revision,
+        sourceContextId: preview.sourceContextId!, editorSessionId: ticket.editorSessionId, editSequence: ticket.editSequence,
+        candidateId: ticket.candidateId, ticketId: ticket.ticketId, planSha256: ticket.planSha256, acknowledgeQuoteUnavailable: true, actor: "creator" };
+      await assert.rejects(pipeline.confirmNarrationPlanV2(run.id, { ...adoption, acknowledgeQuoteUnavailable: false }), /核价/);
+      const first = await pipeline.confirmNarrationPlanV2(run.id, adoption);
+      saved = first.run;
+      const replay = await pipeline.confirmNarrationPlanV2(run.id, adoption);
+      assert.equal(replay.receipt.replay, true);
+      assert.equal(replay.run.revision, saved.revision);
+      await assert.rejects(pipeline.confirmNarrationPlanV2(run.id, { ...adoption, planSha256: "e".repeat(64) }), /同一保存请求/);
+      await assert.rejects(pipeline.previewNarrationPlanV2(run.id, { version: "video-factory/narration-plan-v3",
+        expectedRunRevision: saved.revision, sourceContextId: preview.sourceContextId!, editorSessionId: "character-edit",
+        editSequence: 2, candidate: { ...characterCandidateFromPlan(preview.plan), text: "注入正文" }, actor: "creator" }), /字段|正文/);
+    } else if (mode === "upstream-edit-v2") {
       const ticket = await pipeline.previewNarrationPlanV2(run.id, {
         expectedRunRevision: run.revision, sourceContextId: preview.sourceContextId!,
         editorSessionId: "stale-source-v2", editSequence: 1, actor: "creator",

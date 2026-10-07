@@ -79,8 +79,6 @@
 .studio-v3 .creative-message { padding: 14px; line-height: 1.8; border: 0; }
 .studio-v3 .creative-message > span { margin-bottom: 5px; font-size: 12px; }
 .studio-v3 .creative-empty-chat { font-size: 14px; color: var(--muted); }
-.studio-v3 .creative-quick-prompts { gap: 7px; margin: 20px 0 14px; }
-.studio-v3 .creative-quick-prompts button { border: 1px solid var(--line); border-radius: 5px; font-size: 12px; }
 .studio-v3 .creative-composer textarea { min-height: 128px; border-color: var(--control-border); font-size: 15px; line-height: 1.8; }
 .studio-v3 .creative-composer-actions { display: flex; flex: 0 0 auto; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .studio-v3 .creative-review-actions { position: static; padding: 20px 26px; gap: 10px; background: var(--paper); box-shadow: 0 -8px 24px rgb(30 42 61 / 3%); }
@@ -124,6 +122,8 @@
 .optional-timing-tool[open] > summary { border-bottom: 1px solid var(--line); }
 .optional-timing-tool > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .optional-timing-tool .narration-timing-editor { margin: 0; border: 0; border-radius: 0 0 6px 6px; }
+.narration-timing-editor fieldset { min-width: 0; margin-inline: 0; }
+.narration-timing-editor audio { display: block; width: 100%; max-width: 100%; }
 .studio-v3 .original-review-notice { display: flex; align-items: start; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; color: var(--amber); font-size: 13px; line-height: 1.8; }
 .studio-v3 .original-review-notice > svg { flex: 0 0 auto; margin-top: 3px; }
 .studio-v3 .original-review-notice a { margin-left: auto; color: var(--accent-strong); text-underline-offset: 3px; }
@@ -213,3 +213,22 @@
   /* 保留完整诊断；长结构字段名也能在窄屏面板内换行。 */
   overflow-wrap: anywhere;
 }
+
+/* 角色和台词复用工作区的表单层级；窄屏保持单列，不藏后面的角色。 */
+.studio-v3 .character-script-editor,
+.studio-v3 .character-editor-card,
+.studio-v3 .character-editor-scene,
+.studio-v3 .character-turn-editor { min-width: 0; border: 0; padding: 0; margin: 0 0 20px; }
+.studio-v3 .character-editor-list,
+.studio-v3 .character-reader-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 20px; }
+.studio-v3 .character-editor-card,
+.studio-v3 .character-reader-list article { padding: 16px; background: var(--surface, #f7f7f5); border-radius: 10px; overflow-wrap: anywhere; }
+.studio-v3 .character-script-editor legend { font-weight: 600; margin-bottom: 12px; }
+.studio-v3 .character-script-editor input:not([type="checkbox"]),
+.studio-v3 .character-script-editor select,
+.studio-v3 .character-script-editor textarea { box-sizing: border-box; min-width: 0; max-width: 100%; width: 100%; }
+.studio-v3 .character-cast { min-width: 0; display: flex; flex-wrap: wrap; gap: 12px; border: 0; padding: 12px 0; }
+.studio-v3 .character-cast label { display: flex; align-items: center; gap: 6px; }
+.studio-v3 .character-turn-editor { padding: 12px 0; border-top: 1px solid var(--border, #ddd); }
+.studio-v3 .character-dialogue { padding-left: 20px; }
+.studio-v3 .character-dialogue li { margin: 14px 0; overflow-wrap: anywhere; }

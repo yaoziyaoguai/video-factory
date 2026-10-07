@@ -10,6 +10,7 @@ import {
   BROKER_TASK_KINDS,
   COMMON_ROLE_PREAMBLE,
   outputSchemaFor,
+  modelOutputSchemaFor,
   providerOutputSchemaFor,
   outputSchemaValidationErrorFor,
   outputSemanticValidationErrorFor,
@@ -142,6 +143,9 @@ function validCreativeTreatment(): Record<string, unknown> {
 function assertStrictObjectRequirements(schema: unknown, path: string): void {
   if (typeof schema !== "object" || schema === null || Array.isArray(schema)) return;
   const record = schema as Record<string, unknown>;
+  for (const branch of Array.isArray(record.anyOf) ? record.anyOf : []) {
+    assertStrictObjectRequirements(branch, path + ".anyOf");
+  }
   if (record.type === "object") {
     const properties = typeof record.properties === "object" && record.properties !== null && !Array.isArray(record.properties)
       ? record.properties as Record<string, unknown>
@@ -162,7 +166,7 @@ function assertStrictObjectRequirements(schema: unknown, path: string): void {
 // 示例文本里凡嵌入了该 kind 全部顶层 required 键的 JSON 对象，就是在向模型声称"完整字段组合"。
 // 这类示例必须由真校验器裁定：审计指出模型会照抄示例，示例违规即示范违规。
 function claimedCompleteExamplesFor(kind: (typeof BROKER_TASK_KINDS)[number]): Array<{ exampleIndex: number; value: unknown }> {
-  const required = (outputSchemaFor(kind) as { required?: unknown }).required;
+  const required = (modelOutputSchemaFor(kind) as { required?: unknown }).required;
   if (!Array.isArray(required) || required.length === 0) return [];
   return taskPromptFor(kind).examples.flatMap((example, exampleIndex) => {
     const start = example.indexOf("{");
@@ -389,7 +393,7 @@ describe("broker-owned task definitions", () => {
     ] as const);
 
     for (const kind of BROKER_TASK_KINDS) {
-      const schema = outputSchemaFor(kind) as { additionalProperties?: boolean; required?: string[] };
+      const schema = modelOutputSchemaFor(kind) as { additionalProperties?: boolean; required?: string[] };
       assert.equal(schema.additionalProperties, false);
       assert.deepEqual(schema.required, requiredByKind.get(kind));
     }
@@ -413,7 +417,10 @@ describe("broker-owned task definitions", () => {
         : value && typeof value === "object"
           ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "uniqueItems").map(([key, entry]) => [key, removeUnique(entry)]))
           : value;
-      assert.deepEqual(projected, removeUnique(outputSchemaFor(kind)));
+      assert.deepEqual(projected, removeUnique(modelOutputSchemaFor(kind)));
+      const characterSchema = providerOutputSchemaFor(kind, "character_drama");
+      assertStrictObjectRequirements(characterSchema, kind + ":character_drama");
+      assert.deepEqual(characterSchema, removeUnique(modelOutputSchemaFor(kind, "character_drama")));
     }
     assert.ok(JSON.stringify(outputSchemaFor("topic-ideas")).includes('"uniqueItems":true'));
     assert.ok(JSON.stringify(outputSchemaFor("role-audit")).includes('"uniqueItems":true'));
@@ -442,11 +449,11 @@ describe("broker-owned task definitions", () => {
   });
 
   it("requires inspectable shot intent instead of accepting generic scene prose", () => {
-    const scriptSchema = outputSchemaFor("script-draft") as {
+    const scriptSchema = modelOutputSchemaFor("script-draft") as {
       required: string[];
       properties: { scenes: { minItems: number; items: { required: string[] } } };
     };
-    const directorSchema = outputSchemaFor("director-plan") as {
+    const directorSchema = modelOutputSchemaFor("director-plan") as {
       properties: { shots: { items: { required: string[]; properties: {
         sourceInSeconds: { minimum: number };
         temporalBeats: { minItems: number; items: { required: string[] } };
@@ -633,7 +640,7 @@ describe("broker-owned task definitions", () => {
   });
 
   it("rejects broken scene ordering and duplicate director routes", () => {
-    const scriptSchema = outputSchemaFor("script-draft") as {
+    const scriptSchema = modelOutputSchemaFor("script-draft") as {
       properties: { scenes: { items: Record<string, unknown> } };
     };
     const scene = {

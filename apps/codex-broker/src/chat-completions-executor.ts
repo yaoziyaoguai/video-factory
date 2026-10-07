@@ -22,7 +22,8 @@ import {
 } from "./codex-executor.js";
 import {
   BROKER_TASK_KINDS,
-  outputSchemaFor,
+  modelOutputSchemaFor,
+  taskPresentationMode,
   outputSchemaValidationErrorFor,
   outputSemanticValidationErrorFor,
   outputSemanticDiagnosticFor,
@@ -217,7 +218,7 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
       buildTaskPrompt(task, taskPrompt),
       "",
       "返回对象还必须通过以下 JSON Schema：",
-      JSON.stringify(outputSchemaFor(task.kind)),
+      JSON.stringify(modelOutputSchemaFor(task.kind, taskPresentationMode(task.kind, task.payload))),
     ].join("\n");
     const label = this.provider.label;
     const controller = new AbortController();

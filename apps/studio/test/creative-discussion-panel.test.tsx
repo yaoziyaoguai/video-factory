@@ -1101,7 +1101,7 @@ describe("CreativeDiscussionPanel", () => {
       },
     })} busy={false} onCommand={onCommand} />);
 
-    expect(screen.getByText(/有 1 处需要调整/)).toBeInTheDocument();
+    expect(screen.getByText(/有 1 条修改建议，由你决定是否采用/)).toBeInTheDocument();
     expect(screen.getByText("先复查现有素材，再决定是否更换。")).toBeInTheDocument();
     const confirmButton = screen.getByRole("button", { name: "保留这些建议，仍采用" });
     expect(confirmButton).toBeEnabled();
@@ -1161,11 +1161,17 @@ describe("CreativeDiscussionPanel", () => {
     expect(composer.value).toMatch(/^先保留我原来的开场。/);
     expect(composer.value).toContain("第二镜缩短两秒，保留动作结果。");
     expect(composer.value).toContain("结尾留一秒听环境声。");
+    await waitFor(() => expect(composer).toHaveFocus());
+    expect(screen.getByText("交互记录")).toBeInTheDocument();
+    for (const name of ["解释这个安排", "开头不够吸引", "给我另一个方向，但先不要替换"]) {
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    }
     expect(onCommand).not.toHaveBeenCalled();
     await userEvent.type(composer, "\n但不要改第一镜。");
     expect(composer.value).toContain("但不要改第一镜。");
     await userEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledWith(expect.objectContaining({ action: "revise", message: expect.stringContaining("但不要改第一镜") })));
+    expect(onCommand).toHaveBeenCalledTimes(1);
   });
 
   it("does not carry a selected audit suggestion to a new version with identical text", async () => {

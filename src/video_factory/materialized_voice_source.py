@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from .voiceover import _write_json_durably
+from .character_narration_plan import VERSION as CHARACTER_PLAN_VERSION
 
 MANIFEST_VERSION = "video-factory/voice-source-manifest-v1"
+CHARACTER_MANIFEST_VERSION = "video-factory/voice-source-manifest-v2"
 RECEIPT_VERSION = "video-factory/voice-source-receipt-v1"
 DECODED_PROFILE = {"sampleRate": 44_100, "channels": 1, "sampleFormat": "s16le"}
 
@@ -71,6 +73,9 @@ def build_materialized_manifest(
     if not isinstance(items, list):
         raise ValueError("voice 来源清单需要列表形式的合成账本。")
     plan_groups = {group["id"]: group for group in narration_plan["groups"]}
+    character_plan = narration_plan.get("version") == CHARACTER_PLAN_VERSION
+    if [item.get("groupId") for item in items] != [group["id"] for group in narration_plan["groups"]]:
+        raise ValueError("voice 来源清单的组数量、顺序或身份与计划不一致。")
     if plan_groups:
         if not items:
             raise ValueError("voice 来源清单需要非空的合成账本。")
@@ -105,6 +110,15 @@ def build_materialized_manifest(
             "decoded": {**DECODED_PROFILE, "sampleCount": decoded_sample_count(raw_path)},
         }
         source_range = plan_group.get("sourceRange")
+        if character_plan:
+            for field in ("turnId", "speakerId", "voiceProfileId"):
+                if not isinstance(plan_group.get(field), str) or item.get(field) != plan_group[field]:
+                    raise ValueError(f"voice 台词的 {field} 与原计划不一致。")
+                entry[field] = plan_group[field]
+            for field in ("providerId", "modelId"):
+                if not isinstance(item.get(field), str) or not item[field] or item[field] != ledger.get(field):
+                    raise ValueError(f"voice 台词的实际 {field} 无法核实。")
+                entry[field] = item[field]
         if source_range is not None:
             entry["sourceRange"] = dict(source_range)
         metadata_path = item.get("metadataPath")
@@ -132,7 +146,7 @@ def build_materialized_manifest(
     ledger_snapshot_path = output_dir / "voice-operation-snapshot.json"
     shutil.copyfile(ledger_path, ledger_snapshot_path)
     manifest: dict[str, Any] = {
-        "version": MANIFEST_VERSION,
+        "version": CHARACTER_MANIFEST_VERSION if character_plan else MANIFEST_VERSION,
         "runId": run_id,
         "nodeId": node_id,
         "sourceOperationId": source_operation_id,
@@ -167,8 +181,12 @@ def write_materialized_manifest(manifest: dict[str, Any], output_dir: Path) -> P
 def read_materialized_manifest(path: Path, node_root: Path) -> dict[str, Any]:
     """读取并核验清单：自身摘要一致、全部引用 realpath 落在节点根内且 SHA 匹配。"""
     manifest = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(manifest, dict) or manifest.get("version") != MANIFEST_VERSION:
+    if not isinstance(manifest, dict) or manifest.get("version") not in (MANIFEST_VERSION, CHARACTER_MANIFEST_VERSION):
         raise ValueError("voice 来源清单版本未知。")
+    character_manifest = manifest["version"] == CHARACTER_MANIFEST_VERSION
+    plan_version = (manifest.get("narrationPlan") or {}).get("version")
+    if (character_manifest and plan_version != CHARACTER_PLAN_VERSION) or (not character_manifest and plan_version == CHARACTER_PLAN_VERSION):
+        raise ValueError("voice 来源清单与计划版本不匹配。")
     recorded = manifest.get("manifestSha256")
     body = {key: value for key, value in manifest.items() if key != "manifestSha256"}
     if recorded != _digest(body):
@@ -197,6 +215,10 @@ def read_materialized_manifest(path: Path, node_root: Path) -> dict[str, Any]:
     for entry in groups:
         if not isinstance(entry, dict):
             raise ValueError("voice 来源清单的组记录无效。")
+        if character_manifest and (any(not isinstance(entry.get(field), str) or not entry[field]
+                for field in ("turnId", "speakerId", "voiceProfileId", "providerId", "modelId"))
+                or entry["turnId"] != entry.get("groupId")):
+            raise ValueError("角色声音来源清单缺少逐句身份与实际服务记录。")
         raw_path = verify_reference(entry.get("raw"), "原始音频", "audio/mpeg")
         meta_path = verify_reference(entry.get("meta"), "原始响应 metadata", "application/json")
         try:
@@ -237,6 +259,9 @@ def verify_materialized_manifest(
     node_root = node_root.resolve()
     # 调用方先用 read_materialized_manifest 完成结构层核验（摘要/引用根内/SHA），
     # 本函数补齐身份与全组对账层；两层任一失败都在排轨/恢复执行前拒绝。
+    character_plan = narration_plan.get("version") == CHARACTER_PLAN_VERSION
+    if manifest.get("version") != (CHARACTER_MANIFEST_VERSION if character_plan else MANIFEST_VERSION):
+        raise ValueError("voice 来源清单与原计划版本不匹配。")
     if manifest.get("runId") != run_id or manifest.get("nodeId") != node_id:
         raise ValueError("voice 来源清单不属于当前 run/节点。")
     if manifest.get("sourceOperationId") != source_operation_id:
@@ -269,6 +294,8 @@ def verify_materialized_manifest(
     if [entry.get("groupId") for entry in entries] != [group.get("id") for group in plan_groups]:
         raise ValueError("voice 来源清单与原计划的组数量、顺序或身份不一致（漏组/重复组）。")
     for entry, group in zip(entries, plan_groups):
+        if character_plan and any(entry.get(field) != group.get(field) for field in ("turnId", "speakerId", "voiceProfileId")):
+            raise ValueError("voice 台词的角色或音色与原计划不一致。")
         if entry.get("sourceScenePositions") != list(group.get("sourceScenePositions") or []):
             raise ValueError(f"voice 组 {group.get('id')} 的镜头归属与原计划不一致。")
         if entry.get("textSha256") != hashlib.sha256(str(group.get("text", "")).encode("utf-8")).hexdigest():
@@ -299,6 +326,9 @@ def verify_materialized_manifest(
     if [item.get("groupId") for item in snapshot_items] != [entry.get("groupId") for entry in entries]:
         raise ValueError("voice 来源清单与账本快照的组对应不一致。")
     for item, entry in zip(snapshot_items, entries):
+        if character_plan and any(item.get(field) != entry.get(field)
+                for field in ("turnId", "speakerId", "voiceProfileId", "providerId", "modelId")):
+            raise ValueError("voice 台词的角色、音色或实际服务与原账本不一致。")
         if item.get("state") != "materialized":
             raise ValueError(f"voice 组 {entry.get('groupId')} 在账本快照中不是已完成物化状态。")
         for field in ("itemRequestId", "synthesisKey", "responseItemRequestId"):

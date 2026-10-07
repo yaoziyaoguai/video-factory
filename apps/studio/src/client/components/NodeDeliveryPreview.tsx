@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { CharacterScriptReader, isCharacterDocument } from "./CharacterScriptEditor.js";
 import { creatorContainerViewId, creatorViewId, isCreatorNestedField, isCreatorTopLevelField } from "../creator-document-policy.js";
 import { unsplashPublicUrl } from "./UnsplashAttribution.js";
 import { hasStockAttribution, StockAttribution, stockPublicUrl, stockSourceUrl } from "./StockAttribution.js";
@@ -187,11 +188,13 @@ const FIELD_LABELS: Record<string, string> = {
 };
 
 export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps) {
+  if (creatorViewId(nodeId) === "script" && isCharacterDocument(value)) return <CharacterScriptReader value={value} />;
   const record = asRecord(value);
   if (!record) return <p className="node-document-state">这一步暂时没有可查看的详细内容。</p>;
   const inputPreview = nodeId.endsWith("-input");
   const viewId = creatorViewId(nodeId);
-  const continuousVoice = viewId === "voice" && !inputPreview && record.version === "video-factory/voiceover-plan-v3";
+  const continuousVoice = viewId === "voice" && !inputPreview
+    && (record.version === "video-factory/voiceover-plan-v3" || record.version === "video-factory/voiceover-plan-v4");
   const assetRoutes = viewId === "assets" && Array.isArray(record.director_routing)
     ? record.director_routing
     : [];
@@ -290,6 +293,7 @@ function validCueList(subtitles: Record<string, unknown> | undefined): Array<{ t
 }
 
 function ContinuousVoiceTimingPreview({ record }: { record: Record<string, unknown> }) {
+  const characterMode = record.version === "video-factory/voiceover-plan-v4";
   const groups = Array.isArray(record.groups) ? record.groups.map(asRecord).filter((group) => group !== undefined) : [];
   const rate = record.sampleRate;
   if (rate !== 44100 || groups.some((group) => !Array.isArray(group.sourceScenePositions)
@@ -315,11 +319,11 @@ function ContinuousVoiceTimingPreview({ record }: { record: Record<string, unkno
   const uncoveredScenes = windows && cues ? windows.filter((window) => !cues.some((cue) =>
     window.startSample < cue.endSample && cue.startSample < window.endSample)).map((window) =>
     `镜头 ${window.position}（${(window.startSample / rate).toFixed(1)}–${(window.endSample / rate).toFixed(1)} 秒）没有旁白覆盖`) : null;
-  return <section className="node-preview-section" aria-label="连贯旁白与画面节奏">
-    <h4>连贯旁白与画面节奏</h4>
-    <p>同组旁白跨镜连续播放，不因切换画面重新起句。请用本页播放器连听全片。</p>
+  return <section className="node-preview-section" aria-label={characterMode ? "角色台词与画面节奏" : "连贯旁白与画面节奏"}>
+    <h4>{characterMode ? "角色台词与画面节奏" : "连贯旁白与画面节奏"}</h4>
+    <p>{characterMode ? "台词按剧本顺序、分别使用各角色选定的音色。请连续试听，核对换人、停顿和画面；不包含口型同步。" : "同组旁白跨镜连续播放，不因切换画面重新起句。请用本页播放器连听全片。"}</p>
     <ul>{groups.map((group, index) => <li key={index}>
-      <strong>第 {index + 1} 组 · 镜头 {(group.sourceScenePositions as number[]).join("、")}</strong>
+      <strong>{characterMode ? `台词 ${index + 1}` : `第 ${index + 1} 组`} · 镜头 {(group.sourceScenePositions as number[]).join("、")}</strong>
       <p>{group.text as string}</p>
       <p>声音从 {((group.startSample as number) / rate).toFixed(1)} 秒到 {((group.endSample as number) / rate).toFixed(1)} 秒；
         这一段画面仍有 {((group.unfilledWindowSamples as number) / rate).toFixed(1)} 秒未铺旁白。</p>

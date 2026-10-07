@@ -171,9 +171,18 @@ export class RoleAuditOutputError extends Error {
   }
 }
 
+/** 两次生成响应均已取回，但宿主结构校验未通过；不能误报为在途请求。 */
+class RoleProducerOutputError extends Error {
+  constructor(readonly creatorMessage: string, diagnostic: string) {
+    super(`${creatorMessage}\n诊断：${diagnostic}`);
+    this.name = "RoleProducerOutputError";
+  }
+}
+
 export function isCompletedRoleAgentFailure(error: RoleAgentLoopError): boolean {
   return codexBridgeErrorFromCause(error)?.stage === "completed_failure"
-    || error.sourceError instanceof RoleAuditOutputError;
+    || error.sourceError instanceof RoleAuditOutputError
+    || error.sourceError instanceof RoleProducerOutputError;
 }
 
 /** 宿主在物理请求提交前停止执行；不是模型运行失败，也不消耗模型调用次数。 */
@@ -432,11 +441,12 @@ export async function runRoleAgentLoop<TOutput>(
           await persistCheckpoint(options, state);
           if (structuredOutputAttempts >= MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN) {
             throw await failedLoopError(
-              new Error(
+              new RoleProducerOutputError(
                 `${options.role}连续两次返回了无法使用的结果；本轮质量审计尚未消耗，`
                 // 机器诊断放进「诊断：」段：界面渲染时剥掉这一整段，创作者只读到中文句；
                 // 原文留在 checkpoint 与日志里给操作员定位。裸拼在中文句后面会变成半句英文。
-                + `可从已保存进度继续。\n诊断：${validationRevision.validationError}`,
+                + "可从已保存进度继续。",
+                validationRevision.validationError,
               ),
               options,
               state,
@@ -744,6 +754,8 @@ async function failedLoopError<TOutput>(
       summary: baseMessage,
     };
   } else if (error instanceof RoleAuditOutputError) {
+    state.failure = { stage: "completed_failure", summary: error.creatorMessage };
+  } else if (error instanceof RoleProducerOutputError) {
     state.failure = { stage: "completed_failure", summary: error.creatorMessage };
   } else if (error instanceof RoleAgentHostStop) {
     state.failure = { stage: "not_accepted", summary: error.message };

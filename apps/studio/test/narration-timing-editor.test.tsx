@@ -119,6 +119,68 @@ it("sends a relayout apply bound to the current voice version and stop, then rep
   await screen.findByText(/未重新购买/);
 });
 
+it("reconciles its applied request when the current voice arrives before the POST response", async () => {
+  const next = previewFixture();
+  next.expectedRunRevision = 8;
+  next.plan.groups[1]!.placement.anchor = "end";
+  vi.spyOn(studioApi, "narrationPlan").mockResolvedValueOnce(previewFixture()).mockResolvedValue(next);
+  const pendingPost = deferred<StudioRunDetail>();
+  const dispatch = vi.spyOn(studioApi, "requestNarrationRevision").mockReturnValue(pendingPost.promise);
+  const query = vi.spyOn(studioApi, "narrationRelayoutOperation").mockImplementation(async (_runId, requestId) => ({
+    requestId, state: "applied", requestDigest: "d".repeat(64), resultVoiceVersionId: "version-voice-2", isCurrent: true }));
+  const view = renderEditor();
+  await screen.findByText("第一句。");
+  fireEvent.change(screen.getByLabelText("第 2 段落点"), { target: { value: "end" } });
+  fireEvent.click(screen.getByRole("button", { name: "应用时间调整并重新试听" }));
+  await waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+  const request = dispatch.mock.calls[0]![1];
+  if (request.action !== "relayout_narration") throw new Error("Expected relayout request.");
+  const requestId = request.requestId;
+  const changedVoice = structuredClone(voiceNode);
+  changedVoice.outputState!.effectiveVersionId = "version-voice-2";
+  changedVoice.outputState!.versions.push({ id: "version-voice-2", artifactIds: ["art-plan", "art-audio"],
+    schemaVersion: "video-factory/voiceover-plan-v3" } as never);
+  view.rerender(<NarrationTimingEditor runId="run-timing" revision={8} voiceNode={changedVoice}
+    artifacts={artifacts} interventionId="intervention-new" disabled={false} />);
+  await screen.findByText(/未重新购买/);
+  expect(query).toHaveBeenCalledWith("run-timing", requestId);
+  expect(screen.queryByText("时间草稿尚未生效。")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "继续此时间调整" })).not.toBeInTheDocument();
+  expect(screen.getByLabelText("第 2 段落点")).toHaveValue("end");
+  expect(screen.getByRole("button", { name: "应用时间调整并重新试听" })).toBeEnabled();
+  expect(window.localStorage.getItem("vf:narration-timing-draft:run-timing")).toBeNull();
+  await act(async () => pendingPost.resolve({ nodes: [] } as unknown as StudioRunDetail));
+  expect(dispatch).toHaveBeenCalledOnce();
+});
+
+it.each(["request", "version", "superseded"])("keeps its draft when the current-voice receipt has a %s mismatch", async (mismatch) => {
+  vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(previewFixture());
+  const pendingPost = deferred<StudioRunDetail>();
+  const dispatch = vi.spyOn(studioApi, "requestNarrationRevision").mockReturnValue(pendingPost.promise);
+  const query = vi.spyOn(studioApi, "narrationRelayoutOperation").mockImplementation(async (_runId, requestId) => ({
+    requestId: mismatch === "request" ? "other-request" : requestId, state: "applied", requestDigest: "d".repeat(64),
+    resultVoiceVersionId: mismatch === "version" ? "other-version" : "version-voice-2", isCurrent: mismatch !== "superseded" }));
+  const view = renderEditor();
+  await screen.findByText("第一句。");
+  fireEvent.change(screen.getByLabelText("第 2 段落点"), { target: { value: "end" } });
+  fireEvent.click(screen.getByRole("button", { name: "应用时间调整并重新试听" }));
+  await waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+  const original = window.localStorage.getItem("vf:narration-timing-draft:run-timing");
+  const changedVoice = structuredClone(voiceNode);
+  changedVoice.outputState!.effectiveVersionId = "version-voice-2";
+  view.rerender(<NarrationTimingEditor runId="run-timing" revision={8} voiceNode={changedVoice}
+    artifacts={artifacts} interventionId="intervention-new" disabled={false} />);
+  await screen.findByText(/旧草稿保持只读/);
+  const request = dispatch.mock.calls[0]![1];
+  if (request.action !== "relayout_narration") throw new Error("Expected relayout request.");
+  expect(query).toHaveBeenCalledWith("run-timing", request.requestId);
+  expect(screen.queryByText(/未重新购买/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "继续此时间调整" })).toBeDisabled();
+  expect(window.localStorage.getItem("vf:narration-timing-draft:run-timing")).toBe(original);
+  await act(async () => pendingPost.resolve({ nodes: [] } as unknown as StudioRunDetail));
+  expect(dispatch).toHaveBeenCalledOnce();
+});
+
 it("keeps the draft and offers discard when the local adjustment fails", async () => {
   vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(previewFixture());
   const dispatch = vi.spyOn(studioApi, "requestNarrationRevision")
@@ -520,12 +582,24 @@ it("accepts the new source after the user explicitly discards a dirty old-source
   expect(query).not.toHaveBeenCalled();
 });
 
-it("uses only receipt-bound group audio at the first-fit stop and ignores unrelated raw audio", async () => {
-  vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(previewFixture());
+it.each(["v2", "v3"])("uses only receipt-bound group audio at the %s first-fit stop and ignores unrelated raw audio", async (mode) => {
+  const preview = previewFixture();
+  if (mode === "v3") preview.plan = {
+    version: "video-factory/narration-plan-v3", mode: "character_turns", audioStrategy: "external_tts",
+    script: v2Plan.script, visualPlan: { ...v2Plan.visualPlan, fps: 30 }, edgeTrim: "none", subtitleMode: "provider_sentence",
+    source: { sourceContextId: "sc-timing-test", canonicalSourceSha256: "c".repeat(64) },
+    silences: [], groups: v2Plan.groups.map((g, i) => ({ id: g.id, turnId: g.id, speakerId: "speaker-" + i,
+      voiceProfileId: "minimax:female-shaonv", sourceScenePositions: [1], text: g.text,
+      window: g.window, placement: { anchor: "start", offsetFrames: 0 } })),
+  };
+  vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(preview);
+  const dispatch = vi.spyOn(studioApi, "requestNarrationRevision").mockResolvedValue({ nodes: [] } as unknown as StudioRunDetail);
+  vi.spyOn(studioApi, "narrationRelayoutOperation").mockImplementation(async (_runId, requestId) => ({
+    requestId, state: "applied", requestDigest: "a".repeat(64), resultVoiceVersionId: "voice-new", isCurrent: true }));
   const conflicted = structuredClone(voiceNode) as unknown as StudioNode;
   delete (conflicted.outputState as { effectiveVersionId?: string }).effectiveVersionId;
   (conflicted.output as Record<string, unknown>).conflict = {
-    code: "NARRATION_GROUP_DOES_NOT_FIT_V2", requiredFrames: 135, availableFrames: 90 };
+    code: mode === "v3" ? "NARRATION_TURN_DOES_NOT_FIT" : "NARRATION_GROUP_DOES_NOT_FIT_V2", requiredFrames: 135, availableFrames: 90 };
   (conflicted.output as Record<string, unknown>).voiceSourceReceipt = {
     voiceInputVersionId: "input-voice", sourceOperationId: "tts-original-op",
     manifestArtifactId: "manifest", manifestSha256: "m".repeat(64), receiptArtifactId: "receipt",
@@ -545,6 +619,12 @@ it("uses only receipt-bound group audio at the first-fit stop and ignores unrela
     "/api/runs/run-timing/artifacts/raw-a/content",
     "/api/runs/run-timing/artifacts/raw-b/content",
   ]);
+  fireEvent.change(screen.getByLabelText("第 1 段窗口结束秒"), { target: { value: "4.5" } });
+  fireEvent.click(screen.getByRole("button", { name: "应用时间调整并重新试听" }));
+  await waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+  expect(dispatch.mock.calls[0]![1]).toMatchObject({ sourceContextId: "sc-timing-test",
+    source: { kind: "materialized_operation", sourceVoiceOperationId: "tts-original-op" },
+    layout: { narrationPlanVersion: preview.plan.version, groups: [{ groupId: "ng-1", window: { endFrame: 135 } }, {}] } });
 });
 
 it.each([true, "relayout"])("uses the adopted voice version when the retained conflict is resolved with %s", async (resolved) => {

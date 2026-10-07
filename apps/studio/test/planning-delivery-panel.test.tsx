@@ -13,6 +13,43 @@ const artifact = (id: string, kind: string): StudioArtifact => ({
 afterEach(() => vi.restoreAllMocks());
 
 describe("PlanningDeliveryPanel", () => {
+  it("uses the readable script view for a preserved stage draft", () => {
+    render(<PlanningDeliveryPanel runId="run-draft" versionId="node-v2" artifactIds={[]} artifacts={[]}
+      publicationExpected={false} creativeReview={{ stages: { script: {
+        phase: "waiting_user", currentDraft: { versionId: "draft-v1", sha256: "a".repeat(64) },
+        currentDocument: { scenes: [{ position: 1, narration: "窗边的光慢慢挪过桌面。", duration: 7,
+          visual_strategy: "generated", visual_prompt: "窗边的编辑示意卡" }] },
+      } } }} />);
+    expect(screen.getByRole("button", { name: /脚本.*待确认/ })).toBeInTheDocument();
+    expect(screen.getByText("查看完整业务内容").closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText("position")).not.toBeVisible();
+    expect(screen.getAllByText("窗边的光慢慢挪过桌面。").some(node => !node.closest("details"))).toBe(true);
+  });
+
+  it("does not present a stale stage draft or a different-version confirmation as adopted", async () => {
+    const creativeReview = { stages: { treatment: { phase: "confirmed",
+      currentDraft: { versionId: "draft-v2", sha256: "b".repeat(64) }, currentDocument: { viewerPromise: "本次保存稿" },
+      confirmation: { versionId: "draft-v1", draftSha256: "b".repeat(64) } } } };
+    const view = render(<PlanningDeliveryPanel runId="run-stale" versionId="node-v2" artifactIds={[]} artifacts={[]}
+      publicationExpected={false} creativeReview={creativeReview} />);
+    expect(screen.getByRole("button", { name: /前期构思.*待确认/ })).toBeInTheDocument();
+    view.rerender(<PlanningDeliveryPanel runId="run-stale" versionId="node-v2" artifactIds={[]} artifacts={[]}
+      publicationExpected={false} creativeReview={creativeReview} stale />);
+    expect(screen.getByRole("button", { name: /前期构思.*待更新/ })).toBeInTheDocument();
+    expect(screen.getByText("上次保存版本 · 待更新 · 只读")).toBeInTheDocument();
+    expect(screen.queryByText(/当前阶段稿.*已采用/)).not.toBeInTheDocument();
+  });
+
+  it("keeps an unreadable formal artifact explicit instead of replacing it with a stage draft", async () => {
+    vi.spyOn(studioApi, "resourceJson").mockRejectedValue(new Error("unreadable"));
+    render(<PlanningDeliveryPanel runId="run-formal" versionId="node-v2" artifactIds={["formal"]}
+      artifacts={[artifact("formal", "creative_treatment")]} publicationExpected creativeReview={{ stages: { treatment: {
+        currentDraft: { versionId: "draft-v1", sha256: "a".repeat(64) }, currentDocument: { viewerPromise: "不能冒充正式产物" },
+      } } }} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("正文暂时无法核验或读取");
+    expect(screen.queryByText("不能冒充正式产物")).not.toBeInTheDocument();
+  });
+
   it("describes a generated route as a capability rather than acquired or paid media", async () => {
     vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ evidenceRequirements: [{
       claim: "虚构的杯中星河", requirement: "illustration_only", acquisition: "pipeline_generated",

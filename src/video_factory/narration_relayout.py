@@ -22,8 +22,11 @@ from .narration_plan import (
     validate_narration_plan,
     validate_narration_plan_v2_standalone,
 )
-from .narration_subtitles import build_group_subtitles
+from .narration_subtitles import build_group_subtitles, SUBTITLES_CONTRACT_VERSION
 from .voiceover import mastering_settings
+from .character_narration_plan import (
+    VERSION as CHARACTER_PLAN_VERSION, build_character_narration_plan, validate_character_narration_plan,
+)
 
 LAYOUT_OPERATION_PREFIX = "relayout-"
 
@@ -38,10 +41,15 @@ def parse_relayout_layout(value: Any, original_plan: dict[str, Any]) -> dict[str
         raise ValueError("relayout 布局必须是对象。")
     version = value.get("narrationPlanVersion")
     original_version = original_plan.get("version")
-    if version not in (NARRATION_PLAN_V1_VERSION, NARRATION_PLAN_V2_VERSION):
+    if version not in (NARRATION_PLAN_V1_VERSION, NARRATION_PLAN_V2_VERSION, CHARACTER_PLAN_VERSION):
         raise ValueError("relayout 布局的计划版本未知。")
     if version != original_version:
         raise ValueError("relayout 不能隐式升级或降级计划版本。")
+    def only_fields(item, fields):
+        if not isinstance(item, dict) or set(item) - set(fields):
+            raise ValueError("角色时间调整只接受窗口与落点字段，不接受正文/角色/音色。")
+    if version == CHARACTER_PLAN_VERSION:
+        only_fields(value, ("narrationPlanVersion", "groups", "userSilences"))
     groups = value.get("groups")
     if not isinstance(groups, list) or len(groups) != len(original_plan["groups"]):
         raise ValueError("relayout 布局必须以原顺序恰好列出全部分组。")
@@ -49,6 +57,10 @@ def parse_relayout_layout(value: Any, original_plan: dict[str, Any]) -> dict[str
     for entry, original in zip(groups, original_plan["groups"]):
         if not isinstance(entry, dict) or entry.get("groupId") != original["id"] or entry["groupId"] in seen:
             raise ValueError("relayout 布局的分组身份或顺序与原计划不一致。")
+        if version == CHARACTER_PLAN_VERSION:
+            only_fields(entry, ("groupId", "window", "placement"))
+            only_fields(entry.get("window"), ("startFrame", "endFrame"))
+            only_fields(entry.get("placement"), ("anchor", "offsetFrames"))
         if version == NARRATION_PLAN_V1_VERSION and entry.get("window") != original["window"]:
             raise ValueError("v1 只调整落点；窗口与分组不变。")
         seen.add(entry.get("groupId"))
@@ -59,16 +71,30 @@ def parse_relayout_layout(value: Any, original_plan: dict[str, Any]) -> dict[str
         return {"version": version, "groups": groups, "userSilences": []}
     if not isinstance(user_silences, list):
         raise ValueError("v2 布局的用户静默必须是列表。")
+    if version == CHARACTER_PLAN_VERSION:
+        for silence in user_silences:
+            only_fields(silence, ("startFrame", "endFrame"))
     return {"version": version, "groups": groups, "userSilences": user_silences}
 
 
 def build_relayout_target_plan(
     original_plan: dict[str, Any], layout: dict[str, Any],
     *, scenes: list[dict[str, Any]], script_sha256: str, visual_sha256: str,
-    source_context_id: str | None,
+    source_context_id: str | None, script: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """应用布局到原计划并整体校验：文字/分组/来源固定，只有窗口、落点与显式留白可变。"""
     target: dict[str, Any] = json.loads(json.dumps(original_plan, ensure_ascii=False))
+    if target["version"] == CHARACTER_PLAN_VERSION:
+        if not isinstance(script, dict):
+            raise ValueError("角色排轨必须绑定完整角色剧本。")
+        context = {"script": {**script, "scenes": scenes}, "scriptSha256": script_sha256,
+                   "visualSha256": visual_sha256, "sourceContextId": source_context_id}
+        validate_character_narration_plan(original_plan, context)
+        return build_character_narration_plan(context, {
+            "version": CHARACTER_PLAN_VERSION,
+            "groups": [{"turnId": item["groupId"], "window": item.get("window"), "placement": item.get("placement")}
+                       for item in layout["groups"]],
+            "userSilences": layout["userSilences"]})
     legacy_silences = [s for s in target.get("silences", []) if s.get("source") == "legacy_silent_scene"]
     if target["version"] == NARRATION_PLAN_V2_VERSION:
         target_groups = {group["id"]: group for group in target["groups"]}
@@ -106,7 +132,7 @@ def perform_relayout(
     script_sha256: str, visual_sha256: str, output_dir: Path, node_root: Path,
     run_id: str, node_id: str, source_operation_id: str, relayout_source: str,
     source_identity: dict[str, Any],
-    layout_operation_id: str | None = None,
+    layout_operation_id: str | None = None, script: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """清单核验 → 读取原 raw → 真实排轨 → 字幕按新布局重映射；全程零外部发送。"""
     manifest = read_materialized_manifest(manifest_path, node_root)
@@ -134,10 +160,10 @@ def perform_relayout(
         narration_plan=original_plan, narration_plan_path=narration_plan_path,
     )
     parsed_layout = parse_relayout_layout(layout, original_plan)
-    source_context_id = manifest.get("sourceContextId") if original_plan.get("version") == NARRATION_PLAN_V2_VERSION else None
+    source_context_id = manifest.get("sourceContextId") if original_plan.get("version") in (NARRATION_PLAN_V2_VERSION, CHARACTER_PLAN_VERSION) else None
     target_plan = build_relayout_target_plan(original_plan, parsed_layout,
         scenes=scenes, script_sha256=script_sha256, visual_sha256=visual_sha256,
-        source_context_id=source_context_id)
+        source_context_id=source_context_id, script=script)
     raw_audio: dict[str, Path] = {}
     for entry in manifest["groups"]:
         raw_audio[entry["groupId"]] = node_root / entry["raw"]["relativePath"]
@@ -153,7 +179,13 @@ def perform_relayout(
     subtitles = build_group_subtitles(
         node_root / manifest["ledger"]["snapshot"]["relativePath"], node_root, assembled,
         narration_plan_sha256=_digest_of_plan(target_plan), adapter_version=str(synthesis.get("adapterVersion") or "minimax-subtitles-v1"),
-        allow_initial_download=False)
+        allow_initial_download=False) if target_plan["groups"] else {
+            "version": SUBTITLES_CONTRACT_VERSION, "status": "not_required",
+            "adapterVersion": str(synthesis.get("adapterVersion") or "minimax-subtitles-v1"),
+            "acceptedNarrationPlanSha256": _digest_of_plan(target_plan),
+            "script": target_plan.get("script"), "visualPlan": target_plan.get("visualPlan"),
+            "layoutKey": assembled["layoutKey"], "clock": {"sampleRate": 44100},
+            "groups": [], "reason": "no_narration_groups", "cues": []}
     from .worker import write_subtitle_sidecars
     write_subtitle_sidecars(subtitles, output_dir)
     # §4.2.5 两类身份不混淆：voiceOperationId 恒为原 TTS 操作；layoutOperationId 取本次
@@ -162,7 +194,8 @@ def perform_relayout(
     manifest_reference = _relative_within_node(manifest_path, node_root)
     assembled.update({
         "provider": str(synthesis.get("provider") or "minimax"),
-        "voice": synthesis.get("voice"), "rate": synthesis.get("rate"),
+        **({"voice": synthesis.get("voice")} if target_plan["version"] != CHARACTER_PLAN_VERSION else {}),
+        "rate": synthesis.get("rate"),
         "voiceOperationId": manifest["sourceOperationId"],
         "trackSha256": hashlib.sha256(Path(assembled["track_path"]).read_bytes()).hexdigest(),
         "layoutOperationId": resolved_layout_operation,

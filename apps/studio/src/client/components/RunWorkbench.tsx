@@ -5,7 +5,7 @@ import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { initialFilmArrival, nextFilmArrival } from "../film-arrival.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { agentLoopPendingNote, agentLoopPhaseLabel, creatorFacingTechnicalText, creatorRunStatusLabel, platformLabel, providerLabel, reviewProviderLabel, catalogModelLabel, runNodeLabel, RUN_NODE_LABELS, sourceAssetReviewBreakdown } from "../presentation.js";
-import { NodeWorkspace, revealNodeWorkspace } from "./NodeWorkspace.js";
+import { NodeExecutionConfigurationEditor, NodeWorkspace, revealNodeWorkspace } from "./NodeWorkspace.js";
 import { nodeContentReview } from "./NodeContentReview.js";
 import { RunCostDetailPanel } from "./CostDashboard.js";
 import { AudioReviewPanel } from "./AudioReviewPanel.js";
@@ -14,7 +14,7 @@ import { SubtitleRecoveryPanel } from "./SubtitleRecoveryPanel.js";
 import { NarrationTimingEditor, type NarrationTimingToolSummary } from "./NarrationTimingEditor.js";
 import { decisionConsequenceView } from "./decision-consequence.js";
 import { studioApi } from "../api.js";
-import { videoDownloadFilename } from "../download-filename.js";
+import { publishPackageDownloadFilename, videoDownloadFilename } from "../download-filename.js";
 
 export function currentSubtitlePreview(run: StudioRunDetail) {
   const voice = run.nodes.find(node => node.id === "voice");
@@ -34,6 +34,7 @@ export function currentSubtitlePreview(run: StudioRunDetail) {
 
 interface RunWorkbenchProps {
   creativeDiscussion?: ReactNode;
+  assetConfigurationBlockedReason?: string;
   run: StudioRunDetail;
   providers?: StudioProvider[];
   decisionPending: boolean;
@@ -70,9 +71,18 @@ interface RunWorkbenchProps {
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, creativeDiscussion, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onReviseNodeDocument, onAuditNodeDocument, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onPrepareReviewContinuation, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlockedReason, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onReviseNodeDocument, onAuditNodeDocument, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onPrepareReviewContinuation, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [prepareSnapshot, setPrepareSnapshot] = useState<import("../../shared/api.js").StudioReviewContinuationInput>();
+  function editCharacters() {
+    if (nodeMutationPending || decisionPending || hasUncertainPaidOutcome(run)) return;
+    if (run.characterScriptEditTarget && onPrepareReviewContinuation) {
+      setPrepareSnapshot({ ...run.characterScriptEditTarget, commandId: crypto.randomUUID(), expectedRunRevision: run.revision,
+        intent: "edit_character_script", acknowledgeImpact: true });
+    } else if (!run.nodes.some(node => node.id === "creative-planning")) {
+      revealNodeWorkspace("script");
+    }
+  }
   const prepareDialogRef = useDialogFocus<HTMLElement>(Boolean(prepareSnapshot), () => setPrepareSnapshot(undefined), nodeMutationPending);
   const [rejecting, setRejecting] = useState(false);
   const [rejectNote, setRejectNote] = useState("");
@@ -116,6 +126,11 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
   // 下载名始终绑定 run.videoArtifactId 选中的这份产物，不取数组最后一个。
   const videoDownloadName = video ? videoDownloadFilename(run.title, video.id) : undefined;
+  // 仅提供当前采用的交付清单；下载不签署授权，也不调用平台发布。
+  const publishPackage = run.status === "succeeded" ? run.artifacts.find(artifact =>
+    artifact.id === run.publishPackageArtifactId && artifact.kind === "publish_package"
+    && artifact.contentType === "application/json" && artifact.contentUrl) : undefined;
+  const publishPackageDownloadName = publishPackage ? publishPackageDownloadFilename(run.title, publishPackage.id) : undefined;
   const subtitlePreview = currentSubtitlePreview(run);
   // loadeddata 的资格属于具体媒体源；同一个播放器换片时不能借用旧片的 ready 状态。
   const videoIdentity = video?.contentUrl ? `${run.id}\0${video.id}\0${video.contentUrl}` : undefined;
@@ -174,6 +189,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
   const nextPipelineNode = boundaryGate && waitingNodeIndex >= 0
     ? run.nodes.slice(waitingNodeIndex + 1).find((node) => !["succeeded", "skipped"].includes(node.status)) : undefined;
   const creatorNodes = run.nodes.filter((node) => node.id === nextGateNode?.id || nodeHasCreatorContent(node, run));
+  // 本片来源影响规划，不能等素材节点有产物才出现；始终共用一个编辑会话。
+  const assetConfigurationNode = run.nodes.find(node => node.id === "assets" && node.executionConfiguration);
   const activeSpendNode = readOnly ? undefined : creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
   const currentArtifactNode = !video?.contentUrl && !creativeDiscussion && run.activeIntervention?.kind !== "creative_review"
     ? creatorNodes.find((node) => node.id === run.activeIntervention?.nodeId && node.id !== activeSpendNode?.id)
@@ -362,12 +379,15 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
     busy={nodeMutationPending}
     runId={run.id}
     runRevision={run.revision}
+    characterDrama={run.presentationMode === "character_drama"}
+    {...(run.characterScriptEditTarget && onPrepareReviewContinuation ? { onEditCharacters: editCharacters } : {})}
     acceptedPlanDigest={run.productionPlanDigest ?? ""}
     runArtifacts={run.artifacts}
     {...(run.activeIntervention?.id ? { activeInterventionId: run.activeIntervention.id } : {})}
     readOnly={readOnly}
     {...(run.optionalReviewUncertaintySafe ? { optionalReviewUncertaintySafe: true as const } : {})}
     currentDelivery={node.id === currentArtifactNode?.id}
+    hideExecutionConfiguration={node.id === assetConfigurationNode?.id}
     {...(node.id === "creative-planning" && run.planningStages ? { planningStages: run.planningStages } : {})}
     {...(node.id === "creative-planning" ? { onPendingPlanningConfigurationChange: setHasPendingPlanningConfiguration } : {})}
     pauseBusy={pausePending}
@@ -462,6 +482,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
       <div className="run-workspace-toolbar">
       <nav className="run-section-nav" aria-label="作品工作区">
         <a href="#run-current">当前步骤与产物</a>
+        {run.characterScriptEditTarget && onPrepareReviewContinuation ? <button type="button" className="button button-ghost"
+          disabled={nodeMutationPending || decisionPending || hasUncertainPaidOutcome(run)} onClick={editCharacters}>修改角色与台词</button> : null}
         {run.nodes.some((node) => node.id === "creative-planning" && node.outputState?.versions.some((version) => version.id === node.outputState?.effectiveVersionId && version.artifactIds.length > 0))
           ? <a href="#node-workspace-creative-planning" onClick={() => revealNodeWorkspace("creative-planning")}>查看规划交付</a> : null}
         {remainingCreatorNodes.length > 0 ? <a href="#run-artifacts">已保留的内容与设置</a> : null}
@@ -490,6 +512,18 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
       </div>
 
       <div id="run-current" className="run-current-workspace">
+      {assetConfigurationNode ? <NodeExecutionConfigurationEditor
+        key={`${run.id}:asset-sources`}
+        node={assetConfigurationNode}
+        providers={providers}
+        runStatus={run.status}
+        runRevision={run.revision}
+        busy={nodeMutationPending || decisionPending}
+        readOnly={readOnly || !onConfigureNode}
+        paidRecoveryLocked={Boolean(uncertainPaidNode) && run.optionalReviewUncertaintySafe !== true}
+        {...(assetConfigurationBlockedReason ? { editingBlockedReason: assetConfigurationBlockedReason } : {})}
+        onSave={input => onConfigureNode!(assetConfigurationNode.id, input)}
+      /> : null}
       {creativeDiscussion}
       {!readOnly && !creativeDiscussion && run.activeIntervention?.kind === "creative_review" ? <p className="workspace-loading" role="status">正在读取当前方案与讨论。读取完成后才能确认此版本。</p> : null}
       {!readOnly && !creativeDiscussion && run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
@@ -655,6 +689,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               <p>{run.continuation?.reason}</p>
               {visiblePaidNodeSummary ? <PaidOperationPanel
                 summary={visiblePaidNodeSummary}
+                runId={run.id}
+                characterMode={run.presentationMode === "character_drama"}
                 providers={providers}
                 busy={nodeMutationPending}
                 settlementOnly
@@ -759,6 +795,8 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
                       key={`${finding.timecodeMs}:${finding.findingIndex}`}
                       finding={finding}
                       busy={decisionPending}
+                      characterDrama={run.presentationMode === "character_drama"}
+                      onEditCharacters={editCharacters}
                       onSeek={() => {
                         if (!previewRef.current) return;
                         previewRef.current.currentTime = finding.timecodeMs / 1_000;
@@ -902,11 +940,14 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
               </>}
               {visiblePaidNodeSummary ? <PaidOperationPanel
                 summary={visiblePaidNodeSummary}
+                runId={run.id}
+                characterMode={run.presentationMode === "character_drama"}
                 providers={providers}
                 busy={nodeMutationPending}
                 {...(uncertainPaidNodeProviderId ? { providerIdHint: uncertainPaidNodeProviderId } : {})}
                 {...(onReconcilePaidNode ? { onReconcile: onReconcilePaidNode } : {})}
               /> : null}
+              {publishPackage && publishPackageDownloadName ? <a className="button button-secondary" href={publishPackage.contentUrl} download={publishPackageDownloadName}><Download aria-hidden="true" size={16} />下载发布包</a> : null}
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />准备各平台发布包</button> : null}
               {run.status === "succeeded" && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
               {hasPendingPlanningConfiguration && (run.status === "failed" || run.status === "rejected") ? <p className="run-failure-summary">模型选择尚未保存。请先保存模型，或恢复为当前模型后再重试。</p> : null}
@@ -1172,13 +1213,15 @@ export function RunWorkbench({ run, creativeDiscussion, providers = [], decision
       {prepareSnapshot ? <div className="dialog-backdrop" onMouseDown={event => {
         if (event.target === event.currentTarget && !nodeMutationPending) setPrepareSnapshot(undefined);
       }}><section className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="prepare-review-title" ref={prepareDialogRef}>
-        <header className="dialog-header"><h2 id="prepare-review-title">恢复已有成果</h2></header>
-        <p>不会采用或签字，不会重新生成、采购或审片。只恢复你正在查看的这一版；恢复后还需要你另行确认采用。</p>
+        <header className="dialog-header"><h2 id="prepare-review-title">{prepareSnapshot.intent === "edit_character_script" ? "返回角色与台词" : "恢复已有成果"}</h2></header>
+        <p>{prepareSnapshot.intent === "edit_character_script"
+          ? "已有画面、声音和历史稿保留。返回后可改角色、音色或台词；导演方案和后续步骤需要重新确认。打开和保存不会生成或购买，采用后才按实际改动核对复用与费用。"
+          : "不会采用或签字，不会重新生成、采购或审片。只恢复你正在查看的这一版；恢复后还需要你另行确认采用。"}</p>
         <footer className="dialog-actions">
           <button type="button" className="button button-ghost" disabled={nodeMutationPending} onClick={() => setPrepareSnapshot(undefined)}>取消</button>
           <button type="button" className="button button-primary" disabled={nodeMutationPending}
             onClick={() => void onPrepareReviewContinuation?.(prepareSnapshot).then(() => setPrepareSnapshot(undefined), () => undefined)}>
-            {nodeMutationPending ? "正在恢复…" : prepareSnapshot.nodeId === "creative-planning" ? "确认恢复工作台" : "确认进入人工审看"}
+            {nodeMutationPending ? "正在恢复…" : prepareSnapshot.intent === "edit_character_script" ? "确认返回编辑" : prepareSnapshot.nodeId === "creative-planning" ? "确认恢复工作台" : "确认进入人工审看"}
           </button>
         </footer>
       </section></div> : null}
@@ -1235,14 +1278,21 @@ function voiceTimingConflict(run: StudioRunDetail): {
   };
 }
 
-function PaidOperationPanel({ summary, providers, providerIdHint, busy, settlementOnly = false, onReconcile }: {
+function PaidOperationPanel({ summary: initialSummary, runId, characterMode, providers, providerIdHint, busy, settlementOnly = false, onReconcile }: {
   summary: StudioPaidNodeSummary;
+  runId: string;
+  characterMode: boolean;
   providers: StudioProvider[];
   providerIdHint?: string;
   busy: boolean;
   settlementOnly?: boolean;
   onReconcile?: (nodeId: string, input: StudioPaidReconciliationDraft) => Promise<void>;
 }) {
+  const [observed, setObserved] = useState<StudioPaidNodeSummary>();
+  const [checking, setChecking] = useState(false);
+  const [observationNotice, setObservationNotice] = useState<string>();
+  useEffect(() => { setObserved(undefined); setObservationNotice(undefined); }, [initialSummary]);
+  const summary = observed && observed.operationId === initialSummary.operationId ? observed : initialSummary;
   const [taskId, setTaskId] = useState("");
   const [manualOutcome, setManualOutcome] = useState<"confirmed_not_charged" | "confirmed_charged">();
   const [note, setNote] = useState("");
@@ -1275,6 +1325,24 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, settleme
   const consoleEntries = providerConsoleEntries(providers, summary.items.length
     ? summary.items.map((item) => item.providerId)
     : providerIdHint ? [providerIdHint] : []);
+  if (characterMode && isVoiceCall && summary.requiresManualReconciliation
+    && summary.failureKind !== "terminal_failure" && summary.recommendedOutcome !== "confirmed_not_charged") {
+    return <section className="paid-operation-panel requires-manual" aria-label="配音恢复">
+      <header><strong>角色配音结果仍待确认</strong><small>保留已完成台词，不重新购买</small></header>
+      <p>系统会核对原请求已经保存的响应，不发送新的配音请求。若原响应还没有到达，费用保持待确认；当前服务没有远端补查能力时，需要核实原调用，不能换一个任务重复购买。</p>
+      {observationNotice ? <p role="status">{observationNotice}</p> : null}
+      <button type="button" className="button button-primary" disabled={busy || checking} onClick={() => {
+        setChecking(true); setObservationNotice(undefined);
+        void studioApi.paidOperation(runId, "voice").then(result => {
+          if (result.operationId !== initialSummary.operationId) {
+            setObservationNotice("原任务身份已变化，请刷新制作记录后核对。"); return;
+          }
+          setObserved(result);
+          if (result.requiresManualReconciliation) setObservationNotice("尚未找到可核实的原响应，已完成音频保留，本次没有重新发送。");
+        }, () => setObservationNotice("原请求证据暂时读取失败，已有音频保留；请稍后再核对。")).finally(() => setChecking(false));
+      }}>{checking ? "正在核对原响应…" : "核对原配音结果"}</button>
+    </section>;
+  }
   if (!settlementOnly && isVoiceCall && summary.requiresManualReconciliation && (
     summary.failureKind === "terminal_failure"
     || summary.recommendedOutcome === "confirmed_not_charged"
@@ -1345,7 +1413,9 @@ function PaidOperationPanel({ summary, providers, providerIdHint, busy, settleme
       <p><strong>下一步：</strong>检查失败镜头的画面来源，再为未完成镜头生成新报价。</p>
     </div> : <div className="paid-operation-explanation">
       <p><strong>发生了什么：</strong>服务商已经受理任务，但结果没有完整回到本次制作。</p>
-      <p><strong>为什么可以恢复：</strong>系统保留了原任务编号，会继续查询并下载原结果，不会创建新任务或新增报价。</p>
+      <p><strong>为什么可以恢复：</strong>{characterMode && isVoiceCall
+        ? "已完成的台词和原请求迟到的结果会复用，不会重复购买；尚未发送的台词会在原授权范围内继续配音。"
+        : "系统保留了原任务编号，会继续查询并下载原结果，不会创建新任务或新增报价。"}</p>
       <p><strong>下一步：</strong>继续获取原任务结果。</p>
     </div>}
     {requiresManualReconciliation && onReconcile ? <div className="paid-reconciliation-controls">
@@ -1848,9 +1918,11 @@ function SceneNarrationRevision({ scenePosition, busy, onLoad, onSubmit }: {
   </div>;
 }
 
-function SceneRevisionFinding({ finding, busy, onSeek, onSubmit, onReselectAsset, onLoadNarration, onSubmitNarration }: {
+function SceneRevisionFinding({ finding, busy, onSeek, onSubmit, onReselectAsset, onLoadNarration, onSubmitNarration, characterDrama, onEditCharacters }: {
   finding: VisualReviewFinding;
   busy: boolean;
+  characterDrama: boolean;
+  onEditCharacters: () => void;
   onSeek: () => void;
   onSubmit: (input: Pick<StudioSceneRevisionInput, "reuseFromScenePosition" | "note">) => Promise<void>;
   onReselectAsset?: (input: Pick<StudioSceneResourceRevisionInput, "note">) => Promise<void>;
@@ -1913,7 +1985,11 @@ function SceneRevisionFinding({ finding, busy, onSeek, onSubmit, onReselectAsset
         「画面没兑现这句话」这类缺陷本来就有两个修法：改画面，或者改承诺。哪边才是问题由操作员
         判断，宿主替它选边就是把一条真实缺陷推回给一条只换画面的路。改错了字不会变成悄悄放行：
         复审会按新文字重判这一镜。 */}
-    {finding.scenePosition && onLoadNarration && onSubmitNarration
+    {characterDrama && finding.scenePosition ? <div className="scene-narration-actions">
+      <p>这是角色台词，不使用单旁白改字。到脚本工作区修改角色、音色或台词；创作规划可从脚本阶段修改输入，保存后由你决定重新规划。已生成资源保留，费用仍需按新计划核对。</p>
+      <button type="button" className="button button-secondary" disabled={busy} onClick={onEditCharacters}>修改角色或台词</button>
+    </div> : null}
+    {!characterDrama && finding.scenePosition && onLoadNarration && onSubmitNarration
       ? <SceneNarrationRevision
         scenePosition={finding.scenePosition}
         busy={busy}
