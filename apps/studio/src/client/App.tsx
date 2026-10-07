@@ -3,16 +3,16 @@ import { Navigate, Route, Routes, useLocation, useParams } from "react-router-do
 import { AuthGate } from "./components/AuthGate.js";
 import { AppShell } from "./components/AppShell.js";
 import { RouteErrorBoundary } from "./components/RouteErrorBoundary.js";
-import { ExperimentsPage } from "./pages/ExperimentsPage.js";
-import { AssetsPage } from "./pages/AssetsPage.js";
-import { CasesPage } from "./pages/CasesPage.js";
 import { HomePage } from "./pages/HomePage.js";
-import { ProjectsPage } from "./pages/ProjectsPage.js";
-import { ResourcesPage } from "./pages/ResourcesPage.js";
-import { TodayPage } from "./pages/TodayPage.js";
-import { TemplatesPage } from "./pages/TemplatesPage.js";
 
 const RunPage = lazy(() => import("./pages/RunPage.js").then(module => ({ default: module.RunPage })));
+const TodayPage = lazy(() => import("./pages/TodayPage.js").then(module => ({ default: module.TodayPage })));
+const CasesPage = lazy(() => import("./pages/CasesPage.js").then(module => ({ default: module.CasesPage })));
+const ProjectsPage = lazy(() => import("./pages/ProjectsPage.js").then(module => ({ default: module.ProjectsPage })));
+const AssetsPage = lazy(() => import("./pages/AssetsPage.js").then(module => ({ default: module.AssetsPage })));
+const TemplatesPage = lazy(() => import("./pages/TemplatesPage.js").then(module => ({ default: module.TemplatesPage })));
+const ResourcesPage = lazy(() => import("./pages/ResourcesPage.js").then(module => ({ default: module.ResourcesPage })));
+const ExperimentsPage = lazy(() => import("./pages/ExperimentsPage.js").then(module => ({ default: module.ExperimentsPage })));
 
 export function App() {
   return (
@@ -30,8 +30,8 @@ function StudioRoutes() {
   const { pathname } = useLocation();
   return (
     <RouteErrorBoundary key={pathname}>
-    <Suspense fallback={<main className="page" role="status">正在打开页面…</main>}>
-    <Routes>
+      <Suspense fallback={<main className="page" role="status">正在打开页面…</main>}>
+      <Routes>
       <Route path="/" element={<HomePage />} />
       <Route path="/topics" element={<TodayPage />} />
       <Route path="/cases" element={<CasesPage />} />
@@ -44,8 +44,8 @@ function StudioRoutes() {
       <Route path="/runs/:runId" element={<LegacyRunRedirect />} />
       <Route path="/providers" element={<Navigate to="/resources" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
-    </Suspense>
+      </Routes>
+      </Suspense>
     </RouteErrorBoundary>
   );
 }
