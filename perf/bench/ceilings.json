@@ -1,5 +1,5 @@
 {
- "home::ready_p75": 4631.9,
- "queue::ready_p75": 4684.1,
- "workspace::ready_p75": 6556
+ "home::ready_p75": 3248.4,
+ "queue::ready_p75": 3409.1,
+ "workspace::ready_p75": 4221.3
 }

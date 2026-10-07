@@ -1,5 +1,7 @@
 import { parseStudioNarrationRevisionInput } from "./narration-revision-input.js";
 import { createReadStream } from "node:fs";
+import { promisify } from "node:util";
+import { gzip } from "node:zlib";
 import Fastify, { type FastifyInstance } from "fastify";
 import { parseProductionTemplate } from "@video-factory/template-core";
 import { CodexBridgeError, DocumentCommandConflictError, DocumentCommandPendingError, RoleAgentLoopError } from "@video-factory/production-pipeline";
@@ -228,9 +230,36 @@ export interface BuildStudioAppOptions {
 }
 
 const SAFE_ROUTE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const gzipAsync = promisify(gzip);
+
+function acceptsGzip(header: string | undefined): boolean {
+  const entries = (header ?? "").split(",").map(value => {
+    const [name, ...parameters] = value.trim().toLowerCase().split(";");
+    const quality = parameters.map(p => p.trim()).find(p => p.startsWith("q="));
+    return { name, quality: quality === undefined ? 1 : /^q=(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/.test(quality) ? Number(quality.slice(2)) : 0 };
+  });
+  return ((entries.find(entry => entry.name === "gzip") ?? entries.find(entry => entry.name === "*"))?.quality ?? 0) > 0;
+}
 
 export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance {
   const app = Fastify({ logger: options.logger ?? false });
+  // 只减少列表/工作区JSON的传输字节：不裁历史、不缓存制作状态、不触碰媒体Range或SSE。
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (request.method !== "GET" || reply.statusCode !== 200 || typeof payload !== "string"
+      || !/^\/api\/runs(?:\/[^/]+)?$/.test(request.url.split("?", 1)[0]!)
+      || !String(reply.getHeader("content-type")).startsWith("application/json")
+      || reply.getHeader("content-encoding") || Buffer.byteLength(payload) < 2048) return payload;
+    const vary = String(reply.getHeader("vary") ?? "");
+    if (!vary.split(",").some(value => ["*", "accept-encoding"].includes(value.trim().toLowerCase()))) {
+      reply.header("vary", vary ? `${vary}, Accept-Encoding` : "Accept-Encoding");
+    }
+    if (!acceptsGzip(request.headers["accept-encoding"])) return payload;
+    const compressed = await gzipAsync(payload, { level: 4 });
+    if (compressed.length >= Buffer.byteLength(payload)) return payload;
+    reply.header("content-encoding", "gzip");
+    reply.removeHeader("content-length");
+    return compressed;
+  });
   const auth = options.auth ? new StudioAuthenticator(options.auth) : undefined;
   for (const contentType of ["application/octet-stream", "video/mp4", "video/quicktime", "video/webm"]) {
     app.addContentTypeParser(contentType, { parseAs: "buffer", bodyLimit: 30 * 1024 * 1024 }, (_request, body, done) => done(null, body));

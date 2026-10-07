@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { gunzipSync } from "node:zlib";
 import { describe, it } from "node:test";
 import { CodexBridgeError, DocumentCommandPendingError, DocumentCommandConflictError } from "@video-factory/production-pipeline";
 import { buildStudioApp, type StudioServicePort } from "../src/server/app.js";
@@ -256,6 +257,80 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
 }
 
 describe("Studio API", () => {
+  it("compresses a negotiated large run without changing any revision or history bytes", async () => {
+    const detail = { ...runDetail(), angle: "保留完整的历史与用户决定。".repeat(1000) };
+    const app = buildStudioApp({ service: fakeService({ getRun: async () => detail, listRuns: async () => [detail] }) });
+    try {
+      for (const url of ["/api/runs/run-1", "/api/runs?origin=manual"]) {
+        const plain = await app.inject({ method: "GET", url });
+        const zipped = await app.inject({ method: "GET", url, headers: { "accept-encoding": "br, gzip, deflate" } });
+        assert.equal(zipped.statusCode, 200);
+        assert.equal(zipped.headers["content-encoding"], "gzip");
+        assert.match(String(zipped.headers.vary), /Accept-Encoding/i);
+        assert.equal(gunzipSync(zipped.rawPayload).toString(), plain.body);
+        assert.ok(zipped.rawPayload.length < plain.rawPayload.length / 2);
+        assert.equal(Number(zipped.headers["content-length"]), zipped.rawPayload.length);
+      }
+    } finally { await app.close(); }
+  });
+
+  it("negotiates gzip conservatively and preserves existing Vary dimensions", async () => {
+    const detail = { ...runDetail(), angle: "完整历史".repeat(1000) };
+    const app = buildStudioApp({ service: fakeService({ getRun: async () => detail }) });
+    app.addHook("onRequest", async (_request, reply) => { reply.header("vary", "Origin"); });
+    try {
+      for (const encoding of ["identity", "br", "gzip;q=0", "gzip;q=0, *;q=1", "gzip;q=no", "gzip;q=2", "*;q=0"]) {
+        const result = await app.inject({ method: "GET", url: "/api/runs/run-1", headers: { "accept-encoding": encoding } });
+        assert.equal(result.headers["content-encoding"], undefined, encoding);
+        assert.deepEqual(result.json(), detail);
+        assert.equal(result.headers.vary, "Origin, Accept-Encoding");
+      }
+      for (const encoding of ["gzip;q=0.5", "GZIP", "*;q=1"]) {
+        const result = await app.inject({ method: "GET", url: "/api/runs/run-1", headers: { "accept-encoding": encoding } });
+        assert.equal(result.headers["content-encoding"], "gzip", encoding);
+        assert.deepEqual(JSON.parse(gunzipSync(result.rawPayload).toString()), detail);
+      }
+    } finally { await app.close(); }
+  });
+
+  it("leaves small, HEAD, error, and previously encoded run responses untouched", async () => {
+    const app = buildStudioApp({ service: fakeService({ getRun: async (id) => {
+      if (id === "error") throw new Error("internal");
+      if (id === "missing") return undefined;
+      return id === "small" ? runDetail() : { ...runDetail(), angle: "历史".repeat(2000) };
+    } }) });
+    app.addHook("onRequest", async (request, reply) => {
+      if (request.url.endsWith("encoded")) reply.header("content-encoding", "custom-existing");
+    });
+    try {
+      for (const [id, status] of [["small", 200], ["error", 500], ["missing", 404]] as const) {
+        const result = await app.inject({ method: "GET", url: `/api/runs/${id}`, headers: { "accept-encoding": "gzip" } });
+        assert.equal(result.statusCode, status);
+        assert.equal(result.headers["content-encoding"], undefined);
+      }
+      const head = await app.inject({ method: "HEAD", url: "/api/runs/large", headers: { "accept-encoding": "gzip" } });
+      assert.equal(head.statusCode, 200);
+      assert.equal(head.body, "");
+      assert.equal(head.headers["content-encoding"], undefined);
+      const encoded = await app.inject({ method: "GET", url: "/api/runs/encoded", headers: { "accept-encoding": "gzip" } });
+      assert.equal(encoded.headers["content-encoding"], "custom-existing");
+      assert.equal(encoded.json().angle, "历史".repeat(2000));
+    } finally { await app.close(); }
+  });
+
+  it("keeps unauthorized run access denied even when compression is requested", async () => {
+    let reads = 0;
+    const app = buildStudioApp({ service: fakeService({ getRun: async () => { reads++; return runDetail(); } }),
+      auth: { username: "owner", passwordHash: "scrypt:v1:dGVzdC1zYWx0:pmeouWD7DazLps4NKXPdmS3_gNAeOnnMRDfJz9l6RvU",
+        sessionSecret: "test-session-secret-that-is-long-enough", secureCookie: true } });
+    try {
+      const result = await app.inject({ method: "GET", url: "/api/runs/run-1", headers: { "accept-encoding": "gzip" } });
+      assert.equal(result.statusCode, 401);
+      assert.equal(result.headers["content-encoding"], undefined);
+      assert.equal(reads, 0);
+    } finally { await app.close(); }
+  });
+
   it("projects review prefill through a read-only route using the trusted actor, never a query actor", async () => {
     const calls: string[][] = [];
     const app = buildStudioApp({ service: fakeService({ reviewPrefill: async (runId, actor) => {
@@ -1987,11 +2062,11 @@ describe("Studio API", () => {
       resolveArtifact: async () => ({ path: artifactPath, contentType: "video/mp4", sizeBytes: 10 }),
     }) });
 
-    const complete = await app.inject({ method: "GET", url: "/api/runs/run-1/artifacts/video/content" });
+    const complete = await app.inject({ method: "GET", url: "/api/runs/run-1/artifacts/video/content", headers: { "accept-encoding": "gzip" } });
     const partial = await app.inject({
       method: "GET",
       url: "/api/runs/run-1/artifacts/video/content",
-      headers: { range: "bytes=2-5" },
+      headers: { range: "bytes=2-5", "accept-encoding": "gzip" },
     });
     const invalid = await app.inject({
       method: "GET",
@@ -2000,6 +2075,8 @@ describe("Studio API", () => {
     });
 
     assert.equal(complete.statusCode, 200);
+    assert.equal(complete.headers["content-encoding"], undefined);
+    assert.equal(partial.headers["content-encoding"], undefined);
     assert.equal(complete.body, "0123456789");
     assert.equal(complete.headers["accept-ranges"], "bytes");
     assert.equal(partial.statusCode, 206);
@@ -2019,9 +2096,10 @@ describe("Studio API", () => {
       resolveArtifact: async () => ({ path: artifactPath, contentType: "application/json", sizeBytes: 8,
         verifiedBytes: Buffer.from("verified") }),
     }) });
-    const complete = await app.inject({ method: "GET", url: "/api/runs/run-1/artifacts/treatment/content" });
+    const complete = await app.inject({ method: "GET", url: "/api/runs/run-1/artifacts/treatment/content", headers: { "accept-encoding": "gzip" } });
     const partial = await app.inject({ method: "GET", url: "/api/runs/run-1/artifacts/treatment/content", headers: { range: "bytes=1-3" } });
     assert.equal(complete.body, "verified");
+    assert.equal(complete.headers["content-encoding"], undefined);
     assert.equal(partial.body, "eri");
     await app.close();
   });
