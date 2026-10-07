@@ -1,15 +1,18 @@
-import { Navigate, Route, Routes, useParams } from "react-router-dom";
+import { lazy, Suspense } from "react";
+import { Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { AuthGate } from "./components/AuthGate.js";
 import { AppShell } from "./components/AppShell.js";
+import { RouteErrorBoundary } from "./components/RouteErrorBoundary.js";
 import { ExperimentsPage } from "./pages/ExperimentsPage.js";
 import { AssetsPage } from "./pages/AssetsPage.js";
 import { CasesPage } from "./pages/CasesPage.js";
 import { HomePage } from "./pages/HomePage.js";
 import { ProjectsPage } from "./pages/ProjectsPage.js";
 import { ResourcesPage } from "./pages/ResourcesPage.js";
-import { RunPage } from "./pages/RunPage.js";
 import { TodayPage } from "./pages/TodayPage.js";
 import { TemplatesPage } from "./pages/TemplatesPage.js";
+
+const RunPage = lazy(() => import("./pages/RunPage.js").then(module => ({ default: module.RunPage })));
 
 export function App() {
   return (
@@ -24,7 +27,10 @@ export function App() {
 }
 
 function StudioRoutes() {
+  const { pathname } = useLocation();
   return (
+    <RouteErrorBoundary key={pathname}>
+    <Suspense fallback={<main className="page" role="status">正在打开页面…</main>}>
     <Routes>
       <Route path="/" element={<HomePage />} />
       <Route path="/topics" element={<TodayPage />} />
@@ -39,6 +45,8 @@ function StudioRoutes() {
       <Route path="/providers" element={<Navigate to="/resources" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </Suspense>
+    </RouteErrorBoundary>
   );
 }
 
