@@ -307,15 +307,19 @@ describe("CodexBridgeClient × CodexBrokerServer durable recovery", () => {
     }
   });
 
-  it("G04 preserves the accepted fact across the query fault matrix", async () => {
+  it("G04 preserves the accepted fact across the query fault matrix", async (context) => {
+    // 逻辑观察期限由查询轮次推进；真实socket保持超时保护，避免并发调度在POST后
+    // 耗尽80ms而根本未进入要验证的查询故障。不是放宽产品期限或省略零重发断言。
+    context.mock.timers.enable({ apis: ["Date"], now: Date.now() });
     for (const fault of ["reset", "timeout", "partial-json", "invalid-json", "http-500", "bare-404"] as const) {
       const fixture = await startAcceptedFaultFixture(fault);
       try {
         const client = new CodexBridgeClient({
           socketPath: fixture.socketPath,
-          timeoutMs: 80,
+          timeoutMs: 10_000,
           pollIntervalMs: 10,
           maxAttempts: 1,
+          sleep: async () => { context.mock.timers.tick(2_000); },
         });
         await assert.rejects(
           () => client.runTaskDetailed("topic-ideas", { signals: [] }, `fault-${fault}`),
