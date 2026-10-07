@@ -4,6 +4,17 @@ import { CharacterScriptReader, isCharacterDocument } from "./CharacterScriptEdi
 
 type CreativeStage = StudioCreativeReviewSnapshot["stage"];
 
+function deliveryTypeLabel(value: unknown): string {
+  switch (value) {
+    case "generated_video": return "AI 视频";
+    case "generated_image": return "AI 图片";
+    case "stock_video": return "素材库视频";
+    case "stock_image": return "素材库图片";
+    case "editorial_card": return "图文说明卡";
+    default: return "待确认获取方式";
+  }
+}
+
 function draftSegments(stage: CreativeStage, value: Record<string, unknown>) {
   const field = stage === "treatment" ? "progression" : stage === "script" ? "scenes" : "shots";
   const items = value[field];
@@ -110,7 +121,7 @@ export function CreativeDraft({ stage, value }: { stage: CreativeStage; value: u
     <DraftList label="声音方向" value={value.soundPrinciples} />
   </div>;
   if (stage === "script") return <div className="creative-readable-draft"><DraftField label="叙事推进（制作参考）" value={value.narrativeArc} />{Array.isArray(value.scenes) ? value.scenes.map((scene, index) => isRecord(scene) ? <section className="creative-scene" key={`${String(scene.id ?? "scene")}:${index}`}><strong>第 {Number(scene.position ?? index + 1)} 段 · {Number(scene.duration ?? 0)} 秒</strong><div className="creative-audience-copy"><small>旁白 · 观众听到的内容</small><p>{String(scene.narration ?? "")}</p></div><div className="creative-production-note"><small>画面描述 · 制作参考，尚未生成</small><p>{String(scene.visual_prompt ?? "")}</p></div></section> : null) : null}</div>;
-  return <div className="creative-readable-draft">{isRecord(value.visualBible) ? <DraftField label="全片视觉规则" value={`${String(value.visualBible.narrativeApproach ?? "")} · ${String(value.visualBible.pacing ?? "")} · ${String(value.visualBible.continuity ?? "")}`} /> : null}{Array.isArray(value.shots) ? value.shots.map((shot, index) => isRecord(shot) ? <section className="creative-scene" key={`${String(shot.scenePosition ?? "shot")}:${index}`}><strong>镜头 {Number(shot.scenePosition ?? index + 1)} · {String(shot.deliveryType ?? "待定路线")}</strong><p>{String(shot.visibleAction ?? shot.generationPrompt ?? shot.query ?? "")}</p><small>预计时长与获取路线将在当前方案确认后进入报价；画面尚未生成。</small></section> : null) : null}</div>;
+  return <div className="creative-readable-draft">{isRecord(value.visualBible) ? <DraftField label="全片视觉规则" value={`${String(value.visualBible.narrativeApproach ?? "")} · ${String(value.visualBible.pacing ?? "")} · ${String(value.visualBible.continuity ?? "")}`} /> : null}{Array.isArray(value.shots) ? value.shots.map((shot, index) => isRecord(shot) ? <section className="creative-scene" key={`${String(shot.scenePosition ?? "shot")}:${index}`}><strong>镜头 {Number(shot.scenePosition ?? index + 1)} · {deliveryTypeLabel(shot.deliveryType)}</strong><p>{String(shot.visibleAction ?? shot.generationPrompt ?? shot.query ?? "")}</p><small>预计时长与获取路线将在当前方案确认后进入报价；画面尚未生成。</small></section> : null) : null}</div>;
 }
 
 function DraftField({ label, value }: { label: string; value: unknown }) {

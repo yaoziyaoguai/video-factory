@@ -14,6 +14,26 @@ describe("CreativeDraftReader", () => {
     else delete (window as Partial<Window>).matchMedia;
   });
 
+  it("shows readable director delivery labels in segment and whole-draft views without changing the plan", () => {
+    const routes = [
+      ["generated_video", "AI 视频"], ["generated_image", "AI 图片"],
+      ["stock_video", "素材库视频"], ["stock_image", "素材库图片"],
+      ["editorial_card", "图文说明卡"], ["unrecognized_route", "待确认获取方式"],
+    ] as const;
+    const value = { shots: routes.map(([deliveryType], index) => ({ scenePosition: index + 1, deliveryType, visibleAction: `画面 ${index + 1}` })) };
+    const original = JSON.stringify(value);
+    render(<CreativeDraftReader stage="director" value={value} />);
+    expect(screen.getByText("镜头 1 · AI 视频")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "阅读镜头 2" }));
+    expect(screen.getByText("镜头 2 · AI 图片")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看整篇" }));
+    routes.forEach(([route, label], index) => {
+      expect(screen.getByText(`镜头 ${index + 1} · ${label}`)).toBeInTheDocument();
+      expect(screen.queryByText(new RegExp(route))).not.toBeInTheDocument();
+    });
+    expect(JSON.stringify(value)).toBe(original);
+  });
+
   it("cancels interrupted segment feedback and respects reduced motion without delaying the selected content", () => {
     let notifyResize: (() => void) | undefined;
     vi.stubGlobal("ResizeObserver", class {
