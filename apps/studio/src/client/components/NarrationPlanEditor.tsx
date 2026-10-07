@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { secondsToFramesV2 } from "@video-factory/production-pipeline/narration-text";
-import type { StudioNarrationPlanPreview, StudioNarrationPreviewTicketV2 } from "../../shared/api.js";
+import type { StudioNarrationPlanPreview, StudioNarrationPreviewTicketV2, StudioRunDetail } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 
@@ -162,7 +162,7 @@ function NarrationSegmentationSection({ runId, runRevision, preview: loadedPrevi
   runRevision: number;
   preview: StudioNarrationPlanPreview;
   disabled: boolean;
-  onSaved(): void;
+  onSaved(run: StudioRunDetail, plan: StudioNarrationPlanPreview["plan"]): void;
   onUseDefault(): Promise<boolean>;
   sequence: { current: number };
   ignoreStoredDraft: boolean;
@@ -318,7 +318,7 @@ function NarrationSegmentationSection({ runId, runRevision, preview: loadedPrevi
         } catch {
           setStorageWarning("服务端已保存；本机旧草稿未能清理，下次会先按服务端版本核对。");
         }
-        onSaved();
+        onSaved(result.run, ticket.plan);
       }
     } catch (caught) {
       if (activeRequest.current === token) setError(caught instanceof Error ? caught.message : "保存没有完成；草稿保留，请重试。");
@@ -471,7 +471,7 @@ function NarrationSegmentationSection({ runId, runRevision, preview: loadedPrevi
   </details>;
 }
 
-export function NarrationPlanEditor({ runId, runRevision, disabled, characterDrama = false, onEditCharacters }: { runId: string; runRevision: number; disabled: boolean; characterDrama?: boolean; onEditCharacters?: () => void }) {
+export function NarrationPlanEditor({ runId, runRevision, disabled, characterDrama = false, onEditCharacters, onRunUpdated }: { runId: string; runRevision: number; disabled: boolean; characterDrama?: boolean; onEditCharacters?: () => void; onRunUpdated?: (run: StudioRunDetail) => void }) {
   const [preview, setPreview] = useState<StudioNarrationPlanPreview>();
   const [busyToken, setBusyToken] = useState<string>();
   const [error, setError] = useState<string>();
@@ -558,6 +558,7 @@ export function NarrationPlanEditor({ runId, runRevision, disabled, characterDra
       loadedPlanSignature.current = JSON.stringify(plan);
       setPreview({ ...preview, expectedRunRevision: result.revision, plan, confirmed: true });
       setSaved(true);
+      onRunUpdated?.(result);
       return true;
     } catch (caught) {
       if (activeRequest.current === token) setError(caught instanceof Error ? caught.message : "旁白方案保存失败，当前选择仍保留。");
@@ -615,7 +616,7 @@ export function NarrationPlanEditor({ runId, runRevision, disabled, characterDra
       <p>{characterMode ? "实际声音长度在配音后才能确定。台词过长时保留原音频等你调整，不截词、不加速。" : "实际声音长度在配音后才能确定。中文旁白常见语速约每秒 3–5 字；过长时保留原音频等你调整，不截词、不加速。"}</p>
       <p>保存{characterMode ? "角色配音" : "旁白"}方案本身不收费，也不开始配音；确认当前素材步骤后才会进入配音。</p>
       {preview.editorContext.mode === "pre_generation" && preview.sourceContextId
-        ? <NarrationSegmentationSection key={`${loadedRunId}:${preview.sourceContextId}:${preview.expectedRunRevision}:${loadGeneration}`}
+        ? <NarrationSegmentationSection key={`${loadedRunId}:${preview.sourceContextId}:${loadGeneration}`}
             runId={loadedRunId ?? runId} runRevision={runRevision} preview={preview}
             disabled={Boolean(busyToken) || reloadPrompt || disabled || loadedRunId !== runId}
             sequence={previewSequence} ignoreStoredDraft={ignoredDraftRun.current === loadedRunId}
@@ -626,7 +627,11 @@ export function NarrationPlanEditor({ runId, runRevision, disabled, characterDra
                 setStorageWarning(undefined);
               }
             }}
-            onSaved={() => setSaved(true)} onUseDefault={() => preview.editorContext.defaultPlan.version === "video-factory/narration-plan-v1" ? confirmPlan(preview.editorContext.defaultPlan) : Promise.resolve(false)} />
+            onSaved={(nextRun, savedPlan) => {
+              setPreview({ ...preview, expectedRunRevision: nextRun.revision, plan: savedPlan, confirmed: true });
+              setSaved(true);
+              onRunUpdated?.(nextRun);
+            }} onUseDefault={() => preview.editorContext.defaultPlan.version === "video-factory/narration-plan-v1" ? confirmPlan(preview.editorContext.defaultPlan) : Promise.resolve(false)} />
         : null}
       {preview.quote ? <section aria-label="旁白费用预估"><p>本次需新合成 {preview.quote.items.filter((item) => !item.reused).length} 组，
         可复用 {preview.quote.items.filter((item) => item.reused).length} 组；保守预估 ¥{preview.quote.maxCostCny.toFixed(2)}。</p>

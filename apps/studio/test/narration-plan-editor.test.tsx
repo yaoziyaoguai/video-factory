@@ -33,7 +33,8 @@ afterEach(() => {
 it("previews without adoption and saves the creator's placement without starting the next node", async () => {
   vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(structuredClone(preview));
   const confirm = vi.spyOn(studioApi, "confirmNarrationPlan").mockResolvedValue({ revision: 6 } as StudioRunDetail);
-  const view = render(<NarrationPlanEditor runId="run-example" runRevision={5} disabled={false} />);
+  const onRunUpdated = vi.fn();
+  const view = render(<NarrationPlanEditor runId="run-example" runRevision={5} disabled={false} onRunUpdated={onRunUpdated} />);
   expect(studioApi.narrationPlan).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "查看连贯旁白方案" }));
   await screen.findByText("先停一下。");
@@ -44,6 +45,7 @@ it("previews without adoption and saves the creator's placement without starting
   await waitFor(() => expect(confirm).toHaveBeenCalledOnce());
   expect(confirm.mock.calls[0]?.[1].plan.groups[0]?.placement.anchor).toBe("end");
   expect(confirm.mock.calls[0]?.[1].expectedRunRevision).toBe(5);
+  expect(onRunUpdated).toHaveBeenCalledExactlyOnceWith({ revision: 6 });
   view.rerender(<NarrationPlanEditor runId="run-example" runRevision={6} disabled={false} />);
   await screen.findByText(/已采用.*未开始配音/);
   view.rerender(<NarrationPlanEditor runId="run-example" runRevision={7} disabled={false} />);
@@ -148,7 +150,8 @@ it("keeps segmentation collapsed by default and saves a v2 candidate only throug
 });
 
 function v2PlanForSegmentation() {
-  return { version: "video-factory/narration-plan-v2", groups: [
+  return { ...structuredClone(v1Plan), version: "video-factory/narration-plan-v2",
+    source: { normalization: "narration-text-v1", sourceContextId: "sc-editable", canonicalSourceSha256: "c".repeat(64) }, groups: [
     { id: "ng-1", sourceRange: { baseGroupId: "nb-1", startCodePoint: 0, endCodePoint: 5 },
       sourceScenePositions: [1], text: "先停一下。", window: { startFrame: 0, endFrame: 300 },
       placement: { anchor: "start", offsetFrames: 0 } }] };

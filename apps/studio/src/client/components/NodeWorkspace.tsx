@@ -31,6 +31,7 @@ interface NodeWorkspaceProps {
   /** C2：制作范围授权需要 run 身份与当前方案 digest。 */
   runId: string;
   runRevision: number;
+  onRunUpdated?: (run: import("../../shared/api.js").StudioRunDetail) => void;
   characterDrama?: boolean;
   onEditCharacters?: () => void;
   acceptedPlanDigest: string;
@@ -64,7 +65,7 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, characterDrama: propsCharacterDrama = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, hideExecutionConfiguration = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, onRunUpdated, characterDrama: propsCharacterDrama = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, hideExecutionConfiguration = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
   onAuthorizeProductionScope = async input => { await studioApi.authorizeProductionScope(runId, input); },
   onAmendProductionScope = async (authorizationId, input) => { await studioApi.amendProductionScope(runId, authorizationId, input); },
   onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
@@ -481,7 +482,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       && node.id === (nodes.some((candidate) => candidate.id === "asset-source-review") ? "asset-source-review" : "assets")
       && nodes.some((candidate) => candidate.id === "voice" && candidate.status === "pending"
         && candidate.plannedExecution?.providerId === "minimax-tts-v1")
-      ? <NarrationPlanEditor key={runId} runId={runId} runRevision={runRevision} characterDrama={propsCharacterDrama} disabled={busy || runStatus === "running"} {...(onEditCharacters ? { onEditCharacters } : {})} /> : null}
+      ? <NarrationPlanEditor key={runId} runId={runId} runRevision={runRevision} characterDrama={propsCharacterDrama} disabled={busy || runStatus === "running"} {...(onEditCharacters ? { onEditCharacters } : {})} {...(onRunUpdated ? { onRunUpdated } : {})} /> : null}
     {!readOnly && activeInterventionId
         && ((nodes.some((candidate) => candidate.id === "voice" && candidate.status === "needs_human")
               && (node.id === "voice" || node.id === "render"))

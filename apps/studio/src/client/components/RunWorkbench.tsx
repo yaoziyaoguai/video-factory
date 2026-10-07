@@ -39,6 +39,7 @@ interface RunWorkbenchProps {
   providers?: StudioProvider[];
   decisionPending: boolean;
   onDecision: (input: StudioDecisionInput) => Promise<void>;
+  onRunUpdated?: (run: StudioRunDetail) => void;
   onRequestSceneRevision?: (input: StudioSceneRevisionInput) => Promise<void>;
   /** 重取某一镜的素材：在这一镜已通过语义筛选的候选里改选下一名，画面换一版。 */
   onRequestSceneResourceRevision?: (input: StudioSceneResourceRevisionInput) => Promise<void>;
@@ -73,7 +74,7 @@ interface RunWorkbenchProps {
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlockedReason, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onReviseNodeDocument, onAuditNodeDocument, onConfigureNode, onAuthorizeSpend, onAuthorizeProductionScope, onAmendProductionScope, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onPrepareReviewContinuation, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlockedReason, providers = [], decisionPending, onDecision, onRunUpdated, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onReviseNodeDocument, onAuditNodeDocument, onConfigureNode, onAuthorizeSpend, onAuthorizeProductionScope, onAmendProductionScope, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onPrepareReviewContinuation, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [prepareSnapshot, setPrepareSnapshot] = useState<import("../../shared/api.js").StudioReviewContinuationInput>();
   function editCharacters() {
@@ -383,6 +384,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
     busy={nodeMutationPending}
     runId={run.id}
     runRevision={run.revision}
+    {...(onRunUpdated ? { onRunUpdated } : {})}
     characterDrama={run.presentationMode === "character_drama"}
     {...(run.characterScriptEditTarget && onPrepareReviewContinuation ? { onEditCharacters: editCharacters } : {})}
     acceptedPlanDigest={run.productionPlanDigest ?? ""}
