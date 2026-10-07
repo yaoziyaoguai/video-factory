@@ -59,10 +59,15 @@ interface NodeWorkspaceProps {
   onAuditDocument?: (nodeId: string, input: { expectedRunRevision: number; expectedVersionId: string }) => Promise<void>;
   onConfigure?: (nodeId: string, input: StudioNodeExecutionConfigurationInput) => Promise<void>;
   onAuthorize: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
+  onAuthorizeProductionScope?: (input: import("../../shared/api.js").StudioProductionAuthorizationInput) => Promise<void>;
+  onAmendProductionScope?: (authorizationId: string, input: import("../../shared/api.js").StudioProductionAmendmentInput) => Promise<void>;
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, characterDrama: propsCharacterDrama = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, hideExecutionConfiguration = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize, onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, characterDrama: propsCharacterDrama = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, hideExecutionConfiguration = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
+  onAuthorizeProductionScope = async input => { await studioApi.authorizeProductionScope(runId, input); },
+  onAmendProductionScope = async (authorizationId, input) => { await studioApi.amendProductionScope(runId, authorizationId, input); },
+  onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
   const shouldOpenForAttention = currentDelivery || node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
@@ -402,7 +407,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     setError(undefined);
     setScopeAuthorizing(true);
     try {
-      await studioApi.authorizeProductionScope(runId, {
+      await onAuthorizeProductionScope({
         expectedRunRevision: pendingQuote.preparedAtRevision,
         quoteId: pendingQuote.quote.quoteId,
         acceptedPlanDigest: pendingQuote.quote.acceptedPlanDigest,
@@ -433,7 +438,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       if (!quote.fundingRequestId || !quote.fundingAuthorizationId) {
         throw new Error("服务端没有生成追加请求，请刷新后重新获取。");
       }
-      await studioApi.amendProductionScope(runId, quote.fundingAuthorizationId, {
+      await onAmendProductionScope(quote.fundingAuthorizationId, {
         expectedRunRevision: runRevision,
         fundingRequestId: quote.fundingRequestId,
         idempotencyKey: `amend-${runId}-${quote.fundingRequestId}`,

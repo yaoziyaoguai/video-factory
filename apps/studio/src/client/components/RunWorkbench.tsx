@@ -58,6 +58,8 @@ interface RunWorkbenchProps {
   onAuditNodeDocument?: (nodeId: string, input: { expectedRunRevision: number; expectedVersionId: string }) => Promise<void>;
   onConfigureNode?: (nodeId: string, input: StudioNodeExecutionConfigurationInput) => Promise<void>;
   onAuthorizeSpend?: (nodeId: string, input: StudioSpendAuthorizationInput) => Promise<void>;
+  onAuthorizeProductionScope?: (input: import("../../shared/api.js").StudioProductionAuthorizationInput) => Promise<void>;
+  onAmendProductionScope?: (authorizationId: string, input: import("../../shared/api.js").StudioProductionAmendmentInput) => Promise<void>;
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
   onRegenerateStale?: () => Promise<void>;
   onRequestPause?: () => Promise<void>;
@@ -71,7 +73,7 @@ interface RunWorkbenchProps {
   connectionHeartbeatAt?: string;
 }
 
-export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlockedReason, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onReviseNodeDocument, onAuditNodeDocument, onConfigureNode, onAuthorizeSpend, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onPrepareReviewContinuation, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
+export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlockedReason, providers = [], decisionPending, onDecision, onRequestSceneRevision, onRequestSceneResourceRevision, onRequestNarrationRevision, onLoadSceneNarration, onReinspectVisualReview, onOpenPublish, onRestart, costDetail, nodeMutationPending = false, pausePending = false, onOverrideNode, onOverrideNodeInput, onReviseNodeDocument, onAuditNodeDocument, onConfigureNode, onAuthorizeSpend, onAuthorizeProductionScope, onAmendProductionScope, onRejectSpend, onRegenerateStale, onRequestPause, onResumePaused, onQueryOriginalTextTask, onPrepareReviewContinuation, onRetrieveOriginalTextTask, onRetryFailedNode, paidNodeSummary, onReconcilePaidNode, connectionHeartbeatAt }: RunWorkbenchProps) {
   const [approving, setApproving] = useState(false);
   const [prepareSnapshot, setPrepareSnapshot] = useState<import("../../shared/api.js").StudioReviewContinuationInput>();
   function editCharacters() {
@@ -400,6 +402,8 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
     {...(onReviseNodeDocument && onAuditNodeDocument ? { onReviseDocument: onReviseNodeDocument, onAuditDocument: onAuditNodeDocument } : {})}
     onConfigure={onConfigureNode ?? (async () => undefined)}
     onAuthorize={onAuthorizeSpend ?? (async () => undefined)}
+    {...(onAuthorizeProductionScope ? { onAuthorizeProductionScope } : {})}
+    {...(onAmendProductionScope ? { onAmendProductionScope } : {})}
     onRejectSpend={onRejectSpend ?? (async () => undefined)}
   />;
 
@@ -1097,7 +1101,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
             <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p>{sourcePreflightDecision
               ? <><strong>你接受的是当前素材预检的质量风险，不是宣布审查通过。</strong><span>若复核未完成，仍如实保留“未完成、无评分”。继续配音与渲染时仍受原费用授权限制；这不是成片定版。</span></>
               : sourceReviewIncompleteRisk
-              ? <><strong>你接受的是“审查没有结论”的事实，不是把它改成通过。</strong><span>已生成画面和费用事实会保留，继续只运行后续配音与渲染；不会重新购买已成功素材，最终仍显示为可播放首版而非正式发布通过。</span></>
+              ? <><strong>你接受的是“审查没有结论”的事实，不是把它改成通过。</strong><span>已生成画面和费用事实会保留，不会重新购买已成功素材；尚未生成的素材仍按当前报价和授权处理。后续配音、渲染与人工终审仍分别确认，这不是成片定版或对外发布。</span></>
               : sourceReviewDecision
               ? <><strong>你确认的是：已看过这份试片意见，愿意按当前方案继续。</strong><span>系统不会重新购买已生成试片；其它尚未生成的素材仍会先依据当前报价和授权处理。</span></>
               : visualReviewIncompleteDecision
@@ -1115,7 +1119,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                 : "批准后将生成发布包。"}</strong><span>这会结束人工终审；请确认已经完整观看画面、字幕并听过声音。</span></>}</p></div>
             {/* 逐条表态管的是审片结论。机器质检是判过或不过的闸门——它不通过时流程走不到终审，
                 所以这里没有它的条目，操作员不必怀疑自己漏签了什么。边界停点上两件事都不涉及。 */}
-            {boundaryGate || sourcePreflightDecision || visualReviewIncompleteDecision ? null : <p className="review-disposition-note">技术质检不适用逐条表态：它由机器判定通过或不过，没过就到不了这一步，不在这里逐条签。</p>}
+            {boundaryGate || sourcePreflightDecision || sourceReviewDecision || sourceReviewIncompleteRisk || visualReviewIncompleteDecision ? null : <p className="review-disposition-note">技术质检不适用逐条表态：它由机器判定通过或不过，没过就到不了这一步，不在这里逐条签。</p>}
             {reviewItems.length > 0 ? <div className="review-disposition-list">
               <button type="button" className="button button-secondary" disabled={prefillBusy || decisionPending}
                 onClick={() => void prefillReview()}>沿用上一停点的逐条表态</button>

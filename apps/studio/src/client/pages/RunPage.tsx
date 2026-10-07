@@ -521,6 +521,34 @@ function RunPageContent({ runId }: { runId: string }) {
     }
   }
 
+  async function authorizeProductionScope(input: import("../../shared/api.js").StudioProductionAuthorizationInput) {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      const nextRun = await withMutationProgress(() => studioApi.authorizeProductionScope(runId, input));
+      setRun(current => preferRunSnapshot(current, nextRun));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
+  async function amendProductionScope(authorizationId: string, input: import("../../shared/api.js").StudioProductionAmendmentInput) {
+    setNodeMutationPending(true);
+    setError(undefined);
+    try {
+      const nextRun = await withMutationProgress(() => studioApi.amendProductionScope(runId, authorizationId, input));
+      setRun(current => preferRunSnapshot(current, nextRun));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      throw caught;
+    } finally {
+      setNodeMutationPending(false);
+    }
+  }
+
   async function regenerateStale() {
     setNodeMutationPending(true);
     setError(undefined);
@@ -695,7 +723,7 @@ function RunPageContent({ runId }: { runId: string }) {
       </section> : null}
       {costError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{costError}</div> : null}
       {paidOperationError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{paidOperationError}</div> : null}
-      <RunWorkbench run={run} {...(hasUnsavedCreativeEdits ? { assetConfigurationBlockedReason: "请先保存或放弃当前稿件的手动修改，再调整画面来源。" } : {})} creativeDiscussion={creativeReview ? <CreativeDiscussionPanel key={`${run.id}:${creativeReview.stage}:${creativeReview.reviewPurpose ?? "draft"}`} review={creativeReview} busy={creativeCommandPending || nodeMutationPending || decisionPending || creativeReview.phase === "checking"} onDraftDirtyChange={setHasUnsavedCreativeEdits} onCommand={commandCreativeReview} providers={runProviders} /> : undefined} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onRequestSceneResourceRevision={requestSceneResourceRevision} onRequestNarrationRevision={requestNarrationRevision} onLoadSceneNarration={loadSceneNarration} onReinspectVisualReview={reinspectVisualReview} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending || creativeCommandPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onReviseNodeDocument={reviseNodeDocument} onAuditNodeDocument={auditNodeDocument} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onQueryOriginalTextTask={queryOriginalTextTask} onPrepareReviewContinuation={prepareReviewContinuation} onRetrieveOriginalTextTask={retrieveOriginalTextTask} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
+      <RunWorkbench run={run} {...(hasUnsavedCreativeEdits ? { assetConfigurationBlockedReason: "请先保存或放弃当前稿件的手动修改，再调整画面来源。" } : {})} creativeDiscussion={creativeReview ? <CreativeDiscussionPanel key={`${run.id}:${creativeReview.stage}:${creativeReview.reviewPurpose ?? "draft"}`} review={creativeReview} busy={creativeCommandPending || nodeMutationPending || decisionPending || creativeReview.phase === "checking"} onDraftDirtyChange={setHasUnsavedCreativeEdits} onCommand={commandCreativeReview} providers={runProviders} /> : undefined} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onRequestSceneResourceRevision={requestSceneResourceRevision} onRequestNarrationRevision={requestNarrationRevision} onLoadSceneNarration={loadSceneNarration} onReinspectVisualReview={reinspectVisualReview} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending || creativeCommandPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onReviseNodeDocument={reviseNodeDocument} onAuditNodeDocument={auditNodeDocument} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onAuthorizeProductionScope={authorizeProductionScope} onAmendProductionScope={amendProductionScope} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onQueryOriginalTextTask={queryOriginalTextTask} onPrepareReviewContinuation={prepareReviewContinuation} onRetrieveOriginalTextTask={retrieveOriginalTextTask} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
       {creativeHistory ? <CreativeReviewHistoryPanel history={creativeHistory} /> : null}
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}
       <NewRunDialog

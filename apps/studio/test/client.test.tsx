@@ -164,6 +164,66 @@ const runDetail: StudioRunDetail = {
 };
 
 describe("Studio client", () => {
+  it.each(["authorization", "amendment"] as const)("refreshes progress while scope %s is pending without a run event or a second purchase", async phase => {
+    vi.restoreAllMocks();
+    vi.stubGlobal("EventSource", class { addEventListener() {} close() {} });
+    vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+    const { activeIntervention: _stop, videoArtifactId: _video, ...base } = runDetail;
+    const waiting: StudioRunDetail = {
+      ...base, revision: 10, status: "awaiting_spend_approval", currentNodeId: "assets",
+      productionPlanDigest: "a".repeat(64), artifacts: [],
+      nodes: [{ id: "assets", label: "画面", status: "awaiting_spend_approval", artifactIds: [], qualityGateResults: [],
+        spendPlan: { id: "plan-progress", inputVersionIds: [], providerId: "ai-shot-router-v1", modelId: "wan-video",
+          estimatedCostCny: 3.75, maxCostCny: 3.75, maxAttempts: 1, items: [], createdAt: base.startedAt } }],
+    };
+    if (phase === "amendment") waiting.nodes[0]!.spendAssessment = {
+      action: "request_approval", reason: "amount", approvedAmountCents: 375, settledCents: 0, reservedCents: 375,
+      pendingUnknownCents: 0, requestedMaximumCents: 75, additionalCents: 75, resultingMaximumCents: 450, blockedAssets: [],
+    };
+    const running: StudioRunDetail = { ...waiting, revision: 11, status: "running",
+      nodes: waiting.nodes.map(node => ({ ...node, status: "running" })) };
+    let current = waiting;
+    let finish!: (run: StudioRunDetail) => void;
+    const pending = new Promise<StudioRunDetail>(resolve => { finish = resolve; });
+    vi.spyOn(studioApi, "run").mockImplementation(async () => current);
+    vi.spyOn(studioApi, "runCosts").mockRejectedValue(new Error("no cost fixture"));
+    vi.spyOn(studioApi, "providers").mockResolvedValue([]);
+    vi.spyOn(studioApi, "creativeReviewHistory").mockRejectedValue(new Error("no history fixture"));
+    vi.spyOn(studioApi, "prepareProductionQuote").mockResolvedValue({ quoteId: "quote-progress", acceptedPlanDigest: "a".repeat(64),
+      estimatedCostCny: 3.75, maximumCostCny: 3.75, scopeSummary: { content: "四个镜头", assets: [], uncertainty: [] }, feasible: true,
+      ...(phase === "amendment" ? { fundingRequestId: "funding-progress", fundingAuthorizationId: "scope-progress" } : {}) });
+    const authorize = vi.spyOn(studioApi, "authorizeProductionScope").mockImplementation(() => {
+      current = running;
+      return pending;
+    });
+    const amend = vi.spyOn(studioApi, "amendProductionScope").mockImplementation(() => {
+      current = running;
+      return pending;
+    });
+    const view = render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
+    try {
+      if (phase === "authorization") {
+        await userEvent.click(await screen.findByRole("button", { name: "获取费用报价" }));
+        expect(authorize).not.toHaveBeenCalled();
+        await userEvent.click(await screen.findByRole("button", { name: "确认并授权（最高 ¥3.75）" }));
+      } else {
+        await userEvent.click(await screen.findByRole("button", { name: "同意追加 ¥0.75 并继续" }));
+      }
+      await waitFor(() => expect(screen.getByText("自动制作中")).toBeInTheDocument(), { timeout: 4_000 });
+      expect(authorize).toHaveBeenCalledTimes(phase === "authorization" ? 1 : 0);
+      expect(amend).toHaveBeenCalledTimes(phase === "amendment" ? 1 : 0);
+      expect(screen.queryByRole("button", { name: "确认并授权（最高 ¥3.75）" })).not.toBeInTheDocument();
+      await act(async () => { finish(running); });
+      expect(authorize).toHaveBeenCalledTimes(phase === "authorization" ? 1 : 0);
+      expect(amend).toHaveBeenCalledTimes(phase === "amendment" ? 1 : 0);
+    } finally {
+      await act(async () => { finish(running); });
+      view.unmount();
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("previews only the subtitle sidecar bound to this exact film and never doubles burned captions", () => {
     const run: StudioRunDetail = { ...runDetail, nodes: [
       { id: "voice", label: "配音", status: "succeeded", artifactIds: ["vtt"], qualityGateResults: [],
@@ -5830,6 +5890,21 @@ describe("Studio client", () => {
     expect(screen.getByText(/DeepSeek 视觉导演 · DeepSeek-Flash/)).toBeInTheDocument();
     expect(screen.queryByText(/deepseek-flash/)).not.toBeInTheDocument();
     expect(screen.getByText("制作服务连接刚刚确认")).toBeInTheDocument();
+  });
+
+  it("describes remaining materials and later checks honestly when accepting an incomplete pilot review", async () => {
+    const { activeIntervention: _stop, videoArtifactId: _video, ...base } = runDetail;
+    render(<RunWorkbench run={{ ...base, status: "needs_human", currentNodeId: "assets", artifacts: [],
+      nodes: [{ id: "assets", label: "画面", status: "needs_human", artifactIds: [], qualityGateResults: [] }],
+      activeIntervention: { id: "pilot-risk", nodeId: "assets", kind: "source_review_retry", reason: "首镜已生成，审查未完成",
+        reviewStatus: "incomplete", providerOutcomeKnown: true, evidenceId: "e".repeat(64),
+        options: ["approve", "reject"], createdAt: base.startedAt },
+    }} decisionPending={false} onDecision={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "接受未完成审查，继续生成首版" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/尚未生成的素材仍按当前报价和授权处理/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/后续配音、渲染与人工终审仍分别确认/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/继续只运行后续配音与渲染|技术质检不适用逐条表态/)).not.toBeInTheDocument();
   });
 
   it("offers retry-or-terminate only for a paused source review, never a skip", () => {

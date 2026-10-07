@@ -133,7 +133,7 @@ describe("ResourcesPage source and rights section", () => {
       expect(screen.getByRole("button", { name: category })).toBeInTheDocument();
     }
     expect(within(screen.getByLabelText("全局模型目录")).queryByRole("combobox")).toBeNull();
-    fireEvent.change(screen.getByRole("combobox", { name: "编剧默认模型" }), { target: { value: "writer-b" } });
+    fireEvent.change(await screen.findByRole("combobox", { name: "编剧默认模型" }), { target: { value: "writer-b" } });
     fireEvent.click(screen.getByRole("button", { name: "保存角色配置" }));
     expect(update).toHaveBeenCalledWith({ modelDefaults: { "writer-v1": "writer-b", "video-v1": "video-a" } });
   });
