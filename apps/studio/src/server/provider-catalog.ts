@@ -508,7 +508,7 @@ export function buildProviderCatalog(
       billing: "metered",
       status: seedanceAvailable ? "ready" : "needs_config",
       description: "通过同一个火山方舟协议调用可配置的视频模型；实际选中镜头逐项报价并等待人工确认。",
-      modes: ["文生视频", "9:16", "2-15 秒", "无声素材"],
+      modes: ["文生视频", "9:16", "模型原生音画（试用）"],
       deliveryTypes: assetProviderDeliveryTypes("seedance-video-v1"),
       latency: "minutes",
       ...(seedanceSettings ? { estimatedCnyPerClip: seedanceSettings.estimatedCnyPerClip } : {}),
@@ -519,7 +519,7 @@ export function buildProviderCatalog(
         providerFamily: "ark-video",
         available: seedanceAvailable,
         description: model.recommended
-          ? "当前推荐的方舟视频模型，适合精品关键镜头与受控小额验证。"
+          ? "原生音画按时长与分辨率估价，实际费用以供应商视频 token 为准；不是固定每镜价格。"
           : "同一方舟 API 下的可选视频模型，可按项目或节点覆盖默认值。",
       })),
       requirement: "需要连接火山方舟账号，并为视频模型配置单镜头估价；模型可在页面选择",
@@ -652,6 +652,17 @@ export function buildProviderCatalog(
       }],
       requirement: "需要开通火山引擎视觉内容生成服务与 OmniHuman 权限，并准备可访问的图片和音频地址；普通方舟模型权限不能替代",
       docsUrl: "https://api.volcengine.com/api-docs/?serviceCode=cv&version=2024-06-06",
+    }),
+    provider({
+      id: "python-native-audio-v1",
+      capability: "audio.prepare_native",
+      label: "视频原声准备",
+      available: runtime.python && runtime.ffmpeg && runtime.ffprobe,
+      kind: "local",
+      description: "保留所选视频模型生成的原声，按画面采用区间本地准备试听，不调用独立配音服务。无同步字幕；跨镜声线、台词与口型需自行听看。",
+      modes: ["原声试听", "本地处理", "无独立TTS"],
+      latency: "seconds",
+      requirement: "需要 python3、ffmpeg 和 ffprobe",
     }),
     provider({
       id: "python-ffmpeg-v1",

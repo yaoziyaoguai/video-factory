@@ -46,6 +46,7 @@ from .narration_subtitles import (
 )
 from .voiceover import mastering_settings, _write_bytes_durably, _write_json_durably
 from .renderer import render_job_manifest
+from .native_audio import NativeAudioError, prepare_native_audio, validate_native_audio_plan
 from .diagnostics import diagnostic_context, diagnostic_span
 
 
@@ -57,6 +58,7 @@ SUPPORTED_CAPABILITIES = {
     "asset.prepare",
     "voice.synthesize",
     "voice.quote",
+    "audio.prepare_native",
     "video.render",
     "quality.review",
 }
@@ -98,6 +100,8 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
         return search_assets(request, output_dir, started_at)
     if capability == "voice.synthesize":
         return synthesize_voice(request, output_dir, started_at)
+    if capability == "audio.prepare_native":
+        return prepare_native_voice(request, output_dir, started_at)
     if capability == "voice.quote":
         inputs, parameters = request["input"], request.get("parameters", {})
         plan = inputs.get("narrationPlan")
@@ -1172,16 +1176,55 @@ def minimax_failure_diagnostics(output_dir: Path, operation_id: str) -> Dict[str
     return diagnostics
 
 
+def prepare_native_voice(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
+    inputs = request["input"]
+    try:
+        _, executable = materialize_executable_script(inputs, output_dir)
+        if executable is None:
+            raise NativeAudioError("invalid_binding", "原生声音需要当前可执行画面方案。")
+        assets = json.loads(require_existing_path(inputs, "assetPlanPath").read_text())
+        assert_asset_plan_matches_executable_plan(assets, executable)
+        root = Path(request["parameters"]["mediaRoot"]).resolve()
+        plan_path = prepare_native_audio(inputs, root, output_dir, executable, assets)
+        plan = json.loads(plan_path.read_text())
+    except (NativeAudioError, WorkerProtocolError, json.JSONDecodeError, OSError) as error:
+        code = error.code if isinstance(error, NativeAudioError) else "invalid_binding"
+        message = str(error) if isinstance(error, NativeAudioError) else "当前规划或素材文件不完整，无法准备原声。已有素材保留，请恢复文件或关联返工。"
+        report_path = output_dir / "native_audio_report.json"
+        _write_json_durably(report_path, {"status": "unavailable", "code": code, "message": message})
+        result = success_response(request, output={"audioMode": "native_av", "nativeAudioIssue": code}, artifacts=[
+            describe_artifact(report_path, "native_audio_report", "application/json", request, "Local native audio inspection.")], started_at=started_at)
+        result.update(status="rejected", error={"code": "NATIVE_AUDIO_UNAVAILABLE", "message": message})
+        result["diagnostics"].update(providerOutcomeKnown=True, meteredAttemptCount=0)
+        return result
+    result = success_response(request, output={"nativeAudioPlanPath": str(plan_path), "trackPath": plan["trackPath"], "audioMode": "native_av",
+        "subtitleStatus": "unavailable", "partialSource": any(s["partialSource"] for s in plan["segments"])}, artifacts=[
+        describe_artifact(plan_path, "native_audio_plan", "application/json", request, "Native source audio; see source media terms."),
+        describe_artifact(Path(plan["trackPath"]), "voiceover", "audio/wav", request, "Locally prepared native source audio; no TTS."),
+    ], started_at=started_at)
+    result["diagnostics"].update(providerOutcomeKnown=True, meteredAttemptCount=0)
+    return result
+
+
 def render_video(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
     script_path, executable_plan = materialize_executable_script(request["input"], output_dir)
     asset_plan_path = require_existing_path(request["input"], "assetPlanPath")
-    voiceover_plan_path = require_existing_path(request["input"], "voiceoverPlanPath")
+    native = request["input"].get("audioMode") == "native_av"
+    if native and "voiceoverPlanPath" in request["input"] or not native and "nativeAudioPlanPath" in request["input"]:
+        raise WorkerProtocolError("Native audio and TTS plans cannot be mixed.")
+    voiceover_plan_path = None if native else require_existing_path(request["input"], "voiceoverPlanPath")
+    native_plan_path = require_existing_path(request["input"], "nativeAudioPlanPath") if native else None
     if executable_plan is not None:
         try:
             asset_plan = json.loads(asset_plan_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise WorkerProtocolError(f"Asset plan is not valid JSON: {error}") from error
         assert_asset_plan_matches_executable_plan(asset_plan, executable_plan)
+    if native:
+        if executable_plan is None:
+            raise WorkerProtocolError("Native render requires the adopted executable plan.")
+        validate_native_audio_plan(json.loads(native_plan_path.read_text()), request["input"],
+            Path(request["parameters"]["mediaRoot"]), executable_plan, asset_plan)
     resolution = str(request.get("parameters", {}).get("resolution", "1080x1920"))
     manifest_path = render_job_manifest(
         job_id=1,
@@ -1190,6 +1233,7 @@ def render_video(request: Dict[str, Any], output_dir: Path, started_at: float) -
         require_assets=True,
         asset_plan_path=asset_plan_path,
         voiceover_plan_path=voiceover_plan_path,
+        native_audio_plan_path=native_plan_path,
         resolution=resolution,
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1213,7 +1257,8 @@ def render_video(request: Dict[str, Any], output_dir: Path, started_at: float) -
     return success_response(
         request,
         output={"videoPath": str(video_path), "renderManifestPath": str(manifest_path),
-            **render_subtitle_summary(manifest, voiceover_plan_path)},
+            **({"audioMode": "native_av", "subtitleStatus": "unavailable", "subtitleBurnStatus": "not_burned"}
+               if native else render_subtitle_summary(manifest, voiceover_plan_path))},
         artifacts=artifacts,
         started_at=started_at,
     )

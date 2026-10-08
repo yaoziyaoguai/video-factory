@@ -383,9 +383,16 @@ describe("CodexBridgeClient", () => {
     }
   });
 
-  it("aborts on timeout and never replays the task", async () => {
+  it("aborts on timeout and never replays the task", async (t) => {
+    const timeoutSignal = AbortSignal.timeout.bind(AbortSignal);
+    const controller = new AbortController();
+    // 本例验证已到达服务端的请求超时不重发。把真实 60ms 计时放在受理后，
+    // 避免并发测试下连接调度本身耗尽期限、实际一个 POST 都没收到。
+    t.mock.method(AbortSignal, "timeout", () => controller.signal);
     const bridge = await startBridge((_request, _response) => {
       // 挂起不响应，模拟 broker 无应答。
+      const timeout = timeoutSignal(60);
+      timeout.addEventListener("abort", () => controller.abort(timeout.reason), { once: true });
     });
     const delays: number[] = [];
     try {

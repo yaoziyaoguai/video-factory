@@ -881,7 +881,7 @@ export class StudioService {
       throw error;
     }
   }
-  async retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail> {
+  async retryFailedNode(runId: string, nodeId: string, nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"]): Promise<StudioRunDetail> {
     const current = await this.production.get(runId);
     if (!current) throw new StudioNotFoundError("没有找到这条制作记录。");
     if (current.nodes.find((node) => node.id === nodeId)?.outcomeUncertain) {
@@ -894,7 +894,7 @@ export class StudioService {
       await this.series.resumeRun(current.seriesId, current.episodeNumber, runId);
     }
     try {
-      const updated = await this.production.retryFailedNode(runId, nodeId);
+      const updated = await this.production.retryFailedNode(runId, nodeId, nativeAudioRecovery);
       if (current.seriesId) await this.reconcileSeriesRuns();
       return updated;
     } catch (error) {
@@ -1048,7 +1048,9 @@ async function canonProposalForRun(
   const effectiveFinalReview = finalReviewNode.outputState?.versions.find(
     (version) => version.id === finalReviewNode.outputState?.effectiveVersionId,
   )?.output;
-  const scriptNode = run.nodes.find((node) => node.id === "script");
+  // 联合规划把采用的脚本交付在 creative-planning；旧分离拓扑仍以 script 为权威。
+  const scriptNode = run.nodes.find((node) => node.id === "script")
+    ?? run.nodes.find((node) => node.id === "creative-planning");
   const effectiveScript = scriptNode?.outputState?.versions.find(
     (version) => version.id === scriptNode.outputState?.effectiveVersionId,
   );

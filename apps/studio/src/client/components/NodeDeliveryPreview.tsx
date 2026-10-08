@@ -8,6 +8,7 @@ import { platformLabel, providerLabel } from "../presentation.js";
 interface NodeDeliveryPreviewProps {
   nodeId: string;
   value: unknown;
+  nativeAudio?: boolean;
 }
 
 const PRIMARY_FIELDS: Record<string, string[]> = {
@@ -187,12 +188,21 @@ const FIELD_LABELS: Record<string, string> = {
   renderManifestPath: "渲染清单",
 };
 
-export function NodeDeliveryPreview({ nodeId, value }: NodeDeliveryPreviewProps) {
-  if (creatorViewId(nodeId) === "script" && isCharacterDocument(value)) return <CharacterScriptReader value={value} />;
+export function NodeDeliveryPreview({ nodeId, value, nativeAudio = false }: NodeDeliveryPreviewProps) {
+  if (creatorViewId(nodeId) === "script" && isCharacterDocument(value)) return <CharacterScriptReader value={value} nativeAudio={nativeAudio} />;
   const record = asRecord(value);
   if (!record) return <p className="node-document-state">这一步暂时没有可查看的详细内容。</p>;
   const inputPreview = nodeId.endsWith("-input");
   const viewId = creatorViewId(nodeId);
+  if (viewId === "voice" && !inputPreview && (record.audioMode === "native_av" || record.version === "video-factory/native-audio-plan-v1")) {
+    return <section className="node-readable-preview" aria-label="视频原声说明">
+      <h4>视频原声</h4>
+      <p>声音来自已采用的视频，按相同画面区间本地拼接，没有另外购买配音。请试听并查看原片，确认台词、声线和截断处是否合适。</p>
+      <p>未提供同步字幕。字幕、台词准确性与口型没有被系统自动验收。</p>
+      {record.partialSource === true ? <p role="note">使用了原片的部分区间，请留意句首句尾是否被截断。</p> : null}
+      {record.nativeAudioIssue ? <p role="status">原声暂时无法准备。原视频已保留，可在当前停点重新准备，或调整方案后关联返工。</p> : null}
+    </section>;
+  }
   const continuousVoice = viewId === "voice" && !inputPreview
     && (record.version === "video-factory/voiceover-plan-v3" || record.version === "video-factory/voiceover-plan-v4");
   const assetRoutes = viewId === "assets" && Array.isArray(record.director_routing)

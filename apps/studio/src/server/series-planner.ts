@@ -313,6 +313,6 @@ function blockingEpisode(series: SeriesRecord, episode: StudioSeriesEpisode): St
   return [...series.episodes]
     .filter((candidate) => candidate.episodeNumber < episode.episodeNumber)
     .sort((left, right) => left.episodeNumber - right.episodeNumber)
-    .find((candidate) => (candidate.status !== "ready" && candidate.status !== "published")
-      || !series.canon.facts.some((fact) => fact.sourceEpisodeId === candidate.id));
+    // 已定版但没有新增事实仍是有效前集，与存储层的采用条件保持一致。
+    .find((candidate) => candidate.status !== "ready" && candidate.status !== "published");
 }

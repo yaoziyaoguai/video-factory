@@ -5,6 +5,21 @@ import { validateTaskPayload } from "../src/codex-executor.js";
 import { outputValidationErrorFor, providerOutputSchemaFor } from "../src/task-definitions.js";
 import { summarizeProductionCapabilities } from "../../../packages/production-pipeline/src/production-capabilities.js";
 const fixture = JSON.parse(readFileSync(new URL("../../../tests/fixtures/character-drama-cases.json", import.meta.url), "utf8"));
+test("native AV planning declares per-shot sound, not TTS or cross-shot reuse, through the broker", () => {
+  const capabilities = summarizeProductionCapabilities([{ id: "wan-video-v1", deliveryTypes: ["generated_video"],
+    supportsReferenceImage: true, strengths: [], constraints: [], selectedModelId: "wan3.0-video" }], "python-native-audio-v1");
+  const task = validateTaskPayload("script-draft", { brief: { title: "小店", angle: "三人对话", audience: "青年", nicheSlug: "life",
+    platform: "douyin", durationSeconds: 20, presentationMode: "character_drama", characterVoiceProfiles: [],
+    productionCapabilities: capabilities } });
+  if (task.kind !== "script-draft") throw new Error("wrong task");
+  assert.deepEqual(task.payload.brief.productionCapabilities.audio, { nativeAv: true, narration: false,
+    pauseControl: "text_hint", continuousNarrationGroups: false, musicTrack: false, soundEffectsTrack: false });
+  assert.deepEqual(task.payload.brief.productionCapabilities.editing, { sourceRangeReuse: false, staticEditorialCard: false });
+  assert.equal(task.payload.brief.productionCapabilities.assetProviders[0]?.supportsReferenceImage, false);
+  assert.match(task.payload.brief.productionCapabilities.assetProviders[0]!.constraints.join(" "), /原生|原声/);
+  assert.throws(() => validateTaskPayload("script-draft", { brief: { ...task.payload.brief,
+    productionCapabilities: { ...capabilities, audio: { ...capabilities.audio, nativeAv: "true" } } } }), /nativeAv/);
+});
 test("MC-A05 selects director-v2 and retains character bindings in the broker input", () => {
   const schema = providerOutputSchemaFor("director-plan", "character_drama");
   assert.equal((schema.properties as Record<string, { const?: string }>).version!.const, "video-factory/director-plan-v2");

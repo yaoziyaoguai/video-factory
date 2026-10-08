@@ -178,10 +178,11 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   // 它真正的后果说话——把中间节点的放行写成「批准进入发布包」会让用户以为点下去就发了。
   const boundaryGate = run.activeIntervention?.boundary === "node-complete";
   const voiceNode = run.nodes.find((node) => node.id === "voice");
+  const nativeAudio = run.audioMode === "native_av";
   const voiceOutput = voiceNode?.output;
   const voiceWithoutSubtitles = boundaryGate && run.activeIntervention?.nodeId === "voice"
-    && typeof voiceOutput === "object" && voiceOutput !== null && "narrationMode" in voiceOutput
-    && voiceOutput.narrationMode === "continuous_groups" && "subtitleStatus" in voiceOutput
+    && typeof voiceOutput === "object" && voiceOutput !== null
+    && (nativeAudio || "narrationMode" in voiceOutput && voiceOutput.narrationMode === "continuous_groups") && "subtitleStatus" in voiceOutput
     && voiceOutput.subtitleStatus !== "verified" && voiceOutput.subtitleStatus !== "ready";
   const boundaryOptions = boundaryGate ? run.activeIntervention?.options ?? [] : [];
   // 停点放行的是下一步，而下一步还没跑、没有任何产物，于是它从前落不进 creatorNodes：
@@ -386,6 +387,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
     runRevision={run.revision}
     {...(onRunUpdated ? { onRunUpdated } : {})}
     characterDrama={run.presentationMode === "character_drama"}
+    nativeAudio={nativeAudio}
     {...(run.characterScriptEditTarget && onPrepareReviewContinuation ? { onEditCharacters: editCharacters } : {})}
     acceptedPlanDigest={run.productionPlanDigest ?? ""}
     runArtifacts={run.artifacts}
@@ -520,7 +522,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
       </div>
 
       <div id="run-current" className="run-current-workspace">
-      {assetConfigurationNode ? <NodeExecutionConfigurationEditor
+      {assetConfigurationNode && !nativeAudio ? <NodeExecutionConfigurationEditor
         key={`${run.id}:asset-sources`}
         node={assetConfigurationNode}
         providers={providers}
@@ -621,7 +623,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
           </div>
           <p className="preview-provenance">当前成片 · {new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(video.createdAt))} 生成。先观看实际内容，再结合复核意见判断。</p>
           </section> : currentArtifactNode ? <section className="current-artifact-surface" aria-label="当前步骤产物">
-          <header className="section-heading"><div><h2>{runNodeLabel(currentArtifactNode.id)}</h2><p>当前已保留的产物与设置。核对后再决定是否进入下一步。</p></div></header>
+          <header className="section-heading"><div><h2>{runStepLabel(run, currentArtifactNode.id)}</h2><p>当前已保留的产物与设置。核对后再决定是否进入下一步。</p></div></header>
           {renderNodeWorkspace(currentArtifactNode)}
         </section> : null}
 
@@ -681,7 +683,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
           {canReinspect && reinspectionEvidenceId && onReinspectVisualReview ? <CurrentFilmReinspection
             input={{ expectedRunRevision: run.revision, reviewEvidenceId: reinspectionEvidenceId }}
             busy={nodeMutationPending || decisionPending} onConfirm={onReinspectVisualReview} /> : null}
-          {run.activeIntervention?.nodeId === "final-review" && !readOnly && onRequestNarrationRevision
+          {!nativeAudio && run.activeIntervention?.nodeId === "final-review" && !readOnly && onRequestNarrationRevision
             ? <SubtitleRecoveryPanel key={`${run.id}:${run.revision}`} run={run}
               busy={decisionPending || nodeMutationPending} onRecover={onRequestNarrationRevision} /> : null}
           {!visualReview && video?.contentUrl ? <section className="review-advisory" role="status" aria-label="机器审片状态">
@@ -706,6 +708,18 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                 {...(onReconcilePaidNode ? { onReconcile: onReconcilePaidNode } : {})}
               /> : null}
               {onRestart ? <button className="button button-primary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
+            </section>
+          ) : run.activeIntervention?.kind === "local_preparation_retry" && run.audioMode === "native_av" ? (
+            <section className="intervention-panel" aria-label="原声准备暂停">
+              <div className="attention-heading"><AlertTriangle aria-hidden="true" size={18} /><h2>原声还没准备好</h2></div>
+              <p>{run.activeIntervention.reason}</p>
+              <p>原视频和费用记录都保留。重试只在本地重新提取原声，不购买视频或配音；若原片没有声音，请关联返工，调整声音模式或画面方案。</p>
+              <div className="decision-actions">
+                <button className="button button-primary" type="button" disabled={nodeMutationPending || !run.nativeAudioRecovery || !onRetryFailedNode}
+                  onClick={() => { if (onRetryFailedNode) void onRetryFailedNode("voice"); }}><RotateCcw aria-hidden="true" size={17} />重新准备原声（不重新购买）</button>
+                {onRestart ? <button className="button button-secondary" type="button" disabled={nodeMutationPending || decisionPending || hasUncertainPaidOutcome(run)} onClick={onRestart}>调整方案，关联返工</button> : null}
+                <button className="button button-secondary" type="button" disabled={decisionPending || nodeMutationPending} onClick={() => openDecision("reject")}>终止制作</button>
+              </div>
             </section>
           ) : run.activeIntervention?.kind === "source_review_retry" && run.activeIntervention ? (
             <section className="intervention-panel" aria-label="试片审查暂停">
@@ -768,7 +782,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               <div className="attention-heading">
                 <AlertTriangle aria-hidden="true" size={18} />
                 {/* 边界停点由界面按 nodeId 说步骤名（服务端只有英文节点标识），否则用户看不出停在哪一步。 */}
-                <h2>{boundaryGate ? `${runNodeLabel(run.activeIntervention.nodeId)}做完了，等你放行` : "需要你的判断"}</h2>
+                <h2>{boundaryGate ? `${runStepLabel(run, run.activeIntervention.nodeId)}做完了，等你放行` : "需要你的判断"}</h2>
               </div>
               <p>{creatorFacingTechnicalText(run.activeIntervention.reason)}</p>
               {waitingNodeProgress ? <div className={`agent-loop-progress is-stacked is-${waitingNodeProgress.phase}`} role="status">
@@ -824,8 +838,8 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                           ...input,
                         }),
                       } : {})}
-                      {...(onLoadSceneNarration ? { onLoadNarration: onLoadSceneNarration } : {})}
-                      {...(onRequestNarrationRevision ? {
+                      {...(!nativeAudio && onLoadSceneNarration ? { onLoadNarration: onLoadSceneNarration } : {})}
+                      {...(!nativeAudio && onRequestNarrationRevision ? {
                         onSubmitNarration: (input) => onRequestNarrationRevision({
                           expectedRunRevision: run.revision,
                           ...input,
@@ -968,7 +982,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
 
           {/* 终审的可选时间工具默认收起、排在主决定之后（CLOUD-03）。组件保持挂载——
               details 折叠只隐藏表单，不卸载，未保存输入/未决请求/刷新保护都在。 */}
-          {video?.contentUrl && run.activeIntervention?.nodeId === "final-review" && !readOnly
+          {!nativeAudio && video?.contentUrl && run.activeIntervention?.nodeId === "final-review" && !readOnly
             && voiceNode?.status === "succeeded" && voiceNode.outputState?.stale !== true
             && voiceNode.outputState?.effectiveVersionId
             ? <details className="optional-timing-tool">
@@ -1094,16 +1108,16 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                 : finalReviewIncompleteRisk
                 ? "接受未复核风险，完成内部定版"
                 : boundaryGate
-                ? `确认放行「${runNodeLabel(run.activeIntervention?.nodeId ?? "")}」`
+                ? `确认放行「${runStepLabel(run, run.activeIntervention?.nodeId ?? "")}」`
                 : reviewItems.length > 0 ? "逐条表态后批准成片" : "确认批准成片"}</h2></div>
               <button className="icon-button" type="button" onClick={closeApproveDecision} disabled={decisionPending} title="关闭"><X aria-hidden="true" size={19} /></button>
             </header>
             {/* 边界停点批准的是"这一步的产出可以往下走"，不生成发布包、不结束终审，也和机器质检无关。
                 这里原来一律讲终审的话——用户点下去之前读到的最后一段话是错的。 */}
             <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p>{sourcePreflightDecision
-              ? <><strong>你接受的是当前素材预检的质量风险，不是宣布审查通过。</strong><span>若复核未完成，仍如实保留“未完成、无评分”。继续配音与渲染时仍受原费用授权限制；这不是成片定版。</span></>
+              ? <><strong>你接受的是当前素材预检的质量风险，不是宣布审查通过。</strong><span>若复核未完成，仍如实保留“未完成、无评分”。{nativeAudio ? "后续本地准备原声与渲染，不另买配音；已有素材费用授权不扩大。" : "继续配音与渲染时仍受原费用授权限制；"}这不是成片定版。</span></>
               : sourceReviewIncompleteRisk
-              ? <><strong>你接受的是“审查没有结论”的事实，不是把它改成通过。</strong><span>已生成画面和费用事实会保留，不会重新购买已成功素材；尚未生成的素材仍按当前报价和授权处理。后续配音、渲染与人工终审仍分别确认，这不是成片定版或对外发布。</span></>
+              ? <><strong>你接受的是“审查没有结论”的事实，不是把它改成通过。</strong><span>已生成画面和费用事实会保留，不会重新购买已成功素材；尚未生成的素材仍按当前报价和授权处理。后续{nativeAudio ? "原声试听" : "配音"}、渲染与人工终审仍分别确认，这不是成片定版或对外发布。</span></>
               : sourceReviewDecision
               ? <><strong>你确认的是：已看过这份试片意见，愿意按当前方案继续。</strong><span>系统不会重新购买已生成试片；其它尚未生成的素材仍会先依据当前报价和授权处理。</span></>
               : visualReviewIncompleteDecision
@@ -1113,7 +1127,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               : contentDecisionNode
               ? <><strong>{contentDecisionUnaudited ? "你采用的是尚未取得独立审计结论的当前版本。" : contentDecisionHasSuggestions ? "你看过内容建议，决定保留建议并采用当前版本。" : "你采用的是当前已审计版本。"}</strong><span>本次决定会绑定当前文字版本；旧版建议不会自动写入当前稿。质量决定不会替代后续素材和费用确认。</span></>
               : voiceWithoutSubtitles
-              ? <><strong>本次配音已保存，但同步字幕尚未就绪。</strong><span>你可以选择无同步字幕的版本继续渲染，必要的画面说明仍保留。系统不会用逐镜旁白冒充同步字幕，也不会为补字幕自动重买配音。请先试听整段声音。</span></>
+              ? <><strong>本次{nativeAudio ? "原声" : "配音"}已保存，但同步字幕尚未就绪。</strong><span>你可以选择无同步字幕的版本继续渲染，必要的画面说明仍保留。{nativeAudio ? "系统不会用剧本台词猜测同步字幕，也不会为补字幕重新购买视频或配音。" : "系统不会用逐镜旁白冒充同步字幕，也不会为补字幕自动重买配音。"}请先试听整段声音。</span></>
               : boundaryGate
               ? <><strong>放行后这一步的结果就固定下来，制作按现在保存的设置继续往下走。</strong><span>想换模型、参数或输入，请先关掉这个窗口去配置；放行之后要改，就得让这一步连同下游重做。</span></>
               : <><strong>{reviewItems.length > 0
@@ -2046,9 +2060,13 @@ function timingToolNotice(summary: NarrationTimingToolSummary | undefined): stri
   return notices.length ? `（${notices.join(" · ")}）` : "";
 }
 
+function runStepLabel(run: StudioRunDetail, nodeId: string): string {
+  return nodeId === "voice" && run.audioMode === "native_av" ? "原声试听" : runNodeLabel(nodeId);
+}
+
 function CurrentDecisionBar({ run }: { run: StudioRunDetail }) {  const intervention = run.activeIntervention;
   if (!intervention) return null;
-  const nodeName = runNodeLabel(intervention.nodeId);
+  const nodeName = runStepLabel(run, intervention.nodeId);
   const incomplete = intervention.kind === "source_review_retry" && intervention.reviewStatus === "incomplete";
   const hardStop = intervention.kind === "source_review_retry" && intervention.reviewStatus === "unknown_or_unsafe";
   const state = incomplete ? "需要处理" : hardStop ? "需要处理" : "等你确认";
@@ -2061,6 +2079,7 @@ function CurrentDecisionBar({ run }: { run: StudioRunDetail }) {  const interven
     reviewStatus: intervention.reviewStatus,
     continuationScope: intervention.continuationScope,
     hasPublishPackageNode: run.nodes.some((node) => node.id === "publish-package"),
+    audioMode: run.audioMode,
   });
   return <section className={`current-decision-bar${hardStop ? " is-hard-stop" : incomplete ? " is-incomplete" : ""}`} aria-label="当前决定" role="status">
     <div className="current-decision-heading">
@@ -2138,6 +2157,7 @@ function activeNodeModel(run: StudioRunDetail, providers: StudioProvider[]): str
   const current = run.nodes.find((node) => node.id === run.currentAction?.nodeId)
     ?? run.nodes.find((node) => node.status === "running");
   if (!current) return undefined;
+  if (current.id === "voice" && run.audioMode === "native_av") return "原声准备 · 本地处理，不调用配音模型";
   const configuration = current.executionConfiguration;
   const selectedModelId = configuration?.modelSelections[configuration.providerId]?.trim();
   // 重建的执行计划可能仍带角色的默认模型；回执到达前只能展示本次选择，不能冒称实际执行。

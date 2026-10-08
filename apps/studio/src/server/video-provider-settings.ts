@@ -190,7 +190,7 @@ function reviewedWanProfiles(configuredModel: string): VideoModelRuntimeProfile[
       aspectRatios: ["9:16", "16:9"],
       minDurationSeconds: 2,
       maxDurationSeconds: 15,
-      supportsAudio: false,
+      supportsAudio: true,
     },
     {
       id: "wan3.0-video-prime",
@@ -221,6 +221,9 @@ function reviewedSeedanceProfiles(
       id: DEFAULT_SEEDANCE_MODEL_ID,
       label: "Seedance 2.5",
       estimatedCnyPerClip: estimate(DEFAULT_SEEDANCE_MODEL_ID),
+      // 无输入视频、24fps、9:16/16:9 的公开规格估价；实付以 completion_tokens 为准。
+      // 720p: 1280*720*24/1024 * 70/1e6；1080p 使用 77/1e6。
+      estimatedCnyPerSecondByResolution: { "480p": 0.672, "720p": 1.512, "1080p": 3.7422 },
       taskTypes: ["text-to-video"],
       resolutions: ["480p", "720p", "1080p"],
       aspectRatios: ["9:16", "16:9", "1:1", "3:4", "4:3"],

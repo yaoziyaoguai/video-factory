@@ -60,6 +60,87 @@ const summaryBrief: ProductionBrief = {
 };
 
 describe("GenerativeAssetWorkerClient", () => {
+  it("native AV preserves adopted dialogue and offscreen intent, freezes audio in the quote and reuses same-scene media", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-native-assets-"));
+    try {
+      const { script } = JSON.parse(await readFile(new URL("../../../tests/fixtures/character-drama-cases.json", import.meta.url), "utf8"));
+      script.scenes[0].character_ids = ["shopkeeper"];
+      script.scenes[0].dialogue[0].text = "预算只够一杯；费用怎么算？";
+      const scriptPath = path.join(root, "script.json");
+      const directorPath = path.join(root, "director.json");
+      const shots = script.scenes.map((s: Record<string, unknown>) => ({ scenePosition: s.position,
+        preferredProviderId: "wan-video-v1", alternativeProviderIds: [], deliveryType: "generated_video",
+        query: s.visual_prompt, generationPrompt: "黏土动画，店内交谈", subject: "黏土小店", characterIds: s.character_ids,
+        speakingTurnIds: (s.dialogue as { id: string }[]).map((t) => t.id) }));
+      await writeFile(scriptPath, JSON.stringify(script));
+      await writeFile(directorPath, JSON.stringify({ version: "video-factory/director-plan-v2", shots }));
+      const requests: import("../src/video-generation.js").VideoGenerationRequest[] = [];
+      const worker = new GenerativeAssetWorkerClient({ fallback: new LocalAssetWorker(),
+        adapters: [{ estimatedCnyPerClip: 2, defaultModelId: "wan3.0-video", modelPrices: { "wan3.0-video": 2 },
+          modelProfiles: { "wan3.0-video": { taskTypes: ["text-to-video"], resolutions: ["720P"], minDurationSeconds: 2,
+            maxDurationSeconds: 15, supportsAudio: true } }, adapter: { providerId: "wan-video-v1", generate: async (r) => {
+              requests.push(r); return { providerId: "wan-video-v1", taskId: `native-${requests.length}`, videoUrl: `https://example.com/${requests.length}.mp4` };
+            } } }], resolveHost: resolvePublicHost,
+        fetch: async () => new Response("unit-video", { headers: { "content-type": "video/mp4" } }) });
+      const request = (attempt: number) => {
+        const r = routedWorkerRequest(scriptPath, directorPath, path.join(root, `attempt-${attempt}`), 4, 20);
+        return { ...r, commandId: `native-${attempt}`, parameters: { ...(r.parameters as object), audioMode: "native_av",
+          nativeVideoProviderId: "wan-video-v1", modelSelections: { "wan-video-v1": "wan3.0-video" } } };
+      };
+      const first = request(1);
+      const quote = await worker.forecastPaidAssetSpend({ input: first.input as Record<string, unknown>, parameters: first.parameters, nodeDirectory: root });
+      assert.equal(quote?.createCostCny, 8);
+      assert.equal((await worker.run(first)).status, "succeeded");
+      assert.equal(requests.length, 4);
+      assert.ok(requests.every((r) => r.generateAudio === true));
+      assert.match(requests[0]!.prompt, /预算只够一杯；费用怎么算？/);
+      assert.match(requests[0]!.prompt, /场外/);
+      assert.match(requests[0]!.prompt, /黏土/);
+      assert.doesNotMatch(requests[0]!.prompt, /电影化写实/);
+      assert.equal((await worker.run(request(2))).status, "succeeded");
+      assert.equal(requests.length, 4);
+      // 改词只改变实际发言镜头；不允许视觉相同就自动沿用旧原声。
+      script.scenes[0].dialogue[0].text = "这杯我请。";
+      await writeFile(scriptPath, JSON.stringify(script));
+      const next = request(3);
+      assert.equal((await worker.forecastPaidAssetSpend({ input: next.input as Record<string, unknown>, parameters: next.parameters, nodeDirectory: root }))?.createCostCny, 2);
+      assert.equal((await worker.run(next)).status, "succeeded");
+      assert.equal(requests.length, 5);
+      script.scenes[0].dialogue[0].text = "预算只够一杯；费用怎么算？";
+      await writeFile(scriptPath, JSON.stringify(script));
+      assert.equal((await worker.forecastPaidAssetSpend({ input: first.input as Record<string, unknown>, parameters: first.parameters, nodeDirectory: root }))?.createCostCny, 0);
+      assert.equal((await worker.run(request(4))).status, "succeeded");
+      assert.equal(requests.length, 5, "A→B→A 可以复用已物化同请求原片，不能重新采购");
+      shots[1].reuseFromScenePosition = 1;
+      await writeFile(directorPath, JSON.stringify({ version: "video-factory/director-plan-v2", shots }));
+      await assert.rejects(() => worker.forecastPaidAssetSpend({ input: first.input as Record<string, unknown>, parameters: first.parameters, nodeDirectory: root }), /native|原生/);
+      await assert.rejects(() => worker.run(request(5)), /native|原生/);
+      assert.equal(requests.length, 5);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  for (const taskReturned of [false, true]) it(`native AV unknown with task=${taskReturned} never creates twice`, async (t) => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-native-unknown-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const scriptPath = path.join(root, "script.json"), directorPath = path.join(root, "director.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [{ position: 1, duration: 6, visual_strategy: "generated", visual_prompt: "安静的街角", narration: "今天，走慢一点。" }] }));
+    await writeFile(directorPath, JSON.stringify({ shots: [{ scenePosition: 1, preferredProviderId: "wan-video-v1", alternativeProviderIds: [],
+      deliveryType: "generated_video", query: "街角", generationPrompt: "安静的街角" }] }));
+    let creates = 0, observes = 0;
+    const subject = new GenerativeAssetWorkerClient({ fallback: new LocalAssetWorker(), adapters: [{ estimatedCnyPerClip: 2,
+      defaultModelId: "wan3.0-video", modelPrices: { "wan3.0-video": 2 },
+      adapter: { providerId: "wan-video-v1", generate: async (_input, progress) => {
+        creates++;
+        if (taskReturned) await progress?.({ providerId: "wan-video-v1", taskId: "native-accepted", status: "submitted" });
+        throw new Error("connection lost after possible acceptance");
+      }, reconcile: async (id) => { observes++; assert.equal(id, "native-accepted"); throw new Error("still observing original request"); } },
+    }] });
+    const original = routedWorkerRequest(scriptPath, directorPath, path.join(root, "attempt-1"), 1, 2);
+    const request = { ...original, parameters: { ...original.parameters as object, audioMode: "native_av", nativeVideoProviderId: "wan-video-v1", modelSelections: { "wan-video-v1": "wan3.0-video" } } };
+    assert.equal((await subject.run(request)).diagnostics?.providerOutcomeKnown, false);
+    assert.equal((await subject.run({ ...request, attempt: 2, outputDir: path.join(root, "attempt-2") })).diagnostics?.providerOutcomeKnown, false);
+    assert.equal(creates, 1);
+    assert.equal(observes, taskReturned ? 1 : 0);
+  });
   it("MC-A10/11 sends visible character appearances to the adapter and reuses unchanged requests", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-character-assets-"));
     try {

@@ -6,6 +6,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./native-audio": {
+      "types": "./dist/native-audio.d.ts",
+      "import": "./dist/native-audio.js"
+    },
     "./character-script": {
       "types": "./dist/character-script.d.ts",
       "import": "./dist/character-script.js"

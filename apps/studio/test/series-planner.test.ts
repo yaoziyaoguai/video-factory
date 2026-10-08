@@ -26,6 +26,17 @@ const series: SeriesRecord = {
 };
 
 describe("SeriesPlanner", () => {
+  it("unlocks the next episode after an internal master with no new canon facts", () => {
+    const planner = new SeriesPlanner();
+    const episodes = planner.planEpisodes(series, 3);
+    episodes[0]!.status = "ready";
+    episodes[0]!.runId = "run-approved";
+    episodes[0]!.lastObservedRun = { id: "run-approved", revision: 8 };
+    assert.equal(planner.plan({ ...series, episodes }, 3)[0]?.seriesSequence?.status, "ready");
+    episodes[0]!.status = "in_production";
+    assert.equal(planner.plan({ ...series, episodes }, 3)[0]?.seriesSequence?.status, "blocked");
+  });
+
   it("materializes an ordered episode roadmap before projecting candidates", () => {
     const planner = new SeriesPlanner({ now: () => new Date("2026-08-24T09:00:00.000Z") });
     const episodes = planner.planEpisodes(series, 4);

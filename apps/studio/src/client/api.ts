@@ -408,9 +408,9 @@ export const studioApi = {
     `/api/runs/${encodeURIComponent(runId)}/task-recovery/retrieve`,
     { method: "POST" },
   ),
-  retryFailedNode: (runId: string, nodeId: string) => requestJson<StudioRunDetail>(
+  retryFailedNode: (runId: string, nodeId: string, nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"]) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/retry`,
-    { method: "POST" },
+    { method: "POST", ...(nativeAudioRecovery ? { headers: { "content-type": "application/json" }, body: JSON.stringify(nativeAudioRecovery) } : {}) },
   ),
   paidOperation: (runId: string, nodeId: string) => requestJson<StudioPaidNodeSummary>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/paid-operation`,

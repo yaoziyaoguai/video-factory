@@ -298,9 +298,9 @@ describe("broker-owned task definitions", () => {
       [
         "video-factory/topic-editor-v12",
         "video-factory/series-showrunner-v3",
-        "video-factory/treatment-director-v7",
-        "video-factory/screenwriter-v19",
-        "video-factory/director-v29",
+        "video-factory/treatment-director-v8",
+        "video-factory/screenwriter-v20",
+        "video-factory/director-v30",
       ],
     );
     assert.deepEqual(
@@ -801,7 +801,7 @@ describe("broker-owned task definitions", () => {
 
   it("pins the creative-treatment prompt pack and enforces beat-reference semantics", () => {
     const prompt = taskPromptFor("creative-treatment");
-    assert.equal(prompt.version, "video-factory/treatment-director-v7");
+    assert.equal(prompt.version, "video-factory/treatment-director-v8");
     assert.match(prompt.directive, /不输出完整逐镜分镜.*不报价.*不声称画面或配音已完成/);
     assert.match(prompt.directive, /lockedViewerPromise.*保持其实际收益与事实边界/);
     assert.match(prompt.directive, /suppliedSourceIds 只能引用 suppliedSources 中的 id/);

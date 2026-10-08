@@ -12,6 +12,8 @@ import { StudioVoicePreviewUnavailableError } from "./local-capabilities.js";
 import type { ModelConnections } from "./model-connections.js";
 import {
   StudioInputError,
+  requiredObject,
+  requiredTrimmedString,
   STUDIO_PLANNING_EDITABLE_STAGES,
   type StudioPlanningEditableStage,
   type StudioProductionAmendmentInput,
@@ -212,7 +214,7 @@ export interface StudioServicePort {
   resumeStale(runId: string): Promise<StudioRunDetail>;
   queryOriginalTextTask(runId: string, target?: import("../shared/api.js").StudioOptionalReviewTarget): Promise<StudioRunDetail>;
   retrieveOriginalTextTask(runId: string): Promise<StudioRunDetail>;
-  retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail>;
+  retryFailedNode(runId: string, nodeId: string, nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"]): Promise<StudioRunDetail>;
   inspectPaidNode(runId: string, nodeId: string): Promise<StudioPaidNodeSummary>;
   reconcilePaidNode(runId: string, nodeId: string, input: StudioPaidReconciliationInput, actor: string): Promise<StudioRunDetail>;
   subscribe(runId: string, listener: (run: StudioRunDetail) => void): () => void;
@@ -965,7 +967,15 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   app.post<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/retry", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     requireSafeRouteId(request.params.nodeId, "节点编号");
-    return options.service.retryFailedNode(request.params.runId, request.params.nodeId);
+    let recovery: StudioRunDetail["nativeAudioRecovery"];
+    if (request.body !== undefined) {
+      const input = requiredObject(request.body, "原声恢复请求");
+      if (!Number.isSafeInteger(input.expectedRunRevision) || Number(input.expectedRunRevision) < 0) {
+        throw new StudioInputError("制作版本必须是非负整数。");
+      }
+      recovery = { expectedRunRevision: Number(input.expectedRunRevision), interventionId: requiredTrimmedString(input.interventionId, "原声准备停点") };
+    }
+    return options.service.retryFailedNode(request.params.runId, request.params.nodeId, recovery);
   });
 
   app.get<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/paid-operation", async (request) => {

@@ -8,6 +8,7 @@ import { CharacterScriptEditor, isCharacterDocument } from "./CharacterScriptEdi
 interface NodeStructuredEditorProps {
   nodeId: string;
   value: unknown;
+  nativeAudio?: boolean;
   assetProviderIds?: string[];
   assetProviders?: Array<Pick<StudioProvider, "id" | "label" | "deliveryTypes">>;
   onChange: (value: unknown) => void;
@@ -154,8 +155,8 @@ const ENUM_OPTIONS: Record<string, Array<{ value: string; label: string }>> = {
   resolvedProfileId: directorOptions(false),
 };
 
-export function NodeStructuredEditor({ nodeId, value, assetProviderIds = [], assetProviders = [], onChange }: NodeStructuredEditorProps) {
-  if (creatorViewId(nodeId) === "script" && isCharacterDocument(value)) return <CharacterScriptEditor value={value} onChange={onChange} />;
+export function NodeStructuredEditor({ nodeId, value, assetProviderIds = [], assetProviders = [], nativeAudio = false, onChange }: NodeStructuredEditorProps) {
+  if (creatorViewId(nodeId) === "script" && isCharacterDocument(value)) return <CharacterScriptEditor value={value} nativeAudio={nativeAudio} onChange={onChange} />;
   const record = asRecord(value);
   if (!record) return <p className="node-document-state">这个交付没有适合手工修改的内容。</p>;
   const entries = Object.entries(record).filter(([key, fieldValue]) => hasEditableValue(fieldValue) && isCreatorTopLevelField(nodeId, key, fieldValue));

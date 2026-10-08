@@ -10241,6 +10241,45 @@ describe("ProductionPipeline", () => {
     assert.deepEqual(switchedPlan?.items?.map((item) => item.id), ["scene-1", "scene-2"]);
     assert.deepEqual(switchedPlan?.items?.map((item) => item.modelId), ["seedance-v2", "seedance-v2"]);
     assert.equal(switchedPlan?.estimatedCostCny, 6.2);
+
+    // 同一型号的旧无声母片只通过了候选初筛，不能绕过原生声音请求身份的核验。
+    const nativeModel = "doubao-seedance-2-5-260628";
+    await writeFile(path.join(operationDirectory, `${createHash("sha256").update(operationId).digest("hex")}.json`), JSON.stringify({
+      version: "video-factory/paid-operation-v2", operationId, completed: true,
+      items: ledgerItems.map(item => ({ ...item, modelId: nativeModel })),
+    }));
+    let generated = 0;
+    previousScript.scenes.forEach(scene => { scene.duration = 10; });
+    class NativeQuoteScriptWorker extends GeneratedScriptWorker {
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const result = await super.run(request);
+        if (request.capability !== "script.draft") return result;
+        const scriptPath = String(result.output?.scriptPath);
+        const bytes = JSON.stringify(previousScript);
+        await writeFile(scriptPath, bytes);
+        result.artifacts[0] = { ...result.artifacts[0]!, kind: "script", schemaVersion: "video-factory/script-v1",
+          sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: Buffer.byteLength(bytes) };
+        return result;
+      }
+    }
+    const nativeWorker = new pipeline.GenerativeAssetWorkerClient({ runsRoot: path.join(workspaceRoot, "runs"),
+      fallback: new NativeQuoteScriptWorker(), adapters: [{ defaultModelId: nativeModel, estimatedCnyPerClip: 2.4,
+        modelPrices: { [nativeModel]: 2.4 }, adapter: { providerId: "seedance-video-v1",
+          generate: async () => { generated += 1; throw new Error("must wait for spending approval"); } } }] });
+    const nativeSubject = new pipeline.ProductionPipeline({ workspaceRoot, worker: nativeWorker,
+      directorAgent: { id: "api-visual-director-v1", plan: async () => directorPlan("旧版第二镜", 2.4) },
+      assetProviders: [meteredSeedanceProvider()],
+      providerRuntimeMetadata: [{ ...seedanceRuntimeMetadata(), modelId: nativeModel }] });
+    const { voiceDirection: _tts, ...nativeBase } = reworkBrief;
+    const nativeRun = await nativeSubject.start({ ...nativeBase, audioMode: "native_av",
+      durationSeconds: 20, durationRange: { minSeconds: 20, maxSeconds: 30 },
+      nativeVideoProviderId: "seedance-video-v1", models: { "seedance-video-v1": nativeModel },
+      providers: { ...nativeBase.providers, voice: "python-native-audio-v1" },
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true },
+      rework: { ...reworkBrief.rework!, sourceRunRevision: 2, affectedScenePositions: [] } });
+    assert.equal(nativeRun.status, "awaiting_spend_approval", JSON.stringify(nativeRun.nodeRuns.map(n => ({ node: n.nodeId, error: n.error }))));
+    assert.deepEqual(nativeRun.nodeRuns.find(n => n.nodeId === "assets")?.spendPlan?.items?.map(item => item.id), ["scene-1", "scene-2"]);
+    assert.equal(generated, 0, "本轮报价前不能购买带声音的新素材");
   });
 
   it("carries explicit incomplete acceptance through the real asset executor and the remaining quote", async () => {

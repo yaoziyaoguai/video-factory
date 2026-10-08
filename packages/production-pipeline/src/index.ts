@@ -1,5 +1,7 @@
 export { BRIEF_PROTOCOL_VERSION, WORKER_PROTOCOL_VERSION, parseBrief, parsePersistedBrief, parseProductionSeriesContext, parseVoiceDoesNotFitConflict } from "./contracts.js";
 export { parseModelConnectionInput } from "./model-connection.js";
+export { NATIVE_VIDEO_MODELS, NATIVE_AUDIO_PROVIDER, assertNativeVideoModel } from "./native-audio.js";
+export type { ProductionAudioMode } from "./native-audio.js";
 export { diagnosticEvent } from "./diagnostics.js";
 export { classifyReviewDisposition, dispositionAllowsHumanStop } from "./review-disposition.js";
 export { summarizeModelExecutionFacts } from "./model-execution-facts.js";
@@ -324,7 +326,7 @@ export type {
   WorkerArtifactDescriptor,
   WorkerResponse,
 } from "./python-worker-client.js";
-export { advanceSceneCandidateRanking, canRetryRejectedReviewNode, effectiveProductionBrief, independentCreativeConsultationActions, HumanDecisionConflictError, PaidOperationManualReconciliationError, planningFailureForCreators, ProductionPipeline, productionWorkflowVersion, summarizeReworkImpact, withBoundaryGate } from "./production-pipeline.js";
+export { advanceSceneCandidateRanking, canRetryRejectedReviewNode, canRetryNativeAudioNode, type ProductionNodeRetryOptions, effectiveProductionBrief, independentCreativeConsultationActions, HumanDecisionConflictError, PaidOperationManualReconciliationError, planningFailureForCreators, ProductionPipeline, productionWorkflowVersion, summarizeReworkImpact, withBoundaryGate } from "./production-pipeline.js";
 export {
   PRODUCTION_AUTHORIZATION_VERSION,
   canonicalProductionAssetIntentDigest,

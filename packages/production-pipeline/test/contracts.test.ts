@@ -473,7 +473,7 @@ describe("ProductionBrief", () => {
     });
 
     assert.equal(brief.providers.voice, "minimax-tts-v1");
-    assert.equal(brief.voiceDirection.profileId, "minimax:female-chengshu");
+    assert.equal(brief.voiceDirection?.profileId, "minimax:female-chengshu");
   });
 
   it("normalizes legacy video-wide limits because every paid action is quoted separately", () => {

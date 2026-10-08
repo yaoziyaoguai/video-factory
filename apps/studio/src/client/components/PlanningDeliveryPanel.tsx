@@ -53,6 +53,7 @@ interface PlanningDeliveryPanelProps {
   publicationExpected: boolean;
   creativeReview?: unknown;
   stale?: boolean;
+  nativeAudio?: boolean;
 }
 
 // 阶段稿来自当前有效输出，不能按历史产物的时间顺序猜当前稿。
@@ -67,8 +68,8 @@ function preservedStageDraft(review: unknown, kind: string, stale: boolean) {
   return { document: state!.currentDocument, status: stale ? "待更新" : adopted ? "已采用" : "待确认" };
 }
 
-export function PlanningDeliveryPanel({ runId, versionId, artifactIds, artifacts, publicationExpected, creativeReview, stale = false }: PlanningDeliveryPanelProps) {
-  const current = DELIVERIES.map((entry) => ({
+export function PlanningDeliveryPanel({ runId, versionId, artifactIds, artifacts, publicationExpected, creativeReview, stale = false, nativeAudio = false }: PlanningDeliveryPanelProps) {
+  const current = DELIVERIES.filter((entry) => !nativeAudio || !["asset_candidates", "asset_ranking"].includes(entry.kind)).map((entry) => ({
     ...entry,
     artifact: artifacts.find((artifact) => artifactIds.includes(artifact.id) && artifact.kind === entry.kind),
     draft: preservedStageDraft(creativeReview, entry.kind, stale),
@@ -112,11 +113,11 @@ export function PlanningDeliveryPanel({ runId, versionId, artifactIds, artifacts
     </div>
     <div className="planning-delivery-document" aria-live="polite">
       <header><strong>{selected.label}</strong><small>{stale ? "上次保存版本 · 待更新 · 只读" : selected.artifact ? "当前正式版本 · 只读" : selected.draft ? `当前阶段稿 · ${selected.draft.status} · 只读` : "尚未生成"}</small></header>
-      {!selected.artifact && selected.draft ? <PlanningPreview kind={selected.kind} value={selected.draft.document} />
+      {!selected.artifact && selected.draft ? <PlanningPreview kind={selected.kind} value={selected.draft.document} nativeAudio={nativeAudio} />
         : reading?.identity !== identity || reading.status === "loading" ? <p>正在读取当前交付…</p>
         : reading.status === "unavailable" ? <p>这一项尚未产出，其他已交付内容仍可查看。</p>
           : reading.status === "invalid" ? <p role="alert">交付已登记，但正文暂时无法核验或读取。已保留现有成果，请查看制作记录；不要为此重新规划。</p>
-            : <PlanningPreview kind={selected.kind} value={reading.document} />}
+            : <PlanningPreview kind={selected.kind} value={reading.document} nativeAudio={nativeAudio} />}
       {selected.artifact ? <details className="planning-document-records"><summary>查看产物登记信息</summary>
         <dl className="planning-document-fields"><div><dt>登记编号</dt><dd>{selected.artifact.id}</dd></div>
           <div><dt>内容校验值</dt><dd>{selected.artifact.sha256 ?? "未登记"}</dd></div></dl>
@@ -125,9 +126,9 @@ export function PlanningDeliveryPanel({ runId, versionId, artifactIds, artifacts
   </section>;
 }
 
-function PlanningPreview({ kind, value }: { kind: string; value: unknown }) {
+function PlanningPreview({ kind, value, nativeAudio = false }: { kind: string; value: unknown; nativeAudio?: boolean }) {
   return PREVIEW_NODE_IDS[kind]
-    ? <><NodeDeliveryPreview nodeId={PREVIEW_NODE_IDS[kind]!} value={value} />
+    ? <><NodeDeliveryPreview nodeId={PREVIEW_NODE_IDS[kind]!} value={value} nativeAudio={nativeAudio} />
       <details className="planning-delivery-complete"><summary>查看完整业务内容</summary><PlanningDocument value={value} /></details></>
     : <PlanningDocument value={value} />;
 }

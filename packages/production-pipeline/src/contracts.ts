@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { REQUIRED_CODEX_TASK_CONTRACT_DIGESTS } from "./codex-chat.js";
 import type { DurationRange } from "./executable-timeline.js";
+import { assertNativeVideoModel, NATIVE_AUDIO_PROVIDER, type ProductionAudioMode } from "./native-audio.js";
 
 export const BRIEF_PROTOCOL_VERSION = "video-factory/brief-v1" as const;
 export const WORKER_PROTOCOL_VERSION = "video-factory/worker-v1" as const;
@@ -362,6 +363,8 @@ export interface ProductionSeriesContext {
 export interface ProductionBrief {
   protocolVersion: typeof BRIEF_PROTOCOL_VERSION;
   presentationMode?: "narration" | "character_drama";
+  audioMode?: ProductionAudioMode;
+  nativeVideoProviderId?: string;
   title: string;
   angle: string;
   audience: string;
@@ -384,7 +387,7 @@ export interface ProductionBrief {
   economics: ProductionEconomics;
   budgetIntentionCny?: number;
   spendFeedback?: ProductionSpendFeedback[];
-  voiceDirection: ProductionVoiceDirection;
+  voiceDirection?: ProductionVoiceDirection;
   editorial?: ProductionEditorialDirection;
   visualProof?: string;
   visualIntent?: string;
@@ -408,10 +411,17 @@ const PRODUCTION_BRIEF_INPUT_KEYS = new Set([
   "platform", "reviewMode", "runPurpose", "visualReviewPolicy", "providers", "models", "modelSelectionSources", "frozenModelSelections", "workflowFeatures",
   "referenceVideo", "director", "economics", "spendFeedback", "voiceDirection", "editorial", "visualProof",
   "visualIntent", "visualPlan", "visualPlanAdopted", "seriesContext", "creationContext", "rework", "taskContractDigests",
-  "articleSources", "budgetIntentionCny", "presentationMode",
+  "articleSources", "budgetIntentionCny", "presentationMode", "audioMode", "nativeVideoProviderId",
   // 模板字段只为旧调用方提供明确的弃用剥离；它们不会进入有效 brief。
   "template", "templateSnapshot",
 ]);
+
+export function requireTtsVoiceDirection(brief: ProductionBrief): ProductionVoiceDirection {
+  if (brief.audioMode === "native_av" || !brief.voiceDirection) {
+    throw new Error("原生音画不使用独立配音设置；请查看原声或通过返工切换声音模式。");
+  }
+  return brief.voiceDirection;
+}
 
 export function parseBrief(value: unknown): ProductionBrief {
   if (!isRecord(value)) {
@@ -427,6 +437,11 @@ export function parseBrief(value: unknown): ProductionBrief {
   if (value.presentationMode !== undefined && value.presentationMode !== "narration" && value.presentationMode !== "character_drama") {
     throw new Error("presentationMode must be narration or character_drama.");
   }
+  if (value.audioMode !== undefined && value.audioMode !== "tts" && value.audioMode !== "native_av") {
+    throw new Error("audioMode must be tts or native_av.");
+  }
+  const native = value.audioMode === "native_av";
+  if (!native && value.nativeVideoProviderId !== undefined) throw new Error("nativeVideoProviderId requires native_av.");
 
   const providers = requireRecord(value.providers, "providers");
   const models = parseModelSelections(value.models);
@@ -439,7 +454,18 @@ export function parseBrief(value: unknown): ProductionBrief {
   const budgetIntentionCny = value.budgetIntentionCny === undefined ? undefined
     : boundedNumber(value.budgetIntentionCny, "budgetIntentionCny", 0, 100_000, false);
   const spendFeedback = parseSpendFeedback(value.spendFeedback);
-  const voiceDirection = parseVoiceDirection(value.voiceDirection);
+  if (native && (value.voiceDirection !== undefined || providers.voice !== undefined && providers.voice !== NATIVE_AUDIO_PROVIDER)) {
+    throw new Error("native_av does not accept TTS voiceDirection or a TTS provider.");
+  }
+  const voiceDirection = native ? undefined : parseVoiceDirection(value.voiceDirection);
+  const nativeVideoProviderId = native ? requireString(value.nativeVideoProviderId, "nativeVideoProviderId") : undefined;
+  if (nativeVideoProviderId) {
+    assertNativeVideoModel(nativeVideoProviderId, models[nativeVideoProviderId]);
+    if (!workflowFeatures.executablePlan || !director || director.assetProviderIds.length !== 1
+      || director.assetProviderIds[0] !== nativeVideoProviderId || providers.assets !== "ai-shot-router-v1") {
+      throw new Error("native_av requires an executable plan and exactly one selected video provider through ai-shot-router-v1.");
+    }
+  }
   const editorial = parseEditorialDirection(value.editorial);
   const visualProof = value.visualProof === undefined ? undefined : requireString(value.visualProof, "visualProof");
   const visualIntent = value.visualIntent === undefined ? undefined : optionalBoundedText(value.visualIntent, "visualIntent", 1000);
@@ -472,9 +498,9 @@ export function parseBrief(value: unknown): ProductionBrief {
   if (workflowFeatures.referenceGrammar && (!director || !referenceVideo)) {
     throw new Error("workflowFeatures.referenceGrammar requires a reference video and AI director configuration.");
   }
-  const voiceProvider = requireString(providers.voice, "providers.voice");
-  const expectedVoiceProvider = voiceProviderForProfile(voiceDirection.profileId);
-  if (voiceProvider !== expectedVoiceProvider) {
+  const voiceProvider = native ? NATIVE_AUDIO_PROVIDER : requireString(providers.voice, "providers.voice");
+  const expectedVoiceProvider = voiceDirection ? voiceProviderForProfile(voiceDirection.profileId) : NATIVE_AUDIO_PROVIDER;
+  if (voiceDirection && voiceProvider !== expectedVoiceProvider) {
     throw new Error(
       `voiceDirection.profileId '${voiceDirection.profileId}' must use providers.voice '${expectedVoiceProvider}'.`,
     );
@@ -499,6 +525,8 @@ export function parseBrief(value: unknown): ProductionBrief {
   return {
     protocolVersion: BRIEF_PROTOCOL_VERSION,
     ...(value.presentationMode !== undefined ? { presentationMode: value.presentationMode } : {}),
+    ...(value.audioMode !== undefined ? { audioMode: value.audioMode } : {}),
+    ...(nativeVideoProviderId ? { nativeVideoProviderId } : {}),
     title: requireString(value.title, "title"),
     angle: requireString(value.angle, "angle"),
     audience: requireString(value.audience, "audience"),
@@ -534,7 +562,7 @@ export function parseBrief(value: unknown): ProductionBrief {
     economics,
     ...(budgetIntentionCny !== undefined ? { budgetIntentionCny } : {}),
     ...(spendFeedback.length ? { spendFeedback } : {}),
-    voiceDirection,
+    ...(voiceDirection ? { voiceDirection } : {}),
     ...(editorial ? { editorial } : {}),
     ...(visualProof ? { visualProof } : {}),
     ...(visualIntent ? { visualIntent } : {}),

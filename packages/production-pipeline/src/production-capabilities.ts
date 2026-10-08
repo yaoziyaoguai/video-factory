@@ -1,4 +1,5 @@
 import type { VideoAspectRatio } from "./video-generation.js";
+import { NATIVE_AUDIO_PROVIDER } from "./native-audio.js";
 
 export interface ProductionCapabilityAssetProvider {
   id: string;
@@ -19,6 +20,8 @@ export interface ProductionCapabilities {
     staticEditorialCard: boolean;
   };
   audio: {
+    /** 仅显式原生模式声明；旧输入缺失不推断启用。 */
+    nativeAv?: boolean;
     narration: boolean;
     pauseControl: "punctuation" | "text_hint" | "unsupported";
     /**
@@ -41,27 +44,29 @@ export function summarizeProductionCapabilities(
   >,
   voiceProviderId?: string,
 ): ProductionCapabilities {
+  const native = voiceProviderId === NATIVE_AUDIO_PROVIDER;
   return {
     assetProviders: providers.map((provider) => ({
       id: provider.id,
       deliveryTypes: [...provider.deliveryTypes],
-      supportsReferenceImage: provider.supportsReferenceImage ?? false,
+      supportsReferenceImage: !native && (provider.supportsReferenceImage ?? false),
       strengths: [...provider.strengths],
-      constraints: [...provider.constraints],
+      constraints: [...provider.constraints, ...(native ? ["原生音画：整片固定本型号，每镜独立生成有声视频；不混图库、图片、跨镜复用或独立TTS；无同步字幕保证。"] : [])],
       ...(provider.selectedModelId ? { selectedModelId: provider.selectedModelId } : {}),
       ...(provider.minDurationSeconds !== undefined ? { minDurationSeconds: provider.minDurationSeconds } : {}),
       ...(provider.maxDurationSeconds !== undefined ? { maxDurationSeconds: provider.maxDurationSeconds } : {}),
       ...(provider.aspectRatios ? { aspectRatios: [...provider.aspectRatios] } : {}),
     })),
     editing: {
-      sourceRangeReuse: true,
-      staticEditorialCard: providers.some((provider) => provider.deliveryTypes.includes("editorial_card")),
+      sourceRangeReuse: !native,
+      staticEditorialCard: !native && providers.some((provider) => provider.deliveryTypes.includes("editorial_card")),
     },
     audio: {
-      narration: Boolean(voiceProviderId),
+      ...(native ? { nativeAv: true } : {}),
+      narration: !native && Boolean(voiceProviderId),
       pauseControl: voiceProviderId === "macos-say-v1"
         ? "punctuation"
-        : voiceProviderId === "minimax-tts-v1" ? "text_hint" : "unsupported",
+        : native || voiceProviderId === "minimax-tts-v1" ? "text_hint" : "unsupported",
       // 只有已接线的连续组 worker 链路才声明该能力；其它 provider 保持 false，不由 narration 推断。
       continuousNarrationGroups: voiceProviderId === "minimax-tts-v1",
       musicTrack: false,

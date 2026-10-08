@@ -34,7 +34,7 @@ function draftSegments(stage: CreativeStage, value: Record<string, unknown>) {
   return { field, segments };
 }
 
-export function CreativeDraftReader({ stage, value }: { stage: CreativeStage; value: unknown }) {
+export function CreativeDraftReader({ stage, value, nativeAudio = false }: { stage: CreativeStage; value: unknown; nativeAudio?: boolean }) {
   const [selectedId, setSelectedId] = useState<string>();
   const [showWholeDraft, setShowWholeDraft] = useState(false);
   const structured = isRecord(value) ? draftSegments(stage, value) : undefined;
@@ -93,9 +93,9 @@ export function CreativeDraftReader({ stage, value }: { stage: CreativeStage; va
     };
   }, [selected?.key, showWholeDraft]);
   useEffect(() => () => indicatorAnimationRef.current?.cancel(), []);
-  if (!structured || !isRecord(value)) return <CreativeDraft stage={stage} value={value} />;
+  if (!structured || !isRecord(value)) return <CreativeDraft stage={stage} value={value} nativeAudio={nativeAudio} />;
   const { field, segments } = structured;
-  if (!selected) return <CreativeDraft stage={stage} value={value} />;
+  if (!selected) return <CreativeDraft stage={stage} value={value} nativeAudio={nativeAudio} />;
   return <section className="creative-draft-reader" aria-label="稿件阅读">
     <div className="creative-reader-toolbar"><span>{segments.length} {stage === "director" ? "镜头" : "段"}</span>
       <button type="button" className="button button-ghost" onClick={() => setShowWholeDraft((current) => !current)}>{showWholeDraft ? "返回分段阅读" : "查看整篇"}</button>
@@ -105,12 +105,12 @@ export function CreativeDraftReader({ stage, value }: { stage: CreativeStage; va
       aria-current={segment.key === selected.key ? "true" : undefined} onClick={() => setSelectedId(segment.key)}>
       <span className="creative-segment-number">{String(index + 1).padStart(2, "0")}</span><span className="creative-segment-title">{segment.label}</span>
     </button>)}</nav> : null}
-    <div className="creative-reader-content" aria-live="polite"><CreativeDraft stage={stage} value={showWholeDraft ? value : { ...value, [field]: [selected.item] }} /></div>
+    <div className="creative-reader-content" aria-live="polite"><CreativeDraft stage={stage} value={showWholeDraft ? value : { ...value, [field]: [selected.item] }} nativeAudio={nativeAudio} /></div>
   </section>;
 }
 
-export function CreativeDraft({ stage, value }: { stage: CreativeStage; value: unknown }) {
-  if (stage === "script" && isCharacterDocument(value)) return <CharacterScriptReader value={value} />;
+export function CreativeDraft({ stage, value, nativeAudio = false }: { stage: CreativeStage; value: unknown; nativeAudio?: boolean }) {
+  if (stage === "script" && isCharacterDocument(value)) return <CharacterScriptReader value={value} nativeAudio={nativeAudio} />;
   if (!isRecord(value)) return <p>当前方案暂时无法读取，请刷新后重试。</p>;
   if (stage === "treatment") return <div className="creative-readable-draft">
     <DraftField label="观众看完能得到什么" value={value.viewerPromise} />

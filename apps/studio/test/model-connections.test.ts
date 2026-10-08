@@ -8,6 +8,7 @@ import { codexExecutorProfileFor } from "../../codex-broker/src/codex-executor.j
 import { ModelConnections } from "../src/server/model-connections.js";
 import { includeRegisteredModels } from "../src/server/registered-model-catalog.js";
 import { buildRoleAgentAssembly } from "../src/server/role-agent-assembly.js";
+import { CapabilityStudio } from "../src/server/capability-studio.js";
 
 test("Studio management reaches the broker registry and refreshes the real selectable role catalog", async () => {
   const directory = await mkdtemp("/tmp/vf-model-api-");
@@ -43,4 +44,37 @@ test("Studio management reaches the broker registry and refreshes the real selec
     assert.equal(changes, 4);
     assert.equal(executions, 0);
   } finally { await server.close(); await registry.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a registered director makes the shot router available without a legacy default broker", async () => {
+  const capabilities = new CapabilityStudio({
+    repositoryRoot: process.cwd(), workspaceRoot: "/unused-model-catalog", environment: {},
+    commandAvailable: async () => true,
+    codexAvailability: { available: false, reason: "not configured", taskKinds: [] },
+    deepseekCodexAvailability: { available: false, reason: "not configured", taskKinds: [] },
+    registeredModels: () => [{ id: "m-0123456789ab", enabled: true, socketName: "m-0123456789ab.sock",
+      label: "Registered director", protocol: "openai-chat-completions", baseUrl: "https://example.com/v1",
+      modelId: "test-model", capabilities: ["text", "image"], maxOutputTokens: 4096, credentialConfigured: true }],
+  });
+  const catalog = await capabilities.listProviders();
+  assert.equal(catalog.find(provider => provider.id === "api-visual-director-v1")?.available, true);
+  assert.equal(catalog.find(provider => provider.id === "ai-shot-router-v1")?.available, true,
+    "a usable director must not be rejected solely because the old broker is absent");
+});
+
+test("shot routing still requires Python and an enabled text-capable director", async () => {
+  for (const scenario of ["no-python", "disabled", "image-only", "no-connection"] as const) {
+    const capabilities = new CapabilityStudio({
+      repositoryRoot: process.cwd(), workspaceRoot: "/unused-model-catalog", environment: {},
+      commandAvailable: async command => scenario !== "no-python" || command !== "python3",
+      codexAvailability: { available: false, reason: "not configured", taskKinds: [] },
+      deepseekCodexAvailability: { available: false, reason: "not configured", taskKinds: [] },
+      registeredModels: () => scenario === "no-connection" ? [] : [{ id: "m-0123456789ab", enabled: scenario !== "disabled",
+        socketName: "m-0123456789ab.sock", label: "Registered model", protocol: "openai-chat-completions",
+        baseUrl: "https://example.com/v1", modelId: "test-model", capabilities: scenario === "image-only" ? ["image"] : ["text", "image"],
+        maxOutputTokens: 4096, credentialConfigured: true }],
+    });
+    const catalog = await capabilities.listProviders();
+    assert.equal(catalog.find(provider => provider.id === "ai-shot-router-v1")?.available, false, scenario);
+  }
 });

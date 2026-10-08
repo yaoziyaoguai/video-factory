@@ -320,6 +320,7 @@ export interface ProductionCapabilitiesPayload {
     staticEditorialCard: boolean;
   };
   audio: {
+    nativeAv?: boolean;
     narration: boolean;
     pauseControl: "punctuation" | "text_hint" | "unsupported";
     /** T08：可选能力声明；旧持久化输入缺失时为“未声明支持”，不推断已启用。 */
@@ -2578,7 +2579,14 @@ export function requireProductionCapabilities(value: unknown, field: string): Pr
   const audio = requireRecord(record.audio, `${field}.audio`);
   // T08：continuousNarrationGroups 为可选布尔——缺失（旧持久化输入）消费为未声明支持；
   // 出现时必须是布尔；其余未知键仍被精确键校验拒绝。
-  assertExactKeys(audio, ["narration", "pauseControl", "continuousNarrationGroups", "musicTrack", "soundEffectsTrack"], `${field}.audio`);
+  assertExactKeys(audio, ["nativeAv", "narration", "pauseControl", "continuousNarrationGroups", "musicTrack", "soundEffectsTrack"], `${field}.audio`);
+  if (audio.nativeAv !== undefined && typeof audio.nativeAv !== "boolean") {
+    throw new CodexExecutorError(`${field}.audio.nativeAv must be a boolean.`, false);
+  }
+  if (audio.nativeAv === true && (audio.narration !== false || audio.continuousNarrationGroups !== false
+    || editing.sourceRangeReuse !== false || editing.staticEditorialCard !== false)) {
+    throw new CodexExecutorError(`${field}.audio.nativeAv cannot enable TTS or mixed/cross-shot editing.`, false);
+  }
   if (audio.continuousNarrationGroups !== undefined && typeof audio.continuousNarrationGroups !== "boolean") {
     throw new CodexExecutorError(`${field}.audio.continuousNarrationGroups must be a boolean.`, false);
   }
@@ -2593,6 +2601,7 @@ export function requireProductionCapabilities(value: unknown, field: string): Pr
       staticEditorialCard: editing.staticEditorialCard,
     },
     audio: {
+      ...(audio.nativeAv !== undefined ? { nativeAv: audio.nativeAv } : {}),
       narration: audio.narration,
       pauseControl: audio.pauseControl,
       ...(audio.continuousNarrationGroups !== undefined ? { continuousNarrationGroups: audio.continuousNarrationGroups } : {}),

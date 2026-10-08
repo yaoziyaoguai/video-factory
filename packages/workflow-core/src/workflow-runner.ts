@@ -1243,6 +1243,7 @@ export class WorkflowRunner {
       allowRejectedNode?: boolean;
       allowSourceReviewRetry?: boolean;
       allowSourceReviewDecision?: boolean;
+      allowLocalPreparationRetry?: boolean;
     } = {},
   ): Promise<WorkflowRun<TInitialInput>> {
     validateWorkflowDefinition(definition);
@@ -1259,14 +1260,22 @@ export class WorkflowRunner {
     const reviewDecisionPause = options.allowSourceReviewDecision === true
       && previousRun.status === "needs_human"
       && previousRun.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId)?.intervention?.kind === "source_review_decision";
-    if (previousRun.status !== "failed" && !retryingRejectedNode && !reviewRetryPause && !reviewDecisionPause) {
+    // 本地媒体准备失败不等同于已完成待采用；仅专用停点允许重跑，不能借此放行普通人审。
+    const localNode = previousRun.nodeRuns.find(node => node.nodeId === nodeId);
+    const localPreparationPause = options.allowLocalPreparationRetry === true
+      && previousRun.status === "needs_human" && localNode?.status === "needs_human"
+      && localNode.intervention?.kind === "local_preparation_retry"
+      && localNode.executionReceipt?.transport === "local_process"
+      && localNode.executionReceipt.billing === "local_compute";
+    if (previousRun.status !== "failed" && !retryingRejectedNode && !reviewRetryPause && !reviewDecisionPause && !localPreparationPause) {
       throw new Error(`Run '${previousRun.id}' is not failed.`);
     }
     const failedNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId);
     const retryableNodeStatus = failedNode?.status === "failed"
       || retryingRejectedNode && failedNode?.status === "rejected"
       || reviewRetryPause
-      || reviewDecisionPause;
+      || reviewDecisionPause
+      || localPreparationPause;
     if (!failedNode || !retryableNodeStatus || !definition.nodes.some((node) => node.id === nodeId)) {
       throw new Error(`Node '${nodeId}' is not the failed node.`);
     }

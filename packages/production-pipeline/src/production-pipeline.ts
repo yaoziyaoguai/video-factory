@@ -90,7 +90,8 @@ import {
 import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.js";
 import { PlanContractError } from "./executable-timeline.js";
 import { assertCurrentVisualReviewContract, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport, visualReviewBlocksContinuation, type IndependentVisualReviewExecution, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewFinding, type VisualReviewReport, type VisualReviewScope } from "./codex-visual-review.js";
-import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, parseVoiceDoesNotFitConflict, WORKER_PROTOCOL_VERSION, type ProductionBrief, type ProductionReworkFinding } from "./contracts.js";
+import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, parseVoiceDoesNotFitConflict, requireTtsVoiceDirection, WORKER_PROTOCOL_VERSION, type ProductionBrief, type ProductionReworkFinding } from "./contracts.js";
+import { NATIVE_AUDIO_PROVIDER } from "./native-audio.js";
 import { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
 import { parseSourceReviewOutcome, type WorkerResponse } from "./python-worker-client.js";
 import {
@@ -829,6 +830,24 @@ export function canRetryRejectedReviewNode(
   return recommendation === "revise" || recommendation === "reject";
 }
 
+export interface ProductionNodeRetryOptions {
+  recoverOriginalTextTask?: boolean;
+  resumeCompletedTextTask?: boolean;
+  resumeCompletedTextTaskRequestId?: string;
+  nativeAudioRecovery?: { expectedRunRevision: number; interventionId: string };
+}
+
+/** 只重做当前原声准备，不使已批准的素材失效，也不放行普通试听停点。 */
+export function canRetryNativeAudioNode(run: WorkflowRun<ProductionBrief>, nodeId: string): boolean {
+  if (run.initialInput.audioMode !== "native_av" || nodeId !== "voice" || run.status !== "needs_human"
+    || run.nodeRuns.some(node => node.status === "running")) return false;
+  const node = run.nodeRuns.find(item => item.nodeId === nodeId);
+  return node?.status === "needs_human" && !node.outcomeUncertain && node.intervention?.kind === "local_preparation_retry"
+    && node.executionReceipt?.providerId === NATIVE_AUDIO_PROVIDER
+    && node.executionReceipt.transport === "local_process" && node.executionReceipt.billing === "local_compute"
+    && isObjectRecord(node.output) && node.output.audioMode === "native_av" && typeof node.output.nativeAudioIssue === "string";
+}
+
 const INTERRUPTED_RUN_ERROR = "应用重启中断了这次制作，请重新发起制作。已完成的产物仍保留在本次记录中。";
 const DEFAULT_EXECUTION_LEASE_HEARTBEAT_MS = 5_000;
 const DEFAULT_EXECUTION_LEASE_STALE_MS = 30_000;
@@ -1548,6 +1567,7 @@ export class ProductionPipeline {
         return runner.rerunFromNode(evidenceRefresh, withExecutableBrief(previous, brief), "final-review");
       }
       if (decision.action === "approve"
+        && brief.audioMode !== "native_av"
         && activeInterventionNode.nodeId === (brief.providers.visualReview ? "asset-source-review" : "assets")
         && (brief.presentationMode === "character_drama"
           || previous.artifacts.some((artifact) => artifact.kind === "narration_plan" && artifact.provenance?.providerId === "creator-narration-plan-v1"))) {
@@ -3082,6 +3102,7 @@ export class ProductionPipeline {
     }
     const brief = parsePersistedBrief(run.initialInput);
     if (brief.providers.voice !== "minimax-tts-v1") throw new HumanDecisionConflictError("连贯旁白当前支持 MiniMax 系统音色，请先选择对应的配音服务。");
+    const voiceDirection = requireTtsVoiceDirection(brief);
     const outputs = new Map(run.nodeRuns.map((node) => [node.nodeId, effectiveNodeOutput(node)]));
     const planning = currentPlanningOutputPaths({ outputs }, brief);
     if (!planning.executablePlanPath) throw new HumanDecisionConflictError("正式画面方案尚未准备好，请先完成创作规划。");
@@ -3136,11 +3157,11 @@ export class ProductionPipeline {
       visualArtifact: { id: visualArtifact.id, sha256: visualArtifact.sha256, outputVersionId: visualOutputVersionId },
       parentArtifactIds,
       upstreamVersionIds,
-      voiceInput: { ...planning, voice: brief.voiceDirection.profileId.split(":").slice(1).join(":"),
+      voiceInput: { ...planning, voice: voiceDirection.profileId.split(":").slice(1).join(":"),
         ...(characterScript ? { baseVoiceInputVersionId: isObjectRecord(effectiveVoiceInput)
           && "baseVoiceInputVersionId" in effectiveVoiceInput ? effectiveVoiceInput.baseVoiceInputVersionId
           : voice?.inputState?.effectiveVersionId ?? null } : {}),
-        rate: brief.voiceDirection.rate, pause_scale: brief.voiceDirection.pauseScale, mastering_preset: brief.voiceDirection.masteringPreset,
+        rate: voiceDirection.rate, pause_scale: voiceDirection.pauseScale, mastering_preset: voiceDirection.masteringPreset,
         scriptArtifactId: scriptArtifact.id, scriptOutputVersionId,
         visualArtifactId: visualArtifact.id, visualOutputVersionId,
         parentArtifactIds, upstreamVersionIds },
@@ -4406,6 +4427,9 @@ export class ProductionPipeline {
     draft: ProductionNarrationRevisionDraft,
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun> {
+    if (parsePersistedBrief((await this.store.load<ProductionBrief>(runId)).initialInput).audioMode === "native_av") {
+      throw new HumanDecisionConflictError("视频原声不支持独立TTS改词、排轨或字幕恢复，请返回规划或关联返工。");
+    }
     if (draft.action === "relayout_narration") {
       const parsed = parseNarrationRelayoutRequest(draft);
       return this.dispatchNarrationRelayout(runId, { ...parsed, actor: draft.actor.trim() }, listener);
@@ -5556,7 +5580,7 @@ export class ProductionPipeline {
   async retryFailedNode(
     runId: string,
     nodeId: string,
-    options?: { recoverOriginalTextTask?: boolean; resumeCompletedTextTask?: boolean; resumeCompletedTextTaskRequestId?: string },
+    options?: ProductionNodeRetryOptions,
   ): Promise<WorkflowRun<ProductionBrief>> {
     const dispatched = await this.dispatchRetryFailedNode(runId, nodeId, undefined, options);
     return dispatched.completion;
@@ -6695,7 +6719,7 @@ export class ProductionPipeline {
     runId: string,
     nodeId: string,
     listener?: ProductionRunListener,
-    options?: { recoverOriginalTextTask?: boolean; resumeCompletedTextTask?: boolean; resumeCompletedTextTaskRequestId?: string },
+    options?: ProductionNodeRetryOptions,
   ): Promise<DispatchedProductionRun> {
     const observed = await this.store.load<ProductionBrief>(runId);
     const failedReview = observed.nodeRuns.find(node => node.nodeId === nodeId);
@@ -6727,6 +6751,14 @@ export class ProductionPipeline {
     }
     const dispatched = await this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
       const retryRejectedReview = canRetryRejectedReviewNode(previous, nodeId);
+      const retryNativeAudio = canRetryNativeAudioNode(previous, nodeId);
+      if (options?.nativeAudioRecovery || retryNativeAudio) {
+        const target = options?.nativeAudioRecovery;
+        if (!retryNativeAudio || !target || target.expectedRunRevision !== previous.revision
+          || target.interventionId !== previous.nodeRuns.find(node => node.nodeId === nodeId)?.intervention?.id) {
+          throw new HumanDecisionConflictError("原声准备停点已变化，请刷新后再试。");
+        }
+      }
       const brief = parsePersistedBrief(previous.initialInput);
       const recoveryWorkflowOperationRequestId = options?.recoverOriginalTextTask
         ? previous.nodeRuns.find((node) => node.nodeId === nodeId)?.operationRequestId
@@ -6785,7 +6817,9 @@ export class ProductionPipeline {
         }),
         withExecutableBrief(recoveryBase, brief),
         nodeId,
-        retryRejectedReview
+        retryNativeAudio
+          ? { allowLocalPreparationRetry: true }
+          : retryRejectedReview
           ? { allowRejectedNode: true }
           : previous.nodeRuns.find((node) => node.nodeId === nodeId)?.intervention?.kind === "source_review_retry"
             ? { allowSourceReviewRetry: true }
@@ -7228,7 +7262,10 @@ export class ProductionPipeline {
         };
       },
       validateInputOverride: validateInputOverride ?? ((input) => requireOutputRecord(input, `${id} input`)),
-      validateOverride: (output) => validateWorkerNodeOverride(id, output),
+      validateOverride: (output) => {
+        if (id === "voice" && brief.audioMode === "native_av") throw new HumanDecisionConflictError("视频原声必须来自当前采用的视频，不能手工替换为TTS计划。请重新准备原声或关联返工。");
+        return validateWorkerNodeOverride(id, output);
+      },
     });
 
     const nodes: NodeDefinition[] = [
@@ -7375,8 +7412,8 @@ export class ProductionPipeline {
       ...(brief.providers.visualReview ? [sourceAssetVisualReviewNode(brief, this.runsRoot)] : []),
       workerNode(
         "voice",
-        "Synthesize voice",
-        "voice.synthesize",
+        brief.audioMode === "native_av" ? "Prepare native audio" : "Synthesize voice",
+        brief.audioMode === "native_av" ? "audio.prepare_native" : "voice.synthesize",
         brief.providers.voice,
         [usesJointCreativePlanning(brief) ? "creative-planning" : "script", brief.providers.visualReview ? "asset-source-review" : "assets"],
         usesJointCreativePlanning(brief)
@@ -7384,6 +7421,9 @@ export class ProductionPipeline {
           : brief.durationRange && brief.director ? ["production-preflight", "assets"] : ["script", "assets"],
         (context) => {
           const planning = currentPlanningOutputPaths(context, brief);
+          if (brief.audioMode === "native_av") return { ...planning, audioMode: "native_av",
+            assetPlanPath: outputPath(context, "assets", "assetPlanPath") };
+          const voiceDirection = requireTtsVoiceDirection(brief);
           // 声音模式由用户确认的产物决定。上游显式改时长后沿新的父产物取重绑定方案，
           // 不因 inputState 失效而静默退回逐镜合成，也不借用其他历史脚本的方案。
           const parents = context.artifacts.filter((artifact) => artifact.kind === "script" && artifact.uri === planning.scriptPath
@@ -7398,14 +7438,14 @@ export class ProductionPipeline {
             scriptPath: planning.scriptPath,
             ...(planning.executablePlanPath !== undefined ? { executablePlanPath: planning.executablePlanPath } : {}),
             ...(narration?.uri ? { narrationPlanPath: narration.uri } : {}),
-            voice: brief.voiceDirection.profileId.slice(brief.voiceDirection.profileId.indexOf(":") + 1),
-            rate: brief.voiceDirection.rate,
-            pause_scale: brief.voiceDirection.pauseScale,
-            mastering_preset: brief.voiceDirection.masteringPreset,
+            voice: voiceDirection.profileId.slice(voiceDirection.profileId.indexOf(":") + 1),
+            rate: voiceDirection.rate,
+            pause_scale: voiceDirection.pauseScale,
+            mastering_preset: voiceDirection.masteringPreset,
           };
         },
         "声音导演",
-        validateVoiceNodeInput,
+        brief.audioMode === "native_av" ? validateNativeVoiceNodeInput : validateVoiceNodeInput,
       ),
       workerNode(
         "render",
@@ -7422,7 +7462,8 @@ export class ProductionPipeline {
             scriptPath: planning.scriptPath,
             ...(planning.executablePlanPath !== undefined ? { executablePlanPath: planning.executablePlanPath } : {}),
             assetPlanPath: outputPath(context, "assets", "assetPlanPath"),
-            voiceoverPlanPath: outputPath(context, "voice", "voiceoverPlanPath"),
+            ...(brief.audioMode === "native_av" ? { audioMode: "native_av", nativeAudioPlanPath: outputPath(context, "voice", "nativeAudioPlanPath") }
+              : { voiceoverPlanPath: outputPath(context, "voice", "voiceoverPlanPath") }),
           };
         },
         "剪辑师",
@@ -8183,11 +8224,14 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
   ): Promise<ReadonlySet<string>> {
     const forecast = this.worker.forecastPaidAssetSpend;
     if (!forecast) return new Set();
-    const result = await forecast.call(this.worker, {
+    const request = forecast.call(this.worker, {
       input,
       parameters: { ...this.config.parameters, providerId: this.id },
       nodeDirectory: path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId),
-    }).catch(() => undefined);
+    });
+    // 原生请求在报价前完成声音与模式校验，不能先吞错授权、执行时才拒绝。
+    const result = this.config.parameters.audioMode === "native_av"
+      ? await request : await request.catch(() => undefined);
     return new Set(result?.reusableQuoteItemIds ?? []);
   }
 
@@ -8236,7 +8280,8 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
         [...sceneDurations].map(([position, duration]) => ({ position, duration })),
         quoteShots,
       );
-      const carriedScenePositions = new Set(await inspectReworkCarriedAssetScenePositions({
+      // 原生是否复用必须由下方完整请求预测确认；同型号旧无声母片通过初筛不等于声音请求相同。
+      const carriedScenePositions = new Set(this.config.parameters.audioMode === "native_av" ? [] : await inspectReworkCarriedAssetScenePositions({
         runsRoot: this.runsRoot,
         input,
         currentScript: requireOutputRecord(JSON.parse(await readFile(scriptPath, "utf8")), "script"),
@@ -8260,7 +8305,7 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
           ? "沿用返修前已生成的画面，不重复购买"
           : reuseSourceScenePosition !== undefined
             ? `复用镜头 ${reuseSourceScenePosition} 的画面，不重复购买`
-            : directorEstimatedCostCny === 0
+            : directorEstimatedCostCny === 0 && this.config.parameters.audioMode !== "native_av"
               ? "免费素材，不需要购买"
               : undefined;
         if (excludedNote !== undefined) {
@@ -8433,7 +8478,15 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
   }
 
   async run(input: Record<string, unknown>, context: WorkflowContext): Promise<WorkerResponse> {
+    if ((this.capability === "video.render" || this.capability === "audio.prepare_native")
+      && parsePersistedBrief(context.initialInput).audioMode === "native_av"
+      && (input.audioMode !== "native_av" || input.voiceoverPlanPath !== undefined || input.narrationPlanPath !== undefined)) {
+      throw new Error("原生音画不能改用独立TTS或历史配音计划。");
+    }
     await verifyExecutablePlanInput(input, context, this.runsRoot);
+    if (this.capability === "audio.prepare_native" || this.capability === "video.render" && input.audioMode === "native_av") {
+      input = await bindNativeAudioInputs(input, context, this.runsRoot);
+    }
     if (this.config.capability === "asset.prepare") {
       // 复用描述只能由已登记产物派生，不能接受客户端伪造的路径或 SHA。
       const { reusableStockAssets: _untrusted, ...assetInput } = input;
@@ -8455,6 +8508,9 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
     const attempt = await reserveAttemptDirectory(path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId));
     const outputDir = attempt.directory;
     const parameters: Record<string, unknown> = { ...this.config.parameters, providerId: this.config.id };
+    if (this.capability === "audio.prepare_native" || this.capability === "video.render" && input.audioMode === "native_av") {
+      parameters.mediaRoot = path.join(this.runsRoot, context.runId);
+    }
     if (this.config.capability === "asset.prepare") {
       const acceptedEvidenceIds = [...new Set(context.decisions
         .filter((decision) => decision.action === "approve")
@@ -9428,7 +9484,7 @@ function directorStageInputIdentity(
       ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
       ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
       ...(brief.articleSources?.length ? { articleSources: brief.articleSources } : {}),
-      voiceTiming: voiceTimingFor(brief),
+      ...voiceTimingFor(brief),
       productionCapabilities: productionCapabilitiesFor(brief, options),
     },
     referenceGrammar: referenceGrammar ?? null,
@@ -11103,7 +11159,7 @@ function creativePlanningNode(
               ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
               ...(currentBrief.visualIntent ? { visualIntent: currentBrief.visualIntent } : {}),
               ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
-              voiceTiming: voiceTimingFor(currentBrief),
+              ...voiceTimingFor(currentBrief),
               ...(referenceGrammar ? { referenceGrammar } : {}),
               ...(currentBrief.seriesContext ? { seriesContext: currentBrief.seriesContext } : {}),
               ...(currentBrief.articleSources?.length ? { articleSources: currentBrief.articleSources } : {}),
@@ -11247,7 +11303,7 @@ function creativePlanningNode(
                 ...(currentBrief.budgetIntentionCny !== undefined ? { budgetIntentionCny: currentBrief.budgetIntentionCny, budgetMeaning: "用户费用偏好，不是硬上限或付款授权" } : {}),
                 upstreamConfirmed: discussion.upstreamDocuments,
                 productionCapabilities: productionCapabilitiesFor(currentBrief, options),
-                voiceTiming: voiceTimingFor(currentBrief),
+                ...voiceTimingFor(currentBrief),
                 ...(currentBrief.seriesContext ? { seriesContext: currentBrief.seriesContext } : {}),
                 ...(currentBrief.visualIntent ? { visualIntent: currentBrief.visualIntent } : {}),
                 ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
@@ -12338,7 +12394,7 @@ function directorNode(
         ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
         ...(currentBrief.visualIntent ? { visualIntent: currentBrief.visualIntent } : {}),
         ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
-        voiceTiming: voiceTimingFor(currentBrief),
+        ...voiceTimingFor(currentBrief),
         productionCapabilities: summarizeProductionCapabilities(assetProviders, currentBrief.providers.voice),
         ...(referenceGrammar ? { referenceGrammar } : {}),
         ...(currentBrief.seriesContext ? { seriesContext: currentBrief.seriesContext } : {}),
@@ -13463,7 +13519,7 @@ function screenwriterBrief(
     productionCapabilities: options
       ? productionCapabilitiesFor(brief, options)
       : summarizeProductionCapabilities([], brief.providers.voice),
-    voiceTiming: voiceTimingFor(brief),
+    ...voiceTimingFor(brief),
     ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
     ...(brief.editorial ? { editorial: brief.editorial } : {}),
     ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
@@ -13487,11 +13543,13 @@ function screenwriterBrief(
   };
 }
 
-function voiceTimingFor(brief: ProductionBrief): { rate: number; pauseScale: number } {
-  return {
-    rate: brief.voiceDirection.rate,
-    pauseScale: brief.voiceDirection.pauseScale,
-  };
+function voiceTimingFor(brief: ProductionBrief): { voiceTiming?: { rate: number; pauseScale: number } } {
+  if (brief.audioMode === "native_av") return {};
+  const direction = requireTtsVoiceDirection(brief);
+  return { voiceTiming: {
+    rate: direction.rate,
+    pauseScale: direction.pauseScale,
+  } };
 }
 
 function modelFacingReworkFinding(finding: ProductionReworkFinding): ProductionReworkFinding {
@@ -14695,6 +14753,7 @@ function assetSemanticRankNode(
 function providerConfigs(brief: ProductionBrief, options: ProductionPipelineOptions): ProviderConfig[] {
   const runtimeMetadata = new Map((options.providerRuntimeMetadata ?? []).map((item) => [item.id, item]));
   const assetMetadata = resolveAssetRuntimeMetadata(brief, runtimeMetadata, options.assetProviders ?? []);
+  const voiceDirection = brief.audioMode === "native_av" ? undefined : requireTtsVoiceDirection(brief);
   return [
     ...(brief.providers.script === "codex-screenwriter-v1"
       ? []
@@ -14704,6 +14763,7 @@ function providerConfigs(brief: ProductionBrief, options: ProductionPipelineOpti
       : []),
     providerConfig(brief.providers.assets, "asset.prepare", "assets", {
       maxCostCny: 0,
+      ...(brief.audioMode === "native_av" ? { audioMode: "native_av", nativeVideoProviderId: brief.nativeVideoProviderId } : {}),
       modelSelections: resolvedAssetModels(brief, runtimeMetadata),
       ...(brief.providers.visualReview ? {
         reviewProviderId: brief.providers.visualReview,
@@ -14712,14 +14772,15 @@ function providerConfigs(brief: ProductionBrief, options: ProductionPipelineOpti
       freeProviderIds: (brief.director?.assetProviderIds ?? []).filter((providerId) =>
         options.assetProviders?.some((provider) => provider.id === providerId && provider.billing === "free")),
     }, assetMetadata, assetConfigurationSource(brief), runtimeMetadata),
-    providerConfig(brief.providers.voice, "voice.synthesize", "voice", {
-      profileId: brief.voiceDirection.profileId,
-      voice: brief.voiceDirection.profileId.slice(brief.voiceDirection.profileId.indexOf(":") + 1),
-      rate: brief.voiceDirection.rate,
-      pauseScale: brief.voiceDirection.pauseScale,
-      masteringPreset: brief.voiceDirection.masteringPreset,
+    voiceDirection ? providerConfig(brief.providers.voice, "voice.synthesize", "voice", {
+      profileId: voiceDirection.profileId,
+      voice: voiceDirection.profileId.slice(voiceDirection.profileId.indexOf(":") + 1),
+      rate: voiceDirection.rate,
+      pauseScale: voiceDirection.pauseScale,
+      masteringPreset: voiceDirection.masteringPreset,
       maxCostCny: 0,
-    }, runtimeMetadata.get(brief.providers.voice), modelSourceFor(brief, brief.providers.voice)),
+    }, runtimeMetadata.get(brief.providers.voice), modelSourceFor(brief, brief.providers.voice))
+      : providerConfig(NATIVE_AUDIO_PROVIDER, "audio.prepare_native", "voice", { audioMode: "native_av" }),
     providerConfig(brief.providers.render, "video.render", "render", {}, runtimeMetadata.get(brief.providers.render), modelSourceFor(brief, brief.providers.render)),
     providerConfig(brief.providers.technicalReview, "quality.review", "technical-review", {}, runtimeMetadata.get(brief.providers.technicalReview), modelSourceFor(brief, brief.providers.technicalReview)),
   ];
@@ -14853,6 +14914,7 @@ function providerConfig(
       "minimax-tts-v1": { provider: "minimax", voice: "female-chengshu", rate: 190 },
       "ffmpeg-tone-test-v1": { provider: "tone" },
     },
+    "audio.prepare_native": { "python-native-audio-v1": { provider: "native-audio" } },
     "video.render": {
       "python-ffmpeg-v1": { resolution: "1080x1920" },
     },
@@ -14896,6 +14958,8 @@ function receiptParameters(parameters: Record<string, unknown>): Record<string, 
     "maxAttempts",
     "limit",
     "freeProviderIds",
+    "audioMode",
+    "nativeVideoProviderId",
   ]);
   const output: Record<string, ExecutionParameterValue> = {};
   for (const [key, value] of Object.entries(parameters)) {
@@ -14937,6 +15001,15 @@ function validateVoiceNodeInput(input: unknown): Record<string, unknown> {
     pause_scale: pauseScale,
     mastering_preset: value.mastering_preset,
   };
+}
+
+function validateNativeVoiceNodeInput(input: unknown): Record<string, unknown> {
+  const value = requireOutputRecord(input, "native voice input");
+  if (["voice", "rate", "pause_scale", "mastering_preset", "narrationPlanPath", "voiceoverPlanPath"].some(key => value[key] !== undefined)) {
+    throw new Error("原生音画不接受独立配音操作；请通过返工切换声音模式。");
+  }
+  return { audioMode: "native_av", scriptPath: requiredOutputString(value, "scriptPath"),
+    executablePlanPath: requiredOutputString(value, "executablePlanPath"), assetPlanPath: requiredOutputString(value, "assetPlanPath") };
 }
 
 function effectiveVoiceReceiptParameters(
@@ -15306,6 +15379,11 @@ async function workerResponseToNodeResult(
       artifacts,
       ...(providerOutcomeKnown !== undefined ? { providerOutcomeKnown } : {}),
     };
+  }
+  if (response.status === "rejected" && response.error?.code === "NATIVE_AUDIO_UNAVAILABLE") {
+    return { status: "needs_human", error, output: response.output ?? {}, artifacts, providerOutcomeKnown: true,
+      intervention: { kind: "local_preparation_retry", reason: `${rawError} 原素材和费用记录已保留；可重新准备原声，或返回规划/关联返工，当前不会重新购买视频或配音。`,
+        requiredAction: "request_changes", options: ["request_changes", "reject"] } };
   }
   if (response.status === "rejected" && response.error?.code === "VOICE_DOES_NOT_FIT") {
     const output = requireOutputRecord(response.output, "voice timing conflict output");
@@ -16074,7 +16152,7 @@ function validateWorkerNodeOverride(nodeId: string, output: unknown): Record<str
     script: ["scriptPath"],
     "asset-candidates": ["candidateSearchPath", "candidateInventoryPath"],
     assets: ["assetPlanPath"],
-    voice: ["voiceoverPlanPath", "trackPath"],
+    voice: [isObjectRecord(output) && output.audioMode === "native_av" ? "nativeAudioPlanPath" : "voiceoverPlanPath", "trackPath"],
     render: ["videoPath", "renderManifestPath"],
     "technical-review": ["reviewPath"],
   };
@@ -16093,6 +16171,7 @@ function validateWorkerNodeOverride(nodeId: string, output: unknown): Record<str
 function validateBriefInputOverride(value: unknown, workflowBrief: ProductionBrief): ProductionBrief {
   const parsed = parseBrief(value);
   const immutableConfigurationMatches = JSON.stringify({
+    audioMode: parsed.audioMode, nativeVideoProviderId: parsed.nativeVideoProviderId,
     providers: parsed.providers,
     models: parsed.models,
     modelSelectionSources: parsed.modelSelectionSources,
@@ -16104,6 +16183,7 @@ function validateBriefInputOverride(value: unknown, workflowBrief: ProductionBri
     voiceDirection: parsed.voiceDirection,
     reviewMode: parsed.reviewMode,
   }) === JSON.stringify({
+    audioMode: workflowBrief.audioMode, nativeVideoProviderId: workflowBrief.nativeVideoProviderId,
     providers: workflowBrief.providers,
     models: workflowBrief.models,
     modelSelectionSources: workflowBrief.modelSelectionSources,
@@ -16142,6 +16222,8 @@ function mergeCurrentBrief(value: unknown, workflowBrief: ProductionBrief): Prod
   return parsePersistedBrief({
     ...workflowBrief,
     ...value,
+    audioMode: workflowBrief.audioMode,
+    nativeVideoProviderId: workflowBrief.nativeVideoProviderId,
     providers: workflowBrief.providers,
     models: workflowBrief.models,
     modelSelectionSources: workflowBrief.modelSelectionSources,
@@ -16597,7 +16679,7 @@ function optionalReviewRefFact(run: WorkflowRun, ref: NonNullable<NodeRun["optio
 // 仅新可选审片人工路径要求逐份必需媒体，不改变旧v1作品的读取合同。
 async function verifyOptionalRequiredMedia(run: WorkflowRun, outputs: Map<string, unknown>, selected: Artifact[], runRoot: string): Promise<void> {
   for (const [nodeId, fields] of [
-    ["voice", ["voiceoverPlanPath", "trackPath"]],
+    ["voice", [parsePersistedBrief(run.initialInput).audioMode === "native_av" ? "nativeAudioPlanPath" : "voiceoverPlanPath", "trackPath"]],
     ["render", ["videoPath", "renderManifestPath"]],
     ["technical-review", ["reviewPath"]],
   ] as const) {
@@ -16774,7 +16856,7 @@ async function currentInternalDeliveryEvidence(
       throw new HumanDecisionConflictError("原审查诊断与当前交付不一致，请核对原请求；旧产物仍保留。");
     }
   }
-  const voice = selected.find((artifact) => artifact.uri === outputs.get("voice")?.voiceoverPlanPath);
+  const voice = selected.find((artifact) => artifact.uri === outputs.get("voice")?.[brief.audioMode === "native_av" ? "nativeAudioPlanPath" : "voiceoverPlanPath"]);
   const voicePlan: unknown = voice?.uri ? JSON.parse(await readFile(voice.uri, "utf8")) : null;
   const subtitles = isObjectRecord(voicePlan) && isObjectRecord(voicePlan.subtitles) ? voicePlan.subtitles : undefined;
   const sidecars: Array<{ format: string; sha256: string; sizeBytes: number }> = [];
@@ -18101,7 +18183,7 @@ async function currentArtifactsForPackaging(context: Pick<WorkflowContext, "arti
         ]),
     ...(brief.workflowFeatures?.referenceGrammar ? [{ nodeId: "reference-grammar", paths: [outputPath(context, "reference-grammar", "referenceGrammarPath")] }] : []),
     { nodeId: "assets", paths: [outputPath(context, "assets", "assetPlanPath")] },
-    { nodeId: "voice", paths: [outputPath(context, "voice", "voiceoverPlanPath"), outputPath(context, "voice", "trackPath")] },
+    { nodeId: "voice", paths: [outputPath(context, "voice", brief.audioMode === "native_av" ? "nativeAudioPlanPath" : "voiceoverPlanPath"), outputPath(context, "voice", "trackPath")] },
     { nodeId: "render", paths: [outputPath(context, "render", "videoPath"), outputPath(context, "render", "renderManifestPath")] },
     { nodeId: "technical-review", paths: [outputPath(context, "technical-review", "reviewPath")] },
     ...(brief.providers.visualReview && includeOptionalReview ? [{ nodeId: "visual-review", paths: [outputPath(context, "visual-review", "visualReviewPath")] }] : []),
@@ -18698,6 +18780,38 @@ async function verifyStoredArtifacts(artifacts: readonly Artifact[]): Promise<vo
     }
     await verifyArtifactBytes(artifact.uri, artifact.sha256, artifact.sizeBytes);
   }
+}
+
+async function bindNativeAudioInputs(
+  input: Record<string, unknown>, context: WorkflowContext, runsRoot: string,
+): Promise<Record<string, unknown>> {
+  const root = path.join(runsRoot, context.runId);
+  if (input.assetPlanPath !== outputPath(context, "assets", "assetPlanPath")) throw new Error("原声素材不是当前采用版本。");
+  const bind = async (uri: unknown, kind: string) => {
+    const artifact = context.artifacts.find(a => a.uri === uri && a.kind === kind);
+    if (!artifact?.uri || !artifact.sha256) throw new Error(`原声输入缺少有效登记：${kind}`);
+    await verifyStoredArtifactWithinRoot(root, artifact);
+    return { artifactId: artifact.id, uri: artifact.uri, sha256: artifact.sha256,
+      ...(artifact.provenance?.providerId ? { providerId: artifact.provenance.providerId } : {}) };
+  };
+  const nativeInputIdentities = {
+    scriptPath: await bind(input.scriptPath, "script"),
+    executablePlanPath: await bind(input.executablePlanPath, "executable_plan"),
+    assetPlanPath: await bind(input.assetPlanPath, "asset_plan"),
+  };
+  const plan = requireOutputRecord(JSON.parse(await readFile(String(input.assetPlanPath), "utf8")), "native asset plan");
+  if (!Array.isArray(plan.scene_assets) || !plan.scene_assets.length) throw new Error("原声缺少当前视频素材。");
+  const nativeSourceIdentities = await Promise.all(plan.scene_assets.map(async entry => {
+    const asset = requireOutputRecord(entry, "native source");
+    if (asset.media_type !== "video") throw new Error("原生音画不能混用图片或独立配音。");
+    return bind(asset.local_path, "media_asset");
+  }));
+  if (input.nativeAudioPlanPath !== undefined) {
+    if (input.nativeAudioPlanPath !== outputPath(context, "voice", "nativeAudioPlanPath")) throw new Error("原声计划不是当前采用版本。");
+    await bind(input.nativeAudioPlanPath, "native_audio_plan");
+  }
+  // 身份仅由宿主登记产物派生，覆盖任何调用方夹带值。
+  return { ...input, nativeInputIdentities, nativeSourceIdentities };
 }
 
 async function verifyExecutablePlanInput(

@@ -16,6 +16,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { NATIVE_AUDIO_PROVIDER, NATIVE_VIDEO_MODELS } from "@video-factory/production-pipeline/native-audio";
 import { defaultStudioDurationRange, DEFAULT_STUDIO_VOICE_DIRECTION, type StudioCreatorSettings, type StudioProductionInput, type StudioProvider, type StudioReferenceVideo, type StudioReworkDraft, type StudioReworkFinding } from "../../shared/api.js";
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
@@ -110,14 +111,22 @@ function canonicalRecipeId(recipeId: RecipeId | undefined): RecipeId {
 }
 
 export function NewRunDialog({ open, providers, initialDataReady = true, initialValues, inheritedNodeIds, requiredAffectedScenePositions, scopePrompt, inheritedReferenceVideo, creatorSettings, settingsError, onRetrySettings, onClose, onSubmit }: NewRunDialogProps) {
+  const [audioMode, setAudioMode] = useState<"tts" | "native_av">("tts");
+  const [nativeVideoProviderId, setNativeVideoProviderId] = useState("wan-video-v1");
+  const nativeAudio = audioMode === "native_av";
+  const nativeVideoProviders = providers.filter(provider => provider.available && provider.kind !== "test"
+    && provider.modelProfiles?.some(model => model.id === NATIVE_VIDEO_MODELS[provider.id] && model.available));
   const defaults = useMemo(
     () => providerDefaults(providers, creatorSettings?.roleProviderDefaults),
     [creatorSettings?.roleProviderDefaults, providers],
   );
   const [bindings, setBindings] = useState<StudioProductionInput["providers"]>(defaults);
   const effectiveBindings = useMemo(
-    () => initialValues?.rework ? bindings : availableProviderBindings(bindings, defaults, providers),
-    [bindings, defaults, initialValues?.rework, providers],
+    () => {
+      const available = initialValues?.rework ? bindings : availableProviderBindings(bindings, defaults, providers);
+      return nativeAudio ? { ...available, assets: "ai-shot-router-v1", voice: NATIVE_AUDIO_PROVIDER } : available;
+    },
+    [bindings, defaults, initialValues?.rework, providers, nativeAudio],
   );
   const [activeKey, setActiveKey] = useState<BindingKey>("assets");
   const [recipeId, setRecipeId] = useState<RecipeId>("free-stock");
@@ -132,8 +141,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const durationRangeTouched = useRef(false);
   const visualIntentTouched = useRef(false);
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([]);
+  const activeAssetProviderIds = nativeAudio ? [nativeVideoProviderId] : assetProviderIds;
   const [modelSelections, setModelSelections] = useState<Record<string, string>>({});
-  const [voiceDirection, setVoiceDirection] = useState<StudioProductionInput["voiceDirection"]>(() => defaultVoiceDirection(providers));
+  const [voiceDirection, setVoiceDirection] = useState<NonNullable<StudioProductionInput["voiceDirection"]>>(() => defaultVoiceDirection(providers));
   const [budgetIntention, setBudgetIntention] = useState(String(initialValues?.budgetIntentionCny ?? ""));
   const [semanticRankEnabled, setSemanticRankEnabled] = useState(true);
   const [acceptUnreviewedFirstCut, setAcceptUnreviewedFirstCut] = useState(false);
@@ -201,11 +211,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   }, [discardPromptOpen]);
   const [visualGroupOpen, setVisualGroupOpen] = useState(false);
   const formSnapshot = useMemo(() => JSON.stringify({
-    bindings, recipeId, directorProfileId, platform, presentationMode, durationSeconds, durationRange, durationRangeDrafts,
+    bindings, recipeId, directorProfileId, platform, presentationMode, audioMode, nativeVideoProviderId, durationSeconds, durationRange, durationRangeDrafts,
     assetProviderIds: [...assetProviderIds].sort(), modelSelections, voiceDirection, budgetIntention,
     semanticRankEnabled, acceptUnreviewedFirstCut, briefSummaryValues, visualBriefValues,
     referenceVideo: referenceVideo ? { ...referenceVideo } : null, rework,
-  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, directorProfileId, durationRange, durationRangeDrafts, durationSeconds, modelSelections, platform, presentationMode, recipeId, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection]);
+  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, directorProfileId, durationRange, durationRangeDrafts, durationSeconds, modelSelections, platform, presentationMode, audioMode, nativeVideoProviderId, recipeId, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection]);
   useLayoutEffect(() => {
     if (!open || !initialDataReady || !initializedForOpen.current) return;
     if (baselineSnapshotRef.current === null) baselineSnapshotRef.current = formSnapshot;
@@ -249,9 +259,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const assetSources = providers.filter((provider) => {
     return provider.capability === "asset.prepare" && provider.kind !== "test" && provider.id !== "ai-shot-router-v1";
   });
-  const selectedAssetSources = assetSources.filter((provider) => assetProviderIds.includes(provider.id));
+  const selectedAssetSources = assetSources.filter((provider) => activeAssetProviderIds.includes(provider.id));
   const selectedMeteredSources = selectedAssetSources.filter((provider) => provider.billing === "metered");
-  const selectedRecipe = RECIPES.find((recipe) => recipe.id === recipeId) ?? RECIPES[0]!;
+  const selectedRecipe = RECIPES.find((recipe) => recipe.id === (nativeAudio ? "keyshot-ai" : recipeId)) ?? RECIPES[0]!;
   const visualSourceIssue = visualSourceCompatibilityIssue(undefined, selectedAssetSources);
   const effectiveModelId = (provider: StudioProvider) => modelSelections[provider.id]
     ?? provider.defaultModelId;
@@ -272,7 +282,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   // “先生成首版、稍后审片”的风险；独立角色复核同样只提供建议，不是开工硬门。
   const singleReviewAvailable = Boolean(visualReviewProvider);
   const visualReviewUnavailable = !singleReviewAvailable;
-  const semanticRankCompatible = Boolean(effectiveBindings.director && effectiveBindings.assets === "ai-shot-router-v1");
+  const semanticRankCompatible = !nativeAudio && Boolean(effectiveBindings.director && effectiveBindings.assets === "ai-shot-router-v1");
   const effectiveSemanticRank = semanticRankCompatible && semanticRankEnabled;
   const meteredSelected = selectedMeteredSources.length > 0 && selectedRecipe.allowMeteredProviders;
   const subscriptionVisualReview = singleReviewAvailable && visualReviewProvider?.billing === "subscription"
@@ -286,7 +296,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       && provider.approvalPolicy === "automatic";
   });
   const selectedVoiceProvider = providers.find((provider) => provider.capability === "voice.synthesize" && provider.id === effectiveBindings.voice);
-  const voiceCostSummary = automaticVoiceProvider
+  const voiceCostSummary = nativeAudio ? "原声：随视频报价，不另买配音；本地准备试听不调用模型" : automaticVoiceProvider
     ? `配音：${creatorProviderName(automaticVoiceProvider)} 自动按量计费，不另弹逐笔报价`
     : selectedVoiceProvider?.kind === "local"
       ? "配音：本地系统声音，不产生外部服务调用费"
@@ -297,14 +307,15 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
           : selectedVoiceProvider ? "配音：计费方式尚未确认，请检查所选服务" : "配音：未选择声音";
   const hasMeteredCalls = meteredSelected || automaticVoiceProvider !== undefined;
   const economics: StudioProductionInput["economics"] = {
-    recipeId,
+    recipeId: nativeAudio ? "custom" : recipeId,
     allowMeteredProviders: hasMeteredCalls,
   };
   const inheritedSelectionIssues = useMemo<InheritedSelectionIssue[]>(() => {
     if (!initialValues?.rework) return [];
     const issues: InheritedSelectionIssue[] = [];
     for (const item of CAPABILITIES) {
-      const providerId = bindings[item.key];
+      if (nativeAudio && item.key === "voice") continue;
+      const providerId = effectiveBindings[item.key];
       if (!providerId && item.optional) continue;
       const provider = providers.find((candidate) => candidate.id === providerId);
       const reason = !provider
@@ -326,7 +337,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         });
       }
     }
-    for (const providerId of assetProviderIds) {
+    for (const providerId of activeAssetProviderIds) {
       const provider = providers.find((candidate) => candidate.id === providerId);
       const reason = !provider
         ? "当前画面来源目录中已不存在"
@@ -348,10 +359,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       }
     }
     const selectedProviderIds = new Set([
-      ...Object.values(bindings).filter((providerId): providerId is string => Boolean(providerId)),
-      ...assetProviderIds,
+      ...Object.values(effectiveBindings).filter((providerId): providerId is string => Boolean(providerId)),
+      ...activeAssetProviderIds,
     ]);
     for (const [providerId, modelId] of Object.entries(modelSelections)) {
+      if (nativeAudio && providerId === nativeVideoProviderId) continue;
       if (!selectedProviderIds.has(providerId)) continue;
       const provider = providers.find((candidate) => candidate.id === providerId);
       if (!provider?.available) continue;
@@ -366,7 +378,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         });
       }
     }
-    if (voiceSelectionAvailable === false) {
+    if (!nativeAudio && voiceSelectionAvailable === false) {
       issues.push({
         id: "voice-profile",
         label: "声音演员",
@@ -376,15 +388,18 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       });
     }
     return issues;
-  }, [assetProviderIds, bindings, initialValues?.rework, modelSelections, providers, selectedRecipe.allowMeteredProviders, voiceSelectionAvailable]);
+  }, [assetProviderIds, nativeAudio, nativeVideoProviderId, effectiveBindings, initialValues?.rework, modelSelections, providers, selectedRecipe.allowMeteredProviders, voiceSelectionAvailable]);
   const missingCapabilities = CAPABILITIES.filter((item) => {
     return !item.optional
+      && !(nativeAudio && item.key === "voice")
       && !providers.some((provider) => provider.capability === item.capability && provider.available && provider.kind !== "test");
   });
   const missingProductionRoles = [
     ...missingCapabilities.map((item) => item.label),
-    ...(assetProviderIds.length > 0 ? [] : ["导演画面来源"]),
-    ...(voiceSelectionAvailable === false && !initialValues?.rework ? ["可用声音演员"] : []),
+    ...(activeAssetProviderIds.length > 0 ? [] : ["导演画面来源"]),
+    ...(!nativeAudio && voiceSelectionAvailable === false && !initialValues?.rework ? ["可用声音演员"] : []),
+    ...(nativeAudio && !nativeVideoProviders.some(provider => provider.id === nativeVideoProviderId) ? ["可用原生音画型号"] : []),
+    ...(nativeAudio && !providers.some(provider => provider.id === NATIVE_AUDIO_PROVIDER && provider.available) ? ["本地原声准备"] : []),
   ];
   // 链接按现有分区优先：制作角色能力缺口落到制作分工；只剩画面来源缺口时落到画面来源分区，避免让创作者自己找。
   const capabilitySettingsHref = missingCapabilities.length > 0
@@ -419,6 +434,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setDiscardPromptOpen(false);
     if (formScrollRef.current) formScrollRef.current.scrollTop = 0;
     setPresentationMode(initialValues?.presentationMode ?? "narration");
+    setAudioMode(initialValues?.audioMode ?? "tts");
+    setNativeVideoProviderId(initialValues?.nativeVideoProviderId ?? nativeVideoProviders[0]?.id ?? "wan-video-v1");
     durationRangeTouched.current = false;
     const initialVoiceDirection = initialValues?.voiceDirection
       ?? (creatorSettings && !creatorVoiceIsShippedDefault(creatorSettings) ? creatorSettings.voiceDirection : undefined)
@@ -432,7 +449,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       ...defaults,
       ...(initialValues?.providers ?? {}),
       assets: initialValues?.rework ? initialValues.providers?.assets ?? defaults.assets : "ai-shot-router-v1",
-      voice: initialValues?.rework
+      // 表单保存独立配音草稿；原生模式的活动绑定由 effectiveBindings 投影，不污染返工切回。
+      voice: initialValues?.rework && initialValues.providers?.voice !== NATIVE_AUDIO_PROVIDER
         ? initialValues.providers?.voice ?? requestedVoiceProvider
         : providerForVoiceProfile(resolvedVoiceDirection.profileId),
     };
@@ -670,12 +688,16 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       }
       const selectedProviderIds = new Set([
         ...Object.values(providersForRun).filter((providerId): providerId is string => Boolean(providerId)),
-        ...assetProviderIds,
+        ...activeAssetProviderIds,
         "sound-review-v1",
       ]);
       const modelsForRun = Object.fromEntries(Object.entries(modelSelections).filter(([providerId, modelId]) => {
         return selectedProviderIds.has(providerId) && Boolean(modelId);
       }));
+      if (nativeAudio) {
+        if (!nativeVideoProviders.some(provider => provider.id === nativeVideoProviderId)) throw new Error("请选择可用的原生音画型号。");
+        modelsForRun[nativeVideoProviderId] = NATIVE_VIDEO_MODELS[nativeVideoProviderId]!;
+      }
       const scriptProviderId = providersForRun.script;
       const selectedScriptModelId = scriptProviderId ? modelSelections[scriptProviderId] : undefined;
       const treatmentProvider = providers.find((provider) => (
@@ -725,7 +747,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         ...(initialValues?.seriesContext ? { seriesContext: initialValues.seriesContext } : {}),
         ...(initialValues?.creationContext ? { creationContext: initialValues.creationContext } : {}),
         ...(rework ? { rework } : {}),
-        voiceDirection,
+        ...(nativeAudio ? { audioMode: "native_av", nativeVideoProviderId } : { voiceDirection,
+          ...(initialValues?.audioMode !== undefined ? { audioMode: "tts" as const } : {}) }),
         providers: providersForRun,
         models: modelsForRun,
         workflowFeatures: {
@@ -741,7 +764,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         ...(referenceVideo && isUploadedReferenceVideo(referenceVideo)
           ? { referenceVideo: { uploadId: referenceVideo.uploadId, label: referenceVideo.label } }
           : {}),
-        director: { profileId: directorProfileId, assetProviderIds },
+        director: { profileId: directorProfileId, assetProviderIds: activeAssetProviderIds },
         economics,
         ...(budgetIntentionCny !== undefined ? { budgetIntentionCny } : {}),
       });
@@ -944,9 +967,23 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                     <option value="narration">解说视频</option>
                     <option value="character_drama">角色剧情</option>
                   </select>
-                  {presentationMode === "character_drama" ? <small>按角色分别配音；不包含口型同步或模型原声对白。</small> : null}
+                  {presentationMode === "character_drama" && !nativeAudio ? <small>按角色分别配音；不包含口型同步或模型原声对白。</small> : null}
                   {rework ? <small>沿用原制作形式；若要更换形式，请新建制作。</small> : null}
                 </label>
+                <label className="field field-compact">
+                  <span>声音来源</span>
+                  <select aria-label="声音来源" value={audioMode} onChange={event => { setAudioMode(event.target.value as "tts" | "native_av"); setActiveKey("assets"); }}>
+                    <option value="tts">独立配音（默认）</option>
+                    <option value="native_av">模型原生音画（试用）</option>
+                  </select>
+                  <small>{nativeAudio ? "原声随画面生成，不另买配音。没有同步字幕；跨镜声线、台词和口型需听看确认。改词需重新生成相应视频，另行报价。" : "保留现有配音、分段、留白和字幕流程。"}</small>
+                </label>
+                {nativeAudio ? <label className="field field-compact"><span>原生音画模型</span>
+                  <select aria-label="原生音画模型" value={nativeVideoProviderId} onChange={event => setNativeVideoProviderId(event.target.value)}>
+                    {!nativeVideoProviders.some(provider => provider.id === nativeVideoProviderId) ? <option value={nativeVideoProviderId} disabled>当前型号不可用</option> : null}
+                    {nativeVideoProviders.map(provider => <option key={provider.id} value={provider.id}>{provider.modelProfiles?.find(model => model.id === NATIVE_VIDEO_MODELS[provider.id])?.label}</option>)}
+                  </select><small>整条制作使用一个型号逐镜生成，不混用免费图库、图片或独立配音。采用后如要改模式，需关联返工。</small>
+                </label> : null}
                 <label className="field field-compact">
                   <span>建议时长</span>
                   <select name="durationSeconds" value={String(durationSeconds)} onChange={(event) => changeSuggestedDuration(Number(event.target.value))}>
@@ -1021,7 +1058,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
             <details className="new-run-group new-run-group-visual" open={visualGroupOpen} onToggle={(event) => setVisualGroupOpen(event.currentTarget.open)}>
               <summary>
                 <strong>02 画面与声音</strong>
-                <small>{`${STUDIO_DIRECTOR_PROFILES.find((profile) => profile.id === directorProfileId)?.label ?? "导演"} · ${selectedRecipe.label} · ${automaticVoiceProvider ? `${creatorProviderName(automaticVoiceProvider)}（自动按量计费）` : effectiveBindings.voice ? "声音已配置" : "未选择声音"}`}</small>
+                <small>{`${STUDIO_DIRECTOR_PROFILES.find((profile) => profile.id === directorProfileId)?.label ?? "导演"} · ${nativeAudio ? "模型原生音画 · 不另买配音" : `${selectedRecipe.label} · ${automaticVoiceProvider ? `${creatorProviderName(automaticVoiceProvider)}（自动按量计费）` : effectiveBindings.voice ? "声音已配置" : "未选择声音"}`}`}</small>
                 <ChevronDown aria-hidden="true" size={15} />
               </summary>
               <div className="new-run-group-body">
@@ -1071,7 +1108,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               {referenceError ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />{referenceError}</p> : null}
             </section>
 
-            <section className="recipe-section" aria-labelledby="recipe-section-title" data-tour="production-recipes">
+            <section hidden={nativeAudio} className="recipe-section" aria-labelledby="recipe-section-title" data-tour="production-recipes">
               <div className="compact-section-heading">
                 <div><span>03</span><h3 id="recipe-section-title">画面来源策略</h3></div>
                 <small>决定导演可用能力，不设全片费用上限</small>
@@ -1096,7 +1133,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               </fieldset>
             </section>
 
-            <VoiceStudio
+            {!nativeAudio ? <VoiceStudio
               sectionLabel="05"
               value={voiceDirection}
               preserveUnavailableSelection={Boolean(initialValues?.rework)}
@@ -1105,7 +1142,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 setVoiceDirection(next);
                 setBindings((current) => ({ ...current, voice: providerId }));
               }}
-            />
+            /> : null}
               </div>
             </details>
 
@@ -1141,7 +1178,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                     <option value="">继承角色默认</option>
                     {providers.find((provider) => provider.id === "sound-review-v1")?.modelProfiles?.filter((model) => model.available).map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}
                   </select><small>将直接审听成片音轨；费用按你的模型服务账号计算。</small></label> : null}
-                  {CAPABILITIES.map((item) => {
+                  {CAPABILITIES.filter(item => !nativeAudio || item.key !== "voice").map((item) => {
                     const candidates = roleProviderCandidates(item, providers);
                     const requestedProviderId = effectiveBindings[item.key];
                     const selected = providers.find((provider) => provider.id === requestedProviderId);
@@ -1188,7 +1225,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                           ? <small>你选的是首选；只有确认请求未被受理时，兼容候选才会接管。若请求可能已受理但结果不确定，流程会暂停核对，不会切换模型。</small>
                           : null}
                       </label> : <p>{item.key === "voice" ? "音色与语速在下方声音导演中调整。" : selected?.description ?? item.description}</p>}
-                      {item.key === "assets" ? <div className="production-role-source-models">
+                      {item.key === "assets" && !nativeAudio ? <div className="production-role-source-models">
                         <strong>本次画面来源与模型</strong>
                         {selectedAssetSources.map((provider) => {
                           const models = selectableModelsForCapability(provider.modelProfiles, provider.capability);
@@ -1227,7 +1264,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   <small>点击步骤更换能力</small>
                 </div>
                 <div className="workflow-stage-list">
-                  {CAPABILITIES.map((item, index) => {
+                  {CAPABILITIES.filter(item => !nativeAudio || item.key !== "voice").map((item, index) => {
                     const selected = providers.find((provider) => provider.id === effectiveBindings[item.key]);
                     const Icon = item.icon;
                     return (
@@ -1287,7 +1324,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 </div>
               </div>
               </section>
-              <section ref={assetSourcePoolRef} className="asset-source-pool" aria-labelledby="asset-source-pool-title">
+              <section hidden={nativeAudio} ref={assetSourcePoolRef} className="asset-source-pool" aria-labelledby="asset-source-pool-title">
                 <div className="compact-section-heading">
                   <div><span>B</span><h3 id="asset-source-pool-title">导演可用素材池</h3></div>
                   <small>{assetProviderIds.length} 项已启用，最终组合由 AI 生成</small>
@@ -1339,7 +1376,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               <label className={effectiveSemanticRank ? "visual-review-control is-enabled" : "visual-review-control"}>
                 <input type="checkbox" checked={effectiveSemanticRank} disabled={!semanticRankCompatible} onChange={(event) => setSemanticRankEnabled(event.target.checked)} />
                 <span><Sparkles aria-hidden="true" size={17} /><strong>AI 候选画面排序</strong></span>
-                <small>{semanticRankCompatible ? "先预览图库候选并给出逐镜排序；失败时保留素材源原顺序，下载前仍可人工调整" : "需要先启用 AI 视觉导演与逐镜画面选择"}</small>
+                <small>{audioMode === "native_av" ? "原生音画逐镜生成视频，不使用图库候选排序" : semanticRankCompatible ? "先预览图库候选并给出逐镜排序；失败时保留素材源原顺序，下载前仍可人工调整" : "需要先启用 AI 视觉导演与逐镜画面选择"}</small>
               </label>
               {visualReviewUnavailable ? <label className="visual-review-control is-optional-risk">
                 <input
@@ -1471,7 +1508,7 @@ function productionStepLabel(capability: string): string {
   return CAPABILITIES.find((item) => item.capability === capability)?.label ?? "其他制作步骤";
 }
 
-function defaultVoiceDirection(providers: StudioProvider[]): StudioProductionInput["voiceDirection"] {
+function defaultVoiceDirection(providers: StudioProvider[]): NonNullable<StudioProductionInput["voiceDirection"]> {
   const profileId = providers.some((provider) => provider.id === "minimax-tts-v1" && provider.available)
     ? "minimax:Chinese (Mandarin)_News_Anchor"
     : DEFAULT_STUDIO_VOICE_DIRECTION.profileId;

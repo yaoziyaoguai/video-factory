@@ -21,6 +21,35 @@ function deterministicIds(): (prefix: string) => string {
 const clock = (): string => "2026-08-21T10:00:00.000Z";
 
 describe("WorkflowRunner", () => {
+  it("retries a local preparation pause without accepting output or reopening paid parents", async () => {
+    let assets = 0, prepares = 0;
+    const definition: WorkflowDefinition = { id: "local-recovery", name: "Local recovery", version: "1", nodes: [
+      { id: "assets", label: "Assets", capability: "asset.prepare", mode: "automatic", execute: () => { assets++; return { output: { kept: true } }; } },
+      { id: "voice", label: "Prepare", capability: "audio.prepare_native", mode: "automatic", dependsOn: ["assets"], execute: () => {
+        prepares++;
+        return prepares === 1 ? { status: "needs_human", output: { error: "invalid_source" },
+          receipt: { providerId: "local", providerLabel: "Local", modelId: "local", transport: "local_process", billing: "local_compute", parameters: {} },
+          intervention: { kind: "local_preparation_retry", reason: "本地准备失败", requiredAction: "reject", options: ["reject"] } }
+          : { output: { sound: "current" } };
+      } },
+    ] };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const paused = await runner.run(definition, {});
+    await assert.rejects(runner.retryFailedNode(definition, paused, "voice"), /not failed/);
+    const metered = structuredClone(paused);
+    metered.nodeRuns[1]!.executionReceipt!.billing = "metered";
+    await assert.rejects(runner.retryFailedNode(definition, metered, "voice", { allowLocalPreparationRetry: true }), /not failed/);
+    const unknown = structuredClone(paused);
+    unknown.nodeRuns[1]!.outcomeUncertain = true;
+    await assert.rejects(runner.retryFailedNode(definition, unknown, "voice", { allowLocalPreparationRetry: true }), /uncertain/);
+    const success = await runner.retryFailedNode(definition, paused, "voice", { allowLocalPreparationRetry: true });
+    assert.equal(success.status, "succeeded");
+    assert.equal(assets, 1);
+    assert.equal(prepares, 2);
+    assert.equal(success.nodeRuns[1]!.intervention, undefined);
+    await assert.rejects(runner.retryFailedNode(definition, success, "voice", { allowLocalPreparationRetry: true }), /not failed/);
+  });
+
   it("preserves original optional audit uncertainty across a successful local continuation", async () => {
     let executions = 0;
     const definition: WorkflowDefinition = { id: "optional-audit-history", name: "Optional audit", version: "1", nodes: [{

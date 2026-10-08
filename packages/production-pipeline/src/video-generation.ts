@@ -408,6 +408,7 @@ export class WanVideoAdapter implements VideoGenerationAdapter {
             resolution: "720P",
             ratio: request.ratio,
             duration: request.durationSeconds,
+            ...(request.generateAudio !== undefined ? { audio: request.generateAudio } : {}),
             ...(model.startsWith("wan3.0-") ? {} : { prompt_extend: true }),
             watermark: false,
           },

@@ -12,6 +12,8 @@ import {
   validateCharacterScriptStructure,
   scriptSceneText,
   canRetryRejectedReviewNode,
+  canRetryNativeAudioNode,
+  type ProductionNodeRetryOptions,
   canonicalProductionAssetIntentDigest,
   canonicalQualityContractDigest,
   CodexBridgeClient,
@@ -234,7 +236,7 @@ export interface StudioPipelinePort {
   retryFailedNode(
     runId: string,
     nodeId: string,
-    options?: { recoverOriginalTextTask?: boolean; resumeCompletedTextTask?: boolean; resumeCompletedTextTaskRequestId?: string },
+    options?: ProductionNodeRetryOptions,
   ): Promise<WorkflowRun<ProductionBrief>>;
   inspectPaidNode(runId: string, nodeId: string): Promise<ProductionPaidNodeSummary>;
   /** joint-v1 规划阶段只读检视：pipeline 拥有 checkpoint/commit 的领域读取，Studio 只映射 DTO。 */
@@ -253,7 +255,7 @@ export interface StudioPipelinePort {
     runId: string,
     nodeId: string,
     listener?: ProductionRunListener,
-    options?: { recoverOriginalTextTask?: boolean; resumeCompletedTextTask?: boolean; resumeCompletedTextTaskRequestId?: string },
+    options?: ProductionNodeRetryOptions,
   ): Promise<DispatchedProductionRun>;
   withRunMaintenanceLease<T>(runIds: string[], action: () => Promise<T>): Promise<T>;
 }
@@ -506,6 +508,8 @@ export class ProductionStudio {
     const input: StudioProductionInput = {
       protocolVersion: "video-factory/brief-v1",
       ...(brief.presentationMode !== undefined ? { presentationMode: brief.presentationMode } : {}),
+      ...(brief.audioMode !== undefined ? { audioMode: brief.audioMode } : {}),
+      ...(brief.nativeVideoProviderId ? { nativeVideoProviderId: brief.nativeVideoProviderId } : {}),
       title: brief.title,
       angle: brief.angle,
       audience: brief.audience,
@@ -535,7 +539,7 @@ export class ProductionStudio {
       },
       director: structuredClone(reworkDirector),
       economics: structuredClone(brief.economics),
-      voiceDirection: structuredClone(brief.voiceDirection),
+      ...(brief.voiceDirection ? { voiceDirection: structuredClone(brief.voiceDirection) } : {}),
       ...(brief.editorial ? { editorial: structuredClone(brief.editorial) } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
       ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
@@ -2082,6 +2086,7 @@ export class ProductionStudio {
     actor: string,
   ): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
+    assertIndependentNarration(current);
     assertExecutableRunContinuation(current);
     if (current.status !== "needs_human") {
       throw new StudioConflictError("这条制作当前不在人工终审阶段。");
@@ -2116,7 +2121,7 @@ export class ProductionStudio {
     sourceOperationId?: string; relayoutSource?: string; layoutOperationId?: string;
     resultVoiceVersionId?: string; isCurrent: boolean; failureReason?: string; createdAt?: string;
   }> {
-    await this.loadRequiredRun(runId);
+    assertIndependentNarration(await this.loadRequiredRun(runId));
     if (!this.options.pipeline.readNarrationRelayoutOperation) {
       throw new StudioConflictError("当前制作引擎不支持时间调整查询。");
     }
@@ -2723,6 +2728,7 @@ export class ProductionStudio {
 
   async previewNarrationPlan(runId: string): Promise<NarrationPlanPreview> {
     const run = await this.loadRequiredRun(runId);
+    assertIndependentNarration(run);
     assertExecutableRunContinuation(run);
     if (!this.options.pipeline.previewNarrationPlan) throw new StudioConflictError("当前制作服务尚不支持连贯旁白方案。");
     try {
@@ -2737,6 +2743,7 @@ export class ProductionStudio {
   /** §2.2 候选预览：本地核价并签发票据；读取与核价不发起 TTS、不消费、不放行素材。 */
   async previewNarrationPlanV2(runId: string, input: StudioNarrationPreviewV2Input, actor: string): Promise<NarrationPreviewTicketResponseV2> {
     const run = await this.loadRequiredRun(runId);
+    assertIndependentNarration(run);
     assertExecutableRunContinuation(run);
     if (!this.options.pipeline.previewNarrationPlanV2) throw new StudioConflictError("当前制作服务尚不支持分段旁白候选预览。");
     if (!Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 0
@@ -2759,6 +2766,7 @@ export class ProductionStudio {
 
   async confirmNarrationPlanV2(runId: string, input: StudioNarrationConfirmV2Input, actor: string): Promise<StudioNarrationConfirmV2Result> {
     const run = await this.loadRequiredRun(runId);
+    assertIndependentNarration(run);
     assertExecutableRunContinuation(run);
     if (!this.options.pipeline.confirmNarrationPlanV2) throw new StudioConflictError("当前制作服务尚不支持分段旁白计划保存。");
     if (!Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 0
@@ -2786,6 +2794,7 @@ export class ProductionStudio {
 
   async confirmNarrationPlan(runId: string, input: { expectedRunRevision: number; plan: unknown }, actor: string): Promise<StudioRunDetail> {
     const run = await this.loadRequiredRun(runId);
+    assertIndependentNarration(run);
     assertExecutableRunContinuation(run);
     if (!this.options.pipeline.confirmNarrationPlan) throw new StudioConflictError("当前制作服务尚不支持连贯旁白方案。");
     if (!Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 0) throw new StudioInputError("请先查看最新旁白方案。");
@@ -3170,8 +3179,8 @@ export class ProductionStudio {
     }
   }
 
-  async retryFailedNode(runId: string, nodeId: string): Promise<StudioRunDetail> {
-    return this.retryFailedNodeInternal(runId, nodeId, false);
+  async retryFailedNode(runId: string, nodeId: string, nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"]): Promise<StudioRunDetail> {
+    return this.retryFailedNodeInternal(runId, nodeId, false, nativeAudioRecovery);
   }
 
   async queryOriginalTextTask(runId: string, target?: StudioOptionalReviewTarget): Promise<StudioRunDetail> {
@@ -3329,8 +3338,15 @@ export class ProductionStudio {
     return this.retryFailedNodeInternal(runId, pending.nodeId, true);
   }
 
-  private async retryFailedNodeInternal(runId: string, nodeId: string, recoveredTextTask: boolean): Promise<StudioRunDetail> {
+  private async retryFailedNodeInternal(runId: string, nodeId: string, recoveredTextTask: boolean, nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"]): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
+    const retryNativeAudio = canRetryNativeAudioNode(current, nodeId);
+    if (nativeAudioRecovery || retryNativeAudio) {
+      if (!retryNativeAudio || !nativeAudioRecovery || nativeAudioRecovery.expectedRunRevision !== current.revision
+        || nativeAudioRecovery.interventionId !== current.nodeRuns.find(node => node.nodeId === nodeId)?.intervention?.id) {
+        throw new StudioConflictError("原声准备停点已变化，请刷新后再试。");
+      }
+    }
     const pendingTextTask = await loadPendingTextTask(
       this.options.workspaceRoot,
       runId,
@@ -3357,7 +3373,7 @@ export class ProductionStudio {
       && current.nodeRuns.find((node) => node.nodeId === nodeId)?.status === "failed";
     const retryingIncompleteSourceReview = current.status === "needs_human"
       && current.nodeRuns.find((node) => node.nodeId === nodeId)?.intervention?.kind === "source_review_retry";
-    if (!retryingFailure && !retryingIncompleteSourceReview && !canRetryRejectedReviewNode(current, nodeId)) {
+    if (!retryingFailure && !retryingIncompleteSourceReview && !canRetryRejectedReviewNode(current, nodeId) && !retryNativeAudio) {
       throw new StudioConflictError("这个节点当前不能重试，请刷新页面检查最新状态。");
     }
     assertExecutableRunContinuation(current);
@@ -3367,7 +3383,7 @@ export class ProductionStudio {
           runId,
           nodeId,
           (run) => this.publish(this.toDetail(run)),
-          recoveredTextTask || resumeCompletedTextTask
+          nativeAudioRecovery ? { nativeAudioRecovery } : recoveredTextTask || resumeCompletedTextTask
             ? {
               recoverOriginalTextTask: true,
               ...(resumeCompletedTextTask
@@ -3384,7 +3400,7 @@ export class ProductionStudio {
       const updated = await this.options.pipeline.retryFailedNode(
         runId,
         nodeId,
-        recoveredTextTask || resumeCompletedTextTask
+        nativeAudioRecovery ? { nativeAudioRecovery } : recoveredTextTask || resumeCompletedTextTask
           ? {
             recoverOriginalTextTask: true,
             ...(resumeCompletedTextTask
@@ -3400,7 +3416,7 @@ export class ProductionStudio {
       this.publish(detail);
       return detail;
     } catch (error) {
-      if (error instanceof StaleRunRevisionError || (error instanceof Error && /locked by another writer/.test(error.message))) {
+      if (error instanceof HumanDecisionConflictError || error instanceof StaleRunRevisionError || (error instanceof Error && /locked by another writer/.test(error.message))) {
         throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
       }
       throw error;
@@ -3578,7 +3594,7 @@ export class ProductionStudio {
       ["script.draft", brief.providers.script],
       ...(brief.director && brief.providers.director ? [["storyboard.plan", brief.providers.director] as [string, string]] : []),
       ["asset.prepare", brief.providers.assets],
-      ["voice.synthesize", brief.providers.voice],
+      [brief.audioMode === "native_av" ? "audio.prepare_native" : "voice.synthesize", brief.providers.voice],
       ["video.render", brief.providers.render],
       ["quality.review", brief.providers.technicalReview],
       ...(visualReviewEnabled && brief.providers.visualReview ? [["quality.review.visual", brief.providers.visualReview] as [string, string]] : []),
@@ -4454,6 +4470,7 @@ function toRunSummary(run: WorkflowRun<ProductionBrief>): StudioRunSummary {
     id: run.id,
     title: brief.title,
     status: run.status,
+    ...(brief.audioMode ? { audioMode: brief.audioMode } : {}),
     platform: brief.platform,
     durationSeconds: brief.durationSeconds,
     startedAt: run.startedAt,
@@ -4599,8 +4616,8 @@ function toRunDetail(
       : undefined;
     return {
       id,
-      label,
-      role: node?.role ?? role,
+      label: id === "voice" && brief.audioMode === "native_av" ? "原声试听" : label,
+      role: id === "voice" && brief.audioMode === "native_av" ? "声音准备" : node?.role ?? role,
       actionLabel: nodeActionLabel(id, effectiveExecution?.providerId),
       status: node?.status ?? "pending",
       ...(node?.startedAt ? { startedAt: node.startedAt } : {}),
@@ -4724,7 +4741,9 @@ function toRunDetail(
     ...toRunSummary(run),
     ...(characterScriptEditTarget ? { characterScriptEditTarget } : {}),
     revision: run.revision,
+    ...(canRetryNativeAudioNode(run, "voice") && active ? { nativeAudioRecovery: { expectedRunRevision: run.revision, interventionId: active.id } } : {}),
     ...(brief.presentationMode ? { presentationMode: brief.presentationMode } : {}),
+    ...(brief.nativeVideoProviderId ? { nativeVideoProviderId: brief.nativeVideoProviderId } : {}),
     angle: brief.angle,
     audience: brief.audience,
     nicheSlug: brief.nicheSlug,
@@ -5312,6 +5331,12 @@ function parseBriefWithInputError(value: unknown): ProductionBrief {
     return parseBrief(value);
   } catch (error) {
     throw new StudioInputError(productionInputMessage(error));
+  }
+}
+
+function assertIndependentNarration(run: WorkflowRun<ProductionBrief>): void {
+  if (parsePersistedBrief(run.initialInput).audioMode === "native_av") {
+    throw new StudioConflictError("本片使用视频原声，不能独立改词、排轨或恢复TTS字幕。请返回规划修改相应视频，或创建关联返工版本；已有成果保留，涉及新生成仍须确认报价。");
   }
 }
 

@@ -26,6 +26,13 @@ export function includeRegisteredModels(providers: StudioProvider[], connections
       }))],
     };
   });
+  // 素材路由消费已完成的导演方案，不直接调用某一家默认 broker。
+  const router = catalog.find(provider => provider.id === "ai-shot-router-v1");
+  if (router && runtime.python && catalog.some(provider => provider.id === "api-visual-director-v1" && provider.available)) {
+    router.available = true;
+    router.status = "ready";
+    router.requirement = "Python 与视觉导演已配置；付费镜头仍须单独报价授权。";
+  }
   const audio = connections.filter((model) => model.enabled && model.capabilities.includes("audio") && model.capabilities.includes("image"));
   catalog.push({
     id: "sound-review-v1", label: "声音审片员", capability: "quality.review.audio", kind: "external",

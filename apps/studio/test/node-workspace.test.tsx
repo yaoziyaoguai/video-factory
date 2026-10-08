@@ -1197,6 +1197,19 @@ describe("node production workspaces", () => {
     expect(screen.getByLabelText("实际配音试听")).toHaveAttribute("src", "/api/runs/run-1/artifacts/voice-audio/content");
   });
 
+  it("labels current and previous native audio without calling them purchased TTS", () => {
+    const props = { acceptedPlanDigest: TEST_PLAN_DIGEST, runId: "run-native-audio-label", runRevision: 2, nativeAudio: true,
+      node: { ...succeededNode, id: "voice", label: "原声试听", role: "声音准备", output: { audioMode: "native_av" } },
+      artifacts: [{ id: "native-audio", kind: "voiceover", createdAt: "2026-10-08T00:00:00.000Z", contentType: "audio/wav",
+        contentUrl: "/api/runs/run-native-audio-label/artifacts/native-audio/content", producerNodeId: "voice" }],
+      busy: false, onOverride: async () => undefined, onInputOverride: async () => undefined, onAuthorize: async () => undefined };
+    const view = render(<NodeWorkspace {...props} runStatus="succeeded" />);
+    expect(screen.getByLabelText("实际原声试听")).toHaveAttribute("src", props.artifacts[0]!.contentUrl);
+    expect(screen.queryByLabelText("实际配音试听")).not.toBeInTheDocument();
+    view.rerender(<NodeWorkspace {...props} runStatus="stale" />);
+    expect(screen.getByLabelText("上次准备的原声试听")).toHaveAttribute("src", props.artifacts[0]!.contentUrl);
+  });
+
   it("edits voice instructions as node input instead of pretending generated audio metadata is editable", async () => {
     const onInputOverride = vi.fn(async () => undefined);
     render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}

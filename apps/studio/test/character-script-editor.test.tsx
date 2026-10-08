@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { CreativeDiscussionPanel } from "../src/client/components/CreativeDiscussionPanel.js";
 import { NodeDeliveryPreview } from "../src/client/components/NodeDeliveryPreview.js";
@@ -65,4 +66,33 @@ it("reads role names and ordered dialogue in historical script deliveries", () =
   expect(screen.getByText(script.scenes[0].dialogue[0].text)).toBeInTheDocument();
   expect(screen.getByText(script.scenes[3].dialogue[1].text)).toBeInTheDocument();
   expect(screen.queryByText("旁白 · 观众听到的内容")).not.toBeInTheDocument();
+});
+
+it("native character editing keeps dialogue and sound intent without promising a TTS voice", async () => {
+  const user = userEvent.setup();
+  const catalog = vi.spyOn(studioApi, "voices").mockResolvedValue(voices);
+  const command = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
+  render(<CreativeDiscussionPanel review={{ ...review(), runId: "run-native-character-editor" }} nativeAudio busy={false} onCommand={command} />);
+  expect(screen.queryAllByText("已选配音音色")).toHaveLength(0);
+  await user.click(screen.getByText(/手动修订这份稿件/));
+  const intent = await screen.findByLabelText("角色 1 · 声音要求");
+  expect(screen.queryByLabelText("角色 1 · 音色")).not.toBeInTheDocument();
+  expect(screen.queryByText(/按角色分别配音/)).not.toBeInTheDocument();
+  expect(catalog).not.toHaveBeenCalled();
+  await user.clear(intent);
+  await user.type(intent, "低声说话，略带着急");
+  await user.click(screen.getByRole("button", { name: "保存修订" }));
+  await waitFor(() => expect(command).toHaveBeenCalledOnce());
+  const saved = command.mock.calls[0]![0] as unknown as { action: string; document: typeof script };
+  expect(saved.action).toBe("edit_draft");
+  expect(saved.document.characters[0]).toMatchObject({ voice_intent: "低声说话，略带着急", voice_profile_id: script.characters[0].voice_profile_id });
+  expect(saved.document.scenes).toEqual(script.scenes);
+});
+
+it("native script deliveries label pauses as intentions, not verified TTS timing", () => {
+  render(<NodeDeliveryPreview nodeId="script" value={script} nativeAudio />);
+  expect(screen.queryAllByText("已选配音音色")).toHaveLength(0);
+  expect(screen.queryAllByText("尚未选择音色")).toHaveLength(0);
+  expect(screen.getAllByText(/停顿意图/).length).toBeGreaterThan(0);
+  expect(screen.getByText(script.scenes[0].dialogue[0].text)).toBeInTheDocument();
 });

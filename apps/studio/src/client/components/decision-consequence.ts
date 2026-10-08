@@ -1,4 +1,4 @@
-import type { StudioIntervention } from "../../shared/api.js";
+import type { StudioIntervention, StudioRunDetail } from "../../shared/api.js";
 
 /**
  * 决定栏的输入只来自结构化干预字段（nodeId/kind/boundary/reviewStatus/continuationScope）
@@ -12,6 +12,7 @@ export interface DecisionConsequenceFacts {
   continuationScope?: StudioIntervention["continuationScope"];
   /** 图里是否真的存在 publish-package 下游节点；终审批准后的文案费用说明以此为准。 */
   hasPublishPackageNode: boolean;
+  audioMode?: StudioRunDetail["audioMode"];
 }
 
 export interface DecisionConsequenceView {
@@ -66,7 +67,9 @@ export function decisionConsequenceView(facts: DecisionConsequenceFacts): Decisi
     return {
       consequence: "接受后只继续后续制作，保留“审查未完成、无评分”事实；复用已生成的画面，不会重新购买已成功素材。",
       rerunNote: "可只重试审查",
-      costNote: "已有费用授权不扩大；后续配音、渲染仍按已选服务规则计费",
+      costNote: facts.audioMode === "native_av"
+        ? "已有费用授权不扩大；本地准备视频原声，不另买配音；审片等模型调用按已选服务计费"
+        : "已有费用授权不扩大；后续配音、渲染仍按已选服务规则计费",
     };
   }
   if (facts.nodeId === "publish-package") {
@@ -80,7 +83,9 @@ export function decisionConsequenceView(facts: DecisionConsequenceFacts): Decisi
     return {
       consequence: "放行后进入下一节点，不会重跑当前节点。",
       rerunNote: "不重跑当前节点",
-      costNote: "付费画面按既有流程报价；自动按量配音和模型依已选服务规则计费",
+      costNote: facts.audioMode === "native_av"
+        ? "原生视频按既有流程报价；原声准备为本地处理，不另买配音；其它模型调用按已选服务计费"
+        : "付费画面按既有流程报价；自动按量配音和模型依已选服务规则计费",
     };
   }
   return {

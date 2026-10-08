@@ -893,6 +893,7 @@ export interface StudioRunSummary {
   id: string;
   title: string;
   status: StudioRunStatus;
+  audioMode?: "tts" | "native_av";
   platform: string;
   durationSeconds: number;
   startedAt: string;
@@ -1013,6 +1014,8 @@ export interface StudioRunArchiveInput {
 
 export interface StudioRunDetail extends StudioRunSummary {
   revision: number;
+  nativeAudioRecovery?: { expectedRunRevision: number; interventionId: string };
+  nativeVideoProviderId?: string;
   presentationMode?: "narration" | "character_drama";
   angle: string;
   audience: string;
@@ -1477,7 +1480,7 @@ export interface StudioArtifact {
 export interface StudioIntervention {
   id: string;
   nodeId: string;
-  kind?: "creative_review" | "source_review_retry" | "source_review_decision";
+  kind?: "creative_review" | "source_review_retry" | "source_review_decision" | "local_preparation_retry";
   /** 节点边界的"完成待放行"停点：这一步已做完，产物已存，只等你决定是否进入下一步。 */
   boundary?: "node-complete";
   reason: string;
@@ -2171,6 +2174,8 @@ export interface StudioReworkDraft {
 
 export interface StudioProductionInput {
   protocolVersion: "video-factory/brief-v1";
+  audioMode?: "tts" | "native_av";
+  nativeVideoProviderId?: string;
   presentationMode?: "narration" | "character_drama";
   title: string;
   angle: string;
@@ -2202,7 +2207,7 @@ export interface StudioProductionInput {
     caseSelectionId?: string;
   };
   rework?: StudioReworkContext;
-  voiceDirection: StudioVoiceDirection;
+  voiceDirection?: StudioVoiceDirection;
   providers: {
     script: string;
     director?: string;

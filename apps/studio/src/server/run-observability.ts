@@ -57,6 +57,7 @@ export interface StudioRunObservability {
 }
 
 export function nodeActionLabel(nodeId: string, providerId?: string): string {
+  if (nodeId === "voice" && providerId === "python-native-audio-v1") return "正在从已采用的视频本地准备原声，不调用配音模型";
   if (nodeId === "script" && providerId !== "codex-screenwriter-v1") return "编剧正在生成结构化脚本";
   return NODE_ACTIONS[nodeId] ?? "正在完成当前节点的创作交付";
 }

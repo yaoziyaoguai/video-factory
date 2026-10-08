@@ -108,7 +108,7 @@ export interface CodexScreenwriterAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_SCREENWRITER_TIMEOUT_MS = 660_000;
 const DEFAULT_SCREENWRITER_MAX_ATTEMPTS = 2;
-export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v21|role-audit-v9|script-validator-v5|visual-plan-v2|production-capabilities-v4|voice-timing-v1|creative-treatment-v2|canon-facts-v2|article-sources-v1|creator-paced-opening-v1|audit-capabilities-once-v1|character-script-v1";
+export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v22|role-audit-v9|script-validator-v5|visual-plan-v2|production-capabilities-v5|voice-timing-v1|creative-treatment-v2|canon-facts-v2|article-sources-v1|creator-paced-opening-v1|audit-capabilities-once-v1|character-script-v1|native-av-v1";
 
 // id 固定为 codex-screenwriter-v1：brief.providers.script 持久化该 id，registry 按 id 匹配 provider。
 export class CodexScreenwriterAgent implements ScreenwriterAgent {

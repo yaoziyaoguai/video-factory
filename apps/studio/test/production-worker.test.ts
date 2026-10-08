@@ -11,6 +11,22 @@ import { readMeteredImageProviderSettings } from "../src/server/image-provider-s
 import { readMeteredVideoProviderSettings } from "../src/server/video-provider-settings.js";
 import { buildStudioChildEnvironment } from "../src/server/studio-child-environment.js";
 import { assetProviderDeliveryTypes, assetProviderSupportsReferenceImage, buildProviderCatalog } from "../src/server/provider-catalog.js";
+import { estimateVideoGenerationCostCny } from "../../../packages/production-pipeline/src/generative-asset-worker.js";
+
+it("native sound is local and Seedance 2.5 is priced by the rendered specification, not a fixed clip", () => {
+  const environment = { ARK_API_KEY: "controlled", SEEDANCE_ESTIMATED_CNY_PER_CLIP: "8" };
+  const setting = readMeteredVideoProviderSettings(environment)[0]!;
+  const profile = setting.models.find(item => item.id === "doubao-seedance-2-5-260628")!;
+  assert.equal(estimateVideoGenerationCostCny(5, 8, profile), 7.56);
+  assert.equal(estimateVideoGenerationCostCny(15, 8, profile), 22.68);
+  assert.equal(estimateVideoGenerationCostCny(5, 8, { ...profile, resolutions: ["1080p"] }), 18.71);
+  const catalog = buildProviderCatalog({ python: true, ffmpeg: true, ffprobe: true, say: false }, environment, { available: false });
+  const native = catalog.find(item => item.id === "python-native-audio-v1");
+  assert.equal(native?.capability, "audio.prepare_native");
+  assert.equal(native?.available, true);
+  assert.equal(native?.billing, "free");
+  assert.equal(catalog.find(item => item.id === "wan-video-v1")?.modelProfiles?.find(item => item.id === "wan3.0-video")?.supportsAudio, true);
+});
 
 describe("production Python runtime", () => {
   it("prefers an explicit runtime, then the verified project environment", () => {

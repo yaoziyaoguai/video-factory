@@ -33,6 +33,7 @@ interface NodeWorkspaceProps {
   runRevision: number;
   onRunUpdated?: (run: import("../../shared/api.js").StudioRunDetail) => void;
   characterDrama?: boolean;
+  nativeAudio?: boolean;
   onEditCharacters?: () => void;
   acceptedPlanDigest: string;
   artifacts: StudioArtifact[];
@@ -65,7 +66,7 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, onRunUpdated, characterDrama: propsCharacterDrama = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, hideExecutionConfiguration = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, onRunUpdated, characterDrama: propsCharacterDrama = false, nativeAudio = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, hideExecutionConfiguration = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
   onAuthorizeProductionScope = async input => { await studioApi.authorizeProductionScope(runId, input); },
   onAmendProductionScope = async (authorizationId, input) => { await studioApi.amendProductionScope(runId, authorizationId, input); },
   onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
@@ -133,6 +134,9 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     && (effectiveVersion?.artifactIds?.length
       ? effectiveVersion.artifactIds.includes(audioArtifact.id)
       : effectiveVersion?.source !== "human"));
+  const audioCaption = audioIsCurrent
+    ? nativeAudio ? "实际原声试听" : "实际配音试听"
+    : nativeAudio ? "上次准备的原声" : "上次生成的配音";
   const visualArtifacts = useMemo(
     () => selectMaterializedVisualArtifacts(node, artifacts, effectiveVersion?.artifactIds),
     [artifacts, effectiveVersion?.artifactIds, node],
@@ -478,12 +482,12 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
 
   return (
     <>
-    {!readOnly && node.status === "needs_human"
+    {!nativeAudio && !readOnly && node.status === "needs_human"
       && node.id === (nodes.some((candidate) => candidate.id === "asset-source-review") ? "asset-source-review" : "assets")
       && nodes.some((candidate) => candidate.id === "voice" && candidate.status === "pending"
         && candidate.plannedExecution?.providerId === "minimax-tts-v1")
       ? <NarrationPlanEditor key={runId} runId={runId} runRevision={runRevision} characterDrama={propsCharacterDrama} disabled={busy || runStatus === "running"} {...(onEditCharacters ? { onEditCharacters } : {})} {...(onRunUpdated ? { onRunUpdated } : {})} /> : null}
-    {!readOnly && activeInterventionId
+    {!nativeAudio && !readOnly && activeInterventionId
         && ((nodes.some((candidate) => candidate.id === "voice" && candidate.status === "needs_human")
               && (node.id === "voice" || node.id === "render"))
           || (node.id === "final-review" && node.status === "needs_human"
@@ -522,7 +526,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>{fallbackHeading}</strong>：{fallbackReason}</span></p> : null}
         {node.outputState?.stale ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} />这一步的结果已经过期，后续成片不会继续采用它。请检查人工版本后重新生成；仍然适用的部分会自动保留，不会全部重做。</p> : null}
-        {node.executionConfiguration && !showPlanningStages && !hideExecutionConfiguration ? <NodeExecutionConfigurationEditor
+        {node.executionConfiguration && !showPlanningStages && !hideExecutionConfiguration && !(nativeAudio && ["voice", "assets"].includes(node.id)) ? <NodeExecutionConfigurationEditor
           node={node}
           providers={providers}
           runStatus={runStatus}
@@ -599,7 +603,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             {hasEditableInput ? <section ref={inputEditorSectionRef} className="node-output-preview">
               <header><div><strong>{editingPlanningStageId ? `正在修改创作规划「${editingPlanningStageId === "treatment" ? "前期构思" : editingPlanningStageId === "script" ? "脚本" : "导演方案"}」阶段的输入` : "本步骤专用设置"}</strong><small>{inputSourceLabel(effectiveInputVersion?.source)}{node.inputState?.stale ? " · 前序内容已变化，需复核" : ""}{editingPlanningStageId ? " · 保存后从该阶段开始重新规划" : ""}</small></div>{!editingInput ? <button className="button button-ghost" type="button" onClick={() => beginInputEditing()}><FilePenLine aria-hidden="true" size={15} />编辑输入</button> : null}</header>
               {effectiveInputVersion?.source === "reconstructed" ? <p className="node-version-note">旧任务没有保存当时的原始输入；这里展示的是按当前上游内容推断出的可编辑版本。</p> : null}
-              {editingInput ? <NodeStructuredEditor nodeId={`${node.id}-input`} value={safeParse(inputDraft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setInputDraft(pretty(value)); }} /> : <NodeDeliveryPreview nodeId={`${node.id}-input`} value={effectiveInput(node)} />}
+              {editingInput ? <NodeStructuredEditor nativeAudio={nativeAudio} nodeId={`${node.id}-input`} value={safeParse(inputDraft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setInputDraft(pretty(value)); }} /> : <NodeDeliveryPreview nativeAudio={nativeAudio} nodeId={`${node.id}-input`} value={effectiveInput(node)} />}
               {editingInput ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelInputEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveInputOverride()}><Save aria-hidden="true" size={15} />保存人工输入</button></footer> : null}
             </section> : null}
           </div>
@@ -680,7 +684,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         ) : null}
 
         <section className="node-output-preview node-creator-delivery">
-          <header><div><strong>{node.id === "creative-planning" ? "规划交付目录" : `${node.role ?? "制作角色"}的交付`}</strong><small>{node.id === "creative-planning" ? "逐项查看已保存的阶段稿和正式交付；修改与确认在创作工作台进行" : deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
+          <header><div><strong>{node.id === "creative-planning" ? "规划交付目录" : `${node.role ?? "制作角色"}的交付`}</strong><small>{node.id === "creative-planning" ? "逐项查看已保存的阶段稿和正式交付；修改与确认在创作工作台进行" : nativeAudio && node.id === "voice" ? "声音来自已采用的视频，可在此试听；如需改词或改声音模式，请关联返工。" : deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
           {node.id === "assets" && visualArtifacts.length ? <div className={visualsAreCurrent ? "node-visual-preview" : "node-visual-preview is-stale"}>
             <header><strong>{visualsAreCurrent ? "实际素材画面" : "上次生成的素材画面"}</strong><small>{visualArtifacts.length} 个可预览素材{visualsAreCurrent ? "" : " · 将重新检查适用性，只重做不再适用的部分"}</small></header>
             <div>
@@ -699,9 +703,10 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             artifactIds={planningArtifactIds}
             artifacts={artifacts}
             publicationExpected={node.status === "succeeded"}
+            nativeAudio={nativeAudio}
             creativeReview={asRecord(effectiveOutput(node) ?? (node.outputState ? undefined : node.output))?.creativeReview}
             stale={node.outputState?.stale === true}
-          /> : editing ? <NodeStructuredEditor nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <p className="node-workspace-error" role="alert">详细内容读取失败：{documentError}</p> : <NodeDeliveryPreview nodeId={node.id} value={documentPreview ?? effectiveOutput(node) ?? node.output} />}
+          /> : editing ? <NodeStructuredEditor nativeAudio={nativeAudio} nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <p className="node-workspace-error" role="alert">详细内容读取失败：{documentError}</p> : <NodeDeliveryPreview nativeAudio={nativeAudio} nodeId={node.id} value={documentPreview ?? effectiveOutput(node) ?? node.output} />}
           {contentReview && !editing ? <NodeContentReview value={contentReview} /> : null}
           {contentReview && !editing && (node.id === "publish-package" || node.id === "reference-grammar") && onReviseDocument && onAuditDocument
             ? <NodeDocumentCommands
@@ -718,7 +723,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           {(node.id === "reference-grammar" || node.id === "publish-package") && !editing
             ? <NodeDocumentHistory nodeId={node.id} outputState={node.outputState} artifacts={artifacts} />
             : null}
-          {audioArtifact?.contentUrl ? <div className={audioIsCurrent ? "node-audio-preview" : "node-audio-preview is-stale"}><div><strong>{audioIsCurrent ? "实际配音试听" : "上次生成的配音"}</strong>{!audioIsCurrent ? <small>当前文字已修改或上游已变化；继续生成后会更新声音。</small> : null}</div><audio aria-label={audioIsCurrent ? "实际配音试听" : "上次生成的配音试听"} src={audioArtifact.contentUrl} controls preload="metadata" /></div> : null}
+          {audioArtifact?.contentUrl ? <div className={audioIsCurrent ? "node-audio-preview" : "node-audio-preview is-stale"}><div><strong>{audioCaption}</strong>{!audioIsCurrent ? <small>当前文字已修改或上游已变化；继续生成后会更新声音。</small> : null}</div><audio aria-label={audioIsCurrent ? audioCaption : `${audioCaption}试听`} src={audioArtifact.contentUrl} controls preload="metadata" /></div> : null}
           {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
         </section>
 

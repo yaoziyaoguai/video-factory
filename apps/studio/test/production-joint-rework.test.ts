@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it, mock } from "node:test";
 import {
   ProductionPipeline,
+  PythonWorkerClient,
   FileRunStore,
   canonicalJsonV2,
   buildCharacterNarrationPlan,
@@ -35,6 +37,136 @@ import { studioApi } from "../src/client/api.js";
 import type { StudioProvider } from "../src/shared/api.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
+
+it("native AV formal pipeline preserves human gates and retries only local audio, with TTS APIs rejected", async (t) => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-native-pipeline-"));
+  t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+  const python = new PythonWorkerClient({ command: ["python3", "-m", "video_factory.worker"],
+    cwd: repositoryRoot, env: { PATH: process.env.PATH!, PYTHONPATH: path.join(repositoryRoot, "src") }, timeoutMs: 120_000 });
+  const calls: string[] = [];
+  const agents = jointReworkAgents({ treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] });
+  const direct = async (input: VisualDirectorAgentInput) => {
+    const old = await agents.directorAgent!.plan(input);
+    return { ...old, shots: old.shots.map(shot => ({ ...shot, preferredProviderId: "wan-video-v1",
+      deliveryType: "generated_video" as const, estimatedCostCny: 4.8 })) };
+  };
+  let failAudioOnce = true;
+  const worker = { run: async (request: Record<string, unknown>): Promise<WorkerResponse> => {
+    const capability = String(request.capability);
+    calls.push(capability);
+    assert.notEqual(capability, "voice.synthesize", "原生制作不能偷偷调用TTS");
+    const dir = String(request.outputDir);
+    await mkdir(dir, { recursive: true });
+    const artifact = async (uri: string, kind: string, contentType: string) => {
+      const bytes = await readFile(uri);
+      return { uri, kind, contentType, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.length,
+        provenance: { providerId: String((request.parameters as Record<string, unknown>).providerId), producerNodeId: String(request.nodeRunId),
+          attempt: Number(request.attempt), licenseNote: "Controlled local fixture; zero provider calls." } };
+    };
+    if (capability === "asset.prepare") {
+      const input = request.input as Record<string, unknown>;
+      const executable = JSON.parse(await readFile(String(input.executablePlanPath), "utf8"));
+      const assets = [];
+      const artifacts = [];
+      for (const cut of executable.cuts) {
+        const uri = path.join(dir, `scene-${cut.scenePosition}.mp4`);
+        await promisify(execFile)("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=blue:s=180x320:r=25:d=9", "-f", "lavfi", "-i",
+          "sine=frequency=440:sample_rate=48000:duration=9", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", uri]);
+        artifacts.push(await artifact(uri, "media_asset", "video/mp4"));
+        assets.push({ scene_position: cut.scenePosition, local_path: uri, media_type: "video", provider: "wan", asset_id: `task-${cut.scenePosition}`,
+          width: 180, height: 320, duration: 9, duration_frames: cut.frameCount, source_in_frame: cut.sourceInFrame,
+          asset_key: cut.assetKey, license_note: "controlled fixture", source_url: "https://example.com/fixture" });
+      }
+      const uri = path.join(dir, "asset_plan.json");
+      await writeFile(uri, JSON.stringify({ scene_assets: assets }));
+      artifacts.push(await artifact(uri, "asset_plan", "application/json"));
+      return { protocolVersion: "video-factory/worker-v1", commandId: String(request.commandId), status: "succeeded",
+        output: { assetPlanPath: uri }, artifacts, diagnostics: { providerOutcomeKnown: true, meteredAttemptCount: 0 } };
+    }
+    if (capability === "audio.prepare_native" && failAudioOnce) {
+      failAudioOnce = false;
+      const uri = path.join(dir, "native_audio_report.json");
+      await writeFile(uri, JSON.stringify({ code: "audio_decode_failed", message: "受控本地解码错误" }));
+      return { protocolVersion: "video-factory/worker-v1", commandId: String(request.commandId), status: "rejected",
+        output: { audioMode: "native_av", nativeAudioIssue: "audio_decode_failed" },
+        error: { code: "NATIVE_AUDIO_UNAVAILABLE", message: "受控本地解码错误" }, artifacts: [await artifact(uri, "native_audio_report", "application/json")],
+        diagnostics: { providerOutcomeKnown: true, meteredAttemptCount: 0 } };
+    }
+    return python.run(capability === "video.render" ? { ...request, parameters: { ...request.parameters as object, resolution: "180x320" } } : request);
+  } };
+  const pipeline = new ProductionPipeline({ workspaceRoot, worker, ...agents,
+    directorAgent: { ...agents.directorAgent!, plan: direct, planDetailed: async input => input.creativeReviewExecution?.mode === "check"
+      ? passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "视觉导演", "director-plan", "director-model-one")
+      : { output: await direct(input), trace: { taskKind: "director-plan", promptVersion: "v1", prompt: "fixture", providerId: "openai", modelId: "director-model-one" } } },
+    // 能力目录的参考镜价不是费用授权依据；即便目录估价暂缺，运行时已核型号仍必须报价。
+    assetProviders: [{ id: "wan-video-v1", label: "Wan", billing: "metered", modes: ["生成视频"], deliveryTypes: ["generated_video"], estimatedCnyPerClip: 0, generative: true }],
+    providerRuntimeMetadata: [{ id: "wan-video-v1", label: "Wan", modelId: "wan3.0-video", transport: "http_api", billing: "metered", approvalPolicy: "manual", estimatedCostCny: 4.8, maxAttempts: 1,
+      modelProfiles: [{ modelId: "wan3.0-video", estimatedCostCny: 4.8, minDurationSeconds: 2, maxDurationSeconds: 15, resolutions: ["720P"], supportsAudio: true }] }] });
+  const { voiceDirection: _voice, ...base } = jointReworkBrief();
+  const brief = { ...base, audioMode: "native_av" as const, nativeVideoProviderId: "wan-video-v1", models: { "wan-video-v1": "wan3.0-video" },
+    providers: { ...base.providers, assets: "ai-shot-router-v1", voice: "python-native-audio-v1" },
+    director: { profileId: "auto" as const, assetProviderIds: ["wan-video-v1"] }, economics: { recipeId: "custom" as const, allowMeteredProviders: true },
+    workflowFeatures: { ...base.workflowFeatures!, boundaryGates: "user-confirmed-v1" as const } };
+  let run = await confirmGatedRework(pipeline, brief);
+  const approve = async () => {
+    const gate = run.nodeRuns.find(node => node.status === "needs_human")!.intervention!;
+    run = await pipeline.decide(run.id, { interventionId: gate.id, action: "approve", actor: "tester", expectedRunRevision: run.revision, reviewEvidenceId: null });
+  };
+  assert.equal(run.nodeRuns.find(n => n.status === "needs_human")?.nodeId, "creative-planning");
+  await approve();
+  const spend = run.nodeRuns.find(n => n.nodeId === "assets")!.spendPlan!;
+  assert.ok(spend, JSON.stringify({ nodes: run.nodeRuns.map(n => ({ id: n.nodeId, status: n.status, error: n.error, intervention: n.intervention, output: n.nodeId === "assets" ? n.output : undefined })), calls }));
+  assert.deepEqual(calls, []);
+  run = await pipeline.authorizeSpend(run.id, { spendPlanId: spend.id, nodeId: spend.nodeId, inputVersionIds: spend.inputVersionIds,
+    providerId: spend.providerId, modelId: spend.modelId, maxCostCny: spend.maxCostCny, maxAttempts: spend.maxAttempts, approvedBy: "tester" });
+  assert.equal(run.nodeRuns.find(n => n.status === "needs_human")?.nodeId, "assets");
+  await approve();
+  assert.equal(run.status, "needs_human");
+  assert.equal((run.nodeRuns.find(n => n.nodeId === "voice")?.output as Record<string, unknown>).nativeAudioIssue, "audio_decode_failed");
+  const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: async () => true, environment: {} });
+  const app = buildStudioApp({ service, logger: false });
+  t.after(() => app.close());
+  assert.equal((await app.inject({ method: "GET", url: `/api/runs/${run.id}/narration-plan` })).statusCode, 409);
+  assert.equal((await app.inject({ method: "POST", url: `/api/runs/${run.id}/narration-revisions`, payload: {
+    expectedRunRevision: run.revision, scenePosition: 1, narration: "替换台词", note: "原生模式不能购买旁白",
+  } })).statusCode, 409);
+  const before = await pipeline.loadPersisted(run.id);
+  const assetsHash = before.artifacts.filter(a => a.kind === "media_asset").map(a => a.sha256);
+  const recovery = (await app.inject({ method: "GET", url: `/api/runs/${run.id}` })).json().nativeAudioRecovery;
+  assert.deepEqual(recovery, { expectedRunRevision: run.revision, interventionId: run.nodeRuns.find(n => n.nodeId === "voice")!.intervention!.id });
+  const dispatchRetry = pipeline.dispatchRetryFailedNode.bind(pipeline);
+  let retryCompletion: Promise<unknown> | undefined;
+  t.mock.method(pipeline, "dispatchRetryFailedNode", async (...args: Parameters<typeof dispatchRetry>) => {
+    const operation = await dispatchRetry(...args);
+    retryCompletion = operation.completion;
+    return operation;
+  });
+  const retryUrl = `/api/runs/${run.id}/nodes/voice/retry`;
+  assert.equal((await app.inject({ method: "POST", url: retryUrl })).statusCode, 409, "重试必须绑定当前失败停点");
+  assert.equal((await app.inject({ method: "POST", url: retryUrl, payload: { ...recovery, expectedRunRevision: run.revision - 1 } })).statusCode, 409);
+  const resumed = await app.inject({ method: "POST", url: retryUrl, payload: recovery });
+  assert.equal(resumed.statusCode, 200, resumed.body);
+  // HTTP 返回首个 checkpoint，不代表后台已释放租约；下一次直接管线调用须等正式 completion。
+  assert.ok(retryCompletion);
+  await retryCompletion;
+  run = await pipeline.loadPersisted(run.id);
+  assert.ok(run.revision > before.revision);
+  assert.equal(run.nodeRuns.find(n => n.status === "needs_human")?.nodeId, "voice", JSON.stringify(run.nodeRuns.map(n => ({ id: n.nodeId, error: n.error }))));
+  assert.equal((run.nodeRuns.find(n => n.nodeId === "voice")!.output as Record<string, unknown>).subtitleStatus, "unavailable");
+  assert.equal(calls.filter(c => c === "asset.prepare").length, 1);
+  assert.equal(calls.filter(c => c === "audio.prepare_native").length, 2);
+  assert.equal((await app.inject({ method: "POST", url: retryUrl, payload: recovery })).statusCode, 409, "重复或旧标签提交不能重复处理");
+  assert.deepEqual(run.artifacts.filter(a => a.kind === "media_asset").map(a => a.sha256), assetsHash);
+  await approve();
+  assert.equal(run.nodeRuns.find(n => n.status === "needs_human")?.nodeId, "render");
+  const video = (run.nodeRuns.find(n => n.nodeId === "render")!.output as Record<string, unknown>).videoPath;
+  await promisify(execFile)("ffmpeg", ["-v", "error", "-xerror", "-i", String(video), "-f", "null", "-"]);
+  const detail = (await app.inject({ method: "GET", url: `/api/runs/${run.id}` })).json();
+  assert.equal(detail.audioMode, "native_av");
+  assert.equal(detail.nodes.find((n: { id: string }) => n.id === "voice").label, "原声试听");
+  const summaries = (await app.inject({ method: "GET", url: "/api/runs" })).json();
+  assert.equal(summaries.find((entry: { id: string }) => entry.id === run.id)?.audioMode, "native_av");
+});
 
 it("MC-A08/24 character script reopens after planning without generation; edits resume the real graph", async (t) => {
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-character-reopen-"));

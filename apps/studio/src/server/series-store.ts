@@ -1215,9 +1215,8 @@ function blockingPriorEpisode(series: SeriesRecord, episode: StudioSeriesEpisode
   return [...series.episodes]
     .filter((candidate) => candidate.episodeNumber < episode.episodeNumber)
     .sort((left, right) => left.episodeNumber - right.episodeNumber)
-    .find((candidate) => (candidate.status !== "ready" && candidate.status !== "published")
-      || (!isMigrationEpisode(candidate)
-        && !series.canon.facts.some((fact) => fact.sourceEpisodeId === candidate.id)));
+    // ready 来自有效终审交接；本集可以没有新增事实，不能因此禁止下一集。
+    .find((candidate) => candidate.status !== "ready" && candidate.status !== "published");
 }
 
 function blockingDownstreamEpisode(series: SeriesRecord, episode: StudioSeriesEpisode): StudioSeriesEpisode | undefined {

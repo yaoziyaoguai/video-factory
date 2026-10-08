@@ -24,6 +24,7 @@ export { CreativeDraft } from "./CreativeDraftReader.js";
 interface CreativeDiscussionPanelProps {
   review: StudioCreativeReviewSnapshot;
   busy: boolean;
+  nativeAudio?: boolean;
   onDraftDirtyChange?: (dirty: boolean) => void;
   onCommand(input: StudioCreativeReviewCommandInput): Promise<void | StudioCreativeReviewCommandReceipt>;
   /** CLOUD-11/P5.2：run 的服务目录（来自 RunPage runProviders），供“素材安排待补齐”筛选兼容来源。 */
@@ -61,7 +62,7 @@ interface PendingRiskConfirm {
   command: StudioCreativeReviewCommandInput;
 }
 
-export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyChange, providers = [] }: CreativeDiscussionPanelProps) {
+export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyChange, providers = [], nativeAudio = false }: CreativeDiscussionPanelProps) {
   const purposeKey = review.reviewPurpose ?? "draft";
   // 旧版按版本号写 localStorage 的草稿 key：只作一次性只读导入来源，不再写入。
   const storageKey = `vf:creative-draft:${review.runId}:${review.stage}:${purposeKey}${review.draftVersionId ? `:${review.draftVersionId}` : ""}`;
@@ -668,8 +669,8 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
             }}>查看 {review.checkResult.issues.length} 条建议</button> : null}
           </div>
           {handoffNotice ? <p className="creative-handoff-notice" role="status">当前稿件已更新</p> : null}
-          <CreativeDraftEditor sessionSlotKey={sessionSlotKey} sessionBase={sessionBase} legacyEditStorageKey={`${storageKey}:edit`} draftIdentity={`${review.draftVersionId ?? review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} evidenceRepairs={evidenceRepairs} providers={providers} allowedRetrievalProviderIds={review.stage === "treatment" ? review.draftValidation?.allowedRetrievalProviderIds : undefined} />
-          <CreativeDraftReader key={`${review.runId}:${draftIdentity}:${review.draftArtifactId}`} stage={review.stage} value={review.draft} />
+          <CreativeDraftEditor nativeAudio={nativeAudio} sessionSlotKey={sessionSlotKey} sessionBase={sessionBase} legacyEditStorageKey={`${storageKey}:edit`} draftIdentity={`${review.draftVersionId ?? review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} evidenceRepairs={evidenceRepairs} providers={providers} allowedRetrievalProviderIds={review.stage === "treatment" ? review.draftValidation?.allowedRetrievalProviderIds : undefined} />
+          <CreativeDraftReader key={`${review.runId}:${draftIdentity}:${review.draftArtifactId}`} stage={review.stage} value={review.draft} nativeAudio={nativeAudio} />
           {incompleteCheck ? <section className="creative-check-result" role="status"><strong>独立复核未完成 · 无评分</strong><p>{review.checkResult?.summary}</p></section> : null}
           {needsStockConsent ? <section className="creative-check-result" role="status">
             <strong>可以先制作首版，但请了解素材风险</strong>
@@ -682,7 +683,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
             selectedIds={selectedIds}
             onChange={setSelectedIds}
           /></details>
-          {review.previousDraft !== undefined ? <details><summary>查看上一版</summary><CreativeDraft stage={review.stage} value={review.previousDraft} /></details> : null}
+          {review.previousDraft !== undefined ? <details><summary>查看上一版</summary><CreativeDraft stage={review.stage} value={review.previousDraft} nativeAudio={nativeAudio} /></details> : null}
           <a href="#creative-review-history">查看完整创作版本记录</a>
           {/* 停在这里是因为自动循环推不动了，不是这一版做完了。不说出来，人会以为一切正常。 */}
           {review.stopDetail ? <section className="creative-check-result" role="status">
@@ -716,7 +717,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
           </section> : null}
           {review.proposals.map((proposal) => <section className="creative-proposal" key={proposal.proposalId}>
             <header><strong>{review.scopeConflict?.proposalId === proposal.proposalId ? "越界新稿 · 仅供比较" : "备选方案"}</strong><small>{proposal.changeSummary.join("；") || "可与当前方案比较"}</small></header>
-            <CreativeDraft stage={review.stage} value={proposal.document} />
+            <CreativeDraft stage={review.stage} value={proposal.document} nativeAudio={nativeAudio} />
             {review.scopeConflict?.proposalId === proposal.proposalId ? <p>这份新稿尚未被采用；调整返工范围并重新报价前不能使用。</p>
               : <button type="button" className="button button-secondary" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || !review.allowedActions.includes("adopt_proposal")} onClick={() => void submit({ action: "adopt_proposal", commandId: crypto.randomUUID(), ...commandBase, proposalId: proposal.proposalId }).catch(() => undefined)}>采用这个备选</button>}
           </section>)}
@@ -919,7 +920,7 @@ const ACQUISITION_LABEL: Record<string, string> = {
   pipeline_retrievable: "图库检索画面",
 };
 
-function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey, draftIdentity, stage, draft, busy, onSave, onDirtyChange, evidenceRepairs = [], providers = [], allowedRetrievalProviderIds }: {
+function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey, draftIdentity, stage, draft, busy, onSave, onDirtyChange, evidenceRepairs = [], providers = [], allowedRetrievalProviderIds, nativeAudio = false }: {
   sessionSlotKey: string;
   sessionBase: CreativeDraftSessionBase;
   legacyEditStorageKey: string;
@@ -927,6 +928,7 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
   stage: StudioCreativeReviewSnapshot["stage"];
   draft: unknown;
   busy: boolean;
+  nativeAudio?: boolean;
   onSave(document: Record<string, unknown>): Promise<void>;
   onDirtyChange(dirty: boolean): void;
   /** 服务端投影的当前稿缺项（CLOUD-11）；按保存稿列出，选择后随完整文档一起保存。 */
@@ -1001,7 +1003,7 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
         })}
       </fieldset> : null}
       {dirty && editStorageBroken ? <p className="creative-storage-note" role="status">手工修订无法在本机保存；当前页面内已保留，刷新或关闭可能丢失，请先复制。</p> : null}
-      {isCharacterDocument(current) ? <CharacterScriptEditor value={current} disabled={busy || saving || stale} onChange={(document) => {
+      {isCharacterDocument(current) ? <CharacterScriptEditor value={current} disabled={busy || saving || stale} nativeAudio={nativeAudio} onChange={(document) => {
         setSaveState(undefined); setEdited({ baseKey: edited?.baseKey ?? draftKey, document: { ...document } });
       }} /> : null}
       {fields.filter((field) => !isCharacterDocument(current) || !field.key.startsWith("scenes.")).map((field) => <label key={field.key} className="creative-edit-field">

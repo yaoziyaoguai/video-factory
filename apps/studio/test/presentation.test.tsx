@@ -49,6 +49,11 @@ describe("creator-facing presentation labels", () => {
     expect(creatorRunStatusLabel({ status: "needs_human", currentNodeId: "production-preflight" })).toBe("等你确认制作预检");
   });
 
+  it("names native audio consistently in run summaries while preserving the default TTS label", () => {
+    expect(creatorRunStatusLabel({ status: "needs_human", currentNodeId: "voice", audioMode: "native_av" })).toBe("等你确认原声试听");
+    expect(creatorRunStatusLabel({ status: "needs_human", currentNodeId: "voice" })).toBe("等你确认配音");
+  });
+
   it("resolves cost service labels from the model catalog only when the match is unambiguous", () => {
     const catalog = [
       { id: "codex-creative-treatment-v1", label: "AI 前期构思" },

@@ -840,21 +840,38 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
   });
 
   for (const terminalState of ["completed_success", "completed_failure"] as const) {
-    it(`consumes one late ${terminalState} result and advances the real workflow once`, async () => {
+    it(`consumes one late ${terminalState} result and advances the real workflow once`, async (t) => {
       const workspaceRoot = await mkdtemp(path.join(tmpdir(), `vf-formal-${terminalState}-`));
       const broker = await brokerFixture(workspaceRoot);
       const treatmentCounter = { calls: 0 };
       try {
         const interrupting = new TrackingClient({
           socketPath: broker.socketPath,
-          timeoutMs: 50,
+          timeoutMs: 30_000,
           maxAttempts: 1,
           pollIntervalMs: 10,
+          sleep: async () => {
+            await broker.executor.waitForFirstStarted();
+            // 确认真实 Broker 已受理后再推进时钟，稳定制造“原请求仍在执行”的超时。
+            t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 30_001 });
+          },
         });
+        const submit = interrupting.runTaskDetailed.bind(interrupting);
+        interrupting.runTaskDetailed = (kind, payload, requestId, session, options = {}) => submit(
+          kind, payload, requestId, session, { ...options, beforeSubmit: async operation => {
+            await options.beforeSubmit?.(operation);
+            // 覆盖整门禁负载下的慢 checkpoint：不能把“等待迟到结果”变成“根本没受理”。
+            await new Promise(resolve => setTimeout(resolve, 100));
+          } },
+        );
         const firstPipeline = pipeline(workspaceRoot, interrupting, treatmentCounter);
         const initialDispatch = await firstPipeline.dispatch(brief());
-        await broker.executor.waitForFirstStarted();
+        await Promise.race([
+          broker.executor.waitForFirstStarted(),
+          initialDispatch.completion.then(run => assert.fail(`Initial dispatch finished before broker acceptance: ${JSON.stringify(run.nodeRuns.map(node => node.error))}`)),
+        ]);
         const failed = await initialDispatch.completion;
+        t.mock.timers.reset();
         assert.equal(failed.status, "failed");
         assert.equal(treatmentCounter.calls, 1);
         const originalRequestId = interrupting.submissions[0]?.requestId;
@@ -937,13 +954,15 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
         assert.equal(broker.executor.submissions.filter((entry) => entry.kind === "role-audit").length, 1);
         if (terminalState === "completed_failure") {
           assert.equal(recoveryDispatchOptions?.resumeCompletedTextTaskRequestId, originalRequestId);
-        assert.ok(checkpointRecoveryRequestIds.includes(originalRequestId), JSON.stringify({
+          assert.ok(checkpointRecoveryRequestIds.includes(originalRequestId), JSON.stringify({
             checkpointRecoveryRequestIds,
             originalRequestId,
             recoveryDispatchOptions,
           }));
         }
       } finally {
+        t.mock.timers.reset();
+        broker.executor.completeFirst(terminalState);
         await broker.close();
         await rm(workspaceRoot, { recursive: true, force: true });
       }

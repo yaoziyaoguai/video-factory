@@ -535,6 +535,23 @@ describe("JsonSeriesStore", () => {
     assert.equal(published.canon.facts.length, 1);
   });
 
+  it("allows adoption after an approved empty-canon episode, not an unapproved succeeded run", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-empty-canon-"));
+    const store = new JsonSeriesStore(path.join(root, "series.json"));
+    await store.create(record());
+    await store.adoptEpisode("series-1", 1, "2026-08-24T09:00:00.000Z");
+    await store.linkRun("series-1", "series-series-1-episode-001", "run-1", "2026-08-24T09:01:00.000Z");
+    await store.reconcileRuns([{ id: "run-1", status: "succeeded", revision: 7 }], "2026-08-24T09:02:00.000Z");
+    await assert.rejects(store.adoptEpisode("series-1", 2, "2026-08-24T09:03:00.000Z"), /先完成第 1 集/);
+    await store.reconcileRuns([{ id: "run-1", status: "succeeded", revision: 8, canonProposal: {
+      memorySummary: "第 1 集已完成内部定版，本集没有新增系列事实。", statements: [],
+      sourceOutputVersionIds: ["planning-v1", "final-review-v1"],
+    } }], "2026-08-24T09:04:00.000Z");
+    const adopted = await store.adoptEpisode("series-1", 2, "2026-08-24T09:05:00.000Z");
+    assert.equal(adopted.episodes[1]?.status, "selected");
+    assert.deepEqual(adopted.canon.facts, []);
+  });
+
   it("invalidates stale canon, blocks the next episode, and requeues failed or missing runs", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-series-reconcile-"));
     const store = new JsonSeriesStore(path.join(root, "series.json"));

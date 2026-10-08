@@ -293,6 +293,41 @@ describe("Studio client", () => {
     expect(screen.queryByRole("button", { name: "批准进入发布包" })).not.toBeInTheDocument();
   });
 
+  it("offers only local native audio recovery or linked rework, without adopting missing sound", async () => {
+    const retry = vi.fn().mockResolvedValue(undefined), restart = vi.fn();
+    const run: StudioRunDetail = { ...runDetail, audioMode: "native_av", nativeAudioRecovery: { expectedRunRevision: 5, interventionId: "native-failed" },
+      activeIntervention: { id: "native-failed", nodeId: "voice", kind: "local_preparation_retry", reason: "原片音轨读取失败", options: ["reject"], createdAt: runDetail.startedAt },
+      nodes: [{ id: "voice", label: "原声试听", role: "声音准备", status: "needs_human", artifactIds: [], qualityGateResults: [], output: { nativeAudioIssue: "audio_decode_failed" } }],
+    };
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} onRetryFailedNode={retry} onRestart={restart} />);
+    await userEvent.click(screen.getByRole("button", { name: "重新准备原声（不重新购买）" }));
+    expect(retry).toHaveBeenCalledWith("voice");
+    await userEvent.click(screen.getByRole("button", { name: "调整方案，关联返工" }));
+    expect(restart).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: /采用本版|采用原声|采用配音|调整配音时间/ })).not.toBeInTheDocument();
+  });
+
+  it("describes native sound preparation and adoption without claiming TTS or a missing model", async () => {
+    const run: StudioRunDetail = { ...runDetail, audioMode: "native_av",
+      activeIntervention: { ...runDetail.activeIntervention!, nodeId: "voice", boundary: "node-complete" }, nodes: [
+        { id: "voice", label: "原声试听", role: "声音准备", status: "needs_human", artifactIds: [], qualityGateResults: [],
+          output: { audioMode: "native_av", subtitleStatus: "unavailable" },
+          plannedExecution: { providerId: "python-native-audio-v1", providerLabel: "视频原声准备", modelId: "native-audio-plan-v1", transport: "local_process", billing: "free", snapshotSource: "created" } },
+        { id: "render", label: "渲染", role: "剪辑", status: "pending", artifactIds: [], qualityGateResults: [] },
+      ] };
+    const view = render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "原声试听 · 等你确认" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "原声试听做完了，等你放行" })).toBeInTheDocument();
+    expect(screen.queryByText(/自动按量配音/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "查看无同步字幕版并确认" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("本次原声已保存，但同步字幕尚未就绪");
+    expect(screen.getByRole("dialog")).not.toHaveTextContent("重买配音");
+    const { activeIntervention: _intervention, ...running } = run;
+    view.rerender(<RunWorkbench run={{ ...running, status: "running", nodes: [{ ...run.nodes[0]!, status: "running" }, run.nodes[1]!] }} decisionPending={false} onDecision={vi.fn()} />);
+    expect(screen.getByText(/原声准备 · 本地处理，不调用配音模型/)).toBeInTheDocument();
+    expect(screen.queryByText(/模型名称未记录/)).not.toBeInTheDocument();
+  });
+
   it("previews rendering as the immediate step after voice even when later review has configuration", () => {
     const run: StudioRunDetail = { ...runDetail, activeIntervention: { ...runDetail.activeIntervention!, nodeId: "voice", boundary: "node-complete" }, nodes: [
       { id: "voice", label: "配音", role: "声音导演", status: "needs_human", artifactIds: [], qualityGateResults: [] },
@@ -1219,6 +1254,49 @@ describe("Studio client", () => {
     await user.type(screen.getByLabelText("视频标题"), "创作目标");
     expect(screen.getByRole("region", { name: "创作目标摘要" })).toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("submits native AV from the shared form without a TTS service or inactive TTS fields", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const nativeProviders: StudioProvider[] = [...providers.filter(p => p.capability !== "voice.synthesize"),
+      { id: "python-native-audio-v1", capability: "audio.prepare_native", label: "视频原声准备", available: true, kind: "local", billing: "free" },
+      { id: "wan-video-v1", capability: "asset.prepare", label: "Wan", available: true, kind: "external", billing: "metered", deliveryTypes: ["generated_video"],
+        modelProfiles: [{ id: "wan3.0-video", providerId: "wan-video-v1", providerFamily: "wan", description: "受控原生音画型号", label: "Wan 3.0", available: true, taskTypes: ["text-to-video"], supportsAudio: true }] }];
+    render(<NewRunDialog open providers={nativeProviders} initialValues={{ title: "小店三位客人", angle: "原创多人对话", audience: "普通观众" }} onClose={() => undefined} onSubmit={onSubmit} />);
+    await user.selectOptions(screen.getByLabelText("声音来源"), "native_av");
+    expect(screen.getByText(/原声随画面生成/)).toBeInTheDocument();
+    expect(screen.getByLabelText("费用方式")).not.toHaveTextContent("使用免费图库");
+    expect(screen.getByLabelText("费用方式")).toHaveTextContent("不另买配音");
+    expect(screen.getByText("原生音画逐镜生成视频，不使用图库候选排序")).toBeInTheDocument();
+    await user.click(screen.getByText("03 模型与高级设置"));
+    expect(screen.queryByRole("button", { name: /配音.*声音导演/ })).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("视频形式"), "character_drama");
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    const input = onSubmit.mock.calls[0]![0];
+    expect(input).toMatchObject({ audioMode: "native_av", nativeVideoProviderId: "wan-video-v1", presentationMode: "character_drama",
+      models: { "wan-video-v1": "wan3.0-video" }, providers: { voice: "python-native-audio-v1", assets: "ai-shot-router-v1" },
+      director: { assetProviderIds: ["wan-video-v1"] }, economics: { allowMeteredProviders: true } });
+    expect(input).not.toHaveProperty("voiceDirection");
+    expect(input.models).not.toHaveProperty("minimax-tts-v1");
+  });
+
+  it("returns a native rework to TTS without inheriting the local native audio provider", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<NewRunDialog open providers={providers} initialValues={{ audioMode: "native_av", nativeVideoProviderId: "wan-video-v1",
+      title: "原声返工", angle: "改用独立配音", audience: "短视频创作者",
+      providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "python-native-audio-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
+      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      rework: { sourceRunId: "native-original", sourceRunRevision: 7, rejectionReason: "改为独立配音", affectedScenePositions: [1], previousScript: { scenes: [{ position: 1 }] }, nodeInstructions: { script: "保留正文", visualDirection: "保持画面", assets: "按新模式核对画面" }, findings: [] },
+    }} onClose={() => undefined} onSubmit={onSubmit} />);
+    await user.click(screen.getByRole("button", { name: /查看继承设置/ }));
+    await user.selectOptions(screen.getByLabelText("声音来源"), "tts");
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
+    await waitFor(() => expect(onSubmit, document.body.textContent ?? "").toHaveBeenCalledOnce());
+    expect(onSubmit.mock.calls[0]![0]).toMatchObject({ audioMode: "tts", providers: { voice: "macos-say-v1" }, voiceDirection: { profileId: "macos:Tingting" } });
+    expect(onSubmit.mock.calls[0]![0]).not.toHaveProperty("nativeVideoProviderId");
   });
 
   it("states scoped billing facts instead of promising the whole production is free", () => {

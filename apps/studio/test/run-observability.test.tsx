@@ -19,6 +19,14 @@ function node(
 }
 
 describe("run observability", () => {
+  it("explains native audio as local source preparation instead of voice synthesis", () => {
+    const result = buildRunObservability({ status: "running", startedAt: "2026-10-08T00:00:00Z", now: "2026-10-08T00:00:10Z",
+      nodes: [node("voice", "原声试听", "running", { role: "声音准备",
+        plannedExecution: { providerId: "python-native-audio-v1", providerLabel: "视频原声准备", modelId: "native-audio-plan-v1", transport: "local_process", billing: "free", snapshotSource: "created" } })],
+      videoAvailable: false, publishPackageAvailable: false });
+    expect(result.currentAction?.label).toBe("正在从已采用的视频本地准备原声，不调用配音模型");
+  });
+
   it("offers stock rematching for short material instead of retrying or changing review models", () => {
     const result = buildRunObservability({ status: "failed", startedAt: "2026-09-26T08:39:00Z", now: "2026-09-26T08:40:00Z",
       nodes: [node("assets", "画面", "succeeded"), node("asset-source-review", "预检", "failed", {

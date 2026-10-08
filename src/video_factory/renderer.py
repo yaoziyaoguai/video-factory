@@ -11,6 +11,7 @@ from .stock_images import prepare_render_image
 from .narration_subtitles import cues_to_ass
 from .voiceover import _write_bytes_durably
 from .character_script import CHARACTER_SCRIPT_VERSION, validate_character_script
+from .native_audio import VERSION as NATIVE_AUDIO_VERSION, file_sha
 
 
 FONT_CANDIDATES = [
@@ -102,6 +103,21 @@ def attach_asset_plan(manifest_path: Path, asset_plan: Optional[dict]) -> None:
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def attach_native_audio_plan(manifest_path: Path, plan: dict) -> None:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    track = Path(str(plan.get("trackPath", "")))
+    if plan.get("version") != NATIVE_AUDIO_VERSION or not track.is_file() or file_sha(track) != plan.get("trackSha256"):
+        raise RuntimeError("Native audio plan has no verified track.")
+    if plan.get("totalFrames") != sum(timeline_frame_counts(manifest["slides"])):
+        raise RuntimeError("Native audio plan does not match the render timeline.")
+    manifest["audioMode"] = "native_av"
+    manifest["native_audio_plan"] = plan
+    # 规划台词没有同步时间证据，不能继续走旧逐镜字幕投影。
+    for slide in manifest["slides"]:
+        slide["text"] = slide.get("on_screen_text", "")
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def attach_voiceover_plan(manifest_path: Path, voiceover_plan: Optional[dict]) -> None:
@@ -242,6 +258,8 @@ def render_asset_video(
     frame_counts = timeline_frame_counts(manifest["slides"])
     for scene, frame_count in zip(manifest["slides"], frame_counts):
         asset = scene_assets[int(scene["position"])]
+        if manifest.get("audioMode") == "native_av":
+            asset = {**asset, "native_audio_source": True}
         caption_style = "editorial" if asset.get("provider") == "local" else "subtitle"
         caption_path = write_caption_overlay(
             manifest,
@@ -449,6 +467,7 @@ def render_scene_clip(
             )
         input_args = ["-i", str(asset_path)]
         background_filter = (
+            ("setpts=PTS-STARTPTS," if asset.get("native_audio_source") else "") +
             f"trim=start={source_start:.9f}:end={source_end:.9f},"
             "setpts=PTS-STARTPTS,fps=30,"
             f"scale={width}:{height}:force_original_aspect_ratio=increase,"
@@ -825,6 +844,12 @@ def escape_concat_path(path: Path) -> str:
 
 
 def render_audio_input(manifest: dict) -> list[str]:
+    if manifest.get("audioMode") == "native_av":
+        plan = manifest.get("native_audio_plan") or {}
+        track = Path(str(plan.get("trackPath", "")))
+        if plan.get("version") != NATIVE_AUDIO_VERSION or not track.is_file() or file_sha(track) != plan.get("trackSha256"):
+            raise RuntimeError("Native render cannot fall back to silence or a different audio track.")
+        return ["-i", str(track)]
     voiceover_plan = manifest.get("voiceover_plan")
     if voiceover_plan:
         return ["-i", str(voiceover_plan["track_path"])]
@@ -837,7 +862,7 @@ def render_audio_input(manifest: dict) -> list[str]:
 
 
 def render_audio_duration_options(manifest: dict) -> list[str]:
-    if manifest.get("voiceover_plan", {}).get("version") in ("video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4"):
+    if manifest.get("audioMode") == "native_av" or manifest.get("voiceover_plan", {}).get("version") in ("video-factory/voiceover-plan-v3", "video-factory/voiceover-plan-v4"):
         # v3 音轨已经按样本校验为完整片长，不以最短输入决定输出结束点。
         return ["-t", f"{sum(timeline_frame_counts(manifest['slides'])) / RENDER_FPS:.9f}"]
     return ["-shortest"]
@@ -862,7 +887,10 @@ def render_job_manifest(
     asset_plan_path: Optional[Path] = None,
     voiceover_plan_path: Optional[Path] = None,
     resolution: str = "1080x1920",
+    native_audio_plan_path: Optional[Path] = None,
 ) -> Path:
+    if native_audio_plan_path is not None and voiceover_plan_path is not None:
+        raise RuntimeError("Native audio and TTS plans cannot be mixed.")
     output_dir = workspace / "renders" / str(job_id)
     manifest_path = write_render_manifest(job_id, script_path, output_dir, resolution=resolution)
     resolved_asset_plan_path = asset_plan_path or default_asset_plan_path(workspace, job_id)
@@ -873,7 +901,10 @@ def render_job_manifest(
         else None
     )
     attach_asset_plan(manifest_path, asset_plan)
-    attach_voiceover_plan(manifest_path, voiceover_plan)
+    if native_audio_plan_path is not None:
+        attach_native_audio_plan(manifest_path, json.loads(native_audio_plan_path.read_text(encoding="utf-8")))
+    else:
+        attach_voiceover_plan(manifest_path, voiceover_plan)
     if dry_run:
         return manifest_path
     if require_assets and asset_plan is None:

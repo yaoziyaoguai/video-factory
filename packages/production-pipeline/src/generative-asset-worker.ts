@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isCharacterScript, validateCharacterScriptStructure } from "./character-script.js";
+import { assertNativeVideoModel } from "./native-audio.js";
 import { lookup } from "node:dns/promises";
 import { copyFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
@@ -102,6 +103,7 @@ interface ScriptScene {
   visualPrompt: string;
   characterVisuals?: Array<{ id: string; appearance: string }>;
   visibleAction?: string;
+  nativeSpeech?: string;
 }
 
 const METERED_CREATE_ATTEMPTED = Symbol("meteredCreateAttempted");
@@ -260,6 +262,7 @@ export interface ResolvedAssetExecutionRequest {
   ratio: "9:16";
   resolution?: VideoGenerationRequest["resolution"];
   generateAudio?: boolean;
+  audioMode?: "native_av";
   referenceFromScenePosition?: number;
   referenceImageSha256?: string;
   executionDigest: string;
@@ -381,6 +384,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     if (providerId === "ai-shot-router-v1") {
       return this.runDirectorRoutes(request, parameters);
     }
+    if (parameters.audioMode === "native_av") throw new Error("原生音画必须通过当前采用的逐镜画面方案执行。");
     const modelSelections = optionalStringRecord(parameters.modelSelections, "modelSelections");
     const modelId = modelSelections[providerId];
     const binding = this.resolveBinding(providerId, modelId);
@@ -710,6 +714,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     scriptPath: string;
     directorPlanPath: string;
     modelSelections: Record<string, string>;
+    audioMode?: unknown;
+    nativeVideoProviderId?: unknown;
   }): Promise<{
     script: Record<string, unknown>;
     scenes: ScriptScene[];
@@ -718,11 +724,21 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     generatedRoutes: DirectorGeneratedRoute[];
   }> {
     const script = requiredRecord(JSON.parse(await readFile(options.scriptPath, "utf8")), "Script");
-    const scenes = parseScenes(script);
+    const native = options.audioMode === "native_av";
+    const scenes = parseScenes(script, native);
     const sceneByPosition = new Map(scenes.map((scene) => [scene.position, scene]));
     const directorPlan = requiredRecord(JSON.parse(await readFile(options.directorPlanPath, "utf8")), "Director plan");
     assertCharacterDirectorBindings(script, directorPlan);
     const routedShots = parseRoutedShots(directorPlan.shots);
+    if (native) {
+      const provider = requiredString(options.nativeVideoProviderId, "nativeVideoProviderId");
+      assertNativeVideoModel(provider, options.modelSelections[provider]);
+      if (routedShots.some((route) => route.preferredProviderId !== provider || route.deliveryType !== "generated_video"
+        || route.providerIds.some((id) => id !== provider)
+        || assetReuseSourceScenePosition(route) !== undefined || route.referenceFromScenePosition !== undefined)) {
+        throw new Error("原生音画每镜必须独立使用选定视频型号；请修改画面方案，不能混入图库、图片、其它型号或跨镜复用。");
+      }
+    }
     assertExactScenePositions("Director plan", routedShots.map((shot) => shot.scenePosition), scenes);
     const modelSelections = options.modelSelections;
     const byScenePosition = new Map(routedShots.map((route) => [route.scenePosition, route]));
@@ -767,7 +783,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       if (!binding) {
         throw new Error(`Provider '${providerId}' is not configured.`);
       }
-      const compiledPrompt = compileGenerationPrompt(providerId, route, scene);
+      const compiledPrompt = appendNativeSpeech(compileGenerationPrompt(providerId, route, scene), scene);
       const requiredUseDurationSeconds = requiredDurationByRoot.get(route.scenePosition)!;
       const requestScene = binding.mediaType === "video"
         ? { ...scene, duration: requiredUseDurationSeconds }
@@ -811,6 +827,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         scriptPath,
         directorPlanPath,
         modelSelections,
+        audioMode: request.parameters.audioMode,
+        nativeVideoProviderId: request.parameters.nativeVideoProviderId,
       });
       if (generatedRoutes.length === 0) return { reusableQuoteItemIds: [], createCostCny: 0 };
       const sourceFingerprint = await paidAssetSourceFingerprint([scriptPath, directorPlanPath]);
@@ -843,7 +861,9 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           .map((item) => item.quoteItemId),
         createCostCny: prepared.createCostCny,
       };
-    } catch {
+    } catch (error) {
+      // 原生的非法路线/输入必须在报价前修正，不能回退成一份不同请求的估价。
+      if (request.parameters.audioMode === "native_av") throw error;
       // 预测本身不可得时退回原有报价口径，由花费闸门照常向操作员要授权。
       return undefined;
     }
@@ -864,6 +884,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       scriptPath,
       directorPlanPath,
       modelSelections,
+      audioMode: parameters.audioMode,
+      nativeVideoProviderId: parameters.nativeVideoProviderId,
     });
     const generatedRouteByPosition = new Map(generatedRoutes.map((entry) => [entry.scene.position, entry]));
     if (generatedRoutes.length) {
@@ -1974,13 +1996,23 @@ function optionalNumberRecord(value: unknown, field: string): Record<string, num
   }));
 }
 
-function parseScenes(script: Record<string, unknown>): ScriptScene[] {
+function parseScenes(script: Record<string, unknown>, native = false): ScriptScene[] {
   if (isCharacterScript(script)) {
     const accepted = validateCharacterScriptStructure(script);
     return accepted.scenes.map((scene) => ({ position: scene.position, duration: scene.duration,
       visualStrategy: scene.visual_strategy, visualPrompt: scene.visual_prompt,
       characterVisuals: scene.character_ids.map((id) => ({ id, appearance: accepted.characters.find((c) => c.id === id)!.appearance })),
       visibleAction: scene.visible_action ?? scene.visual_prompt,
+      ...(native ? { nativeSpeech: [
+        "原生声音：按下列顺序说出原文台词，不添加其他台词。只有出场角色可以入画；场外发言不得新增出镜者。",
+        ...scene.dialogue.map((turn) => {
+          const speaker = accepted.characters.find((c) => c.id === turn.speaker_id)!;
+          return `${speaker.name} (${speaker.id}，${scene.character_ids.includes(speaker.id) ? "出镜" : "场外"})：${JSON.stringify(turn.text)}\n`
+            + `声音与表演意图：${speaker.voice_intent}；${turn.delivery}`
+            + (turn.after_pause_frames ? `；句后约${(turn.after_pause_frames / 30).toFixed(2)}秒停顿意图（非精确时间保证）` : "");
+        }),
+        ...(scene.sound_cue ? [`环境声音意图：${scene.sound_cue}`] : []),
+      ].join("\n") } : {}),
     }));
   }
   const value = script.scenes;
@@ -1994,6 +2026,8 @@ function parseScenes(script: Record<string, unknown>): ScriptScene[] {
       duration: boundedNumber(scene.duration, `Script scene ${index + 1} duration`, 0.1, 180),
       visualStrategy: requiredString(scene.visual_strategy, `Script scene ${index + 1} visual_strategy`),
       visualPrompt: requiredString(scene.visual_prompt, `Script scene ${index + 1} visual_prompt`),
+      ...(native ? { nativeSpeech: `原生声音：用场外解说说出以下原文，不因解说增加出镜主持人。\n${JSON.stringify(requiredString(scene.narration, "native narration"))}`
+        + (typeof scene.sound_cue === "string" ? `\n环境声音意图：${scene.sound_cue}` : "") } : {}),
     };
   });
 }
@@ -2021,7 +2055,8 @@ export function resolveAssetExecutionRequest(options: {
     durationSeconds,
     ratio: "9:16" as const,
     ...(resolution ? { resolution } : {}),
-    ...(options.mediaType === "video" && options.profile ? { generateAudio: false } : {}),
+    ...(options.scene.nativeSpeech !== undefined ? { audioMode: "native_av" as const, generateAudio: true }
+      : options.mediaType === "video" && options.profile ? { generateAudio: false } : {}),
     ...(options.reference ? { referenceFromScenePosition: options.reference.scenePosition } : {}),
     ...(options.reference?.imageSha256 ? { referenceImageSha256: options.reference.imageSha256 } : {}),
   };
@@ -2478,6 +2513,14 @@ function withNoRenderedTextConstraint(prompt: string): string {
   return [prompt, NO_RENDERED_TEXT_CONSTRAINT].filter(Boolean).join("\n");
 }
 
+function appendNativeSpeech(visual: string, scene: ScriptScene): string {
+  if (scene.nativeSpeech === undefined) return visual;
+  const prompt = `${visual}\n${scene.nativeSpeech}`;
+  // 公共保守输入界限；超长时要求改稿，不能截掉台词后继续付费。
+  if (prompt.length > 5000) throw new Error("原生音画提示词超过5000字，请缩短本镜描述或台词后重新核价。");
+  return prompt;
+}
+
 function compileGenerationPrompt(providerId: string, route: RoutedShot, scene: ScriptScene): string {
   const hasShotSpec = Boolean(route.subject || route.environment || route.visibleAction || route.temporalBeats.length
     || route.shotSize || route.camera || route.lighting || route.negativeConstraints.length || route.successCriteria.length);
@@ -2510,7 +2553,7 @@ function compileGenerationPrompt(providerId: string, route: RoutedShot, scene: S
   }
   if (providerId === "hailuo-video-v1" || providerId === "wan-video-v1") {
     return [
-      "竖屏 9:16，电影化写实画面，运动自然，主体连续。",
+      "竖屏 9:16，遵循已采用的画面风格，运动自然，主体连续。",
       ...common,
       ...(timeline.length ? [`动作时间线：${timeline.join("；")}`] : []),
       ...(success.length ? [`画面验收：${success.join("；")}`] : []),
@@ -2966,6 +3009,7 @@ function createPaidAssetOperationItem(
     ratio: request.ratio,
     ...(request.resolution ? { resolution: request.resolution } : {}),
     ...(request.generateAudio !== undefined ? { generateAudio: request.generateAudio } : {}),
+    ...(request.audioMode ? { audioMode: request.audioMode } : {}),
     ...(request.referenceFromScenePosition !== undefined
       ? { referenceFromScenePosition: request.referenceFromScenePosition }
       : {}),

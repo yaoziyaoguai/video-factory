@@ -13,6 +13,17 @@ const artifact = (id: string, kind: string): StudioArtifact => ({
 afterEach(() => vi.restoreAllMocks());
 
 describe("PlanningDeliveryPanel", () => {
+  it("does not promise unused stock candidate deliveries in native audio mode", async () => {
+    vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ viewerPromise: "原声逐镜生成" });
+    const props = { runId: "native-plan", versionId: "v1", artifactIds: ["treatment"], artifacts: [artifact("treatment", "creative_treatment")], publicationExpected: true };
+    const view = render(<PlanningDeliveryPanel {...props} nativeAudio />);
+    expect(await screen.findByText("原声逐镜生成")).toBeInTheDocument();
+    expect(screen.getByLabelText("规划产物目录").querySelectorAll("button")).toHaveLength(4);
+    expect(screen.queryByRole("button", { name: /候选素材|选材排序/ })).not.toBeInTheDocument();
+    view.rerender(<PlanningDeliveryPanel {...props} />);
+    expect(screen.getByLabelText("规划产物目录").querySelectorAll("button")).toHaveLength(6);
+  });
+
   it("uses the readable script view for a preserved stage draft", () => {
     render(<PlanningDeliveryPanel runId="run-draft" versionId="node-v2" artifactIds={[]} artifacts={[]}
       publicationExpected={false} creativeReview={{ stages: { script: {

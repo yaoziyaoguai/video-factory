@@ -3881,8 +3881,10 @@ describe("StudioService", () => {
     assert.deepEqual(secondRead.canon.facts, []);
   });
 
-  it("builds series canon from the effective immutable script artifact and invalidates stale output", async () => {
+  for (const scriptStage of ["script", "creative-planning"] as const) {
+  it(`builds series canon from the effective immutable ${scriptStage} artifact and invalidates stale output`, async (t) => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-effective-canon-"));
+    t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const service = new StudioService({
       workspaceRoot,
@@ -3912,7 +3914,7 @@ describe("StudioService", () => {
       creationContext: { origin: "series", opportunityId: opportunity.id },
     }, "series-canon-run");
 
-    const scriptPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "script", "attempt-1", "script.json");
+    const scriptPath = path.join(workspaceRoot, "runs", "run-1", "nodes", scriptStage, "attempt-1", "script.json");
     await mkdir(path.dirname(scriptPath), { recursive: true });
     await writeFile(scriptPath, `${JSON.stringify({
       viewerPromise: "完成一次真实实验",
@@ -3931,19 +3933,19 @@ describe("StudioService", () => {
         artifactIds: [],
         qualityGateResults: [],
       }, {
-        nodeId: "script",
+        nodeId: scriptStage,
         status: "succeeded",
         artifactIds: ["artifact-script"],
         qualityGateResults: [],
         output: { scriptPath, canonFacts: ["已经完成一次低成本实验。", "记录步骤后可以复现实验结果。"] },
         outputState: {
-          nodeId: "script",
-          generatedVersionId: "script-v1",
-          effectiveVersionId: "script-v1",
+          nodeId: scriptStage,
+          generatedVersionId: `${scriptStage}-v1`,
+          effectiveVersionId: `${scriptStage}-v1`,
           stale: false,
           versions: [{
-            id: "script-v1",
-            nodeId: "script",
+            id: `${scriptStage}-v1`,
+            nodeId: scriptStage,
             source: "generated",
             artifactIds: ["artifact-script"],
             inputVersionIds: [],
@@ -3987,7 +3989,7 @@ describe("StudioService", () => {
                 nodeId: "final-review",
                 source: "generated" as const,
                 artifactIds: [],
-                inputVersionIds: ["script-v1"],
+                inputVersionIds: [`${scriptStage}-v1`],
                 output: {
                   review: {},
                   canonFacts: ["未经脚本确认的事实。"],
@@ -4005,15 +4007,23 @@ describe("StudioService", () => {
         uri: scriptPath,
         createdAt: "2026-08-30T09:00:00.000Z",
         contentType: "application/json",
-        producer: { nodeId: "script", attempt: 1 },
+        producer: { nodeId: scriptStage, attempt: 1 },
         provenance: { providerId: "codex-screenwriter-v1" },
       }, ...pipeline.run.artifacts],
     };
 
+    const recordScriptIdentity = async () => {
+      const bytes = await readFile(scriptPath);
+      Object.assign(pipeline.run.artifacts.find((artifact) => artifact.id === "artifact-script")!, {
+        sizeBytes: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      });
+    };
+    await recordScriptIdentity();
     const blocked = (await service.listSeries())[0]!;
     assert.equal(blocked.episodes[0]?.status, "in_production");
     assert.equal(blocked.canon.facts.length, 0);
-    const scriptNode = pipeline.run.nodeRuns.find((node) => node.nodeId === "script")!;
+    const scriptNode = pipeline.run.nodeRuns.find((node) => node.nodeId === scriptStage)!;
     const finalReview = pipeline.run.nodeRuns.find((node) => node.nodeId === "final-review")!;
     pipeline.run.revision = 8;
     await writeFile(scriptPath, `${JSON.stringify({
@@ -4026,6 +4036,7 @@ describe("StudioService", () => {
     scriptNode.outputState!.versions[0]!.output = { scriptPath, canonFacts: [] };
     finalReview.output = { review: {}, canonFacts: [] };
     finalReview.outputState!.versions[0]!.output = { review: {}, canonFacts: [] };
+    await recordScriptIdentity();
     const emptyCanon = (await service.listSeries())[0]!;
     assert.equal(emptyCanon.episodes[0]?.status, "ready");
     assert.deepEqual(emptyCanon.canon.facts, []);
@@ -4043,6 +4054,7 @@ describe("StudioService", () => {
     scriptNode.outputState!.versions[0]!.output = { scriptPath, canonFacts: approvedCanonFacts };
     finalReview.output = { review: {}, canonFacts: approvedCanonFacts };
     finalReview.outputState!.versions[0]!.output = { review: {}, canonFacts: approvedCanonFacts };
+    await recordScriptIdentity();
     await service.archiveRuns(["run-1"]);
     await assert.rejects(
       () => service.deleteRun("run-1"),
@@ -4056,13 +4068,14 @@ describe("StudioService", () => {
       "记录步骤后可以复现实验结果。",
     ]);
     assert.equal(ready.canon.facts.some((fact) => fact.statement.includes("下一集")), false);
-    assert.deepEqual(ready.canon.facts[0]?.sourceOutputVersionIds, ["script-v1", "final-review-v1"]);
+    assert.deepEqual(ready.canon.facts[0]?.sourceOutputVersionIds, [`${scriptStage}-v1`, "final-review-v1"]);
 
-    pipeline.run.nodeRuns.find((node) => node.nodeId === "script")!.outputState!.stale = true;
+    pipeline.run.nodeRuns.find((node) => node.nodeId === scriptStage)!.outputState!.stale = true;
     const invalidated = (await service.listSeries())[0]!;
     assert.equal(invalidated.episodes[0]?.status, "in_production");
     assert.equal(invalidated.canon.facts.length, 0);
   });
+  }
 
   it("rejects series context on a non-series production", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-non-series-context-"));
