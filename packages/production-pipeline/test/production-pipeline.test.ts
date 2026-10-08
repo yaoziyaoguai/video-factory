@@ -10282,56 +10282,122 @@ describe("ProductionPipeline", () => {
     assert.equal(generated, 0, "本轮报价前不能购买带声音的新素材");
   });
 
-  it("carries explicit incomplete acceptance through the real asset executor and the remaining quote", async () => {
-    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-real-pilot-acceptance-"));
-    let creates = 0;
-    let reviews = 0;
-    const worker = new pipeline.GenerativeAssetWorkerClient({
-      fallback: new RoutedAssetBaselineWorker(),
-      pilotReviewer: new pipeline.SourceAssetPilotReviewer([{
-        id: "controlled-reviewer", modelId: "controlled-model",
-        review: async () => { reviews += 1; throw new Error("completed review failure"); },
-      }]),
-      adapters: [{ estimatedCnyPerClip: 2.4, defaultModelId: "seedance-v1", modelPrices: { "seedance-v1": 2.4 },
-        adapter: { providerId: "seedance-video-v1", generate: async () => ({
-          providerId: "seedance-video-v1", taskId: `paid-task-${++creates}`, videoUrl: "https://example.com/generated.mp4",
-        }) },
-      }],
-      resolveHost: async () => ["93.184.216.34"],
-      fetch: async () => new Response("controlled-video", { headers: { "content-type": "video/mp4" } }),
+  for (const [authorizationMode, reviewResult] of [
+    ["legacy", "incomplete"], ["production-scope", "incomplete"],
+    ["legacy", "revise"], ["production-scope", "revise"],
+  ] as const) {
+    it(`carries explicit pilot acceptance through the real asset executor and the remaining quote (${authorizationMode}, ${reviewResult})`, async () => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-real-pilot-acceptance-"));
+      let creates = 0;
+      let reviews = 0;
+      class PilotSourceWorker extends RoutedAssetBaselineWorker {
+        override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+          const result = await super.run(request);
+          if (authorizationMode !== "production-scope" || request.capability !== "script.draft") return result;
+          const scriptPath = String(result.output?.scriptPath);
+          const script = JSON.parse(await readFile(scriptPath, "utf8"));
+          script.scenes.forEach((scene: { duration: number }) => { scene.duration = 10; });
+          const bytes = JSON.stringify(script);
+          await writeFile(scriptPath, bytes);
+          result.artifacts[0] = { ...result.artifacts[0]!, kind: "script", schemaVersion: "video-factory/script-v1",
+            sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: Buffer.byteLength(bytes) };
+          return result;
+        }
+      }
+      const worker = new pipeline.GenerativeAssetWorkerClient({
+        fallback: new PilotSourceWorker(),
+        pilotReviewer: new pipeline.SourceAssetPilotReviewer([{
+          id: "controlled-reviewer", modelId: "controlled-model",
+          review: async () => {
+            reviews += 1;
+            if (reviewResult === "incomplete") throw new Error("completed review failure");
+            return {
+              version: "video-factory/visual-review-v1", summary: "试片结果",
+              scores: { composition: 94, continuity: 94, legibility: 94, safety: 94, pacing: 94 },
+              confidence: 0.95, recommendation: "revise",
+              findings: [{
+                timecodeMs: 0, startTimecodeMs: 0, endTimecodeMs: 0, scenePosition: 1,
+                targetNodeId: "assets", claimType: "static", evidenceStatus: "failed",
+                evidenceFrameSha256: null, nextAction: "rework_asset", category: "legibility",
+                severity: "critical", description: "生成了水印", suggestion: "移除画面水印后重做此镜头",
+              }],
+            };
+          },
+        }]),
+        adapters: [{ estimatedCnyPerClip: 2.4, defaultModelId: "seedance-v1", modelPrices: { "seedance-v1": 2.4 },
+          adapter: { providerId: "seedance-video-v1", generate: async () => ({
+            providerId: "seedance-video-v1", taskId: `paid-task-${++creates}`, videoUrl: "https://example.com/generated.mp4",
+          }) },
+        }],
+        resolveHost: async () => ["93.184.216.34"],
+        fetch: async () => new Response("controlled-video", { headers: { "content-type": "video/mp4" } }),
+      });
+      const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker, directorAgent: generatedShotDirector(),
+        assetProviders: [meteredSeedanceProvider()], providerRuntimeMetadata: [seedanceRuntimeMetadata()] });
+      const awaiting = await subject.start({ ...brief,
+        ...(authorizationMode === "production-scope" ? {
+          durationSeconds: 20, durationRange: { minSeconds: 20, maxSeconds: 30 },
+          workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true },
+        } : {}),
+        providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+        director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+        economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
+      });
+      assert.equal(awaiting.status, "awaiting_spend_approval", JSON.stringify(awaiting.nodeRuns.map(node => ({ nodeId: node.nodeId, status: node.status, error: node.error }))));
+      const firstPlan = awaiting.nodeRuns.find((node) => node.nodeId === "assets")!.spendPlan!;
+      let stopped: WorkflowRun<pipeline.ProductionBrief>;
+      if (authorizationMode === "production-scope") {
+        const inputState = awaiting.nodeRuns.find(node => node.nodeId === "assets")!.inputState!;
+        const input = inputState.versions.find(version => version.id === inputState.effectiveVersionId)!.value as { executablePlanPath: string };
+        const planDigest = createHash("sha256").update(await readFile(input.executablePlanPath)).digest("hex");
+        const runBrief = awaiting.initialInput;
+        stopped = await subject.acceptProductionAuthorization(awaiting.id, {
+          version: "video-factory/production-authorization-v1", id: "pilot-original-scope",
+          runId: awaiting.id, approvalRevision: awaiting.revision,
+          acceptedPlanDigest: planDigest,
+          qualityContractDigest: pipeline.canonicalQualityContractDigest({
+            angle: runBrief.angle, audience: runBrief.audience,
+            durationRange: runBrief.durationRange ?? { minSeconds: 0, maxSeconds: 0 },
+            directorProfileId: runBrief.director?.profileId ?? "",
+          }),
+          approvedAmountCents: Math.round(firstPlan.maxCostCny * 100),
+          approvedBy: "owner", approvedAt: new Date().toISOString(),
+          permittedAssets: firstPlan.items!.map(item => ({
+            assetKey: item.id,
+            intentDigest: pipeline.canonicalProductionAssetIntentDigest(planDigest, item.id),
+            models: [{ providerId: item.providerId, modelId: item.modelId }], maxCreateAttempts: 1,
+          })),
+        });
+      } else {
+        stopped = await subject.authorizeSpend(awaiting.id, { ...firstPlan, spendPlanId: firstPlan.id, approvedBy: "owner" });
+      }
+      const assets = stopped.nodeRuns.find((node) => node.nodeId === "assets")!;
+      assert.equal(assets.intervention?.kind, reviewResult === "incomplete" ? "source_review_retry" : "source_review_decision", assets.error);
+      assert.equal(creates, 1);
+      assert.equal(reviews, 1);
+      const requoted = await subject.decide(stopped.id, {
+        interventionId: assets.intervention!.id, expectedRunRevision: stopped.revision, action: "approve",
+        actor: "owner", ...(reviewResult === "incomplete" ? { acceptIncomplete: true } : {}),
+        reviewEvidenceId: (assets.output as { sourceReview: { evidenceId: string } }).sourceReview.evidenceId,
+      });
+      assert.equal(requoted.status, "approval_invalidated");
+      assert.equal(creates, 1, "接受质量风险不代签新的费用报价");
+      const remaining = requoted.nodeRuns.find((node) => node.nodeId === "assets")!.spendPlan!;
+      assert.equal(remaining.estimatedCostCny, 2.4);
+      const resumed = authorizationMode === "production-scope"
+        ? await subject.resumeCoveredSpendApproval(requoted.id)
+        : await subject.authorizeSpend(requoted.id, { ...remaining, spendPlanId: remaining.id, approvedBy: "owner" });
+      const resumedAssets = resumed.nodeRuns.find((node) => node.nodeId === "assets")!;
+      assert.equal(resumedAssets.status, "succeeded", JSON.stringify({ error: resumedAssets.error, assessment: resumedAssets.spendAssessment }));
+      assert.equal(resumedAssets.operationRequestId, assets.operationRequestId);
+      assert.equal(creates, 2, "首镜不得重购，只生成剩余镜头");
+      assert.equal(reviews, 1, "明确接受试片意见后不暗中再审");
+      assert.equal(resumed.status, "needs_human", "后续人工终审仍保留");
+      const receipts = await subject.readPaidExecutionReceipts(resumed.id);
+      assert.equal(receipts.find((receipt) => receipt.nodeId === "assets")?.actualCostCny, 4.8,
+        "恢复后展示同一操作的累计已发生费用，不仅是本次新增");
     });
-    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker, directorAgent: generatedShotDirector(),
-      assetProviders: [meteredSeedanceProvider()], providerRuntimeMetadata: [seedanceRuntimeMetadata()] });
-    const awaiting = await subject.start({ ...brief,
-      providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
-      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
-    });
-    const firstPlan = awaiting.nodeRuns.find((node) => node.nodeId === "assets")!.spendPlan!;
-    const stopped = await subject.authorizeSpend(awaiting.id, { ...firstPlan, spendPlanId: firstPlan.id, approvedBy: "owner" });
-    const assets = stopped.nodeRuns.find((node) => node.nodeId === "assets")!;
-    assert.equal(assets.intervention?.kind, "source_review_retry", assets.error);
-    assert.equal(creates, 1);
-    assert.equal(reviews, 1);
-    const requoted = await subject.decide(stopped.id, {
-      interventionId: assets.intervention!.id, expectedRunRevision: stopped.revision, action: "approve",
-      actor: "owner", acceptIncomplete: true, reviewEvidenceId: assets.intervention!.evidenceId!,
-    });
-    assert.equal(requoted.status, "approval_invalidated");
-    assert.equal(creates, 1, "接受质量风险不代签新的费用报价");
-    const remaining = requoted.nodeRuns.find((node) => node.nodeId === "assets")!.spendPlan!;
-    assert.equal(remaining.estimatedCostCny, 2.4);
-    const resumed = await subject.authorizeSpend(requoted.id, { ...remaining, spendPlanId: remaining.id, approvedBy: "owner" });
-    const resumedAssets = resumed.nodeRuns.find((node) => node.nodeId === "assets")!;
-    assert.equal(resumedAssets.status, "succeeded", resumedAssets.error);
-    assert.equal(resumedAssets.operationRequestId, assets.operationRequestId);
-    assert.equal(creates, 2, "首镜不得重购，只生成剩余镜头");
-    assert.equal(reviews, 1, "明确接受未完成后不暗中再审");
-    assert.equal(resumed.status, "needs_human", "后续人工终审仍保留");
-    const receipts = await subject.readPaidExecutionReceipts(resumed.id);
-    assert.equal(receipts.find((receipt) => receipt.nodeId === "assets")?.actualCostCny, 4.8,
-      "恢复后展示同一操作的累计已发生费用，不仅是本次新增");
-  });
+  }
 
   it("requotes only the unsubmitted shot after a completed provider result fails to download", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-mixed-paid-recovery-"));

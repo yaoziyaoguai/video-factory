@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import {
+  GenerativeAssetWorkerClient,
+  SourceAssetPilotReviewer,
   ProductionPipeline,
   canonicalQualityContractDigest,
   type CreativeTreatmentAgent,
@@ -185,11 +187,11 @@ const C2_PROVIDERS: StudioProvider[] = [
   { id: "python-technical-review-v1", capability: "quality.review", label: "机器质检", available: true, kind: "local" },
 ];
 
-async function newQuoteStudio(workspaceRoot: string): Promise<{ studio: ProductionStudio; pipeline: ProductionPipeline }> {
+async function newQuoteStudio(workspaceRoot: string, worker = new QuoteWorker()): Promise<{ studio: ProductionStudio; pipeline: ProductionPipeline }> {
   const agents = quoteAgents();
   const pipeline = new ProductionPipeline({
     workspaceRoot,
-    worker: new QuoteWorker(),
+    worker,
     treatmentAgents: agents.treatmentAgents,
     screenwriterAgent: agents.screenwriterAgent as never,
     directorAgent: agents.directorAgent,
@@ -242,6 +244,62 @@ async function currentQuoteDraft(harness: { studio: ProductionStudio; pipeline: 
 }
 
 describe("C2 production quotes and authorization commands", () => {
+  it("rechecks a pilot continuation quote without raising the original scope or rebuying the pilot", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-c2-pilot-requote-"));
+    let creates = 0;
+    const worker = new GenerativeAssetWorkerClient({
+      fallback: new QuoteWorker(),
+      pilotReviewer: new SourceAssetPilotReviewer([{
+        id: "controlled-reviewer", modelId: "controlled-model",
+        review: async () => { throw new Error("completed review failure"); },
+      }]),
+      adapters: [{ estimatedCnyPerClip: 2.4, defaultModelId: "seedance-v1", modelPrices: { "seedance-v1": 2.4 },
+        adapter: { providerId: "seedance-video-v1", generate: async () => ({
+          providerId: "seedance-video-v1", taskId: `paid-task-${++creates}`, videoUrl: "https://example.com/generated.mp4",
+        }) },
+      }],
+      resolveHost: async () => ["93.184.216.34"],
+      fetch: async () => new Response("controlled-video", { headers: { "content-type": "video/mp4" } }),
+    });
+    const harness = await newQuoteStudio(workspaceRoot, worker);
+    const runId = await awaitingRun(harness);
+    const draft = await currentQuoteDraft(harness, runId);
+    const initialQuote = await harness.studio.prepareProductionQuote(runId, {
+      expectedRunRevision: draft.run.revision, acceptedPlanDigest: draft.planDigest,
+    });
+    await harness.studio.authorizeProductionScope(runId, {
+      expectedRunRevision: draft.run.revision, quoteId: initialQuote.quoteId,
+      acceptedPlanDigest: draft.planDigest, idempotencyKey: "pilot-initial-authorization",
+    });
+    const originalScope = await harness.pipeline.readProductionAuthorization(runId);
+    const stopped = await harness.pipeline.show(runId);
+    const assets = stopped.nodeRuns.find(node => node.nodeId === "assets")!;
+    assert.equal(assets.intervention?.kind, "source_review_retry");
+    assert.equal(creates, 1);
+    const requoted = await harness.pipeline.decide(runId, {
+      interventionId: assets.intervention!.id, expectedRunRevision: stopped.revision,
+      action: "approve", actor: "studio-owner", acceptIncomplete: true,
+      reviewEvidenceId: assets.intervention!.evidenceId!,
+    });
+    const quote = await harness.studio.prepareProductionQuote(runId, {
+      expectedRunRevision: requoted.revision, acceptedPlanDigest: draft.planDigest,
+    });
+    assert.equal(creates, 1, "仅重新核价不能生成媒体");
+    assert.equal(quote.estimatedCostCny, 4.8);
+    assert.equal(quote.additionalCents, 0);
+    assert.equal(quote.scopeSummary.excludedAssets?.length, 1);
+    const command = { expectedRunRevision: requoted.revision, quoteId: quote.quoteId,
+      acceptedPlanDigest: draft.planDigest, idempotencyKey: "pilot-rechecked-authorization" };
+    const resumed = await harness.studio.authorizeProductionScope(runId, command);
+    assert.equal(resumed.nodes.find(node => node.id === "assets")?.status, "succeeded");
+    assert.equal(creates, 3, "首镜复用，只采购剩余两镜");
+    const active = await harness.pipeline.readProductionAuthorization(runId);
+    assert.equal(active?.approvedAmountCents, originalScope?.approvedAmountCents);
+    assert.equal(active?.supersedesAuthorizationId, originalScope?.id);
+    await harness.studio.authorizeProductionScope(runId, command);
+    assert.equal(creates, 3, "同报价授权重放不能重复采购");
+  });
+
   it("prepares an immutable quote and authorizes via the service, replaying idempotently", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-c2-quote-"));
     const harness = await newQuoteStudio(workspaceRoot);

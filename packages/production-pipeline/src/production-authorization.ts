@@ -181,7 +181,7 @@ export function foldProductionSpendLedger(
     } else if (group.some((item) => item.state === "prepared"
       && (!item.operationId || !options.terminalOperationIds?.has(item.operationId)))) {
       // 活跃操作的预留已持久化但尚未受理：占用预留，不算 create。
-      // 已有失败/拒绝终态回执的操作不可能再提交其 prepared 项，必须释放；只有
+      // 失败、拒绝或完成人工停点后，未提交项须经续作报价重新预留，旧预留不叠加；
       // submitted/provider_succeeded/unknown 等真正越过 Provider 边界的状态继续保守占用。
       reservedCents = checkedAddCents(reservedCents, maxEstimateCents);
     }

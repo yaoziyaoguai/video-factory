@@ -612,7 +612,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         {node.spendPlan ? (
           <section className="spend-gate" aria-label={`${node.label}费用确认`}>
             <div><CircleDollarSign aria-hidden="true" size={20} /><span><strong>执行前费用确认</strong><small>预计 ¥{node.spendPlan.estimatedCostCny.toFixed(2)}，最高 ¥{node.spendPlan.maxCostCny.toFixed(2)} · 最多 {node.spendPlan.maxAttempts} 次</small>{node.spendPlan.items?.map((item) => <small key={item.id}><span>{item.label} · {providerLabel(item.providerId) ?? "画面服务"} · {providerModelLabel(providers.find((provider) => provider.id === item.providerId), item.modelId)}</span> · ¥{item.estimatedCostCny.toFixed(2)}</small>)}</span></div>
-            {node.spendAuthorizationId ? <span className="spend-authorized"><ShieldCheck aria-hidden="true" size={15} />已授权</span> : readOnly ? <small>历史报价仅供查看</small> : node.spendAssessment?.action === "request_approval" ? (
+            {node.spendAuthorizationId ? <span className="spend-authorized"><ShieldCheck aria-hidden="true" size={15} />已授权</span> : readOnly ? <small>历史报价仅供查看</small> : node.spendAssessment?.action === "request_approval" && !pendingQuote ? (
               <div className="spend-gate-actions spend-funding" aria-label="费用缺口">
                 <p><strong>{spendAssessmentHeadline(node.spendAssessment)}</strong></p>
                 <dl className="spend-quote-summary">
@@ -626,6 +626,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
                   {node.spendAssessment.reason === "amount" ? <button className="button button-primary" type="button" disabled={busy || scopeAuthorizing} onClick={() => void acceptFundingAmendment()}>
                     <ShieldCheck aria-hidden="true" size={16} />{scopeAuthorizing ? "正在确认…" : `同意追加 ¥${(node.spendAssessment.additionalCents / 100).toFixed(2)} 并继续`}
                   </button> : null}
+                  <button className="button button-ghost" type="button" disabled={busy || scopeAuthorizing} onClick={() => void prepareProductionScopeQuote()}>重新核对报价</button>
                   {node.id === "assets" ? <button className="button button-ghost" type="button" disabled={busy || scopeAuthorizing} onClick={() => { setError(undefined); setRejectingSpend(true); }}>调整方案</button> : null}
                   {onRequestPause ? <button className="button button-ghost" type="button" disabled={busy || scopeAuthorizing || pauseRequested} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{pauseRequested ? "已请求暂停" : "暂不继续"}</button> : null}
                 </div>

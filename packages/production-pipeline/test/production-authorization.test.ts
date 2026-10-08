@@ -534,6 +534,26 @@ describe("foldProductionSpendLedger", () => {
     assert.deepEqual(Object.keys(folded.attemptsByAsset), []);
   });
 
+  it("only releases unsubmitted items of a finished pilot, preserving live and accepted exposure", () => {
+    const states = ["prepared", "unknown", "submitted", "provider_succeeded", "materialized", "terminal_failed"] as const;
+    const folded = foldProductionSpendLedger([
+      ...states.map((state, index) => ({
+        operationId: "finished-pilot", itemRequestId: `pilot-${state}`, quoteItemId: `scene-${index}`,
+        state, estimatedCostCny: 2.4,
+        ...(state === "materialized" ? { actualCostCny: 2.1 } : {}),
+        ...(state === "terminal_failed" ? { taskId: "accepted-failure" } : {}),
+      })),
+      { operationId: "live-operation", itemRequestId: "live-prepared", quoteItemId: "scene-live",
+        state: "prepared", estimatedCostCny: 2.4 },
+    ], { terminalOperationIds: new Set(["finished-pilot"]) });
+    assert.equal(folded.settledCents, 210);
+    assert.equal(folded.pendingUnknownCents, 240);
+    assert.equal(folded.reservedCents, 960, "submitted、provider_succeeded、已受理失败和活跃prepared仍占用");
+    assert.equal(folded.attemptsByAsset["scene-0"], undefined);
+    assert.equal(folded.attemptsByAsset["scene-live"], undefined);
+    for (const index of [1, 2, 3, 4, 5]) assert.equal(folded.attemptsByAsset[`scene-${index}`], 1);
+  });
+
 });
 
 describe("assessProductionSpendPlan whole-plan amounts", () => {

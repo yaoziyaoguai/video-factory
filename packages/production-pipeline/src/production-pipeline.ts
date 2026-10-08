@@ -6271,7 +6271,7 @@ export class ProductionPipeline {
           return run;
         }
         const foldedLedger = foldProductionSpendLedger(ledgerSnapshot ?? [], {
-          terminalOperationIds: terminalPaidOperationIds(run, plan.nodeId),
+          terminalOperationIds: finishedPaidOperationIds(run, plan.nodeId),
         });
         // 逐素材剩余 create 预算（scope 用户批准的每素材上限 - ledger 已用次数）。
         // 全覆盖评估保证每个新 create 项至少剩 1 次；预算随子凭证下发，由 worker 在
@@ -10370,13 +10370,16 @@ type ProductionScopeQuoteAssessment =
     assessment?: ProductionSpendPlanAssessment;
   };
 
-function terminalPaidOperationIds(
+function finishedPaidOperationIds(
   run: WorkflowRun<ProductionBrief>,
   nodeId: string,
 ): ReadonlySet<string> {
   return new Set((run.executionReceipts ?? []).flatMap((receipt) => (
     receipt.nodeId === nodeId
-      && (receipt.status === "failed" || receipt.status === "rejected")
+      && (receipt.status === "failed" || receipt.status === "rejected"
+        // 试片的人审停点也结束了本次执行；prepared 仍未越过付费边界，续作报价会
+        // 重新预留，不能再把旧预留扣一次。已提交/unknown 的占用仍由逐项账本保留。
+        || (receipt.status === "needs_human" && Boolean(receipt.finishedAt)))
       && receipt.requestId
       ? [receipt.requestId]
       : []
@@ -10424,7 +10427,7 @@ async function assessProductionScopePendingQuote(options: {
   }
   const spendState = foldProductionSpendLedger(
     options.paidItems as Parameters<typeof foldProductionSpendLedger>[0],
-    { terminalOperationIds: terminalPaidOperationIds(options.run, options.spendPlan.nodeId) },
+    { terminalOperationIds: finishedPaidOperationIds(options.run, options.spendPlan.nodeId) },
   );
   const attemptsByAsset = spendState.attemptsByAsset;
   const quoteItems = options.spendPlan.items ?? [];

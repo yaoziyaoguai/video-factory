@@ -1601,6 +1601,52 @@ describe("node production workspaces", () => {
     expect(onAuthorize).not.toHaveBeenCalled();
   });
 
+  it("rechecks a persisted funding assessment without authorizing until the new quote is accepted", async () => {
+    const paidNode: StudioNode = {
+      id: "assets", label: "画面", role: "素材导演", status: "approval_invalidated",
+      artifactIds: [], qualityGateResults: [],
+      spendPlan: {
+        id: "remaining-plan", inputVersionIds: ["script-v2"], providerId: "seedance-video-v1",
+        modelId: "seedance-v1", estimatedCostCny: 22.68, maxCostCny: 22.68, maxAttempts: 1,
+        createdAt: "2026-10-08T05:00:00.000Z",
+      },
+      spendAssessment: {
+        action: "request_approval", reason: "amount", approvedAmountCents: 3024,
+        settledCents: 756, reservedCents: 2268, pendingUnknownCents: 0,
+        requestedMaximumCents: 2268, additionalCents: 2268, resultingMaximumCents: 5292,
+        blockedAssets: [],
+      },
+    };
+    const quoteSpy = vi.spyOn(studioApi, "prepareProductionQuote").mockResolvedValue({
+      quoteId: "quote-rechecked", acceptedPlanDigest: "a".repeat(64),
+      estimatedCostCny: 22.68, maximumCostCny: 22.68, feasible: true,
+      scopeSummary: {
+        content: "保留首镜，继续剩余三镜", assets: [], uncertainty: [],
+        excludedAssets: [{ id: "scene-1", label: "首镜", note: "已有可用画面，不重复购买" }],
+      },
+    });
+    const authorize = vi.fn(async () => undefined);
+    const amendSpy = vi.spyOn(studioApi, "amendProductionScope");
+    render(<NodeWorkspace node={paidNode} providers={[seedanceProvider]} runStatus="approval_invalidated"
+      runId="run-1" runRevision={11} acceptedPlanDigest={"a".repeat(64)} artifacts={[]} busy={false}
+      onOverride={async () => undefined} onAuthorize={async () => undefined} onAuthorizeProductionScope={authorize} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "重新核对报价" }));
+    expect(await screen.findByText("保留首镜，继续剩余三镜")).toBeInTheDocument();
+    expect(screen.getByText(/已有可用画面，不重复购买/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /同意追加/ })).not.toBeInTheDocument();
+    expect(quoteSpy).toHaveBeenCalledWith("run-1", { expectedRunRevision: 11, acceptedPlanDigest: "a".repeat(64) });
+    expect(authorize).not.toHaveBeenCalled();
+    expect(amendSpy).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "确认并授权（最高 ¥22.68）" }));
+    await waitFor(() => expect(authorize).toHaveBeenCalledExactlyOnceWith({
+      expectedRunRevision: 11, quoteId: "quote-rechecked", acceptedPlanDigest: "a".repeat(64),
+      idempotencyKey: "scope-run-1-quote-rechecked",
+    }));
+    expect(amendSpy).not.toHaveBeenCalled();
+  });
+
   it("offers the funding three actions from the structured assessment", async () => {
     const onRejectSpend = vi.fn(async () => undefined);
     const onRequestPause = vi.fn(async () => undefined);
