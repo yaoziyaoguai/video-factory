@@ -4,6 +4,15 @@ import { describe, expect, it, vi } from "vitest";
 import { NodeStructuredEditor } from "../src/client/components/NodeStructuredEditor.js";
 
 describe("NodeStructuredEditor", () => {
+  it("clears inherited editorial advice without dropping source facts or runtime configuration", async () => {
+    const value = { title: "原创三人书店", editorial: { verdict: "produce_image_story", reasons: ["旧选题理由"], guardrails: ["必须显示书封"] },
+      articleSources: [{ sourceId: "source-kept" }], providers: { assets: "pexels-stock-v1" } };
+    const onChange = vi.fn();
+    render(<NodeStructuredEditor nodeId="brief" value={value} onChange={onChange} />);
+    expect(screen.getByRole("textbox", { name: "内容注意事项（每行一项）" })).toHaveValue("必须显示书封");
+    await userEvent.click(screen.getByRole("button", { name: "清空沿用的创作建议" }));
+    expect(onChange).toHaveBeenCalledWith({ ...value, editorial: { verdict: "produce_video", reasons: [], guardrails: [] } });
+  });
   it("edits deep creative fields while omitting provenance and system-only fields", () => {
     const onChange = vi.fn();
     render(<NodeStructuredEditor
@@ -34,7 +43,8 @@ describe("NodeStructuredEditor", () => {
     const onChange = vi.fn();
     render(<NodeStructuredEditor nodeId="reference-grammar" value={{ beats: [60, 80], confidence: 0.75 }} onChange={onChange} />);
 
-    const threshold = screen.getByDisplayValue("60");
+    const threshold = screen.getByRole("spinbutton", { name: "节拍 1" });
+    expect(screen.getByRole("spinbutton", { name: "节拍 2" })).toHaveValue(80);
     fireEvent.change(threshold, { target: { value: "65" } });
     fireEvent.blur(threshold);
     expect(onChange).toHaveBeenCalledWith({ beats: [65, 80], confidence: 0.75 });

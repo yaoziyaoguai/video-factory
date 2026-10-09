@@ -2273,6 +2273,11 @@ body:has(.studio-v3) {
 .studio-v3 .agent-loop-progress span { color: var(--muted); }
 .studio-v3 .agent-loop-progress.is-auditing { color: var(--blue); background: var(--blue-soft); border-left-color: var(--blue); }
 .studio-v3 .agent-loop-progress.is-exhausted { color: var(--red); background: var(--red-soft); border-left-color: var(--red); }
+.studio-v3 .agent-loop-progress.is-stacked { grid-template-columns: minmax(0, 1fr); justify-content: stretch; }
+.studio-v3 .agent-loop-progress.is-stacked > * { min-width: 0; overflow-wrap: anywhere; }
+.studio-v3 .creative-long-reply > summary { cursor: pointer; white-space: pre-wrap; line-height: 1.7; }
+.studio-v3 .creative-long-reply > p { margin: 12px 0 0; white-space: pre-wrap; }
+.studio-v3 .node-output-preview > footer { flex-wrap: wrap; }
 
 .studio-v3 .button,
 .studio-v3 :is(.asset-card, .project-folio, .template-card, .production-role) {

@@ -191,6 +191,18 @@ describe("creator tour routing", () => {
     expect(config?.steps?.some((step) => step.element === '[data-tour="project-queue"]')).toBe(true);
   });
 
+  it("explains the assets page using its existing source and filter controls", () => {
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    render(<MemoryRouter initialEntries={["/assets"]}><AppShell>
+      <section aria-label="素材库概况">已保存素材</section><section aria-label="素材筛选">来源筛选</section>
+    </AppShell></MemoryRouter>);
+    fireEvent.click(screen.getAllByRole("button", { name: "打开创作向导" })[0]!);
+    fireEvent.click(screen.getByRole("button", { name: "讲解当前页面" }));
+    expect(driverMock.instance.drive).toHaveBeenCalledOnce();
+    const config = driverMock.factory.mock.calls[0]?.[0];
+    expect(config?.steps?.map(step => step.element)).toEqual(['[aria-label="素材库概况"]', '[aria-label="素材筛选"]']);
+  });
+
   it("explains how to recover a failed run in the page tour", () => {
     window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
     render(

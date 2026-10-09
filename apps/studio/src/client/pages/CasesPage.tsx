@@ -24,6 +24,7 @@ export function CasesPage() {
   const navigate = useNavigate();
   const [catalog, setCatalog] = useState<StudioCaseCatalog>();
   const [loading, setLoading] = useState(true);
+  const [waitingSeconds, setWaitingSeconds] = useState(0);
   const [error, setError] = useState<string>();
   const [keyword, setKeyword] = useState("");
   const [view, setView] = useState<CaseView | "all">("all");
@@ -60,6 +61,14 @@ export function CasesPage() {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    setWaitingSeconds(0);
+    if (!loading) return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => setWaitingSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [loading]);
 
   // 原地重读创作设置：读不到就不开工，避免用错声音、平台或时长。
   const retrySettings = useCallback(async () => {
@@ -250,7 +259,10 @@ export function CasesPage() {
 
       <div className="case-workspace">
         <section className="case-list" aria-label="案例列表">
-          {loading && !catalog ? <p className="case-hint"><Loader2 aria-hidden="true" size={14} className="spin" /> 正在从来源平台取回真实内容，首次需要一点时间。</p> : null}
+          {loading ? <p className="case-hint" role="status"><Loader2 aria-hidden="true" size={14} className="spin" />
+            正在读取来源平台的案例。<span aria-live="off">已等待 {waitingSeconds} 秒。</span>
+            {catalog ? "已加载的列表和当前参考仍可使用，不必重复刷新。" : "当前参考独立读取；若已显示，可以继续使用。来源尚未返回，暂时无法估计剩余时间。"}
+          </p> : null}
           {!loading && items.length === 0 ? (
             <p className="case-hint">
               {catalog?.items.length ? "没有符合条件的参考内容，换一个关键词或筛选项试试。" : "暂时没有取到内容，请查看上方来源状态。"}

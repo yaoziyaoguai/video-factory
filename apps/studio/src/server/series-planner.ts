@@ -145,14 +145,8 @@ export class SeriesPlanner {
       audience: series.audience,
       painPoint: episode.viewerPromise,
       hook: episode.hook,
-      evidence: [{
-        source: `系列路线图「${series.name}」第 ${episode.episodeNumber} 集`,
-        platform: series.platform,
-        keyword: `${series.name} / ${episode.pillar}`,
-        strength: 82,
-        evidenceUrl: seriesRoadmapUrl(episode.id),
-        collectedAt: episode.updatedAt,
-      }],
+      // 路线图是创作意图，不是社交平台热度或外部事实来源。
+      evidence: [],
       audienceReach: planningQuality,
       visualFeasibility: planningQuality,
       productionCostEfficiency: Math.min(82, planningQuality + 6),

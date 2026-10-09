@@ -99,6 +99,7 @@ export function GuideDock({ open, pathname, onOpenChange, onStartFullTour, onSta
 }
 
 function guideContext(pathname: string): { title: string; description: string; step: number } {
+  if (pathname === "/assets") return { title: "查找素材，核对后再复用", description: "在已有作品和素材之间切换，查看画面、所属制作、来源与授权。", step: 2 };
   if (pathname === "/projects") {
     return { title: "到了制作记录，接下来这样做", description: "先查看“待你处理”的制作。方案确认、费用授权、失败恢复和人工终审，都可能需要你操作。", step: 2 };
   }

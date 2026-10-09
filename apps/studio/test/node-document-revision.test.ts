@@ -224,6 +224,24 @@ const baseRevisionInput = {
 };
 
 describe("durable document task boundaries", () => {
+  it("records a preflight rejection as not accepted so a local pointer cannot remain pending", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-document-preflight-"));
+    const store = new DocumentCommandStore(root, "publish-package");
+    let sends = 0;
+    const identity = { commandId: "terminal-without-confirmation", action: "revise" as const, actor: "creator",
+      input: { ...baseRevisionInput, instruction: "保留原修改意见" } };
+    await assert.rejects(store.withCommand(identity, async () => { sends++; }, async () => {
+      throw new StudioConflictError("请明确确认创建修订版。");
+    }), /明确确认/);
+    const records = await store.list();
+    assert.equal(records.length, 1);
+    assert.equal(records[0]!.state, "failed");
+    assert.equal(records[0]!.error?.stage, "not_accepted");
+    assert.equal(records[0]!.input.instruction, "保留原修改意见");
+    assert.equal(records[0]!.prepared, undefined);
+    await assert.rejects(store.withCommand(identity, async () => { sends++; }), /明确确认/);
+    assert.equal(sends, 0);
+  });
   function revise(writer: CodexPublishCopyWriter, task: DocumentTaskContext) {
     return writer.revise({ task, platform: "douyin", brief: productionBrief(), narrations: ["给今天留一点空白。", "从一件小事开始。", "先少做一个决定。"],
       currentCopy: { title: "旧标题", description: "旧描述", hashtags: ["生活"] }, instruction: "标题具体一点" });
@@ -778,9 +796,13 @@ describe("publish-package document revision and current-version audit", () => {
     }, "creator"), /脚本/);
     assert.equal(calls, 0);
     script.status = "succeeded";
-    // 恢复原命令；不另建命令掩盖首轮上下文错误，不应重审或重买媒体。
-    await studio.reviseNodeDocument(harness.run.id, "publish-package", {
+    // 已明确未受理的旧命令只返回原拒绝；用户在上下文修复后发起新操作。
+    await assert.rejects(studio.reviseNodeDocument(harness.run.id, "publish-package", {
       ...baseRevisionInput, instruction: "去掉制作说明，按现有事实改写。",
+    }, "creator"), /脚本/);
+    assert.equal(calls, 0, "取回原拒绝不会偷偷提交模型");
+    await studio.reviseNodeDocument(harness.run.id, "publish-package", {
+      ...baseRevisionInput, commandId: "after-script-recovered", instruction: "去掉制作说明，按现有事实改写。",
     }, "creator");
     assert.equal(calls, 1);
     assert.equal((harness.pipeline.lastOverride?.output as { contentReview: { status: string } }).contentReview.status, "not_audited");
@@ -851,8 +873,17 @@ describe("publish-package document revision and current-version audit", () => {
       await assert.rejects(studio.reviseNodeDocument(harness.run.id, "publish-package",
         { ...baseRevisionInput, commandId: "must-not-submit", instruction: "新标题" }, "creator"), /文字操作/);
       assert.equal(calls, 0, "不能先调用模型再因另一个节点待结算而卡在结果写入");
-      assert.deepEqual(await studio.documentCommands(harness.run.id, "publish-package"), [], "未登记第二个相互阻塞的操作");
+      const [rejected] = await studio.documentCommands(harness.run.id, "publish-package");
+      assert.equal(rejected?.state, "failed", "拒绝回执不得留下第二个相互阻塞的待核操作");
+      assert.equal(rejected?.failureStage, "not_accepted");
+      assert.equal(rejected?.billingPending, false);
+      await assert.rejects(studio.reviseNodeDocument(harness.run.id, "publish-package",
+        { ...baseRevisionInput, commandId: "must-not-submit", instruction: "新标题" }, "creator"), /文字操作/);
+      assert.equal(calls, 0, "重放明确拒绝仍不调用模型");
     } finally { finish.resolve(); await pending; }
+    await studio.reviseNodeDocument(harness.run.id, "publish-package",
+      { ...baseRevisionInput, commandId: "after-other-node-settled", instruction: "新标题" }, "creator");
+    assert.equal(calls, 1, "原节点结清后可明确发起新操作，拒绝回执不锁死制作");
   });
 
   it("retains the committed revision if notifying the browser fails and replays without another model call", async () => {

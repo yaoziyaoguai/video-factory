@@ -6,6 +6,7 @@ import { studioApi } from "../api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, creatorFacingTechnicalText, providerLabel, providerModelLabel, reasoningEffortLabel } from "../presentation.js";
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
+import { clearCreativeSessionFields, creativeSessionSlotKey, creativeSessionStorage, readCreativeSessionSlot, writeCreativeSessionFields, type CreativeDraftSessionBase } from "../creative-draft-session.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
 import { NarrationPlanEditor } from "./NarrationPlanEditor.js";
 import { NarrationTimingEditor } from "./NarrationTimingEditor.js";
@@ -49,6 +50,8 @@ interface NodeWorkspaceProps {
   onDocumentReadinessChange?: (nodeId: string, versionId: string, ready: boolean) => void;
   /** 画面来源由制作页统一展示时，不在节点内重复挂载编辑会话。 */
   hideExecutionConfiguration?: boolean;
+  /** 当前停点已在决定区显示同一审计，不重复整段原文和调用计数。 */
+  hideAgentProgress?: boolean;
   pauseBusy?: boolean;
   pauseRequested?: boolean;
   /** joint-v1 创作规划节点的真实阶段投影；其他节点不传。 */
@@ -67,14 +70,14 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, onRunUpdated, characterDrama: propsCharacterDrama = false, nativeAudio = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, onDocumentReadinessChange, hideExecutionConfiguration = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, onRunUpdated, characterDrama: propsCharacterDrama = false, nativeAudio = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, onDocumentReadinessChange, hideExecutionConfiguration = false, hideAgentProgress = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
   onAuthorizeProductionScope = async input => { await studioApi.authorizeProductionScope(runId, input); },
   onAmendProductionScope = async (authorizationId, input) => { await studioApi.amendProductionScope(runId, authorizationId, input); },
   onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
   const isDecisionDocument = node.id === "publish-package" || node.id === "reference-grammar";
-  const shouldOpenForAttention = currentDelivery || node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
+  const shouldOpenForAttention = currentDelivery || (isDecisionDocument && node.status === "needs_human") || node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
   // 文字采用停点优先展示当前正文；前序输入仍可主动展开，不抢占阅读位置。
-  const shouldOpenInputForAttention = shouldOpenForAttention && !(currentDelivery && isDecisionDocument);
+  const shouldOpenInputForAttention = shouldOpenForAttention && !isDecisionDocument;
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenInputForAttention);
   const [editing, setEditing] = useState(false);
@@ -123,12 +126,18 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     [artifacts, effectiveVersion?.artifactIds, node.id],
   );
   const documentIdentity = JSON.stringify([runId, node.id, effectiveVersion?.id, editableArtifact?.id, editableArtifact?.contentUrl]);
+  const { storage: draftStorage, durable: draftStorageDurable } = creativeSessionStorage();
+  const draftSlot = creativeSessionSlotKey(runId, node.id, "node-output");
+  const [localDraftPresent, setLocalDraftPresent] = useState(false);
+  const [localDraftDurable, setLocalDraftDurable] = useState(draftStorageDurable);
+  const draftBase = useRef<CreativeDraftSessionBase | undefined>(undefined);
   const [documentContext, setDocumentContext] = useState({ identity: documentIdentity, generation: 0 });
   // 即便有效版本回到原身份，也不复活已过期的编辑会话。
   if (documentContext.identity !== documentIdentity) setDocumentContext({ identity: documentIdentity, generation: documentContext.generation + 1 });
   const documentPreview = documentResult?.identity === documentIdentity ? documentResult.content : undefined;
   const documentOutput = isDecisionDocument && node.outputState ? effectiveVersion?.output : effectiveOutput(node) ?? node.output;
-  const inlineDocument = node.id === "reference-grammar" ? asRecord(documentOutput)?.grammar ?? documentOutput : documentOutput;
+  const inlineDocument = node.id === "reference-grammar" ? asRecord(documentOutput)?.grammar ?? documentOutput
+    : node.id === "asset-source-review" ? asRecord(documentOutput)?.report ?? documentOutput : documentOutput;
   const documentRequired = isDecisionDocument && (Boolean(editableArtifact) || !hasCreatorDocumentContent(node.id, inlineDocument));
   const documentError = documentFailure?.identity === documentIdentity ? documentFailure.message
     : documentRequired && !editableArtifact ? "当前版本的完整文档不可读取，不能用历史稿代替；原稿和记录仍保留。" : undefined;
@@ -235,6 +244,18 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   }, [documentPreview, editing, node]);
 
   useEffect(() => {
+    if (!isDecisionDocument) return;
+    const saved = readCreativeSessionSlot(draftStorage, draftSlot);
+    setLocalDraftPresent(Boolean(saved?.document));
+    // 看见更新后将旧基线永久作废；刷新或 A→B→A 不得让旧草稿重新获得保存资格。
+    if (saved?.document && saved.document.baseKey !== documentIdentity && !saved.document.baseKey.startsWith("stale:")) {
+      setLocalDraftDurable(writeCreativeSessionFields(draftStorage, draftSlot, saved.base, {
+        document: { ...saved.document, baseKey: `stale:${saved.document.baseKey}` },
+      }));
+    }
+  }, [isDecisionDocument, draftStorage, draftSlot, documentIdentity]);
+
+  useEffect(() => {
     if (!editingInput) setInputDraft(pretty(effectiveInput(node) ?? {}));
   }, [editingInput, node]);
 
@@ -273,11 +294,31 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
 
   function beginEditing() {
     const usesDocument = Boolean(editableArtifact && documentPreview !== undefined);
+    const saved = isDecisionDocument ? readCreativeSessionSlot(draftStorage, draftSlot) : null;
     setError(undefined);
     setEditingDocument(usesDocument);
-    setDocumentEditBaseline(usesDocument ? { identity: documentIdentity, artifactId: editableArtifact!.id, generation: documentContext.generation } : undefined);
-    setDraft(pretty(usesDocument ? documentPreview : effectiveOutput(node) ?? node.output ?? {}));
+    setDocumentEditBaseline(usesDocument ? { identity: saved?.document?.baseKey ?? documentIdentity, artifactId: saved?.base.artifactId ?? editableArtifact!.id, generation: documentContext.generation } : undefined);
+    draftBase.current = saved?.base ?? { runId, stage: node.id, purposeKey: "node-output", ...(effectiveVersion ? { versionId: effectiveVersion.id } : {}), ...(editableArtifact ? { artifactId: editableArtifact.id } : {}) };
+    setDraft(pretty(saved?.document?.document ?? (usesDocument ? documentPreview : effectiveOutput(node) ?? node.output ?? {})));
     setEditing(true);
+  }
+
+  function updateOutputDraft(value: unknown) {
+    setError(undefined);
+    setDraft(pretty(value));
+    if (!isDecisionDocument || !editingDocument || !documentEditBaseline || !draftBase.current) return;
+    const document = asRecord(value);
+    if (!document) return;
+    setLocalDraftPresent(true);
+    setLocalDraftDurable(writeCreativeSessionFields(draftStorage, draftSlot, draftBase.current, {
+      document: { baseKey: staleDocumentEdit ? `stale:${documentEditBaseline.identity}` : documentEditBaseline.identity, document },
+    }));
+  }
+
+  function discardOutputDraft() {
+    clearCreativeSessionFields(draftStorage, draftSlot, ["document"]);
+    setLocalDraftPresent(false);
+    cancelEditing();
   }
 
   function cancelEditing() {
@@ -342,6 +383,10 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         return;
       }
       await onOverride(node.id, { ...parsed, ...(confirmTerminalEdit ? { confirmTerminalEdit: true } : {}) });
+      if (isDecisionDocument) {
+        clearCreativeSessionFields(draftStorage, draftSlot, ["document"]);
+        setLocalDraftPresent(false);
+      }
       setEditing(false);
       setTerminalOverride(undefined);
     } catch (caught) {
@@ -544,7 +589,8 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       <div className="node-workspace-body">
         {readOnly ? <p className="node-workspace-warning"><AlertTriangle aria-hidden="true" size={16} />旧版工作流结果只读；要继续修改，请基于这版重新制作。</p> : null}
         {showPlanningStages && capability ? <details className="node-capability-details"><summary>本次使用的创作服务</summary><p>{capability}</p></details> : null}
-        {node.agentLoopProgress ? <div className={`agent-loop-progress is-${node.agentLoopProgress.phase}`} role="status">
+        {node.agentLoopProgress && !hideAgentProgress ? <div className={`agent-loop-progress is-stacked is-${node.agentLoopProgress.phase}`} role="status">
+          {["asset-source-review", "visual-review"].includes(node.id) ? <span>以下是对审片报告的复核，不代表素材或成片质量通过。素材问题以审片正文为准。</span> : null}
           <strong>{agentLoopPhaseLabel(node.agentLoopProgress, node.status !== "running" && effectiveVersion?.source === "human")}</strong>
           {node.agentLoopProgress.latestAudit ? contentReview
             ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分；完整原文见对应版本的审计记录。</span>
@@ -735,7 +781,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             nativeAudio={nativeAudio}
             creativeReview={asRecord(effectiveOutput(node) ?? (node.outputState ? undefined : node.output))?.creativeReview}
             stale={node.outputState?.stale === true}
-          /> : editing ? <NodeStructuredEditor nativeAudio={nativeAudio} nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <div className="node-document-read-error">
+          /> : editing ? <NodeStructuredEditor nativeAudio={nativeAudio} nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={updateOutputDraft} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <div className="node-document-read-error">
             <p className="node-workspace-error" role="alert">详细内容读取失败：{documentError}</p>
             {editableArtifact?.contentUrl ? <button className="button button-ghost" type="button" onClick={() => {
               setDocumentResult(undefined);
@@ -763,7 +809,8 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             : null}
           {audioArtifact?.contentUrl ? <div className={audioIsCurrent ? "node-audio-preview" : "node-audio-preview is-stale"}><div><strong>{audioCaption}</strong>{!audioIsCurrent ? <small>当前文字已修改或上游已变化；继续生成后会更新声音。</small> : null}</div><audio aria-label={audioIsCurrent ? audioCaption : `${audioCaption}试听`} src={audioArtifact.contentUrl} controls preload="metadata" /></div> : null}
           {editing && staleDocumentEdit ? <p className="node-workspace-error" role="alert">当前交付已更新。你的未保存修改仍保留，请先复制需要保留的内容，再取消编辑、核对当前稿。</p> : null}
-          {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy || staleDocumentEdit} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
+          {localDraftPresent ? <p className="node-document-state">{localDraftDurable ? "本标签的未保存修改已暂存，刷新后可从“编辑交付”找回。" : "未保存修改仅留在当前页面；浏览器暂存不可用，刷新前请先复制。"}</p> : null}
+          {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelEditing}><X aria-hidden="true" size={15} />取消</button>{localDraftPresent ? <button className="button button-ghost" type="button" disabled={busy} onClick={discardOutputDraft}>放弃未保存修改</button> : null}<button className="button button-primary" type="button" disabled={busy || staleDocumentEdit} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
         </section>
 
         {error ? <p className="node-workspace-error" role="alert">{error}</p> : null}
@@ -971,7 +1018,7 @@ function deliveryEditHint(
   if (READ_ONLY_NODE_IDS.has(nodeId)) return "技术结果只读；需要调整时请修改上游内容后重跑";
   if (runStatus === "running" && hasDelivery) return "后续步骤正在执行；可先暂停，再修改这份交付";
   if (runStatus === "paused" && hasDelivery) return "制作已暂停，可以修改；保存后下游旧结果会自动失效";
-  if (source === "human") return "已采用你的修改";
+  if (source === "human") return "修改已保存，采用状态见决定区";
   if (hasDelivery) return "自动生成，可按需修改";
   return status === "pending" ? "等待前一步完成" : "本步骤没有需要人工阅读的内容";
 }
@@ -1251,7 +1298,6 @@ function creatorDraftValidationError(nodeId: string, value: unknown, requireMode
     ]);
     if (topLevelError) return topLevelError;
     return firstCollectionItemError(draft.scenes, "分镜", [
-      ["narration", "旁白"],
       ["visual_prompt", "画面提示"],
       ["visible_action", "可见动作"],
     ]);

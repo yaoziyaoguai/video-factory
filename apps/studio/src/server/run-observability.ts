@@ -282,6 +282,12 @@ function rebuildControlledReason(candidate: string): string {
 function buildControlledDetail(raw: string, nodeId: string): { technicalDetail: string } | undefined {
   void nodeId;
   const parts: string[] = [];
+  // 旧版多候选失败只剩受控汇总，逐项恢复人话原因；绝不直接透出异常原文或配置身份。
+  if (/^\d+ 个候选模型调用未能完成：/.test(raw)) {
+    for (const match of raw.matchAll(/(\d+)\. [A-Za-z0-9_.-]+ (?:服务端错误（HTTP (\d{3})）|输出未通过合同（[a-z0-9_]+）)/g)) {
+      parts.push(`候选 ${Number(match[1])}：${match[2] ? `服务返回 HTTP ${match[2]}` : "返回的内容格式或结构不符合要求"}`);
+    }
+  }
   const stageCode = /ASSET_SEARCH_SOURCES_UNAVAILABLE/.exec(raw);
   if (stageCode) parts.push(stageCode[0]);
   for (const match of raw.matchAll(/([A-Za-z0-9-]+-v\d+)：([^，。；;、\n()（）]+)/g)) {

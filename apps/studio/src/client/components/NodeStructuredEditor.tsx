@@ -54,6 +54,7 @@ const LABELS: Record<string, string> = {
   composition: "构图",
   camera: "镜头运动",
   color: "色彩",
+  transitions: "转场",
   sound: "声音",
   summary: "摘要",
   recommendation: "结论",
@@ -162,6 +163,16 @@ export function NodeStructuredEditor({ nodeId, value, assetProviderIds = [], ass
   const entries = Object.entries(record).filter(([key, fieldValue]) => hasEditableValue(fieldValue) && isCreatorTopLevelField(nodeId, key, fieldValue));
   if (!entries.length) return <p className="node-document-state">这个交付只有系统记录，不需要手工修改。</p>;
   return <div className="node-structured-editor" data-node-editor={nodeId}>
+    {creatorViewId(nodeId) === "brief" && asRecord(record.editorial) ? <section className="node-editor-group" aria-label="沿用的创作建议">
+      <header><strong>选题阶段的创作建议</strong></header>
+      <p>可以修改或清空不再适用的建议；参考来源、事实和费用授权不会因此改变。</p>
+      {(["reasons", "guardrails"] as const).map(key => <label className="node-editor-field node-editor-field-wide" key={key}>
+        <span>{key === "reasons" ? "创作理由（每行一项）" : "内容注意事项（每行一项）"}</span>
+        <textarea value={Array.isArray(asRecord(record.editorial)![key]) ? (asRecord(record.editorial)![key] as string[]).join("\n") : ""}
+          onChange={event => onChange({ ...record, editorial: { ...asRecord(record.editorial), [key]: event.target.value.split("\n").filter(text => text.trim()) } })} />
+      </label>)}
+      <button type="button" className="button button-ghost" onClick={() => onChange({ ...record, editorial: { verdict: "produce_video", reasons: [], guardrails: [] } })}>清空沿用的创作建议</button>
+    </section> : null}
     {entries.map(([key, fieldValue]) => <StructuredField
       key={key}
       fieldKey={key}
@@ -214,7 +225,7 @@ function StructuredField({ nodeId, fieldKey, value, assetProviderIds, assetProvi
       return <label className="node-editor-field node-editor-field-wide"><span>{label(fieldKey)}<small>每行一项</small></span><textarea rows={Math.min(6, Math.max(2, value.length))} value={value.join("\n")} onChange={(event) => onChange(path, event.target.value.split("\n"))} /></label>;
     }
     if (value.every(isScalar)) {
-      return <section className="node-editor-collection node-editor-scalar-list"><header><strong>{label(fieldKey)}</strong><span>{value.length} 项</span></header><div>{value.map((item, index) => <ScalarEditor key={index} value={item} onChange={(next) => onChange([...path, index], next)} />)}</div></section>;
+      return <section className="node-editor-collection node-editor-scalar-list"><header><strong>{label(fieldKey)}</strong><span>{value.length} 项</span></header><div>{value.map((item, index) => <label key={index} className="node-editor-field"><span>{label(fieldKey)} {index + 1}</span><ScalarEditor value={item} onChange={(next) => onChange([...path, index], next)} /></label>)}</div></section>;
     }
     const visibleItems = value.map((item, index) => {
       const child = asRecord(item);
@@ -266,7 +277,7 @@ function StructuredField({ nodeId, fieldKey, value, assetProviderIds, assetProvi
     return <label className="node-editor-field"><span>{label(fieldKey)}</span><select value={stringValue} onChange={(event) => onChange(path, event.target.value)}>{choices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>;
   }
   const multiline = typeof value === "string" && (value.length > 72 || /(prompt|narration|summary|description|suggestion|rationale|note|hook|angle)/i.test(fieldKey));
-  return <label className={multiline ? "node-editor-field node-editor-field-wide" : "node-editor-field"}><span>{label(fieldKey)}</span>{multiline
+  return <label className={multiline ? "node-editor-field node-editor-field-wide" : "node-editor-field"}><span>{fieldKey === "description" && nodeId === "publish-package" && path.includes("copy") ? "发布正文" : label(fieldKey)}</span>{multiline
     ? <textarea rows={3} value={formatEditableScalar(value)} onChange={(event) => onChange(path, event.target.value)} />
     : typeof value === "number"
       ? fieldKey === "confidence" && value >= 0 && value <= 1
@@ -276,7 +287,7 @@ function StructuredField({ nodeId, fieldKey, value, assetProviderIds, assetProvi
 }
 
 function ScalarEditor({ value, onChange }: { value: unknown; onChange: (value: unknown) => void }) {
-  if (typeof value === "boolean") return <label className="node-editor-toggle"><input type="checkbox" checked={value} onChange={(event) => onChange(event.target.checked)} /><span>{value ? "是" : "否"}</span></label>;
+  if (typeof value === "boolean") return <input type="checkbox" checked={value} onChange={(event) => onChange(event.target.checked)} />;
   if (typeof value === "number") return <NumberEditor value={value} onChange={onChange} />;
   return <input type="text" value={formatEditableScalar(value)} onChange={(event) => onChange(event.target.value)} />;
 }

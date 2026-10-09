@@ -280,7 +280,12 @@ describe("creator settings API contracts", () => {
     });
     assert.throws(() => parseStudioCreatorSettingsPatch({ defaultRecipeId: "unlimited-paid" }), /默认制作配方无效/);
     assert.throws(() => parseStudioCreatorSettingsPatch({ productionDefaults: { directorProfileId: "famous-person" } }), /默认导演角色无效/);
-    assert.throws(() => parseStudioCreatorSettingsPatch({ productionDefaults: { durationSeconds: 120 } }), /默认视频时长/);
+    for (const durationSeconds of [12, 12.5, 120]) {
+      assert.equal(parseStudioCreatorSettingsPatch({ productionDefaults: { durationSeconds } }).productionDefaults?.durationSeconds, durationSeconds);
+    }
+    for (const durationSeconds of [0, -1, Infinity, NaN]) {
+      assert.throws(() => parseStudioCreatorSettingsPatch({ productionDefaults: { durationSeconds } }), /默认参考时长/);
+    }
     assert.throws(() => parseStudioCreatorSettingsPatch({ productionDefaults: { reviewMode: "automatic" } }), /人工终审/);
     assert.throws(() => parseStudioCreatorSettingsPatch({ roleProviderDefaults: { unknown: "provider-v1" } }), /生产角色/);
     assert.throws(() => parseStudioCreatorSettingsPatch({ roleProviderDefaults: { script: "bad provider" } }), /能力编号/);

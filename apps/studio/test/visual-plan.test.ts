@@ -11,7 +11,8 @@ describe("planVisualDirection", () => {
     });
 
     assert.equal(plan.beats.length, 3);
-    assert.deepEqual(plan.beats.map((beat) => beat.duration), ["0-3 秒", "3-14 秒", "14-24 秒"]);
+    assert.equal(plan.beats.every(beat => beat.duration.includes("时长由脚本确定")), true);
+    assert.match(plan.strategy, /不规定镜头数量或时长/);
     assert.equal(plan.beats[0]?.source, "stock");
     assert.match(plan.beats[0]?.searchQuery ?? "", /下班后什么都不想做/);
     assert.match(plan.beats[1]?.description ?? "", /环境|动作/);

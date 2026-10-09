@@ -5,6 +5,12 @@ import { describe, expect, it } from "vitest";
 import { NodeDeliveryPreview } from "../src/client/components/NodeDeliveryPreview.js";
 
 describe("NodeDeliveryPreview", () => {
+  it("shows the source asset review as a report instead of an empty creative document", () => {
+    render(<NodeDeliveryPreview nodeId="asset-source-review" value={{ recommendation: "revise", confidence: 0.8,
+      summary: "前三镜不符，需要换素材。", findings: [] }} />);
+    expect(screen.getByText("前三镜不符，需要换素材。")).toBeInTheDocument();
+    expect(screen.queryByText(/没有需要人工查看/)).not.toBeInTheDocument();
+  });
   it("shows character turn timing without describing it as a single continuous narrator", () => {
     render(<NodeDeliveryPreview nodeId="voice" value={{
       version: "video-factory/voiceover-plan-v4", duration: 24, sampleRate: 44100,

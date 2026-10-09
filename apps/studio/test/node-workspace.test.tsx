@@ -598,6 +598,24 @@ describe("node production workspaces", () => {
     });
   });
 
+  it("shows the current source-visual report body without offering report edits", async () => {
+    const report = { summary: "当前素材有两处构图问题", scores: { composition: 62 },
+      findings: [{ category: "composition", severity: "warning", message: "主体被边缘裁切", suggestion: "调整取景后重新检查" }],
+      confidence: 0.9, recommendation: "repair" };
+    const node: StudioNode = { ...succeededNode, id: "asset-source-review", label: "生成画面预检", role: "视觉审片员",
+      status: "needs_human", output: { report: { summary: "旧版报告不得当作当前" } },
+      outputState: { ...succeededNode.outputState!, versions: [{ ...succeededNode.outputState!.versions[0]!,
+        output: { sourceVisualReviewPath: "/managed/report.json", report, reviewStatus: "completed" } }] } };
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-source-report" runRevision={3}
+      node={node} runStatus="needs_human" currentDelivery artifacts={[]} busy={false}
+      onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    expect(screen.getByText("当前素材有两处构图问题")).toBeVisible();
+    expect(screen.getByText("主体被边缘裁切")).toBeVisible();
+    expect(screen.queryByText("旧版报告不得当作当前")).not.toBeInTheDocument();
+    expect(screen.queryByText("这一步没有需要人工查看或修改的创作内容。")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑交付" })).not.toBeInTheDocument();
+  });
+
   it("lets a failed source-visual gate switch its review service without rerunning paid assets", async () => {
     const onConfigure = vi.fn(async () => undefined);
     const providers: StudioProvider[] = [
@@ -1935,6 +1953,36 @@ describe("node production workspaces", () => {
     expect(screen.getByRole("button", { name: "保存为人工版本" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "标题" })).toHaveValue("未保存的标题");
     expect(onOverride).not.toHaveBeenCalled();
+  });
+
+  it("restores an unsaved publication after cancelling terminal confirmation and remounting on a newer version", async () => {
+    const onOverride = vi.fn(async () => { throw new Error("当前交付已更新"); });
+    vi.spyOn(studioApi, "resourceJson").mockImplementation(async url => ({ copy: { title: url === "/local-a" ? "原文案" : "另一标签已保存", description: "发布正文", hashtags: [] } }));
+    const makeNode = (id: string): StudioNode => ({ ...succeededNode, id: "publish-package", label: "发布文案", artifactIds: [id],
+      output: { publishPackagePath: "/copy.json" }, outputState: { ...succeededNode.outputState!, effectiveVersionId: id,
+        versions: [{ ...succeededNode.outputState!.versions[0]!, id, artifactIds: [id], output: { publishPackagePath: "/copy.json" } }] } });
+    const props = { acceptedPlanDigest: TEST_PLAN_DIGEST, runId: "run-local-publish-draft", runRevision: 2, runStatus: "succeeded" as const,
+      artifacts: ["local-a", "local-b"].map(id => ({ id, kind: "publish_package", contentType: "application/json", contentUrl: `/${id}`, createdAt: "now" })),
+      busy: false, onOverride, onAuthorize: async () => undefined };
+    const first = render(<NodeWorkspace {...props} node={makeNode("local-a")} />);
+    await screen.findByText("原文案");
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "本标签尚未保存的原文" } });
+    await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认创建修订版" }));
+    await screen.findByText("当前交付已更新");
+    await userEvent.keyboard("{Escape}");
+    first.unmount();
+    const second = render(<NodeWorkspace {...props} runRevision={3} node={makeNode("local-b")} />);
+    await screen.findByText("另一标签已保存");
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    expect(screen.getByRole("textbox", { name: "标题" })).toHaveValue("本标签尚未保存的原文");
+    expect(screen.getByRole("button", { name: "保存为人工版本" })).toBeDisabled();
+    expect(onOverride).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByRole("button", { name: "放弃未保存修改" }));
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    expect(screen.getByRole("textbox", { name: "标题" })).toHaveValue("另一标签已保存");
+    second.unmount();
   });
 
   it("does not display a late or missing historical document as the current publication", async () => {

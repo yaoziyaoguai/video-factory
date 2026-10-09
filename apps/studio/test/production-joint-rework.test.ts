@@ -15,6 +15,7 @@ import {
   buildCharacterNarrationPlan,
   CodexBridgeError,
   RoleAgentLoopError,
+  ModelCandidatesExhaustedError,
   runRoleAgentLoop,
   HumanDecisionConflictError,
   type CreativeTreatmentAgent,
@@ -4281,7 +4282,7 @@ describe("F01 series unaudited revision can enter normal production (2026-10-02)
   });
 });
 
-for (const failureMode of ["current", "invalid_returned", "legacy_trace_only", "legacy_prepared", "unknown"] as const) {
+for (const failureMode of ["current", "fallback_completed", "fallback_unknown", "invalid_returned", "legacy_trace_only", "legacy_prepared", "legacy_checkpoints", "legacy_checkpoint_unknown", "unknown"] as const) {
 it(`keeps a preserved script editable after downstream generation failure (${failureMode})`, async () => {
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-planning-generation-recovery-"));
   const spies: ReworkSpies = { treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] };
@@ -4290,6 +4291,34 @@ it(`keeps a preserved script editable after downstream generation failure (${fai
   let directorAttempts = 0;
   agents.directorAgent!.planDetailed = async (...args) => {
     if (args[0].creativeReviewExecution?.mode !== "check" && ++directorAttempts === 1) {
+      if (failureMode.startsWith("legacy_checkpoint")) {
+        const failures = [];
+        for (const modelId of ["primary", "backup"]) {
+          try {
+            await runRoleAgentLoop({ role: "导演", contractVersion: "controlled", criteria: ["返回有效方案"], maxIterations: 1,
+              checkpoint: args[0].agentLoopCheckpointForModel!(modelId),
+              produce: async () => { throw new CodexBridgeError("受控原请求失败", false,
+                failureMode === "legacy_checkpoint_unknown" && modelId === "backup" ? "uncertain"
+                  : modelId === "primary" ? "not_accepted" : "completed_failure", 503); },
+              validate: value => value, audit: async () => { throw new Error("生成失败不能审计"); } });
+          } catch (error) { failures.push({ modelId, providerId: modelId, error }); }
+        }
+        // 旧 joint 节点没登记包装错误的 loop artifact，但原始 checkpoint 已耐久落盘。
+        throw new Error("历史候选耗尽包装", { cause: new ModelCandidatesExhaustedError(failures) });
+      }
+      if (failureMode.startsWith("fallback_")) {
+        throw new ModelCandidatesExhaustedError([
+          { modelId: "primary", providerId: "primary", error: new CodexBridgeError("服务暂时不可用", false,
+            "completed_failure", 503, undefined, { category: "service_unavailable" }) },
+          { modelId: "backup", providerId: "backup", error: new RoleAgentLoopError("备用导演没有返回有效方案", {
+            version: "video-factory/agent-loop-v1", role: "视觉导演", contractVersion: "controlled", criteria: [],
+            status: "failed", maxIterations: 1, iterations: [],
+            failure: { stage: failureMode === "fallback_unknown" ? "uncertain" : "completed_failure" },
+          }, undefined, new CodexBridgeError("备用导演没有返回有效方案", false,
+            failureMode === "fallback_unknown" ? "uncertain" : "completed_failure", 422,
+            undefined, { category: "invalid_output", reasonCode: "task_schema" })) },
+        ]);
+      }
       if (failureMode === "invalid_returned") {
         await runRoleAgentLoop({ role: "导演", contractVersion: "controlled", criteria: ["来源必须可用"], maxIterations: 1,
           produce: async () => ({ output: { invalid: true } }),
@@ -4319,7 +4348,7 @@ it(`keeps a preserved script editable after downstream generation failure (${fai
       baseDraftSha256: shown.draftSha256, expectedCheckIdentity: shown.checkResult!.checkIdentity });
   }
   assert.equal(directorAttempts, 1);
-  if (failureMode === "current" || failureMode === "invalid_returned") {
+  if (failureMode === "current" || failureMode === "invalid_returned" || failureMode === "fallback_completed") {
     assert.equal(run.status, "needs_human", "已核清的生成失败应保留可操作停点，无须先把制作判死");
     const saved = run.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as {
       creativeReview: { stages: { script: { confirmationHistory: unknown[] }; director: { currentDocument: unknown } } }; planningStop: { detail: string } };
@@ -4337,7 +4366,7 @@ it(`keeps a preserved script editable after downstream generation failure (${fai
       commandId: "prepare-failed-director", expectedRunRevision: run.revision, nodeId: "creative-planning", stage: "script",
       targetArtifactId: draft.artifactId, targetVersionId: draft.versionId, targetSha256: draft.sha256,
     } as const;
-    if (failureMode === "unknown") {
+    if (failureMode === "unknown" || failureMode === "fallback_unknown" || failureMode === "legacy_checkpoint_unknown") {
       await assert.rejects(() => pipeline.prepareReviewContinuation(run.id, preparation), /原结果尚未核清/);
       assert.equal(directorAttempts, 1, "unknown 不能被恢复动作换成新生成");
       assert.deepEqual(await pipeline.loadPersisted(run.id), run, "拒绝恢复不能破坏原稿或请求身份");
@@ -4371,6 +4400,7 @@ it(`keeps a preserved script editable after downstream generation failure (${fai
   assert.equal(snapshot.stage, "script");
   const document = structuredClone(snapshot.draft) as { scenes: Array<{ narration: string }> };
   document.scenes[0]!.narration = "用户保存的新开头";
+  document.scenes[1]!.narration = "";
   const editing = await pipeline.dispatchCreativeReviewCommand(run.id, {
     action: "edit_draft", commandId: "edit-after-director-failure", actor: "creator", stage: "script",
     expectedRunRevision: run.revision, expectedReviewRevision: snapshot.reviewRevision,
@@ -4391,6 +4421,7 @@ it(`keeps a preserved script editable after downstream generation failure (${fai
   assert.equal(directorAttempts, 2, "只有用户明确采用才重新生成下游");
   assert.equal((await studio.creativeReview(run.id))!.stage, "director", "恢复后能到达真实导演稿确认，不跳过它");
   assert.equal(spies.directorInputs.at(-1)!.scenes[0]!.narration, "用户保存的新开头", "导演必须使用修改后的脚本");
+  assert.equal(spies.directorInputs.at(-1)!.scenes[1]!.narration, "", "用户保留的无旁白镜头不得填词或被导演入口拒绝");
   assert.deepEqual(await pipeline.confirmCreativeReview(run.id, adoption), run, "同一采用重放不再次生成");
   assert.equal(directorAttempts, 2);
 });

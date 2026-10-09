@@ -68,6 +68,14 @@ function runningRun(): StudioRunDetail {
 }
 
 describe("text task recovery UI", () => {
+  it("shows sanitized provider diagnostics for a rejected director result, not only infrastructure errors", async () => {
+    const run = failedRun("completed_failure");
+    run.failure = { ...run.failure!, category: "node_failure", nodeId: "creative-planning", nodeLabel: "创作规划",
+      summary: "模型没有返回符合结构的导演方案。", technicalDetail: "候选 1：服务返回 HTTP 503；候选 2：返回的内容格式或结构不符合要求" };
+    render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} /></MemoryRouter>);
+    await userEvent.click(screen.getByText("查看技术详情"));
+    expect(screen.getByText(/服务返回 HTTP 503/)).toBeVisible();
+  });
   it("does not label an unregistered audit request as unaccepted or offer an unusable query", () => {
     const { taskRecovery: _recovery, failure: _failure, ...base } = failedRun("accepted_unknown");
     const query = vi.fn();

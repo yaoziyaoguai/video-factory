@@ -19,6 +19,15 @@ function node(
 }
 
 describe("run observability", () => {
+  it("explains both causes of exhausted director candidates without echoing raw diagnostics", () => {
+    const result = buildRunObservability({ status: "failed", startedAt: "2026-10-10T00:00:00Z", now: "2026-10-10T00:00:01Z",
+      nodes: [node("creative-planning", "创作规划", "failed", {
+        error: "2 个候选模型调用未能完成：1. deepseek-flash 服务端错误（HTTP 503）；2. backup 输出未通过合同（task_schema）。 sk-private-secret", })],
+      videoAvailable: false, publishPackageAvailable: false });
+    expect(result.failure?.technicalDetail).toContain("候选 1：服务返回 HTTP 503");
+    expect(result.failure?.technicalDetail).toContain("候选 2：返回的内容格式或结构不符合要求");
+    expect(result.failure?.technicalDetail).not.toContain("sk-private-secret");
+  });
   it("explains native audio as local source preparation instead of voice synthesis", () => {
     const result = buildRunObservability({ status: "running", startedAt: "2026-10-08T00:00:00Z", now: "2026-10-08T00:00:10Z",
       nodes: [node("voice", "原声试听", "running", { role: "声音准备",

@@ -440,7 +440,7 @@ function SeriesRoadmap({
                 <div><dt>推理</dt><dd>{planningReasoningLabel(selectedEpisode.planning)}</dd></div>
               </dl>
               {selectedEpisode.planning.auditStatus === "stale"
-                ? <p><strong>复核状态：</strong>上游内容已更新，原复核已过期。是否重新审计由你决定；满足前集定版条件后，也可采用当前稿。</p>
+                ? <p><strong>复核状态：</strong>上游内容已更新，原复核已过期。是否重新审计由你决定；请核对当前显示的前集定版交接。采用时保留本集计划，并以这份最新交接为制作依据。</p>
                 : selectedEpisode.planning.auditSummary ? <p><strong>复核结论：</strong>{creatorFacingTechnicalText(selectedEpisode.planning.auditSummary)}{selectedEpisode.planning.auditScore !== undefined ? `（${selectedEpisode.planning.auditScore} 分）` : ""}</p> : null}
               {selectedEpisode.planning.auditSuggestions?.length ? <div>
                 <ul aria-label="本集内容建议">{selectedEpisode.planning.auditSuggestions.map((suggestion, index) => <li key={`${index}:${suggestion}`}>

@@ -206,6 +206,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
   const closeRiskDialog = () => { setPendingRisk(null); setIdentityStale(false); };
   const riskDialogRef = useDialogFocus<HTMLDivElement>(pendingRisk !== null, closeRiskDialog);
   const hasBlockingIssues = review.blockingIssues.length > 0;
+  const processing = busy || review.phase === "checking";
   const evidenceRepairs = review.stage === "treatment" ? review.draftValidation?.issues ?? [] : [];
   const hasMissingEvidenceProvider = evidenceRepairs.length > 0;
   const hasUnavailableEvidenceProvider = evidenceRepairs.some((issue) => compatibleEvidenceProviders(
@@ -654,13 +655,14 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
     <section className="creative-discussion-panel" aria-labelledby="creative-review-title">
       <header className="creative-discussion-header">
         <div>
-          <h2 id="creative-review-title">{hasBlockingIssues ? "当前导演方案需要你决定" : review.reviewPurpose === "direction" ? "导演初稿已就绪，等你决定" : review.reviewPurpose === "material_plan" ? "选材方案已就绪，等你决定" : `${STAGE_LABEL[review.stage]}已生成，等你确认`}</h2>
+          <h2 id="creative-review-title">{processing ? `正在处理${STAGE_LABEL[review.stage]}，当前稿件已保留` : hasBlockingIssues ? "当前导演方案需要你决定" : review.reviewPurpose === "direction" ? "导演初稿已就绪，等你决定" : review.reviewPurpose === "material_plan" ? "选材方案已就绪，等你决定" : `${STAGE_LABEL[review.stage]}已生成，等你确认`}</h2>
           {hasBlockingIssues ? <p>自动选材尚未通过，具体原因见下方。已保留你确认的方案，不会自动改成生成画面；请在讨论区说明允许怎样调整，或补充素材。</p> : null}
-          {review.reviewPurpose === "direction" ? <p>你可以和导演继续讨论；只有采用这版初稿后，才会开始寻找候选画面。</p> : null}
+          {review.reviewPurpose === "direction" && !processing ? <p>你可以和导演继续讨论；只有采用这版初稿后，才会开始寻找候选画面。</p> : null}
+          {processing ? <p>下方保留操作前的稿件供查看。正在查询原操作，具体制作阶段见进度区，请勿重复提交。</p> : null}
           {review.reviewPurpose === "material_plan" ? <p>请查看选材结果与风险；这次决定不会自动扩大素材采购授权。</p> : null}
         </div>
         <span className={`creative-review-phase phase-${review.phase}`}>
-          {review.phase === "checking" ? "正在处理原操作" : "等你决定"}
+          {processing ? "正在处理原操作" : "等你决定"}
         </span>
       </header>
 
@@ -801,7 +803,9 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
               if (followMessagesRef.current) setUnseenMessages(false);
             }}>
             {review.messages.length === 0 ? <p className="creative-empty-chat"><MessageCircle aria-hidden="true" size={18} />还没有讨论。可以问为什么这样安排，或直接说想改成什么样。</p> : null}
-            {review.messages.map((entry) => <p key={entry.id} className={`creative-message message-${entry.role}${newMessageIds.has(entry.id) ? " is-new" : ""}`} onAnimationEnd={() => setNewMessageIds((current) => { if (!current.has(entry.id)) return current; const next = new Set(current); next.delete(entry.id); return next; })}><span>{entry.role === "user" ? "你" : "创作角色"}</span>{entry.text}</p>)}
+            {review.messages.map((entry) => <div key={entry.id} className={`creative-message message-${entry.role}${newMessageIds.has(entry.id) ? " is-new" : ""}`} onAnimationEnd={() => setNewMessageIds((current) => { if (!current.has(entry.id)) return current; const next = new Set(current); next.delete(entry.id); return next; })}><span>{entry.role === "user" ? "你" : "创作角色"}</span>{entry.role !== "user" && entry.text.length > 400
+              ? <details className="creative-long-reply"><summary>{entry.text.slice(0, 160)}…<br /><strong>展开完整回复（{entry.text.length} 字）</strong></summary><p>{entry.text}</p></details>
+              : entry.text}</div>)}
           </div>
           {unseenMessages ? <button type="button" className="creative-unseen-messages" onClick={() => {
             const list = messageListRef.current;
@@ -843,7 +847,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
       </div>
 
       {error ? <p className="form-error" role="alert">{error} 输入内容已保留，请查看最新方案后再试。</p> : null}
-      {pendingCommandId ? <div className="creative-storage-note" role="status">上一条操作结果尚未核清。
+      {pendingCommandId ? <div className="creative-storage-note" role="status">{processing ? "本次操作已提交，正在等待原结果；不会重复发送。" : "上一条操作结果尚未核清。"}
         <button type="button" className="button button-secondary" disabled={reconcilingCommand || busy} onClick={() => void reconcilePendingCommand()}>
           {reconcilingCommand ? "正在核对…" : "核对上一条操作"}
         </button>

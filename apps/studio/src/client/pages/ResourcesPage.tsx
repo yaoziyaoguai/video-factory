@@ -374,7 +374,7 @@ export function ResourcesPage() {
         {settingsError ? <ResourceError title="创作默认值读取失败" message={settingsError} retry={load} /> : !settings ? <div className="region-loading">正在读取创作默认值...</div> : <div className="configuration-sheet">
           <div className="configuration-intro">
             <Settings2 aria-hidden="true" size={22} />
-            <div><strong>先定创作习惯，再开始生产</strong><p>默认使用人工终审和仅免费画面；启用付费关键镜头后，图片、视频会按实际导演方案逐项报价并等待人工确认。</p><small>{productionEnvironmentSummary(capabilities)}</small></div>
+            <div><strong>先定创作习惯，再开始生产</strong><p>默认使用人工终审和仅免费画面；启用付费关键镜头后，图片、视频会按实际导演方案逐项报价并等待人工确认。</p><small>{productionEnvironmentSummary(capabilities, services)}</small></div>
           </div>
           <div className="configuration-fields">
             <label className="field"><span>画面来源策略</span><select aria-label="默认画面来源策略" value={defaultRecipeId} onChange={(event) => setDefaultRecipeId(event.target.value as StudioProductionRecipeId)}>{RECIPE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
@@ -382,10 +382,10 @@ export function ResourcesPage() {
               <option value="auto">自动选导演</option><option value="documentary-observer">纪实观察</option><option value="quiet-humanism">静观生活</option><option value="urban-poetic">都市诗意</option><option value="chromatic-storytelling">色彩叙事</option><option value="geometric-control">几何秩序</option><option value="suspense-staging">悬念调度</option>
             </select></label>
             <label className="field"><span>目标平台</span><select aria-label="默认目标平台" value={productionDefaults.platform} onChange={(event) => setProductionDefaults((current) => ({ ...current, platform: event.target.value as StudioProductionDefaults["platform"] }))}><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option><option value="bilibili">哔哩哔哩</option></select></label>
-            <label className="field"><span>默认时长</span><select aria-label="默认视频时长" value={String(productionDefaults.durationSeconds)} onChange={(event) => setProductionDefaults((current) => ({ ...current, durationSeconds: Number(event.target.value) as StudioProductionDefaults["durationSeconds"] }))}><option value="20">20 秒</option><option value="24">24 秒</option><option value="30">30 秒</option><option value="45">45 秒</option></select></label>
+            <label className="field"><span>默认参考时长（秒）</span><input type="number" step="any" min="0.01" aria-label="默认视频时长" value={productionDefaults.durationSeconds || ""} onChange={(event) => setProductionDefaults((current) => ({ ...current, durationSeconds: Number(event.target.value) }))} /><small>只是创作参考；实际时长在脚本阶段由你确认。</small></label>
           </div>
           <div className="segmented-control configuration-review-mode" aria-label="终审方式"><span>人工终审</span><small>发布前不可跳过的安全检查</small></div>
-          <div className="configuration-save-row"><span>{productionHasChanges ? "有未保存的创作默认值" : "当前默认值已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !productionHasChanges} onClick={() => void saveDefaults({ defaultRecipeId, productionDefaults }, "创作默认值已保存，将从下一条新制作生效。")}><Save aria-hidden="true" size={16} />{productionHasChanges ? "保存创作默认" : "已保存"}</button></div>
+          <div className="configuration-save-row"><span>{!Number.isFinite(productionDefaults.durationSeconds) || productionDefaults.durationSeconds <= 0 ? "请填写大于 0 的参考时长" : productionHasChanges ? "有未保存的创作默认值" : "当前默认值已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !productionHasChanges || !Number.isFinite(productionDefaults.durationSeconds) || productionDefaults.durationSeconds <= 0} onClick={() => void saveDefaults({ defaultRecipeId, productionDefaults }, "创作默认值已保存，将从下一条新制作生效。")}><Save aria-hidden="true" size={16} />{productionHasChanges ? "保存创作默认" : "已保存"}</button></div>
         </div>}
       </section>
       {settingsNotice ? <p className={`resource-settings-notice is-${settingsNotice.kind}`} role={settingsNotice.kind === "error" ? "alert" : "status"}>{settingsNotice.message}</p> : null}
@@ -982,15 +982,21 @@ function trendSourceStatusText(source: StudioTrendSource): string {
   return containsInternalOperationsLanguage(text) ? TREND_SOURCE_CONTACT_ADMIN_HINT : text;
 }
 
-function productionEnvironmentSummary(capabilities: StudioLocalCapability[]): string {
+function productionEnvironmentSummary(capabilities: StudioLocalCapability[], services: StudioTrendService[]): string {
   if (capabilities.length === 0) {
     return "制作环境状态未知，可先新建制作试用；遇到无法进入的步骤再联系管理员。";
   }
   const affected = [...new Set(capabilities
     .filter((item) => item.state !== "ready")
+    .filter(item => !(item.id === "docker" && services.some(service => service.status === "ready")))
+    .filter(item => !(item.id === "macos-voices" && capabilities.some(capability => capability.id === "minimax-tts" && capability.state === "ready")))
     .map((item) => LOCAL_CAPABILITY_IMPACT_LABELS[item.id] ?? "个别制作步骤"))];
+  const alternatives = [
+    capabilities.some(item => item.id === "docker" && item.state !== "ready") && services.some(service => service.status === "ready") ? "热点使用已连接服务，无需本机运行" : "",
+    capabilities.some(item => item.id === "macos-voices" && item.state !== "ready") && capabilities.some(item => item.id === "minimax-tts" && item.state === "ready") ? "本机音色不可用，可用云端配音" : "",
+  ].filter(Boolean);
   if (affected.length === 0) {
-    return "制作环境已就绪：画面处理、配音和成片合成可以直接使用。";
+    return `制作环境已就绪：画面处理、配音和成片合成可以直接使用。${alternatives.length ? alternatives.join("；") + "。" : ""}`;
   }
   return `制作环境有 ${affected.length} 处未就绪：${affected.join("、")}暂不可用或受限；其余创作能力不受影响，无法自行解决时请联系管理员。`;
 }

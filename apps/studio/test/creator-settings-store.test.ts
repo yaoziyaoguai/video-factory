@@ -24,7 +24,7 @@ describe("JsonCreatorSettingsStore", () => {
       defaultRecipeId: "free-stock",
       defaultAssetProviderId: "pexels-stock-v1",
       roleProviderDefaults: { script: "codex-screenwriter-v1", director: "api-visual-director-v1" },
-      productionDefaults: { directorProfileId: "documentary-observer", durationSeconds: 30 },
+      productionDefaults: { directorProfileId: "documentary-observer", durationSeconds: 12.5 },
       topicStrategy: {
         positioning: "替普通人解释技术变化。",
         targetAudience: "关注 AI 但不想看营销稿的职场人。",
@@ -47,7 +47,7 @@ describe("JsonCreatorSettingsStore", () => {
       directorProfileId: "documentary-observer",
       reviewMode: "manual",
       platform: "douyin",
-      durationSeconds: 30,
+      durationSeconds: 12.5,
     });
     assert.deepEqual(reloaded.topicStrategy, {
       positioning: "替普通人解释技术变化。",

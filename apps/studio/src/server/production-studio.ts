@@ -2387,6 +2387,7 @@ export class ProductionStudio {
       commandId: record.commandId, action: record.action, state: record.state,
       expectedRunRevision: record.input.expectedRunRevision, expectedVersionId: record.input.expectedVersionId,
       ...(record.input.instruction ? { instruction: record.input.instruction } : {}),
+      ...(record.input.confirmTerminalEdit ? { confirmTerminalEdit: true } : {}),
       createdAt: record.createdAt, updatedAt: record.updatedAt,
       ...(record.error ? { error: record.error.message } : {}),
       ...(record.error?.stage ? { failureStage: record.error.stage } : {}),
@@ -2549,7 +2550,7 @@ export class ProductionStudio {
     const context = await this.prepareNodeDocumentContext(runId, nodeId, {
       expectedRunRevision: input.expectedRunRevision,
       expectedVersionId: input.expectedVersionId,
-      confirmTerminalEdit: false,
+      confirmTerminalEdit: input.confirmTerminalEdit === true,
     });
     const brief = effectiveProductionBrief(context.run);
     let execution: PublishCopyAuditExecution;
@@ -4910,6 +4911,19 @@ function collectNodeDurationHistory(runs: WorkflowRun<ProductionBrief>[]): Recor
 }
 
 function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
+  const render = run.nodes.find(node => node.id === "render" && node.status === "succeeded" && !node.outputState?.stale);
+  const renderArtifactIds = render?.outputState?.versions.find(version => version.id === render.outputState?.effectiveVersionId)?.artifactIds ?? render?.artifactIds ?? [];
+  const currentVideoIds = run.artifacts.filter(artifact => renderArtifactIds.includes(artifact.id) && artifact.contentType?.startsWith("video/") && artifact.sha256).map(artifact => artifact.id);
+  const finalReview = run.nodes.find(node => node.id === "visual-review" && node.status === "succeeded" && !node.outputState?.stale);
+  const finalOutput = finalReview?.outputState?.versions.find(version => version.id === finalReview.outputState?.effectiveVersionId)?.output ?? finalReview?.output;
+  const finalReport = isRecord(finalOutput) && isRecord(finalOutput.report) ? finalOutput.report : undefined;
+  const finalScope = finalReport && isRecord(finalReport.reviewScope) ? finalReport.reviewScope : undefined;
+  const hasCurrentRenderedReview = isRecord(finalOutput) && !["incomplete", "uncertain"].includes(String(finalOutput.reviewStatus))
+    && finalReport?.version === "video-factory/visual-review-v1" && Array.isArray(finalReport.findings)
+    && finalScope?.reviewStage === "rendered_video" && finalScope.current === true
+    && typeof finalScope.evidenceId === "string" && /^[a-f0-9]{64}$/.test(finalScope.evidenceId)
+    && currentVideoIds.length > 0 && Array.isArray(finalScope.sourceArtifactIds)
+    && currentVideoIds.every(id => (finalScope.sourceArtifactIds as unknown[]).includes(id));
   const reports = ["visual-review", "asset-source-review", "assets"].flatMap((nodeId) => {
     const node = run.nodes.find((candidate) => candidate.id === nodeId);
     if (!node || node.status === "stale" || node.outputState?.stale === true) return [];
@@ -4942,6 +4956,9 @@ function reworkFindings(run: StudioRunDetail): StudioReworkFinding[] {
         || typeof value.evidenceFrameSha256 === "string" && /^[a-f0-9]{64}$/.test(value.evidenceFrameSha256));
     if (!hasCurrentEvidenceContract) return [];
     if (evidenceStatus !== "failed" && evidenceStatus !== "not_observed") return [];
+    // 返工默认以当前成片报告为准，不把源素材采样不足重复塞进画面重做意见。
+    // 这不是宣告旧问题已解决：原报告保留，failed（含权利问题）始终继续带入。
+    if (hasCurrentRenderedReview && nodeId !== "visual-review" && evidenceStatus === "not_observed") return [];
     if (evidenceStatus === "not_observed" && (value.severity !== "info" || nextAction !== "inspect_existing_media")) return [];
     if (evidenceStatus === "failed" && value.severity === "info") return [];
     const description = typeof value.description === "string" && value.description.trim()

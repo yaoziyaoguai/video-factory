@@ -37,12 +37,12 @@ export function planVisualDirection(input: VisualDirectionInput): StudioVisualPl
   const contextSource = contextSourceFor(category);
 
   return {
-    strategy: `${direction}。优先使用可验证的素材库实拍，只有确有必要时才使用已启用的生成模型补齐。`,
+    strategy: `${direction}。以下是开场、展开与收束的方向参考，不规定镜头数量或时长；以你随后采用的脚本为准。优先使用可验证的素材库实拍，只有确有必要时才使用已启用的生成模型补齐。`,
     beats: [
       {
         id: "hook",
         role: "冲突钩子",
-        duration: "0-3 秒",
+        duration: "开场 · 时长由脚本确定",
         description: `用一个具体动作或结果先呈现：${completePhrase(input.hook)} 画面先于解释。`,
         searchQuery: `${topic} 真实反应 特写 竖屏`,
         source: "stock",
@@ -50,15 +50,17 @@ export function planVisualDirection(input: VisualDirectionInput): StudioVisualPl
       {
         id: "context",
         role: "证据与语境",
-        duration: "3-14 秒",
-        description: contextDescription(category, topic, argumentForm),
-        searchQuery: contextQuery(category, topic, argumentForm),
+        duration: "展开 · 时长由脚本确定",
+        description: input.visualStyle?.trim()
+          ? `围绕“${topic}”展开动作与关系，遵循栏目画面方向：${input.visualStyle.trim()}；具体镜头由脚本和导演方案确定。`
+          : contextDescription(category, topic, argumentForm),
+        searchQuery: input.visualStyle?.trim() ? `${topic} ${input.visualStyle.trim()}` : contextQuery(category, topic, argumentForm),
         source: contextSource,
       },
       {
         id: "payoff",
         role: "结论收束",
-        duration: "14-24 秒",
+        duration: "收束 · 时长由脚本确定",
         description: `回到人物、结果或前后对照，用一个可验证变化回答“${topic}”并留出评论问题。`,
         searchQuery: `${topic} 前后对比 结果 人物反应`,
         source: payoffSourceFor(category),

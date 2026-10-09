@@ -135,7 +135,7 @@ export interface StudioProductionDefaults {
   directorProfileId: StudioDirectorProfileId;
   reviewMode: "manual" | "automatic";
   platform: "douyin" | "xiaohongshu" | "bilibili";
-  durationSeconds: 20 | 24 | 30 | 45;
+  durationSeconds: number;
 }
 
 export type StudioProductionRoleBindingKey =
@@ -1316,6 +1316,7 @@ export interface StudioNodeDocumentAuditInput {
   commandId?: string;
   expectedRunRevision: number;
   expectedVersionId: string;
+  confirmTerminalEdit?: boolean;
 }
 
 export interface StudioDocumentCommand {
@@ -1325,6 +1326,7 @@ export interface StudioDocumentCommand {
   expectedRunRevision: number;
   expectedVersionId: string;
   instruction?: string;
+  confirmTerminalEdit?: boolean;
   createdAt: string;
   updatedAt: string;
   error?: string;
@@ -2650,8 +2652,8 @@ export function parseStudioCreatorSettingsPatch(value: unknown): StudioCreatorSe
     }
     if (defaults.durationSeconds !== undefined) {
       const durationSeconds = Number(defaults.durationSeconds);
-      if (durationSeconds !== 20 && durationSeconds !== 24 && durationSeconds !== 30 && durationSeconds !== 45) {
-        throw new StudioInputError("默认视频时长无效。");
+      if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+        throw new StudioInputError("默认参考时长请输入大于零的秒数。");
       }
       productionDefaults.durationSeconds = durationSeconds;
     }

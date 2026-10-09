@@ -435,6 +435,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
     currentDelivery={node.id === currentArtifactNode?.id}
     {...(node.id === currentArtifactNode?.id ? { onDocumentReadinessChange } : {})}
     hideExecutionConfiguration={node.id === assetConfigurationNode?.id}
+    hideAgentProgress={node.id === waitingNodeId && Boolean(run.activeIntervention && !["creative_review", "source_review_retry", "source_review_decision", "local_preparation_retry"].includes(run.activeIntervention.kind ?? ""))}
     {...(node.id === "creative-planning" && run.planningStages ? { planningStages: run.planningStages } : {})}
     {...(node.id === "creative-planning" ? { onPendingPlanningConfigurationChange: setHasPendingPlanningConfiguration } : {})}
     pauseBusy={pausePending}
@@ -825,6 +826,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               </div>
               <p>{creatorFacingTechnicalText(run.activeIntervention.reason)}</p>
               {waitingNodeProgress ? <div className={`agent-loop-progress is-stacked is-${waitingNodeProgress.phase}`} role="status">
+                {["asset-source-review", "visual-review"].includes(waitingNodeId ?? "") ? <span>以下是对审片报告的复核，不代表素材或成片质量通过。素材问题以审片正文为准。</span> : null}
                 <strong>{agentLoopPhaseLabel(waitingNodeProgress, waitingAuditHistorical)}</strong>
                 {waitingNodeProgress.latestAudit && contentDecisionReview ? <span>{waitingAuditHistorical ? "修改前复核" : "独立复核"} {waitingNodeProgress.latestAudit.score} 分；完整原文见对应版本的审计记录。</span> : waitingNodeProgress.latestAudit ? <>
                   <span>{waitingAuditHistorical ? "修改前复核" : "独立复核"} {waitingNodeProgress.latestAudit.score} 分：{waitingNodeProgress.latestAudit.summary}</span>
@@ -985,7 +987,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                   </div>
                 </> : <>
                   <p className="run-failure-summary">{run.failure.summary}</p>
-                  {(["asset-source-review", "visual-review"].includes(run.failure.nodeId) || run.failure.category === "infrastructure" || /源素材视觉预检|媒体处理失败|ASSET_SEARCH_SOURCES_UNAVAILABLE|图库候选检索全部来源失败/.test(run.failure.technicalDetail ?? "")) && run.failure.technicalDetail
+                  {(["creative-planning", "asset-source-review", "visual-review"].includes(run.failure.nodeId) || run.failure.category === "infrastructure" || /源素材视觉预检|媒体处理失败|ASSET_SEARCH_SOURCES_UNAVAILABLE|图库候选检索全部来源失败/.test(run.failure.technicalDetail ?? "")) && run.failure.technicalDetail
                     ? <details className="run-technical-details"><summary>查看技术详情</summary><p className="run-failure-summary"><strong>失败原因：</strong>{creatorFacingTechnicalText(run.failure.technicalDetail)}</p></details>
                     : null}
                   <div className="run-failure-impact">

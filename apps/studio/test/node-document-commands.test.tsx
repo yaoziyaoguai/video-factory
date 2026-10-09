@@ -22,6 +22,45 @@ function setup(overrides: Partial<Parameters<typeof NodeDocumentCommands>[0]> = 
 }
 
 describe("NodeDocumentCommands", () => {
+  it("can audit the current completed copy while keeping unsent opinions for an older copy", async () => {
+    const onAudit = vi.fn(async () => undefined);
+    const props = { nodeId: "publish-package", runRevision: 7, effectiveVersionId: "copy-1", completed: true,
+      contentReview: { status: "not_audited" as const, summary: "未审", suggestions: [] },
+      busy: false, onAudit, onRevise: vi.fn(async () => undefined) };
+    const view = render(<NodeDocumentCommands {...props} />);
+    fireEvent.click(screen.getByText("继续修改（会形成新版本）"));
+    fireEvent.change(screen.getByRole("textbox", { name: "修订意见" }), { target: { value: "旧稿意见先保留" } });
+    view.rerender(<NodeDocumentCommands {...props} runRevision={8} effectiveVersionId="copy-2" />);
+    expect(screen.getByRole("button", { name: "发送修订意见" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "审计当前版本（会调用模型）" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认审计当前文案" }));
+    await waitFor(() => expect(onAudit).toHaveBeenCalledWith("publish-package", expect.objectContaining({
+      expectedRunRevision: 8, expectedVersionId: "copy-2", confirmTerminalEdit: true,
+    })));
+    expect(props.onRevise).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "修订意见" })).toHaveValue("旧稿意见先保留");
+  });
+  it("confirms a completed document revision before registering or sending it", async () => {
+    vi.spyOn(studioApi, "documentCommands").mockResolvedValue([]);
+    const onRevise = vi.fn(async () => undefined);
+    setup({ runId: "completed-copy", completed: true, onRevise });
+    fireEvent.click(screen.getByText("继续修改（会形成新版本）"));
+    fireEvent.change(screen.getByRole("textbox", { name: "修订意见" }), { target: { value: "保留正文，只改标题" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "发送修订意见" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
+    expect(screen.getByRole("dialog", { name: "确认创建文案修订版" })).toBeVisible();
+    expect(onRevise).not.toHaveBeenCalled();
+    expect(localStorage.getItem("vf:document-command:completed-copy:publish-package")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "继续编辑" }));
+    expect(screen.getByRole("textbox", { name: "修订意见" })).toHaveValue("保留正文，只改标题");
+    fireEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认创建修订版" }));
+    await waitFor(() => expect(onRevise).toHaveBeenCalledWith("publish-package", expect.objectContaining({
+      instruction: "保留正文，只改标题", expectedRunRevision: 7, expectedVersionId: "publish-v1", confirmTerminalEdit: true,
+    })));
+    const remembered = JSON.parse(localStorage.getItem("vf:document-command:completed-copy:publish-package")!);
+    expect(remembered.confirmTerminalEdit).toBe(true);
+  });
   it.each(["revise", "audit"] as const)("distinguishes a not-accepted %s from a failed model execution", async action => {
     vi.spyOn(studioApi, "documentCommands").mockResolvedValue([{
       commandId: `refused-${action}`, action, state: "failed", expectedRunRevision: 7, expectedVersionId: "publish-v1",

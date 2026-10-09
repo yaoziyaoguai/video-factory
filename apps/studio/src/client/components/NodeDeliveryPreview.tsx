@@ -189,6 +189,8 @@ const FIELD_LABELS: Record<string, string> = {
 };
 
 export function NodeDeliveryPreview({ nodeId, value, nativeAudio = false }: NodeDeliveryPreviewProps) {
+  // 源素材预检与成片审片共用报告形状，只复用只读视图，不开放报告手改。
+  if (nodeId === "asset-source-review") return <NodeDeliveryPreview nodeId="visual-review" value={value} />;
   if (creatorViewId(nodeId) === "script" && isCharacterDocument(value)) return <CharacterScriptReader value={value} nativeAudio={nativeAudio} />;
   const record = asRecord(value);
   if (!record) return <p className="node-document-state">这一步暂时没有可查看的详细内容。</p>;
@@ -220,7 +222,8 @@ export function NodeDeliveryPreview({ nodeId, value, nativeAudio = false }: Node
     ...(inputPreview ? Object.keys(record).filter((key) => isCreatorTopLevelField(nodeId, key, record[key]) && isScalar(record[key])) : []),
   ])
     .filter((key) => isCreatorTopLevelField(nodeId, key, record[key]))
-    .filter((key) => hasDisplayScalar(record[key]));
+    .filter((key) => hasDisplayScalar(record[key]))
+    .filter(key => !(viewId === "publish-package" && key === "title" && asRecord(record.copy)?.title === record.title));
   const nestedKeys = uniqueKeys([
     ...(NESTED_FIELDS[viewId] ?? []),
     ...(inputPreview ? Object.keys(record).filter((key) => isCreatorTopLevelField(nodeId, key, record[key]) && asRecord(record[key]) !== undefined) : []),
@@ -686,6 +689,7 @@ function voiceProfileLabel(value: string): string {
 }
 
 function fieldLabel(key: string, viewId?: string): string {
+  if (key === "description" && viewId === "publish-package") return "发布正文";
   if (key === "summary") return ({ "reference-grammar": "参考视频分析摘要", "asset-semantic-rank": "候选排序摘要", "visual-review": "视觉审片摘要" } as Record<string, string>)[viewId ?? ""] ?? "摘要";
   if (key === "provider") return viewId === "voice" ? "配音服务" : viewId === "assets" ? "素材来源" : "服务或来源";
   if (key === "beats" && viewId === "reference-grammar") return "分段表达结构";

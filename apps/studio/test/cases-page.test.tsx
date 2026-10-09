@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { studioApi } from "../src/client/api.js";
@@ -113,9 +113,27 @@ function renderPage() {
   return render(<MemoryRouter><CasesPage /></MemoryRouter>);
 }
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("CasesPage", () => {
+  it("keeps existing cases usable and shows elapsed waiting without sending another refresh", async () => {
+    mockApi();
+    renderPage();
+    await screen.findByText(transcriptItem.title);
+    let complete!: (value: StudioCaseCatalog) => void;
+    vi.mocked(studioApi.cases).mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    await act(async () => { vi.advanceTimersByTime(45_000); });
+    expect(screen.getByText(/已等待 45 秒/)).toBeInTheDocument();
+    expect(screen.getByText(/已加载的列表和当前参考仍可使用/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: new RegExp(transcriptItem.title) })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "刷新" })).toBeDisabled();
+    expect(studioApi.cases).toHaveBeenCalledTimes(2);
+    await act(async () => { complete(catalog); });
+    expect(screen.queryByText(/已等待/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "刷新" })).toBeEnabled();
+  });
   it("shows the fetched items with their real content type, and says a failed source is failed", async () => {
     mockApi();
     renderPage();

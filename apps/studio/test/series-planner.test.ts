@@ -54,11 +54,7 @@ describe("SeriesPlanner", () => {
     ]);
     assert.equal(candidates[0]?.providerId, "series-roadmap-v2");
     assert.match(candidates[0]?.hook ?? "", /第 1 集|可复核结果/);
-    assert.equal(candidates[0]?.evidence[0]?.source, "系列路线图「AI 下班实验室」第 1 集");
-    assert.equal(
-      candidates[0]?.evidence[0]?.evidenceUrl,
-      "https://video.wangjinkun333.me/topics?mode=series&candidate=series-series-1-episode-001",
-    );
+    assert.deepEqual(candidates[0]?.evidence, [], "系列路线图不是外部来源，更不能伪造热度82");
     assert.match(candidates[0]?.visualPlan?.strategy ?? "", /真实桌面操作与生活空镜/);
     assert.equal(candidates[0]?.score.visualFeasibility, 68);
     assert.equal(candidates[0]?.score.audienceReach, 68);

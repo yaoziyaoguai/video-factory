@@ -1438,6 +1438,7 @@ function parseNodeDocumentAuditInput(value: unknown): StudioNodeDocumentAuditInp
     ...(input.commandId !== undefined ? { commandId: requireText(input.commandId, "commandId") } : {}),
     expectedRunRevision: requireExpectedRevision(input.expectedRunRevision),
     expectedVersionId: requireText(input.expectedVersionId, "expectedVersionId"),
+    ...(input.confirmTerminalEdit === true ? { confirmTerminalEdit: true } : {}),
   };
 }
 

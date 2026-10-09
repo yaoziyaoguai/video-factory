@@ -77,6 +77,19 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+it("explains an untracked legacy voice before offering an unusable timing control", async () => {
+  const preview = previewFixture();
+  preview.plan = preview.editorContext!.defaultPlan!;
+  vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(preview);
+  const dispatch = vi.spyOn(studioApi, "requestNarrationRevision");
+  renderEditor({ voiceNode: { ...voiceNode, output: { trackPath: "/legacy.m4a" } } });
+  await screen.findByText(/这版声音没有可核对的排轨来源/);
+  expect(screen.queryByLabelText("第 1 段留空秒")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "应用时间调整并重新试听" })).not.toBeInTheDocument();
+  expect(screen.getByText(/原声音仍可试听与采用/)).toBeInTheDocument();
+  expect(dispatch).not.toHaveBeenCalled();
+});
+
 it("shows the current v2 groups, quantizes seconds on blur, and keeps invalid input with a message", async () => {
   vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(previewFixture());
   renderEditor();

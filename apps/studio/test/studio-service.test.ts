@@ -1051,6 +1051,33 @@ describe("StudioService", () => {
     assert.doesNotMatch(draft?.input.rework?.nodeInstructions.visualDirection ?? "", /当前没有结构化视觉问题/);
   });
 
+  it("uses the current rendered review instead of prefilling old source sampling gaps, without hiding failed source findings", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-rework-review-precedence-"));
+    const base = waitingRun(workspaceRoot);
+    const gap = { timecodeMs: 1000, startTimecodeMs: 1000, endTimecodeMs: 1200, scenePosition: 1,
+      targetNodeId: "assets", claimType: "non_visual", evidenceStatus: "not_observed", evidenceFrameSha256: null,
+      nextAction: "inspect_existing_media", severity: "info", category: "audio", description: "源视频没有音频", suggestion: "检查现有声音，不要重购画面" };
+    const failed = { ...gap, claimType: "static", evidenceStatus: "failed", nextAction: "rework_asset", severity: "major",
+      category: "rights", description: "素材授权缺失", suggestion: "更换有授权的素材" };
+    const sourceOutput = { report: { findings: [gap, failed], reviewScope: { reviewStage: "source_assets" } } };
+    for (const state of ["current", "stale", "wrong_media", "incomplete"] as const) {
+      const run: WorkflowRun<ProductionBrief> = { ...base, status: "succeeded", decisions: [], interventions: [],
+        nodeRuns: [base.nodeRuns[0]!, { nodeId: "asset-source-review", status: "succeeded", artifactIds: [], qualityGateResults: [], output: sourceOutput },
+          { nodeId: "visual-review", status: state === "stale" ? "stale" : "succeeded", artifactIds: [], qualityGateResults: [], output: {
+            reviewStatus: state === "incomplete" ? "incomplete" : "completed",
+            report: { version: "video-factory/visual-review-v1", findings: [], reviewScope: { reviewStage: "rendered_video", evidenceId: "e".repeat(64),
+              sourceArtifactIds: [state === "wrong_media" ? "old-media" : "artifact-video"] } },
+          } }],
+      };
+      const service = new StudioService({ workspaceRoot, pipeline: new FakePipeline(run), commandAvailable: allCommandsAvailable, environment: {} });
+      const draft = await service.reworkDraft(run.id);
+      const descriptions = draft!.input.rework!.findings.map(finding => finding.description);
+      assert.equal(descriptions.includes("源视频没有音频"), state !== "current", state);
+      assert.ok(descriptions.includes("素材授权缺失"), "当前成片审片不洗掉真实源素材失败");
+      assert.equal(sourceOutput.report.findings.length, 2, "历史报告必须保留");
+    }
+  });
+
   it("keeps a stale visual report as history without expanding the current rework scope", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-stale-review-rework-"));
     const base = waitingRun(workspaceRoot);
@@ -3732,13 +3759,14 @@ describe("StudioService", () => {
       ...brief,
       creationContext: { origin: "series", opportunityId: opportunity.id },
       seriesContext: maliciousContext,
+      angle: "三位角色误会后互相解释，只用一张静态插画，不增加实验承诺。",
     }, "trusted-series-context-1");
 
     const dispatched = pipeline.lastInput as ProductionBrief;
     assert.equal(dispatched.title, currentSeries.episodes[0]?.title);
     assert.equal(dispatched.audience, currentSeries.audience);
     assert.equal(dispatched.nicheSlug, currentSeries.track);
-    assert.ok(dispatched.angle.includes(currentSeries.episodes[0]?.viewerPromise ?? "不会匹配"));
+    assert.equal(dispatched.angle, "三位角色误会后互相解释，只用一张静态插画，不增加实验承诺。");
     assert.equal(dispatched.seriesContext?.seriesId, currentSeries.id);
     assert.equal(dispatched.seriesContext?.seriesName, currentSeries.name);
     assert.equal(dispatched.seriesContext?.episodeNumber, 1);
@@ -4047,6 +4075,8 @@ describe("StudioService", () => {
       });
     };
     await recordScriptIdentity();
+    const blockedInbox = await service.listCandidateInbox({ origins: ["series"] });
+    assert.equal(blockedInbox.items.find((item) => item.episodeNumber === 2)?.seriesSequence?.status, "blocked");
     const blocked = (await service.listSeries())[0]!;
     assert.equal(blocked.episodes[0]?.status, "in_production");
     assert.equal(blocked.canon.facts.length, 0);
@@ -4064,6 +4094,10 @@ describe("StudioService", () => {
     finalReview.output = { review: {}, canonFacts: [] };
     finalReview.outputState!.versions[0]!.output = { review: {}, canonFacts: [] };
     await recordScriptIdentity();
+    // 候选入口必须自行同步定版事实，不能依赖另一个并行页面请求先读过系列。
+    const readyInbox = await service.listCandidateInbox({ origins: ["series"] });
+    assert.equal(readyInbox.items.find((item) => item.episodeNumber === 2)?.seriesSequence?.status, "ready");
+    assert.equal(readyInbox.items.find((item) => item.episodeNumber === 3)?.seriesSequence?.status, "blocked");
     const emptyCanon = (await service.listSeries())[0]!;
     assert.equal(emptyCanon.episodes[0]?.status, "ready");
     assert.deepEqual(emptyCanon.canon.facts, []);

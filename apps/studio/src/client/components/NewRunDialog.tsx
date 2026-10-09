@@ -179,6 +179,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     requiredAffectedScenePositions,
   ));
   const [scopeDecisionConfirmed, setScopeDecisionConfirmed] = useState(false);
+  const [inheritEditorial, setInheritEditorial] = useState(true);
   const initializedForOpen = useRef(false);
   // 误关保护：以初始化完成后的表单快照为基线，只有用户实际修改才视为 dirty；
   // 异步初始化与后台 providers 更新不算修改，也不能覆盖已编辑值（AC-08）。
@@ -216,9 +217,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const formSnapshot = useMemo(() => JSON.stringify({
     bindings, recipeId, directorProfileId, platform, presentationMode, audioMode, nativeVideoProviderId, durationSeconds, durationReferenceDraft, durationRange, durationRangeDrafts,
     assetProviderIds: [...assetProviderIds].sort(), modelSelections, voiceDirection, budgetIntention,
-    semanticRankEnabled, acceptUnreviewedFirstCut, briefSummaryValues, visualBriefValues,
+    semanticRankEnabled, acceptUnreviewedFirstCut, briefSummaryValues, visualBriefValues, inheritEditorial,
     referenceVideo: referenceVideo ? { ...referenceVideo } : null, rework,
-  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, directorProfileId, durationRange, durationRangeDrafts, durationSeconds, durationReferenceDraft, modelSelections, platform, presentationMode, audioMode, nativeVideoProviderId, recipeId, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection]);
+  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, directorProfileId, durationRange, durationRangeDrafts, durationSeconds, durationReferenceDraft, modelSelections, platform, presentationMode, audioMode, nativeVideoProviderId, recipeId, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection, inheritEditorial]);
   useLayoutEffect(() => {
     if (!open || !initialDataReady || !initializedForOpen.current) return;
     if (baselineSnapshotRef.current === null) baselineSnapshotRef.current = formSnapshot;
@@ -251,7 +252,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     requiredAffectedScenePositions,
   ), [initialValues?.rework, requiredAffectedScenePositions]);
   const reworkTargetStepLabels = useMemo(() => reworkFindingTargetStepLabels(groupedReworkFindings), [groupedReworkFindings]);
-  const editorial = initialValues?.editorial;
+  const editorial = inheritEditorial ? initialValues?.editorial : undefined;
   // CLOUD-08/P3：案例入口的摘要只展示已填写的创作目标，不再把角度推导成三段相似说明。
   const caseEntryOrigin = initialValues?.creationContext?.origin === "case";
   const imageStory = editorial?.verdict === "produce_image_story";
@@ -437,6 +438,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setDiscardPromptOpen(false);
     if (formScrollRef.current) formScrollRef.current.scrollTop = 0;
     setPresentationMode(initialValues?.presentationMode ?? "narration");
+    setInheritEditorial(true);
     setAudioMode(initialValues?.audioMode ?? "tts");
     setNativeVideoProviderId(initialValues?.nativeVideoProviderId ?? nativeVideoProviders[0]?.id ?? "wan-video-v1");
     durationRangeTouched.current = false;
@@ -1091,6 +1093,19 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               {caseEntryOrigin
                 ? <CaseCreativeSummary title={briefSummaryValues.title} audience={briefSummaryValues.audience} angle={briefSummaryValues.angle} visualProof={visualBriefValues.visualProof} strategy={visualBriefValues.strategy} />
                 : Object.values(briefSummaryValues).some((value) => value.trim()) || visualBriefValues.visualProof.trim() || visualBriefValues.strategy.trim() ? <CreativeSummary summary={creativeSummary} /> : null}
+              {initialValues?.editorial ? <section className="editorial-brief-note" aria-label="沿用的创作建议">
+                <label><input type="checkbox" checked={inheritEditorial} onChange={event => {
+                  setInheritEditorial(event.target.checked);
+                  if (event.target.checked && initialValues.editorial?.verdict === "produce_image_story") {
+                    const recipe = RECIPES.find(item => item.id === "free-stock")!;
+                    setRecipeId(recipe.id);
+                    setAssetProviderIds(includeLocalEditorialSource(sourceIdsForRecipe(recipe, providers), providers));
+                    setBindings(current => ({ ...current, assets: "ai-shot-router-v1" }));
+                  }
+                }} />沿用选题阶段的创作建议</label>
+                <ul>{[...initialValues.editorial.reasons, ...initialValues.editorial.guardrails].map((text, index) => <li key={index}>{text}</li>)}</ul>
+                <small>{inheritEditorial ? "这些建议会进入内容简报；已换成新内容时可取消沿用。" : "本次不沿用以上建议。参考来源及事实记录仍保留，未授权内容不能因此被当作事实。"}</small>
+              </section> : null}
               {imageStory ? (
                 <div className="editorial-brief-note" role="note">
                   <strong>总编建议 · 图文成片</strong>

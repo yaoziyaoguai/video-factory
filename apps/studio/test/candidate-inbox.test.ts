@@ -54,6 +54,21 @@ const trendCandidate = {
 };
 
 describe("CandidateInboxStudio", () => {
+  it("does not present a legacy series roadmap link as external evidence", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-evidence-"));
+    const store = new JsonOpportunityStore(path.join(root, "opportunities.json"));
+    const studio = new OpportunityStudio({ opportunities: store, createId: () => "series-owned-candidate" });
+    const created = await studio.create({ title: "原创办公室喜剧", platform: "douyin", track: "series", audience: "观众", painPoint: "无", hook: "三个人的误会", evidence: [],
+      scores: { audienceReach: 80, visualFeasibility: 80, productionCostEfficiency: 80, novelty: 80, monetization: 80, seriesPotential: 80, complianceRisk: 0 } });
+    const record = (await store.get(created.id))!;
+    const historical = { ...record, candidate: { ...record.candidate, id: "legacy-series", evidence: [
+      { source: "series-planner", platform: "douyin", keyword: "办公室", strength: 82, evidenceUrl: "https://video.wangjinkun333.me/topics?mode=series&candidate=legacy-series" },
+      { source: "manual", platform: "douyin", keyword: "用户参考", strength: 0, evidenceUrl: "https://example.com/reference" },
+    ] }, origin: "series" as const };
+    await store.create(historical);
+    assert.deepEqual((await studio.get("legacy-series"))!.evidence.map(item => item.evidenceUrl), ["https://example.com/reference"]);
+    assert.equal((await store.get("legacy-series"))!.candidate.evidence.length, 2, "只读展示归一不改历史文件");
+  });
   it("preserves the topic editor's concrete visual evidence and shot plan when adopting and reloading", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-candidate-visual-plan-"));
     const filePath = path.join(root, "opportunities.json");

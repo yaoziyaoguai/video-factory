@@ -61,7 +61,7 @@ describe("creator-facing presentation labels", () => {
     ];
     expect(costProviderLabel("codex-creative-treatment-v1", catalog)).toBe("AI 前期构思");
     expect(costProviderLabel("codex-screenwriter-v1", catalog)).toBe("AI 编剧");
-    expect(costProviderLabel("deepseek", catalog)).toBe("来源服务未识别（deepseek）");
+    expect(costProviderLabel("deepseek", catalog)).toBe("DeepSeek");
     expect(costProviderLabel("m-793ad8b15bed", catalog)).toBe("来源服务未识别（m-793ad8b15bed）");
     expect(costProviderLabel("codex-screenwriter-v1", undefined)).toBe("AI 编剧");
   });

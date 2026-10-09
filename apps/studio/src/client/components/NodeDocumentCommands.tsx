@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { studioApi } from "../api.js";
 import type { StudioDocumentCommand, StudioNodeDocumentRevisionInput, StudioNodeDocumentAuditInput } from "../../shared/api.js";
 import { creatorFacingTechnicalText } from "../presentation.js";
+import { useDialogFocus } from "../hooks/useDialogFocus.js";
 
 const MAX_INSTRUCTION_CHARS = 4_000;
 
@@ -33,6 +34,8 @@ export function NodeDocumentCommands({ runId, nodeId, runRevision, effectiveVers
   const [lookupFailed, setLookupFailed] = useState(false);
   const [localPointerFailed, setLocalPointerFailed] = useState(false);
   const [loadingCommands, setLoadingCommands] = useState(Boolean(runId));
+  const [confirmation, setConfirmation] = useState<{ action: "revise" | "audit"; revision: number; version: string; scope: string }>();
+  const confirmationRef = useDialogFocus<HTMLElement>(Boolean(confirmation), () => setConfirmation(undefined), working);
   const storageKey = runId ? `vf:document-command:${runId}:${nodeId}` : undefined;
   const scope = `${runId ?? ""}:${nodeId}`;
   const currentScope = useRef(scope);
@@ -78,11 +81,12 @@ export function NodeDocumentCommands({ runId, nodeId, runRevision, effectiveVers
   // 只在完成状态切换时决定默认展开；输入过程中不改变用户已选择的开合状态。
   useEffect(() => { setRevisionOpen(!completed || Boolean(instruction)); }, [completed]);
 
-  function rememberCommand(action: "revise" | "audit", text?: string): StudioDocumentCommand {
+  function rememberCommand(action: "revise" | "audit", text?: string, confirmTerminalEdit = false): StudioDocumentCommand {
     const now = new Date().toISOString();
     const command: StudioDocumentCommand = { commandId: crypto.randomUUID(), action, state: "created",
       expectedRunRevision: runRevision, expectedVersionId: effectiveVersionId,
-      ...(text ? { instruction: text } : {}), createdAt: now, updatedAt: now, billingPending: true };
+      ...(text ? { instruction: text } : {}), ...(confirmTerminalEdit ? { confirmTerminalEdit: true } : {}),
+      createdAt: now, updatedAt: now, billingPending: true };
     if (storageKey) {
       try { localStorage.setItem(storageKey, JSON.stringify(command)); }
       catch { throw new Error("无法保存本次操作编号，尚未发送给模型。请检查浏览器存储；修改意见仍保留。"); }
@@ -93,7 +97,8 @@ export function NodeDocumentCommands({ runId, nodeId, runRevision, effectiveVers
 
   async function runCommand(command: StudioDocumentCommand) {
     const input = { commandId: command.commandId, expectedRunRevision: command.expectedRunRevision,
-      expectedVersionId: command.expectedVersionId };
+      expectedVersionId: command.expectedVersionId,
+      ...(command.confirmTerminalEdit ? { confirmTerminalEdit: true } : {}) };
     if (command.action === "revise") await onRevise(nodeId, { ...input, instruction: command.instruction ?? "" });
     else await onAudit(nodeId, input);
     if (currentScope.current !== scope) return;
@@ -123,14 +128,18 @@ export function NodeDocumentCommands({ runId, nodeId, runRevision, effectiveVers
     setError(undefined);
   }
 
-  async function sendRevision() {
+  async function sendRevision(confirmTerminalEdit = false) {
     const trimmed = instruction.trim();
     if (!trimmed || overLimit || staleInstruction) return;
+    if (completed && !confirmTerminalEdit) {
+      setConfirmation({ action: "revise", revision: runRevision, version: effectiveVersionId, scope });
+      return;
+    }
     setWorking(true);
     setError(undefined);
     setInfo(undefined);
     try {
-      const command = rememberCommand("revise", trimmed);
+      const command = rememberCommand("revise", trimmed, confirmTerminalEdit);
       const sent = instructionOwnership.current;
       const saved = await runCommand(command);
       if (currentScope.current !== scope) return;
@@ -147,12 +156,16 @@ export function NodeDocumentCommands({ runId, nodeId, runRevision, effectiveVers
     }
   }
 
-  async function auditCurrent() {
+  async function auditCurrent(confirmTerminalEdit = false) {
+    if (completed && !confirmTerminalEdit) {
+      setConfirmation({ action: "audit", revision: runRevision, version: effectiveVersionId, scope });
+      return;
+    }
     setWorking(true);
     setError(undefined);
     setInfo(undefined);
     try {
-      const saved = await runCommand(rememberCommand("audit"));
+      const saved = await runCommand(rememberCommand("audit", undefined, confirmTerminalEdit));
       if (currentScope.current !== scope) return;
       setInfo(documentCommandResultMessage(saved));
     } catch (caught) {
@@ -170,6 +183,18 @@ export function NodeDocumentCommands({ runId, nodeId, runRevision, effectiveVers
       if (currentScope.current === scope) setInfo(documentCommandResultMessage(saved));
     } catch (caught) { if (currentScope.current === scope) setError(caught instanceof Error ? caught.message : String(caught)); }
     finally { if (currentScope.current === scope) { setWorking(false); await refreshCommands(); } }
+  }
+
+  function confirmOperation() {
+    const selected = confirmation;
+    setConfirmation(undefined);
+    if (!selected || selected.scope !== scope || selected.revision !== runRevision || selected.version !== effectiveVersionId) {
+      setError("当前稿件或制作状态已变化，请核对后再确认；修改意见仍保留。");
+      return;
+    }
+    if (pending || selected.action === "revise" && staleInstruction) return;
+    if (selected.action === "revise") void sendRevision(true);
+    else void auditCurrent(true);
   }
 
   return <section className="node-document-commands" aria-label={nodeId === "reference-grammar" ? "参考报告修订与审计" : "发布文案修订与审计"}>
@@ -246,6 +271,18 @@ export function NodeDocumentCommands({ runId, nodeId, runRevision, effectiveVers
     <button className="button button-ghost" type="button" onClick={() => void auditCurrent()} disabled={pending}>{auditLabel}</button>
     {error ? <p role="alert">{error}</p> : null}
     {info ? <p>{info}</p> : null}
+    {confirmation ? <div className="node-confirm-layer" role="presentation">
+      <section ref={confirmationRef} role="dialog" aria-modal="true" aria-labelledby={`document-confirm-${nodeId}`} tabIndex={-1}>
+        <h3 id={`document-confirm-${nodeId}`}>{confirmation.action === "revise" ? "确认创建文案修订版" : "确认审计已完成的文案"}</h3>
+        <p>{confirmation.action === "revise"
+          ? "这次会调用模型生成新的文案，保留原文案、成片和终审记录。新稿仍由你阅读并决定是否采用。"
+          : "这次会调用模型审计当前文案，保留文案与成片，不自动修改或采用。"}</p>
+        <div><button className="button button-ghost" type="button" onClick={() => setConfirmation(undefined)}>继续编辑</button>
+          <button className="button button-primary" type="button" disabled={pending} onClick={confirmOperation}>
+            {confirmation.action === "revise" ? "确认创建修订版" : "确认审计当前文案"}
+          </button></div>
+      </section>
+    </div> : null}
   </section>;
 }
 

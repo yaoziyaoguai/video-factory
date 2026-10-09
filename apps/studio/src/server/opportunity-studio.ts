@@ -160,7 +160,15 @@ function toOpportunity(record: OpportunityRecord): StudioOpportunity {
     scoreProvenance: record.scoreProvenance
       ? { ...record.scoreProvenance }
       : { source: "历史记录 · topic-intelligence-v1", scoredAt: record.createdAt },
-    evidence: record.candidate.evidence.map((signal) => ({ ...signal })),
+    evidence: record.candidate.evidence.filter(signal => {
+      if (record.origin !== "series" || !signal.evidenceUrl) return true;
+      try {
+        const url = new URL(signal.evidenceUrl);
+        // 历史路线图把本站导航误记为外部来源，只读归一；真实补充来源不受影响。
+        return !(url.origin === "https://video.wangjinkun333.me" && url.pathname === "/topics"
+          && url.searchParams.get("mode") === "series" && url.searchParams.get("candidate") === record.candidate.id);
+      } catch { return true; }
+    }).map((signal) => ({ ...signal })),
     ...(record.articleSources?.length ? { articleSources: structuredClone(record.articleSources) } : {}),
     ...(record.articleFacts?.length ? { articleFacts: structuredClone(record.articleFacts) } : {}),
     ...(record.articleUncertainties?.length ? { articleUncertainties: [...record.articleUncertainties] } : {}),

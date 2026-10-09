@@ -349,6 +349,8 @@ export class StudioService {
     return status;
   }
   async listCandidateInbox(input: StudioCandidateInboxQuery): Promise<StudioCandidateInbox> {
+    // 系列与候选在页面上并行读取；候选也须先核对真实定版，避免同屏已定版却仍锁住下一集。
+    if (!input.origins?.length || input.origins.includes("series")) await this.reconcileSeriesRuns();
     // 只读已生成候选；空缓存/过期缓存不能在页面读取时启动收费生成。
     const inbox = await this.candidateInbox.list(input, { awaitTrendGeneration: false });
     const includesTrend = input.origins === undefined || input.origins.includes("trend");
@@ -521,7 +523,10 @@ export class StudioService {
       ? {
           ...configuredInput,
           title: seriesContext.episode.title,
-          angle: `${seriesContext.episode.hook}\n本集必须兑现：${seriesContext.episode.viewerPromise}\n结尾交付：${seriesContext.episode.payoff}`,
+          // 正史与本集承诺仍由服务端 seriesContext 绑定；用户在开工表单修改的角度不能被静默覆盖。
+          angle: typeof configuredInput.angle === "string" && configuredInput.angle.trim()
+            ? configuredInput.angle.trim()
+            : `${seriesContext.episode.hook}\n本集必须兑现：${seriesContext.episode.viewerPromise}\n结尾交付：${seriesContext.episode.payoff}`,
           audience: seriesContext.audience,
           nicheSlug: seriesContext.track,
           platform: seriesContext.platform,

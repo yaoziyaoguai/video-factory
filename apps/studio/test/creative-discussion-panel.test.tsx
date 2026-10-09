@@ -70,6 +70,33 @@ afterEach(() => {
 });
 
 describe("early duration decision", () => {
+  it("does not call an in-progress director adoption a new decision or an unknown result", async () => {
+    const current = review({ stage: "director", reviewPurpose: "direction",
+      checkResult: { verdict: "pass", score: 90, summary: "可用", issues: [], checkIdentity: "checked" } });
+    let finish!: () => void;
+    const onCommand = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+    const { rerender } = render(<CreativeDiscussionPanel review={current} busy={false} onCommand={onCommand} />);
+    fireEvent.click(screen.getByRole("button", { name: /采用导演初稿/ }));
+    expect(onCommand).toHaveBeenCalledOnce();
+    rerender(<CreativeDiscussionPanel review={current} busy onCommand={onCommand} />);
+    expect(screen.getByRole("heading", { name: "正在处理导演方案，当前稿件已保留" })).toBeInTheDocument();
+    expect(screen.queryByText("上一条操作结果尚未核清。")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /等你决定/ })).not.toBeInTheDocument();
+    await act(async () => { finish?.(); });
+  });
+
+  it("collapses long model replies but preserves the full original and the user's words", () => {
+    const userText = "我的意见。".repeat(90);
+    const reply = "逐项说明。".repeat(100);
+    const { container } = render(<CreativeDiscussionPanel review={review({ messages: [
+      { id: "user-long", commandId: "long", role: "user", text: userText }, { id: "assistant-long", commandId: "long", role: "assistant", text: reply },
+    ] })} busy={false} onCommand={vi.fn(async () => undefined)} />);
+    expect(screen.getByText(userText)).toBeInTheDocument();
+    const details = container.querySelector("details.creative-long-reply")!;
+    expect(details).not.toHaveAttribute("open");
+    expect(details.querySelector("p")?.textContent).toBe(reply);
+    expect(details.querySelector("summary")).toHaveTextContent("展开完整回复");
+  });
   it("keeps explicit re-audit reachable after a completed audit and removes undo only when no prior draft exists", async () => {
     const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
     const current = review({ checkResult: { verdict: "pass", score: 90, summary: "本稿可用", issues: [], checkIdentity: "audit-ready" } });

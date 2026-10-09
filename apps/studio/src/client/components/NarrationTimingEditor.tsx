@@ -548,7 +548,18 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
     {error ? <p className="error-message" role="alert">{error}</p> : <p>正在读取当前声音方案…</p>}
   </section>;
 
-  const locked = Boolean(busyToken) || disabled || stale;
+  const sourceVersion = voiceNode.outputState?.versions.find(version => version.id === currentVoiceVersion);
+  const sourceTracked = receipt && isFirstFitConflict(outputConflict?.code)
+    ? typeof receipt.sourceOperationId === "string" && typeof receipt.manifestArtifactId === "string"
+    : sourceVersion && typeof outputRecord.layoutKey === "string" && typeof outputRecord.voiceOperationId === "string"
+      && ["voiceover_plan", "voiceover"].every(kind => artifacts.some(artifact => artifact.kind === kind && sourceVersion.artifactIds.includes(artifact.id)));
+  if (!sourceTracked && !pendingEnvelope && !dirty && !stale) return <section className="node-preview-section narration-timing-editor" aria-label="只调整配音时间">
+    <h3>这版声音暂不支持只调整时间</h3>
+    <p role="status">这版声音没有可核对的排轨来源，无法保证调整时复用原配音，因此不提供无效的编辑控件。原声音仍可试听与采用；如需改词或重做声音，请使用返工入口，费用由你另行确认。</p>
+    {storageWarning ? <p>{storageWarning}</p> : null}
+  </section>;
+
+  const locked = Boolean(busyToken) || disabled || stale || !sourceTracked;
   return <section className="node-preview-section narration-timing-editor" aria-label="只调整配音时间">
     <h3>只调整配音时间</h3>
     <p>复用原配音，本地调整窗口、落点和明确留白；不重新购买、不改文本、不改音色、不改变画面总时长。完成后停在声音试听，由你确认才继续渲染。</p>

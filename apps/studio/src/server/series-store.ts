@@ -239,11 +239,11 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       if (episode.status !== "planned") {
         throw new SeriesStoreConflictError(`第 ${episodeNumber} 集已经进入后续阶段，请刷新后再试。`);
       }
-      if (episode.canonBaseRevision !== current.canon.revision) {
-        throw new SeriesStoreConflictError(`第 ${episodeNumber} 集尚未通过基于最新已确认内容的开拍复核。`);
+      if (episode.canonBaseRevision !== current.canon.revision && !expectedGenerationId) {
+        throw new SeriesStoreConflictError(`第 ${episodeNumber} 集的前集定版内容已更新，请查看最新交接与本集计划后再确认采用；是否审计由你决定。`);
       }
-      // 开拍复核是建议，不是闸门：auditStatus 只说明那份自动审计判了什么，采用与否由用户决定。
-      // 会真正拦住用户的是上面那条"计划基于旧版已定版内容"的一致性事实，以及下面的集序约束。
+      // 最新页面的 generation 同时绑定路线图与已定版事实；采用明确确认这个基准，
+      // 不调用审计或把旧审计改为通过。集序和上游编辑租约仍在同一锁内检查。
       const upstreamEdit = current.episodes.find((candidate) => candidate.episodeNumber < episode.episodeNumber
         && activeEditLease(candidate, updatedAt));
       if (upstreamEdit) {
@@ -256,15 +256,18 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       const selectedVersion = ensureEpisodeVersion(episode);
       const selectedAudit = [...(selectedVersion.auditHistory ?? [])].reverse()
         .find((audit) => audit.targetVersionId === selectedVersion.contentVersionId);
-      const adoptionAuditStatus: NonNullable<StudioSeriesEpisode["adoption"]>["auditStatus"] = selectedAudit?.status ?? "not_audited";
+      const staleAudit = selectedVersion.planning.auditStatus === "stale";
+      const adoptionAuditStatus: NonNullable<StudioSeriesEpisode["adoption"]>["auditStatus"] = staleAudit
+        ? "stale" : selectedAudit?.status ?? "not_audited";
       const episodes = current.episodes.map((candidate, candidateIndex) => candidateIndex === episodeIndex
         ? {
           ...selectedVersion,
+          canonBaseRevision: current.canon.revision,
           status: "selected" as const,
           opportunityId: candidate.id,
           adoption: {
             targetVersionId: selectedVersion.contentVersionId!,
-            auditId: selectedAudit?.auditId ?? null,
+            auditId: staleAudit ? null : selectedAudit?.auditId ?? null,
             auditStatus: adoptionAuditStatus,
             adoptedAt: updatedAt,
           },
@@ -973,8 +976,8 @@ export class JsonSeriesStore implements StudioSeriesRepository {
                 ...episode.planning,
                 auditStatus: "stale" as const,
                 auditSummary: episode.canonBaseRevision !== canon.revision
-                  ? "系列正史已更新，采用前需要重新审计。"
-                  : "上一集的正式交接已更新，采用前需要重新审计。",
+                  ? "系列已定版内容已更新，请核对最新事实后决定是否采用；可选择重新审计。"
+                  : "上一集的正式交接已更新，请核对交接后决定是否采用；可选择重新审计。",
               }
             : episode.planning;
           return {

@@ -3125,6 +3125,19 @@ describe("Creative OS", () => {
     unmount();
 
     capabilitiesApi.mockResolvedValue([
+      { id: "python", label: "Python", category: "runtime", state: "ready", evidence: "可用" },
+      { id: "ffmpeg", label: "FFmpeg", category: "runtime", state: "ready", evidence: "可用" },
+      { id: "docker", label: "Docker", category: "runtime", state: "missing", evidence: "云端容器内无CLI" },
+      { id: "macos-voices", label: "本机音色", category: "voice", state: "missing", evidence: "Linux不支持" },
+      { id: "minimax-tts", label: "云端音色", category: "voice", state: "ready", evidence: "已配置" },
+    ]);
+    vi.mocked(studioApi.trendServices).mockResolvedValue([{ id: "newsnow", label: "NewsNow", kind: "aggregator", status: "ready", lastCheckedAt: "2026-10-10T00:00:00Z" }]);
+    const cloud = render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+    expect(await screen.findByText(/制作环境已就绪.*热点使用已连接服务/)).toHaveTextContent("本机音色不可用，可用云端配音");
+    expect(screen.queryByText(/制作环境有 2 处未就绪/)).not.toBeInTheDocument();
+    cloud.unmount();
+
+    capabilitiesApi.mockResolvedValue([
       { id: "python", label: "Python worker", category: "runtime", state: "ready", evidence: "python3 可执行文件" },
       { id: "ffmpeg", label: "FFmpeg 音视频引擎", category: "runtime", state: "missing", evidence: "需要 ffmpeg 与 ffprobe" },
       { id: "docker", label: "Docker 本地服务", category: "runtime", state: "ready", evidence: "Docker CLI 已安装" },

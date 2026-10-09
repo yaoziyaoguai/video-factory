@@ -15,7 +15,7 @@ import { RunCostDetailPanel } from "../src/client/components/CostDashboard.js";
 import { currentSubtitlePreview, RunWorkbench } from "../src/client/components/RunWorkbench.js";
 import { MultiPlatformPublishDialog } from "../src/client/components/MultiPlatformPublishDialog.js";
 import { preferRunSnapshot, RunPage } from "../src/client/pages/RunPage.js";
-import type { StudioCreatorSettings, StudioDecisionInput, StudioNode, StudioProvider, StudioRunDetail, StudioRunSummary, StudioTemplate } from "../src/shared/api.js";
+import type { StudioCreatorSettings, StudioDecisionInput, StudioNode, StudioProductionInput, StudioProvider, StudioRunDetail, StudioRunSummary, StudioTemplate } from "../src/shared/api.js";
 
 it("shows separately verified requests, model attempts and unknown money without inventing a free recovery", () => {
   render(<RunCostDetailPanel detail={{ runId: "cost-facts", title: "统计", totals: {
@@ -3281,6 +3281,20 @@ describe("Studio client", () => {
     expect(studioApi.templates).not.toHaveBeenCalled();
   });
 
+  it("lets the creator stop inheriting old editorial advice without silently changing the topic", async () => {
+    const onSubmit = vi.fn<(input: StudioProductionInput) => Promise<void>>(async () => undefined);
+    render(<NewRunDialog open providers={providers} initialValues={{ title: "原创三人书店剧情", angle: "三位店员的误会", audience: "剧情观众",
+      editorial: { verdict: "produce_video", reasons: ["解释出版数据"], guardrails: ["必须显示原书封"] } }} onClose={() => undefined} onSubmit={onSubmit} />);
+    const inherited = await screen.findByRole("checkbox", { name: "沿用选题阶段的创作建议" });
+    expect(inherited).toBeChecked();
+    expect(screen.getByText("必须显示原书封")).toBeInTheDocument();
+    await userEvent.click(inherited);
+    await userEvent.click(screen.getByRole("button", { name: "开始前期构思" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit.mock.calls[0]![0]).not.toHaveProperty("editorial");
+    expect(onSubmit.mock.calls[0]![0].title).toBe("原创三人书店剧情");
+  });
+
   it("locks an editorial image story to a free production path", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
@@ -4911,7 +4925,8 @@ describe("Studio client", () => {
       }),
     };
     render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} />);
-    expect(screen.getAllByText("修改前的模型复核记录")).toHaveLength(2);
+    // 同一历史报告只在决定区呈现一次，仍明确不代表当前人工稿已通过。
+    expect(screen.getAllByText("修改前的模型复核记录")).toHaveLength(1);
     expect(screen.getByText("修改前复核 92 分：原稿的建议")).toBeInTheDocument();
     expect(screen.queryByText(/独立复核已通过/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /确认当前步骤，进入下一步/ })).toBeEnabled();

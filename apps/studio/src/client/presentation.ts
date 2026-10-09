@@ -295,6 +295,7 @@ export function providerLabel(providerId?: string): string | undefined {
     "deepseek-visual-review-v1": "视觉审片员",
     "codex-role-auditor-v1": "AI 独立质量复核",
     openai: "AI 创作服务",
+    deepseek: "DeepSeek",
     pexels: "Pexels 图库",
     pixabay: "Pixabay 图库",
     unsplash: "Unsplash 图片",

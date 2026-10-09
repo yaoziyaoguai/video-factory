@@ -155,6 +155,7 @@ export function pageTourSteps(pathname: string): DriveStep[] {
   if (pathname === "/projects") return PROJECT_TOUR_STEPS;
   if (pathname.startsWith("/projects/")) return RUN_TOUR_STEPS;
   if (pathname === "/resources") return RESOURCE_TOUR_STEPS;
+  if (pathname === "/assets") return ASSET_TOUR_STEPS;
   if (pathname === "/experiments") return EXPERIMENT_TOUR_STEPS;
   return HOME_TOUR_STEPS;
 }
@@ -277,6 +278,11 @@ const RUN_TOUR_STEPS: DriveStep[] = [
       description: "当前只展示制作侧事实。平台导出或授权连接器接入后，再回到“制作复盘”比较播放、完播、互动和涨粉。",
     },
   },
+];
+
+const ASSET_TOUR_STEPS: DriveStep[] = [
+  { element: '[aria-label="素材库概况"]', popover: { title: "查看已有作品和素材", description: "这里整理制作中已经保存的成片与素材。打开详情可核对来源、许可和所属制作；能播放不等于内容适合下一条视频。", side: "bottom", align: "start" } },
+  { element: '[aria-label="素材筛选"]', popover: { title: "按需要查找，再决定复用", description: "用搜索和筛选缩小范围。复用前核对画面内容与授权；导览不会生成素材、花钱或替你确认。", side: "bottom", align: "start" } },
 ];
 
 const RESOURCE_TOUR_STEPS: DriveStep[] = [

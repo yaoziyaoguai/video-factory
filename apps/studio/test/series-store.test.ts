@@ -76,6 +76,33 @@ function episode(episodeNumber: number, previousEpisodeId?: string): SeriesRecor
 }
 
 describe("JsonSeriesStore", () => {
+  it("adopts the next episode against the visible finalized canon without requiring a new audit", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-series-visible-canon-"));
+    const store = new JsonSeriesStore(path.join(root, "series.json"));
+    await store.create(record());
+    await store.adoptEpisode("series-1", 1, "2026-08-24T09:00:00.000Z");
+    await store.linkRun("series-1", "series-series-1-episode-001", "run-1", "2026-08-24T09:01:00.000Z");
+    await store.reconcileRuns([{ id: "run-1", status: "succeeded", revision: 2, canonProposal: {
+      memorySummary: "前集已定版：结论 A", statements: ["结论 A"], sourceOutputVersionIds: ["script-v1", "render-v1"],
+    } }], "2026-08-24T09:10:00.000Z");
+    const visible = (await store.list())[0]!;
+    const prior = visible.episodes[1]!;
+    assert.equal(prior.planning.auditStatus, "stale");
+    assert.notEqual(prior.canonBaseRevision, visible.canon.revision);
+    await assert.rejects(store.adoptEpisode(visible.id, 2, "2026-08-24T09:11:00.000Z"));
+    await assert.rejects(store.adoptEpisode(visible.id, 2, "2026-08-24T09:11:00.000Z", `${visible.id}:r1:e2`));
+    const adopted = await store.adoptEpisode(visible.id, 2, "2026-08-24T09:11:00.000Z", `${visible.id}:r${visible.revision}:e2`);
+    const selected = adopted.episodes[1]!;
+    assert.equal(selected.status, "selected");
+    assert.equal(selected.title, prior.title);
+    assert.deepEqual(selected.continuity, prior.continuity);
+    assert.deepEqual(adopted.canon, visible.canon);
+    assert.equal(selected.canonBaseRevision, visible.canon.revision);
+    assert.equal(selected.planning.auditStatus, "stale");
+    assert.equal(selected.adoption?.auditStatus, "stale");
+    assert.equal(selected.adoption?.auditId, null);
+    await store.reserveRun(visible.id, selected.id, selected.id, "next-run", "2026-08-24T09:12:00.000Z");
+  });
   it("keeps A to B to A as separate episode versions and binds audits and adoption to the current version", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-series-version-history-"));
     const store = new JsonSeriesStore(path.join(root, "series.json"));
@@ -483,7 +510,7 @@ describe("JsonSeriesStore", () => {
     assert.match(ready.episodes[1]?.continuity.inheritedFromPrevious[0] ?? "", /票据模糊时必须人工复核/);
     await assert.rejects(
       () => store.adoptEpisode("series-1", 2, "2026-08-24T09:11:00.000Z"),
-      (error: unknown) => error instanceof SeriesStoreConflictError && /开拍复核/.test(error.message),
+      (error: unknown) => error instanceof SeriesStoreConflictError && /查看最新交接/.test(error.message),
     );
     const staleEpisode = ready.episodes[1]!;
     const rebased = await store.rebaseEpisodePlan("series-1", 2, ready.revision, ready.canon.revision, {
