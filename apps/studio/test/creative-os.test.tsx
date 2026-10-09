@@ -1226,7 +1226,7 @@ describe("Creative OS", () => {
 
     await user.click(await screen.findByRole("button", { name: "新建制作" }));
 
-    expect(screen.getByRole("combobox", { name: "建议时长" })).toHaveValue("45");
+    expect(screen.getByRole("spinbutton", { name: "建议时长" })).toHaveValue(45);
   });
 
   it("uses the creator target platform instead of the opportunity source platform", async () => {
@@ -1401,7 +1401,7 @@ describe("Creative OS", () => {
     await user.click(within(dialog).getByRole("button", { name: "重新读取" }));
     expect(settingsRequest).toHaveBeenCalledTimes(2);
     expect(await screen.findByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
-    expect(screen.getByRole("combobox", { name: "建议时长" })).toHaveValue("45");
+    expect(screen.getByRole("spinbutton", { name: "建议时长" })).toHaveValue(45);
     expect(screen.queryByText(/未能读取你的创作设置/)).not.toBeInTheDocument();
   });
 
@@ -1434,7 +1434,7 @@ describe("Creative OS", () => {
     await user.click(within(dialog).getByRole("button", { name: "重新读取" }));
     expect(settingsRequest).toHaveBeenCalledTimes(2);
     expect(await screen.findByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
-    expect(screen.getByRole("combobox", { name: "建议时长" })).toHaveValue("45");
+    expect(screen.getByRole("spinbutton", { name: "建议时长" })).toHaveValue(45);
     expect(screen.queryByText(/未能读取你的创作设置/)).not.toBeInTheDocument();
   });
 

@@ -1,7 +1,15 @@
 import type { ProductionBlueprintPatch, ProductionTemplateInput } from "@video-factory/template-core";
 import type { ProductionArticleSourceSnapshot, ProductionReviewContinuationInput } from "@video-factory/production-pipeline";
+import { parseDurationAmendment, validateContentLedDurationIntent, type DurationAmendment, type DurationBounds, type DurationIntent } from "@video-factory/production-pipeline/executable-timeline";
 
 export type StudioReviewContinuationInput = ProductionReviewContinuationInput;
+export interface StudioStaleHumanContentRecovery {
+  code: "STALE_HUMAN_CONTENT_REVIEW_REQUIRED";
+  nodeId: string;
+  field: "input" | "output";
+  effectiveVersionId: string;
+  runRevision: number;
+}
 export type StudioReviewContinuationTarget = Omit<StudioReviewContinuationInput, "commandId" | "expectedRunRevision">;
 
 export interface StudioReviewContinuationReceipt {
@@ -1014,6 +1022,15 @@ export interface StudioRunArchiveInput {
 
 export interface StudioRunDetail extends StudioRunSummary {
   revision: number;
+  /** 当前有效brief的服务端投影，声音调整不由客户端重算身份。 */
+  durationIntent?: Pick<StudioCreativeDuration, "policy" | "briefSha256" | "referenceSeconds" | "commitment">;
+  /** 仅当前声音冲突所依赖的已校验方案；不是brief的参考时长。 */
+  voiceTimingPlan?: {
+    versionId: string;
+    planSha256: string;
+    totalFrames: number;
+    cuts: Array<{ scenePosition: number; frameCount: number }>;
+  };
   nativeAudioRecovery?: { expectedRunRevision: number; interventionId: string };
   nativeVideoProviderId?: string;
   presentationMode?: "narration" | "character_drama";
@@ -1311,6 +1328,8 @@ export interface StudioDocumentCommand {
   createdAt: string;
   updatedAt: string;
   error?: string;
+  /** 原请求已保存的失败阶段，仅用于区分未受理与受理后失败。 */
+  failureStage?: string;
   modelId?: string;
   modelCallCount?: number;
   providerWaitMs?: number;
@@ -1498,6 +1517,29 @@ export interface StudioIntervention {
   };
 }
 
+export interface StudioCreativeConflict {
+  code: "duration_commitment_conflict" | "execution_capability_conflict";
+  scenePositions: number[];
+  detail: string;
+}
+
+export interface StudioCreativeDurationProposal {
+  versionId: string;
+  totalFrames: number;
+  totalSeconds: number;
+  scenes: Array<{ position: number; frameCount: number; durationSeconds: number }>;
+}
+
+export interface StudioCreativeDuration {
+  policy: "content-led-v1" | "legacy";
+  briefSha256: string;
+  referenceSeconds: number;
+  commitment?: DurationBounds;
+  proposal?: StudioCreativeDurationProposal;
+  previouslyAdopted?: StudioCreativeDurationProposal;
+  unavailableReason?: string;
+}
+
 export interface StudioCreativeReviewSnapshot {
   runId: string;
   runRevision: number;
@@ -1509,7 +1551,9 @@ export interface StudioCreativeReviewSnapshot {
   draftArtifactId: string;
   draftContentUrl?: string;
   phase: "waiting_user" | "checking";
-  allowedActions: Array<"discuss" | "revise" | "audit_current" | "adopt_proposal" | "edit_draft" | "undo_draft" | "confirm" | "return_to_stage">;
+  allowedActions: Array<"discuss" | "revise" | "audit_current" | "adopt_proposal" | "edit_draft" | "undo_draft" | "confirm" | "update_duration" | "return_to_stage">;
+  duration?: StudioCreativeDuration;
+  conflicts?: StudioCreativeConflict[];
   returnTargets: Array<{
     stage: StudioPlanningEditableStage;
     label: string;
@@ -1518,7 +1562,8 @@ export interface StudioCreativeReviewSnapshot {
   draft: unknown;
   previousDraft?: unknown;
   messages: Array<{ id: string; role: "user" | "assistant"; text: string; commandId: string }>;
-  proposals: Array<{ proposalId: string; baseDraftSha256: string; document: unknown; changeSummary: string[] }>;
+  proposals: Array<{ proposalId: string; baseDraftSha256: string; baseDraftVersionId?: string; baseStageInputDigest?: string;
+    conflicts?: StudioCreativeConflict[]; duration?: StudioCreativeDurationProposal; document: unknown; changeSummary: string[] }>;
   effectiveUserInstructions: Array<{ commandId: string; message: string }>;
   qualityAdvisories?: Array<{ scenePositions: number[]; reason: string }>;
   blockingIssues: Array<{
@@ -1561,15 +1606,16 @@ export interface StudioCreativeReviewSnapshot {
    */
   pendingConsultation?: {
     commandId: string;
-    allowedActions: Array<"edit_draft" | "confirm" | "return_to_stage">;
+    allowedActions: Array<"edit_draft" | "confirm" | "update_duration" | "return_to_stage">;
     targetDraft: { versionId?: string; artifactId?: string; sha256: string };
   };
   /** 耐久原命令查询引用；换稿/推进后仍可发现，不依赖本机pending指针。 */
   consultationOperations?: Array<{
     commandId: string;
     command: StudioCreativeReviewCommandInput;
-    status: "unknown" | "completed";
-    resultDisposition?: "recorded_not_applied";
+    status: "running" | "unknown" | "completed" | "failed" | "not_accepted";
+    resultDisposition?: "applied" | "recorded_not_applied";
+    detail?: string;
     reply?: string;
   }>;
   scopeConflict?: { proposalId: string; sourceRunId: string; requiredScenePositions: number[] };
@@ -1622,7 +1668,8 @@ type StudioCreativeReviewCommandBase = {
 
 export type StudioCreativeReviewCommandInput = StudioCreativeReviewCommandBase & (
   // 独立复核是"提议"而非"否决"：repair 时人仍可继续，但必须显式承担（与 return_to_stage 的 acknowledgeImpact 同模式）。
-  | { action: "confirm"; acknowledgeRepair?: boolean; acknowledgeIncomplete?: true; acknowledgeUnaudited?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string }
+  | { action: "confirm"; acknowledgeRepair?: boolean; acknowledgeIncomplete?: true; acknowledgeUnaudited?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string; durationAmendment?: DurationAmendment }
+  | { action: "update_duration"; durationAmendment: DurationAmendment }
   | { action: "audit_current" }
   | { action: "discuss" | "revise"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
   | { action: "adopt_proposal"; proposalId: string }
@@ -1645,7 +1692,7 @@ export interface StudioCreativeReviewCommandReceipt {
    * 独立处理出口，不是对原命令的取消或完成。
    */
   independentDraftActions?: {
-    actions: Array<"edit_draft" | "confirm" | "return_to_stage">;
+    actions: Array<"edit_draft" | "confirm" | "update_duration" | "return_to_stage">;
     targetDraft: { versionId?: string; artifactId?: string; sha256: string };
   };
   /** C1：discuss/revise 完成时的结果处置——applied=已应用到当前稿；recorded_not_applied=结果只归档原命令。 */
@@ -1655,7 +1702,7 @@ export interface StudioCreativeReviewCommandReceipt {
 export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCreativeReviewCommandInput {
   const input = requiredObject(value, "创作操作");
   const commonFields = ["action", "commandId", "expectedRunRevision", "expectedReviewRevision", "stage", "reviewPurpose", "baseDraftSha256", "baseDraftVersionId"];
-  const actionFields = input.action === "discuss" || input.action === "revise"
+  const actionFields = input.action === "update_duration" ? ["durationAmendment"] : input.action === "discuss" || input.action === "revise"
     ? ["message", "selection"]
     : input.action === "adopt_proposal"
       ? ["proposalId"]
@@ -1666,12 +1713,12 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
           : input.action === "confirm"
             // 这两个字段曾经漏在白名单外，于是"看过意见，仍然确认"在 HTTP 入口就被拒，
             // 整条链在界面后面断掉、只在图级单测里看着是通的。
-            ? ["acknowledgeRepair", "acknowledgeIncomplete", "acknowledgeUnaudited", "acceptQualityFallback", "expectedCheckIdentity"]
+            ? ["acknowledgeRepair", "acknowledgeIncomplete", "acknowledgeUnaudited", "acceptQualityFallback", "expectedCheckIdentity", "durationAmendment"]
         : [];
   const allowed = new Set([...commonFields, ...actionFields]);
   const unknown = Object.keys(input).find((key) => !allowed.has(key));
   if (unknown) throw new StudioInputError(`创作操作不支持字段“${unknown}”。`);
-  if (!["confirm", "audit_current", "discuss", "revise", "adopt_proposal", "edit_draft", "undo_draft", "return_to_stage"].includes(String(input.action))) {
+  if (!["confirm", "update_duration", "audit_current", "discuss", "revise", "adopt_proposal", "edit_draft", "undo_draft", "return_to_stage"].includes(String(input.action))) {
     throw new StudioInputError("创作操作类型不正确。");
   }
   const commandId = requiredTrimmedString(input.commandId, "操作编号");
@@ -1696,6 +1743,13 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
     baseDraftSha256,
     ...(input.baseDraftVersionId !== undefined ? { baseDraftVersionId: requiredTrimmedString(input.baseDraftVersionId, "稿件版本") } : {}),
   };
+  let durationAmendment: DurationAmendment | undefined;
+  if (input.action === "update_duration" || input.durationAmendment !== undefined) {
+    if (!common.baseDraftVersionId) throw new StudioInputError("修改时长要求必须指明当前稿件版本。");
+    try { durationAmendment = parseDurationAmendment(input.durationAmendment); }
+    catch (error) { throw new StudioInputError(`时长要求不正确：${error instanceof Error ? error.message : String(error)}`); }
+  }
+  if (input.action === "update_duration") return { action: "update_duration", ...common, durationAmendment: durationAmendment! };
   if (input.action === "discuss" || input.action === "revise") {
     const message = requiredTrimmedString(input.message, "讨论内容");
     if (message.length > 4_000) throw new StudioInputError("讨论内容不能超过 4000 个字符。");
@@ -1733,7 +1787,10 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
   if (input.acknowledgeUnaudited !== undefined && input.acknowledgeUnaudited !== true) {
     throw new StudioInputError("未审采用必须明确选择。");
   }
-  if (input.acknowledgeUnaudited === true && (input.acknowledgeRepair === true || input.acknowledgeIncomplete === true || input.expectedCheckIdentity !== undefined)) {
+  if (durationAmendment && input.acknowledgeUnaudited !== true) {
+    throw new StudioInputError("变更时长要求后是新的未审版本，请明确同意按新要求采用当前稿。");
+  }
+  if (!durationAmendment && input.acknowledgeUnaudited === true && (input.acknowledgeRepair === true || input.acknowledgeIncomplete === true || input.expectedCheckIdentity !== undefined)) {
     throw new StudioInputError("未审采用不能携带上一版的审计意见。");
   }
   if (input.acceptQualityFallback !== undefined
@@ -1758,6 +1815,7 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
     ...(input.acknowledgeUnaudited === true ? { acknowledgeUnaudited: true as const } : {}),
     ...(input.acceptQualityFallback === true ? { acceptQualityFallback: true as const } : {}),
     ...(expectedCheckIdentity === undefined ? {} : { expectedCheckIdentity }),
+    ...(durationAmendment ? { durationAmendment } : {}),
   };
 }
 
@@ -2172,7 +2230,7 @@ export interface StudioReworkDraft {
   inheritedReferenceVideo?: Pick<StudioReferenceVideo, "label" | "mimeType" | "sizeBytes">;
 }
 
-export interface StudioProductionInput {
+export type StudioProductionInput = DurationIntent & {
   protocolVersion: "video-factory/brief-v1";
   audioMode?: "tts" | "native_av";
   nativeVideoProviderId?: string;
@@ -2181,8 +2239,6 @@ export interface StudioProductionInput {
   angle: string;
   audience: string;
   nicheSlug: string;
-  durationSeconds: number;
-  durationRange?: { minSeconds: number; maxSeconds: number };
   platform: string;
   reviewMode: "manual" | "automatic";
   runPurpose?: "production" | "test";
@@ -2266,7 +2322,13 @@ export function assertStudioExecutableProductionInput(value: unknown): void {
   if ((workflowFeatures as Record<string, unknown>).boundaryGates !== "user-confirmed-v1") {
     throw new StudioInputError("新建制作必须在每个节点边界停下等你确认（workflowFeatures.boundaryGates=\"user-confirmed-v1\"）。");
   }
-  if (typeof input.durationRange !== "object" || input.durationRange === null || Array.isArray(input.durationRange)) {
+  if (input.durationPolicy !== undefined && input.durationPolicy !== "content-led-v1") {
+    throw new StudioInputError("未知的制作时长规则。");
+  }
+  if (input.durationPolicy === "content-led-v1") {
+    try { validateContentLedDurationIntent(input as Extract<DurationIntent, { durationPolicy: string }>); }
+    catch (error) { throw new StudioInputError(error instanceof Error ? error.message : String(error)); }
+  } else if (typeof input.durationRange !== "object" || input.durationRange === null || Array.isArray(input.durationRange)) {
     throw new StudioInputError("新建制作必须填写可编辑的成片时长范围。");
   }
   if (typeof input.director !== "object" || input.director === null || Array.isArray(input.director)) {
@@ -2315,6 +2377,7 @@ export type StudioDecisionInput = StudioDecisionInputBase & (
       scenePosition: number;
       durationSeconds: number;
       groupId?: string;
+      durationAmendment?: DurationAmendment;
     };
   }
   | {
@@ -2773,23 +2836,29 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
         throw new StudioInputError("调整配音方案时必须填写镜头和新时长。");
       }
       const timing = input.voiceTiming as Record<string, unknown>;
-      if (Object.keys(timing).some((field) => field !== "scenePosition" && field !== "durationSeconds" && field !== "groupId")) {
+      if (Object.keys(timing).some((field) => !["scenePosition", "durationSeconds", "groupId", "durationAmendment"].includes(field))) {
         throw new StudioInputError("配音时长调整包含不支持的字段。");
       }
       if (!Number.isSafeInteger(timing.scenePosition) || Number(timing.scenePosition) < 1) {
         throw new StudioInputError("配音镜头编号必须是正整数。");
       }
       if (typeof timing.durationSeconds !== "number" || !Number.isFinite(timing.durationSeconds)
-        || timing.durationSeconds <= 0 || timing.durationSeconds > 180) {
-        throw new StudioInputError("配音镜头时长必须大于 0 秒且不超过 180 秒。");
+        || timing.durationSeconds <= 0 || !Number.isSafeInteger(Math.ceil(timing.durationSeconds * 30))) {
+        throw new StudioInputError("配音镜头时长必须是可精确表示帧数的正有限秒数。");
       }
       if (timing.groupId !== undefined && (typeof timing.groupId !== "string" || !/^narration-[1-9]\d*$/.test(timing.groupId))) {
         throw new StudioInputError("连续旁白分组编号不正确，请重新打开当前方案。");
+      }
+      let durationAmendment: DurationAmendment | undefined;
+      if (timing.durationAmendment !== undefined) {
+        try { durationAmendment = parseDurationAmendment(timing.durationAmendment); }
+        catch (error) { throw new StudioInputError(error instanceof Error ? error.message : "时长要求格式不正确。"); }
       }
       voiceTiming = {
         scenePosition: Number(timing.scenePosition),
         durationSeconds: timing.durationSeconds,
         ...(typeof timing.groupId === "string" ? { groupId: timing.groupId } : {}),
+        ...(durationAmendment ? { durationAmendment } : {}),
       };
     }
   } else if (input.voiceTiming !== undefined) {

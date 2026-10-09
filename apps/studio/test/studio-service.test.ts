@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import type { Artifact, HumanDecisionDraft, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
+import { StaleHumanContentError } from "@video-factory/workflow-core";
 import type {
   DispatchedProductionRun,
   ProductionBrief,
@@ -427,6 +428,32 @@ async function completeTrendRefresh(service: StudioService, refreshId?: string):
 }
 
 describe("StudioService", () => {
+  for (const field of ["input", "output"] as const) {
+    it(`explains stale human ${field} recovery as HTTP 409 without changing the run`, async (t) => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-human-stale-http-"));
+      t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+      const run = { ...executableWaitingRun(workspaceRoot), status: "stale" as const };
+      const pipeline = new FakePipeline(run);
+      let resumeCalls = 0;
+      t.mock.method(pipeline, "resumeStale", async () => {
+        resumeCalls += 1;
+        throw new StaleHumanContentError("publish-package", field, "manual-1", run.revision);
+      });
+      const service = new StudioService({ workspaceRoot, pipeline, environment: {}, commandAvailable: allCommandsAvailable });
+      const app = buildStudioApp({ service, logger: false });
+      t.after(() => app.close());
+      const before = structuredClone(pipeline.run);
+      const response = await app.inject({ method: "POST", url: `/api/runs/${run.id}/regenerate-stale` });
+      assert.equal(response.statusCode, 409, response.body);
+      assert.match(response.json().error, field === "input" ? /编辑输入.*复核.*保存/ : /编辑交付.*复核.*保存/);
+      assert.match(response.json().error, /已保留.*未开始重新生成/);
+      assert.deepEqual(response.json().recovery, { code: "STALE_HUMAN_CONTENT_REVIEW_REQUIRED", nodeId: "publish-package", field,
+        effectiveVersionId: "manual-1", runRevision: run.revision });
+      assert.deepEqual(pipeline.run, before);
+      assert.equal(resumeCalls, 1);
+      assert.equal(pipeline.dispatchCount, 0);
+    });
+  }
   it("keeps real HTTP candidate GETs read-only across cold cache, active refresh and restart", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-trend-readonly-http-"));
     let calls = 0;

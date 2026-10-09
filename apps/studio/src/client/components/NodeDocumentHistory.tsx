@@ -3,6 +3,7 @@ import type { StudioArtifact, StudioNodeOutputState } from "../../shared/api.js"
 import { studioApi } from "../api.js";
 import { NodeContentReview, nodeContentReview } from "./NodeContentReview.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
+import { beijingDateTime } from "../presentation.js";
 
 const DOCUMENT_KIND: Record<string, string> = {
   "publish-package": "publish_package",
@@ -23,14 +24,17 @@ export function NodeDocumentHistory({ nodeId, outputState, artifacts }: {
       const artifact = artifacts.find((candidate) => version.artifactIds.includes(candidate.id)
         && candidate.kind === DOCUMENT_KIND[nodeId]
         && candidate.contentType === "application/json");
-      return <HistoricalDocument key={version.id} nodeId={nodeId} versionId={version.id} artifact={artifact} review={nodeContentReview(version.output)} />;
+      return <HistoricalDocument key={version.id} nodeId={nodeId} versionId={version.id}
+        label={`第 ${outputState!.versions.indexOf(version) + 1} 版 · ${beijingDateTime(version.createdAt) ?? "时间未记录"}`}
+        artifact={artifact} review={nodeContentReview(version.output)} />;
     })}
   </section>;
 }
 
-function HistoricalDocument({ nodeId, versionId, artifact, review }: {
+function HistoricalDocument({ nodeId, versionId, label, artifact, review }: {
   nodeId: string;
   versionId: string;
+  label: string;
   artifact: StudioArtifact | undefined;
   review: ReturnType<typeof nodeContentReview>;
 }) {
@@ -40,7 +44,10 @@ function HistoricalDocument({ nodeId, versionId, artifact, review }: {
   useEffect(() => {
     if (!open || !artifact?.contentUrl) return;
     const controller = new AbortController();
+    setContent(undefined);
+    setError(undefined);
     void studioApi.resourceJson(artifact.contentUrl, controller.signal).then((value) => {
+      if (controller.signal.aborted) return;
       setContent(value);
       setError(undefined);
     }).catch((caught: unknown) => {
@@ -49,11 +56,14 @@ function HistoricalDocument({ nodeId, versionId, artifact, review }: {
     return () => controller.abort();
   }, [artifact?.contentUrl, open]);
   return <details onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary>查看历史版本 {versionId}</summary>
+    <summary>{label}</summary>
     {review ? <NodeContentReview value={review} /> : <p>此历史版本没有可核实的审计记录。</p>}
     {!artifact?.contentUrl ? <p>此历史版本的完整文档不可读取，请查看原始产物记录。</p>
       : error ? <p role="alert">读取历史文档失败：{error}</p>
         : content === undefined ? <p>正在读取历史文档…</p>
           : <NodeDeliveryPreview nodeId={nodeId} value={content} />}
+    <details className="node-document-diagnostics"><summary>版本诊断信息</summary>
+      <label className="field"><span>版本编号（可选中复制）</span><input aria-label="历史版本编号" readOnly value={versionId} onFocus={event => event.currentTarget.select()} /></label>
+    </details>
   </details>;
 }

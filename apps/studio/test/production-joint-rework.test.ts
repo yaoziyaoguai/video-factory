@@ -217,13 +217,18 @@ it("MC-A08/24 character script reopens after planning without generation; edits 
   const counts = { writes, audits, media, director: counters.directorInputs.length };
   const denied = await app.inject({ method: "POST", url: `/api/runs/${run.id}/review-continuations`, payload: { ...request, acknowledgeImpact: false } });
   assert.equal(denied.statusCode, 400);
-  const uncertain = structuredClone(original);
-  uncertain.nodeRuns.find(n => n.nodeId === "voice")!.outcomeUncertain = true;
   const runStore = new FileRunStore(path.join(workspaceRoot, "runs"));
-  await runStore.checkpoint(uncertain);
-  const blocked = await app.inject({ method: "POST", url: `/api/runs/${run.id}/review-continuations`, payload: { ...request, commandId: "unknown-reopen" } });
-  assert.equal(blocked.statusCode, 409, blocked.body);
-  assert.deepEqual(await pipeline.loadPersisted(run.id), uncertain);
+  for (const nodeId of ["voice", "assets"]) {
+    const uncertain = structuredClone(original);
+    uncertain.nodeRuns.find(n => n.nodeId === nodeId)!.outcomeUncertain = true;
+    await runStore.checkpoint(uncertain);
+    const blocked = await app.inject({ method: "POST", url: `/api/runs/${run.id}/review-continuations`,
+      payload: { ...request, commandId: `unknown-${nodeId}-reopen` } });
+    assert.equal(blocked.statusCode, 409, blocked.body);
+    assert.deepEqual(await pipeline.loadPersisted(run.id), uncertain);
+    assert.deepEqual({ writes, audits, media, director: counters.directorInputs.length }, counts,
+      "返回上游不能绕过原付费请求或触发新调用");
+  }
   await runStore.checkpoint(original);
   crashAfterGraph = true;
   const interrupted = await app.inject({ method: "POST", url: `/api/runs/${run.id}/review-continuations`, payload: request });
@@ -276,7 +281,7 @@ it("MC-A08/24 character script reopens after planning without generation; edits 
   assert.ok(original.artifacts.every(a => run.artifacts.some(b => b.id === a.id)));
 });
 
-it("MC-A17/21/22 character HTTP tickets, durable first-fit and crash recovery reuse original audio", async (t) => {
+for (const durationMode of ["legacy", "content-led-v1"] as const) it(`MC-A17/21/22 character HTTP tickets, durable first-fit and crash recovery reuse original audio (${durationMode})`, async (t) => {
   const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-character-transaction-"));
   const { script } = JSON.parse(await readFile(path.join(repositoryRoot, "tests/fixtures/character-drama-cases.json"), "utf8"));
   const agents = jointReworkAgents({ treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] });
@@ -318,6 +323,10 @@ it("MC-A17/21/22 character HTTP tickets, durable first-fit and crash recovery re
     providerRuntimeMetadata: [{ id: "minimax-tts-v1", label: "MiniMax", modelId: "speech-2.8-turbo",
       transport: "http_api", billing: "metered", approvalPolicy: "automatic", estimatedCostCny: .5, maxAttempts: 1 }] });
   const brief = jointReworkBrief();
+  if (durationMode === "content-led-v1") {
+    brief.durationPolicy = durationMode;
+    delete brief.durationRange;
+  }
   let run = await pipeline.start({ ...brief, presentationMode: "character_drama",
     providers: { ...brief.providers, voice: "minimax-tts-v1" },
     voiceDirection: { ...brief.voiceDirection, profileId: "minimax:female-chengshu" },
@@ -565,6 +574,95 @@ it("MC-A03/08 invalid character edits keep the current stop; six roles save and 
   assert.equal(audits, 1, "手改不自动再次审计");
   assert.equal((await pipeline.loadPersisted(run.id))!.status, "needs_human");
   assert.deepEqual(current.draft, script, "旧稿只读保留");
+});
+
+for (const optionalUnknown of [false, true]) it(`publish HTTP validates legacy dispositions before stripping and retains final approval (optional unknown=${optionalUnknown})`, async (t) => {
+  const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-publish-dispositions-http-"));
+  const worker = new ReworkWorker();
+  let visualCalls = 0;
+  const pipeline = new ProductionPipeline({ workspaceRoot, worker,
+    ...jointReworkAgents({ treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] }),
+    assetProviders: REWORK_ASSET_PROVIDERS,
+    ...(optionalUnknown ? {
+      providerRuntimeMetadata: [{ id: "deepseek-visual-review-v1", label: "受控视觉", modelId: "deepseek-flash",
+        transport: "unix_socket" as const, billing: "subscription" as const, approvalPolicy: "none" as const, maxAttempts: 1 }],
+      visualReviewAgents: [{ id: "deepseek-visual-review-v1", modelId: "deepseek-flash", async review(input) {
+        visualCalls += 1;
+        if (input.reviewStage === "rendered_video") throw new RoleAgentLoopError("原审计待核", {
+          version: "video-factory/agent-loop-v1", role: "视觉审片员", contractVersion: "controlled",
+          criteria: [], status: "failed", maxIterations: 1, iterations: [], failure: { stage: "uncertain" },
+        }, undefined, new CodexBridgeError("受控原请求待核", false, "uncertain"));
+        return { version: "video-factory/visual-review-v1" as const, summary: "受控源素材", scores: {
+          composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 90 }, findings: [], confidence: .9, recommendation: "approve" as const };
+      } }],
+    } : {}),
+  });
+  const input = jointReworkBrief();
+  input.workflowFeatures = { ...input.workflowFeatures!, boundaryGates: "user-confirmed-v1" };
+  if (optionalUnknown) input.providers.visualReview = "deepseek-visual-review-v1";
+  let run = await confirmGatedRework(pipeline, input);
+  for (let step = 0; step < 16 && run.status === "needs_human"; step++) {
+    const node = run.nodeRuns.find(item => item.status === "needs_human")!;
+    if (node.nodeId === "publish-package") break;
+    const intervention = node.intervention!;
+    const output = node.output as Record<string, unknown>;
+    run = await pipeline.decide(run.id, {
+      action: "approve", actor: "owner", interventionId: intervention.id, expectedRunRevision: run.revision,
+      reviewEvidenceId: intervention.evidenceId ?? (typeof output?.reviewEvidenceId === "string" ? output.reviewEvidenceId : null),
+      ...(intervention.continuationScope ? { commandId: `http-setup-${step}`, acceptIncomplete: true as const } : {}),
+    });
+  }
+  const publish = run.nodeRuns.find(node => node.status === "needs_human")!;
+  assert.equal(publish?.nodeId, "publish-package", JSON.stringify(run.nodeRuns.map(node => ({ id: node.nodeId, status: node.status, error: node.error }))));
+  const final = run.interventions.findLast(item => item.nodeId === "final-review")!;
+  const finalDecision = run.decisions.find(item => item.interventionId === final.id)!;
+  const app = buildStudioApp({ service: new StudioService({ repositoryRoot, workspaceRoot, pipeline }), logger: false });
+  t.after(() => app.close());
+  let completion: Promise<unknown> | undefined;
+  const dispatch = pipeline.dispatchDecision.bind(pipeline);
+  t.mock.method(pipeline, "dispatchDecision", async (...args: Parameters<typeof dispatch>) => {
+    const operation = await dispatch(...args);
+    completion = operation.completion;
+    return operation;
+  });
+  const payload = { interventionId: publish.intervention!.id, expectedRunRevision: run.revision, action: "approve",
+    reviewEvidenceId: null, contentVersionId: publish.outputState!.effectiveVersionId, acceptUnauditedContent: true };
+  const previous = await pipeline.loadPersisted(run.id);
+  const originalCalls = visualCalls;
+  const key = "a".repeat(64);
+  for (const reviewDispositions of [[], [{ itemKey: "", decision: "accept_risk" }],
+    [{ itemKey: key, decision: "accept_risk" }, { itemKey: key, decision: "accept_risk" }],
+    [{ itemKey: key, decision: "invalid" }], [{ itemKey: key, decision: "reject" }]]) {
+    const invalid = await app.inject({ method: "POST", url: `/api/runs/${run.id}/decisions`, payload: { ...payload, reviewDispositions } });
+    assert.equal(invalid.statusCode, 400, invalid.body);
+    assert.deepEqual(await pipeline.loadPersisted(run.id), previous);
+    assert.equal(visualCalls, originalCalls);
+  }
+  // 旧文案请求合法多带表态即可，不要求重新覆盖成片全部项目。
+  const body = { ...payload, reviewDispositions: [{ itemKey: key, decision: "accept_risk" }] };
+  const response = await app.inject({ method: "POST", url: `/api/runs/${run.id}/decisions`, payload: body });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.ok(completion);
+  await completion;
+  const accepted = await pipeline.loadPersisted(run.id);
+  assert.equal(accepted.status, "succeeded");
+  assert.equal(accepted.decisions.at(-1)?.reviewDispositions, undefined);
+  assert.equal(accepted.decisions.at(-1)?.reviewDispositionBasis, undefined);
+  assert.deepEqual(accepted.decisions.find(item => item.id === finalDecision.id), finalDecision);
+  const artifact = accepted.artifacts.find(item => item.kind === "publish_package" && publish.artifactIds.includes(item.id))!;
+  const packaged = JSON.parse(await readFile(artifact.uri!, "utf8"));
+  assert.equal(packaged.approval.decisionId, finalDecision.id);
+  assert.equal(packaged.approval.interventionId, final.id);
+  if (optionalUnknown) {
+    assert.equal(packaged.internalDelivery.machineVisualReview, "incomplete");
+    assert.equal(packaged.internalDelivery.evidence.visual.status, "incomplete_unknown");
+    const visual = accepted.nodeRuns.find(item => item.nodeId === "visual-review")!;
+    assert.equal(visual.outcomeUncertain, true, "文案采用不得洗掉原审计unknown");
+  }
+  const replay = await app.inject({ method: "POST", url: `/api/runs/${run.id}/decisions`, payload: body });
+  assert.equal(replay.statusCode, 409, "普通文案批准仍拒绝旧revision重复提交，不扩通用重放");
+  assert.deepEqual(await pipeline.loadPersisted(run.id), accepted);
+  assert.equal(visualCalls, originalCalls, "采用与重放不能重发原审计");
 });
 
 it("replays scoped approval through the formal HTTP consumer before stale-page guards and allows local rework", async () => {
@@ -1112,7 +1210,8 @@ async function confirmCreativeStages(
     if (run.status !== "needs_human" || intervention?.kind !== "creative_review" || !intervention.continuation) break;
     const gate = intervention.continuation;
     const gateNode = run.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
-    const shown = (gateNode.output as { creativeReview?: { stages?: Record<string, { checkResult?: { verdict?: string; checkIdentity?: string } }> } })?.creativeReview?.stages?.[gate.stage]?.checkResult;
+    const stage = (gateNode.output as { creativeReview?: { stages?: Record<string, { currentDraft?: { versionId: string }; checkResult?: { verdict?: string; checkIdentity?: string } }> } })?.creativeReview?.stages?.[gate.stage];
+    const shown = stage?.checkResult;
     run = await pipeline.confirmCreativeReview(run.id, {
       commandId: `confirm-${gate.stage}-${index + 1}`,
       actor: "producer",
@@ -1120,6 +1219,7 @@ async function confirmCreativeStages(
       expectedReviewRevision: gate.reviewRevision,
       stage: gate.stage,
       baseDraftSha256: gate.draftSha256,
+      ...(stage?.currentDraft ? { baseDraftVersionId: stage.currentDraft.versionId } : {}),
       ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
       ...(shown?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}),
     });
@@ -2367,7 +2467,7 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     assert.ok(forecastCalls >= 8, "预览核价真实发生");
   });
 
-  it("registers real manifest and receipt artifacts when the first v2 fit conflicts (§4.2.4)", async () => {
+  for (const durationMode of ["legacy", "content-led-v1"] as const) it(`registers real manifest and receipt artifacts when the first v2 fit conflicts (§4.2.4, ${durationMode})`, async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-first-fit-"));
     // 真实 Python worker：受控合成 1 秒音频（30 帧），窗口只有 15 帧 → 首次排轨冲突。
     class ControlledFirstFitWorker extends ReworkWorker {
@@ -2391,6 +2491,10 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
         transport: "http_api", billing: "metered", approvalPolicy: "automatic", estimatedCostCny: 0.5, maxAttempts: 1 }],
     });
     const brief = jointReworkBrief();
+    if (durationMode === "content-led-v1") {
+      brief.durationPolicy = durationMode;
+      delete brief.durationRange;
+    }
     let run = await pipeline.start({ ...brief,
       providers: { ...brief.providers, voice: "minimax-tts-v1" },
       economics: { ...brief.economics, allowMeteredProviders: true, maxCostCny: 5 },
@@ -2446,6 +2550,14 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     const voiceStopped = stopped.nodeRuns.find(node => node.nodeId === "voice")!;
     assert.equal(voiceStopped.status, "needs_human", "首次 fit 冲突转为可恢复停点，不是 failed");
     assert.match(voiceStopped.intervention?.reason ?? "", /调整时间|不重新购买/);
+    const studio = new ProductionStudio({ workspaceRoot, pipeline, listProviders: async () => [],
+      archiveStore: { list: async () => [], add: async () => {}, remove: async () => {} } });
+    if (durationMode === "content-led-v1") {
+      assert.equal((await studio.get(stopped.id))!.continuation?.supported, true);
+      await assert.rejects(studio.reworkDraft(stopped.id), /失败、已打回或已完成/,
+        "新版无range不能被误认旧版，只能先在当前停点处理或明确终止");
+      assert.deepEqual(await pipeline.loadPersisted(stopped.id), stopped);
+    }
     assert.equal(worker.synthesisCalls, 1, "音频已真实物化（一次受控合成）后冲突");
     // 真实产物登记：manifest + 不可变 receipt（kind 固定）互相绑定真实 artifactId。
     const manifestArtifact = stopped.artifacts.find(artifact => artifact.kind === "voice_source_manifest");
@@ -2655,6 +2767,23 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     for (const [sourcePath, originalBytes] of immutableSourceBytes) {
       assert.deepEqual(await readFile(sourcePath), originalBytes,
         `连续排轨不得改写原来源 ${path.relative(voiceNodeRoot, sourcePath)}`);
+    }
+    if (durationMode === "content-led-v1") {
+      const terminated = await pipeline.decide(relayoutedA2.id, { interventionId: voiceA2.intervention!.id,
+        action: "reject", actor, note: "准备重新安排剧本与镜头时长", expectedRunRevision: relayoutedA2.revision,
+        reviewEvidenceId: null });
+      assert.equal(terminated.status, "rejected");
+      const rework = await studio.reworkDraft(terminated.id);
+      assert.equal(rework!.input.durationPolicy, "content-led-v1");
+      assert.equal(rework!.input.durationRange, undefined);
+      assert.equal(rework!.input.rework!.sourceRunId, terminated.id);
+      assert.equal(rework!.input.rework!.sourceRunRevision, terminated.revision);
+      assert.ok(rework!.input.rework!.previousScript && rework!.input.rework!.previousDirectorPlan);
+      assert.equal(worker.synthesisCalls, 1, "终止与打开关联草稿都不能购买声音");
+      assert.equal(worker.relayoutCalls, 4);
+      for (const [sourcePath, originalBytes] of immutableSourceBytes) {
+        assert.deepEqual(await readFile(sourcePath), originalBytes, "终止与返工草稿保留原音轨和费用账本");
+      }
     }
   });
 

@@ -100,6 +100,18 @@
 /* 深色仅属于观片区，决定区仍使用易读的浅色纸面。 */
 .studio-v3 .run-page .review-layout { grid-template-columns: minmax(0, 1.6fr) minmax(310px, 1fr); gap: 24px; margin: 0 0 30px; }
 .studio-v3 .run-page .review-layout-no-media { grid-template-columns: minmax(0, 1fr); }
+/* 文案停点先读当前文字；成片保留为上下文，不再占据主要决定对象的位置。 */
+.studio-v3 .run-page:not(.is-viewing-focused) .review-layout-document { grid-template-areas: "document decision" "video decision"; align-items: start; }
+.studio-v3 .run-page:not(.is-viewing-focused) .review-layout-document > .current-artifact-surface { grid-area: document; }
+.studio-v3 .run-page:not(.is-viewing-focused) .review-layout-document > .video-stage { grid-area: video; }
+.studio-v3 .run-page:not(.is-viewing-focused) .review-layout-document > .review-panel { grid-area: decision; }
+.studio-v3 .review-layout-document .current-artifact-surface { border-radius: 8px; }
+.studio-v3 .review-layout-document .current-artifact-surface > .section-heading p { margin-bottom: 0; font-size: 14px; line-height: 1.75; }
+.studio-v3 .review-layout-document .node-preview-summary dd,
+.studio-v3 .review-layout-document .node-preview-facts dd { font-size: 15px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.studio-v3 .review-layout-document .node-preview-summary dt,
+.studio-v3 .review-layout-document .node-preview-facts dt { font-size: 13px; }
+.studio-v3 .review-layout-document .decision-actions .button { min-width: 0; white-space: normal; line-height: 1.6; }
 .studio-v3 .run-page .video-stage { border-color: var(--line); border-radius: 8px; box-shadow: var(--shadow); }
 .studio-v3 .run-page .stage-heading { min-height: 0; padding: 18px 22px; background: var(--paper); }
 .studio-v3 .run-page .stage-heading .eyebrow { color: var(--muted); font-size: 11px; }
@@ -116,6 +128,32 @@
 .studio-v3 .run-page .review-panel { position: static; padding: 22px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); box-shadow: none; }
 .studio-v3 .run-page .current-decision-bar { padding: 18px 22px; margin-bottom: 22px; border-radius: 6px; box-shadow: none; }
 .studio-v3 .run-page .current-decision-bar h2 { font-size: 18px; font-weight: 600; }
+
+/* 文字交付的审计、修订与历史沿用现有纸面/输入体系，仅补缺失的局部层级。 */
+.studio-v3 :is(.node-document-commands, .node-content-review, .node-document-history) { min-width: 0; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; }
+.studio-v3 :is(.node-document-commands, .node-content-review, .node-document-history) p { margin: 8px 0; }
+.studio-v3 :is(.node-document-revision, .node-content-review, .node-document-history) summary { padding: 10px 0; color: var(--ink); font-size: 14px; font-weight: 550; cursor: pointer; }
+.studio-v3 :is(.node-document-revision, .node-content-review, .node-document-history) summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.studio-v3 .node-document-revision { margin-bottom: 14px; }
+.studio-v3 .node-document-instruction { margin-top: 14px; }
+.studio-v3 .node-document-instruction textarea { width: 100%; min-height: 120px; font-size: 15px; line-height: 1.75; }
+.studio-v3 .node-document-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+.studio-v3 .node-document-charcount { margin-left: auto; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.studio-v3 .node-document-commands .button { max-width: 100%; white-space: normal; line-height: 1.6; }
+.studio-v3 .node-document-suggestions > label { display: flex; align-items: baseline; gap: 8px; margin: 10px 0; }
+.studio-v3 .node-document-suggestions input { flex: 0 0 auto; accent-color: var(--accent); }
+.studio-v3 .node-document-command-records { max-height: 320px; overflow-y: auto; overscroll-behavior: contain; padding: 0 12px; margin-bottom: 16px; background: var(--paper-soft); border-radius: 6px; }
+.studio-v3 .node-document-command-record { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.studio-v3 .node-document-command-record:last-child { border-bottom: 0; }
+.studio-v3 .node-document-original { white-space: pre-wrap; }
+.studio-v3 .node-document-state { min-height: 0; padding: 16px; font-size: 14px; line-height: 1.75; background: var(--paper-soft); }
+.studio-v3 .node-document-read-error { padding-bottom: 12px; }
+.studio-v3 .node-document-history > h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.studio-v3 .node-document-history > details { border-bottom: 1px solid var(--line); }
+.studio-v3 .node-document-diagnostics { margin: 12px 0; color: var(--muted); }
+.studio-v3 .node-document-diagnostics input { width: 100%; font-size: 13px; }
+.studio-v3 .review-disposition-progress { position: sticky; top: 0; z-index: 1; margin: 0; padding: 10px 0; background: var(--paper); color: var(--ink); font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; border-bottom: 1px solid var(--line); }
+.studio-v3 .review-disposition-list + .decision-override-field { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
 /* CLOUD-03：终审可选时间工具默认收起的一行摘要；主决定区排在它之前。 */
 .optional-timing-tool { margin: 18px 0 0; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-soft); }
 .optional-timing-tool > summary { padding: 12px 14px; font-size: 13px; font-weight: 600; cursor: pointer; list-style-position: inside; }
@@ -147,6 +185,7 @@
 
 @media (max-width: 1100px) {
   .studio-v3 .run-page .review-layout { grid-template-columns: minmax(0, 1fr); }
+  .studio-v3 .run-page:not(.is-viewing-focused) .review-layout-document { grid-template-areas: "document" "decision" "video"; }
   .studio-v3 .creative-discussion-layout { grid-template-columns: minmax(0, 1fr) minmax(280px, 40%); }
   .studio-v3 .creative-draft-surface { padding-inline: 24px; }
   .studio-v3 .creative-chat-surface { padding: 20px; }

@@ -1154,7 +1154,9 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       return;
     }
     if (error instanceof StudioConflictError || error instanceof DocumentCommandConflictError) {
-      void reply.code(409).send({ error: error.message });
+      void reply.code(409).send({ error: error.message,
+        ...(error instanceof StudioConflictError && error.recovery ? { recovery: error.recovery } : {}),
+      });
       return;
     }
     if (error instanceof StudioVoicePreviewUnavailableError) {

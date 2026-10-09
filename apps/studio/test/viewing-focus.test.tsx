@@ -27,7 +27,7 @@ function filmRun(): StudioRunDetail {
     activeIntervention: { id: "final-stop", nodeId: "final-review", reason: "请审看当前成片", options: ["approve", "reject"],
       createdAt: "2026-10-03T00:00:00.000Z" },
     optionalReviewTasks: [{ nodeId: "visual-review", purpose: "audio_review", operationId: "original-audio",
-      targetVersionId: "render-current", requestState: "unknown", resultState: "absent", summary: "原声音审片结果仍待核。" }],
+      requestId: "original-audio-request", targetVersionId: "render-current", requestState: "unknown", resultState: "absent", summary: "原声音审片结果仍待核。" }],
   };
 }
 

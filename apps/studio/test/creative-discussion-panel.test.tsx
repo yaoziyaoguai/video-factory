@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CreativeDiscussionPanel } from "../src/client/components/CreativeDiscussionPanel.js";
 import { studioApi } from "../src/client/api.js";
-import type { StudioCreativeReviewCommandInput, StudioCreativeReviewCommandReceipt, StudioCreativeReviewSnapshot } from "../src/shared/api.js";
+import { parseStudioCreativeReviewCommandInput, type StudioCreativeReviewCommandInput, type StudioCreativeReviewCommandReceipt, type StudioCreativeReviewSnapshot } from "../src/shared/api.js";
 
 const sha = "a".repeat(64);
 
@@ -67,6 +67,202 @@ afterEach(() => {
   window.localStorage.clear();
   window.sessionStorage.clear();
   vi.restoreAllMocks();
+});
+
+describe("early duration decision", () => {
+  it("keeps explicit re-audit reachable after a completed audit and removes undo only when no prior draft exists", async () => {
+    const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
+    const current = review({ checkResult: { verdict: "pass", score: 90, summary: "本稿可用", issues: [], checkIdentity: "audit-ready" } });
+    const { rerender } = render(<CreativeDiscussionPanel review={current} busy={false} onCommand={onCommand} />);
+    expect(screen.queryByRole("button", { name: "撤销本轮修改" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "重新审计当前版本（会调用模型）" }));
+    expect(onCommand.mock.calls[0]![0].action).toBe("audit_current");
+    rerender(<CreativeDiscussionPanel review={{ ...current, previousDraft: current.draft }} busy={false} onCommand={onCommand} />);
+    expect(screen.getByRole("button", { name: "撤销本轮修改" })).toBeEnabled();
+  });
+  it.each(["running", "unknown", "failed", "not_accepted", "completed"] as const)("shows the durable original request after a fresh mount (%s) without duplicating its completed message", async status => {
+    const command = storedDiscussion("durable-original");
+    const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
+    const original = { ...command, message: "请保留办公室预算本的对白" };
+    render(<CreativeDiscussionPanel review={review({ consultationOperations: [{ commandId: original.commandId, command: original, status }],
+      messages: status === "completed" ? [{ id: "user-message", commandId: original.commandId, role: "user", text: original.message }] : [] })}
+      busy={false} onCommand={onCommand} />);
+    expect(screen.getAllByText(original.message)).toHaveLength(1);
+    expect(screen.getByText(status === "running" || status === "unknown" ? "已提交 · 结果待核" : status === "failed" ? "执行失败 · 已核清" : status === "not_accepted" ? "未受理" : "已完成")).toBeInTheDocument();
+    expect(onCommand).not.toHaveBeenCalled();
+    if (status === "running" || status === "unknown") {
+      expect(screen.getByRole("button", { name: "发送修订意见" })).toBeDisabled();
+    }
+  });
+
+  it("shows proposal conflicts and only sets the chosen proposal as the current draft", async () => {
+    const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
+    render(<CreativeDiscussionPanel review={review({ proposals: [{ proposalId: "long-proposal",
+      baseDraftSha256: sha, document: { scenes: [{ position: 1, duration: 38, narration: "完整保留的候选台词。" }] },
+      duration: { versionId: "proposal-v1", totalSeconds: 38, totalFrames: 1140, scenes: [{ position: 1, durationSeconds: 38, frameCount: 1140 }] },
+      changeSummary: ["展开说明"], conflicts: [{ code: "duration_commitment_conflict", scenePositions: [1],
+        detail: "建议 38 秒，超出最多 30 秒的要求。" }] }],
+      duration: { policy: "content-led-v1", referenceSeconds: 24, briefSha256: "b".repeat(64), commitment: { maxSeconds: 30 } } })} busy={false} onCommand={onCommand} />);
+    expect(screen.getByText(/此备选约 38 秒.*1140 帧.*共 1 镜/)).toBeInTheDocument();
+    expect(screen.getByText(/备选仍受当前时长要求约束：最多 30 秒/)).toBeInTheDocument();
+    expect(screen.getByText("建议 38 秒，超出最多 30 秒的要求。")).toBeInTheDocument();
+    expect(screen.getByText(/不会确认本阶段或开始后续制作/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "设为当前草稿" }));
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "adopt_proposal", proposalId: "long-proposal" });
+  });
+
+  function durationReview(overrides: Partial<StudioCreativeReviewSnapshot> = {}) {
+    return review({ draftVersionId: "script-v2", allowedActions: [...review().allowedActions, "update_duration"],
+      duration: { policy: "content-led-v1", briefSha256: "b".repeat(64), referenceSeconds: 24,
+        proposal: { versionId: "script-v2", totalFrames: 360, totalSeconds: 12,
+          scenes: [{ position: 1, frameCount: 360, durationSeconds: 12 }] } }, ...overrides });
+  }
+
+  it("shows the actual proposal and adopts its version and duration in the existing content decision", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
+    render(<CreativeDiscussionPanel review={durationReview()} busy={false} onCommand={onCommand} />);
+    expect(screen.getByText("建议成片约 12 秒，共 1 镜")).toBeInTheDocument();
+    expect(screen.getByText(/参考目标：24 秒/)).toBeInTheDocument();
+    expect(screen.getByText(/费用待方案核价/)).toBeInTheDocument();
+    expect(screen.getByText(/第 1 镜：12 秒/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "采用此脚本 · 约12秒（未审计）" }));
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "confirm", baseDraftVersionId: "script-v2", acknowledgeUnaudited: true });
+    expect(onCommand.mock.calls[0]![0]).not.toHaveProperty("durationAmendment");
+  });
+
+  it("saves a single explicit boundary without adopting the script or inventing a minimum", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
+    render(<CreativeDiscussionPanel review={durationReview()} busy={false} onCommand={onCommand} />);
+    await user.click(screen.getByRole("button", { name: "修改时长要求" }));
+    await user.type(screen.getByLabelText("最多秒数（可不填）"), "30");
+    expect(screen.getByRole("button", { name: "采用此脚本 · 约12秒（未审计）" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "仅保存时长要求" }));
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "update_duration", baseDraftVersionId: "script-v2",
+      durationAmendment: { expectedBriefSha256: "b".repeat(64), range: { maxSeconds: 30 } } });
+    const command = onCommand.mock.calls[0]![0];
+    expect(command.action).toBe("update_duration");
+    if (command.action !== "update_duration") throw new Error("expected duration command");
+    expect(command.durationAmendment.range).not.toHaveProperty("minSeconds");
+  });
+
+  it("adopts a conflicting current script with its amended boundary in one explicit unaudited decision", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
+    const current = durationReview();
+    current.duration!.commitment = { maxSeconds: 10 };
+    current.conflicts = [{ code: "duration_commitment_conflict", scenePositions: [1], detail: "本稿12秒超过最多10秒" }];
+    current.checkResult = { verdict: "repair", score: 70, summary: "开头仍有建议", issues: [], checkIdentity: "check-current" };
+    render(<CreativeDiscussionPanel review={current} busy={false} onCommand={onCommand} />);
+    await user.click(screen.getByRole("button", { name: "修改时长要求" }));
+    const max = screen.getByLabelText("最多秒数（可不填）");
+    await user.clear(max);
+    await user.type(max, "12");
+    expect(screen.getByText(/变更时长要求后，这版稿件未重新审计/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "按新时长要求采用当前脚本（未审计）" }));
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "confirm", baseDraftVersionId: "script-v2",
+      expectedCheckIdentity: "check-current", acknowledgeRepair: true, acknowledgeUnaudited: true,
+      durationAmendment: { expectedBriefSha256: "b".repeat(64), range: { maxSeconds: 12 } } });
+  });
+
+  it("keeps unsaved duration input after remount and rejects a newer version with identical text", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
+    const view = render(<CreativeDiscussionPanel review={durationReview()} busy={false} onCommand={onCommand} />);
+    await user.click(screen.getByRole("button", { name: "修改时长要求" }));
+    await user.type(screen.getByLabelText("最多秒数（可不填）"), "30");
+    view.unmount();
+    render(<CreativeDiscussionPanel review={durationReview({ draftVersionId: "script-v3" })} busy={false} onCommand={onCommand} />);
+    expect(screen.getByLabelText("最多秒数（可不填）")).toHaveValue("30");
+    expect(screen.getByText(/输入已保留但不能覆盖新版本/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "仅保存时长要求" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "按新时长要求采用当前脚本（未审计）" })).toBeDisabled();
+    expect(onCommand).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "放弃时长修改" }));
+    await user.click(screen.getByRole("button", { name: "修改时长要求" }));
+    expect(screen.getByLabelText("最多秒数（可不填）")).toHaveValue("");
+  });
+
+  it("clears a commitment explicitly and never bypasses a real capability conflict", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
+    const current = durationReview();
+    current.duration!.commitment = { minSeconds: 10, maxSeconds: 15 };
+    current.conflicts = [{ code: "execution_capability_conflict", scenePositions: [1], detail: "型号只能供给10秒，本镜需要12秒" }];
+    render(<CreativeDiscussionPanel review={current} busy={false} onCommand={onCommand} />);
+    await user.click(screen.getByRole("button", { name: "修改时长要求" }));
+    await user.click(screen.getByRole("checkbox", { name: /取消明确时长要求/ }));
+    expect(screen.getByRole("button", { name: "按新时长要求采用当前脚本（未审计）" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "仅保存时长要求" }));
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "update_duration", durationAmendment: { range: null } });
+  });
+
+  it("rejects an impossible frame range and still-conflicting adoption without losing the typed boundary", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
+    render(<CreativeDiscussionPanel review={durationReview()} busy={false} onCommand={onCommand} />);
+    await user.click(screen.getByRole("button", { name: "修改时长要求" }));
+    const max = screen.getByLabelText("最多秒数（可不填）");
+    await user.type(max, "0.02");
+    await user.click(screen.getByRole("button", { name: "仅保存时长要求" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("没有可执行的正整数帧");
+    expect(max).toHaveValue("0.02");
+    await user.clear(max);
+    await user.type(max, "10");
+    await user.click(screen.getByRole("button", { name: "按新时长要求采用当前脚本（未审计）" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("最多10秒冲突");
+    expect(max).toHaveValue("10");
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it("keeps stock-risk consent and freezes the full version and brief when combining adoption", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
+    const current = durationReview({ stage: "director", reviewPurpose: "material_plan", qualityAdvisories: [{ scenePositions: [1], reason: "素材只是示意" }],
+      checkResult: { status: "incomplete", summary: "原审计未完成", issues: [], checkIdentity: "d".repeat(64) } });
+    const view = render(<CreativeDiscussionPanel review={current} busy={false} onCommand={onCommand} />);
+    await user.click(screen.getByRole("button", { name: "修改时长要求" }));
+    await user.type(screen.getByLabelText("最多秒数（可不填）"), "20");
+    await user.click(screen.getByRole("button", { name: "按新时长要求采用当前导演方案（未审计）" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent("素材风险");
+    expect(onCommand).not.toHaveBeenCalled();
+    view.rerender(<CreativeDiscussionPanel review={{ ...current, draftVersionId: "same-sha-new-version" }} busy={false} onCommand={onCommand} />);
+    await user.click(within(dialog).getByRole("button", { name: "接受素材风险，先制作首版" }));
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(dialog).toHaveTextContent("内容已更新");
+    view.rerender(<CreativeDiscussionPanel review={{ ...current, duration: { ...current.duration!, briefSha256: "c".repeat(64) } }} busy={false} onCommand={onCommand} />);
+    await user.click(within(dialog).getByRole("button", { name: "接受素材风险，先制作首版" }));
+    expect(onCommand).not.toHaveBeenCalled();
+    // 回到原身份重新核对；正式提交仍经过共享HTTP parser，旧未完成知情与新未审分开。
+    view.rerender(<CreativeDiscussionPanel review={current} busy={false} onCommand={onCommand} />);
+    await user.click(within(dialog).getByRole("button", { name: "接受素材风险，先制作首版" }));
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    const command = parseStudioCreativeReviewCommandInput(onCommand.mock.calls[0]![0]);
+    expect(command).toMatchObject({ action: "confirm", acknowledgeIncomplete: true, acknowledgeUnaudited: true,
+      expectedCheckIdentity: "d".repeat(64), acceptQualityFallback: true, durationAmendment: { range: { maxSeconds: 20 } } });
+  });
+
+  it("allows duration saving beside an unknown discussion only with the server's independent-action proof", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
+    const pending = storedDiscussion("pending-duration");
+    window.localStorage.setItem("vf:creative-command:run-creative:script:draft", JSON.stringify(pending));
+    render(<CreativeDiscussionPanel review={durationReview({ pendingConsultation: { commandId: pending.commandId,
+      allowedActions: ["update_duration"], targetDraft: { versionId: "script-v2", sha256: sha } } })} busy={false} onCommand={onCommand} />);
+    await user.click(screen.getByRole("button", { name: "修改时长要求" }));
+    await user.type(screen.getByLabelText("最多秒数（可不填）"), "30");
+    await user.click(screen.getByRole("button", { name: "仅保存时长要求" }));
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(onCommand.mock.calls[0]![0].action).toBe("update_duration");
+    expect(window.localStorage.getItem(`vf:creative-consultation-command:run-creative:${pending.commandId}`)).toBe(JSON.stringify(pending));
+  });
 });
 
 // CLOUD-11/P5.2（V15/V16 UI 面）：人话问题＋折叠技术详情；补齐区只列兼容可用来源、
@@ -326,7 +522,7 @@ describe("CreativeDiscussionPanel", () => {
         { severity: "advisory", criterion: "结尾", evidence: "结尾太满", repairInstruction: "结尾留白。" },
       ],
     } })} busy={false} onCommand={onCommand} />);
-    const adopt = screen.getByRole("button", { name: "保留这些建议，仍采用" });
+    const adopt = screen.getByRole("button", { name: /采用.*（保留审计建议）/ });
     const draft = screen.getByRole("article", { name: "当前脚本" });
     expect(adopt.compareDocumentPosition(draft) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const composer = screen.getByRole("textbox", { name: /聊聊你的想法/ });
@@ -405,7 +601,7 @@ describe("CreativeDiscussionPanel", () => {
     expect(screen.getByRole("button", { name: "建议与讨论" })).toHaveAttribute("aria-pressed", "true");
     await waitFor(() => expect(screen.getByRole("heading", { name: "本版建议" })).toHaveFocus());
     expect(onCommand).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "保留这些建议，仍采用" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /采用.*（保留审计建议）/ })).toBeEnabled();
   });
 
   it("shows the old plan as current and never offers direct adoption of an out-of-scope proposal", () => {
@@ -418,7 +614,7 @@ describe("CreativeDiscussionPanel", () => {
         changeSummary: ["镜头 1 超出批准范围"] }],
     })} busy={false} onCommand={onCommand} />);
     expect(screen.getByText("越界新稿 · 仅供比较")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "采用这个备选" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "设为当前草稿" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "返回来源制作，调整返工范围" })).toHaveAttribute("href", "/projects/run-source");
     expect(onCommand).not.toHaveBeenCalled();
   });
@@ -442,7 +638,7 @@ describe("CreativeDiscussionPanel", () => {
     fireEvent.change(composer, { target: { value: "换个问法再试" } });
     expect(composer).toHaveValue("换个问法再试");
     expect(screen.getByRole("button", { name: "只讨论" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /采用.*（未审计）/ })).toBeEnabled();
     expect(onCommand).not.toHaveBeenCalled();
   });
 
@@ -569,12 +765,12 @@ describe("CreativeDiscussionPanel", () => {
     fireEvent.change(composer, { target: { value: "后写的个人意见保留，不能另投模型" } });
     expect(screen.getByRole("button", { name: "只讨论" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "发送修订意见" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "审计当前版本" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /审计当前版本（会调用模型）/ })).toBeDisabled();
     fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
     expect(onCommand).not.toHaveBeenCalled();
     expect(composer).toHaveValue("后写的个人意见保留，不能另投模型");
     expect(screen.getByRole("button", { name: "核对原讨论结果" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /采用.*（未审计）/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: "返回前期构思" })).toBeEnabled();
     await userEvent.click(screen.getByText("手动修订这份稿件"));
     fireEvent.change(screen.getByLabelText("分镜 1 · 旁白"), { target: { value: "用户明确手改当前稿" } });
@@ -616,20 +812,20 @@ describe("CreativeDiscussionPanel", () => {
     }] })} busy={false} onCommand={onCommand} />);
     expect(screen.getByRole("button", { name: "只讨论" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "发送修订意见" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "审计当前版本" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /审计当前版本（会调用模型）/ })).toBeEnabled();
     expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue("后写的意见不会被取回结果清掉");
     expect(onCommand.mock.calls[0]![0]).toEqual(original);
     expect(window.localStorage.getItem(key)).toBeNull();
   });
 
-  it("clears a restored completed consultation pointer from durable proof without issuing a command", async () => {
+  it.each(["completed", "failed", "not_accepted"] as const)("clears a restored %s consultation pointer from durable proof without issuing a command", async status => {
     const original: StudioCreativeReviewCommandInput = { commandId: "completed-before-remount", action: "discuss",
       expectedRunRevision: 7, expectedReviewRevision: 2, stage: "script", baseDraftSha256: sha, message: "原讨论" };
     const key = "vf:creative-command:run-creative:script:draft";
     window.localStorage.setItem(key, JSON.stringify(original));
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
     render(<CreativeDiscussionPanel review={review({ consultationOperations: [{
-      commandId: original.commandId, command: original, status: "completed", resultDisposition: "recorded_not_applied",
+      commandId: original.commandId, command: original, status,
     }] })} busy={false} onCommand={onCommand} />);
     fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "用户后来写下的意见" } });
     await waitFor(() => expect(screen.getByRole("button", { name: "只讨论" })).toBeEnabled());
@@ -640,7 +836,8 @@ describe("CreativeDiscussionPanel", () => {
     expect(onCommand).not.toHaveBeenCalled();
   });
 
-  it.each(["different-body", "cleanup-failure", "newer-command"])("does not erase %s while reconciling durable completed proof", async condition => {
+  for (const status of ["completed", "failed", "not_accepted"] as const)
+  it.each(["different-body", "cleanup-failure", "newer-command"])(`does not erase %s while reconciling durable ${status} proof`, async condition => {
     const original: StudioCreativeReviewCommandInput = { commandId: "completed-proof", action: "discuss",
       expectedRunRevision: 7, expectedReviewRevision: 2, stage: "script", baseDraftSha256: sha, message: "原讨论" };
     const key = "vf:creative-command:run-creative:script:draft";
@@ -650,7 +847,7 @@ describe("CreativeDiscussionPanel", () => {
     if (condition === "cleanup-failure") vi.mocked(window.localStorage.removeItem).mockImplementation(() => { throw new Error("cleanup unavailable"); });
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
     render(<CreativeDiscussionPanel review={review({ consultationOperations: [{
-      commandId: original.commandId, command: original, status: "completed", resultDisposition: "recorded_not_applied",
+      commandId: original.commandId, command: original, status,
     }] })} busy={false} onCommand={onCommand} />);
     fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "输入仍保留，不猜测命令已经释放" } });
     expect(screen.getByRole("button", { name: "只讨论" })).toBeDisabled();
@@ -759,7 +956,7 @@ describe("CreativeDiscussionPanel", () => {
       status: "incomplete", summary: "请求已结清，但没有有效复核结论", issues: [], checkIdentity: "b".repeat(64),
     } })} busy={false} onCommand={onCommand} />);
     expect(screen.getByText("独立复核未完成 · 无评分")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "接受复核未完成，采用本版" }));
+    await userEvent.click(screen.getByRole("button", { name: /采用.*（复核未完成）/ }));
     expect(confirmSpy).not.toHaveBeenCalled();
     // 按钮自身已是明确风险决定，不再叠加泛化确认弹窗。
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -772,7 +969,7 @@ describe("CreativeDiscussionPanel", () => {
     const rendered = render(<CreativeDiscussionPanel review={review({ stage: "director", qualityAdvisories: [
       { scenePositions: [1], reason: "示意素材尚未核实" },
     ] })} busy={false} onCommand={onCommand} />);
-    await userEvent.click(screen.getByRole("button", { name: "接受素材风险，先制作首版" }));
+    await userEvent.click(screen.getByRole("button", { name: "采用选材方案（接受素材风险）" }));
     const dialog = screen.getByRole("dialog");
     // 弹窗打开期间服务端换了稿/换了复核。
     rendered.rerender(<CreativeDiscussionPanel review={review({
@@ -866,7 +1063,7 @@ describe("CreativeDiscussionPanel", () => {
     await screen.findByText(/保存未完成，输入仍保留/);
     expect(onCommand).not.toHaveBeenCalled();
     expect(screen.getByLabelText("分镜 1 · 旁白")).toHaveValue("不要丢掉这句手写旁白");
-    expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /采用.*（未审计）/ })).toBeDisabled();
     expect(screen.queryByText(/修订已保存。/)).not.toBeInTheDocument();
   });
 
@@ -908,7 +1105,7 @@ describe("CreativeDiscussionPanel", () => {
       { scenePositions: [1], reason: "候选仅得20分，视觉核验未完成" },
     ] })} busy={false} onCommand={onCommand} />);
     expect(screen.getByText(/候选仅得20分/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "接受素材风险，先制作首版" }));
+    await userEvent.click(screen.getByRole("button", { name: "采用选材方案（接受素材风险）" }));
     // 应用内弹窗出现，先看风险再决定；关闭不发送。
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByText(/本版尚未审计/)).toBeInTheDocument();
@@ -916,7 +1113,7 @@ describe("CreativeDiscussionPanel", () => {
     expect(onCommand).not.toHaveBeenCalled();
     await userEvent.click(within(dialog).getByRole("button", { name: "返回查看" }));
     expect(onCommand).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole("button", { name: "接受素材风险，先制作首版" }));
+    await userEvent.click(screen.getByRole("button", { name: "采用选材方案（接受素材风险）" }));
     await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /接受素材风险，先制作首版/ }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
     expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "confirm", acceptQualityFallback: true, acknowledgeUnaudited: true, baseDraftSha256: sha });
@@ -928,7 +1125,7 @@ describe("CreativeDiscussionPanel", () => {
     const narration = await screen.findByLabelText("分镜 1 · 旁白");
     await userEvent.clear(narration);
     await userEvent.type(narration, "我还没保存的文字");
-    expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /采用.*（未审计）/ })).toBeDisabled();
     rendered.rerender(<CreativeDiscussionPanel review={review({
       draftSha256: "b".repeat(64), reviewRevision: 4,
       draft: { ...review().draft as object, narrativeArc: "服务端的新方案" },
@@ -979,7 +1176,7 @@ describe("CreativeDiscussionPanel", () => {
     await userEvent.type(composer, "继续");
     fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
     expect(screen.getByRole("button", { name: "只讨论" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /采用.*（未审计）/ })).toBeDisabled();
     expect(onCommand).not.toHaveBeenCalled();
   });
 
@@ -1079,7 +1276,7 @@ describe("CreativeDiscussionPanel", () => {
     expect(screen.getByRole("heading", { name: "当前导演方案需要你决定" })).toBeInTheDocument();
     expect(screen.getByText(/已保留你确认的方案，不会自动改成生成画面/)).toBeInTheDocument();
     expect(screen.getByText(/镜头 1、2、3、4/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /采用.*（未审计）/ })).toBeInTheDocument();
   });
 
   it("keeps confirmation available under a repair verdict but only after an explicit acknowledgement", async () => {
@@ -1103,7 +1300,7 @@ describe("CreativeDiscussionPanel", () => {
 
     expect(screen.getByText(/有 1 条修改建议，由你决定是否采用/)).toBeInTheDocument();
     expect(screen.getByText("先复查现有素材，再决定是否更换。")).toBeInTheDocument();
-    const confirmButton = screen.getByRole("button", { name: "保留这些建议，仍采用" });
+    const confirmButton = screen.getByRole("button", { name: /采用.*（保留审计建议）/ });
     expect(confirmButton).toBeEnabled();
     expect(screen.queryByRole("button", { name: "确认当前方案，继续" })).not.toBeInTheDocument();
 
@@ -1128,7 +1325,7 @@ describe("CreativeDiscussionPanel", () => {
       checkIdentity: "e".repeat(64),
       issues: [{ severity: "advisory", criterion: "开场", evidence: "首句较慢", repairInstruction: "把问题提前。" }],
     } })} busy={false} onCommand={onCommand} />);
-    await userEvent.click(screen.getByRole("button", { name: "保留这些建议，仍采用" }));
+    await userEvent.click(screen.getByRole("button", { name: /采用.*（保留审计建议）/ }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(onCommand.mock.calls[0]![0]).toMatchObject({ action: "confirm", expectedCheckIdentity: "e".repeat(64) });
@@ -1196,16 +1393,16 @@ describe("CreativeDiscussionPanel", () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
     expect(screen.getByText("本版未审计")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "审计当前版本" }));
+    await userEvent.click(screen.getByRole("button", { name: /审计当前版本（会调用模型）/ }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledWith(expect.objectContaining({ action: "audit_current" })));
     onCommand.mockClear();
-    await userEvent.click(screen.getByRole("button", { name: "采用本版（未审计）" }));
+    await userEvent.click(screen.getByRole("button", { name: /采用.*（未审计）/ }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledWith(expect.objectContaining({ action: "confirm", acknowledgeUnaudited: true })));
   });
 
   it("still offers confirmation while no repair verdict is outstanding", () => {
     render(<CreativeDiscussionPanel review={review({ stage: "director" })} busy={false} onCommand={vi.fn(async () => undefined)} />);
-    expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /采用.*（未审计）/ })).toBeEnabled();
   });
 
   it("names each creative stage the way the rest of the studio names it", () => {

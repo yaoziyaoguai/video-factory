@@ -8,6 +8,7 @@ it("preserves the complete draft version on a creative command", () => {
 import { describe, it } from "node:test";
 import {
   StudioInputError,
+  assertStudioExecutableProductionInput,
   parseStudioCandidateSourcesInput,
   parseStudioCreatorSettingsPatch,
   parseStudioOpportunityInput,
@@ -21,6 +22,14 @@ import {
 import { parseStudioNarrationRevisionInput } from "../src/server/narration-revision-input.js";
 
 describe("run intervention API contracts", () => {
+  it("keeps modern content-led creation executable without requiring a hard range", () => {
+    const input = { durationPolicy: "content-led-v1", durationSeconds: 24,
+      workflowFeatures: { executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1", boundaryGates: "user-confirmed-v1" },
+      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] } };
+    assert.doesNotThrow(() => assertStudioExecutableProductionInput(input));
+    assert.throws(() => assertStudioExecutableProductionInput({ ...input, workflowFeatures: { ...input.workflowFeatures, boundaryGates: undefined } }), /每个节点边界/);
+    assert.throws(() => assertStudioExecutableProductionInput({ ...input, durationPolicy: undefined }), /时长范围/);
+  });
   it("accepts an explicit incomplete-review continuation and rejects an implicit bypass", () => {
     const evidenceId = "a".repeat(64);
     assert.deepEqual(parseStudioDecisionInput({
@@ -93,6 +102,20 @@ describe("run intervention API contracts", () => {
         reviewEvidenceId: null,
         voiceTiming: { scenePosition: 1, durationSeconds: 8.2 },
       }), /只有调整方案时/);
+    }
+  });
+
+  it("accepts explicit voice duration amendments and leaves legacy duration limits to the bound run", () => {
+    const base = { action: "request_changes", expectedRunRevision: 4, interventionId: "voice-timing-1", reviewEvidenceId: null };
+    for (const range of [null, { maxSeconds: 203 }]) {
+      const voiceTiming = { scenePosition: 1, durationSeconds: 181,
+        durationAmendment: { expectedBriefSha256: "a".repeat(64), range } };
+      assert.deepEqual(parseStudioDecisionInput({ ...base, voiceTiming }), { ...base, voiceTiming });
+    }
+    for (const durationAmendment of [{ range: null }, { expectedBriefSha256: "a".repeat(64), range: {} },
+      { expectedBriefSha256: "a".repeat(64), range: { maxSeconds: 0.02 } },
+      { expectedBriefSha256: "a".repeat(64), range: null, durationPolicy: "legacy" }]) {
+      assert.throws(() => parseStudioDecisionInput({ ...base, voiceTiming: { scenePosition: 1, durationSeconds: 12, durationAmendment } }));
     }
   });
 
@@ -536,6 +559,28 @@ describe("scene narration revision API contracts", () => {
 });
 
 describe("creative review confirm API contract", () => {
+  it("accepts version-bound duration saves and combined adoption without weakening normal audit acknowledgements", () => {
+    const base = { commandId: "duration-command", expectedRunRevision: 3, expectedReviewRevision: 6,
+      stage: "script", baseDraftSha256: "a".repeat(64), baseDraftVersionId: "script-current#v3" };
+    const durationAmendment = { expectedBriefSha256: "b".repeat(64), range: { maxSeconds: 38 } };
+    const update = { ...base, action: "update_duration", durationAmendment };
+    assert.deepEqual(parseStudioCreativeReviewCommandInput(update), update);
+    assert.deepEqual(parseStudioCreativeReviewCommandInput({ ...update, durationAmendment: { ...durationAmendment, range: null } }),
+      { ...update, durationAmendment: { ...durationAmendment, range: null } });
+    const combined = { ...base, action: "confirm", durationAmendment, acknowledgeUnaudited: true,
+      acknowledgeRepair: true, expectedCheckIdentity: "c".repeat(64) };
+    assert.deepEqual(parseStudioCreativeReviewCommandInput(combined), combined);
+    for (const bad of [
+      { ...combined, durationAmendment: undefined }, { ...combined, acknowledgeUnaudited: undefined },
+      { ...combined, expectedCheckIdentity: undefined }, { ...combined, baseDraftVersionId: undefined },
+      { ...update, baseDraftVersionId: undefined }, { ...update, durationAmendment: {} },
+      { ...update, durationAmendment: { ...durationAmendment, range: {} } },
+      { ...update, durationAmendment: { ...durationAmendment, range: { maxSeconds: 0.02 } } },
+      { ...update, durationAmendment: { ...durationAmendment, policy: "legacy" } },
+      { ...base, action: "discuss", durationAmendment, message: "聊时长" },
+    ]) assert.throws(() => parseStudioCreativeReviewCommandInput(bad), StudioInputError);
+  });
+
   const base = {
     action: "confirm",
     commandId: "confirm-1",

@@ -46,6 +46,7 @@ interface NodeWorkspaceProps {
   /** 仅使用宿主逐条核实后的事实，不能凭节点名称或风险按钮推断未知请求安全。 */
   optionalReviewUncertaintySafe?: true;
   currentDelivery?: boolean;
+  onDocumentReadinessChange?: (nodeId: string, versionId: string, ready: boolean) => void;
   /** 画面来源由制作页统一展示时，不在节点内重复挂载编辑会话。 */
   hideExecutionConfiguration?: boolean;
   pauseBusy?: boolean;
@@ -66,13 +67,16 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, onRunUpdated, characterDrama: propsCharacterDrama = false, nativeAudio = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, hideExecutionConfiguration = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, onRunUpdated, characterDrama: propsCharacterDrama = false, nativeAudio = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, onDocumentReadinessChange, hideExecutionConfiguration = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
   onAuthorizeProductionScope = async input => { await studioApi.authorizeProductionScope(runId, input); },
   onAmendProductionScope = async (authorizationId, input) => { await studioApi.amendProductionScope(runId, authorizationId, input); },
   onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
+  const isDecisionDocument = node.id === "publish-package" || node.id === "reference-grammar";
   const shouldOpenForAttention = currentDelivery || node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
+  // 文字采用停点优先展示当前正文；前序输入仍可主动展开，不抢占阅读位置。
+  const shouldOpenInputForAttention = shouldOpenForAttention && !(currentDelivery && isDecisionDocument);
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
-  const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenForAttention);
+  const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenInputForAttention);
   const [editing, setEditing] = useState(false);
   const [editingInput, setEditingInput] = useState(false);
   const [editingDocument, setEditingDocument] = useState(false);
@@ -94,9 +98,10 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   // 后台 props 刷新不得把旧草稿的提交基准无声升级到新版本。
   const [inputEditBaseline, setInputEditBaseline] = useState<{ runRevision: number; versionId: string }>();
   const [error, setError] = useState<string>();
-  const [documentPreview, setDocumentPreview] = useState<unknown>();
-  const [documentLoading, setDocumentLoading] = useState(false);
-  const [documentError, setDocumentError] = useState<string>();
+  const [documentResult, setDocumentResult] = useState<{ identity: string; content: unknown }>();
+  const [documentFailure, setDocumentFailure] = useState<{ identity: string; message: string }>();
+  const [documentReadAttempt, setDocumentReadAttempt] = useState(0);
+  const [documentEditBaseline, setDocumentEditBaseline] = useState<{ identity: string; artifactId: string; generation: number }>();
   const [terminalOverride, setTerminalOverride] = useState<StudioNodeOverrideInput>();
   const [terminalInputOverride, setTerminalInputOverride] = useState<StudioNodeInputDraft>();
   const spendDialogRef = useDialogFocus<HTMLElement>(authorizing, () => {
@@ -117,6 +122,19 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     () => selectEditableArtifact(node.id, artifacts, effectiveVersion?.artifactIds),
     [artifacts, effectiveVersion?.artifactIds, node.id],
   );
+  const documentIdentity = JSON.stringify([runId, node.id, effectiveVersion?.id, editableArtifact?.id, editableArtifact?.contentUrl]);
+  const [documentContext, setDocumentContext] = useState({ identity: documentIdentity, generation: 0 });
+  // 即便有效版本回到原身份，也不复活已过期的编辑会话。
+  if (documentContext.identity !== documentIdentity) setDocumentContext({ identity: documentIdentity, generation: documentContext.generation + 1 });
+  const documentPreview = documentResult?.identity === documentIdentity ? documentResult.content : undefined;
+  const documentOutput = isDecisionDocument && node.outputState ? effectiveVersion?.output : effectiveOutput(node) ?? node.output;
+  const inlineDocument = node.id === "reference-grammar" ? asRecord(documentOutput)?.grammar ?? documentOutput : documentOutput;
+  const documentRequired = isDecisionDocument && (Boolean(editableArtifact) || !hasCreatorDocumentContent(node.id, inlineDocument));
+  const documentError = documentFailure?.identity === documentIdentity ? documentFailure.message
+    : documentRequired && !editableArtifact ? "当前版本的完整文档不可读取，不能用历史稿代替；原稿和记录仍保留。" : undefined;
+  const documentLoading = Boolean(editableArtifact?.contentUrl && documentPreview === undefined && !documentError);
+  const staleDocumentEdit = editingDocument && (documentEditBaseline?.identity !== documentIdentity
+    || documentEditBaseline.generation !== documentContext.generation);
   const audioArtifact = useMemo(
     () => {
       if (node.id !== "voice") return undefined;
@@ -184,7 +202,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     () => providers.filter((provider) => assetProviderIds.includes(provider.id)),
     [assetProviderIds, providers],
   );
-  const deliveryValue = documentPreview ?? effectiveOutput(node) ?? node.output;
+  const deliveryValue = documentRequired ? documentPreview : documentPreview ?? inlineDocument;
   const contentReview = node.id === "reference-grammar" || node.id === "publish-package"
     ? nodeContentReview(effectiveOutput(node) ?? node.output)
     : undefined;
@@ -200,6 +218,10 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const hasDelivery = node.id === "creative-planning"
     ? planningVersionArtifactIds.length > 0
     : hasCreatorDocumentContent(node.id, deliveryValue);
+  const documentReady = hasDelivery && !documentLoading && !documentError && !editing && !node.outputState?.stale;
+  useEffect(() => {
+    if (isDecisionDocument) onDocumentReadinessChange?.(node.id, effectiveVersion?.id ?? "", documentReady);
+  }, [isDecisionDocument, node.id, effectiveVersion?.id, documentReady, onDocumentReadinessChange]);
   const hasEditableInput = node.id !== "brief" && hasCreatorDocumentContent(`${node.id}-input`, effectiveInput(node));
   const inputSources = useMemo(
     () => creatorInputSources(node, nodes, effectiveInputVersion),
@@ -219,9 +241,12 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   useEffect(() => {
     if (shouldOpenForAttention) {
       setWorkspaceOpen(true);
-      setInputReviewOpen(true);
     }
   }, [shouldOpenForAttention]);
+
+  useEffect(() => {
+    if (shouldOpenInputForAttention) setInputReviewOpen(true);
+  }, [shouldOpenInputForAttention]);
 
   useEffect(() => {
     setRejectingSpend(false);
@@ -232,29 +257,25 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
 
   useEffect(() => {
     if (!editableArtifact?.contentUrl) {
-      setDocumentPreview(undefined);
-      setDocumentError(undefined);
-      setDocumentLoading(false);
       return;
     }
     const controller = new AbortController();
-    setDocumentLoading(true);
-    setDocumentError(undefined);
+    setDocumentFailure(undefined);
     void studioApi.resourceJson(editableArtifact.contentUrl, controller.signal).then((content) => {
-      setDocumentPreview(content);
-      setDocumentLoading(false);
+      if (controller.signal.aborted) return;
+      setDocumentResult({ identity: documentIdentity, content });
     }).catch((caught: unknown) => {
       if (controller.signal.aborted) return;
-      setDocumentError(caught instanceof Error ? caught.message : "读取失败");
-      setDocumentLoading(false);
+      setDocumentFailure({ identity: documentIdentity, message: caught instanceof Error ? caught.message : "读取失败" });
     });
     return () => controller.abort();
-  }, [editableArtifact?.contentUrl]);
+  }, [documentIdentity, editableArtifact?.contentUrl, documentReadAttempt]);
 
   function beginEditing() {
     const usesDocument = Boolean(editableArtifact && documentPreview !== undefined);
     setError(undefined);
     setEditingDocument(usesDocument);
+    setDocumentEditBaseline(usesDocument ? { identity: documentIdentity, artifactId: editableArtifact!.id, generation: documentContext.generation } : undefined);
     setDraft(pretty(usesDocument ? documentPreview : effectiveOutput(node) ?? node.output ?? {}));
     setEditing(true);
   }
@@ -300,9 +321,13 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
 
   async function saveOverride(confirmTerminalEdit = false, preparedOverride?: StudioNodeOverrideInput) {
     setError(undefined);
+    if (staleDocumentEdit) {
+      setError("当前交付已更新。你的未保存修改仍保留，请先复制需要保留的内容，再取消编辑、核对当前稿。");
+      return;
+    }
     try {
-      const parsed = preparedOverride ?? (editingDocument && editableArtifact
-        ? { document: { artifactId: editableArtifact.id, content: JSON.parse(draft) as unknown } }
+      const parsed = preparedOverride ?? (editingDocument && documentEditBaseline
+        ? { document: { artifactId: documentEditBaseline.artifactId, content: JSON.parse(draft) as unknown } }
         : { output: JSON.parse(draft) as unknown });
       const validationError = creatorDraftValidationError(
         node.id,
@@ -521,7 +546,10 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         {showPlanningStages && capability ? <details className="node-capability-details"><summary>本次使用的创作服务</summary><p>{capability}</p></details> : null}
         {node.agentLoopProgress ? <div className={`agent-loop-progress is-${node.agentLoopProgress.phase}`} role="status">
           <strong>{agentLoopPhaseLabel(node.agentLoopProgress, node.status !== "running" && effectiveVersion?.source === "human")}</strong>
-          {node.agentLoopProgress.latestAudit ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{node.agentLoopProgress.latestAudit.summary}</span> : <span>{agentLoopPendingNote(node.agentLoopProgress)}</span>}
+          {node.agentLoopProgress.latestAudit ? contentReview
+            ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分；完整原文见对应版本的审计记录。</span>
+            : <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{node.agentLoopProgress.latestAudit.summary}</span>
+            : <span>{agentLoopPendingNote(node.agentLoopProgress)}</span>}
           <span>实际模型调用：创作 {node.agentLoopProgress.producerModelCallCount ?? 0} 次，审计 {node.agentLoopProgress.auditModelCallCount ?? 0} 次{(node.agentLoopProgress.structuredRepairModelCallCount ?? 0) > 0 ? `（其中结构修复 ${node.agentLoopProgress.structuredRepairModelCallCount} 次）` : ""}。查询、刷新和等待不计为新调用。</span>
         </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>{fallbackHeading}</strong>：{fallbackReason}</span></p> : null}
@@ -707,25 +735,35 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
             nativeAudio={nativeAudio}
             creativeReview={asRecord(effectiveOutput(node) ?? (node.outputState ? undefined : node.output))?.creativeReview}
             stale={node.outputState?.stale === true}
-          /> : editing ? <NodeStructuredEditor nativeAudio={nativeAudio} nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <p className="node-workspace-error" role="alert">详细内容读取失败：{documentError}</p> : <NodeDeliveryPreview nativeAudio={nativeAudio} nodeId={node.id} value={documentPreview ?? effectiveOutput(node) ?? node.output} />}
+          /> : editing ? <NodeStructuredEditor nativeAudio={nativeAudio} nodeId={node.id} value={safeParse(draft)} assetProviderIds={assetProviderIds} assetProviders={editableAssetProviders} onChange={(value) => { setError(undefined); setDraft(pretty(value)); }} /> : documentLoading ? <p className="node-document-state">正在读取详细内容...</p> : documentError ? <div className="node-document-read-error">
+            <p className="node-workspace-error" role="alert">详细内容读取失败：{documentError}</p>
+            {editableArtifact?.contentUrl ? <button className="button button-ghost" type="button" onClick={() => {
+              setDocumentResult(undefined);
+              setDocumentFailure(undefined);
+              setDocumentReadAttempt(attempt => attempt + 1);
+            }}>重新读取当前文档</button> : null}
+          </div> : <NodeDeliveryPreview nativeAudio={nativeAudio} nodeId={node.id} value={deliveryValue} />}
           {contentReview && !editing ? <NodeContentReview value={contentReview} /> : null}
-          {contentReview && !editing && (node.id === "publish-package" || node.id === "reference-grammar") && onReviseDocument && onAuditDocument
-            ? <NodeDocumentCommands
+          {contentReview && (node.id === "publish-package" || node.id === "reference-grammar") && onReviseDocument && onAuditDocument
+            ? <div hidden={editing}><NodeDocumentCommands
+              key={`${runId}:${node.id}`}
               runId={runId}
               nodeId={node.id}
               runRevision={runRevision}
               effectiveVersionId={effectiveVersion?.id ?? ""}
               contentReview={contentReview}
-              busy={busy || readOnly}
+              busy={busy || readOnly || !documentReady || editing}
+              completed={runStatus === "succeeded"}
               onRevise={onReviseDocument}
               onAudit={onAuditDocument}
-            />
+            /></div>
             : null}
           {(node.id === "reference-grammar" || node.id === "publish-package") && !editing
             ? <NodeDocumentHistory nodeId={node.id} outputState={node.outputState} artifacts={artifacts} />
             : null}
           {audioArtifact?.contentUrl ? <div className={audioIsCurrent ? "node-audio-preview" : "node-audio-preview is-stale"}><div><strong>{audioCaption}</strong>{!audioIsCurrent ? <small>当前文字已修改或上游已变化；继续生成后会更新声音。</small> : null}</div><audio aria-label={audioIsCurrent ? audioCaption : `${audioCaption}试听`} src={audioArtifact.contentUrl} controls preload="metadata" /></div> : null}
-          {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
+          {editing && staleDocumentEdit ? <p className="node-workspace-error" role="alert">当前交付已更新。你的未保存修改仍保留，请先复制需要保留的内容，再取消编辑、核对当前稿。</p> : null}
+          {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelEditing}><X aria-hidden="true" size={15} />取消</button><button className="button button-primary" type="button" disabled={busy || staleDocumentEdit} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
         </section>
 
         {error ? <p className="node-workspace-error" role="alert">{error}</p> : null}
@@ -942,7 +980,8 @@ function selectEditableArtifact(nodeId: string, artifacts: StudioArtifact[], eff
   const kind = EDITABLE_ARTIFACT_KIND[nodeId];
   if (!kind) return undefined;
   const candidates = artifacts.filter((artifact) => artifact.kind === kind && artifact.contentType === "application/json" && artifact.contentUrl);
-  return candidates.find((artifact) => effectiveArtifactIds?.includes(artifact.id)) ?? candidates[0];
+  const current = candidates.find((artifact) => effectiveArtifactIds?.includes(artifact.id));
+  return current ?? (nodeId === "publish-package" || nodeId === "reference-grammar" ? undefined : candidates[0]);
 }
 
 function selectMaterializedVisualArtifacts(

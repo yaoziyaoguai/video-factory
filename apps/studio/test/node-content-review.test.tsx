@@ -19,6 +19,15 @@ describe("NodeContentReview", () => {
     expect(screen.getByText("初审：开头铺垫过长")).toBeInTheDocument();
     expect(screen.getByText("提前展示结果")).toBeInTheDocument();
     expect(screen.queryByText("audit-current-private")).not.toBeInTheDocument();
+    expect(screen.getAllByText("当前复核：叙述清楚")).toHaveLength(1);
+    expect(screen.getByText("当前复核：叙述清楚").closest("details")).not.toHaveAttribute("open");
+  });
+  it("keeps equal text from different audit identities and exposes the risk outside collapsed reports", () => {
+    render(<NodeContentReview value={{ status: "has_suggestions", summary: "需要核对结尾", suggestions: ["核对事实"], auditId: "a2",
+      history: [{ status: "has_suggestions", summary: "需要核对结尾", suggestions: ["核对事实"], auditId: "a1" },
+        { status: "has_suggestions", summary: "需要核对结尾", suggestions: ["核对事实"], auditId: "a2" }] }} />);
+    expect(screen.getAllByText("需要核对结尾")).toHaveLength(2);
+    expect(screen.getByText("本版有内容建议").closest("details")).toBeNull();
   });
   it("shows creator-facing suggestions even when the first audit passed", () => {
     render(<NodeContentReview value={{ status: "passed", summary: "整体可用", suggestions: ["开场先展示最终画面，再解释做法。"] }} />);
@@ -30,6 +39,7 @@ describe("NodeContentReview", () => {
     render(<NodeContentReview value={{ status: "not_audited", summary: "人工修改后的本版尚未重新审计。", suggestions: [] }} />);
     expect(screen.getByText("本版未审")).toBeInTheDocument();
     expect(screen.queryByText("本版已审计")).not.toBeInTheDocument();
+    expect(screen.queryByText(/本版审计记录/)).not.toBeInTheDocument();
   });
 
   it("uses the effective human version rather than the older generated review", () => {

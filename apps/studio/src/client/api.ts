@@ -40,6 +40,7 @@ import type {
   StudioReworkDraft,
   StudioRunDetail,
   StudioRunSummary,
+  StudioStaleHumanContentRecovery,
   StudioSeries,
   StudioSeriesInput,
   StudioSeriesEpisodePlanInput,
@@ -507,17 +508,27 @@ function scopedCollectionPath(base: string, origin?: "trend" | "series" | "manua
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, studioRequest(init));
-  const body = await response.json().catch(() => undefined) as { error?: string; documentCommandPending?: boolean } | undefined;
+  const body = await response.json().catch(() => undefined) as { error?: string; documentCommandPending?: boolean; recovery?: unknown } | undefined;
   if (body?.documentCommandPending) throw new Error(body.error ?? "原文字任务仍在执行，请取回原操作结果。");
   if (!response.ok) {
     notifyAuthenticationLoss(url, response.status);
-    throw new StudioApiError(userFacingApiError(body?.error, response.status), response.status);
+    throw new StudioApiError(userFacingApiError(body?.error, response.status), response.status,
+      response.status === 409 ? staleHumanContentRecovery(body?.recovery) : undefined);
   }
   return body as T;
 }
 
 export class StudioApiError extends Error {
-  constructor(message: string, readonly status: number) { super(message); this.name = "StudioApiError"; }
+  constructor(message: string, readonly status: number, readonly recovery?: StudioStaleHumanContentRecovery) { super(message); this.name = "StudioApiError"; }
+}
+
+function staleHumanContentRecovery(value: unknown): StudioStaleHumanContentRecovery | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const detail = value as Record<string, unknown>;
+  if (detail.code !== "STALE_HUMAN_CONTENT_REVIEW_REQUIRED" || typeof detail.nodeId !== "string" || !detail.nodeId
+    || (detail.field !== "input" && detail.field !== "output") || typeof detail.effectiveVersionId !== "string" || !detail.effectiveVersionId
+    || typeof detail.runRevision !== "number" || !Number.isSafeInteger(detail.runRevision) || detail.runRevision < 0) return undefined;
+  return { code: detail.code, nodeId: detail.nodeId, field: detail.field, effectiveVersionId: detail.effectiveVersionId, runRevision: detail.runRevision };
 }
 
 async function requestEmpty(url: string, init?: RequestInit): Promise<void> {

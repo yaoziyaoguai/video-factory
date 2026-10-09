@@ -3,7 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import type { StudioCostRunDetail, StudioCreativeReviewCommandInput, StudioCreativeReviewHistory, StudioCreativeReviewSnapshot, StudioCreatorSettings, StudioDecisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProductionInput, StudioProvider, StudioReworkDraft, StudioRunDetail, StudioNarrationRevisionInput,
   StudioSceneResourceRevisionInput, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
-import { studioApi, subscribeToRun } from "../api.js";
+import { studioApi, subscribeToRun, StudioApiError } from "../api.js";
+import { revealNodeWorkspace } from "../components/NodeWorkspace.js";
 import { pendingLocalReviewCommand, observePendingLocalReviewCommand, submitLocalReviewCommand } from "../review-continuation-command.js";
 import { createRunRead } from "../run-read-coalescer.js";
 import { currentScriptArtifact, sceneNarrationText } from "../scene-narration.js";
@@ -34,6 +35,10 @@ export function preferRunSnapshot(current: StudioRunDetail | undefined, next: St
     ...(next.productionPlanDigest === undefined && current.productionPlanDigest !== undefined
       ? { productionPlanDigest: current.productionPlanDigest }
       : {}),
+    ...(next.voiceTimingPlan === undefined && current.voiceTimingPlan !== undefined
+      && next.activeIntervention?.id === current.activeIntervention?.id
+      && next.durationIntent?.briefSha256 === current.durationIntent?.briefSha256
+      ? { voiceTimingPlan: current.voiceTimingPlan } : {}),
   };
   return withCarriedAgentLoopProgress(current, adopted);
 }
@@ -72,7 +77,12 @@ function RunPageContent({ runId }: { runId: string }) {
   latestRun.current = run;
   const [loading, setLoading] = useState(true);
   const [decisionPending, setDecisionPending] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setErrorText] = useState<string>();
+  const [humanRecovery, setHumanRecovery] = useState<import("../../shared/api.js").StudioStaleHumanContentRecovery>();
+  function setError(message: string | undefined) {
+    setErrorText(message);
+    setHumanRecovery(undefined);
+  }
   const [connectionWarning, setConnectionWarning] = useState<string>();
   const [connectionHeartbeatAt, setConnectionHeartbeatAt] = useState<string>();
   const [publishing, setPublishing] = useState(false);
@@ -552,11 +562,13 @@ function RunPageContent({ runId }: { runId: string }) {
   async function regenerateStale() {
     setNodeMutationPending(true);
     setError(undefined);
+    setHumanRecovery(undefined);
     try {
       const nextRun = await withMutationProgress(() => studioApi.regenerateStale(runId));
       setRun((current) => preferRunSnapshot(current, nextRun));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+      if (caught instanceof StudioApiError) setHumanRecovery(caught.recovery);
       throw caught;
     } finally {
       setNodeMutationPending(false);
@@ -715,7 +727,14 @@ function RunPageContent({ runId }: { runId: string }) {
     <>
       <div className="run-back-row"><Link to="/projects"><ArrowLeft aria-hidden="true" size={16} />制作记录</Link></div>
       {connectionWarning && !isTerminal(run.status) ? <div className="inline-error" role="status"><AlertCircle aria-hidden="true" size={16} />{connectionWarning}</div> : null}
-      {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</div> : null}
+      {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} /><div>{error}
+        {humanRecovery && run.status === "stale" && run.nodes.some(node => node.id === humanRecovery.nodeId) ? <>
+          {run.revision !== humanRecovery.runRevision ? <p>制作已更新，请核对当前版本；不会自动覆盖或保存稿件。</p> : null}
+          <button className="button button-secondary" type="button" onClick={() => revealNodeWorkspace(humanRecovery.nodeId)}>
+            前往复核人工{humanRecovery.field === "input" ? "输入" : "交付"}
+          </button>
+        </> : null}
+      </div></div> : null}
       {pendingLocalReviewCommand(runId) ? <section className="task-recovery-panel" aria-label="原本地决定状态">
         <p>上一条准备或风险决定已保留原编号与输入；先查看状态，不要换编号重复确认。</p>
         <button type="button" className="button button-secondary" disabled={nodeMutationPending || decisionPending} onClick={() => void observeLocalReviewCommand()}>查看上次决定状态</button>

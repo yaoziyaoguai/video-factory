@@ -18,10 +18,14 @@ describe("NodeDocumentHistory", () => {
       { id: "artifact-new", kind: "publish_package", producerNodeId: "publish-package", createdAt: "2026-09-24T00:01:00Z", contentType: "application/json", contentUrl: "/new" },
     ];
     render(<NodeDocumentHistory nodeId="publish-package" outputState={versions} artifacts={artifacts} />);
-    fireEvent.click(screen.getByText(/查看历史版本/));
+    const summary = screen.getByText(/第 1 版 · 2026-09-24/);
+    expect(summary).not.toHaveTextContent("v1");
+    fireEvent.click(summary);
     expect(await screen.findByText("旧版完整描述")).toBeInTheDocument();
     expect(screen.getByText("旧版建议")).toBeInTheDocument();
     expect(resource).toHaveBeenCalledWith("/old", expect.any(AbortSignal));
     expect(screen.queryByRole("button", { name: /采用|确认/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("版本诊断信息"));
+    expect(screen.getByLabelText("历史版本编号")).toHaveValue("v1");
   });
 });

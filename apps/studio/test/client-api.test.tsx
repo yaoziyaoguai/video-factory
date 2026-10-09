@@ -6,6 +6,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it("preserves structured stale human content identity without inferring it from error text", async () => {
+  const recovery = { code: "STALE_HUMAN_CONTENT_REVIEW_REQUIRED", nodeId: "publish-package", field: "output", effectiveVersionId: "manual-1", runRevision: 8 };
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ error: "复核人工稿", recovery }), { status: 409 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ error: "stale human output", recovery: { ...recovery, code: "UNRELATED" } }), { status: 409 })));
+  await expect(studioApi.regenerateStale("run-1")).rejects.toMatchObject({ status: 409, recovery });
+  await expect(studioApi.regenerateStale("run-1")).rejects.toMatchObject({ status: 409, recovery: undefined });
+});
+
 describe("source supplement client API", () => {
   it("posts candidate and opportunity urls with the trusted studio mutation header", async () => {
     const fetchMock = vi.fn()

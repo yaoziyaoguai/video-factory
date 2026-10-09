@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -110,6 +110,24 @@ const hailuoProvider: StudioProvider = {
 };
 
 describe("node production workspaces", () => {
+  it("prioritizes the current decision document while keeping its input disclosure available", async () => {
+    const output = { copy: { title: "当前发布标题", description: "当前发布正文", hashtags: [] } };
+    const node: StudioNode = { ...succeededNode, id: "publish-package", label: "发布文案与发布包", role: "发行编辑", output,
+      outputState: { ...succeededNode.outputState!, versions: [{ ...succeededNode.outputState!.versions[0]!, output }] } };
+    const props = { node, currentDelivery: true, runId: "current-document", runRevision: 1,
+      acceptedPlanDigest: TEST_PLAN_DIGEST, runStatus: "needs_human" as const, artifacts: [], busy: false,
+      onOverride: async () => undefined, onAuthorize: async () => undefined };
+    const { rerender } = render(<NodeWorkspace {...props} />);
+    expect(screen.getByText("当前发布正文")).toBeVisible();
+    const disclosure = screen.getByText("查看和调整这个角色收到的内容").closest("details")!;
+    expect(disclosure).not.toHaveAttribute("open");
+    await userEvent.click(screen.getByText("查看和调整这个角色收到的内容"));
+    expect(disclosure).toHaveAttribute("open");
+    rerender(<NodeWorkspace {...props} runRevision={2} />);
+    expect(disclosure).toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: "编辑输入" })).toBeEnabled();
+  });
+
   it("shows preserved planning drafts and their decisions when the latest attempt only registered diagnostics", async () => {
     const read = vi.spyOn(studioApi, "resourceJson");
     const output = { creativeReview: { activeStage: "script", stages: {
@@ -150,7 +168,7 @@ describe("node production workspaces", () => {
       artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined}
       onReviseDocument={revise} onAuditDocument={audit} />);
     expect(screen.getByRole("region", { name: "参考报告修订与审计" })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("button", { name: "审计当前版本" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: /审计当前版本（会调用模型）/ })).toBeEnabled());
     fireEvent.change(screen.getByRole("textbox", { name: "修订意见" }), { target: { value: "把景别变化说清楚。" } });
     fireEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
     await waitFor(() => expect(revise).toHaveBeenCalledWith("reference-grammar", {
@@ -1867,6 +1885,114 @@ describe("node production workspaces", () => {
 
     expect(await screen.findByText(/current/)).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/current", expect.any(Object));
+  });
+
+  it("preserves unsent revision feedback while manually editing and cancelling the current document", async () => {
+    vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ copy: { title: "当前文案", description: "完整正文", hashtags: [] } });
+    vi.spyOn(studioApi, "documentCommands").mockResolvedValue([]);
+    const revise = vi.fn(async () => undefined);
+    const audit = vi.fn(async () => undefined);
+    const output = { publishPackagePath: "/copy.json", contentReview: { status: "not_audited", summary: "本版未审", suggestions: [] } };
+    const node: StudioNode = { ...succeededNode, id: "publish-package", label: "发布文案", artifactIds: ["copy"], output,
+      outputState: { ...succeededNode.outputState!, effectiveVersionId: "copy-v1",
+        versions: [{ ...succeededNode.outputState!.versions[0]!, id: "copy-v1", artifactIds: ["copy"], output }] } };
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="edit-with-feedback" runRevision={2}
+      runStatus="needs_human" node={node} artifacts={[{ id: "copy", kind: "publish_package", contentType: "application/json", contentUrl: "/copy", createdAt: "now" }]}
+      busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined}
+      onReviseDocument={revise} onAuditDocument={audit} />);
+    await screen.findByText("当前文案");
+    const original = "尚未发送：保留窗边光影，结尾不要丢。";
+    fireEvent.change(screen.getByRole("textbox", { name: "修订意见" }), { target: { value: original } });
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    expect(screen.queryByRole("textbox", { name: "修订意见" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "审计当前版本（会调用模型）" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.getByRole("textbox", { name: "修订意见" })).toHaveValue(original);
+    expect(revise).not.toHaveBeenCalled();
+    expect(audit).not.toHaveBeenCalled();
+  });
+
+  it("keeps a document edit on its original version through a newer version and A-to-B-to-A", async () => {
+    const onOverride = vi.fn(async () => undefined);
+    vi.spyOn(studioApi, "resourceJson").mockImplementation(async url => ({ copy: { title: url === "/copy-a" ? "A标题" : "B标题", description: "完整文案", hashtags: [] } }));
+    const makeNode = (versionId: string, artifactId: string): StudioNode => ({ ...succeededNode, id: "publish-package", label: "发布文案", role: "发行编辑",
+      artifactIds: [artifactId], output: { publishPackagePath: "/copy.json" },
+      outputState: { generatedVersionId: "v1", effectiveVersionId: versionId, stale: false, versions: [{ ...succeededNode.outputState!.versions[0]!, id: versionId,
+        artifactIds: [artifactId], output: { publishPackagePath: "/copy.json" } }] } });
+    const artifacts = ["a", "b"].map(id => ({ id: `artifact-${id}`, kind: "publish_package", contentType: "application/json", contentUrl: `/copy-${id}`, createdAt: "2026-10-09T00:00:00Z" }));
+    const props = { acceptedPlanDigest: TEST_PLAN_DIGEST, runId: "run-document", runRevision: 2, runStatus: "needs_human" as const, artifacts, busy: false, onOverride, onAuthorize: async () => undefined };
+    const view = render(<NodeWorkspace {...props} node={makeNode("v1", "artifact-a")} />);
+    await screen.findByText("A标题");
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "未保存的标题" } });
+    view.rerender(<NodeWorkspace {...props} runRevision={3} node={makeNode("v2", "artifact-b")} />);
+    expect(screen.getByRole("textbox", { name: "标题" })).toHaveValue("未保存的标题");
+    expect(screen.getByRole("button", { name: "保存为人工版本" })).toBeDisabled();
+    view.rerender(<NodeWorkspace {...props} runRevision={4} node={makeNode("v3", "artifact-a")} />);
+    expect(screen.getByRole("button", { name: "保存为人工版本" })).toBeDisabled();
+    expect(screen.getByText(/当前交付已更新/)).toBeInTheDocument();
+    view.rerender(<NodeWorkspace {...props} runRevision={5} node={makeNode("v1", "artifact-a")} />);
+    expect(screen.getByRole("button", { name: "保存为人工版本" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "标题" })).toHaveValue("未保存的标题");
+    expect(onOverride).not.toHaveBeenCalled();
+  });
+
+  it("does not display a late or missing historical document as the current publication", async () => {
+    let resolveA!: (value: unknown) => void;
+    const resource = vi.spyOn(studioApi, "resourceJson").mockImplementation(url => url === "/a"
+      ? new Promise(resolve => { resolveA = resolve; }) : Promise.resolve({ copy: { title: "当前B", description: "B正文", hashtags: [] } }));
+    const makeNode = (id: string): StudioNode => ({ ...succeededNode, id: "publish-package", label: "发布文案", artifactIds: [id],
+      output: { publishPackagePath: "/copy.json" }, outputState: { ...succeededNode.outputState!, effectiveVersionId: id,
+        versions: [{ ...succeededNode.outputState!.versions[0]!, id, artifactIds: [id], output: { publishPackagePath: "/copy.json" } }] } });
+    const artifacts = ["a", "b"].map(id => ({ id, kind: "publish_package", contentType: "application/json", contentUrl: `/${id}`, createdAt: "2026-10-09T00:00:00Z" }));
+    const props = { acceptedPlanDigest: TEST_PLAN_DIGEST, runId: "run-document", runRevision: 2, runStatus: "needs_human" as const, artifacts, busy: false, onOverride: vi.fn(), onAuthorize: async () => undefined };
+    const view = render(<NodeWorkspace {...props} node={makeNode("a")} />);
+    view.rerender(<NodeWorkspace {...props} node={makeNode("b")} />);
+    await screen.findByText("当前B");
+    await act(async () => { resolveA({ copy: { title: "迟到A", description: "A正文", hashtags: [] } }); });
+    expect(screen.queryByText("迟到A")).not.toBeInTheDocument();
+    expect(screen.getByText("当前B")).toBeInTheDocument();
+    view.rerender(<NodeWorkspace {...props} node={makeNode("missing")} />);
+    await waitFor(() => expect(screen.queryByText("当前B")).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "编辑交付" })).not.toBeInTheDocument();
+    expect(resource).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("alert")).toHaveTextContent("当前版本的完整文档不可读取");
+  });
+
+  it("rereads only the current document after a read failure without dropping unsent revision feedback", async () => {
+    const read = vi.spyOn(studioApi, "resourceJson")
+      .mockResolvedValueOnce({ copy: { title: "原发布稿", description: "原正文", hashtags: [] } })
+      .mockRejectedValueOnce(new Error("暂时无法读取"))
+      .mockResolvedValueOnce({ copy: { title: "当前发布稿", description: "当前正文", hashtags: [] } });
+    vi.spyOn(studioApi, "documentCommands").mockResolvedValue([]);
+    const ready = vi.fn();
+    const revise = vi.fn();
+    const makeNode = (id: string): StudioNode => {
+      const output = { publishPackagePath: "/copy.json", contentReview: { status: "not_audited", summary: "本版未审", suggestions: [] } };
+      return { ...succeededNode, id: "publish-package", label: "发布文案", artifactIds: [id], output,
+        outputState: { ...succeededNode.outputState!, effectiveVersionId: id,
+          versions: [{ ...succeededNode.outputState!.versions[0]!, id, artifactIds: [id], output }] } };
+    };
+    const props = { acceptedPlanDigest: TEST_PLAN_DIGEST, runId: "run-read-recovery", runRevision: 2,
+      runStatus: "needs_human" as const, busy: false, onOverride: vi.fn(), onAuthorize: vi.fn(),
+      onReviseDocument: revise, onAuditDocument: vi.fn(), onDocumentReadinessChange: ready,
+      artifacts: ["a", "b"].map(id => ({ id, kind: "publish_package", contentType: "application/json", contentUrl: `/${id}`, createdAt: "2026-10-09T00:00:00Z" })) };
+    const view = render(<NodeWorkspace {...props} node={makeNode("a")} />);
+    await screen.findByText("原发布稿");
+    fireEvent.change(screen.getByRole("textbox", { name: "修订意见" }), { target: { value: "我的未发送意见" } });
+    view.rerender(<NodeWorkspace {...props} runRevision={3} node={makeNode("b")} />);
+    await screen.findByText(/详细内容读取失败/);
+    expect(screen.queryByText("原发布稿")).not.toBeInTheDocument();
+    expect(ready).toHaveBeenLastCalledWith("publish-package", "b", false);
+    expect(screen.getByRole("textbox", { name: "修订意见" })).toHaveValue("我的未发送意见");
+    await userEvent.click(screen.getByRole("button", { name: "重新读取当前文档" }));
+    await screen.findByText("当前发布稿");
+    expect(read).toHaveBeenLastCalledWith("/b", expect.any(AbortSignal));
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(ready).toHaveBeenLastCalledWith("publish-package", "b", true);
+    expect(screen.getByRole("textbox", { name: "修订意见" })).toHaveValue("我的未发送意见");
+    expect(screen.getByRole("button", { name: "发送修订意见" })).toBeDisabled();
+    expect(revise).not.toHaveBeenCalled();
   });
 
   it("requires confirmation before editing a terminal run and closes the modal with Escape", async () => {

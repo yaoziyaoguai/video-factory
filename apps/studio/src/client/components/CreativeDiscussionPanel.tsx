@@ -15,9 +15,11 @@ import {
   type CreativeDraftSessionBase,
 } from "../creative-draft-session.js";
 import { CreativeDraft, CreativeDraftReader } from "./CreativeDraftReader.js";
+import { CreativeDurationPanel, durationSecondsLabel } from "./CreativeDurationPanel.js";
 import { CharacterScriptEditor, isCharacterDocument } from "./CharacterScriptEditor.js";
 import type { StudioCreativeReviewCommandInput, StudioCreativeReviewCommandReceipt, StudioCreativeReviewSnapshot } from "../../shared/api.js";
 import { parseStudioCreativeReviewCommandInput } from "../../shared/api.js";
+import type { DurationAmendment } from "@video-factory/production-pipeline/executable-timeline";
 
 export { CreativeDraft } from "./CreativeDraftReader.js";
 
@@ -56,6 +58,8 @@ interface PendingRiskConfirm {
     runRevision: number;
     reviewRevision: number;
     draftSha256: string;
+    draftVersionId?: string;
+    briefSha256?: string;
     checkIdentity?: string;
     allowedActions: StudioCreativeReviewSnapshot["allowedActions"];
   };
@@ -106,9 +110,11 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
   // 待核原请求不接受新模型操作；文字仍可编辑，服务端证明的三类稿件决定另行核验。
   // 本机指针整理后仍以耐久记录为准，不能因刷新或独立手改就重新开放讨论。
   const hasUnresolvedOperation = pendingCommandId !== undefined || review.pendingConsultation !== undefined
-    || review.consultationOperations?.some(operation => operation.status === "unknown") === true;
+    || review.consultationOperations?.some(operation => operation.status === "running"
+      || operation.status === "unknown" && operation.command.action !== "audit_current") === true;
   const [hasUnsavedEdits, setHasUnsavedEdits] = useState(false);
-  useEffect(() => { onDraftDirtyChange?.(hasUnsavedEdits); }, [hasUnsavedEdits, onDraftDirtyChange]);
+  const [editingDuration, setEditingDuration] = useState(false);
+  useEffect(() => { onDraftDirtyChange?.(hasUnsavedEdits || editingDuration); }, [hasUnsavedEdits, editingDuration, onDraftDirtyChange]);
   useEffect(() => () => onDraftDirtyChange?.(false), [onDraftDirtyChange]);
   const [mobileTab, setMobileTab] = useState<"draft" | "discussion">("draft");
   const [storageBroken, setStorageBroken] = useState(false);
@@ -214,6 +220,13 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
   const auditIssueIdentity = `${review.runId}:${review.stage}:${purposeKey}:${review.draftVersionId ?? review.draftArtifactId}:${review.draftSha256}:${review.checkResult?.checkIdentity ?? "unreviewed"}`;
   const qualityAdvisories = review.qualityAdvisories ?? [];
   const needsStockConsent = review.stage === "director" && review.reviewPurpose !== "direction" && qualityAdvisories.length > 0;
+  const adoptionObject = review.reviewPurpose === "direction" ? "导演初稿" : review.reviewPurpose === "material_plan" ? "选材方案" : STAGE_LABEL[review.stage];
+  const currentAuditPending = review.consultationOperations?.some(operation => operation.command.action === "audit_current"
+    && (operation.status === "running" || operation.status === "unknown") && operation.command.stage === review.stage
+    && operation.command.baseDraftSha256 === review.draftSha256
+    && operation.command.baseDraftVersionId === review.draftVersionId) === true;
+  const scriptAdoptionLabel = review.stage === "script" && review.duration?.proposal
+    ? `采用此脚本 · 约${durationSecondsLabel(review.duration.proposal.totalSeconds)}秒${incompleteCheck ? "（审计未完成）" : !review.checkResult ? "（未审计）" : hasContentSuggestions ? "（保留审计建议）" : ""}` : undefined;
   const commandBase = useMemo(() => ({
     expectedRunRevision: review.runRevision,
     expectedReviewRevision: review.reviewRevision,
@@ -235,12 +248,13 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
   }
 
   useEffect(() => {
-    // 原结果查询期间父页面可能重挂面板；完成态也要从耐久证明同步，不能仅依赖旧实例回调。
-    // 此处只整理匹配的本机指针，不查询/发送请求，不把unknown当completed。
-    const completed = review.consultationOperations?.find(operation => operation.commandId === pendingCommandId && operation.status === "completed");
-    if (!completed) return;
-    try { releaseCompletedConsultation(completed.command); }
-    catch { setCompletionNotice("原请求已完成，但本机恢复记录尚未整理；请核对原操作，不需要重新生成。当前输入已保留。"); }
+    // 查询期间父页面可能重挂面板；已核终态从耐久证明同步，不能仅依赖旧实例回调。
+    // 失败/未受理也已核清，但不等于成功；只整理匹配指针，保留原文且不自动重发。
+    const settled = review.consultationOperations?.find(operation => operation.commandId === pendingCommandId
+      && (operation.status === "completed" || operation.status === "failed" || operation.status === "not_accepted"));
+    if (!settled) return;
+    try { releaseCompletedConsultation(settled.command); }
+    catch { setCompletionNotice("原请求已核清，但本机恢复记录尚未整理；请核对原操作，不需要重新生成。当前输入已保留。"); }
   }, [pendingCommandId, commandStorageKey, review.consultationOperations]);
 
   useEffect(() => {
@@ -307,7 +321,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
     // 重新核；其余新命令继续等待原命令核清，不能用本地指针冒充服务端证明。
     const pendingConsultation = review.pendingConsultation;
     const independentlyAllowed = pendingConsultation !== undefined && pendingConsultation.commandId === pending?.commandId
-      && (input.action === "edit_draft" || input.action === "confirm" || input.action === "return_to_stage")
+      && (input.action === "edit_draft" || input.action === "confirm" || input.action === "return_to_stage" || input.action === "update_duration")
       && pendingConsultation.allowedActions.includes(input.action) === true;
     if (pending && !independentlyAllowed && !sameCommandBody(pending, input)) {
       setError("上一条操作的结果尚未核清，不能用新操作覆盖它。请先核对上一条操作。");
@@ -331,11 +345,11 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
       if (receipt && receipt.commandId !== command.commandId) throw new Error("返回的操作编号不一致，原命令仍待核实。请核对原操作，不要重复发送。");
       if (canRetainIndependentAudit(command, receipt)) {
         retainIndependentAudit(command);
-        return;
+        return false;
       }
       if (receipt?.status === "unknown" || receipt?.status === "running") {
         setCompletionNotice("原操作结果仍未确定；原命令与输入已保留，请核对原请求，不要重复发送。原请求与费用保持待核。");
-        return;
+        return false;
       }
     } catch (caught) {
       if (caught instanceof Error && "commandCompleted" in caught && caught.commandCompleted === true) {
@@ -354,11 +368,12 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
     }
     if (!cleaned) {
       setCompletionNotice("操作已完成，本机恢复记录未清理；不需要重发。");
-      return;
+      return false;
     }
     if (clearMessage && currentStorageKey.current === sessionSlotKey && messageSequence.current === sentMessageSequence) {
       setMessage((current) => current === message ? "" : current);
     }
+    return true;
   }
 
   function retainIndependentAudit(command: StudioCreativeReviewCommandInput) {
@@ -491,8 +506,9 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
     sendMessage("discuss");
   }
 
-  function openConfirmRisk() {
+  function openConfirmRisk(durationAmendment?: DurationAmendment) {
     const lines = [
+      ...(durationAmendment ? ["本次将一并修改时长要求并采用当前稿；变更后的版本未重新审计，原审计意见仍保留。"] : []),
       ...(!review.checkResult ? ["本版尚未审计。继续表示采用未审稿，同时接受下列素材风险；不会自动补审。"] : []),
       ...(awaitingRepair ? ["独立复核对当前这一版提出了意见，还没有通过。"] : []),
       ...(incompleteCheck ? ["独立复核没有得到有效结论。这不是审查通过，也没有质量评分；你可以承担未完成复核的风险采用本版。"] : []),
@@ -512,6 +528,8 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
         runRevision: review.runRevision,
         reviewRevision: review.reviewRevision,
         draftSha256: review.draftSha256,
+        ...(review.draftVersionId ? { draftVersionId: review.draftVersionId } : {}),
+        ...(review.duration ? { briefSha256: review.duration.briefSha256 } : {}),
         ...(review.checkResult ? { checkIdentity: review.checkResult.checkIdentity } : {}),
         allowedActions: review.allowedActions,
       },
@@ -522,7 +540,8 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
         // 把界面上这一条复核的身份原样带回去：确认要指向人看到的意见，不能指向服务端
         // 此刻恰好记着的那一条。
         ...(review.checkResult ? { expectedCheckIdentity: review.checkResult.checkIdentity } : {}),
-        ...(!review.checkResult ? { acknowledgeUnaudited: true as const } : {}),
+        ...(!review.checkResult || durationAmendment ? { acknowledgeUnaudited: true as const } : {}),
+        ...(durationAmendment ? { durationAmendment } : {}),
         ...(awaitingRepair ? { acknowledgeRepair: true } : {}),
         ...(incompleteCheck ? { acknowledgeIncomplete: true as const } : {}),
         ...(needsStockConsent ? { acceptQualityFallback: true as const } : {}),
@@ -530,8 +549,23 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
     });
   }
 
+  async function confirmWithDuration(durationAmendment: DurationAmendment) {
+    if (busy || hasMissingEvidenceProvider || hasUnsavedEdits || !review.allowedActions.includes("confirm")
+      || !review.allowedActions.includes("update_duration")) return false;
+    if (needsStockConsent) {
+      openConfirmRisk(durationAmendment);
+      return false;
+    }
+    return submit({ action: "confirm", commandId: crypto.randomUUID(), ...commandBase, durationAmendment,
+      acknowledgeUnaudited: true,
+      ...(review.checkResult ? { expectedCheckIdentity: review.checkResult.checkIdentity } : {}),
+      ...(awaitingRepair ? { acknowledgeRepair: true as const } : {}),
+      ...(incompleteCheck ? { acknowledgeIncomplete: true as const } : {}),
+    });
+  }
+
   function confirmDraft() {
-    if (busy || hasMissingEvidenceProvider || hasUnsavedEdits || !review.allowedActions.includes("confirm")) return;
+    if (busy || hasMissingEvidenceProvider || hasUnsavedEdits || editingDuration || review.conflicts?.length || !review.allowedActions.includes("confirm")) return;
     if (needsStockConsent) {
       openConfirmRisk();
       return;
@@ -548,7 +582,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
   }
 
   function auditCurrent() {
-    if (busy || hasUnresolvedOperation || hasUnsavedEdits || !review.allowedActions.includes("audit_current")) return;
+    if (busy || hasUnresolvedOperation || currentAuditPending || hasUnsavedEdits || !review.allowedActions.includes("audit_current")) return;
     void submit({ action: "audit_current", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined);
   }
 
@@ -567,6 +601,8 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
         runRevision: review.runRevision,
         reviewRevision: review.reviewRevision,
         draftSha256: review.draftSha256,
+        ...(review.draftVersionId ? { draftVersionId: review.draftVersionId } : {}),
+        ...(review.duration ? { briefSha256: review.duration.briefSha256 } : {}),
         ...(review.checkResult ? { checkIdentity: review.checkResult.checkIdentity } : {}),
         allowedActions: review.allowedActions,
       },
@@ -590,6 +626,8 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
       && identity.runRevision === review.runRevision
       && identity.reviewRevision === review.reviewRevision
       && identity.draftSha256 === review.draftSha256
+      && identity.draftVersionId === review.draftVersionId
+      && identity.briefSha256 === review.duration?.briefSha256
       && (identity.checkIdentity ?? null) === (review.checkResult?.checkIdentity ?? null)
       && review.allowedActions.includes(pendingRisk.kind === "confirm" ? "confirm" : "return_to_stage");
     if (!stillCurrent) {
@@ -636,15 +674,18 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
         </details>
       </section> : null}
 
+      <CreativeDurationPanel key={`${review.runId}:${review.stage}:${purposeKey}`} review={review} busy={busy || hasUnsavedEdits}
+        onEditingChange={setEditingDuration} onAdopt={confirmWithDuration}
+        onSave={amendment => submit({ action: "update_duration", commandId: crypto.randomUUID(), ...commandBase, durationAmendment: amendment })} />
       <section className="creative-review-actions creative-decision-bar" id="creative-confirm-footer" aria-label="当前稿件决定">
         <div className="creative-confirm-context" tabIndex={-1}><strong>{hasUnsavedEdits ? "有未保存的手动修改" : hasMissingEvidenceProvider ? "先补齐素材安排，再决定采用" : review.reviewPurpose === "direction" ? "确认对象：当前导演初稿" : review.reviewPurpose === "material_plan" ? "确认对象：当前选材方案" : `确认对象：当前${STAGE_LABEL[review.stage]}`}</strong><small>{hasUnsavedEdits ? "先保存或放弃修改，再确认采用；不会提交编辑器里的未保存文字。" : hasMissingEvidenceProvider ? "这里只缺画面服务安排，不是审计建议在阻止采用。修订保存后，由你决定是否审计或采用。" : review.checkResult ? "采用不会重复审计当前稿，也不会授权购买素材；后续付费仍需单独确认。" : "本版尚未审计。你可主动审计，也可明确采用未审稿；后续付费仍需单独确认。"}</small></div>
         <div className="creative-decision-buttons">
-          <button type="button" className={`button ${hasMissingEvidenceProvider ? "button-secondary" : "button-primary"}`} disabled={busy || hasMissingEvidenceProvider || hasUnsavedEdits || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{hasMissingEvidenceProvider ? "补齐画面服务后再采用" : needsStockConsent ? "接受素材风险，先制作首版" : incompleteCheck ? "接受复核未完成，采用本版" : hasContentSuggestions ? "保留这些建议，仍采用" : !review.checkResult ? "采用本版（未审计）" : hasBlockingIssues ? "修改后重新检查" : review.reviewPurpose === "direction" ? "采用导演初稿，开始选材" : review.reviewPurpose === "material_plan" ? "采用选材方案，继续制作" : "确认当前方案，继续"}</button>
+          <button type="button" className={`button ${hasMissingEvidenceProvider ? "button-secondary" : "button-primary"}`} disabled={busy || hasMissingEvidenceProvider || hasUnsavedEdits || editingDuration || Boolean(review.conflicts?.length) || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{hasMissingEvidenceProvider ? "补齐画面服务后再采用" : scriptAdoptionLabel ?? (needsStockConsent ? "采用选材方案（接受素材风险）" : incompleteCheck ? `采用${adoptionObject}（复核未完成）` : hasContentSuggestions ? `采用${adoptionObject}（保留审计建议）` : !review.checkResult ? `采用${adoptionObject}（未审计）` : hasBlockingIssues ? "修改后重新检查" : review.reviewPurpose === "direction" ? "采用导演初稿，开始选材" : review.reviewPurpose === "material_plan" ? "采用选材方案，继续制作" : `采用当前${adoptionObject}，继续`)}</button>
           <button type="button" className={`button ${hasMissingEvidenceProvider ? "button-primary" : "button-secondary"}`} onClick={focusRevisionDiscussion}><MessageCircle aria-hidden="true" size={16} />提出修改</button>
         </div>
         <div className="creative-secondary-decisions">
-          <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || review.previousDraft === undefined || !review.allowedActions.includes("undo_draft")} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button>
-          <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || !review.allowedActions.includes("audit_current")} onClick={auditCurrent}>审计当前版本</button>
+          {review.previousDraft !== undefined ? <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || !review.allowedActions.includes("undo_draft")} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button> : null}
+          <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || currentAuditPending || hasUnsavedEdits || !review.allowedActions.includes("audit_current")} onClick={auditCurrent}>{review.checkResult ? "重新审计当前版本（会调用模型）" : "审计当前版本（会调用模型）"}</button>
         </div>
       </section>
 
@@ -717,9 +758,23 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
           </section> : null}
           {review.proposals.map((proposal) => <section className="creative-proposal" key={proposal.proposalId}>
             <header><strong>{review.scopeConflict?.proposalId === proposal.proposalId ? "越界新稿 · 仅供比较" : "备选方案"}</strong><small>{proposal.changeSummary.join("；") || "可与当前方案比较"}</small></header>
+            {proposal.duration ? <p>此备选约 {durationSecondsLabel(proposal.duration.totalSeconds)} 秒（{proposal.duration.totalFrames} 帧），共 {proposal.duration.scenes.length} 镜。</p>
+              : review.stage === "script" ? <p>此备选的逐镜时长暂不可核对；不能用参考目标代替。</p> : null}
+            {review.duration ? <p>备选仍受当前时长要求约束：{review.duration.commitment
+              ? [review.duration.commitment.minSeconds === undefined ? null : `至少 ${durationSecondsLabel(review.duration.commitment.minSeconds)} 秒`,
+                review.duration.commitment.maxSeconds === undefined ? null : `最多 ${durationSecondsLabel(review.duration.commitment.maxSeconds)} 秒`].filter(Boolean).join("，")
+              : "未设硬性范围"}。</p> : null}
             <CreativeDraft stage={review.stage} value={proposal.document} nativeAudio={nativeAudio} />
+            {proposal.conflicts?.length ? <div role="status">
+              <strong>这份草稿仍有待处理的冲突</strong>
+              <ul>{proposal.conflicts.map((conflict, index) => <li key={`${conflict.code}:${index}`}>{conflict.detail}</li>)}</ul>
+              <p>{proposal.conflicts.some(conflict => conflict.code === "execution_capability_conflict")
+                ? "设为当前草稿后，请调整分镜或素材安排；取消时长要求不能扩大素材能力。"
+                : "设为当前草稿后，可修改稿件，或修改、取消时长要求。"}</p>
+            </div> : null}
             {review.scopeConflict?.proposalId === proposal.proposalId ? <p>这份新稿尚未被采用；调整返工范围并重新报价前不能使用。</p>
-              : <button type="button" className="button button-secondary" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || !review.allowedActions.includes("adopt_proposal")} onClick={() => void submit({ action: "adopt_proposal", commandId: crypto.randomUUID(), ...commandBase, proposalId: proposal.proposalId }).catch(() => undefined)}>采用这个备选</button>}
+              : <><p>设为当前草稿只切换编辑对象，不会确认本阶段或开始后续制作。</p>
+                <button type="button" className="button button-secondary" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || editingDuration || !review.allowedActions.includes("adopt_proposal")} onClick={() => void submit({ action: "adopt_proposal", commandId: crypto.randomUUID(), ...commandBase, proposalId: proposal.proposalId }).catch(() => undefined)}>设为当前草稿</button></>}
           </section>)}
         </article>
 
@@ -754,6 +809,27 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
             followMessagesRef.current = true;
             setUnseenMessages(false);
           }}>有新消息，查看 ↓</button> : null}
+          {review.consultationOperations?.length ? <aside className="creative-storage-note" aria-label="原讨论与修改请求">
+            {review.consultationOperations.map(operation => {
+              const audit = operation.command.action === "audit_current";
+              const originalText = "message" in operation.command ? operation.command.message : undefined;
+              const alreadyShown = review.messages.some(entry => entry.role === "user" && entry.commandId === operation.commandId);
+              return <div key={operation.commandId}>
+                <strong>{audit ? "文字审计" : operation.command.action === "revise" ? "稿件修订" : "创作讨论"} · {STAGE_LABEL[operation.command.stage]}</strong>
+                <p>{operation.status === "running" || operation.status === "unknown" ? "已提交 · 结果待核"
+                  : operation.status === "failed" ? "执行失败 · 已核清" : operation.status === "not_accepted" ? "未受理" : "已完成"}</p>
+                {originalText && !alreadyShown ? <p className="creative-original-message">{originalText}</p> : null}
+                {operation.detail ? <p>{operation.detail}</p> : null}
+                {operation.status === "unknown" ? <p>原请求与费用仍待核；核对只查询原请求，不会另发一次。</p> : null}
+                {operation.status === "running" ? <p>正在处理原请求，请稍后查看；不会重复发送。</p> : null}
+                {operation.status === "failed" || operation.status === "not_accepted" ? <p>当前稿仍保留。你可修改意见后主动发起新的{audit ? "文字审计" : "讨论或修订"}（会调用模型），或处理已有稿件；费用以实际记录为准。</p> : null}
+                {operation.resultDisposition === "recorded_not_applied" ? <p>回复只归档于原稿；当前稿和决定未改变。</p> : null}
+                {operation.reply && operation.resultDisposition === "recorded_not_applied" ? <p>{operation.reply}</p> : null}
+                {operation.status === "unknown" ? <button type="button" className="button button-secondary" disabled={busy || reconcilingCommand}
+                  onClick={() => void reconcileConsultation(operation.command)}>{audit ? "核对原文字审计结果" : "核对原讨论结果"}</button> : null}
+              </div>;
+            })}
+          </aside> : null}
           <label className="creative-composer">
             <span>聊聊你的想法</span>
             <textarea ref={composerRef} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="例如：为什么这样开场？或者：把开头改得更直接一些。" />
@@ -773,14 +849,6 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
         </button>
       </div> : null}
       {completionNotice ? <p className="creative-storage-note" role="status">{completionNotice}</p> : null}
-      {review.consultationOperations?.length ? <aside className="creative-storage-note" aria-label="原讨论与修改请求">
-        {review.consultationOperations.map(operation => <div key={operation.commandId}>
-          <p>{operation.status === "unknown" ? "原讨论或修改请求仍待核，费用尚未核清；当前稿与原请求分开处理。" : "原请求已完成，回复只归档于原稿；当前稿和决定未改变。"}</p>
-          {operation.reply ? <p>{operation.reply}</p> : null}
-          {operation.status === "unknown" ? <button type="button" className="button button-secondary" disabled={busy || reconcilingCommand}
-            onClick={() => void reconcileConsultation(operation.command)}>核对原讨论结果</button> : null}
-        </div>)}
-      </aside> : null}
       {storageBroken ? <p className="creative-storage-note" role="status">本机草稿无法保存；当前页面内已保留，刷新或关闭可能丢失，请先复制。待发命令也需要浏览器存储恢复后才能发送。</p> : null}
       {review.returnTargets.length > 0 ? <aside className="creative-return-actions" aria-label="返回前期方案">
         <strong>需要调整更早的决定？</strong>

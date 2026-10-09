@@ -6,8 +6,9 @@ export class StudioNotFoundError extends Error {
 }
 
 export class StudioConflictError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly recovery?: StudioStaleHumanContentRecovery) {
     super(message);
     this.name = "StudioConflictError";
   }
 }
+import type { StudioStaleHumanContentRecovery } from "../shared/api.js";

@@ -718,6 +718,36 @@ describe("reference-grammar document commands", () => {
 });
 
 describe("publish-package document revision and current-version audit", () => {
+  for (const action of ["revise", "audit"] as const) it(`U03 projects a durably not-accepted ${action} distinctly without replaying it`, async () => {
+    const harness = await buildHarness(undefined);
+    const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));
+    await store.create(harness.run);
+    const bridge = await documentSocket(harness.workspaceRoot, {});
+    bridge.refuse();
+    const pipeline = documentPipeline(harness.workspaceRoot, harness.runRoot);
+    const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline,
+      listProviders: async () => [],
+      archiveStore: { list: async () => ({}), archive: async () => {}, restore: async () => {} },
+      documentCopyTools: new CodexPublishCopyWriter({ socketPath: bridge.socketPath, maxAttempts: 1 }),
+    });
+    const input = { commandId: `not-accepted-${action}`, ...baseRevisionInput, instruction: "保留未受理的原意见" };
+    const send = () => action === "revise"
+      ? studio.reviseNodeDocument(harness.run.id, "publish-package", input, "creator")
+      : studio.auditNodeDocumentCurrent(harness.run.id, "publish-package", input, "creator");
+    try {
+      const before = await store.load(harness.run.id);
+      await assert.rejects(send(), (error: unknown) => error instanceof CodexBridgeError && error.stage === "not_accepted");
+      const [command] = await studio.documentCommands(harness.run.id, "publish-package");
+      assert.equal(command!.state, "failed", "沿用耐久状态，不新增状态机");
+      assert.equal(command!.failureStage, "not_accepted");
+      assert.equal(command!.expectedVersionId, "publish-v1");
+      if (action === "revise") assert.equal(command!.instruction, input.instruction);
+      assert.deepEqual(await store.load(harness.run.id), before);
+      await assert.rejects(send());
+      assert.equal(bridge.posts.length, 1, "查询/重放原失败不能重新发送");
+    } finally { await bridge.close(); }
+  });
+
   it("revises publishing from the effective joint-planning script, never a historical or stale script", async () => {
     let calls = 0;
     const harness = await buildHarness(undefined);

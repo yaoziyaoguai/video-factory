@@ -13,6 +13,7 @@ export async function documentSocket(workspaceRoot: string, output: unknown) {
   const accepted = Promise.withResolvers<void>();
   const posts: Record<string, unknown>[] = [];
   let holdResponse = false;
+  let refuseSubmission = false;
   let queryMode: "complete" | "failure" | "running" | "unknown" | "conflict" = "complete";
   const broker: CodexBrokerBinding = { version: "video-factory/task-binding-v1", storeId: `vfs_store_${"b".repeat(32)}`,
     providerId: "controlled", modelId: "chosen-document-model" };
@@ -33,6 +34,14 @@ export async function documentSocket(workspaceRoot: string, output: unknown) {
         posts.push(envelope);
         const binding = taskBinding({ request: envelope, broker, kind: envelope.kind as CodexTaskKind,
           contractDigest: envelope.expectedContractDigest as string });
+        // Broker 明确未把任务交给模型；后续查询必须保留同一受理事实与绑定。
+        if (refuseSubmission) {
+          const result = { state: "not_accepted", requestId: envelope.requestId, binding,
+            status: 503, error: "controlled admission refused" };
+          await writeFile(resultFile, JSON.stringify(result));
+          respond(response, 503, result);
+          return;
+        }
         const result = { state: "completed_success", ok: true, requestId: envelope.requestId, binding, output: JSON.stringify(output),
           trace: { taskKind: envelope.kind, promptVersion: "document-test-v1", prompt: "controlled fixture",
             contractDigest: envelope.expectedContractDigest, providerId: broker.providerId, modelId: broker.modelId,
@@ -61,6 +70,7 @@ export async function documentSocket(workspaceRoot: string, output: unknown) {
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
   return { socketPath, posts, accepted: accepted.promise,
+    refuse: () => { refuseSubmission = true; },
     hold: () => { holdResponse = true; }, query: (mode: typeof queryMode) => { queryMode = mode; },
     close: async () => { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); },
   };

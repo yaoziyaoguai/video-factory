@@ -18,6 +18,7 @@ import {
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { NATIVE_AUDIO_PROVIDER, NATIVE_VIDEO_MODELS } from "@video-factory/production-pipeline/native-audio";
 import { defaultStudioDurationRange, DEFAULT_STUDIO_VOICE_DIRECTION, type StudioCreatorSettings, type StudioProductionInput, type StudioProvider, type StudioReferenceVideo, type StudioReworkDraft, type StudioReworkFinding } from "../../shared/api.js";
+import { parseDurationBounds, validateContentLedDurationIntent, type DurationBounds, type DurationIntent } from "@video-factory/production-pipeline/executable-timeline";
 import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { visualSourceCompatibilityIssue } from "../../shared/visual-source-compatibility.js";
@@ -134,8 +135,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [platform, setPlatform] = useState("douyin");
   const [presentationMode, setPresentationMode] = useState<NonNullable<StudioProductionInput["presentationMode"]>>("narration");
   const [durationSeconds, setDurationSeconds] = useState(24);
+  const [durationReferenceDraft, setDurationReferenceDraft] = useState<string | undefined>();
+  const legacyDuration = Boolean(initialValues?.rework && initialValues.durationPolicy === undefined);
   const [durationRange, setDurationRange] = useState<StudioProductionInput["durationRange"]>(() => (
-    initialValues?.durationRange ?? defaultStudioDurationRange(initialValues?.durationSeconds ?? 24)
+    initialValues?.durationRange ?? (legacyDuration ? defaultStudioDurationRange(initialValues?.durationSeconds ?? 24) : undefined)
   ));
   const [durationRangeDrafts, setDurationRangeDrafts] = useState<Partial<Record<"minSeconds" | "maxSeconds", string>>>({});
   const durationRangeTouched = useRef(false);
@@ -211,11 +214,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   }, [discardPromptOpen]);
   const [visualGroupOpen, setVisualGroupOpen] = useState(false);
   const formSnapshot = useMemo(() => JSON.stringify({
-    bindings, recipeId, directorProfileId, platform, presentationMode, audioMode, nativeVideoProviderId, durationSeconds, durationRange, durationRangeDrafts,
+    bindings, recipeId, directorProfileId, platform, presentationMode, audioMode, nativeVideoProviderId, durationSeconds, durationReferenceDraft, durationRange, durationRangeDrafts,
     assetProviderIds: [...assetProviderIds].sort(), modelSelections, voiceDirection, budgetIntention,
     semanticRankEnabled, acceptUnreviewedFirstCut, briefSummaryValues, visualBriefValues,
     referenceVideo: referenceVideo ? { ...referenceVideo } : null, rework,
-  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, directorProfileId, durationRange, durationRangeDrafts, durationSeconds, modelSelections, platform, presentationMode, audioMode, nativeVideoProviderId, recipeId, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection]);
+  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, directorProfileId, durationRange, durationRangeDrafts, durationSeconds, durationReferenceDraft, modelSelections, platform, presentationMode, audioMode, nativeVideoProviderId, recipeId, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection]);
   useLayoutEffect(() => {
     if (!open || !initialDataReady || !initializedForOpen.current) return;
     if (baselineSnapshotRef.current === null) baselineSnapshotRef.current = formSnapshot;
@@ -471,7 +474,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     setPlatform(isProductionPlatform(initialPlatform) ? initialPlatform : "");
     const initialDurationSeconds = initialValues?.durationSeconds ?? creatorSettings?.productionDefaults?.durationSeconds ?? 24;
     setDurationSeconds(initialDurationSeconds);
-    setDurationRange(initialValues?.durationRange ?? defaultStudioDurationRange(initialDurationSeconds));
+    setDurationReferenceDraft(undefined);
+    setDurationRange(initialValues?.durationRange ?? (legacyDuration ? defaultStudioDurationRange(initialDurationSeconds) : undefined));
+    setDurationRangeDrafts({});
     setAssetProviderIds(sourceIds);
     // 只有用户或入口明确指定的模型才属于本次覆盖。全局默认值由服务端按优先级解析。
     setModelSelections({ ...(initialValues?.models ?? {}) });
@@ -594,18 +599,23 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
 
   function changeSuggestedDuration(nextDurationSeconds: number) {
     setDurationSeconds(nextDurationSeconds);
-    if (durationRange && !durationRangeTouched.current) {
+    if (legacyDuration && durationRange && !durationRangeTouched.current) {
       setDurationRange(defaultStudioDurationRange(nextDurationSeconds));
     }
   }
 
   function changeDurationRange(field: "minSeconds" | "maxSeconds", value: number) {
-    if (!durationRange || !Number.isInteger(value)) return;
+    if (!durationRange || !Number.isFinite(value) || value <= 0) return;
+    if (!legacyDuration) {
+      setDurationRange(current => ({ ...current, [field]: value }));
+      return;
+    }
+    if (!Number.isInteger(value)) return;
     durationRangeTouched.current = true;
     const bounded = Math.min(180, Math.max(20, value));
     const next = field === "minSeconds"
-      ? { minSeconds: Math.min(bounded, durationRange.maxSeconds), maxSeconds: durationRange.maxSeconds }
-      : { minSeconds: durationRange.minSeconds, maxSeconds: Math.max(bounded, durationRange.minSeconds) };
+      ? { minSeconds: Math.min(bounded, durationRange.maxSeconds!), maxSeconds: durationRange.maxSeconds! }
+      : { minSeconds: durationRange.minSeconds!, maxSeconds: Math.max(bounded, durationRange.minSeconds!) };
     setDurationRange(next);
     setDurationSeconds((current) => Math.min(next.maxSeconds, Math.max(next.minSeconds, current)));
   }
@@ -614,12 +624,21 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   // 离开输入框时才校验并提交（清空或非整数则还原为当前值）。
   function commitDurationDraft(field: "minSeconds" | "maxSeconds") {
     const draft = durationRangeDrafts[field];
+    if (!legacyDuration && draft !== undefined) {
+      if (draft.trim() === "") {
+        setDurationRange(current => { const next: DurationBounds = { ...current }; delete next[field]; return next; });
+      } else if (Number.isFinite(Number(draft)) && Number(draft) > 0) {
+        changeDurationRange(field, Number(draft));
+      } else {
+        return; // 保留无效输入供用户修正，不能静默改成另一个承诺。
+      }
+    }
     setDurationRangeDrafts((current) => {
       if (!(field in current)) return current;
       const { [field]: _removed, ...rest } = current;
       return rest;
     });
-    if (draft === undefined || draft.trim() === "" || !Number.isInteger(Number(draft))) return;
+    if (!legacyDuration || draft === undefined || draft.trim() === "" || !Number.isInteger(Number(draft))) return;
     changeDurationRange(field, Number(draft));
   }
 
@@ -727,6 +746,21 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         setFocusInvalidBudget(true);
         throw new Error("预算意向请输入 0 到 100000 元的有效金额，或留空；这不是付款授权。");
       }
+      const submittedRange = durationRange === undefined ? undefined : { ...durationRange };
+      if (!legacyDuration && submittedRange) {
+        for (const field of ["minSeconds", "maxSeconds"] as const) {
+          const raw = durationRangeDrafts[field];
+          if (raw === undefined) continue;
+          if (raw.trim() === "") delete submittedRange[field];
+          else submittedRange[field] = Number(raw);
+        }
+      }
+      const duration: DurationIntent = legacyDuration ? {
+        durationSeconds, durationRange: { minSeconds: submittedRange!.minSeconds!, maxSeconds: submittedRange!.maxSeconds! },
+      } : { durationPolicy: "content-led-v1",
+        durationSeconds: durationReferenceDraft === undefined ? durationSeconds : durationReferenceDraft.trim() === "" ? 24 : Number(durationReferenceDraft),
+        ...(submittedRange ? { durationRange: parseDurationBounds(submittedRange)! } : {}) };
+      if (duration.durationPolicy === "content-led-v1") validateContentLedDurationIntent(duration);
       await onSubmit({
         protocolVersion: "video-factory/brief-v1",
         presentationMode,
@@ -734,8 +768,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         angle: requiredString(data, "angle"),
         audience: requiredString(data, "audience"),
         nicheSlug: initialValues?.nicheSlug ?? topicSlug(requiredString(data, "title")),
-        durationSeconds,
-        ...(durationRange ? { durationRange } : {}),
+        ...duration,
         platform,
         reviewMode: "manual",
         runPurpose: initialValues?.runPurpose ?? "production",
@@ -986,26 +1019,39 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 </label> : null}
                 <label className="field field-compact">
                   <span>建议时长</span>
-                  <select name="durationSeconds" value={String(durationSeconds)} onChange={(event) => changeSuggestedDuration(Number(event.target.value))}>
+                  {legacyDuration ? <select aria-label="建议时长" name="durationSeconds" value={String(durationSeconds)} onChange={(event) => changeSuggestedDuration(Number(event.target.value))}>
                     {![20, 24, 30, 36, 40, 42, 45, 60].includes(durationSeconds) ? <option value={durationSeconds}>{durationSeconds} 秒</option> : null}
                     {[20, 24, 30, 36, 40, 42, 45, 60]
                       .map((seconds) => <option key={seconds} value={seconds}>{seconds} 秒</option>)}
-                  </select>
+                  </select> : <input aria-label="建议时长" name="durationSeconds" type="number" step="any"
+                    value={durationReferenceDraft ?? durationSeconds}
+                    onChange={event => setDurationReferenceDraft(event.target.value)}
+                    onBlur={() => {
+                      if (durationReferenceDraft === undefined) return;
+                      const value = durationReferenceDraft.trim() === "" ? 24 : Number(durationReferenceDraft);
+                      if (Number.isFinite(value) && value > 0) { setDurationSeconds(value); setDurationReferenceDraft(undefined); }
+                    }} />}
+                  <small>{legacyDuration ? "沿用旧版时长约束。" : "仅作参考；脚本会给出具体总长供你确认，费用待方案核价。"}</small>
                 </label>
-                {durationRange ? <details className="brief-extra-options duration-range-options">
-                  <summary>时长范围 <span>{durationRange.minSeconds}–{durationRange.maxSeconds} 秒</span></summary>
+                {!legacyDuration ? <label className="field field-compact">
+                  <span><input aria-label="必须在此范围内" type="checkbox" checked={durationRange !== undefined}
+                    onChange={event => { setDurationRange(event.target.checked ? {} : undefined); setDurationRangeDrafts({}); }} />必须在此范围内</span>
+                  <small>可只填一端；不勾选就不限制总长，由你在脚本阶段决定。</small>
+                </label> : null}
+                {durationRange ? <details className="brief-extra-options duration-range-options" open={!legacyDuration}>
+                  <summary>{legacyDuration ? "沿用旧版时长约束" : "明确时长承诺"} <span>{durationRange.minSeconds === undefined ? "无下限" : `至少 ${durationRange.minSeconds} 秒`} · {durationRange.maxSeconds === undefined ? "无上限" : `最多 ${durationRange.maxSeconds} 秒`}</span></summary>
                   <div className="brief-extra-fields">
                   <label className="field field-compact">
                     <span>最短时长</span>
-                    <input type="number" min={20} max={durationRange.maxSeconds} step={1}
-                      value={durationRangeDrafts.minSeconds ?? durationRange.minSeconds}
+                    <input type="number" min={legacyDuration ? 20 : undefined} max={legacyDuration ? durationRange.maxSeconds : undefined} step={legacyDuration ? 1 : "any"}
+                      value={durationRangeDrafts.minSeconds ?? durationRange.minSeconds ?? ""}
                       onChange={(event) => setDurationRangeDrafts((current) => ({ ...current, minSeconds: event.target.value }))}
                       onBlur={() => commitDurationDraft("minSeconds")} />
                   </label>
                   <label className="field field-compact">
                     <span>最长时长</span>
-                    <input type="number" min={durationRange.minSeconds} max={180} step={1}
-                      value={durationRangeDrafts.maxSeconds ?? durationRange.maxSeconds}
+                    <input type="number" min={legacyDuration ? durationRange.minSeconds : undefined} max={legacyDuration ? 180 : undefined} step={legacyDuration ? 1 : "any"}
+                      value={durationRangeDrafts.maxSeconds ?? durationRange.maxSeconds ?? ""}
                       onChange={(event) => setDurationRangeDrafts((current) => ({ ...current, maxSeconds: event.target.value }))}
                       onBlur={() => commitDurationDraft("maxSeconds")} />
                   </label>

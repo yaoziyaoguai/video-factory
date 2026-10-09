@@ -106,7 +106,7 @@ describe("creative draft two-tab recovery", () => {
     expect(screen.getByText(/旧稿不能覆盖新稿/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存修订" })).toBeDisabled();
     expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue("A的意见文字");
-    expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "采用脚本（未审计）" })).toBeDisabled();
   });
 
   it("keeps tab A's words when tab B abandons its own local edit", async () => {

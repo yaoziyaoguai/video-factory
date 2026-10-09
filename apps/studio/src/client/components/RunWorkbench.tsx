@@ -1,5 +1,5 @@
 import { Activity, AlertTriangle, Check, Clock3, Download, Pause, Play, RotateCcw, Send, X, XCircle } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { StudioCostRunDetail, StudioDecisionInput, StudioNarrationRevisionInput, StudioSceneResourceRevisionInput, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioPaidNodeSummary, StudioPaidReconciliationInput, StudioProvider, StudioRunDetail, StudioSceneRevisionInput, StudioSpendAuthorizationInput, StudioSpendRejectionInput, StudioVisualReinspectionInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { initialFilmArrival, nextFilmArrival } from "../film-arrival.js";
@@ -15,6 +15,8 @@ import { NarrationTimingEditor, type NarrationTimingToolSummary } from "./Narrat
 import { decisionConsequenceView } from "./decision-consequence.js";
 import { studioApi } from "../api.js";
 import { publishPackageDownloadFilename, videoDownloadFilename } from "../download-filename.js";
+import { parseDurationAmendment, type DurationAmendment } from "@video-factory/production-pipeline/executable-timeline";
+import { durationSecondsLabel } from "./CreativeDurationPanel.js";
 
 export function currentSubtitlePreview(run: StudioRunDetail) {
   const voice = run.nodes.find(node => node.id === "voice");
@@ -97,6 +99,11 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   const [replanningVoice, setReplanningVoice] = useState(false);
   const [voiceDurationSeconds, setVoiceDurationSeconds] = useState("");
   const [voiceScenePosition, setVoiceScenePosition] = useState(0);
+  const [voiceIntentSnapshot, setVoiceIntentSnapshot] = useState<StudioRunDetail["durationIntent"]>();
+  const [voicePlanSnapshot, setVoicePlanSnapshot] = useState<StudioRunDetail["voiceTimingPlan"]>();
+  const [voiceCommitmentAction, setVoiceCommitmentAction] = useState("keep");
+  const [voiceMinSeconds, setVoiceMinSeconds] = useState("");
+  const [voiceMaxSeconds, setVoiceMaxSeconds] = useState("");
   const [hasPendingPlanningConfiguration, setHasPendingPlanningConfiguration] = useState(false);
   const [decisionSnapshot, setDecisionSnapshot] = useState<Pick<StudioDecisionInput, "expectedRunRevision" | "interventionId" | "reviewEvidenceId" | "commandId"> & {
     acceptIncomplete?: true;
@@ -126,6 +133,11 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   };
   const voiceTimingDialogRef = useDialogFocus<HTMLElement>(replanningVoice, closeVoiceTimingDecision, decisionPending);
   const readOnly = run.continuation?.supported === false;
+  const [readableDocument, setReadableDocument] = useState<{ runId: string; nodeId: string; versionId: string; ready: boolean }>();
+  const onDocumentReadinessChange = useCallback((nodeId: string, versionId: string, ready: boolean) => {
+    setReadableDocument(previous => previous?.runId === run.id && previous.nodeId === nodeId && previous.versionId === versionId && previous.ready === ready
+      ? previous : { runId: run.id, nodeId, versionId, ready });
+  }, [run.id]);
   const video = run.artifacts.find((artifact) => artifact.id === run.videoArtifactId);
   // 下载名始终绑定 run.videoArtifactId 选中的这份产物，不取数组最后一个。
   const videoDownloadName = video ? videoDownloadFilename(run.title, video.id) : undefined;
@@ -196,7 +208,8 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   // 本片来源影响规划，不能等素材节点有产物才出现；始终共用一个编辑会话。
   const assetConfigurationNode = run.nodes.find(node => node.id === "assets" && node.executionConfiguration);
   const activeSpendNode = readOnly ? undefined : creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
-  const currentArtifactNode = !video?.contentUrl && !creativeDiscussion && run.activeIntervention?.kind !== "creative_review"
+  const decidingDocument = ["publish-package", "reference-grammar"].includes(run.activeIntervention?.nodeId ?? "");
+  const currentArtifactNode = (!video?.contentUrl || decidingDocument) && !creativeDiscussion && run.activeIntervention?.kind !== "creative_review"
     ? creatorNodes.find((node) => node.id === run.activeIntervention?.nodeId && node.id !== activeSpendNode?.id)
     : undefined;
   const remainingCreatorNodes = creatorNodes.filter((node) => node.id !== activeSpendNode?.id && node.id !== currentArtifactNode?.id);
@@ -242,6 +255,27 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   const selectedVoiceCut = voiceTiming?.cuts?.find((cut) => cut.scenePosition === voiceScenePosition);
   const voiceMinimum = voiceTiming?.groupId ? (selectedVoiceCut ? selectedVoiceCut.frameCount / 30
     + voiceTiming.requiredSeconds - voiceTiming.plannedSeconds : Infinity) : voiceTiming?.requiredSeconds ?? Infinity;
+  const voiceContentLed = voiceIntentSnapshot?.policy === "content-led-v1";
+  const voiceTimingStale = Boolean(replanningVoice && (!decisionSnapshot
+    || decisionSnapshot.expectedRunRevision !== run.revision || decisionSnapshot.interventionId !== run.activeIntervention?.id
+    || voiceIntentSnapshot?.briefSha256 !== run.durationIntent?.briefSha256
+    || voicePlanSnapshot?.versionId !== run.voiceTimingPlan?.versionId
+    || voicePlanSnapshot?.planSha256 !== run.voiceTimingPlan?.planSha256));
+  const voiceOriginalCut = voicePlanSnapshot?.cuts.find(cut => cut.scenePosition === voiceScenePosition);
+  const voiceRequestedFrames = Math.ceil(Number(voiceDurationSeconds) * 30 - 1e-6);
+  const voiceProposedTotalFrames = voicePlanSnapshot && voiceOriginalCut && Number.isSafeInteger(voiceRequestedFrames) && voiceRequestedFrames > 0
+    ? voicePlanSnapshot.totalFrames - voiceOriginalCut.frameCount + voiceRequestedFrames : undefined;
+  let voiceAmendment: DurationAmendment | undefined;
+  let voiceAmendmentError: string | undefined;
+  if (replanningVoice && voiceContentLed && voiceCommitmentAction !== "keep") {
+    try {
+      voiceAmendment = parseDurationAmendment({ expectedBriefSha256: voiceIntentSnapshot.briefSha256,
+        range: voiceCommitmentAction === "clear" ? null : {
+          ...(voiceMinSeconds.trim() ? { minSeconds: Number(voiceMinSeconds) } : {}),
+          ...(voiceMaxSeconds.trim() ? { maxSeconds: Number(voiceMaxSeconds) } : {}),
+        } });
+    } catch { voiceAmendmentError = "请填写至少一个可执行的正数边界；留空的一端不会被自动补齐。"; }
+  }
   const visualReviewRequiresRevision = visualReview?.recommendation === "revise" || visualReview?.recommendation === "reject";
   const singleVisualReview = visualReview?.mode === "single";
   // 停下来的这一步的独立复核进度。SSE 载荷里没有它，由 preferRunSnapshot 从上一帧补回来，
@@ -257,8 +291,11 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
     : undefined;
   const contentDecisionUnaudited = Boolean(contentDecisionNode && (!contentDecisionReview || contentDecisionReview.status === "not_audited"));
   const contentDecisionHasSuggestions = Boolean(contentDecisionReview?.suggestions.length);
-  const contentDecisionActionLabel = contentDecisionUnaudited ? "采用本版（未审计），继续"
-    : contentDecisionHasSuggestions ? "保留建议，采用当前稿" : "采用当前稿，继续";
+  const contentDecisionObject = waitingNodeId === "reference-grammar" ? "参考报告" : "发布文案";
+  const contentDecisionActionLabel = contentDecisionUnaudited ? `采用${contentDecisionObject}（未审计），继续`
+    : contentDecisionHasSuggestions ? `采用${contentDecisionObject}（保留审计建议）` : `采用当前${contentDecisionObject}，继续`;
+  const contentDecisionReady = !contentDecisionNode || Boolean(readableDocument?.ready && readableDocument.runId === run.id
+    && readableDocument.nodeId === contentDecisionNode.id && readableDocument.versionId === contentDecisionVersion?.id);
   const waitingNode = waitingNodeId ? run.nodes.find((node) => node.id === waitingNodeId) : undefined;
   const waitingNodeProgress = waitingNode?.agentLoopProgress;
   const waitingAuditHistorical = waitingNode?.status !== "running" && waitingNode?.outputState?.versions.find(
@@ -269,7 +306,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   // 其它停点（素材预检、配音等）不携带无关的成片证据，与服务端分派保持同一合同。
   const renderedReviewStop = ["visual-review", "final-review", "publish-package"]
     .includes(run.activeIntervention?.nodeId ?? "");
-  const reviewItems = renderedReviewStop ? visualReview?.reviewItems ?? [] : [];
+  const reviewItems = ["visual-review", "final-review"].includes(waitingNodeId ?? "") ? visualReview?.reviewItems ?? [] : [];
   const reviewDraftBasis = JSON.stringify([run.id, run.activeIntervention?.id, run.videoArtifactId, visualReview?.evidenceId, reviewItems,
     run.nodes.filter(node => ["voice", "render", "visual-review"].includes(node.id)).map(node =>
       [node.id, node.outputState?.effectiveVersionId, node.outputState?.stale, node.executionReceipt?.requestId, node.output])]);
@@ -288,6 +325,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   const unexplainedReviewItems = reviewItems.filter((item) => (
     item.itemKey && reviewDecisions[item.itemKey]?.decision === "reject" && !reviewDecisions[item.itemKey]?.reason.trim()
   ));
+  const disposedReviewCount = reviewItems.length - undisposedReviewItems.length - unexplainedReviewItems.length;
   const setReviewDecision = (itemKey: string, decision: "accept" | "reject" | "accept_risk") => {
     reviewEditGeneration.current++;
     setReviewDraft({ basis: reviewDraftBasis, values: { ...reviewDecisions, [itemKey]: { decision, reason: reviewDecisions[itemKey]?.reason ?? "" } } });
@@ -395,6 +433,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
     readOnly={readOnly}
     {...(run.optionalReviewUncertaintySafe ? { optionalReviewUncertaintySafe: true as const } : {})}
     currentDelivery={node.id === currentArtifactNode?.id}
+    {...(node.id === currentArtifactNode?.id ? { onDocumentReadinessChange } : {})}
     hideExecutionConfiguration={node.id === assetConfigurationNode?.id}
     {...(node.id === "creative-planning" && run.planningStages ? { planningStages: run.planningStages } : {})}
     {...(node.id === "creative-planning" ? { onPendingPlanningConfigurationChange: setHasPendingPlanningConfiguration } : {})}
@@ -463,6 +502,11 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
     });
     setVoiceScenePosition(voiceTiming.groupId ? 0 : voiceTiming.scenePosition);
     setVoiceDurationSeconds(voiceTiming.groupId ? "" : String(voiceTiming.requiredSeconds));
+    setVoiceIntentSnapshot(run.durationIntent);
+    setVoicePlanSnapshot(run.voiceTimingPlan);
+    setVoiceCommitmentAction("keep");
+    setVoiceMinSeconds("");
+    setVoiceMaxSeconds("");
     setReplanningVoice(true);
   };
 
@@ -470,8 +514,9 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
     <strong>{run.status === "succeeded" ? "作品已完成，原审片事实独立保留" : "原审计请求独立保留"}</strong>
     {run.optionalReviewTasks.map(task => <div key={`${task.nodeId}:${task.purpose}:${task.operationId}`}>
       <p>{task.summary}</p>
-      <p>{task.purpose === "creative_audit" ? "文字审计" : task.purpose === "audio_review" ? "声音审片" : "视觉审片"}：{task.requestState === "unknown" ? "结果与费用仍待核" : task.requestState === "settled" ? "原任务已结束" : "未提交或未受理"}</p>
-      {onQueryOriginalTextTask ? <button type="button" className="button button-secondary" disabled={nodeMutationPending}
+      <p>{task.purpose === "creative_audit" ? "文字审计" : task.purpose === "audio_review" ? "声音审片" : "视觉审片"}：{task.requestState === "unknown" ? "结果与费用仍待核" : task.requestState === "settled" ? "原任务已结束" : task.requestState === "not_accepted" ? "原请求未受理" : "未登记可查询的原请求"}</p>
+      {!task.requestId ? <p>没有可供查询的原请求编号；不代表没有发生调用或费用。已保存成果与原操作记录仍保留。</p> : null}
+      {onQueryOriginalTextTask && task.requestId ? <button type="button" className="button button-secondary" disabled={nodeMutationPending}
         onClick={() => void onQueryOriginalTextTask({ nodeId: task.nodeId, purpose: task.purpose, operationId: task.operationId })}>
         查询原{task.purpose === "creative_audit" ? "文字审计" : task.purpose === "audio_review" ? "声音审片" : "视觉审片"}
       </button> : null}
@@ -582,8 +627,12 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
 
       {!video?.contentUrl ? originalReviewRecords : null}
 
-      {showReviewSurface ? <div className={`review-layout${!video?.contentUrl && !currentArtifactNode ? " review-layout-no-media" : ""}`}>
-        {video?.contentUrl ? <section className="video-stage" aria-labelledby="preview-title" data-tour="run-preview">
+      {showReviewSurface ? <div className={`review-layout${decidingDocument ? " review-layout-document" : ""}${!video?.contentUrl && !currentArtifactNode ? " review-layout-no-media" : ""}`}>
+        {currentArtifactNode ? <section className="current-artifact-surface" aria-label="当前步骤产物">
+          <header className="section-heading"><div><h2>{runStepLabel(run, currentArtifactNode.id)}</h2><p>{decidingDocument ? "先核对当前完整内容；采用只确认这份文字，不会重新签署成片终审。" : "当前已保留的产物与设置。核对后再决定是否进入下一步。"}</p></div></header>
+          {renderNodeWorkspace(currentArtifactNode)}
+        </section> : null}
+        {video?.contentUrl ? <section key="current-video" className="video-stage" aria-labelledby="preview-title" data-tour="run-preview">
           <div className="section-heading stage-heading">
             <div><p className="eyebrow">最终画面</p><h2 id="preview-title">成片预览</h2></div>
             <div className="video-stage-actions">
@@ -622,10 +671,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
             {videoIdentity && filmRevealIdentity === videoIdentity ? <div className="film-reveal-curtain" aria-hidden="true" onAnimationEnd={() => setFilmRevealIdentity((current) => current === videoIdentity ? undefined : current)} /> : null}
           </div>
           <p className="preview-provenance">当前成片 · {new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(video.createdAt))} 生成。先观看实际内容，再结合复核意见判断。</p>
-          </section> : currentArtifactNode ? <section className="current-artifact-surface" aria-label="当前步骤产物">
-          <header className="section-heading"><div><h2>{runStepLabel(run, currentArtifactNode.id)}</h2><p>当前已保留的产物与设置。核对后再决定是否进入下一步。</p></div></header>
-          {renderNodeWorkspace(currentArtifactNode)}
-        </section> : null}
+          </section> : null}
 
         <aside className="review-panel" aria-label="审片与产物" data-tour="run-review">
           {run.creativeSummary ? <details className="creative-summary run-creative-summary" role="region" aria-label="创作目标摘要">
@@ -648,29 +694,22 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                 : "审片结果不完整，不能按完整双审处理"}</small></header>
             <div className="merged-review-summary">
               <span>视觉结论 · {visualReviewRecommendationLabel(visualReview.recommendation)}</span>
-              {(() => {
-                const { excerpt, truncated } = reviewSummaryExcerpt(visualReview.summary);
-                return <>
-                  <p>{excerpt}{truncated ? <small>（原文节选）</small> : null}</p>
-                  {truncated ? <details className="review-full-summary">
-                    <summary>查看完整结论原文</summary>
-                    <p>{creatorFacingTechnicalText(visualReview.summary)}</p>
-                  </details> : null}
-                </>;
-              })()}
+              <details className="review-full-summary">
+                <summary>查看完整结论原文</summary>
+                <p>{creatorFacingTechnicalText(visualReview.summary)}</p>
+              </details>
             </div>
             {flawedReviewBranches.length > 0 ? <p className="review-audit-caveat" role="note">
               <strong>有 {flawedReviewBranches.length} 份审片报告未通过报告质量复核</strong>
               <span>{flawedReviewBranches.map((branch) => `${reviewProviderLabel(branch.providerId, providers)} · ${catalogModelLabel(providers, branch.modelId) ?? branch.modelId}`).join("、")}。需要重点核对的是报告的依据，不等于作品已被否决。请结合成片判断各条意见；发布仍需满足页面列出的必要条件。</span>
             </p> : null}
             <div className="independent-review-list">
-              {visualReview.independentReviews.map((review) => {
-                const branch = reviewSummaryExcerpt(review.summary);
-                return <article key={`${review.providerId}:${review.modelId}`}>
+              {visualReview.independentReviews.map((review, index) => {
+                return <article key={`${review.providerId}:${review.modelId}:${index}`}>
                 <header><strong>{reviewProviderLabel(review.providerId, providers)}</strong><span>{visualReviewRecommendationLabel(review.recommendation)}</span></header>
                 <small>{catalogModelLabel(providers, review.modelId) ?? review.modelId}{review.score !== undefined ? ` · ${review.score} 分` : ""}{` · ${review.findingCount} 项问题`}{review.auditVerdict === "repair" ? " · 独立审计未通过" : ""}</small>
-                <p>{branch.excerpt}{branch.truncated ? <small>（原文节选）</small> : null}</p>
-                {branch.truncated ? <details className="review-full-summary">
+                {/* 单审的分支就是上方完整报告；多审各有独立来源，不能按正文相同合并。 */}
+                {!singleVisualReview ? <details className="review-full-summary">
                   <summary>查看这份意见的完整原文</summary>
                   <p>{creatorFacingTechnicalText(review.summary)}</p>
                 </details> : null}
@@ -787,7 +826,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               <p>{creatorFacingTechnicalText(run.activeIntervention.reason)}</p>
               {waitingNodeProgress ? <div className={`agent-loop-progress is-stacked is-${waitingNodeProgress.phase}`} role="status">
                 <strong>{agentLoopPhaseLabel(waitingNodeProgress, waitingAuditHistorical)}</strong>
-                {waitingNodeProgress.latestAudit ? <>
+                {waitingNodeProgress.latestAudit && contentDecisionReview ? <span>{waitingAuditHistorical ? "修改前复核" : "独立复核"} {waitingNodeProgress.latestAudit.score} 分；完整原文见对应版本的审计记录。</span> : waitingNodeProgress.latestAudit ? <>
                   <span>{waitingAuditHistorical ? "修改前复核" : "独立复核"} {waitingNodeProgress.latestAudit.score} 分：{waitingNodeProgress.latestAudit.summary}</span>
                   {waitingNodeProgress.latestAudit.issues?.length ? <ul className="agent-audit-issues">
                     {waitingNodeProgress.latestAudit.issues.map((issue, index) => <li key={`${issue.criterion}:${index}`}>
@@ -803,7 +842,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               </div> : null}
               {visualReviewRequiresRevision && visualReview ? <div className="agent-review-decision">
                 <strong>视觉审片建议修改后再审</strong>
-                <p>{creatorFacingTechnicalText(visualReview.summary)}</p>
+                <p>完整结论保留在上方审片报告中。先核对当前成片，再决定如何处理下列意见。</p>
                 <div className="agent-review-facts">
                   {visualReview.lowestScores.map((score) => <span key={score.key}>{score.label} <strong>{score.value}</strong></span>)}
                   <span>模型判定存在问题：<strong>{visualReview.findingCount}</strong> 项</span>
@@ -858,6 +897,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                     : "仍需处理。放行当前步骤不会跳过它，请按该步骤的提示继续。"}</span>
                 {nextGateNode ? <button className="button button-ghost" type="button" onClick={() => revealNodeWorkspace(nextGateNode.id)}>{nextGateNode.id === nextPipelineNode.id ? "去配置" : "提前配置后续步骤"}「{stepNameFor(nextGateNode, nextGateNode.label)}」</button> : null}
               </div> : null}
+              {contentDecisionNode && !contentDecisionReady ? <p className="node-document-state" role="status">请先读取并核对当前完整{contentDecisionObject}；若正在编辑，请保存或取消编辑后再采用。</p> : null}
               <div className="decision-actions">
                 {boundaryGate ? <>
                   {/* 尊重 runner 实际接受的闸门：options 里没有的动作不发按钮，否则按钮会与
@@ -866,8 +906,9 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                     <button
                       className="button button-primary"
                       type="button"
-                      disabled={decisionPending}
+                      disabled={decisionPending || !contentDecisionReady}
                       onClick={() => {
+                        if (!contentDecisionReady) return;
                         if (contentDecisionNode && reviewItems.length === 0) {
                           const snapshot = decisionSnapshotFor("approve");
                           if (snapshot) void onDecision({ action: "approve", ...snapshot });
@@ -975,7 +1016,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               {hasPendingPlanningConfiguration && (run.status === "failed" || run.status === "rejected") ? <p className="run-failure-summary">模型选择尚未保存。请先保存模型，或恢复为当前模型后再重试。</p> : null}
               {(run.status === "failed" || run.status === "rejected") && !run.taskRecovery && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && retryableNodeId(run) ? <button className={`button ${canRestorePreservedWork ? "button-secondary" : "button-primary"}`} type="button" disabled={nodeMutationPending || hasPendingPlanningConfiguration} onClick={() => void onRetryFailedNode(retryableNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{run.failure?.retryLabel ?? (sourceAssetFailure && run.status === "rejected" ? "重新检查已有试片" : run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤")}</button> : null}
               {(run.status === "failed" || run.status === "rejected") && !run.taskRecovery && !hasUncertainPaidOutcome(run) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
-              {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onRegenerateStale()}><RotateCcw aria-hidden="true" size={16} />{isCostReplan ? "按降本意见重新规划并报价" : "按人工版本继续生成"}</button> : null}
+              {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => { void onRegenerateStale().catch(() => undefined); }}><RotateCcw aria-hidden="true" size={16} />{isCostReplan ? "按降本意见重新规划并报价" : "按人工版本继续生成"}</button> : null}
               {run.status === "paused" && onResumePaused ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onResumePaused()}><Play aria-hidden="true" size={16} />继续自动制作</button> : null}
             </section>
           )}
@@ -1026,6 +1067,8 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               <button className="icon-button" type="button" onClick={closeVoiceTimingDecision} disabled={decisionPending} title="关闭"><X aria-hidden="true" size={19} /></button>
             </header>
             <p>自然配音需要 {voiceTiming.requiredSeconds} 秒，当前{voiceTiming.groupId ? "整组画面" : "镜头"}只有 {voiceTiming.plannedSeconds} 秒。接受新时长后，系统会重排统一时间轴并重新检查素材、画面和成片。原音频保留；素材不够长时需要重新选材，新增购买仍须确认报价。</p>
+            {voicePlanSnapshot && voiceProposedTotalFrames !== undefined ? <p role="status">整片时长：原 {durationSecondsLabel(voicePlanSnapshot.totalFrames / 30)} 秒（{voicePlanSnapshot.totalFrames} 帧） → 建议 {durationSecondsLabel(voiceProposedTotalFrames / 30)} 秒（{voiceProposedTotalFrames} 帧）。这次确认只采用当前方案的上述调整；素材覆盖及费用仍需按新版本核对。</p>
+              : voiceContentLed && !voicePlanSnapshot ? <p role="status">当前完整时间轴暂不可核对，请等待详情更新后重新打开调整。参考目标不代表原成片时长。</p> : null}
             {voiceTiming.groupId ? <label className="field field-wide"><span>选择要延长的镜头</span>
               <select value={voiceScenePosition || ""} onChange={(event) => {
                 const position = Number(event.target.value);
@@ -1040,19 +1083,35 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                 type="number"
                 min={Number.isFinite(voiceMinimum) ? voiceMinimum : undefined}
                 disabled={!voiceScenePosition}
-                max={180}
+                max={voiceContentLed ? undefined : 180}
                 step="0.001"
                 value={voiceDurationSeconds}
                 onChange={(event) => setVoiceDurationSeconds(event.target.value)}
                 data-dialog-initial-focus
               />
             </label>
+            {voiceContentLed ? <fieldset disabled={decisionPending || voiceTimingStale}>
+              <legend>本次只修改所选镜头及你明确选择的时长要求</legend>
+              <p>参考目标 {voiceIntentSnapshot.referenceSeconds} 秒不是硬限制。当前承诺：{voiceIntentSnapshot.commitment
+                ? [voiceIntentSnapshot.commitment.minSeconds === undefined ? "" : `至少 ${voiceIntentSnapshot.commitment.minSeconds} 秒`,
+                  voiceIntentSnapshot.commitment.maxSeconds === undefined ? "" : `最多 ${voiceIntentSnapshot.commitment.maxSeconds} 秒`].filter(Boolean).join("，") : "未设置"}。</p>
+              <label className="field"><span>本次时长要求</span><select value={voiceCommitmentAction} onChange={event => setVoiceCommitmentAction(event.target.value)}>
+                <option value="keep">保留当前要求</option><option value="replace">修改明确的时长要求</option><option value="clear">取消明确的时长要求</option>
+              </select></label>
+              {voiceCommitmentAction === "replace" ? <>
+                <label className="field"><span>成片至少（秒）</span><input type="number" step="any" value={voiceMinSeconds} onChange={event => setVoiceMinSeconds(event.target.value)} /></label>
+                <label className="field"><span>成片最多（秒）</span><input type="number" step="any" value={voiceMaxSeconds} onChange={event => setVoiceMaxSeconds(event.target.value)} /></label>
+              </> : null}
+              {voiceAmendmentError ? <p role="status">{voiceAmendmentError}</p> : null}
+              {voiceCommitmentAction === "clear" ? <p>取消后仍检查真实素材覆盖和配音完整性，不会自动拉伸或重购音轨。</p> : null}
+            </fieldset> : null}
+            {voiceTimingStale ? <p role="alert">当前方案或时长要求已更新，输入仍保留。请先核对新版，关闭后重新打开调整。</p> : null}
             <footer className="dialog-actions">
               <button className="button button-ghost" type="button" onClick={closeVoiceTimingDecision} disabled={decisionPending}>取消</button>
               <button
                 className="button button-primary"
                 type="button"
-                disabled={decisionPending || !decisionSnapshot || !voiceScenePosition || !Number.isFinite(Number(voiceDurationSeconds)) || Number(voiceDurationSeconds) < voiceMinimum - 1e-6 || Number(voiceDurationSeconds) > 180}
+                disabled={decisionPending || voiceTimingStale || Boolean(voiceAmendmentError) || !decisionSnapshot || !voiceScenePosition || !Number.isFinite(Number(voiceDurationSeconds)) || Number(voiceDurationSeconds) < voiceMinimum - 1e-6 || (!voiceContentLed && Number(voiceDurationSeconds) > 180) || (voiceContentLed && (!Number.isSafeInteger(voiceProposedTotalFrames) || !voicePlanSnapshot))}
                 onClick={() => decisionSnapshot && void onDecision({
                   action: "request_changes",
                   ...decisionSnapshot,
@@ -1060,6 +1119,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                     scenePosition: voiceScenePosition,
                     durationSeconds: Number(voiceDurationSeconds),
                     ...(voiceTiming.groupId ? { groupId: voiceTiming.groupId } : {}),
+                    ...(voiceAmendment ? { durationAmendment: voiceAmendment } : {}),
                   },
                 })}
               ><RotateCcw aria-hidden="true" size={17} />接受新时长并继续制作</button>
@@ -1137,6 +1197,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                 所以这里没有它的条目，操作员不必怀疑自己漏签了什么。边界停点上两件事都不涉及。 */}
             {boundaryGate || sourcePreflightDecision || sourceReviewDecision || sourceReviewIncompleteRisk || visualReviewIncompleteDecision ? null : <p className="review-disposition-note">技术质检不适用逐条表态：它由机器判定通过或不过，没过就到不了这一步，不在这里逐条签。</p>}
             {reviewItems.length > 0 ? <div className="review-disposition-list">
+              <p className="review-disposition-progress" role="status">已表态 {disposedReviewCount}/{reviewItems.length}</p>
               <button type="button" className="button button-secondary" disabled={prefillBusy || decisionPending}
                 onClick={() => void prefillReview()}>沿用上一停点的逐条表态</button>
               {prefillNotice?.basis === reviewDraftBasis ? <p role="status">{prefillNotice.text}</p> : null}
@@ -2036,14 +2097,6 @@ function ProductionProgress({ run }: { run: StudioRunDetail }) {
       </span>)}
     </div>
   </nav>;
-}
-
-// 复核摘要默认只给节选：真实结论可能很长，长文必须通过明确的展开入口查看，
-// 且节选要标注"原文节选"，不把截断文本伪装成完整结论（UX-04）。
-function reviewSummaryExcerpt(text: string): { excerpt: string; truncated: boolean } {
-  const clean = creatorFacingTechnicalText(text) ?? "";
-  if (clean.length <= 160) return { excerpt: clean, truncated: false };
-  return { excerpt: `${clean.slice(0, 160)}…`, truncated: true };
 }
 
 /** 折叠摘要上的待处理提示（CLOUD-03）：有未决操作/失败/冲突时不能把状态藏起来。 */

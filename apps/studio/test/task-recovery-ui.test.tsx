@@ -68,6 +68,22 @@ function runningRun(): StudioRunDetail {
 }
 
 describe("text task recovery UI", () => {
+  it("does not label an unregistered audit request as unaccepted or offer an unusable query", () => {
+    const { taskRecovery: _recovery, failure: _failure, ...base } = failedRun("accepted_unknown");
+    const query = vi.fn();
+    const run: StudioRunDetail = { ...base, status: "needs_human", optionalReviewTasks: [{
+      nodeId: "creative-planning", purpose: "creative_audit", operationId: "audit-without-request",
+      targetVersionId: "script-A", requestState: "not_submitted", resultState: "absent", summary: "原操作事实保留。",
+    }] };
+    render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} onQueryOriginalTextTask={query} /></MemoryRouter>);
+    const original = screen.getByRole("region", { name: "原审计与费用待核" });
+    expect(within(original).getByText(/未登记可查询的原请求/)).toBeVisible();
+    expect(original).toHaveTextContent("不代表没有发生调用或费用");
+    expect(within(original).queryByText(/未提交或未受理/)).toBeNull();
+    expect(within(original).queryByRole("button", { name: "查询原文字审计" })).toBeNull();
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it("downloads only the adopted publish package without publishing or approving a draft", () => {
     const { taskRecovery: _recovery, failure: _failure, ...base } = failedRun("completed_failure");
     const decide = vi.fn();
@@ -102,7 +118,7 @@ describe("text task recovery UI", () => {
       artifacts: [{ id: "film-current", kind: "render", contentUrl: "/media/film.mp4", contentType: "video/mp4",
         createdAt: "2026-10-02T00:00:00Z", producerNodeId: "render" }],
       optionalReviewTasks: [{ nodeId: "visual-review", purpose: "audio_review", operationId: "original-audio",
-        targetVersionId: "render-current", requestState: "unknown", resultState: "absent", summary: "原声音审片结果仍待核。" }],
+        requestId: "original-audio-request", targetVersionId: "render-current", requestState: "unknown", resultState: "absent", summary: "原声音审片结果仍待核。" }],
     };
     render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={decide} onQueryOriginalTextTask={query} /></MemoryRouter>);
     const film = screen.getByRole("region", { name: "成片预览" });
@@ -242,7 +258,7 @@ describe("text task recovery UI", () => {
     const { taskRecovery: _taskRecovery, ...baseRun } = failedRun("accepted_unknown");
     const run: StudioRunDetail = { ...baseRun, status: "succeeded",
       optionalReviewTasks: ["visual_review", "audio_review"].map((purpose, index) => ({ nodeId: "visual-review",
-        purpose: purpose as "visual_review" | "audio_review", operationId: `original-${index}`, targetVersionId: "render-A",
+        purpose: purpose as "visual_review" | "audio_review", operationId: `original-${index}`, requestId: `original-request-${index}`, targetVersionId: "render-A",
         requestState: "unknown", resultState: "absent", summary: "作品已采用；原审片结果与费用待核，查询不会重发。" })) };
     const query = vi.fn(async () => undefined);
     render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined}

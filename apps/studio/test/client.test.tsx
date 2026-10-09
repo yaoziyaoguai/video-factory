@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NewRunDialog } from "../src/client/components/NewRunDialog.js";
 import { VoiceStudio } from "../src/client/components/VoiceStudio.js";
 import { VOICE_PRESETS } from "../src/shared/template-voice-recommendation.js";
-import { studioApi, subscribeToRun } from "../src/client/api.js";
+import { studioApi, subscribeToRun, StudioApiError } from "../src/client/api.js";
 import { ProductionQueue } from "../src/client/components/ProductionQueue.js";
 import { RunCostDetailPanel } from "../src/client/components/CostDashboard.js";
 import { currentSubtitlePreview, RunWorkbench } from "../src/client/components/RunWorkbench.js";
@@ -164,6 +164,35 @@ const runDetail: StudioRunDetail = {
 };
 
 describe("Studio client", () => {
+  it("opens the existing workspace from a structured stale human recovery without saving or regenerating", async () => {
+    vi.restoreAllMocks();
+    vi.stubGlobal("EventSource", class { addEventListener() {} close() {} });
+    const { activeIntervention: _stop, videoArtifactId: _video, ...base } = runDetail;
+    const stale: StudioRunDetail = { ...base, status: "stale", currentNodeId: "publish-package", artifacts: [],
+      nodes: [{ id: "publish-package", label: "发布文案", status: "stale", artifactIds: [], qualityGateResults: [], output: { title: "人工标题" },
+        outputState: { effectiveVersionId: "manual-1", generatedVersionId: "auto-1", stale: true, versions: [
+          { id: "manual-1", source: "human", createdAt: base.startedAt, createdBy: "tester", schemaVersion: "publish-v1",
+            output: { title: "人工标题" }, artifactIds: [], inputVersionIds: [] },
+        ] } }] };
+    vi.spyOn(studioApi, "run").mockResolvedValue(stale);
+    vi.spyOn(studioApi, "runCosts").mockRejectedValue(new Error("no fixture"));
+    vi.spyOn(studioApi, "paidOperation").mockRejectedValue(new Error("no fixture"));
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "creativeReviewHistory").mockRejectedValue(new Error("no fixture"));
+    vi.spyOn(studioApi, "creativeReview").mockRejectedValue(new Error("no fixture"));
+    const recovery = { code: "STALE_HUMAN_CONTENT_REVIEW_REQUIRED" as const, nodeId: "publish-package", field: "output" as const, effectiveVersionId: "manual-1", runRevision: stale.revision };
+    const resume = vi.spyOn(studioApi, "regenerateStale").mockRejectedValue(new StudioApiError("人工稿已保留，请复核并保存。", 409, recovery));
+    const save = vi.spyOn(studioApi, "overrideNode");
+    try {
+      render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
+      await userEvent.click(await screen.findByRole("button", { name: "按人工版本继续生成" }));
+      const action = await screen.findByRole("button", { name: "前往复核人工交付" });
+      await userEvent.click(action);
+      expect(document.getElementById("node-workspace-publish-package")).toHaveAttribute("open");
+      expect(resume).toHaveBeenCalledTimes(1);
+      expect(save).not.toHaveBeenCalled();
+    } finally { vi.restoreAllMocks(); vi.unstubAllGlobals(); }
+  });
   it.each(["authorization", "amendment"] as const)("refreshes progress while scope %s is pending without a run event or a second purchase", async phase => {
     vi.restoreAllMocks();
     vi.stubGlobal("EventSource", class { addEventListener() {} close() {} });
@@ -267,19 +296,31 @@ describe("Studio client", () => {
 
   it("binds an unaudited publish-copy adoption to the visible document version", async () => {
     const onDecision = vi.fn().mockResolvedValue(undefined);
+    let load!: (value: unknown) => void;
+    vi.spyOn(studioApi, "resourceJson").mockImplementation(() => new Promise(resolve => { load = resolve; }));
     const current = { publishPackagePath: "/private/current.json", contentReview: { status: "not_audited", summary: "人工修改后的本版尚未重新审计。", suggestions: [] } };
     const publishNode: StudioNode = {
-      id: "publish-package", label: "发布文案与发布包", role: "发行编辑", status: "needs_human", artifactIds: [], qualityGateResults: [], output: current,
+      id: "publish-package", label: "发布文案与发布包", role: "发行编辑", status: "needs_human", artifactIds: ["publication-v2"], qualityGateResults: [], output: current,
       outputState: { generatedVersionId: "v1", effectiveVersionId: "v2", stale: false, versions: [
         { id: "v1", source: "generated", artifactIds: [], inputVersionIds: [], createdAt: "2026-09-24T00:00:00Z", createdBy: "agent", schemaVersion: "v1", output: { contentReview: { status: "passed", summary: "旧版通过", suggestions: [] } } },
-        { id: "v2", source: "human", artifactIds: [], inputVersionIds: [], createdAt: "2026-09-24T00:01:00Z", createdBy: "creator", schemaVersion: "v1", output: current },
+        { id: "v2", source: "human", artifactIds: ["publication-v2"], inputVersionIds: [], createdAt: "2026-09-24T00:01:00Z", createdBy: "creator", schemaVersion: "v1", output: current },
       ] },
     };
     const run: StudioRunDetail = { ...runDetail, revision: 9, currentNodeId: "publish-package", nodes: [...runDetail.nodes.filter((node) => node.id !== "publish-package"), publishNode],
+      artifacts: [...runDetail.artifacts, { id: "publication-v2", producerNodeId: "publish-package", kind: "publish_package", contentType: "application/json", contentUrl: "/publication-v2", createdAt: "2026-09-24T00:01:00Z" }],
       activeIntervention: { id: "publish-v2-stop", nodeId: "publish-package", boundary: "node-complete", reason: "等你决定", options: ["approve", "reject"], createdAt: "2026-09-24T00:01:00Z" },
     };
     render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
-    fireEvent.click(screen.getByRole("button", { name: "采用本版（未审计），继续" }));
+    const adopt = screen.getByRole("button", { name: "采用发布文案（未审计），继续" });
+    expect(adopt).toBeDisabled();
+    fireEvent.click(adopt);
+    expect(onDecision).not.toHaveBeenCalled();
+    await act(async () => load({ copy: { title: "当前保存标题", description: "当前保存正文", hashtags: [] } }));
+    const document = screen.getByRole("region", { name: "当前步骤产物" });
+    expect(document).toHaveTextContent("当前保存正文");
+    expect(document.compareDocumentPosition(screen.getByTitle("成片预览")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(adopt).toBeEnabled();
+    fireEvent.click(adopt);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
       action: "approve", contentVersionId: "v2", acceptUnauditedContent: true, expectedRunRevision: 9,
@@ -378,8 +419,10 @@ describe("Studio client", () => {
     const approve = within(dialog).getByRole("button", { name: "逐条表态已完成，生成发布包" });
     expect(approve).toBeDisabled();
     expect(prefill).not.toHaveBeenCalled();
+    expect(within(dialog).getByText("已表态 0/1")).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "沿用上一停点的逐条表态" }));
     await within(dialog).findByText("已预填，尚未确认本节点；你仍可修改。") ;
+    expect(within(dialog).getByText("已表态 1/1")).toBeInTheDocument();
     expect(onDecision).not.toHaveBeenCalled();
     expect(approve).toBeEnabled();
     await user.click(approve);
@@ -496,10 +539,39 @@ describe("Studio client", () => {
     prefill.mockRestore();
   });
 
-  it("collects rendered review decisions before adopting publish copy and retains its document identity", async () => {
+  it("counts only valid current-evidence dispositions, retains the four-of-five stop and clears progress when evidence changes", async () => {
+    const user = userEvent.setup();
+    const onDecision = vi.fn();
+    const findings = ["b", "c", "d", "e", "f"].map((key, index) => ({ itemKey: key.repeat(64), timecodeMs: index * 1000,
+      scenePosition: 1, category: "composition", description: `需核对的画面 ${index + 1}`, suggestion: "可选择保留", evidenceStatus: "failed", severity: "warning" }));
+    const run: StudioRunDetail = { ...runDetail, nodes: [...runDetail.nodes.filter(node => node.id !== "visual-review"),
+      { id: "visual-review", label: "成片审片", status: "succeeded", artifactIds: [], qualityGateResults: [], output: {
+        report: { recommendation: "revise", summary: "五条画面意见", findings, reviewScope: { evidenceId: "a".repeat(64) } } } }] };
+    const { rerender } = render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
+    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByText("已表态 0/5")).toBeInTheDocument();
+    for (const button of dialog.getAllByRole("button", { name: "接受风险，保留本版" }).slice(0, 4)) await user.click(button);
+    expect(dialog.getByText("已表态 4/5")).toBeInTheDocument();
+    const approve = dialog.getByRole("button", { name: "逐条表态已完成，生成发布包" });
+    expect(approve).toBeDisabled();
+    await user.click(dialog.getAllByRole("button", { name: "不采纳，维持现状" })[4]!);
+    expect(dialog.getByText("已表态 4/5")).toBeInTheDocument();
+    await user.type(dialog.getByLabelText("不采纳理由"), "已看过，这里是有意留白。");
+    expect(dialog.getByText("已表态 5/5")).toBeInTheDocument();
+    expect(approve).toBeEnabled();
+    await user.click(dialog.getAllByRole("button", { name: "采纳，先返修" })[4]!);
+    expect(dialog.getByText("已表态 5/5")).toBeInTheDocument();
+    expect(approve).toBeDisabled();
+    rerender(<RunWorkbench run={{ ...run, revision: run.revision + 1, activeIntervention: { ...run.activeIntervention!, id: "new-review-stop" } }} decisionPending={false} onDecision={onDecision} />);
+    expect(screen.getByText("已表态 0/5")).toBeInTheDocument();
+    expect(onDecision).not.toHaveBeenCalled();
+  });
+
+  it("adopts publish copy without repeating rendered dispositions and retains its document and evidence identity", async () => {
     const user = userEvent.setup();
     const onDecision = vi.fn().mockResolvedValue(undefined);
-    const current = { contentReview: { status: "passed", summary: "文案已审", suggestions: [] } };
+    const current = { copy: { title: "当前发布标题", description: "已保存的完整发布正文", hashtags: [] }, contentReview: { status: "passed", summary: "文案已审", suggestions: [] } };
     const itemKey = "9".repeat(64);
     const run: StudioRunDetail = {
       ...runDetail, currentNodeId: "publish-package", revision: 19,
@@ -509,21 +581,20 @@ describe("Studio client", () => {
         output: { report: { recommendation: "approve", summary: "保留质量建议", scores: { composition: 80, continuity: 80, pacing: 80, legibility: 80, safety: 90 }, reviewScope: { evidenceId: "a".repeat(64) }, findings: [{ itemKey, timecodeMs: 1000, scenePosition: 1, category: "composition", description: "主体略偏边缘", suggestion: "可保留", evidenceStatus: "failed", severity: "warning" }] } },
       }, {
         id: "publish-package", label: "发布文案与发布包", role: "发行编辑", status: "needs_human", artifactIds: [], qualityGateResults: [], output: current,
+        agentLoopProgress: { iteration: 1, maxIterations: 1, completedIterations: 1, phase: "passed", producerModelCallCount: 1, auditModelCallCount: 1,
+          latestAudit: { verdict: "pass", score: 92, summary: "文案已审", issues: [] } },
         outputState: { generatedVersionId: "publish-v1", effectiveVersionId: "publish-v1", stale: false, versions: [{ id: "publish-v1", source: "generated", artifactIds: [], inputVersionIds: [], createdAt: "2026-09-26T00:00:00Z", createdBy: "agent", schemaVersion: "v1", output: current }] },
       }],
     };
     render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
-    await user.click(screen.getByRole("button", { name: "采用当前稿，继续" }));
-    expect(onDecision).not.toHaveBeenCalled();
-    const dialog = screen.getByRole("dialog");
-    const approve = within(dialog).getByRole("button", { name: "采用当前稿，继续" });
-    expect(approve).toBeDisabled();
-    await user.click(within(dialog).getByRole("button", { name: "接受风险，保留本版" }));
-    await user.click(approve);
+    expect(screen.getAllByText(/文案已审/)).toHaveLength(1);
+    expect(screen.getByText("文案已审").closest("details")).not.toHaveAttribute("open");
+    await user.click(screen.getByRole("button", { name: "采用当前发布文案，继续" }));
     expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({
       action: "approve", expectedRunRevision: 19, interventionId: "publish-stop", contentVersionId: "publish-v1", reviewEvidenceId: "a".repeat(64),
-      reviewDispositions: [{ itemKey, decision: "accept_risk" }],
     }));
+    expect(onDecision.mock.calls[0]![0]).not.toHaveProperty("reviewDispositions");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("reveals only the currently loaded new film, without remounting the player or replaying an earlier film", async () => {
@@ -627,9 +698,9 @@ describe("Studio client", () => {
     });
     vi.spyOn(studioApi, "creativeReviewCommand").mockImplementation(async (_id, commandId) => ({ commandId, status: "completed", observationUrl: "/unused" }));
     render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
-    await user.click(await screen.findByRole("button", { name: "采用这个备选" }));
+    await user.click(await screen.findByRole("button", { name: "设为当前草稿" }));
     await waitFor(() => expect(within(screen.getByRole("article", { name: "当前前期构思" })).getByText("采用后的新结尾")).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "采用前期构思（未审计）" })).toBeEnabled();
     expect(screen.queryByText("正在处理原操作")).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("前期构思 · 第 2 版 · 未审计")).toBeInTheDocument());
     expect(post).toHaveBeenCalledTimes(1);
@@ -694,13 +765,13 @@ describe("Studio client", () => {
       });
       expect(screen.getByPlaceholderText("例如：为什么这样开场？或者：把开头改得更直接一些。")).toBe(composer);
       expect(composer).toHaveValue("保留安静，不追加口号");
-      expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "采用前期构思（未审计）" })).toBeDisabled();
       expect(storage.has("vf:creative-command:run-1:treatment:draft")).toBe(true);
       await act(async () => { finish(); });
       await waitFor(() => expect(screen.getByText("修改后的结尾")).toBeInTheDocument());
       await waitFor(() => expect(storage.has("vf:creative-command:run-1:treatment:draft")).toBe(false));
       expect(screen.queryByText("上一条操作结果尚未核清。")).not.toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "采用前期构思（未审计）" })).toBeEnabled();
       expect(post).toHaveBeenCalledTimes(1);
     } finally {
       finish();
@@ -848,8 +919,8 @@ describe("Studio client", () => {
     const user = userEvent.setup();
     try {
       render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
-      await user.click(await screen.findByRole("button", { name: "审计当前版本" }));
-      await waitFor(() => expect(screen.getByRole("button", { name: "采用本版（未审计）" })).toBeEnabled(), { timeout: 700 });
+      await user.click(await screen.findByRole("button", { name: "审计当前版本（会调用模型）" }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "采用前期构思（未审计）" })).toBeEnabled(), { timeout: 700 });
       expect(storage.has("vf:creative-command:run-1:treatment:draft")).toBe(false);
       const auditCommand = post.mock.calls[0]![1];
       expect(JSON.parse(storage.get(`vf:creative-audit-command:run-1:${auditCommand.commandId}`)!)).toMatchObject({ action: "audit_current", commandId: auditCommand.commandId });
@@ -909,6 +980,24 @@ describe("Studio client", () => {
       planningStages: newer.planningStages,
     });
     expect(preferRunSnapshot(undefined, older)).toBe(older);
+  });
+
+  it("T11 keeps verified voice timing only across the same revision, stop and brief", () => {
+    const detailed: StudioRunDetail = {
+      ...runDetail,
+      durationIntent: { policy: "content-led-v1", referenceSeconds: 24, briefSha256: "a".repeat(64) },
+      voiceTimingPlan: { versionId: "plan-v1", planSha256: "b".repeat(64), totalFrames: 945,
+        cuts: [{ scenePosition: 1, frameCount: 945 }] },
+    };
+    const { voiceTimingPlan, ...pushed } = detailed;
+    expect(preferRunSnapshot(detailed, pushed).voiceTimingPlan).toEqual(voiceTimingPlan);
+    expect(preferRunSnapshot(detailed, { ...pushed, revision: pushed.revision + 1 }).voiceTimingPlan).toBeUndefined();
+    expect(preferRunSnapshot(detailed, { ...pushed,
+      durationIntent: { ...detailed.durationIntent!, briefSha256: "c".repeat(64) } }).voiceTimingPlan).toBeUndefined();
+    expect(preferRunSnapshot(detailed, { ...pushed,
+      activeIntervention: { ...runDetail.activeIntervention!, id: "different-stop" } }).voiceTimingPlan).toBeUndefined();
+    const fresh = { ...voiceTimingPlan!, versionId: "plan-v2", totalFrames: 1005 };
+    expect(preferRunSnapshot(detailed, { ...pushed, voiceTimingPlan: fresh }).voiceTimingPlan).toEqual(fresh);
   });
 
   it("keeps the paused node's audit advice when a boundary stop bumps the revision", () => {
@@ -1403,14 +1492,18 @@ describe("Studio client", () => {
     expect(screen.getByRole("radio", { name: /AI 逐镜选择画面来源/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /本地编辑画面/ })).not.toBeChecked();
     expect(screen.getByRole("checkbox", { name: /Pexels 图库/ })).toBeChecked();
-    expect(screen.getByRole("option", { name: "20 秒" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "18 秒" })).not.toBeInTheDocument();
+    const referenceDuration = screen.getByRole("spinbutton", { name: "建议时长" });
+    await user.clear(referenceDuration);
+    await user.type(referenceDuration, "18");
+    expect(referenceDuration).toHaveValue(18);
     await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       title: "下班后别急着做这 3 件事",
       nicheSlug: expect.stringMatching(/^topic-[a-f0-9]{8}$/),
       protocolVersion: "video-factory/brief-v1",
+      durationPolicy: "content-led-v1",
+      durationSeconds: 18,
       reviewMode: "manual",
       runPurpose: "production",
       providers: expect.objectContaining({ script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1" }),
@@ -1430,6 +1523,7 @@ describe("Studio client", () => {
       },
     }));
     expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty("visualPlan");
+    expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty("durationRange");
     expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty("visualIntent");
 
     rerender(<NewRunDialog open={false} providers={providers} onClose={onClose} onSubmit={onSubmit} />);
@@ -1554,7 +1648,7 @@ describe("Studio client", () => {
     />);
 
     expect(await screen.findByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
-    expect(screen.getByRole("combobox", { name: "建议时长" })).toHaveValue("30");
+    expect(screen.getByRole("spinbutton", { name: "建议时长" })).toHaveValue(30);
     expect(screen.getByRole("radio", { name: /仅免费画面/ })).toBeChecked();
     expect(screen.getByRole("combobox", { name: "导演角色" })).toHaveValue("documentary-observer");
   });
@@ -1595,7 +1689,7 @@ describe("Studio client", () => {
     />);
 
     expect(await screen.findByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
-    expect(screen.getByRole("combobox", { name: "建议时长" })).toHaveValue("45");
+    expect(screen.getByRole("spinbutton", { name: "建议时长" })).toHaveValue(45);
     expect(screen.getByRole("button", { name: "开始前期构思" })).toBeInTheDocument();
     expect(screen.queryByText(/未能读取你的创作设置/)).not.toBeInTheDocument();
   });
@@ -1680,7 +1774,7 @@ describe("Studio client", () => {
     />);
     await screen.findByRole("button", { name: "开始前期构思" });
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "目标平台" }), "xiaohongshu");
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "建议时长" }), "40");
+    fireEvent.change(screen.getByRole("spinbutton", { name: "建议时长" }), { target: { value: "40" } });
 
     rerender(<NewRunDialog
       open
@@ -1704,7 +1798,7 @@ describe("Studio client", () => {
     />);
 
     expect(screen.getByRole("combobox", { name: "目标平台" })).toHaveValue("xiaohongshu");
-    expect(screen.getByRole("combobox", { name: "建议时长" })).toHaveValue("40");
+    expect(screen.getByRole("spinbutton", { name: "建议时长" })).toHaveValue(40);
   });
 
   it("stops before production when only an unselected editorial card can supply visuals", async () => {
@@ -2404,7 +2498,7 @@ describe("Studio client", () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<NewRunDialog open providers={providers} initialValues={{ durationSeconds: 27, template: { templateId: "automatic-custom" } }} onClose={() => undefined} onSubmit={onSubmit} />);
 
-    expect(await screen.findByRole("option", { name: "27 秒" })).toBeInTheDocument();
+    expect(await screen.findByRole("spinbutton", { name: "建议时长" })).toHaveValue(27);
     await user.type(screen.getByLabelText("视频标题"), "一条自定义时长的视频");
     await user.type(screen.getByLabelText("内容角度"), "验证显式时长不依赖模板");
     await user.type(screen.getByLabelText("目标受众"), "内容创作者");
@@ -2416,20 +2510,53 @@ describe("Studio client", () => {
     expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty("template");
   });
 
-  it("creates an editable duration range and keeps the suggested duration inside it", async () => {
+  it("starts content-led by default without deriving a hard range from its reference", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={onSubmit} />);
+    expect(screen.getByRole("checkbox", { name: "必须在此范围内" })).not.toBeChecked();
+    expect(screen.queryByLabelText("最短时长")).not.toBeInTheDocument();
+    expect(screen.getByText(/脚本会给出具体总长供你确认/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText("视频标题"), "由内容提出时长");
+    await user.type(screen.getByLabelText("内容角度"), "保留用户决定");
+    await user.type(screen.getByLabelText("目标受众"), "创作者");
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ durationPolicy: "content-led-v1", durationSeconds: 24 }));
+    expect(onSubmit.mock.calls[0]![0]).not.toHaveProperty("durationRange");
+  });
+
+  it("sends only the explicit maximum and permits a decimal reference outside that commitment", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<NewRunDialog open providers={providers} onClose={vi.fn()} onSubmit={onSubmit} />);
+    const reference = screen.getByRole("spinbutton", { name: "建议时长" });
+    await user.clear(reference);
+    await user.type(reference, "50.1");
+    await user.click(screen.getByRole("checkbox", { name: "必须在此范围内" }));
+    await user.type(screen.getByLabelText("最长时长"), "12");
+    await user.type(screen.getByLabelText("视频标题"), "一镜短片");
+    await user.type(screen.getByLabelText("内容角度"), "让模型提出片长");
+    await user.type(screen.getByLabelText("目标受众"), "创作者");
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ durationPolicy: "content-led-v1", durationSeconds: 50.1, durationRange: { maxSeconds: 12 } }));
+    expect(screen.getByLabelText("最短时长")).toHaveValue(null);
+  });
+
+  it("keeps the suggested duration independent when only a minimum is explicitly set", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={onSubmit} />);
 
+    await user.click(screen.getByRole("checkbox", { name: "必须在此范围内" }));
     const minimum = screen.getByLabelText("最短时长");
     const maximum = screen.getByLabelText("最长时长");
-    expect(minimum).toHaveValue(20);
-    expect(maximum).toHaveValue(34);
+    expect(minimum).toHaveValue(null);
+    expect(maximum).toHaveValue(null);
 
     fireEvent.change(minimum, { target: { value: "30" } });
     // 时长范围按“失焦才提交”合同生效：编辑期间不逐键夹取（产品缺陷修复）。
     fireEvent.blur(minimum);
-    expect(screen.getByLabelText("建议时长")).toHaveValue("30");
+    expect(screen.getByLabelText("建议时长")).toHaveValue(24);
 
     await user.type(screen.getByLabelText("视频标题"), "动态时长合同测试");
     await user.type(screen.getByLabelText("内容角度"), "让完整表达决定最终时长");
@@ -2437,12 +2564,12 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      durationSeconds: 30,
-      durationRange: { minSeconds: 30, maxSeconds: 34 },
+      durationSeconds: 24,
+      durationRange: { minSeconds: 30 },
     }));
   });
 
-  it("restores the accepted duration range when its maximum is cleared", async () => {
+  it("removes an explicitly cleared maximum without changing the remaining minimum", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<NewRunDialog open providers={providers}
@@ -2453,21 +2580,21 @@ describe("Studio client", () => {
     await user.clear(maximum);
     expect(maximum).toHaveValue(null);
     await user.tab();
-    expect(maximum).toHaveValue(180);
+    expect(maximum).toHaveValue(null);
     expect(screen.getByLabelText("最短时长")).toHaveValue(30);
-    expect(screen.getByLabelText("建议时长")).toHaveValue("45");
+    expect(screen.getByLabelText("建议时长")).toHaveValue(45);
 
     await user.type(screen.getByLabelText("视频标题"), "时长输入回归");
-    await user.type(screen.getByLabelText("内容角度"), "清空不能改写已确认的时长");
+    await user.type(screen.getByLabelText("内容角度"), "清空只取消明确的上限");
     await user.type(screen.getByLabelText("目标受众"), "短视频创作者");
     await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       durationSeconds: 45,
-      durationRange: { minSeconds: 30, maxSeconds: 180 },
+      durationRange: { minSeconds: 30 },
     }));
   });
 
-  it("restores the accepted minimum on clearing and cancels without creating a run", async () => {
+  it("removes an explicitly cleared minimum and protects the unsaved change on cancel", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     const onClose = vi.fn();
@@ -2479,19 +2606,22 @@ describe("Studio client", () => {
     await user.clear(minimum);
     expect(minimum).toHaveValue(null);
     await user.tab();
-    expect(minimum).toHaveValue(45);
+    expect(minimum).toHaveValue(null);
     expect(screen.getByLabelText("最长时长")).toHaveValue(180);
-    expect(screen.getByLabelText("建议时长")).toHaveValue("60");
+    expect(screen.getByLabelText("建议时长")).toHaveValue(60);
     await user.click(screen.getByRole("button", { name: "取消" }));
+    expect(onClose).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "放弃并关闭" }));
     expect(onClose).toHaveBeenCalledOnce();
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("keeps multi-digit duration drafts until blur and still validates numeric bounds", async () => {
+  it("keeps multi-digit duration drafts and does not clamp new commitments to old limits", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(<NewRunDialog open providers={providers} onClose={vi.fn()} onSubmit={onSubmit} />);
 
+    await user.click(screen.getByRole("checkbox", { name: "必须在此范围内" }));
     const maximum = screen.getByLabelText("最长时长");
     await user.clear(maximum);
     await user.type(maximum, "4");
@@ -2509,13 +2639,33 @@ describe("Studio client", () => {
     await user.clear(maximum);
     await user.type(maximum, "1.5");
     await user.tab();
-    expect(maximum).toHaveValue(180);
+    expect(maximum).toHaveValue(1.5);
     await user.clear(maximum);
     await user.type(maximum, "200");
     expect(maximum).toHaveValue(200);
     await user.tab();
-    expect(maximum).toHaveValue(180);
+    expect(maximum).toHaveValue(200);
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("preserves the unmarked legacy duration contract when opening an associated rework", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<NewRunDialog open providers={providers} initialValues={{
+      title: "旧版返工", angle: "保留旧约束", audience: "创作者", durationSeconds: 24,
+      rework: { sourceRunId: "run-legacy-duration", sourceRunRevision: 2, findings: [],
+        nodeInstructions: { script: "修改表达", visualDirection: "沿用画面", assets: "沿用素材" } },
+    }} onClose={vi.fn()} onSubmit={onSubmit} />);
+    expect(screen.queryByRole("checkbox", { name: "必须在此范围内" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("最短时长")).toHaveValue(20);
+    const maximum = screen.getByLabelText("最长时长");
+    expect(maximum).toHaveValue(34);
+    await user.clear(maximum);
+    await user.tab();
+    expect(maximum).toHaveValue(34);
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ durationRange: { minSeconds: 20, maxSeconds: 34 } }));
+    expect(onSubmit.mock.calls[0]![0]).not.toHaveProperty("durationPolicy");
   });
 
   it("keeps mandatory dual visual review enabled for every production run", async () => {
@@ -4470,7 +4620,7 @@ describe("Studio client", () => {
     expect(screen.getByRole("radio", { name: /仅免费画面/ })).toBeChecked();
     expect(screen.getByRole("combobox", { name: "导演角色" })).toHaveValue("documentary-observer");
     expect(screen.getByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
-    expect(screen.getByRole("combobox", { name: "建议时长" })).toHaveValue("30");
+    expect(screen.getByRole("spinbutton", { name: "建议时长" })).toHaveValue(30);
     expect(screen.getByLabelText("终审模式")).toHaveTextContent("人工终审");
     expect(await screen.findByRole("button", { name: /高级微调/ })).toHaveTextContent("205 字/分");
     await user.click(screen.getByText("03 模型与高级设置"));
@@ -4965,13 +5115,17 @@ describe("Studio client", () => {
     expect(screen.queryByRole("button", { name: "查看无同步字幕版并确认" })).not.toBeInTheDocument();
   });
 
-  for (const grouped of [false, true]) it(`offers the voice timing intervention action instead of publish approval (grouped ${grouped})`, async () => {
+  for (const contentLed of [false, true]) for (const grouped of [false, true]) it(`offers the voice timing intervention action instead of publish approval (grouped ${grouped}, content-led ${contentLed})`, async () => {
     const user = userEvent.setup();
     const onDecision = vi.fn().mockResolvedValue(undefined);
     const { videoArtifactId: _videoArtifactId, ...runWithoutVideo } = runDetail;
     const run: StudioRunDetail = {
       ...runWithoutVideo,
       revision: 4,
+      ...(contentLed ? { durationIntent: { policy: "content-led-v1" as const, briefSha256: "d".repeat(64),
+        referenceSeconds: 24, commitment: { maxSeconds: 20 } },
+        voiceTimingPlan: { versionId: "timing-plan-v1", planSha256: "e".repeat(64), totalFrames: 600,
+          cuts: [{ scenePosition: 1, frameCount: 240 }, { scenePosition: 2, frameCount: 360 }] } } : {}),
       activeIntervention: {
         id: "voice-timing-1",
         nodeId: "voice",
@@ -5011,14 +5165,43 @@ describe("Studio client", () => {
       await user.selectOptions(within(dialog).getByLabelText("选择要延长的镜头"), "2");
       expect(within(dialog).getByLabelText("镜头 2 时长（秒）")).toHaveValue(14);
     } else expect(within(dialog).getByLabelText("镜头 1 时长（秒）")).toHaveValue(8.2);
+    if (contentLed) {
+      expect(within(dialog).getByText(grouped ? /原 20 秒（600 帧） → 建议 22 秒（660 帧）/ : /原 20 秒（600 帧） → 建议 20.2 秒（606 帧）/)).toBeInTheDocument();
+      await user.selectOptions(within(dialog).getByLabelText("本次时长要求"), grouped ? "replace" : "clear");
+      if (grouped) await user.type(within(dialog).getByLabelText("成片最多（秒）"), "30");
+      expect(within(dialog).getByText(/原音频保留/)).toBeInTheDocument();
+    }
     await user.click(within(dialog).getByRole("button", { name: "接受新时长并继续制作" }));
     expect(onDecision).toHaveBeenCalledWith({
       action: "request_changes",
       expectedRunRevision: 4,
       interventionId: "voice-timing-1",
       reviewEvidenceId: null,
-      voiceTiming: grouped ? { scenePosition: 2, durationSeconds: 14, groupId: "narration-1" } : { scenePosition: 1, durationSeconds: 8.2 },
+      voiceTiming: { ...(grouped ? { scenePosition: 2, durationSeconds: 14, groupId: "narration-1" } : { scenePosition: 1, durationSeconds: 8.2 }),
+        ...(contentLed ? { durationAmendment: { expectedBriefSha256: "d".repeat(64), range: grouped ? { maxSeconds: 30 } : null } } : {}) },
     });
+  });
+
+  it("keeps voice timing input but blocks submission after its plan or brief identity changes", async () => {
+    const user = userEvent.setup();
+    const onDecision = vi.fn();
+    const run: StudioRunDetail = { ...runDetail, revision: 4,
+      durationIntent: { policy: "content-led-v1", briefSha256: "d".repeat(64), referenceSeconds: 24 },
+      voiceTimingPlan: { versionId: "plan-v1", planSha256: "e".repeat(64), totalFrames: 600,
+        cuts: [{ scenePosition: 1, frameCount: 600 }] },
+      activeIntervention: { id: "timing-stale", nodeId: "voice", reason: "配音不适配", options: ["request_changes", "reject"], createdAt: "2026-10-09T00:00:00Z" },
+      nodes: [{ ...runDetail.nodes[0]!, id: "voice", status: "needs_human", output: {
+        conflict: { code: "VOICE_DOES_NOT_FIT", scenePosition: 1, plannedSeconds: 20, requiredSeconds: 21 } } }] };
+    const { rerender } = render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
+    await user.click(screen.getByRole("button", { name: "调整方案" }));
+    await user.clear(screen.getByLabelText("镜头 1 时长（秒）"));
+    await user.type(screen.getByLabelText("镜头 1 时长（秒）"), "22");
+    rerender(<RunWorkbench run={{ ...run, revision: 5,
+      durationIntent: { ...run.durationIntent!, briefSha256: "f".repeat(64) } }} decisionPending={false} onDecision={onDecision} />);
+    expect(screen.getByLabelText("镜头 1 时长（秒）")).toHaveValue(22);
+    expect(screen.getByRole("button", { name: "接受新时长并继续制作" })).toBeDisabled();
+    expect(screen.getByText(/输入仍保留/)).toBeInTheDocument();
+    expect(onDecision).not.toHaveBeenCalled();
   });
 
   it("makes the visual review recommendation the default final-review decision", async () => {
@@ -5294,9 +5477,9 @@ describe("Studio client", () => {
     expect(within(singleReview).getByRole("note")).toHaveTextContent("有 1 份审片报告未通过报告质量复核");
   });
 
-  it("collapses long review summaries behind a labeled excerpt with the full text expandable", () => {
+  it.each([1, 12])("shows one collapsed full report for a single review identity without duplicating an excerpt (%s paragraphs)", paragraphs => {
     const longSummary = "审片范围：rendered_video 成片。"
-      + "这一镜的采样帧显示双手在水流下搓洗，泡沫清晰可见，背景为厨房水槽，与脚本要求一致。".repeat(12);
+      + "这一镜的采样帧显示双手在水流下搓洗，泡沫清晰可见，背景为厨房水槽，与脚本要求一致。".repeat(paragraphs);
     const run: StudioRunDetail = {
       ...runDetail,
       nodes: [
@@ -5327,15 +5510,32 @@ describe("Studio client", () => {
     render(<RunWorkbench run={run} providers={providers} decisionPending={false} onDecision={vi.fn()} />);
 
     const region = screen.getByRole("region", { name: "独立质量复核结果" });
-    // 长结论默认收起：默认 DOM 里只有节选，完整原文在关闭的 details 里。
+    // 单审的合并摘要与分支是同一原报告，只留一个完整入口，不按文字相似合并其他身份。
     const details = within(region).getByText("查看完整结论原文").closest("details")!;
     expect((details as HTMLDetailsElement).open).toBe(false);
     expect(details).toHaveTextContent(longSummary);
-    // 节选带明确标注，不把截断文本伪装成完整结论（合并结论与分支各有一份）。
-    expect(within(region).getAllByText(/原文节选/).length).toBeGreaterThan(0);
+    expect(region.querySelectorAll(".review-full-summary")).toHaveLength(1);
+    expect(within(region).queryByText(/原文节选/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(longSummary)).toHaveLength(1);
     // 展开后能读到全部原意见。
     fireEvent.click(within(region).getByText("查看完整结论原文"));
     expect((details as HTMLDetailsElement).open).toBe(true);
+  });
+
+  it("keeps equal report text from two independent review sources as separate collapsed originals", () => {
+    const report = { recommendation: "approve", summary: "相同文字，不同审片来源", scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 90 }, findings: [] };
+    const run: StudioRunDetail = { ...runDetail, nodes: [...runDetail.nodes, {
+      id: "visual-review", label: "成片审片", role: "审片员", status: "succeeded", artifactIds: [], qualityGateResults: [],
+      output: { report: { ...report, summary: "合并结论", confidence: 0.9, reviewScope: { evidenceId: "a".repeat(64) }, independentReviews: [
+        { providerId: "deepseek-visual-review-v1", modelId: "deepseek-flash", report },
+        { providerId: "codex-visual-review-v1", modelId: "gpt-5.6-sol", report },
+      ] } },
+    }] };
+    render(<RunWorkbench run={run} providers={providers} decisionPending={false} onDecision={vi.fn()} />);
+    const originals = screen.getAllByText("相同文字，不同审片来源");
+    expect(originals).toHaveLength(2);
+    for (const original of originals) expect(original.closest("details")).not.toHaveAttribute("open");
+    expect(originals[0]!.closest("details")).not.toBe(originals[1]!.closest("details"));
   });
 
   it("opens the current delivery and does not duplicate the creative discussion decision bar", () => {
