@@ -98,7 +98,7 @@ Workflow 或 Node 产生的可追踪文件或数据，例如脚本、分镜、�
 
 ## Production Brief
 
-`video-factory/brief-v1` 输入合同，固定目标平台、受众、时长和 provider binding。
+`video-factory/brief-v1` 输入合同，固定目标平台、受众、时长意向和 provider binding。新制作用 `durationPolicy: content-led-v1` 区分参考目标与用户明确设置的时长承诺；`durationRange` 只保存明确的端点，无承诺时缺省。实际时长随当前脚本与方案版本由用户确认。未带新标记的历史制作继续沿用原合同。
 
 ## Worker Protocol
 
