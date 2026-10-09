@@ -14,18 +14,18 @@ import {
 
 export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as const;
 export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
-  "audio-review": "30edc48c2ca0ee91a02a3a744c06e00142dad6a724a7739f2e4b022470865249",
+  "audio-review": "da9840a3d5a8400d164b9166cd414a104974f036d885b83ef10b2d66b3cb1925",
   "topic-ideas": "c60a44f2760233060b547f40603608719586c486969bd46e3bbfcfd323bd7840",
   "series-roadmap": "0ebde2d2a1edfabce73498e9b3ed78fd20d1a979da2cd4d4cc6c09b5db53435f",
   "creative-treatment": "ef2404a7e0e5dd5be24c009313fe9ec87f10dcda101e3a23ab946c8e87350a6a",
   "director-plan": "88e01eb323141757aebeb5c1e9eff0dc7b77ba7c261455f9a2ba511823c11227",
-  "script-draft": "881b41598882868b3f6deab2fdba9456ea23e29c6c4d295880a602bfcc7a2b44",
-  "publish-copy": "fabc33582075d170245f64b5b7a6899302dd4049aec8dca76d48a6cbf5820399",
+  "script-draft": "d1d80947176946ef6ce13ea561d1e1efe143e5848120267f064a02b30ea213c4",
+  "publish-copy": "82c44982c2291d5b0e2361f6ab1b71dee92d89ceeb8dd1d0380b81fe7f3cf1b3",
   "asset-rank": "8693ee66be5e7db08d20c1847786e015734cda4f63d1c369f2141336dd31723b",
   "reference-grammar": "f14b46d1b3e675d21973b6f6ae8daf594b010409007473cdfaa5adbecb1dea8e",
   "visual-review": "7fc682f73d5750ae7776ec9e42f52a043c17e4258d95f368e03937b964e1b73a",
   "role-audit": "657142f6b41c5689214667bcdade73e9143126c069160be28d6df52584719303",
-  "creative-discussion": "a4a35ff4760b6b25400056f64d831cf9a403bb1aefd66bba78ce11b14e12bfbb",
+  "creative-discussion": "ee0e164d483ed051ae5aa4a1eb8b7cf18a2ff3f71bfbe2b769ce3fe25f434e7d",
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。

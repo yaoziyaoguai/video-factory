@@ -155,11 +155,11 @@ export function briefAuditProjection(brief: ProductionBrief): BriefAuditCandidat
     ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
     ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
     // 来源身份由创建端证据（visualPlanAdopted）决定，不由字段空值推断（R3-09）：
-    // false=创建端确认未采用的系统建议 → 标记为参考；缺省/true=来源未知或已采用 →
+    // false=创建端确认未采用的系统建议 → 不送入用户承诺审查；缺省/true=来源未知或已采用 →
     // 保留原要求语义送审，不替用户作降级决定。
     ...(brief.visualPlan
       ? brief.visualPlanAdopted === false
-        ? { visualPlan: brief.visualPlan, visualPlanProvenance: "system_suggested_reference" }
+        ? { visualPlanProvenance: "system_suggested_reference" }
         : { visualPlan: brief.visualPlan }
       : {}),
     // 锁定的观众承诺在 seriesContext.episode.viewerPromise 里，随系列事实一起送审；

@@ -427,12 +427,13 @@ export function validateScriptDraft(value: unknown, options: DurationIntent & {
     if (!isScriptVisualStrategy(visualStrategy)) {
       throw new Error(`scenes[${index}].visual_strategy must be one of stock, image, generated, local.`);
     }
+    if (typeof scene.narration !== "string") throw new Error(`scenes[${index}].narration must be a string (empty for intentional silence).`);
     const parsed = {
       position: integer(scene.position, `scenes[${index}].position`),
       ...(optionalText(scene.purpose, `scenes[${index}].purpose`) !== undefined
         ? { purpose: optionalText(scene.purpose, `scenes[${index}].purpose`)! }
         : {}),
-      narration: text(scene.narration, `scenes[${index}].narration`),
+      narration: scene.narration.trim(),
       duration: positiveNumber(scene.duration, `scenes[${index}].duration`),
       visual_strategy: visualStrategy,
       visual_prompt: text(scene.visual_prompt, `scenes[${index}].visual_prompt`),

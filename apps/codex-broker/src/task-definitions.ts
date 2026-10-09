@@ -118,13 +118,13 @@ const SEMANTIC_RULES_VERSION: Record<BrokerTaskKind, string> = {
   "series-roadmap": "series-roadmap-semantics-v2",
   "creative-treatment": "creative-treatment-semantics-v13|production-capabilities-v4|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
   "director-plan": "director-plan-semantics-v14|production-capabilities-v4|voice-timing-v1|article-sources-v1|planning-revision-v1|director-plan-v2",
-  "script-draft": "script-draft-semantics-v11|production-capabilities-v4|voice-timing-v1|creative-treatment-v2|canon-facts-v2|article-sources-v1|voice-adoption-boundary-v1|character-script-v1",
-  "publish-copy": "publish-copy-semantics-v5",
+  "script-draft": "script-draft-semantics-v12|production-capabilities-v4|voice-timing-v1|creative-treatment-v2|canon-facts-v2|article-sources-v1|voice-adoption-boundary-v1|character-script-v1",
+  "publish-copy": "publish-copy-semantics-v6",
   "asset-rank": "asset-rank-semantics-v5",
   "reference-grammar": "reference-grammar-semantics-v4",
   "visual-review": "visual-review-semantics-v11|source-timecode-v1|claim-evidence-capability-v1",
   "role-audit": "role-audit-semantics-v11|creator-facing-issues-v1|planning-disposition-v1|host-readiness-review-v1|source-timecode-v1|role-quality-rubric-v1",
-  "creative-discussion": "creative-discussion-semantics-v4|user-confirmed-v1|character-script-v1|director-plan-v2",
+  "creative-discussion": "creative-discussion-semantics-v5|user-confirmed-v1|character-script-v1|director-plan-v2",
 };
 
 export const COMMON_ROLE_PREAMBLE = [
@@ -178,7 +178,7 @@ export const SCREENWRITER_DIRECTIVE = [
   "关键 payoff 在 purpose、visible_action、visual_prompt、旁白与成功条件中形成一致的起点、推进和可见结果。表达类作品的推进不必伪装成可验证的现实实验。",
   "旁白按真实朗读组织：优先交代谁、什么东西、发生了什么，再给必要解释。一句尽量承担一个主要意思；连续出现抽象名词、三层以上定语或多个转折时，先改写成具体动作或分句。必要术语和事实限定保留，不用加速配音掩盖难读。",
   "先形成连贯的整段旁白，再按自然语义分配到镜头：后一句推进或回应前一句，不能每切一镜就重新介绍眼前素材。不得机械重复'这是、然后、最后'来假装衔接，也不能把一个未完的分句切成两次孤立配音。",
-  "读取 productionCapabilities.audio。brief.voiceTiming 仅表示语速与停顿配置，不是已确认的旁白方案；不能据此声称用户已采用连续配音。audio.continuousNarrationGroups 为 true 时，可以建议同一叙事段的旁白跨相邻非留白镜头连贯朗读；是否采用由用户在后续声音方案中明确确认，能力声明不是采用凭据。明确留白必须保留，不为换镜自动补停顿。未声明支持或尚未确认采用时，不依赖连续合成才能成立：逐镜模式每镜从起点开始，剩余画面时长补静音。两种模式都：结合语速估计自然朗读长度，避免一两秒话配十秒空等；有意留白在 sound_cue 和 purpose 说明观看作用，纯静默镜 narration 只用省略号留白标记，该标记不朗读、不显示为字幕；不能通过额外废话、过快语速或取消用户明确留白来凑时长，预计空白不合理时先重配镜头时长与叙事。不宣称未启用的能力；不要求未接线的音乐、拟音或多轨能力。",
+  "读取 productionCapabilities.audio。brief.voiceTiming 仅表示语速与停顿配置，不是已确认的旁白方案；不能据此声称用户已采用连续配音。audio.continuousNarrationGroups 为 true 时，可以建议同一叙事段的旁白跨相邻非留白镜头连贯朗读；是否采用由用户在后续声音方案中明确确认，能力声明不是采用凭据。明确留白必须保留，不为换镜自动补停顿。未声明支持或尚未确认采用时，不依赖连续合成才能成立：逐镜模式每镜从起点开始，剩余画面时长补静音。两种模式都：结合语速估计自然朗读长度，避免一两秒话配十秒空等；有意留白在 sound_cue 和 purpose 说明观看作用，纯静默镜 narration 使用空字符串或省略号留白标记，不朗读、不显示为字幕；不能通过额外废话、过快语速或取消用户明确留白来凑时长，预计空白不合理时先重配镜头时长与叙事。不宣称未启用的能力；不要求未接线的音乐、拟音或多轨能力。",
   "narration 只写观众应听到的话；purpose、success_criteria、failure_conditions 写制作与验收要求。不要把'建立认知、完成验证、形成闭环、提供可执行方法'等内部描述直接复制成旁白，除非它们就是本片需要解释的专业概念。",
   "读取 brief.voiceTiming 与 productionCapabilities.audio，把语速和停顿当作自然时长规划依据而非精确字秒公式；当前不支持的音乐、拟音和多轨不能写成必需执行项。",
   "屏幕文字在实际镜头时长内可读。需要观众先预测或选择时，在揭示之前给出提示并留出至少一秒阅读；不要在最后半秒同时放完整规则和提问。声音提示是后续制作意图，不是音轨已存在的证明。",
@@ -526,7 +526,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
   }
   if (kind === "script-draft") {
     return {
-      version: "video-factory/screenwriter-v21",
+      version: "video-factory/screenwriter-v22",
       directive: SCREENWRITER_DIRECTIVE,
       task: "按内容与用户明确时长要求提出完整分镜脚本，供用户确认内容和建议成片时长。",
       outputRules: [
@@ -975,7 +975,7 @@ const SCRIPT_DRAFT_OUTPUT_SCHEMA = {
         properties: {
           position: { type: "integer", minimum: 1 },
           purpose: { type: "string", minLength: 1 },
-          narration: { type: "string", minLength: 1 },
+          narration: { type: "string", description: "旁白原文；有意无旁白的镜头用空字符串，不补占位词。" },
           duration: { type: "number", exclusiveMinimum: 0 },
           visual_strategy: { type: "string", enum: ["stock", "image", "generated", "local"] },
           visual_prompt: { type: "string", minLength: 1 },

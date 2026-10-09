@@ -1288,6 +1288,43 @@ describe("ProductionPipeline", () => {
     assert.equal(output.report, undefined, "no fabricated review report may appear on the incomplete stop");
     assert.match(String(output.visualReviewPath ?? ""), /visual_review_incomplete\.json$/);
     assert.equal(typeof node?.executionReceipt, "object");
+    // 历史停点只补证据、不代签；随后仍要求用户明确承担风险，且核对同一版媒体。
+    const legacy = structuredClone(run);
+    const legacyNode = legacy.nodeRuns.find(item => item.nodeId === "visual-review")!;
+    delete legacyNode.intervention!.evidenceId;
+    delete legacyNode.intervention!.reviewStatus;
+    for (const stop of legacy.interventions.filter(item => item.id === intervention.id)) {
+      delete stop.evidenceId;
+      delete stop.reviewStatus;
+    }
+    await writeFile(path.join(workspaceRoot, "runs", run.id, "run.json"), JSON.stringify(legacy));
+    const refreshed = await subject.decide(run.id, {
+      interventionId: intervention.id, expectedRunRevision: legacy.revision,
+      actor: "creator", action: "approve", acceptIncomplete: true, reviewEvidenceId: null,
+    });
+    const refreshedStop = refreshed.nodeRuns.find(item => item.nodeId === "visual-review")!.intervention!;
+    assert.ok(refreshedStop.evidenceId);
+    assert.equal(refreshed.decisions.length, legacy.decisions.length, "补齐历史停点不得签字");
+    assert.equal(refreshed.nodeRuns.some(item => item.nodeId === "final-review"), false);
+    await assert.rejects(subject.decide(run.id, {
+      interventionId: refreshedStop.id, expectedRunRevision: refreshed.revision,
+      actor: "creator", action: "approve", reviewEvidenceId: refreshedStop.evidenceId!,
+    }), /明确接受未复核风险/);
+    const originalVideo = await readFile(videoArtifact.uri!);
+    try {
+      await writeFile(videoArtifact.uri!, "different-media");
+      await assert.rejects(subject.decide(run.id, {
+        interventionId: refreshedStop.id, expectedRunRevision: refreshed.revision,
+        actor: "creator", action: "approve", acceptIncomplete: true, reviewEvidenceId: refreshedStop.evidenceId!,
+      }), /sha256 does not match its descriptor/);
+    } finally { await writeFile(videoArtifact.uri!, originalVideo); }
+    const adopted = await subject.decide(run.id, {
+      commandId: "accept-settled-review", interventionId: intervention.id,
+      expectedRunRevision: refreshed.revision, actor: "creator", action: "approve", acceptIncomplete: true,
+      reviewEvidenceId: refreshedStop.evidenceId!,
+    });
+    assert.equal(adopted.nodeRuns.find(item => item.nodeId === "final-review")?.status, "needs_human",
+      "已核清的审计失败必须允许承担风险，且仍独立停在人工终审");
     attachedAudio = { status: "failed", reason: "原声音审片已结清，但没有有效意见。" };
     const withSound = await subject.start({ ...brief, providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" } });
     assert.equal(withSound.status, "needs_human");
@@ -1648,8 +1685,10 @@ describe("ProductionPipeline", () => {
     let run = await subject.start({ ...brief, providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" } });
     const visualStop = run.nodeRuns.find(node => node.nodeId === "visual-review")!;
     assert.equal(visualStop.status, "needs_human");
+    assert.ok(visualStop.intervention?.evidenceId);
     run = await subject.decide(run.id, { expectedRunRevision: run.revision, actor: "creator",
-      interventionId: visualStop.intervention!.id, action: "approve", reviewEvidenceId: null });
+      interventionId: visualStop.intervention!.id, action: "approve",
+      reviewEvidenceId: visualStop.intervention!.evidenceId, acceptIncomplete: true });
     const final = run.nodeRuns.find(node => node.nodeId === "final-review")!;
     assert.equal(final.status, "needs_human");
     const evidenceId = final.intervention!.evidenceId!;
@@ -1742,13 +1781,20 @@ describe("ProductionPipeline", () => {
     const visualStop = run.nodeRuns.find((candidate) => candidate.nodeId === "visual-review");
     assert.equal(visualStop?.status, "needs_human");
 
+    await assert.rejects(subject.decide(run.id, {
+      interventionId: visualStop!.intervention!.id, action: "approve", actor: "creator",
+      expectedRunRevision: run.revision, reviewEvidenceId: null,
+    }), /bound to the current review evidence/);
+    assert.equal((await subject.loadPersisted(run.id)).decisions.length, run.decisions.length);
     // 用户承担未复核风险继续：节点完成，进入终审。
+    assert.ok(visualStop?.intervention?.evidenceId);
     run = await subject.decide(run.id, {
       interventionId: visualStop!.intervention!.id,
       action: "approve",
       actor: "creator",
       expectedRunRevision: run.revision,
-      reviewEvidenceId: null,
+      reviewEvidenceId: visualStop!.intervention!.evidenceId,
+      acceptIncomplete: true,
     });
     const finalReview = run.nodeRuns.find((candidate) => candidate.nodeId === "final-review");
     const failureNodes = run.nodeRuns.filter((n) => n.status === "failed" || n.error).map((n) => `${n.nodeId}:${n.status}:${n.error}`);
@@ -4067,18 +4113,19 @@ describe("ProductionPipeline", () => {
   it("lets an editor revise brief content while protecting workflow infrastructure", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-brief-override-"));
     const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });
-    const waiting = await subject.start(brief);
+    const waiting = await subject.start({ ...brief, editorial: { verdict: "produce_video", reasons: ["解释出版情况"], guardrails: ["展示书封"] } });
     const briefOutput = waiting.nodeRuns.find((node) => node.nodeId === "brief")?.output as pipeline.ProductionBrief;
 
     const revised = await subject.applyNodeOverride(waiting.id, {
       nodeId: "brief",
       actor: "producer",
-      output: { ...briefOutput, title: "人工修改后的选题" },
+      output: { ...briefOutput, title: "人工修改后的选题", editorial: { verdict: "produce_video", reasons: [], guardrails: [] } },
     });
 
     assert.equal(revised.status, "stale");
     assert.equal((revised.nodeRuns.find((node) => node.nodeId === "brief")?.output as pipeline.ProductionBrief).title, "人工修改后的选题");
     assert.equal(revised.nodeRuns.find((node) => node.nodeId === "script")?.status, "stale");
+    assert.deepEqual(pipeline.effectiveProductionBrief(revised).editorial, { verdict: "produce_video", reasons: [], guardrails: [] });
     await assert.rejects(() => subject.applyNodeOverride(waiting.id, {
       nodeId: "brief",
       actor: "producer",
@@ -12020,6 +12067,51 @@ describe("ProductionPipeline", () => {
     await writeFile(runPath, baseline);
     const validAgain = await subject.resumeStale(stale.id);
     assert.equal(validAgain.status, "needs_human", "原有效批准仍可正常重生成文案");
+    const validPublish = validAgain.nodeRuns.find(node => node.nodeId === "publish-package")!;
+    latest = await subject.decide(validAgain.id, {
+      interventionId: validPublish.intervention!.id, action: "approve", actor: "owner",
+      expectedRunRevision: validAgain.revision, reviewEvidenceId: evidenceId,
+      contentVersionId: validPublish.outputState!.effectiveVersionId, acceptUnauditedContent: true,
+    });
+    // 完成态的 AI 修订只是新稿，不得借用原文案的批准直接成为完成版。
+    for (const round of [1, 2]) {
+      const prior = latest.nodeRuns.find(node => node.nodeId === "publish-package")!;
+      const artifact = latest.artifacts.find(item => item.kind === "publish_package" && prior.artifactIds.includes(item.id))!;
+      const document = JSON.parse(await readFile(artifact.uri!, "utf8"));
+      document.copy.title = `AI 新文案第${round}轮`;
+      const content = JSON.stringify(document);
+      const uri = path.join(workspaceRoot, "runs", latest.id, `copy-revision-${round}.json`);
+      await writeFile(uri, content);
+      const draft = {
+        nodeId: "publish-package", actor: "owner", allowTerminalEdit: true,
+        expectedRunRevision: latest.revision, expectedVersionId: prior.outputState!.effectiveVersionId,
+        documentCommandId: `completed-copy-${round}`, documentResultSha256: createHash("sha256").update(content).digest("hex"),
+        output: { ...prior.output as Record<string, unknown>, publishPackagePath: uri,
+          contentReview: { status: "not_audited", summary: "AI 新稿待用户决定", suggestions: [] } },
+        artifacts: [{ kind: "publish_package", uri, contentType: "application/json", parentArtifactIds: [artifact.id],
+          sha256: createHash("sha256").update(content).digest("hex"), sizeBytes: Buffer.byteLength(content),
+          provenance: { providerId: "ai-revision" } }],
+      };
+      const revised = await subject.applyNodeOverride(latest.id, draft);
+      assert.equal(revised.status, "needs_human", "AI 新稿必须单独采用");
+      const revisedNode = revised.nodeRuns.find(node => node.nodeId === "publish-package")!;
+      assert.equal(revisedNode.intervention?.boundary, "node-complete");
+      assert.notEqual(revisedNode.intervention?.id, prior.intervention?.id);
+      assert.deepEqual(revised.decisions, latest.decisions, "修订不得替用户签字");
+      assert.deepEqual(revised.nodeRuns.filter(node => node.nodeId !== "publish-package"),
+        latest.nodeRuns.filter(node => node.nodeId !== "publish-package"), "原成片、声音、终审不动");
+      assert.deepEqual(await subject.applyNodeOverride(latest.id, draft), revised, "同体重放不另建稿或停点");
+      await assert.rejects(subject.decide(revised.id, { interventionId: prior.intervention!.id,
+        action: "approve", actor: "owner", expectedRunRevision: revised.revision,
+        reviewEvidenceId: evidenceId, contentVersionId: prior.outputState!.effectiveVersionId }), /intervention/i);
+      latest = await subject.decide(revised.id, {
+        interventionId: revisedNode.intervention!.id, action: "approve", actor: "owner",
+        expectedRunRevision: revised.revision, reviewEvidenceId: evidenceId,
+        contentVersionId: revisedNode.outputState!.effectiveVersionId, acceptUnauditedContent: true,
+      });
+      assert.equal(latest.status, "succeeded");
+      assert.deepEqual(latest.decisions.find(decision => decision.id === finalDecision.id), finalDecision);
+    }
   });
 
   it("边界闸门不会静默跳过声明了 qualityGates 的节点", async () => {

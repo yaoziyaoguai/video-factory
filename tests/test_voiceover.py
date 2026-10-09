@@ -38,6 +38,7 @@ class MiniMaxVoiceoverTest(unittest.TestCase):
             script_path.write_text(json.dumps({"scenes": [
                 {"position": 1, "narration": "……", "duration": 0.3},
                 {"position": 2, "narration": " \n\t", "duration": 0.2},
+                {"position": 3, "narration": "", "duration": 0.2},
             ]}), encoding="utf-8")
             output_dir = root / "nodes" / "voice" / "attempt-1"
             with patch("video_factory.voiceover.urlopen", side_effect=AssertionError("Silence must not call TTS")), patch.dict(
@@ -51,12 +52,12 @@ class MiniMaxVoiceoverTest(unittest.TestCase):
                     estimated_cost_cny=0.5,
                 )
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            self.assertEqual([scene["speech_duration"] for scene in plan["scenes"]], [0, 0])
+            self.assertEqual([scene["speech_duration"] for scene in plan["scenes"]], [0, 0, 0])
             for scene in plan["scenes"]:
                 self.assertAlmostEqual(
                     voiceover_module.probe_audio_duration(Path(scene["audio_path"])), scene["duration"], delta=0.03
                 )
-            self.assertAlmostEqual(voiceover_module.probe_audio_duration(Path(plan["track_path"])), 0.5, delta=0.08)
+            self.assertAlmostEqual(voiceover_module.probe_audio_duration(Path(plan["track_path"])), 0.7, delta=0.08)
             decoded = subprocess.run([
                 "ffmpeg", "-v", "error", "-i", plan["track_path"], "-f", "s16le", "-",
             ], check=True, capture_output=True)

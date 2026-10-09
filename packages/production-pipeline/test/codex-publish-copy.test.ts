@@ -47,11 +47,11 @@ describe("CodexPublishCopyWriter", () => {
   it("accepts one and two scene narrations without adding filler", async () => {
     const client = new CapturingCodexClient(() => rawCopy());
     const writer = new CodexPublishCopyWriter({ client });
-    for (const narrations of [["这证明了你是朋友"], ["今晚是现场效果最好的一次", "他用行动证明了自己的勇气"]]) {
+    for (const narrations of [["这证明了你是朋友"], ["今晚是现场效果最好的一次", "他用行动证明了自己的勇气"], ["先看倒影", "", "最后听到脚步"]]) {
       await writer.write({ ...publishInput(), narrations });
       assert.deepEqual((client.calls.at(-1)!.payload as PublishCopyInput).narrations, narrations);
     }
-    assert.equal(client.calls.length, 2);
+    assert.equal(client.calls.length, 3);
   });
 
   it("returns the first publish draft and independent advice without automatic rewriting", async () => {
@@ -142,11 +142,11 @@ describe("CodexPublishCopyWriter", () => {
     );
     await assert.rejects(
       () => writer.write({ ...publishInput(), narrations: [] }),
-      /narrations must contain 1 to 24 non-empty entries/,
+      /narrations must contain 1 to 24 string entries/,
     );
     await assert.rejects(
-      () => writer.write({ ...publishInput(), narrations: ["第一场旁白", " ", "第三场旁白"] }),
-      /narrations must contain 1 to 24 non-empty entries/,
+      () => writer.write({ ...publishInput(), narrations: ["第一场旁白", null as unknown as string, "第三场旁白"] }),
+      /narrations must contain 1 to 24 string entries/,
     );
     assert.equal(codexClient.calls.length, 0);
   });

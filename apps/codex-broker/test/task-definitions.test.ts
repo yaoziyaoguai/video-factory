@@ -299,7 +299,7 @@ describe("broker-owned task definitions", () => {
         "video-factory/topic-editor-v12",
         "video-factory/series-showrunner-v3",
         "video-factory/treatment-director-v9",
-        "video-factory/screenwriter-v21",
+      "video-factory/screenwriter-v22",
         "video-factory/director-v31",
       ],
     );
@@ -867,6 +867,13 @@ describe("broker-owned task definitions", () => {
 });
 
 // T08：连续旁白能力语义——提示词不再误述能力，角色与审计读取同一能力事实。
+it("keeps audio advice within connected tools without denying observable sound defects", () => {
+  const rules = JSON.stringify(taskPromptFor("audio-review"));
+  assert.match(rules, /未接入独立背景音乐、环境音或拟音的添加与混轨/);
+  assert.match(rules, /不因此隐瞒真实听到的问题/);
+  assert.match(rules, /外部后期建议/);
+});
+
 it("describes the confirmed continuous-narration capability instead of the old cross-scene prohibition", () => {
   assert.match(SCREENWRITER_DIRECTIVE, /productionCapabilities\.audio/);
   assert.match(SCREENWRITER_DIRECTIVE, /continuousNarrationGroups/);

@@ -827,7 +827,10 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
   }
   if (kind === "publish-copy") {
     assertExactKeys(record, ["platform", "brief", "narrations", "revision"], "payload");
-    const narrations = stringArray(record.narrations, "payload.narrations");
+    const narrations = arrayValue(record.narrations, "payload.narrations").map((entry, index) => {
+      if (typeof entry !== "string") throw new CodexExecutorError(`payload.narrations[${index}] must be a string.`, false);
+      return entry;
+    });
     if (narrations.length < 1 || narrations.length > 24) {
       throw new CodexExecutorError("payload.narrations must contain 1 to 24 entries.", false);
     }

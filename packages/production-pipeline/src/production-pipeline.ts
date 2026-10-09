@@ -1593,6 +1593,11 @@ export class ProductionPipeline {
           "Creative review cannot use the generic decision endpoint; use the stage confirmation command.",
         );
       }
+      if (activeInterventionNode.nodeId === "visual-review"
+        && await this.bindSettledVisualReviewGate(previous)) {
+        // 旧停点缺少风险证据身份：先补齐可见停点，让用户重新确认，不替旧请求签字。
+        return { ...previous, revision: previous.revision + 1, updatedAt: this.clock() };
+      }
       if (decision.action === "approve" && activeInterventionNode.nodeId === "final-review"
         && isUnconfiguredVisualFirstCut(brief) && !finalReviewEvidenceId(activeInterventionNode)
         && decision.reviewEvidenceId == null) {
@@ -1655,6 +1660,8 @@ export class ProductionPipeline {
             ? activeInterventionNode.intervention.evidenceId : null)
           : renderedReviewStop && effectiveVisualEvidenceId !== null
             ? effectiveVisualEvidenceId
+            : activeInterventionNode.nodeId === "visual-review" && incompleteVisualDeliveryProof(visualDelivery)
+              ? activeInterventionNode.intervention?.evidenceId ?? null
             : activeInterventionNode.nodeId === "final-review"
               ? finalReviewEvidenceId(activeInterventionNode)
               : null;
@@ -1675,6 +1682,17 @@ export class ProductionPipeline {
       }
       if (decision.reviewEvidenceId !== currentReviewEvidenceId) {
         throw new HumanDecisionConflictError("Human decision is not bound to the current review evidence.");
+      }
+      if (decision.action === "approve" && activeInterventionNode.nodeId === "visual-review"
+        && incompleteVisualDeliveryProof(visualDelivery)
+        && activeInterventionNode.intervention?.continuationScope !== "rendered_video_optional_review") {
+        if (decision.acceptIncomplete !== true) {
+          throw new HumanDecisionConflictError("这次审片没有有效结论，请明确接受未复核风险后再进入人工终审。");
+        }
+        const evidence = await currentInternalDeliveryEvidence(previous, brief, this.store.runDirectory(runId));
+        if (contentSha256(evidence) !== currentReviewEvidenceId) {
+          throw new HumanDecisionConflictError("当前成片或审查证据已变化，请重新查看后再确认。");
+        }
       }
       if (decision.action === "approve" && activeInterventionNode?.nodeId === "final-review") {
         if (activeInterventionNode.intervention?.reviewStatus === "incomplete" && decision.acceptIncomplete !== true) {
@@ -2938,7 +2956,21 @@ export class ProductionPipeline {
     }, this.clock());
   }
 
+  private async bindSettledVisualReviewGate(run: WorkflowRun<ProductionBrief>): Promise<boolean> {
+    const visual = run.nodeRuns.find(item => item.nodeId === "visual-review");
+    const proof = visual && incompleteVisualDeliveryProof(effectiveNodeOutput(visual));
+    if (visual?.status !== "needs_human" || !visual.intervention || visual.outputState?.stale
+      || !proof || proof.continuationScope === "rendered_video_optional_review"
+      || visual.intervention.evidenceId) return false;
+    const evidence = await currentInternalDeliveryEvidence(run, effectiveProductionBrief(run), this.store.runDirectory(run.id));
+    Object.assign(visual.intervention, { reviewStatus: "incomplete", providerOutcomeKnown: true,
+      evidenceId: contentSha256(evidence) });
+    run.interventions = run.interventions.map(item => item.id === visual.intervention!.id ? visual.intervention! : item);
+    return true;
+  }
+
   private async captureOptionalReviewDiagnostics(run: WorkflowRun<ProductionBrief>): Promise<void> {
+    await this.bindSettledVisualReviewGate(run);
     const node = run.nodeRuns.find(item => item.nodeId === "creative-planning");
     const output = node && effectiveNodeOutput(node);
     const review = isObjectRecord(output?.creativeReview) ? output.creativeReview as unknown as CreativeReviewState : undefined;
@@ -3117,10 +3149,17 @@ export class ProductionPipeline {
       const version = node.outputState?.versions.find(item => item.id === node.outputState?.effectiveVersionId);
       const trace = run.artifacts.find(item => (version?.artifactIds ?? node.artifactIds).includes(item.id)
         && item.kind === "agent_loop_trace" && item.producer?.nodeId === node.nodeId);
-      if (!trace?.uri) throw new HumanDecisionConflictError("下游生成的原结果尚未核清，请先核对原请求；当前稿已保留，不会重新发送。");
-      await verifyStoredArtifactWithinRoot(this.store.runDirectory(run.id), trace);
-      const failure = JSON.parse(await readFile(trace.uri, "utf8")) as { failure?: { stage?: string } };
-      if (failure.failure?.stage !== "completed_failure") {
+      let settled = false;
+      if (trace?.uri) {
+        await verifyStoredArtifactWithinRoot(this.store.runDirectory(run.id), trace);
+        const failure = JSON.parse(await readFile(trace.uri, "utf8")) as { failure?: { stage?: string } };
+        settled = failure.failure?.stage === "completed_failure";
+      } else {
+        // 旧 joint 包装异常没有登记 loop artifact；必须核本次操作的全部候选 checkpoint，
+        // 不能拿外层 command.failed 或历史单个请求替当前所有请求签收。
+        settled = await hasSettledPlanningGenerationCheckpoints(this.store.runDirectory(run.id), run, review.activeStage);
+      }
+      if (!settled) {
         throw new HumanDecisionConflictError("下游生成的原结果尚未核清，请先核对原请求；当前稿已保留，不会重新发送。");
       }
       await assertNoUnresolvedPlanningTask(this.store.runDirectory(run.id), run);
@@ -3330,10 +3369,24 @@ export class ProductionPipeline {
       });
       const next = runner.applyNodeOverride(this.createWorkflow(brief), withExecutableBrief(previous, brief), effectiveOverride);
       if (override.documentCommandId && override.documentResultSha256) {
-        const state = next.nodeRuns.find((node) => node.nodeId === override.nodeId)!.outputState!;
+        const revised = next.nodeRuns.find((node) => node.nodeId === override.nodeId)!;
+        const state = revised.outputState!;
         state.versions.find((version) => version.id === state.effectiveVersionId)!.documentCommand = {
           commandId: override.documentCommandId, resultSha256: override.documentResultSha256,
         };
+        if (override.nodeId === "publish-package" && boundaryGatesEnabled(brief)
+          && previous.nodeRuns.find(node => node.nodeId === override.nodeId)?.status === "succeeded") {
+          // 用户授权生成新文案，不等于已经读过并采用新稿；原成片和独立终审保持有效。
+          revised.status = "needs_human";
+          delete revised.finishedAt;
+          revised.intervention = { id: `document-review-${contentSha256(override.documentCommandId)}`,
+            nodeId: revised.nodeId, createdAt: this.clock(), boundary: "node-complete",
+            reason: "文案修订版已保存，请阅读后决定是否采用。原成片与终审记录保持不变。",
+            requiredAction: "approve", options: ["approve", "reject"] };
+          next.interventions = [...next.interventions.filter(item => item.nodeId !== revised.nodeId), revised.intervention];
+          next.status = "needs_human";
+          delete next.finishedAt;
+        }
       }
       return next;
     }, override.documentCommandId);
@@ -12129,10 +12182,14 @@ function creativePlanningNode(
           const failureArtifactIds: string[] = [];
           if (outcome.generationError) {
             // 交回用户不等于擦掉失败；原始诊断继续随本次产物登记。
-            const evidence = await failedAgentLoopNodeResult({ error: outcome.generationError,
+            const failureOptions = { error: outcome.generationError,
               attemptDirectory: attempt.directory, nodeId: "creative-planning", attempt: attempt.attempt,
               parentArtifactIds: context.artifacts.map(artifact => artifact.id),
-              provider: { id: currentBrief.providers.script }, providerLabel: "joint-v1 创作规划" });
+              provider: { id: currentBrief.providers.script, billing: "subscription" as const }, providerLabel: "joint-v1 创作规划" };
+            const evidence = outcome.generationError instanceof ModelCandidatesExhaustedError
+              ? await failedModelCandidatesNodeResult({ ...failureOptions, error: outcome.generationError,
+                taskKind: outcome.gate.stage === "script" ? "director-plan" : "script-draft" })
+              : await failedAgentLoopNodeResult({ ...failureOptions, error: outcome.generationError });
             for (const artifact of evidence.artifacts ?? []) failureArtifactIds.push(context.addArtifact(artifact).id);
           }
           const finalState = ((await graph.getState(threadConfig))?.values ?? {}) as Partial<PlanningGraphState>;
@@ -13856,8 +13913,8 @@ async function readNarrations(scriptPath: string): Promise<string[]> {
       throw new Error(`Script scene ${index + 1} must be an object.`);
     }
     const narration = (scene as Record<string, unknown>).narration;
-    if (typeof narration !== "string" || !narration.trim()) {
-      throw new Error(`Script scene ${index + 1} narration must be a non-empty string.`);
+    if (typeof narration !== "string") {
+      throw new Error(`Script scene ${index + 1} narration must be a string.`);
     }
     return narration.trim();
   });
@@ -13890,11 +13947,12 @@ function parseDirectorScenes(script: unknown): VisualDirectorAgentInput["scenes"
     const duration = Number(scene.duration);
     if (!Number.isInteger(position) || position < 1) throw new Error(`Script scene ${index + 1} position is invalid.`);
     if (!Number.isFinite(duration) || duration <= 0) throw new Error(`Script scene ${index + 1} duration is invalid.`);
+    if (typeof scene.narration !== "string") throw new Error(`Script scene ${index + 1} narration must be a string.`);
     return {
       position,
       ...(optionalOutputString(scene.purpose) ? { purpose: optionalOutputString(scene.purpose)! } : {}),
       duration,
-      narration: requiredOutputString(scene, "narration"),
+      narration: scene.narration.trim(),
       visualPrompt: requiredOutputString(scene, "visual_prompt"),
       visualStrategy: visualStrategy(scene.visual_strategy),
       visibleAction: optionalOutputString(scene.visible_action) ?? requiredOutputString(scene, "visual_prompt"),
@@ -16083,6 +16141,35 @@ function optionalNonNegativeInteger(value: unknown, field: string): number | und
     throw new Error(`Worker diagnostics ${field} must be a non-negative integer.`);
   }
   return Number(value);
+}
+
+async function hasSettledPlanningGenerationCheckpoints(
+  runDirectory: string, run: WorkflowRun<ProductionBrief>, upstreamStage: CreativeStage,
+): Promise<boolean> {
+  const node = run.nodeRuns.find(item => item.nodeId === "creative-planning");
+  const role = upstreamStage === "treatment" ? "编剧" : upstreamStage === "script" ? "导演" : undefined;
+  if (!node?.operationRequestId || !role) return false;
+  const directory = path.join(runDirectory, "nodes", node.nodeId, "agent-loop-checkpoints");
+  let names: string[];
+  try { names = await readdir(directory); }
+  catch (error) { if (hasCode(error, "ENOENT")) return false; throw error; }
+  const root = await realpath(runDirectory);
+  let matched = 0;
+  for (const name of names.filter(item => item.endsWith(".json"))) {
+    const file = await realpath(path.join(directory, name));
+    if (!file.startsWith(`${root}${path.sep}`)) return false;
+    const value: unknown = JSON.parse(await readFile(file, "utf8"));
+    if (!isObjectRecord(value) || !isObjectRecord(value.recoveryOwner)) return false;
+    if (value.recoveryOwner.runId !== run.id || value.recoveryOwner.nodeId !== node.nodeId
+      || value.recoveryOwner.workflowOperationRequestId !== node.operationRequestId || value.role !== role) continue;
+    matched += 1;
+    if (!["video-factory/agent-loop-checkpoint-v8", "video-factory/agent-loop-checkpoint-v9"].includes(String(value.version))
+      || (value.storageKey ?? value.key) !== name.slice(0, -5) || value.status !== "failed"
+      || !isObjectRecord(value.failure) || !["completed_failure", "not_accepted", "rejected"].includes(String(value.failure.stage))
+      || value.failure.stage !== "completed_failure" && isObjectRecord(value.failure.details) && value.failure.details.accepted === true
+      || value.pendingOperation) return false;
+  }
+  return matched > 0;
 }
 
 async function assertNoUnresolvedPlanningTask(runDirectory: string, run: WorkflowRun<ProductionBrief>): Promise<void> {

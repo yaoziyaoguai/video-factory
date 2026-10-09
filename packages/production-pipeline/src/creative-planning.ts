@@ -12,7 +12,7 @@ import { RoleAgentLoopError, RoleAgentPlanningHaltError, isCompletedRoleAgentFai
 import { CodexBridgeError, codexBridgeErrorFromCause, type AgentLoopTrace, type RoleAudit, type RoleAuditPlanningDisposition } from "./codex-chat.js";
 import { ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
 import { classifyCreativeConsultationError, type CreativeConsultationFacts } from "./creative-discussion-facts.js";
-import { isModelProviderFailure, isTransientRoleAuditProviderFailure } from "./model-fallback.js";
+import { isModelProviderFailure, isTransientRoleAuditProviderFailure, publicModelFailure } from "./model-fallback.js";
 import {
   compileExecutableProductionPlan,
   parseExecutableProductionPlan,
@@ -252,7 +252,7 @@ export interface CreateCreativePlanningGraphOptions {
 export type CreativePlanningRunOutcome =
   | { status: "completed"; state: CreativePlanningState; executablePlan: PlanningArtifact<ExecutableProductionPlan> }
   | { status: "halted"; state: CreativePlanningState; halt: PlanningHalt }
-  | { status: "waiting_user"; state: CreativePlanningState; gate: CreativeReviewGate; generationError?: RoleAgentLoopError };
+  | { status: "waiting_user"; state: CreativePlanningState; gate: CreativeReviewGate; generationError?: RoleAgentLoopError | ModelCandidatesExhaustedError };
 
 const PlanningGraphAnnotation = Annotation.Root({
   runId: Annotation<string>(),
@@ -1947,8 +1947,15 @@ export async function runCreativePlanning(
       ) as PlanningGraphState;
     } catch (error) {
       // 只有已核清的生成失败才能退回真实人工停点；unknown 保持原请求恢复语义。
-      if (!(error instanceof RoleAgentLoopError) || !isCompletedRoleAgentFailure(error)) throw error;
-      const recovered = await reopenPlanningGenerationGate(graph, canonicalInput.runId, canonicalInput.inputDigest);
+      const settled = error instanceof RoleAgentLoopError && isCompletedRoleAgentFailure(error)
+        || error instanceof ModelCandidatesExhaustedError && error.failures.length > 0
+          && error.failures.every(failure => failure.error instanceof RoleAgentLoopError && isCompletedRoleAgentFailure(failure.error)
+            || classifyCreativeConsultationError(failure.error).fact !== "unknown");
+      if (!settled || !(error instanceof RoleAgentLoopError || error instanceof ModelCandidatesExhaustedError)) throw error;
+      const failureDetail = error instanceof ModelCandidatesExhaustedError
+        ? error.failures.map((failure, index) => `候选 ${index + 1}：${publicModelFailure(failure.error)}`).join("；")
+        : publicModelFailure(error);
+      const recovered = await reopenPlanningGenerationGate(graph, canonicalInput.runId, canonicalInput.inputDigest, undefined, failureDetail);
       if (!recovered) throw error;
       return { status: "waiting_user", gate: creativeReviewGate(recovered.creativeReview, recovered.creativeReview.activeStage),
         state: projectCreativePlanningState(recovered), generationError: error };
@@ -1965,6 +1972,7 @@ export async function runCreativePlanning(
 export async function reopenPlanningGenerationGate(
   graph: CreativePlanningGraph, runId: string, inputDigest: string,
   target?: { stage: CreativeStage; versionId: string; sha256: string },
+  failureDetail?: string,
 ): Promise<PlanningGraphState | undefined> {
   const config = { configurable: { thread_id: planningThreadId(runId, inputDigest) } };
   const snapshot = await graph.getState(config);
@@ -1990,7 +1998,7 @@ export async function reopenPlanningGenerationGate(
     creativeReview: { ...review, reviewRevision: review.reviewRevision + 1,
       stages: { ...review.stages, [stage]: { ...current, phase: "waiting_user", confirmation: null } } },
     planningStop: { reason: "needs_user", issueIds: [],
-      detail: `${name}生成没有完成，尚无可采用的${name}。已保留你的${upstreamName}及采用记录；你可以先修改，也可以采用当前稿重新生成${name}。不会自动重试或重做已完成的上游内容。` },
+      detail: `${name}生成没有完成，尚无可采用的${name}。已保留你的${upstreamName}及采用记录；你可以先修改，也可以采用当前稿重新生成${name}。不会自动重试或重做已完成的上游内容。${failureDetail ? ` 本次调用情况：${failureDetail}` : ""}` },
   }, `${stage}_review`);
   return await graph.invoke(null, config) as PlanningGraphState;
 }

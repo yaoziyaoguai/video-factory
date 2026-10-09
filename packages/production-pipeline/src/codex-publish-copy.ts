@@ -255,8 +255,8 @@ function validatePublishCopyInput(input: PublishCopyInput): void {
   if (!Array.isArray(input.narrations)
     || input.narrations.length < 1
     || input.narrations.length > 24
-    || input.narrations.some((entry) => typeof entry !== "string" || !entry.trim())) {
-    throw new Error("Publish copy narrations must contain 1 to 24 non-empty entries.");
+    || input.narrations.some((entry) => typeof entry !== "string")) {
+    throw new Error("Publish copy narrations must contain 1 to 24 string entries (empty for silent scenes).");
   }
 }
 

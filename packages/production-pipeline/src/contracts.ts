@@ -1455,8 +1455,8 @@ function parseEditorialDirection(value: unknown): ProductionEditorialDirection |
   }
   return {
     verdict: input.verdict,
-    reasons: requireStringArray(input.reasons, "editorial.reasons"),
-    guardrails: requireStringArray(input.guardrails, "editorial.guardrails"),
+    reasons: requireStringArray(input.reasons, "editorial.reasons", true),
+    guardrails: requireStringArray(input.guardrails, "editorial.guardrails", true),
   };
 }
 
@@ -1576,8 +1576,8 @@ function optionalBoundedText(value: unknown, field: string, maximum: number): st
   return normalized;
 }
 
-function requireStringArray(value: unknown, field: string): string[] {
-  if (!Array.isArray(value) || value.length === 0) throw new Error(`${field} must be a non-empty string array.`);
+function requireStringArray(value: unknown, field: string, allowEmpty = false): string[] {
+  if (!Array.isArray(value) || (!allowEmpty && value.length === 0)) throw new Error(`${field} must be a${allowEmpty ? "" : " non-empty"} string array.`);
   return value.map((item, index) => requireString(item, `${field}[${index}]`));
 }
 

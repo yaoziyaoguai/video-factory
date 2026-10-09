@@ -841,6 +841,17 @@ describe("CodexScreenwriterAgent", () => {
     assert.equal(codexClient.calls.length, 0);
   });
 
+  it("accepts an explicitly silent scene but rejects missing or non-string narration", () => {
+    const draft = validDraft();
+    draft.scenes[1]!.narration = "";
+    const parsed = validateScriptDraft(draft, { durationSeconds: 24 });
+    assert.ok(!isCharacterScript(parsed));
+    assert.equal(parsed.scenes[1]!.narration, "");
+    for (const invalid of [undefined, null, 3]) {
+      assert.throws(() => validateScriptDraft({ ...draft, scenes: [{ ...draft.scenes[0], narration: invalid }] }, { durationPolicy: "content-led-v1", durationSeconds: 24 }), /narration.*string/);
+    }
+  });
+
   it("validateScriptDraft enforces its own target bounds", () => {
     assert.throws(
       () => validateScriptDraft(validDraft(), { durationSeconds: 5 }),
@@ -996,9 +1007,9 @@ describe("CodexScreenwriterAgent", () => {
         pattern: /outside 0\.6-1\.4x/,
       },
       {
-        name: "empty narration",
-        output: () => ({ scenes: [validScene(1, { narration: " " }), validScene(2), validScene(3)] }),
-        pattern: /scenes\[0\]\.narration must be a non-empty string/,
+        name: "missing narration field",
+        output: () => ({ scenes: [{ ...validScene(1), narration: undefined }, validScene(2), validScene(3)] }),
+        pattern: /scenes\[0\]\.narration must be a string/,
       },
       {
         name: "non-finite duration",

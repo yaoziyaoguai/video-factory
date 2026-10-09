@@ -114,8 +114,19 @@ export class DocumentCommandStore {
       const saved = record;
       if (!saved.completedAt && (saved.execution || saved.state === "failed")) saved.completedAt = saved.updatedAt;
       const persist = async () => { assertOwned(); saved.updatedAt = new Date().toISOString(); await this.save(saved); };
-      if (isNew && beforeCreate) await beforeCreate(persist);
-      else await persist();
+      if (isNew && beforeCreate) {
+        try { await beforeCreate(persist); }
+        catch (error) {
+          // 此时执行回调尚未进入，不可能提交模型；保存明确拒绝，供原编号查询和刷新恢复。
+          saved.state = "failed";
+          saved.completedAt = new Date().toISOString();
+          saved.error = { stage: "not_accepted", message: error instanceof Error
+            && ["StudioConflictError", "StudioInputError", "DocumentCommandConflictError"].includes(error.name)
+            ? error.message : "这次文字操作未受理，当前稿与修改意见保留。请核对当前状态后再操作。" };
+          await persist();
+          throw error;
+        }
+      } else await persist();
       const task: DocumentTaskContext = {
         requestId: saved.prepared?.requestId ?? `doc-${digest({ directory: this.directory, commandId })}`,
         ...(saved.prepared ? { prepared: saved.prepared } : {}),

@@ -32,7 +32,7 @@ describe("brief audit projection separates system suggestions from user requirem
       },
     }));
     assert.equal(projection.visualPlanProvenance, "system_suggested_reference");
-    assert.ok(projection.visualPlan);
+    assert.equal(projection.visualPlan, undefined, "未采用的旧时长/画面示意不应再参与用户承诺审查");
   });
 
   it("does not downgrade a visual plan without adoption evidence or one the user adopted", () => {
