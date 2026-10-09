@@ -415,8 +415,8 @@ describe("Studio client", () => {
     ] };
     const view = render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
     await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
-    const dialog = screen.getByRole("dialog");
-    const approve = within(dialog).getByRole("button", { name: "逐条表态已完成，生成发布包" });
+    let dialog = screen.getByRole("dialog");
+    let approve = within(dialog).getByRole("button", { name: "逐条表态已完成，生成发布包" });
     expect(approve).toBeDisabled();
     expect(prefill).not.toHaveBeenCalled();
     expect(within(dialog).getByText("已表态 0/1")).toBeInTheDocument();
@@ -437,6 +437,13 @@ describe("Studio client", () => {
     expect(approve).toBeDisabled();
     expect(within(dialog).getByText("还有 1 条没有表态。")).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "接受风险，保留本版" }));
+    // 新证据上的表态不能复活旧确认快照；重新查看后才允许确认当前停点。
+    expect(approve).toBeDisabled();
+    expect(onDecision).toHaveBeenCalledTimes(1);
+    await user.click(within(dialog).getByRole("button", { name: "返回查看当前内容" }));
+    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
+    dialog = screen.getByRole("dialog");
+    approve = within(dialog).getByRole("button", { name: "逐条表态已完成，生成发布包" });
     expect(approve).toBeEnabled();
     next.revision++;
     next.nodes.at(-1)!.output = { report: { ...report, reviewScope: { evidenceId: "c".repeat(64) } } };
@@ -6291,6 +6298,42 @@ describe("Studio client", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "确认继续到人工终审" }));
     await waitFor(() => expect(onDecision).toHaveBeenCalledTimes(1));
     expect(onDecision.mock.calls[0]?.[0]).toMatchObject({ action: "approve", interventionId: "visual-incomplete", expectedRunRevision: 16 });
+  });
+
+  it("requires a fresh look after legacy review evidence is prepared, keeping the user's approval note", async () => {
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const current: StudioRunDetail = { ...runDetail, revision: 16, status: "needs_human", currentNodeId: "visual-review",
+      activeIntervention: { id: "visual-incomplete", nodeId: "visual-review", reason: "审片已结束但无有效结论",
+        options: ["approve", "reject"], createdAt: runDetail.startedAt },
+      nodes: [{ id: "visual-review", label: "视觉审片", status: "needs_human", artifactIds: [], qualityGateResults: [],
+        output: { reviewStatus: "incomplete", providerOutcomeKnown: true } },
+        { id: "final-review", label: "人工终审", status: "pending", artifactIds: [], qualityGateResults: [] }],
+    };
+    const view = (run: StudioRunDetail) => <RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />;
+    const { rerender } = render(view(current));
+    fireEvent.click(screen.getByRole("button", { name: "接受未复核风险，进入人工终审" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "批准备注（选填）" }), { target: { value: "保留我的风险判断" } });
+    fireEvent.click(screen.getByRole("button", { name: "确认继续到人工终审" }));
+    expect(onDecision).toHaveBeenCalledTimes(1);
+
+    const prepared: StudioRunDetail = { ...current, revision: 17,
+      activeIntervention: { ...current.activeIntervention!, evidenceId: "e".repeat(64) } };
+    rerender(view(prepared));
+    expect(screen.getByRole("button", { name: "确认继续到人工终审" })).toBeDisabled();
+    expect(screen.getByText(/确认依据已刷新.*尚未签字/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认继续到人工终审" }));
+    expect(onDecision).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("textbox", { name: "批准备注（选填）" })).toHaveValue("保留我的风险判断");
+
+    fireEvent.click(screen.getByRole("button", { name: "返回查看当前内容" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "接受未复核风险，进入人工终审" }));
+    expect(onDecision).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "确认继续到人工终审" }));
+    expect(onDecision).toHaveBeenCalledTimes(2);
+    expect(onDecision).toHaveBeenLastCalledWith({ action: "approve", expectedRunRevision: 17,
+      interventionId: "visual-incomplete", reviewEvidenceId: "e".repeat(64), acceptIncomplete: true,
+      note: "保留我的风险判断" });
   });
 
   it("does not offer reinspection when the first cut has no configured review node", () => {

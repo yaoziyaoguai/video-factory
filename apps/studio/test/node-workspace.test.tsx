@@ -110,6 +110,38 @@ const hailuoProvider: StudioProvider = {
 };
 
 describe("node production workspaces", () => {
+  it.each(["needs_human", "succeeded"] as const)("reveals a new pending decision document (%s node) once without overriding the user's later collapse", async (status) => {
+    const output = { copy: { title: "当前发布标题", description: "当前发布正文", hashtags: [] } };
+    const node: StudioNode = { ...succeededNode, id: "publish-package", label: "发布文案与发布包", output,
+      outputState: { ...succeededNode.outputState!, versions: [{ ...succeededNode.outputState!.versions[0]!, output }] } };
+    const props = { node, currentDelivery: true, runId: "returning-document", runRevision: 1,
+      acceptedPlanDigest: TEST_PLAN_DIGEST, runStatus: "succeeded" as const, artifacts: [], busy: false,
+      onOverride: async () => undefined, onAuthorize: async () => undefined };
+    const { rerender } = render(<NodeWorkspace {...props} />);
+    const workspace = screen.getByRole("group", { name: /发布文案与发布包/ });
+    const summary = workspace.querySelector("summary")!;
+    await userEvent.click(summary);
+    expect(workspace).not.toHaveAttribute("open");
+
+    const pending: StudioNode = { ...node, status };
+    rerender(<NodeWorkspace {...props} node={pending} runRevision={2} runStatus="needs_human" />);
+    expect(workspace).toHaveAttribute("open");
+    expect(screen.getByText("当前发布正文")).toBeVisible();
+    await userEvent.click(summary);
+    rerender(<NodeWorkspace {...props} node={{ ...pending }} runRevision={3} runStatus="needs_human" />);
+    expect(workspace).not.toHaveAttribute("open");
+
+    const nextOutput = { copy: { title: "新的发布标题", description: "新一版待确认正文", hashtags: [] } };
+    const next: StudioNode = { ...pending, output: nextOutput,
+      outputState: { ...pending.outputState!, effectiveVersionId: "next-version", versions: [
+        ...pending.outputState!.versions,
+        { ...pending.outputState!.versions[0]!, id: "next-version", output: nextOutput },
+      ] } };
+    rerender(<NodeWorkspace {...props} node={next} runRevision={4} runStatus="needs_human" />);
+    expect(workspace).toHaveAttribute("open");
+    expect(screen.getByText("新一版待确认正文")).toBeVisible();
+  });
+
   it("prioritizes the current decision document while keeping its input disclosure available", async () => {
     const output = { copy: { title: "当前发布标题", description: "当前发布正文", hashtags: [] } };
     const node: StudioNode = { ...succeededNode, id: "publish-package", label: "发布文案与发布包", role: "发行编辑", output,

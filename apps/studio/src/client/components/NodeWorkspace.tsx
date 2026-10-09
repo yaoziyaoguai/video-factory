@@ -265,6 +265,15 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     }
   }, [shouldOpenForAttention]);
 
+  // 完成态也可能一直是 currentDelivery；新稿待采用时按文档身份展开一次，
+  // 之后的轮询不覆盖用户主动折叠的选择。
+  const pendingDecisionIdentity = isDecisionDocument
+    && (node.status === "needs_human" || (currentDelivery && runStatus === "needs_human"))
+    ? JSON.stringify([documentIdentity, activeInterventionId]) : undefined;
+  useEffect(() => {
+    if (pendingDecisionIdentity) setWorkspaceOpen(true);
+  }, [pendingDecisionIdentity]);
+
   useEffect(() => {
     if (shouldOpenInputForAttention) setInputReviewOpen(true);
   }, [shouldOpenInputForAttention]);
@@ -568,10 +577,11 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           artifacts={runArtifacts ?? artifacts}
           interventionId={activeInterventionId}
           disabled={busy || runStatus === "running"} /> : null}
+    {/* 当前待决定文档移到决定区时，不让同名互斥分组在旧卡片卸载前关闭新卡片。 */}
     <details
       id={`node-workspace-${node.id}`}
       className={`node-workspace is-${node.status}`}
-      name="creator-workspaces"
+      name={isDecisionDocument && currentDelivery ? undefined : "creator-workspaces"}
       aria-label={`${node.label} · ${node.role ?? "制作角色"}`}
       open={workspaceOpen}
       onToggle={(event) => {

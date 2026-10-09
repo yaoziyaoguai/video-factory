@@ -464,6 +464,19 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
     }
   }, [run.activeIntervention]);
 
+  // 只绑定当前停点实际消费的证据；刷新不能把已打开的确认框无声升级为新授权。
+  const decisionReviewEvidenceId = sourceReviewDecision || sourceReviewRetry
+    ? sourceReviewEvidenceId ?? run.activeIntervention?.evidenceId ?? null
+    : renderedReviewStop
+      ? scopedOptionalReview ? run.activeIntervention?.evidenceId ?? null : visualReview?.evidenceId ?? run.activeIntervention?.evidenceId ?? null
+      : null;
+  const approvalSnapshotStale = Boolean(approving && decisionSnapshot && (
+    decisionSnapshot.expectedRunRevision !== run.revision
+    || decisionSnapshot.interventionId !== run.activeIntervention?.id
+    || decisionSnapshot.reviewEvidenceId !== decisionReviewEvidenceId
+    || decisionSnapshot.contentVersionId !== contentDecisionNode?.outputState?.effectiveVersionId
+  ));
+
   const decisionSnapshotFor = (kind: "approve" | "reject") => {
     if (!run.activeIntervention) return undefined;
     return {
@@ -472,11 +485,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
       ...(kind === "approve" && scopedOptionalReview ? { commandId: crypto.randomUUID() } : {}),
       // 成片审片证据只在消费它的停点随决定提交；其余停点不携带无关证据（与服务端分派一致）。
       // 终审无结论停点绑定的是 intervention.evidenceId（宿主交付快照 ID）。
-      reviewEvidenceId: sourceReviewDecision || sourceReviewRetry
-        ? sourceReviewEvidenceId ?? run.activeIntervention.evidenceId ?? null
-        : renderedReviewStop
-          ? scopedOptionalReview ? run.activeIntervention.evidenceId ?? null : visualReview?.evidenceId ?? run.activeIntervention.evidenceId ?? null
-          : null,
+      reviewEvidenceId: decisionReviewEvidenceId,
       ...(kind === "approve" && (sourceReviewIncompleteRisk || visualReviewIncompleteDecision || finalReviewIncompleteRisk)
         ? { acceptIncomplete: true as const } : {}),
       ...(kind === "approve" && contentDecisionNode?.outputState?.effectiveVersionId
@@ -1260,16 +1269,21 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               {undisposedReviewItems.length > 0 ? `还有 ${undisposedReviewItems.length} 条没有表态。` : ""}
               {acceptedReviewItems.length > 0 ? `其中 ${acceptedReviewItems.length} 条已采纳、还等着返修。` : ""}
             </p> : null}
+            {approvalSnapshotStale ? <p className="review-disposition-blocker" role="alert">
+              {decisionSnapshot?.interventionId === run.activeIntervention?.id
+                ? "确认依据已刷新，当前停点尚未签字。请先重新查看当前内容，再确认；批准备注已保留。"
+                : "当前停点已变化，不能继续提交刚才的确认。请先查看当前内容；批准备注已保留。"}
+            </p> : null}
             <footer className="dialog-actions">
-              <button className="button button-ghost" type="button" onClick={closeApproveDecision} disabled={decisionPending}>{boundaryGate ? "先不放行" : "再看一遍"}</button>
+              <button className="button button-ghost" type="button" onClick={closeApproveDecision} disabled={decisionPending}>{approvalSnapshotStale ? "返回查看当前内容" : boundaryGate ? "先不放行" : "再看一遍"}</button>
               <button
                 className="button button-primary"
                 type="button"
-                disabled={decisionPending || !decisionSnapshot
+                disabled={decisionPending || !decisionSnapshot || approvalSnapshotStale
                   || undisposedReviewItems.length > 0
                   || acceptedReviewItems.length > 0
                   || unexplainedReviewItems.length > 0}
-                onClick={() => decisionSnapshot && void onDecision({
+                onClick={() => decisionSnapshot && !approvalSnapshotStale && void onDecision({
                   action: "approve",
                   ...decisionSnapshot,
                   ...(approvalNote.trim() ? { note: approvalNote.trim() } : {}),
