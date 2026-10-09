@@ -90,12 +90,18 @@ export type {
 export {
   assertMediaCoverage,
   assertVoiceFits,
+  assertDurationCommitment,
+  parseDurationBounds,
+  durationIntentFor,
+  executableDurationFor,
+  validateContentLedDurationIntent,
   compileTimeline,
   PlanContractError,
 } from "./executable-timeline.js";
 export {
   compileExecutableProductionPlan,
   EXECUTABLE_PRODUCTION_PLAN_VERSION,
+  CONTENT_LED_PRODUCTION_PLAN_VERSION,
   parseExecutableProductionPlan,
 } from "./executable-production-plan.js";
 export type {
@@ -107,13 +113,17 @@ export type {
 export type {
   CompiledCut,
   CompiledTimeline,
+  ContentLedTimeline,
   CutInput,
   DurationRange,
+  DurationBounds,
+  DurationIntent,
+  ExecutableDuration,
   MaterializedMedia,
   PlanErrorCode,
   VoiceTiming,
 } from "./executable-timeline.js";
-export { DIRECTOR_PLAN_VERSION, VISUAL_DIRECTOR_PROFILES, validateVisualDirectorPlan } from "./visual-director.js";
+export { DIRECTOR_PLAN_VERSION, VISUAL_DIRECTOR_PROFILES, validateVisualDirectorPlan, validateVisualDirectorDraft, visualDirectorCapabilityConflicts } from "./visual-director.js";
 export type {
   ShotAuthenticityPolicy,
   ShotDecision,
@@ -254,6 +264,7 @@ export {
   candidateSearchFingerprint,
   compileInputFromContext,
   createCreativePlanningGraph,
+  creativeDiscussionRequestId,
   defaultAvailabilityReviewer,
   executablePlanCompilePort,
   initialPlanningGraphState,
@@ -326,7 +337,7 @@ export type {
   WorkerArtifactDescriptor,
   WorkerResponse,
 } from "./python-worker-client.js";
-export { advanceSceneCandidateRanking, canRetryRejectedReviewNode, canRetryNativeAudioNode, type ProductionNodeRetryOptions, effectiveProductionBrief, independentCreativeConsultationActions, HumanDecisionConflictError, PaidOperationManualReconciliationError, planningFailureForCreators, ProductionPipeline, productionWorkflowVersion, summarizeReworkImpact, withBoundaryGate } from "./production-pipeline.js";
+export { advanceSceneCandidateRanking, canRetryRejectedReviewNode, canRetryNativeAudioNode, type ProductionNodeRetryOptions, effectiveProductionBrief, independentCreativeConsultationActions, HumanDecisionConflictError, VoiceTimingContinuationError, PaidOperationManualReconciliationError, planningFailureForCreators, ProductionPipeline, productionWorkflowVersion, summarizeReworkImpact, withBoundaryGate } from "./production-pipeline.js";
 export {
   PRODUCTION_AUTHORIZATION_VERSION,
   canonicalProductionAssetIntentDigest,
@@ -376,6 +387,7 @@ export type {
   VideoGenerationAdapter,
   VideoGenerationProgress,
   VideoGenerationRequest,
+  VideoGenerationRecoveryRequest,
   VideoGenerationResult,
   WanVideoAdapterOptions,
 } from "./video-generation.js";
@@ -391,6 +403,8 @@ export type {
 } from "./image-generation.js";
 export {
   GenerativeAssetWorkerClient,
+  PaidAssetSafetyError,
+  PaidAssetOutcomeUnresolvedError,
   inspectPaidAssetLedger,
   isSourceReviewIncompleteError,
   paidAssetSourceFingerprint,

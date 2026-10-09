@@ -21,6 +21,45 @@ function deterministicIds(): (prefix: string) => string {
 const clock = (): string => "2026-08-21T10:00:00.000Z";
 
 describe("WorkflowRunner", () => {
+  it("exposes live retained interventions during execution, reload, retry and rework", async () => {
+    const observed: Array<Array<{ id: string; nodeId: string }>> = [];
+    let savedContext: WorkflowContext | undefined;
+    let breakProbe = false;
+    const definition: WorkflowDefinition = { id: "live-interventions", name: "Live intervention identity", version: "1", nodes: [
+      { id: "approval", label: "Approval", capability: "script.draft", mode: "manual", execute: () => ({
+        status: "needs_human", output: "approved", intervention: { reason: "approve", requiredAction: "approve" } }) },
+      { id: "probe", label: "Probe", capability: "script.draft", mode: "automatic", dependsOn: ["approval"],
+        execute: (_input, context) => {
+          savedContext = context;
+          const interventions = (context as WorkflowContext & { interventions?: Array<{ id: string; nodeId: string }> }).interventions;
+          assert.ok(Array.isArray(interventions));
+          observed.push(interventions.map(({ id, nodeId }) => ({ id, nodeId })));
+          if (breakProbe) throw new Error("controlled probe failure");
+          return { output: "read" };
+        } },
+      { id: "next", label: "Next", capability: "script.draft", mode: "manual", dependsOn: ["probe"], execute: () => ({
+        status: "needs_human", output: "done", intervention: { reason: "approve", requiredAction: "approve" } }) },
+    ] };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, {});
+    const firstId = waiting.interventions[0]!.id;
+    const next = await runner.resume(definition, structuredClone(waiting), { interventionId: firstId, action: "approve", actor: "owner" });
+    assert.equal(next.status, "needs_human", next.nodeRuns.find(node => node.status === "failed")?.error);
+    assert.deepEqual(observed[0], [{ id: firstId, nodeId: "approval" }]);
+    assert.deepEqual((savedContext as WorkflowContext & { interventions: unknown }).interventions, next.interventions,
+      "同一context须看到后续新增停点，不是构造时快照");
+    const completed = await runner.resume(definition, next, { interventionId: next.interventions.at(-1)!.id, action: "approve", actor: "owner" });
+    breakProbe = true;
+    const reopened = await runner.rerunFromNode(definition, completed, "probe");
+    assert.equal(reopened.status, "failed");
+    assert.deepEqual(observed.at(-1), [{ id: firstId, nodeId: "approval" }], "返工移除的停点不能从旧数组复活");
+    breakProbe = false;
+    const recovered = await runner.retryFailedNode(definition, structuredClone(reopened), "probe");
+    assert.equal(recovered.status, "needs_human");
+    assert.deepEqual(observed.at(-1), [{ id: firstId, nodeId: "approval" }]);
+    assert.notEqual(recovered.interventions.at(-1)!.id, next.interventions.at(-1)!.id);
+  });
+
   it("retries a local preparation pause without accepting output or reopening paid parents", async () => {
     let assets = 0, prepares = 0;
     const definition: WorkflowDefinition = { id: "local-recovery", name: "Local recovery", version: "1", nodes: [
@@ -3513,8 +3552,12 @@ describe("WorkflowRunner", () => {
 
     await assert.rejects(
       () => runner.resumeStale(definition, sourceChanged),
-      /stale human output.*reviewed.*discarded/i,
+      { name: "StaleHumanContentError", code: "STALE_HUMAN_CONTENT_REVIEW_REQUIRED", nodeId: "script", field: "output",
+        effectiveVersionId: sourceChanged.nodeRuns.find(node => node.nodeId === "script")!.outputState!.effectiveVersionId,
+        runRevision: sourceChanged.revision },
     );
+    assert.equal(sourceChanged.nodeRuns.find(node => node.nodeId === "script")?.outputState?.stale, true);
+    assert.deepEqual(sourceChanged.nodeRuns.find(node => node.nodeId === "script")?.output, { value: "human script" });
   });
 
   it("persists node inputs as versions and reruns from the effective human input", async () => {
@@ -3672,7 +3715,9 @@ describe("WorkflowRunner", () => {
     assert.equal(sourceChanged.nodeRuns.find((node) => node.nodeId === "script")?.inputState?.stale, true);
     await assert.rejects(
       () => runner.resumeStale(definition, sourceChanged),
-      /human input.*reviewed/i,
+      { name: "StaleHumanContentError", code: "STALE_HUMAN_CONTENT_REVIEW_REQUIRED", nodeId: "script", field: "input",
+        effectiveVersionId: sourceChanged.nodeRuns.find(node => node.nodeId === "script")!.inputState!.effectiveVersionId,
+        runRevision: sourceChanged.revision },
     );
 
     const reconfirmed = runner.applyNodeInputOverride(definition, sourceChanged, {

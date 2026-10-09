@@ -31,6 +31,18 @@ interface WorkerClient {
   forecastPaidVoiceSpend?(request: NarrationSpendRequest): Promise<NarrationSpendQuote | undefined>;
 }
 
+/** 由持有当前 run 租约的 Host 注入，不接受 JSON 请求中的回调。 */
+export interface PaidAssetExecutionContext {
+  /** 宿主原请求恢复专用，只限制当前operation，绝不授权新增create。 */
+  recoverOperationId?: string;
+  withSourceRunSnapshot<T>(sourceRunId: string, action: () => Promise<T>): Promise<T>;
+}
+
+type PaidAssetCreateBoundary = <T>(
+  item: PaidAssetOperationItem,
+  submit: (releaseAfterProgress: () => Promise<void>) => Promise<T>,
+) => Promise<T>;
+
 export interface VideoGenerationAdapterBinding {
   adapter: VideoGenerationAdapter;
   estimatedCnyPerClip: number;
@@ -107,6 +119,18 @@ interface ScriptScene {
 }
 
 const METERED_CREATE_ATTEMPTED = Symbol("meteredCreateAttempted");
+
+export class PaidAssetSafetyError extends Error {}
+
+/** 可复用集合会过滤旧指纹，不能用它代替完整账本上的采购安全判断。 */
+export class PaidAssetOutcomeUnresolvedError extends PaidAssetSafetyError {
+  readonly code = "PAID_ASSET_OUTCOME_UNRESOLVED";
+
+  constructor(itemRequestId: string) {
+    super(`Paid item '${itemRequestId}' still has an unresolved provider outcome; reconcile the original request before a new create.`);
+    this.name = "PaidAssetOutcomeUnresolvedError";
+  }
+}
 
 /** BG-05：返工携带的 reference/身份证明无法核验时抛出——run 停在素材检查点，
  * 列出缺证明的母片；新媒体 create 必须为 0，等用户补证或确认重生成。 */
@@ -200,6 +224,7 @@ interface PaidAssetOperationItem {
   carriedForwardFromItemRequestId?: string;
   error?: string;
   manualReconciliationRequired?: boolean;
+  sourceRunSnapshot?: { runId: string; revision: number; operationId?: string };
 }
 
 interface PaidAssetOperationLedger {
@@ -375,14 +400,19 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     }
   }
 
-  async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+  async run(request: Record<string, unknown>, execution?: PaidAssetExecutionContext): Promise<WorkerResponse> {
     if (request.capability !== "asset.prepare") {
       return this.options.fallback.run(request);
     }
+    if (execution?.recoverOperationId && request.commandId !== execution.recoverOperationId) {
+      throw new PaidAssetSafetyError("Paid recovery does not match the original operation identity.");
+    }
+    const recoveryFailure = await this.recoverOriginalOperation(request);
+    if (recoveryFailure) return recoveryFailure;
     const parameters = requiredRecord(request.parameters, "Worker parameters");
     const providerId = requiredString(parameters.providerId, "Worker providerId");
     if (providerId === "ai-shot-router-v1") {
-      return this.runDirectorRoutes(request, parameters);
+      return this.runDirectorRoutes(request, parameters, execution);
     }
     if (parameters.audioMode === "native_av") throw new Error("原生音画必须通过当前采用的逐镜画面方案执行。");
     const modelSelections = optionalStringRecord(parameters.modelSelections, "modelSelections");
@@ -510,7 +540,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
               ledgerPath,
               ledger: openedLedger?.ledger,
               ledgerItem,
-              allowCreate: openedLedger?.created !== false || acceptedPilotContinuation,
+              allowCreate: !execution?.recoverOperationId && (openedLedger?.created !== false || acceptedPilotContinuation),
+              createBoundary: this.paidCreateBoundary(request, execution),
               ...(Object.keys(itemCreateBudgets).length ? {
                 itemCreateBudgets,
                 priorCreateAttempts: priorCreateAttemptsByQuoteItem[`scene-${scene.position}`],
@@ -807,6 +838,143 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     return { script, scenes, directorPlan, routedShots, generatedRoutes };
   }
 
+  private paidCreateBoundary(request: Record<string, unknown>, execution?: PaidAssetExecutionContext): PaidAssetCreateBoundary {
+    return async <T>(item: PaidAssetOperationItem, submit: (releaseAfterProgress: () => Promise<void>) => Promise<T>): Promise<T> => {
+      const input = requiredRecord(request.input, "Worker input");
+      const sourceRunId = isRecord(input.rework) ? optionalString(input.rework.sourceRunId) : undefined;
+      const recheck = async () => {
+        const directory = path.join(path.dirname(requiredString(request.outputDir, "outputDir")), ".generation-operations");
+        assertNoUnresolvedPaidAssetItems(paidAssetLedgerLeaves(await previousPaidAssetItems(directory)));
+        const source = await readReworkPaidAssetSafety(this.options.runsRoot, input);
+        assertNoUnresolvedPaidAssetItems(source?.items ?? []);
+        if (source?.uncertainOperationId) throw new PaidAssetOutcomeUnresolvedError(source.uncertainOperationId);
+        if (source?.snapshot) item.sourceRunSnapshot = source.snapshot;
+      };
+      if (!sourceRunId || !execution) {
+        await recheck();
+        return submit(async () => {});
+      }
+      await assertAcyclicReworkSource(this.options.runsRoot, requiredString(request.runId, "runId"), sourceRunId);
+      // provider 的首个 progress 已耐久写入后才释放源保护；回调等待租约真正释放，
+      // 因此 adapter 后续的轮询/下载不持源锁。完整请求仍在本调用内 await。
+      let signalSubmitted!: () => void;
+      const submitted = new Promise<void>((resolve) => { signalSubmitted = resolve; });
+      let releaseProgress!: () => void;
+      const released = new Promise<void>((resolve) => { releaseProgress = resolve; });
+      let pending: Promise<T> | undefined;
+      let leaseError: unknown;
+      try {
+        await execution.withSourceRunSnapshot(sourceRunId, async () => {
+          await recheck();
+          pending = submit(async () => { signalSubmitted(); await released; });
+          // 无进度回调的同步响应/失败也须先完成 submit 内的落账。
+          pending.then(signalSubmitted, signalSubmitted);
+          await submitted;
+        });
+      } catch (error) {
+        leaseError = error;
+      } finally {
+        releaseProgress();
+      }
+      if (!pending) {
+        if (leaseError) throw leaseError;
+        throw new PaidAssetSafetyError("Paid submission did not start inside the source lease.");
+      }
+      const result = await pending;
+      if (leaseError) throw leaseError;
+      return result;
+    };
+  }
+
+  /** 原 operation 恢复只认落盘身份；当前脚本/编译器变化不能阻断旧任务查询。 */
+  private async recoverOriginalOperation(request: Record<string, unknown>): Promise<WorkerResponse | undefined> {
+    const operationId = requiredString(request.commandId, "commandId");
+    const outputDir = requiredString(request.outputDir, "outputDir");
+    const ledgerPath = generationLedgerPathIn(path.dirname(outputDir), operationId);
+    let ledger: PaidAssetOperationLedger;
+    try {
+      ledger = parsePaidAssetOperationLedger(JSON.parse(await readFile(ledgerPath, "utf8")), operationId);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    const pending = ledger.items.filter((item) => (
+      item.state === "submitted" || item.state === "unknown" || item.state === "provider_succeeded"
+    ));
+    if (!pending.length) return undefined;
+    await mkdir(outputDir, { recursive: true });
+    const jobsPath = path.join(outputDir, "generation_jobs.json");
+    const jobs: GenerationJob[] = [];
+    for (const item of pending) {
+      const mediaType = item.parameters.mediaType;
+      if (mediaType !== "video" && mediaType !== "image") throw new PaidAssetSafetyError("Original paid media type is missing.");
+      const job: GenerationJob = { scenePosition: item.scenePosition, providerId: item.providerId,
+        status: "submitted", estimatedCostCny: item.estimatedCostCny, mediaType, carriedForward: true,
+        ...(item.taskId ? { taskId: item.taskId } : {}) };
+      jobs.push(job);
+      try {
+        if (!item.taskId) throw new PaidAssetOutcomeUnresolvedError(item.itemRequestId);
+        const adapter = this.adapters.get(item.providerId)?.adapter;
+        const missingProtocolModel = item.providerId === "hailuo-video-v1" && (!item.modelId || item.modelId === item.providerId);
+        // 正常原任务查询可刷新过期URL；旧账本缺协议型号但已有成功URL时，仍可直接物化。
+        const canMaterializeWithoutProtocol = missingProtocolModel && item.state === "provider_succeeded" && Boolean(item.resultUrl);
+        if (mediaType === "video" && adapter?.reconcile && !canMaterializeWithoutProtocol) {
+          if (missingProtocolModel) {
+            throw new PaidAssetSafetyError("Original MiniMax protocol model is missing; reconcile this task manually.");
+          }
+          const result = await adapter.reconcile(item.taskId, { ...(item.modelId ? { modelId: item.modelId } : {}) }, async (progress) => {
+            if (progress.taskId !== item.taskId || progress.providerId !== item.providerId) {
+              throw new PaidAssetSafetyError("Provider recovery returned a different original task identity.");
+            }
+            item.state = progress.status === "succeeded" ? "provider_succeeded"
+              : progress.status === "failed" ? "terminal_failed"
+                : progress.status === "unknown" ? "unknown" : "submitted";
+            if (progress.videoUrl) item.resultUrl = progress.videoUrl;
+            if (progress.error) item.error = safeGenerationDiagnostic(progress.error);
+            await writeGenerationLedger(ledgerPath, ledger);
+          });
+          if (result.taskId !== item.taskId || result.providerId !== item.providerId) {
+            throw new PaidAssetSafetyError("Provider recovery returned a different original task identity.");
+          }
+          item.resultUrl = result.videoUrl;
+          item.state = "provider_succeeded";
+          await writeGenerationLedger(ledgerPath, ledger);
+        }
+        if (item.state !== "provider_succeeded" || !item.resultUrl) {
+          throw new PaidAssetOutcomeUnresolvedError(item.itemRequestId);
+        }
+        const media = await downloadGeneratedAsset(this.fetch, item.resultUrl,
+          path.join(outputDir, `recovered_${item.itemRequestId}`), mediaType, this.maxDownloadBytes,
+          this.resolveHost, this.downloadTimeoutMs, this.downloadIdleTimeoutMs);
+        await this.validateGeneratedMedia(media.path, mediaType, Number(item.parameters.durationSeconds));
+        Object.assign(item, { state: "materialized" as const, localPath: media.path, ...await fileIdentity(media.path) });
+        delete item.error;
+        delete item.manualReconciliationRequired;
+        applySucceeded(job, item.taskId, item.resultUrl);
+      } catch (error) {
+        job.status = "failed";
+        job.error = safeGenerationDiagnostic(error);
+        item.error = job.error;
+        if (error instanceof ProviderRequestRejectedError || error instanceof UnrecoverableGeneratedAssetDownloadError) {
+          item.manualReconciliationRequired = true;
+        }
+        if (error instanceof GeneratedMediaContractError) item.state = "terminal_failed";
+      }
+      await writeGenerationLedger(ledgerPath, ledger);
+      await writeJobs(jobsPath, jobs);
+    }
+    // 成功恢复只物化原媒体；后面的正常路径仍核当前输入身份，不能借恢复采用新方案。
+    const failed = jobs.find((job) => job.status === "failed");
+    if (!failed) return undefined;
+    return { protocolVersion: "video-factory/worker-v1", commandId: operationId, status: "failed",
+      output: { generationJobsPath: jobsPath },
+      artifacts: [await describeFile(jobsPath, "generation_jobs", "application/json", "paid-asset-recovery", request,
+        "Original paid task recovery; no new provider submission.")],
+      error: { code: "ASSET_GENERATION_FAILED", message: failed.error ?? "Original paid task remains unresolved." },
+      diagnostics: { providerOutcomeKnown: ledgerProviderOutcomeKnown(ledger), meteredAttemptCount: 0,
+        meteredFailedAttemptCount: 0, actualCostCny: 0, actualCostSource: "configured_rate" } };
+  }
+
   /**
    * 花费报价预测：回答"这次执行到底会不会向 provider 发起新的付费 create"。
    * 与执行期共用 planDirectorRoutes 与 preparePaidAssetOperation，因此结论与执行一致；
@@ -840,6 +1008,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         binding,
         sourceFingerprint,
       ));
+      const sourceSafety = await readReworkPaidAssetSafety(this.options.runsRoot, request.input);
       const reworkCarryForwardItems = await findReworkCarryForwardItems({
         ...(this.options.runsRoot ? { runsRoot: this.options.runsRoot } : {}),
         input: request.input,
@@ -854,6 +1023,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         operationId,
         baseItems,
         reworkCarryForwardItems,
+        sourceSafety,
       );
       return {
         reusableQuoteItemIds: prepared.items
@@ -862,6 +1032,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         createCostCny: prepared.createCostCny,
       };
     } catch (error) {
+      if (error instanceof PaidAssetSafetyError) throw error;
       // 原生的非法路线/输入必须在报价前修正，不能回退成一份不同请求的估价。
       if (request.parameters.audioMode === "native_av") throw error;
       // 预测本身不可得时退回原有报价口径，由花费闸门照常向操作员要授权。
@@ -872,6 +1043,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
   private async runDirectorRoutes(
     request: Record<string, unknown>,
     parameters: Record<string, unknown>,
+    execution?: PaidAssetExecutionContext,
   ): Promise<WorkerResponse> {
     const input = requiredRecord(request.input, "Worker input");
     const scriptPath = requiredString(input.scriptPath, "scriptPath");
@@ -918,6 +1090,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       binding,
       sourceFingerprint,
     ));
+    const sourceSafety = generatedRoutes.length
+      ? await readReworkPaidAssetSafety(this.options.runsRoot, input) : undefined;
     const reworkCarryForwardItems = await findReworkCarryForwardItems({
       ...(this.options.runsRoot ? { runsRoot: this.options.runsRoot } : {}),
       input,
@@ -928,7 +1102,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       ))),
     });
     const preparedOperation = generatedRoutes.length
-      ? await preparePaidAssetOperation(path.dirname(outputDir), operationId, baseItems, reworkCarryForwardItems)
+      ? await preparePaidAssetOperation(path.dirname(outputDir), operationId, baseItems, reworkCarryForwardItems, sourceSafety)
       : undefined;
     const priorCreateAttemptsByQuoteItem = preparedOperation?.priorCreateAttemptsByQuoteItem ?? {};
     const estimatedCost = assetExecutionEstimatedCost(preparedOperation, parameters);
@@ -1055,7 +1229,8 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
               ledgerPath,
               ledger: openedLedger?.ledger,
               ledgerItem,
-              allowCreate: openedLedger?.created !== false || acceptedPilotContinuation,
+              allowCreate: !execution?.recoverOperationId && (openedLedger?.created !== false || acceptedPilotContinuation),
+              createBoundary: this.paidCreateBoundary(request, execution),
               ...(referenceImages ? { referenceImages } : {}),
               ...(Object.keys(itemCreateBudgets).length ? {
                 itemCreateBudgets,
@@ -1414,12 +1589,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
           ? {
               reconcile: async (taskId, request, onProgress) => {
                 const result = await video.adapter.reconcile!(taskId, {
-                  prompt: request.compiledPrompt,
-                  durationSeconds: request.durationSeconds,
-                  ratio: request.ratio,
-                  ...(request.resolution ? { resolution: request.resolution } : {}),
-                  ...(request.generateAudio !== undefined ? { generateAudio: request.generateAudio } : {}),
-                  ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
+                  modelId: request.modelId,
                 }, onProgress);
                 return { taskId: result.taskId, url: result.videoUrl };
               },
@@ -1766,6 +1936,65 @@ async function findReworkCarryForwardItems(
     Number(sourceRunRevision),
   );
   return safelyCarriableReworkItems(sourceItems, reusableScenes, routedShots, options.modelSelections, regenerationScope);
+}
+
+interface ReworkPaidAssetSafety {
+  items: PaidAssetOperationItem[];
+  uncertainOperationId?: string;
+  snapshot: { runId: string; revision: number; operationId?: string };
+}
+
+async function assertAcyclicReworkSource(runsRoot: string | undefined, runId: string, sourceRunId: string): Promise<void> {
+  if (!runsRoot) throw new PaidAssetSafetyError("Rework source store is unavailable.");
+  const visited = new Set([runId]);
+  let current: string | undefined = sourceRunId;
+  while (current) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(current) || visited.has(current)) {
+      throw new PaidAssetSafetyError("Rework source identity is invalid or cyclic; no paid submission was made.");
+    }
+    visited.add(current);
+    const run = requiredRecord(JSON.parse(await readFile(path.join(runsRoot, current, "run.json"), "utf8")), "Rework ancestor");
+    const brief = isRecord(run.initialInput) ? run.initialInput : undefined;
+    current = isRecord(brief?.rework) ? optionalString(brief.rework.sourceRunId) : undefined;
+  }
+}
+
+async function readReworkPaidAssetSafety(
+  runsRoot: string | undefined,
+  input: Record<string, unknown>,
+): Promise<ReworkPaidAssetSafety | undefined> {
+  if (!isRecord(input.rework)) return undefined;
+  const { sourceRunId, sourceRunRevision } = input.rework;
+  if (!runsRoot || typeof sourceRunId !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sourceRunId) || !Number.isSafeInteger(sourceRunRevision)) {
+    throw new PaidAssetSafetyError("Rework source identity is missing; verify the source run before purchasing assets.");
+  }
+  try {
+    const sourceRun = requiredRecord(JSON.parse(await readFile(path.join(runsRoot, sourceRunId, "run.json"), "utf8")), "Rework source run");
+    if (sourceRun.revision !== sourceRunRevision || !Array.isArray(sourceRun.nodeRuns)) {
+      throw new Error("Rework source revision changed or its node evidence is missing.");
+    }
+    const assetNodes = sourceRun.nodeRuns.filter((node) => isRecord(node) && node.nodeId === "assets");
+    if (assetNodes.length !== 1) throw new Error("Rework source assets node is missing or ambiguous.");
+    const node = requiredRecord(assetNodes[0], "Rework source assets node");
+    const operationId = optionalString(node.operationRequestId);
+    const nodeDirectory = path.join(runsRoot, sourceRunId, "nodes", "assets");
+    const items = paidAssetLedgerLeaves(await previousPaidAssetItems(path.join(nodeDirectory, ".generation-operations")));
+    // 免费来源没有生成账本是正常事实；有付费受理事实却缺账本不能当作从未购买。
+    const receipt = isRecord(node.executionReceipt) ? node.executionReceipt : undefined;
+    const previousPlan = isRecord(input.rework.previousDirectorPlan) ? input.rework.previousDirectorPlan : undefined;
+    const paidRoute = Array.isArray(previousPlan?.shots) && previousPlan.shots.some((shot) => (
+      isRecord(shot) && KNOWN_METERED_ASSET_PROVIDERS.has(String(shot.preferredProviderId))
+    ));
+    if (operationId && (receipt?.billing === "metered" || paidRoute || node.outcomeUncertain === true)) {
+      parsePaidAssetOperationLedger(JSON.parse(await readFile(generationLedgerPathIn(nodeDirectory, operationId), "utf8")), operationId);
+    }
+    return { items, snapshot: { runId: sourceRunId, revision: Number(sourceRunRevision), ...(operationId ? { operationId } : {}) },
+      ...(node.outcomeUncertain === true ? { uncertainOperationId: operationId ?? sourceRunId } : {}) };
+  } catch (error) {
+    if (error instanceof PaidAssetSafetyError) throw error;
+    throw new PaidAssetSafetyError(`Cannot verify rework paid asset history: ${safeGenerationDiagnostic(error)}`);
+  }
 }
 
 // previous 计划若缺少执行语义必需字段则无法证明任何镜头可安全继承，fail closed 按新生成报价。
@@ -2482,13 +2711,13 @@ function parseRoutedShots(value: unknown): RoutedShot[] {
 const NO_RENDERED_TEXT_CONSTRAINT = "画面中不得出现任何可读文字、字幕、标题、界面、标牌、徽标、水印、乱码或内部制作术语；所有文字与披露只由后期叠加。";
 
 function compileDirectGenerationPrompt(scene: ScriptScene): string {
-  return withNoRenderedTextConstraint([sanitizePrompt(scene.visualPrompt), characterVisualPrompt(scene)].filter(Boolean).join("\n"));
+  return withNoRenderedTextConstraint([normalizePromptClauses(scene.visualPrompt), characterVisualPrompt(scene)].filter(Boolean).join("\n"));
 }
 
 function characterVisualPrompt(scene: ScriptScene): string {
   if (!scene.characterVisuals) return "";
   return [
-    ...scene.characterVisuals.map((c) => `出场角色 ${c.id}：${sanitizePrompt(c.appearance)}`),
+    ...scene.characterVisuals.map((c) => `出场角色 ${c.id}：${normalizePromptClauses(c.appearance)}`),
     scene.characterVisuals.length ? "仅呈现上述出场角色；场外对白不增加画面人物。" : "本镜无角色出场。",
     promptClause("角色动作", scene.visibleAction),
   ].filter(Boolean).join("\n");
@@ -2524,10 +2753,10 @@ function appendNativeSpeech(visual: string, scene: ScriptScene): string {
 function compileGenerationPrompt(providerId: string, route: RoutedShot, scene: ScriptScene): string {
   const hasShotSpec = Boolean(route.subject || route.environment || route.visibleAction || route.temporalBeats.length
     || route.shotSize || route.camera || route.lighting || route.negativeConstraints.length || route.successCriteria.length);
-  if (!hasShotSpec) return withNoRenderedTextConstraint([sanitizePrompt(route.generationPrompt || scene.visualPrompt), characterVisualPrompt(scene)].filter(Boolean).join("\n"));
+  if (!hasShotSpec) return withNoRenderedTextConstraint([normalizePromptClauses(route.generationPrompt || scene.visualPrompt), characterVisualPrompt(scene)].filter(Boolean).join("\n"));
 
-  const timeline = route.temporalBeats.map(sanitizePrompt).filter(Boolean);
-  const directorExecution = sanitizePrompt(route.generationPrompt);
+  const timeline = route.temporalBeats.map(normalizePromptClauses).filter(Boolean);
+  const directorExecution = normalizePromptClauses(route.generationPrompt);
   const common = [
     characterVisualPrompt(scene),
     promptClause("导演执行描述", directorExecution),
@@ -2538,8 +2767,8 @@ function compileGenerationPrompt(providerId: string, route: RoutedShot, scene: S
     promptClause("镜头", route.camera),
     promptClause("光线", route.lighting),
   ].filter(Boolean);
-  const negative = route.negativeConstraints.map(sanitizePrompt).filter(Boolean);
-  const success = route.successCriteria.map(sanitizePrompt).filter(Boolean);
+  const negative = route.negativeConstraints.map(normalizePromptClauses).filter(Boolean);
+  const success = route.successCriteria.map(normalizePromptClauses).filter(Boolean);
 
   if (providerId === "seedance-video-v1") {
     return [
@@ -2571,17 +2800,16 @@ function compileGenerationPrompt(providerId: string, route: RoutedShot, scene: S
 }
 
 function promptClause(label: string, value: string | undefined): string {
-  const safe = sanitizePrompt(value ?? "");
+  const safe = normalizePromptClauses(value ?? "");
   return safe ? `${label}：${safe}` : "";
 }
 
-function sanitizePrompt(value: string): string {
-  // AIGC 披露由渲染与发布链路负责，不能反向污染生成模型的画面提示词。
-  const forbidden = /审批|预算|版权|工作流|授权|付费|费用|合规|AIGC|(?:AI\s*(?:生成|内容)|人工智能生成|生成式镜头).*(?:标识|声明|披露)|平台(?:声明|披露)|文件(?:标记|标识)|成片.*(?:标识|声明|披露)|(?:Seedream|Seedance|MiniMax|Hailuo|Wanxiang|Provider).*(?:标识|声明|披露)|水印.*(?:保留|清晰|裁切|遮挡|移除)/i;
+function normalizePromptClauses(value: string): string {
+  // 编译只规范化分隔符，不按创作中的词语猜测授权或删除用户已采用的内容。
   return value
     .split(/[。；;\n]+/)
     .map((part) => part.trim())
-    .filter((part) => part && !forbidden.test(part))
+    .filter(Boolean)
     .join("；");
 }
 
@@ -3058,6 +3286,7 @@ async function preparePaidAssetOperation(
   operationId: string,
   items: PaidAssetOperationItem[],
   reworkCarryForwardItems: PaidAssetOperationItem[] = [],
+  sourceSafety?: ReworkPaidAssetSafety,
 ): Promise<{
   ledgerPath: string;
   items: PaidAssetOperationItem[];
@@ -3088,6 +3317,11 @@ async function preparePaidAssetOperation(
   const previousItems = paidAssetLedgerLeaves(await previousPaidAssetItems(operationsDirectory, operationId));
   const priorCreateAttemptsByQuoteItem = countLocalCreateAttempts(previousItems);
   const carriedItems = await carryForwardPaidAssetItems(operationId, items, previousItems, reworkCarryForwardItems);
+  if (carriedItems.some((item) => item.state === "prepared")) {
+    assertNoUnresolvedPaidAssetItems(previousItems);
+    assertNoUnresolvedPaidAssetItems(sourceSafety?.items ?? []);
+    if (sourceSafety?.uncertainOperationId) throw new PaidAssetOutcomeUnresolvedError(sourceSafety.uncertainOperationId);
+  }
   return {
     ledgerPath,
     items: carriedItems,
@@ -3149,19 +3383,16 @@ async function carryForwardPaidAssetItems(
       });
       continue;
     }
-    const unresolved = previousCandidates.find((candidate) => (
-      candidate.state === "submitted"
-      || candidate.state === "provider_succeeded"
-      || candidate.state === "unknown"
-    ));
-    if (unresolved) {
-      throw new Error(
-        `Paid item '${unresolved.itemRequestId}' still has an unresolved provider outcome and must be reconciled before a new create.`,
-      );
-    }
     carriedItems.push(item);
   }
   return carriedItems;
+}
+
+function assertNoUnresolvedPaidAssetItems(items: readonly PaidAssetOperationItem[]): void {
+  const unresolved = items.find((item) => (
+    item.state === "submitted" || item.state === "unknown" || item.state === "provider_succeeded"
+  ));
+  if (unresolved) throw new PaidAssetOutcomeUnresolvedError(unresolved.itemRequestId);
 }
 
 /** 叶子条目内的 create 事实计数：携带条目是复用不计数，未携带且已发生 create 的计一次。 */
@@ -3181,12 +3412,8 @@ function countLocalCreateAttempts(leafItems: readonly PaidAssetOperationItem[]):
 }
 
 async function countPriorCreateAttempts(nodeDirectory: string, operationId: string): Promise<Record<string, number>> {
-  try {
-    const previousItems = paidAssetLedgerLeaves(await previousPaidAssetItems(nodeDirectory, operationId));
-    return countLocalCreateAttempts(previousItems);
-  } catch {
-    return {};
-  }
+  const previousItems = paidAssetLedgerLeaves(await previousPaidAssetItems(nodeDirectory, operationId));
+  return countLocalCreateAttempts(previousItems);
 }
 
 async function firstVerifiedMaterializedItem(
@@ -3296,11 +3523,13 @@ async function previousPaidAssetItems(directory: string, operationId?: string): 
   const items: PaidAssetOperationItem[] = [];
   for (const name of names) {
     if (name === currentName) continue;
-    const value = requiredRecord(JSON.parse(await readFile(path.join(directory, name), "utf8")), "Paid operation ledger");
-    if (typeof value.operationId !== "string") {
-      throw new Error(`Paid operation ledger '${name}' is incompatible or corrupted.`);
+    try {
+      const value = requiredRecord(JSON.parse(await readFile(path.join(directory, name), "utf8")), "Paid operation ledger");
+      if (typeof value.operationId !== "string") throw new Error("Operation identity is missing.");
+      items.push(...parsePaidAssetOperationLedger(value, value.operationId).items);
+    } catch (error) {
+      throw new PaidAssetSafetyError(`Paid operation ledger '${name}' cannot be verified: ${safeGenerationDiagnostic(error)}`);
     }
-    items.push(...parsePaidAssetOperationLedger(value, value.operationId).items);
   }
   return items;
 }
@@ -3424,7 +3653,16 @@ async function openGenerationOperation(
 function parsePaidAssetOperationLedger(value: unknown, operationId: string): PaidAssetOperationLedger {
   const record = requiredRecord(value, "Paid operation ledger");
   if (record.version !== "video-factory/paid-operation-v2" || record.operationId !== operationId || !Array.isArray(record.items)) {
-    throw new Error("Paid operation ledger is incompatible or corrupted.");
+    throw new PaidAssetSafetyError("Paid operation ledger is incompatible or corrupted.");
+  }
+  const ids = new Set<string>();
+  for (const item of record.items) {
+    if (!isRecord(item) || typeof item.itemRequestId !== "string" || !item.itemRequestId.trim()
+      || ids.has(item.itemRequestId) || !isRecord(item.parameters)
+      || !["prepared", "submitted", "provider_succeeded", "materialized", "terminal_failed", "unknown"].includes(String(item.state))) {
+      throw new PaidAssetSafetyError("Paid operation ledger contains an invalid item identity or state.");
+    }
+    ids.add(item.itemRequestId);
   }
   return record as unknown as PaidAssetOperationLedger;
 }
@@ -3535,6 +3773,7 @@ async function generatePaidAssetItem(options: {
   ledger: PaidAssetOperationLedger | undefined;
   ledgerItem: PaidAssetOperationItem | undefined;
   allowCreate: boolean;
+  createBoundary: PaidAssetCreateBoundary;
   referenceImages?: [string, ...string[]];
   /** C1：scope 派生的逐素材 create 预算（assetKey → 允许的总 create 次数）。 */
   itemCreateBudgets?: Record<string, number>;
@@ -3628,47 +3867,47 @@ async function generatePaidAssetItem(options: {
       }
     }
   }
-  if (ledgerItem && options.ledgerPath && options.ledger) {
+  if (!ledgerItem || !options.ledgerPath || !options.ledger) {
+    throw new PaidAssetSafetyError("A durable paid operation is required before provider submission.");
+  }
+  const { ledgerPath, ledger } = options;
+  return options.createBoundary(ledgerItem, async (releaseAfterProgress) => {
     ledgerItem.state = "unknown";
     delete ledgerItem.manualReconciliationRequired;
     delete ledgerItem.error;
-    await writeGenerationLedger(options.ledgerPath, options.ledger);
-  }
-  // 这是本次 worker 真正越过 create 边界的证据；恢复/查询旧 taskId 不计作新付费尝试。
-  options.job[METERED_CREATE_ATTEMPTED] = true;
-  try {
-    const generated = await options.binding.generate(
-      options.request,
-      recordProgress,
-      options.referenceImages,
-    );
-    if (ledgerItem && options.ledgerPath && options.ledger) {
+    await writeGenerationLedger(ledgerPath, ledger);
+    // 恢复/查询旧 taskId 不计作新付费尝试；这里只登记真正越过 create 的调用。
+    options.job[METERED_CREATE_ATTEMPTED] = true;
+    try {
+      const generated = await options.binding.generate(
+        options.request,
+        async (progress) => { await recordProgress(progress); await releaseAfterProgress(); },
+        options.referenceImages,
+      );
       ledgerItem.taskId = generated.taskId;
       ledgerItem.resultUrl = generated.url;
       ledgerItem.state = "provider_succeeded";
       ledgerItem.actualCostCny = roundMoney(options.sceneCost);
       ledgerItem.actualCostSource = "configured_rate";
       delete ledgerItem.error;
-      await writeGenerationLedger(options.ledgerPath, options.ledger);
-    }
-    return generated;
-  } catch (error) {
-    if (error instanceof ProviderRequestRejectedError && !ledgerItem?.taskId) {
-      delete options.job[METERED_CREATE_ATTEMPTED];
-    }
-    if (ledgerItem && options.ledgerPath && options.ledger) {
+      await writeGenerationLedger(ledgerPath, ledger);
+      return generated;
+    } catch (error) {
+      if (error instanceof ProviderRequestRejectedError && !ledgerItem.taskId) {
+        delete options.job[METERED_CREATE_ATTEMPTED];
+      }
       if (error instanceof ProviderRequestRejectedError && !ledgerItem.taskId) {
         ledgerItem.state = "terminal_failed";
         delete ledgerItem.actualCostCny;
         delete ledgerItem.actualCostSource;
-      } else if (ledgerItem.state !== "terminal_failed" && ledgerItem.state !== "submitted") {
+      } else if (!["terminal_failed", "submitted"].includes(ledgerItem.state)) {
         ledgerItem.state = "unknown";
       }
       ledgerItem.error = safeGenerationDiagnostic(error);
-      await writeGenerationLedger(options.ledgerPath, options.ledger);
+      await writeGenerationLedger(ledgerPath, ledger);
+      throw error;
     }
-    throw error;
-  }
+  });
 }
 
 function isExistingPaidTask(item: PaidAssetOperationItem | undefined): boolean {

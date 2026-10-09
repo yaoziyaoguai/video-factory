@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { REQUIRED_CODEX_TASK_CONTRACT_DIGESTS } from "./codex-chat.js";
-import type { DurationRange } from "./executable-timeline.js";
+import { parseDurationBounds, type DurationIntent, type DurationRange } from "./executable-timeline.js";
 import { assertNativeVideoModel, NATIVE_AUDIO_PROVIDER, type ProductionAudioMode } from "./native-audio.js";
 
 export const BRIEF_PROTOCOL_VERSION = "video-factory/brief-v1" as const;
@@ -360,7 +360,7 @@ export interface ProductionSeriesContext {
   };
 }
 
-export interface ProductionBrief {
+export type ProductionBrief = DurationIntent & {
   protocolVersion: typeof BRIEF_PROTOCOL_VERSION;
   presentationMode?: "narration" | "character_drama";
   audioMode?: ProductionAudioMode;
@@ -369,8 +369,6 @@ export interface ProductionBrief {
   angle: string;
   audience: string;
   nicheSlug: string;
-  durationSeconds: number;
-  durationRange?: DurationRange;
   platform: string;
   reviewMode: "manual" | "automatic";
   runPurpose?: "production" | "test";
@@ -404,10 +402,10 @@ export interface ProductionBrief {
   articleSources?: ProductionArticleSourceSnapshot[];
   rework?: ProductionReworkContext;
   taskContractDigests?: Partial<Record<"visual-review" | "role-audit" | "creative-treatment", string>>;
-}
+};
 
 const PRODUCTION_BRIEF_INPUT_KEYS = new Set([
-  "protocolVersion", "title", "angle", "audience", "nicheSlug", "durationSeconds", "durationRange",
+  "protocolVersion", "title", "angle", "audience", "nicheSlug", "durationSeconds", "durationRange", "durationPolicy",
   "platform", "reviewMode", "runPurpose", "visualReviewPolicy", "providers", "models", "modelSelectionSources", "frozenModelSelections", "workflowFeatures",
   "referenceVideo", "director", "economics", "spendFeedback", "voiceDirection", "editorial", "visualProof",
   "visualIntent", "visualPlan", "visualPlanAdopted", "seriesContext", "creationContext", "rework", "taskContractDigests",
@@ -434,6 +432,9 @@ export function parseBrief(value: unknown): ProductionBrief {
   }
   const unknownField = Object.keys(value).find((key) => !PRODUCTION_BRIEF_INPUT_KEYS.has(key));
   if (unknownField) throw new Error(`Brief field '${unknownField}' is not allowed.`);
+  if (value.durationPolicy !== undefined && value.durationPolicy !== "content-led-v1") {
+    throw new Error("durationPolicy must be content-led-v1 when provided.");
+  }
   if (value.presentationMode !== undefined && value.presentationMode !== "narration" && value.presentationMode !== "character_drama") {
     throw new Error("presentationMode must be narration or character_drama.");
   }
@@ -480,13 +481,12 @@ export function parseBrief(value: unknown): ProductionBrief {
   const articleSources = parseProductionArticleSources(value.articleSources);
   const rework = parseReworkContext(value.rework);
   const taskContractDigests = parseTaskContractDigests(value.taskContractDigests);
-  // joint-v1 拓扑必然编译可执行方案：缺 durationRange 或导演配置在合同层 fail closed，
-  // 不得静默降级回旧规划流程。该检查先于 executablePlan 的通用检查：joint-v1 总是同时
-  // 携带 executablePlan，先报更具体的拓扑标记。
-  if (workflowFeatures.creativePlanning && (!value.durationRange || !director)) {
+  // 新版未设硬承诺仍走完整可执行规划；仅旧合同要求双端range作为规划输入。
+  const missingDurationInput = value.durationPolicy === undefined && !value.durationRange;
+  if (workflowFeatures.creativePlanning && (missingDurationInput || !director)) {
     throw new Error("workflowFeatures.creativePlanning requires both durationRange and director planning inputs.");
   }
-  if (workflowFeatures.executablePlan && (!value.durationRange || !director)) {
+  if (workflowFeatures.executablePlan && (missingDurationInput || !director)) {
     throw new Error("workflowFeatures.executablePlan requires both durationRange and director planning inputs.");
   }
   if (workflowFeatures.assetSemanticRank && !director) {
@@ -506,10 +506,17 @@ export function parseBrief(value: unknown): ProductionBrief {
     );
   }
   const durationSeconds = value.durationSeconds;
-  if (!Number.isInteger(durationSeconds) || Number(durationSeconds) < 20 || Number(durationSeconds) > 180) {
+  if (value.durationPolicy === "content-led-v1"
+    ? typeof durationSeconds !== "number" || !Number.isFinite(durationSeconds) || durationSeconds <= 0
+    : !Number.isInteger(durationSeconds) || Number(durationSeconds) < 20 || Number(durationSeconds) > 180) {
+    if (value.durationPolicy === "content-led-v1") throw new Error("durationSeconds must be a positive finite reference value.");
     throw new Error("durationSeconds must be an integer between 20 and 180.");
   }
-  const durationRange = parseDurationRange(value.durationRange, Number(durationSeconds));
+  const duration: DurationIntent = value.durationPolicy === "content-led-v1"
+    ? { durationPolicy: value.durationPolicy, durationSeconds: Number(durationSeconds),
+      ...(value.durationRange !== undefined ? { durationRange: parseDurationBounds(value.durationRange)! } : {}) }
+    : { durationSeconds: Number(durationSeconds),
+      ...(value.durationRange !== undefined ? { durationRange: parseDurationRange(value.durationRange, Number(durationSeconds))! } : {}) };
   if (value.reviewMode !== "manual" && value.reviewMode !== "automatic") {
     throw new Error("reviewMode must be 'manual' or 'automatic'.");
   }
@@ -531,8 +538,7 @@ export function parseBrief(value: unknown): ProductionBrief {
     angle: requireString(value.angle, "angle"),
     audience: requireString(value.audience, "audience"),
     nicheSlug: requireString(value.nicheSlug, "nicheSlug"),
-    durationSeconds: Number(durationSeconds),
-    ...(durationRange ? { durationRange } : {}),
+    ...duration,
     platform: requireProductionPlatform(value.platform),
     reviewMode: value.reviewMode,
     runPurpose: value.runPurpose ?? "production",

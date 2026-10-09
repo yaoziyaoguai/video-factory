@@ -338,6 +338,25 @@ test("producer 将合同 fixture 转换为 CreativeTreatment 并复用 role-audi
   assert.ok(context.currentRoleContract.productionCapabilities, "完整能力仍供审计使用");
 });
 
+test("content-led reference and single-ended commitment survive treatment and audit inputs", async () => {
+  for (const bounds of [undefined, { maxSeconds: 12 }]) {
+    const client = new ControlledTreatmentClient("deepseek", "deepseek-flash", kind =>
+      kind === "creative-treatment" ? structuredClone(valid) : passingAudit);
+    const agent = new CodexCreativeTreatmentAgent({ client, modelId: "deepseek-flash" });
+    const input = agentInput();
+    const { durationRange: _old, ...base } = input.brief;
+    await agent.treatDetailed({ ...input, brief: { ...base, durationPolicy: "content-led-v1", durationSeconds: 12.1,
+      ...(bounds ? { durationRange: bounds } : {}) } });
+    const produce = client.calls[0]!.payload as { brief: Record<string, unknown> };
+    const audit = client.calls[1]!.payload as { context: { upstreamFacts: Record<string, unknown> } };
+    for (const brief of [produce.brief, audit.context.upstreamFacts]) {
+      assert.equal(brief.durationPolicy, "content-led-v1");
+      assert.deepEqual(brief.durationRange, bounds);
+      assert.equal(brief.durationSeconds, 12.1);
+    }
+  }
+});
+
 test("构思返工要求同时进入 producer 与独立 audit 上下文", async () => {
   const client = new ControlledTreatmentClient("openai", "gpt-test", (kind) => {
     if (kind === "creative-treatment") return structuredClone(valid);

@@ -8,6 +8,23 @@ from video_factory.character_script import validate_character_script
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/character-drama-cases.json").read_text(encoding="utf-8"))
 
 class CharacterScriptTest(unittest.TestCase):
+    def test_structurally_valid_claims_are_left_for_semantic_review(self):
+        for case in FIXTURE["structurally_valid_semantic_review"]:
+            with self.subTest(case=case["name"]):
+                script = copy.deepcopy(FIXTURE["script"])
+                target = script
+                for key in case["path"][:-1]:
+                    target = target[key]
+                target[case["path"][-1]] = case["value"]
+                self.assertEqual(validate_character_script(script, duration_seconds=24), script)
+
+    def test_one_and_two_scene_structures_preserve_dialogue(self):
+        for count in [1, 2]:
+            script = copy.deepcopy(FIXTURE["script"])
+            script["scenes"] = script["scenes"][:count]
+            script["scenes"][0]["dialogue"][0]["text"] = "这证明了你是朋友"
+            self.assertEqual(validate_character_script(script), script)
+
     def test_shared_invalid_cases(self):
         for case in FIXTURE["invalid"]:
             with self.subTest(case=case["name"]):

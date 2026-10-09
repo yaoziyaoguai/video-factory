@@ -298,9 +298,9 @@ describe("broker-owned task definitions", () => {
       [
         "video-factory/topic-editor-v12",
         "video-factory/series-showrunner-v3",
-        "video-factory/treatment-director-v8",
-        "video-factory/screenwriter-v20",
-        "video-factory/director-v30",
+        "video-factory/treatment-director-v9",
+        "video-factory/screenwriter-v21",
+        "video-factory/director-v31",
       ],
     );
     assert.deepEqual(
@@ -320,7 +320,8 @@ describe("broker-owned task definitions", () => {
     assert.match(treatment.directive, /brief\.productionCapabilities/);
     assert.match(treatment.directive, /referenceGrammar 只作为风格和结构参考/);
     assert.match(script.directive, /brief\.creativeTreatment.*brief\.planningIssues/);
-    assert.match(script.directive, /durationRange.*没有明确范围.*目标时长兼容边界/);
+    assert.match(script.directive, /durationPolicy=content-led-v1.*只是参考.*不设默认总长范围/);
+    assert.match(script.directive, /未带 policy 的历史输入才沿用原范围或目标 0.6 到 1.4 倍/);
     assert.match(script.directive, /同一母片的不同、完整覆盖的区间/);
     assert.doesNotMatch(script.directive, /每个 scene 必须能由一段素材从开头独立执行/);
     assert.match(director.directive, /sourceInSeconds.*已知非负源起点.*正常速度裁切/);
@@ -471,7 +472,7 @@ describe("broker-owned task definitions", () => {
     assert.ok(directorSchema.properties.shots.items.required.includes("reuseFromScenePosition"));
     assert.ok(directorSchema.properties.shots.items.required.includes("referenceFromScenePosition"));
     assert.ok(directorSchema.properties.shots.items.required.includes("sourceInSeconds"));
-    assert.equal(scriptSchema.properties.scenes.minItems, 3);
+    assert.equal(scriptSchema.properties.scenes.minItems, 1);
     assert.equal(directorSchema.properties.shots.items.properties.temporalBeats.minItems, 1);
     assert.deepEqual(directorSchema.properties.shots.items.properties.temporalBeats.items.required, ["startSeconds", "endSeconds", "action"]);
     assert.equal(directorSchema.properties.shots.items.properties.sourceInSeconds.minimum, 0);
@@ -658,6 +659,13 @@ describe("broker-owned task definitions", () => {
       search_terms: ["视频剪辑"],
     };
     assert.ok(scriptSchema.properties.scenes.items);
+    for (const count of [1, 2]) {
+      assert.equal(outputValidationErrorFor("script-draft", {
+        viewerPromise: "虚构人物和好", narrativeArc: "行动回应争执", canonFacts: [],
+        scenes: Array.from({ length: count }, (_, index) => ({ ...scene, position: index + 1,
+          duration: 12 / count, visual_strategy: "generated", narration: "这证明了你是朋友" })),
+      }), undefined);
+    }
     assert.match(outputValidationErrorFor("script-draft", {
       viewerPromise: "给出一个可执行判断",
       narrativeArc: "问题、例子、结论",
@@ -801,7 +809,7 @@ describe("broker-owned task definitions", () => {
 
   it("pins the creative-treatment prompt pack and enforces beat-reference semantics", () => {
     const prompt = taskPromptFor("creative-treatment");
-    assert.equal(prompt.version, "video-factory/treatment-director-v8");
+    assert.equal(prompt.version, "video-factory/treatment-director-v9");
     assert.match(prompt.directive, /不输出完整逐镜分镜.*不报价.*不声称画面或配音已完成/);
     assert.match(prompt.directive, /lockedViewerPromise.*保持其实际收益与事实边界/);
     assert.match(prompt.directive, /suppliedSourceIds 只能引用 suppliedSources 中的 id/);
@@ -853,7 +861,7 @@ describe("broker-owned task definitions", () => {
   it("pins the creative-treatment semantic rules version that owns the whitespace contract", () => {
     assert.equal(
       taskContractDescriptorFor("creative-treatment").semanticRulesVersion,
-      "creative-treatment-semantics-v12|production-capabilities-v4|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
+      "creative-treatment-semantics-v13|production-capabilities-v4|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
     );
   });
 });

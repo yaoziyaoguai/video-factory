@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it, mock } from "node:test";
@@ -29,10 +31,12 @@ import {
   type ScreenwriterAgentInput,
   type VisualAssetProviderCapability,
   type VisualDirectorAgent,
+  type VisualDirectorPlan,
   type VisualDirectorAgentInput,
   type WorkerResponse,
 } from "../src/index.js";
 import type { WorkflowRun } from "@video-factory/workflow-core";
+import { FileRunStore } from "../src/run-store.js";
 import { summarizeJointPlanningExecution } from "../src/production-pipeline.js";
 import { CodexBrokerServer } from "../../../apps/codex-broker/src/broker-server.js";
 import { runCreativeDiscussionTask } from "../src/codex-creative-discussion.js";
@@ -40,6 +44,7 @@ import type { ValidatedTask } from "../../../apps/codex-broker/src/codex-executo
 import { CodexAssetSemanticRanker, deterministicAssetRanking, type AssetCandidateReport } from "../src/asset-semantic-ranker.js";
 import { ProductionStudio } from "../../../apps/studio/src/server/production-studio.js";
 import { JsonRunArchiveStore } from "../../../apps/studio/src/server/run-archive-store.js";
+import { fallbackShotGrammar } from "../src/reference-grammar.js";
 
 // ---------------------------------------------------------------------------
 // B4-REMAINDER：joint-v1 规划编辑合同的行为测试。
@@ -596,6 +601,613 @@ async function jointPlanningEditTokens(
 }
 
 describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
+  for (const location of ["current", "source"] as const) for (const state of ["submitted", "unknown", "provider_succeeded", "tts_unknown"] as const) {
+    it(`P0-3 duration commands preserve unresolved paid facts (${location}/${state})`, async () => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-duration-paid-"));
+      const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+        screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+      const pipeline = newClosurePipeline(workspaceRoot, spies);
+      const store = new FileRunStore(path.join(workspaceRoot, "runs"));
+      const source = location === "source" ? await pipeline.start({ ...closureBrief({ creativeReview: true }), durationPolicy: "content-led-v1" }) : undefined;
+      let run = await pipeline.start({ ...closureBrief({ creativeReview: true }), durationPolicy: "content-led-v1", durationRange: { maxSeconds: 30 },
+        ...(source ? { rework: { sourceRunId: source.id, sourceRunRevision: source.revision, findings: [],
+          nodeInstructions: { script: "保持原文", visualDirection: "保持原画面", assets: "核对原任务" } } } : {}) });
+      const first = (run.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
+      run = await pipeline.confirmCreativeReview(run.id, { commandId: "paid-treatment", actor: "creator", stage: "treatment",
+        expectedRunRevision: run.revision, expectedReviewRevision: first.reviewRevision,
+        baseDraftVersionId: first.stages.treatment.currentDraft!.versionId, baseDraftSha256: first.stages.treatment.currentDraft!.sha256,
+        expectedCheckIdentity: first.stages.treatment.checkResult!.checkIdentity });
+      const paidRun = source ?? run;
+      // 明确的安全负例：注入历史未核付费事实，不用于成功链或伪造批准。
+      if (state === "tts_unknown") {
+        paidRun.nodeRuns.push({ nodeId: "voice", status: "failed", startedAt: "2026-10-09T00:00:00Z",
+          artifactIds: [], qualityGateResults: [], outcomeUncertain: true });
+        await store.checkpoint(paidRun);
+      }
+      let ledgerPath: string | undefined;
+      if (state !== "tts_unknown") {
+        const directory = path.join(workspaceRoot, "runs", paidRun.id, "nodes", "assets", ".generation-operations");
+        await mkdir(directory, { recursive: true });
+        ledgerPath = path.join(directory, `${contentSha256("original-asset-operation")}.json`);
+        await writeFile(ledgerPath, JSON.stringify({ version: "video-factory/paid-operation-v2", operationId: "original-asset-operation", completed: false,
+          items: [{ itemRequestId: "original-item", quoteItemId: "old-quote", scenePosition: 24,
+            inputFingerprint: "old-prompt-and-duration", sourceFingerprint: "old-source", executorProviderId: "hailuo-video-v1",
+            providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02", parameters: { mediaType: "video", durationSeconds: 10 },
+            estimatedCostCny: 2.4, state, taskId: "original-task", ...(state === "provider_succeeded" ? { resultUrl: "https://fixture.invalid/original.mp4" } : {}) }] }));
+      }
+      run = await pipeline.show(run.id);
+      const review = (run.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
+      const before = JSON.stringify(run);
+      const sourceBefore = JSON.stringify(await pipeline.show(paidRun.id));
+      const ledgerBefore = ledgerPath ? await readFile(ledgerPath, "utf8") : undefined;
+      const calls = structuredClone(spies);
+      for (const action of ["update_duration", "confirm"] as const) {
+        await assert.rejects(pipeline.dispatchCreativeReviewCommand(run.id, { action, commandId: `paid-${action}`, actor: "creator", stage: "script",
+          expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+          baseDraftVersionId: review.stages.script.currentDraft!.versionId, baseDraftSha256: review.stages.script.currentDraft!.sha256,
+          ...(action === "confirm" ? { acknowledgeUnaudited: true as const, expectedCheckIdentity: review.stages.script.checkResult!.checkIdentity } : {}),
+          durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range: null } }),
+          error => error instanceof HumanDecisionConflictError && /原素材请求|原请求结果仍在核实/.test(error.message));
+        assert.equal(JSON.stringify(await pipeline.show(run.id)), before);
+        assert.equal(JSON.stringify(await pipeline.show(paidRun.id)), sourceBefore);
+        if (ledgerPath) assert.equal(await readFile(ledgerPath, "utf8"), ledgerBefore);
+        assert.deepEqual(spies, calls, "拒绝先于新规划或制作调用");
+      }
+    });
+  }
+
+  it("C08 retains an over-capability director draft and clearing duration cannot authorize it", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-director-capability-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const director = closureDirector(spies);
+    const originalPlan = director.plan;
+    director.plan = async input => {
+      const plan = await originalPlan(input) as VisualDirectorPlan;
+      plan.shots[0] = { ...plan.shots[0]!, preferredProviderId: "fixture-video", deliveryType: "generated_video", sourceInSeconds: 10 };
+      return plan;
+    };
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new ClosureWorker(), treatmentAgents: closureTreatmentAgents(spies),
+      screenwriterAgent: closureScreenwriter(spies), directorAgent: director,
+      assetProviders: [...CLOSURE_ASSET_PROVIDERS, { id: "fixture-video", label: "受控视频", billing: "free", modes: ["视频"],
+        deliveryTypes: ["generated_video"], generative: true }] });
+    let run = await pipeline.start({ ...closureBrief({ creativeReview: true, assetProviderIds: ["local-editorial-v1", "fixture-video"] }),
+      durationPolicy: "content-led-v1", durationRange: undefined });
+    const reviewOf = (value: typeof run) => (value.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
+    for (const stage of ["treatment", "script"] as const) {
+      const review = reviewOf(run);
+      run = await pipeline.confirmCreativeReview(run.id, { commandId: `capacity-${stage}`, actor: "creator", stage,
+        expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+        baseDraftVersionId: review.stages[stage].currentDraft!.versionId, baseDraftSha256: review.stages[stage].currentDraft!.sha256,
+        expectedCheckIdentity: review.stages[stage].checkResult!.checkIdentity });
+    }
+    assert.equal(run.status, "needs_human");
+    let review = reviewOf(run);
+    assert.equal(review.activeStage, "director");
+    assert.equal(review.stages.director.conflicts?.[0]?.code, "execution_capability_conflict");
+    assert.equal(review.stages.director.confirmation, null);
+    assert.equal((review.stages.director.currentDocument as VisualDirectorPlan).shots[0]!.sourceInSeconds, 10);
+    assert.equal(spies.directorCalls, 1);
+    const command = () => ({ commandId: "capacity-command", actor: "creator", stage: "director" as const,
+      reviewPurpose: review.directorReviewPurpose!, expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+      baseDraftVersionId: review.stages.director.currentDraft!.versionId, baseDraftSha256: review.stages.director.currentDraft!.sha256 });
+    await assert.rejects(pipeline.dispatchCreativeReviewCommand(run.id, { ...command(), action: "confirm",
+      expectedCheckIdentity: review.stages.director.checkResult!.checkIdentity }), /source only produces|能力/);
+    assert.deepEqual(await pipeline.show(run.id), run);
+    run = await (await pipeline.dispatchCreativeReviewCommand(run.id, { ...command(), action: "update_duration",
+      durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range: null } })).completion;
+    review = reviewOf(run);
+    assert.equal(review.stages.director.conflicts?.[0]?.code, "execution_capability_conflict");
+    await assert.rejects(pipeline.dispatchCreativeReviewCommand(run.id, { ...command(), commandId: "capacity-after-clear", action: "confirm",
+      acknowledgeUnaudited: true }), /source only produces|能力/);
+    assert.deepEqual(await pipeline.show(run.id), run);
+    assert.equal(spies.directorCalls, 1);
+  });
+
+  it("C01 retains a duration-conflicting first script at its real review stop and rejects confirmation without losing it", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-content-led-conflict-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const screenwriter = closureScreenwriter(spies);
+    const original = screenwriter.draftDetailed!;
+    screenwriter.draftDetailed = async input => {
+      const result = await original(input);
+      if (input.creativeReviewExecution?.mode === "check") return result;
+      return { ...result, output: { ...(result.output as object), scenes: [12, 12, 14].map((duration, index) => ({
+        position: index + 1, duration, narration: "他用行动证明了自己的勇气。", visual_strategy: "local",
+        visual_prompt: "桌面上的预算本", search_terms: ["预算本"],
+      })) } };
+    };
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new ClosureWorker(),
+      treatmentAgents: closureTreatmentAgents(spies), screenwriterAgent: screenwriter,
+      directorAgent: closureDirector(spies), assetProviders: CLOSURE_ASSET_PROVIDERS });
+    let run = await pipeline.start({ ...closureBrief({ creativeReview: true }),
+      durationPolicy: "content-led-v1", durationRange: { maxSeconds: 30 } });
+    const readReview = (value: typeof run) => (value.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
+    let review = readReview(run);
+    run = await pipeline.confirmCreativeReview(run.id, { commandId: "accept-treatment", actor: "creator",
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision, stage: "treatment",
+      baseDraftVersionId: review.stages.treatment.currentDraft!.versionId,
+      baseDraftSha256: review.stages.treatment.currentDraft!.sha256,
+      expectedCheckIdentity: review.stages.treatment.checkResult!.checkIdentity });
+    assert.equal(run.status, "needs_human");
+    review = readReview(run);
+    assert.equal(review.activeStage, "script");
+    assert.equal(review.stages.script.confirmation, null);
+    assert.equal((review.stages.script.currentDocument as { scenes: unknown[] }).scenes.length, 3);
+    assert.equal(review.stages.script.conflicts?.[0]?.code, "duration_commitment_conflict");
+    assert.deepEqual(review.stages.script.conflicts?.[0]?.scenePositions, [1, 2, 3]);
+    assert.equal(spies.screenwriterCalls.length, 1);
+    assert.equal(spies.directorCalls, 0);
+    const before = await pipeline.show(run.id);
+    await assert.rejects(pipeline.confirmCreativeReview(run.id, { commandId: "reject-conflicting-script", actor: "creator",
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision, stage: "script",
+      baseDraftVersionId: review.stages.script.currentDraft!.versionId,
+      baseDraftSha256: review.stages.script.currentDraft!.sha256,
+      ...(review.stages.script.checkResult ? { expectedCheckIdentity: review.stages.script.checkResult.checkIdentity }
+        : { acknowledgeUnaudited: true as const }) }), /时长承诺/);
+    assert.deepEqual(await pipeline.show(run.id), before, "拒绝采用只拒绝本命令，不破坏人工停点");
+    assert.equal(spies.directorCalls, 0);
+    const originalScript = structuredClone(review.stages.script.currentDocument) as { scenes: Array<{ narration: string }> };
+    const editedScript = structuredClone(originalScript);
+    editedScript.scenes[0]!.narration = "他把预算本交还给了朋友。";
+    const edit = await pipeline.dispatchCreativeReviewCommand(run.id, { action: "edit_draft", commandId: "edit-conflicting-script", actor: "creator",
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision, stage: "script",
+      baseDraftVersionId: review.stages.script.currentDraft!.versionId,
+      baseDraftSha256: review.stages.script.currentDraft!.sha256, document: editedScript });
+    run = await edit.completion;
+    review = readReview(run);
+    assert.equal(run.status, "needs_human");
+    assert.deepEqual(review.stages.script.currentDocument, originalScript, "冲突修改只能登记候选，不能替换原稿");
+    const proposal = review.stages.script.proposals.at(-1)!;
+    assert.deepEqual(proposal.document, editedScript);
+    assert.equal(proposal.conflicts?.[0]?.code, "duration_commitment_conflict");
+    const studio = new ProductionStudio({ workspaceRoot, pipeline, listProviders: async () => [],
+      archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive.json")) });
+    const shownCandidate = (await studio.creativeReview(run.id))!.proposals.find(item => item.proposalId === proposal.proposalId)!;
+    assert.equal(shownCandidate.duration?.versionId, proposal.draft.versionId);
+    assert.equal(shownCandidate.duration?.totalFrames, 1140);
+    assert.equal(shownCandidate.duration?.totalSeconds, 38);
+    const adopt = await pipeline.dispatchCreativeReviewCommand(run.id, { action: "adopt_proposal", commandId: "select-conflicting-script", actor: "creator",
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision, stage: "script",
+      baseDraftVersionId: review.stages.script.currentDraft!.versionId,
+      baseDraftSha256: review.stages.script.currentDraft!.sha256, proposalId: proposal.proposalId });
+    run = await adopt.completion;
+    review = readReview(run);
+    assert.deepEqual(review.stages.script.currentDocument, editedScript);
+    assert.equal(review.stages.script.confirmation, null, "设为当前稿不是阶段确认");
+    assert.equal(review.stages.script.conflicts?.[0]?.code, "duration_commitment_conflict");
+    assert.equal(spies.screenwriterCalls.length, 1);
+    assert.equal(spies.directorCalls, 0);
+  });
+
+  it("C03 changes and clears the duration commitment in the same run without regenerating or reapproving upstream content", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-duration-amendment-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const pipeline = newClosurePipeline(workspaceRoot, spies);
+    let run = await pipeline.start({ ...closureBrief({ creativeReview: true }),
+      durationPolicy: "content-led-v1", durationRange: { maxSeconds: 20 } });
+    const reviewOf = (value: typeof run) => (value.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
+    let review = reviewOf(run);
+    run = await pipeline.confirmCreativeReview(run.id, { commandId: "duration-treatment", actor: "creator",
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision, stage: "treatment",
+      baseDraftVersionId: review.stages.treatment.currentDraft!.versionId,
+      baseDraftSha256: review.stages.treatment.currentDraft!.sha256,
+      expectedCheckIdentity: review.stages.treatment.checkResult!.checkIdentity });
+    review = reviewOf(run);
+    const original = structuredClone(review);
+    const counts = structuredClone(spies);
+    const command = { action: "update_duration" as const, commandId: "duration-to-30", actor: "creator", stage: "script" as const,
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+      baseDraftVersionId: review.stages.script.currentDraft!.versionId,
+      baseDraftSha256: review.stages.script.currentDraft!.sha256,
+      durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range: { maxSeconds: 30 } } };
+    const studio = new ProductionStudio({ workspaceRoot, pipeline, listProviders: async () => [],
+      archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive.json")) });
+    const shown = (await studio.creativeReview(run.id))!;
+    assert.equal(shown.duration?.policy, "content-led-v1");
+    assert.equal(shown.duration?.briefSha256, command.durationAmendment.expectedBriefSha256);
+    assert.deepEqual(shown.duration?.commitment, { maxSeconds: 20 });
+    assert.equal(shown.duration?.proposal?.totalFrames, 720);
+    assert.equal(shown.duration?.proposal?.versionId, command.baseDraftVersionId);
+    assert.deepEqual(shown.duration?.proposal?.scenes.map(scene => scene.frameCount), [240, 240, 240]);
+    assert.equal(shown.conflicts?.[0]?.code, "duration_commitment_conflict");
+    assert.ok(shown.allowedActions.includes("update_duration"));
+    const { actor, ...body } = command;
+    await studio.commandCreativeReview(run.id, body, actor);
+    // HTTP/Studio 先返回耐久受理；以原命令的终态回执判完成，不把受理当失败或再发。
+    for (let attempt = 0; attempt < 500; attempt++) {
+      if ((await studio.creativeReviewCommand(run.id, body.commandId))?.status !== "running") break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal((await studio.creativeReviewCommand(run.id, body.commandId))?.status, "completed");
+    run = await pipeline.show(run.id);
+    review = reviewOf(run);
+    assert.equal(run.status, "needs_human");
+    assert.deepEqual(run.initialInput.durationRange, { maxSeconds: 30 });
+    assert.deepEqual(review.stages.script.currentDocument, original.stages.script.currentDocument);
+    assert.notEqual(review.stages.script.currentDraft!.versionId, original.stages.script.currentDraft!.versionId);
+    assert.equal(review.stages.script.checkResult, null, "旧审计不能转成新版本通过");
+    assert.equal(review.stages.script.confirmation, null);
+    assert.deepEqual(review.stages.treatment, original.stages.treatment, "构思内容及原批准不重新签字");
+    assert.equal(review.stages.script.conflicts, undefined);
+    assert.deepEqual(spies, counts, "本地改承诺不调用任何角色");
+    assert.deepEqual(await pipeline.show(run.id), run);
+    assert.deepEqual(await (await pipeline.dispatchCreativeReviewCommand(run.id, command)).completion, run, "同体重放在CAS前返回原回执");
+    await assert.rejects(pipeline.dispatchCreativeReviewCommand(run.id, { ...command,
+      durationAmendment: { ...command.durationAmendment, range: { maxSeconds: 31 } } }), /different content/);
+    run = await (await pipeline.dispatchCreativeReviewCommand(run.id, { ...command, commandId: "duration-clear",
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+      baseDraftVersionId: review.stages.script.currentDraft!.versionId,
+      durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range: null } })).completion;
+    assert.equal(Object.hasOwn(run.initialInput, "durationRange"), false);
+    const input = await effectivePlanningInput(pipeline, run.id);
+    assert.equal(Object.hasOwn((input as { brief: ProductionBrief }).brief, "durationRange"), false);
+    const cleared = (await studio.creativeReview(run.id))!;
+    assert.equal(cleared.duration?.commitment, undefined);
+    assert.equal(cleared.conflicts?.length ?? 0, 0);
+    assert.equal(cleared.duration?.proposal?.totalFrames, 720);
+    review = reviewOf(run);
+    run = await pipeline.confirmCreativeReview(run.id, { commandId: "duration-script", actor: "creator",
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision, stage: "script",
+      baseDraftVersionId: review.stages.script.currentDraft!.versionId,
+      baseDraftSha256: review.stages.script.currentDraft!.sha256, acknowledgeUnaudited: true });
+    assert.equal(reviewOf(run).activeStage, "director", "后续正式执行继续新digest的原稿而不是重新生成");
+    assert.equal(spies.screenwriterCalls.length, counts.screenwriterCalls.length);
+    assert.equal(spies.treatmentModelCalls.length, counts.treatmentModelCalls.length);
+  });
+
+  it("C04 adopts the visible script and its amended duration together without reusing the old audit", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-duration-confirm-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const pipeline = newClosurePipeline(workspaceRoot, spies);
+    let run = await pipeline.start({ ...closureBrief({ creativeReview: true }),
+      durationPolicy: "content-led-v1", durationRange: { maxSeconds: 20 } });
+    const reviewOf = (value: typeof run) => (value.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
+    let review = reviewOf(run);
+    run = await pipeline.confirmCreativeReview(run.id, { commandId: "combined-treatment", actor: "creator",
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision, stage: "treatment",
+      baseDraftVersionId: review.stages.treatment.currentDraft!.versionId,
+      baseDraftSha256: review.stages.treatment.currentDraft!.sha256,
+      expectedCheckIdentity: review.stages.treatment.checkResult!.checkIdentity });
+    review = reviewOf(run);
+    const original = structuredClone(review);
+    const command = { action: "confirm" as const, commandId: "combined-script", actor: "creator", stage: "script" as const,
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+      baseDraftVersionId: review.stages.script.currentDraft!.versionId,
+      baseDraftSha256: review.stages.script.currentDraft!.sha256, acknowledgeUnaudited: true as const,
+      expectedCheckIdentity: review.stages.script.checkResult!.checkIdentity,
+      durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range: { maxSeconds: 30 } } };
+    const before = await pipeline.show(run.id);
+    await assert.rejects(pipeline.dispatchCreativeReviewCommand(run.id, { ...command, commandId: "combined-invalid",
+      durationAmendment: { ...command.durationAmendment, range: { maxSeconds: 23 } } }), /时长承诺/);
+    assert.deepEqual(await pipeline.show(run.id), before, "组合失败不得降级为只保存承诺");
+    const studio = new ProductionStudio({ workspaceRoot, pipeline, listProviders: async () => [],
+      archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive.json")) });
+    const { actor, ...body } = command;
+    await studio.commandCreativeReview(run.id, body, actor);
+    for (let attempt = 0; attempt < 500; attempt++) {
+      if ((await studio.creativeReviewCommand(run.id, body.commandId))?.status !== "running") break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal((await studio.creativeReviewCommand(run.id, body.commandId))?.status, "completed");
+    run = await pipeline.show(run.id);
+    review = reviewOf(run);
+    assert.equal(review.activeStage, "director");
+    assert.deepEqual(run.initialInput.durationRange, { maxSeconds: 30 });
+    assert.deepEqual(review.stages.script.currentDocument, original.stages.script.currentDocument);
+    assert.notEqual(review.stages.script.currentDraft!.versionId, original.stages.script.currentDraft!.versionId);
+    assert.equal(review.stages.script.confirmation?.unauditedAdoption, true);
+    assert.equal(review.stages.script.confirmation?.auditId, null);
+    assert.equal(review.stages.script.checkResult, null);
+    assert.deepEqual(review.stages.script.auditHistory, original.stages.script.auditHistory);
+    assert.deepEqual(review.stages.treatment.confirmation, original.stages.treatment.confirmation);
+    assert.equal(spies.screenwriterCalls.length, 1);
+    assert.equal(spies.directorCalls, 1);
+    assert.deepEqual(await (await pipeline.dispatchCreativeReviewCommand(run.id, command)).completion, run);
+    assert.equal(spies.directorCalls, 1, "同体重放不能重复后继生成");
+  });
+
+  it("C05 requires the current full draft identity and never revives an old A thread after A to B to A", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-duration-aba-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const pipeline = newClosurePipeline(workspaceRoot, spies);
+    let run = await pipeline.start({ ...closureBrief({ creativeReview: true }), durationPolicy: "content-led-v1", durationRange: { maxSeconds: 30 } });
+    const reviewOf = (value: typeof run) => (value.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
+    let review = reviewOf(run);
+    const confirmTreatment = { commandId: "aba-treatment", actor: "creator", stage: "treatment" as const,
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+      baseDraftSha256: review.stages.treatment.currentDraft!.sha256,
+      expectedCheckIdentity: review.stages.treatment.checkResult!.checkIdentity };
+    await assert.rejects(pipeline.confirmCreativeReview(run.id, confirmTreatment), /稿件版本/);
+    assert.deepEqual(await pipeline.show(run.id), run);
+    run = await pipeline.confirmCreativeReview(run.id, { ...confirmTreatment,
+      baseDraftVersionId: review.stages.treatment.currentDraft!.versionId });
+    review = reviewOf(run);
+    const original = structuredClone(review);
+    const counts = structuredClone(spies);
+    const originalRevision = run.revision;
+    const originalSha = contentSha256(run.initialInput);
+    for (const maxSeconds of [40, 30]) {
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, { action: "update_duration",
+        commandId: `aba-${maxSeconds}`, actor: "creator", stage: "script", expectedRunRevision: run.revision,
+        expectedReviewRevision: review.reviewRevision, baseDraftSha256: review.stages.script.currentDraft!.sha256,
+        baseDraftVersionId: review.stages.script.currentDraft!.versionId,
+        durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range: { maxSeconds } } })).completion;
+      review = reviewOf(run);
+    }
+    assert.equal(contentSha256(run.initialInput), originalSha);
+    assert.deepEqual(review.stages.script.currentDocument, original.stages.script.currentDocument);
+    assert.equal(review.stages.script.versionHistory.length, original.stages.script.versionHistory.length + 2);
+    assert.notEqual(review.stages.script.currentDraft!.versionId, original.stages.script.currentDraft!.versionId);
+    assert.equal(review.stages.script.checkResult, null);
+    const currentCommand = { action: "update_duration" as const, commandId: "aba-stale", actor: "creator", stage: "script" as const,
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+      baseDraftVersionId: review.stages.script.currentDraft!.versionId, baseDraftSha256: review.stages.script.currentDraft!.sha256,
+      durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range: null } };
+    for (const stale of [
+      { baseDraftVersionId: original.stages.script.currentDraft!.versionId },
+      { expectedRunRevision: originalRevision },
+      { expectedReviewRevision: original.reviewRevision },
+      { durationAmendment: { expectedBriefSha256: "0".repeat(64), range: null } },
+    ]) {
+      await assert.rejects(pipeline.dispatchCreativeReviewCommand(run.id, { ...currentCommand, ...stale }));
+      assert.deepEqual(await pipeline.show(run.id), run);
+    }
+    assert.deepEqual(spies, counts);
+  });
+
+  it("C03 notifies the persisted acceptance before a duration command finishes and notifies exact replay without saving again", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-duration-notify-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new ClosureWorker(),
+      treatmentAgents: closureTreatmentAgents(spies), screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureDirector(spies), assetProviders: CLOSURE_ASSET_PROVIDERS,
+      durationChangeFailpoints: { afterAccepted: () => held } });
+    const run = await pipeline.start({ ...closureBrief({ creativeReview: true }), durationPolicy: "content-led-v1" });
+    const review = (run.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
+    const command = { action: "update_duration" as const, commandId: "notify-duration", actor: "creator", stage: "treatment" as const,
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+      baseDraftVersionId: review.stages.treatment.currentDraft!.versionId, baseDraftSha256: review.stages.treatment.currentDraft!.sha256,
+      durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range: null } };
+    const notifications: Array<{ revision: number; status: string }> = [];
+    let durable = true;
+    const listener = async (value: WorkflowRun<ProductionBrief>) => {
+      durable &&= JSON.stringify(await pipeline.show(value.id)) === JSON.stringify(value);
+      notifications.push({ revision: value.revision, status: value.creativeReviewOperations!.at(-1)!.status });
+    };
+    const dispatch = pipeline.dispatchCreativeReviewCommand(run.id, command, listener);
+    const returnedAtAcceptance = await Promise.race([dispatch.then(() => true), delay(500).then(() => false)]);
+    release();
+    const result = await (await dispatch).completion;
+    assert.equal(returnedAtAcceptance, true, "HTTP可以在耐久受理后返回，不需等整个采用生命周期");
+    assert.equal(durable, true);
+    assert.equal(notifications[0]!.status, "running");
+    assert.equal(notifications.at(-1)!.status, "completed");
+    notifications.length = 0;
+    await (await pipeline.dispatchCreativeReviewCommand(run.id, command, listener)).completion;
+    assert.deepEqual(notifications, [{ revision: result.revision, status: "completed" }]);
+    assert.deepEqual(await pipeline.show(run.id), result);
+  });
+
+  for (const purpose of ["direction", "material_plan"] as const) it(`C07 saves a conflicting ${purpose} commitment at the earliest affected script without losing downstream documents`, async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-duration-upstream-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const library = purpose === "material_plan";
+    const director = closureLibraryDirector(spies);
+    director.planDetailed = async input => input.creativeReviewExecution?.mode === "check"
+      ? passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "视觉导演", "fixture-director-contract-v1", "director-plan", "director-binding-model")
+      : { output: await director.plan(input) };
+    const pipeline = library ? new ProductionPipeline({ workspaceRoot, worker: new ClosureLibraryWorker(),
+      treatmentAgents: closureTreatmentAgents(spies), screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: director, assetSemanticRanker: closureRanker(spies), assetProviders: [
+        { id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] },
+        ...CLOSURE_ASSET_PROVIDERS] }) : newClosurePipeline(workspaceRoot, spies);
+    let run = await pipeline.start({ ...closureBrief({ creativeReview: true, assetSemanticRank: library }), durationPolicy: "content-led-v1", durationRange: undefined });
+    const reviewOf = (value: typeof run) => (value.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
+    const preceding: Array<"treatment" | "script" | "director"> = library ? ["treatment", "script", "director"] : ["treatment", "script"];
+    for (const stage of preceding) {
+      const review = reviewOf(run);
+      run = await pipeline.confirmCreativeReview(run.id, { commandId: `upstream-${stage}`, actor: "creator", stage,
+        expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+        baseDraftVersionId: review.stages[stage].currentDraft!.versionId,
+        baseDraftSha256: review.stages[stage].currentDraft!.sha256,
+        ...(stage === "director" ? { reviewPurpose: "direction" as const } : {}),
+        expectedCheckIdentity: review.stages[stage].checkResult!.checkIdentity });
+    }
+    const before = structuredClone(run);
+    const review = reviewOf(run);
+    const counts = structuredClone(spies);
+    assert.equal(review.activeStage, "director");
+    assert.equal(review.directorReviewPurpose, purpose);
+    const command = { commandId: "shrink-at-director", actor: "creator", stage: "director" as const,
+      reviewPurpose: review.directorReviewPurpose ?? "material_plan" as const,
+      expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+      baseDraftVersionId: review.stages.director.currentDraft!.versionId,
+      baseDraftSha256: review.stages.director.currentDraft!.sha256,
+      durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range: { maxSeconds: 20 } } };
+    await assert.rejects(pipeline.dispatchCreativeReviewCommand(run.id, { ...command, action: "confirm",
+      acknowledgeUnaudited: true, expectedCheckIdentity: review.stages.director.checkResult!.checkIdentity }), /时长承诺/);
+    assert.deepEqual(await pipeline.show(run.id), before, "上游真冲突的组合采用不能降级保存");
+    run = await (await pipeline.dispatchCreativeReviewCommand(run.id, { ...command, action: "update_duration" })).completion;
+    const after = reviewOf(run);
+    assert.equal(after.activeStage, "script", "保存后回到最早需处理的阶段");
+    assert.deepEqual(run.initialInput.durationRange, { maxSeconds: 20 });
+    assert.deepEqual(after.stages.script.currentDocument, review.stages.script.currentDocument);
+    assert.deepEqual(after.stages.director.currentDocument, review.stages.director.currentDocument);
+    assert.deepEqual(after.stages.treatment, review.stages.treatment);
+    assert.equal(after.stages.script.confirmation, null);
+    assert.equal(after.stages.director.confirmation, null);
+    assert.equal(after.stages.script.conflicts?.[0]?.code, "duration_commitment_conflict");
+    assert.deepEqual(spies, counts, "回到冲突处不发任何生成");
+  });
+
+  for (const window of ["afterAccepted", "afterGraph", "afterRunSaved"] as const) {
+    it(`C06 resumes duration ${window} after real process death and blocks another write first`, { timeout: 45_000 }, async () => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-duration-crash-"));
+      const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+        screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+      const withGrammar = window === "afterRunSaved";
+      const referencePath = path.join(workspaceRoot, "reference.mp4");
+      const referenceBytes = "Reference identity fixture (not a playback test).";
+      if (withGrammar) await writeFile(referencePath, referenceBytes);
+      const pipeline = new ProductionPipeline({ workspaceRoot, worker: new ClosureWorker(),
+        treatmentAgents: closureTreatmentAgents(spies), screenwriterAgent: closureScreenwriter(spies),
+        directorAgent: closureDirector(spies), assetProviders: CLOSURE_ASSET_PROVIDERS,
+        ...(withGrammar ? { referenceVideoRoot: workspaceRoot,
+          referenceGrammarAgent: { id: "reference-fixture", modelId: "reference-fixture", analyze: async () => fallbackShotGrammar(24_000, "隔离参考身份夹具") } } : {}) });
+      const brief = closureBrief({ creativeReview: true });
+      let run = await pipeline.start({ ...brief, durationPolicy: "content-led-v1", durationRange: { maxSeconds: 20 },
+        ...(withGrammar ? { workflowFeatures: { ...brief.workflowFeatures!, referenceGrammar: true },
+          referenceVideo: { uploadId: "ref-duration", label: "隔离参考身份", path: referencePath, mimeType: "video/mp4" as const,
+            sizeBytes: Buffer.byteLength(referenceBytes), sha256: createHash("sha256").update(referenceBytes).digest("hex") } } : {}) });
+      const reviewOf = (value: typeof run) => (value.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
+      let review = reviewOf(run);
+      run = await pipeline.confirmCreativeReview(run.id, { commandId: "before-crash", actor: "creator",
+        expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision, stage: "treatment",
+        baseDraftVersionId: review.stages.treatment.currentDraft!.versionId,
+        baseDraftSha256: review.stages.treatment.currentDraft!.sha256,
+        expectedCheckIdentity: review.stages.treatment.checkResult!.checkIdentity });
+      review = reviewOf(run);
+      const command = { action: "update_duration", commandId: "same-duration-command", actor: "creator", stage: "script",
+        expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+        baseDraftVersionId: review.stages.script.currentDraft!.versionId, baseDraftSha256: review.stages.script.currentDraft!.sha256,
+        durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range: { maxSeconds: 30 } } };
+      await writeFile(path.join(workspaceRoot, "duration-command.json"), JSON.stringify({ runId: run.id, command }));
+      const child = (phase: string) => new Promise<{ code: number | null; signal: string | null; stderr: string }>((resolve, reject) => {
+        const process = spawn(globalThis.process.execPath, ["--import", "tsx", path.resolve(import.meta.dirname, "fixtures/duration-change-child.ts"), workspaceRoot, phase, window],
+          { stdio: ["ignore", "pipe", "pipe"] });
+        let stderr = "";
+        process.stdout.resume();
+        process.stderr.on("data", chunk => { stderr += chunk; });
+        process.once("error", reject);
+        process.once("close", (code, signal) => resolve({ code, signal, stderr }));
+      });
+      const crashed = await child("crash");
+      assert.equal(crashed.signal, "SIGKILL", crashed.stderr);
+      if (withGrammar) {
+        const snapshot = await pipeline.show(run.id);
+        const state = snapshot.nodeRuns.find(node => node.nodeId === "creative-planning")!.inputState!;
+        const grammarPath = (state.versions.find(version => version.id === state.effectiveVersionId)!.value as { referenceGrammarPath: string }).referenceGrammarPath;
+        await rename(grammarPath, `${grammarPath}.unavailable`);
+      }
+      const lock = await stat(path.join(workspaceRoot, "runs", run.id, ".execution-lease.json.lock"));
+      await delay(Math.max(0, lock.mtimeMs + 5_050 - Date.now()));
+      const recovered = await child("recover");
+      assert.equal(recovered.code, 0, recovered.stderr);
+      const result = await pipeline.show(run.id);
+      assert.equal(result.revision, run.revision + 1, "一个逻辑时长操作只增加一次制作revision");
+      assert.deepEqual(result.initialInput.durationRange, { maxSeconds: 30 });
+      const after = reviewOf(result);
+      assert.equal(after.stages.script.versionHistory.length, review.stages.script.versionHistory.length + 1);
+      assert.deepEqual(after.stages.script.currentDocument, review.stages.script.currentDocument);
+      assert.deepEqual(after.stages.treatment.confirmation, review.stages.treatment.confirmation);
+      assert.equal(after.stages.script.confirmation, null);
+      assert.equal(result.creativeReviewOperations!.at(-1)!.status, "completed");
+      assert.equal((await child("replay")).code, 0);
+      assert.deepEqual(await pipeline.show(run.id), result);
+      await assert.rejects(readFile(path.join(workspaceRoot, "unexpected-provider-calls.log")), { code: "ENOENT" });
+    });
+  }
+
+  for (const window of ["duringDirector", "afterContinued", "afterAccepted", "afterGraph", "afterRunSaved"] as const) {
+    it(`C06 combined confirmation recovers ${window} without resubmitting the accepted director request`, { timeout: 60_000 }, async () => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-duration-confirm-crash-"));
+      const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+        screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+      const pipeline = newClosurePipeline(workspaceRoot, spies);
+      const reviewOf = (value: WorkflowRun<ProductionBrief>) => (value.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
+      let run = await pipeline.start({ ...closureBrief({ creativeReview: true }), durationPolicy: "content-led-v1", durationRange: { maxSeconds: 20 } });
+      let review = reviewOf(run);
+      run = await pipeline.confirmCreativeReview(run.id, { commandId: "before-combined-crash", actor: "creator", stage: "treatment",
+        expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+        baseDraftVersionId: review.stages.treatment.currentDraft!.versionId, baseDraftSha256: review.stages.treatment.currentDraft!.sha256,
+        expectedCheckIdentity: review.stages.treatment.checkResult!.checkIdentity });
+      review = reviewOf(run);
+      const command = { action: "confirm", commandId: "combined-duration-command", actor: "creator", stage: "script",
+        expectedRunRevision: run.revision, expectedReviewRevision: review.reviewRevision,
+        baseDraftVersionId: review.stages.script.currentDraft!.versionId, baseDraftSha256: review.stages.script.currentDraft!.sha256,
+        acknowledgeUnaudited: true, expectedCheckIdentity: review.stages.script.checkResult!.checkIdentity,
+        durationAmendment: { expectedBriefSha256: contentSha256(run.initialInput), range: { maxSeconds: 30 } } };
+      let submits = 0;
+      let release!: () => void;
+      let started!: () => void;
+      const received = new Promise<void>(resolve => { started = resolve; });
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const executor = {
+        identity: { profileId: "deepseek", providerId: "duration-fixture", modelId: "director-binding-model", taskKinds: ["director-plan", "role-audit"] },
+        modelCandidates: ["duration-fixture"],
+        async runTask(task: ValidatedTask) {
+          let output: unknown;
+          if (task.kind === "director-plan") {
+            submits += 1;
+            started();
+            if (window === "duringDirector") await held;
+            output = await closureDirector(spies).plan(task.payload as unknown as VisualDirectorAgentInput);
+          } else if (task.kind === "role-audit") {
+            output = passingCreativeReviewExecution(null, "视觉导演", "fixture", "director-plan", "director-binding-model").agentLoop.iterations[0]!.audit;
+          } else throw new Error(`unexpected task ${task.kind}`);
+          return { output: JSON.stringify(output), sessionId: "019c-duration-7000-8000-000000000001",
+            trace: { taskKind: task.kind, providerId: "duration-fixture", modelId: "director-binding-model", promptVersion: "duration-fixture", prompt: "受控恢复测试", contractDigest: task.expectedContractDigest } };
+        },
+      };
+      const socketPath = path.join(workspaceRoot, "d.sock");
+      const broker = new CodexBrokerServer({ socketPath, executor: executor as unknown as ConstructorParameters<typeof CodexBrokerServer>[0]["executor"],
+        concurrency: 2, maxBacklog: 8, idempotencyDirectory: path.join(workspaceRoot, "broker-idempotency"), sessionDirectory: path.join(workspaceRoot, "sessions") });
+      await broker.start();
+      try {
+        await writeFile(path.join(workspaceRoot, "duration-command.json"), JSON.stringify({ runId: run.id, command, socketPath }));
+        const child = (phase: string) => {
+          const process = spawn(globalThis.process.execPath, ["--import", "tsx", path.resolve(import.meta.dirname, "fixtures/duration-change-child.ts"), workspaceRoot, phase, window], { stdio: ["ignore", "pipe", "pipe"] });
+          const completion = new Promise<{ code: number | null; signal: string | null; stderr: string }>((resolve, reject) => {
+            let stderr = "";
+            process.stdout.resume(); process.stderr.on("data", chunk => { stderr += chunk; });
+            process.once("error", reject); process.once("close", (code, signal) => resolve({ code, signal, stderr }));
+          });
+          return { process, completion };
+        };
+        const crashing = child("crash");
+        if (window === "duringDirector") {
+          await Promise.race([received, crashing.completion.then(result => { throw new Error(`child stopped before request: ${result.stderr}`); })]);
+          crashing.process.kill("SIGKILL");
+        }
+        const crashed = await crashing.completion;
+        assert.equal(crashed.signal, "SIGKILL", crashed.stderr);
+        const interrupted = await pipeline.show(run.id);
+        const originalRequest = interrupted.nodeRuns.find(node => node.nodeId === "creative-planning")!.operationRequestId;
+        assert.ok(originalRequest);
+        release();
+        const lock = await stat(path.join(workspaceRoot, "runs", run.id, ".execution-lease.json.lock"));
+        await delay(Math.max(0, lock.mtimeMs + 5_050 - Date.now()));
+        const recovered = await child("recover").completion;
+        assert.equal(recovered.code, 0, recovered.stderr);
+        const result = await pipeline.show(run.id);
+        assert.equal(result.status, "needs_human");
+        assert.equal(reviewOf(result).activeStage, "director");
+        assert.equal(result.revision, run.revision + 1);
+        assert.equal(reviewOf(result).stages.script.versionHistory.length, review.stages.script.versionHistory.length + 1);
+        assert.equal(reviewOf(result).stages.script.confirmation!.commandId, command.commandId);
+        assert.deepEqual(reviewOf(result).stages.treatment.confirmation, review.stages.treatment.confirmation);
+        const resumedRequest = result.nodeRuns.find(node => node.nodeId === "creative-planning")!.operationRequestId;
+        if (window === "afterAccepted" || window === "afterGraph") {
+          // 此两窗后继尚未开始，旧ID属于上一条脚本生成，不可冒充本次确认的执行身份。
+          assert.notEqual(resumedRequest, originalRequest);
+        } else assert.equal(resumedRequest, originalRequest);
+        assert.equal(submits, 1);
+        assert.equal((await child("replay").completion).code, 0);
+        assert.deepEqual(await pipeline.show(run.id), result);
+        assert.equal(submits, 1);
+      } finally { release(); await broker.close(); }
+    });
+  }
+
   it("carries adopted article evidence through every planning role and invalidates all dependent stages when it changes", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-article-evidence-planning-"));
     const spies: ClosureSpies = {
@@ -2793,6 +3405,53 @@ describe("joint planning physical execution summary (Revision 9)", () => {
 });
 
 describe("settled audit candidate exhaustion through the production pipeline", () => {
+  for (const mode of ["not_accepted", "completed_failure", "mixed"] as const) {
+    it(`U03 preserves the actual manual audit outcome and reason across later audits (${mode})`, async () => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-audit-receipt-"));
+      const spies: ClosureSpies = {
+        treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], treatmentAuditModels: [],
+        screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+      };
+      let failAudit = false;
+      const options = { auditFailure: (modelId: string) => failAudit
+        ? new CodexBridgeError("controlled audit provider failure", true,
+          mode === "mixed" ? modelId === "treatment-model-a" ? "completed_failure" : "not_accepted" : mode,
+          503, "model_provider_transient") : undefined };
+      const pipeline = newClosurePipeline(workspaceRoot, spies, options);
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      const studio = new ProductionStudio({ workspaceRoot, pipeline, listProviders: async () => [],
+        archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive.json")) });
+      const before = (await studio.creativeReview(run.id))!;
+      const command = { action: "audit_current" as const, commandId: `u03-audit-${mode}`, actor: "creator",
+        stage: before.stage, expectedRunRevision: run.revision, expectedReviewRevision: before.reviewRevision,
+        baseDraftSha256: before.draftSha256, baseDraftVersionId: before.draftVersionId! };
+      failAudit = true;
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, command)).completion;
+      const failed = (await studio.creativeReview(run.id))!;
+      const original = failed.consultationOperations!.find(op => op.commandId === command.commandId)!;
+      assert.equal(original.status, mode === "not_accepted" ? "not_accepted" : "failed");
+      assert.ok(original.detail, "没有结论的具体原因必须跟随原命令");
+      assert.equal(failed.checkResult?.status, "incomplete");
+      assert.deepEqual(failed.draft, before.draft);
+      assert.equal(run.status, "needs_human");
+      assert.equal(spies.screenwriterCalls.length, 0, "审计失败不自动推进");
+      const callCount = spies.treatmentAuditCalls;
+      await (await pipeline.dispatchCreativeReviewCommand(run.id, command)).completion;
+      assert.equal(spies.treatmentAuditCalls, callCount, "同体重放不重新审计");
+      failAudit = false;
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, { ...command,
+        commandId: `u03-audit-success-${mode}`, expectedRunRevision: run.revision,
+        expectedReviewRevision: failed.reviewRevision })).completion;
+      const restored = new ProductionStudio({ workspaceRoot, pipeline: newClosurePipeline(workspaceRoot, spies, options),
+        listProviders: async () => [], archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive.json")) });
+      const after = (await restored.creativeReview(run.id))!;
+      assert.deepEqual(after.consultationOperations!.find(op => op.commandId === command.commandId), original,
+        "后续成功或重载不能抹掉前一次失败的事实");
+      assert.equal(after.consultationOperations!.at(-1)!.status, "completed");
+      assert.equal(after.checkResult?.verdict, "pass");
+    });
+  }
+
   it("keeps the valid draft at a human gate when every audit candidate is definitively unavailable", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-audit-exhaustion-"));
     const spies: ClosureSpies = {
@@ -3915,6 +4574,10 @@ describe("creative consultation fact classification (C2)", () => {
         assert.equal(operation?.status, testCase.expect.receipt, `${gateStage}/${testCase.label} operation 回执`);
         const studio = new ProductionStudio({ workspaceRoot, pipeline, listProviders: async () => [],
           archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive.json")) });
+        const projected = (await studio.creativeReview(settled.id))!.consultationOperations?.find(item => item.commandId === operation!.commandId);
+        assert.equal(projected?.status, testCase.expect.receipt, "新标签能从服务端重新取得原命令的真实状态");
+        assert.equal(projected?.command.action === "discuss" || projected?.command.action === "revise" ? projected.command.message : undefined,
+          "C2 分类意见", "失败/未知/未受理的原文不能仅存在原标签中");
         assert.equal((await studio.creativeReviewCommand(settled.id, operation!.commandId))?.status, testCase.expect.receipt,
           `${gateStage}/${testCase.label} 正式Studio耐久读取与operation同事实`);
         // 事实三：原稿不动
@@ -3953,19 +4616,28 @@ describe("creative consultation fact classification (C2)", () => {
 describe("creative discussion unknown recovery (C1)", () => {
   class ControllableDiscussionExecutor {
     submits = 0;
+    private failNextTask = false;
     private held: Array<() => void> = [];
     private mode: "hold" | "complete" = "complete";
-    identity = { profileId: "deepseek", providerId: "c1-provider", modelId: "c1-model", taskKinds: ["creative-discussion"] };
+    identity = { profileId: "deepseek", providerId: "c1-provider", modelId: "c1-model", taskKinds: ["creative-discussion", "role-audit"] };
     modelCandidates = ["c1-provider"];
     hold() { this.mode = "hold"; }
+    failNext() { this.failNextTask = true; }
     release() { this.mode = "complete"; for (const resolve of this.held) resolve(); this.held = []; }
     get pending() { return this.held.length; }
 
     async runTask(task: ValidatedTask, _options?: unknown): Promise<{ output: string; sessionId: string; trace: Record<string, unknown> }> {
       this.submits += 1;
       const payload = task.payload as Record<string, any>;
-      if (task.kind !== "creative-discussion") throw new Error(`unexpected kind ${task.kind}`);
+      if (!["creative-discussion", "role-audit"].includes(task.kind)) throw new Error(`unexpected kind ${task.kind}`);
+      if (this.failNextTask) { this.failNextTask = false; throw new Error("Controlled accepted execution failed."); }
       if (this.mode === "hold" && this.submits > 0) await new Promise<void>(resolve => this.held.push(resolve));
+      if (task.kind === "role-audit") {
+        const execution = passingCreativeReviewExecution(payload.candidate, "编剧", "fixture", "script-draft", "c1-model");
+        return { output: JSON.stringify(execution.agentLoop.iterations[0]!.audit), sessionId: "019c-c1-0000-7000-8000-000000000001",
+          trace: { taskKind: task.kind, providerId: "c1-provider", modelId: "c1-model", promptVersion: "controlled-c1",
+            contractDigest: task.expectedContractDigest, prompt: "C1 受控审计" } };
+      }
       const isRevise = payload.requestMode === "revise";
       const revised = structuredClone(payload.currentDocument);
       if (isRevise && payload.stage === "treatment") revised.payoff = "C1 修订后的结尾";
@@ -3988,7 +4660,7 @@ describe("creative discussion unknown recovery (C1)", () => {
     }
   }
 
-  async function startRecoveryHarness(options: { holdInitially?: boolean } = {}) {
+  async function startRecoveryHarness(options: { holdInitially?: boolean; auditViaBroker?: boolean } = {}) {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-c1-"));
     const sockets = path.join(workspaceRoot, "sockets");
     await mkdir(sockets, { recursive: true });
@@ -4009,6 +4681,9 @@ describe("creative discussion unknown recovery (C1)", () => {
       screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
     };
     const discussionViaBroker = (input: import("../src/codex-creative-discussion.js").CreativeDiscussionAgentInput) => runCreativeDiscussionTask(client, input);
+    const fixtureWriter = closureScreenwriter(spies);
+    const auditWriter = new CodexScreenwriterAgent({ client, modelId: fixtureWriter.modelId!, sessionMode: "stateless" });
+    let auditViaBrokerEnabled = false;
     const buildPipeline = () => new ProductionPipeline({
       workspaceRoot,
       worker: new ClosureWorker(),
@@ -4016,11 +4691,15 @@ describe("creative discussion unknown recovery (C1)", () => {
         providerId: entry.providerId,
         agent: Object.assign(entry.agent, { discussDetailed: discussionViaBroker }),
       })),
-      screenwriterAgent: Object.assign(closureScreenwriter(spies), { discussDetailed: discussionViaBroker }) as ScreenwriterAgent,
+      screenwriterAgent: { ...fixtureWriter, discussDetailed: discussionViaBroker,
+        draftDetailed: input => options.auditViaBroker && auditViaBrokerEnabled && input.creativeReviewExecution?.mode === "check"
+          && input.creativeReviewExecution.auditOperationId
+          ? auditWriter.draftDetailed(input) : fixtureWriter.draftDetailed!(input) },
       directorAgent: Object.assign(closureDirector(spies), { discussDetailed: discussionViaBroker }) as VisualDirectorAgent,
       assetProviders: CLOSURE_ASSET_PROVIDERS,
     });
-    return { workspaceRoot, executor, broker, client, spies, buildPipeline };
+    return { workspaceRoot, executor, broker, client, spies, buildPipeline,
+      enableBrokerAudit: () => { auditViaBrokerEnabled = true; } };
   }
 
   const gateOf = (run: WorkflowRun<ProductionBrief>) => {
@@ -4044,6 +4723,7 @@ describe("creative discussion unknown recovery (C1)", () => {
         expectedRunRevision: current.revision,
         expectedReviewRevision: continuation.reviewRevision,
         baseDraftSha256: continuation.draftSha256,
+        baseDraftVersionId: stageReview(current, continuation.stage).currentDraft!.versionId,
         ...(shown?.checkIdentity ? { expectedCheckIdentity: shown.checkIdentity } : {}),
         ...(shown?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}),
         ...(!shown ? { acknowledgeUnaudited: true as const } : {}),
@@ -4051,6 +4731,200 @@ describe("creative discussion unknown recovery (C1)", () => {
     }
     return current;
   }
+
+  for (const action of ["discuss", "revise"] as const) it(`U03 keeps ${action} recovery in its own panel without presenting it as a second text audit`, async () => {
+    const harness = await startRecoveryHarness({ holdInitially: true, auditViaBroker: true });
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "script");
+      const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline, listProviders: async () => [],
+        archiveStore: new JsonRunArchiveStore(path.join(harness.workspaceRoot, "archive.json")) });
+      const shown = (await studio.creativeReview(run.id))!;
+      const command = { action, commandId: `u03-projection-${action}`, actor: "creator", stage: shown.stage,
+        expectedRunRevision: run.revision, expectedReviewRevision: shown.reviewRevision,
+        baseDraftSha256: shown.draftSha256, baseDraftVersionId: shown.draftVersionId!, message: "保留本条原请求" };
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, command)).completion;
+      const originalFacts = await pipeline.originalOptionalReviewTasks(run.id);
+      assert.ok(originalFacts.length, "原有风险证据仍保留，不靠删除事实修显示");
+      assert.deepEqual((await studio.get(run.id))!.optionalReviewTasks ?? [], [], "讨论不是另一条文字审计");
+      const pending = (await studio.creativeReview(run.id))!.consultationOperations!.find(op => op.commandId === command.commandId)!;
+      assert.equal(pending.status, "unknown");
+      assert.equal(pending.command.action, action);
+      assert.equal(pending.command.message, command.message);
+      harness.executor.release();
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, command)).completion;
+      assert.equal((await studio.creativeReview(run.id))!.consultationOperations!.find(op => op.commandId === command.commandId)!.status, "completed");
+      assert.deepEqual((await studio.get(run.id))!.optionalReviewTasks ?? [], []);
+      assert.deepEqual(await pipeline.originalOptionalReviewTasks(run.id), originalFacts, "展示去重复不改安全事实");
+      assert.equal(harness.executor.submits, 1, "恢复只观察原请求");
+      harness.executor.hold();
+      harness.enableBrokerAudit();
+      const current = (await studio.creativeReview(run.id))!;
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, { action: "audit_current", commandId: "u03-real-audit", actor: "creator",
+        stage: current.stage, expectedRunRevision: run.revision, expectedReviewRevision: current.reviewRevision,
+        baseDraftSha256: current.draftSha256, baseDraftVersionId: current.draftVersionId! })).completion;
+      const audits = (await studio.get(run.id))!.optionalReviewTasks ?? [];
+      assert.equal(audits.length, 1, "真正的文字审计仍有独立查询与费用记录");
+      assert.ok(audits[0]!.requestId);
+      assert.equal(audits[0]!.requestState, "unknown");
+    } finally { harness.executor.release(); await harness.broker.close(); }
+  });
+
+  it("U03 retains each original failure reason after two consultations fail on the same stage", async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "script");
+      const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline, listProviders: async () => [],
+        archiveStore: new JsonRunArchiveStore(path.join(harness.workspaceRoot, "archive.json")) });
+      const reasons = new Map<string, string>();
+      for (const index of [1, 2]) {
+        harness.executor.failNext();
+        const shown = (await studio.creativeReview(run.id))!;
+        const commandId = `u03-failed-original-${index}`;
+        run = await (await pipeline.dispatchCreativeReviewCommand(run.id, { action: "discuss", commandId, actor: "creator",
+          stage: "script", expectedRunRevision: run.revision, expectedReviewRevision: shown.reviewRevision,
+          baseDraftSha256: shown.draftSha256, baseDraftVersionId: shown.draftVersionId!, message: `第${index}条原讨论意见` })).completion;
+        const projected = (await studio.creativeReview(run.id))!.consultationOperations!.find(item => item.commandId === commandId)!;
+        assert.equal(projected.status, "failed");
+        assert.ok(projected.detail, "每条原失败先有自己的可读原因");
+        reasons.set(commandId, projected.detail);
+      }
+      const reloaded = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline: harness.buildPipeline(), listProviders: async () => [],
+        archiveStore: new JsonRunArchiveStore(path.join(harness.workspaceRoot, "archive.json")) });
+      const projected = (await reloaded.creativeReview(run.id))!.consultationOperations!;
+      for (const [commandId, detail] of reasons) assert.equal(projected.find(item => item.commandId === commandId)?.detail, detail,
+        "下一次失败或服务重建不能抹掉上一条原命令的原因");
+      assert.equal(harness.executor.submits, 2, "只执行用户明确发送的两次讨论");
+    } finally { await harness.broker.close(); }
+  });
+
+  it("C09 closes a detached audit receipt from durable facts when a later original query is unavailable", async () => {
+    const harness = await startRecoveryHarness({ holdInitially: true, auditViaBroker: true });
+    let brokerClosed = false;
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start({ ...closureBrief({ creativeReview: true }), durationPolicy: "content-led-v1", durationRange: { maxSeconds: 30 } });
+      run = await confirmTo(pipeline, run, "script");
+      harness.enableBrokerAudit();
+      const gate = gateOf(run).continuation;
+      const original = { action: "audit_current" as const, commandId: "duration-settled-original", actor: "creator", stage: "script" as const,
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision, baseDraftSha256: gate.draftSha256,
+        baseDraftVersionId: stageReview(run, "script").currentDraft!.versionId };
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, original)).completion;
+      assert.equal(run.creativeReviewOperations!.at(-1)!.status, "unknown");
+      const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline, listProviders: async () => [],
+        archiveStore: new JsonRunArchiveStore(path.join(harness.workspaceRoot, "archive.json")) });
+      const shown = (await studio.creativeReview(run.id))!;
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, { action: "update_duration", commandId: "duration-settled-change", actor: "creator", stage: "script",
+        expectedRunRevision: run.revision, expectedReviewRevision: shown.reviewRevision, baseDraftVersionId: shown.draftVersionId!,
+        baseDraftSha256: shown.draftSha256, durationAmendment: { expectedBriefSha256: shown.duration!.briefSha256, range: null } })).completion;
+      const currentDraft = structuredClone(stageReview(run, "script").currentDraft);
+      const stop = structuredClone(gateOf(run).node.intervention);
+      const task = (await pipeline.originalOptionalReviewTasks(run.id)).find(item => item.targetVersionId === original.baseDraftVersionId)!;
+      assert.ok(task.prepared);
+      harness.executor.release();
+      let observed = await harness.client.observePreparedOnce(task.prepared);
+      for (let attempt = 0; (observed.state === "running" || observed.state === "accepted_unknown") && attempt < 100; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        observed = await harness.client.observePreparedOnce(task.prepared);
+      }
+      assert.equal(observed.state, "completed_success");
+      if (observed.state !== "completed_success") throw new Error("原受控审计必须真实完成");
+      const { prepared: _prepared, ...identity } = task;
+      // 正式原请求查询入口可先落账；命令回执尚未收口时，下一次查询恰好不可用。
+      run = await pipeline.recordOptionalReviewObservation(run.id, { ...identity, requestState: "settled", resultState: "valid", result: observed.execution.output });
+      assert.equal(run.creativeReviewOperations!.find(item => item.commandId === original.commandId)!.status, "unknown");
+      assert.equal((await pipeline.originalOptionalReviewTasks(run.id)).find(item => item.requestId === task.requestId)!.requestState, "settled");
+      await harness.broker.close();
+      brokerClosed = true;
+      const settled = await (await pipeline.dispatchCreativeReviewCommand(run.id, original)).completion;
+      assert.equal(settled.creativeReviewOperations!.find(item => item.commandId === original.commandId)!.status, "completed");
+      assert.equal(settled.creativeReviewOperations!.find(item => item.commandId === original.commandId)!.resultDisposition, "recorded_not_applied");
+      assert.equal(settled.revision, run.revision + 1);
+      assert.deepEqual(stageReview(settled, "script").currentDraft, currentDraft);
+      assert.deepEqual(gateOf(settled).node.intervention, stop);
+      assert.equal(stageReview(settled, "script").auditHistory.at(-1)!.versionId, original.baseDraftVersionId);
+      assert.equal(harness.executor.submits, 1);
+      assert.deepEqual(await (await pipeline.dispatchCreativeReviewCommand(run.id, original)).completion, settled);
+    } finally { harness.executor.release(); if (!brokerClosed) await harness.broker.close(); }
+  });
+
+  for (const action of ["revise", "audit_current"] as const) it(`C09 changes only the duration commitment during an unknown optional ${action} and archives the late reply`, async () => {
+    const harness = await startRecoveryHarness({ holdInitially: true, auditViaBroker: action === "audit_current" });
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start({ ...closureBrief({ creativeReview: true }), durationPolicy: "content-led-v1", durationRange: { maxSeconds: 30 } });
+      run = await confirmTo(pipeline, run, "script");
+      harness.enableBrokerAudit();
+      const gate = gateOf(run).continuation;
+      const original = { commandId: "duration-unknown-original", actor: "creator", stage: "script" as const,
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision, baseDraftSha256: gate.draftSha256,
+        baseDraftVersionId: stageReview(run, "script").currentDraft!.versionId,
+        ...(action === "revise" ? { action, message: "只调整收束" } : { action }) };
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, original)).completion;
+      assert.equal(run.creativeReviewOperations!.at(-1)!.status, "unknown");
+      const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline, listProviders: async () => [],
+        archiveStore: new JsonRunArchiveStore(path.join(harness.workspaceRoot, "archive.json")) });
+      const shown = (await studio.creativeReview(run.id))!;
+      if (action === "revise") {
+        assert.ok(shown.pendingConsultation?.allowedActions.includes("update_duration"), "只在真实维护租约证明后开放本地改承诺");
+      } else {
+        assert.equal((await studio.creativeReviewCommand(run.id, original.commandId))?.independentDraftActionsAllowed, true,
+          "审计沿原审计回执证明独立稿件权限，不伪装成讨论请求");
+      }
+      assert.ok(shown.draftVersionId);
+      const changed = await (await pipeline.dispatchCreativeReviewCommand(run.id, { action: "update_duration", commandId: "duration-during-unknown", actor: "creator", stage: "script",
+        expectedRunRevision: run.revision, expectedReviewRevision: shown.reviewRevision,
+        baseDraftVersionId: shown.draftVersionId, baseDraftSha256: shown.draftSha256,
+        durationAmendment: { expectedBriefSha256: shown.duration!.briefSha256, range: null } })).completion;
+      assert.equal(changed.initialInput.durationRange, undefined);
+      assert.equal(changed.status, "needs_human", JSON.stringify(changed.nodeRuns.map(node => ({ id: node.nodeId, status: node.status, error: node.error }))));
+      assert.ok(changed.nodeRuns.find(node => node.nodeId === "creative-planning")?.intervention?.continuation,
+        JSON.stringify(changed.nodeRuns.map(node => ({ id: node.nodeId, status: node.status, error: node.error, intervention: node.intervention }))));
+      const review = structuredClone(gateOf(changed).node.output);
+      const stop = structuredClone(gateOf(changed).node.intervention);
+      if (action === "audit_current") {
+        const task = (await pipeline.originalOptionalReviewTasks(run.id)).find(item => item.targetVersionId === original.baseDraftVersionId)!;
+        assert.ok(task?.prepared);
+        const index = changed.artifacts.map(item => item.data).find((item): item is Record<string, unknown> =>
+          !!item && typeof item === "object" && "requestId" in item && item.requestId === task.requestId && "sourceRelativePath" in item)!;
+        const file = path.join(harness.workspaceRoot, "runs", run.id, String(index.sourceRelativePath));
+        const before = JSON.stringify(await pipeline.show(run.id));
+        await rename(file, `${file}.held`);
+        try {
+          await assert.rejects(async () => (await pipeline.dispatchCreativeReviewCommand(run.id, original)).completion);
+          assert.equal(JSON.stringify(await pipeline.show(run.id)), before, "缺原信封不能重造请求或改当前稿");
+        } finally { await rename(`${file}.held`, file); }
+        for (let query = 0; query < 2; query++) {
+          const waiting = await (await pipeline.dispatchCreativeReviewCommand(run.id, original)).completion;
+          assert.deepEqual(gateOf(waiting).node.output, review);
+          assert.deepEqual(gateOf(waiting).node.intervention, stop);
+          assert.equal(waiting.creativeReviewOperations!.find(item => item.commandId === original.commandId)!.status, "unknown");
+          assert.equal(harness.executor.submits, 1);
+        }
+      }
+      harness.executor.release();
+      const observed = await (await pipeline.dispatchCreativeReviewCommand(run.id, original)).completion;
+      if (action === "revise") assert.deepEqual(gateOf(observed).node.output, review);
+      else {
+        const beforeReview = (review as { creativeReview: CreativeReviewState }).creativeReview.stages.script;
+        const afterReview = stageReview(observed, "script");
+        assert.deepEqual({ ...afterReview, auditHistory: [] }, { ...beforeReview, auditHistory: [] });
+        assert.equal(afterReview.auditHistory.length, beforeReview.auditHistory.length + 1);
+        assert.equal(afterReview.auditHistory.at(-1)?.versionId, original.baseDraftVersionId);
+        assert.notEqual(afterReview.auditHistory.at(-1)?.versionId, afterReview.currentDraft!.versionId);
+      }
+      assert.deepEqual(gateOf(observed).node.intervention, stop);
+      assert.equal(observed.initialInput.durationRange, undefined);
+      assert.equal(observed.creativeReviewOperations!.find(op => op.commandId === original.commandId)!.resultDisposition, "recorded_not_applied");
+      assert.equal(harness.executor.submits, 1, "承诺修改和迟到核对都不新增生成请求");
+      const replayed = await (await pipeline.dispatchCreativeReviewCommand(run.id, original)).completion;
+      assert.deepEqual(replayed, observed, "终态重放只返回原回执，不再审计或加版本");
+    } finally { harness.executor.release(); await harness.broker.close(); }
+  });
 
   it("C1-B allows hand-editing the saved draft while the original request stays unknown, and the late result never overwrites", async () => {
     const harness = await startRecoveryHarness({ holdInitially: true });

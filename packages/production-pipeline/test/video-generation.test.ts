@@ -65,7 +65,7 @@ describe("metered video generation adapters", () => {
 
     const result = await adapter.reconcile!(
       "seedance-task-existing",
-      { prompt: "原请求", durationSeconds: 5, ratio: "9:16" },
+      {},
     );
 
     assert.equal(result.taskId, "seedance-task-existing");
@@ -197,7 +197,7 @@ describe("metered video generation adapters", () => {
 
     const result = await adapter.reconcile!(
       "wan-existing",
-      { prompt: "原请求", durationSeconds: 6, ratio: "9:16" },
+      {},
     );
 
     assert.equal(result.videoUrl, "https://example.com/wan-existing.mp4");
@@ -323,7 +323,7 @@ describe("metered video generation adapters", () => {
 
     const result = await adapter.reconcile!(
       "minimax-existing",
-      { prompt: "原请求", durationSeconds: 6, ratio: "9:16", modelId: "MiniMax-Hailuo-2.3" },
+      { modelId: "MiniMax-Hailuo-2.3" },
     );
 
     assert.equal(result.videoUrl, "https://example.com/minimax-existing.mp4");

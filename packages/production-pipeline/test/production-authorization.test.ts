@@ -888,6 +888,7 @@ describe("scope-covered spend approval auto-continues", () => {
     assert.ok(effectiveInput?.executablePlanPath, "assets input must reference the executable plan");
     const planDigest = createHash("sha256").update(await readFile(effectiveInput.executablePlanPath!)).digest("hex");
     const runBrief = (run as unknown as { initialInput: Record<string, unknown> }).initialInput as unknown as import("../src/index.js").ProductionBrief;
+    assert.ok(runBrief.durationPolicy === undefined, "此夹具保留旧版授权合同");
     return baseScope({
       id: "scope-cover",
       runId,

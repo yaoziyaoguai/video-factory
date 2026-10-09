@@ -14,8 +14,10 @@
     {"name":"pause_overflows_scene","path":["scenes",0,"dialogue",0,"after_pause_frames"],"value":180},
     {"name":"no_speech_text","path":["scenes",0,"dialogue",0,"text"],"value":"   "},
     {"name":"fake_narration","path":["scenes",0,"narration"],"value":"不能回退为单旁白"},
-    {"name":"dialogue_evidence_claim","path":["scenes",0,"dialogue",0,"text"],"value":"这个生成画面证明了实验效果。"},
     {"name":"noncontiguous_position","path":["scenes",1,"position"],"value":3}
+  ],
+  "structurally_valid_semantic_review": [
+    {"name":"dialogue_evidence_claim","path":["scenes",0,"dialogue",0,"text"],"value":"这个生成画面证明了实验效果。"}
   ],
   "script": {
     "version": "video-factory/character-script-v1",

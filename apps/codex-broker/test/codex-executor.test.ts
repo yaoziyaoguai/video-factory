@@ -542,6 +542,62 @@ describe("parseTaskRequest", () => {
     }
   });
 
+  it("preserves content-led reference and explicit endpoints at all planning-role intake boundaries", () => {
+    for (const build of [scriptRequest, creativeTreatmentContractRequest, directorRequest]) {
+      for (const range of [undefined, { maxSeconds: 12 }, { minSeconds: 40 }, { minSeconds: 20, maxSeconds: 40 }]) {
+        const request = build();
+        const brief = request.payload.brief as Record<string, unknown>;
+        brief.durationPolicy = "content-led-v1";
+        brief.durationSeconds = 50.1;
+        delete brief.durationRange;
+        if (range) brief.durationRange = range;
+        const accepted = parseTaskRequest(request);
+        assert.ok("brief" in accepted.payload);
+        const received = accepted.payload.brief as Record<string, unknown>;
+        assert.equal(received.durationPolicy, "content-led-v1");
+        assert.equal(received.durationSeconds, 50.1, "参考目标可在明确承诺之外");
+        assert.deepEqual(received.durationRange, range);
+        assert.equal(Object.hasOwn(received, "durationRange"), range !== undefined);
+      }
+      for (const invalid of [null, {}, { maxSeconds: 0.02 }, { minSeconds: 1.01, maxSeconds: 1.02 }, { maxSeconds: "12" }, { maxSeconds: Infinity }, { maxSeconds: 12, hidden: true }]) {
+        const request = build();
+        Object.assign(request.payload.brief as object, { durationPolicy: "content-led-v1", durationSeconds: 24, durationRange: invalid });
+        assert.throws(() => parseTaskRequest(request), error => assertTerminal(error, /时长|duration/));
+      }
+      for (const policy of ["content-led-v2", null]) {
+        const request = build();
+        Object.assign(request.payload.brief as object, { durationPolicy: policy });
+        assert.throws(() => parseTaskRequest(request), error => assertTerminal(error, /durationPolicy/));
+      }
+    }
+  });
+
+  it("accepts one or two saved scenes and publish narrations without lexical evidence rejection", () => {
+    for (const count of [1, 2]) {
+      const currentDocument = { scenes: Array.from({ length: count }, (_, index) => ({
+        position: index + 1, duration: 12 / count, narration: "这证明了你是朋友，今晚是现场效果最好的一次。",
+        visual_strategy: "generated", visual_prompt: "办公室喜剧里审批预算本的虚构表演", search_terms: ["办公室喜剧"],
+      })) };
+      const request = { protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION, kind: "creative-discussion",
+        expectedContractDigest: taskContractDescriptorFor("creative-discussion").digest,
+        payload: { stage: "script", currentDocument, context: { effectiveUserInstructions: [], upstreamConfirmed: {}, productionCapabilities: {} },
+          message: "保留原话，讨论表演", recentMessages: [] } };
+      const discussionTask = parseTaskRequest(request);
+      assert.equal(discussionTask.kind, "creative-discussion");
+      assert.deepEqual(discussionTask.payload.currentDocument, currentDocument);
+      const publish = publishCopyRequest();
+      publish.payload.narrations = currentDocument.scenes.map(scene => scene.narration);
+      const publishTask = parseTaskRequest(publish);
+      assert.equal(publishTask.kind, "publish-copy");
+      assert.deepEqual(publishTask.payload.narrations, publish.payload.narrations);
+      for (const invalidCount of [0, 25]) {
+        const invalid = structuredClone(request);
+        invalid.payload.currentDocument.scenes = Array.from({ length: invalidCount }, (_, index) => ({ ...currentDocument.scenes[0]!, position: index + 1 }));
+        assert.throws(() => parseTaskRequest(invalid), /1 to 24/);
+      }
+    }
+  });
+
   it("accepts data-only payloads and bounded repair context for producer tasks", async () => {
     const topicInput = topicRequest();
     topicInput.payload.revision = { candidate: { ideas: [] }, audit: { repairInstructions: ["补充观众收益"] } };
@@ -569,7 +625,7 @@ describe("parseTaskRequest", () => {
     });
     const expectedScriptBrief = structuredClone(scriptRequest().payload.brief) as Record<string, unknown>;
     assert.deepEqual(script.payload.brief, expectedScriptBrief);
-    assert.equal(script.payload.brief.templateGuidance, undefined);
+    assert.equal(Object.hasOwn(script.payload.brief, "templateGuidance"), false);
     assert.doesNotMatch(buildTaskPrompt(script), /costPolicy|maxPaidShots|maxCost/);
 
     for (const request of [scriptRequest(), directorRequest()]) {
@@ -1032,8 +1088,8 @@ describe("parseTaskRequest", () => {
     await assert.rejects(async () => parseTaskRequest(missingNarrations), (error: unknown) => assertTerminal(error, /payload\.narrations/));
 
     const tooFewNarrations = publishCopyRequest();
-    tooFewNarrations.payload.narrations = ["第一场旁白", "第二场旁白"];
-    await assert.rejects(async () => parseTaskRequest(tooFewNarrations), (error: unknown) => assertTerminal(error, /3 to 24 entries/));
+    tooFewNarrations.payload.narrations = [];
+    await assert.rejects(async () => parseTaskRequest(tooFewNarrations), (error: unknown) => assertTerminal(error, /1 to 24 entries/));
 
     const missingPlatform = publishCopyRequest();
     delete missingPlatform.payload.platform;
@@ -1499,7 +1555,7 @@ describe("CodexExecutor.runTask", () => {
 
     assert.equal(JSON.parse(result.output).viewerPromise, "学会识别资料支持的结论边界");
     assert.equal(result.trace?.taskKind, "creative-treatment");
-    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v8");
+    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v9");
 
     const noSources = creativeTreatmentContractRequest();
     noSources.payload.suppliedSources = [];
@@ -2515,11 +2571,13 @@ describe("existing script discussion exact boundary (C6)", () => {
     await assert.rejects(async () => parseDiscussion({ ...savedScript, scenes: savedScript.scenes.map((scene, index) => index === 0 ? { ...scene, surpriseField: "x" } : scene) }), /surpriseField/);
   });
 
-  it("applies the host evidence boundary to success_criteria and failure_conditions for generated visuals", async () => {
-    await assert.rejects(async () => parseDiscussion({ ...savedScript, scenes: savedScript.scenes.map((scene, index) => index === 0
-      ? { ...scene, success_criteria: ["现场证据证明了效果"] } : scene) }), /generated visual|证据|evidence/i);
-    await assert.rejects(async () => parseDiscussion({ ...savedScript, scenes: savedScript.scenes.map((scene, index) => index === 0
-      ? { ...scene, failure_conditions: ["画面被证实为真实结果"] } : scene) }), /generated visual|证据|evidence/i);
+  it("preserves evidence-claim wording for semantic discussion rather than rejecting by vocabulary", () => {
+    for (const fields of [{ success_criteria: ["现场证据证明了效果"] }, { failure_conditions: ["画面被证实为真实结果"] }]) {
+      const document = { ...savedScript, scenes: savedScript.scenes.map((scene, index) => index === 0 ? { ...scene, ...fields } : scene) };
+      const task = parseDiscussion(document);
+      assert.equal(task.kind, "creative-discussion");
+      assert.deepEqual(task.payload.currentDocument, document);
+    }
   });
 
   it("accepts honest illustrative wording in criteria and does not modify the document bytes", async () => {

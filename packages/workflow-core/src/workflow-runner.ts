@@ -44,6 +44,14 @@ export class NodeVersionConflictError extends Error {
   }
 }
 
+export class StaleHumanContentError extends Error {
+  readonly code = "STALE_HUMAN_CONTENT_REVIEW_REQUIRED";
+  constructor(readonly nodeId: string, readonly field: "input" | "output", readonly effectiveVersionId: string, readonly runRevision: number) {
+    super(`Node '${nodeId}' has a stale human ${field} that must be reviewed and saved again before regeneration.`);
+    this.name = "StaleHumanContentError";
+  }
+}
+
 export interface WorkflowRunnerOptions {
   providers?: ProviderRegistry;
   clock?: () => string;
@@ -73,6 +81,7 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
     providers: ProviderRegistry,
     readonly now: () => string,
     readonly nextId: (prefix: string) => string,
+    private readonly currentInterventions: () => readonly HumanIntervention[],
     readonly artifacts: Artifact[] = [],
     readonly outputs: Map<string, unknown> = new Map<string, unknown>(),
     readonly decisions: HumanDecision[] = [],
@@ -85,6 +94,7 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
       get initialInput() { return context.initialInput; },
       get artifacts() { return context.artifacts; },
       get decisions() { return context.decisions; },
+      get interventions() { return context.interventions; },
       get outputs() { return context.outputs; },
       get spendAuthorization() { return context.spendAuthorization; },
       get spendAuthorizationExemptProviderId() { return context.spendAuthorizationExemptProviderId; },
@@ -100,6 +110,10 @@ class InMemoryWorkflowContext<TInitialInput> implements WorkflowContext<TInitial
 
   publicContext(): WorkflowContext<TInitialInput> {
     return this.#publicContext;
+  }
+
+  get interventions(): readonly HumanIntervention[] {
+    return this.currentInterventions();
   }
 
   addArtifact<TData = unknown>(draft: ArtifactDraft<TData>): Artifact<TData> {
@@ -271,6 +285,7 @@ export class WorkflowRunner {
     validateWorkflowDefinition(definition);
 
     const runId = this.idFactory("run");
+    let run: WorkflowRun<TInitialInput> | undefined;
     const context = new InMemoryWorkflowContext(
       runId,
       definition.id,
@@ -278,8 +293,10 @@ export class WorkflowRunner {
       this.providers,
       this.clock,
       this.idFactory,
+      // 首次execution plan早于run建立；仅这个初始化窗口没有停点。
+      () => run?.interventions ?? [],
     );
-    const run: WorkflowRun<TInitialInput> = {
+    run = {
       id: runId,
       revision: 0,
       workflowId: definition.id,
@@ -323,6 +340,7 @@ export class WorkflowRunner {
       this.providers,
       this.clock,
       this.idFactory,
+      () => run.interventions,
       run.artifacts,
       outputs,
       run.decisions,
@@ -437,6 +455,7 @@ export class WorkflowRunner {
       this.providers,
       this.clock,
       this.idFactory,
+      () => run.interventions,
       run.artifacts,
       outputs,
       run.decisions,
@@ -465,7 +484,7 @@ export class WorkflowRunner {
     const outputs = new Map(run.nodeRuns.filter(node => node.status === "succeeded" && node.output !== undefined)
       .map(node => [node.nodeId, node.output]));
     const context = new InMemoryWorkflowContext(run.id, definition.id, run.initialInput,
-      this.providers, this.clock, this.idFactory, run.artifacts, outputs, run.decisions);
+      this.providers, this.clock, this.idFactory, () => run.interventions, run.artifacts, outputs, run.decisions);
     normalizeLegacyVersionStates(definition, run, context.publicContext());
     return this.continueRun(definition, run, context);
   }
@@ -524,6 +543,7 @@ export class WorkflowRunner {
       this.providers,
       this.clock,
       this.idFactory,
+      () => run.interventions,
       run.artifacts,
       outputs,
       run.decisions,
@@ -614,6 +634,7 @@ export class WorkflowRunner {
       this.providers,
       this.clock,
       this.idFactory,
+      () => run.interventions,
       run.artifacts,
       outputs,
       run.decisions,
@@ -791,6 +812,7 @@ export class WorkflowRunner {
       this.providers,
       this.clock,
       this.idFactory,
+      () => run.interventions,
       run.artifacts,
       outputs,
       run.decisions,
@@ -1007,6 +1029,7 @@ export class WorkflowRunner {
       this.providers,
       this.clock,
       this.idFactory,
+      () => run.interventions,
       run.artifacts,
       outputs,
       run.decisions,
@@ -1064,6 +1087,7 @@ export class WorkflowRunner {
       this.providers,
       this.clock,
       this.idFactory,
+      () => run.interventions,
       run.artifacts,
       outputs,
       run.decisions,
@@ -1143,9 +1167,7 @@ export class WorkflowRunner {
           (version) => version.id === nodeRun.outputState?.effectiveVersionId,
         );
         if (effectiveOutput?.source === "human") {
-          throw new Error(
-            `Node '${nodeRun.nodeId}' has a stale human output that must be reviewed and saved again or explicitly discarded before regeneration.`,
-          );
+          throw new StaleHumanContentError(nodeRun.nodeId, "output", effectiveOutput.id, previousRun.revision);
         }
       }
       if (nodeRun.status !== "stale" || !nodeRun.inputState?.stale) continue;
@@ -1153,9 +1175,7 @@ export class WorkflowRunner {
         (version) => version.id === nodeRun.inputState?.effectiveVersionId,
       );
       if (effectiveInput?.source === "human") {
-        throw new Error(
-          `Node '${nodeRun.nodeId}' has a stale human input that must be reviewed and saved again before regeneration.`,
-        );
+        throw new StaleHumanContentError(nodeRun.nodeId, "input", effectiveInput.id, previousRun.revision);
       }
     }
     const outputs = new Map<string, unknown>();
@@ -1185,6 +1205,7 @@ export class WorkflowRunner {
       this.providers,
       this.clock,
       this.idFactory,
+      () => run.interventions,
       run.artifacts,
       outputs,
       run.decisions,
@@ -1222,6 +1243,7 @@ export class WorkflowRunner {
       this.providers,
       this.clock,
       this.idFactory,
+      () => run.interventions,
       run.artifacts,
       outputs,
       run.decisions,
@@ -1334,6 +1356,7 @@ export class WorkflowRunner {
       this.providers,
       this.clock,
       this.idFactory,
+      () => run.interventions,
       run.artifacts,
       outputs,
       run.decisions,
@@ -1402,6 +1425,7 @@ export class WorkflowRunner {
       this.providers,
       this.clock,
       this.idFactory,
+      () => run.interventions,
       run.artifacts,
       outputs,
       run.decisions,
@@ -1898,7 +1922,7 @@ function validateIncompleteSourceReviewDecision(
 }
 
 // 逐条表态是人工裁决的留痕，所以它的完整性由核心把关，而不是靠各调用方自觉。
-function validateReviewDispositions(dispositions: HumanDecisionDraft["reviewDispositions"]): void {
+export function validateReviewDispositions(dispositions: HumanDecisionDraft["reviewDispositions"]): void {
   if (dispositions === undefined) return;
   if (dispositions.length === 0) throw new Error("Review dispositions must not be empty when supplied.");
   if (new Set(dispositions.map((disposition) => disposition.itemKey)).size !== dispositions.length) {
@@ -2923,7 +2947,7 @@ function descendantNodeIds(nodes: NodeDefinition[], rootNodeId: string): Set<str
   return descendants;
 }
 
-function assertNoUncertainPaidOutcomeInvalidated(
+export function assertNoUncertainPaidOutcomeInvalidated(
   run: WorkflowRun,
   invalidatedNodeIds: ReadonlySet<string>,
   verifiedOperations?: WorkflowRunnerOptions["optionalReviewInvalidationOperations"],

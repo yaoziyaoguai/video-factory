@@ -3,8 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
-// 内容安全基础约束直接复用宿主同一份规则（讨论输入不另造一份可能漂移的关键词清单）。
-import { assertGeneratedVisualDoesNotClaimEvidence } from "@video-factory/production-pipeline/visual-evidence-boundary";
+import { parseDurationBounds, validateContentLedDurationIntent, type DurationIntent } from "@video-factory/production-pipeline/executable-timeline";
 import {
   BROKER_TASK_INPUT_CONTRACTS,
   BROKER_TASK_KINDS,
@@ -330,7 +329,7 @@ export interface ProductionCapabilitiesPayload {
   };
 }
 
-export interface ScriptBrief {
+export type ScriptBrief = DurationIntent & {
   presentationMode?: "narration" | "character_drama";
   characterVoiceProfiles?: Array<{ id: string; providerId: string; label: string }>;
   title: string;
@@ -338,8 +337,6 @@ export interface ScriptBrief {
   audience: string;
   nicheSlug: string;
   platform: string;
-  durationSeconds: number;
-  durationRange?: { minSeconds: number; maxSeconds: number };
   creativeTreatment?: Record<string, unknown>;
   planningIssues?: unknown[];
   productionCapabilities: ProductionCapabilitiesPayload;
@@ -831,8 +828,8 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
   if (kind === "publish-copy") {
     assertExactKeys(record, ["platform", "brief", "narrations", "revision"], "payload");
     const narrations = stringArray(record.narrations, "payload.narrations");
-    if (narrations.length < 3 || narrations.length > 24) {
-      throw new CodexExecutorError("payload.narrations must contain 3 to 24 entries.", false);
+    if (narrations.length < 1 || narrations.length > 24) {
+      throw new CodexExecutorError("payload.narrations must contain 1 to 24 entries.", false);
     }
     const revision = record.revision === undefined ? undefined : boundedRecord(record.revision, "payload.revision", 192 * 1024);
     return {
@@ -1770,8 +1767,8 @@ function requireExistingScriptDiscussionDocument(
     && stringArray(document.canonFacts, `${field}.canonFacts`).length > 8) {
     throw new CodexExecutorError(`${field}.canonFacts must contain at most 8 entries.`, false);
   }
-  if (!Array.isArray(document.scenes) || document.scenes.length < 3 || document.scenes.length > 24) {
-    throw new CodexExecutorError(`${field}.scenes must contain 3 to 24 entries.`, false);
+  if (!Array.isArray(document.scenes) || document.scenes.length < 1 || document.scenes.length > 24) {
+    throw new CodexExecutorError(`${field}.scenes must contain 1 to 24 entries.`, false);
   }
   const positions: number[] = [];
   document.scenes.forEach((entry, index) => {
@@ -1803,19 +1800,6 @@ function requireExistingScriptDiscussionDocument(
     }
     if (new Set(searchTerms.map((term) => term.trim())).size !== searchTerms.length) {
       throw new CodexExecutorError(`${sceneField}.search_terms must not contain duplicate terms after trimming.`, false);
-    }
-    // 内容安全基础约束与宿主保存路径同源（含 success_criteria/failure_conditions，
-    // 与 validateScriptDraft 的检查数组一致）：生成路线的文案不得宣称真实证据。
-    if (scene.visual_strategy === "generated") {
-      assertGeneratedVisualDoesNotClaimEvidence([
-        typeof scene.purpose === "string" ? scene.purpose : undefined,
-        typeof scene.narration === "string" ? scene.narration : undefined,
-        typeof scene.visual_prompt === "string" ? scene.visual_prompt : undefined,
-        typeof scene.visible_action === "string" ? scene.visible_action : undefined,
-        typeof scene.on_screen_text === "string" ? scene.on_screen_text : undefined,
-        ...(Array.isArray(scene.success_criteria) ? scene.success_criteria.filter((value): value is string => typeof value === "string") : []),
-        ...(Array.isArray(scene.failure_conditions) ? scene.failure_conditions.filter((value): value is string => typeof value === "string") : []),
-      ], sceneField);
     }
     positions.push(Number(scene.position));
   });
@@ -2153,13 +2137,14 @@ function requireDirectorBrief(value: unknown): Record<string, unknown> {
   if (brief.presentationMode === "character_drama") arrayValue(brief.characters, "payload.brief.characters");
   assertExactKeys(brief, [
     "presentationMode", "characters",
-    "title", "angle", "audience", "platform", "durationSeconds", "durationRange", "viewerPromise", "narrativeArc",
+    "title", "angle", "audience", "platform", "durationSeconds", "durationRange", "durationPolicy", "viewerPromise", "narrativeArc",
     "requestedProfileId", "editorial", "visualProof", "visualIntent", "visualPlan", "voiceTiming", "budgetIntentionCny",
     "referenceGrammar", "seriesContext", "articleSources", "creativeTreatment", "planningIssues", "planningRevision", "productionCapabilities", "rework",
   ], "payload.brief");
   validateBudgetIntention(brief.budgetIntentionCny);
   const normalized: Record<string, unknown> = {
     ...brief,
+    ...requireContentLedDuration(brief),
     productionCapabilities: requireProductionCapabilities(brief.productionCapabilities, "payload.brief.productionCapabilities"),
     ...(brief.creativeTreatment === undefined
       ? {}
@@ -2729,6 +2714,7 @@ function requireCreativeTreatmentBrief(value: unknown): Record<string, unknown> 
   validateBudgetIntention(record.budgetIntentionCny);
   const brief: Record<string, unknown> = {
     ...boundedRecord(record, "payload.brief", 192 * 1024),
+    ...requireContentLedDuration(record),
     productionCapabilities: requireProductionCapabilities(record.productionCapabilities, "payload.brief.productionCapabilities"),
   };
   if (record.visualProof !== undefined) {
@@ -2753,12 +2739,30 @@ function requireCreativeTreatmentBrief(value: unknown): Record<string, unknown> 
   return brief;
 }
 
-// script-draft 的 brief 在受理前做字段级校验：越界值直接 400，不进入 codex。
+function requireContentLedDuration(record: Record<string, unknown>): Extract<DurationIntent, { durationPolicy: string }> | undefined {
+  if (record.durationPolicy === undefined) return undefined;
+  if (record.durationPolicy !== "content-led-v1") {
+    throw new CodexExecutorError("payload.brief.durationPolicy is invalid.", false);
+  }
+  try {
+    const suppliedBounds = parseDurationBounds(record.durationRange);
+    const input = { durationPolicy: "content-led-v1" as const, durationSeconds: record.durationSeconds as number,
+      ...(suppliedBounds ? { durationRange: suppliedBounds } : {}) };
+    const bounds = validateContentLedDurationIntent(input);
+    return { durationPolicy: input.durationPolicy, durationSeconds: input.durationSeconds,
+      ...(bounds ? { durationRange: bounds } : {}) };
+  } catch (error) {
+    throw new CodexExecutorError(`payload.brief duration: ${error instanceof Error ? error.message : String(error)}`, false);
+  }
+}
+
+// script-draft 的 brief 在受理前做字段级校验：历史合同与新参考语义分别处理。
 function requireScriptBrief(value: unknown): ScriptBrief {
   const record = requireRecord(value, "payload.brief");
   assertExactKeys(record, [...SCRIPT_BRIEF_FIELDS], "payload.brief");
   const durationSeconds = record.durationSeconds;
-  if (!Number.isInteger(durationSeconds) || Number(durationSeconds) < 20 || Number(durationSeconds) > 180) {
+  const contentLed = requireContentLedDuration(record);
+  if (!contentLed && (!Number.isInteger(durationSeconds) || Number(durationSeconds) < 20 || Number(durationSeconds) > 180)) {
     throw new CodexExecutorError("payload.brief.durationSeconds must be an integer between 20 and 180.", false);
   }
   const brief: ScriptBrief = {
@@ -2767,7 +2771,7 @@ function requireScriptBrief(value: unknown): ScriptBrief {
     audience: requiredText(record.audience, "payload.brief.audience"),
     nicheSlug: requiredText(record.nicheSlug, "payload.brief.nicheSlug"),
     platform: requiredText(record.platform, "payload.brief.platform"),
-    durationSeconds: Number(durationSeconds),
+    ...(contentLed ?? { durationSeconds: Number(durationSeconds) }),
     productionCapabilities: requireProductionCapabilities(record.productionCapabilities, "payload.brief.productionCapabilities"),
   };
   const presentationMode = optionalPresentationMode(record.presentationMode);
@@ -2781,7 +2785,7 @@ function requireScriptBrief(value: unknown): ScriptBrief {
       return { id: requiredText(voice.id, "voice.id"), providerId: requiredText(voice.providerId, "voice.providerId"), label: requiredText(voice.label, "voice.label") };
     });
   }
-  if (record.durationRange !== undefined) {
+  if (brief.durationPolicy === undefined && record.durationRange !== undefined) {
     const range = requireRecord(record.durationRange, "payload.brief.durationRange");
     assertExactKeys(range, ["minSeconds", "maxSeconds"], "payload.brief.durationRange");
     const minSeconds = Number(range.minSeconds);

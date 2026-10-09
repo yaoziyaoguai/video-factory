@@ -1,10 +1,15 @@
 import {
   compileTimeline,
+  assertDurationCommitment,
+  parseDurationBounds,
   type CompiledCut,
+  type DurationBounds,
   type DurationRange,
+  type ExecutableDuration,
 } from "./executable-timeline.js";
 
 export const EXECUTABLE_PRODUCTION_PLAN_VERSION = "video-factory/executable-plan-v1" as const;
+export const CONTENT_LED_PRODUCTION_PLAN_VERSION = "video-factory/executable-plan-v2" as const;
 
 export interface ExecutablePlanScene {
   position: number;
@@ -23,31 +28,38 @@ export interface ExecutablePlanShot {
   }>;
 }
 
-export interface ExecutableProductionPlan {
-  version: typeof EXECUTABLE_PRODUCTION_PLAN_VERSION;
+interface ExecutableProductionPlanBody {
   treatmentArtifactId?: string;
   scriptArtifactId: string;
   directorArtifactId: string;
   candidateArtifactIds: string[];
-  durationRange: DurationRange;
   fps: 30;
   totalFrames: number;
   cuts: CompiledCut[];
 }
 
-export interface CompileExecutableProductionPlanInput {
+export type ExecutableProductionPlan = ExecutableProductionPlanBody & (
+  | { version: typeof EXECUTABLE_PRODUCTION_PLAN_VERSION; durationPolicy?: undefined; durationRange: DurationRange }
+  | { version: typeof CONTENT_LED_PRODUCTION_PLAN_VERSION; durationPolicy: "content-led-v1"; durationRange?: DurationBounds }
+);
+
+interface CompileExecutableProductionPlanBody {
   treatmentArtifactId?: string;
   scriptArtifactId: string;
   directorArtifactId: string;
   candidateArtifactIds?: readonly string[];
-  durationRange: DurationRange;
   scenes: readonly ExecutablePlanScene[];
   shots: readonly ExecutablePlanShot[];
 }
 
+export type CompileExecutableProductionPlanInput = CompileExecutableProductionPlanBody & ExecutableDuration;
+
 export function compileExecutableProductionPlan(
   input: CompileExecutableProductionPlanInput,
 ): ExecutableProductionPlan {
+  if (input.durationPolicy !== undefined && input.durationPolicy !== "content-led-v1") {
+    throw new Error("Executable production plan durationPolicy is invalid.");
+  }
   const scriptArtifactId = artifactId(input.scriptArtifactId, "scriptArtifactId");
   const directorArtifactId = artifactId(input.directorArtifactId, "directorArtifactId");
   const treatmentArtifactId = input.treatmentArtifactId === undefined
@@ -90,7 +102,7 @@ export function compileExecutableProductionPlan(
     return root;
   };
 
-  const timeline = compileTimeline(input.scenes.map((scene, index) => {
+  const cutInputs = input.scenes.map((scene, index) => {
     const shot = shotsByPosition.get(scene.position);
     if (!shot || scene.position !== index + 1) {
       throw new Error("Script scenes and director shots must use the same contiguous scene positions.");
@@ -107,32 +119,50 @@ export function compileExecutableProductionPlan(
       durationSeconds: scene.duration,
       sourceInSeconds: shot.sourceInSeconds ?? 0,
     };
-  }), input.durationRange);
+  });
+  const timeline = input.durationPolicy === "content-led-v1"
+    ? compileTimeline(cutInputs, input.durationRange, input.durationPolicy)
+    : compileTimeline(cutInputs, input.durationRange);
 
-  return {
-    version: EXECUTABLE_PRODUCTION_PLAN_VERSION,
+  const identity = {
     ...(treatmentArtifactId ? { treatmentArtifactId } : {}),
     scriptArtifactId,
     directorArtifactId,
     candidateArtifactIds,
-    durationRange: { ...timeline.durationRange },
+  };
+  const frames = {
     fps: timeline.fps,
     totalFrames: timeline.totalFrames,
     cuts: timeline.cuts.map((cut) => ({ ...cut })),
+  };
+  return "durationPolicy" in timeline ? {
+    version: CONTENT_LED_PRODUCTION_PLAN_VERSION, ...identity, durationPolicy: timeline.durationPolicy,
+    ...(timeline.durationRange ? { durationRange: { ...timeline.durationRange } } : {}), ...frames,
+  } : {
+    version: EXECUTABLE_PRODUCTION_PLAN_VERSION, ...identity, durationRange: { ...timeline.durationRange }, ...frames,
   };
 }
 
 export function parseExecutableProductionPlan(value: unknown): ExecutableProductionPlan {
   const input = record(value, "Executable production plan");
-  if (input.version !== EXECUTABLE_PRODUCTION_PLAN_VERSION) {
-    throw new Error(`Executable production plan version must be '${EXECUTABLE_PRODUCTION_PLAN_VERSION}'.`);
+  if (input.version !== EXECUTABLE_PRODUCTION_PLAN_VERSION && input.version !== CONTENT_LED_PRODUCTION_PLAN_VERSION) {
+    throw new Error("Unsupported executable production plan version.");
+  }
+  const contentLed = input.version === CONTENT_LED_PRODUCTION_PLAN_VERSION;
+  if (contentLed ? input.durationPolicy !== "content-led-v1" : input.durationPolicy !== undefined) {
+    throw new Error("Executable production plan version and durationPolicy do not match.");
   }
   if (input.fps !== 30) throw new Error("Executable production plan fps must be 30.");
-  const durationRange = record(input.durationRange, "Executable production plan durationRange");
-  const minSeconds = integer(durationRange.minSeconds, "durationRange.minSeconds");
-  const maxSeconds = integer(durationRange.maxSeconds, "durationRange.maxSeconds");
-  if (minSeconds < 20 || maxSeconds > 180 || minSeconds > maxSeconds) {
-    throw new Error("Executable production plan durationRange is invalid.");
+  let legacyRange: DurationRange | undefined;
+  const bounds = contentLed ? parseDurationBounds(input.durationRange) : undefined;
+  if (!contentLed) {
+    const durationRange = record(input.durationRange, "Executable production plan durationRange");
+    const minSeconds = integer(durationRange.minSeconds, "durationRange.minSeconds");
+    const maxSeconds = integer(durationRange.maxSeconds, "durationRange.maxSeconds");
+    if (minSeconds < 20 || maxSeconds > 180 || minSeconds > maxSeconds) {
+      throw new Error("Executable production plan durationRange is invalid.");
+    }
+    legacyRange = { minSeconds, maxSeconds };
   }
   const scriptArtifactId = artifactId(input.scriptArtifactId, "scriptArtifactId");
   const directorArtifactId = artifactId(input.directorArtifactId, "directorArtifactId");
@@ -164,22 +194,31 @@ export function parseExecutableProductionPlan(value: unknown): ExecutableProduct
       throw new Error(`Executable production plan cut ${index + 1} has invalid frame continuity.`);
     }
     nextStartFrame += frameCount;
+    if (!Number.isSafeInteger(nextStartFrame)) throw new Error("Executable production plan totalFrames exceeds safe integer frames.");
     return { scenePosition, beatId, assetKey, startFrame, frameCount, sourceInFrame };
   });
   const totalFrames = integer(input.totalFrames, "totalFrames");
-  if (totalFrames !== nextStartFrame || totalFrames < minSeconds * 30 || totalFrames > maxSeconds * 30) {
+  if (totalFrames !== nextStartFrame || totalFrames < 1
+    || legacyRange && (totalFrames < legacyRange.minSeconds * 30 || totalFrames > legacyRange.maxSeconds * 30)) {
     throw new Error("Executable production plan totalFrames does not match its cuts and duration range.");
   }
-  return {
-    version: EXECUTABLE_PRODUCTION_PLAN_VERSION,
+  if (contentLed) assertDurationCommitment(totalFrames, bounds, cuts.map(cut => cut.scenePosition));
+  const identity = {
     ...(treatmentArtifactId ? { treatmentArtifactId } : {}),
     scriptArtifactId,
     directorArtifactId,
     candidateArtifactIds,
-    durationRange: { minSeconds, maxSeconds },
-    fps: 30,
+  };
+  const frames = {
+    fps: 30 as const,
     totalFrames,
     cuts,
+  };
+  return contentLed ? {
+    version: CONTENT_LED_PRODUCTION_PLAN_VERSION, ...identity, durationPolicy: "content-led-v1",
+    ...(bounds ? { durationRange: bounds } : {}), ...frames,
+  } : {
+    version: EXECUTABLE_PRODUCTION_PLAN_VERSION, ...identity, durationRange: legacyRange!, ...frames,
   };
 }
 
@@ -196,7 +235,7 @@ function record(value: unknown, field: string): Record<string, unknown> {
 }
 
 function integer(value: unknown, field: string): number {
-  if (!Number.isInteger(value)) throw new Error(`${field} must be an integer.`);
+  if (!Number.isSafeInteger(value)) throw new Error(`${field} must be a safe integer.`);
   return Number(value);
 }
 

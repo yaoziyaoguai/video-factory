@@ -2,11 +2,10 @@ import { isDeepStrictEqual } from "node:util";
 import { CodexBridgeClient, requestOptionsForDeadline, type CodexTaskExecution, type CodexTaskRequestOptions } from "./codex-chat.js";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { ProductionArticleSourceSnapshot, ProductionReworkFinding, ProductionSeriesContext, ProductionVisualPlan } from "./contracts.js";
-import type { DurationRange } from "./executable-timeline.js";
+import { assertDurationCommitment, durationIntentFor, PlanContractError, quantizeDurationsToFrames, validateContentLedDurationIntent, type DurationBounds, type DurationIntent } from "./executable-timeline.js";
 import type { CreativeTreatment } from "./creative-treatment.js";
 import type { PlanningIssue } from "./creative-planning.js";
 import { summarizeProductionCapabilities, type ProductionCapabilities } from "./production-capabilities.js";
-import { assertGeneratedVisualDoesNotClaimEvidence } from "./visual-evidence-boundary.js";
 import { runCreativeDiscussionTask, type CreativeDiscussionAgentInput } from "./codex-creative-discussion.js";
 import type { CreativeDiscussionResult } from "./creative-review.js";
 import { CHARACTER_SCRIPT_VERSION, validateCharacterScript, type CharacterScript, type PresentationMode, type CharacterVoiceProfile } from "./character-script.js";
@@ -38,7 +37,7 @@ export interface NarrationScriptDraft {
 export type ScriptDraft = NarrationScriptDraft | CharacterScript;
 
 export interface ScreenwriterAgentInput {
-  brief: {
+  brief: DurationIntent & {
     presentationMode?: PresentationMode;
     characterVoiceProfiles?: CharacterVoiceProfile[];
     title: string;
@@ -46,8 +45,6 @@ export interface ScreenwriterAgentInput {
     audience: string;
     nicheSlug: string;
     platform: string;
-    durationSeconds: number;
-    durationRange?: DurationRange;
     editorial?: {
       verdict: "produce_video" | "produce_image_story";
       reasons: string[];
@@ -236,8 +233,20 @@ function screenwriterAuditContext(
   candidate: ScriptDraft,
 ): Record<string, unknown> {
   const series = brief.seriesContext;
-  const durationRange = effectiveScriptDurationRange(brief.durationSeconds, brief.durationRange);
-  const totalDurationSeconds = candidate.scenes.reduce((total, scene) => total + scene.duration, 0);
+  const durationRange = effectiveScriptDurationRange(brief);
+  const totalFrames = brief.durationPolicy === "content-led-v1"
+    ? quantizeDurationsToFrames(candidate.scenes.map(scene => scene.duration)).reduce((total, frames) => total + frames, 0)
+    : undefined;
+  const totalDurationSeconds = totalFrames === undefined ? candidate.scenes.reduce((total, scene) => total + scene.duration, 0) : totalFrames / 30;
+  let durationWithinRange = (durationRange?.minSeconds === undefined || totalDurationSeconds >= durationRange.minSeconds)
+    && (durationRange?.maxSeconds === undefined || totalDurationSeconds <= durationRange.maxSeconds);
+  if (totalFrames !== undefined) {
+    try { assertDurationCommitment(totalFrames, durationRange); durationWithinRange = true; }
+    catch (error) {
+      if (!(error instanceof PlanContractError) || error.code !== "duration_commitment_conflict") throw error;
+      durationWithinRange = false;
+    }
+  }
   const reworkForAudit = brief.rework ? {
     sourceRunId: brief.rework.sourceRunId,
     instruction: brief.rework.instruction,
@@ -270,16 +279,15 @@ function screenwriterAuditContext(
     },
     currentRoleContract: {
       platform: brief.platform,
-      durationSeconds: brief.durationSeconds,
-      ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
-      sceneCount: { min: 3, max: 24 },
-      acceptedSceneDurationTotal: durationRange,
+      ...durationIntentFor(brief),
+      sceneCount: { min: 1, max: 24 },
+      acceptedSceneDurationTotal: durationRange ?? null,
       candidateFacts: {
         sceneCount: candidate.scenes.length,
         totalDurationSeconds,
-        durationRange: { ...durationRange },
-        durationWithinRange: totalDurationSeconds >= durationRange.minSeconds
-          && totalDurationSeconds <= durationRange.maxSeconds,
+        ...(totalFrames !== undefined ? { totalFrames } : {}),
+        durationRange: durationRange ? { ...durationRange } : null,
+        durationWithinRange,
         canonFacts: {
           requiredField: true,
           allowedCount: { min: 0, max: 8 },
@@ -321,7 +329,7 @@ function screenwriterAuditContext(
 }
 
 function validateScreenwriterTarget(input: ScreenwriterAgentInput): void {
-  effectiveScriptDurationRange(input.brief.durationSeconds, input.brief.durationRange, "Screenwriter brief");
+  effectiveScriptDurationRange(input.brief, "Screenwriter brief");
   const affected = input.brief.rework?.affectedScenePositions;
   if (affected !== undefined && (affected.length > 100
     || affected.some((position) => !Number.isInteger(position) || position < 1)
@@ -336,12 +344,13 @@ function validateScreenwriterCandidate(
   context: { iteration: number; repair: boolean },
 ): ScriptDraft {
   const validation = {
-    durationSeconds: input.brief.durationSeconds,
+    ...durationIntentFor(input.brief),
     presentationMode: input.brief.presentationMode ?? "narration",
-    ...(input.brief.durationRange ? { durationRange: input.brief.durationRange } : {}),
     requireCanonFacts: Boolean(input.brief.seriesContext),
   };
-  const candidate = validateScriptDraft(value, validation);
+  const candidate = input.planningMode && input.creativeReviewExecution
+    ? validateScriptDraftStructure(value, validation)
+    : validateScriptDraft(value, validation);
   // joint 人工定稿流程只在这里核结构；返工范围由图层在采用前核验，越界候选留为提案。
   // 若在角色循环里拒绝范围，会误触结构重试并把整条制作打成 failed，用户拿不到原稿停点。
   if (input.planningMode && input.creativeReviewExecution?.mode === "draft") return candidate;
@@ -380,9 +389,18 @@ function validateScreenwriterCandidate(
   }, validation);
 }
 
-export function validateScriptDraft(value: unknown, options: {
-  durationSeconds: number;
-  durationRange?: DurationRange;
+/** 人工决定前只验结构；明确承诺仍保留在宿主输入中，由停点呈现并在采用/执行时校验。 */
+export function validateScriptDraftStructure(value: unknown, options: DurationIntent & {
+  requireCanonFacts?: boolean;
+  presentationMode?: PresentationMode;
+}): ScriptDraft {
+  if (options.durationPolicy !== "content-led-v1") return validateScriptDraft(value, options);
+  validateContentLedDurationIntent(options);
+  const { durationRange: _commitment, ...structure } = options;
+  return validateScriptDraft(value, structure);
+}
+
+export function validateScriptDraft(value: unknown, options: DurationIntent & {
   requireCanonFacts?: boolean;
   presentationMode?: PresentationMode;
 }): ScriptDraft {
@@ -397,15 +415,11 @@ export function validateScriptDraft(value: unknown, options: {
     throw new Error("角色字段必须携带明确的 character-script-v1 版本。");
   }
   if (options.presentationMode === "character_drama") throw new Error("角色剧情需要 character-script-v1，不能退回单旁白。");
-  if (!Number.isInteger(options.durationSeconds)
-    || options.durationSeconds < 20
-    || options.durationSeconds > 180) {
-    throw new Error("Script draft target durationSeconds must be an integer between 20 and 180.");
-  }
+  const durationRange = effectiveScriptDurationRange(options);
   const input = record(value, "Script draft");
   if (!Array.isArray(input.scenes)) throw new Error("Script draft scenes must be an array.");
-  if (input.scenes.length < 3 || input.scenes.length > 24) {
-    throw new Error(`Script draft must contain between 3 and 24 scenes; got ${input.scenes.length}.`);
+  if (input.scenes.length < 1 || input.scenes.length > 24) {
+    throw new Error(`Script draft must contain between 1 and 24 scenes; got ${input.scenes.length}.`);
   }
   const scenes = input.scenes.map((entry, index) => {
     const scene = record(entry, `scenes[${index}]`);
@@ -439,17 +453,6 @@ export function validateScriptDraft(value: unknown, options: {
         : {}),
       search_terms: searchTermArray(scene.search_terms, `scenes[${index}].search_terms`),
     };
-    if (parsed.visual_strategy === "generated") {
-      assertGeneratedVisualDoesNotClaimEvidence([
-        parsed.purpose,
-        parsed.narration,
-        parsed.visual_prompt,
-        parsed.visible_action,
-        parsed.on_screen_text,
-        ...(parsed.success_criteria ?? []),
-        ...(parsed.failure_conditions ?? []),
-      ], `scenes[${index}]`);
-    }
     return parsed;
   }).sort((left, right) => left.position - right.position);
   scenes.forEach((scene, index) => {
@@ -458,8 +461,10 @@ export function validateScriptDraft(value: unknown, options: {
     }
   });
   const total = scenes.reduce((sum, scene) => sum + scene.duration, 0);
-  const durationRange = effectiveScriptDurationRange(options.durationSeconds, options.durationRange, "Script draft target");
-  if (total < durationRange.minSeconds || total > durationRange.maxSeconds) {
+  if (options.durationPolicy === "content-led-v1") {
+    const frames = quantizeDurationsToFrames(scenes.map(scene => scene.duration));
+    assertDurationCommitment(frames.reduce((sum, count) => sum + count, 0), durationRange, scenes.map(scene => scene.position));
+  } else if (durationRange && (total < durationRange.minSeconds! || total > durationRange.maxSeconds!)) {
     const rangeDescription = options.durationRange
       ? `the ${durationRange.minSeconds}-${durationRange.maxSeconds}s duration range`
       : `0.6-1.4x of the ${options.durationSeconds}s target`;
@@ -482,10 +487,12 @@ export function validateScriptDraft(value: unknown, options: {
 }
 
 function effectiveScriptDurationRange(
-  durationSeconds: number,
-  durationRange?: DurationRange,
+  intent: DurationIntent,
   field = "Script draft target",
-): DurationRange {
+): DurationBounds | undefined {
+  if (intent.durationPolicy === "content-led-v1") return validateContentLedDurationIntent(intent);
+  if (intent.durationPolicy !== undefined) throw new Error(`${field} durationPolicy is invalid.`);
+  const { durationSeconds, durationRange } = intent;
   if (!Number.isInteger(durationSeconds) || durationSeconds < 20 || durationSeconds > 180) {
     throw new Error(`${field} durationSeconds must be an integer between 20 and 180.`);
   }

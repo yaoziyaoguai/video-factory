@@ -1026,7 +1026,8 @@ describe("ProductionPipeline codex screenwriter", () => {
 
     assert.equal(run.status, "failed");
     assert.equal(run.nodeRuns.at(-1)?.nodeId, "script");
-    assert.match(run.nodeRuns.at(-1)?.error ?? "", /between 3 and 24 scenes/);
+    // 单镜结构已合法；此坏稿仍必须因缺少必需的画面策略而拒绝。
+    assert.match(run.nodeRuns.at(-1)?.error ?? "", /scenes\[0\]\.visual_strategy must be one of stock, image, generated, local/);
     assert.equal(run.artifacts.some((artifact) => artifact.kind === "script"), false);
     assert.equal(worker.requests.length, 0);
     await assert.rejects(

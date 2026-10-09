@@ -798,6 +798,39 @@ describe("CodexScreenwriterAgent", () => {
     assert.deepEqual((facts.canonFacts as Record<string, unknown>).allowedCount, { min: 0, max: 8 });
   });
 
+  it("gives the auditor the same quantized content-led duration boundary used by execution", async () => {
+    const producer = new SequencedCodexClient([{ scenes: [validScene(1, { duration: 1.015 })] }]);
+    const audit = new SequencedCodexClient([{
+      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+      assessments: [{ targetPath: "", dimensions: ["attention", "progression", "payoff", "expression"].map(dimension => ({ dimension, score: 90, evidence: "受控内容" })) }],
+      verdict: "pass", score: 90, summary: "受控意见", issues: [], repairInstructions: [],
+    }]);
+    const agent = new CodexScreenwriterAgent({ client: producer, auditClient: audit, maxReviewIterations: 1 });
+    const input: ScreenwriterAgentInput = { ...screenwriterInput(), brief: { ...screenwriterInput().brief,
+      durationPolicy: "content-led-v1", durationSeconds: 24, durationRange: { maxSeconds: 1.01 } } };
+    await agent.draftDetailed(input);
+    const facts = (audit.calls[0]!.payload as { context: { currentRoleContract: { candidateFacts: Record<string, unknown> } } }).context.currentRoleContract.candidateFacts;
+    assert.equal(facts.totalFrames, 30);
+    assert.equal(facts.totalDurationSeconds, 1);
+    assert.equal(facts.durationWithinRange, true);
+    assert.equal(producer.calls.length, 1);
+  });
+
+  it("preserves a complete content-led proposal outside the commitment without structural regeneration", async () => {
+    const proposed = { scenes: [validScene(1, { duration: 38 })] };
+    const producer = new SequencedCodexClient([proposed]);
+    const agent = new CodexScreenwriterAgent({ client: producer });
+    const input: ScreenwriterAgentInput = { ...screenwriterInput(), planningMode: true,
+      creativeReviewExecution: { mode: "draft" },
+      brief: { ...screenwriterInput().brief, durationPolicy: "content-led-v1", durationSeconds: 24,
+        durationRange: { maxSeconds: 30 } } };
+    const result = await agent.draftDetailed(input);
+    assert.deepEqual(result.output, proposed);
+    assert.deepEqual(producer.calls.map(call => call.kind), ["script-draft"]);
+    assert.throws(() => validateScriptDraft(result.output, input.brief), /38|时长/,
+      "保留候选不等于允许执行违反承诺的稿件");
+  });
+
   it("rejects invalid brief targets before sending anything to codex", async () => {
     const codexClient = new CapturingCodexClient(() => validDraft());
     const agent = new CodexScreenwriterAgent({ client: codexClient });
@@ -867,7 +900,7 @@ describe("CodexScreenwriterAgent", () => {
     assert.deepEqual(validateScriptDraft(draft, { durationSeconds: 24 }), draft);
   });
 
-  it("keeps generated scenes inside an explicit illustration boundary", () => {
+  it("accepts structurally valid claims for semantic review instead of lexical rejection", () => {
     const unsafe = {
       scenes: [
         validScene(1, {
@@ -879,10 +912,7 @@ describe("CodexScreenwriterAgent", () => {
         validScene(3),
       ],
     };
-    assert.throws(
-      () => validateScriptDraft(unsafe, { durationSeconds: 24 }),
-      /generated visual as real-world evidence/,
-    );
+    assert.deepEqual(validateScriptDraft(unsafe, { durationSeconds: 24 }), unsafe);
 
     const bounded = {
       scenes: [
@@ -898,18 +928,32 @@ describe("CodexScreenwriterAgent", () => {
     assert.deepEqual(validateScriptDraft(bounded, { durationSeconds: 24 }), bounded);
   });
 
+  it("accepts content-led one-shot scripts without inventing bounds and reports explicit conflicts", () => {
+    const options = { durationPolicy: "content-led-v1" as const, durationSeconds: 24 };
+    for (const narration of ["这证明了你是朋友", "今晚是现场效果最好的一次", "他用行动证明了自己的勇气"]) {
+      const draft = { scenes: [validScene(1, { duration: 12, visual_strategy: "generated", narration })] };
+      assert.deepEqual(validateScriptDraft(draft, options), draft);
+      assert.deepEqual(validateScriptDraft(draft, { ...options, durationSeconds: 50, durationRange: { maxSeconds: 12 } }), draft);
+      assert.throws(() => validateScriptDraft(draft, { ...options, durationRange: { maxSeconds: 10 } }),
+        (error: unknown) => error instanceof Error && "code" in error && error.code === "duration_commitment_conflict");
+    }
+    const long = { scenes: [1, 2, 3].map(position => validScene(position, { duration: 61 })) };
+    assert.deepEqual(validateScriptDraft(long, options), long);
+    assert.throws(() => validateScriptDraft({ scenes: [validScene(1, { duration: 0.001 })] }, options));
+  });
+
   it("rejects non-contract drafts without any fallback", async () => {
     const cases: Array<{ name: string; output: () => unknown; pattern: RegExp }> = [
       { name: "missing scenes", output: () => ({}), pattern: /scenes must be an array/ },
       {
         name: "too few scenes",
-        output: () => ({ scenes: [validScene(1), validScene(2)] }),
-        pattern: /between 3 and 24 scenes; got 2/,
+        output: () => ({ scenes: [] }),
+        pattern: /between 1 and 24 scenes; got 0/,
       },
       {
         name: "too many scenes",
         output: () => ({ scenes: Array.from({ length: 25 }, (_, index) => validScene(index + 1)) }),
-        pattern: /between 3 and 24 scenes; got 25/,
+        pattern: /between 1 and 24 scenes; got 25/,
       },
       {
         name: "position gap",

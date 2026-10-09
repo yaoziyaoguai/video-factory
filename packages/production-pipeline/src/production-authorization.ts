@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ExecutableDuration } from "./executable-timeline.js";
 
 // C1：制作范围授权（production scope）与逐请求执行凭证的决策核心。
 // scope 是“用户确认方案时一次性批准的制作许可”：整数分的最高金额、许可的素材及其模型、
@@ -12,10 +13,9 @@ export const PRODUCTION_AUTHORIZATION_VERSION = "video-factory/production-author
 // 观众承诺锚（angle/audience/visualProof/visualPlan/editorial）、时长范围与导演档案。
 // 宿主在接受与自动继续两侧用同一函数计算并核对；executable plan bytes 不含这些字段，
 // 不能只靠 plan digest 代替质量合同身份。
-export function canonicalQualityContractDigest(quality: {
+export function canonicalQualityContractDigest(quality: ExecutableDuration & {
   angle: string;
   audience: string;
-  durationRange: { minSeconds: number; maxSeconds: number };
   directorProfileId: string;
   visualProof?: string;
   visualPlanDigest?: string;
@@ -24,6 +24,7 @@ export function canonicalQualityContractDigest(quality: {
   return createHash("sha256").update(JSON.stringify({
     angle: quality.angle,
     audience: quality.audience,
+    ...(quality.durationPolicy ? { durationPolicy: quality.durationPolicy } : {}),
     durationRange: quality.durationRange,
     directorProfileId: quality.directorProfileId,
     ...(quality.visualProof ? { visualProof: quality.visualProof } : {}),

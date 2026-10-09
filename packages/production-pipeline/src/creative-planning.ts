@@ -7,7 +7,7 @@ import { assetReuseSourceScenePosition, ReworkScopeConflictError } from "./gener
 import { validateAssetSemanticRanking, type AssetCandidateReport, type AssetSemanticRanking } from "./asset-semantic-ranker.js";
 import { applyCreativeReviewEditDraft } from "./creative-review.js";
 import { planningThreadId } from "./creative-planning-store.js";
-import type { DurationRange } from "./executable-timeline.js";
+import { assertDurationCommitment, PlanContractError, quantizeDurationsToFrames, parseDurationBounds, type ExecutableDuration } from "./executable-timeline.js";
 import { RoleAgentLoopError, RoleAgentPlanningHaltError, isCompletedRoleAgentFailure } from "./role-agent-loop.js";
 import { CodexBridgeError, codexBridgeErrorFromCause, type AgentLoopTrace, type RoleAudit, type RoleAuditPlanningDisposition } from "./codex-chat.js";
 import { ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
@@ -37,6 +37,7 @@ import {
   type CreativeReviewResume,
   type CreativeReviewGate,
   type CreativeReviewState,
+  type CreativeDraftConflict,
   type CreativeStage,
   type CreativeReviewConfirmResume,
   type StockDeliveryAcceptance,
@@ -139,18 +140,19 @@ export interface PlanningArtifact<Output> {
    * blockingIssues），但既不触发 halt 也不参与 duplicate_issue 判定。
    */
   advisories?: PlanningIssue[];
+  /** 宿主结构校验后投影的能力冲突；模型不拥有是否可执行的裁决权。 */
+  conflicts?: CreativeDraftConflict[];
 }
 
 // 图的可持久化输入身份只包含 durable 领域字段。角色/模型输入与执行期 callback、deadline
 // 属于注入 port 的宿主闭包：进入 checkpoint 后 SQLite 的 JSON round-trip 会静默丢掉函数，
 // 让恢复依赖不可再现的运行时状态，因此这里不接受也不保存它们。
-export interface CreativePlanningInput {
+export type CreativePlanningInput = ExecutableDuration & {
   runId: string;
   /** 宿主已接受的规划输入 digest：输入变化必须进入新 thread，不得命中旧图结果。 */
   inputDigest: string;
-  durationRange: DurationRange;
   creativeReview?: typeof CREATIVE_REVIEW_FEATURE;
-}
+};
 
 export interface CreativePlanningContext {
   runId: string;
@@ -228,7 +230,7 @@ export interface CreativePlanningPorts {
    * 与生成路径一致的校验参数，所以由 port 装配方注入；缺失时人工修订不可用（gate 明确报错，
    * 不静默放行未校验的稿件）。upstreamScript 是当前已确认脚本（导演稿校验的 scenes 来源）。
    */
-  validateEditedDraft?: (stage: CreativeStage, document: unknown, upstreamScript: unknown) => void;
+  validateEditedDraft?: (stage: CreativeStage, document: unknown, upstreamScript: unknown, purpose?: "draft") => CreativeDraftConflict[] | void;
   /** 经来源 run 校验的旧稿；模型越界时只作为保留选项，不自动采用新候选。 */
   reworkBaseline?: Partial<{ script: PlanningArtifact<ScriptDraft>; director: PlanningArtifact<VisualDirectorPlan> }>;
 }
@@ -288,6 +290,7 @@ const PlanningGraphAnnotation = Annotation.Root({
   carriedProviderTraces: Annotation<Partial<Record<PlanningStageId, string>>>(),
   /** 播种产物所依据的阶段兼容身份；恢复不能依赖另一个非原子 sidecar。 */
   carriedStageInputIdentities: Annotation<Partial<Record<PlanningStageId, string>>>(),
+  durationChange: Annotation<{ commandId: string; sourceInputDigest: string; sourceCheckpointId: string; targetDraftVersionId: string } | null>(),
   halt: Annotation<PlanningHalt | null>(),
   /**
    * 自动循环停下、把决定交还给人的原因。与 halt 互斥：halt 结束整条制作（旧流程保留），
@@ -330,6 +333,7 @@ export function initialPlanningGraphState(input: CreativePlanningInput): Plannin
     carriedModelTraces: {},
     carriedProviderTraces: {},
     carriedStageInputIdentities: {},
+    durationChange: null,
     halt: null,
     planningStop: null,
     manualDirectorReview: false,
@@ -338,11 +342,75 @@ export function initialPlanningGraphState(input: CreativePlanningInput): Plannin
   };
 }
 
+/** 宿主已核身份与承诺后，从指定checkpoint投影新线程；只改本地状态，不执行任何角色。 */
+export function projectDurationAmendmentState(
+  source: PlanningGraphState,
+  input: CreativePlanningInput,
+  command: { commandId: string; sourceCheckpointId: string; targetStage: CreativeStage },
+): PlanningGraphState {
+  const base = durablePlanningInput(input);
+  if (base.durationPolicy !== "content-led-v1" || source.base.durationPolicy !== "content-led-v1"
+    || source.runId !== base.runId) throw new Error("Duration amendment requires the same content-led production.");
+  const stage = command.targetStage;
+  const current = source.creativeReview.stages[stage];
+  if (!current.currentDraft || current.currentDocument === null) throw new Error("Duration amendment has no current document.");
+  const state: PlanningGraphState = { ...initialPlanningGraphState(base), ...structuredClone(source),
+    base, inputDigest: base.inputDigest, stage, halt: null, planningStop: null, scopeConflict: null };
+  const order: CreativeStage[] = ["treatment", "script", "director"];
+  const review = structuredClone(source.creativeReview);
+  for (const downstream of order.slice(order.indexOf(stage) + 1)) {
+    review.stages[downstream].confirmation = null;
+    review.stages[downstream].checkResult = null;
+    review.stages[downstream].phase = "drafting";
+  }
+  // 下游历史不删除，只有本次确认身份失效；原有上游批准原样保留。
+  if (stage !== "director" || review.directorReviewPurpose !== "material_plan") delete review.directionConfirmation;
+  const stageInputDigest = stage === "treatment" ? treatmentReviewInputDigest(state)
+    : stage === "script" ? scriptReviewInputDigest(state) : directorReviewInputDigest(state);
+  const artifactId = `duration-draft:${contentSha256({ runId: source.runId, commandId: command.commandId, stage })}`;
+  state.creativeReview = publishCreativeDraft(review, stage, artifactId, current.currentDocument, stageInputDigest,
+    stage === "script" ? scriptDurationConflicts(state, current.currentDocument as ScriptDraft)
+      : (current.conflicts ?? []).filter(conflict => conflict.code === "execution_capability_conflict"));
+  Object.assign(state, stage === "director" ? { executablePlan: null } : invalidateAfterCreativeReturn(state, stage));
+  const artifact = { artifactId, output: structuredClone(current.currentDocument) };
+  if (stage === "treatment") state.treatmentArtifact = artifact as PlanningArtifact<CreativeTreatment>;
+  else if (stage === "script") state.scriptArtifact = artifact as PlanningArtifact<ScriptDraft>;
+  else {
+    state.directorPlan = artifact as PlanningArtifact<VisualDirectorPlan>;
+    if (source.integratedPlan) state.integratedPlan = artifact as PlanningArtifact<VisualDirectorPlan>;
+  }
+  state.artifactIds[stage] = [artifactId];
+  state.durationChange = { commandId: command.commandId, sourceInputDigest: source.inputDigest,
+    sourceCheckpointId: command.sourceCheckpointId, targetDraftVersionId: state.creativeReview.stages[stage].currentDraft!.versionId };
+  return state;
+}
+
+/** 组合确认先在纯快照中校验；失败不能先保存一半承诺。 */
+export function validateDurationAmendmentConfirmation(state: PlanningGraphState, resume: CreativeReviewConfirmResume): void {
+  if (resume.stage === "director" && (state.creativeReview.directorReviewPurpose ?? "material_plan") === "material_plan"
+    && currentStockQualityIssues(state).length > 0 && resume.acceptQualityFallback !== true) {
+    throw new Error("当前素材仍有质量建议，请明确采用风险或先调整素材；时长要求未保存。");
+  }
+  confirmPlanningDraft(state, state.creativeReview, resume);
+}
+
 // 初始 state 投影为只含允许字段的新对象：调用方的额外属性（运行时 callback、deadline 等）
 // 不进入 checkpoint。runId/inputDigest 非空与 durationRange 基本合法在此校验，先于任何节点执行。
 function durablePlanningInput(input: CreativePlanningInput): CreativePlanningInput {
   const runId = requiredPlanningText(input.runId, "CreativePlanningInput.runId");
   const inputDigest = requiredPlanningText(input.inputDigest, "CreativePlanningInput.inputDigest");
+  if (input.durationPolicy !== undefined && input.durationPolicy !== "content-led-v1") {
+    throw new Error("CreativePlanningInput.durationPolicy is invalid.");
+  }
+  if (input.creativeReview !== undefined && input.creativeReview !== CREATIVE_REVIEW_FEATURE) {
+    throw new Error(`CreativePlanningInput.creativeReview must be '${CREATIVE_REVIEW_FEATURE}'.`);
+  }
+  if (input.durationPolicy === "content-led-v1") {
+    const bounds = parseDurationBounds(input.durationRange);
+    return { runId, inputDigest, durationPolicy: input.durationPolicy,
+      ...(bounds ? { durationRange: bounds } : {}),
+      ...(input.creativeReview ? { creativeReview: input.creativeReview } : {}) };
+  }
   const raw = input.durationRange;
   if (typeof raw !== "object" || raw === null) {
     throw new Error("CreativePlanningInput.durationRange must be an object.");
@@ -351,9 +419,6 @@ function durablePlanningInput(input: CreativePlanningInput): CreativePlanningInp
   if (!Number.isInteger(minSeconds) || !Number.isInteger(maxSeconds)
     || minSeconds < 1 || maxSeconds < minSeconds) {
     throw new Error("CreativePlanningInput.durationRange is invalid: minSeconds/maxSeconds must be integers with 1 <= minSeconds <= maxSeconds.");
-  }
-  if (input.creativeReview !== undefined && input.creativeReview !== CREATIVE_REVIEW_FEATURE) {
-    throw new Error(`CreativePlanningInput.creativeReview must be '${CREATIVE_REVIEW_FEATURE}'.`);
   }
   return {
     runId,
@@ -846,7 +911,7 @@ async function auditPublishedStageDraft(
       : error instanceof RoleAgentLoopError
         && isCompletedRoleAgentFailure(error);
     if (settledCheckFailure) {
-      return { creativeReview: recordCreativeReviewCheck(state.creativeReview, stage, {
+      const creativeReview = recordCreativeReviewCheck(state.creativeReview, stage, {
         versionId: current.currentDraft.versionId,
         status: "incomplete",
         draftSha256: current.currentDraft.sha256,
@@ -858,6 +923,21 @@ async function auditPublishedStageDraft(
         recordedAt: new Date().toISOString(),
         // R3-02：失败记账同样绑定操作身份——同一已核清失败的重放幂等，不再随机出新 id。
         auditId: `audit-${contentSha256({ auditOperationId: options.auditOperationId })}`,
+      });
+      // 已核清的审计服务故障不等于命令成功；只为本条人工命令保留精确请求事实。
+      // 沿用所有候选的Bridge聚合，不把异操作拒收、普通错误或未知请求猜成未受理。
+      const facts = classifyCreativeConsultationError(error);
+      if (!options.commandId || facts.fact === "unknown") return { creativeReview };
+      return { creativeReview: recordCreativeReviewContinuation(creativeReview, stage, {
+        status: facts.fact === "not_accepted" ? "rejected_operation" : "error",
+        reasonCode: facts.fact === "not_accepted" ? "audit_not_accepted" : "audit_provider_failed",
+        detail: facts.fact === "not_accepted"
+          ? "这次文字审计未受理，没有执行新的审计请求。当前稿保留；可以主动再审，或承担未审风险采用。此前费用仍以原请求记录为准。"
+          : "这次文字审计执行失败，未取得有效结论。当前稿保留；可以主动再审，或承担未审风险采用。已发生的请求与费用不会因失败清零。",
+        auditOperationId: options.auditOperationId,
+        source: "manual",
+        commandId: options.commandId,
+        recordedAt: new Date().toISOString(),
       }) };
     }
     // 在途/受理状态未知时保留原异常与 checkpoint（uncertain 已在 catch 顶部优先转换）。
@@ -988,6 +1068,26 @@ function isSettledAuditProviderFailure(error: unknown, auditOperationId: string)
   return source instanceof CodexBridgeError
     && (source.stage === "completed_failure" || source.stage === "not_accepted")
     && (isModelProviderFailure(error) || isTransientRoleAuditProviderFailure(error));
+}
+
+function scriptDurationConflicts(state: PlanningGraphState, script: ScriptDraft): CreativeDraftConflict[] {
+  if (state.base.durationPolicy !== "content-led-v1") return [];
+  const frames = quantizeDurationsToFrames(script.scenes.map(scene => scene.duration));
+  try {
+    assertDurationCommitment(frames.reduce((sum, count) => sum + count, 0), state.base.durationRange,
+      script.scenes.map(scene => scene.position));
+    return [];
+  } catch (error) {
+    if (!(error instanceof PlanContractError) || error.code !== "duration_commitment_conflict") throw error;
+    return [{ code: error.code, scenePositions: error.scenePositions, detail: error.message }];
+  }
+}
+
+function draftConflicts(state: PlanningGraphState, stage: CreativeStage, document: unknown,
+  validate: CreativePlanningPorts["validateEditedDraft"]): CreativeDraftConflict[] {
+  if (state.base.durationPolicy !== "content-led-v1") return [];
+  if (stage === "script") return scriptDurationConflicts(state, document as ScriptDraft);
+  return stage === "director" ? validate?.(stage, document, state.scriptArtifact?.output ?? null, "draft") ?? [] : [];
 }
 
 function stageAuditNode(
@@ -1170,7 +1270,9 @@ export function compileInputFromContext(context: CreativePlanningContext): Compi
     ...(context.candidates && context.ranking
       ? { candidateArtifactIds: [context.candidates.artifactId, context.ranking.artifactId] }
       : {}),
-    durationRange: context.base.durationRange,
+    ...(context.base.durationPolicy === "content-led-v1"
+      ? { durationPolicy: context.base.durationPolicy, ...(context.base.durationRange ? { durationRange: context.base.durationRange } : {}) }
+      : { durationRange: context.base.durationRange }),
     scenes: script.output.scenes.map((scene) => ({ position: scene.position, duration: scene.duration })),
     shots: finalPlan.output.shots.map((shot) => {
       // 复用根按有效值投影：显式 reuseFromScenePosition 与 query 的 REUSE_ONLY 编码（数字/
@@ -1352,7 +1454,7 @@ function planningNodeActions(
           ...(changed ? invalidateRankingEvidence(artifactIds) : { artifactIds }),
           scopeConflict: null,
           ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE
-            ? { creativeReview: publishCreativeDraft(state.creativeReview, "script", artifact.artifactId, artifact.output, scriptReviewInputDigest(state)) }
+            ? { creativeReview: publishCreativeDraft(state.creativeReview, "script", artifact.artifactId, artifact.output, scriptReviewInputDigest(state), scriptDurationConflicts(state, artifact.output)) }
             : {}),
         };
       } catch (error) {
@@ -1365,7 +1467,8 @@ function planningNodeActions(
         requireArtifact(artifact, "director");
         if (ports.reworkBaseline?.director && ports.validateEditedDraft) {
           try {
-            ports.validateEditedDraft("director", artifact.output, state.scriptArtifact?.output ?? null);
+            ports.validateEditedDraft("director", artifact.output, state.scriptArtifact?.output ?? null,
+              state.base.durationPolicy === "content-led-v1" ? "draft" : undefined);
           } catch (error) {
             if (error instanceof ReworkScopeConflictError && state.base.creativeReview === CREATIVE_REVIEW_FEATURE) {
               return scopeConflictProposalUpdate(state, "director", ports.reworkBaseline.director, artifact, error);
@@ -1385,7 +1488,7 @@ function planningNodeActions(
           scopeConflict: null,
           ...(state.base.creativeReview === CREATIVE_REVIEW_FEATURE
             ? { creativeReview: {
-              ...publishCreativeDraft(state.creativeReview, "director", artifact.artifactId, artifact.output, directorReviewInputDigest(state)),
+              ...publishCreativeDraft(state.creativeReview, "director", artifact.artifactId, artifact.output, directorReviewInputDigest(state), artifact.conflicts ?? []),
               directorReviewPurpose: "direction" as const,
             } }
             : {}),
@@ -2222,8 +2325,10 @@ function reviewGateNode(
     if (state.creativeReview.stages[stage].phase !== "waiting_user") return {};
     const gate = creativeReviewGate(state.creativeReview, stage);
     const resume = parseCreativeReviewResume(interrupt(gate));
+    if (resume.action === "update_duration") throw new Error("时长修改必须由宿主事务同步制作与规划状态，不能直接恢复图。");
     if (resume.action === "confirm") {
       if (resume.stage !== stage || resume.baseDraftSha256 !== gate.draft.sha256
+        || resume.baseDraftVersionId !== undefined && resume.baseDraftVersionId !== gate.draft.versionId
         || resume.expectedReviewRevision !== gate.reviewRevision) {
         throw new Error("Creative review confirmation is stale：你确认的那一条已经不是当前这一条，请重新查看。");
       }
@@ -2324,9 +2429,12 @@ function reviewGateNode(
         : stageState.previousDocument;
       if (nextDocument !== undefined && nextDocument !== null) {
         // 备选与恢复旧稿都要成为新版本；在覆盖有效稿前重验结构和已批准返工范围。
-        validateEditedDraft?.(stage, structuredClone(nextDocument), state.scriptArtifact?.output ?? null);
+        validateEditedDraft?.(stage, structuredClone(nextDocument), state.scriptArtifact?.output ?? null, "draft");
       }
-      const creativeReview = applyCreativeReviewDeterministicCommand(state.creativeReview, resume);
+      const creativeReview = applyCreativeReviewDeterministicCommand(state.creativeReview, resume, {
+        requireProposalIdentity: state.base.durationPolicy === "content-led-v1",
+        conflicts: nextDocument ? draftConflicts(state, stage, nextDocument, validateEditedDraft) : [],
+      });
       return {
         creativeReview,
         // 草稿被换成了另一版，"自动循环为什么停下"说的已经不是当前这一版，跟着一起放掉。
@@ -2341,8 +2449,9 @@ function reviewGateNode(
       if (!validateEditedDraft) {
         throw new Error("Creative planning ports do not support hand-edited drafts.");
       }
-      validateEditedDraft(stage, structuredClone(resume.document), state.scriptArtifact?.output ?? null);
-      const creativeReview = applyCreativeReviewEditDraft(state.creativeReview, resume, resume.document);
+      validateEditedDraft(stage, structuredClone(resume.document), state.scriptArtifact?.output ?? null, "draft");
+      const creativeReview = applyCreativeReviewEditDraft(state.creativeReview, resume, resume.document,
+        draftConflicts(state, stage, resume.document, validateEditedDraft));
       return {
         creativeReview,
         planningStop: null,
@@ -2415,7 +2524,13 @@ function reviewGateNode(
     }
     let creativeReview;
     try {
-      creativeReview = recordCreativeDiscussion(state.creativeReview, resume, result);
+      const document = result[stage];
+      if (state.base.durationPolicy === "content-led-v1" && document !== null
+        && (result.intent === "propose" || result.intent === "revise")) {
+        validateEditedDraft?.(stage, document, state.scriptArtifact?.output ?? null, "draft");
+      }
+      creativeReview = recordCreativeDiscussion(state.creativeReview, resume, result,
+        document !== null ? draftConflicts(state, stage, document, validateEditedDraft) : []);
     } catch (error) {
       // 请求已执行但结果不满足登记合同（如 revise 缺文档）：同样是已核清的操作失败，
       // 不能把整条制作打成 failed 锁死工作台。该事实只有 planning 侧知道，经

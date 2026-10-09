@@ -57,7 +57,7 @@ describe("native provider request control", () => {
         } });
       const request = { prompt: "预算只够买一杯；你呢？", durationSeconds: 6, ratio: "9:16" as const, generateAudio };
       await adapter.generate(request);
-      await adapter.reconcile!("t", request);
+      await adapter.reconcile!("t", {});
       assert.equal(bodies.length, 1);
       assert.equal((bodies[0]!.parameters as Record<string, unknown>).audio, generateAudio);
     }

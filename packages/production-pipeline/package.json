@@ -6,6 +6,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./executable-timeline": {
+      "types": "./dist/executable-timeline.d.ts",
+      "import": "./dist/executable-timeline.js"
+    },
     "./native-audio": {
       "types": "./dist/native-audio.d.ts",
       "import": "./dist/native-audio.js"

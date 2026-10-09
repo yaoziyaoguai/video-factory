@@ -27,6 +27,34 @@ const validBrief = {
 } as const;
 
 describe("ProductionBrief", () => {
+  it("keeps content-led references separate from explicit bounds and preserves legacy semantics", () => {
+    const modern = { ...validBrief, durationPolicy: "content-led-v1", durationSeconds: 50,
+      providers: { ...validBrief.providers, director: "api-visual-director-v1" },
+      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1" } };
+    for (const durationRange of [undefined, { maxSeconds: 30 }, { minSeconds: 1.01 }, { minSeconds: 8.3, maxSeconds: 12 }]) {
+      const brief = pipeline.parseBrief({ ...modern, ...(durationRange ? { durationRange } : {}) });
+      assert.equal(brief.durationPolicy, "content-led-v1");
+      assert.deepEqual(brief.durationRange, durationRange);
+      assert.equal(brief.durationSeconds, 50);
+      assert.equal(brief.workflowFeatures?.creativePlanning, "joint-v1");
+      assert.deepEqual(pipeline.parsePersistedBrief(JSON.parse(JSON.stringify(brief))), brief);
+    }
+    assert.equal(pipeline.parseBrief({ ...modern, durationSeconds: 12.1 }).durationSeconds, 12.1);
+    for (const durationRange of [null, {}, { maxSeconds: 0.02 }, { minSeconds: 1.01, maxSeconds: 1.02 },
+      { minSeconds: 12, maxSeconds: 10 }, { minSeconds: true }, { maxSeconds: Infinity }, { maxSeconds: 30, target: 20 }]) {
+      assert.throws(() => pipeline.parseBrief({ ...modern, durationRange }));
+    }
+    for (const durationSeconds of [0, -1, NaN, Infinity, "24", null]) {
+      assert.throws(() => pipeline.parseBrief({ ...modern, durationSeconds }));
+    }
+    for (const durationPolicy of [null, "unknown", true]) {
+      assert.throws(() => pipeline.parseBrief({ ...modern, durationPolicy }), /durationPolicy/);
+    }
+    assert.throws(() => pipeline.parseBrief({ ...modern, director: undefined }), /director/);
+    assert.equal(Object.hasOwn(pipeline.parsePersistedBrief(validBrief), "durationPolicy"), false);
+    assert.throws(() => pipeline.parseBrief({ ...validBrief, durationSeconds: 19 }), /20 and 180/);
+  });
   it("MC-A01 preserves explicit presentation mode for four origins and does not migrate old briefs", () => {
     const legacy = pipeline.parseBrief(validBrief);
     assert.equal(Object.hasOwn(legacy, "presentationMode"), false);

@@ -1,10 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
+import { parseDurationAmendment, type DurationAmendment } from "./executable-timeline.js";
 
 export const CREATIVE_REVIEW_VERSION = "video-factory/creative-review-v1" as const;
 export const CREATIVE_REVIEW_FEATURE = "user-confirmed-v1" as const;
 
 export type CreativeStage = "treatment" | "script" | "director";
 export type CreativeReviewPhase = "drafting" | "waiting_user" | "responding" | "checking" | "confirmed";
+
+export interface CreativeDraftConflict {
+  code: "duration_commitment_conflict" | "execution_capability_conflict";
+  scenePositions: number[];
+  detail: string;
+}
 
 export interface CreativeReviewMessage {
   id: string;
@@ -16,6 +23,9 @@ export interface CreativeReviewMessage {
 export interface CreativeReviewProposal {
   proposalId: string;
   baseDraftSha256: string;
+  baseDraftVersionId?: string;
+  baseStageInputDigest?: string;
+  conflicts?: CreativeDraftConflict[];
   draft: CreativeDraftRef;
   document: unknown;
   changeSummary: string[];
@@ -200,6 +210,8 @@ export interface CreativeStageReviewState {
   confirmation: CreativeStageConfirmation | null;
   messages: CreativeReviewMessage[];
   currentDocument: unknown | null;
+  /** 结构完整但尚不可执行的事实；不冒充模型审计，也不丢弃原稿。 */
+  conflicts?: CreativeDraftConflict[];
   previousDocument: unknown | null;
   proposals: CreativeReviewProposal[];
   effectiveUserInstructions: EffectiveUserInstruction[];
@@ -275,6 +287,7 @@ export interface CreativeReviewConfirmResume {
   commandId: string;
   actor: string;
   baseDraftSha256: string;
+  baseDraftVersionId?: string;
   expectedReviewRevision: number;
   /** 本版有审计时必填（用户看过的那条）；未审采用不得携带。 */
   checkIdentity?: string;
@@ -297,8 +310,21 @@ export interface CreativeReviewAuditCurrentResume {
   expectedReviewRevision: number;
 }
 
+/** 时长变更由宿主跨Store/图事务消费；图不得把它当作普通生成续接。 */
+export interface CreativeReviewDurationResume {
+  action: "update_duration";
+  stage: CreativeStage;
+  commandId: string;
+  actor: string;
+  baseDraftSha256: string;
+  baseDraftVersionId: string;
+  expectedReviewRevision: number;
+  durationAmendment: DurationAmendment;
+}
+
 export type CreativeReviewResume =
   | CreativeReviewConfirmResume
+  | CreativeReviewDurationResume
   | CreativeReviewDiscussResume
   | CreativeReviewAdoptResume
   | CreativeReviewEditDraftResume
@@ -405,12 +431,18 @@ export function creativeVersionId(artifactId: string, revision: number): string 
   return `${artifactId}#v${revision}`;
 }
 
+function withoutDraftConflicts(current: CreativeStageReviewState): CreativeStageReviewState {
+  const { conflicts: _oldConflicts, ...rest } = current;
+  return rest;
+}
+
 export function publishCreativeDraft(
   review: CreativeReviewState,
   stage: CreativeStage,
   artifactId: string,
   output: unknown,
   stageInputDigest: string,
+  conflicts?: CreativeDraftConflict[],
 ): CreativeReviewState {
   const current = review.stages[stage];
   const sha256 = contentSha256(output);
@@ -435,7 +467,7 @@ export function publishCreativeDraft(
     stages: {
       ...review.stages,
       [stage]: {
-        ...current,
+        ...withoutDraftConflicts(current),
         phase: "waiting_user",
         currentDraft: nextDraft,
         versionHistory: sameDraft ? (current.versionHistory ?? []) : [
@@ -444,6 +476,7 @@ export function publishCreativeDraft(
         ],
         previousDraft: sameDraft ? current.previousDraft : current.currentDraft,
         currentDocument: structuredClone(output),
+        ...(conflicts?.length ? { conflicts: structuredClone(conflicts) } : {}),
         previousDocument: sameDraft ? current.previousDocument : current.currentDocument,
         previousEffectiveUserInstructions: sameDraft
           ? current.previousEffectiveUserInstructions
@@ -697,6 +730,7 @@ export function recordCreativeDiscussion(
   review: CreativeReviewState,
   command: CreativeReviewDiscussResume,
   result: CreativeDiscussionResult,
+  conflicts: CreativeDraftConflict[] = [],
 ): CreativeReviewState {
   const current = requireWaitingDraft(review, command);
   if (result.stage !== command.stage) throw new Error("Creative discussion result belongs to another stage.");
@@ -721,7 +755,7 @@ export function recordCreativeDiscussion(
       stages: { ...review.stages, [command.stage]: { ...current, phase: "waiting_user", messages, continuation: null } },
     };
   }
-  if (result.intent === "propose") {
+  if (result.intent === "propose" || (result.intent === "revise" && conflicts.length > 0)) {
     if (document === null) throw new Error("Creative discussion proposal is missing its stage document.");
     const draft = draftRefForDocument(current.currentDraft!, document);
     return {
@@ -737,6 +771,9 @@ export function recordCreativeDiscussion(
           proposals: [...current.proposals, {
             proposalId: `proposal:${command.commandId}`,
             baseDraftSha256: current.currentDraft!.sha256,
+            baseDraftVersionId: current.currentDraft!.versionId,
+            baseStageInputDigest: current.currentDraft!.stageInputDigest,
+            ...(conflicts.length ? { conflicts: structuredClone(conflicts) } : {}),
             draft,
             document: structuredClone(document),
             changeSummary: result.changeSummary.map((entry) => entry.trim()),
@@ -782,24 +819,34 @@ export function recordCreativeDiscussion(
   };
 }
 
+export function assertCreativeProposalBase(proposal: unknown, draft: unknown, requireCompleteIdentity = false): void {
+  if (!isRecord(proposal) || !isRecord(draft)
+    || typeof proposal.baseDraftSha256 !== "string" || proposal.baseDraftSha256 !== draft.sha256
+    || ((requireCompleteIdentity || proposal.baseDraftVersionId !== undefined)
+      && (typeof proposal.baseDraftVersionId !== "string" || proposal.baseDraftVersionId !== draft.versionId))
+    || ((requireCompleteIdentity || proposal.baseStageInputDigest !== undefined)
+      && (typeof proposal.baseStageInputDigest !== "string" || proposal.baseStageInputDigest !== draft.stageInputDigest))) {
+    throw new Error("Creative review proposal is stale: its base draft changed or its version identity is missing.");
+  }
+}
+
 export function applyCreativeReviewDeterministicCommand(
   review: CreativeReviewState,
   command: CreativeReviewAdoptResume | CreativeReviewUndoResume,
+  options: { requireProposalIdentity?: boolean; conflicts?: CreativeDraftConflict[] } = {},
 ): CreativeReviewState {
   const current = requireWaitingDraft(review, command);
   if (command.action === "adopt_proposal") {
     const proposal = current.proposals.find((candidate) => candidate.proposalId === command.proposalId);
     if (!proposal) throw new Error("Creative review proposal does not exist in the current stage.");
-    if (proposal.baseDraftSha256 !== current.currentDraft!.sha256) {
-      throw new Error("Creative review proposal is stale: its base draft changed.");
-    }
+    assertCreativeProposalBase(proposal, current.currentDraft, options.requireProposalIdentity);
     return {
       ...review,
       reviewRevision: review.reviewRevision + 1,
       stages: {
         ...review.stages,
         [command.stage]: {
-          ...current,
+          ...withoutDraftConflicts(current),
           phase: "waiting_user",
           previousDraft: current.currentDraft,
           previousDocument: current.currentDocument,
@@ -818,6 +865,7 @@ export function applyCreativeReviewDeterministicCommand(
             }, document: structuredClone(proposal.document) },
           ],
           currentDocument: structuredClone(proposal.document),
+          ...(options.conflicts?.length ? { conflicts: structuredClone(options.conflicts) } : {}),
           confirmation: null,
           checkResult: null,
           continuation: null,
@@ -842,7 +890,7 @@ export function applyCreativeReviewDeterministicCommand(
     stages: {
       ...review.stages,
       [command.stage]: {
-        ...current,
+        ...withoutDraftConflicts(current),
         phase: "waiting_user",
         currentDraft: {
           ...current.previousDraft,
@@ -858,6 +906,7 @@ export function applyCreativeReviewDeterministicCommand(
           }, document: structuredClone(current.previousDocument) },
         ],
         currentDocument: structuredClone(current.previousDocument),
+        ...(options.conflicts?.length ? { conflicts: structuredClone(options.conflicts) } : {}),
         previousDraft: current.currentDraft,
         previousDocument: current.currentDocument,
         effectiveUserInstructions: structuredClone(current.previousEffectiveUserInstructions ?? []),
@@ -882,15 +931,36 @@ export function applyCreativeReviewEditDraft(
   review: CreativeReviewState,
   command: CreativeReviewEditDraftResume,
   validatedDocument: unknown,
+  conflicts: CreativeDraftConflict[] = [],
 ): CreativeReviewState {
   const current = requireWaitingDraft(review, command);
+  if (conflicts.length) {
+    return {
+      ...review,
+      reviewRevision: review.reviewRevision + 1,
+      stages: { ...review.stages, [command.stage]: {
+        ...current,
+        proposals: [...current.proposals, {
+          proposalId: `proposal:${command.commandId}`,
+          baseDraftSha256: current.currentDraft!.sha256,
+          baseDraftVersionId: current.currentDraft!.versionId,
+          baseStageInputDigest: current.currentDraft!.stageInputDigest,
+          draft: draftRefForDocument(current.currentDraft!, validatedDocument),
+          document: structuredClone(validatedDocument),
+          changeSummary: ["手动修改已保存为候选；仍需处理执行冲突。"],
+          commandId: command.commandId,
+          conflicts: structuredClone(conflicts),
+        }],
+      } },
+    };
+  }
   return {
     ...review,
     reviewRevision: review.reviewRevision + 1,
     stages: {
       ...review.stages,
       [command.stage]: {
-        ...current,
+        ...withoutDraftConflicts(current),
         phase: "waiting_user",
         previousDraft: current.currentDraft,
         previousDocument: current.currentDocument,
@@ -928,6 +998,14 @@ export function applyCreativeReviewEditDraft(
 export function parseCreativeReviewResume(value: unknown): CreativeReviewResume {
   if (!isRecord(value)) throw new Error("Creative review resume must be an object.");
   if (value.action === "confirm") return parseCreativeReviewConfirmResume(value);
+  if (value.action === "update_duration") {
+    const allowed = new Set(["action", "stage", "commandId", "actor", "baseDraftSha256", "baseDraftVersionId", "expectedReviewRevision", "durationAmendment"]);
+    const unknown = Object.keys(value).find(key => !allowed.has(key));
+    if (unknown) throw new Error(`Creative review resume field '${unknown}' is not allowed.`);
+    return { action: "update_duration", ...parseCreativeReviewCommandBase(value),
+      baseDraftVersionId: requiredText(value.baseDraftVersionId, "baseDraftVersionId"),
+      durationAmendment: parseDurationAmendment(value.durationAmendment) };
+  }
   if (value.action === "adopt_proposal") {
     const allowed = new Set([
       "action", "stage", "commandId", "actor", "baseDraftSha256", "expectedReviewRevision", "proposalId",
@@ -1023,7 +1101,7 @@ function draftRefForDocument(base: CreativeDraftRef, document: unknown): Creativ
 export function parseCreativeReviewConfirmResume(value: unknown): CreativeReviewConfirmResume {
   if (!isRecord(value)) throw new Error("Creative review resume must be an object.");
   const allowed = new Set([
-    "action", "stage", "commandId", "actor", "baseDraftSha256", "expectedReviewRevision", "checkIdentity", "confirmedAt",
+    "action", "stage", "commandId", "actor", "baseDraftSha256", "baseDraftVersionId", "expectedReviewRevision", "checkIdentity", "confirmedAt",
     "acknowledgeRepair", "acknowledgeIncomplete", "acceptQualityFallback", "acknowledgeUnaudited",
   ]);
   const unknown = Object.keys(value).find((key) => !allowed.has(key));

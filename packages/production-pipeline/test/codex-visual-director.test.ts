@@ -179,6 +179,47 @@ function validPlan(): Record<string, unknown> {
 }
 
 describe("CodexVisualDirectorAgent", () => {
+  it("C08 keeps an over-capability creative director candidate without automatic repair", async () => {
+    const input = directorInput();
+    input.brief.durationPolicy = "content-led-v1";
+    input.planningMode = true;
+    input.creativeReviewExecution = { mode: "draft" };
+    input.economics.allowMeteredProviders = true;
+    input.assetProviders = [{ ...input.assetProviders[0]!, id: "seedance-video-v1", billing: "metered",
+      deliveryTypes: ["generated_video"], maxDurationSeconds: 15, estimatedCnyPerClip: 2 }];
+    const candidate = validPlan();
+    const shot = (candidate.shots as Record<string, unknown>[])[0]!;
+    Object.assign(shot, { preferredProviderId: "seedance-video-v1", deliveryType: "generated_video",
+      sourceInSeconds: 12, estimatedCostCny: 2 });
+    const client = new SequencedCodexClient([candidate], "openai", "gpt-test");
+    const agent = new CodexVisualDirectorAgent({ client, modelId: "gpt-test", sessionMode: "stateless" });
+    const result = await agent.planDetailed(input);
+    assert.equal(result.output.shots[0]!.sourceInSeconds, 12);
+    assert.deepEqual(client.calls.map(call => call.kind), ["director-plan"]);
+
+    // 正式执行及旧语义仍拒绝不足的源素材覆盖，不借候选通道绕过能力校验。
+    const strict = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => candidate) });
+    const executableInput = structuredClone(input);
+    delete executableInput.creativeReviewExecution;
+    await assert.rejects(() => strict.plan(executableInput), /only produces 15s/);
+    const legacy = structuredClone(input);
+    delete legacy.brief.durationPolicy;
+    await assert.rejects(() => strict.plan(legacy), /only produces 15s/);
+  });
+
+  it("passes content-led references without inventing a director hard range", async () => {
+    for (const bounds of [undefined, { maxSeconds: 12 }]) {
+      const input = directorInput();
+      input.brief = { ...input.brief, durationPolicy: "content-led-v1", durationSeconds: 12.1,
+        ...(bounds ? { durationRange: bounds } : {}) };
+      const client = new CapturingCodexClient(() => validPlan());
+      await new CodexVisualDirectorAgent({ client }).plan(input);
+      const payload = client.calls[0]!.payload as VisualDirectorAgentInput;
+      assert.equal(payload.brief.durationPolicy, "content-led-v1");
+      assert.deepEqual(payload.brief.durationRange, bounds);
+      assert.equal(payload.brief.durationSeconds, 12.1);
+    }
+  });
   it("MC-A05 consumes character dialogue in the actual director model path without fake narration", async () => {
     const input = directorInput();
     input.brief.presentationMode = "character_drama";
@@ -1658,7 +1699,7 @@ describe("CodexVisualDirectorAgent", () => {
     assert.equal(result.shots[0]?.deliveryType, "generated_image");
   });
 
-  it("rejects generated shots that claim real verification", async () => {
+  it("retains generated-shot claims for semantic review rather than rejecting by words", async () => {
     const input = directorInput();
     input.scenes[0]!.visualStrategy = "generated";
     input.assetProviders.push({
@@ -1679,7 +1720,7 @@ describe("CodexVisualDirectorAgent", () => {
     shot.rationale = "生成画面已经验证了产品效果。";
     const agent = new CodexVisualDirectorAgent({ client: new CapturingCodexClient(() => plan) });
 
-    await assert.rejects(() => agent.plan(input), /generated visual as real-world evidence/);
+    assert.equal((await agent.plan(input)).shots[0]!.rationale, shot.rationale);
   });
 
   it("lets the independent audit name unsupported identity continuity instead of keyword-rejecting the plan", async () => {

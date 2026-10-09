@@ -1,5 +1,5 @@
 export { ProviderRegistry } from "./provider-registry.js";
-export { NodeVersionConflictError, WorkflowRunner } from "./workflow-runner.js";
+export { NodeVersionConflictError, StaleHumanContentError, WorkflowRunner, validateReviewDispositions, assertNoUncertainPaidOutcomeInvalidated } from "./workflow-runner.js";
 export {
   defaultTopicScoringWeights,
   scoreTopicCandidate,

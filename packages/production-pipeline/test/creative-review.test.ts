@@ -203,6 +203,32 @@ describe("初稿审一次的版本与动作合同", () => {
     assert.equal(adopted.stages.treatment.checkResult, null);
   });
 
+  it("C05 does not revive proposals from A/v1 after A-B-A or infer missing base identities", () => {
+    const base = publishCreativeDraft(initialCreativeReviewState(), "treatment", "treatment-artifact", treatment, "in-1");
+    const proposed = recordCreativeDiscussion(base, {
+      action: "discuss", stage: "treatment", commandId: "old-proposal", actor: "creator", message: "再提一种方案",
+      baseDraftSha256: base.stages.treatment.currentDraft!.sha256, expectedReviewRevision: base.reviewRevision,
+    }, { stage: "treatment", intent: "propose", reply: "备选", changeSummary: [], treatment: { ...treatment, payoff: "备选结尾" },
+      script: null, director: null, upstreamRequest: null });
+    const edited = publishCreativeDraft(proposed, "treatment", "treatment-artifact", { ...treatment, payoff: "B" }, "in-1");
+    const restored = publishCreativeDraft(edited, "treatment", "treatment-artifact", treatment, "in-1");
+    assert.equal(restored.stages.treatment.currentDraft!.sha256, base.stages.treatment.currentDraft!.sha256);
+    assert.notEqual(restored.stages.treatment.currentDraft!.versionId, base.stages.treatment.currentDraft!.versionId);
+    const command = { action: "adopt_proposal" as const, stage: "treatment" as const, commandId: "use-old-proposal", actor: "creator",
+      proposalId: "proposal:old-proposal", baseDraftSha256: restored.stages.treatment.currentDraft!.sha256, expectedReviewRevision: restored.reviewRevision };
+    const before = structuredClone(restored);
+    assert.throws(() => applyCreativeReviewDeterministicCommand(restored, command, { requireProposalIdentity: true }), /stale/);
+    assert.deepEqual(restored, before);
+    const legacyProposal = structuredClone(proposed);
+    delete legacyProposal.stages.treatment.proposals[0]!.baseDraftVersionId;
+    delete legacyProposal.stages.treatment.proposals[0]!.baseStageInputDigest;
+    assert.throws(() => applyCreativeReviewDeterministicCommand(legacyProposal,
+      { ...command, expectedReviewRevision: legacyProposal.reviewRevision }, { requireProposalIdentity: true }), /identity is missing/);
+    assert.equal(applyCreativeReviewDeterministicCommand(legacyProposal,
+      { ...command, expectedReviewRevision: legacyProposal.reviewRevision }).stages.treatment.confirmation, null,
+    "无标记历史流程仍沿旧候选兼容分支");
+  });
+
   it("连续多次修订后仍能回看每版全文和当时的采用决定", () => {
     let review = publishCreativeDraft(initialCreativeReviewState(), "treatment", "treatment-artifact", treatment, "in-1");
     const versions = [review.stages.treatment.currentDraft!.versionId];
@@ -330,6 +356,16 @@ describe("初稿审一次的版本与动作合同", () => {
 });
 
 describe("three-stage creative review gates", () => {
+  it("parses a duration recovery envelope only with the original version and complete amendment", () => {
+    const input = { action: "update_duration", stage: "script", commandId: "duration-save", actor: "creator",
+      expectedReviewRevision: 4, baseDraftSha256: "a".repeat(64), baseDraftVersionId: "script#v3",
+      durationAmendment: { expectedBriefSha256: "b".repeat(64), range: null } };
+    assert.deepEqual(parseCreativeReviewResume(input), input);
+    for (const changed of [{ baseDraftVersionId: undefined }, { durationAmendment: undefined }, { extra: true }]) {
+      assert.throws(() => parseCreativeReviewResume({ ...input, ...changed }));
+    }
+  });
+
   // F03（2026-10-02 执行包）：可选审计 unknown 不再锁死制作。原请求事实（checkpoint/
   // prepared operation）原样保留待查询；工作台、稿件、讨论不动；未审采用是显式入口。
   it("keeps the workbench and allows explicit unaudited adoption while the original audit request is unknown", async () => {

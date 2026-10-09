@@ -4237,11 +4237,13 @@ describe("ProductionPipeline", () => {
         title: revisedTitle,
         angle: revisedAngle,
         audience: revisedAudience,
+        durationRange: { minSeconds: 20, maxSeconds: 45 },
       },
     });
     const regenerated = await subject.resumeStale(stale.id);
 
-    assert.equal(regenerated.status, "succeeded");
+    assert.equal(regenerated.status, "succeeded", JSON.stringify(regenerated.nodeRuns
+      .filter((node) => node.status === "failed").map(({ nodeId, error }) => ({ nodeId, error }))));
     assert.equal(screenwriterInputs.length, 2);
     assert.equal(directorInputs.length, 2);
     assert.equal(publishInputs.length, 2);
@@ -4267,11 +4269,11 @@ describe("ProductionPipeline", () => {
     );
     assert.deepEqual(screenwriterInputs.map((input) => input.brief.durationRange), [
       { minSeconds: 20, maxSeconds: 34 },
-      { minSeconds: 20, maxSeconds: 34 },
+      { minSeconds: 20, maxSeconds: 45 },
     ]);
     assert.deepEqual(directorInputs.map((input) => input.brief.durationRange), [
       { minSeconds: 20, maxSeconds: 34 },
-      { minSeconds: 20, maxSeconds: 34 },
+      { minSeconds: 20, maxSeconds: 45 },
     ]);
     assert.notEqual(screenwriterInputs[0]?.agentLoopCheckpoint?.key, screenwriterInputs[1]?.agentLoopCheckpoint?.key);
     assert.notEqual(directorInputs[0]?.agentLoopCheckpoint?.key, directorInputs[1]?.agentLoopCheckpoint?.key);
@@ -10028,6 +10030,109 @@ describe("ProductionPipeline", () => {
     assert.equal(plan.estimatedCostCny, 2.4);
   });
 
+  it("does not convert an unresolved paid forecast into an approvable fallback quote", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-unsafe-forecast-"));
+    class UnresolvedForecastWorker extends ForecastingAssetWorker {
+      override async forecastPaidAssetSpend(): Promise<never> {
+        throw new pipeline.PaidAssetOutcomeUnresolvedError("original-paid-item");
+      }
+    }
+    const worker = new UnresolvedForecastWorker([]);
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker,
+      directorAgent: generatedShotDirector(), assetProviders: [meteredSeedanceProvider()],
+      providerRuntimeMetadata: [seedanceRuntimeMetadata()] });
+    const run = await subject.start({ ...brief,
+      providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 } });
+    assert.notEqual(run.status, "awaiting_spend_approval");
+    const asset = run.nodeRuns.find((node) => node.nodeId === "assets")!;
+    assert.equal(asset.spendPlan, undefined);
+    assert.match(asset.error ?? "", /original-paid-item.*unresolved/);
+    assert.equal(worker.calls.filter((call) => call.capability === "asset.prepare").length, 0);
+  });
+
+  for (const mode of ["video-progress", "image-sync", "image-throw"] as const) it(`holds the source lease through paid submission and releases it after durable acceptance (${mode})`, async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-paid-source-lease-"));
+    let source: WorkflowRun<pipeline.ProductionBrief> | undefined;
+    let subject: pipeline.ProductionPipeline;
+    let creates = 0, protectedSubmits = 0, unlockedPolls = 0, unlockedDownloads = 0;
+    const submit = async () => {
+      creates++;
+      if (source) {
+        await assert.rejects(() => subject.withRunMaintenanceLease([source!.id], async () => {}),
+          /lease|locked|already|executing/i);
+        protectedSubmits++;
+      }
+      return `lease-task-${creates}`;
+    };
+    const worker = new pipeline.GenerativeAssetWorkerClient({ runsRoot: path.join(workspaceRoot, "runs"),
+      fallback: new RoutedAssetBaselineWorker(), resolveHost: async () => ["93.184.216.34"],
+      fetch: async () => {
+        if (source) await subject.withRunMaintenanceLease([source.id], async () => { unlockedDownloads++; });
+        return new Response("controlled-media", { headers: { "content-type": mode === "video-progress" ? "video/mp4" : "image/png" } });
+      },
+      imageAdapters: [{ estimatedCnyPerImage: 0.25, adapter: { providerId: "seedream-image-v1", generate: async () => {
+        const taskId = await submit();
+        if (source && mode === "image-throw") throw new Error("image create connection lost before acceptance response");
+        return { providerId: "seedream-image-v1", taskId, imageUrl: `https://example.com/${taskId}.png` };
+      } } }],
+      adapters: [{ estimatedCnyPerClip: 2.4, defaultModelId: "seedance-v1", modelPrices: { "seedance-v1": 2.4 },
+        adapter: { providerId: "seedance-video-v1", generate: async (_request, progress) => {
+          const taskId = await submit();
+          await progress?.({ providerId: "seedance-video-v1", taskId, status: "submitted" });
+          if (source) {
+            await subject.withRunMaintenanceLease([source.id], async () => { unlockedPolls++; });
+          }
+          await progress?.({ providerId: "seedance-video-v1", taskId, status: "succeeded", videoUrl: `https://example.com/${taskId}.mp4` });
+          return { providerId: "seedance-video-v1", taskId, videoUrl: `https://example.com/${taskId}.mp4` };
+        } } }],
+    });
+    const director = generatedShotDirector();
+    subject = new pipeline.ProductionPipeline({ workspaceRoot, worker,
+      directorAgent: { ...director, plan: async (request) => {
+        const result = await director.plan(request) as pipeline.VisualDirectorPlan;
+        return mode === "video-progress" ? result : { ...result, shots: result.shots.map(shot => ({
+          ...shot, preferredProviderId: "seedream-image-v1", deliveryType: "generated_image" as const,
+        })) };
+      } },
+      assetProviders: [meteredSeedanceProvider(), { id: "seedream-image-v1", label: "Seedream", billing: "metered",
+        modes: ["文生图"], deliveryTypes: ["generated_image"], estimatedCnyPerClip: 0.25, generative: true }],
+      providerRuntimeMetadata: [seedanceRuntimeMetadata(), { id: "seedream-image-v1", label: "Seedream",
+        modelId: "seedream-v1", transport: "http_api", billing: "metered", estimatedCostCny: 0.25, maxAttempts: 1 }] });
+    const input: pipeline.ProductionBrief = { ...brief,
+      providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
+      director: { profileId: "auto", assetProviderIds: mode === "video-progress" ? ["seedance-video-v1"] : ["seedream-image-v1"] },
+      economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 } };
+    const awaiting = await subject.start(input);
+    const plan = awaiting.nodeRuns.find((node) => node.nodeId === "assets")!.spendPlan!;
+    const finishedSource = await subject.authorizeSpend(awaiting.id, { ...plan, spendPlanId: plan.id, approvedBy: "owner" });
+    assert.equal(finishedSource.nodeRuns.find((node) => node.nodeId === "assets")?.status, "succeeded");
+    const scriptPath = String((finishedSource.nodeRuns.find((node) => node.nodeId === "script")!.output as Record<string, unknown>).scriptPath);
+    const directorPath = String((finishedSource.nodeRuns.find((node) => node.nodeId === "visual-direction")!.output as Record<string, unknown>).directorPlanPath);
+    source = finishedSource;
+    const rework = await subject.start({ ...input, rework: { sourceRunId: source.id, sourceRunRevision: source.revision,
+      findings: [], affectedScenePositions: [1, 2], nodeInstructions: { script: "保留脚本", visualDirection: "保留画面方案", assets: "重做两镜" },
+      previousScript: JSON.parse(await readFile(scriptPath, "utf8")),
+      previousDirectorPlan: JSON.parse(await readFile(directorPath, "utf8")) } });
+    const nextPlan = rework.nodeRuns.find((node) => node.nodeId === "assets")!.spendPlan!;
+    assert.ok(nextPlan, JSON.stringify(rework.nodeRuns.map((node) => ({ id: node.nodeId, error: node.error }))));
+    const completed = await subject.authorizeSpend(rework.id, { ...nextPlan, spendPlanId: nextPlan.id, approvedBy: "owner" });
+    assert.equal(completed.nodeRuns.find((node) => node.nodeId === "assets")?.status, mode === "image-throw" ? "failed" : "succeeded",
+      completed.nodeRuns.find((node) => node.nodeId === "assets")?.error);
+    assert.equal(creates, mode === "image-throw" ? 3 : 4);
+    assert.equal(protectedSubmits, mode === "image-throw" ? 1 : 2);
+    assert.equal(unlockedPolls, mode === "video-progress" ? 2 : 0);
+    assert.equal(unlockedDownloads, mode === "image-throw" ? 0 : 2);
+    await subject.withRunMaintenanceLease([source.id], async () => {
+      const ledger = await subject.inspectPaidNode(completed.id, "assets");
+      assert.equal(ledger.items[0]?.state, mode === "image-throw" ? "unknown" : "materialized");
+      if (mode === "image-throw") {
+        assert.equal(completed.nodeRuns.find(node => node.nodeId === "assets")?.outcomeUncertain, true);
+      }
+    });
+  });
+
   it("runs a metered assets node without an approval when every paid scene is provably reused", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-spend-forecast-free-"));
     const worker = new ForecastingAssetWorker(["scene-1", "scene-2"]);
@@ -10351,6 +10456,7 @@ describe("ProductionPipeline", () => {
         const input = inputState.versions.find(version => version.id === inputState.effectiveVersionId)!.value as { executablePlanPath: string };
         const planDigest = createHash("sha256").update(await readFile(input.executablePlanPath)).digest("hex");
         const runBrief = awaiting.initialInput;
+        assert.ok(runBrief.durationPolicy === undefined, "此夹具验证旧版授权恢复");
         stopped = await subject.acceptProductionAuthorization(awaiting.id, {
           version: "video-factory/production-authorization-v1", id: "pilot-original-scope",
           runId: awaiting.id, approvalRevision: awaiting.revision,
@@ -10399,7 +10505,7 @@ describe("ProductionPipeline", () => {
     });
   }
 
-  it("requotes only the unsubmitted shot after a completed provider result fails to download", async () => {
+  it("materializes the original result before requoting only the unsubmitted shot after a download failure", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-mixed-paid-recovery-"));
     let creates = 0;
     let failDownload = true;
@@ -10448,15 +10554,26 @@ describe("ProductionPipeline", () => {
     const oldOperationId = failed.nodeRuns.find((node) => node.nodeId === "assets")?.operationRequestId;
     const summary = await subject.inspectPaidNode(failed.id, "assets");
     assert.deepEqual(summary.items.map((item) => item.state), ["provider_succeeded", "terminal_failed"]);
-    assert.equal(summary.recommendedOutcome, "requote", "completed results are reusable; the unsubmitted shot needs a new operation");
+    assert.equal(summary.recommendedOutcome, "resume_original", "已成功但未物化的原片先恢复，不能直接为其余镜头报价");
+    await assert.rejects(subject.reconcilePaidNode(failed.id, {
+      nodeId: "assets", expectedRunRevision: failed.revision,
+      reconciliationId: "premature-new-quote", outcome: "requote",
+    }), /requires 'resume_original'/);
+    assert.equal((await subject.loadPersisted(failed.id)).revision, failed.revision);
+    assert.equal(creates, 1);
     failDownload = false;
     const requoted = await subject.reconcilePaidNode(failed.id, {
       nodeId: "assets", expectedRunRevision: failed.revision,
-      reconciliationId: "quote-only-unsubmitted-shot", outcome: "requote",
+      reconciliationId: "recover-before-quote-unsubmitted-shot", outcome: "resume_original",
     });
-    assert.equal(requoted.status, "awaiting_spend_approval");
+    assert.equal(requoted.status, "awaiting_spend_approval", JSON.stringify({
+      node: requoted.nodeRuns.find(node => node.nodeId === "assets"),
+      ledger: await subject.inspectPaidNode(failed.id, "assets"),
+    }));
     assert.notEqual(requoted.nodeRuns.find((node) => node.nodeId === "assets")?.operationRequestId, oldOperationId);
     assert.equal(creates, 1, "showing the new quote cannot create a paid task");
+    assert.equal((await subject.inspectPaidNode(failed.id, "assets")).items.some(item => item.state === "provider_succeeded"), false,
+      "新报价前必须真正物化原成功任务，不能只凭URL把它当可复用");
     const nextPlan = requoted.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
     assert.ok(nextPlan);
     assert.deepEqual(nextPlan.items?.map((item) => item.id), ["scene-2"]);
@@ -11626,7 +11743,8 @@ describe("ProductionPipeline", () => {
     );
   });
 
-  it("视觉审片边界停点：放行必须绑定当前审片证据并携带逐条表态", async () => {
+  for (const reviewMode of ["manual", "automatic"] as const)
+  for (const legacyPublishDispositions of [false, true]) it(`视觉审片及终审保留逐条表态，文案只确认当前稿（${reviewMode}，旧附带表态=${legacyPublishDispositions}）`, async () => {
     // 真实 UI（RunWorkbench.openDecision）在 visual-review 停点会把报告 reviewScope.evidenceId
     // 与逐条表态一起提交；服务端 dispatchDecision 只认 source-review / final-review 证据时，
     // 这个停点会永远 500（2026-09-23 run-1278 实测）。合同应是：有审片证据就必须绑定——
@@ -11686,6 +11804,7 @@ describe("ProductionPipeline", () => {
 
     let run = await subject.start({
       ...brief,
+      reviewMode,
       runPurpose: "production",
       workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" as const },
       providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
@@ -11784,7 +11903,7 @@ describe("ProductionPipeline", () => {
       }),
       /not bound to the current review evidence/,
     );
-    // 发布包停点同样必须逐条表态（EB-03），但表态不解释为终审签字。
+    // 文案采用不重复成片表态，但仍要求绑定当前文案版本。
     await assert.rejects(
       () => subject.decide(finalApproved.id, {
         interventionId: String(publishNode.intervention?.id),
@@ -11793,10 +11912,20 @@ describe("ProductionPipeline", () => {
         expectedRunRevision: finalApproved.revision,
         reviewEvidenceId: evidenceId,
       }),
-      /逐条表态/,
+      /文字交付的版本已经变化/,
     );
     const publishVersionId = publishNode.outputState?.effectiveVersionId;
     assert.ok(publishVersionId);
+    for (const malformed of [[], [{ itemKey: "", decision: "accept_risk" }],
+      [{ itemKey: "x", decision: "accept_risk" }, { itemKey: "x", decision: "accept_risk" }],
+      [{ itemKey: "x", decision: "invalid" }], [{ itemKey: "x", decision: "reject" }]]) {
+      await assert.rejects(() => subject.decide(finalApproved.id, {
+        interventionId: String(publishNode.intervention?.id), action: "approve", actor: "owner",
+        expectedRunRevision: finalApproved.revision, reviewEvidenceId: evidenceId, contentVersionId: publishVersionId,
+        acceptUnauditedContent: true, reviewDispositions: malformed as HumanReviewDisposition[],
+      }));
+      assert.equal((await subject.loadPersisted(finalApproved.id)).revision, finalApproved.revision);
+    }
     await assert.rejects(() => subject.decide(finalApproved.id, {
       interventionId: String(publishNode.intervention?.id), action: "approve", actor: "owner",
       expectedRunRevision: finalApproved.revision, reviewEvidenceId: evidenceId,
@@ -11813,14 +11942,84 @@ describe("ProductionPipeline", () => {
       actor: "owner",
       expectedRunRevision: finalApproved.revision,
       reviewEvidenceId: evidenceId,
-      reviewDispositions: dispositions,
+      ...(legacyPublishDispositions ? { reviewDispositions: dispositions } : {}),
       contentVersionId: publishVersionId,
       acceptUnauditedContent: true,
     });
     assert.equal(published.status, "succeeded");
     assert.equal(published.decisions.at(-1)?.contentVersionId, publishVersionId);
     assert.equal(published.decisions.at(-1)?.contentAuditStatus, "not_audited");
+    assert.equal(published.decisions.at(-1)?.reviewDispositions, undefined);
+    assert.equal(published.decisions.at(-1)?.reviewDispositionBasis, undefined);
+    const finalInterventionId = approved.nodeRuns.find(node => node.nodeId === "final-review")!.intervention!.id;
+    assert.deepEqual(published.decisions.find(decision => decision.interventionId === finalInterventionId)?.reviewDispositions,
+      finalApproved.decisions.find(decision => decision.interventionId === finalInterventionId)?.reviewDispositions,
+      "剥离文案旧字段不能改写已保存的独立终审");
     assert.ok(published.artifacts.some((artifact) => artifact.kind === "publish_package"));
+    // 只返工文案两轮，不能要求重签成片，也不能拿最近的文案批准代替终审。
+    let latest = published;
+    const finalDecision = finalApproved.decisions.find(decision => decision.interventionId === finalInterventionId)!;
+    for (const round of [1, 2]) {
+      const previousNode = latest.nodeRuns.find(node => node.nodeId === "publish-package")!;
+      const inputVersion = previousNode.inputState!.versions.find(version => version.id === previousNode.inputState!.effectiveVersionId)!;
+      const input = inputVersion.value as { brief: Record<string, unknown>; scriptPath: string };
+      const stale = await subject.applyNodeInputOverride(latest.id, {
+        nodeId: "publish-package", actor: "owner", allowTerminalEdit: true,
+        expectedRunRevision: latest.revision, expectedVersionId: inputVersion.id,
+        input: { ...input, brief: { ...input.brief, title: `新文案第${round}轮` } },
+      });
+      const regenerated = await subject.resumeStale(stale.id);
+      assert.equal(regenerated.status, "needs_human", regenerated.nodeRuns.find(node => node.status === "failed")?.error);
+      const nextPublish = regenerated.nodeRuns.find(node => node.nodeId === "publish-package")!;
+      const artifact = regenerated.artifacts.find(item => item.kind === "publish_package" && nextPublish.artifactIds.includes(item.id))!;
+      const payload = JSON.parse(await readFile(artifact.uri!, "utf8"));
+      assert.equal(payload.approval.decisionId, finalDecision.id);
+      assert.equal(payload.approval.interventionId, finalInterventionId);
+      latest = await subject.decide(regenerated.id, {
+        interventionId: nextPublish.intervention!.id, action: "approve", actor: "owner",
+        expectedRunRevision: regenerated.revision, reviewEvidenceId: evidenceId,
+        contentVersionId: nextPublish.outputState!.effectiveVersionId, acceptUnauditedContent: true,
+      });
+      assert.equal(latest.status, "succeeded");
+    }
+    const lastPublish = latest.nodeRuns.find(node => node.nodeId === "publish-package")!;
+    const inputVersion = lastPublish.inputState!.versions.find(version => version.id === lastPublish.inputState!.effectiveVersionId)!;
+    const input = inputVersion.value as { brief: Record<string, unknown>; scriptPath: string };
+    const stale = await subject.applyNodeInputOverride(latest.id, {
+      nodeId: "publish-package", actor: "owner", allowTerminalEdit: true,
+      expectedRunRevision: latest.revision, expectedVersionId: inputVersion.id,
+      input: { ...input, brief: { ...input.brief, title: "核验终审批准来源" } },
+    });
+    const runPath = path.join(workspaceRoot, "runs", stale.id, "run.json");
+    const baseline = await readFile(runPath, "utf8");
+    // 仅隔离负例篡改持久化身份：实际生成包仍经过正式resumeStale，不伪造成功记录。
+    for (const kind of ["visual-only", "publish-only", "replaced-stop", "removed-stop", "changed-evidence", "null-evidence"] as const) {
+      const invalid = JSON.parse(baseline) as WorkflowRun;
+      if (kind === "visual-only" || kind === "publish-only") {
+        const otherStop = kind === "visual-only" ? "visual-review" : "publish-package";
+        const ids = latest.interventions.filter(item => item.nodeId === otherStop).map(item => item.id);
+        invalid.decisions = latest.decisions.filter(decision => ids.includes(decision.interventionId));
+        assert.ok(invalid.decisions.some(decision => decision.action === "approve" && decision.reviewEvidenceId === evidenceId), kind);
+      } else if (kind === "replaced-stop") {
+        invalid.interventions.push({ ...invalid.interventions.find(item => item.id === finalInterventionId)!, id: "new-final-stop" });
+      } else if (kind === "removed-stop") {
+        invalid.interventions = invalid.interventions.filter(item => item.nodeId !== "final-review");
+      } else {
+        const final = invalid.nodeRuns.find(node => node.nodeId === "final-review")!;
+        const output = { ...(final.output as Record<string, unknown>), reviewEvidenceId: kind === "null-evidence" ? null : "0".repeat(64) };
+        final.output = output;
+        final.outputState!.versions.find(version => version.id === final.outputState!.effectiveVersionId)!.output = output;
+      }
+      await writeFile(runPath, JSON.stringify(invalid));
+      const rejected = await subject.resumeStale(stale.id);
+      assert.equal(rejected.status, "failed", kind);
+      const rejectedPublish = rejected.nodeRuns.find(node => node.nodeId === "publish-package")!;
+      assert.match(rejectedPublish.error ?? "", /recorded final-review operator decision/, kind);
+      assert.equal(rejectedPublish.artifactIds.length, 0, "无有效终审不得产生新发布包");
+    }
+    await writeFile(runPath, baseline);
+    const validAgain = await subject.resumeStale(stale.id);
+    assert.equal(validAgain.status, "needs_human", "原有效批准仍可正常重生成文案");
   });
 
   it("边界闸门不会静默跳过声明了 qualityGates 的节点", async () => {

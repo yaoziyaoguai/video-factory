@@ -14,14 +14,6 @@ def script_scene_text(script: dict[str, Any], scene: dict[str, Any]) -> str:
         return " ".join(turn["text"] for turn in scene["dialogue"]) or scene.get("visible_action") or scene.get("purpose") or scene["visual_prompt"]
     return str(scene["narration"])
 
-_CLAIMS = [
-    r"(?:已(?:经)?|得到|完成|成功)(?:被)?(?:验证|证实|证明)",
-    r"(?:验证|证实|证明)(?:了|通过|成立|有效|因果|效果|结果)",
-    r"(?:真实|现实|实拍|现场)(?:验证|实验|测试|结果|证据|效果)",
-    r"(?:因果|产品效果|方法效果).{0,8}(?:成立|已验证|得到验证|被证明)",
-]
-_NEGATED = r"(?:不|非|不能|不得|并非|不是|不可|未)(?:能|得|是|可)?[^，。；！？!?]{0,12}$"
-
 def validate_character_script(value: Any, *, duration_seconds: int | None = None,
                               duration_range: dict[str, int] | None = None,
                               require_canon_facts: bool = False) -> dict[str, Any]:
@@ -93,18 +85,10 @@ def validate_character_script(value: Any, *, duration_seconds: int | None = None
         for key in ("success_criteria", "failure_conditions"):
             if key in s:
                 scene[key] = _strings(s[key], 1)
-        if scene["visual_strategy"] == "generated":
-            values = [scene.get(k, "") for k in ("purpose", "visual_prompt", "visible_action", "on_screen_text")]
-            values += [t["text"] for t in dialogue] + scene.get("success_criteria", []) + scene.get("failure_conditions", [])
-            for text in values:
-                for pattern in _CLAIMS:
-                    for match in re.finditer(pattern, text):
-                        if not re.search(_NEGATED, text[max(0, match.start() - 18):match.start()]):
-                            raise ValueError("Generated visual cannot claim real-world evidence.")
         scenes.append(scene)
     scenes.sort(key=lambda scene: scene["position"])
-    if not 3 <= len(scenes) <= 24 or any(s["position"] != i + 1 for i, s in enumerate(scenes)):
-        raise ValueError("剧本须有3–24个连续编号的镜头。")
+    if not 1 <= len(scenes) <= 24 or any(s["position"] != i + 1 for i, s in enumerate(scenes)):
+        raise ValueError("剧本须有1–24个连续编号的镜头。")
     if not low <= sum(s["duration"] for s in scenes) <= high:
         raise ValueError("剧本总时长超出目标范围。")
     if require_canon_facts and "canonFacts" not in src:

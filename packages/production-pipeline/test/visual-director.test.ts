@@ -56,6 +56,14 @@ function shot(scenePosition: number, preferredProviderId: string): VisualDirecto
 }
 
 describe("validateVisualDirectorPlan", () => {
+  it("leaves lexical claims to semantic review while retaining the evidence-provider boundary", () => {
+    const options: VisualDirectorPlanValidation = { scenePositions: [1], allowedProviderIds: ["seedance-video-v1"],
+      generativeProviderIds: ["seedance-video-v1"], estimatedCnyPerClip: { "seedance-video-v1": 1 }, economics };
+    const input = plan([{ ...shot(1, "seedance-video-v1"), generationPrompt: "虚构剧场的现场效果，这个生成画面证明了实验效果。" }]);
+    assert.equal(validateVisualDirectorPlan(input, options).shots[0]!.generationPrompt, input.shots[0]!.generationPrompt);
+    input.shots[0]!.authenticityPolicy = "evidence";
+    assert.throws(() => validateVisualDirectorPlan(input, options), /evidence shot.*generative provider/);
+  });
   it("MC-A10 preserves four-character director bindings and refuses changed or omitted turns", () => {
     const bindings = Object.fromEntries([1, 2, 3, 4].map((position) => [position, {
       characterIds: ["shop", "courier", "neighbor", "student"].slice(0, position),

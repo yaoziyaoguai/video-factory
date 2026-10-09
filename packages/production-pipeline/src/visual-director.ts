@@ -7,7 +7,7 @@ import {
   type ProductionSpendFeedbackReason,
   type ProductionVisualPlan,
 } from "./contracts.js";
-import { quantizeDurationsToFrames, type DurationRange } from "./executable-timeline.js";
+import { PlanContractError, quantizeDurationsToFrames, type DurationIntent } from "./executable-timeline.js";
 import type { CodexTaskExecution } from "./codex-chat.js";
 import type { RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import type { ShotGrammar } from "./reference-grammar.js";
@@ -17,15 +17,12 @@ import type { CharacterDialogueTurn, ScriptCharacter, PresentationMode } from ".
 import type { PlanningIssue } from "./creative-planning.js";
 import type { ProductionCapabilities } from "./production-capabilities.js";
 import type { CreativeDiscussionAgentInput } from "./codex-creative-discussion.js";
-import type { CreativeDiscussionResult } from "./creative-review.js";
+import type { CreativeDiscussionResult, CreativeDraftConflict } from "./creative-review.js";
 import {
   assetReuseSourceScenePosition,
   normalizeVideoGenerationDurationSeconds,
   type VideoGenerationDurationBounds,
 } from "./generative-asset-worker.js";
-import {
-  assertGeneratedVisualDoesNotClaimEvidence,
-} from "./visual-evidence-boundary.js";
 
 export const DIRECTOR_PLAN_VERSION = "video-factory/director-plan-v1" as const;
 export const CHARACTER_DIRECTOR_PLAN_VERSION = "video-factory/director-plan-v2" as const;
@@ -249,16 +246,14 @@ export function directorCharacterBindings(scenes: VisualDirectorScene[]): Record
 }
 
 export interface VisualDirectorAgentInput {
-  brief: {
+  brief: DurationIntent & {
     presentationMode?: PresentationMode;
     characters?: ScriptCharacter[];
     title: string;
     angle: string;
     audience: string;
     platform: string;
-    durationSeconds: number;
     budgetIntentionCny?: number;
-    durationRange?: DurationRange;
     viewerPromise?: string;
     narrativeArc?: string;
     requestedProfileId: ProductionDirectorProfileId;
@@ -357,6 +352,15 @@ export interface VisualDirectorAgent {
 }
 
 export function validateVisualDirectorPlan(value: unknown, options: VisualDirectorPlanValidation): VisualDirectorPlan {
+  return validateDirectorDocument(value, options, false);
+}
+
+/** 规划草稿保留完整的能力冲突；采用和执行仍使用严格校验，不把冲突当坏JSON重生成。 */
+export function validateVisualDirectorDraft(value: unknown, options: VisualDirectorPlanValidation): VisualDirectorPlan {
+  return validateDirectorDocument(value, options, true);
+}
+
+function validateDirectorDocument(value: unknown, options: VisualDirectorPlanValidation, draftOnly: boolean): VisualDirectorPlan {
   const input = record(value, "Director plan");
   const expectedVersion = options.presentationMode === "character_drama" ? CHARACTER_DIRECTOR_PLAN_VERSION : DIRECTOR_PLAN_VERSION;
   if (input.version !== expectedVersion) {
@@ -482,21 +486,9 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
         );
       }
     }
-    const generatedDelivery = deliveryType === "generated_image" || deliveryType === "generated_video";
     // 编剧的 visual_strategy 是获取路线建议，不等于用户锁定的真实性合同。真正需要实证的
     // 镜头已由 authenticityPolicy=evidence 与允许 Provider 池共同约束；普通 illustrative 镜头
     // 可以由视觉导演在用户启用的路线内从图库改为生成，避免图库无候选时形成不可执行死路。
-    if (generatedDelivery) {
-      assertGeneratedVisualDoesNotClaimEvidence([
-        optionalText(shot.subject, `shots[${index}].subject`),
-        optionalText(shot.environment, `shots[${index}].environment`),
-        visibleAction,
-        ...(beats ?? []).map(({ action }) => action),
-        generationPrompt,
-        rationale,
-        ...(successCriteria ?? []),
-      ], `shots[${index}]`);
-    }
     return {
       scenePosition,
       ...(reuseFromScenePosition !== undefined ? { reuseFromScenePosition } : {}),
@@ -555,7 +547,6 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
   const shotsByPosition = new Map(shots.map((shot) => [shot.scenePosition, shot]));
   // 跨镜主体是否构成叙事依赖是整份方案的语义判断，由既有独立导演审计负责；这里仅
   // 校验可执行的 reuse/reference 关系。自由文本不能用关键词在 parser 阶段提前误杀。
-  const reuseRoots = new Map<number, ShotDecision>();
   for (const shot of shots) {
     if (shot.referenceFromScenePosition !== undefined) {
       const source = shotsByPosition.get(shot.referenceFromScenePosition);
@@ -581,44 +572,11 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
       );
     }
     shot.reuseFromScenePosition = root.scenePosition;
-    reuseRoots.set(shot.scenePosition, root);
   }
 
-  if (options.sceneDurations) {
-    const requiredByRoot = new Map<number, { frames: number; consumer: ShotDecision }>();
-    for (const shot of shots) {
-      const root = reuseRoots.get(shot.scenePosition) ?? shot;
-      if (root.deliveryType !== "generated_video") continue;
-      const requiredFrames = reuseSourceEndFrame(
-        shot.scenePosition,
-        shot.sourceInSeconds ?? 0,
-        options.sceneDurations,
-      );
-      if (requiredFrames === undefined) continue;
-      const previous = requiredByRoot.get(root.scenePosition);
-      if (!previous || requiredFrames > previous.frames) {
-        requiredByRoot.set(root.scenePosition, { frames: requiredFrames, consumer: shot });
-      }
-    }
-    for (const [rootPosition, requirement] of requiredByRoot) {
-      const root = shotsByPosition.get(rootPosition)!;
-      const durationBounds = options.selectedVideoModelDurationBounds?.[root.preferredProviderId];
-      const requiredSeconds = requirement.frames / 30;
-      const maximum = durationBounds?.maxDurationSeconds ?? 15;
-      if (requirement.frames > maximum * 30) {
-        throw new Error(
-          `Director plan scene ${requirement.consumer.scenePosition} reuses generated video from root scene ${rootPosition}, `
-          + `requires source through ${requiredSeconds}s, but that source only produces ${maximum}s.`,
-        );
-      }
-      const generatedDuration = normalizeVideoGenerationDurationSeconds(requiredSeconds, durationBounds);
-      if (generatedDuration * 30 < requirement.frames) {
-        throw new Error(
-          `Director plan scene ${requirement.consumer.scenePosition} reuses generated video from root scene ${rootPosition}, `
-          + `requires source through ${requiredSeconds}s, but that source only produces ${generatedDuration}s.`,
-        );
-      }
-    }
+  if (!draftOnly) {
+    const conflict = visualDirectorCapabilityConflicts({ shots }, options)[0];
+    if (conflict) throw new PlanContractError(conflict.code, conflict.scenePositions, conflict.detail);
   }
 
   const paidShots = shots.filter((shot) => shot.estimatedCostCny > 0);
@@ -651,6 +609,39 @@ export function validateVisualDirectorPlan(value: unknown, options: VisualDirect
     }) };
   }
   return { ...common, version: DIRECTOR_PLAN_VERSION, shots };
+}
+
+/** 对已经通过结构校验的完整稿计算真实单段覆盖，不放大型号能力，也不自动拆镜。 */
+export function visualDirectorCapabilityConflicts(
+  plan: Pick<VisualDirectorPlan, "shots">,
+  options: Pick<VisualDirectorPlanValidation, "sceneDurations" | "selectedVideoModelDurationBounds">,
+): CreativeDraftConflict[] {
+  if (!options.sceneDurations) return [];
+  const shotsByPosition = new Map(plan.shots.map(shot => [shot.scenePosition, shot]));
+  const requiredByRoot = new Map<number, { frames: number; consumer: ShotDecision }>();
+  for (const shot of plan.shots) {
+    const { root } = resolveReuseRoot(shot, shotsByPosition);
+    if (root.deliveryType !== "generated_video") continue;
+    const frames = reuseSourceEndFrame(shot.scenePosition, shot.sourceInSeconds ?? 0, options.sceneDurations);
+    if (frames === undefined) continue;
+    if (!requiredByRoot.has(root.scenePosition) || frames > requiredByRoot.get(root.scenePosition)!.frames) {
+      requiredByRoot.set(root.scenePosition, { frames, consumer: shot });
+    }
+  }
+  const conflicts: CreativeDraftConflict[] = [];
+  for (const [rootPosition, requirement] of requiredByRoot) {
+    const root = shotsByPosition.get(rootPosition)!;
+    const bounds = options.selectedVideoModelDurationBounds?.[root.preferredProviderId];
+    const requiredSeconds = requirement.frames / 30;
+    const maximum = bounds?.maxDurationSeconds ?? 15;
+    const availableSeconds = requirement.frames > maximum * 30 ? maximum : normalizeVideoGenerationDurationSeconds(requiredSeconds, bounds);
+    if (availableSeconds * 30 < requirement.frames) conflicts.push({ code: "execution_capability_conflict",
+      scenePositions: [requirement.consumer.scenePosition],
+      detail: `Director plan scene ${requirement.consumer.scenePosition} reuses generated video from root scene ${rootPosition}, `
+        + `requires source through ${requiredSeconds}s, but that source only produces ${availableSeconds}s.`,
+    });
+  }
+  return conflicts;
 }
 
 function resolveReuseRoot(

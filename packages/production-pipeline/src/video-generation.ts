@@ -17,6 +17,9 @@ export interface VideoGenerationResult {
   videoUrl: string;
 }
 
+/** 查询已受理任务只需其协议身份，不应重新编译或伪造原 prompt。 */
+export type VideoGenerationRecoveryRequest = Pick<VideoGenerationRequest, "modelId">;
+
 export interface VideoGenerationProgress {
   providerId: string;
   taskId: string;
@@ -33,7 +36,7 @@ export interface VideoGenerationAdapter {
   ): Promise<VideoGenerationResult>;
   reconcile?(
     taskId: string,
-    request: VideoGenerationRequest,
+    request: VideoGenerationRecoveryRequest,
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult>;
 }
@@ -113,7 +116,7 @@ export class SeedanceVideoAdapter implements VideoGenerationAdapter {
 
   async reconcile(
     taskId: string,
-    _request: VideoGenerationRequest,
+    _request: VideoGenerationRecoveryRequest,
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
     taskId = requiredString(taskId, "Seedance task id");
@@ -203,7 +206,7 @@ export class MiniMaxVideoAdapter implements VideoGenerationAdapter {
 
   async reconcile(
     taskId: string,
-    request: VideoGenerationRequest,
+    request: VideoGenerationRecoveryRequest,
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
     const model = resolveMiniMaxModel(request.modelId, this.options.model, this.options.modelProtocols);
@@ -424,7 +427,7 @@ export class WanVideoAdapter implements VideoGenerationAdapter {
 
   async reconcile(
     taskId: string,
-    _request: VideoGenerationRequest,
+    _request: VideoGenerationRecoveryRequest,
     onProgress?: (progress: VideoGenerationProgress) => Promise<void> | void,
   ): Promise<VideoGenerationResult> {
     taskId = requiredString(taskId, "Wan task id");

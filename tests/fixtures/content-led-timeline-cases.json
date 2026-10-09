@@ -1,0 +1,26 @@
+{
+  "version": "content-led-timeline-cases-v1",
+  "cases": [
+    { "id": "one-cut-12", "durations": [12], "frames": [360], "valid": true },
+    { "id": "three-cut-183", "durations": [61, 61, 61], "frames": [1830, 1830, 1830], "valid": true },
+    { "id": "cumulative-rounding", "durations": [8.01, 8.01, 7.98], "frames": [240, 241, 239], "valid": true },
+    { "id": "max-only", "durations": [6, 6], "frames": [180, 180], "range": { "maxSeconds": 12 }, "valid": true },
+    { "id": "max-only-conflict", "durations": [6, 6], "frames": [180, 180], "range": { "maxSeconds": 10 }, "valid": false },
+    { "id": "min-only", "durations": [8.3], "frames": [249], "range": { "minSeconds": 8.3 }, "valid": true },
+    { "id": "max-floor-29", "durations": [0.9666666666666667], "frames": [29], "range": { "maxSeconds": 0.999999999 }, "valid": true },
+    { "id": "max-floor-reject-30", "durations": [1], "frames": [30], "range": { "maxSeconds": 0.999999999 }, "valid": false },
+    { "id": "min-ceil-31", "durations": [1.0333333333333334], "frames": [31], "range": { "minSeconds": 1.000000001 }, "valid": true },
+    { "id": "min-ceil-reject-30", "durations": [1], "frames": [30], "range": { "minSeconds": 1.000000001 }, "valid": false },
+    { "id": "max-1_01-floor-30", "durations": [1], "frames": [30], "range": { "maxSeconds": 1.01 }, "valid": true },
+    { "id": "max-1_01-reject-31", "durations": [1.0333333333333334], "frames": [31], "range": { "maxSeconds": 1.01 }, "valid": false },
+    { "id": "max-less-than-one-frame", "durations": [0.03333333333333333], "frames": [1], "range": { "maxSeconds": 0.02 }, "valid": false },
+    { "id": "no-integral-frame", "durations": [1], "frames": [30], "range": { "minSeconds": 1.01, "maxSeconds": 1.02 }, "valid": false },
+    { "id": "empty-range", "durations": [12], "frames": [360], "range": {}, "valid": false },
+    { "id": "null-range", "durations": [12], "frames": [360], "range": null, "valid": false },
+    { "id": "unknown-range-key", "durations": [12], "frames": [360], "range": { "maxSeconds": 20, "target": 12 }, "valid": false },
+    { "id": "boolean-range", "durations": [12], "frames": [360], "range": { "minSeconds": true }, "valid": false },
+    { "id": "negative-range", "durations": [12], "frames": [360], "range": { "minSeconds": -1 }, "valid": false },
+    { "id": "inverted-range", "durations": [12], "frames": [360], "range": { "minSeconds": 13, "maxSeconds": 12 }, "valid": false },
+    { "id": "scientific-lower-bound", "durations": [0.03333333333333333], "frames": [1], "range": { "minSeconds": 1e-7 }, "valid": true }
+  ]
+}

@@ -6,6 +6,27 @@ import { isCharacterScript } from "../src/character-script.js";
 
 const fixture = JSON.parse(readFileSync(new URL("../../../tests/fixtures/character-drama-cases.json", import.meta.url), "utf8"));
 
+for (const example of fixture.structurally_valid_semantic_review) test("semantic review, not structural rejection: " + example.name, () => {
+  const input = structuredClone(fixture.script);
+  let target = input;
+  for (const key of example.path.slice(0, -1)) target = target[key];
+  target[example.path.at(-1)] = example.value;
+  assert.deepEqual(validateScriptDraft(input, { durationSeconds: 24 }), input);
+});
+
+test("content-led four-character two-shot script retains all dialogue and reports explicit commitment conflicts", () => {
+  const input = structuredClone(fixture.script);
+  input.scenes = input.scenes.slice(0, 2);
+  input.scenes.forEach((s: typeof input.scenes[number]) => { s.duration = 6; });
+  input.scenes[0].dialogue[0].text = "这证明了你是朋友";
+  input.scenes[1].dialogue[0].text = "今晚是现场效果最好的一次";
+  const options = { durationPolicy: "content-led-v1" as const, durationSeconds: 24 };
+  assert.deepEqual(validateScriptDraft(input, options), input);
+  assert.deepEqual(validateScriptDraft(input, { ...options, durationRange: { maxSeconds: 12 } }), input);
+  assert.throws(() => validateScriptDraft(input, { ...options, durationRange: { maxSeconds: 10 } }),
+    (e: unknown) => e instanceof Error && "code" in e && e.code === "duration_commitment_conflict");
+});
+
 for (const invalid of fixture.invalid) test("MC-A03 shared invalid: " + invalid.name, () => {
   const input = structuredClone(fixture.script);
   let target = input;

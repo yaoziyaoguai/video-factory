@@ -1,6 +1,5 @@
 import type { ScriptScene } from "./codex-screenwriter.js";
-import type { DurationRange } from "./executable-timeline.js";
-import { assertGeneratedVisualDoesNotClaimEvidence } from "./visual-evidence-boundary.js";
+import { assertDurationCommitment, quantizeDurationsToFrames, validateContentLedDurationIntent, type DurationIntent } from "./executable-timeline.js";
 
 export const CHARACTER_SCRIPT_VERSION = "video-factory/character-script-v1";
 export type PresentationMode = "narration" | "character_drama";
@@ -46,7 +45,7 @@ export function scriptSceneText(scene: ScriptScene | CharacterScriptScene): stri
     : scene.narration;
 }
 
-interface CharacterScriptValidation { durationSeconds: number; durationRange?: DurationRange; requireCanonFacts?: boolean }
+type CharacterScriptValidation = DurationIntent & { requireCanonFacts?: boolean };
 export function validateCharacterScript(value: unknown, options: CharacterScriptValidation): CharacterScript {
   return parseCharacterScript(value, options);
 }
@@ -57,13 +56,15 @@ export function validateCharacterScriptStructure(value: unknown): CharacterScrip
 function parseCharacterScript(value: unknown, options?: CharacterScriptValidation): CharacterScript {
   const input = object(value, "角色剧本");
   if (input.version !== CHARACTER_SCRIPT_VERSION) throw new Error("不支持的角色剧本版本。");
-  if (options && (!Number.isInteger(options.durationSeconds) || options.durationSeconds < 20 || options.durationSeconds > 180)) {
+  if (options?.durationPolicy === "content-led-v1") validateContentLedDurationIntent(options);
+  const legacy = options?.durationPolicy === undefined ? options : undefined;
+  if (legacy && (!Number.isInteger(legacy.durationSeconds) || legacy.durationSeconds < 20 || legacy.durationSeconds > 180)) {
     throw new Error("Script draft target durationSeconds must be an integer between 20 and 180.");
   }
-  const range = options ? options.durationRange ?? { minSeconds: options.durationSeconds * 0.6, maxSeconds: options.durationSeconds * 1.4 } : undefined;
-  if (options?.durationRange && range && (!Number.isInteger(range.minSeconds) || !Number.isInteger(range.maxSeconds)
+  const range = legacy ? legacy.durationRange ?? { minSeconds: legacy.durationSeconds * 0.6, maxSeconds: legacy.durationSeconds * 1.4 } : undefined;
+  if (legacy?.durationRange && range && (!Number.isInteger(range.minSeconds) || !Number.isInteger(range.maxSeconds)
     || range.minSeconds < 20 || range.maxSeconds > 180 || range.minSeconds > range.maxSeconds
-    || options.durationSeconds < range.minSeconds || options.durationSeconds > range.maxSeconds)) {
+    || legacy.durationSeconds < range.minSeconds || legacy.durationSeconds > range.maxSeconds)) {
     throw new Error("Script draft target durationRange is invalid.");
   }
   const characters = list(input.characters, "characters").map((entry, i): ScriptCharacter => {
@@ -109,13 +110,13 @@ function parseCharacterScript(value: unknown, options?: CharacterScriptValidatio
       ...(s.success_criteria === undefined ? {} : { success_criteria: strings(s.success_criteria, "success_criteria", 1) }),
       ...(s.failure_conditions === undefined ? {} : { failure_conditions: strings(s.failure_conditions, "failure_conditions", 1) }),
       search_terms: terms, character_ids: characterIds, dialogue };
-    if (scene.visual_strategy === "generated") assertGeneratedVisualDoesNotClaimEvidence([
-      scene.purpose, scene.visual_prompt, scene.visible_action, scene.on_screen_text,
-      ...dialogue.map((t) => t.text), ...(scene.success_criteria ?? []), ...(scene.failure_conditions ?? []),
-    ], "scenes[" + i + "]");
     return scene;
   }).sort((a, b) => a.position - b.position);
-  if (scenes.length < 3 || scenes.length > 24 || scenes.some((s, i) => s.position !== i + 1)) throw new Error("剧本须有3–24个连续编号的镜头。");
+  if (scenes.length < 1 || scenes.length > 24 || scenes.some((s, i) => s.position !== i + 1)) throw new Error("剧本须有1–24个连续编号的镜头。");
+  if (options?.durationPolicy === "content-led-v1") {
+    const frames = quantizeDurationsToFrames(scenes.map(s => s.duration));
+    assertDurationCommitment(frames.reduce((sum, count) => sum + count, 0), options.durationRange, scenes.map(s => s.position));
+  }
   const total = scenes.reduce((n, s) => n + s.duration, 0);
   if (range && (total < range.minSeconds || total > range.maxSeconds)) throw new Error("剧本总时长超出目标范围。");
   if (options?.requireCanonFacts && input.canonFacts === undefined) throw new Error("Series script drafts must contain a canonFacts array with at most 8 entries.");

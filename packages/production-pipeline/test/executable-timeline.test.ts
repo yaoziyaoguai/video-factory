@@ -24,6 +24,14 @@ function hasCode(code: PlanErrorCode): (error: unknown) => boolean {
   return (error) => error instanceof PlanContractError && error.code === code;
 }
 
+test("content-led时间轴允许1镜12秒且不补隐含时长范围", () => {
+  const timeline = compileTimeline(cuts([12]), undefined, "content-led-v1");
+  assert.equal(timeline.totalFrames, 360);
+  assert.equal(timeline.cuts.length, 1);
+  assert.equal(timeline.durationPolicy, "content-led-v1");
+  assert.equal(Object.hasOwn(timeline, "durationRange"), false);
+});
+
 test("31.5秒在20–34秒区间内有效，不强行压到24秒", () => {
   const timeline = compileTimeline(cuts([4, 6, 3, 3, 3, 4, 7, 1.5]), { minSeconds: 20, maxSeconds: 34 });
   assert.equal(timeline.totalFrames, 945);

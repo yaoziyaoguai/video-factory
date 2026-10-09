@@ -9,6 +9,7 @@ import shutil
 import sys
 import time
 from contextlib import contextmanager
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict
 
@@ -1358,41 +1359,76 @@ def materialize_executable_script(
     projected = {
         **script,
         "duration_target": executable_plan["totalFrames"] / 30,
-        "duration_range": executable_plan["durationRange"],
         "scenes": projected_scenes,
     }
+    if "durationRange" in executable_plan:
+        projected["duration_range"] = executable_plan["durationRange"]
+    else:
+        projected.pop("duration_range", None)
     projected_path = output_dir / "executable_script.json"
     projected_path.write_text(json.dumps(projected, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return projected_path, executable_plan
 
 
+def _safe_frame(value: Any, minimum: int = 0) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= 2 ** 53 - 1
+
+
+def _validate_duration_bounds(value: Any) -> tuple[int, int]:
+    if (not isinstance(value, dict) or not value
+            or set(value) - {"minSeconds", "maxSeconds"}):
+        raise WorkerProtocolError("Duration commitment must contain minSeconds or maxSeconds")
+    for bound in value.values():
+        if (not isinstance(bound, (int, float)) or isinstance(bound, bool)
+                or not math.isfinite(bound) or bound <= 0):
+            raise WorkerProtocolError("Duration commitment bounds must be positive finite numbers")
+    if ("minSeconds" in value and "maxSeconds" in value
+            and value["minSeconds"] > value["maxSeconds"]):
+        raise WorkerProtocolError("Duration commitment minimum exceeds maximum")
+    # 使用JSON十进制含义的有理数，不先做浮点乘法，也不以epsilon放宽用户承诺。
+    minimum = math.ceil(Fraction(str(value["minSeconds"])) * 30) if "minSeconds" in value else 1
+    maximum = math.floor(Fraction(str(value["maxSeconds"])) * 30) if "maxSeconds" in value else 2 ** 53 - 1
+    if maximum < 1 or minimum > maximum or minimum > 2 ** 53 - 1:
+        raise WorkerProtocolError("Duration commitment has no executable positive safe integer frame")
+    return minimum, maximum
+
+
 def validate_executable_plan(value: Any) -> Dict[int, Dict[str, Any]]:
-    if not isinstance(value, dict) or value.get("version") != "video-factory/executable-plan-v1":
+    if not isinstance(value, dict) or value.get("version") not in (
+        "video-factory/executable-plan-v1", "video-factory/executable-plan-v2",
+    ):
         raise WorkerProtocolError("Unsupported executable production plan version")
+    content_led = value["version"] == "video-factory/executable-plan-v2"
+    if (value.get("durationPolicy") != "content-led-v1" if content_led else "durationPolicy" in value):
+        raise WorkerProtocolError("Executable production plan version and durationPolicy do not match")
     if (
         value.get("fps") != 30
-        or not isinstance(value.get("totalFrames"), int)
-        or isinstance(value.get("totalFrames"), bool)
-        or value["totalFrames"] <= 0
+        or not _safe_frame(value.get("totalFrames"), 1)
     ):
         raise WorkerProtocolError("Executable production plan has invalid frame metadata")
     duration_range = value.get("durationRange")
-    if not isinstance(duration_range, dict):
-        raise WorkerProtocolError("Executable production plan has no duration range")
-    min_seconds = duration_range.get("minSeconds")
-    max_seconds = duration_range.get("maxSeconds")
-    if (
-        not isinstance(min_seconds, int)
-        or isinstance(min_seconds, bool)
-        or not isinstance(max_seconds, int)
-        or isinstance(max_seconds, bool)
-        or min_seconds < 20
-        or max_seconds > 180
-        or min_seconds > max_seconds
-        or value["totalFrames"] < min_seconds * 30
-        or value["totalFrames"] > max_seconds * 30
-    ):
-        raise WorkerProtocolError("Executable production plan has an invalid duration range")
+    if content_led:
+        if "durationRange" in value:
+            minimum, maximum = _validate_duration_bounds(duration_range)
+            if not minimum <= value["totalFrames"] <= maximum:
+                raise WorkerProtocolError("duration_commitment_conflict: executable plan exceeds the explicit duration commitment")
+    else:
+        if not isinstance(duration_range, dict):
+            raise WorkerProtocolError("Executable production plan has no duration range")
+        min_seconds = duration_range.get("minSeconds")
+        max_seconds = duration_range.get("maxSeconds")
+        if (
+            not isinstance(min_seconds, int)
+            or isinstance(min_seconds, bool)
+            or not isinstance(max_seconds, int)
+            or isinstance(max_seconds, bool)
+            or min_seconds < 20
+            or max_seconds > 180
+            or min_seconds > max_seconds
+            or value["totalFrames"] < min_seconds * 30
+            or value["totalFrames"] > max_seconds * 30
+        ):
+            raise WorkerProtocolError("Executable production plan has an invalid duration range")
     cuts = value.get("cuts")
     if not isinstance(cuts, list) or not cuts:
         raise WorkerProtocolError("Executable production plan has no cuts")
@@ -1410,15 +1446,10 @@ def validate_executable_plan(value: Any) -> Dict[int, Dict[str, Any]]:
             not isinstance(scene_position, int)
             or isinstance(scene_position, bool)
             or scene_position != index + 1
-            or not isinstance(start_frame, int)
-            or isinstance(start_frame, bool)
+            or not _safe_frame(start_frame)
             or start_frame != next_start
-            or not isinstance(duration_frames, int)
-            or isinstance(duration_frames, bool)
-            or duration_frames <= 0
-            or not isinstance(source_in_frame, int)
-            or isinstance(source_in_frame, bool)
-            or source_in_frame < 0
+            or not _safe_frame(duration_frames, 1)
+            or not _safe_frame(source_in_frame)
             or not isinstance(asset_key, str)
             or not asset_key.strip()
         ):
@@ -1430,6 +1461,8 @@ def validate_executable_plan(value: Any) -> Dict[int, Dict[str, Any]]:
             "asset_key": asset_key,
         }
         next_start += duration_frames
+        if not _safe_frame(next_start, 1):
+            raise WorkerProtocolError("Executable production totalFrames exceeds safe integer frames")
     if next_start != value["totalFrames"]:
         raise WorkerProtocolError("Executable production cuts do not equal totalFrames")
     return timings
@@ -1456,7 +1489,10 @@ def project_executable_timings_into_asset_plan(plan_path: Path, executable_plan:
     if positions != set(timings):
         raise WorkerProtocolError("Asset plan scenes do not match executable production cuts")
     plan["duration_target"] = executable_plan["totalFrames"] / 30
-    plan["duration_range"] = executable_plan["durationRange"]
+    if "durationRange" in executable_plan:
+        plan["duration_range"] = executable_plan["durationRange"]
+    else:
+        plan.pop("duration_range", None)
     plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 

@@ -6,7 +6,7 @@ import {
   parseCreativeTreatment,
   type CreativeTreatment,
 } from "./creative-treatment.js";
-import type { DurationRange } from "./executable-timeline.js";
+import { durationIntentFor, validateContentLedDurationIntent, type DurationIntent } from "./executable-timeline.js";
 import type { ProductionSeriesContext, ProductionVisualPlan } from "./contracts.js";
 import type { ShotGrammar } from "./reference-grammar.js";
 import { summarizeProductionCapabilities, type ProductionCapabilities } from "./production-capabilities.js";
@@ -84,16 +84,14 @@ export function creativeTreatmentSeriesContext(
 }
 
 export interface CreativeTreatmentAgentInput {
-  brief: {
+  brief: DurationIntent & {
     presentationMode?: "narration" | "character_drama";
     title: string;
     angle: string;
     audience: string;
     nicheSlug: string;
     platform: string;
-    durationSeconds: number;
     budgetIntentionCny?: number;
-    durationRange?: DurationRange;
     /** 用户或系列已接受的观众承诺；宿主锁定它并覆盖模型输出，没有时接受构思生成值。 */
     lockedViewerPromise?: string;
     editorial?: {
@@ -258,9 +256,8 @@ function treatmentPayload(input: CreativeTreatmentAgentInput): Record<string, un
       audience: brief.audience,
       nicheSlug: brief.nicheSlug,
       platform: brief.platform,
-      durationSeconds: brief.durationSeconds,
+      ...durationIntentFor(brief),
       ...(brief.budgetIntentionCny !== undefined ? { budgetIntentionCny: brief.budgetIntentionCny } : {}),
-      ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
       ...(brief.lockedViewerPromise ? { lockedViewerPromise: brief.lockedViewerPromise } : {}),
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
@@ -296,14 +293,19 @@ function validateTreatmentInput(input: CreativeTreatmentAgentInput): string[] {
   for (const field of ["title", "angle", "audience", "nicheSlug", "platform"] as const) {
     if (!brief[field].trim()) throw new Error(`Creative treatment brief.${field} must be a non-empty string.`);
   }
-  if (!Number.isInteger(brief.durationSeconds) || brief.durationSeconds < 20 || brief.durationSeconds > 180) {
-    throw new Error("Creative treatment brief.durationSeconds must be an integer between 20 and 180.");
-  }
-  if (brief.durationRange
-    && (!Number.isInteger(brief.durationRange.minSeconds) || !Number.isInteger(brief.durationRange.maxSeconds)
-      || brief.durationRange.minSeconds < 20 || brief.durationRange.maxSeconds > 180
-      || brief.durationRange.minSeconds > brief.durationRange.maxSeconds)) {
-    throw new Error("Creative treatment brief.durationRange must use ordered integer bounds between 20 and 180.");
+  if (brief.durationPolicy === "content-led-v1") {
+    validateContentLedDurationIntent(brief);
+  } else {
+    if (brief.durationPolicy !== undefined) throw new Error("Creative treatment brief.durationPolicy is invalid.");
+    if (!Number.isInteger(brief.durationSeconds) || brief.durationSeconds < 20 || brief.durationSeconds > 180) {
+      throw new Error("Creative treatment brief.durationSeconds must be an integer between 20 and 180.");
+    }
+    if (brief.durationRange
+      && (!Number.isInteger(brief.durationRange.minSeconds) || !Number.isInteger(brief.durationRange.maxSeconds)
+        || brief.durationRange.minSeconds < 20 || brief.durationRange.maxSeconds > 180
+        || brief.durationRange.minSeconds > brief.durationRange.maxSeconds)) {
+      throw new Error("Creative treatment brief.durationRange must use ordered integer bounds between 20 and 180.");
+    }
   }
   if (brief.lockedViewerPromise !== undefined && !brief.lockedViewerPromise.trim()) {
     throw new Error("Creative treatment brief.lockedViewerPromise must be a non-empty string when provided.");
@@ -354,8 +356,7 @@ function treatmentAuditContext(
       angle: brief.angle,
       audience: brief.audience,
       platform: brief.platform,
-      durationSeconds: brief.durationSeconds,
-      ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
+      ...durationIntentFor(brief),
       ...(brief.lockedViewerPromise ? { lockedViewerPromise: brief.lockedViewerPromise } : {}),
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),

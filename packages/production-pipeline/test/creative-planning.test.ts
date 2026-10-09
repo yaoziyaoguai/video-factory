@@ -1519,6 +1519,30 @@ describe("B3 固定创作规划图", () => {
   // -------------------------------------------------------------------------
 
   describe("10 durable 输入投影（P07）", () => {
+    it("content-led graph compiles and reloads without a default range", async () => {
+      await withWorkspace(async workspaceRoot => {
+        const store = CreativePlanningStore.open(workspaceRoot);
+        try {
+          const script = scriptFixture();
+          script.scenes = [{ ...script.scenes[0]!, duration: 12 }];
+          const director = directorPlanFixture();
+          director.shots = [{ ...director.shots[0]!, temporalBeats: [{ startSeconds: 0, endSeconds: 12, action: "完整一幕" }] }];
+          const { ports, calls } = spyPorts({ scriptOutputs: [script], directorOutputs: [director] });
+          const graph = createCreativePlanningGraph({ ports, checkpointer: store.saver });
+          const input: CreativePlanningInput = { runId: RUN_ID, inputDigest: INPUT_DIGEST, durationPolicy: "content-led-v1" };
+          const threadId = planningThreadId(RUN_ID, INPUT_DIGEST);
+          const result = await runCreativePlanning(graph, { input, threadId });
+          assert.equal(result.status, "completed");
+          if (result.status !== "completed") throw new Error("Expected compiled plan");
+          assert.equal(result.executablePlan.output.version, "video-factory/executable-plan-v2");
+          assert.equal(result.executablePlan.output.totalFrames, 360);
+          assert.equal(Object.hasOwn(result.executablePlan.output, "durationRange"), false);
+          assert.deepEqual(calls.compile[0]!.base, input);
+          assert.deepEqual(await runCreativePlanning(graph, { input, threadId }), result);
+          assert.equal(calls.compile.length, 1);
+        } finally { store.close(); }
+      });
+    });
     it("checkpoint 只保存 durable 规划身份：额外 callback/deadline 不持久化，恢复不依赖它们", async () => {
       await withWorkspace(async (workspaceRoot) => {
         const threadId = planningThreadId(RUN_ID, INPUT_DIGEST);
@@ -3193,7 +3217,7 @@ describe("B3 固定创作规划图", () => {
     };
 
     /** 调用方持有的独立可变 input：durationRange 必须是副本，不得污染共享 fixture。 */
-    function independentCallerInput(): CreativePlanningInput {
+    function independentCallerInput(): Extract<CreativePlanningInput, { durationPolicy?: undefined }> {
       return { runId: RUN_ID, inputDigest: INPUT_DIGEST, durationRange: { ...DURATION_RANGE } };
     }
 

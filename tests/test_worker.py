@@ -16,7 +16,7 @@ from pathlib import Path
 
 from video_factory.domain import SceneAsset, StockAssetCandidate
 from video_factory.voiceover import VoiceDoesNotFitError
-from video_factory.worker import WorkerProtocolError, handle_request, validate_request
+from video_factory.worker import WorkerProtocolError, handle_request, validate_request, validate_executable_plan
 
 
 def materialize_stock_test_video(candidate, target):
@@ -29,6 +29,69 @@ def materialize_stock_test_video(candidate, target):
 
 
 class WorkerContractTest(unittest.TestCase):
+    def test_content_led_shared_decimal_frame_contract(self):
+        fixture = json.loads((Path(__file__).parent / "fixtures/content-led-timeline-cases.json").read_text())
+        for case in fixture["cases"]:
+            with self.subTest(case=case["id"]):
+                start = 0
+                cuts = []
+                for i, count in enumerate(case["frames"]):
+                    cuts.append({"scenePosition": i + 1, "beatId": f"beat-{i + 1}", "assetKey": f"asset-{i + 1}",
+                                 "startFrame": start, "frameCount": count, "sourceInFrame": 0})
+                    start += count
+                plan = {"version": "video-factory/executable-plan-v2", "durationPolicy": "content-led-v1",
+                        "fps": 30, "totalFrames": start, "cuts": cuts}
+                if "range" in case:
+                    plan["durationRange"] = case["range"]
+                if not case["valid"]:
+                    with self.assertRaises(WorkerProtocolError):
+                        validate_executable_plan(plan)
+                    continue
+                timings = validate_executable_plan(plan)
+                self.assertEqual([value["duration_frames"] for value in timings.values()], case["frames"])
+                for mutation in [{"version": "video-factory/executable-plan-v1"}, {"durationPolicy": None},
+                                 *({"totalFrames": invalid} for invalid in [True, float("nan"), float("inf"), -1, 0, 2 ** 53])]:
+                    with self.assertRaises(WorkerProtocolError):
+                        validate_executable_plan({**plan, **mutation})
+                for field in ["frameCount", "startFrame", "sourceInFrame"]:
+                    for invalid in [True, float("nan"), float("inf"), -1, 2 ** 53]:
+                        with self.subTest(field=field, invalid=invalid), self.assertRaises(WorkerProtocolError):
+                            validate_executable_plan({**plan, "cuts": [{**cuts[0], field: invalid}, *cuts[1:]]})
+
+    def test_content_led_projection_removes_old_range_and_preserves_explicit_endpoint(self):
+        from video_factory.worker import materialize_executable_script, project_executable_timings_into_asset_plan
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for bounds in [None, {"maxSeconds": 12}]:
+                with self.subTest(bounds=bounds):
+                    script_path = root / "script.json"
+                    asset_path = root / "assets.json"
+                    executable_path = root / "executable.json"
+                    old_range = {"minSeconds": 20, "maxSeconds": 34}
+                    script_path.write_text(json.dumps({"duration_range": old_range,
+                        "scenes": [{"position": 1, "duration": 24, "narration": "完整一幕"}]}))
+                    asset_path.write_text(json.dumps({"duration_range": old_range,
+                        "scene_assets": [{"scene_position": 1, "duration": 24}]}))
+                    plan = {"version": "video-factory/executable-plan-v2", "durationPolicy": "content-led-v1",
+                        "fps": 30, "totalFrames": 360,
+                        "cuts": [{"scenePosition": 1, "assetKey": "asset-1", "startFrame": 0,
+                                  "frameCount": 360, "sourceInFrame": 0}]}
+                    if bounds is not None:
+                        plan["durationRange"] = bounds
+                    executable_path.write_text(json.dumps(plan))
+                    projected_path, loaded = materialize_executable_script({"scriptPath": str(script_path),
+                        "executablePlanPath": str(executable_path)}, root)
+                    self.assertEqual(loaded, plan)
+                    project_executable_timings_into_asset_plan(asset_path, loaded)
+                    for path in [projected_path, asset_path]:
+                        projected = json.loads(path.read_text())
+                        self.assertEqual(projected["duration_target"], 12)
+                        if bounds is None:
+                            self.assertNotIn("duration_range", projected)
+                        else:
+                            self.assertEqual(projected["duration_range"], bounds)
+                    self.assertEqual(json.loads(script_path.read_text())["duration_range"], old_range)
+
     def test_ai_router_materializes_accepted_low_score_image_and_rejects_changed_scope(self):
         from PIL import Image
         with tempfile.TemporaryDirectory() as tmp:

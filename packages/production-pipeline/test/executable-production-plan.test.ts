@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   compileExecutableProductionPlan,
@@ -41,6 +42,61 @@ function input(): CompileExecutableProductionPlanInput {
 }
 
 describe("compileExecutableProductionPlan", () => {
+  const shared = JSON.parse(readFileSync(new URL("../../../tests/fixtures/content-led-timeline-cases.json", import.meta.url), "utf8")) as {
+    cases: Array<{ id: string; durations: number[]; frames: number[]; range?: unknown; valid: boolean }>;
+  };
+  for (const item of shared.cases) it(`shares exact content-led decimal and cumulative frame semantics: ${item.id}`, () => {
+    const input = {
+      durationPolicy: "content-led-v1", scriptArtifactId: "script-v2", directorArtifactId: "director-v2",
+      ...(Object.hasOwn(item, "range") ? { durationRange: item.range } : {}),
+      scenes: item.durations.map((duration, i) => ({ position: i + 1, duration })),
+      shots: item.durations.map((duration, i) => ({ scenePosition: i + 1,
+        temporalBeats: [{ startSeconds: 0, endSeconds: duration, action: "完整片段" }] })),
+    } as CompileExecutableProductionPlanInput;
+    if (!item.valid) {
+      assert.throws(() => compileExecutableProductionPlan(input));
+      let startFrame = 0;
+      const cuts = item.frames.map((frameCount, index) => {
+        const cut = { scenePosition: index + 1, beatId: `beat-${index + 1}`, assetKey: `asset-${index + 1}`,
+          startFrame, frameCount, sourceInFrame: 0 };
+        startFrame += frameCount;
+        return cut;
+      });
+      assert.throws(() => parseExecutableProductionPlan({ version: "video-factory/executable-plan-v2",
+        durationPolicy: "content-led-v1", scriptArtifactId: "script-v2", directorArtifactId: "director-v2",
+        candidateArtifactIds: [], fps: 30, totalFrames: startFrame, cuts, durationRange: item.range }));
+      return;
+    }
+    const plan = compileExecutableProductionPlan(input);
+    assert.deepEqual(plan.cuts.map(cut => cut.frameCount), item.frames);
+    assert.equal(plan.totalFrames, item.frames.reduce((sum, value) => sum + value, 0));
+    assert.deepEqual(plan.durationRange, item.range);
+    assert.deepEqual(parseExecutableProductionPlan(JSON.parse(JSON.stringify(plan))), plan);
+    assert.throws(() => parseExecutableProductionPlan({ ...plan, version: "video-factory/executable-plan-v1" }));
+    assert.throws(() => parseExecutableProductionPlan({ ...plan, durationPolicy: undefined }));
+    for (const invalid of [true, NaN, Infinity, -1, 0, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.throws(() => parseExecutableProductionPlan({ ...plan, totalFrames: invalid }));
+    }
+    for (const field of ["frameCount", "startFrame", "sourceInFrame"]) {
+      for (const invalid of [true, NaN, Infinity, -1, Number.MAX_SAFE_INTEGER + 1]) {
+        assert.throws(() => parseExecutableProductionPlan({ ...plan, cuts: [
+          { ...plan.cuts[0], [field]: invalid }, ...plan.cuts.slice(1),
+        ] }));
+      }
+    }
+  });
+  it("compiles and reads content-led plan-v2 without inventing a duration range", () => {
+    const plan = compileExecutableProductionPlan({
+      scriptArtifactId: "script-v2", directorArtifactId: "director-v2", durationPolicy: "content-led-v1",
+      scenes: [{ position: 1, duration: 12 }],
+      shots: [{ scenePosition: 1, temporalBeats: [{ startSeconds: 0, endSeconds: 12, action: "完整一幕" }] }],
+    });
+    assert.equal(plan.version, "video-factory/executable-plan-v2");
+    assert.equal(plan.durationPolicy, "content-led-v1");
+    assert.equal(Object.hasOwn(plan, "durationRange"), false);
+    assert.equal(plan.totalFrames, 360);
+    assert.deepEqual(parseExecutableProductionPlan(JSON.parse(JSON.stringify(plan))), plan);
+  });
   it("blocks mismatched role timing instead of letting a director score replace the script timeline", () => {
     assert.throws(() => compileExecutableProductionPlan(input()), /director timing.*scene 1.*15s/i);
 

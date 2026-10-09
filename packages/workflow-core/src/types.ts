@@ -532,7 +532,7 @@ export interface WorkflowRun<TInitialInput = unknown> {
   creativeReviewOperations?: Array<{
     commandId: string;
     requestDigest: string;
-    action: "discuss" | "revise" | "audit_current" | "adopt_proposal" | "edit_draft" | "undo_draft" | "confirm" | "return_to_stage";
+    action: "discuss" | "revise" | "audit_current" | "adopt_proposal" | "edit_draft" | "undo_draft" | "confirm" | "return_to_stage" | "update_duration";
     stage: "treatment" | "script" | "director";
     // not_accepted：任务在受理前被拒（零提交）——DG-UX-04 把它从 failed 里分开，
     // 用户可以安全地修改输入后重新发起，不会误以为已核清的执行失败。
@@ -545,11 +545,27 @@ export interface WorkflowRun<TInitialInput = unknown> {
      * completed 不再冒称当前稿已修改。
      */
     resultDisposition?: "applied" | "recorded_not_applied";
+    /** 与本命令绑定的续接原因快照；后续讨论不得让旧命令的原因消失。 */
+    detail?: string;
     /** 已核清的旧咨询回复，仅与原命令关联；不代表应用到当前版本。 */
     result?: unknown;
     /** 原始用户命令与图恢复输入；用于进程重启后观察/续接同一物理请求。 */
     request?: Record<string, unknown>;
     resume?: unknown;
+    /** 本地时长事务的跨Store/图恢复身份；正文只保留在指定的图checkpoint。 */
+    durationChange?: {
+      phase: "prepared" | "applied";
+      oldBriefSha256: string;
+      newBriefSha256: string;
+      sourceInputDigest: string;
+      sourceCheckpointId: string;
+      targetInputDigest: string;
+      targetPreviousCheckpointId: string | null;
+      targetCheckpointId?: string;
+      targetDraftVersionId: string;
+      targetStage: "treatment" | "script" | "director";
+      preservedApprovals: Array<{ stage: "treatment" | "script"; commandId: string; versionId: string; draftSha256: string }>;
+    };
   }>;
   /**
    * F03/F04（2026-10-02 执行包）：历史审计异常 failed 记录的显式准备回执。prepare 只
@@ -580,6 +596,7 @@ export interface WorkflowContext<TInitialInput = unknown> {
   initialInput: TInitialInput;
   artifacts: readonly Artifact[];
   decisions: readonly HumanDecision[];
+  readonly interventions: readonly HumanIntervention[];
   outputs: ReadonlyMap<string, unknown>;
   readonly spendAuthorization: Readonly<SpendAuthorization> | undefined;
   readonly spendAuthorizationExemptProviderId: string | undefined;

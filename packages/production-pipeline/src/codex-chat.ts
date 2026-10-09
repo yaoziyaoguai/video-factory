@@ -17,15 +17,15 @@ export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
   "audio-review": "30edc48c2ca0ee91a02a3a744c06e00142dad6a724a7739f2e4b022470865249",
   "topic-ideas": "c60a44f2760233060b547f40603608719586c486969bd46e3bbfcfd323bd7840",
   "series-roadmap": "0ebde2d2a1edfabce73498e9b3ed78fd20d1a979da2cd4d4cc6c09b5db53435f",
-  "creative-treatment": "5d306dd6f79f9875ce27db669021d097b31ff08cb91e78065f544d508b1da72f",
-  "director-plan": "99ea1a4e58f0237c9e13dd13813f82a41777781667e80161a0afa20dafd8db77",
-  "script-draft": "fdd5bef21230159b1b55be5d1048b19a4d44e4f0bff8810bf74041f6d2859092",
-  "publish-copy": "321a9b07d9eeb6bd1bb1e075a16c7d3bc65948983be11b3c082834aa8a030dd4",
+  "creative-treatment": "ef2404a7e0e5dd5be24c009313fe9ec87f10dcda101e3a23ab946c8e87350a6a",
+  "director-plan": "88e01eb323141757aebeb5c1e9eff0dc7b77ba7c261455f9a2ba511823c11227",
+  "script-draft": "881b41598882868b3f6deab2fdba9456ea23e29c6c4d295880a602bfcc7a2b44",
+  "publish-copy": "fabc33582075d170245f64b5b7a6899302dd4049aec8dca76d48a6cbf5820399",
   "asset-rank": "8693ee66be5e7db08d20c1847786e015734cda4f63d1c369f2141336dd31723b",
   "reference-grammar": "f14b46d1b3e675d21973b6f6ae8daf594b010409007473cdfaa5adbecb1dea8e",
   "visual-review": "7fc682f73d5750ae7776ec9e42f52a043c17e4258d95f368e03937b964e1b73a",
   "role-audit": "657142f6b41c5689214667bcdade73e9143126c069160be28d6df52584719303",
-  "creative-discussion": "7af622c7ad3b709d9bc4f54826555a652c23c92c0d8e36940c76656b4255d75e",
+  "creative-discussion": "a4a35ff4760b6b25400056f64d831cf9a403bb1aefd66bba78ce11b14e12bfbb",
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。

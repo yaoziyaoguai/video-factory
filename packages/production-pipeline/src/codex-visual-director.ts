@@ -1,4 +1,5 @@
 import { CodexBridgeClient, requestOptionsForDeadline, type CodexTaskExecution } from "./codex-chat.js";
+import { durationIntentFor, validateContentLedDurationIntent } from "./executable-timeline.js";
 import {
   assetReuseSourceScenePosition,
   normalizeVideoGenerationDurationSeconds,
@@ -8,6 +9,7 @@ import {
   directorCharacterBindings,
   reuseSourceEndFrame,
   validateVisualDirectorPlan,
+  validateVisualDirectorDraft,
   type VisualAssetDeliveryType,
   type VisualDirectorAgent,
   type VisualDirectorAgentInput,
@@ -207,9 +209,11 @@ function validateDirectorCandidate(
   context?: RoleAgentValidationContext,
 ): VisualDirectorPlan {
   const validation = validationFor(input);
+  const validate = input.brief.durationPolicy === "content-led-v1" && input.planningMode && input.creativeReviewExecution
+    ? validateVisualDirectorDraft : validateVisualDirectorPlan;
   const rework = input.brief.rework;
   if (!rework?.previousDirectorPlan || rework.affectedScenePositions === undefined) {
-    const plan = validateVisualDirectorPlan(value, validation);
+    const plan = validate(value, validation);
     assertPlanningRevisionScope(plan, input.brief.planningRevision);
     return plan;
   }
@@ -224,7 +228,7 @@ function validateDirectorCandidate(
     new Set(rework.affectedScenePositions),
     validation.scenePositions,
   );
-  return validateVisualDirectorPlan(merged, validation);
+  return validate(merged, validation);
 }
 
 function assertPlanningRevisionScope(
@@ -472,8 +476,7 @@ function visualDirectorAuditContext(
         angle: brief.angle,
         audience: brief.audience,
         platform: brief.platform,
-        durationSeconds: brief.durationSeconds,
-        ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
+        ...durationIntentFor(brief),
         ...(brief.viewerPromise ? { viewerPromise: brief.viewerPromise } : {}),
         ...(brief.narrativeArc ? { narrativeArc: brief.narrativeArc } : {}),
         requestedProfileId: brief.requestedProfileId,
@@ -539,6 +542,7 @@ function visualDirectorAuditContext(
       })),
     },
     currentRoleContract: {
+      ...(brief.durationPolicy ? { durationPolicy: brief.durationPolicy } : {}),
       ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
       availableDirectorProfileIds: VISUAL_DIRECTOR_PROFILES.map(({ id }) => id),
       selectedDirectorProfile,
@@ -619,6 +623,11 @@ function visualDirectorAuditContext(
 }
 
 function validateDirectorDurationRange(input: VisualDirectorAgentInput): void {
+  if (input.brief.durationPolicy === "content-led-v1") {
+    validateContentLedDurationIntent(input.brief);
+    return;
+  }
+  if (input.brief.durationPolicy !== undefined) throw new Error("Director brief.durationPolicy is invalid.");
   const { durationSeconds, durationRange } = input.brief;
   if (!Number.isInteger(durationSeconds) || durationSeconds < 20 || durationSeconds > 180) {
     throw new Error("Director brief.durationSeconds must be an integer between 20 and 180.");
