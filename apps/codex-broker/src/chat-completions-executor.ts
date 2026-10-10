@@ -447,7 +447,21 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
       const visualFindings = task.kind === "visual-review"
         ? (parsed as { findings: Array<{ timecodeMs: number }> }).findings
         : [];
-      if (task.kind === "audio-review") validateAudioReviewReport(parsed, task.payload.audioSha256, task.payload.durationMs);
+      if (task.kind === "audio-review") {
+        try {
+          validateAudioReviewReport(parsed, task.payload.audioSha256, task.payload.durationMs);
+        } catch {
+          // 响应已完整返回；音轨绑定或时间语义不合规是确定性拒收，不是网络结果未知。
+          throw new CodexExecutorError(`${label} audio-review output failed task semantic validation.`, false, {
+            outcomeUncertain: false,
+            details: {
+              ...invalidOutputDetails(this.identity.providerId, modelId, providerWaitMs, "task_semantics"),
+              taskKind: task.kind,
+              ...responseDiagnostics,
+            },
+          });
+        }
+      }
       if (task.kind === "visual-review"
         && visualFindings.some((finding) => finding.timecodeMs > task.payload.durationMs)) {
         throw new CodexExecutorError(

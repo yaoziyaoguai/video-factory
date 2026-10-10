@@ -10,6 +10,7 @@ import { AudioReviewService } from "../src/server/audio-review-service.js";
 import { StudioService } from "../src/server/studio-service.js";
 import { PythonReviewMediaPreprocessor } from "../src/server/review-media-preprocessor.js";
 import { ModelRegistry } from "../../codex-broker/src/model-registry.js";
+import { ChatCompletionsExecutor, DEEPSEEK_CHAT_COMPLETIONS_PROVIDER } from "../../codex-broker/src/chat-completions-executor.js";
 import { taskContractDescriptorFor } from "../../codex-broker/src/task-definitions.js";
 import { CodexBridgeClient, CodexBridgeError, CodexVisualReviewAgent, AUDIO_REVIEW_CHECKS, validateAudioReviewReport, VisualReviewWithAudioError, ProductionPipeline, PythonWorkerClient, type VisualReviewAgent, type AudioReviewResult } from "@video-factory/production-pipeline";
 import { explicitEditorialDirector, localEditorialAssetProvider } from "../../../packages/production-pipeline/src/cli.js";
@@ -20,6 +21,59 @@ const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]);
 const audio = Buffer.from("ID3-test-soundtrack");
 const media = { prepare: async () => ({ durationMs: 1000, frames: [{ timecodeMs: 0, sha256: sha(jpeg), jpegBase64: jpeg.toString("base64") }] }) };
 const checks = Object.fromEntries(AUDIO_REVIEW_CHECKS.map((key) => [key, "not_observed"]));
+
+for (const interruptedBody of [false, true]) {
+test(`real audio executor ${interruptedBody ? "interrupted body stays unknown" : "rejection stays settled"} through restart without resubmission`, async (t) => {
+  const directory = await mkdtemp("/tmp/vf-audio-executor-rejection-");
+  let calls = 0;
+  const registry = new ModelRegistry({ directory: path.join(directory, "registry"), socketDirectory: directory, timeoutMs: 1000,
+    createExecutor: entry => new ChatCompletionsExecutor({ provider: DEEPSEEK_CHAT_COMPLETIONS_PROVIDER, env: {},
+      configuredModel: entry, fetchFn: async () => {
+        calls++;
+        if (interruptedBody) return new Response(new ReadableStream({
+          start(controller) { controller.error(new Error("controlled connection lost after response headers")); },
+        }), { headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+          audioSha256: "f".repeat(64), summary: "完整返回但音轨身份错误", checks, findings: [],
+        }) }, finish_reason: "stop" }] }), { headers: { "content-type": "application/json" } });
+      },
+    }),
+  });
+  t.after(async () => { await registry.close(); await rm(directory, { recursive: true, force: true }); });
+  await registry.start();
+  await registry.handle("POST", "/v1/models", { label: "Audio", protocol: "openai-chat-completions", baseUrl: "https://example.com/v1", modelId: "audio-native", apiKey: "test", maxOutputTokens: 32000, capabilities: ["image", "audio"] });
+  const model = registry.list()[0]!;
+  const client = new CodexBridgeClient({ socketPath: path.join(directory, model.socketName), timeoutMs: 2000, pollIntervalMs: 10 });
+  const newService = () => new AudioReviewService({ connections: () => [{ model, client }], media,
+    extract: async (_video, output) => { await writeFile(output, audio); } });
+  const videoPath = path.join(directory, "render.mp4");
+  await writeFile(videoPath, "fixture-video");
+  const input = { runRoot: directory, videoPath, selectedAudioModelId: model.id };
+  const first = await newService().review(input);
+  const expectedStatus = interruptedBody ? "uncertain" : "failed";
+  const expectedRequestState = interruptedBody ? "unknown" : "settled";
+  assert.equal(first.status, expectedStatus, "完整报告校验失败与真正的响应断连必须区分");
+  const requests = path.join(directory, ".audio-review-requests");
+  const requestId = (await readdir(requests)).find(name => name.endsWith(".input.json"))!.replace(/\.input\.json$/, "");
+  const failure = JSON.parse(await readFile(path.join(requests, `${requestId}.failure.json`), "utf8"));
+  assert.equal(failure.requestState, expectedRequestState);
+  if (interruptedBody) {
+    assert.ok(!(await readdir(requests)).includes(`${requestId}.result.json`), "真正未知的请求不能凭本地结束伪造终态");
+  } else {
+    const result = JSON.parse(await readFile(path.join(requests, `${requestId}.result.json`), "utf8"));
+    assert.equal(result.kind, "request_failed");
+    assert.equal(result.requestState, "settled");
+    assert.equal(result.audioSha256, sha(audio));
+  }
+  await registry.close();
+  await registry.start();
+  assert.equal((await newService().review(input)).status, expectedStatus);
+  const observed = await newService().observe({ runRoot: directory, requestId });
+  assert.equal(observed.status, expectedStatus);
+  assert.equal(observed.requestState, expectedRequestState);
+  assert.equal(calls, 1, "重启与原请求查询不再次请求模型");
+});
+}
 
 async function recoveryHarness() {
   const directory = await mkdtemp("/tmp/vf-audio-recovery-");
