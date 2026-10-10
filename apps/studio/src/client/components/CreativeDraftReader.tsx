@@ -118,7 +118,7 @@ export function CreativeDraft({ stage, value, nativeAudio = false }: { stage: Cr
     <DraftList label="内容推进" value={Array.isArray(value.progression) ? value.progression.map((beat) => isRecord(beat) ? `${String(beat.purpose ?? "")}：${String(beat.viewerGain ?? "")}` : String(beat)) : []} />
     <DraftField label="结尾兑现" value={value.payoff} />
     <DraftList label="视觉方向" value={value.visualPrinciples} />
-    <DraftList label="声音方向" value={value.soundPrinciples} />
+    <SoundDirections value={value.soundPrinciples} />
   </div>;
   if (stage === "script") return <div className="creative-readable-draft"><DraftField label="叙事推进（制作参考）" value={value.narrativeArc} />{Array.isArray(value.scenes) ? value.scenes.map((scene, index) => isRecord(scene) ? <section className="creative-scene" key={`${String(scene.id ?? "scene")}:${index}`}><strong>第 {Number(scene.position ?? index + 1)} 段 · {Number(scene.duration ?? 0)} 秒</strong><div className="creative-audience-copy"><small>旁白 · 观众听到的内容</small><p>{String(scene.narration ?? "")}</p></div><div className="creative-production-note"><small>画面描述 · 制作参考，尚未生成</small><p>{String(scene.visual_prompt ?? "")}</p></div></section> : null) : null}</div>;
   return <div className="creative-readable-draft">{isRecord(value.visualBible) ? <DraftField label="全片视觉规则" value={`${String(value.visualBible.narrativeApproach ?? "")} · ${String(value.visualBible.pacing ?? "")} · ${String(value.visualBible.continuity ?? "")}`} /> : null}{Array.isArray(value.shots) ? value.shots.map((shot, index) => isRecord(shot) ? <section className="creative-scene" key={`${String(shot.scenePosition ?? "shot")}:${index}`}><strong>镜头 {Number(shot.scenePosition ?? index + 1)} · {deliveryTypeLabel(shot.deliveryType)}</strong><p>{String(shot.visibleAction ?? shot.generationPrompt ?? shot.query ?? "")}</p><small>预计时长与获取路线将在当前方案确认后进入报价；画面尚未生成。</small></section> : null) : null}</div>;
@@ -132,6 +132,26 @@ function DraftField({ label, value }: { label: string; value: unknown }) {
 function DraftList({ label, value }: { label: string; value: unknown }) {
   if (!Array.isArray(value) || value.length === 0) return null;
   return <section><strong>{label}</strong><ul>{value.map((item, index) => <li key={index}>{String(item)}</li>)}</ul></section>;
+}
+
+export function SoundDirections({ value, label = "声音方向" }: { value: unknown; label?: string | null }) {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const original = value.map(String);
+  // 只翻译阅读层中已知字段的含义；不删创作句子，也不改模型原稿和编辑器的保存内容。
+  const readable = original.map(text => text
+    .replace(/\b(?:audio\.)?narration\s*=\s*(true|false)\b/g, (_, enabled: string) => `独立旁白：${enabled === "true" ? "启用" : "不单独合成"}`)
+    .replace(/\bpauseControl\s*=\s*(text_hint|unsupported)\b/g, (_, mode: string) => mode === "text_hint" ? "停顿：通过文字提示表达，效果需试听" : "停顿：不支持独立精确控制")
+    .replace(/\bmusicTrack\s*(?:\/|、)\s*soundEffectsTrack\s*(?:=|均为)\s*(true|false)\b/g, (_, enabled: string) => `独立音乐与音效轨：${enabled === "true" ? "已接入" : "未接入"}`)
+    .replace(/\b(musicTrack|soundEffectsTrack|continuousNarrationGroups)\s*=\s*(true|false)\b/g, (_, field: string, enabled: string) => {
+      const label = field === "musicTrack" ? "独立音乐轨" : field === "soundEffectsTrack" ? "独立音效轨" : "连续旁白分组";
+      return `${label}：${enabled === "true" ? "可用" : "未启用"}`;
+    }));
+  return <>
+    <section>{label ? <strong>{label}</strong> : null}<ul>{readable.map((text, index) => <li key={index}>{text}</li>)}</ul></section>
+    {readable.some((text, index) => text !== original[index]) ? <details className="node-technical-output">
+      <summary>查看声音方向原文</summary><ul>{original.map((text, index) => <li key={index}>{text}</li>)}</ul>
+    </details> : null}
+  </>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

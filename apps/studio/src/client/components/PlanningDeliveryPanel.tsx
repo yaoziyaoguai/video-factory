@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { StudioArtifact } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
+import { SoundDirections } from "./CreativeDraftReader.js";
 
 const DELIVERIES = [
   { kind: "creative_treatment", label: "前期构思" },
@@ -140,7 +141,8 @@ function PlanningDocument({ value }: { value: unknown }) {
   if (value && typeof value === "object") {
     const business = Object.entries(value).filter(([key]) => !TECHNICAL_FIELD.test(key));
     return business.length > 0 ? <dl className="planning-document-fields">{business.map(([key, item]) => <div key={key}>
-        <dt>{FIELD_LABELS[key] ?? key}</dt><dd><PlanningDocument value={item} /></dd>
+        <dt>{FIELD_LABELS[key] ?? key}</dt><dd>{key === "soundPrinciples"
+          ? <SoundDirections value={item} label={null} /> : <PlanningDocument value={item} />}</dd>
       </div>)}</dl> : null;
   }
   return <span>{value === null || value === undefined ? "未填写" : typeof value === "boolean" ? value ? "是" : "否" : VALUE_LABELS[String(value)] ?? String(value)}</span>;

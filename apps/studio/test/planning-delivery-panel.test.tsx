@@ -13,6 +13,17 @@ const artifact = (id: string, kind: string): StudioArtifact => ({
 afterEach(() => vi.restoreAllMocks());
 
 describe("PlanningDeliveryPanel", () => {
+  it("explains delivered sound directions while retaining the unchanged original", async () => {
+    const original = "采用独立旁白（当前能力 narration=true）；当前无音乐轨与音效轨（musicTrack、soundEffectsTrack 均为 false）。";
+    const value = { soundPrinciples: [original] };
+    vi.spyOn(studioApi, "resourceJson").mockResolvedValue(value);
+    render(<PlanningDeliveryPanel runId="sound-directions" versionId="v1" artifactIds={["sound-treatment"]}
+      artifacts={[artifact("sound-treatment", "creative_treatment")]} publicationExpected />);
+    expect(await screen.findByText("采用独立旁白（当前能力 独立旁白：启用）；当前无音乐轨与音效轨（独立音乐与音效轨：未接入）。")).toBeVisible();
+    expect(screen.getByText(original).closest("details")).not.toHaveAttribute("open");
+    expect(value.soundPrinciples).toEqual([original]);
+  });
+
   it("does not promise unused stock candidate deliveries in native audio mode", async () => {
     vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ viewerPromise: "原声逐镜生成" });
     const props = { runId: "native-plan", versionId: "v1", artifactIds: ["treatment"], artifacts: [artifact("treatment", "creative_treatment")], publicationExpected: true };

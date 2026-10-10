@@ -14,6 +14,29 @@ describe("CreativeDraftReader", () => {
     else delete (window as Partial<Window>).matchMedia;
   });
 
+  it("explains sound capability tokens without rewriting the creator's draft or hiding its original", () => {
+    const soundPrinciples = [
+      "保持轻声解说；narration=true，pauseControl=text_hint；musicTrack/soundEffectsTrack=false。",
+      "原声模式 audio.narration=false；continuousNarrationGroups=false；不要删掉雨声意图。",
+      "仅在转折处留白，句尾自然收住。",
+      "当前无音乐轨与音效轨（musicTrack、soundEffectsTrack 均为 false），因此不做配乐与音效设计。",
+    ];
+    const value = { soundPrinciples };
+    const before = JSON.stringify(value);
+    render(<CreativeDraftReader stage="treatment" value={value} />);
+    expect(screen.getByText(/保持轻声解说；独立旁白：启用/)).toBeVisible();
+    expect(screen.getByText(/停顿：通过文字提示表达/)).toBeVisible();
+    expect(screen.getAllByText(/独立音乐与音效轨：未接入/)).toHaveLength(2);
+    expect(screen.getByText("当前无音乐轨与音效轨（独立音乐与音效轨：未接入），因此不做配乐与音效设计。")).toBeVisible();
+    expect(screen.getByText(/原声模式 独立旁白：不单独合成/)).toBeVisible();
+    expect(screen.getByText(/原声模式 独立旁白.*不要删掉雨声意图/)).toBeVisible();
+    expect(screen.getAllByText(soundPrinciples[2]!)[0]).toBeVisible();
+    const original = screen.getByText(soundPrinciples[0]!).closest("details");
+    expect(original).not.toHaveAttribute("open");
+    expect(within(original!).getByText("查看声音方向原文")).toBeVisible();
+    expect(JSON.stringify(value)).toBe(before);
+  });
+
   it("shows readable director delivery labels in segment and whole-draft views without changing the plan", () => {
     const routes = [
       ["generated_video", "AI 视频"], ["generated_image", "AI 图片"],
