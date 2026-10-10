@@ -557,9 +557,29 @@ async function collectRankThumbnails(
   fetchThumbnail: (url: string) => Promise<Buffer | undefined>,
 ): Promise<AssetRankThumbnail[]> {
   const queue: Array<{ scenePosition: number; candidate: AssetCandidate }> = [];
-  const maxCandidates = Math.max(0, ...report.scenes.map((scene) => scene.candidates.length));
+  // 图库结果通常按来源成组。只交错镜头仍会让首个来源占满图像预算；
+  // 先在每镜内交错来源，再交错镜头。只改变取图顺序，不改候选全集和原始排名。
+  const sceneCandidates = report.scenes.map(scene => {
+    const sources = new Map<string, AssetCandidate[]>();
+    for (const candidate of scene.candidates) {
+      if (!candidate.previewUrl) continue;
+      const items = sources.get(candidate.provider) ?? [];
+      items.push(candidate);
+      sources.set(candidate.provider, items);
+    }
+    const candidates: AssetCandidate[] = [];
+    const longest = Math.max(0, ...[...sources.values()].map(items => items.length));
+    for (let index = 0; index < longest; index += 1) {
+      for (const items of sources.values()) {
+        const candidate = items[index];
+        if (candidate) candidates.push(candidate);
+      }
+    }
+    return { scenePosition: scene.scenePosition, candidates };
+  });
+  const maxCandidates = Math.max(0, ...sceneCandidates.map(scene => scene.candidates.length));
   for (let candidateIndex = 0; candidateIndex < maxCandidates && queue.length < MAX_THUMBNAIL_ATTEMPTS; candidateIndex += 1) {
-    for (const scene of report.scenes) {
+    for (const scene of sceneCandidates) {
       const candidate = scene.candidates[candidateIndex];
       if (candidate?.previewUrl && queue.length < MAX_THUMBNAIL_ATTEMPTS) queue.push({ scenePosition: scene.scenePosition, candidate });
     }

@@ -33,6 +33,31 @@ const rawReport = {
 };
 
 describe("asset semantic ranking", () => {
+  it("gives each scene's grouped sources visual evidence within the existing first-batch budget", async () => {
+    const report = parseAssetCandidateReport({ ...rawReport, scene_candidates: [1, 2].map(scene_position => ({
+      ...rawReport.scene_candidates[0], scene_position,
+      candidates: ["pexels", "pixabay"].flatMap(provider => Array.from({ length: 6 }, (_, i) =>
+        candidate(provider, `${scene_position}-${provider}-${i}`, 80, 1080, 1920))),
+    })) });
+    const original = structuredClone(report);
+    let sent: (AssetCandidateReport & { thumbnails: Array<{ scenePosition: number; provider: string; assetId: string }> }) | undefined;
+    let downloads = 0;
+    const ranker = new CodexAssetSemanticRanker({
+      fetchThumbnail: async () => { downloads++; return Buffer.from([0xff, 0xd8, 0xff, 0xd9]); },
+      client: { runTask: async (_kind, payload) => { sent = payload as typeof sent; return deterministicAssetRanking(report); } },
+    });
+    await ranker.rank(report);
+    assert.ok(sent);
+    assert.equal(sent.thumbnails.length, 12, "不同来源共享原12图预算，不增加模型图片数");
+    assert.equal(downloads, 12);
+    for (const scenePosition of [1, 2]) for (const provider of ["pexels", "pixabay"]) {
+      assert.deepEqual(sent.thumbnails.filter(t => t.scenePosition === scenePosition && t.provider === provider).map(t => t.assetId),
+        [0, 1, 2].map(i => `${scenePosition}-${provider}-${i}`), "不能因候选按来源成组，整批漏看另一来源");
+    }
+    assert.deepEqual(sent.scenes, original.scenes, "取图顺序不改变候选全集及其原始排名");
+    assert.deepEqual(report, original);
+  });
+
   it("fetches a bounded batch concurrently and keeps candidate order independent of download order", async () => {
     const report = parseAssetCandidateReport({ ...rawReport, scene_candidates: [{
       ...rawReport.scene_candidates[0], candidates: Array.from({ length: 4 }, (_, i) => candidate("pexels", `parallel-${i}`, 80, 1080, 1920)),
