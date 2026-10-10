@@ -135,6 +135,8 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
   onStateSummary?: (summary: NarrationTimingToolSummary) => void;
 }) {
   const [plan, setPlan] = useState<SupportedNarrationPlan>();
+  const [legacySource, setLegacySource] = useState<StudioNarrationPlanPreview["legacySource"]>();
+  const [legacyUnavailable, setLegacyUnavailable] = useState<string>();
   const [characters, setCharacters] = useState<Array<{ id: string; name: string }>>([]);
   const [groups, setGroups] = useState<GroupDraft[]>([]);
   const [userSilences, setUserSilences] = useState<Array<{ startFrame: number; endFrame: number }>>([]);
@@ -213,6 +215,8 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
         const ignoreStoredDraft = discardingDraftRef.current || ignoredDraftRunRef.current === runId || Boolean(appliedOperation);
         const stored = ignoreStoredDraft ? {} : readTimingDraft(runId, identity);
         setPlan(response.plan);
+        setLegacySource(response.legacySource);
+        setLegacyUnavailable(response.legacySourceUnavailableReason);
         setCharacters(response.editorContext?.characters ?? []);
         setSnapshot({ runId, revision, interventionId,
           sourceContextId: response.plan.version !== "video-factory/narration-plan-v1" ? response.plan.source.sourceContextId : "sc-legacy-v1",
@@ -399,6 +403,9 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
         source: { kind: "materialized_operation", voiceInputVersionId: receipt.voiceInputVersionId,
           sourceVoiceOperationId: receipt.sourceOperationId, sourceManifestArtifactId: manifest.id,
           sourceManifestSha256: receipt.manifestSha256, sourceReceiptArtifactId: receiptArtifact.id } };
+    } else if (legacySource) {
+      if (legacySource.voiceVersionId !== currentVoiceVersion) throw new Error("旧声音版本已变化，请重新查看后调整。");
+      request = { ...common, note: "只移动旧配音时间（复用已核原声）", source: legacySource };
     } else {
       const version = voiceNode.outputState?.versions.find((candidate) => candidate.id === currentVoiceVersion);
       const planArtifact = version && artifacts.find((artifact) => version.artifactIds.includes(artifact.id) && artifact.kind === "voiceover_plan");
@@ -551,10 +558,12 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
   const sourceVersion = voiceNode.outputState?.versions.find(version => version.id === currentVoiceVersion);
   const sourceTracked = receipt && isFirstFitConflict(outputConflict?.code)
     ? typeof receipt.sourceOperationId === "string" && typeof receipt.manifestArtifactId === "string"
-    : sourceVersion && typeof outputRecord.layoutKey === "string" && typeof outputRecord.voiceOperationId === "string"
+    : legacySource?.voiceVersionId === currentVoiceVersion && Boolean(legacySource)
+      || !legacyUnavailable && sourceVersion && typeof outputRecord.layoutKey === "string" && typeof outputRecord.voiceOperationId === "string"
       && ["voiceover_plan", "voiceover"].every(kind => artifacts.some(artifact => artifact.kind === kind && sourceVersion.artifactIds.includes(artifact.id)));
   if (!sourceTracked && !pendingEnvelope && !dirty && !stale) return <section className="node-preview-section narration-timing-editor" aria-label="只调整配音时间">
     <h3>这版声音暂不支持只调整时间</h3>
+    {legacyUnavailable ? <p>{legacyUnavailable}</p> : null}
     <p role="status">这版声音没有可核对的排轨来源，无法保证调整时复用原配音，因此不提供无效的编辑控件。原声音仍可试听与采用；如需改词或重做声音，请使用返工入口，费用由你另行确认。</p>
     {storageWarning ? <p>{storageWarning}</p> : null}
   </section>;
@@ -562,6 +571,7 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
   const locked = Boolean(busyToken) || disabled || stale || !sourceTracked;
   return <section className="node-preview-section narration-timing-editor" aria-label="只调整配音时间">
     <h3>只调整配音时间</h3>
+    {legacySource ? <p>已核对原逐镜配音：这里只移动整段声音，不改词、不拆段；字幕仍沿用原逐镜显示，不冒充逐句同步字幕。</p> : null}
     <p>复用原配音，本地调整窗口、落点和明确留白；不重新购买、不改文本、不改音色、不改变画面总时长。完成后停在声音试听，由你确认才继续渲染。</p>
     {outputConflict ? <p role="alert">上一段放不下：需要 {String(outputConflict.requiredFrames)} 帧，当前窗口只有 {String(outputConflict.availableFrames)} 帧。可扩大窗口或调整显式留白。</p> : null}
     {listenArtifacts.length ? <p>原声试听：{listenArtifacts.map((artifact) => <audio key={artifact.id} controls preload="none"

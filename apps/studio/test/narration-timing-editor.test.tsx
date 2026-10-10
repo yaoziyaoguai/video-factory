@@ -90,6 +90,28 @@ it("explains an untracked legacy voice before offering an unusable timing contro
   expect(dispatch).not.toHaveBeenCalled();
 });
 
+it("uses the server-verified legacy source to move retained audio without inventing a manifest", async () => {
+  const preview = previewFixture();
+  preview.plan = preview.editorContext.defaultPlan;
+  preview.legacySource = { kind: "legacy_voice_version", voiceVersionId: "version-voice-1",
+    voicePlanArtifactId: "art-plan", voicePlanSha256: "a".repeat(64), expectedAudioSha256: "b".repeat(64),
+    expectedNarrationPlanSha256: "c".repeat(64), expectedLedgerSha256: "d".repeat(64), sourceVoiceOperationId: "old-tts" };
+  vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(preview);
+  const dispatch = vi.spyOn(studioApi, "requestNarrationRevision").mockResolvedValue({ nodes: [] } as unknown as StudioRunDetail);
+  vi.spyOn(studioApi, "narrationRelayoutOperation").mockImplementation(async (_runId, requestId) => ({
+    requestId, state: "applied", requestDigest: "d".repeat(64), resultVoiceVersionId: "version-new", isCurrent: true }));
+  renderEditor({ voiceNode: { ...voiceNode, output: { trackPath: "/legacy.m4a" } } });
+  const offset = await screen.findByLabelText("第 1 段留空秒");
+  fireEvent.change(offset, { target: { value: "1.5" } });
+  fireEvent.blur(offset);
+  fireEvent.click(screen.getByRole("button", { name: "应用时间调整并重新试听" }));
+  await waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+  const sent = dispatch.mock.calls[0]![1];
+  expect(sent).toMatchObject({ source: preview.legacySource,
+    layout: { narrationPlanVersion: "video-factory/narration-plan-v1", groups: [{ placement: { offsetFrames: 45 } }] } });
+  await screen.findByText(/已用原配音完成本地时间调整/);
+});
+
 it("shows the current v2 groups, quantizes seconds on blur, and keeps invalid input with a message", async () => {
   vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(previewFixture());
   renderEditor();

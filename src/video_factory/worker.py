@@ -904,7 +904,8 @@ def _relayout_voice_claimed(request: Dict[str, Any], output_dir: Path, started_a
                             reservation: Dict[str, Any]) -> Dict[str, Any]:
     """纯本地时间调整：核清单→读原raw→真实排轨→字幕重映射；任何外部发送都不发生。"""
     inputs = request["input"]
-    manifest_path = require_existing_path(inputs, "manifestPath")
+    legacy_source = inputs.get("legacyVoiceSource")
+    manifest_path = None if legacy_source is not None else require_existing_path(inputs, "manifestPath")
     source_identity = inputs.get("sourceIdentity")
     if not isinstance(source_identity, dict):
         raise WorkerProtocolError("纯本地排轨需要宿主核定的原声音来源身份。")
@@ -922,17 +923,27 @@ def _relayout_voice_claimed(request: Dict[str, Any], output_dir: Path, started_a
     else:
         scenes = script_scenes
     try:
-        plan = perform_relayout(
-            manifest_path=manifest_path, layout=inputs.get("layout"),
-            scenes=scenes, script=script_document,
-            script_sha256=hashlib.sha256(Path(inputs["scriptPath"]).read_bytes()).hexdigest(),
-            visual_sha256=hashlib.sha256(Path(inputs["executablePlanPath"]).read_bytes()).hexdigest(),
-            output_dir=output_dir, node_root=node_root,
-            run_id=request["runId"], node_id=str(request.get("nodeRunId") or "voice"),
-            source_operation_id=str(inputs.get("sourceOperationId") or ""),
-            relayout_source=str(inputs.get("relayoutSource") or "materialized_operation"),
-            source_identity=source_identity,
-            layout_operation_id=reservation["layoutOperationId"])
+        if legacy_source is not None:
+            from .legacy_narration_relayout import perform_legacy_relayout
+            if not isinstance(legacy_source, dict) or inputs.get("relayoutSource") != "legacy_voice_version":
+                raise WorkerProtocolError("旧声音来源类型不一致。")
+            plan = perform_legacy_relayout(source=legacy_source, layout=inputs.get("layout"), scenes=scenes,
+                script_sha256=hashlib.sha256(Path(inputs["scriptPath"]).read_bytes()).hexdigest(),
+                visual_sha256=hashlib.sha256(visual_path.read_bytes()).hexdigest(), node_root=node_root,
+                output_dir=output_dir, source_operation_id=str(inputs.get("sourceOperationId") or ""),
+                layout_operation_id=reservation["layoutOperationId"])
+        else:
+            plan = perform_relayout(
+                manifest_path=manifest_path, layout=inputs.get("layout"),
+                scenes=scenes, script=script_document,
+                script_sha256=hashlib.sha256(Path(inputs["scriptPath"]).read_bytes()).hexdigest(),
+                visual_sha256=hashlib.sha256(Path(inputs["executablePlanPath"]).read_bytes()).hexdigest(),
+                output_dir=output_dir, node_root=node_root,
+                run_id=request["runId"], node_id=str(request.get("nodeRunId") or "voice"),
+                source_operation_id=str(inputs.get("sourceOperationId") or ""),
+                relayout_source=str(inputs.get("relayoutSource") or "materialized_operation"),
+                source_identity=source_identity,
+                layout_operation_id=reservation["layoutOperationId"])
     except NarrationGroupDoesNotFitError as error:
         # 时间调整仍放不下：旧有效声音保持不动，用户继续调整窗口或撤销留白。
         if isinstance(error, (NarrationGroupDoesNotFitV2Error, NarrationTurnDoesNotFitError)):
@@ -1010,7 +1021,8 @@ def _relayout_voice_claimed(request: Dict[str, Any], output_dir: Path, started_a
             "sourceOperationId": inputs.get("sourceOperationId"),
             "relayoutSource": inputs.get("relayoutSource"),
             "sourceIdentity": safe_source_identity,
-            "sourceManifestIdentity": inputs.get("sourceManifestIdentity"),
+            **({"sourceLegacyIdentity": inputs.get("sourceLegacyIdentity")} if legacy_source is not None
+               else {"sourceManifestIdentity": inputs.get("sourceManifestIdentity")}),
         },
         "output": {
             "narrationPlanRelativePath": target_plan.name,

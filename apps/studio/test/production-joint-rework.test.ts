@@ -873,7 +873,10 @@ def synthesize(http_request, audio, metadata_path=None, response_binding=None):
 def download(*args, **kwargs):
     if not recover: raise OSError('controlled initial subtitle transport failure')
     return io.BytesIO(json.dumps([{'text': '一段连贯的旁白。', 'time_begin': 0, 'time_end': 500}]).encode())
-with patch('video_factory.group_voiceover._execute_minimax_audio_request', side_effect=synthesize), patch('video_factory.narration_subtitles.open_asset_request', side_effect=download), patch.dict('os.environ', {'MINIMAX_API_KEY': 'controlled-no-network'}):
+def legacy_synthesize(request, output_path):
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', str(output_path)], check=True)
+    return output_path
+with patch('video_factory.voiceover._execute_minimax_audio_request', side_effect=legacy_synthesize), patch('video_factory.group_voiceover._execute_minimax_audio_request', side_effect=synthesize), patch('video_factory.narration_subtitles.open_asset_request', side_effect=download), patch.dict('os.environ', {'MINIMAX_API_KEY': 'controlled-no-network'}):
     print(json.dumps(handle_request(request)))
 `;
   return new Promise((resolve, reject) => {
@@ -2915,7 +2918,7 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     }
   });
 
-  it("relayouts a successful voice locally into a listening stop without repurchase", async () => {
+  for (const legacy of [false, true]) it(`relayouts a successful ${legacy ? "legacy" : "planned"} voice locally into a listening stop without repurchase`, async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-relayout-http-"));
     // 真实 Python worker 产出可排轨的 voiceover_plan 与可解码音频（只替换付费网络边界）。
     class ControlledRelayoutWorker extends ReworkWorker {
@@ -2949,7 +2952,7 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
       if (gateNode?.nodeId === "final-review") break;
       const gate = gateNode?.intervention;
       assert.ok(gate, JSON.stringify({ status: run.status, failure: run.failure }));
-      if (gateNode.nodeId === "assets") {
+      if (gateNode.nodeId === "assets" && !legacy) {
         const preview = await pipeline.previewNarrationPlan(run.id);
         run = await pipeline.confirmNarrationPlan(run.id, { expectedRunRevision: run.revision, plan: preview.plan, actor: "creator" });
       }
@@ -2994,7 +2997,8 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     const audioArtifact = run.artifacts.find(a => version.artifactIds.includes(a.id) && a.uri === voiceOutput.trackPath)!;
     const planDoc = JSON.parse(await readFile(planArtifact.uri!, "utf8"));
     const originalPlanBytes = await readFile(planArtifact.uri!);
-    const group = planDoc.narrationPlan.groups[0];
+    if (legacy) assert.ok(finalReviewRead.legacySource, `原逐镜音频/账本受核后必须提供真实时间调整来源：${finalReviewRead.legacySourceUnavailableReason}`);
+    const group = (legacy ? finalReviewRead.plan : planDoc.narrationPlan).groups[0];
     // §4.2.6.1：interventionId 必须对应当前活动停点（本例为成片返工的 final-review 停点）。
     const reworkStop = run.nodeRuns.find(node => node.nodeId === "final-review"
       && node.status === "needs_human")!.intervention!;
@@ -3004,21 +3008,22 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
       interventionId: reworkStop.id,
       sourceContextId: "sc-relayout-from-initial-confirmation", note: "把整段配音向后挪一秒",
       // 与 Python 端 _digest_of_plan 同字节：canonicalJsonV2（键排序、紧凑分隔符）。
-      source: { kind: "voice_version" as const, voiceVersionId: version.id,
+      source: legacy ? finalReviewRead.legacySource : { kind: "voice_version" as const, voiceVersionId: version.id,
         voicePlanArtifactId: planArtifact.id, voicePlanSha256: planArtifact.sha256!,
         expectedNarrationPlanSha256: createHash("sha256")
           .update(canonicalJsonV2(planDoc.narrationPlan), "utf8").digest("hex"),
         expectedLayoutKey: planDoc.layoutKey, expectedAudioSha256: audioArtifact.sha256!,
         sourceVoiceOperationId: planDoc.voiceOperationId },
       layout: { narrationPlanVersion: "video-factory/narration-plan-v1" as const,
-        groups: [{ groupId: group.id, window: group.window, placement: { anchor: "end" as const, offsetFrames: 30 } }],
+        groups: (legacy ? finalReviewRead.plan.groups : [group]).map((item: { id: string; window: { startFrame: number; endFrame: number } }) => ({
+          groupId: item.id, window: item.window, placement: { anchor: "end" as const, offsetFrames: 30 } })),
         userSilences: [] },
       actor: "creator",
     };
     const dispatched = await pipeline.dispatchNarrationRevision(run.id, request);
     run = await dispatched.completion;
     assert.equal(run.status, "needs_human");
-    const nextVoice = run.nodeRuns.find(node => node.nodeId === "voice")!;
+    let nextVoice = run.nodeRuns.find(node => node.nodeId === "voice")!;
     assert.equal(nextVoice.status, "needs_human");
     assert.deepEqual(nextVoice.intervention?.options, ["approve", "reject"], "成功回新的声音试听停点");
     assert.match(nextVoice.intervention?.reason ?? "", /未重新购买/);
@@ -3065,7 +3070,7 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     }
     assert.ok(!nextVersion.artifactIds.includes(nextVersion.id),
       "预留输出版本 ID 不能被 artifact 分配误消费");
-    assert.equal(newPlanDoc.voiceOperationId, planDoc.voiceOperationId, "voiceOperationId 仍为原 TTS 操作");
+    assert.equal(newPlanDoc.voiceOperationId, legacy ? finalReviewRead.legacySource.sourceVoiceOperationId : planDoc.voiceOperationId, "voiceOperationId 仍为原 TTS 操作");
     assert.notEqual(newPlanDoc.layoutKey, planDoc.layoutKey);
     assert.equal((nextVersion.output as Record<string, unknown>).externalSendCount, 0,
                  "本地排轨动作零外部发送");
@@ -3090,6 +3095,20 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
       (await pipeline.loadPersisted(run.id)).nodeRuns.find(node => node.nodeId === "voice")?.outputState?.effectiveVersionId,
       "拒绝路径不改变有效声音版本");
 
+    if (legacy) {
+      const again = await pipeline.previewNarrationPlan(run.id);
+      assert.ok(again.legacySource, again.legacySourceUnavailableReason);
+      assert.ok(again.plan.groups.every(group => group.placement.offsetFrames === 30), "刷新读取当前布局，不回到初始值");
+      run = await pipeline.requestNarrationRevision(run.id, { ...request, requestId: "legacy-return-a",
+        expectedRunRevision: run.revision, interventionId: nextVoice.intervention!.id, source: again.legacySource,
+        layout: { narrationPlanVersion: "video-factory/narration-plan-v1", userSilences: [],
+          groups: again.plan.groups.map(g => ({ groupId: g.id, window: g.window, placement: { anchor: "start", offsetFrames: 0 } })) } });
+      nextVoice = run.nodeRuns.find(node => node.nodeId === "voice")!;
+      assert.equal(worker.synthesisCalls, 1, "两次调整仍只有最初一次声音合成");
+      const returned = await pipeline.previewNarrationPlan(run.id);
+      assert.ok(returned.legacySource);
+      assert.ok(returned.plan.groups.every(group => group.placement.offsetFrames === 0));
+    }
     const prefillAfterRelayout = await new StudioService({ workspaceRoot, pipeline,
       commandAvailable: async () => true, environment: {} }).reviewPrefill(run.id, "creator");
     assert.equal(prefillAfterRelayout.basis, null, "新声音采用后旧审片表态不得继续预填");

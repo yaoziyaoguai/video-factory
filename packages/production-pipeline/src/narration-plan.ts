@@ -63,6 +63,9 @@ export interface NarrationPlanPreview {
   /** v2 编辑器的宿主派生来源身份（§2.2）；初始预览下发，候选/确认请求原样带回。 */
   sourceContextId?: string;
   quote?: NarrationSpendQuote;
+  /** 旧逐镜声音只读核验后提供；不是补写历史 manifest 或重新合成许可。 */
+  legacySource?: import("./narration-relayout.js").LegacyNarrationSource;
+  legacySourceUnavailableReason?: string;
   editorContext: {
     mode: "pre_generation" | "voice_stop" | "final_review";
     defaultPlan: NarrationPlan | CharacterNarrationPlan;

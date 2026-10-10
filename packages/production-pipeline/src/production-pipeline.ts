@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { inspectLegacyVoiceSource, type LegacyVoiceSourceFiles } from "./legacy-narration-source.js";
+import type { LegacyNarrationSource } from "./narration-relayout.js";
 import { reviewDecisionBasis } from "./review-decision-prefill.js";
 import { isCharacterScript, validateCharacterScriptStructure, scriptSceneText, type CharacterScript, type CharacterVoiceProfile } from "./character-script.js";
 import { CHARACTER_NARRATION_PLAN_VERSION, buildCharacterNarrationPlan, validateCharacterNarrationPlan,
@@ -3395,6 +3397,16 @@ export class ProductionPipeline {
   async previewNarrationPlan(runId: string): Promise<NarrationPlanPreview> {
     const run = await this.store.load<ProductionBrief>(runId);
     const context = await this.narrationPlanContext(run, { readOnly: true });
+    if (context.editorMode !== "pre_generation" && !context.characterScript) {
+      const legacy = await this.legacyNarrationSource(run, context).catch(error => ({
+        unavailable: error instanceof Error ? error.message : "旧声音来源暂不能核验。",
+      }));
+      if (legacy) return { expectedRunRevision: run.revision, confirmed: false,
+        sourceContextId: this.narrationSourceContextIdV2(run, context, this.voiceProviderConfigDigest(run, context)),
+        plan: "unavailable" in legacy ? context.plan : legacy.plan,
+        ...("unavailable" in legacy ? { legacySourceUnavailableReason: legacy.unavailable } : { legacySource: legacy.source }),
+        editorContext: { mode: context.editorMode, defaultPlan: context.plan, baseGroups: [], savedPlanStatus: "none" } };
+    }
     const voiceConfig = providerConfigs(parsePersistedBrief(run.initialInput), this.options).find((config) => config.nodeId === "voice")!;
     const quoteFor = async (plan: SupportedNarrationPlan) => {
       try {
@@ -3553,6 +3565,58 @@ export class ProductionPipeline {
       next.revision += 1;
       return next;
     });
+  }
+
+  private async legacyNarrationSource(run: WorkflowRun<ProductionBrief>,
+    context: Awaited<ReturnType<ProductionPipeline["narrationPlanContext"]>>) {
+    const voice = run.nodeRuns.find(node => node.nodeId === "voice");
+    const version = voice?.outputState?.versions.find(v => v.id === voice.outputState?.effectiveVersionId);
+    if (!voice || !version || voice.outputState?.stale || voice.inputState?.stale || context.characterScript) return undefined;
+    const artifact = run.artifacts.find(a => a.kind === "voiceover_plan" && version.artifactIds.includes(a.id));
+    if (!artifact?.uri || !artifact.sha256) return undefined;
+    await verifyStoredArtifactWithinRoot(this.store.runDirectory(run.id), artifact);
+    const doc = requireOutputRecord(JSON.parse(await readFile(artifact.uri, "utf8")), "voice plan");
+    if (doc.version !== "video-factory/voiceover-plan-v2") return undefined;
+    const track = run.artifacts.find(a => a.kind === "voiceover" && version.artifactIds.includes(a.id) && a.uri === doc.track_path);
+    if (!track?.sha256) throw new HumanDecisionConflictError("旧声音缺少对应音轨，原声音保持不变。");
+    await verifyStoredArtifactWithinRoot(this.store.runDirectory(run.id), track);
+    const retained = isObjectRecord(doc.legacyVoiceSource) ? doc.legacyVoiceSource : undefined;
+    const origin = retained ? requireOutputRecord(retained.origin, "legacy origin") : undefined;
+    const originalVersion = origin ? voice.outputState!.versions.find(v => v.id === origin.voiceVersionId) : version;
+    if (!originalVersion) throw new HumanDecisionConflictError("旧声音原输入版本无法核验。");
+    const originalInputs = voice.inputState?.versions.filter(v => originalVersion.inputVersionIds.includes(v.id)) ?? [];
+    if (originalInputs.length !== 1) throw new HumanDecisionConflictError("旧声音原输入版本无法核验。");
+    const inputVersion = originalInputs[0];
+    const input = requireOutputRecord(inputVersion?.value, "legacy voice input");
+    if (!inputVersion || input.narrationPlanPath !== undefined
+      || input.scriptPath !== context.voiceInput.scriptPath || input.executablePlanPath !== context.voiceInput.executablePlanPath
+      || !isDeepStrictEqual(inputVersion.upstreamVersionIds, context.upstreamVersionIds)
+      || origin && origin.voiceInputVersionId !== inputVersion.id) {
+      throw new HumanDecisionConflictError("旧声音已不对应当前稿件和画面，请先核对来源；原声音保留。");
+    }
+    const originalArtifact = retained ? run.artifacts.find(a => a.kind === "voiceover_plan"
+      && originalVersion.artifactIds.includes(a.id) && a.uri === retained.voicePlanPath && a.sha256 === retained.voicePlanSha256) : artifact;
+    if (!originalArtifact?.uri || !originalArtifact.sha256) throw new HumanDecisionConflictError("旧声音原计划留档缺失。");
+    await verifyStoredArtifactWithinRoot(this.store.runDirectory(run.id), originalArtifact);
+    const originalDoc = requireOutputRecord(JSON.parse(await readFile(originalArtifact.uri, "utf8")), "legacy original voice plan");
+    const originalTrack = run.artifacts.find(a => a.kind === "voiceover" && originalVersion.artifactIds.includes(a.id) && a.uri === originalDoc.track_path);
+    if (!originalTrack?.sha256 || retained && retained.trackSha256 !== originalTrack.sha256) throw new HumanDecisionConflictError("旧声音原音轨身份不符。");
+    const operationId = origin ? requiredOutputString(origin, "sourceVoiceOperationId") : voice.operationRequestId;
+    if (!operationId) throw new HumanDecisionConflictError("旧声音缺少原请求编号，不重新生成声音。");
+    const verified = await inspectLegacyVoiceSource({ nodeRoot: path.join(this.store.runDirectory(run.id), "nodes", "voice"),
+      source: { voicePlanPath: originalArtifact.uri, voicePlanSha256: originalArtifact.sha256, trackSha256: originalTrack.sha256,
+        origin: { voiceVersionId: originalVersion.id, voiceInputVersionId: inputVersion.id, sourceVoiceOperationId: operationId } },
+      scenes: context.scenes, scriptSha256: context.scriptArtifact.sha256, visualSha256: context.visualArtifact.sha256,
+      ...(retained ? { currentPlan: doc.narrationPlan } : {}) });
+    if (retained && retained.ledgerSha256 !== verified.files.ledgerSha256) throw new HumanDecisionConflictError("原账本已变化，请先核查原请求。");
+    const source: LegacyNarrationSource = { kind: "legacy_voice_version", voiceVersionId: version.id,
+      voicePlanArtifactId: artifact.id, voicePlanSha256: artifact.sha256, expectedAudioSha256: track.sha256,
+      expectedNarrationPlanSha256: createHash("sha256").update(canonicalJsonV2(verified.plan)).digest("hex"), expectedLedgerSha256: verified.files.ledgerSha256,
+      sourceVoiceOperationId: operationId };
+    return { ...verified, source, sourceIdentity: { voiceInputVersionId: inputVersion.id,
+      scriptArtifactId: context.scriptArtifact.id, scriptOutputVersionId: context.scriptArtifact.outputVersionId,
+      visualArtifactId: context.visualArtifact.id, visualOutputVersionId: context.visualArtifact.outputVersionId,
+      parentArtifactIds: context.parentArtifactIds, upstreamVersionIds: context.upstreamVersionIds } };
   }
 
   private async narrationPlanContext(run: WorkflowRun<ProductionBrief>, options?: { readOnly?: boolean }): Promise<{
@@ -5535,10 +5599,26 @@ export class ProductionPipeline {
           relayoutSource: "voice_version", sourceIdentity,
           sourceManifestIdentity: { artifactId: originArtifact.id, sha256: originManifest.manifestSha256 } };
       };
-      const resolvedSource = apply.source.kind === "materialized_operation"
-        ? await resolveMaterializedSource(apply.source)
-        : await resolveVoiceVersionSource(apply.source);
-      const { manifestPath, sourceOperationId, relayoutSource, sourceIdentity, sourceManifestIdentity } = resolvedSource;
+      const resolveLegacySource = async (source: LegacyNarrationSource) => {
+        if (voice.outputState?.effectiveVersionId !== source.voiceVersionId) {
+          throw new HumanDecisionConflictError("指定的声音版本已不是当前有效版本，请刷新后重试。");
+        }
+        const context = await this.narrationPlanContext(previous, { readOnly: true });
+        const verified = await this.legacyNarrationSource(previous, context);
+        if (!verified || !isDeepStrictEqual(verified.source, source)) {
+          throw new HumanDecisionConflictError("旧声音来源或原账本已变化，请重新查看后调整。");
+        }
+        return { sourceOperationId: source.sourceVoiceOperationId, relayoutSource: "legacy_voice_version",
+          sourceIdentity: verified.sourceIdentity, legacyVoiceSource: verified.files,
+          sourceLegacyIdentity: { sha256: verified.files.voicePlanSha256, ledgerSha256: verified.files.ledgerSha256 } };
+      };
+      const resolvedSource: { sourceOperationId: string; relayoutSource: string; sourceIdentity: Record<string, unknown>;
+        manifestPath?: string; sourceManifestIdentity?: { artifactId: string; sha256: string };
+        legacyVoiceSource?: LegacyVoiceSourceFiles; sourceLegacyIdentity?: { sha256: string; ledgerSha256: string } } =
+        apply.source.kind === "legacy_voice_version" ? await resolveLegacySource(apply.source)
+          : apply.source.kind === "materialized_operation" ? await resolveMaterializedSource(apply.source)
+            : await resolveVoiceVersionSource(apply.source);
+      const { sourceOperationId, relayoutSource, sourceIdentity, sourceManifestIdentity, sourceLegacyIdentity } = resolvedSource;
 
       // §4.2.6 执行前耐久预留完整请求：actor、原 CAS/停点/source 快照、目标布局与说明、
       // 固定 command/layout operation、attempt 目录与输入/输出版本身份；同一 requestId 的恢复
@@ -5623,8 +5703,7 @@ export class ProductionPipeline {
           response = await this.options.worker.run({
             protocolVersion: WORKER_PROTOCOL_VERSION, commandId,
             runId, nodeRunId: "voice", attempt, capability: "voice.synthesize",
-            input: { relayout: true, manifestPath, layout: apply.layout, sourceOperationId, relayoutSource,
-              sourceIdentity, sourceManifestIdentity,
+            input: { relayout: true, ...resolvedSource, layout: apply.layout,
               relayoutReservation: { requestDigest, commandId, layoutOperationId,
                 reservedInputVersionId, reservedOutputVersionId, workerExecutionToken, attempt },
               scriptPath: planning.scriptPath, executablePlanPath: planning.executablePlanPath },
@@ -5661,7 +5740,8 @@ export class ProductionPipeline {
       await verifyWorkerArtifacts(response, attemptDirectory);
       await verifyNarrationRelayoutCompletion({ response, attemptDirectory, requestDigest, commandId,
         layoutOperationId, runId, attempt, reservedInputVersionId, reservedOutputVersionId,
-        sourceOperationId, relayoutSource, sourceIdentity, sourceManifestIdentity });
+        sourceOperationId, relayoutSource, sourceIdentity,
+        ...(sourceManifestIdentity ? { sourceManifestIdentity } : {}), ...(sourceLegacyIdentity ? { sourceLegacyIdentity } : {}) });
       // §4.2.6.3 worker 完整输出先写耐久完成回执（产物根/类型/SHA/大小 + 预留身份），再进入采用；
       // applied 在 completed 记录上追加（保留 output/artifacts 供侧文件落后时的真实采用对照）。
       const completionRecord = { ...reservation, state: "completed" as const, completedAt: this.clock(),
@@ -19264,7 +19344,8 @@ async function verifyNarrationRelayoutCompletion(options: {
   sourceOperationId: string;
   relayoutSource: string;
   sourceIdentity: Record<string, unknown>;
-  sourceManifestIdentity: { artifactId: string; sha256: string };
+  sourceManifestIdentity?: { artifactId: string; sha256: string };
+  sourceLegacyIdentity?: { sha256: string; ledgerSha256: string };
 }): Promise<NarrationRelayoutCompletion> {
   const output = requireOutputRecord(options.response.output, "relayout output");
   const completionPath = requiredOutputString(output, "completionReceiptPath");
@@ -19299,7 +19380,8 @@ async function verifyNarrationRelayoutCompletion(options: {
     sourceOperationId: options.sourceOperationId,
     relayoutSource: options.relayoutSource,
     sourceIdentity: safeSourceIdentity,
-    sourceManifestIdentity: options.sourceManifestIdentity,
+    ...(options.sourceLegacyIdentity ? { sourceLegacyIdentity: options.sourceLegacyIdentity }
+      : { sourceManifestIdentity: options.sourceManifestIdentity }),
   };
   if (!isDeepStrictEqual(receipt.source, expectedSource)) {
     throw new HumanDecisionConflictError("本地排轨完成收据与受核原声音来源不一致。");

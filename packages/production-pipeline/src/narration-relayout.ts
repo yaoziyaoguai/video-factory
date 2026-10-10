@@ -72,7 +72,18 @@ export interface NarrationFitConflictV3 extends Omit<NarrationFitConflictV2, "ve
   voiceProfileId: string;
 }
 
-export type RelayoutNarrationSource = {
+export interface LegacyNarrationSource {
+  kind: "legacy_voice_version";
+  voiceVersionId: string;
+  voicePlanArtifactId: string;
+  voicePlanSha256: string;
+  expectedAudioSha256: string;
+  expectedNarrationPlanSha256: string;
+  expectedLedgerSha256: string;
+  sourceVoiceOperationId: string;
+}
+
+export type RelayoutNarrationSource = LegacyNarrationSource | {
   kind: "voice_version";
   voiceVersionId: string;
   voicePlanArtifactId: string;
@@ -319,6 +330,16 @@ export function parseRelayoutSource(value: unknown): RelayoutNarrationSource {
     throw new Error("relayout 来源必须是对象。");
   }
   const source = value as Record<string, unknown>;
+  if (source.kind === "legacy_voice_version") {
+    return { kind: "legacy_voice_version",
+      voiceVersionId: safeId(source.voiceVersionId, "声音版本"),
+      voicePlanArtifactId: safeId(source.voicePlanArtifactId, "声音计划产物"),
+      voicePlanSha256: sha256Hex(source.voicePlanSha256, "声音计划摘要"),
+      expectedAudioSha256: sha256Hex(source.expectedAudioSha256, "期望音轨摘要"),
+      expectedNarrationPlanSha256: sha256Hex(source.expectedNarrationPlanSha256, "期望旁白计划摘要"),
+      expectedLedgerSha256: sha256Hex(source.expectedLedgerSha256, "原账本摘要"),
+      sourceVoiceOperationId: safeId(source.sourceVoiceOperationId, "原声音操作") };
+  }
   if (source.kind === "voice_version") {
     return {
       kind: "voice_version",
