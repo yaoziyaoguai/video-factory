@@ -164,6 +164,42 @@ const runDetail: StudioRunDetail = {
 };
 
 describe("Studio client", () => {
+  it.each(["applied", "accepted", "query-failed", "storage-denied"] as const)("observes the original local decision at the next stop without submitting another decision: %s", async state => {
+    vi.restoreAllMocks();
+    vi.stubGlobal("EventSource", class { addEventListener() {} close() {} });
+    const key = "video-factory:local-review-command:run-1";
+    const command = { kind: "decision", input: { commandId: "prior-decision", action: "approve", expectedRunRevision: 0 } };
+    localStorage.setItem(key, JSON.stringify(command));
+    vi.spyOn(studioApi, "run").mockResolvedValue(runDetail);
+    vi.spyOn(studioApi, "runCosts").mockRejectedValue(new Error("no cost fixture"));
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "creativeReviewHistory").mockRejectedValue(new Error("no history fixture"));
+    const observe = vi.spyOn(studioApi, "reviewContinuationReceipt");
+    if (state === "storage-denied") {
+      vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => { throw new Error("storage denied"); });
+      observe.mockResolvedValueOnce({ commandId: "prior-decision", action: "enter_manual_review", nodeId: "visual-review", state: "applied", isCurrent: true })
+        .mockResolvedValue({ commandId: "prior-decision", action: "enter_manual_review", nodeId: "visual-review", state: "accepted", isCurrent: true });
+    } else if (state === "query-failed") observe.mockRejectedValue(new Error("receipt temporarily unavailable"));
+    else observe.mockResolvedValue({ commandId: "prior-decision", action: "enter_manual_review", nodeId: "visual-review", state, isCurrent: true });
+    const decide = vi.spyOn(studioApi, "decide");
+    const prepare = vi.spyOn(studioApi, "prepareReviewContinuation");
+    const view = render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
+    try {
+      await waitFor(() => expect(observe).toHaveBeenCalledWith("run-1", "prior-decision"));
+      if (state === "applied") await waitFor(() => {
+        expect(localStorage.getItem(key)).toBeNull();
+        expect(screen.queryByRole("region", { name: "原本地决定状态" })).not.toBeInTheDocument();
+      });
+      else {
+        expect(localStorage.getItem(key)).toBe(JSON.stringify(command));
+        expect(await screen.findByRole("region", { name: "原本地决定状态" })).toBeInTheDocument();
+      }
+      expect(decide).not.toHaveBeenCalled();
+      expect(prepare).not.toHaveBeenCalled();
+      await act(async () => {});
+      expect(observe).toHaveBeenCalledTimes(1);
+    } finally { view.unmount(); vi.restoreAllMocks(); localStorage.removeItem(key); vi.unstubAllGlobals(); }
+  });
   it("opens the existing workspace from a structured stale human recovery without saving or regenerating", async () => {
     vi.restoreAllMocks();
     vi.stubGlobal("EventSource", class { addEventListener() {} close() {} });

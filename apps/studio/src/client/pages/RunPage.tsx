@@ -186,6 +186,19 @@ function RunPageContent({ runId }: { runId: string }) {
   }, [refreshRunSnapshot, refreshCosts]);
 
   useEffect(() => {
+    if (!run || decisionPending || run.status === "running" || run.status === "pending" || !pendingLocalReviewCommand(runId)) return;
+    // 下一停点到达后核对原决定回执。制作推进不等于请求已知，只有 applied 才解除本地保护。
+    // 这里只 GET，不续作原命令；迟到结果也不能清掉另一标签的新命令。
+    let active = true;
+    void observePendingLocalReviewCommand(runId).then(next => {
+      if (active && next) setRun(current => preferRunSnapshot(current, next));
+    }).catch(caught => {
+      if (active) setErrorText(current => current ?? (caught instanceof Error ? caught.message : String(caught)));
+    });
+    return () => { active = false; };
+  }, [runId, run?.revision, run?.status, decisionPending]);
+
+  useEffect(() => {
     // 命令在途的 running 事件可能暂时不含人工停点。保留原讨论组件与输入，
     // 由原 commandId 的完成回执更新稿件；卸载重挂会抢先读取尚未清理的恢复记录。
     if (creativeCommandPending && run?.id === runId) return;
