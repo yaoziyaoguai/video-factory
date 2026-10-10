@@ -2173,6 +2173,75 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
       assert.ok(run.nodeRuns.some(node => node.nodeId === "voice"));
     }
   });
+  it("keeps an invalid ranking audit at the material decision gate and requires explicit risk consent", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-ranking-audit-decision-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const calls: string[] = [];
+    const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]), client: {
+      runTask: async () => { throw new Error("use audited client"); },
+      runTaskDetailed: async (kind, payload) => {
+        calls.push(kind);
+        if (kind === "role-audit") return { output: {
+          version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+          verdict: "pass", score: 92, summary: "格式错误的审计不能用作通过证据", issues: [], repairInstructions: [],
+          assessments: [{ targetPath: "/scenes/0", dimensions: ["evidence", "coverage", "consistency", "actionability"].map(dimension => ({ dimension, score: 92, evidence: "模型给错了评价对象" })) }],
+        } };
+        const ranking = { ...deterministicAssetRanking(payload as AssetCandidateReport), source: "model" as const, summary: "保留原候选及其55分" };
+        for (const scene of ranking.scenes) for (const candidate of scene.candidates) candidate.semanticScore = 55;
+        return { output: ranking };
+      },
+    } });
+    const director = closureLibraryDirector(spies);
+    director.planDetailed = async input => input.creativeReviewExecution?.mode === "check"
+      ? passingCreativeReviewExecution(input.creativeReviewExecution.candidate, "视觉导演", "fixture-director-contract-v1", "director-plan", "director-binding-model")
+      : { output: await director.plan(input) };
+    const worker = new ClosureLibraryWorker();
+    const execute = worker.run.bind(worker);
+    let prepared: Record<string, unknown> | undefined;
+    worker.run = async request => {
+      if (request.capability === "asset.prepare") { prepared = request; throw new Error("intentional stop before media acquisition"); }
+      return execute(request);
+    };
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker,
+      treatmentAgents: closureTreatmentAgents(spies), screenwriterAgent: closureScreenwriter(spies), directorAgent: director,
+      assetSemanticRanker: ranker, assetProviders: [{ id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] }, ...CLOSURE_ASSET_PROVIDERS],
+    });
+    let run = await pipeline.start(closureBrief({ assetSemanticRank: true, creativeReview: true }));
+    const currentDecision = (commandId: string) => {
+      const node = run.nodeRuns.find(n => n.nodeId === "creative-planning")!;
+      const gate = node.intervention!.continuation!;
+      const review = (node.output as { creativeReview: CreativeReviewState }).creativeReview;
+      const check = review.stages[gate.stage].checkResult;
+      return { commandId, actor: "creator", stage: gate.stage, expectedRunRevision: run.revision,
+        expectedReviewRevision: gate.reviewRevision, baseDraftSha256: gate.draftSha256,
+        ...(check?.checkIdentity ? { expectedCheckIdentity: check.checkIdentity } : { acknowledgeUnaudited: true as const }),
+        ...(check?.verdict === "repair" ? { acknowledgeRepair: true as const } : {}) };
+    };
+    for (let i = 0; i < 3; i++) run = await pipeline.confirmCreativeReview(run.id, currentDecision(`adopt-${i}`));
+    assert.equal(run.status, "needs_human", "审计格式错误不能使整条制作failed");
+    const node = run.nodeRuns.find(n => n.nodeId === "creative-planning")!;
+    assert.equal((node.output as { creativeReview: CreativeReviewState }).creativeReview.directorReviewPurpose, "material_plan");
+    assert.match(JSON.stringify(node.output), /视觉核验/);
+    assert.equal(Boolean(prepared), false, "未核验候选不能自动采购");
+    assert.deepEqual(calls, ["asset-rank", "role-audit"]);
+    run = await pipeline.confirmCreativeReview(run.id, currentDecision("missing-risk-consent"));
+    assert.equal(run.status, "needs_human", "缺少风险确认时仍停在人面前，不执行素材");
+    assert.equal((run.nodeRuns.find(n => n.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview.directorReviewPurpose, "material_plan");
+    assert.equal(Boolean(prepared), false);
+    run = await pipeline.confirmCreativeReview(run.id, { ...currentDecision("accept-unverified-material"), acceptQualityFallback: true });
+    assert.ok(prepared, "知情采用后才能到素材执行边界");
+    const input = prepared.input as Record<string, string>;
+    const ranking = JSON.parse(await readFile(input.candidateRankingPath!, "utf8"));
+    assert.equal(ranking.deliveryAcceptance.policyVersion, "playable-first-v1");
+    assert.deepEqual(ranking.visualEvidence.reviewed, []);
+    assert.equal(ranking.scenes[0].candidates[0].semanticScore, 55);
+    assert.equal(ranking.scenes[0].candidates[0].locked, false);
+    assert.match(ranking.summary, /复核没有可用的结论/);
+    assert.deepEqual(calls, ["asset-rank", "role-audit"], "显式采用不重发排序或审计");
+    assert.equal(spies.treatmentTitles.length, 1);
+    assert.equal(spies.screenwriterCalls.length, 1);
+  });
+
   it("preserves valid treatment and script when editing after a partially failed plan", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-fix-partial-closure-"));
     const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };

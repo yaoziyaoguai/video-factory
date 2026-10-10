@@ -104,6 +104,78 @@ describe("asset semantic ranking", () => {
     assert.deepEqual(await ranker.rankDetailed(report, checkpoint), result);
     assert.equal(calls, settledCalls);
   });
+  it("delivers a saved ranking for user decision when the completed audit has invalid assessment targets", async () => {
+    const report = parseAssetCandidateReport(rawReport);
+    let saved: unknown;
+    let downloads = 0;
+    const calls: string[] = [];
+    const checkpoint = { key: "invalid-ranking-audit", load: async () => structuredClone(saved),
+      save: async (value: unknown) => { saved = structuredClone(value); } };
+    const ranking = { ...deterministicAssetRanking(report), source: "model" as const, summary: "保留真实排序理由" };
+    ranking.scenes[0]!.candidates[0]!.semanticScore = 55;
+    const invalidAudit = { ...passingAudit(), assessments: passingAudit().assessments.map(a => ({ ...a, targetPath: "/scenes/0" })) };
+    const ranker = new CodexAssetSemanticRanker({
+      fetchThumbnail: async () => { downloads++; return Buffer.from([0xff, 0xd8, 0xff, 0xd9]); },
+      client: {
+        runTask: async () => { throw new Error("use audited transport"); },
+        runTaskDetailed: async kind => { calls.push(kind); return { output: kind === "role-audit" ? invalidAudit : ranking }; },
+      },
+    });
+    const result = await ranker.rankDetailed(report, checkpoint);
+    assert.equal(result.agentLoop?.status, "awaiting_user");
+    assert.equal(result.agentLoop?.failure?.stage, "completed_failure", "不可用的审计不能冒充通过");
+    assert.equal(result.agentLoop?.iterations.length, 0, "不捏造有效审计");
+    assert.deepEqual(result.output.scenes, ranking.scenes, "原排序、分数和理由完整保留，不降分或虚抬");
+    assert.match(result.output.summary, /复核.*没有可用的结论/);
+    assert.match(result.output.summary, /保留真实排序理由/);
+    assert.deepEqual(result.output.visualEvidence?.reviewed, [], "未通过复核的图像不能获得已核验身份");
+    assert.deepEqual(calls, ["asset-rank", "role-audit"]);
+    assert.equal(downloads, 2);
+    assert.deepEqual(await ranker.rankDetailed(report, checkpoint), result);
+    assert.equal(calls.length, 2, "重放人工停点不重发模型请求或补证");
+    const stored = saved as { status: string; auditValidationFailure: { invalidCandidate: unknown }; assetRankBatch: { finished?: unknown; deadlineAt: number } };
+    assert.equal(stored.status, "failed", "原审计失败checkpoint保留");
+    assert.deepEqual(stored.auditValidationFailure.invalidCandidate, invalidAudit);
+    // 模拟升级前已保存的相同失败：旧checkpoint没有新交付缓存，仍须零重发恢复。
+    delete stored.assetRankBatch.finished;
+    stored.assetRankBatch.deadlineAt = 0;
+    const recovered = await ranker.rankDetailed(report, checkpoint);
+    assert.deepEqual(recovered.output, result.output);
+    assert.equal(calls.length, 2);
+    assert.equal(downloads, 2);
+  });
+  it("keeps an unknown audit pending and only delivers the candidate after observing its malformed original result", async () => {
+    const report = parseAssetCandidateReport(rawReport);
+    let saved: unknown;
+    let calls = 0;
+    const observed: string[] = [];
+    const checkpoint = { key: "unknown-ranking-audit", load: async () => structuredClone(saved),
+      save: async (value: unknown) => { saved = structuredClone(value); } };
+    const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]), client: {
+      runTask: async () => { throw new Error("use audited transport"); },
+      runTaskDetailed: async (kind, payload, requestId, _session, options) => {
+        const operation = preparedOperation(kind, payload, requestId!);
+        operation.taskFact = "accepted_unknown";
+        await options?.beforeSubmit?.(operation);
+        calls++;
+        if (kind === "role-audit") throw new CodexBridgeError("original result unknown", false, "uncertain");
+        return { output: { ...deterministicAssetRanking(report), source: "model" } };
+      },
+      observePrepared: async operation => {
+        observed.push(operation.requestId);
+        return { output: { ...passingAudit(), assessments: passingAudit().assessments.map(a => ({ ...a, targetPath: "/scenes/0" })) } };
+      },
+    } });
+    await assert.rejects(ranker.rankDetailed(report, checkpoint), (error: unknown) => error instanceof RoleAgentLoopError && error.agentLoop.failure?.stage === "uncertain");
+    const pending = saved as { assetRankBatch: { finished?: unknown }; pendingOperation: { operation: { requestId: string } } };
+    assert.equal(pending.assetRankBatch.finished, undefined);
+    const requestId = pending.pendingOperation.operation.requestId;
+    const recovered = await ranker.rankDetailed(report, checkpoint);
+    assert.equal(recovered.agentLoop?.status, "awaiting_user");
+    assert.deepEqual(recovered.output.visualEvidence?.reviewed, []);
+    assert.deepEqual(observed, [requestId]);
+    assert.equal(calls, 2, "只观察原审计，不重新发送生产者或审计");
+  });
   it("settles an accepted legacy second ranking with the new single-audit policy without resubmitting", async () => {
     const report = parseAssetCandidateReport(rawReport);
     let saved: unknown;

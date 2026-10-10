@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { CodexBridgeClient, CodexPreparedOperation, CodexTaskExecution } from "./codex-chat.js";
 import { pendingRoleAgentOperation } from "./role-agent-checkpoint.js";
-import { RoleAgentHostStop, RoleAgentLoopError, RoleAgentNoProgressError, runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
+import { RoleAgentHostStop, RoleAgentLoopError, RoleAgentNoProgressError, RoleAuditOutputError, runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 
 export interface AssetCandidate {
   provider: string;
@@ -178,6 +178,24 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
         return await this.rankBatchDetailed(batch.payload, localCheckpoint, selectedModelId, batch.deadlineAt, report, canStartSupplement);
       } catch (error) {
         if (!(error instanceof RoleAgentLoopError)) throw error;
+        if (error.sourceError instanceof RoleAuditOutputError && error.agentLoop.pendingCandidate
+          && !(isRecord(stored) && isRecord(stored.pendingOperation))) {
+          // 已取回却不合规的审计不是排序成果缺失。保留原失败及候选，交回人工决定；
+          // withVisualEvidence 仍不给它已核验身份，也不为修审计自动重发或追加补证。
+          const ranking = validateAssetSemanticRanking(error.agentLoop.pendingCandidate.candidate, batch.payload);
+          const execution: CodexTaskExecution<AssetSemanticRanking> = {
+            output: { ...ranking, summary: `独立复核没有可用的结论，排序保留供你查看和决定。${ranking.summary}` },
+            ...(error.lastTrace ? { trace: error.lastTrace } : {}),
+            agentLoop: { ...error.agentLoop, status: "awaiting_user" as const },
+          };
+          if (batch.phase === "primary") {
+            // 旧失败过了取图时限也应交还原排序，不用确定性回退覆盖它；时限只限制新请求。
+            batch.finished = { ...execution, output: withVisualEvidence(execution, batch.payload, report, 0) };
+            await persist(stored);
+            return batch.finished;
+          }
+          return execution;
+        }
         const deadlineStop = error.sourceError instanceof RoleAgentHostStop && error.sourceError.reason === "deadline";
         const settledLateFailure = Date.now() >= batch.deadlineAt
           && (error.agentLoop.failure?.stage === "completed_failure" || error.sourceError instanceof RoleAgentNoProgressError)
