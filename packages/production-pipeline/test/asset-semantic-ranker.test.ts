@@ -33,6 +33,29 @@ const rawReport = {
 };
 
 describe("asset semantic ranking", () => {
+  it("fetches a bounded batch concurrently and keeps candidate order independent of download order", async () => {
+    const report = parseAssetCandidateReport({ ...rawReport, scene_candidates: [{
+      ...rawReport.scene_candidates[0], candidates: Array.from({ length: 4 }, (_, i) => candidate("pexels", `parallel-${i}`, 80, 1080, 1920)),
+    }] });
+    const releases: Array<() => void> = [];
+    let sent: { thumbnails: Array<{ assetId: string }> } | undefined;
+    const ranker = new CodexAssetSemanticRanker({
+      fetchThumbnail: () => new Promise(resolve => releases.push(() => resolve(Buffer.from([0xff, 0xd8, 0xff, 0xd9])))),
+      client: { runTask: async (_kind, payload) => { sent = payload as typeof sent; return deterministicAssetRanking(report); } },
+    });
+    const pending = ranker.rank(report);
+    await new Promise(resolve => setImmediate(resolve));
+    const initial = releases.length;
+    // 先释放所有在途任务，红测也不留下计时器或挂起的操作。
+    for (let i = 0; i < 4; i++) {
+      for (const release of [...releases].reverse()) release();
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    await pending;
+    assert.equal(initial, 3, "同一批最多三个免费缩略图下载，不逐张串行等待");
+    assert.deepEqual(sent?.thumbnails.map(t => t.assetId), ["parallel-0", "parallel-1", "parallel-2", "parallel-3"]);
+  });
+
   it("returns a settled advisory ranking without declaring its audit passed or repeating it", async () => {
     const report = parseAssetCandidateReport(rawReport);
     let saved: unknown;

@@ -1331,6 +1331,12 @@ def normalize_pixabay_videos(payload: dict, query: str, limit: int) -> List[Stoc
             continue
         width = int(best_file.get("width") or 0)
         height = int(best_file.get("height") or 0)
+        # 使用供应商返回的同片海报；优先小图以适配排序输入，不猜地址或拿作者头像代替。
+        renditions = item.get("videos", {})
+        preview_url = next((str(renditions[size]["thumbnail"]) for size in ("small", "tiny", "medium", "large")
+                            if isinstance(renditions.get(size), dict)
+                            and isinstance(renditions[size].get("thumbnail"), str)
+                            and renditions[size]["thumbnail"]), "")
         candidates.append(
             StockAssetCandidate(
                 provider="pixabay",
@@ -1339,7 +1345,7 @@ def normalize_pixabay_videos(payload: dict, query: str, limit: int) -> List[Stoc
                 width=width,
                 height=height,
                 duration=float(item.get("duration") or 0),
-                preview_url="",
+                preview_url=preview_url,
                 download_url=str(best_file.get("url") or ""),
                 source_url=str(item.get("pageURL") or ""),
                 creator=str(item.get("user") or ""),

@@ -764,6 +764,20 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual([candidate.asset_id for candidate in pexels], ["1", "2"])
         self.assertEqual([candidate.asset_id for candidate in pixabay], ["3", "4"])
 
+    def test_pixabay_video_poster_is_preserved_without_guessing_a_thumbnail(self):
+        # 官方 videos.<rendition>.thumbnail 是该视频的海报，不是作者头像或自造 URL。
+        poster = "https://cdn.pixabay.com/video/2015/08/08/125-135736646_small.jpg"
+        item = {"id": 125, "duration": 12, "videos": {
+            "medium": {"width": 1280, "height": 720, "url": "https://cdn.pixabay.com/video/clip.mp4"},
+            "small": {"width": 640, "height": 360, "url": "https://cdn.pixabay.com/video/clip-small.mp4", "thumbnail": poster},
+        }}
+        candidates = normalize_pixabay_videos({"hits": [item]}, "water reflection", 6)
+        self.assertEqual(candidates[0].preview_url, poster)
+        self.assertEqual(candidates[0].download_url, "https://cdn.pixabay.com/video/clip.mp4")
+        item["videos"]["small"].pop("thumbnail")
+        item["userImageURL"] = "https://cdn.pixabay.com/user/avatar.jpg"
+        self.assertEqual(normalize_pixabay_videos({"hits": [item]}, "water", 6)[0].preview_url, "")
+
     def test_stock_asset_requests_include_provider_safe_headers(self):
         headers = api_headers({"Authorization": "test-key"})
 

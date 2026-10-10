@@ -1646,12 +1646,16 @@ export function buildTaskPrompt(
       ...(task.payload.revision ? { revision: task.payload.revision } : {}),
     };
   }
+  // 候选排序资料含多镜候选与导演上下文；省去排版空白，不删字段、证据或审计要求。
+  const roleContract = task.kind === "role-audit" ? task.payload.context.currentRoleContract : undefined;
+  const compactRankingData = task.kind === "asset-rank" || (roleContract !== null && typeof roleContract === "object"
+    && "automaticUseMinimumSemanticScore" in roleContract && typeof roleContract.automaticUseMinimumSemanticScore === "number");
   return [
     ...stableRulesBlock(prompt),
     "",
     DATA_ISOLATION_NOTICE,
     "<<<TASK_DATA",
-    JSON.stringify(data, null, 2),
+    JSON.stringify(data, null, compactRankingData ? undefined : 2),
     "TASK_DATA>>>",
     "",
     "最终回复只输出一个满足 broker JSON Schema 的 JSON 对象，不要输出解释文字。",

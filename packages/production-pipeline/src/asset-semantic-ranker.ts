@@ -566,26 +566,42 @@ async function collectRankThumbnails(
   }
   const thumbnails: AssetRankThumbnail[] = [];
   const deadline = Date.now() + THUMBNAIL_COLLECTION_MS;
-  for (const item of queue) {
-    if (thumbnails.length >= MAX_RANK_THUMBNAILS || Date.now() >= deadline) break;
+  const fetched = new Map<string, Promise<Buffer | undefined>>();
+  const collect = async (item: typeof queue[number]): Promise<AssetRankThumbnail | undefined> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
+      let download = fetched.get(item.candidate.previewUrl);
+      if (!download) {
+        download = fetchThumbnail(item.candidate.previewUrl);
+        fetched.set(item.candidate.previewUrl, download);
+      }
       const jpeg = await Promise.race([
-        fetchThumbnail(item.candidate.previewUrl),
+        download,
         new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), Math.min(5_000, deadline - Date.now())); }),
       ]);
-      if (!jpeg || jpeg.length < 4 || jpeg.length > MAX_THUMBNAIL_BYTES || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) continue;
-      thumbnails.push({
+      if (!jpeg || jpeg.length < 4 || jpeg.length > MAX_THUMBNAIL_BYTES || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) return undefined;
+      return {
         scenePosition: item.scenePosition,
         provider: item.candidate.provider,
         assetId: item.candidate.assetId,
         sha256: await sha256Hex(jpeg),
         jpegBase64: jpeg.toString("base64"),
-      });
+      };
     } catch {
       // 单张缩略图失败只会降低该候选的视觉证据，不中断整次免费素材搜索。
     } finally {
       if (timer) clearTimeout(timer);
+    }
+    return undefined;
+  };
+  // 有界并发减少网络串行等待；按原队列收回结果，快慢不改变镜头公平性或候选身份。
+  // 批量大小不超过剩余图像槽位，维持12图/24尝试/20秒的原边界。
+  for (let index = 0; index < queue.length && thumbnails.length < MAX_RANK_THUMBNAILS && Date.now() < deadline;) {
+    const size = Math.min(3, MAX_RANK_THUMBNAILS - thumbnails.length);
+    const batch = queue.slice(index, index + size);
+    index += batch.length;
+    for (const thumbnail of await Promise.all(batch.map(collect))) {
+      if (thumbnail) thumbnails.push(thumbnail);
     }
   }
   return thumbnails;

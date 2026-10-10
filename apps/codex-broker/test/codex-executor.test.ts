@@ -323,6 +323,21 @@ it("rejects a null asset-rank thumbnail list instead of treating it as empty", (
   assert.throws(() => parseTaskRequest(request), /thumbnails must be an array/);
 });
 
+it("sends compact ranking and ranking-audit data without dropping candidate facts or image identities", () => {
+  const rank = assetRankRequest();
+  const audit = roleAuditRequest();
+  audit.payload.context = { upstreamFacts: { scenes: rank.payload.scenes }, currentRoleContract: { automaticUseMinimumSemanticScore: 40 } };
+  for (const request of [rank, audit]) {
+    const prompt = buildTaskPrompt(parseTaskRequest(request));
+    const data = prompt.split("<<<TASK_DATA\n")[1]!.split("\nTASK_DATA>>>")[0]!;
+    const parsed = JSON.parse(data);
+    assert.equal(data, JSON.stringify(parsed), "候选资料不发送仅供人阅读的重复缩进");
+    assert.deepEqual(parsed.scenes ?? parsed.context.upstreamFacts.scenes, rank.payload.scenes);
+    if (request === rank) assert.equal(parsed.thumbnails[0].assetId, "asset-1");
+    else assert.equal(parsed.context.currentRoleContract.automaticUseMinimumSemanticScore, 40);
+  }
+});
+
 function jpegOfSize(size: number): Buffer {
   assert.ok(size >= 5);
   const jpeg = Buffer.alloc(size);
