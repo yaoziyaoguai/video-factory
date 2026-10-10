@@ -41,6 +41,23 @@ def pexels_opener(request, timeout):
 
 
 class StockSearchIsolationTest(unittest.TestCase):
+    def test_candidate_report_keeps_scene_duration_offset_and_action_requirements(self):
+        scene = Scene(1, "", 6, "stock", "手把杯子从左移到右")
+        route = sea_route(alternatives=())
+        route["shots"][0].update({"sourceInSeconds": 2,
+            "visibleAction": "手把杯子从左移到右", "successCriteria": ["完整看到拿起、移动、放下"],
+            "temporalBeats": [{"startSeconds": 0, "endSeconds": 6, "action": "完整移动杯子"}]})
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(stock_assets.urllib.request, "urlopen", side_effect=pexels_opener), \
+                patch.dict(stock_assets.os.environ, {"PEXELS_API_KEY": "dummy"}):
+            public, _ = search_routed_scene_asset_candidates(1, [scene], Path(tmp), route)
+            row = json.loads(public.read_text())["scene_candidates"][0]
+        self.assertEqual(row["intent"].get("scene_duration_seconds"), "6")
+        self.assertEqual(row["intent"].get("source_in_seconds"), "2")
+        self.assertEqual(json.loads(row["intent"]["success_criteria"]), ["完整看到拿起、移动、放下"])
+        self.assertIn("完整移动杯子", row["intent"]["temporal_beats"])
+        self.assertEqual(row["candidates"][0]["duration"], 8)
+
     def test_worker_deadline_reaches_real_search_and_publishes_partial_inventory(self):
         clock, requests = [100.0], []
         def opener(request, timeout):

@@ -876,7 +876,10 @@ describe("asset semantic ranking", () => {
   });
 
   it("resumes the saved ranking request and reuses its thumbnail snapshot", async () => {
-    const report = parseAssetCandidateReport(rawReport);
+    const report = { ...parseAssetCandidateReport(rawReport), planningIntent: { rankingIntent: { shots: [{
+      scenePosition: 1, visibleAction: "蒸汽持续上升", sourceInSeconds: 1,
+      temporalBeats: [{ startSeconds: 0, endSeconds: 6, action: "蒸汽持续上升" }], successCriteria: ["完整连续动作"],
+    }] } } };
     let stored: unknown;
     let interruptProducer = true;
     let producerCalls = 0;
@@ -912,6 +915,9 @@ describe("asset semantic ranking", () => {
       },
       observePrepared: async (operation: CodexPreparedOperation): Promise<CodexTaskExecution> => {
         observed.push(operation.requestId);
+        const payload = operation.envelope.payload as AssetCandidateReport;
+        assert.equal(payload.scenes[0]!.intent.scene_duration_seconds, "6");
+        assert.equal(payload.scenes[0]!.intent.source_in_seconds, "1");
         return { output: ranking };
       },
     };

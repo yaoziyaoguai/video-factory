@@ -357,6 +357,22 @@ function rankModelPayload(payload: RankPayload, contextReport: AssetCandidateRep
   const planning = (contextReport as AssetCandidateReport & { planningIntent?: unknown }).planningIntent;
   const director = isRecord(planning) ? planning.rankingIntent : undefined;
   const scenes = payload.scenes.map(scene => {
+    const shot = isRecord(director) && Array.isArray(director.shots)
+      ? director.shots.find(value => isRecord(value) && value.scenePosition === scene.scenePosition) : undefined;
+    const beats = isRecord(shot) && Array.isArray(shot.temporalBeats) ? shot.temporalBeats : [];
+    const lastBeat = beats.at(-1);
+    const duration = isRecord(lastBeat) && typeof lastBeat.endSeconds === "number" && Number.isFinite(lastBeat.endSeconds)
+      && lastBeat.endSeconds > 0 ? lastBeat.endSeconds : undefined;
+    // 候选可复用，但意图必须跟当前导演稿走。其已校验节拍覆盖本镜全长（允许一帧取整）；
+    // 不改候选/checkpoint身份，已受理请求仍观察原信封，已完成批次仍直接重放。
+    const currentIntent: Record<string, string> = isRecord(shot) ? {
+      scene_duration_seconds: duration === undefined ? "" : String(duration),
+      duration_evidence: "当前已校验导演节拍覆盖全镜，允许一帧取整；无节拍时不沿用旧检索时长。",
+      source_in_seconds: String(shot.sourceInSeconds ?? 0),
+      visible_action: typeof shot.visibleAction === "string" ? shot.visibleAction : "",
+      temporal_beats: JSON.stringify(beats),
+      success_criteria: JSON.stringify(shot.successCriteria ?? []),
+    } : {};
     const related = new Set([scene.scenePosition - 1, scene.scenePosition, scene.scenePosition + 1]);
     if (isRecord(director) && Array.isArray(director.shots)) {
       // 引用可以跨镜头距离；只补齐依赖闭包，不把无关全片上下文复制到每个镜头。
@@ -372,6 +388,7 @@ function rankModelPayload(payload: RankPayload, contextReport: AssetCandidateRep
     }
     return { ...scene, intent: {
     ...scene.intent,
+    ...currentIntent,
     rankingContext: JSON.stringify({
       ...(director === undefined ? {} : { director: isRecord(director) && Array.isArray(director.shots)
         ? { planContract: director.planContract, shots: director.shots.filter(shot => isRecord(shot)
@@ -431,6 +448,7 @@ function rankAuditContext(payload: RankPayload) {
     currentRoleContract: {
       preserveEveryCandidate: true, ranksStartAtOneAndAreUnique: true, lockedMustRemainFalse: true,
       automaticUseMinimumSemanticScore: 40,
+      temporalEvidencePolicy: "对视频候选核对 intent.scene_duration_seconds + source_in_seconds 与候选 duration；图库整数时长可能向下取整，临界值和0时长只记待核，明显不足不能声称完整覆盖。图片不因duration=0判短。temporal_beats/success_criteria/visible_action 中的动作起止与连续性不能由单张缩略图证明。分别记录静态匹配、时长适配和动作证据缺口，不改创作者时长或虚抬分数；不要求新增下载或付费来让排序报告通过。",
       noMatchPolicy: "所有候选都不满足核心主体、物体和动作时，完整保留并相对排序、全部低于 40、明确标记低于推荐标准；排序结果本身可以通过审计。素材能否采用由宿主核对用户确认范围、用途与费用，不得为推进流程抬高分数或更改创作要求。",
     },
     downstreamBoundary: "只排序已有候选；不得要求尚未下载的原文件或后续成片作为当前节点通过证据。",

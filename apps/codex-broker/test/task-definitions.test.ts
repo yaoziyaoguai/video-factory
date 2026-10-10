@@ -307,7 +307,7 @@ describe("broker-owned task definitions", () => {
       [publish.version, rank.version, reference.version, review.version, audit.version],
       [
         "video-factory/publish-editor-v4",
-        "video-factory/asset-rank-v6",
+        "video-factory/asset-rank-v7",
         "video-factory/reference-grammar-v4",
         "video-factory/visual-review-v20",
         "video-factory/role-audit-v12",

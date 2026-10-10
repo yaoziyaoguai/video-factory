@@ -316,6 +316,8 @@ export class AudioReviewService {
         ...identityPayload,
         reviewContext: {
           ...identityPayload.reviewContext,
+          evidenceBoundary: "实际成片混合音轨；抽帧时间不是切镜时间，opening 表示镜头内部的开段采样而非镜头起点。镜头时间以 renderTimeline 为对照；若其不可用，不从脚本或抽帧猜测精确切镜，也不能确认逐帧口型同步。",
+          renderTimeline: await readRenderTimeline(input.renderManifestPath, root, video, media.durationMs),
           audioEvidence: {
             attachmentType: "input_audio", format: "mp3",
             ...(lowLevelIntervals ? {
@@ -439,6 +441,32 @@ function boundFailureDetails(error: unknown, binding: AudioInputBinding): SafeAu
     return safe;
   }
   return undefined;
+}
+
+async function readRenderTimeline(manifestPath: string | undefined, root: string, video: string, durationMs: number) {
+  const unavailable = { source: "unavailable", reason: "没有与当前成片和总时长核对一致的渲染时间线；抽帧不能替代切镜证据。" };
+  if (!manifestPath) return unavailable;
+  try {
+    const target = await realpath(manifestPath);
+    if (!target.startsWith(`${root}${path.sep}`) || (await stat(target)).size > 512 * 1024) return unavailable;
+    const manifest = JSON.parse(await readFile(target, "utf8"));
+    if (typeof manifest.output_file !== "string" || await realpath(manifest.output_file) !== video
+      || !Array.isArray(manifest.slides) || !manifest.slides.length) return unavailable;
+    let elapsed = 0;
+    const positions = new Set<number>();
+    const scenes: Array<{ scenePosition: number; startMs: number; endMs: number }> = [];
+    for (const slide of manifest.slides) {
+      if (!slide || !Number.isInteger(slide.position) || slide.position < 1 || positions.has(slide.position)
+        || typeof slide.duration !== "number" || !Number.isFinite(slide.duration) || slide.duration <= 0) return unavailable;
+      positions.add(slide.position);
+      const startMs = Math.round(elapsed * 1000);
+      elapsed += slide.duration;
+      scenes.push({ scenePosition: slide.position, startMs, endMs: Math.round(elapsed * 1000) });
+    }
+    // 渲染按30fps累计取整；这里只给名义镜头区间，不冒充逐帧/词级同步测量。
+    if (Math.abs(elapsed * 1000 - durationMs) > 1000 / 30) return unavailable;
+    return { source: "render_manifest", precision: "名义镜头区间；实际渲染有不超过一帧的取整误差，不是逐帧动作或词级对齐。", scenes };
+  } catch { return unavailable; }
 }
 
 async function audioInputIdentity(input: VisualReviewAgentInput, root: string): Promise<string> {

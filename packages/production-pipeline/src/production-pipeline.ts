@@ -15244,7 +15244,7 @@ function assetSemanticRankNode(
       transport: "unix_socket",
       billing: "subscription",
       configurationSource: "system_default",
-      parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v6" },
+      parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v7" },
       estimatedCostCny: 0,
     } : {
       providerId: "deterministic-quality-v1",
@@ -15315,7 +15315,7 @@ function assetSemanticRankNode(
                 transport: "unix_socket",
                 billing: "subscription",
                 configurationSource: "system_default",
-                parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v6" },
+                parameters: { rankingMode: "visual_semantic", promptPack: "video-factory/asset-rank-v7" },
               },
               providerLabel: "Codex 候选画面排序",
             });

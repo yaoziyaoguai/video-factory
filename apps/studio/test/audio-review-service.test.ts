@@ -24,11 +24,13 @@ const checks = Object.fromEntries(AUDIO_REVIEW_CHECKS.map((key) => [key, "not_ob
 async function recoveryHarness() {
   const directory = await mkdtemp("/tmp/vf-audio-recovery-");
   const counts = { model: 0, extract: 0, prepare: 0 };
+  const payloads: Record<string, unknown>[] = [];
   const registry = new ModelRegistry({ directory: path.join(directory, "registry"), socketDirectory: directory, timeoutMs: 1000,
     createExecutor: (entry) => ({ identity: { profileId: "deepseek", providerId: entry.id, modelId: entry.id, taskKinds: ["audio-review"] }, modelCandidates: [entry.id],
       runTask: async (task) => {
         counts.model++;
         if (task.kind !== "audio-review") throw new Error("wrong task");
+        payloads.push(task.payload);
         return { output: JSON.stringify({ audioSha256: task.payload.audioSha256, summary: "恢复证据", checks, findings: [] }),
           trace: { taskKind: task.kind, providerId: entry.id, modelId: entry.id, prompt: "test",
             requestIdHash: sha(Buffer.from("provider-issued-request-id")),
@@ -48,9 +50,31 @@ async function recoveryHarness() {
   await writeFile(video, "fixture-video");
   const input = { runRoot: directory, videoPath: video, selectedAudioModelId: model.id };
   const resultPath = async () => path.join(directory, ".audio-review-requests", (await readdir(path.join(directory, ".audio-review-requests"))).find((name) => name.endsWith(".result.json"))!);
-  return { directory, counts, registry, model, client, connections, newService, input, resultPath,
+  return { directory, counts, payloads, registry, model, client, connections, newService, input, resultPath,
     close: async () => { await registry.close(); await rm(directory, { recursive: true, force: true }); } };
 }
+
+test("sound review receives render scene bounds separately from interior sample timestamps", async () => {
+  const h = await recoveryHarness();
+  try {
+    const manifestPath = path.join(h.directory, "render_manifest.json");
+    await writeFile(manifestPath, JSON.stringify({ output_file: h.input.videoPath,
+      slides: [{ position: 1, duration: 6 }, { position: 2, duration: 6 }] }));
+    const input = { ...h.input, renderManifestPath: manifestPath, preparedMedia: {
+      durationMs: 12000, frames: [{ timecodeMs: 6900, scenePosition: 2, phase: "opening" as const,
+        sha256: sha(jpeg), jpegBase64: jpeg.toString("base64") }],
+    } };
+    assert.equal((await h.newService().review(input)).status, "completed");
+    const context = h.payloads[0]!.reviewContext as Record<string, unknown>;
+    const timeline = context.renderTimeline as { source: string; scenes: unknown[] } | undefined;
+    assert.ok(timeline, "仅提供6.9秒的抽帧会丢掉真正6秒的剪辑边界");
+    assert.equal(timeline.source, "render_manifest");
+    assert.deepEqual(timeline.scenes, [{ scenePosition: 1, startMs: 0, endMs: 6000 }, { scenePosition: 2, startMs: 6000, endMs: 12000 }]);
+    assert.match(String(context.evidenceBoundary), /抽帧时间不是切镜/);
+    assert.equal((await h.newService().review(input)).status, "completed");
+    assert.equal(h.counts.model, 1, "新增上下文不改变同一请求的恢复语义");
+  } finally { await h.close(); }
+});
 
 test("completed sound recovery validates full binding and avoids repeated preprocessing after restart", async () => {
   const h = await recoveryHarness();
@@ -63,6 +87,24 @@ test("completed sound recovery validates full binding and avoids repeated prepro
       await writeFile(file, JSON.stringify({ ...saved, [field]: field === "durationMs" ? 2000 : "wrong" }));
       assert.equal((await h.newService().review(h.input)).status, "uncertain", `错绑${field}不能冒充已核清失败或正常报告`);
       assert.equal(h.counts.model, 1);
+    }
+  } finally { await h.close(); }
+});
+
+test("sound review does not invent cuts when render timing or media binding is unavailable", async () => {
+  const h = await recoveryHarness();
+  try {
+    const manifestPath = path.join(h.directory, "render_manifest.json");
+    for (const manifest of [undefined,
+      { output_file: h.input.videoPath, slides: [{ position: 1, duration: 8 }] },
+      { output_file: path.join(h.directory, "missing.mp4"), slides: [{ position: 1, duration: 1 }] }]) {
+      if (manifest) await writeFile(manifestPath, JSON.stringify(manifest));
+      const result = await h.newService().review({ ...h.input, ...(manifest ? { renderManifestPath: manifestPath } : {}) });
+      assert.equal(result.status, "completed", "没有可信切镜证据不阻止审听已有音轨");
+      const context = h.payloads.at(-1)!.reviewContext as Record<string, unknown>;
+      const timeline = context.renderTimeline as { source: string; scenes?: unknown[] };
+      assert.equal(timeline.source, "unavailable");
+      assert.equal(timeline.scenes, undefined);
     }
   } finally { await h.close(); }
 });

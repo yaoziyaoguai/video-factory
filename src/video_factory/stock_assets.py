@@ -261,6 +261,8 @@ def search_routed_scene_asset_candidates(
         report["scene_candidates"].append({
             "scene_position": scene.position,
             "intent": {
+                "scene_duration_seconds": f"{scene.duration:g}",
+                "source_in_seconds": f"{float(route.get('sourceInSeconds') or 0):g}",
                 "narrative_role": str(route.get("narrativeRole") or ""),
                 "subject": str(route.get("subject") or ""),
                 "environment": str(route.get("environment") or ""),
@@ -270,6 +272,7 @@ def search_routed_scene_asset_candidates(
                 "lighting": str(route.get("lighting") or ""),
                 "generation_prompt": str(route.get("generationPrompt") or ""),
                 "temporal_beats": " | ".join(str(beat) for beat in (route.get("temporalBeats") or []) if str(beat).strip()),
+                "success_criteria": json.dumps(route.get("successCriteria") or [], ensure_ascii=False),
                 "continuity_note": str(route.get("continuityNote") or ""),
                 "reuse_from_scene_position": str(reuse_from_scene_position or ""),
             },
