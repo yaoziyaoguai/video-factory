@@ -4572,6 +4572,22 @@ export class ProductionPipeline {
         clock: this.clock,
         idFactory: this.idFactory,
       });
+      const planning = previous.nodeRuns.find(node => node.nodeId === override.nodeId);
+      if (override.nodeId === "creative-planning" && usesJointCreativePlanning(brief)
+        && planning?.status === "needs_human") {
+        if (!boundaryGatesEnabled(brief) || planning.intervention?.boundary !== "node-complete"
+          || planning.intervention.kind !== undefined
+          || !previous.interventions.some(stop => stop.id === planning.intervention!.id
+            && stop.nodeId === planning.nodeId && stop.boundary === "node-complete" && stop.kind === undefined)) {
+          throw new HumanDecisionConflictError("当前规划仍在专用确认点，请在创作工作台修改当前稿或返回前期方案；不能用通用输入保存替代该决定。");
+        }
+        // 共享 brief 的输入修订不是批准；专用转移保留待重执行义务，旧成果仅供回看。
+        return runner.reviseCompletedNodeInput(
+          this.createWorkflow(effectiveBrief),
+          withExecutableBrief(effectivePrevious, effectiveBrief),
+          override,
+        );
+      }
       return runner.applyNodeInputOverride(
         this.createWorkflow(effectiveBrief),
         withExecutableBrief(effectivePrevious, effectiveBrief),

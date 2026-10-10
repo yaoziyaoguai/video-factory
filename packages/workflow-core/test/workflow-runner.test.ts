@@ -3046,6 +3046,77 @@ describe("WorkflowRunner", () => {
     assert.deepEqual(waiting, before, "被拒绝的保存不得留下任何快照修改");
   });
 
+  it("keeps a completed-boundary input revision pending through restart, configuration and failed execution", async () => {
+    let fail = false;
+    const consumed: unknown[] = [];
+    const definition: WorkflowDefinition = { id: "completed-input-revision", name: "Input revision", version: "1", nodes: [{
+      id: "plan", label: "Plan", capability: "script.draft", mode: "automatic",
+      execute: input => {
+        consumed.push(input);
+        if (fail) throw new Error("controlled planning failure");
+        return { status: "needs_human", output: input,
+          intervention: { boundary: "node-complete", reason: "确认当前结果", requiredAction: "approve", options: ["approve", "reject"] } };
+      },
+    }] };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+    const waiting = await runner.run(definition, { title: "original" });
+    const oldStop = waiting.interventions[0]!;
+    const revised = runner.reviseCompletedNodeInput(definition, waiting, {
+      nodeId: "plan", actor: "editor", input: { title: "revised" },
+      expectedVersionId: waiting.nodeRuns[0]!.inputState!.effectiveVersionId,
+    });
+    assert.equal(revised.revision, waiting.revision + 1);
+    assert.equal(revised.status, "stale");
+    assert.equal(consumed.length, 1);
+    assert.deepEqual(revised.decisions, waiting.decisions);
+    assert.equal(revised.nodeRuns[0]!.reexecutionRequiredForInputVersionId, revised.nodeRuns[0]!.inputState!.effectiveVersionId);
+    assert.throws(() => runner.applyNodeOverride(definition, revised, { nodeId: "plan", actor: "editor", output: { title: "old" } }), /must execute its revised input/);
+    const configured = runner.applyExecutionConfigurationOverride(definition, revised, {
+      nodeId: "plan", actor: "editor", initialInput: { title: "configured" },
+    });
+    assert.equal(configured.nodeRuns[0]!.reexecutionRequiredForInputVersionId, revised.nodeRuns[0]!.reexecutionRequiredForInputVersionId);
+    const editedAgain = runner.applyNodeInputOverride(definition, configured, {
+      nodeId: "plan", actor: "editor", input: { title: "latest" },
+      expectedVersionId: configured.nodeRuns[0]!.inputState!.effectiveVersionId,
+    });
+    assert.equal(editedAgain.nodeRuns[0]!.reexecutionRequiredForInputVersionId, editedAgain.nodeRuns[0]!.inputState!.effectiveVersionId);
+    fail = true;
+    const failed = await runner.resumeStale(definition, JSON.parse(JSON.stringify(editedAgain)));
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.nodeRuns[0]!.reexecutionRequiredForInputVersionId, editedAgain.nodeRuns[0]!.inputState!.effectiveVersionId);
+    assert.throws(() => runner.applyNodeOverride(definition, failed, {
+      nodeId: "plan", actor: "editor", output: { title: "manual bypass" }, allowTerminalEdit: true,
+    }), /must execute its revised input/);
+    fail = false;
+    const retried = await runner.retryFailedNode(definition, failed, "plan");
+    assert.deepEqual(consumed, [{ title: "original" }, { title: "latest" }, { title: "latest" }]);
+    assert.equal(retried.status, "needs_human");
+    assert.equal(retried.nodeRuns[0]!.reexecutionRequiredForInputVersionId, undefined);
+    assert.notEqual(retried.interventions[0]!.id, oldStop.id);
+    await assert.rejects(() => runner.resume(definition, retried, { interventionId: oldStop.id, actor: "editor", action: "approve" }), /not active/);
+    assert.equal((await runner.resume(definition, retried, {
+      interventionId: retried.interventions[0]!.id, actor: "editor", action: "approve",
+    })).status, "succeeded");
+  });
+
+  for (const kind of ["creative_review", "source_review_decision", "source_review_retry"] as const) {
+    it(`does not revise inputs through the completed-boundary method at ${kind}`, async () => {
+      const definition: WorkflowDefinition = { id: "special-input-stop", name: "Special input stop", version: "1", nodes: [{
+        id: "plan", label: "Plan", capability: "script.draft", mode: "automatic", execute: () => ({
+          status: "needs_human", output: { title: "current" },
+          intervention: { kind, reason: "专用决定", requiredAction: "approve", options: ["approve", "reject"] },
+        }),
+      }] };
+      const runner = new WorkflowRunner({ clock, idFactory: deterministicIds() });
+      const waiting = await runner.run(definition, { title: "original" });
+      const before = structuredClone(waiting);
+      assert.throws(() => runner.reviseCompletedNodeInput(definition, waiting, {
+        nodeId: "plan", actor: "editor", input: { title: "revised" },
+      }), /no active ordinary completion boundary/);
+      assert.deepEqual(waiting, before);
+    });
+  }
+
   it("rejects a generic approve on a source_review_retry stop regardless of its declared options (R4-03)", async () => {
     const definition: WorkflowDefinition = {
       id: "retry-approve-guard",

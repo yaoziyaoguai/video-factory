@@ -21,8 +21,10 @@ import { StudioInputError, type StudioProvider, type StudioRunDetail } from "../
 const TREATMENT_PROVIDER_ID = "codex-creative-treatment-v1";
 
 class EditingWorker {
+  constructor(private readonly calls?: string[]) {}
   async run(request: Record<string, unknown>): Promise<WorkerResponse> {
     const capability = String(request.capability);
+    this.calls?.push(capability);
     const outputDir = String(request.outputDir);
     await mkdir(outputDir, { recursive: true });
     const outputs: Record<string, Record<string, unknown>> = {
@@ -75,6 +77,7 @@ class EditingWorker {
 }
 
 interface EditingSpies {
+  workerCalls?: string[];
   treatmentCalls: string[];
   screenwriterCalls: string[];
   directorCalls: number;
@@ -251,7 +254,7 @@ function editingProviders(): StudioProvider[] {
 function newEditingStudio(workspaceRoot: string, spies: EditingSpies): { studio: ProductionStudio; pipeline: ProductionPipeline } {
   const pipeline = new ProductionPipeline({
     workspaceRoot,
-    worker: new EditingWorker(),
+    worker: new EditingWorker(spies.workerCalls),
     ...editingAgents(spies),
     assetProviders: EDITING_ASSET_PROVIDERS,
   });
@@ -295,6 +298,96 @@ async function mutateRunJson(runId: string, workspaceRoot: string, mutate: (payl
 }
 
 describe("planningStageId editing API (B4-REMAINDER)", () => {
+  it("saves changed planning input at the node-complete stop without adopting or executing it", async (t) => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-editing-complete-stop-"));
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [], workerCalls: [] };
+    const harness = newEditingStudio(workspaceRoot, spies);
+    let run = await harness.pipeline.start({ ...editingBrief(),
+      workflowFeatures: { ...editingBrief().workflowFeatures, boundaryGates: "user-confirmed-v1" },
+    });
+    const briefStop = run.nodeRuns.find(node => node.nodeId === "brief")!.intervention!;
+    run = await harness.pipeline.decide(run.id, { interventionId: briefStop.id, action: "approve", actor: "producer",
+      expectedRunRevision: run.revision, reviewEvidenceId: null });
+    const planning = run.nodeRuns.find(node => node.nodeId === "creative-planning")!;
+    assert.equal(planning.status, "needs_human");
+    assert.equal(planning.intervention?.boundary, "node-complete");
+    const before = await harness.pipeline.loadPersisted(run.id);
+    const callsBefore = structuredClone(spies);
+    const input = await effectivePlanningInputValue(harness.studio, run.id) as { brief: ProductionBrief };
+    const tokens = await planningEditTokens(harness.studio, run.id);
+    const app = buildStudioApp({ service: {
+      applyNodeInputOverride: harness.studio.applyNodeInputOverride.bind(harness.studio),
+      applyNodeOverride: harness.studio.applyNodeOverride.bind(harness.studio),
+    } as unknown as StudioServicePort, logger: false });
+    t.after(() => app.close());
+    const response = await app.inject({ method: "PUT", url: `/api/runs/${run.id}/nodes/creative-planning/input-override`,
+      payload: { ...tokens, planningStageId: "director", input: { ...input, brief: { ...input.brief, title: "修改后待重新规划" } } },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    const saved = await harness.pipeline.loadPersisted(run.id);
+    assert.equal(saved.status, "stale");
+    assert.equal(saved.revision, before.revision + 1, "one input revision is one atomic commit");
+    assert.equal(saved.initialInput.title, "修改后待重新规划");
+    assert.deepEqual(saved.decisions, before.decisions, "saving input is not approving the old stop");
+    assert.deepEqual(saved.artifacts, before.artifacts, "saving retains the existing artifacts without producing more");
+    assert.deepEqual(spies, callsBefore, "saving makes no model request");
+    const savedPlanning = saved.nodeRuns.find(node => node.nodeId === "creative-planning")!;
+    assert.equal(savedPlanning.inputState!.versions.length, planning.inputState!.versions.length + 1);
+    assert.equal(savedPlanning.outputState!.stale, true);
+    assert.equal(savedPlanning.reexecutionRequiredForInputVersionId, savedPlanning.inputState!.effectiveVersionId);
+    assert.equal(savedPlanning.intervention, undefined, "there is no new result to approve yet");
+    assert.ok(!saved.interventions.some(stop => stop.id === planning.intervention!.id));
+
+    // 同一正式接口覆盖旧revision、旧inputVersion与两步换稿；拒绝后必须逐字保全状态。
+    for (const staleTokens of [tokens, { ...tokens, expectedRunRevision: saved.revision }]) {
+      const rejected = await app.inject({ method: "PUT", url: `/api/runs/${run.id}/nodes/creative-planning/input-override`,
+        payload: { ...staleTokens, planningStageId: "director", input },
+      });
+      assert.equal(rejected.statusCode, 409, rejected.body);
+      assert.deepEqual(await harness.pipeline.loadPersisted(run.id), saved);
+    }
+    const overrideResponse = await app.inject({ method: "PUT", url: `/api/runs/${run.id}/nodes/creative-planning/override`,
+      payload: { output: savedPlanning.output },
+    });
+    assert.equal(overrideResponse.statusCode, 409, overrideResponse.body);
+    assert.match(overrideResponse.body, /重新生成/);
+    await assert.rejects(() => harness.pipeline.decide(run.id, {
+      interventionId: planning.intervention!.id, action: "approve", actor: "producer",
+      expectedRunRevision: saved.revision, reviewEvidenceId: null,
+    }));
+    assert.deepEqual(await harness.pipeline.loadPersisted(run.id), saved);
+
+    const savedInput = await effectivePlanningInputValue(harness.studio, run.id);
+    await harness.studio.applyNodeInputOverride(run.id, "creative-planning", {
+      ...await planningEditTokens(harness.studio, run.id), input: savedInput, planningStageId: "director",
+    }, "producer");
+    assert.deepEqual(await harness.pipeline.loadPersisted(run.id), saved, "an unchanged input remains a no-op");
+
+    // 进程重启与配置变更不得抹去待重执行义务；仍复用正式显式重生成消费者。
+    const restarted = newEditingStudio(workspaceRoot, spies);
+    await restarted.studio.applyNodeExecutionConfiguration(run.id, "creative-planning", {
+      expectedRunRevision: saved.revision, planningStageId: "director",
+      modelSelections: { "api-visual-director-v1": "director-model-two" },
+    }, "producer");
+    const configured = await restarted.pipeline.loadPersisted(run.id);
+    assert.equal(configured.nodeRuns.find(node => node.nodeId === "creative-planning")!.reexecutionRequiredForInputVersionId,
+      savedPlanning.inputState!.effectiveVersionId);
+    await assert.rejects(() => restarted.studio.applyNodeOverride(run.id, "creative-planning", {
+      output: savedPlanning.output,
+    }, "producer"), /重新生成/);
+    assert.deepEqual(spies, callsBefore, "save, rejected decisions and configuration make no model or worker request");
+    const regenerated = await restarted.pipeline.resumeStale(run.id);
+    const newPlanning = regenerated.nodeRuns.find(node => node.nodeId === "creative-planning")!;
+    assert.equal(spies.treatmentCalls.at(-1), "修改后待重新规划", "director-page editing still updates the shared brief consumed upstream");
+    assert.equal(regenerated.status, "needs_human");
+    assert.equal(newPlanning.intervention?.boundary, "node-complete");
+    assert.notEqual(newPlanning.intervention!.id, planning.intervention!.id);
+    assert.equal(newPlanning.reexecutionRequiredForInputVersionId, undefined);
+    assert.equal(newPlanning.outputState!.stale, false);
+    assert.deepEqual(regenerated.decisions, before.decisions, "regeneration is not adopting the new result");
+    assert.deepEqual(spies.workerCalls, [], "the next media stage must still wait for explicit approval");
+  });
+
   it("accepts planningStageId only on creative-planning and only for whitelisted stages", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-editing-http-"));
     const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };

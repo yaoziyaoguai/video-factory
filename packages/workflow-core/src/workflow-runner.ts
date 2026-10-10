@@ -44,6 +44,13 @@ export class NodeVersionConflictError extends Error {
   }
 }
 
+export class NodeReexecutionRequiredError extends Error {
+  constructor(readonly nodeId: string) {
+    super(`Node '${nodeId}' must execute its revised input before its output can be saved or approved.`);
+    this.name = "NodeReexecutionRequiredError";
+  }
+}
+
 export class StaleHumanContentError extends Error {
   readonly code = "STALE_HUMAN_CONTENT_REVIEW_REQUIRED";
   constructor(readonly nodeId: string, readonly field: "input" | "output", readonly effectiveVersionId: string, readonly runRevision: number) {
@@ -607,6 +614,9 @@ export class WorkflowRunner {
     if (previousNodeRun.status === "awaiting_spend_approval" || previousNodeRun.status === "approval_invalidated") {
       throw new Error(`Node '${override.nodeId}' is waiting for spend approval; use the spend authorization flow instead of editing its output.`);
     }
+    if (previousNodeRun.reexecutionRequiredForInputVersionId) {
+      throw new NodeReexecutionRequiredError(node.id);
+    }
     // 专用停点（试片决定/试片重试/创作讨论）承载各自的裁决与继续合同，通用换稿
     // 无法证明新版本会被继续路径采用——明确拒绝，指向专用入口（R3-03）。
     if (
@@ -758,6 +768,24 @@ export class WorkflowRunner {
     previousRun: WorkflowRun<TInitialInput>,
     override: NodeInputOverrideDraft<TInput>,
   ): WorkflowRun<TInitialInput> {
+    return this.overrideNodeInput(definition, previousRun, override, false);
+  }
+
+  /** 宿主显式选择普通完成边界的输入返工；不开放通用 needs_human 保存开关。 */
+  reviseCompletedNodeInput<TInitialInput, TInput = unknown>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+    override: NodeInputOverrideDraft<TInput>,
+  ): WorkflowRun<TInitialInput> {
+    return this.overrideNodeInput(definition, previousRun, override, true);
+  }
+
+  private overrideNodeInput<TInitialInput, TInput>(
+    definition: WorkflowDefinition,
+    previousRun: WorkflowRun<TInitialInput>,
+    override: NodeInputOverrideDraft<TInput>,
+    reviseCompletedBoundary: boolean,
+  ): WorkflowRun<TInitialInput> {
     validateWorkflowDefinition(definition);
     if (previousRun.workflowId !== definition.id || previousRun.workflowVersion !== definition.version) {
       throw new Error("Workflow definition does not match the persisted run.");
@@ -783,11 +811,18 @@ export class WorkflowRunner {
     if (previousNodeRun.status === "running") {
       throw new Error(`Node '${override.nodeId}' input cannot be overridden while it is running.`);
     }
+    if (reviseCompletedBoundary && (previousNodeRun.status !== "needs_human"
+      || previousNodeRun.intervention?.boundary !== "node-complete"
+      || previousNodeRun.intervention.kind !== undefined
+      || !previousRun.interventions.some(stop => stop.id === previousNodeRun.intervention!.id
+        && stop.nodeId === node.id && stop.boundary === "node-complete" && stop.kind === undefined))) {
+      throw new Error(`Node '${node.id}' has no active ordinary completion boundary for input revision.`);
+    }
     // 等待中的人审/费用停点是专属恢复入口的状态：通用输入保存会清掉停点（intervention/
     // spendPlan），随后的输出保存就能把节点标成成功——两步绕过必须从第一步拒绝
     //（R4-02/R5-01）。人审拒绝只看状态，不依赖 intervention 对象是否还在；普通 stale
     // 节点的显式输入复核不受影响。
-    if (previousNodeRun.status === "needs_human") {
+    if (previousNodeRun.status === "needs_human" && !reviseCompletedBoundary) {
       if (previousNodeRun.intervention && ["source_review_decision", "source_review_retry", "creative_review"].includes(previousNodeRun.intervention.kind ?? "")) {
         throw new Error(`Node '${override.nodeId}' is waiting for a dedicated '${previousNodeRun.intervention.kind}' decision; use its dedicated command instead of a generic input override.`);
       }
@@ -855,6 +890,9 @@ export class WorkflowRunner {
       stale: false,
       versions: [...(previousInputState?.versions ?? []), version],
     };
+    if (reviseCompletedBoundary || previousNodeRun.reexecutionRequiredForInputVersionId) {
+      nodeRun.reexecutionRequiredForInputVersionId = versionId;
+    }
     nodeRun.status = "stale";
     delete nodeRun.intervention;
     delete nodeRun.spendPlan;
@@ -1639,6 +1677,10 @@ export class WorkflowRunner {
       const derivedInput = node.getInput ? node.getInput(publicContext) : (context.initialInput as TInput);
       const input = resolveEffectiveNodeInput(node, nodeRun, derivedInput, upstreamVersionIds, publicContext);
       const inputVersionIds = executionInputVersionIdsFromUpstream(nodeRun, upstreamVersionIds);
+      // 配置变更可能重新派生输入；义务绑定本次实际消费的版本，但执行失败时不得清除。
+      if (nodeRun.reexecutionRequiredForInputVersionId) {
+        nodeRun.reexecutionRequiredForInputVersionId = nodeRun.inputState!.effectiveVersionId;
+      }
       const provider = resolveNodeProvider(node, context);
       if (provider) {
         receiptDraft = providerReceiptDraft(provider);
@@ -1802,6 +1844,9 @@ export class WorkflowRunner {
         if (intervention) {
           nodeRun.intervention = intervention;
         }
+        if (intervention?.boundary === "node-complete" && intervention.kind === undefined) {
+          completeInputReexecution(nodeRun, result.output, inputVersionIds);
+        }
         nodeRun.finishedAt = context.now();
         return nodeRun;
       }
@@ -1818,6 +1863,7 @@ export class WorkflowRunner {
       }
 
       nodeRun.status = "succeeded";
+      completeInputReexecution(nodeRun, result.output, inputVersionIds);
       nodeRun.finishedAt = context.now();
       return nodeRun;
     } catch (error) {
@@ -1860,6 +1906,13 @@ function isDefinitiveZeroAttemptFailure(receipt: NodeExecutionReceiptDraft): boo
     && (receipt.actualCostCny ?? 0) === 0;
 }
 
+function completeInputReexecution(node: NodeRun, output: unknown, inputVersionIds: string[]): void {
+  if (output !== undefined && node.reexecutionRequiredForInputVersionId
+    && inputVersionIds.includes(node.reexecutionRequiredForInputVersionId)) {
+    delete node.reexecutionRequiredForInputVersionId;
+  }
+}
+
 function validateResumeRequest<TInitialInput>(
   definition: WorkflowDefinition,
   run: WorkflowRun<TInitialInput>,
@@ -1877,6 +1930,10 @@ function validateResumeRequest<TInitialInput>(
   const waitingNode = run.nodeRuns.find((nodeRun) => nodeRun.status === "needs_human");
   if (waitingNode?.intervention?.id !== decision.interventionId) {
     throw new Error(`Intervention '${decision.interventionId}' is not active for run '${run.id}'.`);
+  }
+  if (decision.action === "approve" && waitingNode.reexecutionRequiredForInputVersionId
+    && waitingNode.intervention.boundary === "node-complete" && waitingNode.intervention.kind === undefined) {
+    throw new NodeReexecutionRequiredError(waitingNode.nodeId);
   }
   const allowedActions = waitingNode.intervention.options ?? [waitingNode.intervention.requiredAction];
   if (!allowedActions.includes(decision.action)) {

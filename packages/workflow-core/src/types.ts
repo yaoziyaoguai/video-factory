@@ -492,6 +492,8 @@ export interface NodeRun<TOutput = unknown> {
   executionReceipt?: NodeExecutionReceipt;
   inputState?: NodeInputState;
   outputState?: NodeOutputState<TOutput>;
+  /** 完成停点上的输入修订必须实际重执行；保存输出或更换配置不能代替这次执行。 */
+  reexecutionRequiredForInputVersionId?: string;
   spendPlan?: SpendPlan;
   spendAuthorizationId?: string;
   // C1：报价等待节点上最近一次"范围未覆盖"的结构化评估（原因/金额/缺失目标），

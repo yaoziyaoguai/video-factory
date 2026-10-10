@@ -3,7 +3,7 @@ import { mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile }
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { lock } from "proper-lockfile";
-import { NodeVersionConflictError, StaleHumanContentError } from "@video-factory/workflow-core";
+import { NodeReexecutionRequiredError, NodeVersionConflictError, StaleHumanContentError } from "@video-factory/workflow-core";
 import type { ArtifactDraft, HumanDecisionDraft, NodeExecutionReceipt, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
 import type { ProductionTemplateSnapshot } from "@video-factory/template-core";
 import {
@@ -2372,6 +2372,9 @@ export class ProductionStudio {
       if (!persisted) {
         await Promise.all(humanDocumentPaths.map((candidate) => rm(candidate, { force: true }).catch(() => undefined)));
       }
+      if (error instanceof NodeReexecutionRequiredError) {
+        throw new StudioConflictError("输入已经修改，请先重新生成规划，再确认新的成果；保存旧交付不能代替重新生成。");
+      }
       if (error instanceof StaleRunRevisionError || error instanceof NodeVersionConflictError || (error instanceof Error && /locked by another writer/.test(error.message))) {
         throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
       }
@@ -2905,6 +2908,7 @@ export class ProductionStudio {
       this.publish(detail);
       return detail;
     } catch (error) {
+      if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
       if (error instanceof StaleRunRevisionError || error instanceof NodeVersionConflictError || (error instanceof Error && /locked by another writer/.test(error.message))) {
         throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
       }
