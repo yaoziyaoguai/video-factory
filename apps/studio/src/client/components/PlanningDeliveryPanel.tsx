@@ -105,7 +105,7 @@ export function PlanningDeliveryPanel({ runId, versionId, artifactIds, artifacts
       ? "正式交付记录暂未核对成功。已有文件不会被当作新方案使用；请查看制作记录，不要为此重新规划。"
       : "正式规划尚未交付。当前可讨论的初稿请在上方创作工作台查看。"}</p>;
   }
-  return <section className="planning-delivery" aria-label="当前规划交付">
+  return <section className={`planning-delivery${selected.kind === "asset_ranking" ? " planning-delivery-ranking" : ""}`} aria-label="当前规划交付">
     <div className="planning-delivery-index" aria-label="规划产物目录">
       {current.map((entry) => <button key={entry.kind} type="button" className={entry.kind === selectedKind ? "is-selected" : ""}
         aria-pressed={entry.kind === selectedKind} onClick={() => setSelectedKind(entry.kind)}>

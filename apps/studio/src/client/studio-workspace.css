@@ -271,3 +271,19 @@
 .studio-v3 .character-turn-editor { padding: 12px 0; border-top: 1px solid var(--border, #ddd); }
 .studio-v3 .character-dialogue { padding-left: 20px; }
 .studio-v3 .character-dialogue li { margin: 14px 0; overflow-wrap: anywhere; }
+
+/* 排序理由是长文，不再被产物目录、镜头双列和候选内部分列层层挤窄。 */
+.studio-v3 .planning-delivery-ranking { grid-template-columns: minmax(0, 1fr); }
+.studio-v3 .planning-delivery-ranking .planning-delivery-index { display: flex; flex-wrap: wrap; gap: 4px; }
+.studio-v3 .planning-delivery-ranking .planning-delivery-document { border-left: 0; border-top: 1px solid var(--line); padding: 16px 0 0; }
+.studio-v3 .planning-delivery-ranking .planning-delivery-document > header { flex-wrap: wrap; }
+.studio-v3 .planning-delivery-ranking .node-preview-summary { grid-template-columns: minmax(0, 1fr); }
+.studio-v3 .planning-delivery-ranking .node-preview-summary dt { color: var(--muted); font-size: 12px; }
+.studio-v3 .planning-delivery-ranking .node-preview-summary dd { color: var(--ink); font-size: 14px; line-height: 1.75; }
+.studio-v3 .asset-ranking-preview .node-preview-items { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.studio-v3 .asset-ranking-preview .node-preview-items article { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px 0; background: transparent; border: 0; border-top: 1px solid var(--line); }
+.studio-v3 .asset-ranking-preview .node-preview-items article > span { font-size: 14px; line-height: 1.6; }
+.studio-v3 .asset-ranking-preview .node-preview-items article > div { min-width: 0; gap: 12px; }
+.studio-v3 .asset-ranking-preview .node-preview-items article strong { font-size: 16px; line-height: 1.75; overflow-wrap: anywhere; }
+.studio-v3 .asset-ranking-preview .node-preview-items article p { display: block; font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; }
+.studio-v3 .asset-ranking-preview .node-preview-items article p b { display: block; margin-bottom: 4px; color: var(--ink); font-size: 14px; }
