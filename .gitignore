@@ -30,3 +30,5 @@ docs/guides/*
 !docs/guides/stock-sources.md
 !docs/guides/model-configuration.md
 !docs/guides/production-workflow.md
+!docs/guides/production-overview.md
+!docs/guides/production-overview.html
