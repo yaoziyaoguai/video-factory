@@ -164,7 +164,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
             </div>
             {mode === "trend" ? (
               <div className="trend-refresh-status" aria-label="热点更新状态">
-                <span><i aria-hidden="true" />{modeBusy ? (modeItems.length > 0 ? "正在更新，当前仍可使用" : "正在生成今日提案") : "每日缓存"}</span>
+                <span><i aria-hidden="true" />{modeError ? "读取未完成" : modeGenerating ? (modeItems.length > 0 ? "正在生成新提案，已有内容仍可使用" : "正在生成今日提案") : modeLoading ? "正在读取已有提案" : "每日缓存"}</span>
                 <small>{trendStatusText(props.trendMeta)}</small>
                 {/* 判据必须是 modeBusy 而不是 modeLoading：读取返回后这一轮生成仍在后台推进，
                     此时再点一次不会"插队"，只会排到 broker 的唯一队列里等上几分钟才开始。 */}
@@ -183,7 +183,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
           {modeError && modeItems.length === 0 ? (
             <div className="candidate-error" role="alert"><AlertCircle aria-hidden="true" size={20} /><div><strong>{mode === "trend" ? "热点候选暂时不可用" : "系列候选暂时不可用"}</strong><span>{modeError}</span></div><button className="button button-secondary" type="button" onClick={() => props.onRetry(candidateMode)}><RefreshCw aria-hidden="true" size={15} />重试</button></div>
           ) : modeBusy && modeItems.length === 0 ? (
-            <div className="candidate-loading"><RadioTower aria-hidden="true" size={24} /><div><h2>{mode === "trend" ? "正在生成今日提案" : "正在读取系列选题"}</h2><p>{mode === "trend" ? "AI 选题总编正在分析热点并形成提案，通常需要几分钟；页面会自动更新，系列和自定义创作仍可立即使用。" : "系列策划通常几秒内就会出现。"}</p></div>{mode === "trend" ? <button className="button button-secondary" type="button" onClick={props.onManual}>录入自己的选题</button> : null}</div>
+            <div className="candidate-loading" role="status"><RadioTower aria-hidden="true" size={24} /><div><h2>{modeGenerating ? "正在生成今日提案" : mode === "trend" ? "正在读取已有提案" : "正在读取系列选题"}</h2><p>{modeGenerating ? "后台已开始生成，页面会自动更新。你仍可使用系列或自己的想法开始创作。" : "正在获取已保存的内容；此提示不表示启动了新的生成任务。"}</p></div>{mode === "trend" ? <button className="button button-secondary" type="button" onClick={props.onManual}>写下自己的想法</button> : null}</div>
           ) : mode === "series" && props.series.length === 0 ? (
             <div className="series-empty"><LibraryBig aria-hidden="true" size={28} /><div><h3>先创建一个可持续的系列</h3><p>定义受众、栏目承诺和内容支柱后，系统会给出连续编号的下一集候选。</p></div><button className="button button-primary" type="button" onClick={props.onCreateSeries}>创建第一个系列</button></div>
           ) : mode === "trend" && clearCount === 0 && deskView === "all" ? (
@@ -378,7 +378,8 @@ function SeriesRoadmap({
 
   return (
     <div className="series-roadmap">
-      <section className="series-season-summary" aria-label="本季策划摘要">
+      <details className="series-season-summary" role="region" aria-label="本季策划摘要">
+        <summary>第 {series.currentSeason.number} 季 · {series.currentSeason.title} · 下一集 {series.nextEpisodeNumber}<span>查看栏目承诺与规则</span></summary>
           <div><span>第 {series.currentSeason.number} 季 · {seasonPlanLabel(series)}</span><strong>{series.currentSeason.title}</strong>{series.currentSeason.arc.trim() !== series.premise.trim() ? <p>{series.currentSeason.arc}</p> : null}</div>
         <dl>
           <div><dt>栏目承诺</dt><dd>{series.premise}</dd></div>
@@ -388,7 +389,7 @@ function SeriesRoadmap({
             <p>{series.bible.rules.slice(0, 2).join("；")}</p>
           </details></dd></div>
         </dl>
-      </section>
+      </details>
 
       {onGenerateRoadmap && series.episodes.length > 0 && series.episodes.every((episode) => episode.status === "planned" && episode.planning.source === "rules") ? (
         <div className="candidate-cache-warning" role="status">
@@ -627,26 +628,33 @@ function normalizeMatchText(value: string): string {
 }
 
 function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSources, onRevise }: { item: StudioCandidateInboxItem; adopting: boolean; disabled: boolean; onAdopt: () => Promise<void>; onSupplementSources?: (candidate: StudioCandidateInboxItem) => void; onRevise?: (candidate: StudioCandidateInboxItem, instruction: string) => Promise<void> }) {
-  const [revising, setRevising] = useState(false);
-  const [revisionInstruction, setRevisionInstruction] = useState("");
-  const [revisionBusy, setRevisionBusy] = useState(false);
-  const [revisionNote, setRevisionNote] = useState<string>();
-  const [revisionError, setRevisionError] = useState<string>();
+  type RevisionDraft = { open: boolean; instruction: string; busy: boolean; note?: string; error?: string | undefined };
+  const [drafts, setDrafts] = useState<Record<string, RevisionDraft>>({});
+  // 切换候选保留各自草稿；异步结果只更新发送时的候选版本，不能污染后来选中的项。
+  const revisionKey = JSON.stringify([item.id, item.generationId ?? null]);
+  const draft = drafts[revisionKey];
+  const revising = draft?.open ?? false;
+  const revisionInstruction = draft?.instruction ?? "";
+  const revisionBusy = draft?.busy ?? false;
+  const revisionNote = draft?.note;
+  const revisionError = draft?.error;
+  function updateRevision(change: Partial<RevisionDraft>) {
+    setDrafts(current => ({ ...current, [revisionKey]: {
+      open: false, instruction: "", busy: false, ...current[revisionKey], ...change,
+    } }));
+  }
 
   async function sendCandidateRevision() {
     const trimmed = revisionInstruction.trim();
     if (!trimmed || !onRevise) return;
-    setRevisionBusy(true);
-    setRevisionError(undefined);
+    updateRevision({ busy: true, error: undefined });
     try {
       await onRevise(item, trimmed);
-      setRevisionInstruction("");
-      setRevising(false);
-      setRevisionNote("已提交修订：修订稿以「本版未审」进入候选收件箱，原候选保持不变。");
+      updateRevision({ instruction: "", open: false, note: "已提交修订：修订稿以「本版未审」进入候选收件箱，原候选保持不变。" });
     } catch (caught) {
-      setRevisionError(caught instanceof Error ? caught.message : String(caught));
+      updateRevision({ error: caught instanceof Error ? caught.message : String(caught) });
     } finally {
-      setRevisionBusy(false);
+      updateRevision({ busy: false });
     }
   }
   const adviceSkip = item.editorialDecision.verdict === "skip";
@@ -690,7 +698,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
                   value={revisionInstruction}
                   rows={2}
                   disabled={revisionBusy || disabled}
-                  onChange={(event) => { setRevisionInstruction(event.target.value); setRevisionError(undefined); }}
+                  onChange={(event) => updateRevision({ instruction: event.target.value, error: undefined })}
                   placeholder="这条候选要怎么改？只产一版未审修订稿，最终以这里的文字为准。"
                 />
               </label>
@@ -708,7 +716,7 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
               type="button"
               disabled={disabled || revisionBusy}
               aria-label={`修订 ${item.title}`}
-              onClick={() => setRevising(true)}
+              onClick={() => updateRevision({ open: true })}
             >修订</button>
           )}
           {revisionNote ? <p><small>{revisionNote}</small></p> : null}
@@ -981,10 +989,10 @@ function TrendRecoveryPanel({
 function CustomEntry({ onManual, onImport }: { onManual: () => void; onImport: () => void }) {
   return (
     <div className="custom-entry">
-      <div><p className="eyebrow">自主选题</p><h2>自定义创作</h2><p>不追热点也完全成立。把自己的观察、系列外灵感或已经核验的研究直接送进同一套制作流程。</p></div>
+      <div><h2>写下想法，保存为创作草稿</h2><p>先保存内容，再由你决定何时开始制作；保存不会生成视频或授权付费。</p></div>
       <div className="custom-entry-actions">
-        <button className="custom-entry-action" type="button" onClick={onManual}><PenLine aria-hidden="true" size={22} /><span><strong>手动录入</strong><small>填写标题、受众、痛点和开场钩子</small></span><ArrowRight aria-hidden="true" size={17} /></button>
-        <button className="custom-entry-action" type="button" onClick={onImport}><FileInput aria-hidden="true" size={22} /><span><strong>导入 JSON</strong><small>接入外部研究或其他 AI 工具的结构化结果</small></span><ArrowRight aria-hidden="true" size={17} /></button>
+        <button className="button button-primary" type="button" onClick={onManual}><PenLine aria-hidden="true" size={18} />写下新想法</button>
+        <details className="custom-entry-import"><summary>已有结构化资料？</summary><button className="button button-ghost" type="button" onClick={onImport}><FileInput aria-hidden="true" size={18} />导入 JSON</button><p>导入外部研究资料，保存后仍由你决定是否开始制作。</p></details>
       </div>
     </div>
   );

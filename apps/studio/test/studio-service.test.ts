@@ -23,6 +23,7 @@ import {
   type StudioPipelinePort,
 } from "../src/server/studio-service.js";
 import { JsonOpportunityStore } from "../src/server/opportunity-store.js";
+import { CaseStudio } from "../src/server/case-studio.js";
 import { JsonRunArchiveStore } from "../src/server/run-archive-store.js";
 import { loadAgentLoopProgress, ProductionStudio } from "../src/server/production-studio.js";
 import { buildStudioApp } from "../src/server/app.js";
@@ -497,6 +498,75 @@ describe("StudioService", () => {
       await app.close();
       await rm(workspaceRoot, { recursive: true, force: true });
     }
+  });
+
+  it("keeps the user's angle separate from trusted case instructions through repeated rework", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-case-rework-angle-"));
+    const pipeline = new FakePipeline({ ...waitingRun(workspaceRoot), status: "failed", nodeRuns: [], artifacts: [] });
+    const item = { id: "ted:case-one", sourceId: "ted" as const, sourceLabel: "TED", title: "受控参考",
+      originalUrl: "https://example.test/talk", contentState: "transcript" as const, contentTypeLabel: "逐字稿",
+      topics: [], metrics: [], metricsFetchedAt: "2026-10-12T00:00:00Z", usageNote: "受控参考" };
+    const cases = new CaseStudio({ cacheRoot: path.join(workspaceRoot, "case-cache"), selectionPath: path.join(workspaceRoot, "selection.json"),
+      sources: [{ sourceId: "ted", label: "TED", list: async () => ({ items: [item] }),
+        readDetail: async () => ({ item, transcript: { state: "read", fetchedAt: "2026-10-12T00:00:00Z",
+          paragraphs: [{ id: "p1", text: "仅为测试的参考正文" }], truncated: false, usageNote: "受控参考" } }) }] });
+    const service = new StudioService({ workspaceRoot, pipeline, cases, environment: {}, commandAvailable: allCommandsAvailable });
+    try {
+      await cases.saveSelection({ caseId: item.id, intent: "用户主题", borrowIntent: ["开场方式"] });
+      const angle = "我的参考与借鉴观点必须保留，不是系统注释。";
+      await service.startRun({ ...brief, angle, creationContext: { origin: "case", opportunityId: "", caseSelectionId: item.id,
+        caseReferenceDirective: angle } });
+      const first = structuredClone(pipeline.lastInput as ProductionBrief);
+      const directive = await cases.borrowDirectiveFor(item.id);
+      assert.equal(first.angle, `${angle}\n${directive}`);
+      pipeline.run = { ...pipeline.run, initialInput: first };
+      const draft = (await service.reworkDraft(pipeline.run.id))!;
+      assert.equal(draft.input.angle, angle, "返工表单只带用户角度，派生说明仍由服务端负责");
+      await service.startRun(draft.input);
+      const second = structuredClone(pipeline.lastInput as ProductionBrief);
+      assert.equal(second.angle, first.angle);
+      assert.deepEqual(first.articleSources, second.articleSources);
+      pipeline.run = { ...pipeline.run, initialInput: second };
+      const next = (await service.reworkDraft(pipeline.run.id))!;
+      next.input.angle = "用户重新写的参考角度，不得按关键词删改。";
+      await cases.saveSelection({ caseId: item.id, intent: "新主题", borrowIntent: ["结尾回收"] });
+      await service.startRun(next.input);
+      const third = pipeline.lastInput as ProductionBrief;
+      assert.equal(third.angle, `${next.input.angle}\n${await cases.borrowDirectiveFor(item.id)}`);
+      assert.ok(!third.angle.includes("的开场方式；"));
+      assert.equal(first.angle, `${angle}\n${directive}`, "原制作不可被返工改写");
+      pipeline.run = { ...pipeline.run, initialInput: structuredClone(third) };
+      const withoutBorrow = (await service.reworkDraft(pipeline.run.id))!;
+      await cases.saveSelection({ caseId: item.id, intent: "只读参考正文", borrowIntent: [] });
+      await service.startRun(withoutBorrow.input);
+      assert.equal((pipeline.lastInput as ProductionBrief).angle, next.input.angle);
+      assert.equal((pipeline.lastInput as ProductionBrief).creationContext?.caseReferenceDirective, undefined);
+
+      // 无派生标记的历史稿不迁移、不猜旧说明；当前精确说明仍不能再重复追加。
+      const historical = structuredClone(first);
+      delete historical.creationContext!.caseReferenceDirective;
+      pipeline.run = { ...pipeline.run, initialInput: historical };
+      await cases.saveSelection({ caseId: item.id, intent: "用户主题", borrowIntent: ["开场方式"] });
+      await service.startRun((await service.reworkDraft(pipeline.run.id))!.input);
+      assert.equal((pipeline.lastInput as ProductionBrief).angle, first.angle);
+      // 浏览器单行输入会删除换行；说明的身份不能依赖显示层保留分隔符。
+      for (const separator of ["", " "]) {
+        const flattened = { ...historical, angle: `${angle}${separator}${directive}` };
+        pipeline.run = { ...pipeline.run, initialInput: flattened };
+        await service.startRun((await service.reworkDraft(pipeline.run.id))!.input);
+        const saved = structuredClone(pipeline.lastInput as ProductionBrief);
+        assert.equal(saved.angle, flattened.angle, "已含当前完整说明时不重复追加");
+        pipeline.run = { ...pipeline.run, initialInput: saved };
+        const nextDraft = (await service.reworkDraft(pipeline.run.id))!;
+        assert.equal(nextDraft.input.angle, angle, "只去掉可信末尾说明，保留用户原话");
+        await service.startRun(nextDraft.input);
+        assert.equal((pipeline.lastInput as ProductionBrief).angle, first.angle);
+      }
+      await cases.clearSelection();
+      const before = pipeline.dispatchCount;
+      await assert.rejects(() => service.startRun(next.input), /重新选择/);
+      assert.equal(pipeline.dispatchCount, before, "参考不存在时不能偷用旧正文或启动新制作");
+    } finally { await rm(workspaceRoot, { recursive: true, force: true }); }
   });
 
   it("marks only a structured rework-scope failure as needing a fresh scope decision", async () => {
@@ -3708,7 +3778,7 @@ describe("StudioService", () => {
     assert.equal((await service.listOpportunities("trend")).length, 1);
   });
 
-  it("rebuilds trusted series context from the adopted opportunity before dispatch", async () => {
+  it("preserves editable production fields while rebuilding trusted series context before dispatch", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-series-context-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const service = new StudioService({
@@ -3759,12 +3829,16 @@ describe("StudioService", () => {
       ...brief,
       creationContext: { origin: "series", opportunityId: opportunity.id },
       seriesContext: maliciousContext,
+      title: "本片由用户命名",
+      audience: "本片面向新观众",
+      platform: "bilibili",
       angle: "三位角色误会后互相解释，只用一张静态插画，不增加实验承诺。",
     }, "trusted-series-context-1");
 
     const dispatched = pipeline.lastInput as ProductionBrief;
-    assert.equal(dispatched.title, currentSeries.episodes[0]?.title);
-    assert.equal(dispatched.audience, currentSeries.audience);
+    assert.equal(dispatched.title, "本片由用户命名");
+    assert.equal(dispatched.audience, "本片面向新观众");
+    assert.equal(dispatched.platform, "bilibili");
     assert.equal(dispatched.nicheSlug, currentSeries.track);
     assert.equal(dispatched.angle, "三位角色误会后互相解释，只用一张静态插画，不增加实验承诺。");
     assert.equal(dispatched.seriesContext?.seriesId, currentSeries.id);
@@ -3772,6 +3846,8 @@ describe("StudioService", () => {
     assert.equal(dispatched.seriesContext?.episodeNumber, 1);
     assert.equal(dispatched.seriesContext?.canonBaseRevision, 0);
     assert.equal(dispatched.seriesContext?.episode.title, currentSeries.episodes[0]?.title);
+    assert.equal(dispatched.seriesContext?.audience, currentSeries.audience);
+    assert.equal(dispatched.seriesContext?.platform, currentSeries.platform);
     assert.equal(dispatched.seriesContext?.episode.viewerPromise, currentSeries.episodes[0]?.viewerPromise);
     assert.equal(dispatched.seriesContext?.episode.payoff, currentSeries.episodes[0]?.payoff);
     assert.equal(dispatched.seriesContext?.episode.planning.role, "系列总编");
@@ -4130,6 +4206,22 @@ describe("StudioService", () => {
     ]);
     assert.equal(ready.canon.facts.some((fact) => fact.statement.includes("下一集")), false);
     assert.deepEqual(ready.canon.facts[0]?.sourceOutputVersionIds, [`${scriptStage}-v1`, "final-review-v1"]);
+
+    assert.equal((await service.getRun("run-1"))?.seriesRework?.mode, "blocked", "历史工作流不能伪造可修改出口");
+    if (scriptStage === "creative-planning") {
+      pipeline.run.workflowVersion = productionWorkflowVersion(pipeline.run.initialInput);
+      const completedDetail = await service.getRun("run-1");
+      assert.equal(completedDetail?.seriesRework?.mode, "edit_current");
+      const dispatchesBeforeRework = pipeline.dispatchCount;
+      await assert.rejects(() => service.reworkDraft("run-1"), /修改本集/);
+      assert.equal(pipeline.dispatchCount, dispatchesBeforeRework);
+      assert.deepEqual((await service.listSeries())[0]?.canon, ready.canon);
+      const nextEpisode = (await service.listCandidateInbox({ origins: ["series"] })).items.find((item) => item.episodeNumber === 2)!;
+      await service.adoptCandidate(nextEpisode.id, { origin: "series", acceptUnaudited: true });
+      assert.equal((await service.getRun("run-1"))?.seriesRework?.mode, "blocked");
+      await assert.rejects(() => service.reworkDraft("run-1"), /第 2 集已经采用/);
+      assert.equal(pipeline.dispatchCount, dispatchesBeforeRework);
+    }
 
     pipeline.run.nodeRuns.find((node) => node.nodeId === scriptStage)!.outputState!.stale = true;
     const invalidated = (await service.listSeries())[0]!;

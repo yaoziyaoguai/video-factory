@@ -76,25 +76,29 @@ export function CreativeDurationPanel({ review, busy = false, onSave, onAdopt, o
   const adopted = duration.previouslyAdopted;
   const changed = proposal && adopted && proposal.totalFrames !== adopted.totalFrames;
   return <section className="creative-check-result creative-duration-panel" aria-label="本版时长">
-    {proposal ? <>
-      <strong>建议成片约 {durationSecondsLabel(proposal.totalSeconds)} 秒，共 {proposal.scenes.length} 镜</strong>
-      <p>以当前脚本的 {proposal.totalFrames} 帧计算；采用这版脚本时一并确认，不会自动设成硬性范围。</p>
-      <ul>{proposal.scenes.map(scene => <li key={scene.position}>第 {scene.position} 镜：{durationSecondsLabel(scene.durationSeconds)} 秒（{scene.frameCount} 帧）</li>)}</ul>
-    </> : <p>{duration.unavailableReason ?? "目标仅作参考，脚本会给出具体总长供你确认。"}</p>}
-    <p>参考目标：{durationSecondsLabel(duration.referenceSeconds)} 秒，不代表已确认的成片时长。</p>
-    <p>{duration.policy === "legacy" ? "沿用旧版时长约束" : "你明确设置的时长要求"}：{duration.commitment
+    <div className="duration-summary-header">
+      {proposal ? <strong>建议成片约 {durationSecondsLabel(proposal.totalSeconds)} 秒，共 {proposal.scenes.length} 镜</strong>
+        : <strong>{duration.unavailableReason ?? "目标仅作参考，脚本会给出具体总长供你确认。"}</strong>}
+      {duration.policy === "content-led-v1" && onSave && !editor ? <button type="button" className="button button-ghost"
+        disabled={busy || !review.allowedActions.includes("update_duration")} onClick={openEditor}>修改时长要求</button> : null}
+    </div>
+    <p className="duration-summary-meta">参考目标：{durationSecondsLabel(duration.referenceSeconds)} 秒 · {duration.policy === "legacy" ? "沿用旧版时长约束" : "你明确设置的时长要求"}：{duration.commitment
       ? [duration.commitment.minSeconds === undefined ? null : `至少 ${durationSecondsLabel(duration.commitment.minSeconds)} 秒`,
         duration.commitment.maxSeconds === undefined ? null : `最多 ${durationSecondsLabel(duration.commitment.maxSeconds)} 秒`].filter(Boolean).join("，")
       : "未设硬性范围"}</p>
+    <p className="duration-decision-note">{proposal ? "采用本版时一并确认时长；" : "参考目标不代表已确认时长；"}费用待方案核价，不授权素材购买。</p>
+    {proposal ? <details className="duration-scene-details"><summary>查看 {proposal.scenes.length} 镜时长明细</summary>
+      <p>以当前脚本的 {proposal.totalFrames} 帧计算；采用这版脚本时一并确认，不会自动设成硬性范围。</p>
+      <ul>{proposal.scenes.map(scene => <li key={scene.position}>第 {scene.position} 镜：{durationSecondsLabel(scene.durationSeconds)} 秒（{scene.frameCount} 帧）</li>)}</ul>
+    </details> : null}
     {changed ? <p role="status">时长变化：原 {durationSecondsLabel(adopted.totalSeconds)} 秒 → 建议 {durationSecondsLabel(proposal.totalSeconds)} 秒。当前镜头安排已改变，素材覆盖、声音安排及报价需要按新版本核对；旧版采用不代表已采用这版。</p> : null}
-    <p>费用待方案核价；这里的时长不是购买授权。</p>
     {review.conflicts?.length ? <div role="status"><strong>当前稿需要调整后才能采用</strong>
       <ul>{review.conflicts.map((conflict, index) => <li key={`${conflict.code}:${index}`}>{conflict.scenePositions.length ? `镜头 ${conflict.scenePositions.join("、")}：` : ""}{conflict.detail}</li>)}</ul>
       <p>{review.conflicts.some(conflict => conflict.code === "execution_capability_conflict")
         ? "请修改分镜或素材安排；取消时长要求不能补足实际媒体或型号能力。"
-        : "可修改脚本，或修改、取消下方的时长要求；当前内容会保留。"}</p>
+        : "可修改脚本，或修改、取消时长要求；当前内容会保留。"}</p>
     </div> : null}
-    {duration.policy === "content-led-v1" && onSave ? editor ? <div className="creative-duration-editor">
+    {duration.policy === "content-led-v1" && onSave && editor ? <div className="creative-duration-editor">
       <strong>修改时长要求</strong>
       {storageBroken ? <p role="alert">本机草稿存储暂不可用；当前输入仍在页面中，但刷新后可能无法恢复，请先复制保存。</p> : null}
       <p>只记录你明确填写的边界，不补另一端；保存不会采用稿件、生成或购买素材。</p>
@@ -112,6 +116,6 @@ export function CreativeDurationPanel({ review, busy = false, onSave, onAdopt, o
         {onAdopt ? <button type="button" className="button button-primary" disabled={adoptionDisabled} onClick={() => void save(true)}>按新时长要求采用当前{review.stage === "script" ? "脚本" : review.stage === "director" ? "导演方案" : "构思"}（未审计）</button> : null}
         <button type="button" className="button button-ghost" disabled={busy || saving} onClick={() => { setEditor(null); setError(undefined); }}>放弃时长修改</button>
       </div>
-    </div> : <button type="button" className="button button-secondary" disabled={busy || !review.allowedActions.includes("update_duration")} onClick={openEditor}>修改时长要求</button> : null}
+    </div> : null}
   </section>;
 }

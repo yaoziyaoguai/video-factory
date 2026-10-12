@@ -10,14 +10,14 @@ describe("opportunity draft protection", () => {
     render(<OpportunityDialog open onClose={close} onSubmit={vi.fn()} />);
     await user.type(screen.getByLabelText("选题标题"), "保留手动稿");
     await user.click(screen.getByRole("tab", { name: "JSON 导入" }));
-    fireEvent.change(screen.getByLabelText(/^机会数据/), { target: { value: '{"title":"导入草稿"}' } });
+    fireEvent.change(screen.getByLabelText(/^创作草稿数据/), { target: { value: '{"title":"导入草稿"}' } });
     await user.click(screen.getByRole("tab", { name: "手动录入" }));
     expect(screen.getByLabelText("选题标题")).toHaveValue("保留手动稿");
     await user.click(screen.getByRole("tab", { name: "JSON 导入" }));
-    expect(screen.getByLabelText(/^机会数据/)).toHaveValue('{"title":"导入草稿"}');
+    expect(screen.getByLabelText(/^创作草稿数据/)).toHaveValue('{"title":"导入草稿"}');
     await user.keyboard("{Escape}{Escape}");
     expect(screen.queryByRole("heading", { name: "要放弃本次填写吗？" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText(/^机会数据/)).toHaveFocus();
+    expect(screen.getByLabelText(/^创作草稿数据/)).toHaveFocus();
     expect(close).not.toHaveBeenCalled();
   });
 
@@ -49,7 +49,7 @@ describe("opportunity draft protection", () => {
     const submit = vi.fn(() => new Promise<void>((_resolve, no) => { reject = no; }));
     render(<OpportunityDialog open onClose={close} onSubmit={submit} />);
     for (const label of ["选题标题", "目标受众", "核心痛点", "开场钩子"]) await user.type(screen.getByLabelText(label), "要保留的内容");
-    await user.click(screen.getByRole("button", { name: "保存机会" }));
+    await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
     expect(submit).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "关闭" })).toBeDisabled();
     await user.keyboard("{Escape}");
@@ -98,7 +98,7 @@ describe("manual opportunity source honesty (DG-UX-02)", () => {
     await user.type(screen.getByLabelText("目标受众"), "注意力分散的上班族");
     await user.type(screen.getByLabelText("核心痛点"), "工作间隙刷不掉的走神");
     await user.type(screen.getByLabelText("开场钩子"), "先放下手机看窗边三分钟");
-    await user.click(screen.getByRole("button", { name: "保存机会" }));
+    await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
     const withoutLink = onSubmit.mock.calls[0]![0];
     expect(withoutLink.origin).toBe("manual");
@@ -113,7 +113,7 @@ describe("manual opportunity source honesty (DG-UX-02)", () => {
     await user.type(screen.getByLabelText("开场钩子"), "先放下手机看窗边三分钟");
     await user.click(screen.getByText("可选：补充参考来源"));
     await user.type(screen.getByLabelText("参考链接"), "https://qa-reference.invalid/article");
-    await user.click(screen.getByRole("button", { name: "保存机会" }));
+    await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
     const withLink = onSubmit.mock.calls[0]![0];
     expect(withLink.origin).toBe("manual");

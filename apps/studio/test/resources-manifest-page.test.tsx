@@ -93,6 +93,7 @@ describe("ResourcesPage source and rights section", () => {
     expect(screen.getByText("文本模型在新建或返工时选择；只有付费图片、视频会在执行前逐镜报价并确认")).toBeInTheDocument();
   });
 
+
   it("groups model defaults by capability and saves one change without dropping the other defaults", async () => {
     const providers: StudioProvider[] = [
       modelProvider("writer-v1", "编剧模型", "script.draft", ["text"], ["writer-a", "writer-b"]),
@@ -478,9 +479,10 @@ describe("ResourcesPage source and rights section", () => {
     expect(pageText).not.toContain("适配器");
     expect(pageText).not.toContain("环境变量");
     expect(pageText).not.toMatch(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9_]+)+\b/);
-    const environmentSummary = screen.getByText(/制作环境有 2 处未就绪/);
-    expect(environmentSummary).toHaveTextContent("成片合成、云端配音暂不可用或受限");
-    expect(environmentSummary).toHaveTextContent("无法自行解决时请联系管理员");
+    const environmentSummary = screen.getByRole("list", { name: "制作环境状态" });
+    expect(environmentSummary).toHaveTextContent("成片合成不可用");
+    expect(environmentSummary).toHaveTextContent("云端配音未配置或不可用");
+    expect(screen.getByText(/未就绪项不代表其他能力不可用/)).toHaveTextContent("无法自行解决时请联系管理员");
     expect(screen.queryByText(/运行底座/)).not.toBeInTheDocument();
   });
 });

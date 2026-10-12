@@ -4766,6 +4766,8 @@ describe("creative discussion unknown recovery (C1)", () => {
           ? auditWriter.draftDetailed(input) : fixtureWriter.draftDetailed!(input) },
       directorAgent: Object.assign(closureDirector(spies), { discussDetailed: discussionViaBroker }) as VisualDirectorAgent,
       assetProviders: CLOSURE_ASSET_PROVIDERS,
+      providerRuntimeMetadata: [{ id: "minimax-tts-v1", label: "受控声音", modelId: "speech-2.8-turbo",
+        transport: "http_api", billing: "metered", approvalPolicy: "automatic", estimatedCostCny: 0.5, maxAttempts: 1 }],
     });
     return { workspaceRoot, executor, broker, client, spies, buildPipeline,
       enableBrokerAudit: () => { auditViaBrokerEnabled = true; } };
@@ -4801,6 +4803,78 @@ describe("creative discussion unknown recovery (C1)", () => {
     return current;
   }
 
+  it("DF03 allows narration preparation after an optional discussion without clearing its unknown facts", async () => {
+    const harness = await startRecoveryHarness({ holdInitially: true });
+    try {
+      const pipeline = harness.buildPipeline();
+      const brief = closureBrief({ creativeReview: true });
+      let run = await pipeline.start({ ...brief, providers: { ...brief.providers, voice: "minimax-tts-v1" },
+        voiceDirection: { profileId: "minimax:female-chengshu", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+        workflowFeatures: { ...brief.workflowFeatures, boundaryGates: "user-confirmed-v1" } });
+      const briefGate = run.nodeRuns.find(node => node.status === "needs_human")!;
+      if (briefGate.nodeId === "brief") run = await pipeline.decide(run.id, { interventionId: briefGate.intervention!.id,
+        action: "approve", actor: "creator", expectedRunRevision: run.revision, reviewEvidenceId: null });
+      const gate = gateOf(run).continuation;
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, { action: "discuss", commandId: "df03-unknown", actor: "creator",
+        stage: gate.stage, expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, baseDraftVersionId: stageReview(run, gate.stage).currentDraft!.versionId,
+        message: "只讨论" })).completion;
+      for (let i = 0; i < 10 && !run.nodeRuns.some(node => node.nodeId === "assets" && node.status === "needs_human"); i++) {
+        const node = run.nodeRuns.find(node => node.status === "needs_human")!;
+        assert.ok(node?.intervention);
+        if (node.intervention.kind === "creative_review") {
+          const current = node.intervention.continuation!;
+          const review = stageReview(run, current.stage);
+          run = await pipeline.confirmCreativeReview(run.id, { commandId: `df03-confirm-${i}`, actor: "creator",
+            stage: current.stage, expectedRunRevision: run.revision, expectedReviewRevision: current.reviewRevision,
+            baseDraftSha256: current.draftSha256, baseDraftVersionId: review.currentDraft!.versionId,
+            ...(review.checkResult ? { expectedCheckIdentity: review.checkResult.checkIdentity } : { acknowledgeUnaudited: true as const }) });
+        } else run = await pipeline.decide(run.id, { interventionId: node.intervention.id, action: "approve", actor: "creator",
+          expectedRunRevision: run.revision, reviewEvidenceId: null });
+      }
+      assert.ok(run.nodeRuns.some(node => node.nodeId === "assets" && node.status === "needs_human"));
+      const before = structuredClone(run);
+      const preview = await pipeline.previewNarrationPlan(run.id);
+      assert.ok(preview.plan.groups.length);
+      assert.deepEqual(await pipeline.show(run.id), before, "预览不清除原请求与费用，也不采用素材");
+      assert.equal(harness.executor.submits, 1);
+      const store = new FileRunStore(path.join(harness.workspaceRoot, "runs"));
+      const unknownGeneration = structuredClone(before);
+      const assets = unknownGeneration.nodeRuns.find(node => node.nodeId === "assets")!;
+      assets.outcomeUncertain = true;
+      await store.checkpoint(unknownGeneration);
+      await assert.rejects(pipeline.previewNarrationPlan(run.id), /原请求结果仍在核实/, "身份不明的生成仍不能绕过");
+    } finally { harness.executor.release(); await harness.broker.close(); }
+  });
+
+  it("DF02 proves a rejected local edit was not accepted without settling an unrelated unknown discussion", async () => {
+    const harness = await startRecoveryHarness({ holdInitially: true });
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "script");
+      const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline, listProviders: async () => [],
+        archiveStore: new JsonRunArchiveStore(path.join(harness.workspaceRoot, "archive.json")) });
+      const shown = (await studio.creativeReview(run.id))!;
+      const original = { action: "discuss" as const, commandId: "df02-original", actor: "creator", stage: shown.stage,
+        expectedRunRevision: run.revision, expectedReviewRevision: shown.reviewRevision,
+        baseDraftSha256: shown.draftSha256, baseDraftVersionId: shown.draftVersionId!, message: "只讨论，不改稿" };
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, original)).completion;
+      const current = (await studio.creativeReview(run.id))!;
+      const rejected = { action: "edit_draft" as const, commandId: "df02-rejected", stage: current.stage,
+        expectedRunRevision: current.runRevision, expectedReviewRevision: current.reviewRevision,
+        baseDraftSha256: current.draftSha256, baseDraftVersionId: current.draftVersionId!, document: { scenes: [] } };
+      await assert.rejects(studio.commandCreativeReview(run.id, rejected, "creator"), /保存被拒绝/);
+      await pipeline.withRunMaintenanceLease([run.id], async () => {
+        assert.equal((await studio.creativeReviewCommand(run.id, rejected.commandId))?.status, "unknown", "活跃写者退出前不能证明未受理");
+      });
+      assert.equal((await studio.creativeReviewCommand(run.id, rejected.commandId))?.status, "not_accepted");
+      assert.equal((await studio.creativeReviewCommand(run.id, original.commandId))?.status, "unknown");
+      assert.deepEqual(await pipeline.show(run.id), run, "只读证明不清理原请求或费用事实");
+      assert.equal(harness.executor.submits, 1);
+    } finally { harness.executor.release(); await harness.broker.close(); }
+  });
+
   for (const action of ["discuss", "revise"] as const) it(`U03 keeps ${action} recovery in its own panel without presenting it as a second text audit`, async () => {
     const harness = await startRecoveryHarness({ holdInitially: true, auditViaBroker: true });
     try {
@@ -4824,6 +4898,7 @@ describe("creative discussion unknown recovery (C1)", () => {
       harness.executor.release();
       run = await (await pipeline.dispatchCreativeReviewCommand(run.id, command)).completion;
       assert.equal((await studio.creativeReview(run.id))!.consultationOperations!.find(op => op.commandId === command.commandId)!.status, "completed");
+      assert.equal((await studio.creativeReview(run.id))!.stopDetail, undefined, "DF01：原讨论成功不能继续显示它已过时的待核原因");
       assert.deepEqual((await studio.get(run.id))!.optionalReviewTasks ?? [], []);
       assert.deepEqual(await pipeline.originalOptionalReviewTasks(run.id), originalFacts, "展示去重复不改安全事实");
       assert.equal(harness.executor.submits, 1, "恢复只观察原请求");

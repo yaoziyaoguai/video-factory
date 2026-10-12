@@ -780,7 +780,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       const episode = series?.episodes[episodeIndex];
       if (!series || !episode) return;
       if (episode.status === "published") {
-        throw new SeriesStoreConflictError("这一集已经发布，不能直接改写系列正史；请创建更正集或正式修订版本。");
+        throw new SeriesStoreConflictError("这一集已经发布，不能直接改写系列正史；原片和发布记录仍保留。");
       }
       const downstream = blockingDownstreamEpisode(series, episode);
       if (downstream) {
@@ -821,7 +821,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
     const episode = series?.episodes.find((candidate) => candidate.runId === runId);
     if (!series || !episode) return;
     if (episode.status === "published") {
-      throw new SeriesStoreConflictError("这一集已经发布，不能直接改写系列正史；请创建更正集或正式修订版本。");
+      throw new SeriesStoreConflictError("这一集已经发布，不能直接改写系列正史；原片和发布记录仍保留。");
     }
     const downstream = blockingDownstreamEpisode(series, episode);
     if (downstream) {

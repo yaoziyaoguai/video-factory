@@ -1084,7 +1084,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                     }}
                   />
                   {initialValues?.visualPlan && !visualBriefValues.strategy.trim() ? (
-                    <small>可参考的方向：{initialValues.visualPlan.strategy}。只有你填写或明确采用后，才会成为制作要求。</small>
+                    <small>可参考的方向：{initialValues.visualPlan.strategy.replace(/[。.!！?？]+$/u, "")}。只有你填写或明确采用后，才会成为制作要求。</small>
                   ) : null}
                 </label>
                   </div>

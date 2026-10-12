@@ -457,9 +457,34 @@ export class StudioService {
       ? runs.filter((item) => origin === "manual" ? item.creationOrigin === "manual" || item.creationOrigin === undefined : item.creationOrigin === origin)
       : runs;
   }
-  getRun(runId: string): Promise<StudioRunDetail | undefined> { return this.production.get(runId); }
+  async getRun(runId: string): Promise<StudioRunDetail | undefined> {
+    const run = await this.production.get(runId);
+    if (!run?.seriesId || run.status !== "succeeded") return run;
+    const series = (await this.series.list()).find((item) => item.id === run.seriesId);
+    const episode = series?.episodes.find((item) => item.runId === run.id);
+    if (!episode || run.continuation?.supported === false) {
+      return { ...run, seriesRework: { mode: "blocked", reason: !episode
+        ? "尚未核对到本集绑定，请到系列页核对；不会新建第二条制作占用本集。"
+        : "这是只读的历史工作流，当前不能直接改写本集；原片和历史记录保留。" } };
+    }
+    try {
+      await this.series.assertRunEditable(run.id);
+      return { ...run, seriesRework: { mode: "edit_current" } };
+    } catch (error) {
+      if (!(error instanceof StudioConflictError)) throw error;
+      return { ...run, seriesRework: { mode: "blocked", reason: error.message } };
+    }
+  }
   reviewPrefill(runId: string, actor: string) { return this.production.reviewPrefill(runId, actor); }
-  reworkDraft(runId: string): Promise<StudioReworkDraft | undefined> { return this.production.reworkDraft(runId); }
+  async reworkDraft(runId: string): Promise<StudioReworkDraft | undefined> {
+    const run = await this.getRun(runId);
+    if (run?.seriesId && run.status === "succeeded") {
+      throw new StudioConflictError(run.seriesRework?.mode === "edit_current"
+        ? "本集已经定版，请使用完成页的「修改本集内容」在原制作中修改；不能新建另一条制作重复占用本集。"
+        : run.seriesRework?.reason ?? "当前不能改写这条系列制作，请先到系列页核对本集状态。");
+    }
+    return this.production.reworkDraft(runId);
+  }
   archiveRuns(runIds: string[]): Promise<void> { return this.production.archive(runIds); }
   restoreRuns(runIds: string[]): Promise<void> { return this.production.restore(runIds); }
   async deleteRun(runId: string): Promise<void> {
@@ -522,14 +547,14 @@ export class StudioService {
     let trustedInput = seriesContext && reservationId && isRecord(configuredInput)
       ? {
           ...configuredInput,
-          title: seriesContext.episode.title,
-          // 正史与本集承诺仍由服务端 seriesContext 绑定；用户在开工表单修改的角度不能被静默覆盖。
+          // 本片可编辑字段遵从开工表单；系列身份、正史与本集承诺仍由服务端重建。
+          title: configuredInput.title ?? seriesContext.episode.title,
           angle: typeof configuredInput.angle === "string" && configuredInput.angle.trim()
             ? configuredInput.angle.trim()
             : `${seriesContext.episode.hook}\n本集必须兑现：${seriesContext.episode.viewerPromise}\n结尾交付：${seriesContext.episode.payoff}`,
-          audience: seriesContext.audience,
+          audience: configuredInput.audience ?? seriesContext.audience,
           nicheSlug: seriesContext.track,
-          platform: seriesContext.platform,
+          platform: configuredInput.platform ?? seriesContext.platform,
           seriesContext: { ...seriesContext, productionReservationId: reservationId },
         }
       : configuredInput;
@@ -630,11 +655,15 @@ export class StudioService {
       throw new StudioInputError(error instanceof Error ? error.message : "参考内容不可用，请返回案例页面重新选择。");
     }
     const angle = typeof input.angle === "string" ? input.angle.trim() : "";
+    const { caseReferenceDirective: _untrustedDirective, ...trustedCreation } = creation ?? {};
+    const alreadyIncluded = directive && angle.endsWith(directive);
     // 借鉴方式附在用户自己写的角度之后：用户的原话在前、不被改写，系统只补一句它选了什么。
     return {
       ...input,
       articleSources,
-      ...(directive ? { angle: [angle, directive].filter(Boolean).join("\n") } : {}),
+      creationContext: { ...trustedCreation, ...(directive ? { caseReferenceDirective: directive } : {}) },
+      // 历史稿没有派生标记时，也不再次追加与当前可信选择完全相同的尾部说明。
+      ...(directive && !alreadyIncluded ? { angle: [angle, directive].filter(Boolean).join("\n") } : {}),
     };
   }
 

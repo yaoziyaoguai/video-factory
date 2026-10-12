@@ -398,6 +398,8 @@ export type ProductionBrief = DurationIntent & {
     opportunityId: string;
     /** origin 为 case 时指向服务端保存的案例参考；其它来源不带这个字段。 */
     caseSelectionId?: string;
+    /** 服务端实际附加的案例说明；返工可精确取回用户角度，不按词句猜测。 */
+    caseReferenceDirective?: string;
   };
   articleSources?: ProductionArticleSourceSnapshot[];
   rework?: ProductionReworkContext;
@@ -1092,6 +1094,8 @@ function parseCreationContext(value: unknown): ProductionBrief["creationContext"
       origin: "case",
       opportunityId: typeof input.opportunityId === "string" ? input.opportunityId.trim() : "",
       caseSelectionId: requireString(input.caseSelectionId, "creationContext.caseSelectionId"),
+      ...(typeof input.caseReferenceDirective === "string" && input.caseReferenceDirective.trim()
+        ? { caseReferenceDirective: input.caseReferenceDirective.trim() } : {}),
     };
   }
   return {

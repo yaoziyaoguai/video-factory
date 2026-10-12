@@ -46,6 +46,31 @@ test("Studio management reaches the broker registry and refreshes the real selec
   } finally { await server.close(); await registry.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("registered model identities replace legacy catalog placeholders for every consumer", async () => {
+  const id = "m-0123456789ab";
+  const capabilities = new CapabilityStudio({
+    repositoryRoot: process.cwd(), workspaceRoot: "/unused-model-catalog", environment: {},
+    commandAvailable: async () => true,
+    codexAvailability: { available: true, reason: "registered runtime", modelId: id, modelCandidates: [id],
+      taskKinds: ["creative-treatment", "script-draft", "director-plan", "role-audit", "series-roadmap"] },
+    deepseekCodexAvailability: { available: false, reason: "not configured", taskKinds: [] },
+    registeredModels: () => [{ id, enabled: true, socketName: `${id}.sock`, label: "已登记模型",
+      protocol: "openai-chat-completions", baseUrl: "https://example.com/v1", modelId: "test-model",
+      capabilities: ["text", "image"], maxOutputTokens: 4096, credentialConfigured: true }],
+  });
+  const catalog = await capabilities.listProviders();
+  for (const provider of catalog.filter(item => item.modelProfiles?.some(model => model.id === id))) {
+    const matches = provider.modelProfiles!.filter(model => model.id === id);
+    assert.equal(matches.length, 1, `${provider.id} must expose one choice per execution identity`);
+    assert.equal(matches[0]!.label, "已登记模型 · test-model");
+    // 名称登记不能替代执行能力公告；旧审片路由在此没有 visual-review 能力。
+    assert.equal(matches[0]!.available, provider.id !== "codex-visual-review-v1", provider.id);
+    if (provider.id === "codex-visual-review-v1") assert.equal(provider.available, false);
+    if (provider.available && provider.defaultModelId === id) assert.equal(matches[0]!.recommended, true);
+  }
+  assert.equal(catalog.find(provider => provider.id === "codex-screenwriter-v1")!.defaultModelId, id);
+});
+
 test("a registered director makes the shot router available without a legacy default broker", async () => {
   const capabilities = new CapabilityStudio({
     repositoryRoot: process.cwd(), workspaceRoot: "/unused-model-catalog", environment: {},

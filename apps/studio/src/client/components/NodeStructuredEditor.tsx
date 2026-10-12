@@ -19,6 +19,7 @@ const LABELS: Record<string, string> = {
   script: "脚本",
   visualDirection: "导演方案",
   directorPlan: "导演方案",
+  copy: "发布文案",
   title: "标题",
   angle: "切入角度",
   audience: "目标观众",
@@ -160,7 +161,8 @@ export function NodeStructuredEditor({ nodeId, value, assetProviderIds = [], ass
   if (creatorViewId(nodeId) === "script" && isCharacterDocument(value)) return <CharacterScriptEditor value={value} nativeAudio={nativeAudio} onChange={onChange} />;
   const record = asRecord(value);
   if (!record) return <p className="node-document-state">这个交付没有适合手工修改的内容。</p>;
-  const entries = Object.entries(record).filter(([key, fieldValue]) => hasEditableValue(fieldValue) && isCreatorTopLevelField(nodeId, key, fieldValue));
+  const entries = Object.entries(record).filter(([key, fieldValue]) => hasEditableValue(fieldValue) && isCreatorTopLevelField(nodeId, key, fieldValue))
+    .filter(([key]) => !(creatorViewId(nodeId) === "publish-package" && key === "title" && asRecord(record.copy)));
   if (!entries.length) return <p className="node-document-state">这个交付只有系统记录，不需要手工修改。</p>;
   return <div className="node-structured-editor" data-node-editor={nodeId}>
     {creatorViewId(nodeId) === "brief" && asRecord(record.editorial) ? <section className="node-editor-group" aria-label="沿用的创作建议">
@@ -195,6 +197,10 @@ function updateCreativeField(
   assetProviders: Array<Pick<StudioProvider, "id" | "label" | "deliveryTypes">>,
 ): Record<string, unknown> {
   const updated = updateAtPath(record, path, value);
+  // 发布包兼容字段与文案标题是同一个值；界面只编辑一次，仍保留服务端的一致性校验。
+  if (creatorViewId(nodeId) === "publish-package" && path.length === 2 && path[0] === "copy" && path[1] === "title") {
+    return { ...updated, title: value };
+  }
   if (creatorViewId(nodeId) !== "visual-direction" || path.at(-1) !== "preferredProviderId" || typeof value !== "string") {
     return updated;
   }

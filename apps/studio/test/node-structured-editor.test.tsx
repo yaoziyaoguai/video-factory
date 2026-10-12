@@ -4,6 +4,21 @@ import { describe, expect, it, vi } from "vitest";
 import { NodeStructuredEditor } from "../src/client/components/NodeStructuredEditor.js";
 
 describe("NodeStructuredEditor", () => {
+  it("edits the publication title once while keeping both stored title fields consistent", () => {
+    const value = { title: "原标题", copy: { title: "原标题", description: "正文", hashtags: ["观察"] },
+      approval: { interventionId: "final-kept" }, artifacts: [{ id: "film-kept" }], aigc: { required: true } };
+    const onChange = vi.fn();
+    render(<NodeStructuredEditor nodeId="publish-package" value={value} onChange={onChange} />);
+    expect(screen.getAllByRole("textbox", { name: "标题" })).toHaveLength(1);
+    expect(screen.getByText("发布文案")).toBeInTheDocument();
+    expect(screen.queryByText("copy")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "新标题" } });
+    expect(onChange).toHaveBeenLastCalledWith({ ...value, title: "新标题", copy: { ...value.copy, title: "新标题" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "发布正文" }), { target: { value: "新正文" } });
+    expect(onChange).toHaveBeenLastCalledWith({ ...value, copy: { ...value.copy, description: "新正文" } });
+    expect(value.title).toBe("原标题");
+  });
+
   it("clears inherited editorial advice without dropping source facts or runtime configuration", async () => {
     const value = { title: "原创三人书店", editorial: { verdict: "produce_image_story", reasons: ["旧选题理由"], guardrails: ["必须显示书封"] },
       articleSources: [{ sourceId: "source-kept" }], providers: { assets: "pexels-stock-v1" } };

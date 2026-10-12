@@ -1228,6 +1228,43 @@ describe("node production workspaces", () => {
     });
   });
 
+  it("does not describe a pending voice as already generated", () => {
+    const { output, outputState, executionReceipt, ...withoutDelivery } = succeededNode;
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-pending-voice" runRevision={1}
+      node={{ ...withoutDelivery, id: "voice", label: "配音", role: "声音导演", status: "pending" }} runStatus="needs_human"
+      artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    expect(screen.getByText("配音尚未生成；可先调整配音指令，前一步确认后才会开始合成。")).toBeInTheDocument();
+    expect(screen.queryByText("已经生成的声音只能试听；修改下方配音指令后会重新合成。")).not.toBeInTheDocument();
+  });
+
+  it.each(["pending", "awaiting_spend_approval"] as const)("does not claim pictures exist before materialization (%s)", (status) => {
+    const { output, outputState, executionReceipt, ...withoutDelivery } = succeededNode;
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-pending-assets" runRevision={1}
+      node={{ ...withoutDelivery, id: "assets", label: "画面", role: "素材导演", status, artifactIds: [] }} runStatus="awaiting_spend_approval"
+      artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    expect(screen.getByText("画面尚未生成；可先核对导演方案中的逐镜来源与提示，确认后再继续。")).toBeInTheDocument();
+    expect(screen.queryByText(/已经生成的画面只能预览/)).not.toBeInTheDocument();
+  });
+
+  it("does not offer native audio listening before audio preparation", () => {
+    const { output, outputState, executionReceipt, ...withoutDelivery } = succeededNode;
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-pending-native" runRevision={1} nativeAudio
+      node={{ ...withoutDelivery, id: "voice", label: "原声试听", role: "声音准备", status: "pending", artifactIds: [] }} runStatus="needs_human"
+      artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    expect(screen.getByText("原声尚未准备；确认画面后才会提取视频中的声音供你试听。")).toBeInTheDocument();
+    expect(screen.queryByText(/声音来自已采用的视频，可在此试听/)).not.toBeInTheDocument();
+  });
+
+  it("does not offer listening when native preparation returned an issue without audio", () => {
+    const { output, outputState, executionReceipt, ...withoutDelivery } = succeededNode;
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-failed-native" runRevision={1} nativeAudio
+      node={{ ...withoutDelivery, id: "voice", label: "原声试听", role: "声音准备", status: "needs_human",
+        output: { audioMode: "native_av", nativeAudioIssue: "audio_decode_failed" }, artifactIds: [] }} runStatus="needs_human"
+      artifacts={[]} busy={false} onOverride={async () => undefined} onAuthorize={async () => undefined} />);
+    expect(screen.getByText("原声尚不可试听；请查看下方原因和恢复操作，原视频与费用记录会保留。")).toBeInTheDocument();
+    expect(screen.queryByText(/声音来自已采用的视频，可在此试听/)).not.toBeInTheDocument();
+  });
+
   it("previews the actual synthesized audio in the voice delivery", () => {
     render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
       runId="run-nw"

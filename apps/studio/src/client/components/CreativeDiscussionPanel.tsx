@@ -15,6 +15,7 @@ import {
   type CreativeDraftSessionBase,
 } from "../creative-draft-session.js";
 import { CreativeDraft, CreativeDraftReader } from "./CreativeDraftReader.js";
+import { CreativeDraftChanges } from "./CreativeDraftChanges.js";
 import { CreativeDurationPanel, durationSecondsLabel } from "./CreativeDurationPanel.js";
 import { CharacterScriptEditor, isCharacterDocument } from "./CharacterScriptEditor.js";
 import type { StudioCreativeReviewCommandInput, StudioCreativeReviewCommandReceipt, StudioCreativeReviewSnapshot } from "../../shared/api.js";
@@ -272,11 +273,22 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
   // A→B→A′）清空旧 scene/beat 范围；同身份的普通 rerender/SSE revision 不清用户选择。
   useEffect(() => setSelectedIds([]), [`${review.runId}:${review.stage}:${purposeKey}:${review.draftVersionId ?? "legacy"}:${review.draftArtifactId}:${review.draftSha256}`]);
 
+  const auditSuggestions = review.checkResult?.status !== "incomplete" ? review.checkResult?.issues.map((issue, index) => ({
+    index,
+    text: (issue.creatorAction ?? issue.repairInstruction).trim(),
+    title: issue.creatorTitle ?? issue.creatorAction ?? issue.repairInstruction,
+  })) ?? [] : [];
+  // 输入文字是唯一真源：刷新、手改、换版都不依赖另一份未持久化的建议队列。
+  const includedSuggestions = auditSuggestions.filter((suggestion, index, suggestions) => suggestion.text
+    && suggestions.findIndex(item => item.text === suggestion.text) === index && containsSuggestion(message, suggestion.text));
+  const discussionScope = selectedIds.length > 0
+    ? `指定范围：${selectionOptions(review.stage, review.draft).filter(option => selectedIds.includes(option.id)).map(option => option.label).join("、")}`
+    : "全稿讨论";
+
   function appendAuditSuggestions() {
     if (!review.checkResult || review.checkResult.status === "incomplete" || selectedAuditIndexes.length === 0) return;
-    const additions = selectedAuditIndexes
-      .map((index) => review.checkResult?.issues[index]?.creatorAction ?? review.checkResult?.issues[index]?.repairInstruction)
-      .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+    const additions = [...new Set(auditSuggestions.filter(suggestion => selectedAuditIndexes.includes(suggestion.index))
+      .map(suggestion => suggestion.text).filter(text => text && !containsSuggestion(message, text)))];
     const next = [message.trimEnd(), ...additions.map((value) => `- ${value}`)].filter(Boolean).join("\n");
     if (next.length > 4000) {
       setError("加入后会超过 4,000 字，请删减当前文字或少选几条；原输入已保留。");
@@ -685,10 +697,6 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
           <button type="button" className={`button ${hasMissingEvidenceProvider ? "button-secondary" : "button-primary"}`} disabled={busy || hasMissingEvidenceProvider || hasUnsavedEdits || editingDuration || Boolean(review.conflicts?.length) || !review.allowedActions.includes("confirm")} onClick={confirmDraft}><Check aria-hidden="true" size={16} />{hasMissingEvidenceProvider ? "补齐画面服务后再采用" : scriptAdoptionLabel ?? (needsStockConsent ? "采用选材方案（接受素材风险）" : incompleteCheck ? `采用${adoptionObject}（复核未完成）` : hasContentSuggestions ? `采用${adoptionObject}（保留审计建议）` : !review.checkResult ? `采用${adoptionObject}（未审计）` : hasBlockingIssues ? "修改后重新检查" : review.reviewPurpose === "direction" ? "采用导演初稿，开始选材" : review.reviewPurpose === "material_plan" ? "采用选材方案，继续制作" : `采用当前${adoptionObject}，继续`)}</button>
           <button type="button" className={`button ${hasMissingEvidenceProvider ? "button-primary" : "button-secondary"}`} onClick={focusRevisionDiscussion}><MessageCircle aria-hidden="true" size={16} />提出修改</button>
         </div>
-        <div className="creative-secondary-decisions">
-          {review.previousDraft !== undefined ? <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || !review.allowedActions.includes("undo_draft")} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button> : null}
-          <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || currentAuditPending || hasUnsavedEdits || !review.allowedActions.includes("audit_current")} onClick={auditCurrent}>{review.checkResult ? "重新审计当前版本（会调用模型）" : "审计当前版本（会调用模型）"}</button>
-        </div>
       </section>
 
       <div className="creative-mobile-tabs" role="group" aria-label="方案与讨论">
@@ -712,6 +720,8 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
             }}>查看 {review.checkResult.issues.length} 条建议</button> : null}
           </div>
           {handoffNotice ? <p className="creative-handoff-notice" role="status">当前稿件已更新</p> : null}
+          {review.previousDraft !== undefined ? <CreativeDraftChanges key={`${review.runId}:${draftIdentity}`} stage={review.stage}
+            current={review.draft} previous={review.previousDraft} nativeAudio={nativeAudio} /> : null}
           <CreativeDraftEditor nativeAudio={nativeAudio} sessionSlotKey={sessionSlotKey} sessionBase={sessionBase} legacyEditStorageKey={`${storageKey}:edit`} draftIdentity={`${review.draftVersionId ?? review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} evidenceRepairs={evidenceRepairs} providers={providers} allowedRetrievalProviderIds={review.stage === "treatment" ? review.draftValidation?.allowedRetrievalProviderIds : undefined} />
           <CreativeDraftReader key={`${review.runId}:${draftIdentity}:${review.draftArtifactId}`} stage={review.stage} value={review.draft} nativeAudio={nativeAudio} />
           {incompleteCheck ? <section className="creative-check-result" role="status"><strong>独立复核未完成 · 无评分</strong><p>{review.checkResult?.summary}</p></section> : null}
@@ -726,10 +736,14 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
             selectedIds={selectedIds}
             onChange={setSelectedIds}
           /></details>
-          {review.previousDraft !== undefined ? <details><summary>查看上一版</summary><CreativeDraft stage={review.stage} value={review.previousDraft} nativeAudio={nativeAudio} /></details> : null}
+          <div className="creative-secondary-decisions">
+            {review.previousDraft !== undefined ? <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || !review.allowedActions.includes("undo_draft")} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button> : null}
+            <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || currentAuditPending || hasUnsavedEdits || !review.allowedActions.includes("audit_current")} onClick={auditCurrent}>{review.checkResult ? "重新审计当前版本（会调用模型）" : "审计当前版本（会调用模型）"}</button>
+          </div>
           <a href="#creative-review-history">查看完整创作版本记录</a>
           {/* 停在这里是因为自动循环推不动了，不是这一版做完了。不说出来，人会以为一切正常。 */}
-          {review.stopDetail ? <section className="creative-check-result" role="status">
+          {review.stopDetail && !(review.reviewContinuation?.reasonCode.startsWith("discussion_")
+            && review.stopDetail === review.reviewContinuation.detail) ? <section className="creative-check-result" role="status">
             <strong>需要你决定下一步</strong>
             <p>{review.stopDetail}</p>
           </section> : null}
@@ -781,20 +795,47 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
         </article>
 
         <section id="creative-chat" className={mobileTab === "discussion" ? "creative-chat-surface is-mobile-active" : "creative-chat-surface"} aria-label="与当前角色讨论">
+          <p className="creative-discussion-context">当前{STAGE_LABEL[review.stage]} · {discussionScope}</p>
           {review.checkResult && review.checkResult.status !== "incomplete" && review.checkResult.issues.length > 0 ? <section className="creative-check-result creative-advice-panel" aria-labelledby="creative-advice-title">
             <header><h3 id="creative-advice-title" tabIndex={-1}>本版建议</h3><span>{review.checkResult.issues.length} 条</span></header>
             <p className="creative-advice-scope">全稿建议</p>
             <strong>{review.checkResult.verdict === "repair" ? `有 ${review.checkResult.issues.length} 条修改建议，由你决定是否采用` : `本版已审计 · ${review.checkResult.issues.length} 条可选建议`}</strong>
             <p>{review.checkResult.summary}</p>
             <ul>{review.checkResult.issues.map((issue, index) => <li key={`${review.checkResult?.checkIdentity}:${index}`}>
-              <label><input type="checkbox" checked={selectedAuditIndexes.includes(index)} disabled={busy} aria-label={issue.creatorAction ?? issue.repairInstruction} onChange={(event) => setSelectedAuditIndexes((current) => event.target.checked ? [...current, index] : current.filter((value) => value !== index))} />
+              <label><input type="checkbox" checked={selectedAuditIndexes.includes(index) || containsSuggestion(message, (issue.creatorAction ?? issue.repairInstruction).trim())} disabled={busy || containsSuggestion(message, (issue.creatorAction ?? issue.repairInstruction).trim())} aria-label={issue.creatorAction ?? issue.repairInstruction} onChange={(event) => setSelectedAuditIndexes((current) => event.target.checked ? [...current, index] : current.filter((value) => value !== index))} />
                 <span>{issue.creatorTitle ?? issue.creatorAction ?? issue.repairInstruction}</span>
+                {containsSuggestion(message, (issue.creatorAction ?? issue.repairInstruction).trim()) ? <small>已加入</small> : null}
               </label>
-              {issue.creatorObservation ? <small>{issue.creatorObservation}</small> : issue.evidence ? <small>{issue.evidence}</small> : null}
-              {issue.creatorTitle && issue.creatorAction ? <p>{issue.creatorAction}</p> : null}
+              <details className="creative-advice-detail"><summary>查看依据与修改建议</summary>
+                {issue.creatorObservation ? <small>{issue.creatorObservation}</small> : issue.evidence ? <small>{issue.evidence}</small> : null}
+                {issue.creatorTitle && issue.creatorAction ? <p>{issue.creatorAction}</p> : null}
+              </details>
             </li>)}</ul>
             <button type="button" className="button button-secondary" disabled={busy || selectedAuditIndexes.length === 0} onClick={appendAuditSuggestions}>加入修改意见（{selectedAuditIndexes.length}）</button>
           </section> : null}
+          {includedSuggestions.length > 0 ? <section className="creative-added-advice" aria-label="已加入的修改意见">
+            <strong>已加入修改意见 · {includedSuggestions.length} 条</strong>
+            <ul>{includedSuggestions.map(suggestion => <li key={suggestion.text}><span>{suggestion.title}</span>
+              <button type="button" className="button button-ghost" aria-label={`移除已加入建议：${suggestion.title}`} onClick={() => {
+                // 只移除仍然完整存在的原条目；用户改写的意见不再匹配，不擅自删除。
+                setMessage(current => removeSuggestion(current, suggestion.text));
+              }}>移除</button>
+            </li>)}</ul>
+            <small>仍是未发送的文字，可在下面自由修改；选择或移除不会改稿。</small>
+          </section> : null}
+          <label className="creative-composer">
+            <span>聊聊你的想法</span>
+            <textarea ref={composerRef} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="例如：为什么这样开场？或者：把开头改得更直接一些。" />
+            <small>只讨论不改稿；发送修订意见才会修改。Ctrl + Enter 只讨论。</small>
+          </label>
+          {hasUnresolvedOperation ? <p className="creative-composer-pending" role="status">
+            <span>原操作仍在处理或待核，暂不另发讨论或修订。当前输入不会发送或清空。</span>{" "}
+            {review.consultationOperations?.length ? <a href="#creative-request-records">查看原请求与核对入口</a> : null}
+          </p> : null}
+          <div className="creative-composer-actions">
+            <button type="button" className="button button-secondary" disabled={busy || hasUnresolvedOperation || !message.trim() || !review.allowedActions.includes("discuss")} onClick={() => sendMessage("discuss")}><Send aria-hidden="true" size={16} />{busy ? "正在处理…" : "只讨论"}</button>
+            <button type="button" className="button button-primary" disabled={busy || hasUnresolvedOperation || !message.trim() || !review.allowedActions.includes("revise")} onClick={() => sendMessage("revise")}>发送修订意见</button>
+          </div>
           <header className="creative-chat-heading"><MessageCircle aria-hidden="true" size={17} /><strong>交互记录</strong></header>
           <div className="creative-message-list" aria-live="polite" ref={messageListRef}
             onScroll={(event) => {
@@ -813,36 +854,26 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
             followMessagesRef.current = true;
             setUnseenMessages(false);
           }}>有新消息，查看 ↓</button> : null}
-          {review.consultationOperations?.length ? <aside className="creative-storage-note" aria-label="原讨论与修改请求">
+          {review.consultationOperations?.length ? <aside id="creative-request-records" className="creative-request-records" aria-label="原讨论与修改请求">
             {review.consultationOperations.map(operation => {
               const audit = operation.command.action === "audit_current";
               const originalText = "message" in operation.command ? operation.command.message : undefined;
               const alreadyShown = review.messages.some(entry => entry.role === "user" && entry.commandId === operation.commandId);
-              return <div key={operation.commandId}>
-                <strong>{audit ? "文字审计" : operation.command.action === "revise" ? "稿件修订" : "创作讨论"} · {STAGE_LABEL[operation.command.stage]}</strong>
-                <p>{operation.status === "running" || operation.status === "unknown" ? "已提交 · 结果待核"
-                  : operation.status === "failed" ? "执行失败 · 已核清" : operation.status === "not_accepted" ? "未受理" : "已完成"}</p>
+              return <details key={operation.commandId} className={`creative-request-record is-${operation.status}`} open={operation.status !== "completed"}>
+                <summary>{audit ? "文字审计" : operation.command.action === "revise" ? "稿件修订" : "创作讨论"} · {STAGE_LABEL[operation.command.stage]} · <span>{operation.status === "running" ? "正在处理原请求" : operation.status === "unknown" ? "暂时无法确认原请求结果"
+                  : operation.status === "failed" ? "执行失败 · 结果已核清" : operation.status === "not_accepted" ? "未受理" : "已完成"}</span></summary>
                 {originalText && !alreadyShown ? <p className="creative-original-message">{originalText}</p> : null}
                 {operation.detail ? <p>{operation.detail}</p> : null}
                 {operation.status === "unknown" ? <p>原请求与费用仍待核；核对只查询原请求，不会另发一次。</p> : null}
-                {operation.status === "running" ? <p>正在处理原请求，请稍后查看；不会重复发送。</p> : null}
+                {operation.status === "running" ? <p>正在处理原请求，请稍后查看；不会重复发送。原请求费用仍待核，以实际记录为准。</p> : null}
                 {operation.status === "failed" || operation.status === "not_accepted" ? <p>当前稿仍保留。你可修改意见后主动发起新的{audit ? "文字审计" : "讨论或修订"}（会调用模型），或处理已有稿件；费用以实际记录为准。</p> : null}
                 {operation.resultDisposition === "recorded_not_applied" ? <p>回复只归档于原稿；当前稿和决定未改变。</p> : null}
                 {operation.reply && operation.resultDisposition === "recorded_not_applied" ? <p>{operation.reply}</p> : null}
                 {operation.status === "unknown" ? <button type="button" className="button button-secondary" disabled={busy || reconcilingCommand}
                   onClick={() => void reconcileConsultation(operation.command)}>{audit ? "核对原文字审计结果" : "核对原讨论结果"}</button> : null}
-              </div>;
+              </details>;
             })}
           </aside> : null}
-          <label className="creative-composer">
-            <span>聊聊你的想法</span>
-            <textarea ref={composerRef} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="例如：为什么这样开场？或者：把开头改得更直接一些。" />
-            <small>只讨论不改稿；发送修订意见才会修改。Ctrl + Enter 只讨论。</small>
-          </label>
-          <div className="creative-composer-actions">
-            <button type="button" className="button button-secondary" disabled={busy || hasUnresolvedOperation || !message.trim() || !review.allowedActions.includes("discuss")} onClick={() => sendMessage("discuss")}><Send aria-hidden="true" size={16} />{busy ? "正在处理…" : "只讨论"}</button>
-            <button type="button" className="button button-primary" disabled={busy || hasUnresolvedOperation || !message.trim() || !review.allowedActions.includes("revise")} onClick={() => sendMessage("revise")}>发送修订意见</button>
-          </div>
         </section>
       </div>
 
@@ -891,6 +922,14 @@ function canRetainIndependentAudit(
 ): boolean {
   return command.action === "audit_current" && receipt?.commandId === command.commandId
     && receipt.status === "unknown" && receipt.independentDraftActionsAllowed === true;
+}
+
+function containsSuggestion(message: string, suggestion: string): boolean {
+  return suggestion.length > 0 && `\n${message}\n`.includes(`\n- ${suggestion}\n`);
+}
+
+function removeSuggestion(message: string, suggestion: string): string {
+  return `\n${message}\n`.replace(`\n- ${suggestion}\n`, "\n").slice(1, -1);
 }
 
 function CreativeSelection({ stage, draft, selectedIds, onChange }: {
@@ -1047,6 +1086,8 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
     {/* 收起时不渲染字段：可读稿和编辑器里会出现相同文字，展开才挂载避免同一屏两份同文。 */}
     {open ? <>
       <p className="creative-edit-state" role="status">{stale ? "当前方案已更新。你的未保存文字仍在下方，可先复制留存；请放弃旧稿修改、重新读取当前版本后再编辑。旧稿不能覆盖新稿。" : saving ? "正在保存修订，等待服务端确认…" : saveState === "failed" ? "保存未完成，输入仍保留。请查看错误后重试。" : dirty ? "修改尚未生效；保存后会形成未审新稿，等你决定是否审计或采用。" : saveState === "saved" ? "修订已保存。请核对当前稿，再决定是否审计或采用。" : "可直接修改文字。保存不会自动审计、采用或购买素材。"}</p>
+      {stage === "director" && isRecord(draft.visualBible) && typeof draft.visualBible.viewerPromise === "string"
+        ? <p>观众承诺来自已采用的脚本，保存会沿用「{draft.visualBible.viewerPromise}」。如需更改，请返回脚本。</p> : null}
       {evidenceRepairs.length > 0 ? <fieldset className="creative-evidence-repairs">
         <legend>素材安排待补齐</legend>
         <p>以下素材安排还没选择画面服务；选择不会调用外部服务、不报价、不签费用，保存后形成未审新稿。</p>
@@ -1095,7 +1136,13 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
           onClick={async () => {
             if (!edited || stale || saving || busy) return;
             setSaving(true);
-            try { await onSave(edited.document); setEdited(null); setSaveState("saved"); }
+            try {
+              // 兼容旧编辑器恢复的本地草稿：只提交本阶段可改字段，不偷改上游已采用承诺。
+              const document = stage === "director" && isRecord(draft.visualBible) && isRecord(edited.document.visualBible)
+                ? { ...edited.document, visualBible: { ...edited.document.visualBible, viewerPromise: draft.visualBible.viewerPromise } }
+                : edited.document;
+              await onSave(document); setEdited(null); setSaveState("saved");
+            }
             catch { setSaveState("failed"); }
             finally { setSaving(false); }
           }}
@@ -1180,7 +1227,6 @@ function editableTextFields(stage: StudioCreativeReviewSnapshot["stage"], draft:
   if (!isRecord(draft.visualBible)) return [];
   const fields: EditableTextField[] = [];
   for (const [field, label] of [
-    ["viewerPromise", "观众承诺"],
     ["narrativeApproach", "叙事方式"],
     ["pacing", "节奏"],
     ["composition", "构图"],

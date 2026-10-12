@@ -10,9 +10,30 @@
   --accent-soft: #eaf0fb;
   --blue: #2c55cc;
   --blue-soft: #eaf0fb;
+  --green: #147657;
+  --text-body: 14px;
+  --text-meta: 12px;
   --shadow: 0 2px 4px rgb(23 32 51 / 3%), 0 16px 32px -24px rgb(23 32 51 / 25%);
 }
 .studio-v3 { padding-left: 216px; }
+/* 整个确认窗口受视口约束；长意见由正文滚动，焦点和取消入口留在窗口内。 */
+.studio-v3 .dialog-backdrop { padding: 16px; }
+.studio-v3 .decision-dialog { max-height: calc(100dvh - 32px); overflow-y: auto; overscroll-behavior: contain; }
+.studio-v3 .decision-dialog > .dialog-header,
+.studio-v3 .decision-dialog > .dialog-actions { position: sticky; z-index: 2; background: var(--paper); }
+.studio-v3 .decision-dialog > .dialog-header { top: 0; flex-shrink: 0; }
+.studio-v3 .decision-dialog > .dialog-actions { bottom: 0; flex-shrink: 0; }
+.studio-v3 .decision-dialog:has(> .decision-dialog-body) { display: flex; flex-direction: column; overflow: hidden; }
+.studio-v3 .decision-dialog-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 12px; }
+.studio-v3 .decision-dialog-body .review-disposition-list { max-height: none; overflow: visible; }
+.studio-v3 .decision-dialog .dialog-header h2 { overflow-wrap: anywhere; }
+.studio-v3 .decision-dialog .dialog-actions .button { min-width: 0; white-space: normal; }
+.studio-v3 .decision-dialog:has(> .decision-dialog-body) > .dialog-actions > .button-ghost { flex: 0 0 auto; min-width: 88px; }
+.studio-v3 .decision-dialog:has(> .decision-dialog-body) > .dialog-actions > .button-primary { flex: 1; }
+.studio-v3 .decision-dialog .dialog-header .icon-button { flex-shrink: 0; }
+/* 能力限制与保存范围是正文，不用小字模拟低优先级。 */
+.studio-v3 .resources-page :is(.field > span, .field > small, .configuration-intro small, .configuration-save-row > span, .configuration-review-mode small) { font-size: var(--text-body); line-height: 1.7; }
+.studio-v3 .configuration-intro small { display: block; color: var(--green); font-size: var(--text-body); line-height: 1.7; }
 .studio-v3 .content-shell { min-height: calc(100dvh - 66px); }
 .studio-v3 .studio-sidebar {
   width: 216px;
@@ -126,7 +147,16 @@
   .studio-v3 .mobile-nav a { font-weight: 500; }
   .studio-v3 .mobile-nav a.active { color: var(--accent-strong); }
   .studio-v3 .mobile-header-actions .tour-help-button { width: 40px; min-height: 44px; }
+  /* 窄屏先编辑默认值；服务与费用说明完整保留在保存按钮之前。 */
+  .studio-v3 .configuration-defaults .configuration-fields { grid-row: 1; }
+  .studio-v3 .configuration-defaults .configuration-intro { grid-row: 2; border-right: 0; padding-inline: 16px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .studio-v3 .content-shell > main > * { animation: none; }
 }
+.studio-v3 .production-environment-status { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 10px 24px; padding: 0; margin: 12px 0; list-style: none; }
+.studio-v3 .production-environment-status li { display: grid; gap: 4px; color: var(--ink); font-size: 14px; line-height: 1.7; }
+.studio-v3 .production-environment-status strong { color: var(--ink); font-size: 14px; font-weight: 600; }
+.studio-v3 .production-environment-status li[data-state="ready"] > strong { color: var(--green); }
+.studio-v3 .production-environment-status small,
+.studio-v3 .production-environment-note { color: var(--muted); font-size: 14px; line-height: 1.7; }

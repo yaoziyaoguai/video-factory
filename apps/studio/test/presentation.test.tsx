@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { buildProviderCatalog } from "../src/server/provider-catalog.js";
-import { RUN_NODE_ORDER, agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, costProviderLabel, creatorFacingTechnicalText, creatorRunStatusLabel, proposalSourceLabel, providerLabel, providerModelLabel, reasoningEffortLabel, runNodeLabel } from "../src/client/presentation.js";
+import { RUN_NODE_ORDER, agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, costProviderLabel, creatorFacingTechnicalText, creatorRunStatusLabel, proposalSourceLabel, providerLabel, providerModelLabel, reasoningEffortLabel, reviewProviderLabel, runNodeLabel } from "../src/client/presentation.js";
 
 describe("creator-facing presentation labels", () => {
+  it("does not assign a shared review model to the first unrelated role in the catalog", () => {
+    const modelProfiles = [{ id: "shared-model", label: "同一审片模型" }];
+    const providers = [{ id: "topic-editor", label: "选题总编", modelProfiles },
+      { id: "visual-review", label: "视觉审片员", modelProfiles }];
+    expect(reviewProviderLabel("shared-model", providers)).toBe("同一审片模型");
+    expect(reviewProviderLabel("shared-model", [...providers].reverse())).toBe("同一审片模型");
+    expect(reviewProviderLabel("visual-review", providers)).toBe("视觉审片员");
+    expect(reviewProviderLabel("shared-model", [providers[1]!])).toBe("视觉审片员");
+  });
+
   it("does not expose internal provider ids or director routing codes", () => {
     expect(providerLabel("human-editor")).toBe("人工编辑");
     expect(providerLabel("human-editor-private-state")).toBe("人工编辑记录");
@@ -14,6 +24,8 @@ describe("creator-facing presentation labels", () => {
     expect(providerLabel("local-relayout-v1")).toBe("配音时间调整（复用原声）");
     expect(providerLabel("local-subtitle-recovery-v1")).toBe("字幕同步恢复（复用原声）");
     expect(providerLabel("minimax-tts-v1")).toBe("MiniMax 中文配音");
+    expect(providerLabel("python-native-audio-v1")).toBe("视频原声（本地提取）");
+    expect(providerLabel("system-font")).toBe("系统字体");
     expect(providerModelLabel(undefined, "internal-model-id")).toBe("模型名称未收录（internal-model-id）");
   });
 
@@ -22,6 +34,16 @@ describe("creator-facing presentation labels", () => {
     expect(catalogModelLabel(providers, "deepseek-flash")).toBe("DeepSeek-Flash");
     expect(catalogModelLabel(providers, "secret-internal-model")).toBeUndefined();
     expect(catalogModelLabel(providers, undefined)).toBeUndefined();
+  });
+
+  it("prefers a registered model name over a raw-id catalog placeholder", () => {
+    const providers = [
+      { id: "writer", label: "编剧", modelProfiles: [{ id: "shared", label: "shared" }, { id: "shared", label: "共享模型" }] },
+      { id: "reviewer", label: "审片员", modelProfiles: [{ id: "shared", label: "共享模型" }] },
+    ];
+    expect(catalogModelLabel(providers, "shared")).toBe("共享模型");
+    expect(reviewProviderLabel("shared", providers)).toBe("共享模型");
+    expect(catalogModelLabel([{ modelProfiles: [{ id: "unlisted", label: "unlisted" }] }], "unlisted")).toBe("unlisted");
   });
 
   it("declares official console entries only for metered providers that can require reconciliation", () => {

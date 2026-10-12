@@ -287,7 +287,7 @@ describe("session storage partial failure keeps in-page input (C5)", () => {
   it.each([
     { stage: "treatment" as const, draft: { viewerPromise: "原承诺" }, label: "观众看完能得到什么" },
     { stage: "script" as const, draft: scriptReview().draft, label: "分镜 1 · 旁白" },
-    { stage: "director" as const, draft: { visualBible: { viewerPromise: "原承诺" } }, label: "全片视觉规则 · 观众承诺" },
+    { stage: "director" as const, draft: { visualBible: { pacing: "原节奏" } }, label: "全片视觉规则 · 节奏" },
   ])("RF2 keeps both $stage fields and a truthful warning across remounts during a read outage", async ({ stage, draft, label }) => {
     const session = tabStorage();
     let broken = false;

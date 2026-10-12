@@ -164,6 +164,32 @@ const runDetail: StudioRunDetail = {
 };
 
 describe("Studio client", () => {
+  it("keeps final confirmation ahead of optional reports without approving on open or cancel", async () => {
+    const onDecision = vi.fn();
+    const { container } = render(<RunWorkbench run={runDetail} decisionPending={false} onDecision={onDecision} />);
+    const approve = screen.getByRole("button", { name: "确认本版成片并内部定版" });
+    const report = screen.getByRole("status", { name: "机器审片状态" });
+    expect(approve.compareDocumentPosition(report) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await userEvent.click(approve);
+    const dialog = screen.getByRole("dialog", { name: "确认本版成片，完成内部定版" });
+    expect(within(dialog).getByRole("button", { name: "确认内部定版并准备文案" })).toBeEnabled();
+    expect(container.querySelector(".decision-dialog-body")).toContainElement(within(dialog).getByRole("textbox", { name: "批准备注（选填）" }));
+    await userEvent.keyboard("{Escape}");
+    expect(approve).toHaveFocus();
+    expect(onDecision).not.toHaveBeenCalled();
+  });
+
+  it("does not invent zero counts before the production list has loaded or after a read failure", () => {
+    const props = { runs: [], onCreate: vi.fn(), onRetry: vi.fn(), onArchive: vi.fn(), onRestore: vi.fn(), onDelete: vi.fn() };
+    const view = render(<MemoryRouter><ProductionQueue {...props} loading /></MemoryRouter>);
+    const counts = () => [...view.container.querySelectorAll(".project-edition strong")].map(el => el.textContent);
+    expect(counts()).toEqual(["—", "—", "—"]);
+    view.rerender(<MemoryRouter><ProductionQueue {...props} loading={false} error="读取失败" /></MemoryRouter>);
+    expect(counts()).toEqual(["—", "—", "—"]);
+    view.rerender(<MemoryRouter><ProductionQueue {...props} loading={false} /></MemoryRouter>);
+    expect(counts()).toEqual(["0", "0", "0"]);
+  });
+
   it.each(["applied", "accepted", "query-failed", "storage-denied"] as const)("observes the original local decision at the next stop without submitting another decision: %s", async state => {
     vi.restoreAllMocks();
     vi.stubGlobal("EventSource", class { addEventListener() {} close() {} });
@@ -367,7 +393,7 @@ describe("Studio client", () => {
     const run = { ...runDetail, activeIntervention: { ...runDetail.activeIntervention!, nodeId: "asset-source-review" } };
     render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
     expect(screen.getByRole("button", { name: "接受当前素材风险，继续制作" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "批准进入发布包" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认本版成片并内部定版" })).not.toBeInTheDocument();
   });
 
   it("offers only local native audio recovery or linked rework, without adopting missing sound", async () => {
@@ -450,9 +476,9 @@ describe("Studio client", () => {
       { id: "visual-review", label: "成片审片", role: "审片员", status: "succeeded", artifactIds: [], qualityGateResults: [], output: { report } },
     ] };
     const view = render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
-    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
+    await user.click(screen.getByRole("button", { name: "接受风险并内部定版" }));
     let dialog = screen.getByRole("dialog");
-    let approve = within(dialog).getByRole("button", { name: "逐条表态已完成，生成发布包" });
+    let approve = within(dialog).getByRole("button", { name: "确认内部定版并准备文案" });
     expect(approve).toBeDisabled();
     expect(prefill).not.toHaveBeenCalled();
     expect(within(dialog).getByText("已表态 0/1")).toBeInTheDocument();
@@ -477,9 +503,9 @@ describe("Studio client", () => {
     expect(approve).toBeDisabled();
     expect(onDecision).toHaveBeenCalledTimes(1);
     await user.click(within(dialog).getByRole("button", { name: "返回查看当前内容" }));
-    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
+    await user.click(screen.getByRole("button", { name: "接受风险并内部定版" }));
     dialog = screen.getByRole("dialog");
-    approve = within(dialog).getByRole("button", { name: "逐条表态已完成，生成发布包" });
+    approve = within(dialog).getByRole("button", { name: "确认内部定版并准备文案" });
     expect(approve).toBeEnabled();
     next.revision++;
     next.nodes.at(-1)!.output = { report: { ...report, reviewScope: { evidenceId: "c".repeat(64) } } };
@@ -507,7 +533,7 @@ describe("Studio client", () => {
     const response = { expectedRunRevision: 19, basis: "b".repeat(64), reviewEvidenceId: "a".repeat(64), sourceDecisionId: "prior",
       dispositions: [{ itemKey: key, decision: "accept_risk" as const }] };
     const view = render(<RunWorkbench run={runA} decisionPending={false} onDecision={onDecision} />);
-    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
+    await user.click(screen.getByRole("button", { name: "接受风险并内部定版" }));
     let dialog = within(screen.getByRole("dialog"));
     await user.click(dialog.getByRole("button", { name: "沿用上一停点的逐条表态" }));
     // 在途请求期间离开 A，再回到未发生业务变化的 A（revision 不变、无手填）。
@@ -542,14 +568,14 @@ describe("Studio client", () => {
     const response = { expectedRunRevision: 19, basis: "b".repeat(64), reviewEvidenceId: "a".repeat(64), sourceDecisionId: "prior",
       dispositions: [{ itemKey: key, decision: "accept_risk" as const }] };
     const view = render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
-    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
+    await user.click(screen.getByRole("button", { name: "接受风险并内部定版" }));
     let dialog = within(screen.getByRole("dialog"));
     await user.click(dialog.getByRole("button", { name: "沿用上一停点的逐条表态" }));
-    await user.click(dialog.getByRole("button", { name: "不采纳，维持现状" }));
+    await user.click(dialog.getByRole("button", { name: "不同意这条意见" }));
     await user.type(dialog.getByLabelText("不采纳理由"), "这是当前手填判断");
     await act(async () => complete(response));
     expect(dialog.getByLabelText("不采纳理由")).toHaveValue("这是当前手填判断");
-    expect(dialog.getByRole("button", { name: "不采纳，维持现状" })).toHaveAttribute("aria-pressed", "true");
+    expect(dialog.getByRole("button", { name: "不同意这条意见" })).toHaveAttribute("aria-pressed", "true");
     expect(dialog.queryByText("已预填，尚未确认本节点；你仍可修改。")).toBeNull();
     await user.click(dialog.getByRole("button", { name: "沿用上一停点的逐条表态" }));
     view.rerender(<RunWorkbench run={{ ...run, id: "different-run" }} decisionPending={false} onDecision={onDecision} />);
@@ -572,12 +598,12 @@ describe("Studio client", () => {
           category: "composition", description: "主体略偏", suggestion: "可保留", evidenceStatus: "failed", severity: "warning" }],
           reviewScope: { evidenceId: "a".repeat(64) } } } }] };
     render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
-    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
+    await user.click(screen.getByRole("button", { name: "接受风险并内部定版" }));
     const dialog = within(screen.getByRole("dialog"));
     await user.click(dialog.getByRole("button", { name: "沿用上一停点的逐条表态" }));
     expect(await dialog.findByText(/暂时无法读取上一停点表态/)).toBeInTheDocument();
     await user.click(dialog.getByRole("button", { name: "接受风险，保留本版" }));
-    await user.click(dialog.getByRole("button", { name: "逐条表态已完成，生成发布包" }));
+    await user.click(dialog.getByRole("button", { name: "确认内部定版并准备文案" }));
     expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({ reviewDispositions: [{ itemKey: key, decision: "accept_risk" }] }));
     prefill.mockRestore();
   });
@@ -591,14 +617,14 @@ describe("Studio client", () => {
       { id: "visual-review", label: "成片审片", status: "succeeded", artifactIds: [], qualityGateResults: [], output: {
         report: { recommendation: "revise", summary: "五条画面意见", findings, reviewScope: { evidenceId: "a".repeat(64) } } } }] };
     const { rerender } = render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
-    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
+    await user.click(screen.getByRole("button", { name: "接受风险并内部定版" }));
     const dialog = within(screen.getByRole("dialog"));
     expect(dialog.getByText("已表态 0/5")).toBeInTheDocument();
     for (const button of dialog.getAllByRole("button", { name: "接受风险，保留本版" }).slice(0, 4)) await user.click(button);
     expect(dialog.getByText("已表态 4/5")).toBeInTheDocument();
-    const approve = dialog.getByRole("button", { name: "逐条表态已完成，生成发布包" });
+    const approve = dialog.getByRole("button", { name: "确认内部定版并准备文案" });
     expect(approve).toBeDisabled();
-    await user.click(dialog.getAllByRole("button", { name: "不采纳，维持现状" })[4]!);
+    await user.click(dialog.getAllByRole("button", { name: "不同意这条意见" })[4]!);
     expect(dialog.getByText("已表态 4/5")).toBeInTheDocument();
     await user.type(dialog.getByLabelText("不采纳理由"), "已看过，这里是有意留白。");
     expect(dialog.getByText("已表态 5/5")).toBeInTheDocument();
@@ -676,7 +702,7 @@ describe("Studio client", () => {
     expect(screen.getByText("等你确认创作规划")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: `查看并确认方案：${runSummary.title}` })).toHaveAttribute("href", "/projects/run-1");
     expect(screen.queryByText("已有成片可预览")).not.toBeInTheDocument();
-    expect(screen.queryByText("等你审片")).not.toBeInTheDocument();
+    expect(screen.queryByText("等你确认内部定版")).not.toBeInTheDocument();
   });
 
   it("keeps the project identity before the creative draft without an empty video or final-review actions", () => {
@@ -750,6 +776,45 @@ describe("Studio client", () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
+  it("DF02 shows a proven local rejection and keeps the editable input instead of polling or hiding the cause", async () => {
+    vi.restoreAllMocks();
+    for (const name of ["localStorage", "sessionStorage"]) {
+      const values = new Map<string, string>();
+      vi.stubGlobal(name, { getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) });
+    }
+    vi.stubGlobal("EventSource", class { addEventListener() {} close() {} });
+    const initial: StudioRunDetail = { ...runDetail, currentNodeId: "creative-planning", artifacts: [],
+      nodes: [{ id: "creative-planning", label: "创作规划", status: "needs_human", artifactIds: [], qualityGateResults: [] }],
+      activeIntervention: { id: "review", nodeId: "creative-planning", kind: "creative_review", reason: "等你确认", options: ["approve"], createdAt: runDetail.startedAt } };
+    delete initial.videoArtifactId;
+    const review: import("../src/shared/api.js").StudioCreativeReviewSnapshot = {
+      runId: initial.id, runRevision: initial.revision, stage: "treatment", reviewRevision: 1,
+      draftSha256: "a".repeat(64), draftArtifactId: "draft", phase: "waiting_user",
+      allowedActions: ["edit_draft", "confirm"], returnTargets: [], draft: { payoff: "原结尾" },
+      messages: [], effectiveUserInstructions: [], blockingIssues: [], proposals: [],
+    };
+    vi.spyOn(studioApi, "run").mockResolvedValue(initial);
+    vi.spyOn(studioApi, "runCosts").mockRejectedValue(new Error("no fixture"));
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "creativeReviewHistory").mockRejectedValue(new Error("no fixture"));
+    vi.spyOn(studioApi, "creativeReview").mockResolvedValue(review);
+    const post = vi.spyOn(studioApi, "commandCreativeReview").mockRejectedValue(new StudioApiError("保存被拒绝：请补齐结尾内容。", 409));
+    vi.spyOn(studioApi, "creativeReviewCommand").mockImplementation(async (_id, commandId) => ({ commandId, status: "not_accepted", observationUrl: "/same" }));
+    try {
+      render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
+      await userEvent.click(await screen.findByText("手动修订这份稿件"));
+      const editor = await screen.findByRole("textbox", { name: "结尾兑现" });
+      fireEvent.change(editor, { target: { value: "未保存的结尾" } });
+      await userEvent.click(screen.getByRole("button", { name: "保存修订" }));
+      await screen.findByText(/保存被拒绝：请补齐结尾内容。/);
+      expect(editor).toHaveValue("未保存的结尾");
+      expect(screen.getByRole("button", { name: "保存修订" })).toBeEnabled();
+      expect(post).toHaveBeenCalledTimes(1);
+      expect(localStorage.getItem("vf:creative-command:run-1:treatment:draft")).toBeNull();
+    } finally { vi.restoreAllMocks(); vi.unstubAllGlobals(); }
+  });
+
   it("keeps an in-flight creative panel mounted across transient running events and clears only the settled command", async () => {
     vi.restoreAllMocks();
     const storage = new Map<string, string>();
@@ -1025,6 +1090,16 @@ describe("Studio client", () => {
     expect(preferRunSnapshot(undefined, older)).toBe(older);
   });
 
+  it("keeps series editing guidance for a lightweight event, but accepts refreshed restrictions", () => {
+    const detailed: StudioRunDetail = { ...runDetail, status: "succeeded", seriesId: "series-1", seriesRework: { mode: "edit_current" } };
+    const { seriesRework, ...pushed } = detailed;
+    expect(preferRunSnapshot(detailed, pushed).seriesRework).toEqual(seriesRework);
+    expect(preferRunSnapshot(detailed, { ...pushed, revision: pushed.revision + 1 }).seriesRework).toBeUndefined();
+    expect(preferRunSnapshot(detailed, { ...pushed, status: "running" }).seriesRework).toBeUndefined();
+    const blocked = { mode: "blocked" as const, reason: "第 2 集已经采用" };
+    expect(preferRunSnapshot(detailed, { ...pushed, seriesRework: blocked }).seriesRework).toEqual(blocked);
+  });
+
   it("T11 keeps verified voice timing only across the same revision, stop and brief", () => {
     const detailed: StudioRunDetail = {
       ...runDetail,
@@ -1270,7 +1345,7 @@ describe("Studio client", () => {
     expect(screen.getByRole("heading", { name: "制作记录", level: 1 })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新建制作" })).toHaveClass("project-create-button");
     expect(screen.getByText(runSummary.title)).toBeInTheDocument();
-    expect(screen.getAllByText("等你审片").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("等你确认内部定版").length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: /进入审片/ })[0]).toHaveAttribute("href", "/projects/run-1");
     expect(screen.getByText("待你处理", { selector: ".project-edition span" }).closest("div")).toHaveTextContent("2");
     await user.click(screen.getByRole("button", { name: "筛选：待你处理" }));
@@ -4810,11 +4885,11 @@ describe("Studio client", () => {
     expect(screen.getByRole("link", { name: "下载成片" })).toHaveAttribute("download");
     expect(screen.queryByText(/技术文件与运行证据/)).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /脚本技术文件/ })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "批准进入发布包" }));
+    await user.click(screen.getByRole("button", { name: "确认本版成片并内部定版" }));
 
-    expect(screen.getByRole("dialog", { name: "确认批准成片" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "确认本版成片，完成内部定版" })).toBeInTheDocument();
     expect(onDecision).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "确认批准并生成发布包" }));
+    await user.click(screen.getByRole("button", { name: "确认内部定版并准备文案" }));
     expect(onDecision).toHaveBeenCalledWith({
       action: "approve",
       expectedRunRevision: 3,
@@ -4856,7 +4931,7 @@ describe("Studio client", () => {
 
     render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} />);
 
-    expect(screen.queryByRole("button", { name: "批准进入发布包" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认本版成片并内部定版" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "终止制作" })).toBeInTheDocument();
   });
 
@@ -4952,7 +5027,7 @@ describe("Studio client", () => {
     // 审计自己的措辞是 blocking；对用户它始终只是建议，界面不能写成"阻断"。
     expect(screen.getByText("建议先改")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /确认当前步骤，进入下一步/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /批准进入发布包/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /确认本版成片并内部定版/ })).not.toBeInTheDocument();
   });
 
   it("does not present an old audit as approval of a human-edited brief", () => {
@@ -5352,9 +5427,9 @@ describe("Studio client", () => {
     expect(within(dualReview).getByText(/deepseek-flash · 63 分 · 1 项问题/)).toBeInTheDocument();
     expect(within(dualReview).getByText(/gpt-5\.6-sol · 59 分 · 2 项问题/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "仍要批准（说明理由）" }));
-    const dialog = screen.getByRole("dialog", { name: "逐条表态后批准成片" });
-    const approve = within(dialog).getByRole("button", { name: "逐条表态已完成，生成发布包" });
+    await user.click(screen.getByRole("button", { name: "接受风险并内部定版" }));
+    const dialog = screen.getByRole("dialog", { name: "确认本版成片，完成内部定版" });
+    const approve = within(dialog).getByRole("button", { name: "确认内部定版并准备文案" });
     // 审片提出的每一条结论都要表态；只要还有没表态的条目，批准就必须是禁用的。
     expect(approve).toBeDisabled();
     expect(within(dialog).getByText("还有 2 条没有表态。")).toBeInTheDocument();
@@ -5370,12 +5445,12 @@ describe("Studio client", () => {
     expect(approve).toBeDisabled();
     expect(within(dialog).getByText(/其中 1 条已采纳、还等着返修。/)).toBeInTheDocument();
 
-    await user.click(within(dialog).getAllByRole("button", { name: "不采纳，维持现状" })[0]!);
+    await user.click(within(dialog).getAllByRole("button", { name: "不同意这条意见" })[0]!);
     const firstReason = within(dialog).getByLabelText("不采纳理由");
     await user.type(firstReason, "已逐帧复核，这里是刻意的浅色画面");
     // 只有不采纳的条目需要写明理由，两条都表态且都写了理由才放行。
     expect(approve).toBeDisabled();
-    await user.click(within(dialog).getAllByRole("button", { name: "不采纳，维持现状" })[1]!);
+    await user.click(within(dialog).getAllByRole("button", { name: "不同意这条意见" })[1]!);
     const secondReason = within(dialog).getAllByLabelText("不采纳理由")[1]!;
     await user.type(secondReason, "节奏符合本次发布要求");
     expect(approve).toBeEnabled();
@@ -5636,7 +5711,7 @@ describe("Studio client", () => {
     expect(screen.queryByRole("region", { name: "生产工作流" })).not.toBeInTheDocument();
     expect(screen.queryByText("10 / 12 个步骤完成")).not.toBeInTheDocument();
     expect(screen.queryByText("83%")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "批准进入发布包" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认本版成片并内部定版" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "打回" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "基于这版重新制作" }));
     expect(onRestart).toHaveBeenCalledOnce();
@@ -6280,7 +6355,7 @@ describe("Studio client", () => {
     expect(screen.getByText(/重试只续未完成的审查分支/)).toBeInTheDocument();
     const retry = screen.getByRole("button", { name: "重试审查（复用已生成画面）" });
     expect(screen.getByRole("button", { name: "终止制作" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /做完了|批准进入发布包/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /做完了|确认本版成片并内部定版/ })).not.toBeInTheDocument();
 
     fireEvent.click(retry);
     expect(onRetryFailedNode).toHaveBeenCalledWith("assets");
@@ -6326,7 +6401,7 @@ describe("Studio client", () => {
         output: { reviewStatus: "incomplete", providerOutcomeKnown: true } },
         { id: "final-review", label: "人工终审", status: "pending", artifactIds: [], qualityGateResults: [] }],
     }} decisionPending={false} onDecision={onDecision} />);
-    expect(screen.queryByRole("button", { name: "批准进入发布包" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认本版成片并内部定版" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "接受未复核风险，进入人工终审" }));
     const dialog = screen.getByRole("dialog", { name: "接受未复核风险，进入人工终审" });
     expect(within(dialog).getByText(/不会生成发布包，也不代表审片通过/)).toBeInTheDocument();
@@ -6421,7 +6496,7 @@ describe("Studio client", () => {
     expect(screen.getByText(/机器视觉审片未取得有效结论/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "接受未复核风险并内部定版" }));
     expect(await screen.findByRole("dialog", { name: "接受未复核风险，完成内部定版" })).toBeInTheDocument();
-    expect(screen.getByText(/你接受的是这个未复核事实，不是宣布审查通过/)).toBeInTheDocument();
+    expect(screen.getByText(/你接受的是未复核风险，不是宣布审查通过/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "确认承担风险并内部定版" }));
     await waitFor(() => expect(onDecision).toHaveBeenCalledTimes(1));
     const payload = onDecision.mock.calls[0]?.[0] as Record<string, unknown>;

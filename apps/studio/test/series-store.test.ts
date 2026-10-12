@@ -560,6 +560,9 @@ describe("JsonSeriesStore", () => {
     assert.equal(published.episodes[0]?.status, "published");
     assert.equal(published.canon.revision, 1);
     assert.equal(published.canon.facts.length, 1);
+    await assert.rejects(store.assertRunEditable("run-1"), /已经发布/);
+    await assert.rejects(store.acquireRunEditLease("run-1", "published-edit", "2026-08-24T10:01:00.000Z"), /已经发布/);
+    assert.deepEqual((await store.list())[0], published);
   });
 
   it("allows adoption after an approved empty-canon episode, not an unapproved succeeded run", async () => {

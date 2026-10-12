@@ -3,6 +3,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CreativeDraftReader } from "../src/client/components/CreativeDraftReader.js";
 
 describe("CreativeDraftReader", () => {
+  it("puts the audience's actual script before production reference text", () => {
+    render(<CreativeDraftReader stage="script" value={{ narrativeArc: "这是一段制作参考", scenes: [
+      { id: "opening", position: 1, duration: 4, narration: "这是观众先听到的话", visual_prompt: "窗边" },
+    ] }} />);
+    const spoken = screen.getByText("这是观众先听到的话");
+    const reference = screen.getByText("这是一段制作参考");
+    expect(spoken.compareDocumentPosition(reference) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
   const originalAnimate = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "animate");
   const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
   afterEach(() => {

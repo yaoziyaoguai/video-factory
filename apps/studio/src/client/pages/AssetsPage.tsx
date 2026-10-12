@@ -10,6 +10,7 @@ import {
   Music2,
   Search,
   ShieldAlert,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
@@ -104,6 +105,7 @@ export function AssetsPage() {
 
   const originOptions = [...new Set(collectionAssets.map((asset) => asset.origin))];
   const providerOptions = providerFilterOptions(collectionAssets);
+  const extraFilterCount = Number(origin !== "all") + Number(provider !== "all");
   const hasFilters = filter !== "all" || origin !== "all" || provider !== "all" || Boolean(query.trim());
   const clearFilters = () => {
     setFilter("all");
@@ -144,7 +146,7 @@ export function AssetsPage() {
           <p className="page-summary">{collection === "creative" ? "可再次用于创作的画面与声音，按内容去重并保留授权和入片记录。" : "最终成片、脚本与质检记录独立归档，不混入可复用素材。"}</p>
           <Link to="/resources#visual-providers">配置外部素材来源</Link>
         </div>
-        <div className="asset-library-count"><strong>{collectionAssets.length}</strong><span>{collection === "creative" ? "项创作素材" : "项成片与记录"}</span></div>
+        <div className="asset-library-count"><strong>{manifest ? collectionAssets.length : "—"}</strong><span>{collection === "creative" ? "项创作素材" : "项成片与记录"}</span></div>
       </header>
 
       {manifest ? <section className="asset-index-summary" aria-label="素材库概况">
@@ -172,17 +174,29 @@ export function AssetsPage() {
           </div>
         </div>
         <div className="asset-library-filters">
-          {visibleFilters.map((item) => <button key={item.id} type="button" aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}<span>{assetCount(collectionAssets, item.id)}</span></button>)}
+          {visibleFilters.map((item) => <button key={item.id} type="button" aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}<span>{manifest ? assetCount(collectionAssets, item.id) : "—"}</span></button>)}
         </div>
-        <div className="asset-library-refiners">
-          <label><span className="sr-only">素材来源类型</span><select value={origin} onChange={(event) => setOrigin(event.target.value as "all" | StudioAssetOrigin)}><option value="all">全部来源</option>{originOptions.map((item) => <option key={item} value={item}>{originLabel(item)}</option>)}</select></label>
-          <label><span className="sr-only">素材提供方</span><select value={provider} onChange={(event) => setProvider(event.target.value)}><option value="all">全部提供方</option>{providerOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+        <div className="asset-library-search-row">
           <label className="asset-library-search"><Search aria-hidden="true" size={16} /><span className="sr-only">搜索素材</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索画面、标签或作品" /></label>
+          <details className="asset-library-extra-filters">
+            <summary>{extraFilterCount ? `更多筛选 · ${extraFilterCount} 项` : "更多筛选"}<ChevronDown aria-hidden="true" size={14} /></summary>
+            <div className="asset-library-refiners">
+              <label><span>素材来源类型</span><select value={origin} onChange={(event) => setOrigin(event.target.value as "all" | StudioAssetOrigin)}><option value="all">全部来源</option>{originOptions.map((item) => <option key={item} value={item}>{originLabel(item)}</option>)}</select></label>
+              <label><span>素材提供方</span><select value={provider} onChange={(event) => setProvider(event.target.value)}><option value="all">全部提供方</option>{providerOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+            </div>
+          </details>
         </div>
+        {hasFilters ? <div className="asset-library-active-filters" aria-label="已启用的素材筛选">
+          {filter !== "all" ? <button type="button" aria-label={`移除类型筛选：${FILTERS.find((item) => item.id === filter)?.label ?? filter}`} onClick={() => setFilter("all")}>{FILTERS.find((item) => item.id === filter)?.label ?? filter}<X aria-hidden="true" size={13} /></button> : null}
+          {origin !== "all" ? <button type="button" aria-label={`移除来源筛选：${originLabel(origin)}`} onClick={() => setOrigin("all")}>{originLabel(origin)}<X aria-hidden="true" size={13} /></button> : null}
+          {provider !== "all" ? <button type="button" aria-label={`移除提供方筛选：${providerOptions.find((item) => item.id === provider)?.label ?? providerLabel(provider)}`} onClick={() => setProvider("all")}>{providerOptions.find((item) => item.id === provider)?.label ?? providerLabel(provider)}<X aria-hidden="true" size={13} /></button> : null}
+          {query.trim() ? <button type="button" aria-label={`移除搜索条件：${query.trim()}`} onClick={() => setQuery("")}>搜索：{query.trim()}<X aria-hidden="true" size={13} /></button> : null}
+          <button type="button" className="asset-library-clear-filters" onClick={clearFilters}>清除全部筛选</button>
+        </div> : null}
       </section>
 
       {error ? <div className="inline-error" role="alert">{error}<button className="button button-secondary" type="button" onClick={() => void load()}>重新读取</button></div> : null}
-      {loading && !manifest ? <div className="asset-library-empty">正在建立素材索引...</div> : null}
+      {loading && !manifest ? <div className="asset-library-empty" role="status">正在读取已有素材...</div> : null}
       {!loading && manifest && assets.length === 0 ? <div className="asset-library-empty"><FolderOpen aria-hidden="true" size={28} /><strong>这个范围里还没有内容</strong><span>{hasFilters ? "可以清除筛选，查看完整素材库。" : "完成一次真实制作后，镜头和制作记录会自动归档到这里。"}</span>{hasFilters ? <button className="button button-secondary" type="button" onClick={clearFilters}>清除筛选</button> : null}</div> : null}
 
       {assets.length && view === "asset" ? <section className="asset-library-grid" aria-live="polite">

@@ -160,7 +160,7 @@ describe("focused film viewing", () => {
     expect(video.closest(".video-frame")).not.toHaveClass("film-reveal-active");
     expect(screen.getByText("1 项原审计的结果与费用待核；费用未核实不表示免费。")).toBeVisible();
     expect(screen.getByRole("status", { name: "机器审片状态" })).toHaveTextContent("机器视觉审片尚无完整结论");
-    expect(screen.getByRole("button", { name: "批准进入发布包" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认本版成片并内部定版" })).toBeVisible();
     expect(screen.getByRole("button", { name: "终止制作" })).toBeVisible();
     expect(screen.getByRole("link", { name: "下载成片" })).toHaveAttribute("href", "/media/current.mp4");
     await user.click(screen.getByRole("link", { name: "查看原请求与查询" }));

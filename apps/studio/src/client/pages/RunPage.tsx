@@ -23,6 +23,8 @@ export function preferRunSnapshot(current: StudioRunDetail | undefined, next: St
     ...(next.planningStages === undefined && current.planningStages !== undefined
       ? { planningStages: current.planningStages }
       : {}),
+    ...(next.seriesRework === undefined && current.seriesRework !== undefined && next.status === "succeeded"
+      ? { seriesRework: current.seriesRework } : {}),
     ...(next.taskRecovery === undefined && current.taskRecovery !== undefined
       ? { taskRecovery: current.taskRecovery }
       : {}),
@@ -232,6 +234,11 @@ function RunPageContent({ runId }: { runId: string }) {
   }, [refreshPaidNode, uncertainPaidNodeId]);
 
   useEffect(() => {
+    // 终态事件来自制作管线；系列修改范围由服务层核对，完成后补读一次当前事实。
+    if (run?.status === "succeeded" && run.seriesId && !run.seriesRework) void refreshRunSnapshot(false);
+  }, [run?.id, run?.status, run?.seriesId, run?.seriesRework, refreshRunSnapshot]);
+
+  useEffect(() => {
     if (!run || run.status === "succeeded" || run.status === "failed" || run.status === "rejected") {
       return;
     }
@@ -309,8 +316,12 @@ function RunPageContent({ runId }: { runId: string }) {
     setCreativeCommandPending(true);
     setError(undefined);
     try {
+      let rejectionMessage: string | undefined;
       // POST 响应丢失也只观察同一 commandId；不把受理当成完成，不另造请求身份。
       try { await studioApi.commandCreativeReview(runId, input); } catch (submitError) {
+        if (submitError instanceof StudioApiError && (submitError.status === 400 || submitError.status === 409)) {
+          rejectionMessage = submitError.message;
+        }
         try { await studioApi.creativeReviewCommand(runId, input.commandId); } catch { throw submitError; }
       }
       const observe = async () => {
@@ -337,7 +348,7 @@ function RunPageContent({ runId }: { runId: string }) {
           if (requestId === creativeReviewRequest.current) setCreativeReview(review);
           setRun((current) => preferRunSnapshot(current, nextRun));
           if (operation.status === "not_accepted") {
-            throw Object.assign(new Error("这次操作未受理，没有执行；当前稿件已保留，请查看当前方案后重新选择。"), { commandCompleted: true });
+            throw Object.assign(new Error(rejectionMessage ?? "这次操作未受理，没有执行；当前稿件已保留，请查看当前方案后重新选择。"), { commandCompleted: true });
           }
           if (operation.status === "failed") {
             throw Object.assign(new Error("这次创作操作未成功，当前稿已保留。请查看失败原因和恢复选项；不会自动重复生成。"), { commandCompleted: true });

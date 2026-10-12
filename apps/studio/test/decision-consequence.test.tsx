@@ -211,7 +211,7 @@ describe("final review optional timing tool", () => {
     // 主动作（人工终审决定区）在 DOM 上先于可选工具出现。
     const decisionPanel = aside.querySelector(".intervention-panel") as HTMLElement | null;
     expect(decisionPanel).not.toBeNull();
-    expect(decisionPanel?.textContent).toContain("需要你的判断");
+    expect(decisionPanel?.textContent).toContain("确认本版成片，完成内部定版");
     expect((decisionPanel as HTMLElement).compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     // summary 是可聚焦的开关（真实浏览器支持 Enter/Space；jsdom 只模拟 click 切换）。

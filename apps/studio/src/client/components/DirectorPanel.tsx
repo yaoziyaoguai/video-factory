@@ -41,8 +41,8 @@ export function DirectorPanel({ opportunity, providers, providerError, onProduce
     <aside className="director-panel" aria-label="导演控制台" data-tour="director-panel">
       <header className="panel-heading">
         <div>
-          <span>导演台</span>
-          <h2>创意决策</h2>
+          <span>制作准备</span>
+          <h2>确认想法并开始制作</h2>
         </div>
         <WandSparkles aria-hidden="true" size={19} />
       </header>

@@ -1567,7 +1567,7 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     }
   });
 
-  it("recovers subtitles through the real client HTTP Studio pipeline and Python worker without rebuying voice", async (t) => {
+  for (const optionalUnknown of [false, true]) it(`recovers subtitles through the real client HTTP Studio pipeline and Python worker without rebuying voice (optional unknown=${optionalUnknown})`, async (t) => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-subtitle-http-"));
     const voiceRequests: Array<Record<string, unknown>> = [];
     class SubtitleWorker extends ReworkWorker {
@@ -1581,11 +1581,21 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
       ...jointReworkAgents({ treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] }),
       assetProviders: REWORK_ASSET_PROVIDERS,
       providerRuntimeMetadata: [{ id: "minimax-tts-v1", label: "MiniMax", modelId: "speech-2.8-turbo",
-        transport: "http_api", billing: "metered", approvalPolicy: "automatic", estimatedCostCny: 0.5, maxAttempts: 1 }],
+        transport: "http_api", billing: "metered", approvalPolicy: "automatic", estimatedCostCny: 0.5, maxAttempts: 1 },
+        { id: "deepseek-visual-review-v1", label: "受控视觉", modelId: "deepseek-flash",
+          transport: "unix_socket", billing: "subscription", approvalPolicy: "none", maxAttempts: 1 }],
+      ...(optionalUnknown ? { visualReviewAgents: [{ id: "deepseek-visual-review-v1", modelId: "deepseek-flash", async review(input) {
+        if (input.reviewStage === "rendered_video") throw new RoleAgentLoopError("原审计待核", {
+          version: "video-factory/agent-loop-v1", role: "视觉审片员", contractVersion: "controlled",
+          criteria: [], status: "failed", maxIterations: 1, iterations: [], failure: { stage: "uncertain" },
+        }, undefined, new CodexBridgeError("受控原请求待核", false, "uncertain"));
+        return { version: "video-factory/visual-review-v1" as const, summary: "受控源素材", scores: {
+          composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 90 }, findings: [], confidence: .9, recommendation: "approve" as const };
+      } }] } : {}),
     });
     const brief = jointReworkBrief();
     let run = await pipeline.start({ ...brief,
-      providers: { ...brief.providers, voice: "minimax-tts-v1" },
+      providers: { ...brief.providers, voice: "minimax-tts-v1", ...(optionalUnknown ? { visualReview: "deepseek-visual-review-v1" } : {}) },
       economics: { ...brief.economics, allowMeteredProviders: true, maxCostCny: 5 },
       voiceDirection: { ...brief.voiceDirection, profileId: "minimax:female-chengshu" },
       workflowFeatures: { ...brief.workflowFeatures, boundaryGates: "user-confirmed-v1" },
@@ -1595,13 +1605,14 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
       if (gateNode?.nodeId === "final-review") break;
       const gate = gateNode?.intervention;
       assert.ok(gate, JSON.stringify({ status: run.status, failure: run.failure, nodes: run.nodeRuns }));
-      if (gateNode.nodeId === "assets") {
+      if (gateNode.nodeId === (optionalUnknown ? "asset-source-review" : "assets")) {
         const preview = await pipeline.previewNarrationPlan(run.id);
         run = await pipeline.confirmNarrationPlan(run.id, { expectedRunRevision: run.revision, plan: preview.plan, actor: "creator" });
       }
       run = gate.kind === "creative_review" ? await confirmCreativeStages(pipeline, run)
         : await pipeline.decide(run.id, { interventionId: gate.id, action: "approve", actor: "creator",
-          expectedRunRevision: run.revision, reviewEvidenceId: null });
+          expectedRunRevision: run.revision, reviewEvidenceId: gate.evidenceId ?? null,
+          ...(gate.continuationScope ? { commandId: `subtitle-setup-${step}`, acceptIncomplete: true as const } : {}) });
     }
     assert.equal(run.nodeRuns.find(node => node.nodeId === "final-review")?.status, "needs_human");
     assert.equal(voiceRequests.length, 1);
@@ -1624,6 +1635,17 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
       const nativeFetch = globalThis.fetch;
       t.mock.method(globalThis, "fetch", (url: string | URL | Request, init?: RequestInit) =>
         nativeFetch(typeof url === "string" ? new URL(url, origin) : url, init));
+      const runStore = new FileRunStore(path.join(workspaceRoot, "runs"));
+      for (const unknownNode of ["voice", "assets"]) {
+        const unknownGeneration = structuredClone(run);
+        unknownGeneration.nodeRuns.find(node => node.nodeId === unknownNode)!.outcomeUncertain = true;
+        await runStore.checkpoint(unknownGeneration);
+        await assert.rejects(studioApi.requestNarrationRevision(run.id, input), /原请求/,
+          "未知生成不能借字幕恢复重发或使原产物失效");
+        assert.deepEqual(await pipeline.loadPersisted(run.id), unknownGeneration);
+        assert.equal(voiceRequests.length, 1);
+      }
+      await runStore.checkpoint(run);
       await assert.rejects(studioApi.requestNarrationRevision(run.id, { ...input, expectedAudioSha256: "f".repeat(64) }), /当前配音.*不会重新购买/);
       assert.equal(voiceRequests.length, 1, "错绑在worker前拒绝，原停点保留");
       await studioApi.requestNarrationRevision(run.id, input);
@@ -1636,6 +1658,10 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
       assert.deepEqual(await readFile(sourceOutput.voiceoverPlanPath), originalPlanBytes);
       assert.equal(saved.nodeRuns.find(node => node.nodeId === "assets")?.outputState?.effectiveVersionId, oldAssets);
       assert.equal(voiceRequests.length, 2);
+      if (optionalUnknown) {
+        assert.equal(saved.nodeRuns.find(node => node.nodeId === "visual-review")?.outcomeUncertain, true,
+          "本地字幕恢复不得结清可选审计的原请求或费用");
+      }
       assert.equal((voiceRequests[1]!.input as Record<string, unknown>).recover_subtitles, true);
       const version = nextVoice.outputState!.versions.find(item => item.id === nextVoice.outputState!.effectiveVersionId)!;
       const vtt = saved.artifacts.find(artifact => version.artifactIds.includes(artifact.id) && artifact.kind === "narration_vtt");
@@ -1811,6 +1837,26 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
       "every model-facing rework finding must match the Broker's strict public contract",
     );
     assert.equal(reworkTreatmentCalls, 0, "unaffected treatment must be inherited across runs for media/director-only rework");
+  });
+
+  it("consumes all three explicit rework instructions at the real planning boundaries", async (t) => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-rework-three-instructions-"));
+    t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+    const spies: ReworkSpies = { treatmentCalls: 0, screenwriterBodies: [], directorInputs: [] };
+    const harness = newJointReworkStudio(workspaceRoot, spies);
+    const sourceId = await rejectedJointRun(harness);
+    const draft = (await harness.studio.reworkDraft(sourceId))!;
+    const instructions = { script: "从旁白解释原因，不改主题", visualDirection: "镜头多展示近景细节", assets: "只选择真实生活画面" };
+    draft.input.rework!.nodeInstructions = instructions;
+    const before = spies.screenwriterBodies.length;
+    const run = await confirmGatedRework(harness.pipeline, draft.input as ProductionBrief);
+    assert.equal(run.status, "needs_human");
+    assert.ok(spies.screenwriterBodies.slice(before).some(body => body.includes(instructions.script)));
+    const director = spies.directorInputs.at(-1)!.brief.rework!;
+    assert.equal(director.visualDirectionInstruction, instructions.visualDirection);
+    assert.equal(director.assetInstruction, instructions.assets);
+    assert.ok(director.previousDirectorPlan);
+    assert.equal((await harness.pipeline.show(sourceId)).status, "rejected", "新返工不能修改来源制作");
   });
 
   it("routes a rejected joint asset quote back to creative-planning with director cost feedback only", async () => {

@@ -151,6 +151,7 @@ export function ResourcesPage() {
   const [manifestError, setManifestError] = useState<string>();
   const [settingsError, setSettingsError] = useState<string>();
   const [settings, setSettings] = useState<StudioCreatorSettings>();
+  const settingsLoadedRef = useRef(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsNotice, setSettingsNotice] = useState<SettingsNotice>();
   const [voiceDirection, setVoiceDirection] = useState<StudioVoiceDirection>({
@@ -231,8 +232,10 @@ export function ResourcesPage() {
     const capabilityRequest = studioApi.localCapabilities()
       .then((values) => setCapabilities(values))
       .catch(() => setCapabilities([]));
-    const settingsRequest = studioApi.settings()
+    // 能力刷新不重置用户正在编辑的默认值；首次读取失败时仍可重试。
+    const settingsRequest = settingsLoadedRef.current ? Promise.resolve() : studioApi.settings()
       .then((value) => {
+        settingsLoadedRef.current = true;
         setSettings(value);
         setVoiceDirection(value.voiceDirection);
         setDefaultRecipeId(canonicalRecipeId(value.defaultRecipeId));
@@ -271,13 +274,14 @@ export function ResourcesPage() {
     try {
       const updated = await studioApi.updateSettings(patch);
       setSettings(updated);
-      if (patch.voiceDirection) setVoiceDirection(updated.voiceDirection);
-      if (patch.defaultRecipeId) setDefaultRecipeId(canonicalRecipeId(updated.defaultRecipeId));
-      if (patch.roleProviderDefaults) setRoleProviderDefaults(updated.roleProviderDefaults ?? {});
-      if (patch.modelDefaults) setModelDefaults(updated.modelDefaults ?? {});
-      if (patch.productionDefaults) setProductionDefaults(updated.productionDefaults);
-      if (patch.topicStrategy) setTopicStrategy({ ...DEFAULT_STUDIO_TOPIC_STRATEGY, ...updated.topicStrategy });
-      setSettingsNotice({ kind: "success", message: successMessage });
+      // 响应只确认本次提交；各组草稿若已被继续编辑，不用旧响应覆盖新输入。
+      if (patch.voiceDirection) setVoiceDirection((current) => current === voiceDirection ? updated.voiceDirection : current);
+      if (patch.defaultRecipeId) setDefaultRecipeId((current) => current === defaultRecipeId ? canonicalRecipeId(updated.defaultRecipeId) : current);
+      if (patch.roleProviderDefaults) setRoleProviderDefaults((current) => current === roleProviderDefaults ? updated.roleProviderDefaults ?? {} : current);
+      if (patch.modelDefaults) setModelDefaults((current) => current === modelDefaults ? updated.modelDefaults ?? {} : current);
+      if (patch.productionDefaults) setProductionDefaults((current) => current === productionDefaults ? updated.productionDefaults : current);
+      if (patch.topicStrategy) setTopicStrategy((current) => current === topicStrategy ? { ...DEFAULT_STUDIO_TOPIC_STRATEGY, ...updated.topicStrategy } : current);
+      setSettingsNotice({ kind: "success", message: `${successMessage}保存期间的新修改仍需另行保存。` });
     } catch (caught) {
       setSettingsNotice({ kind: "error", message: `保存失败：${errorMessage(caught)}` });
     } finally {
@@ -335,7 +339,6 @@ export function ResourcesPage() {
     <main className="page resources-page" data-active-section={activeSection}>
       <header className="page-header resources-header">
         <div>
-          <p className="eyebrow">创作控制室</p>
           <h1>创作设置</h1>
           <p className="page-summary">为下一条视频确定默认创作方式，并检查热点、模型、声音、画面和发布出口是否真正可用。</p>
         </div>
@@ -350,12 +353,12 @@ export function ResourcesPage() {
         </button>
       </header>
 
-      <section className="resource-masthead" aria-label="能力概览" data-tour="resource-overview">
+      <details className="resource-overview-disclosure" data-tour="resource-overview"><summary>查看服务连接概况</summary><section className="resource-masthead" aria-label="能力概览">
         <div><span>热点服务</span><strong>{serviceError ? "—" : `${readyServices}/${services.length}`}</strong></div>
         <div><span>画面来源</span><strong>{providerError ? "—" : readyVisual}</strong></div>
         <div><span>制作能力</span><strong>{providerError ? "—" : `${readyFoundation}/${foundationProviders.length}`}</strong></div>
         <div className="resource-budget"><UploadCloud aria-hidden="true" size={17} /><span>发布出口</span><strong>{publishError ? "—" : usablePublishTargets}</strong></div>
-      </section>
+      </section></details>
 
       <nav className="configuration-index" aria-label="配置分区">
         {RESOURCE_SECTIONS.map(({ id, label, icon: Icon }) => (
@@ -374,7 +377,7 @@ export function ResourcesPage() {
         {settingsError ? <ResourceError title="创作默认值读取失败" message={settingsError} retry={load} /> : !settings ? <div className="region-loading">正在读取创作默认值...</div> : <div className="configuration-sheet">
           <div className="configuration-intro">
             <Settings2 aria-hidden="true" size={22} />
-            <div><strong>先定创作习惯，再开始生产</strong><p>默认使用人工终审和仅免费画面；启用付费关键镜头后，图片、视频会按实际导演方案逐项报价并等待人工确认。</p><small>{productionEnvironmentSummary(capabilities, services)}</small></div>
+            <div><p>启用付费画面后，仍须查看本片报价并单独确认费用；保存默认值不是购买授权。</p><ProductionEnvironmentStatus capabilities={capabilities} services={services} /></div>
           </div>
           <div className="configuration-fields">
             <label className="field"><span>画面来源策略</span><select aria-label="默认画面来源策略" value={defaultRecipeId} onChange={(event) => setDefaultRecipeId(event.target.value as StudioProductionRecipeId)}>{RECIPE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
@@ -982,23 +985,32 @@ function trendSourceStatusText(source: StudioTrendSource): string {
   return containsInternalOperationsLanguage(text) ? TREND_SOURCE_CONTACT_ADMIN_HINT : text;
 }
 
-function productionEnvironmentSummary(capabilities: StudioLocalCapability[], services: StudioTrendService[]): string {
+function ProductionEnvironmentStatus({ capabilities, services }: { capabilities: StudioLocalCapability[]; services: StudioTrendService[] }) {
   if (capabilities.length === 0) {
-    return "制作环境状态未知，可先新建制作试用；遇到无法进入的步骤再联系管理员。";
+    return <p className="production-environment-note">制作环境状态未知，可先查看制作准备；遇到无法进入的步骤再联系管理员。</p>;
   }
-  const affected = [...new Set(capabilities
-    .filter((item) => item.state !== "ready")
-    .filter(item => !(item.id === "docker" && services.some(service => service.status === "ready")))
-    .filter(item => !(item.id === "macos-voices" && capabilities.some(capability => capability.id === "minimax-tts" && capability.state === "ready")))
-    .map((item) => LOCAL_CAPABILITY_IMPACT_LABELS[item.id] ?? "个别制作步骤"))];
-  const alternatives = [
-    capabilities.some(item => item.id === "docker" && item.state !== "ready") && services.some(service => service.status === "ready") ? "热点使用已连接服务，无需本机运行" : "",
-    capabilities.some(item => item.id === "macos-voices" && item.state !== "ready") && capabilities.some(item => item.id === "minimax-tts" && item.state === "ready") ? "本机音色不可用，可用云端配音" : "",
-  ].filter(Boolean);
-  if (affected.length === 0) {
-    return `制作环境已就绪：画面处理、配音和成片合成可以直接使用。${alternatives.length ? alternatives.join("；") + "。" : ""}`;
-  }
-  return `制作环境有 ${affected.length} 处未就绪：${affected.join("、")}暂不可用或受限；其余创作能力不受影响，无法自行解决时请联系管理员。`;
+  return <>
+    <ul className="production-environment-status" aria-label="制作环境状态">
+      {capabilities.map((capability) => {
+        const ready = capability.state === "ready";
+        const label = LOCAL_CAPABILITY_IMPACT_LABELS[capability.id] ?? "个别制作步骤";
+        // 云端的 ready 只证明已配置凭据；Docker 的 ready 只证明本地工具存在。
+        // 不把它们等同为模型调用、账户额度或热点服务已经验证。
+        const configuredOnly = capability.id === "minimax-tts" || capability.id === "docker";
+        const state = ready ? configuredOnly ? "configured" : "ready" : "unavailable";
+        const text = capability.id === "minimax-tts"
+          ? ready ? "云端配音已配置" : "云端配音未配置或不可用"
+          : capability.id === "docker"
+            ? ready ? "本地热点运行工具已安装" : "本地热点运行工具不可用"
+            : `${label}${ready ? "已就绪" : "不可用"}`;
+        return <li key={capability.id} data-state={state}><strong>{text}</strong>
+          {capability.id === "minimax-tts" && ready ? <span>仅表示已配置；实际调用与账户额度尚未验证。使用云端配音会按量计费，不会自动替换本机音色。</span> : null}
+          {capability.id === "docker" && services.some((service) => service.status === "ready") ? <span>热点使用已连接服务，无需本机运行。</span> : null}
+        </li>;
+      })}
+    </ul>
+    {capabilities.some((capability) => capability.state !== "ready") ? <p className="production-environment-note">未就绪项不代表其他能力不可用；无法自行解决时请联系管理员。</p> : null}
+  </>;
 }
 
 function browserServiceUrl(value: string | undefined): string | undefined {

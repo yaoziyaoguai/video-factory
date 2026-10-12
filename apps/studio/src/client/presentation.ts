@@ -49,7 +49,7 @@ export function runNodeLabel(nodeId: string): string {
 export function creatorRunStatusLabel(run: Pick<StudioRunSummary, "status" | "currentNodeId" | "continuation" | "audioMode">): string | undefined {
   if (isHistoricalReadOnlyRun(run)) return "历史只读";
   if (run.status !== "needs_human") return undefined;
-  if (run.currentNodeId === "final-review") return "等你审片";
+  if (run.currentNodeId === "final-review") return "等你确认内部定版";
   if (run.currentNodeId === "voice" && run.audioMode === "native_av") return "等你确认原声试听";
   return `等你确认${runNodeLabel(run.currentNodeId)}`;
 }
@@ -309,6 +309,8 @@ export function providerLabel(providerId?: string): string | undefined {
     local: "本地编辑画面",
     minimax: "MiniMax",
     "minimax-tts-v1": "MiniMax 中文配音",
+    "python-native-audio-v1": "视频原声（本地提取）",
+    "system-font": "系统字体",
     seedance: "Seedance",
   } as Record<string, string>)[providerId] ?? `来源服务未识别（${displayIdentifier(providerId)}）`;
 }
@@ -323,7 +325,7 @@ export function providerModelLabel(
 
 /**
  * 审片回执把模型接入编号（m-…）同时记为 providerId/modelId，它不在静态目录里。
- * 显示时先按角色目录还原服务名；还原不了才退回静态目录，而不是给创作者看"未收录"技术串。
+ * 只有唯一归属时才还原角色服务名；同一模型用于多个角色时显示模型名，不按目录顺序猜角色。
  */
 export function reviewProviderLabel(
   providerId: string,
@@ -331,8 +333,9 @@ export function reviewProviderLabel(
 ): string {
   const direct = providers.find((provider) => provider.id === providerId);
   if (direct) return direct.label;
-  const owner = providers.find((provider) => provider.modelProfiles?.some((model) => model.id === providerId));
-  if (owner) return owner.label;
+  const owners = providers.filter((provider) => provider.modelProfiles?.some((model) => model.id === providerId));
+  if (owners.length === 1) return owners[0]!.label;
+  if (owners.length > 1) return catalogModelLabel(owners, providerId) ?? "已配置审片模型";
   // providerId 非空时 providerLabel 恒有返回；这里的兜底只为类型完整，实际不可达。
   return providerLabel(providerId) ?? providerId;
 }
@@ -359,11 +362,16 @@ function displayIdentifier(value: string): string {
 
 export function catalogModelLabel(providers: Array<{ modelProfiles?: Array<{ id: string; label: string }> }>, modelId?: string): string | undefined {
   if (!modelId) return undefined;
+  let placeholder: string | undefined;
   for (const provider of providers) {
-    const label = provider.modelProfiles?.find((model) => model.id === modelId)?.label;
-    if (label) return label;
+    for (const model of provider.modelProfiles ?? []) {
+      if (model.id !== modelId || !model.label) continue;
+      // 同一接入可同时出现在静态占位与已连接目录中，已登记名称优先于裸编号。
+      if (model.label !== modelId) return model.label;
+      placeholder = model.label;
+    }
   }
-  return undefined;
+  return placeholder;
 }
 
 export function creatorFacingTechnicalText(value?: string): string | undefined {

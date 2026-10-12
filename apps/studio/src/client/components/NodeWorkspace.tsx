@@ -77,7 +77,8 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const isDecisionDocument = node.id === "publish-package" || node.id === "reference-grammar";
   const shouldOpenForAttention = currentDelivery || (isDecisionDocument && node.status === "needs_human") || node.status === "awaiting_spend_approval" || node.status === "approval_invalidated" || node.status === "failed";
   // 文字采用停点优先展示当前正文；前序输入仍可主动展开，不抢占阅读位置。
-  const shouldOpenInputForAttention = shouldOpenForAttention && !isDecisionDocument;
+  const shouldOpenInputForAttention = shouldOpenForAttention && !isDecisionDocument
+    && !(currentDelivery && (node.status === "succeeded" || node.status === "needs_human"));
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenInputForAttention);
   const [editing, setEditing] = useState(false);
@@ -635,6 +636,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         </div> : null}
 
         {showPlanningStages && planningStages ? (
+          <details className="node-stage-details"><summary>查看创作分工与各阶段设置</summary>
           <PlanningStagesPanel
             stages={planningStages}
             providers={providers}
@@ -657,8 +659,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
                 throw caught;
               }
             }}
-          />
-
+          /></details>
         ) : null}
 
         {canEditInput && hasReviewableInput ? <details className="node-input-adjustment" open={inputReviewOpen} onToggle={(event) => setInputReviewOpen(event.currentTarget.open)}>
@@ -769,7 +770,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         ) : null}
 
         <section className="node-output-preview node-creator-delivery">
-          <header><div><strong>{node.id === "creative-planning" ? "规划交付目录" : `${node.role ?? "制作角色"}的交付`}</strong><small>{node.id === "creative-planning" ? "逐项查看已保存的阶段稿和正式交付；修改与确认在创作工作台进行" : nativeAudio && node.id === "voice" ? "声音来自已采用的视频，可在此试听；如需改词或改声音模式，请关联返工。" : deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
+          <header><div><strong>{node.id === "creative-planning" ? "规划交付目录" : `${node.role ?? "制作角色"}的交付`}</strong><small>{node.id === "creative-planning" ? "逐项查看已保存的阶段稿和正式交付；修改与确认在创作工作台进行" : deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested, nativeAudio, audioIsCurrent)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
           {node.id === "assets" && visualArtifacts.length ? <div className={visualsAreCurrent ? "node-visual-preview" : "node-visual-preview is-stale"}>
             <header><strong>{visualsAreCurrent ? "实际素材画面" : "上次生成的素材画面"}</strong><small>{visualArtifacts.length} 个可预览素材{visualsAreCurrent ? "" : " · 将重新检查适用性，只重做不再适用的部分"}</small></header>
             <div>
@@ -1017,8 +1018,20 @@ function deliveryEditHint(
   status: StudioNode["status"],
   runStatus: StudioRunStatus,
   pauseRequested: boolean,
+  nativeAudio: boolean,
+  hasCurrentAudio: boolean,
 ): string {
   if (pauseRequested) return "已请求暂停；当前任务安全结束后即可修改";
+  if (nodeId === "voice" && nativeAudio) return status === "pending" && !hasDelivery
+    ? "原声尚未准备；确认画面后才会提取视频中的声音供你试听。"
+    : hasCurrentAudio ? "声音来自已采用的视频，可在此试听；如需改词或改声音模式，请关联返工。"
+      : "原声尚不可试听；请查看下方原因和恢复操作，原视频与费用记录会保留。";
+  if (nodeId === "voice" && status === "pending" && !hasDelivery) {
+    return "配音尚未生成；可先调整配音指令，前一步确认后才会开始合成。";
+  }
+  if (nodeId === "assets" && !hasDelivery && (status === "pending" || status === "awaiting_spend_approval")) {
+    return "画面尚未生成；可先核对导演方案中的逐镜来源与提示，确认后再继续。";
+  }
   if (nodeId === "assets") return runStatus === "running"
     ? "画面只读；如需更换，请先暂停，再修改导演方案中的逐镜来源或提示。"
     : "已经生成的画面只能预览；要更换画面，请修改上方导演方案中的逐镜来源或提示，再继续生成。";
@@ -1184,7 +1197,7 @@ export function NodeExecutionConfigurationEditor({ node, providers, runStatus, r
       <span><Settings2 aria-hidden="true" size={16} /></span>
       <div><strong>{node.id === "assets" ? "本片画面来源" : "本次制作选择"}</strong><small>{editing
         ? node.id === "assets"
-          ? "更换画面来源，或切换到时长、任务能力不同的视频模型，会让导演重新规划；同一来源下，只有能力兼容的模型切换才从画面素材继续。保存后旧费用确认会自动失效。"
+          ? "核对本次变更的影响，再保存本片设置。"
           : "保存后继续制作才会生效，旧费用确认会自动失效"
         : executionConfigurationSummary(node, providers)}</small></div>
       {canEdit && !editing ? <button className="button button-ghost" type="button" disabled={busy} onClick={() => { setEditBaselineRevision(runRevision); setEditing(true); }}>调整</button> : null}
@@ -1214,7 +1227,12 @@ export function NodeExecutionConfigurationEditor({ node, providers, runStatus, r
           </div> : null}
         </> : null}
       </> : <>
-        <p>只修改本片，不改变新建默认值。保存不会开始生成或付费；更换来源后需重新规划并由你确认。可保留免费来源混用，也可只选 AI 视频。尚未发送的意见不会用于重新规划。</p>
+        <p>只修改本片，不改变新建默认值。保存不会开始生成或付费；可保留免费来源混用，也可只选 AI 视频。</p>
+        <dl className="source-change-impact" aria-label="画面来源调整影响">
+          <div><dt>保留</dt><dd>已有文件和历史版本；尚未发送的意见不会用于重新规划。</dd></div>
+          <div><dt>重新确认</dt><dd>更换画面来源，或切换到时长、任务能力不同的视频模型，会让导演重新规划；同一来源下，只有能力兼容的模型切换才从画面素材继续。保存后旧费用确认会自动失效。</dd></div>
+          <div><dt>待新方案确定</dt><dd>哪些镜头可以复用、哪些需要生成及新增费用，以新方案与报价为准；不会把保存设置当作生成授权。</dd></div>
+        </dl>
         <div className="node-asset-source-options">
           {inheritedUnavailableAssetSources.map((provider) => <article key={provider.id} className="is-selected">
             <label><input type="checkbox" checked onChange={(event) => updateAssetSource(provider.id, event.target.checked)} /><span><strong>{provider.label}</strong><small>已失效 · 取消选择后保存</small></span></label>

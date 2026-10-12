@@ -196,7 +196,11 @@ describe("text task recovery UI", () => {
     expect(review).not.toHaveTextContent("可播放首版");
     if (approved) expect(review).toHaveTextContent("人工终审已确认");
     else expect(review).not.toHaveTextContent("人工终审已确认");
-    expect(screen.getByText(/制作已完成，发布包可以下载使用/)).toHaveTextContent("外部平台发布仍需你自行操作");
+    const delivery = screen.getByRole("region", { name: "交付状态" });
+    expect(document.querySelector(".run-header")).toHaveTextContent("内部交付已完成");
+    expect(screen.getByRole("region", { name: "完成范围摘要" })).toHaveTextContent("未取得机器审片结论");
+    expect(delivery).toHaveTextContent("外部发布需你自行操作");
+    expect(delivery).toHaveTextContent("未取得可下载的发布包");
     expect(screen.getByRole("link", { name: "下载成片" })).toHaveAttribute("href", "/api/film");
     const fee = screen.getByRole("region", { name: "付费任务证据" });
     expect(fee).not.toHaveTextContent("系统已经停住");

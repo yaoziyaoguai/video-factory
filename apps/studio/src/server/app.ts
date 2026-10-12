@@ -1134,9 +1134,13 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     },
   );
 
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     const statusCode = typeof error === "object" && error !== null && "statusCode" in error ? error.statusCode : undefined;
     const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+    if (code === "FST_ERR_CTP_INVALID_MEDIA_TYPE" && request.routeOptions.url === "/api/reference-videos") {
+      void reply.code(415).send({ error: "参考视频只支持 MP4、MOV 或 WebM，请选择视频文件。" });
+      return;
+    }
     if (statusCode === 413 || code === "FST_ERR_CTP_BODY_TOO_LARGE") {
       void reply.code(413).send({ error: "参考视频不能超过 30 MB。" });
       return;

@@ -288,7 +288,7 @@ const ASSET_TOUR_STEPS: DriveStep[] = [
 const RESOURCE_TOUR_STEPS: DriveStep[] = [
   {
     element: '[data-tour="resource-overview"]',
-    popover: { title: "先看整套工厂是否可用", description: "这里汇总热点服务、画面来源、制作能力和发布出口。", side: "bottom", align: "start" },
+    popover: { title: "查看服务连接概况", description: "展开这里可核对热点服务、画面来源、制作能力和发布出口；展开不会启动制作。", side: "bottom", align: "start" },
   },
   {
     element: '[data-tour="configuration-defaults"]',

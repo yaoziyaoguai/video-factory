@@ -2548,9 +2548,16 @@ function reviewGateNode(
     }
     const draftChanged = creativeReview.stages[stage].currentDraft?.sha256
       !== state.creativeReview.stages[stage].currentDraft?.sha256;
+    const previousContinuation = state.creativeReview.stages[stage].continuation;
+    const resolvedDiscussionStop = previousContinuation?.commandId === resume.commandId
+      && previousContinuation.reasonCode.startsWith("discussion_")
+      && state.planningStop?.detail === previousContinuation.detail
+      && state.planningStop.issueIds.length === 0;
     return {
       creativeReview,
       ...creativeDocumentArtifactUpdate(state, stage, creativeReview),
+      // 只清本条已完成讨论的停止说明；不把独立的内容/范围冲突一并隐藏。
+      ...(resolvedDiscussionStop ? { planningStop: null } : {}),
       ...(draftChanged
         ? {
             issues: [],

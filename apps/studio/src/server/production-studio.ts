@@ -498,6 +498,10 @@ export class ProductionStudio {
     const needsScope = failedScopeConflict || reworkScopeUnresolved(draftScope);
     // 历史运行可能把热点来源误存成目标平台；返工页仍需打开，让创作者明确重选。
     const brief = effectiveProductionBrief(run);
+    const caseDirective = brief.creationContext?.origin === "case" ? brief.creationContext.caseReferenceDirective : undefined;
+    const reworkAngle = caseDirective && brief.angle.endsWith(caseDirective)
+      ? brief.angle.slice(0, -caseDirective.length).trimEnd()
+      : brief.angle;
     const inheritedReferenceVideo = brief.workflowFeatures?.referenceGrammar && brief.referenceVideo
       ? await this.verifiedReferenceVideoForRun(run, brief)
       : undefined;
@@ -536,7 +540,7 @@ export class ProductionStudio {
       ...(brief.audioMode !== undefined ? { audioMode: brief.audioMode } : {}),
       ...(brief.nativeVideoProviderId ? { nativeVideoProviderId: brief.nativeVideoProviderId } : {}),
       title: brief.title,
-      angle: brief.angle,
+      angle: reworkAngle,
       audience: brief.audience,
       nicheSlug: brief.nicheSlug,
       ...(brief.durationPolicy === "content-led-v1" ? durationIntentFor(brief) : {
@@ -2036,7 +2040,18 @@ export class ProductionStudio {
         const settled = await this.readCreativeReviewCommand(runId, commandId);
         if (settled) return settled;
         const current = await this.loadRequiredRun(runId);
-        return receipt(current.status === "running" || current.nodeRuns.some(node => node.outcomeUncertain) ? "unknown" : "not_accepted");
+        if (current.status === "running") return receipt("unknown");
+        if (current.nodeRuns.some(node => node.outcomeUncertain)) {
+          // 已取得写租约且该命令从未登记；仍须证明其它未知只属于已绑定的可选请求。
+          // 这只证明本命令未受理，不结清其它请求/费用，也不放开未知生成的重发。
+          if (!this.options.pipeline.assertOptionalReviewContinuationSafe) return receipt("unknown");
+          try { await this.options.pipeline.assertOptionalReviewContinuationSafe(runId); }
+          catch (error) {
+            if (error instanceof HumanDecisionConflictError) return receipt("unknown");
+            throw error;
+          }
+        }
+        return receipt("not_accepted");
       });
     } catch (error) {
       if (error instanceof Error && /locked by another writer/i.test(error.message)) return receipt("unknown");

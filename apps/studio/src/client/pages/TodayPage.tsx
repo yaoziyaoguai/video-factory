@@ -67,9 +67,11 @@ export function TodayPage() {
   const [boardVerificationCandidate, setBoardVerificationCandidate] = useState<StudioCandidateInboxItem>();
   const [nextStepNotice, setNextStepNotice] = useState<string>();
   const [nextStepNoticeAction, setNextStepNoticeAction] = useState<{ to: string; label: string }>();
+  const [nextPreparationId, setNextPreparationId] = useState<string>();
   // 提示统一入口：不带跳转动作的提示会清掉旧链接，避免“去查看”指向过期目标。
   const announceNotice = useCallback((text: string) => {
     setNextStepNoticeAction(undefined);
+    setNextPreparationId(undefined);
     setNextStepNotice(text);
   }, []);
   const [sourceSupplementTarget, setSourceSupplementTarget] = useState<
@@ -367,7 +369,8 @@ export function TodayPage() {
     // 保存成功必须可见、可继续：自定义机会进入「从想法开始」的待制作区，
     // 跨页状态以服务端机会状态为准，这里只负责告诉用户它去了哪里、下一步做什么。
     if (entryMode === "custom") {
-      announceNotice(`已保存《${created.title}》。它已进入下方待制作区，可以直接开始制作。`);
+      announceNotice(`已保存《${created.title}》。来自我的想法；保存不会生成视频或授权付费。`);
+      setNextPreparationId(created.id);
       return;
     }
     announceNotice(`已保存《${created.title}》。它已进入「从想法开始」的待制作区，当前入口继续展示热点候选。`);
@@ -392,7 +395,8 @@ export function TodayPage() {
       } : current;
       if (candidate.origin === "trend") setTrendInbox(updateInbox);
       else setSeriesInbox(updateInbox);
-      announceNotice("已采用。下一步：检查证据与镜头计划，再开始制作。");
+      announceNotice(`已采用《${adopted.title}》。${candidate.origin === "series" ? `来自系列${adopted.seriesName ? `《${adopted.seriesName}》` : ""}${adopted.episodeNumber ? `第 ${adopted.episodeNumber} 集` : ""}` : "来自热点候选"}；采用不会生成视频或授权付费。`);
+      setNextPreparationId(adopted.id);
       window.requestAnimationFrame(() => {
         adoptedSectionRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
         adoptedSectionRef.current?.focus({ preventScroll: true });
@@ -579,13 +583,17 @@ export function TodayPage() {
               await loadTrendInbox();
             }} onCreateSeries={() => setSeriesDialogOpen(true)} onSelectSeries={setActiveSeriesId} onUpdateSeriesEpisode={updateSeriesEpisode} onLinkLegacyRun={linkLegacySeriesRun} onRescanSeries={loadSeriesWorkspace} onViewProductionRecords={() => navigate("/projects")} onManual={() => openOpportunityDialog("manual")} onImport={() => openOpportunityDialog("json")} />
       {candidateActionError ? <div className="inline-error topic-action-error" role="alert"><AlertCircle aria-hidden="true" size={18} />{candidateActionError}</div> : null}
-      {nextStepNotice ? <div className="next-step-notice" role="status"><CheckCircle2 aria-hidden="true" size={18} /><strong>{nextStepNotice}</strong>{nextStepNoticeAction ? <Link className="button button-secondary" to={nextStepNoticeAction.to}>{nextStepNoticeAction.label}</Link> : null}<button type="button" onClick={() => { setNextStepNotice(undefined); setNextStepNoticeAction(undefined); }} aria-label="关闭下一步提示">知道了</button></div> : null}
+      {nextStepNotice ? <div className="next-step-notice" role="status"><CheckCircle2 aria-hidden="true" size={18} /><strong>{nextStepNotice}</strong>{nextStepNoticeAction ? <Link className="button button-secondary" to={nextStepNoticeAction.to}>{nextStepNoticeAction.label}</Link> : null}{nextPreparationId && displayedOpportunities.some((item) => item.id === nextPreparationId) ? <button className="button button-secondary" type="button" onClick={() => {
+        // 准备入口绑定刚保存/采用的对象；用户换选其他草稿后也不能误开另一条。
+        setSelectedId(nextPreparationId);
+        openProductionDialog();
+      }}>继续制作准备</button> : null}<button type="button" onClick={() => { setNextStepNotice(undefined); setNextStepNoticeAction(undefined); setNextPreparationId(undefined); }} aria-label="关闭下一步提示">知道了</button></div> : null}
 
       <section ref={adoptedSectionRef} tabIndex={-1} className="adopted-opportunities" aria-labelledby="adopted-opportunities-title">
         <header>
           <div>
             <p className="eyebrow">{entryMode === "series" ? "本集制作" : "待制作"}</p>
-            <h2 id="adopted-opportunities-title">{entryMode === "series" ? "本集制作准备" : "待制作机会"}</h2>
+            <h2 id="adopted-opportunities-title">{entryMode === "series" ? "本集制作准备" : "已保存的创作草稿"}</h2>
           </div>
           {entryMode === "series" && selected ? (
             <label className="series-production-selector">

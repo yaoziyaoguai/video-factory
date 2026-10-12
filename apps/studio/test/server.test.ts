@@ -655,6 +655,28 @@ describe("Studio API", () => {
     await app.close();
   });
 
+  it("reports an unsupported reference file as a format error rather than a transient server failure", async () => {
+    let calls = 0;
+    const app = buildStudioApp({ service: fakeService({
+      uploadReferenceVideo: async () => {
+        calls += 1;
+        throw new Error("must not be called");
+      },
+    }) });
+    try {
+      const response = await app.inject({
+        method: "POST", url: "/api/reference-videos",
+        headers: { "content-type": "text/markdown", "x-video-factory-filename": "notes.md" },
+        payload: "This is not a reference video.",
+      });
+      assert.equal(response.statusCode, 415);
+      assert.deepEqual(response.json(), { error: "参考视频只支持 MP4、MOV 或 WebM，请选择视频文件。" });
+      assert.equal(calls, 0);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("rejects an empty or oversized reference upload before calling the store", async () => {
     let calls = 0;
     const app = buildStudioApp({ service: fakeService({

@@ -3633,7 +3633,7 @@ export class ProductionPipeline {
     const upstreamRevisionCanReconfirm = ["needs_human", "paused", "stale"].includes(run.status)
       && voice?.status === "stale"
       && !voice.operationRequestId && (!voice.outputState || voice.outputState.stale);
-    if (!["needs_human", "paused", "stale"].includes(run.status) || run.nodeRuns.some((node) => node.status === "running" || node.outcomeUncertain)
+    if (!["needs_human", "paused", "stale"].includes(run.status) || run.nodeRuns.some((node) => node.status === "running")
       || voice && !upstreamRevisionCanReconfirm
         && (voice.status !== "pending" || voice.operationRequestId || voice.outputState && !voice.outputState.stale)) {
       // §6 首次 fit 冲突恢复：voice 停在可恢复冲突时，时间调整编辑器仍需只读读取已保存计划
@@ -3646,6 +3646,11 @@ export class ProductionPipeline {
       } else {
         throw new HumanDecisionConflictError("请在素材确认后、尚未开始配音时查看和采用旁白方案；原有配音不会被静默替换。");
       }
+    }
+    if (editorMode === "pre_generation") {
+      // 本地配音安排不结清历史讨论/审计；只允许已核身份的可选未知继续留账。
+      const blocked = await blockingUncertainNode(run, this.store.runDirectory(run.id));
+      if (blocked) throw new HumanDecisionConflictError(`原请求结果仍在核实（${blocked.nodeId}），请先查询原请求；不能把未知生成当成已完成。`);
     }
     const brief = parsePersistedBrief(run.initialInput);
     if (brief.providers.voice !== "minimax-tts-v1") throw new HumanDecisionConflictError("连贯旁白当前支持 MiniMax 系统音色，请先选择对应的配音服务。");
@@ -5968,8 +5973,13 @@ export class ProductionPipeline {
       }
       if (previous.revision !== draft.expectedRunRevision) throw new StaleRunRevisionError(runId, draft.expectedRunRevision, previous.revision);
       const intervention = previous.nodeRuns.find(node => node.nodeId === "final-review" && node.status === "needs_human")?.intervention;
-      if (previous.status !== "needs_human" || !intervention || previous.nodeRuns.some(node => node.outcomeUncertain || node.status === "running")) {
-        throw new HumanDecisionConflictError("请在原请求已结清的成片确认阶段恢复字幕；现有声音与成片会保留。");
+      if (previous.status !== "needs_human" || !intervention || previous.nodeRuns.some(node => node.status === "running")) {
+        throw new HumanDecisionConflictError("请在成片确认阶段且当前执行已停止后恢复字幕；现有声音与成片会保留。");
+      }
+      // 可选咨询的待核事实不能阻止本地恢复；生成类或身份不明的原请求仍不可绕过。
+      const blocked = await blockingUncertainNode(previous, this.store.runDirectory(runId));
+      if (blocked) {
+        throw new HumanDecisionConflictError(`原请求结果仍在核实（${blocked.nodeId}），暂不能恢复字幕；现有声音与成片会保留。`);
       }
       const version = voice?.outputState?.versions.find(candidate => candidate.id === voice.outputState?.effectiveVersionId);
       if (!voice || !version || version.id !== draft.expectedVoiceVersionId || voice.outputState?.stale) {

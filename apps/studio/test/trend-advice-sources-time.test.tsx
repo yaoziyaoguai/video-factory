@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -60,18 +60,21 @@ const auditReceipt: StudioTopicGenerationReceipt = {
   auditRepairInstructions: ["建议一：补充第二来源的原始链接。", "修复说明：重新绑定 sourceId。"],
 };
 
-function renderTrendWorkspace(inbox: StudioCandidateInbox, trendMeta: Parameters<typeof trendStatusText>[0]) {
+function renderTrendWorkspace(inbox: StudioCandidateInbox, trendMeta: Parameters<typeof trendStatusText>[0], state: { loading?: boolean; generating?: boolean; error?: string; onRevise?: (candidate: StudioCandidateInboxItem, instruction: string) => Promise<void> } = {}) {
   return render(<MemoryRouter><TopicEntryWorkspace
     initialMode="trend"
     selectedSeriesId={undefined}
     inbox={inbox}
     series={[]}
     historicalRuns={[]}
-    loading={{}}
+    loading={{ trend: state.loading ?? false }}
+    trendRefreshing={state.generating ?? false}
+    error={state.error ? { trend: state.error } : {}}
     trendMeta={trendMeta}
     onRetry={() => undefined}
     onRefreshTrends={() => undefined}
     onAdopt={async () => undefined}
+    {...(state.onRevise ? { onReviseTrendCandidate: state.onRevise } : {})}
     onCreateSeries={() => undefined}
     onSelectSeries={() => undefined}
     onUpdateSeriesEpisode={async () => undefined}
@@ -82,6 +85,44 @@ function renderTrendWorkspace(inbox: StudioCandidateInbox, trendMeta: Parameters
     onImport={() => undefined}
   /></MemoryRouter>);
 }
+
+it("keeps candidate revision text and a late error with their original candidate", async () => {
+  const user = userEvent.setup();
+  let failOriginal!: (reason: Error) => void;
+  const onRevise = vi.fn(() => new Promise<void>((_resolve, reject) => { failOriginal = reject; }));
+  const first = trendCandidate(1), second = trendCandidate(2);
+  renderTrendWorkspace(buildInbox([first, second]), { platformCount: 1, candidateCount: 2 }, { onRevise });
+  await user.click(screen.getByRole("button", { name: "修订 候选提案 1" }));
+  await user.type(screen.getByRole("textbox", { name: "修订意见" }), "只修改第一条");
+  await user.click(screen.getByRole("button", { name: "发送修订意见" }));
+  await user.click(screen.getByRole("button", { name: "查看候选提案 2" }));
+  await user.click(screen.getByRole("button", { name: "修订 候选提案 2" }));
+  expect(screen.getByRole("textbox", { name: "修订意见" })).toHaveValue("");
+  await user.type(screen.getByRole("textbox", { name: "修订意见" }), "第二条独立意见");
+  failOriginal(new Error("第一条模型暂不可用"));
+  await waitFor(() => expect(onRevise).toHaveBeenCalledOnce());
+  expect(screen.queryByText("第一条模型暂不可用")).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "修订意见" })).toHaveValue("第二条独立意见");
+  await user.click(screen.getByRole("button", { name: "查看候选提案 1" }));
+  expect(screen.getByRole("textbox", { name: "修订意见" })).toHaveValue("只修改第一条");
+  await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("第一条模型暂不可用"));
+  expect(onRevise).toHaveBeenCalledWith(first, "只修改第一条");
+});
+
+it("separates reading saved proposals from accepted generation and failed reads", () => {
+  const inbox = buildInbox([]);
+  const meta = { platformCount: 0, candidateCount: 0 };
+  const first = renderTrendWorkspace(inbox, meta, { loading: true });
+  expect(screen.getByRole("heading", { name: "正在读取已有提案" })).toBeInTheDocument();
+  expect(screen.queryByText(/正在生成今日提案|通常需要几分钟/)).not.toBeInTheDocument();
+  first.unmount();
+  const second = renderTrendWorkspace(inbox, meta, { generating: true });
+  expect(screen.getByRole("heading", { name: "正在生成今日提案" })).toBeInTheDocument();
+  second.unmount();
+  renderTrendWorkspace(inbox, meta, { error: "读取失败" });
+  expect(screen.queryByText(/正在生成今日提案|正在读取已有提案/)).not.toBeInTheDocument();
+  expect(screen.getByText("读取失败")).toBeInTheDocument();
+});
 
 // CLOUD-05/P2.1（V06、V07）：复核建议默认紧凑、全文可展开、批次与列表范围分开。
 describe("topic audit advice panel", () => {

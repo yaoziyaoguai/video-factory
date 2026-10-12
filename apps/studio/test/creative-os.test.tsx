@@ -292,12 +292,12 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
 
     const { unmount } = render(<MemoryRouter initialEntries={["/topics?mode=custom"]}><TodayPage /></MemoryRouter>);
-    expect(await screen.findByRole("heading", { name: "自定义创作" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "写下想法，保存为创作草稿" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "热点候选收件箱" })).not.toBeInTheDocument();
     unmount();
 
     render(<MemoryRouter initialEntries={["/topics?mode=manual"]}><TodayPage /></MemoryRouter>);
-    expect(await screen.findByRole("heading", { name: "自定义创作" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "写下想法，保存为创作草稿" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "热点候选收件箱" })).not.toBeInTheDocument();
   });
 
@@ -312,7 +312,7 @@ describe("Creative OS", () => {
 
     render(<MemoryRouter initialEntries={["/topics?mode=custom"]}><TodayPage /></MemoryRouter>);
 
-    const pendingHeading = await screen.findByRole("heading", { name: "待制作机会" });
+    const pendingHeading = await screen.findByRole("heading", { name: "已保存的创作草稿" });
     expect(screen.getByRole("heading", { name: pending.title })).toBeInTheDocument();
     expect(screen.queryByText(produced.title)).not.toBeInTheDocument();
     expect(pendingHeading.closest("header")?.querySelector(":scope > span")).toHaveTextContent("1 条");
@@ -328,7 +328,7 @@ describe("Creative OS", () => {
 
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "待制作机会" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "已保存的创作草稿" })).toBeInTheDocument();
     expect(screen.queryByText(pending.title)).not.toBeInTheDocument();
     expect(screen.getByText(/已开始制作的内容请到制作记录继续/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "查看制作记录" })).toHaveAttribute("href", "/projects");
@@ -361,7 +361,7 @@ describe("Creative OS", () => {
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
     expect(await screen.findByText(/0 条候选可进入制作 · 1 条已进入待制作区 · 1 条建议先补来源 · 0 条已完成/)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "待制作机会" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "已保存的创作草稿" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: blocked.title })).toBeInTheDocument();
     // 来源不足只是醒目标注，不能变成"不可制作"的判决。
     expect(screen.getByRole("note")).toHaveTextContent("提醒（仅供参考，不影响你开工）：当前总编规则要求至少 2 个不同域名的有效原始来源链接。");
@@ -899,6 +899,9 @@ describe("Creative OS", () => {
       onViewProductionRecords: vi.fn(), onManual: vi.fn(), onImport: vi.fn() };
     const { rerender } = render(<MemoryRouter><TopicEntryWorkspace {...props} series={[series]} /></MemoryRouter>);
     expect(screen.getAllByText(series.premise)).toHaveLength(1);
+    const season = screen.getByRole("region", { name: "本季策划摘要" });
+    expect(season).not.toHaveAttribute("open");
+    await user.click(season.querySelector(":scope > summary")!);
     const summary = screen.getByText("查看栏目规则与定版记录");
     expect(summary.closest("details")).not.toHaveAttribute("open");
     expect(screen.getByText(series.bible.rules[0]!)).not.toBeVisible();
@@ -1462,11 +1465,11 @@ describe("Creative OS", () => {
     expect(screen.getByRole("button", { name: "重新刷新热点" })).toBeEnabled();
     expect(screen.getByRole("link", { name: "继续已有系列" })).toHaveAttribute("href", "/topics?mode=series");
     await user.click(screen.getByRole("button", { name: "录入自己的选题" }));
-    expect(screen.getByRole("dialog", { name: "录入机会" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "写下你的想法" })).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "JSON 导入" }));
-    expect(screen.getByRole("textbox", { name: /机会数据/ })).toHaveFocus();
+    expect(screen.getByRole("textbox", { name: /创作草稿数据/ })).toHaveFocus();
     await user.keyboard("{Escape}");
-    expect(screen.queryByRole("dialog", { name: "录入机会" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "写下你的想法" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "录入自己的选题" })).toHaveFocus();
   });
 
@@ -1716,7 +1719,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("button", { name: new RegExp(editorialSkipOnly.title) })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "查看缺来源的选题" }));
 
-    const blockedSection = screen.getByRole("region", { name: "待制作机会" });
+    const blockedSection = screen.getByRole("region", { name: "已保存的创作草稿" });
     await waitFor(() => expect(blockedSection).toHaveFocus());
     expect(scrollIntoView).toHaveBeenCalled();
     expect(screen.getByRole("heading", { name: firstBlocked.title })).toBeInTheDocument();
@@ -1749,7 +1752,7 @@ describe("Creative OS", () => {
 
     expect(await screen.findByRole("heading", { name: "本轮还没有热点候选" })).toBeInTheDocument();
     expect(screen.getByText(/另有 2 条历史选题来源不足/)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "待制作机会" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "已保存的创作草稿" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "历史候选需补来源" })).not.toBeInTheDocument();
     // 两种理由不得合并计数：2 条来源不足的历史选题 + 1 条总编不建议，必须分开说。
     expect(screen.queryByText(/3 条建议先补来源/)).not.toBeInTheDocument();
@@ -1760,7 +1763,7 @@ describe("Creative OS", () => {
     expect(screen.getAllByText("待补来源 · 仍可开工").length).toBeGreaterThanOrEqual(2);
   });
 
-  it("keeps the manual path usable while the local topic model is warming up", async () => {
+  it("keeps the manual path usable while saved topics are still loading without claiming generation", async () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
@@ -1769,10 +1772,10 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "candidateInbox").mockReturnValue(new Promise(() => undefined));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "正在生成今日提案" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "正在读取已有提案" })).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "今天做一条视频" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "录入自己的选题" }));
-    expect(screen.getByRole("dialog", { name: "录入机会" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "写下自己的想法" }));
+    expect(screen.getByRole("dialog", { name: "写下你的想法" })).toBeInTheDocument();
   });
 
   it("keeps the hard trend error explicit while a cached refresh failure still offers recovery", async () => {
@@ -2044,7 +2047,8 @@ describe("Creative OS", () => {
 
     expect(adopt).toHaveBeenCalledWith("trend-1", { origin: "trend" });
     expect(screen.getByRole("heading", { name: "下班后的 AI 时间账本" })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("下一步：检查证据与镜头计划");
+    expect(screen.getByRole("status")).toHaveTextContent("来自热点候选");
+    expect(screen.getByRole("button", { name: "继续制作准备" })).toBeVisible();
   });
 
   it("requires explicit evidence confirmation for review candidates and keeps under-sourced high-risk candidates adoptable", async () => {
@@ -2275,7 +2279,7 @@ describe("Creative OS", () => {
     await user.type(screen.getByLabelText("目标受众"), "经常出门又不方便充电的通勤族");
     await user.type(screen.getByLabelText("核心痛点"), "手机一天要充三次，不知道哪些习惯在耗电");
     await user.type(screen.getByLabelText("开场钩子"), "这三个充电习惯，正在偷偷吃掉你的电量。");
-    await user.click(screen.getByRole("button", { name: "保存机会" }));
+    await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
 
     // 保存成功必须可见、可继续：提示 + 指向自定义入口待制作区的下一步链接。
     expect(await screen.findByText(/已保存《QA自有想法：三种手机充电习惯的耗电真相》/)).toBeInTheDocument();
@@ -2714,7 +2718,7 @@ describe("Creative OS", () => {
     await user.type(screen.getByLabelText("开场钩子"), opportunity.hook);
     await user.click(screen.getByText("可选：补充参考来源"));
     await user.type(screen.getByLabelText("参考链接"), "https://example.cn/source");
-    await user.click(screen.getByRole("button", { name: "保存机会" }));
+    await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       title: opportunity.title,
@@ -2731,7 +2735,7 @@ describe("Creative OS", () => {
 
     rerender(<OpportunityDialog open={false} onClose={() => undefined} onSubmit={onSubmit} />);
     rerender(<OpportunityDialog open onClose={() => undefined} onSubmit={onSubmit} />);
-    expect(screen.getByRole("button", { name: "保存机会" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "保存创作草稿" })).toBeEnabled();
   });
 
   it("creates a quick opportunity with honest zero sources and score defaults", async () => {
@@ -2743,7 +2747,7 @@ describe("Creative OS", () => {
     await user.type(screen.getByLabelText("目标受众"), "普通上班族");
     await user.type(screen.getByLabelText("核心痛点"), "下班后无法切换状态");
     await user.type(screen.getByLabelText("开场钩子"), "真正让人恢复的，可能不是继续刷手机。");
-    await user.click(screen.getByRole("button", { name: "保存机会" }));
+    await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
 
     // DG-UX-02：不填参考链接就是零来源（origin manual），不再伪造 manual-supplement 占位。
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
@@ -2759,12 +2763,12 @@ describe("Creative OS", () => {
     render(<OpportunityDialog open onClose={() => undefined} onSubmit={async () => undefined} />);
 
     await user.click(screen.getByRole("tab", { name: "JSON 导入" }));
-    fireEvent.change(screen.getByRole("textbox", { name: /机会数据/ }), { target: { value: "{" } });
-    await user.click(screen.getByRole("button", { name: "保存机会" }));
+    fireEvent.change(screen.getByRole("textbox", { name: /创作草稿数据/ }), { target: { value: "{" } });
+    await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
 
     expect(screen.getByRole("alert")).toHaveTextContent("JSON 格式不正确");
 
-    fireEvent.change(screen.getByRole("textbox", { name: /机会数据/ }), { target: { value: "{}" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /创作草稿数据/ }), { target: { value: "{}" } });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -2773,8 +2777,8 @@ describe("Creative OS", () => {
     render(<OpportunityDialog open onClose={() => undefined} onSubmit={async () => undefined} />);
 
     await user.click(screen.getByRole("tab", { name: "JSON 导入" }));
-    fireEvent.change(screen.getByRole("textbox", { name: /机会数据/ }), { target: { value: "{" } });
-    await user.click(screen.getByRole("button", { name: "保存机会" }));
+    fireEvent.change(screen.getByRole("textbox", { name: /创作草稿数据/ }), { target: { value: "{" } });
+    await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
     expect(screen.getByRole("alert")).toHaveTextContent("JSON 格式不正确");
 
     await user.click(screen.getByRole("tab", { name: "手动录入" }));
@@ -2786,7 +2790,7 @@ describe("Creative OS", () => {
     const user = userEvent.setup();
     render(<OpportunityDialog open onClose={() => undefined} onSubmit={async () => undefined} />);
 
-    await user.click(screen.getByRole("button", { name: "保存机会" }));
+    await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
     expect(screen.getByRole("alert")).toHaveTextContent("标题不能为空");
 
     await user.type(screen.getByLabelText("选题标题"), "继续填写选题");
@@ -2853,8 +2857,8 @@ describe("Creative OS", () => {
     render(<OpportunityDialog open onClose={() => undefined} onSubmit={onSubmit} />);
 
     await user.click(screen.getByRole("tab", { name: "JSON 导入" }));
-    fireEvent.change(screen.getByRole("textbox", { name: /机会数据/ }), { target: { value: JSON.stringify(input) } });
-    await user.click(screen.getByRole("button", { name: "保存机会" }));
+    fireEvent.change(screen.getByRole("textbox", { name: /创作草稿数据/ }), { target: { value: JSON.stringify(input) } });
+    await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
 
     expect(onSubmit).toHaveBeenCalledWith(input);
   });
@@ -3120,7 +3124,10 @@ describe("Creative OS", () => {
 
     const { unmount } = render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
-    expect(await screen.findByText("制作环境已就绪：画面处理、配音和成片合成可以直接使用。")).toBeInTheDocument();
+    expect(await screen.findByText("画面与字幕处理已就绪")).toBeInTheDocument();
+    expect(screen.getByText("本机中文配音已就绪")).toBeInTheDocument();
+    expect(screen.getByText("成片合成已就绪")).toBeInTheDocument();
+    expect(screen.getByText("云端配音已配置")).toBeInTheDocument();
     expect(screen.queryByText(/运行底座/)).not.toBeInTheDocument();
     unmount();
 
@@ -3133,7 +3140,9 @@ describe("Creative OS", () => {
     ]);
     vi.mocked(studioApi.trendServices).mockResolvedValue([{ id: "newsnow", label: "NewsNow", kind: "aggregator", status: "ready", lastCheckedAt: "2026-10-10T00:00:00Z" }]);
     const cloud = render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
-    expect(await screen.findByText(/制作环境已就绪.*热点使用已连接服务/)).toHaveTextContent("本机音色不可用，可用云端配音");
+    expect(await screen.findByText("本机中文配音不可用")).toBeInTheDocument();
+    expect(screen.getByText("云端配音已配置")).toBeInTheDocument();
+    expect(screen.getByText("热点使用已连接服务，无需本机运行。")).toBeInTheDocument();
     expect(screen.queryByText(/制作环境有 2 处未就绪/)).not.toBeInTheDocument();
     cloud.unmount();
 
@@ -3146,9 +3155,9 @@ describe("Creative OS", () => {
     ] satisfies StudioLocalCapability[]);
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
-    const summary = await screen.findByText(/制作环境有 2 处未就绪/);
-    expect(summary).toHaveTextContent("成片合成、云端配音暂不可用或受限");
-    expect(summary).toHaveTextContent("无法自行解决时请联系管理员");
+    expect(await screen.findByText("成片合成不可用")).toBeInTheDocument();
+    expect(screen.getByText("云端配音未配置或不可用")).toBeInTheDocument();
+    expect(screen.getByText(/未就绪项不代表其他能力不可用/)).toHaveTextContent("无法自行解决时请联系管理员");
     expect(document.body.textContent ?? "").not.toContain("MINIMAX_API_KEY");
     expect(screen.queryByText(/运行底座/)).not.toBeInTheDocument();
   });

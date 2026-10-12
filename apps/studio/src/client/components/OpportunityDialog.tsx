@@ -81,8 +81,8 @@ export function OpportunityDialog({ open, initialMode = "manual", onClose, onSub
         <div inert={discardPromptOpen} aria-hidden={discardPromptOpen || undefined}>
         <header className="dialog-header">
           <div>
-            <p className="eyebrow">选题草稿</p>
-            <h2 id="opportunity-dialog-title">录入机会</h2>
+            <p className="eyebrow">创作草稿 · 保存不启动制作</p>
+            <h2 id="opportunity-dialog-title">写下你的想法</h2>
           </div>
           <button className="icon-button" type="button" onClick={requestClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
@@ -102,7 +102,7 @@ export function OpportunityDialog({ open, initialMode = "manual", onClose, onSub
           <div className="field-wide" hidden={mode !== "manual"}><ManualFields /></div>
           <div className="field-wide" hidden={mode !== "json"}>
             <label className="field field-wide json-field">
-              <span>机会数据</span>
+              <span>创作草稿数据</span>
               <textarea name="json" required data-dialog-initial-focus rows={18} spellCheck={false} placeholder={'{"title":"...","evidence":[...],"scores":{...}}'} />
               <small>请使用选题导入格式；提交后系统仍会检查字段和内容。</small>
             </label>
@@ -110,14 +110,14 @@ export function OpportunityDialog({ open, initialMode = "manual", onClose, onSub
           {error ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}
           <footer className="dialog-actions">
             <button className="button button-ghost" type="button" onClick={requestClose} disabled={submitting}>取消</button>
-            <button className="button button-primary" type="submit" disabled={submitting}><Check aria-hidden="true" size={17} />{submitting ? "正在保存..." : "保存机会"}</button>
+            <button className="button button-primary" type="submit" disabled={submitting}><Check aria-hidden="true" size={17} />{submitting ? "正在保存..." : "保存创作草稿"}</button>
           </footer>
         </form>
         </div>
         {discardPromptOpen ? <div className="dialog-backdrop new-run-discard-backdrop" role="presentation">
           <section className="decision-dialog" aria-labelledby="opportunity-discard-title">
             <header className="dialog-header"><h2 id="opportunity-discard-title">要放弃本次填写吗？</h2></header>
-            <div className="decision-dialog-copy"><AlertCircle aria-hidden="true" size={22} /><p>尚未保存的选题和导入内容都会丢失；不会创建机会或制作。</p></div>
+            <div className="decision-dialog-copy"><AlertCircle aria-hidden="true" size={22} /><p>尚未保存的想法和导入内容都会丢失；不会保存草稿或开始制作。</p></div>
             <footer className="dialog-actions">
               <button className="button button-primary" type="button" data-dialog-initial-focus onClick={() => setDiscardPromptOpen(false)}>返回填写</button>
               <button className="button button-danger-ghost" type="button" onClick={() => { setDiscardPromptOpen(false); onClose(); }}>放弃并关闭</button>

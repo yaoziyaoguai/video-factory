@@ -73,13 +73,13 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
         <div className="project-archive-heading">
           <h2 id="today-heading" className="sr-only">{view === "current" ? "当前制作" : "已归档"}</h2>
           <div className="project-edition" data-tour="project-overview">
-            <div><strong>{activeCount}</strong><span>制作中</span></div>
-            <div><strong>{reviewCount}</strong><span>待你处理</span></div>
-            <div><strong>{finishedCount}</strong><span>近期完成</span></div>
+            <div><strong>{loading || error ? "—" : activeCount}</strong><span>制作中</span></div>
+            <div><strong>{loading || error ? "—" : reviewCount}</strong><span>待你处理</span></div>
+            <div><strong>{loading || error ? "—" : finishedCount}</strong><span>近期完成</span></div>
           </div>
           <div className="queue-view-switch" role="group" aria-label="制作记录视图">
             <button type="button" aria-pressed={view === "current"} onClick={() => setView("current")}>当前</button>
-            <button type="button" aria-pressed={view === "archive"} onClick={() => setView("archive")}>归档 <span>{archivedRuns.length}</span></button>
+            <button type="button" aria-pressed={view === "archive"} onClick={() => setView("archive")}>归档 <span>{loading || error ? "—" : archivedRuns.length}</span></button>
           </div>
         </div>
         <div className="project-controls" aria-label="制作记录工具" data-tour="project-controls">

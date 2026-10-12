@@ -133,6 +133,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   };
   const voiceTimingDialogRef = useDialogFocus<HTMLElement>(replanningVoice, closeVoiceTimingDecision, decisionPending);
   const readOnly = run.continuation?.supported === false;
+  const completedSeries = run.status === "succeeded" && Boolean(run.seriesId);
   const [readableDocument, setReadableDocument] = useState<{ runId: string; nodeId: string; versionId: string; ready: boolean }>();
   const onDocumentReadinessChange = useCallback((nodeId: string, versionId: string, ready: boolean) => {
     setReadableDocument(previous => previous?.runId === run.id && previous.nodeId === nodeId && previous.versionId === versionId && previous.ready === ready
@@ -205,6 +206,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   const nextPipelineNode = boundaryGate && waitingNodeIndex >= 0
     ? run.nodes.slice(waitingNodeIndex + 1).find((node) => !["succeeded", "skipped"].includes(node.status)) : undefined;
   const creatorNodes = run.nodes.filter((node) => node.id === nextGateNode?.id || nodeHasCreatorContent(node, run));
+  const seriesEditNodeId = ["creative-planning", "script", "brief"].find((id) => creatorNodes.some((node) => node.id === id && node.status === "succeeded"));
   // 本片来源影响规划，不能等素材节点有产物才出现；始终共用一个编辑会话。
   const assetConfigurationNode = run.nodes.find(node => node.id === "assets" && node.executionConfiguration);
   const activeSpendNode = readOnly ? undefined : creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
@@ -222,7 +224,8 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   const uncertainPaidNodeProviderId = (uncertainPaidNode?.executionReceipt ?? uncertainPaidNode?.plannedExecution)?.providerId;
   const sourcePreflightDecision = run.activeIntervention?.nodeId === "asset-source-review";
   const visualReview = sourcePreflightDecision ? undefined : visualReviewDecision(run);
-  const incompleteReviewOutput = run.nodes.find((node) => node.id === "visual-review")?.output;
+  const incompleteReviewOutput = run.nodes.find((node) => node.id === "visual-review"
+    && node.status !== "stale" && node.outputState?.stale !== true)?.output;
   const incompleteAudioReview = !sourcePreflightDecision && incompleteReviewOutput && typeof incompleteReviewOutput === "object"
     ? (incompleteReviewOutput as Record<string, unknown>).audioReview : undefined;
   const scopedOptionalReview = run.activeIntervention?.continuationScope === "rendered_video_optional_review";
@@ -361,6 +364,9 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   }
   const assetVersionId = run.nodes.find((node) => node.id === "assets")?.outputState?.effectiveVersionId;
   const isCostReplan = run.status === "stale" && hasDirectorCostFeedback(run);
+  const staleResultNodes = run.nodes.filter(node => node.status === "stale" || node.outputState?.stale === true);
+  const retainedResultNodes = run.nodes.filter(node => node.status === "succeeded" && node.outputState?.stale !== true
+    && (hasContent(node.output) || node.artifactIds.length > 0 || Boolean(node.outputState?.effectiveVersionId)));
   const sourceAssetFailure = run.failure && isSourceAssetReviewFailure(run.failure)
     ? sourceAssetReviewBreakdown(run.failure)
     : undefined;
@@ -541,7 +547,11 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
           <h1>{run.title}</h1>
           <div className="run-title-meta"><span>{platformLabel(run.platform)} · 目标 {run.durationSeconds} 秒</span><details className="run-brief-context"><summary>创作目标与受众</summary><p className="page-summary">{run.angle} · {run.audience}</p></details></div>
         </div>
-        <StatusBadge status={run.status} {...(creatorRunStatusLabel(run) ? { label: creatorRunStatusLabel(run)! } : {})} />
+        <StatusBadge status={run.status} {...(run.status === "succeeded" && !readOnly
+          ? { label: "内部交付已完成" }
+          : run.status === "failed" && video?.contentUrl && run.failure?.nodeId === "visual-review"
+          ? { label: "已有成片 · 审片待处理" }
+          : creatorRunStatusLabel(run) ? { label: creatorRunStatusLabel(run)! } : {})} />
       </header>
 
       <div className="run-workspace-toolbar">
@@ -577,21 +587,9 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
       </div>
 
       <div id="run-current" className="run-current-workspace">
-      {assetConfigurationNode && !nativeAudio ? <NodeExecutionConfigurationEditor
-        key={`${run.id}:asset-sources`}
-        node={assetConfigurationNode}
-        providers={providers}
-        runStatus={run.status}
-        runRevision={run.revision}
-        busy={nodeMutationPending || decisionPending}
-        readOnly={readOnly || !onConfigureNode}
-        paidRecoveryLocked={Boolean(uncertainPaidNode) && run.optionalReviewUncertaintySafe !== true}
-        {...(assetConfigurationBlockedReason ? { editingBlockedReason: assetConfigurationBlockedReason } : {})}
-        onSave={input => onConfigureNode!(assetConfigurationNode.id, input)}
-      /> : null}
       {creativeDiscussion}
       {!readOnly && !creativeDiscussion && run.activeIntervention?.kind === "creative_review" ? <p className="workspace-loading" role="status">正在读取当前方案与讨论。读取完成后才能确认此版本。</p> : null}
-      {!readOnly && !creativeDiscussion && run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
+      {!readOnly && !creativeDiscussion && !video?.contentUrl && run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
       {activeSpendNode ? <section className="current-production-action" aria-labelledby="current-production-action-title">
         <header>
           <div><p className="eyebrow">当前需要处理</p><h2 id="current-production-action-title">现在需要你：确认{stepNameFor(activeSpendNode, activeSpendNode.label)}</h2></div>
@@ -636,6 +634,16 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
       </div> : null}
 
       {!video?.contentUrl ? originalReviewRecords : null}
+
+      {run.status === "succeeded" && !readOnly ? <section className="completion-snapshot" aria-label="完成范围摘要">
+        <span>{publishPackage ? "发布包已准备" : "发布包尚不可下载"}</span>
+        <span>{visualReview ? singleVisualReview
+          ? `独立质量复核 ${visualReview.independentReviews.length} 份`
+          : `机器双审 ${visualReview.independentReviews.length}/2`
+          : "未取得机器审片结论"}</span>
+        <span>对外发布仍需你自行操作</span>
+        {costDetail?.totals.actualPendingCount ? <span>{costDetail.totals.actualPendingCount} 笔费用待核</span> : null}
+      </section> : null}
 
       {showReviewSurface ? <div className={`review-layout${decidingDocument ? " review-layout-document" : ""}${!video?.contentUrl && !currentArtifactNode ? " review-layout-no-media" : ""}`}>
         {currentArtifactNode ? <section className="current-artifact-surface" aria-label="当前步骤产物">
@@ -684,63 +692,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
           </section> : null}
 
         <aside className="review-panel" aria-label="审片与产物" data-tour="run-review">
-          {run.creativeSummary ? <details className="creative-summary run-creative-summary" role="region" aria-label="创作目标摘要">
-            <summary><strong>系统整理的创作目标</strong><small>展开核对</small></summary>
-            <p>根据本次简报推导；如有偏差，请在打回后修改标题、角度、受众或画面要求。</p>
-            <dl>
-              <div><dt>给谁看</dt><dd>{run.creativeSummary.audience}</dd></div>
-              <div><dt>开头承诺</dt><dd>{run.creativeSummary.openingPromise}</dd></div>
-              <div><dt>画面方向参考</dt><dd>{run.creativeSummary.requiredVisual}</dd></div>
-              <div><dt>结尾收益</dt><dd>{run.creativeSummary.payoff}</dd></div>
-            </dl>
-          </details> : null}
-          {visualReview ? <section className="independent-review-panel" aria-label={singleVisualReview ? "独立质量复核结果" : "双模型审片结果"}>
-            <header><strong>{singleVisualReview
-              ? `成片独立质量复核：${visualReview.independentReviews.length} 份已完成`
-              : `成片双审：${visualReview.independentReviews.length}/2 已完成`}</strong><small>{singleVisualReview
-              ? "该模型审查同一版成片"
-              : visualReview.independentReviews.length === 2
-                ? visualReview.evidenceId ? "两者查看同一份成片证据" : "独立审查同一版成片"
-                : "审片结果不完整，不能按完整双审处理"}</small></header>
-            <div className="merged-review-summary">
-              <span>视觉结论 · {visualReviewRecommendationLabel(visualReview.recommendation)}</span>
-              <details className="review-full-summary">
-                <summary>查看完整结论原文</summary>
-                <p>{creatorFacingTechnicalText(visualReview.summary)}</p>
-              </details>
-            </div>
-            {flawedReviewBranches.length > 0 ? <p className="review-audit-caveat" role="note">
-              <strong>有 {flawedReviewBranches.length} 份审片报告未通过报告质量复核</strong>
-              <span>{flawedReviewBranches.map((branch) => `${reviewProviderLabel(branch.providerId, providers)} · ${catalogModelLabel(providers, branch.modelId) ?? branch.modelId}`).join("、")}。需要重点核对的是报告的依据，不等于作品已被否决。请结合成片判断各条意见；发布仍需满足页面列出的必要条件。</span>
-            </p> : null}
-            <div className="independent-review-list">
-              {visualReview.independentReviews.map((review, index) => {
-                return <article key={`${review.providerId}:${review.modelId}:${index}`}>
-                <header><strong>{reviewProviderLabel(review.providerId, providers)}</strong><span>{visualReviewRecommendationLabel(review.recommendation)}</span></header>
-                <small>{catalogModelLabel(providers, review.modelId) ?? review.modelId}{review.score !== undefined ? ` · ${review.score} 分` : ""}{` · ${review.findingCount} 项问题`}{review.auditVerdict === "repair" ? " · 独立审计未通过" : ""}</small>
-                {/* 单审的分支就是上方完整报告；多审各有独立来源，不能按正文相同合并。 */}
-                {!singleVisualReview ? <details className="review-full-summary">
-                  <summary>查看这份意见的完整原文</summary>
-                  <p>{creatorFacingTechnicalText(review.summary)}</p>
-                </details> : null}
-              </article>;
-              })}
-              {!singleVisualReview && visualReview.independentReviews.length < 2 ? <p role="status">缺少 {2 - visualReview.independentReviews.length} 个可验证的独立审片结果，请重新审查当前成片。</p> : null}
-            </div>
-          </section> : null}
-          {visualReview || incompleteAudioReview ? <AudioReviewPanel value={visualReview?.audioReview ?? incompleteAudioReview} /> : null}
-          {canReinspect && reinspectionEvidenceId && onReinspectVisualReview ? <CurrentFilmReinspection
-            input={{ expectedRunRevision: run.revision, reviewEvidenceId: reinspectionEvidenceId }}
-            busy={nodeMutationPending || decisionPending} onConfirm={onReinspectVisualReview} /> : null}
-          {!nativeAudio && run.activeIntervention?.nodeId === "final-review" && !readOnly && onRequestNarrationRevision
-            ? <SubtitleRecoveryPanel key={`${run.id}:${run.revision}`} run={run}
-              busy={decisionPending || nodeMutationPending} onRecover={onRequestNarrationRevision} /> : null}
-          {!visualReview && video?.contentUrl ? <section className="review-advisory" role="status" aria-label="机器审片状态">
-            <strong>机器视觉审片尚无完整结论</strong>
-            <p>{run.status === "succeeded" && run.finalReviewOutcome === "approved"
-              ? "人工终审已确认，内部制作已完成；未完成的机器审片状态独立保留。当前视频可以播放和下载。"
-              : "当前视频可以播放和下载；是否采用由你决定，机器审片状态不等于人工终审或外部平台发布状态。"}</p>
-          </section> : null}
+          {!readOnly && video?.contentUrl && run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
           {readOnly ? (
             <section className="run-state-panel" role="status">
               <p className="eyebrow">历史制作记录</p>
@@ -831,9 +783,71 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               <div className="attention-heading">
                 <AlertTriangle aria-hidden="true" size={18} />
                 {/* 边界停点由界面按 nodeId 说步骤名（服务端只有英文节点标识），否则用户看不出停在哪一步。 */}
-                <h2>{boundaryGate ? `${runStepLabel(run, run.activeIntervention.nodeId)}做完了，等你放行` : "需要你的判断"}</h2>
+                <h2>{boundaryGate ? `${runStepLabel(run, run.activeIntervention.nodeId)}做完了，等你放行` : run.activeIntervention.nodeId === "final-review" ? "确认本版成片，完成内部定版" : "查看本版结果并决定是否继续"}</h2>
               </div>
               <p>{creatorFacingTechnicalText(run.activeIntervention.reason)}</p>
+              <div className="decision-actions">
+                {boundaryGate ? <>
+                  {/* 尊重 runner 实际接受的闸门：options 里没有的动作不发按钮，否则按钮会与
+                      服务端校验漂移（点了必然报"does not allow action"）。 */}
+                  {boundaryOptions.includes("approve") ? (
+                    <button
+                      className="button button-primary"
+                      type="button"
+                      disabled={decisionPending || !contentDecisionReady}
+                      onClick={() => {
+                        if (!contentDecisionReady) return;
+                        if (contentDecisionNode && reviewItems.length === 0) {
+                          const snapshot = decisionSnapshotFor("approve");
+                          if (snapshot) void onDecision({ action: "approve", ...snapshot });
+                        } else openDecision("approve");
+                      }}
+                    >
+                      <Check aria-hidden="true" size={17} />{voiceWithoutSubtitles ? "查看无同步字幕版并确认" : contentDecisionNode ? contentDecisionActionLabel : "确认当前步骤，进入下一步"}
+                    </button>
+                  ) : null}
+                  {boundaryOptions.includes("reject") ? (
+                    <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
+                      <XCircle aria-hidden="true" size={17} />终止制作
+                    </button>
+                  ) : null}
+                </> : voiceTiming ? <>
+                  <button className="button button-primary" type="button" disabled={decisionPending} onClick={openVoiceTimingDecision}>
+                    <RotateCcw aria-hidden="true" size={17} />调整方案
+                  </button>
+                  <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
+                    <XCircle aria-hidden="true" size={17} />终止制作
+                  </button>
+                </> : visualReviewRequiresRevision ? <>
+                  {/* 这一支原来写「修改后再审」，但它提交的是 reject——一个把这条视频当场终止的终态，
+                      没有任何返修会因此发生。想返修的人会点它，然后拿到一条停止制作的视频。
+                      现在按它的实际后果说话；要返修请用下面每条结论旁的返工入口。 */}
+                  {onRequestSceneRevision && assetVersionId && visualReview?.reviewArtifactId && visualReview.findings.length > 0 ? <button
+                    className="button button-secondary" type="button" onClick={() => {
+                      const section = document.getElementById("current-review-findings");
+                      section?.focus();
+                      section?.scrollIntoView?.({ block: "start" });
+                    }}>处理修改意见</button> : null}
+                  <button className="button button-primary" type="button" disabled={decisionPending} onClick={() => openDecision("approve")}>
+                    <Check aria-hidden="true" size={17} />{run.activeIntervention.nodeId === "final-review" ? "接受风险并内部定版" : "接受风险，进入人工终审"}
+                  </button>
+                  <button className="button button-ghost" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
+                    <XCircle aria-hidden="true" size={17} />终止制作
+                  </button>
+                </> : <>
+                  {run.activeIntervention.options.includes("approve") ? <button
+                    className="button button-primary"
+                    type="button"
+                    disabled={decisionPending}
+                    onClick={() => openDecision("approve")}
+                  >
+                    <Check aria-hidden="true" size={17} />{sourcePreflightDecision ? "接受当前素材风险，继续制作" : sourceReviewDecision || sourceReviewIncompleteRisk ? "查看质量意见并继续制作" : visualReviewIncompleteDecision ? "接受未复核风险，进入人工终审" : finalReviewIncompleteRisk ? "接受未复核风险并内部定版" : "确认本版成片并内部定版"}
+                  </button> : null}
+                  <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
+                    <XCircle aria-hidden="true" size={17} />终止制作
+                  </button>
+                </>}
+              </div>
               {waitingNodeProgress ? <div className={`agent-loop-progress is-stacked is-${waitingNodeProgress.phase}`} role="status">
                 {["asset-source-review", "visual-review"].includes(waitingNodeId ?? "") ? <span>以下是对审片报告的复核，不代表素材或成片质量通过。素材问题以审片正文为准。</span> : null}
                 <strong>{agentLoopPhaseLabel(waitingNodeProgress, waitingAuditHistorical)}</strong>
@@ -851,16 +865,21 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                 </> : <span>{agentLoopPendingNote(waitingNodeProgress)}</span>}
                 <span>实际模型调用：创作 {waitingNodeProgress.producerModelCallCount ?? 0} 次，审计 {waitingNodeProgress.auditModelCallCount ?? 0} 次。查询、刷新和等待不计为新调用。</span>
               </div> : null}
-              {visualReviewRequiresRevision && visualReview ? <div className="agent-review-decision">
+              {visualReviewRequiresRevision && visualReview ? <div className="agent-review-decision" id="current-review-findings" tabIndex={-1}>
                 <strong>视觉审片建议修改后再审</strong>
-                <p>完整结论保留在上方审片报告中。先核对当前成片，再决定如何处理下列意见。</p>
+                <p>完整结论保留在审片报告中。先核对当前成片，再决定如何处理下列意见。</p>
                 <div className="agent-review-facts">
-                  {visualReview.lowestScores.map((score) => <span key={score.key}>{score.label} <strong>{score.value}</strong></span>)}
                   <span>模型判定存在问题：<strong>{visualReview.findingCount}</strong> 项</span>
                   {visualReview.pendingInspectionCount ? <span><strong>{visualReview.pendingInspectionCount}</strong> 项待补查</span> : null}
                   {visualReview.infoCount ? <span><strong>{visualReview.infoCount}</strong> 项提示</span> : null}
-                  <span>模型自评把握程度 <strong>{Number.isFinite(visualReview.confidence) && visualReview.confidence >= 0 && visualReview.confidence <= 1 ? `${Math.round(visualReview.confidence * 100)}%` : "数值异常，待核对"}</strong></span>
                 </div>
+                <details className="review-score-details"><summary>查看模型评分与自评</summary>
+                  <div className="agent-review-facts">
+                    {visualReview.lowestScores.map((score) => <span key={score.key}>{score.label} <strong>{score.value}</strong></span>)}
+                    <span>模型自评把握程度 <strong>{Number.isFinite(visualReview.confidence) && visualReview.confidence >= 0 && visualReview.confidence <= 1 ? `${Math.round(visualReview.confidence * 100)}%` : "数值异常，待核对"}</strong></span>
+                  </div>
+                  <p>自评是模型自己的判断，不代表已校准的准确率；请以当前成片和具体意见为依据。</p>
+                </details>
                 {onRequestSceneRevision && assetVersionId && visualReview.reviewArtifactId
                   ? <div className="scene-revision-list">
                     {visualReview.findings.map((finding) => <SceneRevisionFinding
@@ -909,62 +928,6 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                 {nextGateNode ? <button className="button button-ghost" type="button" onClick={() => revealNodeWorkspace(nextGateNode.id)}>{nextGateNode.id === nextPipelineNode.id ? "去配置" : "提前配置后续步骤"}「{stepNameFor(nextGateNode, nextGateNode.label)}」</button> : null}
               </div> : null}
               {contentDecisionNode && !contentDecisionReady ? <p className="node-document-state" role="status">请先读取并核对当前完整{contentDecisionObject}；若正在编辑，请保存或取消编辑后再采用。</p> : null}
-              <div className="decision-actions">
-                {boundaryGate ? <>
-                  {/* 尊重 runner 实际接受的闸门：options 里没有的动作不发按钮，否则按钮会与
-                      服务端校验漂移（点了必然报"does not allow action"）。 */}
-                  {boundaryOptions.includes("approve") ? (
-                    <button
-                      className="button button-primary"
-                      type="button"
-                      disabled={decisionPending || !contentDecisionReady}
-                      onClick={() => {
-                        if (!contentDecisionReady) return;
-                        if (contentDecisionNode && reviewItems.length === 0) {
-                          const snapshot = decisionSnapshotFor("approve");
-                          if (snapshot) void onDecision({ action: "approve", ...snapshot });
-                        } else openDecision("approve");
-                      }}
-                    >
-                      <Check aria-hidden="true" size={17} />{voiceWithoutSubtitles ? "查看无同步字幕版并确认" : contentDecisionNode ? contentDecisionActionLabel : "确认当前步骤，进入下一步"}
-                    </button>
-                  ) : null}
-                  {boundaryOptions.includes("reject") ? (
-                    <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
-                      <XCircle aria-hidden="true" size={17} />终止制作
-                    </button>
-                  ) : null}
-                </> : voiceTiming ? <>
-                  <button className="button button-primary" type="button" disabled={decisionPending} onClick={openVoiceTimingDecision}>
-                    <RotateCcw aria-hidden="true" size={17} />调整方案
-                  </button>
-                  <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
-                    <XCircle aria-hidden="true" size={17} />终止制作
-                  </button>
-                </> : visualReviewRequiresRevision ? <>
-                  {/* 这一支原来写「修改后再审」，但它提交的是 reject——一个把这条视频当场终止的终态，
-                      没有任何返修会因此发生。想返修的人会点它，然后拿到一条停止制作的视频。
-                      现在按它的实际后果说话；要返修请用下面每条结论旁的返工入口。 */}
-                  <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
-                    <XCircle aria-hidden="true" size={17} />终止制作
-                  </button>
-                  <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("approve")}>
-                    <Check aria-hidden="true" size={17} />仍要批准（说明理由）
-                  </button>
-                </> : <>
-                  {run.activeIntervention.options.includes("approve") ? <button
-                    className="button button-primary"
-                    type="button"
-                    disabled={decisionPending}
-                    onClick={() => openDecision("approve")}
-                  >
-                    <Check aria-hidden="true" size={17} />{sourcePreflightDecision ? "接受当前素材风险，继续制作" : sourceReviewDecision || sourceReviewIncompleteRisk ? "查看质量意见并继续制作" : visualReviewIncompleteDecision ? "接受未复核风险，进入人工终审" : finalReviewIncompleteRisk ? "接受未复核风险并内部定版" : "批准进入发布包"}
-                  </button> : null}
-                  <button className="button button-secondary" type="button" disabled={decisionPending} onClick={() => openDecision("reject")}>
-                    <XCircle aria-hidden="true" size={17} />终止制作
-                  </button>
-                </>}
-              </div>
             </section>
           ) : (
             <section className={`run-state-panel${run.failure ? " has-failure" : ""}`}>
@@ -1009,9 +972,26 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                   </ul>
                 </>}
               </> : <>
-                <h2>当前状态</h2>
+                <h2>{run.status === "succeeded" ? "内部交付已完成" : "当前状态"}</h2>
                 <p>{runStateMessage(run)}</p>
               </>}
+              {run.status === "succeeded" ? <section className="delivery-facts" aria-label="交付状态">
+                <dl>
+                  <div><dt>成片</dt><dd>{video?.contentUrl ? "当前成片可播放、下载" : "未取得可下载的成片"}</dd></div>
+                  <div><dt>发布包</dt><dd>{publishPackage ? "已准备，可下载" : "未取得可下载的发布包"}</dd></div>
+                  <div><dt>对外发布</dt><dd>外部发布需你自行操作；这里不代表已发布</dd></div>
+                </dl>
+              </section> : null}
+              {run.status === "stale" ? <section className="rework-impact-summary" aria-label="本次返工影响">
+                <dl>
+                  <div><dt>当前仍有效</dt><dd>{retainedResultNodes.length ? retainedResultNodes.map(node => stepNameFor(node, node.label)).join("、") : "尚无可确认的有效结果"}</dd></div>
+                  <div><dt>已失效，需重新处理</dt><dd>{staleResultNodes.length ? staleResultNodes.map(node => stepNameFor(node, node.label)).join("、") : "当前记录未列出具体步骤"}</dd></div>
+                  <div><dt>仍待确定</dt><dd>具体镜头、音轨是否复用及新增费用，需重新核对方案与报价；失效不等于删除已有文件。</dd></div>
+                  <div><dt>下一次确认</dt><dd>{run.activeIntervention
+                    ? `当前先确认「${runStepLabel(run, run.activeIntervention.nodeId)}」；后续停点以新执行结果为准。`
+                    : "继续后按实际结果进入下一人工停点；具体停点尚未确定，不会沿用失效的费用授权。"}</dd></div>
+                </dl>
+              </section> : null}
               {visiblePaidNodeSummary ? <PaidOperationPanel
                 summary={visiblePaidNodeSummary}
                 runId={run.id}
@@ -1023,7 +1003,15 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               /> : null}
               {publishPackage && publishPackageDownloadName ? <a className="button button-secondary" href={publishPackage.contentUrl} download={publishPackageDownloadName}><Download aria-hidden="true" size={16} />下载发布包</a> : null}
               {run.status === "succeeded" && onOpenPublish ? <button className="button button-primary" type="button" onClick={onOpenPublish}><Send aria-hidden="true" size={16} />准备各平台发布包</button> : null}
-              {run.status === "succeeded" && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
+              {completedSeries ? <div role="status" aria-label="本集修改范围">
+                <p>{run.seriesRework?.mode === "edit_current"
+                  ? "在本制作中修改内容与方案。保存后受影响的成果会失效，需重新生成并确认；原片和历史版本保留，不会新建另一条制作占用本集。"
+                  : run.seriesRework?.reason ?? "请刷新后核对本集修改状态；不会新建另一条制作占用本集。"}</p>
+                {run.seriesRework?.mode === "edit_current" && !readOnly && seriesEditNodeId
+                  ? <button className="button button-secondary" type="button" disabled={nodeMutationPending || decisionPending}
+                    onClick={() => revealNodeWorkspace(seriesEditNodeId)}><RotateCcw aria-hidden="true" size={16} />修改本集内容</button>
+                  : <a className="button button-secondary" href="/topics?mode=series">查看系列安排</a>}
+              </div> : run.status === "succeeded" && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
               {hasPendingPlanningConfiguration && (run.status === "failed" || run.status === "rejected") ? <p className="run-failure-summary">模型选择尚未保存。请先保存模型，或恢复为当前模型后再重试。</p> : null}
               {(run.status === "failed" || run.status === "rejected") && !run.taskRecovery && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && retryableNodeId(run) ? <button className={`button ${canRestorePreservedWork ? "button-secondary" : "button-primary"}`} type="button" disabled={nodeMutationPending || hasPendingPlanningConfiguration} onClick={() => void onRetryFailedNode(retryableNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{run.failure?.retryLabel ?? (sourceAssetFailure && run.status === "rejected" ? "重新检查已有试片" : run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤")}</button> : null}
               {(run.status === "failed" || run.status === "rejected") && !run.taskRecovery && !hasUncertainPaidOutcome(run) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
@@ -1032,6 +1020,68 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
             </section>
           )}
 
+          {run.creativeSummary ? <details className="creative-summary run-creative-summary" role="region" aria-label="创作目标摘要">
+            <summary><strong>系统整理的创作目标</strong><small>展开核对</small></summary>
+            <p>根据本次简报推导；如有偏差，请在打回后修改标题、角度、受众或画面要求。</p>
+            <dl>
+              <div><dt>给谁看</dt><dd>{run.creativeSummary.audience}</dd></div>
+              <div><dt>开头承诺</dt><dd>{run.creativeSummary.openingPromise}</dd></div>
+              <div><dt>画面方向参考</dt><dd>{run.creativeSummary.requiredVisual}</dd></div>
+              <div><dt>结尾收益</dt><dd>{run.creativeSummary.payoff}</dd></div>
+            </dl>
+          </details> : null}
+          {visualReview ? <section className="independent-review-panel" aria-label={singleVisualReview ? "独立质量复核结果" : "双模型审片结果"}>
+            <header><strong>{singleVisualReview
+              ? `成片独立质量复核：${visualReview.independentReviews.length} 份已完成`
+              : `成片双审：${visualReview.independentReviews.length}/2 已完成`}</strong><small>{singleVisualReview
+              ? "该模型审查同一版成片"
+              : visualReview.independentReviews.length === 2
+                ? visualReview.evidenceId ? "两者查看同一份成片证据" : "独立审查同一版成片"
+                : "审片结果不完整，不能按完整双审处理"}</small></header>
+            <div className="merged-review-summary">
+              <span>视觉结论 · {visualReviewRecommendationLabel(visualReview.recommendation)}</span>
+              <details className="review-full-summary">
+                <summary>查看完整结论原文</summary>
+                <p>{creatorFacingTechnicalText(visualReview.summary)}</p>
+              </details>
+            </div>
+            {flawedReviewBranches.length > 0 ? <p className="review-audit-caveat" role="note">
+              <strong>有 {flawedReviewBranches.length} 份审片报告未通过报告质量复核</strong>
+              <span>{flawedReviewBranches.map((branch) => `${reviewProviderLabel(branch.providerId, providers)} · ${catalogModelLabel(providers, branch.modelId) ?? branch.modelId}`).join("、")}。需要重点核对的是报告的依据，不等于作品已被否决。请结合成片判断各条意见；发布仍需满足页面列出的必要条件。</span>
+            </p> : null}
+            <div className="independent-review-list">
+              {visualReview.independentReviews.map((review, index) => {
+                return <article key={`${review.providerId}:${review.modelId}:${index}`}>
+                <header><strong>{reviewProviderLabel(review.providerId, providers)}</strong><span>{visualReviewRecommendationLabel(review.recommendation)}</span></header>
+                <small>{catalogModelLabel(providers, review.modelId) ?? review.modelId}{review.score !== undefined ? ` · ${review.score} 分` : ""}{` · ${review.findingCount} 项问题`}{review.auditVerdict === "repair" ? " · 独立审计未通过" : ""}</small>
+                {/* 单审的分支就是上方完整报告；多审各有独立来源，不能按正文相同合并。 */}
+                {!singleVisualReview ? <details className="review-full-summary">
+                  <summary>查看这份意见的完整原文</summary>
+                  <p>{creatorFacingTechnicalText(review.summary)}</p>
+                </details> : null}
+              </article>;
+              })}
+              {!singleVisualReview && visualReview.independentReviews.length < 2 ? <p role="status">
+                缺少 {2 - visualReview.independentReviews.length} 个可验证的独立审片结果。
+                {run.finalReviewOutcome === "approved"
+                  ? "机器审片尚不完整；不改变已记录的人工终审决定。是否补审由你决定，原请求和费用待核状态保留。"
+                  : "机器审片尚不完整，请结合当前成片自行判断；采用与人工终审仍分别确认。"}
+              </p> : null}
+            </div>
+          </section> : null}
+          {visualReview || incompleteAudioReview ? <AudioReviewPanel value={visualReview?.audioReview ?? incompleteAudioReview} /> : null}
+          {canReinspect && reinspectionEvidenceId && onReinspectVisualReview ? <CurrentFilmReinspection
+            input={{ expectedRunRevision: run.revision, reviewEvidenceId: reinspectionEvidenceId }}
+            busy={nodeMutationPending || decisionPending} onConfirm={onReinspectVisualReview} /> : null}
+          {!nativeAudio && run.activeIntervention?.nodeId === "final-review" && !readOnly && onRequestNarrationRevision
+            ? <SubtitleRecoveryPanel key={`${run.id}:${run.revision}`} run={run}
+              busy={decisionPending || nodeMutationPending} onRecover={onRequestNarrationRevision} /> : null}
+          {!visualReview && video?.contentUrl ? <section className="review-advisory" role="status" aria-label="机器审片状态">
+            <strong>机器视觉审片尚无完整结论</strong>
+            <p>{run.status === "succeeded" && run.finalReviewOutcome === "approved"
+              ? "人工终审已确认，内部制作已完成；未完成的机器审片状态独立保留。当前视频可以播放和下载。"
+              : "当前视频可以播放和下载；是否采用由你决定，机器审片状态不等于人工终审或外部平台发布状态。"}</p>
+          </section> : null}
           {/* 终审的可选时间工具默认收起、排在主决定之后（CLOUD-03）。组件保持挂载——
               details 折叠只隐藏表单，不卸载，未保存输入/未决请求/刷新保护都在。 */}
           {!nativeAudio && video?.contentUrl && run.activeIntervention?.nodeId === "final-review" && !readOnly
@@ -1047,6 +1097,18 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
         </aside>
       </div> : null}
 
+      {assetConfigurationNode && !nativeAudio ? <NodeExecutionConfigurationEditor
+        key={`${run.id}:asset-sources`}
+        node={assetConfigurationNode}
+        providers={providers}
+        runStatus={run.status}
+        runRevision={run.revision}
+        busy={nodeMutationPending || decisionPending}
+        readOnly={readOnly || !onConfigureNode}
+        paidRecoveryLocked={Boolean(uncertainPaidNode) && run.optionalReviewUncertaintySafe !== true}
+        {...(assetConfigurationBlockedReason ? { editingBlockedReason: assetConfigurationBlockedReason } : {})}
+        onSave={input => onConfigureNode!(assetConfigurationNode.id, input)}
+      /> : null}
       {video?.contentUrl ? originalReviewRecords : null}
 
       </div>
@@ -1059,7 +1121,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
         <div className="node-workspace-list">{reviewResultNodes.map(renderNodeWorkspace)}</div>
       </section> : null}
       {remainingCreatorNodes.length ? <section id="run-artifacts" className="role-workspaces" aria-labelledby="role-workspaces-title">
-        <header className="section-heading"><div><p className="eyebrow">创作内容</p><h2 id="role-workspaces-title">逐项预览与修改</h2><p>这里只呈现会影响作品、并且适合人工调整的内容。路径、版本和运行参数不会占用你的注意力。</p></div><span>{remainingCreatorNodes.length} 项</span></header>
+        <header className="section-heading"><div><p className="eyebrow">创作内容</p><h2 id="role-workspaces-title">逐项预览与修改</h2><p>查看已保留的内容，选择需要修改的部分。</p></div><span>{remainingCreatorNodes.length} 项</span></header>
         <div className="node-workspace-list">
           {remainingCreatorNodes.map(renderNodeWorkspace)}
         </div>
@@ -1180,9 +1242,10 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                 ? "接受未复核风险，完成内部定版"
                 : boundaryGate
                 ? `确认放行「${runStepLabel(run, run.activeIntervention?.nodeId ?? "")}」`
-                : reviewItems.length > 0 ? "逐条表态后批准成片" : "确认批准成片"}</h2></div>
+                : "确认本版成片，完成内部定版"}</h2></div>
               <button className="icon-button" type="button" onClick={closeApproveDecision} disabled={decisionPending} title="关闭"><X aria-hidden="true" size={19} /></button>
             </header>
+            <div className="decision-dialog-body">
             {/* 边界停点批准的是"这一步的产出可以往下走"，不生成发布包、不结束终审，也和机器质检无关。
                 这里原来一律讲终审的话——用户点下去之前读到的最后一段话是错的。 */}
             <div className="decision-dialog-copy"><Check aria-hidden="true" size={22} /><p>{sourcePreflightDecision
@@ -1192,9 +1255,9 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               : sourceReviewDecision
               ? <><strong>你确认的是：已看过这份试片意见，愿意按当前方案继续。</strong><span>系统不会重新购买已生成试片；其它尚未生成的素材仍会先依据当前报价和授权处理。</span></>
               : visualReviewIncompleteDecision
-              ? <><strong>这次机器审片没有有效结论；继续只会进入人工终审。</strong><span>不会生成发布包，也不代表审片通过。当前成片和未复核记录保留，不会因此重买素材、配音或再调用审片模型；内部定版仍需下一步明确确认。</span></>
+              ? <><strong>{visualReview ? "已有视觉意见，但整体复核仍未完成" : "本次整体复核未完成"}；继续只会进入人工终审。</strong><span>不会生成发布包，也不代表审片通过。当前成片、已有意见和待核记录保留，不会因此重买素材、配音或再调用审片模型；内部定版仍需下一步明确确认。</span></>
               : finalReviewIncompleteRisk
-              ? <><strong>机器审片这次没有给出可用结论；你接受的是这个未复核事实，不是宣布审查通过。</strong><span>内部定版会绑定当前成片与这份风险签字。成片仍可查看；若之后重新取得审片结论，这里不会自动改写。</span></>
+              ? <><strong>{visualReview ? "已有视觉意见，但整体复核仍未完成。" : "本次整体复核未完成。"}你接受的是未复核风险，不是宣布审查通过。</strong><span>已有意见、待核结果与费用记录均保留。内部定版会绑定当前成片与这份风险签字；若之后重新取得审片结论，这里不会自动改写。</span></>
               : contentDecisionNode
               ? <><strong>{contentDecisionUnaudited ? "你采用的是尚未取得独立审计结论的当前版本。" : contentDecisionHasSuggestions ? "你看过内容建议，决定保留建议并采用当前版本。" : "你采用的是当前已审计版本。"}</strong><span>本次决定会绑定当前文字版本；旧版建议不会自动写入当前稿。质量决定不会替代后续素材和费用确认。</span></>
               : voiceWithoutSubtitles
@@ -1212,7 +1275,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
               <button type="button" className="button button-secondary" disabled={prefillBusy || decisionPending}
                 onClick={() => void prefillReview()}>沿用上一停点的逐条表态</button>
               {prefillNotice?.basis === reviewDraftBasis ? <p role="status">{prefillNotice.text}</p> : null}
-              <p className="review-disposition-guide">采纳=现在返修；不采纳=认为意见不成立，需写理由；接受风险=认可问题，但保留本版和原始评分。</p>
+              <p className="review-disposition-guide">认可问题但保留本版，选“接受风险”；认为意见不成立，选“不同意这条意见”并写理由；要落实修改，选“采纳，先返修”。选择只是本次表态草稿，最后确认才生效。</p>
               {reviewItems.map((item, index) => {
                 const itemKey = item.itemKey!;
                 const choice = reviewDecisions[itemKey];
@@ -1237,7 +1300,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                       type="button"
                       aria-pressed={choice?.decision === "reject"}
                       onClick={() => setReviewDecision(itemKey, "reject")}
-                    >不采纳，维持现状</button>
+                    >不同意这条意见</button>
                     <button
                       className="button button-ghost"
                       type="button"
@@ -1274,8 +1337,9 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                 ? "确认依据已刷新，当前停点尚未签字。请先重新查看当前内容，再确认；批准备注已保留。"
                 : "当前停点已变化，不能继续提交刚才的确认。请先查看当前内容；批准备注已保留。"}
             </p> : null}
+            </div>
             <footer className="dialog-actions">
-              <button className="button button-ghost" type="button" onClick={closeApproveDecision} disabled={decisionPending}>{approvalSnapshotStale ? "返回查看当前内容" : boundaryGate ? "先不放行" : "再看一遍"}</button>
+              <button className="button button-ghost" type="button" onClick={closeApproveDecision} disabled={decisionPending}>{approvalSnapshotStale ? "返回查看当前内容" : boundaryGate ? "先不放行" : "先不确认"}</button>
               <button
                 className="button button-primary"
                 type="button"
@@ -1304,7 +1368,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                   : contentDecisionNode ? contentDecisionActionLabel
                   : voiceWithoutSubtitles ? "确认无同步字幕版，进入渲染"
                   : boundaryGate ? "确认放行，进入下一步"
-                  : reviewItems.length > 0 ? "逐条表态已完成，生成发布包" : "确认批准并生成发布包"}</button>
+                  : "确认内部定版并准备文案"}</button>
             </footer>
           </section>
         </div>
@@ -1772,7 +1836,7 @@ function previousRenderedReviewIndex(
 
 function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | undefined {
   const node = run.nodes.find((item) => item.id === "visual-review");
-  if (!node) return undefined;
+  if (!node || node.status === "stale" || node.outputState?.stale === true) return undefined;
   const effectiveOutput = node.outputState?.versions.find((version) => version.id === node.outputState?.effectiveVersionId)?.output ?? node.output;
   if (!isRecord(effectiveOutput)) return undefined;
   const report = isRecord(effectiveOutput.report) ? effectiveOutput.report : effectiveOutput;
@@ -2292,7 +2356,7 @@ function formatClock(value: string): string {
 
 function runStateMessage(run: StudioRunDetail): string {
   if (run.status === "succeeded") {
-    return "制作已完成，发布包可以下载使用。这里表示内部交付完成，外部平台发布仍需你自行操作。";
+    return "制作流程已完成。下方分别列出可用交付；机器审片覆盖、原请求与费用状态仍独立保留。";
   }
   if (run.status === "rejected") {
     const humanDecision = run.decisions.at(-1);

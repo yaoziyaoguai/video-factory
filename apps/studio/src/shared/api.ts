@@ -1021,6 +1021,8 @@ export interface StudioRunArchiveInput {
 }
 
 export interface StudioRunDetail extends StudioRunSummary {
+  /** 系列定版后的修改沿用原 run；不能通过普通新建返工重复占用单集。 */
+  seriesRework?: { mode: "edit_current" | "blocked"; reason?: string };
   revision: number;
   /** 当前有效brief的服务端投影，声音调整不由客户端重算身份。 */
   durationIntent?: Pick<StudioCreativeDuration, "policy" | "briefSha256" | "referenceSeconds" | "commitment">;
