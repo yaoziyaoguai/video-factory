@@ -1257,6 +1257,20 @@ body:has(.studio-v3) {
 .studio-v3 .cost-run-table > a :is(strong, small),
 .studio-v3 .cost-line-list :is(strong, b, small) { font-size: 11px; }
 
+.studio-v3 .series-roadmap-operation,
+.studio-v3 .planning-cost-operations { margin: 16px 0; padding: 16px; border: 1px solid var(--line); background: var(--paper); }
+.studio-v3 .series-roadmap-operation :is(h3, h4),
+.studio-v3 .planning-cost-operations :is(h3, h4) { margin: 0 0 10px; }
+.studio-v3 .series-roadmap-operation p,
+.studio-v3 .planning-cost-operations p,
+.studio-v3 .model-execution-details { font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+.studio-v3 .series-roadmap-operation summary,
+.studio-v3 .model-execution-details summary { cursor: pointer; padding: 10px 0; font-weight: 600; }
+.studio-v3 .series-recovery-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.studio-v3 .model-execution-details article,
+.studio-v3 .planning-cost-operations > article { border-top: 1px solid var(--line); padding: 12px 0; min-width: 0; }
+.studio-v3 .model-execution-details code { overflow-wrap: anywhere; white-space: normal; }
+
 .studio-v3 .cost-call-details {
   margin-top: 14px;
   border-top: 1px solid var(--line);

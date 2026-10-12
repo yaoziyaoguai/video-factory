@@ -26,6 +26,20 @@ const series: SeriesRecord = {
 };
 
 describe("SeriesPlanner", () => {
+  it("keeps pillar drafts grounded without inventing an experiment or outcome", () => {
+    const planner = new SeriesPlanner();
+    for (const category of ["lifestyle", "technology"] as const) {
+      const input = { ...series, category, name: "日常观察", premise: "记录事物缓慢变化", pillars: ["窗边光影", "沿河散步"], visualStyle: "无人空镜" };
+      const drafts = planner.planEpisodes(input, 2);
+      assert.equal(drafts[0]?.pillar, "窗边光影");
+      assert.equal(drafts[1]?.pillar, "沿河散步");
+      assert.doesNotMatch(JSON.stringify(drafts), /真实任务实验|最省钱|三步清单|直接验证/);
+      assert.match(drafts[0]!.payoff, /待.*确认/);
+      assert.equal(planner.plan({ ...input, episodes: drafts })[1]?.seriesSequence?.status, "blocked");
+    }
+    assert.match(planner.planEpisodes({ ...series, pillars: [] }, 1)[0]!.title, /待策划/);
+  });
+
   it("unlocks the next episode after an internal master with no new canon facts", () => {
     const planner = new SeriesPlanner();
     const episodes = planner.planEpisodes(series, 3);

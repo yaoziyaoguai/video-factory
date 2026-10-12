@@ -6,3 +6,4 @@ process.once('message', async ({workspace, run}) => {
   catch(e){process.send({type:'done',error:e.message});}
   process.disconnect();
 });
+process.send({type:'ready'});

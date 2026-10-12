@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { modelAttemptUsage, summarizeModelAttemptUsage, type ModelAttemptUsage } from "@video-factory/production-pipeline/model-attempt-usage";
 import { Agent, fetch as undiciFetch, type Dispatcher } from "undici";
 import { validateAudioReviewReport } from "@video-factory/production-pipeline/audio-review";
 import type { ModelConnectionInput } from "@video-factory/production-pipeline/model-connection";
@@ -231,12 +233,14 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
     let responseHeadersReceived = false;
     let modelAttemptCount = 0;
     let structuredRepairCount = 0;
+    const modelAttempts: ModelAttemptUsage[] = [];
 
     try {
       let activePrompt = prompt;
       let repairBaseline: unknown;
       for (let requestAttempt = 1; ; requestAttempt += 1) {
       modelAttemptCount = requestAttempt;
+      modelAttempts.push({ attempt: requestAttempt, usage: null });
       const configured = this.configuredModel
         ? configuredModelRequest(this.configuredModel.connection, activePrompt, images, task.kind === "audio-review" ? task.payload.audio : undefined)
         : undefined;
@@ -343,6 +347,7 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
         ...requestIdDiagnostics,
         ...envelope.diagnostics,
       };
+      modelAttempts[requestAttempt - 1] = modelAttemptUsage(requestAttempt, responseDiagnostics);
       if (envelope.diagnostics.finishReason === "length") {
         throw new CodexExecutorError(
           `${label} Chat Completion reached its output limit before completing the result.`,
@@ -383,7 +388,8 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
         // 输出根本不是 JSON 与"JSON 合规但违反 schema"是可修的同一类事：模型这轮话说了、
         // 只是形态不合合同。过去只有后者给修复轮，前者直接判终局，于是"模型写了段散文再跟一个
         // JSON"这种最常见的可修故障一次都不修就烧掉整轮（实测 topic-ideas 两个候选因此全灭）。
-        if (requestAttempt === 1
+        // 审计例外：无可解析的基线就无法保护原判断，不能让修复轮重新补造评估。
+        if (task.kind !== "role-audit" && requestAttempt === 1
           && Buffer.byteLength(output, "utf8") <= MAX_CONTRACT_REPAIR_OUTPUT_BYTES) {
           activePrompt = invalidJsonRepairPrompt(prompt, output);
           structuredRepairCount = 1;
@@ -510,6 +516,7 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
           modelAttemptCount: requestAttempt,
           structuredRepairCount,
           ...responseDiagnostics,
+          ...summarizeModelAttemptUsage(modelAttempts),
         },
       };
       }
@@ -518,6 +525,11 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
         if (error.details) {
           error.details.modelAttemptCount = modelAttemptCount;
           error.details.structuredRepairCount = structuredRepairCount;
+          // 某些流读取错误携带已返回的usage，须在抛出前归入当前尝试。
+          if (modelAttemptCount && modelAttempts[modelAttemptCount - 1]?.usage === null) {
+            modelAttempts[modelAttemptCount - 1] = modelAttemptUsage(modelAttemptCount, error.details);
+          }
+          Object.assign(error.details, summarizeModelAttemptUsage(modelAttempts));
         }
         throw error;
       }
@@ -545,6 +557,7 @@ export class ChatCompletionsExecutor implements BrokerTaskExecutor {
             remoteQueryable: false,
             modelAttemptCount,
             structuredRepairCount,
+            ...summarizeModelAttemptUsage(modelAttempts),
           },
           outcomeUncertain: !definitelyNotAccepted,
         },
@@ -623,7 +636,7 @@ function contractRepairPreservesSemantics(kind: BrokerTaskKind, before: unknown,
     return JSON.stringify(protectedVisualReviewContent(before)) === JSON.stringify(protectedVisualReviewContent(after));
   }
   if (kind === "role-audit") {
-    return JSON.stringify(protectedRoleAuditContent(before)) === JSON.stringify(protectedRoleAuditContent(after));
+    return roleAuditRepairPreservesContent(before, after, modelOutputSchemaFor("role-audit"));
   }
   if (kind === "creative-treatment") {
     return creativeTreatmentRepairPreservesSemantics(before, after);
@@ -703,24 +716,23 @@ function protectedVisualReviewContent(value: unknown): unknown {
   };
 }
 
-function protectedRoleAuditContent(value: unknown): unknown {
-  if (!isRecord(value)) return value;
-  return {
-    version: value.version,
-    verdict: value.verdict,
-    score: value.score,
-    summary: value.summary,
-    issues: Array.isArray(value.issues) ? value.issues.map((issue) => {
-      if (!isRecord(issue)) return issue;
-      return {
-        severity: issue.severity,
-        criterion: issue.criterion,
-        evidence: issue.evidence,
-        repairInstruction: issue.repairInstruction,
-      };
-    }) : value.issues,
-    repairInstructions: value.repairInstructions,
-  };
+// 直接消费输出schema：新增内容字段自动受保护；只有const固定值可在缺失时补齐。
+// 不允许把缺失的评分、证据或建议伪装成结构修复，也不冻结schema之外可删除的字段。
+function roleAuditRepairPreservesContent(before: unknown, after: unknown, schema: unknown): boolean {
+  if (!isRecord(schema)) return isDeepStrictEqual(before, after);
+  if (before === undefined) return Object.hasOwn(schema, "const") && isDeepStrictEqual(after, schema.const);
+  if (Array.isArray(before)) {
+    return Array.isArray(after) && before.length === after.length
+      && before.every((item, index) => roleAuditRepairPreservesContent(item, after[index], schema.items));
+  }
+  if (isRecord(before) && isRecord(schema.properties)) {
+    if (!isRecord(after)) return false;
+    return Object.entries(schema.properties).every(([field, child]) => {
+      if (!Object.hasOwn(before, field) && !Object.hasOwn(after, field)) return true;
+      return roleAuditRepairPreservesContent(before[field], after[field], child);
+    });
+  }
+  return isDeepStrictEqual(before, after);
 }
 
 function networkFailureFor(

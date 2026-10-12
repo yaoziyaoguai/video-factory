@@ -74,6 +74,7 @@ COPY --from=builder /app/apps/codex-broker/dist apps/codex-broker/dist
 COPY --from=production-dependencies /app/node_modules/undici apps/codex-broker/node_modules/undici
 COPY packages/production-pipeline/package.json apps/codex-broker/node_modules/@video-factory/production-pipeline/package.json
 COPY --from=builder /app/packages/production-pipeline/dist/model-connection.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/model-connection.js
+COPY --from=builder /app/packages/production-pipeline/dist/model-attempt-usage.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/model-attempt-usage.js
 COPY --from=builder /app/packages/production-pipeline/dist/audio-review.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/audio-review.js
 COPY --from=builder /app/packages/production-pipeline/dist/diagnostics.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/diagnostics.js
 COPY --from=builder /app/packages/production-pipeline/dist/visual-evidence-boundary.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/visual-evidence-boundary.js

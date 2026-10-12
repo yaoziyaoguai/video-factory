@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { parseModelAttempts, summarizeModelAttemptUsage, type ModelAttemptUsage, type ModelTokenUsage } from "./model-attempt-usage.js";
 import { roleAgentCheckpointRequestPhases } from "./role-agent-checkpoint.js";
 
 type RecordValue = Record<string, unknown>;
@@ -17,6 +19,9 @@ export interface ModelExecutionFact {
   state: ModelRequestState;
   accepted: boolean | null;
   modelAttemptCount: number | null;
+  modelAttempts?: ModelAttemptUsage[];
+  usage?: ModelTokenUsage;
+  usageComplete?: boolean;
   evidenceSources: string[];
   checkpointKeys: string[];
   startedAt?: string;
@@ -51,6 +56,7 @@ export function projectRequestExecution(input: {
     ...(input.cycle !== undefined ? { cycle: input.cycle } : {}),
     state: hashMismatch ? "unknown" : input.state, accepted: hashMismatch ? null : accepted,
     modelAttemptCount: hashMismatch ? null : accepted === false ? 0 : count(trace.modelAttemptCount),
+    ...(!hashMismatch ? usageProjection(trace) : { usageComplete: false }),
     providerMs: count(trace.providerWaitMs), queueMs: count(trace.queueWaitMs),
     evidenceSources: [input.evidenceSource], checkpointKeys: input.checkpointKey ? [input.checkpointKey] : [],
     ...(validTime(input.startedAt) ? { startedAt: input.startedAt } : {}),
@@ -83,10 +89,15 @@ export function projectCheckpointExecutions(nodeId: string, checkpoint: RecordVa
     const failureHash = details.brokerRequestIdHash ?? (details.requestIdHash === hash(requestId) ? details.requestIdHash : undefined);
     const failed = failureHash === hash(requestId)
       || isPending && failureHash === undefined;
-    let state: ModelRequestState = trace ? "completed" : "unknown";
-    if (!trace && failed && failure.stage === "not_accepted" && details.accepted !== true) state = "not_accepted";
-    else if (!trace && failed && failure.stage === "completed_failure") state = "completed_failure";
-    else if (!trace && isPending) {
+    const saved = record(record(checkpoint.requestExecutions)[requestId]);
+    const savedState = ["completed", "completed_failure", "not_accepted", "unknown"].includes(string(saved.state))
+      ? saved.state as ModelRequestState : undefined;
+    const savedTerminal = savedState !== undefined && isTerminal(savedState);
+    let state: ModelRequestState = trace ? "completed" : savedState ?? "unknown";
+    // 整体失败可能来自后一个备用服务；它不能覆盖原请求已经保存的终态与用量。
+    if (!trace && !savedTerminal && failed && failure.stage === "not_accepted" && details.accepted !== true) state = "not_accepted";
+    else if (!trace && !savedTerminal && failed && failure.stage === "completed_failure") state = "completed_failure";
+    else if (!trace && !savedTerminal && isPending) {
       if (failure.stage === "uncertain" || ["accepted", "running", "accepted_unknown"].includes(string(pending.taskFact))) state = "accepted_unknown";
       else if (pending.taskFact === "not_submitted") state = "prepared";
     }
@@ -94,7 +105,7 @@ export function projectCheckpointExecutions(nodeId: string, checkpoint: RecordVa
       evidenceSource: source, checkpointKey: string(checkpoint.storageKey) || string(checkpoint.key),
       ...(string(owners[requestId]) ? { operationId: string(owners[requestId]) } : {}),
       ...(count(checkpoint.cycle) !== null ? { cycle: count(checkpoint.cycle)! } : {}),
-      trace: trace ?? (failed ? details : undefined), binding: isPending ? pending.brokerBinding : undefined,
+      trace: trace ?? (savedTerminal ? saved.trace : failed ? details : savedState ? saved.trace : undefined), binding: isPending ? pending.brokerBinding : undefined,
     });
   });
   const batch = record(checkpoint.assetRankBatch);
@@ -109,7 +120,22 @@ export function mergeModelExecutionFacts(facts: readonly ModelExecutionFact[]): 
   for (const fact of facts) {
     const previous = merged.get(fact.executionKey);
     if (!previous) { merged.set(fact.executionKey, structuredClone(fact)); continue; }
-    const conflict = previous.conflict || fact.conflict || previous.nodeId !== fact.nodeId
+    const attempts = new Map<number, ModelAttemptUsage>();
+    let usageConflict = false;
+    for (const item of [...previous.modelAttempts ?? [], ...fact.modelAttempts ?? []]) {
+      const earlier = attempts.get(item.attempt);
+      if (!earlier) { attempts.set(item.attempt, structuredClone(item)); continue; }
+      if (earlier.requestIdHash && item.requestIdHash && earlier.requestIdHash !== item.requestIdHash) usageConflict = true;
+      for (const [field, value] of Object.entries(item.usage ?? {})) {
+        const existing = earlier.usage?.[field as keyof ModelTokenUsage];
+        if (existing !== undefined && !isDeepStrictEqual(existing, value)) usageConflict = true;
+      }
+      attempts.set(item.attempt, { ...item, ...earlier,
+        usage: earlier.usage || item.usage ? { ...item.usage, ...earlier.usage } : null });
+    }
+    const attemptCount = maxKnown(previous.modelAttemptCount, fact.modelAttemptCount);
+    const usageEvidence = usageProjection({ modelAttempts: attempts.size ? [...attempts.values()].sort((a, b) => a.attempt - b.attempt) : undefined, modelAttemptCount: attemptCount });
+    const conflict = usageConflict || previous.conflict || fact.conflict || previous.nodeId !== fact.nodeId
       || previous.modelId !== "unknown" && fact.modelId !== "unknown" && previous.modelId !== fact.modelId
       || previous.accepted !== null && fact.accepted !== null && previous.accepted !== fact.accepted
       || isTerminal(previous.state) && isTerminal(fact.state) && previous.state !== fact.state;
@@ -119,6 +145,10 @@ export function mergeModelExecutionFacts(facts: readonly ModelExecutionFact[]): 
       ...preferred,
       accepted: preferred.accepted ?? previous.accepted ?? fact.accepted,
       modelAttemptCount: maxKnown(previous.modelAttemptCount, fact.modelAttemptCount),
+      ...(usageEvidence.modelAttempts ? { modelAttempts: structuredClone(usageEvidence.modelAttempts) } : {}),
+      ...(usageEvidence.usage ? { usage: { ...usageEvidence.usage } } : {}),
+      usageComplete: !conflict && usageEvidence.usageComplete === true
+        && usageEvidence.modelAttempts?.length === maxKnown(previous.modelAttemptCount, fact.modelAttemptCount),
       providerMs: maxKnown(previous.providerMs, fact.providerMs), queueMs: maxKnown(previous.queueMs, fact.queueMs),
       evidenceSources: [...new Set([...previous.evidenceSources, ...fact.evidenceSources])],
       checkpointKeys: [...new Set([...previous.checkpointKeys, ...fact.checkpointKeys])],
@@ -153,6 +183,17 @@ export function summarizeModelExecutionFacts(
     cumulativeRequestMs: intervals.length === verified.length ? intervals.reduce((sum, [start, end]) => sum + end - start, 0) : null,
     requestWallUnionMs: intervals.length === verified.length ? unionDuration(intervals) : null,
   };
+}
+
+function usageProjection(trace: RecordValue): Pick<ModelExecutionFact, "modelAttempts" | "usage" | "usageComplete" | "conflict"> {
+  try {
+    const attempts = parseModelAttempts(trace.modelAttempts);
+    if (!attempts) return { usageComplete: false };
+    const { modelAttempts, usageComplete, ...usage } = summarizeModelAttemptUsage(attempts, count(trace.modelAttemptCount) ?? -1);
+    return { modelAttempts, usage, usageComplete };
+  } catch {
+    return { usageComplete: false, conflict: true };
+  }
 }
 
 function unionDuration(intervals: Array<[number, number]>): number {

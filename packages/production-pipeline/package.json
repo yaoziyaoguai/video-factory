@@ -26,6 +26,10 @@
       "types": "./dist/model-connection.d.ts",
       "import": "./dist/model-connection.js"
     },
+    "./model-attempt-usage": {
+      "types": "./dist/model-attempt-usage.d.ts",
+      "import": "./dist/model-attempt-usage.js"
+    },
     "./audio-review": {
       "types": "./dist/audio-review.d.ts",
       "import": "./dist/audio-review.js"

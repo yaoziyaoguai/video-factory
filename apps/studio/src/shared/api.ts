@@ -611,7 +611,7 @@ export interface StudioSeriesEpisodePlanning {
   role: string;
   auditRole: string;
   // awaiting_user：自动复核跑完但没判通过，结论与建议留在记录里等用户裁决。
-  auditStatus: "passed" | "awaiting_user" | "fallback" | "human_override" | "stale" | "not_audited";
+  auditStatus: "passed" | "awaiting_user" | "fallback" | "human_override" | "stale" | "not_audited" | "failed" | "unknown";
   auditIterations: number;
   auditScore?: number;
   auditSummary?: string;
@@ -725,8 +725,28 @@ export interface StudioSeriesProductionContext {
   productionReservationId?: string;
 }
 
+export interface StudioPlanningOperation {
+  id: string;
+  owner: { kind: "series" | "topic" | "unassigned"; id: string; title: string };
+  action: "generate" | "audit" | "revise" | "unknown";
+  evidenceIssue?: string;
+  baseRevision?: number;
+  episodeNumber?: number;
+  state: string;
+  executionFacts: import("@video-factory/production-pipeline").ModelExecutionFact[];
+}
+
+export interface StudioSeriesRoadmapOperation extends StudioPlanningOperation {
+  canQuery?: boolean;
+  auditStatus: "passed" | "awaiting_user" | "failed" | "unknown" | "not_audited";
+  message: string;
+  candidate?: Array<Pick<StudioSeriesEpisode, "episodeNumber" | "pillar" | "title" | "viewerPromise" | "hook" | "payoff"> & { fromPrevious: string[]; toNext: string[] }>;
+  canRetrieve: boolean;
+}
+
 export interface StudioSeries {
   id: string;
+  roadmapOperations?: StudioSeriesRoadmapOperation[];
   name: string;
   premise: string;
   audience: string;
@@ -2145,6 +2165,7 @@ export interface StudioCostDashboard {
   byProvider: Array<StudioCostGroup & { providerId: string }>;
   byNode: Array<StudioCostGroup & { nodeId: string }>;
   runs: StudioCostRunSummary[];
+  planningOperations?: StudioPlanningOperation[];
 }
 
 export interface StudioCostRunDetail extends StudioCostRunSummary {

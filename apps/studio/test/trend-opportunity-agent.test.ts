@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { readPlanningCheckpoints } from "../src/server/planning-operations.js";
 import { CodexBridgeClient, ModelCandidatesExhaustedError, type CodexTaskExecution, type CodexTaskKind } from "@video-factory/production-pipeline";
 import {
   CodexTopicIdeaModel,
@@ -1785,6 +1789,21 @@ describe("CodexTopicIdeaModel.reviseCandidate", () => {
     assert.equal(payload.revision?.instruction, "标题给出通勤者可以执行的信息核对动作。");
     assert.equal(payload.revision?.candidate?.id, "trend-abc123");
     assert.equal(payload.signals[0]!.id, "trend-weather", "revision stays bound to the candidate's own signal");
+  });
+
+  it("keeps topic revision ownership and request identity across replay", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "topic-operation-"));
+    const client = new CapturingCodexClient(() => ({ ideas: [revisedIdea] }));
+    const input = { candidate: candidateForRevision, instruction: "改标题" };
+    try {
+      await new CodexTopicIdeaModel(client, directory).reviseCandidate(input);
+      const records = await readPlanningCheckpoints(directory);
+      assert.equal(records.length, 1);
+      assert.equal(records[0]!.owner.id, "trend-abc123");
+      assert.equal(records[0]!.operation.executionFacts.length, 1);
+      await new CodexTopicIdeaModel(client, directory).reviseCandidate(input);
+      assert.equal(client.calls.length, 1);
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
   it("rejects blank instructions and drifted signal bindings before publishing a revision", async () => {

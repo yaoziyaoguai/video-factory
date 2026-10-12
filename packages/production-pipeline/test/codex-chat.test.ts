@@ -197,6 +197,7 @@ describe("CodexBridgeClient", () => {
           ...trace,
           requestPayloadBytes: Buffer.byteLength(JSON.stringify({ brief: {} })),
           promptBytes: Buffer.byteLength(trace.prompt),
+          usageComplete: false,
         },
       });
     } finally {
@@ -561,6 +562,7 @@ describe("CodexBridgeClient", () => {
           completionTokens: 65_536,
           totalTokens: 67_536,
           reasoningTokens: 61_000,
+          usageComplete: false,
         });
         assert.doesNotMatch(error.creatorMessage, /Agent|Codex bridge|host-only broker|socket/i);
         return true;

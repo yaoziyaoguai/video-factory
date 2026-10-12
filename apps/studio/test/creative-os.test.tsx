@@ -755,7 +755,138 @@ describe("Creative OS", () => {
       visualStyle: "",
     }));
     expect(await screen.findByRole("option", { name: /AI 下班实验室/ })).toBeInTheDocument();
-    await waitFor(() => expect(generate).toHaveBeenCalledWith("series-1"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "创建系列" })).not.toBeInTheDocument());
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("starts generation once only after the explicit roadmap action", async () => {
+    const user = userEvent.setup();
+    const saved = seriesPublicAffairs();
+    saved.episodes.forEach((episode) => { episode.planning.source = "rules"; episode.planning.auditStatus = "fallback"; });
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([saved]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    let resolve!: (series: StudioSeries) => void;
+    const generate = vi.spyOn(studioApi, "generateSeriesRoadmap").mockReturnValue(new Promise((done) => { resolve = done; }));
+    render(<MemoryRouter initialEntries={["/topics?mode=series"]}><TodayPage /></MemoryRouter>);
+    const button = await screen.findByRole("button", { name: "生成并审计路线图" });
+    expect(generate).not.toHaveBeenCalled();
+    await user.click(button);
+    expect(button).toBeDisabled();
+    await user.click(button);
+    expect(generate).toHaveBeenCalledTimes(1);
+    resolve(saved);
+    await waitFor(() => expect(button).not.toBeDisabled());
+  });
+
+  it("clears the saved-only notice before a failed explicit generation", async () => {
+    const user = userEvent.setup();
+    const saved = seriesPublicAffairs();
+    saved.episodes.forEach((episode) => { episode.planning.source = "rules"; episode.planning.auditStatus = "fallback"; });
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValueOnce([]).mockResolvedValue([saved]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    vi.spyOn(studioApi, "createSeries").mockResolvedValue(saved);
+    const generate = vi.spyOn(studioApi, "generateSeriesRoadmap").mockRejectedValue(new Error("独立审计失败"));
+    render(<MemoryRouter initialEntries={["/topics?mode=series"]}><TodayPage /></MemoryRouter>);
+    await user.click(await screen.findByRole("button", { name: "新建系列" }));
+    await user.type(screen.getByLabelText("系列名称"), saved.name);
+    await user.type(screen.getByLabelText("系列承诺"), saved.premise);
+    await user.type(screen.getByLabelText("目标受众"), saved.audience);
+    await user.click(screen.getByRole("button", { name: "创建系列" }));
+    expect(await screen.findByText(/系列已保存，尚未调用模型/)).toBeInTheDocument();
+    expect(generate).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "生成并审计路线图" }));
+    expect(await screen.findByText(/路线图操作未全部完成：独立审计失败/)).toBeInTheDocument();
+    expect(screen.queryByText(/系列已保存，尚未调用模型/)).not.toBeInTheDocument();
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows saved roadmap candidates and retrieves without regenerating or adopting", async () => {
+    const user = userEvent.setup();
+    const saved = seriesPublicAffairs();
+    saved.episodes.forEach((episode) => { episode.planning.source = "rules"; episode.planning.auditStatus = "fallback"; });
+    saved.roadmapOperations = [{
+      id: "a".repeat(64), owner: { kind: "series", id: saved.id, title: saved.name }, action: "generate",
+      baseRevision: saved.revision, state: "failed", auditStatus: "failed", canRetrieve: true,
+      message: "候选已保存；独立审计未完成。", executionFacts: [],
+      candidate: [{ episodeNumber: 1, pillar: saved.pillars[0]!, title: "取回的模型候选", viewerPromise: "可独立兑现的观察", hook: "看这个细节", payoff: "看见完整变化", fromPrevious: [], toNext: [] }],
+    }];
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([saved]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    const generate = vi.spyOn(studioApi, "generateSeriesRoadmap");
+    const adopt = vi.spyOn(studioApi, "adoptCandidate");
+    const retrieved = structuredClone(saved);
+    retrieved.revision += 1;
+    retrieved.roadmapOperations![0]!.canRetrieve = false;
+    retrieved.episodes[0]!.title = "取回的模型候选";
+    retrieved.episodes[0]!.planning = { ...retrieved.episodes[0]!.planning, source: "agent", auditStatus: "failed" };
+    const recover = vi.spyOn(studioApi, "recoverSeriesRoadmap").mockResolvedValue(retrieved);
+    render(<MemoryRouter initialEntries={["/topics?mode=series"]}><TodayPage /></MemoryRouter>);
+    await user.click(await screen.findByText("查看原候选（1 集）"));
+    expect(screen.getByText("可独立兑现的观察")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "生成并审计路线图" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "取回为待采用草稿" }));
+    await waitFor(() => expect(recover).toHaveBeenCalledWith(saved.id, "a".repeat(64), "retrieve"));
+    expect(await screen.findByRole("button", { name: "取回为待采用草稿" })).toBeDisabled();
+    expect(generate).not.toHaveBeenCalled();
+    expect(adopt).not.toHaveBeenCalled();
+  });
+
+  it("keeps historical candidates read-only when the original revision is missing", async () => {
+    const user = userEvent.setup();
+    const saved = seriesPublicAffairs();
+    saved.episodes.forEach((episode) => { episode.planning.source = "rules"; });
+    saved.roadmapOperations = [{
+      id: "b".repeat(64), owner: { kind: "series", id: saved.id, title: saved.name }, action: "generate",
+      state: "failed", auditStatus: "failed", canRetrieve: false, canQuery: true, executionFacts: [],
+      message: "独立审计失败，已生成的候选保留。",
+      evidenceIssue: "已按原请求输入核对系列归属；未保存原始版本，候选仅供查看，不覆盖当前稿。",
+      candidate: [{ episodeNumber: 1, pillar: saved.pillars[0]!, title: "历史模型候选", viewerPromise: "原来的承诺", hook: "原来的开场", payoff: "原来的兑现", fromPrevious: [], toNext: [] }],
+    }];
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([saved]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    const recover = vi.spyOn(studioApi, "recoverSeriesRoadmap").mockResolvedValue(saved);
+    render(<MemoryRouter initialEntries={["/topics?mode=series"]}><TodayPage /></MemoryRouter>);
+    await user.click(await screen.findByText("查看原候选（1 集）"));
+    expect(screen.getByText("原来的承诺")).toBeInTheDocument();
+    expect(screen.getByText(/未保存原始版本/)).toBeInTheDocument();
+    expect(screen.queryByText("当前路线图已修改或采用，原候选仅供查看。")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "取回为待采用草稿" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "生成并审计路线图" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查询原请求" }));
+    await waitFor(() => expect(recover).toHaveBeenCalledWith(saved.id, "b".repeat(64), "query"));
+  });
+
+  it("shows an unassigned historical request as a generation blocker without attaching its candidate", async () => {
+    const saved = seriesPublicAffairs();
+    saved.episodes.forEach((episode) => { episode.planning.source = "rules"; });
+    saved.roadmapOperations = [{ id: "c".repeat(64), owner: { kind: "unassigned", id: "c".repeat(64), title: "归属待核" },
+      action: "unknown", state: "unknown", auditStatus: "unknown", canRetrieve: false, canQuery: false, executionFacts: [],
+      message: "存在无法核对业务归属的历史系列请求，已暂停模型生成，避免重复调用。", evidenceIssue: "原请求证据不完整。",
+    }];
+    vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "runs").mockResolvedValue([]);
+    vi.spyOn(studioApi, "series").mockResolvedValue([saved]);
+    vi.spyOn(studioApi, "candidateInbox").mockResolvedValue(inbox([]));
+    render(<MemoryRouter initialEntries={["/topics?mode=series"]}><TodayPage /></MemoryRouter>);
+    expect(await screen.findByRole("heading", { name: "历史系列请求待核" })).toBeInTheDocument();
+    expect(screen.getByText(/已暂停模型生成/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查询原请求" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "取回为待采用草稿" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "生成并审计路线图" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/查看原候选/)).not.toBeInTheDocument();
   });
 
   it("preserves explicitly supplied series directions rather than replacing them with defaults", async () => {

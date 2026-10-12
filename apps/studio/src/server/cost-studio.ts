@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { summarizeModelExecutionFacts, type ModelExecutionProjection } from "@video-factory/production-pipeline";
+import { mergeModelExecutionFacts, summarizeModelExecutionFacts, type ModelExecutionProjection } from "@video-factory/production-pipeline";
 import type {
   StudioBillingType,
   StudioCostDashboard,
@@ -7,6 +7,7 @@ import type {
   StudioCostLine,
   StudioCostRunDetail,
   StudioCostTotals,
+  StudioPlanningOperation,
 } from "../shared/api.js";
 
 interface CostRunSource {
@@ -40,17 +41,39 @@ export class CostStudio {
     private readonly readPaidReceipts?: (runId: string) => Promise<unknown[]>,
     private readonly readDocumentReceipts?: (runId: string) => Promise<unknown[]>,
     private readonly readExecutionFacts?: (runId: string) => Promise<ModelExecutionProjection>,
+    private readonly readPlanningOperations?: () => Promise<StudioPlanningOperation[]>,
   ) {}
 
   async dashboard(): Promise<StudioCostDashboard> {
     const details = await Promise.all((await this.listRuns()).map((run) => this.detail(run)));
     const lines = details.flatMap((detail) => detail.lines);
+    const planningOperations = await this.readPlanningOperations?.() ?? [];
+    const runKeys = new Set(details.flatMap((detail) => detail.executionFacts?.map((fact) => fact.executionKey) ?? []));
+    const planningFacts = mergeModelExecutionFacts(planningOperations.flatMap((operation) => operation.executionFacts))
+      .filter((fact) => !runKeys.has(fact.executionKey));
+    const planningTotals = summarizeModelExecutionFacts(planningFacts, planningOperations.flatMap((operation) => operation.evidenceIssue ? [operation.evidenceIssue] : []));
+    const totalsByRun = aggregateExecutionTotals(details.map((detail) => detail.totals));
+    const pending = planningFacts.filter((fact) => fact.accepted !== false && fact.state !== "prepared").length;
+    const cash = totals(lines);
     return {
       currency: "CNY",
-      totals: { ...totals(lines), ...aggregateExecutionTotals(details.map((detail) => detail.totals)) },
-      byProvider: group(lines, (line) => line.providerId).map((item) => ({ ...item, providerId: item.id })),
-      byNode: group(lines, (line) => line.nodeId).map((item) => ({ ...item, nodeId: item.id })),
+      totals: { ...cash, ...totalsByRun,
+        actualPendingCount: cash.actualPendingCount + pending,
+        ...(planningFacts.length || cash.unverifiedModelCalls !== undefined
+          ? { unverifiedModelCalls: (cash.unverifiedModelCalls ?? 0) + planningTotals.verifiedModelAttempts } : {}),
+        cumulativeProviderMs: addKnown(totalsByRun.cumulativeProviderMs, planningTotals.cumulativeProviderMs),
+        cumulativeQueueMs: addKnown(totalsByRun.cumulativeQueueMs, planningTotals.cumulativeQueueMs),
+        cumulativeRequestMs: addKnown(totalsByRun.cumulativeRequestMs, planningTotals.cumulativeRequestMs),
+        ...(planningFacts.length ? { newBrokerRequestsThisAttempt: null, newModelAttemptsThisAttempt: null } : {}),
+        verifiedBrokerRequests: (totalsByRun.verifiedBrokerRequests ?? 0) + planningTotals.verifiedBrokerRequests,
+        verifiedModelAttempts: (totalsByRun.verifiedModelAttempts ?? 0) + planningTotals.verifiedModelAttempts,
+        countExact: totalsByRun.countExact === true && planningTotals.countExact,
+        countConflicts: (totalsByRun.countConflicts ?? 0) + planningTotals.countConflicts,
+      },
+      byProvider: planningGroups(group(lines, (line) => line.providerId), planningFacts, "providerId").map((item) => ({ ...item, providerId: item.id })),
+      byNode: planningGroups(group(lines, (line) => line.nodeId), planningFacts, "nodeId").map((item) => ({ ...item, nodeId: item.id })),
       runs: details.map(({ lines: _lines, ...summary }) => summary),
+      planningOperations,
     };
   }
 
@@ -84,6 +107,22 @@ export class CostStudio {
     }
     return { ...detail, totals: totals(detail.lines) };
   }
+}
+
+const addKnown = (left: number | null | undefined, right: number | null) =>
+  typeof left === "number" && right !== null ? left + right : null;
+
+function planningGroups(groups: StudioCostGroup[], facts: ModelExecutionProjection["facts"], field: "providerId" | "nodeId"): StudioCostGroup[] {
+  const result = new Map(groups.map((item) => [item.id, { ...item }]));
+  for (const fact of facts) {
+    if (fact.accepted === false || fact.state === "prepared") continue;
+    const id = fact[field];
+    const group = result.get(id) ?? { id, label: id, calls: 0, actualCostCny: 0, estimatedCostCny: 0, actualPendingCount: 0 };
+    group.calls += fact.conflict ? 0 : fact.modelAttemptCount ?? 0;
+    group.actualPendingCount += 1;
+    result.set(id, group);
+  }
+  return [...result.values()];
 }
 
 function runTiming(run: CostRunSource): NonNullable<StudioCostRunDetail["timing"]> {

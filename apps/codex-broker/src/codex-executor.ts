@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { modelAttemptUsage, summarizeModelAttemptUsage, type ModelAttemptUsage, type ModelTokenUsage } from "@video-factory/production-pipeline/model-attempt-usage";
 import { parseDurationBounds, validateContentLedDurationIntent, type DurationIntent } from "@video-factory/production-pipeline/executable-timeline";
 import {
   BROKER_TASK_INPUT_CONTRACTS,
@@ -218,6 +219,8 @@ export type CodexExecutorFailureCategory =
   | "execution_failed";
 
 export interface CodexExecutorFailureDetails {
+  modelAttempts?: ModelAttemptUsage[];
+  usageComplete?: boolean;
   category: CodexExecutorFailureCategory;
   reasonCode: string;
   providerId: string;
@@ -609,6 +612,8 @@ export function modelIdForTask(identity: CodexExecutorIdentity, task: ValidatedT
 }
 
 export interface CodexTaskTrace {
+  modelAttempts?: ModelAttemptUsage[];
+  usageComplete?: boolean;
   taskKind: BrokerTaskKind;
   promptVersion: string;
   contractDigest?: string;
@@ -982,9 +987,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
     let activePrompt = initialPrompt;
     let totalProviderWaitMs = 0;
     let totalValidationMs = 0;
-    let totalPromptTokens = 0;
-    let totalCompletionTokens = 0;
-    let totalReasoningTokens = 0;
+    const modelAttempts: ModelAttemptUsage[] = [];
     let firstOutputEventMs: number | undefined;
     for (let modelAttempt = 1; modelAttempt <= 2; modelAttempt += 1) {
       const taskDir = await mkdtemp(path.join(this.workspaceRoot, "task-"));
@@ -997,6 +1000,8 @@ export class CodexExecutor implements BrokerTaskExecutor {
           if (error instanceof CodexExecutorError && error.details) {
             error.details.modelAttemptCount = modelAttempt;
             error.details.structuredRepairCount = modelAttempt - 1;
+            modelAttempts.push(modelAttemptUsage(modelAttempt, error.details));
+            Object.assign(error.details, summarizeModelAttemptUsage(modelAttempts));
           }
           throw error;
         }
@@ -1006,9 +1011,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
       totalProviderWaitMs += execution.providerWaitMs;
       totalValidationMs += execution.validationMs;
       firstOutputEventMs ??= execution.firstOutputEventMs;
-      totalPromptTokens += execution.promptTokens ?? 0;
-      totalCompletionTokens += execution.completionTokens ?? 0;
-      totalReasoningTokens += execution.reasoningTokens ?? 0;
+      modelAttempts.push(modelAttemptUsage(modelAttempt, execution));
 
       if (execution.validationFailure) {
         const canRepair = task.kind === "director-plan"
@@ -1030,6 +1033,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
                 modelId: model ?? this.identity.modelId,
                 modelAttemptCount: 1,
                 structuredRepairCount: 0,
+                ...summarizeModelAttemptUsage(modelAttempts),
               },
             });
           }
@@ -1049,6 +1053,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
               modelAttemptCount: modelAttempt,
               structuredRepairCount: modelAttempt - 1,
               providerWaitMs: totalProviderWaitMs,
+              ...summarizeModelAttemptUsage(modelAttempts),
             },
           },
         );
@@ -1068,10 +1073,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
           ...(firstOutputEventMs !== undefined ? { firstOutputEventMs } : {}),
           toolMs: 0,
           validationMs: totalValidationMs,
-          ...(totalPromptTokens > 0 ? { promptTokens: totalPromptTokens } : {}),
-          ...(totalCompletionTokens > 0 ? { completionTokens: totalCompletionTokens } : {}),
-          ...(totalPromptTokens + totalCompletionTokens > 0 ? { totalTokens: totalPromptTokens + totalCompletionTokens } : {}),
-          ...(totalReasoningTokens > 0 ? { reasoningTokens: totalReasoningTokens } : {}),
+          ...summarizeModelAttemptUsage(modelAttempts),
           modelAttemptCount: modelAttempt,
           structuredRepairCount: modelAttempt - 1,
         },
@@ -1135,6 +1137,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
       detached: true,
     });
     const providerStartedAt = this.now();
+    let usage: ModelTokenUsage = {};
     const failureDetails = (
       category: CodexExecutorFailureCategory,
       reasonCode: string,
@@ -1145,6 +1148,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
       providerId: this.identity.providerId,
       modelId: model ?? this.identity.modelId,
       providerWaitMs: elapsedMilliseconds(providerStartedAt, this.now()),
+      ...usage,
       ...extra,
     });
     let firstOutputAt: number | undefined;
@@ -1190,8 +1194,11 @@ export class CodexExecutor implements BrokerTaskExecutor {
       options.signal?.removeEventListener("abort", onAbort);
     }
     const providerFinishedAt = this.now();
+    usage = codexUsageFromJsonl(await stdoutPromise);
     if (cancelled) {
-      throw new CodexExecutorError("Codex task was cancelled because its client disconnected.", true);
+      throw new CodexExecutorError("Codex task was cancelled because its client disconnected.", true, {
+        details: failureDetails("execution_failed", "cancelled"),
+      });
     }
     if (timedOut) {
       throw new CodexExecutorError(`Codex task timed out after ${timeoutMs}ms.`, true, {
@@ -1247,6 +1254,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
         providerWaitMs: elapsedMilliseconds(providerStartedAt, providerFinishedAt),
         ...(firstOutputAt !== undefined ? { firstOutputEventMs: elapsedMilliseconds(providerStartedAt, firstOutputAt) } : {}),
         validationMs: elapsedMilliseconds(validationStartedAt, this.now()),
+        ...usage,
         validationFailure: { kind: "schema", message: schemaError, reasonCode: "task_schema" },
       };
     }
@@ -1258,6 +1266,7 @@ export class CodexExecutor implements BrokerTaskExecutor {
         providerWaitMs: elapsedMilliseconds(providerStartedAt, providerFinishedAt),
         ...(firstOutputAt !== undefined ? { firstOutputEventMs: elapsedMilliseconds(providerStartedAt, firstOutputAt) } : {}),
         validationMs: elapsedMilliseconds(validationStartedAt, this.now()),
+        ...usage,
         validationFailure: {
           kind: "semantics",
           message: semanticError,
@@ -1292,7 +1301,6 @@ export class CodexExecutor implements BrokerTaskExecutor {
     const sessionId = options.persistSession || options.sessionId
       ? codexSessionIdFromJsonl(stdout) ?? options.sessionId
       : undefined;
-    const usage = codexUsageFromJsonl(stdout);
     return {
       output,
       ...(sessionId ? { sessionId } : {}),

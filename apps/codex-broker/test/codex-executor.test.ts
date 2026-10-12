@@ -1625,7 +1625,8 @@ describe("CodexExecutor.runTask", () => {
         calls += 1;
         if (calls === 2) repairPrompt = Buffer.concat(child.stdinChunks).toString("utf8");
         await writeFile(lastMessagePath, JSON.stringify(calls === 1 ? invalid : repaired), "utf8");
-        child.stdout.end(); child.stderr.end(); child.emit("close", 0, null);
+        child.stdout.end(`${JSON.stringify({ type: "turn.completed", usage: { input_tokens: calls * 100, output_tokens: calls * 10 } })}\n`);
+        child.stderr.end(); child.emit("close", 0, null);
       }),
     });
 
@@ -1637,6 +1638,12 @@ describe("CodexExecutor.runTask", () => {
     assert.deepEqual(JSON.parse(result.output), repaired);
     assert.equal(result.trace?.modelAttemptCount, 2);
     assert.equal(result.trace?.structuredRepairCount, 1);
+    assert.equal(result.trace?.totalTokens, 330);
+    assert.equal(result.trace?.usageComplete, true);
+    assert.deepEqual(result.trace?.modelAttempts, [
+      { attempt: 1, usage: { promptTokens: 100, completionTokens: 10, totalTokens: 110 } },
+      { attempt: 2, usage: { promptTokens: 200, completionTokens: 20, totalTokens: 220 } },
+    ]);
   });
 
   it("stops after one director semantic repair when the repaired output is still invalid", async () => {
@@ -1658,7 +1665,8 @@ describe("CodexExecutor.runTask", () => {
       spawnFn: fakeSpawn(async ({ child, lastMessagePath }) => {
         calls += 1;
         await writeFile(lastMessagePath, JSON.stringify(invalid), "utf8");
-        child.stdout.end(); child.stderr.end(); child.emit("close", 0, null);
+        child.stdout.end(calls === 1 ? `${JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, output_tokens: 0 } })}\n` : "");
+        child.stderr.end(); child.emit("close", 0, null);
       }),
     });
 
@@ -1669,6 +1677,12 @@ describe("CodexExecutor.runTask", () => {
         assert.equal(error.details?.reasonCode, "duplicate_scene_position");
         assert.equal(error.details?.modelAttemptCount, 2);
         assert.equal(error.details?.structuredRepairCount, 1);
+        assert.equal(error.details?.totalTokens, 0);
+        assert.equal(error.details?.usageComplete, false);
+        assert.deepEqual(error.details?.modelAttempts, [
+          { attempt: 1, usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } },
+          { attempt: 2, usage: null },
+        ]);
         return true;
       },
     );

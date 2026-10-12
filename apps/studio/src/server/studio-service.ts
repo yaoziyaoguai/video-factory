@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { readPlanningOperations } from "./planning-operations.js";
 import type {
   StartRunResponse,
   StudioArtifactResource,
@@ -203,6 +204,7 @@ export class StudioService {
     });
     this.series = new SeriesStudio({
       series: options.series ?? new JsonSeriesStore(path.join(options.workspaceRoot, "series", "series.json")),
+      roadmapLockDirectory: path.join(options.workspaceRoot, "series", "roadmap-locks"),
       now,
       ...(options.createSeriesId ? { createId: options.createSeriesId } : {}),
       ...(options.seriesPlanningAgent ? { planningAgent: options.seriesPlanningAgent } : {}),
@@ -261,6 +263,7 @@ export class StudioService {
       options.pipeline.readPaidExecutionReceipts ? (runId) => options.pipeline.readPaidExecutionReceipts!(runId) : undefined,
       options.pipeline.readDocumentExecutionReceipts ? (runId) => options.pipeline.readDocumentExecutionReceipts!(runId) : undefined,
       options.pipeline.readModelExecutionFacts ? (runId) => options.pipeline.readModelExecutionFacts!(runId) : undefined,
+      () => readPlanningOperations(options.workspaceRoot),
     );
     this.publishing = new PublishingStudio({
       workspaceRoot: options.workspaceRoot,
@@ -389,6 +392,9 @@ export class StudioService {
   }
   createSeries(input: StudioSeriesInput): Promise<StudioSeries> { return this.series.create(input); }
   generateSeriesRoadmap(seriesId: string): Promise<StudioSeries> { return this.series.generateRoadmap(seriesId); }
+  recoverSeriesRoadmap(seriesId: string, operationId: string, action: "query" | "retrieve"): Promise<StudioSeries> {
+    return this.series.recoverRoadmap(seriesId, operationId, action);
+  }
   auditSeriesEpisodeCurrent(seriesId: string, episodeNumber: number, expectedRevision: number): Promise<StudioSeries> {
     return this.series.auditEpisodeCurrent(seriesId, episodeNumber, expectedRevision);
   }

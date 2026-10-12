@@ -425,12 +425,14 @@ export function TodayPage() {
     setSeriesDialogOpen(false);
     setActiveSeriesId(created.id);
     await loadSeriesCandidates();
-    await generateSeriesRoadmap(created.id);
+    announceNotice("系列已保存，尚未调用模型。你可以手工编辑，或明确生成并审计路线图。");
   }
 
   async function generateSeriesRoadmap(seriesId: string) {
     setGeneratingSeriesId(seriesId);
     setCandidateActionError(undefined);
+    setNextStepNotice(undefined);
+    setNextStepNoticeAction(undefined);
     try {
       const generated = await studioApi.generateSeriesRoadmap(seriesId);
       setSeries((current) => current.map((item) => item.id === generated.id ? generated : item));
@@ -439,7 +441,23 @@ export function TodayPage() {
         ? "系列路线图初稿和内容建议已生成。请逐集查看，决定是否采用。"
         : "系列已保存为可编辑的规则路线图；模型初稿暂不可用，你仍可继续编辑和采用。");
     } catch (caught) {
-      setCandidateActionError(`系列已保存，但模型路线图未完成：${errorMessage(caught)}。可稍后重试；现有规则路线图仍可编辑。`);
+      await loadSeriesWorkspace();
+      setCandidateActionError(`路线图操作未全部完成：${errorMessage(caught)}。请查看下方原操作与候选；现有路线图仍可编辑。`);
+    } finally {
+      setGeneratingSeriesId(undefined);
+    }
+  }
+
+  async function recoverSeriesRoadmap(seriesId: string, operationId: string, action: "query" | "retrieve") {
+    setGeneratingSeriesId(seriesId);
+    setCandidateActionError(undefined);
+    try {
+      const updated = await studioApi.recoverSeriesRoadmap(seriesId, operationId, action);
+      setSeries((current) => current.map((item) => item.id === updated.id ? updated : item));
+      await loadSeriesCandidates();
+      announceNotice(action === "retrieve" ? "候选已取回为待采用草稿；没有调用模型，也没有自动采用。" : "已查询原操作，请核对候选、审计状态与用量。没有发起新生成。");
+    } catch (caught) {
+      setCandidateActionError(`原操作${action === "retrieve" ? "取回" : "查询"}未完成：${errorMessage(caught)}`);
     } finally {
       setGeneratingSeriesId(undefined);
     }
@@ -575,7 +593,7 @@ export function TodayPage() {
           <button className="button button-secondary" type="button" onClick={() => void retrySettings()}><RefreshCw aria-hidden="true" size={16} />重新读取</button>
         </div>
       ) : null}
-      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} trendRefreshPending={trendRefreshPending} trendRefreshing={trendRefreshing} sourceBlockedOpportunities={sourceBlockedOpportunities} onFocusSourceBlocked={focusSourceBlockedOpportunity} {...(seriesAuditReady === undefined ? {} : { seriesAuditReady })} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} {...(generatingSeriesId ? { generatingSeriesId } : {})} onGenerateSeriesRoadmap={generateSeriesRoadmap} onAuditSeriesEpisode={auditSeriesEpisodeCurrent} onReviseSeriesEpisode={reviseSeriesEpisodeCurrent} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onSupplementSources={(candidate) => setSourceSupplementTarget({ kind: "candidate", candidate })} onReviseTrendCandidate={async (candidate, instruction) => {
+      <TopicEntryWorkspace initialMode={entryMode} {...(initialCandidateId ? { initialSelectedId: initialCandidateId } : {})} selectedSeriesId={selectedSeriesId} {...(inbox ? { inbox } : {})} series={series} historicalRuns={runs} loading={{ trend: trendLoading, series: seriesLoading }} error={{ ...(trendError ? { trend: trendError } : {}), ...(seriesError ? { series: seriesError } : {}) }} trendMeta={trendMeta} trendRefreshPending={trendRefreshPending} trendRefreshing={trendRefreshing} sourceBlockedOpportunities={sourceBlockedOpportunities} onFocusSourceBlocked={focusSourceBlockedOpportunity} {...(seriesAuditReady === undefined ? {} : { seriesAuditReady })} {...(adoptingCandidateId ? { adoptingId: adoptingCandidateId } : {})} {...(generatingSeriesId ? { generatingSeriesId } : {})} onGenerateSeriesRoadmap={generateSeriesRoadmap} onRecoverSeriesRoadmap={recoverSeriesRoadmap} onAuditSeriesEpisode={auditSeriesEpisodeCurrent} onReviseSeriesEpisode={reviseSeriesEpisodeCurrent} onRetry={(origin) => void (origin === "trend" ? loadTrendInbox(true) : loadSeriesWorkspace())} onRefreshTrends={() => void loadTrendInbox(true)} onAdopt={adoptCandidate} onSupplementSources={(candidate) => setSourceSupplementTarget({ kind: "candidate", candidate })} onReviseTrendCandidate={async (candidate, instruction) => {
               if (!candidate.generationId) {
                 throw new Error("这条候选缺少可核对的版本身份，请刷新候选列表后重试。");
               }

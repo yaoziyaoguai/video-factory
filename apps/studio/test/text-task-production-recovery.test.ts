@@ -696,6 +696,7 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
           modelId: "integration-model",
           brokerRequestIdHash: createHash("sha256").update(client.submissions[0]!.requestId).digest("hex"),
           queueWaitMs: "measured",
+          usageComplete: false,
         },
       });
 

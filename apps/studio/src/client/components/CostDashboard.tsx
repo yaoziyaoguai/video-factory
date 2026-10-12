@@ -2,6 +2,7 @@ import { CircleDollarSign, Clock3, Gauge, ReceiptText, RotateCcw } from "lucide-
 import { Link } from "react-router-dom";
 import type { StudioCostDashboard, StudioCostGroup, StudioCostRunDetail, StudioCostTotals, StudioProvider } from "../../shared/api.js";
 import { catalogModelLabel, costProviderLabel, providerLabel, runNodeLabel } from "../presentation.js";
+import { ModelExecutionDetails } from "./ModelExecutionDetails.js";
 
 export function CostDashboard({ dashboard }: { dashboard: StudioCostDashboard }) {
   return (
@@ -12,6 +13,16 @@ export function CostDashboard({ dashboard }: { dashboard: StudioCostDashboard })
         <CostRanking title="按实际服务" groups={dashboard.byProvider} kind="provider" />
         <CostRanking title="按制作步骤" groups={dashboard.byNode} kind="node" />
       </div>
+      {dashboard.planningOperations?.length ? <section className="planning-cost-operations" aria-label="制作前模型操作">
+        <h3>制作前模型操作</h3>
+        <p>系列与选题尚未创建制作，也会产生模型请求；实付金额待账单核对。</p>
+        {dashboard.planningOperations.map((operation) => <article key={operation.id}>
+          <h4>{operation.owner.title} · {{ generate: "生成", audit: "审计", revise: "修订", unknown: "历史操作" }[operation.action]}</h4>
+          <p>{{ series: "系列", topic: "选题", unassigned: "待核对象" }[operation.owner.kind]}：{operation.owner.id}{operation.episodeNumber ? ` · 第 ${operation.episodeNumber} 集` : ""}</p>
+          {operation.evidenceIssue ? <p role="status">{operation.evidenceIssue}</p> : null}
+          <ModelExecutionDetails facts={operation.executionFacts} />
+        </article>)}
+      </section> : null}
       <div className="cost-run-table">
         <header><strong>视频明细</strong><span>{dashboard.runs.length} 条制作</span></header>
         {dashboard.runs.length ? dashboard.runs.map((run) => <Link to={`/projects/${run.runId}`} key={run.runId}><span><strong>{run.title}</strong><small>{run.totals.meteredCalls} 次按量调用 · {run.totals.failedMeteredCalls} 次明确失败 · {run.totals.actualPendingCount} 笔待确认是否扣费</small></span><b>{actualCostLabel(run.totals)}</b></Link>) : <p>产生制作调用后，这里会按视频汇总。</p>}
@@ -26,6 +37,7 @@ export function RunCostDetailPanel({ detail, providers }: { detail: StudioCostRu
     <section className="run-cost-detail" aria-labelledby="run-cost-title">
       <header className="section-heading"><div><p className="eyebrow">本片费用</p><h2 id="run-cost-title">调用与费用明细</h2></div><ReceiptText aria-hidden="true" size={19} /></header>
       <CostMetrics totals={detail.totals} compact />
+      {detail.executionFacts?.length ? <ModelExecutionDetails facts={detail.executionFacts} /> : null}
       {detail.timing ? <p className="cost-time-summary">制作经过时间：{durationLabel(detail.timing.wallElapsedMs)}（含人工停点）；其中等待你决定：{durationLabel(detail.timing.humanWaitMs)}。本次恢复耗时：{durationLabel(detail.timing.recoveryMs)}。缺少起止记录时不估算。</p> : null}
       <details className="cost-call-details">
         <summary><span><strong>调用与费用明细</strong><small>报价和授权不等于实际消费；结果不明确的调用要核对是否扣费，按配置费率登记的金额仍需与服务商账单核对。</small></span><b>{lines.length} 项</b></summary>
@@ -89,7 +101,8 @@ function CostRanking({ title, groups, kind }: { title: string; groups: StudioCos
   const max = Math.max(...groups.map((group) => group.actualCostCny), 1);
   return <section className="cost-ranking"><header><strong>{title}</strong><span>{groups.length} 项</span></header>{groups.length ? groups.map((group) => {
     const amount = group.actualCostCny;
-    const label = kind === "provider" ? providerLabel(group.id) ?? group.label : runNodeLabel(group.id);
+    const label = kind === "provider" ? providerLabel(group.id) ?? group.label
+      : group.id === "series.planning" ? "系列策划" : group.id === "topic.planning" ? "选题策划" : runNodeLabel(group.id);
     return <div key={group.id}><span><b>{label}</b><small>{group.calls} 次执行</small></span><i><span style={{ width: `${Math.max(4, amount / max * 100)}%` }} /></i><strong>{group.actualPendingCount > 0 ? `¥${group.actualCostCny.toFixed(2)} + ${group.actualPendingCount} 笔待确认` : `¥${group.actualCostCny.toFixed(2)}`}</strong></div>;
   }) : <p>暂无调用数据</p>}</section>;
 }

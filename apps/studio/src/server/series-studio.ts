@@ -1,4 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+import path from "node:path";
+import { lock } from "proper-lockfile";
 import type {
   StudioCandidateInboxItem,
   StudioSeries,
@@ -19,9 +22,10 @@ import {
 export interface SeriesStudioOptions {
   series: StudioSeriesRepository;
   planner?: Pick<SeriesPlanner, "plan" | "planEpisodes">;
-  planningAgent?: Pick<SeriesPlanningAgent, "reviewEpisode"> & Partial<Pick<SeriesPlanningAgent, "generate" | "reviseEpisode">>;
+  planningAgent?: Pick<SeriesPlanningAgent, "reviewEpisode"> & Partial<Pick<SeriesPlanningAgent, "generate" | "reviseEpisode" | "roadmapOperations" | "retrieveRoadmap" | "observeRoadmap">>;
   now?: () => Date;
   createId?: () => string;
+  roadmapLockDirectory?: string;
 }
 
 export class SeriesStudio {
@@ -40,7 +44,7 @@ export class SeriesStudio {
 
   async list(): Promise<StudioSeries[]> {
     const records = await this.options.series.list();
-    return Promise.all(records.map((series) => this.ensureRoadmap(series)));
+    return Promise.all(records.map(async (series) => this.withRoadmapOperations(await this.ensureRoadmap(series))));
   }
 
   async create(input: StudioSeriesInput): Promise<StudioSeries> {
@@ -88,12 +92,62 @@ export class SeriesStudio {
   async generateRoadmap(seriesId: string): Promise<StudioSeries> {
     const running = this.roadmapGeneration.get(seriesId);
     if (running) return running;
-    const operation = this.generateInitialRoadmap(seriesId);
+    const operation = this.withRoadmapLock(seriesId, () => this.generateInitialRoadmap(seriesId));
     this.roadmapGeneration.set(seriesId, operation);
     try {
       return await operation;
     } finally {
       this.roadmapGeneration.delete(seriesId);
+    }
+  }
+
+  private async withRoadmapLock(seriesId: string, action: () => Promise<StudioSeries>): Promise<StudioSeries> {
+    const directory = this.options.roadmapLockDirectory;
+    if (!directory) return action();
+    await mkdir(directory, { recursive: true });
+    const key = createHash("sha256").update(seriesId).digest("hex");
+    let release: () => Promise<void>;
+    try {
+      release = await lock(path.join(directory, key), { realpath: false, stale: 300_000, update: 2_500, retries: 0 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ELOCKED") throw new StudioConflictError("路线图操作仍在执行，请等待原操作结束。");
+      throw error;
+    }
+    // 生成和恢复共享文件锁；人工改稿仍可进行，由 store 的 revision 检查防止迟到结果覆盖。
+    try { return await action(); } finally { await release(); }
+  }
+
+  private async withRoadmapOperations(series: StudioSeries): Promise<StudioSeries> {
+    const operations = await this.options.planningAgent?.roadmapOperations?.(series);
+    return operations ? { ...series, roadmapOperations: operations } : series;
+  }
+
+  async recoverRoadmap(seriesId: string, operationId: string, action: "query" | "retrieve"): Promise<StudioSeries> {
+    if (this.roadmapGeneration.has(seriesId)) throw new StudioConflictError("路线图操作仍在执行，请等待原操作结束。");
+    const operation = this.withRoadmapLock(seriesId, () => this.recoverInitialRoadmap(seriesId, operationId, action));
+    this.roadmapGeneration.set(seriesId, operation);
+    try { return await operation; } finally { this.roadmapGeneration.delete(seriesId); }
+  }
+
+  private async recoverInitialRoadmap(seriesId: string, operationId: string, action: "query" | "retrieve"): Promise<StudioSeries> {
+    const current = await this.options.series.get(seriesId);
+    if (!current) throw new StudioNotFoundError("没有找到这个系列。");
+    const agent = this.options.planningAgent;
+    const original = (await agent?.roadmapOperations?.(current))?.find((item) => item.id === operationId);
+    if (!original) throw new StudioNotFoundError("没有找到原路线图操作。");
+    if (action === "query") {
+      if (original.canQuery === false) throw new StudioConflictError(original.message);
+      await agent?.observeRoadmap?.(current, operationId);
+      return this.withRoadmapOperations((await this.options.series.get(seriesId))!);
+    }
+    if (!original.canRetrieve || !agent?.retrieveRoadmap) throw new StudioConflictError("当前版本已修改、采用或尚无有效候选；原结果仅供查看，不覆盖当前稿。");
+    const result = await agent.retrieveRoadmap(current, operationId);
+    const episodes = this.planner.planEpisodes({ ...current, episodes: [], nextEpisodeNumber: 1 }, current.episodes.length, result.drafts, result.planning);
+    try {
+      return this.withRoadmapOperations(await this.options.series.replaceInitialRoadmap(current.id, current.revision, episodes, this.now().toISOString()));
+    } catch (error) {
+      if (error instanceof SeriesStoreConflictError) throw new StudioConflictError(error.message);
+      throw error;
     }
   }
 
@@ -103,6 +157,9 @@ export class SeriesStudio {
       if (!current) throw new SeriesStoreNotFoundError("没有找到这个系列。");
       if (current.episodes.every((episode) => episode.planning.source === "agent")) return current;
       if (!this.options.planningAgent?.generate) return current;
+      const originals = await this.options.planningAgent.roadmapOperations?.(current);
+      if (originals?.length) throw new StudioConflictError(originals.find((operation) => operation.owner.kind === "unassigned")?.message
+        ?? "已有原路线图操作，请查看候选或查询原请求；不会重新生成。");
       if (current.episodes.some((episode) => episode.status !== "planned" || episode.planning.source !== "rules")) {
         throw new SeriesStoreConflictError("路线图已被修改，不能用模型初稿覆盖创作者的决定。");
       }

@@ -1,9 +1,56 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { readPlanningOperations } from "../src/server/planning-operations.js";
 import { CostStudio } from "../src/server/cost-studio.js";
 import { projectCheckpointExecutions } from "../../../packages/production-pipeline/src/model-execution-facts.js";
 
 describe("CostStudio", () => {
+  it("includes pre-production requests without inventing runs or paid amounts", async () => {
+    const facts = projectCheckpointExecutions("series.planning", {
+      key: "loop", attemptedRequestIds: ["produce"], requestPhases: { produce: { phase: "produce", iteration: 1 } },
+      pendingCandidate: { iteration: 1, candidateTrace: { providerId: "deepseek", modelId: "test", modelAttemptCount: 2 } },
+    }, "planning:loop");
+    const operation = { id: "loop", owner: { kind: "series" as const, id: "series-1", title: "系列" }, action: "generate" as const, state: "failed", executionFacts: facts };
+    const studio = new CostStudio(async () => [], undefined, undefined, undefined, undefined, async () => [operation]);
+    const dashboard = await studio.dashboard();
+    assert.equal(dashboard.runs.length, 0);
+    assert.equal(dashboard.planningOperations?.[0]?.owner.id, "series-1");
+    assert.equal(dashboard.totals.verifiedBrokerRequests, 1);
+    assert.equal(dashboard.totals.verifiedModelAttempts, 2);
+    assert.equal(dashboard.totals.actualPendingCount, 1);
+    assert.equal(dashboard.totals.actualCostCny, 0);
+    assert.equal((await studio.dashboard()).totals.verifiedModelAttempts, 2);
+    assert.equal(dashboard.byProvider[0]?.calls, 2);
+    assert.equal(dashboard.byNode[0]?.actualPendingCount, 1);
+    assert.equal(dashboard.planningOperations?.[0]?.executionFacts[0]?.usageComplete, false);
+  });
+  it("keeps unassigned and unreadable planning evidence visible without guessing usage or business ownership", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "planning-cost-"));
+    const directory = path.join(root, "checkpoints", "topic-editor");
+    try {
+      await mkdir(directory, { recursive: true });
+      await writeFile(path.join(directory, `${"a".repeat(64)}.json`), JSON.stringify({
+        key: "legacy", attemptedRequestIds: ["original"], requestPhases: { original: { phase: "produce", iteration: 1 } },
+        pendingCandidate: { iteration: 1, candidateTrace: { providerId: "test", modelId: "test", modelAttemptCount: 2, totalTokens: 50, prompt: "must stay private" } },
+      }));
+      await writeFile(path.join(directory, `${"b".repeat(64)}.json`), "{broken");
+      const studio = new CostStudio(async () => [], undefined, undefined, undefined, undefined, () => readPlanningOperations(root));
+      const dashboard = await studio.dashboard();
+      assert.equal(dashboard.planningOperations?.length, 2);
+      assert.ok(dashboard.planningOperations?.every((operation) => operation.owner.kind === "unassigned" && operation.evidenceIssue));
+      assert.equal(dashboard.totals.countExact, false);
+      assert.equal(dashboard.totals.actualPendingCount, 1);
+      assert.equal(dashboard.totals.actualCostCny, 0);
+      const fact = dashboard.planningOperations?.find((operation) => operation.executionFacts.length)?.executionFacts[0];
+      assert.equal(fact?.modelAttemptCount, 2);
+      assert.equal(fact?.usageComplete, false);
+      assert.equal(fact?.modelAttempts, undefined);
+      assert.doesNotMatch(JSON.stringify(dashboard), /must stay private/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it("counts the current human wait beyond the runner's per-pass finishedAt", async () => {
     const startedAt = "2026-01-01T00:00:00.000Z";
     const pausedAt = "2026-01-01T00:00:10.000Z";

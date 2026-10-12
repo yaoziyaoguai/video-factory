@@ -1,11 +1,15 @@
-import path from "node:path";
 import {
   CodexBridgeClient,
-  fileRoleAgentLoopCheckpoint,
   roleAgentCheckpointKey,
   runRoleAgentLoop,
+  validateRoleAudit,
+  type CodexPreparedOperation,
+  fileRoleAgentLoopCheckpoint,
 } from "@video-factory/production-pipeline";
-import type { StudioSeriesEpisodePlanning } from "../shared/api.js";
+import path from "node:path";
+import type { StudioPlanningOperation, StudioSeriesEpisodePlanning, StudioSeriesRoadmapOperation } from "../shared/api.js";
+import { StudioConflictError } from "./studio-errors.js";
+import { planningCheckpoint, readPlanningCheckpoints, isRecord as isCheckpointRecord } from "./planning-operations.js";
 import type { StudioSeriesEpisode } from "../shared/api.js";
 import type { SeriesEpisodeDraft } from "./series-planner.js";
 import type { SeriesRecord } from "./series-store.js";
@@ -21,6 +25,9 @@ export interface SeriesPlanningResult {
 
 export interface SeriesPlanningAgent {
   generate(series: SeriesRecord, count: number): Promise<SeriesPlanningResult>;
+  roadmapOperations?(series: SeriesRecord): Promise<StudioSeriesRoadmapOperation[]>;
+  retrieveRoadmap?(series: SeriesRecord, operationId: string): Promise<SeriesPlanningResult>;
+  observeRoadmap?(series: SeriesRecord, operationId: string): Promise<void>;
   reviewEpisode(series: SeriesRecord, episode: StudioSeriesEpisode): Promise<{ draft: SeriesEpisodeDraft; planning: StudioSeriesEpisodePlanning }>;
   reviseEpisode(series: SeriesRecord, episode: StudioSeriesEpisode, instruction: string): Promise<{ draft: SeriesEpisodeDraft; planning: StudioSeriesEpisodePlanning }>;
 }
@@ -64,6 +71,12 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
       planningWindow: { startEpisodeNumber, count },
     };
     const checkpointKey = roleAgentCheckpointKey({ request, model, contractVersion: SERIES_SHOWRUNNER_CONTRACT_VERSION });
+    const originals = await this.planningRecords();
+    if (originals.unassigned.length) throw new StudioConflictError(unassignedRoadmapMessage);
+    // 同key进入role loop也可能为已失败的审计换代；已有操作统一沿原请求查询或取回。
+    if (originals.records.some(({ owner }) => owner.kind === "series" && owner.id === series.id && owner.action === "generate")) {
+      throw new StudioConflictError("已有原路线图操作，请查看候选或查询原请求；更换模型或合同也不会重新生成。");
+    }
     const execution = await runRoleAgentLoop<{ episodes: SeriesEpisodeDraft[] }>({
       role: "系列总编",
       contractVersion: SERIES_SHOWRUNNER_CONTRACT_VERSION,
@@ -103,10 +116,10 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
       }, requestId, session, { ...requestOptions, ...(model ? { model } : {}) }),
       validate: (value) => parseSeriesRoadmapOutput(value, series.pillars, startEpisodeNumber, count),
       ...(this.checkpointDirectory ? {
-        checkpoint: fileRoleAgentLoopCheckpoint(
-          path.join(this.checkpointDirectory, `${checkpointKey}.json`),
-          checkpointKey,
-        ),
+        checkpoint: planningCheckpoint(this.checkpointDirectory, checkpointKey, {
+          kind: "series", id: series.id, title: series.name, action: "generate", baseRevision: series.revision,
+          pillars: series.pillars, startEpisodeNumber, count,
+        }),
       } : {}),
     });
     const finalAudit = execution.agentLoop?.iterations.at(-1)?.audit;
@@ -129,6 +142,96 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         ...(execution.trace?.reasoningEffort ? { reasoningEffort: execution.trace.reasoningEffort } : {}),
       },
     };
+  }
+
+  private async planningRecords() {
+    const unassigned: StudioPlanningOperation[] = [];
+    const records = this.checkpointDirectory ? await readPlanningCheckpoints(this.checkpointDirectory, (operation) => unassigned.push(operation), true) : [];
+    return { records, unassigned };
+  }
+
+  private async roadmapRecords(seriesId: string) {
+    return (await this.planningRecords()).records
+      .filter(({ owner }) => owner.kind === "series" && owner.id === seriesId && owner.action === "generate");
+  }
+
+  async roadmapOperations(series: SeriesRecord): Promise<StudioSeriesRoadmapOperation[]> {
+    const { records, unassigned } = await this.planningRecords();
+    return [
+      ...records.filter(({ owner }) => owner.kind === "series" && owner.id === series.id && owner.action === "generate")
+        .map((record) => roadmapOperation(record, series)),
+      ...unassigned.map((operation): StudioSeriesRoadmapOperation => ({ ...operation,
+        id: operation.id.slice(operation.id.lastIndexOf(":") + 1), message: unassignedRoadmapMessage,
+        auditStatus: "unknown", canRetrieve: false, canQuery: false,
+      })),
+    ];
+  }
+
+  async retrieveRoadmap(series: SeriesRecord, operationId: string): Promise<SeriesPlanningResult> {
+    const record = (await this.roadmapRecords(series.id)).find(({ key }) => key === operationId);
+    if (!record) throw new Error("没有找到原路线图操作。");
+    const operation = roadmapOperation(record, series);
+    if (!operation.candidate) throw new Error("原操作尚无通过产稿合同的候选；请查询原请求。");
+    if (!operation.canRetrieve) throw new Error("路线图版本已修改或采用，原候选只能查看，不能覆盖当前版本。");
+    const pending = isCheckpointRecord(record.checkpoint.pendingCandidate) ? record.checkpoint.pendingCandidate : undefined;
+    const last = Array.isArray(record.checkpoint.completed) ? record.checkpoint.completed.at(-1) : undefined;
+    const trace = isCheckpointRecord(pending?.candidateTrace) ? pending.candidateTrace
+      : isCheckpointRecord(last) && isCheckpointRecord(last.candidateTrace) ? last.candidateTrace : {};
+    const audit = !pending && isCheckpointRecord(last) && isCheckpointRecord(last.audit)
+      ? validateRoleAudit(last.audit, { role: "系列总编", candidate: { episodes: operation.candidate } }) : undefined;
+    return { drafts: operation.candidate, planning: {
+      source: "agent", role: "系列总编", auditRole: "独立质量复核", auditStatus: operation.auditStatus,
+      auditIterations: Array.isArray(record.checkpoint.completed) ? record.checkpoint.completed.length : 0,
+      auditSummary: operation.message,
+      ...(audit ? { auditScore: audit.score, auditSuggestions: audit.issues.map((issue) => issue.creatorAction ?? issue.repairInstruction) } : {}),
+      providerId: typeof trace.providerId === "string" ? trace.providerId : "unknown",
+      modelId: typeof trace.modelId === "string" ? trace.modelId : "unknown",
+      promptVersion: typeof trace.promptVersion === "string" ? trace.promptVersion : "unknown",
+    } };
+  }
+
+  async observeRoadmap(series: SeriesRecord, operationId: string): Promise<void> {
+    const record = (await this.roadmapRecords(series.id)).find(({ key }) => key === operationId);
+    if (!record || !this.checkpointDirectory) throw new Error("没有找到原路线图操作。");
+    const pending = record.checkpoint.pendingOperation;
+    if (!isCheckpointRecord(pending) || !isCheckpointRecord(pending.operation)) return;
+    const operation = pending.operation as unknown as CodexPreparedOperation;
+    const observed = await this.client.observePreparedOnce(operation, { timeoutMs: 10_000 });
+    if (observed.state === "query_failure") throw new Error("原请求查询未成功，已保存的候选和待核状态不变；请稍后查询。");
+    if (observed.state === "conflict") throw new Error("原请求身份与服务记录不一致，已停止恢复；请核对原服务记录。");
+    if (observed.state === "not_accepted") throw new Error("原服务未能确认这条已保存请求；不据此重新提交，请保留原请求核对。");
+    if (observed.state === "completed_success") {
+      const execution = observed.execution;
+      if (pending.phase === "produce") {
+        const candidate = parseSeriesRoadmapOutput(execution.output, record.owner.pillars ?? [], record.owner.startEpisodeNumber!, record.owner.count!);
+        record.checkpoint.pendingCandidate = { iteration: pending.iteration, candidate, ...(execution.trace ? { candidateTrace: execution.trace } : {}) };
+        delete record.checkpoint.pendingOperation;
+        delete record.checkpoint.failure;
+        record.checkpoint.status = "running";
+      } else if (pending.phase === "audit" && isCheckpointRecord(record.checkpoint.pendingCandidate)) {
+        const candidate = record.checkpoint.pendingCandidate;
+        try {
+          const audit = validateRoleAudit(execution.output, { role: "系列总编", candidate: candidate.candidate });
+          record.checkpoint.completed = [...(Array.isArray(record.checkpoint.completed) ? record.checkpoint.completed : []),
+            { ...candidate, audit, ...(execution.trace ? { auditTrace: execution.trace } : {}) }];
+          delete record.checkpoint.pendingCandidate;
+          delete record.checkpoint.failure;
+          record.checkpoint.status = audit.verdict === "pass" ? "passed" : "awaiting_user";
+        } catch {
+          record.checkpoint.status = "failed";
+          record.checkpoint.failure = { stage: "completed_failure", summary: "原审计已返回，但未通过审计合同；候选保留。", details: execution.trace };
+        }
+        delete record.checkpoint.pendingOperation;
+      }
+    } else if (observed.state === "completed_failure") {
+      record.checkpoint.failure = { stage: observed.error.stage, summary: observed.error.creatorMessage,
+        ...(observed.error.failureDetails ? { details: observed.error.failureDetails } : {}) };
+      record.checkpoint.status = "failed";
+      delete record.checkpoint.pendingOperation;
+    } else return;
+    // 只查询原请求，绝不进入loop并启动下一阶段或换代请求。
+    if (record.checkpoint.planningOwner === undefined) record.checkpoint.planningOriginalOperation = operation;
+    await fileRoleAgentLoopCheckpoint(path.join(this.checkpointDirectory, `${record.key}.json`), record.key).save(record.checkpoint);
   }
 
   async reviewEpisode(
@@ -192,10 +295,10 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         return parsed;
       },
       ...(this.checkpointDirectory ? {
-        checkpoint: fileRoleAgentLoopCheckpoint(
-          path.join(this.checkpointDirectory, `${checkpointKey}.json`),
-          checkpointKey,
-        ),
+        checkpoint: planningCheckpoint(this.checkpointDirectory, checkpointKey, {
+          kind: "series", id: series.id, title: series.name, action: "audit", baseRevision: series.revision,
+          episodeNumber: episode.episodeNumber,
+        }),
       } : {}),
     });
     const finalIteration = execution.agentLoop?.iterations.at(-1);
@@ -259,7 +362,10 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         return parsed;
       },
       ...(this.checkpointDirectory ? {
-        checkpoint: fileRoleAgentLoopCheckpoint(path.join(this.checkpointDirectory, `${checkpointKey}.json`), checkpointKey),
+        checkpoint: planningCheckpoint(this.checkpointDirectory, checkpointKey, {
+          kind: "series", id: series.id, title: series.name, action: "revise", baseRevision: series.revision,
+          episodeNumber: episode.episodeNumber,
+        }),
       } : {}),
     });
     return {
@@ -274,6 +380,32 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
       },
     };
   }
+}
+
+const unassignedRoadmapMessage = "存在无法核对业务归属的历史系列请求，已暂停模型生成，避免重复调用。请核对费用记录中的原请求；当前稿仍可手工编辑。";
+
+function roadmapOperation(record: Awaited<ReturnType<typeof readPlanningCheckpoints>>[number], series: SeriesRecord): StudioSeriesRoadmapOperation {
+  const { checkpoint, owner, operation } = record;
+  const last = Array.isArray(checkpoint.completed) ? checkpoint.completed.at(-1) : undefined;
+  const saved = isCheckpointRecord(checkpoint.pendingCandidate) ? checkpoint.pendingCandidate : isCheckpointRecord(last) ? last : undefined;
+  let candidate: SeriesEpisodeDraft[] | undefined;
+  if (saved && Number.isSafeInteger(owner.startEpisodeNumber) && Number.isSafeInteger(owner.count)) {
+    try { candidate = parseSeriesRoadmapOutput(saved.candidate, owner.pillars ?? [], owner.startEpisodeNumber!, owner.count!).episodes; }
+    catch { /* 当前产稿合同不接受的旧候选只能保留原记录，不能交付。 */ }
+  }
+  const failure = isCheckpointRecord(checkpoint.failure) ? checkpoint.failure : undefined;
+  const auditStatus = checkpoint.status === "passed" ? "passed" : checkpoint.status === "awaiting_user" ? "awaiting_user"
+    : failure?.stage === "uncertain" || isCheckpointRecord(checkpoint.pendingOperation) ? "unknown"
+    : checkpoint.status === "failed" ? "failed" : "not_audited";
+  const audit = isCheckpointRecord(last) && isCheckpointRecord(last.audit) ? last.audit : undefined;
+  const message = auditStatus === "passed" || auditStatus === "awaiting_user"
+    ? typeof audit?.summary === "string" ? audit.summary : "原审计已完成。"
+    : auditStatus === "failed" ? candidate ? "独立审计失败，已生成的候选保留；取回不等于审计通过或采用。" : "生成未交付合法候选。原操作已保留，可核对请求及费用；当前规则稿仍可手工编辑。"
+    : auditStatus === "unknown" ? "原请求结果待核；只查询原请求，不重新生成。" : "候选尚未审计；取回后由你决定。";
+  return { ...operation, auditStatus, message, ...(candidate ? { candidate } : {}), canQuery: true,
+    canRetrieve: !!candidate && owner.baseRevision === series.revision
+      && series.episodes.every((episode) => episode.status === "planned" && episode.planning.source === "rules" && !episode.runId && !episode.runReservation),
+  };
 }
 
 function seriesPlanningContext(series: SeriesRecord) {

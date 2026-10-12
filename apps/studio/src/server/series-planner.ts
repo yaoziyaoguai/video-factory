@@ -28,15 +28,6 @@ export interface SeriesEpisodeDraft {
   toNext: string[];
 }
 
-const EPISODE_LENSES = [
-  "先做一次真实任务实验",
-  "比较最省钱与最省时间的两种做法",
-  "复盘最容易失败的一步",
-  "把方法压缩成可收藏的三步清单",
-  "用一个反例检验这套方法的边界",
-  "回答上一集留下的关键问题",
-];
-
 export class SeriesPlanner {
   private readonly now: () => Date;
 
@@ -105,17 +96,16 @@ export class SeriesPlanner {
         fromPrevious: [], toNext: [],
       };
       const pillar = series.pillars[(episodeNumber - 1) % series.pillars.length] ?? series.premise;
-      const lens = EPISODE_LENSES[(episodeNumber - 1) % EPISODE_LENSES.length] ?? EPISODE_LENSES[0]!;
       const episode = String(episodeNumber).padStart(2, "0");
       return {
         episodeNumber,
         pillar,
-        title: `${series.name} ${episode}｜${pillar}：${lens}`,
-        viewerPromise: `围绕“${pillar}”给出一个可验证、可复用的具体结论。`,
-        hook: `第 ${episodeNumber} 集直接验证“${lens}”：${series.audience}最终能得到什么可复核结果？`,
-        payoff: `完成“${lens}”，并把结论交给下一集继续验证。`,
+        title: `${series.name} ${episode}｜${pillar} · 待策划`,
+        viewerPromise: series.premise,
+        hook: `第 ${episodeNumber} 集围绕“${pillar}”展开，具体开场待创作。`,
+        payoff: `“${pillar}”的本集具体兑现待创作者确认，不预设实验、结论或已完成的结果。`,
         fromPrevious: episodeNumber === 1 ? [] : ["承接上一集定版后写入的连续性记忆，不把路线图意图冒充正史。"],
-        toNext: [`保留“${pillar}”尚未解决的一个边界问题，供下一集推进。`],
+        toNext: [],
       };
     });
   }

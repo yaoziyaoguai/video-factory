@@ -162,6 +162,9 @@ export const studioApi = {
   generateSeriesRoadmap: (seriesId: string) => requestJson<StudioSeries>(
     `/api/series/${encodeURIComponent(seriesId)}/roadmap/generate`, { method: "POST" },
   ),
+  recoverSeriesRoadmap: (seriesId: string, operationId: string, action: "query" | "retrieve") => requestJson<StudioSeries>(
+    `/api/series/${encodeURIComponent(seriesId)}/roadmap/operations/${encodeURIComponent(operationId)}/${action}`, { method: "POST" },
+  ),
   auditSeriesEpisodeCurrent: (seriesId: string, episodeNumber: number, expectedRevision: number) => requestJson<StudioSeries>(
     `/api/series/${encodeURIComponent(seriesId)}/episodes/${episodeNumber}/audit-current`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedRevision }) },

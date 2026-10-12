@@ -4,7 +4,9 @@ export { NATIVE_VIDEO_MODELS, NATIVE_AUDIO_PROVIDER, assertNativeVideoModel } fr
 export type { ProductionAudioMode } from "./native-audio.js";
 export { diagnosticEvent } from "./diagnostics.js";
 export { classifyReviewDisposition, dispositionAllowsHumanStop } from "./review-disposition.js";
-export { summarizeModelExecutionFacts } from "./model-execution-facts.js";
+export { summarizeModelExecutionFacts, projectCheckpointExecutions, projectRequestExecution, mergeModelExecutionFacts } from "./model-execution-facts.js";
+export { modelAttemptUsage, parseModelAttempts, summarizeModelAttemptUsage } from "./model-attempt-usage.js";
+export type { ModelAttemptUsage, ModelTokenUsage } from "./model-attempt-usage.js";
 export type { ModelExecutionFact, ModelExecutionProjection } from "./model-execution-facts.js";
 export { buildNarrationPlan, validateNarrationPlan } from "./narration-plan.js";
 export { CHARACTER_NARRATION_PLAN_VERSION, buildCharacterNarrationPlan, validateCharacterNarrationPlan,
@@ -144,6 +146,7 @@ export {
   CODEX_TASK_KINDS,
   CodexBridgeClient,
   CodexBridgeError,
+  validatePreparedOperation,
 } from "./codex-chat.js";
 export type { CodexBridgeClientOptions, CodexPreparedOperation, CodexPreparedObservation, CodexTaskExecution, CodexTaskKind, CodexTaskRequestOptions, CodexTaskSession, CodexTaskTrace, ModelCandidateAttempt } from "./codex-chat.js";
 export { brokerModelCandidates } from "./codex-task-binding.js";

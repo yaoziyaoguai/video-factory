@@ -18,6 +18,32 @@ describe("planVisualDirection", () => {
     assert.match(plan.beats[1]?.description ?? "", /环境|动作/);
   });
 
+  it("uses positive topic intent rather than incidental or negated keywords", () => {
+    for (const hook of ["先放下手机，看叶片在水里慢慢舒展。", "不谈 AI，也不做实验，只记录窗边的光。", "电脑留在包里，沿着河岸走一会儿。", "无需科技或软件演示，观察雨滴。", "不是对照实验，只有日常片段。"]) {
+      const plan = planVisualDirection({ title: "留十二秒给日常", hook });
+      assert.doesNotMatch(plan.strategy, /屏幕操作|受控实证/);
+      assert.doesNotMatch(plan.beats[1]!.description, /录制真实操作|只改变/);
+    }
+    const technical = planVisualDirection({ title: "手机系统如何管理应用权限", hook: "打开设置逐项演示定位权限。" });
+    assert.match(technical.strategy, /屏幕操作/);
+    const separatedIntent = planVisualDirection({ title: "手机系统权限设置", hook: "不做实验，逐项讲解真实操作。" });
+    assert.match(separatedIntent.strategy, /屏幕操作/);
+    const explicit = planVisualDirection({ title: "AI 软件操作", hook: "技术演示", category: "lifestyle" });
+    assert.doesNotMatch(explicit.strategy, /屏幕操作/);
+  });
+
+  it("does not classify explicitly denied claims as the subject or delete their original wording", () => {
+    const original = "先放下手机。看茶叶在杯中慢慢舒展，把这十二秒留给自己。只记录日常，不宣称健康疗效。";
+    for (const hook of [original, "观察窗边的光，不承诺财经收益。", "记录雨滴的变化，不保证工作收入。", "只展示水纹，不声称健康效果。"]) {
+      const plan = planVisualDirection({ title: "给日常留十二秒", hook });
+      assert.match(plan.strategy, /人物近景、生活动作与环境细节/);
+      assert.match(plan.beats[1]!.description, /生活环境/);
+      assert.ok(plan.beats[0]!.description.includes(hook), "分类分析不能删除创作者的原文");
+    }
+    const health = planVisualDirection({ title: "健康运动如何循序渐进", hook: "演示基础训练，不宣称治疗效果。" });
+    assert.match(health.strategy, /动作特写、场地关系与数据卡片/);
+  });
+
   it("honors a series visual direction while keeping source choices editable", () => {
     const plan = planVisualDirection({
       title: "AI 下班实验室 04｜真实任务实验",

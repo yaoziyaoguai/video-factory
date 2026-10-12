@@ -16,7 +16,7 @@ export interface VisualPlanDeliveryCapabilities {
 type VideoArgumentForm = "controlled-demonstration" | "explanation";
 
 export function recommendTemplateForBrief(input: Pick<VisualDirectionInput, "title" | "hook">): "product-demo" | "knowledge-explainer" {
-  return argumentFormFor(`${input.title} ${input.hook}`) === "controlled-demonstration"
+  return argumentFormFor(`${input.title}\n${input.hook}`) === "controlled-demonstration"
     ? "product-demo"
     : "knowledge-explainer";
 }
@@ -31,8 +31,8 @@ export function resolveOpportunityVisualPlan(
 
 export function planVisualDirection(input: VisualDirectionInput): StudioVisualPlan {
   const topic = compactTopic(input.title);
-  const category = input.category ?? inferVisualCategory(`${input.title} ${input.hook}`);
-  const argumentForm = argumentFormFor(`${input.title} ${input.hook}`);
+  const category = input.category ?? inferVisualCategory(`${input.title}\n${input.hook}`);
+  const argumentForm = argumentFormFor(`${input.title}\n${input.hook}`);
   const direction = input.visualStyle?.trim() || defaultDirection(category, argumentForm);
   const contextSource = contextSourceFor(category);
 
@@ -175,7 +175,15 @@ function defaultDirection(category: StudioTopicCategory, argumentForm: VideoArgu
   return "人物近景、生活动作与环境细节";
 }
 
+// 否定句说明不做什么，不能据此给题材或实验形式加分；转折后的正向要求另行判断。
+function affirmativeTopicText(value: string): string {
+  return value.split(/[，,。；;！？!?\n]|但是|而是|但要|但会/)
+    .filter((clause) => !/(?:不(?:是|做|谈|讲|用|要|需|涉及|讨论|宣称|声称|承诺|保证)|无需|不要|不必|没有|拒绝|放下|远离)/.test(clause))
+    .join(" ");
+}
+
 function argumentFormFor(value: string): VideoArgumentForm {
+  value = affirmativeTopicText(value);
   const controlledComparison = /(?:同一|同样|相同|其他条件不变)[\s\S]{0,40}(?:只|仅)[\s\S]{0,24}(?:改变|调整|移动|更换|增加|减少|加|不加|换)/;
   const explicitExperiment = /(?:前后|两组|对照|对比)[\s\S]{0,20}(?:验证|实测|实验|测试)|(?:验证|实测|实验|测试)[\s\S]{0,20}(?:前后|两组|对照|对比|差别|变化|效果|结果)/;
   const promisedDemonstration = /实测|实验|测试验证|现场验证|亲自验证/;
@@ -184,7 +192,8 @@ function argumentFormFor(value: string): VideoArgumentForm {
     : "explanation";
 }
 
-function inferVisualCategory(value: string): StudioTopicCategory {
+export function inferVisualCategory(value: string): StudioTopicCategory {
+  value = affirmativeTopicText(value);
   if (/亲子|育儿|母婴|家长|宝宝/.test(value)) return "parenting";
   if (/汽车|新车|新能源车|电动车|智驾|车企/.test(value)) return "automotive";
   if (/游戏|电竞|手游|主机|玩家/i.test(value)) return "gaming";
@@ -192,7 +201,9 @@ function inferVisualCategory(value: string): StudioTopicCategory {
   if (/美食|早餐|小吃|餐厅|菜谱|做饭|咖啡/.test(value)) return "food";
   if (/旅行|旅游|文旅|景区|酒店|民宿/.test(value)) return "travel";
   if (/三农|农业|农机|粮食|丰收|乡村振兴/.test(value)) return "agriculture-rural";
-  if (/\bAI\b|人工智能|模型|科技|软件|应用|手机|电脑/i.test(value)) return "technology";
+  const technologySubject = /\bAI\b|人工智能|科技|编程|算法|芯片|操作系统/i;
+  const technologyTask = /(?:模型|软件|应用|手机|电脑).{0,24}(?:功能|权限|系统|设置|安装|配置|性能|操作|评测|开发)|(?:使用|操作|评测|安装|配置|开发).{0,16}(?:模型|软件|应用|手机|电脑)/;
+  if (technologySubject.test(value) || technologyTask.test(value)) return "technology";
   if (/职场|工作|工资|就业|消费|财经|收入/.test(value)) return "finance-career";
   if (/比赛|体育|足球|篮球|训练|健康|运动|冠军|赛事|联赛|球队|TYL/i.test(value)) return "health-sports";
   if (/学校|学习|教育|考试|课程/.test(value)) return "education";

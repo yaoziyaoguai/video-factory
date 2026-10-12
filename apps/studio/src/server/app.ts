@@ -144,6 +144,7 @@ export interface StudioServicePort {
   listSeries(): Promise<StudioSeries[]>;
   createSeries(input: StudioSeriesInput): Promise<StudioSeries>;
   generateSeriesRoadmap(seriesId: string): Promise<StudioSeries>;
+  recoverSeriesRoadmap?(seriesId: string, operationId: string, action: "query" | "retrieve"): Promise<StudioSeries>;
   auditSeriesEpisodeCurrent(seriesId: string, episodeNumber: number, expectedRevision: number): Promise<StudioSeries>;
   reviseSeriesEpisodeCurrent(seriesId: string, episodeNumber: number, expectedRevision: number, instruction: string): Promise<StudioSeries>;
   updateSeriesEpisodePlan(seriesId: string, episodeNumber: number, input: StudioSeriesEpisodePlanInput): Promise<StudioSeries>;
@@ -458,6 +459,16 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     requireSafeRouteId(request.params.seriesId, "系列编号");
     return options.service.generateSeriesRoadmap(request.params.seriesId);
   });
+  app.post<{ Params: { seriesId: string; operationId: string; action: string } }>(
+    "/api/series/:seriesId/roadmap/operations/:operationId/:action", async (request) => {
+      requireSafeRouteId(request.params.seriesId, "系列编号");
+      if (!/^[a-f0-9]{64}$/.test(request.params.operationId)) throw new StudioInputError("原操作编号无效。");
+      const action = request.params.action;
+      if (action !== "query" && action !== "retrieve") throw new StudioInputError("恢复动作无效。");
+      if (!options.service.recoverSeriesRoadmap) throw new StudioInputError("当前环境没有启用路线图恢复。");
+      return options.service.recoverSeriesRoadmap(request.params.seriesId, request.params.operationId, action);
+    },
+  );
   app.patch<{ Params: { seriesId: string; episodeNumber: string } }>(
     "/api/series/:seriesId/episodes/:episodeNumber",
     async (request) => {

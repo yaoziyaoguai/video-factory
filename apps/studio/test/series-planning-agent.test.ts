@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import {
   CodexBridgeClient,
+  CodexBridgeError,
   type CodexPreparedOperation,
   type CodexTaskExecution,
   type CodexTaskKind,
@@ -37,6 +38,37 @@ const series: SeriesRecord = {
   createdAt: "2026-08-24T08:00:00.000Z",
   updatedAt: "2026-08-24T08:00:00.000Z",
 };
+
+describe("series partial result recovery", () => {
+  it("keeps a validated candidate across restart and retrieves without another model call", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "series-partial-"));
+    const calls: string[] = [];
+    const client = new CodexBridgeClient({ socketPath: "/unused" });
+    client.runTaskDetailed = async (kind, _payload, requestId) => {
+      calls.push(kind);
+      if (kind === "role-audit") throw new CodexBridgeError("invalid audit", false, "completed_failure", 422, undefined, {
+        category: "invalid_output", reasonCode: "repair_semantic_drift", providerId: "test", modelId: "test", modelAttemptCount: 2,
+        brokerRequestIdHash: (await import("node:crypto")).createHash("sha256").update(requestId!).digest("hex"),
+      });
+      return { output: { episodes: [draft(1, "真实任务实验", "独立第一集", "第一集兑现"), draft(2, "成本与时间复盘", "独立第二集", "第二集兑现")] },
+        trace: { taskKind: kind, promptVersion: "test", prompt: "test", providerId: "test", modelId: "test", modelAttemptCount: 1 } };
+    };
+    try {
+      await assert.rejects(new CodexSeriesPlanningAgent(client, directory).generate(series, 2));
+      const restarted = new CodexSeriesPlanningAgent(client, directory);
+      const operations = await restarted.roadmapOperations(series);
+      assert.equal(operations.length, 1);
+      assert.equal(operations[0]?.candidate?.length, 2);
+      assert.equal(operations[0]?.auditStatus, "failed");
+      const recovered = await restarted.retrieveRoadmap(series, operations[0]!.id);
+      assert.equal(recovered.planning.auditStatus, "failed");
+      assert.equal(recovered.planning.auditIterations, 0);
+      assert.deepEqual(calls, ["series-roadmap", "role-audit"]);
+      await assert.rejects(restarted.retrieveRoadmap({ ...series, revision: 2 }, operations[0]!.id), /版本|修改/);
+      assert.deepEqual(calls, ["series-roadmap", "role-audit"]);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+});
 
 const CREATIVE_DIMENSION_EVIDENCE: Record<string, string> = {
   attention: "前两秒给出本集的具体问题。",
@@ -341,7 +373,7 @@ describe("CodexSeriesPlanningAgent", () => {
     assert.equal(result.planning.auditStatus, "awaiting_user");
   });
 
-  it("resumes the saved series generation result before starting its audit", async () => {
+  it("queries the saved series generation result without starting another audit", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "vf-series-generate-recovery-"));
     const client = new InterruptingSeriesClient("series-roadmap", {
       episodes: [
@@ -353,12 +385,16 @@ describe("CodexSeriesPlanningAgent", () => {
       const agent = new CodexSeriesPlanningAgent(client, directory);
       await assert.rejects(() => agent.generate(series, 2), /series response interrupted/);
 
-      const result = await agent.generate(series, 2);
+      await assert.rejects(() => agent.generate(series, 2), /原路线图操作/);
+      const operation = (await agent.roadmapOperations(series))[0]!;
+      await agent.observeRoadmap(series, operation.id);
+      const result = await agent.retrieveRoadmap(series, operation.id);
 
-      assert.equal(result.planning.auditStatus, "passed");
+      assert.equal(result.planning.auditStatus, "not_audited");
+      assert.equal(result.drafts.length, 2);
       assert.equal(client.calls.filter((kind) => kind === "series-roadmap").length, 1);
       assert.deepEqual(client.observedKinds, ["series-roadmap"]);
-      assert.equal(client.calls.filter((kind) => kind === "role-audit").length, 1);
+      assert.equal(client.calls.filter((kind) => kind === "role-audit").length, 0);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -449,6 +485,10 @@ class InterruptingSeriesClient extends CodexBridgeClient {
   async observePrepared(operation: CodexPreparedOperation): Promise<CodexTaskExecution> {
     this.observedKinds.push(operation.kind);
     return { output: operation.kind === "series-roadmap" ? this.roadmap : this.auditOutput() };
+  }
+
+  override async observePreparedOnce(operation: CodexPreparedOperation) {
+    return { state: "completed_success" as const, execution: await this.observePrepared(operation) };
   }
 }
 

@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
-import path from "node:path";
+import { planningCheckpoint } from "./planning-operations.js";
 import {
   CodexBridgeClient,
   CodexBridgeError,
   ModelCandidatesExhaustedError,
-  fileRoleAgentLoopCheckpoint,
   roleAgentCheckpointKey,
   runRoleAgentLoop,
 } from "@video-factory/production-pipeline";
@@ -480,10 +479,9 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
       }, requestId, session, { ...requestOptions, ...(model ? { model } : {}) }),
       validate: parseTopicIdeasOutput,
       ...(this.checkpointDirectory ? {
-        checkpoint: fileRoleAgentLoopCheckpoint(
-          path.join(this.checkpointDirectory, `${roleAgentCheckpointKey({ request, contractVersion: TOPIC_EDITOR_AGENT_CONTRACT_VERSION })}.json`),
+        checkpoint: planningCheckpoint(this.checkpointDirectory,
           roleAgentCheckpointKey({ request, contractVersion: TOPIC_EDITOR_AGENT_CONTRACT_VERSION }),
-        ),
+          { kind: "topic", id: identityNonce ?? roleAgentCheckpointKey(request), title: signals[0]?.title ?? "选题生成", action: "generate" }),
       } : {}),
     });
     this.executionIdentity = execution.trace
@@ -544,14 +542,34 @@ export class CodexTopicIdeaModel implements TrendIdeaModel {
       },
       ...(model ? { selectedModelId: model } : {}),
     };
-    const execution = await this.client.runTaskDetailed("topic-ideas", request);
-    const parsed = parseTopicIdeasOutput(execution.output);
-    const idea = parsed.ideas[0];
-    if (!idea) throw new Error("Candidate revision returned no usable idea.");
-    if (idea.signalId !== signals[0]!.id) {
-      throw new Error(`Candidate revision drifted to an unrelated signal (got ${idea.signalId}).`);
-    }
-    return idea;
+    const validate = (output: unknown) => {
+      const parsed = parseTopicIdeasOutput(output);
+      const idea = parsed.ideas[0];
+      if (!idea) throw new Error("Candidate revision returned no usable idea.");
+      if (idea.signalId !== signals[0]!.id) throw new Error(`Candidate revision drifted to an unrelated signal (got ${idea.signalId}).`);
+      return parsed;
+    };
+    const key = roleAgentCheckpointKey({ request, contractVersion: TOPIC_EDITOR_AGENT_CONTRACT_VERSION, action: "revise" });
+    const execution = await runRoleAgentLoop<{ ideas: TrendModelIdea[] }>({
+      role: "选题总编", contractVersion: TOPIC_EDITOR_AGENT_CONTRACT_VERSION, criteria: ["只修订原候选，保持来源绑定。"],
+      maxIterations: 1, deferAudit: true,
+      produce: async (_revision, { requestId, session, requestOptions, preparedOperation }) => {
+        const result = preparedOperation ? await this.client.observePrepared(preparedOperation, requestOptions)
+          : await this.client.runTaskDetailed("topic-ideas", request, requestId, session, { ...requestOptions, ...(model ? { model } : {}) });
+        // 原修订是一次产稿；来源漂移不能触发宿主自动再产一版，同时保留失败用量。
+        try { validate(result.output); } catch (error) {
+          throw new CodexBridgeError(error instanceof Error ? error.message : String(error), false, "completed_failure", 422, undefined,
+            { category: "invalid_output", reasonCode: "topic_revision_signal_binding", providerId: "unknown", modelId: "unknown", ...result.trace,
+              brokerRequestIdHash: createHash("sha256").update(requestId).digest("hex") });
+        }
+        return result;
+      },
+      audit: () => { throw new Error("选题修订不得自动审计。"); },
+      validate,
+      ...(this.checkpointDirectory ? { checkpoint: planningCheckpoint(this.checkpointDirectory, key,
+        { kind: "topic", id: candidate.id, title: candidate.title, action: "revise" }) } : {}),
+    });
+    return execution.output.ideas[0]!;
   }
 
   lastExecutionIdentity(): { providerId: string; modelId: string } | undefined {

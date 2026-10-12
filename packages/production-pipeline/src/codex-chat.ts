@@ -1,4 +1,5 @@
 import http from "node:http";
+import { parseModelAttempts, summarizeModelAttemptUsage, type ModelAttemptUsage } from "./model-attempt-usage.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   TASK_BINDING_VERSION,
@@ -51,6 +52,8 @@ export type ModelCandidateAttempt = ModelCandidateAttemptBase & (
 );
 
 export interface CodexTaskTrace {
+  modelAttempts?: ModelAttemptUsage[];
+  usageComplete?: boolean;
   taskKind: CodexTaskKind;
   promptVersion: string;
   contractDigest?: string;
@@ -94,6 +97,12 @@ export interface CodexTaskSession {
 export interface CodexTaskRequestOptions {
   timeoutMs?: number;
   beforeSubmit?: (operation: CodexPreparedOperation) => Promise<void>;
+  /** 故障切换前保存每个原请求的回执；回调失败时停止执行，不能丢失费用证据后继续调用。 */
+  onExecution?: (execution: {
+    requestId: string;
+    state: "completed" | "completed_failure" | "not_accepted" | "unknown";
+    trace?: CodexTaskTrace | ModelProviderFailureDetails;
+  }) => Promise<void>;
   /**
    * 本次任务要用的模型，必须是 broker 在 /health 里公告的已审核候选之一。
    * 它随信封的 brokerBinding.modelId 声明给 broker，而不是另开一个字段——模型本来
@@ -134,6 +143,8 @@ export type ModelProviderFailureCategory =
   | "execution_failed";
 
 export interface ModelProviderFailureDetails {
+  modelAttempts?: ModelAttemptUsage[];
+  usageComplete?: boolean;
   category: ModelProviderFailureCategory;
   reasonCode: string;
   providerId: string;
@@ -1296,7 +1307,7 @@ function validateResponseIdentity(record: Record<string, unknown>, operation: Co
   }
 }
 
-function validatePreparedOperation(operation: CodexPreparedOperation, socketPath: string): void {
+export function validatePreparedOperation(operation: CodexPreparedOperation, socketPath: string): void {
   if (operation.version !== "video-factory/codex-prepared-operation-v1"
     || operation.route.socketPath !== socketPath
     || operation.envelope.requestId !== operation.requestId
@@ -1425,7 +1436,17 @@ function parseTrace(value: unknown): CodexTaskTrace {
     ...(retryCount !== undefined ? { retryCount } : {}),
     ...(modelAttemptCount !== undefined ? { modelAttemptCount } : {}),
     ...(structuredRepairCount !== undefined ? { structuredRepairCount } : {}),
+    ...attemptUsageDetails(trace.modelAttempts, modelAttemptCount),
   };
+}
+
+function attemptUsageDetails(value: unknown, expectedCount: number | undefined) {
+  try {
+    const attempts = parseModelAttempts(value);
+    return attempts ? summarizeModelAttemptUsage(attempts, expectedCount ?? -1) : { usageComplete: false };
+  } catch {
+    throw new CodexBridgeError("Codex bridge model attempt usage is invalid.", false);
+  }
 }
 
 function optionalDurationMs(value: unknown, field: string): number | undefined {
@@ -1616,6 +1637,7 @@ function bridgeFailureDetails(raw: string): ModelProviderFailureDetails | undefi
       ...(typeof details.remoteQueryable === "boolean" ? { remoteQueryable: details.remoteQueryable } : {}),
       ...(typeof details.modelAttemptCount === "number" ? { modelAttemptCount: details.modelAttemptCount } : {}),
       ...(typeof details.structuredRepairCount === "number" ? { structuredRepairCount: details.structuredRepairCount } : {}),
+      ...attemptUsageDetails(details.modelAttempts, typeof details.modelAttemptCount === "number" ? details.modelAttemptCount : undefined),
     };
   } catch {
     return undefined;

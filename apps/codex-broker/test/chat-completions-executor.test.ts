@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import { CodexExecutorError, codexExecutorProfileFor, parseTaskRequest } from "../src/codex-executor.js";
-import { REQUIRED_BROKER_TASK_KINDS as BROKER_TASK_KINDS, taskContractDescriptorFor } from "../src/task-definitions.js";
+import { REQUIRED_BROKER_TASK_KINDS as BROKER_TASK_KINDS, modelOutputSchemaFor, taskContractDescriptorFor } from "../src/task-definitions.js";
 import {
   ChatCompletionsExecutor,
   DEEPSEEK_CHAT_COMPLETIONS_PROVIDER,
@@ -279,6 +279,98 @@ function validRoleAudit(): Record<string, unknown> {
   };
 }
 
+describe("role-audit repair and physical attempt usage", () => {
+  function repaired(first: Record<string, unknown>, second: Record<string, unknown>, missingFirstUsage = false) {
+    let calls = 0;
+    const executor = chatExecutor({ env: { DEEPSEEK_API_KEY: API_KEY }, fetchFn: async () => {
+      calls += 1;
+      assert.ok(calls <= 2);
+      return new Response(JSON.stringify({
+        choices: [{ finish_reason: "stop", message: { content: JSON.stringify(calls === 1 ? first : second) } }],
+        ...(!missingFirstUsage || calls !== 1 ? { usage: calls === 1
+          ? { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 }
+          : { prompt_tokens: 200, completion_tokens: 30, total_tokens: 230 } } : {}),
+      }), { status: 200 });
+    } });
+    return executor.runTask(roleAuditTask(false));
+  }
+
+  it("fills only schema-fixed structure and protects every other top-level contract field", async () => {
+    const schema = modelOutputSchemaFor("role-audit") as { properties: Record<string, { const?: unknown }> };
+    const valid = validRoleAudit();
+    assert.deepEqual(Object.keys(valid).sort(), Object.keys(schema.properties).sort());
+    for (const [field, definition] of Object.entries(schema.properties)) {
+      const missing = { ...valid };
+      delete missing[field];
+      if (Object.hasOwn(definition, "const")) {
+        assert.equal(JSON.parse((await repaired(missing, valid)).output)[field], definition.const);
+      } else {
+        await assert.rejects(repaired(missing, valid), (error: unknown) => {
+          assert.ok(error instanceof CodexExecutorError);
+          assert.equal(error.details?.reasonCode, "repair_semantic_drift", field);
+          return true;
+        });
+      }
+    }
+  });
+
+  it("rejects changed assessment evidence, creator advice and missing content judgments", async () => {
+    const valid = validRoleAudit();
+    const changed = structuredClone(valid);
+    (changed.assessments as Array<{ dimensions: Array<{ evidence: string }> }>)[0]!.dimensions[0]!.evidence = "另一项证据";
+    await assert.rejects(repaired({ ...valid, extra: true }, changed), /changed protected content/);
+    const issue = { severity: "advisory", criterion: "表达", evidence: "原证据", repairInstruction: "原建议", creatorTitle: "标题", creatorObservation: "观察", creatorAction: "行动" };
+    const audit = { ...valid, issues: [issue] };
+    await assert.rejects(repaired({ ...audit, extra: true }, { ...audit, issues: [{ ...issue, creatorAction: "改写行动" }] }), /changed protected content/);
+    const missing = structuredClone(valid);
+    delete (missing.assessments as Array<{ dimensions: Array<Record<string, unknown>> }>)[0]!.dimensions[0]!.evidence;
+    await assert.rejects(repaired(missing, valid), /changed protected content/);
+  });
+
+  it("does not synthesize audit judgments when no parseable baseline exists", async () => {
+    let calls = 0;
+    const executor = chatExecutor({ env: { DEEPSEEK_API_KEY: API_KEY }, fetchFn: async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ choices: [{ message: { content: calls === 1 ? "无法提供结构化判断" : JSON.stringify(validRoleAudit()) } }] }), { status: 200 });
+    } });
+    await assert.rejects(executor.runTask(roleAuditTask(false)), (error: unknown) => error instanceof CodexExecutorError && error.details?.reasonCode === "invalid_json");
+    assert.equal(calls, 1);
+  });
+
+  it("records both attempts and sums returned usage on successful repair", async () => {
+    const result = await repaired({ ...validRoleAudit(), extra: true }, validRoleAudit());
+    const trace = result.trace as unknown as Record<string, unknown>;
+    assert.equal(trace.modelAttemptCount, 2);
+    assert.equal(trace.totalTokens, 350);
+    assert.equal(trace.promptTokens, 300);
+    assert.equal(trace.completionTokens, 50);
+    assert.equal(trace.usageComplete, true);
+    assert.deepEqual(trace.modelAttempts, [
+      { attempt: 1, usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 } },
+      { attempt: 2, usage: { promptTokens: 200, completionTokens: 30, totalTokens: 230 } },
+    ]);
+  });
+
+  it("keeps known usage while marking a missing attempt usage incomplete", async () => {
+    const result = await repaired({ ...validRoleAudit(), extra: true }, validRoleAudit(), true);
+    const trace = result.trace as unknown as Record<string, unknown>;
+    assert.equal(trace.totalTokens, 230);
+    assert.equal(trace.usageComplete, false);
+    assert.deepEqual((trace.modelAttempts as unknown[])[0], { attempt: 1, usage: null });
+  });
+
+  it("preserves both usage records when repair ends in failure", async () => {
+    await assert.rejects(repaired({ ...validRoleAudit(), extra: true }, { ...validRoleAudit(), summary: "改写判断" }), (error: unknown) => {
+      assert.ok(error instanceof CodexExecutorError);
+      const details = error.details as unknown as Record<string, unknown>;
+      assert.equal(details.totalTokens, 350);
+      assert.equal(details.usageComplete, true);
+      assert.equal((details.modelAttempts as unknown[]).length, 2);
+      return true;
+    });
+  });
+});
+
 describe("ChatCompletionsExecutor", () => {
   it("does not fall through to the ambient process credential when an environment is injected", () => {
     const previous = process.env.DEEPSEEK_API_KEY;
@@ -505,6 +597,10 @@ describe("ChatCompletionsExecutor", () => {
           completionTokens: 65_536,
           totalTokens: 67_536,
           reasoningTokens: 61_000,
+          modelAttempts: [{ attempt: 1, requestIdHash: createHash("sha256").update(requestId).digest("hex"), usage: {
+            promptTokens: 2_000, completionTokens: 65_536, totalTokens: 67_536, reasoningTokens: 61_000,
+          } }],
+          usageComplete: true,
           modelAttemptCount: 1,
           structuredRepairCount: 0,
         });
@@ -1237,6 +1333,8 @@ describe("ChatCompletionsExecutor", () => {
           providerId: "deepseek",
           modelId: "deepseek-flash",
           providerWaitMs: 37,
+          modelAttempts: [{ attempt: 1, requestIdHash: createHash("sha256").update(upstreamRequestId).digest("hex"), usage: null }],
+          usageComplete: false,
           modelAttemptCount: 1,
           structuredRepairCount: 0,
         });
@@ -1376,6 +1474,8 @@ describe("ChatCompletionsExecutor", () => {
           headersReceived: false,
           localExecutionEnded: true,
           remoteQueryable: false,
+          modelAttempts: [{ attempt: 1, usage: null }],
+          usageComplete: false,
           modelAttemptCount: 1,
           structuredRepairCount: 0,
         });

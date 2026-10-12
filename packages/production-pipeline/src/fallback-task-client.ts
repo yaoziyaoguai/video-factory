@@ -1,6 +1,7 @@
 import {
   CodexBridgeClient,
   CodexBridgeError,
+  codexBridgeErrorFromCause,
   type CodexTaskExecution,
   type CodexTaskKind,
   type CodexPreparedOperation,
@@ -94,13 +95,18 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
             ...(affinityProviderId === candidate.providerId && session.handle ? { handle: session.handle } : {}),
           }
         : undefined;
+      let execution: CodexTaskExecution;
       try {
-        const execution = await candidate.client.runTaskDetailed(kind, payload, candidateRequestId, candidateSession, {
+        execution = await candidate.client.runTaskDetailed(kind, payload, candidateRequestId, candidateSession, {
           ...requestOptions, ...(preferredModel ? { model: modelId } : {}),
         });
-        if (session) this.rememberAffinity(session.key, candidate.providerId);
-        return failures.length > 0 ? withFallbackTrace(execution, failures, modelId, candidate.providerId) : execution;
       } catch (error) {
+        const bridge = codexBridgeErrorFromCause(error);
+        if (candidateRequestId) await requestOptions.onExecution?.({
+          requestId: candidateRequestId,
+          state: bridge?.stage === "completed_failure" ? "completed_failure" : bridge?.stage === "not_accepted" ? "not_accepted" : "unknown",
+          ...(bridge?.failureDetails ? { trace: bridge.failureDetails } : {}),
+        });
         failures.push({ modelId, providerId: candidate.providerId, error });
         // isModelProviderFailure 对 stage=uncertain 一律返回 false：请求可能已被 durable broker
         // 受理并仍在执行，绝不能为它生成新的 backup requestId（双跑风险），原样上抛。
@@ -109,7 +115,12 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
           throw error;
         }
         if (position === ordered.length - 1) throw new ModelCandidatesExhaustedError(failures);
+        continue;
       }
+      if (candidateRequestId) await requestOptions.onExecution?.({ requestId: candidateRequestId, state: "completed",
+        ...(execution.trace ? { trace: execution.trace } : {}) });
+      if (session) this.rememberAffinity(session.key, candidate.providerId);
+      return failures.length > 0 ? withFallbackTrace(execution, failures, modelId, candidate.providerId) : execution;
     }
     throw new ModelCandidatesExhaustedError(failures);
   }
@@ -128,6 +139,12 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
     }
     // 恢复必须回到快照绑定的原路由；此处不筛“当前健康”也不遍历 backup。
     return candidate.client.observePrepared(operation, requestOptions);
+  }
+
+  override async observePreparedOnce(operation: CodexPreparedOperation, requestOptions: CodexTaskRequestOptions = {}) {
+    const candidate = this.candidates.find((item) => item.providerId === operation.brokerBinding.providerId);
+    if (!candidate) return { state: "query_failure" as const, observationError: "原模型服务暂不可用，保留原请求等待核对。" };
+    return candidate.client.observePreparedOnce(operation, requestOptions);
   }
 
   private rememberAffinity(sessionKey: string, providerId: string): void {

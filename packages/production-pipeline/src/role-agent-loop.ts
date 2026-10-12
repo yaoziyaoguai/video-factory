@@ -264,6 +264,7 @@ interface PersistedLoopState {
   retriedRequestIds: string[];
   requestOwners: Record<string, string>;
   requestPhases: Record<string, { phase: "produce" | "audit"; iteration: number }>;
+  requestExecutions?: Record<string, { state: "completed" | "completed_failure" | "not_accepted" | "unknown"; trace: unknown }>;
   failure?: NonNullable<AgentLoopTrace["failure"]>;
   /** C5：已确证未受理（409）触发的会话重建计数；持久化、有界，防止无界重建循环。 */
   sessionRebuilds: Record<"produce" | "audit", number>;
@@ -983,6 +984,7 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
         ([requestId, owner]) => typeof requestId === "string" && typeof owner === "string" && owner.length > 0,
       )) as Record<string, string>
       : {},
+    ...(isRecordValue(candidate.requestExecutions) ? { requestExecutions: structuredClone(candidate.requestExecutions) as NonNullable<PersistedLoopState["requestExecutions"]> } : {}),
     // 在更改合同/循环key前固化历史物理请求映射，迁移后不再依赖可变身份反推。
     requestPhases: Object.fromEntries(roleAgentCheckpointRequestPhases(
       loaded as Record<string, unknown>, new Set(candidate.attemptedRequestIds!),
@@ -1281,11 +1283,23 @@ async function executeTrackedOperation<TOutput>(
       && state.pendingOperation.generation === (state.operationGenerations[operationKey] ?? 0)
       ? structuredClone(state.pendingOperation.operation)
       : undefined;
-    return await execute({
+    const result = await execute({
       requestId,
       session,
       requestOptions: {
         beforeSubmit: async (preparedOperation) => {
+          // backup拥有自己的物理请求身份；逻辑操作的requestId不能替代备用请求记账。
+          if (!state.attemptedRequestIds.includes(preparedOperation.requestId)) {
+            state.attemptedRequestIds.push(preparedOperation.requestId);
+            state.requestPhases[preparedOperation.requestId] = { phase, iteration };
+            state.phaseAttempts[phase] += 1;
+          }
+          // 切换服务后pending会变化，先保留原绑定；没有usage时仍不能推造次数或金额。
+          (state.requestExecutions ??= {})[preparedOperation.requestId] ??= { state: "unknown", trace: {
+            providerId: preparedOperation.brokerBinding.providerId,
+            modelId: preparedOperation.brokerBinding.modelId,
+            brokerRequestIdHash: createHash("sha256").update(preparedOperation.requestId).digest("hex"),
+          } };
           if (options.checkpoint?.executionOwnerId && !state.requestOwners[preparedOperation.requestId]) {
             state.requestOwners[preparedOperation.requestId] = options.checkpoint.executionOwnerId;
           }
@@ -1299,10 +1313,31 @@ async function executeTrackedOperation<TOutput>(
           };
           await persistCheckpoint(options, state);
         },
+        onExecution: async ({ requestId: actualRequestId, state: executionState, trace }) => {
+          const previous = state.requestExecutions?.[actualRequestId]?.trace;
+          (state.requestExecutions ??= {})[actualRequestId] = { state: executionState,
+            trace: { ...(isRecordValue(previous) ? previous : {}), ...(trace ? structuredClone(trace) : {}) } };
+          await persistCheckpoint(options, state);
+        },
       },
       ...(pending ? { preparedOperation: pending } : {}),
     });
+    // 宿主校验可能退役候选；先按物理请求保留回执，后续产稿不可覆盖已返回的用量。
+    if (result.trace) {
+      const actualRequestId = state.attemptedRequestIds.find((id) => createHash("sha256").update(id).digest("hex") === result.trace!.brokerRequestIdHash)
+        ?? state.pendingOperation?.operation.requestId ?? requestId;
+      (state.requestExecutions ??= {})[actualRequestId] = { state: "completed", trace: structuredClone(result.trace) };
+    }
+    return result;
   } catch (error) {
+    const bridge = codexBridgeErrorFromCause(error);
+    const actualRequestId = bridge?.failureDetails?.brokerRequestIdHash
+      ? state.attemptedRequestIds.find((id) => createHash("sha256").update(id).digest("hex") === bridge.failureDetails!.brokerRequestIdHash) ?? requestId
+      : state.pendingOperation?.operation.requestId ?? requestId;
+    if (bridge?.failureDetails) (state.requestExecutions ??= {})[actualRequestId] = {
+      state: bridge.stage === "completed_failure" ? "completed_failure" : bridge.stage === "not_accepted" ? "not_accepted" : "unknown",
+      trace: structuredClone(bridge.failureDetails),
+    };
     const unaccepted = error instanceof CodexBridgeError
       && ["not_accepted", "rejected", "conflict"].includes(error.stage)
       && error.failureDetails?.accepted !== true;

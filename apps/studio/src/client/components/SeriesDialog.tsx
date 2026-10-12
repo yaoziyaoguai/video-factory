@@ -2,6 +2,7 @@ import { AlertCircle, Check, SlidersHorizontal, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { parseStudioSeriesInput, type StudioSeriesInput } from "../../shared/api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
+import { inferVisualCategory } from "../../shared/visual-plan.js";
 
 interface SeriesDialogProps {
   open: boolean;
@@ -44,7 +45,7 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
         premise: required(data, "premise"),
         audience: required(data, "audience"),
         platform: valueOr(data, "platform", "douyin"),
-        category: valueOr(data, "category", inferSeriesCategory(`${name} ${required(data, "premise")}`)),
+        category: valueOr(data, "category", inferVisualCategory(`${name}\n${required(data, "premise")}`)),
         track: seriesTrack(name),
         pillars: [valueOr(data, "pillar1", ""), valueOr(data, "pillar2", "")].filter(Boolean),
         tone: valueOr(data, "tone", ""),
@@ -69,7 +70,7 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
     }}>
       <section ref={dialogRef} className="run-dialog series-dialog" role="dialog" aria-modal="true" aria-labelledby="series-dialog-title" tabIndex={-1}>
         <header className="dialog-header" inert={discardPromptOpen}>
-          <div><p className="eyebrow">系列策划</p><h2 id="series-dialog-title">创建系列</h2><p>只填三项就能开始。未填写的风格和内容方向交给角色提出建议，再由你决定。</p></div>
+          <div><p className="eyebrow">系列策划</p><h2 id="series-dialog-title">创建系列</h2><p>创建只保存系列和可编辑草稿，不调用模型。保存后可手工编辑，或点击“生成并审计路线图”；该动作会调用模型并可能产生费用。未填写的风格和内容方向交给角色提出建议，再由你决定。</p></div>
           <button className="icon-button" type="button" onClick={requestClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
         <form
@@ -155,24 +156,6 @@ function positiveInteger(data: FormData, key: string, fallback: number): number 
 function currentQuarterLabel(): string {
   const now = new Date();
   return `${now.getFullYear()} Q${Math.floor(now.getMonth() / 3) + 1}`;
-}
-
-function inferSeriesCategory(value: string): StudioSeriesInput["category"] {
-  if (/亲子|育儿|母婴|家长|宝宝/.test(value)) return "parenting";
-  if (/汽车|新车|新能源车|电动车|智驾/.test(value)) return "automotive";
-  if (/游戏|电竞|手游|主机|玩家/i.test(value)) return "gaming";
-  if (/时尚|穿搭|美妆|护肤|防晒/.test(value)) return "fashion-beauty";
-  if (/美食|早餐|小吃|餐厅|菜谱|做饭/.test(value)) return "food";
-  if (/旅行|旅游|文旅|景区|酒店|民宿/.test(value)) return "travel";
-  if (/三农|农业|农机|粮食|丰收|乡村振兴/.test(value)) return "agriculture-rural";
-  if (/\bAI\b|人工智能|模型|科技|软件|应用/i.test(value)) return "technology";
-  if (/职场|工作|工资|就业|消费|财经/.test(value)) return "finance-career";
-  if (/运动|健康|足球|篮球|训练/.test(value)) return "health-sports";
-  if (/学习|教育|考试|课程/.test(value)) return "education";
-  if (/电影|音乐|明星|综艺/.test(value)) return "entertainment";
-  if (/城市|社区|文化|华人|地方/.test(value)) return "local-culture";
-  if (/社会|新闻|公共|事件/.test(value)) return "society";
-  return "lifestyle";
 }
 
 function seriesTrack(name: string): string {

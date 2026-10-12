@@ -84,26 +84,38 @@ async function fixture(t) {
 import {fork} from 'node:child_process';
 function worker(t) {
   const child=fork(new URL('./r4-receipt-child.mjs', import.meta.url),[],{cwd:process.cwd(),stdio:['ignore','ignore','inherit','ipc']});
-  t.after(()=>{if(child.connected)child.kill();});
+  t.after(()=>{if(child.exitCode===null)child.kill();});
   const buffered = new Map();
   const waiting = new Map();
-  child.on('message',m=>{const resolve=waiting.get(m.type);if(resolve){waiting.delete(m.type);resolve(m);}else buffered.set(m.type,m);});
-  return {child,wait:type=>buffered.has(type)?Promise.resolve(buffered.get(type)):new Promise(resolve=>waiting.set(type,resolve))};
+  let failure;
+  const fail=error=>{failure=error;for(const pending of waiting.values())pending.reject(error);waiting.clear();};
+  child.on('error',fail);
+  child.on('exit',(code,signal)=>fail(new Error(`Receipt worker exited before its response: ${code ?? signal}`)));
+  child.on('message',m=>{const pending=waiting.get(m.type);if(pending){waiting.delete(m.type);pending.resolve(m);}else buffered.set(m.type,m);});
+  return {child,wait:type=>buffered.has(type)?Promise.resolve(buffered.get(type)):failure?Promise.reject(failure):new Promise((resolve,reject)=>waiting.set(type,{resolve,reject}))};
 }
 test('R4-F03: concurrent processes must not overwrite terminal receipt with stale running', {timeout:10000}, async t=>{
+  const started=performance.now();
+  const mark=stage=>console.log(JSON.stringify({probe:'receipt-race-timing',stage,elapsedMs:Math.round(performance.now()-started)}));
   const f=await fixture(t);
-  f.holdNextRunning();
+  mark('fixture-ready');
   const old=worker(t);
+  const next=worker(t);
+  // 模块冷启动不属于回执竞争；并行准备两个进程，再按原 barrier 顺序制造迟到 running。
+  await Promise.all([old.wait('ready').then(()=>mark('old-worker-ready')),next.wait('ready').then(()=>mark('next-worker-ready'))]);
+  f.holdNextRunning();
   old.child.send({workspace:f.workspace,run:f.run});
   await f.waitUntilRunningHeld();
+  mark('running-held');
   f.setState('completed_failure');
-  const next=worker(t);
   next.child.send({workspace:f.workspace,run:f.run});
   const terminal=await next.wait('done');
+  mark('terminal-written');
   assert.equal(terminal.error,undefined);
   assert.equal(terminal.state,'completed_failure');
   f.releaseHeldRunning();
   const stale=await old.wait('done');
+  mark('stale-returned');
   assert.equal(stale.error,undefined);
   const persisted=JSON.parse(await readFile(f.receiptPath,'utf8'));
   console.log(JSON.stringify({probe:'receipt-race',terminal,stale,persistedState:persisted.taskState,posts:f.posts}));

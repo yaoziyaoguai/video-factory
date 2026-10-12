@@ -15,6 +15,35 @@ function checkpoint() {
 }
 
 describe("read-only model execution facts", () => {
+  it("preserves physical attempt usage once across checkpoint replay and flags missing legacy evidence", () => {
+    const input = { nodeId: "series.plan", requestId: "roadmap", purpose: "produce", state: "completed" as const, evidenceSource: "series.json" };
+    const usageTrace = { ...trace("roadmap", 2), modelAttempts: [
+      { attempt: 1, usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 } },
+      { attempt: 2, usage: { promptTokens: 200, completionTokens: 30, totalTokens: 230 } },
+    ] };
+    const fact = projectRequestExecution({ ...input, trace: usageTrace });
+    const merged = mergeModelExecutionFacts([fact, fact, fact]);
+    assert.equal(merged.length, 1);
+    assert.deepEqual((merged[0] as unknown as Record<string, unknown>).modelAttempts, usageTrace.modelAttempts);
+    assert.equal((merged[0] as unknown as Record<string, unknown>).usageComplete, true);
+    const legacy = projectRequestExecution({ ...input, trace: { ...trace("roadmap", 2), totalTokens: 230 } });
+    assert.equal((legacy as unknown as Record<string, unknown>).usageComplete, false);
+    assert.equal((legacy as unknown as Record<string, unknown>).modelAttempts, undefined);
+    const conflict = projectRequestExecution({ ...input, trace: { ...usageTrace, modelAttempts: [
+      { attempt: 1, usage: { promptTokens: 999, completionTokens: 20, totalTokens: 1019 } }, usageTrace.modelAttempts[1],
+    ] } });
+    assert.equal(mergeModelExecutionFacts([fact, conflict])[0]?.conflict, true);
+  });
+  it("merges complementary attempt usage without losing known fields on replay", () => {
+    const input = { nodeId: "series.plan", requestId: "partial", purpose: "produce", state: "completed" as const, evidenceSource: "series.json" };
+    const first = projectRequestExecution({ ...input, trace: { ...trace("partial"), modelAttempts: [{ attempt: 1, usage: { promptTokens: 100 } }] } });
+    const second = projectRequestExecution({ ...input, trace: { ...trace("partial"), modelAttempts: [{ attempt: 1, usage: { completionTokens: 20, totalTokens: 120 } }] } });
+    for (const facts of [[first, second, first], [second, first, second]]) {
+      const merged = mergeModelExecutionFacts(facts);
+      assert.deepEqual(merged[0]?.usage, { promptTokens: 100, completionTokens: 20, totalTokens: 120 });
+      assert.equal(merged[0]?.usageComplete, true);
+    }
+  });
   it("does not confuse provider receipts with broker identities and still rejects a mismatched broker hash", () => {
     const input = { nodeId: "visual-review", requestId: "sound-1", purpose: "audio", state: "completed" as const, evidenceSource: "sound.result" };
     const legacy = { providerId: "provider", modelId: "model", requestIdHash: hash("upstream-receipt"), modelAttemptCount: 1 };

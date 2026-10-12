@@ -6,6 +6,34 @@ import { describe, it } from "node:test";
 import { CodexBridgeError, RoleAgentLoopError, runRoleAgentLoop, validateRoleAudit } from "../src/index.js";
 import type { ModelProviderFailureCategory } from "../src/codex-chat.js";
 import { fileRoleAgentLoopCheckpoint } from "../src/role-agent-checkpoint.js";
+import { projectCheckpointExecutions, mergeModelExecutionFacts } from "../src/model-execution-facts.js";
+
+it("retains every returned usage across host validation repair and checkpoint replay", async () => {
+  let stored: unknown;
+  let calls = 0;
+  const execute = () => runRoleAgentLoop({
+    role: "选题总编", contractVersion: "usage-test-v1", criteria: ["标题"], maxIterations: 1, deferAudit: true,
+    checkpoint: { key: "usage-test", load: async () => stored, save: async (value) => { stored = structuredClone(value); } },
+    produce: async () => {
+      calls++;
+      return { output: calls === 1 ? { invalid: true } : { title: "合法候选" }, trace: {
+        taskKind: "topic-ideas" as const, promptVersion: "test", prompt: "private prompt", providerId: "test", modelId: "test", modelAttemptCount: 1,
+        modelAttempts: [{ attempt: 1, usage: { promptTokens: calls * 100, completionTokens: calls * 10, totalTokens: calls * 110 } }],
+      } };
+    },
+    audit: async () => { throw new Error("不得自动审计"); }, validate: titleCandidate,
+  });
+  await execute();
+  const facts = projectCheckpointExecutions("topic.planning", stored as Record<string, unknown>, "checkpoint");
+  assert.equal(facts.length, 2);
+  assert.deepEqual(facts.map((fact) => fact.usage?.totalTokens), [110, 220]);
+  assert.ok(facts.every((fact) => fact.usageComplete));
+  await execute();
+  assert.equal(calls, 2);
+  const replayed = projectCheckpointExecutions("topic.planning", stored as Record<string, unknown>, "checkpoint");
+  assert.equal(mergeModelExecutionFacts([...facts, ...replayed]).length, 2);
+  assert.doesNotMatch(JSON.stringify(facts), /private prompt/);
+});
 
 describe("role agent loop audit boundary", () => {
   it("recovers a legacy rejected audit without another model call and keeps explicit reinspection independent", async () => {

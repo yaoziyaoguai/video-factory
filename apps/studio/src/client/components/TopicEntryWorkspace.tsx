@@ -34,6 +34,7 @@ import { creatorFacingTechnicalText, reasoningEffortLabel } from "../presentatio
 import { beijingDateTime, evidenceGroupCountLabel, groupDisplayEvidence, platformLabel, proposalSourceLabel, TOPIC_CATEGORY_LABELS, trendStatusText, type DisplayEvidenceGroup, type TrendStatusMeta } from "../presentation.js";
 import { CandidateVerificationDialog } from "./CandidateVerificationDialog.js";
 import { SeriesEpisodeDialog } from "./SeriesEpisodeDialog.js";
+import { ModelExecutionDetails } from "./ModelExecutionDetails.js";
 
 type EntryMode = StudioCandidateOrigin | "custom";
 type TrendDeskView = "all" | "produce_video" | "produce_image_story" | "not_recommended" | "pending_editor" | "source_short";
@@ -52,6 +53,7 @@ interface TopicEntryWorkspaceProps {
   seriesAuditReady?: boolean;
   generatingSeriesId?: string;
   onGenerateSeriesRoadmap?: (seriesId: string) => Promise<void>;
+  onRecoverSeriesRoadmap?: (seriesId: string, operationId: string, action: "query" | "retrieve") => Promise<void>;
   onRetry: (origin: StudioCandidateOrigin) => void;
   onRefreshTrends: () => void;
   onAdopt: (candidate: StudioCandidateInboxItem, verificationConfirmed?: boolean) => Promise<void>;
@@ -221,6 +223,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
               onRescan={props.onRescanSeries}
               onViewProductionRecords={props.onViewProductionRecords}
               {...(props.onGenerateSeriesRoadmap ? { onGenerateRoadmap: props.onGenerateSeriesRoadmap } : {})}
+              {...(props.onRecoverSeriesRoadmap ? { onRecoverRoadmap: props.onRecoverSeriesRoadmap } : {})}
               generatingRoadmap={props.generatingSeriesId === selectedSeries.id}
               {...(props.onSupplementSources ? { onSupplementSources: props.onSupplementSources } : {})}
               {...(props.seriesAuditReady === undefined ? {} : { seriesAuditReady: props.seriesAuditReady })}
@@ -299,6 +302,7 @@ function SeriesRoadmap({
   onSupplementSources,
   seriesAuditReady,
   onGenerateRoadmap,
+  onRecoverRoadmap,
   generatingRoadmap,
 }: {
   series: StudioSeries;
@@ -317,6 +321,7 @@ function SeriesRoadmap({
   onSupplementSources?: (candidate: StudioCandidateInboxItem) => void;
   seriesAuditReady?: boolean;
   onGenerateRoadmap?: (seriesId: string) => Promise<void>;
+  onRecoverRoadmap?: (seriesId: string, operationId: string, action: "query" | "retrieve") => Promise<void>;
   generatingRoadmap: boolean;
 }) {
   const [editing, setEditing] = useState(false);
@@ -391,10 +396,31 @@ function SeriesRoadmap({
         </dl>
       </details>
 
-      {onGenerateRoadmap && series.episodes.length > 0 && series.episodes.every((episode) => episode.status === "planned" && episode.planning.source === "rules") ? (
+      {series.roadmapOperations?.map((operation) => <section className="series-roadmap-operation" key={operation.id} aria-label="原路线图操作">
+        <h3>{operation.owner.kind === "unassigned" ? "历史系列请求待核" : operation.candidate ? "已保存模型候选" : "原路线图请求"}</h3>
+        <p role="status">{operation.message}</p>
+        {operation.evidenceIssue ? <p>{operation.evidenceIssue}</p> : null}
+        {operation.candidate ? <details>
+          <summary>查看原候选（{operation.candidate.length} 集）</summary>
+          <ol>{operation.candidate.map((episode) => <li key={episode.episodeNumber}>
+            <h4>第 {episode.episodeNumber} 集 · {episode.title}</h4>
+            <p>{episode.viewerPromise}</p><p>开场：{episode.hook}</p><p>兑现：{episode.payoff}</p>
+            <p>承接：{episode.fromPrevious.join("；") || "无"} · 留给下一集：{episode.toNext.join("；") || "无"}</p>
+          </li>)}</ol>
+        </details> : null}
+        {operation.candidate ? <p>取回只写入待采用草稿，不调用模型。采用和人工修改仍由你决定。</p> : null}
+        {operation.candidate && !operation.canRetrieve && !operation.evidenceIssue ? <p>当前路线图已修改或采用，原候选仅供查看。</p> : null}
+        {onRecoverRoadmap ? <div className="series-recovery-actions">
+          <button className="button button-secondary" type="button" disabled={generatingRoadmap || operation.canQuery === false} onClick={() => void onRecoverRoadmap(series.id, operation.id, "query")}>查询原请求</button>
+          <button className="button button-primary" type="button" disabled={generatingRoadmap || editing || !operation.canRetrieve} onClick={() => void onRecoverRoadmap(series.id, operation.id, "retrieve")}>取回为待采用草稿</button>
+        </div> : null}
+        <ModelExecutionDetails facts={operation.executionFacts} />
+      </section>)}
+
+      {onGenerateRoadmap && !series.roadmapOperations?.length && series.episodes.length > 0 && series.episodes.every((episode) => episode.status === "planned" && episode.planning.source === "rules") ? (
         <div className="candidate-cache-warning" role="status">
           <AlertCircle aria-hidden="true" size={17} />
-          <span>当前是可编辑的规则路线图，尚无模型初稿和首审。</span>
+          <span>当前是可编辑的规则路线图，尚无模型初稿和首审。生成并审计将调用模型，可能产生费用。</span>
           <button className="button button-secondary" type="button" disabled={generatingRoadmap} onClick={() => void onGenerateRoadmap(series.id)}>
             {generatingRoadmap ? "正在生成并审计…" : "生成并审计路线图"}
           </button>
@@ -535,6 +561,8 @@ function planningAuditLabel(planning: StudioSeries["episodes"][number]["planning
   if (planning.auditStatus === "passed") return `独立复核已通过（记录 ${planning.auditIterations} 次）`;
   // 历史记录可能不止一次；当前首稿只审一次，不能再把固定三轮写成产品规则。
   if (planning.auditStatus === "awaiting_user") return `独立复核有建议（记录 ${planning.auditIterations} 次）`;
+  if (planning.auditStatus === "failed") return "独立审计失败 · 候选保留";
+  if (planning.auditStatus === "unknown") return "原审计结果待核 · 请查询原请求";
   if (planning.auditStatus === "stale") return "上游内容已更新 · 可主动再审";
   if (planning.auditStatus === "not_audited") return "本版未审；可直接采用或主动审计";
   if (planning.auditStatus === "human_override") return "人工修订 · 待后续复核";
