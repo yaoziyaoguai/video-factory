@@ -251,6 +251,7 @@ export function TemplatesPage() {
 
       {error ? <div className="page-error" role="alert"><AlertCircle size={18} aria-hidden="true" /><span>{error}</span></div> : null}
       {loading && templates.length === 0 ? <div className="queue-placeholder">正在读取模板目录...</div> : null}
+      <div className="template-workspace">
       {templates.length > 0 ? <TemplateGallery templates={templates} selectedId={selectedId} onSelect={select} /> : null}
       {draft ? (
         <section className="template-editor" aria-label="模板编辑器">
@@ -345,6 +346,7 @@ export function TemplatesPage() {
           </footer>
         </section>
       ) : null}
+      </div>
       <details className="template-experiments" aria-label="模板制作质量记录">
         <summary><span><strong>模板制作质量记录</strong><small>查看过审、返工和制作质量证据，不预测流量</small></span><b>{experiments.length ? `${experiments.length} 个模板有数据` : "暂无数据"}</b></summary>
         <div className="template-experiment-content">

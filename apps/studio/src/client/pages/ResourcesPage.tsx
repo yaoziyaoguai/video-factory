@@ -338,9 +338,14 @@ export function ResourcesPage() {
   return (
     <main className="page resources-page" data-active-section={activeSection}>
       <header className="page-header resources-header">
-        <div>
+        <div className="resources-header-copy">
           <h1>创作设置</h1>
-          <p className="page-summary">为下一条视频确定默认创作方式，并检查热点、模型、声音、画面和发布出口是否真正可用。</p>
+          <details className="resource-overview-disclosure" data-tour="resource-overview"><summary>查看服务连接概况</summary><section className="resource-masthead" aria-label="能力概览">
+            <div><span>热点服务</span><strong>{serviceError ? "—" : `${readyServices}/${services.length}`}</strong></div>
+            <div><span>画面来源</span><strong>{providerError ? "—" : readyVisual}</strong></div>
+            <div><span>制作能力</span><strong>{providerError ? "—" : `${readyFoundation}/${foundationProviders.length}`}</strong></div>
+            <div className="resource-budget"><UploadCloud aria-hidden="true" size={17} /><span>发布出口</span><strong>{publishError ? "—" : usablePublishTargets}</strong></div>
+          </section></details>
         </div>
         <button
           aria-label="刷新能力状态"
@@ -352,13 +357,6 @@ export function ResourcesPage() {
           <RefreshCw aria-hidden="true" size={17} />
         </button>
       </header>
-
-      <details className="resource-overview-disclosure" data-tour="resource-overview"><summary>查看服务连接概况</summary><section className="resource-masthead" aria-label="能力概览">
-        <div><span>热点服务</span><strong>{serviceError ? "—" : `${readyServices}/${services.length}`}</strong></div>
-        <div><span>画面来源</span><strong>{providerError ? "—" : readyVisual}</strong></div>
-        <div><span>制作能力</span><strong>{providerError ? "—" : `${readyFoundation}/${foundationProviders.length}`}</strong></div>
-        <div className="resource-budget"><UploadCloud aria-hidden="true" size={17} /><span>发布出口</span><strong>{publishError ? "—" : usablePublishTargets}</strong></div>
-      </section></details>
 
       <nav className="configuration-index" aria-label="配置分区">
         {RESOURCE_SECTIONS.map(({ id, label, icon: Icon }) => (
@@ -376,11 +374,10 @@ export function ResourcesPage() {
         <ResourceHeading eyebrow="创作基线" title="新建制作默认值" meta="保存后自动带入下一条视频，创建时仍可单独调整" />
         {settingsError ? <ResourceError title="创作默认值读取失败" message={settingsError} retry={load} /> : !settings ? <div className="region-loading">正在读取创作默认值...</div> : <div className="configuration-sheet">
           <div className="configuration-intro">
-            <Settings2 aria-hidden="true" size={22} />
-            <div><p>启用付费画面后，仍须查看本片报价并单独确认费用；保存默认值不是购买授权。</p><ProductionEnvironmentStatus capabilities={capabilities} services={services} /></div>
+            <ProductionEnvironmentStatus capabilities={capabilities} services={services} />
           </div>
           <div className="configuration-fields">
-            <label className="field"><span>画面来源策略</span><select aria-label="默认画面来源策略" value={defaultRecipeId} onChange={(event) => setDefaultRecipeId(event.target.value as StudioProductionRecipeId)}>{RECIPE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
+            <label className="field"><span>画面来源策略</span><select aria-label="默认画面来源策略" value={defaultRecipeId} onChange={(event) => setDefaultRecipeId(event.target.value as StudioProductionRecipeId)}>{RECIPE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select><small>启用付费画面后，仍须查看本片报价并单独确认费用；保存默认值不是购买授权。</small></label>
             <label className="field"><span>导演角色</span><select aria-label="默认导演角色" value={productionDefaults.directorProfileId} onChange={(event) => setProductionDefaults((current) => ({ ...current, directorProfileId: event.target.value as StudioProductionDefaults["directorProfileId"] }))}>
               <option value="auto">自动选导演</option><option value="documentary-observer">纪实观察</option><option value="quiet-humanism">静观生活</option><option value="urban-poetic">都市诗意</option><option value="chromatic-storytelling">色彩叙事</option><option value="geometric-control">几何秩序</option><option value="suspense-staging">悬念调度</option>
             </select></label>
@@ -388,7 +385,7 @@ export function ResourcesPage() {
             <label className="field"><span>默认参考时长（秒）</span><input type="number" step="any" min="0.01" aria-label="默认视频时长" value={productionDefaults.durationSeconds || ""} onChange={(event) => setProductionDefaults((current) => ({ ...current, durationSeconds: Number(event.target.value) }))} /><small>只是创作参考；实际时长在脚本阶段由你确认。</small></label>
           </div>
           <div className="segmented-control configuration-review-mode" aria-label="终审方式"><span>人工终审</span><small>发布前不可跳过的安全检查</small></div>
-          <div className="configuration-save-row"><span>{!Number.isFinite(productionDefaults.durationSeconds) || productionDefaults.durationSeconds <= 0 ? "请填写大于 0 的参考时长" : productionHasChanges ? "有未保存的创作默认值" : "当前默认值已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !productionHasChanges || !Number.isFinite(productionDefaults.durationSeconds) || productionDefaults.durationSeconds <= 0} onClick={() => void saveDefaults({ defaultRecipeId, productionDefaults }, "创作默认值已保存，将从下一条新制作生效。")}><Save aria-hidden="true" size={16} />{productionHasChanges ? "保存创作默认" : "已保存"}</button></div>
+          <div className="configuration-save-row"><span>{!Number.isFinite(productionDefaults.durationSeconds) || productionDefaults.durationSeconds <= 0 ? "请填写大于 0 的参考时长" : productionHasChanges ? "有未保存的创作默认值" : "当前默认值已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !productionHasChanges || !Number.isFinite(productionDefaults.durationSeconds) || productionDefaults.durationSeconds <= 0} onClick={() => void saveDefaults({ defaultRecipeId, productionDefaults }, "创作默认值已保存，将从下一条新制作生效。")}><Save aria-hidden="true" size={16} />保存创作默认</button></div>
         </div>}
       </section>
       {settingsNotice ? <p className={`resource-settings-notice is-${settingsNotice.kind}`} role={settingsNotice.kind === "error" ? "alert" : "status"}>{settingsNotice.message}</p> : null}
@@ -610,13 +607,16 @@ function ManifestLedger({ items, record = false, onReview }: { items: StudioReso
 }
 
 function ResourceItemPreview({ item }: { item: StudioResourceManifest["items"][number] }) {
+  const [failedSource, setFailedSource] = useState<string>();
   const label = resourceItemIdentity(item);
   const imageUrl = item.providerId === "unsplash-stock-v1" ? unsplashPublicUrl(item.previewUrl, "images.unsplash.com") : item.contentUrl;
+  const mediaSource = item.contentType?.startsWith("image/") ? imageUrl : item.contentUrl;
+  if (mediaSource && failedSource === mediaSource) return <div className="resource-item-preview is-unavailable" role="status" aria-label={`${label}预览未能加载`}><Film aria-hidden="true" size={18} /><span>预览未能加载</span></div>;
   if (imageUrl && item.contentType?.startsWith("image/")) {
-    return <div className="resource-item-preview"><img src={imageUrl} alt={`${label}素材缩略图`} loading="lazy" /><span>{label}</span></div>;
+    return <div className="resource-item-preview"><img src={imageUrl} alt={`${label}素材缩略图`} loading="lazy" onError={() => setFailedSource(mediaSource)} /><span>{label}</span></div>;
   }
   if (item.contentUrl && item.contentType?.startsWith("video/")) {
-    return <div className="resource-item-preview"><video src={`${item.contentUrl}#t=0.1`} aria-label={`${label}素材缩略图`} muted playsInline preload="metadata" /><span>{label}</span></div>;
+    return <div className="resource-item-preview"><video src={`${item.contentUrl}#t=0.1`} aria-label={`${label}素材缩略图`} muted playsInline preload="metadata" onError={() => setFailedSource(mediaSource)} /><span>{label}</span></div>;
   }
   return <div className="resource-item-preview is-placeholder"><Film aria-hidden="true" size={18} /><span>{label}</span></div>;
 }

@@ -1,11 +1,13 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
+import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { studioApi } from "../src/client/api.js";
 import { AssetsPage } from "../src/client/pages/AssetsPage.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
 import { TodayPage } from "../src/client/pages/TodayPage.js";
+import { TopicEntryWorkspace } from "../src/client/components/TopicEntryWorkspace.js";
 import type { StudioCandidateInboxItem, StudioCreatorSettings, StudioIndexedAsset, StudioLocalCapability, StudioOpportunity, StudioResourceManifest, StudioSeries } from "../src/shared/api.js";
 
 const settings: StudioCreatorSettings = {
@@ -69,6 +71,82 @@ const saved: StudioOpportunity = {
 afterEach(() => vi.restoreAllMocks());
 
 describe("UI/UX page refinements", () => {
+  it("collapses candidate filters without hiding source facts, applied conditions, or zero-result recovery", async () => {
+    const user = userEvent.setup();
+    const lifestyle: StudioCandidateInboxItem = {
+      ...saved, id: "candidate-lifestyle", origin: "trend", category: "lifestyle", freshness: "today", risk: "low",
+      verification: { status: "ready", independentSources: 1, requiredSources: 1, reasons: [] },
+      editorialDecision: { verdict: "produce_video", score: 80, pendingEditorReview: true, reasons: ["规则保底，尚未审计"], guardrails: [] },
+      providerId: "rules", generatedAt: saved.createdAt, rationale: "让生活观察先出现",
+    };
+    const technology: StudioCandidateInboxItem = { ...lifestyle, id: "candidate-technology", title: "修好一盏旧台灯", category: "technology" };
+    const callbacks = {
+      selectedSeriesId: undefined, series: [], historicalRuns: [], loading: {},
+      trendMeta: { platformCount: 1, candidateCount: 2 },
+      onRetry: vi.fn(), onRefreshTrends: vi.fn(), onAdopt: vi.fn(), onCreateSeries: vi.fn(), onSelectSeries: vi.fn(),
+      onUpdateSeriesEpisode: vi.fn(), onLinkLegacyRun: vi.fn(), onRescanSeries: vi.fn(), onViewProductionRecords: vi.fn(), onManual: vi.fn(), onImport: vi.fn(),
+    } satisfies ComponentProps<typeof TopicEntryWorkspace>;
+    const workspace = (items: StudioCandidateInboxItem[]) => <MemoryRouter><TopicEntryWorkspace {...callbacks} inbox={{
+      items, generatedAt: saved.createdAt, refreshing: false,
+      facets: { total: items.length, origins: {}, categories: {}, platforms: {}, verdicts: {} },
+    }} /></MemoryRouter>;
+    const { rerender } = render(workspace([lifestyle, technology]));
+    const toggle = screen.getByText("筛选候选");
+    expect(toggle.closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText(/本轮热点由本地规则保底生成/)).toBeVisible();
+    expect(screen.getByText(/来源采集时间未记录/)).toBeVisible();
+    expect(screen.getByRole("button", { name: `查看${lifestyle.title}` })).toBeVisible();
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "生活 1" }));
+    await user.click(toggle);
+    expect(screen.getByLabelText("当前候选筛选")).toHaveTextContent("内容分类：生活");
+    expect(screen.getByLabelText("当前候选筛选")).toBeVisible();
+    expect(screen.getByRole("button", { name: "清除筛选" })).toBeVisible();
+    rerender(workspace([technology]));
+    expect(screen.getByLabelText("当前候选筛选")).toHaveTextContent("内容分类：生活");
+    expect(toggle.closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText("当前筛选下没有候选。")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(screen.queryByLabelText("当前候选筛选")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `查看${technology.title}` })).toBeVisible();
+    expect(callbacks.onAdopt).not.toHaveBeenCalled();
+    expect(callbacks.onRefreshTrends).not.toHaveBeenCalled();
+  });
+
+  it("keeps all settings sections and unsaved values when opening the compact connection overview", async () => {
+    mockSettings([capability("ffmpeg", "missing"), capability("minimax-tts", "ready")]);
+    const update = vi.spyOn(studioApi, "updateSettings");
+    const user = userEvent.setup();
+    render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
+    const duration = await screen.findByRole("spinbutton", { name: "默认视频时长" });
+    await user.clear(duration);
+    await user.type(duration, "42");
+
+    const overview = screen.getByText("查看服务连接概况");
+    expect(overview.closest("header")).toContainElement(screen.getByRole("heading", { name: "创作设置" }));
+    await user.click(overview);
+    expect(overview.closest("details")).toHaveAttribute("open");
+    await user.click(overview);
+    expect(overview.closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText("成片合成不可用").closest("details")).toBeNull();
+    expect(screen.getByText(/保存默认值不是购买授权/).closest("label")).toContainElement(screen.getByRole("combobox", { name: "默认画面来源策略" }));
+
+    const links = within(screen.getByRole("navigation", { name: "配置分区" })).getAllByRole("link");
+    expect(links).toHaveLength(9);
+    for (const link of links) {
+      await user.click(link);
+      expect(link).toHaveAttribute("aria-current", "page");
+      expect(window.location.hash).toBe(link.getAttribute("href"));
+    }
+    await user.click(links[0]!);
+    expect(screen.getByRole("spinbutton", { name: "默认视频时长" })).toBe(duration);
+    expect(duration).toHaveValue(42);
+    expect(screen.getByText("有未保存的创作默认值")).toBeInTheDocument();
+    expect(update).not.toHaveBeenCalled();
+    expect(studioApi.settings).toHaveBeenCalledOnce();
+    window.history.replaceState(null, "", "/");
+  });
+
   it("keeps edits made while creator defaults are saving, without claiming those edits were saved", async () => {
     mockSettings([]);
     let finish!: (value: StudioCreatorSettings) => void;
@@ -286,6 +364,8 @@ describe("UI/UX page refinements", () => {
     vi.spyOn(studioApi, "adoptCandidate").mockResolvedValue(adopted);
     const start = vi.spyOn(studioApi, "start");
     render(<MemoryRouter initialEntries={["/topics?mode=trend"]}><TodayPage /></MemoryRouter>);
+    expect(await screen.findByRole("heading", { name: "热点候选收件箱" })).toBeInTheDocument();
+    expect(screen.queryByText("实时信号")).not.toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: `采用候选 ${proposal.title}` }));
     const next = await screen.findByRole("button", { name: "继续制作准备" });
     expect(next.closest('[role="status"]')).toHaveTextContent("来自热点候选");

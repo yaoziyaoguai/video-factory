@@ -143,7 +143,7 @@ export function AssetsPage() {
       <header className="page-header asset-library-header">
         <div>
           <h1>素材库</h1>
-          <p className="page-summary">{collection === "creative" ? "可再次用于创作的画面与声音，按内容去重并保留授权和入片记录。" : "最终成片、脚本与质检记录独立归档，不混入可复用素材。"}</p>
+          {collection === "records" ? <p className="page-summary">成片、脚本与质检记录，不计入可复用素材。</p> : null}
           <Link to="/resources#visual-providers">配置外部素材来源</Link>
         </div>
         <div className="asset-library-count"><strong>{manifest ? collectionAssets.length : "—"}</strong><span>{collection === "creative" ? "项创作素材" : "项成片与记录"}</span></div>
@@ -338,13 +338,17 @@ function voiceOperationLabel(operation: NonNullable<StudioIndexedAssetUsage["voi
 }
 
 function AssetPreview({ asset, usage = asset.usages.at(-1), identity, onMediaPlay }: { asset: StudioIndexedAsset; usage?: StudioIndexedAssetUsage | undefined; identity: string; onMediaPlay?: (element: HTMLMediaElement) => void }) {
+  const [failedSource, setFailedSource] = useState<string>();
   const isUnsplash = (usage?.providerId ?? asset.providerId) === "unsplash-stock-v1";
   const imageUrl = isUnsplash
     ? unsplashPublicUrl(usage?.previewUrl ?? asset.previewUrl, "images.unsplash.com")
     : asset.contentUrl;
-  if (asset.contentUrl && asset.mediaKind === "video") return <div className="asset-card-preview"><video aria-label={`${assetTitle(asset, usage)} 预览`} src={`${asset.contentUrl}#t=0.1`} muted controls playsInline preload="metadata" onPlay={(event) => onMediaPlay?.(event.currentTarget)} /><span className="asset-card-identity">{identity}</span></div>;
-  if (imageUrl && asset.mediaKind === "image") return <div className="asset-card-preview"><img src={imageUrl} alt={`${assetTitle(asset, usage)} 素材`} loading="lazy" /><span className="asset-card-identity">{identity}</span></div>;
-  if (asset.contentUrl && asset.mediaKind === "audio") return <div className="asset-card-preview is-audio"><Music2 aria-hidden="true" size={28} /><audio aria-label={`${assetTitle(asset, usage)} 试听`} src={asset.contentUrl} controls preload="none" onPlay={(event) => onMediaPlay?.(event.currentTarget)} /><span className="asset-card-identity">{identity}</span></div>;
+  const mediaSource = asset.mediaKind === "image" ? imageUrl : asset.contentUrl;
+  const orientation = asset.width && asset.height && asset.width < asset.height ? "portrait" : "landscape";
+  if (mediaSource && failedSource === mediaSource) return <div className="asset-card-preview is-unavailable" role="status"><Film aria-hidden="true" size={28} /><strong>预览未能加载</strong><small>素材记录仍保留，可打开作品查看。</small><span className="asset-card-identity">{identity}</span></div>;
+  if (asset.contentUrl && asset.mediaKind === "video") return <div className="asset-card-preview" data-orientation={orientation}><video aria-label={`${assetTitle(asset, usage)} 预览`} src={`${asset.contentUrl}#t=0.1`} muted controls playsInline preload="metadata" onError={() => setFailedSource(mediaSource)} onPlay={(event) => onMediaPlay?.(event.currentTarget)} /><span className="asset-card-identity">{identity}</span></div>;
+  if (imageUrl && asset.mediaKind === "image") return <div className="asset-card-preview" data-orientation={orientation}><img src={imageUrl} alt={`${assetTitle(asset, usage)} 素材`} loading="lazy" onError={() => setFailedSource(mediaSource)} /><span className="asset-card-identity">{identity}</span></div>;
+  if (asset.contentUrl && asset.mediaKind === "audio") return <div className="asset-card-preview is-audio"><Music2 aria-hidden="true" size={28} /><audio aria-label={`${assetTitle(asset, usage)} 试听`} src={asset.contentUrl} controls preload="none" onError={() => setFailedSource(mediaSource)} onPlay={(event) => onMediaPlay?.(event.currentTarget)} /><span className="asset-card-identity">{identity}</span></div>;
   const Icon = asset.mediaKind === "video" ? Film : asset.mediaKind === "image" ? ImageIcon : asset.mediaKind === "audio" ? Music2 : asset.mediaKind === "document" ? FileText : Database;
   return <div className={`asset-card-preview is-${asset.mediaKind}`}><Icon aria-hidden="true" size={28} /><span>{mediaKindLabel(asset.mediaKind)}</span><span className="asset-card-identity">{identity}</span></div>;
 }

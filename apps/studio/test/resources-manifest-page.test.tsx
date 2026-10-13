@@ -328,6 +328,12 @@ describe("ResourcesPage source and rights section", () => {
     expect(within(runs).getByText("第 2 镜 · 视频画面")).toBeInTheDocument();
     expect(within(runs).getByRole("img", { name: "第 1 镜素材缩略图" })).toHaveAttribute("src", "/api/runs/alpha/artifacts/image-1/content");
     expect(within(runs).getByLabelText("第 2 镜素材缩略图")).toHaveAttribute("src", "/api/runs/beta/artifacts/video-2/content#t=0.1");
+    fireEvent.error(within(runs).getByRole("img", { name: "第 1 镜素材缩略图" }));
+    fireEvent.error(within(runs).getByLabelText("第 2 镜素材缩略图"));
+    expect(within(runs).getByRole("status", { name: "第 1 镜预览未能加载" })).toBeVisible();
+    expect(within(runs).getByRole("status", { name: "第 2 镜预览未能加载" })).toBeVisible();
+    expect(within(runs).getByText("第 1 镜 · 图片画面")).toBeVisible();
+    expect(within(runs).getByText("第 2 镜 · 视频画面")).toBeVisible();
   });
 
   it("marks the voice direction as creator-customized when saving it from settings", async () => {

@@ -1,4 +1,4 @@
-import { ChartNoAxesCombined, ChevronDown, CircleHelp, Clapperboard, Images, Layers3, LayoutTemplate, LogOut, Radar, Search, Settings2, Sparkles, UserRound, X } from "lucide-react";
+import { ChartNoAxesCombined, ChevronDown, CircleHelp, Clapperboard, Ellipsis, Images, Layers3, LayoutTemplate, LogOut, Radar, Search, Settings2, Sparkles, UserRound, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import type { StudioOpportunity, StudioRunSummary, StudioTemplate } from "../../shared/api.js";
@@ -11,6 +11,8 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
   const [healthy, setHealthy] = useState<boolean>();
   const [guideOpen, setGuideOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [moreNavOpen, setMoreNavOpen] = useState(false);
+  const moreNavTriggerRef = useRef<HTMLButtonElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchRuns, setSearchRuns] = useState<StudioRunSummary[]>([]);
   const [searchTemplates, setSearchTemplates] = useState<StudioTemplate[]>([]);
@@ -27,12 +29,25 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
   }, []);
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    setMoreNavOpen(false);
   }, [location.pathname]);
+
+  useEffect(() => {
+    if (!moreNavOpen) return;
+    const closeMoreNav = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setMoreNavOpen(false);
+      moreNavTriggerRef.current?.focus();
+    };
+    window.addEventListener("keydown", closeMoreNav);
+    return () => window.removeEventListener("keydown", closeMoreNav);
+  }, [moreNavOpen]);
 
   const openSearch = useCallback(() => {
     if (document.activeElement instanceof HTMLElement && document.activeElement !== document.body) {
       searchReturnFocusRef.current = document.activeElement;
     }
+    setMoreNavOpen(false);
     setSearchOpen(true);
     // 搜索范围 = 制作记录 + 选题机会 + 当前有效模板 + 功能入口；首次打开时一次性装配。
     if (!searchLoaded) {
@@ -101,62 +116,50 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
   return (
     <div className="app-shell studio-v3">
       <a className="skip-link" href="#main-content">跳到主要内容</a>
-      <aside className="studio-sidebar">
-        <NavLink className="brand" to="/" aria-label="VideoFactory 创作台">
-          <span className="brand-mark"><Clapperboard aria-hidden="true" size={19} /></span>
-          <span><strong>VideoFactory</strong><small>影像创作工作室</small></span>
-        </NavLink>
-        <nav className="primary-nav" aria-label="主导航" data-tour="primary-nav">
-          <NavLink to="/" end aria-label="创作台" title="创作台"><Radar aria-hidden="true" size={18} /><span>创作台</span></NavLink>
-          <NavLink to="/projects" data-tour="projects-nav" aria-label="制作记录" title="制作记录"><Layers3 aria-hidden="true" size={18} /><span>制作记录</span></NavLink>
-          <NavLink to="/assets" aria-label="素材库" title="素材库"><Images aria-hidden="true" size={18} /><span>素材库</span></NavLink>
-          <NavLink to="/templates" aria-label="模板资料" title="模板资料"><LayoutTemplate aria-hidden="true" size={18} /><span>模板资料</span></NavLink>
-          <NavLink to="/resources" aria-label="创作设置" title="创作设置"><Settings2 aria-hidden="true" size={18} /><span>创作设置</span></NavLink>
-          <NavLink to="/experiments" aria-label="制作复盘" title="制作复盘"><ChartNoAxesCombined aria-hidden="true" size={18} /><span>制作复盘</span></NavLink>
-        </nav>
-        <div className="sidebar-footer">
-          <button className="tour-help-button" type="button" onClick={() => setGuideOpen(true)} title="打开创作向导" aria-label="打开创作向导">
-            <CircleHelp aria-hidden="true" size={17} /><span>创作向导</span>
-          </button>
-          <div className="studio-status" title={healthy ? "制作服务就绪" : "运行环境状态"}>
-            <span className={`health-dot ${healthy === false ? "health-down" : ""}`} />
-            <span>{healthy === undefined ? "检查服务" : healthy ? "制作服务就绪" : "服务需要检查"}</span>
+      <header className="studio-masthead">
+        <div className="studio-masthead-main">
+          <NavLink className="brand" to="/" aria-label="VideoFactory 创作台">
+            <span className="brand-mark"><Clapperboard aria-hidden="true" size={19} /></span>
+            <span><strong>VideoFactory</strong><small>影像创作</small></span>
+          </NavLink>
+          <div className="studio-status" role="status" aria-label="基础工具检查" title="仅检查 Python、FFmpeg、FFprobe 的可执行文件是否可访问，不代表模型、配音与成片合成能力可用。">
+            <span aria-hidden="true" className={`health-dot ${healthy === undefined ? "health-checking" : healthy === false ? "health-down" : ""}`} />
+            <span>{healthy === undefined ? "检查基础工具" : healthy ? "基础工具可用" : "基础工具需检查"}</span>
           </div>
-          {onLogout ? <AccountMenu username={username ?? "当前账号"} onLogout={onLogout} /> : null}
+          <nav className={`primary-nav${moreNavOpen ? " primary-nav-more-open" : ""}`} aria-label="主导航" data-tour="primary-nav" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setMoreNavOpen(false); }}>
+            <NavLink to="/" end aria-label="创作台" title="创作台"><Radar aria-hidden="true" size={18} /><span>创作台</span></NavLink>
+            <NavLink to="/projects" data-tour="projects-nav" aria-label="制作记录" title="制作记录"><Layers3 aria-hidden="true" size={18} /><span>制作记录</span></NavLink>
+            <NavLink to="/assets" aria-label="素材库" title="素材库"><Images aria-hidden="true" size={18} /><span>素材库</span></NavLink>
+            <div id="studio-secondary-nav" className="studio-secondary-nav">
+              <NavLink to="/templates" aria-label="模板资料" title="模板资料"><LayoutTemplate aria-hidden="true" size={18} /><span>模板资料</span></NavLink>
+              <NavLink to="/resources" aria-label="创作设置" title="创作设置"><Settings2 aria-hidden="true" size={18} /><span>创作设置</span></NavLink>
+              <NavLink to="/experiments" aria-label="制作复盘" title="制作复盘"><ChartNoAxesCombined aria-hidden="true" size={18} /><span>制作复盘</span></NavLink>
+            </div>
+            <button ref={moreNavTriggerRef} className="studio-more-nav-trigger" type="button" aria-label="更多页面" aria-expanded={moreNavOpen} aria-controls="studio-secondary-nav" onClick={() => setMoreNavOpen((current) => !current)}>
+              <Ellipsis aria-hidden="true" size={18} /><span>更多</span>
+            </button>
+          </nav>
+          <div className="studio-masthead-tools">
+            <button className="studio-search-trigger" type="button" onClick={openSearch} aria-label="搜索项目、选题、模板或功能" title="搜索项目、选题、模板或功能">
+              <Search aria-hidden="true" size={18} />
+              <span>搜索</span>
+              <kbd>{navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl"} K</kbd>
+            </button>
+            <button className="tour-help-button" type="button" onClick={() => { setMoreNavOpen(false); setGuideOpen(true); }} title="打开创作向导" aria-label="打开创作向导">
+              <CircleHelp aria-hidden="true" size={18} /><span>向导</span>
+            </button>
+            {onLogout ? <AccountMenu username={username ?? "当前账号"} onLogout={onLogout} onOpen={() => setMoreNavOpen(false)} /> : null}
+          </div>
         </div>
-      </aside>
-      <header className="studio-topbar">
-        <div className="studio-workspace-context" aria-label="当前工作区"><span>工作室</span><span aria-hidden="true">/</span><strong>{workspaceLabel}</strong></div>
-        <button className="studio-search-trigger" type="button" onClick={openSearch} aria-label="搜索项目、选题、模板或功能">
-          <Search aria-hidden="true" size={17} />
-          <span>搜索项目、选题、模板或功能</span>
-          <kbd>{navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl"} K</kbd>
-        </button>
-      </header>
-      <header className="mobile-studio-header">
-        <NavLink className="brand" to="/" aria-label="VideoFactory 创作台">
-          <span className="brand-mark"><Clapperboard aria-hidden="true" size={18} /></span>
-          <strong>VideoFactory</strong>
-        </NavLink>
-        <div className="mobile-header-actions">
-          <button className="tour-help-button" type="button" onClick={openSearch} title="搜索" aria-label="搜索"><Search aria-hidden="true" size={19} /></button>
-          <span className={`health-dot ${healthy === false ? "health-down" : ""}`} title={healthy ? "制作服务就绪" : "运行环境状态"} />
-          <button className="tour-help-button" type="button" onClick={() => setGuideOpen(true)} title="打开创作向导" aria-label="打开创作向导"><CircleHelp aria-hidden="true" size={19} /></button>
-          {onLogout ? <AccountMenu compact username={username ?? "当前账号"} onLogout={onLogout} /> : null}
+        <div className="studio-location-bar">
+          <div className="studio-workspace-context" aria-label="当前工作区"><span>工作室</span><span aria-hidden="true">/</span><strong>{workspaceLabel}</strong></div>
         </div>
       </header>
       <div id="main-content" className="content-shell" tabIndex={-1}>{children}</div>
-      <nav className="mobile-nav" aria-label="移动端主导航">
-        <NavLink to="/" end><Radar aria-hidden="true" size={19} /><span>创作台</span></NavLink>
-        <NavLink to="/projects" data-tour="projects-nav"><Layers3 aria-hidden="true" size={19} /><span>制作记录</span></NavLink>
-        <NavLink to="/assets"><Images aria-hidden="true" size={19} /><span>素材</span></NavLink>
-        <NavLink to="/templates"><LayoutTemplate aria-hidden="true" size={19} /><span>模板资料</span></NavLink>
-        <NavLink to="/resources" aria-label="创作设置"><Settings2 aria-hidden="true" size={19} /><span>设置</span></NavLink>
-      </nav>
       <GuideDock
         open={guideOpen}
         pathname={location.pathname}
-        onOpenChange={setGuideOpen}
+        onOpenChange={(open) => { if (open) setMoreNavOpen(false); setGuideOpen(open); }}
         onStartFullTour={startFullTour}
         onStartPageTour={startPageTour}
       />
@@ -245,17 +248,29 @@ function opportunityOriginLabel(origin: StudioOpportunity["origin"] | undefined)
   return "热点";
 }
 
-function AccountMenu({ username, onLogout, compact = false }: { username: string; onLogout(): Promise<void>; compact?: boolean }) {
+function AccountMenu({ username, onLogout, onOpen }: { username: string; onLogout(): Promise<void>; onOpen(): void }) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+    const closeOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !menuRef.current?.contains(event.target)) setOpen(false);
     };
     window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
+    document.addEventListener("pointerdown", closeOutside);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("pointerdown", closeOutside);
+    };
   }, [open]);
 
   const logout = async () => {
@@ -269,18 +284,19 @@ function AccountMenu({ username, onLogout, compact = false }: { username: string
   };
 
   return (
-    <div className={compact ? "studio-account studio-account-compact" : "studio-account"}>
+    <div ref={menuRef} className="studio-account" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false); }}>
       <button
-        className={compact ? "tour-help-button studio-account-trigger" : "studio-account-trigger"}
+        ref={triggerRef}
+        className="studio-account-trigger"
         type="button"
         aria-label={`账号菜单：${username}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => { if (!open) onOpen(); setOpen((current) => !current); }}
       >
-        <UserRound aria-hidden="true" size={compact ? 18 : 16} />
-        {!compact ? <span>{username}</span> : null}
-        {!compact ? <ChevronDown aria-hidden="true" size={14} /> : null}
+        <UserRound aria-hidden="true" size={18} />
+        <span>{username}</span>
+        <ChevronDown aria-hidden="true" size={14} />
       </button>
       {open ? (
         <div className="studio-account-popover" role="menu" aria-label="账号菜单">

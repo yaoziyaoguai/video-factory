@@ -155,15 +155,12 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
       {mode === "custom" ? <CustomEntry onManual={props.onManual} onImport={props.onImport} /> : (
         <div className="candidate-inbox">
           <header className="candidate-inbox-heading">
-            <div>
-              <p className="eyebrow">{mode === "trend" ? "实时信号" : "系列策划"}</p>
-              <h2>{mode === "trend" ? "热点候选收件箱" : "系列选题台"}</h2>
-              <p>{mode === "trend"
-                ? ruleBaselineCount > 0 && ruleBaselineCount >= modeItems.length
-                  ? "本轮热点由本地规则保底生成，还没有经过选题总编转译；先筛选，再核验证据。"
-                  : "热点信号已经过选题总编转译；先筛选，再核验证据。"
-                : "每个系列保留长期承诺，策划器只生成接下来的可制作集数。"}</p>
-            </div>
+            {mode === "trend" ? <div>
+              <h2>热点候选收件箱</h2>
+              <p>{ruleBaselineCount > 0 && ruleBaselineCount >= modeItems.length
+                ? "本轮热点由本地规则保底生成，还没有经过选题总编转译；先筛选，再核验证据。"
+                : "热点信号已经过选题总编转译；先筛选，再核验证据。"}</p>
+            </div> : null}
             {mode === "trend" ? (
               <div className="trend-refresh-status" aria-label="热点更新状态">
                 <span><i aria-hidden="true" />{modeError ? "读取未完成" : modeGenerating ? (modeItems.length > 0 ? "正在生成新提案，已有内容仍可使用" : "正在生成今日提案") : modeLoading ? "正在读取已有提案" : "每日缓存"}</span>
@@ -230,6 +227,8 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
             />
           ) : (
             <>
+              <details className="candidate-filter-disclosure">
+                <summary>筛选候选</summary>
               <div className="candidate-filters" aria-label="候选筛选">
                 <div className="verdict-filter" aria-label="生产建议">
                   <button type="button" className={deskView === "all" ? "is-active" : ""} onClick={() => setDeskView("all")}>全部 <span>{seriesItems.length}</span></button>
@@ -247,8 +246,14 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
                   ))}
                 </div>
                 <label className="platform-filter"><span>热点来源平台</span><select aria-label="热点来源平台" value={platform} onChange={(event) => setPlatform(event.target.value)}><option value="all">全部来源平台</option>{platforms.map((item) => <option key={item} value={item}>{platformLabel(item)}</option>)}</select></label>
-                {hasActiveFilters ? <button className="candidate-clear-filters" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setDeskView("all"); }}>清除筛选</button> : null}
               </div>
+              </details>
+              {hasActiveFilters ? <div className="candidate-active-filters" aria-label="当前候选筛选">
+                {deskView !== "all" ? <span>生产建议：{deskView === "not_recommended" ? "总编不建议" : deskView === "pending_editor" ? "待总编评估" : deskView === "source_short" ? "来源不足" : editorialVerdictLabel(deskView)}</span> : null}
+                {category !== "all" ? <span>内容分类：{TOPIC_CATEGORY_LABELS[category]} · {categoryCounts[category] ?? 0}</span> : null}
+                {platform !== "all" ? <span>来源平台：{platformLabel(platform)}</span> : null}
+                <button className="candidate-clear-filters" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setDeskView("all"); }}>清除筛选</button>
+              </div> : null}
               {visibleItems.length > 0 ? (
                 <div className="candidate-inbox-body">
                   <div className="candidate-list" aria-label="候选提案列表">
@@ -266,7 +271,7 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
                   </div>
                   {selected ? <CandidateDetail item={selected} adopting={props.adoptingId === selected.id} disabled={props.adoptingId !== undefined} onAdopt={() => adopt(selected)} {...(props.onSupplementSources ? { onSupplementSources: props.onSupplementSources } : {})} {...(props.onReviseTrendCandidate && selected.origin === "trend" ? { onRevise: props.onReviseTrendCandidate } : {})} /> : null}
                 </div>
-              ) : <div className="filtered-empty"><BookOpenText aria-hidden="true" size={22} /><span>当前筛选下没有候选。</span>{hasActiveFilters ? <button className="button button-secondary" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setDeskView("all"); }}>清除筛选</button> : null}</div>}
+              ) : <div className="filtered-empty"><BookOpenText aria-hidden="true" size={22} /><span>当前筛选下没有候选。</span></div>}
             </>
           )}
         </div>

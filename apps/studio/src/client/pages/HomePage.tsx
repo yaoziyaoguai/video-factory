@@ -1,4 +1,4 @@
-import { ArrowRight, Clapperboard, Flame, Lightbulb, ListVideo, Plus, RefreshCw } from "lucide-react";
+import { ArrowRight, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
@@ -45,11 +45,17 @@ export function HomePage() {
   return (
     <main className="home-page">
       <header className="home-intro">
-        <div>
+        <div className="home-heading">
           <h1>创作台</h1>
-          <p>把想法写下来，把作品继续完成。</p>
+          <time>{new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "short" }).format(new Date())}</time>
         </div>
-        <time>{new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "short" }).format(new Date())}</time>
+        {!loading && !error ? <section className="home-production-overview" aria-label="制作概况">
+          <span><small>待你处理</small><strong>{overview.attention}</strong></span>
+          <span><small>自动制作</small><strong>{overview.active}</strong></span>
+          <span><small>已完成</small><strong>{overview.completed}</strong></span>
+          <span><small>已归档</small><strong>{overview.archived}</strong></span>
+          <Link to="/projects">全部制作<ArrowRight aria-hidden="true" size={15} /></Link>
+        </section> : null}
       </header>
 
       {error ? <div className="home-error" role="alert"><span>{error}</span><button className="button button-secondary" type="button" onClick={() => void load()}><RefreshCw aria-hidden="true" size={16} />重新连接</button></div> : null}
@@ -68,41 +74,33 @@ export function HomePage() {
         </section>
       ) : null}
 
-      {runs.length ? <section className="home-production-overview" aria-label="制作概况">
-        <span><small>待你处理</small><strong>{overview.attention}</strong></span>
-        <span><small>自动制作</small><strong>{overview.active}</strong></span>
-        <span><small>已完成</small><strong>{overview.completed}</strong></span>
-        <span><small>已归档</small><strong>{overview.archived}</strong></span>
-        <Link to="/projects">全部制作<ArrowRight aria-hidden="true" size={15} /></Link>
-      </section> : null}
-
       <section className="home-start" aria-labelledby="start-title">
         <header>
-          <div><h2 id="start-title">你今天从哪里出发？</h2><p>开始一条新视频</p></div>
+          <h2 id="start-title">你今天从哪里出发？</h2>
         </header>
         <div className="home-start-options">
           <button type="button" onClick={() => navigate("/topics")}>
-            <span className="home-option-icon is-hot"><Flame aria-hidden="true" size={21} /></span>
+            <span className="home-option-number" aria-hidden="true">01</span>
             <span><strong>从热点开始</strong><small>发现值得讲的当下话题</small></span>
             <ArrowRight aria-hidden="true" size={18} />
           </button>
           <button type="button" onClick={() => navigate("/topics?mode=series")}>
-            <span className="home-option-icon is-series"><ListVideo aria-hidden="true" size={21} /></span>
+            <span className="home-option-number" aria-hidden="true">02</span>
             <span><strong>继续一个系列</strong><small>延续栏目，创作下一集</small></span>
             <ArrowRight aria-hidden="true" size={18} />
           </button>
           <button type="button" onClick={() => navigate("/topics?mode=manual")}>
-            <span className="home-option-icon is-idea"><Lightbulb aria-hidden="true" size={21} /></span>
+            <span className="home-option-number" aria-hidden="true">03</span>
             <span><strong>从自己的想法开始</strong><small>写下主题，加入你的参考</small></span>
             <Plus aria-hidden="true" size={18} />
           </button>
           <button type="button" onClick={() => navigate("/cases")}>
-            <span className="home-option-icon is-case"><Clapperboard aria-hidden="true" size={21} /></span>
+            <span className="home-option-number" aria-hidden="true">04</span>
             <span><strong>从案例 / 脚本开始</strong><small>借鉴好作品，写自己的版本</small></span>
             <ArrowRight aria-hidden="true" size={18} />
           </button>
         </div>
-        <p className="home-start-note">选择一种开始方式。系统会沿同一条制作线推进；需要生成付费图片或视频时，会先报价并等你确认。</p>
+        <p className="home-start-note">需要生成付费图片或视频时，会先报价并等你确认。</p>
       </section>
     </main>
   );

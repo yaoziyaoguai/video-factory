@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -93,7 +93,7 @@ describe("artifact-first library surfaces", () => {
     expect(screen.getByRole("button", { name: /从案例 \/ 脚本开始/ })).toBeEnabled();
   });
 
-  it("lets the creator preview the real current video before the overview without approving it", async () => {
+  it("keeps the real current video before the creation entries while moving counts to the heading", async () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([run]);
     render(<MemoryRouter><HomePage /></MemoryRouter>);
 
@@ -104,7 +104,9 @@ describe("artifact-first library surfaces", () => {
     expect(preview).not.toHaveAttribute("autoplay");
     expect(within(work).getByRole("link", { name: /审片/ })).toHaveAttribute("href", "/projects/run-current");
     const overview = screen.getByRole("region", { name: "制作概况" });
-    expect(work.compareDocumentPosition(overview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(overview.closest("header")).not.toBeNull();
+    const entries = screen.getByRole("region", { name: "你今天从哪里出发？" });
+    expect(work.compareDocumentPosition(entries) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("keeps attribution and rights actions visible while revealing optional specifications on request", async () => {
@@ -126,6 +128,21 @@ describe("artifact-first library surfaces", () => {
     await user.click(detailsToggle);
     expect(details).not.toHaveAttribute("open");
     expect(screen.getByRole("link", { name: /查看作品：清晨街道/ })).toBeVisible();
+  });
+
+  it.each(["image", "video", "audio"] as const)("shows a failed %s preview without hiding its record or rights actions", async (mediaKind) => {
+    vi.spyOn(studioApi, "runs").mockResolvedValue([run]);
+    vi.spyOn(studioApi, "resourceManifest").mockResolvedValue(manifest([{ ...asset, mediaKind }]));
+    render(<MemoryRouter><AssetsPage /></MemoryRouter>);
+    const preview = mediaKind === "image"
+      ? await screen.findByRole("img", { name: "清晨街道 素材" })
+      : await screen.findByLabelText(`清晨街道 ${mediaKind === "audio" ? "试听" : "预览"}`);
+    fireEvent.error(preview);
+    expect(screen.getByText("预览未能加载")).toBeVisible();
+    expect(screen.getByText("素材记录仍保留，可打开作品查看。")).toBeVisible();
+    expect(screen.getByRole("link", { name: /去确认授权：清晨街道/ })).toBeVisible();
+    expect(screen.getByRole("link", { name: /查看作品：清晨街道/ })).toHaveAttribute("href", "/projects/run-current");
+    expect(screen.getByRole("link", { name: /查看素材原始来源/ })).toHaveAttribute("href", asset.sourceUrl);
   });
 
   it("does not invent a video preview for a planning result and keeps the actual next action", async () => {

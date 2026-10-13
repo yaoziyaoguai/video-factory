@@ -580,7 +580,7 @@ export function TodayPage() {
   return (
     <main className="today-page">
       <header className="today-header">
-        <div><p className="eyebrow">{entryCopy(entryMode).eyebrow}</p><h1>{entryCopy(entryMode).title}</h1><p>{dailyStatus}</p></div>
+        <div><h1>{entryTitle(entryMode)}</h1><p>{dailyStatus}</p></div>
         <Link className="button button-secondary" to="/"><ArrowLeft aria-hidden="true" size={17} />更换创作入口</Link>
       </header>
       {runsLoading ? <div className="region-loading">正在读取生产状态...</div> : runsError ? (
@@ -796,10 +796,10 @@ function buildInboxFacets(items: StudioCandidateInboxItem[]): StudioCandidateInb
   return facets;
 }
 
-function entryCopy(mode: "trend" | "series" | "custom"): { eyebrow: string; title: string } {
-  if (mode === "series") return { eyebrow: "系列策划", title: "继续你的内容系列" };
-  if (mode === "custom") return { eyebrow: "自由创作", title: "从你的想法开始" };
-  return { eyebrow: "热点选题", title: "挑一条真正值得做的热点" };
+function entryTitle(mode: "trend" | "series" | "custom"): string {
+  if (mode === "series") return "继续你的内容系列";
+  if (mode === "custom") return "从你的想法开始";
+  return "挑一条真正值得做的热点";
 }
 
 function buildTrendMeta(inbox: StudioCandidateInbox | undefined) {
