@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { studioApi } from "../api.js";
 import type { StudioDocumentCommand, StudioNodeDocumentRevisionInput, StudioNodeDocumentAuditInput } from "../../shared/api.js";
 import { creatorFacingTechnicalText } from "../presentation.js";
@@ -24,6 +24,8 @@ export interface NodeDocumentCommandsProps {
  */
 export function NodeDocumentCommands({ runId, nodeId, runRevision, effectiveVersionId, contentReview, busy, completed = false, onRevise, onAudit }: NodeDocumentCommandsProps) {
   const [instruction, setInstruction] = useState("");
+  const instructionRef = useRef<HTMLTextAreaElement>(null);
+  const instructionContextId = useId();
   const [revisionOpen, setRevisionOpen] = useState(!completed);
   const [checked, setChecked] = useState<number[]>([]);
   const [working, setWorking] = useState(false);
@@ -126,6 +128,7 @@ export function NodeDocumentCommands({ runId, nodeId, runRevision, effectiveVers
     setChecked([]);
     setInfo(undefined);
     setError(undefined);
+    instructionRef.current?.focus();
   }
 
   async function sendRevision(confirmTerminalEdit = false) {
@@ -239,38 +242,43 @@ export function NodeDocumentCommands({ runId, nodeId, runRevision, effectiveVers
         disabled={pending || checked.length === 0 || staleInstruction}
       >加入修改意见（{checked.length}）</button>
     </div> : null}
-    <label className="field node-document-instruction">
-      <span>修订意见</span>
-      <textarea
-        aria-label="修订意见"
-        value={instruction}
-        rows={3}
-        onChange={(event) => {
-          if (!instruction) setInstructionTarget(targetContext.generation);
-          setInstruction(event.target.value); setInfo(undefined); setError(undefined);
-        }}
-        disabled={pending}
-        placeholder="写下这份内容要怎么改；最终只以这里的文字为准。"
-      />
-    </label>
-    <div className="node-document-actions">
-      <button
-        className="button"
-        type="button"
-        onClick={() => void sendRevision()}
-        disabled={pending || !instruction.trim() || overLimit || staleInstruction}
-      >发送修订意见</button>
-      <span className="node-document-charcount">{[...instruction].length}/{MAX_INSTRUCTION_CHARS}</span>
+    <div className="document-command-composer">
+      <p id={instructionContextId} className="document-command-context">当前修改的是{nodeId === "reference-grammar" ? "参考报告" : "发布文案"}。发送会调用模型，新稿仍由你决定是否采用。</p>
+      <label className="field node-document-instruction">
+        <span>修订意见</span>
+        <textarea
+          ref={instructionRef}
+          aria-label="修订意见"
+          aria-describedby={instructionContextId}
+          value={instruction}
+          rows={3}
+          onChange={(event) => {
+            if (!instruction) setInstructionTarget(targetContext.generation);
+            setInstruction(event.target.value); setInfo(undefined); setError(undefined);
+          }}
+          disabled={pending}
+          placeholder="写下这份内容要怎么改；最终只以这里的文字为准。"
+        />
+      </label>
+      <div className="node-document-actions">
+        <button
+          className="button"
+          type="button"
+          onClick={() => void sendRevision()}
+          disabled={pending || !instruction.trim() || overLimit || staleInstruction}
+        >发送修订意见</button>
+        <span className="node-document-charcount">{[...instruction].length}/{MAX_INSTRUCTION_CHARS}</span>
+      </div>
+      {staleInstruction ? <div role="alert">
+        <p>当前稿件已经更新，下面保留的是你对旧稿尚未发送的意见。请核对后再决定是否用于当前稿。</p>
+        <button type="button" className="button button-ghost" disabled={pending} onClick={() => setInstructionTarget(targetContext.generation)}>将这些意见用于当前稿</button>
+      </div> : null}
+      {overLimit ? <p role="alert">修订意见超过 {MAX_INSTRUCTION_CHARS} 字，请删减后再发送；原文完整保留，不会被截断。</p> : null}
     </div>
-    {staleInstruction ? <div role="alert">
-      <p>当前稿件已经更新，下面保留的是你对旧稿尚未发送的意见。请核对后再决定是否用于当前稿。</p>
-      <button type="button" className="button button-ghost" disabled={pending} onClick={() => setInstructionTarget(targetContext.generation)}>将这些意见用于当前稿</button>
-    </div> : null}
-    {overLimit ? <p role="alert">修订意见超过 {MAX_INSTRUCTION_CHARS} 字，请删减后再发送；原文完整保留，不会被截断。</p> : null}
     </details>
     <button className="button button-ghost" type="button" onClick={() => void auditCurrent()} disabled={pending}>{auditLabel}</button>
-    {error ? <p role="alert">{error}</p> : null}
-    {info ? <p>{info}</p> : null}
+    {error ? <p className="document-command-status" role="alert">{error}</p> : null}
+    {info ? <p className="document-command-status" role="status">{info}</p> : null}
     {confirmation ? <div className="node-confirm-layer" role="presentation">
       <section ref={confirmationRef} role="dialog" aria-modal="true" aria-labelledby={`document-confirm-${nodeId}`} tabIndex={-1}>
         <h3 id={`document-confirm-${nodeId}`}>{confirmation.action === "revise" ? "确认创建文案修订版" : "确认审计已完成的文案"}</h3>

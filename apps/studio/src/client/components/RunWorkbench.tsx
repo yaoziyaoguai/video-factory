@@ -156,6 +156,8 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   }, [videoIdentity]);
   useEffect(() => {
     if (!viewingFocused) return;
+    // 专注时将原播放器带入视窗；不隐藏风险信息，也不重建媒体或改变播放位置。
+    previewRef.current?.closest(".video-stage")?.scrollIntoView?.({ block: "start", behavior: "instant" });
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       // 弹窗独占 Escape，包括提交中暂时不允许关闭的弹窗；观看布局不抢走它的焦点。
@@ -169,6 +171,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   }, [viewingFocused]);
   const [filmArrival, setFilmArrival] = useState(initialFilmArrival);
   const [readyVideoIdentity, setReadyVideoIdentity] = useState<string>();
+  const [failedVideoIdentity, setFailedVideoIdentity] = useState<string>();
   const [filmRevealIdentity, setFilmRevealIdentity] = useState<string>();
   const filmRevealTimerRef = useRef<number | undefined>(undefined);
   useEffect(() => {
@@ -211,6 +214,8 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   const assetConfigurationNode = run.nodes.find(node => node.id === "assets" && node.executionConfiguration);
   const activeSpendNode = readOnly ? undefined : creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
   const decidingDocument = ["publish-package", "reference-grammar"].includes(run.activeIntervention?.nodeId ?? "");
+  const decidingPublishCopy = run.activeIntervention?.nodeId === "publish-package";
+  const ReviewFindingsSurface = decidingPublishCopy ? "details" : "div";
   const currentArtifactNode = (!video?.contentUrl || decidingDocument) && !creativeDiscussion && run.activeIntervention?.kind !== "creative_review"
     ? creatorNodes.find((node) => node.id === run.activeIntervention?.nodeId && node.id !== activeSpendNode?.id)
     : undefined;
@@ -589,7 +594,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
       <div id="run-current" className="run-current-workspace">
       {creativeDiscussion}
       {!readOnly && !creativeDiscussion && run.activeIntervention?.kind === "creative_review" ? <p className="workspace-loading" role="status">正在读取当前方案与讨论。读取完成后才能确认此版本。</p> : null}
-      {!readOnly && !creativeDiscussion && !video?.contentUrl && run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
+      {!showReviewSurface && !readOnly && !creativeDiscussion && run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
       {activeSpendNode ? <section className="current-production-action" aria-labelledby="current-production-action-title">
         <header>
           <div><p className="eyebrow">当前需要处理</p><h2 id="current-production-action-title">现在需要你：确认{stepNameFor(activeSpendNode, activeSpendNode.label)}</h2></div>
@@ -652,7 +657,7 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
         </section> : null}
         {video?.contentUrl ? <section key="current-video" className="video-stage" aria-labelledby="preview-title" data-tour="run-preview">
           <div className="section-heading stage-heading">
-            <div><p className="eyebrow">最终画面</p><h2 id="preview-title">成片预览</h2></div>
+            <div><h2 id="preview-title">成片预览</h2></div>
             <div className="video-stage-actions">
               <button ref={viewingFocusToggleRef} className="button button-secondary viewing-focus-toggle" type="button" aria-pressed={viewingFocused}
                 onClick={() => setViewingFocusIdentity(viewingFocused ? undefined : videoIdentity)}>
@@ -674,12 +679,15 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
           <div className={`video-frame${videoIdentity && filmRevealIdentity === videoIdentity ? " film-reveal-active" : ""}`}>
             {video?.contentUrl ? (
               <video ref={previewRef} title="成片预览" src={`${video.contentUrl}#t=0.1`} controls playsInline preload="auto"
-                onLoadStart={() => setReadyVideoIdentity(undefined)}
+                onLoadStart={() => { setReadyVideoIdentity(undefined); setFailedVideoIdentity(undefined); }}
                 onLoadedData={(event) => {
                   if (event.currentTarget.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
-                    && event.currentTarget.getAttribute("src") === `${video.contentUrl}#t=0.1`) setReadyVideoIdentity(videoIdentity);
+                    && event.currentTarget.getAttribute("src") === `${video.contentUrl}#t=0.1`) {
+                    setReadyVideoIdentity(videoIdentity);
+                    setFailedVideoIdentity(undefined);
+                  }
                 }}
-                onError={() => setReadyVideoIdentity(undefined)}>
+                onError={() => { setReadyVideoIdentity(undefined); setFailedVideoIdentity(videoIdentity); }}>
                 {subtitlePreview?.contentUrl ? <track kind="subtitles" src={subtitlePreview.contentUrl}
                   srcLang="zh" label="同步字幕" default /> : null}
               </video>
@@ -688,11 +696,14 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
             )}
             {videoIdentity && filmRevealIdentity === videoIdentity ? <div className="film-reveal-curtain" aria-hidden="true" onAnimationEnd={() => setFilmRevealIdentity((current) => current === videoIdentity ? undefined : current)} /> : null}
           </div>
+          {videoIdentity && failedVideoIdentity === videoIdentity ? <p className="video-preview-status is-error" role="status">
+            成片预览读取失败，原成片记录仍保留。{videoDownloadName ? "可尝试通过上方下载查看。" : "请稍后重新打开页面查看。"}此提示不会重新生成视频。
+          </p> : videoIdentity && readyVideoIdentity !== videoIdentity ? <p className="video-preview-status" role="status">正在读取成片预览…</p> : null}
           <p className="preview-provenance">当前成片 · {new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(video.createdAt))} 生成。先观看实际内容，再结合复核意见判断。</p>
           </section> : null}
 
         <aside className="review-panel" aria-label="审片与产物" data-tour="run-review">
-          {!readOnly && video?.contentUrl && run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
+          {!readOnly && (video?.contentUrl || !creativeDiscussion) && run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
           {readOnly ? (
             <section className="run-state-panel" role="status">
               <p className="eyebrow">历史制作记录</p>
@@ -865,7 +876,11 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                 </> : <span>{agentLoopPendingNote(waitingNodeProgress)}</span>}
                 <span>实际模型调用：创作 {waitingNodeProgress.producerModelCallCount ?? 0} 次，审计 {waitingNodeProgress.auditModelCallCount ?? 0} 次。查询、刷新和等待不计为新调用。</span>
               </div> : null}
-              {visualReviewRequiresRevision && visualReview ? <div className="agent-review-decision" id="current-review-findings" tabIndex={-1}>
+              {visualReviewRequiresRevision && visualReview ? <ReviewFindingsSurface className={`agent-review-decision${decidingPublishCopy ? " previous-film-findings" : ""}`} id="current-review-findings" tabIndex={-1}>
+                {decidingPublishCopy ? <summary>
+                  <strong>成片审片记录与返工</strong>
+                  <span>{visualReviewRecommendationLabel(visualReview.recommendation)} · {visualReview.findingCount} 项问题{visualReview.pendingInspectionCount ? ` · ${visualReview.pendingInspectionCount} 项待补查` : ""}{visualReview.infoCount ? ` · ${visualReview.infoCount} 项提示` : ""}</span>
+                </summary> : null}
                 <strong>视觉审片建议修改后再审</strong>
                 <p>完整结论保留在审片报告中。先核对当前成片，再决定如何处理下列意见。</p>
                 <div className="agent-review-facts">
@@ -917,8 +932,8 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
                     />)}
                   </div>
                   : null}
-                <p className="agent-review-guidance">补查会重跑整轮审片、不会重新购买画面或配音，因此<strong>其它镜头（包括上一轮已通过的镜头）的结论也可能变化</strong>；判定与上一轮不同的条目会标出「判定变动」，并给出两轮原文。批准前你要对本轮每一条结论逐条表态：采纳的必须先返修，不采纳的要写明理由。</p>
-              </div> : null}
+                <p className="agent-review-guidance">补查会重跑整轮审片、不会重新购买画面或配音，因此<strong>其它镜头（包括上一轮已通过的镜头）的结论也可能变化</strong>；判定与上一轮不同的条目会标出「判定变动」，并给出两轮原文。{decidingPublishCopy ? "这里保留的是成片意见；采用发布文案不重复签署成片终审。若选择返工，请按更新后的步骤重新确认。" : "批准前你要对本轮每一条结论逐条表态：采纳的必须先返修，不采纳的要写明理由。"}</p>
+              </ReviewFindingsSurface> : null}
               {nextPipelineNode ? <div className="boundary-next-step">
                 <span>下一步「{stepNameFor(nextPipelineNode, nextPipelineNode.label)}」{nextPipelineNode.status === "stale"
                   ? "需要重新生成。放行当前步骤后，再由你明确继续；不会重做仍然有效的素材和配音。"

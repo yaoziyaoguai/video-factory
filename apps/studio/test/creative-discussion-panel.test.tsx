@@ -233,6 +233,50 @@ describe("early duration decision", () => {
     expect(screen.getByLabelText("最多秒数（可不填）")).toHaveValue("");
   });
 
+  it("keeps one script duration editor and decision in the overview across pane switches", async () => {
+    const onCommand = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    render(<CreativeDiscussionPanel review={durationReview()} busy={false} onCommand={onCommand} />);
+    const reader = screen.getByRole("region", { name: "稿件阅读" });
+    const duration = screen.getByRole("region", { name: "本版时长" });
+    const decision = screen.getByRole("region", { name: "当前稿件决定" });
+    expect(within(decision).getByText(/费用待方案核价.*后续付费仍需单独确认/)).toBeInTheDocument();
+    expect(within(duration).queryByText(/费用待方案核价/)).not.toBeInTheDocument();
+    expect(duration.compareDocumentPosition(reader) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(duration.compareDocumentPosition(decision) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "修改时长要求" }));
+    const input = screen.getByLabelText("最多秒数（可不填）");
+    await user.type(input, "30");
+    await user.click(screen.getByRole("button", { name: "建议与讨论" }));
+    await user.click(screen.getByRole("button", { name: "当前方案" }));
+    expect(screen.getAllByRole("region", { name: "本版时长" })).toHaveLength(1);
+    expect(screen.getAllByRole("region", { name: "当前稿件决定" })).toHaveLength(1);
+    expect(screen.getByLabelText("最多秒数（可不填）")).toBe(input);
+    expect(input).toHaveValue("30");
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it("keeps manual draft and unsent discussion in their original inputs across pane switches", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async () => undefined);
+    render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
+    await user.click(screen.getByText("手动修订这份稿件"));
+    const narration = screen.getByLabelText("分镜 1 · 旁白");
+    await user.clear(narration);
+    await user.type(narration, "还没保存的开场文字");
+    await user.click(screen.getByRole("button", { name: "建议与讨论" }));
+    const composer = screen.getByRole("textbox", { name: /讨论与修改/ });
+    await user.type(composer, "这条意见暂时不要发送");
+    await user.click(screen.getByRole("button", { name: "当前方案" }));
+    expect(screen.getByLabelText("分镜 1 · 旁白")).toBe(narration);
+    expect(narration).toHaveValue("还没保存的开场文字");
+    expect(screen.getByRole("button", { name: /采用.*（未审计）/ })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "建议与讨论" }));
+    expect(screen.getByRole("textbox", { name: /讨论与修改/ })).toBe(composer);
+    expect(composer).toHaveValue("这条意见暂时不要发送");
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
   it("clears a commitment explicitly and never bypasses a real capability conflict", async () => {
     const user = userEvent.setup();
     const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => undefined);
@@ -341,7 +385,7 @@ describe("discussion suggestions remain editable user input", () => {
     const onCommand = vi.fn(async () => undefined);
     const { unmount } = render(<CreativeDiscussionPanel review={current} busy={false} onCommand={onCommand} />);
     const user = userEvent.setup();
-    const input = screen.getByRole("textbox", { name: /聊聊你的想法/ });
+    const input = screen.getByRole("textbox", { name: /讨论与修改/ });
     fireEvent.change(input, { target: { value: "我的详细补充。".repeat(80) } });
     for (let index = 0; index < count; index += 1) await user.click(screen.getByRole("checkbox", { name: `建议 ${index + 1} 的原文` }));
     await user.click(screen.getByRole("button", { name: `加入修改意见（${count}）` }));
@@ -350,7 +394,7 @@ describe("discussion suggestions remain editable user input", () => {
     unmount();
     const { checkResult: _previousCheck, ...uncheckedReview } = current;
     render(<CreativeDiscussionPanel review={{ ...uncheckedReview, draftVersionId: "next-version", draftSha256: "b".repeat(64) }} busy={false} onCommand={onCommand} />);
-    expect(screen.getByRole("textbox", { name: /聊聊你的想法/ })).toHaveValue(fullText);
+    expect(screen.getByRole("textbox", { name: /讨论与修改/ })).toHaveValue(fullText);
     expect(screen.queryByText("本版建议")).not.toBeInTheDocument();
     expect(onCommand).not.toHaveBeenCalled();
   });
@@ -359,7 +403,7 @@ describe("discussion suggestions remain editable user input", () => {
     const user = userEvent.setup();
     const onCommand = vi.fn(async () => undefined);
     render(<CreativeDiscussionPanel review={advisedReview()} busy={false} onCommand={onCommand} />);
-    const input = screen.getByRole("textbox", { name: /聊聊你的想法/ });
+    const input = screen.getByRole("textbox", { name: /讨论与修改/ });
     await user.type(input, "保留我的个人要求");
     await user.click(screen.getByRole("checkbox", { name: "先讲结果" }));
     await user.click(screen.getByRole("button", { name: "加入修改意见（1）" }));
@@ -379,7 +423,7 @@ describe("discussion suggestions remain editable user input", () => {
     render(<CreativeDiscussionPanel review={advisedReview()} busy={false} onCommand={onCommand} />);
     await user.click(screen.getByRole("checkbox", { name: "先讲结果" }));
     await user.click(screen.getByRole("button", { name: "加入修改意见（1）" }));
-    const input = screen.getByRole("textbox", { name: /聊聊你的想法/ });
+    const input = screen.getByRole("textbox", { name: /讨论与修改/ });
     fireEvent.change(input, { target: { value: "- 先讲结果，但保留铺垫\n我自己补充的要求" } });
     expect(screen.queryByRole("button", { name: "移除已加入建议：开头更直接" })).not.toBeInTheDocument();
     expect(onCommand).not.toHaveBeenCalled();
@@ -496,7 +540,7 @@ describe("evidence retrieval repair UI", () => {
     const revise = screen.getByRole("button", { name: "提出修改" });
     expect(revise).toHaveClass("button-primary");
     await user.click(revise);
-    await waitFor(() => expect(screen.getByRole("textbox", { name: /聊聊你的想法/ })).toHaveFocus());
+    await waitFor(() => expect(screen.getByRole("textbox", { name: /讨论与修改/ })).toHaveFocus());
     expect(onCommand).not.toHaveBeenCalled();
     await user.click(screen.getByText(/手动修订这份稿件/));
     // 无兼容来源：如实说明并给出口，不默认选服务、不改 not_needed。
@@ -542,7 +586,7 @@ describe("CreativeDiscussionPanel", () => {
     const gate = new Promise<void>(done => { resolve = done; });
     const onCommand = vi.fn(async (_command: StudioCreativeReviewCommandInput) => gate);
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
-    const composer = screen.getByRole("textbox", { name: /聊聊你的想法/ });
+    const composer = screen.getByRole("textbox", { name: /讨论与修改/ });
     fireEvent.change(composer, { target: { value: "同字节但后来输入" } });
     await userEvent.click(screen.getByRole("button", { name: "只讨论" }));
     fireEvent.change(composer, { target: { value: "先改成别的文字" } });
@@ -580,7 +624,7 @@ describe("CreativeDiscussionPanel", () => {
         if (outcome === "commandCompleted") throw Object.assign(new Error("原操作已完成，读取页面失败"), { commandCompleted: true });
       });
       render(<CreativeDiscussionPanel review={review({ stage })} busy={false} onCommand={onCommand} />);
-      const composer = screen.getByRole("textbox", { name: /聊聊你的想法/ });
+      const composer = screen.getByRole("textbox", { name: /讨论与修改/ });
       fireEvent.change(composer, { target: { value: "发送A" } });
       await userEvent.click(screen.getByRole("button", { name: "只讨论" }));
       const key = `vf:creative-command:run-creative:${stage}:draft`;
@@ -649,7 +693,7 @@ describe("CreativeDiscussionPanel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/记录.*变化/);
   });
 
-  it("puts the decision before the draft and opens revision discussion without losing words or selected advice", async () => {
+  it("keeps the script decision outside switchable panes and opens revision discussion without losing words or selected advice", async () => {
     const onCommand = vi.fn(async () => undefined);
     render(<CreativeDiscussionPanel review={review({ checkResult: {
       verdict: "pass", score: 90, summary: "开头和结尾都可以调整。", checkIdentity: "c".repeat(64), issues: [
@@ -659,8 +703,12 @@ describe("CreativeDiscussionPanel", () => {
     } })} busy={false} onCommand={onCommand} />);
     const adopt = screen.getByRole("button", { name: /采用.*（保留审计建议）/ });
     const draft = screen.getByRole("article", { name: "当前脚本" });
-    expect(adopt.compareDocumentPosition(draft) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    const composer = screen.getByRole("textbox", { name: /聊聊你的想法/ });
+    expect(draft).not.toContainElement(adopt);
+    const reader = within(draft).getByRole("region", { name: "稿件阅读" });
+    // 决定区在窄屏自然阅读顺序末尾；桌面由布局放在摘要旁，不复制第二套按钮。
+    expect(reader.compareDocumentPosition(adopt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getAllByRole("region", { name: "当前稿件决定" })).toHaveLength(1);
+    const composer = screen.getByRole("textbox", { name: /讨论与修改/ });
     fireEvent.change(composer, { target: { value: "我先保留这个开头。" } });
     await userEvent.click(screen.getByRole("checkbox", { name: "把结论提前。" }));
     await userEvent.click(screen.getByRole("checkbox", { name: "结尾留白。" }));
@@ -691,7 +739,7 @@ describe("CreativeDiscussionPanel", () => {
     expect(screen.getByRole("button", { name: "阅读第 2 段" })).toHaveAttribute("aria-current", "true");
     rerender(<CreativeDiscussionPanel review={{ ...initial, ...changed }} busy={false} onCommand={onCommand} />);
     expect(screen.getByRole("button", { name: "阅读第 1 段" })).toHaveAttribute("aria-current", "true");
-    expect(within(screen.getByRole("region", { name: "稿件阅读" })).queryByText("当前第二段")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "稿件正文" })).queryByText("当前第二段")).not.toBeInTheDocument();
     expect(onCommand).not.toHaveBeenCalled();
   });
 
@@ -705,14 +753,15 @@ describe("CreativeDiscussionPanel", () => {
       ],
     } })} busy={false} onCommand={onCommand} />);
     const reader = screen.getByRole("region", { name: "稿件阅读" });
-    expect(within(reader).getByText("先看结果。")).toBeInTheDocument();
-    expect(within(reader).queryByText("再说明原因。")).not.toBeInTheDocument();
+    const content = within(screen.getByRole("region", { name: "稿件正文" }));
+    expect(content.getByText("先看结果。")).toBeInTheDocument();
+    expect(content.queryByText("再说明原因。")).not.toBeInTheDocument();
     await userEvent.click(within(reader).getByRole("button", { name: "阅读第 2 段" }));
-    expect(within(reader).getByText("再说明原因。")).toBeInTheDocument();
-    expect(within(reader).queryByText("先看结果。")).not.toBeInTheDocument();
+    expect(content.getByText("再说明原因。")).toBeInTheDocument();
+    expect(content.queryByText("先看结果。")).not.toBeInTheDocument();
     await userEvent.click(screen.getByText("指定讨论范围（可选）"));
     expect(screen.getByRole("checkbox", { name: "第 2 段" })).not.toBeChecked();
-    await userEvent.type(screen.getByRole("textbox", { name: /聊聊你的想法/ }), "讨论整份脚本");
+    await userEvent.type(screen.getByRole("textbox", { name: /讨论与修改/ }), "讨论整份脚本");
     await userEvent.click(screen.getByRole("button", { name: "只讨论" }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
     expect(onCommand.mock.calls[0]?.[0]).toMatchObject({ action: "discuss", message: "讨论整份脚本" });
@@ -732,7 +781,7 @@ describe("CreativeDiscussionPanel", () => {
     const discussion = screen.getByRole("region", { name: "与当前角色讨论" });
     expect(within(draft).queryByRole("checkbox", { name: "把结论提前。" })).not.toBeInTheDocument();
     expect(within(discussion).getByRole("checkbox", { name: "把结论提前。" })).toBeInTheDocument();
-    await userEvent.click(within(draft).getByRole("button", { name: "查看 1 条建议" }));
+    await userEvent.click(screen.getByRole("button", { name: "查看 1 条建议" }));
     expect(screen.getByRole("button", { name: "建议与讨论" })).toHaveAttribute("aria-pressed", "true");
     await waitFor(() => expect(screen.getByRole("heading", { name: "本版建议" })).toHaveFocus());
     expect(onCommand).not.toHaveBeenCalled();
@@ -807,11 +856,11 @@ describe("CreativeDiscussionPanel", () => {
     const onCommand = vi.fn(async () => undefined);
     const first = review({ draftVersionId: "script-artifact#v1" });
     const { rerender } = render(<CreativeDiscussionPanel review={first} busy={false} onCommand={onCommand} />);
-    fireEvent.change(screen.getByRole("textbox", { name: /聊聊你的想法/ }), { target: { value: "只针对第一版的修改" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /讨论与修改/ }), { target: { value: "只针对第一版的修改" } });
     const second = review({ draftVersionId: "script-artifact#v2", draftSha256: "b".repeat(64), reviewRevision: 4 });
     rerender(<CreativeDiscussionPanel review={second} busy={false} onCommand={onCommand} />);
     // 版本更新后旧意见保留给用户显式改写/复用；不自动发送，也不把旧选择绑到新稿。
-    expect(screen.getByRole("textbox", { name: /聊聊你的想法/ })).toHaveValue("只针对第一版的修改");
+    expect(screen.getByRole("textbox", { name: /讨论与修改/ })).toHaveValue("只针对第一版的修改");
     expect(onCommand).not.toHaveBeenCalled();
   });
 
@@ -819,7 +868,7 @@ describe("CreativeDiscussionPanel", () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
     const first = review({ draftVersionId: "script-artifact#v1" });
     const { rerender } = render(<CreativeDiscussionPanel review={first} busy={false} onCommand={onCommand} />);
-    fireEvent.change(screen.getByRole("textbox", { name: /聊聊你的想法/ }), { target: { value: "保留这条意见" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /讨论与修改/ }), { target: { value: "保留这条意见" } });
     await userEvent.click(screen.getByText("指定讨论范围（可选）"));
     for (const changed of [
       { ...first, draftArtifactId: "different-artifact" },
@@ -830,7 +879,7 @@ describe("CreativeDiscussionPanel", () => {
       const scope = screen.getByText(/指定讨论范围/);
       if (!(scope.closest("details") as HTMLDetailsElement).open) await userEvent.click(scope);
       expect(screen.getByRole("checkbox", { name: "第 1 段" })).not.toBeChecked();
-      expect(screen.getByRole("textbox", { name: /聊聊你的想法/ })).toHaveValue("保留这条意见");
+      expect(screen.getByRole("textbox", { name: /讨论与修改/ })).toHaveValue("保留这条意见");
     }
     await userEvent.click(screen.getByRole("button", { name: "只讨论" }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
@@ -841,10 +890,10 @@ describe("CreativeDiscussionPanel", () => {
     const onCommand = vi.fn(async () => undefined);
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
     const longText = "修".repeat(4001);
-    expect(screen.getByRole("textbox", { name: /聊聊你的想法/ })).not.toHaveAttribute("maxlength");
-    fireEvent.change(screen.getByRole("textbox", { name: /聊聊你的想法/ }), { target: { value: longText } });
+    expect(screen.getByRole("textbox", { name: /讨论与修改/ })).not.toHaveAttribute("maxlength");
+    fireEvent.change(screen.getByRole("textbox", { name: /讨论与修改/ }), { target: { value: longText } });
     fireEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
-    expect(screen.getByRole("textbox", { name: /聊聊你的想法/ })).toHaveValue(longText);
+    expect(screen.getByRole("textbox", { name: /讨论与修改/ })).toHaveValue(longText);
     expect(screen.getByRole("alert")).toHaveTextContent("4,000 字");
     expect(onCommand).not.toHaveBeenCalled();
   });
@@ -876,12 +925,12 @@ describe("CreativeDiscussionPanel", () => {
       independentDraftActions: { actions: ["edit_draft", "confirm", "return_to_stage"], targetDraft: { sha256: sha } },
     }));
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
-    fireEvent.change(screen.getByRole("textbox", { name: /聊聊你的想法/ }), { target: { value: "这条讨论尚未完成" } });
+    fireEvent.change(screen.getByRole("textbox", { name: /讨论与修改/ }), { target: { value: "这条讨论尚未完成" } });
     await userEvent.click(screen.getByRole("button", { name: "只讨论" }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
     const original = onCommand.mock.calls[0]![0];
     expect(JSON.parse(window.localStorage.getItem("vf:creative-command:run-creative:script:draft")!)).toEqual(original);
-    expect(screen.getByRole("textbox", { name: /聊聊你的想法/ })).toHaveValue("这条讨论尚未完成");
+    expect(screen.getByRole("textbox", { name: /讨论与修改/ })).toHaveValue("这条讨论尚未完成");
     expect(screen.getByRole("button", { name: "核对上一条操作" })).toBeEnabled();
   });
 
@@ -896,7 +945,7 @@ describe("CreativeDiscussionPanel", () => {
     });
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
     render(<CreativeDiscussionPanel review={snapshot} busy={false} onCommand={onCommand} />);
-    const composer = screen.getByRole("textbox", { name: /聊聊你的想法/ });
+    const composer = screen.getByRole("textbox", { name: /讨论与修改/ });
     fireEvent.change(composer, { target: { value: "后写的个人意见保留，不能另投模型" } });
     expect(screen.getByRole("button", { name: "只讨论" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "发送修订意见" })).toBeDisabled();
@@ -1435,7 +1484,8 @@ describe("CreativeDiscussionPanel", () => {
       },
     })} busy={false} onCommand={onCommand} />);
 
-    expect(screen.getByText(/有 1 条修改建议，由你决定是否采用/)).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "本版建议" })).getByText("1 条")).toBeInTheDocument();
+    expect(screen.getByText("独立复核未通过")).toBeInTheDocument();
     expect(screen.getByText("先复查现有素材，再决定是否更换。")).toBeInTheDocument();
     const confirmButton = screen.getByRole("button", { name: /采用.*（保留审计建议）/ });
     expect(confirmButton).toBeEnabled();

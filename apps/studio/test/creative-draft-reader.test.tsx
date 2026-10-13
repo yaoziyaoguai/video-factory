@@ -7,7 +7,7 @@ describe("CreativeDraftReader", () => {
     render(<CreativeDraftReader stage="script" value={{ narrativeArc: "这是一段制作参考", scenes: [
       { id: "opening", position: 1, duration: 4, narration: "这是观众先听到的话", visual_prompt: "窗边" },
     ] }} />);
-    const spoken = screen.getByText("这是观众先听到的话");
+    const spoken = within(screen.getByRole("region", { name: "稿件正文" })).getByText("这是观众先听到的话");
     const reference = screen.getByText("这是一段制作参考");
     expect(spoken.compareDocumentPosition(reference) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
@@ -96,19 +96,19 @@ describe("CreativeDraftReader", () => {
     ] }} />);
     expect(animate).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "阅读第 2 段" }));
-    expect(screen.getByText("第二段正文")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "稿件正文" })).getByText("第二段正文")).toBeInTheDocument();
     expect(animate).toHaveBeenCalledTimes(1);
     act(() => notifyResize?.());
     expect(animations[0]!.cancel).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "阅读第 3 段" }));
     expect(animations[0]!.cancel).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("第三段正文")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "稿件正文" })).getByText("第三段正文")).toBeInTheDocument();
     media.matches = true;
     act(() => { for (const listener of listeners) listener(); });
     expect(animations[1]!.cancel).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "阅读第 1 段" }));
     expect(animate).toHaveBeenCalledTimes(2);
-    expect(screen.getByText("第一段正文")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "稿件正文" })).getByText("第一段正文")).toBeInTheDocument();
     media.matches = false;
     fireEvent.click(screen.getByRole("button", { name: "阅读第 2 段" }));
     unmount();
@@ -131,11 +131,12 @@ describe("CreativeDraftReader", () => {
   ])("uses the real $stage structure for segment reading and retains whole-draft context", ({ stage, value, button, first, second, context }) => {
     render(<CreativeDraftReader stage={stage} value={value} />);
     const reader = screen.getByRole("region", { name: "稿件阅读" });
-    expect(within(reader).getByText(first)).toBeInTheDocument();
-    expect(within(reader).queryByText(second)).not.toBeInTheDocument();
+    const content = within(screen.getByRole("region", { name: "稿件正文" }));
+    expect(content.getByText(first)).toBeInTheDocument();
+    expect(content.queryByText(second)).not.toBeInTheDocument();
     fireEvent.click(within(reader).getByRole("button", { name: button }));
-    expect(within(reader).getByText(second)).toBeInTheDocument();
-    expect(within(reader).queryByText(first)).not.toBeInTheDocument();
+    expect(content.getByText(second)).toBeInTheDocument();
+    expect(content.queryByText(first)).not.toBeInTheDocument();
     expect(within(reader).getByText(context)).toBeInTheDocument();
     fireEvent.click(within(reader).getByRole("button", { name: "查看整篇" }));
     expect(within(reader).getByText(first)).toBeInTheDocument();
@@ -164,6 +165,6 @@ describe("CreativeDraftReader", () => {
     ] }} />);
     fireEvent.click(screen.getByRole("button", { name: "阅读第 2 段" }));
     expect(screen.getByText("第 2 段 · 8 秒")).toBeInTheDocument();
-    expect(screen.getByText("第二份正文")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "稿件正文" })).getByText("第二份正文")).toBeInTheDocument();
   });
 });

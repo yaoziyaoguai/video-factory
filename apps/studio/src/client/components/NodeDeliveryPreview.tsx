@@ -513,6 +513,7 @@ function formatAssetRoutingRationale(value: unknown): string {
 }
 
 function AssetCandidate({ candidate, index, sceneLabel }: { candidate: unknown; index: number; sceneLabel: string }) {
+  const [failedPreviewUrl, setFailedPreviewUrl] = useState<string>();
   const record = asRecord(candidate);
   if (!record) return null;
   const selected = record.selected === true;
@@ -524,10 +525,10 @@ function AssetCandidate({ candidate, index, sceneLabel }: { candidate: unknown; 
     : "尺寸待下载后核验";
   return <figure className={selected ? "is-selected" : undefined}>
     <div className="asset-candidate-media">
-      {previewUrl ? <img alt={`${sceneLabel} 的候选素材 ${index + 1}`} loading="lazy" src={previewUrl} /> : <span>暂无缩略图</span>}
-      {selected ? <b>当前采用</b> : null}
+      {previewUrl && failedPreviewUrl !== previewUrl ? <img alt={`${sceneLabel} 的候选素材 ${index + 1}`} loading="lazy" src={previewUrl} onError={() => setFailedPreviewUrl(previewUrl)} /> : <span>{previewUrl ? "候选缩略图读取失败" : "暂无缩略图"}</span>}
     </div>
     <figcaption>
+      {selected ? <b className="asset-candidate-selected">当前采用</b> : null}
       <strong>{formatScalar(record.provider_id ?? record.provider, "provider")}</strong>
       <small>{dimensions}{typeof record.duration === "number" && record.duration > 0 ? ` · ${record.duration} 秒` : ""}</small>
       {hasStockAttribution(provider) ? <small><StockAttribution provider={provider}

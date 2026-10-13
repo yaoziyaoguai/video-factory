@@ -22,6 +22,32 @@ function setup(overrides: Partial<Parameters<typeof NodeDocumentCommands>[0]> = 
 }
 
 describe("NodeDocumentCommands", () => {
+  it.each([
+    ["publish-package", "当前修改的是发布文案。发送会调用模型，新稿仍由你决定是否采用。"],
+    ["reference-grammar", "当前修改的是参考报告。发送会调用模型，新稿仍由你决定是否采用。"],
+  ])("names the %s revision target beside the input without submitting", (nodeId, context) => {
+    const onRevise = vi.fn(async () => undefined);
+    const onAudit = vi.fn(async () => undefined);
+    setup({ nodeId, onRevise, onAudit });
+    expect(screen.getByRole("textbox", { name: "修订意见" })).toHaveAccessibleDescription(context);
+    expect(onRevise).not.toHaveBeenCalled();
+    expect(onAudit).not.toHaveBeenCalled();
+  });
+
+  it("returns focus to the editable instruction when suggestions are added, without sending", () => {
+    const onRevise = vi.fn(async () => undefined);
+    setup({ onRevise });
+    const textbox = screen.getByRole("textbox", { name: "修订意见" });
+    fireEvent.change(textbox, { target: { value: "保留我写的开头。" } });
+    fireEvent.click(screen.getByLabelText("描述补充具体收益。"));
+    const append = screen.getByRole("button", { name: "加入修改意见（1）" });
+    append.focus();
+    fireEvent.click(append);
+    expect(textbox).toHaveFocus();
+    expect(textbox).toHaveValue("保留我写的开头。\n描述补充具体收益。");
+    expect(onRevise).not.toHaveBeenCalled();
+  });
+
   it("can audit the current completed copy while keeping unsent opinions for an older copy", async () => {
     const onAudit = vi.fn(async () => undefined);
     const props = { nodeId: "publish-package", runRevision: 7, effectiveVersionId: "copy-1", completed: true,

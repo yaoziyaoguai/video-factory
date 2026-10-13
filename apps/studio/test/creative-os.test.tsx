@@ -684,7 +684,7 @@ describe("Creative OS", () => {
     expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("已完成1");
     expect(screen.getByRole("region", { name: "制作概况" })).toHaveTextContent("已归档1");
     expect(screen.getByRole("region", { name: "制作概况" })).not.toHaveTextContent("需调整");
-    expect(screen.getByText("选择一种开始方式。系统会沿同一条制作线推进；需要生成付费图片或视频时，会先报价并等你确认。")).toBeInTheDocument();
+    expect(screen.getByText("需要生成付费图片或视频时，会先报价并等你确认。")).toBeInTheDocument();
   });
 
   it("keeps a legacy read-only review out of the home to-do count and offers a new version", async () => {

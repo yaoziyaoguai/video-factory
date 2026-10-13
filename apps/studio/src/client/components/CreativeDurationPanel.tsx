@@ -15,12 +15,14 @@ interface DurationEditor {
   clear: boolean;
 }
 
-export function CreativeDurationPanel({ review, busy = false, onSave, onAdopt, onEditingChange }: {
+export function CreativeDurationPanel({ review, busy = false, onSave, onAdopt, onEditingChange, decisionNoteAtAdoption = false }: {
   review: StudioCreativeReviewSnapshot;
   busy?: boolean;
   onSave?: (amendment: DurationAmendment) => Promise<boolean>;
   onAdopt?: (amendment: DurationAmendment) => Promise<boolean>;
   onEditingChange?: (editing: boolean) => void;
+  /** 脚本样板把这条说明放在同一页的唯一采用区，不重复占用移动端读稿空间。 */
+  decisionNoteAtAdoption?: boolean;
 }) {
   // 与稿件编辑使用同一标签会话存储；槽位不含版本，刷新或另一标签更新后仍能找回旧输入。
   const purposeKey = `${review.reviewPurpose ?? "draft"}:duration`;
@@ -86,7 +88,7 @@ export function CreativeDurationPanel({ review, busy = false, onSave, onAdopt, o
       ? [duration.commitment.minSeconds === undefined ? null : `至少 ${durationSecondsLabel(duration.commitment.minSeconds)} 秒`,
         duration.commitment.maxSeconds === undefined ? null : `最多 ${durationSecondsLabel(duration.commitment.maxSeconds)} 秒`].filter(Boolean).join("，")
       : "未设硬性范围"}</p>
-    <p className="duration-decision-note">{proposal ? "采用本版时一并确认时长；" : "参考目标不代表已确认时长；"}费用待方案核价，不授权素材购买。</p>
+    {!decisionNoteAtAdoption ? <p className="duration-decision-note">{proposal ? "采用本版时一并确认时长；" : "参考目标不代表已确认时长；"}费用待方案核价，不授权素材购买。</p> : null}
     {proposal ? <details className="duration-scene-details"><summary>查看 {proposal.scenes.length} 镜时长明细</summary>
       <p>以当前脚本的 {proposal.totalFrames} 帧计算；采用这版脚本时一并确认，不会自动设成硬性范围。</p>
       <ul>{proposal.scenes.map(scene => <li key={scene.position}>第 {scene.position} 镜：{durationSecondsLabel(scene.durationSeconds)} 秒（{scene.frameCount} 帧）</li>)}</ul>

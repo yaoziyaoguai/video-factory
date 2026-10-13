@@ -27,6 +27,9 @@ function draftSegments(stage: CreativeStage, value: Record<string, unknown>) {
   const segments = items.map((item, index) => ({
     key: hasIds ? `id:${String(item[idField])}` : `position:${Number(item[positionField])}`,
     label: stage === "treatment" ? `内容推进 ${index + 1}` : stage === "script" ? `第 ${Number(item.position ?? index + 1)} 段` : `镜头 ${Number(item.scenePosition)}`,
+    number: stage === "script" ? Number(item.position ?? index + 1) : index + 1,
+    summary: stage === "script" && typeof item.narration === "string" ? item.narration.trim() : undefined,
+    duration: stage === "script" && typeof item.duration === "number" && Number.isFinite(item.duration) ? item.duration : undefined,
     // 缺 position 的旧脚本仍沿用它在整篇中的显示序号，阅读切段不改源文档。
     item: stage === "script" ? { ...item, position: item.position ?? index + 1 } : item,
   }));
@@ -96,16 +99,20 @@ export function CreativeDraftReader({ stage, value, nativeAudio = false }: { sta
   if (!structured || !isRecord(value)) return <CreativeDraft stage={stage} value={value} nativeAudio={nativeAudio} />;
   const { field, segments } = structured;
   if (!selected) return <CreativeDraft stage={stage} value={value} nativeAudio={nativeAudio} />;
-  return <section className="creative-draft-reader" aria-label="稿件阅读">
+  return <section className={`creative-draft-reader${stage === "script" ? " creative-draft-reader--script" : ""}`} aria-label="稿件阅读">
+    {!showWholeDraft ? <nav ref={navRef} className={`creative-segment-nav${stage === "script" ? " creative-segment-nav--script" : ""}`} aria-label="稿件段落">
+      {stage === "script" ? <div className="creative-segment-heading"><strong>脚本段落</strong><span>{segments.length} 段</span></div> : null}
+      <span ref={indicatorRef} className="creative-segment-indicator" aria-hidden="true" />{segments.map((segment) => <button
+      type="button" key={segment.key} className="creative-segment-button" aria-label={`阅读${segment.label}`}
+      aria-current={segment.key === selected.key ? "true" : undefined} onClick={() => setSelectedId(segment.key)}>
+      <span className="creative-segment-number" aria-hidden="true">{String(segment.number).padStart(2, "0")}</span>
+      {segment.summary ? <span className="creative-segment-copy">{segment.summary}</span> : null}
+      {segment.duration !== undefined ? <span className="creative-segment-duration">{segment.duration} 秒</span> : null}
+    </button>)}</nav> : null}
     <div className="creative-reader-toolbar"><span>{segments.length} {stage === "director" ? "镜头" : "段"}</span>
       <button type="button" className="button button-ghost" onClick={() => setShowWholeDraft((current) => !current)}>{showWholeDraft ? "返回分段阅读" : "查看整篇"}</button>
     </div>
-    {!showWholeDraft ? <nav ref={navRef} className="creative-segment-nav" aria-label="稿件段落"><span ref={indicatorRef} className="creative-segment-indicator" aria-hidden="true" />{segments.map((segment, index) => <button
-      type="button" key={segment.key} className="creative-segment-button" aria-label={`阅读${segment.label}`}
-      aria-current={segment.key === selected.key ? "true" : undefined} onClick={() => setSelectedId(segment.key)}>
-      <span className="creative-segment-number">{String(index + 1).padStart(2, "0")}</span><span className="creative-segment-title">{segment.label}</span>
-    </button>)}</nav> : null}
-    <div className="creative-reader-content" aria-live="polite"><CreativeDraft stage={stage} value={showWholeDraft ? value : { ...value, [field]: [selected.item] }} nativeAudio={nativeAudio} /></div>
+    <div className="creative-reader-content" role="region" aria-label="稿件正文" aria-live="polite"><CreativeDraft stage={stage} value={showWholeDraft ? value : { ...value, [field]: [selected.item] }} nativeAudio={nativeAudio} /></div>
   </section>;
 }
 

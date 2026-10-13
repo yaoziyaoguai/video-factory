@@ -86,6 +86,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const [editingDocument, setEditingDocument] = useState(false);
   // F05：前序步骤没有挂载正文卡片时，记录被点开的那一条，用于就地说明原因。
   const [unavailableSource, setUnavailableSource] = useState<string | undefined>();
+  const [failedVisualSources, setFailedVisualSources] = useState<Set<string>>(() => new Set());
   const [authorizing, setAuthorizing] = useState(false);
   const [rejectingSpend, setRejectingSpend] = useState(false);
   const [spendRejectionReason, setSpendRejectionReason] = useState<StudioSpendRejectionInput["reason"]>("too_expensive");
@@ -774,12 +775,25 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           {node.id === "assets" && visualArtifacts.length ? <div className={visualsAreCurrent ? "node-visual-preview" : "node-visual-preview is-stale"}>
             <header><strong>{visualsAreCurrent ? "实际素材画面" : "上次生成的素材画面"}</strong><small>{visualArtifacts.length} 个可预览素材{visualsAreCurrent ? "" : " · 将重新检查适用性，只重做不再适用的部分"}</small></header>
             <div>
-              {visualArtifacts.map((artifact, index) => <figure key={artifact.id}>
+              {visualArtifacts.map((artifact, index) => {
+                const source = artifact.contentType?.startsWith("video/") ? artifact.contentUrl : artifact.providerId === "unsplash-stock-v1" ? unsplashPublicUrl(artifact.previewUrl, "images.unsplash.com") : artifact.contentUrl;
+                const identity = `${artifact.id}:${source}`;
+                const label = artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`;
+                const failed = failedVisualSources.has(identity);
+                const onError = () => setFailedVisualSources(previous => new Set(previous).add(identity));
+                const onReady = () => setFailedVisualSources(previous => {
+                  if (!previous.has(identity)) return previous;
+                  const next = new Set(previous);
+                  next.delete(identity);
+                  return next;
+                });
+                return <figure key={artifact.id}>
                 {artifact.contentType?.startsWith("video/")
-                  ? <video aria-label={`${artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`} 画面预览`} src={artifact.contentUrl} controls playsInline preload="metadata" />
-                  : <img alt={`${artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`} 画面预览`} src={artifact.providerId === "unsplash-stock-v1" ? unsplashPublicUrl(artifact.previewUrl, "images.unsplash.com") : artifact.contentUrl} loading="lazy" />}
+                  ? <video aria-label={`${label} 画面预览`} src={source} controls playsInline preload="metadata" onError={onError} onLoadedData={onReady} />
+                  : <img alt={`${label} 画面预览`} src={source} loading="lazy" onError={onError} onLoad={onReady} hidden={failed} />}
+                {failed ? <p className="media-preview-error" role="status">{label} 预览读取失败，原素材记录仍保留。</p> : null}
                 <figcaption><span>{artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`}</span><small>{hasStockAttribution(artifact.providerId) ? <StockAttribution provider={artifact.providerId} creator={artifact.creator} creatorUrl={artifact.creatorUrl} licenseNote={artifact.licenseNote} /> : providerLabel(artifact.providerId) ?? "素材来源未记录"}</small></figcaption>
-              </figure>)}
+              </figure>; })}
             </div>
           </div> : null}
           {node.id === "creative-planning" ? <PlanningDeliveryPanel
