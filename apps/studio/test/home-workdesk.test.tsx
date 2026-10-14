@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,17 +8,66 @@ import type { StudioRunSummary } from "../src/shared/api.js";
 
 afterEach(() => vi.restoreAllMocks());
 
+const baseRun: StudioRunSummary = {
+  id: "current", title: "制作中的作品", status: "needs_human", nextAction: "review",
+  currentNodeId: "creative-planning", platform: "douyin", durationSeconds: 24, startedAt: "2026-10-14T08:00:00.000Z",
+};
+
 describe("home workdesk heading and states", () => {
-  it("keeps numbered creation entries readable without adding decorative numbers to their spoken names", () => {
+  it("keeps creator-action priority over historical and running records and uses real recent runs", async () => {
+    vi.spyOn(studioApi, "runs").mockResolvedValue([
+      { ...baseRun, id: "legacy", title: "旧版正在运行的记录", status: "running", continuation: { supported: false } },
+      { ...baseRun, id: "automatic", title: "正在制作的另一条", status: "running" },
+      { ...baseRun, id: "failed", title: "需要恢复的作品", status: "failed" },
+      { ...baseRun, id: "archived", title: "归档的旧作品", status: "succeeded", archivedAt: "2026-10-14T09:00:00.000Z" },
+      { ...baseRun, id: "recent", title: "昨天完成的作品", status: "succeeded", startedAt: "2026-10-13T08:00:00.000Z" },
+    ]);
+    render(<MemoryRouter><HomePage /></MemoryRouter>);
+    const current = await screen.findByRole("region", { name: "需要恢复的作品" });
+    expect(within(current).getByRole("link")).toHaveAttribute("href", "/projects/failed");
+    expect(within(current).getByText("目标 24 秒")).toBeVisible();
+    expect(within(current).getByText("尚无成片")).toBeVisible();
+    expect(within(current).getByText("工作室光圈 · 装饰")).toBeVisible();
+    expect(current.querySelector("video, img")).toBeNull();
+    const recent = screen.getByRole("region", { name: "留在工作台上的" });
+    expect(screen.queryByText("旧版正在运行的记录")).not.toBeInTheDocument();
+    expect(within(recent).getByRole("link", { name: /正在制作的另一条/ })).toHaveAttribute("href", "/projects/automatic");
+    expect(within(recent).getByRole("link", { name: /昨天完成的作品/ })).toHaveAttribute("href", "/projects/recent");
+    expect(within(recent).queryByText("归档的旧作品")).not.toBeInTheDocument();
+  });
+
+  it("shows a video load failure and retries while retaining the actual review action", async () => {
+    const user = userEvent.setup();
+    const videoRun = { ...baseRun, title: "等待终审的作品", currentNodeId: "final-review", videoContentUrl: "/api/runs/current/artifacts/video/content" };
+    vi.spyOn(studioApi, "runs").mockResolvedValue([videoRun]);
+    render(<MemoryRouter><HomePage /></MemoryRouter>);
+    const work = await screen.findByRole("region", { name: videoRun.title });
+    const video = within(work).getByLabelText(`${videoRun.title} 预览`);
+    fireEvent.error(video);
+    expect(within(work).getByRole("status")).toHaveTextContent("视频暂时未能加载");
+    expect(within(work).getByRole("link", { name: "进入审片" })).toHaveAttribute("href", "/projects/current");
+    expect(work.querySelector("img")).toBeNull();
+    await user.click(within(work).getByRole("button", { name: "重新加载预览" }));
+    expect(within(work).getByLabelText(`${videoRun.title} 预览`)).toHaveAttribute("src", `${videoRun.videoContentUrl}#t=0.1`);
+  });
+
+  it("keeps unknown steps neutral and never claims that an invalidated approval is still valid", async () => {
+    vi.spyOn(studioApi, "runs").mockResolvedValue([{ ...baseRun, status: "approval_invalidated", nextAction: "confirm_spend", currentNodeId: "unrecognized-step" }]);
+    render(<MemoryRouter><HomePage /></MemoryRouter>);
+    const work = await screen.findByRole("region", { name: baseRun.title });
+    expect(within(work).getByText("当前步骤")).toBeVisible();
+    expect(within(work).getByText("费用确认已失效")).toBeVisible();
+    expect(within(work).getByText(/之前的费用确认已失效/)).toBeVisible();
+    expect(within(work).getByRole("link", { name: "确认费用" })).toHaveAttribute("href", "/projects/current");
+  });
+  it("keeps four creation choices readable without presenting them as numbered steps", () => {
     vi.spyOn(studioApi, "runs").mockReturnValue(new Promise(() => {}));
     render(<MemoryRouter><HomePage /></MemoryRouter>);
 
     const entries = screen.getByRole("region", { name: "你今天从哪里出发？" });
     const buttons = within(entries).getAllByRole("button");
     expect(buttons).toHaveLength(4);
-    for (const [index, button] of buttons.entries()) {
-      expect(within(button).getByText(String(index + 1).padStart(2, "0"))).toHaveAttribute("aria-hidden", "true");
-    }
+    expect(within(entries).queryByText(/^(01|02|03|04)$/)).not.toBeInTheDocument();
     expect(buttons[0]).toHaveAccessibleName("从热点开始发现值得讲的当下话题");
     expect(buttons[1]).toHaveAccessibleName("继续一个系列延续栏目，创作下一集");
     expect(buttons[2]).toHaveAccessibleName("从自己的想法开始写下主题，加入你的参考");

@@ -8,7 +8,7 @@
   color: var(--ink);
   background: var(--paper);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 16px;
   box-shadow: var(--shadow-raised);
 }
 
@@ -85,7 +85,7 @@
   text-shadow: none;
   background: var(--paper);
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
+  border-radius: 10px;
   font-family: inherit;
   font-size: 14px;
   font-weight: 650;

@@ -55,12 +55,12 @@ describe("workdesk layout preserves decision and media boundaries", () => {
     expect(onDecision).not.toHaveBeenCalled();
   });
 
-  it("styles pane-switch controls at the same 1100px breakpoint where they become visible", () => {
-    // CSSOM 合同只验证断点与触达区，实际窄屏排版仍由浏览器检查。
+  it("uses mobile pane switches at 700px and naturally stacks the real panel wrappers at 1000px", () => {
+    // CSSOM 合同覆盖真实分栏外层与触达区；实际尺寸和拖动由浏览器检查。
     const sheet = new CSSStyleSheet();
     sheet.replaceSync(readFileSync(resolve(process.cwd(), "src/client/studio-workspace.css"), "utf8"));
     const breakpoint = Array.from(sheet.cssRules).find(rule => rule instanceof CSSMediaRule
-      && rule.conditionText === "(max-width: 1100px)") as CSSMediaRule;
+      && rule.conditionText === "(max-width: 700px)") as CSSMediaRule;
     const paneSwitchRule = Array.from(breakpoint.cssRules).find(rule => rule instanceof CSSStyleRule
       && rule.selectorText === ".studio-v3 .creative-mobile-tabs button") as CSSStyleRule;
     expect(paneSwitchRule.style.getPropertyValue("min-height")).toBe("44px");
@@ -68,6 +68,21 @@ describe("workdesk layout preserves decision and media boundaries", () => {
     expect(paneSwitchRule.style.getPropertyValue("font-size")).toBe("14px");
     expect(Array.from(breakpoint.cssRules).some(rule => rule instanceof CSSStyleRule
       && rule.selectorText === ".studio-v3 .creative-mobile-tabs button:focus-visible")).toBe(true);
+    const stacked = Array.from(sheet.cssRules).find(rule => rule instanceof CSSMediaRule
+      && rule.conditionText === "(max-width: 1000px)") as CSSMediaRule;
+    const panel = Array.from(stacked.cssRules).find(rule => rule instanceof CSSStyleRule
+      && rule.selectorText === ".studio-v3 .creative-discussion-layout > [data-panel]") as CSSStyleRule;
+    const group = Array.from(stacked.cssRules).find(rule => rule instanceof CSSStyleRule
+      && rule.selectorText === ".studio-v3 .creative-discussion-layout") as CSSStyleRule;
+    expect(panel.style.getPropertyValue("width")).toBe("100%");
+    expect(panel.style.getPropertyValue("flex")).toBe("0 0 auto");
+    expect(panel.style.getPropertyPriority("flex")).toBe("important");
+    expect(group.style.getPropertyValue("display")).toBe("block");
+    expect(group.style.getPropertyPriority("display")).toBe("important");
+    const hidden = Array.from(sheet.cssRules).find(rule => rule instanceof CSSStyleRule
+      && rule.selectorText === ".studio-v3 .creative-discussion-layout > [data-panel][hidden]") as CSSStyleRule;
+    expect(hidden.style.getPropertyValue("display")).toBe("none");
+    expect(hidden.style.getPropertyPriority("display")).toBe("important");
   });
 
   it("keeps composer explanations readable and only places closed duration details beside the desktop summary", () => {

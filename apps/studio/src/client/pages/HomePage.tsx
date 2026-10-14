@@ -1,10 +1,10 @@
-import { ArrowRight, Plus, RefreshCw } from "lucide-react";
+import { ArrowRight, Clapperboard, Clock3, FileText, Film, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { StatusBadge } from "../components/StatusBadge.js";
-import { creatorReviewAction, creatorRunStatusLabel, isHistoricalReadOnlyRun, runNeedsCreatorAction, runNodeLabel } from "../presentation.js";
+import { creatorReviewAction, creatorRunStatusLabel, isHistoricalReadOnlyRun, platformLabel, runNeedsCreatorAction, runNodeLabel } from "../presentation.js";
 
 export function HomePage() {
   const navigate = useNavigate();
@@ -32,6 +32,10 @@ export function HomePage() {
   const currentRun = useMemo(() => runs.find(runNeedsCreatorAction)
     ?? runs.find((run) => !isHistoricalReadOnlyRun(run) && (run.status === "running" || run.status === "pending"))
     ?? runs[0], [runs]);
+  const recentRuns = useMemo(() => [...runs]
+    .filter((run) => run.id !== currentRun?.id && !run.archivedAt && !isHistoricalReadOnlyRun(run))
+    .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))
+    .slice(0, 3), [currentRun?.id, runs]);
   const overview = useMemo(() => {
     const current = runs.filter((run) => !run.archivedAt);
     return {
@@ -63,14 +67,20 @@ export function HomePage() {
 
       {currentRun ? (
         <section className={`home-continuation${currentRun.videoContentUrl ? " has-preview" : ""}`} aria-labelledby="continue-title">
-          {currentRun.videoContentUrl ? <div className="home-work-preview"><video controls muted playsInline preload="metadata" src={`${currentRun.videoContentUrl}#t=0.1`} aria-label={`${currentRun.title} 预览`} /></div> : null}
+          <HomeScreening run={currentRun} key={currentRun.id} />
           <div className="home-continuation-copy">
-            <p className="home-work-label">{currentRun.status === "succeeded" ? "最近完成" : "继续上次工作"}</p>
+            <div className="home-work-topline"><p className="home-work-label">{currentRun.status === "succeeded" ? "最近完成" : "继续上次工作"}</p><StatusBadge status={currentRun.status} {...(creatorRunStatusLabel(currentRun) ? { label: creatorRunStatusLabel(currentRun)! } : {})} /></div>
+            <p className="home-work-stage"><FileText aria-hidden="true" size={21} />{isHistoricalReadOnlyRun(currentRun) ? "旧版制作记录" : runNodeLabel(currentRun.currentNodeId)}</p>
             <h2 id="continue-title">{currentRun.title}</h2>
-            <div className="home-work-status"><StatusBadge status={currentRun.status} {...(creatorRunStatusLabel(currentRun) ? { label: creatorRunStatusLabel(currentRun)! } : {})} /></div>
             <p className="home-work-message">{continueMessage(currentRun)}</p>
+            <div className="home-work-spec"><span><Clock3 aria-hidden="true" size={15} />目标 {currentRun.durationSeconds} 秒</span><span>{platformLabel(currentRun.platform)}</span>{currentRun.runPurpose === "test" ? <span>测试记录</span> : null}</div>
             <Link className="button button-primary" to={`/projects/${currentRun.id}`}>{continueAction(currentRun)}<ArrowRight aria-hidden="true" size={16} /></Link>
           </div>
+        </section>
+      ) : !loading && !error ? (
+        <section className="home-first-work" aria-labelledby="first-work-title">
+          <div className="home-first-work-copy"><p className="home-work-label">你的第一条作品</p><h2 id="first-work-title">一个想法，<br />从这里成为影像。</h2><p>从下面选择一个入口。脚本、画面与每次确认，会留在你的制作记录里。</p></div>
+          <span className="home-decoration-label">工作室光圈 · 装饰</span>
         </section>
       ) : null}
 
@@ -80,30 +90,52 @@ export function HomePage() {
         </header>
         <div className="home-start-options">
           <button type="button" onClick={() => navigate("/topics")}>
-            <span className="home-option-number" aria-hidden="true">01</span>
             <span><strong>从热点开始</strong><small>发现值得讲的当下话题</small></span>
             <ArrowRight aria-hidden="true" size={18} />
           </button>
           <button type="button" onClick={() => navigate("/topics?mode=series")}>
-            <span className="home-option-number" aria-hidden="true">02</span>
             <span><strong>继续一个系列</strong><small>延续栏目，创作下一集</small></span>
             <ArrowRight aria-hidden="true" size={18} />
           </button>
           <button type="button" onClick={() => navigate("/topics?mode=manual")}>
-            <span className="home-option-number" aria-hidden="true">03</span>
             <span><strong>从自己的想法开始</strong><small>写下主题，加入你的参考</small></span>
             <Plus aria-hidden="true" size={18} />
           </button>
           <button type="button" onClick={() => navigate("/cases")}>
-            <span className="home-option-number" aria-hidden="true">04</span>
             <span><strong>从案例 / 脚本开始</strong><small>借鉴好作品，写自己的版本</small></span>
             <ArrowRight aria-hidden="true" size={18} />
           </button>
         </div>
         <p className="home-start-note">需要生成付费图片或视频时，会先报价并等你确认。</p>
       </section>
+
+      {!loading && !error && recentRuns.length > 0 ? <section className="home-recent" aria-labelledby="home-recent-title">
+        <header><h2 id="home-recent-title">留在工作台上的</h2><Link to="/projects">全部制作<ArrowRight aria-hidden="true" size={15} /></Link></header>
+        <div className="home-recent-list">{recentRuns.map((run) => <Link to={`/projects/${run.id}`} key={run.id} className="home-recent-run">
+          <span className="home-recent-icon" aria-hidden="true">{run.videoContentUrl ? <Film size={23} /> : <FileText size={23} />}</span>
+          <span className="home-recent-copy"><strong>{run.title}</strong><small>{isHistoricalReadOnlyRun(run) ? "旧版制作记录" : runNodeLabel(run.currentNodeId)} · 目标 {run.durationSeconds} 秒</small></span>
+          <StatusBadge status={run.status} {...(creatorRunStatusLabel(run) ? { label: creatorRunStatusLabel(run)! } : {})} />
+          <ArrowRight aria-hidden="true" size={17} />
+        </Link>)}</div>
+      </section> : null}
     </main>
   );
+}
+
+function HomeScreening({ run }: { run: StudioRunSummary }) {
+  const [failedSource, setFailedSource] = useState<string>();
+  const hasPreview = Boolean(run.videoContentUrl);
+  const previewFailed = hasPreview && failedSource === run.videoContentUrl;
+  return <div className={`home-screening${hasPreview ? " has-media" : " is-waiting"}`}>
+    <div className="home-screening-header"><span><Clapperboard aria-hidden="true" size={18} />放映室</span><span>{hasPreview ? "已有视频" : "尚无成片"}</span></div>
+    {hasPreview && !previewFailed ? <div className="home-work-preview"><video controls muted playsInline preload="metadata" src={`${run.videoContentUrl}#t=0.1`} aria-label={`${run.title} 预览`} onError={() => setFailedSource(run.videoContentUrl)} /></div> : <div className="home-screening-copy" {...(previewFailed ? { role: "status" } : {})}>
+      <Film aria-hidden="true" size={30} strokeWidth={1.4} />
+      <strong>{previewFailed ? "视频暂时未能加载" : "画面留给下一步"}</strong>
+      <p>{previewFailed ? "制作记录仍保留，可以打开作品查看已有结果。" : "这条制作还没有可播放的成片。先继续当前步骤，已有内容会保留在作品中。"}</p>
+      {previewFailed ? <button type="button" className="home-preview-retry" onClick={() => setFailedSource(undefined)}><RefreshCw aria-hidden="true" size={15} />重新加载预览</button> : null}
+    </div>}
+    <div className="home-screening-footer"><span>{hasPreview ? "完整画面 · 由你播放" : "工作室光圈 · 装饰"}</span><span>{hasPreview ? "保留原始比例" : "已有结果以制作记录为准"}</span></div>
+  </div>;
 }
 
 function continueAction(run: StudioRunSummary): string {
@@ -118,6 +150,7 @@ function continueAction(run: StudioRunSummary): string {
 
 function continueMessage(run: StudioRunSummary): string {
   if (isHistoricalReadOnlyRun(run)) return "这是旧版制作记录；现有结果可以查看，继续调整会创建一个新版制作。";
+  if (run.status === "approval_invalidated") return "之前的费用确认已失效。先查看发生变化的内容，再决定是否重新确认费用。";
   if (run.nextAction === "confirm_spend") return "下一步会产生费用，正在等你检查前面的内容。";
   if (run.nextAction === "review") return run.currentNodeId === "final-review" && run.videoContentUrl
     ? "成片已经准备好，正在等你完整观看和判断。"

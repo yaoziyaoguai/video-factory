@@ -1,6 +1,8 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
+import { MotionConfig } from "motion/react";
+import { initializeStudioAppearance } from "./studio-appearance.js";
 import "@fontsource-variable/manrope";
 import "@fontsource-variable/noto-sans-sc";
 import "driver.js/dist/driver.css";
@@ -14,6 +16,7 @@ import "./studio-foundation.css";
 import "./studio-library.css";
 import "./studio-workspace.css";
 
+initializeStudioAppearance();
 const root = document.getElementById("root");
 if (!root) {
   throw new Error("Studio root element was not found.");
@@ -21,8 +24,10 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
+    <MotionConfig reducedMotion="user" transition={{ type: "spring", stiffness: 400, damping: 36 }}>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </MotionConfig>
   </StrictMode>,
 );

@@ -6,8 +6,20 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { AppShell } from '../src/client/components/AppShell.js';
 import { studioApi } from '../src/client/api.js';
 import { useDialogFocus } from '../src/client/hooks/useDialogFocus.js';
+import { initializeStudioAppearance } from '../src/client/studio-appearance.js';
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  localStorage.removeItem('videofactory.studio.appearance');
+  delete document.documentElement.dataset.appearance;
+});
+
+function mockSearchSources() {
+  vi.spyOn(studioApi, 'health').mockResolvedValue({ status: 'ok', runtime: {} });
+  vi.spyOn(studioApi, 'runs').mockResolvedValue([]);
+  vi.spyOn(studioApi, 'opportunities').mockResolvedValue([]);
+  vi.spyOn(studioApi, 'templates').mockResolvedValue({ templates: [], storeRevision: 0 });
+}
 
 it('shows the current workspace without changing navigation or loading business data', async () => {
   vi.spyOn(studioApi, 'health').mockResolvedValue({ status: 'ok', runtime: {} });
@@ -24,21 +36,20 @@ it('shows the current workspace without changing navigation or loading business 
   expect(runs).not.toHaveBeenCalled();
 });
 
-it('keeps global search keyboard-accessible from the quiet navigation shell', async () => {
-  vi.spyOn(studioApi, 'health').mockResolvedValue({ status: 'ok', runtime: {} });
-  vi.spyOn(studioApi, 'runs').mockResolvedValue([]);
-  vi.spyOn(studioApi, 'opportunities').mockResolvedValue([]);
-  vi.spyOn(studioApi, 'templates').mockResolvedValue({ templates: [], storeRevision: 0 });
+it('keeps global search keyboard-accessible and returns focus to its trigger', async () => {
+  mockSearchSources();
   const user = userEvent.setup();
   render(<MemoryRouter initialEntries={['/assets']}><AppShell><main>素材内容</main></AppShell></MemoryRouter>);
   expect(screen.getByLabelText('当前工作区')).toHaveTextContent('素材库');
   const trigger = screen.getByRole('button', { name: '搜索项目、选题、模板或功能' });
   trigger.focus();
   await user.keyboard('{Enter}');
-  await user.type(screen.getByRole('textbox', { name: '搜索项目、选题、模板或功能' }), '素材');
+  const search = screen.getByRole('combobox', { name: '搜索项目、选题、模板或功能' });
+  await waitFor(() => expect(search).toHaveFocus());
+  await user.type(search, '素材');
   await user.keyboard('{Escape}');
-  expect(screen.queryByRole('dialog', { name: '搜索项目、选题、模板或功能' })).not.toBeInTheDocument();
-  expect(trigger).toHaveFocus();
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: '搜索项目、选题、模板或功能' })).not.toBeInTheDocument());
+  await waitFor(() => expect(trigger).toHaveFocus());
 });
 
 it('uses one responsive navigation and one account entry without losing secondary destinations', async () => {
@@ -61,23 +72,20 @@ it('uses one responsive navigation and one account entry without losing secondar
   await waitFor(() => expect(onLogout).toHaveBeenCalledOnce());
 });
 
-it('keeps secondary destinations in the same navigation and closes more after a choice or Escape', async () => {
+it('makes all six destinations directly reachable and moves focus to the selected workspace', async () => {
   vi.spyOn(studioApi, 'health').mockResolvedValue({ status: 'ok', runtime: {} });
   const user = userEvent.setup();
-  render(<MemoryRouter><AppShell><main>当前页面</main></AppShell></MemoryRouter>);
-  const more = screen.getByRole('button', { name: '更多页面' });
-  expect(more).toHaveAttribute('aria-expanded', 'false');
-  await user.click(more);
-  expect(more).toHaveAttribute('aria-expanded', 'true');
-  await user.click(screen.getByRole('link', { name: '创作设置' }));
-  expect(screen.getByLabelText('当前工作区')).toHaveTextContent('创作设置');
-  expect(more).toHaveAttribute('aria-expanded', 'false');
-  await user.click(more);
-  screen.getByRole('link', { name: '模板资料' }).focus();
-  await user.keyboard('{Escape}');
-  expect(more).toHaveAttribute('aria-expanded', 'false');
-  expect(more).toHaveFocus();
-  expect(within(screen.getByRole('navigation', { name: '主导航' })).getAllByRole('link')).toHaveLength(6);
+  render(<MemoryRouter><AppShell><main>当前页面<button>正文操作</button></main></AppShell></MemoryRouter>);
+  const nav = within(screen.getByRole('navigation', { name: '主导航' }));
+  expect(nav.getAllByRole('link')).toHaveLength(6);
+  for (const label of ['创作设置', '模板资料', '制作复盘']) {
+    const link = nav.getByRole('link', { name: label });
+    link.focus();
+    await user.keyboard('{Enter}');
+    expect(link).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByLabelText('当前工作区')).toHaveTextContent(label);
+    expect(document.getElementById('main-content')).toHaveFocus();
+  }
 });
 
 it('does not show a ready service indicator while the health request is unresolved', () => {
@@ -98,31 +106,42 @@ it('keeps an unavailable basic-tool state distinct from a production capability 
   expect(screen.getByText('基础工具需检查').previousElementSibling).toHaveClass('health-down');
 });
 
-it('closes more before opening search so Escape restores the search trigger instead of navigation', async () => {
-  vi.spyOn(studioApi, 'health').mockResolvedValue({ status: 'ok', runtime: {} });
-  vi.spyOn(studioApi, 'runs').mockResolvedValue([]);
-  vi.spyOn(studioApi, 'opportunities').mockResolvedValue([]);
-  vi.spyOn(studioApi, 'templates').mockResolvedValue({ templates: [], storeRevision: 0 });
+it('navigates command results with arrows and Enter, then focuses the destination content', async () => {
+  mockSearchSources();
   const user = userEvent.setup();
-  render(<MemoryRouter><AppShell username="创作者" onLogout={vi.fn()}><main>当前页面</main></AppShell></MemoryRouter>);
-  const more = screen.getByRole('button', { name: '更多页面' });
-  const search = screen.getByRole('button', { name: '搜索项目、选题、模板或功能' });
-  await user.click(more);
-  await user.click(search);
-  expect(more).toHaveAttribute('aria-expanded', 'false');
-  await user.keyboard('{Escape}');
-  expect(search).toHaveFocus();
-  await user.click(more);
-  const account = screen.getByRole('button', { name: '账号菜单：创作者' });
-  await user.click(account);
-  expect(more).toHaveAttribute('aria-expanded', 'false');
-  await user.keyboard('{Escape}');
-  expect(account).toHaveFocus();
-  expect(screen.queryByRole('menu', { name: '账号菜单' })).not.toBeInTheDocument();
+  render(<MemoryRouter><AppShell><main>当前页面<button>正文操作</button></main></AppShell></MemoryRouter>);
+  await user.click(screen.getByRole('button', { name: '搜索项目、选题、模板或功能' }));
+  const search = screen.getByRole('combobox', { name: '搜索项目、选题、模板或功能' });
+  await user.keyboard('{ArrowDown}');
+  expect(screen.getByRole('option', { name: /创作台/ })).toHaveAttribute('aria-selected', 'true');
+  await user.keyboard('{ArrowUp}');
+  expect(screen.getByRole('option', { name: /声音演员与配音设置/ })).toHaveAttribute('aria-selected', 'true');
+  await user.type(search, '素材库');
+  await user.keyboard('{Enter}');
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(screen.getByLabelText('当前工作区')).toHaveTextContent('素材库');
+  await waitFor(() => expect(document.getElementById('main-content')).toHaveFocus());
 });
 
-it('dismisses more when focus enters a body dialog and lets that dialog own Escape and return focus', async () => {
+it('opens one command dialog with a shortcut and preserves the original input on cancellation', async () => {
+  mockSearchSources();
+  const user = userEvent.setup();
+  render(<MemoryRouter><AppShell><main><label>未发送意见<textarea /></label></main></AppShell></MemoryRouter>);
+  const draft = screen.getByRole('textbox', { name: '未发送意见' });
+  await user.type(draft, '保留这一句');
+  await user.keyboard('{Control>}k{/Control}');
+  expect(screen.getAllByRole('dialog')).toHaveLength(1);
+  await user.keyboard('{Control>}k{/Control}');
+  expect(screen.getAllByRole('dialog')).toHaveLength(1);
+  await user.keyboard('{Escape}');
+  await waitFor(() => expect(draft).toHaveFocus());
+  expect(screen.getByRole('textbox', { name: '未发送意见' })).toBe(draft);
+  expect(draft).toHaveValue('保留这一句');
+});
+
+it('lets an existing body dialog own shortcuts, Escape, and return focus', async () => {
   vi.spyOn(studioApi, 'health').mockResolvedValue({ status: 'ok', runtime: {} });
+  const runs = vi.spyOn(studioApi, 'runs');
   function BodyDialog() {
     const [open, setOpen] = useState(false);
     const dialogRef = useDialogFocus<HTMLElement>(open, () => setOpen(false));
@@ -136,14 +155,44 @@ it('dismisses more when focus enters a body dialog and lets that dialog own Esca
   }
   const user = userEvent.setup();
   render(<MemoryRouter><AppShell><BodyDialog /></AppShell></MemoryRouter>);
-  const more = screen.getByRole('button', { name: '更多页面' });
   const bodyTrigger = screen.getByRole('button', { name: '正文确认操作' });
-  await user.click(more);
-  expect(more).toHaveAttribute('aria-expanded', 'true');
   await user.click(bodyTrigger);
-  expect(more).toHaveAttribute('aria-expanded', 'false');
   expect(screen.getByRole('textbox', { name: '确认意见' })).toHaveFocus();
+  await user.keyboard('{Control>}k{/Control}');
+  expect(screen.getAllByRole('dialog')).toHaveLength(1);
+  expect(screen.queryByRole('dialog', { name: '搜索项目、选题、模板或功能' })).not.toBeInTheDocument();
+  expect(runs).not.toHaveBeenCalled();
   await user.keyboard('{Escape}');
   expect(screen.queryByRole('dialog', { name: '正文确认窗口' })).not.toBeInTheDocument();
   expect(bodyTrigger).toHaveFocus();
+});
+
+it('restores the chosen appearance and changes it without remounting unsent input', async () => {
+  vi.spyOn(studioApi, 'health').mockResolvedValue({ status: 'ok', runtime: {} });
+  const runs = vi.spyOn(studioApi, 'runs');
+  localStorage.setItem('videofactory.studio.appearance', 'dark');
+  expect(initializeStudioAppearance()).toBe('dark');
+  const user = userEvent.setup();
+  render(<MemoryRouter><AppShell><main><label>未发送意见<textarea /></label></main></AppShell></MemoryRouter>);
+  expect(screen.getByRole('button', { name: '暗房外观' })).toHaveAttribute('aria-pressed', 'true');
+  const draft = screen.getByRole('textbox', { name: '未发送意见' });
+  await user.type(draft, '切换后继续写');
+  await user.click(screen.getByRole('button', { name: '日光外观' }));
+  expect(document.documentElement).toHaveAttribute('data-appearance', 'light');
+  expect(localStorage.getItem('videofactory.studio.appearance')).toBe('light');
+  expect(screen.getByRole('textbox', { name: '未发送意见' })).toBe(draft);
+  expect(draft).toHaveValue('切换后继续写');
+  expect(runs).not.toHaveBeenCalled();
+});
+
+it('still changes appearance when browser storage is unavailable', async () => {
+  vi.spyOn(studioApi, 'health').mockResolvedValue({ status: 'ok', runtime: {} });
+  vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new DOMException('Storage is disabled', 'SecurityError'); });
+  vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('Storage is disabled', 'SecurityError'); });
+  expect(initializeStudioAppearance()).toBe('light');
+  const user = userEvent.setup();
+  render(<MemoryRouter><AppShell><main>当前页面</main></AppShell></MemoryRouter>);
+  await user.click(screen.getByRole('button', { name: '暗房外观' }));
+  expect(document.documentElement).toHaveAttribute('data-appearance', 'dark');
+  expect(screen.getByRole('button', { name: '暗房外观' })).toHaveAttribute('aria-pressed', 'true');
 });

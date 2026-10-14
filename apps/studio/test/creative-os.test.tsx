@@ -313,7 +313,7 @@ describe("Creative OS", () => {
     render(<MemoryRouter initialEntries={["/topics?mode=custom"]}><TodayPage /></MemoryRouter>);
 
     const pendingHeading = await screen.findByRole("heading", { name: "已保存的创作草稿" });
-    expect(screen.getByRole("heading", { name: pending.title })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: pending.title })).toBeInTheDocument();
     expect(screen.queryByText(produced.title)).not.toBeInTheDocument();
     expect(pendingHeading.closest("header")?.querySelector(":scope > span")).toHaveTextContent("1 条");
   });
@@ -1224,9 +1224,9 @@ describe("Creative OS", () => {
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
     await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
-    await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), "窗边一杯水");
+    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), "窗边一杯水");
 
-    expect(await screen.findByRole("link", { name: /窗边一杯水的六秒光影/ })).toHaveAttribute("href", "/projects/run-1");
+    expect(await screen.findByRole("option", { name: /窗边一杯水的六秒光影/ })).toHaveAttribute("href", "/projects/run-1");
   });
 
   it("shows the real run status in global search", async () => {
@@ -1236,10 +1236,10 @@ describe("Creative OS", () => {
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
     await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
-    await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), "失败的制作");
+    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), "失败的制作");
 
-    expect(await screen.findByRole("link", { name: /失败的制作/ })).toHaveTextContent("失败");
-    expect(screen.getByRole("link", { name: /失败的制作/ })).not.toHaveTextContent("制作中");
+    expect(await screen.findByRole("option", { name: /失败的制作/ })).toHaveTextContent("失败");
+    expect(screen.getByRole("option", { name: /失败的制作/ })).not.toHaveTextContent("制作中");
   });
 
   it("distinguishes same-name rework runs by creation time without exposing internal ids", async () => {
@@ -1252,9 +1252,9 @@ describe("Creative OS", () => {
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
     await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
-    await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), "同名返工作品");
+    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), "同名返工作品");
 
-    const results = await screen.findAllByRole("link", { name: /同名返工作品/ });
+    const results = await screen.findAllByRole("option", { name: /同名返工作品/ });
     expect(results).toHaveLength(2);
     expect(results[0]).toHaveTextContent("09/06");
     expect(results[1]).toHaveTextContent("09/07");
@@ -1271,14 +1271,14 @@ describe("Creative OS", () => {
 
     const trigger = screen.getByRole("button", { name: "搜索项目、选题、模板或功能" });
     await user.click(trigger);
-    const search = screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" });
+    const search = screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" });
     await user.type(search, "模板");
     await user.keyboard("{Escape}");
 
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(trigger).toHaveFocus());
     await user.click(trigger);
-    expect(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" })).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" })).toHaveValue("");
   });
 
   it("keeps opportunity selection, evidence, and production action in one workspace", async () => {
@@ -2469,16 +2469,16 @@ describe("Creative OS", () => {
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
     await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
-    await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), "电池");
+    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), "电池");
 
     // 机会：按来源跳到对应入口并带上 opportunity 深链参数。
-    expect(await screen.findByRole("link", { name: /电池耗电的三个真相/ })).toHaveAttribute("href", "/topics?mode=custom&opportunity=opp-searchable");
+    expect(await screen.findByRole("option", { name: /电池耗电的三个真相/ })).toHaveAttribute("href", "/topics?mode=custom&opportunity=opp-searchable");
 
-    await user.clear(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }));
-    await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), "复盘");
+    await user.clear(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }));
+    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), "复盘");
 
     // 模板：跳到模板工坊并直接打开对应模板。
-    expect(await screen.findByRole("link", { name: /三步复盘法/ })).toHaveAttribute("href", "/templates?template=my-review-flow");
+    expect(await screen.findByRole("option", { name: /三步复盘法/ })).toHaveAttribute("href", "/templates?template=my-review-flow");
   });
 
   it("describes the real search scope when nothing matches", async () => {
@@ -2490,7 +2490,7 @@ describe("Creative OS", () => {
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
     await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
-    await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), "量子物理讲义");
+    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), "量子物理讲义");
 
     expect(await screen.findByText("没有匹配的制作记录、选题机会、模板或功能。换一个更短的关键词试试。")).toBeInTheDocument();
   });
@@ -2513,8 +2513,8 @@ describe("Creative OS", () => {
     render(<MemoryRouter initialEntries={["/resources#production-roles"]}><AppShell><ResourcesPage /></AppShell></MemoryRouter>);
     for (const word of ["声音", "配音", "音色", "语速", "停顿"]) {
       await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
-      await user.type(screen.getByRole("textbox", { name: "搜索项目、选题、模板或功能" }), word);
-      const link = (await screen.findAllByRole("link")).find((item) => item.getAttribute("href") === "/resources#voice-casting");
+      await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), word);
+      const link = (await screen.findAllByRole("option")).find((item) => item.getAttribute("href") === "/resources#voice-casting");
       expect(link).toBeDefined();
       await user.click(link!);
       await waitFor(() => expect(document.getElementById("voice-casting")).toHaveAttribute("data-active", "true"));

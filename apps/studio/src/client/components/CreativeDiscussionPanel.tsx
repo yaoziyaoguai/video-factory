@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, FilePenLine, MessageCircle, RotateCcw, Save, Send, X } from "lucide-react";
+import { ArrowLeft, Check, FilePenLine, MessageCircle, PanelRightClose, RotateCcw, Save, Send, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 import { stageHandoffIdentityChanged } from "../film-arrival.js";
@@ -16,6 +16,7 @@ import {
 } from "../creative-draft-session.js";
 import { CreativeDraft, CreativeDraftReader } from "./CreativeDraftReader.js";
 import { CreativeDraftChanges } from "./CreativeDraftChanges.js";
+import { CreativeWorkspacePanels } from "./CreativeWorkspacePanels.js";
 import { CreativeDurationPanel, durationSecondsLabel } from "./CreativeDurationPanel.js";
 import { CharacterScriptEditor, isCharacterDocument } from "./CharacterScriptEditor.js";
 import type { StudioCreativeReviewCommandInput, StudioCreativeReviewCommandReceipt, StudioCreativeReviewSnapshot } from "../../shared/api.js";
@@ -118,6 +119,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
   useEffect(() => { onDraftDirtyChange?.(hasUnsavedEdits || editingDuration); }, [hasUnsavedEdits, editingDuration, onDraftDirtyChange]);
   useEffect(() => () => onDraftDirtyChange?.(false), [onDraftDirtyChange]);
   const [mobileTab, setMobileTab] = useState<"draft" | "discussion">("draft");
+  const [discussionOpen, setDiscussionOpen] = useState(true);
   const [storageBroken, setStorageBroken] = useState(false);
   const [pendingRisk, setPendingRisk] = useState<PendingRiskConfirm | null>(null);
   const [exitingRisk, setExitingRisk] = useState<PendingRiskConfirm | null>(null);
@@ -141,14 +143,30 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
   useEffect(() => () => {
     if (discussionFocusFrameRef.current !== undefined) window.cancelAnimationFrame(discussionFocusFrameRef.current);
   }, []);
-  function focusRevisionDiscussion() {
+  function changeDiscussionOpen(open: boolean) {
+    if (discussionFocusFrameRef.current !== undefined) window.cancelAnimationFrame(discussionFocusFrameRef.current);
+    discussionFocusFrameRef.current = undefined;
+    setDiscussionOpen(open);
+    if (!open) setMobileTab("draft");
+  }
+  function changeWorkspacePane(pane: "draft" | "discussion") {
+    if (discussionFocusFrameRef.current !== undefined) window.cancelAnimationFrame(discussionFocusFrameRef.current);
+    discussionFocusFrameRef.current = undefined;
+    setMobileTab(pane);
+  }
+  function focusDiscussion(target: "composer" | "advice") {
+    setDiscussionOpen(true);
     setMobileTab("discussion");
     if (discussionFocusFrameRef.current !== undefined) window.cancelAnimationFrame(discussionFocusFrameRef.current);
     discussionFocusFrameRef.current = window.requestAnimationFrame(() => {
-      composerRef.current?.focus({ preventScroll: true });
-      composerRef.current?.scrollIntoView?.({ block: "center" });
+      const element = target === "composer" ? composerRef.current : document.getElementById("creative-advice-title");
+      element?.focus({ preventScroll: true });
+      element?.scrollIntoView?.({ block: target === "composer" ? "center" : "nearest" });
       discussionFocusFrameRef.current = undefined;
     });
+  }
+  function focusRevisionDiscussion() {
+    focusDiscussion("composer");
   }
   const followMessagesRef = useRef(true);
   const [unseenMessages, setUnseenMessages] = useState(false);
@@ -687,14 +705,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
           {review.reviewPurpose === "material_plan" ? <p>请查看选材结果与风险；这次决定不会自动扩大素材采购授权。</p> : null}
           <p className="creative-audit-status">{review.checkResult?.status === "incomplete" ? "审计未取得结论" : review.checkResult ? "本版已审计" : "本版未审计"}</p>
         </div>
-        {review.checkResult && review.checkResult.status !== "incomplete" && review.checkResult.issues.length > 0 ? <button type="button" className="button button-ghost creative-advice-jump" onClick={() => {
-          setMobileTab("discussion");
-          window.requestAnimationFrame(() => {
-            const target = document.getElementById("creative-advice-title");
-            target?.focus();
-            target?.scrollIntoView?.({ block: "nearest" });
-          });
-        }}>查看 {review.checkResult.issues.length} 条建议</button> : null}
+        {review.checkResult && review.checkResult.status !== "incomplete" && review.checkResult.issues.length > 0 ? <button type="button" className="button button-ghost creative-advice-jump" onClick={() => focusDiscussion("advice")}>查看 {review.checkResult.issues.length} 条建议</button> : null}
         <span className={`creative-review-phase phase-${review.phase}`}>
           {processing ? "正在处理原操作" : "等你决定"}
         </span>
@@ -712,13 +723,9 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
 
       {review.stage === "script" ? <div className="creative-script-overview">{durationPanel}</div> : null}
 
-      <div className="creative-mobile-tabs" role="group" aria-label="方案与讨论">
-        <button type="button" aria-pressed={mobileTab === "draft"} aria-controls="creative-draft" onClick={() => setMobileTab("draft")}>当前方案</button>
-        <button type="button" aria-pressed={mobileTab === "discussion"} aria-controls="creative-chat" onClick={() => setMobileTab("discussion")}>建议与讨论{review.messages.length > 0 ? ` · ${review.messages.length}` : ""}</button>
-      </div>
-
-      <div className="creative-discussion-layout">
-        <article id="creative-draft" tabIndex={0} className={`${mobileTab === "draft" ? "creative-draft-surface is-mobile-active" : "creative-draft-surface"}${stageHandoffActive ? " stage-handoff" : ""}`} aria-label={`当前${STAGE_LABEL[review.stage]}`}>
+      <CreativeWorkspacePanels activePane={mobileTab} onPaneChange={changeWorkspacePane} discussionOpen={discussionOpen}
+        onDiscussionOpenChange={changeDiscussionOpen} messageCount={review.messages.length}
+        draft={<article id="creative-draft" tabIndex={0} className={`creative-draft-surface${stageHandoffActive ? " stage-handoff" : ""}`} aria-label={`当前${STAGE_LABEL[review.stage]}`}>
           {stageHandoffActive ? <i className="stage-handoff-rule" aria-hidden="true" /> : null}
           {handoffNotice ? <p className="creative-handoff-notice" role="status">当前稿件已更新</p> : null}
           <CreativeDraftReader key={`${review.runId}:${draftIdentity}:${review.draftArtifactId}`} stage={review.stage} value={review.draft} nativeAudio={nativeAudio} />
@@ -794,9 +801,11 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
               : <><p>设为当前草稿只切换编辑对象，不会确认本阶段或开始后续制作。</p>
                 <button type="button" className="button button-secondary" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || editingDuration || !review.allowedActions.includes("adopt_proposal")} onClick={() => void submit({ action: "adopt_proposal", commandId: crypto.randomUUID(), ...commandBase, proposalId: proposal.proposalId }).catch(() => undefined)}>设为当前草稿</button></>}
           </section>)}
-        </article>
-
-        <section id="creative-chat" className={mobileTab === "discussion" ? "creative-chat-surface is-mobile-active" : "creative-chat-surface"} aria-label="与当前角色讨论">
+        </article>}
+        discussion={<section id="creative-chat" className="creative-chat-surface" aria-label="与当前角色讨论">
+          <header className="creative-discussion-pane-header"><h3>建议与讨论</h3>
+            <button type="button" className="icon-button" aria-label="收起讨论" title="收起讨论，专注读稿" onClick={() => changeDiscussionOpen(false)}><PanelRightClose aria-hidden="true" size={18} /></button>
+          </header>
           <p className="creative-discussion-context">当前{STAGE_LABEL[review.stage]} · {discussionScope}</p>
           {review.checkResult && review.checkResult.status !== "incomplete" && review.checkResult.issues.length > 0 ? <section className="creative-check-result creative-advice-panel" aria-labelledby="creative-advice-title">
             <header><h3 id="creative-advice-title" tabIndex={-1}>本版建议</h3><span>{review.checkResult.issues.length} 条</span></header>
@@ -875,8 +884,8 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
               </details>;
             })}
           </aside> : null}
-        </section>
-      </div>
+        </section>}
+      />
 
       {review.stage === "script" ? <div className="creative-script-decision">{decisionBar}</div> : null}
 

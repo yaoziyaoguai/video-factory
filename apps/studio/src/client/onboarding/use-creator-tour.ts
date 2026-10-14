@@ -28,7 +28,7 @@ export function useCreatorTour(): CreatorTourControls {
       steps: availableTourSteps(steps),
       animate: !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches,
       duration: 240,
-      overlayColor: "#11131a",
+      overlayColor: getComputedStyle(document.documentElement).getPropertyValue("--frame").trim() || "#17232d",
       overlayOpacity: 0.72,
       smoothScroll: true,
       allowClose: true,

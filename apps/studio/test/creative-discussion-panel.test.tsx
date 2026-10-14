@@ -34,6 +34,14 @@ function review(overrides: Partial<StudioCreativeReviewSnapshot> = {}): StudioCr
   };
 }
 
+function useMobileViewport() {
+  const matchMedia = window.matchMedia;
+  vi.spyOn(window, "matchMedia").mockImplementation(query => ({
+    ...matchMedia(query),
+    matches: query === "(max-width: 700px)" || query === "(max-width: 1000px)",
+  }));
+}
+
 function storedDiscussion(commandId: string, stage: StudioCreativeReviewSnapshot["stage"] = "script"): StudioCreativeReviewCommandInput {
   return { commandId, action: "discuss", stage, expectedRunRevision: 8, expectedReviewRevision: 3,
     baseDraftSha256: sha, message: "原意见" };
@@ -234,6 +242,7 @@ describe("early duration decision", () => {
   });
 
   it("keeps one script duration editor and decision in the overview across pane switches", async () => {
+    useMobileViewport();
     const onCommand = vi.fn(async () => undefined);
     const user = userEvent.setup();
     render(<CreativeDiscussionPanel review={durationReview()} busy={false} onCommand={onCommand} />);
@@ -257,6 +266,7 @@ describe("early duration decision", () => {
   });
 
   it("keeps manual draft and unsent discussion in their original inputs across pane switches", async () => {
+    useMobileViewport();
     const user = userEvent.setup();
     const onCommand = vi.fn(async () => undefined);
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
@@ -274,6 +284,85 @@ describe("early duration decision", () => {
     await user.click(screen.getByRole("button", { name: "建议与讨论" }));
     expect(screen.getByRole("textbox", { name: /讨论与修改/ })).toBe(composer);
     expect(composer).toHaveValue("这条意见暂时不要发送");
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it("keeps script edits, duration, scope and selected advice through focus mode without creating a command", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async () => undefined);
+    const current = durationReview({ checkResult: {
+      verdict: "pass", score: 90, summary: "可以调整开头。", checkIdentity: "focus-audit",
+      issues: [{ severity: "advisory", criterion: "开头", evidence: "开场略慢", repairInstruction: "把结论提前。" }],
+    }, messages: [{ id: "already-seen", commandId: "old", role: "assistant", text: "已有讨论记录" }] });
+    const { container, rerender } = render(<CreativeDiscussionPanel review={current} busy={false} onCommand={onCommand} />);
+    await user.click(screen.getByRole("button", { name: "修改时长要求" }));
+    const durationInput = screen.getByLabelText("最多秒数（可不填）");
+    await user.type(durationInput, "30");
+    await user.click(screen.getByText("手动修订这份稿件"));
+    const narration = screen.getByLabelText("分镜 1 · 旁白");
+    await user.type(narration, "保留我的手动文字");
+    await user.click(screen.getByText("指定讨论范围（可选）"));
+    await user.click(screen.getByRole("checkbox", { name: "第 1 段" }));
+    await user.click(screen.getByRole("checkbox", { name: "把结论提前。" }));
+    const composer = screen.getByRole("textbox", { name: /讨论与修改/ });
+    await user.type(composer, "意见还在组织中");
+    const oldMessage = screen.getByText("已有讨论记录");
+    await user.click(screen.getByRole("button", { name: "收起讨论" }));
+    expect(screen.queryByRole("textbox", { name: /讨论与修改/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "展开建议与讨论" })).toHaveFocus();
+    expect(screen.getAllByRole("region", { name: "本版时长" })).toHaveLength(1);
+    expect(screen.getAllByRole("region", { name: "当前稿件决定" })).toHaveLength(1);
+    expect(screen.getByLabelText("最多秒数（可不填）")).toBe(durationInput);
+    expect(screen.getByLabelText("分镜 1 · 旁白")).toBe(narration);
+    expect(container.querySelector(".creative-message.is-new")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "查看 1 条建议" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "本版建议" })).toHaveFocus());
+    expect(screen.getByRole("checkbox", { name: "把结论提前。" })).toBeChecked();
+    expect(screen.getByText("当前脚本 · 指定范围：第 1 段")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "专注读稿" }));
+    await user.click(screen.getByRole("button", { name: "提出修改" }));
+    await waitFor(() => expect(composer).toHaveFocus());
+    expect(screen.getByRole("textbox", { name: /讨论与修改/ })).toBe(composer);
+    expect(composer).toHaveValue("意见还在组织中");
+    expect(screen.getByText("已有讨论记录")).toBe(oldMessage);
+    expect(oldMessage).not.toHaveClass("is-new");
+    expect(durationInput).toHaveValue("30");
+    expect(narration).toHaveValue("先看结果。保留我的手动文字");
+    fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true, isComposing: true });
+    expect(onCommand).not.toHaveBeenCalled();
+    rerender(<CreativeDiscussionPanel review={{ ...current, draftVersionId: "script-v3", draftArtifactId: "new-artifact", draftSha256: "d".repeat(64),
+      checkResult: { ...current.checkResult!, checkIdentity: "new-audit" } }} busy={false} onCommand={onCommand} />);
+    expect(screen.getByRole("textbox", { name: /讨论与修改/ })).toBe(composer);
+    expect(composer).toHaveValue("意见还在组织中");
+    expect(screen.getByLabelText("分镜 1 · 旁白")).toBe(narration);
+    expect(screen.getByLabelText("最多秒数（可不填）")).toBe(durationInput);
+    expect(screen.getByRole("checkbox", { name: "把结论提前。" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "第 1 段" })).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "保存修订" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "仅保存时长要求" })).toBeDisabled();
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it("reopens discussion on mobile from the unique decision and returns focus to the visible pane when collapsed", async () => {
+    useMobileViewport();
+    const user = userEvent.setup();
+    const onCommand = vi.fn(async () => undefined);
+    render(<CreativeDiscussionPanel review={durationReview()} busy={false} onCommand={onCommand} />);
+    const decision = screen.getByRole("region", { name: "当前稿件决定" });
+    expect(screen.queryByRole("region", { name: "与当前角色讨论" })).not.toBeInTheDocument();
+    await user.click(within(decision).getByRole("button", { name: "提出修改" }));
+    const composer = screen.getByRole("textbox", { name: /讨论与修改/ });
+    await waitFor(() => expect(composer).toHaveFocus());
+    await user.type(composer, "移动端未发意见");
+    expect(screen.getByRole("region", { name: "当前稿件决定" })).toBe(decision);
+    expect(screen.getByRole("region", { name: "本版时长" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "收起讨论" }));
+    expect(screen.getByRole("button", { name: "当前方案" })).toHaveFocus();
+    expect(screen.queryByRole("textbox", { name: /讨论与修改/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "建议与讨论" }));
+    expect(screen.getByRole("textbox", { name: /讨论与修改/ })).toBe(composer);
+    expect(composer).toHaveValue("移动端未发意见");
+    expect(screen.getAllByRole("region", { name: "当前稿件决定" })).toHaveLength(1);
     expect(onCommand).not.toHaveBeenCalled();
   });
 
@@ -715,7 +804,7 @@ describe("CreativeDiscussionPanel", () => {
     await userEvent.click(screen.getByRole("button", { name: "提出修改" }));
     await waitFor(() => expect(composer).toHaveFocus());
     expect(composer).toHaveValue("我先保留这个开头。");
-    expect(screen.getByRole("button", { name: "建议与讨论" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "专注读稿" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("button", { name: "加入修改意见（2）" })).toBeEnabled();
     expect(screen.getByText("全稿建议")).toBeInTheDocument();
     expect(onCommand).not.toHaveBeenCalled();
@@ -782,7 +871,7 @@ describe("CreativeDiscussionPanel", () => {
     expect(within(draft).queryByRole("checkbox", { name: "把结论提前。" })).not.toBeInTheDocument();
     expect(within(discussion).getByRole("checkbox", { name: "把结论提前。" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "查看 1 条建议" }));
-    expect(screen.getByRole("button", { name: "建议与讨论" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "专注读稿" })).toHaveAttribute("aria-expanded", "true");
     await waitFor(() => expect(screen.getByRole("heading", { name: "本版建议" })).toHaveFocus());
     expect(onCommand).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: /采用.*（保留审计建议）/ })).toBeEnabled();
