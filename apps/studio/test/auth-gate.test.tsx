@@ -18,6 +18,7 @@ describe("AuthGate", () => {
     render(<AuthGate>{({ username }) => <div>创作台 {username}</div>}</AuthGate>);
 
     expect(await screen.findByRole("heading", { name: "回到创作现场" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "镜头内部的光圈叶片" })).toHaveAttribute("src", "/media/studio-aperture.webp");
     await user.type(screen.getByLabelText("用户名"), "owner");
     await user.type(screen.getByLabelText("密码"), "correct password");
     await user.click(screen.getByRole("button", { name: "进入 VideoFactory" }));

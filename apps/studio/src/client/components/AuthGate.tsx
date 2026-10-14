@@ -98,9 +98,9 @@ function LoginPanel({ onAuthenticated }: { onAuthenticated(session: StudioAuthSe
             </button>
           </form>
         </section>
-        <aside className="auth-filmboard" aria-label="VideoFactory 影像工作台预览">
+        <aside className="auth-filmboard" aria-label="影像创作主题图片">
           <figure className="auth-frame auth-frame-primary">
-            <img src="/media/studio-frame-1.jpg" alt="竖屏影像制作画面" />
+            <img src="/media/studio-aperture.webp" alt="镜头内部的光圈叶片" width={1400} height={933} />
             <figcaption><span>01</span><small>STORY / FRAME</small></figcaption>
           </figure>
           <figure className="auth-frame">

@@ -1,4 +1,4 @@
-/* 创作浏览面：真实作品优先，目录和工具保持紧凑；没有媒体时不补装饰画面。 */
+/* 创作浏览面：真实作品优先；品牌背景不占用成果预览位置。 */
 .studio-v3 .home-page { max-width: 1440px; padding-top: 28px; }
 .studio-v3 .home-intro {
   min-height: 0;
@@ -132,6 +132,26 @@
 .studio-v3 .home-start-options strong { font-size: 16px; font-weight: 600; line-height: 1.55; }
 .studio-v3 .home-start-options small { margin-top: 5px; color: var(--muted); font-size: 14px; line-height: 1.65; }
 .studio-v3 .home-start-note { max-width: 74ch; margin: 16px 0 0; color: var(--muted); font-size: 14px; line-height: 1.75; }
+
+/* 光圈只属于创作入口的背景层；有成片、窄屏和读取失败时不借它代替成果。 */
+@media (min-width: 901px) {
+  .studio-v3 :is(.home-continuation:not(.has-preview), .home-start.is-new-workspace) { position: relative; isolation: isolate; }
+  .studio-v3 :is(.home-continuation:not(.has-preview), .home-start.is-new-workspace)::before {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background: linear-gradient(90deg, var(--paper) 0%, var(--paper) 44%, rgb(255 255 255 / 97%) 55%, rgb(255 255 255 / 75%) 72%, rgb(255 255 255 / 60%) 100%), url("/media/studio-aperture.webp") 116% 48% / 66% auto no-repeat;
+  }
+  .studio-v3 .home-start.is-new-workspace::before {
+    inset-block: -32px -24px;
+    opacity: .7;
+    mask-image: linear-gradient(0deg, transparent, #000 28%, #000 70%, transparent);
+    background: linear-gradient(90deg, var(--canvas) 0%, var(--canvas) 48%, rgb(250 249 247 / 94%) 65%, rgb(250 249 247 / 76%) 100%), url("/media/studio-aperture.webp") right center / 58% auto no-repeat;
+  }
+}
 
 /* 素材预览与来源始终可见，低频规格留在卡片内按需读取。 */
 .studio-v3 .custom-entry { min-height: 0; padding: 28px; background: var(--paper); border: 1px solid var(--line); border-radius: 10px; }

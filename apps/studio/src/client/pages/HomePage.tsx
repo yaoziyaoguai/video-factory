@@ -74,7 +74,7 @@ export function HomePage() {
         </section>
       ) : null}
 
-      <section className="home-start" aria-labelledby="start-title">
+      <section className={`home-start${!loading && !error && !currentRun ? " is-new-workspace" : ""}`} aria-labelledby="start-title">
         <header>
           <h2 id="start-title">你今天从哪里出发？</h2>
         </header>

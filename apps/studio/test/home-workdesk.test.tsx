@@ -32,6 +32,7 @@ describe("home workdesk heading and states", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent("正在读取你的作品");
     expect(screen.queryByRole("region", { name: "制作概况" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "你今天从哪里出发？" })).not.toHaveClass("is-new-workspace");
     resolveRuns([]);
 
     const overview = await screen.findByRole("region", { name: "制作概况" });
@@ -40,6 +41,7 @@ describe("home workdesk heading and states", () => {
     }
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(screen.queryByText("继续上次工作")).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "你今天从哪里出发？" })).toHaveClass("is-new-workspace");
   });
 
   it("keeps the connection failure and retry without inventing production counts", async () => {
@@ -50,6 +52,7 @@ describe("home workdesk heading and states", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("创作台暂时没有连接到制作服务");
     expect(screen.queryByRole("region", { name: "制作概况" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /从自己的想法开始/ })).toBeEnabled();
+    expect(screen.getByRole("region", { name: "你今天从哪里出发？" })).not.toHaveClass("is-new-workspace");
     await user.click(screen.getByRole("button", { name: "重新连接" }));
     expect(await screen.findByRole("region", { name: "制作概况" })).toHaveTextContent("待你处理0");
     expect(runs).toHaveBeenCalledTimes(2);
@@ -75,5 +78,6 @@ describe("home workdesk heading and states", () => {
     expect(within(work).getByRole("link", { name: "确认费用" })).toHaveAttribute("href", "/projects/actual-project-id");
     expect(within(work).getByText("下一步会产生费用，正在等你检查前面的内容。")).toBeVisible();
     expect(container.querySelector("video")).toBeNull();
+    expect(screen.getByRole("region", { name: "你今天从哪里出发？" })).not.toHaveClass("is-new-workspace");
   });
 });
