@@ -50,9 +50,9 @@ Actions 的 `production` 环境使用仓库 Secrets：`SERVER_HOST`、`SERVER_US
 
 `scripts/backup-production.sh` 调用 Python 离线引擎。单独运行也必须提供有效的 `VIDEO_FACTORY_MAINTENANCE_OWNER`，核对同一共享目录中的 FROZEN owner/generation、空 holder，以及 Docker/systemd 的实际退出状态。描述持久根不代替停写证明。
 
-默认从 app 容器挂载、全部相关 broker 的 systemd 配置、实际用户与组解析源目录。解析不完整时可以设置 `VIDEO_FACTORY_BACKUP_SOURCE_DESCRIPTOR`，指向只含路径和数字身份的 JSON 描述文件：顶层 `version: 1`、可选 `app: {uid, gid, groups}`、`brokers` 数组。每个 broker 声明 `unit`、`workspaceRoot`、`uid/gid/groups`、`profile`（`openai/deepseek/zai`）、非空 `envFiles`；可选 `logicalRoot`、`codexHome`、`codexHomeLogical`。`envFiles` 元素可为绝对路径，或 `{source, logical}`。源和逻辑路径映射不得重叠；描述文件不包含密钥值，也不豁免对其他实际 broker unit 的枚举和退出核验。
+默认从 app 容器挂载、全部相关 broker 的 systemd 配置、实际用户与组解析源目录。broker归属由本项目服务名、实际工作区配置、制品路径或显式 `VIDEO_FACTORY_BROKER_UNITS` 认定，同机其它项目的broker不纳入本次停止和备份。解析不完整时可以设置 `VIDEO_FACTORY_BACKUP_SOURCE_DESCRIPTOR`，指向只含路径和数字身份的 JSON 描述文件：顶层 `version: 1`、可选 `app: {uid, gid, groups}`、`brokers` 数组。每个 broker 声明 `unit`、`workspaceRoot`、`uid/gid/groups`、`profile`（`openai/deepseek/zai`）、非空 `envFiles`；可选 `logicalRoot`、`codexHome`、`codexHomeLogical`。`envFiles` 元素可为绝对路径，或 `{source, logical}`。源和逻辑路径映射不得重叠；描述文件不包含密钥值，也不豁免对其他实际 broker unit 的枚举和退出核验。
 
-`VIDEO_FACTORY_BACKUP_DIR` 指定归档目录，默认仓库上级的 `backups/video-factory`；`VIDEO_FACTORY_BACKUP_VERIFY_IMAGE` 指定含当前验证器及依赖的本地镜像，默认源容器镜像；`VIDEO_FACTORY_BACKUP_RETENTION` 默认7天。`VIDEO_FACTORY_BACKUP_ID` 可固定本次名称，已存在即拒绝覆盖。源 release SHA 从源容器配置读取，不使用候选版本环境变量冒充备份版本。
+`VIDEO_FACTORY_BACKUP_DIR` 指定归档目录，默认仓库上级的 `backups/video-factory`；`VIDEO_FACTORY_BACKUP_VERIFY_IMAGE` 指定含当前验证器及依赖的本地镜像，默认源容器镜像；`VIDEO_FACTORY_BACKUP_RETENTION` 默认7天。`VIDEO_FACTORY_BACKUP_ID` 可固定本次名称，已存在即拒绝覆盖。源 release SHA 从源容器配置读取，不使用候选版本环境变量冒充备份版本。部署显式设置 `VIDEO_FACTORY_BACKUP_ALLOW_LEGACY=1`，允许读取已退役broker中原生v1/v2记录和未曾存在的store-id；只验证并保全原格式，旧记录不能满足v3应用请求的binding关联。单独备份默认仍要求当前格式，可按同样证据显式启用兼容。
 
 备份覆盖 app 原始/上传媒体、付费产物、成片、run/版本/审批/费用/发布记录、规划检查点与 SQLite，以及默认、注册和停用 broker 的原请求、会话、store-id和受限配置。停写窗口中的 DB/WAL/SHM先复制到临时目录，用 SQLite backup API生成独立数据库；不修改源数据库，恢复副本不带旧 WAL/SHM。缓存、socket和明确的运行时 owner/lease不恢复成活执行者，业务原请求与store-id保持。
 
@@ -62,7 +62,8 @@ manifest标识 `video-factory/full-backup-v1`，记录源镜像/SHA、owner/gene
 
 ## 维护门禁与冷维护
 
-- **旧版本无法在线切换**：健康端点未报告 v2 维护协议、准确 release SHA 或当前服务实例时，自动部署拒绝停服与切换。当前脚本也要求退役的智谱服务已明确退出。首次旧版升级需要单独授权冷维护：先通过现有入口控制阻止新工作，逐项核实原任务和后继请求已落稳，再正常停止全部写者并确认退出；随后进入同一离线备份、切换、闭门核验流程。无法确认原任务落稳就停止操作，不能强杀、清状态或先启动不支持门禁的旧版来制造证明。冷维护不是脚本自动接管的旁路，本轮没有执行生产冷维护。
+- **首次维护协议升级**：普通 push 和默认手动发布使用 `online`，旧 app/broker 缺少 v2 协议或准确版本时仍在停写前拒绝。已授权发布需要升级旧版时，在同一 Actions 工作流选择 `upgrade_mode=cold`，并提供 `expected_previous_release`（40位最后成功生产 SHA）；仍先完成 verify/security，再持有同一宿主 flock。该选择会临时关闭本站入口。候选构建完成后核原镜像、容器、broker制品、持久根与业务身份；Nginx 只修改匹配本站的 server，保留精确 GET/HEAD `/api/health`，其他请求503，等待旧 worker 正常结束后才算入口排空。严格核默认、注册和停用模型及 app 的本地写入已结束；未完成的本地任务、无结束证明的unknown、残留lease或不可读状态均拒绝冷升级，不修改记录。v3未知结果仅在原记录已有有效 `localExecutionEndedAt` 时保留；没有v3身份的旧记录只对原本已停用且PID/cgroup退出得到证明的服务使用显式只读兼容，保留未知结果与原字节，不补造store-id、binding或成功事实。正常停 app 后复查 broker；为旧 broker 安装本次 runtime stop保护（无限等待、禁止SIGKILL）并读回，再正常停止并核PID/cgroup。controller用正式锁和transition记录 `kind=cold-upgrade, bootstrap=false` 并进入FROZEN，随后复用完整备份、隔离回读、候选闭门核验和同owner开放。最后恢复原Nginx字节并复核公网版本。
+- **冷升级失败恢复**：入口关闭前失败不触碰写者；严格闲置检查失败、尚未停写时恢复原入口。停写未完全证实时保留入口关闭，不restart或强杀。已证实全部停止后的备份/切换失败，先正常停止候选，再恢复原镜像、broker制品和原配置；核对原身份、全部持久任务与空holder后，由 `cold-abort` 留记录并开放原服务。普通 `recover` 不接受冷升级记录。新候选提交后的失败只能继续检查该候选，不能再复活旧写者。遗留frozen/draining、其他owner或被改写的入口/制品均拒绝自动接管；私有事务证据保存在 deployment 目录，不删除用户数据。
 - **崩溃 owner 的恢复路径**：部署留下 `draining`/`frozen` 后，新部署拒绝接管。使用保留的候选制品中的共享维护模块和 `scripts/production-maintenance.mjs`，在同一个 CI flock 下执行受限本机 `recover`。参数依次为共享模块绝对路径、维护目录、`recover`、原 owner；owner 取自本轮 `deployment-<owner>.json` 并与 gate 核对。DRAINING 恢复要求原服务实例及版本仍在；FROZEN 恢复要求原版本已在闭门下恢复、实际健康报告完整且全局无 holder。首次安装失败没有原服务可核时保持关闭。`status` 可只读查看 owner、generation 和 holderCount。不得删除/改写 gate、替换 owner 或按 TTL 放行；残留短锁、持久 holder 和服务重启造成的归属疑问须先查清，`recover` 不会清理它们。
 - **本地 CLI 直写工作区**：当前生产 workspace 由单实例 app、其受控 worker/broker 与部署操作写入，宿主不直接用 CLI 操作该目录。这是冻结语义的前提；引入新的写者必须先接入同一准入协议。
 - **排空口径**：app 覆盖路由、后台制作、规划/审计、热点、上传清理与启动/周期恢复；broker 覆盖队列、任务、会话尾部、最终持久化，以及注册表中所有模型（含停用实例）。规划/制作读取不完整或请求归属不明会阻断冻结。已稳定等待人工且原请求身份完整的 unknown 可作为静止数据保留，仍有本地执行或身份无法证明的 unknown 不可冻结。公开健康报告只给计数与完整性，不暴露内部续作 holder。
