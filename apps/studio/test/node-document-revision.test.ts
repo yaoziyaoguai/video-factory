@@ -1081,6 +1081,7 @@ describe("publish-package document revision and current-version audit", () => {
         resourceManifestPath: harness.manifestPath,
         contentReview: { status: "passed", summary: "手工宣布通过。", suggestions: [] },
       },
+      expectedRunRevision: 7,
       expectedVersionId: "publish-v1",
     } as never, "creator-1"), /审计状态/);
   });

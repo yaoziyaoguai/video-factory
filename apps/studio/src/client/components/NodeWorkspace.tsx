@@ -102,6 +102,12 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   // 输入草稿基线绑定打开编辑器时观察到的 run revision 与输入版本：保存时使用基线，
   // 后台 props 刷新不得把旧草稿的提交基准无声升级到新版本。
   const [inputEditBaseline, setInputEditBaseline] = useState<{ runRevision: number; versionId: string }>();
+  // R6：普通输出编辑同口径——基线在打开编辑器时固定（run revision + 所见 effective
+  // 输出版本，无版本历史 output 用 null）。恢复暂存草稿沿用草稿记录的原基线；旧暂存
+  // 没有可证基线时只保留文本（unprovable），不自动绑定当前版本提交。
+  const [outputEditBaseline, setOutputEditBaseline] = useState<
+    { runRevision: number; versionId: string | null } | { unprovable: true }
+  >();
   const [error, setError] = useState<string>();
   const [documentResult, setDocumentResult] = useState<{ identity: string; content: unknown }>();
   const [documentFailure, setDocumentFailure] = useState<{ identity: string; message: string }>();
@@ -309,9 +315,18 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     setError(undefined);
     setEditingDocument(usesDocument);
     setDocumentEditBaseline(usesDocument ? { identity: saved?.document?.baseKey ?? documentIdentity, artifactId: saved?.base.artifactId ?? editableArtifact!.id, generation: documentContext.generation } : undefined);
-    draftBase.current = saved?.base ?? { runId, stage: node.id, purposeKey: "node-output", ...(effectiveVersion ? { versionId: effectiveVersion.id } : {}), ...(editableArtifact ? { artifactId: editableArtifact.id } : {}) };
+    draftBase.current = saved?.base ?? { runId, stage: node.id, purposeKey: "node-output", runRevision, ...(effectiveVersion ? { versionId: effectiveVersion.id } : {}), ...(editableArtifact ? { artifactId: editableArtifact.id } : {}) };
     setDraft(pretty(saved?.document?.document ?? (usesDocument ? documentPreview : effectiveOutput(node) ?? node.output ?? {})));
     setEditing(true);
+    // R6：输出编辑基线在此刻固定。恢复暂存草稿时沿用记录的原基线（versionId +
+    // runRevision 都可证才可提交）；无可证基线的旧暂存只保留文本。
+    if (saved?.document && (saved.base.versionId === undefined || saved.base.runRevision === undefined)) {
+      setOutputEditBaseline({ unprovable: true });
+    } else {
+      setOutputEditBaseline(saved?.document
+        ? { runRevision: saved.base.runRevision!, versionId: saved.base.versionId! }
+        : { runRevision, versionId: effectiveVersion?.id ?? null });
+    }
   }
 
   function updateOutputDraft(value: unknown) {
@@ -335,6 +350,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   function cancelEditing() {
     setError(undefined);
     setEditing(false);
+    setOutputEditBaseline(undefined);
   }
 
   function cancelInputEditing() {
@@ -377,10 +393,25 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       setError("当前交付已更新。你的未保存修改仍保留，请先复制需要保留的内容，再取消编辑、核对当前稿。");
       return;
     }
+    // R6：基线随编辑器打开固定并随请求提交；终态二次确认沿用捕获时（而非确认时）
+    // 的 preparedOverride，props 期间刷新不升级基线。无可证基线的旧暂存只保留文本。
+    const baseline = outputEditBaseline;
+    if (!baseline) {
+      setError("编辑会话已失效，请重新打开编辑后再保存。");
+      return;
+    }
+    if ("unprovable" in baseline) {
+      setError("暂存草稿没有可核对的版本基线；请先复制需要保留的内容，再取消编辑、重新打开编辑后保存。");
+      return;
+    }
     try {
-      const parsed = preparedOverride ?? (editingDocument && documentEditBaseline
-        ? { document: { artifactId: documentEditBaseline.artifactId, content: JSON.parse(draft) as unknown } }
-        : { output: JSON.parse(draft) as unknown });
+      const parsed = preparedOverride ?? {
+        ...(editingDocument && documentEditBaseline
+          ? { document: { artifactId: documentEditBaseline.artifactId, content: JSON.parse(draft) as unknown } }
+          : { output: JSON.parse(draft) as unknown }),
+        expectedRunRevision: baseline.runRevision,
+        expectedVersionId: baseline.versionId,
+      };
       const validationError = creatorDraftValidationError(
         node.id,
         "output" in parsed ? parsed.output : parsed.document?.content,
@@ -399,6 +430,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         setLocalDraftPresent(false);
       }
       setEditing(false);
+      setOutputEditBaseline(undefined);
       setTerminalOverride(undefined);
     } catch (caught) {
       setError(caught instanceof SyntaxError ? "JSON 格式不正确，请检查括号和引号。" : caught instanceof Error ? caught.message : String(caught));

@@ -1,12 +1,14 @@
-import { AlertCircle, Check, ExternalLink, LoaderCircle, Send, ShieldCheck, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { AlertCircle, Check, ExternalLink, LoaderCircle, RefreshCw, Send, ShieldCheck, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type {
   StudioPublishBatch,
   StudioPublishConfirmations,
+  StudioPublishInput,
   StudioPublishPlatformId,
   StudioPublishReadiness,
+  StudioPublishSnapshot,
 } from "../../shared/api.js";
-import { studioApi } from "../api.js";
+import { StudioApiError, studioApi } from "../api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
 
 interface MultiPlatformPublishDialogProps {
@@ -34,45 +36,112 @@ export function MultiPlatformPublishDialog({ runId, onClose }: MultiPlatformPubl
   const [readiness, setReadiness] = useState<StudioPublishReadiness>();
   const [selected, setSelected] = useState<StudioPublishPlatformId[]>([]);
   const [confirmations, setConfirmations] = useState(EMPTY_CONFIRMATIONS);
+  // 请求一旦发出就保留其完整身份；只有重新读取并确认后，才允许建立不同意图。
+  const [intent, setIntent] = useState<StudioPublishInput>();
+  const [unresolvedIntents, setUnresolvedIntents] = useState<StudioPublishInput[]>([]);
+  const [needsReadiness, setNeedsReadiness] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [snapshotNotice, setSnapshotNotice] = useState<string>();
   const [batch, setBatch] = useState<StudioPublishBatch>();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
+  const appliedSnapshot = useRef<StudioPublishSnapshot | undefined>(undefined);
   const dialogRef = useDialogFocus<HTMLElement>(true, onClose, pending);
-  const allConfirmed = useMemo(() => Object.values(confirmations).every(Boolean), [confirmations]);
+  const allConfirmed = CONFIRMATIONS.every((item) => confirmations[item.key]);
   const selectedTargets = readiness?.targets.filter((target) => selected.includes(target.id)) ?? [];
   const submitCount = selectedTargets.filter((target) => target.status === "ready").length;
   const exportCount = selectedTargets.filter((target) => target.status === "manual_only").length;
 
-  useEffect(() => {
-    let active = true;
+  async function refreshReadiness() {
     setError(undefined);
-    void studioApi.publishReadiness(runId)
-      .then((value) => {
-        if (!active) return;
-        setReadiness(value);
-        setSelected(value.targets.filter((target) => target.status === "ready" || target.status === "manual_only").map((target) => target.id));
-      })
-      .catch((caught: unknown) => active && setError(caught instanceof Error ? caught.message : String(caught)));
-    return () => { active = false; };
+    setChecking(true);
+    try {
+      const value = await studioApi.publishReadiness(runId);
+      const previous = appliedSnapshot.current;
+      const available = value.targets.filter((target) => target.status === "ready" || target.status === "manual_only").map((target) => target.id);
+      const selectedUnavailable = selected.some((id) => !available.includes(id));
+      if (previous && !batch && (!isSameSnapshot(previous, value.snapshot) || selectedUnavailable)) {
+        setConfirmations(EMPTY_CONFIRMATIONS);
+        setIntent(undefined);
+        setSnapshotNotice(selectedUnavailable
+          ? "部分已选平台当前不可用，请核对剩余平台并重新勾选确认。此前结果不确定的请求仍保留供你核对。"
+          : "这条制作的发布条件已更新，请重新核对后再勾选确认。此前结果不确定的请求仍保留供你核对。");
+      }
+      appliedSnapshot.current = value.snapshot;
+      setReadiness(value);
+      setSelected((current) => previous ? current.filter((id) => available.includes(id)) : available);
+      setNeedsReadiness(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      setNeedsReadiness(true);
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  useEffect(() => {
+    appliedSnapshot.current = undefined;
+    setReadiness(undefined);
+    setSelected([]);
+    setConfirmations(EMPTY_CONFIRMATIONS);
+    setIntent(undefined);
+    setUnresolvedIntents([]);
+    setNeedsReadiness(false);
+    setBatch(undefined);
+    setSnapshotNotice(undefined);
+    void refreshReadiness();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId]);
 
+  function reviseIntent() {
+    if (!intent) return false;
+    setIntent(undefined);
+    setConfirmations(EMPTY_CONFIRMATIONS);
+    setNeedsReadiness(true);
+    setSnapshotNotice("你已修改发布选择，请重新检查发布条件，再逐项确认新请求；旧请求结果仍待核对。");
+    return true;
+  }
+
   function togglePlatform(platformId: StudioPublishPlatformId) {
+    reviseIntent();
     setSelected((current) => current.includes(platformId)
       ? current.filter((id) => id !== platformId)
       : [...current, platformId]);
   }
 
+  function toggleConfirmation(key: keyof StudioPublishConfirmations, checked: boolean) {
+    if (reviseIntent()) return;
+    setConfirmations((current) => ({ ...current, [key]: checked }));
+  }
+
   async function publish() {
+    if (!readiness || checking || needsReadiness || pending || !allConfirmed || !selected.length) return;
+    const samePayload = intent
+      && isSameSnapshot(intent.expected, readiness.snapshot)
+      && intent.platformIds.length === selected.length
+      && intent.platformIds.every((id) => selected.includes(id))
+      && CONFIRMATIONS.every((item) => intent.confirmations[item.key] === confirmations[item.key]);
+    const next: StudioPublishInput = samePayload && intent
+      ? intent
+      : {
+        requestId: publishRequestId(),
+        platformIds: [...selected],
+        confirmations: { ...confirmations },
+        expected: { ...readiness.snapshot },
+      };
+    setIntent(next);
     setPending(true);
     setError(undefined);
     try {
-      setBatch(await studioApi.publish(runId, {
-        requestId: publishRequestId(),
-        platformIds: selected,
-        confirmations,
-      }));
+      setBatch(await studioApi.publish(runId, next));
+      setUnresolvedIntents((current) => current.filter((item) => item.requestId !== next.requestId));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+      setUnresolvedIntents((current) => current.some((item) => item.requestId === next.requestId) ? current : [...current, next]);
+      if (caught instanceof StudioApiError && caught.status === 409) {
+        // 409 也可能只是租约占用；只有实际读到新快照才作废旧确认，编号不能据状态码轮换。
+        await refreshReadiness();
+      }
     } finally {
       setPending(false);
     }
@@ -83,6 +152,7 @@ export function MultiPlatformPublishDialog({ runId, onClose }: MultiPlatformPubl
       <section ref={dialogRef} className="publish-dialog" role="dialog" aria-modal="true" aria-labelledby="publish-title" tabIndex={-1}>
         <header className="dialog-header">
           <div><p className="eyebrow">发行制片</p><h2 id="publish-title">{!readiness ? "检查可用的发布方式" : !selected.length ? "选择发布平台" : submitCount && exportCount ? "提交与导出发布材料" : submitCount ? "提交到已授权平台" : "准备各平台发布包"}</h2><p>{!readiness || !selected.length ? "确认各平台的实际处理方式后再继续。" : submitCount && exportCount ? `${submitCount} 个平台将提交，${exportCount} 个平台仅生成发布包。` : submitCount ? "提交后仍需等待各平台处理或审核。" : "下载后，由你到目标平台上传和确认发布。"}</p></div>
+          <button className="icon-button" type="button" onClick={() => void refreshReadiness()} disabled={pending || checking} title="重新检查发布条件"><RefreshCw aria-hidden="true" size={17} /></button>
           <button className="icon-button" type="button" onClick={onClose} disabled={pending} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
 
@@ -98,7 +168,7 @@ export function MultiPlatformPublishDialog({ runId, onClose }: MultiPlatformPubl
                     <input
                       type="checkbox"
                       checked={selected.includes(target.id)}
-                      disabled={!selectable}
+                      disabled={!selectable || pending || checking}
                       onChange={() => togglePlatform(target.id)}
                       {...(index === 0 ? { "data-dialog-initial-focus": true } : {})}
                     />
@@ -123,7 +193,7 @@ export function MultiPlatformPublishDialog({ runId, onClose }: MultiPlatformPubl
             <fieldset className="publish-confirmations">
               <legend>我的最终确认</legend>
               {CONFIRMATIONS.map((item) => <label key={item.key}>
-                <input type="checkbox" checked={confirmations[item.key]} onChange={(event) => setConfirmations((current) => ({ ...current, [item.key]: event.target.checked }))} />
+                <input type="checkbox" checked={confirmations[item.key]} disabled={pending || checking || needsReadiness} onChange={(event) => toggleConfirmation(item.key, event.target.checked)} />
                 <span>{item.label}</span>
               </label>)}
             </fieldset>
@@ -138,10 +208,21 @@ export function MultiPlatformPublishDialog({ runId, onClose }: MultiPlatformPubl
           <div className="publish-delivery-list">{batch.deliveries.map((delivery) => <div key={delivery.platformId}><strong>{readiness?.targets.find((target) => target.id === delivery.platformId)?.label ?? delivery.platformId}</strong><span>{deliveryStatusLabel(delivery.status)}</span><small>{delivery.detail ?? delivery.externalId ?? "等待平台审核"}</small></div>)}</div>
         </div> : null}
 
-        {error ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}
+        {snapshotNotice && !error ? <p className="publish-snapshot-notice"><AlertCircle aria-hidden="true" size={16} />{snapshotNotice}</p> : null}
+        {error ? <div className="publish-error-context" role="alert">
+          <p className="form-error"><AlertCircle aria-hidden="true" size={16} />{error}</p>
+        </div> : null}
+        {unresolvedIntents.length ? <div className="publish-error-context" aria-label="待核对的发布请求">
+          {unresolvedIntents.map((previous) => <p key={previous.requestId}>
+            请求编号 {previous.requestId} 的结果仍待核对（制作版本 {previous.expected.revision}；平台 {previous.platformIds.map((id) => readiness?.targets.find((target) => target.id === id)?.label ?? id).join("、")}）。
+            {intent?.requestId === previous.requestId && !batch
+              ? "再次确认提交会沿用同一编号与同一内容，不会自动创建新请求。"
+              : "这是此前的请求；请核对原结果，当前选择不会重发或替换它。"}
+          </p>)}
+        </div> : null}
         <footer className="dialog-actions">
           <button className="button button-ghost" type="button" onClick={onClose} disabled={pending}>{batch ? "完成" : "取消"}</button>
-          {!batch ? <button className="button button-primary" type="button" disabled={!readiness?.ready || selected.length === 0 || !allConfirmed || pending} onClick={() => void publish()}>
+          {!batch ? <button className="button button-primary" type="button" disabled={!readiness?.ready || selected.length === 0 || !allConfirmed || pending || checking || needsReadiness} onClick={() => void publish()}>
             <Send aria-hidden="true" size={16} />{pending ? "正在处理..." : `确认并执行 ${selected.length} 个平台`}
           </button> : null}
         </footer>
@@ -152,6 +233,12 @@ export function MultiPlatformPublishDialog({ runId, onClose }: MultiPlatformPubl
 
 function publishRequestId(): string {
   return `publish-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function isSameSnapshot(a: StudioPublishSnapshot, b: StudioPublishSnapshot): boolean {
+  return a.revision === b.revision
+    && a.videoArtifactId === b.videoArtifactId
+    && a.publishPackageArtifactId === b.publishPackageArtifactId;
 }
 
 function targetModeLabel(status: StudioPublishReadiness["targets"][number]["status"]): string {

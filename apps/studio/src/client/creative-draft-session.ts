@@ -13,6 +13,8 @@ export interface CreativeDraftSessionBase {
   versionId?: string;
   artifactId?: string;
   draftSha256?: string;
+  /** R6：草稿建立时观察到的 run revision，与 versionId 一起构成可恢复的提交基线。 */
+  runRevision?: number;
 }
 
 export interface CreativeEditedDocument {

@@ -1,11 +1,18 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { ProductionPipeline } from "@video-factory/production-pipeline";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { StudioCostDashboard as CostDto, StudioNode, StudioProvider } from "../src/shared/api.js";
+import type { StudioCostDashboard as CostDto, StudioNode, StudioNodeOverrideInput, StudioProvider, StudioRunDetail } from "../src/shared/api.js";
 import { studioApi } from "../src/client/api.js";
+import { StudioService } from "../src/server/studio-service.js";
+import { buildStudioApp } from "../src/server/app.js";
 import { CostDashboard, RunCostDetailPanel } from "../src/client/components/CostDashboard.js";
 import { NodeWorkspace } from "../src/client/components/NodeWorkspace.js";
+import { creativeSessionSlotKey, creativeSessionStorage, writeCreativeSessionFields } from "../src/client/creative-draft-session.js";
 
 // C2 制作范围授权需要当前方案 digest：工作区测试统一携带一个合法形态的 fixture 值。
 const TEST_PLAN_DIGEST = "b".repeat(64);
@@ -788,6 +795,8 @@ describe("node production workspaces", () => {
 
     expect(onOverride).toHaveBeenCalledWith("script", {
       output: { hook: "人工钩子" },
+      expectedRunRevision: 2,
+      expectedVersionId: "version-generated",
     });
   });
 
@@ -965,7 +974,11 @@ describe("node production workspaces", () => {
     await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
     fireEvent.change(screen.getByRole("textbox", { name: "开场钩子" }), { target: { value: "暂停后人工钩子" } });
     await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
-    expect(onOverride).toHaveBeenCalledWith("script", { output: { hook: "暂停后人工钩子" } });
+    expect(onOverride).toHaveBeenCalledWith("script", {
+      output: { hook: "暂停后人工钩子" },
+      expectedRunRevision: 2,
+      expectedVersionId: "version-generated",
+    });
   });
 
   it("blocks an invalid upstream brief before sending an input override", async () => {
@@ -1930,6 +1943,8 @@ describe("node production workspaces", () => {
         artifactId: "artifact-script",
         content: { title: "人工脚本", scenes: [{ narration: "人工旁白" }] },
       },
+      expectedRunRevision: 2,
+      expectedVersionId: "version-generated",
     });
   });
 
@@ -2125,7 +2140,12 @@ describe("node production workspaces", () => {
     expect(screen.queryByRole("dialog", { name: /创建已结束制作的人工修订版/ })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
     await userEvent.click(screen.getByRole("button", { name: "确认创建修订版" }));
-    expect(onOverride).toHaveBeenCalledWith("script", { output: { hook: "旧钩子" }, confirmTerminalEdit: true });
+    expect(onOverride).toHaveBeenCalledWith("script", {
+      output: { hook: "旧钩子" },
+      expectedRunRevision: 2,
+      expectedVersionId: "version-generated",
+      confirmTerminalEdit: true,
+    });
   });
 
   it("renders stale output as an explicit warning and disables artifacts without a URL", () => {
@@ -2299,5 +2319,276 @@ describe("F05 prior-step viewing on review stops", () => {
     const viewButton = await screen.findByRole("button", { name: /查看 渲染/ });
     await userEvent.click(viewButton);
     expect(await screen.findByRole("note")).toHaveTextContent(/没有单独的正文卡片/);
+  });
+
+  // R6-A（客户端半边）：打开输出编辑器时固定并发基线；后台刷新把 run revision 与
+  // effective 版本都推进后，保存仍提交打开时看到的基线，服务端负责据此 409。
+  it("submits the output baseline captured when the editor opened, not the refreshed props", async () => {
+    const onOverride = vi.fn(async () => undefined);
+    const { rerender } = render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw"
+      runRevision={2} node={succeededNode} runStatus="stale" artifacts={[]} busy={false}
+      onOverride={onOverride} onAuthorize={async () => undefined} />);
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "开场钩子" }), { target: { value: "基于旧版本的钩子" } });
+
+    const backgroundSaved: StudioNode = { ...succeededNode,
+      output: { hook: "别人保存的新钩子" },
+      outputState: { ...succeededNode.outputState!, effectiveVersionId: "version-b",
+        versions: [...succeededNode.outputState!.versions,
+          { ...succeededNode.outputState!.versions[0]!, id: "version-b", output: { hook: "别人保存的新钩子" } }] } };
+    rerender(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw"
+      runRevision={3} node={backgroundSaved} runStatus="stale" artifacts={[]} busy={false}
+      onOverride={onOverride} onAuthorize={async () => undefined} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+    expect(onOverride).toHaveBeenCalledTimes(1);
+    expect(onOverride).toHaveBeenCalledWith("script", {
+      output: { hook: "基于旧版本的钩子" },
+      expectedRunRevision: 2,
+      expectedVersionId: "version-generated",
+    });
+  });
+
+  it("R6 carries ordinary brief saves and conflicts through React, studioApi, HTTP and the real pipeline", async () => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-r6-react-http-"));
+    const worker = { run: vi.fn(async () => { throw new Error("R6 editing must not execute a provider"); }) };
+    const director = { id: "api-visual-director-v1", modelId: "isolated-test-only",
+      plan: vi.fn(async () => { throw new Error("R6 editing must not execute a director"); }) };
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker, directorAgent: director });
+    const service = new StudioService({ workspaceRoot, pipeline, environment: {}, commandAvailable: async () => false });
+    const app = buildStudioApp({ service, logger: false });
+    const requests: Array<{ body: StudioNodeOverrideInput; status: number }> = [];
+    try {
+      // 完整业务对象由 pipeline 创建并停在 brief 人工边界；不伪造 run.json 或服务返回值。
+      const waiting = await pipeline.start({
+        protocolVersion: "video-factory/brief-v1", title: "R6新建隔离简报", angle: "原角度", audience: "测试观众",
+        nicheSlug: "r6-react", durationSeconds: 24, durationRange: { minSeconds: 20, maxSeconds: 34 },
+        platform: "douyin", runPurpose: "test", reviewMode: "manual",
+        providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "local-editorial-v1",
+          voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
+        workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, boundaryGates: "user-confirmed-v1" },
+        director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+        voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
+      });
+      expect(waiting.status).toBe("needs_human");
+      expect(waiting.nodeRuns.find(node => node.nodeId === "brief")?.status).toBe("needs_human");
+      const overrideUrl = `/api/runs/${waiting.id}/nodes/brief/override`;
+      vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+        const reply = await app.inject({ method: (init?.method ?? "GET") as "GET" | "PUT", url,
+          headers: Object.fromEntries(new Headers(init?.headers).entries()),
+          ...(typeof init?.body === "string" ? { payload: init.body } : {}),
+        });
+        if (url === overrideUrl) requests.push({ body: JSON.parse(String(init?.body)), status: reply.statusCode });
+        return new Response(reply.body, { status: reply.statusCode, headers: { "content-type": "application/json" } });
+      });
+      const original = await studioApi.run(waiting.id);
+      const originalNode = original.nodes.find(node => node.id === "brief")!;
+      const baseline = { expectedRunRevision: original.revision, expectedVersionId: originalNode.outputState!.effectiveVersionId! };
+      const output = originalNode.outputState!.versions.find(version => version.id === baseline.expectedVersionId)!.output as Record<string, unknown>;
+      let saved: StudioRunDetail | undefined;
+      const onOverride = async (nodeId: string, input: StudioNodeOverrideInput) => {
+        saved = await studioApi.overrideNode(waiting.id, nodeId, input);
+      };
+      const workspace = (detail: StudioRunDetail) => <NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST}
+        runId={waiting.id} runRevision={detail.revision} runStatus={detail.status}
+        node={detail.nodes.find(node => node.id === "brief")!} nodes={detail.nodes} artifacts={detail.artifacts}
+        busy={false} onOverride={onOverride} onAuthorize={async () => undefined} />;
+      const view = render(workspace(original));
+      await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+      fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "A基于V1修改标题" } });
+      const updated = await studioApi.overrideNode(waiting.id, "brief", {
+        output: { ...output, angle: "B先保存V2角度" }, ...baseline,
+      });
+      expect(requests[0]?.status).toBe(200);
+      const runPath = path.join(workspaceRoot, "runs", waiting.id, "run.json");
+      const beforeStaleSave = await readFile(runPath, "utf8");
+      view.rerender(workspace(updated));
+      await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+      await waitFor(() => expect(requests).toHaveLength(2));
+      expect(requests[1]).toEqual({ status: 409, body: { output: { ...output, title: "A基于V1修改标题" }, ...baseline } });
+      expect(await screen.findByText(/已被更新|已被其他操作更新/)).toBeInTheDocument();
+      expect(screen.getByRole("textbox", { name: "标题" })).toHaveValue("A基于V1修改标题");
+      expect(screen.getByRole("textbox", { name: "切入角度" })).toHaveValue("原角度");
+      expect(await readFile(runPath, "utf8")).toBe(beforeStaleSave);
+      expect(saved).toBeUndefined();
+      await userEvent.click(screen.getByRole("button", { name: "取消" }));
+      await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+      expect(screen.getByRole("textbox", { name: "切入角度" })).toHaveValue("B先保存V2角度");
+      fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "A核对V2后保存标题" } });
+      await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+      await waitFor(() => expect(saved).toBeDefined());
+      expect(requests[2]?.status).toBe(200);
+      expect(requests[2]?.body).toMatchObject({ expectedRunRevision: updated.revision,
+        expectedVersionId: updated.nodes.find(node => node.id === "brief")!.outputState!.effectiveVersionId,
+        output: { title: "A核对V2后保存标题", angle: "B先保存V2角度" } });
+      const persisted = await pipeline.loadPersisted(waiting.id);
+      expect(persisted.nodeRuns.find(node => node.nodeId === "brief")?.output).toMatchObject({
+        title: "A核对V2后保存标题", angle: "B先保存V2角度",
+      });
+      expect(persisted.revision).toBe(updated.revision + 1);
+      expect(persisted.decisions).toEqual(waiting.decisions);
+      expect(persisted.spendAuthorizations).toEqual(waiting.spendAuthorizations);
+      expect(screen.queryByRole("textbox", { name: "标题" })).not.toBeInTheDocument();
+      expect(worker.run).not.toHaveBeenCalled();
+      expect(director.plan).not.toHaveBeenCalled();
+    } finally {
+      cleanup();
+      vi.unstubAllGlobals();
+      await app.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("R6 keeps an ordinary title edit on V1 through a V2 angle refresh, failed retries and explicit reopening", async () => {
+    const original = { title: "原题目", angle: "原角度", audience: "测试观众" };
+    const changed = { ...original, angle: "B保存的新角度" };
+    const briefAt = (versionId: string, output: typeof original): StudioNode => ({
+      ...succeededNode, id: "brief", label: "内容简报", output,
+      outputState: { ...succeededNode.outputState!, effectiveVersionId: versionId,
+        versions: [{ ...succeededNode.outputState!.versions[0]!, id: versionId, output }] },
+    });
+    const conflict = Object.assign(new Error("保存冲突：请核对当前版本"), { status: 409 });
+    const onOverride = vi.fn().mockRejectedValueOnce(conflict).mockRejectedValueOnce(conflict).mockResolvedValueOnce(undefined);
+    const props = { acceptedPlanDigest: TEST_PLAN_DIGEST, runId: "r6-title-angle", runStatus: "needs_human" as const,
+      artifacts: [], busy: false, onOverride, onAuthorize: async () => undefined };
+    const view = render(<NodeWorkspace {...props} runRevision={21} node={briefAt("brief-v1", original)} />);
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "A尚未保存的题目" } });
+    view.rerender(<NodeWorkspace {...props} runRevision={22} node={briefAt("brief-v2", changed)} />);
+    await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+    const expected = { output: { ...original, title: "A尚未保存的题目" }, expectedRunRevision: 21, expectedVersionId: "brief-v1" };
+    expect(onOverride).toHaveBeenLastCalledWith("brief", expected);
+    expect(await screen.findByText("保存冲突：请核对当前版本")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "标题" })).toHaveValue("A尚未保存的题目");
+    expect(screen.getByRole("textbox", { name: "切入角度" })).toHaveValue("原角度");
+    view.rerender(<NodeWorkspace {...props} runRevision={23} node={briefAt("brief-v2", changed)} />);
+    await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+    expect(onOverride).toHaveBeenLastCalledWith("brief", expected);
+    expect(onOverride).toHaveBeenCalledTimes(2);
+    expect(changed.angle).toBe("B保存的新角度");
+    // 普通 output 沿用现有内存编辑合同；只在主动重新打开时采用当前正文与新基线。
+    await userEvent.click(screen.getByRole("button", { name: "取消" }));
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    expect(screen.getByRole("textbox", { name: "切入角度" })).toHaveValue("B保存的新角度");
+    fireEvent.change(screen.getByRole("textbox", { name: "标题" }), { target: { value: "核对后重新编辑" } });
+    await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+    expect(onOverride).toHaveBeenLastCalledWith("brief", { output: { ...changed, title: "核对后重新编辑" },
+      expectedRunRevision: 23, expectedVersionId: "brief-v2" });
+    expect(screen.queryByRole("textbox", { name: "标题" })).not.toBeInTheDocument();
+  });
+
+  it("R6 sends explicit null for a genuinely unversioned output and retains it after a version appears", async () => {
+    const legacy: StudioNode = { ...succeededNode };
+    delete legacy.outputState;
+    const onOverride = vi.fn().mockRejectedValue(new Error("旧基线已失效"));
+    const props = { acceptedPlanDigest: TEST_PLAN_DIGEST, runId: "r6-null-output", runStatus: "stale" as const,
+      artifacts: [], busy: false, onOverride, onAuthorize: async () => undefined };
+    const view = render(<NodeWorkspace {...props} runRevision={4} node={legacy} />);
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "开场钩子" }), { target: { value: "无版本基线的未保存文本" } });
+    view.rerender(<NodeWorkspace {...props} runRevision={5} node={succeededNode} />);
+    await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+    expect(onOverride).toHaveBeenCalledWith("script", { output: { hook: "无版本基线的未保存文本" },
+      expectedRunRevision: 4, expectedVersionId: null });
+    expect(await screen.findByText("旧基线已失效")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "开场钩子" })).toHaveValue("无版本基线的未保存文本");
+  });
+
+  // R6-F：终态二次确认持有打开时捕获的基线；确认时后台已更新也不升级基线，
+  // 且保存失败保留草稿文本供用户复制后重新打开。
+  it("keeps the captured baseline through terminal confirmation and preserves the draft on failure", async () => {
+    const onOverride = vi.fn()
+      .mockRejectedValueOnce(new Error("这条制作的成果已被更新，请刷新后核对最新内容再保存；你的草稿不会被覆盖。"))
+      .mockResolvedValueOnce(undefined);
+    const { rerender } = render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw"
+      runRevision={2} node={succeededNode} runStatus="succeeded" artifacts={[]} busy={false}
+      onOverride={onOverride} onAuthorize={async () => undefined} />);
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "开场钩子" }), { target: { value: "待确认的旧基线钩子" } });
+    await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+    expect(screen.getByRole("dialog", { name: /创建已结束制作的人工修订版/ })).toBeInTheDocument();
+
+    const backgroundSaved: StudioNode = { ...succeededNode,
+      outputState: { ...succeededNode.outputState!, effectiveVersionId: "version-c",
+        versions: [...succeededNode.outputState!.versions,
+          { ...succeededNode.outputState!.versions[0]!, id: "version-c" }] } };
+    rerender(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw"
+      runRevision={5} node={backgroundSaved} runStatus="succeeded" artifacts={[]} busy={false}
+      onOverride={onOverride} onAuthorize={async () => undefined} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "确认创建修订版" }));
+    expect(onOverride).toHaveBeenCalledTimes(1);
+    expect(onOverride).toHaveBeenCalledWith("script", {
+      output: { hook: "待确认的旧基线钩子" },
+      expectedRunRevision: 2,
+      expectedVersionId: "version-generated",
+      confirmTerminalEdit: true,
+    });
+    expect(await screen.findByText(/这条制作的成果已被更新/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "开场钩子" })).toHaveValue("待确认的旧基线钩子");
+  });
+
+  // R6-F：恢复暂存草稿沿用草稿记录的原基线（不升级到当前版本）；旧暂存没有可证
+  // 基线时只保留文本，保存被引导性拒绝，不自动绑定当前版本提交。
+  it("restores a saved document draft with its original baseline and refuses an unprovable legacy slot", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      copy: { title: "当前标题", description: "当前正文", hashtags: [] },
+    }), { status: 200, headers: { "content-type": "application/json" } })));
+    const publishNode: StudioNode = { ...succeededNode, id: "publish-package", label: "发布文案与发布包", role: "发行编辑",
+      output: { copy: { title: "当前标题", description: "当前正文", hashtags: [] } },
+      artifactIds: ["artifact-publish"],
+      outputState: { ...succeededNode.outputState!, effectiveVersionId: "publish-v1",
+        versions: [{ ...succeededNode.outputState!.versions[0]!, id: "publish-v1", artifactIds: ["artifact-publish"],
+          output: { copy: { title: "当前标题", description: "当前正文", hashtags: [] } } }] } };
+    const artifacts = [{
+      id: "artifact-publish", kind: "publish_package", createdAt: "2026-08-27T00:00:00.000Z",
+      contentType: "application/json", contentUrl: "/api/runs/run-restore/artifacts/artifact-publish/content",
+      producerNodeId: "publish-package",
+    }];
+    const identity = JSON.stringify(["run-restore", "publish-package", "publish-v1", "artifact-publish", "/api/runs/run-restore/artifacts/artifact-publish/content"]);
+    const slotKey = creativeSessionSlotKey("run-restore", "publish-package", "node-output");
+    // 组件读取经由 creativeSessionStorage 的域包装实例：写入也走同一实例，
+    // 避免绕过其内存副本（清理标记）造成读写两侧不一致。
+    const draftStorage = creativeSessionStorage().storage;
+    const renderWorkspace = () => render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-restore"
+      runRevision={3} node={publishNode} runStatus="needs_human" artifacts={artifacts} busy={false}
+      onOverride={onOverride} onAuthorize={async () => undefined} currentDelivery />);
+
+    // 有可证基线的暂存：恢复文本并沿用记录的原基线（revision 2 / publish-v1）。
+    draftStorage.setItem(slotKey, JSON.stringify({
+      base: { runId: "run-restore", stage: "publish-package", purposeKey: "node-output", versionId: "publish-v1", runRevision: 2, artifactId: "artifact-publish" },
+      document: { baseKey: identity, document: { copy: { title: "暂存标题", description: "暂存正文", hashtags: [] } } },
+      updatedAt: "2026-10-14T00:00:00.000Z",
+    }));
+    const onOverride = vi.fn(async () => undefined);
+    renderWorkspace();
+    await screen.findByText(/当前标题/);
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    expect(await screen.findByRole("textbox", { name: "标题" })).toHaveValue("暂存标题");
+    await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+    expect(onOverride).toHaveBeenCalledWith("publish-package", {
+      document: { artifactId: "artifact-publish", content: { copy: { title: "暂存标题", description: "暂存正文", hashtags: [] } } },
+      expectedRunRevision: 2,
+      expectedVersionId: "publish-v1",
+    });
+
+    // 旧暂存无可证基线（缺 versionId/runRevision）：文本保留，保存被拒绝并给出指引。
+    cleanup();
+    const onOverrideLegacy = vi.fn(async () => undefined);
+    writeCreativeSessionFields(draftStorage, slotKey,
+      { runId: "run-restore", stage: "publish-package", purposeKey: "node-output", artifactId: "artifact-publish" },
+      { document: { baseKey: identity, document: { copy: { title: "旧暂存标题", description: "旧暂存正文", hashtags: [] } } } });
+    render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-restore"
+      runRevision={3} node={publishNode} runStatus="needs_human" artifacts={artifacts} busy={false}
+      onOverride={onOverrideLegacy} onAuthorize={async () => undefined} currentDelivery />);
+    await screen.findByText(/当前标题/);
+    await userEvent.click(screen.getByRole("button", { name: "编辑交付" }));
+    expect(await screen.findByRole("textbox", { name: "标题" })).toHaveValue("旧暂存标题");
+    await userEvent.click(screen.getByRole("button", { name: "保存为人工版本" }));
+    expect(await screen.findByText(/没有可核对的版本基线/)).toBeInTheDocument();
+    expect(onOverrideLegacy).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "标题" })).toHaveValue("旧暂存标题");
   });
 });

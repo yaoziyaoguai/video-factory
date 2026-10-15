@@ -42,6 +42,10 @@ export class SeriesStudio {
     this.createId = options.createId ?? (() => `series-${randomUUID()}`);
   }
 
+  listSnapshot(): Promise<StudioSeries[]> {
+    return this.options.series.list();
+  }
+
   async list(): Promise<StudioSeries[]> {
     const records = await this.options.series.list();
     return Promise.all(records.map(async (series) => this.withRoadmapOperations(await this.ensureRoadmap(series))));

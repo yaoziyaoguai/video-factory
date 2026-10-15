@@ -6,6 +6,8 @@ import { ChatCompletionsExecutor, DEEPSEEK_CHAT_COMPLETIONS_PROVIDER } from "../
 import { CodexBrokerServer } from "../../../codex-broker/src/broker-server.js";
 import { buildStudioApp } from "../../src/server/app.js";
 import { StudioService, type StudioPipelinePort } from "../../src/server/studio-service.js";
+import { MaintenanceGate } from "../../src/server/maintenance-gate.js";
+import { transitionMaintenanceGate } from "@video-factory/production-pipeline/maintenance";
 import { CodexSeriesPlanningAgent } from "../../src/server/series-planning-agent.js";
 import type { StudioSeriesInput } from "../../src/shared/api.js";
 
@@ -26,13 +28,19 @@ export function roadmapAudit() {
 }
 
 /** 真路由、服务、文件存储、bridge、durable broker 与执行器；仅供应商 HTTP 响应受控。 */
-export async function seriesCausalHarness(options: { workspaceRoot?: string; audit?: "pass" | "fail"; gateAudit?: Promise<void>; gateProduce?: Promise<void>; timeoutMs?: number; selectedModel?: () => Promise<string | undefined> } = {}) {
+export async function seriesCausalHarness(options: { workspaceRoot?: string; audit?: "pass" | "fail"; gateAudit?: Promise<void>; gateProduce?: Promise<void>; timeoutMs?: number; selectedModel?: () => Promise<string | undefined>; maintenance?: boolean } = {}) {
   const workspaceRoot = options.workspaceRoot ?? await mkdtemp(path.join(tmpdir(), "vf-causal-"));
   await mkdir(workspaceRoot, { recursive: true });
   // Unix socket 路径有长度上限，业务证据仍放在显式工作区。
   const socketRoot = await mkdtemp(path.join(tmpdir(), "vf-cs-"));
   const socketPath = path.join(socketRoot, "b.sock");
   const calls: Array<{ kind: string; attempt: number }> = [];
+  const maintenanceDirectory = options.maintenance ? path.join(workspaceRoot, "maintenance") : undefined;
+  if (maintenanceDirectory) await transitionMaintenanceGate(maintenanceDirectory, "open", "setup");
+  const maintenanceGate = new MaintenanceGate(maintenanceDirectory ? { directory: maintenanceDirectory } : {});
+  await maintenanceGate.announceStartup();
+  let produceStarted!: () => void;
+  const produceStart = new Promise<void>((resolve) => { produceStarted = resolve; });
   let auditStarted!: () => void;
   const auditStart = new Promise<void>((resolve) => { auditStarted = resolve; });
   const executor = new ChatCompletionsExecutor({ provider: DEEPSEEK_CHAT_COMPLETIONS_PROVIDER, env: { DEEPSEEK_API_KEY: "local-test-only" },
@@ -42,7 +50,7 @@ export async function seriesCausalHarness(options: { workspaceRoot?: string; aud
       const kind = isAudit ? "role-audit" : "series-roadmap";
       const attempt = calls.filter((call) => call.kind === kind).length + 1;
       calls.push({ kind, attempt });
-      if (isAudit) { auditStarted(); await options.gateAudit; } else await options.gateProduce;
+      if (isAudit) { auditStarted(); await options.gateAudit; } else { produceStarted(); await options.gateProduce; }
       const audit = roadmapAudit();
       const output = !isAudit ? roadmap : options.audit === "pass" ? audit
         : attempt % 2 === 1 ? { ...audit, extra: true } : { ...audit, summary: "结构修复时改写判断" };
@@ -50,7 +58,9 @@ export async function seriesCausalHarness(options: { workspaceRoot?: string; aud
         usage: { prompt_tokens: 100 * attempt, completion_tokens: 10 * attempt, total_tokens: 110 * attempt } }), { status: 200 });
     },
   });
-  const broker = new CodexBrokerServer({ socketPath, executor, idempotencyDirectory: path.join(workspaceRoot, "broker"), sessionDirectory: path.join(workspaceRoot, "sessions") });
+  const broker = new CodexBrokerServer({ socketPath, executor, idempotencyDirectory: path.join(workspaceRoot, "broker"), sessionDirectory: path.join(workspaceRoot, "sessions"),
+    ...(maintenanceDirectory ? { maintenanceDirectory } : {}),
+  });
   await broker.start();
   const transport = new CodexBridgeClient({ socketPath, timeoutMs: options.timeoutMs ?? 5000, pollIntervalMs: 10 });
   const client = new FallbackCodexTaskClient({ candidates: [{ client: transport, providerId: "deepseek", modelId: "deepseek-flash",
@@ -59,7 +69,8 @@ export async function seriesCausalHarness(options: { workspaceRoot?: string; aud
   // 任何制作执行都是验收越界；只提供空制作列表，绝无真实模型或媒体服务退路。
   const pipeline = new Proxy({ list: async () => [] }, { get(target, key) {
     if (key === "list") return target.list;
-    if (typeof key === "string" && key.startsWith("read")) return undefined;
+    // 本桩仅提供空列表；可选读取能力缺省，不发生制作扫描或执行。
+    if (typeof key === "string" && (key.startsWith("read") || key === "scanRuns")) return undefined;
     return () => { throw new Error(`Local causal harness forbids production method ${String(key)}`); };
   } }) as unknown as StudioPipelinePort;
   function service() {
@@ -68,9 +79,12 @@ export async function seriesCausalHarness(options: { workspaceRoot?: string; aud
       trendGateway: { listServices: async () => [], listSignals: async () => [] }, trendAgent: { listCandidates: async () => [] },
     });
   }
-  const app = buildStudioApp({ service: service() });
-  return { app, client, transport, broker, calls, auditStart, workspaceRoot, checkpointDirectory, service,
-    newApp: () => buildStudioApp({ service: service() }),
+  const newApp = () => buildStudioApp({ service: service(), ...(maintenanceDirectory ? {
+    maintenanceGate, maintenanceIntegrity: async () => ({ complete: true, issues: [] }),
+  } : {}) });
+  const app = newApp();
+  return { app, client, transport, broker, calls, auditStart, produceStart, workspaceRoot, checkpointDirectory, service,
+    maintenanceDirectory, maintenanceGate, newApp,
     async close() { await app.close(); await broker.close(); await rm(socketRoot, { recursive: true, force: true }); if (!options.workspaceRoot) await rm(workspaceRoot, { recursive: true, force: true }); },
   };
 }

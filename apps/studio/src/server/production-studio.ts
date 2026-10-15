@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { holdMaintenanceWork } from "@video-factory/production-pipeline/maintenance";
 import { mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -147,6 +148,8 @@ export interface StudioPipelinePort {
   readPaidExecutionReceipts?: (runId: string) => Promise<NodeExecutionReceipt[]>;
   readTextExecutionUsage?: (runId: string) => Promise<Array<{ nodeId: string; providerId: string; modelId: string; modelCallCount: number }>>;
   list(): Promise<WorkflowRun<ProductionBrief>[]>;
+  /** 容错扫描；未提供时回退严格 list()。健康浏览不因单条坏记录失败。 */
+  scanRuns?(): Promise<import("@video-factory/production-pipeline").RunScanResult<ProductionBrief>>;
   remove(runId: string): Promise<void>;
   loadPersisted(runId: string): Promise<WorkflowRun<ProductionBrief>>;
   show(runId: string): Promise<WorkflowRun<ProductionBrief>>;
@@ -341,9 +344,15 @@ export class ProductionStudio {
 
   constructor(private readonly options: ProductionStudioOptions) {}
 
+  /** 健康浏览入口：优先容错扫描；完整性语义由调用方（费用/部署）单独使用 scan。 */
+  private async listHealthyRuns(): Promise<WorkflowRun<ProductionBrief>[]> {
+    const scan = await this.options.pipeline.scanRuns?.();
+    return scan ? scan.runs : this.options.pipeline.list();
+  }
+
   async list(): Promise<StudioRunSummary[]> {
     const [runs, archived] = await Promise.all([
-      this.options.pipeline.list(),
+      this.listHealthyRuns(),
       this.options.archiveStore.list(),
     ]);
     this.historicalNodeDurations = collectNodeDurationHistory(runs);
@@ -355,7 +364,7 @@ export class ProductionStudio {
       const [run, archived, historyRuns, pauseRequested] = await Promise.all([
         this.options.pipeline.show(runId),
         this.options.archiveStore.list(),
-        this.options.pipeline.list(),
+        this.listHealthyRuns(),
         this.options.pipeline.pauseRequested(runId),
       ]);
       this.historicalNodeDurations = collectNodeDurationHistory(historyRuns);
@@ -1058,7 +1067,7 @@ export class ProductionStudio {
 
   private async dispatchBrief(brief: ProductionBrief): Promise<StartRunResponse> {
     if (Object.keys(this.historicalNodeDurations).length === 0) {
-      this.historicalNodeDurations = collectNodeDurationHistory(await this.options.pipeline.list());
+      this.historicalNodeDurations = collectNodeDurationHistory(await this.listHealthyRuns());
     }
     const dispatched = await this.options.pipeline.dispatch(brief, (run) => this.publish(this.toDetail(run)));
     this.trackCompletion(dispatched);
@@ -1074,6 +1083,12 @@ export class ProductionStudio {
       })
       .finally(() => this.completions.delete(tracked));
     this.completions.add(tracked);
+    holdMaintenanceWork(tracked);
+  }
+
+  /** 维护排空口径：当前已受理后台链路全部 settle 后才解除占用（R3）。 */
+  activeWork(): Promise<void> {
+    return Promise.allSettled([...this.completions]).then(() => undefined);
   }
 
   private async dispatchedDetail(dispatched: DispatchedProductionRun): Promise<StudioRunDetail> {
@@ -1514,6 +1529,11 @@ export class ProductionStudio {
     return detail;
   }
 
+  /** 发布只投影已读 run，不触发完整工作台的跨 run 查询或恢复状态读取。 */
+  publishRunDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
+    return this.toDetail(run);
+  }
+
   private toDetail(run: WorkflowRun<ProductionBrief>): StudioRunDetail {
     return toRunDetail(run, {
       now: (this.options.now ?? (() => new Date()))().toISOString(),
@@ -1922,10 +1942,8 @@ export class ProductionStudio {
         creativeReviewCommandDraft(input, actor),
         (run) => this.publish(this.toDetail(run)),
       ));
-      void dispatched.completion.then(
-        (run) => this.publish(this.toDetail(run)),
-        () => undefined,
-      );
+      // 创作讨论命令也是已受理后台链路：纳入完成登记，排空不因 HTTP 已返回而误判空闲。
+      this.trackCompletion(dispatched);
       return await this.creativeReviewCommand(runId, input.commandId) ?? {
         commandId: input.commandId,
         status: "running",
@@ -2307,7 +2325,8 @@ export class ProductionStudio {
     input: StudioNodeOverrideInput,
     actor: string,
   ): Promise<StudioRunDetail> {
-    const current = await this.loadRequiredRun(runId);
+    // show 会投影 legacy 版本；显式 null 必须按原持久状态判定是否确实无版本。
+    const current = await this.loadRequiredRun(runId, input.expectedVersionId === null);
     assertExecutableRunContinuation(current);
     if (current.status === "running") {
       throw new StudioConflictError("制作仍在执行，暂时不能修改节点。请等待它停在确认点后再编辑。");
@@ -2318,10 +2337,21 @@ export class ProductionStudio {
     await this.assertReworkUncertaintySafe(current);
     const node = current.nodeRuns.find((candidate) => candidate.nodeId === nodeId);
     if (!node) throw new StudioInputError(`没有找到制作步骤“${nodeId}”。`);
+    // 这里只做早期拒绝；包括普通 no-op 在内的最终校验由 pipeline 执行租约内重读完成。
+    const effectiveVersion = node.outputState?.versions.find((version) => version.id === node.outputState?.effectiveVersionId);
+    if (node.outputState !== undefined && (!effectiveVersion || input.expectedVersionId === null)) {
+      throw new StudioConflictError("这条制作的成果版本无法核对，请刷新后再保存；你的草稿不会被覆盖。");
+    }
+    const currentBaselineVersionId = effectiveVersion?.id ?? null;
+    if (input.expectedVersionId !== currentBaselineVersionId) {
+      throw new StudioConflictError("这条制作的成果已被更新，请刷新后核对最新内容再保存；你的草稿不会被覆盖。");
+    }
+    if (input.expectedRunRevision !== current.revision) {
+      throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
+    }
     const editsOutput = input.output !== undefined;
     const editsDocument = input.document !== undefined;
     if (editsOutput === editsDocument) throw new StudioInputError("请选择一种节点交付进行修改。");
-    const effectiveVersion = node.outputState?.versions.find((version) => version.id === node.outputState?.effectiveVersionId);
     const reference = effectiveVersion?.output ?? node.output;
     let overrideOutput = input.output === undefined
       ? undefined
@@ -2365,9 +2395,6 @@ export class ProductionStudio {
       runRoot: path.join(this.options.workspaceRoot, "runs", runId),
       allowPathChanges: editsDocument,
     });
-    if (!editsDocument && node.outputState?.stale !== true && isDeepStrictEqual(overrideOutput, reference)) {
-      return this.toDetail(current);
-    }
     let persisted = false;
     try {
       const updated = await this.options.pipeline.applyNodeOverride(runId, {
@@ -2375,7 +2402,10 @@ export class ProductionStudio {
         actor,
         output: overrideOutput,
         ...(overrideArtifacts ? { artifacts: overrideArtifacts } : {}),
-        ...(effectiveVersion ? { expectedVersionId: effectiveVersion.id } : {}),
+        // 沿用编辑器基线，不在保存时替换为新版本；普通 no-op 也必须通过锁内复核。
+        expectedVersionId: input.expectedVersionId,
+        expectedRunRevision: input.expectedRunRevision,
+        ...(editsOutput ? { skipUnchangedOutput: true } : {}),
         allowTerminalEdit: isTerminalRun(current.status) && input.confirmTerminalEdit === true,
         schemaVersion: effectiveVersion?.schemaVersion ?? "1",
       });
@@ -3552,10 +3582,11 @@ export class ProductionStudio {
     };
   }
 
-  async resolveArtifact(runId: string, artifactId: string): Promise<StudioArtifactResource | undefined> {
+  async resolveArtifact(runId: string, artifactId: string, loadedRun?: WorkflowRun<ProductionBrief>): Promise<StudioArtifactResource | undefined> {
     let run: WorkflowRun<ProductionBrief>;
     try {
-      run = await this.options.pipeline.loadPersisted(runId);
+      run = loadedRun ?? await this.options.pipeline.loadPersisted(runId);
+      if (run.id !== runId) throw new Error("Artifact snapshot belongs to another run.");
     } catch (error) {
       if (hasCode(error, "ENOENT")) throw new StudioNotFoundError("没有找到这条制作记录。");
       throw error;
@@ -3587,9 +3618,9 @@ export class ProductionStudio {
       ...(verifiedBytes ? { verifiedBytes } : {}) };
   }
 
-  private async loadRequiredRun(runId: string): Promise<WorkflowRun<ProductionBrief>> {
+  private async loadRequiredRun(runId: string, persisted = false): Promise<WorkflowRun<ProductionBrief>> {
     try {
-      return await this.options.pipeline.show(runId);
+      return persisted ? await this.options.pipeline.loadPersisted(runId) : await this.options.pipeline.show(runId);
     } catch (error) {
       if (hasCode(error, "ENOENT")) throw new StudioNotFoundError("没有找到这条制作记录。");
       throw error;

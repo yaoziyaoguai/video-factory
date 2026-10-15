@@ -581,6 +581,10 @@ a { color: inherit; }
 .publish-confirmations label { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: start; gap: 8px; color: #4f544f; font-size: 11px; line-height: 1.5; cursor: pointer; }
 .publish-confirmations input { width: 15px; height: 15px; margin-top: 1px; accent-color: var(--blue); }
 .publish-dialog > .form-error { margin: 0 22px 12px; }
+.publish-dialog > .publish-snapshot-notice { display: flex; align-items: flex-start; gap: 7px; margin: 0 22px 12px; padding: 10px; color: var(--muted); background: #f3f4f6; border-radius: 3px; font-size: 12px; line-height: 1.5; }
+.publish-error-context { margin: 0 22px 12px; }
+.publish-error-context .form-error { margin: 0; }
+.publish-error-context small { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .publish-dialog > .dialog-actions { padding: 13px 22px; background: #f8f9fa; }
 .publish-result { display: grid; gap: 14px; padding: 22px; }
 .publish-result-heading { display: flex; align-items: flex-start; gap: 9px; padding: 12px; background: #e9f0e8; }

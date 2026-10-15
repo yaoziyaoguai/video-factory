@@ -1,11 +1,102 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { readPlanningOperations } from "../src/server/planning-operations.js";
+import { readPlanningMaintenanceIntegrity, readPlanningOperations } from "../src/server/planning-operations.js";
+import { taskBinding } from "../../../packages/production-pipeline/src/codex-task-binding.js";
 import { CostStudio } from "../src/server/cost-studio.js";
 import { projectCheckpointExecutions } from "../../../packages/production-pipeline/src/model-execution-facts.js";
+
+describe("planning maintenance integrity", () => {
+  function stoppedCheckpoint(key: string, kind: "series" | "topic" = "topic") {
+    const requestId = `planning-${key.slice(0, 8)}`;
+    const brokerBinding = { version: "video-factory/task-binding-v1" as const, storeId: `vfs_store_${"c".repeat(32)}`, providerId: "test", modelId: "test" };
+    const taskKind = kind === "series" ? "series-roadmap" as const : "topic-ideas" as const;
+    const envelope = { protocolVersion: "video-factory/codex-bridge-v2", requestId, kind: taskKind, brokerBinding,
+      payload: kind === "series" ? { series: { id: "series-original", name: "原系列", pillars: ["主题"] }, planningWindow: { startEpisodeNumber: 1, count: 2 } }
+        : { signals: [{ title: "选题" }] } };
+    const operation = { version: "video-factory/codex-prepared-operation-v1", requestId, kind: taskKind,
+      envelope, serializedEnvelope: JSON.stringify(envelope), brokerBinding,
+      binding: taskBinding({ request: envelope, broker: brokerBinding, kind: taskKind }), route: { socketPath: "/isolated/broker.sock" }, taskFact: "accepted_unknown" };
+    return { version: "video-factory/agent-loop-checkpoint-v9", key,
+      planningOwner: { kind, id: kind === "series" ? "series-original" : "topic-original", title: "原操作", action: "generate" },
+      status: "failed", completed: [], attemptedRequestIds: [requestId], failure: { stage: "uncertain" },
+      pendingOperation: { phase: "produce", iteration: 1, generation: 0, operationKey: "produce:1", operation },
+      requestExecutions: { [requestId]: { state: "unknown" } } };
+  }
+
+  it("blocks malformed, unassigned, active and invalid-status checkpoints without changing their bytes", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "planning-maintenance-invalid-"));
+    try {
+      for (const directoryName of ["topic-editor", "series-showrunner"] as const) {
+        const directory = path.join(root, "checkpoints", directoryName);
+        await mkdir(directory, { recursive: true });
+        const kind = directoryName === "series-showrunner" ? "series" : "topic";
+        const brokenKey = "a".repeat(64);
+        const unassigned = stoppedCheckpoint("b".repeat(64), kind) as Record<string, unknown>;
+        delete unassigned.planningOwner; delete unassigned.pendingOperation;
+        const samples = [
+          [brokenKey, "{broken"],
+          ["b".repeat(64), JSON.stringify(unassigned)],
+          ["d".repeat(64), JSON.stringify({ ...stoppedCheckpoint("d".repeat(64), kind), status: "running" })],
+          ["e".repeat(64), JSON.stringify({ ...stoppedCheckpoint("e".repeat(64), kind), status: "idle" })],
+        ] as const;
+        for (const [key, bytes] of samples) await writeFile(path.join(directory, `${key}.json`), bytes);
+        const result = await readPlanningMaintenanceIntegrity(root);
+        assert.equal(result.complete, false);
+        for (const [key, bytes] of samples) {
+          assert.ok(result.issues.some((issue) => issue.runId === `planning:${directoryName}:${key}`));
+          assert.equal(await readFile(path.join(directory, `${key}.json`), "utf8"), bytes);
+        }
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("keeps stopped unknown identity intact, including verified legacy ownership without baseRevision", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "planning-maintenance-stopped-"));
+    try {
+      for (const [name, key, kind] of [["topic-editor", "a".repeat(64), "topic"], ["series-showrunner", "b".repeat(64), "series"]] as const) {
+        const directory = path.join(root, "checkpoints", name);
+        await mkdir(directory, { recursive: true });
+        const checkpoint = stoppedCheckpoint(key, kind) as Record<string, unknown>;
+        if (kind === "series") delete checkpoint.planningOwner;
+        const bytes = JSON.stringify(checkpoint);
+        const file = path.join(directory, `${key}.json`);
+        await writeFile(file, bytes);
+        assert.equal((await readPlanningMaintenanceIntegrity(root)).complete, true);
+        assert.equal(await readFile(file, "utf8"), bytes);
+      }
+      const operations = await readPlanningOperations(root);
+      const legacy = operations.find((operation) => operation.owner.kind === "series");
+      assert.ok(legacy?.evidenceIssue, "missing baseRevision is a read-only legacy limitation, not an active writer");
+      assert.equal(legacy.baseRevision, undefined);
+      const topicFile = path.join(root, "checkpoints", "topic-editor", `${"a".repeat(64)}.json`);
+      const tampered = stoppedCheckpoint("a".repeat(64));
+      tampered.pendingOperation.operation.binding.requestDigest = "f".repeat(64);
+      await writeFile(topicFile, JSON.stringify(tampered));
+      assert.equal((await readPlanningMaintenanceIntegrity(root)).complete, false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("blocks unverifiable pending identity and unreadable checkpoint directories", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "planning-maintenance-unreadable-"));
+    try {
+      assert.deepEqual(await readPlanningMaintenanceIntegrity(root), { complete: true, issues: [] });
+      const directory = path.join(root, "checkpoints", "topic-editor");
+      await mkdir(directory, { recursive: true });
+      const key = "a".repeat(64);
+      const checkpoint = stoppedCheckpoint(key);
+      checkpoint.attemptedRequestIds = ["unrelated-request"];
+      await writeFile(path.join(directory, `${key}.json`), JSON.stringify(checkpoint));
+      assert.equal((await readPlanningMaintenanceIntegrity(root)).issues[0]?.problem, "planning_unknown_operation_unbound");
+      await writeFile(path.join(root, "checkpoints", "series-showrunner"), "not a directory");
+      const result = await readPlanningMaintenanceIntegrity(root);
+      assert.equal(result.complete, false);
+      assert.ok(result.issues.some((issue) => issue.problem === "planning_state_unreadable"));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
 
 describe("CostStudio", () => {
   it("includes pre-production requests without inventing runs or paid amounts", async () => {
@@ -838,5 +929,38 @@ describe("CostStudio", () => {
     assert.equal(recovered?.status, "succeeded", "unknown→终态是合法推进");
     assert.equal(recovered?.actualCostCny, 0.5, "待核→实付是合法更正（现金账本权威）");
     assert.equal(recovered?.countConflict, undefined);
+  });
+  it("reports an incomplete run scan instead of presenting healthy-subset totals as complete", async () => {
+    const run = { id: "run-healthy", status: "succeeded", startedAt: "2026-09-27T00:00:00Z", finishedAt: "2026-09-27T00:01:00Z",
+      interventions: [], decisions: [], nodeRuns: [], executionReceipts: [], spendAuthorizations: [] };
+    const scan = { runs: [run], complete: false, issues: [
+      { runId: "run-corrupt", problem: "invalid_json", detail: "Unexpected end of JSON input" },
+      { runId: "run-formal", problem: "missing_run_json" },
+    ] };
+    const studio = new CostStudio(async () => [run], undefined, undefined, undefined, undefined, undefined, async () => scan);
+    const dashboard = await studio.dashboard();
+
+    assert.equal(dashboard.runs.length, 1);
+    assert.equal(dashboard.totals.countExact, false, "不完整扫描不得当作完整合计");
+    assert.equal(dashboard.runScan?.complete, false);
+    assert.deepEqual(dashboard.runScan?.issues.map((issue) => issue.runId), ["run-corrupt", "run-formal"]);
+    // 系统读取错误保留为明确失败，不能以旧列表代替本次扫描。
+    const inaccessible = Object.assign(new Error("EACCES: runs root unreadable"), { code: "EACCES" });
+    const failedScan = new CostStudio(async () => { throw new Error("must not fall back to another scan"); },
+      undefined, undefined, undefined, undefined, undefined, async () => { throw inaccessible; });
+    await assert.rejects(() => failedScan.dashboard(), (error) => error === inaccessible);
+  });
+  it("keeps a complete scan absent from the dashboard payload", async () => {
+    const run = { id: "run-ok", status: "succeeded", startedAt: "2026-09-27T00:00:00Z", finishedAt: "2026-09-27T00:01:00Z",
+      interventions: [], decisions: [], nodeRuns: [], executionReceipts: [], spendAuthorizations: [] };
+    let scans = 0;
+    const studio = new CostStudio(async () => { throw new Error("must use the scanned run set"); },
+      undefined, undefined, undefined, undefined, undefined,
+      async () => { scans += 1; return { runs: [run], complete: true, issues: [] }; });
+    const dashboard = await studio.dashboard();
+    assert.equal(dashboard.runScan, undefined);
+    assert.equal(dashboard.totals.countExact, true);
+    assert.equal(scans, 1);
+    assert.deepEqual(dashboard.runs.map((item) => item.runId), [run.id]);
   });
 });

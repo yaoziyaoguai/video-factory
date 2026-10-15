@@ -42,10 +42,16 @@ export class CostStudio {
     private readonly readDocumentReceipts?: (runId: string) => Promise<unknown[]>,
     private readonly readExecutionFacts?: (runId: string) => Promise<ModelExecutionProjection>,
     private readonly readPlanningOperations?: () => Promise<StudioPlanningOperation[]>,
+    private readonly readRunScan?: () => Promise<{ runs: CostRunSource[]; complete: boolean; issues: Array<{ runId: string; problem: string; detail?: string }> }>,
   ) {}
 
   async dashboard(): Promise<StudioCostDashboard> {
-    const details = await Promise.all((await this.listRuns()).map((run) => this.detail(run)));
+    // 健康集合与完整性必须来自同一次扫描，不能把两个时刻的结果拼成完整合计。
+    const runScan = await this.readRunScan?.();
+    const allRuns = runScan ? runScan.runs : await this.listRuns();
+    // 扫描不完整时金额只覆盖健康子集：runScan 显式标注，countExact 不允许为 true。
+    const scanComplete = runScan?.complete !== false;
+    const details = await Promise.all(allRuns.map((run) => this.detail(run)));
     const lines = details.flatMap((detail) => detail.lines);
     const planningOperations = await this.readPlanningOperations?.() ?? [];
     const runKeys = new Set(details.flatMap((detail) => detail.executionFacts?.map((fact) => fact.executionKey) ?? []));
@@ -67,13 +73,16 @@ export class CostStudio {
         ...(planningFacts.length ? { newBrokerRequestsThisAttempt: null, newModelAttemptsThisAttempt: null } : {}),
         verifiedBrokerRequests: (totalsByRun.verifiedBrokerRequests ?? 0) + planningTotals.verifiedBrokerRequests,
         verifiedModelAttempts: (totalsByRun.verifiedModelAttempts ?? 0) + planningTotals.verifiedModelAttempts,
-        countExact: totalsByRun.countExact === true && planningTotals.countExact,
+        countExact: scanComplete && totalsByRun.countExact === true && planningTotals.countExact,
         countConflicts: (totalsByRun.countConflicts ?? 0) + planningTotals.countConflicts,
       },
       byProvider: planningGroups(group(lines, (line) => line.providerId), planningFacts, "providerId").map((item) => ({ ...item, providerId: item.id })),
       byNode: planningGroups(group(lines, (line) => line.nodeId), planningFacts, "nodeId").map((item) => ({ ...item, nodeId: item.id })),
       runs: details.map(({ lines: _lines, ...summary }) => summary),
       planningOperations,
+      ...(runScan && !runScan.complete
+        ? { runScan: { complete: false as const, issues: runScan.issues } }
+        : {}),
     };
   }
 

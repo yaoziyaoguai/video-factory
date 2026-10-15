@@ -226,17 +226,34 @@ describe("publishing API contracts", () => {
       factualAccuracy: true,
       commercialDisclosure: true,
     };
+    // R7：提交必须携带首次确认时看到的 readiness 快照，解析原样透传不补值。
+    const expected = { revision: 9, videoArtifactId: "video", publishPackageArtifactId: "package" };
     assert.deepEqual(parseStudioPublishInput({
       requestId: "publish-1",
       platformIds: ["douyin", "kuaishou"],
       confirmations,
+      expected,
     }), {
       requestId: "publish-1",
       platformIds: ["douyin", "kuaishou"],
       confirmations,
+      expected,
     });
-    assert.throws(() => parseStudioPublishInput({ requestId: "publish-1", platformIds: [], confirmations }), /至少选择/);
-    assert.throws(() => parseStudioPublishInput({ requestId: "publish-1", platformIds: ["douyin", "douyin"], confirmations }), /重复/);
+    assert.deepEqual(parseStudioPublishInput({
+      requestId: "publish-1",
+      platformIds: ["douyin"],
+      confirmations,
+      expected: { revision: 0, videoArtifactId: null, publishPackageArtifactId: null },
+    }).expected, { revision: 0, videoArtifactId: null, publishPackageArtifactId: null });
+    assert.throws(() => parseStudioPublishInput({ requestId: "publish-1", platformIds: ["douyin"], confirmations }), /发布快照/);
+    assert.throws(() => parseStudioPublishInput({
+      requestId: "publish-1",
+      platformIds: ["douyin"],
+      confirmations,
+      expected: { revision: -1, videoArtifactId: null, publishPackageArtifactId: null },
+    }), /发布快照/);
+    assert.throws(() => parseStudioPublishInput({ requestId: "publish-1", platformIds: [], confirmations, expected }), /至少选择/);
+    assert.throws(() => parseStudioPublishInput({ requestId: "publish-1", platformIds: ["douyin", "douyin"], confirmations, expected }), /重复/);
     assert.throws(() => parseStudioPublishInput({
       requestId: "publish-1",
       platformIds: ["douyin"],

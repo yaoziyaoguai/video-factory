@@ -16,7 +16,7 @@ import type {
   ProductionSceneRevisionDraft,
   ProductionSpendRejectionDraft,
 } from "@video-factory/production-pipeline";
-import { CodexBridgeClient, effectiveProductionBrief, HumanDecisionConflictError, PaidOperationManualReconciliationError, productionWorkflowVersion, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, StaleRunRevisionError, type CodexPreparedOperation } from "@video-factory/production-pipeline";
+import { CodexBridgeClient, effectiveProductionBrief, HumanDecisionConflictError, PaidOperationManualReconciliationError, ProductionPipeline, productionWorkflowVersion, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, StaleRunRevisionError, type CodexPreparedOperation } from "@video-factory/production-pipeline";
 import {
   StudioConflictError,
   StudioService as ProductionStudioService,
@@ -429,6 +429,58 @@ async function completeTrendRefresh(service: StudioService, refreshId?: string):
 }
 
 describe("StudioService", () => {
+  it("serves healthy runs and marks costs incomplete through the real pipeline despite corrupt neighbours", async (t) => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-studio-run-scan-"));
+    t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+    const healthy: WorkflowRun<ProductionBrief> = {
+      id: "run-healthy", revision: 0, workflowId: "daily-production", workflowVersion: "1.0.0",
+      status: "running", initialInput: legacyBrief, startedAt: "2026-08-21T10:00:00.000Z",
+      nodeRuns: [{ nodeId: "brief", status: "running", startedAt: "2026-08-21T10:00:00.000Z", artifactIds: [], qualityGateResults: [] }],
+      artifacts: [], interventions: [], decisions: [],
+    };
+    const records = new Map([
+      [healthy.id, JSON.stringify(healthy)],
+      ["run-truncated", '{"id":"run-truncated","revision":'],
+      ["run-bad-node", JSON.stringify({ ...healthy, id: "run-bad-node", nodeRuns: [null] })],
+      ["run-bad-operations", JSON.stringify({ ...healthy, id: "run-bad-operations", creativeReviewOperations: {} })],
+    ]);
+    for (const [id, bytes] of records) {
+      await mkdir(path.join(workspaceRoot, "runs", id), { recursive: true });
+      await writeFile(path.join(workspaceRoot, "runs", id, "run.json"), bytes);
+    }
+    let workerCalls = 0;
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: { run: async () => {
+      workerCalls += 1;
+      throw new Error("No execution is allowed during scan recovery");
+    } } });
+    assert.equal(await pipeline.recoverInterruptedRuns(), 1);
+    const service = new StudioService({ workspaceRoot, pipeline, environment: {}, commandAvailable: allCommandsAvailable });
+    const app = buildStudioApp({ service, logger: false });
+    t.after(() => app.close());
+    await app.ready();
+    const list = await app.inject({ method: "GET", url: "/api/runs" });
+    assert.equal(list.statusCode, 200, list.body);
+    assert.deepEqual(list.json().map((run: { id: string }) => run.id), [healthy.id]);
+    const detail = await app.inject({ method: "GET", url: `/api/runs/${healthy.id}` });
+    assert.equal(detail.statusCode, 200, detail.body);
+    assert.equal(detail.json().status, "failed");
+    const costs = await app.inject({ method: "GET", url: "/api/costs" });
+    assert.equal(costs.statusCode, 200, costs.body);
+    assert.equal(costs.json().totals.countExact, false);
+    assert.equal(costs.json().runScan.complete, false);
+    assert.deepEqual(costs.json().runScan.issues.map((issue: { runId: string }) => issue.runId).sort(),
+      ["run-bad-node", "run-bad-operations", "run-truncated"]);
+    for (const [id, bytes] of records) {
+      if (id === healthy.id) continue;
+      const bad = await app.inject({ method: "GET", url: `/api/runs/${id}` });
+      assert.equal(bad.statusCode, 500, bad.body);
+      assert.equal(await readFile(path.join(workspaceRoot, "runs", id, "run.json"), "utf8"), bytes);
+    }
+    assert.equal(await pipeline.recoverInterruptedRuns(), 0);
+    assert.equal((await pipeline.scanRuns()).complete, false);
+    await assert.rejects(() => pipeline.list());
+    assert.equal(workerCalls, 0);
+  });
   for (const field of ["input", "output"] as const) {
     it(`explains stale human ${field} recovery as HTTP 409 without changing the run`, async (t) => {
       const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-human-stale-http-"));
@@ -1710,7 +1762,9 @@ describe("StudioService", () => {
     }), /创建新版本|可执行制作方案/);
 
     await assert.rejects(
-      () => service.applyNodeOverride(run.id, "render", { output: {} }, "studio-owner"),
+      () => service.applyNodeOverride(run.id, "render", {
+      expectedRunRevision: 0,
+      expectedVersionId: null, output: {} }, "studio-owner"),
       /创建新版本|可执行制作方案/,
     );
     assert.equal(pipeline.lastOverride, undefined);
@@ -5633,28 +5687,194 @@ describe("StudioService", () => {
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
     await assert.rejects(
-      () => service.applyNodeOverride("run-1", "script", { output: { hook: "新钩子", scenes: [{ narration: "新旁白" }] } }, "trusted-owner"),
+      () => service.applyNodeOverride("run-1", "script", {
+      expectedRunRevision: 0,
+      expectedVersionId: null, output: { hook: "新钩子", scenes: [{ narration: "新旁白" }] } }, "trusted-owner"),
       /仍在执行/,
     );
     pipeline.run = { ...pipeline.run, status: "needs_human" };
     await assert.rejects(
-      () => service.applyNodeOverride("run-1", "script", { output: { hook: 42, scenes: [] } }, "trusted-owner"),
+      () => service.applyNodeOverride("run-1", "script", {
+      expectedRunRevision: 0,
+      expectedVersionId: null, output: { hook: 42, scenes: [] } }, "trusted-owner"),
       /output\.hook.*文字/,
     );
     await service.applyNodeOverride(
       "run-1",
       "script",
-      { output: { hook: "旧钩子", scenes: [{ narration: "旧旁白" }] } },
+      {
+      expectedRunRevision: 0,
+      expectedVersionId: null, output: { hook: "旧钩子", scenes: [{ narration: "旧旁白" }] } },
       "trusted-owner",
     );
-    assert.equal(pipeline.lastOverride, undefined);
+    assert.equal(pipeline.lastOverride?.skipUnchangedOutput, true, "普通 no-op 必须交给 pipeline 锁内复核");
+    assert.equal(pipeline.run.revision, 0);
     await service.applyNodeOverride(
       "run-1",
       "script",
-      { output: { hook: "新钩子", scenes: [{ narration: "新旁白" }] } },
+      {
+      expectedRunRevision: 0,
+      expectedVersionId: null, output: { hook: "新钩子", scenes: [{ narration: "新旁白" }] } },
       "trusted-owner",
     );
     assert.equal(pipeline.lastOverride?.actor, "trusted-owner");
+  });
+
+  // 此处验证 Studio 早期拒绝与锁内 no-op 的派发参数；真实读后竞态及字节保全见 production-planning-editing.test。
+  it("rejects stale output baselines and sends valid no-ops to the pipeline boundary", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-baseline-"));
+    const run = executableWaitingRun(workspaceRoot);
+    run.nodeRuns.unshift({
+      nodeId: "script",
+      status: "succeeded",
+      output: { hook: "旧钩子", scenes: [{ narration: "旧旁白" }] },
+      artifactIds: [],
+      qualityGateResults: [],
+      outputState: {
+        nodeId: "script",
+        generatedVersionId: "script-v1",
+        effectiveVersionId: "script-v1",
+        stale: false,
+        versions: [{
+          id: "script-v1", nodeId: "script", source: "generated", artifactIds: [], inputVersionIds: [],
+          createdAt: "2026-08-27T00:00:00.000Z", createdBy: "worker", schemaVersion: "1",
+          output: { hook: "旧钩子", scenes: [{ narration: "旧旁白" }] },
+        }],
+      },
+    });
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    // B 先保存 V2（revision 与 effective 版本都推进）。
+    const updated = structuredClone(run);
+    const scriptNodeV2 = updated.nodeRuns.find((node) => node.nodeId === "script")!;
+    scriptNodeV2.output = { hook: "B 保存的新钩子", scenes: [{ narration: "新旁白" }] };
+    scriptNodeV2.outputState = {
+      ...scriptNodeV2.outputState!,
+      effectiveVersionId: "script-v2",
+      versions: [...scriptNodeV2.outputState!.versions, {
+        ...scriptNodeV2.outputState!.versions[0]!,
+        id: "script-v2",
+        output: { hook: "B 保存的新钩子", scenes: [{ narration: "新旁白" }] },
+      }],
+    };
+    updated.revision = run.revision + 1;
+    pipeline.run = updated;
+
+    // A 持旧基线（revision 与版本都过期）保存 → 冲突；V2 不被覆盖。
+    await assert.rejects(() => service.applyNodeOverride("run-1", "script", {
+      output: { hook: "A 基于旧版本的钩子", scenes: [{ narration: "旧旁白" }] },
+      expectedRunRevision: run.revision,
+      expectedVersionId: "script-v1",
+    }, "creator-a"), /成果已被更新/);
+    assert.equal(pipeline.lastOverride, undefined);
+
+    // revision 是当前的、但版本基线过期 → 仍冲突（本例不模拟读后竞态）。
+    await assert.rejects(() => service.applyNodeOverride("run-1", "script", {
+      output: { hook: "A 基于旧版本的钩子", scenes: [{ narration: "旧旁白" }] },
+      expectedRunRevision: updated.revision,
+      expectedVersionId: "script-v1",
+    }, "creator-a"), /成果已被更新/);
+    assert.equal(pipeline.lastOverride, undefined);
+
+    // 过期基线的 no-op（内容与当前值完全相同）不得走快捷出口。
+    await assert.rejects(() => service.applyNodeOverride("run-1", "script", {
+      output: { hook: "B 保存的新钩子", scenes: [{ narration: "新旁白" }] },
+      expectedRunRevision: run.revision,
+      expectedVersionId: "script-v1",
+    }, "creator-a"), /已被更新/);
+    assert.equal(pipeline.lastOverride, undefined);
+    assert.equal(pipeline.run.revision, updated.revision, "V2 的 revision 未被覆盖");
+    assert.equal((pipeline.run.nodeRuns.find((node) => node.nodeId === "script")!.output as { hook: string }).hook, "B 保存的新钩子");
+
+    // 基线正确时仍必须经过 pipeline；此 fake 仅证明接线，不能证明执行锁或无版本写入。
+    const noop = await service.applyNodeOverride("run-1", "script", {
+      output: { hook: "B 保存的新钩子", scenes: [{ narration: "新旁白" }] },
+      expectedRunRevision: updated.revision,
+      expectedVersionId: "script-v2",
+    }, "creator-b");
+    assert.ok(noop);
+    assert.equal(pipeline.lastOverride?.skipUnchangedOutput, true);
+    assert.equal(pipeline.lastOverride?.expectedRunRevision, updated.revision);
+    assert.equal(pipeline.lastOverride?.expectedVersionId, "script-v2");
+    assert.equal(pipeline.run.revision, updated.revision);
+  });
+
+  // R7-D：整链使用真实 service 决定路径产生合法终审状态（decide→approve 落 decision
+  // 记录），发布 readiness/publish 全走 StudioService→PublishingStudio→journal 落盘；
+  // 之后 run 再推进时同一意图重发在租约内快照比对处冲突，不产生第二次 delivery。
+  it("publishes from a legally approved run and rejects the same intent after the run advances", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-"));
+    // 与真实 WorkflowRunner 一致：decide 时落 decision 记录（FakePipeline 缺这步）。
+    class DecidingFakePipeline extends FakePipeline {
+      override async decide(runId: string, decision: HumanDecisionDraft): Promise<WorkflowRun<ProductionBrief>> {
+        await super.decide(runId, decision);
+        this.run = {
+          ...this.run,
+          decisions: [...this.run.decisions, { ...decision, id: `decision-${this.run.decisions.length + 1}`, createdAt: "2026-08-21T10:02:00.000Z" }],
+        };
+        return this.run;
+      }
+    }
+    const packagePath = path.join(workspaceRoot, "runs", "run-1", "nodes", "publish-package", "attempt-1", "package.json");
+    await mkdir(path.dirname(packagePath), { recursive: true });
+    await writeFile(packagePath, JSON.stringify({
+      aigc: { explicitLabelChecked: true, implicitMetadataWritten: true },
+      resourceManifest: { needsReviewCount: 0 },
+      artifacts: [{ id: "artifact-video", kind: "render", provenance: { licenseNote: "Generated locally." } }],
+    }));
+    const base = executableWaitingRun(workspaceRoot);
+    const run: WorkflowRun<ProductionBrief> = {
+      ...base,
+      videoArtifactId: "artifact-video",
+      publishPackageArtifactId: "artifact-package",
+      artifacts: [...base.artifacts, {
+        id: "artifact-package",
+        kind: "publish_package",
+        uri: packagePath,
+        createdAt: "2026-08-21T10:01:00.000Z",
+        contentType: "application/json",
+        sizeBytes: 12,
+        sha256: "b".repeat(64),
+        producer: { nodeId: "publish-package", attempt: 1 },
+        provenance: { providerId: "codex-publish-copy-v1", licenseNote: "Approved publish package." },
+      }],
+    };
+    const pipeline = new DecidingFakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    await service.decide("run-1", {
+      action: "approve",
+      expectedRunRevision: 0,
+      interventionId: "intervention-1",
+      reviewEvidenceId: null,
+    }, "jinkun");
+    assert.equal(pipeline.run.status, "succeeded");
+    assert.ok(pipeline.run.decisions.some((decision) => decision.action === "approve"), "终审决定由 service 决定路径落记录");
+
+    const readiness = await service.publishReadiness("run-1");
+    assert.equal(readiness.ready, true, JSON.stringify(readiness.checks));
+    assert.deepEqual(readiness.snapshot, { revision: 1, videoArtifactId: "artifact-video", publishPackageArtifactId: "artifact-package" });
+
+    const input = {
+      requestId: "publish-service-intent-1",
+      platformIds: ["douyin"] as const,
+      confirmations: {
+        finalContent: true,
+        aigcDisclosure: true,
+        rightsAndLikeness: true,
+        factualAccuracy: true,
+        commercialDisclosure: true,
+      },
+      expected: readiness.snapshot,
+    };
+    const batch = await service.publish("run-1", input);
+    assert.equal(batch.status, "succeeded");
+    assert.deepEqual(batch.deliveries.map((delivery) => delivery.status), ["export_ready"]);
+    assert.deepEqual(pipeline.maintenanceLeaseCalls.at(-1), ["run-1"], "发布事务在 run 维护租约内执行");
+
+    pipeline.run = { ...pipeline.run, revision: pipeline.run.revision + 1 };
+    await assert.rejects(() => service.publish("run-1", input), /自你核对发布条件以来这条制作已有更新/);
   });
 
   it("requires explicit confirmation before editing a terminal run", async () => {
@@ -5666,13 +5886,17 @@ describe("StudioService", () => {
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
     await assert.rejects(
-      () => service.applyNodeOverride("run-1", "script", { output: { hook: "修订钩子" } }, "trusted-owner"),
+      () => service.applyNodeOverride("run-1", "script", {
+      expectedRunRevision: 0,
+      expectedVersionId: null, output: { hook: "修订钩子" } }, "trusted-owner"),
       /明确确认/,
     );
     await service.applyNodeOverride(
       "run-1",
       "script",
-      { output: { hook: "修订钩子" }, confirmTerminalEdit: true },
+      {
+      expectedRunRevision: 0,
+      expectedVersionId: null, output: { hook: "修订钩子" }, confirmTerminalEdit: true },
       "trusted-owner",
     );
     assert.equal(pipeline.lastOverride?.actor, "trusted-owner");
@@ -5715,6 +5939,8 @@ describe("StudioService", () => {
 
     await assert.rejects(
       () => service.applyNodeOverride("run-1", "script", {
+      expectedRunRevision: 0,
+      expectedVersionId: null,
         output: { hook: "新钩子" },
         confirmTerminalEdit: true,
       }, "trusted-owner"),
@@ -5993,6 +6219,8 @@ describe("StudioService", () => {
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
 
     await service.applyNodeOverride("run-1", "script", {
+      expectedRunRevision: 0,
+      expectedVersionId: "script-generated-v1",
       document: {
         artifactId: "artifact-script",
         content: { title: "旧脚本", scenes: [{ narration: "旧旁白" }] },
@@ -6001,6 +6229,8 @@ describe("StudioService", () => {
     assert.equal(pipeline.lastOverride, undefined);
 
     await service.applyNodeOverride("run-1", "script", {
+      expectedRunRevision: 0,
+      expectedVersionId: "script-generated-v1",
       document: {
         artifactId: "artifact-script",
         content: { title: "人工脚本", scenes: [{ narration: "人工旁白" }] },
@@ -6198,6 +6428,8 @@ describe("StudioService", () => {
     assert.deepEqual(pipeline.lastInputOverride?.input, { candidateInventoryPath, selectedAssetIds: ["two"] });
 
     await service.applyNodeOverride("run-1", "asset-candidates", {
+      expectedRunRevision: 0,
+      expectedVersionId: "candidate-output-v1",
       document: { artifactId: "artifact-candidates", content: edited },
     }, "trusted-owner");
 
@@ -6217,6 +6449,8 @@ describe("StudioService", () => {
     forged.scene_candidates[0]!.candidates[0]!.preview_url = "http://127.0.0.1/private";
     await assert.rejects(
       () => service.applyNodeOverride("run-1", "asset-candidates", {
+      expectedRunRevision: 0,
+      expectedVersionId: "candidate-output-v1",
         document: { artifactId: "artifact-candidates", content: forged },
       }, "trusted-owner"),
       /preview_url 不能修改/,
@@ -6225,6 +6459,8 @@ describe("StudioService", () => {
     forgedCredit.scene_candidates[0]!.candidates[0]!.creator_url = "https://example.com/another-author";
     await assert.rejects(
       () => service.applyNodeOverride("run-1", "asset-candidates", {
+      expectedRunRevision: 0,
+      expectedVersionId: "candidate-output-v1",
         document: { artifactId: "artifact-candidates", content: forgedCredit },
       }, "trusted-owner"),
       /creator_url 不能修改/,
@@ -6246,6 +6482,8 @@ describe("StudioService", () => {
 
     await assert.rejects(
       () => service.applyNodeOverride("run-1", "script", {
+      expectedRunRevision: 0,
+      expectedVersionId: null,
         document: { artifactId: "artifact-video", content: { title: "越权修改" } },
       }, "trusted-owner"),
       /当前可编辑产物/,
@@ -6307,6 +6545,8 @@ describe("StudioService", () => {
     edited.scene_assets[0]!.asset_id = "human-replacement";
 
     await service.applyNodeOverride("run-1", "assets", {
+      expectedRunRevision: 0,
+      expectedVersionId: null,
       document: { artifactId: "artifact-asset-plan", content: edited },
       authorizedRunFiles: [replacementPath],
     }, "trusted-owner");
@@ -6336,6 +6576,8 @@ describe("StudioService", () => {
     forged.scene_assets[0]!.local_path = outsidePath;
     await assert.rejects(
       () => service.applyNodeOverride("run-1", "assets", {
+      expectedRunRevision: 0,
+      expectedVersionId: null,
         document: { artifactId: "artifact-asset-plan", content: forged },
         authorizedRunFiles: [outsidePath],
       }, "trusted-owner"),
@@ -6382,6 +6624,8 @@ describe("StudioService", () => {
 
     await assert.rejects(
       () => service.applyNodeOverride("run-1", "publish-package", {
+      expectedRunRevision: 0,
+      expectedVersionId: null,
         document: { artifactId: "artifact-package", content: forged },
       }, "trusted-owner"),
       /由系统托管/,
@@ -6393,6 +6637,8 @@ describe("StudioService", () => {
     edited.copy.description = "新描述";
     edited.copy.hashtags = ["新话题"];
     await service.applyNodeOverride("run-1", "publish-package", {
+      expectedRunRevision: 0,
+      expectedVersionId: null,
       document: { artifactId: "artifact-package", content: edited },
     }, "trusted-owner");
     const saved = JSON.parse(await readFile((pipeline.lastOverride?.output as { publishPackagePath: string }).publishPackagePath, "utf8")) as typeof publishPackage;
@@ -6438,6 +6684,8 @@ describe("StudioService", () => {
     forged.scene_assets[0]!.license_note = "self owned";
 
     await service.applyNodeOverride("run-1", "assets", {
+      expectedRunRevision: 0,
+      expectedVersionId: null,
       document: { artifactId: "plan", content: forged },
     }, "trusted-owner");
 

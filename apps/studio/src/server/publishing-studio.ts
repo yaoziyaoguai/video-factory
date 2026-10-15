@@ -9,10 +9,11 @@ import {
   type StudioPublishInput,
   type StudioPublishPlatformId,
   type StudioPublishReadiness,
+  type StudioPublishSnapshot,
   type StudioPublishTarget,
   type StudioRunDetail,
 } from "../shared/api.js";
-import { StudioNotFoundError } from "./studio-errors.js";
+import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 
 export interface PlatformPublishRequest {
   platformId: StudioPublishPlatformId;
@@ -30,16 +31,25 @@ export interface PlatformPublisher {
   publish(request: PlatformPublishRequest): Promise<PlatformPublishReceipt>;
 }
 
-export interface PublishingStudioOptions {
+export interface PublishingRunSnapshot {
+  run: StudioRunDetail;
+  loadPublishPackage: () => Promise<unknown>;
+  loadEffectiveResourceReviewCount?: () => Promise<number | undefined>;
+}
+
+export type PublishingStudioOptions = {
   workspaceRoot: string;
-  getRun: (runId: string) => Promise<StudioRunDetail | undefined>;
-  loadPublishPackage: (run: StudioRunDetail) => Promise<unknown>;
-  loadEffectiveResourceReviewCount?: (runId: string) => Promise<number | undefined>;
   withRunLease?: <T>(runId: string, action: () => Promise<T>) => Promise<T>;
   publishers?: PlatformPublisher[];
   targets?: StudioPublishTarget[];
   now?: () => Date;
-}
+} & ({
+  getRunSnapshot: (runId: string) => Promise<PublishingRunSnapshot | undefined>;
+} | {
+  getRun: (runId: string) => Promise<StudioRunDetail | undefined>;
+  loadPublishPackage: (run: StudioRunDetail) => Promise<unknown>;
+  loadEffectiveResourceReviewCount?: (runId: string) => Promise<number | undefined>;
+});
 
 export class PublishingStudio {
   private readonly publishers: Map<StudioPublishPlatformId, PlatformPublisher>;
@@ -60,16 +70,20 @@ export class PublishingStudio {
   }
 
   async readiness(runId: string): Promise<StudioPublishReadiness> {
-    const run = await this.requiredRun(runId);
-    const publishPackage = await this.options.loadPublishPackage(run);
-    const effectiveResourceReviewCount = this.options.loadEffectiveResourceReviewCount
-      ? await this.options.loadEffectiveResourceReviewCount(runId)
-      : undefined;
+    return this.readinessFromSnapshot(await this.requiredSnapshot(runId));
+  }
+
+  /** 发布包与授权检查捕获同一已读 run；租约内复用，不重新加载或再次获取租约。 */
+  private async readinessFromSnapshot(snapshot: PublishingRunSnapshot): Promise<StudioPublishReadiness> {
+    const { run } = snapshot;
+    const publishPackage = await snapshot.loadPublishPackage();
+    const effectiveResourceReviewCount = await snapshot.loadEffectiveResourceReviewCount?.();
     const checks = complianceChecks(run, publishPackage, effectiveResourceReviewCount);
     return {
-      runId,
+      runId: run.id,
       ready: !checks.some((check) => check.status === "blocked"),
       title: run.title,
+      snapshot: publishSnapshotOf(run),
       targets: this.listTargets(),
       checks,
     };
@@ -83,7 +97,7 @@ export class PublishingStudio {
     const digest = publishRequestDigest(runId, input);
     const existing = this.inFlight.get(key);
     if (existing) {
-      if (existing.digest !== digest) throw new StudioInputError("这个发布请求编号已经绑定到另一组平台或确认内容，请重新生成请求编号。");
+      if (existing.digest !== digest) throw new StudioInputError("这个发布请求编号已经绑定到另一组平台、确认内容或制作版本，请重新生成请求编号。");
       return existing.operation;
     }
     const operation = this.publishOnce(runId, input).finally(() => {
@@ -99,9 +113,16 @@ export class PublishingStudio {
   }
 
   private async publishUnderLease(runId: string, input: StudioPublishInput): Promise<StudioPublishBatch> {
-    const run = await this.requiredRun(runId);
-    const snapshotDigest = publishRequestDigest(runId, input, run);
-    const readiness = await this.readiness(runId);
+    const snapshot = await this.requiredSnapshot(runId);
+    const { run } = snapshot;
+    // R7：租约内重读 run 后，先比对首次确认时看到的快照身份——run 自核对以来已推进
+    // （新终审、重生成发布包或任何修订）在这里冲突，早于合规检查与任何 journal 写入，
+    // 不产生发布副作用；请求编号与快照的绑定同时进入 inFlight 与持久 journal 摘要。
+    if (!isSamePublishSnapshot(input.expected, publishSnapshotOf(run))) {
+      throw new StudioConflictError("自你核对发布条件以来这条制作已有更新，请刷新核对最新状态后重新确认发布。");
+    }
+    const snapshotDigest = publishRequestDigest(runId, input);
+    const readiness = await this.readinessFromSnapshot(snapshot);
     const blocker = readiness.checks.find((check) => check.status === "blocked");
     if (blocker) throw new StudioInputError(blocker.detail);
     if (Object.values(input.confirmations).some((confirmed) => !confirmed)) {
@@ -117,7 +138,7 @@ export class PublishingStudio {
     const journalPath = path.join(directory, `${input.requestId}.journal.json`);
     const journal = await readPublishJournal(journalPath);
     if (journal && (journal.runId !== runId || journal.requestId !== input.requestId || journal.requestDigest !== snapshotDigest)) {
-      throw new StudioInputError("这个发布请求编号已经绑定到另一组平台或确认内容，请重新生成请求编号。");
+      throw new StudioInputError("这个发布请求编号已经绑定到另一组平台、确认内容或制作版本，请重新生成请求编号。");
     }
     const existing = await readBatch(batchPath);
     if (journal?.state === "completed") {
@@ -202,10 +223,19 @@ export class PublishingStudio {
     return batch;
   }
 
-  private async requiredRun(runId: string): Promise<StudioRunDetail> {
-    const run = await this.options.getRun(runId);
+  private async requiredSnapshot(runId: string): Promise<PublishingRunSnapshot> {
+    const options = this.options;
+    if ("getRunSnapshot" in options) {
+      const snapshot = await options.getRunSnapshot(runId);
+      if (!snapshot) throw new StudioNotFoundError("没有找到这条制作记录。");
+      return snapshot;
+    }
+    const run = await options.getRun(runId);
     if (!run) throw new StudioNotFoundError("没有找到这条制作记录。");
-    return run;
+    return { run, loadPublishPackage: () => options.loadPublishPackage(run),
+      ...(options.loadEffectiveResourceReviewCount ? {
+        loadEffectiveResourceReviewCount: () => options.loadEffectiveResourceReviewCount!(run.id),
+      } : {}) };
   }
 }
 
@@ -343,17 +373,30 @@ interface PublishJournal {
   inProgressPlatformId?: StudioPublishPlatformId;
 }
 
-function publishRequestDigest(runId: string, input: StudioPublishInput, run?: StudioRunDetail): string {
+/** R7：持久 digest 字段布局保持 `runId/platformIds/confirmations/revision/videoArtifactId/publishPackageArtifactId`，身份取自已校验的 expected 快照，journal 格式不迁移。 */
+function publishRequestDigest(runId: string, input: StudioPublishInput): string {
   return createHash("sha256").update(JSON.stringify({
     runId,
     platformIds: input.platformIds,
     confirmations: input.confirmations,
-    ...(run ? {
-      revision: run.revision,
-      videoArtifactId: run.videoArtifactId,
-      publishPackageArtifactId: run.publishPackageArtifactId,
-    } : {}),
+    revision: input.expected.revision,
+    videoArtifactId: input.expected.videoArtifactId,
+    publishPackageArtifactId: input.expected.publishPackageArtifactId,
   })).digest("hex");
+}
+
+function publishSnapshotOf(run: StudioRunDetail): StudioPublishSnapshot {
+  return {
+    revision: run.revision,
+    videoArtifactId: run.videoArtifactId ?? null,
+    publishPackageArtifactId: run.publishPackageArtifactId ?? null,
+  };
+}
+
+function isSamePublishSnapshot(expected: StudioPublishSnapshot, current: StudioPublishSnapshot): boolean {
+  return expected.revision === current.revision
+    && expected.videoArtifactId === current.videoArtifactId
+    && expected.publishPackageArtifactId === current.publishPackageArtifactId;
 }
 
 async function readPublishJournal(journalPath: string): Promise<PublishJournal | undefined> {

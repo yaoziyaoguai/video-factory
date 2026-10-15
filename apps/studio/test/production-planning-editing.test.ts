@@ -347,7 +347,11 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
       assert.deepEqual(await harness.pipeline.loadPersisted(run.id), saved);
     }
     const overrideResponse = await app.inject({ method: "PUT", url: `/api/runs/${run.id}/nodes/creative-planning/override`,
-      payload: { output: savedPlanning.output },
+      payload: {
+        output: savedPlanning.output,
+        expectedRunRevision: saved.revision,
+        expectedVersionId: savedPlanning.outputState!.effectiveVersionId,
+      },
     });
     assert.equal(overrideResponse.statusCode, 409, overrideResponse.body);
     assert.match(overrideResponse.body, /重新生成/);
@@ -374,6 +378,8 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
       savedPlanning.inputState!.effectiveVersionId);
     await assert.rejects(() => restarted.studio.applyNodeOverride(run.id, "creative-planning", {
       output: savedPlanning.output,
+      expectedRunRevision: configured.revision,
+      expectedVersionId: savedPlanning.outputState!.effectiveVersionId,
     }, "producer"), /重新生成/);
     assert.deepEqual(spies, callsBefore, "save, rejected decisions and configuration make no model or worker request");
     const regenerated = await restarted.pipeline.resumeStale(run.id);
@@ -774,6 +780,8 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
     // 页面载入的交付仍带有生成当时的配置快照；这里只改正文，不让它回滚当前选择。
     await studio.applyNodeOverride(first.id, "brief", {
       output: { ...displayed, title: "换源后修改的标题", angle: "换源后修改的角度" },
+      expectedRunRevision: configured.revision,
+      expectedVersionId: briefNode!.outputState!.effectiveVersionId!,
     }, "producer");
     const saved = await pipeline.loadPersisted(first.id);
     const state = saved.nodeRuns.find(node => node.nodeId === "brief")?.outputState;
@@ -907,4 +915,136 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
       "only producer-a's input version may be persisted",
     );
   });
+});
+
+describe("ordinary output editing through HTTP and the execution lease (R6)", () => {
+  async function setup() {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-output-editing-boundary-"));
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [], workerCalls: [] };
+    const harness = newEditingStudio(workspaceRoot, spies);
+    const run = await harness.pipeline.start({ ...editingBrief(),
+      workflowFeatures: { ...editingBrief().workflowFeatures, boundaryGates: "user-confirmed-v1" },
+    });
+    const node = run.nodeRuns.find(candidate => candidate.nodeId === "brief")!;
+    assert.equal(node.intervention?.boundary, "node-complete");
+    const app = buildStudioApp({ service: {
+      applyNodeOverride: harness.studio.applyNodeOverride.bind(harness.studio),
+    } as unknown as StudioServicePort, logger: false });
+    const url = `/api/runs/${run.id}/nodes/brief/override`;
+    const payload = { output: node.output, expectedRunRevision: run.revision,
+      expectedVersionId: node.outputState!.effectiveVersionId };
+    const runFile = path.join(workspaceRoot, "runs", run.id, "run.json");
+    return { ...harness, workspaceRoot, spies, run, app, url, payload, runFile };
+  }
+
+  it("rejects a no-op after a real writer changes the run between the Studio read and dispatch", async (t) => {
+    const h = await setup();
+    t.after(() => h.app.close());
+    const originalShow = h.pipeline.show.bind(h.pipeline);
+    let readSnapshot!: () => void;
+    const read = new Promise<void>(resolve => { readSnapshot = resolve; });
+    let release!: () => void;
+    const paused = new Promise<void>(resolve => { release = resolve; });
+    let first = true;
+    h.pipeline.show = async (id) => {
+      const run = await originalShow(id);
+      if (first) { first = false; readSnapshot(); await paused; }
+      return run;
+    };
+    const request = h.app.inject({ method: "PUT", url: h.url, payload: h.payload }).then(response => response);
+    await read;
+    let afterWriter: string;
+    try {
+      await h.pipeline.applyNodeOverride(h.run.id, { ...h.payload, nodeId: "brief", actor: "writer-b",
+        output: { ...(h.payload.output as ProductionBrief), angle: "另一位编辑先保存的角度" } });
+      afterWriter = await readFile(h.runFile, "utf8");
+    } finally { release(); }
+    const response = await request;
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(await readFile(h.runFile, "utf8"), afterWriter!);
+    assert.deepEqual(h.spies.workerCalls, []);
+  });
+
+  it("does not bypass an occupied execution lease for an unchanged output", async (t) => {
+    const h = await setup();
+    t.after(() => h.app.close());
+    const original = await readFile(h.runFile, "utf8");
+    const response = await h.pipeline.withRunMaintenanceLease([h.run.id], async () =>
+      h.app.inject({ method: "PUT", url: h.url, payload: h.payload }));
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(await readFile(h.runFile, "utf8"), original);
+    assert.deepEqual(h.spies.workerCalls, []);
+  });
+
+  it("keeps a valid no-op byte-identical and rejects its stale baseline after a real edit", async (t) => {
+    const h = await setup();
+    t.after(() => h.app.close());
+    const original = await readFile(h.runFile, "utf8");
+    const unchanged = await h.app.inject({ method: "PUT", url: h.url, payload: h.payload });
+    assert.equal(unchanged.statusCode, 200, unchanged.body);
+    assert.equal(await readFile(h.runFile, "utf8"), original);
+    const changedOutput = { ...(h.payload.output as ProductionBrief), title: "正式新标题" };
+    const changed = await h.app.inject({ method: "PUT", url: h.url, payload: { ...h.payload, output: changedOutput } });
+    assert.equal(changed.statusCode, 200, changed.body);
+    const persisted = await h.pipeline.loadPersisted(h.run.id);
+    const node = persisted.nodeRuns.find(candidate => candidate.nodeId === "brief")!;
+    assert.equal(persisted.revision, h.run.revision + 1);
+    assert.equal(node.outputState!.versions.length, 2);
+    assert.equal(node.status, "needs_human");
+    assert.notEqual(node.intervention?.id, h.run.nodeRuns.find(candidate => candidate.nodeId === "brief")?.intervention?.id);
+    const after = await readFile(h.runFile, "utf8");
+    const stale = await h.app.inject({ method: "PUT", url: h.url, payload: { ...h.payload, output: changedOutput } });
+    assert.equal(stale.statusCode, 409, stale.body);
+    assert.equal(await readFile(h.runFile, "utf8"), after);
+    assert.deepEqual(h.spies.workerCalls, []);
+  });
+
+  for (const kind of ["dangling", "empty"] as const) {
+    it(`rejects null no-op and edits against ${kind} output version structure`, async (t) => {
+      const h = await setup();
+      t.after(() => h.app.close());
+      await mutateRunJson(h.run.id, h.workspaceRoot, payload => {
+        const node = (payload.nodeRuns as Array<Record<string, unknown>>).find(candidate => candidate.nodeId === "brief")!;
+        node.outputState = { nodeId: "brief", effectiveVersionId: kind === "dangling" ? "missing" : "", versions: [] };
+      });
+      const original = await readFile(h.runFile, "utf8");
+      for (const output of [h.payload.output, { ...(h.payload.output as ProductionBrief), title: "不能写入" }]) {
+        const response = await h.app.inject({ method: "PUT", url: h.url,
+          payload: { ...h.payload, output, expectedVersionId: null } });
+        assert.equal(response.statusCode, 409, response.body);
+        assert.equal(await readFile(h.runFile, "utf8"), original);
+      }
+      assert.deepEqual(h.spies.workerCalls, []);
+    });
+  }
+
+  for (const baseline of ["null", "projected"] as const) {
+    it(`saves a legitimate unversioned fixture through HTTP with its ${baseline} baseline`, async (t) => {
+      const h = await setup();
+      t.after(() => h.app.close());
+      await mutateRunJson(h.run.id, h.workspaceRoot, payload => {
+        const node = (payload.nodeRuns as Array<Record<string, unknown>>).find(candidate => candidate.nodeId === "brief")!;
+        delete node.outputState;
+      });
+      const original = await readFile(h.runFile, "utf8");
+      const shown = await h.studio.get(h.run.id);
+      const projected = shown!.nodes.find(node => node.id === "brief")!.outputState!.effectiveVersionId;
+      assert.match(projected, /^legacy-output:/);
+      assert.equal(await readFile(h.runFile, "utf8"), original, "show only projects legacy versions");
+      const expectedVersionId = baseline === "null" ? null : projected;
+      const response = await h.app.inject({ method: "PUT", url: h.url,
+        payload: { ...h.payload, expectedVersionId, output: { ...(h.payload.output as ProductionBrief), title: "合法历史形态的新稿" } } });
+      assert.equal(response.statusCode, 200, response.body);
+      const saved = await h.pipeline.loadPersisted(h.run.id);
+      assert.equal(saved.revision, h.run.revision + 1);
+      const state = saved.nodeRuns.find(node => node.nodeId === "brief")!.outputState!;
+      assert.equal(state.versions.find(version => version.id === state.effectiveVersionId)!.source, "human");
+      assert.deepEqual(h.spies.workerCalls, []);
+      const after = await readFile(h.runFile, "utf8");
+      const stale = await h.app.inject({ method: "PUT", url: h.url,
+        payload: { ...h.payload, expectedRunRevision: saved.revision, expectedVersionId: null } });
+      assert.equal(stale.statusCode, 409, stale.body);
+      assert.equal(await readFile(h.runFile, "utf8"), after);
+    });
+  }
 });

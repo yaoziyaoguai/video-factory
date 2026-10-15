@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { holdMaintenanceWork } from "@video-factory/production-pipeline/maintenance";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -81,6 +82,11 @@ export class TrendStudio {
 
   isRefreshing(): boolean {
     return Boolean(this.candidateLoading);
+  }
+
+  /** 维护排空口径：共享的热点抓取链路 settle 后才解除占用（R3）。 */
+  activeWork(): Promise<unknown> {
+    return this.candidateLoading ?? Promise.resolve();
   }
 
   async requestCandidateRefresh(): Promise<StudioTrendRefreshReceipt> {
@@ -315,6 +321,7 @@ export class TrendStudio {
     });
     // candidateLoading 代表“生成、持久化并发布”完整生命周期，调用方等待后即可安全读取刷新状态。
     this.candidateLoading = loading;
+    holdMaintenanceWork(loading);
     return loading;
   }
 

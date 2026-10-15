@@ -35,6 +35,8 @@ import { CodexTopicIdeaModel, TrendOpportunityAgent } from "./trend-opportunity-
 import { ModelConnections } from "./model-connections.js";
 import { AudioReviewService } from "./audio-review-service.js";
 import { LocalCapabilityService } from "./local-capabilities.js";
+import { MaintenanceGate, StudioMaintenanceError } from "./maintenance-gate.js";
+import { readPlanningMaintenanceIntegrity } from "./planning-operations.js";
 
 const repositoryRoot = await findRepositoryRoot(process.cwd());
 loadLocalEnvironment(repositoryRoot);
@@ -145,7 +147,16 @@ modelConnections.onChange = () => {
   if (!assembly.directorAgent) delete pipelineOptions.directorAgent;
   auditedTaskClient?.updateCandidates([...auditedTaskCandidates, ...configuredTaskCandidates()]);
 };
-await pipeline.recoverInterruptedRuns();
+// 维护门禁（R3）：部署共享目录经 bind mount 暴露；未配置时门禁停用（本地开发）。
+const maintenanceDirectory = process.env.VIDEO_FACTORY_MAINTENANCE_DIR?.trim();
+const maintenanceGate = new MaintenanceGate(maintenanceDirectory ? { directory: maintenanceDirectory } : {});
+await maintenanceGate.announceStartup();
+try {
+  await maintenanceGate.withAdmission("startup-recovery", () => pipeline.recoverInterruptedRuns());
+} catch (error) {
+  if (!(error instanceof StudioMaintenanceError)) throw error;
+  process.stderr.write(`Maintenance gate is ${error.state}; startup recovery is paused.\n`);
+}
 const opportunities = new JsonOpportunityStore(path.join(workspaceRoot, "opportunities", "opportunities.json"));
 const service = new StudioService({
   localCapabilities,
@@ -195,9 +206,17 @@ const service = new StudioService({
 });
 const development = process.env.STUDIO_DEV === "1";
 const auth = readStudioAuthEnvironment(process.env, { required: !development, secureCookie: !development });
-const app = buildStudioApp({ service, modelConnections, logger: true, ...(auth ? { auth } : {}) });
+const app = buildStudioApp({ service, modelConnections, logger: true, ...(auth ? { auth } : {}), maintenanceGate,
+  maintenanceIntegrity: async () => {
+    const reports = await Promise.all([pipeline.maintenanceIntegrity(), readPlanningMaintenanceIntegrity(workspaceRoot)]);
+    return { complete: reports.every((report) => report.complete), issues: reports.flatMap((report) => report.issues) };
+  },
+});
 const interruptedRecoveryTimer = setInterval(() => {
-  void pipeline.recoverInterruptedRuns().catch(() => {
+  // 每个恢复周期都过门禁：门禁内已在跑的周期被登记占用，排空会等它结束；
+  // 门禁关闭时静默跳过本轮。
+  void maintenanceGate.withAdmission("recovery-cycle", () => pipeline.recoverInterruptedRuns()).catch((error: unknown) => {
+    if (error instanceof StudioMaintenanceError) return;
     app.log.error("Interrupted production recovery failed; the next recovery cycle will retry.");
   });
 }, 30_000);

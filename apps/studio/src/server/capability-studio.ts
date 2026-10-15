@@ -46,9 +46,11 @@ export class CapabilityStudio {
       this.commandAvailable("ffprobe"),
       this.commandAvailable("say"),
     ]);
+    const release = (this.options.environment.VIDEO_FACTORY_RELEASE_SHA ?? "").trim();
     return {
       status: python && ffmpeg && ffprobe ? "ok" : "degraded",
       runtime: { python, ffmpeg, ffprobe, say },
+      ...(release ? { release } : {}),
     };
   }
 

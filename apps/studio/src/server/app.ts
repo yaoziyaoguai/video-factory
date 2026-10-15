@@ -2,11 +2,13 @@ import { parseStudioNarrationRevisionInput } from "./narration-revision-input.js
 import { createReadStream } from "node:fs";
 import { promisify } from "node:util";
 import { gzip } from "node:zlib";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { parseProductionTemplate } from "@video-factory/template-core";
 import { CodexBridgeError, DocumentCommandConflictError, DocumentCommandPendingError, RoleAgentLoopError } from "@video-factory/production-pipeline";
 import { StudioAuthenticator, type StudioAuthOptions } from "./auth.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-service.js";
+import { StudioMaintenanceError, type Admission, type MaintenanceGate } from "./maintenance-gate.js";
+import { runWithMaintenanceAdmission } from "@video-factory/production-pipeline/maintenance";
 import type { CaseSearchQuery } from "./case-studio.js";
 import { StudioVoicePreviewUnavailableError } from "./local-capabilities.js";
 import type { ModelConnections } from "./model-connections.js";
@@ -223,6 +225,8 @@ export interface StudioServicePort {
   listPublishTargets(): Promise<StudioPublishTarget[]>;
   publishReadiness(runId: string): Promise<StudioPublishReadiness>;
   publish(runId: string, input: StudioPublishInput): Promise<StudioPublishBatch>;
+  /** 维护排空口径：当前已受理后台链路 settle 后解除占用（R3）。 */
+  activeWork?(): Promise<void>;
 }
 
 export interface BuildStudioAppOptions {
@@ -230,10 +234,16 @@ export interface BuildStudioAppOptions {
   logger?: boolean;
   auth?: StudioAuthOptions;
   modelConnections?: Pick<ModelConnections, "refresh" | "add" | "disable" | "enable">;
+  /** 维护门禁（R3）：提供时非只读路由在门禁关闭时拒绝新顶层工作；只读查询继续可用。 */
+  maintenanceGate?: MaintenanceGate;
+  maintenanceIntegrity?: () => Promise<{ complete: boolean; issues: Array<{ runId: string; problem: string }> }>;
 }
 
 const SAFE_ROUTE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const gzipAsync = promisify(gzip);
+// 目录、路线图与候选同步会持久化；这些 GET 也必须先登记。
+const MAINTENANCE_EXEMPT_ROUTES = /^\/api\/(?:auth|health)(?:\/|$)/;
+const MAINTENANCE_WORK_GET_ROUTES = /^\/api\/(?:series|cases|candidate-inbox)(?:\/|$)/;
 
 function acceptsGzip(header: string | undefined): boolean {
   const entries = (header ?? "").split(",").map(value => {
@@ -266,6 +276,55 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   const auth = options.auth ? new StudioAuthenticator(options.auth) : undefined;
   for (const contentType of ["application/octet-stream", "video/mp4", "video/quicktime", "video/webm"]) {
     app.addContentTypeParser(contentType, { parseAs: "buffer", bodyLimit: 30 * 1024 * 1024 }, (_request, body, done) => done(null, body));
+  }
+
+  // 维护门禁（R3）：非只读路由在门禁关闭时拒绝新顶层工作；已受理链路照常排空，
+  // 纯本地只读查询继续可用。认证与健康检查不受影响。
+  const maintenanceGate = options.maintenanceGate;
+  if (maintenanceGate) {
+    // ALS 必须包住实际 handler；仅在异步 onRequest 中 enter/run 不能保证后继 hook 继承。
+    app.addHook("onRoute", (route) => {
+      const handler = route.handler;
+      route.handler = function (request, reply) {
+        const token = (request as FastifyRequest & { maintenanceAdmission?: Admission }).maintenanceAdmission;
+        if (!token) return handler.call(this, request, reply);
+        if (reply.raw.destroyed) return reply;
+        return runWithMaintenanceAdmission(token, () => {
+          const running = Promise.resolve(handler.call(this, request, reply));
+          token.hold(running);
+          return running;
+        });
+      };
+    });
+    app.addHook("onRequest", async (request, reply) => {
+      const routeUrl = request.routeOptions.url ?? "";
+      if (MAINTENANCE_EXEMPT_ROUTES.test(routeUrl)) return;
+      const method = request.method.toUpperCase();
+      const isWork = (method !== "GET" && method !== "HEAD") || MAINTENANCE_WORK_GET_ROUTES.test(routeUrl);
+      if (!isWork) return;
+      let token: Admission;
+      try {
+        token = await maintenanceGate.admit(routeUrl);
+      } catch (error) {
+        if (error instanceof StudioMaintenanceError) {
+          reply.header("retry-after", "30");
+          return await reply.code(503).send({
+            error: `系统维护进行中（${error.state === "draining" ? "正在排空在途工作" : "已冻结写入"}），新操作暂缓；已受理的工作不受影响，稍后会自动恢复。`,
+            maintenance: { state: error.state, owner: error.owner },
+          });
+        }
+        throw error;
+      }
+      (request as FastifyRequest & { maintenanceAdmission?: Admission }).maintenanceAdmission = token;
+      // 断连也结束 HTTP 所有权；handler 与动态登记的后台链仍由 token.hold 保留。
+      reply.raw.once("close", () => {
+        void maintenanceGate.release(token).catch(() => app.log.error("Maintenance admission release failed; drain remains blocked."));
+      });
+    });
+    app.addHook("onResponse", async (request) => {
+      const token = (request as FastifyRequest & { maintenanceAdmission?: Admission }).maintenanceAdmission;
+      if (token) await maintenanceGate.release(token);
+    });
   }
 
   app.get("/api/auth/session", async (request) => {
@@ -305,7 +364,21 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     }
   });
 
-  app.get("/api/health", async () => options.service.health());
+  app.get("/api/health", async () => {
+    const health = await options.service.health();
+    if (!maintenanceGate?.enabled) return health;
+    try {
+      const integrity = await options.maintenanceIntegrity?.() ?? { complete: false, issues: [{ runId: "*", problem: "integrity_unavailable" }] };
+      const report = await maintenanceGate.report(integrity);
+      // holder 身份是本机续作凭据，不出现在公网健康响应中。
+      return { ...health, maintenance: { protocol: report.protocol, serviceId: report.serviceId,
+        updatedAt: report.updatedAt, gate: report.gateView, quiescent: report.quiescent,
+        integrity: report.integrity, inflightCount: report.inflight.length, holderCount: report.holders.length } };
+    } catch {
+      return { ...health, maintenance: { protocol: "video-factory/maintenance-admission-v2", serviceId: maintenanceGate.serviceId,
+        quiescent: false, integrity: { complete: false, issues: [{ runId: "*", problem: "maintenance_unreadable" }] } } };
+    }
+  });
   app.get("/api/providers", async () => options.service.listProviders());
   app.get("/api/models", async (_request, reply) => {
     if (!options.modelConnections) return reply.code(503).send({ error: "模型接入管理尚未启动。" });
@@ -1384,6 +1457,20 @@ function parseNodeOverrideInput(value: unknown): StudioNodeOverrideInput {
   if (input.confirmTerminalEdit !== undefined && typeof input.confirmTerminalEdit !== "boolean") {
     throw new StudioInputError("终态编辑确认必须是布尔值。");
   }
+  // R6：并发基线由编辑器打开时固定、保存时原样提交；缺失或格式错是输入错误，
+  // 服务端不得补当前版本。
+  const expectedRunRevision = input.expectedRunRevision;
+  if (!Number.isSafeInteger(expectedRunRevision) || Number(expectedRunRevision) < 0) {
+    throw new StudioInputError("制作版本必须是非负整数。");
+  }
+  let expectedVersionId: string | null;
+  if (input.expectedVersionId === null) {
+    expectedVersionId = null;
+  } else {
+    const candidate = typeof input.expectedVersionId === "string" ? input.expectedVersionId.trim() : "";
+    if (!candidate) throw new StudioInputError("缺少输出版本基线，请刷新页面后重新打开编辑。");
+    expectedVersionId = candidate;
+  }
   let document: StudioNodeOverrideInput["document"];
   if (input.document !== undefined) {
     const candidate = requireRecord(input.document, "结构化交付");
@@ -1405,6 +1492,8 @@ function parseNodeOverrideInput(value: unknown): StudioNodeOverrideInput {
     ...(document ? { document } : {}),
     ...(authorizedRunFiles ? { authorizedRunFiles } : {}),
     ...(input.confirmTerminalEdit === true ? { confirmTerminalEdit: true } : {}),
+    expectedRunRevision: Number(expectedRunRevision),
+    expectedVersionId,
   };
 }
 

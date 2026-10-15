@@ -242,6 +242,7 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
       runId,
       ready: true,
       title: "第一条视频",
+      snapshot: { revision: 9, videoArtifactId: "video", publishPackageArtifactId: "package" },
       targets: [{ id: "douyin", label: "抖音", mode: "official_api", status: "ready" }],
       checks: [{ id: "approval", label: "终审", status: "passed", detail: "已批准" }],
     }),
@@ -754,7 +755,7 @@ describe("Studio API", () => {
     const app = buildStudioApp({ service });
 
     const costs = await app.inject({ method: "GET", url: "/api/costs" });
-    const override = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/override", payload: { actor: "editor", output: { hook: "人工钩子" } } });
+    const override = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/override", payload: { actor: "editor", output: { hook: "人工钩子" }, expectedRunRevision: 1, expectedVersionId: "script-output-v1" } });
     const inputOverride = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/script/input-override", payload: { actor: "forged", input: { title: "人工题目" }, expectedRunRevision: 1, expectedVersionId: "script-input-v1" } });
     const configuration = await app.inject({ method: "PUT", url: "/api/runs/run-1/nodes/assets/execution-configuration", payload: { actor: "forged", expectedRunRevision: 0, modelSelections: { "hailuo-video-v1": "MiniMax-H3" }, assetProviderIds: ["local-editorial-v1", "hailuo-video-v1"], economics: { allowMeteredProviders: true, maxPaidShots: 2, maxCostCny: 8 } } });
     const spend = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/assets/spend-authorizations", payload: { spendPlanId: "plan-1", inputVersionIds: ["version-1"], providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02", maxCostCny: 3, maxAttempts: 1, approvedBy: "owner" } });
@@ -889,14 +890,52 @@ describe("Studio API", () => {
       payload: {
         actor: "forged-actor",
         document: { artifactId: "artifact-script", content: { title: "人工脚本" } },
+        expectedRunRevision: 1,
+        expectedVersionId: "script-output-v1",
       },
     });
 
     assert.equal(response.statusCode, 200);
     assert.deepEqual(calls, [{
       actor: "studio-owner",
-      input: { document: { artifactId: "artifact-script", content: { title: "人工脚本" } } },
+      input: { document: { artifactId: "artifact-script", content: { title: "人工脚本" } }, expectedRunRevision: 1, expectedVersionId: "script-output-v1" },
     }]);
+    await app.close();
+  });
+
+  // R6-B/R6-G（HTTP parser 半边）：并发基线缺失或格式错是输入错误（400），不由服务端
+  // 补当前版本；显式 null（所见无版本的合法历史 output）与字符串基线原样透传。
+  it("requires an explicit output baseline on node overrides and passes it through unmodified", async () => {
+    const calls: unknown[] = [];
+    const service = fakeService({
+      applyNodeOverride: async (_runId, _nodeId, input) => {
+        calls.push(input);
+        return runDetail("stale");
+      },
+    });
+    const app = buildStudioApp({ service });
+    const url = "/api/runs/run-1/nodes/script/override";
+
+    for (const payload of [
+      { output: { hook: "无基线" } },
+      { output: { hook: "负版本" }, expectedRunRevision: -1, expectedVersionId: "v1" },
+      { output: { hook: "小数版本" }, expectedRunRevision: 1.5, expectedVersionId: "v1" },
+      { output: { hook: "空版本" }, expectedRunRevision: 1, expectedVersionId: "  " },
+    ]) {
+      const rejected = await app.inject({ method: "PUT", url, payload });
+      assert.equal(rejected.statusCode, 400, JSON.stringify(payload));
+      assert.match(rejected.body, /制作版本必须是非负整数|输出版本基线/);
+    }
+    assert.deepEqual(calls, []);
+
+    const withNull = await app.inject({ method: "PUT", url, payload: { output: { hook: "无版本历史" }, expectedRunRevision: 3, expectedVersionId: null } });
+    assert.equal(withNull.statusCode, 200);
+    const withString = await app.inject({ method: "PUT", url, payload: { output: { hook: "有版本" }, expectedRunRevision: 3, expectedVersionId: "version-9" } });
+    assert.equal(withString.statusCode, 200);
+    assert.deepEqual(calls, [
+      { output: { hook: "无版本历史" }, expectedRunRevision: 3, expectedVersionId: null },
+      { output: { hook: "有版本" }, expectedRunRevision: 3, expectedVersionId: "version-9" },
+    ]);
     await app.close();
   });
 
@@ -1758,27 +1797,59 @@ describe("Studio API", () => {
       url: "/api/runs/run-1/publishing",
       payload: { requestId: "publish-1", platformIds: [], confirmations: {} },
     });
+    const confirmations = {
+      finalContent: true,
+      aigcDisclosure: true,
+      rightsAndLikeness: true,
+      factualAccuracy: true,
+      commercialDisclosure: true,
+    };
+    const expected = { revision: 9, videoArtifactId: "video", publishPackageArtifactId: "package" };
     const published = await app.inject({
       method: "POST",
       url: "/api/runs/run-1/publishing",
-      payload: {
-        requestId: "publish-1",
-        platformIds: ["douyin"],
-        confirmations: {
-          finalContent: true,
-          aigcDisclosure: true,
-          rightsAndLikeness: true,
-          factualAccuracy: true,
-          commercialDisclosure: true,
-        },
-      },
+      payload: { requestId: "publish-1", platformIds: ["douyin"], confirmations, expected },
     });
 
     assert.equal(readiness.statusCode, 200);
+    assert.deepEqual(readiness.json().snapshot, expected);
     assert.equal(readiness.json().targets[0].id, "douyin");
     assert.equal(invalid.statusCode, 400);
     assert.equal(published.statusCode, 200);
     assert.equal(published.json().deliveries[0].externalId, "douyin-item");
+    await app.close();
+  });
+
+  // R7-C：缺/非法快照在 HTTP 解析即拒绝，不进入发布事务。
+  it("requires a valid viewed snapshot on publish requests and rejects malformed ones", async () => {
+    const app = buildStudioApp({ service: fakeService() });
+    const confirmations = {
+      finalContent: true,
+      aigcDisclosure: true,
+      rightsAndLikeness: true,
+      factualAccuracy: true,
+      commercialDisclosure: true,
+    };
+    const cases: Array<Record<string, unknown>> = [
+      { requestId: "publish-x", platformIds: ["douyin"], confirmations },
+      { requestId: "publish-x", platformIds: ["douyin"], confirmations, expected: {} },
+      { requestId: "publish-x", platformIds: ["douyin"], confirmations, expected: { revision: -1, videoArtifactId: null, publishPackageArtifactId: null } },
+      { requestId: "publish-x", platformIds: ["douyin"], confirmations, expected: { revision: 1.5, videoArtifactId: null, publishPackageArtifactId: null } },
+      { requestId: "publish-x", platformIds: ["douyin"], confirmations, expected: { revision: 1, videoArtifactId: "", publishPackageArtifactId: null } },
+      { requestId: "publish-x", platformIds: ["douyin"], confirmations, expected: { revision: 1, videoArtifactId: " video", publishPackageArtifactId: null } },
+      { requestId: "publish-x", platformIds: ["douyin"], confirmations, expected: { revision: 1, videoArtifactId: null, publishPackageArtifactId: 42 } },
+    ];
+    for (const payload of cases) {
+      const response = await app.inject({ method: "POST", url: "/api/runs/run-1/publishing", payload });
+      assert.equal(response.statusCode, 400, JSON.stringify(payload));
+      assert.match(response.json().error, /发布快照/);
+    }
+    const nullPackage = await app.inject({
+      method: "POST",
+      url: "/api/runs/run-1/publishing",
+      payload: { requestId: "publish-null-snapshot", platformIds: ["douyin"], confirmations, expected: { revision: 9, videoArtifactId: "video", publishPackageArtifactId: null } },
+    });
+    assert.equal(nullPackage.statusCode, 200);
     await app.close();
   });
 

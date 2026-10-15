@@ -41,6 +41,8 @@ export type StudioRunStatus =
 export interface StudioHealth {
   status: "ok" | "degraded";
   runtime: Record<string, boolean>;
+  /** 部署注入的 RELEASE_SHA；本地开发/旧版本缺省。部署用它核对候选版本确已上线。 */
+  release?: string;
 }
 
 export type StudioLocalCapabilityState = "ready" | "available" | "missing";
@@ -1322,6 +1324,12 @@ export interface StudioNodeOverrideInput {
   };
   authorizedRunFiles?: string[];
   confirmTerminalEdit?: boolean;
+  /**
+   * 打开编辑器时固定的并发基线（R6）：保存时原样提交，服务端只核对不补值。
+   * `expectedVersionId: null` 表示所见为无版本的合法历史 output。
+   */
+  expectedRunRevision: number;
+  expectedVersionId: string | null;
 }
 
 /** 发布文案 AI 修订：只产一次所授权的修订，产出为未审新稿并停下等人工决定。 */
@@ -2159,6 +2167,12 @@ export interface StudioCostRunSummary {
   totals: StudioCostTotals;
 }
 
+export interface StudioRunScanIssue {
+  runId: string;
+  problem: string;
+  detail?: string;
+}
+
 export interface StudioCostDashboard {
   currency: "CNY";
   totals: StudioCostTotals;
@@ -2166,6 +2180,8 @@ export interface StudioCostDashboard {
   byNode: Array<StudioCostGroup & { nodeId: string }>;
   runs: StudioCostRunSummary[];
   planningOperations?: StudioPlanningOperation[];
+  /** 有运行记录无法读取时不为空；此时金额合计只覆盖健康子集，不代表全部费用。 */
+  runScan?: { complete: false; issues: StudioRunScanIssue[] };
 }
 
 export interface StudioCostRunDetail extends StudioCostRunSummary {
@@ -2504,10 +2520,21 @@ export interface StudioPublishCheck {
   detail: string;
 }
 
+/**
+ * R7：一份发布 readiness 所基于的 run 投影身份。检查与快照来自同一次读取；
+ * 提交时原样带回，服务端在维护租约内与当前 run 比对后才发现发布副作用。
+ */
+export interface StudioPublishSnapshot {
+  revision: number;
+  videoArtifactId: string | null;
+  publishPackageArtifactId: string | null;
+}
+
 export interface StudioPublishReadiness {
   runId: string;
   ready: boolean;
   title: string;
+  snapshot: StudioPublishSnapshot;
   targets: StudioPublishTarget[];
   checks: StudioPublishCheck[];
 }
@@ -2524,6 +2551,8 @@ export interface StudioPublishInput {
   requestId: string;
   platformIds: StudioPublishPlatformId[];
   confirmations: StudioPublishConfirmations;
+  /** R7：首次确认时看到的 readiness 快照，随意图固定；缺失或非法直接输入错误。 */
+  expected: StudioPublishSnapshot;
 }
 
 export interface StudioPublishDelivery {
@@ -3060,7 +3089,24 @@ export function parseStudioPublishInput(value: unknown): StudioPublishInput {
     }
     return [key, confirmationsInput[key]];
   })) as unknown as StudioPublishConfirmations;
-  return { requestId, platformIds, confirmations };
+  const expectedInput = requiredObject(input.expected, "发布快照");
+  const revision = expectedInput.revision;
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+    throw new StudioInputError("发布快照的制作版本必须是非负整数，请刷新发布条件后重新确认。");
+  }
+  const expected = {
+    revision,
+    videoArtifactId: optionalArtifactId(expectedInput.videoArtifactId, "成片"),
+    publishPackageArtifactId: optionalArtifactId(expectedInput.publishPackageArtifactId, "发布包"),
+  };
+  return { requestId, platformIds, confirmations, expected };
+}
+
+/** R7：快照里的 artifact 身份只能是可见的非空字符串，或显式 null（尚未生成）。 */
+function optionalArtifactId(value: unknown, label: string): string | null {
+  if (value === null) return null;
+  if (typeof value === "string" && value.trim() && value.trim() === value) return value;
+  throw new StudioInputError(`发布快照的${label}身份无效，请刷新发布条件后重新确认。`);
 }
 
 const OPPORTUNITY_STATUSES = new Set<StudioOpportunityStatus>([

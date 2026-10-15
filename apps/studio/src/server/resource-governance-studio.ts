@@ -153,6 +153,10 @@ export class ResourceGovernanceStudio {
   async needsReviewCount(runId: string): Promise<number | undefined> {
     const run = (await this.listRuns()).find((candidate) => candidate.id === runId);
     if (!run) throw new StudioNotFoundError("没有找到这条制作记录。");
+    return this.needsReviewCountForRun(run);
+  }
+
+  async needsReviewCountForRun(run: WorkflowRun<ProductionBrief>): Promise<number | undefined> {
     const items = await this.itemsForRun(run);
     if (!items) return undefined;
     const snapshot = await this.reviews.snapshot();

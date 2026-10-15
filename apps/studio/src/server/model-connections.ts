@@ -1,4 +1,5 @@
 import http from "node:http";
+import { maintenanceRequestHeaders } from "@video-factory/production-pipeline/maintenance";
 import path from "node:path";
 import { CodexBridgeClient, parseModelConnectionInput, type ModelConnection } from "@video-factory/production-pipeline";
 
@@ -48,7 +49,7 @@ export class ModelConnections {
       const body = value === undefined ? undefined : JSON.stringify(value);
       const request = http.request({
         socketPath: this.brokerSocketPath, path: route, method, signal: AbortSignal.timeout(10_000),
-        headers: { "content-type": "application/json", ...(body ? { "content-length": String(Buffer.byteLength(body)) } : {}) },
+        headers: { "content-type": "application/json", ...(body ? { "content-length": String(Buffer.byteLength(body)) } : {}), ...maintenanceRequestHeaders() },
       }, (response) => {
         const chunks: Buffer[] = [];
         let size = 0;

@@ -1,6 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { fileRoleAgentLoopCheckpoint, mergeModelExecutionFacts, projectCheckpointExecutions, type RoleAgentLoopCheckpoint } from "@video-factory/production-pipeline";
+import { fileRoleAgentLoopCheckpoint, mergeModelExecutionFacts, projectCheckpointExecutions, validatePreparedOperation, type CodexPreparedOperation, type RoleAgentLoopCheckpoint } from "@video-factory/production-pipeline";
 import type { StudioPlanningOperation } from "../shared/api.js";
 import { StudioConflictError } from "./studio-errors.js";
 import { legacySeriesPlanningOwner } from "./legacy-series-planning.js";
@@ -77,6 +77,81 @@ export async function readPlanningOperations(workspaceRoot: string): Promise<Stu
   const groups = await Promise.all(["series-showrunner", "topic-editor"].map((name) =>
     readPlanningCheckpoints(path.join(workspaceRoot, "checkpoints", name), (operation) => unassigned.push(operation))));
   return [...groups.flat().map((record) => record.operation), ...unassigned];
+}
+
+/** 维护只核本地停点和原身份完整性；费用证据缺口或缺历史版本不等于活动写者。 */
+export async function readPlanningMaintenanceIntegrity(workspaceRoot: string): Promise<{
+  complete: boolean;
+  issues: Array<{ runId: string; problem: string }>;
+}> {
+  const issues: Array<{ runId: string; problem: string }> = [];
+  for (const name of ["series-showrunner", "topic-editor"] as const) {
+    const directory = path.join(workspaceRoot, "checkpoints", name);
+    let records: Awaited<ReturnType<typeof readPlanningCheckpoints>>;
+    try {
+      records = await readPlanningCheckpoints(directory, (operation) => {
+        issues.push({ runId: `planning:${operation.id}`, problem: "planning_owner_unverifiable" });
+      });
+    } catch {
+      issues.push({ runId: `planning:${name}`, problem: "planning_state_unreadable" });
+      continue;
+    }
+    for (const { key, owner, checkpoint } of records) {
+      const runId = `planning:${name}:${key}`;
+      const problem = planningMaintenanceProblem(checkpoint, key, owner, name === "series-showrunner" ? "series" : "topic");
+      if (problem) issues.push({ runId, problem });
+    }
+  }
+  return { complete: issues.length === 0, issues };
+}
+
+function planningMaintenanceProblem(checkpoint: Record<string, unknown>, key: string, owner: PlanningOwner, expectedKind: PlanningOwner["kind"]): string | undefined {
+  if (owner.kind !== expectedKind || !owner.id.trim()
+    || checkpoint.key !== key || typeof checkpoint.version !== "string"
+    || !/^video-factory\/agent-loop-checkpoint-v[3-9]$/.test(checkpoint.version)
+    || !Array.isArray(checkpoint.completed)
+    || !Array.isArray(checkpoint.attemptedRequestIds)
+    || checkpoint.attemptedRequestIds.some((id) => typeof id !== "string" || !id)
+    || !["running", "passed", "awaiting_user", "exhausted", "failed"].includes(String(checkpoint.status))) {
+    return "planning_checkpoint_invalid";
+  }
+  if (checkpoint.status === "running") return "planning_execution_not_settled";
+  const requestIds = new Set(checkpoint.attemptedRequestIds as string[]);
+  const boundRequests = new Set<string>();
+  const addOperation = (value: unknown): boolean => {
+    if (!isRecord(value) || !isRecord(value.route) || typeof value.route.socketPath !== "string" || !value.route.socketPath
+      || typeof value.requestId !== "string" || !requestIds.has(value.requestId)) return false;
+    try {
+      validatePreparedOperation(value as unknown as CodexPreparedOperation, value.route.socketPath);
+      boundRequests.add(value.requestId);
+      return true;
+    } catch { return false; }
+  };
+  if (checkpoint.pendingOperation !== undefined) {
+    const pending = checkpoint.pendingOperation;
+    if (!isRecord(pending) || !["produce", "audit"].includes(String(pending.phase))
+      || !Number.isInteger(pending.iteration) || Number(pending.iteration) < 1
+      || !Number.isInteger(pending.generation) || Number(pending.generation) < 0
+      || typeof pending.operationKey !== "string" || !pending.operationKey
+      || !addOperation(pending.operation)) return "planning_unknown_operation_unbound";
+  }
+  if (checkpoint.planningOriginalOperation !== undefined && !addOperation(checkpoint.planningOriginalOperation)) {
+    return "planning_unknown_operation_unbound";
+  }
+  if (isRecord(checkpoint.failure) && checkpoint.failure.stage === "uncertain" && boundRequests.size === 0) {
+    return "planning_unknown_operation_unbound";
+  }
+  if (checkpoint.requestExecutions !== undefined) {
+    if (!isRecord(checkpoint.requestExecutions)) return "planning_checkpoint_invalid";
+    for (const [requestId, execution] of Object.entries(checkpoint.requestExecutions)) {
+      if (!requestIds.has(requestId) || !isRecord(execution)
+        || !["completed", "completed_failure", "not_accepted", "unknown"].includes(String(execution.state))) {
+        return "planning_checkpoint_invalid";
+      }
+      if (execution.state === "unknown" && !boundRequests.has(requestId)) return "planning_unknown_operation_unbound";
+    }
+  }
+  return undefined;
 }
 
 function isPlanningOwner(value: unknown): value is PlanningOwner {

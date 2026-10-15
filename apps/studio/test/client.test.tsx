@@ -15,7 +15,8 @@ import { RunCostDetailPanel } from "../src/client/components/CostDashboard.js";
 import { currentSubtitlePreview, RunWorkbench } from "../src/client/components/RunWorkbench.js";
 import { MultiPlatformPublishDialog } from "../src/client/components/MultiPlatformPublishDialog.js";
 import { preferRunSnapshot, RunPage } from "../src/client/pages/RunPage.js";
-import type { StudioCreatorSettings, StudioDecisionInput, StudioNode, StudioProductionInput, StudioProvider, StudioRunDetail, StudioRunSummary, StudioTemplate } from "../src/shared/api.js";
+import type { StudioCreatorSettings, StudioDecisionInput, StudioNode, StudioProductionInput, StudioProvider, StudioPublishReadiness, StudioRunDetail, StudioRunSummary, StudioTemplate,
+} from "../src/shared/api.js";
 
 it("shows separately verified requests, model attempts and unknown money without inventing a free recovery", () => {
   render(<RunCostDetailPanel detail={{ runId: "cost-facts", title: "统计", totals: {
@@ -6140,6 +6141,7 @@ describe("Studio client", () => {
       runId: "run-1",
       ready: true,
       title: runDetail.title,
+      snapshot: { revision: 9, videoArtifactId: "video", publishPackageArtifactId: "package" },
       targets: [
         { id: "douyin", label: "抖音", mode: "official_api", status: "ready" },
         { id: "kuaishou", label: "快手", mode: "official_api", status: "planned", requirement: "需要申请开放平台权限" },
@@ -6182,11 +6184,254 @@ describe("Studio client", () => {
       requestId: expect.stringMatching(/^publish-/),
       platformIds: ["douyin", "xiaohongshu"],
       confirmations: expect.objectContaining({ aigcDisclosure: true, rightsAndLikeness: true }),
+      expected: { revision: 9, videoArtifactId: "video", publishPackageArtifactId: "package" },
     }));
     expect(await screen.findByText("已提交审核")).toBeInTheDocument();
     expect(screen.getByText("发布包已准备")).toBeInTheDocument();
     expect(screen.getByText("抖音")).toBeInTheDocument();
     expect(screen.getByText("小红书")).toBeInTheDocument();
+  });
+
+  // R7-D/R7-F：网络结果未知时重试沿用同一请求编号与同一内容；重新检查发现快照变化
+  // 才作废旧勾选与旧意图。
+  it("retries an uncertain publish with the same intent and drops stale confirmations after a snapshot change", async () => {
+    const user = userEvent.setup();
+    const readinessV1: StudioPublishReadiness = {
+      runId: "run-1",
+      ready: true,
+      title: runDetail.title,
+      snapshot: { revision: 9, videoArtifactId: "video", publishPackageArtifactId: "package" },
+      targets: [
+        { id: "douyin", label: "抖音", mode: "official_api", status: "ready" },
+      ],
+      checks: [{ id: "approval", label: "终审与发布包", status: "passed", detail: "已批准" }],
+    };
+    const readiness = vi.spyOn(studioApi, "publishReadiness").mockReset()
+      .mockResolvedValueOnce(readinessV1);
+    const publish = vi.spyOn(studioApi, "publish").mockReset()
+      .mockRejectedValueOnce(new Error("network unreachable"))
+      .mockResolvedValueOnce({
+        id: "publish-retry",
+        runId: "run-1",
+        status: "succeeded",
+        createdAt: "2026-08-25T00:02:00.000Z",
+        deliveries: [{ platformId: "douyin", status: "submitted", externalId: "douyin-item" }],
+      });
+    render(<MultiPlatformPublishDialog runId="run-1" onClose={() => undefined} />);
+
+    for (const confirmation of [
+      /完整观看最终成片/,
+      /主动声明 AI/,
+      /具备发布所需授权/,
+      /事实来源与时效/,
+      /商品、服务或商业合作/,
+    ]) {
+      await user.click(await screen.findByRole("checkbox", { name: confirmation }));
+    }
+    await user.click(screen.getByRole("button", { name: /确认并执行 1 个平台/ }));
+    expect(await screen.findByText(/network unreachable/)).toBeInTheDocument();
+    expect(screen.getByText(/沿用同一编号与同一内容/)).toBeInTheDocument();
+
+    // 网络未知后的重试：同一请求编号、同一 payload，不换 ID，也不自动重取 readiness
+    // 或作废当前勾选（结果未知不自动再发新意图）。
+    await user.click(screen.getByRole("button", { name: /确认并执行 1 个平台/ }));
+    expect(await screen.findByText("已提交审核")).toBeInTheDocument();
+    expect(publish).toHaveBeenCalledTimes(2);
+    const firstIntent = publish.mock.calls[0]![1]!;
+    const retryIntent = publish.mock.calls[1]![1]!;
+    expect(retryIntent.requestId).toBe(firstIntent.requestId);
+    expect(retryIntent.platformIds).toEqual(firstIntent.platformIds);
+    expect(retryIntent.confirmations).toEqual(firstIntent.confirmations);
+    expect(retryIntent.expected).toEqual(firstIntent.expected);
+    expect(readiness).toHaveBeenCalledTimes(1);
+  });
+
+  // R7-D：快照冲突（409）清空意图并重新拉取发布条件，核对新状态后重新确认才建立新意图。
+  it("clears the publish intent on a snapshot conflict and requires a fresh confirmation", async () => {
+    const user = userEvent.setup();
+    const readinessV1: StudioPublishReadiness = {
+      runId: "run-1",
+      ready: true,
+      title: runDetail.title,
+      snapshot: { revision: 9, videoArtifactId: "video", publishPackageArtifactId: "package" },
+      targets: [{ id: "douyin", label: "抖音", mode: "official_api", status: "ready" }],
+      checks: [{ id: "approval", label: "终审与发布包", status: "passed", detail: "已批准" }],
+    };
+    const readinessV2: StudioPublishReadiness = { ...readinessV1, snapshot: { revision: 12, videoArtifactId: "video-v2", publishPackageArtifactId: "package-v2" } };
+    const readiness = vi.spyOn(studioApi, "publishReadiness").mockReset()
+      .mockResolvedValueOnce(readinessV1)
+      .mockResolvedValueOnce(readinessV2);
+    const publish = vi.spyOn(studioApi, "publish").mockReset()
+      .mockRejectedValueOnce(new StudioApiError("自你核对发布条件以来这条制作已有更新，请刷新核对最新状态后重新确认发布。", 409))
+      .mockResolvedValueOnce({
+        id: "publish-new-intent",
+        runId: "run-1",
+        status: "succeeded",
+        createdAt: "2026-08-25T00:02:00.000Z",
+        deliveries: [{ platformId: "douyin", status: "submitted", externalId: "douyin-item-2" }],
+      });
+    render(<MultiPlatformPublishDialog runId="run-1" onClose={() => undefined} />);
+
+    for (const confirmation of [
+      /完整观看最终成片/,
+      /主动声明 AI/,
+      /具备发布所需授权/,
+      /事实来源与时效/,
+      /商品、服务或商业合作/,
+    ]) {
+      await user.click(await screen.findByRole("checkbox", { name: confirmation }));
+    }
+    await user.click(screen.getByRole("button", { name: /确认并执行 1 个平台/ }));
+    // 409 后自动重取 readiness；新快照使旧勾选与旧意图失效（提交按钮回到未确认态）。
+    expect(await screen.findByText(/发布条件已更新/)).toBeInTheDocument();
+    expect(readiness).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: /确认并执行 1 个平台/ })).toBeDisabled();
+
+    // 重新确认后建立新意图：新请求编号 + 新快照。
+    for (const confirmation of [
+      /完整观看最终成片/,
+      /主动声明 AI/,
+      /具备发布所需授权/,
+      /事实来源与时效/,
+      /商品、服务或商业合作/,
+    ]) {
+      await user.click(screen.getByRole("checkbox", { name: confirmation }));
+    }
+    await user.click(screen.getByRole("button", { name: /确认并执行 1 个平台/ }));
+    expect(await screen.findByText("已提交审核")).toBeInTheDocument();
+    expect(publish).toHaveBeenCalledTimes(2);
+    const conflictedIntent = publish.mock.calls[0]![1]!;
+    const newIntent = publish.mock.calls[1]![1]!;
+    expect(newIntent.requestId).not.toBe(conflictedIntent.requestId);
+    expect(newIntent.expected).toEqual({ revision: 12, videoArtifactId: "video-v2", publishPackageArtifactId: "package-v2" });
+  });
+
+  describe("R7 publish intent preservation", () => {
+    const checks = [/完整观看最终成片/, /主动声明 AI/, /具备发布所需授权/, /事实来源与时效/, /商品、服务或商业合作/];
+    const currentReadiness = (): StudioPublishReadiness => ({
+      runId: "run-1", ready: true, title: "已终审制作",
+      snapshot: { revision: 9, videoArtifactId: "video", publishPackageArtifactId: "package" },
+      targets: [
+        { id: "douyin", label: "抖音", mode: "export_package", status: "manual_only" },
+        { id: "xiaohongshu", label: "小红书", mode: "export_package", status: "manual_only" },
+      ], checks: [{ id: "approval", label: "终审与发布包", status: "passed", detail: "已批准" }],
+    });
+    async function confirm(user: ReturnType<typeof userEvent.setup>) {
+      for (const name of checks) await user.click(await screen.findByRole("checkbox", { name }));
+    }
+
+    it("keeps a deliberately narrowed platform set when refreshing the same snapshot", async () => {
+      vi.restoreAllMocks();
+      const user = userEvent.setup();
+      const readiness = vi.spyOn(studioApi, "publishReadiness").mockResolvedValue(currentReadiness());
+      const publish = vi.spyOn(studioApi, "publish").mockRejectedValue(new Error("response lost"));
+      render(<MultiPlatformPublishDialog runId="run-1" onClose={() => undefined} />);
+      await user.click(await screen.findByRole("checkbox", { name: /小红书/ }));
+      await confirm(user);
+      await user.click(screen.getByRole("button", { name: "重新检查发布条件" }));
+      await waitFor(() => expect(readiness).toHaveBeenCalledTimes(2));
+      expect(screen.getByRole("checkbox", { name: /小红书/ })).not.toBeChecked();
+      expect(screen.getByRole("checkbox", { name: /完整观看最终成片/ })).toBeChecked();
+      await user.click(screen.getByRole("button", { name: "确认并执行 1 个平台" }));
+      expect(publish.mock.calls[0]![1].platformIds).toEqual(["douyin"]);
+    });
+
+    it("requires new confirmations when refreshed target availability narrows an unknown intent", async () => {
+      vi.restoreAllMocks();
+      const user = userEvent.setup();
+      const originalReadiness = currentReadiness();
+      const reducedReadiness: StudioPublishReadiness = { ...originalReadiness,
+        targets: originalReadiness.targets.map(target => target.id === "xiaohongshu" ? { ...target, status: "needs_config" } : target) };
+      const readiness = vi.spyOn(studioApi, "publishReadiness").mockResolvedValueOnce(originalReadiness).mockResolvedValueOnce(reducedReadiness);
+      const publish = vi.spyOn(studioApi, "publish").mockRejectedValue(new Error("response lost"));
+      render(<MultiPlatformPublishDialog runId="run-1" onClose={() => undefined} />);
+      await confirm(user);
+      await user.click(screen.getByRole("button", { name: "确认并执行 2 个平台" }));
+      expect(await screen.findByText("response lost")).toBeInTheDocument();
+      const original = structuredClone(publish.mock.calls[0]![1]);
+      await user.click(screen.getByRole("button", { name: "重新检查发布条件" }));
+      await waitFor(() => expect(readiness).toHaveBeenCalledTimes(2));
+      expect(screen.getByRole("checkbox", { name: /小红书/ })).toBeDisabled();
+      expect(screen.getByRole("checkbox", { name: /小红书/ })).not.toBeChecked();
+      expect(screen.getByRole("button", { name: "确认并执行 1 个平台" })).toBeDisabled();
+      for (const name of checks) expect(screen.getByRole("checkbox", { name })).not.toBeChecked();
+      expect(screen.getByText(new RegExp(original.requestId))).toHaveTextContent("抖音、小红书");
+      expect(publish).toHaveBeenCalledTimes(1);
+      await confirm(user);
+      await user.click(screen.getByRole("button", { name: "确认并执行 1 个平台" }));
+      await waitFor(() => expect(publish).toHaveBeenCalledTimes(2));
+      expect(publish.mock.calls[1]![1].requestId).not.toBe(original.requestId);
+      expect(publish.mock.calls[1]![1].platformIds).toEqual(["douyin"]);
+      expect(publish.mock.calls[1]![1].expected).toEqual(original.expected);
+      expect(screen.getByText(new RegExp(original.requestId))).toBeInTheDocument();
+    });
+
+    it("keeps the same immutable intent after a non-snapshot 409", async () => {
+      vi.restoreAllMocks();
+      const user = userEvent.setup();
+      const readiness = vi.spyOn(studioApi, "publishReadiness").mockResolvedValue(currentReadiness());
+      const publish = vi.spyOn(studioApi, "publish").mockRejectedValueOnce(new StudioApiError("制作正在执行，请稍后再试。", 409))
+        .mockRejectedValueOnce(new Error("response lost again"));
+      render(<MultiPlatformPublishDialog runId="run-1" onClose={() => undefined} />);
+      await confirm(user);
+      await user.click(screen.getByRole("button", { name: "确认并执行 2 个平台" }));
+      await waitFor(() => expect(readiness).toHaveBeenCalledTimes(2));
+      const first = structuredClone(publish.mock.calls[0]![1]);
+      expect(await screen.findByText(new RegExp(first.requestId))).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "确认并执行 2 个平台" }));
+      await waitFor(() => expect(publish).toHaveBeenCalledTimes(2));
+      expect(publish.mock.calls[1]![1]).toEqual(first);
+    });
+
+    it("retains unknown request context across a newer snapshot and requires a new confirmation", async () => {
+      vi.restoreAllMocks();
+      const user = userEvent.setup();
+      const firstReadiness = currentReadiness();
+      const secondReadiness: StudioPublishReadiness = { ...firstReadiness,
+        snapshot: { revision: 12, videoArtifactId: "video-v2", publishPackageArtifactId: "package-v2" } };
+      vi.spyOn(studioApi, "publishReadiness").mockResolvedValueOnce(firstReadiness).mockResolvedValueOnce(secondReadiness);
+      const publish = vi.spyOn(studioApi, "publish").mockRejectedValue(new Error("response lost"));
+      render(<MultiPlatformPublishDialog runId="run-1" onClose={() => undefined} />);
+      await confirm(user);
+      await user.click(screen.getByRole("button", { name: "确认并执行 2 个平台" }));
+      expect(await screen.findByText("response lost")).toBeInTheDocument();
+      const original = structuredClone(publish.mock.calls[0]![1]);
+      await user.click(screen.getByRole("button", { name: "重新检查发布条件" }));
+      expect(await screen.findByText(/发布条件已更新/)).toBeInTheDocument();
+      expect(screen.getByText(new RegExp(original.requestId))).toBeInTheDocument();
+      for (const name of checks) expect(screen.getByRole("checkbox", { name })).not.toBeChecked();
+      expect(screen.getByRole("button", { name: "确认并执行 2 个平台" })).toBeDisabled();
+      expect(publish).toHaveBeenCalledTimes(1);
+      await confirm(user);
+      await user.click(screen.getByRole("button", { name: "确认并执行 2 个平台" }));
+      await waitFor(() => expect(publish).toHaveBeenCalledTimes(2));
+      expect(publish.mock.calls[1]![1].requestId).not.toBe(original.requestId);
+      expect(publish.mock.calls[1]![1].expected).toEqual(secondReadiness.snapshot);
+      expect(screen.getByText(new RegExp(original.requestId))).toBeInTheDocument();
+    });
+
+    it("requires refreshed readiness and fresh confirmations before changing an unknown intent", async () => {
+      vi.restoreAllMocks();
+      const user = userEvent.setup();
+      const readiness = vi.spyOn(studioApi, "publishReadiness").mockResolvedValue(currentReadiness());
+      const publish = vi.spyOn(studioApi, "publish").mockRejectedValue(new Error("response lost"));
+      render(<MultiPlatformPublishDialog runId="run-1" onClose={() => undefined} />);
+      await confirm(user);
+      await user.click(screen.getByRole("button", { name: "确认并执行 2 个平台" }));
+      expect(await screen.findByText("response lost")).toBeInTheDocument();
+      const first = structuredClone(publish.mock.calls[0]![1]);
+      await user.click(screen.getByRole("checkbox", { name: /小红书/ }));
+      expect(screen.getByRole("button", { name: "确认并执行 1 个平台" })).toBeDisabled();
+      for (const name of checks) expect(screen.getByRole("checkbox", { name })).not.toBeChecked();
+      await user.click(screen.getByRole("button", { name: "重新检查发布条件" }));
+      await waitFor(() => expect(readiness).toHaveBeenCalledTimes(2));
+      await confirm(user);
+      await user.click(screen.getByRole("button", { name: "确认并执行 1 个平台" }));
+      await waitFor(() => expect(publish).toHaveBeenCalledTimes(2));
+      expect(publish.mock.calls[1]![1].requestId).not.toBe(first.requestId);
+      expect(publish.mock.calls[1]![1].platformIds).toEqual(["douyin"]);
+      expect(screen.getByText(new RegExp(first.requestId))).toBeInTheDocument();
+    });
   });
 
   it("closes the rejection dialog when the run leaves human review", async () => {

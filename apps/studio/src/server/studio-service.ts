@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { holdMaintenanceWork } from "@video-factory/production-pipeline/maintenance";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { readPlanningOperations } from "./planning-operations.js";
@@ -83,7 +84,8 @@ import type {
   StudioVoiceProfile,
 } from "../shared/api.js";
 import { StudioInputError } from "../shared/api.js";
-import { RunLockedError } from "@video-factory/production-pipeline";
+import { RunLockedError, type ProductionBrief } from "@video-factory/production-pipeline";
+import type { WorkflowRun } from "@video-factory/workflow-core";
 import { CapabilityStudio } from "./capability-studio.js";
 import { CandidateInboxStudio, reviewTrendOpportunityAgainstCurrentPolicy } from "./candidate-inbox-studio.js";
 import { CaseStudio, type CaseSearchQuery } from "./case-studio.js";
@@ -232,7 +234,7 @@ export class StudioService {
     });
     this.resourceGovernance = new ResourceGovernanceStudio(
       options.workspaceRoot,
-      () => options.pipeline.list(),
+      listHealthyPipelineRuns(options.pipeline),
       now,
       async (runId, action) => {
         try {
@@ -258,23 +260,32 @@ export class StudioService {
       loadRejectedVisualResources: (runId) => this.resourceGovernance.rejectedVisualItems(runId),
     });
     this.costs = new CostStudio(
-      () => options.pipeline.list(),
+      listHealthyPipelineRuns(options.pipeline),
       options.pipeline.readTextExecutionUsage ? (runId) => options.pipeline.readTextExecutionUsage!(runId) : undefined,
       options.pipeline.readPaidExecutionReceipts ? (runId) => options.pipeline.readPaidExecutionReceipts!(runId) : undefined,
       options.pipeline.readDocumentExecutionReceipts ? (runId) => options.pipeline.readDocumentExecutionReceipts!(runId) : undefined,
       options.pipeline.readModelExecutionFacts ? (runId) => options.pipeline.readModelExecutionFacts!(runId) : undefined,
       () => readPlanningOperations(options.workspaceRoot),
+      options.pipeline.scanRuns ? () => options.pipeline.scanRuns!() : undefined,
     );
     this.publishing = new PublishingStudio({
       workspaceRoot: options.workspaceRoot,
-      getRun: (runId) => this.production.get(runId),
-      loadPublishPackage: async (run) => {
-        if (!run.publishPackageArtifactId) return undefined;
-        const resource = await this.production.resolveArtifact(run.id, run.publishPackageArtifactId);
-        if (!resource) return undefined;
-        return JSON.parse(await readFile(resource.path, "utf8")) as unknown;
+      getRunSnapshot: async (runId) => {
+        let persisted: WorkflowRun<ProductionBrief>;
+        try { persisted = await options.pipeline.loadPersisted(runId); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+        const run = this.production.publishRunDetail(persisted);
+        return {
+          run,
+          loadPublishPackage: async () => {
+            if (!run.publishPackageArtifactId) return undefined;
+            const resource = await this.production.resolveArtifact(run.id, run.publishPackageArtifactId, persisted);
+            if (!resource) return undefined;
+            return JSON.parse(await readFile(resource.path, "utf8")) as unknown;
+          },
+          loadEffectiveResourceReviewCount: () => this.resourceGovernance.needsReviewCountForRun(persisted),
+        };
       },
-      loadEffectiveResourceReviewCount: (runId) => this.resourceGovernance.needsReviewCount(runId),
       withRunLease: async (runId, action) => {
         try {
           return await options.pipeline.withRunMaintenanceLease([runId], action);
@@ -466,7 +477,7 @@ export class StudioService {
   async getRun(runId: string): Promise<StudioRunDetail | undefined> {
     const run = await this.production.get(runId);
     if (!run?.seriesId || run.status !== "succeeded") return run;
-    const series = (await this.series.list()).find((item) => item.id === run.seriesId);
+    const series = (await this.series.listSnapshot()).find((item) => item.id === run.seriesId);
     const episode = series?.episodes.find((item) => item.runId === run.id);
     if (!episode || run.continuation?.supported === false) {
       return { ...run, seriesRework: { mode: "blocked", reason: !episode
@@ -500,6 +511,11 @@ export class StudioService {
     await this.reconcileSeriesRuns();
   }
   costDashboard(): Promise<StudioCostDashboard> { return this.costs.dashboard(); }
+
+  /** 维护排空口径（R3）：制作后台链路与热点抓取全部 settle 后才解除占用。 */
+  async activeWork(): Promise<void> {
+    await Promise.allSettled([this.production.activeWork(), this.trends.activeWork()]);
+  }
   // 「从案例 / 脚本开始」：浏览与选择走服务端，正文快照也保存在服务端，
   // 制作链只认服务端保存的那一条，客户端提交的正文一律不采信。
   listCases(query: CaseSearchQuery, force = false): Promise<StudioCaseCatalog> { return this.cases.search(query, { force }); }
@@ -715,10 +731,10 @@ export class StudioService {
       if (finished || !run?.nodes.some((node) => node.id === "reference-grammar" && node.status === "succeeded")) return;
       finished = true;
       unsubscribe();
-      void this.referenceVideos.remove(uploadId).catch(() => undefined);
+      holdMaintenanceWork(this.referenceVideos.remove(uploadId).catch(() => undefined));
     };
     unsubscribe = this.production.subscribe(runId, inspect);
-    void this.production.get(runId).then(inspect).catch(() => undefined);
+    holdMaintenanceWork(this.production.get(runId).then(inspect).catch(() => undefined));
   }
 
   private async withCreatorDefaults(input: unknown): Promise<unknown> {
@@ -1147,4 +1163,12 @@ function withoutClientArticleSources(input: Record<string, unknown>): Record<str
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** 健康浏览统一入口：优先容错扫描，坏记录不阻断列表/费用聚合（完整性另经 scan 判断）。 */
+function listHealthyPipelineRuns(pipeline: StudioPipelinePort): () => Promise<WorkflowRun<ProductionBrief>[]> {
+  return async () => {
+    const scan = await pipeline.scanRuns?.();
+    return scan ? scan.runs : pipeline.list();
+  };
 }

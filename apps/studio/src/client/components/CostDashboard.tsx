@@ -9,6 +9,7 @@ export function CostDashboard({ dashboard }: { dashboard: StudioCostDashboard })
     <section className="cost-dashboard" aria-labelledby="cost-dashboard-title">
       <header className="section-heading"><div><p className="eyebrow">费用记录</p><h2 id="cost-dashboard-title">按服务和制作步骤核对费用</h2></div><span>人民币 CNY</span></header>
       <CostMetrics totals={dashboard.totals} />
+      {dashboard.runScan ? <p className="cost-conflict-note" role="status">有 {dashboard.runScan.issues.length} 个制作记录无法完整读取（{dashboard.runScan.issues.map((issue) => issue.runId).join("、")}）；本页金额只覆盖可读取的制作，不代表全部费用，请先修复对应记录。</p> : null}
       <div className="cost-dashboard-grid">
         <CostRanking title="按实际服务" groups={dashboard.byProvider} kind="provider" />
         <CostRanking title="按制作步骤" groups={dashboard.byNode} kind="node" />
