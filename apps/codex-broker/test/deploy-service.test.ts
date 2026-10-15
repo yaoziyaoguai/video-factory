@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { MaintenanceCoordinator, transitionMaintenanceGate } from "../../../packages/production-pipeline/src/maintenance.js";
 
 const brokerRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = path.resolve(brokerRoot, "../..");
@@ -96,13 +97,35 @@ interface DeployFailureResult {
   currentRelease: string;
   openAiUnit: string;
   stderr: string;
+  stdout: string;
   trace: string;
   deepseekUnit: string;
   deepseekWorkspaceExists: boolean;
+  gateState: string;
+  gateOwner: string;
+  gateBefore: string;
+  gateAfter: string;
+  appRunning: boolean;
+  appRelease: string;
+  exitCode: number;
+  unitBackupsRemaining: boolean;
 }
 
-async function runDeployFailureScenario(scenario: DeployFailureScenario, firstMigration = false): Promise<DeployFailureResult> {
-  const directory = await mkdtemp(path.join(tmpdir(), "video-factory-deploy-transaction-"));
+interface DeployScenarioOptions {
+  expectSuccess?: boolean;
+  firstMigration?: boolean;
+  appAdmission?: "protocol" | "legacy";
+  expectedExitCode?: number;
+  leftoverGate?: "draining" | "frozen";
+  env?: Record<string, string>;
+}
+
+async function runDeployFailureScenario(
+  scenario: DeployFailureScenario | "success",
+  options: DeployScenarioOptions = {},
+): Promise<DeployFailureResult> {
+  const firstMigration = options.firstMigration ?? false;
+  const directory = await realpath(await mkdtemp(path.join(tmpdir(), "video-factory-deploy-transaction-")));
   const repository = path.join(directory, "repository");
   const scriptsDirectory = path.join(repository, "scripts");
   const brokerInstallRoot = path.join(directory, "host", "codex-broker");
@@ -120,6 +143,10 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario, firstMi
   const tracePath = path.join(stateDirectory, "trace.log");
   const environmentPath = path.join(repository, ".env.docker.prod");
   const releaseSha = "a".repeat(40);
+  const previousSha = "b".repeat(40);
+  const maintenancePackage = path.join(candidateBroker, "node_modules", "@video-factory", "production-pipeline");
+  const maintenanceModule = path.join(maintenancePackage, "dist", "maintenance.js");
+  const healthFixture = path.join(scriptsDirectory, "fixture-health.mjs");
 
   const writeExecutable = async (name: string, contents: string): Promise<void> => {
     const target = path.join(binDirectory, name);
@@ -134,6 +161,7 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario, firstMi
     mkdir(systemdDirectory, { recursive: true }),
     mkdir(path.join(candidateBroker, "dist"), { recursive: true }),
     mkdir(path.join(candidateBroker, "node_modules", "undici"), { recursive: true }),
+    mkdir(path.join(maintenancePackage, "dist"), { recursive: true }),
     mkdir(path.join(candidateBroker, "deploy"), { recursive: true }),
     mkdir(binDirectory, { recursive: true }),
     mkdir(stateDirectory, { recursive: true }),
@@ -148,6 +176,12 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario, firstMi
     writeFile(deepseekUnitPath, "[Unit]\nDescription=old-deepseek\n", "utf8"),
     writeFile(path.join(candidateBroker, "dist", "main.js"), "export {};\n", "utf8"),
     writeFile(path.join(candidateBroker, "package.json"), '{"type":"module"}\n', "utf8"),
+    writeFile(path.join(previousRelease, "release-sha"), `${previousSha}\n`, "utf8"),
+    writeFile(path.join(maintenancePackage, "package.json"), '{"type":"module"}\n', "utf8"),
+    writeFile(maintenanceModule, await readFile(path.join(repositoryRoot, "packages", "production-pipeline", "dist", "maintenance.js"), "utf8")),
+    writeFile(path.join(stateDirectory, "app-running"), options.env?.TEST_APP_RUNNING ?? "1"),
+    writeFile(path.join(stateDirectory, "app-release"), previousSha),
+    writeFile(path.join(stateDirectory, "app-epoch"), "app-original"),
     writeFile(
       path.join(candidateBroker, "dist", "task-definitions.js"),
       `export const BROKER_TASK_KINDS = [
@@ -186,6 +220,81 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario, firstMi
   ]);
   await symlink(previousRelease, path.join(brokerInstallRoot, "current"), "dir");
 
+  // 真实共享模块负责门禁、锁、holders 和服务报告；替身只控制进程状态与 health 接点。
+  const maintenanceDirectory = path.join(brokerInstallRoot, "deployment", "maintenance");
+  await transitionMaintenanceGate(maintenanceDirectory, "open", "original-installation");
+  if (options.leftoverGate) {
+    await transitionMaintenanceGate(maintenanceDirectory, "draining", "deploy-crashed");
+    if (options.leftoverGate === "frozen") await transitionMaintenanceGate(maintenanceDirectory, "frozen", "deploy-crashed");
+  }
+  if (options.env?.TEST_BROKER_BUSY === "1") {
+    const busy = new MaintenanceCoordinator({ directory: maintenanceDirectory, serviceId: "deepseek-original" });
+    await busy.admit("long-running-task");
+  }
+  const gateBefore = await readFile(path.join(maintenanceDirectory, "gate.json"), "utf8");
+  const controller = await readFile(path.join(repositoryRoot, "scripts", "production-maintenance.mjs"), "utf8");
+  assert.ok(controller.includes("readHealth = localHealth"), "controller must expose the health observation seam");
+  await writeFile(path.join(scriptsDirectory, "production-maintenance.mjs"),
+    controller.replace("import { request }", 'import { fixtureHealth } from "./fixture-health.mjs";\nimport { request }')
+      .replace("readHealth = localHealth", "readHealth = fixtureHealth"));
+  await writeFile(healthFixture, `
+import { readFile, appendFile, access } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { MaintenanceCoordinator } from ${JSON.stringify(pathToFileURL(maintenanceModule).href)};
+const state = process.env.DEPLOY_STATE;
+const exists = (name) => access(path.join(state, name)).then(() => true, () => false);
+const text = async (name) => (await readFile(path.join(state, name), "utf8")).trim();
+const originalKinds = ["director-plan", "script-draft", "visual-review"];
+const legacyKinds = ["topic-ideas", "series-roadmap", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit"];
+const candidateKinds = ["topic-ideas", "series-roadmap", "creative-treatment", "director-plan", "script-draft", "publish-copy", "asset-rank", "reference-grammar", "visual-review", "role-audit", "creative-discussion"];
+export async function fixtureHealth(endpoint) {
+  await appendFile(process.env.DEPLOY_TRACE, "health:" + endpoint + "\\n");
+  const app = endpoint.includes("/api/health");
+  const legacy = !app && !endpoint.includes(process.env.TEST_DEEPSEEK_SOCKET);
+  let release, serviceId;
+  if (app) {
+    if (await text("app-running") !== "1") throw new Error("App is stopped.");
+    release = await text("app-release");
+    serviceId = await text("app-epoch");
+  } else {
+    const service = legacy ? "vf-codex-broker" : "vf-deepseek-codex-broker";
+    if (await exists("systemd/" + service + ".stopped")) throw new Error("Broker is stopped.");
+    if (!legacy && process.env.TEST_FIRST_MIGRATION === "1" && !(await exists("systemd/" + service + ".started"))) throw new Error("DeepSeek is not installed yet.");
+    release = (await readFile(path.join(process.env.TEST_BROKER_CURRENT, "release-sha"), "utf8")).trim();
+    serviceId = (legacy ? "legacy" : "deepseek") + (await exists("systemd/" + service + ".epoch")
+      ? await text("systemd/" + service + ".epoch") : "-original");
+    if (!legacy && process.env.DEPLOY_SCENARIO === "deepseek-health" && release === process.env.RELEASE_SHA) throw new Error("Candidate broker is unavailable.");
+  }
+  const incomplete = app && await exists("committed-integrity-failed");
+  const report = await new MaintenanceCoordinator({ directory: process.env.TEST_MAINTENANCE_DIRECTORY, serviceId })
+    .report({ complete: !incomplete, issues: incomplete ? ["unreadable_run"] : [] });
+  const maintenance = { protocol: report.protocol, serviceId: report.serviceId, updatedAt: report.updatedAt,
+    gate: report.gateView, gateView: report.gateView, inflightCount: report.ownCount, holderCount: report.globalCount,
+    integrity: report.integrity, quiescent: report.quiescent };
+  if ((app && process.env.TEST_APP_ADMISSION === "legacy") || (legacy && process.env.TEST_LEGACY_BROKER_LEGACY === "1")) {
+    maintenance.protocol = "video-factory/maintenance-admission-v1";
+  }
+  if (app) {
+    const candidate = release === process.env.RELEASE_SHA;
+    return { status: process.env.DEPLOY_SCENARIO === "app-health" && candidate ? "degraded" : "ok",
+      runtime: { python: true, ffmpeg: true, ffprobe: true },
+      release: candidate && process.env.TEST_APP_RELEASE_MISMATCH === "1" ? "stale-release" : release, maintenance };
+  }
+  const wrongIdentity = !legacy && process.env.DEPLOY_SCENARIO === "broker-identity" && release === process.env.RELEASE_SHA;
+  const openai = legacy || wrongIdentity;
+  const taskKinds = legacy ? legacyKinds : release === process.env.RELEASE_SHA ? candidateKinds : originalKinds;
+  const modelId = openai ? "gpt-test" : "deepseek-flash";
+  return { protocolVersion: "video-factory/codex-bridge-v2", profileId: openai ? "openai" : "deepseek",
+    providerId: openai ? "openai" : "deepseek", modelId, release, taskKinds,
+    taskModels: Object.fromEntries(taskKinds.map((kind) => [kind, modelId])), maintenance };
+}
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  try { process.stdout.write(JSON.stringify(await fixtureHealth(process.argv[2]))); }
+  catch (error) { process.stderr.write(error.message + "\\n"); process.exitCode = 22; }
+}
+`);
+
   const originalDeploy = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
   const isolatedDeploy = originalDeploy
     .replace("broker_unit=/etc/systemd/system/vf-codex-broker.service", `broker_unit=${JSON.stringify(openAiUnitPath)}`)
@@ -198,7 +307,7 @@ async function runDeployFailureScenario(scenario: DeployFailureScenario, firstMi
   await writeFile(deployPath, isolatedDeploy, "utf8");
   await writeFile(
     path.join(scriptsDirectory, "backup-production.sh"),
-    '#!/bin/sh\necho "backup" >> "$DEPLOY_TRACE"\n',
+    '#!/bin/sh\necho "backup:$*" >> "$DEPLOY_TRACE"\nif [ -n "$TEST_SIGNAL_AT_BACKUP" ]; then kill -"$TEST_SIGNAL_AT_BACKUP" "$PPID"; fi\n[ "$TEST_BACKUP_FAILS" = "1" ] && exit 1\nexit 0\n',
     "utf8",
   );
   await chmod(path.join(scriptsDirectory, "backup-production.sh"), 0o755);
@@ -216,16 +325,77 @@ esac
     ),
     writeExecutable("getent", '#!/bin/sh\necho "vf-bridge:x:1234:"\n'),
     writeExecutable("runuser", "#!/bin/sh\nexit 0\n"),
-    writeExecutable("sleep", "#!/bin/sh\nexit 0\n"),
-    writeExecutable("chown", "#!/bin/sh\nexit 0\n"),
-    writeExecutable("systemctl", `#!/bin/sh
-echo "systemctl:$*" >> "$DEPLOY_TRACE"
-if [ "$TEST_FIRST_MIGRATION" = "1" ]; then
-  if [ "$*" = "is-active --quiet vf-deepseek-codex-broker" ]; then exit 3; fi
-  if [ "$*" = "stop vf-deepseek-codex-broker" ]; then /bin/rmdir "$VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR"; fi
+    writeExecutable("sleep", `#!/bin/sh
+if [ -n "$TEST_SIGNAL_DURING_DRAIN" ] && [ "$1" = "5" ] && [ ! -f "$DEPLOY_STATE/signal-sent" ]; then
+  touch "$DEPLOY_STATE/signal-sent"
+  kill -"$TEST_SIGNAL_DURING_DRAIN" "$PPID"
+fi
+if [ "$TEST_REAL_DRAIN_SLEEP" = "1" ] && [ "$1" = "5" ]; then
+  # 排空超时测试需要真实的时钟推进：每次轮询压缩为 1 秒真实时间。
+  exec /bin/sleep 1
 fi
 exit 0
 `),
+    writeExecutable("chown", "#!/bin/sh\nexit 0\n"),
+    writeExecutable(
+      "systemctl",
+      `#!/bin/sh
+echo "systemctl:$*" >> "$DEPLOY_TRACE"
+systemd_state="$DEPLOY_STATE/systemd"
+mkdir -p "$systemd_state"
+case "$1" in
+  is-active)
+    service="$3"
+    if [ "$service" = "vf-zai-codex-broker" ] || [ -f "$systemd_state/$service.stopped" ]; then exit 3; fi
+    if [ "$TEST_FIRST_MIGRATION" = "1" ] && [ "$service" = "vf-deepseek-codex-broker" ] && [ ! -f "$systemd_state/$service.started" ]; then exit 3; fi
+    exit 0
+    ;;
+  show)
+    service="$2"
+    load=loaded
+    active=active
+    sub=running
+    main=123
+    control=0
+    if [ "$service" = "vf-zai-codex-broker" ]; then load=not-found; active=inactive; sub=dead; main=0; fi
+    if [ -f "$systemd_state/$service.stopped" ] || { [ "$TEST_FIRST_MIGRATION" = "1" ] && [ "$service" = "vf-deepseek-codex-broker" ] && [ ! -f "$systemd_state/$service.started" ]; }; then
+      active=inactive; sub=dead; main=0
+    fi
+    if [ "$TEST_UNKNOWN_SERVICE_STATE" = "1" ] && [ "$service" = "vf-codex-broker" ] && [ -f "$systemd_state/$service.stopped" ]; then
+      active=deactivating; sub=stop-sigterm; control=234
+    fi
+    printf 'LoadState=%s\\nActiveState=%s\\nSubState=%s\\nMainPID=%s\\nControlPID=%s\\n' "$load" "$active" "$sub" "$main" "$control"
+    ;;
+  stop)
+    service="$2"
+    if [ "$TEST_STOP_FAILS" = "1" ]; then exit 1; fi
+    touch "$systemd_state/$service.stopped"
+    if [ "$TEST_FIRST_MIGRATION" = "1" ] && [ "$service" = "vf-deepseek-codex-broker" ]; then
+      /bin/rmdir "$VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR" 2>/dev/null || true
+    fi
+    ;;
+  restart)
+    if [ "$TEST_ROLLBACK_BROKER_FAILS" = "1" ] && [ -f "$DEPLOY_STATE/candidate-started" ] && [ "$(readlink "$TEST_BROKER_CURRENT")" = "$TEST_PREVIOUS_RELEASE" ]; then exit 1; fi
+    rm -f "$systemd_state/$2.stopped"
+    touch "$systemd_state/$2.started"
+    echo "-restart-$$" > "$systemd_state/$2.epoch"
+    ;;
+  cat)
+    [ "$2" != "vf-zai-codex-broker" ]
+    exit $?
+    ;;
+  disable)
+    touch "$systemd_state/$3.stopped"
+    if [ -n "$TEST_SIGNAL_AFTER_COMMIT" ] && [ ! -f "$DEPLOY_STATE/signal-sent" ]; then
+      touch "$DEPLOY_STATE/signal-sent"
+      if [ "$TEST_COMMITTED_INTEGRITY_FAILS" = "1" ]; then touch "$DEPLOY_STATE/committed-integrity-failed"; fi
+      kill -"$TEST_SIGNAL_AFTER_COMMIT" "$PPID"
+    fi
+    ;;
+esac
+exit 0
+`,
+    ),
     writeExecutable(
       "install",
       `#!/bin/sh
@@ -278,8 +448,27 @@ exec "$REAL_NODE" "$@"
       `#!/bin/sh
 echo "docker:$*" >> "$DEPLOY_TRACE"
 case "$1" in
+  container)
+    if [ "$TEST_CONTAINER_LIST_FAILS" = "1" ]; then exit 1; fi
+    echo "video_factory_prod"
+    ;;
   inspect)
-    echo "sha256:old-image"
+    if [ "$TEST_CONTAINER_INSPECT_FAILS" = "1" ]; then exit 1; fi
+    case "$*" in
+      *'{{.State.Running}}'*)
+        if grep -q '^1$' "$DEPLOY_STATE/app-running"; then echo "true"; else echo "false"; fi
+        ;;
+      *'{{json .State}}'*)
+        if grep -q '^1$' "$DEPLOY_STATE/app-running"; then
+          echo '{"Running":true,"Pid":1234,"Restarting":false,"Dead":false,"Status":"running"}'
+        elif [ "$TEST_UNKNOWN_APP_STATE" = "1" ]; then
+          echo '{"Running":false,"Pid":0,"Restarting":true,"Dead":false,"Status":"restarting"}'
+        else
+          echo '{"Running":false,"Pid":0,"Restarting":false,"Dead":false,"Status":"exited"}'
+        fi
+        ;;
+      *) echo "sha256:old-image" ;;
+    esac
     ;;
   network)
     exit 0
@@ -295,10 +484,29 @@ case "$1" in
     case " $* " in
       *" up "*)
         if [ ! -d "$VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR" ]; then exit 84; fi
+        case "$*" in
+          *current.compose.json*)
+            if [ "$TEST_ROLLBACK_APP_FAILS" = "1" ]; then exit 85; fi
+            echo "$TEST_PREVIOUS_SHA" > "$DEPLOY_STATE/app-release"
+            ;;
+          *)
+            echo "$RELEASE_SHA" > "$DEPLOY_STATE/app-release"
+            touch "$DEPLOY_STATE/candidate-started"
+            ;;
+        esac
+        echo "1" > "$DEPLOY_STATE/app-running"
+        echo "app-restart-$$" > "$DEPLOY_STATE/app-epoch"
+        if [ -n "$TEST_SIGNAL_AFTER_APP_UP" ] && [ ! -f "$DEPLOY_STATE/signal-sent" ]; then
+          touch "$DEPLOY_STATE/signal-sent"
+          kill -"$TEST_SIGNAL_AFTER_APP_UP" "$PPID"
+        fi
         ;;
-    esac
-    case " $* " in
+      *" stop "*)
+        if [ "$TEST_APP_STOP_FAILS" = "1" ]; then exit 86; fi
+        echo "0" > "$DEPLOY_STATE/app-running"
+        ;;
       *" build app "*) echo "sha256:new-image" > "$DEPLOY_STATE/candidate-image" ;;
+      *" config --format json "*) echo '{"services":{"app":{"image":"video-factory:candidate"}}}' ;;
     esac
     ;;
   create)
@@ -322,102 +530,127 @@ esac
       "curl",
       `#!/bin/sh
 echo "curl:$*" >> "$DEPLOY_TRACE"
-if [ "$DEPLOY_SCENARIO" = "deepseek-health" ]; then
-  case " $* " in
-    *"$TEST_DEEPSEEK_SOCKET"*)
-      current_release="$(readlink "$TEST_BROKER_CURRENT")"
-      if [ "$current_release" != "$TEST_PREVIOUS_RELEASE" ]; then
-        exit 22
-      fi
-      ;;
+endpoint=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --unix-socket) shift; endpoint="unix:$1" ;;
+    http:*) if [ -z "$endpoint" ]; then endpoint="$1"; fi ;;
   esac
-fi
-case " $* " in
-  *" --unix-socket "*)
-    case " $* " in
-      *"$TEST_DEEPSEEK_SOCKET"*)
-        current_release="$(readlink "$TEST_BROKER_CURRENT")"
-        if [ "$DEPLOY_SCENARIO" = "broker-identity" ] && [ "$current_release" != "$TEST_PREVIOUS_RELEASE" ]; then
-          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"openai","providerId":"openai","modelId":"gpt-test","taskKinds":["director-plan","script-draft","visual-review"],"taskModels":{"director-plan":"gpt-test","script-draft":"gpt-test","visual-review":"gpt-test"}}'
-        elif [ "$current_release" = "$TEST_PREVIOUS_RELEASE" ]; then
-          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"deepseek","providerId":"deepseek","modelId":"deepseek-flash","taskKinds":["director-plan","script-draft","visual-review"],"taskModels":{"director-plan":"deepseek-flash","script-draft":"deepseek-flash","visual-review":"deepseek-flash"}}'
-        else
-          echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"deepseek","providerId":"deepseek","modelId":"deepseek-flash","taskKinds":["topic-ideas","series-roadmap","creative-treatment","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit","creative-discussion"],"taskModels":{"topic-ideas":"deepseek-flash","series-roadmap":"deepseek-flash","creative-treatment":"deepseek-flash","director-plan":"deepseek-flash","script-draft":"deepseek-flash","publish-copy":"deepseek-flash","asset-rank":"deepseek-flash","reference-grammar":"deepseek-flash","visual-review":"deepseek-flash","role-audit":"deepseek-flash","creative-discussion":"deepseek-flash"}}'
-        fi
-        ;;
-      *)
-        echo '{"protocolVersion":"video-factory/codex-bridge-v2","profileId":"openai","providerId":"openai","modelId":"gpt-test","taskKinds":["topic-ideas","series-roadmap","director-plan","script-draft","publish-copy","asset-rank","reference-grammar","visual-review","role-audit"],"taskModels":{"topic-ideas":"gpt-test","series-roadmap":"gpt-test","director-plan":"gpt-test","script-draft":"gpt-test","publish-copy":"gpt-test","asset-rank":"gpt-test","reference-grammar":"gpt-test","visual-review":"gpt-test","role-audit":"gpt-test"}}'
-        ;;
-    esac
-    ;;
-  *"/api/health"*)
-    if [ "$DEPLOY_SCENARIO" = "app-health" ] && grep -q "new-image" "$DEPLOY_STATE/candidate-image"; then
-      echo '{"status":"degraded","runtime":{"python":true,"ffmpeg":false,"ffprobe":true}}'
-    else
-      echo '{"status":"ok","runtime":{"python":true,"ffmpeg":true,"ffprobe":true}}'
-    fi
-    ;;
-esac
-exit 0
+  shift
+done
+exec "$REAL_NODE" "$TEST_HEALTH_FIXTURE" "$endpoint"
 `,
     ),
   ]);
 
+  const deploymentStateDirectory = path.join(brokerInstallRoot, "deployment");
+  const deployEnvironment: NodeJS.ProcessEnv = {
+    ...process.env,
+    DEPLOY_SCENARIO: scenario,
+    TEST_FIRST_MIGRATION: firstMigration ? "1" : "0",
+    DEPLOY_STATE: stateDirectory,
+    DEPLOY_TRACE: tracePath,
+    PATH: `${binDirectory}:${process.env.PATH ?? ""}`,
+    RELEASE_SHA: releaseSha,
+    REAL_NODE: process.execPath,
+    TEST_HEALTH_FIXTURE: healthFixture,
+    TEST_MAINTENANCE_DIRECTORY: maintenanceDirectory,
+    TEST_PREVIOUS_SHA: previousSha,
+    TEST_APP_ADMISSION: options.appAdmission ?? "protocol",
+    TEST_BROKER_CURRENT: path.join(brokerInstallRoot, "current"),
+    TEST_CANDIDATE_BROKER: candidateBroker,
+    TEST_OPENAI_UNIT: openAiUnitPath,
+    TEST_PREVIOUS_RELEASE: previousRelease,
+    TEST_DEEPSEEK_SOCKET: path.join(deepseekRuntimeDirectory, "worker.sock"),
+    TEST_DEEPSEEK_STATE: deepseekStateRoot,
+    TEST_DEEPSEEK_UNIT: deepseekUnitPath,
+    VIDEO_FACTORY_ENV_FILE: environmentPath,
+    VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR: deepseekRuntimeDirectory,
+    ...(options.env ?? {}),
+  };
+
   let stderr = "";
+  let stdout = "";
+  let exitCode = 0;
   try {
-    await execFileAsync("bash", [deployPath], {
+    const outcome = await execFileAsync("bash", [deployPath], {
       cwd: repository,
-      env: {
-        ...process.env,
-        DEPLOY_SCENARIO: scenario,
-        TEST_FIRST_MIGRATION: firstMigration ? "1" : "0",
-        DEPLOY_STATE: stateDirectory,
-        DEPLOY_TRACE: tracePath,
-        PATH: `${binDirectory}:${process.env.PATH ?? ""}`,
-        RELEASE_SHA: releaseSha,
-        REAL_NODE: process.execPath,
-        TEST_BROKER_CURRENT: path.join(brokerInstallRoot, "current"),
-        TEST_CANDIDATE_BROKER: candidateBroker,
-        TEST_OPENAI_UNIT: openAiUnitPath,
-        TEST_PREVIOUS_RELEASE: previousRelease,
-        TEST_DEEPSEEK_SOCKET: path.join(deepseekRuntimeDirectory, "worker.sock"),
-        TEST_DEEPSEEK_STATE: deepseekStateRoot,
-        TEST_DEEPSEEK_UNIT: deepseekUnitPath,
-        VIDEO_FACTORY_ENV_FILE: environmentPath,
-        VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR: deepseekRuntimeDirectory,
-      },
+      env: deployEnvironment,
+      timeout: 60_000,
     });
-    assert.fail(`deployment unexpectedly succeeded for ${scenario}`);
+    stdout = outcome.stdout;
+    stderr = outcome.stderr;
   } catch (error) {
-    const failure = error as NodeJS.ErrnoException & { stderr?: string };
-    assert.equal(Number(failure.code), 1);
+    const failure = error as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
+    exitCode = Number(failure.code);
     stderr = failure.stderr ?? "";
+    stdout = failure.stdout ?? "";
+  }
+
+  const gatePath = path.join(maintenanceDirectory, "gate.json");
+  let gateState = "";
+  let gateOwner = "";
+  try {
+    const gate = JSON.parse(await readFile(gatePath, "utf8")) as { state?: string; owner?: string };
+    gateState = gate.state ?? "";
+    gateOwner = gate.owner ?? "";
+  } catch {
+    gateState = "";
+  }
+  let unitBackupsRemaining = false;
+  for (const entry of await readdir(deploymentStateDirectory).catch(() => [] as string[])) {
+    if (entry.startsWith("legacy-unit.") || entry.startsWith("deepseek-unit.")) {
+      unitBackupsRemaining = true;
+    }
   }
 
   try {
+    assert.equal(exitCode, options.expectSuccess ? 0 : options.expectedExitCode ?? 1,
+      `unexpected deployment result for ${scenario}: ${stderr}`);
     return {
       candidateImage: (await readFile(path.join(stateDirectory, "candidate-image"), "utf8")).trim(),
       currentRelease: await readlink(path.join(brokerInstallRoot, "current")),
       openAiUnit: await readFile(openAiUnitPath, "utf8"),
       stderr,
+      stdout,
       trace: await readFile(tracePath, "utf8"),
       deepseekUnit: await readFile(deepseekUnitPath, "utf8"),
       deepseekWorkspaceExists: await statExists(path.join(deepseekStateRoot, "workspace")),
+      gateState,
+      gateOwner,
+      gateBefore,
+      gateAfter: await readFile(gatePath, "utf8"),
+      appRunning: (await readFile(path.join(stateDirectory, "app-running"), "utf8")).trim() === "1",
+      appRelease: (await readFile(path.join(stateDirectory, "app-release"), "utf8")).trim(),
+      exitCode,
+      unitBackupsRemaining,
     };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 }
 
+/** R3-C：按固定顺序断言 trace 中各动作的先后（构建→停写者→备份→切换→启动）。 */
+function assertTraceOrder(trace: string, markers: string[]): void {
+  let cursor = 0;
+  for (const marker of markers) {
+    const at = trace.indexOf(marker, cursor);
+    assert.ok(at >= 0, `trace must contain "${marker}" after byte ${cursor}`);
+    cursor = at + marker.length;
+  }
+}
+
 function assertFullDeployRollback(result: DeployFailureResult, expectAppRollback: boolean): void {
   assert.equal(path.basename(result.currentRelease), "previous");
+  assert.equal(result.appRunning, true);
+  assert.equal(result.appRelease, "b".repeat(40));
   assert.equal(result.candidateImage, expectAppRollback ? "sha256:old-image" : "sha256:new-image");
   assert.match(result.openAiUnit, /Description=old-openai/);
   assert.doesNotMatch(result.openAiUnit, /Description=new-openai/);
   assert.match(result.deepseekUnit, /Description=old-deepseek/);
   assert.doesNotMatch(result.deepseekUnit, /Description=new-deepseek/);
   assert.match(result.stderr, /Deployment failed; restoring the application and all configured brokers/);
-  assert.doesNotMatch(result.stderr, /Rollback did not fully recover every component/);
+  assert.doesNotMatch(result.stderr, /Recovery did not fully restore every writer|Maintenance recovery verification failed/);
   assert.match(result.trace, /systemctl:restart vf-codex-broker/);
   assert.match(result.trace, /systemctl:restart vf-deepseek-codex-broker/);
   if (expectAppRollback) {
@@ -427,7 +660,9 @@ function assertFullDeployRollback(result: DeployFailureResult, expectAppRollback
   } else {
     assert.doesNotMatch(result.trace, /docker:tag video-factory:rollback video-factory:candidate/);
     assert.doesNotMatch(result.trace, /docker:compose .* up --detach --no-deps --force-recreate app/);
+    assert.match(result.trace, /docker:compose .*current\.compose\.json up --detach --no-deps app/);
   }
+  assert.equal(result.gateState, "open");
   assert.equal(result.deepseekWorkspaceExists, true);
 }
 
@@ -475,7 +710,7 @@ restart_brokers topic-ideas,series-roadmap,creative-treatment,director-plan,scri
     assert.match(service, /^RuntimeDirectoryMode=0750$/m);
     assert.match(service, /^RuntimeDirectoryPreserve=restart$/m);
     assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_WORKSPACE_ROOT=\/var\/lib\/video-factory-deepseek-codex\/workspace$/m);
-    assert.match(service, /^ReadWritePaths=\/var\/lib\/video-factory-deepseek-codex \/run\/video-factory-deepseek-codex$/m);
+    assert.match(service, /^ReadWritePaths=\/var\/lib\/video-factory-deepseek-codex \/run\/video-factory-deepseek-codex \/opt\/video-factory\/codex-broker\/deployment\/maintenance$/m);
     assert.match(service, /\/run\/video-factory-deepseek-codex\/worker\.sock/);
     assert.doesNotMatch(service, /CODEX_HOME|CODEX_BIN|MODEL_CATALOG/);
     assert.match(service, /DEEPSEEK_API_KEY/);
@@ -820,7 +1055,7 @@ exit 42
     assertFullDeployRollback(result, false);
   });
 
-  it("rejects a healthy HTTP response from the wrong broker identity without restarting the unchanged app", async () => {
+  it("rejects the wrong broker identity and restores the already stopped original app", async () => {
     const result = await runDeployFailureScenario("broker-identity");
 
     assertFullDeployRollback(result, false);
@@ -833,14 +1068,14 @@ exit 42
   });
 
   it("restores the old app after a failed first DeepSeek migration without requiring a prior DeepSeek service", async () => {
-    const result = await runDeployFailureScenario("app-health", true);
+    const result = await runDeployFailureScenario("app-health", { firstMigration: true });
     assert.equal(path.basename(result.currentRelease), "previous");
     assert.equal(result.candidateImage, "sha256:old-image");
     assert.match(result.trace, /systemctl:stop vf-deepseek-codex-broker/);
     assert.match(result.trace, /systemctl:restart vf-codex-broker/);
     assert.equal(result.trace.match(/systemctl:restart vf-deepseek-codex-broker/g)?.length, 1);
     assert.match(result.trace, /docker:compose .* up --detach --no-deps --force-recreate app/);
-    assert.doesNotMatch(result.stderr, /Rollback did not fully recover every component/);
+    assert.doesNotMatch(result.stderr, /Recovery did not fully restore every writer|Maintenance recovery verification failed/);
   });
 
   it("preserves both retired socket mounts for rollback to the previous production image", async () => {
@@ -849,6 +1084,228 @@ exit 42
     assert.match(compose, /target: \/run\/video-factory-zai-codex\n/);
     assert.match(compose, /VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH:/);
   });
+
+  it("drains, freezes, backs up and only then switches artifacts in the fixed maintenance order (R3-C)", async () => {
+    const result = await runDeployFailureScenario("success", { expectSuccess: true });
+
+    assert.equal(result.candidateImage, "sha256:new-image");
+    assert.notEqual(path.basename(result.currentRelease), "previous");
+    assert.match(result.deepseekUnit, /Description=new-deepseek/);
+    assertTraceOrder(result.trace, [
+      " build app",
+      "systemctl:stop vf-codex-broker",
+      "systemctl:stop vf-deepseek-codex-broker",
+      "backup:",
+      "->",
+      "systemctl:restart vf-deepseek-codex-broker",
+      " up --detach --remove-orphans --force-recreate app",
+    ]);
+    // 成功路径：同一 owner 重开门禁并清理 unit 备份（已提交）。
+    assert.equal(result.gateState, "open");
+    assert.match(result.gateOwner, /^deploy-/);
+    assert.equal(result.unitBackupsRemaining, false);
+  });
+
+  it("keeps the maintenance transaction order when the candidate app fails health (R3-C failure finale)", async () => {
+    const result = await runDeployFailureScenario("app-health");
+
+    assertFullDeployRollback(result, true);
+    assertTraceOrder(result.trace, [
+      " build app",
+      "systemctl:stop vf-codex-broker",
+      "systemctl:stop vf-deepseek-codex-broker",
+      "backup:",
+      "->",
+      " up --detach --remove-orphans --force-recreate app",
+    ]);
+    // 回滚在闭门状态完成后重开门禁。
+    assert.equal(result.gateState, "open");
+    assert.match(result.gateOwner, /^deploy-/);
+  });
+
+  it("rejects a healthy app that does not report the candidate release (R3b version binding)", async () => {
+    const result = await runDeployFailureScenario("success", {
+      env: { TEST_APP_RELEASE_MISMATCH: "1" },
+    });
+
+    assert.match(result.stderr, /does not report the candidate release/);
+    assertFullDeployRollback(result, true);
+    assert.equal(result.gateState, "open");
+  });
+
+  it("reopens the gate without touching services when the drain times out (R3-D)", async () => {
+    const result = await runDeployFailureScenario("success", {
+      env: {
+        TEST_BROKER_BUSY: "1",
+        TEST_REAL_DRAIN_SLEEP: "1",
+        VIDEO_FACTORY_DRAIN_TIMEOUT_SECONDS: "6",
+      },
+    });
+
+    assert.match(result.stderr, /Drain timed out after 6s; verifying the original services before reopening/);
+    assert.match(result.stderr, /Maintenance gate reopened/);
+    assert.doesNotMatch(result.trace, /systemctl:stop/);
+    assert.doesNotMatch(result.trace, /backup:/);
+    assert.doesNotMatch(result.trace, /->/);
+    assert.doesNotMatch(result.trace, / up --detach/);
+    assert.equal(path.basename(result.currentRelease), "previous");
+    assert.match(result.deepseekUnit, /Description=old-deepseek/);
+    assert.equal(result.gateState, "open");
+  });
+
+  for (const failure of ["TEST_STOP_FAILS", "TEST_APP_STOP_FAILS", "TEST_UNKNOWN_SERVICE_STATE", "TEST_UNKNOWN_APP_STATE"] as const) {
+    it(`preserves FROZEN without restart or backup when clean writer exit is unproved: ${failure}`, async () => {
+      const result = await runDeployFailureScenario("success", { env: { [failure]: "1" } });
+      assert.match(result.stderr, /Failed to stop writers cleanly/);
+      assert.match(result.stderr, /gate stays FROZEN/);
+      assert.doesNotMatch(result.stderr, /Maintenance gate reopened/);
+      assert.match(result.trace, /systemctl:stop vf-codex-broker/);
+      assert.doesNotMatch(result.trace, /systemctl:restart|backup:|->| up --detach/);
+      assert.equal(path.basename(result.currentRelease), "previous");
+      assert.match(result.deepseekUnit, /Description=old-deepseek/);
+      assert.equal(result.gateState, "frozen");
+      assert.equal(result.unitBackupsRemaining, true);
+    });
+  }
+
+  it("keeps the previous artifacts and reopens when the full backup fails (R3-D)", async () => {
+    const result = await runDeployFailureScenario("success", {
+      env: { TEST_BACKUP_FAILS: "1" },
+    });
+
+    assert.match(result.stderr, /Full backup or its restore verification failed; not switching artifacts/);
+    assert.match(result.trace, /backup:/);
+    assert.doesNotMatch(result.trace, /->/);
+    assert.match(result.trace, /current\.compose\.json up --detach --no-deps app/);
+    assert.equal(result.appRunning, true);
+    assert.equal(result.appRelease, "b".repeat(40));
+    assert.equal(path.basename(result.currentRelease), "previous");
+    assert.match(result.deepseekUnit, /Description=old-deepseek/);
+    assert.match(result.trace, /systemctl:restart vf-codex-broker/);
+    assert.equal(result.gateState, "open");
+  });
+
+  it("refuses an online switch when the running app predates the maintenance protocol (R3-E)", async () => {
+    const result = await runDeployFailureScenario("success", {
+      appAdmission: "legacy",
+      env: { TEST_APP_RUNNING: "1" },
+    });
+
+    assert.match(result.stderr, /拒绝在线切换.*当前运行中的 app/);
+    assert.doesNotMatch(result.trace, /systemctl:stop/);
+    assert.doesNotMatch(result.trace, /backup:/);
+    assert.doesNotMatch(result.trace, /->/);
+    assert.doesNotMatch(result.trace, / up --detach/);
+    assert.equal(path.basename(result.currentRelease), "previous");
+    assert.equal(result.gateState, "open");
+    assert.equal(result.gateAfter, result.gateBefore);
+  });
+
+  it("refuses an online switch when an active broker predates the maintenance protocol (R3-E)", async () => {
+    const result = await runDeployFailureScenario("success", {
+      env: { TEST_LEGACY_BROKER_LEGACY: "1" },
+    });
+
+    assert.match(result.stderr, /拒绝在线切换.*旧版 vf-codex-broker/);
+    assert.doesNotMatch(result.trace, /systemctl:stop/);
+    assert.doesNotMatch(result.trace, /backup:/);
+    assert.doesNotMatch(result.trace, /->/);
+    assert.equal(path.basename(result.currentRelease), "previous");
+    assert.equal(result.gateState, "open");
+    assert.equal(result.gateAfter, result.gateBefore);
+  });
+
+  for (const leftoverGate of ["draining", "frozen"] as const) {
+    it(`leaves a crashed owner's ${leftoverGate} gate unchanged instead of taking it over (R3-G)`, async () => {
+      const result = await runDeployFailureScenario("success", { leftoverGate });
+      assert.equal(result.gateOwner, "deploy-crashed");
+      assert.equal(result.gateState, leftoverGate);
+      assert.equal(result.gateAfter, result.gateBefore);
+      assert.match(result.stderr, /previous maintenance owner must be recovered explicitly/);
+      assert.doesNotMatch(result.trace, /systemctl:stop|systemctl:restart|backup:|->| up --detach/);
+      assert.equal(result.appRunning, true);
+      assert.equal(result.appRelease, "b".repeat(40));
+    });
+  }
+
+  for (const signal of ["TERM", "INT"] as const) {
+    it(`recovers the original admission without stopping writers after ${signal} during drain`, async () => {
+      const result = await runDeployFailureScenario("success", {
+        env: { TEST_SIGNAL_DURING_DRAIN: signal, TEST_BROKER_BUSY: "1" },
+        expectedExitCode: signal === "TERM" ? 143 : 130,
+      });
+      assert.doesNotMatch(result.trace, /systemctl:stop|systemctl:restart|backup:|->| up --detach/);
+      assert.equal(result.appRunning, true);
+      assert.equal(result.appRelease, "b".repeat(40));
+      assert.equal(path.basename(result.currentRelease), "previous");
+      assert.equal(result.gateState, "open");
+    });
+
+    it(`recovers stopped original writers under the closed gate after ${signal} during backup`, async () => {
+      const result = await runDeployFailureScenario("success", {
+        env: { TEST_SIGNAL_AT_BACKUP: signal }, expectedExitCode: signal === "TERM" ? 143 : 130,
+      });
+      assert.match(result.trace, /backup:/);
+      assert.doesNotMatch(result.trace, /->/);
+      assert.equal(path.basename(result.currentRelease), "previous");
+      assert.equal(result.appRunning, true);
+      assert.equal(result.appRelease, "b".repeat(40));
+      assert.equal(result.gateState, "open");
+      assert.match(result.stderr, /Restoring the previous writers under the closed maintenance gate/);
+    });
+  }
+
+  for (const signal of ["TERM", "INT"] as const) {
+    it(`rolls back a partially switched release after ${signal} without swallowing its failure exit`, async () => {
+      const result = await runDeployFailureScenario("success", {
+        env: { TEST_SIGNAL_AFTER_APP_UP: signal }, expectedExitCode: signal === "TERM" ? 143 : 130,
+      });
+      assertFullDeployRollback(result, true);
+    });
+  }
+
+  for (const signal of ["TERM", "INT"] as const) for (const incomplete of [false, true]) {
+    it(`does not resurrect old writers after committed ${signal}; candidate integrity ${incomplete ? "incomplete" : "complete"}`, async () => {
+      const result = await runDeployFailureScenario("success", {
+        env: { TEST_SIGNAL_AFTER_COMMIT: signal, TEST_COMMITTED_INTEGRITY_FAILS: incomplete ? "1" : "0" },
+        expectedExitCode: signal === "TERM" ? 143 : 130,
+      });
+      assert.notEqual(path.basename(result.currentRelease), "previous");
+      assert.equal(result.candidateImage, "sha256:new-image");
+      assert.equal(result.appRunning, true);
+      assert.equal(result.appRelease, "a".repeat(40));
+      assert.doesNotMatch(result.trace, /systemctl:restart vf-codex-broker/);
+      assert.equal(result.trace.match(/systemctl:restart vf-deepseek-codex-broker/g)?.length, 1);
+      assert.doesNotMatch(result.trace, /current\.compose\.json up |docker:tag video-factory:rollback/);
+      assert.doesNotMatch(result.stderr, /Restoring the previous writers/);
+      assert.equal(result.gateState, incomplete ? "frozen" : "open");
+      assert.equal(result.unitBackupsRemaining, incomplete);
+      if (incomplete) {
+        assert.match(result.stderr, /Maintenance recovery verification failed/);
+        assert.doesNotMatch(result.stderr, /Maintenance gate reopened/);
+      } else assert.match(result.stderr, /Maintenance gate reopened/);
+    });
+  }
+
+  for (const failure of ["TEST_ROLLBACK_APP_FAILS", "TEST_ROLLBACK_BROKER_FAILS"] as const) {
+    it(`retains FROZEN and recovery evidence when rollback is incomplete: ${failure}`, async () => {
+      const result = await runDeployFailureScenario("app-health", { env: { [failure]: "1" } });
+      assert.equal(result.gateState, "frozen");
+      assert.equal(result.unitBackupsRemaining, true);
+      assert.match(result.stderr, /Recovery did not fully restore every writer/);
+      assert.doesNotMatch(result.stderr, /Maintenance gate reopened/);
+      assert.equal(path.basename(result.currentRelease), "previous");
+    });
+  }
+
+  for (const failure of ["TEST_CONTAINER_LIST_FAILS", "TEST_CONTAINER_INSPECT_FAILS"] as const) {
+    it(`does not misclassify failed container discovery as a first installation: ${failure}`, async () => {
+      const result = await runDeployFailureScenario("success", { env: { [failure]: "1" } });
+      assert.equal(result.gateAfter, result.gateBefore);
+      assert.doesNotMatch(result.trace, /systemctl:stop|systemctl:restart|backup:|->| up --detach/);
+      assert.equal(path.basename(result.currentRelease), "previous");
+    });
+  }
 
   it("checks DeepSeek reachability without submitting content before mutating the release", async () => {
     const result = await runDeployFailureScenario("deepseek-upstream");

@@ -19,13 +19,17 @@ Environment=VIDEO_FACTORY_CODEX_EFFORT=xhigh
 Environment=VIDEO_FACTORY_CODEX_SOCKET_PATH=/run/video-factory-deepseek-codex/worker.sock
 Environment=VIDEO_FACTORY_CODEX_WORKSPACE_ROOT=/var/lib/video-factory-deepseek-codex/workspace
 Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=1200000
+# 维护门禁：与 app/部署共用短锁和持久登记，排空期间只接续已登记链路。
+Environment=VIDEO_FACTORY_MAINTENANCE_DIR=/opt/video-factory/codex-broker/deployment/maintenance
 ExecStart=/opt/video-factory/codex-broker/bin/node /opt/video-factory/codex-broker/current/dist/main.js
 RuntimeDirectory=video-factory-deepseek-codex
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=restart
 Restart=on-failure
 RestartSec=3
-TimeoutStopSec=20
+# 排空先于停止；若退出异常，保留关闭门禁等待核查，不由 systemd 强杀。
+TimeoutStopSec=infinity
+SendSIGKILL=no
 
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -44,7 +48,7 @@ LockPersonality=true
 SystemCallArchitectures=native
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ReadWritePaths=/var/lib/video-factory-deepseek-codex /run/video-factory-deepseek-codex
+ReadWritePaths=/var/lib/video-factory-deepseek-codex /run/video-factory-deepseek-codex /opt/video-factory/codex-broker/deployment/maintenance
 
 [Install]
 WantedBy=multi-user.target

@@ -77,10 +77,13 @@ COPY --from=builder /app/packages/production-pipeline/dist/model-connection.js a
 COPY --from=builder /app/packages/production-pipeline/dist/model-attempt-usage.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/model-attempt-usage.js
 COPY --from=builder /app/packages/production-pipeline/dist/audio-review.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/audio-review.js
 COPY --from=builder /app/packages/production-pipeline/dist/diagnostics.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/diagnostics.js
+COPY --from=builder /app/packages/production-pipeline/dist/maintenance.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/maintenance.js
 COPY --from=builder /app/packages/production-pipeline/dist/visual-evidence-boundary.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/visual-evidence-boundary.js
 COPY --from=builder /app/packages/production-pipeline/dist/character-script.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/character-script.js
 COPY --from=builder /app/packages/production-pipeline/dist/executable-timeline.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/executable-timeline.js
 COPY apps/codex-broker/deploy apps/codex-broker/deploy
+# 备份恢复验证工具（R2）：部署脚本在隔离容器内用它核对恢复副本，不进业务运行时。
+COPY scripts/verify-production-backup.mjs scripts/verify-production-backup.mjs
 
 # 宿主机的私密 umask 可能让源码为 0600；镜像应用文件必须可被非 root 用户读取。
 # /app 只含构建产物和代码，运行凭据与用户数据在镜像之外，保持各自的严格权限。

@@ -68,6 +68,10 @@ services:
       VIDEO_FACTORY_CODEX_SOCKET_PATH: ${VIDEO_FACTORY_CODEX_SOCKET_PATH:-/run/video-factory-codex/worker.sock}
       VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH: ${VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH:-/run/video-factory-zai-codex/worker.sock}
       VIDEO_FACTORY_DEEPSEEK_CODEX_SOCKET_PATH: /run/video-factory-deepseek-codex/worker.sock
+      # 与 broker/部署共用短锁和持久登记；关闭后仅已登记链路可接续。
+      VIDEO_FACTORY_MAINTENANCE_DIR: /run/video-factory-maintenance
+      # 部署注入的 RELEASE_SHA：健康端点回显，部署脚本据此核对候选版本确已上线（R3b）。
+      VIDEO_FACTORY_RELEASE_SHA: ${RELEASE_SHA:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -81,6 +85,12 @@ services:
       - "127.0.0.1:${VIDEO_FACTORY_HOST_PORT:-4317}:4317"
     volumes:
       - video_factory_workspace:/data/factory
+      # gate、holders 和各进程报告同目录；共享组权限允许双方在同一短锁内更新。
+      - type: bind
+        source: ${VIDEO_FACTORY_MAINTENANCE_DIR:-/opt/video-factory/codex-broker/deployment/maintenance}
+        target: /run/video-factory-maintenance
+        bind:
+          create_host_path: false
       # read_only 只阻止文件系统变更；Unix socket 的 connect 是协议写不是文件系统写，
       # 因此安全边界不在此处，而在 broker 的 kind 白名单与 socket 0660 组权限。
       # 保留旧镜像的回滚挂载；成功部署会停用旧服务，新生产不使用此 socket。

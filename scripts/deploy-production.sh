@@ -64,6 +64,9 @@ if [[ "$deployment_mode" == "release" ]]; then
 elif [[ "$deployment_mode" != "bootstrap" ]]; then
   echo "VIDEO_FACTORY_DEPLOYMENT_MODE must be 'release' or 'bootstrap'." >&2
   exit 1
+else
+  release_sha="$(git -C "$repository_root" rev-parse HEAD)"
+  [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]] || exit 1
 fi
 
 if [[ "$deepseek_broker_configured" -ne 1 ]]; then
@@ -78,6 +81,8 @@ fi
 deepseek_broker_runtime_dir="${deepseek_broker_runtime_dir:-/run/video-factory-deepseek-codex}"
 deepseek_broker_socket="$deepseek_broker_runtime_dir/worker.sock"
 export VIDEO_FACTORY_DEEPSEEK_CODEX_RUNTIME_DIR="$deepseek_broker_runtime_dir"
+# compose 用它注入运行时 VIDEO_FACTORY_RELEASE_SHA，健康端点回显供版本核对（R3b）。
+export RELEASE_SHA="$release_sha"
 
 ensure_deepseek_workspace() {
   local target
@@ -143,11 +148,15 @@ check_deepseek_upstream || {
 docker network inspect "$trend_network" >/dev/null 2>&1 \
   || docker network create --driver bridge "$trend_network" >/dev/null
 
-# 不做“排空运行中制作”的等待：/api/runs 受登录会话保护，本脚本不持有凭据，
-# 为部署开免认证端点会削弱认证边界。被中断的 run 由 recoverInterruptedRuns
-# 显式标记失败（“应用重启中断了这次制作”），不会伪装成成功。
-
-previous_image="$(docker inspect --format='{{.Image}}' "$container" 2>/dev/null || true)"
+# 不把 Docker 查询失败伪装成首次安装；仅明确不存在目标容器时无源镜像。
+container_names="$(docker container ls --all --format '{{.Names}}')" || exit 1
+previous_image=""
+while IFS= read -r name; do
+  if [[ "$name" == "$container" ]]; then
+    previous_image="$(docker inspect --format='{{.Image}}' "$container")" || exit 1
+    [[ -n "$previous_image" ]] || exit 1
+  fi
+done <<< "$container_names"
 deployment_state="$broker_root/deployment"
 mkdir -p "$deployment_state"
 previous_compose="${VIDEO_FACTORY_ROLLBACK_COMPOSE_FILE:-$deployment_state/current.compose.json}"
@@ -159,7 +168,6 @@ if [[ -n "$previous_image" ]]; then
   fi
   "${rollback_compose[@]}" config --quiet
   docker tag "$previous_image" video-factory:rollback
-  "$repository_root/scripts/backup-production.sh"
 fi
 
 previous_broker_release="$(readlink "$broker_root/current" 2>/dev/null || true)"
@@ -174,12 +182,15 @@ if [[ -f "$deepseek_broker_unit" ]]; then
 fi
 
 app_health() {
-  local url="$1" timeout_seconds="${2:-5}" health_json
-  health_json="$(curl --fail --silent --show-error --max-time "$timeout_seconds" "$url")" || return 1
-  APP_HEALTH_JSON="$health_json" "$broker_root/bin/node" --eval '
+  local url="$1" timeout_seconds="${2:-5}" expected_release="${3:-}" health_json
+  health_json="$(curl --noproxy '*' --fail --silent --show-error --max-time "$timeout_seconds" "$url")" || return 1
+  APP_HEALTH_JSON="$health_json" EXPECTED_RELEASE="$expected_release" "$broker_root/bin/node" --eval '
     try {
       const health = JSON.parse(process.env.APP_HEALTH_JSON ?? "");
-      process.exit(health?.status === "ok" ? 0 : 1);
+      // 期望版本为空（bootstrap/旧应用）时只看状态；否则必须精确回显候选 RELEASE_SHA。
+      const releaseMatches = (process.env.EXPECTED_RELEASE ?? "") === ""
+        || health?.release === process.env.EXPECTED_RELEASE;
+      process.exit(health?.status === "ok" && releaseMatches ? 0 : 1);
     } catch {
       process.exit(1);
     }
@@ -199,7 +210,7 @@ wait_for_health() {
 
 broker_health() {
   local socket="$1" expected_profile="$2" expected_provider="$3" expected_kinds="$4" allow_extra_kinds="${5:-0}" health_json
-  health_json="$(curl --fail --silent --max-time 5 --unix-socket "$socket" http://localhost/health)" || return 1
+  health_json="$(curl --noproxy '*' --fail --silent --max-time 5 --unix-socket "$socket" http://localhost/health)" || return 1
   BROKER_HEALTH_JSON="$health_json" \
     EXPECTED_BROKER_PROFILE="$expected_profile" \
     EXPECTED_BROKER_PROVIDER="$expected_provider" \
@@ -232,7 +243,7 @@ broker_health() {
 
 broker_contract_kinds() {
   local socket="$1" expected_profile="$2" expected_provider="$3" health_json
-  health_json="$(curl --fail --silent --max-time 5 --unix-socket "$socket" http://localhost/health)" || return 1
+  health_json="$(curl --noproxy '*' --fail --silent --max-time 5 --unix-socket "$socket" http://localhost/health)" || return 1
   BROKER_HEALTH_JSON="$health_json" \
     EXPECTED_BROKER_PROFILE="$expected_profile" \
     EXPECTED_BROKER_PROVIDER="$expected_provider" \
@@ -296,6 +307,18 @@ install_broker_units_from_release() {
       return 1
     fi
     install -m 0644 "$deepseek_source" "$deepseek_broker_unit" || return 1
+    # 本次解析出的共享目录必须同时供 unit 与 compose 使用；只改本轮已安装的 unit。
+    python3 - "$deepseek_broker_unit" "$maintenance_directory" <<'PY' || return 1
+from pathlib import Path
+import sys
+unit = Path(sys.argv[1])
+root = sys.argv[2]
+if not root.startswith('/') or any(character.isspace() for character in root) or '%' in root:
+    raise SystemExit('Maintenance directory is not a supported systemd path')
+text = unit.read_text()
+text = text.replace('/opt/video-factory/codex-broker/deployment/maintenance', root)
+unit.write_text(text)
+PY
   fi
   systemctl daemon-reload || return 1
 }
@@ -365,7 +388,7 @@ rollback_broker() {
 rollback() {
   local failed=0
   # 两个 broker 共享同一个 release 指针，先一起恢复并通过各自健康检查。
-  # 应用只有在候选容器已开始切换时才重建，避免 Broker 前置失败打断运行中的制作。
+  # 已在冻结窗口停止的原 app 也必须恢复，即使 broker 切换先失败。
   rollback_broker || failed=1
   if [[ "$app_mutated" -eq 1 ]]; then
     if [[ -z "$previous_image" ]] || ! docker image inspect video-factory:rollback >/dev/null 2>&1; then
@@ -379,6 +402,9 @@ rollback() {
         failed=1
       fi
     fi
+  elif [[ "$app_was_running" -eq 1 ]]; then
+    "${rollback_compose[@]}" up --detach --no-deps app || failed=1
+    wait_for_health 24 || failed=1
   fi
   return "$failed"
 }
@@ -388,21 +414,151 @@ deployment_committed=0
 rollback_in_progress=0
 app_mutated=0
 
+# —— 维护门禁（R3）：与 app/broker 的准入共用同一短锁和持久登记。 ——
+maintenance_directory="${VIDEO_FACTORY_MAINTENANCE_DIR:-$deployment_state/maintenance}"
+maintenance_owner="deploy-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
+maintenance_module=""
+maintenance_phase=""   # frozen 表示禁止新增写者；仍须另行核实实际进程退出。
+maintenance_recovery_allowed=0
+maintenance_endpoints=()
+drain_timeout_seconds="${VIDEO_FACTORY_DRAIN_TIMEOUT_SECONDS:-3600}"
+app_was_running=0
+active_broker_sockets=()
+
+maintenance_control() {
+  "$broker_root/bin/node" "$repository_root/scripts/production-maintenance.mjs" \
+    "$maintenance_module" "$maintenance_directory" "$1" "$maintenance_owner" "${@:2}"
+}
+
+# 失败只按原部署记录恢复；新版本则核准确版本及完整静止后再开放。
+reopen_gate() {
+  [[ -n "$maintenance_phase" ]] || return 0
+  if [[ "$deployment_committed" -eq 1 ]]; then
+    maintenance_control reopen "$release_sha" "http://127.0.0.1:4317/api/health" "unix:$deepseek_broker_socket" || return 1
+  else
+    [[ "$maintenance_recovery_allowed" -eq 1 ]] || return 1
+    maintenance_control recover || return 1
+  fi
+  maintenance_phase=""
+  echo "Maintenance gate reopened (owner=$maintenance_owner)." >&2
+  return 0
+}
+
+app_container_running() {
+  [[ "$(docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null || true)" == "true" ]]
+}
+
+service_stopped() {
+  local state
+  state="$(systemctl show "$1" --property=LoadState,ActiveState,SubState,MainPID,ControlPID --no-pager)" || return 1
+  WRITER_STATE="$state" "$broker_root/bin/node" --eval '
+    const s = Object.fromEntries((process.env.WRITER_STATE ?? "").trim().split("\n").map(line => {
+      const i = line.indexOf("="); return [line.slice(0, i), line.slice(i + 1)];
+    }));
+    process.exit(["loaded", "not-found"].includes(s.LoadState)
+      && s.ActiveState === "inactive" && s.SubState === "dead"
+      && s.MainPID === "0" && s.ControlPID === "0" ? 0 : 1);
+  '
+}
+
+app_stopped() {
+  local state
+  state="$(docker inspect --format='{{json .State}}' "$container")" || return 1
+  APP_STATE="$state" "$broker_root/bin/node" --eval '
+    try {
+      const s = JSON.parse(process.env.APP_STATE);
+      process.exit(s.Running === false && s.Pid === 0 && s.Restarting === false
+        && s.Dead === false && ["exited", "created"].includes(s.Status) ? 0 : 1);
+    } catch { process.exit(1); }
+  '
+}
+
+refuse_legacy_online_switch() {
+  echo "拒绝在线切换：$1 不支持维护门禁协议（无法安全排空/停写）。" >&2
+  echo "本次未停止任何服务、未切换任何制品。冷维护须先阻止新入口、确认原任务落稳，" >&2
+  echo "再正常停止全部写者 → 备份与隔离恢复验证 → 升级 → 闭门复验；不能确认落稳时停止操作。" >&2
+  exit 1
+}
+
+wait_for_quiescence() {
+  local deadline=$((SECONDS + drain_timeout_seconds))
+  while :; do
+    # helper 同锁核空集合→锁外刷新 live health→同锁核 generation/本机报告并冻结。
+    if maintenance_control freeze ${maintenance_endpoints[@]+"${maintenance_endpoints[@]}"}; then
+      maintenance_phase="frozen"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "Drain timed out after ${drain_timeout_seconds}s; verifying the original services before reopening." >&2
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+stop_writers() {
+  # 只在已冻结且完整排空后正常停止；未知/过渡状态不能证明退出。
+  maintenance_recovery_allowed=0
+  if [[ "$legacy_broker_was_active" -eq 1 ]]; then
+    systemctl stop "$broker_service" || return 1
+  fi
+  if [[ "$deepseek_broker_was_active" -eq 1 ]]; then
+    systemctl stop "$deepseek_broker_service" || return 1
+  fi
+  service_stopped "$broker_service" || return 1
+  service_stopped "$deepseek_broker_service" || return 1
+  service_stopped vf-zai-codex-broker || return 1
+  if [[ "$app_was_running" -eq 1 ]]; then
+    "${rollback_compose[@]}" stop --timeout -1 app >/dev/null || return 1
+  fi
+  if [[ -n "$previous_image" ]]; then app_stopped || return 1; fi
+  maintenance_recovery_allowed=1
+  return 0
+}
+
+resume_previous_writers() {
+  # 冻结后、切换制品前的失败：原制品未动，闭门拉起原有写者并等健康。
+  local failed=0
+  echo "Restoring the previous writers under the closed maintenance gate." >&2
+  restart_brokers "$deepseek_broker_rollback_kinds" 0 1 || failed=1
+  if [[ "$app_was_running" -eq 1 ]]; then
+    "${rollback_compose[@]}" up --detach --no-deps app || failed=1
+    wait_for_health 24 || failed=1
+  fi
+  return "$failed"
+}
+
 rollback_on_exit() {
-  local status="$?" rollback_status=0
+  local status="$?" recovery_status=0
   trap - EXIT
-  if [[ "$status" -ne 0 && "$deployment_mutated" -eq 1 && "$deployment_committed" -eq 0 && "$rollback_in_progress" -eq 0 ]]; then
-    rollback_in_progress=1
-    echo "Deployment failed; restoring the application and all configured brokers." >&2
-    set +e
-    rollback
-    rollback_status="$?"
-    set -e
-    if [[ "$rollback_status" -ne 0 ]]; then
-      echo "Rollback did not fully recover every component; operator intervention is required." >&2
+  if [[ "$status" -ne 0 ]]; then
+    if [[ "$deployment_mutated" -eq 1 && "$deployment_committed" -eq 0 && "$rollback_in_progress" -eq 0 ]]; then
+      rollback_in_progress=1
+      echo "Deployment failed; restoring the application and all configured brokers under the closed maintenance gate." >&2
+      set +e
+      rollback
+      recovery_status="$?"
+      set -e
+    elif [[ "$deployment_committed" -eq 0 && "$maintenance_phase" == "frozen" && "$maintenance_recovery_allowed" -eq 1 ]]; then
+      # 已确认停写、未切制品的失败可以闭门恢复原写者。
+      set +e
+      resume_previous_writers
+      recovery_status="$?"
+      set -e
+    elif [[ "$deployment_committed" -eq 0 && "$maintenance_phase" == "frozen" ]]; then
+      # 停止失败时进程状态未证实，不以 restart/强杀把它变成可恢复状态。
+      recovery_status=1
+    fi
+    if [[ "$recovery_status" -ne 0 ]]; then
+      # 恢复未完全成功：门禁保持 FROZEN 阻塞新工作并显式说明，不冒充恢复完成。
+      echo "Recovery did not fully restore every writer; the maintenance gate stays FROZEN (owner=$maintenance_owner). Operator intervention is required." >&2
+      exit "$status"
     fi
   fi
-  if [[ "$deployment_committed" -eq 1 ]]; then
+  if ! reopen_gate; then
+    echo "Maintenance recovery verification failed; gate remains closed (owner=$maintenance_owner)." >&2
+    [[ "$status" -ne 0 ]] || status=1
+  elif [[ "$deployment_committed" -eq 1 ]]; then
     rm -f "$previous_broker_unit_backup" "$previous_deepseek_broker_unit_backup"
   fi
   exit "$status"
@@ -443,6 +599,7 @@ stage_broker_release() {
     return 1
   fi
   rm -rf "$staging"
+  printf '%s\n' "$release_sha" > "$release_dir/release-sha" || return 1
   chown -R root:vf-bridge "$release_dir" || return 1
   chmod -R a+rX "$release_dir" || return 1
   candidate_broker_release="$release_dir"
@@ -473,6 +630,79 @@ candidate_broker_task_kinds="$(task_kinds_from_release "$candidate_broker_releas
   echo "Candidate broker release does not publish a valid task contract." >&2
   exit 1
 }
+# —— 维护事务（R3b 固定顺序）：拒绝旧协议 → 关新工作 → 排空 → 冻结 → 停写者
+# → 离线完整备份+隔离恢复校验 → 切换 → 闭门启动核验 → 同 owner 开门。 ——
+maintenance_module="$candidate_broker_release/node_modules/@video-factory/production-pipeline/dist/maintenance.js"
+[[ -f "$maintenance_module" ]] || { echo "Candidate is missing the shared maintenance protocol." >&2; exit 1; }
+export VIDEO_FACTORY_MAINTENANCE_DIR="$maintenance_directory"
+if [[ ! -e "$maintenance_directory" ]]; then
+  # setgid 让 app(1001) 与 broker(vf-bridge) 创建的锁/登记持续共享组。
+  install -d -m 2770 "$maintenance_directory"
+  if [[ "$(id -u)" -eq 0 ]]; then chown root:vf-bridge "$maintenance_directory"; fi
+  chmod 2770 "$maintenance_directory"
+fi
+
+# 未启用当前协议的退役写者不能由这次发布直接停止；需先获授权做冷维护。
+service_stopped vf-zai-codex-broker || refuse_legacy_online_switch "vf-zai-codex-broker 或其未证实退出状态"
+if [[ -n "$previous_image" ]]; then
+  if app_container_running; then
+    app_was_running=1
+    maintenance_control preflight "http://127.0.0.1:4317/api/health" || refuse_legacy_online_switch "当前运行中的 app"
+    maintenance_endpoints+=("http://127.0.0.1:4317/api/health")
+  else
+    app_stopped || { echo "App writer state is unknown; refusing deployment." >&2; exit 1; }
+  fi
+fi
+if [[ "$legacy_broker_was_active" -eq 1 ]]; then
+  maintenance_control preflight "unix:$broker_socket" || refuse_legacy_online_switch "旧版 $broker_service"
+  active_broker_sockets+=("$broker_socket")
+  maintenance_endpoints+=("unix:$broker_socket")
+else
+  service_stopped "$broker_service" || { echo "Legacy broker exit is unverified." >&2; exit 1; }
+fi
+if [[ "$deepseek_broker_was_active" -eq 1 ]]; then
+  maintenance_control preflight "unix:$deepseek_broker_socket" || refuse_legacy_online_switch "旧版 $deepseek_broker_service"
+  active_broker_sockets+=("$deepseek_broker_socket")
+  maintenance_endpoints+=("unix:$deepseek_broker_socket")
+else
+  service_stopped "$deepseek_broker_service" || { echo "DeepSeek broker exit is unverified." >&2; exit 1; }
+fi
+if [[ ! -e "$maintenance_directory/gate.json" ]]; then
+  if [[ -n "$previous_image" || "${#active_broker_sockets[@]}" -gt 0 ]]; then
+    refuse_legacy_online_switch "现有部署缺少持久维护门禁"
+  fi
+  maintenance_control initialize || exit 1
+fi
+# 关闭状态不能自动换 owner；受限 recover 命令核原部署记录、版本、进程与同锁证明。
+maintenance_control drain ${maintenance_endpoints[@]+"${maintenance_endpoints[@]}"} || exit 1
+maintenance_phase="draining"
+maintenance_recovery_allowed=1
+echo "Maintenance gate closed for draining (owner=$maintenance_owner)."
+if ! wait_for_quiescence; then exit 1; fi
+
+echo "Writers frozen; stopping the drained app and all brokers."
+if ! stop_writers; then
+  echo "Failed to stop writers cleanly; gate remains closed for operator verification." >&2
+  exit 1
+fi
+
+if [[ -n "$previous_image" || "${#active_broker_sockets[@]}" -gt 0 ]]; then
+  echo "Running the offline full backup with isolated restore verification."
+  if ! env \
+    VIDEO_FACTORY_MAINTENANCE_DIR="$maintenance_directory" \
+    VIDEO_FACTORY_MAINTENANCE_OWNER="$maintenance_owner" \
+    VIDEO_FACTORY_CONTAINER="$container" \
+    VIDEO_FACTORY_BACKUP_DIR="${VIDEO_FACTORY_BACKUP_DIR:-$broker_root/backups}" \
+    VIDEO_FACTORY_BACKUP_VERIFY_IMAGE=video-factory:candidate \
+    "$repository_root/scripts/backup-production.sh"; then
+    echo "Full backup or its restore verification failed; not switching artifacts." >&2
+    exit 1
+  fi
+else
+  # 首次安装由部署外层显式判定“不适用”；绝不写 full 成功标记（R2）。
+  echo "首次安装：没有旧部署可备份，离线完整备份不适用（不写 full 成功标记）。"
+fi
+
 # 候选 release 已完整校验；只有从这里切换指针后，失败才需要回滚应用和 broker。
 deployment_mutated=1
 if ! ln -sfn "$candidate_broker_release" "$broker_root/current"; then
@@ -499,17 +729,24 @@ if ! wait_for_health 36; then
   exit 1
 fi
 
+# 闭门状态下核对健康与准确版本：回显的 RELEASE_SHA 必须等于候选（R3b 第 5 步）。
+if [[ -n "$release_sha" ]] && ! app_health http://127.0.0.1:4317/api/health 15 "$release_sha"; then
+  echo "App is healthy but does not report the candidate release $release_sha." >&2
+  exit 1
+fi
+
 if [[ "$deepseek_broker_enabled" -eq 1 ]] && ! broker_health "$deepseek_broker_socket" deepseek deepseek \
   "$candidate_broker_task_kinds"; then
   echo "DeepSeek broker became unhealthy after the app deployment." >&2
   exit 1
 fi
 
-if [[ -n "$public_health_url" ]] && ! app_health "$public_health_url" 15; then
+if [[ -n "$public_health_url" ]] && ! app_health "$public_health_url" 15 "$release_sha"; then
   echo "Public health check failed: $public_health_url" >&2
   exit 1
 fi
 
+maintenance_control verify "$release_sha" "http://127.0.0.1:4317/api/health" "unix:$deepseek_broker_socket" || exit 1
 systemctl enable "$deepseek_broker_service" >/dev/null
 "${compose[@]}" config --format json | python3 -c 'import sys; print(sys.stdin.read().replace("$", "$$"))' \
   > "$deployment_state/current.compose.json.partial"
@@ -540,5 +777,8 @@ find "$broker_root/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 
         rm -rf "$stale"
       fi
     done || echo "Broker release cleanup was incomplete; deployment remains healthy." >&2
+
+# —— 同 owner 重开门禁：新版本已在闭门状态通过健康与版本核验（R3b 第 5 步）。 ——
+reopen_gate
 
 echo "VideoFactory deployment completed."

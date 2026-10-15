@@ -1,41 +1,8 @@
 #!/usr/bin/env bash
+# VideoFactory 离线完整备份（R2）入口。实际逻辑在 production-backup.py：
+# 只在维护门禁 FROZEN、全部写者已退出的窗口产出可验证的 full 归档。
 set -euo pipefail
 umask 077
 
-container="${VIDEO_FACTORY_CONTAINER:-video_factory_prod}"
-backup_root="${VIDEO_FACTORY_BACKUP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/backups/video-factory}"
-retention="${VIDEO_FACTORY_BACKUP_RETENTION:-7}"
-
-if ! docker inspect "$container" >/dev/null 2>&1; then
-  echo "No existing VideoFactory container; skipping metadata backup."
-  exit 0
-fi
-
-mkdir -p "$backup_root"
-timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-target="$backup_root/video-factory-metadata-$timestamp.tar.gz"
-partial="$target.partial"
-trap 'rm -f "$partial"' EXIT
-
-# 视频、音频和缓存可重新生成；自动备份只保留轻量工作流状态。
-# 独立只读挂载在停服维护时也可备份，不启动应用或旧任务。
-image="$(docker inspect --format='{{.Image}}' "$container")"
-workspace_volume="$(docker inspect --format='{{range .Mounts}}{{if eq .Destination "/data/factory"}}{{.Name}}{{end}}{{end}}' "$container")"
-[[ -n "$workspace_volume" ]] && docker volume inspect "$workspace_volume" >/dev/null
-docker run --rm --pull never --network none --user 0:0 \
-  --mount "type=volume,src=$workspace_volume,dst=/data/factory,readonly,volume-nocopy" \
-  --entrypoint tar "$image" -C /data/factory -czf - \
-  --exclude='*.mp4' \
-  --exclude='*.mov' \
-  --exclude='*.m4a' \
-  --exclude='*.wav' \
-  --exclude='*.png' \
-  --exclude='*.jpg' \
-  --exclude='*.jpeg' \
-  --exclude='*.webp' \
-  . >"$partial"
-mv "$partial" "$target"
-trap - EXIT
-
-find "$backup_root" -type f -name 'video-factory-metadata-*.tar.gz' -mtime "+$retention" -delete
-echo "Metadata backup written to $target"
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+python3 -I -B "${repository_root}/scripts/production-backup.py" --repository-root "$repository_root" "$@"
