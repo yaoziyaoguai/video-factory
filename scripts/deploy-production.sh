@@ -734,6 +734,7 @@ if [[ "$upgrade_mode" == "cold" ]]; then
   cold_control idle || exit 1
   # 旧版不能读取维护门禁：先关闭并排空外部入口，再正常停 app，复核全部 broker。
   cold_writers_touched=1
+  cold_control stop-app || exit 1
   "${rollback_compose[@]}" stop --timeout -1 app >/dev/null || exit 1
   app_stopped || exit 1
   cold_control stop-brokers || exit 1

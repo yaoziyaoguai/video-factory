@@ -13,7 +13,10 @@ from pathlib import Path
 import re
 import shlex
 import socket
+import signal
+import subprocess
 import sys
+import time
 
 spec = importlib.util.spec_from_file_location("production_backup", Path(__file__).with_name("production-backup.py"))
 backup = importlib.util.module_from_spec(spec)
@@ -21,6 +24,9 @@ spec.loader.exec_module(backup)
 Error = backup.BackupError
 SHA = re.compile(r"[a-f0-9]{40}")
 IMAGE = re.compile(r"sha256:[a-f0-9]{64}")
+LEGACY_RELEASE = "e2602eb7c80708382b41380ac94d65adfb5ecccb"
+LEGACY_IMAGE = "sha256:199d8eae34b464ba55a36be1a9b18bdfc57bf42dcaa2d1ebb0c06e0ca5fae237"
+APP_STOP_TIMEOUT = 30
 
 
 def utc_now():
@@ -258,6 +264,143 @@ def check_app_stopped(info):
         raise Error("app 尚未正常退出")
 
 
+def app_process(info):
+    pid = info.get("State", {}).get("Pid")
+    if not isinstance(pid, int) or pid <= 1:
+        raise Error("原 app PID 身份不可核实")
+    root = Path("/proc") / str(pid)
+    raw = (root / "stat").read_text()
+    fields = raw[raw.rfind(")") + 2:].split()
+    argv = (root / "cmdline").read_bytes().split(b"\0")
+    if raw.split(" (", 1)[0] != str(pid) or len(fields) < 20 or fields[0] == "Z" or not fields[19].isdigit():
+        raise Error("原 app 进程身份无效")
+    if argv not in ([b"node", b"apps/studio/dist/server/server/main.js", b""],
+                    [b"/usr/local/bin/node", b"apps/studio/dist/server/server/main.js", b""]):
+        raise Error("原 app 不是已知 Node 入口")
+    namespaces = dict(line.split(":", 1) for line in (root / "status").read_text().splitlines() if ":" in line)
+    if namespaces.get("NSpid", "").split() != [str(pid), "1"]:
+        raise Error("原 app 不是独立 PID namespace 中的 PID1")
+    return {"pid": pid, "startTime": fields[19], "bootId": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+            "cgroup": (root / "cgroup").read_text()}
+
+
+def empty_app_runs(state):
+    app_roles = [role for role in state["roles"] if role["role"] == "app-workspace"]
+    if len(app_roles) != 1 or app_roles[0]["logical"] != "/data/factory":
+        raise Error("旧 app 工作根身份不明确")
+    runs = Path(app_roles[0]["source"]) / "runs"
+    if runs.is_symlink() or not runs.is_dir() or any(runs.iterdir()):
+        raise Error("一次性旧 app 停止只允许空 runs 目录")
+
+
+def stop_identity(state, expected, process_identity=None):
+    # 不能等待被卡住的 daemon stop 锁；inspect 自身也有期限。
+    try:
+        raw = subprocess.run(["docker", "inspect", state["container"]["id"]], capture_output=True, text=True, timeout=3, check=False)
+    except subprocess.TimeoutExpired as error:
+        raise Error("原 app 停止身份查询超时；保留入口屏障") from error
+    result = json.loads(backup.require_command_success(raw, "原 app 停止身份查询"))
+    if not isinstance(result, list) or len(result) != 1:
+        raise Error("原 app 停止身份响应无效")
+    info = result[0]
+    if info.get("Id") != expected.get("Id") or info.get("Image") != expected.get("Image"):
+        raise Error("原 app 停止身份改变")
+    if info.get("RestartCount", 0) != expected.get("RestartCount", 0) or info.get("State", {}).get("StartedAt") != expected.get("State", {}).get("StartedAt"):
+        raise Error("原 app 在停止期间重启")
+    if info.get("State", {}).get("Running") is True and process_identity is not None and app_process(info) != process_identity:
+        raise Error("原 app PID 在停止期间改变")
+    return info
+
+
+def arm_legacy_stop(state, expected, process_identity):
+    if state["previousRelease"] != LEGACY_RELEASE or expected["Image"] != LEGACY_IMAGE:
+        raise Error("未授权的旧 app 兼容镜像")
+    assert_loopback(expected)
+    host = expected.get("HostConfig", {})
+    if host.get("PidMode", "") or host.get("NetworkMode") in ("host", "container") or str(host.get("NetworkMode", "")).startswith("container:"):
+        raise Error("旧 app 需要独立 PID 与网络 namespace")
+    if any(item.startswith("NODE_OPTIONS=") and item != "NODE_OPTIONS=" for item in expected.get("Config", {}).get("Env", [])):
+        raise Error("旧 app 含未核实的 Node 调试/加载参数")
+    empty_app_runs(state)
+    current = stop_identity(state, expected, process_identity)
+    if current.get("State", {}).get("Running") is not True:
+        raise Error("旧 app 在兼容准备前已退出")
+    script = Path(__file__).with_name("production-legacy-stop.mjs").read_text()
+    proof = json.dumps({key: process_identity[key] for key in ("startTime", "bootId")})
+    argv = ["docker", "exec", "-i", expected["Id"], "node", "--input-type=module", "-", proof]
+    try:
+        result = subprocess.run(argv, input=script, capture_output=True, text=True, timeout=20, check=False)
+    except subprocess.TimeoutExpired as error:
+        raise Error("旧 app 协作准备超时，调试口清理未证明；保留入口屏障") from error
+    value = json.loads(backup.require_command_success(result, "旧 app 协作准备（需确认调试口已清理）"))
+    if value.get("mode") not in ("legacy-once", "native-handler") or value.get("debuggerClosed") is not True \
+            or any(value.get(key) != process_identity[key] for key in ("startTime", "bootId")):
+        raise Error("旧 app 协作准备或调试口清理未得到证明")
+    stop_identity(state, expected, process_identity)
+    empty_app_runs(state)
+    return value["mode"]
+
+
+def stop_app(state):
+    expected = original_identity(state)
+    assert_loopback(expected)
+    if expected.get("Config", {}).get("StopSignal", "") not in ("", "SIGTERM", "15"):
+        raise Error("原 app Docker stop 不是正常 SIGTERM")
+    process_identity = app_process(expected)
+    idle(state)
+    if expected.get("State", {}).get("Running") is not True:
+        raise Error("原 app 已意外退出")
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise Error("冷升级正常停止需要 Linux pidfd 身份绑定")
+    descriptor = os.pidfd_open(process_identity["pid"])
+    controller = None
+    started = time.monotonic()
+    try:
+        stop_identity(state, expected, process_identity)
+        # daemon 负责 manual-stop 语义，防止 unless-stopped 自动拉起；-1 永不升级为 SIGKILL。
+        controller = subprocess.Popen(["docker", "stop", "--time", "-1", expected["Id"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        mode = "normal"
+        attempted = False
+        while time.monotonic() - started < APP_STOP_TIMEOUT:
+            info = stop_identity(state, expected, process_identity)
+            if info.get("State", {}).get("Running") is not True:
+                check_app_stopped(info)
+                if info["State"].get("ExitCode") != 0 or info["State"].get("OOMKilled") is not False:
+                    raise Error("原 app 未以 exit 0 自然退出")
+                # 正常 stop RPC 完成才能证明 restart policy 已受 daemon 抑制。
+                try:
+                    code = controller.wait(timeout=3)
+                except subprocess.TimeoutExpired as error:
+                    raise Error("原 app 已退出但 Docker 正常停止尚未完成") from error
+                if code != 0:
+                    raise Error("Docker 正常停止控制失败")
+                final = stop_identity(state, expected)
+                check_app_stopped(final)
+                if final["State"].get("ExitCode") != 0 or final["State"].get("OOMKilled") is not False:
+                    raise Error("原 app 正常停止最终状态改变")
+                return mode
+            if not attempted and time.monotonic() - started >= 2:
+                attempted = True
+                if state["previousRelease"] == LEGACY_RELEASE and expected["Image"] == LEGACY_IMAGE:
+                    # 先尝试已有正常 handler；两秒后仍活着才在本次停流、空闲证明下启用固定旧版兼容。
+                    mode = arm_legacy_stop(state, expected, process_identity)
+                stop_identity(state, expected, process_identity)
+                signal.pidfd_send_signal(descriptor, signal.SIGTERM)
+            if controller.poll() is not None and controller.returncode != 0:
+                raise Error("Docker 正常停止控制失败")
+            time.sleep(0.1)
+        raise Error("原 app 正常停止超时；未强杀 app，保留入口屏障")
+    finally:
+        os.close(descriptor)
+        if controller is not None and controller.poll() is None:
+            # 仅终止本次 CLI；daemon 的 -1 停止不变，绝不改容器信号或 restart policy。
+            controller.terminate()
+            try:
+                controller.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+
+
 def protect_stops(state, state_path):
     idle(state, app_stopped=True)
     protections = []
@@ -332,7 +475,7 @@ def evidence(state, output, *, restored=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "idle", "app-stopped", "stop-brokers", "stopped", "rollback-stopped", "restored", "cleanup"))
+    parser.add_argument("command", choices=("prepare", "idle", "stop-app", "app-stopped", "stop-brokers", "stopped", "rollback-stopped", "restored", "cleanup"))
     parser.add_argument("state", type=Path)
     parser.add_argument("--container", default="video_factory_prod")
     parser.add_argument("--image", default="video-factory:candidate")
@@ -355,6 +498,8 @@ def main():
             state = private_json(args.state)
             if args.command in ("idle", "app-stopped"):
                 idle(state, app_stopped=args.command == "app-stopped")
+            elif args.command == "stop-app":
+                stop_app(state)
             elif args.command == "stop-brokers":
                 protect_stops(state, args.state)
             elif args.command == "rollback-stopped":

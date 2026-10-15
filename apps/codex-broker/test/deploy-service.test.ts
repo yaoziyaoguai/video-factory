@@ -338,6 +338,8 @@ const source = { previousRelease: process.env.TEST_PREVIOUS_SHA, candidateReleas
   candidateEndpoints: ["http://127.0.0.1:4317/api/health", "unix:" + process.env.TEST_DEEPSEEK_SOCKET] };
 if (command === "prepare") {
   await writeFile(statePath, JSON.stringify({...source, ingressPath:input("--ingress")}));
+} else if (command === "stop-app") {
+  await writeFile(path.join(stateRoot,"app-running"), "0");
 } else if (command === "stop-brokers") {
   for (const service of ["vf-codex-broker", "vf-deepseek-codex-broker"]) {
     await writeFile(path.join(stateRoot,"systemd",service+".stopped"), "");
@@ -1247,7 +1249,7 @@ exit 42
     assert.equal(result.gateBefore, "");
     assert.equal(result.gateState, "open");
     assert.equal(result.appRelease, "a".repeat(40));
-    assertTraceOrder(result.trace, ["cold:prepare", "ingress:enter", "cold:idle", " stop --timeout -1 app",
+    assertTraceOrder(result.trace, ["cold:prepare", "ingress:enter", "cold:idle", "cold:stop-app", " stop --timeout -1 app",
       "cold:stop-brokers", "cold:stopped", "backup:", "->", "systemctl:restart vf-deepseek-codex-broker",
       " up --detach --remove-orphans --force-recreate app", "ingress:restore"]);
     assert.doesNotMatch(result.trace, /cold:restored/);
@@ -1259,6 +1261,15 @@ exit 42
     assert.equal(result.appRunning, true);
     assertTraceOrder(result.trace, ["ingress:enter", "cold:idle", "ingress:restore"]);
     assert.doesNotMatch(result.trace, / stop --timeout|systemctl:stop|backup:|->/);
+  });
+
+  it("does not advance cold deployment when cooperative app shutdown is unproved", async () => {
+    const result = await runDeployFailureScenario("success", { cold: true, env: { TEST_COLD_FAIL: "stop-app" } });
+    assert.equal(result.appRunning, true);
+    assert.equal(result.gateAfter, "");
+    assertTraceOrder(result.trace, ["ingress:enter", "cold:idle", "cold:stop-app"]);
+    assert.doesNotMatch(result.trace, / stop --timeout|cold:stop-brokers|ingress:restore|systemctl:restart|backup:|->/);
+    assert.match(result.stderr, /Cold stop was not fully verified/);
   });
 
   it("leaves cold ingress closed without restart when normal broker stop is unproved", async () => {

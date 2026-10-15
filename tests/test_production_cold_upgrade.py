@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -417,6 +417,189 @@ class ProductionColdUpgradeTests(unittest.TestCase):
         with self.assertRaisesRegex(cold.Error, "尚未关闭并排空"):
             cold.ingress_closed(state)
         self.assertEqual(self.commands, [])
+
+    @contextmanager
+    def app_stop_fixture(self, *, legacy=True, normal_exit=False, exit_code=0, terminate_on_signal=True):
+        state = self.prepared()
+        self.close_ingress()
+        (self.app_root / "runs").mkdir()
+        if legacy:
+            state["previousRelease"] = cold.LEGACY_RELEASE
+            state["container"]["image"] = cold.LEGACY_IMAGE
+            self.last_release.write_text(cold.LEGACY_RELEASE + "\n")
+            self.container["Image"] = cold.LEGACY_IMAGE
+        self.container["RestartCount"] = 0
+        self.container["State"].update(StartedAt="2026-10-15T00:00:00Z", OOMKilled=False, ExitCode=0)
+        proof = {"pid": 123, "startTime": "1234", "bootId": "01234567-89ab-cdef-0123-456789abcdef", "cgroup": "0::/fixture\n"}
+        observed = {"clock": 0.0, "events": [], "helper": None}
+        controller = Mock()
+        controller.returncode = None
+        controller.poll.side_effect = lambda: controller.returncode
+        def wait_controller(timeout):
+            if self.container["State"]["Running"]:
+                self.raise_timeout(timeout)
+            controller.returncode = 0
+            return 0
+        controller.wait.side_effect = wait_controller
+        controller.terminate.side_effect = lambda: observed["events"].append("controller-terminate")
+
+        def stop():
+            self.stop_app()
+            self.container["State"]["ExitCode"] = exit_code
+
+        def popen(argv, **kwargs):
+            observed["events"].append("docker-stop")
+            self.assertEqual(argv, ["docker", "stop", "--time", "-1", self.container["Id"]])
+            if normal_exit:
+                stop()
+            return controller
+
+        def sigterm(descriptor, sig):
+            self.assertEqual(descriptor, 90)
+            self.assertEqual(sig, cold.signal.SIGTERM)
+            observed["events"].append("sigterm")
+            if terminate_on_signal:
+                stop()
+
+        def command(argv, **kwargs):
+            if argv[:2] == ["docker", "inspect"]:
+                self.assertEqual(argv[2], self.container["Id"])
+                self.assertEqual(kwargs["timeout"], 3)
+                return subprocess.CompletedProcess(argv, 0, stdout=json.dumps([self.container]), stderr="")
+            if argv[:3] == ["docker", "exec", "-i"]:
+                self.assertEqual(argv[3:7], [self.container["Id"], "node", "--input-type=module", "-"])
+                self.assertEqual(json.loads(argv[7]), {key: proof[key] for key in ("startTime", "bootId")})
+                self.assertEqual(kwargs["timeout"], 20)
+                self.assertIn("process.once('SIGTERM', onTerm)", kwargs["input"])
+                observed["events"].append("arm")
+                if observed["helper"] is not None:
+                    return observed["helper"](argv, kwargs)
+                return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"mode": "legacy-once", "debuggerClosed": True, **proof}), stderr="")
+            raise AssertionError(argv)
+
+        def tick(seconds):
+            observed["clock"] += seconds
+
+        with patch.object(cold, "app_process", return_value=proof), \
+                patch.object(cold.os, "pidfd_open", return_value=90, create=True) as opened, \
+                patch.object(cold.os, "close") as closed, \
+                patch.object(cold.signal, "pidfd_send_signal", side_effect=sigterm, create=True), \
+                patch.object(cold.time, "monotonic", side_effect=lambda: observed["clock"]), \
+                patch.object(cold.time, "sleep", side_effect=tick), \
+                patch.object(cold.subprocess, "run", side_effect=command), \
+                patch.object(cold.subprocess, "Popen", side_effect=popen):
+            yield state, observed, controller, opened, closed
+
+    @staticmethod
+    def raise_timeout(timeout):
+        raise subprocess.TimeoutExpired("docker stop", timeout)
+
+    def test_stop_app_uses_manual_stop_then_exact_signal_only_after_legacy_debugger_is_closed(self):
+        with self.app_stop_fixture() as (state, observed, controller, opened, closed):
+            self.assertEqual(cold.stop_app(state), "legacy-once")
+            self.assertEqual(observed["events"], ["docker-stop", "arm", "sigterm"])
+            opened.assert_called_once_with(123)
+            closed.assert_called_once_with(90)
+            controller.terminate.assert_not_called()
+            self.assertFalse(self.container["State"]["Running"])
+
+    def test_stop_app_with_existing_native_handler_never_enables_debugger(self):
+        with self.app_stop_fixture(normal_exit=True) as (state, observed, *_):
+            self.assertEqual(cold.stop_app(state), "normal")
+            self.assertEqual(observed["events"], ["docker-stop"])
+
+    def test_stop_app_nonlegacy_image_can_only_use_normal_signal_and_times_out_without_force(self):
+        with self.app_stop_fixture(legacy=False, terminate_on_signal=False) as (state, observed, controller, _, closed):
+            with self.assertRaisesRegex(cold.Error, "正常停止超时"):
+                cold.stop_app(state)
+            self.assertEqual(observed["events"], ["docker-stop", "sigterm", "controller-terminate"])
+            self.assertLessEqual(observed["clock"], cold.APP_STOP_TIMEOUT + 0.2)
+            self.assertTrue(self.container["State"]["Running"])
+            controller.terminate.assert_called_once()
+            closed.assert_called_once_with(90)
+
+    def test_stop_app_refuses_nonempty_runs_without_arming_or_sending_extra_signal(self):
+        with self.app_stop_fixture() as (state, observed, *_):
+            (self.app_root / "runs" / "even-completed-run.json").write_text("{}")
+            with self.assertRaisesRegex(cold.Error, "空 runs"):
+                cold.stop_app(state)
+            self.assertEqual(observed["events"], ["docker-stop", "controller-terminate"])
+            self.assertTrue(self.container["State"]["Running"])
+
+    def test_stop_app_refuses_debug_cleanup_failure_and_preserves_live_app(self):
+        with self.app_stop_fixture() as (state, observed, *_):
+            observed["helper"] = lambda argv, kwargs: subprocess.CompletedProcess(argv, 0, stdout='{"mode":"legacy-once","debuggerClosed":false}', stderr="")
+            with self.assertRaisesRegex(cold.Error, "调试口清理未得到证明"):
+                cold.stop_app(state)
+            self.assertEqual(observed["events"], ["docker-stop", "arm", "controller-terminate"])
+            self.assertTrue(self.container["State"]["Running"])
+
+    def test_stop_app_requires_exit_zero(self):
+        with self.app_stop_fixture(normal_exit=True, exit_code=143) as (state, *_):
+            with self.assertRaisesRegex(cold.Error, "exit 0"):
+                cold.stop_app(state)
+
+    def test_stop_identity_binds_container_start_time_restart_count_and_pid(self):
+        expected = copy.deepcopy(self.container)
+        expected["RestartCount"] = 0
+        expected["State"]["StartedAt"] = "original"
+        for changed in ("id", "image", "start", "restart", "pid"):
+            with self.subTest(changed=changed):
+                info = copy.deepcopy(expected)
+                if changed == "id":
+                    info["Id"] = "f" * 64
+                elif changed == "image":
+                    info["Image"] = CANDIDATE_IMAGE
+                elif changed == "start":
+                    info["State"]["StartedAt"] = "new"
+                elif changed == "restart":
+                    info["RestartCount"] = 1
+                result = subprocess.CompletedProcess([], 0, stdout=json.dumps([info]))
+                with patch.object(cold.subprocess, "run", return_value=result), patch.object(cold, "app_process", return_value={"pid": 456}):
+                    with self.assertRaisesRegex(cold.Error, "身份改变|重启|PID.*改变"):
+                        cold.stop_identity({"container": {"id": expected["Id"]}}, expected, {"pid": 123})
+
+    def test_legacy_stop_rejects_unknown_image_and_unverified_node_options(self):
+        with self.app_stop_fixture() as (state, observed, *_):
+            expected = copy.deepcopy(self.container)
+            proof = {"pid": 123, "startTime": "1234", "bootId": "01234567-89ab-cdef-0123-456789abcdef", "cgroup": "0::/fixture\n"}
+            expected["Image"] = ORIGINAL_IMAGE
+            with self.assertRaisesRegex(cold.Error, "兼容镜像"):
+                cold.arm_legacy_stop(state, expected, proof)
+            expected = copy.deepcopy(self.container)
+            expected["Config"]["Env"].append("NODE_OPTIONS=--inspect-port=0.0.0.0:9333")
+            with self.assertRaisesRegex(cold.Error, "未核实.*参数"):
+                cold.arm_legacy_stop(state, expected, proof)
+            self.assertEqual(observed["events"], [])
+
+    def test_stop_app_rejects_debug_helper_timeout_without_signalling(self):
+        with self.app_stop_fixture() as (state, observed, *_):
+            def timeout(argv, kwargs):
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            observed["helper"] = timeout
+            with self.assertRaisesRegex(cold.Error, "调试口清理未证明"):
+                cold.stop_app(state)
+            self.assertEqual(observed["events"], ["docker-stop", "arm", "controller-terminate"])
+            self.assertTrue(self.container["State"]["Running"])
+
+    def test_stop_app_rejects_docker_stop_signal_override_before_mutation(self):
+        with self.app_stop_fixture() as (state, observed, *_):
+            self.container["Config"]["StopSignal"] = "SIGKILL"
+            with self.assertRaisesRegex(cold.Error, "不是正常 SIGTERM"):
+                cold.stop_app(state)
+            self.assertEqual(observed["events"], [])
+
+    def test_stop_app_requires_fresh_ingress_and_idle_before_starting_stop(self):
+        with self.app_stop_fixture() as (state, observed, *_):
+            self.ingress_exit = 1
+            with self.assertRaisesRegex(cold.Error, "入口屏障复核"):
+                cold.stop_app(state)
+            self.assertEqual(observed["events"], [])
+            self.ingress_exit = 0
+            self.health_responses[(state["units"][DEEPSEEK]["socket"], "/health")]["active"] = 1
+            with self.assertRaisesRegex(cold.Error, "执行/排队任务"):
+                cold.stop_app(state)
+            self.assertEqual(observed["events"], [])
 
     def test_normal_stop_installs_and_verifies_own_protections_before_any_stop(self):
         self.add_unit(OPENAI, "openai", active=True)
