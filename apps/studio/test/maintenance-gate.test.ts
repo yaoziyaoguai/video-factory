@@ -252,6 +252,13 @@ describe("maintenance admission in the studio app", () => {
 
   it("uses a fresh internal admission instead of forwarding a caller credential", async (t) => {
     const { gate } = await setup(t);
+    const releases: Promise<void>[] = [];
+    const release = gate.release.bind(gate);
+    t.mock.method(gate, "release", (token) => {
+      const pending = release(token);
+      releases.push(pending);
+      return pending;
+    });
     let internal: Record<string, string> | undefined;
     const service = { ...stubService, updateCreatorSettings: async () => {
       internal = maintenanceRequestHeaders();
@@ -265,5 +272,9 @@ describe("maintenance admission in the studio app", () => {
     assert.ok(internal?.["x-video-factory-admission"]);
     assert.notEqual(internal?.["x-video-factory-admission"], "public-caller-value");
     assert.equal(response.body.includes(internal!["x-video-factory-admission"]!), false);
+    // inject 返回不代表 onResponse 的持久释放完成；先等原释放再清理测试目录。
+    assert.ok(releases.length > 0);
+    await Promise.all(releases);
+    assert.equal((await gate.report({ complete: true })).holders.length, 0);
   });
 });
