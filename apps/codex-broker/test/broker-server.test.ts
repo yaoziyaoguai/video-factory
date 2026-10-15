@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import http from "node:http";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  MAINTENANCE_ADMISSION_HEADER,
+  MAINTENANCE_ADMISSION_PROTOCOL,
+  MaintenanceCoordinator,
+  transitionMaintenanceGate,
+} from "@video-factory/production-pipeline/maintenance";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -86,6 +92,7 @@ interface BrokerSpec {
   modelCandidates?: readonly string[];
   durableIdempotency?: boolean;
   durableSessions?: boolean;
+  maintenanceDirectory?: string;
 }
 
 async function startBroker(spec: BrokerSpec = {}): Promise<BrokerHandle> {
@@ -105,6 +112,7 @@ async function startBroker(spec: BrokerSpec = {}): Promise<BrokerHandle> {
     ...(spec.now !== undefined ? { now: spec.now } : {}),
     ...(spec.durableIdempotency ? { idempotencyDirectory: path.join(directory, "idempotency") } : {}),
     ...(spec.durableSessions ? { sessionDirectory: path.join(directory, "sessions") } : {}),
+    ...(spec.maintenanceDirectory ? { maintenanceDirectory: spec.maintenanceDirectory } : {}),
   });
   await server.start();
   return {
@@ -1515,6 +1523,305 @@ describe("CodexBrokerServer reviewed model overrides", () => {
       assert.equal((JSON.parse(switched.body) as { failureKind: string }).failureKind, "binding_conflict");
     } finally {
       await broker.close();
+    }
+  });
+});
+
+describe("broker maintenance status (R3)", () => {
+  it("accepts only a registered chain while draining and retains broker ownership after HTTP and parent completion", async () => {
+    const maintenanceDirectory = await mkdtemp(path.join(tmpdir(), "vf-broker-owned-"));
+    await transitionMaintenanceGate(maintenanceDirectory, "open", "setup");
+    const app = new MaintenanceCoordinator({ directory: maintenanceDirectory, serviceId: "app-test" });
+    const parent = await app.admit("production");
+    const finish = new Deferred<void>();
+    const entered = new Deferred<void>();
+    let calls = 0;
+    const broker = await startBroker({ maintenanceDirectory, durableIdempotency: true, script: async () => {
+      calls += 1; entered.resolve(); await finish.promise; return { output: '{"ideas":[]}' };
+    } });
+    try {
+      await transitionMaintenanceGate(maintenanceDirectory, "draining", "deploy-owned");
+      const rejected = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body: topicTaskBody("new-top-level") });
+      assert.equal(rejected.status, 503);
+      const spoofed = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body: topicTaskBody("spoofed"),
+        headers: { [MAINTENANCE_ADMISSION_HEADER]: "00000000-0000-4000-8000-000000000000" } });
+      assert.equal(spoofed.status, 500);
+      assert.equal(calls, 0);
+      const body = topicTaskBody("owned-continuation");
+      const accepted = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body,
+        headers: { [MAINTENANCE_ADMISSION_HEADER]: parent.id } });
+      assert.equal(accepted.status, 202);
+      await entered.promise;
+      await app.release(parent);
+      const holders = JSON.parse(await readFile(path.join(maintenanceDirectory, "holders.json"), "utf8")) as {
+        holders: Array<{ id: string; rootId: string; serviceId: string }>;
+      };
+      assert.equal(holders.holders.length, 1);
+      assert.equal(holders.holders[0]!.rootId, parent.rootId);
+      assert.notEqual(holders.holders[0]!.serviceId, parent.serviceId);
+      const health = await brokerRequest(broker.socketPath, { method: "GET", path: "/health" });
+      assert.equal(JSON.parse(health.body).maintenance.protocol, MAINTENANCE_ADMISSION_PROTOCOL);
+      assert.equal(JSON.parse(health.body).maintenance.quiescent, false);
+      for (const id of [parent.id, holders.holders[0]!.id]) assert.equal(health.body.includes(id), false);
+      const replay = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
+      assert.equal(replay.status, 202, "same accepted request remains observable without a new holder");
+      assert.equal(calls, 1);
+      await assert.rejects(() => transitionMaintenanceGate(maintenanceDirectory, "frozen", "deploy-owned"), /holders/);
+      finish.resolve();
+      await waitFor(async () => (await broker.server.maintenanceStatus()).quiescent);
+      await transitionMaintenanceGate(maintenanceDirectory, "frozen", "deploy-owned");
+      const frozen = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body: topicTaskBody("frozen-new") });
+      assert.equal(frozen.status, 503);
+      assert.equal(calls, 1);
+    } finally {
+      finish.resolve(); await app.release(parent); await broker.close();
+      await rm(maintenanceDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("serves completed POST and GET facts under frozen maintenance without repairing session files", async () => {
+    const maintenanceDirectory = await mkdtemp(path.join(tmpdir(), "vf-broker-query-"));
+    await transitionMaintenanceGate(maintenanceDirectory, "open", "setup");
+    let calls = 0;
+    const broker = await startBroker({ maintenanceDirectory, durableIdempotency: true, durableSessions: true, script: () => {
+      calls += 1; return { output: '{"ideas":[]}', sessionId: "019c0000-0000-7000-8000-000000000021" };
+    } });
+    try {
+      const body = JSON.stringify({ ...JSON.parse(topicTaskBody("readonly-session")), sessionKey: "run-maintenance:topic" });
+      const completed = await postTaskAwaitOutcome(broker.socketPath, body);
+      assert.equal(completed.status, 200);
+      await waitFor(async () => (await broker.server.maintenanceStatus()).quiescent);
+      const result = JSON.parse(completed.body) as { requestId: string; binding: Record<string, unknown> };
+      const sessions = path.join(broker.directory, "sessions");
+      await rm(sessions, { recursive: true, force: true });
+      await transitionMaintenanceGate(maintenanceDirectory, "draining", "deploy-query");
+      await transitionMaintenanceGate(maintenanceDirectory, "frozen", "deploy-query");
+      const holderBytes = await readFile(path.join(maintenanceDirectory, "holders.json"), "utf8");
+      const queried = await brokerRequest(broker.socketPath, { method: "GET", path: `/v1/tasks/${result.requestId}`, headers: queryHeaders(result.binding) });
+      const replayed = await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body });
+      assert.equal(queried.status, 200);
+      assert.equal(replayed.status, 200);
+      assert.equal(JSON.parse(queried.body).state, "completed_success");
+      assert.equal(calls, 1);
+      await assert.rejects(stat(sessions), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+      assert.equal(await readFile(path.join(maintenanceDirectory, "holders.json"), "utf8"), holderBytes);
+    } finally { await broker.close(); await rm(maintenanceDirectory, { recursive: true, force: true }); }
+  });
+
+  it("fails closed on malformed gate and holder persistence failure before acceptance", async () => {
+    const maintenanceDirectory = await mkdtemp(path.join(tmpdir(), "vf-broker-fail-closed-"));
+    await transitionMaintenanceGate(maintenanceDirectory, "open", "setup");
+    let calls = 0;
+    const broker = await startBroker({ maintenanceDirectory, durableIdempotency: true, script: () => {
+      calls += 1; return { output: '{"ideas":[]}' };
+    } });
+    try {
+      const gatePath = path.join(maintenanceDirectory, "gate.json");
+      const gate = await readFile(gatePath, "utf8");
+      await writeFile(gatePath, "{broken");
+      assert.equal((await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body: topicTaskBody("bad-gate") })).status, 500);
+      assert.equal((await broker.server.maintenanceStatus()).quiescent, false);
+      await writeFile(gatePath, gate);
+      const holdersPath = path.join(maintenanceDirectory, "holders.json");
+      await rename(holdersPath, `${holdersPath}.saved`);
+      await mkdir(holdersPath);
+      assert.equal((await brokerRequest(broker.socketPath, { method: "POST", path: "/v1/tasks", body: topicTaskBody("bad-holders") })).status, 500);
+      assert.equal(calls, 0);
+      assert.equal((await readdir(path.join(broker.directory, "idempotency"))).some((name) => name.endsWith(".json")), false);
+      await rm(holdersPath, { recursive: true });
+      await rename(`${holdersPath}.saved`, holdersPath);
+    } finally { await broker.close(); await rm(maintenanceDirectory, { recursive: true, force: true }); }
+  });
+
+  it("rejects truncated, misnamed and unowned durable facts from the quiescence proof", async () => {
+    const maintenanceDirectory = await mkdtemp(path.join(tmpdir(), "vf-broker-integrity-"));
+    await transitionMaintenanceGate(maintenanceDirectory, "open", "setup");
+    const broker = await startBroker({ maintenanceDirectory, durableIdempotency: true, durableSessions: true });
+    try {
+      const body = topicTaskBody("integrity");
+      const completed = await postTaskAwaitOutcome(broker.socketPath, body);
+      assert.equal(completed.status, 200);
+      await waitFor(async () => (await broker.server.maintenanceStatus()).quiescent);
+      const requestId = JSON.parse(body).requestId as string;
+      const recordPath = path.join(broker.directory, "idempotency", `${createHash("sha256").update(requestId).digest("hex")}.json`);
+      const valid = await readFile(recordPath, "utf8");
+      const invalidVariants = ["{truncated", JSON.stringify({ ...JSON.parse(valid), requestId: "different-request" }),
+        JSON.stringify({ ...JSON.parse(valid), state: "accepted", outcome: undefined }),
+        JSON.stringify({ ...JSON.parse(valid), state: "accepted", outcome: undefined, uncertainty: { localExecutionEndedAt: "not-a-date" } })];
+      for (const value of invalidVariants) {
+        await writeFile(recordPath, value);
+        const status = await broker.server.maintenanceStatus();
+        assert.equal(status.quiescent, false);
+        assert.equal(status.integrity.complete, false);
+      }
+      await writeFile(recordPath, valid);
+      const storePath = path.join(broker.directory, "idempotency", ".store-id");
+      const storeId = await readFile(storePath, "utf8");
+      await writeFile(storePath, "vfs_store_" + "a".repeat(32));
+      assert.equal((await broker.server.maintenanceStatus()).quiescent, false);
+      await writeFile(storePath, storeId);
+      const sessions = path.join(broker.directory, "sessions");
+      await mkdir(sessions, { recursive: true });
+      await writeFile(path.join(sessions, `${"a".repeat(64)}.json`), "{truncated");
+      assert.equal((await broker.server.maintenanceStatus()).quiescent, false);
+    } finally { await broker.close(); await rm(maintenanceDirectory, { recursive: true, force: true }); }
+  });
+
+  it("reports quiescence and the gate view on /health only when a maintenance directory is configured", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "video-factory-broker-maintenance-"));
+    const maintenanceDirectory = await mkdtemp(path.join(tmpdir(), "video-factory-broker-gate-"));
+    const open = await transitionMaintenanceGate(maintenanceDirectory, "open", "setup");
+    let started = 0;
+    let releaseTask!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseTask = resolve; });
+    const server = new CodexBrokerServer({
+      socketPath: path.join(directory, "worker.sock"),
+      executor: new ScriptedExecutor(async () => {
+        started += 1;
+        await gate;
+        return { output: "{\"ideas\":[]}" };
+      }),
+      idempotencyDirectory: path.join(directory, "idempotency"),
+      maintenanceDirectory,
+    });
+    await server.start();
+    try {
+      const socketPath = path.join(directory, "worker.sock");
+      const idleHealth = JSON.parse((await brokerRequest(socketPath, { method: "GET", path: "/health" })).body) as {
+        maintenance?: { quiescent: boolean; gate: unknown };
+      };
+      assert.equal(idleHealth.maintenance?.quiescent, true);
+      assert.deepEqual(idleHealth.maintenance?.gate, open);
+
+      // durable 模式：先受理再关门；执行器阻塞期间必须判定为非静止。
+      const accepted = await brokerRequest(socketPath, {
+        method: "POST", path: "/v1/tasks",
+        body: topicTaskBody("maintenance-active"),
+      });
+      assert.equal(accepted.status, 202);
+      await waitFor(() => started === 1);
+      const draining = await transitionMaintenanceGate(maintenanceDirectory, "draining", "deploy-1");
+      const busyHealth = JSON.parse((await brokerRequest(socketPath, { method: "GET", path: "/health" })).body) as {
+        maintenance?: { quiescent: boolean; gate: { state: string; owner: string } };
+      };
+      assert.equal(busyHealth.maintenance?.quiescent, false, "已受理任务在执行中不得判定静止");
+      assert.deepEqual(busyHealth.maintenance?.gate, draining);
+      releaseTask();
+      await waitFor(async () => {
+        const settled = JSON.parse((await brokerRequest(socketPath, { method: "GET", path: "/health" })).body) as { maintenance?: { quiescent: boolean } };
+        return settled.maintenance?.quiescent === true;
+      });
+    } finally {
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
+      await rm(maintenanceDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the plain health report byte-compatible when no maintenance directory is configured", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "video-factory-broker-plain-health-"));
+    const server = new CodexBrokerServer({
+      socketPath: path.join(directory, "worker.sock"),
+      executor: new ScriptedExecutor(() => ({ output: "{\"ideas\":[]}" })),
+    });
+    await server.start();
+    try {
+      const health = JSON.parse((await brokerRequest(path.join(directory, "worker.sock"), { method: "GET", path: "/health" })).body) as Record<string, unknown>;
+      assert.equal("maintenance" in health, false);
+    } finally {
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a settled unknown as quiescent with identity intact and blocks while it is still running", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "video-factory-broker-unknown-quiesce-"));
+    const maintenanceDirectory = await mkdtemp(path.join(tmpdir(), "video-factory-broker-unknown-gate-"));
+    await transitionMaintenanceGate(maintenanceDirectory, "open", "setup");
+    let releaseTask!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseTask = resolve; });
+    let released = false;
+    const server = new CodexBrokerServer({
+      socketPath: path.join(directory, "worker.sock"),
+      executor: new ScriptedExecutor(async () => {
+        if (!released) {
+          // 执行中的 unknown：本地结论未定，必须阻断静止判定。
+          await gate;
+          throw new CodexExecutorError("stream interrupted while awaiting provider", false, {
+            outcomeUncertain: true,
+            failureKind: "model_provider_transient",
+            details: { category: "network", reasonCode: "response_stream_interrupted", providerId: "openai", modelId: "gpt-test" },
+          });
+        }
+        return { output: "{\"ideas\":[]}" };
+      }),
+      idempotencyDirectory: path.join(directory, "idempotency"),
+      maintenanceDirectory,
+    });
+    await server.start();
+    try {
+      const socketPath = path.join(directory, "worker.sock");
+      const body = topicTaskBody("unknown-quiesce");
+      const accepted = await brokerRequest(socketPath, { method: "POST", path: "/v1/tasks", body });
+      assert.equal(accepted.status, 202);
+      const binding = (JSON.parse(accepted.body) as { binding: Record<string, unknown> }).binding;
+      const requestId = (JSON.parse(body) as { requestId: string }).requestId;
+
+      const busy = await server.maintenanceStatus();
+      assert.equal(busy.quiescent, false, "执行中的 unknown 不得判定静止");
+      releaseTask();
+      released = true;
+
+      // unknown 落稳后：等待人工的原请求可作为静止数据保存，身份与占用不变。
+      await waitFor(async () => {
+        const status = await server.maintenanceStatus();
+        return status.quiescent === true;
+      });
+      const query = await brokerRequest(socketPath, {
+        method: "GET", path: `/v1/tasks/${encodeURIComponent(requestId)}`,
+        headers: queryHeaders(binding),
+      });
+      assert.equal(query.status, 200);
+      const state = JSON.parse(query.body) as { state: string; failureDetails?: { reasonCode?: string } };
+      assert.equal(state.state, "accepted_unknown");
+      assert.equal(state.failureDetails?.reasonCode, "response_stream_interrupted");
+      const record = JSON.parse(await readFile(
+        path.join(directory, "idempotency", `${createHash("sha256").update(requestId).digest("hex")}.json`),
+        "utf8",
+      )) as { requestId: string; state: string; uncertainty?: unknown; binding?: { requestDigest?: string } };
+      assert.equal(record.state, "accepted");
+      assert.ok(record.uncertainty !== undefined, "unknown 依据不得被清空以达成排空");
+      assert.equal(record.requestId, requestId);
+      assert.equal(record.binding?.requestDigest, binding.requestDigest);
+    } finally {
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
+      await rm(maintenanceDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not call a durable store idle when its persistent state is unreadable", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "video-factory-broker-unreadable-"));
+    await transitionMaintenanceGate(directory, "open", "setup");
+    const server = new CodexBrokerServer({
+      socketPath: path.join(directory, "worker.sock"),
+      executor: new ScriptedExecutor(() => ({ output: "{\"ideas\":[]}" })),
+      idempotencyDirectory: path.join(directory, "idempotency"),
+      maintenanceDirectory: directory,
+    });
+    await server.start();
+    try {
+      const storePath = path.join(directory, "idempotency");
+      // 幂等目录由 start() 惰性创建；显式建一次再收走读权限，验证不可读即非静止。
+      await mkdir(storePath, { recursive: true });
+      await chmod(storePath, 0o000);
+      const status = await server.maintenanceStatus();
+      assert.equal(status.detail.storeReadable, false);
+      assert.equal(status.quiescent, false, "持久状态不可读不得当作静止");
+    } finally {
+      await chmod(path.join(directory, "idempotency"), 0o700);
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
     }
   });
 });

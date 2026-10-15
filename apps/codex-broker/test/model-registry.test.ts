@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ModelRegistry } from "../src/model-registry.js";
+import {
+  MAINTENANCE_ADMISSION_PROTOCOL,
+  MaintenanceCoordinator,
+  runWithMaintenanceAdmission,
+  transitionMaintenanceGate,
+} from "@video-factory/production-pipeline/maintenance";
 import { CodexBridgeClient, type CodexPreparedOperation } from "../../../packages/production-pipeline/src/codex-chat.js";
 import { taskContractDescriptorFor } from "../src/task-definitions.js";
 
@@ -55,4 +61,97 @@ test("registry persists private credentials, uses separate durable model identit
     await registry.handle("POST", `/v1/models/${model.id}/enable`);
     assert.equal(registry.list()[0]!.enabled, true);
   } finally { await registry.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("registry retains registered queued writes through draining and reports all disabled model instances", async () => {
+  const directory = await mkdtemp("/tmp/vf-registry-queue-");
+  const maintenanceDirectory = await mkdtemp("/tmp/vf-registry-queue-gate-");
+  await transitionMaintenanceGate(maintenanceDirectory, "open", "setup");
+  const app = new MaintenanceCoordinator({ directory: maintenanceDirectory, serviceId: "registry-app" });
+  const parent = await app.admit("model-settings");
+  const registry = new ModelRegistry({ directory, socketDirectory: directory, timeoutMs: 2000, maintenanceDirectory,
+    createExecutor: (entry) => ({
+      identity: { profileId: "deepseek", providerId: entry.id, modelId: entry.id, taskKinds: ["topic-ideas"] },
+      runTask: async () => { throw new Error("No model work expected."); },
+    }),
+  });
+  let resume!: () => void;
+  const blocked = new Promise<void>((resolve) => { resume = resolve; });
+  const internals = registry as unknown as { writes: Promise<unknown> };
+  try {
+    await registry.start();
+    internals.writes = blocked;
+    const input = { label: "排队模型", protocol: "openai-chat-completions", baseUrl: "https://example.com/v1", modelId: "native/model", apiKey: "private-test-key", capabilities: ["text"], maxOutputTokens: 32768 };
+    const first = registry.handle("POST", "/v1/models", input);
+    const second = registry.handle("POST", "/v1/models", input);
+    const deadline = Date.now() + 2_000;
+    for (;;) {
+      const report = JSON.parse(await readFile(path.join(maintenanceDirectory, "holders.json"), "utf8")) as { holders: Array<{ kind: string }> };
+      if (report.holders.filter((entry) => entry.kind === "model-registry-write").length === 2) break;
+      if (Date.now() > deadline) throw new Error("Registry admission did not become ready.");
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await transitionMaintenanceGate(maintenanceDirectory, "draining", "deploy-queue");
+    const busy = await registry.maintenanceStatus();
+    assert.equal(busy.quiescent, false);
+    assert.equal(busy.detail.pendingWrites, 2);
+    assert.equal(busy.protocol, MAINTENANCE_ADMISSION_PROTOCOL);
+    assert.equal(JSON.stringify(busy).includes(parent.id), false);
+    await assert.rejects(() => registry.handle("POST", "/v1/models", input), /Maintenance draining/);
+    resume();
+    await Promise.all([first, second]);
+    assert.equal(registry.list().length, 2, "admitted queued writes complete after gate closes");
+    const modelId = registry.list()[0]!.id;
+    await runWithMaintenanceAdmission(parent, () => registry.handle("POST", `/v1/models/${modelId}/disable`));
+    assert.equal(registry.list()[0]!.enabled, false);
+    await app.release(parent);
+    const idle = await registry.maintenanceStatus();
+    assert.equal(idle.quiescent, true);
+    assert.equal(idle.servers.length, 2, "disabled model remains in the aggregate");
+    await writeFile(path.join(directory, "models.json"), "{truncated");
+    assert.equal((await registry.maintenanceStatus()).quiescent, false);
+    await writeFile(path.join(maintenanceDirectory, "gate.json"), "{bad-gate");
+    await assert.rejects(() => registry.handle("POST", "/v1/models", input));
+    assert.equal((await registry.maintenanceStatus()).integrity.complete, false);
+  } finally {
+    resume(); await app.release(parent); await registry.close();
+    await rm(directory, { recursive: true, force: true }); await rm(maintenanceDirectory, { recursive: true, force: true });
+  }
+});
+
+test("registry pauses registration writes under the maintenance gate and reports aggregate quiescence", async () => {
+  const directory = await mkdtemp("/tmp/vf-registry-maintenance-");
+  const maintenanceDirectory = await mkdtemp("/tmp/vf-registry-maintenance-gate-");
+  await transitionMaintenanceGate(maintenanceDirectory, "open", "setup");
+  const registry = new ModelRegistry({ directory, socketDirectory: directory, timeoutMs: 2000, maintenanceDirectory,
+    createExecutor: (entry) => ({
+      identity: { profileId: "deepseek", providerId: entry.id, modelId: entry.id, taskKinds: ["topic-ideas"] },
+      runTask: async () => ({ output: '{"ideas":[]}', trace: {
+        providerId: entry.id, modelId: entry.id, taskKind: "topic-ideas",
+        promptVersion: taskContractDescriptorFor("topic-ideas").promptVersion,
+        contractDigest: taskContractDescriptorFor("topic-ideas").digest, prompt: "test",
+      } }),
+    }),
+  });
+  try {
+    await registry.start();
+    const input = { label: "我的模型", protocol: "openai-chat-completions", baseUrl: "https://example.com/v1", modelId: "native/model", apiKey: "private-test-key", capabilities: ["text"], maxOutputTokens: 32768 };
+    await registry.handle("POST", "/v1/models", input);
+    const idle = await registry.maintenanceStatus();
+    assert.equal(idle.quiescent, true);
+    assert.equal(idle.servers.length, 1);
+
+    // 门禁关闭：注册类写入拒绝，查询照常。
+    await transitionMaintenanceGate(maintenanceDirectory, "draining", "deploy-1");
+    await assert.rejects(() => registry.handle("POST", "/v1/models", input), /Maintenance draining/);
+    await assert.rejects(() => registry.handle("POST", `/v1/models/${registry.list()[0]!.id}/disable`), /Maintenance draining/);
+    const models = await registry.handle("GET", "/v1/models");
+    assert.equal((models as { models: unknown[] }).models.length, 1);
+    // 静止判定不受门禁状态本身影响：没有本地写者即静止。
+    assert.equal((await registry.maintenanceStatus()).quiescent, true);
+  } finally {
+    await registry.close();
+    await rm(directory, { recursive: true, force: true });
+    await rm(maintenanceDirectory, { recursive: true, force: true });
+  }
 });

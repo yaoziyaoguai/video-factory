@@ -1,8 +1,18 @@
 import http from "node:http";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { diagnosticEvent } from "@video-factory/production-pipeline/diagnostics";
+import {
+  MAINTENANCE_ADMISSION_PROTOCOL,
+  MaintenanceCoordinator,
+  MaintenancePausedError,
+  publicMaintenanceReport,
+  requestAdmissionId,
+  runWithMaintenanceAdmission,
+  type BrokerAdmission,
+  type BrokerMaintenanceStatus,
+} from "./maintenance-gate.js";
 import {
   CODEX_BRIDGE_PROTOCOL_VERSION,
   BROKER_TASK_KINDS,
@@ -211,8 +221,13 @@ export interface CodexBrokerServerOptions {
   shutdownTimeoutMs?: number;
   idempotencyDirectory?: string;
   sessionDirectory?: string;
+  releaseSha?: string;
   now?: () => Date;
   modelManagement?: (method: string, url: string, body?: unknown) => Promise<unknown>;
+  /** 维护共享目录（R3）：提供时 /health 附带维护视图与静止判定。 */
+  maintenanceDirectory?: string;
+  /** 聚合其他实例（如注册模型服务）的静止判定；任一未静止即整体未静止。 */
+  maintenanceAggregate?: () => Promise<{ quiescent: boolean; detail?: Record<string, unknown> }>;
 }
 
 export class CodexBrokerServer {
@@ -234,8 +249,17 @@ export class CodexBrokerServer {
   private readonly backgroundFailures = new Map<string, string>();
   private ownerLock: OwnerLock | undefined;
   private storeId: string | undefined;
+  private readonly maintenance: MaintenanceCoordinator;
+  private readonly maintenanceServiceId: string;
+  private readonly maintenanceFailures = new Set<string>();
 
   constructor(private readonly options: CodexBrokerServerOptions) {
+    this.maintenanceServiceId = `broker-${createHash("sha256").update(options.socketPath).digest("hex").slice(0, 16)}-${randomUUID()}`;
+    this.maintenance = new MaintenanceCoordinator({
+      ...(options.maintenanceDirectory ? { directory: options.maintenanceDirectory } : {}),
+      serviceId: this.maintenanceServiceId,
+      ...(options.now ? { now: options.now } : {}),
+    });
     this.concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
     this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
@@ -252,6 +276,7 @@ export class CodexBrokerServer {
 
   async start(): Promise<void> {
     try {
+      await this.maintenance.announceStartup();
       if (this.options.idempotencyDirectory) {
         this.ownerLock = await acquireOwnerLock(this.options.idempotencyDirectory);
         this.storeId = await ensureStoreId(this.options.idempotencyDirectory);
@@ -315,6 +340,7 @@ export class CodexBrokerServer {
   healthReport(): Record<string, unknown> {
     return {
       protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+      ...(this.options.releaseSha ? { release: this.options.releaseSha } : {}),
       taskBindingVersion: TASK_BINDING_VERSION,
       ...(this.storeId ? { storeId: this.storeId } : {}),
       taskContracts: Object.fromEntries(
@@ -336,6 +362,101 @@ export class CodexBrokerServer {
     };
   }
 
+  /** 静止必须同时证明生命周期结束和完整持久身份；unknown 只接受明确本地结束的原记录。 */
+  async maintenanceStatus(): Promise<BrokerMaintenanceStatus> {
+    const issues = [...this.maintenanceFailures];
+    const detail: Record<string, unknown> = {
+      queued: this.queue.queued(),
+      active: this.queue.active(),
+      backgroundTasks: this.backgroundTasks.size,
+      sessionTails: this.sessionTails.size,
+      idempotentTasks: this.idempotentTasks.size,
+    };
+    try {
+      await this.inspectPersistentState(issues);
+      detail.storeReadable = true;
+    } catch {
+      detail.storeReadable = false;
+      issues.push("persistent_state_unreadable");
+    }
+    const lifecycleIdle = detail.queued === 0 && detail.active === 0
+      && detail.backgroundTasks === 0 && detail.sessionTails === 0 && detail.idempotentTasks === 0;
+    if (!lifecycleIdle) issues.push("local_work_active");
+    if (this.options.maintenanceAggregate) {
+      try {
+        const aggregated = await this.options.maintenanceAggregate();
+        detail.aggregate = aggregated.detail ?? { quiescent: aggregated.quiescent };
+        if (!aggregated.quiescent) issues.push("registered_models_not_quiescent");
+      } catch {
+        issues.push("registered_models_unreadable");
+      }
+    }
+    try {
+      const report = await this.maintenance.report({ complete: issues.length === 0, issues });
+      return { ...publicMaintenanceReport(report), detail };
+    } catch {
+      // 坏门禁、登记集合或报告写入失败不能变成 OPEN/idle；旧报告也不能证明本次观察。
+      return {
+        protocol: MAINTENANCE_ADMISSION_PROTOCOL,
+        serviceId: this.maintenanceServiceId,
+        updatedAt: new Date().toISOString(),
+        gate: null,
+        gateView: null,
+        inflightCount: this.maintenance.currentInflight().length,
+        holderCount: -1,
+        integrity: { complete: false, issueCount: issues.length + 1 },
+        quiescent: false,
+        detail,
+      };
+    }
+  }
+
+  private async inspectPersistentState(issues: string[]): Promise<void> {
+    const directory = this.options.idempotencyDirectory;
+    if (directory) {
+      const storedId = (await readFile(path.join(directory, STORE_ID_FILE), "utf8")).trim();
+      if (!isStoreId(storedId) || storedId !== this.storeId) issues.push("store_identity_mismatch");
+      const owner = await readOwnerLock(path.join(directory, OWNER_LOCK_FILE));
+      if (!owner || owner.token !== this.ownerLock?.token) issues.push("store_owner_unverifiable");
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (entry.name === STORE_ID_FILE || entry.name === OWNER_LOCK_FILE) continue;
+        if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/.test(entry.name)) {
+          issues.push("unexpected_durable_entry");
+          continue;
+        }
+        const record = await readIdempotencyRecord(path.join(directory, entry.name));
+        if (!record || !maintenanceRecordIdentityValid(record, entry.name, storedId, this.options.executor.identity)) {
+          issues.push("durable_identity_unverifiable");
+          continue;
+        }
+        if (record.state === "accepted" && (record.version !== 3
+          || !record.uncertainty || typeof record.uncertainty.localExecutionEndedAt !== "string"
+          || !Number.isFinite(Date.parse(record.uncertainty.localExecutionEndedAt)))) {
+          issues.push("accepted_task_without_local_stop");
+        }
+      }
+    }
+    if (this.options.sessionDirectory) {
+      let entries;
+      try {
+        entries = await readdir(this.options.sessionDirectory, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      for (const entry of entries) {
+        if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/.test(entry.name)) {
+          issues.push("unexpected_session_entry");
+          continue;
+        }
+        const record = await readSessionRecord(path.join(this.options.sessionDirectory, entry.name));
+        if (!record || path.basename(sessionRecordPath(this.options.sessionDirectory, record.handle)) !== entry.name) {
+          issues.push("session_identity_unverifiable");
+        }
+      }
+    }
+  }
+
   private async handle(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     const url = request.url ?? "";
     try {
@@ -344,7 +465,14 @@ export class CodexBrokerServer {
         return;
       }
       if (url === "/health" && request.method === "GET") {
-        this.sendJson(response, 200, this.healthReport());
+        const report = this.healthReport();
+        if (this.options.maintenanceDirectory) {
+          // 部署排空轮询用：静止 = 全部已受理工作与本地写者清零。
+          const maintenance = await this.maintenanceStatus();
+          this.sendJson(response, 200, { ...report, maintenance });
+        } else {
+          this.sendJson(response, 200, report);
+        }
         return;
       }
       if (this.options.modelManagement && (url === "/v1/models" || /^\/v1\/models\/m-[a-f0-9]{12}\/(disable|enable)$/.test(url))) {
@@ -355,9 +483,18 @@ export class CodexBrokerServer {
         try {
           const raw = request.method === "POST" ? await this.readBody(request) : undefined;
           if (raw !== undefined && Buffer.byteLength(raw) > 16 * 1024) throw new Error("模型配置过大。");
-          const result = await this.options.modelManagement(request.method, url, raw ? JSON.parse(raw) : undefined);
+          const body = raw ? JSON.parse(raw) : undefined;
+          const result = request.method === "POST"
+            ? await this.maintenance.withAdmission("model-registry-request", (token) =>
+              runWithMaintenanceAdmission(token, () => this.options.modelManagement!(request.method!, url, body)),
+              requestAdmissionId(request.headers))
+            : await this.options.modelManagement(request.method, url, body);
           this.sendJson(response, 200, result);
-        } catch {
+        } catch (error) {
+          if (error instanceof MaintenancePausedError) {
+            this.sendMaintenancePaused(response);
+            return;
+          }
           // 请求含密钥；不把解析器或文件系统异常中的原始输入回显给浏览器。
           this.sendJson(response, 400, { error: "模型配置未保存，请检查协议、地址、能力和参数。" });
         }
@@ -376,9 +513,14 @@ export class CodexBrokerServer {
         return;
       }
       this.sendJson(response, 404, { error: "Not found." });
-    } catch {
-      this.sendJson(response, 500, { error: "Internal broker error." });
+    } catch (error) {
+      if (error instanceof MaintenancePausedError) this.sendMaintenancePaused(response);
+      else this.sendJson(response, 500, { error: "Internal broker error." });
     }
+  }
+
+  private sendMaintenancePaused(response: http.ServerResponse): void {
+    this.sendJson(response, 503, { error: "Maintenance in progress; new model work is paused." }, DEFAULT_RETRY_AFTER_SECONDS);
   }
 
   private async handleTask(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
@@ -478,11 +620,9 @@ export class CodexBrokerServer {
       }
       if (durable.kind === "completed") {
         if (durable.record.state !== "completed") throw new Error("unreachable durable replay state");
-        const materialized = await this.materializeSessionRecord("sessionRecord" in durable.record
-          ? durable.record.sessionRecord
-          : undefined);
-        void materialized;
-        this.sendCompletedEnvelope(response, requestId, durable.binding, durable.record.outcome);
+        await this.repairSessionRecordWhenAdmitted(requestId, "sessionRecord" in durable.record
+          ? durable.record.sessionRecord : undefined, request);
+        this.sendCompletedEnvelope(response, requestId, durable.binding, durable.record.outcome, this.backgroundFailures.get(requestId));
         return;
       }
       if (durable.kind === "running") {
@@ -506,15 +646,20 @@ export class CodexBrokerServer {
         this.sendJson(response, 409, { error: message });
         return;
       }
+      const admission = await this.maintenance.admit(`task:${task.kind}`, requestAdmissionId(request.headers));
       try {
-        const accepted = await this.acceptDurableTask(requestId, digest, binding, task, session, sessionId, executionOptions);
+        const accepted = await runWithMaintenanceAdmission(admission, () =>
+          this.acceptDurableTask(requestId, digest, binding, task, session, sessionId, executionOptions, admission));
         if (accepted === "conflict") {
           this.sendBindingConflict(response);
           return;
         }
-      } catch (error) {
+      } catch {
         this.sendJson(response, 500, { error: "Codex broker could not commit the accepted task result; retry the same requestId." });
         return;
+      } finally {
+        // 202 不等待执行完成；登记的动态 hold 保留归属直到后台、会话尾和落盘清理全结束。
+        void this.releaseAdmission(admission);
       }
       const active = this.idempotentTasks.get(requestId);
       this.sendTaskFact(response, 202, requestId, active ? "running" : "accepted_unknown", binding);
@@ -530,9 +675,10 @@ export class CodexBrokerServer {
       this.sendJson(response, 409, { error: message });
       return;
     }
+    const admission = await this.maintenance.admit(`task:${task.kind}`, requestAdmissionId(request.headers));
     let outcome: TaskOutcome;
     try {
-      outcome = await this.withSessionLock(session, async () => {
+      outcome = await runWithMaintenanceAdmission(admission, () => this.withSessionLock(session, async () => {
         const submission = this.queue.submit(task, {
           ...executionOptions,
           ...(sessionId ? { sessionId } : {}),
@@ -545,10 +691,12 @@ export class CodexBrokerServer {
         const executed = await submission.outcome;
         response.off("close", cancelIfDisconnected);
         return this.finalizeSession(task.kind, session, sessionId, executed);
-      });
+      }));
     } catch {
       this.sendJson(response, 500, { error: "Codex broker could not commit the accepted task result; retry the same requestId." });
       return;
+    } finally {
+      await this.releaseAdmission(admission);
     }
     this.sendOutcome(response, outcome);
   }
@@ -609,13 +757,8 @@ export class CodexBrokerServer {
       this.sendTaskFact(response, 200, requestId, state, record.binding, this.backgroundFailures.get(requestId), record.uncertainty);
       return;
     }
-    // completed 用 200 信封返回原始 outcome：查询永远不把任务事实伪装成查询层 HTTP 错误。
-    try {
-      await this.materializeSessionRecord(record.sessionRecord);
-      this.backgroundFailures.delete(requestId);
-    } catch {
-      this.backgroundFailures.set(requestId, "session_registry_persistence_failed");
-    }
+    // completed 用 200 返回原事实；闭门无写入归属时只读，不因索引缺失重新执行任务。
+    await this.repairSessionRecordWhenAdmitted(requestId, record.sessionRecord, request);
     this.sendCompletedEnvelope(response, requestId, record.binding, record.outcome, this.backgroundFailures.get(requestId));
   }
 
@@ -660,6 +803,7 @@ export class CodexBrokerServer {
     session: TaskSessionRequest | undefined,
     sessionId: string | undefined,
     executionOptions: CodexExecutionOptions,
+    admission: BrokerAdmission,
   ): Promise<"accepted" | "conflict"> {
     const active = this.idempotentTasks.get(requestId);
     if (active) {
@@ -684,7 +828,7 @@ export class CodexBrokerServer {
       const outcome = this.withSessionLock(session, () =>
         this.executeDurableTask(recordPath, requestId, digest, binding, task, session, sessionId, executionOptions));
       entry.outcome = outcome;
-      this.trackBackgroundTask(requestId, outcome);
+      this.trackBackgroundTask(requestId, outcome, admission);
     })();
     entry = { binding, acceptance };
     this.idempotentTasks.set(requestId, entry);
@@ -696,6 +840,8 @@ export class CodexBrokerServer {
       if (error instanceof BindingConflictError) return "conflict";
       throw error;
     }
+    // 等待准入期间别的同身份请求可能已落定；重放记录没有新后台生命周期。
+    if (!entry.outcome && this.idempotentTasks.get(requestId) === entry) this.idempotentTasks.delete(requestId);
     return "accepted";
   }
 
@@ -750,20 +896,48 @@ export class CodexBrokerServer {
     return completion.outcome;
   }
 
-  private trackBackgroundTask(requestId: string, outcome: Promise<TaskOutcome>): void {
+  private trackBackgroundTask(requestId: string, outcome: Promise<TaskOutcome>, admission: BrokerAdmission): void {
     const tracked = outcome.then(
       () => undefined,
       () => {
         // 后台落盘失败只能改变“观察是否可用”，不能伪造任务终态，也不能让进程因 unhandled rejection 退出。
         this.backgroundFailures.set(requestId, "completion_persistence_failed");
       },
-    );
-    this.backgroundTasks.add(tracked);
-    void tracked.then(() => {
-      this.backgroundTasks.delete(tracked);
+    ).finally(() => {
       const current = this.idempotentTasks.get(requestId);
       if (current?.outcome === outcome) this.idempotentTasks.delete(requestId);
     });
+    admission.hold(tracked);
+    // 停服等待也涵盖共享登记释放；否则 owner fence 可能早于最后一次维护落盘释放。
+    const complete = tracked.then(() => this.releaseAdmission(admission));
+    this.backgroundTasks.add(complete);
+    void complete.then(() => this.backgroundTasks.delete(complete));
+  }
+
+  private async releaseAdmission(admission: BrokerAdmission): Promise<void> {
+    try {
+      await this.maintenance.release(admission);
+    } catch {
+      this.maintenanceFailures.add("admission_release_failed");
+    }
+  }
+
+  private async repairSessionRecordWhenAdmitted(
+    requestId: string,
+    record: SessionRecord | undefined,
+    request: http.IncomingMessage,
+  ): Promise<void> {
+    if (!record) return;
+    try {
+      if (!this.options.sessionDirectory) throw new Error("Session directory unavailable.");
+      const existing = await readSessionRecord(sessionRecordPath(this.options.sessionDirectory, record.handle));
+      if (existing && JSON.stringify(existing) === JSON.stringify(record)) return;
+      await this.maintenance.withAdmission("session-index-repair", () => this.materializeSessionRecord(record),
+        requestAdmissionId(request.headers));
+      this.backgroundFailures.delete(requestId);
+    } catch (error) {
+      if (!(error instanceof MaintenancePausedError)) this.backgroundFailures.set(requestId, "session_registry_persistence_failed");
+    }
   }
 
   private sendBindingConflict(response: http.ServerResponse): void {
@@ -1028,6 +1202,34 @@ type IdempotencyRecord =
   | { version: 3; requestId: string; digest: string; binding: DurableTaskBinding; state: "completed"; outcome: TaskOutcome; sessionRecord?: SessionRecord };
 
 type CompletedIdempotencyRecord = Extract<IdempotencyRecord, { state: "completed" }>;
+
+function maintenanceRecordIdentityValid(
+  record: IdempotencyRecord,
+  filename: string,
+  storeId: string,
+  identity: CodexExecutorIdentity,
+): boolean {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.requestId)
+    || filename !== `${createHash("sha256").update(record.requestId).digest("hex")}.json`
+    || !/^[a-f0-9]{64}$/.test(record.digest)
+    || record.version !== 3 || !isDurableTaskBinding(record.binding)
+    || record.binding.storeId !== storeId || record.binding.providerId !== identity.providerId) return false;
+  if (record.state === "accepted") return true;
+  const outcome = record.outcome;
+  if (outcome.ok === true) {
+    if (record.state !== "completed" || typeof outcome.output !== "string") return false;
+    const trace = outcome.trace;
+    if (!trace || trace.providerId !== record.binding.providerId || trace.modelId !== record.binding.modelId
+      || trace.taskKind !== record.binding.kind
+      || (record.binding.contractDigest !== null && trace.contractDigest !== record.binding.contractDigest)) return false;
+  } else if (outcome.ok !== false || typeof outcome.message !== "string"
+    || ![400, 409, 413, 422, 503, 500].includes(outcome.status)) return false;
+  if (record.state === "completed" && record.sessionRecord) {
+    if (!isSessionRecord(record.sessionRecord) || record.sessionRecord.taskKind !== record.binding.kind
+      || !outcome.ok || outcome.sessionHandle !== record.sessionRecord.handle) return false;
+  }
+  return true;
+}
 
 class BindingConflictError extends Error {}
 
