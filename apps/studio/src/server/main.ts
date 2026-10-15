@@ -37,6 +37,7 @@ import { AudioReviewService } from "./audio-review-service.js";
 import { LocalCapabilityService } from "./local-capabilities.js";
 import { MaintenanceGate, StudioMaintenanceError } from "./maintenance-gate.js";
 import { readPlanningMaintenanceIntegrity } from "./planning-operations.js";
+import { installStudioLifecycle } from "./server-lifecycle.js";
 
 const repositoryRoot = await findRepositoryRoot(process.cwd());
 loadLocalEnvironment(repositoryRoot);
@@ -212,17 +213,11 @@ const app = buildStudioApp({ service, modelConnections, logger: true, ...(auth ?
     return { complete: reports.every((report) => report.complete), issues: reports.flatMap((report) => report.issues) };
   },
 });
-const interruptedRecoveryTimer = setInterval(() => {
-  // 每个恢复周期都过门禁：门禁内已在跑的周期被登记占用，排空会等它结束；
-  // 门禁关闭时静默跳过本轮。
-  void maintenanceGate.withAdmission("recovery-cycle", () => pipeline.recoverInterruptedRuns()).catch((error: unknown) => {
-    if (error instanceof StudioMaintenanceError) return;
-    app.log.error("Interrupted production recovery failed; the next recovery cycle will retry.");
-  });
-}, 30_000);
-interruptedRecoveryTimer.unref();
-app.addHook("onClose", async () => {
-  clearInterval(interruptedRecoveryTimer);
+installStudioLifecycle({
+  app,
+  maintenanceGate,
+  recoverInterruptedRuns: () => pipeline.recoverInterruptedRuns(),
+  activeWork: () => service.activeWork(),
 });
 
 if (!development) {

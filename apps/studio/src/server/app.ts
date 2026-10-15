@@ -256,6 +256,13 @@ function acceptsGzip(header: string | undefined): boolean {
 
 export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance {
   const app = Fastify({ logger: options.logger ?? false });
+  const eventStreams = new Set<() => void>();
+  let closing = false;
+  app.addHook("preClose", async () => {
+    closing = true;
+    // SSE 只观察制作，不拥有业务工作；先结束订阅才能等待 HTTP 关闭。
+    for (const close of eventStreams) close();
+  });
   // 只减少列表/工作区JSON的传输字节：不裁历史、不缓存制作状态、不触碰媒体Range或SSE。
   app.addHook("onSend", async (request, reply, payload) => {
     if (request.method !== "GET" || reply.statusCode !== 200 || typeof payload !== "string"
@@ -282,6 +289,15 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
   // 纯本地只读查询继续可用。认证与健康检查不受影响。
   const maintenanceGate = options.maintenanceGate;
   if (maintenanceGate) {
+    const pendingAdmissions = new Set<Promise<Admission>>();
+    app.addHook("preClose", async () => {
+      if (pendingAdmissions.size === 0) return;
+      // 断连时准入可能仍在等共享锁；必须接住随后返回的 token 并完成释放。
+      const keepAlive = setInterval(() => undefined, 1_000);
+      try {
+        while (pendingAdmissions.size > 0) await Promise.allSettled([...pendingAdmissions]);
+      } finally { clearInterval(keepAlive); }
+    });
     // ALS 必须包住实际 handler；仅在异步 onRequest 中 enter/run 不能保证后继 hook 继承。
     app.addHook("onRoute", (route) => {
       const handler = route.handler;
@@ -302,9 +318,12 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       const method = request.method.toUpperCase();
       const isWork = (method !== "GET" && method !== "HEAD") || MAINTENANCE_WORK_GET_ROUTES.test(routeUrl);
       if (!isWork) return;
+      if (closing) return reply.code(503).send({ error: "服务正在关闭，请稍后重试。" });
       let token: Admission;
+      const admitting = maintenanceGate.admit(routeUrl);
+      pendingAdmissions.add(admitting);
       try {
-        token = await maintenanceGate.admit(routeUrl);
+        token = await admitting;
       } catch (error) {
         if (error instanceof StudioMaintenanceError) {
           reply.header("retry-after", "30");
@@ -314,6 +333,10 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
           });
         }
         throw error;
+      } finally { pendingAdmissions.delete(admitting); }
+      if (closing || reply.raw.destroyed) {
+        await maintenanceGate.release(token);
+        return reply.code(503).send({ error: "服务正在关闭，请稍后重试。" });
       }
       (request as FastifyRequest & { maintenanceAdmission?: Admission }).maintenanceAdmission = token;
       // 断连也结束 HTTP 所有权；handler 与动态登记的后台链仍由 token.hold 保留。
@@ -1140,7 +1163,18 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       buffered = run;
     };
     const unsubscribe = options.service.subscribe(request.params.runId, (run) => send(run));
-    const current = await options.service.getRun(request.params.runId);
+    let current: StudioRunDetail | undefined;
+    try {
+      current = await options.service.getRun(request.params.runId);
+    } catch (error) {
+      unsubscribe();
+      throw error;
+    }
+    // 首次快照可能跨过 preClose；不能在关门后再登记一个永不终止的流。
+    if (closing || reply.raw.destroyed) {
+      unsubscribe();
+      return reply.code(503).send({ error: "服务正在关闭，请稍后重新连接。" });
+    }
     if (!current && !buffered) {
       unsubscribe();
       return reply.code(404).send({ error: "没有找到这条制作记录。" });
@@ -1159,6 +1193,7 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
         return;
       }
       closed = true;
+      eventStreams.delete(close);
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       unsubscribe();
       if (!reply.raw.writableEnded) {
@@ -1175,7 +1210,8 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       }
     };
 
-    request.raw.on("close", close);
+    eventStreams.add(close);
+    reply.raw.once("close", close);
     send(buffered ?? current!);
     if (!closed) {
       const sendHeartbeat = (): void => {
