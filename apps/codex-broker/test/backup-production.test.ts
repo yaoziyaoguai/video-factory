@@ -22,7 +22,12 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 const DEFAULT_STORE = `vfs_store_${"1".repeat(32)}`;
 const SESSION_HANDLE = `vfs_${"a".repeat(32)}`;
 const CHECKPOINT_KEY = hash("series-planning-checkpoint");
-const PYTHON = path.join(repositoryRoot, ".local/python/.venv/bin/python");
+// 解析当前测试环境的解释器，避免依赖开发工作区中未提交的虚拟环境。
+const { stdout: pythonExecutable } = await execFileAsync(process.env.VIDEO_FACTORY_PYTHON ?? "python3", [
+  "-I", "-c", "import sys; print(sys.executable)",
+]);
+const PYTHON = pythonExecutable.trim();
+assert.ok(path.isAbsolute(PYTHON), "Python must report its absolute executable path");
 
 interface BackupFixture {
   root: string;
@@ -125,7 +130,7 @@ async function buildFixture(): Promise<BackupFixture> {
       execFile(injectedDriver ? PYTHON : "bash", injectedDriver ? ["-I", "-B", injectedDriver] : [backupScript], {
         cwd: repositoryRoot,
         env: {
-          PATH: `${binDir}:${path.dirname(process.execPath)}:${path.join(repositoryRoot, ".local/python/.venv/bin")}:/usr/bin:/bin`,
+          PATH: `${binDir}:${path.dirname(process.execPath)}:${path.dirname(PYTHON)}:/usr/bin:/bin`,
           REAL_NODE: process.execPath,
           TEST_VERIFIER: verifierScript,
           DEPLOY_TRACE: tracePath,
