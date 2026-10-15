@@ -143,7 +143,7 @@ def unit_name(value: str) -> str:
 
 
 def inspect_unit(unit: str) -> dict[str, str]:
-    properties = "Id,LoadState,ActiveState,SubState,MainPID,ControlPID,ControlGroup,User,Group,SupplementaryGroups,Environment,EnvironmentFiles,DynamicUser"
+    properties = "Id,LoadState,ActiveState,SubState,MainPID,ControlPID,ControlGroup,User,Group,SupplementaryGroups,Environment,EnvironmentFiles,DynamicUser,ExecStart"
     result = run_command(["systemctl", "show", unit, f"--property={properties}", "--no-pager"], description="systemctl show")
     values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
     if (values.get("LoadState") == "not-found" and result.returncode in (0, 4)
@@ -157,7 +157,8 @@ def inspect_unit(unit: str) -> dict[str, str]:
 
 
 def discover_units(extra: list[str]) -> dict[str, dict[str, str]]:
-    units = set(BROKER_UNITS) | {unit_name(item) for item in extra}
+    required = set(BROKER_UNITS) | {unit_name(item) for item in extra}
+    units = set(required)
     for command in ("list-unit-files", "list-units"):
         # systemd 在 glob 无匹配时可能以 exit=1 返回空输出；枚举全部后本地筛选，查询失败仍拒绝。
         result = run_command(["systemctl", command, "--all", "--type=service", "--no-legend", "--no-pager"], description=f"systemctl {command}")
@@ -172,7 +173,37 @@ def discover_units(extra: list[str]) -> dict[str, dict[str, str]]:
                 raise BackupError("broker unit 枚举输出不完整或不可解析")
             if "broker" in words[0]:
                 units.add(unit_name(words[0]))
-    return {unit: inspect_unit(unit) for unit in sorted(units)}
+    result = {}
+    for unit in sorted(units):
+        status = inspect_unit(unit)
+        # 同机其他项目也可能叫 broker；只接管本项目的命名或实际运行绑定。
+        belongs = unit in required or unit.startswith(("vf-", "video-factory-")) \
+            or "VIDEO_FACTORY_CODEX_WORKSPACE_ROOT=" in status.get("Environment", "") \
+            or "/etc/video-factory/" in status.get("EnvironmentFiles", "") \
+            or "/opt/video-factory/codex-broker/" in status.get("ExecStart", "")
+        if belongs:
+            result[unit] = status
+    return result
+
+
+def assert_broker_stopped(unit: str, status: dict) -> None:
+    if (status.get("ActiveState") not in ("inactive", "failed")
+            or status.get("SubState") not in ("dead", "failed")
+            or status.get("MainPID") != "0" or status.get("ControlPID") != "0"):
+        raise BackupError(f"broker 服务 {unit} 写者未退出或状态未知")
+    cgroup = status.get("ControlGroup")
+    if cgroup is None:
+        raise BackupError(f"broker 服务 {unit} 缺少 cgroup 退出证明")
+    if cgroup:
+        group_path = Path("/sys/fs/cgroup") / cgroup.lstrip("/")
+        if ".." in group_path.parts:
+            raise BackupError("cgroup 路径无效")
+        if group_path.exists():
+            for base, _, names in os.walk(group_path, onerror=lambda error: (_ for _ in ()).throw(error)):
+                if "cgroup.procs" not in names:
+                    raise BackupError("无法核实 cgroup 进程集合")
+                if (Path(base) / "cgroup.procs").read_text().strip():
+                    raise BackupError(f"broker 服务 {unit} cgroup 写者未退出")
 
 
 def check_writers_stopped(container: str, maintenance_dir: Path, units: dict | None = None) -> dict:
@@ -189,23 +220,7 @@ def check_writers_stopped(container: str, maintenance_dir: Path, units: dict | N
     for unit, status in units.items():
         if status.get("LoadState") == "not-found":
             continue
-        if (status.get("ActiveState") not in ("inactive", "failed")
-                or status.get("SubState") not in ("dead", "failed")
-                or status.get("MainPID") != "0" or status.get("ControlPID") != "0"):
-            raise BackupError(f"broker 服务 {unit} 写者未退出或状态未知")
-        cgroup = status.get("ControlGroup")
-        if cgroup is None:
-            raise BackupError(f"broker 服务 {unit} 缺少 cgroup 退出证明")
-        if cgroup:
-            group_path = Path("/sys/fs/cgroup") / cgroup.lstrip("/")
-            if ".." in group_path.parts:
-                raise BackupError("cgroup 路径无效")
-            if group_path.exists():
-                for base, _, names in os.walk(group_path, onerror=lambda error: (_ for _ in ()).throw(error)):
-                    if "cgroup.procs" not in names:
-                        raise BackupError("无法核实 cgroup 进程集合")
-                    if (Path(base) / "cgroup.procs").read_text().strip():
-                        raise BackupError(f"broker 服务 {unit} cgroup 写者未退出")
+        assert_broker_stopped(unit, status)
         stopped.append(unit)
     return {"container": container, "containerRunning": False, "image": info["Image"],
             "brokerUnits": stopped, "maintenanceDirectory": str(maintenance_dir)}
@@ -318,7 +333,7 @@ def configured_broker(unit: str, status: dict) -> dict:
             **system_identity(status), **({"codexHome": env["CODEX_HOME"]} if env.get("CODEX_HOME") else {})}
 
 
-def resolve_sources(container: str) -> tuple[list[dict], dict, dict]:
+def resolve_sources(container: str, *, require_stopped: bool = True) -> tuple[list[dict], dict, dict]:
     info = docker_inspect(container)
     descriptor_path = os.environ.get("VIDEO_FACTORY_BACKUP_SOURCE_DESCRIPTOR", "")
     descriptor = read_json(Path(descriptor_path), "source descriptor") if descriptor_path else {}
@@ -334,7 +349,9 @@ def resolve_sources(container: str) -> tuple[list[dict], dict, dict]:
         supplied[unit] = entry
     extra = shlex.split(os.environ.get("VIDEO_FACTORY_BROKER_UNITS", "").replace(",", " "))
     units = discover_units(list(supplied) + extra)
-    writers = check_writers_stopped(container, Path(os.environ.get("VIDEO_FACTORY_MAINTENANCE_DIR") or DEFAULT_MAINTENANCE_DIR), units)
+    writers = check_writers_stopped(container, Path(os.environ.get("VIDEO_FACTORY_MAINTENANCE_DIR") or DEFAULT_MAINTENANCE_DIR), units) if require_stopped else {
+        "image": info.get("Image"), "container": container, "containerRunning": info.get("State", {}).get("Running"),
+    }
     app_root, _ = resolve_app_root(container, os.environ.get("VIDEO_FACTORY_APP_WORKSPACE_ROOT", "").strip() or None)
     app_user = identity(descriptor["app"]) if descriptor.get("app") is not None else app_identity(info)
     roles = [{"role": "app-workspace", "source": str(app_root), "logical": APP_LOGICAL_ROOT,
@@ -576,7 +593,7 @@ def unpack_isolated(partial: Path, target: Path) -> None:
         apply_metadata(directory, attrs)
 
 
-def verifier_report(image: str, roles: list[dict], restore: Path | None = None, snapshots: dict | None = None) -> dict:
+def verifier_report(image: str, roles: list[dict], restore: Path | None = None, snapshots: dict | None = None, *, require_idle: bool = False, require_locally_idle: bool = False, stopped_units: set[str] | None = None, allow_legacy: bool = False) -> dict:
     report = {"business": {}, "configs": {}}
     for role in roles:
         physical = (restore / role["archive"]) if restore else Path(role["source"])
@@ -603,10 +620,22 @@ def verifier_report(image: str, roles: list[dict], restore: Path | None = None, 
                  "--role", role["role"], "--root", role["logical"]]
         if role.get("codexHome"):
             argv += ["--codex-home", role["codexHome"]]
+        if require_idle:
+            argv += ["--require-idle", "true"]
+        if require_locally_idle:
+            argv += ["--require-locally-idle", "true"]
+        if allow_legacy and role["role"] == "broker-workspace":
+            argv += ["--allow-legacy", "true"]
+        if require_locally_idle and role.get("unit") in (stopped_units or set()):
+            argv += ["--writer-stopped", "true"]
         result = run_command(argv, description="业务身份隔离读取")
         try:
             value = json.loads(require_command_success(result, "恢复验证容器"))
             if not isinstance(value, dict) or value.get("complete") is not True:
+                raise ValueError()
+            if require_idle and value.get("quiescent") is not True:
+                raise ValueError()
+            if require_locally_idle and value.get("localQuiescent") is not True:
                 raise ValueError()
         except ValueError as error:
             raise BackupError("恢复验证报告不完整或不可解析") from error
@@ -619,6 +648,9 @@ def verify_request_links(report: dict) -> None:
     stores = {}
     for business in report["business"].values():
         for store in business.get("stores", []):
+            # 早期退休 store 没有 v3 身份；保留其字节和 legacy 摘要，但不能满足新请求关联。
+            if store.get("storeId") is None and store.get("legacy") is True:
+                continue
             if store["storeId"] in stores:
                 raise BackupError("不同 broker 根出现重复 store-id，无法确认原请求归属")
             stores[store["storeId"]] = {item["requestId"]: item for item in store["records"]}
@@ -627,7 +659,7 @@ def verify_request_links(report: dict) -> None:
             actual = stores.get(request["binding"]["storeId"], {}).get(request["requestId"])
             if actual is None and request["required"]:
                 raise BackupError("应用原请求缺少对应 broker durable record")
-            if actual is not None and actual["binding"] != request["binding"]:
+            if actual is not None and actual.get("binding") != request["binding"]:
                 raise BackupError("应用与 broker 的原请求 binding 不一致")
 
 
@@ -750,8 +782,9 @@ def main() -> int:
         verify_archive(partial, files)
         restore = workdir / "restore-verify"
         unpack_isolated(partial, restore)
-        source_report = verifier_report(image, roles, snapshots=snapshots)
-        restored_report = verifier_report(image, roles, restore=restore)
+        allow_legacy = os.environ.get("VIDEO_FACTORY_BACKUP_ALLOW_LEGACY") == "1"
+        source_report = verifier_report(image, roles, snapshots=snapshots, allow_legacy=allow_legacy)
+        restored_report = verifier_report(image, roles, restore=restore, allow_legacy=allow_legacy)
         reports_match(source_report, restored_report)
         log("restore.verified", roles=len(source_report["business"]))
         staged_manifest = workdir / "manifest.json.partial"
