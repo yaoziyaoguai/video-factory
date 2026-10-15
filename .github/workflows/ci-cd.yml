@@ -2,6 +2,16 @@ name: CI/CD
 
 on:
   workflow_dispatch:
+    inputs:
+      upgrade_mode:
+        description: "Maintenance protocol upgrade (cold temporarily closes this site)"
+        type: choice
+        options: [online, cold]
+        default: online
+      expected_previous_release:
+        description: "Required for cold: exact last successful production SHA"
+        type: string
+        default: ""
   pull_request:
     branches: [main]
   push:
@@ -126,16 +136,22 @@ jobs:
           PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}
           RELEASE_SHA: ${{ github.sha }}
           DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+          UPGRADE_MODE: ${{ inputs.upgrade_mode || 'online' }}
+          EXPECTED_PREVIOUS_RELEASE: ${{ inputs.expected_previous_release || '' }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 40m
-          envs: PROJECT_PATH,PUBLIC_HEALTH_URL,RELEASE_SHA,DEPLOY_RUN
+          envs: PROJECT_PATH,PUBLIC_HEALTH_URL,RELEASE_SHA,DEPLOY_RUN,UPGRADE_MODE,EXPECTED_PREVIOUS_RELEASE
           script: |
             set -euo pipefail
             umask 077
             [[ "$DEPLOY_RUN" =~ ^[0-9]+-[0-9]+$ ]]
+            [[ "$UPGRADE_MODE" == online || "$UPGRADE_MODE" == cold ]]
+            if [[ "$UPGRADE_MODE" == cold ]]; then
+              [[ "$EXPECTED_PREVIOUS_RELEASE" =~ ^[0-9a-f]{40}$ ]]
+            fi
             bundle_path="/tmp/video-factory-release-${DEPLOY_RUN}.bundle"
             release_path="${PROJECT_PATH}.release"
             trap 'rm -f "$bundle_path"' EXIT
@@ -202,6 +218,9 @@ jobs:
             test "$(git -C "$release_path" rev-parse HEAD)" = "$RELEASE_SHA"
             VIDEO_FACTORY_ENV_FILE="$PROJECT_PATH/.env.docker.prod" \
               VIDEO_FACTORY_ROLLBACK_COMPOSE_FILE="$rollback_config" \
+              VIDEO_FACTORY_UPGRADE_MODE="$UPGRADE_MODE" \
+              VIDEO_FACTORY_EXPECTED_PREVIOUS_RELEASE="$EXPECTED_PREVIOUS_RELEASE" \
+              VIDEO_FACTORY_LAST_RELEASE_FILE="$last_release" \
               PUBLIC_HEALTH_URL="$PUBLIC_HEALTH_URL" \
               bash "$release_path/scripts/deploy-production.sh"
             printf '%s\n' "$RELEASE_SHA" > "$last_release.partial"

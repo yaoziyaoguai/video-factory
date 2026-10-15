@@ -115,6 +115,7 @@ interface DeployScenarioOptions {
   expectSuccess?: boolean;
   firstMigration?: boolean;
   appAdmission?: "protocol" | "legacy";
+  cold?: boolean;
   expectedExitCode?: number;
   leftoverGate?: "draining" | "frozen";
   env?: Record<string, string>;
@@ -222,7 +223,8 @@ async function runDeployFailureScenario(
 
   // 真实共享模块负责门禁、锁、holders 和服务报告；替身只控制进程状态与 health 接点。
   const maintenanceDirectory = path.join(brokerInstallRoot, "deployment", "maintenance");
-  await transitionMaintenanceGate(maintenanceDirectory, "open", "original-installation");
+  if (options.cold && !options.leftoverGate) await mkdir(maintenanceDirectory, { recursive: true });
+  else await transitionMaintenanceGate(maintenanceDirectory, "open", "original-installation");
   if (options.leftoverGate) {
     await transitionMaintenanceGate(maintenanceDirectory, "draining", "deploy-crashed");
     if (options.leftoverGate === "frozen") await transitionMaintenanceGate(maintenanceDirectory, "frozen", "deploy-crashed");
@@ -231,7 +233,10 @@ async function runDeployFailureScenario(
     const busy = new MaintenanceCoordinator({ directory: maintenanceDirectory, serviceId: "deepseek-original" });
     await busy.admit("long-running-task");
   }
-  const gateBefore = await readFile(path.join(maintenanceDirectory, "gate.json"), "utf8");
+  const gateBefore = await readFile(path.join(maintenanceDirectory, "gate.json"), "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" && options.cold) return "";
+    throw error;
+  });
   const controller = await readFile(path.join(repositoryRoot, "scripts", "production-maintenance.mjs"), "utf8");
   assert.ok(controller.includes("readHealth = localHealth"), "controller must expose the health observation seam");
   await writeFile(path.join(scriptsDirectory, "production-maintenance.mjs"),
@@ -265,6 +270,12 @@ export async function fixtureHealth(endpoint) {
     serviceId = (legacy ? "legacy" : "deepseek") + (await exists("systemd/" + service + ".epoch")
       ? await text("systemd/" + service + ".epoch") : "-original");
     if (!legacy && process.env.DEPLOY_SCENARIO === "deepseek-health" && release === process.env.RELEASE_SHA) throw new Error("Candidate broker is unavailable.");
+  }
+  if (process.env.TEST_COLD === "1" && release !== process.env.RELEASE_SHA) {
+    return app ? { status: "ok" } : { protocolVersion: "video-factory/codex-bridge-v2",
+      profileId: legacy ? "openai" : "deepseek", providerId: legacy ? "openai" : "deepseek",
+      modelId: "test-model", active: 0, queued: 0, taskKinds: legacy ? legacyKinds : originalKinds,
+      taskModels: Object.fromEntries((legacy ? legacyKinds : originalKinds).map(kind => [kind, "test-model"])) };
   }
   const incomplete = app && await exists("committed-integrity-failed");
   const report = await new MaintenanceCoordinator({ directory: process.env.TEST_MAINTENANCE_DIRECTORY, serviceId })
@@ -311,6 +322,46 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     "utf8",
   );
   await chmod(path.join(scriptsDirectory, "backup-production.sh"), 0o755);
+  if (options.cold) {
+    // 宿主动作在独立用例验证；此处保留真实 controller，验证 shell 跨阶段编排与回滚。
+    const hostHelper = path.join(scriptsDirectory, "fixture-cold-host.mjs");
+    await writeFile(hostHelper, `
+import { appendFile, writeFile, readFile } from "node:fs/promises";
+import path from "node:path";
+const [command, statePath, ...args] = process.argv.slice(2);
+const stateRoot = process.env.DEPLOY_STATE;
+await appendFile(process.env.DEPLOY_TRACE, "cold:" + command + "\\n");
+if (process.env.TEST_COLD_FAIL === command) process.exit(1);
+const input = name => args[args.indexOf(name) + 1];
+const source = { previousRelease: process.env.TEST_PREVIOUS_SHA, candidateRelease: process.env.RELEASE_SHA,
+  container: {id: "1".repeat(64), image: "sha256:" + "2".repeat(64)}, brokerRelease: process.env.TEST_PREVIOUS_RELEASE,
+  candidateEndpoints: ["http://127.0.0.1:4317/api/health", "unix:" + process.env.TEST_DEEPSEEK_SOCKET] };
+if (command === "prepare") {
+  await writeFile(statePath, JSON.stringify({...source, ingressPath:input("--ingress")}));
+} else if (command === "stop-brokers") {
+  for (const service of ["vf-codex-broker", "vf-deepseek-codex-broker"]) {
+    await writeFile(path.join(stateRoot,"systemd",service+".stopped"), "");
+    await appendFile(process.env.DEPLOY_TRACE, "cold:normal-stop:"+service+"\\n");
+  }
+} else if (command === "stopped" || command === "restored") {
+  const state = JSON.parse(await readFile(statePath,"utf8"));
+  const restored = command === "restored";
+  await writeFile(input("--output"), JSON.stringify({...source, kind: restored ? "cold-abort" : "cold-upgrade", bootstrap:false,
+    ingress:{closed:true,drained:true,statePath:state.ingressPath}, integrity:{complete:true,quiescent:true},
+    observedAt:new Date().toISOString(), ...(restored ? {writersRestored:true,candidateWritersStopped:true} : {writersStopped:true}) }));
+}
+`);
+    await writeFile(path.join(scriptsDirectory, "production-cold-ingress.mjs"), `
+import { appendFile,writeFile } from "node:fs/promises";
+const [command,state] = process.argv.slice(2);
+await appendFile(process.env.DEPLOY_TRACE,"ingress:"+command+"\\n");
+if (command === "enter") await writeFile(state,JSON.stringify({phase:"closed",closed:true,drained:true}));
+if (process.env.TEST_COLD_FAIL === "ingress-"+command) process.exit(1);
+`);
+    await writeFile(deployPath, isolatedDeploy.replace(
+      'python3 -I -B "$repository_root/scripts/production-cold-upgrade.py"',
+      `node ${JSON.stringify(hostHelper)}`));
+  }
 
   await Promise.all([
     writeExecutable(
@@ -548,6 +599,9 @@ exec "$REAL_NODE" "$TEST_HEALTH_FIXTURE" "$endpoint"
     ...process.env,
     DEPLOY_SCENARIO: scenario,
     TEST_FIRST_MIGRATION: firstMigration ? "1" : "0",
+    ...(options.cold ? { TEST_COLD: "1", VIDEO_FACTORY_UPGRADE_MODE: "cold",
+      VIDEO_FACTORY_EXPECTED_PREVIOUS_RELEASE: previousSha, VIDEO_FACTORY_LAST_RELEASE_FILE: path.join(directory, "last-release"),
+      PUBLIC_HEALTH_URL: "http://127.0.0.1:4317/api/health" } : {}),
     DEPLOY_STATE: stateDirectory,
     DEPLOY_TRACE: tracePath,
     PATH: `${binDirectory}:${process.env.PATH ?? ""}`,
@@ -619,7 +673,10 @@ exec "$REAL_NODE" "$TEST_HEALTH_FIXTURE" "$endpoint"
       gateState,
       gateOwner,
       gateBefore,
-      gateAfter: await readFile(gatePath, "utf8"),
+      gateAfter: await readFile(gatePath, "utf8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT" && options.cold) return "";
+        throw error;
+      }),
       appRunning: (await readFile(path.join(stateDirectory, "app-running"), "utf8")).trim() === "1",
       appRelease: (await readFile(path.join(stateDirectory, "app-release"), "utf8")).trim(),
       exitCode,
@@ -1183,6 +1240,76 @@ exit 42
     assert.match(result.deepseekUnit, /Description=old-deepseek/);
     assert.match(result.trace, /systemctl:restart vf-codex-broker/);
     assert.equal(result.gateState, "open");
+  });
+
+  it("upgrades legacy writers only through explicit cold ingress, idle, stop and backup proofs", async () => {
+    const result = await runDeployFailureScenario("success", { cold: true, expectSuccess: true });
+    assert.equal(result.gateBefore, "");
+    assert.equal(result.gateState, "open");
+    assert.equal(result.appRelease, "a".repeat(40));
+    assertTraceOrder(result.trace, ["cold:prepare", "ingress:enter", "cold:idle", " stop --timeout -1 app",
+      "cold:stop-brokers", "cold:stopped", "backup:", "->", "systemctl:restart vf-deepseek-codex-broker",
+      " up --detach --remove-orphans --force-recreate app", "ingress:restore"]);
+    assert.doesNotMatch(result.trace, /cold:restored/);
+  });
+
+  it("restores the untouched legacy service after cold idle refuses, without stopping any writer", async () => {
+    const result = await runDeployFailureScenario("success", { cold: true, env: { TEST_COLD_FAIL: "idle" } });
+    assert.equal(result.gateAfter, "");
+    assert.equal(result.appRunning, true);
+    assertTraceOrder(result.trace, ["ingress:enter", "cold:idle", "ingress:restore"]);
+    assert.doesNotMatch(result.trace, / stop --timeout|systemctl:stop|backup:|->/);
+  });
+
+  it("leaves cold ingress closed without restart when normal broker stop is unproved", async () => {
+    const result = await runDeployFailureScenario("success", { cold: true, env: { TEST_COLD_FAIL: "stop-brokers" } });
+    assert.equal(result.appRunning, false);
+    assert.equal(result.gateAfter, "");
+    assert.doesNotMatch(result.trace, /ingress:restore|systemctl:restart|backup:|->/);
+    assert.match(result.stderr, /Cold stop was not fully verified/);
+  });
+
+  it("explicitly aborts a cold transaction and restores the original writers when backup fails", async () => {
+    const result = await runDeployFailureScenario("success", { cold: true, env: { TEST_BACKUP_FAILS: "1" } });
+    assert.equal(result.gateState, "open");
+    assert.equal(result.appRelease, "b".repeat(40));
+    assert.equal(path.basename(result.currentRelease), "previous");
+    assertTraceOrder(result.trace, ["backup:", "cold:rollback-stopped", "systemctl:restart vf-deepseek-codex-broker",
+      "cold:restored", "cold:cleanup", "ingress:restore"]);
+  });
+
+  it("normally stops the cold candidate before restoring the exact legacy artifacts", async () => {
+    const result = await runDeployFailureScenario("app-health", { cold: true });
+    assert.equal(result.gateState, "open");
+    assert.equal(result.appRelease, "b".repeat(40));
+    assert.equal(path.basename(result.currentRelease), "previous");
+    assertTraceOrder(result.trace, ["backup:", " up --detach --remove-orphans --force-recreate app",
+      " stop --timeout -1 app", "systemctl:stop vf-deepseek-codex-broker", "cold:rollback-stopped",
+      "systemctl:restart vf-deepseek-codex-broker", "cold:restored", "ingress:restore"]);
+  });
+
+  it("rejects a previous maintenance owner before closing cold ingress", async () => {
+    const result = await runDeployFailureScenario("success", { cold: true, leftoverGate: "frozen" });
+    assert.equal(result.gateOwner, "deploy-crashed");
+    assert.equal(result.gateBefore, result.gateAfter);
+    assert.doesNotMatch(result.trace, /ingress:enter| stop --timeout|systemctl:stop|backup:|->/);
+  });
+
+  it("keeps cold ingress closed if restored legacy identity cannot be verified", async () => {
+    const result = await runDeployFailureScenario("success", { cold: true,
+      env: { TEST_BACKUP_FAILS: "1", TEST_COLD_FAIL: "restored" } });
+    assert.equal(result.gateState, "frozen");
+    assert.doesNotMatch(result.trace, /ingress:restore/);
+    assert.match(result.stderr, /Cold upgrade recovery is incomplete/);
+  });
+
+  it("never rolls back a committed cold candidate when ingress restoration fails", async () => {
+    const result = await runDeployFailureScenario("success", { cold: true,
+      env: { TEST_COLD_FAIL: "ingress-restore" } });
+    assert.equal(result.appRelease, "a".repeat(40));
+    assert.equal(result.gateState, "open");
+    assert.notEqual(path.basename(result.currentRelease), "previous");
+    assert.doesNotMatch(result.trace, /cold:restored|cold:rollback-stopped/);
   });
 
   it("refuses an online switch when the running app predates the maintenance protocol (R3-E)", async () => {

@@ -7,6 +7,18 @@ environment_file="${VIDEO_FACTORY_ENV_FILE:-$repository_root/.env.docker.prod}"
 public_health_url="${PUBLIC_HEALTH_URL:-}"
 release_sha="${RELEASE_SHA:-}"
 deployment_mode="${VIDEO_FACTORY_DEPLOYMENT_MODE:-release}"
+upgrade_mode="${VIDEO_FACTORY_UPGRADE_MODE:-online}"
+expected_previous_release="${VIDEO_FACTORY_EXPECTED_PREVIOUS_RELEASE:-}"
+last_release_file="${VIDEO_FACTORY_LAST_RELEASE_FILE:-}"
+if [[ "$upgrade_mode" != "online" && "$upgrade_mode" != "cold" ]]; then
+  echo "VIDEO_FACTORY_UPGRADE_MODE must be online or cold." >&2
+  exit 1
+fi
+if [[ "$upgrade_mode" == "cold" ]] && { [[ "$deployment_mode" != "release" ]] \
+  || [[ ! "$expected_previous_release" =~ ^[0-9a-f]{40}$ ]] || [[ -z "$last_release_file" || -z "$public_health_url" ]]; }; then
+  echo "Cold upgrades require an Actions release, exact previous SHA, last release record and public health URL." >&2
+  exit 1
+fi
 container="video_factory_prod"
 broker_service=vf-codex-broker
 broker_unit=/etc/systemd/system/vf-codex-broker.service
@@ -424,6 +436,20 @@ maintenance_endpoints=()
 drain_timeout_seconds="${VIDEO_FACTORY_DRAIN_TIMEOUT_SECONDS:-3600}"
 app_was_running=0
 active_broker_sockets=()
+cold_state="$deployment_state/cold-$maintenance_owner.json"
+cold_ingress_state="$deployment_state/ingress-$maintenance_owner.json"
+cold_evidence="$deployment_state/cold-proof-$maintenance_owner.json"
+cold_ingress_started=0
+cold_writers_touched=0
+cold_writers_stopped=0
+
+cold_control() {
+  python3 -I -B "$repository_root/scripts/production-cold-upgrade.py" "$1" "$cold_state" "${@:2}"
+}
+
+cold_ingress() {
+  "$broker_root/bin/node" "$repository_root/scripts/production-cold-ingress.mjs" "$1" "$cold_ingress_state" "${@:2}"
+}
 
 maintenance_control() {
   "$broker_root/bin/node" "$repository_root/scripts/production-maintenance.mjs" \
@@ -528,9 +554,59 @@ resume_previous_writers() {
   return "$failed"
 }
 
+cold_finish() {
+  local status="$1"
+  if [[ "$deployment_committed" -eq 1 ]]; then
+    # 提交后只能继续开放已核验的候选，不能复活旧写者。
+    reopen_gate || return 1
+    cold_control cleanup || return 1
+    cold_ingress restore || return 1
+    cold_ingress_started=0
+    rm -f "$previous_broker_unit_backup" "$previous_deepseek_broker_unit_backup"
+    return 0
+  fi
+  [[ "$cold_ingress_started" -eq 1 ]] || return 0
+  if [[ "$cold_writers_touched" -eq 0 ]]; then
+    cold_ingress restore || return 1
+    cold_control cleanup || return 1
+    return 0
+  fi
+  if [[ "$cold_writers_stopped" -ne 1 ]]; then
+    echo "Cold stop was not fully verified; ingress remains closed, no writer is restarted." >&2
+    return 1
+  fi
+  if [[ "$deployment_mutated" -eq 1 ]]; then
+    # 候选尚未开放，无新工作；先正常停候选再恢复原制品，保留两边停止保护。
+    "${compose[@]}" stop --timeout -1 app >/dev/null || return 1
+    systemctl stop "$deepseek_broker_service" || return 1
+    if [[ "$legacy_broker_was_active" -eq 1 ]]; then systemctl stop "$broker_service" || return 1; fi
+    cold_control rollback-stopped || return 1
+    rollback || return 1
+  else
+    cold_control rollback-stopped || return 1
+    resume_previous_writers || return 1
+  fi
+  cold_control restored --output "$cold_evidence.abort" || return 1
+  # 若 cold-enter 已产生门禁，只能以记录的原 owner/原制品完成显式 abort。
+  if [[ -e "$maintenance_directory/gate.json" ]]; then
+    maintenance_control cold-abort "$cold_evidence.abort" || return 1
+  fi
+  maintenance_phase=""
+  cold_control cleanup || return 1
+  cold_ingress restore || return 1
+  cold_ingress_started=0
+}
+
 rollback_on_exit() {
   local status="$?" recovery_status=0
   trap - EXIT
+  if [[ "$upgrade_mode" == "cold" ]]; then
+    if ! cold_finish "$status"; then
+      echo "Cold upgrade recovery is incomplete; the site ingress remains closed (owner=$maintenance_owner)." >&2
+      [[ "$status" -ne 0 ]] || status=1
+    fi
+    exit "$status"
+  fi
   if [[ "$status" -ne 0 ]]; then
     if [[ "$deployment_mutated" -eq 1 && "$deployment_committed" -eq 0 && "$rollback_in_progress" -eq 0 ]]; then
       rollback_in_progress=1
@@ -642,7 +718,32 @@ if [[ ! -e "$maintenance_directory" ]]; then
   chmod 2770 "$maintenance_directory"
 fi
 
-# 未启用当前协议的退役写者不能由这次发布直接停止；需先获授权做冷维护。
+if [[ "$upgrade_mode" == "cold" ]]; then
+  [[ -n "$previous_image" ]] || { echo "Cold upgrade requires an existing deployment." >&2; exit 1; }
+  cold_control prepare --container "$container" --image video-factory:candidate \
+    --previous-release "$expected_previous_release" --candidate-release "$release_sha" \
+    --last-release "$last_release_file" --broker-current "$broker_root/current" \
+    --maintenance-directory "$maintenance_directory" --ingress "$cold_ingress_state" \
+    --node "$broker_root/bin/node" || exit 1
+  maintenance_control cold-preflight "$cold_state" || exit 1
+  app_was_running=1
+  if [[ "$legacy_broker_was_active" -eq 1 ]]; then active_broker_sockets+=("$broker_socket"); fi
+  if [[ "$deepseek_broker_was_active" -eq 1 ]]; then active_broker_sockets+=("$deepseek_broker_socket"); fi
+  cold_ingress_started=1
+  cold_ingress enter "$public_health_url" || exit 1
+  cold_control idle || exit 1
+  # 旧版不能读取维护门禁：先关闭并排空外部入口，再正常停 app，复核全部 broker。
+  cold_writers_touched=1
+  "${rollback_compose[@]}" stop --timeout -1 app >/dev/null || exit 1
+  app_stopped || exit 1
+  cold_control stop-brokers || exit 1
+  cold_control stopped --output "$cold_evidence" || exit 1
+  cold_writers_stopped=1
+  maintenance_control cold-enter "$cold_evidence" || exit 1
+  maintenance_phase="frozen"
+  maintenance_recovery_allowed=1
+else
+# 普通在线路径拒绝未启用当前协议的原服务，显式冷升级独立核入口与停写。
 service_stopped vf-zai-codex-broker || refuse_legacy_online_switch "vf-zai-codex-broker 或其未证实退出状态"
 if [[ -n "$previous_image" ]]; then
   if app_container_running; then
@@ -685,6 +786,7 @@ if ! stop_writers; then
   echo "Failed to stop writers cleanly; gate remains closed for operator verification." >&2
   exit 1
 fi
+fi
 
 if [[ -n "$previous_image" || "${#active_broker_sockets[@]}" -gt 0 ]]; then
   echo "Running the offline full backup with isolated restore verification."
@@ -694,6 +796,7 @@ if [[ -n "$previous_image" || "${#active_broker_sockets[@]}" -gt 0 ]]; then
     VIDEO_FACTORY_CONTAINER="$container" \
     VIDEO_FACTORY_BACKUP_DIR="${VIDEO_FACTORY_BACKUP_DIR:-$broker_root/backups}" \
     VIDEO_FACTORY_BACKUP_VERIFY_IMAGE=video-factory:candidate \
+    VIDEO_FACTORY_BACKUP_ALLOW_LEGACY=1 \
     "$repository_root/scripts/backup-production.sh"; then
     echo "Full backup or its restore verification failed; not switching artifacts." >&2
     exit 1
@@ -780,5 +883,11 @@ find "$broker_root/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 
 
 # —— 同 owner 重开门禁：新版本已在闭门状态通过健康与版本核验（R3b 第 5 步）。 ——
 reopen_gate
+if [[ "$upgrade_mode" == "cold" ]]; then
+  cold_control cleanup || exit 1
+  cold_ingress restore || exit 1
+  cold_ingress_started=0
+  app_health "$public_health_url" 15 "$release_sha" || exit 1
+fi
 
 echo "VideoFactory deployment completed."
