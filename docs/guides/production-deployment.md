@@ -62,6 +62,8 @@ Actions 的 SSH 命令超时不证明宿主部署控制进程或 Docker 停止�
 
 发布 full 成功标记前，必须完成 partial归档校验、新空目录解包、同逻辑路径容器回读，以及源与副本报告一致性检查。恢复容器只挂恢复目录，按 app/broker 的实际 UID/GID/组读取业务文件，禁网且不运行业务 main、恢复 timer 或 provider；受限配置单独按原权限和字节摘要核验。验证器通过正式读取逻辑核媒体/响应、审批与账本、规划SQLite、模型请求关联、设置和机会库格式。任何缺源、缺媒体、身份不符、读取错误、空间不足或 owner/generation变化都失败；已存在的恢复目标（即使空目录）也拒绝使用。仅成功发布新的 full 后才执行保留期清理。
 
+验证容器失败时，宿主只报告业务 `role`、其在解析角色列表中的零起始 `index`、退出码，以及固定 Node/系统错误代码或 `reason-sha256`。摘要对应验证器固定错误原因的 UTF-8 SHA-256，可与同提交 `scripts/verify-production-backup.mjs` 中的 `fail(...)` 字面量或错误代码对照；未识别输出显示 `diagnostic=unclassified`。不把原 stderr、业务内容、配置路径或 provider 消息复制到 Actions 日志。诊断信息不改变完整性、闲置或失败保全规则。
+
 manifest标识 `video-factory/full-backup-v1`，记录源镜像/SHA、owner/generation、逻辑根映射、每个文件的hash和字节数，以及文件与目录的权限和UID/GID。旧 metadata 归档不具备完整媒体恢复能力。隔离回读证明归档完整和离线可读；不证明真实秘密、线上续作或异地灾备可用。
 
 ## 维护门禁与冷维护

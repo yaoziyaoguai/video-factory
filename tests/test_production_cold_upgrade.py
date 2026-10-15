@@ -246,6 +246,48 @@ class ProductionColdUpgradeTests(unittest.TestCase):
         self.health_mock.assert_any_call(model_socket)
         self.assertEqual(stat.S_IMODE(self.state_path.stat().st_mode), 0o600)
 
+    def test_prepare_identifies_verifier_failure_without_exposing_output(self):
+        controlled = "持久执行租约或未完成写入仍存在"
+        cases = (
+            (f"verify-production-backup: 业务完整性验证失败 ({controlled})\n", "reason-sha256=" + cold.hashlib.sha256(controlled.encode()).hexdigest()),
+            ("verify-production-backup: 业务完整性验证失败 (EACCES)\n", "reason-sha256=" + cold.hashlib.sha256(b"EACCES").hexdigest()),
+            ("Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/private/FAKE-KEY'\n", "code=ERR_MODULE_NOT_FOUND"),
+            ("FAKE-KEY: unstructured provider payload\n", "diagnostic=unclassified"),
+        )
+        for stderr, expected in cases:
+            with self.subTest(stderr=stderr):
+                def fail_verifier(argv, *, description):
+                    if "/app/scripts/verify-production-backup.mjs" in argv:
+                        return subprocess.CompletedProcess(argv, 1, stdout="FAKE-KEY private stdout", stderr=stderr)
+                    return self.run_command(argv, description=description)
+
+                with patch.object(backup, "run_command", side_effect=fail_verifier):
+                    with self.assertRaises(cold.Error) as raised:
+                        cold.prepare(self.args)
+                message = str(raised.exception)
+                self.assertIn("role=app-workspace", message)
+                self.assertIn("index=0", message)
+                self.assertIn("exit=1", message)
+                self.assertIn(expected, message)
+                self.assertNotIn("FAKE-KEY", message)
+                self.assertNotIn(controlled, message)
+                self.assertNotIn(str(self.root), message)
+                self.assertFalse(self.state_path.exists())
+                self.assertFalse(self.ingress_path.exists())
+                self.assertFalse(any(argv[:2] == ["systemctl", "stop"] for argv in self.commands))
+
+    def test_verifier_failure_identifies_the_failing_broker_role_index(self):
+        roles = [{"role": role, "source": str(self.app_root), "logical": "/data/test",
+                  "archive": "private-FAKE-KEY", "identity": self.identity}
+                 for role in ("app-workspace", "broker-workspace")]
+        success = subprocess.CompletedProcess([], 0, stdout=json.dumps(self.verifier_value), stderr="")
+        failure = subprocess.CompletedProcess([], 125, stdout="", stderr="private-FAKE-KEY")
+        with patch.object(backup, "run_command", side_effect=[success, failure]):
+            with self.assertRaises(backup.BackupError) as raised:
+                backup.verifier_report(CANDIDATE_IMAGE, roles)
+        self.assertIn("role=broker-workspace, index=1, exit=125", str(raised.exception))
+        self.assertNotIn("FAKE-KEY", str(raised.exception))
+
     def test_prepare_requires_exact_distinct_shas_and_matching_previous_release(self):
         cases = (
             ("short previous SHA", {"previous_release": PREVIOUS[:7]}, PREVIOUS, PREVIOUS, "准确原版本和候选 SHA"),

@@ -593,9 +593,24 @@ def unpack_isolated(partial: Path, target: Path) -> None:
         apply_metadata(directory, attrs)
 
 
+def verifier_failure(result: subprocess.CompletedProcess[str], role: str, index: int) -> BackupError:
+    # 不回显 reader/provider 的消息；固定诊断摘要可与同提交验证器中的 fail 字面量匹配。
+    match = re.fullmatch(r"verify-production-backup: 业务完整性验证失败 \(([^\r\n]+)\)\n?", result.stderr)
+    diagnostic = "diagnostic=unclassified"
+    if match:
+        diagnostic = "reason-sha256=" + hashlib.sha256(match[1].encode()).hexdigest()
+    else:
+        for code in ("ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ERR_DLOPEN_FAILED", "EACCES", "ENOENT", "EROFS"):
+            if re.search(r"\b" + code + r"\b", result.stderr):
+                diagnostic = "code=" + code
+                break
+    label = role if role in ("app-workspace", "broker-workspace") else "unknown"
+    return BackupError(f"恢复验证容器 失败 (role={label}, index={index}, exit={result.returncode}, {diagnostic})")
+
+
 def verifier_report(image: str, roles: list[dict], restore: Path | None = None, snapshots: dict | None = None, *, require_idle: bool = False, require_locally_idle: bool = False, stopped_units: set[str] | None = None, allow_legacy: bool = False) -> dict:
     report = {"business": {}, "configs": {}}
-    for role in roles:
+    for index, role in enumerate(roles):
         physical = (restore / role["archive"]) if restore else Path(role["source"])
         if role["role"] == "broker-config":
             report["configs"][role["archive"]] = {"sha256": sha256_file(physical), **metadata(physical)}
@@ -629,8 +644,10 @@ def verifier_report(image: str, roles: list[dict], restore: Path | None = None, 
         if require_locally_idle and role.get("unit") in (stopped_units or set()):
             argv += ["--writer-stopped", "true"]
         result = run_command(argv, description="业务身份隔离读取")
+        if result.returncode != 0:
+            raise verifier_failure(result, role["role"], index)
         try:
-            value = json.loads(require_command_success(result, "恢复验证容器"))
+            value = json.loads(result.stdout)
             if not isinstance(value, dict) or value.get("complete") is not True:
                 raise ValueError()
             if require_idle and value.get("quiescent") is not True:
