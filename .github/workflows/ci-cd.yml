@@ -29,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Pull the official Node base image before running tests
+        run: timeout 120 docker pull docker.io/library/node:22-alpine
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -53,7 +55,7 @@ jobs:
         run: chmod -R go-rwx apps packages src examples
       - run: >-
           docker build
-          --build-arg NODE_IMAGE=public.ecr.aws/docker/library/node:22-alpine
+          --build-arg NODE_IMAGE=docker.io/library/node:22-alpine
           --file docker/Dockerfile
           --tag video-factory:ci .
       - name: Boot production Studio as the image user without network or credentials
