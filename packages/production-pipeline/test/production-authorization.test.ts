@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   assessProductionSpendPlan,
-  canonicalProductionAssetIntentDigest,
-  canonicalQualityContractDigest,
   foldProductionSpendLedger,
   parseProductionAuthorizationScope,
   resolveProductionSpendDecision,
@@ -354,11 +352,15 @@ describe("scope coverage of concrete spend plans", () => {
 // 宿主接受/读取（真实 ProductionPipeline + FileRunStore；角色全部走本地 worker 替身）。
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import type { WorkflowRun } from "@video-factory/workflow-core";
+import { AUTH_BRIEF, createR5Fixture, readR5SpendState, scopeForCurrentQuote } from "./fixtures/production-authorization-child.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import path from "node:path";
-import { ProductionPipeline, type ProductionBrief, type WorkerResponse } from "../src/index.js";
+import { GenerativeAssetWorkerClient, ProductionPipeline, type ProductionBrief, type WorkerResponse } from "../src/index.js";
 
 class AuthWorker {
   async run(request: Record<string, unknown>): Promise<WorkerResponse> {
@@ -634,31 +636,6 @@ describe("assessProductionSpendPlan whole-plan amounts", () => {
   });
 });
 
-const AUTH_BRIEF = {
-  protocolVersion: "video-factory/brief-v1",
-  title: "制作范围授权验证",
-  angle: "授权边界",
-  audience: "创作者",
-  nicheSlug: "auth",
-  durationSeconds: 24,
-  durationRange: { minSeconds: 20, maxSeconds: 34 },
-  platform: "douyin",
-  runPurpose: "test",
-  reviewMode: "manual",
-  providers: {
-    script: "codex-screenwriter-v1",
-    director: "api-visual-director-v1",
-    assets: "local-editorial-v1",
-    voice: "macos-say-v1",
-    render: "python-ffmpeg-v1",
-    technicalReview: "python-technical-review-v1",
-  },
-  workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1" },
-  director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
-  economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
-  voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
-} as unknown as ProductionBrief;
-
 describe("production authorization host acceptance", () => {
   it("accepts a scope atomically and rejects stale revisions, duplicates, and foreign chains", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "vf-c1-accept-"));
@@ -788,10 +765,8 @@ describe("production authorization host acceptance", () => {
 // ---------------------------------------------------------------------------
 // C1 宿主自动继续：scope 覆盖当前报价时派生子凭证继续；不覆盖（方案变化/无授权）保持人工等待。
 // ---------------------------------------------------------------------------
-import { readFile } from "node:fs/promises";
-
 describe("scope-covered spend approval auto-continues", () => {
-  async function meteredAwaitingRun(workspaceRoot: string) {
+  async function meteredAwaitingRun(workspaceRoot: string, worker = new AuthWorker()) {
     const treatment: { providerId: string; agent: import("../src/index.js").CreativeTreatmentAgent } = {
       providerId: "openai",
       agent: {
@@ -815,7 +790,7 @@ describe("scope-covered spend approval auto-continues", () => {
     };
     const pipeline = new ProductionPipeline({
       workspaceRoot,
-      worker: new AuthWorker(),
+      worker,
       treatmentAgents: [treatment],
       screenwriterAgent: {
         id: "codex-screenwriter-v1",
@@ -880,40 +855,6 @@ describe("scope-covered spend approval auto-continues", () => {
     return { pipeline, run };
   }
 
-  async function scopeForCurrentQuote(pipeline: ProductionPipeline, runId: string, overrides: Partial<ProductionAuthorizationScope> = {}) {
-    const run = await pipeline.show(runId);
-    const assets = run.nodeRuns.find((node) => node.nodeId === "assets")!;
-    const plan = assets.spendPlan!;
-    const effectiveInput = assets.inputState?.versions.find((v) => v.id === assets.inputState?.effectiveVersionId)?.value as { executablePlanPath?: string };
-    assert.ok(effectiveInput?.executablePlanPath, "assets input must reference the executable plan");
-    const planDigest = createHash("sha256").update(await readFile(effectiveInput.executablePlanPath!)).digest("hex");
-    const runBrief = (run as unknown as { initialInput: Record<string, unknown> }).initialInput as unknown as import("../src/index.js").ProductionBrief;
-    assert.ok(runBrief.durationPolicy === undefined, "此夹具保留旧版授权合同");
-    return baseScope({
-      id: "scope-cover",
-      runId,
-      approvalRevision: run.revision,
-      acceptedPlanDigest: planDigest,
-      qualityContractDigest: canonicalQualityContractDigest({
-        angle: runBrief.angle,
-        audience: runBrief.audience,
-        durationRange: runBrief.durationRange ?? { minSeconds: 0, maxSeconds: 0 },
-        directorProfileId: runBrief.director?.profileId ?? "",
-        ...(runBrief.visualProof ? { visualProof: runBrief.visualProof } : {}),
-      }),
-      approvedAmountCents: Math.round(plan.maxCostCny * 100) + 10_000,
-      permittedAssets: (plan.items ?? []).map((item) => ({
-        assetKey: item.id,
-        // 与正式 issuer（ProductionStudio 引用同一 helper）一致的逐资产 intent 投影；
-        // 旧的 SHA256(item.id) fixture 只保留作拒绝用例。
-        intentDigest: canonicalProductionAssetIntentDigest(planDigest, item.id),
-        models: [{ providerId: item.providerId, modelId: item.modelId }],
-        maxCreateAttempts: 2,
-      })),
-      ...overrides,
-    });
-  }
-
   it("rejects a predecessor-less amendment when an active authorization already exists", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "vf-c1-fork-guard-"));
     const { pipeline, run } = await meteredAwaitingRun(workspaceRoot);
@@ -955,6 +896,93 @@ describe("scope-covered spend approval auto-continues", () => {
     // 明确终点：素材执行在子凭证下真实推进（不再停在报价等待）。
     const persisted = await pipeline.show(run.id);
     assert.notEqual(persisted.status, "awaiting_spend_approval");
+  });
+
+  it("passes scope identity with cumulative budgets to the actual worker request", async () => {
+    const requests: Record<string, unknown>[] = [];
+    class CapturingWorker extends AuthWorker {
+      override async run(request: Record<string, unknown>) {
+        requests.push(request);
+        return super.run(request);
+      }
+    }
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "vf-r5-scope-identity-"));
+    const { pipeline, run } = await meteredAwaitingRun(workspaceRoot, new CapturingWorker());
+    const scope = await scopeForCurrentQuote(pipeline, run.id);
+    await pipeline.acceptProductionAuthorization(run.id, scope);
+    const parameters = requests.find(request => request.capability === "asset.prepare")?.parameters as Record<string, unknown>;
+    assert.equal(parameters.derivedFromScopeId, scope.id);
+    assert.equal((parameters.itemCreateBudgets as Record<string, number>)["scene-1"], 2);
+  });
+
+  it("rejects a scope credential when a cooperating worker consumes the budget before dispatch takes its lease", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "vf-r5-ledger-race-"));
+    const { pipeline, run } = await meteredAwaitingRun(workspaceRoot);
+    const scope = await scopeForCurrentQuote(pipeline, run.id);
+    scope.permittedAssets.forEach(asset => { asset.maxCreateAttempts = 1; });
+    let creates = 0;
+    const worker = new GenerativeAssetWorkerClient({ runsRoot: join(workspaceRoot, "runs"), fallback: new AuthWorker(),
+      adapters: [{ estimatedCnyPerClip: 2.4, defaultModelId: "seedance-v1", modelPrices: { "seedance-v1": 2.4 },
+        adapter: { providerId: "seedance-video-v1", generate: async (_request, progress) => {
+          creates += 1;
+          await progress?.({ providerId: "seedance-video-v1", taskId: "cooperating-task", status: "submitted" });
+          await progress?.({ providerId: "seedance-video-v1", taskId: "cooperating-task", status: "failed", error: "accepted failure" });
+          throw new Error("accepted failure");
+        } } }],
+    });
+    const dispatch = pipeline.dispatchSpendAuthorization.bind(pipeline);
+    let interposed = false;
+    pipeline.dispatchSpendAuthorization = async (id, authorization, listener, guard) => {
+      if (!interposed && authorization.derivedFromScopeId) {
+        interposed = true;
+        // 另一受控写者在同一正式lease内使用真实worker落账；不手改计数或账本。
+        await pipeline.withRunMaintenanceLease([id], async () => {
+          const assets = run.nodeRuns.find(node => node.nodeId === "assets")!;
+          const input = assets.inputState!.versions.find(version => version.id === assets.inputState!.effectiveVersionId)!.value;
+          const response = await worker.run({ protocolVersion: "video-factory/worker-v1", commandId: "cooperating-operation",
+            runId: id, nodeRunId: "assets", attempt: 1, capability: "asset.prepare", input,
+            outputDir: join(workspaceRoot, "runs", id, "nodes", "assets", "cooperating-attempt"),
+            parameters: { providerId: "seedance-video-v1", provider: "seedance", maxPaidShots: 3, maxCostCny: 100,
+              derivedFromScopeId: scope.id, itemCreateBudgets: { "scene-1": 1, "scene-2": 1, "scene-3": 1 } } });
+          assert.equal(response.status, "failed");
+          assert.equal(creates, 1);
+        });
+      }
+      return dispatch(id, authorization, listener, guard);
+    };
+    await assert.rejects(() => pipeline.acceptProductionAuthorization(run.id, scope), /scope.*coverage.*changed/i);
+    assert.equal(interposed, true);
+    assert.equal(creates, 1);
+    const current = await pipeline.loadPersisted(run.id);
+    assert.equal(current.status, "awaiting_spend_approval");
+    assert.equal(current.spendAuthorizations?.length ?? 0, 0);
+    assert.equal((await pipeline.readProductionAuthorization(run.id))?.id, scope.id);
+  });
+
+  it("rejects a child from a superseded scope at the actual dispatch lease", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "vf-r5-scope-head-race-"));
+    const { pipeline, run } = await meteredAwaitingRun(workspaceRoot);
+    const scope = await scopeForCurrentQuote(pipeline, run.id);
+    const dispatch = pipeline.dispatchSpendAuthorization.bind(pipeline);
+    let interposed = false;
+    let replacedBytes: string | undefined;
+    pipeline.dispatchSpendAuthorization = async (id, authorization, listener, guard) => {
+      if (!interposed && authorization.derivedFromScopeId === scope.id) {
+        interposed = true;
+        const replacement = await scopeForCurrentQuote(pipeline, id, { id: "replacement-scope",
+          supersedesAuthorizationId: scope.id, approvedAmountCents: 1 });
+        await pipeline.acceptProductionAuthorization(id, replacement);
+        replacedBytes = await readFile(join(workspaceRoot, "runs", id, "run.json"), "utf8");
+      }
+      return dispatch(id, authorization, listener, guard);
+    };
+    await assert.rejects(() => pipeline.acceptProductionAuthorization(run.id, scope), /no longer the active authorization/);
+    assert.equal(interposed, true);
+    assert.equal(await readFile(join(workspaceRoot, "runs", run.id, "run.json"), "utf8"), replacedBytes);
+    const current = await pipeline.loadPersisted(run.id);
+    assert.equal(current.status, "awaiting_spend_approval");
+    assert.equal(current.spendAuthorizations?.length ?? 0, 0);
+    assert.equal((await pipeline.readProductionAuthorization(run.id))?.id, "replacement-scope");
   });
 
   for (const evidence of ["terminal-unsubmitted", "active-unsubmitted", "terminal-submitted"] as const) {
@@ -1042,6 +1070,233 @@ describe("scope-covered spend approval auto-continues", () => {
     assert.equal(waitingNode.spendAssessment?.reason, "quality");
   });
 
+  // R5-A：真实宿主派生/dispatch → 真实 GenerativeAssetWorker（provider 仅 stub）。
+  // 上限 M=2：第 1 次 create 受理后失败（P=1），第 2 次必须仍被允许（累计口径——
+  // 旧实现把剩余 M−P 下发给累计比较，会在第 2 次就拒绝），第 3 次在覆盖评估处
+  // 停在人工入口，provider 恰好两次 create。
+  it("derives cumulative per-asset create budgets across the host and the real generative worker", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "vf-r5a-cumulative-budget-"));
+    let creates = 0;
+    const { pipeline, brief } = createR5Fixture(workspaceRoot, {
+      fallback: new AuthWorker(),
+      onCreate: () => { creates += 1; },
+    });
+    const awaiting = await pipeline.start(brief);
+    assert.equal(awaiting.status, "awaiting_spend_approval",
+      JSON.stringify(awaiting.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error, intervention: node.intervention?.kind }))));
+    const scope = await scopeForCurrentQuote(pipeline, awaiting.id);
+    assert.equal(scope.permittedAssets.length, 2);
+    assert.ok(scope.permittedAssets.every((asset) => asset.maxCreateAttempts === 2));
+
+    const first = await pipeline.acceptProductionAuthorization(awaiting.id, scope);
+    assert.notEqual(first.status, "awaiting_spend_approval", "覆盖的报价必须自动继续");
+    const firstDerived = first.spendAuthorizations!.at(-1)!;
+    assert.equal(firstDerived.itemCreateBudgets?.["scene-1"], 2,
+      "派生子凭证必须下发累计上限 M=2，而不是剩余值");
+    assert.equal(firstDerived.itemCreateBudgets?.["scene-2"], 2,
+      "未受影响的素材同样下发累计上限（次数按素材独立累计）");
+    assert.equal(creates, 1, "第 1 次 create 受理后失败，同操作内后续素材不再越过 create 边界");
+    assert.equal(first.nodeRuns.find((node) => node.nodeId === "assets")?.status, "failed");
+    assert.notEqual(first.nodeRuns.find((node) => node.nodeId === "assets")?.outcomeUncertain, true,
+      "受理后失败是已知终态");
+
+    const second = await pipeline.retryFailedNode(first.id, "assets");
+    assert.equal(creates, 2, "累计口径下第 2 次 create 必须被允许（P+1=2<=M）");
+    const secondDerived = second.spendAuthorizations!.at(-1)!;
+    assert.equal(secondDerived.itemCreateBudgets?.["scene-1"], 2,
+      "重试派生仍下发累计上限；历史次数由账本累计，不在派生值里重复扣减");
+    assert.equal(secondDerived.derivedFromScopeId, scope.id);
+    assert.equal(second.nodeRuns.find((node) => node.nodeId === "assets")?.status, "failed");
+
+    const third = await pipeline.retryFailedNode(second.id, "assets");
+    assert.equal(third.status, "awaiting_spend_approval",
+      `M−P=0 时第 3 次 create 必须停在既有人工入口，不得派生子凭证；creates=${creates} nodes=${JSON.stringify(third.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error, intervention: node.intervention?.kind })))}`);
+    assert.equal(third.spendAuthorizations!.length, second.spendAuthorizations!.length,
+      "未覆盖的重试不得签发第三份凭证");
+    assert.equal(creates, 2, "provider 恰好两次 create");
+    const assessment = third.nodeRuns.find((node) => node.nodeId === "assets")?.spendAssessment;
+    assert.ok(assessment, "未覆盖评估必须落盘供人工入口展示");
+    const operationsDirectory = join(workspaceRoot, "runs", third.id, "nodes", "assets", ".generation-operations");
+    const ledgerFiles = (await readdir(operationsDirectory)).filter((file) => file.endsWith(".json"));
+    let physicalCreates = 0;
+    for (const file of ledgerFiles) {
+      const ledger = JSON.parse(await readFile(join(operationsDirectory, file), "utf8")) as {
+        items: Array<{ state: string; taskId?: string }>;
+      };
+      physicalCreates += ledger.items.filter((item) => item.taskId && item.state !== "prepared").length;
+    }
+    assert.equal(physicalCreates, 2, "账本记录恰好两次越过 create 边界的物理请求");
+
+    // R5-B：scope 替换不重置历史占用。用户重新批准更高的累计上限 M=3：历史 P=2 仍在，
+    // 第 3 次 create 必须被允许，且派生预算用新 scope 的 M=3——不是旧值 2，也不是把
+    // 历史清零后的 3 次全新额度（第 4 次仍会耗尽）。
+    const supersedingScope = await scopeForCurrentQuote(pipeline, third.id, {
+      id: "scope-cover-2",
+      supersedesAuthorizationId: scope.id,
+      permittedAssets: scope.permittedAssets.map((asset) => ({ ...asset, maxCreateAttempts: 3 })),
+    });
+    const fourth = await pipeline.acceptProductionAuthorization(third.id, supersedingScope);
+    assert.notEqual(fourth.status, "awaiting_spend_approval", "更高上限的新 scope 覆盖当前报价后自动继续");
+    assert.equal(creates, 3, "替换 scope 后第 3 次 create 被允许（P=2，2+1<=新 M=3）——历史占用未被重置");
+    const fourthDerived = fourth.spendAuthorizations!.at(-1)!;
+    assert.equal(fourthDerived.itemCreateBudgets?.["scene-1"], 3,
+      "派生预算跟随新 scope 的累计上限 M=3");
+    assert.equal(fourthDerived.derivedFromScopeId, supersedingScope.id);
+    const fifth = await pipeline.retryFailedNode(fourth.id, "assets");
+    assert.equal(fifth.status, "awaiting_spend_approval",
+      "新上限同样按累计口径耗尽：第 4 次 create 停在人工入口");
+    assert.equal(creates, 3, "provider 仍然恰好三次 create");
+  });
+
+  it("R5-B preserves cumulative attempts across fresh host and worker processes", { timeout: 30_000 }, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "vf-r5-process-attempts-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const first = await r5Child(root, "attempts", "seed");
+    assert.equal(first.run.status, "failed");
+    assert.deepEqual(first.after.state, { settledCents: 240, reservedCents: 0, pendingUnknownCents: 0,
+      attemptsByAsset: { "scene-1": 1 } });
+    const second = await r5Child(root, "attempts", "retry");
+    assert.notEqual(second.pid, first.pid);
+    assert.deepEqual(second.before!.state, first.after.state);
+    assert.equal(second.run.status, "failed");
+    assert.equal(second.creates.length, 1, "fresh worker must allow P=1, M=2");
+    assert.deepEqual(second.after.state, { settledCents: 480, reservedCents: 0, pendingUnknownCents: 0,
+      attemptsByAsset: { "scene-1": 2 } });
+    const exhausted = await r5Child(root, "attempts", "retry");
+    assert.notEqual(exhausted.pid, second.pid);
+    assert.deepEqual(exhausted.before!.state, second.after.state);
+    assert.equal(exhausted.run.status, "awaiting_spend_approval");
+    assert.equal(exhausted.run.nodeRuns.find(node => node.nodeId === "assets")?.spendAssessment?.reason, "attempts");
+    assert.equal(exhausted.run.spendAuthorizations!.length, second.run.spendAuthorizations!.length);
+    assert.equal(exhausted.creates.length, 0, "fresh process must not reset P=2 to zero");
+    assert.deepEqual(exhausted.after.state, second.after.state);
+    assert.equal((await readR5ProviderEvents(root)).length, 2);
+  });
+
+  it("R5-B retains accepted failure exposure across process recovery and a scope funds amendment", { timeout: 30_000 }, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "vf-r5-process-amount-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const first = await r5Child(root, "amount", "seed");
+    assert.equal(first.run.status, "failed");
+    assert.ok(first.scope.permittedAssets.every(asset => asset.maxCreateAttempts === 4));
+    assert.equal(first.after.state.settledCents, 240);
+    assert.equal(first.after.state.reservedCents, 0);
+    assert.deepEqual(first.after.state.attemptsByAsset, { "scene-1": 1 });
+    const denied = await r5Child(root, "amount", "retry");
+    assert.notEqual(denied.pid, first.pid);
+    assert.deepEqual(denied.before!.state, first.after.state);
+    assert.equal(denied.run.status, "awaiting_spend_approval");
+    assert.equal(denied.run.nodeRuns.find(node => node.nodeId === "assets")?.spendAssessment?.reason, "amount");
+    assert.equal(denied.run.nodeRuns.find(node => node.nodeId === "assets")?.spendAssessment?.additionalCents, 240);
+    assert.equal(denied.creates.length, 0, "remaining attempts cannot spend money already occupied by the failed task");
+    assert.equal(denied.run.spendAuthorizations!.length, first.run.spendAuthorizations!.length);
+    assert.deepEqual(denied.after.state, first.after.state);
+    const amended = await r5Child(root, "amount", "amend");
+    assert.notEqual(amended.pid, denied.pid);
+    assert.equal(amended.scope.supersedesAuthorizationId, first.scope.id);
+    assert.equal(amended.scope.approvedAmountCents, first.scope.approvedAmountCents + 240);
+    assert.deepEqual(amended.before!.state, first.after.state);
+    assert.equal(amended.run.status, "failed");
+    assert.equal(amended.creates.length, 1);
+    assert.deepEqual(amended.after.state, { settledCents: 480, reservedCents: 0, pendingUnknownCents: 0,
+      attemptsByAsset: { "scene-1": 2 } });
+    const deniedAgain = await r5Child(root, "amount", "retry");
+    assert.notEqual(deniedAgain.pid, amended.pid);
+    assert.deepEqual(deniedAgain.before!.state, amended.after.state);
+    assert.equal(deniedAgain.run.status, "awaiting_spend_approval");
+    assert.equal(deniedAgain.run.nodeRuns.find(node => node.nodeId === "assets")?.spendAssessment?.reason, "amount");
+    assert.equal(deniedAgain.run.nodeRuns.find(node => node.nodeId === "assets")?.spendAssessment?.additionalCents, 240);
+    assert.equal(deniedAgain.creates.length, 0);
+    assert.deepEqual(deniedAgain.after.state, amended.after.state);
+    assert.equal((await readR5ProviderEvents(root)).length, 2);
+  });
+
+  it("R5-B spends scene-2's remaining attempts while reusing scene-1 at its independent ceiling", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "vf-r5-independent-assets-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const fixture = createR5Fixture(root, { outcome: scene => scene === 1 ? "succeeded" : "failed" });
+    const waiting = await fixture.pipeline.start(fixture.brief);
+    const scope = await scopeForCurrentQuote(fixture.pipeline, waiting.id);
+    scope.permittedAssets.forEach(asset => { asset.maxCreateAttempts = asset.assetKey === "scene-1" ? 1 : 2; });
+    const first = await fixture.pipeline.acceptProductionAuthorization(waiting.id, scope);
+    assert.equal(first.nodeRuns.find(node => node.nodeId === "assets")?.status, "failed");
+    assert.deepEqual(fixture.creates.map(event => event.scene), [1, 2]);
+    const original = (await readR5SpendState(root, first.id)).items.find(item => item.scenePosition === 1 && item.state === "materialized")!;
+    assert.ok(original.localPath);
+    const mediaBytes = await readFile(original.localPath);
+    const ledgerPath = join(root, "runs", first.id, "nodes", "assets", ".generation-operations",
+      `${createHash("sha256").update(original.operationId).digest("hex")}.json`);
+    const ledgerBytes = await readFile(ledgerPath);
+    const second = await fixture.pipeline.retryFailedNode(first.id, "assets");
+    assert.equal(second.nodeRuns.find(node => node.nodeId === "assets")?.status, "failed");
+    assert.deepEqual(fixture.creates.map(event => event.scene), [1, 2, 2], "scene-1's P=1/M=1 cannot consume scene-2's second attempt");
+    assert.equal(second.spendAuthorizations!.at(-1)!.itemCreateBudgets?.["scene-2"], 2);
+    const snapshot = await readR5SpendState(root, first.id);
+    assert.equal(snapshot.state.settledCents, 720, "one materialized and two accepted failures each retain the configured 240-cent charge");
+    assert.equal(snapshot.state.reservedCents, 0);
+    assert.deepEqual({ ...snapshot.state.attemptsByAsset }, { "scene-1": 1, "scene-2": 2 });
+    assert.deepEqual(await readFile(original.localPath), mediaBytes);
+    assert.deepEqual(await readFile(ledgerPath), ledgerBytes);
+    const third = await fixture.pipeline.retryFailedNode(first.id, "assets");
+    assert.equal(third.status, "awaiting_spend_approval");
+    assert.equal(third.spendAuthorizations!.length, second.spendAuthorizations!.length);
+    assert.equal(third.nodeRuns.find(node => node.nodeId === "assets")?.spendAssessment?.reason, "attempts");
+    assert.deepEqual(fixture.creates.map(event => event.scene), [1, 2, 2]);
+    assert.deepEqual((await readR5SpendState(root, first.id)).state, snapshot.state);
+  });
+
+  it("R5-D keeps legacy narrowed credential bytes and conservative denial while deriving a new covered retry", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "vf-r5-legacy-credential-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const fixture = createR5Fixture(root);
+    const { pipeline } = fixture;
+    const waiting = await pipeline.start(fixture.brief);
+    const scope = await scopeForCurrentQuote(pipeline, waiting.id);
+    const first = await pipeline.acceptProductionAuthorization(waiting.id, scope);
+    assert.equal(fixture.creates.length, 1);
+    const scopePath = join(root, "runs", first.id, "production-authorization", `${scope.id}.json`);
+    const scopeBytes = await readFile(scopePath);
+    const runPath = join(root, "runs", first.id, "run.json");
+    const dispatch = pipeline.dispatchSpendAuthorization.bind(pipeline);
+    let legacyIssued = false;
+    // 唯一兼容注入点：模拟旧签发M−P=1；凭证、run和账本仍由正式路径落盘，绝不回写历史事实。
+    pipeline.dispatchSpendAuthorization = async (id, draft, listener, guard) => {
+      assert.equal(legacyIssued, false);
+      legacyIssued = true;
+      assert.equal(draft.itemCreateBudgets?.["scene-1"], 2);
+      return dispatch(id, { ...draft, itemCreateBudgets: { ...draft.itemCreateBudgets, "scene-1": 1 } }, listener, guard);
+    };
+    let denied;
+    try { denied = await pipeline.retryFailedNode(first.id, "assets"); }
+    finally { pipeline.dispatchSpendAuthorization = dispatch; }
+    assert.equal(legacyIssued, true);
+    assert.equal(denied.nodeRuns.find(node => node.nodeId === "assets")?.status, "failed");
+    assert.match(denied.nodeRuns.find(node => node.nodeId === "assets")?.error ?? "", /authorized create budget \(1\/1\)/);
+    assert.equal(fixture.creates.length, 1, "the old remaining value must retain its original conservative meaning");
+    const legacy = denied.spendAuthorizations!.at(-1)!;
+    assert.equal(legacy.itemCreateBudgets?.["scene-1"], 1);
+    const deniedBytes = await readFile(runPath, "utf8");
+    const legacyBytes = credentialBytes(deniedBytes, legacy.id);
+    await pipeline.show(first.id);
+    await pipeline.readProductionAuthorization(first.id);
+    await readR5SpendState(root, first.id);
+    assert.equal(await readFile(runPath, "utf8"), deniedBytes, "read-only recovery must not rewrite a legacy credential");
+    assert.deepEqual(await readFile(scopePath), scopeBytes);
+    const retried = await pipeline.retryFailedNode(first.id, "assets");
+    const renewed = retried.spendAuthorizations!.at(-1)!;
+    assert.notEqual(renewed.id, legacy.id);
+    assert.equal(renewed.derivedFromScopeId, scope.id);
+    assert.equal(renewed.itemCreateBudgets?.["scene-1"], 2);
+    assert.equal(retried.spendAuthorizations!.length, denied.spendAuthorizations!.length + 1);
+    assert.equal(fixture.creates.length, 2, "the still-valid scope must authorize the next legitimate retry without new human approval");
+    assert.notEqual(retried.status, "awaiting_spend_approval");
+    assert.deepEqual(retried.decisions, denied.decisions);
+    assert.equal(credentialBytes(await readFile(runPath, "utf8"), legacy.id), legacyBytes);
+    assert.deepEqual(retried.spendAuthorizations!.find(entry => entry.id === legacy.id), legacy);
+    assert.deepEqual(await readFile(scopePath), scopeBytes);
+    assert.equal((await readR5SpendState(root, first.id)).state.attemptsByAsset["scene-1"], 2);
+  });
+
   it("fails closed when accepting a new authorization over a corrupted committed chain", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "vf-c1-corrupt-chain-"));
     const { pipeline, run } = await meteredAwaitingRun(workspaceRoot);
@@ -1115,3 +1370,52 @@ describe("scope-covered spend approval auto-continues", () => {
     assert.equal(run.status, "awaiting_spend_approval");
   });
 });
+
+interface R5ChildResult {
+  pid: number;
+  recovered: number;
+  before?: Awaited<ReturnType<typeof readR5SpendState>>;
+  after: Awaited<ReturnType<typeof readR5SpendState>>;
+  run: WorkflowRun<ProductionBrief>;
+  scope: ProductionAuthorizationScope;
+  creates: Array<{ scene: number; taskId: string; pid: number }>;
+}
+
+async function r5Child(root: string, scenario: "attempts" | "amount", phase: "seed" | "retry" | "amend"): Promise<R5ChildResult> {
+  const script = fileURLToPath(new URL("./fixtures/production-authorization-child.ts", import.meta.url));
+  const loader = fileURLToPath(new URL("../../../node_modules/tsx/dist/loader.mjs", import.meta.url));
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", loader, script, root, scenario, phase], {
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "pipe"], timeout: 15_000,
+    });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", chunk => { stdout += String(chunk); });
+    child.stderr.on("data", chunk => { stderr += String(chunk); });
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      try {
+        assert.equal(code, 0, `${scenario}/${phase}: ${signal ?? ""}\n${stderr}\n${stdout}`);
+        assert.equal(signal, null);
+        const result = JSON.parse(stdout.trim().split("\n").at(-1)!) as R5ChildResult;
+        assert.equal(result.pid, child.pid);
+        assert.equal(result.recovered, 0, "these fixtures exit only after the committed failure and lease release");
+        resolve(result);
+      } catch (error) { reject(error); }
+    });
+  });
+}
+
+async function readR5ProviderEvents(root: string): Promise<Array<{ scene: number; taskId: string; pid: number }>> {
+  return (await readFile(join(root, "provider-events.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+}
+
+function credentialBytes(runBytes: string, authorizationId: string): string {
+  // 子凭证嵌在run.json中；截取原始片段比较，避免parse/stringify掩盖字节改写。
+  const start = runBytes.indexOf('  "spendAuthorizations": [\n');
+  assert.ok(start >= 0);
+  const end = runBytes.indexOf("\n  ]", start);
+  const entries = runBytes.slice(start, end).match(/^    \{\n[\s\S]*?^    \}/gm) ?? [];
+  const entry = entries.find(bytes => JSON.parse(bytes).id === authorizationId);
+  assert.ok(entry, `credential ${authorizationId} must remain in its original persisted representation`);
+  return entry;
+}

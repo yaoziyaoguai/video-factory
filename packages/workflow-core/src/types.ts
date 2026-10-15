@@ -327,11 +327,18 @@ export interface NodeOverrideDraft<TOutput = unknown> {
   actor: string;
   output?: TOutput;
   artifacts?: ArtifactDraft[];
-  expectedVersionId?: string;
+  /**
+   * 输出版本基线（R6）：调用方在打开编辑器时看到的 effective 版本。
+   * `null` 是显式的"所见无版本"基线（合法历史 output 可没有 outputState），
+   * 锁内要求当前仍无版本才放行；undefined 保留给不经人工编辑器的内部流程。
+   */
+  expectedVersionId?: string | null;
   /** 长时间文字操作提交时，同版本的其它修改也不能被旧快照覆盖。 */
   expectedRunRevision?: number;
   documentCommandId?: string;
   documentResultSha256?: string;
+  /** 普通编辑保存可在锁内校验后保留未变化的输出；内部换稿默认仍建立版本。 */
+  skipUnchangedOutput?: boolean;
   allowTerminalEdit?: boolean;
   schemaVersion?: string;
 }
@@ -396,8 +403,11 @@ export interface SpendAuthorizationDraft {
   // C1：由制作范围授权（production scope）派生子凭证时的来源证明。仅作内部审计字段，
   // 不参与 exact matcher 的相等比较。
   derivedFromScopeId?: string;
-  // C1：scope 派生的逐素材剩余 create 预算（assetKey → 剩余次数）。范围收窄发生在预留层，
-  // 不改变必须与报价计划逐字段一致的 maxCostCny/maxAttempts；worker 在每个 create 边界执行。
+  // C1：scope 派生的逐素材累计 create 上限（assetKey → 已批准的总次数 M）。worker 对
+  // 同一物理 create 集合计数，每个 create 边界比较 历史次数 P + 1 <= M；下发的是
+  // 批准上限本身而不是剩余值——覆盖评估在 host 侧另行核对 M − P ≥ 1，剩余口径不
+  // 进入累计比较。范围收窄发生在预留层，不改变必须与报价计划逐字段一致的
+  // maxCostCny/maxAttempts。
   itemCreateBudgets?: Record<string, number>;
 }
 

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { holdMaintenanceWork } from "./maintenance.js";
 import { inspectLegacyVoiceSource, type LegacyVoiceSourceFiles } from "./legacy-narration-source.js";
 import type { LegacyNarrationSource } from "./narration-relayout.js";
 import { reviewDecisionBasis } from "./review-decision-prefill.js";
@@ -60,7 +61,8 @@ import {
   type AssetSemanticRanking,
 } from "./asset-semantic-ranker.js";
 import { REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION, fallbackShotGrammar, validateShotGrammar, type ReferenceGrammarAgent, type ReferenceGrammarExecution, type ShotGrammar } from "./reference-grammar.js";
-import { CodexBridgeClient, CodexBridgeError, codexBridgeErrorFromCause, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, type AgentLoopTrace, type CodexPreparedOperation, type CodexTaskExecution, type CodexTaskKind, type CodexTaskTrace, type ModelCandidateAttempt, type RoleAudit } from "./codex-chat.js";
+import { parseTaskBinding } from "./codex-task-binding.js";
+import { CodexBridgeClient, CodexBridgeError, codexBridgeErrorFromCause, validatePreparedOperation, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, type AgentLoopTrace, type CodexPreparedOperation, type CodexTaskExecution, type CodexTaskKind, type CodexTaskTrace, type ModelCandidateAttempt, type RoleAudit } from "./codex-chat.js";
 import { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey, roleAgentCheckpointRequestPhases as planningCheckpointRequestPhases } from "./role-agent-checkpoint.js";
 import { RoleAgentLoopError, isCompletedRoleAgentFailure, validateRoleAudit, type HostPlanningReadiness } from "./role-agent-loop.js";
 import { classifyReviewDisposition, dispositionAllowsHumanStop } from "./review-disposition.js";
@@ -98,7 +100,8 @@ import { PlanContractError, durationIntentFor, executableDurationFor, parseDurat
 import { assertCurrentVisualReviewContract, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport, visualReviewBlocksContinuation, type IndependentVisualReviewExecution, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewFinding, type VisualReviewReport, type VisualReviewScope } from "./codex-visual-review.js";
 import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, parseVoiceDoesNotFitConflict, requireTtsVoiceDirection, WORKER_PROTOCOL_VERSION, type ProductionBrief, type ProductionReworkFinding } from "./contracts.js";
 import { NATIVE_AUDIO_PROVIDER } from "./native-audio.js";
-import { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
+import { FileRunStore, RunLockedError, StaleRunRevisionError, type RunScanResult } from "./run-store.js";
+import { diagnosticEvent } from "./diagnostics.js";
 import { parseSourceReviewOutcome, type WorkerResponse } from "./python-worker-client.js";
 import {
   validateVisualDirectorPlan,
@@ -638,6 +641,9 @@ interface PaidNodeReconciliationRecord {
   version: "video-factory/paid-reconciliation-v1";
   reconciliationId: string;
   nodeId: string;
+  runId?: string;
+  operationId?: string;
+  settledItemRequestIds?: string[];
   outcome: ProductionPaidNodeReconciliationDraft["outcome"];
   itemRequestId?: string;
   taskId?: string;
@@ -658,6 +664,20 @@ interface PaidVoiceOperationItem {
   persistedState?: PaidAssetLedgerItemSummary["state"];
   stateHistory: string[];
   reusedFromOperationId?: string;
+  /** 人工结清证据（R4）：绑定具体 reconciliation 与原 item 身份；不改变状态与历史。 */
+  notChargedSettlement?: { reconciliationId: string; settledAt: string };
+}
+
+/**
+ * 操作级终结依据（R4）：来自 worker 耐久记录的可验证拒收，或已完成的人工 reconciliation。
+ * 只有存在终结依据（或旧 v3 账本中可核实的 terminal 原事实）时，该操作的未发 prepared 组
+ * 才不再作为活跃预留；终结依据本身绝不重新激活旧操作发送新请求。
+ */
+interface PaidVoiceTerminalEvidence {
+  source: "explicit_rejection" | "reconciliation";
+  recordedAt: string;
+  itemRequestIds: string[];
+  reconciliation?: { reconciliationId: string; settledAt: string; settledItemRequestIds: string[] };
 }
 
 interface PaidVoiceOperationLedger {
@@ -670,6 +690,7 @@ interface PaidVoiceOperationLedger {
   actualCostCny?: number;
   actualCostSource?: "configured_rate";
   items: PaidVoiceOperationItem[];
+  terminalEvidence?: PaidVoiceTerminalEvidence;
 }
 
 interface VoiceManifestRecovery {
@@ -1124,6 +1145,39 @@ export class ProductionPipeline {
     return this.store.list<ProductionBrief>();
   }
 
+  /** 容错扫描：健康浏览与完整性判断用；严格 list() 合同不变。 */
+  async scanRuns(): Promise<RunScanResult<ProductionBrief>> {
+    return this.store.scan<ProductionBrief>();
+  }
+
+  async maintenanceIntegrity(): Promise<{ complete: boolean; issues: Array<{ runId: string; problem: string }> }> {
+    const scan = await this.scanRuns();
+    const issues: Array<{ runId: string; problem: string }> = scan.issues.map(({ runId, problem }) => ({ runId, problem }));
+    for (const run of scan.runs) {
+      if (run.status === "pending" || run.status === "running"
+        || run.nodeRuns.some((node) => node.status === "running")
+        || run.creativeReviewOperations?.some((operation) => operation.status === "running")) {
+        issues.push({ runId: run.id, problem: "execution_not_settled" });
+      }
+      // 维护不按时间回收运行租约；残留租约必须先由原恢复路径核清。
+      for (const file of [this.executionLeasePath(run.id), this.executionLeaseLockPath(run.id)]) {
+        try {
+          await stat(file);
+          issues.push({ runId: run.id, problem: "execution_lease_present" });
+        } catch (error) { if (!hasCode(error, "ENOENT")) throw error; }
+      }
+      try {
+        for (const node of run.nodeRuns.filter((item) => item.outcomeUncertain)) {
+          const problem = await maintenanceUnknownOperationProblem(this.runsRoot, run, node);
+          if (problem) issues.push({ runId: run.id, problem });
+        }
+      } catch {
+        issues.push({ runId: run.id, problem: "unknown_operation_evidence_invalid" });
+      }
+    }
+    return { complete: issues.length === 0, issues };
+  }
+
   async readPaidExecutionReceipts(runId: string): Promise<NodeExecutionReceipt[]> {
     const run = await this.store.load<ProductionBrief>(runId);
     const receipts = structuredClone(run.executionReceipts ?? []);
@@ -1319,7 +1373,13 @@ export class ProductionPipeline {
 
   async recoverInterruptedRuns(options: { leaseStaleAfterMs?: number } = {}): Promise<number> {
     const leaseStaleAfterMs = options.leaseStaleAfterMs ?? this.options.executionLeaseStaleMs ?? DEFAULT_EXECUTION_LEASE_STALE_MS;
-    const interrupted = (await this.store.list<ProductionBrief>())
+    // 恢复用容错扫描：坏记录不阻断其余可验证记录的恢复；诊断显式可见，
+    // 不完整扫描不得被当作完整静默依据（调用方需要完整性时另查 scanRuns）。
+    const scan = await this.store.scan<ProductionBrief>();
+    for (const issue of scan.issues) {
+      diagnosticEvent("run_scan.issue", { runId: issue.runId, reasonCode: issue.problem });
+    }
+    const interrupted = scan.runs
       .filter((run) => run.status === "pending" || run.status === "running");
     let recovered = 0;
     for (const run of interrupted) {
@@ -1401,7 +1461,7 @@ export class ProductionPipeline {
             run.id,
             creativeRecoveryRequest as unknown as ProductionCreativeReviewCommandDraft,
           );
-          void dispatched.completion.catch(() => undefined);
+          holdMaintenanceWork(dispatched.completion.catch(() => undefined));
         } catch {
           // 已把原 run 如实标为 interrupted/failed；恢复证据损坏或当前配置不再可用时保持
           // 可诊断失败，不构造新 commandId，也不阻断其它历史 run 的启动恢复。
@@ -3352,6 +3412,20 @@ export class ProductionPipeline {
       }
       await verifyNodeOverrideBoundary(this.store.runDirectory(runId), override);
       const brief = parsePersistedBrief(previous.initialInput);
+      const runner = new WorkflowRunner({
+        optionalReviewInvalidationOperations: await verifiedOptionalReviewInvalidationOperations(previous, this.store.runDirectory(runId)),
+        providers: this.createRegistry(brief),
+        clock: this.clock,
+        idFactory: this.idFactory,
+      });
+      const previousNode = previous.nodeRuns.find((node) => node.nodeId === override.nodeId);
+      if (override.skipUnchangedOutput && !override.documentCommandId && !override.artifacts?.length
+        && previousNode && previousNode.outputState?.stale !== true
+        && isDeepStrictEqual(effectiveNodeOutput(previousNode), override.output)) {
+        // 执行全部基线和工作流守卫，但不持久化克隆结果；尤其不能先写导演换稿文件。
+        runner.applyNodeOverride(this.createWorkflow(brief), withExecutableBrief(previous, brief), override);
+        return previous;
+      }
       let effectiveOverride = override.nodeId === "visual-direction"
         ? await this.prepareVisualDirectionOverride(previous, override)
         : override;
@@ -3363,12 +3437,6 @@ export class ProductionPipeline {
         const content = validateBriefInputOverride(override.output, base ? parsePersistedBrief(base) : brief);
         effectiveOverride = { ...override, output: mergeCurrentBrief(content, brief) };
       }
-      const runner = new WorkflowRunner({
-        optionalReviewInvalidationOperations: await verifiedOptionalReviewInvalidationOperations(previous, this.store.runDirectory(runId)),
-        providers: this.createRegistry(brief),
-        clock: this.clock,
-        idFactory: this.idFactory,
-      });
       const next = runner.applyNodeOverride(this.createWorkflow(brief), withExecutableBrief(previous, brief), effectiveOverride);
       if (override.documentCommandId && override.documentResultSha256) {
         const revised = next.nodeRuns.find((node) => node.nodeId === override.nodeId)!;
@@ -3391,7 +3459,7 @@ export class ProductionPipeline {
         }
       }
       return next;
-    }, override.documentCommandId);
+    }, override.documentCommandId, override.skipUnchangedOutput === true);
   }
 
   async previewNarrationPlan(runId: string): Promise<NarrationPlanPreview> {
@@ -6269,6 +6337,7 @@ export class ProductionPipeline {
     try {
       await this.assertExecutionLease(lease);
       const previous = await this.store.load<ProductionBrief>(runId);
+      await assertNoPendingVoiceReconciliation(this.store.runDirectory(runId), draft.reconciliationId.trim());
       const recordPath = this.paidReconciliationPath(runId, draft.reconciliationId.trim());
       const existingRecord = await readPaidNodeReconciliationRecord(recordPath);
       if (existingRecord && (
@@ -6288,6 +6357,9 @@ export class ProductionPipeline {
       if (existingRecord?.status === "in_progress" && previous.revision !== existingRecord.expectedRunRevision) {
         const currentNode = previous.nodeRuns.find((node) => node.nodeId === draft.nodeId);
         if (!currentNode?.outcomeUncertain) {
+          if (existingRecord.nodeId === "voice" && existingRecord.outcome === "confirmed_not_charged") {
+            await assertVoiceSettlementApplied(previous, this.store.runDirectory(runId), existingRecord);
+          }
           await this.assertExecutionLease(lease);
           await writePaidNodeReconciliationRecord(recordPath, {
             ...existingRecord,
@@ -6444,10 +6516,22 @@ export class ProductionPipeline {
           || previousNode.executionReceipt?.actualCostSource === "manual_reconciled"
           ? previousNode.executionReceipt.actualCostSource
           : "configured_rate";
+      const voiceSettlementIds = voiceOperation?.items
+        .filter((item) => (item.persistedState ?? item.state) !== "materialized")
+        .map((item) => item.itemRequestId);
+      if (existingRecord && draft.nodeId === "voice" && draft.outcome === "confirmed_not_charged"
+        && (existingRecord.runId !== runId || existingRecord.operationId !== operationId
+          || !isDeepStrictEqual(existingRecord.settledItemRequestIds, voiceSettlementIds))) {
+        throw new Error("Original voice reconciliation no longer matches its operation or settled items.");
+      }
       const reconciliationRecord: PaidNodeReconciliationRecord = existingRecord ?? {
         version: "video-factory/paid-reconciliation-v1",
         reconciliationId: draft.reconciliationId.trim(),
         nodeId: draft.nodeId,
+        runId,
+        ...(operationId ? { operationId } : {}),
+        ...(draft.nodeId === "voice" && draft.outcome === "confirmed_not_charged" && voiceSettlementIds
+          ? { settledItemRequestIds: voiceSettlementIds } : {}),
         outcome: draft.outcome,
         ...(itemRequestId ? { itemRequestId } : {}),
         ...(taskId ? { taskId } : {}),
@@ -6519,7 +6603,13 @@ export class ProductionPipeline {
       }
       if (draft.outcome === "confirmed_not_charged" && voiceOperation) {
         await this.assertExecutionLease(lease);
-        voiceOperation = await markPaidVoiceItemsNotCharged(nodeDirectory, voiceOperation);
+        voiceOperation = await markPaidVoiceItemsNotCharged(
+          nodeDirectory,
+          voiceOperation,
+          reconciliationRecord.reconciliationId,
+          reconciliationRecord.createdAt,
+          reconciliationRecord.settledItemRequestIds!,
+        );
       }
       if (manualAssetItem && items.some((item) => (
         item.itemRequestId !== manualAssetItem.itemRequestId
@@ -6554,9 +6644,14 @@ export class ProductionPipeline {
           if (!consumed.includes(authorizationId)) consumed.push(authorizationId);
         }
         retryNode.status = "failed";
+        // 结清只完成费用事实：仍含 unknown/submitted/provider_succeeded 的原请求不能凭结清重试
+        // （R4-B 保守占用不清零）；只有明确终结事实（拒收/已结清的未发组）才指向合法新重试。
         retryNode.error = options?.settleOnly === true
           ? "这笔历史付费任务已完成账单结算；旧版制作不会恢复执行，请创建新版本继续制作。"
-          : "配音请求已按服务商明确拒绝结清；请先调整配音设置，再点击“重试失败步骤”创建新任务。";
+          : voiceOperation?.items.some((item) =>
+              item.state === "unknown" || item.state === "submitted" || item.state === "provider_succeeded")
+            ? "配音原请求结果仍未核清，本次仅记录费用结清；请先核对原请求结果，或创建新版本继续制作。"
+            : "配音请求已按服务商明确拒绝结清；请先调整配音设置，再点击“重试失败步骤”创建新任务。";
         retryNode.finishedAt = this.clock();
         delete retryNode.spendAuthorizationId;
         if (options?.settleOnly === true) delete retryNode.spendPlan;
@@ -6904,15 +6999,18 @@ export class ProductionPipeline {
         const foldedLedger = foldProductionSpendLedger(ledgerSnapshot ?? [], {
           terminalOperationIds: finishedPaidOperationIds(run, plan.nodeId),
         });
-        // 逐素材剩余 create 预算（scope 用户批准的每素材上限 - ledger 已用次数）。
+        // 逐素材 create 预算按累计口径下发（R5）：worker 对同一物理 create 集合计数，
+        // 每次只比较 历史次数 P + 1 <= 上限。这里必须传用户批准的累计上限 M 本身——
+        // 覆盖评估已保证 M − P ≥ 1；把剩余 M − P 再下发给累计比较会重复扣减次数。
         // 全覆盖评估保证每个新 create 项至少剩 1 次；预算随子凭证下发，由 worker 在
-        // create 边界执行——收窄发生在预留层，不改动必须与报价计划逐字段一致的凭证。
+        // create 边界执行——收窄只发生在覆盖评估与 scope 余额核对，不改动必须与
+        // 报价计划逐字段一致的凭证。
         const itemCreateBudgets: Record<string, number> = {};
         for (const quoteItem of plan.items ?? []) {
           const permitted = scope.permittedAssets.find((asset) => asset.assetKey === quoteItem.id);
           if (!permitted) continue;
           const remaining = permitted.maxCreateAttempts - (foldedLedger.attemptsByAsset[quoteItem.id] ?? 0);
-          if (remaining >= 1) itemCreateBudgets[quoteItem.id] = remaining;
+          if (remaining >= 1) itemCreateBudgets[quoteItem.id] = permitted.maxCreateAttempts;
         }
         // 金额上界已并入整份计划评估（planMaximumCents）：assessment 覆盖"条目合计与
         // 计划最高占用取大"的完整口径，这里不再重复检查。
@@ -6931,7 +7029,7 @@ export class ProductionPipeline {
           approvedBy: `${scope.approvedBy}（制作范围授权 ${scope.id}）`,
           derivedFromScopeId: scope.id,
           itemCreateBudgets,
-        }, listener, async () => {
+        }, listener, async (previous) => {
           // supersession 防护（C1-R1）：派发事务持锁边界内重读授权链，确认 head 仍是覆盖
           // 判定所用的 scope；已被替代的 scope 不得为尚未开始的新请求签发子授权。
           const latest = await this.readProductionAuthorization(runId);
@@ -6939,6 +7037,26 @@ export class ProductionPipeline {
             throw new Error(
               `Production authorization '${expectedScopeId}' is no longer the active authorization of run '${runId}'; refusing to derive a child spend credential.`,
             );
+          }
+          // 外层覆盖结果只是候选；等待执行租约期间，合法写者可能已消耗次数或金额。
+          const currentNode = previous.nodeRuns.find((node) => node.nodeId === plan.nodeId);
+          const currentPlan = currentNode?.spendPlan;
+          if (!currentPlan || !isDeepStrictEqual(currentPlan, plan)
+            || (currentNode.status !== "awaiting_spend_approval" && currentNode.status !== "approval_invalidated")) {
+            throw new Error("Production scope coverage changed before dispatch; refusing a stale child spend credential.");
+          }
+          const currentLedger = await inspectPaidAssetLedger(
+            path.join(this.runsRoot, runId, "nodes", currentPlan.nodeId),
+          ).catch(() => null);
+          const currentCoverage = await assessProductionScopePendingQuote({
+            scope: latest,
+            run: previous,
+            runsRoot: this.runsRoot,
+            spendPlan: currentPlan,
+            paidItems: currentLedger,
+          });
+          if (!currentCoverage.covered) {
+            throw new Error("Production scope coverage changed before dispatch; refusing a stale child spend credential.");
           }
         });
       }
@@ -7609,6 +7727,7 @@ export class ProductionPipeline {
       await this.assertExecutionLease(lease);
       const previous = await this.store.load<ProductionBrief>(runId);
       await assertNoPendingDocumentCommands(this.store.runDirectory(runId), allowedDocumentCommandId);
+      await assertNoPendingVoiceReconciliation(this.store.runDirectory(runId));
       let persisted = false;
       const checkpoint = async (run: WorkflowRun<ProductionBrief>) => {
         await this.assertExecutionLease(lease);
@@ -7647,6 +7766,7 @@ export class ProductionPipeline {
       await this.assertExecutionLease(lease);
       previous = await this.store.load<ProductionBrief>(runId);
       await assertNoPendingDocumentCommands(this.store.runDirectory(runId));
+      await assertNoPendingVoiceReconciliation(this.store.runDirectory(runId));
     } catch (error) {
       await this.releaseExecutionLease(lease);
       throw error;
@@ -9179,6 +9299,9 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
     const attempt = await reserveAttemptDirectory(path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId));
     const outputDir = attempt.directory;
     const parameters: Record<string, unknown> = { ...this.config.parameters, providerId: this.config.id };
+    // 授权来源和逐项预算只消费当前凭证，不能继承 provider 配置中的旧值。
+    delete parameters.derivedFromScopeId;
+    delete parameters.itemCreateBudgets;
     if (this.capability === "audio.prepare_native" || this.capability === "video.render" && input.audioMode === "native_av") {
       parameters.mediaRoot = path.join(this.runsRoot, context.runId);
     }
@@ -9212,6 +9335,9 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
         parameters.estimatedCostCny = this.estimatedCostCny;
         // C1：scope 派生的逐素材 create 预算随子凭证下发；worker 在每个 create 边界执行，
         // 超预算的 create 在越过付费边界前 fail closed（停在可操作状态，不静默降级）。
+        if (authorization.derivedFromScopeId) {
+          parameters.derivedFromScopeId = authorization.derivedFromScopeId;
+        }
         if (authorization.itemCreateBudgets) {
           parameters.itemCreateBudgets = { ...authorization.itemCreateBudgets };
         }
@@ -16356,7 +16482,123 @@ export async function summarizeJointPlanningExecution(
   };
 }
 
-async function readNodeAccountingCheckpoints(runsRoot: string, runId: string, nodeId: string, onIssue?: (issue: string) => void): Promise<Record<string, unknown>[]> {
+/** 维护只核已有请求身份；不取回结果、不重发，也不结清 unknown 的费用。 */
+async function maintenanceUnknownOperationProblem(runsRoot: string, run: WorkflowRun, node: NodeRun): Promise<string | undefined> {
+  const refs = node.optionalReviewOperationRefs ?? [];
+  const ids = node.outcomeUncertainOperationIds?.length ? node.outcomeUncertainOperationIds
+    : node.operationRequestId ? [node.operationRequestId] : refs.map((ref) => ref.operationId);
+  if (!ids.length || ids.some((id) => !optionalOutputString(id))) return "unknown_operation_unbound";
+  const runRoot = path.join(runsRoot, run.id);
+  const nodeRoot = path.join(runRoot, "nodes", node.nodeId);
+  if (refs.length) {
+    const tasks = (await originalOptionalReviewTasks(run, runRoot)).filter((task) => task.nodeId === node.nodeId);
+    for (const ref of refs) {
+      const task = tasks.find((item) => item.operationId === ref.operationId && item.requestId === ref.requestId
+        && item.targetVersionId === ref.targetVersionId && item.inputDigest === ref.inputDigest && item.purpose === ref.purpose);
+      if (!task || task.requestState === "unknown" && !task.prepared) return "unknown_operation_unbound";
+      if (task.prepared) maintenancePreparedOperation(task.prepared);
+    }
+    if (!ids.every((id) => tasks.some((task) => task.operationId === id && task.prepared))) return "unknown_operation_unbound";
+    const checkpoints = await maintenanceCheckpointOperations(runsRoot, run, node);
+    return checkpoints.problem;
+  }
+  if (node.nodeId === "voice") {
+    for (const id of new Set(ids)) {
+      const operation = await readPaidVoiceOperation(nodeRoot, id);
+      if (!operation?.items.length) return "unknown_operation_unbound";
+      await assertReadableFileWithin(nodeRoot, paidVoiceOperationPath(nodeRoot, id));
+      if (!optionalOutputString(operation.providerId) || !optionalOutputString(operation.modelId)) return "unknown_operation_evidence_invalid";
+      const seen = new Set<string>();
+      for (const value of operation.items) {
+        const item = value as unknown as Record<string, unknown>;
+        if (!optionalOutputString(item.itemRequestId) || seen.has(value.itemRequestId)
+          || item.providerId !== operation.providerId || item.modelId !== operation.modelId) return "unknown_operation_evidence_invalid";
+        seen.add(value.itemRequestId);
+        if (operation.version === "video-factory/voice-operation-v3") {
+          if (!optionalOutputString(item.groupId) || !maintenanceDigest(item.synthesisKey)
+            || item.itemRequestId !== `voice-group-${contentSha256([id, item.groupId, item.synthesisKey]).slice(0, 32)}`) {
+            return "unknown_operation_evidence_invalid";
+          }
+        } else if (!maintenancePaidItemIdentity(id, item)) return "unknown_operation_evidence_invalid";
+      }
+    }
+    return undefined;
+  }
+  if (node.nodeId === "assets") {
+    const items = await inspectPaidAssetLedger(nodeRoot);
+    for (const id of new Set(ids)) {
+      const owned = items.filter((item) => item.operationId === id);
+      if (!owned.length) return "unknown_operation_unbound";
+      const file = path.join(nodeRoot, ".generation-operations", `${createHash("sha256").update(id).digest("hex")}.json`);
+      await assertReadableFileWithin(nodeRoot, file);
+      const record: unknown = JSON.parse(await readFile(file, "utf8"));
+      if (!isObjectRecord(record) || record.operationId !== id || typeof record.completed !== "boolean"
+        || owned.some((item) => !maintenancePaidItemIdentity(id, item as unknown as Record<string, unknown>)
+          || !optionalOutputString(item.executorProviderId) || !optionalOutputString(item.providerId)
+          || !optionalOutputString(item.modelId))) return "unknown_operation_evidence_invalid";
+    }
+    return undefined;
+  }
+  const checkpoints = await maintenanceCheckpointOperations(runsRoot, run, node);
+  return checkpoints.problem ?? (ids.every((id) => checkpoints.bound.has(id)) ? undefined : "unknown_operation_unbound");
+}
+
+async function maintenanceCheckpointOperations(
+  runsRoot: string, run: WorkflowRun, node: NodeRun,
+): Promise<{ bound: Set<string>; problem?: string }> {
+  const readIssues: string[] = [];
+  const checkpoints = await readNodeAccountingCheckpoints(runsRoot, run.id, node.nodeId, (issue) => readIssues.push(issue), true);
+  const bound = new Set<string>();
+  if (readIssues.length) return { bound, problem: "unknown_operation_evidence_invalid" };
+  for (const checkpoint of checkpoints) {
+    if (checkpoint.status === "running") return { bound, problem: "execution_not_settled" };
+    if (!["passed", "awaiting_user", "exhausted", "failed"].includes(String(checkpoint.status))) return { bound, problem: "unknown_operation_evidence_invalid" };
+    const pending = isObjectRecord(checkpoint.pendingOperation) ? checkpoint.pendingOperation : undefined;
+    const operation = pending ? maintenancePreparedOperation(pending.operation) : undefined;
+    const attempted = checkpoint.attemptedRequestIds;
+    const owner = checkpoint.recoveryOwner as Record<string, unknown>;
+    const requestOwners = isObjectRecord(checkpoint.requestOwners) ? checkpoint.requestOwners : {};
+    if (operation) {
+      if (!Array.isArray(attempted) || !attempted.includes(operation.requestId)
+        || !optionalOutputString(owner.workflowOperationRequestId)
+        || requestOwners[operation.requestId] !== undefined && requestOwners[operation.requestId] !== owner.workflowOperationRequestId
+        || !["produce", "audit"].includes(String(pending!.phase))
+        || !Number.isSafeInteger(pending!.iteration) || Number(pending!.iteration) < 1
+        || !Number.isSafeInteger(pending!.generation) || Number(pending!.generation) < 0) return { bound, problem: "unknown_operation_evidence_invalid" };
+      bound.add(owner.workflowOperationRequestId as string);
+    }
+    if (checkpoint.requestExecutions !== undefined) {
+      if (!isObjectRecord(checkpoint.requestExecutions)) return { bound, problem: "unknown_operation_evidence_invalid" };
+      for (const [requestId, state] of Object.entries(checkpoint.requestExecutions)) {
+        if (!Array.isArray(attempted) || !attempted.includes(requestId)
+          || !["completed", "completed_failure", "not_accepted", "unknown"].includes(String(state))
+          || state === "unknown" && operation?.requestId !== requestId) return { bound, problem: "unknown_operation_evidence_invalid" };
+      }
+    }
+  }
+  return { bound };
+}
+
+function maintenancePreparedOperation(value: unknown): CodexPreparedOperation {
+  if (!isObjectRecord(value) || !isObjectRecord(value.route) || !optionalOutputString(value.route.socketPath)
+    || !optionalOutputString(value.requestId)) throw new Error("Original maintenance request is invalid.");
+  parseTaskBinding(value.binding);
+  const operation = value as unknown as CodexPreparedOperation;
+  validatePreparedOperation(operation, operation.route.socketPath);
+  return operation;
+}
+
+function maintenanceDigest(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+function maintenancePaidItemIdentity(operationId: string, item: Record<string, unknown>): boolean {
+  return maintenanceDigest(item.inputFingerprint) && maintenanceDigest(item.sourceFingerprint)
+    && Number.isSafeInteger(item.scenePosition) && Number(item.scenePosition) > 0
+    && item.itemRequestId === `paid-item-${createHash("sha256").update(`${operationId}\0${item.inputFingerprint}`).digest("hex").slice(0, 24)}`;
+}
+
+async function readNodeAccountingCheckpoints(runsRoot: string, runId: string, nodeId: string, onIssue?: (issue: string) => void, strictIdentity = false): Promise<Record<string, unknown>[]> {
   const directory = path.join(runsRoot, runId, "nodes", nodeId, "agent-loop-checkpoints");
   let names: string[];
   try {
@@ -16369,6 +16611,7 @@ async function readNodeAccountingCheckpoints(runsRoot: string, runId: string, no
   for (const name of names) {
     let value: unknown;
     try {
+      if (strictIdentity) await assertReadableFileWithin(path.join(runsRoot, runId), path.join(directory, name));
       value = JSON.parse(await readFile(path.join(directory, name), "utf8"));
     } catch {
       onIssue?.(`${name}:unreadable`);
@@ -16379,7 +16622,11 @@ async function readNodeAccountingCheckpoints(runsRoot: string, runId: string, no
         && value.version !== "video-factory/agent-loop-checkpoint-v9")
       || !isObjectRecord(value.recoveryOwner)
       || value.recoveryOwner.runId !== runId
-      || value.recoveryOwner.nodeId !== nodeId) continue;
+      || value.recoveryOwner.nodeId !== nodeId
+      || strictIdentity && `${String(value.storageKey ?? value.key)}.json` !== name) {
+      if (strictIdentity) onIssue?.(`${name}:owner_unverifiable`);
+      continue;
+    }
     checkpoints.push(value);
   }
   return checkpoints;
@@ -19713,6 +19960,49 @@ async function verifyArtifactBytes(uri: string, expectedSha256: string, expected
   }
 }
 
+async function assertNoPendingVoiceReconciliation(runRoot: string, allowedId?: string): Promise<void> {
+  const directory = path.join(runRoot, ".paid-reconciliations");
+  let files: string[];
+  try { files = await readdir(directory); }
+  catch (error) { if (hasCode(error, "ENOENT")) return; throw error; }
+  for (const file of files.filter((name) => name.endsWith(".json"))) {
+    const record = await readPaidNodeReconciliationRecord(path.join(directory, file));
+    if (!record || file !== `${createHash("sha256").update(record.reconciliationId).digest("hex")}.json`
+      || record.runId !== undefined && record.runId !== path.basename(runRoot)) {
+      throw new Error("Paid reconciliation record has an invalid original identity.");
+    }
+    if (record.nodeId === "voice" && record.status === "in_progress" && record.reconciliationId !== allowedId) {
+      throw new Error(`Voice reconciliation '${record.reconciliationId}' is incomplete; resume it before another execution.`);
+    }
+  }
+}
+
+async function assertVoiceSettlementApplied(
+  run: WorkflowRun<ProductionBrief>, runRoot: string, record: PaidNodeReconciliationRecord,
+): Promise<void> {
+  const node = run.nodeRuns.find((item) => item.nodeId === "voice");
+  if (record.runId !== run.id || run.revision !== record.expectedRunRevision + 1
+    || node?.status !== "failed" || node.outcomeUncertain || node.operationRequestId
+    || record.operationId && !(run.executionReceipts ?? []).some((receipt) => (
+      receipt.nodeId === "voice" && receipt.requestId === record.operationId
+    ))) throw new Error("Voice reconciliation does not match the persisted run settlement.");
+  if (record.settledItemRequestIds !== undefined) {
+    if (!record.operationId) throw new Error("Voice reconciliation is missing its original operation.");
+    const operation = await readPaidVoiceOperation(path.join(runRoot, "nodes", "voice"), record.operationId);
+    const settlement = operation?.terminalEvidence?.reconciliation;
+    if (!operation || settlement?.reconciliationId !== record.reconciliationId
+      || settlement.settledAt !== record.createdAt
+      || !isDeepStrictEqual(settlement.settledItemRequestIds, record.settledItemRequestIds)
+      || !isDeepStrictEqual(operation.items.filter((item) => (item.persistedState ?? item.state) !== "materialized")
+        .map((item) => item.itemRequestId), record.settledItemRequestIds)
+      || operation.items.some((item) => record.settledItemRequestIds!.includes(item.itemRequestId)
+        && (item.notChargedSettlement?.reconciliationId !== record.reconciliationId
+          || item.notChargedSettlement.settledAt !== record.createdAt))) {
+      throw new Error("Voice reconciliation does not match the original ledger settlement.");
+    }
+  }
+}
+
 async function readPaidNodeReconciliationRecord(pathname: string): Promise<PaidNodeReconciliationRecord | undefined> {
   let value: unknown;
   try {
@@ -19727,6 +20017,11 @@ async function readPaidNodeReconciliationRecord(pathname: string): Promise<PaidN
     || value.version !== "video-factory/paid-reconciliation-v1"
     || typeof value.reconciliationId !== "string"
     || typeof value.nodeId !== "string"
+    || (value.runId !== undefined && (typeof value.runId !== "string" || !value.runId))
+    || (value.operationId !== undefined && (typeof value.operationId !== "string" || !value.operationId))
+    || (value.settledItemRequestIds !== undefined && (!Array.isArray(value.settledItemRequestIds)
+      || value.settledItemRequestIds.some((id) => typeof id !== "string" || !id)
+      || new Set(value.settledItemRequestIds).size !== value.settledItemRequestIds.length))
     || !["resume_original", "requote", "confirmed_not_charged", "confirmed_charged"].includes(String(value.outcome))
     || (value.itemRequestId !== undefined && (
       typeof value.itemRequestId !== "string"
@@ -20144,20 +20439,34 @@ async function readPaidVoiceOperation(
 async function markPaidVoiceItemsNotCharged(
   nodeDirectory: string,
   operation: PaidVoiceOperationLedger,
+  reconciliationId: string,
+  settledAt: string,
+  settledItemRequestIds: string[],
 ): Promise<PaidVoiceOperationLedger> {
-  const ledger = structuredClone(operation);
+  // 人工“确认未收费”只补终结依据（R4）：已发送项保持原状态与历史（unknown/submitted/
+  // provider_succeeded 的保守占用不清零，terminal_failed 的明确拒收事实不抹掉），
+  // materialized 的费用与来源不受损；不把部分结清当全部费用清零，也不重置任何状态。
+  // 该函数幂等：同一 reconciliation 重入只覆写同一份证据，不产生第二次结算或任何 provider 调用。
+  // readPaidVoiceOperation 可投影已保存响应；写结清时只改原磁盘字段，不能把投影当新的完成事实。
+  const ledger = JSON.parse(await readFile(paidVoiceOperationPath(nodeDirectory, operation.operationId), "utf8")) as PaidVoiceOperationLedger;
+  if (ledger.operationId !== operation.operationId || !isDeepStrictEqual(
+    ledger.items.filter((item) => item.state !== "materialized").map((item) => item.itemRequestId), settledItemRequestIds,
+  )) throw new Error("Voice operation changed before its original settlement could be recorded.");
   for (const item of ledger.items) {
-    if (item.state === "materialized") continue;
-    item.state = "prepared";
-    if (item.stateHistory.at(-1) !== "prepared") item.stateHistory.push("prepared");
-    delete (item as PaidVoiceOperationItem & { error?: string }).error;
+    if (!settledItemRequestIds.includes(item.itemRequestId)) continue;
+    item.notChargedSettlement = { reconciliationId, settledAt };
   }
-  ledger.completed = ledger.items.every((item) => item.state === "materialized");
-  if (!ledger.items.some((item) => item.state === "materialized")) {
+  const existingEvidence = ledger.terminalEvidence;
+  ledger.terminalEvidence = {
+    ...(existingEvidence ?? {
+      source: "reconciliation" as const,
+      recordedAt: settledAt,
+      itemRequestIds: settledItemRequestIds,
+    }),
+    reconciliation: { reconciliationId, settledAt, settledItemRequestIds },
+  };
+  if (!ledger.items.some((item) => item.state === "materialized") && ledger.actualCostCny === undefined) {
     ledger.actualCostCny = 0;
-    ledger.actualCostSource = "configured_rate";
-  } else if (ledger.actualCostCny === undefined) {
-    ledger.actualCostCny = ledger.estimatedCostCny;
     ledger.actualCostSource = "configured_rate";
   }
   await writeJsonRecordAtomically(paidVoiceOperationPath(nodeDirectory, ledger.operationId), ledger);

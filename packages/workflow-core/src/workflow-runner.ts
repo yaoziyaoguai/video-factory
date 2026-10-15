@@ -649,6 +649,14 @@ export class WorkflowRunner {
       outputs,
       run.decisions,
     );
+    // null 只表示整个版本状态缺失，必须在 legacy 重建前校验；空结构和悬空指针仍是冲突。
+    const existingState = nodeRun.outputState;
+    if (existingState !== undefined && (override.expectedVersionId === null
+      || !existingState.effectiveVersionId?.trim()
+      || !existingState.versions.some((version) => version.id === existingState.effectiveVersionId))) {
+      throw new NodeVersionConflictError(node.id, String(override.expectedVersionId ?? "<valid-version>"),
+        existingState.effectiveVersionId || "<dangling>");
+    }
     normalizeLegacyVersionStates(definition, run, context.publicContext());
     const outputState = nodeRun.outputState ?? createLegacyOutputState(node, nodeRun, run.nodeRuns);
     if (override.expectedVersionId && override.expectedVersionId !== outputState.effectiveVersionId) {

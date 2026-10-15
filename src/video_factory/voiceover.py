@@ -283,12 +283,85 @@ def _prepare_minimax_operation(
     }
     with _minimax_operation_lock(ledger_path):
         if ledger_path.is_file():
-            return _read_minimax_operation(ledger_path, ledger)
+            persisted = _read_minimax_operation(ledger_path, ledger)
+            _assert_voice_reconciliation_complete(persisted, output_dir.parent.resolve())
+            if not persisted.get("completed") and _settled_terminal_minimax_candidate(persisted, output_dir.parent.resolve()):
+                raise RuntimeError("The original MiniMax operation is terminal and cannot be submitted again.")
+            return persisted
         ledger["ledgerPath"] = str(ledger_path)
         with _minimax_reuse_lock(ledger_path.parent):
             _reuse_prior_minimax_items(ledger_path, ledger)
             _write_json_durably(ledger_path, _ledger_without_private_fields(ledger))
         return ledger
+
+
+def _has_voice_terminal_fact(items: list[Any]) -> bool:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        history = item.get("stateHistory")
+        last_sent = [state for state in history if state != "prepared"] if isinstance(history, list) else []
+        if item.get("state") == "terminal_failed" or last_sent and last_sent[-1] == "terminal_failed":
+            return True
+    return False
+
+
+def _has_voice_reconciliation(candidate: dict[str, Any]) -> bool:
+    evidence = candidate.get("terminalEvidence")
+    return (isinstance(evidence, dict) and (evidence.get("source") == "reconciliation" or "reconciliation" in evidence)
+            or any(isinstance(item, dict) and "notChargedSettlement" in item for item in candidate.get("items", [])))
+
+
+def _completed_voice_reconciliation(candidate: dict[str, Any], node_directory: Path) -> bool:
+    """跨 ledger/run/record 的结清只有最后完成记录与原操作、结清范围全部吻合才生效。"""
+    evidence = candidate.get("terminalEvidence")
+    settlement = evidence.get("reconciliation") if isinstance(evidence, dict) else None
+    if not isinstance(settlement, dict) or not isinstance(settlement.get("reconciliationId"), str):
+        return False
+    node = node_directory.resolve()
+    if node.name != "voice" or node.parent.name != "nodes":
+        return False
+    run_root = node.parent.parent
+    record_path = run_root / ".paid-reconciliations" / (hashlib.sha256(settlement["reconciliationId"].encode()).hexdigest() + ".json")
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        run = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    ids = [item.get("itemRequestId") for item in candidate.get("items", [])
+           if isinstance(item, dict) and item.get("state") != "materialized"]
+    settled_ids = settlement.get("settledItemRequestIds")
+    if (not ids or any(not isinstance(value, str) or not value for value in ids) or len(set(ids)) != len(ids)
+            or not isinstance(settled_ids, list) or settled_ids != ids
+            or not isinstance(record, dict) or record.get("version") != "video-factory/paid-reconciliation-v1"
+            or record.get("status") != "completed" or record.get("outcome") != "confirmed_not_charged"
+            or record.get("reconciliationId") != settlement["reconciliationId"] or record.get("nodeId") != "voice"
+            or record.get("operationId") != candidate.get("operationId") or record.get("runId") != run_root.name
+            or record.get("settledItemRequestIds") != ids
+            or type(record.get("resultingRunRevision")) is not int
+            or not isinstance(run, dict) or run.get("id") != run_root.name or type(run.get("revision")) is not int
+            or run["revision"] < record["resultingRunRevision"]):
+        return False
+    if any(item.get("state") != "materialized" and (not isinstance(item.get("notChargedSettlement"), dict)
+           or item["notChargedSettlement"].get("reconciliationId") != settlement["reconciliationId"]
+           or item["notChargedSettlement"].get("settledAt") != settlement.get("settledAt"))
+           for item in candidate["items"]):
+        return False
+    return any(isinstance(receipt, dict) and receipt.get("nodeId") == "voice"
+               and receipt.get("requestId") == candidate.get("operationId")
+               for receipt in run.get("executionReceipts", []))
+
+
+def _assert_voice_reconciliation_complete(candidate: dict[str, Any], node_directory: Path) -> None:
+    if _has_voice_reconciliation(candidate) and not _completed_voice_reconciliation(candidate, node_directory):
+        raise RuntimeError("Original voice reconciliation is incomplete or unbound; refusing another paid request.")
+
+
+def _settled_terminal_minimax_candidate(candidate_ledger: dict[str, Any], node_directory: Path) -> bool:
+    items = candidate_ledger.get("items")
+    return (isinstance(items, list) and bool(items) and all(
+        isinstance(item, dict) and item.get("state") in ("materialized", "terminal_failed", "prepared") for item in items)
+        and (_has_voice_terminal_fact(items) or _completed_voice_reconciliation(candidate_ledger, node_directory)))
 
 
 def _reuse_prior_minimax_items(ledger_path: Path, ledger: dict[str, Any]) -> None:
@@ -300,8 +373,8 @@ def _reuse_prior_minimax_items(ledger_path: Path, ledger: dict[str, Any]) -> Non
                 continue
             try:
                 candidate_ledger = json.loads(candidate_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
+            except (OSError, json.JSONDecodeError) as error:
+                raise RuntimeError("Cannot verify an existing MiniMax operation; refusing a duplicate request.") from error
             if (
                 not isinstance(candidate_ledger, dict)
                 or candidate_ledger.get("version") != "video-factory/paid-operation-v2"
@@ -310,6 +383,7 @@ def _reuse_prior_minimax_items(ledger_path: Path, ledger: dict[str, Any]) -> Non
                 or not isinstance(candidate_ledger.get("items"), list)
             ):
                 continue
+            _assert_voice_reconciliation_complete(candidate_ledger, node_directory)
             candidate = next((
                 value for value in candidate_ledger["items"]
                 if isinstance(value, dict)
@@ -329,7 +403,10 @@ def _reuse_prior_minimax_items(ledger_path: Path, ledger: dict[str, Any]) -> Non
                     "reusedFromItemRequestId": candidate.get("itemRequestId"),
                 })
                 break
-            if candidate.get("state") in {"prepared", "unknown", "submitted", "provider_succeeded"}:
+            # 已明确终结的旧操作已退出：其未发 prepared 不再作为活跃预留（R4）；
+            # unknown/submitted/provider_succeeded 项无论结清与否都保持保守占用。
+            if (candidate.get("state") in {"prepared", "unknown", "submitted", "provider_succeeded"}
+                    and not _settled_terminal_minimax_candidate(candidate_ledger, node_directory)):
                 matching_pending_operation = candidate_ledger.get("operationId")
         if item["state"] != "materialized" and matching_pending_operation:
             raise RuntimeError(
@@ -444,6 +521,22 @@ def _verified_materialized_minimax_path(item: dict[str, Any], node_directory: Pa
             f"MiniMax paid item '{item['itemRequestId']}' raw audio no longer matches its ledger identity; "
             "refusing a duplicate request."
         )
+    if "synthesisKey" in item:
+        metadata = Path(str(item.get("metadataPath", ""))).resolve()
+        try:
+            if not metadata.is_relative_to(node_directory) or not metadata.is_file():
+                raise ValueError("missing response")
+            metadata_bytes = metadata.read_bytes()
+            response = json.loads(metadata_bytes)
+            request_id = item.get("responseItemRequestId", item.get("reusedFromItemRequestId", item["itemRequestId"]))
+            if (hashlib.sha256(metadata_bytes).hexdigest() != item.get("metadataSha256")
+                    or not isinstance(response, dict)
+                    or response.get("request") != {"itemRequestId": request_id, "synthesisKey": item["synthesisKey"]}
+                    or response.get("audio_sha256") != item["sha256"]
+                    or response.get("audio_size_bytes") != item["sizeBytes"]):
+                raise ValueError("response identity mismatch")
+        except (OSError, ValueError) as error:
+            raise RuntimeError("The materialized voice response cannot be verified; refusing a duplicate request.") from error
     return raw_path
 
 

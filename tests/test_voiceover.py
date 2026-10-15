@@ -656,6 +656,73 @@ class MiniMaxVoiceoverTest(unittest.TestCase):
             self.assertEqual(item["stateHistory"], ["prepared", "unknown", "terminal_failed"])
             self.assertIn("invalid request", item["error"])
 
+    def test_legal_retry_after_terminal_rejection_reuses_success_and_resends_the_rest(self):
+        # R4（逐镜 v2 同口径）：镜 1 成功、镜 2 明确拒收、镜 3 未发时，已终结旧操作的
+        # 未发 prepared 不再作为活跃预留；合法新操作复用镜 1、只补发镜 2/3，旧 ID 不重发。
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps({"scenes": [
+                {"position": 1, "narration": "第一镜先说。", "duration": 2},
+                {"position": 2, "narration": "第二镜被拒。", "duration": 2},
+                {"position": 3, "narration": "第三镜未发。", "duration": 2},
+            ]}), encoding="utf-8")
+            request_count = 0
+
+            def urlopen(_request, timeout):
+                nonlocal request_count
+                request_count += 1
+                if request_count == 2:
+                    return _Response({
+                        "data": {},
+                        "base_resp": {"status_code": 1004, "status_msg": "content rejected"},
+                    })
+                return _Response({
+                    "data": {"audio": b"ID3-terminal-retry-audio".hex(), "status": 2},
+                    "base_resp": {"status_code": 0, "status_msg": "success"},
+                })
+
+            def ffmpeg(command, **_kwargs):
+                Path(command[-1]).write_bytes(b"normalized-audio")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            def run(operation_id: str, attempt: int):
+                return synthesize_voiceover_plan(
+                    script_path=script_path,
+                    output_dir=root / "nodes" / "voice" / f"attempt-{attempt}",
+                    provider="minimax",
+                    operation_id=operation_id,
+                    provider_id="minimax-tts-v1",
+                    model_id="speech-test",
+                    estimated_cost_cny=0.5,
+                )
+
+            with patch("video_factory.voiceover.require_ffmpeg"), patch(
+                "video_factory.voiceover.urlopen", side_effect=urlopen
+            ), patch("video_factory.voiceover.probe_audio_duration", return_value=1.9), patch(
+                "video_factory.voiceover.subprocess.run", side_effect=ffmpeg
+            ), patch.dict("os.environ", {"MINIMAX_API_KEY": "test-key"}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "MiniMax speech synthesis failed"):
+                    run("voice-terminal-original", 1)
+                # 旧操作 ID 不能被重新激活：镜 2 已 terminal_failed。
+                with self.assertRaisesRegex(RuntimeError, "cannot be submitted again"):
+                    run("voice-terminal-original", 1)
+                run("voice-terminal-retry", 2)
+
+            operations = root / "nodes" / "voice" / ".voice-operations"
+            original = json.loads((operations / (
+                hashlib.sha256(b"voice-terminal-original").hexdigest() + ".json")).read_text(encoding="utf-8"))
+            retried_ledger = json.loads((operations / (
+                hashlib.sha256(b"voice-terminal-retry").hexdigest() + ".json")).read_text(encoding="utf-8"))
+            self.assertEqual([item["state"] for item in original["items"]],
+                             ["materialized", "terminal_failed", "prepared"])
+            self.assertEqual(request_count, 4, "原操作 2 次（成功+拒收），新操作只补发镜 2/3")
+            self.assertEqual([item["state"] for item in retried_ledger["items"]],
+                             ["materialized", "materialized", "materialized"])
+            self.assertEqual(retried_ledger["items"][0]["stateHistory"], ["prepared", "reused_materialized"])
+            self.assertEqual(retried_ledger["items"][0]["reusedFromOperationId"], "voice-terminal-original")
+            self.assertIsNone(retried_ledger["items"][1].get("reusedFromOperationId"))
+
     def test_missing_minimax_credentials_leave_the_paid_item_prepared(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

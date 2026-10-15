@@ -8,7 +8,9 @@ import { NodeVersionConflictError, type Artifact, type HumanReviewDisposition, t
 import type { WorkerResponse } from "../src/index.js";
 import * as pipeline from "../src/index.js";
 import { RoleAgentLoopError, RoleAuditOutputError } from "../src/role-agent-loop.js";
-import { CodexBridgeError } from "../src/codex-chat.js";
+import { CodexBridgeError, type CodexPreparedOperation } from "../src/codex-chat.js";
+import { taskBinding } from "../src/codex-task-binding.js";
+import { contentSha256, stableJson } from "../src/creative-review.js";
 import { VisualReviewFallbackError } from "../src/codex-visual-review.js";
 
 const brief = {
@@ -4110,6 +4112,62 @@ describe("ProductionPipeline", () => {
     assert.deepEqual(unchanged.nodeRuns.find((node) => node.nodeId === "script")?.output, waiting.nodeRuns.find((node) => node.nodeId === "script")?.output);
   });
 
+  // R6-G：显式 null 基线（编辑器所见为无版本的合法历史 output）在锁内、legacy 版本
+  // 重建之前核对：当前仍无版本才放行并沿既有重建逻辑产生首个人工版本；版本已出现、
+  // 悬空/非法版本结构都不当作无版本，revision 变化照常拒绝；不做历史批量迁移。
+  it("applies an explicit null output baseline only while the node still has no version", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-null-baseline-"));
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });
+    const waiting = await subject.start(brief);
+    const scriptOutput = waiting.nodeRuns.find((node) => node.nodeId === "script")!.output!;
+    const runFile = path.join(workspaceRoot, "runs", waiting.id, "run.json");
+    const stripVersions = async (mutate: (scriptNode: Record<string, unknown>) => void) => {
+      const legacy = JSON.parse(await readFile(runFile, "utf8")) as { nodeRuns: Array<Record<string, unknown>> };
+      mutate(legacy.nodeRuns.find((node) => node.nodeId === "script")!);
+      await writeFile(runFile, JSON.stringify(legacy));
+    };
+    await stripVersions((scriptNode) => {
+      delete scriptNode.outputState;
+    });
+
+    const saved = await subject.applyNodeOverride(waiting.id, {
+      nodeId: "script", actor: "editor", output: scriptOutput,
+      expectedRunRevision: waiting.revision, expectedVersionId: null,
+    });
+    const savedState = saved.nodeRuns.find((node) => node.nodeId === "script")!.outputState!;
+    // legacy 重建先补历史版本，人工版本作为新 effective 版本落档（既有重建逻辑）。
+    const savedVersion = savedState.versions.find((version) => version.id === savedState.effectiveVersionId)!;
+    assert.equal(savedVersion.source, "human");
+    assert.ok(savedState.versions.length >= 1);
+
+    // null 不等于跳过校验：首个人工版本落档后，null 基线必须冲突。
+    await assert.rejects(() => subject.applyNodeOverride(saved.id, {
+      nodeId: "script", actor: "editor", output: scriptOutput,
+      expectedRunRevision: saved.revision, expectedVersionId: null,
+    }), NodeVersionConflictError);
+    // revision 变化仍拒绝（null 基线不免除 revision 核对）。
+    await assert.rejects(() => subject.applyNodeOverride(saved.id, {
+      nodeId: "script", actor: "editor", output: scriptOutput,
+      expectedRunRevision: saved.revision - 1, expectedVersionId: null,
+    }), pipeline.StaleRunRevisionError);
+    const persistedAfterConflicts = await subject.loadPersisted(saved.id);
+    assert.equal(persistedAfterConflicts.revision, saved.revision, "拒绝不产生部分写入");
+
+    // 悬空/空版本结构都不当作无版本；只改变本轮临时夹具。
+    for (const effectiveVersionId of ["missing-version", ""]) {
+      await stripVersions((scriptNode) => {
+        scriptNode.outputState = { nodeId: "script", effectiveVersionId, versions: [] };
+      });
+      const before = await readFile(runFile, "utf8");
+      const dangling = await subject.loadPersisted(saved.id);
+      await assert.rejects(() => subject.applyNodeOverride(saved.id, {
+        nodeId: "script", actor: "editor", output: scriptOutput,
+        expectedRunRevision: dangling.revision, expectedVersionId: null,
+      }), NodeVersionConflictError);
+      assert.equal(await readFile(runFile, "utf8"), before);
+    }
+  });
+
   it("lets an editor revise brief content while protecting workflow infrastructure", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-brief-override-"));
     const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: new FakeWorker() });
@@ -5948,6 +6006,16 @@ describe("ProductionPipeline", () => {
     });
     assert.equal(reviewed.status, "needs_human");
     assert.equal(reviewed.spendAuthorizations?.length, 1);
+
+    const runFile = path.join(workspaceRoot, "runs", reviewed.id, "run.json");
+    const beforeNoop = await readFile(runFile, "utf8");
+    const directorNode = reviewed.nodeRuns.find(node => node.nodeId === "visual-direction")!;
+    await subject.applyNodeOverride(reviewed.id, { nodeId: "visual-direction", actor: "director",
+      output: directorNode.output, expectedRunRevision: reviewed.revision,
+      expectedVersionId: directorNode.outputState!.effectiveVersionId, skipUnchangedOutput: true });
+    assert.equal(await readFile(runFile, "utf8"), beforeNoop);
+    await assert.rejects(() => stat(path.join(workspaceRoot, "runs", reviewed.id, "nodes", "visual-direction", "manual-overrides")),
+      (error: NodeJS.ErrnoException) => error.code === "ENOENT", "no-op must not create a rewritten plan file");
 
     const currentPlanPath = String((reviewed.nodeRuns.find((node) => node.nodeId === "visual-direction")?.output as Record<string, unknown>).directorPlanPath);
     const currentPlan = JSON.parse(await readFile(currentPlanPath, "utf8")) as Record<string, unknown> & { shots: Array<Record<string, unknown>> };
@@ -8955,15 +9023,167 @@ describe("ProductionPipeline", () => {
     assert.equal(resolvedVoice?.status, "failed");
     assert.equal(resolvedVoice?.outcomeUncertain, undefined);
     assert.equal(resolvedVoice?.operationRequestId, undefined);
-    assert.match(resolvedVoice?.error ?? "", /调整配音设置.*重试失败步骤/);
+    // 未知结果（unknown）的人工未收费结清只记账不清占用：原请求仍不能直接重试。
+    assert.match(resolvedVoice?.error ?? "", /配音原请求结果仍未核清，本次仅记录费用结清/);
     assert.equal(voiceCalls, 1);
     const reconciledLedger = JSON.parse(await readFile(voiceLedgerPath, "utf8")) as {
-      items: Array<{ state: string }>;
+      items: Array<{
+        state: string;
+        notChargedSettlement?: { reconciliationId: string };
+      }>;
+      terminalEvidence?: {
+        source: string;
+        itemRequestIds: string[];
+        reconciliation: { reconciliationId: string; settledItemRequestIds: string[] };
+      };
     };
-    assert.deepEqual(reconciledLedger.items.map((item) => item.state), ["materialized", "prepared"]);
+    // 结清保留原状态与历史（R4）：unknown 不被重置为 prepared，materialized 不受损。
+    assert.deepEqual(reconciledLedger.items.map((item) => item.state), ["materialized", "unknown"]);
+    assert.equal(reconciledLedger.items[0]?.notChargedSettlement, undefined);
+    assert.equal(reconciledLedger.items[1]?.notChargedSettlement?.reconciliationId, "tts-confirmed-not-charged");
+    assert.equal(reconciledLedger.terminalEvidence?.source, "reconciliation");
+    assert.deepEqual(reconciledLedger.terminalEvidence?.itemRequestIds, ["voice-scene-2"]);
+    assert.equal(reconciledLedger.terminalEvidence?.reconciliation.reconciliationId, "tts-confirmed-not-charged");
+    assert.deepEqual(reconciledLedger.terminalEvidence?.reconciliation.settledItemRequestIds, ["voice-scene-2"]);
     const receipts = resolved.executionReceipts?.filter((receipt) => receipt.requestId === operationId) ?? [];
     assert.equal(receipts.length, 1);
     assert.equal(receipts[0]?.actualCostCny, 0.1);
+  });
+
+  for (const fault of ["before-run-save", "after-run-save"] as const) {
+    it(`blocks new execution until interrupted voice settlement completes (${fault})`, async () => {
+      const { workspaceRoot, subject, worker, failed, failedVoice } = await uncertainPaidVoiceFixture("voice-settlement-boundary-");
+      const runRoot = path.join(workspaceRoot, "runs", failed.id);
+      const operationId = failedVoice.operationRequestId!;
+      const ledgerPath = path.join(runRoot, "nodes", "voice", ".voice-operations",
+        `${createHash("sha256").update(operationId).digest("hex")}.json`);
+      await mkdir(path.dirname(ledgerPath), { recursive: true });
+      await writeFile(ledgerPath, JSON.stringify({
+        version: "video-factory/paid-operation-v2", operationId, completed: false,
+        providerId: "minimax-tts-v1", modelId: "speech-2.8-turbo", estimatedCostCny: 0.1,
+        items: [{ itemRequestId: "never-sent", state: "prepared", stateHistory: ["prepared"] }],
+      }));
+      const draft = { nodeId: "voice", expectedRunRevision: failed.revision,
+        reconciliationId: "finish-original-settlement", outcome: "confirmed_not_charged" as const,
+        actor: "test", note: "Only the unsubmitted group is settled." };
+      const recordPath = path.join(runRoot, ".paid-reconciliations",
+        `${createHash("sha256").update(draft.reconciliationId).digest("hex")}.json`);
+      const store = (subject as unknown as { store: pipeline.FileRunStore }).store;
+      const save = store.save.bind(store);
+      store.save = async (run, revision) => {
+        if (fault === "after-run-save") await save(run, revision);
+        throw new Error(`injected ${fault}`);
+      };
+      await assert.rejects(() => subject.reconcilePaidNode(failed.id, draft), /injected/);
+      store.save = save;
+      const runBefore = await readFile(path.join(runRoot, "run.json"));
+      const ledgerBefore = await readFile(ledgerPath);
+      const callsBefore = worker.calls.length;
+      assert.equal(JSON.parse(await readFile(recordPath, "utf8")).status, "in_progress");
+      await assert.rejects(() => subject.retryFailedNode(failed.id, "voice"), /reconciliation/i);
+      await assert.rejects(() => subject.reconcilePaidNode(failed.id, { ...draft, reconciliationId: "another-settlement" }),
+        /reconciliation.*incomplete/i);
+      assert.equal(worker.calls.length, callsBefore);
+      assert.deepEqual(await readFile(path.join(runRoot, "run.json")), runBefore);
+      assert.deepEqual(await readFile(ledgerPath), ledgerBefore);
+      const settled = await subject.reconcilePaidNode(failed.id, draft);
+      const record = JSON.parse(await readFile(recordPath, "utf8"));
+      assert.equal(record.status, "completed");
+      assert.equal(record.runId, failed.id);
+      assert.equal(record.operationId, operationId);
+      assert.deepEqual(record.settledItemRequestIds, ["never-sent"]);
+      assert.equal(settled.revision, failed.revision + 1);
+      assert.equal(worker.calls.length, callsBefore);
+      assert.deepEqual(await subject.reconcilePaidNode(failed.id, draft), settled);
+      assert.equal(settled.executionReceipts?.filter(receipt => receipt.requestId === operationId).length, 1);
+    });
+  }
+
+  it("re-entering a partially settled voice ledger does not double settle or resubmit", async () => {
+    // R4-F：结清在写账本与保存 run 之间中断后，磁盘上只有半完成的结清证据。
+    // 重入必须幂等：不重复结算、不调用 provider、旧身份可追溯、materialized 费用保留。
+    const { workspaceRoot, subject, worker, failed } = await uncertainPaidVoiceFixture(
+      "video-factory-tts-settlement-idempotent-",
+    );
+    const failedVoice = failed.nodeRuns.find((node) => node.nodeId === "voice")!;
+    const operationId = failedVoice.operationRequestId!;
+    const voiceNodeDirectory = path.join(workspaceRoot, "runs", failed.id, "nodes", "voice");
+    const rawPath = path.join(voiceNodeDirectory, "attempt-1", "scene_01_raw.mp3");
+    const rawBytes = Buffer.from("durable paid voice");
+    await mkdir(path.dirname(rawPath), { recursive: true });
+    await writeFile(rawPath, rawBytes);
+    const voiceLedgerPath = path.join(voiceNodeDirectory, ".voice-operations",
+      `${createHash("sha256").update(operationId).digest("hex")}.json`);
+    const materializedItem = {
+      itemRequestId: "voice-scene-1",
+      state: "materialized",
+      stateHistory: ["prepared", "unknown", "materialized"],
+      localPath: rawPath,
+      sha256: createHash("sha256").update(rawBytes).digest("hex"),
+      sizeBytes: rawBytes.length,
+      actualCostCny: 0.1,
+    };
+    const unknownItem = {
+      itemRequestId: "voice-scene-2",
+      state: "unknown",
+      stateHistory: ["prepared", "unknown"],
+      // 中断前 markPaidVoiceItemsNotCharged 已落盘的半完成结清。
+      notChargedSettlement: { reconciliationId: "settle-once", settledAt: "2026-10-15T00:00:00.000Z" },
+    };
+    await mkdir(path.dirname(voiceLedgerPath), { recursive: true });
+    await writeFile(voiceLedgerPath, `${JSON.stringify({
+      version: "video-factory/paid-operation-v2",
+      operationId,
+      completed: false,
+      providerId: "minimax-tts-v1",
+      modelId: "speech-2.8-turbo",
+      estimatedCostCny: 0.1,
+      actualCostCny: 0.1,
+      actualCostSource: "configured_rate",
+      items: [materializedItem, unknownItem],
+      terminalEvidence: {
+        source: "reconciliation",
+        recordedAt: "2026-10-15T00:00:00.000Z",
+        itemRequestIds: ["voice-scene-2"],
+        reconciliation: {
+          reconciliationId: "settle-once",
+          settledAt: "2026-10-15T00:00:00.000Z",
+          settledItemRequestIds: ["voice-scene-2"],
+        },
+      },
+    }, null, 2)}\n`, "utf8");
+
+    const beforeCalls = worker.calls.filter((call) => call.capability === "voice.synthesize").length;
+    const resolved = await subject.reconcilePaidNode(failed.id, {
+      nodeId: "voice",
+      expectedRunRevision: failed.revision,
+      reconciliationId: "settle-once",
+      outcome: "confirmed_not_charged",
+      actor: "owner",
+      note: "结清中断后重入。",
+    });
+    assert.equal(resolved.status, "failed");
+    const resolvedVoice = resolved.nodeRuns.find((node) => node.nodeId === "voice");
+    assert.equal(resolvedVoice?.outcomeUncertain, undefined);
+    // 半完成结清不解除 unknown 的保守占用：依旧只记录费用结清。
+    assert.match(resolvedVoice?.error ?? "", /配音原请求结果仍未核清，本次仅记录费用结清/);
+    assert.equal(worker.calls.filter((call) => call.capability === "voice.synthesize").length, beforeCalls,
+      "重入不得再次调用 provider");
+    const ledger = JSON.parse(await readFile(voiceLedgerPath, "utf8")) as {
+      items: Array<{ itemRequestId: string; state: string; actualCostCny?: number; notChargedSettlement?: { reconciliationId: string } }>;
+      terminalEvidence?: { reconciliation: { reconciliationId: string; settledItemRequestIds: string[] } };
+    };
+    // 重入只覆写同一份证据：结清范围仍是原 itemRequestIds，materialized 费用不受损。
+    assert.equal(ledger.terminalEvidence?.reconciliation.reconciliationId, "settle-once");
+    assert.deepEqual(ledger.terminalEvidence?.reconciliation.settledItemRequestIds, ["voice-scene-2"]);
+    assert.equal(ledger.items[0]?.state, "materialized");
+    assert.equal(ledger.items[0]?.actualCostCny, 0.1);
+    assert.equal(ledger.items[0]?.notChargedSettlement, undefined);
+    assert.equal(ledger.items[1]?.state, "unknown");
+    assert.equal(ledger.items[1]?.notChargedSettlement?.reconciliationId, "settle-once");
+    const receipts = resolved.executionReceipts?.filter((receipt) => receipt.requestId === operationId) ?? [];
+    assert.equal(receipts.length, 1);
+    assert.equal(receipts[0]?.actualCostCny, 0.1, "重入不得重复累计已结清费用");
   });
 
   for (const { ordinaryRetry, grouped } of [{ ordinaryRetry: false, grouped: false }, { ordinaryRetry: true, grouped: false },
@@ -9191,9 +9411,11 @@ describe("ProductionPipeline", () => {
         economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 5 },
       });
       await entered;
-      const originalList = pipeline.FileRunStore.prototype.list;
-      const scan = context.mock.method(pipeline.FileRunStore.prototype, "list", async function (this: pipeline.FileRunStore) {
-        const snapshot = await originalList.call(this);
+      // 恢复的快照缝隙已从容错 scan 取数；保持同一合同：扫描与取得租约之间原执行者
+      // 已停在人工/费用确认时，恢复不得用旧快照覆盖。
+      const originalScan = pipeline.FileRunStore.prototype.scan;
+      const scan = context.mock.method(pipeline.FileRunStore.prototype, "scan", async function (this: pipeline.FileRunStore) {
+        const snapshot = await originalScan.call(this);
         scannedResolve();
         await inspect;
         return snapshot;
@@ -10301,7 +10523,17 @@ describe("ProductionPipeline", () => {
       items: ledgerItems,
     }));
     await writeFile(path.join(workspaceRoot, "runs", sourceRunId, "run.json"), JSON.stringify({
+      id: sourceRunId,
       revision: 1,
+      workflowId: "daily-production",
+      workflowVersion: "1.0.0",
+      status: "succeeded",
+      startedAt: "2026-09-01T08:00:00.000Z",
+      finishedAt: "2026-09-01T08:05:00.000Z",
+      initialInput: {},
+      artifacts: [],
+      interventions: [],
+      decisions: [],
       nodeRuns: [{
         nodeId: "assets",
         status: "succeeded",
@@ -10310,6 +10542,8 @@ describe("ProductionPipeline", () => {
           generatedVersionId: "source-assets-v1",
           effectiveVersionId: "source-assets-v1",
           stale: false,
+          versions: [{ id: "source-assets-v1", nodeId: "assets", source: "generated", output: {},
+            artifactIds: [], inputVersionIds: [], createdAt: "2026-09-01T08:05:00.000Z", createdBy: "test", schemaVersion: "1" }],
         },
       }],
     }));
@@ -12247,5 +12481,318 @@ describe("ProductionPipeline", () => {
       truncated: false,
     }]);
     assert.equal(JSON.stringify(projection).includes("正文正文"), false);
+  });
+
+  describe("maintenance original request integrity", () => {
+    const stopped = (id: string, nodeId: string, operationId: string): WorkflowRun => ({
+      id, revision: 0, workflowId: "daily-production", workflowVersion: "1.0.0", status: "failed",
+      initialInput: brief, startedAt: "2026-10-15T00:00:00.000Z", finishedAt: "2026-10-15T00:01:00.000Z",
+      artifacts: [], interventions: [], decisions: [],
+      nodeRuns: [{ nodeId, status: "failed", outcomeUncertain: true, operationRequestId: operationId,
+        artifactIds: [], qualityGateResults: [], startedAt: "2026-10-15T00:00:00.000Z", finishedAt: "2026-10-15T00:01:00.000Z" }],
+    });
+    const subjectFor = (workspaceRoot: string) => new pipeline.ProductionPipeline({
+      workspaceRoot, worker: { run: async () => { throw new Error("maintenance must never execute work"); } },
+    });
+    const prepared = (requestId: string): CodexPreparedOperation => {
+      const kind = "role-audit" as const;
+      const brokerBinding = { version: "video-factory/task-binding-v1" as const,
+        storeId: `vfs_store_${"a".repeat(32)}`, providerId: "deepseek", modelId: "deepseek-flash" };
+      const envelope = { requestId, kind, payload: { candidate: { title: "isolated maintenance fixture" } } };
+      return { version: "video-factory/codex-prepared-operation-v1", requestId, kind, envelope,
+        serializedEnvelope: JSON.stringify(envelope), brokerBinding,
+        binding: taskBinding({ request: envelope, broker: brokerBinding, kind }),
+        route: { socketPath: "/isolated/broker.sock" }, taskFact: "accepted_unknown" };
+    };
+    const checkpointFor = (run: WorkflowRun, operation = prepared(`${run.id}-request`)) => {
+      const node = run.nodeRuns[0]!;
+      const key = createHash("sha256").update(`${run.id}-checkpoint`).digest("hex");
+      return { version: "video-factory/agent-loop-checkpoint-v9", key, storageKey: key,
+        status: "failed", failure: { stage: "uncertain" }, completed: [],
+        recoveryOwner: { runId: run.id, nodeId: node.nodeId, workflowOperationRequestId: node.operationRequestId! },
+        attemptedRequestIds: [operation.requestId], requestOwners: { [operation.requestId]: node.operationRequestId! },
+        requestExecutions: { [operation.requestId]: "unknown" },
+        pendingOperation: { phase: "audit", iteration: 1, generation: 0, operationKey: "audit:1", operation } };
+    };
+    const persistCheckpoint = async (store: pipeline.FileRunStore, run: WorkflowRun, value: ReturnType<typeof checkpointFor>) => {
+      const directory = path.join(store.runDirectory(run.id), "nodes", run.nodeRuns[0]!.nodeId, "agent-loop-checkpoints");
+      await mkdir(directory, { recursive: true });
+      const file = path.join(directory, `${value.storageKey}.json`);
+      await writeFile(file, JSON.stringify(value));
+      return file;
+    };
+    const persistVoice = async (store: pipeline.FileRunStore, run: WorkflowRun, version: "v2" | "v3" = "v3") => {
+      const operationId = run.nodeRuns[0]!.operationRequestId!;
+      const directory = path.join(store.runDirectory(run.id), "nodes", "voice", ".voice-operations");
+      await mkdir(directory, { recursive: true });
+      const file = path.join(directory, `${createHash("sha256").update(operationId).digest("hex")}.json`);
+      const inputFingerprint = "c".repeat(64);
+      const synthesisKey = "d".repeat(64);
+      const itemRequestId = version === "v3"
+        ? `voice-group-${createHash("sha256").update(JSON.stringify([operationId, "group-1", synthesisKey])).digest("hex").slice(0, 32)}`
+        : `paid-item-${createHash("sha256").update(`${operationId}\0${inputFingerprint}`).digest("hex").slice(0, 24)}`;
+      await writeFile(file, JSON.stringify({
+        version: version === "v3" ? "video-factory/voice-operation-v3" : "video-factory/paid-operation-v2",
+        operationId, completed: false, providerId: "minimax-tts-v1", modelId: "speech-2.8-turbo",
+        estimatedCostCny: 0.2, actualCostCny: 0.1,
+        items: [{ itemRequestId, state: "unknown", stateHistory: ["prepared", "unknown"],
+          providerId: "minimax-tts-v1", modelId: "speech-2.8-turbo",
+          ...(version === "v3" ? { groupId: "group-1", synthesisKey,
+            quote: { unit: "10000_characters", unitPriceCny: "2.00", estimatedUnits: 100, maxCostCny: 0.2 } }
+            : { inputFingerprint, sourceFingerprint: "e".repeat(64), scenePosition: 1, parameters: { voice: "female-chengshu" } }) }],
+      }));
+      return file;
+    };
+    const persistAssets = async (store: pipeline.FileRunStore, run: WorkflowRun) => {
+      const operationId = run.nodeRuns[0]!.operationRequestId!;
+      const inputFingerprint = "c".repeat(64);
+      const directory = path.join(store.runDirectory(run.id), "nodes", "assets", ".generation-operations");
+      await mkdir(directory, { recursive: true });
+      const file = path.join(directory, `${createHash("sha256").update(operationId).digest("hex")}.json`);
+      await writeFile(file, JSON.stringify({ version: "video-factory/paid-operation-v2", operationId, completed: false,
+        items: [{ itemRequestId: `paid-item-${createHash("sha256").update(`${operationId}\0${inputFingerprint}`).digest("hex").slice(0, 24)}`,
+          quoteItemId: "scene-1", inputFingerprint, sourceFingerprint: "e".repeat(64), scenePosition: 1,
+          executorProviderId: "hailuo-video-v1", providerId: "hailuo-video-v1", modelId: "MiniMax-Hailuo-02",
+          parameters: { mediaType: "video", durationSeconds: 5, ratio: "9:16" },
+          state: "unknown", estimatedCostCny: 2.4, actualCostCny: 2.4, actualCostSource: "configured_rate" }],
+      }));
+      return file;
+    };
+
+    for (const nodeId of ["voice", "assets", "creative-planning"] as const) {
+      it(`rejects an invented ${nodeId} operation id with no persisted original request`, async (t) => {
+        const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-maintenance-missing-original-"));
+        t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+        const store = new pipeline.FileRunStore(path.join(workspaceRoot, "runs"));
+        const run = stopped("run-missing", nodeId, "invented-operation");
+        await store.create(run);
+        const before = await readFile(store.runPath(run.id), "utf8");
+        const result = await subjectFor(workspaceRoot).maintenanceIntegrity();
+        assert.equal(result.complete, false);
+        assert.ok(result.issues.some(issue => issue.runId === run.id && issue.problem === "unknown_operation_unbound"));
+        assert.equal(await readFile(store.runPath(run.id), "utf8"), before);
+      });
+    }
+
+    for (const damage of ["binding", "owner", "request-owner", "running", "invalid-status", "unrelated-unknown", "bad-json"] as const) {
+      it(`rejects stopped text work when its original checkpoint has ${damage} damage`, async (t) => {
+        const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-maintenance-text-original-"));
+        t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+        const store = new pipeline.FileRunStore(path.join(workspaceRoot, "runs"));
+        const run = stopped("run-text", "creative-planning", "text-operation");
+        await store.create(run);
+        const checkpoint = checkpointFor(run);
+        if (damage === "binding") checkpoint.pendingOperation.operation.binding.requestDigest = "f".repeat(64);
+        if (damage === "owner") checkpoint.recoveryOwner.runId = "other-run";
+        if (damage === "request-owner") checkpoint.requestOwners[checkpoint.pendingOperation.operation.requestId] = "other-operation";
+        if (damage === "running") checkpoint.status = "running";
+        if (damage === "invalid-status") checkpoint.status = "invented";
+        if (damage === "unrelated-unknown") checkpoint.requestExecutions["unbound-request"] = "unknown";
+        const file = await persistCheckpoint(store, run, checkpoint);
+        if (damage === "bad-json") await writeFile(file, "{broken");
+        const before = await readFile(file, "utf8");
+        assert.equal((await subjectFor(workspaceRoot).maintenanceIntegrity()).complete, false);
+        assert.equal(await readFile(file, "utf8"), before);
+      });
+    }
+
+    for (const nodeId of ["voice", "assets"] as const) {
+      it(`rejects a ${nodeId} ledger whose original operation belongs to another id`, async (t) => {
+        const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-maintenance-ledger-owner-"));
+        t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+        const store = new pipeline.FileRunStore(path.join(workspaceRoot, "runs"));
+        const run = stopped("run-ledger", nodeId, "original-operation");
+        await store.create(run);
+        const file = nodeId === "voice" ? await persistVoice(store, run) : await persistAssets(store, run);
+        const ledger = JSON.parse(await readFile(file, "utf8"));
+        ledger.operationId = "different-operation";
+        await writeFile(file, JSON.stringify(ledger));
+        assert.equal((await subjectFor(workspaceRoot).maintenanceIntegrity()).complete, false);
+      });
+    }
+
+    it("requires every optional review reference to retain its verified original request and binding", async (t) => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-maintenance-optional-original-"));
+      t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+      const store = new pipeline.FileRunStore(path.join(workspaceRoot, "runs"));
+      const run = stopped("run-optional", "visual-review", "visual-original");
+      await store.create(run);
+      const checkpoint = checkpointFor(run);
+      const file = await persistCheckpoint(store, run, checkpoint);
+      const operation = checkpoint.pendingOperation.operation;
+      const runRoot = store.runDirectory(run.id);
+      const evidenceDirectory = path.join(runRoot, "nodes", "visual-review", "optional-review-evidence");
+      await mkdir(evidenceDirectory, { recursive: true });
+      const artifact = async (data: Record<string, unknown>): Promise<Artifact> => {
+        const sha256 = contentSha256(data), bytes = stableJson(data);
+        const uri = path.join(evidenceDirectory, `${sha256}.json`);
+        await writeFile(uri, bytes);
+        return { id: `proof-${sha256}`, kind: "review_diagnostic", schemaVersion: String(data.version),
+          data, uri, sha256, sizeBytes: Buffer.byteLength(bytes), createdAt: run.startedAt,
+          producer: { nodeId: "visual-review", attempt: 1 }, provenance: { providerId: "host-optional-review-operation" } };
+      };
+      const fact = { purpose: "visual_review" as const, operationId: "visual-original", requestId: operation.requestId,
+        targetVersionId: "video-v1", inputDigest: operation.binding.requestDigest, requestState: "unknown" as const,
+        resultState: "absent" as const, reasonCode: "original_request_pending", evidenceArtifactIds: [] as string[] };
+      const index = await artifact({ version: "video-factory/optional-review-operation-index-v1", runId: run.id,
+        nodeId: "visual-review", purpose: fact.purpose, operationId: fact.operationId, requestId: fact.requestId,
+        targetVersionId: fact.targetVersionId, inputDigest: fact.inputDigest, sourceRelativePath: path.relative(runRoot, file) });
+      fact.evidenceArtifactIds.push(index.id);
+      const continuation = await artifact({ version: "video-factory/optional-review-continuation-v1", runId: run.id,
+        nodeId: "visual-review", scope: "rendered_video", requestFacts: [fact] });
+      run.artifacts.push(index, continuation);
+      run.nodeRuns[0]!.outcomeUncertainOperationIds = [fact.operationId];
+      run.nodeRuns[0]!.optionalReviewOperationRefs = [{ purpose: fact.purpose, operationId: fact.operationId,
+        requestId: fact.requestId, targetVersionId: fact.targetVersionId, inputDigest: fact.inputDigest,
+        continuationEvidenceArtifactId: continuation.id }];
+      await store.checkpoint(run);
+      const subject = subjectFor(workspaceRoot);
+      const files = [store.runPath(run.id), file, index.uri!, continuation.uri!];
+      const before = await Promise.all(files.map(item => readFile(item, "utf8")));
+      assert.deepEqual(await subject.maintenanceIntegrity(), { complete: true, issues: [] });
+      assert.deepEqual(await Promise.all(files.map(item => readFile(item, "utf8"))), before);
+      checkpoint.pendingOperation.operation.serializedEnvelope = "{}";
+      await writeFile(file, JSON.stringify(checkpoint));
+      assert.equal((await subject.maintenanceIntegrity()).complete, false);
+      checkpoint.pendingOperation.operation.serializedEnvelope = JSON.stringify(operation.envelope);
+      checkpoint.status = "running";
+      await writeFile(file, JSON.stringify(checkpoint));
+      assert.equal((await subject.maintenanceIntegrity()).complete, false);
+      checkpoint.status = "failed";
+      await writeFile(file, JSON.stringify(checkpoint));
+      await rm(index.uri!);
+      assert.equal((await subject.maintenanceIntegrity()).complete, false);
+    });
+
+    it("does not treat forged optional-review refs or uncertain id lists as original evidence", async (t) => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-maintenance-forged-optional-"));
+      t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+      const store = new pipeline.FileRunStore(path.join(workspaceRoot, "runs"));
+      const run = stopped("run-forged", "visual-review", "invented-workflow-operation");
+      run.nodeRuns[0]!.outcomeUncertainOperationIds = ["invented-operation"];
+      run.nodeRuns[0]!.optionalReviewOperationRefs = [{ purpose: "visual_review", operationId: "invented-operation",
+        requestId: "invented-request", targetVersionId: "v1", inputDigest: "f".repeat(64), continuationEvidenceArtifactId: "missing-proof" }];
+      await store.create(run);
+      const before = await readFile(store.runPath(run.id), "utf8");
+      assert.equal((await subjectFor(workspaceRoot).maintenanceIntegrity()).complete, false);
+      assert.equal(await readFile(store.runPath(run.id), "utf8"), before);
+    });
+
+    it("retains valid stopped voice, asset and text unknowns without changing request bytes or cost receipts", async (t) => {
+      const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-maintenance-valid-originals-"));
+      t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+      const store = new pipeline.FileRunStore(path.join(workspaceRoot, "runs"));
+      const files: string[] = [];
+      for (const [id, nodeId] of [["voice-v2", "voice"], ["voice-v3", "voice"], ["assets", "assets"], ["text", "creative-planning"]]) {
+        const run = stopped(`run-${id}`, nodeId!, `original-${id}`);
+        run.executionReceipts = [{ nodeId: nodeId!, capability: nodeId === "voice" ? "voice.synthesize" : "asset.prepare",
+          providerId: "original-provider", providerLabel: "original", modelId: "original-model", billing: "metered",
+          transport: "http_api", status: "failed", requestId: `original-${id}`, actualCostCny: 0.27,
+          estimatedCostCny: 0.32, actualCostSource: "configured_rate",
+          startedAt: run.startedAt, finishedAt: run.finishedAt! }];
+        await store.create(run);
+        files.push(store.runPath(run.id));
+        files.push(nodeId === "voice" ? await persistVoice(store, run, id === "voice-v2" ? "v2" : "v3")
+          : nodeId === "assets" ? await persistAssets(store, run) : await persistCheckpoint(store, run, checkpointFor(run)));
+      }
+      const before = await Promise.all(files.map(file => readFile(file, "utf8")));
+      assert.deepEqual(await subjectFor(workspaceRoot).maintenanceIntegrity(), { complete: true, issues: [] });
+      assert.deepEqual(await Promise.all(files.map(file => readFile(file, "utf8"))), before);
+    });
+  });
+
+  it("keeps maintenance incomplete for corrupt records, active runs, orphan leases and unbound unknown work", async (t) => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-maintenance-integrity-"));
+    t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+    const store = new pipeline.FileRunStore(path.join(workspaceRoot, "runs"));
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker: { run: async () => { throw new Error("no execution"); } } });
+    const stable: WorkflowRun = { id: "run-stable", revision: 0, workflowId: "daily-production", workflowVersion: "1.0.0",
+      status: "failed", initialInput: brief, startedAt: "2026-10-15T00:00:00.000Z", artifacts: [], interventions: [], decisions: [],
+      nodeRuns: [{ nodeId: "voice", status: "failed", outcomeUncertain: true, operationRequestId: "voice-original",
+        startedAt: "2026-10-15T00:00:00.000Z", artifactIds: [], qualityGateResults: [] }],
+    };
+    await store.create(stable);
+    const ledgerDirectory = path.join(store.runDirectory(stable.id), "nodes", "voice", ".voice-operations");
+    await mkdir(ledgerDirectory, { recursive: true });
+    const synthesisKey = "d".repeat(64);
+    await writeFile(path.join(ledgerDirectory, `${createHash("sha256").update("voice-original").digest("hex")}.json`), JSON.stringify({
+      version: "video-factory/voice-operation-v3", operationId: "voice-original", completed: false,
+      providerId: "minimax-tts-v1", modelId: "speech-2.8-turbo", estimatedCostCny: 0.2,
+      items: [{ itemRequestId: `voice-group-${contentSha256(["voice-original", "group-1", synthesisKey]).slice(0, 32)}`,
+        groupId: "group-1", synthesisKey, providerId: "minimax-tts-v1", modelId: "speech-2.8-turbo",
+        state: "unknown", stateHistory: ["prepared", "unknown"], quote: { unitPriceCny: "2.00", maxCostCny: 0.2 } }],
+    }));
+    const original = await readFile(store.runPath(stable.id), "utf8");
+    assert.deepEqual(await subject.maintenanceIntegrity(), { complete: true, issues: [] });
+    assert.equal(await readFile(store.runPath(stable.id), "utf8"), original);
+    await store.create({ ...stable, id: "run-active", status: "running", nodeRuns: [] });
+    const unboundNode = { ...stable.nodeRuns[0]! };
+    delete unboundNode.operationRequestId;
+    await store.create({ ...stable, id: "run-unbound", nodeRuns: [unboundNode] });
+    const lease = path.join(store.runDirectory(stable.id), ".execution-lease.json.lock");
+    await mkdir(lease);
+    await mkdir(store.runDirectory("run-corrupt"));
+    await writeFile(store.runPath("run-corrupt"), "{broken");
+    const integrity = await subject.maintenanceIntegrity();
+    assert.equal(integrity.complete, false);
+    assert.deepEqual(new Set(integrity.issues.map((issue) => `${issue.runId}:${issue.problem}`)), new Set([
+      "run-corrupt:invalid_json", "run-active:execution_not_settled", "run-stable:execution_lease_present", "run-unbound:unknown_operation_unbound",
+    ]));
+    assert.equal(await readFile(store.runPath(stable.id), "utf8"), original);
+  });
+
+  it("recovers verifiable runs despite a corrupt record and never treats the scan as complete", async (t) => {
+    const diagnostics: string[] = [];
+    t.mock.method(console, "error", (line: string) => { diagnostics.push(line); });
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-corrupt-recovery-"));
+    const store = new pipeline.FileRunStore(path.join(workspaceRoot, "runs"));
+    const runningRun: WorkflowRun = {
+      id: "run-recovery-good",
+      revision: 0,
+      workflowId: "daily-production",
+      workflowVersion: "1.0.0",
+      status: "running",
+      initialInput: { title: "可恢复的制作" },
+      startedAt: "2026-08-21T10:00:00.000Z",
+      nodeRuns: [{ nodeId: "brief", status: "running", startedAt: "2026-08-21T10:00:01.000Z", artifactIds: [], qualityGateResults: [] } as never],
+      artifacts: [],
+      interventions: [],
+      decisions: [],
+    };
+    await store.create(runningRun);
+    await mkdir(path.join(workspaceRoot, "runs", "run-corrupt"), { recursive: true });
+    const corruptBytes = '{"id":"run-corrupt","revision":0,"started';
+    await writeFile(path.join(workspaceRoot, "runs", "run-corrupt", "run.json"), corruptBytes, "utf8");
+
+    const workerCalls: Array<Record<string, unknown>> = [];
+    const subject = new pipeline.ProductionPipeline({
+      workspaceRoot,
+      worker: {
+        run: async (request: Record<string, unknown>) => {
+          workerCalls.push(request);
+          throw new Error("recovery must not dispatch work");
+        },
+      },
+    });
+
+    // 修复前：store.list() 的一条坏记录会让恢复（以及等待它的服务启动）整体失败。
+    const recovered = await subject.recoverInterruptedRuns();
+    assert.equal(recovered, 1);
+    assert.equal((await subject.loadPersisted("run-recovery-good")).status, "failed");
+    assert.equal(workerCalls.length, 0);
+    const scan = await subject.scanRuns();
+    assert.deepEqual(scan.runs.map((run) => run.id), ["run-recovery-good"]);
+    assert.equal(scan.complete, false);
+    assert.equal(scan.issues[0]?.runId, "run-corrupt");
+    assert.equal(scan.issues[0]?.problem, "invalid_json");
+    const diagnostic = diagnostics.map((line) => JSON.parse(line)).find((event) => event.event === "run_scan.issue");
+    assert.equal(diagnostic?.runId, "run-corrupt");
+    assert.equal(diagnostic?.reasonCode, "invalid_json");
+    assert.equal(diagnostics.join("\n").includes(corruptBytes), false);
+    // 坏记录原字节不变；再次扫描不因坏项被隐藏而变完整。
+    assert.equal(await readFile(path.join(workspaceRoot, "runs", "run-corrupt", "run.json"), "utf8"), corruptBytes);
+    assert.equal((await subject.scanRuns()).complete, false);
+    // 直接读取坏记录仍显式失败，不给替代结构。
+    await assert.rejects(() => subject.loadPersisted("run-corrupt"));
   });
 });

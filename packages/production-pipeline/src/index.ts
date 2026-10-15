@@ -333,7 +333,7 @@ export type {
   PublishCopyRevisionInput,
   PublishCopyWriter,
 } from "./codex-publish-copy.js";
-export { FileRunStore, RunLockedError, StaleRunRevisionError } from "./run-store.js";
+export { FileRunStore, RunLockedError, StaleRunRevisionError, type RunScanIssue, type RunScanProblem, type RunScanResult } from "./run-store.js";
 export { PythonWorkerClient } from "./python-worker-client.js";
 export type {
   PythonWorkerClientOptions,

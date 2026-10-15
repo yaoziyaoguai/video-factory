@@ -1,4 +1,5 @@
 import http from "node:http";
+import { maintenanceRequestHeaders } from "./maintenance.js";
 import { parseModelAttempts, summarizeModelAttemptUsage, type ModelAttemptUsage } from "./model-attempt-usage.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -733,6 +734,7 @@ export class CodexBridgeClient {
         headers: {
           "content-type": "application/json",
           "content-length": String(Buffer.byteLength(body)),
+          ...maintenanceRequestHeaders(),
         },
         signal: AbortSignal.timeout(timeoutMs),
       }, (response) => {
@@ -837,7 +839,7 @@ export class CodexBridgeClient {
         socketPath: this.options.socketPath,
         path: `${TASK_PATH}/${encodeURIComponent(operation.requestId)}`,
         method: "GET",
-        headers: { accept: "application/json", ...taskBindingHeaders(operation.binding) },
+        headers: { accept: "application/json", ...taskBindingHeaders(operation.binding), ...maintenanceRequestHeaders() },
         signal: AbortSignal.timeout(timeoutMs),
       }, (response) => {
         const chunks: Buffer[] = [];

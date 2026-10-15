@@ -25,6 +25,7 @@ import type { AssetPilotReviewer } from "./asset-pilot-review.js";
 import { visualReviewBlocksContinuation } from "./codex-visual-review.js";
 import { quantizeDurationsToFrames } from "./executable-timeline.js";
 import type { NarrationSpendQuote, NarrationSpendRequest } from "./narration-plan.js";
+import { foldProductionSpendLedger } from "./production-authorization.js";
 
 interface WorkerClient {
   run(request: Record<string, unknown>): Promise<WorkerResponse>;
@@ -428,7 +429,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     }
 
     const maxCostCny = boundedNumber(parameters.maxCostCny, "maxCostCny", 0, 100_000);
-    const itemCreateBudgets = optionalNumberRecord(parameters.itemCreateBudgets, "itemCreateBudgets");
+    optionalNumberRecord(parameters.itemCreateBudgets, "itemCreateBudgets");
     const unavailableReview = this.pilotReviewUnavailable(request, parameters);
     if (unavailableReview) return unavailableReview;
     const input = requiredRecord(request.input, "Worker input");
@@ -459,7 +460,6 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const preparedOperation = scenes.length
       ? await preparePaidAssetOperation(path.dirname(outputDir), operationId, baseItems)
       : undefined;
-    const priorCreateAttemptsByQuoteItem = preparedOperation?.priorCreateAttemptsByQuoteItem ?? {};
     const estimatedCost = assetExecutionEstimatedCost(preparedOperation, parameters);
     if (estimatedCost > 0 && maxCostCny <= 0) {
       throw new Error("Paid asset execution requires a positive spend authorization.");
@@ -542,10 +542,6 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
               ledgerItem,
               allowCreate: !execution?.recoverOperationId && (openedLedger?.created !== false || acceptedPilotContinuation),
               createBoundary: this.paidCreateBoundary(request, execution),
-              ...(Object.keys(itemCreateBudgets).length ? {
-                itemCreateBudgets,
-                priorCreateAttempts: priorCreateAttemptsByQuoteItem[`scene-${scene.position}`],
-              } : {}),
             });
         applyAcceptedTask(job, generated.taskId, sceneCost);
         if (job.carriedForward) {
@@ -843,12 +839,30 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       const input = requiredRecord(request.input, "Worker input");
       const sourceRunId = isRecord(input.rework) ? optionalString(input.rework.sourceRunId) : undefined;
       const recheck = async () => {
-        const directory = path.join(path.dirname(requiredString(request.outputDir, "outputDir")), ".generation-operations");
-        assertNoUnresolvedPaidAssetItems(paidAssetLedgerLeaves(await previousPaidAssetItems(directory)));
+        const nodeDirectory = path.dirname(requiredString(request.outputDir, "outputDir"));
+        const history = await inspectPaidAssetLedger(nodeDirectory);
+        assertNoUnresolvedPaidAssetItems(paidAssetLedgerLeaves(history));
         const source = await readReworkPaidAssetSafety(this.options.runsRoot, input);
         assertNoUnresolvedPaidAssetItems(source?.items ?? []);
         if (source?.uncertainOperationId) throw new PaidAssetOutcomeUnresolvedError(source.uncertainOperationId);
         if (source?.snapshot) item.sourceRunSnapshot = source.snapshot;
+        const parameters = requiredRecord(request.parameters, "Worker parameters");
+        const scopeDerived = parameters.derivedFromScopeId !== undefined;
+        if (scopeDerived) requiredString(parameters.derivedFromScopeId, "derivedFromScopeId");
+        const budgets = optionalNumberRecord(parameters.itemCreateBudgets, "itemCreateBudgets");
+        const budget = Object.hasOwn(budgets, item.quoteItemId) ? budgets[item.quoteItemId] : undefined;
+        if (scopeDerived && budget === undefined) {
+          throw new PaidAssetSafetyError(`Asset '${item.quoteItemId}' is missing its scope-authorized create budget.`);
+        }
+        if (budget !== undefined) {
+          // 沿用宿主的物理请求归并，在现有租约边界内重读；prepare 快照和 alias 叶子都不能作为累计次数。
+          const priorCreates = foldProductionSpendLedger(history).attemptsByAsset[item.quoteItemId] ?? 0;
+          if (priorCreates + 1 > budget) {
+            throw new PaidAssetSafetyError(
+              `Asset '${item.quoteItemId}' has reached its authorized create budget (${priorCreates}/${budget}); a new spend authorization is required before another create.`,
+            );
+          }
+        }
       };
       if (!sourceRunId || !execution) {
         await recheck();
@@ -1050,7 +1064,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const directorPlanPath = requiredString(input.directorPlanPath, "directorPlanPath");
     const outputDir = requiredString(request.outputDir, "outputDir");
     const maxCostCny = boundedNumber(parameters.maxCostCny, "maxCostCny", 0, 100_000);
-    const itemCreateBudgets = optionalNumberRecord(parameters.itemCreateBudgets, "itemCreateBudgets");
+    optionalNumberRecord(parameters.itemCreateBudgets, "itemCreateBudgets");
     const modelSelections = optionalStringRecord(parameters.modelSelections, "modelSelections");
     const { script, scenes, directorPlan, routedShots, generatedRoutes } = await this.planDirectorRoutes({
       scriptPath,
@@ -1104,7 +1118,6 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const preparedOperation = generatedRoutes.length
       ? await preparePaidAssetOperation(path.dirname(outputDir), operationId, baseItems, reworkCarryForwardItems, sourceSafety)
       : undefined;
-    const priorCreateAttemptsByQuoteItem = preparedOperation?.priorCreateAttemptsByQuoteItem ?? {};
     const estimatedCost = assetExecutionEstimatedCost(preparedOperation, parameters);
     if (estimatedCost > 0 && maxCostCny <= 0) {
       throw new Error("Paid asset execution requires a positive spend authorization.");
@@ -1232,10 +1245,6 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
               allowCreate: !execution?.recoverOperationId && (openedLedger?.created !== false || acceptedPilotContinuation),
               createBoundary: this.paidCreateBoundary(request, execution),
               ...(referenceImages ? { referenceImages } : {}),
-              ...(Object.keys(itemCreateBudgets).length ? {
-                itemCreateBudgets,
-                priorCreateAttempts: priorCreateAttemptsByQuoteItem[`scene-${scene.position}`],
-              } : {}),
             });
         applyAcceptedTask(job, generated.taskId, sceneCost);
         if (job.carriedForward) {
@@ -3292,8 +3301,6 @@ async function preparePaidAssetOperation(
   items: PaidAssetOperationItem[];
   existing: boolean;
   createCostCny: number;
-  /** 历史 create 计数（按素材键）：跨操作叶子条目中真实发生 create 的次数（携带不计数）。 */
-  priorCreateAttemptsByQuoteItem: Record<string, number>;
 }> {
   const ledgerPath = generationLedgerPathIn(nodeDirectory, operationId);
   // 历次操作的台账都在同一个 .generation-operations 目录里：携带复用正是靠与它们比对。
@@ -3308,14 +3315,12 @@ async function preparePaidAssetOperation(
       items: persisted.items,
       existing: true,
       createCostCny: 0,
-      priorCreateAttemptsByQuoteItem: await countPriorCreateAttempts(operationsDirectory, operationId),
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 
   const previousItems = paidAssetLedgerLeaves(await previousPaidAssetItems(operationsDirectory, operationId));
-  const priorCreateAttemptsByQuoteItem = countLocalCreateAttempts(previousItems);
   const carriedItems = await carryForwardPaidAssetItems(operationId, items, previousItems, reworkCarryForwardItems);
   if (carriedItems.some((item) => item.state === "prepared")) {
     assertNoUnresolvedPaidAssetItems(previousItems);
@@ -3330,7 +3335,6 @@ async function preparePaidAssetOperation(
       (sum, item) => sum + (item.carriedForwardFromItemRequestId ? 0 : item.estimatedCostCny),
       0,
     )),
-    priorCreateAttemptsByQuoteItem,
   };
 }
 
@@ -3388,32 +3392,11 @@ async function carryForwardPaidAssetItems(
   return carriedItems;
 }
 
-function assertNoUnresolvedPaidAssetItems(items: readonly PaidAssetOperationItem[]): void {
+function assertNoUnresolvedPaidAssetItems(items: readonly Pick<PaidAssetOperationItem, "itemRequestId" | "state">[]): void {
   const unresolved = items.find((item) => (
     item.state === "submitted" || item.state === "unknown" || item.state === "provider_succeeded"
   ));
   if (unresolved) throw new PaidAssetOutcomeUnresolvedError(unresolved.itemRequestId);
-}
-
-/** 叶子条目内的 create 事实计数：携带条目是复用不计数，未携带且已发生 create 的计一次。 */
-function countLocalCreateAttempts(leafItems: readonly PaidAssetOperationItem[]): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const item of leafItems) {
-    if (item.carriedForwardFromItemRequestId) continue;
-    const created = item.state === "submitted"
-      || item.state === "provider_succeeded"
-      || item.state === "materialized"
-      || item.state === "unknown"
-      || (item.state === "terminal_failed" && (Boolean(item.taskId) || item.actualCostCny !== undefined));
-    if (!created) continue;
-    counts[item.quoteItemId] = (counts[item.quoteItemId] ?? 0) + 1;
-  }
-  return counts;
-}
-
-async function countPriorCreateAttempts(nodeDirectory: string, operationId: string): Promise<Record<string, number>> {
-  const previousItems = paidAssetLedgerLeaves(await previousPaidAssetItems(nodeDirectory, operationId));
-  return countLocalCreateAttempts(previousItems);
 }
 
 async function firstVerifiedMaterializedItem(
@@ -3775,10 +3758,6 @@ async function generatePaidAssetItem(options: {
   allowCreate: boolean;
   createBoundary: PaidAssetCreateBoundary;
   referenceImages?: [string, ...string[]];
-  /** C1：scope 派生的逐素材 create 预算（assetKey → 允许的总 create 次数）。 */
-  itemCreateBudgets?: Record<string, number>;
-  /** 本素材在历史操作中已发生的 create 次数（携带不计数）。 */
-  priorCreateAttempts?: number;
 }): Promise<{ taskId: string; url: string }> {
   const { ledgerItem } = options;
   const recordProgress = async (progress: VideoGenerationProgress | ImageGenerationProgress): Promise<void> => {
@@ -3850,22 +3829,6 @@ async function generatePaidAssetItem(options: {
   }
   if (ledgerItem && !options.allowCreate) {
     throw new Error(`Paid item '${ledgerItem.itemRequestId}' was prepared but not submitted; a new spend authorization is required.`);
-  }
-  // C1：逐素材 create 预算（scope 用户批准的每素材次数上限）在越过付费边界前强制执行。
-  // 预算耗尽的 create 停在可操作状态，绝不静默超授权重试。
-  if (ledgerItem && options.itemCreateBudgets) {
-    const budget = options.itemCreateBudgets[ledgerItem.quoteItemId];
-    if (budget !== undefined) {
-      if (!Number.isSafeInteger(budget) || budget < 0) {
-        throw new Error(`Paid item '${ledgerItem.itemRequestId}' carries an invalid create budget.`);
-      }
-      const priorCreates = options.priorCreateAttempts ?? 0;
-      if (priorCreates + 1 > budget) {
-        throw new Error(
-          `Asset '${ledgerItem.quoteItemId}' has reached its authorized create budget (${priorCreates}/${budget}); a new spend authorization is required before another create.`,
-        );
-      }
-    }
   }
   if (!ledgerItem || !options.ledgerPath || !options.ledger) {
     throw new PaidAssetSafetyError("A durable paid operation is required before provider submission.");

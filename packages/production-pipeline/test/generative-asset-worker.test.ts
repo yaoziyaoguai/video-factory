@@ -441,6 +441,301 @@ describe("GenerativeAssetWorkerClient", () => {
     }
     assert.equal(creates, 1);
   });
+  // R5-F：逐素材累计 create 预算在真实 worker 的串行 create 边界强制执行。
+  // 前两次 create 越过真实边界并受理后失败（账本累计 P=2）；同一份累计预算 M=2
+  // 下第 3 次必须在调用 provider 之前被拒绝——即使宿主覆盖评估被绕过，worker 也守住上限。
+  it("refuses the next create at the real boundary once the cumulative per-asset budget is exhausted", async (t) => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-r5f-create-budget-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const scriptPath = path.join(root, "script.json"), directorPath = path.join(root, "director.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [{ position: 1, duration: 6,
+      visual_strategy: "generated", visual_prompt: "街角生成镜头" }] }));
+    await writeFile(directorPath, JSON.stringify({ shots: [{ scenePosition: 1, preferredProviderId: "seedance-video-v1",
+      deliveryType: "generated_video", generationPrompt: "街角生成镜头" }] }));
+    let creates = 0;
+    const subject = new GenerativeAssetWorkerClient({ fallback: new LocalAssetWorker(), adapters: [{
+      estimatedCnyPerClip: 2, adapter: { providerId: "seedance-video-v1", generate: async (_request, progress) => {
+        creates++;
+        const taskId = `r5f-task-${creates}`;
+        await progress?.({ providerId: "seedance-video-v1", taskId, status: "submitted" });
+        await progress?.({ providerId: "seedance-video-v1", taskId, status: "failed",
+          error: `accepted task ${taskId} failed after acceptance` });
+        throw new Error(`accepted task ${taskId} failed after acceptance`);
+      } },
+    }], resolveHost: resolvePublicHost,
+      fetch: async () => new Response("r5f-video", { headers: { "content-type": "video/mp4" } }) });
+    const request = (attempt: number) => {
+      const base = routedWorkerRequest(scriptPath, directorPath, path.join(root, `attempt-${attempt}`), 1, 2);
+      return { ...base, commandId: `r5f-operation-${attempt}`,
+        parameters: { ...base.parameters, itemCreateBudgets: { "scene-1": 2 } } };
+    };
+    // 第 1、2 次 create 均越过真实 create 边界、受理后失败：跨操作账本累计 P=2。
+    const first = await subject.run(request(1));
+    assert.equal(first.status, "failed");
+    assert.match(first.error?.message ?? "", /failed after acceptance/);
+    assert.equal(creates, 1);
+    const second = await subject.run(request(2));
+    assert.equal(second.status, "failed");
+    assert.match(second.error?.message ?? "", /failed after acceptance/);
+    assert.equal(creates, 2, "累计口径：P=1 时第 2 次 create（P+1=2<=M=2）必须被允许");
+    // 第 3 次：同一份累计预算已耗尽，必须在 create 边界前拒绝，provider 不再被调用。
+    const third = await subject.run(request(3));
+    assert.equal(third.status, "failed");
+    assert.match(third.error?.message ?? "", /reached its authorized create budget \(2\/2\)/);
+    assert.notEqual(third.diagnostics?.providerOutcomeKnown, false,
+      "预算拒绝发生在 provider 调用之前，不是未知结局，不得当作不确定态重试");
+    assert.equal(creates, 2, "预算耗尽后 provider 不得再被调用");
+    // 账本证据：跨操作叶子恰好两次真实 create（受理即有 taskId 且离开 prepared）。
+    const operationsDirectory = path.join(root, ".generation-operations");
+    const ledgerFiles = (await readdir(operationsDirectory)).filter((file) => file.endsWith(".json"));
+    let physicalCreates = 0;
+    for (const file of ledgerFiles) {
+      const ledger = JSON.parse(await readFile(path.join(operationsDirectory, file), "utf8")) as {
+        items: Array<{ state: string; taskId?: string }>;
+      };
+      physicalCreates += ledger.items.filter((item) => item.taskId && item.state !== "prepared").length;
+    }
+    assert.equal(physicalCreates, 2, "账本记录恰好两次越过 create 边界的物理请求");
+  });
+  // R5-E：scope 派生子凭证携带的逐素材预算值非法（非整数/负数）时，worker 必须在
+  // 调用 provider 之前拒绝——不能把坏预算退化成无限次。
+  it("rejects an invalid per-asset create budget before touching the provider", async (t) => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-r5e-invalid-budget-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const scriptPath = path.join(root, "script.json"), directorPath = path.join(root, "director.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [{ position: 1, duration: 6,
+      visual_strategy: "generated", visual_prompt: "街角生成镜头" }] }));
+    await writeFile(directorPath, JSON.stringify({ shots: [{ scenePosition: 1, preferredProviderId: "seedance-video-v1",
+      deliveryType: "generated_video", generationPrompt: "街角生成镜头" }] }));
+    let creates = 0;
+    const subject = new GenerativeAssetWorkerClient({ fallback: new LocalAssetWorker(), adapters: [{
+      estimatedCnyPerClip: 2, adapter: { providerId: "seedance-video-v1", generate: async () => {
+        creates++;
+        return { providerId: "seedance-video-v1", taskId: `r5e-task-${creates}`, videoUrl: "https://example.com/r5e.mp4" };
+      } },
+    }], resolveHost: resolvePublicHost,
+      fetch: async () => new Response("r5e-video", { headers: { "content-type": "video/mp4" } }) });
+    const request = (attempt: number, budget: number) => {
+      const base = routedWorkerRequest(scriptPath, directorPath, path.join(root, `attempt-${attempt}`), 1, 2);
+      return { ...base, commandId: `r5e-operation-${attempt}`,
+        parameters: { ...base.parameters, itemCreateBudgets: { "scene-1": budget } } };
+    };
+    for (const [label, budget] of [["fractional", 1.5], ["negative", -1]] as const) {
+      await assert.rejects(
+        () => subject.run(request(label === "fractional" ? 1 : 2, budget)),
+        /must be a non-negative integer/,
+        `${label} budget must be refused at parameter parsing`,
+      );
+    }
+    assert.equal(creates, 0, "非法预算在 provider 调用之前被拒绝");
+  });
+  for (const routed of [false, true]) {
+    for (const budgetCase of ["missing", "empty", "other-asset", "inherited"] as const) {
+      it(`R5 refuses scope create with ${budgetCase} budget (${routed ? "routed" : "direct"})`, async (t) => {
+        const harness = await createBudgetHarness(routed);
+        t.after(() => rm(harness.root, { recursive: true, force: true }));
+        const budgets = budgetCase === "missing" ? {}
+          : { itemCreateBudgets: budgetCase === "empty" ? {}
+            : budgetCase === "other-asset" ? { "scene-2": 1 } : Object.create({ "scene-1": 1 }) };
+        const response = await harness.worker.run(harness.request(1, { derivedFromScopeId: "scope-r5", ...budgets }));
+        assert.equal(response.status, "failed");
+        assert.match(response.error?.message ?? "", /create budget/i);
+        assert.equal(response.diagnostics?.meteredAttemptCount, 0);
+        assert.notEqual(response.diagnostics?.providerOutcomeKnown, false);
+        assert.equal(harness.calls.creates, 0, "scope 的新 create 必须有当前素材的显式预算");
+      });
+    }
+    it(`R5 preserves ordinary authorization without a scope map (${routed ? "routed" : "direct"})`, async (t) => {
+      const harness = await createBudgetHarness(routed);
+      t.after(() => rm(harness.root, { recursive: true, force: true }));
+      harness.setOutcome("succeeded");
+      assert.equal((await harness.worker.run(harness.request(1))).status, "succeeded");
+      assert.equal(harness.calls.creates, 1);
+    });
+  }
+
+  it("R5 preserves scope reuse and original-task queries without authorizing a fresh create", async (t) => {
+    const harness = await createBudgetHarness(true);
+    t.after(() => rm(harness.root, { recursive: true, force: true }));
+    harness.setOutcome("unknown");
+    const original = harness.request(1, { derivedFromScopeId: "scope-r5", itemCreateBudgets: { "scene-1": 1 } });
+    assert.equal((await harness.worker.run(original)).diagnostics?.providerOutcomeKnown, false);
+    await assert.rejects(() => harness.worker.run(harness.request(2, {
+      derivedFromScopeId: "scope-r5", itemCreateBudgets: { "scene-1": 10 },
+    })), /unresolved provider outcome/);
+    assert.equal(harness.calls.creates, 1, "提高次数也不能把 unknown 换成新请求");
+    const recovered = await harness.worker.run({ ...original, outputDir: path.join(harness.root, "recovery"),
+      parameters: { ...original.parameters, itemCreateBudgets: {} } });
+    assert.equal(recovered.status, "succeeded", recovered.error?.message);
+    const reused = await harness.worker.run(harness.request(3, { derivedFromScopeId: "scope-r5", itemCreateBudgets: {} }));
+    assert.equal(reused.status, "succeeded", reused.error?.message);
+    assert.deepEqual(harness.calls, { creates: 1, observes: 1 });
+    assert.equal(reused.diagnostics?.meteredAttemptCount, 0);
+  });
+
+  for (const aliasFirst of [false, true]) it(`R5 counts a real carry-forward chain once with duplicates (alias first=${aliasFirst})`, async (t) => {
+    const harness = await createBudgetHarness(true);
+    t.after(() => rm(harness.root, { recursive: true, force: true }));
+    harness.setOutcome("succeeded");
+    const scope = { derivedFromScopeId: "scope-r5", itemCreateBudgets: { "scene-1": 2 } };
+    for (const attempt of [1, 2, 3]) {
+      const response = await harness.worker.run(harness.request(attempt, scope));
+      assert.equal(response.status, "succeeded", response.error?.message);
+    }
+    assert.equal(harness.calls.creates, 1, "两层真实携带没有新增购买");
+    const directory = path.join(harness.root, ".generation-operations");
+    const records = await Promise.all([1, 2, 3].map(async (attempt) => readFile(harness.ledgerPath(attempt), "utf8")));
+    await Promise.all([1, 2, 3].map((attempt) => rm(harness.ledgerPath(attempt))));
+    for (const [index, record] of records.entries()) {
+      await writeFile(path.join(directory, `${aliasFirst ? 3 - index : index}-history.json`), record);
+    }
+    await writeFile(path.join(directory, "4-duplicate-root.json"), records[0]!);
+    await writeFile(path.join(directory, "5-duplicate-alias.json"), records[2]!);
+    await harness.writePrompt("新的第二个物理请求");
+    harness.setOutcome("failed");
+    const second = await harness.worker.run(harness.request(4, scope));
+    assert.match(second.error?.message ?? "", /accepted task failed/);
+    assert.equal(harness.calls.creates, 2, "重复/乱序 alias 仅占一个物理次数，P=1时第二次允许");
+    const exhausted = await harness.worker.run(harness.request(5, scope));
+    assert.equal(exhausted.status, "failed");
+    assert.match(exhausted.error?.message ?? "", /reached its authorized create budget \(2\/2\)/);
+    assert.equal(harness.calls.creates, 2, "alias 不得隐藏原始 create，第三次必须拒绝");
+  });
+
+  it("R5 deduplicates the same physical failed request before the next create", async (t) => {
+    const harness = await createBudgetHarness(false);
+    t.after(() => rm(harness.root, { recursive: true, force: true }));
+    const scope = { derivedFromScopeId: "scope-r5", itemCreateBudgets: { "scene-1": 2 } };
+    assert.match((await harness.worker.run(harness.request(1, scope))).error?.message ?? "", /accepted task failed/);
+    await writeFile(path.join(harness.root, ".generation-operations", "duplicate.json"), await readFile(harness.ledgerPath(1)));
+    const second = await harness.worker.run(harness.request(2, scope));
+    assert.match(second.error?.message ?? "", /accepted task failed/);
+    assert.equal(harness.calls.creates, 2, "同一 itemRequestId 的相同事实不重复扣次数");
+    const third = await harness.worker.run(harness.request(3, scope));
+    assert.match(third.error?.message ?? "", /reached its authorized create budget \(2\/2\)/);
+    assert.equal(harness.calls.creates, 2);
+  });
+
+  for (const corruption of ["missing-parent", "cycle", "conflict", "unreadable"] as const) {
+    it(`R5 refuses new scope create when ledger lineage is ${corruption}`, async (t) => {
+      const harness = await createBudgetHarness(true);
+      t.after(() => rm(harness.root, { recursive: true, force: true }));
+      harness.setOutcome("succeeded");
+      const scope = { derivedFromScopeId: "scope-r5", itemCreateBudgets: { "scene-1": 5 } };
+      assert.equal((await harness.worker.run(harness.request(1, scope))).status, "succeeded");
+      assert.equal((await harness.worker.run(harness.request(2, scope))).status, "succeeded");
+      const parent = JSON.parse(await readFile(harness.ledgerPath(1), "utf8"));
+      const alias = JSON.parse(await readFile(harness.ledgerPath(2), "utf8"));
+      if (corruption === "missing-parent") await rm(harness.ledgerPath(1));
+      if (corruption === "cycle") {
+        parent.items[0].carriedForwardFromItemRequestId = alias.items[0].itemRequestId;
+        await writeFile(harness.ledgerPath(1), JSON.stringify(parent));
+      }
+      if (corruption === "conflict") {
+        parent.items[0].actualCostCny = 0;
+        await writeFile(path.join(harness.root, ".generation-operations", "conflicting-copy.json"), JSON.stringify(parent));
+      }
+      if (corruption === "unreadable") {
+        await mkdir(path.join(harness.root, ".generation-operations", "not-readable.json"));
+      }
+      await harness.writePrompt("确实需要重新购买的新画面");
+      let failure: unknown;
+      try { failure = await harness.worker.run(harness.request(3, scope)); } catch (error) { failure = error; }
+      const diagnostic = failure instanceof Error ? failure.message : (failure as WorkerResponse).error?.message ?? "";
+      assert.match(diagnostic, /parent.*missing|cycle|conflicting records|cannot be verified|paid.*ledger/i);
+      assert.equal(harness.calls.creates, 1, "坏账本不能退回零历史后继续购买");
+    });
+  }
+
+  it("R5 counts a terminal zero-cost record but releases an explicitly unaccepted request", async (t) => {
+    for (const costRecorded of [false, true]) {
+      const harness = await createBudgetHarness(false);
+      t.after(() => rm(harness.root, { recursive: true, force: true }));
+      const scope = { derivedFromScopeId: "scope-r5", itemCreateBudgets: { "scene-1": 1 } };
+      harness.setOutcome("rejected");
+      const rejected = await harness.worker.run(harness.request(1, scope));
+      assert.equal(rejected.diagnostics?.meteredAttemptCount, 0);
+      const ledger = JSON.parse(await readFile(harness.ledgerPath(1), "utf8"));
+      assert.equal(ledger.items[0].state, "terminal_failed");
+      assert.equal(ledger.items[0].taskId, undefined);
+      assert.equal(ledger.items[0].actualCostCny, undefined);
+      if (costRecorded) {
+        // 独立新夹具：保留显式零元计价事实，不能把字段存在误当成 truthy 金额。
+        ledger.items[0].actualCostCny = 0;
+        await writeFile(harness.ledgerPath(1), JSON.stringify(ledger));
+      }
+      harness.setOutcome("failed");
+      const next = await harness.worker.run(harness.request(2, scope));
+      assert.match(next.error?.message ?? "", costRecorded ? /reached its authorized create budget \(1\/1\)/ : /accepted task failed/);
+      assert.equal(harness.calls.creates, costRecorded ? 1 : 2);
+    }
+  });
+
+  for (const exhaustedScene of [1, 2]) it(`R5 keeps scene ${exhaustedScene}'s exhausted budget independent from the other scene`, async (t) => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-r5-independent-boundary-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const calls: number[] = [];
+    const worker = new GenerativeAssetWorkerClient({ fallback: new LocalAssetWorker(), adapters: [{
+      estimatedCnyPerClip: 2, adapter: { providerId: "seedance-video-v1", generate: async (request, progress) => {
+        const match = /^scene-(\d+)/.exec(request.prompt);
+        assert.ok(match);
+        const scene = Number(match[1]);
+        calls.push(scene);
+        const taskId = `independent-${scene}-${calls.length}`;
+        await progress?.({ providerId: "seedance-video-v1", taskId, status: "submitted" });
+        await progress?.({ providerId: "seedance-video-v1", taskId, status: "failed", error: "accepted scene failure" });
+        throw new Error("accepted scene failure");
+      } },
+    }] });
+    const otherScene = exhaustedScene === 1 ? 2 : 1;
+    const budgets = { [`scene-${exhaustedScene}`]: 1, [`scene-${otherScene}`]: 2 };
+    const execute = async (scene: number, attempt: number) => {
+      const scriptPath = path.join(root, `script-${scene}.json`);
+      await writeFile(scriptPath, JSON.stringify({ scenes: [{ position: scene, duration: 6,
+        visual_strategy: "generated", visual_prompt: `scene-${scene}` }] }));
+      const request = workerRequest(scriptPath, path.join(root, `attempt-${attempt}`), 1, 2);
+      return worker.run({ ...request, commandId: `independent-operation-${attempt}`,
+        parameters: { ...request.parameters, derivedFromScopeId: "independent-scope", itemCreateBudgets: budgets } });
+    };
+    assert.match((await execute(exhaustedScene, 1)).error?.message ?? "", /accepted scene failure/);
+    assert.match((await execute(otherScene, 2)).error?.message ?? "", /accepted scene failure/);
+    assert.match((await execute(exhaustedScene, 3)).error?.message ?? "", /authorized create budget \(1\/1\)/);
+    assert.deepEqual(calls, [exhaustedScene, otherScene]);
+    assert.match((await execute(otherScene, 4)).error?.message ?? "", /accepted scene failure/);
+    assert.match((await execute(otherScene, 5)).error?.message ?? "", /authorized create budget \(2\/2\)/);
+    assert.deepEqual(calls, [exhaustedScene, otherScene, otherScene], "a different key's P or M must not decide this asset's create");
+  });
+
+  it("R5 rechecks the durable count after another real worker completes before its create boundary", async (t) => {
+    const harness = await createBudgetHarness(true);
+    t.after(() => rm(harness.root, { recursive: true, force: true }));
+    let markPrepared!: () => void, releasePreparation!: () => void;
+    const prepared = new Promise<void>((resolve) => { markPrepared = resolve; });
+    const continuePreparation = new Promise<void>((resolve) => { releasePreparation = resolve; });
+    const fallback = new LocalAssetWorker();
+    const delayed = harness.makeWorker({ run: async (request) => {
+      markPrepared();
+      await continuePreparation;
+      return fallback.run(request);
+    } });
+    const scope = { derivedFromScopeId: "scope-r5", itemCreateBudgets: { "scene-1": 1 } };
+    const delayedRun = delayed.run(harness.request(1, scope));
+    try {
+      await prepared;
+      const writer = await harness.worker.run(harness.request(2, scope));
+      assert.match(writer.error?.message ?? "", /accepted task failed/);
+      assert.equal(harness.calls.creates, 1);
+      const ledger = JSON.parse(await readFile(harness.ledgerPath(2), "utf8"));
+      assert.equal(ledger.items[0].state, "terminal_failed");
+      assert.equal(ledger.items[0].taskId, "r5-task-1");
+    } finally { releasePreparation(); }
+    const stale = await delayedRun;
+    assert.equal(stale.status, "failed");
+    assert.match(stale.error?.message ?? "", /reached its authorized create budget \(1\/1\)/);
+    assert.equal(stale.diagnostics?.meteredAttemptCount, 0);
+    assert.equal(harness.calls.creates, 1, "准备时P=0不能覆盖真实边界前已落盘的P=1");
+  });
+
   it("allows verified reuse but not a remaining prepared create while another original item is unknown", async (t) => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-paid-reuse-only-"));
     t.after(() => rm(root, { recursive: true, force: true }));
@@ -5154,6 +5449,52 @@ async function pilotHarness(
     Object.assign(request.parameters, { providerId: "ai-shot-router-v1", provider: "ai-router" });
   }
   return { root, worker, request, events, setVerdict: (value: typeof verdict) => { verdict = value; } };
+}
+
+async function createBudgetHarness(routed: boolean) {
+  const root = await mkdtemp(path.join(tmpdir(), "vf-r5-budget-boundary-"));
+  const scriptPath = path.join(root, "script.json"), directorPath = path.join(root, "director.json");
+  const writePrompt = async (prompt: string) => {
+    await writeFile(scriptPath, JSON.stringify({ scenes: [{ position: 1, duration: 6,
+      visual_strategy: "generated", visual_prompt: prompt }] }));
+    await writeFile(directorPath, JSON.stringify({ shots: [{ scenePosition: 1, preferredProviderId: "seedance-video-v1",
+      deliveryType: "generated_video", generationPrompt: prompt }] }));
+  };
+  await writePrompt("街角生成镜头");
+  const calls = { creates: 0, observes: 0 };
+  let outcome: "succeeded" | "failed" | "unknown" | "rejected" = "failed";
+  const makeWorker = (fallback: { run(request: Record<string, unknown>): Promise<WorkerResponse> } = new LocalAssetWorker()) => (
+    new GenerativeAssetWorkerClient({ fallback, adapters: [{ estimatedCnyPerClip: 2, adapter: {
+      providerId: "seedance-video-v1", generate: async (_request, progress) => {
+        calls.creates++;
+        const taskId = `r5-task-${calls.creates}`;
+        if (outcome === "rejected") throw new ProviderRequestRejectedError("request explicitly unaccepted");
+        await progress?.({ providerId: "seedance-video-v1", taskId, status: "submitted" });
+        if (outcome === "unknown") throw new Error("response lost after acceptance");
+        if (outcome === "failed") {
+          await progress?.({ providerId: "seedance-video-v1", taskId, status: "failed", error: "accepted task failed" });
+          throw new Error("accepted task failed");
+        }
+        return { providerId: "seedance-video-v1", taskId, videoUrl: `https://example.com/${taskId}.mp4` };
+      }, reconcile: async (taskId) => {
+        calls.observes++;
+        return { providerId: "seedance-video-v1", taskId, videoUrl: `https://example.com/${taskId}.mp4` };
+      },
+    } }], resolveHost: resolvePublicHost,
+    fetch: async () => new Response("controlled-r5-video", { headers: { "content-type": "video/mp4" } }) })
+  );
+  return {
+    root, calls, writePrompt, makeWorker, worker: makeWorker(),
+    setOutcome(value: typeof outcome) { outcome = value; },
+    ledgerPath: (attempt: number) => path.join(root, ".generation-operations",
+      `${createHash("sha256").update(`r5-operation-${attempt}`).digest("hex")}.json`),
+    request: (attempt: number, parameters: Record<string, unknown> = {}) => {
+      const base = routed
+        ? routedWorkerRequest(scriptPath, directorPath, path.join(root, `attempt-${attempt}`), 1, 2)
+        : workerRequest(scriptPath, path.join(root, `attempt-${attempt}`), 1, 2);
+      return { ...base, commandId: `r5-operation-${attempt}`, parameters: { ...base.parameters, ...parameters } };
+    },
+  };
 }
 
 class LocalAssetWorker {

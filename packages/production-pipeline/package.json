@@ -6,6 +6,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./maintenance": {
+      "types": "./dist/maintenance.d.ts",
+      "import": "./dist/maintenance.js"
+    },
     "./executable-timeline": {
       "types": "./dist/executable-timeline.d.ts",
       "import": "./dist/executable-timeline.js"

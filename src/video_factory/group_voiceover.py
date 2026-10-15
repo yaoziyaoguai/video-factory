@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import time
 from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from .voiceover import (
     _MiniMaxTerminalError, _execute_minimax_audio_request, _minimax_audio_payload,
     _minimax_operation_lock, _minimax_reuse_lock, _prepare_minimax_audio_request,
     _verified_materialized_minimax_path, _write_json_durably,
+    _assert_voice_reconciliation_complete, _settled_terminal_minimax_candidate,
 )
 
 VERSION = "video-factory/voice-operation-v3"
@@ -117,6 +119,9 @@ def synthesize_minimax_groups(
                                        *(("turnId", "speakerId", "voiceProfileId") if plan.get("version") == CHARACTER_PLAN_VERSION else ())))
                            for saved, expected in zip(ledger["items"], items))):
                 raise RuntimeError("The original voice operation is bound to a different confirmed plan.")
+            _assert_voice_reconciliation_complete(ledger, node_root)
+            if not ledger.get("completed") and _settled_terminal_minimax_candidate(ledger, node_root):
+                raise RuntimeError("The original voice request is unsettled or failed; use a new operation after settlement.")
         else:
             ledger = {"version": VERSION, "operationId": operation_id, "identity": identity,
                       "providerId": provider_id, "modelId": model_id, "authorizationCny": authorization_cny,
@@ -157,6 +162,13 @@ def synthesize_minimax_groups(
             except _MiniMaxTerminalError:
                 item["state"] = "terminal_failed"
                 item["stateHistory"].append("terminal_failed")
+                # 终结依据（R4）：可验证拒收的事实随账本耐久落盘。后续新操作凭它（且仅凭
+                # 可核实的终结事实）才能把本操作的未发 prepared 组视为不再活跃预留。
+                ledger["terminalEvidence"] = {
+                    "source": "explicit_rejection",
+                    "recordedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "itemRequestIds": [item["itemRequestId"]],
+                }
                 _write_json_durably(ledger_path, ledger)
                 raise
             response = _verified_response(item, node_root)
@@ -172,18 +184,15 @@ def _reuse_groups(ledger: dict[str, Any], ledger_path: Path, node_root: Path) ->
         candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
         if not isinstance(candidate, dict) or not isinstance(candidate.get("items"), list):
             raise RuntimeError("Cannot verify an existing voice operation; do not create another paid request.")
-        # 角色请求已明确拒绝后，后续 prepared 组从未发送。新的人工作业可复用前组并重试；
-        # unknown/在途组仍一律阻止新作业，原作业也不会自动越过 terminal_failed。
-        terminal_character_operation = (candidate.get("version") == VERSION
-            and candidate.get("narrationPlanVersion") == CHARACTER_PLAN_VERSION
-            and all(isinstance(item, dict) and item.get("state") in ("materialized", "terminal_failed", "prepared")
-                    for item in candidate["items"])
-            and any(item.get("state") == "terminal_failed" for item in candidate["items"]))
+        _assert_voice_reconciliation_complete(candidate, node_root)
+        # 结清记录必须最后持久化完成；终结标签不能替代原请求及组范围核验。
+        settled_terminal_operation = (candidate.get("version") == VERSION
+            and _settled_terminal_minimax_candidate(candidate, node_root))
         for prior in candidate["items"]:
             if not isinstance(prior, dict):
                 raise RuntimeError("Cannot verify an existing voice item.")
             if (prior.get("state") in ("unknown", "submitted", "provider_succeeded")
-                    or (prior.get("state") == "prepared" and not terminal_character_operation)):
+                    or (prior.get("state") == "prepared" and not settled_terminal_operation)):
                 raise RuntimeError("An earlier voice operation is unsettled; do not bypass it with a new plan.")
             if candidate.get("version") != VERSION or prior.get("state") != "materialized":
                 continue
