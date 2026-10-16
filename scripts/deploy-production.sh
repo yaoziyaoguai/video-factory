@@ -179,7 +179,8 @@ while IFS= read -r name; do
   fi
 done <<< "$container_names"
 deployment_state="$broker_root/deployment"
-mkdir -p "$deployment_state"
+# broker 只需穿越父目录；回滚配置仍由 umask 077 保持私有。
+install -d -o root -g vf-bridge -m 0710 "$deployment_state"
 previous_compose="${VIDEO_FACTORY_ROLLBACK_COMPOSE_FILE:-$deployment_state/current.compose.json}"
 rollback_compose=(docker compose --project-name video-factory -f "$previous_compose")
 if [[ -n "$previous_image" ]]; then
@@ -725,6 +726,13 @@ if [[ ! -e "$maintenance_directory" ]]; then
   install -d -m 2770 "$maintenance_directory"
   if [[ "$(id -u)" -eq 0 ]]; then chown root:vf-bridge "$maintenance_directory"; fi
   chmod 2770 "$maintenance_directory"
+fi
+# 在关闭入口和停止服务前，按真实服务身份核对整条路径及共享目录权限。
+if ! runuser -u "$deepseek_broker_user" -g vf-bridge -- \
+  sh -c 'test -x "$1" && test -r "$1" && test -w "$1"' sh "$maintenance_directory"; then
+  echo "DeepSeek broker cannot access the shared maintenance directory; leaving running writers untouched." >&2
+  rm -f "$previous_broker_unit_backup" "$previous_deepseek_broker_unit_backup"
+  exit 1
 fi
 
 if [[ "$upgrade_mode" == "cold" ]]; then

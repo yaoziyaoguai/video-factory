@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename, rm, rmdir } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, rm, rmdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -92,7 +92,7 @@ export async function withMaintenanceLock<T>(directory: string, operation: () =>
   let acquired = false;
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
     try {
-      await mkdir(lockPath, { mode: 0o2770 });
+      await mkdir(lockPath, { mode: 0o770 });
       acquired = true;
       break;
     } catch (error) {
@@ -104,7 +104,7 @@ export async function withMaintenanceLock<T>(directory: string, operation: () =>
   if (!acquired) throw new Error("Maintenance lock was not acquired.");
   const context = { directory: root, active: true };
   try {
-    await chmod(lockPath, 0o2770);
+    await ensureSharedDirectoryMode(lockPath);
     return await lockContexts.run(context, operation);
   } finally {
     context.active = false;
@@ -411,8 +411,13 @@ async function writeJsonAtomically(destination: string, value: unknown): Promise
 }
 
 async function ensureDirectory(directory: string): Promise<void> {
-  const created = await mkdir(directory, { recursive: true, mode: 0o2770 });
-  if (created !== undefined) await chmod(directory, 0o2770);
+  const created = await mkdir(directory, { recursive: true, mode: 0o770 });
+  if (created !== undefined) await ensureSharedDirectoryMode(directory);
+}
+
+async function ensureSharedDirectoryMode(directory: string): Promise<void> {
+  // Linux 从宿主预设的 setgid 父目录继承共享组；受限服务不能再次显式设置 setgid。
+  if (((await stat(directory)).mode & 0o7777) !== 0o2770) await chmod(directory, 0o2770);
 }
 
 async function readJson(file: string, label: string): Promise<unknown> {

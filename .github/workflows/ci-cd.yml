@@ -191,7 +191,8 @@ jobs:
             fi
             # 在 checkout 之前保存旧版解析配置，并以容器实际环境覆盖已更新的 env 文件。
             rollback_config="/opt/video-factory/codex-broker/deployment/before-${DEPLOY_RUN}.json"
-            install -d -m 0700 "$(dirname "$rollback_config")"
+            # 共享维护目录在其下；仅允许 broker 组穿越，配置文件仍受 umask 077 保护。
+            install -d -o root -g vf-bridge -m 0710 "$(dirname "$rollback_config")"
             if docker inspect video_factory_prod >/dev/null 2>&1; then
               VIDEO_FACTORY_CODEX_SOCKET_GID="$(getent group vf-bridge | cut -d: -f3)" \
                 docker compose --project-name video-factory --env-file "$PROJECT_PATH/.env.docker.prod" \

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -377,7 +377,14 @@ esac
 `,
     ),
     writeExecutable("getent", '#!/bin/sh\necho "vf-bridge:x:1234:"\n'),
-    writeExecutable("runuser", "#!/bin/sh\nexit 0\n"),
+    writeExecutable("runuser", `#!/bin/sh
+case " $* " in
+  *" -- test -w "*) exit 0 ;;
+esac
+echo "maintenance-access:$*" >> "$DEPLOY_TRACE"
+[ "$TEST_MAINTENANCE_ACCESS_FAILS" = "1" ] && exit 1
+exit 0
+`),
     writeExecutable("sleep", `#!/bin/sh
 if [ -n "$TEST_SIGNAL_DURING_DRAIN" ] && [ "$1" = "5" ] && [ ! -f "$DEPLOY_STATE/signal-sent" ]; then
   touch "$DEPLOY_STATE/signal-sent"
@@ -881,6 +888,48 @@ rollback_broker
     assert.ok(workflow.includes('[[ "$BACKUP_EXISTING_DATA" == true || "$UPGRADE_MODE" == cold ]]'));
     assert.ok(workflow.includes('VIDEO_FACTORY_BACKUP_EXISTING_DATA="$BACKUP_EXISTING_DATA"'));
   });
+
+  it("gives the maintenance parent only group traversal and preserves private rollback files", async () => {
+    const deploy = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
+    const workflow = await readFile(path.join(repositoryRoot, ".github", "workflows", "ci-cd.yml"), "utf8");
+    const deployInstall = deploy.match(/^install -d -o root -g vf-bridge -m 0710 "\$deployment_state"$/m)?.[0];
+    const workflowInstall = workflow.match(/install -d -o root -g vf-bridge -m 0710 "\$\(dirname "\$rollback_config"\)"/)?.[0];
+    assert.ok(deployInstall);
+    assert.ok(workflowInstall);
+    const directory = await mkdtemp(path.join(tmpdir(), "vf-maintenance-parent-"));
+    const parent = path.join(directory, "deployment");
+    const privateFile = path.join(parent, "before-release.json");
+    try {
+      await mkdir(parent, { mode: 0o700 });
+      await writeFile(privateFile, "private-fixture\n", { mode: 0o600 });
+      const before = await stat(privateFile);
+      for (const command of [deployInstall, workflowInstall]) {
+        // 本机测试实际模式与文件保全；root/vf-bridge 的跨用户边界另由 Linux 服务身份核验。
+        await execFileAsync("bash", ["-c", `umask 077\n${command.replace(" -o root -g vf-bridge", "")}`], {
+          env: { ...process.env, deployment_state: parent, rollback_config: privateFile },
+        });
+        assert.equal((await stat(parent)).mode & 0o7777, 0o710);
+        const after = await stat(privateFile);
+        assert.equal(after.mode & 0o7777, 0o600);
+        assert.equal(after.ino, before.ino);
+        assert.equal(await readFile(privateFile, "utf8"), "private-fixture\n");
+      }
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  for (const cold of [false, true]) {
+    it(`refuses inaccessible maintenance before ${cold ? "cold" : "online"} writer shutdown`, async () => {
+      const result = await runDeployFailureScenario("success", { cold, env: { TEST_MAINTENANCE_ACCESS_FAILS: "1" } });
+      assert.match(result.stderr, /DeepSeek broker cannot access the shared maintenance directory/);
+      assert.match(result.trace, /maintenance-access:-u vf-deepseek-codex -g vf-bridge/);
+      assert.doesNotMatch(result.trace, /ingress:enter|cold:stop-|compose[^\n]* stop |systemctl:stop |systemctl:restart |backup:|compose[^\n]* up /);
+      assert.equal(result.gateAfter, result.gateBefore);
+      assert.equal(result.appRunning, true);
+      assert.equal(result.appRelease, "b".repeat(40));
+      assert.match(result.currentRelease, /previous$/);
+      assert.equal(result.unitBackupsRemaining, false);
+    });
+  }
 
   for (const scenario of ["tracked", "untracked"] as const) {
     it(`refuses to build a release checkout with ${scenario} changes`, async () => {
