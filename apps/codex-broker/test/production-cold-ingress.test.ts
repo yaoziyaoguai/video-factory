@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -74,7 +76,21 @@ server {
 `);
 const OTHER = "server { listen 80; server_name other.example.com; location / { return 200 'other'; } }\n";
 
-async function fixture(t: TestContext) {
+async function deploymentIngressPath(directory: string) {
+  const deploy = await readFile(new URL("../../../scripts/deploy-production.sh", import.meta.url), "utf8");
+  const setup = deploy.match(/^deployment_state="\$broker_root\/deployment"\n[\s\S]*?(?=^previous_compose=)/m)?.[0];
+  const state = deploy.match(/^cold_ingress_state=.*$/m)?.[0];
+  assert.ok(setup);
+  assert.ok(state);
+  // 运行正式目录布局，仅省略本机无权设置的 root/宿主组；真实属主在 Linux 演练核验。
+  const commands = setup.replace(/ -o root -g (?:vf-bridge|root)/g, "");
+  const { stdout } = await promisify(execFile)("bash", ["-c", `set -eu\numask 077\n${commands}\n${state}\nprintf '%s' "$cold_ingress_state"`], {
+    env: { PATH: process.env.PATH, broker_root: directory, upgrade_mode: "cold", maintenance_owner: "fixture-owner" },
+  });
+  return stdout;
+}
+
+async function fixture(t: TestContext, deployedLayout = false) {
   const directory = await realpath(await mkdtemp(path.join(tmpdir(), "vf-cold-ingress-")));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const available = path.join(directory, "sites-available");
@@ -84,7 +100,7 @@ async function fixture(t: TestContext) {
   const target = path.join(available, HOST);
   const link = path.join(enabled, HOST);
   const other = path.join(available, "other");
-  const stateFile = path.join(transaction, "ingress.json");
+  const stateFile = deployedLayout ? await deploymentIngressPath(directory) : path.join(transaction, "ingress.json");
   await writeFile(target, ORIGINAL, { mode: 0o644 });
   await writeFile(other, OTHER);
   await symlink(`../sites-available/${HOST}`, link);
@@ -204,6 +220,51 @@ describe("production cold ingress transaction", () => {
     await f.fresh().restore(f.stateFile);
     assert.equal(f.reloads, reloads);
     await assert.rejects(() => f.control.enter(f.stateFile, HEALTH), /after restore/);
+  });
+
+  it("closes and restores ingress with the real deployment directory layout", async (t) => {
+    const f = await fixture(t, true);
+    const originalStat = await lstat(f.target);
+    const otherStat = await lstat(f.other);
+    const linkStat = await lstat(f.link);
+    assert.equal((await lstat(f.transaction)).mode & 0o7777, 0o710);
+    assert.equal((await f.control.enter(f.stateFile, HEALTH)).phase, "closed");
+    assert.equal((await lstat(path.dirname(f.stateFile))).mode & 0o7777, 0o700);
+    assert.equal((await lstat(f.stateFile)).mode & 0o7777, 0o600);
+    assert.equal((await f.fresh().status(f.stateFile)).drained, true);
+    const barrier = await closedBytes(f);
+    const evidence = await readFile(f.stateFile);
+    const reloads = f.reloads;
+    await assert.rejects(() => f.fresh().restore(path.join(path.dirname(f.stateFile), "unknown-owner.json")), /Invalid cold ingress/);
+    assert.deepEqual(await readFile(f.target), barrier);
+    assert.deepEqual(await readFile(f.stateFile), evidence);
+    assert.equal(f.reloads, reloads);
+    assert.equal((await f.fresh().restore(f.stateFile)).phase, "restored");
+    assert.deepEqual(await readFile(f.target), ORIGINAL);
+    const restored = await lstat(f.target);
+    assert.equal(restored.mode, originalStat.mode);
+    assert.equal(restored.uid, originalStat.uid);
+    assert.equal(restored.gid, originalStat.gid);
+    assert.equal((await lstat(f.link)).ino, linkStat.ino);
+    assert.equal((await lstat(f.other)).ino, otherStat.ino);
+    assert.equal(await readFile(f.other, "utf8"), OTHER);
+    const afterRestore = f.reloads;
+    await f.fresh().restore(f.stateFile);
+    assert.equal(f.reloads, afterRestore);
+  });
+
+  it("refuses a symlink or non-directory ingress path before changing its target", async (t) => {
+    const f = await fixture(t);
+    const privateDirectory = path.join(f.transaction, "ingress");
+    const targetStat = await lstat(f.other);
+    await symlink(f.other, privateDirectory);
+    await assert.rejects(() => deploymentIngressPath(f.directory), /Refusing unsafe cold ingress transaction directory/);
+    assert.equal((await lstat(f.other)).mode, targetStat.mode);
+    assert.equal(await readFile(f.other, "utf8"), OTHER);
+    await rm(privateDirectory);
+    await writeFile(privateDirectory, "existing evidence", { mode: 0o600 });
+    await assert.rejects(() => deploymentIngressPath(f.directory), /Refusing unsafe cold ingress transaction directory/);
+    assert.equal(await readFile(privateDirectory, "utf8"), "existing evidence");
   });
 
   it("preserves unrelated server blocks in the selected file byte-for-byte", () => {

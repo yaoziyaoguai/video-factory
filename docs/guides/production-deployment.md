@@ -40,7 +40,7 @@ Actions 的 `production` 环境使用仓库 Secrets：`SERVER_HOST`、`SERVER_US
 
 Studio 对 `SIGTERM`、`SIGINT` 使用同一幂等关闭流程：停止安排恢复周期，关闭 SSE 订阅与 HTTP 入口，等待已开始的恢复、后台后继和持久 admission 释放后自然退出。请求断开时仍在等待共享锁的准入也必须完成释放，不能在关门后继续开工。退出等待保持事件循环存活，不使用 `process.exit()` 截断落盘；持久释放失败则保持等待，不能把 HTTP 已关闭当作全部工作完成。Docker 正常停止须由 `docker stop`/Compose 发起，使 `restart: unless-stopped` 识别手动停止，单独向宿主 PID 发信号不能保证容器保持停止。
 
-共享目录默认 `/opt/video-factory/codex-broker/deployment/maintenance`，可用 `VIDEO_FACTORY_MAINTENANCE_DIR` 覆盖，unit 与 Compose 必须指向同一目录。父目录 `deployment` 为 `root:vf-bridge 0710`，只给共享组穿越权限，回滚配置文件仍由 `umask 077` 保持私有；维护目录为 `root:vf-bridge 2770`，保留 setgid。broker 的 `RestrictSUIDSGID=true` 保持启用，运行时新建子目录从预设父目录继承 setgid，不在 `mkdir` 中请求该位，也不重复设置已经正确的模式。自定义路径的所有父目录也须允许服务用户穿越。脚本在关闭入口与停服务前以真实 broker 身份检查维护目录可访问、可读写。其中 `gate.json`、`holders.json`、`services/` 通过同一个 `.admission.lock` 短锁协调。不要手写这些文件，也不要依据时间删除 holder 或锁。
+共享目录默认 `/opt/video-factory/codex-broker/deployment/maintenance`，可用 `VIDEO_FACTORY_MAINTENANCE_DIR` 覆盖，unit 与 Compose 必须指向同一目录。父目录 `deployment` 为 `root:vf-bridge 0710`，只给共享组穿越权限，回滚配置文件仍由 `umask 077` 保持私有。冷升级入口事务及其锁单独写入 `deployment/ingress/`（`root:root 0700`），满足入口控制器的私有父目录要求；已有事务保留在原路径，不自动迁移。维护目录为 `root:vf-bridge 2770`，保留 setgid。broker 的 `RestrictSUIDSGID=true` 保持启用，运行时新建子目录从预设父目录继承 setgid，不在 `mkdir` 中请求该位，也不重复设置已经正确的模式。自定义路径的所有父目录也须允许服务用户穿越。脚本在关闭入口与停服务前以真实 broker 身份检查维护目录可访问、可读写。其中 `gate.json`、`holders.json`、`services/` 通过同一个 `.admission.lock` 短锁协调。不要手写这些文件，也不要依据时间删除 holder 或锁。
 
 首次安装没有可备份的旧部署时，脚本显式报告“完整备份不适用”，不写 full 成功标记。已有部署默认必须通过备份验证，只有上述显式 `cold` 选项可以关闭本次备份；容器查询失败或已有数据无法定位不能当作首次安装。
 

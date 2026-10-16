@@ -181,6 +181,15 @@ done <<< "$container_names"
 deployment_state="$broker_root/deployment"
 # broker 只需穿越父目录；回滚配置仍由 umask 077 保持私有。
 install -d -o root -g vf-bridge -m 0710 "$deployment_state"
+cold_ingress_directory="$deployment_state/ingress"
+if [[ "$upgrade_mode" == "cold" ]]; then
+  # 入口事务要求私有父目录，与 broker 可穿越的共享维护父目录分开。
+  if [[ -L "$cold_ingress_directory" || -e "$cold_ingress_directory" && ! -d "$cold_ingress_directory" ]]; then
+    echo "Refusing unsafe cold ingress transaction directory." >&2
+    exit 1
+  fi
+  install -d -o root -g root -m 0700 "$cold_ingress_directory"
+fi
 previous_compose="${VIDEO_FACTORY_ROLLBACK_COMPOSE_FILE:-$deployment_state/current.compose.json}"
 rollback_compose=(docker compose --project-name video-factory -f "$previous_compose")
 if [[ -n "$previous_image" ]]; then
@@ -447,7 +456,7 @@ drain_timeout_seconds="${VIDEO_FACTORY_DRAIN_TIMEOUT_SECONDS:-3600}"
 app_was_running=0
 active_broker_sockets=()
 cold_state="$deployment_state/cold-$maintenance_owner.json"
-cold_ingress_state="$deployment_state/ingress-$maintenance_owner.json"
+cold_ingress_state="$cold_ingress_directory/ingress-$maintenance_owner.json"
 cold_evidence="$deployment_state/cold-proof-$maintenance_owner.json"
 cold_ingress_started=0
 cold_writers_touched=0
@@ -612,7 +621,7 @@ rollback_on_exit() {
   trap - EXIT
   if [[ "$upgrade_mode" == "cold" ]]; then
     if ! cold_finish "$status"; then
-      echo "Cold upgrade recovery is incomplete; the site ingress remains closed (owner=$maintenance_owner)." >&2
+      echo "Cold upgrade recovery is incomplete; site ingress restoration is unverified (owner=$maintenance_owner)." >&2
       [[ "$status" -ne 0 ]] || status=1
     fi
     exit "$status"
