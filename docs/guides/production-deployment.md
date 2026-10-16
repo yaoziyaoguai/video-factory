@@ -74,6 +74,7 @@ manifest标识 `video-factory/full-backup-v1`，记录源镜像/SHA、owner/gene
 - **崩溃 owner 的恢复路径**：部署留下 `draining`/`frozen` 后，新部署拒绝接管。使用保留的候选制品中的共享维护模块和 `scripts/production-maintenance.mjs`，在同一个 CI flock 下执行受限本机 `recover`。参数依次为共享模块绝对路径、维护目录、`recover`、原 owner；owner 取自本轮 `deployment-<owner>.json` 并与 gate 核对。DRAINING 恢复要求原服务实例及版本仍在；FROZEN 恢复要求原版本已在闭门下恢复、实际健康报告完整且全局无 holder。首次安装失败没有原服务可核时保持关闭。`status` 可只读查看 owner、generation 和 holderCount。不得删除/改写 gate、替换 owner 或按 TTL 放行；残留短锁、持久 holder 和服务重启造成的归属疑问须先查清，`recover` 不会清理它们。
 - **本地 CLI 直写工作区**：当前生产 workspace 由单实例 app、其受控 worker/broker 与部署操作写入，宿主不直接用 CLI 操作该目录。这是冻结语义的前提；引入新的写者必须先接入同一准入协议。
 - **排空口径**：app 覆盖路由、后台制作、规划/审计、热点、上传清理与启动/周期恢复；broker 覆盖队列、任务、会话尾部、最终持久化，以及注册表中所有模型（含停用实例）。规划/制作读取不完整或请求归属不明会阻断冻结。已稳定等待人工且原请求身份完整的 unknown 可作为静止数据保留，仍有本地执行或身份无法证明的 unknown 不可冻结。公开健康报告只给计数与完整性，不暴露内部续作 holder。
+- **选题修订的只产稿停点**：用户修订选题时，已知 `deferAudit` 合同只产稿，不自动审计；模型循环正常返回后，v9检查点仍保留 `running` 与未审候选。维护读取器及 `--require-locally-idle true` 通过与恢复路径共享的结构校验、准确合同摘要、topic/revise归属、合法候选、候选回执与原请求的逐一绑定、全部请求的明确终态识别此停点，不改写检查点。prepare前已确证未受理的连接失败可以没有broker回执；若保存了请求摘要，仍须匹配，已受理请求不能使用这一例外。普通产稿到审计之间的 `running`、未知合同、在途/缺失/冲突的执行事实仍拒绝；`--require-idle true` 仍要求原严格终态。该判断只证明模型循环停点，不能代替HTTP和缓存落盘尾部排空、维护holder清零及实际写者退出证明。
 
 工作区与私有环境配置保留，发布不自动清理旧制作。新版 v2 声音计划和原声时间调整由配套 Studio、工作流和 Python worker 一起发布；旧 v1 与无计划路径继续保留，不做批量数据迁移。
 
