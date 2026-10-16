@@ -93,7 +93,7 @@ describe("artifact-first library surfaces", () => {
     expect(screen.getByRole("button", { name: /从案例 \/ 脚本开始/ })).toBeEnabled();
   });
 
-  it("keeps the real current video before the creation entries while moving counts to the heading", async () => {
+  it("keeps the real current video below the creation entries with counts in the workdesk heading", async () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([run]);
     render(<MemoryRouter><HomePage /></MemoryRouter>);
 
@@ -106,7 +106,7 @@ describe("artifact-first library surfaces", () => {
     const overview = screen.getByRole("region", { name: "制作概况" });
     expect(overview.closest("header")).not.toBeNull();
     const entries = screen.getByRole("region", { name: "你今天从哪里出发？" });
-    expect(work.compareDocumentPosition(entries) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(entries.compareDocumentPosition(work) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("keeps attribution and rights actions visible while revealing optional specifications on request", async () => {

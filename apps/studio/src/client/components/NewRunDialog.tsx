@@ -537,7 +537,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     const settingsFailed = Boolean(settingsError);
     return (
       <div className="dialog-backdrop" role="presentation">
-        <section ref={dialogRef} className="run-dialog recipe-dialog" role="dialog" aria-modal="true" aria-labelledby="new-run-loading-title" aria-busy={settingsFailed ? undefined : "true"} tabIndex={-1}>
+        <section ref={dialogRef} className="run-dialog recipe-dialog new-production-dialog" role="dialog" aria-modal="true" aria-labelledby="new-run-loading-title" aria-busy={settingsFailed ? undefined : "true"} tabIndex={-1}>
           <header className="dialog-header recipe-dialog-header">
             <div>
               <p className="eyebrow">制作方案</p>
@@ -816,18 +816,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     <div className={`dialog-backdrop${!open ? " dialog-exit-decoration" : ""}`} role="presentation" aria-hidden={!open} inert={!open} onMouseDown={(event) => {
       if (event.target === event.currentTarget && !submitting) requestClose();
     }}>
-      <section ref={dialogRef} className="run-dialog recipe-dialog" role="dialog" aria-modal="true" aria-labelledby={discardPromptOpen ? "new-run-discard-title" : "new-run-title"} tabIndex={-1}>
+      <section ref={dialogRef} className="run-dialog recipe-dialog new-production-dialog" role="dialog" aria-modal="true" aria-labelledby={discardPromptOpen ? "new-run-discard-title" : "new-run-title"} tabIndex={-1}>
         <header className="dialog-header recipe-dialog-header" inert={discardPromptOpen} aria-hidden={discardPromptOpen}>
           <div>
-            <p className="eyebrow">制作方案</p>
             <h2 id="new-run-title">{rework ? "调整方案后重新制作" : "新建制作"}</h2>
-            <p>{rework ? "已载入上一版可用设置；真实母片复用与最终方案仍需重新规划验证。下面的修改要求会真正交给对应制作步骤执行。" : "先生成前期构思，再与你讨论定稿。脚本与分镜也会分别等你确认；付费图片和视频另行报价。"}</p>
-          </div>
-          <div className="dialog-budget" aria-label="费用方式">
-            {/* 费用说明分对象陈述：画面策略、配音规则、订阅/未知各说各的，不作全单免费或逐笔确认的绝对承诺（UX-01）。 */}
-            <span>{meteredSelected ? "画面：按实际方案逐项报价，确认后才执行" : "画面：使用免费图库，无现金报价"}</span>
-            <strong>{voiceCostSummary}</strong>
-            <small>订阅模型按你的供应商账号计费；预算意向不是花费授权。</small>
+            <p>{rework ? "以已保存的上一版为起点，确认这次要改什么。" : "把想法写清楚，和创作团队一起打磨成片。"}</p>
           </div>
           <button className="icon-button" type="button" onClick={requestClose} disabled={submitting} title="关闭" aria-label="关闭新建制作">
             <X aria-hidden="true" size={19} />
@@ -836,6 +829,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
 
         <form className="run-form recipe-form" onSubmit={(event) => event.preventDefault()} key={initialValues?.title ?? "blank-production"} inert={discardPromptOpen} aria-hidden={discardPromptOpen}>
           <div ref={formScrollRef} className="recipe-form-scroll" style={{ overflowAnchor: "none" }}>
+            <p className="new-production-intro">{rework ? "已载入上一版可用设置；真实母片复用与最终方案仍需重新规划验证。下面的修改要求会真正交给对应制作步骤执行。" : "先生成前期构思，再与你讨论定稿。脚本与分镜也会分别等你确认；付费图片和视频另行报价。"}</p>
             {rework ? <section className="rework-brief-section" aria-labelledby="rework-scope-title" tabIndex={-1} data-dialog-initial-focus>
               <div className="compact-section-heading">
                 <div><span>返工</span><h3 id="rework-scope-title">本轮变更范围</h3></div>
@@ -955,11 +949,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <span>查看继承设置</span><small>上一版预填与本轮可调整设置</small><ChevronDown aria-hidden="true" size={17} />
               </button>
             </div> : null}
-            <details className="inherited-production-summary">
-              <summary><span>继承制作设置</span><small>优先使用免费路线；收费画面仍需逐项报价确认</small></summary>
-              <p>角色、模型、声音和画面来源会继承创作设置与本次入口内容。开始后可在对应节点工作区单独调整，不会改动全局默认。</p>
-            </details>
-
             <div hidden={Boolean(rework) && !inheritedSettingsOpen}>
             <section className="brief-section" aria-labelledby="brief-section-title">
               <div className="compact-section-heading">
@@ -978,7 +967,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 </div>
                 <label className="field field-wide">
                   <span>内容角度</span>
-                  <input name="angle" required defaultValue={initialValues?.angle ?? ""} placeholder="这条视频用什么独特角度讲清问题" onChange={(event) => {
+                  <textarea name="angle" required rows={3} defaultValue={initialValues?.angle ?? ""} placeholder="这条视频用什么独特角度讲清问题" onChange={(event) => {
                     const angle = event.target.value;
                     setBriefSummaryValues((current) => ({ ...current, angle }));
                   }} />
@@ -1210,6 +1199,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
             <details className="new-run-group new-run-group-advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
               <summary><strong>03 模型与高级设置</strong><small>{budgetIntention.trim() ? `预算意向 ¥${budgetIntention}` : "预算意向未填写"} · {Object.keys(modelSelections).length ? `${Object.keys(modelSelections).length} 项本片模型覆盖` : "沿用角色默认模型"}</small><ChevronDown aria-hidden="true" size={15} /></summary>
               <div className="new-run-group-body">
+              <details className="inherited-production-summary">
+                <summary><span>继承制作设置</span><small>查看本片设置从哪里来</small></summary>
+                <p>角色、模型、声音和画面来源会继承创作设置与本次入口内容。开始后可在对应节点工作区单独调整，不会改动全局默认。</p>
+              </details>
               <label className="field budget-intention-field">
                 <span>本片预算意向（元，可不填）</span>
                 <input
@@ -1433,6 +1426,13 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               </div>
             </details>
 
+            <section className="new-production-confirmation" aria-labelledby="production-confirmation-title">
+              <div className="compact-section-heading"><div><h3 id="production-confirmation-title">开工前确认</h3></div><small>生成构思后，每个阶段仍由你决定</small></div>
+              <div className="dialog-budget" aria-label="费用方式">
+                <span>{meteredSelected ? "画面：按实际方案逐项报价，确认后才执行" : "画面：使用免费图库，无现金报价"}</span>
+                <strong>{voiceCostSummary}</strong>
+                <small>订阅模型按你的供应商账号计费；预算意向不是花费授权。</small>
+              </div>
             <section className="production-guardrails" aria-label="开工前检查">
               <label className={effectiveSemanticRank ? "visual-review-control is-enabled" : "visual-review-control"}>
                 <input type="checkbox" checked={effectiveSemanticRank} disabled={!semanticRankCompatible} onChange={(event) => setSemanticRankEnabled(event.target.checked)} />
@@ -1461,6 +1461,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   subscriptionVisualReview ? "视觉审片使用订阅额度，不产生现金报价；质量问题会停在审片步骤" : "",
                 ].filter(Boolean).join("；")}</small>
               </div>
+            </section>
             </section>
 
             {missingProductionRoles.length > 0 ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />缺少正式生产能力：{missingProductionRoles.join("、")}。请先在创作设置中完成配置。<a className="button button-ghost" href={capabilitySettingsHref}>打开创作设置</a></p> : null}
@@ -1524,13 +1525,16 @@ function CreativeSummary({ summary }: {
   summary: { audience: string; openingPromise: string; requiredVisual: string; payoff: string };
 }) {
   return <section className="creative-summary" aria-label="创作目标摘要">
-    <header><strong>系统整理的创作目标</strong><small>根据简报推导；可回到标题、角度、受众和画面字段修改</small></header>
+    <details>
+    <summary><strong>系统整理的创作目标</strong><small>展开核对简报如何转化为创作目标</small><ChevronDown aria-hidden="true" size={16} /></summary>
+    <p>根据简报推导；可回到标题、角度、受众和画面字段修改</p>
     <dl>
       <div><dt>给谁看</dt><dd>{summary.audience}</dd></div>
       <div><dt>开头承诺</dt><dd>{summary.openingPromise}</dd></div>
       <div><dt>画面方向参考</dt><dd>{summary.requiredVisual}</dd></div>
       <div><dt>结尾收益</dt><dd>{summary.payoff}</dd></div>
     </dl>
+    </details>
   </section>;
 }
 

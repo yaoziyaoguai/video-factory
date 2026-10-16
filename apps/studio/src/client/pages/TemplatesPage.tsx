@@ -240,28 +240,50 @@ export function TemplatesPage() {
   const modelProviders = providers.filter((provider) => provider.modelProfiles?.length);
 
   return (
-    <main className="page template-studio-page">
-      <header className="page-header template-page-header">
-        <div><p className="eyebrow">成片方法</p><h1>模板资料</h1><p className="page-summary">模板目前只作为资料和实验记录，不参与新制作或返工；新制作按你的要求重新规划，不自动套模板。</p></div>
-        <div className="template-header-actions">
-          <button className="icon-button" type="button" onClick={refreshTemplates} disabled={loading} title="刷新模板"><RefreshCw size={18} aria-hidden="true" /></button>
-          <button className="button button-primary" type="button" onClick={() => { if (confirmDiscard()) setCreateOpen(true); }}><Plus size={17} aria-hidden="true" />新建空白模板</button>
+    <main className="page template-studio-page collections-page collections-templates">
+      <header className="page-header template-page-header collections-hero">
+        <div className="collections-hero-copy">
+          <p className="eyebrow">方法资料 · 叙事与表达</p>
+          <h1>模板资料</h1>
+          <p className="page-summary">模板目前只作为资料和实验记录，不参与新制作或返工；新制作按你的要求重新规划，不自动套模板。</p>
+          <div className="template-header-actions collections-hero-actions">
+            <button className="button button-primary" type="button" onClick={() => { if (confirmDiscard()) setCreateOpen(true); }}><Plus size={17} aria-hidden="true" />新建空白模板</button>
+            <button className="icon-button" type="button" onClick={refreshTemplates} disabled={loading} title="刷新模板"><RefreshCw size={18} aria-hidden="true" /></button>
+          </div>
         </div>
+        <figure className="collections-hero-photo" aria-hidden="true">
+          <img src="/media/collections/story-notebook.webp" alt="" width="1200" height="1800" />
+          <figcaption>叙事笔记</figcaption>
+        </figure>
       </header>
 
       {error ? <div className="page-error" role="alert"><AlertCircle size={18} aria-hidden="true" /><span>{error}</span></div> : null}
-      {loading && templates.length === 0 ? <div className="queue-placeholder">正在读取模板目录...</div> : null}
+      {loading && templates.length === 0 ? <div className="queue-placeholder" role="status">正在读取模板目录...</div> : null}
+      {!loading && !error && templates.length === 0 ? <section className="collections-empty" aria-labelledby="templates-empty-title"><LayoutTemplate size={28} aria-hidden="true" /><h2 id="templates-empty-title">资料库还没有模板</h2><p>从新建空白模板开始，记录你的叙事结构、画面和声音想法。模板只保存在资料库中。</p></section> : null}
       <div className="template-workspace">
-      {templates.length > 0 ? <TemplateGallery templates={templates} selectedId={selectedId} onSelect={select} /> : null}
+      {templates.length > 0 ? <aside className="template-catalog" aria-labelledby="template-catalog-title">
+        <div className="collections-section-heading"><div><p className="eyebrow">资料目录</p><h2 id="template-catalog-title">叙事方法</h2></div><span>{templates.length} 份</span></div>
+        <TemplateGallery templates={templates} selectedId={selectedId} onSelect={select} />
+      </aside> : null}
       {draft ? (
         <section className="template-editor" aria-label="模板编辑器">
           <header className="template-editor-heading">
             <span><LayoutTemplate size={19} aria-hidden="true" /></span>
             <div><p>{templateCategoryLabel(draft.category)} · v{draft.version}</p><h2>{draft.name}</h2></div>
-            <strong>{draft.status === "draft" ? "草稿" : draft.builtIn ? "内置模板" : "已发布"}</strong>
+            <div className="template-editor-state">
+              <strong>{draft.status === "draft" ? "草稿" : draft.builtIn ? "内置模板" : "已发布"}</strong>
+            </div>
           </header>
+          {draft.status === "draft" || notice ? <div className="template-editor-toolbar">
+            {draft.status === "draft" ? <>
+              <span role={dirty ? "status" : undefined}>{dirty ? "有未保存修改" : "草稿已保存"}</span>
+              <button className="button button-primary" type="button" disabled={saving} onClick={() => void saveDraft()}><Save size={16} aria-hidden="true" />保存草稿</button>
+            </> : null}
+            {notice ? <p className="template-editor-notice" role="status">{notice}</p> : null}
+          </div> : null}
           <div className="template-editor-grid">
-            <section className="template-editor-copy">
+            <section className="template-editor-copy" aria-labelledby="template-expression-title">
+              <div className="collections-editor-section"><p className="eyebrow">01 · 表达设定</p><h3 id="template-expression-title">内容、画面与声音</h3></div>
               <label className="field"><span>模板名称</span><input value={draft.name} disabled={draft.status !== "draft"} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
               <label className="field"><span>适用说明</span><textarea rows={3} value={draft.description} disabled={draft.status !== "draft"} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
               <div className="template-system-fields">
@@ -287,8 +309,8 @@ export function TemplatesPage() {
                 })}</div>
               </details> : null}
             </section>
-            <section className="template-story-editor">
-              <div className="section-heading"><h3>故事结构</h3><span>{draft.storyStructure.length} 个节拍</span></div>
+            <section className="template-story-editor" aria-labelledby="template-story-title">
+              <div className="section-heading"><div><p className="eyebrow">02 · 叙事安排</p><h3 id="template-story-title">故事结构</h3></div><span>{draft.storyStructure.length} 个节拍</span></div>
               {draft.storyStructure.map((beat, index) => (
                 <div className="template-beat-editor" key={beat.id}>
                   <span>{String(index + 1).padStart(2, "0")}</span>
@@ -330,12 +352,9 @@ export function TemplatesPage() {
               ))}
             </section>
           </div>
-          {dirty ? <p className="template-editor-notice is-warning" role="status">有未保存修改</p> : null}
-          {notice ? <p className="template-editor-notice" role="status">{notice}</p> : null}
           <footer className="template-editor-actions">
             {draft.status === "draft" ? (
               <>
-                <button className="button button-secondary" type="button" disabled={saving} onClick={() => void saveDraft()}><Save size={16} aria-hidden="true" />保存草稿</button>
                 <button className="button button-primary" type="button" disabled={saving} onClick={() => setPublishConfirmOpen(true)}><Send size={16} aria-hidden="true" />保存为模板正式版</button>
               </>
             ) : (

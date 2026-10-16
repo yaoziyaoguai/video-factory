@@ -34,6 +34,7 @@ export function CasesPage() {
   const [selectedId, setSelectedId] = useState<string>();
   const [detail, setDetail] = useState<StudioCaseDetail>();
   const latestDetailRef = useRef<string | undefined>(undefined);
+  const detailRef = useRef<HTMLElement>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string>();
   const [selection, setSelection] = useState<StudioCaseSelection>();
@@ -133,6 +134,16 @@ export function CasesPage() {
     }
   }
 
+  function selectCase(item: StudioCaseSummary) {
+    void openDetail(item);
+    // 窄屏目录与正文上下排列；点击后让键盘和读屏一起进入阅读区。
+    if (!window.matchMedia?.("(max-width: 980px)").matches) return;
+    window.requestAnimationFrame(() => {
+      detailRef.current?.focus({ preventScroll: true });
+      detailRef.current?.scrollIntoView({ block: "start", behavior: "auto" });
+    });
+  }
+
   async function saveSelection() {
     if (!detail) return;
     setSaving(true);
@@ -166,32 +177,34 @@ export function CasesPage() {
   const facets = catalog?.facets;
 
   return (
-    <main className="cases-page">
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">从案例 / 脚本开始</p>
+    <main className="cases-page creation-cases-page">
+      <header className="creation-page-hero creation-cases-hero">
+        <img className="creation-page-hero-image" src="/media/creation/reference-desk.webp" alt="" width={1400} height={612} />
+        <div className="creation-page-hero-copy">
+          <p className="eyebrow">案例 / 脚本 · 参考室</p>
           <h1>发现值得借鉴的视频和脚本</h1>
-          <p className="page-summary">
-            这里的内容来自外部平台的真实公开页面：脚本文本取自来源方自己发布的逐字稿，视频案例只保存公开信息并链接原站。
-            它们只作为创作参考，不是成片素材，也不会进入热点选题候选。
-          </p>
+          <p>读一段脚本，研究一条视频。把值得学习的表达，带进你自己的创作。</p>
         </div>
-        <button className="button" type="button" onClick={() => void load(true)} disabled={loading}>
+        <button className="button creation-hero-action" type="button" onClick={() => void load(true)} disabled={loading}>
           {loading ? <Loader2 aria-hidden="true" size={16} className="spin" /> : <RefreshCw aria-hidden="true" size={16} />}
           刷新
         </button>
       </header>
+      <p className="creation-page-caption">脚本取自来源方公开逐字稿；视频案例保留公开信息并链接原站。内容仅作创作参考，不作为成片素材，也不进入热点候选。</p>
 
       {catalog?.sources?.length ? (
-        <ul className="case-source-strip">
-          {catalog.sources.map((source) => (
-            <li key={source.sourceId} className={`case-source-item is-${source.state}`}>
-              <strong>{source.label}</strong>
-              <span>{source.detail}</span>
-              {source.fetchedAt ? <small>取得时间 {formatTime(source.fetchedAt)}</small> : null}
-            </li>
-          ))}
-        </ul>
+        <section className="case-source-ledger" aria-label="来源状态">
+          <h2>来源状态</h2>
+          <ul className="case-source-strip">
+            {catalog.sources.map((source) => (
+              <li key={source.sourceId} className={`case-source-item is-${source.state}`}>
+                <strong>{source.label}</strong>
+                <span>{source.detail}</span>
+                {source.fetchedAt ? <small>取得时间 {formatTime(source.fetchedAt)}</small> : null}
+              </li>
+            ))}
+          </ul>
+        </section>
       ) : null}
 
       {selection ? (
@@ -259,6 +272,7 @@ export function CasesPage() {
 
       <div className="case-workspace">
         <section className="case-list" aria-label="案例列表">
+          <header className="case-list-heading"><h2>参考目录</h2><span>{catalog ? `${items.length} 条内容` : "等待来源返回"}</span></header>
           {loading ? <p className="case-hint" role="status"><Loader2 aria-hidden="true" size={14} className="spin" />
             正在读取来源平台的案例。<span aria-live="off">已等待 {waitingSeconds} 秒。</span>
             {catalog ? "已加载的列表和当前参考仍可使用，不必重复刷新。" : "当前参考独立读取；若已显示，可以继续使用。来源尚未返回，暂时无法估计剩余时间。"}
@@ -273,7 +287,8 @@ export function CasesPage() {
               key={item.id}
               type="button"
               className={`case-card${selectedId === item.id ? " is-selected" : ""}`}
-              onClick={() => void openDetail(item)}
+              aria-pressed={selectedId === item.id}
+              onClick={() => selectCase(item)}
             >
               <span className={`case-state is-${item.contentState}`}>{item.contentTypeLabel}</span>
               <strong>{item.title}</strong>
@@ -293,8 +308,13 @@ export function CasesPage() {
           ))}
         </section>
 
-        <section className="case-detail" aria-label="参考详情">
-          {!selectedId ? <p className="case-hint">先选择一条参考内容，这里会显示它的正文或可用信息。</p> : null}
+        <section ref={detailRef} className="case-detail" aria-label="参考详情" tabIndex={-1}>
+          {!selectedId ? <div className="case-reading-empty">
+            <p className="eyebrow">参考阅读台</p>
+            <h2>找到表达，再写自己的角度</h2>
+            <p>先选择一条参考内容，这里会显示它的正文或可用信息。</p>
+            <ol><li><strong>读内容</strong><span>查看原站文字、公开信息与使用限制。</span></li><li><strong>选借鉴</strong><span>记录要学习的结构、节奏或表达方式。</span></li><li><strong>写意图</strong><span>用自己的选题与角度进入制作准备。</span></li></ol>
+          </div> : null}
           {detailError ? <p className="case-error">{detailError}</p> : null}
           {detail ? (
             <article>
@@ -343,6 +363,7 @@ export function CasesPage() {
               ) : null}
 
               <footer className="case-create">
+                <div className="case-create-heading"><p className="eyebrow">写下你的创作</p><h3>让参考成为新的起点</h3></div>
                 <label>
                   <span>这次想做什么</span>
                   <textarea

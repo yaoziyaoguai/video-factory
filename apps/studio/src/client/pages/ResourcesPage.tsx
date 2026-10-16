@@ -110,16 +110,25 @@ const AUTOMATIC_AGENT_ROLES = [
   { label: "独立质量复核", capability: "role.audit" },
 ] as const;
 
-const RESOURCE_SECTIONS: Array<{ id: ResourceSectionId; label: string; icon: typeof Clapperboard }> = [
-  { id: "creation-defaults", label: "创作默认", icon: SlidersHorizontal },
-  { id: "model-settings", label: "模型设置", icon: Settings2 },
-  { id: "topic-strategy", label: "选题策略", icon: Sparkles },
-  { id: "trend-connections", label: "热点信号", icon: RadioTower },
-  { id: "voice-casting", label: "声音演员", icon: Sparkles },
-  { id: "visual-providers", label: "画面来源", icon: Film },
-  { id: "production-roles", label: "制作分工", icon: Clapperboard },
-  { id: "resource-manifest", label: "来源与授权", icon: ListChecks },
-  { id: "publish-channels", label: "发布渠道", icon: UploadCloud },
+const RESOURCE_SECTION_GROUPS: Array<{
+  label: string;
+  sections: Array<{ id: ResourceSectionId; label: string; icon: typeof Clapperboard }>;
+}> = [
+  { label: "创作起点", sections: [
+    { id: "creation-defaults", label: "创作默认", icon: SlidersHorizontal },
+    { id: "topic-strategy", label: "选题策略", icon: Sparkles },
+    { id: "voice-casting", label: "声音演员", icon: Sparkles },
+  ] },
+  { label: "工具与接入", sections: [
+    { id: "model-settings", label: "模型设置", icon: Settings2 },
+    { id: "production-roles", label: "制作分工", icon: Clapperboard },
+    { id: "visual-providers", label: "画面来源", icon: Film },
+    { id: "trend-connections", label: "热点信号", icon: RadioTower },
+  ] },
+  { label: "交付核对", sections: [
+    { id: "resource-manifest", label: "来源与授权", icon: ListChecks },
+    { id: "publish-channels", label: "发布渠道", icon: UploadCloud },
+  ] },
 ];
 
 export function ResourcesPage() {
@@ -334,46 +343,64 @@ export function ResourcesPage() {
   const reviewableManifestRuns = useMemo(() => groupManifestItems(reviewableManifestItems), [reviewableManifestItems]);
   const productionRecordRuns = useMemo(() => groupManifestItems(productionRecordItems), [productionRecordItems]);
   const reviewableNeedsReviewCount = resourceManifest?.needsReviewCount ?? needsReviewItems.length;
+  const unsavedSections: Partial<Record<ResourceSectionId, boolean>> = {
+    "creation-defaults": productionHasChanges,
+    "topic-strategy": topicHasChanges,
+    "voice-casting": voiceHasChanges,
+    "production-roles": roleHasChanges || modelDefaultsHaveChanges,
+  };
 
   return (
-    <main className="page resources-page" data-active-section={activeSection}>
-      <header className="page-header resources-header">
-        <div className="resources-header-copy">
+    <main className="page resources-page creation-resources-page" data-active-section={activeSection}>
+      <header className="resources-header creation-page-hero creation-settings-hero">
+        <img className="creation-page-hero-image" src="/media/creation/studio-tools.webp" alt="" width={1400} height={850} />
+        <div className="creation-page-hero-copy">
+          <p className="eyebrow">工作室 · 偏好与接入</p>
           <h1>创作设置</h1>
-          <details className="resource-overview-disclosure" data-tour="resource-overview"><summary>查看服务连接概况</summary><section className="resource-masthead" aria-label="能力概览">
-            <div><span>热点服务</span><strong>{serviceError ? "—" : `${readyServices}/${services.length}`}</strong></div>
-            <div><span>画面来源</span><strong>{providerError ? "—" : readyVisual}</strong></div>
-            <div><span>制作能力</span><strong>{providerError ? "—" : `${readyFoundation}/${foundationProviders.length}`}</strong></div>
-            <div className="resource-budget"><UploadCloud aria-hidden="true" size={17} /><span>发布出口</span><strong>{publishError ? "—" : usablePublishTargets}</strong></div>
-          </section></details>
+          <p>让工作室按你的习惯运转。从内容方向到声音、画面和制作分工，整理好下一次创作的起点。</p>
         </div>
         <button
           aria-label="刷新能力状态"
-          className="icon-button"
+          className="button creation-hero-action"
           type="button"
           onClick={() => void load()}
           title="刷新能力状态"
         >
-          <RefreshCw aria-hidden="true" size={17} />
+          <RefreshCw aria-hidden="true" size={17} />刷新状态
         </button>
       </header>
 
       <nav className="configuration-index" aria-label="配置分区">
-        {RESOURCE_SECTIONS.map(({ id, label, icon: Icon }) => (
-          <a key={id} href={`#${id}`} aria-current={activeSection === id ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection(id); }}><Icon aria-hidden="true" size={15} />{label}</a>
-        ))}
+        {RESOURCE_SECTION_GROUPS.map((group) => <div className="configuration-nav-group" key={group.label}>
+          <p>{group.label}</p>
+          {group.sections.map(({ id, label, icon: Icon }) => (
+            <a key={id} href={`#${id}`} aria-current={activeSection === id ? "page" : undefined} onClick={(event) => { event.preventDefault(); showSection(id); }}>
+              <Icon aria-hidden="true" size={16} /><span>{label}</span>
+              {unsavedSections[id] ? <span className="configuration-unsaved-dot" role="img" aria-label="有未保存修改" /> : null}
+            </a>
+          ))}
+        </div>)}
       </nav>
       <label className="configuration-index-select">
         <span>设置分区</span>
         <select value={activeSection} onChange={(event) => showSection(event.target.value as ResourceSectionId)}>
-          {RESOURCE_SECTIONS.map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+          {RESOURCE_SECTION_GROUPS.map((group) => <optgroup label={group.label} key={group.label}>
+            {group.sections.map(({ id, label }) => <option key={id} value={id}>{label}{unsavedSections[id] ? " · 未保存" : ""}</option>)}
+          </optgroup>)}
         </select>
       </label>
 
       <section id="creation-defaults" className="resource-section configuration-defaults" data-resource-section data-active={activeSection === "creation-defaults" ? "true" : undefined} data-tour="configuration-defaults">
         <ResourceHeading eyebrow="创作基线" title="新建制作默认值" meta="保存后自动带入下一条视频，创建时仍可单独调整" />
+        <details className="resource-overview-disclosure" data-tour="resource-overview"><summary>查看服务连接概况</summary><section className="resource-masthead" aria-label="能力概览">
+          <div><span>热点服务</span><strong>{serviceError ? "—" : `${readyServices}/${services.length}`}</strong></div>
+          <div><span>画面来源</span><strong>{providerError ? "—" : readyVisual}</strong></div>
+          <div><span>制作能力</span><strong>{providerError ? "—" : `${readyFoundation}/${foundationProviders.length}`}</strong></div>
+          <div className="resource-budget"><UploadCloud aria-hidden="true" size={17} /><span>发布出口</span><strong>{publishError ? "—" : usablePublishTargets}</strong></div>
+        </section></details>
         {settingsError ? <ResourceError title="创作默认值读取失败" message={settingsError} retry={load} /> : !settings ? <div className="region-loading">正在读取创作默认值...</div> : <div className="configuration-sheet">
           <div className="configuration-intro">
+            <div className="configuration-intro-heading"><h3>工作室连接状态</h3><p>先确认可用工具，再安排这条视频。</p></div>
             <ProductionEnvironmentStatus capabilities={capabilities} services={services} />
           </div>
           <div className="configuration-fields">

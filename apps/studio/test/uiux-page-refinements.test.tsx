@@ -123,7 +123,9 @@ describe("UI/UX page refinements", () => {
     await user.type(duration, "42");
 
     const overview = screen.getByText("查看服务连接概况");
-    expect(overview.closest("header")).toContainElement(screen.getByRole("heading", { name: "创作设置" }));
+    const defaultsSection = screen.getByRole("heading", { name: "新建制作默认值" }).closest("section");
+    expect(defaultsSection).toContainElement(overview);
+    expect(screen.getByRole("heading", { name: "创作设置" })).toBeVisible();
     await user.click(overview);
     expect(overview.closest("details")).toHaveAttribute("open");
     await user.click(overview);
@@ -133,6 +135,7 @@ describe("UI/UX page refinements", () => {
 
     const links = within(screen.getByRole("navigation", { name: "配置分区" })).getAllByRole("link");
     expect(links).toHaveLength(9);
+    expect(within(links[0]!).getByLabelText("有未保存修改")).toBeInTheDocument();
     for (const link of links) {
       await user.click(link);
       expect(link).toHaveAttribute("aria-current", "page");
@@ -378,6 +381,8 @@ describe("UI/UX page refinements", () => {
 
   it("continues an adopted series episode into preparation with its series context but zero production starts", async () => {
     const user = userEvent.setup();
+    const matchMedia = window.matchMedia;
+    vi.spyOn(window, "matchMedia").mockImplementation(query => ({ ...matchMedia(query), matches: query === "(max-width: 700px)" }));
     const series: StudioSeries = {
       id: "series-coffee", name: "下班观察室", premise: "从下班路上观察城市生活", audience: saved.audience,
       platform: "douyin", category: "lifestyle", track: saved.track, pillars: ["生活观察"], tone: "自然", visualStyle: "生活实拍",
@@ -414,6 +419,9 @@ describe("UI/UX page refinements", () => {
     const adopt = vi.spyOn(studioApi, "adoptCandidate").mockImplementation(async () => { adoptedOnServer = true; return adopted; });
     const start = vi.spyOn(studioApi, "start");
     render(<MemoryRouter initialEntries={["/topics?mode=series"]}><TodayPage /></MemoryRouter>);
+    await user.click(await screen.findByRole("button", { name: /E01/ }));
+    await waitFor(() => expect(screen.getByRole("article", { name: "单集详情" })).toHaveFocus());
+    expect(start).not.toHaveBeenCalled();
     await user.click(await screen.findByRole("button", { name: "采用本集并进入制作" }));
     const next = await screen.findByRole("button", { name: "继续制作准备" });
     expect(next.closest('[role="status"]')).toHaveTextContent(`来自系列《${series.name}》第 1 集`);

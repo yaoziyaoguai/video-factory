@@ -1,27 +1,28 @@
-/* 放映室与编辑台共用一组表面、文字和操作色；语义状态单独保留。 */
+/* 摄影入口、编辑台与弹层共用表面与操作色；制作状态保留独立语义。 */
 :root {
   color-scheme: light;
-  color: #203140;
-  background: #eef1f4;
-  --canvas: #eef1f4;
-  --paper: #fbfcfd;
-  --paper-soft: #e7edf2;
+  color: #252a34;
+  background: #f5f6f8;
+  --canvas: #f5f6f8;
+  --paper: #ffffff;
+  --paper-soft: #eef1f5;
   --raised: #ffffff;
-  --ink: #203140;
-  --muted: #526575;
-  --faint: #526575;
-  --line: #d6e0e7;
-  --line-strong: #9aaab7;
-  --rail: #fbfcfd;
-  --accent: #315caa;
-  --action: #315caa;
-  --action-hover: #254e98;
+  --ink: #252a34;
+  --muted: #606b7b;
+  --faint: #606b7b;
+  --line: #dce2e9;
+  --line-strong: #a8b2c0;
+  --rail: #ffffff;
+  --accent: #bf3049;
+  --action: #bf3049;
+  --action-hover: #a3243b;
   --action-ink: #ffffff;
-  --accent-strong: #254e98;
-  --accent-soft: #e3eafa;
+  --accent-strong: #a3243b;
+  --accent-soft: #fbedf0;
   --blue: #315caa;
   --blue-soft: #e3eafa;
-  --focus: #315caa;
+  --focus: #4168b6;
+  --focus-soft: #e8eefb;
   --stage: #17232d;
   --frame: #17232d;
   --frame-soft: #293d4c;
@@ -31,16 +32,23 @@
   --frame-focus: #a5c3f6;
   --green: #25634f;
   --green-soft: #e5f0e9;
-  --amber: #86521c;
-  --yellow: #86521c;
-  --amber-soft: #f8eddd;
-  --yellow-soft: #f8eddd;
+  /* 待确认提示使用冷灰；沿用既有变量名，让旧组件同步去除黄褐底色。 */
+  --amber: #46566c;
+  --yellow: var(--amber);
+  --amber-soft: var(--paper-soft);
+  --yellow-soft: var(--amber-soft);
   --red: #a93447;
   --red-soft: #f9e8ec;
   --danger-ink: #a93447;
-  --control-border: #9aaab7;
-  --surface-subtle: #eef1f4;
-  --surface-pressed: #e7edf2;
+  --control-border: #939eae;
+  --surface-subtle: #edf0f4;
+  --surface-pressed: #e2e7ee;
+  --canvas-grid: rgb(61 79 108 / 3%);
+  --editorial-surface: #e9edf3;
+  --editorial-ink: #4a5b73;
+  --font-editorial: "Noto Serif SC Variable", "Songti SC", "STSong", serif;
+  --field-radius: 7px;
+  --field-shadow: inset 0 1px 2px rgb(35 48 67 / 3%);
   --font-display: "Manrope Variable", "Noto Sans SC Variable", "PingFang SC", sans-serif;
   --font-body: "Manrope Variable", "Noto Sans SC Variable", "PingFang SC", sans-serif;
   --text-body: 16px;
@@ -50,42 +58,47 @@
 }
 :root[data-appearance="dark"] {
   color-scheme: dark;
-  color: #eaf0f4;
-  background: #15232c;
-  --canvas: #15232c;
-  --paper: #1e303b;
-  --paper-soft: #293f4c;
-  --raised: #253a47;
-  --ink: #eaf0f4;
-  --muted: #b0c1cd;
-  --faint: #b0c1cd;
-  --line: #3b5363;
-  --line-strong: #819aaa;
-  --rail: #1e303b;
-  --accent: #a5c3f6;
-  --action: #a5c3f6;
-  --action-hover: #c6d8fa;
-  --action-ink: #152c4f;
-  --accent-strong: #c6d8fa;
-  --accent-soft: #2b4565;
+  color: #eef0f2;
+  background: #171b22;
+  --canvas: #171b22;
+  --paper: #212731;
+  --paper-soft: #2a323e;
+  --raised: #354050;
+  --ink: #eef0f2;
+  --muted: #b7bec6;
+  --faint: #b7bec6;
+  --line: #414b5b;
+  --line-strong: #8795ab;
+  --rail: #20272d;
+  --accent: #f6a2b2;
+  --action: #f6a2b2;
+  --action-hover: #ffc5d0;
+  --action-ink: #341b24;
+  --accent-strong: #ffc5d0;
+  --accent-soft: #412a36;
   --blue: #a5c3f6;
   --blue-soft: #2b4565;
-  --focus: #a5c3f6;
+  --focus: #9abcfb;
+  --focus-soft: #2d405e;
   --stage: #0d1820;
   --frame: #0d1820;
   --frame-soft: #253a47;
   --green: #a9d6be;
   --green-soft: #254c40;
-  --amber: #eed0a2;
-  --yellow: #eed0a2;
-  --amber-soft: #4d3d2b;
-  --yellow-soft: #4d3d2b;
+  --amber: #c6d2e3;
+  --yellow: var(--amber);
+  --amber-soft: var(--paper-soft);
+  --yellow-soft: var(--amber-soft);
   --red: #f2aab6;
   --red-soft: #512c39;
   --danger-ink: #f2aab6;
-  --control-border: #819aaa;
-  --surface-subtle: #1e303b;
-  --surface-pressed: #293f4c;
+  --control-border: #8593a8;
+  --surface-subtle: #28313e;
+  --surface-pressed: #354257;
+  --canvas-grid: rgb(181 201 235 / 3%);
+  --editorial-surface: #2c3747;
+  --editorial-ink: #c1cee2;
+  --field-shadow: inset 0 1px 2px rgb(0 0 0 / 12%);
   --shadow: 0 24px 65px -35px rgb(5 16 22 / 50%);
   --shadow-raised: 0 24px 80px -25px rgb(5 16 22 / 75%);
 }
@@ -146,6 +159,9 @@ body { background: var(--canvas); color: var(--ink); }
 .studio-v3 .button-ghost { color: var(--muted); background: transparent; border-color: var(--line); box-shadow: none; }
 .studio-v3 .button-danger { color: #ffffff; background: #a93447; border-color: #a93447; }
 .studio-v3 .button-danger-ghost { color: var(--red); background: var(--paper); border-color: var(--red); }
+.studio-v3 :is(.page-error, .inline-error) { color: var(--danger-ink); border-color: var(--red); font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.studio-v3 .page-error > span { flex-direction: column; }
+.studio-v3 :is(.page-error, .inline-error) > svg { flex-shrink: 0; }
 .studio-v3 .status-badge { max-width: 100%; min-height: 26px; border-radius: 6px; font-size: 12px; line-height: 1.6; white-space: normal; overflow-wrap: anywhere; }
 .studio-v3 :is(.status-needs_human, .status-awaiting_spend_approval, .status-approval_invalidated, .status-stale) { color: var(--amber); background: var(--amber-soft); }
 .studio-v3 :is(.status-paused, .status-pending, .status-historical) { color: var(--muted); background: var(--paper-soft); }
@@ -153,14 +169,22 @@ body { background: var(--canvas); color: var(--ink); }
 :is(.studio-v3, .studio-overlay-root) .icon-button:hover:not(:disabled) { color: var(--ink); background: var(--paper-soft); }
 .studio-v3 .icon-button:hover:not(:disabled) svg { transform: none; }
 .studio-v3 :is(input, select, textarea) { accent-color: var(--accent); }
-.studio-v3 :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea) { min-height: 44px; border-radius: 10px; }
+.studio-v3 :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea) { min-height: 44px; border-radius: var(--field-radius); }
 .studio-v3 .field > span:has(> input:is([type="checkbox"], [type="radio"])) { display: flex; align-items: center; gap: 8px; min-height: 44px; }
 .studio-v3 .field input:is([type="checkbox"], [type="radio"]) { flex: 0 0 16px; width: 16px; height: 16px; min-height: 16px; padding: 0; margin: 0; }
 .studio-v3 :is(.field, .node-editor-field) :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea),
-.studio-v3 :is(.template-model-field, .series-controls, .platform-filter, .provider-model-select, .asset-model-overrides, .foundation-model-control) select { color: var(--ink); background: var(--paper); border-color: var(--control-border); }
+.studio-v3 :is(.template-model-field, .series-controls, .platform-filter, .provider-model-select, .asset-model-overrides, .foundation-model-control) select { color: var(--ink); background: var(--paper); border-color: var(--control-border); box-shadow: var(--field-shadow); }
 .studio-v3 :is(input, textarea, select)::placeholder { color: var(--muted); }
 .studio-v3 :is(.field, .node-editor-field) :is(input, select, textarea):disabled { color: var(--muted); background: var(--paper-soft); cursor: not-allowed; }
 .studio-v3 .node-editor-field :is(input, textarea)[readonly] { color: var(--muted); background: var(--canvas); }
+/* 所有编辑入口共享字段手感；焦点、只读和错误状态不依赖背景装饰。 */
+.studio-v3 :is(.field, .node-editor-field, .creative-edit-field, .template-beat-editor, .template-model-field) :is(input:not([type="checkbox"]):not([type="radio"]), textarea, select) { transition: border-color 140ms ease, box-shadow 140ms ease; }
+.studio-v3 :is(.field, .node-editor-field, .creative-edit-field, .template-beat-editor) :is(input, textarea, select):hover:not(:disabled):not(:focus) { border-color: var(--muted); }
+.studio-v3 :is(.field, .node-editor-field, .creative-edit-field, .template-beat-editor, .template-model-field) :is(input, textarea, select):focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; box-shadow: 0 0 0 5px var(--focus-soft); }
+.studio-v3 :is(input, textarea, select)[aria-invalid="true"] { border-color: var(--danger-ink); }
+.studio-v3 input[type="number"] { font-variant-numeric: tabular-nums; }
+.studio-v3 .json-field textarea { font: 14px/1.8 ui-monospace, "SFMono-Regular", Consolas, monospace; tab-size: 2; }
+.studio-v3 :is(.today-header, .page-header) h1 { font-family: var(--font-editorial); font-weight: 650; }
 :is(.studio-v3, .studio-overlay-root) :is(button, a, input, select, textarea, summary, [role="separator"]):focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 .studio-v3 :is(button, a, input, select, textarea, summary) { scroll-margin-block: 108px 80px; }
 .studio-v3 :is(section, [id]) { scroll-margin-top: 108px; }
@@ -222,9 +246,9 @@ body { background: var(--canvas); color: var(--ink); }
 .studio-search-hints { display: flex; gap: 18px; padding: 13px 24px; color: var(--muted); border-top: 1px solid var(--line); font-size: 12px; }
 .studio-overlay-root .studio-search-backdrop, .studio-overlay-root .studio-search-dialog { transition: opacity 180ms ease; }
 .studio-overlay-root [data-starting-style], .studio-overlay-root [data-ending-style] { opacity: 0; }
-.studio-v3 .content-shell > main { animation: studio-workspace-enter 180ms ease-out both; }
+/* main 内承载固定弹层；整体透明度动画会把弹层困在导航下方的层叠上下文。 */
+.studio-v3 .content-shell > main { animation: none; }
 .studio-v3 .content-shell > main > :is(.page-header, .today-header, .run-header, .production-strip, .topic-entry-workspace, .project-edition, .project-archive, .resource-masthead, .configuration-index, .template-gallery, .template-experiments, .current-production-action, .review-layout, .role-workspaces) { animation: none; }
-@keyframes studio-workspace-enter { from { opacity: .65; } to { opacity: 1; } }
 .studio-v3 .production-environment-status { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 10px 24px; padding: 0; margin: 12px 0; list-style: none; }
 .studio-v3 .production-environment-status li { display: grid; gap: 4px; color: var(--ink); font-size: 14px; line-height: 1.7; }
 .studio-v3 .production-environment-status strong { color: var(--ink); font-size: 14px; font-weight: 600; }

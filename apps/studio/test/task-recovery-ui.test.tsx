@@ -1,5 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { RunWorkbench } from "../src/client/components/RunWorkbench.js";
@@ -342,6 +343,32 @@ describe("text task recovery UI", () => {
     expect(query).toHaveBeenCalledOnce();
     expect(screen.queryByRole("button", { name: "重试失败步骤" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "取回结果并继续" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["accepted_unknown", "查询原任务"],
+    ["completed_success", "取回结果并继续"],
+  ] as const)("preserves %s evidence when %s rejects after reporting an error", async (state, action) => {
+    const run = failedRun(state);
+    const retry = vi.fn(async () => undefined);
+    const operation = vi.fn(async () => { throw new Error("原任务读取失败，请稍后核对。"); });
+    function RecoveryPage() {
+      const [error, setError] = useState<string>();
+      async function recover() {
+        try { await operation(); }
+        catch (caught) { setError((caught as Error).message); throw caught; }
+      }
+      return <MemoryRouter>{error ? <p role="alert">{error}</p> : null}<RunWorkbench run={run}
+        decisionPending={false} onDecision={async () => undefined} onQueryOriginalTextTask={recover}
+        onRetrieveOriginalTextTask={recover} onRetryFailedNode={retry} /></MemoryRouter>;
+    }
+    render(<RecoveryPage />);
+    await userEvent.click(screen.getByRole("button", { name: action }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("原任务读取失败，请稍后核对。");
+    expect(screen.getByRole("status", { name: "原模型任务恢复" })).toHaveTextContent(run.taskRecovery!.summary);
+    expect(screen.getByRole("button", { name: action })).toBeEnabled();
+    expect(operation).toHaveBeenCalledOnce();
+    expect(retry).not.toHaveBeenCalled();
   });
 
   it("offers one explicit consume action after the original result is verified", async () => {

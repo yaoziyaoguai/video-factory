@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, ChevronDown, CircleDollarSign, Clock3, FilePenLine, Pause, Save, Settings2, ShieldCheck, X } from "lucide-react";
+import { Activity, AlertTriangle, Check, ChevronDown, CircleDollarSign, Clock3, FilePenLine, Pause, Save, Settings2, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProductionQuote, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
@@ -13,6 +13,7 @@ import { NarrationTimingEditor } from "./NarrationTimingEditor.js";
 import { NodeDocumentCommands } from "./NodeDocumentCommands.js";
 import { NodeContentReview, nodeContentReview } from "./NodeContentReview.js";
 import { NodeDocumentHistory } from "./NodeDocumentHistory.js";
+import { statusLabel } from "./StatusBadge.js";
 import { unsplashPublicUrl } from "./UnsplashAttribution.js";
 import { hasStockAttribution, StockAttribution } from "./StockAttribution.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
@@ -614,7 +615,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     {/* 当前待决定文档移到决定区时，不让同名互斥分组在旧卡片卸载前关闭新卡片。 */}
     <details
       id={`node-workspace-${node.id}`}
-      className={`node-workspace is-${node.status}`}
+      className={`node-workspace production-node is-${node.status}${node.outcomeUncertain ? " has-uncertain-outcome" : ""}${node.outputState?.stale ? " has-stale-output" : ""}`}
       name={isDecisionDocument && currentDelivery ? undefined : "creator-workspaces"}
       aria-label={`${node.label} · ${node.role ?? "制作角色"}`}
       open={workspaceOpen}
@@ -624,10 +625,13 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
       }}
     >
       <summary>
-        <span className="node-workspace-state">{node.status === "succeeded" ? <Check aria-hidden="true" size={14} /> : <span />}</span>
+        <span className="node-workspace-state" aria-hidden="true">{node.outcomeUncertain || node.outputState?.stale ? <AlertTriangle size={15} /> : node.status === "succeeded" ? <Check size={15} /> : node.status === "running" ? <Activity size={15} /> : ["needs_human", "awaiting_spend_approval", "approval_invalidated", "failed", "rejected", "stale"].includes(node.status) ? <AlertTriangle size={15} /> : <Clock3 size={15} />}</span>
         <span className="node-workspace-title"><strong>{node.label}</strong><small>{node.role ?? "制作角色"}</small></span>
         {capability && !showPlanningStages ? <span className="node-workspace-provenance">{capability}</span> : <span />}
-        {node.outputState?.stale ? <span className="node-stale-label"><AlertTriangle aria-hidden="true" size={14} />旧结果</span> : null}
+        <span className="node-workspace-labels">
+          <span className="node-workspace-status">{node.outcomeUncertain ? "结果待核" : node.outputState?.stale ? "待重新生成" : node.status === "skipped" ? "已跳过" : node.status === "succeeded" ? "已保留" : statusLabel(node.status)}</span>
+          {node.outputState?.stale ? <span className="node-stale-label"><AlertTriangle aria-hidden="true" size={14} />旧结果</span> : null}
+        </span>
         <ChevronDown className="node-workspace-chevron" aria-hidden="true" size={17} />
       </summary>
       <div className="node-workspace-body">

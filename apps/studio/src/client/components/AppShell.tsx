@@ -25,6 +25,9 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
   const searchReturnFocusRef = useRef<HTMLElement | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const location = useLocation();
+  const topicMode = new URLSearchParams(location.search).get("mode");
+  const isTrendWorkspace = location.pathname === "/topics" && !["series", "manual", "custom"].includes(topicMode ?? "");
+  const isCreationEntry = location.pathname === "/topics" || location.pathname === "/cases";
   const previousPath = useRef(location.pathname);
   const { startFullTour, startPageTour } = useCreatorTour();
   const workspaceLabel = location.pathname.startsWith("/projects/") ? "作品工作区"
@@ -58,15 +61,16 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
   }, [openSearch]);
 
   return (
-    <div className="app-shell studio-v3">
+    <div className={`app-shell studio-v3 studio-creation-shell${location.pathname === "/" ? " studio-home-shell" : " studio-content-shell"}${isTrendWorkspace ? " studio-trend-shell" : ""}`}>
       <a className="skip-link" href="#main-content">跳到主要内容</a>
       <header className="studio-masthead">
         <NavLink className="brand" to="/" aria-label="VideoFactory 创作台">
           <span className="brand-mark"><Clapperboard aria-hidden="true" size={25} strokeWidth={1.5} /></span>
+          <span className="home-brand-copy"><strong>VideoFactory</strong><small>让好故事被看见</small></span>
         </NavLink>
         <nav className="primary-nav" aria-label="主导航" data-tour="primary-nav">
-          {navigation.map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} end={to === "/"} aria-label={label} title={label} {...(to === "/projects" ? { "data-tour": "projects-nav" } : {})}>
-            {({ isActive }) => <>{isActive ? <motion.span className="studio-nav-marker" layoutId="studio-nav-marker" /> : null}<Icon aria-hidden="true" size={21} strokeWidth={1.6} /><span>{label}</span></>}
+          {navigation.map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => isActive || (to === "/" && isCreationEntry) ? "active" : undefined} aria-label={label} title={label} {...(to === "/projects" ? { "data-tour": "projects-nav" } : {})}>
+            {({ isActive }) => <>{isActive || (to === "/" && isCreationEntry) ? <motion.span className="studio-nav-marker" layoutId="studio-nav-marker" /> : null}<Icon aria-hidden="true" size={21} strokeWidth={1.6} /><span>{label}</span></>}
           </NavLink>)}
         </nav>
         <div className="studio-topbar">
@@ -74,7 +78,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
           <div className="studio-workspace-context" aria-label="当前工作区"><span>工作室</span><span aria-hidden="true">/</span><strong>{workspaceLabel}</strong></div>
           <div className="studio-masthead-tools">
             <button className="studio-search-trigger" type="button" onClick={openSearch} aria-label="搜索项目、选题、模板或功能" title="搜索项目、选题、模板或功能">
-              <Search aria-hidden="true" size={18} /><span>搜索</span><kbd>{navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl"} K</kbd>
+              <Search aria-hidden="true" size={18} /><span>搜索作品、选题或模板…</span><kbd>{navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl"} K</kbd>
             </button>
             <div className="studio-appearance" role="group" aria-label="界面外观">
               <button type="button" aria-label="日光外观" title="日光外观" aria-pressed={appearance === "light"} onClick={() => setAppearance("light")}><Sun aria-hidden="true" size={17} /></button>
@@ -84,6 +88,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
             {onLogout ? <AccountMenu username={username ?? "当前账号"} onLogout={onLogout} /> : null}
           </div>
         </div>
+        <div className="home-sidebar-note"><Clapperboard aria-hidden="true" size={22} strokeWidth={1.3} /><p>好的生活<br />值得被记录</p><small>用影像，让平凡的日常<br />发出微光。</small></div>
         <div className="studio-status" role="status" aria-label="基础工具检查" title="仅检查 Python、FFmpeg、FFprobe 的可执行文件是否可访问，不代表模型、配音与成片合成能力可用。">
           <span aria-hidden="true" className={`health-dot ${healthy === undefined ? "health-checking" : healthy === false ? "health-down" : ""}`} />
           <span>{healthy === undefined ? "检查基础工具" : healthy ? "基础工具可用" : "基础工具需检查"}</span>

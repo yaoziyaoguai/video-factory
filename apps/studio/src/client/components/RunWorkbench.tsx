@@ -409,13 +409,14 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
         className="button button-secondary"
         type="button"
         disabled={nodeMutationPending}
-        onClick={() => void onQueryOriginalTextTask()}
+        // 页面负责显示失败原因；按钮收住拒绝，避免变成未处理的浏览器错误。
+        onClick={() => void onQueryOriginalTextTask().catch(() => undefined)}
       ><Activity aria-hidden="true" size={16} />{nodeMutationPending ? "正在查询原任务..." : "查询原任务"}</button> : null}
       {run.taskRecovery.allowedActions.includes("retrieve_and_continue") && onRetrieveOriginalTextTask ? <button
         className="button button-primary"
         type="button"
         disabled={nodeMutationPending}
-        onClick={() => void onRetrieveOriginalTextTask()}
+        onClick={() => void onRetrieveOriginalTextTask().catch(() => undefined)}
       ><Play aria-hidden="true" size={16} />{nodeMutationPending ? "正在取回..." : "取回结果并继续"}</button> : null}
     </div>
     {localRecoveryActions ? <div className="task-recovery-local">
@@ -546,11 +547,12 @@ export function RunWorkbench({ run, creativeDiscussion, assetConfigurationBlocke
   </section> : null;
 
   return (
-    <main className={`page run-page${creativeDiscussion ? " has-creative-discussion" : ""}${viewingFocused ? " is-viewing-focused" : ""}`}>
+    <main className={`page run-page production-workbench${creativeDiscussion ? " has-creative-discussion" : ""}${viewingFocused ? " is-viewing-focused" : ""}`}>
       <header className="run-header" data-tour="run-header">
-        <div>
+        <div className="run-heading-copy">
+          <p className="eyebrow">本次制作</p>
           <h1>{run.title}</h1>
-          <div className="run-title-meta"><span>{platformLabel(run.platform)} · 目标 {run.durationSeconds} 秒</span><details className="run-brief-context"><summary>创作目标与受众</summary><p className="page-summary">{run.angle} · {run.audience}</p></details></div>
+          <div className="run-title-meta"><span>{platformLabel(run.platform)} · 目标 {run.durationSeconds} 秒</span><details className="run-brief-context"><summary>创作目标与受众</summary><dl className="run-brief-facts"><div><dt>创作角度</dt><dd>{run.angle}</dd></div><div><dt>目标受众</dt><dd>{run.audience}</dd></div></dl></details></div>
         </div>
         <StatusBadge status={run.status} {...(run.status === "succeeded" && !readOnly
           ? { label: "内部交付已完成" }

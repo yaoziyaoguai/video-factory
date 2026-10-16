@@ -1,0 +1,176 @@
+/* 新建制作是一份可阅读的简报；标题和动作留在窗内，只有正文滚动。 */
+.studio-v3 .new-production-dialog {
+  width: min(1020px, 100%);
+  min-height: 0;
+  max-height: calc(100dvh - 32px);
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 28px 100px rgb(0 0 0 / 28%);
+}
+.studio-v3 .new-production-dialog .recipe-dialog-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  gap: 24px;
+  flex: 0 0 auto;
+  padding: 24px 30px 20px;
+  background: var(--editorial-surface);
+  border-top: 3px solid var(--action);
+  border-bottom: 1px solid var(--line);
+}
+.studio-v3 .new-production-dialog .recipe-dialog-header h2 { margin: 0; font-family: var(--font-editorial); font-size: 28px; line-height: 1.4; font-weight: 700; letter-spacing: -.6px; }
+.studio-v3 .new-production-dialog .recipe-dialog-header > div > p { display: block; margin: 6px 0 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
+.studio-v3 .new-production-dialog .recipe-dialog-header > .icon-button { align-self: start; border-radius: 50%; background: var(--paper-soft); }
+.studio-v3 .new-production-dialog .recipe-form { flex: 1 1 auto; min-height: 0; }
+.studio-v3 .new-production-dialog .recipe-form-scroll { flex: 1 1 auto; min-height: 0; padding: 24px 30px 30px; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 20px; }
+.studio-v3 .new-production-dialog :is(input, textarea, select, summary, section, [id]) { scroll-margin-block: 20px; }
+.studio-v3 .new-production-dialog .new-production-intro { margin: 0 0 26px; max-width: 76ch; color: var(--muted); font-size: 14px; line-height: 1.8; }
+.studio-v3 .new-production-dialog .brief-section { padding: 0 0 26px; border: 0; }
+.studio-v3 .new-production-dialog .compact-section-heading { align-items: baseline; gap: 12px; margin: 0 0 18px; }
+.studio-v3 .new-production-dialog .compact-section-heading h3 { color: var(--ink); font-size: 18px; line-height: 1.5; }
+.studio-v3 .new-production-dialog .compact-section-heading > div > span { color: var(--accent); background: var(--accent-soft); border-radius: 7px; font-size: 12px; }
+.studio-v3 .new-production-dialog .compact-section-heading small { color: var(--muted); font-size: 12px; line-height: 1.7; }
+.studio-v3 .new-production-dialog .brief-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 24px; }
+.studio-v3 .new-production-dialog .brief-fields > .field { grid-column: span 1; align-content: start; }
+.studio-v3 .new-production-dialog .brief-fields > .field-wide { grid-column: 1 / -1; }
+.studio-v3 .new-production-dialog .field { gap: 8px; }
+.studio-v3 .new-production-dialog :is(.field > span, .field > label, .field > label > span) { color: var(--ink); font-size: 14px; font-weight: 600; line-height: 1.6; }
+.studio-v3 .new-production-dialog .field :is(input:not([type="checkbox"]), select, textarea) { min-height: 46px; padding: 11px 13px; color: var(--ink); background: var(--paper); border: 1px solid var(--control-border); border-radius: var(--field-radius); box-shadow: var(--field-shadow); font-size: 16px; line-height: 1.65; }
+.studio-v3 .new-production-dialog .field textarea { min-height: 108px; resize: vertical; }
+.studio-v3 .new-production-dialog .field :is(input, select, textarea):focus { border-color: var(--accent); }
+.studio-v3 .new-production-dialog .field :is(input, select, textarea):disabled { color: var(--muted); background: var(--paper-soft); }
+.studio-v3 .new-production-dialog .field input[type="checkbox"] { width: 18px; min-height: 18px; height: 18px; margin: 0 7px 0 0; vertical-align: middle; accent-color: var(--accent); }
+.studio-v3 .new-production-dialog .field small { color: var(--muted); font-size: 13px; line-height: 1.75; }
+.studio-v3 .new-production-dialog :is(.brief-extra-options, .inherited-production-summary) { grid-column: 1 / -1; margin: 0; padding: 0; background: var(--paper-soft); border: 1px solid var(--line); border-radius: 12px; }
+.studio-v3 .new-production-dialog :is(.brief-extra-options, .inherited-production-summary) > summary { min-height: 48px; padding: 13px 16px; color: var(--ink); font-size: 14px; line-height: 1.7; cursor: pointer; }
+.studio-v3 .new-production-dialog :is(.brief-extra-options, .inherited-production-summary) > summary :is(span, small) { margin-left: 8px; color: var(--muted); font-size: 12px; }
+.studio-v3 .new-production-dialog .brief-extra-fields { gap: 18px; padding: 4px 16px 18px; }
+.studio-v3 .new-production-dialog .inherited-production-summary > p { padding: 0 16px 16px; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.8; }
+.studio-v3 .new-production-dialog .creative-summary { display: block; padding: 0; margin: 20px 0 0; background: transparent; border: 0; border-top: 1px solid var(--line); border-radius: 0; }
+.studio-v3 .new-production-dialog .creative-summary summary { display: flex; min-height: 52px; align-items: center; gap: 12px; padding: 12px 0; cursor: pointer; list-style: none; }
+.studio-v3 .new-production-dialog .creative-summary summary::-webkit-details-marker { display: none; }
+.studio-v3 .new-production-dialog .creative-summary summary > svg { margin-left: auto; flex-shrink: 0; color: var(--muted); }
+.studio-v3 .new-production-dialog .creative-summary details[open] > summary > svg { transform: rotate(180deg); }
+.studio-v3 .new-production-dialog .creative-summary :is(summary, header) strong { color: var(--ink); font-size: 14px; font-weight: 600; }
+.studio-v3 .new-production-dialog .creative-summary :is(summary, header) small { color: var(--muted); font-size: 12px; line-height: 1.7; }
+.studio-v3 .new-production-dialog .creative-summary > header { padding: 16px 0 10px; }
+.studio-v3 .new-production-dialog .creative-summary details > p { color: var(--muted); font-size: 13px; line-height: 1.7; }
+.studio-v3 .new-production-dialog .creative-summary dl { gap: 16px 24px; padding-bottom: 12px; }
+.studio-v3 .new-production-dialog .creative-summary dl > div { border-color: var(--line); }
+.studio-v3 .new-production-dialog .creative-summary dt { font-size: 12px; font-weight: 500; }
+.studio-v3 .new-production-dialog .creative-summary dd { color: var(--ink); font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.studio-v3 .new-production-dialog .editorial-brief-note { margin-top: 18px; padding: 16px 18px; color: var(--ink); background: var(--paper-soft); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 10px; }
+.studio-v3 .new-production-dialog .editorial-brief-note :is(span, strong, label, li) { font-size: 14px; line-height: 1.8; }
+.studio-v3 .new-production-dialog .editorial-brief-note small { color: var(--muted); font-size: 13px; line-height: 1.8; }
+.studio-v3 .new-production-dialog .editorial-brief-note ul { margin: 8px 0; padding-left: 22px; }
+.studio-v3 .new-production-dialog .new-run-group { margin: 0 0 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.studio-v3 .new-production-dialog .new-run-group > summary { display: grid; grid-template-columns: minmax(0, 1fr) 20px; gap: 5px 18px; padding: 18px 20px; min-height: 84px; list-style: none; cursor: pointer; }
+.studio-v3 .new-production-dialog .new-run-group > summary::-webkit-details-marker { display: none; }
+.studio-v3 .new-production-dialog .new-run-group > summary strong { color: var(--ink); font-size: 17px; font-weight: 600; line-height: 1.5; }
+.studio-v3 .new-production-dialog .new-run-group > summary small { grid-column: 1; color: var(--muted); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.studio-v3 .new-production-dialog .new-run-group > summary > svg { grid-column: 2; grid-row: 1 / 3; align-self: center; color: var(--muted); }
+.studio-v3 .new-production-dialog .new-run-group[open] > summary { border-bottom: 1px solid var(--line); }
+.studio-v3 .new-production-dialog .new-run-group[open] > summary > svg { transform: rotate(180deg); }
+.studio-v3 .new-production-dialog .new-run-group-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 26px; padding: 24px 20px; }
+.studio-v3 .new-production-dialog .new-run-group-body > * { min-width: 0; }
+.studio-v3 .new-production-dialog .budget-intention-field { width: min(360px, 100%); }
+.studio-v3 .new-production-dialog .new-run-group-body .compact-section-heading > div > span { display: none; }
+.studio-v3 .new-production-dialog .new-run-group-body .compact-section-heading h3 { font-size: 16px; }
+.studio-v3 .new-production-dialog .new-run-group-body :is(.director-casting-section, .recipe-section, .reference-style-section, .voice-studio) { margin: 0; padding: 0; border: 0; }
+.studio-v3 .new-production-dialog .director-profile-note { padding: 14px 16px; background: var(--paper-soft); border-radius: 10px; }
+.studio-v3 .new-production-dialog .director-profile-note :is(span, small) { color: var(--muted); font-size: 13px; line-height: 1.7; }
+.studio-v3 .new-production-dialog .recipe-options { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.studio-v3 .new-production-dialog .recipe-option-body { height: 100%; padding: 16px; background: var(--paper); border-radius: 12px; }
+.studio-v3 .new-production-dialog .recipe-name strong { white-space: normal; font-size: 14px; line-height: 1.6; }
+.studio-v3 .new-production-dialog .recipe-name svg { color: var(--accent); }
+.studio-v3 .new-production-dialog .recipe-option-body > small { font-size: 13px; line-height: 1.8; }
+.studio-v3 .new-production-dialog .recipe-option > input:checked + .recipe-option-body { background: var(--accent-soft); }
+.studio-v3 .new-production-dialog .reference-video-control { background: var(--paper-soft); border-color: var(--line); border-radius: 12px; }
+.studio-v3 .new-production-dialog .reference-video-picker { color: var(--ink); }
+.studio-v3 .new-production-dialog :is(.reference-style-note, .reference-video-picker small) { color: var(--muted); font-size: 13px; line-height: 1.8; }
+.studio-v3 .new-production-dialog .advanced-production { margin-top: 0; border: 0; }
+.studio-v3 .new-production-dialog .production-role-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.studio-v3 .new-production-dialog .production-role { padding: 16px; gap: 14px; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 12px; box-shadow: none; transform: none; }
+.studio-v3 .new-production-dialog .production-role:hover { transform: none; box-shadow: none; border-color: var(--line); }
+.studio-v3 .new-production-dialog .production-role-icon { color: var(--accent); border-radius: 9px; }
+.studio-v3 .new-production-dialog .production-role :is(p, small, .field > span) { color: var(--muted); font-size: 13px; line-height: 1.75; }
+.studio-v3 .new-production-dialog .production-role > header strong { font-size: 15px; }
+.studio-v3 .new-production-dialog .production-role-source-models { background: var(--paper-soft); border-color: var(--line); border-radius: 10px; }
+.studio-v3 .new-production-dialog .production-role-source-models .field { grid-template-columns: 1fr; }
+.studio-v3 .new-production-dialog .production-role-source-models .field > span { white-space: normal; }
+.studio-v3 .new-production-dialog .production-role-source-models > strong { font-size: 13px; }
+.studio-v3 .new-production-dialog .production-settings-guidance { color: var(--muted); font-size: 14px; line-height: 1.8; }
+.studio-v3 .new-production-dialog .production-auditor { color: var(--ink); background: var(--paper-soft); border-color: var(--line); border-radius: 12px; }
+.studio-v3 .new-production-dialog .production-auditor :is(small, em) { color: var(--muted); font-size: 13px; line-height: 1.7; }
+.studio-v3 .new-production-dialog .workflow-config { grid-template-columns: minmax(210px, .85fr) minmax(0, 1.5fr); border-color: var(--line); border-radius: 12px; background: var(--paper); }
+.studio-v3 .new-production-dialog .workflow-stage:is(:hover, .is-active) { background: var(--paper); }
+.studio-v3 .new-production-dialog .workflow-stage strong { flex-wrap: wrap; }
+.studio-v3 .new-production-dialog :is(.workflow-stage.is-active > svg, .provider-browser-header p) { color: var(--accent); }
+.studio-v3 .new-production-dialog .workflow-stage strong em { color: var(--accent); background: var(--accent-soft); font-size: 12px; }
+.studio-v3 .new-production-dialog :is(.asset-source-pool, .asset-model-overrides) { padding: 18px; color: var(--ink); background: var(--paper-soft); border-color: var(--line); border-radius: 12px; }
+.studio-v3 .new-production-dialog :is(.asset-source-option, .voice-card, .voice-preset-picker button) { color: var(--ink); background: var(--paper); border-color: var(--line); border-radius: 10px; }
+.studio-v3 .new-production-dialog .asset-source-option.is-selected { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.studio-v3 .new-production-dialog :is(.asset-source-option, .provider-choice) input { accent-color: var(--accent); }
+.studio-v3 .new-production-dialog :is(.asset-source-option, .provider-choice-title) strong { white-space: normal; overflow-wrap: anywhere; font-size: 14px; }
+.studio-v3 .new-production-dialog .asset-source-option small { white-space: normal; font-size: 13px; line-height: 1.7; }
+.studio-v3 .new-production-dialog .provider-choice-title { flex-wrap: wrap; }
+.studio-v3 .new-production-dialog .provider-choice-main { font-size: 13px; line-height: 1.8; }
+.studio-v3 .new-production-dialog .provider-mode-list small { color: var(--muted); }
+.studio-v3 .new-production-dialog .voice-card.is-selected { border-color: var(--accent); background: var(--accent-soft); }
+.studio-v3 .new-production-dialog .voice-preset-picker button.is-selected { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+.studio-v3 .new-production-dialog .new-production-confirmation { margin-top: 30px; padding-top: 24px; border-top: 1px solid var(--line); }
+.studio-v3 .new-production-dialog .dialog-budget { display: grid; max-width: none; justify-items: start; gap: 7px; padding: 18px 20px; margin: 0; text-align: left; color: var(--ink); background: var(--paper-soft); border: 1px solid var(--line); border-radius: 12px; }
+.studio-v3 .new-production-dialog .dialog-budget :is(span, strong) { color: var(--ink); font-size: 14px; font-weight: 500; line-height: 1.7; }
+.studio-v3 .new-production-dialog .dialog-budget small { color: var(--muted); font-size: 13px; line-height: 1.8; }
+.studio-v3 .new-production-dialog .production-guardrails { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding-top: 16px; }
+.studio-v3 .new-production-dialog .visual-review-control { background: var(--paper); border-color: var(--line); border-radius: 12px; padding: 16px 40px 16px 16px; }
+.studio-v3 .new-production-dialog .visual-review-control.is-enabled { color: var(--ink); background: var(--paper-soft); border-color: var(--line); }
+.studio-v3 .new-production-dialog .visual-review-control > input { accent-color: var(--accent); top: 18px; }
+.studio-v3 .new-production-dialog .visual-review-control > span svg { color: var(--accent); flex-shrink: 0; }
+.studio-v3 .new-production-dialog .visual-review-control > small { font-size: 13px; line-height: 1.8; }
+.studio-v3 .new-production-dialog .visual-review-control.is-optional-risk { background: var(--yellow-soft); border-color: var(--amber); color: var(--ink); }
+.studio-v3 .new-production-dialog :is(.review-control, .budget-control) { display: grid; grid-column: auto; gap: 6px; align-content: start; padding: 14px 0; }
+.studio-v3 .new-production-dialog .review-control > span { justify-content: start; padding: 0; min-height: 0; background: transparent; border: 0; color: var(--ink); font-size: 14px; }
+.studio-v3 .new-production-dialog .budget-control > span:first-child { color: var(--ink); font-size: 14px; }
+.studio-v3 .new-production-dialog :is(.review-control, .budget-control) small { color: var(--muted); font-size: 13px; line-height: 1.8; }
+.studio-v3 .new-production-dialog :is(.form-error, .page-error) { margin-top: 18px; padding: 14px 16px; color: var(--red); font-size: 14px; line-height: 1.8; border-radius: 10px; }
+.studio-v3 .new-production-dialog .recipe-dialog-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; flex: 0 0 auto; gap: 12px; min-height: 92px; padding: 18px 30px; background: var(--paper-soft); }
+.studio-v3 .new-production-dialog .recipe-dialog-actions > div { display: grid; gap: 5px; margin: 0 12px 0 0; }
+.studio-v3 .new-production-dialog .recipe-dialog-actions > div strong { display: block; color: var(--ink); font-size: 14px; }
+.studio-v3 .new-production-dialog .recipe-dialog-actions > div span { color: var(--muted); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.studio-v3 .new-production-dialog .recipe-dialog-actions > .button { min-height: 46px; margin: 0; white-space: normal; }
+.studio-v3 .new-production-dialog .recipe-dialog-actions > .button-primary { padding-inline: 22px; }
+.studio-v3 .new-production-dialog > :is(.page-loading, .page-error) { padding: 28px 30px; }
+@media (max-width: 700px) {
+  .studio-v3 .dialog-backdrop:has(> .new-production-dialog) { padding: max(8px, env(safe-area-inset-top)) 8px max(8px, env(safe-area-inset-bottom)); }
+  .studio-v3 .new-production-dialog { width: 100%; min-height: 0; max-height: calc(100dvh - max(8px, env(safe-area-inset-top)) - max(8px, env(safe-area-inset-bottom))); border-radius: 16px; }
+  .studio-v3 .new-production-dialog .recipe-dialog-header { padding: 16px 18px; gap: 12px; }
+  .studio-v3 .new-production-dialog .recipe-dialog-header h2 { font-size: 22px; }
+  .studio-v3 .new-production-dialog .recipe-dialog-header > div > p { font-size: 13px; }
+  .studio-v3 .new-production-dialog .recipe-form-scroll { padding: 20px 18px 24px; }
+  .studio-v3 .new-production-dialog .compact-section-heading { flex-wrap: wrap; gap: 5px; }
+  .studio-v3 .new-production-dialog .brief-fields { gap: 18px; }
+  .studio-v3 .new-production-dialog .brief-fields > .field { grid-column: 1 / -1; }
+  .studio-v3 .new-production-dialog .field :is(input:not([type="checkbox"]), textarea, select) { font-size: 16px; }
+  .studio-v3 .new-production-dialog :is(.brief-extra-fields, .director-casting-control, .recipe-options, .production-role-grid, .asset-source-options, .production-guardrails, .workflow-config) { grid-template-columns: 1fr; }
+  .studio-v3 .new-production-dialog .new-run-group > summary { padding: 16px; }
+  .studio-v3 .new-production-dialog .new-run-group-body { padding: 20px 14px; }
+  .studio-v3 .new-production-dialog .creative-summary summary { flex-wrap: wrap; gap: 4px 10px; }
+  .studio-v3 .new-production-dialog .creative-summary summary small { flex-basis: calc(100% - 30px); order: 2; }
+  .studio-v3 .new-production-dialog .creative-summary > header { flex-direction: column; align-items: start; gap: 5px; }
+  .studio-v3 .new-production-dialog .workflow-stage-panel { border-right: 0; border-bottom: 1px solid var(--line); }
+  .studio-v3 .new-production-dialog .recipe-dialog-actions { grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 14px 18px; }
+  .studio-v3 .new-production-dialog .recipe-dialog-actions > div { grid-column: 1 / -1; margin: 0; }
+  .studio-v3 .new-production-dialog .recipe-dialog-actions > div strong { display: none; }
+  .studio-v3 .new-production-dialog .recipe-dialog-actions > .button { min-height: 44px; }
+}
+@media (max-height: 560px) {
+  .studio-v3 .new-production-dialog .recipe-dialog-header { padding-block: 12px; }
+  .studio-v3 .new-production-dialog .recipe-dialog-header > div > p { display: none; }
+  .studio-v3 .new-production-dialog .recipe-dialog-actions { padding-block: 10px; }
+  .studio-v3 .new-production-dialog .recipe-dialog-actions > div { max-height: 80px; overflow-y: auto; overscroll-behavior: contain; }
+}
+@media (max-height: 620px) {
+  .studio-v3 .new-production-dialog .recipe-dialog-header > div > p { display: none; }
+}

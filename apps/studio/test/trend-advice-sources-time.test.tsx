@@ -109,6 +109,32 @@ it("keeps candidate revision text and a late error with their original candidate
   expect(onRevise).toHaveBeenCalledWith(first, "只修改第一条");
 });
 
+it("keeps candidate selection keyboard-accessible and moves narrow-screen readers to the selected detail", async () => {
+  const width = Object.getOwnPropertyDescriptor(window, "innerWidth")!;
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+  const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+  try {
+    const first = trendCandidate(1), second = trendCandidate(2, { audience: "需要核对具体来源的观众" });
+    renderTrendWorkspace(buildInbox([first, second]), { platformCount: 1, candidateCount: 2 });
+    const firstButton = screen.getByRole("button", { name: "查看候选提案 1" });
+    const secondButton = screen.getByRole("button", { name: "查看候选提案 2" });
+    expect(firstButton).toHaveAttribute("aria-pressed", "true");
+    secondButton.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(firstButton).toHaveAttribute("aria-pressed", "false");
+    expect(secondButton).toHaveAttribute("aria-pressed", "true");
+    const detail = screen.getByRole("article", { name: "候选提案 2" });
+    await waitFor(() => expect(detail).toHaveFocus());
+    expect(scroll).toHaveBeenCalledWith({ block: "start", behavior: "auto" });
+    expect(within(detail).getByText(second.audience)).toBeVisible();
+    expect(within(detail).getByRole("region", { name: "来源线索" })).toBeVisible();
+    expect(within(detail).getByText("采用后加入待制作区，不会开始生成或付费。")).toBeVisible();
+  } finally {
+    Object.defineProperty(window, "innerWidth", width);
+    scroll.mockRestore();
+  }
+});
+
 it("separates reading saved proposals from accepted generation and failed reads", () => {
   const inbox = buildInbox([]);
   const meta = { platformCount: 0, candidateCount: 0 };

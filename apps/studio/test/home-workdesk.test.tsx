@@ -68,10 +68,11 @@ describe("home workdesk heading and states", () => {
     const buttons = within(entries).getAllByRole("button");
     expect(buttons).toHaveLength(4);
     expect(within(entries).queryByText(/^(01|02|03|04)$/)).not.toBeInTheDocument();
-    expect(buttons[0]).toHaveAccessibleName("从热点开始发现值得讲的当下话题");
-    expect(buttons[1]).toHaveAccessibleName("继续一个系列延续栏目，创作下一集");
-    expect(buttons[2]).toHaveAccessibleName("从自己的想法开始写下主题，加入你的参考");
-    expect(buttons[3]).toHaveAccessibleName("从案例 / 脚本开始借鉴好作品，写自己的版本");
+    expect(buttons[0]).toHaveAccessibleName("热点选题 从热点开始");
+    expect(buttons[1]).toHaveAccessibleName("系列策划 继续一个系列");
+    expect(buttons[2]).toHaveAccessibleName("我的想法 从自己的想法开始");
+    expect(buttons[3]).toHaveAccessibleName("参考案例 从案例 / 脚本开始");
+    expect(buttons[0]).toHaveAccessibleDescription(/发现值得创作的热点，\s*把握当下的讨论与情绪。/);
   });
 
   it("does not turn unread counts into zero and shows zero only after an empty result", async () => {

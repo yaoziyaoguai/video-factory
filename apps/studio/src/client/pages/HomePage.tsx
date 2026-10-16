@@ -1,10 +1,17 @@
-import { ArrowRight, Clapperboard, Clock3, FileText, Film, Plus, RefreshCw } from "lucide-react";
+import { ArrowRight, BookOpen, Clapperboard, Clock3, FileText, Film, Flame, Layers3, Lightbulb, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { StudioRunSummary } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { StatusBadge } from "../components/StatusBadge.js";
 import { creatorReviewAction, creatorRunStatusLabel, isHistoricalReadOnlyRun, platformLabel, runNeedsCreatorAction, runNodeLabel } from "../presentation.js";
+
+const creationEntries = [
+  { id: "trends", title: "热点选题", description: "发现值得创作的热点，\n把握当下的讨论与情绪。", action: "从热点开始", detail: "", destination: "/topics", icon: Flame },
+  { id: "series", title: "系列策划", description: "用系列，记录更完整的故事，\n让内容持续发生。", action: "继续一个系列", detail: "延续栏目，创作下一集", destination: "/topics?mode=series", icon: Layers3 },
+  { id: "idea", title: "我的想法", description: "从一个灵感开始，\n把脑海中的想法变成作品。", action: "从自己的想法开始", detail: "写下主题，加入你的参考", destination: "/topics?mode=manual", icon: Lightbulb },
+  { id: "reference", title: "参考案例", description: "借鉴优秀作品，\n发现更多创作可能。", action: "从案例 / 脚本开始", detail: "借鉴好作品，写自己的版本", destination: "/cases", icon: BookOpen },
+] as const;
 
 export function HomePage() {
   const navigate = useNavigate();
@@ -48,22 +55,47 @@ export function HomePage() {
 
   return (
     <main className="home-page">
-      <header className="home-intro">
-        <div className="home-heading">
-          <h1>创作台</h1>
-          <time>{new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "short" }).format(new Date())}</time>
+      <header className="home-hero">
+        <img className="home-hero-image" src="/media/home/studio-hero.webp" alt="" fetchPriority="high" width={1920} height={900} />
+        <div className="home-hero-copy">
+          <p className="home-greeting">{greeting()}，</p>
+          <h1><span className="home-sr-only">创作台 · </span>继续创作你的下一个视频</h1>
+          <p className="home-hero-description">从热点、系列、自己的想法或参考案例开始，把灵感变成一部完整的作品。</p>
         </div>
-        {!loading && !error ? <section className="home-production-overview" aria-label="制作概况">
-          <span><small>待你处理</small><strong>{overview.attention}</strong></span>
-          <span><small>自动制作</small><strong>{overview.active}</strong></span>
-          <span><small>已完成</small><strong>{overview.completed}</strong></span>
-          <span><small>已归档</small><strong>{overview.archived}</strong></span>
-          <Link to="/projects">全部制作<ArrowRight aria-hidden="true" size={15} /></Link>
-        </section> : null}
+        <p className="home-hero-note" aria-hidden="true">每一个普通的日常<br />都有动人的角度<span /></p>
       </header>
 
-      {error ? <div className="home-error" role="alert"><span>{error}</span><button className="button button-secondary" type="button" onClick={() => void load()}><RefreshCw aria-hidden="true" size={16} />重新连接</button></div> : null}
-      {loading ? <p className="home-loading" role="status">正在读取你的作品…你也可以先选择下面的创作入口。</p> : null}
+      <section className={`home-creation${!loading && !error && !currentRun ? " is-new-workspace" : ""}`} aria-labelledby="start-title">
+        <h2 id="start-title" className="home-sr-only">你今天从哪里出发？</h2>
+        <div className="home-entry-grid">
+          {creationEntries.map(({ id, title, description, action, detail, destination, icon: Icon }) => (
+            <button className={`home-entry home-entry-${id}`} key={id} type="button" aria-labelledby={`home-entry-title-${id} home-entry-action-${id}`} aria-describedby={detail ? `home-entry-detail-${id}` : `home-entry-description-${id}`} onClick={() => navigate(destination)}>
+              <img className="home-entry-image" src={`/media/home/entry-${id}.webp`} alt="" width={700} height={1000} decoding="async" />
+              <span className="home-entry-heading">
+                <span className="home-entry-topline" aria-hidden="true"><span className="home-entry-symbol"><Icon size={17} strokeWidth={1.8} /></span><ArrowRight className="home-entry-arrow" size={21} /></span>
+                <strong id={`home-entry-title-${id}`}>{title}</strong>
+                <span className="home-entry-description" id={`home-entry-description-${id}`}>{description}</span>
+              </span>
+              <span className="home-entry-footer"><span id={`home-entry-action-${id}`}>{action}</span>{detail ? <small id={`home-entry-detail-${id}`}>{detail}</small> : null}</span>
+            </button>
+          ))}
+        </div>
+        <p className="home-start-note">需要生成付费图片或视频时，会先报价并等你确认。</p>
+      </section>
+
+      <section className="home-workdesk" aria-labelledby="home-workdesk-title">
+        <header className="home-workdesk-heading">
+          <h2 id="home-workdesk-title">最近的制作 <ArrowRight aria-hidden="true" size={20} /></h2>
+          {!loading && !error ? <section className="home-production-overview" aria-label="制作概况">
+            <span><small>待你处理</small><strong>{overview.attention}</strong></span>
+            <span><small>自动制作</small><strong>{overview.active}</strong></span>
+            <span><small>已完成</small><strong>{overview.completed}</strong></span>
+            <span><small>已归档</small><strong>{overview.archived}</strong></span>
+            <Link to="/projects">全部制作<ArrowRight aria-hidden="true" size={15} /></Link>
+          </section> : null}
+        </header>
+        {error ? <div className="home-error" role="alert"><span>{error}</span><button className="button button-secondary" type="button" onClick={() => void load()}><RefreshCw aria-hidden="true" size={16} />重新连接</button></div> : null}
+        {loading ? <p className="home-loading" role="status">正在读取你的作品…你也可以先选择上面的创作入口。</p> : null}
 
       {currentRun ? (
         <section className={`home-continuation${currentRun.videoContentUrl ? " has-preview" : ""}`} aria-labelledby="continue-title">
@@ -78,36 +110,12 @@ export function HomePage() {
           </div>
         </section>
       ) : !loading && !error ? (
-        <section className="home-first-work" aria-labelledby="first-work-title">
-          <div className="home-first-work-copy"><p className="home-work-label">你的第一条作品</p><h2 id="first-work-title">一个想法，<br />从这里成为影像。</h2><p>从下面选择一个入口。脚本、画面与每次确认，会留在你的制作记录里。</p></div>
-          <span className="home-decoration-label">工作室光圈 · 装饰</span>
+        <section className="home-empty-work" aria-labelledby="first-work-title">
+          <span className="home-empty-icon" aria-hidden="true"><Clapperboard size={30} strokeWidth={1.3} /></span>
+          <div><h3 id="first-work-title">第一部作品，从一个想法开始</h3><p>选择上方入口开始创作，脚本、画面与每次确认都会保留在这里。</p></div>
+          <Link to="/topics?mode=manual"><Plus aria-hidden="true" size={18} />开始创作</Link>
         </section>
       ) : null}
-
-      <section className={`home-start${!loading && !error && !currentRun ? " is-new-workspace" : ""}`} aria-labelledby="start-title">
-        <header>
-          <h2 id="start-title">你今天从哪里出发？</h2>
-        </header>
-        <div className="home-start-options">
-          <button type="button" onClick={() => navigate("/topics")}>
-            <span><strong>从热点开始</strong><small>发现值得讲的当下话题</small></span>
-            <ArrowRight aria-hidden="true" size={18} />
-          </button>
-          <button type="button" onClick={() => navigate("/topics?mode=series")}>
-            <span><strong>继续一个系列</strong><small>延续栏目，创作下一集</small></span>
-            <ArrowRight aria-hidden="true" size={18} />
-          </button>
-          <button type="button" onClick={() => navigate("/topics?mode=manual")}>
-            <span><strong>从自己的想法开始</strong><small>写下主题，加入你的参考</small></span>
-            <Plus aria-hidden="true" size={18} />
-          </button>
-          <button type="button" onClick={() => navigate("/cases")}>
-            <span><strong>从案例 / 脚本开始</strong><small>借鉴好作品，写自己的版本</small></span>
-            <ArrowRight aria-hidden="true" size={18} />
-          </button>
-        </div>
-        <p className="home-start-note">需要生成付费图片或视频时，会先报价并等你确认。</p>
-      </section>
 
       {!loading && !error && recentRuns.length > 0 ? <section className="home-recent" aria-labelledby="home-recent-title">
         <header><h2 id="home-recent-title">留在工作台上的</h2><Link to="/projects">全部制作<ArrowRight aria-hidden="true" size={15} /></Link></header>
@@ -118,8 +126,16 @@ export function HomePage() {
           <ArrowRight aria-hidden="true" size={17} />
         </Link>)}</div>
       </section> : null}
+      </section>
     </main>
   );
+}
+
+function greeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 6 || hour >= 18) return "晚上好";
+  if (hour < 12) return "上午好";
+  return "下午好";
 }
 
 function HomeScreening({ run }: { run: StudioRunSummary }) {

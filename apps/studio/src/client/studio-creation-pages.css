@@ -1,0 +1,358 @@
+/* 长系列名不能撑开 grid 的隐式列，挤住旁边的新建入口。 */
+.studio-v3 .series-controls label { grid-template-columns: minmax(0, 1fr); }
+.studio-v3 .series-controls select { width: 100%; min-width: 0; font-size: 14px; }
+
+/* 摄影只用于入口与简介；草稿、原文、费用和核对信息保留纯色稿面。 */
+.studio-v3 .creation-page-hero,
+.studio-v3 .series-season-cover,
+.studio-v3 .custom-entry-cover { position: relative; isolation: isolate; min-width: 0; overflow: hidden; color: var(--ink); background: var(--editorial-surface); }
+.studio-v3 .creation-page-hero-image,
+.studio-v3 .series-season-cover > img,
+.studio-v3 .custom-entry-cover > img { position: absolute; z-index: -2; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; }
+.studio-v3 .series-season-cover::before,
+.studio-v3 .custom-entry-cover::before { content: ""; position: absolute; z-index: -1; pointer-events: none; }
+.studio-v3 .creation-page-hero { display: grid; grid-template-columns: minmax(0, 1fr); align-content: center; justify-items: start; gap: 18px; min-height: 236px; margin: 8px 0 0; padding: 28px 34px; color: var(--ink); background: var(--editorial-surface); border-block: 1px solid var(--line-strong); border-radius: 3px; }
+.studio-v3 .creation-page-hero-copy { max-width: 62%; min-width: 0; }
+.studio-v3 .creation-page-hero .eyebrow,
+.studio-v3 .series-season-cover .eyebrow,
+.studio-v3 .custom-entry-cover .eyebrow { display: block; margin: 0 0 13px; color: #e5eaf2; font-size: 13px; line-height: 1.7; font-weight: 500; letter-spacing: .08em; }
+.studio-v3 .creation-page-hero .creation-page-hero-copy h1 { margin: 0; padding: 0; color: var(--ink); font-family: var(--font-editorial); font-size: clamp(29px, 2.7vw, 39px); font-weight: 650; line-height: 1.5; letter-spacing: .025em; text-wrap: balance; }
+.studio-v3 .creation-page-hero .creation-page-hero-copy > p:last-child { max-width: 36em; margin: 14px 0 0; color: var(--muted); font-size: 15px; line-height: 1.9; }
+.studio-v3 .creation-page-hero .creation-hero-action { flex: 0 0 auto; min-height: 44px; padding: 11px 17px; color: var(--ink); background: var(--paper); border: 1px solid var(--control-border); border-radius: 7px; }
+.studio-v3 .creation-page-hero .creation-hero-action:hover:not(:disabled) { color: var(--ink); background: var(--paper-soft); border-color: var(--ink); }
+.studio-v3 .creation-page-hero .creation-hero-action:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+.studio-v3 .creation-page-caption { max-width: 74em; margin: 15px 2px 24px; color: var(--muted); font-size: 13px; line-height: 1.85; }
+
+.studio-v3 .creation-page-hero .eyebrow, .studio-v3 .custom-entry-cover .eyebrow { color: var(--editorial-ink); font-size: 12px; letter-spacing: .12em; }
+.studio-v3 .creation-page-hero .creation-page-hero-image { left: auto; right: 0; width: 34%; clip-path: polygon(12% 0, 100% 0, 100% 100%, 0 100%); }
+.studio-v3 .creation-page-hero::before { content: none; }
+
+/* 参考室：来源记录、目录和阅读稿面各自承担不同任务。 */
+.studio-v3 .creation-cases-hero .creation-page-hero-image { object-position: center 64%; }
+.studio-v3 .creation-cases-page .case-source-ledger { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 20px; padding: 18px 0; border-block: 1px solid var(--line); }
+.studio-v3 .creation-cases-page .case-source-ledger > h2 { margin: 3px 0 0; color: var(--ink); font-size: 14px; font-weight: 600; }
+.studio-v3 .creation-cases-page .case-source-strip { gap: 16px 26px; margin: 0; }
+.studio-v3 .creation-cases-page .case-source-item { min-width: 0; gap: 4px; padding: 1px 0 1px 12px; background: transparent; border-width: 0 0 0 2px; border-radius: 0; }
+.studio-v3 .creation-cases-page .case-source-item strong { color: var(--ink); font-size: 14px; }
+.studio-v3 .creation-cases-page .case-source-item :is(span, small) { color: var(--muted); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.studio-v3 .creation-cases-page .case-selection-banner { margin-block: 22px 0; padding: 20px 22px; background: var(--accent-soft); border-color: var(--line); border-radius: 12px; }
+.studio-v3 .creation-cases-page .case-selection-banner strong { font-size: 17px; line-height: 1.7; overflow-wrap: anywhere; }
+.studio-v3 .creation-cases-page .case-selection-banner :is(span, small) { font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.studio-v3 .creation-cases-page .case-toolbar { gap: 14px; padding-block: 22px; margin-bottom: 24px; }
+.studio-v3 .creation-cases-page .case-search { min-width: 0; color: var(--muted); background: var(--paper); border-color: var(--control-border); }
+.studio-v3 .creation-cases-page .case-search:focus-within { outline: 2px solid var(--focus, var(--action)); outline-offset: 3px; }
+.studio-v3 .creation-cases-page .case-search input { font-size: 15px; }
+.studio-v3 .creation-cases-page .case-search button { min-width: 36px; min-height: 40px; color: var(--muted); }
+.studio-v3 .creation-cases-page .case-views { gap: 0; padding: 0; background: transparent; border-radius: 0; }
+.studio-v3 .creation-cases-page .case-views button { padding: 10px 14px; border-radius: 0; border-bottom: 2px solid transparent; }
+.studio-v3 .creation-cases-page .case-views button.is-active { color: var(--action); background: transparent; border-color: var(--action); box-shadow: none; }
+.studio-v3 .creation-cases-page .case-filters { width: 100%; gap: 12px 20px; }
+.studio-v3 .creation-cases-page .case-workspace { grid-template-columns: minmax(260px, .72fr) minmax(0, 1.28fr); gap: 30px; }
+.studio-v3 .creation-cases-page .case-list { min-width: 0; gap: 0; }
+.studio-v3 .creation-cases-page .case-list-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; padding: 0 4px 16px; border-bottom: 1px solid var(--line); }
+.studio-v3 .creation-cases-page .case-list-heading h2 { margin: 0; font-size: 19px; font-weight: 600; }
+.studio-v3 .creation-cases-page .case-list-heading span { color: var(--muted); font-size: 13px; }
+.studio-v3 .creation-cases-page .case-card { gap: 8px; padding: 20px 16px; background: transparent; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
+.studio-v3 .creation-cases-page .case-card:hover { background: var(--paper-soft); }
+.studio-v3 .creation-cases-page .case-card.is-selected { background: var(--paper); box-shadow: inset 3px 0 0 var(--action); }
+.studio-v3 .creation-cases-page .case-card > strong { font-size: 17px; line-height: 1.7; font-weight: 600; }
+.studio-v3 .creation-cases-page .case-card small { font-size: 14px; line-height: 1.75; }
+.studio-v3 .creation-cases-page :is(.case-meta, .case-metric-line) { color: var(--muted); font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.studio-v3 .creation-cases-page .case-hint { display: block; margin: 16px 0; font-size: 14px; line-height: 1.9; }
+.studio-v3 .creation-cases-page .case-hint > svg { margin-right: 8px; vertical-align: middle; }
+.studio-v3 .creation-cases-page .case-detail { min-width: 0; padding: clamp(22px, 2.6vw, 38px); border-radius: 16px; }
+.studio-v3 .creation-cases-page .case-detail > article { gap: 24px; }
+.studio-v3 .creation-cases-page .case-detail > article > header { gap: 12px; padding-bottom: 24px; }
+.studio-v3 .creation-cases-page .case-detail h2 { font-size: clamp(24px, 2.1vw, 30px); line-height: 1.55; overflow-wrap: anywhere; }
+.studio-v3 .creation-cases-page .case-detail header a { width: fit-content; min-height: 40px; font-size: 14px; text-underline-offset: 4px; }
+.studio-v3 .creation-cases-page .case-usage { padding: 14px 16px; color: var(--muted); background: var(--paper-soft); border-left: 2px solid var(--line-strong); font-size: 14px; line-height: 1.85; }
+.studio-v3 .creation-cases-page .case-transcript { max-height: 640px; max-width: 100%; gap: 20px; padding: 0 12px 8px 0; scrollbar-gutter: stable; }
+.studio-v3 .creation-cases-page .case-transcript p { color: var(--ink); font-family: var(--font-sans); font-size: 18px; line-height: 1.95; }
+.studio-v3 .creation-cases-page .case-transcript .case-transcript-note { color: var(--muted); font-size: 13px; line-height: 1.8; }
+.studio-v3 .creation-cases-page .case-transcript-missing { color: var(--muted); background: var(--paper-soft); border-color: var(--line); border-radius: 10px; font-size: 14px; line-height: 1.8; }
+.studio-v3 .creation-cases-page .case-create { gap: 18px; padding-top: 24px; border-color: var(--line); }
+.studio-v3 .creation-cases-page .case-create-heading .eyebrow { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+.studio-v3 .creation-cases-page .case-create-heading h3 { margin: 0; color: var(--ink); font-size: 20px; font-weight: 600; }
+.studio-v3 .creation-cases-page .case-create :is(label > span, legend) { color: var(--ink); font-size: 14px; font-weight: 550; }
+.studio-v3 .creation-cases-page .case-create textarea { min-height: 130px; padding: 14px; color: var(--ink); background: var(--paper); border-color: var(--control-border); border-radius: 10px; font-size: 16px; line-height: 1.8; resize: vertical; }
+.studio-v3 .creation-cases-page .case-create fieldset button { min-height: 40px; padding: 8px 12px; color: var(--muted); background: var(--paper); border-color: var(--line-strong); border-radius: 8px; font-size: 14px; }
+.studio-v3 .creation-cases-page .case-create fieldset button.is-active { color: var(--action); background: var(--accent-soft); border-color: var(--action); }
+.studio-v3 .creation-cases-page .case-create > small { color: var(--muted); font-size: 13px; line-height: 1.8; }
+.studio-v3 .creation-cases-page .case-reading-empty { padding-block: 14px 26px; }
+.studio-v3 .creation-cases-page .case-reading-empty > .eyebrow { margin: 0 0 16px; color: var(--action); }
+.studio-v3 .creation-cases-page .case-reading-empty > p:not(.eyebrow) { color: var(--muted); font-size: 15px; line-height: 1.9; }
+.studio-v3 .creation-cases-page .case-reading-empty ol { display: grid; gap: 0; margin: 30px 0 0; padding: 0; list-style: none; counter-reset: reference-step; }
+.studio-v3 .creation-cases-page .case-reading-empty li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 5px 12px; padding-block: 17px; border-top: 1px solid var(--line); counter-increment: reference-step; }
+.studio-v3 .creation-cases-page .case-reading-empty li::before { grid-row: 1 / 3; color: var(--action); font-size: 13px; font-variant-numeric: tabular-nums; content: "0" counter(reference-step); }
+.studio-v3 .creation-cases-page .case-reading-empty li strong { font-size: 15px; font-weight: 550; }
+.studio-v3 .creation-cases-page .case-reading-empty li span { grid-column: 2; color: var(--muted); font-size: 14px; line-height: 1.8; }
+
+/* 系列：封面交代本季，目录保持顺序，单集内容是一张可阅读的稿面。 */
+.studio-v3 .creation-series-roadmap { background: transparent; }
+/* 季封面采用印相纸叠层；只有装饰照片旋转，交互和正文保持水平。 */
+.studio-v3 .creation-series-roadmap .series-season-cover { min-height: 220px; padding: 28px 34px; color: var(--ink); background: var(--editorial-surface); border-block: 1px solid var(--line-strong); border-radius: 3px; }
+.studio-v3 .series-season-cover > img { inset: 24px 4% 24px auto; width: 34%; height: calc(100% - 48px); object-position: center 62%; border: 7px solid #ffffff; box-shadow: 0 10px 20px rgb(24 35 52 / 18%); transform: rotate(-3deg); }
+.studio-v3 .series-season-cover::before { inset: 26px 4% 26px auto; width: 34%; background: transparent; border: 1px solid var(--line-strong); transform: rotate(3deg); }
+.studio-v3 .series-season-cover > div { max-width: 57%; }
+.studio-v3 .series-season-cover .eyebrow { color: var(--editorial-ink); font-size: 12px; letter-spacing: .09em; }
+.studio-v3 .series-season-cover h2 { margin: 0; color: var(--ink); font-family: var(--font-editorial); font-size: clamp(30px, 2.6vw, 40px); font-weight: 650; line-height: 1.6; overflow-wrap: anywhere; }
+.studio-v3 .series-season-cover > div > p:not(.eyebrow) { max-width: 42em; margin: 10px 0; color: var(--ink); font-size: 15px; line-height: 1.9; }
+.studio-v3 .series-season-cover > div > span { display: block; margin-top: 16px; color: var(--muted); font-size: 13px; line-height: 1.8; }
+.studio-v3 .creation-series-roadmap .series-season-summary { padding: 18px 4px; margin-bottom: 24px; }
+.studio-v3 .creation-series-roadmap .series-season-summary > summary { font-weight: 550; }
+.studio-v3 .creation-series-roadmap .series-season-summary dl { gap: 24px; }
+.studio-v3 .creation-series-roadmap .series-season-summary dl > div { padding: 12px 0; border: 0; border-radius: 0; background: transparent; }
+.studio-v3 .creation-series-roadmap .series-season-summary dd { margin-top: 8px; font-size: 15px; line-height: 1.85; }
+.studio-v3 .creation-series-roadmap .series-roadmap-body { grid-template-columns: minmax(240px, .62fr) minmax(0, 1.38fr); align-items: start; gap: 26px; background: transparent; }
+.studio-v3 .creation-series-roadmap .series-episode-directory { min-width: 0; }
+.studio-v3 .series-episode-directory > header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 0 12px 18px; border-bottom: 1px solid var(--line); }
+.studio-v3 .series-episode-directory > header h3 { margin: 0; font-size: 18px; font-weight: 600; }
+.studio-v3 .series-episode-directory > header > span { color: var(--muted); font-size: 13px; }
+.studio-v3 .creation-series-roadmap .series-episode-list { max-height: 790px; border: 0; }
+.studio-v3 .creation-series-roadmap .series-episode-list button { grid-template-columns: 32px minmax(0, 1fr); gap: 10px; padding: 18px 14px; color: var(--ink); background: transparent; border-bottom-color: var(--line); border-radius: 0; }
+.studio-v3 .creation-series-roadmap .series-episode-list button:hover { background: var(--paper-soft); }
+.studio-v3 .creation-series-roadmap .series-episode-list button.is-active { background: var(--paper-soft); box-shadow: inset 3px 0 0 var(--action); }
+.studio-v3 .creation-series-roadmap .series-episode-index { align-self: start; margin-top: 4px; color: var(--muted); font-size: 13px; font-weight: 600; }
+.studio-v3 .creation-series-roadmap .series-episode-copy small { color: var(--action); font-size: 12px; font-weight: 500; }
+.studio-v3 .creation-series-roadmap .series-episode-copy strong { overflow: visible; color: var(--ink); font-size: 16px; font-weight: 600; line-height: 1.7; white-space: normal; }
+.studio-v3 .creation-series-roadmap .series-episode-copy > span { display: -webkit-box; color: var(--muted); font-size: 13px; line-height: 1.8; white-space: normal; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.studio-v3 .creation-series-roadmap .series-episode-status { grid-column: 2; justify-self: start; min-height: 28px; padding: 2px 8px; color: var(--muted); background: var(--paper); font-size: 12px; font-weight: 500; white-space: normal; }
+.studio-v3 .creation-series-roadmap .series-episode-status:is(.is-ready, .is-published) { color: var(--green); background: var(--green-soft); }
+.studio-v3 .creation-series-roadmap .series-episode-detail { order: 0; min-height: 0; padding: 28px 30px; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 16px; scroll-margin-top: 90px; }
+.studio-v3 .creation-series-roadmap .series-episode-detail > header { flex-wrap: wrap; align-items: start; gap: 10px 16px; color: var(--action); font-size: 13px; font-weight: 550; }
+.studio-v3 .creation-series-roadmap .series-episode-detail > header > span { min-width: 0; flex: 1 1 180px; line-height: 1.8; overflow-wrap: anywhere; }
+.studio-v3 .creation-series-roadmap .series-episode-detail > header strong { padding: 4px 9px; color: var(--muted); background: var(--paper-soft); border-color: var(--line); border-radius: 6px; font-weight: 500; }
+.studio-v3 .creation-series-roadmap .series-episode-detail > h3 { margin-top: 20px; font-size: clamp(24px, 2.2vw, 30px); line-height: 1.6; overflow-wrap: anywhere; }
+.studio-v3 .creation-series-roadmap .series-viewer-promise { margin-block: 12px 0; color: var(--muted); font-size: 16px; line-height: 1.9; }
+.studio-v3 .creation-series-roadmap .series-continuity-grid { gap: 0; margin-top: 26px; border-top: 1px solid var(--line); }
+.studio-v3 .creation-series-roadmap .series-continuity-grid section { grid-template-columns: 100px minmax(0, 1fr); gap: 16px; padding: 17px 0; background: transparent; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
+.studio-v3 .creation-series-roadmap .series-continuity-grid span { color: var(--muted); font-size: 13px; font-weight: 550; line-height: 1.9; }
+.studio-v3 .creation-series-roadmap .series-continuity-grid p { color: var(--ink); font-size: 15px; line-height: 1.85; overflow-wrap: anywhere; }
+.studio-v3 .creation-series-roadmap .series-agent-route { margin-top: 26px; padding: 0; background: transparent; border: 0; border-radius: 0; }
+.studio-v3 .creation-series-roadmap .series-agent-route strong { font-size: 15px; line-height: 1.7; }
+.studio-v3 .creation-series-roadmap .series-agent-route :is(small, dt, dd, p, li) { font-size: 14px; line-height: 1.85; }
+.studio-v3 .creation-series-roadmap .series-agent-route dl { gap: 12px; margin-block: 18px; }
+.studio-v3 .creation-series-roadmap .series-agent-route dl > div { padding: 10px 12px; background: var(--paper-soft); border: 0; border-radius: 8px; }
+.studio-v3 .creation-series-roadmap .series-agent-route > p { margin-top: 12px; padding-top: 14px; }
+.studio-v3 .creation-series-roadmap .series-agent-route > div:has(> ul) { display: block; }
+.studio-v3 .creation-series-roadmap .series-agent-route ul { padding-left: 22px; }
+.studio-v3 .creation-series-roadmap .series-agent-route li { margin-block: 8px; }
+.studio-v3 .creation-series-roadmap .series-agent-route li label { display: flex; align-items: start; gap: 10px; }
+.studio-v3 .creation-series-roadmap .series-agent-route li input { flex: 0 0 auto; width: 18px; height: 18px; margin-top: 5px; accent-color: var(--action); }
+.studio-v3 .creation-series-roadmap .series-version-history { margin-block: 16px; padding: 14px 0; border-block: 1px solid var(--line); font-size: 14px; }
+.studio-v3 .creation-series-roadmap .series-version-history summary { min-height: 30px; color: var(--ink); cursor: pointer; }
+.studio-v3 .creation-series-roadmap .series-agent-route > .series-revision-input { display: grid; gap: 12px; margin-top: 20px; padding-top: 22px; border-top: 1px solid var(--line); }
+.studio-v3 .creation-series-roadmap .series-revision-input label { color: var(--ink); font-size: 15px; font-weight: 550; }
+.studio-v3 .creation-series-roadmap .series-revision-input textarea { width: 100%; min-height: 140px; padding: 14px; color: var(--ink); background: var(--paper); border: 1px solid var(--control-border); border-radius: 10px; font: inherit; font-size: 16px; line-height: 1.8; resize: vertical; }
+.studio-v3 .creation-series-roadmap .series-revision-input .button { justify-self: start; }
+.studio-v3 .creation-series-roadmap :is(.series-lock-note, .series-progress-note, .series-legacy-recovery) { flex-wrap: wrap; align-items: start; gap: 10px; margin-top: 20px; padding: 15px; }
+.studio-v3 .creation-series-roadmap .series-lock-note > svg { flex: 0 0 auto; margin-top: 4px; }
+.studio-v3 .creation-series-roadmap .series-lock-note a { margin: 0; white-space: normal; }
+.studio-v3 .creation-series-roadmap .series-episode-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line); }
+.studio-v3 .creation-series-roadmap .series-episode-actions .button { width: auto; flex: 1 1 170px; min-height: 48px; padding: 12px 16px; white-space: normal; }
+.studio-v3 .creation-series-roadmap .series-episode-actions .button-primary { flex-grow: 2; }
+.studio-v3 .creation-series-roadmap .series-roadmap-operation { margin-block: 18px; padding: 20px; background: var(--paper-soft); border: 1px solid var(--line); border-radius: 12px; font-size: 14px; line-height: 1.85; overflow-wrap: anywhere; }
+.studio-v3 .creation-series-roadmap .series-recovery-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.studio-v3 .creation-series-roadmap .series-legacy-show-all { max-width: 100%; text-align: left; line-height: 1.8; }
+
+/* 想法入口保留一处主动作，导入和构思提示放在旁边。 */
+.studio-v3 .creation-custom-entry { display: block; min-height: 0; padding: 0; overflow: hidden; background: var(--paper); border: 0; border-radius: 16px; }
+.studio-v3 .custom-entry-cover { display: flex; align-items: center; min-height: 250px; padding: 34px 38px; border-block: 1px solid var(--line-strong); border-radius: 3px; }
+.studio-v3 .custom-entry-cover > img { inset: 22px 4% 22px auto; width: 32%; height: calc(100% - 44px); object-position: center 57%; border: 7px solid #ffffff; transform: rotate(3deg); box-shadow: 0 10px 20px rgb(24 35 52 / 18%); }
+.studio-v3 .custom-entry-cover::before { inset: 24px 4% 24px auto; width: 32%; background: transparent; border: 1px solid var(--line-strong); transform: rotate(-3deg); }
+.studio-v3 .custom-entry-cover > div { max-width: 58%; }
+.studio-v3 .custom-entry-cover h2 { max-width: 16em; margin: 0; color: var(--ink); font-family: var(--font-editorial); font-size: clamp(28px, 2.5vw, 36px); font-weight: 650; line-height: 1.6; letter-spacing: .015em; }
+.studio-v3 .custom-entry-cover > div > p:last-child { max-width: 32em; margin: 16px 0 0; color: var(--muted); font-size: 15px; line-height: 1.9; }
+.studio-v3 .custom-entry-workbench { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, .8fr); gap: 38px; padding: 34px 38px; }
+.studio-v3 .custom-entry-start > .eyebrow { margin: 0 0 12px; color: var(--action); font-size: 13px; }
+.studio-v3 .custom-entry-start h3 { margin: 0; color: var(--ink); font-size: 23px; font-weight: 600; line-height: 1.6; }
+.studio-v3 .custom-entry-start > p:not(.eyebrow) { max-width: 34em; margin-block: 14px 24px; color: var(--muted); font-size: 15px; line-height: 1.9; }
+.studio-v3 .custom-entry-start > .button { justify-content: space-between; gap: 16px; min-height: 48px; padding: 12px 20px; }
+.studio-v3 .custom-entry-start > .custom-entry-boundary { margin-block: 16px 0; font-size: 13px; line-height: 1.9; }
+.studio-v3 .custom-entry-notes { min-width: 0; padding-left: 30px; border-left: 1px solid var(--line); }
+.studio-v3 .custom-entry-notes h3 { margin: 0 0 18px; color: var(--ink); font-size: 15px; font-weight: 600; }
+.studio-v3 .custom-entry-notes ul { display: grid; gap: 15px; margin: 0; padding: 0; list-style: none; }
+.studio-v3 .custom-entry-notes li { display: grid; gap: 4px; color: var(--muted); font-size: 14px; line-height: 1.8; }
+.studio-v3 .custom-entry-notes li span { color: var(--ink); font-size: 13px; font-weight: 550; }
+.studio-v3 .creation-custom-entry .custom-entry-import { margin-top: 24px; padding-top: 8px; border-top: 1px solid var(--line); }
+.studio-v3 .creation-custom-entry .custom-entry-import > summary { min-height: 44px; color: var(--ink); font-size: 14px; }
+.studio-v3 .creation-custom-entry .custom-entry-import p { font-size: 14px; line-height: 1.85; }
+
+/* 设置按任务分区；分区始终挂载，切换目录不会重建尚未保存的草稿。 */
+.studio-v3 .creation-resources-page .creation-settings-hero { display: grid; margin-bottom: 28px; }
+.studio-v3 .creation-settings-hero .creation-page-hero-image { object-position: 75% 48%; }
+.studio-v3 .creation-settings-hero::before { background: transparent; }
+.studio-v3 .creation-resources-page > .configuration-index { gap: 0; padding: 4px 0; border: 0; border-radius: 0; background: transparent; }
+.studio-v3 .creation-resources-page .configuration-nav-group { display: grid; gap: 3px; padding-block: 14px; }
+.studio-v3 .creation-resources-page .configuration-nav-group + .configuration-nav-group { border-top: 1px solid var(--line); }
+.studio-v3 .creation-resources-page .configuration-nav-group > p { margin: 0 0 8px; padding-inline: 14px; color: var(--muted); font-size: 12px; font-weight: 500; line-height: 1.7; }
+.studio-v3 .creation-resources-page .configuration-index a { display: flex; justify-content: start; gap: 10px; min-height: 46px; padding: 11px 14px; color: var(--muted); border: 0; border-radius: 8px; font-size: 14px; font-weight: 500; white-space: normal; text-decoration: none; }
+.studio-v3 .creation-resources-page .configuration-index a > svg { flex-shrink: 0; }
+.studio-v3 .creation-resources-page .configuration-index a[aria-current="page"] { color: var(--action); background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--action); }
+.studio-v3 .creation-resources-page .configuration-index a:hover { color: var(--ink); background: var(--paper); }
+.studio-v3 .creation-resources-page .configuration-index a:focus-visible { outline: 2px solid var(--focus, var(--action)); outline-offset: 2px; }
+.studio-v3 .creation-resources-page .configuration-unsaved-dot { flex: 0 0 auto; width: 6px; height: 6px; margin-left: auto; background: var(--amber); border-radius: 50%; }
+.studio-v3 .creation-resources-page .resource-heading { display: block; padding: 4px 0 20px; margin-bottom: 20px; border-bottom: 1px solid var(--line); }
+.studio-v3 .creation-resources-page .resource-heading .eyebrow { display: block; margin: 0 0 9px; color: var(--action); font-size: 12px; font-weight: 500; letter-spacing: .05em; }
+.studio-v3 .creation-resources-page .resource-heading h2 { margin: 0; color: var(--ink); font-family: var(--font-sans); font-size: 25px; line-height: 1.6; font-weight: 600; }
+.studio-v3 .creation-resources-page .resource-heading > span { display: block; max-width: 64em; margin-top: 10px; color: var(--muted); font-size: 14px; line-height: 1.85; text-align: left; }
+.studio-v3 .creation-resources-page > [data-resource-section][data-active="true"] { animation: none; }
+.studio-v3 .creation-resources-page .configuration-intro-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 18px; margin-bottom: 14px; }
+.studio-v3 .creation-resources-page .configuration-intro-heading h3 { margin: 0; color: var(--ink); font-size: 16px; font-weight: 550; }
+.studio-v3 .creation-resources-page .configuration-intro-heading p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.8; }
+.studio-v3 .creation-resources-page .resource-overview-disclosure { margin: -6px 0 20px; padding: 0 18px; background: var(--paper); border: 1px solid var(--line); border-radius: 10px; }
+.studio-v3 .creation-resources-page .resource-overview-disclosure .resource-masthead { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 8px 0 0; padding: 0; color: var(--ink); background: transparent; border: 0; }
+.studio-v3 .creation-resources-page .resource-masthead > div { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 5px; padding: 8px 0; color: var(--ink); background: transparent; border: 0; }
+.studio-v3 .creation-resources-page .resource-masthead > div > span { color: var(--muted); font-size: 13px; }
+.studio-v3 .creation-resources-page .resource-masthead > div > strong { color: var(--ink); font-size: 19px; font-weight: 550; }
+.studio-v3 .creation-resources-page .resource-masthead .resource-budget > svg { display: none; }
+.studio-v3 .creation-resources-page :is(.configuration-fields, .topic-strategy-fields) { align-items: start; }
+.studio-v3 .creation-resources-page .configuration-save-row { flex-wrap: wrap; gap: 14px 20px; }
+.studio-v3 .creation-resources-page .configuration-review-mode { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--ink); background: var(--paper-soft); border-color: var(--line); }
+.studio-v3 .creation-resources-page .configuration-review-mode small { color: var(--muted); }
+.studio-v3 .creation-resources-page .configuration-save-row > .button { min-height: 46px; white-space: normal; }
+.studio-v3 .creation-resources-page .topic-rubric { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 26px; padding: 0 0 24px; background: transparent; border: 0; }
+.studio-v3 .creation-resources-page .topic-rubric article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px 12px; padding: 17px 0; background: transparent; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; }
+.studio-v3 .creation-resources-page .topic-rubric article > span { grid-column: 2; grid-row: 1; align-self: start; color: var(--muted); background: var(--paper); font-size: 12px; }
+.studio-v3 .creation-resources-page .topic-rubric article > strong { grid-column: 1; grid-row: 1; color: var(--ink); font-size: 15px; font-weight: 550; }
+.studio-v3 .creation-resources-page .topic-rubric article > small { grid-column: 1 / -1; color: var(--muted); font-size: 14px; line-height: 1.8; }
+.studio-v3 .creation-resources-page .topic-instruction-editor { padding: 24px; background: var(--paper); border: 1px solid var(--line); border-radius: 16px; }
+.studio-v3 .creation-resources-page .topic-strategy-fields { gap: 24px; }
+.studio-v3 .creation-resources-page :is(.role-configuration-grid, .model-default-cards) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.studio-v3 .creation-resources-page .role-configuration > header { align-items: start; flex-wrap: wrap; gap: 8px; }
+.studio-v3 .creation-resources-page .role-mode { max-width: 100%; white-space: normal; }
+.studio-v3 .creation-resources-page .role-configuration :is(.role-runtime-summary, .role-fallback-note) { overflow-wrap: anywhere; }
+.studio-v3 .creation-resources-page .resource-note { font-size: 14px; line-height: 1.9; }
+
+/* 创作表单共用编辑台层次：固定标题、可滚动稿面和清楚的保存区。 */
+.studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) { width: min(800px, 100%); max-height: calc(100dvh - 32px); overflow-y: auto; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 12px; }
+.studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) .dialog-header { position: sticky; z-index: 2; top: 0; padding: 22px 28px; background: var(--editorial-surface); border-top: 3px solid var(--action); }
+.studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) .dialog-header h2 { color: var(--ink); font-family: var(--font-editorial); font-size: 27px; font-weight: 650; line-height: 1.5; }
+.studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) .dialog-header .eyebrow { margin: 0 0 6px; color: var(--editorial-ink); font-size: 12px; letter-spacing: .06em; }
+.studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) .run-form { padding: 24px 28px; gap: 22px; }
+.studio-v3 :is(.series-form, .series-episode-form) { display: grid; grid-template-columns: minmax(0, 1fr); }
+.studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) :is(.field > span, .field > label) { color: var(--ink); font-size: 14px; font-weight: 600; }
+.studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) .field { gap: 8px; }
+.studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) .field :is(input, select, textarea) { min-width: 0; min-height: 46px; padding: 11px 13px; border: 1px solid var(--control-border); border-radius: var(--field-radius); box-shadow: var(--field-shadow); font: 16px/1.75 var(--font-body); }
+.studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) .field textarea { min-height: 120px; resize: vertical; }
+.studio-v3 .opportunity-dialog .field.json-field textarea { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) :is(.form-intro, .field small) { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.85; }
+.studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) .dialog-actions { position: sticky; bottom: 0; z-index: 1; margin: 8px -28px -24px; padding: 16px 28px; background: var(--paper-soft); border-top: 1px solid var(--line); }
+.studio-v3 .opportunity-form .form-section { gap: 20px; }
+.studio-v3 .opportunity-form .form-section-heading { align-items: start; flex-direction: column; gap: 5px; margin-bottom: 2px; }
+.studio-v3 .opportunity-form .form-section-heading h3 { font-size: 17px; }
+.studio-v3 .opportunity-form .form-section-heading span { font-size: 13px; line-height: 1.8; }
+.studio-v3 .opportunity-dialog .dialog-mode-tabs { gap: 20px; padding: 10px 28px 0; }
+.studio-v3 .opportunity-dialog .dialog-mode-tabs button { min-height: 44px; padding-inline: 2px; font-size: 14px; font-weight: 550; }
+.studio-v3 .opportunity-dialog .dialog-mode-tabs button[aria-selected="true"] { color: var(--action); border-color: var(--action); }
+.studio-v3 :is(.opportunity-advanced, .series-advanced) { border: 1px solid var(--line); border-radius: 8px; background: var(--paper-soft); }
+.studio-v3 :is(.opportunity-advanced, .series-advanced) > summary { min-height: 48px; padding: 12px 16px; color: var(--ink); font-size: 14px; cursor: pointer; }
+.studio-v3 .series-advanced > summary strong { font-size: 14px; }
+.studio-v3 .series-advanced > summary small { font-size: 12px; line-height: 1.7; }
+.studio-v3 :is(.opportunity-advanced-body, .series-advanced-grid) { padding: 8px 16px 20px; }
+.studio-v3 .creation-resources-page :is(.field, .topic-instruction-editor) :is(input:not([type="checkbox"]):not([type="radio"]), textarea, select) { font-size: 16px; line-height: 1.8; border-radius: var(--field-radius); box-shadow: var(--field-shadow); }
+.studio-v3 .creation-resources-page .configuration-save-row { padding-top: 18px; border-top: 1px solid var(--line); }
+@media (max-width: 700px) {
+  .studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) { max-height: calc(100dvh - 16px); border-radius: 10px; }
+  .studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) .dialog-header { padding: 16px 18px; }
+  .studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) .dialog-header h2 { font-size: 23px; }
+  .studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) .run-form { padding: 20px 18px; gap: 18px; }
+  .studio-v3 :is(.opportunity-dialog, .series-dialog, .series-episode-dialog) .dialog-actions { margin-inline: -18px; margin-bottom: -20px; padding: 14px 18px; }
+  .studio-v3 .opportunity-dialog .dialog-mode-tabs { padding-inline: 18px; }
+}
+
+@media (min-width: 981px) {
+  .studio-v3 .creation-resources-page { grid-template-columns: 176px minmax(0, 1fr); column-gap: 34px; }
+  .studio-v3 .creation-resources-page > .configuration-index { top: 24px; }
+}
+@media (max-width: 1100px) {
+  .studio-v3 .creation-series-roadmap .series-roadmap-body { grid-template-columns: minmax(220px, .65fr) minmax(0, 1.35fr); gap: 18px; }
+  .studio-v3 .creation-series-roadmap .series-episode-detail { padding: 24px; }
+  .studio-v3 .creation-series-roadmap .series-continuity-grid section { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .studio-v3 .creation-resources-page :is(.role-configuration-grid, .model-default-cards) { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 980px) {
+  .studio-v3 .creation-resources-page .creation-settings-hero { margin-bottom: 24px; }
+  .studio-v3 .creation-resources-page > .configuration-index-select { padding: 16px 18px; margin-bottom: 26px; background: var(--paper); border: 1px solid var(--line); border-radius: 12px; }
+  .studio-v3 .creation-resources-page .configuration-index-select > span { margin-bottom: 9px; font-size: 13px; }
+  .studio-v3 .creation-resources-page .configuration-index-select select { color: var(--ink); background: var(--paper); border-color: var(--control-border); border-radius: 8px; }
+  .studio-v3 .creation-cases-page .case-workspace { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+  .studio-v3 .creation-cases-page .case-list { max-height: 480px; overflow-y: auto; overscroll-behavior-y: contain; }
+  .studio-v3 .creation-cases-page .case-list-heading { position: sticky; z-index: 1; top: 0; padding: 14px 4px; background: var(--canvas); }
+  .studio-v3 .creation-cases-page .case-detail { scroll-margin-top: 80px; }
+}
+@media (max-width: 800px) {
+  .studio-v3 .creation-series-roadmap .series-roadmap-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .studio-v3 .creation-series-roadmap .series-episode-list { max-height: 390px; overflow-y: auto; }
+  .studio-v3 .creation-series-roadmap .series-episode-list button { grid-template-columns: 32px minmax(0, 1fr) auto; }
+  .studio-v3 .creation-series-roadmap .series-episode-status { grid-column: 3; }
+  .studio-v3 .custom-entry-workbench { grid-template-columns: minmax(0, 1fr); gap: 30px; }
+  .studio-v3 .custom-entry-notes { padding: 26px 0 0; border-left: 0; border-top: 1px solid var(--line); }
+  .studio-v3 .custom-entry-notes ul { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+}
+@media (max-width: 600px) {
+  .studio-v3 .opportunity-form .form-section-heading { flex-direction: column; align-items: start; gap: 8px; }
+  .studio-v3 .creation-cases-page .case-detail,
+  .studio-v3 .creation-series-roadmap .series-episode-detail { scroll-margin-top: 112px; }
+  .studio-v3 .series-controls { flex-wrap: wrap; }
+  .studio-v3 .series-controls label { flex-basis: 100%; max-width: none; }
+  .studio-v3 .creation-page-hero .creation-page-hero-image { width: 100%; height: 72px; top: 0; clip-path: none; object-position: center; }
+  .studio-v3 .creation-page-hero .creation-page-hero-copy { max-width: none; }
+  .studio-v3 .creation-page-hero,
+  .studio-v3 .creation-resources-page .creation-settings-hero { display: grid; grid-template-columns: minmax(0, 1fr); height: auto; min-height: 0; gap: 18px; padding: 98px 22px 24px; border-radius: 3px; }
+  .studio-v3 .creation-page-hero .creation-page-hero-copy h1 { font-size: 28px; line-height: 1.5; }
+  .studio-v3 .creation-page-hero .creation-page-hero-copy > p:last-child { margin-top: 12px; font-size: 14px; line-height: 1.9; }
+  .studio-v3 .creation-page-hero .eyebrow { margin-bottom: 10px; font-size: 12px; }
+  .studio-v3 .creation-cases-page .case-source-ledger { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .studio-v3 .creation-cases-page .case-source-item { flex-basis: 100%; }
+  .studio-v3 .creation-cases-page .case-selection-banner { flex-wrap: wrap; padding: 18px; }
+  .studio-v3 .creation-cases-page .case-search { flex-basis: 100%; }
+  .studio-v3 .creation-cases-page .case-views { width: 100%; }
+  .studio-v3 .creation-cases-page .case-views button { flex: 1; padding-inline: 7px; }
+  .studio-v3 .creation-cases-page .case-facet { flex: 1 1 180px; }
+  .studio-v3 .creation-cases-page .case-facet select { max-width: none; }
+  .studio-v3 .creation-cases-page .case-detail { padding: 22px 18px; }
+  .studio-v3 .creation-cases-page .case-detail h2 { font-size: 24px; }
+  .studio-v3 .creation-cases-page .case-transcript { max-height: 560px; padding-right: 5px; }
+  .studio-v3 .creation-cases-page .case-transcript p { font-size: 18px; }
+  .studio-v3 .creation-cases-page .case-create > .button { width: 100%; }
+  .studio-v3 .creation-series-roadmap .series-season-cover { min-height: 210px; padding: 22px; }
+  .studio-v3 .series-season-cover > img { inset: 18px 18px auto auto; width: 90px; height: 66px; border-width: 4px; }
+  .studio-v3 .series-season-cover::before { inset: 18px 18px auto auto; width: 90px; height: 66px; }
+  .studio-v3 .series-season-cover > div { max-width: none; }
+  .studio-v3 .series-season-cover .eyebrow { max-width: calc(100% - 108px); min-height: 48px; }
+  .studio-v3 .series-season-cover h2 { font-size: 30px; }
+  .studio-v3 .creation-series-roadmap .series-season-summary > summary > span { display: block; margin: 5px 0 0; font-size: 13px; }
+  .studio-v3 .creation-series-roadmap .series-season-summary dl { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .studio-v3 .creation-series-roadmap .series-episode-list button { grid-template-columns: 30px minmax(0, 1fr); padding-inline: 10px; }
+  .studio-v3 .creation-series-roadmap .series-episode-status { grid-column: 2; }
+  .studio-v3 .creation-series-roadmap .series-episode-detail { padding: 22px 18px; }
+  .studio-v3 .creation-series-roadmap .series-episode-detail > h3 { font-size: 25px; }
+  .studio-v3 .creation-series-roadmap .series-agent-route dl { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .studio-v3 .creation-series-roadmap .series-agent-route dl > div { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 12px; }
+  .studio-v3 .creation-series-roadmap .series-agent-route dd { margin: 0; }
+  .studio-v3 .creation-series-roadmap .series-roadmap-operation { padding: 16px; }
+  .studio-v3 .custom-entry-cover { min-height: 240px; padding: 28px 22px; }
+  .studio-v3 .custom-entry-cover::before { display: none; }
+  .studio-v3 .custom-entry-cover > img { inset: 20px 18px auto auto; width: 82px; height: 62px; border-width: 4px; }
+  .studio-v3 .custom-entry-cover > div { max-width: none; }
+  .studio-v3 .custom-entry-cover .eyebrow { max-width: calc(100% - 100px); min-height: 58px; }
+  .studio-v3 .custom-entry-cover h2 { font-size: 27px; }
+  .studio-v3 .custom-entry-cover > div > p:last-child { font-size: 14px; }
+  .studio-v3 .custom-entry-workbench { padding: 26px 20px; }
+  .studio-v3 .custom-entry-start h3 { font-size: 22px; }
+  .studio-v3 .custom-entry-start > .button { width: 100%; }
+  .studio-v3 .custom-entry-notes ul { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .studio-v3 .creation-resources-page .resource-heading h2 { font-size: 23px; }
+  .studio-v3 .creation-resources-page .configuration-defaults :is(.configuration-intro, .configuration-fields) { padding: 20px 18px; }
+  .studio-v3 .creation-resources-page .configuration-defaults .configuration-sheet > :is(.configuration-save-row, .configuration-review-mode) { margin-inline: 18px; }
+  .studio-v3 .creation-resources-page .configuration-save-row > .button { width: 100%; }
+  .studio-v3 .creation-resources-page .resource-overview-disclosure .resource-masthead { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .studio-v3 .creation-resources-page .topic-rubric { grid-template-columns: minmax(0, 1fr); }
+  .studio-v3 .creation-resources-page .topic-instruction-editor { padding: 20px 18px; }
+  .studio-v3 .creation-resources-page .role-configuration { padding: 20px 18px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .studio-v3 .creation-series-roadmap .series-episode-list button,
+  .studio-v3 .creation-cases-page .case-card { transition: none; }
+}

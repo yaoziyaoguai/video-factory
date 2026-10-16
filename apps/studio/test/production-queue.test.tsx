@@ -20,6 +20,23 @@ function expectTodoCount(value: string): void {
 }
 
 describe("ProductionQueue rejected follow-up", () => {
+  it("clears an empty combined filter without treating the archive as empty", async () => {
+    const user = userEvent.setup();
+    render(<MemoryRouter><ProductionQueue runs={[rejectedRun, { ...rejectedRun, id: "archived", title: "归档作品", archivedAt: "2026-09-02T00:00:00Z" }]} loading={false} onCreate={() => undefined} /></MemoryRouter>);
+    await user.click(screen.getByRole("button", { name: "筛选：制作中" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索制作记录" }), "不存在的标题");
+    await user.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(screen.getByRole("textbox", { name: "搜索制作记录" })).toHaveValue("");
+    expect(screen.getByRole("button", { name: "筛选：重点" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText(rejectedRun.title)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "归档 1" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索制作记录" }), "不存在的标题");
+    expect(screen.queryByText("归档还是空的")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(screen.getByText("归档作品")).toBeVisible();
+    expect(screen.getByRole("button", { name: "归档 1" })).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("keeps a rejected run in the creator to-do with the existing rework path as its CTA", async () => {
     const user = userEvent.setup();
     const newerCompleted = Array.from({ length: 6 }, (_, index) => ({

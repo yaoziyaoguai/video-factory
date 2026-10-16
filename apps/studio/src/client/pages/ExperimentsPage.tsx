@@ -1,4 +1,4 @@
-import { AlertCircle, BarChart3, CircleCheck, RefreshCw, RotateCcw, ScanSearch, TriangleAlert } from "lucide-react";
+import { AlertCircle, ArrowRight, BarChart3, CircleCheck, RefreshCw, RotateCcw, ScanSearch, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import type { StudioCostDashboard as StudioCostDashboardDto, StudioRunSummary, StudioTemplateExperimentScorecard } from "../../shared/api.js";
@@ -74,22 +74,47 @@ export function ExperimentsPage() {
   }, [learningRuns]);
 
   return (
-    <main className="page experiments-page">
-      <header className="page-header"><div><p className="eyebrow">内容学习</p><h1>制作复盘</h1><p className="page-summary">先看作品的终审结果、返工原因与制作阻塞，再决定下一条怎么改。平台数据接入后，再用完播、互动和涨粉判断传播表现。</p></div></header>
+    <main className="page experiments-page collections-page collections-experiments">
+      <header className="page-header collections-hero">
+        <div className="collections-hero-copy">
+          <p className="eyebrow">创作复盘 · 从作品中学习</p>
+          <h1>制作复盘</h1>
+          <p className="page-summary">先看作品的终审结果、返工原因与制作阻塞，再决定下一条怎么改。平台数据接入后，再用完播、互动和涨粉判断传播表现。</p>
+          <div className="collections-hero-actions"><Link className="collections-text-link" to="/projects">回到制作记录<ArrowRight aria-hidden="true" size={16} /></Link></div>
+        </div>
+        <figure className="collections-hero-photo" aria-hidden="true">
+          <img src="/media/collections/film-review.webp" alt="" width="1200" height="800" />
+          <figcaption>逐帧观察</figcaption>
+        </figure>
+      </header>
       {loading ? <div className="region-loading">正在读取制作记录...</div> : error ? (
         <div className="page-error" role="alert"><AlertCircle aria-hidden="true" size={18} /><span><strong>制作统计未知</strong>{error}</span><button className="icon-button" type="button" onClick={() => void load()} title="重试"><RefreshCw aria-hidden="true" size={17} /></button></div>
-      ) : <><section className="metric-strip experiment-metric-strip" aria-label="制作统计" data-tour="experiment-metrics">
-        <article><CircleCheck aria-hidden="true" size={17} /><span>终审通过率</span><strong>{stats.approvalRate === undefined ? "待样本" : `${stats.approvalRate}%`}</strong></article>
-        <article><ScanSearch aria-hidden="true" size={17} /><span>等你审片</span><strong>{stats.needsReview}</strong></article>
-        <article><RotateCcw aria-hidden="true" size={17} /><span>已打回返工</span><strong>{stats.rejected}</strong></article>
-        <article><TriangleAlert aria-hidden="true" size={17} /><span>制作中断</span><strong>{stats.interrupted}</strong></article>
+      ) : <>
+      <div className="collections-section-heading"><div><p className="eyebrow">制作结果</p><h2>从终审开始看</h2></div><span>不含测试制作</span></div>
+      <section className="metric-strip experiment-metric-strip" aria-label="制作统计" data-tour="experiment-metrics">
+        <article><CircleCheck aria-hidden="true" size={17} /><span>终审通过率</span><strong>{stats.approvalRate === undefined ? "待样本" : `${stats.approvalRate}%`}</strong><small>{stats.reviewed} 条已终审作品</small></article>
+        <article><ScanSearch aria-hidden="true" size={17} /><span>等你审片</span><strong>{stats.needsReview}</strong><small>待完成的人工终审</small></article>
+        <article><RotateCcw aria-hidden="true" size={17} /><span>已打回返工</span><strong>{stats.rejected}</strong><small>已有明确终审意见</small></article>
+        <article><TriangleAlert aria-hidden="true" size={17} /><span>制作中断</span><strong>{stats.interrupted}</strong><small>与内容效果分别处理</small></article>
       </section>
+      <div className="collections-review-workspace">
       <section className="learning-focus" aria-labelledby="learning-focus-title">
         <header className="section-heading"><div><p className="eyebrow">下一轮行动</p><h2 id="learning-focus-title">这一轮最该改什么</h2></div><span>来自真实制作记录</span></header>
         <div className="learning-focus-grid">
           <article><strong>{stats.rejected ? `${stats.rejected} 条成片被打回` : stats.reviewed ? `已终审 ${stats.reviewed} 条，全部通过` : "先积累终审样本"}</strong><p>{stats.rejected ? "返工时沿用可用母片，只重做审片明确指出的镜头，并检查建议是否真正进入脚本、导演和画面节点。" : stats.reviewed ? "当前非测试制作的终审记录中没有被打回的作品。可以回看具体作品继续改进；终审通过不代表传播效果已验证。" : "完成终审后，才有依据比较作品通过情况与具体返工原因。"}</p></article>
           <article><strong>{bottleneck ? `${runNodeLabel(bottleneck[0])}出现 ${bottleneck[1]} 次问题` : "当前没有集中故障步骤"}</strong><p>{bottleneck ? "先解决重复出现的制作阻塞，避免把技术失败误当作内容失败。" : "先完成作品并审片，关注开头承诺是否兑现、视觉连续性与观众能否看懂；无样本不推断效果。"}</p></article>
         </div>
+      </section>
+      <section className="recent-learning-runs" aria-labelledby="recent-learning-title">
+        <header className="section-heading"><div><p className="eyebrow">最近结果</p><h2 id="recent-learning-title">从具体作品继续改</h2></div><Link to="/projects">查看全部</Link></header>
+        <div>{recentLearningRuns.length ? recentLearningRuns.map((run) => <Link to={`/projects/${run.id}`} key={run.id}><span><strong>{run.title}</strong><small>{runNodeLabel(run.currentNodeId)} · {new Date(run.finishedAt ?? run.startedAt).toLocaleDateString("zh-CN")}</small></span><b className={`collections-outcome outcome-${run.finalReviewOutcome ?? run.status}`}>{runOutcomeLabel(run)}</b><ArrowRight aria-hidden="true" size={16} /></Link>) : <p>还没有可以复盘的制作结果。</p>}</div>
+      </section>
+      </div>
+      <section className="analytics-empty analytics-empty-compact" aria-labelledby="analytics-empty-title" data-tour="experiment-outcomes">
+        <span><BarChart3 aria-hidden="true" size={24} /></span>
+        <p className="eyebrow">平台结果连接器</p>
+        <h2 id="analytics-empty-title">还不能判断是否成为爆款</h2>
+        <p>播放、完播、互动和涨粉尚未接入，所以这里不会编造“爆款分”。当前根据终审和具体返工意见改进内容，制作故障另行处理；终审通过不等于已经成为爆款。</p>
       </section>
       {historicalTemplates.length > 0 || templateError ? <details className="template-learning" aria-labelledby="template-learning-title">
         <summary id="template-learning-title">历史模板记录（暂停用于新制作）</summary>
@@ -106,16 +131,6 @@ export function ExperimentsPage() {
           </article>)}
         </div>}
       </details> : null}
-      <section className="recent-learning-runs" aria-labelledby="recent-learning-title">
-        <header className="section-heading"><div><p className="eyebrow">最近结果</p><h2 id="recent-learning-title">从具体作品继续改</h2></div><Link to="/projects">查看全部</Link></header>
-        <div>{recentLearningRuns.length ? recentLearningRuns.map((run) => <Link to={`/projects/${run.id}`} key={run.id}><span><strong>{run.title}</strong><small>{runNodeLabel(run.currentNodeId)} · {new Date(run.finishedAt ?? run.startedAt).toLocaleDateString("zh-CN")}</small></span><b>{runOutcomeLabel(run)}</b></Link>) : <p>还没有可以复盘的制作结果。</p>}</div>
-      </section>
-      <section className="analytics-empty analytics-empty-compact" aria-labelledby="analytics-empty-title" data-tour="experiment-outcomes">
-        <span><BarChart3 aria-hidden="true" size={24} /></span>
-        <p className="eyebrow">平台结果连接器</p>
-        <h2 id="analytics-empty-title">还不能判断是否成为爆款</h2>
-        <p>播放、完播、互动和涨粉尚未接入，所以这里不会编造“爆款分”。当前根据终审和具体返工意见改进内容，制作故障另行处理；终审通过不等于已经成为爆款。</p>
-      </section>
       <details className="secondary-cost-details" onToggle={(event) => {
         if (event.currentTarget.open && !costs && !costLoading) void loadCosts();
       }}>

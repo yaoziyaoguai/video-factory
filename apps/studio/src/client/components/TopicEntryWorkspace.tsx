@@ -6,6 +6,7 @@ import {
   Clapperboard,
   Clock3,
   FileInput,
+  Inbox,
   LibraryBig,
   LockKeyhole,
   PenLine,
@@ -86,6 +87,18 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   const [deskView, setDeskView] = useState<TrendDeskView>("all");
   const [selectedId, setSelectedId] = useState(props.initialSelectedId ?? "");
   const [verificationCandidate, setVerificationCandidate] = useState<StudioCandidateInboxItem>();
+  const workspaceRef = useRef<HTMLElement>(null);
+
+  function selectCandidate(id: string) {
+    setSelectedId(id);
+    if (mode === "trend" && window.matchMedia("(max-width: 900px)").matches) {
+      window.requestAnimationFrame(() => {
+        const detail = workspaceRef.current?.querySelector<HTMLElement>(".candidate-detail");
+        detail?.focus({ preventScroll: true });
+        detail?.scrollIntoView({ block: "start", behavior: "auto" });
+      });
+    }
+  }
 
   const modeItems = useMemo(() => (props.inbox?.items ?? []).filter((item) => item.origin === mode), [mode, props.inbox]);
   const seriesItems = mode === "series" && props.selectedSeriesId
@@ -151,15 +164,17 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
   }, [deskView, sourceShortCount]);
 
   return (
-    <section className="topic-entry-workspace" data-tour="topic-inbox" aria-label={mode === "trend" ? "热点选题" : mode === "series" ? "系列选题" : "自定义创作"}>
+    <section ref={workspaceRef} className={`topic-entry-workspace${mode === "trend" ? " topic-trend-workspace" : ""}`} data-tour="topic-inbox" aria-label={mode === "trend" ? "热点选题" : mode === "series" ? "系列选题" : "自定义创作"}>
       {mode === "custom" ? <CustomEntry onManual={props.onManual} onImport={props.onImport} /> : (
         <div className="candidate-inbox">
           <header className="candidate-inbox-heading">
-            {mode === "trend" ? <div>
-              <h2>热点候选收件箱</h2>
-              <p>{ruleBaselineCount > 0 && ruleBaselineCount >= modeItems.length
-                ? "本轮热点由本地规则保底生成，还没有经过选题总编转译；先筛选，再核验证据。"
-                : "热点信号已经过选题总编转译；先筛选，再核验证据。"}</p>
+            {mode === "trend" ? <div className="trend-inbox-intro">
+              <span className="trend-inbox-symbol" aria-hidden="true"><Inbox size={24} strokeWidth={1.5} /></span>
+              <div><h2>热点候选收件箱</h2>
+                <p>{ruleBaselineCount > 0 && ruleBaselineCount >= modeItems.length
+                  ? "本轮热点由本地规则保底生成，还没有经过选题总编转译；先筛选，再核验证据。"
+                  : "热点信号已经过选题总编转译；先筛选，再核验证据。"}</p>
+              </div>
             </div> : null}
             {mode === "trend" ? (
               <div className="trend-refresh-status" aria-label="热点更新状态">
@@ -226,7 +241,9 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
               {...(props.seriesAuditReady === undefined ? {} : { seriesAuditReady: props.seriesAuditReady })}
             />
           ) : (
-            <>
+            <div className="candidate-inbox-body">
+              <div className="candidate-browser">
+              {mode === "trend" ? <header className="candidate-browser-heading"><h3>候选选题 <span>（{visibleItems.length}）</span></h3><small>按评分排列</small></header> : null}
               <details className="candidate-filter-disclosure">
                 <summary>筛选候选</summary>
               <div className="candidate-filters" aria-label="候选筛选">
@@ -254,25 +271,22 @@ export function TopicEntryWorkspace(props: TopicEntryWorkspaceProps) {
                 {platform !== "all" ? <span>来源平台：{platformLabel(platform)}</span> : null}
                 <button className="candidate-clear-filters" type="button" onClick={() => { setCategory("all"); setPlatform("all"); setDeskView("all"); }}>清除筛选</button>
               </div> : null}
-              {visibleItems.length > 0 ? (
-                <div className="candidate-inbox-body">
-                  <div className="candidate-list" aria-label="候选提案列表">
-                    {visibleItems.map((item, index) => (
-                      <button key={item.id} type="button" className={`candidate-row${selected?.id === item.id ? " is-active" : ""}`} aria-label={`查看${item.title}`} onClick={() => setSelectedId(item.id)}>
-                        <span className="candidate-number">{String(index + 1).padStart(2, "0")}</span>
-                        <span className="candidate-row-copy"><small>{TOPIC_CATEGORY_LABELS[item.category]} · {platformLabel(item.platform)} · {candidateStatusLabel(item)}</small><strong>{item.title}</strong><span>{item.hook}</span></span>
-                        <span className="candidate-score">{item.verification.status === "blocked"
-                          ? <><small>内容潜力</small>{Math.round(item.score.final)}</>
-                          : item.editorialDecision.pendingEditorReview
-                            ? <small>待总编评估</small>
-                            : <><small>总编评分</small>{Math.round(item.editorialDecision.score)}</>}</span>
-                      </button>
-                    ))}
-                  </div>
-                  {selected ? <CandidateDetail item={selected} adopting={props.adoptingId === selected.id} disabled={props.adoptingId !== undefined} onAdopt={() => adopt(selected)} {...(props.onSupplementSources ? { onSupplementSources: props.onSupplementSources } : {})} {...(props.onReviseTrendCandidate && selected.origin === "trend" ? { onRevise: props.onReviseTrendCandidate } : {})} /> : null}
-                </div>
-              ) : <div className="filtered-empty"><BookOpenText aria-hidden="true" size={22} /><span>当前筛选下没有候选。</span></div>}
-            </>
+              {visibleItems.length > 0 ? <div className="candidate-list" aria-label="候选提案列表">
+                {visibleItems.map((item, index) => (
+                  <button key={item.id} type="button" className={`candidate-row${selected?.id === item.id ? " is-active" : ""}`} aria-label={`查看${item.title}`} aria-pressed={selected?.id === item.id} aria-controls="candidate-detail" onClick={() => selectCandidate(item.id)}>
+                    <span className="candidate-number">{String(index + 1).padStart(2, "0")}</span>
+                    <span className="candidate-row-copy"><strong>{item.title}</strong><span>{item.hook}</span><small>{TOPIC_CATEGORY_LABELS[item.category]} · {platformLabel(item.platform)} · {candidateStatusLabel(item)}</small></span>
+                    <span className="candidate-score">{item.verification.status === "blocked"
+                      ? <><small>内容潜力</small>{Math.round(item.score.final)}</>
+                      : item.editorialDecision.pendingEditorReview
+                        ? <small>待总编评估</small>
+                        : <><small>总编评分</small>{Math.round(item.editorialDecision.score)}</>}</span>
+                  </button>
+                ))}
+              </div> : <div className="filtered-empty"><BookOpenText aria-hidden="true" size={22} /><span>当前筛选下没有候选。</span></div>}
+              </div>
+              {selected ? <CandidateDetail item={selected} adopting={props.adoptingId === selected.id} disabled={props.adoptingId !== undefined} onAdopt={() => adopt(selected)} {...(props.onSupplementSources ? { onSupplementSources: props.onSupplementSources } : {})} {...(props.onReviseTrendCandidate && selected.origin === "trend" ? { onRevise: props.onReviseTrendCandidate } : {})} /> : null}
+            </div>
           )}
         </div>
       )}
@@ -369,7 +383,10 @@ function SeriesRoadmap({
   function selectEpisode(episodeId: string) {
     onSelect(episodeId);
     if (typeof window === "undefined" || !window.matchMedia?.("(max-width: 700px)").matches) return;
-    window.requestAnimationFrame(() => detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    window.requestAnimationFrame(() => {
+      detailRef.current?.focus({ preventScroll: true });
+      detailRef.current?.scrollIntoView({ behavior: "auto", block: "start" });
+    });
   }
 
   async function linkLegacyRun() {
@@ -387,10 +404,18 @@ function SeriesRoadmap({
   }
 
   return (
-    <div className="series-roadmap">
+    <div className="series-roadmap creation-series-roadmap">
+      <header className="series-season-cover">
+        <img src="/media/creation/writing-desk.webp" alt="" width={1600} height={900} />
+        <div>
+          <p className="eyebrow">第 {series.currentSeason.number} 季 · {seasonPlanLabel(series)}</p>
+          <h2>{series.currentSeason.title}</h2>
+          <p>{series.currentSeason.arc.trim() !== series.premise.trim() ? series.currentSeason.arc : `写给${series.audience}的连续创作`}</p>
+          <span>下一集 {series.nextEpisodeNumber} · 按集确认，接续创作</span>
+        </div>
+      </header>
       <details className="series-season-summary" role="region" aria-label="本季策划摘要">
-        <summary>第 {series.currentSeason.number} 季 · {series.currentSeason.title} · 下一集 {series.nextEpisodeNumber}<span>查看栏目承诺与规则</span></summary>
-          <div><span>第 {series.currentSeason.number} 季 · {seasonPlanLabel(series)}</span><strong>{series.currentSeason.title}</strong>{series.currentSeason.arc.trim() !== series.premise.trim() ? <p>{series.currentSeason.arc}</p> : null}</div>
+        <summary>栏目承诺与规则<span>查看本季策划摘要</span></summary>
         <dl>
           <div><dt>栏目承诺</dt><dd>{series.premise}</dd></div>
           <div><dt>栏目背景</dt><dd><details>
@@ -437,13 +462,15 @@ function SeriesRoadmap({
       ) : null}
 
       <div className="series-roadmap-body">
-        <ol className="series-episode-list" aria-label="本季单集路线图">
+        <nav className="series-episode-directory" aria-label="单集目录">
+          <header><h3>本季路线图</h3><span>{episodes.length} 集</span></header>
+          <ol className="series-episode-list" aria-label="本季单集路线图">
           {episodes.map((episode) => {
             const candidate = candidates.find((item) => item.id === episode.id);
             const locked = candidate?.seriesSequence?.status === "blocked";
             return (
               <li key={episode.id}>
-                <button type="button" className={`${selectedEpisode?.id === episode.id ? "is-active" : ""}${locked ? " is-locked" : ""}`} onClick={() => selectEpisode(episode.id)}>
+                <button type="button" aria-current={selectedEpisode?.id === episode.id ? "true" : undefined} className={`${selectedEpisode?.id === episode.id ? "is-active" : ""}${locked ? " is-locked" : ""}`} onClick={() => selectEpisode(episode.id)}>
                   <span className="series-episode-index">E{String(episode.episodeNumber).padStart(2, "0")}</span>
                   <span className="series-episode-copy"><small>{episode.pillar}</small><strong>{seriesEpisodeTitle(episode)}</strong>{episode.viewerPromise.trim() !== series.premise.trim() && episode.id !== selectedEpisode?.id ? <span>{episode.viewerPromise}</span> : null}</span>
                   <span className={`series-episode-status is-${episode.status}`}>{locked ? <LockKeyhole aria-hidden="true" size={13} /> : episode.status === "ready" || episode.status === "published" ? <CheckCircle2 aria-hidden="true" size={13} /> : <Clapperboard aria-hidden="true" size={13} />}{seriesEpisodeStatusLabel(episode, locked)}</span>
@@ -451,14 +478,15 @@ function SeriesRoadmap({
               </li>
             );
           })}
-        </ol>
+          </ol>
+        </nav>
 
         {selectedEpisode ? (
-          <article ref={detailRef} className="series-episode-detail">
+          <article ref={detailRef} className="series-episode-detail" aria-label="单集详情" tabIndex={-1}>
             <header><span>第 {selectedEpisode.episodeNumber} 集{selectedEpisode.arc.trim() !== series.currentSeason.arc.trim() && selectedEpisode.arc.trim() !== series.premise.trim() ? ` · ${selectedEpisode.arc}` : ""}</span><strong>{seriesEpisodeStatusLabel(selectedEpisode, Boolean(blockedBy))}</strong></header>
             <h3>{seriesEpisodeTitle(selectedEpisode)}</h3>
             {selectedEpisode.viewerPromise.trim() !== series.premise.trim() ? <p className="series-viewer-promise">{selectedEpisode.viewerPromise}</p> : null}
-            <div className="series-continuity-grid">
+            <div className="series-continuity-grid" aria-label="本集内容与前后承接">
               <section><span>前集定版交接</span><p>{(selectedEpisode.continuity.inheritedFromPrevious ?? []).join("；") || "暂无前集定版交接。"}</p></section>
               <section><span>本集承接要求</span><p>{selectedEpisode.continuity.fromPrevious.join("；") || "没有额外创作约束。"}</p></section>
               <section><span>本集兑现</span><p>{seriesEpisodePayoff(selectedEpisode)}</p></section>
@@ -713,49 +741,31 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
   // CLOUD-06：展示层同链接同标题合并为一组；独立域名计数仍用服务端 verification 原值。
   const evidenceGroups = groupDisplayEvidence(item.evidence);
   return (
-    <article className="candidate-detail" aria-labelledby="candidate-detail-title">
-      <header><span>{item.origin === "series" ? `${item.seriesName} · 第 ${item.episodeNumber} 集` : `${TOPIC_CATEGORY_LABELS[item.category]}观察`}</span><strong aria-label={`${scoreLabel} ${scoreValue} 分`}><small>{scoreLabel}</small>{scoreValue}</strong></header>
+    <article id="candidate-detail" className="candidate-detail" tabIndex={-1} aria-labelledby="candidate-detail-title">
+      <header>
+        <div className="candidate-detail-tags"><span>{item.origin === "series" ? `${item.seriesName} · 第 ${item.episodeNumber} 集` : TOPIC_CATEGORY_LABELS[item.category]}</span><span>{platformLabel(item.platform)}</span><span className={`candidate-verdict-tag${pendingEditor || sourceShort ? " is-pending" : adviceSkip ? " is-caution" : ""}`}>{candidateStatusLabel(item)}</span></div>
+        <strong aria-label={`${scoreLabel} ${scoreValue} 分`}><small>{scoreLabel}</small>{scoreValue}</strong>
+      </header>
       <h3 id="candidate-detail-title">{item.title}</h3>
       <p className="candidate-creation-label">创作建议 · 不代表外部事实或播放量保证</p>
       <blockquote>{item.hook}</blockquote>
-      <p>{item.rationale}</p>
+      <section className="candidate-creative-copy" aria-label="创作思路">
+        <h4>创作思路</h4><p>{item.rationale}</p>
+        {item.audience ? <p className="candidate-audience"><span>面向观众</span>{item.audience}</p> : null}
+        {item.visualProof ? <p className="candidate-visual-proof"><small>画面构思 · 尚未生成</small>{item.visualProof}</p> : null}
+      </section>
       {(item.revisedFrom || item.auditStatus === "not_audited") ? <p className="candidate-revision-flag"><small>修订稿 · 本版未审（不自动审计；可主动审计或核对后采用）</small></p> : null}
-      {onRevise && item.origin === "trend" ? (
-        <div className="candidate-revision">
-          {revising ? (
-            <>
-              <label>
-                <span>修订意见</span>
-                <textarea
-                  aria-label="修订意见"
-                  value={revisionInstruction}
-                  rows={2}
-                  disabled={revisionBusy || disabled}
-                  onChange={(event) => updateRevision({ instruction: event.target.value, error: undefined })}
-                  placeholder="这条候选要怎么改？只产一版未审修订稿，最终以这里的文字为准。"
-                />
-              </label>
-              <button
-                className="button button-primary"
-                type="button"
-                disabled={revisionBusy || disabled || !revisionInstruction.trim()}
-                onClick={() => void sendCandidateRevision()}
-              >发送修订意见</button>
-              {revisionError ? <p role="alert">{revisionError}</p> : null}
-            </>
-          ) : (
-            <button
-              className="button button-secondary"
-              type="button"
-              disabled={disabled || revisionBusy}
-              aria-label={`修订 ${item.title}`}
-              onClick={() => updateRevision({ open: true })}
-            >修订</button>
-          )}
-          {revisionNote ? <p><small>{revisionNote}</small></p> : null}
-        </div>
-      ) : null}
-      {item.visualProof ? <p className="candidate-visual-proof"><small>画面构思 · 尚未生成</small>{item.visualProof}</p> : null}
+      <section className="candidate-evidence" aria-label="来源线索"><h4>来源线索 <span>（{evidenceGroups.length}）</span></h4><EvidenceGroupList groups={evidenceGroups.slice(0, 2)} totalGroups={evidenceGroups.length} idPrefix={item.id} /></section>
+      {item.origin === "trend" && item.articleSources?.length ? <details className="candidate-score-explainer candidate-article-reading" open>
+        <summary>原文阅读与事实依据</summary>
+        <div>{item.articleSources.map((source, index) => <span key={source.sourceId}>{index + 1}. {articleReadStatusLabel(source.readStatus)} · {source.pageTitle || source.finalUrl}{source.readStatus === "failed" ? "。读取服务未能完成，不代表文章没有事实依据。" : null}</span>)}</div>
+        {item.articleFacts?.map((fact, index) => {
+          const origin = factOriginLabel(item, fact);
+          return <p key={`${fact.sourceId}-${index}`}>已读事实：{fact.statement}{origin ? <small>（{origin}）</small> : null}</p>;
+        })}
+        {item.articleUncertainties?.map((uncertainty, index) => <p key={index}>仍待核验：{uncertainty}</p>)}
+        {!item.articleFacts?.length ? <p>当前没有可作为正文事实引用的内容；标题和热度只用于选题线索。</p> : null}
+      </details> : null}
       <div className={`editorial-decision is-${item.editorialDecision.verdict}`}>
         <span>总编建议</span>
         <strong>{pendingEditor ? "尚未评估 · 当前只有规则保底" : `${verdictLabel} · ${item.editorialDecision.score} 分`}</strong>
@@ -782,24 +792,22 @@ function CandidateDetail({ item, adopting, disabled, onAdopt, onSupplementSource
           ? "内容潜力分只反映选题机会与制作可行性；来源不足只是提醒，是否开工由你决定。证据强度表示当前信号热度或排名，不等同于事实可信度。"
           : "总分以观众需求为主：它回答“具体是谁、在什么场景下会因为什么点开”，由选题总编单独判断，热度不参与。风险分越低越安全。证据强度表示当前信号热度或排名，不等同于事实可信度。"}</p>
       </details>
-      <div className="candidate-evidence"><span>来源线索</span><EvidenceGroupList groups={evidenceGroups.slice(0, 2)} totalGroups={evidenceGroups.length} idPrefix={item.id} /></div>
-      {item.origin === "trend" && item.articleSources?.length ? <details className="candidate-score-explainer candidate-article-reading" open>
-        <summary>原文阅读与事实依据</summary>
-        <div>{item.articleSources.map((source, index) => <span key={source.sourceId}>{index + 1}. {articleReadStatusLabel(source.readStatus)} · {source.pageTitle || source.finalUrl}{source.readStatus === "failed" ? "。读取服务未能完成，不代表文章没有事实依据。" : null}</span>)}</div>
-        {item.articleFacts?.map((fact, index) => {
-          const origin = factOriginLabel(item, fact);
-          return <p key={`${fact.sourceId}-${index}`}>已读事实：{fact.statement}{origin ? <small>（{origin}）</small> : null}</p>;
-        })}
-        {item.articleUncertainties?.map((uncertainty, index) => <p key={index}>仍待核验：{uncertainty}</p>)}
-        {!item.articleFacts?.length ? <p>当前没有可作为正文事实引用的内容；标题和热度只用于选题线索。</p> : null}
-      </details> : null}
       {advice ? <p className="candidate-advisory" role="note"><ShieldAlert aria-hidden="true" size={15} />{advice}（只是建议，不影响你采用）</p> : null}
       <div className={`candidate-verification is-${item.verification.status}`}><ShieldAlert aria-hidden="true" size={15} /><span><strong>{sourceShort
         ? "来源不足 · 仍可由你决定开工"
         : item.verification.status === "review_required"
           ? "建议采用前先核验"
           : "来源已达标"}</strong><small>{item.verification.reasons[0]}</small></span><output>{evidenceGroupCountLabel(item.evidence)} · {item.verification.independentSources} 个有效来源域名（需 {item.verification.requiredSources} 个）</output></div>
+      {onRevise && item.origin === "trend" && (revising || revisionNote) ? <div className="candidate-revision">
+        {revising ? <>
+          <label><span>修订意见</span><textarea aria-label="修订意见" value={revisionInstruction} rows={3} disabled={revisionBusy || disabled} onChange={(event) => updateRevision({ instruction: event.target.value, error: undefined })} placeholder="这条候选要怎么改？只产一版未审修订稿，最终以这里的文字为准。" /></label>
+          <button className="button button-secondary" type="button" disabled={revisionBusy || disabled || !revisionInstruction.trim()} onClick={() => void sendCandidateRevision()}>发送修订意见</button>
+          {revisionError ? <p role="alert">{revisionError}</p> : null}
+        </> : null}
+        {revisionNote ? <p><small>{revisionNote}</small></p> : null}
+      </div> : null}
       <div className="candidate-actions">
+        {onRevise && item.origin === "trend" && !revising ? <button className="button button-secondary" type="button" disabled={disabled || revisionBusy} aria-label={`修订 ${item.title}`} onClick={() => updateRevision({ open: true })}><PencilLine aria-hidden="true" size={15} />修订</button> : null}
         {canSupplementSources ? (
           <button className="button button-secondary" type="button" aria-label={`补充来源 ${item.title}`} disabled={disabled} onClick={() => onSupplementSources?.(item)}>保存来源并重新评估</button>
         ) : null}
@@ -835,8 +843,10 @@ export function EvidenceGroupList({ groups, totalGroups, idPrefix }: {
     {groups.map((group, index) => {
       const evidence = group.primary;
       const link = evidence.evidenceUrl?.trim();
+      const collectedAt = beijingDateTime(evidence.collectedAt);
       const heading = <><strong>{isManualEvidence(evidence) ? "用户补充来源" : evidence.keyword}</strong>
-        <small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${platformLabel(evidence.platform)} · 榜单热度或排名信号 ${evidence.strength}`}</small></>;
+        <small>{isManualEvidence(evidence) ? "用户补充 · 不作为热度信号" : `${platformLabel(evidence.platform)} · 榜单热度或排名信号 ${evidence.strength}`}</small>
+        {collectedAt ? <time dateTime={evidence.collectedAt}>采集于 {collectedAt}（北京时间）</time> : null}</>;
       return <div key={`${idPrefix}-eg-${index}`} className="evidence-group">
         {link ? <a href={link} target="_blank" rel="noreferrer">{heading}</a> : <div>{heading}</div>}
         {group.duplicates.length > 0 ? (
@@ -1021,11 +1031,28 @@ function TrendRecoveryPanel({
 
 function CustomEntry({ onManual, onImport }: { onManual: () => void; onImport: () => void }) {
   return (
-    <div className="custom-entry">
-      <div><h2>写下想法，保存为创作草稿</h2><p>先保存内容，再由你决定何时开始制作；保存不会生成视频或授权付费。</p></div>
-      <div className="custom-entry-actions">
-        <button className="button button-primary" type="button" onClick={onManual}><PenLine aria-hidden="true" size={18} />写下新想法</button>
-        <details className="custom-entry-import"><summary>已有结构化资料？</summary><button className="button button-ghost" type="button" onClick={onImport}><FileInput aria-hidden="true" size={18} />导入 JSON</button><p>导入外部研究资料，保存后仍由你决定是否开始制作。</p></details>
+    <div className="custom-entry creation-custom-entry">
+      <header className="custom-entry-cover">
+        <img src="/media/creation/writing-desk.webp" alt="" width={1600} height={900} />
+        <div>
+          <p className="eyebrow">自己的想法 · 创作手记</p>
+          <h2>写下想法，保存为创作草稿</h2>
+          <p>一段观察、一个问题，或一直想讲的故事。先把它记下来。</p>
+        </div>
+      </header>
+      <div className="custom-entry-workbench">
+        <section className="custom-entry-start" aria-label="记录新想法">
+          <p className="eyebrow">从一句话开始</p>
+          <h3>这次，你想让谁看到什么？</h3>
+          <p>写清选题、观众和开场，就有了一份可以继续打磨的创作草稿。</p>
+          <button className="button button-primary" type="button" onClick={onManual}><PenLine aria-hidden="true" size={18} />写下新想法<ArrowRight aria-hidden="true" size={16} /></button>
+          <p className="custom-entry-boundary">先保存内容，再由你决定何时开始制作；保存不会生成视频或授权付费。</p>
+        </section>
+        <aside className="custom-entry-notes" aria-label="整理想法的提示">
+          <h3>留给下一步的线索</h3>
+          <ul><li><span>给谁看</span>观众正在遇到什么问题？</li><li><span>讲什么</span>你有怎样的观察或判断？</li><li><span>怎么开场</span>第一句话为何值得停留？</li></ul>
+          <details className="custom-entry-import"><summary>已有结构化资料？</summary><p>导入外部研究资料，保存后仍由你决定是否开始制作。</p><button className="button button-secondary" type="button" onClick={onImport}><FileInput aria-hidden="true" size={18} />导入 JSON</button></details>
+        </aside>
       </div>
     </div>
   );

@@ -70,7 +70,7 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
     }}>
       <section ref={dialogRef} className="run-dialog series-dialog" role="dialog" aria-modal="true" aria-labelledby="series-dialog-title" tabIndex={-1}>
         <header className="dialog-header" inert={discardPromptOpen}>
-          <div><p className="eyebrow">系列策划</p><h2 id="series-dialog-title">创建系列</h2><p>创建只保存系列和可编辑草稿，不调用模型。保存后可手工编辑，或点击“生成并审计路线图”；该动作会调用模型并可能产生费用。未填写的风格和内容方向交给角色提出建议，再由你决定。</p></div>
+          <div><p className="eyebrow">系列策划</p><h2 id="series-dialog-title">创建系列</h2></div>
           <button className="icon-button" type="button" onClick={requestClose} disabled={submitting} title="关闭"><X aria-hidden="true" size={19} /></button>
         </header>
         <form
@@ -83,6 +83,7 @@ export function SeriesDialog({ open, onClose, onSubmit }: SeriesDialogProps) {
           }}
           noValidate
         >
+          <p className="form-intro field-wide">创建只保存系列和可编辑草稿，不调用模型。保存后可手工编辑，或点击“生成并审计路线图”；该动作会调用模型并可能产生费用。未填写的风格和内容方向交给角色提出建议，再由你决定。</p>
           <label className="field field-wide"><span>系列名称</span><input name="name" required data-dialog-initial-focus placeholder="例如：AI 下班实验室" /></label>
           <label className="field field-wide"><span>系列承诺</span><textarea name="premise" required rows={3} placeholder="每一集稳定为观众解决什么问题" /></label>
           <label className="field"><span>目标受众</span><input name="audience" required placeholder="最想持续服务的那群人" /></label>

@@ -44,6 +44,7 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
     return [...active, ...recentCompleted];
   }, [archivedRuns, currentRuns, filter, query, view]);
   const displayedRuns = visibleRuns.slice(0, visibleCount);
+  const hasFilters = Boolean(query.trim()) || (view === "current" && filter !== "all");
   const selectableRuns = visibleRuns.filter((run) => view === "archive" || isTerminal(run));
   const selectedRuns = selectableRuns.filter((run) => selectedIds.has(run.id));
   const activeCount = currentRuns.filter((run) => !isHistoricalReadOnlyRun(run) && (run.status === "pending" || run.status === "running")).length;
@@ -57,16 +58,23 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
   }, [filter, query, view]);
 
   return (
-    <main className="page queue-page">
-      <header className="page-header">
-        <div>
+    <main className="page queue-page collections-page collections-projects">
+      <header className="page-header collections-hero">
+        <div className="collections-hero-copy">
+          <p className="eyebrow">创作档案 · 从想法到成片</p>
           <h1>制作记录</h1>
           <p className="page-summary">{reviewCount > 0 ? `${reviewCount} 条制作等你处理。打开作品，接着上次的方案继续。` : "打开作品继续制作，或开始一个新想法。"}</p>
+          <div className="collections-hero-actions">
+            <button className="button button-primary project-create-button" type="button" onClick={onCreate} data-tour="project-create">
+              <Plus aria-hidden="true" size={17} />
+              新建制作
+            </button>
+          </div>
         </div>
-        <button className="button button-primary project-create-button" type="button" onClick={onCreate} data-tour="project-create">
-          <Plus aria-hidden="true" size={17} />
-          新建制作
-        </button>
+        <figure className="collections-hero-photo" aria-hidden="true">
+          <img src="/media/collections/editing-desk.webp" alt="" width="1200" height="801" />
+          <figcaption>摄影工作台</figcaption>
+        </figure>
       </header>
 
       <section className="queue-section" aria-labelledby="today-heading" data-tour="project-queue">
@@ -125,7 +133,7 @@ export function ProductionQueue({ runs, loading, error, onRetry, onCreate, onArc
             <button className="button button-secondary" type="button" onClick={onCreate}><Plus aria-hidden="true" size={17} />新建制作</button>
           </div>
         ) : visibleRuns.length === 0 ? (
-          <div className="queue-placeholder">{view === "archive" ? "归档还是空的" : "没有符合当前筛选条件的制作记录"}</div>
+          <div className="queue-placeholder"><span>{view === "archive" && !hasFilters ? "归档还是空的" : "没有符合当前筛选条件的制作记录"}</span>{hasFilters ? <button className="button button-secondary" type="button" onClick={() => { setQuery(""); setFilter("all"); }}>清除筛选</button> : null}</div>
         ) : (
           <div className="production-archive" role="list" aria-label={view === "archive" ? "已归档视频制作记录" : "当前视频制作记录"}>
             {displayedRuns.map((run, index) => (

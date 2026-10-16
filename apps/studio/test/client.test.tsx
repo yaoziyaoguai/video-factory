@@ -1543,6 +1543,26 @@ describe("Studio client", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it("keeps a multiline brief and its close protection after creation fails", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const onSubmit = vi.fn().mockRejectedValue(new Error("创建失败，请稍后重试"));
+    render(<NewRunDialog open providers={providers} initialValues={{ title: "原始标题", angle: "原始角度", audience: "创作者" }} onClose={onClose} onSubmit={onSubmit} />);
+    const angle = screen.getByRole("textbox", { name: "内容角度" });
+    await user.clear(angle);
+    await user.type(angle, "先展示真实问题。\n再给出可核对的过程和结果。");
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("创建失败，请稍后重试");
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ angle: "先展示真实问题。\n再给出可核对的过程和结果。" }));
+    expect(angle).toHaveValue("先展示真实问题。\n再给出可核对的过程和结果。");
+    await user.click(screen.getByRole("button", { name: "关闭新建制作" }));
+    expect(screen.getByRole("button", { name: "返回填写" })).toHaveFocus();
+    await user.click(screen.getByRole("button", { name: "返回填写" }));
+    expect(angle).toHaveValue("先展示真实问题。\n再给出可核对的过程和结果。");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
   it("protects edited fields across the close button and discards only after explicit confirmation", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

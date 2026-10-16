@@ -578,7 +578,7 @@ export function TodayPage() {
   }
 
   return (
-    <main className="today-page">
+    <main className={`today-page${entryMode === "trend" ? " today-trend-page" : ""}`}>
       <header className="today-header">
         <div><h1>{entryTitle(entryMode)}</h1><p>{dailyStatus}</p></div>
         <Link className="button button-secondary" to="/"><ArrowLeft aria-hidden="true" size={17} />更换创作入口</Link>

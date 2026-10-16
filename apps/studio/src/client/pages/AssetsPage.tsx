@@ -157,15 +157,23 @@ export function AssetsPage() {
     : FILTERS.filter((item) => item.id !== "reusable" && item.id !== "needs_review");
 
   return (
-    <main className="page asset-library-page">
-      <header className="page-header asset-library-header">
-        <div>
+    <main className="page asset-library-page collections-page collections-assets" data-collection={collection}>
+      <header className="page-header collections-hero">
+        <div className="collections-hero-copy">
+          <p className="eyebrow">素材档案 · 画面与声音</p>
           <h1>素材库</h1>
-          {collection === "records" ? <p className="page-summary">成片、脚本与质检记录，不计入可复用素材。</p> : null}
-          <Link to="/resources#visual-providers">配置外部素材来源</Link>
+          <p className="page-summary">{collection === "records" ? "成片、脚本与质检记录，不计入可复用素材。" : "回看用过的画面与声音，沿着作品查找来源、授权和使用记录。"}</p>
+          <div className="collections-hero-actions"><Link className="collections-text-link" to="/resources#visual-providers">配置外部素材来源<ArrowRight aria-hidden="true" size={16} /></Link></div>
         </div>
-        <div className="asset-library-count"><strong>{manifest ? collectionAssets.length : "—"}</strong><span>{collection === "creative" ? "项创作素材" : "项成片与记录"}</span></div>
+        <figure className="collections-hero-photo" aria-hidden="true">
+          <img src="/media/collections/film-archive.webp" alt="" width="1200" height="1200" />
+          <figcaption>底片档案</figcaption>
+        </figure>
       </header>
+      <div className="collections-section-heading asset-library-heading">
+        <div><p className="eyebrow">{collection === "creative" ? "创作收藏" : "制作归档"}</p><h2>{collection === "creative" ? "每一份素材，都有来处" : "作品背后的完整记录"}</h2></div>
+        <div className="asset-library-count"><strong>{manifest ? collectionAssets.length : "—"}</strong><span>{collection === "creative" ? "项创作素材" : "项成片与记录"}</span></div>
+      </div>
 
       {manifest ? <section className="asset-index-summary" aria-label="素材库概况">
         {collection === "creative" ? <>

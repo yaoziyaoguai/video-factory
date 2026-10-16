@@ -116,6 +116,20 @@ function renderPage() {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("CasesPage", () => {
+  it.each([true, false])("moves focus to the selected reference only in the stacked layout (%s)", async (stacked) => {
+    mockApi();
+    const matchMedia = window.matchMedia;
+    vi.spyOn(window, "matchMedia").mockImplementation(query => ({ ...matchMedia(query), matches: stacked && query === "(max-width: 980px)" }));
+    renderPage();
+    const card = await screen.findByRole("button", { name: new RegExp(transcriptItem.title) });
+    card.focus();
+    fireEvent.click(card);
+    await screen.findByText("原站逐字稿的第一段正文。");
+    if (stacked) await waitFor(() => expect(screen.getByRole("region", { name: "参考详情" })).toHaveFocus());
+    else expect(card).toHaveFocus();
+    expect(studioApi.selectCase).not.toHaveBeenCalled();
+  });
+
   it("keeps existing cases usable and shows elapsed waiting without sending another refresh", async () => {
     mockApi();
     renderPage();

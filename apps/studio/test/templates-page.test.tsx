@@ -42,6 +42,29 @@ beforeEach(() => {
 });
 
 describe("TemplatesPage", () => {
+  it("distinguishes an empty reference library from a loading catalog", async () => {
+    vi.mocked(studioApi.templates).mockResolvedValue({ storeRevision: 3, templates: [], deletedBuiltIns: [] });
+    render(<MemoryRouter><TemplatesPage /></MemoryRouter>);
+
+    expect(screen.getByRole("status")).toHaveTextContent("正在读取模板目录...");
+    expect(screen.queryByRole("heading", { name: "资料库还没有模板" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "资料库还没有模板" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建空白模板" })).toBeEnabled();
+    expect(screen.queryByRole("radiogroup", { name: "视频模板" })).not.toBeInTheDocument();
+  });
+
+  it("keeps a failed catalog distinct from an empty library and supports refresh", async () => {
+    const user = userEvent.setup();
+    vi.mocked(studioApi.templates).mockRejectedValueOnce(new Error("模板目录暂时不可用"));
+    render(<MemoryRouter><TemplatesPage /></MemoryRouter>);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("模板目录暂时不可用");
+    expect(screen.queryByRole("heading", { name: "资料库还没有模板" })).not.toBeInTheDocument();
+    await user.click(screen.getByTitle("刷新模板"));
+    expect(await screen.findByRole("heading", { name: "知识解释" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("puts template editing first and keeps supporting evidence and model overrides collapsed until requested", async () => {
     const user = userEvent.setup();
     render(<MemoryRouter><TemplatesPage /></MemoryRouter>);

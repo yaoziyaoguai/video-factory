@@ -735,12 +735,16 @@ function RunPageContent({ runId }: { runId: string }) {
   }
 
   if (loading) {
-    return <div className="page-loading"><LoaderCircle aria-hidden="true" size={22} />正在读取制作详情...</div>;
+    return <main className="page production-page-state" aria-busy="true">
+      <div className="production-state-icon"><LoaderCircle aria-hidden="true" size={24} /></div>
+      <h1>制作工作台</h1>
+      <p role="status">正在读取制作详情...</p>
+    </main>;
   }
   if (!run) {
     return (
-      <main className="page missing-page">
-        <AlertCircle aria-hidden="true" size={24} />
+      <main className="page missing-page production-page-state">
+        <div className="production-state-icon is-error"><AlertCircle aria-hidden="true" size={24} /></div>
         <h1>没有找到这条制作记录</h1>
         <p>{error ?? "请返回制作记录并重新选择。"}</p>
         <Link className="button button-secondary" to="/projects"><ArrowLeft aria-hidden="true" size={17} />返回制作记录</Link>
@@ -749,7 +753,8 @@ function RunPageContent({ runId }: { runId: string }) {
   }
   return (
     <>
-      <div className="run-back-row"><Link to="/projects"><ArrowLeft aria-hidden="true" size={16} />制作记录</Link></div>
+      <nav className="run-back-row production-breadcrumb" aria-label="制作位置"><Link to="/projects"><ArrowLeft aria-hidden="true" size={16} />制作记录</Link><span aria-hidden="true">/</span><span aria-current="page">制作工作台</span></nav>
+      <div className="production-notices">
       {connectionWarning && !isTerminal(run.status) ? <div className="inline-error" role="status"><AlertCircle aria-hidden="true" size={16} />{connectionWarning}</div> : null}
       {error ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} /><div>{error}
         {humanRecovery && run.status === "stale" && run.nodes.some(node => node.id === humanRecovery.nodeId) ? <>
@@ -761,11 +766,14 @@ function RunPageContent({ runId }: { runId: string }) {
       </div></div> : null}
       {pendingLocalReviewCommand(runId) ? <section className="task-recovery-panel" aria-label="原本地决定状态">
         <p>上一条准备或风险决定已保留原编号与输入；先查看状态，不要换编号重复确认。</p>
-        <button type="button" className="button button-secondary" disabled={nodeMutationPending || decisionPending} onClick={() => void observeLocalReviewCommand()}>查看上次决定状态</button>
-        <button type="button" className="button button-secondary" disabled={nodeMutationPending || decisionPending} onClick={() => void observeLocalReviewCommand(true)}>按原操作继续</button>
+        <div className="task-recovery-actions">
+          <button type="button" className="button button-secondary" disabled={nodeMutationPending || decisionPending} onClick={() => void observeLocalReviewCommand()}>查看上次决定状态</button>
+          <button type="button" className="button button-secondary" disabled={nodeMutationPending || decisionPending} onClick={() => void observeLocalReviewCommand(true)}>按原操作继续</button>
+        </div>
       </section> : null}
       {costError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{costError}</div> : null}
       {paidOperationError ? <div className="inline-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{paidOperationError}</div> : null}
+      </div>
       <RunWorkbench run={run} onRunUpdated={next => { if (next.id === currentRunId.current) setRun(current => preferRunSnapshot(current, next)); }} {...(hasUnsavedCreativeEdits ? { assetConfigurationBlockedReason: "请先保存或放弃当前稿件的手动修改，再调整画面来源。" } : {})} creativeDiscussion={creativeReview ? <CreativeDiscussionPanel nativeAudio={run.audioMode === "native_av"} key={`${run.id}:${creativeReview.stage}:${creativeReview.reviewPurpose ?? "draft"}`} review={creativeReview} busy={creativeCommandPending || nodeMutationPending || decisionPending || creativeReview.phase === "checking"} onDraftDirtyChange={setHasUnsavedCreativeEdits} onCommand={commandCreativeReview} providers={runProviders} /> : undefined} providers={runProviders} decisionPending={decisionPending} onDecision={decide} onRequestSceneRevision={requestSceneRevision} onRequestSceneResourceRevision={requestSceneResourceRevision} onRequestNarrationRevision={requestNarrationRevision} onLoadSceneNarration={loadSceneNarration} onReinspectVisualReview={reinspectVisualReview} onOpenPublish={() => setPublishing(true)} onRestart={() => void beginRestart()} {...(costDetail ? { costDetail } : {})} {...(paidNodeSummary ? { paidNodeSummary } : {})} {...(connectionHeartbeatAt ? { connectionHeartbeatAt } : {})} nodeMutationPending={nodeMutationPending || creativeCommandPending} pausePending={pausePending} onOverrideNode={overrideNode} onOverrideNodeInput={overrideNodeInput} onReviseNodeDocument={reviseNodeDocument} onAuditNodeDocument={auditNodeDocument} onConfigureNode={configureNode} onAuthorizeSpend={authorizeSpend} onAuthorizeProductionScope={authorizeProductionScope} onAmendProductionScope={amendProductionScope} onRejectSpend={rejectSpend} onRegenerateStale={regenerateStale} onRequestPause={requestPause} onResumePaused={resumePaused} onQueryOriginalTextTask={queryOriginalTextTask} onPrepareReviewContinuation={prepareReviewContinuation} onRetrieveOriginalTextTask={retrieveOriginalTextTask} onRetryFailedNode={retryFailedNode} onReconcilePaidNode={reconcilePaidNode} />
       {creativeHistory ? <CreativeReviewHistoryPanel nativeAudio={run.audioMode === "native_av"} history={creativeHistory} /> : null}
       {publishing ? <MultiPlatformPublishDialog runId={run.id} onClose={() => setPublishing(false)} /> : null}

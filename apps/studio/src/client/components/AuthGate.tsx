@@ -99,17 +99,9 @@ function LoginPanel({ onAuthenticated }: { onAuthenticated(session: StudioAuthSe
           </form>
         </section>
         <aside className="auth-filmboard" aria-label="影像创作主题图片">
-          <figure className="auth-frame auth-frame-primary">
-            <img src="/media/studio-aperture.webp" alt="镜头内部的光圈叶片" width={1400} height={933} />
-            <figcaption><span>01</span><small>STORY / FRAME</small></figcaption>
-          </figure>
           <figure className="auth-frame">
-            <img src="/media/studio-frame-2.jpg" alt="影像镜头预览" />
-            <figcaption><span>02</span><small>VISUAL / CUT</small></figcaption>
-          </figure>
-          <figure className="auth-frame">
-            <img src="/media/studio-frame-3.jpg" alt="成片审阅画面" />
-            <figcaption><span>03</span><small>REVIEW / MASTER</small></figcaption>
+            <img src="/media/atelier/projector.webp" alt="暗房里投影机映出的光束" width={1400} height={933} />
+            <figcaption><strong>从一个想法，<br />到一部作品。</strong><p>记录灵感，打磨故事，留住值得被看见的瞬间。</p></figcaption>
           </figure>
         </aside>
       </div>
