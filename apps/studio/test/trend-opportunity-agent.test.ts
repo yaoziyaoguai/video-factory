@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { readPlanningCheckpoints } from "../src/server/planning-operations.js";
-import { CodexBridgeClient, ModelCandidatesExhaustedError, type CodexTaskExecution, type CodexTaskKind } from "@video-factory/production-pipeline";
+import { fileURLToPath } from "node:url";
+import { readPlanningCheckpoints, readPlanningMaintenanceIntegrity } from "../src/server/planning-operations.js";
+import { CodexBridgeClient, CodexBridgeError, FallbackCodexTaskClient, ModelCandidatesExhaustedError, type CodexTaskExecution, type CodexTaskKind, type CodexTaskRequestOptions, type CodexTaskSession } from "@video-factory/production-pipeline";
+import { taskBinding } from "../../../packages/production-pipeline/src/codex-task-binding.js";
 import {
   CodexTopicIdeaModel,
   TrendOpportunityAgent,
@@ -1804,6 +1809,139 @@ describe("CodexTopicIdeaModel.reviseCandidate", () => {
       await new CodexTopicIdeaModel(client, directory).reviseCandidate(input);
       assert.equal(client.calls.length, 1);
     } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("recognizes a settled deferred revision in maintenance and the packaged verifier without rewriting it", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "topic-revision-maintenance-"));
+    const directory = path.join(root, "checkpoints", "topic-editor");
+    class TracedRevisionClient extends CodexBridgeClient {
+      calls = 0;
+      constructor() { super({ socketPath: "/nonexistent/vf-codex.sock" }); }
+      override async runTaskDetailed(kind: CodexTaskKind, _payload: unknown, requestId?: string): Promise<CodexTaskExecution> {
+        assert.equal(kind, "topic-ideas");
+        assert.ok(requestId);
+        this.calls++;
+        assert.equal((await readPlanningMaintenanceIntegrity(root)).complete, false, "the live model call must still block maintenance");
+        const inFlight = await runVerifier();
+        assert.equal(inFlight.code, 1, "the packaged verifier must reject the live revision");
+        assert.equal(inFlight.stdout, "");
+        return { output: { ideas: [revisedIdea] }, trace: { taskKind: kind, providerId: "test", modelId: "test",
+          promptVersion: "test", prompt: "isolated fixture", brokerRequestIdHash: createHash("sha256").update(requestId).digest("hex") } };
+      }
+    }
+    const client = new TracedRevisionClient();
+    const input = { candidate: candidateForRevision, instruction: "改标题" };
+    const script = fileURLToPath(new URL("../../../scripts/verify-production-backup.mjs", import.meta.url));
+    const runVerifier = async (mode = "--require-locally-idle") => {
+      try {
+        const result = await promisify(execFile)(process.execPath, [script, "--role", "app-workspace", "--root", root, mode, "true"]);
+        return { code: 0, ...result };
+      } catch (error) {
+        const result = error as Error & { code: number; stdout: string; stderr: string };
+        return { code: result.code, stdout: result.stdout, stderr: result.stderr };
+      }
+    };
+    try {
+      await mkdir(path.join(root, "runs"));
+      await new CodexTopicIdeaModel(client, directory).reviseCandidate(input);
+      const [{ checkpoint, key }] = await readPlanningCheckpoints(directory);
+      const file = path.join(directory, `${key}.json`);
+      const original = await readFile(file, "utf8");
+      assert.equal(checkpoint.status, "running", "deferred audit is not an audited pass");
+      assert.deepEqual(await readPlanningMaintenanceIntegrity(root), { complete: true, issues: [] });
+      const accepted = await runVerifier();
+      assert.equal(accepted.code, 0, accepted.stderr);
+      assert.equal(JSON.parse(accepted.stdout).localQuiescent, true);
+      const strict = await runVerifier("--require-idle");
+      assert.equal(strict.code, 1, "an unaudited revision is not a strict terminal checkpoint");
+      assert.equal(strict.stdout, "");
+      assert.equal(await readFile(file, "utf8"), original);
+      await new CodexTopicIdeaModel(client, directory).reviseCandidate(input);
+      assert.equal(client.calls, 1, "replay must not produce or audit again");
+      const requestId = (checkpoint.attemptedRequestIds as string[])[0]!;
+      const mutations: Array<[string, (value: any) => void]> = [
+        ["ordinary pre-audit window", (value) => { value.contractDigest = "f".repeat(64); }],
+        ["unbound candidate response", (value) => { value.pendingCandidate.candidateTrace.brokerRequestIdHash = "f".repeat(64); }],
+        ["unknown execution", (value) => { value.requestExecutions[requestId].state = "unknown"; }],
+        ["missing execution", (value) => { delete value.requestExecutions[requestId]; }],
+        ["missing phase", (value) => { delete value.requestPhases[requestId]; }],
+        ["audit already requested", (value) => { value.requestPhases[requestId].phase = "audit"; }],
+        ["pending operation", (value) => { value.pendingOperation = {}; }],
+        ["invalid candidate", (value) => { value.pendingCandidate.candidate.ideas = []; }],
+        ["unknown contract version", (value) => { value.version = "video-factory/agent-loop-checkpoint-v10"; }],
+        ["unfinished validation", (value) => { value.validationFailure = {}; }],
+        ["orphan execution", (value) => { value.requestExecutions.other = { state: "completed" }; }],
+        ...["cycle", "sessions", "operationGenerations", "failedOperationRequestIds", "phaseAttempts"].map((field): [string, (value: any) => void] =>
+          [`missing replay field ${field}`, (value) => { delete value[field]; }]),
+      ];
+      for (const [name, mutate] of mutations) {
+        const changed = structuredClone(checkpoint);
+        mutate(changed);
+        const bytes = JSON.stringify(changed);
+        await writeFile(file, bytes);
+        assert.equal((await readPlanningMaintenanceIntegrity(root)).complete, false, name);
+        const refused = await runVerifier();
+        assert.equal(refused.code, 1, name);
+        assert.equal(refused.stdout, "", name);
+        assert.equal(await readFile(file, "utf8"), bytes, name);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("keeps a deferred revision locally idle after an unaccepted primary and successful fallback", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "topic-revision-fallback-"));
+    const directory = path.join(root, "checkpoints", "topic-editor");
+    class RevisionClient extends CodexBridgeClient {
+      calls = 0;
+      constructor(private readonly primary: boolean) { super({ socketPath: "/nonexistent/vf-codex.sock" }); }
+      override async runTaskDetailed(kind: CodexTaskKind, payload: unknown, requestId?: string, session?: CodexTaskSession, options: CodexTaskRequestOptions = {}): Promise<CodexTaskExecution> {
+        assert.equal(kind, "topic-ideas");
+        assert.ok(requestId);
+        this.calls++;
+        if (this.primary) throw new CodexBridgeError("Codex bridge socket failed with ECONNREFUSED.", true, "not_accepted");
+        const brokerBinding = { version: "video-factory/task-binding-v1" as const, storeId: `vfs_store_${"a".repeat(32)}`, providerId: "backup", modelId: "backup-model" };
+        const envelope = { protocolVersion: "video-factory/codex-bridge-v2", requestId, kind, payload, brokerBinding,
+          ...(session ? { sessionKey: session.key, ...(session.handle ? { sessionHandle: session.handle } : {}) } : {}) };
+        await options.beforeSubmit?.({ version: "video-factory/codex-prepared-operation-v1", requestId, kind, envelope,
+          serializedEnvelope: JSON.stringify(envelope), brokerBinding, binding: taskBinding({ request: envelope, broker: brokerBinding, kind, session }),
+          route: { socketPath: "/nonexistent/vf-codex.sock" }, taskFact: "not_submitted" });
+        return { output: { ideas: [revisedIdea] }, trace: { taskKind: kind, providerId: "backup", modelId: "backup-model",
+          promptVersion: "test", prompt: "isolated fixture", brokerRequestIdHash: createHash("sha256").update(requestId).digest("hex") } };
+      }
+    }
+    const primary = new RevisionClient(true), backup = new RevisionClient(false);
+    const client = new FallbackCodexTaskClient({ candidates: [
+      { client: primary, providerId: "primary", modelId: "primary-model", taskKinds: ["topic-ideas"] },
+      { client: backup, providerId: "backup", modelId: "backup-model", taskKinds: ["topic-ideas"] },
+    ] });
+    const input = { candidate: candidateForRevision, instruction: "改标题" };
+    const script = fileURLToPath(new URL("../../../scripts/verify-production-backup.mjs", import.meta.url));
+    try {
+      await mkdir(path.join(root, "runs"));
+      await new CodexTopicIdeaModel(client, directory).reviseCandidate(input);
+      const [{ checkpoint, key }] = await readPlanningCheckpoints(directory);
+      const file = path.join(directory, `${key}.json`);
+      const original = await readFile(file, "utf8");
+      const requestId = (checkpoint.attemptedRequestIds as string[])[0]!;
+      const executions = checkpoint.requestExecutions as Record<string, { state: string; trace: Record<string, unknown> }>;
+      assert.deepEqual(executions[requestId], { state: "not_accepted", trace: {} }, "failure before prepare has no broker receipt");
+      assert.deepEqual(await readPlanningMaintenanceIntegrity(root), { complete: true, issues: [] });
+      const accepted = await promisify(execFile)(process.execPath, [script, "--role", "app-workspace", "--root", root, "--require-locally-idle", "true"]);
+      assert.equal(JSON.parse(accepted.stdout).localQuiescent, true);
+      assert.equal(await readFile(file, "utf8"), original);
+      await new CodexTopicIdeaModel(client, directory).reviseCandidate(input);
+      assert.deepEqual([primary.calls, backup.calls], [1, 1]);
+      for (const mutation of ["unknown", "completed", "completed_failure", "wrong-hash"]) {
+        const changed = structuredClone(checkpoint);
+        const failed = (changed.requestExecutions as typeof executions)[requestId]!;
+        if (mutation === "wrong-hash") failed.trace.brokerRequestIdHash = "f".repeat(64);
+        else failed.state = mutation;
+        await writeFile(file, JSON.stringify(changed));
+        assert.equal((await readPlanningMaintenanceIntegrity(root)).complete, false, mutation);
+        await assert.rejects(() => promisify(execFile)(process.execPath, [script, "--role", "app-workspace", "--root", root, "--require-locally-idle", "true"]),
+          (error: unknown) => (error as { code: number }).code === 1, mutation);
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("rejects blank instructions and drifted signal bindings before publishing a revision", async () => {

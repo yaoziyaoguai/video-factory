@@ -144,11 +144,11 @@ function idleRun(run) {
       || !Number.isFinite(Date.parse(operation.finishedAt))) fail("续接命令缺少终结身份");
   }
 }
-function idleLoop(value) {
+function idleLoop(value, settledRevision = false) {
   if (!/^video-factory\/agent-loop-checkpoint-v[3-9]$/.test(value.version)
     || !hashPattern.test(value.key ?? "") || !Array.isArray(value.completed) || !Array.isArray(value.attemptedRequestIds)
     || value.attemptedRequestIds.some((id) => typeof id !== "string" || !id)) fail("规划检查点结构未知");
-  idleState(value, "status", ["passed", "failed", "exhausted"]);
+  if (!settledRevision) idleState(value, "status", ["passed", "failed", "exhausted"]);
   if (value.pendingOperation !== undefined) fail("规划原请求仍待核");
   for (const iteration of value.completed) {
     if (!record(iteration) || !Number.isSafeInteger(iteration.iteration) || iteration.iteration < 1
@@ -170,10 +170,10 @@ function idleLoop(value) {
 }
 
 /** 只检查执行协议字段，不把创作正文里的 status/state 当作调度状态。 */
-function idleEvidence(value, settled = new Set()) {
-  if (Array.isArray(value)) { for (const item of value) idleEvidence(item, settled); return; }
+function idleEvidence(value, settled = new Set(), settledTopicRevision) {
+  if (Array.isArray(value)) { for (const item of value) idleEvidence(item, settled, settledTopicRevision); return; }
   if (!record(value)) return;
-  if (typeof value.version === "string" && value.version.startsWith("video-factory/agent-loop-checkpoint-")) settled = idleLoop(value);
+  if (typeof value.version === "string" && value.version.startsWith("video-factory/agent-loop-checkpoint-")) settled = idleLoop(value, settledTopicRevision?.(value) === true);
   if (value.version === "video-factory/codex-prepared-operation-v1") {
     if (!["not_submitted", "possibly_submitted", "accepted", "running", "accepted_unknown"].includes(value.taskFact)) fail("原请求 taskFact 未知");
     if (!settled.has(value.requestId)) fail("原请求缺少已核实终态");
@@ -189,7 +189,7 @@ function idleEvidence(value, settled = new Set()) {
   }
   if (value.version === "video-factory/narration-confirm-operation-v1") idleState(value, "state", ["projected"]);
   if (value.version === "video-factory/narration-relayout-operation-v1") idleState(value, "state", ["applied", "failed", "discarded"]);
-  for (const child of Object.values(value)) idleEvidence(child, settled);
+  for (const child of Object.values(value)) idleEvidence(child, settled, settledTopicRevision);
 }
 
 async function verifyIdleRunFiles(run, directory, files) {
@@ -494,12 +494,13 @@ async function verifyApp(args) {
       collectPrepared(await json(file), requests);
     }
   }
-  const { readPlanningMaintenanceIntegrity, readPlanningCheckpoints } = await import("../apps/studio/dist/server/server/planning-operations.js");
+  const { readPlanningMaintenanceIntegrity, readPlanningCheckpoints, isSettledTopicRevision } = await import("../apps/studio/dist/server/server/planning-operations.js");
+  const settledTopicRevision = args.requireLocallyIdle ? isSettledTopicRevision : undefined;
   const planning = await readPlanningMaintenanceIntegrity(args.root);
   if (!planning.complete || planning.issues.length) fail("规划检查点不可恢复或身份不完整");
   if (args.checkIdle) {
     for (const name of ["series-showrunner", "topic-editor"]) {
-      for (const { checkpoint } of await readPlanningCheckpoints(path.join(args.root, "checkpoints", name))) idleEvidence(checkpoint);
+      for (const { checkpoint } of await readPlanningCheckpoints(path.join(args.root, "checkpoints", name))) idleEvidence(checkpoint, new Set(), settledTopicRevision);
     }
     await verifyIdleSeries(args.root);
   }
@@ -511,7 +512,7 @@ async function verifyApp(args) {
       if (!record(value) || !/^video-factory\/agent-loop-checkpoint-v[3-9]$/.test(value.version ?? "")
         || path.basename(file) !== `${value.key}.json`
         || !["series-showrunner", "topic-editor"].includes(path.basename(path.dirname(file)))) fail("规划检查点布局或协议未知");
-      idleEvidence(value);
+      idleEvidence(value, new Set(), settledTopicRevision);
     }
     collectPrepared(value, requests);
     checkpoints.push({ path: path.relative(args.root, file), ...await hashed(file) });

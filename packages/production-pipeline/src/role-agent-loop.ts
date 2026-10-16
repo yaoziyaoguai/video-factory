@@ -798,6 +798,36 @@ async function failedLoopError<TOutput>(
   );
 }
 
+/** 维护与恢复共享结构门槛；仅只读判别，不触发 fresh、保存或模型调用。 */
+export function isRoleAgentCheckpointStructureValid(value: unknown, options: Pick<RoleAgentLoopOptions<unknown>, "role" | "maxIterations">): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const candidate = value as Partial<PersistedLoopState>;
+  const version = (value as { version?: unknown }).version;
+  const legacyV3 = version === "video-factory/agent-loop-checkpoint-v3";
+  const legacyV4 = version === "video-factory/agent-loop-checkpoint-v4";
+  const legacyV5 = version === "video-factory/agent-loop-checkpoint-v5";
+  const legacyV6 = version === "video-factory/agent-loop-checkpoint-v6";
+  const legacyV7 = version === "video-factory/agent-loop-checkpoint-v7";
+  const legacyV8 = version === "video-factory/agent-loop-checkpoint-v8";
+  return !((!legacyV3 && !legacyV4 && !legacyV5 && !legacyV6 && !legacyV7 && !legacyV8
+      && version !== "video-factory/agent-loop-checkpoint-v9")
+    || candidate.role !== options.role
+    || candidate.maxIterations !== options.maxIterations
+    || (candidate.status !== "running" && candidate.status !== "passed" && candidate.status !== "awaiting_user"
+      && candidate.status !== "exhausted" && candidate.status !== "failed")
+    || !Number.isInteger(candidate.cycle) || Number(candidate.cycle) < 0
+    || !Array.isArray(candidate.completed)
+    || !isRequestState(candidate.operationGenerations, "number")
+    || !isRequestState(candidate.failedOperationRequestIds, "string")
+    || !Array.isArray(candidate.attemptedRequestIds)
+    || candidate.attemptedRequestIds.some((requestId) => typeof requestId !== "string")
+    || (!legacyV3 && !isSessionState(candidate.sessions))
+    || (!legacyV3 && !legacyV4 && !legacyV5 && !isPhaseAttempts(candidate.phaseAttempts))
+    || ((legacyV8 || version === "video-factory/agent-loop-checkpoint-v9")
+      && candidate.pendingOperation !== undefined
+      && !isPersistedPendingOperation(candidate.pendingOperation)));
+}
+
 async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>): Promise<PersistedLoopState> {
   const fresh = (cycle = 0): PersistedLoopState => ({
     version: "video-factory/agent-loop-checkpoint-v9",
@@ -837,23 +867,7 @@ async function restoreCheckpoint<TOutput>(options: RoleAgentLoopOptions<TOutput>
   const legacyV8 = loadedVersion === "video-factory/agent-loop-checkpoint-v8";
   const recoverablePending = (legacyV8 || loadedVersion === "video-factory/agent-loop-checkpoint-v9")
     && isPersistedPendingOperation(candidate.pendingOperation);
-  const structurallyInvalid = (!legacyV3 && !legacyV4 && !legacyV5 && !legacyV6 && !legacyV7 && !legacyV8
-      && loadedVersion !== "video-factory/agent-loop-checkpoint-v9")
-    || candidate.role !== options.role
-    || candidate.maxIterations !== options.maxIterations
-    || (candidate.status !== "running" && candidate.status !== "passed" && candidate.status !== "awaiting_user"
-      && candidate.status !== "exhausted" && candidate.status !== "failed")
-    || !Number.isInteger(candidate.cycle) || Number(candidate.cycle) < 0
-    || !Array.isArray(candidate.completed)
-    || !isRequestState(candidate.operationGenerations, "number")
-    || !isRequestState(candidate.failedOperationRequestIds, "string")
-    || !Array.isArray(candidate.attemptedRequestIds)
-    || candidate.attemptedRequestIds.some((requestId) => typeof requestId !== "string")
-    || (!legacyV3 && !isSessionState(candidate.sessions))
-    || (!legacyV3 && !legacyV4 && !legacyV5 && !isPhaseAttempts(candidate.phaseAttempts))
-    || ((legacyV8 || loadedVersion === "video-factory/agent-loop-checkpoint-v9")
-      && candidate.pendingOperation !== undefined
-      && !isPersistedPendingOperation(candidate.pendingOperation));
+  const structurallyInvalid = !isRoleAgentCheckpointStructureValid(candidate, options);
   if (structurallyInvalid) {
     if (recoverablePending) {
       throw new Error("Agent loop has an accepted pending operation that is incompatible with the current role; it must be reconciled before a new request can be created.");
@@ -1074,7 +1088,7 @@ function pendingCandidateExecution<TOutput>(
   };
 }
 
-function roleContractDigest<TOutput>(options: RoleAgentLoopOptions<TOutput>): string {
+export function roleContractDigest(options: Pick<RoleAgentLoopOptions<unknown>, "contractVersion" | "role" | "criteria" | "maxIterations" | "maxPhaseAttempts" | "planningRole" | "deferAudit">): string {
   // stopAfterAudit 只控制拿到结果后是否继续，不改变模型输入、校验或物理请求。
   // 不纳入 digest，确保收紧自动轮次时仍能观察旧请求、复用已完成审计，不重复计费。
   return valueHash({

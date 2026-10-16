@@ -1,9 +1,12 @@
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { fileRoleAgentLoopCheckpoint, mergeModelExecutionFacts, projectCheckpointExecutions, validatePreparedOperation, type CodexPreparedOperation, type RoleAgentLoopCheckpoint } from "@video-factory/production-pipeline";
+import { fileRoleAgentLoopCheckpoint, isRoleAgentCheckpointStructureValid, mergeModelExecutionFacts, projectCheckpointExecutions, roleContractDigest, validatePreparedOperation, type CodexPreparedOperation, type RoleAgentLoopCheckpoint } from "@video-factory/production-pipeline";
 import type { StudioPlanningOperation } from "../shared/api.js";
 import { StudioConflictError } from "./studio-errors.js";
 import { legacySeriesPlanningOwner } from "./legacy-series-planning.js";
+import { parseTopicIdeasOutput, TOPIC_REVISION_LOOP_CONTRACT } from "./topic-editor-contract.js";
 
 export interface PlanningOwner {
   kind: "series" | "topic";
@@ -115,7 +118,7 @@ function planningMaintenanceProblem(checkpoint: Record<string, unknown>, key: st
     || !["running", "passed", "awaiting_user", "exhausted", "failed"].includes(String(checkpoint.status))) {
     return "planning_checkpoint_invalid";
   }
-  if (checkpoint.status === "running") return "planning_execution_not_settled";
+  if (checkpoint.status === "running" && !isSettledTopicRevision(checkpoint)) return "planning_execution_not_settled";
   const requestIds = new Set(checkpoint.attemptedRequestIds as string[]);
   const boundRequests = new Set<string>();
   const addOperation = (value: unknown): boolean => {
@@ -152,6 +155,52 @@ function planningMaintenanceProblem(checkpoint: Record<string, unknown>, key: st
     }
   }
   return undefined;
+}
+
+/** 只产稿合同的 running 是循环内状态；不能据此放行普通产稿到审计之间的窗口。 */
+export function isSettledTopicRevision(checkpoint: Record<string, unknown>): boolean {
+  const owner = checkpoint.planningOwner;
+  const pending = checkpoint.pendingCandidate;
+  const ids = checkpoint.attemptedRequestIds;
+  const phases = checkpoint.requestPhases;
+  const executions = checkpoint.requestExecutions;
+  if (checkpoint.version !== "video-factory/agent-loop-checkpoint-v9" || checkpoint.status !== "running"
+    || !isRoleAgentCheckpointStructureValid(checkpoint, TOPIC_REVISION_LOOP_CONTRACT)
+    || checkpoint.contractDigest !== roleContractDigest(TOPIC_REVISION_LOOP_CONTRACT)
+    || !isPlanningOwner(owner) || owner.kind !== "topic" || owner.action !== "revise" || !owner.id.trim()
+    || typeof checkpoint.key !== "string" || !/^[a-f0-9]{64}$/.test(checkpoint.key)
+    || !Array.isArray(checkpoint.completed) || checkpoint.completed.length
+    || [checkpoint.pendingOperation, checkpoint.planningOriginalOperation, checkpoint.failure,
+      checkpoint.validationFailure, checkpoint.auditValidationFailure].some((value) => value !== undefined)
+    || !isRecord(pending) || pending.iteration !== 1 || !isRecord(pending.candidateTrace)
+    || !Array.isArray(ids) || !ids.length || ids.some((id) => typeof id !== "string" || !id)
+    || new Set(ids).size !== ids.length || !isRecord(phases) || !isRecord(executions)
+    || Object.keys(phases).some((id) => !ids.includes(id))
+    || Object.keys(executions).some((id) => !ids.includes(id))) return false;
+  try {
+    if (!parseTopicIdeasOutput(pending.candidate).ideas.length) return false;
+  } catch { return false; }
+  const trace = pending.candidateTrace;
+  if (trace.taskKind !== "topic-ideas" || typeof trace.providerId !== "string" || !trace.providerId
+    || typeof trace.modelId !== "string" || !trace.modelId) return false;
+  let candidateBound = false;
+  for (const id of ids as string[]) {
+    const phase = phases[id], execution = executions[id];
+    const digest = createHash("sha256").update(id).digest("hex");
+    if (!isRecord(phase) || phase.phase !== "produce" || phase.iteration !== 1
+      || !isRecord(execution) || !["completed", "completed_failure", "not_accepted"].includes(String(execution.state))
+      || !isRecord(execution.trace)) return false;
+    // prepare 前已确证未受理的连接失败没有 broker 回执；已有摘要仍必须匹配原请求。
+    if (execution.trace.brokerRequestIdHash !== digest
+      && !(execution.state === "not_accepted" && execution.trace.brokerRequestIdHash === undefined)) return false;
+    if (trace.brokerRequestIdHash === digest) {
+      if (execution.state !== "completed" || !isDeepStrictEqual(trace, execution.trace)) return false;
+      candidateBound = true;
+    }
+  }
+  const facts = projectCheckpointExecutions("topic.planning", checkpoint, "maintenance");
+  return candidateBound && facts.length === ids.length
+    && facts.every((fact) => !fact.conflict && ["completed", "completed_failure", "not_accepted"].includes(fact.state));
 }
 
 function isPlanningOwner(value: unknown): value is PlanningOwner {
