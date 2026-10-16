@@ -59,14 +59,17 @@ describe("workdesk layout preserves decision and media boundaries", () => {
     // CSSOM 合同覆盖真实分栏外层与触达区；实际尺寸和拖动由浏览器检查。
     const sheet = new CSSStyleSheet();
     sheet.replaceSync(readFileSync(resolve(process.cwd(), "src/client/studio-workspace.css"), "utf8"));
-    const breakpoint = Array.from(sheet.cssRules).find(rule => rule instanceof CSSMediaRule
-      && rule.conditionText === "(max-width: 700px)") as CSSMediaRule;
-    const paneSwitchRule = Array.from(breakpoint.cssRules).find(rule => rule instanceof CSSStyleRule
+    // 同一断点可分散在多个媒体规则中，触达区合同须检查全部匹配规则。
+    const mobileRules = Array.from(sheet.cssRules)
+      .filter((rule): rule is CSSMediaRule => rule instanceof CSSMediaRule
+        && rule.conditionText === "(max-width: 700px)")
+      .flatMap(rule => Array.from(rule.cssRules));
+    const paneSwitchRule = mobileRules.find(rule => rule instanceof CSSStyleRule
       && rule.selectorText === ".studio-v3 .creative-mobile-tabs button") as CSSStyleRule;
     expect(paneSwitchRule.style.getPropertyValue("min-height")).toBe("44px");
     expect(paneSwitchRule.style.getPropertyValue("background")).toBe("transparent");
     expect(paneSwitchRule.style.getPropertyValue("font-size")).toBe("14px");
-    expect(Array.from(breakpoint.cssRules).some(rule => rule instanceof CSSStyleRule
+    expect(mobileRules.some(rule => rule instanceof CSSStyleRule
       && rule.selectorText === ".studio-v3 .creative-mobile-tabs button:focus-visible")).toBe(true);
     const stacked = Array.from(sheet.cssRules).find(rule => rule instanceof CSSMediaRule
       && rule.conditionText === "(max-width: 1000px)") as CSSMediaRule;
