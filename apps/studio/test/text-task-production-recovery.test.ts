@@ -565,6 +565,7 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
       const broker = await brokerWithExecutor(workspaceRoot, executor);
       const counter = { calls: 0 };
       const worker = new RankingRecoveryWorker();
+      const studios: ProductionStudio[] = [];
       const createPipeline = (client: CodexBridgeClient) => pipeline(workspaceRoot, client, counter, undefined, worker, {
         assetSemanticRanker: new CodexAssetSemanticRanker({ client, modelId: "integration-model",
           fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]) }),
@@ -604,6 +605,7 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
         const resumedPipeline = createPipeline(resumedClient);
         const studio = new ProductionStudio({ workspaceRoot, pipeline: resumedPipeline,
           archiveStore: { list: async () => ({}) } as never, listProviders: async () => [] });
+        studios.push(studio);
         assert.deepEqual((await studio.get(failed.id))?.taskRecovery?.allowedActions, ["query_original_task"]);
         await assert.rejects(studio.retryFailedNode(failed.id, "creative-planning"), /请先查询原任务/);
         assert.equal((await studio.queryOriginalTextTask(failed.id)).taskRecovery?.taskState, "running");
@@ -620,7 +622,10 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
         assert.equal(queried.taskRecovery?.taskState, terminalState);
         if (terminalState === "completed_success") await studio.retrieveOriginalTextTask(failed.id);
         else await studio.retryFailedNode(failed.id, "creative-planning");
+        await studio.activeWork();
         const recovered = await waitForStopped(resumedPipeline, failed.id);
+        await assert.rejects(readFile(path.join(workspaceRoot, "runs", failed.id, ".execution-lease.json")),
+          (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
         assert.equal(recovered.status, "needs_human", JSON.stringify(recovered.nodeRuns.map(n => ({ nodeId: n.nodeId, status: n.status, error: n.error }))));
         assert.equal(counter.calls, upstreamCalls, "accepted treatment is retained");
         assert.deepEqual(worker.calls, ["asset.search"], "candidate search and media acquisition must not restart");
@@ -629,6 +634,8 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
         assert.equal(executor.submissions.length, 6);
       } finally {
         executor.complete(terminalState);
+        // 停点可见时仍可能有后续落盘；等真实完成链退出后才删除工作区。
+        await Promise.all(studios.map(studio => studio.activeWork()));
         await broker.close();
         await rm(workspaceRoot, { recursive: true, force: true });
       }
@@ -845,6 +852,7 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
       const workspaceRoot = await mkdtemp(path.join(tmpdir(), `vf-formal-${terminalState}-`));
       const broker = await brokerFixture(workspaceRoot);
       const treatmentCounter = { calls: 0 };
+      const studios: ProductionStudio[] = [];
       try {
         const interrupting = new TrackingClient({
           socketPath: broker.socketPath,
@@ -905,6 +913,7 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
           archiveStore: { list: async () => ({}) } as never,
           listProviders: async () => [],
         });
+        studios.push(studio);
         const peerPipeline = pipeline(workspaceRoot, resumingClient, treatmentCounter, checkpointRecoveryRequestIds);
         const peerStudio = new ProductionStudio({
           workspaceRoot,
@@ -912,6 +921,7 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
           archiveStore: { list: async () => ({}) } as never,
           listProviders: async () => [],
         });
+        studios.push(peerStudio);
         let queried = await studio.queryOriginalTextTask(failed.id);
         // accepted_unknown 也是"还没落定"：broker 此刻只是还没观察到终态，
         // 只等 running 会在负载高时提前退出，把还没落定的任务当成结论。
@@ -933,7 +943,10 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
         assert.equal(concurrent.filter((result) => result.status === "fulfilled").length, 1, "independent Studio instances must not both advance one recovery");
         const dispatched = concurrent.find((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof recovery>>> => result.status === "fulfilled")!.value;
         assert.equal(dispatched.status, "running");
+        await Promise.all(studios.map(studio => studio.activeWork()));
         const settled = await waitForStopped(resumedPipeline, failed.id);
+        await assert.rejects(readFile(path.join(workspaceRoot, "runs", failed.id, ".execution-lease.json")),
+          (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
 
         assert.notEqual(settled.status, "failed", JSON.stringify({
           nodes: settled.nodeRuns.map((node) => ({ nodeId: node.nodeId, status: node.status, error: node.error })),
@@ -962,8 +975,9 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
           }));
         }
       } finally {
-        t.mock.timers.reset();
         broker.executor.completeFirst(terminalState);
+        await Promise.all(studios.map(studio => studio.activeWork()));
+        t.mock.timers.reset();
         await broker.close();
         await rm(workspaceRoot, { recursive: true, force: true });
       }
