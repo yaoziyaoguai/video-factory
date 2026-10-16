@@ -256,6 +256,8 @@ def render_asset_video(
     scene_commands = []
     image_processing = []
     frame_counts = timeline_frame_counts(manifest["slides"])
+    subtitle_filter, subtitle_burn = _prepare_verified_subtitles(manifest, output_dir)
+    scene_start_frame = 0
     for scene, frame_count in zip(manifest["slides"], frame_counts):
         asset = scene_assets[int(scene["position"])]
         if manifest.get("audioMode") == "native_av":
@@ -278,9 +280,12 @@ def render_asset_video(
             width,
             height,
             frame_count=frame_count,
+            subtitle_filter=subtitle_filter,
+            scene_start_frame=scene_start_frame,
         )
         clips.append(clip_path)
         scene_commands.append(command)
+        scene_start_frame += frame_count
         derived_image = clips_dir / f"scene_{scene['position']:02d}.render.png"
         if str(derived_image) in command:
             image_processing.append({
@@ -292,14 +297,8 @@ def render_asset_video(
     output_file = Path(str(manifest["output_file"]))
     audio_input = render_audio_input(manifest)
     temporary_output = output_file.with_name(f"{output_file.stem}.partial{output_file.suffix}")
-    # T05：同步字幕的唯一烧录路径——已有画面结果 → 一次本地 ASS 烧录中间视频 →
-    # 现有最终音画封装。-c:v copy 的最终封装不承担字幕滤镜；滤镜或旁挂缺失时
-    # 如实记录 blocked，不回退到逐镜文字冒充同步字幕。
-    burned_clip, subtitle_burn = burn_verified_subtitles(manifest, output_dir, clips_concat_path, output_file)
-    if burned_clip is not None:
-        concat_input = ["-i", str(burned_clip)]
-    else:
-        concat_input = ["-f", "concat", "-safe", "0", "-i", str(clips_concat_path)]
+    # 字幕已随逐镜画面一起编码；最终仅拼接与封装，避免为字幕再次编码整片。
+    concat_input = ["-f", "concat", "-safe", "0", "-i", str(clips_concat_path)]
     final_command = [
         "ffmpeg",
         "-y",
@@ -334,6 +333,8 @@ def render_asset_video(
     manifest["clips_dir"] = str(clips_dir)
     manifest["clips_concat_file"] = str(clips_concat_path)
     if subtitle_burn is not None:
+        if subtitle_filter is not None:
+            subtitle_burn["status"] = "burned"
         manifest["subtitle_burn"] = subtitle_burn
     manifest["ffmpeg_scene_commands"] = scene_commands
     manifest['image_processing'] = image_processing
@@ -430,6 +431,8 @@ def render_scene_clip(
     width: int,
     height: int,
     frame_count: Optional[int] = None,
+    subtitle_filter: Optional[str] = None,
+    scene_start_frame: int = 0,
 ) -> tuple[Path, list[str]]:
     if "duration_frames" in asset:
         requested_frame_count = asset["duration_frames"]
@@ -499,6 +502,12 @@ def render_scene_clip(
     else:
         raise RuntimeError(f"Unsupported scene asset media type: {asset['media_type']}")
 
+    # ASS 使用整片时钟。先映射到全片帧号，再恢复本镜从零开始的时间戳，
+    # 跨镜字幕沿用同一份已验证时间线，不重切文本或另造逐镜字幕证据。
+    subtitle_filters = (
+        f"settb=1/{RENDER_FPS},setpts=N+{scene_start_frame},{subtitle_filter},setpts=N,"
+        if subtitle_filter is not None else ""
+    )
     command = [
         "ffmpeg",
         "-y",
@@ -511,6 +520,7 @@ def render_scene_clip(
             f"[bg][1:v]overlay=0:0,"
             f"drawbox=x=0:y={height - 10}:w='min(iw,iw*t/{duration:.3f})':h=10:"
             "color=white@0.72:t=fill,"
+            f"{subtitle_filters}"
             "format=yuv420p[v]"
         ),
         "-map",
@@ -929,10 +939,44 @@ def burn_verified_subtitles(
     clips_concat_path: Path,
     output_file: Path,
 ) -> tuple[Optional[Path], Optional[dict]]:
-    """只有 verified 的同次字幕才烧录；校验 plan 绑定，滤镜缺失如实 blocked。
+    """静帧脚本路径只编码一次；素材路径在逐镜编码时复用相同字幕校验。"""
+    subtitle_filter, subtitle_burn = _prepare_verified_subtitles(manifest, output_dir)
+    if subtitle_filter is None:
+        return None, subtitle_burn
+    burned = output_file.with_name(f"{output_file.stem}.subtitled{output_file.suffix}")
+    burned_temporary = burned.with_name(f"{burned.stem}.partial{burned.suffix}")
+    frame_count = sum(timeline_frame_counts(manifest["slides"]))
+    width, height = parse_resolution(str(manifest.get("resolution", "1080x1920")))
+    burn_command = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(clips_concat_path),
+        "-vf",
+        f"fps=30,scale={width}:{height},{subtitle_filter},format=yuv420p",
+        "-an",
+        "-frames:v",
+        str(frame_count),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        str(burned_temporary),
+    ]
+    run_atomic_ffmpeg(burn_command, burned_temporary, burned)
+    assert subtitle_burn is not None
+    subtitle_burn["status"] = "burned"
+    return burned, subtitle_burn
 
-    返回 (烧录后的中间视频路径或 None, 记录到 manifest 的烧录状态或 None)。
-    """
+
+def _prepare_verified_subtitles(manifest: dict, output_dir: Path) -> tuple[Optional[str], Optional[dict]]:
+    """核对批准的字幕及音轨，派生整片 ASS；成功编码前不宣称已烧录。"""
     voiceover_plan = manifest.get("voiceover_plan")
     if not isinstance(voiceover_plan, dict):
         return None, None
@@ -959,9 +1003,6 @@ def burn_verified_subtitles(
     if not ffmpeg_filter_available("ass"):
         # 本机 FFmpeg 无 libass：不回退逐镜文字冒充同步字幕，如实 blocked。
         return None, {"status": "blocked", "reason": "ffmpeg_missing_libass"}
-    burned = output_file.with_name(f"{output_file.stem}.subtitled{output_file.suffix}")
-    burned_temporary = burned.with_name(f"{burned.stem}.partial{burned.suffix}")
-    frame_count = sum(timeline_frame_counts(manifest["slides"]))
     width, height = parse_resolution(str(manifest.get("resolution", "1080x1920")))
     font_path = find_font_file()
     if font_path is None:
@@ -972,31 +1013,8 @@ def burn_verified_subtitles(
     ass_path = output_dir / "narration-render.ass"
     _write_bytes_durably(ass_path, cues_to_ass(subtitles.get("cues", []), width=width, height=height,
         font_name=font_name, font_size=max(12, round(56 * height / 1920))).encode("utf-8"))
-    burn_command = [
-        "ffmpeg",
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(clips_concat_path),
-        "-vf",
-        f"fps=30,scale={width}:{height},ass={_ass_filter_path(ass_path)}:fontsdir={_ass_filter_path(font_path.parent)},format=yuv420p",
-        "-an",
-        "-frames:v",
-        str(frame_count),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "23",
-        str(burned_temporary),
-    ]
-    run_atomic_ffmpeg(burn_command, burned_temporary, burned)
-    return burned, {
-        "status": "burned",
+    return f"ass={_ass_filter_path(ass_path)}:fontsdir={_ass_filter_path(font_path.parent)}", {
+        "status": "prepared",
         "assPath": str(ass_path),
         "cueCount": len(subtitles.get("cues", [])),
         "contractVersion": subtitles.get("version"),

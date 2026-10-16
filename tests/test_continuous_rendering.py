@@ -9,13 +9,71 @@ from unittest.mock import patch
 from PIL import Image
 
 from video_factory.continuous_voiceover import assemble_narration_track
-from video_factory.narration_plan import build_narration_plan
+from video_factory.narration_plan import SAMPLE_RATE, build_narration_plan
 from video_factory.renderer import attach_voiceover_plan, burn_verified_subtitles, ffmpeg_filter_available, render_script_video, render_asset_video, write_render_manifest
 from video_factory.narration_subtitles import cues_to_ass
 from test_continuous_voiceover import tone
 
 
 class ContinuousRenderingTest(unittest.TestCase):
+    def test_asset_render_encodes_each_scene_once_with_subtitles_across_the_cut(self):
+        help_result = subprocess.run(["ffmpeg", "-hide_banner", "-h", "filter=ass"],
+                                     check=True, capture_output=True, text=True)
+        if "Filter ass\n" not in help_result.stdout:
+            self.skipTest("Installed FFmpeg has no ass filter; Linux CI covers real subtitle burning")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = {"title": "跨镜字幕", "duration_target": 2, "scenes": [
+                {"position": position, "duration": 1, "narration": "", "visual_strategy": "stock", "visual_prompt": "海面"}
+                for position in (1, 2)]}
+            script_path = root / "script.json"
+            script_path.write_text(json.dumps(script))
+            track = root / "narration.wav"
+            tone(track, 2)
+            cues = [{"text": "跨镜连续字幕", "startSample": SAMPLE_RATE // 2, "endSample": SAMPLE_RATE * 3 // 2}]
+            ass = root / "narration.ass"
+            ass.write_text(cues_to_ass(cues))
+            original_ass = ass.read_bytes()
+            voice = {"layoutKey": "a" * 64, "track_path": str(track),
+                "trackSha256": hashlib.sha256(track.read_bytes()).hexdigest(),
+                "scenes": [{"position": position, "duration": 1} for position in (1, 2)],
+                "subtitles": {"version": "video-factory/narration-subtitles-v1", "status": "verified",
+                    "layoutKey": "a" * 64, "cues": cues, "sidecar": {"ass": ass.name},
+                    "sidecarSha256": {"ass": hashlib.sha256(original_ass).hexdigest()}}}
+            image = root / "image.png"
+            Image.new("RGB", (180, 320), "navy").save(image)
+            source_video = root / "source.mp4"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=navy:s=180x320:r=30",
+                "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source_video)], check=True)
+            assets = {"scene_assets": [
+                {"scene_position": 1, "media_type": "image", "provider": "pexels", "local_path": str(image)},
+                {"scene_position": 2, "media_type": "video", "provider": "pexels", "local_path": str(source_video),
+                 "source_in_frame": 30, "duration_frames": 30}]}
+            output = root / "render"
+            manifest_path = write_render_manifest(1, script_path, output, "180x320")
+            attach_voiceover_plan(manifest_path, voice)
+            with patch("video_factory.renderer.subprocess.run", wraps=subprocess.run) as calls:
+                video = render_asset_video(manifest_path, output, assets, "180x320")
+            encodes = [call.args[0] for call in calls.call_args_list if "libx264" in call.args[0]]
+            self.assertEqual(len(encodes), 2, "逐镜已经编码，字幕不得再触发整片重编码")
+            manifest = json.loads(manifest_path.read_text())
+            self.assertEqual(manifest["subtitle_burn"]["status"], "burned")
+            self.assertEqual(ass.read_bytes(), original_ass)
+            probe = json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(video)],
+                check=True, capture_output=True, text=True).stdout)
+            self.assertEqual(int(next(s for s in probe["streams"] if s["codec_type"] == "video")["nb_frames"]), 60)
+            self.assertTrue(any(s["codec_type"] == "audio" for s in probe["streams"]))
+            visible = []
+            for timestamp in ("0.25", "0.75", "1.25", "1.75"):
+                frame = subprocess.run(["ffmpeg", "-v", "error", "-ss", timestamp, "-i", str(video),
+                    "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                    check=True, capture_output=True).stdout
+                # 只核字幕区域，避开顶部 AI 标记和最下方逐镜进度线。
+                pixels = Image.frombytes("RGB", (180, 320), frame).crop((0, 220, 180, 300))
+                rgb = pixels.tobytes()
+                visible.append(any(min(rgb[index:index + 3]) > 200 for index in range(0, len(rgb), 3)))
+            self.assertEqual(visible, [False, True, True, False], "第二镜仍须按整片时间显示跨镜字幕")
+
     def test_detects_subtitle_filter_from_real_ffmpeg_columns_not_description(self):
         # FFmpeg 7/8分别有三位/两位能力标志；滤镜名在第二列，不在描述末尾。
         for flags in ("...", ".."):
