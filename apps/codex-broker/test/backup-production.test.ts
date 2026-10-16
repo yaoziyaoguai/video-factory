@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { chmod, cp, mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile, truncate } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -192,6 +193,8 @@ for index, arg in enumerate(args):
 root = args[args.index('--root') + 1]
 command = [env['REAL_NODE'], env['TEST_VERIFIER'], '--role', args[args.index('--role') + 1], '--root', mounts[root], '--logical-root', root]
 if '--codex-home' in args: command += ['--codex-home', mounts[args[args.index('--codex-home') + 1]]]
+for flag in ('--require-idle', '--require-locally-idle', '--allow-legacy', '--writer-stopped'):
+    if flag in args: command += [flag, args[args.index(flag) + 1]]
 result = subprocess.run(command, capture_output=True, text=True)
 if env.get('TEST_FINAL_GATE_GENERATION') and 'restore-verify' in mounts[root]:
     gate = pathlib.Path(env['VIDEO_FACTORY_MAINTENANCE_DIR']) / 'gate.json'
@@ -349,6 +352,426 @@ async function populateBusinessData(fixture: BackupFixture): Promise<{ finalVide
 function readManifest(fixture: BackupFixture): Promise<{ files: Array<{ path: string; sha256: string; mode: string }>; sqlite: Array<{ logical: string; integrity: string }>; formatVersion: string }> {
   return readFile(path.join(fixture.backupDir, "video-factory-full-test-backup-0001.json"), "utf8").then(JSON.parse);
 }
+
+async function verifier(fixture: BackupFixture, role: "app-workspace" | "broker-workspace", options: string[] = []) {
+  const root = role === "app-workspace" ? fixture.appRoot : fixture.brokerRoot;
+  return new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+    execFile(process.execPath, [verifierScript, "--role", role, "--root", root,
+      "--logical-root", role === "app-workspace" ? "/data/factory" : root, ...options], { cwd: repositoryRoot }, (error, stdout, stderr) => {
+      resolve({ code: typeof error?.code === "number" ? error.code : error ? 1 : 0, stdout, stderr });
+    });
+  });
+}
+
+async function updateJson(file: string, update: (value: any) => void) {
+  const value = JSON.parse(await readFile(file, "utf8"));
+  update(value);
+  await writeFile(file, JSON.stringify(value));
+}
+
+async function populateIdleBusinessData(fixture: BackupFixture) {
+  await populateBusinessData(fixture);
+  await updateJson(path.join(fixture.appRoot, "runs/run-001/run.json"), (run) => {
+    run.status = "failed";
+    run.finishedAt = "2026-10-15T00:00:00Z";
+    run.nodeRuns = [{ nodeId: "voiceover", status: "failed", startedAt: run.startedAt, finishedAt: run.finishedAt,
+      artifactIds: [], qualityGateResults: [], outcomeUncertain: false }];
+    run.creativeReviewOperations = [{ commandId: "creative-failed", requestDigest: hash("creative-failed"), action: "discuss",
+      stage: "treatment", status: "failed", acceptedAt: run.startedAt, finishedAt: run.finishedAt }];
+    run.reviewContinuationOperations = [{ commandId: "continuation-failed", requestDigest: hash("continuation-failed"),
+      action: "prepare", nodeId: "creative-planning", targetRunRevision: 2, status: "failed", acceptedAt: run.startedAt, finishedAt: run.finishedAt }];
+  });
+  const operationFile = path.join(fixture.appRoot, "runs/run-001/nodes/voiceover/model-operation.json");
+  const operation = JSON.parse(await readFile(operationFile, "utf8"));
+  await updateJson(path.join(fixture.appRoot, "checkpoints/series-showrunner", `${CHECKPOINT_KEY}.json`), (checkpoint) => {
+    checkpoint.status = "failed";
+    checkpoint.failure = { stage: "completed_failure" };
+    checkpoint.attemptedRequestIds = [operation.requestId];
+    checkpoint.requestExecutions = { [operation.requestId]: { state: "completed_failure", trace: {
+      providerId: operation.binding.providerId, modelId: operation.binding.modelId, brokerRequestIdHash: hash(operation.requestId),
+    } } };
+    checkpoint.planningOriginalOperation = operation;
+  });
+  await rm(operationFile);
+  for (const [directory, requestId] of [
+    ["codex-idempotency/deepseek", "r2"], ["models/m-123456abcdef/tasks", "r-disabled"],
+  ]) {
+    await updateJson(path.join(fixture.brokerRoot, ".video-factory", directory!, `${hash(requestId!)}.json`), (record) => {
+      record.state = "completed";
+      delete record.uncertainty;
+      record.outcome = { ok: false, status: 422, message: "Historical terminal provider failure" };
+    });
+  }
+}
+
+async function treeBytes(root: string): Promise<Record<string, string>> {
+  const result: Record<string, string> = {};
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const target = path.join(root, entry.name);
+    if (entry.isDirectory()) for (const [relative, value] of Object.entries(await treeBytes(target))) result[`${entry.name}/${relative}`] = value;
+    else result[entry.name] = await sha256Of(target);
+  }
+  return result;
+}
+
+describe("explicit cold-upgrade idle verification", () => {
+  it("keeps default recovery semantics and requires the explicit boolean option", async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateBusinessData(fixture);
+      for (const role of ["app-workspace", "broker-workspace"] as const) {
+        const baseline = await verifier(fixture, role);
+        assert.equal(baseline.code, 0, baseline.stderr);
+        assert.equal(Object.hasOwn(JSON.parse(baseline.stdout), "quiescent"), false);
+        const disabled = await verifier(fixture, role, ["--require-idle", "false"]);
+        assert.equal(disabled.code, 0, disabled.stderr);
+        assert.deepEqual(JSON.parse(disabled.stdout), JSON.parse(baseline.stdout));
+        const strict = await verifier(fixture, role, ["--require-idle", "true"]);
+        assert.equal(strict.code, 1, strict.stdout);
+        assert.equal(strict.stdout, "");
+      }
+      for (const options of [["--require-idle"], ["--require-idle", "yes"], ["--require-idle", "TRUE"]]) {
+        assert.equal((await verifier(fixture, "app-workspace", options)).code, 1);
+      }
+    } finally { await fixture.dispose(); }
+  });
+
+  it("accepts reliably terminal history, preserves summaries and never repairs source records", async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateIdleBusinessData(fixture);
+      // 正在服务的 broker 必须保留 owner fence；进程活性由调用方独立检查。
+      await writeFile(path.join(fixture.brokerRoot, ".video-factory/codex-idempotency/deepseek/.owner.lock"), JSON.stringify({ pid: 42, token: "live-owner" }));
+      const beforeApp = await treeBytes(fixture.appRoot), beforeBroker = await treeBytes(fixture.brokerRoot);
+      for (const role of ["app-workspace", "broker-workspace"] as const) {
+        const baseline = await verifier(fixture, role);
+        assert.equal(baseline.code, 0, baseline.stderr);
+        const strict = await verifier(fixture, role, ["--require-idle", "true"]);
+        assert.equal(strict.code, 0, strict.stderr);
+        assert.deepEqual(JSON.parse(strict.stdout), { ...JSON.parse(baseline.stdout), quiescent: true });
+      }
+      assert.deepEqual(await treeBytes(fixture.appRoot), beforeApp);
+      assert.deepEqual(await treeBytes(fixture.brokerRoot), beforeBroker);
+      await assert.rejects(readFile(path.join(fixture.appRoot, "series/series.json")), { code: "ENOENT" });
+    } finally { await fixture.dispose(); }
+  });
+
+  const appCases: Array<readonly [string, (fixture: BackupFixture) => Promise<unknown>]> = [
+    ...["pending", "running", "needs_human", "paused", "stale", "awaiting_spend_approval", "approval_invalidated", "future_status"].map((status) =>
+      [`run ${status}`, (fixture: BackupFixture) => updateJson(path.join(fixture.appRoot, "runs/run-001/run.json"), (run) => { run.status = status; })] as const),
+    ...["running", "pending", "needs_human", "awaiting_spend_approval", "stale", "future_status"].map((status) =>
+      [`node ${status} hidden under terminal run`, (fixture: BackupFixture) => updateJson(path.join(fixture.appRoot, "runs/run-001/run.json"), (run) => { run.nodeRuns[0].status = status; })] as const),
+    ["terminal node with unresolved provider outcome", (fixture) => updateJson(path.join(fixture.appRoot, "runs/run-001/run.json"), (run) => { run.nodeRuns[0].outcomeUncertain = true; })],
+    ["unknown creative command", (fixture) => updateJson(path.join(fixture.appRoot, "runs/run-001/run.json"), (run) => { run.creativeReviewOperations[0].status = "unknown"; })],
+    ["active creative command", (fixture) => updateJson(path.join(fixture.appRoot, "runs/run-001/run.json"), (run) => { run.creativeReviewOperations[0].status = "running"; })],
+    ["accepted continuation command", (fixture) => updateJson(path.join(fixture.appRoot, "runs/run-001/run.json"), (run) => { run.reviewContinuationOperations[0].status = "accepted"; })],
+    ["unfinished duration transaction", (fixture) => updateJson(path.join(fixture.appRoot, "runs/run-001/run.json"), (run) => { run.creativeReviewOperations[0].durationChange = { phase: "prepared" }; })],
+    ...[".execution-lease.json", ".execution-lease.json.lock", "run.lock", "run.json.tmp-123-fixture"].map((name) =>
+      [`lease or partial write ${name}`, (fixture: BackupFixture) => writeFile(path.join(fixture.appRoot, "runs/run-001", name), "{}") ] as const),
+    ["lease in an unlisted scratch directory", async (fixture) => {
+      await mkdir(path.join(fixture.appRoot, "runs/scratch"));
+      await mkdir(path.join(fixture.appRoot, "runs/scratch/.execution-lease.json.lock"));
+    }],
+    ["malformed series store", async (fixture) => {
+      await mkdir(path.join(fixture.appRoot, "series"));
+      await writeFile(path.join(fixture.appRoot, "series/series.json"), "{}");
+    }],
+    ...["in_production", "paused", "unknown"].map((status) => [`series episode ${status}`, async (fixture: BackupFixture) => {
+      await mkdir(path.join(fixture.appRoot, "series"));
+      await writeFile(path.join(fixture.appRoot, "series/series.json"), JSON.stringify({ version: 2,
+        series: [{ id: "series-001", status: "active", episodes: [{ id: "ep-1", status, episodeNumber: 1 }] }] }));
+    }] as const),
+    ...["runReservation", "editLease"].map((lease) => [`series ${lease}`, async (fixture: BackupFixture) => {
+      await mkdir(path.join(fixture.appRoot, "series"));
+      await writeFile(path.join(fixture.appRoot, "series/series.json"), JSON.stringify({ version: 2,
+        series: [{ id: "series-001", status: "active", episodes: [{ id: "ep-1", status: "ready", episodeNumber: 1, [lease]: { id: "active" } }] }] }));
+    }] as const),
+    ["unknown opportunity status", (fixture) => writeFile(path.join(fixture.appRoot, "opportunities/opportunities.json"), JSON.stringify({ version: 1,
+      opportunities: [{ candidate: { id: "topic-1", status: "future_status", score: { final: 1 } }, updatedAt: "2026-10-15T00:00:00Z" }] }))],
+    ...["running", "awaiting_user", "unknown"].map((status) => [`planning checkpoint ${status}`, (fixture: BackupFixture) =>
+      updateJson(path.join(fixture.appRoot, "checkpoints/series-showrunner", `${CHECKPOINT_KEY}.json`), (checkpoint) => { checkpoint.status = status; })] as const),
+    ["failed planning checkpoint with unknown request", (fixture) => updateJson(path.join(fixture.appRoot, "checkpoints/series-showrunner", `${CHECKPOINT_KEY}.json`), (checkpoint) => {
+      checkpoint.requestExecutions.r2.state = "unknown";
+    })],
+    ["nested node planning checkpoint with unknown request", async (fixture) => {
+      const directory = path.join(fixture.appRoot, "runs/run-001/nodes/voiceover/agent-loop-checkpoints");
+      await mkdir(directory);
+      const checkpoint = JSON.parse(await readFile(path.join(fixture.appRoot, "checkpoints/series-showrunner", `${CHECKPOINT_KEY}.json`), "utf8"));
+      checkpoint.requestExecutions.r2.state = "unknown";
+      await writeFile(path.join(directory, `${CHECKPOINT_KEY}.json`), JSON.stringify(checkpoint));
+    }],
+    ...["prepared", "submitted", "provider_succeeded", "unknown", "future_state"].map((state) => [`paid ledger item ${state}`, (fixture: BackupFixture) =>
+      updateJson(path.join(fixture.appRoot, "runs/run-001/nodes/voiceover/.voice-operations", `${hash("voice-fixture")}.json`), (ledger) => {
+        ledger.completed = false; ledger.items[0].state = state;
+      })] as const),
+    ["materialized but unfinished paid ledger", (fixture) => updateJson(path.join(fixture.appRoot, "runs/run-001/nodes/voiceover/.voice-operations", `${hash("voice-fixture")}.json`), (ledger) => { ledger.completed = false; })],
+  ];
+  for (const [name, mutate] of appCases) it(`refuses ${name} without writing or reporting quiescent`, async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateIdleBusinessData(fixture);
+      await mutate(fixture);
+      const before = await treeBytes(fixture.appRoot);
+      const result = await verifier(fixture, "app-workspace", ["--require-idle", "true"]);
+      assert.equal(result.code, 1, name + result.stdout);
+      assert.equal(result.stdout, "");
+      assert.doesNotMatch(result.stderr, /FAKE-KEY/);
+      assert.deepEqual(await treeBytes(fixture.appRoot), before);
+    } finally { await fixture.dispose(); }
+  });
+
+  for (const directory of ["codex-idempotency/deepseek", "codex-idempotency/custom", "models/m-abcdef123456/tasks",
+    "models/m-123456abcdef/tasks", "models/m-fedcba654321/tasks"]) {
+    for (const state of ["accepted", "accepted_unknown", "running", "future_state"]) it(`refuses ${state} in ${directory}`, async () => {
+      const fixture = await buildFixture();
+      try {
+        await populateIdleBusinessData(fixture);
+        const source = path.join(fixture.brokerRoot, ".video-factory/codex-idempotency/deepseek", `${hash("r2")}.json`);
+        const target = path.join(fixture.brokerRoot, ".video-factory", directory);
+        await mkdir(target, { recursive: true });
+        const value = JSON.parse(await readFile(source, "utf8"));
+        const storeId = `vfs_store_${hash(directory).slice(0, 32)}`;
+        // 各 store 原有绑定保持一致，只新增一条未终结请求。
+        let existingStore: string;
+        try { existingStore = await readFile(path.join(target, ".store-id"), "utf8"); }
+        catch { existingStore = storeId; await writeFile(path.join(target, ".store-id"), storeId); }
+        value.requestId = "active-cold-request"; value.state = state;
+        value.binding.storeId = existingStore;
+        value.binding.providerId = directory.split("/")[1];
+        value.uncertainty = { localExecutionEndedAt: "2026-10-15T00:00:00Z" };
+        delete value.outcome;
+        await writeFile(path.join(target, `${hash(value.requestId)}.json`), JSON.stringify(value));
+        const result = await verifier(fixture, "broker-workspace", ["--require-idle", "true"]);
+        assert.equal(result.code, 1, result.stdout);
+        assert.equal(result.stdout, "");
+      } finally { await fixture.dispose(); }
+    });
+  }
+
+  it("rejects pending session materialization while default recovery still accepts it", async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateIdleBusinessData(fixture);
+      const session = path.join(fixture.brokerRoot, ".video-factory/codex-sessions/deepseek", `${hash(SESSION_HANDLE)}.json`);
+      await rm(session);
+      assert.equal((await verifier(fixture, "broker-workspace")).code, 0);
+      const strict = await verifier(fixture, "broker-workspace", ["--require-idle", "true"]);
+      assert.equal(strict.code, 1, strict.stdout);
+      await assert.rejects(readFile(session), { code: "ENOENT" });
+    } finally { await fixture.dispose(); }
+  });
+
+  it("allows materialized/terminal-failed paid history and reads idle series without persisting normalization", async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateIdleBusinessData(fixture);
+      await updateJson(path.join(fixture.appRoot, "runs/run-001/nodes/voiceover/.voice-operations", `${hash("voice-fixture")}.json`), (ledger) => {
+        ledger.completed = false;
+        ledger.items.push({ itemRequestId: "terminal-paid-failure", providerId: "minimax-tts-v1", modelId: "speech-02-hd", state: "terminal_failed" });
+      });
+      await mkdir(path.join(fixture.appRoot, "series"));
+      const seriesFile = path.join(fixture.appRoot, "series/series.json");
+      await writeFile(seriesFile, JSON.stringify({ version: 1, series: [{ id: "series-001", status: "active", episodes: [
+        { id: "episode-1", episodeNumber: 1, status: "ready" }, { id: "episode-2", episodeNumber: 2, status: "planned" },
+      ] }] }));
+      const before = await treeBytes(fixture.appRoot);
+      const result = await verifier(fixture, "app-workspace", ["--require-idle", "true"]);
+      assert.equal(result.code, 0, result.stderr);
+      assert.deepEqual(await treeBytes(fixture.appRoot), before);
+    } finally { await fixture.dispose(); }
+  });
+
+  it("rejects unfinished document commands, then accepts their reliably terminal failure", async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateIdleBusinessData(fixture);
+      const directory = path.join(fixture.appRoot, "runs/run-001/nodes/publish-package/document-commands");
+      await mkdir(directory, { recursive: true });
+      const identity = { action: "revise", actor: "fixture", input: { expectedRunRevision: 3, expectedVersionId: "publish-v1" } };
+      const value = { ...identity, version: "video-factory/document-command-v1", commandId: "copy-edit", requestDigest: hash(JSON.stringify(identity)),
+        state: "created", createdAt: "2026-10-15T00:00:00Z", updatedAt: "2026-10-15T00:00:00Z" };
+      const file = path.join(directory, `${hash(JSON.stringify(value.commandId))}.json`);
+      for (const state of ["created", "pending", "completed", "unknown"]) {
+        await writeFile(file, JSON.stringify({ ...value, state }));
+        assert.equal((await verifier(fixture, "app-workspace", ["--require-idle", "true"])).code, 1, state);
+      }
+      await writeFile(file, JSON.stringify({ ...value, state: "failed", error: { stage: "not_accepted" } }));
+      const result = await verifier(fixture, "app-workspace", ["--require-idle", "true"]);
+      assert.equal(result.code, 0, result.stderr);
+    } finally { await fixture.dispose(); }
+  });
+
+  it("requires settled matching publishing journal and receipt, preserving uncertain failures", async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateIdleBusinessData(fixture);
+      const directory = path.join(fixture.appRoot, "runs/run-001/publishing");
+      await mkdir(directory);
+      const journal = { version: "video-factory/publish-journal-v1", runId: "run-001", requestId: "publish-1", requestDigest: hash("publish-1"),
+        state: "completed", createdAt: "2026-10-15T00:00:00Z", deliveries: [{ platformId: "bilibili", status: "needs_config" }] };
+      const batch = { id: "publish-1", runId: "run-001", status: "failed", createdAt: journal.createdAt, deliveries: journal.deliveries };
+      const journalFile = path.join(directory, "publish-1.journal.json"), batchFile = path.join(directory, "publish-1.json");
+      await writeFile(journalFile, JSON.stringify(journal));
+      assert.equal((await verifier(fixture, "app-workspace", ["--require-idle", "true"])).code, 1);
+      await writeFile(batchFile, JSON.stringify(batch));
+      const good = await verifier(fixture, "app-workspace", ["--require-idle", "true"]);
+      assert.equal(good.code, 0, good.stderr);
+      for (const changes of [{ state: "running" }, { state: "unknown" }, { inProgressPlatformId: "bilibili" },
+        { deliveries: [{ platformId: "bilibili", status: "failed" }] }, { requestId: "wrong-request" }]) {
+        await writeFile(journalFile, JSON.stringify({ ...journal, ...changes }));
+        assert.equal((await verifier(fixture, "app-workspace", ["--require-idle", "true"])).code, 1, JSON.stringify(changes));
+      }
+    } finally { await fixture.dispose(); }
+  });
+
+  it("reads only latest real planning graph states and rejects unfinished/unknown SQLite state without writes", async () => {
+    const fixture = await buildFixture();
+    const { SqliteSaver } = await import("@langchain/langgraph-checkpoint-sqlite");
+    const { createCreativePlanningGraph, initialPlanningGraphState } = await import("../../../packages/production-pipeline/src/creative-planning.js");
+    const { planningThreadId } = await import("../../../packages/production-pipeline/src/creative-planning-store.js");
+    let saver: InstanceType<typeof SqliteSaver> | undefined;
+    try {
+      await populateIdleBusinessData(fixture);
+      await mkdir(path.join(fixture.appRoot, "planning"));
+      const database = path.join(fixture.appRoot, "planning/checkpoints.sqlite");
+      saver = SqliteSaver.fromConnString(database);
+      const forbidden = async (): Promise<never> => { throw new Error("test must not execute ports"); };
+      const graph = createCreativePlanningGraph({ checkpointer: saver, ports: {
+        treatment: forbidden, screenwriter: forbidden, director: forbidden, compile: forbidden,
+        searchCandidates: forbidden, rank: forbidden, integrateDirector: forbidden,
+      } });
+      const inputDigest = hash("fixture-planning-input");
+      const config = { configurable: { thread_id: planningThreadId("run-001", inputDigest) } };
+      const initial = initialPlanningGraphState({ runId: "run-001", inputDigest, durationRange: { minSeconds: 20, maxSeconds: 40 } });
+      await graph.updateState(config, initial, "treatment");
+      const unfinished = await verifier(fixture, "app-workspace", ["--require-idle", "true"]);
+      assert.equal(unfinished.code, 1, unfinished.stdout);
+      await graph.updateState(config, { ...initial, stage: "compile", executablePlan: { artifactId: "plan-1", output: {} } }, "compile");
+      // 模拟调用方只读挂载；仅 readonly SQL 连接在可写 FS 上仍可更新 SHM 的 reader marks。
+      for (const file of [database, database + "-wal", database + "-shm"]) await chmod(file, 0o444);
+      await chmod(path.dirname(database), 0o555);
+      const before = await treeBytes(fixture.appRoot);
+      const complete = await verifier(fixture, "app-workspace", ["--require-idle", "true"]);
+      assert.equal(complete.code, 0, complete.stderr);
+      assert.ok(JSON.parse(complete.stdout).planningSqlite.checkpoints.length >= 2, "history remains included in recovery summary");
+      assert.deepEqual(await treeBytes(fixture.appRoot), before);
+      await chmod(path.dirname(database), 0o755);
+      for (const file of [database, database + "-wal", database + "-shm"]) await chmod(file, 0o644);
+      saver.db.close(); saver = undefined;
+      saver = SqliteSaver.fromConnString(database);
+      const latest = await saver.getTuple(config);
+      assert.ok(latest);
+      const checkpoint = { ...latest.checkpoint, id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        channel_values: { ...latest.checkpoint.channel_values, future_pending_state: "unknown" } };
+      await saver.put(latest.config, checkpoint, latest.metadata!);
+      assert.equal((await verifier(fixture, "app-workspace", ["--require-idle", "true"])).code, 1);
+    } finally {
+      await chmod(path.join(fixture.appRoot, "planning"), 0o755).catch(() => undefined);
+      saver?.db.close(); await fixture.dispose();
+    }
+  });
+
+  it("matches completed audio-review evidence to its original prepared request without replay", async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateIdleBusinessData(fixture);
+      const checkpoint = JSON.parse(await readFile(path.join(fixture.appRoot, "checkpoints/series-showrunner", `${CHECKPOINT_KEY}.json`), "utf8"));
+      const operation = checkpoint.planningOriginalOperation;
+      const directory = path.join(fixture.appRoot, "runs/run-001/.audio-review-requests");
+      await mkdir(directory);
+      operation.audioInputBinding = { version: "video-factory/audio-review-input-v1", requestId: operation.requestId,
+        modelId: operation.binding.modelId, videoSha256: hash("video"), audioSha256: hash("audio"), durationMs: 30000 };
+      await writeFile(path.join(directory, `${operation.requestId}.json`), JSON.stringify(operation));
+      assert.equal((await verifier(fixture, "app-workspace", ["--require-idle", "true"])).code, 1);
+      const result = { ...operation.audioInputBinding, version: "video-factory/audio-review-result-v1", kind: "request_failed", requestState: "settled" };
+      const file = path.join(directory, `${operation.requestId}.result.json`);
+      await writeFile(file, JSON.stringify(result));
+      const before = await treeBytes(fixture.appRoot);
+      const good = await verifier(fixture, "app-workspace", ["--require-idle", "true"]);
+      assert.equal(good.code, 0, good.stderr);
+      assert.deepEqual(await treeBytes(fixture.appRoot), before);
+      for (const mutation of [{ requestState: "unknown" }, { audioSha256: hash("other audio") }, { requestId: "other-request" }]) {
+        await writeFile(file, JSON.stringify({ ...result, ...mutation }));
+        assert.equal((await verifier(fixture, "app-workspace", ["--require-idle", "true"])).code, 1);
+      }
+    } finally { await fixture.dispose(); }
+  });
+
+  it("keeps local quiescence distinct from unresolved remote outcomes", async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateBusinessData(fixture);
+      const before = await treeBytes(fixture.brokerRoot);
+      const local = await verifier(fixture, "broker-workspace", ["--require-locally-idle", "true"]);
+      assert.equal(local.code, 0, local.stderr);
+      const report = JSON.parse(local.stdout);
+      assert.equal(report.localQuiescent, true);
+      assert.equal(Object.hasOwn(report, "quiescent"), false);
+      assert.equal(report.stores.flatMap((store: any) => store.records).filter((value: any) => value.state === "accepted").length, 2);
+      assert.equal((await verifier(fixture, "broker-workspace", ["--require-idle", "true"])).code, 1);
+      assert.deepEqual(await treeBytes(fixture.brokerRoot), before);
+      for (const stop of [undefined, "invalid", 0, "2999-01-01T00:00:00Z"]) {
+        await updateJson(path.join(fixture.brokerRoot, ".video-factory/codex-idempotency/deepseek", `${hash("r2")}.json`), (value) => {
+          value.uncertainty = stop === undefined ? undefined : { localExecutionEndedAt: stop };
+        });
+        assert.equal((await verifier(fixture, "broker-workspace", ["--require-locally-idle", "true"])).code, 1);
+      }
+    } finally { await fixture.dispose(); }
+  });
+
+  it("reads legacy stores only explicitly, never fabricates binding, and gates retired unknown work", async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateIdleBusinessData(fixture);
+      const directory = path.join(fixture.brokerRoot, ".video-factory/codex-idempotency/retired");
+      await mkdir(directory);
+      const accepted = { version: 1, requestId: "legacy-accepted", digest: hash("legacy-accepted"), state: "accepted" };
+      const completed = { version: 1, requestId: "legacy-completed", digest: hash("legacy-completed"), state: "completed",
+        outcome: { ok: false, status: 422, message: "Historical failure" } };
+      for (const value of [accepted, completed]) await writeFile(path.join(directory, `${hash(value.requestId)}.json`), JSON.stringify(value));
+      const before = await treeBytes(fixture.brokerRoot);
+      assert.equal((await verifier(fixture, "broker-workspace")).code, 1);
+      const backup = await verifier(fixture, "broker-workspace", ["--allow-legacy", "true"]);
+      assert.equal(backup.code, 0, backup.stderr);
+      assert.equal(Object.hasOwn(JSON.parse(backup.stdout), "quiescent"), false);
+      const store = JSON.parse(backup.stdout).stores.find((item: any) => item.name === "default/retired");
+      assert.equal(store.storeId, null); assert.equal(store.legacy, true);
+      assert.equal(store.records.every((item: any) => item.legacyVersion === 1 && !Object.hasOwn(item, "binding")), true);
+      const localArgs = ["--require-locally-idle", "true", "--allow-legacy", "true"];
+      assert.equal((await verifier(fixture, "broker-workspace", localArgs)).code, 1);
+      const stopped = await verifier(fixture, "broker-workspace", [...localArgs, "--writer-stopped", "true"]);
+      assert.equal(stopped.code, 0, stopped.stderr);
+      assert.equal(JSON.parse(stopped.stdout).localQuiescent, true);
+      assert.deepEqual(await treeBytes(fixture.brokerRoot), before);
+      for (const options of [["--writer-stopped", "true"], ["--require-idle", "true", "--writer-stopped", "true"],
+        ["--require-idle", "true", "--require-locally-idle", "true"]]) assert.equal((await verifier(fixture, "broker-workspace", options)).code, 1);
+      await updateJson(path.join(directory, `${hash("legacy-accepted")}.json`), (value) => { value.version = 3; });
+      assert.equal((await verifier(fixture, "broker-workspace", [...localArgs, "--writer-stopped", "true"])).code, 1, "retired proof cannot excuse a malformed v3 binding");
+    } finally { await fixture.dispose(); }
+  });
+
+  it("validates legacy v2 session authority without constructing a v3 binding", async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateIdleBusinessData(fixture);
+      const file = path.join(fixture.brokerRoot, ".video-factory/codex-idempotency/deepseek", `${hash("r-session")}.json`);
+      await updateJson(file, (value) => { value.version = 2; delete value.binding; });
+      const result = await verifier(fixture, "broker-workspace", ["--allow-legacy", "true", "--require-idle", "true"]);
+      assert.equal(result.code, 0, result.stderr);
+      await updateJson(file, (value) => { value.sessionRecord.taskKind = "creative-discussion"; });
+      assert.equal((await verifier(fixture, "broker-workspace", ["--allow-legacy", "true"])).code, 1);
+    } finally { await fixture.dispose(); }
+  });
+
+  for (const uncertain of [true, "false"]) it(`refuses a completed broker record carrying uncertain=${uncertain}`, async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateIdleBusinessData(fixture);
+      await updateJson(path.join(fixture.brokerRoot, ".video-factory/codex-idempotency/deepseek", `${hash("r2")}.json`), (value) => { value.outcome.outcomeUncertain = uncertain; });
+      assert.equal((await verifier(fixture, "broker-workspace", ["--require-idle", "true"])).code, 1);
+    } finally { await fixture.dispose(); }
+  });
+});
 
 describe("production offline backup (R2)", () => {
   const reviewedCorruptions: Array<[string, (fixture: BackupFixture) => Promise<unknown>]> = [
@@ -660,6 +1083,21 @@ print(rows)
     });
   }
 
+  it("ignores an unrelated active broker while discovering VideoFactory writers", async () => {
+    const fixture = await buildFixture();
+    try {
+      await populateBusinessData(fixture);
+      const result = await fixture.runBackup({ VIDEO_FACTORY_BACKUP_SOURCE_DESCRIPTOR: "", TEST_EXTRA_UNITS: JSON.stringify({
+        "token-talk-codex-broker.service": { Environment: "TOKEN_TALK_WORKSPACE=/srv/token-talk", EnvironmentFiles: "/etc/token-talk/broker.env (ignore_errors=no)",
+          ExecStart: "/opt/token-talk/bin/broker", ActiveState: "active", SubState: "running", MainPID: "1234", ControlGroup: "/system.slice/token-talk-codex-broker.service" },
+      }) });
+      assert.equal(result.code, 0, result.stderr);
+      const manifest = JSON.parse(await readFile(path.join(fixture.backupDir, "video-factory-full-test-backup-0001.json"), "utf8"));
+      assert.equal(manifest.roles.filter((role: { role: string }) => role.role === "broker-workspace").length, 1);
+      assert.doesNotMatch(JSON.stringify(manifest), /token-talk/);
+    } finally { await fixture.dispose(); }
+  });
+
   it("resolves configured root B instead of an existing default A, including retired and extra brokers", async () => {
     const fixture = await buildFixture();
     try {
@@ -704,7 +1142,7 @@ print(rows)
       await populateBusinessData(fixture);
       const database = path.join(fixture.appRoot, "planning/checkpoints.sqlite");
       await mkdir(path.dirname(database));
-      holder = spawn(process.execPath, ["--input-type=module", "--eval", `
+      holder = spawn(process.execPath, ["--expose-gc", "--input-type=module", "--eval", `
         import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
         const saver = SqliteSaver.fromConnString(process.argv[1]);
         saver.setup(); saver.db.pragma('wal_autocheckpoint=0'); saver.db.pragma('wal_checkpoint(TRUNCATE)');
@@ -712,8 +1150,12 @@ print(rows)
           channel_values: { runId: 'run-001', approved: true, pending: 'audit' }, channel_versions: {}, versions_seen: {} };
         await saver.put({ configurable: { thread_id: 'creative-planning:run-001:fixture' } }, checkpoint,
           { source: 'loop', step: 2, parents: {} });
-        process.stdout.write('ready\\n'); setInterval(() => {}, 1000);
-      `, database], { cwd: repositoryRoot, env: { PATH: path.dirname(process.execPath) }, stdio: ["ignore", "pipe", "pipe"] });
+        // 由关闭回调持有连接；只保活进程会让 GC 关闭 SQLite 并删除 WAL。
+        process.stdin.resume();
+        process.stdin.once('end', () => saver.db.close());
+        // 等当前模块求值结束后再 GC，保证 WAL 由 fixture 生命周期持有。
+        setImmediate(() => { global.gc(); process.stdout.write('ready\\n'); });
+      `, database], { cwd: repositoryRoot, env: { PATH: path.dirname(process.execPath) }, stdio: ["pipe", "pipe", "pipe"] });
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error("planning WAL holder timeout")), 10_000);
         holder!.stdout!.on("data", (chunk) => { if (chunk.toString().includes("ready")) { clearTimeout(timer); resolve(); } });
@@ -741,7 +1183,15 @@ print(rows)
         console.log(JSON.stringify(value.checkpoint.channel_values)); saver.db.close();
       `, path.join(restore, "app-workspace/planning/checkpoints.sqlite")], { cwd: repositoryRoot });
       assert.deepEqual(JSON.parse(stdout), { runId: "run-001", approved: true, pending: "audit" });
-    } finally { holder?.kill("SIGKILL"); await fixture.dispose(); }
+    } finally {
+      try {
+        if (holder && holder.exitCode === null && holder.signalCode === null) {
+          const closed = once(holder, "close");
+          holder.stdin!.end();
+          await closed;
+        }
+      } finally { await fixture.dispose(); }
+    }
   });
 
   const failureScenarios: Array<{ name: string; overrides: Record<string, string>; expected: RegExp; gate?: "draining" }> = [

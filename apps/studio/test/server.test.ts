@@ -2107,6 +2107,62 @@ describe("Studio API", () => {
     await app.close();
   });
 
+  it("closes a live nonterminal SSE stream before waiting for HTTP shutdown", async () => {
+    let unsubscribed = false;
+    const app = buildStudioApp({ service: fakeService({
+      getRun: async () => runDetail("needs_human"),
+      subscribe: () => () => { unsubscribed = true; },
+    }) });
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const response = await fetch(`${address}/api/runs/run-1/events`);
+    const reader = response.body!.getReader();
+    await reader.read();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        app.close(),
+        new Promise<never>((_resolve, reject) => { deadline = setTimeout(() => reject(new Error("SSE blocked shutdown")), 1_000); }),
+      ]);
+      assert.equal(unsubscribed, true);
+      while (!(await reader.read()).done) { /* 消费已发送的帧，确认服务端正常结束流。 */ }
+    } finally {
+      clearTimeout(deadline);
+      await reader.cancel();
+      app.server.closeAllConnections();
+      await app.close();
+    }
+  });
+
+  it("does not open an SSE stream when its initial snapshot finishes during shutdown", async () => {
+    let snapshotReady!: () => void;
+    let finishSnapshot!: () => void;
+    const started = new Promise<void>((resolve) => { snapshotReady = resolve; });
+    const waiting = new Promise<void>((resolve) => { finishSnapshot = resolve; });
+    let unsubscribed = false;
+    const app = buildStudioApp({ service: fakeService({
+      getRun: async () => { snapshotReady(); await waiting; return runDetail("needs_human"); },
+      subscribe: () => () => { unsubscribed = true; },
+    }) });
+    let preClose!: () => void;
+    const closingStarted = new Promise<void>((resolve) => { preClose = resolve; });
+    app.addHook("preClose", async () => { preClose(); });
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const responding = fetch(`${address}/api/runs/run-1/events`, { signal: AbortSignal.timeout(2_000) });
+    await started;
+    const closing = app.close();
+    await closingStarted;
+    finishSnapshot();
+    const response = await responding;
+    try {
+      assert.equal(response.status, 503);
+      assert.equal(unsubscribed, true);
+    } finally {
+      await response.body?.cancel();
+      app.server.closeAllConnections();
+      await closing;
+    }
+  });
+
   it("buffers a terminal event emitted while the initial SSE snapshot is loading", async () => {
     let listener: ((run: StudioRunDetail) => void) | undefined;
     let unsubscribed = false;

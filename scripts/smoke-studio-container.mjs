@@ -50,4 +50,7 @@ try {
   await Promise.race([completion, delay(2000)]);
   if (!closed) child.kill("SIGKILL");
   await completion;
+  assert.equal(child.signalCode, null, `Studio did not close gracefully: ${child.signalCode}`);
+  assert.equal(child.exitCode, 0, `Studio shutdown failed: ${diagnostic}`);
 }
+console.log("Production Studio handled SIGTERM and exited naturally with code 0.");

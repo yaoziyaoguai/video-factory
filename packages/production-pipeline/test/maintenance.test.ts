@@ -398,6 +398,45 @@ describe("shared maintenance coordinator", { concurrency: false }, () => {
     });
   });
 
+  it("uses inherited setgid permissions when the service forbids explicit setgid syscalls", async (t) => {
+    const { directory, coordinator } = await fixture(t);
+    const originalMkdir = fs.mkdir;
+    const originalChmod = fs.chmod;
+    const denied = () => Object.assign(new Error("RestrictSUIDSGID denied explicit setgid"), { code: "EPERM" });
+    const mkdirMock = t.mock.method(fs, "mkdir", async (target: string, options: { mode?: number; recursive?: boolean }) => {
+      if ((options?.mode ?? 0) & 0o2000) throw denied();
+      let existed = true;
+      try { await stat(target); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        existed = false;
+      }
+      const created = await originalMkdir(target, options);
+      if (!existed && ((await stat(path.dirname(target))).mode & 0o2000)) {
+        // 在非 Linux 测试机模拟内核继承；服务本身仍禁止显式设置该位。
+        await originalChmod(target, 0o2770);
+      }
+      return created;
+    });
+    const chmodMock = t.mock.method(fs, "chmod", async (target: string, mode: number) => {
+      if (mode & 0o2000) throw denied();
+      await originalChmod(target, mode);
+    });
+    syncBuiltinESMExports();
+    try {
+      await coordinator.announceStartup();
+      await coordinator.withAdmission("sandboxed-work", async () => undefined);
+      const report = await coordinator.report({ complete: true });
+      assert.equal(report.quiescent, true);
+      assert.equal(report.globalCount, 0);
+      assert.equal((await stat(path.join(directory, "services"))).mode & 0o7777, 0o2770);
+      await withMaintenanceLock(directory, async () => {
+        assert.equal((await stat(path.join(directory, ".admission.lock"))).mode & 0o7777, 0o2770);
+      });
+    } finally {
+      mkdirMock.mock.restore(); chmodMock.mock.restore(); syncBuiltinESMExports();
+    }
+  });
+
   it("orders a contending process admission after a locked DRAINING transition", { timeout: 30_000 }, async (t) => {
     const { root, directory, coordinator } = await fixture(t);
     const closer = await childActor(t, root, directory, "drain-under-lock");

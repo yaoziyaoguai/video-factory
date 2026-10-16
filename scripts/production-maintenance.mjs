@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createHash } from 'node:crypto';
 import { request } from 'node:http';
 import { readFile, readdir, open } from 'node:fs/promises';
 import path from 'node:path';
@@ -7,10 +8,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 /** 部署只通过共享模块切门禁；网络观察发生在锁外，冻结证明在同锁内复核。 */
 export function maintenanceControl(shared, directory, readHealth = localHealth) {
   const { MAINTENANCE_ADMISSION_PROTOCOL: protocol, withMaintenanceLock, readMaintenanceGate,
-    readMaintenanceHolders, transitionMaintenanceGate, transitionMaintenanceGateLocked } = shared;
+    readMaintenanceHolders, transitionMaintenanceGateLocked } = shared;
   const lock = (operation) => withMaintenanceLock(directory, operation);
   const recordPath = (owner) => {
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(owner)) throw new Error('Invalid deployment owner.');
+    if (typeof owner !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(owner)) throw new Error('Invalid deployment owner.');
     return path.join(directory, `deployment-${owner}.json`);
   };
   const gateFor = async (owner, states) => {
@@ -25,7 +26,7 @@ export function maintenanceControl(shared, directory, readHealth = localHealth) 
     if (!Array.isArray(endpoints) || endpoints.some((endpoint) => typeof endpoint !== 'string')
       || new Set(endpoints).size !== endpoints.length) throw new Error('Maintenance endpoints are invalid or duplicated.');
     const reports = [];
-    const health = await Promise.all(endpoints.map(async (endpoint) => {
+    const results = await Promise.allSettled(endpoints.map(async (endpoint) => {
       const value = await readHealth(endpoint);
       if (!value || typeof value !== 'object' || (value.status !== undefined && value.status !== 'ok')) throw new Error('Health response is invalid or degraded.');
       const visit = (status) => {
@@ -44,6 +45,10 @@ export function maintenanceControl(shared, directory, readHealth = localHealth) 
       visit(value.maintenance);
       return { endpoint, release: value.release ?? null, serviceId: value.maintenance.serviceId };
     }));
+    // 失败也必须等所有观察结束，避免返回后仍有服务报告写入与恢复操作并发。
+    const failed = results.find((result) => result.status === 'rejected');
+    if (failed) throw failed.reason;
+    const health = results.map((result) => result.value);
     if (new Set(reports.map((item) => item.serviceId)).size !== reports.length) {
       throw new Error('Live services report duplicate identities.');
     }
@@ -85,12 +90,175 @@ export function maintenanceControl(shared, directory, readHealth = localHealth) 
   };
   const deploymentRecord = async (owner) => {
     const record = JSON.parse(await readFile(recordPath(owner), 'utf8'));
-    if (record.protocol !== protocol || record.owner !== owner || !Array.isArray(record.previous)
-      || !Array.isArray(record.serviceIds) || record.serviceIds.some((id) => typeof id !== 'string')
-      || (record.previous.length === 0 && record.bootstrap !== true)) throw new Error('Deployment recovery record is invalid.');
+    if (!isRecord(record) || record.protocol !== protocol || record.owner !== owner || !Array.isArray(record.previous)
+      || !Array.isArray(record.serviceIds) || record.serviceIds.some((id) => typeof id !== 'string')) {
+      throw new Error('Deployment recovery record is invalid.');
+    }
+    if (record.kind === 'cold-upgrade') {
+      validateColdEvidence(record.cold, 'cold-upgrade');
+      if (record.bootstrap !== false || record.previous.length !== 0 || record.serviceIds.length !== 0
+        || (record.retryOf !== undefined && typeof record.retryOf !== 'string')) {
+        throw new Error('Cold deployment recovery record is invalid.');
+      }
+    } else if (record.kind !== undefined || (record.previous.length === 0 && record.bootstrap !== true)) {
+      throw new Error('Deployment recovery record is invalid.');
+    }
     return record;
   };
+  const abortPath = (owner) => {
+    recordPath(owner);
+    return path.join(directory, `deployment-cold-abort-${owner}.json`);
+  };
+  const abortRecord = async (owner, original) => {
+    const record = JSON.parse(await readFile(abortPath(owner), 'utf8'));
+    if (!isRecord(record) || record.protocol !== protocol || record.kind !== 'cold-abort' || record.owner !== owner
+      || record.frozenGate?.state !== 'frozen' || record.frozenGate.owner !== owner
+      || !Number.isSafeInteger(record.frozenGate.generation) || record.frozenGate.generation < 2
+      || !Array.isArray(record.serviceReports)
+      || record.serviceReports.some((item) => !isRecord(item) || !isText(item.name)
+        || path.basename(item.name) !== item.name || !item.name.endsWith('.json') || !/^[a-f0-9]{64}$/.test(item.sha256 ?? ''))
+      || new Set(record.serviceReports.map((item) => item.name)).size !== record.serviceReports.length) {
+      throw new Error('Cold abort recovery record is invalid.');
+    }
+    validateColdEvidence(record.cold, 'cold-abort');
+    bindColdAbort(record.cold, original.cold);
+    return record;
+  };
+  const coldHistory = async (owner) => {
+    const entries = [];
+    const seen = new Set();
+    while (owner !== undefined) {
+      if (seen.has(owner)) throw new Error('Cold retry recovery history is cyclic.');
+      seen.add(owner);
+      const record = await deploymentRecord(owner);
+      if (record.kind !== 'cold-upgrade') throw new Error('Existing deployment is not a cold upgrade.');
+      if (entries.length && !sameColdSource(entries.at(-1).record.cold, record.cold)) {
+        throw new Error('Cold retry source differs from its recovery history.');
+      }
+      entries.push({ record, aborted: await abortRecord(owner, record) });
+      owner = record.retryOf;
+    }
+    return entries;
+  };
+  const checkColdFiles = async (history, currentOwner) => {
+    const allowed = new Set(['.admission.lock', 'gate.json', 'holders.json', 'services']);
+    for (const { record } of history) {
+      allowed.add(path.basename(recordPath(record.owner)));
+      allowed.add(path.basename(abortPath(record.owner)));
+    }
+    if (currentOwner !== undefined) allowed.add(path.basename(recordPath(currentOwner)));
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (!allowed.has(entry.name) || (['.admission.lock', 'services'].includes(entry.name) ? !entry.isDirectory() : !entry.isFile())) {
+        throw new Error('Existing maintenance state is outside the cold recovery history.');
+      }
+    }
+  };
+  const serviceFiles = async () => {
+    const names = await readdir(path.join(directory, 'services'), { withFileTypes: true }).catch((error) => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+    const reports = [];
+    for (const entry of names.sort((left, right) => left.name.localeCompare(right.name))) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) throw new Error('Unexpected cold service report file.');
+      const bytes = await readFile(path.join(directory, 'services', entry.name));
+      reports.push({ name: entry.name, sha256: createHash('sha256').update(bytes).digest('hex'), bytes });
+    }
+    return reports;
+  };
+  const coldEligibility = async (owner, identity) => {
+    recordPath(owner);
+    const entries = (await readdir(directory)).filter((entry) => entry !== '.admission.lock');
+    if (entries.length === 0) return undefined;
+    if (entries.includes(path.basename(recordPath(owner))) || entries.includes(path.basename(abortPath(owner)))) {
+      throw new Error('Cold deployment owner already has recovery evidence; use a new owner.');
+    }
+    const gate = await readMaintenanceGate(directory);
+    if (gate.state !== 'open' || gate.owner === owner) {
+      throw new Error('Existing maintenance requires its own explicit recovery and a new cold owner.');
+    }
+    await empty();
+    const history = await coldHistory(gate.owner);
+    const { record, aborted } = history[0];
+    if (!sameColdSource(identity, record.cold)
+      || !sameGate(gate, { ...aborted.frozenGate, state: 'open', generation: aborted.frozenGate.generation + 1 })) {
+      throw new Error('Cold retry source or gate differs from the aborted deployment.');
+    }
+    await checkColdFiles(history);
+    const reports = await serviceFiles();
+    const known = new Map(aborted.serviceReports.map((item) => [item.name, item.sha256]));
+    if (reports.length !== known.size || reports.some((item) => known.get(item.name) !== item.sha256)) {
+      throw new Error('Cold-aborted service reports changed; explicit recovery is required.');
+    }
+    return gate.owner;
+  };
+  const bindCandidate = (record, endpoints, release) => {
+    if (record.kind !== 'cold-upgrade') return;
+    if (release !== record.cold.candidateRelease) throw new Error('Cold candidate release does not match its evidence.');
+    if (!Array.isArray(endpoints) || endpoints.length !== record.cold.candidateEndpoints.length
+      || new Set(endpoints).size !== endpoints.length
+      || endpoints.some((endpoint) => !record.cold.candidateEndpoints.includes(endpoint))) {
+      throw new Error('Cold candidate endpoints must match every recorded app and broker endpoint.');
+    }
+  };
   return {
+    async coldPreflight(owner, identity) {
+      const snapshot = structuredClone(identity);
+      validateColdIdentity(snapshot, true);
+      return lock(async () => { await coldEligibility(owner, snapshot); });
+    },
+    async coldEnter(owner, evidence) {
+      const file = recordPath(owner);
+      const cold = structuredClone(evidence);
+      validateColdEvidence(cold, 'cold-upgrade');
+      freshColdEvidence(cold);
+      return lock(async () => {
+        const retryOf = await coldEligibility(owner, cold);
+        freshColdEvidence(cold);
+        await writeRecord(file, { protocol, owner, kind: 'cold-upgrade', bootstrap: false, previous: [], serviceIds: [],
+          cold, ...(retryOf === undefined ? {} : { retryOf }), startedAt: new Date().toISOString() });
+        // 旧进程已由宿主停止；共享锁覆盖完整初始化，v2 写者不能观察中间的 OPEN。
+        if (retryOf === undefined) await transitionMaintenanceGateLocked(directory, 'open', owner);
+        await transitionMaintenanceGateLocked(directory, 'draining', owner);
+        return transitionMaintenanceGateLocked(directory, 'frozen', owner);
+      });
+    },
+    async coldAbort(owner, evidence) {
+      const file = abortPath(owner);
+      const cold = structuredClone(evidence);
+      validateColdEvidence(cold, 'cold-abort');
+      freshColdEvidence(cold);
+      return lock(async () => {
+        const gate = await gateFor(owner, ['frozen']);
+        const record = await deploymentRecord(owner);
+        if (record.kind !== 'cold-upgrade') throw new Error('Cold abort requires a cold upgrade record.');
+        bindColdAbort(cold, record.cold);
+        await empty();
+        const history = await coldHistory(record.retryOf);
+        if (history.length && !sameColdSource(record.cold, history[0].record.cold)) {
+          throw new Error('Cold retry source differs from its recovery history.');
+        }
+        await checkColdFiles(history, owner);
+        const known = new Map((history[0]?.aborted.serviceReports ?? []).map((item) => [item.name, item.sha256]));
+        const reports = await serviceFiles();
+        for (const item of reports) {
+          if (known.get(item.name) === item.sha256) continue;
+          const report = JSON.parse(item.bytes.toString('utf8'));
+          if (!isRecord(report) || report.protocol !== protocol || !isText(report.serviceId)
+            || item.name !== `${encodeURIComponent(report.serviceId)}.json` || !sameGate(report.gateView, gate)
+            || !isTimestamp(report.updatedAt) || report.ownCount !== 0 || report.globalCount !== 0
+            || !Array.isArray(report.inflight) || report.inflight.length !== 0
+            || !Array.isArray(report.holders) || report.holders.length !== 0) {
+            throw new Error('Cold abort service report is active or has unknown provenance.');
+          }
+        }
+        freshColdEvidence(cold);
+        // 先持久化中止证明再开门；失败保留 FROZEN，不能将未完成中止当作可重试的 OPEN。
+        await writeRecord(file, { protocol, owner, kind: 'cold-abort', cold, frozenGate: gate,
+          serviceReports: reports.map(({ name, sha256 }) => ({ name, sha256 })), abortedAt: new Date().toISOString() });
+        return transitionMaintenanceGateLocked(directory, 'open', owner);
+      });
+    },
     async initialize(owner) {
       return lock(async () => {
         try { await readMaintenanceGate(directory); }
@@ -129,24 +297,28 @@ export function maintenanceControl(shared, directory, readHealth = localHealth) 
     },
     async freeze(owner, endpoints) {
       const record = await deploymentRecord(owner);
+      if (record.kind === 'cold-upgrade') throw new Error('Cold upgrade must freeze as part of cold-enter.');
       if (JSON.stringify([...endpoints].sort()) !== JSON.stringify(record.previous.map((item) => item.endpoint).sort())) {
         throw new Error('Freeze must inspect every original live endpoint.');
       }
       return settle(owner, endpoints, ['draining'], 'frozen', record.previous);
     },
     async verify(owner, endpoints, release) {
-      await deploymentRecord(owner);
+      const record = await deploymentRecord(owner);
+      bindCandidate(record, endpoints, release);
       if (endpoints.length === 0) throw new Error('Verification requires the candidate live services.');
       return settle(owner, endpoints, ['frozen'], 'frozen', endpoints.map((endpoint) => ({ endpoint, release })));
     },
     async reopen(owner, endpoints, release) {
-      await deploymentRecord(owner);
+      const record = await deploymentRecord(owner);
+      bindCandidate(record, endpoints, release);
       if (endpoints.length === 0) throw new Error('Reopening requires the candidate live services.');
       const expected = endpoints.map((endpoint) => ({ endpoint, release }));
       return settle(owner, endpoints, ['frozen'], 'open', expected);
     },
     async recover(owner) {
       const record = await deploymentRecord(owner);
+      if (record.kind === 'cold-upgrade') throw new Error('Cold upgrade requires explicit cold-abort evidence; maintenance remains closed.');
       const before = await lock(() => gateFor(owner, ['draining', 'frozen']));
       if (record.bootstrap && before.state === 'frozen') {
         throw new Error('Failed first installation has no prior services to verify; maintenance remains closed.');
@@ -167,6 +339,70 @@ export function maintenanceControl(shared, directory, readHealth = localHealth) 
       });
     },
   };
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isText(value) {
+  return typeof value === 'string' && value.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function isAbsolutePath(value) {
+  return isText(value) && path.isAbsolute(value);
+}
+
+function isTimestamp(value) {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+}
+
+function validateColdIdentity(identity, requireEndpoints) {
+  if (!isRecord(identity) || typeof identity.previousRelease !== 'string' || !/^[a-f0-9]{40}$/.test(identity.previousRelease)
+    || typeof identity.candidateRelease !== 'string' || !/^[a-f0-9]{40}$/.test(identity.candidateRelease)
+    || identity.previousRelease === identity.candidateRelease || !isRecord(identity.container)
+    || typeof identity.container.image !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(identity.container.image)
+    || !isAbsolutePath(identity.brokerRelease)) {
+    throw new Error('Cold deployment source and candidate identities are invalid.');
+  }
+  if (requireEndpoints) {
+    const endpoints = identity.candidateEndpoints;
+    if (!Array.isArray(endpoints) || endpoints.length !== 2 || new Set(endpoints).size !== 2
+      || !endpoints.includes('http://127.0.0.1:4317/api/health')
+      || !endpoints.some((endpoint) => typeof endpoint === 'string' && endpoint.startsWith('unix:') && isAbsolutePath(endpoint.slice(5)))) {
+      throw new Error('Cold candidate endpoints require the exact app health URL and an absolute broker socket.');
+    }
+  }
+}
+
+function validateColdEvidence(evidence, kind) {
+  validateColdIdentity(evidence, kind === 'cold-upgrade');
+  if (evidence.kind !== kind || !isText(evidence.container.id)
+    || !isRecord(evidence.ingress) || evidence.ingress.closed !== true || evidence.ingress.drained !== true
+    || !isAbsolutePath(evidence.ingress.statePath) || !isRecord(evidence.integrity)
+    || evidence.integrity.complete !== true || evidence.integrity.quiescent !== true || !isTimestamp(evidence.observedAt)
+    || (kind === 'cold-upgrade' ? evidence.bootstrap !== false || evidence.writersStopped !== true
+      : evidence.writersRestored !== true || evidence.candidateWritersStopped !== true
+        || (evidence.bootstrap !== undefined && evidence.bootstrap !== false))) {
+    throw new Error(`Invalid ${kind} host evidence.`);
+  }
+}
+
+function freshColdEvidence(evidence) {
+  const age = Date.now() - Date.parse(evidence.observedAt);
+  if (age < 0 || age > 120_000) throw new Error('Cold host evidence is stale or from the future.');
+}
+
+function sameColdSource(left, right) {
+  return left.previousRelease === right.previousRelease && left.container.image === right.container.image
+    && left.brokerRelease === right.brokerRelease;
+}
+
+function bindColdAbort(aborted, original) {
+  if (!sameColdSource(aborted, original) || aborted.candidateRelease !== original.candidateRelease
+    || aborted.ingress.statePath !== original.ingress.statePath || Date.parse(aborted.observedAt) < Date.parse(original.observedAt)) {
+    throw new Error('Cold abort evidence does not match the original deployment bindings.');
+  }
 }
 
 function sameGate(left, right) {
@@ -221,7 +457,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const shared = await import(pathToFileURL(path.resolve(modulePath)).href);
     const control = maintenanceControl(shared, directory);
     let result;
-    if (command === 'status') result = await control.status();
+    if (['cold-preflight', 'cold-enter', 'cold-abort'].includes(command)) {
+      if (args.length !== 1) throw new Error(`${command} requires exactly one host evidence JSON path.`);
+      const evidence = JSON.parse(await readFile(args[0], 'utf8'));
+      const operation = { 'cold-preflight': 'coldPreflight', 'cold-enter': 'coldEnter', 'cold-abort': 'coldAbort' }[command];
+      result = await control[operation](owner, evidence);
+    }
+    else if (command === 'status') result = await control.status();
     else if (command === 'initialize') result = await control.initialize(owner);
     else if (command === 'preflight') result = await control.preflight(args);
     else if (command === 'drain') result = await control.drain(owner, args);

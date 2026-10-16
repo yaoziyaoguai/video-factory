@@ -151,7 +151,7 @@ export {
 export type { CodexBridgeClientOptions, CodexPreparedOperation, CodexPreparedObservation, CodexTaskExecution, CodexTaskKind, CodexTaskRequestOptions, CodexTaskSession, CodexTaskTrace, ModelCandidateAttempt } from "./codex-chat.js";
 export { brokerModelCandidates } from "./codex-task-binding.js";
 export type { AgentLoopTrace, AgentLoopIterationTrace, RoleAudit, RoleAuditIssue } from "./codex-chat.js";
-export { RoleAgentLoopError, runRoleAgentLoop, validateRoleAudit } from "./role-agent-loop.js";
+export { RoleAgentLoopError, isRoleAgentCheckpointStructureValid, roleContractDigest, runRoleAgentLoop, validateRoleAudit } from "./role-agent-loop.js";
 export { fallbackRequestId, isModelProviderFailure, publicModelFailure } from "./model-fallback.js";
 export { FallbackCodexTaskClient } from "./fallback-task-client.js";
 export type { FallbackTaskClientCandidate, FallbackTaskClientOptions } from "./fallback-task-client.js";

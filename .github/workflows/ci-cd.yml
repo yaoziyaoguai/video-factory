@@ -2,6 +2,20 @@ name: CI/CD
 
 on:
   workflow_dispatch:
+    inputs:
+      upgrade_mode:
+        description: "Maintenance protocol upgrade (cold temporarily closes this site)"
+        type: choice
+        options: [online, cold]
+        default: online
+      expected_previous_release:
+        description: "Required for cold: exact last successful production SHA"
+        type: string
+        default: ""
+      backup_existing_data:
+        description: "Back up existing data (disable only for an authorized cold release without historical data retention)"
+        type: boolean
+        default: true
   pull_request:
     branches: [main]
   push:
@@ -19,6 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Pull the official Node base image before running tests
+        run: timeout 120 docker pull docker.io/library/node:22-alpine
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -43,7 +59,7 @@ jobs:
         run: chmod -R go-rwx apps packages src examples
       - run: >-
           docker build
-          --build-arg NODE_IMAGE=public.ecr.aws/docker/library/node:22-alpine
+          --build-arg NODE_IMAGE=docker.io/library/node:22-alpine
           --file docker/Dockerfile
           --tag video-factory:ci .
       - name: Boot production Studio as the image user without network or credentials
@@ -126,16 +142,25 @@ jobs:
           PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}
           RELEASE_SHA: ${{ github.sha }}
           DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+          UPGRADE_MODE: ${{ inputs.upgrade_mode || 'online' }}
+          EXPECTED_PREVIOUS_RELEASE: ${{ inputs.expected_previous_release || '' }}
+          BACKUP_EXISTING_DATA: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.backup_existing_data) == 'false' && 'false' || 'true' }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 40m
-          envs: PROJECT_PATH,PUBLIC_HEALTH_URL,RELEASE_SHA,DEPLOY_RUN
+          envs: PROJECT_PATH,PUBLIC_HEALTH_URL,RELEASE_SHA,DEPLOY_RUN,UPGRADE_MODE,EXPECTED_PREVIOUS_RELEASE,BACKUP_EXISTING_DATA
           script: |
             set -euo pipefail
             umask 077
             [[ "$DEPLOY_RUN" =~ ^[0-9]+-[0-9]+$ ]]
+            [[ "$UPGRADE_MODE" == online || "$UPGRADE_MODE" == cold ]]
+            [[ "$BACKUP_EXISTING_DATA" == true || "$BACKUP_EXISTING_DATA" == false ]]
+            [[ "$BACKUP_EXISTING_DATA" == true || "$UPGRADE_MODE" == cold ]]
+            if [[ "$UPGRADE_MODE" == cold ]]; then
+              [[ "$EXPECTED_PREVIOUS_RELEASE" =~ ^[0-9a-f]{40}$ ]]
+            fi
             bundle_path="/tmp/video-factory-release-${DEPLOY_RUN}.bundle"
             release_path="${PROJECT_PATH}.release"
             trap 'rm -f "$bundle_path"' EXIT
@@ -166,7 +191,8 @@ jobs:
             fi
             # 在 checkout 之前保存旧版解析配置，并以容器实际环境覆盖已更新的 env 文件。
             rollback_config="/opt/video-factory/codex-broker/deployment/before-${DEPLOY_RUN}.json"
-            install -d -m 0700 "$(dirname "$rollback_config")"
+            # 共享维护目录在其下；仅允许 broker 组穿越，配置文件仍受 umask 077 保护。
+            install -d -o root -g vf-bridge -m 0710 "$(dirname "$rollback_config")"
             if docker inspect video_factory_prod >/dev/null 2>&1; then
               VIDEO_FACTORY_CODEX_SOCKET_GID="$(getent group vf-bridge | cut -d: -f3)" \
                 docker compose --project-name video-factory --env-file "$PROJECT_PATH/.env.docker.prod" \
@@ -202,6 +228,10 @@ jobs:
             test "$(git -C "$release_path" rev-parse HEAD)" = "$RELEASE_SHA"
             VIDEO_FACTORY_ENV_FILE="$PROJECT_PATH/.env.docker.prod" \
               VIDEO_FACTORY_ROLLBACK_COMPOSE_FILE="$rollback_config" \
+              VIDEO_FACTORY_UPGRADE_MODE="$UPGRADE_MODE" \
+              VIDEO_FACTORY_BACKUP_EXISTING_DATA="$BACKUP_EXISTING_DATA" \
+              VIDEO_FACTORY_EXPECTED_PREVIOUS_RELEASE="$EXPECTED_PREVIOUS_RELEASE" \
+              VIDEO_FACTORY_LAST_RELEASE_FILE="$last_release" \
               PUBLIC_HEALTH_URL="$PUBLIC_HEALTH_URL" \
               bash "$release_path/scripts/deploy-production.sh"
             printf '%s\n' "$RELEASE_SHA" > "$last_release.partial"
