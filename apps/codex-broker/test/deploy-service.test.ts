@@ -872,6 +872,16 @@ rollback_broker
     assert.doesNotMatch(deployJob, /git fetch origin/);
   });
 
+  it("preserves an explicit boolean cold backup opt-out across Actions and SSH while defaulting to backup", async () => {
+    const workflow = await readFile(path.join(repositoryRoot, ".github", "workflows", "ci-cd.yml"), "utf8");
+    assert.match(workflow, /backup_existing_data:\n\s+description:.*\n\s+type: boolean\n\s+default: true/);
+    assert.ok(workflow.includes("BACKUP_EXISTING_DATA: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.backup_existing_data) == 'false' && 'false' || 'true' }}"));
+    assert.match(workflow, /envs: [^\n]*EXPECTED_PREVIOUS_RELEASE,BACKUP_EXISTING_DATA/);
+    assert.ok(workflow.includes('[[ "$BACKUP_EXISTING_DATA" == true || "$BACKUP_EXISTING_DATA" == false ]]'));
+    assert.ok(workflow.includes('[[ "$BACKUP_EXISTING_DATA" == true || "$UPGRADE_MODE" == cold ]]'));
+    assert.ok(workflow.includes('VIDEO_FACTORY_BACKUP_EXISTING_DATA="$BACKUP_EXISTING_DATA"'));
+  });
+
   for (const scenario of ["tracked", "untracked"] as const) {
     it(`refuses to build a release checkout with ${scenario} changes`, async () => {
       const stderr = await runDirtyReleaseScenario(scenario);
@@ -1254,6 +1264,81 @@ exit 42
       " up --detach --remove-orphans --force-recreate app", "ingress:restore"]);
     assert.doesNotMatch(result.trace, /cold:restored/);
   });
+
+  it("skips historical backup only after cold stop proofs and still verifies and opens the candidate", async () => {
+    const result = await runDeployFailureScenario("success", { cold: true, expectSuccess: true,
+      env: { VIDEO_FACTORY_BACKUP_EXISTING_DATA: "false", TEST_BACKUP_FAILS: "1" } });
+    assert.match(result.stdout, /Historical data backup explicitly disabled for this cold release; no full backup was created/);
+    assert.doesNotMatch(result.trace, /backup:|cold:restored/);
+    assertTraceOrder(result.trace, ["cold:prepare", "ingress:enter", "cold:idle", "cold:stop-app", " stop --timeout -1 app",
+      "cold:stop-brokers", "cold:stopped", "->", "systemctl:restart vf-deepseek-codex-broker",
+      " up --detach --remove-orphans --force-recreate app", "ingress:restore"]);
+    assert.equal(result.appRelease, "a".repeat(40));
+    assert.equal(result.appRunning, true);
+    assert.equal(result.gateState, "open");
+    assert.match(result.gateOwner, /^deploy-/);
+    assert.equal(result.unitBackupsRemaining, false);
+  });
+
+  it("cannot bypass unproved cold writer exit by disabling historical backup", async () => {
+    const result = await runDeployFailureScenario("success", { cold: true,
+      env: { VIDEO_FACTORY_BACKUP_EXISTING_DATA: "false", TEST_COLD_FAIL: "stop-brokers" } });
+    assert.equal(result.appRunning, false);
+    assert.equal(result.gateAfter, "");
+    assert.equal(path.basename(result.currentRelease), "previous");
+    assert.doesNotMatch(result.trace, /backup:|->|systemctl:restart| up --detach|ingress:restore/);
+    assert.match(result.stderr, /Cold stop was not fully verified/);
+  });
+
+  it("rolls back a cold candidate that fails exact release verification even when backup is disabled", async () => {
+    const result = await runDeployFailureScenario("success", { cold: true,
+      env: { VIDEO_FACTORY_BACKUP_EXISTING_DATA: "false", TEST_APP_RELEASE_MISMATCH: "1" } });
+    assert.match(result.stderr, /does not report the candidate release/);
+    assert.doesNotMatch(result.trace, /backup:/);
+    assertTraceOrder(result.trace, ["cold:stopped", "->", " up --detach --remove-orphans --force-recreate app",
+      "cold:rollback-stopped", "cold:restored", "ingress:restore"]);
+    assert.equal(path.basename(result.currentRelease), "previous");
+    assert.equal(result.appRelease, "b".repeat(40));
+    assert.equal(result.appRunning, true);
+    assert.equal(result.gateState, "open");
+  });
+
+  for (const cold of [false, true]) {
+    it(`rejects historical backup opt-out before side effects for ${cold ? "bootstrap" : "online"} deployment`, async () => {
+      const result = await runDeployFailureScenario("success", { cold,
+        env: { VIDEO_FACTORY_BACKUP_EXISTING_DATA: "false", VIDEO_FACTORY_DEPLOYMENT_MODE: cold ? "bootstrap" : "release" } });
+      assert.match(result.stderr, /Skipping historical backup requires an explicit cold release/);
+      assert.equal(result.trace, "");
+      assert.equal(result.gateAfter, result.gateBefore);
+      assert.equal(path.basename(result.currentRelease), "previous");
+      assert.equal(result.appRelease, "b".repeat(40));
+      assert.equal(result.appRunning, true);
+    });
+
+    it(`still requires a successful backup when explicitly enabled for ${cold ? "cold" : "online"} deployment`, async () => {
+      const result = await runDeployFailureScenario("success", { cold,
+        env: { VIDEO_FACTORY_BACKUP_EXISTING_DATA: "true", TEST_BACKUP_FAILS: "1" } });
+      assert.match(result.trace, /backup:/);
+      assert.match(result.stderr, /Full backup or its restore verification failed; not switching artifacts/);
+      assert.doesNotMatch(result.trace, /->/);
+      assert.equal(path.basename(result.currentRelease), "previous");
+      assert.equal(result.appRelease, "b".repeat(40));
+      assert.equal(result.appRunning, true);
+      assert.equal(result.gateState, "open");
+    });
+  }
+
+  for (const value of ["0", "1", "yes", "False"]) {
+    it(`rejects an invalid historical backup value before touching services: ${value}`, async () => {
+      const result = await runDeployFailureScenario("success", { cold: true,
+        env: { VIDEO_FACTORY_BACKUP_EXISTING_DATA: value } });
+      assert.match(result.stderr, /VIDEO_FACTORY_BACKUP_EXISTING_DATA must be true or false/);
+      assert.equal(result.trace, "");
+      assert.equal(result.gateAfter, result.gateBefore);
+      assert.equal(path.basename(result.currentRelease), "previous");
+      assert.equal(result.appRunning, true);
+    });
+  }
 
   it("restores the untouched legacy service after cold idle refuses, without stopping any writer", async () => {
     const result = await runDeployFailureScenario("success", { cold: true, env: { TEST_COLD_FAIL: "idle" } });

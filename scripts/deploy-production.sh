@@ -10,6 +10,15 @@ deployment_mode="${VIDEO_FACTORY_DEPLOYMENT_MODE:-release}"
 upgrade_mode="${VIDEO_FACTORY_UPGRADE_MODE:-online}"
 expected_previous_release="${VIDEO_FACTORY_EXPECTED_PREVIOUS_RELEASE:-}"
 last_release_file="${VIDEO_FACTORY_LAST_RELEASE_FILE:-}"
+backup_existing_data="${VIDEO_FACTORY_BACKUP_EXISTING_DATA:-true}"
+if [[ "$backup_existing_data" != "true" && "$backup_existing_data" != "false" ]]; then
+  echo "VIDEO_FACTORY_BACKUP_EXISTING_DATA must be true or false." >&2
+  exit 1
+fi
+if [[ "$backup_existing_data" == "false" && ( "$upgrade_mode" != "cold" || "$deployment_mode" != "release" ) ]]; then
+  echo "Skipping historical backup requires an explicit cold release." >&2
+  exit 1
+fi
 if [[ "$upgrade_mode" != "online" && "$upgrade_mode" != "cold" ]]; then
   echo "VIDEO_FACTORY_UPGRADE_MODE must be online or cold." >&2
   exit 1
@@ -789,7 +798,9 @@ if ! stop_writers; then
 fi
 fi
 
-if [[ -n "$previous_image" || "${#active_broker_sockets[@]}" -gt 0 ]]; then
+if [[ "$backup_existing_data" == "false" ]]; then
+  echo "Historical data backup explicitly disabled for this cold release; no full backup was created."
+elif [[ -n "$previous_image" || "${#active_broker_sockets[@]}" -gt 0 ]]; then
   echo "Running the offline full backup with isolated restore verification."
   if ! env \
     VIDEO_FACTORY_MAINTENANCE_DIR="$maintenance_directory" \
