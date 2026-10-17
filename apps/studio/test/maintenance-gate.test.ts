@@ -12,6 +12,10 @@ import { ProductionStudio, type StudioPipelinePort } from "../src/server/product
 import type { DispatchedProductionRun, ProductionBrief } from "@video-factory/production-pipeline";
 import type { WorkflowRun } from "@video-factory/workflow-core";
 import { seriesCausalHarness, seriesInput } from "./fixtures/series-causal-harness.js";
+import { TrendGateway } from "../src/server/trend-gateway.js";
+import { TrendOpportunityAgent } from "../src/server/trend-opportunity-agent.js";
+import { TrendStudio } from "../src/server/trend-studio.js";
+import { setTimeout as delay } from "node:timers/promises";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -127,6 +131,49 @@ describe("MaintenanceGate", () => {
 });
 
 describe("maintenance admission in the studio app", () => {
+  it("finishes a real trend refresh and releases admission even when one source ignores abort", async (t) => {
+    const { directory, gate } = await setup(t);
+    const stalled = deferred<Response>();
+    let cancelLateBody = 0;
+    let modelCalls = 0;
+    let releaseDone!: Promise<void>;
+    const release = gate.release.bind(gate);
+    t.mock.method(gate, "release", (token) => { releaseDone = release(token); return releaseDone; });
+    const gateway = new TrendGateway({ timeoutMs: 50, fetcher: async (input) => String(input).includes("/douyin")
+      ? stalled.promise : new Response(JSON.stringify({ data: [], items: [] })) });
+    const trends = new TrendStudio({ repositoryRoot: directory, cachePath: path.join(directory, "candidates.json"),
+      environment: {}, now: () => new Date(), trendGateway: gateway,
+      trendAgent: new TrendOpportunityAgent({ signals: gateway,
+        model: { id: "test", generate: async () => { modelCalls += 1; return []; } } }),
+    });
+    const app = buildStudioApp({ maintenanceGate: gate,
+      service: { ...stubService, refreshTrendCandidates: () => trends.requestCandidateRefresh() } });
+    t.after(() => app.close());
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/trend-candidates/refresh" });
+      assert.equal(response.statusCode, 202);
+      const completed = await Promise.race([
+        trends.activeWork().then(() => releaseDone).then(() => true),
+        delay(1_000).then(() => false),
+      ]);
+      assert.equal(completed, true, "刷新和维护登记都必须在来源截止后结束");
+      assert.equal(trends.candidateRefreshStatus(response.json().refreshId)?.state, "succeeded");
+      assert.equal((await gate.report({ complete: true })).holders.length, 0);
+      assert.equal(modelCalls, 1);
+      const cached = await readFile(path.join(directory, "candidates.json"), "utf8");
+      stalled.resolve(new Response(new ReadableStream({ cancel() { cancelLateBody += 1; } })));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(cancelLateBody, 1, "迟到响应必须被取消，不能重新触发生成或覆盖缓存");
+      assert.equal(await readFile(path.join(directory, "candidates.json"), "utf8"), cached);
+      await drain(directory);
+      await transitionMaintenanceGate(directory, "frozen", "deploy-1");
+    } finally {
+      stalled.resolve(new Response("{}"));
+      await trends.activeWork();
+      await releaseDone;
+    }
+  });
+
   it("keeps read routes available and rejects all work routes while draining", async (t) => {
     const { directory, gate } = await setup(t);
     const app = buildStudioApp({ service: stubService, maintenanceGate: gate, maintenanceIntegrity: async () => ({ complete: true, issues: [] }) });

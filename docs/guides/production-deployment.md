@@ -20,12 +20,23 @@ Actions 的 `production` 环境使用仓库 Secrets：`SERVER_HOST`、`SERVER_US
 ## 已有 ECS 的升级前提
 
 - Docker Compose、共享 Node 22+、`vf-bridge` 组与现有 Studio 工作区已初始化。
+- Docker Engine 避开已知有 BuildKit history 崩溃缺陷的 29.3.0 / 29.3.1；本项目已验证的修复版本为 29.4.3。旧版不要用 `docker buildx history` 查询构建进度，查看 Actions 输出或当前构建进程即可。
 - `vf-deepseek-codex` 服务用户存在，能运行 `/opt/video-factory/codex-broker/bin/node`。
 - `/etc/video-factory/deepseek-codex-broker.env` 为 `root:root`、权限 `0600`，包含有效的 `DEEPSEEK_API_KEY`；配置只能经受控通道写入，不能通过 Git 分发。
 - Studio 使用项目目录下现有 `.env.docker.prod`，其登录配置和媒体服务配置不因发布被覆盖。Unsplash 可选变量为 `UNSPLASH_ACCESS_KEY`。
 - 服务器有构建和工作区备份空间。不要为了腾空间删除用户媒体、数据库或其他项目文件。
 
 从旧 OpenAI/智谱生产环境升级时，只预备 DeepSeek 用户与凭据；不要对旧 broker 制品提前启动 DeepSeek。真正的制品与 systemd unit 切换由部署脚本执行。
+
+### Docker 29.3 的 history 崩溃
+
+BuildKit 在有订阅者时软删除历史记录，会在待查询事件列表留下空条目。29.3 的排序代码未排除这些条目，查询历史可触发 `filterHistoryEvents` / `history.go:1074` 空指针并导致整个 daemon 退出；这不是应用镜像构建失败或机器内存不足的证据。
+
+上游 [BuildKit #6614](https://github.com/moby/buildkit/pull/6614) 清除空事件并加入软删除记录的集成回归。[Docker 29.4.0](https://docs.docker.com/engine/release-notes/29/#2940) 升级至包含修复的 BuildKit 0.29.0。只升级 Buildx CLI 插件不能修复内置于 Engine 的 BuildKit。
+
+宿主 Engine 升级会影响同机其他容器，须协调维护窗口。先按现有门禁排空、冻结并正常停止 app/broker，完成完整备份与隔离回读；再正常停止其他容器，升级明确指定的 Engine 和 CLI 包。不要顺带升级 containerd、清理历史记录、删除卷或重建业务容器。升级前保留原版包、容器 ID/镜像/状态与非秘密配置，候选二进制先用独立 socket、数据目录及 containerd namespace 验证启动、构建和历史查询，禁止用旧生产 daemon 重演崩溃。
+
+升级后恢复原容器和 broker，核对 Engine 版本、全部原容器身份与健康、app/broker 原 release 和零在途，再由本轮 owner 恢复门禁。若正常停止不能完成或状态不明，保留现场并停止升级，不强杀或清理维护登记；若软件包切换失败，保留维护窗口，核清停止状态后使用原版包回滚。`live-restore` 可减少部分 daemon 故障的影响，但不能代替本次缺陷修复，也不能当作跨版本升级无中断的保证。
 
 ## 验证与回滚
 

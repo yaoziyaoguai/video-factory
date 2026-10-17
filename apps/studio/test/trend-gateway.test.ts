@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import { TrendGateway } from "../src/server/trend-gateway.js";
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -10,6 +13,53 @@ function jsonResponse(value: unknown, status = 200): Response {
 }
 
 describe("TrendGateway", () => {
+  it("aborts a real stalled response body and can fetch a fresh batch afterward", async (t) => {
+    let stall = true;
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (stall && request.url === "/douyin") { response.write('{"data":['); return; }
+      response.end(JSON.stringify({ data: [{ title: "恢复来源" }], items: [{ title: "可用来源" }] }));
+    });
+    t.after(() => { server.closeAllConnections(); server.close(); });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+    const gateway = new TrendGateway({ timeoutMs: 100, environment: {
+      VIDEO_FACTORY_DAILYHOT_URL: baseUrl, VIDEO_FACTORY_NEWSNOW_URL: baseUrl,
+    } });
+    assert.deepEqual((await gateway.listSignals({ platforms: ["douyin"] })).map((item) => item.title), ["可用来源"]);
+    stall = false;
+    assert.deepEqual((await gateway.listSignals({ platforms: ["douyin"] })).map((item) => item.title), ["恢复来源", "可用来源"]);
+  });
+
+  for (const stalledPhase of ["headers", "json", "error-body"] as const) {
+    it(`settles the batch when ${stalledPhase} ignores cancellation`, async () => {
+      let signal: AbortSignal | undefined;
+      let release!: () => void;
+      const stalled = new Promise<void>((resolve) => { release = resolve; });
+      const gateway = new TrendGateway({ timeoutMs: 20, fetcher: async (input, options) => {
+        if (String(input).includes(":4444/")) return jsonResponse({ items: [{ title: "可用来源" }] });
+        signal = options!.signal!;
+        if (stalledPhase === "headers") await stalled;
+        const response = jsonResponse({ data: [{ title: "迟到来源" }] }, stalledPhase === "error-body" ? 503 : 200);
+        if (stalledPhase === "json") response.json = async () => { await stalled; return { data: [] }; };
+        if (stalledPhase === "error-body") response.arrayBuffer = async () => { await stalled; return new ArrayBuffer(0); };
+        return response;
+      } });
+      try {
+        const outcome = await Promise.race([
+          gateway.listSignals({ platforms: ["douyin"] }),
+          delay(200).then(() => "still-pending" as const),
+        ]);
+        assert.ok(signal?.aborted, "来源应收到取消信号");
+        assert.notEqual(outcome, "still-pending", "单个来源不得让整批热点永久挂起");
+        assert.deepEqual((outcome as Awaited<ReturnType<typeof gateway.listSignals>>).map((item) => item.title), ["可用来源"]);
+      } finally { release(); }
+    });
+  }
+
   it("reports local services from real health evidence", async () => {
     const plainTextResponses: Response[] = [];
     const fetcher: typeof fetch = async (input) => {

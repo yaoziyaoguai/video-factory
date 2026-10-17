@@ -61,16 +61,17 @@ export class TrendGateway {
     return Promise.all(this.services.map(async (definition) => {
       const lastCheckedAt = this.now().toISOString();
       try {
-        const response = await this.request(new URL(definition.healthPath, definition.baseUrl));
-        if (!response.ok) {
-          await drainResponse(response);
-          return statusFrom(definition, "degraded", lastCheckedAt, `HTTP ${response.status}`);
-        }
-        const itemCount = await responseItemCount(response);
-        return {
-          ...statusFrom(definition, "ready", lastCheckedAt, "健康检查通过"),
-          ...(itemCount === undefined ? {} : { itemCount }),
-        };
+        return await this.request(new URL(definition.healthPath, definition.baseUrl), async (response) => {
+          if (!response.ok) {
+            await drainResponse(response);
+            return statusFrom(definition, "degraded", lastCheckedAt, `HTTP ${response.status}`);
+          }
+          const itemCount = await responseItemCount(response);
+          return {
+            ...statusFrom(definition, "ready", lastCheckedAt, "健康检查通过"),
+            ...(itemCount === undefined ? {} : { itemCount }),
+          };
+        });
       } catch (error) {
         return statusFrom(definition, "stopped", lastCheckedAt, errorMessage(error));
       }
@@ -99,12 +100,13 @@ export class TrendGateway {
   }
 
   private async readDailyHot(definition: ServiceDefinition, platform: string): Promise<StudioTrendSignal[]> {
-    const response = await this.request(new URL(`/${platform}`, definition.baseUrl));
-    if (!response.ok) {
-      await drainResponse(response);
-      throw new Error(`DailyHot ${platform}: HTTP ${response.status}`);
-    }
-    const body = await response.json() as Record<string, unknown>;
+    const body = await this.request(new URL(`/${platform}`, definition.baseUrl), async (response) => {
+      if (!response.ok) {
+        await drainResponse(response);
+        throw new Error(`DailyHot ${platform}: HTTP ${response.status}`);
+      }
+      return await response.json() as Record<string, unknown>;
+    });
     if (body.code !== undefined && Number(body.code) !== 200) return [];
     const collectedAt = timestamp(body.updateTime, this.now());
     return array(body.data).flatMap((item, index) => {
@@ -129,12 +131,13 @@ export class TrendGateway {
   private async readNewsNow(definition: ServiceDefinition, platform: string): Promise<StudioTrendSignal[]> {
     const url = new URL("/api/s", definition.baseUrl);
     url.searchParams.set("id", platform);
-    const response = await this.request(url);
-    if (!response.ok) {
-      await drainResponse(response);
-      throw new Error(`NewsNow ${platform}: HTTP ${response.status}`);
-    }
-    const body = await response.json() as Record<string, unknown>;
+    const body = await this.request(url, async (response) => {
+      if (!response.ok) {
+        await drainResponse(response);
+        throw new Error(`NewsNow ${platform}: HTTP ${response.status}`);
+      }
+      return await response.json() as Record<string, unknown>;
+    });
     const collectedAt = timestamp(body.updatedTime, this.now());
     return array(body.items).flatMap((item, index) => {
       const record = object(item);
@@ -157,11 +160,32 @@ export class TrendGateway {
     return this.services.find((candidate) => candidate.id === id)!;
   }
 
-  private request(url: URL): Promise<Response> {
-    return this.fetcher(url, {
-      headers: { accept: "application/json, text/plain;q=0.8, text/html;q=0.5" },
-      signal: AbortSignal.timeout(this.timeoutMs),
+  private async request<T>(url: URL, consume: (response: Response) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error(`热点来源请求超过 ${this.timeoutMs}ms。`);
+        // 取消底层连接与结束等待是两件事：即使传输层没有 settle，也不能拖死整批 allSettled。
+        try { controller.abort(error); } finally { reject(error); }
+      }, this.timeoutMs);
     });
+    const operation = (async () => {
+      const response = await this.fetcher(url, {
+        headers: { accept: "application/json, text/plain;q=0.8, text/html;q=0.5" },
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) {
+        // 超时后迟到的响应不再解析；取消响应体，避免遗留连接或让旧批次重新发布。
+        void response.body?.cancel().catch(() => undefined);
+        throw controller.signal.reason;
+      }
+      return consume(response);
+    })();
+    try {
+      // 同一截止时间覆盖响应头、JSON 正文和失败响应的 drain，不能只约束 fetch 返回。
+      return await Promise.race([operation, deadline]);
+    } finally { clearTimeout(timer!); }
   }
 }
 
