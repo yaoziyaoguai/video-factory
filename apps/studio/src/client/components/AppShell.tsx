@@ -61,7 +61,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
   }, [openSearch]);
 
   return (
-    <div className={`app-shell studio-v3 studio-creation-shell${location.pathname === "/" ? " studio-home-shell" : " studio-content-shell"}${isTrendWorkspace ? " studio-trend-shell" : ""}`}>
+    <div className={`app-shell studio-v3 studio-creation-shell${location.pathname === "/" ? " studio-home-shell" : " studio-content-shell"}${location.pathname.startsWith("/projects/") ? " studio-production-shell" : ""}${isTrendWorkspace ? " studio-trend-shell" : ""}`}>
       <a className="skip-link" href="#main-content">跳到主要内容</a>
       <header className="studio-masthead">
         <NavLink className="brand" to="/" aria-label="VideoFactory 创作台">

@@ -48,6 +48,8 @@ interface NodeWorkspaceProps {
   /** 仅使用宿主逐条核实后的事实，不能凭节点名称或风险按钮推断未知请求安全。 */
   optionalReviewUncertaintySafe?: true;
   currentDelivery?: boolean;
+  /** 分区导航中被选中的阶段进入时展开，隐藏阶段不参与原生手风琴分组。 */
+  workspaceActive?: boolean;
   onDocumentReadinessChange?: (nodeId: string, versionId: string, ready: boolean) => void;
   /** 画面来源由制作页统一展示时，不在节点内重复挂载编辑会话。 */
   hideExecutionConfiguration?: boolean;
@@ -71,7 +73,7 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, onRunUpdated, characterDrama: propsCharacterDrama = false, nativeAudio = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, onDocumentReadinessChange, hideExecutionConfiguration = false, hideAgentProgress = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, onRunUpdated, characterDrama: propsCharacterDrama = false, nativeAudio = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, workspaceActive, onDocumentReadinessChange, hideExecutionConfiguration = false, hideAgentProgress = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
   onAuthorizeProductionScope = async input => { await studioApi.authorizeProductionScope(runId, input); },
   onAmendProductionScope = async (authorizationId, input) => { await studioApi.amendProductionScope(runId, authorizationId, input); },
   onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
@@ -82,6 +84,9 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     && !(currentDelivery && (node.status === "succeeded" || node.status === "needs_human"));
   const [workspaceOpen, setWorkspaceOpen] = useState(shouldOpenForAttention);
   const [inputReviewOpen, setInputReviewOpen] = useState(shouldOpenInputForAttention);
+  useEffect(() => {
+    if (workspaceActive) setWorkspaceOpen(true);
+  }, [workspaceActive]);
   const [editing, setEditing] = useState(false);
   const [editingInput, setEditingInput] = useState(false);
   const [editingDocument, setEditingDocument] = useState(false);
@@ -173,14 +178,19 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const audioCaption = audioIsCurrent
     ? nativeAudio ? "实际原声试听" : "实际配音试听"
     : nativeAudio ? "上次准备的原声" : "上次生成的配音";
+  // 画面预检也直接展示已有素材；报告与媒体仍分别取各自的当前版本。
+  const visualNode = node.id === "asset-source-review" ? nodes.find(candidate => candidate.id === "assets") : node;
+  const visualVersion = visualNode?.outputState?.versions.find(version => version.id === visualNode.outputState?.effectiveVersionId);
   const visualArtifacts = useMemo(
-    () => selectMaterializedVisualArtifacts(node, artifacts, effectiveVersion?.artifactIds),
-    [artifacts, effectiveVersion?.artifactIds, node],
+    () => visualNode ? selectMaterializedVisualArtifacts(visualNode,
+      node.id === "asset-source-review" ? (runArtifacts ?? artifacts).filter(artifact => artifact.producerNodeId === "assets") : artifacts,
+      visualVersion?.artifactIds) : [],
+    [artifacts, runArtifacts, visualVersion?.artifactIds, visualNode, node.id],
   );
-  const currentVisualArtifactIds = effectiveVersion?.artifactIds?.length ? effectiveVersion.artifactIds : node.artifactIds;
+  const currentVisualArtifactIds = visualVersion?.artifactIds?.length ? visualVersion.artifactIds : visualNode?.artifactIds ?? [];
   const visualsAreCurrent = Boolean(visualArtifacts.length
     && runStatus !== "stale"
-    && !node.outputState?.stale
+    && !visualNode?.outputState?.stale
     && visualArtifacts.every((artifact) => currentVisualArtifactIds.includes(artifact.id)));
   const spendInputs = useMemo(() => node.spendPlan?.inputVersionIds.map((versionId) => {
     const inputOwner = nodes.find((candidate) => candidate.inputState?.versions.some((version) => version.id === versionId));
@@ -596,6 +606,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
 
   return (
     <>
+{audioArtifact?.contentUrl ? <div className={audioIsCurrent ? "node-audio-preview" : "node-audio-preview is-stale"}><div><strong>{audioCaption}</strong>{!audioIsCurrent ? <small>当前文字已修改或上游已变化；继续生成后会更新声音。</small> : null}</div><audio aria-label={audioIsCurrent ? audioCaption : `${audioCaption}试听`} src={audioArtifact.contentUrl} controls preload="metadata" /></div> : null}
     {!nativeAudio && !readOnly && node.status === "needs_human"
       && node.id === (nodes.some((candidate) => candidate.id === "asset-source-review") ? "asset-source-review" : "assets")
       && nodes.some((candidate) => candidate.id === "voice" && candidate.status === "pending"
@@ -616,12 +627,13 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
     <details
       id={`node-workspace-${node.id}`}
       className={`node-workspace production-node is-${node.status}${node.outcomeUncertain ? " has-uncertain-outcome" : ""}${node.outputState?.stale ? " has-stale-output" : ""}`}
-      name={isDecisionDocument && currentDelivery ? undefined : "creator-workspaces"}
+      name={workspaceActive !== undefined || (isDecisionDocument && currentDelivery) ? undefined : "creator-workspaces"}
       aria-label={`${node.label} · ${node.role ?? "制作角色"}`}
       open={workspaceOpen}
       onToggle={(event) => {
+        // 初次挂载已展开的当前交付也会触发 toggle，只有用户展开才需要定位。
+        if (event.currentTarget.open !== workspaceOpen) revealExpandedWorkspace(event.currentTarget);
         setWorkspaceOpen(event.currentTarget.open);
-        revealExpandedWorkspace(event.currentTarget);
       }}
     >
       <summary>
@@ -808,7 +820,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
 
         <section className="node-output-preview node-creator-delivery">
           <header><div><strong>{node.id === "creative-planning" ? "规划交付目录" : `${node.role ?? "制作角色"}的交付`}</strong><small>{node.id === "creative-planning" ? "逐项查看已保存的阶段稿和正式交付；修改与确认在创作工作台进行" : deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested, nativeAudio, audioIsCurrent)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
-          {node.id === "assets" && visualArtifacts.length ? <div className={visualsAreCurrent ? "node-visual-preview" : "node-visual-preview is-stale"}>
+          {["assets", "asset-source-review"].includes(node.id) && visualArtifacts.length ? <div className={visualsAreCurrent ? "node-visual-preview" : "node-visual-preview is-stale"}>
             <header><strong>{visualsAreCurrent ? "实际素材画面" : "上次生成的素材画面"}</strong><small>{visualArtifacts.length} 个可预览素材{visualsAreCurrent ? "" : " · 将重新检查适用性，只重做不再适用的部分"}</small></header>
             <div>
               {visualArtifacts.map((artifact, index) => {
@@ -868,7 +880,6 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           {(node.id === "reference-grammar" || node.id === "publish-package") && !editing
             ? <NodeDocumentHistory nodeId={node.id} outputState={node.outputState} artifacts={artifacts} />
             : null}
-          {audioArtifact?.contentUrl ? <div className={audioIsCurrent ? "node-audio-preview" : "node-audio-preview is-stale"}><div><strong>{audioCaption}</strong>{!audioIsCurrent ? <small>当前文字已修改或上游已变化；继续生成后会更新声音。</small> : null}</div><audio aria-label={audioIsCurrent ? audioCaption : `${audioCaption}试听`} src={audioArtifact.contentUrl} controls preload="metadata" /></div> : null}
           {editing && staleDocumentEdit ? <p className="node-workspace-error" role="alert">当前交付已更新。你的未保存修改仍保留，请先复制需要保留的内容，再取消编辑、核对当前稿。</p> : null}
           {localDraftPresent ? <p className="node-document-state">{localDraftDurable ? "本标签的未保存修改已暂存，刷新后可从“编辑交付”找回。" : "未保存修改仅留在当前页面；浏览器暂存不可用，刷新前请先复制。"}</p> : null}
           {editing ? <footer><button className="button button-ghost" type="button" disabled={busy} onClick={cancelEditing}><X aria-hidden="true" size={15} />取消</button>{localDraftPresent ? <button className="button button-ghost" type="button" disabled={busy} onClick={discardOutputDraft}>放弃未保存修改</button> : null}<button className="button button-primary" type="button" disabled={busy || staleDocumentEdit} onClick={() => void saveOverride()}><Save aria-hidden="true" size={15} />保存为人工版本</button></footer> : null}
@@ -963,9 +974,12 @@ export function revealNodeWorkspace(nodeId: string): boolean {
   if (typeof document === "undefined") return false;
   const workspace = document.getElementById(`node-workspace-${nodeId}`);
   if (!(workspace instanceof HTMLDetailsElement)) return false;
+  workspace.dispatchEvent(new CustomEvent("workbench:reveal-node", { bubbles: true, detail: { nodeId } }));
   if (!workspace.open) workspace.querySelector<HTMLElement>(":scope > summary")?.click();
-  if (typeof workspace.scrollIntoView === "function") workspace.scrollIntoView({ behavior: "smooth", block: "start" });
-  window.requestAnimationFrame(() => workspace.querySelector<HTMLElement>("summary")?.focus());
+  window.requestAnimationFrame(() => {
+    workspace.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    workspace.querySelector<HTMLElement>("summary")?.focus({ preventScroll: true });
+  });
   return true;
 }
 

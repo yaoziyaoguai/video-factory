@@ -110,7 +110,7 @@ describe("focused film viewing", () => {
     const props = { decisionPending: false, onDecision: vi.fn() };
     const { rerender } = render(<MemoryRouter><RunWorkbench run={run} {...props} /></MemoryRouter>);
     await user.click(screen.getByRole("button", { name: "专注观看" }));
-    const workspaceLink = screen.getByRole("link", { name: "当前步骤与产物" });
+    const workspaceLink = screen.getByRole("button", { name: "当前任务" });
     workspaceLink.focus();
     rerender(<MemoryRouter><RunWorkbench run={{ ...run, revision: 5 }} {...props} /></MemoryRouter>);
     expect(screen.getByRole("button", { name: "退出专注观看" })).toHaveAttribute("aria-pressed", "true");

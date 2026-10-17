@@ -164,6 +164,16 @@ const runDetail: StudioRunDetail = {
   videoArtifactId: "video",
 };
 
+// 按用户可见入口进入新工作区，保留各项测试原有的版本与写操作断言。
+function openWorkbenchReview(report = false) {
+  fireEvent.click(screen.getByRole("button", { name: "审片" }));
+  if (report) fireEvent.click(screen.getByText("完整审片报告与复核记录"));
+}
+function openWorkbenchStage(label: string) {
+  fireEvent.click(screen.getByRole("button", { name: "制作流程" }));
+  fireEvent.click(within(screen.getByRole("navigation", { name: "制作阶段" })).getByRole("button", { name: new RegExp(label) }));
+}
+
 describe("Studio client", () => {
   it("keeps final confirmation ahead of optional reports without approving on open or cancel", async () => {
     const onDecision = vi.fn();
@@ -599,6 +609,7 @@ describe("Studio client", () => {
           category: "composition", description: "主体略偏", suggestion: "可保留", evidenceStatus: "failed", severity: "warning" }],
           reviewScope: { evidenceId: "a".repeat(64) } } } }] };
     render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
+    fireEvent.click(screen.getByRole("button", { name: "当前任务" }));
     await user.click(screen.getByRole("button", { name: "接受风险并内部定版" }));
     const dialog = within(screen.getByRole("dialog"));
     await user.click(dialog.getByRole("button", { name: "沿用上一停点的逐条表态" }));
@@ -618,6 +629,7 @@ describe("Studio client", () => {
       { id: "visual-review", label: "成片审片", status: "succeeded", artifactIds: [], qualityGateResults: [], output: {
         report: { recommendation: "revise", summary: "五条画面意见", findings, reviewScope: { evidenceId: "a".repeat(64) } } } }] };
     const { rerender } = render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
+    fireEvent.click(screen.getByRole("button", { name: "当前任务" }));
     await user.click(screen.getByRole("button", { name: "接受风险并内部定版" }));
     const dialog = within(screen.getByRole("dialog"));
     expect(dialog.getByText("已表态 0/5")).toBeInTheDocument();
@@ -4896,12 +4908,12 @@ describe("Studio client", () => {
 
     expect(screen.getByTitle("成片预览")).toHaveAttribute("src", "/api/video#t=0.1");
     const preview = screen.getByRole("region", { name: "成片预览" });
-    const workspaces = screen.getByRole("region", { name: "逐项预览与修改" });
+    const workspaces = document.getElementById("run-artifacts")!;
     expect(preview.compareDocumentPosition(workspaces) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getByText("总导演 · 人工终审")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "制作流程" })).toBeVisible();
     expect(screen.queryByRole("group", { name: "人工终审 · 总导演" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /人工终审/ })).not.toBeInTheDocument();
-    expect(screen.getByText("导演 · 导演方案")).toBeInTheDocument();
+    expect(workspaces).not.toBeVisible();
     expect(screen.getByText("请完整观看成片，确认内容和节奏。")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "下载成片" })).toHaveAttribute("download");
     expect(screen.queryByText(/技术文件与运行证据/)).not.toBeInTheDocument();
@@ -4992,6 +5004,7 @@ describe("Studio client", () => {
 
     render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} />);
 
+    openWorkbenchReview();
     expect(screen.getByRole("region", { name: "只调整配音时间" })).toBeInTheDocument();
     expect(screen.getByText("正在读取当前声音方案…")).toBeInTheDocument();
   });
@@ -5218,6 +5231,7 @@ describe("Studio client", () => {
     // 停点上放行的正是下一步，而下一步还没跑、没有任何产物；从前它在界面上不存在，
     // 于是"进入下一步"之前没有任何地方能改那一步怎么跑。
     expect(screen.getByRole("button", { name: "去配置「创作规划」" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "去配置「创作规划」" }));
     const workspace = screen.getByRole("group", { name: "创作规划 · 创作规划制片" });
     expect(within(workspace).getByRole("region", { name: "创作规划阶段" })).toBeInTheDocument();
     // 阶段模型在这里就能换：停点上改的必须是它真正会用的那一项。
@@ -5441,6 +5455,7 @@ describe("Studio client", () => {
     expect(screen.queryByText(/manualReplacement/i)).not.toBeInTheDocument();
     expect(screen.getByText((_, element) => element?.textContent === "连续性 41")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "终止制作" })).toBeInTheDocument();
+    openWorkbenchReview(true);
     const dualReview = screen.getByRole("region", { name: "双模型审片结果" });
     expect(within(dualReview).getByText("两者查看同一份成片证据")).toBeInTheDocument();
     expect(within(dualReview).getByText("DeepSeek 发现开场画面没有兑现承诺。")).toBeInTheDocument();
@@ -5448,6 +5463,7 @@ describe("Studio client", () => {
     expect(within(dualReview).getByText(/deepseek-flash · 63 分 · 1 项问题/)).toBeInTheDocument();
     expect(within(dualReview).getByText(/gpt-5\.6-sol · 59 分 · 2 项问题/)).toBeInTheDocument();
 
+    fireEvent.click(screen.getByRole("button", { name: "当前任务" }));
     await user.click(screen.getByRole("button", { name: "接受风险并内部定版" }));
     const dialog = screen.getByRole("dialog", { name: "确认本版成片，完成内部定版" });
     const approve = within(dialog).getByRole("button", { name: "确认内部定版并准备文案" });
@@ -5527,6 +5543,7 @@ describe("Studio client", () => {
 
     render(<RunWorkbench run={run} providers={providersWithConnection} decisionPending={false} onDecision={vi.fn().mockResolvedValue(undefined)} />);
 
+    openWorkbenchReview(true);
     const review = screen.getByRole("region", { name: "独立质量复核结果" });
     expect(within(review).getByText("DeepSeek 视觉审片")).toBeInTheDocument();
     expect(within(review).getByText(/qwen3\.8-omni-flash/)).toBeInTheDocument();
@@ -5579,6 +5596,7 @@ describe("Studio client", () => {
 
     render(<RunWorkbench run={run} providers={providers} decisionPending={false} onDecision={vi.fn()} />);
 
+    openWorkbenchReview(true);
     const dualReview = screen.getByRole("region", { name: "双模型审片结果" });
     const caveat = within(dualReview).getByRole("note");
     expect(within(caveat).getByText("有 1 份审片报告未通过报告质量复核")).toBeInTheDocument();
@@ -5622,6 +5640,7 @@ describe("Studio client", () => {
 
     render(<RunWorkbench run={run} providers={providers} decisionPending={false} onDecision={vi.fn()} />);
 
+    openWorkbenchReview(true);
     const singleReview = screen.getByRole("region", { name: "独立质量复核结果" });
     expect(within(singleReview).getByText("成片独立质量复核：1 份已完成")).toBeInTheDocument();
     expect(within(singleReview).getByText("该模型审查同一版成片")).toBeInTheDocument();
@@ -5663,6 +5682,7 @@ describe("Studio client", () => {
 
     render(<RunWorkbench run={run} providers={providers} decisionPending={false} onDecision={vi.fn()} />);
 
+    openWorkbenchReview(true);
     const region = screen.getByRole("region", { name: "独立质量复核结果" });
     // 单审的合并摘要与分支是同一原报告，只留一个完整入口，不按文字相似合并其他身份。
     const details = within(region).getByText("查看完整结论原文").closest("details")!;
@@ -5804,7 +5824,8 @@ describe("Studio client", () => {
     render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} onRequestSceneRevision={onRequestSceneRevision} />);
     const preview = screen.getByTitle("成片预览") as HTMLVideoElement;
     Object.defineProperty(preview, "currentTime", { value: 0, writable: true });
-    await user.click(screen.getByRole("button", { name: /镜头 2.*00:06/ }));
+    openWorkbenchReview();
+    await user.click(within(document.querySelector(".scene-revision-finding")!).getByRole("button", { name: /镜头 2.*00:06/ }));
     expect(preview.currentTime).toBe(6);
     await user.selectOptions(screen.getByLabelText("用已有镜头替换"), "1");
     await user.type(screen.getByLabelText("修改说明"), "第二镜复用第一镜母片");
@@ -5841,6 +5862,7 @@ describe("Studio client", () => {
     expect(resource).not.toHaveBeenCalled();
     rerender(view(run));
     expect(onRecover).not.toHaveBeenCalled();
+    openWorkbenchReview();
     await user.click(screen.getByRole("button", { name: "恢复同步字幕" }));
     expect(await screen.findByText(/保留原声音，不重新合成/)).toBeInTheDocument();
     await user.click(screen.getByLabelText("有新依据，重取一次原字幕"));
@@ -5940,8 +5962,15 @@ describe("Studio client", () => {
     />);
     // 两条结论都带镜位，所以都给文字入口：指向脚本的结论改字是唯一修法；指向素材的结论
     // 「画面没兑现这句话」有两个修法（改画面或改承诺），哪边是问题由操作员判断。
+    openWorkbenchReview();
+    const findingTabs = within(screen.getByRole("navigation", { name: "逐镜审片意见" })).getAllByRole("button");
+    expect(findingTabs).toHaveLength(2);
+    fireEvent.click(findingTabs[1]!);
+    expect(screen.getByRole("button", { name: "改这一镜的字幕/旁白" })).toBeVisible();
+    fireEvent.click(findingTabs[0]!);
     const rewriteButtons = screen.getAllByRole("button", { name: "改这一镜的字幕/旁白" });
-    expect(rewriteButtons).toHaveLength(2);
+    expect(rewriteButtons).toHaveLength(1);
+    fireEvent.click(findingTabs[1]!);
     // 素材那一条同时并排给出"复用更早镜头"：两个修法都摆出来，不替操作员选边。
     expect(screen.getAllByRole("button", { name: "替换后重新审片" })).toHaveLength(1);
     // 第一镜没有更早的镜头可复用，替换控件整块不渲染；文字入口不受影响。
@@ -5949,6 +5978,7 @@ describe("Studio client", () => {
 
     // 原文要等到展开时才取：改字必须看得到现在写的是什么，不能凭记忆重打一遍。
     expect(onLoadSceneNarration).not.toHaveBeenCalled();
+    fireEvent.click(findingTabs[0]!);
     await user.click(rewriteButtons[0]!);
     expect(onLoadSceneNarration).toHaveBeenCalledWith(1);
     const text = await screen.findByLabelText("镜头 1 的旁白字幕");
@@ -5993,11 +6023,13 @@ describe("Studio client", () => {
     rerender(<RunWorkbench run={{ ...run, presentationMode: "character_drama", characterScriptEditTarget: target }}
       decisionPending={false} onDecision={async () => undefined} onPrepareReviewContinuation={prepare}
       onRequestSceneRevision={async () => undefined} />);
+    openWorkbenchReview();
     await user.click(screen.getAllByRole("button", { name: "修改角色或台词" })[0]!);
     expect(screen.getByRole("dialog", { name: "返回角色与台词" })).toHaveTextContent("已有画面、声音和历史稿保留");
     expect(prepare).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "取消" }));
     expect(prepare).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "制作流程" }));
     await user.click(screen.getByRole("button", { name: "修改角色与台词" }));
     await user.click(screen.getByRole("button", { name: "确认返回编辑" }));
     expect(prepare).toHaveBeenCalledWith({ ...target, commandId: expect.any(String), expectedRunRevision: run.revision,
@@ -6016,10 +6048,15 @@ describe("Studio client", () => {
 
     render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
 
-    const workspaces = screen.getByRole("region", { name: "逐项预览与修改" });
-    expect(within(workspaces).queryByRole("group", { name: "渲染 · 剪辑师" })).not.toBeInTheDocument();
-    expect(within(workspaces).queryByRole("group", { name: "机器质检 · 技术质检" })).not.toBeInTheDocument();
-    expect(within(workspaces).queryByRole("group", { name: "人工终审 · 总导演" })).not.toBeInTheDocument();
+    openWorkbenchStage("渲染");
+    const renderDelivery = screen.getByRole("group", { name: "渲染 · 剪辑师" });
+    expect(renderDelivery).toBeVisible();
+    expect(within(renderDelivery).queryByRole("button", { name: "编辑交付" })).not.toBeInTheDocument();
+    openWorkbenchStage("机器质检");
+    const technicalDelivery = screen.getByRole("group", { name: "机器质检 · 技术质检" });
+    expect(technicalDelivery).toBeVisible();
+    expect(within(technicalDelivery).queryByRole("button", { name: "编辑交付" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "人工终审 · 总导演" })).not.toBeInTheDocument();
   });
 
   it("keeps generated scene media available after the asset plan is manually revised", async () => {
@@ -6046,7 +6083,7 @@ describe("Studio client", () => {
     };
 
     render(<RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} />);
-    await user.click(screen.getByText("画面").closest("summary")!);
+    openWorkbenchStage("画面");
 
     expect(document.querySelector('video[aria-label="镜头 6 画面预览"]')).toHaveAttribute("src", "/api/scene-video");
     expect(screen.getByText("镜头 6")).toBeInTheDocument();
@@ -6146,7 +6183,7 @@ describe("Studio client", () => {
 
     const panel = [...document.querySelectorAll<HTMLElement>(".node-workspace")].find((element) => element.textContent?.includes("导演方案"));
     if (!panel) throw new Error("导演方案节点不存在");
-    await user.click(within(panel).getByText("导演方案"));
+    openWorkbenchStage("导演方案");
     expect(await within(panel).findByText("纪实观察")).toBeInTheDocument();
     expect(within(panel).getByText("先现场后解释")).toBeInTheDocument();
     expect(within(panel).getByText("事实镜头")).toBeInTheDocument();
@@ -6479,7 +6516,7 @@ describe("Studio client", () => {
     />);
 
     expect(screen.queryByRole("dialog", { name: "终止这条视频的制作" })).not.toBeInTheDocument();
-    expect(screen.getByText("字幕需要精简")).toBeInTheDocument();
+    expect(screen.getAllByText("字幕需要精简").length).toBeGreaterThan(0);
   });
 
   it("offers a recoverable route after a failed production", async () => {
@@ -6639,6 +6676,7 @@ describe("Studio client", () => {
     };
     const view = (run: StudioRunDetail) => <RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} onReinspectVisualReview={onReinspect} />;
     const { rerender } = render(view(current));
+    openWorkbenchReview();
     fireEvent.click(screen.getByRole("button", { name: "重新审查当前成片" }));
     const dialog = screen.getByRole("dialog", { name: "重新审查这一版成片？" });
     expect(within(dialog).getByText(/新的模型调用.*费用/)).toBeInTheDocument();
@@ -7020,6 +7058,7 @@ describe("Studio client", () => {
       onDecision={async () => undefined}
     />);
 
+    openWorkbenchReview();
     const creativeSummary = screen.getByRole("region", { name: "创作目标摘要" });
     expect(within(creativeSummary).getByText("想核验热点的普通观众")).toBeInTheDocument();
     expect(within(creativeSummary).getByText("让观众能区分传闻和已证实信息")).toBeInTheDocument();
@@ -8160,6 +8199,7 @@ describe("joint-v1 planning stages panel (B4)", () => {
   it("renders real planning stage status, current model, and readable issue text", () => {
     render(<RunWorkbench run={jointRun} providers={jointProviders} decisionPending={false} onDecision={async () => undefined} />);
 
+    openWorkbenchStage("创作规划");
     const panel = screen.getByLabelText("创作规划阶段");
     expect(within(panel).getAllByText("前期构思").length).toBeGreaterThan(0);
     expect(within(panel).getByText("已产出")).toBeInTheDocument();
@@ -8183,6 +8223,7 @@ describe("joint-v1 planning stages panel (B4)", () => {
       onConfigureNode={configure}
     />);
 
+    openWorkbenchStage("创作规划");
     const panel = screen.getByLabelText("创作规划阶段");
     const treatmentModelSelect = within(panel).getByLabelText(/构思阶段模型/);
     await userEvent.selectOptions(treatmentModelSelect, "treatment-model-b");
@@ -8227,11 +8268,14 @@ describe("joint-v1 planning stages panel (B4)", () => {
       onRetryFailedNode={retry}
     />);
 
+    openWorkbenchStage("创作规划");
     const panel = screen.getByLabelText("创作规划阶段");
     await userEvent.selectOptions(within(panel).getByLabelText(/构思阶段模型/), "treatment-model-b");
+    fireEvent.click(screen.getByRole("button", { name: "当前任务" }));
     const retryButton = screen.getByRole("button", { name: "重试失败步骤" });
     expect(retryButton).toBeDisabled();
-    expect(screen.getByText(/模型选择尚未保存/)).toBeInTheDocument();
+    expect(screen.getByText(/模型选择尚未保存/)).toBeVisible();
+    openWorkbenchStage("创作规划");
     await userEvent.click(within(panel).getByRole("button", { name: "保存模型选择" }));
     expect(await within(panel).findByRole("alert")).toHaveTextContent("模型保存冲突");
     expect(within(panel).getByText("treatment-model-a")).toBeInTheDocument();
@@ -8249,6 +8293,7 @@ describe("joint-v1 planning stages panel (B4)", () => {
       onOverrideNodeInput={overrideInput}
     />);
 
+    openWorkbenchStage("创作规划");
     const panel = screen.getByLabelText("创作规划阶段");
     const scriptStage = within(panel).getByText("脚本", { selector: ".planning-stage-name" }).closest("li")!;
     await userEvent.click(within(scriptStage as HTMLElement).getByRole("button", { name: /编辑这一阶段的输入/ }));
@@ -8314,6 +8359,7 @@ describe("planning stage model selection resolves the bound provider (B4-FIX)", 
     const configure = vi.fn(async () => undefined);
     render(<RunWorkbench run={boundRun} providers={twoWriterProviders} decisionPending={false} onDecision={async () => undefined} onConfigureNode={configure} />);
 
+    openWorkbenchStage("创作规划");
     const panel = screen.getByLabelText("创作规划阶段");
     const select = within(panel).getByLabelText(/脚本阶段模型/) as HTMLSelectElement;
     const optionValues = Array.from(select.options).map((option) => option.value);

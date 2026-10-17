@@ -40,6 +40,7 @@ describe("in-production asset source access", () => {
     run.nodes[1]!.executionConfiguration!.economics = { allowMeteredProviders: true };
     const configure = vi.fn(async () => undefined);
     render(<RunWorkbench run={run} providers={providers} decisionPending={false} onDecision={vi.fn()} onConfigureNode={configure} />);
+    await userEvent.click(screen.getByRole("button", { name: "设置与费用" }));
     const editor = within(screen.getByRole("region", { name: "本片画面来源" }));
     await userEvent.click(editor.getByRole("button", { name: "调整" }));
     await userEvent.click(editor.getByRole("button", { name: "保存选择" }));
@@ -68,14 +69,19 @@ describe("in-production asset source access", () => {
         assetProviderIds: input.assetProviderIds!, economics: input.economics! } } : node) }));
     const command = vi.spyOn(studioApi, "commandCreativeReview");
     render(<MemoryRouter initialEntries={[`/projects/${run.id}`]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
-    const editor = within(await screen.findByRole("region", { name: "本片画面来源" }));
+    await screen.findByRole("button", { name: "设置与费用" });
+    const editor = within(screen.getByRole("region", { name: "本片画面来源", hidden: true }));
     await userEvent.click(await screen.findByText("手动修订这份稿件"));
     fireEvent.change(screen.getByLabelText("分镜 1 · 旁白"), { target: { value: "尚未保存的用户旁白" } });
+    await userEvent.click(screen.getByRole("button", { name: "设置与费用" }));
     expect(await editor.findByText(/请先保存或放弃当前稿件/)).toBeVisible();
     expect(editor.queryByRole("button", { name: "调整" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("分镜 1 · 旁白")).toHaveValue("尚未保存的用户旁白");
     expect(configure).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "当前任务" }));
+    expect(screen.getByLabelText("分镜 1 · 旁白")).toHaveValue("尚未保存的用户旁白");
     await userEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    await userEvent.click(screen.getByRole("button", { name: "设置与费用" }));
     await userEvent.click(editor.getByRole("button", { name: "调整" }));
     await userEvent.click(editor.getByRole("checkbox", { name: /通义万相视频/ }));
     await userEvent.click(editor.getByRole("button", { name: "保存选择" }));
@@ -91,6 +97,7 @@ describe("in-production asset source access", () => {
     const authorize = vi.fn();
     render(<RunWorkbench run={planningRun()} providers={providers} creativeDiscussion={<section aria-label="当前稿件">当前脚本</section>}
       decisionPending={false} onDecision={decide} onConfigureNode={configure} onAuthorizeSpend={authorize} />);
+    await userEvent.click(screen.getByRole("button", { name: "设置与费用" }));
     const editor = within(screen.getByRole("region", { name: "本片画面来源" }));
     expect(editor.getByText(/Pexels 视频.*当前不调用付费生成/)).toBeVisible();
     await userEvent.click(editor.getByRole("button", { name: "调整" }));
@@ -114,6 +121,7 @@ describe("in-production asset source access", () => {
   it("cancels without saving and can replace rather than merely add a source", async () => {
     const configure = vi.fn(async () => undefined);
     render(<RunWorkbench run={planningRun()} providers={providers} decisionPending={false} onDecision={vi.fn()} onConfigureNode={configure} />);
+    await userEvent.click(screen.getByRole("button", { name: "设置与费用" }));
     const editor = within(screen.getByRole("region", { name: "本片画面来源" }));
     await userEvent.click(editor.getByRole("button", { name: "调整" }));
     await userEvent.click(editor.getByRole("checkbox", { name: /通义万相视频/ }));
@@ -135,6 +143,7 @@ describe("in-production asset source access", () => {
     const run = planningRun();
     const props = { providers, decisionPending: false, onDecision: vi.fn(), onConfigureNode: configure };
     const view = render(<RunWorkbench run={run} {...props} />);
+    await userEvent.click(screen.getByRole("button", { name: "设置与费用" }));
     await userEvent.click(screen.getByRole("button", { name: "调整" }));
     await userEvent.click(screen.getByRole("checkbox", { name: /通义万相视频/ }));
     view.rerender(<RunWorkbench run={{ ...run, revision: 9, nodes: run.nodes.map(node => node.id === "assets" ? { ...node, status: "stale" } : node) }} {...props} />);
@@ -154,6 +163,7 @@ describe("in-production asset source access", () => {
     const configure = vi.fn();
     render(<RunWorkbench run={run} providers={providers} decisionPending={false} nodeMutationPending={mode === "busy"}
       onDecision={vi.fn()} onConfigureNode={configure} />);
+    await userEvent.click(screen.getByRole("button", { name: "设置与费用" }));
     const editor = within(screen.getByRole("region", { name: "本片画面来源" }));
     const button = editor.queryByRole("button", { name: "调整" });
     if (button) { expect(button).toBeDisabled(); await userEvent.click(button); }
@@ -166,6 +176,7 @@ describe("in-production asset source access", () => {
     const configure = vi.fn();
     const props = { providers, decisionPending: false, onDecision: vi.fn(), onConfigureNode: configure };
     const view = render(<RunWorkbench run={run} {...props} />);
+    await userEvent.click(screen.getByRole("button", { name: "设置与费用" }));
     await userEvent.click(screen.getByRole("button", { name: "调整" }));
     await userEvent.click(screen.getByRole("checkbox", { name: /通义万相视频/ }));
     view.rerender(<RunWorkbench run={{ ...run, status: "running" }} {...props} />);

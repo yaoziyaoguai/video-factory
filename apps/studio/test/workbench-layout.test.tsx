@@ -121,7 +121,7 @@ describe("workdesk layout preserves decision and media boundaries", () => {
       & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("collapses only prior film findings at the publish-copy stop and leaves risks and original queries visible", async () => {
+  it("separates prior film findings from the publish-copy stop and leaves risks and original queries visible", async () => {
     const user = userEvent.setup();
     const run = runFixture();
     run.optionalReviewTasks = [{ nodeId: "visual-review", purpose: "audio_review", operationId: "audio-original",
@@ -130,17 +130,15 @@ describe("workdesk layout preserves decision and media boundaries", () => {
     const onDecision = vi.fn();
     const onQueryOriginalTextTask = vi.fn();
     render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} onQueryOriginalTextTask={onQueryOriginalTextTask} />);
-    const summary = screen.getByText("成片审片记录与返工");
-    const disclosure = summary.closest("details")!;
-    expect(disclosure).not.toHaveAttribute("open");
-    expect(within(disclosure.querySelector("summary")!).getByText(/1 项问题/)).toBeVisible();
+    expect(screen.getByText("视觉审片建议修改后再审")).not.toBeVisible();
+    expect(screen.getByRole("region", { name: "当前步骤产物" })).toBeVisible();
     expect(screen.getByText(/缺少 2 个可验证的独立审片结果/)).toBeVisible();
     expect(screen.getByText(/1 项原审计的结果与费用待核/)).toBeVisible();
     expect(screen.getByRole("button", { name: "查询原声音审片" }).closest("details")).toBeNull();
     expect(screen.getByRole("status", { name: "当前决定" }).closest("details")).toBeNull();
-    await user.click(summary);
-    expect(disclosure).toHaveAttribute("open");
-    expect(within(disclosure).getByText("视觉审片建议修改后再审")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "审片" }));
+    expect(screen.getByText("视觉审片建议修改后再审")).toBeVisible();
+    expect(screen.getByTitle("成片预览")).toBeVisible();
     expect(onDecision).not.toHaveBeenCalled();
     expect(onQueryOriginalTextTask).not.toHaveBeenCalled();
   });
@@ -160,7 +158,8 @@ describe("workdesk layout preserves decision and media boundaries", () => {
     const user = userEvent.setup();
     const onDecision = vi.fn();
     render(<RunWorkbench run={runFixture("final-review")} decisionPending={false} onDecision={onDecision} />);
-    expect(screen.getByText("视觉审片建议修改后再审").closest("details")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "审片" }));
+    expect(screen.getByText("视觉审片建议修改后再审")).toBeVisible();
     expect(screen.queryByText("成片审片记录与返工")).not.toBeInTheDocument();
     const video = screen.getByTitle("成片预览") as HTMLVideoElement;
     const bringIntoView = vi.fn();

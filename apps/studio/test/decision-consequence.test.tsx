@@ -258,6 +258,7 @@ describe("final review optional timing tool", () => {
     const dispatch = vi.spyOn(studioApi, "requestNarrationRevision");
     const run = finalReviewRun({ id: "int-final", reason: "请完整观看成片后终审。", options: ["approve", "reject"] });
     const { container } = render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "审片" }));
     const details = container.querySelector<HTMLDetailsElement>(".optional-timing-tool")!;
     const summary = details.querySelector("summary")!;
     await waitFor(() => expect(summary).toHaveTextContent("有错误待处理"));
@@ -276,6 +277,7 @@ describe("final review optional timing tool", () => {
     if (mode === "read") vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("storage read denied"); });
     const run = finalReviewRun({ id: "int-final", reason: "请完整观看成片后终审。", options: ["approve", "reject"] });
     const { container } = render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "审片" }));
     const details = container.querySelector<HTMLDetailsElement>(".optional-timing-tool")!;
     const summary = details.querySelector("summary")!;
     await userEvent.click(summary);
@@ -303,6 +305,7 @@ describe("final review optional timing tool", () => {
       : { requestId, state: "reserved", requestDigest: "d".repeat(64), isCurrent: false });
     const run = finalReviewRun({ id: "int-final", reason: "请完整观看成片后终审。", options: ["approve", "reject"] });
     const { container } = render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={async () => undefined} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole("button", { name: "审片" }));
     const details = container.querySelector<HTMLDetailsElement>(".optional-timing-tool")!;
     const summary = details.querySelector("summary")!;
     await userEvent.click(summary);

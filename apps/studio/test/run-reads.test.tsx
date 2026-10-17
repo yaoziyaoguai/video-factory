@@ -81,6 +81,7 @@ describe("RunPage read scheduling", () => {
     vi.mocked(studioApi.run).mockResolvedValue(run);
     vi.spyOn(studioApi, "reinspectVisualReview").mockRejectedValue(new Error("当前成片证据已变化，请刷新后重新确认。"));
     await mount();
+    fireEvent.click(screen.getByRole("button", { name: "审片" }));
     fireEvent.click(screen.getByRole("button", { name: "重新审查当前成片" }));
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "确认重新审查" })));
     const dialog = screen.getByRole("dialog", { name: "重新审查这一版成片？" });

@@ -23,6 +23,7 @@ import "./studio-collections.css";
 import "./studio-creation-pages.css";
 import "./studio-new-production.css";
 import "./studio-production.css";
+import "./studio-task-workbench.css";
 
 initializeStudioAppearance();
 const root = document.getElementById("root");

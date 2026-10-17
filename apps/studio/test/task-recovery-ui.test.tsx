@@ -142,23 +142,24 @@ describe("text task recovery UI", () => {
     expect(query).toHaveBeenCalledWith({ nodeId: "visual-review", purpose: "audio_review", operationId: "original-audio" });
   });
 
-  it("keeps recorded and unknown fees visible with details collapsed and reachable from the workspace link", async () => {
+  it("keeps recorded and unknown fees visible with details collapsed and reachable from the settings tab", async () => {
     const run = failedRun("completed_failure");
     render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()}
       costDetail={{ runId: run.id, title: run.title, lines: [], totals: {
         estimatedCostCny: 4, authorizedCostCny: 4, actualCostCny: 1.25, actualPendingCount: 2,
         meteredCalls: 1, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0,
       } }} /></MemoryRouter>);
+    await userEvent.click(screen.getByRole("button", { name: "设置与费用" }));
     const summary = screen.getByText("本片调用与费用").closest("summary")!;
     const details = summary.closest("details")!;
     expect(details).not.toHaveAttribute("open");
     expect(summary).toHaveTextContent("已记录 ¥1.25");
     expect(summary).toHaveTextContent("2 笔待确认是否扣费");
-    expect(screen.getByRole("heading", { name: "调用与费用明细" })).not.toBeVisible();
-    await userEvent.click(screen.getByRole("link", { name: "调用与费用" }));
+    expect(screen.getByRole("heading", { name: "调用与费用明细", hidden: true })).not.toBeVisible();
+    await userEvent.click(summary);
     expect(details).toHaveAttribute("open");
     expect(summary).toHaveFocus();
-    expect(screen.getByRole("heading", { name: "调用与费用明细" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "调用与费用明细", hidden: true })).toBeVisible();
     await userEvent.click(summary);
     expect(details).not.toHaveAttribute("open");
   });
@@ -221,8 +222,9 @@ describe("text task recovery UI", () => {
       const override = vi.fn(async () => undefined);
       const decide = vi.fn(async () => undefined);
       render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={decide} onOverrideNode={override} /></MemoryRouter>);
+      await userEvent.click(screen.getByRole("button", { name: "制作流程" }));
+      await userEvent.click(within(screen.getByRole("navigation", { name: "制作阶段" })).getByRole("button", { name: /内容简报/ }));
       const brief = document.getElementById("node-workspace-brief")!;
-      await userEvent.click(brief.querySelector(":scope > summary")!);
       if (safe) {
         await userEvent.click(within(brief).getByRole("button", { name: "编辑交付" }));
         expect(within(brief).getByRole("button", { name: "保存为人工版本" })).toBeEnabled();
@@ -234,7 +236,7 @@ describe("text task recovery UI", () => {
       expect(decide).not.toHaveBeenCalled();
     });
   }
-  for (const [nodeId, buttonLabel] of [["render", "查看渲染结果"], ["technical-review", "查看机器质检"]] as const) {
+  for (const [nodeId, buttonLabel] of [["render", "渲染"], ["technical-review", "机器质检"]] as const) {
     it(`opens the current ${nodeId} delivery with focus at an optional-review stop`, async () => {
       const base = failedRun("accepted_unknown");
       const run: StudioRunDetail = { ...base, status: "needs_human", currentNodeId: "visual-review",
@@ -243,7 +245,8 @@ describe("text task recovery UI", () => {
       };
       const decide = vi.fn(async () => undefined);
       render(<MemoryRouter><RunWorkbench run={run} decisionPending={false} onDecision={decide} /></MemoryRouter>);
-      await userEvent.click(screen.getByRole("button", { name: buttonLabel }));
+      await userEvent.click(screen.getByRole("button", { name: "制作流程" }));
+      await userEvent.click(within(screen.getByRole("navigation", { name: "制作阶段" })).getByRole("button", { name: new RegExp(buttonLabel) }));
       const delivery = document.getElementById(`node-workspace-${nodeId}`);
       expect(delivery).toBeInstanceOf(HTMLDetailsElement);
       expect(delivery).toHaveAttribute("open");
