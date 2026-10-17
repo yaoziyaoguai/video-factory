@@ -19,10 +19,10 @@ const MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN = 2;
 export const ROLE_AUDIT_CRITERIA_MAX_ITEMS = 16;
 // 评分标准文本在 broker 的 ROLE_AUDIT_DIRECTIVE 里，维度归属在宿主这里。两侧的版本串
 // 必须一致：rubric 一改，旧版本给出的维度分就不再是本轮标准的结论，必须重评。
-export const ROLE_QUALITY_RUBRIC_VERSION = "video-factory/role-quality-rubric-v1";
+export const ROLE_QUALITY_RUBRIC_VERSION = "video-factory/role-quality-rubric-v2";
 
-const CREATIVE_AUDIT_DIMENSIONS = ["attention", "progression", "payoff", "expression"] as const;
-const PUBLISH_AUDIT_DIMENSIONS = ["attention", "payoff", "expression"] as const;
+const CREATIVE_AUDIT_DIMENSIONS = ["expression", "consistency"] as const;
+const PUBLISH_AUDIT_DIMENSIONS = ["expression", "consistency"] as const;
 const REPORT_AUDIT_DIMENSIONS = ["evidence", "coverage", "consistency", "actionability"] as const;
 
 interface RoleAuditAssessmentPlan {
@@ -41,7 +41,7 @@ const ROLE_AUDIT_ASSESSMENT_PLANS: Record<string, RoleAuditAssessmentPlan> = {
   "视觉审片员": { dimensions: REPORT_AUDIT_DIMENSIONS },
   "候选画面复核": { dimensions: REPORT_AUDIT_DIMENSIONS },
   "参考片分析师": { dimensions: REPORT_AUDIT_DIMENSIONS },
-  // 内容简报是创作者写下的任务书本身，创意四维量不到东西；用报告四维（证据/覆盖/一致/可执行）。
+  // 内容简报是创作者写下的任务书本身，创作维度不适用；用报告四维（证据/覆盖/一致/可执行）。
   // 它不设 collection：评的是那一份简报整体，不是某个集合里的条目。
   "内容简报": { dimensions: REPORT_AUDIT_DIMENSIONS },
   "选题总编": { collection: "ideas", dimensions: CREATIVE_AUDIT_DIMENSIONS },
@@ -1675,8 +1675,8 @@ function validateRoleAuditAssessments(
           evidence: text(dimension.evidence, `Role audit assessments[${index}].dimensions[${dimensionIndex}].evidence`),
         };
       });
-    if (dimensions.length < 3) {
-      throw new Error(`Role audit assessments[${index}] must carry at least 3 dimensions.`);
+    if (dimensions.length < 2) {
+      throw new Error(`Role audit assessments[${index}] must carry at least 2 dimensions.`);
     }
     const names = dimensions.map((dimension) => dimension.dimension);
     if (new Set(names).size !== names.length) {

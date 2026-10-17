@@ -1384,21 +1384,12 @@ function creatorDraftValidationError(nodeId: string, value: unknown, requireMode
     ], requireModernPresence);
   }
   if (nodeId === "script") {
-    const topLevelError = firstRequiredTextError(draft, [
-      ["viewerPromise", "观众承诺"],
-      ["narrativeArc", "叙事弧线"],
-    ]);
-    if (topLevelError) return topLevelError;
     return firstCollectionItemError(draft.scenes, "分镜", [
       ["visual_prompt", "画面提示"],
       ["visible_action", "可见动作"],
     ]);
   }
   if (nodeId === "visual-direction") {
-    const topLevelError = firstRequiredTextError(draft, [
-      ["profileRationale", "风格选择理由"],
-    ]);
-    if (topLevelError) return topLevelError;
     const bible = asRecord(draft.visualBible);
     if (!bible) return "全片视觉规则不能为空。";
     const bibleError = firstRequiredTextError(bible, [

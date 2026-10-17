@@ -10,7 +10,6 @@ const TodayPage = lazy(() => import("./pages/TodayPage.js").then(module => ({ de
 const CasesPage = lazy(() => import("./pages/CasesPage.js").then(module => ({ default: module.CasesPage })));
 const ProjectsPage = lazy(() => import("./pages/ProjectsPage.js").then(module => ({ default: module.ProjectsPage })));
 const AssetsPage = lazy(() => import("./pages/AssetsPage.js").then(module => ({ default: module.AssetsPage })));
-const TemplatesPage = lazy(() => import("./pages/TemplatesPage.js").then(module => ({ default: module.TemplatesPage })));
 const ResourcesPage = lazy(() => import("./pages/ResourcesPage.js").then(module => ({ default: module.ResourcesPage })));
 const ExperimentsPage = lazy(() => import("./pages/ExperimentsPage.js").then(module => ({ default: module.ExperimentsPage })));
 
@@ -38,7 +37,6 @@ function StudioRoutes() {
       <Route path="/projects" element={<ProjectsPage />} />
       <Route path="/projects/:runId" element={<RunPage />} />
       <Route path="/assets" element={<AssetsPage />} />
-      <Route path="/templates" element={<TemplatesPage />} />
       <Route path="/resources" element={<ResourcesPage />} />
       <Route path="/experiments" element={<ExperimentsPage />} />
       <Route path="/runs/:runId" element={<LegacyRunRedirect />} />

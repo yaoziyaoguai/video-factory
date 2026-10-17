@@ -1079,11 +1079,11 @@ async function readRunJson(runRoot: string, sourcePath: string, label: string): 
 }
 
 function compactScript(value: Record<string, unknown>): Record<string, unknown> {
-  return pick(value, ["title", "viewerPromise", "narrativeArc", "hook", "duration_target", "platform_notes", "scenes"]);
+  return pick(value, ["title", "hook", "duration_target", "platform_notes", "scenes"]);
 }
 
 function compactDirectorPlan(value: Record<string, unknown>): Record<string, unknown> {
-  return pick(value, ["requestedProfileId", "resolvedProfileId", "profileRationale", "visualBible", "shots"]);
+  return pick(value, ["visualBible", "shots"]);
 }
 
 function compactRenderManifest(value: Record<string, unknown>): Record<string, unknown> {

@@ -13,19 +13,18 @@ const artifact = (id: string, kind: string): StudioArtifact => ({
 afterEach(() => vi.restoreAllMocks());
 
 describe("PlanningDeliveryPanel", () => {
-  it("explains delivered sound directions while retaining the unchanged original", async () => {
-    const original = "采用独立旁白（当前能力 narration=true）；当前无音乐轨与音效轨（musicTrack、soundEffectsTrack 均为 false）。";
-    const value = { soundPrinciples: [original] };
+  it("shows a free-form concept without requiring a sound or storytelling template", async () => {
+    const value = { version: "video-factory/creative-treatment-v3", concept: "观察雨停后的街道，保留安静的结尾。", evidenceRequirements: [], feasibilityQuestions: [] };
     vi.spyOn(studioApi, "resourceJson").mockResolvedValue(value);
-    render(<PlanningDeliveryPanel runId="sound-directions" versionId="v1" artifactIds={["sound-treatment"]}
-      artifacts={[artifact("sound-treatment", "creative_treatment")]} publicationExpected />);
-    expect(await screen.findByText("采用独立旁白（当前能力 独立旁白：启用）；当前无音乐轨与音效轨（独立音乐与音效轨：未接入）。")).toBeVisible();
-    expect(screen.getByText(original).closest("details")).not.toHaveAttribute("open");
-    expect(value.soundPrinciples).toEqual([original]);
+    render(<PlanningDeliveryPanel runId="free-concept" versionId="v1" artifactIds={["treatment"]}
+      artifacts={[artifact("treatment", "creative_treatment")]} publicationExpected />);
+    expect(await screen.findByText(value.concept)).toBeVisible();
+    expect(screen.queryByText("声音方向")).not.toBeInTheDocument();
+    expect(screen.queryByText("观众承诺")).not.toBeInTheDocument();
   });
 
   it("does not promise unused stock candidate deliveries in native audio mode", async () => {
-    vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ viewerPromise: "原声逐镜生成" });
+    vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ concept: "原声逐镜生成" });
     const props = { runId: "native-plan", versionId: "v1", artifactIds: ["treatment"], artifacts: [artifact("treatment", "creative_treatment")], publicationExpected: true };
     const view = render(<PlanningDeliveryPanel {...props} nativeAudio />);
     expect(await screen.findByText("原声逐镜生成")).toBeInTheDocument();
@@ -50,7 +49,7 @@ describe("PlanningDeliveryPanel", () => {
 
   it("does not present a stale stage draft or a different-version confirmation as adopted", async () => {
     const creativeReview = { stages: { treatment: { phase: "confirmed",
-      currentDraft: { versionId: "draft-v2", sha256: "b".repeat(64) }, currentDocument: { viewerPromise: "本次保存稿" },
+      currentDraft: { versionId: "draft-v2", sha256: "b".repeat(64) }, currentDocument: { concept: "本次保存稿" },
       confirmation: { versionId: "draft-v1", draftSha256: "b".repeat(64) } } } };
     const view = render(<PlanningDeliveryPanel runId="run-stale" versionId="node-v2" artifactIds={[]} artifacts={[]}
       publicationExpected={false} creativeReview={creativeReview} />);
@@ -66,7 +65,7 @@ describe("PlanningDeliveryPanel", () => {
     vi.spyOn(studioApi, "resourceJson").mockRejectedValue(new Error("unreadable"));
     render(<PlanningDeliveryPanel runId="run-formal" versionId="node-v2" artifactIds={["formal"]}
       artifacts={[artifact("formal", "creative_treatment")]} publicationExpected creativeReview={{ stages: { treatment: {
-        currentDraft: { versionId: "draft-v1", sha256: "a".repeat(64) }, currentDocument: { viewerPromise: "不能冒充正式产物" },
+        currentDraft: { versionId: "draft-v1", sha256: "a".repeat(64) }, currentDocument: { concept: "不能冒充正式产物" },
       } } }} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("正文暂时无法核验或读取");
     expect(screen.queryByText("不能冒充正式产物")).not.toBeInTheDocument();
@@ -83,7 +82,7 @@ describe("PlanningDeliveryPanel", () => {
   });
 
   it("reads only the current registered version and keeps all six entries visible", async () => {
-    const read = vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ viewerPromise: "让观众学会判断", progression: [{ purpose: "先解释问题" }] });
+    const read = vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ concept: "让观众学会判断", progression: [{ purpose: "先解释问题" }] });
     render(<PlanningDeliveryPanel runId="run-one" versionId="version-two" artifactIds={["treatment-new"]}
       artifacts={[artifact("treatment-old", "creative_treatment"), artifact("treatment-new", "creative_treatment"), artifact("script-old", "script")]}
       publicationExpected />);
@@ -105,8 +104,7 @@ describe("PlanningDeliveryPanel", () => {
 
   it("keeps business content readable while keeping internal identifiers out of the document", async () => {
     vi.spyOn(studioApi, "resourceJson").mockResolvedValue({
-      viewerPromise: "看懂判断方法",
-      progression: [{ beatId: "internal-beat-1", purpose: "解释差异", viewerGain: "会判断" }],
+      concept: "看懂判断方法",
       evidenceRequirements: [{ claim: "水温不是唯一因素", requirement: "factual_support", acquisition: "external_required" }],
     });
     render(<PlanningDeliveryPanel runId="run-one" versionId="version-one" artifactIds={["treatment-one"]}
@@ -114,7 +112,7 @@ describe("PlanningDeliveryPanel", () => {
     expect(await screen.findByText("看懂判断方法")).toBeInTheDocument();
     expect(screen.getByText("需要真实来源支持")).toBeInTheDocument();
     expect(screen.getByText("需要你提供或核实")).toBeInTheDocument();
-    expect(screen.queryByText("internal-beat-1")).not.toBeInTheDocument();
+    expect(screen.queryByText("suppliedSourceIds")).not.toBeInTheDocument();
     await userEvent.click(screen.getByText("查看产物登记信息"));
     expect(screen.getByText("treatment-one")).toBeVisible();
   });
@@ -122,7 +120,7 @@ describe("PlanningDeliveryPanel", () => {
 
 describe("PlanningDeliveryPanel D19", () => {
   it("falls back to the registered effective version when stage verification is empty", async () => {
-    vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ viewerPromise: "当前采用稿正文" });
+    vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ concept: "当前采用稿正文" });
     render(<PlanningDeliveryPanel runId="run-d19" versionId="version-current" artifactIds={["treatment-current"]}
       artifacts={[artifact("treatment-current", "creative_treatment")]} publicationExpected={false} />);
     expect(await screen.findByText("当前采用稿正文")).toBeInTheDocument();

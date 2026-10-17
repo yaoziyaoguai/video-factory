@@ -405,9 +405,6 @@ export function ResourcesPage() {
           </div>
           <div className="configuration-fields">
             <label className="field"><span>画面来源策略</span><select aria-label="默认画面来源策略" value={defaultRecipeId} onChange={(event) => setDefaultRecipeId(event.target.value as StudioProductionRecipeId)}>{RECIPE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select><small>启用付费画面后，仍须查看本片报价并单独确认费用；保存默认值不是购买授权。</small></label>
-            <label className="field"><span>导演角色</span><select aria-label="默认导演角色" value={productionDefaults.directorProfileId} onChange={(event) => setProductionDefaults((current) => ({ ...current, directorProfileId: event.target.value as StudioProductionDefaults["directorProfileId"] }))}>
-              <option value="auto">自动选导演</option><option value="documentary-observer">纪实观察</option><option value="quiet-humanism">静观生活</option><option value="urban-poetic">都市诗意</option><option value="chromatic-storytelling">色彩叙事</option><option value="geometric-control">几何秩序</option><option value="suspense-staging">悬念调度</option>
-            </select></label>
             <label className="field"><span>目标平台</span><select aria-label="默认目标平台" value={productionDefaults.platform} onChange={(event) => setProductionDefaults((current) => ({ ...current, platform: event.target.value as StudioProductionDefaults["platform"] }))}><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option><option value="bilibili">哔哩哔哩</option></select></label>
             <label className="field"><span>默认参考时长（秒）</span><input type="number" step="any" min="0.01" aria-label="默认视频时长" value={productionDefaults.durationSeconds || ""} onChange={(event) => setProductionDefaults((current) => ({ ...current, durationSeconds: Number(event.target.value) }))} /><small>只是创作参考；实际时长在脚本阶段由你确认。</small></label>
           </div>
@@ -423,18 +420,15 @@ export function ResourcesPage() {
       </section>
 
       <section id="topic-strategy" className="resource-section topic-strategy-config" data-resource-section data-active={activeSection === "topic-strategy" ? "true" : undefined} data-tour="topic-strategy">
-        <ResourceHeading eyebrow="总编规则" title="什么题值得做" meta="系统综合判断下列准入条件；你只需维护账号定位、内容边界和来源标准，不需要调整评分权重" />
-        <div className="topic-rubric" aria-label="选题评估参考">
-          {[['明确观众收益', '必需', '说清谁会看，以及看完能解决什么具体问题'], ['前两秒钩子', '必需', '开场立即给出具体承诺或值得停留的理由'], ['画面不可替代', '必需', '有可见行动、对比或现场，而不只是把文字换成口播'], ['创作增量', '必需', '提供通稿之外的新解释、验证或选择依据'], ['可追溯来源', '必需', '事实能回到有效原始链接，并满足下方来源标准'], ['成本与价值匹配', '综合', '预计画面成本要与观看价值和制作必要性相称'], ['风险与形式匹配', '综合', '公共或高风险事件优先证据表达，不用生成画面虚构现场']].map(([label, gate, detail]) => <article key={label}><span>{gate}</span><strong>{label}</strong><small>{detail}</small></article>)}
-        </div>
+        <ResourceHeading eyebrow="总编规则" title="什么题值得做" meta="设置账号定位、内容偏好和来源标准，供总编寻找选题时参考" />
         <div className="topic-instruction-editor">
           <div className="topic-strategy-fields">
-            <label className="field"><span>账号内容定位</span><input required aria-label="账号内容定位" maxLength={500} value={topicStrategy.positioning ?? ""} onChange={(event) => setTopicStrategy((current) => ({ ...current, positioning: event.target.value }))} /><small>必填。一句话说明这个账号长期替观众解决什么问题。</small></label>
+            <label className="field"><span>账号内容定位</span><input required aria-label="账号内容定位" maxLength={500} value={topicStrategy.positioning ?? ""} onChange={(event) => setTopicStrategy((current) => ({ ...current, positioning: event.target.value }))} /><small>必填。说明这个账号长期想做什么内容。</small></label>
             <label className="field"><span>核心观众</span><input required aria-label="核心观众" maxLength={500} value={topicStrategy.targetAudience ?? ""} onChange={(event) => setTopicStrategy((current) => ({ ...current, targetAudience: event.target.value }))} /><small>必填。写真实处境和认知需求，不写“所有人”。</small></label>
             <label className="field"><span>优先寻找</span><textarea required aria-label="优先题材" rows={5} maxLength={1000} value={topicStrategy.preferredDirections ?? ""} onChange={(event) => setTopicStrategy((current) => ({ ...current, preferredDirections: event.target.value }))} /><small>必填。每行一个方向；它决定总编主动寻找什么。</small></label>
             <label className="field"><span>明确避开</span><textarea required aria-label="避开题材" rows={5} maxLength={1000} value={topicStrategy.excludedDirections ?? ""} onChange={(event) => setTopicStrategy((current) => ({ ...current, excludedDirections: event.target.value }))} /><small>必填。每行一个红线；不适合做成视频的热点应直接放弃。</small></label>
             <label className="field"><span>进入推荐前的来源标准</span><select aria-label="候选来源标准" value={topicStrategy.sourcePolicy ?? DEFAULT_STUDIO_TOPIC_STRATEGY.sourcePolicy} onChange={(event) => setTopicStrategy((current) => ({ ...current, sourcePolicy: event.target.value as NonNullable<StudioTopicStrategy["sourcePolicy"]> }))}><option value="primary_or_two_independent">不少于两个不同域名的有效链接</option><option value="traceable_source">至少一个格式有效的原始链接</option></select><small>系统会校验链接格式、来源域名和非搜索结果页；高风险事实仍会要求人工打开核验。</small></label>
-            <label className="field"><span>其他具体原则</span><textarea aria-label="其他选题原则" rows={3} maxLength={2000} value={topicStrategy.customInstruction} onChange={(event) => setTopicStrategy((current) => ({ ...current, customInstruction: event.target.value }))} placeholder="例如：优先能在 30 秒内通过实验或前后对比兑现承诺的题材" /><small>只补充上面没有覆盖的具体判断，不要重复系统底线。</small></label>
+            <label className="field"><span>其他具体原则</span><textarea aria-label="其他选题原则" rows={3} maxLength={2000} value={topicStrategy.customInstruction} onChange={(event) => setTopicStrategy((current) => ({ ...current, customInstruction: event.target.value }))} placeholder="可补充你的题材偏好或其他要求，留空也可以" /><small>只补充上面没有覆盖的具体判断，不要重复系统底线。</small></label>
           </div>
           <div className="configuration-save-row"><span>{!topicStrategyComplete ? "请先补全四项必填规则" : topicHasChanges ? "有未保存的总编规则" : "总编规则已保存"}</span><button className="button button-primary" type="button" disabled={settingsSaving || !topicHasChanges || !topicStrategyComplete} onClick={() => void saveDefaults({ topicStrategy: normalizeTopicStrategy(topicStrategy) }, "总编规则已保存，下一次刷新候选时生效。") }><Save aria-hidden="true" size={16} />{topicHasChanges ? "保存总编规则" : "已保存"}</button></div>
         </div>
@@ -1080,8 +1074,7 @@ function canonicalRecipeId(recipeId: StudioProductionRecipeId): StudioProduction
 
 function sameProductionDefaults(left: StudioProductionDefaults | undefined, right: StudioProductionDefaults): boolean {
   if (!left) return false;
-  return left.directorProfileId === right.directorProfileId
-    && left.reviewMode === right.reviewMode
+  return left.reviewMode === right.reviewMode
     && left.platform === right.platform
     && left.durationSeconds === right.durationSeconds;
 }

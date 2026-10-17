@@ -58,7 +58,6 @@ import type {
   StudioTemplateCreateInput,
   StudioTemplateDeletion,
   StudioTemplateMutation,
-  StudioTemplateExperimentScorecard,
   StudioNodeOverrideInput,
   StudioDocumentCommand,
   StudioNodeDocumentRevisionInput,
@@ -211,7 +210,6 @@ export const studioApi = {
     },
   ),
   templates: () => requestJson<StudioTemplateCatalog>("/api/templates"),
-  templateExperiments: () => requestJson<StudioTemplateExperimentScorecard[]>("/api/template-experiments"),
   resourceManifest: () => requestJson<StudioResourceManifest>("/api/resource-manifest"),
   reviewResource: (input: StudioResourceReviewInput) => requestJson<StudioResourceManifest>("/api/resource-manifest/reviews", {
     method: "POST",

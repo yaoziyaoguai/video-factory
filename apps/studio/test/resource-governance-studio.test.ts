@@ -27,7 +27,7 @@ describe("ResourceGovernanceStudio", () => {
     assert.equal(manifest.assetIndex.assets[0]?.usages[0]?.creatorUrl, creatorUrl);
     assert.equal(manifest.assetIndex.assets[0]?.origin, "stock");
   });
-  it("aggregates persisted resource manifests and evidence-based template scorecards", async () => {
+  it("aggregates persisted resource manifests and asset indexes", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-resources-"));
     const manifestPath = path.join(workspaceRoot, "resource_manifest.json");
     await writeFile(manifestPath, JSON.stringify({
@@ -56,16 +56,10 @@ describe("ResourceGovernanceStudio", () => {
       }],
     }));
     const run = completedRun(manifestPath);
-    let publishedTemplates = [
-      { id: "knowledge-explainer", name: "知识解释" },
-      { id: "custom-workflow", name: "自定义工作流" },
-    ];
     const studio = new ResourceGovernanceStudio(
       workspaceRoot,
       async () => [run],
       () => new Date("2026-08-28T12:00:00.000Z"),
-      undefined,
-      async () => publishedTemplates,
     );
 
     const manifest = await studio.manifest();
@@ -89,20 +83,6 @@ describe("ResourceGovernanceStudio", () => {
     assert.equal(manifest.assetIndex.assets[0]?.tags.includes("stock_video"), false);
     assert.equal(manifest.assetIndex.assets[0]?.tags.includes("pexels-stock-v1"), false);
 
-    const scorecards = await studio.templateExperiments();
-    assert.deepEqual(scorecards.map((item) => item.templateId), ["knowledge-explainer", "custom-workflow"]);
-    const knowledge = scorecards.find((item) => item.templateId === "knowledge-explainer");
-    assert.equal(knowledge?.sampleSize, 1);
-    assert.equal(knowledge?.metrics.narrativeCompleteness, 100);
-    assert.equal(knowledge?.metrics.visualMatch, 80);
-    assert.equal(knowledge?.metrics.manualEditCount, 1);
-    assert.equal(knowledge?.metrics.hookClarity, null);
-    assert.equal(knowledge?.metrics.costEfficiency, null);
-    assert.equal(knowledge?.metrics.finalApprovalRate, 100);
-    assert.equal(scorecards.find((item) => item.templateId === "custom-workflow")?.sampleSize, 0);
-
-    publishedTemplates = [{ id: "custom-workflow", name: "自定义工作流" }];
-    assert.deepEqual((await studio.templateExperiments()).map((item) => item.templateId), ["custom-workflow"]);
   });
 
   it("persists revision-protected review decisions without changing the source manifest", async () => {
@@ -140,25 +120,6 @@ describe("ResourceGovernanceStudio", () => {
     ]);
     assert.equal(attempts.filter((result) => result.status === "fulfilled").length, 1);
     assert.equal(attempts.filter((result) => result.status === "rejected").length, 1);
-  });
-
-  it("keeps test runs out of production template learning", async () => {
-    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-template-purpose-"));
-    const production = completedRun(path.join(workspaceRoot, "production.json"), "run-production");
-    const testRun = completedRun(path.join(workspaceRoot, "test.json"), "run-test", "自动化验收记录");
-    testRun.initialInput.runPurpose = "test";
-    const studio = new ResourceGovernanceStudio(
-      workspaceRoot,
-      async () => [production, testRun],
-      undefined,
-      undefined,
-      async () => [{ id: "knowledge-explainer", name: "知识解释" }],
-    );
-
-    const scorecard = (await studio.templateExperiments())[0];
-
-    assert.equal(scorecard?.sampleSize, 1);
-    assert.equal(scorecard?.metrics.finalApprovalRate, 100);
   });
 
   it("deduplicates review work across reworks and inherits the latest matching decision", async () => {
@@ -291,88 +252,6 @@ describe("ResourceGovernanceStudio", () => {
     const studio = new ResourceGovernanceStudio(workspaceRoot, async () => [completedRun(manifestPath)]);
 
     await assert.rejects(() => studio.manifest(), /授权审核账本格式无效/);
-  });
-
-  it("does not count stale review evidence or an invalidated historical approval", async () => {
-    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-resources-"));
-    const manifestPath = path.join(workspaceRoot, "resource_manifest.json");
-    await writeFile(manifestPath, JSON.stringify({ version: "video-factory/resource-manifest-v1", runId: "run-1", items: [] }));
-    const run = completedRun(manifestPath);
-    run.status = "stale";
-    run.nodeRuns = run.nodeRuns.map((node) => node.nodeId === "visual-review"
-      ? { ...node, status: "stale", outputState: { ...node.outputState!, stale: true } }
-      : node.nodeId === "final-review" ? { ...node, status: "stale" } : node);
-    const studio = new ResourceGovernanceStudio(
-      workspaceRoot,
-      async () => [run],
-      undefined,
-      undefined,
-      async () => [{ id: "knowledge-explainer", name: "知识解释" }],
-    );
-
-    const scorecard = (await studio.templateExperiments()).find((item) => item.templateId === "knowledge-explainer");
-
-    assert.equal(scorecard?.metrics.visualMatch, null);
-    assert.equal(scorecard?.metrics.finalApprovalRate, null);
-  });
-
-  it("uses only decided final reviews as the final approval rate denominator", async () => {
-    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-template-review-rate-"));
-    const manifestPath = path.join(workspaceRoot, "resource_manifest.json");
-    await writeFile(manifestPath, JSON.stringify({ version: "video-factory/resource-manifest-v1", runId: "approved", items: [] }));
-    const approved = completedRun(manifestPath, "approved");
-    const rejected = completedRun(manifestPath, "rejected");
-    rejected.status = "rejected";
-    rejected.nodeRuns = rejected.nodeRuns.map((node) => node.nodeId === "final-review"
-      ? { ...node, status: "rejected" }
-      : node);
-    rejected.decisions = rejected.decisions.map((decision) => ({ ...decision, action: "reject" }));
-    const undecided = completedRun(manifestPath, "undecided");
-    undecided.status = "running";
-    undecided.nodeRuns = undecided.nodeRuns.map((node) => node.nodeId === "final-review"
-      ? { ...node, status: "pending" }
-      : node);
-    undecided.interventions = [];
-    undecided.decisions = [];
-    const sourceRejected = completedRun(manifestPath, "source-rejected");
-    const sourceIntervention = {
-      id: "source-intervention",
-      nodeId: "asset-source-review",
-      reason: "来源不适合入片",
-      requiredAction: "approve" as const,
-      options: ["approve", "reject"] as Array<"approve" | "reject">,
-      createdAt: "2026-08-28T10:00:20.000Z",
-    };
-    sourceRejected.status = "rejected";
-    sourceRejected.nodeRuns = [{
-      nodeId: "asset-source-review",
-      status: "rejected",
-      startedAt: sourceIntervention.createdAt,
-      finishedAt: "2026-08-28T10:00:25.000Z",
-      artifactIds: [],
-      qualityGateResults: [],
-      intervention: sourceIntervention,
-    }];
-    sourceRejected.interventions = [sourceIntervention];
-    sourceRejected.decisions = [{
-      id: "source-decision",
-      interventionId: sourceIntervention.id,
-      action: "reject",
-      actor: "owner",
-      createdAt: "2026-08-28T10:00:25.000Z",
-    }];
-    const studio = new ResourceGovernanceStudio(
-      workspaceRoot,
-      async () => [approved, rejected, undecided, sourceRejected],
-      undefined,
-      undefined,
-      async () => [{ id: "knowledge-explainer", name: "知识解释" }],
-    );
-
-    const scorecard = (await studio.templateExperiments())[0];
-
-    assert.equal(scorecard?.sampleSize, 4);
-    assert.equal(scorecard?.metrics.finalApprovalRate, 50);
   });
 
   it("isolates an untrusted manifest without hiding healthy runs", async () => {
@@ -804,21 +683,6 @@ function completedRun(manifestPath: string, runId = "run-1", title = "知识解�
       platform: "douyin",
       reviewMode: "manual",
       providers: { script: "python-template-v1", assets: "local-editorial-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-      templateSnapshot: {
-        templateId: "knowledge-explainer",
-        templateVersion: 1,
-        resolvedAt: "2026-08-28T10:00:00.000Z",
-        resolvedBlueprint: {
-          platform: "douyin", durationSeconds: 24, automationLevel: "assisted",
-          storyStructure: [{ id: "hook", label: "开场", purpose: "抓住注意", required: true }],
-          shotSlots: [{ id: "shot", beatId: "hook", purpose: "开场", durationSeconds: 4, allowedCapabilities: ["asset.search"], manualReplacement: true }],
-          visualSystem: { composition: "清晰", colorIntent: "自然", subtitleDensity: "medium", pacing: "measured" },
-          soundSystem: { voiceIntent: "可信", pace: "medium", musicIntent: "克制" },
-          qualityRules: [{ id: "facts", label: "事实", dimension: "factual", required: true, threshold: 80 }],
-          capabilityRequirements: [{ capability: "script.draft", required: true }],
-        },
-        sourceLayers: [], fieldSources: {},
-      },
       economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
     },

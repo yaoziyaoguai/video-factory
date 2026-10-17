@@ -64,7 +64,6 @@ import type {
   StudioTemplateCreateInput,
   StudioTemplateDeletion,
   StudioTemplateMutation,
-  StudioTemplateExperimentScorecard,
   StudioProductionInput,
   StudioProductionRoleBindingKey,
   StudioNodeInputOverrideInput,
@@ -222,14 +221,12 @@ export class StudioService {
       path.join(options.workspaceRoot, "templates", "templates.json"),
       BUILTIN_TEMPLATES,
     );
-    const publishedTemplates = async () => (await templateStore.list()).publishedTemplates;
     this.templates = new TemplateStudio(templateStore, now);
     this.candidateInbox = new CandidateInboxStudio({
       trends: this.trends,
       series: this.series,
       opportunities: this.opportunities,
       topicStrategy: async () => (await this.creatorSettings.get()).topicStrategy,
-      publishedTemplates: async () => [],
       now,
     });
     this.resourceGovernance = new ResourceGovernanceStudio(
@@ -246,7 +243,6 @@ export class StudioService {
           throw error;
         }
       },
-      publishedTemplates,
     );
     this.production = new ProductionStudio({
       workspaceRoot: options.workspaceRoot,
@@ -318,7 +314,6 @@ export class StudioService {
     return this.creatorSettings.update(input);
   }
   listTemplates(): Promise<StudioTemplateCatalog> { return this.templates.list(); }
-  templateExperiments(): Promise<StudioTemplateExperimentScorecard[]> { return this.resourceGovernance.templateExperiments(); }
   resourceManifest(): Promise<StudioResourceManifest> { return this.resourceGovernance.manifest(); }
   reviewResource(input: StudioResourceReviewInput, actor = "studio-owner"): Promise<StudioResourceManifest> { return this.resourceGovernance.review(input, actor); }
   getTemplate(id: string, version?: number): Promise<StudioTemplate | undefined> { return this.templates.get(id, version); }
@@ -393,7 +388,6 @@ export class StudioService {
     return reviewTrendOpportunityAgainstCurrentPolicy(
       updated,
       settings.topicStrategy.sourcePolicy,
-      [],
     );
   }
 
@@ -442,7 +436,6 @@ export class StudioService {
     const currentOpportunities = opportunities.map((item) => reviewTrendOpportunityAgainstCurrentPolicy(
       item,
       settings.topicStrategy.sourcePolicy,
-      [],
     ));
     return origin
       ? currentOpportunities.filter((item) => origin === "manual" ? item.origin === "manual" || item.origin === undefined : item.origin === origin)
@@ -455,7 +448,6 @@ export class StudioService {
     return reviewTrendOpportunityAgainstCurrentPolicy(
       opportunity,
       settings.topicStrategy.sourcePolicy,
-      [],
     );
   }
   createOpportunity(input: StudioOpportunityInput): Promise<StudioOpportunity> {
@@ -573,7 +565,7 @@ export class StudioService {
           title: configuredInput.title ?? seriesContext.episode.title,
           angle: typeof configuredInput.angle === "string" && configuredInput.angle.trim()
             ? configuredInput.angle.trim()
-            : `${seriesContext.episode.hook}\n本集必须兑现：${seriesContext.episode.viewerPromise}\n结尾交付：${seriesContext.episode.payoff}`,
+            : seriesContext.episode.concept,
           audience: configuredInput.audience ?? seriesContext.audience,
           nicheSlug: seriesContext.track,
           platform: configuredInput.platform ?? seriesContext.platform,

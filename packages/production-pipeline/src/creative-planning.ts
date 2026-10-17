@@ -210,7 +210,7 @@ export interface CreativePlanningPorts {
     baseDraftArtifactId?: string;
     expectedReviewRevision: number;
     message: string;
-    selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] };
+    selection?: { kind: "document" | "scene"; ids: string[]; scenePositions: number[] };
     recentMessages: Array<{ role: "user" | "assistant"; text: string }>;
     effectiveUserInstructions: Array<{ commandId: string; message: string }>;
     upstreamDocuments: Partial<Record<"treatment" | "script", unknown>>;
@@ -544,8 +544,6 @@ function shotEvidenceIdentity(shot: ShotDecision): unknown {
 function planCreativeContractIdentity(plan: VisualDirectorPlan): unknown {
   return {
     version: plan.version,
-    requestedProfileId: plan.requestedProfileId,
-    resolvedProfileId: plan.resolvedProfileId,
     visualBible: plan.visualBible,
   };
 }
@@ -1023,27 +1021,27 @@ function creativeValidationIssues(message: string): Array<{ path: string; code: 
   const patterns: Array<{ pattern: RegExp; path: (match: RegExpMatchArray) => string }> = [
     {
       // 例：Creative treatment evidenceRequirements[4].retrievalProviderId is required for pipeline_generated.
-      pattern: /Creative treatment ((?:evidenceRequirements|feasibilityQuestions|progression)\[\d+\]\.[A-Za-z]+(?: is required for| must be| cannot use| cannot mark| duplicates| must reference| references source id)[^.；]*)\.?/u,
+      pattern: /Creative treatment ((?:evidenceRequirements|feasibilityQuestions)\[\d+\]\.[A-Za-z]+(?: is required for| must be| cannot use| cannot mark| duplicates| must reference| references source id)[^.；]*)\.?/u,
       path: (match) => match[1]!.split(" is required for")[0]!.split(" must be")[0]!
         .split(" cannot use")[0]!.split(" cannot mark")[0]!.split(" duplicates")[0]!
         .split(" must reference")[0]!.split(" references source id")[0]!,
     },
     {
-      pattern: /Creative treatment ((?:evidenceRequirements|feasibilityQuestions|progression)\[\d+\](?:\.[A-Za-z]+)?(?: is required| must be| cannot| duplicates| must reference| references)[^.；]*)\.?/u,
+      pattern: /Creative treatment ((?:evidenceRequirements|feasibilityQuestions)\[\d+\](?:\.[A-Za-z]+)?(?: is required| must be| cannot| duplicates| must reference| references)[^.；]*)\.?/u,
       path: (match) => match[1]!.split(" is required")[0]!.split(" must be")[0]!
         .split(" cannot")[0]!.split(" duplicates")[0]!.split(" must reference")[0]!
         .split(" references")[0]!,
     },
     {
-      pattern: /Creative treatment (hook\.[A-Za-z]+|viewerPromise|payoff|visualPrinciples|soundPrinciples|version)[^.；;]*/u,
+      pattern: /Creative treatment (concept|version)[^.；;]*/u,
       path: (match) => match[1]!,
     },
     {
-      pattern: /Script draft ((?:scenes|canonFacts)\[\d+\](?:\.[A-Za-z]+)?|viewerPromise|narrativeArc)[^.；]*/u,
+      pattern: /Script draft ((?:scenes|canonFacts)\[\d+\](?:\.[A-Za-z]+)?)[^.；]*/u,
       path: (match) => match[1]!,
     },
     {
-      pattern: /((?:visualBible|requestedProfileId|resolvedProfileId|profileRationale)(?:\.[A-Za-z]+)?|shots\[\d+\]\.[A-Za-z]+) must /u,
+      pattern: /((?:visualBible)(?:\.[A-Za-z]+)?|shots\[\d+\]\.[A-Za-z]+) must /u,
       path: (match) => match[1]!,
     },
   ];

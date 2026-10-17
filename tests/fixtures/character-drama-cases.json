@@ -21,8 +21,6 @@
   ],
   "script": {
     "version": "video-factory/character-script-v1",
-    "viewerPromise": "四个人找一把钥匙。",
-    "narrativeArc": "丢失、线索、找到、收束。",
     "canonFacts": [],
     "characters": [
       {"id":"shopkeeper","name":"店主","kind":"character","appearance":"短发，深蓝围裙，白衬衫。","personality":"着急但愿意道歉。","voice_intent":"沉稳男声。","voice_profile_id":"minimax:male-qn-jingying"},

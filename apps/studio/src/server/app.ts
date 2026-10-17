@@ -99,7 +99,6 @@ import {
   type StudioTemplateCreateInput,
   type StudioTemplateDeletion,
   type StudioTemplateMutation,
-  type StudioTemplateExperimentScorecard,
   type StudioNodeInputOverrideInput,
   type StudioNodeDocumentRevisionInput,
   type StudioNodeDocumentAuditInput,
@@ -121,7 +120,6 @@ export interface StudioServicePort {
   getCreatorSettings(): Promise<StudioCreatorSettings>;
   updateCreatorSettings(input: StudioCreatorSettingsPatch): Promise<StudioCreatorSettings>;
   listTemplates(): Promise<StudioTemplateCatalog>;
-  templateExperiments(): Promise<StudioTemplateExperimentScorecard[]>;
   resourceManifest(): Promise<StudioResourceManifest>;
   reviewResource?(input: StudioResourceReviewInput, actor: string): Promise<StudioResourceManifest>;
   getTemplate(id: string, version?: number): Promise<StudioTemplate | undefined>;
@@ -430,7 +428,6 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     return options.service.updateCreatorSettings(parseStudioCreatorSettingsPatch(request.body));
   });
   app.get("/api/templates", async () => options.service.listTemplates());
-  app.get("/api/template-experiments", async () => options.service.templateExperiments());
   app.get("/api/resource-manifest", async () => options.service.resourceManifest());
   app.post("/api/resource-manifest/reviews", async (request) => {
     if (!options.service.reviewResource) throw new StudioInputError("当前环境没有启用素材授权审核。");

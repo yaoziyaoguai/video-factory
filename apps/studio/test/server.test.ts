@@ -91,14 +91,13 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
     getCreatorSettings: async () => ({
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "economy-daily",
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       topicStrategy: { customInstruction: "优先可拍、可核验、可连载的题材。" },
     }),
     updateCreatorSettings: async (input) => ({
       voiceDirection: input.voiceDirection ?? { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: input.defaultRecipeId ?? "economy-daily",
       productionDefaults: {
-        directorProfileId: input.productionDefaults?.directorProfileId ?? "auto",
         reviewMode: input.productionDefaults?.reviewMode ?? "manual",
         platform: input.productionDefaults?.platform ?? "douyin",
         durationSeconds: input.productionDefaults?.durationSeconds ?? 24,
@@ -110,7 +109,6 @@ function fakeService(overrides: Partial<StudioServicePort> = {}): StudioServiceP
       ...(input.defaultAssetProviderId ? { defaultAssetProviderId: input.defaultAssetProviderId } : {}),
     }),
     listTemplates: async () => ({ storeRevision: 0, templates: [] }),
-    templateExperiments: async () => [],
     resourceManifest: async () => ({
       generatedAt: "2026-08-28T10:00:00.000Z",
       totalItems: 0,
@@ -1161,7 +1159,6 @@ describe("Studio API", () => {
           voiceDirection: input.voiceDirection ?? { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
           defaultRecipeId: input.defaultRecipeId ?? "economy-daily",
           productionDefaults: {
-            directorProfileId: input.productionDefaults?.directorProfileId ?? "auto",
             reviewMode: input.productionDefaults?.reviewMode ?? "manual",
             platform: input.productionDefaults?.platform ?? "douyin",
             durationSeconds: input.productionDefaults?.durationSeconds ?? 24,
@@ -1376,9 +1373,7 @@ describe("Studio API", () => {
         expectedRevision: 3,
         pillar: "真实任务实验",
         title: "一条人工改写的单集",
-        viewerPromise: "看到真实结论",
-        hook: "先看结果",
-        payoff: "完成验证",
+        concept: "看到真实结论",
         fromPrevious: ["承接上一集"],
         toNext: ["留下下一题"],
       },
@@ -1417,9 +1412,7 @@ describe("Studio API", () => {
         expectedRevision: 3,
         pillar: "真实任务实验",
         title: "一条人工改写的单集",
-        viewerPromise: "看到真实结论",
-        hook: "先看结果",
-        payoff: "完成验证",
+        concept: "看到真实结论",
         fromPrevious: ["承接上一集"],
         toNext: ["留下下一题"],
       },
@@ -1615,7 +1608,7 @@ describe("Studio API", () => {
           creativeReview: "user-confirmed-v1",
           boundaryGates: "user-confirmed-v1",
         },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
       },
     });
     const detail = await app.inject({ method: "GET", url: "/api/runs/run-1" });

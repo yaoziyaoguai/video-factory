@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { CodexBridgeClient, requestOptionsForDeadline, type CodexTaskExecution, type CodexTaskRequestOptions } from "./codex-chat.js";
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
-import type { ProductionArticleSourceSnapshot, ProductionReworkFinding, ProductionSeriesContext, ProductionVisualPlan } from "./contracts.js";
+import type { ProductionArticleSourceSnapshot, ProductionReworkFinding, ProductionSeriesContext } from "./contracts.js";
 import { assertDurationCommitment, durationIntentFor, PlanContractError, quantizeDurationsToFrames, validateContentLedDurationIntent, type DurationBounds, type DurationIntent } from "./executable-timeline.js";
 import type { CreativeTreatment } from "./creative-treatment.js";
 import type { PlanningIssue } from "./creative-planning.js";
@@ -29,8 +29,6 @@ export interface ScriptScene {
 }
 
 export interface NarrationScriptDraft {
-  viewerPromise?: string;
-  narrativeArc?: string;
   canonFacts?: string[];
   scenes: ScriptScene[];
 }
@@ -52,7 +50,6 @@ export interface ScreenwriterAgentInput {
     };
     visualProof?: string;
     visualIntent?: string;
-    visualPlan?: ProductionVisualPlan;
     seriesContext?: ProductionSeriesContext;
     articleSources?: ProductionArticleSourceSnapshot[];
     creativeTreatment?: CreativeTreatment;
@@ -105,7 +102,7 @@ export interface CodexScreenwriterAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_SCREENWRITER_TIMEOUT_MS = 660_000;
 const DEFAULT_SCREENWRITER_MAX_ATTEMPTS = 2;
-export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v22|role-audit-v9|script-validator-v5|visual-plan-v2|production-capabilities-v5|voice-timing-v1|creative-treatment-v2|canon-facts-v2|article-sources-v1|creator-paced-opening-v1|audit-capabilities-once-v1|character-script-v1|native-av-v1";
+export const SCREENWRITER_AGENT_CONTRACT_VERSION = "screenwriter-v23|role-audit-v9|script-validator-v5|production-capabilities-v5|voice-timing-v1|creative-treatment-v3|canon-facts-v2|article-sources-v1|creator-paced-opening-v1|audit-capabilities-once-v1|character-script-v1|native-av-v1";
 
 // id 固定为 codex-screenwriter-v1：brief.providers.script 持久化该 id，registry 按 id 匹配 provider。
 export class CodexScreenwriterAgent implements ScreenwriterAgent {
@@ -160,14 +157,13 @@ export class CodexScreenwriterAgent implements ScreenwriterAgent {
       contractVersion: SCREENWRITER_AGENT_CONTRACT_VERSION,
       criteria: [
         ...(input.brief.presentationMode === "character_drama" ? ["角色动机与关系清楚，台词有来有往并推动情节；角色与台词 ID 在修改时稳定，出场与场外发言分开。内容意见不能要求把多人剧情降成单旁白。"] : []),
-        "保持 creativeTreatment 的观众承诺、段落责任与 payoff；落实本次 planningIssues，事实边界一致。",
-        "开场让具体对象、问题、动作或感受逐步成立，按片型与用户要求判断观看动机，不强迫统一秒数、冲突或提问。保留用户明确的静默与留白；逐段说明信息、行动或情绪如何推进，结尾兑现原承诺，不强加CTA或升华。重复导语不能冒充推进，有意审美停留不等于没有价值。",
+        "保持已采用构思的实际内容和用户明确的留白等要求；落实本次 planningIssues，事实边界一致。",
         "脚本动作、旁白、屏幕文字、声音提示与时长协调；旁白可自然朗读，内部制作术语不进入观众表达。必要事实限定保留，冗长句先改写而不是加速或增加无职责镜头。",
         "素材/编辑要求符合 productionCapabilities；同母片源区间方案允许在覆盖可证的前提下交导演落实，独立生成不能冒充同一对象或真实实验。",
-        "durationRange 优先，visualPlan、用户要求和系列约束一致；冲突不能通过静默跳过或捏造能力解决。",
+        "遵守用户明确的时长要求和已确认的系列事实；冲突不能通过静默跳过或捏造能力解决。",
         "canonFacts 必须是 0-8 条已建立事实；没有新增事实时为空数组，不能用计划或推测凑数；事实阈值与条件不因 hook 或总结被改成绝对断言。",
         "rework 的范围、findingId 与人工指令准确，未受影响内容保留，不宣称已经复验。",
-        "修订复核上轮问题，不破坏已有兑现与能力约束；新的 blocking 有可引用依据而不是更换个人偏好。",
+        "修订复核上轮问题，保留未受影响的内容与能力约束；新的 blocking 有可引用依据而不是更换个人偏好。",
       ],
       maxIterations: input.creativeReviewExecution ? 1 : this.maxReviewIterations,
       ...(input.creativeReviewExecution?.mode === "draft" ? { deferAudit: true } : {}),
@@ -257,7 +253,7 @@ function screenwriterAuditContext(
   } : undefined;
   return {
     roleScope: {
-      owns: ["viewerPromise", "narrativeArc", "canonFacts", "scenes"],
+      owns: ["canonFacts", "scenes"],
       doesNotOwn: ["素材实际命中", "画面生成结果", "配音成品", "渲染与终审结果"],
     },
     upstreamFacts: {
@@ -270,7 +266,6 @@ function screenwriterAuditContext(
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
       ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
-      ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
       ...(brief.creativeTreatment ? { creativeTreatment: brief.creativeTreatment } : {}),
       ...(brief.planningIssues ? { planningIssues: brief.planningIssues } : {}),
       ...(brief.articleSources?.length ? { articleSources: brief.articleSources } : {}),
@@ -313,9 +308,7 @@ function screenwriterAuditContext(
         arc: series.arc,
         episode: {
           pillar: series.episode.pillar,
-          viewerPromise: series.episode.viewerPromise,
-          hook: series.episode.hook,
-          payoff: series.episode.payoff,
+          concept: series.episode.concept,
         },
         bible: series.bible,
         acceptedCanonFacts: series.canon.facts.map(({ statement }) => statement),
@@ -476,12 +469,6 @@ export function validateScriptDraft(value: unknown, options: DurationIntent & {
     throw new Error("Series script drafts must contain a canonFacts array with at most 8 entries.");
   }
   return {
-    ...(optionalText(input.viewerPromise, "viewerPromise") !== undefined
-      ? { viewerPromise: optionalText(input.viewerPromise, "viewerPromise")! }
-      : {}),
-    ...(optionalText(input.narrativeArc, "narrativeArc") !== undefined
-      ? { narrativeArc: optionalText(input.narrativeArc, "narrativeArc")! }
-      : {}),
     ...(canonFacts ? { canonFacts } : {}),
     scenes,
   };

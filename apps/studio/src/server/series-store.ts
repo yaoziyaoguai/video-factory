@@ -88,8 +88,7 @@ function newEpisodeVersionId(episodeId: string): string {
 function episodeVersion(episode: StudioSeriesEpisode, versionId: string, recordedAt: string): StudioSeriesEpisodeVersion {
   return {
     versionId, recordedAt, source: episode.planning.source,
-    pillar: episode.pillar, title: episode.title, viewerPromise: episode.viewerPromise,
-    hook: episode.hook, payoff: episode.payoff,
+    pillar: episode.pillar, title: episode.title, concept: episode.concept,
     fromPrevious: [...episode.continuity.fromPrevious], toNext: [...episode.continuity.toNext],
   };
 }
@@ -316,9 +315,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
             ...currentVersion,
             pillar: input.pillar,
             title: input.title,
-            viewerPromise: input.viewerPromise,
-            hook: input.hook,
-            payoff: input.payoff,
+            concept: input.concept,
             continuity: {
               ...candidate.continuity,
               fromPrevious: structuredClone(input.fromPrevious),
@@ -430,16 +427,12 @@ export class JsonSeriesStore implements StudioSeriesRepository {
       if (JSON.stringify({
         pillar: draft.pillar,
         title: draft.title,
-        viewerPromise: draft.viewerPromise,
-        hook: draft.hook,
-        payoff: draft.payoff,
+        concept: draft.concept,
         toNext: draft.toNext,
       }) !== JSON.stringify({
         pillar: episode.pillar,
         title: episode.title,
-        viewerPromise: episode.viewerPromise,
-        hook: episode.hook,
-        payoff: episode.payoff,
+        concept: episode.concept,
         toNext: episode.continuity.toNext,
       })) {
         throw new SeriesStoreConflictError("审计不能改写当前稿；如需调整，请返回路线图明确修订后再审计。");
@@ -456,9 +449,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
             ...currentVersion,
             pillar: draft.pillar,
             title: draft.title,
-            viewerPromise: draft.viewerPromise,
-            hook: draft.hook,
-            payoff: draft.payoff,
+            concept: draft.concept,
             canonBaseRevision: current.canon.revision,
             continuity: {
               ...candidate.continuity,
@@ -510,9 +501,7 @@ export class JsonSeriesStore implements StudioSeriesRepository {
         ...currentVersion,
         pillar: draft.pillar,
         title: draft.title,
-        viewerPromise: draft.viewerPromise,
-        hook: draft.hook,
-        payoff: draft.payoff,
+        concept: draft.concept,
         continuity: { ...episode.continuity, toNext: [...draft.toNext] },
         planning: { ...planning, auditStatus: "not_audited" as const, auditIterations: 0 },
         auditHistory: [...(currentVersion.auditHistory ?? [])],
@@ -1174,9 +1163,7 @@ function historicalAdoptedEpisodes(
       arc,
       pillar: pillars[index % pillars.length]!,
       title: `${record.name ?? "历史系列"} ${String(episodeNumber).padStart(2, "0")}｜历史已采用单集`,
-      viewerPromise: premise,
-      hook: "保留迁移前已经采用的系列单集。",
-      payoff: "等待关联历史制作记录并恢复正式的已确认内容。",
+      concept: premise,
       ...(episodeNumber > 1 ? {
         previousEpisodeId: `series-${seriesId}-episode-${String(episodeNumber - 1).padStart(3, "0")}`,
       } : {}),

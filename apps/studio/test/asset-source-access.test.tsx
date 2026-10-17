@@ -62,7 +62,7 @@ describe("in-production asset source access", () => {
     vi.spyOn(studioApi, "creativeReviewHistory").mockResolvedValue({ runId: run.id, legacyIncomplete: false, entries: [] });
     vi.spyOn(studioApi, "creativeReview").mockResolvedValue({ runId: run.id, runRevision: run.revision, stage: "script", reviewRevision: 1,
       draftSha256: "a".repeat(64), draftArtifactId: "script-current", phase: "waiting_user", allowedActions: ["confirm", "edit_draft", "discuss", "revise"], returnTargets: [],
-      draft: { narrativeArc: "观察到行动", scenes: [{ position: 1, duration: 8, narration: "当前旁白", visual_prompt: "窗边光影" }] },
+      draft: {  scenes: [{ position: 1, duration: 8, narration: "当前旁白", visual_prompt: "窗边光影" }] },
       messages: [], proposals: [], effectiveUserInstructions: [], blockingIssues: [] });
     const configure = vi.spyOn(studioApi, "configureNode").mockImplementation(async (_run, _node, input) => ({ ...run, revision: 9, status: "stale",
       nodes: run.nodes.map(node => node.id === "assets" ? { ...node, status: "stale", executionConfiguration: { ...node.executionConfiguration!,

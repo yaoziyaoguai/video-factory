@@ -193,9 +193,6 @@ function generatedShotDirector(): pipeline.VisualDirectorAgent {
     id: "api-visual-director-v1",
     plan: async (input) => ({
       version: "video-factory/director-plan-v1",
-      requestedProfileId: "auto",
-      resolvedProfileId: "geometric-control",
-      profileRationale: "解释型内容需要统一、可控的生成镜头。",
       visualBible: {
         narrativeApproach: "用具体动作解释每一步。",
         pacing: "均匀推进",
@@ -451,7 +448,7 @@ function passedVisualReviewLoop(
       },
       audit: {
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v1",
+        rubricVersion: "video-factory/role-quality-rubric-v2",
         assessments: [{
           targetPath: "",
           dimensions: [
@@ -2130,8 +2127,8 @@ describe("ProductionPipeline", () => {
         transport: "unix_socket", billing: "subscription", approvalPolicy: "none", maxAttempts: 1 }],
       directorAgent: { id: "api-visual-director-v1", modelId: "fixture", plan: async input => {
         directorCalls += 1;
-        return { version: "video-factory/director-plan-v1", requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "documentary-observer", profileRationale: "海景", visualBible: {
+        return { version: "video-factory/director-plan-v1",
+            visualBible: {
             narrativeApproach: "平静", pacing: "舒缓", composition: "开阔", camera: "固定", color: "自然", continuity: "海景", sound: "海浪",
           }, shots: input.scenes.map(scene => ({ scenePosition: scene.position, narrativeRole: "海景",
             authenticityPolicy: "illustrative", preferredProviderId: "pexels-stock-v1", deliveryType: "stock_video",
@@ -2146,7 +2143,7 @@ describe("ProductionPipeline", () => {
     });
     let run = await subject.start({ ...brief, providers: { ...brief.providers, assets: "ai-shot-router-v1",
       director: "api-visual-director-v1", visualReview: "deepseek-visual-review-v1" },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" },
     });
     for (let i = 0; i < 5 && run.status === "needs_human"; i += 1) {
@@ -2199,7 +2196,7 @@ describe("ProductionPipeline", () => {
         runTaskDetailed: async (kind) => {
           calls.push(kind);
           if (kind === "role-audit" && failureStage === "host_invalid") return { output: {
-            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
             score: 90, verdict: "pass", summary: "不能采用这条无依据的宿主纠正", issues: [], repairInstructions: [],
             assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"]
               .map(dimension => ({ dimension, score: 90, evidence: "夹具证据" })) }],
@@ -2288,9 +2285,6 @@ describe("ProductionPipeline", () => {
         modelId: "director-fixture",
         plan: async (input) => ({
           version: "video-factory/director-plan-v1",
-          requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "documentary-observer",
-          profileRationale: "真实素材优先。",
           visualBible: {
             narrativeApproach: "逐镜解释",
             pacing: "稳定",
@@ -2375,7 +2369,7 @@ describe("ProductionPipeline", () => {
         assets: "ai-shot-router-v1",
         visualReview: "deepseek-visual-review-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
     });
 
     assert.equal(run.status, "needs_human");
@@ -4223,17 +4217,6 @@ describe("ProductionPipeline", () => {
   it("uses the current edited brief for screenwriting, direction, publishing, and agent checkpoints", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-current-brief-"));
     const visualProof = "两条真实标题的措辞差异可以直接并列核对。";
-    const visualPlan = {
-      strategy: "用来源标题并列和确定性标尺逐项核对。",
-      beats: [{
-        id: "headline-certainty-scale",
-        role: "证据钩子",
-        duration: "0-6 秒",
-        description: "左右并列真实标题，高亮“网传”和“正在核查”。",
-        searchQuery: "原始来源 标题 截图",
-        source: "local-card",
-      }],
-    } as const;
     const screenwriterInputs: pipeline.ScreenwriterAgentInput[] = [];
     const directorInputs: pipeline.VisualDirectorAgentInput[] = [];
     const publishInputs: Array<{
@@ -4265,9 +4248,6 @@ describe("ProductionPipeline", () => {
           directorInputs.push(input);
           return {
             version: "video-factory/director-plan-v1",
-            requestedProfileId: input.brief.requestedProfileId,
-            resolvedProfileId: "documentary-observer",
-            profileRationale: "使用实拍镜头保持可信。",
             visualBible: {
               narrativeApproach: "逐步展示",
               pacing: "均匀",
@@ -4324,9 +4304,8 @@ describe("ProductionPipeline", () => {
         director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       visualProof,
-      visualPlan,
     });
     assert.equal(original.status, "succeeded");
     const briefOutput = original.nodeRuns.find((node) => node.nodeId === "brief")?.output as pipeline.ProductionBrief;
@@ -4368,10 +4347,8 @@ describe("ProductionPipeline", () => {
       [screenwriterInputs[1]?.brief.visualProof, directorInputs[1]?.brief.visualProof],
       [visualProof, visualProof],
     );
-    assert.deepEqual(
-      [screenwriterInputs[1]?.brief.visualPlan, directorInputs[1]?.brief.visualPlan],
-      [visualPlan, visualPlan],
-    );
+    assert.equal("visualPlan" in screenwriterInputs[1]!.brief, false);
+    assert.equal("visualPlan" in directorInputs[1]!.brief, false);
     assert.deepEqual(screenwriterInputs.map((input) => input.brief.durationRange), [
       { minSeconds: 20, maxSeconds: 34 },
       { minSeconds: 20, maxSeconds: 45 },
@@ -5055,7 +5032,6 @@ describe("ProductionPipeline", () => {
       },
       models: { "api-visual-director-v1": "gpt-5.6-terra" },
       director: {
-        profileId: "auto",
         assetProviderIds: ["local-editorial-v1"],
       },
     });
@@ -5109,9 +5085,6 @@ describe("ProductionPipeline", () => {
           closureDirectorInput = input;
           return {
             version: "video-factory/director-plan-v1",
-            requestedProfileId: "auto",
-            resolvedProfileId: "geometric-control",
-            profileRationale: "解释型内容需要统一、可控的镜头。",
             visualBible: {
               narrativeApproach: "用具体动作解释每一步。",
               pacing: "均匀推进",
@@ -5151,7 +5124,7 @@ describe("ProductionPipeline", () => {
     await subject.start({
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      director: {  assetProviderIds: ["local-editorial-v1"] },
       rework: {
         sourceRunId: "run-closure-source",
         sourceRunRevision: 1,
@@ -5241,7 +5214,7 @@ describe("ProductionPipeline", () => {
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
       models: { "api-visual-director-v1": "deepseek-flash" },
       modelSelectionSources: { "api-visual-director-v1": "run_override" },
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      director: {  assetProviderIds: ["local-editorial-v1"] },
     });
 
     assert.deepEqual(calls, ["deepseek-flash"]);
@@ -5280,9 +5253,6 @@ describe("ProductionPipeline", () => {
             return {
               output: {
                 version: "video-factory/director-plan-v1" as const,
-                requestedProfileId: input.brief.requestedProfileId,
-                resolvedProfileId: "documentary-observer",
-                profileRationale: "generated-by-deepseek-flash",
                 visualBible: {
                   narrativeApproach: "逐镜解释",
                   pacing: "稳定",
@@ -5341,7 +5311,7 @@ describe("ProductionPipeline", () => {
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
       models: { "api-visual-director-v1": "gpt-5.6-terra" },
       modelSelectionSources: { "api-visual-director-v1": "run_override" },
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      director: {  assetProviderIds: ["local-editorial-v1"] },
     });
     assert.equal(failed.status, "failed");
     assert.deepEqual(calls, ["gpt-5.6-terra"]);
@@ -5372,8 +5342,8 @@ describe("ProductionPipeline", () => {
     const persistedPlan = JSON.parse(await readFile(
       String((node?.output as Record<string, unknown>).directorPlanPath),
       "utf8",
-    )) as { profileRationale?: string };
-    assert.equal(persistedPlan.profileRationale, "generated-by-deepseek-flash");
+    )) as { visualBible: { narrativeApproach: string } };
+    assert.equal(persistedPlan.visualBible.narrativeApproach, "逐镜解释");
   });
 
   it("reuses a verified unchanged director plan before calling the director model", async () => {
@@ -5409,9 +5379,6 @@ describe("ProductionPipeline", () => {
         directorCalls += 1;
         return {
           version: "video-factory/director-plan-v1",
-          requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "geometric-control",
-          profileRationale: "使用本地编辑卡保持视觉结构。",
           visualBible: {
             narrativeApproach: "逐镜说明",
             pacing: "均匀",
@@ -5455,7 +5422,7 @@ describe("ProductionPipeline", () => {
     const originalSource = await subject.start({
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      director: {  assetProviderIds: ["local-editorial-v1"] },
     });
     const sourceBriefOutput = originalSource.nodeRuns.find((node) => node.nodeId === "brief")?.output as pipeline.ProductionBrief;
     const effectiveTitle = "实际由源导演消费的人工题目";
@@ -5604,9 +5571,6 @@ describe("ProductionPipeline", () => {
       modelId: "gpt-5.6-sol",
       plan: async (input) => ({
         version: "video-factory/director-plan-v1",
-        requestedProfileId: input.brief.requestedProfileId,
-        resolvedProfileId: "documentary-observer",
-          profileRationale: "把普通示意从图库调整为可执行的生成画面。",
         visualBible: {
           narrativeApproach: "逐镜说明",
           pacing: "均匀",
@@ -5652,7 +5616,7 @@ describe("ProductionPipeline", () => {
     const failed = await subject.start({
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["fixture-generated-image-v1"] },
+      director: {  assetProviderIds: ["fixture-generated-image-v1"] },
     });
 
     assert.equal(failed.status, "needs_human");
@@ -5677,9 +5641,6 @@ describe("ProductionPipeline", () => {
         directorInput = input;
         return ({
         version: "video-factory/director-plan-v1",
-        requestedProfileId: input.brief.requestedProfileId,
-        resolvedProfileId: "documentary-observer",
-        profileRationale: "本题需要真实动作与食物细节。",
         visualBible: {
           narrativeApproach: "用动作建立问题，再给出具体证据。",
           pacing: "前快后稳",
@@ -5737,28 +5698,8 @@ describe("ProductionPipeline", () => {
         maxAttempts: 1,
       }],
     });
-
-    const templateSnapshot = {
-      templateId: "knowledge-explainer",
-      templateVersion: 1,
-      resolvedAt: "2026-08-27T00:00:00.000Z",
-      resolvedBlueprint: {
-        platform: "douyin",
-        durationSeconds: 24,
-        automationLevel: "assisted",
-        storyStructure: [{ id: "question", label: "提出问题", purpose: "从日常误解切入", required: true }],
-        shotSlots: [{ id: "shot-question", beatId: "question", purpose: "建立问题", durationSeconds: 6, allowedCapabilities: ["asset.search"], manualReplacement: true }],
-        visualSystem: { composition: "一个镜头一个概念", colorIntent: "自然底色", subtitleDensity: "medium", pacing: "measured" },
-        soundSystem: { voiceIntent: "可信", pace: "medium", musicIntent: "克制" },
-        qualityRules: [{ id: "facts", label: "事实准确", dimension: "factual", required: true, threshold: 80 }],
-        capabilityRequirements: [{ capability: "storyboard.plan", required: true }],
-      },
-      sourceLayers: [{ layer: "template", sourceId: "knowledge-explainer@1", appliedFields: ["visualSystem"] }],
-      fieldSources: { visualSystem: "template" },
-    };
     const run = await subject.start({
       ...brief,
-      templateSnapshot,
       models: { "api-visual-director-v1": "gpt-5.6-terra" },
       modelSelectionSources: { "api-visual-director-v1": "run_override" },
       rework: {
@@ -5798,7 +5739,6 @@ describe("ProductionPipeline", () => {
         assets: "ai-shot-router-v1",
       },
       director: {
-        profileId: "auto",
         assetProviderIds: ["local-editorial-v1", "pexels-stock-v1", "seedream-image-v1"],
       },
     });
@@ -5913,7 +5853,6 @@ describe("ProductionPipeline", () => {
         assets: "ai-shot-router-v1",
       },
       director: {
-        profileId: "auto",
         assetProviderIds: ["local-editorial-v1", "pexels-stock-v1", "seedream-image-v1"],
       },
     });
@@ -5932,9 +5871,6 @@ describe("ProductionPipeline", () => {
         id: "api-visual-director-v1",
         plan: async (input) => ({
           version: "video-factory/director-plan-v1",
-          requestedProfileId: "auto",
-          resolvedProfileId: "geometric-control",
-          profileRationale: "生成镜头可以稳定交付解释动作。",
           visualBible: {
             narrativeApproach: "逐镜解释",
             pacing: "均匀",
@@ -5989,7 +5925,7 @@ describe("ProductionPipeline", () => {
     const awaiting = await subject.start({
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1", "local-editorial-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1", "local-editorial-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
     const spendPlan = awaiting.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
@@ -6155,9 +6091,6 @@ describe("ProductionPipeline", () => {
       id: "api-visual-director-v1",
       plan: async (input) => ({
         version: "video-factory/director-plan-v1",
-        requestedProfileId: input.brief.requestedProfileId,
-        resolvedProfileId: "documentary-observer",
-        profileRationale: "用真实动作建立可信解释。",
         visualBible: {
           narrativeApproach: "用动作展示问题和结果。",
           pacing: "均匀推进",
@@ -6219,7 +6152,6 @@ describe("ProductionPipeline", () => {
         voice: "minimax-tts-v1",
       },
       director: {
-        profileId: "auto",
         assetProviderIds: ["local-editorial-v1"],
       },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
@@ -9710,7 +9642,6 @@ describe("ProductionPipeline", () => {
         assets: "ai-shot-router-v1",
       },
       director: {
-        profileId: "auto",
         assetProviderIds: ["local-editorial-v1"],
       },
     } as const;
@@ -10194,9 +10125,6 @@ describe("ProductionPipeline", () => {
         id: "api-visual-director-v1",
         plan: async (input) => ({
           version: "video-factory/director-plan-v1",
-          requestedProfileId: "auto",
-          resolvedProfileId: "geometric-control",
-          profileRationale: "解释型内容需要统一、可控的生成镜头。",
           visualBible: {
             narrativeApproach: "用具体动作解释每一步。",
             pacing: "均匀推进",
@@ -10253,7 +10181,7 @@ describe("ProductionPipeline", () => {
         director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
 
@@ -10286,7 +10214,7 @@ describe("ProductionPipeline", () => {
     const paused = await subject.start({
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
 
@@ -10312,7 +10240,7 @@ describe("ProductionPipeline", () => {
       providerRuntimeMetadata: [seedanceRuntimeMetadata()] });
     const run = await subject.start({ ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 } });
     assert.notEqual(run.status, "awaiting_spend_approval");
     const asset = run.nodeRuns.find((node) => node.nodeId === "assets")!;
@@ -10371,7 +10299,7 @@ describe("ProductionPipeline", () => {
         modelId: "seedream-v1", transport: "http_api", billing: "metered", estimatedCostCny: 0.25, maxAttempts: 1 }] });
     const input: pipeline.ProductionBrief = { ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: mode === "video-progress" ? ["seedance-video-v1"] : ["seedream-image-v1"] },
+      director: {  assetProviderIds: mode === "video-progress" ? ["seedance-video-v1"] : ["seedream-image-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 } };
     const awaiting = await subject.start(input);
     const plan = awaiting.nodeRuns.find((node) => node.nodeId === "assets")!.spendPlan!;
@@ -10416,7 +10344,7 @@ describe("ProductionPipeline", () => {
     const run = await subject.start({
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
 
@@ -10457,9 +10385,6 @@ describe("ProductionPipeline", () => {
     };
     const directorPlan = (secondPrompt: string, estimatedCostCny: number) => ({
       version: "video-factory/director-plan-v1",
-      requestedProfileId: "auto",
-      resolvedProfileId: "geometric-control",
-      profileRationale: "解释型内容需要统一、可控的生成镜头。",
       visualBible: {
         narrativeApproach: "用具体动作解释每一步。",
         pacing: "均匀推进",
@@ -10582,7 +10507,7 @@ describe("ProductionPipeline", () => {
     const reworkBrief: pipeline.ProductionBrief = {
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
       rework: {
         sourceRunId,
@@ -10726,7 +10651,7 @@ describe("ProductionPipeline", () => {
           workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true },
         } : {}),
         providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-        director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+        director: {  assetProviderIds: ["seedance-video-v1"] },
         economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
       });
       assert.equal(awaiting.status, "awaiting_spend_approval", JSON.stringify(awaiting.nodeRuns.map(node => ({ nodeId: node.nodeId, status: node.status, error: node.error }))));
@@ -10745,7 +10670,6 @@ describe("ProductionPipeline", () => {
           qualityContractDigest: pipeline.canonicalQualityContractDigest({
             angle: runBrief.angle, audience: runBrief.audience,
             durationRange: runBrief.durationRange ?? { minSeconds: 0, maxSeconds: 0 },
-            directorProfileId: runBrief.director?.profileId ?? "",
           }),
           approvedAmountCents: Math.round(firstPlan.maxCostCny * 100),
           approvedBy: "owner", approvedAt: new Date().toISOString(),
@@ -10824,7 +10748,7 @@ describe("ProductionPipeline", () => {
     const awaiting = await subject.start({
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
     const firstPlan = awaiting.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
@@ -10933,9 +10857,6 @@ describe("ProductionPipeline", () => {
         id: "api-visual-director-v1",
         plan: async (input) => ({
           version: "video-factory/director-plan-v1",
-          requestedProfileId: "auto",
-          resolvedProfileId: "geometric-control",
-          profileRationale: "图像负责结构，视频负责动作。",
           visualBible: {
             narrativeApproach: "先解释结构，再展示动作。",
             pacing: "均匀推进",
@@ -11010,7 +10931,7 @@ describe("ProductionPipeline", () => {
     const paused = await subject.start({
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedream-image-v1", "seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedream-image-v1", "seedance-video-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
 
@@ -11059,9 +10980,6 @@ describe("ProductionPipeline", () => {
           assert.equal(input.assetProviders[0]?.maxDurationSeconds, 15);
           return {
             version: "video-factory/director-plan-v1",
-            requestedProfileId: "auto",
-            resolvedProfileId: "geometric-control",
-            profileRationale: "生成镜头需要统一视觉。",
             visualBible: {
               narrativeApproach: "用动作解释内容。",
               pacing: "均匀推进",
@@ -11126,7 +11044,7 @@ describe("ProductionPipeline", () => {
     const paused = await subject.start({
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["hailuo-video-v1"] },
+      director: {  assetProviderIds: ["hailuo-video-v1"] },
       models: { "hailuo-video-v1": "MiniMax-H3-Max" },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
@@ -11148,9 +11066,6 @@ describe("ProductionPipeline", () => {
         id: "api-visual-director-v1",
         plan: async (input) => ({
           version: "video-factory/director-plan-v1",
-          requestedProfileId: "auto",
-          resolvedProfileId: "geometric-control",
-          profileRationale: "第二镜复用第一镜母片。",
           visualBible: {
             narrativeApproach: "复用母片保持连续。",
             pacing: "均匀推进",
@@ -11214,7 +11129,7 @@ describe("ProductionPipeline", () => {
     const paused = await subject.start({
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
 
@@ -11234,9 +11149,6 @@ describe("ProductionPipeline", () => {
         id: "api-visual-director-v1",
         plan: async (input) => ({
           version: "video-factory/director-plan-v1",
-          requestedProfileId: "auto",
-          resolvedProfileId: "documentary-observer",
-          profileRationale: "普通动作可由真实图库完整交付。",
           visualBible: {
             narrativeApproach: "用真实动作说明每一步。",
             pacing: "均匀推进",
@@ -11303,7 +11215,7 @@ describe("ProductionPipeline", () => {
         director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1", "pexels-stock-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1", "pexels-stock-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
 
@@ -11338,9 +11250,6 @@ describe("ProductionPipeline", () => {
           const cheaperRevision = input.costFeedback?.[0]?.reason === "too_expensive";
           return {
             version: "video-factory/director-plan-v1",
-            requestedProfileId: "auto",
-            resolvedProfileId: "geometric-control",
-            profileRationale: cheaperRevision ? "根据费用反馈减少付费生成镜头。" : "先使用两条生成镜头。",
             visualBible: {
               narrativeApproach: "用具体动作解释每一步。",
               pacing: "均匀推进",
@@ -11404,7 +11313,7 @@ describe("ProductionPipeline", () => {
       ...brief,
       spendFeedback: historicalFeedback,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1", "pexels-stock-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1", "pexels-stock-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
     const firstPlan = paused.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
@@ -11508,9 +11417,6 @@ describe("ProductionPipeline", () => {
         id: "api-visual-director-v1",
         plan: async (input) => ({
           version: "video-factory/director-plan-v1",
-          requestedProfileId: "auto",
-          resolvedProfileId: "geometric-control",
-          profileRationale: "已优先降本，但当前素材池无法达到目标费用。",
           visualBible: {
             narrativeApproach: "用连续动作解释主题。",
             pacing: "均匀推进",
@@ -11580,7 +11486,7 @@ describe("ProductionPipeline", () => {
         rejectedAt: "2026-08-24T08:00:00.000Z",
       }],
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     });
 

@@ -71,13 +71,11 @@ describe("series partial result recovery", () => {
 });
 
 const CREATIVE_DIMENSION_EVIDENCE: Record<string, string> = {
-  attention: "前两秒给出本集的具体问题。",
-  progression: "本集对当季篇章形成可辨认的推进。",
-  payoff: "结尾兑现了本集自己的观众承诺。",
-  expression: "画面表达在本集预算内可落地。",
+  consistency: "内容忠实于用户意图和已确认事实。",
+  expression: "表达清楚，符合当前制作能力。",
 };
 
-// rubric v1 要求总分等于全部维度分的最低分；让每维都取同一个分数，最小值自然成立。
+// rubric v2 要求总分等于全部维度分的最低分；让每维都取同一个分数，最小值自然成立。
 function creativeDimensions(score: number) {
   return Object.entries(CREATIVE_DIMENSION_EVIDENCE).map(([dimension, evidence]) => ({ dimension, score, evidence }));
 }
@@ -107,16 +105,16 @@ class RepairingClient extends CodexBridgeClient {
       const assessments = episodeAssessments(2, this.auditCount === 1 ? 72 : 91);
       return { output: this.auditCount === 1 ? {
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v1",
+        rubricVersion: "video-factory/role-quality-rubric-v2",
         verdict: "repair",
         score: 72,
         assessments,
         summary: "两集承诺重复。",
-        issues: [{ severity: "blocking", criterion: "单集独立价值", evidence: "两集 viewerPromise 相同", repairInstruction: "让第二集兑现成本判断", creatorAction: "第二集请给观众一个明确的成本判断，不要重复第一集的实验。" }],
+        issues: [{ severity: "blocking", criterion: "单集独立价值", evidence: "两集 concept 相同", repairInstruction: "让第二集兑现成本判断", creatorAction: "第二集请给观众一个明确的成本判断，不要重复第一集的实验。" }],
         repairInstructions: ["让第二集兑现成本判断"],
       } : {
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v1",
+        rubricVersion: "video-factory/role-quality-rubric-v2",
         verdict: "pass",
         score: 91,
         assessments,
@@ -168,7 +166,7 @@ describe("CodexSeriesPlanningAgent", () => {
     const result = await new CodexSeriesPlanningAgent(client).generate(series, 2);
 
     assert.deepEqual(client.calls.map((call) => call.kind), ["series-roadmap", "role-audit"]);
-    assert.equal(result.drafts[1]?.viewerPromise, "看见另一项任务能否完成");
+    assert.equal(result.drafts[1]?.concept, "看见另一项任务能否完成");
     assert.equal(result.planning.auditStatus, "awaiting_user");
     assert.equal(result.planning.auditIterations, 1);
     assert.equal(result.planning.auditScore, 72);
@@ -183,7 +181,7 @@ describe("CodexSeriesPlanningAgent", () => {
     const episode = {
       id: "episode-1", seriesId: series.id, episodeNumber: 1, seasonNumber: 1,
       arc: series.currentSeason.arc, pillar: "真实任务实验", title: "旧稿",
-      viewerPromise: "验证真实任务", hook: "原开场", payoff: "给出结论",
+      concept: "验证真实任务",
       canonBaseRevision: 0, status: "planned" as const,
       contentVersionId: "episode-1#v1",
       continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: ["继续验证"], canonChecks: [] },
@@ -195,14 +193,14 @@ describe("CodexSeriesPlanningAgent", () => {
       createdAt: series.createdAt, updatedAt: series.updatedAt,
     };
     const client = new InterruptingSeriesClient("series-roadmap", {
-      episodes: [{ ...draft(1, "真实任务实验", "旧稿", "验证真实任务"), hook: "新开场" }],
+      episodes: [{ ...draft(1, "真实任务实验", "旧稿", "验证真实任务"), concept: "新开场" }],
     });
     try {
       const agent = new CodexSeriesPlanningAgent(client, directory);
       const current = { ...series, episodes: [episode] };
       await assert.rejects(() => agent.reviseEpisode(current, episode, "改开场"), /series response interrupted/);
       const revised = await agent.reviseEpisode(current, episode, "改开场");
-      assert.equal(revised.draft.hook, "新开场");
+      assert.equal(revised.draft.concept, "新开场");
       assert.equal(revised.planning.auditStatus, "not_audited");
       assert.deepEqual(client.calls, ["series-roadmap"]);
       assert.deepEqual(client.observedKinds, ["series-roadmap"]);
@@ -211,7 +209,7 @@ describe("CodexSeriesPlanningAgent", () => {
     }
   });
 
-  it("rejects duplicate promises and pillars outside the series bible", () => {
+  it("rejects duplicate concepts and pillars outside the series bible", () => {
     const suggested = draft(1, "城市情绪", "停下的那几秒", "重新感受日常");
     assert.deepEqual(parseSeriesRoadmapOutput({ episodes: [suggested] }, [], 1, 1), { episodes: [suggested] });
     assert.throws(() => parseSeriesRoadmapOutput({ episodes: [suggested] }, ["只做科普"], 1, 1), /unknown pillar/);
@@ -222,7 +220,7 @@ describe("CodexSeriesPlanningAgent", () => {
     assert.throws(() => parseSeriesRoadmapOutput({ episodes: [
       draft(1, "真实任务实验", "第一集", "同一个承诺"),
       draft(2, "成本与时间复盘", "第二集", "同一个承诺"),
-    ] }, series.pillars, 1, 2), /viewer promises must be distinct/);
+    ] }, series.pillars, 1, 2), /episode concepts must be distinct/);
   });
 
   it("audits a human episode against the latest canon before changing it", async () => {
@@ -234,7 +232,7 @@ describe("CodexSeriesPlanningAgent", () => {
         return {
           output: {
             version: "video-factory/role-audit-v2",
-            rubricVersion: "video-factory/role-quality-rubric-v1",
+            rubricVersion: "video-factory/role-quality-rubric-v2",
             verdict: "pass",
             score: 94,
             // 系列开拍总编的候选是单集，episodes 只有一项。
@@ -266,9 +264,7 @@ describe("CodexSeriesPlanningAgent", () => {
         arc: series.currentSeason.arc,
         pillar: "成本与时间复盘",
         title: "人工标题",
-        viewerPromise: "给出真实成本",
-        hook: "先看账单",
-        payoff: "得到成本结论",
+        concept: "给出真实成本",
         canonBaseRevision: 0,
         status: "planned" as const,
         continuity: { inheritedFromPrevious: ["第一集正式交接：方法 A 已验证。"], fromPrevious: ["承接方法 A"], toNext: ["继续验证边界"], canonChecks: ["不得虚构结果"] },
@@ -306,7 +302,7 @@ describe("CodexSeriesPlanningAgent", () => {
           audits += 1;
           return { output: {
             version: "video-factory/role-audit-v2",
-            rubricVersion: "video-factory/role-quality-rubric-v1",
+            rubricVersion: "video-factory/role-quality-rubric-v2",
             verdict: audits === 1 ? "repair" : "pass",
             score: audits === 1 ? 70 : 95,
             assessments: episodeAssessments(1, audits === 1 ? 70 : 95),
@@ -325,9 +321,7 @@ describe("CodexSeriesPlanningAgent", () => {
           episodeNumber: 1,
           pillar: "真实任务实验",
           title: "第一集",
-          viewerPromise: "验证真实任务",
-          hook: "先看结果",
-          payoff: "给出结论",
+          concept: "验证真实任务",
           fromPrevious: ["Agent 擅自覆盖的要求"],
           toNext: ["继续验证"],
         }] } };
@@ -341,9 +335,7 @@ describe("CodexSeriesPlanningAgent", () => {
       arc: series.currentSeason.arc,
       pillar: "真实任务实验",
       title: "第一集",
-      viewerPromise: "验证真实任务",
-      hook: "先看结果",
-      payoff: "给出结论",
+      concept: "验证真实任务",
       canonBaseRevision: 0,
       status: "planned" as const,
       continuity: {
@@ -410,9 +402,7 @@ describe("CodexSeriesPlanningAgent", () => {
       arc: series.currentSeason.arc,
       pillar: "真实任务实验",
       title: "人工标题",
-      viewerPromise: "验证真实任务",
-      hook: "先看结果",
-      payoff: "给出结论",
+      concept: "验证真实任务",
       canonBaseRevision: 0,
       status: "planned" as const,
       continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: ["继续验证"], canonChecks: [] },
@@ -495,7 +485,7 @@ class InterruptingSeriesClient extends CodexBridgeClient {
 function passingAudit(episodeCount: number) {
   return {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v1",
+    rubricVersion: "video-factory/role-quality-rubric-v2",
     verdict: "pass",
     score: 94,
     assessments: episodeAssessments(episodeCount, 94),
@@ -559,14 +549,12 @@ it("episode revision crosses the real Broker input contract while version identi
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-function draft(episodeNumber: number, pillar: string, title: string, viewerPromise: string) {
+function draft(episodeNumber: number, pillar: string, title: string, concept: string) {
   return {
     episodeNumber,
     pillar,
     title,
-    viewerPromise,
-    hook: `${title}，先看结果。`,
-    payoff: `${title}并形成一个结论。`,
+    concept,
     fromPrevious: episodeNumber === 1 ? [] : ["承接上一集定版后的记忆"],
     toNext: ["留下一个待验证的边界"],
   };

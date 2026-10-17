@@ -39,8 +39,6 @@ import { ProductionStudio } from "../src/server/production-studio.js";
 import { StudioService } from "../src/server/studio-service.js";
 
 const SCRIPT = {
-  viewerPromise: "看完能理解三个动作",
-  narrativeArc: "问题-动作-结论",
   canonFacts: [],
   scenes: [1, 2, 3].map((position) => ({
     position,
@@ -54,14 +52,12 @@ const SCRIPT = {
 };
 
 const CREATIVE_DIMENSION_EVIDENCE: Record<string, string> = {
-  attention: "前两秒给出本片承诺里的具体动作。",
-  progression: "三段之间有可辨认的推进。",
-  payoff: "结尾兑现了观众承诺。",
-  expression: "画面要求在当前素材能力内可落地。",
+  consistency: "内容忠实于用户意图和已确认事实。",
+  expression: "表达清楚，符合当前制作能力。",
 };
 
-// 编剧属于创作交付：宿主只要求一个根对象，维度固定为四维创作维度。
-// rubric v1 要求总分等于全部维度分的最低分；让每维都取同一个分数，最小值自然成立。
+// 编剧属于创作交付：宿主只要求一个根对象，维度固定为创作维度。
+// rubric v2 要求总分等于全部维度分的最低分；让每维都取同一个分数，最小值自然成立。
 function screenwriterAssessments(score: number) {
   return [{
     targetPath: "",
@@ -71,7 +67,7 @@ function screenwriterAssessments(score: number) {
 
 const PASS_AUDIT = {
   version: "video-factory/role-audit-v2",
-  rubricVersion: "video-factory/role-quality-rubric-v1",
+  rubricVersion: "video-factory/role-quality-rubric-v2",
   verdict: "pass",
   score: 92,
   assessments: screenwriterAssessments(92),
@@ -83,7 +79,7 @@ const PASS_AUDIT = {
 
 const NEEDS_SOURCE_AUDIT = {
   version: "video-factory/role-audit-v2",
-  rubricVersion: "video-factory/role-quality-rubric-v1",
+  rubricVersion: "video-factory/role-quality-rubric-v2",
   verdict: "repair",
   score: 58,
   assessments: screenwriterAssessments(58),
@@ -347,13 +343,8 @@ class LateOptionalAuditExecutor extends PlanningHaltExecutor {
 function treatment(counter: { calls: number }): CreativeTreatment {
   counter.calls += 1;
   return {
-    version: "video-factory/creative-treatment-v2",
-    viewerPromise: "看完能理解三个动作",
-    hook: { narrationIntent: "直接提出问题", visualIntent: "真实动作开场" },
-    progression: [1, 2, 3].map((index) => ({ beatId: `beat-${index}`, purpose: "推进", viewerGain: "理解动作" })),
-    payoff: "得到行动结论",
-    visualPrinciples: ["真实"],
-    soundPrinciples: ["自然"],
+    version: "video-factory/creative-treatment-v3",
+    concept: "看完能理解三个动作",
     evidenceRequirements: [],
     feasibilityQuestions: [],
   };
@@ -372,7 +363,7 @@ function auditedUpstream<T>(output: T, role: string): CodexTaskExecution<T> {
       auditTrace: { taskKind: "role-audit", promptVersion: "integration/role-audit",
         prompt: "integration fixture", providerId: "openai", modelId: "integration-model" },
       audit: { ...PASS_AUDIT, assessments: [{ targetPath: "", dimensions:
-        (["attention", "progression", "payoff", "expression"] as const).map(dimension => ({ dimension, score: 92, evidence: "上游测试稿保持不变。" })) }],
+        (["expression", "consistency"] as const).map(dimension => ({ dimension, score: 92, evidence: "上游测试稿保持不变。" })) }],
       issues: [], repairInstructions: [] },
     }],
   } };
@@ -399,7 +390,7 @@ function brief(): ProductionBrief {
       technicalReview: "python-technical-review-v1",
     },
     workflowFeatures: { creativePlanning: "joint-v1", executablePlan: true, assetSemanticRank: false, referenceGrammar: false },
-    director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+    director: {  assetProviderIds: ["local-editorial-v1"] },
     economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
   } as ProductionBrief;
 }
@@ -468,9 +459,6 @@ function pipeline(
       },
       plan: async (input: VisualDirectorAgentInput) => ({
         version: "video-factory/director-plan-v1",
-        requestedProfileId: input.brief.requestedProfileId,
-        resolvedProfileId: "documentary-observer",
-        profileRationale: "本地确定性测试",
         visualBible: { narrativeApproach: "观察", pacing: "自然", composition: "中景", camera: "固定", color: "自然", continuity: "连续", sound: "环境" },
         shots: input.scenes.map((scene) => ({
           scenePosition: scene.position,
@@ -1027,7 +1015,7 @@ for (const source of ["initial", "manual"] as const) for (const adoptedFirst of 
             expectedRunRevision: run.revision, expectedReviewRevision: node.intervention!.continuation!.reviewRevision,
             baseDraftSha256: node.intervention!.continuation!.draftSha256, document })).completion;
         };
-        await edit("edit-to-B", { ...SCRIPT, narrativeArc: "B版本的推进顺序" });
+        await edit("edit-to-B", { ...SCRIPT, scenes: SCRIPT.scenes.map((scene, i) => i === 0 ? { ...scene, narration: "B版本的旁白" } : scene) });
         const versionB = (await studio.creativeReview(run.id))!.draftVersionId;
         await edit("edit-back-to-A-prime", SCRIPT);
         const versionAPrime = (await studio.creativeReview(run.id))!.draftVersionId;
@@ -1062,7 +1050,7 @@ for (const source of ["initial", "manual"] as const) for (const adoptedFirst of 
             expectedRunRevision: run.revision, expectedReviewRevision: current.intervention!.continuation!.reviewRevision,
             baseDraftSha256: current.intervention!.continuation!.draftSha256, document })).completion;
         };
-        await edit("unknown-A-to-B", { ...SCRIPT, narrativeArc: "待核期间明确修订B" });
+        await edit("unknown-A-to-B", { ...SCRIPT, scenes: SCRIPT.scenes.map((scene, i) => i === 0 ? { ...scene, narration: "待核期间明确修订B" } : scene) });
         const versionB = (await studio.creativeReview(run.id))!.draftVersionId;
         await edit("unknown-B-to-A-prime", SCRIPT);
         const current = (await studio.creativeReview(run.id))!;

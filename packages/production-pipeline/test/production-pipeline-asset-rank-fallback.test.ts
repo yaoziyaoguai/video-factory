@@ -65,9 +65,6 @@ describe("ProductionPipeline semantic ranking fallback", () => {
         id: "api-visual-director-v1",
         plan: async (input) => ({
           version: "video-factory/director-plan-v1",
-          requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "documentary-observer",
-          profileRationale: "使用生成画面。",
           visualBible: { narrativeApproach: "观察", pacing: "紧凑", composition: "人物与环境", camera: "固定", color: "自然", continuity: "同一早晨", sound: "环境声" },
           shots: input.scenes.map((scene) => ({
             scenePosition: scene.position,
@@ -133,9 +130,6 @@ describe("ProductionPipeline semantic ranking fallback", () => {
         id: "api-visual-director-v1",
         plan: async (input) => ({
           version: "video-factory/director-plan-v1",
-          requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "documentary-observer",
-          profileRationale: "真实通勤画面优先。",
           visualBible: { narrativeApproach: "观察", pacing: "紧凑", composition: "人物与环境", camera: "跟随", color: "自然", continuity: "同一早晨", sound: "环境声" },
           shots: input.scenes.map((scene) => ({
             scenePosition: scene.position,
@@ -172,7 +166,7 @@ describe("ProductionPipeline semantic ranking fallback", () => {
       reviewMode: "manual",
       providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
       workflowFeatures: { assetSemanticRank: true, referenceGrammar: false },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1", "local-editorial-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1", "local-editorial-v1"] },
       economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
     };
@@ -245,7 +239,7 @@ describe("ProductionPipeline semantic ranking fallback", () => {
                 },
                 audit: {
                   version: "video-factory/role-audit-v2",
-                  rubricVersion: "video-factory/role-quality-rubric-v1",
+                  rubricVersion: "video-factory/role-quality-rubric-v2",
                   assessments: [{
                     targetPath: "",
                     dimensions: [
@@ -270,9 +264,6 @@ describe("ProductionPipeline semantic ranking fallback", () => {
         id: "api-visual-director-v1",
         plan: async (input) => ({
           version: "video-factory/director-plan-v1",
-          requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "documentary-observer",
-          profileRationale: "真实通勤画面优先。",
           visualBible: { narrativeApproach: "观察", pacing: "紧凑", composition: "人物与环境", camera: "跟随", color: "自然", continuity: "同一早晨", sound: "环境声" },
           shots: input.scenes.map((scene) => ({
             scenePosition: scene.position,
@@ -326,7 +317,7 @@ function semanticBrief(title: string): ProductionBrief {
     reviewMode: "manual",
     providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
     workflowFeatures: { assetSemanticRank: true, referenceGrammar: false },
-    director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1", "local-editorial-v1"] },
+    director: {  assetProviderIds: ["pexels-stock-v1", "local-editorial-v1"] },
     economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
     voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
   };

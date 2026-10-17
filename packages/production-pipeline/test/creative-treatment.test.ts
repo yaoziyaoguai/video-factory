@@ -4,7 +4,6 @@ import type { CodexTaskExecution, CodexTaskKind } from "../src/codex-chat.js";
 import { CodexBridgeClient } from "../src/codex-chat.js";
 import {
   parseCreativeTreatment,
-  lockCreativeTreatmentViewerPromise,
   missingRetrievalProviderIssues,
   retrievalProviderSelectionChanges,
   type CreativeTreatment,
@@ -17,23 +16,14 @@ import {
 } from "../src/production-capabilities.js";
 
 const valid = {
-  version: "video-factory/creative-treatment-v2",
-  viewerPromise: "学会识别资料支持的结论边界",
-  hook: { narrationIntent: "提出一个具体判断", visualIntent: "展示原始资料的关键差异" },
-  progression: [
-    { beatId: "question", purpose: "建立问题", viewerGain: "知道要核对什么" },
-    { beatId: "evidence", purpose: "核对资料", viewerGain: "区分事实与推测" },
-    { beatId: "payoff", purpose: "兑现判断", viewerGain: "知道下一步如何判断" },
-  ],
-  payoff: "给出有条件的结论及下一步",
-  visualPrinciples: ["来源画面优先"],
-  soundPrinciples: ["自然语速、清楚停顿"],
-  evidenceRequirements: [{ beatId: "evidence", claim: "原材料中的陈述", requirement: "factual_support", suppliedSourceIds: ["source-1"], critical: true, acquisition: "supplied", retrievalProviderId: null }],
-  feasibilityQuestions: [{ beatId: "evidence", question: "来源画面是否可读且有使用依据" }],
+  version: "video-factory/creative-treatment-v3",
+  concept: "学会识别资料支持的结论边界",
+  evidenceRequirements: [{  claim: "原材料中的陈述", requirement: "factual_support", suppliedSourceIds: ["source-1"], critical: true, acquisition: "supplied", retrievalProviderId: null }],
+  feasibilityQuestions: [{  question: "来源画面是否可读且有使用依据" }],
 };
 
-test("合法构思接受并保留观众承诺", () => {
-  assert.equal(parseCreativeTreatment(valid, ["source-1"]).viewerPromise, valid.viewerPromise);
+test("自由构思接受并保留正文", () => {
+  assert.equal(parseCreativeTreatment(valid, ["source-1"]).concept, valid.concept);
 });
 
 test("配音能力按真实 Provider 投影且不虚构音乐或音效轨", () => {
@@ -77,78 +67,33 @@ test("越界来源必须报告具体字段而非悄悄接受", () => {
   assert.throws(() => parseCreativeTreatment(valid, []), /suppliedSourceIds/);
 });
 
-test("不存在的beat引用不能进入规划", () => {
-  const changed = { ...valid, feasibilityQuestions: [{ beatId: "missing", question: "能否执行" }] };
-  assert.throws(() => parseCreativeTreatment(changed, ["source-1"]), /beatId/);
+test("构思不要求开头、推进、兑现或视觉声音原则", () => {
+  const draft = { version: "video-factory/creative-treatment-v3", concept: "只想记录窗边发呆的一分钟。没有结论。", evidenceRequirements: [], feasibilityQuestions: [] };
+  assert.deepEqual(parseCreativeTreatment(draft, []), draft);
+  assert.throws(() => parseCreativeTreatment({ ...draft, concept: "  " }, []), /concept/);
 });
 
-test("重复beat和空承诺拒绝", () => {
-  assert.throws(() => parseCreativeTreatment({ ...valid, progression: [valid.progression[0], valid.progression[0]] }, ["source-1"]), /beatId/);
-  assert.throws(() => parseCreativeTreatment({ ...valid, viewerPromise: " " }, ["source-1"]), /viewerPromise/);
-});
-
-test("所有文本输出为 trim 后的规范文本", () => {
-  const padded = {
-    ...valid,
-    viewerPromise: "  学会识别资料支持的结论边界  ",
-    hook: { narrationIntent: " 提出一个具体判断", visualIntent: "展示原始资料的关键差异 " },
-    progression: valid.progression.map((beat) => ({
-      beatId: ` ${beat.beatId} `,
-      purpose: ` ${beat.purpose} `,
-      viewerGain: `${beat.viewerGain} `,
-    })),
-    visualPrinciples: [" 来源画面优先 "],
-    evidenceRequirements: [{
-      beatId: " evidence ",
-      claim: " 原材料中的陈述 ",
-      requirement: "factual_support",
-      suppliedSourceIds: [" source-1 "],
-      critical: true,
-      acquisition: "supplied",
-      retrievalProviderId: null,
-    }],
-  };
-  const parsed = parseCreativeTreatment(padded, ["source-1"]);
-  assert.equal(parsed.viewerPromise, "学会识别资料支持的结论边界");
-  assert.equal(parsed.hook.narrationIntent, "提出一个具体判断");
-  assert.equal(parsed.progression[0]?.beatId, "question");
-  assert.equal(parsed.progression[0]?.purpose, "建立问题");
-  assert.equal(parsed.visualPrinciples[0], "来源画面优先");
-  assert.equal(parsed.evidenceRequirements[0]?.beatId, "evidence");
+test("正文与事实来源保留内容并去掉首尾空格", () => {
+  const parsed = parseCreativeTreatment({ ...valid, concept: "  原样表达\n保留停顿。  ", evidenceRequirements: [{ ...valid.evidenceRequirements[0], suppliedSourceIds: [" source-1 "] }] }, ["source-1"]);
+  assert.equal(parsed.concept, "原样表达\n保留停顿。");
   assert.equal(parsed.evidenceRequirements[0]?.suppliedSourceIds[0], "source-1");
 });
 
 test("无来源但明确待核验的构思可以规划，缺口不被伪造成证据", () => {
   const withGap = {
     ...valid,
-    evidenceRequirements: [{ beatId: "evidence", claim: "原材料中的陈述", requirement: "factual_support", suppliedSourceIds: [], critical: true, acquisition: "supplied", retrievalProviderId: null }],
+    evidenceRequirements: [{ claim: "原材料中的陈述", requirement: "factual_support", suppliedSourceIds: [], critical: true, acquisition: "supplied", retrievalProviderId: null }],
   };
   const parsed = parseCreativeTreatment(withGap, []);
   assert.deepEqual(parsed.evidenceRequirements[0]?.suppliedSourceIds, []);
   assert.equal(parsed.evidenceRequirements[0]?.requirement, "factual_support");
 });
 
-test("progression 数量与 beat 唯一性边界", () => {
-  const thirteenBeats = Array.from({ length: 13 }, (_, index) => ({
-    beatId: `beat-${index}`,
-    purpose: `推进 ${index}`,
-    viewerGain: `收益 ${index}`,
-  }));
-  assert.throws(() => parseCreativeTreatment({ ...valid, progression: thirteenBeats }, ["source-1"]), /progression/);
-  assert.throws(() => parseCreativeTreatment({ ...valid, progression: [] }, ["source-1"]), /progression/);
-});
-
-test("画面与声音原则各 1 到 8 项", () => {
-  const nine = Array.from({ length: 9 }, (_, index) => `原则 ${index}`);
-  assert.throws(() => parseCreativeTreatment({ ...valid, visualPrinciples: nine }, ["source-1"]), /visualPrinciples/);
-  assert.throws(() => parseCreativeTreatment({ ...valid, soundPrinciples: [] }, ["source-1"]), /soundPrinciples/);
-});
-
 test("版本与 requirement 枚举由合同固定", () => {
   assert.throws(() => parseCreativeTreatment({ ...valid, version: "video-factory/creative-treatment-v1" }, ["source-1"]), /version/);
   assert.throws(() => parseCreativeTreatment({
     ...valid,
-    evidenceRequirements: [{ beatId: "evidence", claim: "陈述", requirement: "verified", suppliedSourceIds: ["source-1"], critical: true, acquisition: "supplied", retrievalProviderId: null }],
+    evidenceRequirements: [{ claim: "陈述", requirement: "verified", suppliedSourceIds: ["source-1"], critical: true, acquisition: "supplied", retrievalProviderId: null }],
   }, ["source-1"]), /requirement/);
   assert.throws(() => parseCreativeTreatment({
     ...valid,
@@ -243,25 +188,14 @@ test("必填顶层数组缺失被拒绝，显式空数组仍然合法", () => {
   assert.deepEqual(parseCreativeTreatment({ ...valid, feasibilityQuestions: [] }, ["source-1"]).feasibilityQuestions, []);
 });
 
-test("宿主锁定的观众承诺覆盖模型输出，未锁定时保留生成值", () => {
-  const parsed = parseCreativeTreatment(valid, ["source-1"]);
-  const locked = lockCreativeTreatmentViewerPromise(parsed, "用户已确认的本季承诺");
-  assert.equal(locked.viewerPromise, "用户已确认的本季承诺");
-  assert.notEqual(locked, parsed);
-  assert.equal(parsed.viewerPromise, valid.viewerPromise);
-});
+
 
 const passingAudit = {
   version: "video-factory/role-audit-v2",
-  rubricVersion: "video-factory/role-quality-rubric-v1",
+  rubricVersion: "video-factory/role-quality-rubric-v2",
   assessments: [{
     targetPath: "",
-    dimensions: [
-      { dimension: "attention", score: 95, evidence: "开场提出一个具体判断。" },
-      { dimension: "progression", score: 95, evidence: "抽查逐步展开资料核对。" },
-      { dimension: "payoff", score: 95, evidence: "结尾给出有条件的结论。" },
-      { dimension: "expression", score: 95, evidence: "承诺表述自然可读。" },
-    ],
+    dimensions: [{ dimension: "consistency", score: 95, evidence: "开场提出一个具体判断。" }, { dimension: "expression", score: 95, evidence: "承诺表述自然可读。" }],
   }],
   verdict: "pass",
   score: 95,
@@ -328,8 +262,8 @@ test("producer 将合同 fixture 转换为 CreativeTreatment 并复用 role-audi
   const producePayload = client.calls[0]?.payload as { brief: Record<string, unknown>; suppliedSources: unknown };
   assert.equal(producePayload.brief.title, "资料结论怎么核对");
   assert.deepEqual(producePayload.suppliedSources, [{ sourceId: "source-1", label: "原始报道" }]);
-  assert.equal(execution.output.version, "video-factory/creative-treatment-v2");
-  assert.equal(execution.output.progression.length, 3);
+  assert.equal(execution.output.version, "video-factory/creative-treatment-v3");
+  assert.equal(execution.output.concept, valid.concept);
   assert.equal(execution.agentLoop?.status, "passed");
   const context = (client.calls[1]!.payload as { context: {
     upstreamFacts: Record<string, unknown>; currentRoleContract: Record<string, unknown>;
@@ -394,9 +328,7 @@ test("系列创作事实同时进入构思 producer 与独立 audit", async () =
     episode: {
       pillar: "真实实验",
       title: "第三集",
-      viewerPromise: "看懂失败发生在哪一步",
-      hook: "先展示反常结果",
-      payoff: "给出可复现检查表",
+      concept: "看懂失败发生在哪一步",
     },
     bible: {
       rules: ["结论必须来自本集实际内容"],
@@ -420,18 +352,18 @@ test("系列创作事实同时进入构思 producer 与独立 audit", async () =
   assert.deepEqual(audit.context.upstreamFacts.seriesContext, seriesContext);
 });
 
-test("宿主锁定承诺时 producer 覆盖输出且把锁定值传给模型", async () => {
+test("构思正文不会被宿主替换成锁定承诺", async () => {
   const client = new ControlledTreatmentClient("deepseek", "deepseek-flash", (kind) => {
     if (kind === "creative-treatment") return structuredClone(valid);
     if (kind === "role-audit") return passingAudit;
     throw new Error(`Unexpected task ${kind}`);
   });
   const agent = new CodexCreativeTreatmentAgent({ client, modelId: "deepseek-flash" });
-  const treatment = await agent.treat(agentInput({ lockedViewerPromise: "系列已定的观众承诺" }));
+  const treatment = await agent.treat(agentInput());
 
-  assert.equal(treatment.viewerPromise, "系列已定的观众承诺");
+  assert.equal(treatment.concept, valid.concept);
   const producePayload = client.calls[0]?.payload as { brief: Record<string, unknown> };
-  assert.equal(producePayload.brief.lockedViewerPromise, "系列已定的观众承诺");
+  assert.equal(producePayload.brief.lockedViewerPromise, undefined);
 });
 
 test("producer 拒绝引用越界来源的候选并指出字段", async () => {
@@ -476,11 +408,11 @@ test("producer 输入合同：来源与时长边界先于模型调用被校验",
 // null 与缺失（undefined）两种缺项都覆盖；非 pipeline 取得不误报。
 test("missingRetrievalProviderIssues 参数化定位 null 与缺失两种缺项", () => {
   const requirements = [
-    { beatId: "evidence", claim: "已提供素材", requirement: "factual_support", suppliedSourceIds: ["source-1"], critical: true, acquisition: "supplied", retrievalProviderId: null },
-    { beatId: "question", claim: "第 1 项生成画面", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated", retrievalProviderId: null },
-    { beatId: "evidence", claim: "已配置检索", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "pipeline_retrievable", retrievalProviderId: "pexels-stock-v1" },
-    { beatId: "payoff", claim: "无需画面", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "not_needed", retrievalProviderId: null },
-    { beatId: "payoff", claim: "第 5 项生成画面", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" },
+    { claim: "已提供素材", requirement: "factual_support", suppliedSourceIds: ["source-1"], critical: true, acquisition: "supplied", retrievalProviderId: null },
+    { claim: "第 1 项生成画面", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated", retrievalProviderId: null },
+    { claim: "已配置检索", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "pipeline_retrievable", retrievalProviderId: "pexels-stock-v1" },
+    { claim: "无需画面", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "not_needed", retrievalProviderId: null },
+    { claim: "第 5 项生成画面", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" },
   ];
   const issues = missingRetrievalProviderIssues({ ...valid, evidenceRequirements: requirements });
   assert.equal(issues.length, 2);
@@ -572,4 +504,11 @@ test("retrievalProviderSelectionChanges 覆盖新增行与取得方式改变（C
   assert.deepEqual(retrievalProviderSelectionChanges(base, {
     evidenceRequirements: [{ acquisition: "pipeline_generated", retrievalProviderId: "seedream-image-v1" }],
   }), []);
+});
+
+test("构思新合同拒绝退役结构，不给旧记录保留兼容入口", () => {
+  for (const key of ["viewerPromise", "hook", "progression", "payoff", "visualPrinciples", "soundPrinciples"]) {
+    assert.throws(() => parseCreativeTreatment({ ...valid, [key]: "旧结构" }, ["source-1"]), new RegExp(`${key}.*not allowed`));
+  }
+  assert.throws(() => parseCreativeTreatment({ ...valid, evidenceRequirements: [{ ...valid.evidenceRequirements[0], beatId: "old" }] }, ["source-1"]), /beatId.*not allowed/);
 });

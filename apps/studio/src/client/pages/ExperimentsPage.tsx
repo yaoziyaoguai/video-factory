@@ -1,7 +1,7 @@
 import { AlertCircle, ArrowRight, BarChart3, CircleCheck, RefreshCw, RotateCcw, ScanSearch, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import type { StudioCostDashboard as StudioCostDashboardDto, StudioRunSummary, StudioTemplateExperimentScorecard } from "../../shared/api.js";
+import type { StudioCostDashboard as StudioCostDashboardDto, StudioRunSummary } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { CostDashboard } from "../components/CostDashboard.js";
 import { isHistoricalReadOnlyRun, runNodeLabel } from "../presentation.js";
@@ -13,24 +13,11 @@ export function ExperimentsPage() {
   const [costs, setCosts] = useState<StudioCostDashboardDto>();
   const [costError, setCostError] = useState<string>();
   const [costLoading, setCostLoading] = useState(false);
-  const [templates, setTemplates] = useState<StudioTemplateExperimentScorecard[]>([]);
-  const [templateError, setTemplateError] = useState<string>();
-  const historicalTemplates = templates.filter((template) => template.sampleSize > 0);
   const load = useCallback(async () => {
     setLoading(true);
     setError(undefined);
-    setTemplateError(undefined);
-    const [runResult, templateResult] = await Promise.allSettled([
-      studioApi.runs(),
-      studioApi.templateExperiments(),
-    ]);
-    if (runResult.status === "fulfilled") setRuns(runResult.value);
-    else setError(runResult.reason instanceof Error ? runResult.reason.message : String(runResult.reason));
-    if (templateResult.status === "fulfilled") setTemplates(templateResult.value);
-    else {
-      setTemplates([]);
-      setTemplateError(templateResult.reason instanceof Error ? templateResult.reason.message : String(templateResult.reason));
-    }
+    try { setRuns(await studioApi.runs()); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : String(caught)); }
     setLoading(false);
   }, []);
   const loadCosts = useCallback(async () => {
@@ -102,7 +89,7 @@ export function ExperimentsPage() {
         <header className="section-heading"><div><p className="eyebrow">下一轮行动</p><h2 id="learning-focus-title">这一轮最该改什么</h2></div><span>来自真实制作记录</span></header>
         <div className="learning-focus-grid">
           <article><strong>{stats.rejected ? `${stats.rejected} 条成片被打回` : stats.reviewed ? `已终审 ${stats.reviewed} 条，全部通过` : "先积累终审样本"}</strong><p>{stats.rejected ? "返工时沿用可用母片，只重做审片明确指出的镜头，并检查建议是否真正进入脚本、导演和画面节点。" : stats.reviewed ? "当前非测试制作的终审记录中没有被打回的作品。可以回看具体作品继续改进；终审通过不代表传播效果已验证。" : "完成终审后，才有依据比较作品通过情况与具体返工原因。"}</p></article>
-          <article><strong>{bottleneck ? `${runNodeLabel(bottleneck[0])}出现 ${bottleneck[1]} 次问题` : "当前没有集中故障步骤"}</strong><p>{bottleneck ? "先解决重复出现的制作阻塞，避免把技术失败误当作内容失败。" : "先完成作品并审片，关注开头承诺是否兑现、视觉连续性与观众能否看懂；无样本不推断效果。"}</p></article>
+          <article><strong>{bottleneck ? `${runNodeLabel(bottleneck[0])}出现 ${bottleneck[1]} 次问题` : "当前没有集中故障步骤"}</strong><p>{bottleneck ? "先解决重复出现的制作阻塞，避免把技术失败误当作内容失败。" : "先完成作品并审片，关注内容是否符合你的想法、画面是否连贯、表达是否清楚；无样本不推断效果。"}</p></article>
         </div>
       </section>
       <section className="recent-learning-runs" aria-labelledby="recent-learning-title">
@@ -116,21 +103,6 @@ export function ExperimentsPage() {
         <h2 id="analytics-empty-title">还不能判断是否成为爆款</h2>
         <p>播放、完播、互动和涨粉尚未接入，所以这里不会编造“爆款分”。当前根据终审和具体返工意见改进内容，制作故障另行处理；终审通过不等于已经成为爆款。</p>
       </section>
-      {historicalTemplates.length > 0 || templateError ? <details className="template-learning" aria-labelledby="template-learning-title">
-        <summary id="template-learning-title">历史模板记录（暂停用于新制作）</summary>
-        <Link to="/templates">查看模板资料</Link>
-        {templateError ? <p className="learning-inline-error">模板表现读取失败：{templateError}</p> : <div className="template-learning-grid">
-          {historicalTemplates.map((template) => <article key={template.templateId}>
-            <header><strong>{template.templateName}</strong><span>{template.sampleSize} 条样本</span></header>
-            <dl>
-              <div><dt>终审通过</dt><dd>{percentLabel(template.metrics.finalApprovalRate)}</dd></div>
-              <div><dt>视觉匹配</dt><dd>{scoreLabel(template.metrics.visualMatch)}</dd></div>
-              <div><dt>成片完成率</dt><dd>{percentLabel(template.metrics.narrativeCompleteness)}</dd></div>
-              <div><dt>人工修订</dt><dd>{template.metrics.manualEditCount} 次</dd></div>
-            </dl>
-          </article>)}
-        </div>}
-      </details> : null}
       <details className="secondary-cost-details" onToggle={(event) => {
         if (event.currentTarget.open && !costs && !costLoading) void loadCosts();
       }}>

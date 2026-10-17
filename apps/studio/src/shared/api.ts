@@ -1,4 +1,4 @@
-import type { ProductionBlueprintPatch, ProductionTemplateInput } from "@video-factory/template-core";
+import type { ProductionTemplateInput } from "@video-factory/template-core";
 import type { ProductionArticleSourceSnapshot, ProductionReviewContinuationInput } from "@video-factory/production-pipeline";
 import { parseDurationAmendment, validateContentLedDurationIntent, type DurationAmendment, type DurationBounds, type DurationIntent } from "@video-factory/production-pipeline/executable-timeline";
 
@@ -124,17 +124,7 @@ export type StudioNarrationConfirmV2Result = {
 
 export type StudioProductionRecipeId = "economy-daily" | "free-stock" | "keyshot-ai" | "cinematic-ai" | "custom";
 
-export type StudioDirectorProfileId =
-  | "auto"
-  | "documentary-observer"
-  | "quiet-humanism"
-  | "urban-poetic"
-  | "chromatic-storytelling"
-  | "geometric-control"
-  | "suspense-staging";
-
 export interface StudioProductionDefaults {
-  directorProfileId: StudioDirectorProfileId;
   reviewMode: "manual" | "automatic";
   platform: "douyin" | "xiaohongshu" | "bilibili";
   durationSeconds: number;
@@ -172,7 +162,6 @@ export interface StudioTopicStrategy {
 }
 
 export const DEFAULT_STUDIO_PRODUCTION_DEFAULTS: StudioProductionDefaults = {
-  directorProfileId: "auto",
   reviewMode: "manual",
   platform: "douyin",
   durationSeconds: 24,
@@ -196,7 +185,7 @@ export const DEFAULT_STUDIO_TOPIC_STRATEGY: StudioTopicStrategy = {
   // 指向同一篇文章，独立域名恒为 1，"两个域名"档等于永远不放行任何候选。
   // 一档原文链接 + 高风险人工核验保留了"不把标题当事实"的意图，需要更强佐证可在资源页调回严格档。
   sourcePolicy: "traceable_source",
-  customInstruction: "优先考虑 24–45 秒内能兑现观众承诺的题材。",
+  customInstruction: "",
 };
 
 export interface StudioCreatorSettingsPatch {
@@ -420,19 +409,11 @@ export type StudioCandidateRisk = "low" | "review" | "high";
 export type StudioVerificationStatus = "ready" | "review_required" | "blocked" | "verified";
 export type StudioEditorialVerdict = "produce_video" | "produce_image_story" | "skip";
 
-export interface StudioTemplateRecommendation {
-  id: string;
-  name: string;
-  format: string;
-  rationale: string;
-}
-
 export interface StudioEditorialDecision {
   verdict: StudioEditorialVerdict;
   score: number;
   reasons: string[];
   guardrails: string[];
-  recommendedTemplate?: StudioTemplateRecommendation;
   // 规则保底候选尚未经过选题总编模型评估：分数不是总编结论，客户端必须显示“待总编评估”而不是“总编评分 0”。
   pendingEditorReview?: boolean;
 }
@@ -631,9 +612,7 @@ export interface StudioSeriesEpisodeVersion {
   source: StudioSeriesEpisodePlanning["source"];
   pillar: string;
   title: string;
-  viewerPromise: string;
-  hook: string;
-  payoff: string;
+  concept: string;
   fromPrevious: string[];
   toNext: string[];
 }
@@ -658,9 +637,7 @@ export interface StudioSeriesEpisode {
   arc: string;
   pillar: string;
   title: string;
-  viewerPromise: string;
-  hook: string;
-  payoff: string;
+  concept: string;
   previousEpisodeId?: string;
   canonBaseRevision: number;
   status: StudioSeriesEpisodeStatus;
@@ -714,9 +691,7 @@ export interface StudioSeriesProductionContext {
     updatedAt: string;
     pillar: string;
     title: string;
-    viewerPromise: string;
-    hook: string;
-    payoff: string;
+    concept: string;
     /** F01：采用绑定的内容版本；由服务端从当前 Store 携带并交叉验证，客户端不可自报。 */
     contentVersionId?: string;
     planning: StudioSeriesEpisodePlanning;
@@ -742,7 +717,7 @@ export interface StudioSeriesRoadmapOperation extends StudioPlanningOperation {
   canQuery?: boolean;
   auditStatus: "passed" | "awaiting_user" | "failed" | "unknown" | "not_audited";
   message: string;
-  candidate?: Array<Pick<StudioSeriesEpisode, "episodeNumber" | "pillar" | "title" | "viewerPromise" | "hook" | "payoff"> & { fromPrevious: string[]; toNext: string[] }>;
+  candidate?: Array<Pick<StudioSeriesEpisode, "episodeNumber" | "pillar" | "title" | "concept"> & { fromPrevious: string[]; toNext: string[] }>;
   canRetrieve: boolean;
 }
 
@@ -798,9 +773,7 @@ export interface StudioSeriesEpisodePlanInput {
   expectedRevision: number;
   pillar: string;
   title: string;
-  viewerPromise: string;
-  hook: string;
-  payoff: string;
+  concept: string;
   fromPrevious: string[];
   toNext: string[];
 }
@@ -1062,7 +1035,6 @@ export interface StudioRunDetail extends StudioRunSummary {
   audience: string;
   nicheSlug: string;
   reviewMode: "manual" | "automatic";
-  creativeSummary?: StudioCreativeSummary;
   nodes: StudioNode[];
   artifacts: StudioArtifact[];
   decisions: StudioDecision[];
@@ -1122,13 +1094,6 @@ export interface StudioReworkImpactSummary {
     producedSha256: string[];
     mayCreateNewMedia: boolean;
   };
-}
-
-export interface StudioCreativeSummary {
-  audience: string;
-  openingPromise: string;
-  requiredVisual: string;
-  payoff: string;
 }
 
 export interface StudioNode {
@@ -1703,7 +1668,7 @@ export type StudioCreativeReviewCommandInput = StudioCreativeReviewCommandBase &
   | { action: "confirm"; acknowledgeRepair?: boolean; acknowledgeIncomplete?: true; acknowledgeUnaudited?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string; durationAmendment?: DurationAmendment }
   | { action: "update_duration"; durationAmendment: DurationAmendment }
   | { action: "audit_current" }
-  | { action: "discuss" | "revise"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
+  | { action: "discuss" | "revise"; message: string; selection?: { kind: "document" | "scene"; ids: string[]; scenePositions: number[] } }
   | { action: "adopt_proposal"; proposalId: string }
   | { action: "edit_draft"; document: Record<string, unknown> }
   | { action: "undo_draft" }
@@ -1857,11 +1822,11 @@ export function parseStudioCreativeReviewConfirmInput(value: unknown): StudioCre
   return parsed;
 }
 
-function parseStudioCreativeSelection(value: unknown): { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } {
+function parseStudioCreativeSelection(value: unknown): { kind: "document" | "scene"; ids: string[]; scenePositions: number[] } {
   const selection = requiredObject(value, "讨论范围");
   const unknown = Object.keys(selection).find((key) => !["kind", "ids", "scenePositions"].includes(key));
   if (unknown) throw new StudioInputError(`讨论范围不支持字段“${unknown}”。`);
-  if (selection.kind !== "document" && selection.kind !== "beat" && selection.kind !== "scene") {
+  if (selection.kind !== "document" && selection.kind !== "scene") {
     throw new StudioInputError("讨论范围类型不正确。");
   }
   if (!Array.isArray(selection.ids) || selection.ids.length > 24
@@ -1905,12 +1870,6 @@ export interface StudioTemplateCatalog {
   templates: StudioTemplate[];
   productionTemplates?: StudioTemplate[];
   deletedBuiltIns?: StudioTemplate[];
-}
-
-export interface StudioTemplateSelection {
-  templateId: string;
-  templateVersion?: number;
-  runOverrides?: Pick<ProductionBlueprintPatch, "durationSeconds" | "automationLevel">;
 }
 
 export interface StudioTemplateCloneInput {
@@ -2068,22 +2027,6 @@ export interface StudioResourceManifest {
   needsReviewItems?: StudioResourceManifestItem[];
   items: StudioResourceManifestItem[];
   assetIndex: StudioAssetIndex;
-}
-
-export interface StudioTemplateExperimentScorecard {
-  templateId: string;
-  templateName: string;
-  sampleSize: number;
-  metrics: {
-    hookClarity: number | null;
-    narrativeCompleteness: number | null;
-    visualMatch: number | null;
-    soundQuality: number | null;
-    costEfficiency: number | null;
-    manualEditCount: number;
-    finalApprovalRate: number | null;
-  };
-  note: string;
 }
 
 export type StudioBillingType = "free" | "subscription" | "metered" | "local_compute" | "human";
@@ -2285,7 +2228,6 @@ export type StudioProductionInput = DurationIntent & {
   runPurpose?: "production" | "test";
   /** 视觉审片不可用时，用户明确选择先生成可播放首版；不会伪造审片通过。 */
   visualReviewPolicy?: "required" | "allow_unreviewed_first_cut";
-  template?: StudioTemplateSelection;
   editorial?: {
     verdict: "produce_video" | "produce_image_story";
     reasons: string[];
@@ -2293,9 +2235,6 @@ export type StudioProductionInput = DurationIntent & {
   };
   visualProof?: string;
   visualIntent?: string;
-  visualPlan?: StudioVisualPlan;
-  /** visualPlan 的来源证据：false=继承的未采用系统建议；缺省=来源未知。 */
-  visualPlanAdopted?: boolean;
   seriesContext?: StudioSeriesProductionContext;
   creationContext?: {
     origin: "trend" | "series" | "manual" | "case";
@@ -2331,7 +2270,6 @@ export type StudioProductionInput = DurationIntent & {
     label: string;
   };
   director?: {
-    profileId: "auto" | "documentary-observer" | "quiet-humanism" | "urban-poetic" | "chromatic-storytelling" | "geometric-control" | "suspense-staging";
     assetProviderIds: string[];
   };
   economics: {
@@ -2675,21 +2613,6 @@ export function parseStudioCreatorSettingsPatch(value: unknown): StudioCreatorSe
   if (input.productionDefaults !== undefined) {
     const defaults = requiredObject(input.productionDefaults, "默认生产参数");
     const productionDefaults: Partial<StudioProductionDefaults> = {};
-    if (defaults.directorProfileId !== undefined) {
-      const directorProfileId = String(defaults.directorProfileId);
-      if (!new Set<StudioDirectorProfileId>([
-        "auto",
-        "documentary-observer",
-        "quiet-humanism",
-        "urban-poetic",
-        "chromatic-storytelling",
-        "geometric-control",
-        "suspense-staging",
-      ]).has(directorProfileId as StudioDirectorProfileId)) {
-        throw new StudioInputError("默认导演角色无效。");
-      }
-      productionDefaults.directorProfileId = directorProfileId as StudioDirectorProfileId;
-    }
     if (defaults.reviewMode !== undefined) {
       if (defaults.reviewMode !== "manual") {
         throw new StudioInputError("正式制作必须保留人工终审。");
@@ -3261,28 +3184,11 @@ function parseEditorialDecision(value: unknown): StudioEditorialDecision {
   if (verdict !== "produce_video" && verdict !== "produce_image_story" && verdict !== "skip") {
     throw new StudioInputError("编辑结论无效。");
   }
-  const recommendedTemplate = input.recommendedTemplate === undefined
-    ? undefined
-    : parseTemplateRecommendation(input.recommendedTemplate);
-  if (verdict === "skip" && recommendedTemplate) {
-    throw new StudioInputError("跳过的选题不能推荐制作模板。");
-  }
   return {
     verdict,
     score: boundedNumber(input.score, "生产价值分"),
     reasons: requiredStringArray(input.reasons, "编辑理由"),
     guardrails: requiredStringArray(input.guardrails, "制作边界"),
-    ...(recommendedTemplate ? { recommendedTemplate } : {}),
-  };
-}
-
-function parseTemplateRecommendation(value: unknown): StudioTemplateRecommendation {
-  const input = requiredObject(value, "推荐模板");
-  return {
-    id: requiredTrimmedString(input.id, "推荐模板编号"),
-    name: requiredTrimmedString(input.name, "推荐模板名称"),
-    format: requiredTrimmedString(input.format, "推荐视频形态"),
-    rationale: requiredTrimmedString(input.rationale, "模板推荐理由"),
   };
 }
 
@@ -3361,9 +3267,7 @@ export function parseStudioSeriesEpisodePlanInput(value: unknown): StudioSeriesE
     expectedRevision: positiveInteger(input.expectedRevision, "系列版本"),
     pillar: requiredTrimmedString(input.pillar, "内容支柱"),
     title: requiredTrimmedString(input.title, "单集标题"),
-    viewerPromise: requiredTrimmedString(input.viewerPromise, "观众收获"),
-    hook: requiredTrimmedString(input.hook, "开场钩子"),
-    payoff: requiredTrimmedString(input.payoff, "本集兑现"),
+    concept: requiredTrimmedString(input.concept, "本集想法"),
     fromPrevious: optionalBoundedStringArray(input.fromPrevious, "承接上一集", 8),
     toNext: optionalBoundedStringArray(input.toNext, "留给下一集", 8),
   };

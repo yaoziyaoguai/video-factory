@@ -112,7 +112,7 @@ function renderReworkDialog(
       audience: "短视频创作者",
       nicheSlug: "rework-review-fixes",
       providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       economics: { recipeId: "free-stock", allowMeteredProviders: false },
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       rework,
@@ -759,19 +759,19 @@ describe("Studio client", () => {
       runId: initial.id, runRevision: initial.revision, stage: "treatment", reviewRevision: 1,
       draftSha256: "a".repeat(64), draftArtifactId: "draft", phase: "waiting_user",
       allowedActions: ["discuss", "adopt_proposal", "confirm"], returnTargets: [],
-      draft: { payoff: "当前旧结尾" }, messages: [], effectiveUserInstructions: [], blockingIssues: [],
-      proposals: [{ proposalId: "alternative", baseDraftSha256: "a".repeat(64), document: { payoff: "采用后的新结尾" }, changeSummary: ["替换结尾"] }],
+      draft: { concept: "当前旧结尾" }, messages: [], effectiveUserInstructions: [], blockingIssues: [],
+      proposals: [{ proposalId: "alternative", baseDraftSha256: "a".repeat(64), document: { concept: "采用后的新结尾" }, changeSummary: ["替换结尾"] }],
     };
     let adopted = false;
     vi.spyOn(studioApi, "creativeReviewHistory").mockImplementation(async () => ({ runId: initial.id, legacyIncomplete: false,
       entries: [{ stage: "treatment", versionId: "old", document: oldReview.draft, audits: [] },
-        ...(adopted ? [{ stage: "treatment" as const, versionId: "new", document: { payoff: "采用后的新结尾" }, audits: [] }] : [])],
+        ...(adopted ? [{ stage: "treatment" as const, versionId: "new", document: { concept: "采用后的新结尾" }, audits: [] }] : [])],
     }));
     vi.spyOn(studioApi, "run").mockImplementation(async () => structuredClone(initial));
     vi.spyOn(studioApi, "runCosts").mockRejectedValue(new Error("no cost fixture"));
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
     vi.spyOn(studioApi, "creativeReview").mockImplementation(async () => adopted
-      ? { ...oldReview, reviewRevision: 2, draftSha256: "b".repeat(64), draft: { payoff: "采用后的新结尾" }, proposals: [] }
+      ? { ...oldReview, reviewRevision: 2, draftSha256: "b".repeat(64), draft: { concept: "采用后的新结尾" }, proposals: [] }
       : oldReview);
     const post = vi.spyOn(studioApi, "commandCreativeReview").mockImplementation(async (_id, input) => {
       adopted = true;
@@ -804,7 +804,7 @@ describe("Studio client", () => {
     const review: import("../src/shared/api.js").StudioCreativeReviewSnapshot = {
       runId: initial.id, runRevision: initial.revision, stage: "treatment", reviewRevision: 1,
       draftSha256: "a".repeat(64), draftArtifactId: "draft", phase: "waiting_user",
-      allowedActions: ["edit_draft", "confirm"], returnTargets: [], draft: { payoff: "原结尾" },
+      allowedActions: ["edit_draft", "confirm"], returnTargets: [], draft: { concept: "原结尾" },
       messages: [], effectiveUserInstructions: [], blockingIssues: [], proposals: [],
     };
     vi.spyOn(studioApi, "run").mockResolvedValue(initial);
@@ -817,7 +817,7 @@ describe("Studio client", () => {
     try {
       render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
       await userEvent.click(await screen.findByText("手动修订这份稿件"));
-      const editor = await screen.findByRole("textbox", { name: "结尾兑现" });
+      const editor = await screen.findByRole("textbox", { name: "构思正文" });
       fireEvent.change(editor, { target: { value: "未保存的结尾" } });
       await userEvent.click(screen.getByRole("button", { name: "保存修订" }));
       await screen.findByText(/保存被拒绝：请补齐结尾内容。/);
@@ -857,7 +857,7 @@ describe("Studio client", () => {
       runId: initial.id, runRevision: initial.revision, stage: "treatment", reviewRevision: 1,
       draftSha256: "a".repeat(64), draftArtifactId: "draft", phase: "waiting_user",
       allowedActions: ["revise", "confirm"], returnTargets: [],
-      draft: { payoff: "当前结尾" }, messages: [], effectiveUserInstructions: [], blockingIssues: [], proposals: [],
+      draft: { concept: "当前结尾" }, messages: [], effectiveUserInstructions: [], blockingIssues: [], proposals: [],
     };
     let finish!: () => void;
     const completion = new Promise<void>((resolve) => { finish = resolve; });
@@ -867,7 +867,7 @@ describe("Studio client", () => {
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
     vi.spyOn(studioApi, "creativeReviewHistory").mockRejectedValue(new Error("no history fixture"));
     vi.spyOn(studioApi, "creativeReview").mockImplementation(async () => settled
-      ? { ...review, reviewRevision: 2, draftSha256: "b".repeat(64), draft: { payoff: "修改后的结尾" } } : review);
+      ? { ...review, reviewRevision: 2, draftSha256: "b".repeat(64), draft: { concept: "修改后的结尾" } } : review);
     const post = vi.spyOn(studioApi, "commandCreativeReview").mockImplementation(async (_id, input) => {
       await completion;
       settled = true;
@@ -877,14 +877,14 @@ describe("Studio client", () => {
     const user = userEvent.setup();
     try {
       render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
-      const composer = await screen.findByPlaceholderText("例如：为什么这样开场？或者：把开头改得更直接一些。");
+      const composer = await screen.findByPlaceholderText("描述你想保留或修改的内容，也可以先讨论。");
       await user.type(composer, "保留安静，不追加口号");
       await user.click(screen.getByRole("button", { name: "发送修订意见" }));
       await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
       await act(async () => {
         receiveRun?.(new MessageEvent("run", { data: JSON.stringify({ ...initial, status: "running", revision: initial.revision + 1, activeIntervention: undefined }) }));
       });
-      expect(screen.getByPlaceholderText("例如：为什么这样开场？或者：把开头改得更直接一些。")).toBe(composer);
+      expect(screen.getByPlaceholderText("描述你想保留或修改的内容，也可以先讨论。")).toBe(composer);
       expect(composer).toHaveValue("保留安静，不追加口号");
       expect(screen.getByRole("button", { name: "采用前期构思（未审计）" })).toBeDisabled();
       expect(storage.has("vf:creative-command:run-1:treatment:draft")).toBe(true);
@@ -930,12 +930,12 @@ describe("Studio client", () => {
       runId: "run-1", runRevision: initial.revision, stage: "script", reviewRevision: 3,
       draftSha256: "a".repeat(64), draftArtifactId: "script-a", draftVersionId: "script-a#v1", phase: "waiting_user",
       allowedActions: ["discuss", "revise", "edit_draft", "confirm"], returnTargets: [],
-      draft: { narrativeArc: "问题到答案", scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "第一版旁白。", visual_prompt: "对照" }] },
+      draft: {  scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "第一版旁白。", visual_prompt: "对照" }] },
       messages: [], effectiveUserInstructions: [], blockingIssues: [], proposals: [],
     };
     const v2Review: import("../src/shared/api.js").StudioCreativeReviewSnapshot = {
       ...v1Review, runRevision: initial.revision + 2, reviewRevision: 4, draftSha256: "b".repeat(64), draftVersionId: "script-a#v2",
-      draft: { narrativeArc: "问题到答案", scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "B标签保存的新旁白。", visual_prompt: "对照" }] },
+      draft: {  scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "B标签保存的新旁白。", visual_prompt: "对照" }] },
     };
     // phase: v1 → running（他页保存中，停点暂时消失）→ v2（新版本人工停点）。
     let phase: "v1" | "running" | "v2" = "v1";
@@ -963,13 +963,13 @@ describe("Studio client", () => {
       })();
       await user.clear(field);
       await user.type(field, "A-未保存旁白");
-      fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "A的意见" } });
+      fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "A的意见" } });
       // 另一标签保存：本页收到 running 中间快照，讨论面板随停点消失而卸载。
       await act(async () => {
         phase = "running";
         receiveRun?.(new MessageEvent("run", { data: JSON.stringify({ ...initial, revision: initial.revision + 1, status: "running", activeIntervention: undefined }) }));
       });
-      expect(screen.queryByPlaceholderText(/为什么这样开场/)).not.toBeInTheDocument();
+      expect(screen.queryByPlaceholderText(/描述你想保留或修改的内容/)).not.toBeInTheDocument();
       // 新版本人工停点回来；再补一条同 revision 事件让前一条读取被替代。
       await act(async () => {
         phase = "v2";
@@ -987,7 +987,7 @@ describe("Studio client", () => {
       await waitFor(() => expect(recovered).toHaveValue("A-未保存旁白"));
       expect(screen.getByText(/旧稿不能覆盖新稿/)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "保存修订" })).toBeDisabled();
-      expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue("A的意见");
+      expect(screen.getByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue("A的意见");
       // 明确放弃旧编辑后，编辑器回到服务端当前稿（V2），不能被晚到的 V1 读取翻回去。
       await user.click(screen.getByRole("button", { name: "放弃修改" }));
       expect(screen.getByLabelText("分镜 1 · 旁白")).toHaveValue("B标签保存的新旁白。");
@@ -1016,7 +1016,7 @@ describe("Studio client", () => {
     const review: import("../src/shared/api.js").StudioCreativeReviewSnapshot = {
       runId: initial.id, runRevision: initial.revision, stage: "treatment", reviewRevision: 1,
       draftSha256: "a".repeat(64), draftArtifactId: "draft", phase: "waiting_user",
-      allowedActions: ["audit_current", "revise", "confirm"], returnTargets: [], draft: { payoff: "原结尾" },
+      allowedActions: ["audit_current", "revise", "confirm"], returnTargets: [], draft: { concept: "原结尾" },
       messages: [], effectiveUserInstructions: [], blockingIssues: [], proposals: [],
     };
     let action: "initial" | "audit_current" | "revise" = "initial";
@@ -1028,7 +1028,7 @@ describe("Studio client", () => {
     vi.spyOn(studioApi, "creativeReview").mockImplementation(async () => ({ ...review,
       runRevision: initial.revision + (action === "initial" ? 0 : action === "audit_current" ? 1 : 2),
       draftSha256: action === "revise" ? "b".repeat(64) : review.draftSha256,
-      draft: action === "revise" ? { payoff: "用户明确修订后的结尾" } : review.draft,
+      draft: action === "revise" ? { concept: "用户明确修订后的结尾" } : review.draft,
     }));
     const post = vi.spyOn(studioApi, "commandCreativeReview").mockImplementation(async (_id, input) => {
       action = input.action as "audit_current" | "revise";
@@ -1046,7 +1046,7 @@ describe("Studio client", () => {
       const auditCommand = post.mock.calls[0]![1];
       expect(JSON.parse(storage.get(`vf:creative-audit-command:run-1:${auditCommand.commandId}`)!)).toMatchObject({ action: "audit_current", commandId: auditCommand.commandId });
       expect(screen.getByText(/原审计结果仍待核/)).toBeInTheDocument();
-      fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "我选择先修订结尾" } });
+      fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "我选择先修订结尾" } });
       await user.click(screen.getByRole("button", { name: "发送修订意见" }));
       await screen.findByText("用户明确修订后的结尾");
       expect(post.mock.calls.map(call => call[1].action)).toEqual(["audit_current", "revise"]);
@@ -1143,7 +1143,7 @@ describe("Studio client", () => {
         summary: "结尾没有兑现标题里的承诺",
         issues: [{
           severity: "blocking",
-          criterion: "结尾兑现",
+          criterion: "构思正文",
           evidence: "标题说避开 3 个坑，结尾只讲了一个",
           repairInstruction: "把另外两个坑各补一句",
         }],
@@ -1472,7 +1472,7 @@ describe("Studio client", () => {
     await user.click(screen.getByText("画面要求与证据（可选）"));
     expect(screen.getByLabelText("必须让观众看到的证据（可选）")).toHaveValue("必须显示原始来源");
     await user.type(screen.getByLabelText("视频标题"), "创作目标");
-    expect(screen.getByRole("region", { name: "创作目标摘要" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "创作目标摘要" })).not.toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
@@ -1508,7 +1508,7 @@ describe("Studio client", () => {
     render(<NewRunDialog open providers={providers} initialValues={{ audioMode: "native_av", nativeVideoProviderId: "wan-video-v1",
       title: "原声返工", angle: "改用独立配音", audience: "短视频创作者",
       providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "python-native-audio-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       rework: { sourceRunId: "native-original", sourceRunRevision: 7, rejectionReason: "改为独立配音", affectedScenePositions: [1], previousScript: { scenes: [{ position: 1 }] }, nodeInstructions: { script: "保留正文", visualDirection: "保持画面", assets: "按新模式核对画面" }, findings: [] },
     }} onClose={() => undefined} onSubmit={onSubmit} />);
     await user.click(screen.getByRole("button", { name: /查看继承设置/ }));
@@ -1633,8 +1633,8 @@ describe("Studio client", () => {
     expect(screen.queryByLabelText("选题系列")).not.toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /仅免费画面/ })).toBeChecked();
     expect(screen.getByRole("radio", { name: /允许 AI 生成画面，按实际镜头报价/ })).toBeDisabled();
-    expect(screen.getByRole("combobox", { name: "导演角色" })).toHaveValue("auto");
-    expect(screen.getByText(/AI 根据题材选择导演语法/)).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "导演角色" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/AI 根据题材选择导演语法/)).not.toBeInTheDocument();
     expect(screen.getByLabelText("费用方式")).toHaveTextContent("画面：使用免费图库，无现金报价");
     expect(screen.getByRole("button", { name: /画面素材/, hidden: true })).not.toBeVisible();
     await user.click(screen.getByText("03 模型与高级设置"));
@@ -1659,7 +1659,6 @@ describe("Studio client", () => {
       runPurpose: "production",
       providers: expect.objectContaining({ script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1" }),
       director: {
-        profileId: "auto",
         assetProviderIds: ["pexels-stock-v1"],
       },
       voiceDirection: {
@@ -1682,20 +1681,9 @@ describe("Studio client", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "开始前期构思" })).toBeEnabled());
   });
 
-  it("drops a stale suggested visual plan when the creator rewrites its visual intent", async () => {
+  it("submits the creator's own visual requirements without an inferred summary", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
-    const visualPlan = {
-      strategy: "用真实标题并列和确定性标尺贯穿全片，禁止拼成虚构传播链。",
-      beats: [{
-        id: "headline-certainty-scale",
-        role: "证据并列",
-        duration: "0-8 秒",
-        description: "左右并列两条真实标题，高亮“网传”和“正在核查”。",
-        searchQuery: "source headline screenshot certainty scale",
-        source: "screen" as const,
-      }],
-    };
     render(<NewRunDialog
       open
       providers={providers}
@@ -1705,22 +1693,17 @@ describe("Studio client", () => {
         audience: "想核验热点的普通观众",
         nicheSlug: "headline-certainty",
         visualProof: "两条真实标题的措辞差异可以直接并列核对。",
-        visualPlan,
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
     />);
 
-    const creativeSummary = screen.getByRole("region", { name: "创作目标摘要" });
-    expect(within(creativeSummary).getByText("想核验热点的普通观众")).toBeInTheDocument();
-    expect(within(creativeSummary).getByText("先比较标题证据，不猜传播链")).toBeInTheDocument();
-    expect(within(creativeSummary).getByText("两条真实标题的措辞差异可以直接并列核对。")).toBeInTheDocument();
-    expect(within(creativeSummary).getByText("围绕“同一事件为什么有不同确定性”给出明确答案或可执行判断")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "创作目标摘要" })).not.toBeInTheDocument();
 
     await user.clear(screen.getByLabelText("必须让观众看到的证据（可选）"));
     await user.type(screen.getByLabelText("必须让观众看到的证据（可选）"), "两张来源截图必须在同一屏内完整可读。");
-    await user.clear(screen.getByLabelText("视觉论证方式（可选）"));
-    await user.type(screen.getByLabelText("视觉论证方式（可选）"), "先并列原始截图，再逐项标出措辞差异。");
+    await user.clear(screen.getByLabelText("画面呈现想法（可选）"));
+    await user.type(screen.getByLabelText("画面呈现想法（可选）"), "先并列原始截图，再逐项标出措辞差异。");
 
     await user.click(await screen.findByRole("button", { name: "开始前期构思" }));
 
@@ -1731,20 +1714,9 @@ describe("Studio client", () => {
     expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty("visualPlan");
   });
 
-  it("keeps an untouched upstream visual plan as optional guidance instead of a user requirement", async () => {
+  it("leaves optional visual direction empty without injecting a suggested plan", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
-    const visualPlan = {
-      strategy: "用三组构图示意展示视觉重心变化。",
-      beats: [{
-        id: "composition-guidance",
-        role: "构图对比",
-        duration: "0-8 秒",
-        description: "同一无字杯子在相同背景中只改变主体位置。",
-        searchQuery: "cup composition negative space",
-        source: "generated" as const,
-      }],
-    };
     render(<NewRunDialog
       open
       providers={providers}
@@ -1753,20 +1725,17 @@ describe("Studio client", () => {
         angle: "用示意解释主体位置与负空间",
         audience: "短视频创作者",
         nicheSlug: "composition-guidance",
-        visualPlan,
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
     />);
 
-    expect(screen.getByLabelText("视觉论证方式（可选）")).toHaveValue("");
-    expect(screen.getByText(/可参考的方向：用三组构图示意展示视觉重心变化/)).toBeInTheDocument();
+    expect(screen.getByLabelText("画面呈现想法（可选）")).toHaveValue("");
+    expect(screen.queryByText(/可参考的方向/)).not.toBeInTheDocument();
 
     await user.click(await screen.findByRole("button", { name: "开始前期构思" }));
 
-    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      visualPlan,
-    }));
+    expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty("visualPlan");
     expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty("visualIntent");
   });
 
@@ -1776,7 +1745,7 @@ describe("Studio client", () => {
       defaultRecipeId: "free-stock" as const,
       topicStrategy: { customInstruction: "优先可拍题材。" },
       defaultAssetProviderId: "pexels-stock-v1",
-      productionDefaults: { directorProfileId: "documentary-observer", reviewMode: "manual", platform: "bilibili", durationSeconds: 30 },
+      productionDefaults: {  reviewMode: "manual", platform: "bilibili", durationSeconds: 30 },
     } satisfies StudioCreatorSettings;
     const { rerender } = render(<NewRunDialog
       open
@@ -1801,7 +1770,7 @@ describe("Studio client", () => {
     expect(await screen.findByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
     expect(screen.getByRole("spinbutton", { name: "建议时长" })).toHaveValue(30);
     expect(screen.getByRole("radio", { name: /仅免费画面/ })).toBeChecked();
-    expect(screen.getByRole("combobox", { name: "导演角色" })).toHaveValue("documentary-observer");
+    expect(screen.queryByRole("combobox", { name: "导演角色" })).not.toBeInTheDocument();
   });
 
   it("keeps the dialog openable but unsubmittable while creator settings failed, then initializes from the retried server values", async () => {
@@ -1811,7 +1780,7 @@ describe("Studio client", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
       defaultRecipeId: "free-stock" as const,
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "bilibili", durationSeconds: 45 },
+      productionDefaults: {  reviewMode: "manual", platform: "bilibili", durationSeconds: 45 },
     } satisfies StudioCreatorSettings;
     const { rerender } = render(<NewRunDialog
       open
@@ -1885,7 +1854,7 @@ describe("Studio client", () => {
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         defaultRecipeId: "cinematic-ai",
         topicStrategy: { customInstruction: "" },
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
@@ -1913,7 +1882,7 @@ describe("Studio client", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
       defaultRecipeId: "economy-daily" as const,
       topicStrategy: { customInstruction: "优先可拍题材。" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     } satisfies StudioCreatorSettings;
     const { rerender } = render(<NewRunDialog
       open
@@ -2110,7 +2079,7 @@ describe("Studio client", () => {
         roleProviderDefaults: { script: "codex-screenwriter-v1" },
         modelDefaults: { "codex-screenwriter-v1": "gpt-5.6-terra" },
         topicStrategy: { customInstruction: "优先可拍题材。" },
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
@@ -2144,7 +2113,7 @@ describe("Studio client", () => {
       defaultRecipeId: "economy-daily" as const,
       topicStrategy: { customInstruction: "优先可拍题材。" },
       modelDefaults: {},
-      productionDefaults: { directorProfileId: "auto" as const, reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
+      productionDefaults: {  reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
     };
     const { rerender } = render(
       <NewRunDialog open providers={providers} creatorSettings={creatorSettings} onClose={() => undefined} onSubmit={async () => undefined} />,
@@ -2199,7 +2168,6 @@ describe("Studio client", () => {
       title: "上一版标题",
       angle: "保留上一版角度",
       audience: "内容创作者",
-      template: { templateId: "knowledge-explainer", templateVersion: 3 },
       providers: {
         script: "python-template-v1",
         director: "api-visual-director-v1",
@@ -2208,7 +2176,7 @@ describe("Studio client", () => {
         render: "python-ffmpeg-v1",
         technicalReview: "python-technical-review-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       economics: { recipeId: "free-stock", allowMeteredProviders: false },
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       rework: {
@@ -2273,7 +2241,6 @@ describe("Studio client", () => {
         title: "失效配置返工",
         angle: "逐项替换后才能开工",
         audience: "内容创作者",
-        template: { templateId: "retired-template", templateVersion: 1 },
         providers: {
           script: "retired-script-v1",
           director: "api-visual-director-v1",
@@ -2283,7 +2250,7 @@ describe("Studio client", () => {
           technicalReview: "python-technical-review-v1",
         },
         models: { "api-visual-director-v1": "retired-director-model" },
-        director: { profileId: "auto", assetProviderIds: ["retired-stock-v1"] },
+        director: {  assetProviderIds: ["retired-stock-v1"] },
         economics: { recipeId: "economy-daily", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Retired", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -2372,9 +2339,8 @@ describe("Studio client", () => {
           title: "失效来源返工",
           angle: "明确替换已经失效的来源",
           audience: "短视频创作者",
-          template: { templateId: "knowledge-explainer", templateVersion: 3 },
           providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-          director: { profileId: "auto", assetProviderIds: ["retired-stock-v1"] },
+          director: {  assetProviderIds: ["retired-stock-v1"] },
           economics: { recipeId: "free-stock", allowMeteredProviders: false },
           voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
           rework: {
@@ -2415,9 +2381,8 @@ describe("Studio client", () => {
         title: "照片叙事返工",
         angle: "替换已经失效的画面来源",
         audience: "短视频创作者",
-        template: { templateId: "photo-story", templateVersion: 3 },
         providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-        director: { profileId: "auto", assetProviderIds: ["retired-stock-v1"] },
+        director: {  assetProviderIds: ["retired-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -2459,7 +2424,6 @@ describe("Studio client", () => {
         title: "历史模板返工",
         angle: "保留不可再新选的历史模板",
         audience: "内容创作者",
-        template: { templateId: "historical-template", templateVersion: 2 },
         providers: {
           script: "python-template-v1",
           director: "api-visual-director-v1",
@@ -2468,7 +2432,7 @@ describe("Studio client", () => {
           render: "python-ffmpeg-v1",
           technicalReview: "python-technical-review-v1",
         },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -2507,7 +2471,6 @@ describe("Studio client", () => {
         title: "旧模板版本返工",
         angle: "沿用原制作的模板快照",
         audience: "内容创作者",
-        template: { templateId: "historical-template", templateVersion: 2 },
         providers: {
           script: "python-template-v1",
           director: "api-visual-director-v1",
@@ -2516,7 +2479,7 @@ describe("Studio client", () => {
           render: "python-ffmpeg-v1",
           technicalReview: "python-technical-review-v1",
         },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -2565,7 +2528,6 @@ describe("Studio client", () => {
         title: "停用旧审片",
         angle: "保留人工终审",
         audience: "内容创作者",
-        template: { templateId: "knowledge-explainer", templateVersion: 3 },
         providers: {
           script: "python-template-v1",
           director: "api-visual-director-v1",
@@ -2575,7 +2537,7 @@ describe("Studio client", () => {
           technicalReview: "python-technical-review-v1",
           visualReview: "retired-visual-review-v1",
         },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -2634,7 +2596,7 @@ describe("Studio client", () => {
     render(<NewRunDialog
       open
       providers={providers}
-      initialValues={{ template: { templateId: "photo-story" } }}
+      initialValues={{ }}
       onClose={() => undefined}
       onSubmit={vi.fn()}
     />);
@@ -2647,7 +2609,7 @@ describe("Studio client", () => {
   it("preserves an explicit custom duration without applying a template automation level", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
-    render(<NewRunDialog open providers={providers} initialValues={{ durationSeconds: 27, template: { templateId: "automatic-custom" } }} onClose={() => undefined} onSubmit={onSubmit} />);
+    render(<NewRunDialog open providers={providers} initialValues={{ durationSeconds: 27, }} onClose={() => undefined} onSubmit={onSubmit} />);
 
     expect(await screen.findByRole("spinbutton", { name: "建议时长" })).toHaveValue(27);
     await user.type(screen.getByLabelText("视频标题"), "一条自定义时长的视频");
@@ -2959,7 +2921,7 @@ describe("Studio client", () => {
         reviewMode: "manual",
         providers: { script: "codex-screenwriter-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
         workflowFeatures: { assetSemanticRank: false, referenceGrammar: true },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -3085,7 +3047,7 @@ describe("Studio client", () => {
       defaultRecipeId: "economy-daily" as const,
       topicStrategy: { customInstruction: "优先可拍题材。" },
       modelDefaults: { "seedance-video-v1": "economy-model" },
-      productionDefaults: { directorProfileId: "auto" as const, reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
+      productionDefaults: {  reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
     };
     const user = userEvent.setup();
     render(<NewRunDialog open providers={providersWithModels} creatorSettings={creatorSettings} onClose={() => undefined} onSubmit={vi.fn()} />);
@@ -3207,7 +3169,7 @@ describe("Studio client", () => {
         voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" },
         defaultRecipeId: "economy-daily",
         topicStrategy: { customInstruction: "优先可拍题材。" },
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
@@ -3288,7 +3250,6 @@ describe("Studio client", () => {
         visualReview: "deepseek-visual-review-v1",
       }),
       director: expect.objectContaining({
-        profileId: "auto",
         assetProviderIds: expect.arrayContaining(["pexels-stock-v1", "seedance-video-v1"]),
       }),
       economics: {
@@ -3406,8 +3367,7 @@ describe("Studio client", () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     vi.mocked(studioApi.templates).mockRejectedValue(new Error("模板目录离线"));
     render(<NewRunDialog open providers={providers} initialValues={{
-      title: "情绪隐喻短片", angle: "全片为 AI 示意，不讲实验事实", audience: "普通观众",
-      template: { templateId: "retired-template" }, durationSeconds: 30,
+      title: "情绪隐喻短片", angle: "全片为 AI 示意，不讲实验事实", audience: "普通观众", durationSeconds: 30,
       voiceDirection: { profileId: "macos:Tingting", rate: 175, pauseScale: 1.2, masteringPreset: "natural" },
     }} onClose={() => undefined} onSubmit={onSubmit} />);
     await userEvent.click(screen.getByRole("button", { name: "开始前期构思" }));
@@ -3505,7 +3465,6 @@ describe("Studio client", () => {
           audience: "关注变化的普通用户",
           nicheSlug: "verified-change",
           editorial: { verdict: "produce_video", reasons: ["具有时效价值。"], guardrails: ["逐项核验来源。"] },
-          template: { templateId: "trend-fact-brief" },
         }}
         onClose={() => undefined}
         onSubmit={onSubmit}
@@ -3538,7 +3497,6 @@ describe("Studio client", () => {
         angle: "要求创作者确认实际可用的视频结构",
         audience: "短视频创作者",
         nicheSlug: "retired-template-recommendation",
-        template: { templateId: "retired-recommendation" },
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
@@ -3632,7 +3590,7 @@ describe("Studio client", () => {
         voiceDirectionCustomized: false,
         defaultRecipeId: "economy-daily",
         topicStrategy: { customInstruction: "优先可拍题材。" },
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
@@ -3681,7 +3639,7 @@ describe("Studio client", () => {
         voiceDirectionCustomized: false,
         defaultRecipeId: "economy-daily",
         topicStrategy: { customInstruction: "优先可拍题材。" },
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
@@ -3707,7 +3665,7 @@ describe("Studio client", () => {
         voiceDirectionCustomized: true,
         defaultRecipeId: "economy-daily",
         topicStrategy: { customInstruction: "优先可拍题材。" },
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
@@ -3743,7 +3701,7 @@ describe("Studio client", () => {
         voiceDirectionCustomized: false,
         defaultRecipeId: "economy-daily",
         topicStrategy: { customInstruction: "优先可拍题材。" },
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
@@ -3824,7 +3782,6 @@ describe("Studio client", () => {
         durationSeconds: 24,
         platform: "bilibili",
         reviewMode: "manual",
-        template: { templateId: "knowledge-explainer", templateVersion: 3 },
         providers: {
           script: "codex-screenwriter-v1",
           director: "api-visual-director-v1",
@@ -3834,7 +3791,7 @@ describe("Studio client", () => {
           technicalReview: "python-technical-review-v1",
         },
         models: { "codex-screenwriter-v1": "gpt-primary", "pexels-stock-v1": "search-v2" },
-        director: { profileId: "documentary-observer", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" },
         rework,
@@ -3867,7 +3824,7 @@ describe("Studio client", () => {
         voice: "macos-say-v1",
       }),
       models: { "codex-screenwriter-v1": "deepseek-backup", "pexels-stock-v1": "search-v2" },
-      director: { profileId: "documentary-observer", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       voiceDirection: { profileId: "macos:Tingting", rate: 205, pauseScale: 1.1, masteringPreset: "social" },
       rework: expect.objectContaining({
         sourceRunId: "run-rejected-1",
@@ -3929,7 +3886,6 @@ describe("Studio client", () => {
       platform: rejectedRun.platform,
       reviewMode: "manual" as const,
       runPurpose: "test" as const,
-      template: { templateId: "knowledge-explainer", templateVersion: 3 },
       providers: {
         script: "python-template-v1",
         director: "api-visual-director-v1",
@@ -3954,7 +3910,7 @@ describe("Studio client", () => {
     vi.spyOn(studioApi, "settings").mockResolvedValue({
       voiceDirection: input.voiceDirection,
       defaultRecipeId: "economy-daily",
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       topicStrategy: { customInstruction: "" },
     });
     const draft = vi.spyOn(studioApi, "reworkDraft").mockResolvedValue({
@@ -4004,7 +3960,7 @@ describe("Studio client", () => {
       runPurpose: input.runPurpose ?? "production",
       durationRange: { minSeconds: 20, maxSeconds: 36 },
       workflowFeatures: expect.objectContaining({ executablePlan: true }),
-      director: expect.objectContaining({ profileId: "documentary-observer" }),
+      director: expect.objectContaining({  }),
       rework: expect.objectContaining({
         sourceRunId: "run-1",
         nodeInstructions: rework.nodeInstructions,
@@ -4033,7 +3989,7 @@ describe("Studio client", () => {
         audience: "短视频创作者",
         nicheSlug: "rework-scope",
         providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -4197,7 +4153,7 @@ describe("Studio client", () => {
         audience: "短视频创作者",
         nicheSlug: "rework-whole-film",
         providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -4348,7 +4304,7 @@ describe("Studio client", () => {
         nicheSlug: "rework-budget-intention",
         budgetIntentionCny: 35,
         providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -4380,7 +4336,7 @@ describe("Studio client", () => {
         audience: "短视频创作者",
         nicheSlug: "rework-inheritance-copy",
         providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -4452,7 +4408,7 @@ describe("Studio client", () => {
         audience: "短视频创作者",
         nicheSlug: "rework-early-failure",
         providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -4685,7 +4641,7 @@ describe("Studio client", () => {
         audience: "短视频创作者",
         nicheSlug: "rework-focus",
         providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -4723,9 +4679,8 @@ describe("Studio client", () => {
         title: "异步初始化返工",
         angle: "重开后仍从变更范围开始",
         audience: "短视频创作者",
-        template: { templateId: "knowledge-explainer", templateVersion: 3 },
         providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1"] },
         economics: { recipeId: "free-stock", allowMeteredProviders: false },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         rework: {
@@ -4776,14 +4731,14 @@ describe("Studio client", () => {
         defaultRecipeId: "free-stock",
         topicStrategy: { customInstruction: "优先可拍题材。" },
         defaultAssetProviderId: "pexels-stock-v1",
-        productionDefaults: { directorProfileId: "documentary-observer", reviewMode: "manual", platform: "bilibili", durationSeconds: 30 },
+        productionDefaults: {  reviewMode: "manual", platform: "bilibili", durationSeconds: 30 },
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
     />);
 
     expect(screen.getByRole("radio", { name: /仅免费画面/ })).toBeChecked();
-    expect(screen.getByRole("combobox", { name: "导演角色" })).toHaveValue("documentary-observer");
+    expect(screen.queryByRole("combobox", { name: "导演角色" })).not.toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
     expect(screen.getByRole("spinbutton", { name: "建议时长" })).toHaveValue(30);
     expect(screen.getByLabelText("终审模式")).toHaveTextContent("人工终审");
@@ -4798,7 +4753,7 @@ describe("Studio client", () => {
       platform: "bilibili",
       durationSeconds: 30,
       reviewMode: "manual",
-      director: expect.objectContaining({ profileId: "documentary-observer" }),
+      director: expect.objectContaining({  }),
       economics: expect.objectContaining({ recipeId: "free-stock" }),
     }));
   });
@@ -4823,7 +4778,7 @@ describe("Studio client", () => {
         defaultRecipeId: "economy-daily",
         topicStrategy: { customInstruction: "优先可拍题材。" },
         defaultAssetProviderId: "seedance-video-v1",
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
@@ -4853,7 +4808,7 @@ describe("Studio client", () => {
         defaultRecipeId: "economy-daily",
         topicStrategy: { customInstruction: "优先可拍题材。" },
         defaultAssetProviderId: "ai-shot-router-v1",
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
       }}
       onClose={() => undefined}
       onSubmit={onSubmit}
@@ -5037,9 +4992,9 @@ describe("Studio client", () => {
               summary: "结尾没有兑现标题里的承诺",
               issues: [{
                 severity: "blocking" as const,
-                criterion: "结尾兑现",
-                evidence: "candidate.payoff coverage incomplete",
-                repairInstruction: "repair candidate.payoff",
+                criterion: "构思正文",
+                evidence: "candidate.concept coverage incomplete",
+                repairInstruction: "repair candidate.concept",
                 creatorTitle: "结尾少了两个承诺过的答案",
                 creatorObservation: "标题说避开 3 个坑，结尾只讲了一个",
                 creatorAction: "把另外两个坑各补一句",
@@ -5053,10 +5008,10 @@ describe("Studio client", () => {
 
     expect(screen.getByText("内容简报做完了，等你放行")).toBeInTheDocument();
     expect(screen.getByText(/独立复核 76 分/)).toBeInTheDocument();
-    expect(screen.queryByText("结尾兑现")).not.toBeInTheDocument();
+    expect(screen.queryByText("构思正文")).not.toBeInTheDocument();
     expect(screen.getByText("标题说避开 3 个坑，结尾只讲了一个")).toBeInTheDocument();
     expect(screen.getByText("把另外两个坑各补一句")).toBeInTheDocument();
-    expect(screen.queryByText(/candidate\.payoff/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/candidate\.concept/)).not.toBeInTheDocument();
     expect(screen.queryByText(/自动修订轮次已用尽/)).not.toBeInTheDocument();
     // 审计自己的措辞是 blocking；对用户它始终只是建议，界面不能写成"阻断"。
     expect(screen.getByText("建议先改")).toBeInTheDocument();
@@ -6135,8 +6090,6 @@ describe("Studio client", () => {
   it("shows the director's visual bible and AI-generated per-shot routes", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      resolvedProfileId: "documentary-observer",
-      profileRationale: "热点内容需要真实动作与环境证据。",
       visualBible: {
         narrativeApproach: "先现场后解释",
         pacing: "前快后稳",
@@ -6184,8 +6137,8 @@ describe("Studio client", () => {
     const panel = [...document.querySelectorAll<HTMLElement>(".node-workspace")].find((element) => element.textContent?.includes("导演方案"));
     if (!panel) throw new Error("导演方案节点不存在");
     openWorkbenchStage("导演方案");
-    expect(await within(panel).findByText("纪实观察")).toBeInTheDocument();
-    expect(within(panel).getByText("先现场后解释")).toBeInTheDocument();
+    expect(within(panel).queryByText("纪实观察")).not.toBeInTheDocument();
+    expect(await within(panel).findByText("先现场后解释")).toBeInTheDocument();
     expect(within(panel).getByText("事实镜头")).toBeInTheDocument();
     expect(within(panel).getByText(/Pexels 图库/)).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/api/director-plan-current", expect.objectContaining({ signal: expect.any(AbortSignal) }));
@@ -7043,26 +6996,11 @@ describe("Studio client", () => {
     expect(screen.getByRole("button", { name: "重试视觉审片" })).toBeInTheDocument();
   });
 
-  it("keeps the creative goal visible while reviewing the finished video", () => {
-    render(<RunWorkbench
-      run={{
-        ...runDetail,
-        creativeSummary: {
-          audience: "想核验热点的普通观众",
-          openingPromise: "先比较标题证据，不猜传播链",
-          requiredVisual: "两条真实标题的措辞差异可以直接并列核对。",
-          payoff: "让观众能区分传闻和已证实信息",
-        },
-      }}
-      decisionPending={false}
-      onDecision={async () => undefined}
-    />);
-
+  it("keeps the review focused on the actual film without inventing a creative goal summary", () => {
+    render(<RunWorkbench run={runDetail} decisionPending={false} onDecision={async () => undefined} />);
     openWorkbenchReview();
-    const creativeSummary = screen.getByRole("region", { name: "创作目标摘要" });
-    expect(within(creativeSummary).getByText("想核验热点的普通观众")).toBeInTheDocument();
-    expect(within(creativeSummary).getByText("让观众能区分传闻和已证实信息")).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "成片预览" }).compareDocumentPosition(creativeSummary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("region", { name: "成片预览" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "创作目标摘要" })).not.toBeInTheDocument();
   });
 
   it("labels short-stock recovery as rematching and dispatches the existing recovery action only after a click", async () => {

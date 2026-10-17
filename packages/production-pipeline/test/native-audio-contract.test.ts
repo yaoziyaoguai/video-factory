@@ -9,7 +9,7 @@ const base = {
   platform: "douyin", reviewMode: "manual", audioMode: "native_av", nativeVideoProviderId: "wan-video-v1",
   providers: { script: "codex-screenwriter-v1", director: "codex-visual-director-v1", assets: "ai-shot-router-v1",
     render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-  models: { "wan-video-v1": "wan3.0-video" }, director: { profileId: "auto", assetProviderIds: ["wan-video-v1"] },
+  models: { "wan-video-v1": "wan3.0-video" }, director: {  assetProviderIds: ["wan-video-v1"] },
   economics: { recipeId: "custom", allowMeteredProviders: true },
   workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true },
 };
@@ -29,7 +29,7 @@ describe("native audio brief boundary", () => {
     for (const audioMode of [null, "native", 1, false]) assert.throws(() => parseBrief({ ...base, audioMode }), /audioMode/);
     for (const bad of [
       { models: {} }, { models: { "wan-video-v1": "wan3.0-prime" } },
-      { director: { profileId: "auto", assetProviderIds: ["wan-video-v1", "pexels-stock-v1"] } },
+      { director: {  assetProviderIds: ["wan-video-v1", "pexels-stock-v1"] } },
       { voiceDirection: { profileId: "minimax:female-chengshu", rate: 190, pauseScale: 1, masteringPreset: "natural" } },
       { providers: { ...base.providers, voice: "minimax-tts-v1" } },
       { workflowFeatures: { assetSemanticRank: false, referenceGrammar: false } },

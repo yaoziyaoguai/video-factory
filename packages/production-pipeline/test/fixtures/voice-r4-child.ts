@@ -124,7 +124,7 @@ const options: ProductionPipelineOptions = {
   screenwriterAgent: {
     id: "codex-screenwriter-v1", modelId: "r4-isolated-screenwriter",
     async draft() {
-      return { viewerPromise: "看完三个动作", narrativeArc: "连续动作", canonFacts: ["受控素材"],
+      return {   canonFacts: ["受控素材"],
         scenes: [1, 2, 3, 4, 5].map(position => ({ position, duration: 5,
           narration: position % 2 ? `第${position}组说话。` : "……", visual_strategy: "local",
           visual_prompt: `第${position}个说明卡片`, search_terms: [`说明${position}`] })) };

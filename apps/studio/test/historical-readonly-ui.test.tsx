@@ -76,7 +76,6 @@ describe("historical read-only production UI", () => {
 
   it("does not count or list a legacy review as waiting for the creator", async () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([legacyReview]);
-    vi.spyOn(studioApi, "templateExperiments").mockResolvedValue([]);
 
     render(<MemoryRouter><ExperimentsPage /></MemoryRouter>);
 
@@ -99,7 +98,6 @@ describe("historical read-only production UI", () => {
       runPurpose: "test",
     };
     vi.spyOn(studioApi, "runs").mockResolvedValue([testRun]);
-    vi.spyOn(studioApi, "templateExperiments").mockResolvedValue([]);
 
     render(<MemoryRouter><ExperimentsPage /></MemoryRouter>);
 

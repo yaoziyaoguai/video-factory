@@ -67,8 +67,6 @@ function validScriptDraft(): Record<string, unknown> {
     search_terms: ["hand puts phone on desk"],
   };
   return {
-    viewerPromise: "用一个动作切换下班状态",
-    narrativeArc: "提出疲惫问题，演示动作，给出结论",
     canonFacts: [],
     scenes: Array.from({ length: 5 }, (_, index) => ({ ...scene, position: index + 1 })),
   };
@@ -80,10 +78,8 @@ function directorPlanTask() {
     kind: "director-plan",
     expectedContractDigest: taskContractDescriptorFor("director-plan").digest,
     payload: {
-      directorProfiles: [{ id: "documentary-observer" }],
       brief: {
         title: "下班后先做一件事",
-        requestedProfileId: "auto",
         productionCapabilities: {
           assetProviders: [{
             id: "pexels-stock-v1",
@@ -106,9 +102,6 @@ function directorPlanTask() {
 function validDirectorPlan(): Record<string, unknown> {
   return {
     version: "video-factory/director-plan-v1",
-    requestedProfileId: "auto",
-    resolvedProfileId: "documentary-observer",
-    profileRationale: "真实动作适合观察式表达",
     visualBible: {
       narrativeApproach: "问题到行动",
       motif: "手机与手部",
@@ -175,7 +168,7 @@ function visualReviewTask() {
         sha256: createHash("sha256").update(jpeg).digest("hex"),
         jpegBase64: jpeg.toString("base64"),
       }],
-      reviewContext: { title: "测试短片", viewerPromise: "验证画面是否清晰" },
+      reviewContext: { title: "测试短片",  },
     },
   }, codexExecutorProfileFor("deepseek").identity);
 }
@@ -259,15 +252,10 @@ function assetRankTask(withThumbnail: boolean) {
 function validRoleAudit(): Record<string, unknown> {
   return {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v1",
+    rubricVersion: "video-factory/role-quality-rubric-v2",
     assessments: [{
       targetPath: "",
-      dimensions: [
-        { dimension: "attention", score: 90, evidence: "开场就给出具体对象。" },
-        { dimension: "progression", score: 90, evidence: "每场都在推进信息。" },
-        { dimension: "payoff", score: 90, evidence: "结尾回答了原承诺。" },
-        { dimension: "expression", score: 90, evidence: "旁白具体可理解。" },
-      ],
+      dimensions: [{ dimension: "consistency", score: 90, evidence: "开场就给出具体对象。" }, { dimension: "expression", score: 90, evidence: "旁白具体可理解。" }],
     }],
     verdict: "pass",
     score: 90,
@@ -994,11 +982,11 @@ describe("ChatCompletionsExecutor", () => {
     assert.equal(capturedUrl, CHAT_COMPLETIONS_URL);
     assert.equal(capturedBody?.model, "deepseek-flash");
     assert.equal(capturedBody?.reasoning_effort, "max");
-    assert.match(capturedPrompt, /你在脚本写定前建立本片创作方向/);
+    assert.match(capturedPrompt, /不预设开场钩子/);
     assert.match(capturedPrompt, /source-1/);
     assert.deepEqual(JSON.parse(result.output), output);
     assert.equal(result.trace?.taskKind, "creative-treatment");
-    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v9");
+    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v10");
 
     await assert.rejects(
       async () => executor.runTask(creativeTreatmentTask([])),
@@ -1024,7 +1012,7 @@ describe("ChatCompletionsExecutor", () => {
       (error: unknown) => {
         assert.ok(error instanceof CodexExecutorError);
         assert.equal(error.transient, false);
-        assert.match(error.message, /evidenceRequirements\[0\]\.beatId must reference a progression beat/);
+        assert.match(error.message, /evidenceRequirements\[0\]\.beatId is not allowed/);
         return true;
       },
     );
@@ -1064,7 +1052,7 @@ describe("ChatCompletionsExecutor", () => {
 
     const result = await executor.runTask(creativeTreatmentTask());
 
-    assert.equal(JSON.parse(result.output).viewerPromise, " 学会识别资料支持的结论边界 ");
+    assert.equal(JSON.parse(result.output).concept, " 学会识别资料支持的结论边界 ");
   });
 
   it("applies trim-canonical source-id rules at the payload and output boundaries", async () => {
@@ -1118,7 +1106,7 @@ describe("ChatCompletionsExecutor", () => {
           ? {
             ...legalCreativeTreatmentOutput(),
             draftNote: "结构外备注",
-            hook: { ...(legalCreativeTreatmentOutput().hook as Record<string, unknown>), draftNote: "嵌套备注" },
+            evidenceRequirements: (legalCreativeTreatmentOutput().evidenceRequirements as Array<Record<string, unknown>>).map(entry => ({ ...entry, draftNote: "嵌套备注" })),
           }
           : legalCreativeTreatmentOutput();
         return new Response(JSON.stringify({
@@ -1170,20 +1158,17 @@ describe("ChatCompletionsExecutor", () => {
     });
   }
 
-  it("rejects a creative-treatment repair that rewrites existing hook or progression content", async () => {
+  it("rejects a creative-treatment repair that rewrites existing concept or evidence content", async () => {
     // 第一次输出带结构外字段触发 repair；第二次输出 schema 合法但改写了已有合同内容。
     const schemaInvalidBaseline = () => ({ ...legalCreativeTreatmentOutput(), draftNote: "结构外备注" });
-    const rewrittenHook = () => ({
-      ...legalCreativeTreatmentOutput(),
-      hook: { narrationIntent: "被改写的开头", visualIntent: "展示原始资料的关键差异" },
-    });
-    const rewrittenProgression = () => {
+    const rewrittenConcept = () => ({ ...legalCreativeTreatmentOutput(), concept: "被改写的构思" });
+    const rewrittenEvidence = () => {
       const legal = legalCreativeTreatmentOutput();
-      const progression = [...legal.progression as Array<Record<string, unknown>>];
-      progression[1] = { ...progression[1]!, purpose: "被改写的段落职责" };
-      return { ...legal, progression };
+      const evidenceRequirements = [...legal.evidenceRequirements as Array<Record<string, unknown>>];
+      evidenceRequirements[0] = { ...evidenceRequirements[0]!, claim: "被改写的事实" };
+      return { ...legal, evidenceRequirements };
     };
-    for (const drift of [rewrittenHook, rewrittenProgression]) {
+    for (const drift of [rewrittenConcept, rewrittenEvidence]) {
       let attempt = 0;
       const executor = chatExecutor({
         env: { DEEPSEEK_API_KEY: API_KEY },

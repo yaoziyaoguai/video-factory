@@ -30,7 +30,7 @@ describe("ProductionBrief", () => {
   it("keeps content-led references separate from explicit bounds and preserves legacy semantics", () => {
     const modern = { ...validBrief, durationPolicy: "content-led-v1", durationSeconds: 50,
       providers: { ...validBrief.providers, director: "api-visual-director-v1" },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1" } };
     for (const durationRange of [undefined, { maxSeconds: 30 }, { minSeconds: 1.01 }, { minSeconds: 8.3, maxSeconds: 12 }]) {
       const brief = pipeline.parseBrief({ ...modern, ...(durationRange ? { durationRange } : {}) });
@@ -101,19 +101,10 @@ describe("ProductionBrief", () => {
     });
   });
 
-  it("strips retired template inputs but rejects every other unknown top-level field", () => {
-    const parsed = pipeline.parseBrief({
-      ...validBrief,
-      template: { templateId: "retired-template" },
-      templateSnapshot: { templateId: "retired-template", templateVersion: 3 },
-    });
-
-    assert.equal("template" in parsed, false);
-    assert.equal("templateSnapshot" in parsed, false);
-    assert.throws(
-      () => pipeline.parseBrief({ ...validBrief, misspelledVoiceDirection: true }),
-      /misspelledVoiceDirection.*not allowed/,
-    );
+  it("rejects retired template inputs and other unknown top-level fields", () => {
+    for (const key of ["template", "templateSnapshot", "misspelledVoiceDirection"]) {
+      assert.throws(() => pipeline.parseBrief({ ...validBrief, [key]: {} }), new RegExp(`${key}.*not allowed`));
+    }
   });
 
   it("preserves an explicit duration range without inventing one for persisted legacy briefs", () => {
@@ -182,27 +173,10 @@ describe("ProductionBrief", () => {
     );
   });
 
-  it("preserves the adopted topic editor's visual evidence and concrete plan", () => {
-    const visualPlan = {
-      strategy: "用来源标题并列和确定性标尺逐项核对。",
-      beats: [{
-        id: "headline-certainty-scale",
-        role: "证据并列",
-        duration: "0-8 秒",
-        description: "左右并列真实标题，高亮“网传”和“正在核查”。",
-        searchQuery: "source headline screenshot certainty scale",
-        source: "screen",
-      }],
-    } as const;
-
-    const parsed = pipeline.parseBrief({
-      ...validBrief,
-      visualProof: "两条真实标题的措辞差异可以直接并列核对。",
-      visualPlan,
-    });
-
+  it("preserves explicit visual requirements and rejects retired automatic plans", () => {
+    const parsed = pipeline.parseBrief({ ...validBrief, visualProof: "两条真实标题的措辞差异可以直接并列核对。" });
     assert.equal(parsed.visualProof, "两条真实标题的措辞差异可以直接并列核对。");
-    assert.deepEqual(parsed.visualPlan, visualPlan);
+    assert.throws(() => pipeline.parseBrief({ ...validBrief, visualPlan: { strategy: "固定套路", beats: [] } }), /visualPlan.*not allowed/);
   });
 
   it("rejects a trend source platform as the production target platform", () => {
@@ -240,7 +214,7 @@ describe("ProductionBrief", () => {
           suggestion: "换用无字母片。",
           targetNodeIds: ["visual-direction", "assets"],
         }],
-        previousScript: { viewerPromise: "解释真实原因" },
+        previousScript: {  },
         previousDirectorPlan: { visualBible: { typography: "字幕之外不出现文字" } },
       },
     });
@@ -248,7 +222,7 @@ describe("ProductionBrief", () => {
     assert.equal(parsed.rework?.sourceRunId, "run-rejected-1");
     assert.equal(parsed.rework?.nodeInstructions.assets, "只替换第三镜，其他母片保持不变。");
     assert.deepEqual(parsed.rework?.findings[0]?.targetNodeIds, ["visual-direction", "assets"]);
-    assert.deepEqual(parsed.rework?.previousScript, { viewerPromise: "解释真实原因" });
+    assert.deepEqual(parsed.rework?.previousScript, {  });
     assert.throws(() => pipeline.parseBrief({
       ...validBrief,
       rework: {
@@ -307,9 +281,7 @@ describe("ProductionBrief", () => {
         updatedAt: "2026-10-02T00:00:00.000Z",
         pillar: "真实验证",
         title: "第一集",
-        viewerPromise: "验证一个真实方法",
-        hook: "先看结果",
-        payoff: "给出适用边界",
+        concept: "验证一个真实方法",
         planning: {
           source: "agent",
           role: "系列总编",
@@ -373,9 +345,7 @@ describe("ProductionBrief", () => {
           updatedAt: "2026-08-30T00:00:00.000Z",
           pillar: "真实验证",
           title: "第二集",
-          viewerPromise: "复核上一集的方法",
-          hook: "先看失败结果",
-          payoff: "给出适用边界",
+          concept: "复核上一集的方法",
           planning: {
             source: "agent",
             role: "系列总编",
@@ -565,7 +535,6 @@ describe("ProductionBrief", () => {
         assets: "ai-shot-router-v1",
       },
       director: {
-        profileId: "auto",
         assetProviderIds: ["local-editorial-v1", "pexels-stock-v1", "seedance-video-v1"],
       },
       economics: {
@@ -577,7 +546,6 @@ describe("ProductionBrief", () => {
     });
 
     assert.deepEqual(brief.director, {
-      profileId: "auto",
       assetProviderIds: ["local-editorial-v1", "pexels-stock-v1", "seedance-video-v1"],
     });
     assert.equal(brief.providers.director, "api-visual-director-v1");
@@ -589,7 +557,7 @@ describe("ProductionBrief", () => {
       () => pipeline.parseBrief({
         ...validBrief,
         providers: { ...validBrief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-        director: { profileId: "auto", assetProviderIds: [] },
+        director: {  assetProviderIds: [] },
       }),
       /director\.assetProviderIds/,
     );
@@ -597,7 +565,7 @@ describe("ProductionBrief", () => {
       () => pipeline.parseBrief({
         ...validBrief,
         providers: { ...validBrief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-        director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1", "pexels-stock-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1", "pexels-stock-v1"] },
       }),
       /must not contain duplicates/,
     );
@@ -629,7 +597,7 @@ describe("ProductionBrief", () => {
       () => pipeline.parseBrief({
         ...validBrief,
         providers: { ...validBrief.providers, director: "api-visual-director-v1" },
-        director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+        director: {  assetProviderIds: ["local-editorial-v1"] },
         workflowFeatures: { assetSemanticRank: true, referenceGrammar: false },
       }),
       /requires providers\.assets 'ai-shot-router-v1'/,
@@ -640,7 +608,7 @@ describe("ProductionBrief", () => {
     const input = {
       ...validBrief,
       providers: { ...validBrief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      director: {  assetProviderIds: ["local-editorial-v1"] },
       workflowFeatures: { assetSemanticRank: false, referenceGrammar: true },
       referenceVideo: {
         uploadId: "67d86948-5517-4b17-8da1-b0a695159d4d",
@@ -661,7 +629,7 @@ describe("ProductionBrief", () => {
   it("accepts the joint-v1 creative planning marker and never invents it for legacy briefs", () => {
     // joint-v1 是新制作入口显式写入的共同创作规划标记：round-trip 必须原样保留，普通
     // parseBrief/parsePersistedBrief 不给缺失字段补标——历史 run 按其原工作流读取/恢复。
-    const jointDirector = { profileId: "auto", assetProviderIds: ["local-editorial-v1"] };
+    const jointDirector = {  assetProviderIds: ["local-editorial-v1"] };
     const jointProviders = { ...validBrief.providers, director: "api-visual-director-v1" };
     const jointWorkflow = {
       assetSemanticRank: false,

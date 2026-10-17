@@ -92,7 +92,7 @@ it("judges a pilot claim against the frames the pilot itself sampled", async () 
   });
   const audit = {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v1",
+    rubricVersion: "video-factory/role-quality-rubric-v2",
     assessments: [{
       targetPath: "",
       dimensions: [

@@ -38,9 +38,9 @@ export function assessTreatmentReadiness(
     if (!requirement.critical || (!missingBoundSources && !invalidRetrieval && !unavailableExternalSource)) return;
 
     const reason = unavailableExternalSource
-      ? `核心兑现“${requirement.claim}”依赖当前流水线无法取得的外部材料。`
+      ? `内容“${requirement.claim}”依赖当前流水线无法取得的外部材料。`
       : missingBoundSources
-        ? `核心兑现“${requirement.claim}”声明已有来源，但当前输入没有可证明的来源绑定。`
+        ? `内容“${requirement.claim}”声明已有来源，但当前输入没有可证明的来源绑定。`
         : requirement.requirement === "factual_support"
           ? `核心事实“${requirement.claim}”不能由通用图库或生成画面代替证据。`
           : `核心示意“${requirement.claim}”指定的${generated ? "生成" : "图库"}来源当前不可用，或不支持${generated ? "画面生成" : "素材检索"}。`;
@@ -48,11 +48,11 @@ export function assessTreatmentReadiness(
     issues.push({
       id: `treatment-readiness-${index + 1}`,
       target: routeCanBeRevised ? "director" : "source",
-      beatIds: [requirement.beatId],
+      beatIds: [],
       scenePositions: [],
       reason,
       requiredChange: unavailableExternalSource
-        ? "请补充所需的专属材料，或明确调整本片承诺。"
+        ? "请补充所需的专属材料，或明确调整相关内容。"
         : missingBoundSources
           ? "请补充并绑定支持该主张的来源材料。"
           : routeCanBeRevised

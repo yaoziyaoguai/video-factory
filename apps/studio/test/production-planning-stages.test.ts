@@ -137,13 +137,11 @@ interface PlanningSpies {
 }
 
 const CREATIVE_DIMENSION_EVIDENCE: Record<string, string> = {
-  attention: "前两秒给出具体问题。",
-  progression: "中段有可辨认的推进。",
-  payoff: "结尾兑现了承诺里的结论。",
-  expression: "画面要求在当前素材能力内可落地。",
+  consistency: "内容忠实于用户意图和已确认事实。",
+  expression: "表达清楚，符合当前制作能力。",
 };
 
-// 创作交付类角色的评估对象是整份候选（根路径 ""），维度由宿主固定为四维创作维度；
+// 创作交付类角色的评估对象是整份候选（根路径 ""），维度由宿主固定为创作维度；
 // 总分等于全部维度分的最低分，所以每维取同一个分数。
 const CREATIVE_ASSESSMENTS = [{
   targetPath: "",
@@ -153,7 +151,7 @@ const CREATIVE_ASSESSMENTS = [{
 function checkedCreativeExecution<T>(output: T, role: string, taskKind: "creative-treatment" | "script-draft" | "director-plan", modelId: string) {
   const audit = {
     version: "video-factory/role-audit-v2" as const,
-    rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+    rubricVersion: "video-factory/role-quality-rubric-v2" as const,
     verdict: "pass" as const,
     score: 92,
     assessments: CREATIVE_ASSESSMENTS,
@@ -191,16 +189,8 @@ function planningAgents(
           spies.treatmentCalls += 1;
           if (failure.treatment) throw new Error(failure.treatment === true ? "构思审计失败：三轮未通过" : failure.treatment);
           return {
-            version: "video-factory/creative-treatment-v2",
-            viewerPromise: "看完能避开三个决策坑",
-            hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
-            progression: [
-              { beatId: "beat-1", purpose: "建立问题", viewerGain: "识别坑" },
-              { beatId: "beat-2", purpose: "给出方法", viewerGain: "可执行步骤" },
-            ],
-            payoff: "低风险决策清单",
-            visualPrinciples: ["真实动作", "少字多画面"],
-            soundPrinciples: ["环境声先行"],
+            version: "video-factory/creative-treatment-v3",
+            concept: "看完能避开三个决策坑",
             evidenceRequirements: [],
             feasibilityQuestions: [],
           };
@@ -215,8 +205,6 @@ function planningAgents(
         if (failure.screenwriter) throw new Error("稿件审计失败：三轮未通过");
         return {
           output: {
-            viewerPromise: "看完能避开三个决策坑",
-            narrativeArc: "问题-方法-清单",
             canonFacts: ["步骤可执行"],
             scenes: [1, 2, 3].map((position) => ({
               position,
@@ -245,9 +233,6 @@ function planningAgents(
         spies.directorCalls += 1;
         return {
           version: "video-factory/director-plan-v1",
-          requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "documentary-observer",
-          profileRationale: "用真实动作解释。",
           visualBible: {
             narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
             camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
@@ -371,7 +356,7 @@ function planningBrief(overrides: { assetSemanticRank?: boolean; joint?: boolean
       ...(joint ? { creativePlanning: "joint-v1" as const } : {}),
       ...(overrides.creativeReview ? { creativeReview: "user-confirmed-v1" as const } : {}),
     },
-    director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1", "local-editorial-v1"] },
+    director: {  assetProviderIds: ["pexels-stock-v1", "local-editorial-v1"] },
     economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
     voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
   };
@@ -448,7 +433,7 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
     for (let index = 1; index <= 3; index += 1) {
       const current = await studio.creativeReview(run.id);
       assert.ok(current);
-      const document = { ...(current.draft as Record<string, unknown>), payoff: `第 ${index} 次手工修改` };
+      const document = { ...(current.draft as Record<string, unknown>), concept: `第 ${index} 次手工修改` };
       const operation = await pipeline.dispatchCreativeReviewCommand(run.id, {
         action: "edit_draft", commandId: `history-edit-${index}`, actor: "creator", stage: current.stage,
         expectedRunRevision: current.runRevision, expectedReviewRevision: current.reviewRevision,
@@ -471,7 +456,7 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
     assert.equal(treatmentVersions.length, 4);
     assert.equal(new Set(treatmentVersions.map((entry) => entry.versionId)).size, 4);
     assert.equal(treatmentVersions.at(-1)?.confirmation?.unauditedAdoption, true);
-    assert.equal((treatmentVersions.at(-1)?.document as { payoff?: string }).payoff, "第 3 次手工修改");
+    assert.equal((treatmentVersions.at(-1)?.document as { concept?: string }).concept, "第 3 次手工修改");
   });
   it("preserves an adopted treatment and a settled failed audit across model editing and process reconstruction", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-r11-adopt-carry-"));
@@ -493,7 +478,7 @@ describe("joint-v1 planning stage DTO (read-only projection)", () => {
     }, output: {
       stage: "treatment", intent: "propose", reply: "提供另一种开场，采用前不会替换当前稿。",
       changeSummary: ["开场先展示结果"],
-      treatment: { ...(input.currentDocument as Record<string, unknown>), payoff: "用结果对照收束，保留用户采用意见" },
+      treatment: { ...(input.currentDocument as Record<string, unknown>), concept: "用结果对照收束，保留用户采用意见" },
       script: null, director: null, upstreamRequest: null,
     } });
     const { pipeline, studio } = newPlanningStudio(workspaceRoot, new PlanningStagesWorker(), agents);

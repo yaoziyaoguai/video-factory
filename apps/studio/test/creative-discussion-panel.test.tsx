@@ -23,7 +23,6 @@ function review(overrides: Partial<StudioCreativeReviewSnapshot> = {}): StudioCr
       impact: "脚本、导演方案和后续确认会失效；历史稿件与已经可用的素材会保留，重新确认后再生成后续方案。",
     }],
     draft: {
-      narrativeArc: "问题到答案",
       scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "先看结果。", visual_prompt: "结果对照" }],
     },
     messages: [],
@@ -447,7 +446,7 @@ describe("discussion suggestions remain editable user input", () => {
   it("shows actual changes against the supplied previous draft without reusing its audit", async () => {
     const previous = review().draft;
     render(<CreativeDiscussionPanel review={review({ draftVersionId: "v-next", previousDraft: previous,
-      draft: { narrativeArc: "问题到答案", scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "这次直接说结论。", visual_prompt: "结果对照" }] },
+      draft: {  scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "这次直接说结论。", visual_prompt: "结果对照" }] },
     })} busy={false} onCommand={vi.fn(async () => undefined)} />);
     expect(screen.getByRole("region", { name: "与上一版的实际变化" })).toHaveTextContent("修改 1 项");
     expect(screen.getByText("本版未审计")).toBeInTheDocument();
@@ -537,19 +536,11 @@ describe("discussion suggestions remain editable user input", () => {
 // 不默认选值；选择写入完整文档随 edit_draft 保存；无兼容来源给真实出口。
 describe("evidence retrieval repair UI", () => {
   const badTreatment = {
-    version: "video-factory/creative-treatment-v2",
-    viewerPromise: "看完能避开三个决策坑",
-    hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
-    progression: [
-      { beatId: "beat-1", purpose: "建立问题", viewerGain: "识别坑" },
-      { beatId: "beat-2", purpose: "给出方法", viewerGain: "可执行步骤" },
-    ],
-    payoff: "低风险决策清单",
-    visualPrinciples: ["真实动作"],
-    soundPrinciples: ["环境声先行"],
+    version: "video-factory/creative-treatment-v3",
+    concept: "看完能避开三个决策坑",
     evidenceRequirements: [
-      { beatId: "beat-1", claim: "已提供素材", requirement: "factual_support", suppliedSourceIds: [], critical: true, acquisition: "supplied", retrievalProviderId: null },
-      { beatId: "beat-2", claim: "结尾生成画面", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated", retrievalProviderId: null },
+      {  claim: "已提供素材", requirement: "factual_support", suppliedSourceIds: [], critical: true, acquisition: "supplied", retrievalProviderId: null },
+      {  claim: "结尾生成画面", requirement: "illustration_only", suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated", retrievalProviderId: null },
     ],
     feasibilityQuestions: [],
   };
@@ -616,7 +607,7 @@ describe("evidence retrieval repair UI", () => {
     const document = command.document as typeof badTreatment;
     expect(document.evidenceRequirements[1]!.retrievalProviderId).toBe("seedream-image-v1");
     expect(document.evidenceRequirements[0]!.retrievalProviderId).toBeNull();
-    expect(document.viewerPromise).toBe("看完能避开三个决策坑");
+    expect(document.concept).toBe("看完能避开三个决策坑");
   });
 
   it("offers a real exit when no compatible source is configured and keeps the draft", async () => {
@@ -636,7 +627,7 @@ describe("evidence retrieval repair UI", () => {
     expect(screen.getByText(/当前制作未配置可用的对应画面服务/)).toBeInTheDocument();
     expect(screen.queryByLabelText("第 2 项画面服务")).toBeNull();
     expect(screen.queryByText(/可到制作设置配置来源/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText("观众看完能得到什么")).toHaveValue("看完能避开三个决策坑");
+    expect(screen.getByLabelText("构思正文")).toHaveValue("看完能避开三个决策坑");
   });
 
   // CR3（2026-10-05 复审 AP3 的 UI 面）：补齐候选必须是“本制作已选来源 ∩ 可用目录 ∩
@@ -835,7 +826,6 @@ describe("CreativeDiscussionPanel", () => {
   it("reads one script segment at a time without changing the creator's discussion scope", async () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
     render(<CreativeDiscussionPanel review={review({ draft: {
-      narrativeArc: "问题到答案",
       scenes: [
         { id: "scene-1", position: 1, duration: 8, narration: "先看结果。", visual_prompt: "结果对照" },
         { id: "scene-2", position: 2, duration: 6, narration: "再说明原因。", visual_prompt: "原因示意" },
@@ -907,7 +897,7 @@ describe("CreativeDiscussionPanel", () => {
     // 原始 Bridge 字段路径不出现在普通用户视图。
     expect(screen.queryByText(/payload\.currentDocument/)).not.toBeInTheDocument();
     // 失败不夺走入口：意见框可输入、只讨论可点。
-    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    const composer = screen.getByPlaceholderText(/描述你想保留或修改的内容/);
     fireEvent.change(composer, { target: { value: "换个问法再试" } });
     expect(composer).toHaveValue("换个问法再试");
     expect(screen.getByRole("button", { name: "只讨论" })).toBeEnabled();
@@ -923,11 +913,11 @@ describe("CreativeDiscussionPanel", () => {
     await userEvent.click(screen.getByRole("checkbox", { name: "第 1 段" }));
     // 换版本（内容也变）：选择必须清空，发送不得携带旧 selection
     const second = review({ draftVersionId: "script-artifact#v2", draftSha256: "b".repeat(64), reviewRevision: 4,
-      draft: { narrativeArc: "问题到答案", scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "第二版旁白。", visual_prompt: "对照" }] } });
+      draft: {  scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "第二版旁白。", visual_prompt: "对照" }] } });
     rerender(<CreativeDiscussionPanel review={second} busy={false} onCommand={onCommand} />);
     await userEvent.click(screen.getByText("指定讨论范围（可选）"));
     expect(screen.getByRole("checkbox", { name: "第 1 段" })).not.toBeChecked();
-    fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "C4 意见" } });
+    fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "C4 意见" } });
     await userEvent.click(screen.getByRole("button", { name: "只讨论" }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
     expect(onCommand.mock.calls[0]![0]).not.toHaveProperty("selection");
@@ -1077,7 +1067,7 @@ describe("CreativeDiscussionPanel", () => {
       consultationOperations: [{ commandId: original.commandId, command: original, status: "unknown" }],
     })} busy={false} onCommand={onCommand} />);
     window.localStorage.removeItem(key); // 另一标签手改完成后仅清理它自己的当前命令指针。
-    fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "后写的意见不会被取回结果清掉" } });
+    fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "后写的意见不会被取回结果清掉" } });
     await userEvent.click(screen.getByRole("button", { name: "核对原讨论结果" }));
     await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
     rerender(<CreativeDiscussionPanel review={review({ consultationOperations: [{
@@ -1086,7 +1076,7 @@ describe("CreativeDiscussionPanel", () => {
     expect(screen.getByRole("button", { name: "只讨论" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "发送修订意见" })).toBeEnabled();
     expect(screen.getByRole("button", { name: /审计当前版本（会调用模型）/ })).toBeEnabled();
-    expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue("后写的意见不会被取回结果清掉");
+    expect(screen.getByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue("后写的意见不会被取回结果清掉");
     expect(onCommand.mock.calls[0]![0]).toEqual(original);
     expect(window.localStorage.getItem(key)).toBeNull();
   });
@@ -1100,12 +1090,12 @@ describe("CreativeDiscussionPanel", () => {
     render(<CreativeDiscussionPanel review={review({ consultationOperations: [{
       commandId: original.commandId, command: original, status,
     }] })} busy={false} onCommand={onCommand} />);
-    fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "用户后来写下的意见" } });
+    fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "用户后来写下的意见" } });
     await waitFor(() => expect(screen.getByRole("button", { name: "只讨论" })).toBeEnabled());
     expect(screen.getByRole("button", { name: "发送修订意见" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "核对上一条操作" })).not.toBeInTheDocument();
     expect(window.localStorage.getItem(key)).toBeNull();
-    expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue("用户后来写下的意见");
+    expect(screen.getByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue("用户后来写下的意见");
     expect(onCommand).not.toHaveBeenCalled();
   });
 
@@ -1122,7 +1112,7 @@ describe("CreativeDiscussionPanel", () => {
     render(<CreativeDiscussionPanel review={review({ consultationOperations: [{
       commandId: original.commandId, command: original, status,
     }] })} busy={false} onCommand={onCommand} />);
-    fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "输入仍保留，不猜测命令已经释放" } });
+    fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "输入仍保留，不猜测命令已经释放" } });
     expect(screen.getByRole("button", { name: "只讨论" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "核对上一条操作" })).toBeEnabled();
     expect(window.localStorage.getItem(key)).toBe(JSON.stringify(saved));
@@ -1144,7 +1134,7 @@ describe("CreativeDiscussionPanel", () => {
       expect(await screen.findByText(/原审计结果仍待核/)).toBeInTheDocument();
       expect(window.localStorage.getItem(key)).toBeNull();
       expect(JSON.parse(window.localStorage.getItem("vf:creative-audit-command:run-creative:original-audit")!)).toEqual(command);
-      fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "新的明确修订" } });
+      fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "新的明确修订" } });
       await userEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
       await waitFor(() => expect(onCommand).toHaveBeenCalledTimes(1));
       expect(onCommand.mock.calls[0]).toBeDefined();
@@ -1154,11 +1144,11 @@ describe("CreativeDiscussionPanel", () => {
       // 恢复观察只发原命令一次；待核时入口与守卫一致，不能呈现可点却拒绝的承诺。
       expect(onCommand).toHaveBeenCalledTimes(1);
       expect(onCommand.mock.calls[0]![0].commandId).toBe(command.commandId);
-      fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "不准覆盖原生成" } });
+      fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "不准覆盖原生成" } });
       expect(screen.getByRole("button", { name: "发送修订意见" })).toBeDisabled();
       await userEvent.click(screen.getByRole("button", { name: "发送修订意见" }));
-      fireEvent.keyDown(screen.getByPlaceholderText(/为什么这样开场/), { key: "Enter", ctrlKey: true });
-      expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue("不准覆盖原生成");
+      fireEvent.keyDown(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { key: "Enter", ctrlKey: true });
+      expect(screen.getByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue("不准覆盖原生成");
       expect(onCommand).toHaveBeenCalledTimes(1);
     }
     expect(read).toHaveBeenCalledTimes(1);
@@ -1300,7 +1290,7 @@ describe("CreativeDiscussionPanel", () => {
     });
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
-    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    const composer = screen.getByPlaceholderText(/描述你想保留或修改的内容/);
     fireEvent.change(composer, { target: { value: "存储坏了也能打字" } });
     expect(composer).toHaveValue("存储坏了也能打字");
     expect(screen.getByText(/本机草稿无法保存/)).toBeInTheDocument();
@@ -1309,7 +1299,7 @@ describe("CreativeDiscussionPanel", () => {
   it("does not send a command when the local pending record cannot be written", async () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
-    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    const composer = screen.getByPlaceholderText(/描述你想保留或修改的内容/);
     await userEvent.type(composer, "先写下来");
     vi.mocked(window.localStorage.setItem).mockImplementation(() => {
       throw new Error("storage full");
@@ -1357,7 +1347,7 @@ describe("CreativeDiscussionPanel", () => {
   it("reports success when the server accepted but local cleanup failed", async () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
-    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    const composer = screen.getByPlaceholderText(/描述你想保留或修改的内容/);
     await userEvent.type(composer, "发送这条");
     vi.mocked(window.localStorage.removeItem).mockImplementation(() => {
       throw new Error("cleanup failed");
@@ -1401,14 +1391,14 @@ describe("CreativeDiscussionPanel", () => {
     expect(screen.getByRole("button", { name: /采用.*（未审计）/ })).toBeDisabled();
     rendered.rerender(<CreativeDiscussionPanel review={review({
       draftSha256: "b".repeat(64), reviewRevision: 4,
-      draft: { ...review().draft as object, narrativeArc: "服务端的新方案" },
+      draft: { scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "服务端的新方案", visual_prompt: "结果对照" }] },
     })} busy={false} onCommand={onCommand} />);
     expect(screen.getByLabelText("分镜 1 · 旁白")).toHaveValue("我还没保存的文字");
     expect(screen.getByText(/旧稿不能覆盖新稿/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存修订" })).toBeDisabled();
     expect(onCommand).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: "放弃修改" }));
-    expect(screen.getByLabelText("叙事推进")).toHaveValue("服务端的新方案");
+    expect(screen.getByLabelText("分镜 1 · 旁白")).toHaveValue("服务端的新方案");
   });
 
   it("restores a manual edit after remount and keeps it when saving fails", async () => {
@@ -1430,24 +1420,24 @@ describe("CreativeDiscussionPanel", () => {
 
   it("edits director visual rules without changing shot structure or authorizing production", async () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
-    const document = { visualBible: { viewerPromise: "已经采用的脚本承诺", continuity: "保持连续性", pacing: "舒缓" }, shots: [{ scenePosition: 1, deliveryType: "stock_video" }] };
+    const document = { visualBible: {  continuity: "保持连续性", pacing: "舒缓" }, shots: [{ scenePosition: 1, deliveryType: "stock_video" }] };
     render(<CreativeDiscussionPanel review={review({ stage: "director", draft: document })} busy={false} onCommand={onCommand} />);
     await userEvent.click(screen.getByText("手动修订这份稿件"));
     expect(screen.queryByRole("textbox", { name: "全片视觉规则 · 观众承诺" })).not.toBeInTheDocument();
-    expect(screen.getByText(/观众承诺来自已采用的脚本/)).toBeInTheDocument();
+    expect(screen.queryByText(/观众承诺来自已采用的脚本/)).not.toBeInTheDocument();
     const field = await screen.findByLabelText("全片视觉规则 · 节奏");
     await userEvent.clear(field);
     await userEvent.type(field, "加快开场，保留结尾停顿");
     await userEvent.click(screen.getByRole("button", { name: "保存修订" }));
     await screen.findByText(/修订已保存。/);
     expect(onCommand).toHaveBeenCalledTimes(1);
-    expect(onCommand.mock.calls[0]?.[0]).toMatchObject({ action: "edit_draft", document: { visualBible: { viewerPromise: document.visualBible.viewerPromise, pacing: "加快开场，保留结尾停顿" }, shots: document.shots } });
+    expect(onCommand.mock.calls[0]?.[0]).toMatchObject({ action: "edit_draft", document: { visualBible: {  pacing: "加快开场，保留结尾停顿" }, shots: document.shots } });
   });
 
   it("keeps confirm and send unavailable when the server has not allowed those actions", async () => {
     const onCommand = vi.fn(async () => undefined);
     render(<CreativeDiscussionPanel review={review({ allowedActions: [] })} busy={false} onCommand={onCommand} />);
-    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    const composer = screen.getByPlaceholderText(/描述你想保留或修改的内容/);
     await userEvent.type(composer, "继续");
     fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
     expect(screen.getByRole("button", { name: "只讨论" })).toBeDisabled();
@@ -1458,10 +1448,10 @@ describe("CreativeDiscussionPanel", () => {
   it("renders a readable stage, sends a selected scene with Ctrl+Enter, and ignores IME Enter", async () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
-    expect(screen.getByText("问题到答案")).toBeInTheDocument();
+    expect(screen.getAllByText("先看结果。")).toHaveLength(2);
     await userEvent.click(screen.getByText("指定讨论范围（可选）"));
     await userEvent.click(screen.getByLabelText("第 1 段"));
-    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    const composer = screen.getByPlaceholderText(/描述你想保留或修改的内容/);
     await userEvent.type(composer, "把这一段说得更直接");
     fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true, isComposing: true });
     expect(onCommand).not.toHaveBeenCalled();
@@ -1500,7 +1490,7 @@ describe("CreativeDiscussionPanel", () => {
       commandId, status: "unknown", observationUrl: "/original",
     }));
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
-    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    const composer = screen.getByPlaceholderText(/描述你想保留或修改的内容/);
     await userEvent.type(composer, "解释这一段");
     await userEvent.click(screen.getByRole("button", { name: "只讨论" }));
     await screen.findByRole("alert");
@@ -1516,12 +1506,12 @@ describe("CreativeDiscussionPanel", () => {
   it("does not overwrite an unsent draft when polling refreshes the same run stage", async () => {
     const onCommand = vi.fn(async (_input: StudioCreativeReviewCommandInput) => undefined);
     const rendered = render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
-    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    const composer = screen.getByPlaceholderText(/描述你想保留或修改的内容/);
     await userEvent.type(composer, "我正在写的修改要求");
 
     rendered.rerender(<CreativeDiscussionPanel review={review({ runRevision: 9, reviewRevision: 4 })} busy={false} onCommand={onCommand} />);
 
-    expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue("我正在写的修改要求");
+    expect(screen.getByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue("我正在写的修改要求");
     expect(onCommand).not.toHaveBeenCalled();
   });
 
@@ -1529,7 +1519,7 @@ describe("CreativeDiscussionPanel", () => {
     const onCommand = vi.fn<(_input: StudioCreativeReviewCommandInput) => Promise<void>>()
       .mockRejectedValueOnce(new Error("当前方案已经更新，请查看最新版后重试。"));
     render(<CreativeDiscussionPanel review={review()} busy={false} onCommand={onCommand} />);
-    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    const composer = screen.getByPlaceholderText(/描述你想保留或修改的内容/);
     await userEvent.type(composer, "保留这段输入");
     await userEvent.click(screen.getByRole("button", { name: "只讨论" }));
 
@@ -1623,7 +1613,7 @@ describe("CreativeDiscussionPanel", () => {
       },
     })} busy={false} onCommand={onCommand} />);
 
-    const composer = screen.getByPlaceholderText(/为什么这样开场/) as HTMLTextAreaElement;
+    const composer = screen.getByPlaceholderText(/描述你想保留或修改的内容/) as HTMLTextAreaElement;
     await userEvent.type(composer, "先保留我原来的开场。\n");
     expect(screen.getByText("第二镜等得太久")).toBeInTheDocument();
     expect(screen.getByText("观众等八秒才看到新变化。")).toBeInTheDocument();

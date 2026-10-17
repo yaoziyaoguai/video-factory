@@ -37,7 +37,6 @@ it("presents script source summaries, positions and durations while retaining se
 });
 
 it.each([
-  { stage: "treatment" as const, value: { progression: [{ beatId: "beat", purpose: "提出问题", viewerGain: "理解问题", narration: "不属于构思导航的旁白", duration: 9 }] }, button: "阅读内容推进 1" },
   { stage: "director" as const, value: { shots: [{ scenePosition: 4, visibleAction: "人物推开窗户", narration: "不属于导演导航的旁白", duration: 9 }] }, button: "阅读镜头 4" },
 ])("retains the existing number-only $stage navigation", ({ stage, value, button }) => {
   render(<CreativeDraftReader stage={stage} value={value} />);

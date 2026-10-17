@@ -7,7 +7,6 @@ import type {
   StudioOpportunityStatus,
 } from "../shared/api.js";
 import { canonicalizeSourceUrl, manualSupplementEvidence } from "../shared/api.js";
-import { planVisualDirection } from "../shared/visual-plan.js";
 import {
   OpportunityStoreConflictError,
   OpportunityStoreNotFoundError,
@@ -52,11 +51,6 @@ export class OpportunityStudio {
       ...input.scores,
     });
     try {
-      const visualPlan = input.visualPlan ?? planVisualDirection({
-        title: input.title,
-        hook: input.hook,
-        ...(input.category ? { category: input.category } : {}),
-      });
       return toOpportunity(await this.options.opportunities.create({
         title: input.title,
         ...(input.adoptedCandidateGenerationId ? { adoptedCandidateGenerationId: input.adoptedCandidateGenerationId } : {}),
@@ -83,7 +77,7 @@ export class OpportunityStudio {
         ...(input.articleSources?.length ? { articleSources: structuredClone(input.articleSources) } : {}),
         ...(input.articleFacts?.length ? { articleFacts: structuredClone(input.articleFacts) } : {}),
         ...(input.articleUncertainties?.length ? { articleUncertainties: [...input.articleUncertainties] } : {}),
-        visualPlan,
+        ...(input.visualPlan ? { visualPlan: structuredClone(input.visualPlan) } : {}),
       }));
     } catch (error) {
       if (error instanceof OpportunityStoreConflictError) throw new StudioConflictError(error.message);
@@ -140,11 +134,6 @@ function canonicalEvidenceKey(evidenceUrl: string | undefined): string {
 }
 
 function toOpportunity(record: OpportunityRecord): StudioOpportunity {
-  const visualPlan = record.visualPlan ?? planVisualDirection({
-    title: record.title,
-    hook: record.candidate.hook,
-    ...(record.category ? { category: record.category } : {}),
-  });
   return {
     id: record.candidate.id,
     ...(record.adoptedCandidateGenerationId ? { adoptedCandidateGenerationId: record.adoptedCandidateGenerationId } : {}),
@@ -182,6 +171,6 @@ function toOpportunity(record: OpportunityRecord): StudioOpportunity {
     ...(record.verification ? { verification: structuredClone(record.verification) } : {}),
     ...(record.editorialDecision ? { editorialDecision: structuredClone(record.editorialDecision) } : {}),
     ...(record.visualProof ? { visualProof: record.visualProof } : {}),
-    visualPlan: structuredClone(visualPlan),
+    ...(record.visualPlan ? { visualPlan: structuredClone(record.visualPlan) } : {}),
   };
 }

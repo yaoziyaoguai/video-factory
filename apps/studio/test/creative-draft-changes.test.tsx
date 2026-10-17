@@ -50,15 +50,14 @@ describe("reliable draft comparisons", () => {
     expect(screen.getByText("新画面")).toBeVisible();
   });
 
-  it("compares treatment by beatId and includes changed global requirements", async () => {
-    render(<CreativeDraftChanges stage="treatment" previous={{ viewerPromise: "原目标", progression: [{ beatId: "a", purpose: "铺垫", viewerGain: "旧收获" }] }}
-      current={{ viewerPromise: "新目标", progression: [{ beatId: "a", purpose: "铺垫", viewerGain: "新收获" }, { beatId: "b", purpose: "回收" }] }} />);
-    expect(screen.getByText("修改 1 项 · 新增 1 项 · 整体要求变化 1 项")).toBeInTheDocument();
+  it("compares free-form treatment without requiring segment identities", async () => {
+    render(<CreativeDraftChanges stage="treatment" previous={{ concept: "原构思" }} current={{ concept: "新构思，保留开放结尾。" }} />);
+    expect(screen.getByText("整体内容变化 1 项")).toBeInTheDocument();
+    expect(screen.queryByText(/缺少可核对的段落身份/)).not.toBeInTheDocument();
     await userEvent.click(screen.getByText("只看改动"));
-    expect(screen.getByText("新目标")).toBeVisible();
-    expect(screen.getByText("观众收获")).toBeVisible();
-    expect(screen.getByText("旧收获")).toBeVisible();
-    expect(screen.getByText("新收获")).toBeVisible();
+    expect(screen.getByText("构思正文")).toBeVisible();
+    expect(screen.getByText("原构思")).toBeVisible();
+    expect(screen.getByText("新构思，保留开放结尾。")).toBeVisible();
   });
 
   it("does not report key order as a change, but recomputes for later versions and undo", async () => {

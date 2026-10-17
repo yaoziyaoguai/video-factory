@@ -275,7 +275,7 @@ body { background: var(--canvas); color: var(--ink); }
   .studio-v3 .content-shell { min-height: calc(100dvh - 160px); }
   .studio-masthead { inset: auto 0 0; width: auto; height: auto; padding: 0; border: 0; background: transparent; }
   .studio-masthead > .brand, .studio-masthead .studio-status { display: none; }
-  .studio-masthead .primary-nav { display: grid; width: 100%; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 2px; margin: 0; padding: 5px 6px calc(6px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: var(--paper); }
+  .studio-masthead .primary-nav { display: grid; width: 100%; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 2px; margin: 0; padding: 5px 6px calc(6px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: var(--paper); }
   .studio-masthead .primary-nav a { min-height: 58px; gap: 4px; padding: 6px 1px; font-size: 10px; line-height: 18px; border-radius: 9px; }
   .studio-masthead .primary-nav a svg { width: 19px; height: 19px; }
   .studio-nav-marker { border-radius: 9px; }

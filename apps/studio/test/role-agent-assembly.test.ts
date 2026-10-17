@@ -65,10 +65,8 @@ class ControlledCodexClient extends CodexBridgeClient {
 }
 
 const CREATIVE_DIMENSION_EVIDENCE: Record<string, string> = {
-  attention: "前两秒给出具体动作，不靠口号开场。",
-  progression: "三段之间有可辨认的推进。",
-  payoff: "结尾兑现了观众承诺。",
-  expression: "画面要求在当前素材能力内可落地。",
+  consistency: "内容忠实于用户意图和已确认事实。",
+  expression: "表达清楚，符合当前制作能力。",
 };
 
 const REPORT_DIMENSION_EVIDENCE: Record<string, string> = {
@@ -82,11 +80,11 @@ function scoredDimensions(evidenceByDimension: Record<string, string>, score: nu
   return Object.entries(evidenceByDimension).map(([dimension, evidence]) => ({ dimension, score, evidence }));
 }
 
-// 评估对象与维度集合由宿主按角色决定：创作交付（编剧/导演）评四维创作维度，
+// 评估对象与维度集合由宿主按角色决定：创作交付（编剧/导演）评创作维度，
 // 报告型（视觉审片员）评四维报告维度，两者不能互换。
 const passingAudit = {
   version: "video-factory/role-audit-v2",
-  rubricVersion: "video-factory/role-quality-rubric-v1",
+  rubricVersion: "video-factory/role-quality-rubric-v2",
   verdict: "pass",
   score: 95,
   assessments: [{ targetPath: "", dimensions: scoredDimensions(CREATIVE_DIMENSION_EVIDENCE, 95) }],
@@ -449,7 +447,7 @@ describe("buildRoleAgentAssembly", () => {
   it("keeps assembled producer revisions isolated from prior model history", async () => {
     const repairAudit = {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       verdict: "repair",
       score: 70,
       assessments: [{ targetPath: "", dimensions: scoredDimensions(CREATIVE_DIMENSION_EVIDENCE, 70) }],

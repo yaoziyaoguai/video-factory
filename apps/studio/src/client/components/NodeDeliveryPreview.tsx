@@ -15,7 +15,6 @@ const PRIMARY_FIELDS: Record<string, string[]> = {
   brief: ["title", "angle", "audience"],
   script: ["title", "hook", "structure", "duration_target", "disclosure_required", "platform_notes"],
   "reference-grammar": ["summary", "durationMs", "pacing", "composition", "camera", "color", "transitions", "sound", "confidence"],
-  "visual-direction": ["resolvedProfileId", "profileRationale", "requestedProfileId"],
   "asset-candidates": [],
   "asset-semantic-rank": ["summary", "fallbackReason"],
   assets: [],
@@ -66,9 +65,6 @@ const FIELD_LABELS: Record<string, string> = {
   structure: "叙事结构",
   disclosure_required: "AI 标识",
   platform_notes: "平台提示",
-  resolvedProfileId: "导演风格",
-  requestedProfileId: "指定风格",
-  profileRationale: "选择理由",
   job_id: "任务编号",
   created_at: "生成时间",
   director_plan_version: "导演方案版本",
@@ -157,8 +153,6 @@ const FIELD_LABELS: Record<string, string> = {
   sound_cue: "声音提示",
   success_criteria: "成功条件",
   failure_conditions: "失败条件",
-  viewerPromise: "观众承诺",
-  narrativeArc: "叙事弧线",
   canonFacts: "拟写入系列正史的事实",
   review: "本轮审片结论",
   fallbackReason: "智能排序未完成的原因",
@@ -629,7 +623,6 @@ function formatScalar(value: unknown, key?: string): string {
   if (key === "visual_strategy" && typeof value === "string") return ({ stock: "实拍视频素材", image: "图片素材", local: "本地编辑画面", generated: "AI 生成画面", screen: "屏幕录制", creator: "创作者素材" } as Record<string, string>)[value] ?? value;
   if (key === "authenticityPolicy" && typeof value === "string") return ({ evidence: "事实镜头", illustrative: "说明镜头", expressive: "表现镜头" } as Record<string, string>)[value] ?? value;
   if (key === "mastering_preset" && typeof value === "string") return ({ natural: "自然", intimate: "亲近", social: "社交清晰" } as Record<string, string>)[value] ?? value;
-  if ((key === "requestedProfileId" || key === "resolvedProfileId") && typeof value === "string") return directorProfileLabel(value);
   if (key === "voice" && typeof value === "string") return voiceProfileLabel(value);
   if (key === "narrativeRole" && typeof value === "string") return humanizeNarrativeRole(value);
   if (typeof value === "string" && key && /(?:Path|_path)$/.test(key)) return "已记录文件引用，尚未在此处核验可用性。";
@@ -665,17 +658,6 @@ function humanizeNarrativeRole(value: string): string {
   return replacements.reduce((result, [pattern, replacement]) => result.replace(pattern, replacement), value);
 }
 
-function directorProfileLabel(value: string): string {
-  return ({
-    auto: "自动匹配",
-    "documentary-observer": "纪实观察",
-    "quiet-humanism": "静默人文",
-    "urban-poetic": "都市诗意",
-    "chromatic-storytelling": "色彩叙事",
-    "geometric-control": "几何秩序",
-    "suspense-staging": "悬念调度",
-  } as Record<string, string>)[value] ?? value;
-}
 
 function voiceProfileLabel(value: string): string {
   const labels = {

@@ -43,7 +43,7 @@ function grammar(camera: string): Record<string, unknown> {
 function validAudit(verdict: "pass" | "repair", score: number, issues: Array<Record<string, unknown>> = []): Record<string, unknown> {
   return {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v1",
+    rubricVersion: "video-factory/role-quality-rubric-v2",
     assessments: [{
       targetPath: "",
       dimensions: [
@@ -183,7 +183,7 @@ describe("CodexReferenceGrammarAgent", () => {
         const auditScore = analysisAttempt === 1 ? 61 : 93;
         return { output: {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v1",
+          rubricVersion: "video-factory/role-quality-rubric-v2",
           assessments: [{
             targetPath: "",
             dimensions: [
@@ -301,7 +301,7 @@ describe("CodexReferenceGrammarAgent", () => {
 function passingAudit() {
   return {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v1",
+    rubricVersion: "video-factory/role-quality-rubric-v2",
     assessments: [{
       targetPath: "",
       dimensions: [

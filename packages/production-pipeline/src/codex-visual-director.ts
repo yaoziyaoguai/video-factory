@@ -5,7 +5,6 @@ import {
   normalizeVideoGenerationDurationSeconds,
 } from "./generative-asset-worker.js";
 import {
-  VISUAL_DIRECTOR_PROFILES,
   directorCharacterBindings,
   reuseSourceEndFrame,
   validateVisualDirectorPlan,
@@ -37,7 +36,7 @@ export interface CodexVisualDirectorAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_DIRECTOR_TIMEOUT_MS = 660_000;
 const DEFAULT_DIRECTOR_MAX_ATTEMPTS = 2;
-export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v36|role-audit-v9|director-validator-v7|visual-plan-v2|production-capabilities-v5|voice-timing-v1|planning-disposition-v1|article-sources-v1|audit-capabilities-once-v1|director-plan-v2|native-av-v1";
+export const VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION = "director-v37|role-audit-v9|director-validator-v8|production-capabilities-v5|voice-timing-v1|planning-disposition-v1|article-sources-v1|audit-capabilities-once-v1|director-plan-v2|native-av-v1";
 
 // id 保持 api-visual-director-v1：历史 run 的 brief 持久化了该 id，ProductionPipeline.createRegistry 按 id 匹配 provider。
 export class CodexVisualDirectorAgent implements VisualDirectorAgent {
@@ -82,7 +81,6 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
       ...directorInput
     } = input;
     const rawPlan = await this.client.runTask("director-plan", {
-      directorProfiles: VISUAL_DIRECTOR_PROFILES,
       ...directorInputForModel(directorInput),
     }, undefined, requestOptionsForDeadline(wallClockDeadlineAtMs));
     return validateDirectorCandidate(rawPlan, input);
@@ -101,7 +99,6 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
     } = input;
     const normalizedDirectorInput = directorInputForModel(directorInput);
     const basePayload = {
-      directorProfiles: VISUAL_DIRECTOR_PROFILES,
       ...normalizedDirectorInput,
     };
     const auditClient = this.auditClient ?? this.client;
@@ -110,7 +107,7 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
       planningRole: planningMode === true,
       contractVersion: VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION,
       criteria: [
-        "视觉圣经和逐镜职责兑现已接受构思与脚本承诺；首镜有明确注意对象，相邻镜头在信息、动作或情绪上形成可说明的推进。只换风格、机位或漂亮素材而无新增作用时，定位到具体镜头。",
+        "画面安排符合已采用内容和用户意图；表达、节奏和风格由本片内容决定，不套固定叙事结构。",
         "Shot Spec、temporalBeats、Provider、deliveryType、提示词与成功条件彼此一致且可执行；静态不假装动态。",
         "sourceInSeconds、母片覆盖、复用与参考图关系有效，实际使用区间完整兑现；多余生成尾部不改变成片时间轴。",
         "真正的跨镜身份与因果要求有执行依据，独立生成和免责声明不能伪装保证；否定句中的词语不构成肯定要求。",
@@ -461,11 +458,9 @@ function visualDirectorAuditContext(
       : {}),
     ...(reworkBaseline ? { previousDirectorPlan: reworkBaseline } : {}),
   } : undefined;
-  const selectedDirectorProfile = VISUAL_DIRECTOR_PROFILES.find(({ id }) => id === candidate.resolvedProfileId);
-  if (!selectedDirectorProfile) throw new Error(`Director profile '${candidate.resolvedProfileId}' is unavailable.`);
   return {
     roleScope: {
-      owns: ["requestedProfileId", "resolvedProfileId", "profileRationale", "visualBible", "shots"],
+      owns: ["visualBible", "shots"],
       doesNotOwn: ["素材实际下载结果", "生成模型最终画面", "配音成品", "渲染与审片结果"],
     },
     upstreamFacts: {
@@ -477,13 +472,9 @@ function visualDirectorAuditContext(
         audience: brief.audience,
         platform: brief.platform,
         ...durationIntentFor(brief),
-        ...(brief.viewerPromise ? { viewerPromise: brief.viewerPromise } : {}),
-        ...(brief.narrativeArc ? { narrativeArc: brief.narrativeArc } : {}),
-        requestedProfileId: brief.requestedProfileId,
         ...(brief.editorial ? { editorial: brief.editorial } : {}),
         ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
         ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
-        ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
         ...(brief.creativeTreatment ? { creativeTreatment: brief.creativeTreatment } : {}),
         ...(brief.planningIssues ? { planningIssues: brief.planningIssues } : {}),
         ...(brief.articleSources?.length ? { articleSources: brief.articleSources } : {}),
@@ -514,9 +505,7 @@ function visualDirectorAuditContext(
             arc: series.arc,
             episode: {
               pillar: series.episode.pillar,
-              viewerPromise: series.episode.viewerPromise,
-              hook: series.episode.hook,
-              payoff: series.episode.payoff,
+              concept: series.episode.concept,
             },
             bible: series.bible,
             canon: {
@@ -544,8 +533,6 @@ function visualDirectorAuditContext(
     currentRoleContract: {
       ...(brief.durationPolicy ? { durationPolicy: brief.durationPolicy } : {}),
       ...(brief.durationRange ? { durationRange: { ...brief.durationRange } } : {}),
-      availableDirectorProfileIds: VISUAL_DIRECTOR_PROFILES.map(({ id }) => id),
-      selectedDirectorProfile,
       assetReuse: {
         querySyntax: "REUSE_ONLY scene N",
         execution: "下游素材执行器直接复用已解析的更早镜头母片，不会重新搜索、生成或计费。",
@@ -652,7 +639,6 @@ function validationFor(input: VisualDirectorAgentInput): VisualDirectorPlanValid
     presentationMode: input.brief.presentationMode ?? "narration",
     ...(input.brief.presentationMode === "character_drama" ? { characterSceneBindings: directorCharacterBindings(input.scenes) } : {}),
     scenePositions: input.scenes.map((scene) => scene.position),
-    ...(input.brief.viewerPromise ? { viewerPromise: input.brief.viewerPromise } : {}),
     sceneDurations: Object.fromEntries(input.scenes.map((scene) => [scene.position, scene.duration])),
     sceneVisualStrategies: Object.fromEntries(input.scenes.map((scene) => [scene.position, scene.visualStrategy])),
     allowedProviderIds: input.assetProviders.map((provider) => provider.id),

@@ -527,7 +527,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
       commandId: crypto.randomUUID(),
       ...commandBase,
       message: text,
-      ...(selectedIds.length ? { selection: creativeSelection(review.stage, selectedIds) } : {}),
+      ...(selectedIds.length ? { selection: creativeSelection(selectedIds) } : {}),
     }, true).catch(() => undefined);
   }
 
@@ -739,12 +739,12 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
             <ul>{qualityAdvisories.map((issue, index) => <li key={index}>镜头 {issue.scenePositions.join("、")}：{issue.reason}</li>)}</ul>
             <p>接受不会改分、不会伪装成已核验，也不增加费用授权。你仍可以先讨论调整方案。</p>
           </section> : null}
-          <details className="creative-selection-disclosure"><summary>指定讨论范围{selectedIds.length > 0 ? ` · 已选 ${selectedIds.length} 项` : "（可选）"}</summary><CreativeSelection
+          {selectionOptions(review.stage, review.draft).length > 0 ? <details className="creative-selection-disclosure"><summary>指定讨论范围{selectedIds.length > 0 ? ` · 已选 ${selectedIds.length} 项` : "（可选）"}</summary><CreativeSelection
             stage={review.stage}
             draft={review.draft}
             selectedIds={selectedIds}
             onChange={setSelectedIds}
-          /></details>
+          /></details> : null}
           <div className="creative-secondary-decisions">
             {review.previousDraft !== undefined ? <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || hasUnsavedEdits || !review.allowedActions.includes("undo_draft")} onClick={() => void submit({ action: "undo_draft", commandId: crypto.randomUUID(), ...commandBase }).catch(() => undefined)}><RotateCcw aria-hidden="true" size={16} />撤销本轮修改</button> : null}
             <button type="button" className="button button-ghost" disabled={busy || hasUnresolvedOperation || currentAuditPending || hasUnsavedEdits || !review.allowedActions.includes("audit_current")} onClick={auditCurrent}>{review.checkResult ? "重新审计当前版本（会调用模型）" : "审计当前版本（会调用模型）"}</button>
@@ -835,7 +835,7 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
           </section> : null}
           <label className="creative-composer">
             <span>讨论与修改</span>
-            <textarea ref={composerRef} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="例如：为什么这样开场？或者：把开头改得更直接一些。" />
+            <textarea ref={composerRef} value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="描述你想保留或修改的内容，也可以先讨论。" />
             <small>只讨论不改稿；发送修订意见才会修改。Ctrl + Enter 只讨论。</small>
           </label>
           {hasUnresolvedOperation ? <p className="creative-composer-pending" role="status">
@@ -960,16 +960,16 @@ function CreativeSelection({ stage, draft, selectedIds, onChange }: {
 
 function selectionOptions(stage: StudioCreativeReviewSnapshot["stage"], draft: unknown): Array<{ id: string; label: string }> {
   if (!isRecord(draft)) return [];
-  if (stage === "treatment") return Array.isArray(draft.progression) ? draft.progression.flatMap((item, index) => isRecord(item) ? [{ id: String(item.beatId ?? `beat-${index + 1}`), label: `内容推进 ${index + 1}：${String(item.purpose ?? "")}` }] : []) : [];
+  if (stage === "treatment") return [];
   if (stage === "script") return Array.isArray(draft.scenes) ? draft.scenes.flatMap((item, index) => isRecord(item) ? [{ id: String(item.id ?? `scene-${index + 1}`), label: `第 ${Number(item.position ?? index + 1)} 段` }] : []) : [];
   return Array.isArray(draft.shots) ? draft.shots.flatMap((item, index) => isRecord(item) ? [{ id: `scene-${Number(item.scenePosition ?? index + 1)}`, label: `镜头 ${Number(item.scenePosition ?? index + 1)}` }] : []) : [];
 }
 
-function creativeSelection(stage: StudioCreativeReviewSnapshot["stage"], ids: string[]) {
+function creativeSelection(ids: string[]) {
   return {
-    kind: stage === "treatment" ? "beat" as const : "scene" as const,
+    kind: "scene" as const,
     ids,
-    scenePositions: stage === "treatment" ? [] : ids.map((id) => Number(id.replace(/^scene-/, ""))).filter(Number.isInteger),
+    scenePositions: ids.map((id) => Number(id.replace(/^scene-/, ""))).filter(Number.isInteger),
   };
 }
 
@@ -1098,8 +1098,6 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
     {/* 收起时不渲染字段：可读稿和编辑器里会出现相同文字，展开才挂载避免同一屏两份同文。 */}
     {open ? <>
       <p className="creative-edit-state" role="status">{stale ? "当前方案已更新。你的未保存文字仍在下方，可先复制留存；请放弃旧稿修改、重新读取当前版本后再编辑。旧稿不能覆盖新稿。" : saving ? "正在保存修订，等待服务端确认…" : saveState === "failed" ? "保存未完成，输入仍保留。请查看错误后重试。" : dirty ? "修改尚未生效；保存后会形成未审新稿，等你决定是否审计或采用。" : saveState === "saved" ? "修订已保存。请核对当前稿，再决定是否审计或采用。" : "可直接修改文字。保存不会自动审计、采用或购买素材。"}</p>
-      {stage === "director" && isRecord(draft.visualBible) && typeof draft.visualBible.viewerPromise === "string"
-        ? <p>观众承诺来自已采用的脚本，保存会沿用「{draft.visualBible.viewerPromise}」。如需更改，请返回脚本。</p> : null}
       {evidenceRepairs.length > 0 ? <fieldset className="creative-evidence-repairs">
         <legend>素材安排待补齐</legend>
         <p>以下素材安排还没选择画面服务；选择不会调用外部服务、不报价、不签费用，保存后形成未审新稿。</p>
@@ -1149,11 +1147,7 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
             if (!edited || stale || saving || busy) return;
             setSaving(true);
             try {
-              // 兼容旧编辑器恢复的本地草稿：只提交本阶段可改字段，不偷改上游已采用承诺。
-              const document = stage === "director" && isRecord(draft.visualBible) && isRecord(edited.document.visualBible)
-                ? { ...edited.document, visualBible: { ...edited.document.visualBible, viewerPromise: draft.visualBible.viewerPromise } }
-                : edited.document;
-              await onSave(document); setEdited(null); setSaveState("saved");
+              await onSave(edited.document); setEdited(null); setSaveState("saved");
             }
             catch { setSaveState("failed"); }
             finally { setSaving(false); }
@@ -1188,47 +1182,12 @@ function editableTextFields(stage: StudioCreativeReviewSnapshot["stage"], draft:
     if (raw === undefined || raw === null) return null;
     return { key, label, value: String(raw), apply: (next, value) => { set(next, value); return next; } };
   };
-  const list = (key: string, label: string, field: string): EditableTextField | null => {
-    const items = draft[field];
-    if (!Array.isArray(items) || items.length === 0) return null;
-    return {
-      key,
-      label,
-      value: items.map((item) => String(item)).join("\n"),
-      apply: (next, value) => { next[field] = value.split("\n").map((line) => line.trim()).filter(Boolean); return next; },
-    };
-  };
   if (stage === "treatment") {
-    const fields: EditableTextField[] = [];
-    const viewer = text("viewerPromise", "观众看完能得到什么", (d) => d.viewerPromise, (d, v) => { d.viewerPromise = v; });
-    if (viewer) fields.push(viewer);
-    if (isRecord(draft.hook)) {
-      for (const [field, fieldLabel] of [["narrationIntent", "开头的叙述意图"], ["visualIntent", "开头的画面意图"]] as const) {
-        if (draft.hook[field] === undefined || draft.hook[field] === null) continue;
-        fields.push({
-          key: `hook.${field}`,
-          label: fieldLabel,
-          value: String(draft.hook[field]),
-          apply: (next, value) => { next.hook = { ...(next.hook as Record<string, unknown>), [field]: value }; return next; },
-        });
-      }
-    }
-    fields.push(...collectionTextFields(draft, "progression", "内容推进", [
-      ["purpose", "这一段的作用"],
-      ["viewerGain", "观众得到什么"],
-    ], (item) => String(item.beatId ?? "")));
-    const payoff = text("payoff", "结尾兑现", (d) => d.payoff, (d, v) => { d.payoff = v; });
-    if (payoff) fields.push(payoff);
-    const principles = list("visualPrinciples", "视觉方向（每行一条）", "visualPrinciples");
-    if (principles) fields.push(principles);
-    const sound = list("soundPrinciples", "声音方向（每行一条）", "soundPrinciples");
-    if (sound) fields.push(sound);
-    return fields;
+    const concept = text("concept", "构思正文", (d) => d.concept, (d, v) => { d.concept = v; });
+    return concept ? [concept] : [];
   }
   if (stage === "script") {
     const fields: EditableTextField[] = [];
-    const arc = text("narrativeArc", "叙事推进", (d) => d.narrativeArc, (d, v) => { d.narrativeArc = v; });
-    if (arc) fields.push(arc);
     fields.push(...collectionTextFields(draft, "scenes", "分镜", [
       ["narration", "旁白"],
       ["visual_prompt", "画面描述"],

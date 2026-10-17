@@ -1,7 +1,6 @@
 import { Clapperboard, LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { studioApi } from "../api.js";
-import { STUDIO_DIRECTOR_PROFILES } from "../../shared/director-profiles.js";
 import { providerLabel } from "../presentation.js";
 
 interface DirectorPlanPanelProps {
@@ -9,8 +8,6 @@ interface DirectorPlanPanelProps {
 }
 
 interface DirectorPlanView {
-  resolvedProfileId: string;
-  profileRationale: string;
   visualBible: {
     narrativeApproach: string;
     pacing: string;
@@ -49,14 +46,11 @@ export function DirectorPlanPanel({ contentUrl }: DirectorPlanPanelProps) {
   if (error) return <p className="director-plan-error">{error}</p>;
   if (!plan) return <div className="director-plan-loading"><LoaderCircle aria-hidden="true" size={15} />正在读取导演方案...</div>;
 
-  const profile = STUDIO_DIRECTOR_PROFILES.find((item) => item.id === plan.resolvedProfileId);
   return (
     <section className="director-plan-panel" aria-label="导演方案">
       <header>
         <span><Clapperboard aria-hidden="true" size={16} />导演手记</span>
-        <strong>{profile?.label ?? plan.resolvedProfileId}</strong>
       </header>
-      <p>{plan.profileRationale}</p>
       <dl className="visual-bible-grid">
         <div><dt>叙事</dt><dd>{plan.visualBible.narrativeApproach}</dd></div>
         <div><dt>节奏</dt><dd>{plan.visualBible.pacing}</dd></div>
@@ -89,7 +83,7 @@ function creatorProviderLabel(providerId: string): string {
 function parseDirectorPlan(value: unknown): DirectorPlanView {
   if (!value || typeof value !== "object") throw new Error("invalid director plan");
   const plan = value as DirectorPlanView;
-  if (!plan.visualBible || !Array.isArray(plan.shots) || typeof plan.resolvedProfileId !== "string") {
+  if (!plan.visualBible || !Array.isArray(plan.shots)) {
     throw new Error("invalid director plan");
   }
   return plan;

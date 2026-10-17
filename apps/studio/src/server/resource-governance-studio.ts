@@ -11,7 +11,6 @@ import type {
   StudioResourceManifest,
   StudioResourceManifestItem,
   StudioResourceReviewInput,
-  StudioTemplateExperimentScorecard,
   StudioVoiceVersionInfo,
 } from "../shared/api.js";
 import { StudioInputError } from "../shared/api.js";
@@ -32,11 +31,6 @@ export interface RejectedVisualResource {
   scenePosition?: number;
 }
 
-interface ExperimentTemplate {
-  id: string;
-  name: string;
-}
-
 export class ResourceGovernanceStudio {
   private readonly reviews: ResourceReviewStore;
   private readonly withRunLease: <T>(runId: string, action: () => Promise<T>) => Promise<T>;
@@ -46,7 +40,6 @@ export class ResourceGovernanceStudio {
     private readonly listRuns: () => Promise<WorkflowRun<ProductionBrief>[]>,
     private readonly now: () => Date = () => new Date(),
     withRunLease?: <T>(runId: string, action: () => Promise<T>) => Promise<T>,
-    private readonly listPublishedTemplates: () => Promise<readonly ExperimentTemplate[]> = async () => [],
   ) {
     this.reviews = new ResourceReviewStore(path.join(workspaceRoot, "resource-governance", "reviews.json"));
     this.withRunLease = withRunLease ?? (async <T>(_runId: string, action: () => Promise<T>) => action());
@@ -183,56 +176,6 @@ export class ResourceGovernanceStudio {
     return hasMeteredExecution(run) ? reconstructManifestItems(run) : undefined;
   }
 
-  async templateExperiments(): Promise<StudioTemplateExperimentScorecard[]> {
-    const [runs, templates] = await Promise.all([this.listRuns(), this.listPublishedTemplates()]);
-    return templates.map(({ id: templateId, name: templateName }) => {
-      const samples = runs.filter((run) =>
-        run.initialInput.runPurpose !== "test"
-        && run.initialInput.templateSnapshot?.templateId === templateId);
-      const completed = samples.filter((run) => run.nodeRuns.some((node) =>
-        node.nodeId === "render" && node.status === "succeeded" && node.outputState?.stale !== true));
-      const finalReviewOutcomes = samples.flatMap((run) => {
-        const outcome = currentFinalReviewOutcome(run);
-        return outcome ? [outcome] : [];
-      });
-      const approved = finalReviewOutcomes.filter((outcome) => outcome === "approved").length;
-      const manualEditCount = samples.reduce((total, run) => total + run.nodeRuns.reduce((nodeTotal, node) => {
-        const inputEdits = node.inputState?.versions.filter((version) => version.source === "human").length ?? 0;
-        const outputEdits = node.outputState?.versions.filter((version) => version.source === "human").length ?? 0;
-        return nodeTotal + inputEdits + outputEdits;
-      }, 0), 0);
-      const visualScores = samples.flatMap((run) => run.nodeRuns.flatMap((node) => {
-        if (node.nodeId !== "visual-review" || node.status !== "succeeded" || node.outputState?.stale === true || !isRecord(node.output)) return [];
-        const report = isRecord(node.output.report) ? node.output.report : node.output;
-        if (!isRecord(report.scores)) return [];
-        const composition = finiteNumber(report.scores.composition);
-        const continuity = finiteNumber(report.scores.continuity);
-        return composition === undefined || continuity === undefined ? [] : [(composition + continuity) / 2];
-      }));
-      const soundChecks = samples.flatMap((run) => run.nodeRuns.flatMap((node) => {
-        if (node.nodeId !== "technical-review" || node.status !== "succeeded" || node.outputState?.stale === true || !isRecord(node.output)) return [];
-        return typeof node.output.passed === "boolean" ? [node.output.passed ? 100 : 0] : [];
-      }));
-      return {
-        templateId,
-        templateName,
-        sampleSize: samples.length,
-        metrics: {
-          hookClarity: null,
-          narrativeCompleteness: samples.length ? percent(completed.length, samples.length) : null,
-          visualMatch: visualScores.length ? roundScore(average(visualScores)) : null,
-          soundQuality: soundChecks.length ? roundScore(average(soundChecks)) : null,
-          costEfficiency: null,
-          manualEditCount,
-          finalApprovalRate: finalReviewOutcomes.length ? percent(approved, finalReviewOutcomes.length) : null,
-        },
-        note: samples.length
-          ? "只展示可由运行证据计算的指标；钩子清晰度需后续接入独立人工评分，当前不编造分数。"
-          : "尚无使用该模板完成的样本；首次成片后开始累计，不修改已发布模板版本。",
-      };
-    });
-  }
-
   private async readManifest(uri: string, runId: string): Promise<StoredManifest> {
     const [workspaceRoot, target] = await Promise.all([realpath(this.workspaceRoot), realpath(uri)]);
     const relative = path.relative(workspaceRoot, target);
@@ -305,20 +248,6 @@ function uniqueReviewRepresentatives(items: StudioResourceManifestItem[]): Studi
     if (!representatives.has(key)) representatives.set(key, item);
   }
   return [...representatives.values()];
-}
-
-function currentFinalReviewOutcome(run: WorkflowRun<ProductionBrief>): "approved" | "rejected" | undefined {
-  const finalReview = run.nodeRuns.find((node) => node.nodeId === "final-review");
-  if (!finalReview || finalReview.outputState?.stale === true) return undefined;
-  const interventionId = finalReview.intervention?.id
-    ?? [...run.interventions].reverse().find((intervention) => intervention.nodeId === "final-review")?.id;
-  if (!interventionId) return undefined;
-  const decision = [...run.decisions].reverse().find((candidate) =>
-    candidate.interventionId === interventionId
-    && (candidate.action === "approve" || candidate.action === "reject"));
-  if (decision?.action === "approve" && finalReview.status === "succeeded") return "approved";
-  if (decision?.action === "reject" && finalReview.status === "rejected") return "rejected";
-  return undefined;
 }
 
 function hasMeteredExecution(run: WorkflowRun<ProductionBrief>): boolean {
@@ -757,16 +686,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function average(values: number[]): number {
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function percent(numerator: number, denominator: number): number {
-  return roundScore((numerator / denominator) * 100);
-}
-
-function roundScore(value: number): number {
-  return Math.round(value * 10) / 10;
 }

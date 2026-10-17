@@ -8,7 +8,7 @@ import type { StudioCandidateInboxItem, StudioSeries } from "../src/shared/api.j
 const episode: StudioSeries["episodes"][number] = {
   id: "series-advice-episode-2", seriesId: "series-advice", episodeNumber: 2,
   seasonNumber: 1, arc: "回答真实难题", pillar: "复盘", title: "第二集验证边界",
-  viewerPromise: "看到上一集方法的适用范围", hook: "从例外开始", payoff: "给出可验证的边界",
+  concept: "看到上一集方法的适用范围",
   previousEpisodeId: "series-advice-episode-1", canonBaseRevision: 1, status: "planned",
   continuity: { inheritedFromPrevious: ["前集结论已修改"], fromPrevious: ["验证新结论"], toNext: [], canonChecks: [] },
   planning: {
@@ -36,7 +36,7 @@ function renderSeries(blockedByPrevious: boolean, planning = episode.planning) {
     seriesId: series.id, seriesName: series.name, episodeNumber: 2,
     seriesSequence: blockedByPrevious ? { status: "blocked", blockedByEpisodeNumber: 1 } : { status: "ready" },
     title: episode.title, platform: "douyin", track: "daily", audience: series.audience,
-    painPoint: episode.viewerPromise, hook: episode.hook, rationale: "验证方法的边界", providerId: "test-planner", generatedAt: episode.createdAt, evidence: [],
+    painPoint: episode.concept, hook: episode.concept, rationale: "验证方法的边界", providerId: "test-planner", generatedAt: episode.createdAt, evidence: [],
     score: { audienceReach: 80, visualFeasibility: 80, productionCostEfficiency: 80, novelty: 80, monetization: 60, seriesPotential: 80, complianceRisk: 10, final: 78 },
   };
   const onAdopt = vi.fn(async () => undefined);

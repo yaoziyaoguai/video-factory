@@ -42,7 +42,7 @@ function productionBrief(): ProductionBrief {
       technicalReview: "python-technical-review-v1",
     },
     workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1" },
-    director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+    director: {  assetProviderIds: ["local-editorial-v1"] },
     economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
   } as unknown as ProductionBrief;
@@ -321,10 +321,10 @@ describe("document command real socket and killed Studio process", { concurrency
       const output = action === "revise"
         ? ("grammar" in harness ? { ...harness.grammar, summary: "通过细节铺垫并揭示主体。" }
           : { title: "让下班少一个决定", description: "用小动作留点空白。", hashtags: ["下班"] })
-        : { version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+        : { version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
           verdict: "pass", score: 90, summary: "叙事清楚。", issues: [], repairInstructions: [], assessments: [{
             targetPath: "", dimensions: (nodeId === "reference-grammar" ? ["evidence", "coverage", "consistency", "actionability"]
-              : ["attention", "payoff", "expression"]).map((dimension) => ({ dimension, score: 90, evidence: "当前内容支持这一判断。" })),
+              : ["expression", "consistency"]).map((dimension) => ({ dimension, score: 90, evidence: "当前内容支持这一判断。" })),
           }] };
       const bridge = await documentSocket(harness.workspaceRoot, output);
       if (mode === "accepted") bridge.hold();
@@ -518,7 +518,7 @@ describe("reference-grammar document commands", () => {
         runTaskDetailed: async (kind) => {
         calls.push(kind);
         return { output: kind === "reference-grammar" ? { ...harness.grammar, summary: "先铺垫再揭示。" } : {
-          version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+          version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
           verdict: "pass", score: 90, summary: "结构清楚。", issues: [], repairInstructions: [],
           assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"].map(
             (dimension) => ({ dimension, score: 90, evidence: "实际抽帧已送达。" }),
@@ -608,7 +608,7 @@ describe("reference-grammar document commands", () => {
           audits += 1;
           assert.deepEqual(await readFile(input.videoPath), await readFile(harness.videoPath));
           return { audit: {
-            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
             verdict: "pass", score: 90, summary: "画面顺序有依据。", issues: [], repairInstructions: [],
             assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"].map(
               (dimension) => ({ dimension, score: 90, evidence: "关键帧支持描述。" }),
@@ -691,7 +691,7 @@ describe("reference-grammar document commands", () => {
           audits += 1;
           assert.equal(input.grammar.summary, audits <= 2 ? harness.grammar.summary : "用户明确修订后：由特写逐步展开全景。");
           return { audit: {
-            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
             verdict: "pass", score: 90, summary: `报告复核 ${audits}`, issues: [], repairInstructions: [],
             assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"].map(
               (dimension) => ({ dimension, score: 90, evidence: "所见关键帧支持本项描述。" }),
@@ -824,7 +824,7 @@ describe("publish-package document revision and current-version audit", () => {
       documentCopyTools: {
         revise: async (input) => ({ title: input.instruction, description: "下班后留点空白。", hashtags: ["下班"] }),
         auditCurrent: async () => ({ audit: {
-          version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+          version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
           verdict: "pass", score: 90, summary: "内容清楚。", issues: [], repairInstructions: [], assessments: [],
         } }),
       },
@@ -923,9 +923,9 @@ describe("publish-package document revision and current-version audit", () => {
     await store.create(harness.run);
     const pipeline = documentPipeline(harness.workspaceRoot, harness.runRoot);
     const audit: ProductionNodeDocumentAuditDraft["audit"] = {
-      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
       verdict: "pass", score: 90, summary: "标题和实际内容一致", issues: [], repairInstructions: [],
-      assessments: [{ targetPath: "", dimensions: ["attention", "progression", "payoff", "expression"].map(
+      assessments: [{ targetPath: "", dimensions: ["expression", "consistency"].map(
         (dimension) => ({ dimension, score: 90, evidence: "标题兑现了内容承诺" }),
       ) }],
     };
@@ -1019,12 +1019,8 @@ describe("publish-package document revision and current-version audit", () => {
         auditCalls.push(input);
         return { audit: {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v1",
-          assessments: [{ targetPath: "", dimensions: [
-            { dimension: "attention", score: 62, evidence: "标题可以更具体。" },
-            { dimension: "payoff", score: 62, evidence: "收益清楚。" },
-            { dimension: "expression", score: 62, evidence: "表达自然。" },
-          ] }],
+          rubricVersion: "video-factory/role-quality-rubric-v2",
+          assessments: [{ targetPath: "", dimensions: [{ dimension: "consistency", score: 62, evidence: "标题可以更具体。" }, { dimension: "expression", score: 62, evidence: "表达自然。" }] }],
           verdict: "repair",
           score: 62,
           summary: "标题仍未落到具体动作。",

@@ -2,12 +2,11 @@ import { CodexBridgeClient, requestOptionsForDeadline, type CodexTaskExecution }
 import { runRoleAgentLoop, type RoleAgentLoopCheckpoint } from "./role-agent-loop.js";
 import {
   CREATIVE_TREATMENT_TASK_KIND,
-  lockCreativeTreatmentViewerPromise,
   parseCreativeTreatment,
   type CreativeTreatment,
 } from "./creative-treatment.js";
 import { durationIntentFor, validateContentLedDurationIntent, type DurationIntent } from "./executable-timeline.js";
-import type { ProductionSeriesContext, ProductionVisualPlan } from "./contracts.js";
+import type { ProductionSeriesContext } from "./contracts.js";
 import type { ShotGrammar } from "./reference-grammar.js";
 import { summarizeProductionCapabilities, type ProductionCapabilities } from "./production-capabilities.js";
 import { assessTreatmentReadiness, type TreatmentReadiness } from "./treatment-readiness.js";
@@ -34,9 +33,7 @@ export interface CreativeTreatmentSeriesContext {
   episode: {
     pillar: string;
     title: string;
-    viewerPromise: string;
-    hook: string;
-    payoff: string;
+    concept: string;
   };
   bible: ProductionSeriesContext["bible"];
   canon: ProductionSeriesContext["canon"];
@@ -57,9 +54,7 @@ export function creativeTreatmentSeriesContext(
     episode: {
       pillar: context.episode.pillar,
       title: context.episode.title,
-      viewerPromise: context.episode.viewerPromise,
-      hook: context.episode.hook,
-      payoff: context.episode.payoff,
+      concept: context.episode.concept,
     },
     bible: {
       rules: [...context.bible.rules],
@@ -92,8 +87,6 @@ export interface CreativeTreatmentAgentInput {
     nicheSlug: string;
     platform: string;
     budgetIntentionCny?: number;
-    /** 用户或系列已接受的观众承诺；宿主锁定它并覆盖模型输出，没有时接受构思生成值。 */
-    lockedViewerPromise?: string;
     editorial?: {
       verdict: "produce_video" | "produce_image_story";
       reasons: string[];
@@ -103,7 +96,6 @@ export interface CreativeTreatmentAgentInput {
     visualIntent?: string;
     /** 仅限构思角色负责的本轮返工要求；不得携带完整跨角色返工包。 */
     reworkInstruction?: string;
-    visualPlan?: ProductionVisualPlan;
     productionCapabilities?: ProductionCapabilities;
     /** 已确认且与本集创作有关的系列事实；不包含预约和模型运行元数据。 */
     seriesContext?: CreativeTreatmentSeriesContext;
@@ -148,7 +140,7 @@ export interface CodexCreativeTreatmentAgentOptions {
 // 覆盖单并发 broker 中一个在途任务与本任务的执行时间；生产任务在 broker 队列中优先。
 const DEFAULT_TREATMENT_TIMEOUT_MS = 660_000;
 const DEFAULT_TREATMENT_MAX_ATTEMPTS = 2;
-export const CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION = "creative-treatment-v9|role-audit-v9|treatment-validator-v2|production-capabilities-v5|visual-plan-v2|planning-disposition-v1|host-readiness-v2|rework-instruction-v1|series-context-v1|audit-capabilities-once-v1|character-drama-v1|native-av-v1";
+export const CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION = "creative-treatment-v10|role-audit-v9|treatment-validator-v3|production-capabilities-v5|planning-disposition-v1|host-readiness-v2|rework-instruction-v1|series-context-v2|audit-capabilities-once-v1|character-drama-v1|native-av-v1";
 
 // id 固定为 codex-creative-treatment-v1：构思产物登记来源时按该 id 标注。
 export class CodexCreativeTreatmentAgent implements CreativeTreatmentAgent {
@@ -189,7 +181,7 @@ export class CodexCreativeTreatmentAgent implements CreativeTreatmentAgent {
       undefined,
       requestOptionsForDeadline(input.wallClockDeadlineAtMs),
     );
-    return validateTreatmentCandidate(rawTreatment, sourceIds, input);
+    return parseCreativeTreatment(rawTreatment, sourceIds);
   }
 
   async treatDetailed(input: CreativeTreatmentAgentInput): Promise<CodexTaskExecution<CreativeTreatment>> {
@@ -200,11 +192,10 @@ export class CodexCreativeTreatmentAgent implements CreativeTreatmentAgent {
       planningRole: input.planningMode === true,
       contractVersion: CREATIVE_TREATMENT_AGENT_CONTRACT_VERSION,
       criteria: [
-        "观众承诺与用户和系列锁定目标一致；能具体描述开头吸引、观看过程和结尾兑现，而不只是填写hook、progression、payoff标签。",
-        "每段说明观众相对上一段新知道、看到或感到什么；没有新增作用的段落合并，必要停顿与承接保留并说明职责。beatId稳定，段落不机械等同镜头。",
-        "时长遵守本次明确范围，视觉/声音原则与已声明能力相容；普通素材不要求提前下载，但核心制作前提必须有可信获取责任。",
+        "构思回应用户的实际意图，保留明确要求与已确认的系列事实；表达形式由内容决定。",
+        "时长遵守本次明确范围，提出的画面和声音与已声明能力相容；普通素材不要求提前下载，但核心制作前提必须有可信获取责任。",
         "事实来源、机制示意与情绪表达分开；critical、acquisition 与 retrievalProviderId 可信，suppliedSourceIds 只引用已有 id，来源缺口不伪装已证实。",
-        "保质量后优化复用与成本；不以说明卡、无关图库或缩水承诺假装可行。",
+        "保质量后优化复用与成本；不以无关素材或擅改用户要求假装可行。",
         "修订解决既有问题且保留已合格职责；超出本角色可解范围的问题明确指向上游，不盲目循环。",
       ],
       maxIterations: input.creativeReviewExecution ? 1 : this.maxReviewIterations,
@@ -234,7 +225,7 @@ export class CodexCreativeTreatmentAgent implements CreativeTreatmentAgent {
         ...(previousAudit ? { previousAudit } : {}),
         ...(validationFailure ? { validationFailure } : {}),
       }, requestId, undefined, { ...requestOptionsForDeadline(input.wallClockDeadlineAtMs), ...requestOptions }),
-      validate: (value) => validateTreatmentCandidate(value, sourceIds, input),
+      validate: (value) => parseCreativeTreatment(value, sourceIds),
       ...(input.agentLoopCheckpoint ? { checkpoint: input.agentLoopCheckpoint } : {}),
     });
   }
@@ -258,12 +249,10 @@ function treatmentPayload(input: CreativeTreatmentAgentInput): Record<string, un
       platform: brief.platform,
       ...durationIntentFor(brief),
       ...(brief.budgetIntentionCny !== undefined ? { budgetIntentionCny: brief.budgetIntentionCny } : {}),
-      ...(brief.lockedViewerPromise ? { lockedViewerPromise: brief.lockedViewerPromise } : {}),
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
       ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
       ...(brief.reworkInstruction ? { reworkInstruction: brief.reworkInstruction } : {}),
-      ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
       ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
       productionCapabilities: brief.productionCapabilities ?? summarizeProductionCapabilities([]),
     },
@@ -275,17 +264,6 @@ function treatmentPayload(input: CreativeTreatmentAgentInput): Record<string, un
     // 参考语法是风格/结构参考，单独传递并声明性质：不得冒充本片已验证的事实素材。
     ...(input.referenceGrammar ? { referenceGrammar: { ...input.referenceGrammar, evidenceStatus: "style_structure_reference" } } : {}),
   };
-}
-
-function validateTreatmentCandidate(
-  value: unknown,
-  suppliedSourceIds: string[],
-  input: CreativeTreatmentAgentInput,
-): CreativeTreatment {
-  const treatment = parseCreativeTreatment(value, suppliedSourceIds);
-  return input.brief.lockedViewerPromise
-    ? lockCreativeTreatmentViewerPromise(treatment, input.brief.lockedViewerPromise)
-    : treatment;
 }
 
 function validateTreatmentInput(input: CreativeTreatmentAgentInput): string[] {
@@ -306,9 +284,6 @@ function validateTreatmentInput(input: CreativeTreatmentAgentInput): string[] {
         || brief.durationRange.minSeconds > brief.durationRange.maxSeconds)) {
       throw new Error("Creative treatment brief.durationRange must use ordered integer bounds between 20 and 180.");
     }
-  }
-  if (brief.lockedViewerPromise !== undefined && !brief.lockedViewerPromise.trim()) {
-    throw new Error("Creative treatment brief.lockedViewerPromise must be a non-empty string when provided.");
   }
   if (brief.reworkInstruction !== undefined) {
     if (!brief.reworkInstruction.trim()) {
@@ -343,11 +318,8 @@ function treatmentAuditContext(
   const { brief } = input;
   return {
     roleScope: {
-      owns: ["hook", "progression", "payoff", "visualPrinciples", "soundPrinciples", "evidenceRequirements", "feasibilityQuestions"],
+      owns: ["concept", "evidenceRequirements", "feasibilityQuestions"],
       doesNotOwn: ["素材实际下载与生成结果", "逐镜分镜", "配音与渲染成品", "费用与授权"],
-      ...(brief.lockedViewerPromise
-        ? { viewerPromise: "由用户或系列锁定，宿主覆盖模型字段；只审实质一致性，不要求逐字重复" }
-        : { viewerPromise: "无上游承诺时由本任务生成" }),
     },
     upstreamFacts: {
       ...(brief.presentationMode ? { presentationMode: brief.presentationMode } : {}),
@@ -357,12 +329,10 @@ function treatmentAuditContext(
       audience: brief.audience,
       platform: brief.platform,
       ...durationIntentFor(brief),
-      ...(brief.lockedViewerPromise ? { lockedViewerPromise: brief.lockedViewerPromise } : {}),
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
       ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
       ...(brief.reworkInstruction ? { reworkInstruction: brief.reworkInstruction } : {}),
-      ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
       ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
       ...(hostReadiness ? { hostReadiness } : {}),
       ...(input.referenceGrammar
@@ -375,16 +345,14 @@ function treatmentAuditContext(
       })),
     },
     currentRoleContract: {
-      progressionBounds: { min: 1, max: 12 },
-      principleBounds: { min: 1, max: 8 },
       evidenceRequirementValues: ["factual_support", "illustration_only"],
       acquisitionValues: ["supplied", "pipeline_retrievable", "pipeline_generated", "external_required", "not_needed"],
       acquisitionRule: "图库检索用 pipeline_retrievable，AI画面生成用 pipeline_generated；两者均只用于 illustration_only，并以 retrievalProviderId 绑定当前允许的对应能力。可生成不代表已购买或已取得；事实取证不得由生成画面替代。",
       sourceReferenceRule: "suppliedSourceIds 只能引用 suppliedSources 中列出的 sourceId；无来源时保留空数组缺口",
-      treatmentBoundary: "构思输出段落责任，不输出逐镜分镜，不写费用，不声称素材已经获得",
+      treatmentBoundary: "构思以自由文本表达本片想法，不输出逐镜分镜，不写费用，不声称素材已经获得",
       budgetBoundary: "预算意向不是硬上限或付款授权，不得因为尚未批准费用而阻止讨论与规划；质量和事实边界不因降本而降低",
       productionCapabilities: brief.productionCapabilities ?? summarizeProductionCapabilities([]),
     },
-    downstreamBoundary: "只审查构思是否建立可兑现的创作方向；不得要求尚未检索的图库候选、尚未生成的画面或下游费用确认作为当前节点的通过证据。",
+    downstreamBoundary: "只审查构思是否符合用户意图且没有事实与能力冲突；不得要求尚未检索的图库候选、尚未生成的画面或下游费用确认作为当前节点的通过证据。",
   };
 }

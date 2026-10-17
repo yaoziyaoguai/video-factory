@@ -1,4 +1,4 @@
-import { ChartNoAxesCombined, ChevronDown, CircleHelp, Clapperboard, Images, Layers3, LayoutTemplate, LogOut, Moon, Radar, Search, Settings2, Sun, UserRound } from "lucide-react";
+import { ChartNoAxesCombined, ChevronDown, CircleHelp, Clapperboard, Images, Layers3, LogOut, Moon, Radar, Search, Settings2, Sun, UserRound } from "lucide-react";
 import { motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
@@ -12,7 +12,6 @@ const navigation = [
   { to: "/", label: "创作台", icon: Radar },
   { to: "/projects", label: "制作记录", icon: Layers3 },
   { to: "/assets", label: "素材库", icon: Images },
-  { to: "/templates", label: "模板资料", icon: LayoutTemplate },
   { to: "/resources", label: "创作设置", icon: Settings2 },
   { to: "/experiments", label: "制作复盘", icon: ChartNoAxesCombined },
 ] as const;
@@ -31,7 +30,7 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
   const previousPath = useRef(location.pathname);
   const { startFullTour, startPageTour } = useCreatorTour();
   const workspaceLabel = location.pathname.startsWith("/projects/") ? "作品工作区"
-    : ({ "/": "创作台", "/projects": "制作记录", "/assets": "素材库", "/templates": "模板资料", "/resources": "创作设置", "/experiments": "制作复盘", "/topics": "选题与构思", "/cases": "案例与脚本" }[location.pathname] ?? "创作空间");
+    : ({ "/": "创作台", "/projects": "制作记录", "/assets": "素材库", "/resources": "创作设置", "/experiments": "制作复盘", "/topics": "选题与构思", "/cases": "案例与脚本" }[location.pathname] ?? "创作空间");
   useEffect(() => {
     void studioApi.health().then((health) => setHealthy(health.status === "ok")).catch(() => setHealthy(false));
   }, []);
@@ -77,8 +76,8 @@ export function AppShell({ children, username, onLogout }: { children: ReactNode
           <div className="studio-wordmark">VideoFactory<span>影像创作</span></div>
           <div className="studio-workspace-context" aria-label="当前工作区"><span>工作室</span><span aria-hidden="true">/</span><strong>{workspaceLabel}</strong></div>
           <div className="studio-masthead-tools">
-            <button className="studio-search-trigger" type="button" onClick={openSearch} aria-label="搜索项目、选题、模板或功能" title="搜索项目、选题、模板或功能">
-              <Search aria-hidden="true" size={18} /><span>搜索作品、选题或模板…</span><kbd>{navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl"} K</kbd>
+            <button className="studio-search-trigger" type="button" onClick={openSearch} aria-label="搜索项目、选题或功能" title="搜索项目、选题或功能">
+              <Search aria-hidden="true" size={18} /><span>搜索作品、选题…</span><kbd>{navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl"} K</kbd>
             </button>
             <div className="studio-appearance" role="group" aria-label="界面外观">
               <button type="button" aria-label="日光外观" title="日光外观" aria-pressed={appearance === "light"} onClick={() => setAppearance("light")}><Sun aria-hidden="true" size={17} /></button>

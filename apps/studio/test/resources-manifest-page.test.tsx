@@ -41,7 +41,7 @@ describe("ResourcesPage source and rights section", () => {
       roleProviderDefaults: {},
       modelDefaults: {},
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
     vi.spyOn(studioApi, "resourceManifest").mockResolvedValue({
@@ -114,7 +114,7 @@ describe("ResourcesPage source and rights section", () => {
       roleProviderDefaults: {},
       modelDefaults: { "video-v1": "video-a" },
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
     vi.spyOn(studioApi, "resourceManifest").mockResolvedValue(emptyResourceManifest());
@@ -124,7 +124,7 @@ describe("ResourcesPage source and rights section", () => {
       roleProviderDefaults: {},
       modelDefaults: { "writer-v1": "writer-b", "video-v1": "video-a" },
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
 
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
@@ -237,7 +237,7 @@ describe("ResourcesPage source and rights section", () => {
       roleProviderDefaults: {},
       modelDefaults: {},
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "bilibili", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "bilibili", durationSeconds: 24 },
     });
 
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
@@ -367,7 +367,7 @@ describe("ResourcesPage source and rights section", () => {
       roleProviderDefaults: {},
       modelDefaults: {},
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
 
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
@@ -468,7 +468,7 @@ describe("ResourcesPage source and rights section", () => {
       roleProviderDefaults: {},
       modelDefaults: {},
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
     vi.spyOn(studioApi, "resourceManifest").mockReturnValue(new Promise(() => undefined));
@@ -506,7 +506,7 @@ function stubResourcePage(resourceManifest: StudioResourceManifest) {
     roleProviderDefaults: {},
     modelDefaults: {},
     topicStrategy: { customInstruction: "" },
-    productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+    productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
   });
   vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
   vi.spyOn(studioApi, "resourceManifest").mockResolvedValue(resourceManifest);

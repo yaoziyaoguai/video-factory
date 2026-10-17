@@ -107,7 +107,7 @@ async function approvedPublishingFixture() {
   const waiting = await pipeline.start({ protocolVersion: "video-factory/brief-v1", title: "发布快照验证", angle: "两步确认", audience: "测试",
     nicheSlug: "life-avoidance", durationSeconds: 30, durationRange: { minSeconds: 20, maxSeconds: 40 },
     platform: "douyin", reviewMode: "manual", runPurpose: "test",
-    director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+    director: {  assetProviderIds: ["local-editorial-v1"] },
     workflowFeatures: { executablePlan: true, assetSemanticRank: false, referenceGrammar: false },
     providers: { script: "python-template-v1", director: "explicit-editorial-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1", render: "python-ffmpeg-v1",
       technicalReview: "python-technical-review-v1" } });

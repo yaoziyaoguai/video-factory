@@ -37,7 +37,7 @@ export const AUTH_BRIEF = {
     technicalReview: "python-technical-review-v1",
   },
   workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1" },
-  director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+  director: {  assetProviderIds: ["local-editorial-v1"] },
   economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
   voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
 } as unknown as ProductionBrief;
@@ -65,7 +65,6 @@ export async function scopeForCurrentQuote(
       angle: brief.angle,
       audience: brief.audience,
       durationRange: brief.durationRange ?? { minSeconds: 0, maxSeconds: 0 },
-      directorProfileId: brief.director?.profileId ?? "",
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
     }),
     approvedAmountCents: Math.round(plan.maxCostCny * 100) + 10_000,
@@ -160,16 +159,13 @@ export function createR5Fixture(workspaceRoot: string, options: {
     treatmentAgents: [{ providerId: "openai", agent: {
       id: "codex-creative-treatment-v1", modelId: "treatment-model-a",
       treat: async () => ({
-        version: "video-factory/creative-treatment-v2", viewerPromise: "看完能记住要点",
-        hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
-        progression: [{ beatId: "beat-1", purpose: "建立问题", viewerGain: "识别坑" }],
-        payoff: "低风险决策清单", visualPrinciples: ["真实动作"], soundPrinciples: ["环境声"],
+        version: "video-factory/creative-treatment-v3", concept: "看完能记住要点",
         evidenceRequirements: [], feasibilityQuestions: [],
       }),
     } }],
     screenwriterAgent: {
       id: "codex-screenwriter-v1", modelId: "screenwriter-model-one",
-      draft: async () => ({ viewerPromise: "看完能记住要点", narrativeArc: "问题-方法", canonFacts: ["要点可执行"],
+      draft: async () => ({   canonFacts: ["要点可执行"],
         scenes: [
           { position: 1, narration: "第一段旁白", duration: 12,
             visual_strategy: "generated", visual_prompt: "第一个生成镜头", search_terms: ["镜头 1"] },
@@ -181,8 +177,7 @@ export function createR5Fixture(workspaceRoot: string, options: {
     directorAgent: {
       id: "api-visual-director-v1", modelId: "director-model-one",
       plan: async (input: { brief: { requestedProfileId: string }; scenes: Array<{ position: number }> }) => ({
-        version: "video-factory/director-plan-v1", requestedProfileId: input.brief.requestedProfileId,
-        resolvedProfileId: "documentary-observer", profileRationale: "生成镜头交付。",
+        version: "video-factory/director-plan-v1",
         visualBible: { narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
           camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声" },
         shots: input.scenes.map((scene) => ({
@@ -202,7 +197,7 @@ export function createR5Fixture(workspaceRoot: string, options: {
   const brief: ProductionBrief = {
     ...AUTH_BRIEF,
     providers: { ...AUTH_BRIEF.providers, assets: "ai-shot-router-v1" },
-    director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+    director: {  assetProviderIds: ["seedance-video-v1"] },
     economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
   };
   return { pipeline, worker, brief, creates };

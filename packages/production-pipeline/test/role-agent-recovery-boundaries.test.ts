@@ -10,7 +10,7 @@ import { summarizeJointPlanningExecution } from "../src/production-pipeline.js";
 import type { CodexTaskExecution, CodexTaskKind } from "../src/codex-chat.js";
 
 const audit = {
-  version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+  version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
   verdict: "pass", score: 92, summary: "核验通过", issues: [], repairInstructions: [],
   assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"]
     .map(dimension => ({ dimension, score: 92, evidence: "已核对本轮证据" })) }],

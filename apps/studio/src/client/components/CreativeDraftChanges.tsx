@@ -9,9 +9,9 @@ type SegmentChange = { id: string; label: string; kind: "added" | "removed" | "c
 
 const FIELD_LABELS: Record<string, string> = {
   narration: "旁白", visual_prompt: "画面描述", duration: "时长（秒）", position: "段落顺序",
-  purpose: "段落目的", viewerGain: "观众收获", visualIntent: "画面意图", narrationIntent: "旁白意图",
-  narrativeArc: "叙事推进", viewerPromise: "观众看完能得到什么", hook: "开头", payoff: "结尾兑现",
-  visualPrinciples: "视觉方向", soundPrinciples: "声音方向", dialogue: "角色台词", characters: "角色设定",
+  purpose: "段落目的",
+  concept: "构思正文", evidenceRequirements: "事实与素材依据", feasibilityQuestions: "制作疑问",
+  dialogue: "角色台词", characters: "角色设定",
   character_ids: "出场人物", visible_action: "可见动作", screen_text: "屏幕文字", sound_cue: "声音意图",
   scene_goal: "镜头目的", emotion: "情绪", evidence: "依据", evidencePlan: "素材安排", delivery: "表演提示",
 };
@@ -26,7 +26,7 @@ export function CreativeDraftChanges({ stage, current, previous, nativeAudio = f
     comparison.changes.filter(change => change.kind === "changed").length ? `修改 ${comparison.changes.filter(change => change.kind === "changed").length} 项` : "",
     comparison.changes.filter(change => change.kind === "added").length ? `新增 ${comparison.changes.filter(change => change.kind === "added").length} 项` : "",
     comparison.changes.filter(change => change.kind === "removed").length ? `移除 ${comparison.changes.filter(change => change.kind === "removed").length} 项` : "",
-    comparison.global.length ? `整体要求变化 ${comparison.global.length} 项` : "",
+    comparison.global.length ? `整体内容变化 ${comparison.global.length} 项` : "",
     comparison.reordered ? "排列顺序变化" : "",
   ].filter(Boolean) : [];
   return <section className="creative-draft-changes" aria-label="与上一版的实际变化">
@@ -34,7 +34,7 @@ export function CreativeDraftChanges({ stage, current, previous, nativeAudio = f
     <p>{comparison.mapped ? parts.join(" · ") || "当前稿与上一版内容相同" : "缺少可核对的段落身份，无法可靠逐项对应；请对比前后整篇。"}</p>
     {comparison.mapped && parts.length > 0 ? <details className="creative-change-list"><summary>只看改动</summary>
       {comparison.reordered ? <p>段落排列顺序有变化；以下仍按稳定身份对应，不按位置配对。</p> : null}
-      {comparison.global.length > 0 ? <section><h4>整体要求</h4><ChangedFields fields={comparison.global} /></section> : null}
+      {comparison.global.length > 0 ? <section><h4>整体内容</h4><ChangedFields fields={comparison.global} /></section> : null}
       {comparison.changes.map(change => <section key={change.id}>
         <h4>{change.label} · {change.kind === "added" ? "新增" : change.kind === "removed" ? "移除" : "已修改"}</h4>
         <ChangedFields fields={change.fields} />
@@ -82,8 +82,9 @@ function compareDrafts(stage: Stage, before: unknown, after: unknown):
   | { mapped: false }
   | { mapped: true; changes: SegmentChange[]; global: FieldChange[]; reordered: boolean } {
   if (stage === "director" || !isRecord(before) || !isRecord(after)) return { mapped: false };
-  const field = stage === "treatment" ? "progression" : "scenes";
-  const idField = stage === "treatment" ? "beatId" : "id";
+  if (stage === "treatment") return { mapped: true, changes: [], global: changedFields(before, after, ["version"]), reordered: false };
+  const field = "scenes";
+  const idField = "id";
   const previous = indexedSegments(before[field], idField);
   const current = indexedSegments(after[field], idField);
   if (!previous || !current) return { mapped: false };
@@ -95,8 +96,8 @@ function compareDrafts(stage: Stage, before: unknown, after: unknown):
     const item = next ?? old!;
     const source = next ? current : previous;
     const ordinal = [...source.keys()].indexOf(id) + 1;
-    // 序号只用于显示；对应关系始终取双侧唯一的 id / beatId。
-    const label = stage === "treatment" ? `内容推进 ${ordinal}` : `第 ${Number.isInteger(item.position) ? item.position : ordinal} 段`;
+    // 序号只用于显示；对应关系始终取双侧唯一的 id。
+    const label = `第 ${Number.isInteger(item.position) ? item.position : ordinal} 段`;
     const fields = changedFields(old ?? {}, next ?? {}, [idField]);
     if (!old || !next || fields.length > 0) changes.push({ id, label, kind: !old ? "added" : !next ? "removed" : "changed", fields });
   }

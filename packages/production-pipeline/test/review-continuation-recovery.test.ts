@@ -43,8 +43,8 @@ it("W3 keeps the already accepted publisher identity across real death and start
     submissions.push(task.kind);
     if (task.kind === "publish-copy") { crashProcess!.kill("SIGKILL"); await held; }
     const output = task.kind === "publish-copy" ? { title: "两幕日常", description: "第一幕到第二幕的日常变化。", hashtags: ["日常"] }
-      : { version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1", verdict: "pass", score: 90,
-        assessments: [{ targetPath: "", dimensions: ["attention", "payoff", "expression"].map(dimension => ({ dimension, score: 90, evidence: "受控文案" })) }],
+      : { version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2", verdict: "pass", score: 90,
+        assessments: [{ targetPath: "", dimensions: ["expression", "consistency"].map(dimension => ({ dimension, score: 90, evidence: "受控文案" })) }],
         summary: "受控文案建议", issues: [], repairInstructions: [], planningDisposition: null, hostReadinessReview: null };
     return { output: JSON.stringify(output), sessionId: options?.sessionId ?? "019c0000-0000-7000-8000-000000000001",
       trace: { taskKind: task.kind, providerId: "openai", modelId: "controlled-publisher",

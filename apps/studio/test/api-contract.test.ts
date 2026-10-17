@@ -25,7 +25,7 @@ describe("run intervention API contracts", () => {
   it("keeps modern content-led creation executable without requiring a hard range", () => {
     const input = { durationPolicy: "content-led-v1", durationSeconds: 24,
       workflowFeatures: { executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1", boundaryGates: "user-confirmed-v1" },
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] } };
+      director: {  assetProviderIds: ["local-editorial-v1"] } };
     assert.doesNotThrow(() => assertStudioExecutableProductionInput(input));
     assert.throws(() => assertStudioExecutableProductionInput({ ...input, workflowFeatures: { ...input.workflowFeatures, boundaryGates: undefined } }), /每个节点边界/);
     assert.throws(() => assertStudioExecutableProductionInput({ ...input, durationPolicy: undefined }), /时长范围/);
@@ -274,7 +274,6 @@ describe("creator settings API contracts", () => {
         visualReview: "codex-visual-review-v1",
       },
       productionDefaults: {
-        directorProfileId: "documentary-observer",
         reviewMode: "manual",
         platform: "douyin",
         durationSeconds: 30,
@@ -289,14 +288,12 @@ describe("creator settings API contracts", () => {
         visualReview: "codex-visual-review-v1",
       },
       productionDefaults: {
-        directorProfileId: "documentary-observer",
         reviewMode: "manual",
         platform: "douyin",
         durationSeconds: 30,
       },
     });
     assert.throws(() => parseStudioCreatorSettingsPatch({ defaultRecipeId: "unlimited-paid" }), /默认制作配方无效/);
-    assert.throws(() => parseStudioCreatorSettingsPatch({ productionDefaults: { directorProfileId: "famous-person" } }), /默认导演角色无效/);
     for (const durationSeconds of [12, 12.5, 120]) {
       assert.equal(parseStudioCreatorSettingsPatch({ productionDefaults: { durationSeconds } }).productionDefaults?.durationSeconds, durationSeconds);
     }
@@ -662,7 +659,7 @@ describe("creative review confirm API contract", () => {
   it("accepts a hand-edited draft only as a complete document object", () => {
     // 人工修订走 edit_draft：稿件必须整体提交（服务端会按阶段合同整体校验），
     // 数组或残缺载荷在这里就被拒，不会进到图的校验层。
-    const document = { viewerPromise: "看懂一个判断方法", payoff: "给出检查表" };
+    const document = { concept: "看懂一个判断方法",  };
     assert.deepEqual(
       parseStudioCreativeReviewCommandInput({ ...base, action: "edit_draft", document }),
       { ...base, action: "edit_draft", document },

@@ -8,7 +8,6 @@ import { OpportunityStudio } from "../src/server/opportunity-studio.js";
 import { JsonOpportunityStore } from "../src/server/opportunity-store.js";
 import { SeriesStudio } from "../src/server/series-studio.js";
 import { JsonSeriesStore } from "../src/server/series-store.js";
-import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
 import type { StudioCandidateInboxItem, StudioOpportunity, StudioSeries, StudioSeriesEpisode, StudioTrendCandidate } from "../src/shared/api.js";
 
 const trendCandidate = {
@@ -95,7 +94,6 @@ describe("CandidateInboxStudio", () => {
       trends: { listCandidates: async () => [candidate] },
       series: new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) }),
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
 
     const adopted = await inbox.adopt(candidate.id, { origin: "trend" });
@@ -151,7 +149,7 @@ describe("CandidateInboxStudio", () => {
       planningAgent: { reviewEpisode: async (_series, episode) => {
         audits += 1;
         return {
-          draft: { episodeNumber: episode.episodeNumber, pillar: episode.pillar, title: episode.title, viewerPromise: episode.viewerPromise, hook: episode.hook, payoff: episode.payoff, fromPrevious: episode.continuity.fromPrevious, toNext: episode.continuity.toNext },
+          draft: { episodeNumber: episode.episodeNumber, pillar: episode.pillar, title: episode.title, concept: episode.concept,   fromPrevious: episode.continuity.fromPrevious, toNext: episode.continuity.toNext },
           planning: { source: "human", role: "系列开拍总编", auditRole: "独立质量复核", auditStatus: "awaiting_user", auditIterations: 1, auditSummary: "开头可以更具体", auditSuggestions: ["先展示本集实际结果"], providerId: "test", modelId: "audit-only", promptVersion: "v1" },
         };
       } },
@@ -159,8 +157,8 @@ describe("CandidateInboxStudio", () => {
     const created = await series.create({ name: "单集再审", premise: "验证一个方法", audience: "创作者", platform: "douyin", category: "education", track: "audit-current", pillars: ["验证"], tone: "具体", visualStyle: "纪实", targetEpisodeCount: 1 });
     const original = created.episodes[0]!;
     const edited = await series.updateEpisodePlan(created.id, 1, {
-      expectedRevision: created.revision, pillar: original.pillar, title: "用户自己的标题", viewerPromise: original.viewerPromise,
-      hook: original.hook, payoff: original.payoff, fromPrevious: original.continuity.fromPrevious, toNext: original.continuity.toNext,
+      expectedRevision: created.revision, pillar: original.pillar, title: "用户自己的标题", concept: original.concept,
+        fromPrevious: original.continuity.fromPrevious, toNext: original.continuity.toNext,
     });
     await assert.rejects(() => series.auditEpisodeCurrent(created.id, 1, created.revision), /版本/);
     assert.equal(audits, 0);
@@ -182,7 +180,7 @@ describe("CandidateInboxStudio", () => {
           generationCalls += 1;
           assert.equal(count, 2);
           return {
-            drafts: [1, 2].map((number) => ({ episodeNumber: number, pillar: "验证", title: `模型第 ${number} 集`, viewerPromise: `第 ${number} 集的具体收益`, hook: `先看第 ${number} 集`, payoff: `兑现第 ${number} 集`, fromPrevious: [], toNext: [] })),
+            drafts: [1, 2].map((number) => ({ episodeNumber: number, pillar: "验证", title: `模型第 ${number} 集`, concept: `第 ${number} 集的具体收益`,   fromPrevious: [], toNext: [] })),
             planning: { source: "agent", role: "系列总编", auditRole: "独立质量复核", auditStatus: "awaiting_user", auditIterations: 1, auditSummary: "第二集还可以更具体", auditSuggestions: ["请明确第二集的观众收益"], providerId: "deepseek", modelId: "deepseek-flash", promptVersion: "series-v1" },
           };
         },
@@ -216,7 +214,7 @@ describe("CandidateInboxStudio", () => {
           started();
           await gate;
           return {
-            drafts: [{ episodeNumber: 1, pillar: "验证", title: "模型标题", viewerPromise: "模型收益", hook: "模型开场", payoff: "模型兑现", fromPrevious: [], toNext: [] }],
+            drafts: [{ episodeNumber: 1, pillar: "验证", title: "模型标题", concept: "模型收益",   fromPrevious: [], toNext: [] }],
             planning: { source: "agent", role: "系列总编", auditRole: "独立质量复核", auditStatus: "passed", auditIterations: 1, providerId: "deepseek", modelId: "deepseek-flash", promptVersion: "series-v1" },
           };
         },
@@ -232,9 +230,7 @@ describe("CandidateInboxStudio", () => {
       expectedRevision: created.revision,
       pillar: original.pillar,
       title: "用户决定",
-      viewerPromise: original.viewerPromise,
-      hook: original.hook,
-      payoff: original.payoff,
+      concept: original.concept,
       fromPrevious: original.continuity.fromPrevious,
       toNext: original.continuity.toNext,
     });
@@ -259,9 +255,7 @@ describe("CandidateInboxStudio", () => {
       expectedRevision: created.revision,
       pillar: original.pillar,
       title: "用户更新的标题",
-      viewerPromise: original.viewerPromise,
-      hook: original.hook,
-      payoff: original.payoff,
+      concept: original.concept,
       fromPrevious: original.continuity.fromPrevious,
       toNext: original.continuity.toNext,
     });
@@ -346,7 +340,7 @@ describe("CandidateInboxStudio", () => {
 
     // 新语义：内容潜力 verdict 与开工门禁分离——生产建议保留，门禁作为前置 guardrail。
     assert.equal(listed?.editorialDecision.verdict, "produce_video");
-    assert.equal(listed?.editorialDecision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (listed?.editorialDecision ?? {}), false);
     assert.match(listed?.editorialDecision.guardrails[0] ?? "", /来源核验建议.*是否采用由你决定/);
     assert.match(listed?.editorialDecision.guardrails[0] ?? "", /系列证据尚未达到开拍标准/);
     assert.equal(listed?.verification.status, "blocked");
@@ -391,13 +385,12 @@ describe("CandidateInboxStudio", () => {
         advanceEpisode: async () => { throw new Error("listing must not advance"); },
       },
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
 
     const [listed] = (await inbox.list({ origins: ["series"] })).items;
 
     assert.equal(listed?.editorialDecision.verdict, "produce_image_story");
-    assert.equal(listed?.editorialDecision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (listed?.editorialDecision ?? {}), false);
     assert.notEqual(listed?.editorialDecision.reasons[0], "旧路线图固定建议视频。");
   });
 
@@ -425,7 +418,6 @@ describe("CandidateInboxStudio", () => {
       trends: { listCandidates: async () => [] },
       series,
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
 
     const [candidate] = (await inbox.list({ origins: ["series"] })).items;
@@ -460,12 +452,6 @@ describe("CandidateInboxStudio", () => {
         score: 40,
         reasons: ["当前单集不值得开拍。"],
         guardrails: ["重写单集承诺后再评估。"],
-        recommendedTemplate: {
-          id: "human-mini-doc",
-          name: "人物微纪录",
-          format: "旧的模板推荐",
-          rationale: "这是不应继续展示的历史数据。",
-        },
       },
       seriesId: "series-unavailable",
       seriesName: "暂缓系列",
@@ -497,8 +483,8 @@ describe("CandidateInboxStudio", () => {
     const listed = (await inbox.list({ origins: ["series"] })).items;
 
     assert.equal(listed.find((item) => item.id === skippedCandidate.id)?.editorialDecision.verdict, "skip");
-    assert.equal(listed.find((item) => item.id === skippedCandidate.id)?.editorialDecision.recommendedTemplate, undefined);
-    assert.equal(listed.find((item) => item.id === sequenceBlockedCandidate.id)?.editorialDecision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (listed.find((item) => item.id === skippedCandidate.id)?.editorialDecision ?? {}), false);
+    assert.equal("recommendedTemplate" in (listed.find((item) => item.id === sequenceBlockedCandidate.id)?.editorialDecision ?? {}), false);
   });
 
   it("lets a rule roadmap into production while the missing independent audit stays visible as advice", async () => {
@@ -554,9 +540,7 @@ describe("CandidateInboxStudio", () => {
             episodeNumber: episode.episodeNumber,
             pillar: episode.pillar,
             title: reviewedTitle,
-            viewerPromise: reviewedViewerPromise,
-            hook: reviewedHook,
-            payoff: episode.payoff,
+            concept: reviewedViewerPromise,
             fromPrevious: [...episode.continuity.fromPrevious],
             toNext: [...episode.continuity.toNext],
           },
@@ -588,7 +572,6 @@ describe("CandidateInboxStudio", () => {
       trends: { listCandidates: async () => [] },
       series,
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
     const beforeReview = (await inbox.list({ origins: ["series"] })).items.find((item) => item.episodeNumber === 1);
 
@@ -611,8 +594,7 @@ describe("CandidateInboxStudio", () => {
           return {
             draft: {
               episodeNumber: episode.episodeNumber, pillar: episode.pillar,
-              title: episode.title, viewerPromise: episode.viewerPromise,
-              hook: episode.hook, payoff: episode.payoff,
+              title: episode.title, concept: episode.concept,
               fromPrevious: [...episode.continuity.fromPrevious], toNext: [...episode.continuity.toNext],
             },
             planning: {
@@ -650,9 +632,7 @@ describe("CandidateInboxStudio", () => {
             episodeNumber: episode.episodeNumber,
             pillar: episode.pillar,
             title: "台风伤亡消息持续更新",
-            viewerPromise: episode.viewerPromise,
-            hook: "台风伤亡消息不断更新，哪些说法真的有来源？",
-            payoff: episode.payoff,
+            concept: episode.concept,
             fromPrevious: [...episode.continuity.fromPrevious],
             toNext: [...episode.continuity.toNext],
           },
@@ -685,9 +665,7 @@ describe("CandidateInboxStudio", () => {
       expectedRevision: created.revision,
       pillar: first.pillar,
       title: "台风伤亡消息持续更新",
-      viewerPromise: first.viewerPromise,
-      hook: "台风伤亡消息不断更新，哪些说法真的有来源？",
-      payoff: first.payoff,
+      concept: "台风伤亡消息不断更新，哪些说法真的有来源？",
       fromPrevious: [...first.continuity.fromPrevious],
       toNext: [...first.continuity.toNext],
     });
@@ -736,7 +714,6 @@ describe("CandidateInboxStudio", () => {
       trends: { listCandidates: async () => [highRisk, review] },
       series,
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
 
     const listed = await inbox.list({ origins: ["trend"] });
@@ -745,7 +722,7 @@ describe("CandidateInboxStudio", () => {
     assert.match(listed.items.find((item) => item.id === highRisk.id)?.editorialDecision.guardrails[0] ?? "", /来源核验建议.*是否采用由你决定/);
     assert.equal(listed.items.find((item) => item.id === review.id)?.verification.status, "review_required");
     assert.equal(listed.items.find((item) => item.id === review.id)?.editorialDecision.verdict, "produce_image_story");
-    assert.equal(listed.items.find((item) => item.id === review.id)?.editorialDecision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (listed.items.find((item) => item.id === review.id)?.editorialDecision ?? {}), false);
     // 来源标准只是建议：只补到一个来源不再拦下采用，结论随机会留档并醒目提示。
     const adoptedHighRisk = await inbox.adopt(highRisk.id, { origin: "trend", verificationConfirmed: true });
     assert.equal(adoptedHighRisk.verification?.status, "blocked");
@@ -754,7 +731,7 @@ describe("CandidateInboxStudio", () => {
     await assert.rejects(() => inbox.adopt(review.id, { origin: "trend" }), /确认核验/);
     const adopted = await inbox.adopt(review.id, { origin: "trend", verificationConfirmed: true });
     assert.equal(adopted.verification?.status, "verified");
-    assert.equal(adopted.editorialDecision?.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (adopted.editorialDecision ?? {}), false);
   });
 
   it("does not treat two aggregators carrying the same publisher link as independent evidence", async () => {
@@ -881,7 +858,6 @@ describe("CandidateInboxStudio", () => {
       trends: { listCandidates: async () => [rejectedRawWinner, editorialRunnerUp, editorialWinner] },
       series,
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
 
     const listed = await inbox.list({ origins: ["trend"] });
@@ -963,7 +939,6 @@ describe("CandidateInboxStudio", () => {
       },
       series,
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
 
     const [blocked] = (await inbox.list({ origins: ["trend"] })).items;
@@ -978,13 +953,12 @@ describe("CandidateInboxStudio", () => {
       opportunities: new OpportunityStudio({
         opportunities: new JsonOpportunityStore(path.join(root, "adoption-probe.json")),
       }),
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
     const adoptedWhileBlocked = await probeInbox.adopt("trend-supplement", { origin: "trend" });
     assert.equal(adoptedWhileBlocked.verification?.status, "blocked");
     assert.equal(adoptedWhileBlocked.verification?.independentSources, 1);
     // 创作方向不因门禁消失，也不通过模板锁定制作方式。
-    assert.equal(blocked?.editorialDecision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (blocked?.editorialDecision ?? {}), false);
     assert.match(blocked?.editorialDecision.guardrails[0] ?? "", /来源核验建议.*是否采用由你决定/);
 
     const supplemented = await inbox.supplementTrendCandidateSources("trend-supplement", {
@@ -1035,7 +1009,6 @@ describe("CandidateInboxStudio", () => {
       },
       series,
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
     const modelCandidate: StudioCandidateInboxItem = {
       ...trendCandidate,
@@ -1047,7 +1020,6 @@ describe("CandidateInboxStudio", () => {
       trends: { listCandidates: async () => [current, modelCandidate] },
       series,
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
 
     const [blocked] = (await inbox.list({ origins: ["trend"] })).items;
@@ -1107,7 +1079,6 @@ describe("CandidateInboxStudio", () => {
       series,
       opportunities,
       topicStrategy: async () => ({ customInstruction: "", sourcePolicy: "traceable_source" }),
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
 
     const supplementing = inbox.supplementTrendCandidateSources(current.id, {
@@ -1314,10 +1285,9 @@ describe("CandidateInboxStudio", () => {
     const reviewed = reviewTrendOpportunityAgainstCurrentPolicy(
       historical,
       "primary_or_two_independent",
-      BUILTIN_TEMPLATES,
       new Date("2026-09-07T09:00:00.000Z"),
     );
-    assert.equal(reviewed.editorialDecision?.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (reviewed.editorialDecision ?? {}), false);
   });
 
   it("can adopt a candidate the user saw just before a background trend refresh", async () => {
@@ -1327,24 +1297,21 @@ describe("CandidateInboxStudio", () => {
     });
     const series = new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) });
     let currentCandidates = [trendCandidate];
-    let publishedTemplates = BUILTIN_TEMPLATES;
     const inbox = new CandidateInboxStudio({
       trends: { listCandidates: async () => currentCandidates },
       series,
       opportunities,
-      publishedTemplates: async () => publishedTemplates,
     });
 
     const [visibleCandidate] = (await inbox.list({ origins: ["trend"] })).items;
-    assert.equal(visibleCandidate?.editorialDecision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (visibleCandidate?.editorialDecision ?? {}), false);
     currentCandidates = [{ ...trendCandidate, id: "trend-after-refresh", title: "刷新后的另一条候选" }];
-    publishedTemplates = BUILTIN_TEMPLATES.filter((template) => template.id !== "product-demo");
 
     // 模板目录变化不再阻断采用；同一条被记住的候选仍可按原记忆采用。
     const adopted = await inbox.adopt(visibleCandidate!.id, { origin: "trend" });
 
     assert.equal(adopted.id, trendCandidate.id);
-    assert.equal(adopted.editorialDecision?.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (adopted.editorialDecision ?? {}), false);
     await assert.rejects(() => inbox.adopt(visibleCandidate!.id, { origin: "trend" }), /已被采用|已经失效/);
   });
 
@@ -1356,7 +1323,6 @@ describe("CandidateInboxStudio", () => {
       trends: { listCandidates: async () => currentCandidates },
       series: new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) }),
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
     const [visible] = (await inbox.list({ origins: ["trend"] })).items;
     currentCandidates = [{ ...currentCandidates[0]!, title: "新版选题", generationId: "topic-batch-v2", auditStatus: "passed" as const }];
@@ -1389,7 +1355,6 @@ describe("CandidateInboxStudio", () => {
       series,
       opportunities,
       topicStrategy: async () => ({ customInstruction: "", sourcePolicy }),
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
     const [visibleCandidate] = (await inbox.list({ origins: ["trend"] })).items;
     assert.equal(visibleCandidate?.verification.status, "ready");
@@ -1420,7 +1385,6 @@ describe("CandidateInboxStudio", () => {
       trends: { listCandidates: async () => [prefixedTrend] },
       series,
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
 
     const adopted = await inbox.adopt(prefixedTrend.id, { origin: "trend" });
@@ -1439,7 +1403,6 @@ describe("CandidateInboxStudio", () => {
       trends: { listCandidates: async () => [trendCandidate] },
       series,
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
     await inbox.list({ origins: ["trend"] });
     const { final: _final, ...scores } = trendCandidate.score;
@@ -1495,7 +1458,6 @@ describe("CandidateInboxStudio", () => {
       series,
       opportunities,
       now,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
 
     const all = await inbox.list({});
@@ -1540,9 +1502,7 @@ describe("CandidateInboxStudio", () => {
             episodeNumber: episode.episodeNumber,
             pillar: episode.pillar,
             title: episode.episodeNumber === 1 ? "台风伤亡消息持续更新" : episode.title,
-            viewerPromise: episode.viewerPromise,
-            hook: episode.hook,
-            payoff: episode.payoff,
+            concept: episode.concept,
             fromPrevious: [...episode.continuity.fromPrevious],
             toNext: [...episode.continuity.toNext],
           },
@@ -1574,7 +1534,6 @@ describe("CandidateInboxStudio", () => {
       trends: { listCandidates: async () => [] },
       series,
       opportunities,
-      publishedTemplates: async () => BUILTIN_TEMPLATES,
     });
 
     const [blocked] = (await inbox.list({ origins: ["series"], limit: 1 })).items;
@@ -1604,7 +1563,7 @@ describe("CandidateInboxStudio", () => {
     });
     assert.equal(recovered.verification.status, "review_required");
     assert.equal(recovered.verification.independentSources, 2);
-    assert.equal(recovered.editorialDecision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (recovered.editorialDecision ?? {}), false);
 
     // 补充来源持久化在单集计划上：重新打开存储仍可读到（路线图 URL 留档保存，只在门禁计算时排除）。
     const persisted = (await new SeriesStudio({ series: new JsonSeriesStore(path.join(root, "series.json")) }).list())[0];
@@ -1635,9 +1594,7 @@ function passingGreenlightAgent() {
         episodeNumber: episode.episodeNumber,
         pillar: episode.pillar,
         title: episode.title,
-        viewerPromise: episode.viewerPromise,
-        hook: episode.hook,
-        payoff: episode.payoff,
+        concept: episode.concept,
         fromPrevious: [...episode.continuity.fromPrevious],
         toNext: [...episode.continuity.toNext],
       },

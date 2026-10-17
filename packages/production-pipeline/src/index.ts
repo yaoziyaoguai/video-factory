@@ -75,7 +75,6 @@ export type {
   ProductionArticleSourceSnapshot,
   ProductionBrief,
   ProductionDirectorDirection,
-  ProductionDirectorProfileId,
   ProductionEditorialDirection,
   ProductionEconomics,
   ProductionProviderBindings,
@@ -125,7 +124,7 @@ export type {
   PlanErrorCode,
   VoiceTiming,
 } from "./executable-timeline.js";
-export { DIRECTOR_PLAN_VERSION, VISUAL_DIRECTOR_PROFILES, validateVisualDirectorPlan, validateVisualDirectorDraft, visualDirectorCapabilityConflicts } from "./visual-director.js";
+export { DIRECTOR_PLAN_VERSION, validateVisualDirectorPlan, validateVisualDirectorDraft, visualDirectorCapabilityConflicts } from "./visual-director.js";
 export type {
   ShotAuthenticityPolicy,
   ShotDecision,
@@ -138,7 +137,6 @@ export type {
   VisualDirectorEconomics,
   VisualDirectorPlan,
   VisualDirectorPlanValidation,
-  VisualDirectorProfileDefinition,
 } from "./visual-director.js";
 export {
   CODEX_BRIDGE_PROTOCOL_VERSION,
@@ -210,7 +208,6 @@ export {
   CREATIVE_TREATMENT_PROVIDER_ID,
   CREATIVE_TREATMENT_TASK_KIND,
   CREATIVE_TREATMENT_VERSION,
-  lockCreativeTreatmentViewerPromise,
   missingRetrievalProviderIssues,
   parseCreativeTreatment,
   retrievalProviderSelectionChanges,

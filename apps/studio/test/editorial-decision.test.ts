@@ -1,11 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { decideEditorialFormat as decideEditorialFormatWithTemplates } from "../src/server/editorial-decision.js";
-import { BUILTIN_TEMPLATES } from "../src/server/template-catalog.js";
-
-const decideEditorialFormat = (input: Parameters<typeof decideEditorialFormatWithTemplates>[0]) => (
-  decideEditorialFormatWithTemplates(input, BUILTIN_TEMPLATES)
-);
+import { decideEditorialFormat } from "../src/server/editorial-decision.js";
 
 const base = {
   origin: "trend" as const,
@@ -74,7 +69,7 @@ describe("editorial production decision", () => {
       });
 
       assert.equal(decision.verdict, "produce_video", input.title);
-      assert.equal(decision.recommendedTemplate, undefined, input.title);
+      assert.equal("recommendedTemplate" in (decision ?? {}), false, input.title);
     }
   });
 
@@ -89,7 +84,7 @@ describe("editorial production decision", () => {
     });
 
     assert.equal(decision.verdict, "produce_image_story");
-    assert.equal(decision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (decision ?? {}), false);
   });
 
   it("keeps the format recommendation visible while a high-risk trend remains source-blocked", () => {
@@ -109,7 +104,7 @@ describe("editorial production decision", () => {
 
     assert.equal(decision.verdict, "produce_image_story");
     assert.equal(decision.score > 0, true);
-    assert.equal(decision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (decision ?? {}), false);
     assert.match(decision.guardrails.join(" "), /高风险热点至少需要 2 个独立来源/);
     assert.match(decision.guardrails[0] ?? "", /来源核验建议/);
     assert.match(decision.guardrails[0] ?? "", /是否采用由你决定/);
@@ -130,7 +125,7 @@ describe("editorial production decision", () => {
 
     assert.equal(decision.verdict, "produce_video");
     assert.equal(decision.score > 0, true);
-    assert.equal(decision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (decision ?? {}), false);
     assert.match(decision.guardrails.join(" "), /本集关键结论还没有可核验来源/);
   });
 
@@ -241,13 +236,13 @@ describe("editorial production decision", () => {
     });
 
     assert.equal(decision.verdict, "produce_video");
-    assert.equal(decision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (decision ?? {}), false);
     assert.equal(comparison.verdict, "produce_video");
-    assert.equal(comparison.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (comparison ?? {}), false);
     assert.equal(observational.verdict, "produce_video");
-    assert.equal(observational.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (observational ?? {}), false);
     assert.equal(technology.verdict, "produce_video");
-    assert.equal(technology.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (technology ?? {}), false);
   });
 
   it("requires every viral-video gate to clear its exact boundary", () => {
@@ -304,18 +299,8 @@ describe("editorial production decision", () => {
 
     for (const decision of [productDemo, liveBrief, miniDoc, explainer]) {
       assert.equal(decision.verdict, "produce_video");
-      assert.equal(decision.recommendedTemplate, undefined);
+      assert.equal("recommendedTemplate" in (decision ?? {}), false);
     }
-  });
-
-  it("omits a recommendation when the preferred template is not currently published", () => {
-    const decision = decideEditorialFormatWithTemplates(
-      { ...base, title: "实测 AI 如何整理一份会议记录", freshness: "evergreen" },
-      BUILTIN_TEMPLATES.filter((template) => template.id !== "product-demo"),
-    );
-
-    assert.equal(decision.verdict, "produce_video");
-    assert.equal(decision.recommendedTemplate, undefined);
   });
 
   it("keeps a comparison topic's audience, hook, value, and evidence in one intent without a template", () => {
@@ -335,7 +320,7 @@ describe("editorial production decision", () => {
 
     const decision = decideEditorialFormat(comparison);
     assert.equal(decision.verdict, "produce_video");
-    assert.equal(decision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (decision ?? {}), false);
     assert.match(decision.reasons.join(" "), /项目经理|返工半小时/);
     assert.match(decision.guardrails.join(" "), /同一段录音|同条件测试录像|原始会议纪要/);
   });

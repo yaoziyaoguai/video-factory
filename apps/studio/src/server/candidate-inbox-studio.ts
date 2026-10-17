@@ -16,7 +16,7 @@ import type { OpportunityStudio } from "./opportunity-studio.js";
 import type { SeriesStudio } from "./series-studio.js";
 import { StudioConflictError, StudioNotFoundError } from "./studio-errors.js";
 import { classifyTopicCategory, topicFreshness, topicRiskLevel } from "./topic-taxonomy.js";
-import { decideEditorialFormat, type EditorialTemplateOption } from "./editorial-decision.js";
+import { decideEditorialFormat } from "./editorial-decision.js";
 
 export interface CandidateInboxStudioOptions {
   trends: {
@@ -29,7 +29,6 @@ export interface CandidateInboxStudioOptions {
   series: Pick<SeriesStudio, "listCandidates" | "productionContextFor" | "advanceEpisode" | "appendEpisodeSources">;
   opportunities: Pick<OpportunityStudio, "list" | "create">;
   topicStrategy?: () => Promise<StudioTopicStrategy>;
-  publishedTemplates?: () => Promise<readonly EditorialTemplateOption[]>;
   now?: () => Date;
 }
 
@@ -53,20 +52,19 @@ export class CandidateInboxStudio {
     const readTrends = options.awaitTrendGeneration === false && snapshotCandidates
       ? () => snapshotCandidates.call(this.options.trends)
       : () => this.options.trends.listCandidates();
-    const [trendCandidates, seriesCandidates, adoptedOpportunities, topicStrategy, publishedTemplates] = await Promise.all([
+    const [trendCandidates, seriesCandidates, adoptedOpportunities, topicStrategy] = await Promise.all([
       includeTrends ? readTrends() : Promise.resolve([]),
       includeSeries ? this.options.series.listCandidates() : Promise.resolve([]),
       this.options.opportunities.list(),
       includeTrends ? this.options.topicStrategy?.().catch(() => undefined) : Promise.resolve(undefined),
-      this.options.publishedTemplates?.() ?? Promise.resolve([]),
     ]);
     const adoptedIds = new Set(adoptedOpportunities.map((item) => item.id));
-    const normalizedTrends = trendCandidates.map((candidate) => this.normalizeTrend(candidate, publishedTemplates, topicStrategy?.sourcePolicy));
+    const normalizedTrends = trendCandidates.map((candidate) => this.normalizeTrend(candidate, topicStrategy?.sourcePolicy));
     this.rememberTrendCandidates(normalizedTrends);
     const available = [
       ...normalizedTrends,
       ...seriesCandidates.map((candidate) => {
-        const recommendation = decideEditorialFormat(candidate, publishedTemplates);
+        const recommendation = decideEditorialFormat(candidate);
         if (candidate.editorialDecision.verdict === "skip" || candidate.seriesSequence?.status === "blocked") {
           return {
             ...candidate,
@@ -144,11 +142,8 @@ export class CandidateInboxStudio {
       throw new StudioNotFoundError("这条候选已被采用或已经失效，请刷新候选收件箱。");
     }
     const updated = await appendCandidateSources.call(this.options.trends, candidateId, input.evidenceUrls);
-    const [topicStrategy, publishedTemplates] = await Promise.all([
-      this.options.topicStrategy?.().catch(() => undefined),
-      this.options.publishedTemplates?.() ?? Promise.resolve([]),
-    ]);
-    const normalized = this.normalizeTrend(updated, publishedTemplates, topicStrategy?.sourcePolicy);
+    const topicStrategy = await this.options.topicStrategy?.().catch(() => undefined);
+    const normalized = this.normalizeTrend(updated, topicStrategy?.sourcePolicy);
     this.rememberTrendCandidates([normalized]);
     return normalized;
   }
@@ -185,10 +180,7 @@ export class CandidateInboxStudio {
     const matchingCurrentTrend = matches.some((item) => item.origin === "trend"
       && item.generationId === adoptionInput.expectedGenerationId);
     if (rememberedTrend && !matchingCurrentTrend) {
-      const [topicStrategy, publishedTemplates] = await Promise.all([
-        this.options.topicStrategy?.().catch(() => undefined),
-        this.options.publishedTemplates?.() ?? Promise.resolve([]),
-      ]);
+      const topicStrategy = await this.options.topicStrategy?.().catch(() => undefined);
       const {
         category: _category,
         freshness: _freshness,
@@ -197,7 +189,7 @@ export class CandidateInboxStudio {
         editorialDecision: _editorialDecision,
         ...rememberedCandidate
       } = rememberedTrend;
-      rememberedTrend = this.normalizeTrend(rememberedCandidate, publishedTemplates, topicStrategy?.sourcePolicy);
+      rememberedTrend = this.normalizeTrend(rememberedCandidate, topicStrategy?.sourcePolicy);
     }
     const candidates = adoptionInput.origin === "trend" && adoptionInput.expectedGenerationId
       ? rememberedTrend && !matchingCurrentTrend
@@ -285,7 +277,6 @@ export class CandidateInboxStudio {
 
   private normalizeTrend(
     candidate: StudioTrendCandidate,
-    publishedTemplates: readonly EditorialTemplateOption[],
     sourcePolicy?: StudioTopicStrategy["sourcePolicy"],
   ): StudioCandidateInboxItem {
     const collectedAt = latestOriginalEvidenceTime(candidate.evidence);
@@ -308,7 +299,7 @@ export class CandidateInboxStudio {
     };
     return {
       ...normalized,
-      editorialDecision: decideEditorialFormat(normalized, publishedTemplates),
+      editorialDecision: decideEditorialFormat(normalized),
     };
   }
 
@@ -388,7 +379,6 @@ export function candidateVerification(
 export function reviewTrendOpportunityAgainstCurrentPolicy(
   opportunity: StudioOpportunity,
   sourcePolicy?: StudioTopicStrategy["sourcePolicy"],
-  publishedTemplates: readonly EditorialTemplateOption[] = [],
   now = new Date(),
 ): StudioOpportunity {
   if (opportunity.origin !== "trend") return opportunity;
@@ -420,7 +410,7 @@ export function reviewTrendOpportunityAgainstCurrentPolicy(
       painPoint: opportunity.painPoint,
       hook: opportunity.hook,
       evidence: opportunity.evidence,
-    }, publishedTemplates),
+    }),
   };
 }
 

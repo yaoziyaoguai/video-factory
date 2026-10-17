@@ -647,10 +647,8 @@ function contractRepairPreservesSemantics(kind: BrokerTaskKind, before: unknown,
 // creative-treatment 的结构修复只允许删除 strict schema 不支持的额外字段、补齐第一次结果缺失的合同字段；
 // 第一次结果中已经存在的合同字段值（含嵌套对象与数组条目）逐字冻结，防止借补结构改写构思内容。
 const CREATIVE_TREATMENT_REPAIRED_NESTED_KEYS: Record<string, readonly string[]> = {
-  hook: ["narrationIntent", "visualIntent"],
-  progression: ["beatId", "purpose", "viewerGain"],
-  evidenceRequirements: ["beatId", "claim", "requirement", "suppliedSourceIds"],
-  feasibilityQuestions: ["beatId", "question"],
+  evidenceRequirements: ["claim", "requirement", "suppliedSourceIds", "critical", "acquisition", "retrievalProviderId"],
+  feasibilityQuestions: ["question"],
 };
 
 function creativeTreatmentRepairPreservesSemantics(before: unknown, after: unknown): boolean {
@@ -664,8 +662,7 @@ function creativeTreatmentRepairPreservesSemantics(before: unknown, after: unkno
       if (!treatmentNestedValuePreserved(beforeValue, after[field], nestedKeys)) return false;
       continue;
     }
-    if (field === "version" || field === "viewerPromise" || field === "payoff"
-      || field === "visualPrinciples" || field === "soundPrinciples") {
+    if (field === "version" || field === "concept") {
       if (JSON.stringify(beforeValue) !== JSON.stringify(after[field])) return false;
     }
     // 其余字段是 strict schema 不支持的额外内容，修复时允许删除，不参与比较。

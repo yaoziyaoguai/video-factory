@@ -34,7 +34,7 @@ describe("SeriesPlanner", () => {
       assert.equal(drafts[0]?.pillar, "窗边光影");
       assert.equal(drafts[1]?.pillar, "沿河散步");
       assert.doesNotMatch(JSON.stringify(drafts), /真实任务实验|最省钱|三步清单|直接验证/);
-      assert.match(drafts[0]!.payoff, /待.*确认/);
+      assert.equal(drafts[0]!.concept, input.premise);
       assert.equal(planner.plan({ ...input, episodes: drafts })[1]?.seriesSequence?.status, "blocked");
     }
     assert.match(planner.planEpisodes({ ...series, pillars: [] }, 1)[0]!.title, /待策划/);
@@ -67,15 +67,15 @@ describe("SeriesPlanner", () => {
       { status: "blocked", blockedByEpisodeNumber: 1 },
     ]);
     assert.equal(candidates[0]?.providerId, "series-roadmap-v2");
-    assert.match(candidates[0]?.hook ?? "", /第 1 集|可复核结果/);
+    assert.equal(candidates[0]?.hook, series.premise);
     assert.deepEqual(candidates[0]?.evidence, [], "系列路线图不是外部来源，更不能伪造热度82");
-    assert.match(candidates[0]?.visualPlan?.strategy ?? "", /真实桌面操作与生活空镜/);
+    assert.equal(candidates[0]?.visualPlan, undefined);
     assert.equal(candidates[0]?.score.visualFeasibility, 68);
     assert.equal(candidates[0]?.score.audienceReach, 68);
     assert.notEqual(candidates[0]?.editorialDecision.score, 93);
   });
 
-  it("detects public-event risk in the hook while keeping a source-gated visual format", () => {
+  it("detects public-event risk in the concept while keeping a source-gated visual format", () => {
     const planner = new SeriesPlanner({ now: () => new Date("2026-08-24T09:00:00.000Z") });
     const [episode] = planner.planEpisodes(series, 1);
     const candidates = planner.plan({
@@ -83,7 +83,7 @@ describe("SeriesPlanner", () => {
       episodes: [{
         ...episode!,
         title: "今天的信息判断方法",
-        hook: "警方通报出来后，这项伤亡数字到底来自哪里？",
+        concept: "警方通报出来后，这项伤亡数字到底来自哪里？",
       }],
     }, 1);
 

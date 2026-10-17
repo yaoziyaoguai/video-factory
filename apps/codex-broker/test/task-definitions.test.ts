@@ -27,7 +27,7 @@ import {
 
 it("keeps audit semantic diagnostics on an allowlist of fixed validator messages", () => {
   for (const [message, reasonCode] of [
-    ["output.rubricVersion must be video-factory/role-quality-rubric-v1.", "audit_rubric_version"],
+    ["output.rubricVersion must be video-factory/role-quality-rubric-v2.", "audit_rubric_version"],
     ["output.score must equal the lowest dimension score (72.5).", "audit_score_aggregation"],
     ["output.verdict cannot pass with a score below 80, blocking issues, or repair instructions.", "audit_pass_contradiction"],
     ["output.repairInstructions must contain at least one entry when verdict is repair.", "audit_repair_missing"],
@@ -95,9 +95,6 @@ function validDirectorPlan() {
   };
   return {
     version: "video-factory/director-plan-v1",
-    requestedProfileId: "auto",
-    resolvedProfileId: "documentary-observer",
-    profileRationale: "生活观察题材",
     visualBible: {
       narrativeApproach: "问题到结论",
       motif: "手机动作",
@@ -116,19 +113,9 @@ function validDirectorPlan() {
 
 function validCreativeTreatment(): Record<string, unknown> {
   return {
-    version: "video-factory/creative-treatment-v2",
-    viewerPromise: "学会识别资料支持的结论边界",
-    hook: { narrationIntent: "提出一个具体判断", visualIntent: "展示原始资料的关键差异" },
-    progression: [
-      { beatId: "question", purpose: "建立问题", viewerGain: "知道要核对什么" },
-      { beatId: "evidence", purpose: "核对资料", viewerGain: "区分事实与推测" },
-      { beatId: "payoff", purpose: "兑现判断", viewerGain: "知道下一步如何判断" },
-    ],
-    payoff: "给出有条件的结论及下一步",
-    visualPrinciples: ["来源画面优先"],
-    soundPrinciples: ["自然语速、清楚停顿"],
+    version: "video-factory/creative-treatment-v3",
+    concept: "学会识别资料支持的结论边界",
     evidenceRequirements: [{
-      beatId: "evidence",
       claim: "原材料中的陈述",
       requirement: "factual_support",
       suppliedSourceIds: ["source-1"],
@@ -136,7 +123,7 @@ function validCreativeTreatment(): Record<string, unknown> {
       acquisition: "supplied",
       retrievalProviderId: null,
     }],
-    feasibilityQuestions: [{ beatId: "evidence", question: "来源画面是否可读且有使用依据" }],
+    feasibilityQuestions: [{  question: "来源画面是否可读且有使用依据" }],
   };
 }
 
@@ -248,7 +235,7 @@ describe("broker-owned task definitions", () => {
 
     assert.match(taskPromptFor("topic-ideas").directive, /中文短视频选题总编/);
     assert.match(taskPromptFor("series-roadmap").directive, /长期视频栏目的系列总编/);
-    assert.match(taskPromptFor("creative-treatment").directive, /脚本写定前建立本片创作方向/);
+    assert.match(taskPromptFor("creative-treatment").directive, /不预设开场钩子/);
     assert.match(taskPromptFor("director-plan").directive, /短视频总导演/);
     assert.match(taskPromptFor("script-draft").directive, /中文短视频创意编剧/);
     assert.match(taskPromptFor("publish-copy", "douyin").directive, /抖音/);
@@ -256,7 +243,7 @@ describe("broker-owned task definitions", () => {
     assert.match(taskPromptFor("reference-grammar").directive, /参考片关键帧中提炼可复用的制作语法/);
     assert.match(taskPromptFor("visual-review").directive, /视觉审片/);
     assert.match(taskPromptFor("role-audit").directive, /独立审计当前角色候选/);
-    assert.match(taskPromptFor("role-audit").directive, /没有依据的审美偏好不能阻断/);
+    assert.match(taskPromptFor("role-audit").directive, /不以缺少固定叙事结构或个人风格偏好阻断创作/);
     assert.match(taskPromptFor("role-audit").directive, /前期不要求已经下载普通图库或生成付费画面/);
     assert.match(taskPromptFor("role-audit").directive, /previousAudit/);
     assert.match(taskPromptFor("role-audit").directive, /不要求凭空增加库存、服务商或后期功能/);
@@ -297,8 +284,8 @@ describe("broker-owned task definitions", () => {
       [topic.version, series.version, treatment.version, script.version, director.version],
       [
         "video-factory/topic-editor-v12",
-        "video-factory/series-showrunner-v3",
-        "video-factory/treatment-director-v9",
+        "video-factory/series-showrunner-v4",
+        "video-factory/treatment-director-v10",
       "video-factory/screenwriter-v22",
         "video-factory/director-v31",
       ],
@@ -318,7 +305,7 @@ describe("broker-owned task definitions", () => {
     assert.doesNotMatch(topic.directive, /creatorStrategy/);
     assert.match(series.directive, /canon 只包含已经内部定版的事实/);
     assert.match(treatment.directive, /brief\.productionCapabilities/);
-    assert.match(treatment.directive, /referenceGrammar 只作为风格和结构参考/);
+    assert.match(treatment.directive, /referenceGrammar 仅在用户提供参考片时作为表达参考/);
     assert.match(script.directive, /brief\.creativeTreatment.*brief\.planningIssues/);
     assert.match(script.directive, /durationPolicy=content-led-v1.*只是参考.*不设默认总长范围/);
     assert.match(script.directive, /未带 policy 的历史输入才沿用原范围或目标 0.6 到 1.4 倍/);
@@ -382,9 +369,9 @@ describe("broker-owned task definitions", () => {
       ["audio-review", ["audioSha256", "summary", "checks", "findings"]],
       ["topic-ideas", ["ideas"]],
       ["series-roadmap", ["episodes"]],
-      ["creative-treatment", ["version", "viewerPromise", "hook", "progression", "payoff", "visualPrinciples", "soundPrinciples", "evidenceRequirements", "feasibilityQuestions"]],
-      ["director-plan", ["version", "requestedProfileId", "resolvedProfileId", "profileRationale", "visualBible", "shots"]],
-      ["script-draft", ["viewerPromise", "narrativeArc", "canonFacts", "scenes"]],
+      ["creative-treatment", ["version", "concept", "evidenceRequirements", "feasibilityQuestions"]],
+      ["director-plan", ["version", "visualBible", "shots"]],
+      ["script-draft", ["canonFacts", "scenes"]],
       ["publish-copy", ["title", "description", "hashtags"]],
       ["asset-rank", ["version", "source", "providerId", "modelId", "summary", "scenes"]],
       ["reference-grammar", ["version", "summary", "durationMs", "pacing", "composition", "camera", "color", "transitions", "sound", "beats", "reusableRules", "avoidCopying", "confidence"]],
@@ -431,17 +418,12 @@ describe("broker-owned task definitions", () => {
     assert.ok(creatorIssueSchema.creatorAction);
     assert.match(outputSchemaValidationErrorFor("role-audit", {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       verdict: "pass",
       score: 95,
       assessments: [{
         targetPath: "",
-        dimensions: [
-          { dimension: "attention", score: 95, evidence: "开场给出具体对象。" },
-          { dimension: "progression", score: 95, evidence: "中段逐步给出结果。" },
-          { dimension: "payoff", score: 95, evidence: "结尾回答原承诺。" },
-          { dimension: "expression", score: 95, evidence: "标题自然可读。" },
-        ],
+        dimensions: [{ dimension: "consistency", score: 95, evidence: "开场给出具体对象。" }, { dimension: "expression", score: 95, evidence: "标题自然可读。" }],
       }],
       summary: "检查完成",
       issues: [], repairInstructions: [], planningDisposition: null,
@@ -461,7 +443,7 @@ describe("broker-owned task definitions", () => {
       } } } };
     };
 
-    assert.deepEqual(scriptSchema.required, ["viewerPromise", "narrativeArc", "canonFacts", "scenes"]);
+    assert.deepEqual(scriptSchema.required, ["canonFacts", "scenes"]);
     assert.ok(scriptSchema.properties.scenes.items.required.includes("visible_action"));
     assert.ok(scriptSchema.properties.scenes.items.required.includes("success_criteria"));
     assert.ok(scriptSchema.properties.scenes.items.required.includes("failure_conditions"));
@@ -661,14 +643,12 @@ describe("broker-owned task definitions", () => {
     assert.ok(scriptSchema.properties.scenes.items);
     for (const count of [1, 2]) {
       assert.equal(outputValidationErrorFor("script-draft", {
-        viewerPromise: "虚构人物和好", narrativeArc: "行动回应争执", canonFacts: [],
+          canonFacts: [],
         scenes: Array.from({ length: count }, (_, index) => ({ ...scene, position: index + 1,
           duration: 12 / count, visual_strategy: "generated", narration: "这证明了你是朋友" })),
       }), undefined);
     }
     assert.match(outputValidationErrorFor("script-draft", {
-      viewerPromise: "给出一个可执行判断",
-      narrativeArc: "问题、例子、结论",
       canonFacts: [],
       scenes: Array.from({ length: 5 }, (_, index) => ({
         ...scene,
@@ -753,9 +733,7 @@ describe("broker-owned task definitions", () => {
       episodeNumber: 3,
       pillar: "真实实验",
       title: "验证一个真实任务",
-      viewerPromise: "得到一个可执行结论",
-      hook: "先看真实结果。",
-      payoff: "完成实验并给出结论。",
+      concept: "得到一个可执行结论",
       fromPrevious: ["承接已定版结论"],
       toNext: ["留下成本问题"],
     };
@@ -767,7 +745,7 @@ describe("broker-owned task definitions", () => {
   it("accepts an available generated illustration route consistently across broker, parser and readiness", () => {
     const generated = {
       ...validCreativeTreatment(),
-      evidenceRequirements: [{ beatId: "evidence", claim: "虚构的杯中星河", requirement: "illustration_only",
+      evidenceRequirements: [{ claim: "虚构的杯中星河", requirement: "illustration_only",
         critical: true, acquisition: "pipeline_generated", retrievalProviderId: "wan-video-v1", suppliedSourceIds: [] }],
     };
     assert.equal(outputValidationErrorFor("creative-treatment", generated), undefined);
@@ -792,7 +770,7 @@ describe("broker-owned task definitions", () => {
     for (const deliveryType of ["generated_video", "generated_image", "stock_video", "stock_image"]) {
       const acquisition = deliveryType.startsWith("generated_") ? "pipeline_generated" : "pipeline_retrievable";
       const value = { ...validCreativeTreatment(), evidenceRequirements: [{
-        beatId: "evidence", claim: "仅用于虚构画面", requirement: "illustration_only", critical: true,
+        claim: "仅用于虚构画面", requirement: "illustration_only", critical: true,
         acquisition, retrievalProviderId: "current-provider", suppliedSourceIds: [],
       }] };
       assert.equal(outputValidationErrorFor("creative-treatment", value), undefined);
@@ -807,41 +785,18 @@ describe("broker-owned task definitions", () => {
     }
   });
 
-  it("pins the creative-treatment prompt pack and enforces beat-reference semantics", () => {
+  it("accepts free-form concepts without required storytelling beats", () => {
     const prompt = taskPromptFor("creative-treatment");
-    assert.equal(prompt.version, "video-factory/treatment-director-v9");
-    assert.match(prompt.directive, /不输出完整逐镜分镜.*不报价.*不声称画面或配音已完成/);
-    assert.match(prompt.directive, /lockedViewerPromise.*保持其实际收益与事实边界/);
-    assert.match(prompt.directive, /suppliedSourceIds 只能引用 suppliedSources 中的 id/);
-    assert.match(prompt.directive, /现实事实、因果、实验结果、数字或具体事件/);
-    assert.match(prompt.directive, /主观观察、创作启发、构图选择.*illustration_only.*not_needed/);
-    assert.match(prompt.directive, /示意不能证明普遍结论.*不自动升级为外部来源要求/);
-    assert.match(taskPromptFor("role-audit").directive, /边界声明.*不能单独作为 factual_support.*external_required/);
-    assert.match(prompt.outputRules.join("\n"), /progression 输出 1 到 12 项，beatId 唯一/);
-    assert.match(prompt.outputRules.join("\n"), /reworkInstruction/);
-
+    assert.equal(prompt.version, "video-factory/treatment-director-v10");
+    assert.match(prompt.directive, /不预设开场钩子/);
+    assert.match(prompt.directive, /suppliedSourceIds 只能引用 suppliedSources/);
+    assert.match(prompt.directive, /reworkInstruction/);
     const valid = validCreativeTreatment();
     assert.equal(outputValidationErrorFor("creative-treatment", valid), undefined);
-
-    const duplicateBeat = structuredClone(valid);
-    (duplicateBeat.progression as Array<Record<string, unknown>>)[1]!.beatId = "question";
-    assert.match(outputValidationErrorFor("creative-treatment", duplicateBeat) ?? "", /beatId/);
-
-    const missingEvidenceBeat = structuredClone(valid);
-    (missingEvidenceBeat.evidenceRequirements as Array<Record<string, unknown>>)[0]!.beatId = "ghost";
-    assert.match(outputValidationErrorFor("creative-treatment", missingEvidenceBeat) ?? "", /beatId/);
-
-    const missingFeasibilityBeat = structuredClone(valid);
-    (missingFeasibilityBeat.feasibilityQuestions as Array<Record<string, unknown>>)[0]!.beatId = "ghost";
-    assert.match(outputValidationErrorFor("creative-treatment", missingFeasibilityBeat) ?? "", /beatId/);
-
-    const blankPromise = structuredClone(valid);
-    blankPromise.viewerPromise = " ";
-    assert.match(outputValidationErrorFor("creative-treatment", blankPromise) ?? "", /viewerPromise/);
-
-    const wrongVersion = structuredClone(valid);
-    wrongVersion.version = "video-factory/creative-treatment-v1";
-    assert.match(outputValidationErrorFor("creative-treatment", wrongVersion) ?? "", /version/);
+    assert.equal(outputValidationErrorFor("creative-treatment", { ...valid, concept: "只看雨落下，没有结论。", evidenceRequirements: [], feasibilityQuestions: [] }), undefined);
+    assert.match(outputValidationErrorFor("creative-treatment", { ...valid, concept: " " }) ?? "", /concept/);
+    assert.match(outputValidationErrorFor("creative-treatment", { ...valid, hook: {} }) ?? "", /hook/);
+    assert.match(outputValidationErrorFor("creative-treatment", { ...valid, version: "video-factory/creative-treatment-v2" }) ?? "", /version/);
   });
 
   it("rejects whitespace-only creative-treatment fields that the host parser rejects", () => {
@@ -861,7 +816,7 @@ describe("broker-owned task definitions", () => {
   it("pins the creative-treatment semantic rules version that owns the whitespace contract", () => {
     assert.equal(
       taskContractDescriptorFor("creative-treatment").semanticRulesVersion,
-      "creative-treatment-semantics-v13|production-capabilities-v4|visual-plan-v2|host-readiness-v2|rework-instruction-v1|series-context-v1",
+      "creative-treatment-semantics-v14|production-capabilities-v4|host-readiness-v2|rework-instruction-v1|series-context-v2",
     );
   });
 });
@@ -883,7 +838,7 @@ it("describes the confirmed continuous-narration capability instead of the old c
   assert.doesNotMatch(SCREENWRITER_DIRECTIVE, /不支持旁白自动跨镜/);
   // 开场节奏不强制绝对秒数；用户明确指定的开场时间要求不被通用节奏建议覆盖。
   assert.doesNotMatch(SCREENWRITER_DIRECTIVE, /前两秒/);
-  assert.match(SCREENWRITER_DIRECTIVE, /用户明确指定时间点时按用户要求执行/);
+  assert.match(SCREENWRITER_DIRECTIVE, /用户明确的表达要求/);
 });
 
 // T08：Broker 严格白名单接受可选能力布尔；旧持久化输入缺失仍可读；未知键仍拒绝。

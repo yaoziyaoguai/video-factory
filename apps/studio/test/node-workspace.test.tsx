@@ -171,7 +171,7 @@ describe("node production workspaces", () => {
     const read = vi.spyOn(studioApi, "resourceJson");
     const output = { creativeReview: { activeStage: "script", stages: {
       treatment: { phase: "confirmed", currentDraft: { versionId: "treatment#v1", sha256: "a".repeat(64) },
-        currentDocument: { viewerPromise: "已采用的真实构思", progression: [] },
+        currentDocument: { concept: "已采用的真实构思", progression: [] },
         confirmation: { versionId: "treatment#v1", draftSha256: "a".repeat(64) } },
       script: { phase: "waiting_user", currentDraft: { versionId: "script#v4", sha256: "b".repeat(64) },
         currentDocument: { scenes: [{ position: 1, narration: "保留的当前脚本", duration: 5 }] }, confirmation: null },
@@ -217,7 +217,7 @@ describe("node production workspaces", () => {
     expect(audit).not.toHaveBeenCalled();
   });
   it("reads a formal planning delivery even when the node output contains paths only", async () => {
-    vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ viewerPromise: "清楚解释选择", progression: [{ purpose: "先展示差异" }] });
+    vi.spyOn(studioApi, "resourceJson").mockResolvedValue({ concept: "清楚解释选择", progression: [{ purpose: "先展示差异" }] });
     render(<NodeWorkspace acceptedPlanDigest={TEST_PLAN_DIGEST} runId="run-nw" runRevision={2}
       node={planningNode} runStatus="failed" artifacts={[{
         id: "planning-treatment", kind: "creative_treatment", producerNodeId: "creative-planning",
@@ -2369,7 +2369,7 @@ describe("F05 prior-step viewing on review stops", () => {
         providers: { script: "python-template-v1", director: "api-visual-director-v1", assets: "local-editorial-v1",
           voice: "macos-say-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
         workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, boundaryGates: "user-confirmed-v1" },
-        director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+        director: {  assetProviderIds: ["local-editorial-v1"] },
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       });
       expect(waiting.status).toBe("needs_human");

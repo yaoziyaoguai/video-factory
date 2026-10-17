@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import type { StudioArtifact } from "../../shared/api.js";
 import { studioApi } from "../api.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
-import { SoundDirections } from "./CreativeDraftReader.js";
 
 const DELIVERIES = [
   { kind: "creative_treatment", label: "前期构思" },
@@ -14,9 +13,7 @@ const DELIVERIES = [
 ] as const;
 
 const FIELD_LABELS: Record<string, string> = {
-  viewerPromise: "观众承诺", hook: "开场", progression: "内容推进", payoff: "结尾兑现",
-  narrationIntent: "旁白意图", visualIntent: "画面意图", viewerGain: "观众收获",
-  visualPrinciples: "画面原则", soundPrinciples: "声音原则", narrativeArc: "叙事推进",
+  concept: "构思正文",
   evidenceRequirements: "需要核对的依据", feasibilityQuestions: "制作前要回答的问题",
   claim: "要表达的事实", requirement: "依据要求", acquisition: "获取方式", critical: "关键要求", question: "待决定的问题",
   canonFacts: "已确认的事实", sourcePolicy: "来源原则", sourceIds: "关联来源",
@@ -141,8 +138,7 @@ function PlanningDocument({ value }: { value: unknown }) {
   if (value && typeof value === "object") {
     const business = Object.entries(value).filter(([key]) => !TECHNICAL_FIELD.test(key));
     return business.length > 0 ? <dl className="planning-document-fields">{business.map(([key, item]) => <div key={key}>
-        <dt>{FIELD_LABELS[key] ?? key}</dt><dd>{key === "soundPrinciples"
-          ? <SoundDirections value={item} label={null} /> : <PlanningDocument value={item} />}</dd>
+        <dt>{FIELD_LABELS[key] ?? key}</dt><dd><PlanningDocument value={item} /></dd>
       </div>)}</dl> : null;
   }
   return <span>{value === null || value === undefined ? "未填写" : typeof value === "boolean" ? value ? "是" : "否" : VALUE_LABELS[String(value)] ?? String(value)}</span>;

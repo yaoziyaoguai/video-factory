@@ -99,7 +99,6 @@ function directorInput(): VisualDirectorAgentInput {
       audience: "城市上班族",
       platform: "douyin",
       durationSeconds: 24,
-      requestedProfileId: "urban-poetic",
     },
     scenes: [{
       position: 1,
@@ -131,11 +130,7 @@ function directorInput(): VisualDirectorAgentInput {
 function validPlan(): Record<string, unknown> {
   return {
     version: "video-factory/director-plan-v1",
-    requestedProfileId: "urban-poetic",
-    resolvedProfileId: "urban-poetic",
-    profileRationale: "都市夜景与人物情绪适配。",
     visualBible: {
-      viewerPromise: "看见夜晚如何改变人的行动节奏。",
       narrativeApproach: "碎片化观察",
       motif: "反光路面与暖色窗光",
       pacing: "短促后停顿",
@@ -267,7 +262,6 @@ describe("CodexVisualDirectorAgent", () => {
       }],
     };
     input.brief.visualProof = visualProof;
-    input.brief.visualPlan = visualPlan;
     input.brief.voiceTiming = { rate: 192, pauseScale: 1.2 };
     const articleSources = [{
       sourceId: "source-report",
@@ -285,18 +279,13 @@ describe("CodexVisualDirectorAgent", () => {
     input.assetProviders[0]!.constraints.push("成片必须保留 AIGC 标识");
     const firstPlan = validPlan();
     const repairedPlan = validPlan();
-    repairedPlan.profileRationale = "都市夜景、人物动作与冷暖光对照共同兑现观众承诺。";
+    (repairedPlan.visualBible as Record<string, unknown>).narrativeApproach = "都市夜景、人物动作与冷暖光对照共同兑现观众承诺。";
     const repairAudit = {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       assessments: [{
         targetPath: "",
-        dimensions: [
-          { dimension: "attention", score: 78, evidence: "开场镜头有具体对象。" },
-          { dimension: "progression", score: 78, evidence: "逐镜视觉推进不明确。" },
-          { dimension: "payoff", score: 78, evidence: "风格理由没有兑现观众承诺。" },
-          { dimension: "expression", score: 78, evidence: "理由只写题材适配。" },
-        ],
+        dimensions: [{ dimension: "consistency", score: 78, evidence: "开场镜头有具体对象。" }, { dimension: "expression", score: 78, evidence: "理由只写题材适配。" }],
       }],
       verdict: "repair",
       score: 78,
@@ -311,15 +300,10 @@ describe("CodexVisualDirectorAgent", () => {
     };
     const passAudit = {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       assessments: [{
         targetPath: "",
-        dimensions: [
-          { dimension: "attention", score: 94, evidence: "开场给出具体动作。" },
-          { dimension: "progression", score: 94, evidence: "逐镜视觉推进连贯。" },
-          { dimension: "payoff", score: 94, evidence: "结尾兑现观众承诺。" },
-          { dimension: "expression", score: 94, evidence: "风格理由自然可读。" },
-        ],
+        dimensions: [{ dimension: "consistency", score: 94, evidence: "开场给出具体动作。" }, { dimension: "expression", score: 94, evidence: "风格理由自然可读。" }],
       }],
       verdict: "pass",
       score: 94,
@@ -384,12 +368,12 @@ describe("CodexVisualDirectorAgent", () => {
     };
     const producerBrief = (producerClient.calls[0]!.payload as { brief: VisualDirectorAgentInput["brief"] }).brief;
     assert.equal(producerBrief.visualProof, visualProof);
-    assert.deepEqual(producerBrief.visualPlan, visualPlan);
+    assert.equal("visualPlan" in producerBrief, false);
     assert.deepEqual(producerBrief.durationRange, { minSeconds: 20, maxSeconds: 34 });
     assert.deepEqual(producerBrief.voiceTiming, { rate: 192, pauseScale: 1.2 });
     assert.deepEqual(producerBrief.articleSources, articleSources);
     assert.equal(auditPayload.context.upstreamFacts.brief.visualProof, visualProof);
-    assert.deepEqual(auditPayload.context.upstreamFacts.brief.visualPlan, visualPlan);
+    assert.equal("visualPlan" in auditPayload.context.upstreamFacts.brief, false);
     assert.deepEqual(auditPayload.context.upstreamFacts.brief.voiceTiming, { rate: 192, pauseScale: 1.2 });
     assert.deepEqual(auditPayload.context.upstreamFacts.brief.articleSources, articleSources);
     const contract = auditPayload.context.currentRoleContract;
@@ -399,22 +383,15 @@ describe("CodexVisualDirectorAgent", () => {
     const auditCriteria = (auditClient.calls[0]!.payload as { criteria: string[] }).criteria.join("\n");
     assert.match(
       auditCriteria,
-      /视觉圣经和逐镜职责兑现已接受构思与脚本承诺.*可说明的推进/,
+      /画面安排符合已采用内容和用户意图/,
     );
     assert.match(
       auditCriteria,
       /真正的跨镜身份与因果要求有执行依据.*否定句中的词语不构成肯定要求/,
     );
     assert.equal("directorProfiles" in contract, false);
-    assert.deepEqual(contract.availableDirectorProfileIds, [
-      "documentary-observer",
-      "quiet-humanism",
-      "urban-poetic",
-      "chromatic-storytelling",
-      "geometric-control",
-      "suspense-staging",
-    ]);
-    assert.equal((contract.selectedDirectorProfile as { id: string }).id, "urban-poetic");
+    assert.equal("availableDirectorProfileIds" in contract, false);
+    assert.equal("selectedDirectorProfile" in contract, false);
     assert.match(
       String((contract.inheritedScriptFields as { onScreenText: string }).onScreenText),
       /下游从脚本逐镜继承.*不重复输出/,
@@ -458,20 +435,15 @@ describe("CodexVisualDirectorAgent", () => {
   it("keeps revisions stateful while each full independent audit starts without inherited history", async () => {
     const first = validPlan();
     const repaired = validPlan();
-    repaired.profileRationale = "用固定轴线和冷暖光变化兑现观众承诺。";
+    (repaired.visualBible as Record<string, unknown>).narrativeApproach = "用固定轴线和冷暖光变化兑现观众承诺。";
     const client = new SessionAwareCodexClient({
       "director-plan": [first, repaired],
       "role-audit": [{
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v1",
+        rubricVersion: "video-factory/role-quality-rubric-v2",
         assessments: [{
           targetPath: "",
-          dimensions: [
-            { dimension: "attention", score: 76, evidence: "开场钩子偏弱。" },
-            { dimension: "progression", score: 76, evidence: "镜头推进缺少变化。" },
-            { dimension: "payoff", score: 76, evidence: "风格理由没有说明动作与光线。" },
-            { dimension: "expression", score: 76, evidence: "理由表述笼统。" },
-          ],
+          dimensions: [{ dimension: "consistency", score: 76, evidence: "开场钩子偏弱。" }, { dimension: "expression", score: 76, evidence: "理由表述笼统。" }],
         }],
         verdict: "repair",
         score: 76,
@@ -485,15 +457,10 @@ describe("CodexVisualDirectorAgent", () => {
         repairInstructions: ["补充动作和光线。"],
       }, {
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v1",
+        rubricVersion: "video-factory/role-quality-rubric-v2",
         assessments: [{
           targetPath: "",
-          dimensions: [
-            { dimension: "attention", score: 93, evidence: "开场具体。" },
-            { dimension: "progression", score: 93, evidence: "视觉推进清楚。" },
-            { dimension: "payoff", score: 93, evidence: "结尾兑现承诺。" },
-            { dimension: "expression", score: 93, evidence: "风格理由可读。" },
-          ],
+          dimensions: [{ dimension: "consistency", score: 93, evidence: "开场具体。" }, { dimension: "expression", score: 93, evidence: "风格理由可读。" }],
         }],
         verdict: "pass",
         score: 93,
@@ -557,15 +524,10 @@ describe("CodexVisualDirectorAgent", () => {
     const producerClient = new SequencedCodexClient([revisedPlan], "deepseek", "deepseek-flash");
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       assessments: [{
         targetPath: "",
-        dimensions: [
-          { dimension: "attention", score: 95, evidence: "开场具体。" },
-          { dimension: "progression", score: 95, evidence: "逐镜推进连贯。" },
-          { dimension: "payoff", score: 95, evidence: "两类返工要求均已落实。" },
-          { dimension: "expression", score: 95, evidence: "方案表述清楚。" },
-        ],
+        dimensions: [{ dimension: "consistency", score: 95, evidence: "开场具体。" }, { dimension: "expression", score: 95, evidence: "方案表述清楚。" }],
       }],
       verdict: "pass",
       score: 95,
@@ -658,15 +620,10 @@ describe("CodexVisualDirectorAgent", () => {
     const producerClient = new SequencedCodexClient([candidate], "openai", "gpt-5.6-sol");
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       assessments: [{
         targetPath: "",
-        dimensions: [
-          { dimension: "attention", score: 95, evidence: "开场镜头保持有效。" },
-          { dimension: "progression", score: 95, evidence: "返工后推进连贯。" },
-          { dimension: "payoff", score: 95, evidence: "结尾兑现承诺。" },
-          { dimension: "expression", score: 95, evidence: "方案表述清楚。" },
-        ],
+        dimensions: [{ dimension: "consistency", score: 95, evidence: "开场镜头保持有效。" }, { dimension: "expression", score: 95, evidence: "方案表述清楚。" }],
       }],
       verdict: "pass",
       score: 95,
@@ -742,15 +699,10 @@ describe("CodexVisualDirectorAgent", () => {
     const producerClient = new SequencedCodexClient([candidate], "openai", "gpt-5.6-sol");
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       assessments: [{
         targetPath: "",
-        dimensions: [
-          { dimension: "attention", score: 96, evidence: "开场镜头保持有效。" },
-          { dimension: "progression", score: 96, evidence: "返工后推进连贯。" },
-          { dimension: "payoff", score: 96, evidence: "结尾兑现承诺。" },
-          { dimension: "expression", score: 96, evidence: "方案表述清楚。" },
-        ],
+        dimensions: [{ dimension: "consistency", score: 96, evidence: "开场镜头保持有效。" }, { dimension: "expression", score: 96, evidence: "方案表述清楚。" }],
       }],
       verdict: "pass",
       score: 96,
@@ -785,15 +737,10 @@ describe("CodexVisualDirectorAgent", () => {
     const producerClient = new SequencedCodexClient([firstCandidate, secondCandidate], "deepseek", "deepseek-flash");
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       assessments: [{
         targetPath: "",
-        dimensions: [
-          { dimension: "attention", score: 78, evidence: "开场钩子偏弱。" },
-          { dimension: "progression", score: 78, evidence: "第二镜缺少动作落点。" },
-          { dimension: "payoff", score: 78, evidence: "结尾收益不明确。" },
-          { dimension: "expression", score: 78, evidence: "镜头描述偏笼统。" },
-        ],
+        dimensions: [{ dimension: "consistency", score: 78, evidence: "开场钩子偏弱。" }, { dimension: "expression", score: 78, evidence: "镜头描述偏笼统。" }],
       }],
       verdict: "repair",
       score: 78,
@@ -807,15 +754,10 @@ describe("CodexVisualDirectorAgent", () => {
       repairInstructions: ["只补齐第二镜动作落点。"],
     }, {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       assessments: [{
         targetPath: "",
-        dimensions: [
-          { dimension: "attention", score: 94, evidence: "开场镜头有效。" },
-          { dimension: "progression", score: 94, evidence: "第二镜动作已落实。" },
-          { dimension: "payoff", score: 94, evidence: "结尾兑现承诺。" },
-          { dimension: "expression", score: 94, evidence: "镜头描述具体。" },
-        ],
+        dimensions: [{ dimension: "consistency", score: 94, evidence: "开场镜头有效。" }, { dimension: "expression", score: 94, evidence: "镜头描述具体。" }],
       }],
       verdict: "pass",
       score: 94,
@@ -862,15 +804,10 @@ describe("CodexVisualDirectorAgent", () => {
     const producerClient = new SequencedCodexClient([firstCandidate, repairedCandidate], "deepseek", "deepseek-flash");
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       assessments: [{
         targetPath: "",
-        dimensions: [
-          { dimension: "attention", score: 75, evidence: "开场镜头有效。" },
-          { dimension: "progression", score: 75, evidence: "第一镜水位与视觉圣经冲突。" },
-          { dimension: "payoff", score: 75, evidence: "结尾收益受影响。" },
-          { dimension: "expression", score: 75, evidence: "跨镜描述不一致。" },
-        ],
+        dimensions: [{ dimension: "consistency", score: 75, evidence: "开场镜头有效。" }, { dimension: "expression", score: 75, evidence: "跨镜描述不一致。" }],
       }],
       verdict: "repair",
       score: 75,
@@ -884,15 +821,10 @@ describe("CodexVisualDirectorAgent", () => {
       repairInstructions: ["只修正第一镜水位，其他镜头保持不变。"],
     }, {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       assessments: [{
         targetPath: "",
-        dimensions: [
-          { dimension: "attention", score: 92, evidence: "开场镜头有效。" },
-          { dimension: "progression", score: 92, evidence: "跨镜水位已经统一。" },
-          { dimension: "payoff", score: 92, evidence: "结尾兑现承诺。" },
-          { dimension: "expression", score: 92, evidence: "描述一致可读。" },
-        ],
+        dimensions: [{ dimension: "consistency", score: 92, evidence: "开场镜头有效。" }, { dimension: "expression", score: 92, evidence: "描述一致可读。" }],
       }],
       verdict: "pass",
       score: 92,
@@ -1502,9 +1434,7 @@ describe("CodexVisualDirectorAgent", () => {
     assert.equal("directive" in payload, false);
     assert.equal("task" in payload, false);
     assert.equal("outputContract" in payload, false);
-    const profiles = payload.directorProfiles as Array<{ id: string }>;
-    assert.equal(profiles.length, 6);
-    assert.equal(profiles[0]?.id, "documentary-observer");
+    assert.equal("directorProfiles" in payload, false);
     assert.deepEqual(payload.brief, {
       ...input.brief,
       productionCapabilities: {
@@ -1565,7 +1495,7 @@ describe("CodexVisualDirectorAgent", () => {
     await assert.rejects(() => agent.plan(directorInput()), /Director plan must be an object/);
 
     codexClient.respond = () => ({ version: "video-factory/director-plan-v1" });
-    await assert.rejects(() => agent.plan(directorInput()), /requestedProfileId/);
+    await assert.rejects(() => agent.plan(directorInput()), /visualBible/);
     assert.equal(codexClient.calls.length, 3);
   });
 
@@ -1761,15 +1691,10 @@ describe("CodexVisualDirectorAgent", () => {
     const producerClient = new SequencedCodexClient([plan], "deepseek", "deepseek-flash");
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       assessments: [{
         targetPath: "",
-        dimensions: [
-          { dimension: "attention", score: 55, evidence: "开场画面独立可用。" },
-          { dimension: "progression", score: 55, evidence: "跨镜身份依赖没有执行依据。" },
-          { dimension: "payoff", score: 55, evidence: "身份连续性承诺无法兑现。" },
-          { dimension: "expression", score: 55, evidence: "画面描述与路由不一致。" },
-        ],
+        dimensions: [{ dimension: "consistency", score: 55, evidence: "开场画面独立可用。" }, { dimension: "expression", score: 55, evidence: "画面描述与路由不一致。" }],
       }],
       verdict: "repair",
       score: 55,

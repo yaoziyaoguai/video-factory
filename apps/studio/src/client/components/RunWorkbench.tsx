@@ -1079,16 +1079,7 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
                   : null}
                 <p className="agent-review-guidance">补查会重跑整轮审片、不会重新购买画面或配音，因此<strong>其它镜头（包括上一轮已通过的镜头）的结论也可能变化</strong>；判定与上一轮不同的条目会标出「判定变动」，并给出两轮原文。{decidingPublishCopy ? "这里保留的是成片意见；采用发布文案不重复签署成片终审。若选择返工，请按更新后的步骤重新确认。" : "批准前你要对本轮每一条结论逐条表态：采纳的必须先返修，不采纳的要写明理由。"}</p>
               </div> : null}
-          {run.creativeSummary ? <details className="creative-summary run-creative-summary" role="region" aria-label="创作目标摘要">
-            <summary><strong>系统整理的创作目标</strong><small>展开核对</small></summary>
-            <p>根据本次简报推导；如有偏差，请在打回后修改标题、角度、受众或画面要求。</p>
-            <dl>
-              <div><dt>给谁看</dt><dd>{run.creativeSummary.audience}</dd></div>
-              <div><dt>开头承诺</dt><dd>{run.creativeSummary.openingPromise}</dd></div>
-              <div><dt>画面方向参考</dt><dd>{run.creativeSummary.requiredVisual}</dd></div>
-              <div><dt>结尾收益</dt><dd>{run.creativeSummary.payoff}</dd></div>
-            </dl>
-          </details> : null}
+
           <details className="workbench-full-report"><summary>完整审片报告与复核记录</summary>
           {visualReview ? <section className="independent-review-panel" aria-label={singleVisualReview ? "独立质量复核结果" : "双模型审片结果"}>
             <header><strong>{singleVisualReview

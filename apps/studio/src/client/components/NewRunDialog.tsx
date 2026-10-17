@@ -19,7 +19,6 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { NATIVE_AUDIO_PROVIDER, NATIVE_VIDEO_MODELS } from "@video-factory/production-pipeline/native-audio";
 import { defaultStudioDurationRange, DEFAULT_STUDIO_VOICE_DIRECTION, type StudioCreatorSettings, type StudioProductionInput, type StudioProvider, type StudioReferenceVideo, type StudioReworkDraft, type StudioReworkFinding } from "../../shared/api.js";
 import { parseDurationBounds, validateContentLedDurationIntent, type DurationBounds, type DurationIntent } from "@video-factory/production-pipeline/executable-timeline";
-import { STUDIO_DIRECTOR_PROFILES, type StudioDirectorProfileId } from "../../shared/director-profiles.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { visualSourceCompatibilityIssue } from "../../shared/visual-source-compatibility.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
@@ -70,7 +69,7 @@ type ReferenceVideoSelection = StudioReferenceVideo | (NonNullable<StudioReworkD
 });
 
 const CAPABILITIES: CapabilityDefinition[] = [
-  { key: "script", capability: "script.draft", label: "脚本生成", role: "编剧", description: "结构、钩子与分镜文案", preferred: "codex-screenwriter-v1", icon: FileText },
+  { key: "script", capability: "script.draft", label: "脚本生成", role: "编剧", description: "正文与分镜文案", preferred: "codex-screenwriter-v1", icon: FileText },
   { key: "director", capability: "storyboard.plan", label: "导演方案", role: "导演", description: "统一全片视觉规则并逐镜决定画面", preferred: "api-visual-director-v1", icon: Clapperboard },
   { key: "assets", capability: "asset.prepare", label: "画面素材", role: "素材导演", description: "按导演方案逐镜寻找或生成画面", preferred: "ai-shot-router-v1", icon: Image },
   { key: "voice", capability: "voice.synthesize", label: "配音", role: "声音导演", description: "旁白音色与语速", preferred: "macos-say-v1", icon: Mic2 },
@@ -131,7 +130,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   );
   const [activeKey, setActiveKey] = useState<BindingKey>("assets");
   const [recipeId, setRecipeId] = useState<RecipeId>("free-stock");
-  const [directorProfileId, setDirectorProfileId] = useState<StudioDirectorProfileId>("auto");
   const [platform, setPlatform] = useState("douyin");
   const [presentationMode, setPresentationMode] = useState<NonNullable<StudioProductionInput["presentationMode"]>>("narration");
   const [durationSeconds, setDurationSeconds] = useState(24);
@@ -215,11 +213,11 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   }, [discardPromptOpen]);
   const [visualGroupOpen, setVisualGroupOpen] = useState(false);
   const formSnapshot = useMemo(() => JSON.stringify({
-    bindings, recipeId, directorProfileId, platform, presentationMode, audioMode, nativeVideoProviderId, durationSeconds, durationReferenceDraft, durationRange, durationRangeDrafts,
+    bindings, recipeId, platform, presentationMode, audioMode, nativeVideoProviderId, durationSeconds, durationReferenceDraft, durationRange, durationRangeDrafts,
     assetProviderIds: [...assetProviderIds].sort(), modelSelections, voiceDirection, budgetIntention,
     semanticRankEnabled, acceptUnreviewedFirstCut, briefSummaryValues, visualBriefValues, inheritEditorial,
     referenceVideo: referenceVideo ? { ...referenceVideo } : null, rework,
-  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, directorProfileId, durationRange, durationRangeDrafts, durationSeconds, durationReferenceDraft, modelSelections, platform, presentationMode, audioMode, nativeVideoProviderId, recipeId, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection, inheritEditorial]);
+  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, durationRange, durationRangeDrafts, durationSeconds, durationReferenceDraft, modelSelections, platform, presentationMode, audioMode, nativeVideoProviderId, recipeId, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection, inheritEditorial]);
   useLayoutEffect(() => {
     if (!open || !initialDataReady || !initializedForOpen.current) return;
     if (baselineSnapshotRef.current === null) baselineSnapshotRef.current = formSnapshot;
@@ -413,13 +411,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const productionBlocked = missingProductionRoles.length > 0
     || inheritedSelectionIssues.length > 0
     || visualSourceIssue !== undefined;
-  const creativeSummary = {
-    audience: briefSummaryValues.audience || "待填写目标受众",
-    openingPromise: initialValues?.seriesContext?.episode.hook ?? (briefSummaryValues.angle || "待填写开头承诺"),
-    requiredVisual: visualBriefValues.visualProof || visualBriefValues.strategy || (briefSummaryValues.angle ? `需要呈现的核心画面：“${briefSummaryValues.angle}”` : "待明确需要呈现的核心画面"),
-    payoff: initialValues?.seriesContext?.episode.payoff
-      ?? (briefSummaryValues.title ? `围绕“${briefSummaryValues.title}”给出明确答案或可执行判断` : "待填写观众最终收获"),
-  };
 
   useEffect(() => {
     if (!open) {
@@ -463,7 +454,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       ? "free-stock"
       : initialValues?.economics?.recipeId ?? creatorSettings?.defaultRecipeId);
     const recipe = RECIPES.find((item) => item.id === initialRecipe) ?? RECIPES[0]!;
-    const initialProfile = initialValues?.director?.profileId ?? creatorSettings?.productionDefaults?.directorProfileId ?? "auto";
     const inheritedOrRecommendedSourceIds = initialValues?.director?.assetProviderIds
       ?? sourceIdsForRecipe(recipe, providers, creatorSettings?.defaultAssetProviderId);
     const sourceIds = imageStory
@@ -471,7 +461,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       : inheritedOrRecommendedSourceIds;
     setBindings(initialBindings);
     setRecipeId(recipe.id);
-    setDirectorProfileId(initialProfile);
     const initialPlatform = initialValues?.platform ?? creatorSettings?.productionDefaults?.platform ?? "douyin";
     setPlatform(isProductionPlatform(initialPlatform) ? initialPlatform : "");
     const initialDurationSeconds = initialValues?.durationSeconds ?? creatorSettings?.productionDefaults?.durationSeconds ?? 24;
@@ -736,11 +725,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       }
       const visualProof = visualBriefValues.visualProof.trim();
       const visualIntent = visualBriefValues.strategy.trim();
-      const inheritedVisualIntent = initialValues?.visualIntent?.trim();
-      const inheritedVisualPlanStrategy = initialValues?.visualPlan?.strategy.trim();
-      const preserveInheritedVisualPlan = Boolean(initialValues?.visualPlan)
-        && !visualIntentTouched.current
-        && (!inheritedVisualIntent || inheritedVisualIntent === inheritedVisualPlanStrategy);
       if (visualIntent.length > 1000) throw new Error("画面呈现想法不能超过 1000 个字符。");
       const budgetIntentionCny = budgetIntention.trim() ? Number(budgetIntention) : undefined;
       if (budgetIntentionCny !== undefined && (!Number.isFinite(budgetIntentionCny) || budgetIntentionCny < 0 || budgetIntentionCny > 100_000)) {
@@ -778,7 +762,6 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         ...(editorial ? { editorial } : {}),
         ...(visualProof ? { visualProof } : {}),
         ...(visualIntent ? { visualIntent } : {}),
-        ...(preserveInheritedVisualPlan ? { visualPlan: initialValues!.visualPlan, visualPlanAdopted: false } : {}),
         ...(initialValues?.seriesContext ? { seriesContext: initialValues.seriesContext } : {}),
         ...(initialValues?.creationContext ? { creationContext: initialValues.creationContext } : {}),
         ...(rework ? { rework } : {}),
@@ -799,7 +782,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         ...(referenceVideo && isUploadedReferenceVideo(referenceVideo)
           ? { referenceVideo: { uploadId: referenceVideo.uploadId, label: referenceVideo.label } }
           : {}),
-        director: { profileId: directorProfileId, assetProviderIds: activeAssetProviderIds },
+        director: { assetProviderIds: activeAssetProviderIds },
         economics,
         ...(budgetIntentionCny !== undefined ? { budgetIntentionCny } : {}),
       });
@@ -942,7 +925,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 <li>声音：声音设置已预填；脚本文字变化时，配音可能重新生成。</li>
                 <li>报价：下一轮会对实际需要重新生成的图片和视频逐项报价；最终项目和金额以费用确认页为准。</li>
               </ul>
-              {inheritedNodeIds && inheritedNodeIds.length > 0 ? <p className="rework-boundary-note">已带入上一版基线资料：{inheritedNodeIds.filter((nodeId) => nodeId !== "template").map((nodeId) => REWORK_BASELINE_NODE_LABELS[nodeId] ?? nodeId).join("、")}；这些资料用于对照和预填，不代表声音成品或素材母片已经复用，也不代表免费。</p> : null}
+              {inheritedNodeIds && inheritedNodeIds.length > 0 ? <p className="rework-boundary-note">已带入上一版基线资料：{inheritedNodeIds.map((nodeId) => REWORK_BASELINE_NODE_LABELS[nodeId] ?? nodeId).join("、")}；这些资料用于对照和预填，不代表声音成品或素材母片已经复用，也不代表免费。</p> : null}
             </section> : null}
             {rework ? <div className={inheritedSettingsOpen ? "advanced-production is-open" : "advanced-production"}>
               <button className="advanced-production-toggle" type="button" aria-expanded={inheritedSettingsOpen} onClick={() => setInheritedSettingsOpen((current) => !current)}>
@@ -958,7 +941,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               <div className="brief-fields">
                 <div className="field field-wide">
                   <label htmlFor="new-run-brief-title"><span>视频标题</span></label>
-                  <input id="new-run-brief-title" name="title" required data-dialog-initial-focus={rework ? undefined : true} defaultValue={initialValues?.title ?? ""} placeholder="一句能让人停下来的具体承诺" onChange={(event) => {
+                  <input id="new-run-brief-title" name="title" required data-dialog-initial-focus={rework ? undefined : true} defaultValue={initialValues?.title ?? ""} placeholder="给这条视频起个标题" onChange={(event) => {
                     const title = event.target.value;
                     setBriefSummaryValues((current) => ({ ...current, title }));
                   }} />
@@ -967,14 +950,14 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 </div>
                 <label className="field field-wide">
                   <span>内容角度</span>
-                  <textarea name="angle" required rows={3} defaultValue={initialValues?.angle ?? ""} placeholder="这条视频用什么独特角度讲清问题" onChange={(event) => {
+                  <textarea name="angle" required rows={3} defaultValue={initialValues?.angle ?? ""} placeholder="写下你想表达的内容" onChange={(event) => {
                     const angle = event.target.value;
                     setBriefSummaryValues((current) => ({ ...current, angle }));
                   }} />
                 </label>
                 <label className="field">
                   <span>目标受众</span>
-                  <input name="audience" required defaultValue={initialValues?.audience ?? ""} placeholder="这条视频最想帮助谁" onChange={(event) => setBriefSummaryValues((current) => ({ ...current, audience: event.target.value }))} />
+                  <input name="audience" required defaultValue={initialValues?.audience ?? ""} placeholder="你想让谁看到这条视频" onChange={(event) => setBriefSummaryValues((current) => ({ ...current, audience: event.target.value }))} />
                 </label>
                 <label className="field field-compact">
                   <span>目标平台</span>
@@ -1061,27 +1044,24 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   />
                 </label>
                 <label className="field field-wide">
-                  <span>视觉论证方式（可选）</span>
+                  <span>画面呈现想法（可选）</span>
                   <textarea
-                    aria-label="视觉论证方式（可选）"
+                    aria-label="画面呈现想法（可选）"
                     rows={3}
                     value={visualBriefValues.strategy}
-                    placeholder="例如：用同一主体贯穿全片，先展示问题，再用过程和结果兑现开头承诺"
+                    placeholder="写下你对画面的想法；留空也可以"
                     onChange={(event) => {
                       visualIntentTouched.current = true;
                       setVisualBriefValues((current) => ({ ...current, strategy: event.target.value }));
                     }}
                   />
-                  {initialValues?.visualPlan && !visualBriefValues.strategy.trim() ? (
-                    <small>可参考的方向：{initialValues.visualPlan.strategy.replace(/[。.!！?？]+$/u, "")}。只有你填写或明确采用后，才会成为制作要求。</small>
-                  ) : null}
                 </label>
                   </div>
                 </details>
               </div>
               {caseEntryOrigin
                 ? <CaseCreativeSummary title={briefSummaryValues.title} audience={briefSummaryValues.audience} angle={briefSummaryValues.angle} visualProof={visualBriefValues.visualProof} strategy={visualBriefValues.strategy} />
-                : Object.values(briefSummaryValues).some((value) => value.trim()) || visualBriefValues.visualProof.trim() || visualBriefValues.strategy.trim() ? <CreativeSummary summary={creativeSummary} /> : null}
+                : null}
               {initialValues?.editorial ? <section className="editorial-brief-note" aria-label="沿用的创作建议">
                 <label><input type="checkbox" checked={inheritEditorial} onChange={event => {
                   setInheritEditorial(event.target.checked);
@@ -1108,29 +1088,10 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
             <details className="new-run-group new-run-group-visual" open={visualGroupOpen} onToggle={(event) => setVisualGroupOpen(event.currentTarget.open)}>
               <summary>
                 <strong>02 画面与声音</strong>
-                <small>{`${STUDIO_DIRECTOR_PROFILES.find((profile) => profile.id === directorProfileId)?.label ?? "导演"} · ${nativeAudio ? "模型原生音画 · 不另买配音" : `${selectedRecipe.label} · ${automaticVoiceProvider ? `${creatorProviderName(automaticVoiceProvider)}（自动按量计费）` : effectiveBindings.voice ? "声音已配置" : "未选择声音"}`}`}</small>
+                <small>{`${nativeAudio ? "模型原生音画 · 不另买配音" : `${selectedRecipe.label} · ${automaticVoiceProvider ? `${creatorProviderName(automaticVoiceProvider)}（自动按量计费）` : effectiveBindings.voice ? "声音已配置" : "未选择声音"}`}`}</small>
                 <ChevronDown aria-hidden="true" size={15} />
               </summary>
               <div className="new-run-group-body">
-            <section className="director-casting-section" aria-labelledby="director-casting-title">
-              <div className="compact-section-heading">
-                <div><span>02</span><h3 id="director-casting-title">导演角色</h3></div>
-                <small>角色定创作立场，AI 仍逐镜做决定</small>
-              </div>
-              <div className="director-casting-control">
-                <label className="field">
-                  <span>导演角色</span>
-                  <select value={directorProfileId} onChange={(event) => setDirectorProfileId(event.target.value as StudioDirectorProfileId)}>
-                    {STUDIO_DIRECTOR_PROFILES.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
-                  </select>
-                </label>
-                {(() => {
-                  const profile = STUDIO_DIRECTOR_PROFILES.find((item) => item.id === directorProfileId) ?? STUDIO_DIRECTOR_PROFILES[0]!;
-                  return <div className="director-profile-note"><strong>{profile.inspiration}</strong><span>{profile.summary}</span><small>擅长：{profile.bestFor}</small></div>;
-                })()}
-              </div>
-            </section>
-
             <section className="reference-style-section" aria-labelledby="reference-style-title">
               <div className="compact-section-heading">
                 <div><span>＋</span><h3 id="reference-style-title">参考视频风格（可选）</h3></div>
@@ -1521,30 +1482,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   );
 }
 
-function CreativeSummary({ summary }: {
-  summary: { audience: string; openingPromise: string; requiredVisual: string; payoff: string };
-}) {
-  return <section className="creative-summary" aria-label="创作目标摘要">
-    <details>
-    <summary><strong>系统整理的创作目标</strong><small>展开核对简报如何转化为创作目标</small><ChevronDown aria-hidden="true" size={16} /></summary>
-    <p>根据简报推导；可回到标题、角度、受众和画面字段修改</p>
-    <dl>
-      <div><dt>给谁看</dt><dd>{summary.audience}</dd></div>
-      <div><dt>开头承诺</dt><dd>{summary.openingPromise}</dd></div>
-      <div><dt>画面方向参考</dt><dd>{summary.requiredVisual}</dd></div>
-      <div><dt>结尾收益</dt><dd>{summary.payoff}</dd></div>
-    </dl>
-    </details>
-  </section>;
-}
-
 const CASE_ANGLE_EXCERPT_CODEPOINTS = 120;
 
-/**
- * CLOUD-08/P3：案例入口的摘要只陈述已填写的创作目标——标题、受众、完整角度的一次
- * 节选（可展开原文）与显式填写的画面依据；留空项如实写“待填写”，不把角度推导成
- * 开头承诺/核心画面/结尾收益三段重复。
- */
 function CaseCreativeSummary({ title, audience, angle, visualProof, strategy }: {
   title: string;
   audience: string;
@@ -1970,7 +1909,7 @@ const REWORK_FINDING_TARGET_NODE_LABELS: Record<string, string> = {
  */
 function reworkFindingStageLabel(finding: StudioReworkFinding): string {
   const stage = finding.planningStageId;
-  if (stage === "treatment") return "方案 · 承诺与方向";
+  if (stage === "treatment") return "方案 · 构思与方向";
   if (stage === "script") return "方案 · 事实与论证";
   if (stage === "director") return "方案 · 分镜与可执行性";
   return "";

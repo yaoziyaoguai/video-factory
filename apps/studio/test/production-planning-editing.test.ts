@@ -95,16 +95,8 @@ function editingAgents(spies: EditingSpies): Pick<ProductionPipelineOptions, "tr
           treat: async (input: { brief: { title: string } }) => {
             spies.treatmentCalls.push(input.brief.title);
             return {
-              version: "video-factory/creative-treatment-v2",
-              viewerPromise: "看完能避开三个决策坑",
-              hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
-              progression: [
-                { beatId: "beat-1", purpose: "建立问题", viewerGain: "识别坑" },
-                { beatId: "beat-2", purpose: "给出方法", viewerGain: "可执行步骤" },
-              ],
-              payoff: "低风险决策清单",
-              visualPrinciples: ["真实动作"],
-              soundPrinciples: ["环境声先行"],
+              version: "video-factory/creative-treatment-v3",
+              concept: "看完能避开三个决策坑",
               evidenceRequirements: [],
               feasibilityQuestions: [],
             };
@@ -119,16 +111,8 @@ function editingAgents(spies: EditingSpies): Pick<ProductionPipelineOptions, "tr
           treat: async (input: { brief: { title: string } }) => {
             spies.treatmentCalls.push(`${input.brief.title}::model-b`);
             return {
-              version: "video-factory/creative-treatment-v2",
-              viewerPromise: "看完能避开三个决策坑",
-              hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
-              progression: [
-                { beatId: "beat-1", purpose: "建立问题", viewerGain: "识别坑" },
-                { beatId: "beat-2", purpose: "给出方法", viewerGain: "可执行步骤" },
-              ],
-              payoff: "低风险决策清单",
-              visualPrinciples: ["真实动作"],
-              soundPrinciples: ["环境声先行"],
+              version: "video-factory/creative-treatment-v3",
+              concept: "看完能避开三个决策坑",
               evidenceRequirements: [],
               feasibilityQuestions: [],
             };
@@ -142,8 +126,6 @@ function editingAgents(spies: EditingSpies): Pick<ProductionPipelineOptions, "tr
       draft: async (input: { brief: { title: string }; selectedModelId?: string }) => {
         spies.screenwriterCalls.push(input.selectedModelId ?? "screenwriter-model-one");
         return {
-          viewerPromise: "看完能避开三个决策坑",
-          narrativeArc: "问题-方法-清单",
           canonFacts: ["步骤可执行"],
           scenes: [1, 2, 3].map((position) => ({
             position,
@@ -164,9 +146,6 @@ function editingAgents(spies: EditingSpies): Pick<ProductionPipelineOptions, "tr
         spies.directorModels.push(input.selectedModelId ?? "director-model-one");
         return {
           version: "video-factory/director-plan-v1",
-          requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "documentary-observer",
-          profileRationale: "用真实动作解释。",
           visualBible: {
             narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
             camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
@@ -218,7 +197,7 @@ function editingBrief(): ProductionBrief {
       technicalReview: "python-technical-review-v1",
     },
     workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1" },
-    director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+    director: {  assetProviderIds: ["local-editorial-v1"] },
     economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
     voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
   } as unknown as ProductionBrief;
@@ -766,7 +745,7 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
     const priorVersions = structuredClone(configured.nodeRuns.find(node => node.nodeId === "brief")?.outputState?.versions);
     const callsBefore = structuredClone({ spies, workerCalls });
     for (const configurationChange of [
-      { director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] } },
+      { director: {  assetProviderIds: ["pexels-stock-v1"] } },
       { economics: { recipeId: "custom", allowMeteredProviders: true, maxCostCny: 999 } },
       { frozenModelSelections: { "wan-video-v1": { modelId: "untrusted-model", source: "run_override" } } },
       { reviewMode: "automatic" },

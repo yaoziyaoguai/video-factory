@@ -1,6 +1,5 @@
 import { AlertTriangle, ArrowUpRight, Clock3, Link2, Search, Target } from "lucide-react";
 import type { StudioOpportunity, StudioVisualSource } from "../../shared/api.js";
-import { resolveOpportunityVisualPlan } from "../../shared/visual-plan.js";
 import { beijingDateTime, evidenceGroupCountLabel, groupDisplayEvidence, platformLabel, presentableOpportunityEvidence, scoreSourceLabel, TOPIC_CATEGORY_LABELS } from "../presentation.js";
 
 interface OpportunityFocusProps {
@@ -11,7 +10,7 @@ interface OpportunityFocusProps {
 export function OpportunityFocus({ opportunity, onSupplementSources }: OpportunityFocusProps) {
   const sourceBlocked = opportunity.verification?.status === "blocked";
   // 没有已保存方案时这里只展示创作参考；NewRunDialog 不会把它悄悄提交成用户要求。
-  const visualPlan = resolveOpportunityVisualPlan(opportunity);
+  const visualPlan = opportunity.visualPlan;
   const hasSavedVisualPlan = opportunity.visualPlan !== undefined;
   return (
     <section className="opportunity-focus" aria-labelledby="opportunity-title" data-tour="opportunity-focus">
@@ -40,9 +39,9 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
         </div>
       </header>
 
-      <nav className="opportunity-context-nav" aria-label="选题内容"><a href="#evidence-heading">先看来源与事实 · {opportunity.evidence.length} 条线索</a><a href="#creative-direction">查看创作建议</a></nav>
+      <nav className="opportunity-context-nav" aria-label="选题内容"><a href="#evidence-heading">先看来源与事实 · {opportunity.evidence.length} 条线索</a>{visualPlan ? <a href="#creative-direction">查看创作建议</a> : null}</nav>
 
-      <section id="creative-direction" className="visual-contact-sheet visual-plan" aria-label="镜头方向示意" data-tour="visual-direction">
+      {visualPlan ? <section id="creative-direction" className="visual-contact-sheet visual-plan" aria-label="镜头方向示意" data-tour="visual-direction">
           <header className="contact-sheet-heading">
             <div><span>创作建议 · 不代表外部事实</span><h2>{hasSavedVisualPlan ? "已保存的镜头方向" : "可参考的镜头方向"}</h2></div>
             <p>{visualPlan.strategy}</p>
@@ -56,7 +55,7 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
               </article>
             ))}
           </div>
-      </section>
+      </section> : null}
 
       <div className="score-band" aria-label="机会评分维度">
         <Score label="人群" value={opportunity.score.audienceReach} />

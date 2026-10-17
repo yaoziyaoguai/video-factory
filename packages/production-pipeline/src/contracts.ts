@@ -41,20 +41,7 @@ export interface ProductionSpendFeedback {
   rejectedAt: string;
 }
 
-export const PRODUCTION_DIRECTOR_PROFILE_IDS = [
-  "auto",
-  "documentary-observer",
-  "quiet-humanism",
-  "urban-poetic",
-  "chromatic-storytelling",
-  "geometric-control",
-  "suspense-staging",
-] as const;
-
-export type ProductionDirectorProfileId = (typeof PRODUCTION_DIRECTOR_PROFILE_IDS)[number];
-
 export interface ProductionDirectorDirection {
-  profileId: ProductionDirectorProfileId;
   assetProviderIds: string[];
 }
 
@@ -169,22 +156,6 @@ export interface ProductionEditorialDirection {
   verdict: "produce_video" | "produce_image_story";
   reasons: string[];
   guardrails: string[];
-}
-
-export type ProductionVisualSource = "creator" | "stock" | "screen" | "local-card" | "generated";
-
-export interface ProductionVisualBeat {
-  id: string;
-  role: string;
-  duration: string;
-  description: string;
-  searchQuery: string;
-  source: ProductionVisualSource;
-}
-
-export interface ProductionVisualPlan {
-  strategy: string;
-  beats: ProductionVisualBeat[];
 }
 
 export interface ProductionReworkFinding {
@@ -312,9 +283,7 @@ export interface ProductionSeriesContext {
     updatedAt: string;
     pillar: string;
     title: string;
-    viewerPromise: string;
-    hook: string;
-    payoff: string;
+    concept: string;
     /** F01：采用绑定的内容版本。新创建由服务端携带真实值交叉验证；旧上下文可缺省。 */
     contentVersionId?: string;
     planning: {
@@ -374,7 +343,6 @@ export type ProductionBrief = DurationIntent & {
   runPurpose?: "production" | "test";
   /** 视觉审片不可用时，只有用户明确选择先产出首版才允许正式制作继续。 */
   visualReviewPolicy?: "required" | "allow_unreviewed_first_cut";
-  templateSnapshot?: ProductionTemplateSnapshot;
   providers: ProductionProviderBindings;
   models?: Record<string, string>;
   modelSelectionSources?: Record<string, ProductionModelSelectionSource>;
@@ -389,9 +357,6 @@ export type ProductionBrief = DurationIntent & {
   editorial?: ProductionEditorialDirection;
   visualProof?: string;
   visualIntent?: string;
-  visualPlan?: ProductionVisualPlan;
-  /** visualPlan 的来源证据：false=创建端确认是未采用的系统建议；缺省=来源未知，不得擅自降级。 */
-  visualPlanAdopted?: boolean;
   seriesContext?: ProductionSeriesContext;
   creationContext?: {
     origin: "trend" | "series" | "manual" | "case";
@@ -410,10 +375,8 @@ const PRODUCTION_BRIEF_INPUT_KEYS = new Set([
   "protocolVersion", "title", "angle", "audience", "nicheSlug", "durationSeconds", "durationRange", "durationPolicy",
   "platform", "reviewMode", "runPurpose", "visualReviewPolicy", "providers", "models", "modelSelectionSources", "frozenModelSelections", "workflowFeatures",
   "referenceVideo", "director", "economics", "spendFeedback", "voiceDirection", "editorial", "visualProof",
-  "visualIntent", "visualPlan", "visualPlanAdopted", "seriesContext", "creationContext", "rework", "taskContractDigests",
+  "visualIntent", "seriesContext", "creationContext", "rework", "taskContractDigests",
   "articleSources", "budgetIntentionCny", "presentationMode", "audioMode", "nativeVideoProviderId",
-  // 模板字段只为旧调用方提供明确的弃用剥离；它们不会进入有效 brief。
-  "template", "templateSnapshot",
 ]);
 
 export function requireTtsVoiceDirection(brief: ProductionBrief): ProductionVoiceDirection {
@@ -472,12 +435,6 @@ export function parseBrief(value: unknown): ProductionBrief {
   const editorial = parseEditorialDirection(value.editorial);
   const visualProof = value.visualProof === undefined ? undefined : requireString(value.visualProof, "visualProof");
   const visualIntent = value.visualIntent === undefined ? undefined : optionalBoundedText(value.visualIntent, "visualIntent", 1000);
-  const visualPlan = parseProductionVisualPlan(value.visualPlan);
-  // 来源证据只接受缺省或严格布尔：字符串/数字等非法值必须显式拒绝，不能归一化成
-  // “未采用建议”而降低用户要求身份（R4-08）。
-  const visualPlanAdopted = value.visualPlanAdopted === undefined ? undefined
-    : typeof value.visualPlanAdopted === "boolean" ? value.visualPlanAdopted
-      : (() => { throw new Error("visualPlanAdopted must be a boolean when provided."); })();
   const seriesContext = parseProductionSeriesContext(value.seriesContext);
   const creationContext = parseCreationContext(value.creationContext);
   const articleSources = parseProductionArticleSources(value.articleSources);
@@ -574,8 +531,6 @@ export function parseBrief(value: unknown): ProductionBrief {
     ...(editorial ? { editorial } : {}),
     ...(visualProof ? { visualProof } : {}),
     ...(visualIntent ? { visualIntent } : {}),
-    ...(visualPlan ? { visualPlan } : {}),
-    ...(visualPlanAdopted !== undefined ? { visualPlanAdopted } : {}),
     ...(seriesContext ? { seriesContext } : {}),
     ...(creationContext ? { creationContext } : {}),
     ...(articleSources.length ? { articleSources } : {}),
@@ -708,35 +663,6 @@ function parseTaskContractDigests(value: unknown): ProductionBrief["taskContract
     result[kind as keyof typeof result] = digest;
   }
   return result;
-}
-
-const PRODUCTION_VISUAL_SOURCES = new Set<ProductionVisualSource>(["creator", "stock", "screen", "local-card", "generated"]);
-
-export function parseProductionVisualPlan(value: unknown): ProductionVisualPlan | undefined {
-  if (value === undefined) return undefined;
-  const input = requireRecord(value, "visualPlan");
-  if (!Array.isArray(input.beats) || input.beats.length < 1 || input.beats.length > 12) {
-    throw new Error("visualPlan.beats must contain between 1 and 12 entries.");
-  }
-  const beats = input.beats.map((entry, index): ProductionVisualBeat => {
-    const beat = requireRecord(entry, `visualPlan.beats[${index}]`);
-    const source = requireString(beat.source, `visualPlan.beats[${index}].source`);
-    if (!PRODUCTION_VISUAL_SOURCES.has(source as ProductionVisualSource)) {
-      throw new Error(`visualPlan.beats[${index}].source is invalid.`);
-    }
-    return {
-      id: requireString(beat.id, `visualPlan.beats[${index}].id`),
-      role: requireString(beat.role, `visualPlan.beats[${index}].role`),
-      duration: requireString(beat.duration, `visualPlan.beats[${index}].duration`),
-      description: requireString(beat.description, `visualPlan.beats[${index}].description`),
-      searchQuery: requireString(beat.searchQuery, `visualPlan.beats[${index}].searchQuery`),
-      source: source as ProductionVisualSource,
-    };
-  });
-  if (new Set(beats.map((beat) => beat.id)).size !== beats.length) {
-    throw new Error("visualPlan.beats ids must be unique.");
-  }
-  return { strategy: requireString(input.strategy, "visualPlan.strategy"), beats };
 }
 
 function parseReworkContext(value: unknown): ProductionReworkContext | undefined {
@@ -1143,9 +1069,7 @@ export function parseProductionSeriesContext(value: unknown): ProductionSeriesCo
       updatedAt: requireIsoTimestamp(episode.updatedAt, "seriesContext.episode.updatedAt"),
       pillar: requireString(episode.pillar, "seriesContext.episode.pillar"),
       title: requireString(episode.title, "seriesContext.episode.title"),
-      viewerPromise: requireString(episode.viewerPromise, "seriesContext.episode.viewerPromise"),
-      hook: requireString(episode.hook, "seriesContext.episode.hook"),
-      payoff: requireString(episode.payoff, "seriesContext.episode.payoff"),
+      concept: requireString(episode.concept, "seriesContext.episode.concept"),
       ...(episode.contentVersionId === undefined
         ? {}
         : { contentVersionId: requireString(episode.contentVersionId, "seriesContext.episode.contentVersionId") }),
@@ -1471,10 +1395,6 @@ function parseDirectorDirection(
   if (value === undefined) return undefined;
   const input = requireRecord(value, "director");
   requireString(providers.director, "providers.director");
-  const profileId = requireString(input.profileId, "director.profileId");
-  if (!(PRODUCTION_DIRECTOR_PROFILE_IDS as readonly string[]).includes(profileId)) {
-    throw new Error("director.profileId is invalid.");
-  }
   if (!Array.isArray(input.assetProviderIds) || input.assetProviderIds.length === 0) {
     throw new Error("director.assetProviderIds must be a non-empty array.");
   }
@@ -1484,7 +1404,7 @@ function parseDirectorDirection(
   if (new Set(assetProviderIds).size !== assetProviderIds.length) {
     throw new Error("director.assetProviderIds must not contain duplicates.");
   }
-  return { profileId: profileId as ProductionDirectorProfileId, assetProviderIds };
+  return { assetProviderIds };
 }
 
 function voiceProviderForProfile(profileId: string): string {
@@ -1595,4 +1515,3 @@ function boundedStringList(value: unknown, field: string, maximum: number): stri
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-import { parseProductionTemplateSnapshot, type ProductionTemplateSnapshot } from "@video-factory/template-core";

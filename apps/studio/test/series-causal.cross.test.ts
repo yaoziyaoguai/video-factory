@@ -39,8 +39,8 @@ it("cross-layer: save, explicit generation, failed audit, restart, retrieve, edi
     assert.equal((await reopened.inject({ method: "POST", url: `${base}/retrieve` })).statusCode, 409);
     const episode = recovered.episodes[0]!;
     const edit = await reopened.inject({ method: "PATCH", url: `/api/series/${series.id}/episodes/1`, payload: {
-      expectedRevision: recovered.revision, title: "人工决定保留的光影", pillar: episode.pillar, viewerPromise: episode.viewerPromise,
-      hook: episode.hook, payoff: episode.payoff, fromPrevious: episode.continuity.fromPrevious, toNext: episode.continuity.toNext,
+      expectedRevision: recovered.revision, title: "人工决定保留的光影", pillar: episode.pillar, concept: episode.concept,
+        fromPrevious: episode.continuity.fromPrevious, toNext: episode.continuity.toNext,
     } });
     assert.equal(edit.statusCode, 200, edit.body);
     const inbox = (await reopened.inject({ url: "/api/candidate-inbox?origins=series" })).json<StudioCandidateInbox>();
@@ -322,7 +322,7 @@ it("cross-layer: legacy pending audit keeps original binding across query failur
     await assert.rejects(service.generateSeriesRoadmap(created.id), /原路线图操作/);
     const episode = created.episodes[0]!;
     await service.updateSeriesEpisodePlan(created.id, 1, { expectedRevision: created.revision, title: "历史候选旁的人工新稿", pillar: episode.pillar,
-      viewerPromise: episode.viewerPromise, hook: episode.hook, payoff: episode.payoff, fromPrevious: [], toNext: [] });
+      concept: episode.concept,   fromPrevious: [], toNext: [] });
     release();
     const deadline = Date.now() + 5000;
     let result: StudioSeries;
@@ -420,7 +420,7 @@ it("cross-layer: concurrent human edits survive the late candidate and block old
     await assert.rejects(h.service().recoverSeriesRoadmap(created.id, inFlight.roadmapOperations![0]!.id, "query"), /仍在执行/);
     const episode = created.episodes[0]!;
     await h.service().updateSeriesEpisodePlan(created.id, 1, { expectedRevision: created.revision, title: "并发人工版本", pillar: episode.pillar,
-      viewerPromise: episode.viewerPromise, hook: episode.hook, payoff: episode.payoff, fromPrevious: [], toNext: [] });
+      concept: episode.concept,   fromPrevious: [], toNext: [] });
     release();
     assert.match(String(await result), /路线图|修改|版本/);
     const current = (await service.listSeries())[0]!;

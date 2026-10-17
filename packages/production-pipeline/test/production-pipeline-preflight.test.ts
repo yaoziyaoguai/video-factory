@@ -175,11 +175,7 @@ function directorAgent(): VisualDirectorAgent {
     id: "api-visual-director-v1",
     plan: async (input) => ({
       version: "video-factory/director-plan-v1",
-      requestedProfileId: input.brief.requestedProfileId,
-      resolvedProfileId: "documentary-observer",
-      profileRationale: "真实动作使用纪实图库。",
       visualBible: {
-        viewerPromise: input.brief.viewerPromise,
         narrativeApproach: "三个动作逐步推进。",
         pacing: "自然",
         composition: "稳定中景",
@@ -228,12 +224,10 @@ async function contentLedVoiceConflict(durationRange?: { maxSeconds: number }, f
       return new Date().toISOString();
     },
     treatmentAgents: [{ providerId: "fixture", agent: { id: "codex-creative-treatment-v1", modelId: "fixture-treatment", treat: async () => ({
-      version: "video-factory/creative-treatment-v2", viewerPromise: "完整演示动作",
-      hook: { narrationIntent: "演示问题", visualIntent: "真实动作" },
-      progression: [{ beatId: "action", purpose: "逐步演示", viewerGain: "掌握动作" }], payoff: "完成动作",
-      visualPrinciples: ["真实动作"], soundPrinciples: ["自然讲解"], evidenceRequirements: [], feasibilityQuestions: [],
+      version: "video-factory/creative-treatment-v3", concept: "完整演示动作",
+        evidenceRequirements: [], feasibilityQuestions: [],
     }) } }],
-    screenwriterAgent: { id: "codex-screenwriter-v1", modelId: "fixture-script", draft: async () => ({ viewerPromise: "完整演示动作", scenes }) },
+    screenwriterAgent: { id: "codex-screenwriter-v1", modelId: "fixture-script", draft: async () => ({  scenes }) },
     directorAgent: { ...directorAgent(), modelId: "fixture-director" },
     visualReviewAgent: { id: "test-visual-review-v1", modelId: "test-visual-model", review: async () => cleanVisualReport },
     assetProviders: [{ id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["图库视频"], deliveryTypes: ["stock_video"] }],
@@ -249,7 +243,7 @@ async function contentLedVoiceConflict(durationRange?: { maxSeconds: number }, f
       ...(joint ? { creativePlanning: "joint-v1" as const } : {}) },
     providers: { script: "codex-screenwriter-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1",
       voice: "minimax-tts-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1", visualReview: "test-visual-review-v1" },
-    director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+    director: {  assetProviderIds: ["pexels-stock-v1"] },
     voiceDirection: { profileId: "minimax:female-chengshu", rate: 185, pauseScale: 1, masteringPreset: "natural" },
   });
   watchedRunId = run.id;
@@ -434,7 +428,7 @@ describe("ProductionPipeline production preflight", () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-narration-confirm-"));
     const worker = groupedConflict ? new VoiceConflictWorker(true) : new RecordingWorker();
     const pipeline = new ProductionPipeline({ workspaceRoot, worker,
-      screenwriterAgent: { id: "codex-screenwriter-v1", draft: async () => character ? structuredClone(characterScript) : ({ viewerPromise: "三个动作连成故事", scenes }) },
+      screenwriterAgent: { id: "codex-screenwriter-v1", draft: async () => character ? structuredClone(characterScript) : ({  scenes }) },
       directorAgent: { ...directorAgent(), plan: async (input) => {
         const plan = await directorAgent().plan(input) as NarrationVisualDirectorPlan;
         return character ? { ...plan, version: "video-factory/director-plan-v2",
@@ -453,7 +447,7 @@ describe("ProductionPipeline production preflight", () => {
       workflowFeatures: { boundaryGates: "user-confirmed-v1", assetSemanticRank: false, referenceGrammar: false },
       providers: { script: "codex-screenwriter-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1",
         voice: "minimax-tts-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       voiceDirection: { profileId: "minimax:female-chengshu", rate: 185, pauseScale: 1, masteringPreset: "natural" },
     });
     for (let step = 0; step < 8 && !run.nodeRuns.some((node) => node.nodeId === "assets" && node.status === "needs_human"); step += 1) {
@@ -641,7 +635,6 @@ describe("ProductionPipeline production preflight", () => {
       screenwriterAgent: {
         id: "codex-screenwriter-v1",
         draft: async () => ({
-          viewerPromise: "看完能完成三个真实动作。",
           scenes,
         }),
       },
@@ -698,7 +691,7 @@ describe("ProductionPipeline production preflight", () => {
         technicalReview: "python-technical-review-v1",
         visualReview: "test-visual-review-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       voiceDirection: {
         profileId: "minimax:female-chengshu",
         rate: 185,
@@ -817,8 +810,6 @@ describe("ProductionPipeline production preflight", () => {
       screenwriterAgent: {
         id: "codex-screenwriter-v1",
         draft: async () => ({
-          viewerPromise: "看完能完成三个真实动作。",
-          narrativeArc: "从准备到执行再到收束。",
           scenes,
         }),
       },
@@ -851,7 +842,7 @@ describe("ProductionPipeline production preflight", () => {
         render: "python-ffmpeg-v1",
         technicalReview: "python-technical-review-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       voiceDirection: {
         profileId: "macos:Tingting",
         rate: 185,
@@ -900,7 +891,6 @@ describe("ProductionPipeline production preflight", () => {
       screenwriterAgent: {
         id: "codex-screenwriter-v1",
         draft: async () => ({
-          viewerPromise: "看完能完成三个真实动作。",
           scenes,
         }),
       },
@@ -932,7 +922,7 @@ describe("ProductionPipeline production preflight", () => {
         render: "python-ffmpeg-v1",
         technicalReview: "python-technical-review-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       voiceDirection: {
         profileId: "macos:Tingting",
         rate: 185,
@@ -1000,7 +990,6 @@ describe("ProductionPipeline production preflight", () => {
       screenwriterAgent: {
         id: "codex-screenwriter-v1",
         draft: async () => ({
-          viewerPromise: "看完能理解三个抽象步骤。",
           scenes: scenes.map((scene) => ({
             ...scene,
             visual_strategy: "image" as const,
@@ -1048,7 +1037,7 @@ describe("ProductionPipeline production preflight", () => {
         render: "python-ffmpeg-v1",
         technicalReview: "python-technical-review-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["seedream-image-v1"] },
+      director: {  assetProviderIds: ["seedream-image-v1"] },
       economics: {
         recipeId: "custom",
         allowMeteredProviders: true,
@@ -1095,7 +1084,6 @@ describe("ProductionPipeline production preflight", () => {
       screenwriterAgent: {
         id: "codex-screenwriter-v1",
         draft: async () => ({
-          viewerPromise: "看完能理解三个抽象步骤。",
           scenes: scenes.map((scene) => ({
             ...scene,
             visual_strategy: "image" as const,
@@ -1143,7 +1131,7 @@ describe("ProductionPipeline production preflight", () => {
         render: "python-ffmpeg-v1",
         technicalReview: "python-technical-review-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["seedream-image-v1"] },
+      director: {  assetProviderIds: ["seedream-image-v1"] },
       economics: {
         recipeId: "custom",
         allowMeteredProviders: true,

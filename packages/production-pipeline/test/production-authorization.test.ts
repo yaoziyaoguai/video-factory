@@ -377,8 +377,6 @@ class AuthWorker {
     const output = outputs[capability];
     assert.ok(output, `Unexpected capability: ${capability}`);
     const scriptDocument = JSON.stringify({
-      viewerPromise: "看完能记住三个要点",
-      narrativeArc: "问题-方法-清单",
       canonFacts: ["要点可执行"],
       scenes: [1, 2, 3].map((position) => ({
         position,
@@ -648,16 +646,8 @@ describe("production authorization host acceptance", () => {
           id: "codex-creative-treatment-v1",
           modelId: "treatment-model-a",
           treat: async () => ({
-            version: "video-factory/creative-treatment-v2",
-            viewerPromise: "看完能记住三个要点",
-            hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
-            progression: [
-              { beatId: "beat-1", purpose: "建立问题", viewerGain: "识别坑" },
-              { beatId: "beat-2", purpose: "给出方法", viewerGain: "可执行步骤" },
-            ],
-            payoff: "低风险决策清单",
-            visualPrinciples: ["真实动作"],
-            soundPrinciples: ["环境声先行"],
+            version: "video-factory/creative-treatment-v3",
+            concept: "看完能记住三个要点",
             evidenceRequirements: [],
             feasibilityQuestions: [],
           }),
@@ -667,8 +657,6 @@ describe("production authorization host acceptance", () => {
         id: "codex-screenwriter-v1",
         modelId: "screenwriter-model-one",
         draft: async () => ({
-          viewerPromise: "看完能记住三个要点",
-          narrativeArc: "问题-方法-清单",
           canonFacts: ["要点可执行"],
           scenes: [1, 2, 3].map((position) => ({
             position,
@@ -685,9 +673,6 @@ describe("production authorization host acceptance", () => {
         modelId: "director-local-model",
         plan: async (input: { brief: { requestedProfileId: string }; scenes: Array<{ position: number }> }) => ({
           version: "video-factory/director-plan-v1",
-          requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "documentary-observer",
-          profileRationale: "用真实动作解释。",
           visualBible: {
             narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
             camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
@@ -773,16 +758,8 @@ describe("scope-covered spend approval auto-continues", () => {
         id: "codex-creative-treatment-v1",
         modelId: "treatment-model-a",
         treat: async () => ({
-          version: "video-factory/creative-treatment-v2",
-          viewerPromise: "看完能记住三个要点",
-          hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
-          progression: [
-            { beatId: "beat-1", purpose: "建立问题", viewerGain: "识别坑" },
-            { beatId: "beat-2", purpose: "给出方法", viewerGain: "可执行步骤" },
-          ],
-          payoff: "低风险决策清单",
-          visualPrinciples: ["真实动作"],
-          soundPrinciples: ["环境声先行"],
+          version: "video-factory/creative-treatment-v3",
+          concept: "看完能记住三个要点",
           evidenceRequirements: [],
           feasibilityQuestions: [],
         }),
@@ -796,8 +773,6 @@ describe("scope-covered spend approval auto-continues", () => {
         id: "codex-screenwriter-v1",
         modelId: "screenwriter-model-one",
         draft: async () => ({
-          viewerPromise: "看完能记住三个要点",
-          narrativeArc: "问题-方法-清单",
           canonFacts: ["要点可执行"],
           scenes: [1, 2, 3].map((position) => ({
             position,
@@ -814,9 +789,6 @@ describe("scope-covered spend approval auto-continues", () => {
         modelId: "director-model-one",
         plan: async (input: { brief: { requestedProfileId: string }; scenes: Array<{ position: number; visualPrompt?: string }> }) => ({
           version: "video-factory/director-plan-v1",
-          requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "documentary-observer",
-          profileRationale: "生成镜头交付。",
           visualBible: {
             narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
             camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
@@ -848,7 +820,7 @@ describe("scope-covered spend approval auto-continues", () => {
     const run = await pipeline.start({
       ...AUTH_BRIEF,
       providers: { ...AUTH_BRIEF.providers, assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     } as ProductionBrief);
     assert.equal(run.status, "awaiting_spend_approval", JSON.stringify(run.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));

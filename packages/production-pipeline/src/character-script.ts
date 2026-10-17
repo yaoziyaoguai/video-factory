@@ -26,8 +26,6 @@ export interface CharacterScriptScene extends Omit<ScriptScene, "narration"> {
 }
 export interface CharacterScript {
   version: typeof CHARACTER_SCRIPT_VERSION;
-  viewerPromise?: string;
-  narrativeArc?: string;
   canonFacts?: string[];
   characters: ScriptCharacter[];
   scenes: CharacterScriptScene[];
@@ -120,7 +118,7 @@ function parseCharacterScript(value: unknown, options?: CharacterScriptValidatio
   const total = scenes.reduce((n, s) => n + s.duration, 0);
   if (range && (total < range.minSeconds || total > range.maxSeconds)) throw new Error("剧本总时长超出目标范围。");
   if (options?.requireCanonFacts && input.canonFacts === undefined) throw new Error("Series script drafts must contain a canonFacts array with at most 8 entries.");
-  return { version: CHARACTER_SCRIPT_VERSION, ...optionalText(input, "viewerPromise"), ...optionalText(input, "narrativeArc"),
+  return { version: CHARACTER_SCRIPT_VERSION,
     ...(input.canonFacts === undefined ? {} : { canonFacts: strings(input.canonFacts, "canonFacts", 0) }), characters, scenes };
 }
 

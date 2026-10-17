@@ -69,7 +69,7 @@ function boardItem(providerId: string): StudioCandidateInboxItem {
       painPoint: candidate.painPoint,
       hook: candidate.hook,
       evidence: [{ source: "技术媒体 A", evidenceUrl: "https://example.com/ai-workflow" }],
-    }, BUILTIN_TEMPLATES),
+    }),
   };
 }
 

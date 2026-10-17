@@ -434,7 +434,7 @@ function SeriesRoadmap({
           <summary>查看原候选（{operation.candidate.length} 集）</summary>
           <ol>{operation.candidate.map((episode) => <li key={episode.episodeNumber}>
             <h4>第 {episode.episodeNumber} 集 · {episode.title}</h4>
-            <p>{episode.viewerPromise}</p><p>开场：{episode.hook}</p><p>兑现：{episode.payoff}</p>
+            <p>{episode.concept}</p>
             <p>承接：{episode.fromPrevious.join("；") || "无"} · 留给下一集：{episode.toNext.join("；") || "无"}</p>
           </li>)}</ol>
         </details> : null}
@@ -472,7 +472,7 @@ function SeriesRoadmap({
               <li key={episode.id}>
                 <button type="button" aria-current={selectedEpisode?.id === episode.id ? "true" : undefined} className={`${selectedEpisode?.id === episode.id ? "is-active" : ""}${locked ? " is-locked" : ""}`} onClick={() => selectEpisode(episode.id)}>
                   <span className="series-episode-index">E{String(episode.episodeNumber).padStart(2, "0")}</span>
-                  <span className="series-episode-copy"><small>{episode.pillar}</small><strong>{seriesEpisodeTitle(episode)}</strong>{episode.viewerPromise.trim() !== series.premise.trim() && episode.id !== selectedEpisode?.id ? <span>{episode.viewerPromise}</span> : null}</span>
+                  <span className="series-episode-copy"><small>{episode.pillar}</small><strong>{seriesEpisodeTitle(episode)}</strong>{episode.concept.trim() !== series.premise.trim() && episode.id !== selectedEpisode?.id ? <span>{episode.concept}</span> : null}</span>
                   <span className={`series-episode-status is-${episode.status}`}>{locked ? <LockKeyhole aria-hidden="true" size={13} /> : episode.status === "ready" || episode.status === "published" ? <CheckCircle2 aria-hidden="true" size={13} /> : <Clapperboard aria-hidden="true" size={13} />}{seriesEpisodeStatusLabel(episode, locked)}</span>
                 </button>
               </li>
@@ -485,11 +485,10 @@ function SeriesRoadmap({
           <article ref={detailRef} className="series-episode-detail" aria-label="单集详情" tabIndex={-1}>
             <header><span>第 {selectedEpisode.episodeNumber} 集{selectedEpisode.arc.trim() !== series.currentSeason.arc.trim() && selectedEpisode.arc.trim() !== series.premise.trim() ? ` · ${selectedEpisode.arc}` : ""}</span><strong>{seriesEpisodeStatusLabel(selectedEpisode, Boolean(blockedBy))}</strong></header>
             <h3>{seriesEpisodeTitle(selectedEpisode)}</h3>
-            {selectedEpisode.viewerPromise.trim() !== series.premise.trim() ? <p className="series-viewer-promise">{selectedEpisode.viewerPromise}</p> : null}
+            {selectedEpisode.concept.trim() !== series.premise.trim() ? <p className="series-viewer-promise">{selectedEpisode.concept}</p> : null}
             <div className="series-continuity-grid" aria-label="本集内容与前后承接">
               <section><span>前集定版交接</span><p>{(selectedEpisode.continuity.inheritedFromPrevious ?? []).join("；") || "暂无前集定版交接。"}</p></section>
               <section><span>本集承接要求</span><p>{selectedEpisode.continuity.fromPrevious.join("；") || "没有额外创作约束。"}</p></section>
-              <section><span>本集兑现</span><p>{seriesEpisodePayoff(selectedEpisode)}</p></section>
               <section><span>留给下一集</span><p>{selectedEpisode.continuity.toNext.join("；")}</p></section>
             </div>
             <section className="series-agent-route" aria-label="本集智能制作与质量复核流程">
@@ -520,8 +519,7 @@ function SeriesRoadmap({
                   const audits = selectedEpisode.auditHistory?.filter((audit) => audit.targetVersionId === version.versionId) ?? [];
                   return <li key={version.versionId}>
                     <strong>第 {index + 1} 版{version.versionId === selectedEpisode.contentVersionId ? " · 当前稿" : ""}{selectedEpisode.adoption?.targetVersionId === version.versionId ? " · 已采用" : ""}</strong>
-                    <p>{version.title} · {version.viewerPromise}</p>
-                    <p>开场：{version.hook}；兑现：{version.payoff}</p>
+                    <p>{version.title} · {version.concept}</p>
                     {audits.length ? <ul>{audits.map((audit) => <li key={audit.auditId}>审计于 {audit.recordedAt}：{creatorFacingTechnicalText(audit.summary ?? "没有文字总结")}{audit.suggestions?.length ? `；建议：${audit.suggestions.map(creatorFacingTechnicalText).join("；")}` : ""}</li>)}</ul>
                       : <p>这版没有可核实的独立审计结论。</p>}
                   </li>;
@@ -663,12 +661,6 @@ function seriesEpisodeTitle(episode: StudioSeries["episodes"][number]): string {
   return isMigrationPendingEpisode(episode)
     ? `第 ${episode.episodeNumber} 集 · 历史成片待恢复`
     : episode.title;
-}
-
-function seriesEpisodePayoff(episode: StudioSeries["episodes"][number]): string {
-  return isMigrationPendingEpisode(episode)
-    ? "确认对应的历史成片后，恢复本集定版状态并解锁下一集。"
-    : episode.payoff;
 }
 
 function likelyHistoricalMatch(

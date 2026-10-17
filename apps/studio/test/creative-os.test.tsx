@@ -20,7 +20,6 @@ import { HomePage } from "../src/client/pages/HomePage.js";
 import { TodayPage } from "../src/client/pages/TodayPage.js";
 import type { StudioCandidateInboxItem, StudioCostDashboard, StudioLocalCapability, StudioOpportunity, StudioProvider, StudioRunSummary, StudioSeries, StudioTemplate, StudioTopicGenerationReceipt, StudioTrendSource,
 } from "../src/shared/api.js";
-import { planVisualDirection } from "../src/shared/visual-plan.js";
 
 const opportunity: StudioOpportunity = {
   id: "opportunity-1",
@@ -112,12 +111,6 @@ function candidate(index: number, category: StudioCandidateInboxItem["category"]
       score: 82,
       reasons: ["适合视频表达。"],
       guardrails: ["逐镜核验。"],
-      recommendedTemplate: {
-        id: "knowledge-explainer",
-        name: "知识解释",
-        format: "问题、因果模型与生活验证构成的解释视频",
-        rationale: "让抽象信息形成可复述的因果链。",
-      },
     },
     title: `候选提案 ${index}`,
     platform: index % 2 === 0 ? "bilibili" : "douyin",
@@ -248,9 +241,7 @@ function seriesPublicAffairs(): StudioSeries {
       arc: "台风季事实核对",
       pillar: "来源核验",
       title: "台风伤亡消息持续更新",
-      viewerPromise: "看懂每条消息背后的来源",
-      hook: "哪些伤亡说法真的有来源？",
-      payoff: "给出可核验的来源清单",
+      concept: "看懂每条消息背后的来源",
       canonBaseRevision: 0,
       status: "planned",
       continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: [], canonChecks: [] },
@@ -388,7 +379,7 @@ describe("Creative OS", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "free-stock",
       topicStrategy: { customInstruction: "优先可拍题材。" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     vi.spyOn(studioApi, "candidateInbox").mockResolvedValueOnce(inbox([blocked])).mockResolvedValue(inbox([ready]));
     const supplement = vi.spyOn(studioApi, "supplementCandidateSources").mockResolvedValue(ready);
@@ -422,12 +413,6 @@ describe("Creative OS", () => {
         score: 82,
         reasons: ["适合视频表达。"],
         guardrails: ["逐镜核验。"],
-        recommendedTemplate: {
-          id: "knowledge-explainer",
-          name: "知识解释",
-          format: "问题、因果模型与生活验证构成的解释视频",
-          rationale: "让抽象信息形成可复述的因果链。",
-        },
       },
     };
     vi.spyOn(studioApi, "opportunities").mockResolvedValueOnce([blocked]).mockResolvedValue([ready]);
@@ -438,19 +423,21 @@ describe("Creative OS", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "free-stock",
       topicStrategy: { customInstruction: "优先可拍题材。" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     const supplement = vi.spyOn(studioApi, "supplementOpportunitySources").mockResolvedValue(ready);
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "可参考的镜头方向" })).toBeInTheDocument();
+    await screen.findByLabelText(/历史机会评分/);
+    expect(screen.queryByRole("heading", { name: "可参考的镜头方向" })).not.toBeInTheDocument();
     expect(screen.getByLabelText(/历史机会评分/)).toHaveTextContent("历史分");
     await user.click(screen.getByRole("button", { name: "补充原始来源" }));
     await user.type(screen.getByLabelText("来源链接（每行一条，1–10 条）"), "https://news.example.org/report");
     await user.click(screen.getByRole("button", { name: "保存来源（1 条）" }));
 
     await waitFor(() => expect(supplement).toHaveBeenCalledWith(blocked.id, { evidenceUrls: ["https://news.example.org/report"] }));
-    expect(await screen.findByRole("heading", { name: "可参考的镜头方向" })).toBeInTheDocument();
+    await screen.findByLabelText(/机会总分/);
+    expect(screen.queryByRole("heading", { name: "可参考的镜头方向" })).not.toBeInTheDocument();
     expect(screen.getByLabelText(/机会总分/)).toHaveTextContent("机会分");
     expect(screen.getByRole("button", { name: "新建制作" })).toBeEnabled();
   });
@@ -814,7 +801,7 @@ describe("Creative OS", () => {
       id: "a".repeat(64), owner: { kind: "series", id: saved.id, title: saved.name }, action: "generate",
       baseRevision: saved.revision, state: "failed", auditStatus: "failed", canRetrieve: true,
       message: "候选已保存；独立审计未完成。", executionFacts: [],
-      candidate: [{ episodeNumber: 1, pillar: saved.pillars[0]!, title: "取回的模型候选", viewerPromise: "可独立兑现的观察", hook: "看这个细节", payoff: "看见完整变化", fromPrevious: [], toNext: [] }],
+      candidate: [{ episodeNumber: 1, pillar: saved.pillars[0]!, title: "取回的模型候选", concept: "可独立兑现的观察",   fromPrevious: [], toNext: [] }],
     }];
     vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
@@ -849,7 +836,7 @@ describe("Creative OS", () => {
       state: "failed", auditStatus: "failed", canRetrieve: false, canQuery: true, executionFacts: [],
       message: "独立审计失败，已生成的候选保留。",
       evidenceIssue: "已按原请求输入核对系列归属；未保存原始版本，候选仅供查看，不覆盖当前稿。",
-      candidate: [{ episodeNumber: 1, pillar: saved.pillars[0]!, title: "历史模型候选", viewerPromise: "原来的承诺", hook: "原来的开场", payoff: "原来的兑现", fromPrevious: [], toNext: [] }],
+      candidate: [{ episodeNumber: 1, pillar: saved.pillars[0]!, title: "历史模型候选", concept: "原来的承诺",   fromPrevious: [], toNext: [] }],
     }];
     vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
@@ -975,9 +962,7 @@ describe("Creative OS", () => {
         arc: "历史内容",
         pillar: "旧主题",
         title: "历史单集",
-        viewerPromise: "保留可读",
-        hook: "历史开场",
-        payoff: "历史结论",
+        concept: "保留可读",
         canonBaseRevision: 0,
         status: "planned",
         continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: [], canonChecks: [] },
@@ -1022,7 +1007,7 @@ describe("Creative OS", () => {
     const series = seriesPublicAffairs();
     series.currentSeason.arc = series.premise;
     series.episodes[0]!.arc = series.premise;
-    series.episodes[0]!.viewerPromise = series.premise;
+    series.episodes[0]!.concept = series.premise;
     const props = { initialMode: "series" as const, selectedSeriesId: series.id, inbox: inbox([]), historicalRuns: [],
       loading: {}, trendMeta: { platformCount: 0, candidateCount: 0 }, seriesAuditReady: true,
       onRetry: vi.fn(), onRefreshTrends: vi.fn(), onAdopt: vi.fn(), onCreateSeries: vi.fn(), onSelectSeries: vi.fn(),
@@ -1039,7 +1024,7 @@ describe("Creative OS", () => {
     await user.click(summary);
     expect(screen.getByText(series.bible.rules[0]!)).toBeVisible();
     expect(screen.getByRole("button", { name: "编辑路线图" })).toBeVisible();
-    const distinct = { ...series, episodes: [{ ...series.episodes[0]!, viewerPromise: "本集独有的具体收益" }] };
+    const distinct = { ...series, episodes: [{ ...series.episodes[0]!, concept: "本集独有的具体收益" }] };
     rerender(<MemoryRouter><TopicEntryWorkspace {...props} series={[distinct]} /></MemoryRouter>);
     expect(screen.getAllByText("本集独有的具体收益").some(element => element.classList.contains("series-viewer-promise"))).toBe(true);
   });
@@ -1051,11 +1036,11 @@ describe("Creative OS", () => {
       contentVersionId: "series-v2",
       versionHistory: [
         { versionId: "series-v1", recordedAt: episode.createdAt, source: "agent" as const,
-          pillar: episode.pillar, title: "旧单集标题", viewerPromise: episode.viewerPromise,
-          hook: "旧开场", payoff: episode.payoff, fromPrevious: [], toNext: [] },
+          pillar: episode.pillar, title: "旧单集标题", concept: episode.concept,
+            fromPrevious: [], toNext: [] },
         { versionId: "series-v2", recordedAt: episode.updatedAt, source: "human" as const,
-          pillar: episode.pillar, title: episode.title, viewerPromise: episode.viewerPromise,
-          hook: episode.hook, payoff: episode.payoff, fromPrevious: [], toNext: [] },
+          pillar: episode.pillar, title: episode.title, concept: episode.concept,
+            fromPrevious: [], toNext: [] },
       ],
       auditHistory: [{ auditId: "audit-v1", targetVersionId: "series-v1", recordedAt: episode.createdAt,
         status: "awaiting_user" as const, summary: "旧版开场没有交代来源。", providerId: "model", modelId: "model-a" }],
@@ -1187,10 +1172,10 @@ describe("Creative OS", () => {
     expect(navigation.getByRole("link", { name: /创作台/ })).toHaveAttribute("href", "/");
     expect(navigation.getByRole("link", { name: /制作记录/ })).toHaveAttribute("href", "/projects");
     expect(navigation.getByRole("link", { name: /素材库/ })).toHaveAttribute("href", "/assets");
-    expect(navigation.getByRole("link", { name: /模板资料/ })).toHaveAttribute("href", "/templates");
+    expect(navigation.queryByRole("link", { name: /模板资料/ })).not.toBeInTheDocument();
     expect(navigation.getByRole("link", { name: /创作设置/ })).toHaveAttribute("href", "/resources");
     expect(navigation.getByRole("link", { name: /制作复盘/ })).toHaveAttribute("href", "/experiments");
-    for (const label of ["创作台", "制作记录", "素材库", "模板资料", "创作设置", "制作复盘"]) {
+    for (const label of ["创作台", "制作记录", "素材库", "创作设置", "制作复盘"]) {
       expect(navigation.getByRole("link", { name: label })).toHaveAttribute("aria-label", label);
       expect(navigation.getByRole("link", { name: label })).toHaveAttribute("title", label);
     }
@@ -1223,8 +1208,8 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([{ ...runningRun, title: "窗边一杯水的六秒光影" }]);
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
-    await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
-    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), "窗边一杯水");
+    await user.click(screen.getByRole("button", { name: "搜索项目、选题或功能" }));
+    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题或功能" }), "窗边一杯水");
 
     expect(await screen.findByRole("option", { name: /窗边一杯水的六秒光影/ })).toHaveAttribute("href", "/projects/run-1");
   });
@@ -1235,8 +1220,8 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([{ ...runningRun, title: "失败的制作", status: "failed" }]);
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
-    await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
-    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), "失败的制作");
+    await user.click(screen.getByRole("button", { name: "搜索项目、选题或功能" }));
+    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题或功能" }), "失败的制作");
 
     expect(await screen.findByRole("option", { name: /失败的制作/ })).toHaveTextContent("失败");
     expect(screen.getByRole("option", { name: /失败的制作/ })).not.toHaveTextContent("制作中");
@@ -1251,8 +1236,8 @@ describe("Creative OS", () => {
     ]);
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
-    await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
-    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), "同名返工作品");
+    await user.click(screen.getByRole("button", { name: "搜索项目、选题或功能" }));
+    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题或功能" }), "同名返工作品");
 
     const results = await screen.findAllByRole("option", { name: /同名返工作品/ });
     expect(results).toHaveLength(2);
@@ -1269,16 +1254,16 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
-    const trigger = screen.getByRole("button", { name: "搜索项目、选题、模板或功能" });
+    const trigger = screen.getByRole("button", { name: "搜索项目、选题或功能" });
     await user.click(trigger);
-    const search = screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" });
+    const search = screen.getByRole("combobox", { name: "搜索项目、选题或功能" });
     await user.type(search, "模板");
     await user.keyboard("{Escape}");
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     await waitFor(() => expect(trigger).toHaveFocus());
     await user.click(trigger);
-    expect(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" })).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "搜索项目、选题或功能" })).toHaveValue("");
   });
 
   it("keeps opportunity selection, evidence, and production action in one workspace", async () => {
@@ -1354,7 +1339,7 @@ describe("Creative OS", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "economy-daily",
       topicStrategy: { customInstruction: "优先可拍题材。" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 45 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 45 },
     });
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
@@ -1374,7 +1359,7 @@ describe("Creative OS", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "free-stock",
       topicStrategy: { customInstruction: "优先可拍题材。" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "bilibili", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "bilibili", durationSeconds: 24 },
     });
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
@@ -1383,16 +1368,10 @@ describe("Creative OS", () => {
     expect(screen.getByRole("combobox", { name: "目标平台" })).toHaveValue("bilibili");
   });
 
-  it("presents an executable visual plan for every topic without fake stock frames", () => {
+  it("does not invent a shot plan when the topic has none", () => {
     render(<OpportunityFocus opportunity={opportunity} />);
-
-    const shotBoard = screen.getByRole("region", { name: "镜头方向示意" });
-    expect(shotBoard).toHaveAttribute("data-tour", "visual-direction");
-    expect(within(shotBoard).getByText("镜头 01")).toBeInTheDocument();
-    expect(within(shotBoard).getByText("镜头 02")).toBeInTheDocument();
-    expect(within(shotBoard).getByText("镜头 03")).toBeInTheDocument();
-    expect(within(shotBoard).getAllByText(/素材搜索：下班后什么都不想做/)).toHaveLength(3);
-    expect(within(shotBoard).queryByRole("img")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "镜头方向示意" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: opportunity.title })).toBeInTheDocument();
   });
 
   it("keeps source advice visible without claiming the topic cannot start", () => {
@@ -1442,12 +1421,6 @@ describe("Creative OS", () => {
         score: 72,
         reasons: ["适合用来源画面和数据解释。"],
         guardrails: ["补齐来源后再开工。"],
-        recommendedTemplate: {
-          id: "photo-story",
-          name: "证据图解",
-          format: "来源画面与数据证据驱动的图解视频",
-          rationale: "以证据为主。",
-        },
       },
       visualPlan: {
         strategy: "已保存的视觉方案。",
@@ -1521,7 +1494,7 @@ describe("Creative OS", () => {
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         defaultRecipeId: "free-stock",
         topicStrategy: { customInstruction: "" },
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "bilibili", durationSeconds: 45 },
+        productionDefaults: {  reviewMode: "manual", platform: "bilibili", durationSeconds: 45 },
       });
     render(<MemoryRouter><ProductionPage /></MemoryRouter>);
 
@@ -1556,7 +1529,7 @@ describe("Creative OS", () => {
         voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
         defaultRecipeId: "free-stock",
         topicStrategy: { customInstruction: "" },
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "bilibili", durationSeconds: 45 },
+        productionDefaults: {  reviewMode: "manual", platform: "bilibili", durationSeconds: 45 },
       });
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
@@ -2021,9 +1994,7 @@ describe("Creative OS", () => {
       arc: "回答真实难题",
       pillar: "问题",
       title: seriesCandidate.title,
-      viewerPromise: seriesCandidate.painPoint,
-      hook: seriesCandidate.hook,
-      payoff: "回答一个真实难题",
+      concept: seriesCandidate.painPoint,
       canonBaseRevision: 0,
       status: "planned",
       continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: ["留下下一集问题"], canonChecks: ["保持真实"] },
@@ -2145,12 +2116,6 @@ describe("Creative OS", () => {
         score: 86,
         reasons: ["适合视频表达。"],
         guardrails: ["逐镜核验。"],
-        recommendedTemplate: {
-          id: "knowledge-explainer",
-          name: "知识解释",
-          format: "问题、因果模型与生活验证构成的解释视频",
-          rationale: "让抽象信息形成可复述的因果链。",
-        },
       },
       title: "下班后的 AI 时间账本",
       platform: "douyin",
@@ -2398,7 +2363,7 @@ describe("Creative OS", () => {
       roleProviderDefaults: {},
       modelDefaults: {},
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     vi.spyOn(studioApi, "createOpportunity").mockResolvedValue(created);
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
@@ -2441,7 +2406,7 @@ describe("Creative OS", () => {
       roleProviderDefaults: {},
       modelDefaults: {},
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     render(<MemoryRouter initialEntries={["/topics?mode=custom&opportunity=opp-deep-link"]}><TodayPage /></MemoryRouter>);
 
@@ -2468,17 +2433,17 @@ describe("Creative OS", () => {
     }]);
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
-    await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
-    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), "电池");
+    await user.click(screen.getByRole("button", { name: "搜索项目、选题或功能" }));
+    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题或功能" }), "电池");
 
     // 机会：按来源跳到对应入口并带上 opportunity 深链参数。
     expect(await screen.findByRole("option", { name: /电池耗电的三个真相/ })).toHaveAttribute("href", "/topics?mode=custom&opportunity=opp-searchable");
 
-    await user.clear(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }));
-    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), "复盘");
+    await user.clear(screen.getByRole("combobox", { name: "搜索项目、选题或功能" }));
+    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题或功能" }), "复盘");
 
-    // 模板：跳到模板工坊并直接打开对应模板。
-    expect(await screen.findByRole("option", { name: /三步复盘法/ })).toHaveAttribute("href", "/templates?template=my-review-flow");
+    expect(screen.queryByRole("option", { name: /三步复盘法/ })).not.toBeInTheDocument();
+    expect(studioApi.templates).not.toHaveBeenCalled();
   });
 
   it("describes the real search scope when nothing matches", async () => {
@@ -2489,10 +2454,10 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "opportunities").mockResolvedValue([]);
     render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
-    await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
-    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), "量子物理讲义");
+    await user.click(screen.getByRole("button", { name: "搜索项目、选题或功能" }));
+    await user.type(screen.getByRole("combobox", { name: "搜索项目、选题或功能" }), "量子物理讲义");
 
-    expect(await screen.findByText("没有匹配的制作记录、选题机会、模板或功能。换一个更短的关键词试试。")).toBeInTheDocument();
+    expect(await screen.findByText("没有匹配的制作记录、选题机会或功能。换一个更短的关键词试试。")).toBeInTheDocument();
   });
 
   it("opens actual voice settings from every voice search synonym on the same resources page", async () => {
@@ -2509,11 +2474,11 @@ describe("Creative OS", () => {
     vi.spyOn(studioApi, "voices").mockResolvedValue([]);
     vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
     vi.spyOn(studioApi, "resourceManifest").mockReturnValue(new Promise(() => undefined));
-    vi.spyOn(studioApi, "settings").mockResolvedValue({ voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" }, defaultRecipeId: "economy-daily", roleProviderDefaults: {}, modelDefaults: {}, topicStrategy: { customInstruction: "" }, productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 } });
+    vi.spyOn(studioApi, "settings").mockResolvedValue({ voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" }, defaultRecipeId: "economy-daily", roleProviderDefaults: {}, modelDefaults: {}, topicStrategy: { customInstruction: "" }, productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 } });
     render(<MemoryRouter initialEntries={["/resources#production-roles"]}><AppShell><ResourcesPage /></AppShell></MemoryRouter>);
     for (const word of ["声音", "配音", "音色", "语速", "停顿"]) {
-      await user.click(screen.getByRole("button", { name: "搜索项目、选题、模板或功能" }));
-      await user.type(screen.getByRole("combobox", { name: "搜索项目、选题、模板或功能" }), word);
+      await user.click(screen.getByRole("button", { name: "搜索项目、选题或功能" }));
+      await user.type(screen.getByRole("combobox", { name: "搜索项目、选题或功能" }), word);
       const link = (await screen.findAllByRole("option")).find((item) => item.getAttribute("href") === "/resources#voice-casting");
       expect(link).toBeDefined();
       await user.click(link!);
@@ -2542,7 +2507,7 @@ describe("Creative OS", () => {
       roleProviderDefaults: {},
       modelDefaults: {},
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
     vi.spyOn(studioApi, "resourceManifest").mockReturnValue(new Promise(() => undefined));
@@ -2622,12 +2587,6 @@ describe("Creative OS", () => {
         score: 93,
         reasons: ["观看价值明确。"],
         guardrails: ["核验结果。"],
-        recommendedTemplate: {
-          id: "knowledge-explainer",
-          name: "知识解释",
-          format: "问题、因果模型与生活验证构成的解释视频",
-          rationale: "让抽象信息形成可复述的因果链。",
-        },
       },
     };
     const rejectedRawWinner: StudioCandidateInboxItem = {
@@ -2726,12 +2685,6 @@ describe("Creative OS", () => {
         score: 78,
         reasons: ["适合视频表达。"],
         guardrails: ["逐镜核验。"],
-        recommendedTemplate: {
-          id: "knowledge-explainer",
-          name: "知识解释",
-          format: "问题、因果模型与生活验证构成的解释视频",
-          rationale: "让抽象信息形成可复述的因果链。",
-        },
       },
       title: "一个待核验的热点角度",
       platform: "douyin",
@@ -2753,7 +2706,7 @@ describe("Creative OS", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "free-stock",
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     vi.spyOn(studioApi, "adoptCandidate").mockRejectedValue(new Error("选题保存失败"));
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
@@ -2784,7 +2737,7 @@ describe("Creative OS", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "free-stock",
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     const start = vi.spyOn(studioApi, "start").mockRejectedValue(new Error("制作创建失败"));
     const updateStatus = vi.spyOn(studioApi, "updateOpportunityStatus");
@@ -2819,13 +2772,13 @@ describe("Creative OS", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
       defaultRecipeId: "free-stock",
       topicStrategy: { customInstruction: "" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     const start = vi.spyOn(studioApi, "start").mockResolvedValue({ runId: "run-visual-plan-1" } as Awaited<ReturnType<typeof studioApi.start>>);
     render(<MemoryRouter initialEntries={["/topics"]}><TodayPage /></MemoryRouter>);
 
-    expect(await screen.findByText("可参考的镜头方向")).toBeInTheDocument();
-    expect(screen.getByText(planVisualDirection(opportunity).strategy)).toBeInTheDocument();
+    await screen.findByRole("button", { name: "新建制作" });
+    expect(screen.queryByText("可参考的镜头方向")).not.toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: "新建制作" }));
     await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
@@ -3028,7 +2981,6 @@ describe("Creative OS", () => {
       ...Array.from({ length: approved }, (_, index): StudioRunSummary => ({ ...runningRun, id: `approved-${index}`, status: "succeeded", finalReviewOutcome: "approved" })),
       { ...runningRun, id: "test-only", runPurpose: "test", status: "succeeded", finalReviewOutcome: "approved" },
     ]);
-    vi.spyOn(studioApi, "templateExperiments").mockResolvedValue([]);
     render(<MemoryRouter><ExperimentsPage /></MemoryRouter>);
     await screen.findByRole("heading", { name: "这一轮最该改什么" });
     if (approved) {
@@ -3069,21 +3021,6 @@ describe("Creative OS", () => {
       runs: [],
     };
     vi.spyOn(studioApi, "runs").mockResolvedValue(reviewRuns);
-    vi.spyOn(studioApi, "templateExperiments").mockResolvedValue([{
-      templateId: "knowledge-explainer",
-      templateName: "知识解释",
-      sampleSize: 4,
-      metrics: {
-        hookClarity: null,
-        narrativeCompleteness: 75,
-        visualMatch: 82,
-        soundQuality: 100,
-        costEfficiency: null,
-        manualEditCount: 3,
-        finalApprovalRate: 50,
-      },
-      note: "来自真实运行。",
-    }]);
     const costRequest = vi.spyOn(studioApi, "costs").mockResolvedValue(costs);
 
     render(<MemoryRouter><ExperimentsPage /></MemoryRouter>);
@@ -3096,11 +3033,7 @@ describe("Creative OS", () => {
     const reviewMetric = within(screen.getByLabelText("制作统计")).getByText("等你审片").closest("article");
     expect(within(reviewMetric!).getByText("1")).toBeInTheDocument();
     expect(screen.getByText("画面出现 1 次问题")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("历史模板记录（暂停用于新制作）"));
-    expect(screen.getByRole("link", { name: "查看模板资料" })).toHaveAttribute("href", "/templates");
-    expect(screen.queryByRole("link", { name: "调整模板" })).not.toBeInTheDocument();
-    expect(screen.getByText("82 分")).toBeInTheDocument();
-    expect(screen.getByText("75%")).toBeInTheDocument();
+    expect(screen.queryByText("历史模板记录（暂停用于新制作）")).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "还不能判断是否成为爆款" })).toBeInTheDocument();
     expect(screen.queryByText("来源打回作品")).not.toBeInTheDocument();
     expect(screen.queryByText("待重新生成作品")).not.toBeInTheDocument();
@@ -3116,14 +3049,13 @@ describe("Creative OS", () => {
     expect(costRequest).toHaveBeenCalledTimes(1);
   });
 
-  it("shows a template request failure without also claiming there are no samples", async () => {
+  it("does not load retired template reports on the review page", async () => {
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
-    vi.spyOn(studioApi, "templateExperiments").mockRejectedValue(new Error("template store offline"));
     const costRequest = vi.spyOn(studioApi, "costs");
 
     render(<MemoryRouter><ExperimentsPage /></MemoryRouter>);
 
-    expect(await screen.findByText("模板表现读取失败：template store offline")).toBeInTheDocument();
+    await screen.findByRole("heading", { name: "这一轮最该改什么" });
     expect(screen.queryByText("还没有可比较的模板样本。完成第一条成片后，这里会开始累计真实结果。")).not.toBeInTheDocument();
     expect(costRequest).not.toHaveBeenCalled();
   });
@@ -3211,7 +3143,7 @@ describe("Creative OS", () => {
       roleProviderDefaults: {},
       modelDefaults: {},
       topicStrategy: { customInstruction: "优先可拍题材。" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
     vi.spyOn(studioApi, "resourceManifest").mockReturnValue(new Promise(() => undefined));
@@ -3248,7 +3180,7 @@ describe("Creative OS", () => {
       roleProviderDefaults: {},
       modelDefaults: {},
       topicStrategy: { customInstruction: "优先可拍题材。" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
     vi.spyOn(studioApi, "resourceManifest").mockReturnValue(new Promise(() => undefined));
@@ -3306,19 +3238,20 @@ describe("Creative OS", () => {
       roleProviderDefaults: {},
       modelDefaults: {},
       topicStrategy: { customInstruction: "优先可拍题材。" },
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
     });
     vi.spyOn(studioApi, "publishTargets").mockResolvedValue([]);
     vi.spyOn(studioApi, "resourceManifest").mockReturnValue(new Promise(() => undefined));
 
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
-    expect(await screen.findByRole("combobox", { name: "默认导演角色" })).toBeInTheDocument();
+    await screen.findByRole("combobox", { name: "编剧首选能力" });
+    expect(screen.queryByRole("combobox", { name: "默认导演角色" })).not.toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "编剧首选能力" })).toHaveValue("python-template-v1");
     expect(screen.queryByText("正在读取创作默认值...")).not.toBeInTheDocument();
   });
 
-  it("explains the real topic gates without presenting misleading score weights", async () => {
+  it("keeps topic preferences editable without prescribing an opening formula", async () => {
     vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
     vi.spyOn(studioApi, "trendSources").mockResolvedValue([]);
     vi.spyOn(studioApi, "trendServices").mockResolvedValue([]);
@@ -3328,15 +3261,11 @@ describe("Creative OS", () => {
 
     render(<MemoryRouter><ResourcesPage /></MemoryRouter>);
 
-    const topicGates = await screen.findByLabelText("选题评估参考");
-    expect(within(topicGates).getByText("明确观众收益")).toBeInTheDocument();
-    expect(within(topicGates).getByText("前两秒钩子")).toBeInTheDocument();
-    expect(within(topicGates).getByText("画面不可替代")).toBeInTheDocument();
-    expect(within(topicGates).getByText("可追溯来源")).toBeInTheDocument();
-    expect(within(topicGates).getByText("成本与价值匹配")).toBeInTheDocument();
-    expect(within(topicGates).getByText("风险与形式匹配")).toBeInTheDocument();
-    expect(screen.getByText(/只需维护账号定位、内容边界和来源标准，不需要调整评分权重/)).toBeInTheDocument();
-    expect(topicGates).not.toHaveTextContent(/\d+%/);
+    expect(await screen.findByLabelText("账号内容定位")).toBeInTheDocument();
+    expect(screen.getByLabelText("候选来源标准")).toBeInTheDocument();
+    expect(screen.getByLabelText("其他选题原则")).toBeInTheDocument();
+    expect(screen.queryByLabelText("选题评估参考")).not.toBeInTheDocument();
+    expect(screen.queryByText("前两秒钩子")).not.toBeInTheDocument();
   });
 
   it("keeps the configuration room focused on one editable category at a time", async () => {
@@ -3391,7 +3320,7 @@ describe("Creative OS", () => {
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" as const },
       defaultRecipeId: "economy-daily" as const,
       topicStrategy: { customInstruction: "优先可拍题材。" },
-      productionDefaults: { directorProfileId: "auto" as const, reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
+      productionDefaults: {  reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
     };
     vi.spyOn(studioApi, "providers").mockResolvedValue(readyProviders);
     vi.spyOn(studioApi, "voices").mockResolvedValue([
@@ -3448,13 +3377,11 @@ describe("Creative OS", () => {
     expect(within(generatedVideoGroup!).getByText("MiniMax Hailuo 2.3")).toBeInTheDocument();
     expect(within(generatedVideoGroup!).getByText("可用替补：MiniMax H3")).toBeInTheDocument();
 
-    await user.selectOptions(screen.getByRole("combobox", { name: "默认导演角色" }), "documentary-observer");
     await user.selectOptions(screen.getByRole("combobox", { name: "默认目标平台" }), "bilibili");
     await user.click(screen.getByRole("button", { name: "保存创作默认" }));
     expect(update).toHaveBeenLastCalledWith({
       defaultRecipeId: "free-stock",
       productionDefaults: {
-        directorProfileId: "documentary-observer",
         reviewMode: "manual",
         platform: "bilibili",
         durationSeconds: 24,
@@ -3489,7 +3416,7 @@ describe("Creative OS", () => {
       roleProviderDefaults: { script: "python-template-v1" },
       modelDefaults: {},
       topicStrategy: { customInstruction: "优先可拍题材。" },
-      productionDefaults: { directorProfileId: "auto" as const, reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
+      productionDefaults: {  reviewMode: "manual" as const, platform: "douyin" as const, durationSeconds: 24 as const },
     };
     vi.spyOn(studioApi, "providers").mockResolvedValue(roleProviders);
     vi.spyOn(studioApi, "trendSources").mockResolvedValue([]);

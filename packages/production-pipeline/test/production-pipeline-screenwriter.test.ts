@@ -58,9 +58,7 @@ const seriesContext = {
     updatedAt: "2026-08-30T00:00:00.000Z",
     pillar: "真实实验",
     title: "第一集",
-    viewerPromise: "完成一次低成本验证",
-    hook: "先展示最容易失败的一步",
-    payoff: "给出可复现的结论",
+    concept: "完成一次低成本验证",
     planning: {
       source: "agent",
       role: "系列开拍总编",
@@ -105,25 +103,6 @@ const scriptDraft: ScriptDraft = {
     },
   ],
 };
-
-const templateSnapshot = {
-  templateId: "knowledge-explainer",
-  templateVersion: 1,
-  resolvedAt: "2026-08-27T00:00:00.000Z",
-  resolvedBlueprint: {
-    platform: "douyin",
-    durationSeconds: 24,
-    automationLevel: "assisted",
-    storyStructure: [{ id: "question", label: "提出问题", purpose: "从日常误解切入", required: true }],
-    shotSlots: [{ id: "shot-question", beatId: "question", purpose: "建立问题", durationSeconds: 6, allowedCapabilities: ["asset.search"], manualReplacement: true }],
-    visualSystem: { composition: "一个镜头一个概念", colorIntent: "自然底色", subtitleDensity: "medium", pacing: "measured" },
-    soundSystem: { voiceIntent: "聪明但不居高临下", pace: "medium", musicIntent: "轻盈节拍" },
-    qualityRules: [{ id: "facts", label: "事实准确", dimension: "factual", required: true, threshold: 80 }],
-    capabilityRequirements: [{ capability: "script.draft", required: true }],
-  },
-  sourceLayers: [{ layer: "template", sourceId: "knowledge-explainer@1", appliedFields: ["storyStructure"] }],
-  fieldSources: { storyStructure: "template" },
-} as const;
 
 class RecordingWorker {
   readonly requests: Array<{ capability: string; input: Record<string, unknown> }> = [];
@@ -228,14 +207,14 @@ describe("ProductionPipeline codex screenwriter", () => {
             targetNodeIds: ["visual-direction", "assets"],
           },
         ],
-        previousScript: { viewerPromise: "原承诺", scenes: [{ position: 1 }] },
+        previousScript: {  scenes: [{ position: 1 }] },
       },
     });
 
     assert.equal(inputs[0]?.brief.rework?.sourceRunId, "run-rejected-1");
     assert.equal(inputs[0]?.brief.rework?.instruction, "缩短第三镜旁白，保留前两镜。");
     assert.deepEqual(inputs[0]?.brief.rework?.findings.map(({ findingId }) => findingId), ["vf_111111111111111111111111"]);
-    assert.deepEqual(inputs[0]?.brief.rework?.previousScript, { viewerPromise: "原承诺", scenes: [{ position: 1 }] });
+    assert.deepEqual(inputs[0]?.brief.rework?.previousScript, {  scenes: [{ position: 1 }] });
     const assetInput = worker.requests.find(({ capability }) => capability === "asset.prepare")?.input.rework as { findings?: Array<{ findingId: string }> };
     assert.deepEqual(assetInput.findings?.map(({ findingId }) => findingId), ["vf_222222222222222222222222"]);
   });
@@ -539,15 +518,10 @@ describe("ProductionPipeline codex screenwriter", () => {
               output: repairing
                 ? {
                     version: "video-factory/role-audit-v2",
-                    rubricVersion: "video-factory/role-quality-rubric-v1",
+                    rubricVersion: "video-factory/role-quality-rubric-v2",
                     assessments: [{
                       targetPath: "",
-                      dimensions: [
-                        { dimension: "attention", score: 70, evidence: "开场没有具体对象。" },
-                        { dimension: "progression", score: 70, evidence: "中段信息推进偏慢。" },
-                        { dimension: "payoff", score: 70, evidence: "结尾没有回答开场承诺。" },
-                        { dimension: "expression", score: 70, evidence: "旁白句式拖沓。" },
-                      ],
+                      dimensions: [{ dimension: "consistency", score: 70, evidence: "开场没有具体对象。" }, { dimension: "expression", score: 70, evidence: "旁白句式拖沓。" }],
                     }],
                     verdict: "repair",
                     score: 70,
@@ -557,15 +531,10 @@ describe("ProductionPipeline codex screenwriter", () => {
                   }
                 : {
                     version: "video-factory/role-audit-v2",
-                    rubricVersion: "video-factory/role-quality-rubric-v1",
+                    rubricVersion: "video-factory/role-quality-rubric-v2",
                     assessments: [{
                       targetPath: "",
-                      dimensions: [
-                        { dimension: "attention", score: 92, evidence: "开场给出具体对象。" },
-                        { dimension: "progression", score: 92, evidence: "中段逐步给出结果。" },
-                        { dimension: "payoff", score: 92, evidence: "结尾回答原承诺。" },
-                        { dimension: "expression", score: 92, evidence: "旁白自然可读。" },
-                      ],
+                      dimensions: [{ dimension: "consistency", score: 92, evidence: "开场给出具体对象。" }, { dimension: "expression", score: 92, evidence: "旁白自然可读。" }],
                     }],
                     verdict: "pass",
                     score: 92,
@@ -597,7 +566,7 @@ describe("ProductionPipeline codex screenwriter", () => {
 
   it("preserves the last rejected script draft as an editable artifact", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-rejected-draft-"));
-    const rejectedDraft = { ...scriptDraft, viewerPromise: "仍可由人工修订的最后草稿" };
+    const rejectedDraft = { ...scriptDraft, scenes: scriptDraft.scenes.map((scene, index) => index === 0 ? { ...scene, narration: "仍可由人工修订的最后草稿" } : scene) };
     const agent: ScreenwriterAgent = {
       id: "codex-screenwriter-v1",
       draft: async () => rejectedDraft,
@@ -616,15 +585,10 @@ describe("ProductionPipeline codex screenwriter", () => {
             candidateHash: "a".repeat(64),
             audit: {
               version: "video-factory/role-audit-v2",
-              rubricVersion: "video-factory/role-quality-rubric-v1",
+              rubricVersion: "video-factory/role-quality-rubric-v2",
               assessments: [{
                 targetPath: "",
-                dimensions: [
-                  { dimension: "attention", score: 70, evidence: "开场没有具体对象。" },
-                  { dimension: "progression", score: 70, evidence: "中段信息推进偏慢。" },
-                  { dimension: "payoff", score: 70, evidence: "结尾没有回答开场承诺。" },
-                  { dimension: "expression", score: 70, evidence: "旁白句式拖沓。" },
-                ],
+                dimensions: [{ dimension: "consistency", score: 70, evidence: "开场没有具体对象。" }, { dimension: "expression", score: 70, evidence: "旁白句式拖沓。" }],
               }],
               verdict: "repair",
               score: 70,
@@ -645,7 +609,7 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.equal(scriptNode?.status, "failed");
     assert.ok(scriptArtifact?.uri);
     assert.equal((scriptNode?.output as { scriptPath?: string })?.scriptPath, scriptArtifact.uri);
-    assert.equal(JSON.parse(await readFile(scriptArtifact.uri, "utf8")).viewerPromise, "仍可由人工修订的最后草稿");
+    assert.equal(JSON.parse(await readFile(scriptArtifact.uri, "utf8")).scenes[0].narration, "仍可由人工修订的最后草稿");
   });
 
   it("allows a series episode with no new canon facts to continue through final review", async () => {
@@ -765,15 +729,10 @@ describe("ProductionPipeline codex screenwriter", () => {
             },
             audit: {
               version: "video-factory/role-audit-v2",
-              rubricVersion: "video-factory/role-quality-rubric-v1",
+              rubricVersion: "video-factory/role-quality-rubric-v2",
               assessments: [{
                 targetPath: "",
-                dimensions: [
-                  { dimension: "attention", score: 93, evidence: "开场给出具体对象。" },
-                  { dimension: "progression", score: 93, evidence: "中段逐步给出结果。" },
-                  { dimension: "payoff", score: 93, evidence: "结尾回答原承诺。" },
-                  { dimension: "expression", score: 93, evidence: "旁白自然可读。" },
-                ],
+                dimensions: [{ dimension: "consistency", score: 93, evidence: "开场给出具体对象。" }, { dimension: "expression", score: 93, evidence: "旁白自然可读。" }],
               }],
               verdict: "pass",
               score: 93,
@@ -861,7 +820,7 @@ describe("ProductionPipeline codex screenwriter", () => {
     const { agent, inputs } = stubAgent(() => scriptDraft);
     const pipeline = new ProductionPipeline({ workspaceRoot, worker, screenwriterAgent: agent });
 
-    const run = await pipeline.start({ ...brief, templateSnapshot });
+    const run = await pipeline.start({ ...brief, });
 
     assert.equal(run.status, "succeeded");
     assert.equal(inputs.length, 1);

@@ -58,13 +58,11 @@ const MINIMAL_FIXTURE_VISUAL_PLAN = {
 const modelSignals = signals.map((signal) => ({ ...signal, relatedSignals: [] }));
 
 const CREATIVE_DIMENSION_EVIDENCE: Record<string, string> = {
-  attention: "前两秒给出具体问题，不靠热搜标题复述。",
-  progression: "中段有明确推进，不停在同一种清单模板。",
-  payoff: "结尾兑现了承诺里的具体结论。",
-  expression: "视觉方案写清了可拍的具体动作。",
+  consistency: "内容忠实于用户意图和已确认事实。",
+  expression: "表达清楚，符合当前制作能力。",
 };
 
-// rubric v1 要求总分等于全部维度分的最低分；让每维都取同一个分数，最小值自然成立。
+// rubric v2 要求总分等于全部维度分的最低分；让每维都取同一个分数，最小值自然成立。
 function creativeDimensions(score: number) {
   return Object.entries(CREATIVE_DIMENSION_EVIDENCE).map(([dimension, evidence]) => ({ dimension, score, evidence }));
 }
@@ -91,7 +89,7 @@ class CapturingCodexClient extends CodexBridgeClient {
     if (kind === "role-audit") {
       return { output: {
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v1",
+        rubricVersion: "video-factory/role-quality-rubric-v2",
         verdict: "pass",
         score: 92,
         assessments: ideaAssessments(92),
@@ -235,7 +233,7 @@ describe("TrendOpportunityAgent", () => {
         this.auditCalls += 1;
         return { output: this.auditCalls === 1 ? {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v1",
+          rubricVersion: "video-factory/role-quality-rubric-v2",
           verdict: "repair",
           score: 55,
           assessments: ideaAssessments(55),
@@ -250,7 +248,7 @@ describe("TrendOpportunityAgent", () => {
           repairInstructions: ["删除比例断言，保留可验证的前后对照角度。"],
         } : {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v1",
+          rubricVersion: "video-factory/role-quality-rubric-v2",
           verdict: "pass",
           score: 91,
           assessments: ideaAssessments(91),
@@ -308,7 +306,7 @@ describe("TrendOpportunityAgent", () => {
         }
         return { output: {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v1",
+          rubricVersion: "video-factory/role-quality-rubric-v2",
           verdict: "repair",
           score: 55,
           assessments: ideaAssessments(55),
@@ -391,7 +389,7 @@ describe("TrendOpportunityAgent", () => {
             monetization: 65, audienceDemand: 75,
           }] } }
           : { output: {
-            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
             verdict: "pass", score: 90, assessments: ideaAssessments(90), summary: "可以交给创作者选择。",
             issues: [{ severity: "advisory", criterion: "开头更具体", evidence: "当前只说三小时。",
               repairInstruction: "开头展示时间账本中最大的一块去向。" }],
@@ -568,9 +566,7 @@ describe("TrendOpportunityAgent", () => {
     assert.equal(candidates[0]?.evidence[0]?.strength, 98);
     assert.equal(candidates[0]?.score.final > candidates[1]!.score.final, true);
     assert.equal(candidates[1]?.score.complianceRisk > candidates[0]!.score.complianceRisk, true);
-    assert.equal(candidates[0]?.visualPlan?.beats.length, 3);
-    assert.match(candidates[0]?.visualPlan?.beats[0]?.searchQuery ?? "", /普通人开始用 AI/);
-    assert.equal(candidates[0]?.visualPlan?.beats.some((beat) => beat.source === "local-card"), false);
+    assert.equal(candidates[0]?.visualPlan, undefined);
   });
 
   it("keeps multiple genuinely different angles for the same canonical event and dedupes repeated angles", async () => {

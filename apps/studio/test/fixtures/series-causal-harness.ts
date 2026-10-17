@@ -17,13 +17,13 @@ export const seriesInput: StudioSeriesInput = {
   tone: "克制", visualStyle: "无屏幕演示的生活观察", targetEpisodeCount: 2,
 };
 export const roadmap = { episodes: [
-  { episodeNumber: 1, pillar: "光影", title: "光从窗沿移过去", viewerPromise: "看见十二秒里光影的变化", hook: "先看桌上的那束光。", payoff: "影子慢慢离开杯沿。", fromPrevious: [], toNext: ["下一集观察雨窗"] },
-  { episodeNumber: 2, pillar: "雨窗", title: "两滴雨水相遇", viewerPromise: "看见水滴汇合的过程", hook: "两滴水之间还隔着一点距离。", payoff: "水滴汇合后滑过窗面。", fromPrevious: [], toNext: [] },
+  { episodeNumber: 1, pillar: "光影", title: "光从窗沿移过去", concept: "看见十二秒里光影的变化",   fromPrevious: [], toNext: ["下一集观察雨窗"] },
+  { episodeNumber: 2, pillar: "雨窗", title: "两滴雨水相遇", concept: "看见水滴汇合的过程",   fromPrevious: [], toNext: [] },
 ] };
 export function roadmapAudit() {
-  return { version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+  return { version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
     verdict: "pass", score: 90, summary: "每集兑现独立观察。", issues: [], repairInstructions: [], planningDisposition: null, hostReadinessReview: null,
-    assessments: roadmap.episodes.map((_, index) => ({ targetPath: `/episodes/${index}`, dimensions: ["attention", "progression", "payoff", "expression"].map((dimension) => ({ dimension, score: 90, evidence: "有明确可见的变化。" })) })),
+    assessments: roadmap.episodes.map((_, index) => ({ targetPath: `/episodes/${index}`, dimensions: ["expression", "consistency"].map((dimension) => ({ dimension, score: 90, evidence: "有明确可见的变化。" })) })),
   };
 }
 

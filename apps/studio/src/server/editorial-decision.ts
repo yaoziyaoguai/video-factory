@@ -9,11 +9,6 @@ import type {
   StudioTopicCategory,
 } from "../shared/api.js";
 
-export interface EditorialTemplateOption {
-  id: string;
-  name: string;
-}
-
 export interface EditorialDecisionInput {
   origin: StudioCandidateOrigin;
   providerId?: string;
@@ -43,7 +38,6 @@ const GUIDANCE_METHOD_PATTERN = /如何|怎么|三步|方法|教程|化解|避�
 
 export function decideEditorialFormat(
   input: EditorialDecisionInput,
-  _publishedTemplates: readonly EditorialTemplateOption[],
 ): StudioEditorialDecision {
   const decision = withDemandAdvice(decideProductionPotential(input), input.score.audienceDemand);
   // 规则保底候选的所有结论都没有经过选题总编：无论走哪个分支，都要如实标记等待评估，
@@ -70,7 +64,7 @@ function decideProductionPotential(
       verdict: "skip",
       score: 0,
       reasons: [`选题尚未达到视频生产门槛：${readinessIssues.join("；")}。`],
-      guardrails: ["先补齐明确受众、具体痛点、两秒开场承诺和可追溯证据，再重新评估制作形式。"],
+      guardrails: ["补充内容想法、受众和必要的事实来源，再重新评估。"],
     };
   }
 
@@ -79,7 +73,7 @@ function decideProductionPotential(
       verdict: "skip",
       score: 0,
       reasons: ["当前只是热点规则保底候选，还没有经过选题总编形成具体、可拍的创作角度。"],
-      guardrails: ["等待选题总编恢复，或由创作者补齐明确受众、观看收益、两秒钩子和可执行视频形态后再评估。"],
+      guardrails: ["等待选题总编恢复，或由创作者补充具体想法后再评估。"],
     };
   }
 
@@ -118,7 +112,7 @@ function decideProductionPotential(
       verdict: "skip",
       score: clamp(videoValue),
       reasons: ["受众价值、视觉动作、创意增量或风险控制没有同时越过视频准入线，热度不足以抵消短板。"],
-      guardrails: ["重写为可验证的行动实验，补齐独特画面或明确受众收益后再进入生产。"],
+      guardrails: ["可补充内容想法或可用画面，再评估制作方式。"],
     };
   }
 
@@ -129,7 +123,7 @@ function decideProductionPotential(
     verdict: "produce_video",
     score: clamp(videoValue),
     reasons: [`面向${audience}，围绕“${painPoint}”的画面可行性和创作增量达到视频生产门槛。`],
-    guardrails: [`前两秒兑现钩子“${input.hook!.trim()}”；事实与结果必须回到${evidenceSources}，热度本身不能替代内容价值。`],
+    guardrails: [`事实与结果必须回到${evidenceSources}，热度本身不能替代内容价值。`],
   };
 }
 

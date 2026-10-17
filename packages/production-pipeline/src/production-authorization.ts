@@ -10,15 +10,13 @@ import type { ExecutableDuration } from "./executable-timeline.js";
 export const PRODUCTION_AUTHORIZATION_VERSION = "video-factory/production-authorization-v1" as const;
 
 // 质量合同 digest 的 canonical 投影：只覆盖"改变即必须重新确认方案"的质量承诺字段——
-// 观众承诺锚（angle/audience/visualProof/visualPlan/editorial）、时长范围与导演档案。
+// 用户意图（angle/audience/visualProof/editorial）与时长范围。
 // 宿主在接受与自动继续两侧用同一函数计算并核对；executable plan bytes 不含这些字段，
 // 不能只靠 plan digest 代替质量合同身份。
 export function canonicalQualityContractDigest(quality: ExecutableDuration & {
   angle: string;
   audience: string;
-  directorProfileId: string;
   visualProof?: string;
-  visualPlanDigest?: string;
   editorial?: { verdict: string; reasons: string[]; guardrails: string[] };
 }): string {
   return createHash("sha256").update(JSON.stringify({
@@ -26,9 +24,7 @@ export function canonicalQualityContractDigest(quality: ExecutableDuration & {
     audience: quality.audience,
     ...(quality.durationPolicy ? { durationPolicy: quality.durationPolicy } : {}),
     durationRange: quality.durationRange,
-    directorProfileId: quality.directorProfileId,
     ...(quality.visualProof ? { visualProof: quality.visualProof } : {}),
-    ...(quality.visualPlanDigest ? { visualPlanDigest: quality.visualPlanDigest } : {}),
     ...(quality.editorial ? { editorial: quality.editorial } : {}),
   })).digest("hex");
 }
@@ -50,7 +46,7 @@ export interface ProductionAuthorizationScope {
   approvalRevision: number;
   /** 用户确认的制作方案 digest（executable plan 绑定）。 */
   acceptedPlanDigest: string;
-  /** 质量合同 digest：观众承诺、事实/实拍要求、画面目标与最低技术规格——不是整份文件 bytes。 */
+  /** 质量合同 digest：用户意图、事实/实拍要求、画面目标与最低技术规格——不是整份文件 bytes。 */
   qualityContractDigest: string;
   /** 最高授权金额，整数分。 */
   approvedAmountCents: number;

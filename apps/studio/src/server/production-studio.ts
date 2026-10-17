@@ -6,7 +6,6 @@ import { isDeepStrictEqual } from "node:util";
 import { lock } from "proper-lockfile";
 import { NodeReexecutionRequiredError, NodeVersionConflictError, StaleHumanContentError } from "@video-factory/workflow-core";
 import type { ArtifactDraft, HumanDecisionDraft, NodeExecutionReceipt, NodeInputOverrideDraft, NodeOverrideDraft, SpendAuthorizationDraft, WorkflowRun } from "@video-factory/workflow-core";
-import type { ProductionTemplateSnapshot } from "@video-factory/template-core";
 import {
   reviewDecisionPrefill,
   isCharacterScript,
@@ -524,7 +523,6 @@ export class ProductionStudio {
         ? "codex-screenwriter-v1"
         : brief.providers.script;
     const reworkDirector = brief.director ?? {
-      profileId: "auto",
       assetProviderIds: [brief.providers.assets === "ai-shot-router-v1" ? "local-editorial-v1" : brief.providers.assets],
     };
     // 尚未形成镜头的早期失败不是“用户批准改零镜头”。保留来源链，但让新脚本
@@ -583,7 +581,6 @@ export class ProductionStudio {
       ...(brief.editorial ? { editorial: structuredClone(brief.editorial) } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
       ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
-      ...(brief.visualPlan ? { visualPlan: structuredClone(brief.visualPlan) } : {}),
       ...(brief.seriesContext ? { seriesContext: structuredClone(brief.seriesContext) } : {}),
       ...(brief.creationContext ? { creationContext: structuredClone(brief.creationContext) } : {}),
       rework,
@@ -942,8 +939,6 @@ export class ProductionStudio {
       throw new StudioInputError("按审片意见返工需要使用支持自由文本修改的 AI 编剧，请在编剧一栏选择 AI 编剧后再开工。");
     }
     await this.assertReworkSource(brief);
-    // 模板暂停参与新制作；不改写历史 run，也不继承模板的模型默认值。
-    delete brief.templateSnapshot;
     await this.assertProvidersAvailable(brief);
     if (!idempotencyKey) return this.dispatchBrief(brief);
     assertIdempotencyKey(idempotencyKey);
@@ -4540,12 +4535,8 @@ function productionQualityContractDigest(brief: ProductionBrief): string {
     ...(brief.durationPolicy === "content-led-v1" ? {
       durationPolicy: brief.durationPolicy, ...(brief.durationRange ? { durationRange: brief.durationRange } : {}),
     } : { durationRange: brief.durationRange ?? { minSeconds: 0, maxSeconds: 0 } }),
-    directorProfileId: brief.director?.profileId ?? "",
     ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
     ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
-    ...(brief.visualPlan
-      ? { visualPlanDigest: createHash("sha256").update(JSON.stringify(brief.visualPlan)).digest("hex") }
-      : {}),
     ...(brief.editorial ? { editorial: brief.editorial } : {}),
   });
 }
@@ -4859,7 +4850,6 @@ function toRunDetail(
     audience: brief.audience,
     nicheSlug: brief.nicheSlug,
     reviewMode: brief.reviewMode,
-    creativeSummary: creativeSummary(brief),
     nodes,
     artifacts,
     decisions,
@@ -4871,15 +4861,6 @@ function toRunDetail(
     continuation: continuationSupported
       ? { supported: true }
       : legacyRunContinuation(),
-  };
-}
-
-function creativeSummary(brief: ProductionBrief): NonNullable<StudioRunDetail["creativeSummary"]> {
-  return {
-    audience: brief.audience,
-    openingPromise: brief.seriesContext?.episode.hook ?? brief.angle,
-    requiredVisual: brief.visualProof ?? brief.visualIntent ?? brief.visualPlan?.strategy ?? `需要呈现的核心画面：“${brief.angle}”`,
-    payoff: brief.seriesContext?.episode.payoff ?? `围绕“${brief.title}”给出明确答案或可执行判断`,
   };
 }
 

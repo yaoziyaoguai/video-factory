@@ -27,9 +27,6 @@ export const explicitEditorialDirector: VisualDirectorAgent = {
   modelId: "rules-v1",
   plan: async (input) => ({
     version: "video-factory/director-plan-v1",
-    requestedProfileId: input.brief.requestedProfileId,
-    resolvedProfileId: "geometric-control",
-    profileRationale: "部署 smoke 明确选择静态编辑画面，以验证离线媒体链路。",
     visualBible: {
       narrativeApproach: "每个场景使用一张完整静态画面。",
       pacing: "按脚本场景稳定推进。",

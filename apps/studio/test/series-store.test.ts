@@ -48,9 +48,7 @@ function episode(episodeNumber: number, previousEpisodeId?: string): SeriesRecor
     arc: "从工具尝鲜走到稳定工作流",
     pillar: episodeNumber === 1 ? "真实任务实验" : "成本与时间复盘",
     title: `第 ${episodeNumber} 集`,
-    viewerPromise: "给出可验证的结论",
-    hook: "先看真实结果",
-    payoff: `完成第 ${episodeNumber} 次验证`,
+    concept: "给出可验证的结论",
     ...(previousEpisodeId ? { previousEpisodeId } : {}),
     canonBaseRevision: 0,
     status: "planned",
@@ -111,9 +109,7 @@ describe("JsonSeriesStore", () => {
       expectedRevision,
       pillar: "真实任务实验",
       title,
-      viewerPromise: "给出可验证的结论",
-      hook: "先看真实结果",
-      payoff: "完成第 1 次验证",
+      concept: "给出可验证的结论",
       fromPrevious: [],
       toNext: ["留下一个边界问题"],
     }, "2026-08-24T09:00:00.000Z");
@@ -125,16 +121,16 @@ describe("JsonSeriesStore", () => {
 
     const audited = await store.rebaseEpisodePlan("series-1", 1, aAgain.revision, aAgain.canon.revision, {
       episodeNumber: 1, pillar: episodeAfterEdit.pillar, title: episodeAfterEdit.title,
-      viewerPromise: episodeAfterEdit.viewerPromise, hook: episodeAfterEdit.hook,
-      payoff: episodeAfterEdit.payoff, fromPrevious: [], toNext: ["留下一个边界问题"],
+      concept: episodeAfterEdit.concept,
+       fromPrevious: [], toNext: ["留下一个边界问题"],
     }, { ...episodeAfterEdit.planning, auditStatus: "passed", auditIterations: 1, auditSummary: "当前稿可用。" }, "2026-08-24T09:01:00.000Z");
     assert.equal(audited.episodes[0]?.contentVersionId, episodeAfterEdit.contentVersionId);
     assert.equal(audited.episodes[0]?.auditHistory?.at(-1)?.targetVersionId, episodeAfterEdit.contentVersionId);
 
     const reaudited = await store.rebaseEpisodePlan("series-1", 1, audited.revision, audited.canon.revision, {
       episodeNumber: 1, pillar: episodeAfterEdit.pillar, title: episodeAfterEdit.title,
-      viewerPromise: episodeAfterEdit.viewerPromise, hook: episodeAfterEdit.hook,
-      payoff: episodeAfterEdit.payoff, fromPrevious: [], toNext: ["留下一个边界问题"],
+      concept: episodeAfterEdit.concept,
+       fromPrevious: [], toNext: ["留下一个边界问题"],
     }, { ...episodeAfterEdit.planning, auditStatus: "awaiting_user", auditIterations: 1, auditSummary: "仍有一条建议。" }, "2026-08-24T09:01:30.000Z");
     assert.equal(reaudited.episodes[0]?.auditHistory?.length, 2);
     assert.equal(reaudited.episodes[0]?.contentVersionId, episodeAfterEdit.contentVersionId);
@@ -151,7 +147,7 @@ describe("JsonSeriesStore", () => {
     const episode = current.episodes[0]!;
     await assert.rejects(() => store.rebaseEpisodePlan("series-1", 1, current.revision, current.canon.revision, {
       episodeNumber: 1, pillar: episode.pillar, title: "审计擅自重写的标题",
-      viewerPromise: episode.viewerPromise, hook: episode.hook, payoff: episode.payoff,
+      concept: episode.concept,
       fromPrevious: [...episode.continuity.fromPrevious], toNext: [...episode.continuity.toNext],
     }, { ...episode.planning, auditStatus: "passed" }, "2026-08-24T09:00:00.000Z"), /审计不能改写当前稿/);
     assert.equal((await store.get("series-1"))?.episodes[0]?.title, episode.title);
@@ -252,7 +248,7 @@ describe("JsonSeriesStore", () => {
     const visibleGenerationId = `${created.id}:r${created.revision}:e1`;
     const edited = await store.updateEpisodePlan(created.id, 1, {
       expectedRevision: created.revision, pillar: "真实任务实验", title: "刷新后的标题",
-      viewerPromise: "给出可验证的结论", hook: "先看真实结果", payoff: "完成第 1 次验证",
+      concept: "给出可验证的结论",
       fromPrevious: [], toNext: ["留下一个边界问题"],
     }, "2026-08-24T09:00:00.000Z");
     await assert.rejects(
@@ -343,9 +339,7 @@ describe("JsonSeriesStore", () => {
       expectedRevision: 1,
       pillar: "成本与时间复盘",
       title: "下班后 20 分钟，AI 真能整理完报销吗？",
-      viewerPromise: "看到完整耗时和失败边界",
-      hook: "先展示最终报销表，再倒推过程",
-      payoff: "给出可复现步骤与真实耗时",
+      concept: "看到完整耗时和失败边界",
       fromPrevious: [],
       toNext: ["下一集验证多人协作时是否仍然成立"],
     }, "2026-08-24T08:30:00.000Z");
@@ -363,9 +357,7 @@ describe("JsonSeriesStore", () => {
         expectedRevision: 1,
         pillar: "成本与时间复盘",
         title: "过期编辑",
-        viewerPromise: "不会保存",
-        hook: "不会保存",
-        payoff: "不会保存",
+        concept: "不会保存",
         fromPrevious: [],
         toNext: [],
       }, "2026-08-24T08:31:00.000Z"),
@@ -377,18 +369,14 @@ describe("JsonSeriesStore", () => {
       episodeNumber: 1,
       pillar: editedEpisode.pillar,
       title: editedEpisode.title,
-      viewerPromise: editedEpisode.viewerPromise,
-      hook: editedEpisode.hook,
-      payoff: editedEpisode.payoff,
+      concept: editedEpisode.concept,
       fromPrevious: editedEpisode.continuity.fromPrevious,
       toNext: editedEpisode.continuity.toNext,
     };
     for (const forged of [
       { ...humanDraft, pillar: "真实任务实验" },
       { ...humanDraft, title: "Agent 越权改写的标题" },
-      { ...humanDraft, viewerPromise: "Agent 越权改写的承诺" },
-      { ...humanDraft, hook: "Agent 越权改写的钩子" },
-      { ...humanDraft, payoff: "Agent 越权改写的兑现" },
+      { ...humanDraft, concept: "Agent 越权改写的想法" },
       { ...humanDraft, toNext: ["Agent 越权改写的后续交接"] },
     ]) {
       await assert.rejects(
@@ -405,9 +393,7 @@ describe("JsonSeriesStore", () => {
       episodeNumber: 1,
       pillar: editedEpisode.pillar,
       title: editedEpisode.title,
-      viewerPromise: editedEpisode.viewerPromise,
-      hook: editedEpisode.hook,
-      payoff: editedEpisode.payoff,
+      concept: editedEpisode.concept,
       fromPrevious: editedEpisode.continuity.fromPrevious,
       toNext: editedEpisode.continuity.toNext,
     }, {
@@ -423,9 +409,7 @@ describe("JsonSeriesStore", () => {
         expectedRevision: 4,
         pillar: "成本与时间复盘",
         title: "不能修改",
-        viewerPromise: "不能修改",
-        hook: "不能修改",
-        payoff: "不能修改",
+        concept: "不能修改",
         fromPrevious: [],
         toNext: [],
       }, "2026-08-24T09:01:00.000Z"),
@@ -517,9 +501,7 @@ describe("JsonSeriesStore", () => {
       episodeNumber: 2,
       pillar: staleEpisode.pillar,
       title: staleEpisode.title,
-      viewerPromise: staleEpisode.viewerPromise,
-      hook: staleEpisode.hook,
-      payoff: staleEpisode.payoff,
+      concept: staleEpisode.concept,
       fromPrevious: staleEpisode.continuity.fromPrevious,
       toNext: staleEpisode.continuity.toNext,
     }, { ...staleEpisode.planning, auditStatus: "passed", auditIterations: 1 }, "2026-08-24T09:11:30.000Z");
@@ -606,9 +588,7 @@ describe("JsonSeriesStore", () => {
       episodeNumber: 2,
       pillar: episodeTwo.pillar,
       title: episodeTwo.title,
-      viewerPromise: episodeTwo.viewerPromise,
-      hook: episodeTwo.hook,
-      payoff: episodeTwo.payoff,
+      concept: episodeTwo.concept,
       fromPrevious: episodeTwo.continuity.fromPrevious,
       toNext: episodeTwo.continuity.toNext,
     }, { ...episodeTwo.planning, auditStatus: "passed", auditIterations: 1 }, "2026-08-24T09:10:30.000Z");
@@ -722,9 +702,7 @@ describe("JsonSeriesStore", () => {
       episodeNumber: 2,
       pillar: episodeTwo.pillar,
       title: episodeTwo.title,
-      viewerPromise: episodeTwo.viewerPromise,
-      hook: episodeTwo.hook,
-      payoff: episodeTwo.payoff,
+      concept: episodeTwo.concept,
       fromPrevious: episodeTwo.continuity.fromPrevious,
       toNext: episodeTwo.continuity.toNext,
     }, { ...episodeTwo.planning, auditStatus: "passed", auditIterations: 1 }, "2026-08-24T09:10:30.000Z");
@@ -759,9 +737,7 @@ describe("JsonSeriesStore", () => {
       episodeNumber: 2,
       pillar: episodeTwo.pillar,
       title: episodeTwo.title,
-      viewerPromise: episodeTwo.viewerPromise,
-      hook: episodeTwo.hook,
-      payoff: episodeTwo.payoff,
+      concept: episodeTwo.concept,
       fromPrevious: episodeTwo.continuity.fromPrevious,
       toNext: episodeTwo.continuity.toNext,
     }, { ...episodeTwo.planning, auditStatus: "passed", auditIterations: 1 }, "2026-08-24T09:10:30.000Z");

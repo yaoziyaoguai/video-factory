@@ -7,7 +7,6 @@ import type {
   StudioSeriesEpisodePlanning,
 } from "../shared/api.js";
 import { manualSupplementEvidence, canonicalizeSourceUrl } from "../shared/api.js";
-import { planVisualDirection } from "../shared/visual-plan.js";
 import { decideEditorialFormat } from "./editorial-decision.js";
 import { traceableEvidenceIdentity } from "./candidate-inbox-studio.js";
 import type { SeriesRecord } from "./series-store.js";
@@ -21,9 +20,7 @@ export interface SeriesEpisodeDraft {
   episodeNumber: number;
   pillar: string;
   title: string;
-  viewerPromise: string;
-  hook: string;
-  payoff: string;
+  concept: string;
   fromPrevious: string[];
   toNext: string[];
 }
@@ -61,9 +58,7 @@ export class SeriesPlanner {
         arc: series.currentSeason.arc,
         pillar: draft.pillar,
         title: draft.title,
-        viewerPromise: draft.viewerPromise,
-        hook: draft.hook,
-        payoff: draft.payoff,
+        concept: draft.concept,
         ...(previous ? { previousEpisodeId: previous.id } : {}),
         canonBaseRevision: series.canon.revision,
         status: "planned",
@@ -90,9 +85,7 @@ export class SeriesPlanner {
         episodeNumber,
         pillar: series.name,
         title: `${series.name} ${String(episodeNumber).padStart(2, "0")}｜待策划`,
-        viewerPromise: series.premise,
-        hook: `第 ${episodeNumber} 集开场待创作，请生成路线图或手工填写。`,
-        payoff: "本集具体兑现待创作者确认，不把占位内容当成已完成策划。",
+        concept: series.premise,
         fromPrevious: [], toNext: [],
       };
       const pillar = series.pillars[(episodeNumber - 1) % series.pillars.length] ?? series.premise;
@@ -101,9 +94,7 @@ export class SeriesPlanner {
         episodeNumber,
         pillar,
         title: `${series.name} ${episode}｜${pillar} · 待策划`,
-        viewerPromise: series.premise,
-        hook: `第 ${episodeNumber} 集围绕“${pillar}”展开，具体开场待创作。`,
-        payoff: `“${pillar}”的本集具体兑现待创作者确认，不预设实验、结论或已完成的结果。`,
+        concept: series.premise,
         fromPrevious: episodeNumber === 1 ? [] : ["承接上一集定版后写入的连续性记忆，不把路线图意图冒充正史。"],
         toNext: [],
       };
@@ -127,14 +118,14 @@ export class SeriesPlanner {
   }
 
   private toCandidate(series: SeriesRecord, episode: StudioSeriesEpisode): StudioCandidateInboxItem {
-    const risk = topicRiskLevel(`${episode.title} ${episode.hook} ${episode.viewerPromise} ${episode.payoff}`);
+    const risk = topicRiskLevel(`${episode.title} ${episode.concept}`);
     const planningQuality = seriesPlanningQuality(episode);
     const candidate = scoreTopicCandidate(episode.id, {
       platform: series.platform,
       track: series.track,
       audience: series.audience,
-      painPoint: episode.viewerPromise,
-      hook: episode.hook,
+      painPoint: episode.concept,
+      hook: episode.concept,
       // 路线图是创作意图，不是社交平台热度或外部事实来源。
       evidence: [],
       audienceReach: planningQuality,
@@ -159,10 +150,10 @@ export class SeriesPlanner {
       verification,
       score: candidate.score,
       audience: series.audience,
-      painPoint: episode.viewerPromise,
-      hook: episode.hook,
+      painPoint: episode.concept,
+      hook: episode.concept,
       evidence: candidate.evidence,
-    }, []);
+    });
     return {
       id: candidate.id,
       generationId: `${series.id}:r${series.revision}:e${episode.episodeNumber}`,
@@ -192,19 +183,13 @@ export class SeriesPlanner {
       platform: series.platform,
       track: series.track,
       audience: series.audience,
-      painPoint: episode.viewerPromise,
-      hook: episode.hook,
+      painPoint: episode.concept,
+      hook: episode.concept,
       rationale: `第 ${episode.episodeNumber} 集属于“${episode.arc}”篇章；内容支柱为“${episode.pillar}”，结尾将写回下一集连续性记忆。`,
       providerId: "series-roadmap-v2",
       generatedAt: episode.updatedAt,
       evidence: [...candidate.evidence, ...supplementEvidence],
       score: candidate.score,
-      visualPlan: planVisualDirection({
-        title: episode.title,
-        hook: episode.hook,
-        category: series.category,
-        visualStyle: series.visualStyle,
-      }),
     };
   }
 }

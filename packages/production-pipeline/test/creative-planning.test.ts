@@ -53,17 +53,8 @@ const INPUT_DIGEST = "b3-accepted-input-digest-0001";
 
 function treatmentFixture(): CreativeTreatment {
   return {
-    version: "video-factory/creative-treatment-v2",
-    viewerPromise: "看完能掌握测试主题的三个要点",
-    hook: { narrationIntent: "直接抛出问题", visualIntent: "对比画面开场" },
-    progression: [
-      { beatId: "beat-1", purpose: "建立问题", viewerGain: "知道要解决什么" },
-      { beatId: "beat-2", purpose: "展开方法", viewerGain: "掌握关键步骤" },
-      { beatId: "beat-3", purpose: "兑现结论", viewerGain: "得到可行动的结论" },
-    ],
-    payoff: "回顾三个要点并给出行动建议",
-    visualPrinciples: ["真实场景优先"],
-    soundPrinciples: ["环境声为主"],
+    version: "video-factory/creative-treatment-v3",
+    concept: "看完能掌握测试主题的三个要点",
     evidenceRequirements: [],
     feasibilityQuestions: [],
   };
@@ -76,8 +67,6 @@ function narrationScript(value: ScriptDraft | undefined): NarrationScriptDraft {
 
 function scriptFixture(): NarrationScriptDraft {
   return {
-    viewerPromise: "看完能掌握测试主题的三个要点",
-    narrativeArc: "问题-方法-结论",
     canonFacts: [],
     scenes: [1, 2, 3].map((position) => ({
       position,
@@ -96,9 +85,6 @@ function directorPlanFixture(
 ): VisualDirectorPlan {
   return {
     version: "video-factory/director-plan-v1",
-    requestedProfileId: "documentary-observer",
-    resolvedProfileId: "documentary-observer",
-    profileRationale: "测试固定档案",
     visualBible: {
       narrativeApproach: "观察式",
       pacing: "克制推进",
@@ -3409,17 +3395,12 @@ describe("B3 固定创作规划图", () => {
                 auditCalls += 1;
                 return { output: {
                   version: "video-factory/role-audit-v2",
-                  rubricVersion: "video-factory/role-quality-rubric-v1",
+                  rubricVersion: "video-factory/role-quality-rubric-v2",
                   verdict: "repair",
                   score: 91,
                   assessments: [{
                     targetPath: "",
-                    dimensions: [
-                      { dimension: "attention", score: 91, evidence: "开场给出具体对象。" },
-                      { dimension: "progression", score: 91, evidence: "中段逐步给出结果。" },
-                      { dimension: "payoff", score: 91, evidence: "结尾回答原承诺。" },
-                      { dimension: "expression", score: 91, evidence: "表达具体可执行。" },
-                    ],
+                    dimensions: [{ dimension: "consistency", score: 91, evidence: "开场给出具体对象。" }, { dimension: "expression", score: 91, evidence: "表达具体可执行。" }],
                   }],
                   summary: "创作表达完整，但锁定的真实实测承诺缺少证据来源",
                   issues: [{

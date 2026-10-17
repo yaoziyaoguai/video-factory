@@ -80,7 +80,7 @@ const mutableReport: VisualReviewReport = { ...report, findings: report.findings
 
 const passingAudit = {
   version: "video-factory/role-audit-v2",
-  rubricVersion: "video-factory/role-quality-rubric-v1",
+  rubricVersion: "video-factory/role-quality-rubric-v2",
   assessments: [{
     targetPath: "",
     dimensions: [
@@ -564,7 +564,6 @@ describe("CodexVisualReviewAgent", () => {
     const directorPlanPath = path.join(runRoot, "director_plan.json");
     const renderManifestPath = path.join(runRoot, "render_manifest.json");
     await writeFile(scriptPath, JSON.stringify({
-      viewerPromise: "看见窗边光线变化",
       scenes: [{ position: 1, visible_action: "手拉开窗帘", success_criteria: ["杯沿变亮"] }],
     }));
     await writeFile(directorPlanPath, JSON.stringify({
@@ -590,7 +589,7 @@ describe("CodexVisualReviewAgent", () => {
     });
 
     const reviewContext = (payload as { reviewContext: Record<string, unknown> }).reviewContext;
-    assert.equal((reviewContext.script as Record<string, unknown>).viewerPromise, "看见窗边光线变化");
+    assert.deepEqual((reviewContext.script as Record<string, unknown>).scenes, [{ position: 1, visible_action: "手拉开窗帘", success_criteria: ["杯沿变亮"] }]);
     assert.deepEqual((reviewContext.directorPlan as Record<string, unknown>).shots, [{ scenePosition: 1, temporalBeats: ["[0s-2s] 拉开窗帘"], successCriteria: ["杯沿变亮"] }]);
     assert.deepEqual((reviewContext.renderManifest as Record<string, unknown>).slides, [{ scene_position: 1, duration: 6 }]);
   });
@@ -790,7 +789,7 @@ describe("CodexVisualReviewAgent", () => {
           auditCalls += 1;
           return { output: auditCalls === 1 ? {
             version: "video-factory/role-audit-v2",
-            rubricVersion: "video-factory/role-quality-rubric-v1",
+            rubricVersion: "video-factory/role-quality-rubric-v2",
             assessments: [{
               targetPath: "",
               dimensions: [
@@ -892,7 +891,7 @@ describe("CodexVisualReviewAgent", () => {
           return {
             output: auditCalls === 1 ? {
               version: "video-factory/role-audit-v2",
-              rubricVersion: "video-factory/role-quality-rubric-v1",
+              rubricVersion: "video-factory/role-quality-rubric-v2",
               assessments: [{
                 targetPath: "",
                 dimensions: [
@@ -946,7 +945,7 @@ describe("CodexVisualReviewAgent", () => {
         runTaskDetailed: async () => ({
           output: {
             version: "video-factory/role-audit-v2",
-            rubricVersion: "video-factory/role-quality-rubric-v1",
+            rubricVersion: "video-factory/role-quality-rubric-v2",
             assessments: [{
               targetPath: "",
               dimensions: [

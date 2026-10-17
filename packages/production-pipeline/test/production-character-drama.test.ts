@@ -18,8 +18,8 @@ test("MC-A05/13 formal script→director persists the explicit versions and exac
       screenwriterAgent: { id: "codex-screenwriter-v1", draft: async () => structuredClone(script) },
       directorAgent: { id: "api-visual-director-v1", plan: async (input) => {
         calls.push(input);
-        return { version: "video-factory/director-plan-v2", requestedProfileId: "auto", resolvedProfileId: "quiet-humanism",
-          profileRationale: "对话反应镜头", visualBible: { narrativeApproach: "先疑问后发现", pacing: "自然", composition: "中景",
+        return { version: "video-factory/director-plan-v2",
+           visualBible: { narrativeApproach: "先疑问后发现", pacing: "自然", composition: "中景",
             camera: "固定", color: "自然", continuity: "同一小店", sound: "按角色分别配音" },
           shots: script.scenes.map((s) => ({ scenePosition: s.position, characterIds: s.character_ids, speakingTurnIds: s.dialogue.map((t) => t.id),
             narrativeRole: s.purpose, authenticityPolicy: "illustrative", preferredProviderId: "pexels-stock-v1", deliveryType: "stock_video",
@@ -32,7 +32,7 @@ test("MC-A05/13 formal script→director persists the explicit versions and exac
       nicheSlug: "story", durationSeconds: 24, platform: "douyin", reviewMode: "manual", runPurpose: "test", presentationMode: "character_drama",
       providers: { script: "codex-screenwriter-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1", voice: "macos-say-v1",
         render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
     });
     assert.equal(calls.length, 1, JSON.stringify(run.nodeRuns.map((n) => ({ id: n.nodeId, status: n.status, error: n.error }))));

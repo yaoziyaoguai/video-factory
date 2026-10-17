@@ -12,9 +12,6 @@ const economics = { allowMeteredProviders: true };
 function plan(shots: VisualDirectorPlan["shots"]): VisualDirectorPlan {
   return {
     version: "video-factory/director-plan-v1",
-    requestedProfileId: "auto",
-    resolvedProfileId: "documentary-observer",
-    profileRationale: "真实人物与可验证场景更适合这个题目。",
     visualBible: {
       narrativeApproach: "先看具体动作，再解释原因。",
       pacing: "前快后稳",
@@ -87,26 +84,13 @@ describe("validateVisualDirectorPlan", () => {
     assert.throws(() => validateVisualDirectorPlan({ ...candidate, version: "video-factory/director-plan-v1" }, options), /version/);
   });
 
-  it("copies the accepted viewer promise when the director omits it and rejects an attempted rewrite", () => {
-    const options: VisualDirectorPlanValidation = {
-      scenePositions: [1],
-      viewerPromise: "观众看完能完成一个明确动作。",
-      allowedProviderIds: ["pexels-stock-v1"],
-      generativeProviderIds: [],
-      providerDeliveryTypes: { "pexels-stock-v1": ["stock_video"] },
-      estimatedCnyPerClip: {},
-      economics,
-    };
-    const accepted = validateVisualDirectorPlan(plan([shot(1, "pexels-stock-v1")]), options);
-
-    assert.equal(accepted.visualBible.viewerPromise, options.viewerPromise);
-    assert.throws(() => validateVisualDirectorPlan({
-      ...plan([shot(1, "pexels-stock-v1")]),
-      visualBible: {
-        ...plan([]).visualBible,
-        viewerPromise: "导演自行改写的另一份承诺。",
-      },
-    }, options), /cannot change the accepted viewer promise/);
+  it("does not add an audience promise to a director plan", () => {
+    const accepted = validateVisualDirectorPlan(plan([shot(1, "pexels-stock-v1")]), {
+      scenePositions: [1], allowedProviderIds: ["pexels-stock-v1"], generativeProviderIds: [],
+      providerDeliveryTypes: { "pexels-stock-v1": ["stock_video"] }, estimatedCnyPerClip: {}, economics,
+    });
+    assert.equal(Object.hasOwn(accepted.visualBible, "viewerPromise"), false);
+    assert.deepEqual(accepted.visualBible, plan([]).visualBible);
   });
 
   it("accepts a different AI-selected provider for every shot and replaces model cost with server estimates", () => {

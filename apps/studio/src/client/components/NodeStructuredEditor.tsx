@@ -45,9 +45,6 @@ const LABELS: Record<string, string> = {
   subject: "主体",
   generationPrompt: "生成提示",
   rationale: "选择理由",
-  requestedProfileId: "指定风格",
-  resolvedProfileId: "导演风格",
-  profileRationale: "风格选择理由",
   continuityNote: "连续性",
   continuity: "连续性",
   narrativeApproach: "叙事方式",
@@ -71,8 +68,6 @@ const LABELS: Record<string, string> = {
   economics: "画面来源策略",
   director: "导演配置",
   voiceDirection: "声音配置",
-  viewerPromise: "观众承诺",
-  narrativeArc: "叙事弧线",
   visible_action: "可见动作",
   sound_cue: "声音提示",
   success_criteria: "成功条件",
@@ -153,8 +148,6 @@ const ENUM_OPTIONS: Record<string, Array<{ value: string; label: string }>> = {
     { value: "xiaohongshu", label: "小红书" },
     { value: "bilibili", label: "哔哩哔哩" },
   ],
-  requestedProfileId: directorOptions(true),
-  resolvedProfileId: directorOptions(false),
 };
 
 export function NodeStructuredEditor({ nodeId, value, assetProviderIds = [], assetProviders = [], nativeAudio = false, onChange }: NodeStructuredEditorProps) {
@@ -426,17 +419,6 @@ function label(key: string): string {
   return LABELS[key] ?? key.replace(/[_-]+/g, " ");
 }
 
-function directorOptions(includeAuto: boolean): Array<{ value: string; label: string }> {
-  return [
-    ...(includeAuto ? [{ value: "auto", label: "自动匹配" }] : []),
-    { value: "documentary-observer", label: "纪实观察" },
-    { value: "quiet-humanism", label: "静默人文" },
-    { value: "urban-poetic", label: "都市诗意" },
-    { value: "chromatic-storytelling", label: "色彩叙事" },
-    { value: "geometric-control", label: "几何秩序" },
-    { value: "suspense-staging", label: "悬念调度" },
-  ];
-}
 
 function assetProviderOptions(
   configuredIds: string[],

@@ -14,7 +14,7 @@ const settings: StudioCreatorSettings = {
   voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
   defaultRecipeId: "free-stock", roleProviderDefaults: {}, modelDefaults: {},
   topicStrategy: { customInstruction: "" },
-  productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+  productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
 };
 
 function savedSettings(patch: Parameters<typeof studioApi.updateSettings>[0]): StudioCreatorSettings {
@@ -390,7 +390,7 @@ describe("UI/UX page refinements", () => {
       bible: { rules: ["保留普通生活的真实细节"], recurringElements: [], forbiddenChanges: [] }, canon: { revision: 0, facts: [] },
       episodes: [{
         id: "series-coffee-e1", seriesId: "series-coffee", episodeNumber: 1, seasonNumber: 1, arc: "普通人的下班路", pillar: "生活观察",
-        title: saved.title, viewerPromise: "看见雨天温暖的一面", hook: "系列独有的开头承诺", payoff: "系列独有的结尾收获",
+        title: saved.title, concept: "看见雨天温暖的一面",
         canonBaseRevision: 0, status: "planned", continuity: { inheritedFromPrevious: [], fromPrevious: [], toNext: [], canonChecks: [] },
         planning: { source: "rules", role: "系列总编", auditRole: "独立质量审计", auditStatus: "passed", auditIterations: 1, providerId: "rules", modelId: "deterministic", promptVersion: "test" },
         createdAt: saved.createdAt, updatedAt: saved.updatedAt,
@@ -432,8 +432,7 @@ describe("UI/UX page refinements", () => {
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByLabelText("视频标题")).toHaveValue(adopted.title);
     expect(within(dialog).getByLabelText("目标受众")).toHaveValue(adopted.audience);
-    expect(within(dialog).getByText("系列独有的开头承诺")).toBeInTheDocument();
-    expect(within(dialog).getByText("系列独有的结尾收获")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("内容角度")).toHaveValue(adopted.hook);
     expect(start).not.toHaveBeenCalled();
   });
 });

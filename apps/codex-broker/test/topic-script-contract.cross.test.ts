@@ -153,7 +153,6 @@ describe("script-draft cross-process contract (planning chain brief × Broker pa
       visualIntent: "用通用生活画面解释机制，不冒充用户实测。",
       creativeTreatment: legalCreativeTreatmentOutput(),
       planningIssues: [{ severity: "advisory", detail: "补齐第三条来源后可加强结论" }],
-      visualPlan: { strategy: "桌面实测特写", beats: [] },
       productionCapabilities: {
         assetProviders: [],
         editing: { sourceRangeReuse: true, staticEditorialCard: false },
@@ -245,15 +244,10 @@ class ParsingTreatmentClient extends CodexBridgeClient {
       return {
         output: {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v1",
+          rubricVersion: "video-factory/role-quality-rubric-v2",
           assessments: [{
             targetPath: "",
-            dimensions: [
-              { dimension: "attention", score: 95, evidence: "开场就给出具体对象。" },
-              { dimension: "progression", score: 95, evidence: "每场都在推进信息。" },
-              { dimension: "payoff", score: 95, evidence: "结尾回答了原承诺。" },
-              { dimension: "expression", score: 95, evidence: "表达决策具体可执行。" },
-            ],
+            dimensions: [{ dimension: "consistency", score: 95, evidence: "开场就给出具体对象。" }, { dimension: "expression", score: 95, evidence: "表达决策具体可执行。" }],
           }],
           verdict: "pass",
           score: 95,
@@ -296,9 +290,7 @@ describe("creative-treatment adapter × Broker parser", () => {
           episode: {
             pillar: "真实实验",
             title: "第三集",
-            viewerPromise: "看懂失败发生在哪一步",
-            hook: "先展示反常结果",
-            payoff: "给出可复现检查表",
+            concept: "看懂失败发生在哪一步",
           },
           bible: { rules: ["结论必须来自本集实际内容"], recurringElements: [], forbiddenChanges: [] },
           canon: { revision: 2, facts: [] },
@@ -346,7 +338,7 @@ describe("creative-treatment adapter × Broker parser", () => {
     assert.equal((repaired.revision as { mode?: string }).mode, "validation-repair");
     assert.equal((initial.brief as { visualIntent?: string }).visualIntent, "以来源截图和通用示意解释核对方法。");
     assert.equal(
-      ((initial.brief as { seriesContext?: { episode?: { viewerPromise?: string } } }).seriesContext?.episode?.viewerPromise),
+      ((initial.brief as { seriesContext?: { episode?: { concept?: string } } }).seriesContext?.episode?.concept),
       "看懂失败发生在哪一步",
     );
     assert.equal((initial.brief as { templateGuidance?: unknown }).templateGuidance, undefined);
@@ -382,15 +374,10 @@ class ParsingRepairClient extends CodexBridgeClient {
       return {
         output: {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v1",
+          rubricVersion: "video-factory/role-quality-rubric-v2",
           assessments: [{
             targetPath: "",
-            dimensions: [
-              { dimension: "attention", score: 95, evidence: "开场就给出具体对象。" },
-              { dimension: "progression", score: 95, evidence: "每场都在推进信息。" },
-              { dimension: "payoff", score: 95, evidence: "结尾回答了原承诺。" },
-              { dimension: "expression", score: 95, evidence: "旁白具体可理解。" },
-            ],
+            dimensions: [{ dimension: "consistency", score: 95, evidence: "开场就给出具体对象。" }, { dimension: "expression", score: 95, evidence: "旁白具体可理解。" }],
           }],
           verdict: "pass",
           score: 95,
@@ -420,8 +407,6 @@ const stockCapabilities: ProductionCapabilities = {
 
 function validScriptCandidate(): Record<string, unknown> {
   return {
-    viewerPromise: "学会识别资料支持的结论边界",
-    narrativeArc: "先提出核对问题，再解释来源边界，最后给出行动方法。",
     canonFacts: [],
     scenes: [1, 2, 3].map((position) => ({
       position,
@@ -440,11 +425,7 @@ function validScriptCandidate(): Record<string, unknown> {
 function validDirectorCandidate(): Record<string, unknown> {
   return {
     version: "video-factory/director-plan-v1",
-    requestedProfileId: "auto",
-    resolvedProfileId: "documentary-observer",
-    profileRationale: "通用纪实画面适合解释核对方法。",
     visualBible: {
-      viewerPromise: "学会识别资料支持的结论边界",
       narrativeApproach: "按动作推进核对步骤",
       motif: "纸面标记与手机资料",
       pacing: "稳定清楚",
@@ -518,7 +499,7 @@ describe("script/director adapters × Broker parser", () => {
 
     const directorClient = new ParsingRepairClient("director-plan", validDirectorCandidate());
     await new CodexVisualDirectorAgent({ client: directorClient, maxReviewIterations: 1 }).planDetailed({
-      brief: { ...commonBrief, requestedProfileId: "auto" },
+      brief: { ...commonBrief,  },
       scenes: (validScriptCandidate().scenes as Array<Record<string, unknown>>).map((scene) => ({
         position: scene.position as number,
         narration: scene.narration as string,
@@ -587,7 +568,7 @@ describe("visual-review adapter × Broker parser", () => {
     };
     const audit = {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       assessments: [{
         targetPath: "",
         dimensions: [
@@ -695,7 +676,6 @@ function directorInputForCapabilities(capabilities: ProductionCapabilities): Vis
       platform: "douyin",
       durationSeconds: 24,
       durationRange: { minSeconds: 20, maxSeconds: 34 },
-      requestedProfileId: "auto",
       productionCapabilities: capabilities,
     },
     scenes: [{

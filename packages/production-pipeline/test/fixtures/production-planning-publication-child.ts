@@ -47,16 +47,8 @@ async function recordSideEffect(file: string, entry: string): Promise<void> {
 
 function legalTreatment(title: string): CreativeTreatment {
   return {
-    version: "video-factory/creative-treatment-v2",
-    viewerPromise: "看完能避开三个决策坑",
-    hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
-    progression: [
-      { beatId: "beat-1", purpose: "建立问题", viewerGain: "识别坑" },
-      { beatId: "beat-2", purpose: "给出方法", viewerGain: "可执行步骤" },
-    ],
-    payoff: "低风险决策清单",
-    visualPrinciples: ["真实动作"],
-    soundPrinciples: ["环境声先行"],
+    version: "video-factory/creative-treatment-v3",
+    concept: "看完能避开三个决策坑",
     evidenceRequirements: [],
     feasibilityQuestions: [],
   };
@@ -150,8 +142,6 @@ function childAgents(args: ChildArgs): Pick<ProductionPipelineOptions, "treatmen
       await recordSideEffect(args.sideEffectFile, "screenwriter");
       return {
         output: {
-          viewerPromise: "看完能避开三个决策坑",
-          narrativeArc: "问题-方法-清单",
           canonFacts: ["步骤可执行"],
           scenes: [1, 2, 3].map((position) => ({
             position,
@@ -177,9 +167,6 @@ function childAgents(args: ChildArgs): Pick<ProductionPipelineOptions, "treatmen
       return {
         output: {
           version: "video-factory/director-plan-v1",
-          requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "documentary-observer",
-          profileRationale: "用真实动作解释。",
           visualBible: {
             narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
             camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
@@ -238,7 +225,7 @@ function childBrief(): ProductionBrief {
       technicalReview: "python-technical-review-v1",
     },
     workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1" },
-    director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+    director: {  assetProviderIds: ["local-editorial-v1"] },
     economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
     voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
     seriesContext: {
@@ -258,9 +245,7 @@ function childBrief(): ProductionBrief {
         updatedAt: "2026-09-13T00:00:00.000Z",
         pillar: "恢复边界",
         title: "第一集",
-        viewerPromise: "看完能避开三个决策坑",
-        hook: "先看最常见的失败",
-        payoff: "得到低风险决策清单",
+        concept: "看完能避开三个决策坑",
         planning: {
           source: "agent",
           role: "系列总编",

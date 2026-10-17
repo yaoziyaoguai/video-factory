@@ -14,7 +14,6 @@ describe("JsonCreatorSettingsStore", () => {
     const defaults = await store.get();
     assert.equal(defaults.defaultRecipeId, "economy-daily");
     assert.deepEqual(defaults.productionDefaults, {
-      directorProfileId: "auto",
       reviewMode: "manual",
       platform: "douyin",
       durationSeconds: 24,
@@ -24,7 +23,7 @@ describe("JsonCreatorSettingsStore", () => {
       defaultRecipeId: "free-stock",
       defaultAssetProviderId: "pexels-stock-v1",
       roleProviderDefaults: { script: "codex-screenwriter-v1", director: "api-visual-director-v1" },
-      productionDefaults: { directorProfileId: "documentary-observer", durationSeconds: 12.5 },
+      productionDefaults: {  durationSeconds: 12.5 },
       topicStrategy: {
         positioning: "替普通人解释技术变化。",
         targetAudience: "关注 AI 但不想看营销稿的职场人。",
@@ -44,7 +43,6 @@ describe("JsonCreatorSettingsStore", () => {
       director: "api-visual-director-v1",
     });
     assert.deepEqual(reloaded.productionDefaults, {
-      directorProfileId: "documentary-observer",
       reviewMode: "manual",
       platform: "douyin",
       durationSeconds: 12.5,
@@ -75,7 +73,6 @@ describe("JsonCreatorSettingsStore", () => {
         },
         modelDefaults: {},
         productionDefaults: {
-          directorProfileId: "auto",
           reviewMode: "manual",
           platform: "douyin",
           durationSeconds: 24,

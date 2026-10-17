@@ -18,7 +18,6 @@ function mockSearchSources() {
   vi.spyOn(studioApi, 'health').mockResolvedValue({ status: 'ok', runtime: {} });
   vi.spyOn(studioApi, 'runs').mockResolvedValue([]);
   vi.spyOn(studioApi, 'opportunities').mockResolvedValue([]);
-  vi.spyOn(studioApi, 'templates').mockResolvedValue({ templates: [], storeRevision: 0 });
 }
 
 it('shows the current workspace without changing navigation or loading business data', async () => {
@@ -27,7 +26,7 @@ it('shows the current workspace without changing navigation or loading business 
   render(<MemoryRouter initialEntries={['/projects/a-film']}><AppShell><main>稿件正文</main></AppShell></MemoryRouter>);
   expect(screen.getByLabelText('当前工作区')).toHaveTextContent('作品工作区');
   const nav = within(screen.getByRole('navigation', { name: '主导航' }));
-  expect(nav.getAllByRole('link')).toHaveLength(6);
+  expect(nav.getAllByRole('link')).toHaveLength(5);
   expect(nav.getByRole('link', { name: '制作记录' })).toHaveAttribute('href', '/projects');
   await waitFor(() => expect(screen.getByRole('status', { name: '基础工具检查' })).toHaveTextContent('基础工具可用'));
   expect(screen.getAllByRole('status', { name: '基础工具检查' })).toHaveLength(1);
@@ -41,14 +40,14 @@ it('keeps global search keyboard-accessible and returns focus to its trigger', a
   const user = userEvent.setup();
   render(<MemoryRouter initialEntries={['/assets']}><AppShell><main>素材内容</main></AppShell></MemoryRouter>);
   expect(screen.getByLabelText('当前工作区')).toHaveTextContent('素材库');
-  const trigger = screen.getByRole('button', { name: '搜索项目、选题、模板或功能' });
+  const trigger = screen.getByRole('button', { name: '搜索项目、选题或功能' });
   trigger.focus();
   await user.keyboard('{Enter}');
-  const search = screen.getByRole('combobox', { name: '搜索项目、选题、模板或功能' });
+  const search = screen.getByRole('combobox', { name: '搜索项目、选题或功能' });
   await waitFor(() => expect(search).toHaveFocus());
   await user.type(search, '素材');
   await user.keyboard('{Escape}');
-  await waitFor(() => expect(screen.queryByRole('dialog', { name: '搜索项目、选题、模板或功能' })).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: '搜索项目、选题或功能' })).not.toBeInTheDocument());
   await waitFor(() => expect(trigger).toHaveFocus());
 });
 
@@ -60,7 +59,7 @@ it('uses one responsive navigation and one account entry without losing secondar
 
   expect(screen.getAllByRole('navigation')).toHaveLength(1);
   const nav = within(screen.getByRole('navigation', { name: '主导航' }));
-  expect(nav.getAllByRole('link')).toHaveLength(6);
+  expect(nav.getAllByRole('link')).toHaveLength(5);
   expect(nav.getByRole('link', { name: '制作复盘' })).toHaveAttribute('aria-current', 'page');
   expect(screen.getAllByRole('link', { name: 'VideoFactory 创作台' })).toHaveLength(1);
   expect(within(screen.getByRole('banner')).getAllByRole('button', { name: '打开创作向导' })).toHaveLength(1);
@@ -72,13 +71,13 @@ it('uses one responsive navigation and one account entry without losing secondar
   await waitFor(() => expect(onLogout).toHaveBeenCalledOnce());
 });
 
-it('makes all six destinations directly reachable and moves focus to the selected workspace', async () => {
+it('makes all five destinations directly reachable and moves focus to the selected workspace', async () => {
   vi.spyOn(studioApi, 'health').mockResolvedValue({ status: 'ok', runtime: {} });
   const user = userEvent.setup();
   render(<MemoryRouter><AppShell><main>当前页面<button>正文操作</button></main></AppShell></MemoryRouter>);
   const nav = within(screen.getByRole('navigation', { name: '主导航' }));
-  expect(nav.getAllByRole('link')).toHaveLength(6);
-  for (const label of ['创作设置', '模板资料', '制作复盘']) {
+  expect(nav.getAllByRole('link')).toHaveLength(5);
+  for (const label of ['创作设置', '制作复盘']) {
     const link = nav.getByRole('link', { name: label });
     link.focus();
     await user.keyboard('{Enter}');
@@ -110,8 +109,8 @@ it('navigates command results with arrows and Enter, then focuses the destinatio
   mockSearchSources();
   const user = userEvent.setup();
   render(<MemoryRouter><AppShell><main>当前页面<button>正文操作</button></main></AppShell></MemoryRouter>);
-  await user.click(screen.getByRole('button', { name: '搜索项目、选题、模板或功能' }));
-  const search = screen.getByRole('combobox', { name: '搜索项目、选题、模板或功能' });
+  await user.click(screen.getByRole('button', { name: '搜索项目、选题或功能' }));
+  const search = screen.getByRole('combobox', { name: '搜索项目、选题或功能' });
   await user.keyboard('{ArrowDown}');
   expect(screen.getByRole('option', { name: /创作台/ })).toHaveAttribute('aria-selected', 'true');
   await user.keyboard('{ArrowUp}');
@@ -160,7 +159,7 @@ it('lets an existing body dialog own shortcuts, Escape, and return focus', async
   expect(screen.getByRole('textbox', { name: '确认意见' })).toHaveFocus();
   await user.keyboard('{Control>}k{/Control}');
   expect(screen.getAllByRole('dialog')).toHaveLength(1);
-  expect(screen.queryByRole('dialog', { name: '搜索项目、选题、模板或功能' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('dialog', { name: '搜索项目、选题或功能' })).not.toBeInTheDocument();
   expect(runs).not.toHaveBeenCalled();
   await user.keyboard('{Escape}');
   expect(screen.queryByRole('dialog', { name: '正文确认窗口' })).not.toBeInTheDocument();

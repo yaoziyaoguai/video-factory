@@ -363,7 +363,7 @@ describe("role agent loop audit boundary", () => {
   it("rejects a low-score pass even when the broker is bypassed", () => {
     assert.throws(() => validateRoleAudit({
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v1",
+      rubricVersion: "video-factory/role-quality-rubric-v2",
       verdict: "pass",
       score: 79,
       assessments: auditAssessments(CREATIVE_AUDIT_DIMENSIONS, 79),
@@ -404,7 +404,7 @@ describe("role agent loop audit boundary", () => {
         return {
           output: {
             version: "video-factory/role-audit-v2",
-            rubricVersion: "video-factory/role-quality-rubric-v1",
+            rubricVersion: "video-factory/role-quality-rubric-v2",
             verdict: "pass",
             score: 92,
             assessments: auditAssessments(CREATIVE_AUDIT_DIMENSIONS, 92),
@@ -1570,7 +1570,7 @@ describe("role agent loop audit boundary", () => {
         auditCalls += 1;
         return { output: {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v1",
+          rubricVersion: "video-factory/role-quality-rubric-v2",
           verdict: "repair",
           score: 55,
           assessments: auditAssessments(CREATIVE_AUDIT_DIMENSIONS, 55),
@@ -2054,7 +2054,7 @@ function preparedOperation(
   };
 }
 
-const CREATIVE_AUDIT_DIMENSIONS = ["attention", "progression", "payoff", "expression"] as const;
+const CREATIVE_AUDIT_DIMENSIONS = ["expression", "consistency"] as const;
 const REPORT_AUDIT_DIMENSIONS = ["evidence", "coverage", "consistency", "actionability"] as const;
 
 // 宿主按角色决定维度集合，审计必须按同一版本标准给每个维度分；这里让全部分数相等，
@@ -2069,7 +2069,7 @@ function auditAssessments(dimensions: readonly string[], score: number) {
 function passingAudit(dimensions: readonly string[] = CREATIVE_AUDIT_DIMENSIONS) {
   return {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v1",
+    rubricVersion: "video-factory/role-quality-rubric-v2",
     verdict: "pass",
     score: 92,
     assessments: auditAssessments(dimensions, 92),
@@ -2083,7 +2083,7 @@ function passingAudit(dimensions: readonly string[] = CREATIVE_AUDIT_DIMENSIONS)
 function repairingAudit(dimensions: readonly string[] = CREATIVE_AUDIT_DIMENSIONS) {
   return {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v1",
+    rubricVersion: "video-factory/role-quality-rubric-v2",
     verdict: "repair",
     score: 60,
     assessments: auditAssessments(dimensions, 60),

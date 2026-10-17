@@ -98,7 +98,7 @@ function quoteBrief(): ProductionBrief {
       technicalReview: "python-technical-review-v1",
     },
     workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1" },
-    director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+    director: {  assetProviderIds: ["seedance-video-v1"] },
     economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
   } as unknown as ProductionBrief;
@@ -112,16 +112,8 @@ function quoteAgents(): { treatmentAgents: Array<{ providerId: string; agent: Cr
         id: TREATMENT_PROVIDER_ID,
         modelId: "treatment-model-a",
         treat: async () => ({
-          version: "video-factory/creative-treatment-v2",
-          viewerPromise: "看完能记住三个要点",
-          hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
-          progression: [
-            { beatId: "beat-1", purpose: "建立问题", viewerGain: "识别坑" },
-            { beatId: "beat-2", purpose: "给出方法", viewerGain: "可执行步骤" },
-          ],
-          payoff: "低风险决策清单",
-          visualPrinciples: ["真实动作"],
-          soundPrinciples: ["环境声先行"],
+          version: "video-factory/creative-treatment-v3",
+          concept: "看完能记住三个要点",
           evidenceRequirements: [],
           feasibilityQuestions: [],
         }),
@@ -131,8 +123,6 @@ function quoteAgents(): { treatmentAgents: Array<{ providerId: string; agent: Cr
       id: "codex-screenwriter-v1",
       modelId: "screenwriter-model-one",
       draft: async () => ({
-        viewerPromise: "看完能记住三个要点",
-        narrativeArc: "问题-方法-清单",
         canonFacts: ["要点可执行"],
         scenes: [1, 2, 3].map((position) => ({
           position,
@@ -149,9 +139,6 @@ function quoteAgents(): { treatmentAgents: Array<{ providerId: string; agent: Cr
       modelId: "director-model-one",
       plan: async (input: VisualDirectorAgentInput) => ({
         version: "video-factory/director-plan-v1",
-        requestedProfileId: input.brief.requestedProfileId,
-        resolvedProfileId: "documentary-observer",
-        profileRationale: "生成镜头交付。",
         visualBible: {
           narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
           camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
@@ -232,7 +219,6 @@ async function currentQuoteDraft(harness: { studio: ProductionStudio; pipeline: 
     angle: brief.angle,
     audience: brief.audience,
     durationRange: brief.durationRange ?? { minSeconds: 0, maxSeconds: 0 },
-    directorProfileId: brief.director?.profileId ?? "",
   });
   const quoteItems = (plan.items ?? []).map((item) => ({
     assetKey: item.id,

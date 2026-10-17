@@ -59,7 +59,7 @@ const legacyBrief: ProductionBrief = {
     maxCostCny: 0,
   },
   providers: {
-    script: "python-template-v1",
+    script: "codex-screenwriter-v1",
     assets: "local-editorial-v1",
     voice: "macos-say-v1",
     render: "python-ffmpeg-v1",
@@ -84,7 +84,7 @@ const brief: ProductionBrief = {
     // 边界闸门是新建制作的必需项，所以"一份现代简报"必须带上它——少了它连 start 都进不去。
     boundaryGates: "user-confirmed-v1",
   },
-  director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+  director: {  assetProviderIds: ["local-editorial-v1"] },
 };
 
 function waitingRun(workspaceRoot: string): WorkflowRun<ProductionBrief> {
@@ -757,7 +757,7 @@ describe("StudioService", () => {
     const storyboardPath = path.join(workspaceRoot, "runs", "run-1", "nodes", "visual-direction", "attempt-1", "storyboard.json");
     await mkdir(path.dirname(scriptPath), { recursive: true });
     await mkdir(path.dirname(storyboardPath), { recursive: true });
-    const scriptContent = JSON.stringify({ viewerPromise: "原版承诺", scenes: [1, 2, 3, 4].map((position) => ({ position })) });
+    const scriptContent = JSON.stringify({  scenes: [1, 2, 3, 4].map((position) => ({ position })) });
     const storyboardContent = JSON.stringify({ visualBible: { typography: "画面内不出现文字" }, shots: [1, 2, 3, 4].map((scenePosition) => ({ scenePosition })) });
     await writeFile(scriptPath, scriptContent, "utf8");
     await writeFile(storyboardPath, storyboardContent, "utf8");
@@ -770,20 +770,9 @@ describe("StudioService", () => {
         ...legacyBrief,
         runPurpose: "test",
         visualProof: "四个具体镜头共同兑现同一个可见证据。",
-        visualPlan: {
-          strategy: "沿用上一版四镜证据链，只重做审片指出的镜头。",
-          beats: [{
-            id: "proof-chain",
-            role: "证据推进",
-            duration: "0-24 秒",
-            description: "同一主体在四个连续动作中完成证据链。",
-            searchQuery: "continuous evidence action sequence",
-            source: "stock",
-          }],
-        },
         providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1", visualReview: "deepseek-visual-review-v1" },
         models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
-        director: { profileId: "documentary-observer", assetProviderIds: ["pexels-stock-v1", "seedance-video-v1"] },
+        director: {  assetProviderIds: ["pexels-stock-v1", "seedance-video-v1"] },
       },
       decisions: [{
         interventionId: "intervention-1",
@@ -853,12 +842,12 @@ describe("StudioService", () => {
     const sameDraft = await service.reworkDraft("run-1");
 
     assert.equal(draft?.input.rework?.sourceRunRevision, 12);
-    assert.equal(draft?.input.director?.profileId, "documentary-observer");
+    assert.deepEqual(draft?.input.director, { assetProviderIds: ["pexels-stock-v1", "seedance-video-v1"] });
     assert.equal(draft?.input.models?.["seedance-video-v1"], "doubao-seedance-2-5-260628");
     assert.equal(draft?.input.runPurpose, "test");
     assert.equal(draft?.input.budgetIntentionCny, 35);
     assert.equal(draft?.input.visualProof, "四个具体镜头共同兑现同一个可见证据。");
-    assert.equal(draft?.input.visualPlan?.strategy, "沿用上一版四镜证据链，只重做审片指出的镜头。");
+    assert.equal("visualPlan" in draft!.input, false);
     assert.deepEqual(
       draft?.input.rework?.findings.map(({ findingId }) => findingId),
       sameDraft?.input.rework?.findings.map(({ findingId }) => findingId),
@@ -884,7 +873,7 @@ describe("StudioService", () => {
     assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /主体被裁切到画面边缘/);
     assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /换成主体完整居中的镜头/);
     assert.match(draft?.input.rework?.nodeInstructions.script ?? "", /本次重做原因/);
-    assert.deepEqual(draft?.input.rework?.previousScript, { viewerPromise: "原版承诺", scenes: [1, 2, 3, 4].map((position) => ({ position })) });
+    assert.deepEqual(draft?.input.rework?.previousScript, {  scenes: [1, 2, 3, 4].map((position) => ({ position })) });
     assert.deepEqual(draft?.inheritedNodeIds, ["brief", "script", "visual-direction", "visual-review"]);
     // 未形成素材任务不等于其余镜头没有内容影响：范围以旧脚本/分镜的四镜宇宙保守呈现。
     assert.deepEqual(draft?.requiredAffectedScenePositions, [1, 2, 3, 4]);
@@ -1694,7 +1683,7 @@ describe("StudioService", () => {
     assert.deepEqual(draft?.input.rework?.findings, []);
     assert.deepEqual(draft?.input.durationRange, { minSeconds: 20, maxSeconds: 34 });
     assert.equal(draft?.input.workflowFeatures?.executablePlan, true);
-    assert.deepEqual(draft?.input.director, { profileId: "auto", assetProviderIds: ["local-editorial-v1"] });
+    assert.deepEqual(draft?.input.director, {  assetProviderIds: ["local-editorial-v1"] });
   });
 
   it("rejects every incomplete executable-plan shape at the new production boundary", async () => {
@@ -1706,7 +1695,7 @@ describe("StudioService", () => {
       archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive", "runs.json")),
       listProviders: async () => [],
     });
-    const director = { profileId: "auto", assetProviderIds: ["local-editorial-v1"] } as const;
+    const director = {  assetProviderIds: ["local-editorial-v1"] } as const;
     const providers = { ...brief.providers, director: "api-visual-director-v1" };
 
     await assert.rejects(
@@ -1866,82 +1855,11 @@ describe("StudioService", () => {
     assert.match(draft?.input.rework?.nodeInstructions.assets ?? "", /镜头 3/);
   });
 
-  it("keeps a historical template snapshot readable but strips it from a new rework", async () => {
-    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-rework-template-snapshot-"));
-    const historicalSnapshot: NonNullable<ProductionBrief["templateSnapshot"]> = {
-      templateId: "knowledge-explainer",
-      templateVersion: 1,
-      resolvedAt: "2026-08-21T09:59:00.000Z",
-      resolvedBlueprint: {
-        platform: "douyin",
-        durationSeconds: 24,
-        automationLevel: "assisted",
-        storyStructure: [{ id: "historical-hook", label: "旧版开场", purpose: "保留当时的叙事承诺", required: true }],
-        shotSlots: [{ id: "historical-shot", beatId: "historical-hook", purpose: "旧版镜头", durationSeconds: 24, allowedCapabilities: ["asset.search"], manualReplacement: true }],
-        visualSystem: { composition: "旧版构图规则", colorIntent: "旧版暖色", subtitleDensity: "medium", pacing: "measured" },
-        soundSystem: { voiceIntent: "旧版声音", pace: "medium", musicIntent: "克制" },
-        qualityRules: [{ id: "historical-quality", label: "旧版质量线", dimension: "artistic", required: true, threshold: 80 }],
-        capabilityRequirements: [{ capability: "script.draft", required: true }],
-      },
-      sourceLayers: [{ layer: "template", sourceId: "knowledge-explainer@1", appliedFields: ["storyStructure", "visualSystem"] }],
-      fieldSources: { storyStructure: "template", visualSystem: "template" },
-    };
-    const sourceBrief: ProductionBrief = {
-      ...brief,
-      providers: { ...brief.providers, script: "codex-screenwriter-v1" },
-      voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
-      templateSnapshot: historicalSnapshot,
-    };
-    const pipeline = new FakePipeline({
-      ...waitingRun(workspaceRoot),
-      revision: 7,
-      status: "rejected",
-      initialInput: sourceBrief,
-    });
-    let currentTemplateResolveCalls = 0;
-    const production = new ProductionStudio({
-      workspaceRoot,
-      pipeline,
-      archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive", "runs.json")),
-      listProviders: async () => [
-        { id: "codex-screenwriter-v1", capability: "script.draft", label: "AI 编剧", available: true, kind: "external" },
-        { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "external" },
-        { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" },
-        { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑画面", available: true, kind: "local" },
-        { id: "macos-say-v1", capability: "voice.synthesize", label: "系统配音", available: true, kind: "local" },
-        { id: "python-ffmpeg-v1", capability: "video.render", label: "本地渲染", available: true, kind: "local" },
-        { id: "python-technical-review-v1", capability: "quality.review", label: "机器质检", available: true, kind: "local" },
-      ],
-      resolveTemplateSnapshot: async () => {
-        currentTemplateResolveCalls += 1;
-        return { ...historicalSnapshot, templateVersion: 2, resolvedAt: "2026-09-04T00:00:00.000Z" };
-      },
-    });
-
-    await production.start({
-      ...sourceBrief,
-      template: { templateId: "knowledge-explainer", templateVersion: 1 },
-      rework: {
-        sourceRunId: "run-1",
-        sourceRunRevision: 7,
-        nodeInstructions: {
-          script: "按审片意见精简第三镜旁白。",
-          visualDirection: "保留旧版视觉规则，只修第三镜。",
-          assets: "第三镜使用无字画面，禁止说明卡。",
-        },
-        findings: [],
-      },
-    });
-
-    assert.equal(currentTemplateResolveCalls, 0);
-    assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot, undefined);
-  });
-
   it("requires an explicit unreviewed-first-cut decision when visual review is unavailable", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-dual-review-readiness-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
     const baseProviders = [
-      { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" as const },
+      { id: "codex-screenwriter-v1", capability: "script.draft", label: "AI 编剧", available: true, kind: "local" as const },
       { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "external" as const },
       { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" as const },
       { id: "local-editorial-v1", capability: "asset.prepare", label: "本地编辑画面", available: true, kind: "local" as const, deliveryTypes: ["editorial_card" as const] },
@@ -1985,7 +1903,7 @@ describe("StudioService", () => {
       pipeline,
       archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive", "runs.json")),
       listProviders: async () => [
-        { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" },
+        { id: "codex-screenwriter-v1", capability: "script.draft", label: "AI 编剧", available: true, kind: "local" },
         { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "external" },
         { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" },
         { id: "seedance-video-v1", capability: "asset.prepare", label: "Seedance 视频生成", available: true, kind: "external", billing: "metered", estimatedCnyPerClip: 3.5, deliveryTypes: ["generated_video"] },
@@ -2020,7 +1938,7 @@ describe("StudioService", () => {
       ...brief,
       runPurpose: "production",
       providers: {
-        script: "python-template-v1",
+        script: "codex-screenwriter-v1",
         director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
         voice: "macos-say-v1",
@@ -2028,7 +1946,7 @@ describe("StudioService", () => {
         technicalReview: "python-technical-review-v1",
         visualReview: "deepseek-visual-review-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
     });
     assert.equal(pipeline.dispatchCount, 1);
@@ -2042,7 +1960,7 @@ describe("StudioService", () => {
       pipeline,
       archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive", "runs.json")),
       listProviders: async () => [
-        { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" },
+        { id: "codex-screenwriter-v1", capability: "script.draft", label: "AI 编剧", available: true, kind: "local" },
         { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "external" },
         { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" },
         { id: "opaque-asset-v1", capability: "asset.prepare", label: "未声明交付类型的来源", available: true, kind: "external", deliveryTypes: [] },
@@ -2060,7 +1978,7 @@ describe("StudioService", () => {
         ...brief,
         runPurpose: "production",
         providers: { ...brief.providers, visualReview: "deepseek-visual-review-v1" },
-        director: { profileId: "auto", assetProviderIds: ["opaque-asset-v1"] },
+        director: {  assetProviderIds: ["opaque-asset-v1"] },
       }),
       /当前素材池没有任何可用画面来源/,
     );
@@ -3254,7 +3172,7 @@ describe("StudioService", () => {
     historicalRun.status = "succeeded";
     historicalRun.initialInput = {
       ...historicalRun.initialInput,
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      director: {  assetProviderIds: ["local-editorial-v1"] },
     };
     historicalRun.executionPlan = [];
     historicalRun.nodeRuns = [
@@ -3441,12 +3359,7 @@ describe("StudioService", () => {
     assert.equal(summary?.videoContentUrl, "/api/runs/run-1/artifacts/artifact-video-current/content");
     assert.equal(detail?.videoArtifactId, "artifact-video-current");
     assert.equal(detail?.publishPackageArtifactId, "artifact-package-current");
-    assert.deepEqual(detail?.creativeSummary, {
-      audience: brief.audience,
-      openingPromise: brief.angle,
-      requiredVisual: "用无字示意画面呈现前后变化，不声称实测。",
-      payoff: `围绕“${brief.title}”给出明确答案或可执行判断`,
-    });
+    assert.equal("creativeSummary" in detail!, false);
 
     // 历史文件与节点级旧 ID 仍存在，也不能替代当前有效版本的空交付。
     for (const artifact of run.artifacts) {
@@ -3547,10 +3460,9 @@ describe("StudioService", () => {
     await pipeline.listener?.(pipeline.run);
 
     assert.deepEqual(result, { runId: "run-1", status: "running" });
-    assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot, undefined);
-    // 旧客户端仍传模板时也不能重启模板生产路径，用户明确要求保持原样。
-    await service.startRun({ ...brief, template: { templateId: "unavailable-template" } });
-    assert.equal((pipeline.lastInput as ProductionBrief).templateSnapshot, undefined);
+    assert.equal("templateSnapshot" in (pipeline.lastInput as ProductionBrief), false);
+    await assert.rejects(() => service.startRun({ ...brief, template: { templateId: "unavailable-template" } }), /制作参数不符合要求/);
+    assert.equal("templateSnapshot" in (pipeline.lastInput as ProductionBrief), false);
     assert.equal((pipeline.lastInput as ProductionBrief).angle, brief.angle);
     assert.deepEqual(snapshots, ["needs_human"]);
     await assert.rejects(
@@ -3809,7 +3721,7 @@ describe("StudioService", () => {
     await completeTrendRefresh(service);
     const trendInbox = await service.listCandidateInbox({ origins: ["trend"] });
     const beforeDeletion = trendInbox.items[0];
-    assert.equal(beforeDeletion?.editorialDecision.recommendedTemplate, undefined);
+    assert.equal("recommendedTemplate" in (beforeDeletion?.editorialDecision ?? {}), false);
     assert.deepEqual(trendInbox.topicGeneration, {
       generationId: "generation-service-1",
       generatedAt: "2026-09-07T08:00:00.000Z",
@@ -3826,8 +3738,7 @@ describe("StudioService", () => {
     const afterDeletion = (await service.listCandidateInbox({ origins: ["trend"] })).items[0];
 
     assert.equal(afterDeletion?.editorialDecision.verdict, "produce_image_story");
-    assert.equal(afterDeletion?.editorialDecision.recommendedTemplate, undefined);
-    assert.equal((await service.templateExperiments()).some((item) => item.templateId === "photo-story"), false);
+    assert.equal("recommendedTemplate" in (afterDeletion?.editorialDecision ?? {}), false);
     await service.adoptCandidate(afterDeletion!.id, { origin: "trend", ...(afterDeletion!.generationId ? { expectedGenerationId: afterDeletion!.generationId } : {}), verificationConfirmed: true });
     assert.equal((await service.listOpportunities("trend")).length, 1);
   });
@@ -3902,8 +3813,7 @@ describe("StudioService", () => {
     assert.equal(dispatched.seriesContext?.episode.title, currentSeries.episodes[0]?.title);
     assert.equal(dispatched.seriesContext?.audience, currentSeries.audience);
     assert.equal(dispatched.seriesContext?.platform, currentSeries.platform);
-    assert.equal(dispatched.seriesContext?.episode.viewerPromise, currentSeries.episodes[0]?.viewerPromise);
-    assert.equal(dispatched.seriesContext?.episode.payoff, currentSeries.episodes[0]?.payoff);
+    assert.equal(dispatched.seriesContext?.episode.concept, currentSeries.episodes[0]?.concept);
     assert.equal(dispatched.seriesContext?.episode.planning.role, "系列总编");
     assert.deepEqual(dispatched.seriesContext?.bible.rules, currentSeries.bible.rules);
     assert.notEqual(dispatched.seriesContext?.premise, maliciousContext.premise);
@@ -4102,8 +4012,6 @@ describe("StudioService", () => {
     const scriptPath = path.join(workspaceRoot, "runs", "run-1", "nodes", scriptStage, "attempt-1", "script.json");
     await mkdir(path.dirname(scriptPath), { recursive: true });
     await writeFile(scriptPath, `${JSON.stringify({
-      viewerPromise: "完成一次真实实验",
-      narrativeArc: "从尝试推进到可复用方法",
       canonFacts: ["已经完成一次低成本实验。", "记录步骤后可以复现实验结果。"],
       scenes: [{ narration: "下一集继续验证长期效果。" }],
     })}\n`, "utf8");
@@ -4214,8 +4122,6 @@ describe("StudioService", () => {
     const finalReview = pipeline.run.nodeRuns.find((node) => node.nodeId === "final-review")!;
     pipeline.run.revision = 8;
     await writeFile(scriptPath, `${JSON.stringify({
-      viewerPromise: "完成一次真实实验",
-      narrativeArc: "从尝试推进到可复用方法",
       canonFacts: [],
       scenes: [{ narration: "本集没有形成需要后集继承的新事实。" }],
     })}\n`, "utf8");
@@ -4236,8 +4142,6 @@ describe("StudioService", () => {
     const approvedCanonFacts = ["已经完成一次低成本实验。", "记录步骤后可以复现实验结果。"];
     pipeline.run.revision = 9;
     await writeFile(scriptPath, `${JSON.stringify({
-      viewerPromise: "完成一次真实实验",
-      narrativeArc: "从尝试推进到可复用方法",
       canonFacts: approvedCanonFacts,
       scenes: [{ narration: "下一集继续验证长期效果。" }],
     })}\n`, "utf8");
@@ -4744,7 +4648,7 @@ describe("StudioService", () => {
         defaultRecipeId: "economy-daily",
         roleProviderDefaults: {},
         modelDefaults: {},
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
         topicStrategy: { customInstruction: "" },
       },
     }), "utf8");
@@ -4767,7 +4671,7 @@ describe("StudioService", () => {
         defaultRecipeId: "economy-daily",
         roleProviderDefaults: {},
         modelDefaults: {},
-        productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
+        productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 24 },
         topicStrategy: { customInstruction: "" },
       },
     }), "utf8");
@@ -4814,7 +4718,7 @@ describe("StudioService", () => {
   it("replays a referenced start after the persisted node safely releases its temporary upload", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-studio-reference-idempotency-"));
     const pipeline = new FakePipeline(waitingRun(workspaceRoot));
-    const availability = { available: true, reason: "", taskKinds: ["reference-grammar", "director-plan", "role-audit"] };
+    const availability = { available: true, reason: "", taskKinds: ["script-draft", "reference-grammar", "director-plan", "role-audit"] };
     const firstService = new StudioService({
       workspaceRoot,
       pipeline,
@@ -4830,7 +4734,7 @@ describe("StudioService", () => {
     const input = {
       ...brief,
       providers: { ...brief.providers, director: "api-visual-director-v1", assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      director: {  assetProviderIds: ["local-editorial-v1"] },
       workflowFeatures: {
         assetSemanticRank: false,
         referenceGrammar: true,
@@ -4883,7 +4787,7 @@ describe("StudioService", () => {
         sha256: sourceSha256,
         path: path.join(workspaceRoot, "uploads", "reference-videos", "released", "source.mp4"),
       },
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      director: {  assetProviderIds: ["local-editorial-v1"] },
     };
     const rejectedRun: WorkflowRun<ProductionBrief> = {
       ...base,
@@ -4967,7 +4871,7 @@ describe("StudioService", () => {
         sha256: sourceSha256,
         path: path.join(workspaceRoot, "uploads", "reference-videos", "released", "source.mp4"),
       },
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      director: {  assetProviderIds: ["local-editorial-v1"] },
     };
     const referenceNode = {
       nodeId: "reference-grammar",
@@ -5194,7 +5098,6 @@ describe("StudioService", () => {
     await service.publishTemplate(saved.template.id, saved.storeRevision);
     const paidBrief = {
       ...brief,
-      template: { templateId: "knowledge-model-routing" },
       providers: { ...brief.providers, assets: "seedance-video-v1", visualReview: "deepseek-visual-review-v1" },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 4 },
     };
@@ -5221,7 +5124,6 @@ describe("StudioService", () => {
         assets: "ai-shot-router-v1",
       },
       director: {
-        profileId: "auto",
         assetProviderIds: ["local-editorial-v1", "retired-asset-source-v1"],
       },
       models: { "retired-asset-source-v1": "retired-model" },
@@ -5275,7 +5177,7 @@ describe("StudioService", () => {
         assets: "ai-shot-router-v1",
         visualReview: "deepseek-visual-review-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
       modelSelectionSources: { "seedance-video-v1": "node_override" },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
@@ -5313,7 +5215,7 @@ describe("StudioService", () => {
         assets: "ai-shot-router-v1",
         visualReview: "deepseek-visual-review-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
       modelSelectionSources: { "seedance-video-v1": "global_default" },
       frozenModelSelections: {
@@ -5358,7 +5260,7 @@ describe("StudioService", () => {
         assets: "ai-shot-router-v1",
         visualReview: "deepseek-visual-review-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       models: { "seedance-video-v1": "doubao-seedance-2-5-260628" },
       modelSelectionSources: { "seedance-video-v1": "node_override" },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
@@ -5452,7 +5354,7 @@ describe("StudioService", () => {
     const restarted = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
     const preserved = await restarted.updateCreatorSettings({
       modelDefaults: stale,
-      productionDefaults: { directorProfileId: "auto", reviewMode: "manual", platform: "douyin", durationSeconds: 30 },
+      productionDefaults: {  reviewMode: "manual", platform: "douyin", durationSeconds: 30 },
     });
     assert.deepEqual(preserved.modelDefaults, stale);
     const cleared = await restarted.updateCreatorSettings({ modelDefaults: {} });
@@ -5478,7 +5380,7 @@ describe("StudioService", () => {
         director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      director: {  assetProviderIds: ["local-editorial-v1"] },
     });
 
     assert.deepEqual(result, { runId: "run-1", status: "running" });
@@ -5509,7 +5411,7 @@ describe("StudioService", () => {
         assets: "ai-shot-router-v1",
         visualReview: "deepseek-visual-review-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1"] },
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true, maxPaidShots: 1, maxCostCny: 3.5 },
     });
     assert.deepEqual(result, { runId: "run-1", status: "running" });
@@ -6306,7 +6208,7 @@ describe("StudioService", () => {
         director: "api-visual-director-v1",
         assets: "ai-shot-router-v1",
       },
-      director: { profileId: "auto", assetProviderIds: ["pexels-stock-v1"] },
+      director: {  assetProviderIds: ["pexels-stock-v1"] },
       workflowFeatures: { assetSemanticRank: true, referenceGrammar: false, executablePlan: true },
     };
     run.workflowVersion = productionWorkflowVersion(run.initialInput);
@@ -6755,7 +6657,7 @@ describe("StudioService", () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-planning-read-"));
     const run = waitingRun(workspaceRoot);
     const documentPath = path.join(workspaceRoot, "runs", "run-1", "planning", "treatment.json");
-    const content = JSON.stringify({ viewerPromise: "原来的观众承诺" });
+    const content = JSON.stringify({ concept: "已经登记的构思" });
     await mkdir(path.dirname(documentPath), { recursive: true });
     await writeFile(documentPath, content, "utf8");
     const pipeline = new FakePipeline({ ...run, artifacts: [{
@@ -6765,7 +6667,7 @@ describe("StudioService", () => {
     }] });
     const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
     assert.equal((await service.resolveArtifact("run-1", "planning-treatment"))?.sizeBytes, Buffer.byteLength(content));
-    await writeFile(documentPath, JSON.stringify({ viewerPromise: "被替换的观众承诺" }), "utf8");
+    await writeFile(documentPath, JSON.stringify({ concept: "未经登记的修改" }), "utf8");
     await assert.rejects(() => service.resolveArtifact("run-1", "planning-treatment"), /与登记记录不一致/);
   });
 
@@ -6822,7 +6724,7 @@ describe("StudioService", () => {
     assert.equal(codexPublishCopy?.available, true);
     assert.equal(codexPublishCopy?.billing, "subscription");
     assert.equal(codexPublishCopy?.kind, "external");
-    assert.equal(providers.find((provider) => provider.id === "python-template-v1")?.available, true);
+    assert.equal(providers.some((provider) => provider.id === "python-template-v1"), false);
     assert.equal(providers.some((provider) => provider.id.includes("ollama") || provider.id.includes("qwen")), false);
     assert.equal(providers.find((provider) => provider.id === "macos-say-v1")?.available, false);
     const seedance = providers.find((provider) => provider.id === "seedance-video-v1");
@@ -6994,9 +6896,7 @@ function passingGreenlightAgent() {
         episodeNumber: episode.episodeNumber,
         pillar: episode.pillar,
         title: episode.title,
-        viewerPromise: episode.viewerPromise,
-        hook: episode.hook,
-        payoff: episode.payoff,
+        concept: episode.concept,
         fromPrevious: [...episode.continuity.fromPrevious],
         toNext: [...episode.continuity.toNext],
       },

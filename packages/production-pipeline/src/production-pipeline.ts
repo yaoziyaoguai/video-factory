@@ -98,7 +98,7 @@ import {
 import { VISUAL_DIRECTOR_AGENT_CONTRACT_VERSION } from "./codex-visual-director.js";
 import { PlanContractError, durationIntentFor, executableDurationFor, parseDurationBounds, parseDurationAmendment, validateContentLedDurationIntent, type DurationAmendment, type DurationIntent, type DurationRange } from "./executable-timeline.js";
 import { assertCurrentVisualReviewContract, IndependentVisualReviewError, VISUAL_REVIEW_AGENT_CONTRACT_VERSION, VisualReviewFallbackError, validateAggregatedVisualReviewReport, validateVisualReviewReport, visualReviewBlocksContinuation, type IndependentVisualReviewExecution, type VisualReviewAgent, type VisualReviewAgentInput, type VisualReviewExecution, type VisualReviewFinding, type VisualReviewReport, type VisualReviewScope } from "./codex-visual-review.js";
-import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseProductionVisualPlan, parseVoiceDoesNotFitConflict, requireTtsVoiceDirection, WORKER_PROTOCOL_VERSION, type ProductionBrief, type ProductionReworkFinding } from "./contracts.js";
+import { parseBrief, parsePersistedBrief, parseProductionReworkFindings, parseProductionSeriesContext, parseVoiceDoesNotFitConflict, requireTtsVoiceDirection, WORKER_PROTOCOL_VERSION, type ProductionBrief, type ProductionReworkFinding } from "./contracts.js";
 import { NATIVE_AUDIO_PROVIDER } from "./native-audio.js";
 import { FileRunStore, RunLockedError, StaleRunRevisionError, type RunScanResult } from "./run-store.js";
 import { diagnosticEvent } from "./diagnostics.js";
@@ -423,7 +423,7 @@ export type ProductionCreativeReviewCommandDraft = {
   | { action: "confirm"; acknowledgeRepair?: true; acknowledgeIncomplete?: true; acknowledgeUnaudited?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string; durationAmendment?: DurationAmendment }
   | { action: "update_duration"; durationAmendment: DurationAmendment }
   | { action: "audit_current" }
-  | { action: "discuss" | "revise"; message: string; selection?: { kind: "document" | "beat" | "scene"; ids: string[]; scenePositions: number[] } }
+  | { action: "discuss" | "revise"; message: string; selection?: { kind: "document" | "scene"; ids: string[]; scenePositions: number[] } }
   | { action: "adopt_proposal"; proposalId: string }
   | { action: "edit_draft"; document: unknown }
   | { action: "undo_draft" }
@@ -1023,14 +1023,13 @@ export class ProductionPipeline {
       return;
     }
     if (stage === "director") {
-      const scriptDocument = (upstreamScript ?? {}) as { scenes?: unknown; viewerPromise?: unknown; characters?: unknown };
+      const scriptDocument = (upstreamScript ?? {}) as { scenes?: unknown; characters?: unknown };
       const validate = purpose === "draft" && brief.durationPolicy === "content-led-v1" ? validateVisualDirectorDraft : validateVisualDirectorPlan;
       const plan = validate(document, visualDirectorPlanValidation(
         brief,
         parseDirectorScenes(scriptDocument),
         this.options.assetProviders ?? [],
         this.options.providerRuntimeMetadata ?? [],
-        optionalOutputString(scriptDocument.viewerPromise),
       ));
       if (brief.rework) reworkAffectedScenePositions({
         findings: brief.rework.findings,
@@ -4559,7 +4558,7 @@ export class ProductionPipeline {
       previous.nodeRuns.find((node) => node.nodeId === "script")?.output,
       "scriptPath",
     );
-    const script = JSON.parse(await readFile(scriptPath, "utf8")) as { viewerPromise?: unknown; narrativeArc?: unknown; scenes?: unknown };
+    const script = JSON.parse(await readFile(scriptPath, "utf8")) as { scenes?: unknown };
     const scenes = parseDirectorScenes(script);
     const plan = validateVisualDirectorPlan(
       JSON.parse(await readFile(submittedPath, "utf8")) as unknown,
@@ -4568,7 +4567,6 @@ export class ProductionPipeline {
         scenes,
         this.options.assetProviders ?? [],
         this.options.providerRuntimeMetadata ?? [],
-        optionalOutputString(script.viewerPromise),
       ),
     );
 
@@ -8828,8 +8826,7 @@ function recordedCreativeCheckIdentity(
 
 function scriptReworkGlobalIntent(document: unknown) {
   if (!isObjectRecord(document)) return undefined;
-  return { viewerPromise: document.viewerPromise ?? null, narrativeArc: document.narrativeArc ?? null,
-    canonFacts: document.canonFacts ?? [] };
+  return { canonFacts: document.canonFacts ?? [] };
 }
 
 function creativeReviewOperationDetail(run: WorkflowRun<ProductionBrief>, resume: CreativeReviewResume): { detail?: string } {
@@ -10135,7 +10132,6 @@ function treatmentStageInputIdentity(
   bindings: ReadonlyArray<{ providerId: string; agent: CreativeTreatmentAgent }>,
   referenceGrammar: ShotGrammar | undefined,
 ): unknown {
-  const lockedViewerPromise = acceptedViewerPromise(brief);
   const seriesContext = creativeTreatmentSeriesContext(brief.seriesContext);
   const reworkInstruction = brief.rework?.nodeInstructions.script.trim();
   return {
@@ -10151,9 +10147,7 @@ function treatmentStageInputIdentity(
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
       ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
-      ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
       ...(reworkInstruction ? { reworkInstruction } : {}),
-      ...(lockedViewerPromise ? { lockedViewerPromise } : {}),
       ...(seriesContext ? { seriesContext } : {}),
       productionCapabilities: productionCapabilitiesFor(brief, options),
     },
@@ -10185,14 +10179,7 @@ function treatmentSuppliedSources(
     }));
 }
 
-// 已接受的观众承诺：系列上下文承载宿主锁定的本集承诺。没有系列上下文时不构造承诺，
-// 构思角色自行生成（与 lockedViewerPromise 合同一致）。
-function acceptedViewerPromise(brief: ProductionBrief): string | undefined {
-  const promise = brief.seriesContext?.episode.viewerPromise;
-  return typeof promise === "string" && promise.trim() ? promise : undefined;
-}
-
-// 编剧阶段的实际输入投影：编剧 brief（含模板/实证/系列/实质相关的返工上下文）与生效模型
+// 编剧阶段的实际输入投影：编剧 brief（含实证/系列/实质相关的返工上下文）与生效模型
 // 身份。与 screenwriterBrief 共用同一 rework 投影——media-only 返工不改变编剧真实输入，
 // 身份保持与源 run 一致，跨 run 播种才能在 producer 调用之前继承编剧阶段。
 function scriptStageInputIdentity(brief: ProductionBrief, options: ProductionPipelineOptions): unknown {
@@ -10252,7 +10239,7 @@ function productionCapabilitiesFor(
 }
 
 // 导演阶段的实际输入投影：导演 brief 的 brief 侧字段、参考语法、素材路由完整投影、
-// 费用反馈、返工上下文与生效模型。稿件侧输入（viewerPromise/scenes）由被携带的 script 产物
+// 费用反馈、返工上下文与生效模型。稿件侧输入（scenes）由被携带的 script 产物
 // 身份承担。rework 投影与 director 端口构造的 rework 段一致——返工意见变化必须重做导演阶段。
 function directorStageInputIdentity(
   brief: ProductionBrief,
@@ -10270,11 +10257,9 @@ function directorStageInputIdentity(
       platform: brief.platform,
       ...durationIntentFor(brief),
       ...(brief.budgetIntentionCny !== undefined ? { budgetIntentionCny: brief.budgetIntentionCny } : {}),
-      ...(brief.director ? { requestedProfileId: brief.director.profileId } : {}),
       ...(brief.editorial ? { editorial: brief.editorial } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
       ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
-      ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
       ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
       ...(brief.articleSources?.length ? { articleSources: brief.articleSources } : {}),
       ...voiceTimingFor(brief),
@@ -11247,19 +11232,14 @@ async function assessProductionScopePendingQuote(options: {
     : { covered: false, kind: "quote_items", assessment };
 }
 
-// 质量合同的 brief 投影：与 canonicalQualityContractDigest 的输入对齐（visualPlan 按内容
-// digest 参与，不序列化整个对象）。
+// 质量合同的 brief 投影：与 canonicalQualityContractDigest 的输入对齐。
 function qualityContractProjection(brief: ProductionBrief) {
   return {
     angle: brief.angle,
     audience: brief.audience,
     ...(brief.durationPolicy === "content-led-v1" ? executableDurationFor(brief)
       : { durationRange: brief.durationRange ?? { minSeconds: 0, maxSeconds: 0 } }),
-    directorProfileId: brief.director?.profileId ?? "",
     ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
-    ...(brief.visualPlan
-      ? { visualPlanDigest: createHash("sha256").update(JSON.stringify(brief.visualPlan)).digest("hex") }
-      : {}),
     ...(brief.editorial ? { editorial: brief.editorial } : {}),
   };
 }
@@ -11722,7 +11702,6 @@ function creativePlanningNode(
             } } : {}),
           } } : {}),
           treatment: async (planningContext) => {
-            const lockedViewerPromise = acceptedViewerPromise(currentBrief);
             const seriesContext = creativeTreatmentSeriesContext(currentBrief.seriesContext);
             const reworkInstruction = currentBrief.rework?.nodeInstructions.script.trim();
             const treatmentBrief: CreativeTreatmentAgentInput["brief"] = {
@@ -11738,9 +11717,6 @@ function creativePlanningNode(
               ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
               ...(currentBrief.visualIntent ? { visualIntent: currentBrief.visualIntent } : {}),
               ...(reworkInstruction ? { reworkInstruction } : {}),
-              ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
-              // 用户/系列已接受的承诺进入构思的真实输入：宿主锁定它，模型输出被覆盖对齐。
-              ...(lockedViewerPromise ? { lockedViewerPromise } : {}),
               ...(seriesContext ? { seriesContext } : {}),
               productionCapabilities: productionCapabilitiesFor(currentBrief, options),
             };
@@ -11897,8 +11873,6 @@ function creativePlanningNode(
             const script = planningContext.script;
             if (!script) throw new Error("Creative planning director requires the script artifact.");
             const document = scriptDocument(screenwriterBrief(currentBrief), script.output);
-            const viewerPromise = optionalOutputString(document.viewerPromise);
-            const narrativeArc = optionalOutputString(document.narrativeArc);
             const scenes = parseDirectorScenes(document);
             // 素材路由输入与阶段身份共用同一投影 helper；目录缺失 provider 时明确失败。
             const assetProviders = directorAssetProviderInputs(currentBrief, options);
@@ -11946,13 +11920,9 @@ function creativePlanningNode(
               platform: currentBrief.platform,
               ...durationIntentFor(currentBrief),
               ...(currentBrief.budgetIntentionCny !== undefined ? { budgetIntentionCny: currentBrief.budgetIntentionCny } : {}),
-              ...(viewerPromise ? { viewerPromise } : {}),
-              ...(narrativeArc ? { narrativeArc } : {}),
-              requestedProfileId: currentDirection.profileId,
               ...(currentBrief.editorial ? { editorial: currentBrief.editorial } : {}),
               ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
               ...(currentBrief.visualIntent ? { visualIntent: currentBrief.visualIntent } : {}),
-              ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
               ...voiceTimingFor(currentBrief),
               ...(referenceGrammar ? { referenceGrammar } : {}),
               ...(currentBrief.seriesContext ? { seriesContext: currentBrief.seriesContext } : {}),
@@ -12046,7 +12016,6 @@ function creativePlanningNode(
               scenes,
               options.assetProviders ?? [],
               options.providerRuntimeMetadata ?? [],
-              viewerPromise,
             );
             const allowConflicts = currentBrief.durationPolicy === "content-led-v1" && currentBrief.workflowFeatures?.creativeReview === CREATIVE_REVIEW_FEATURE;
             const plan = (allowConflicts ? validateVisualDirectorDraft : validateVisualDirectorPlan)(execution.output, validation);
@@ -12223,13 +12192,12 @@ function creativePlanningNode(
               return;
             }
             if (stage === "director") {
-              const scriptDocument = (upstreamScript ?? {}) as { scenes?: unknown; viewerPromise?: unknown; characters?: unknown };
+              const scriptDocument = (upstreamScript ?? {}) as { scenes?: unknown; characters?: unknown };
               const validation = visualDirectorPlanValidation(
                 currentBrief,
                 parseDirectorScenes(scriptDocument),
                 options.assetProviders ?? [],
                 options.providerRuntimeMetadata ?? [],
-                optionalOutputString(scriptDocument.viewerPromise),
               );
               const allowConflicts = purpose === "draft" && currentBrief.durationPolicy === "content-led-v1";
               const plan = (allowConflicts ? validateVisualDirectorDraft : validateVisualDirectorPlan)(document, validation);
@@ -13118,9 +13086,7 @@ function directorNode(
       if (!currentDirection) throw new Error("AI director configuration is incomplete.");
       const attempt = await reserveAttemptDirectory(path.join(runsRoot, context.runId, "nodes", "visual-direction"));
       const scriptPath = requiredOutputString(input, "scriptPath");
-      const script = JSON.parse(await readFile(scriptPath, "utf8")) as { viewerPromise?: unknown; narrativeArc?: unknown; scenes?: unknown };
-      const viewerPromise = optionalOutputString(script.viewerPromise);
-      const narrativeArc = optionalOutputString(script.narrativeArc);
+      const script = JSON.parse(await readFile(scriptPath, "utf8")) as { scenes?: unknown };
       const referenceGrammar: ShotGrammar | undefined = brief.workflowFeatures?.referenceGrammar
         ? await readShotGrammarFile(requiredOutputString(input, "referenceGrammarPath"))
         : undefined;
@@ -13188,13 +13154,9 @@ function directorNode(
         audience: currentBrief.audience,
         platform: currentBrief.platform,
         ...durationIntentFor(currentBrief),
-        ...(viewerPromise ? { viewerPromise } : {}),
-        ...(narrativeArc ? { narrativeArc } : {}),
-        requestedProfileId: currentDirection.profileId,
         ...(currentBrief.editorial ? { editorial: currentBrief.editorial } : {}),
         ...(currentBrief.visualProof ? { visualProof: currentBrief.visualProof } : {}),
         ...(currentBrief.visualIntent ? { visualIntent: currentBrief.visualIntent } : {}),
-        ...(currentBrief.visualPlan ? { visualPlan: currentBrief.visualPlan } : {}),
         ...voiceTimingFor(currentBrief),
         productionCapabilities: summarizeProductionCapabilities(assetProviders, currentBrief.providers.voice),
         ...(referenceGrammar ? { referenceGrammar } : {}),
@@ -13246,7 +13208,6 @@ function directorNode(
           scenes,
           options.assetProviders ?? [],
           options.providerRuntimeMetadata ?? [],
-          viewerPromise,
         ),
       });
       if (inherited) return inherited;
@@ -13305,7 +13266,6 @@ function directorNode(
           scenes,
           options.assetProviders ?? [],
           options.providerRuntimeMetadata ?? [],
-          viewerPromise,
         ),
       );
       const planPath = path.join(attempt.directory, "director_plan.json");
@@ -13639,8 +13599,6 @@ function directorScriptReuseIdentity(script: Record<string, unknown>): Record<st
     searchTerms: scene.searchTerms,
   }));
   return {
-    viewerPromise: optionalOutputString(script.viewerPromise),
-    narrativeArc: optionalOutputString(script.narrativeArc),
     ...(isCharacterScript(script) ? { characters: script.characters } : {}),
     scenes,
   };
@@ -13658,7 +13616,6 @@ function directorReuseIdentity(brief: ProductionBrief): Record<string, unknown> 
     editorial: brief.editorial,
     visualProof: brief.visualProof,
     visualIntent: brief.visualIntent,
-    visualPlan: brief.visualPlan,
     seriesContext: brief.seriesContext,
     direction: brief.director,
     allowMeteredProviders: brief.economics.allowMeteredProviders,
@@ -13999,8 +13956,6 @@ function scriptDocument(brief: ScreenwriterAgentInput["brief"], draft: ScriptDra
   return {
     title: brief.title,
     ...(isCharacterScript(draft) ? { version: draft.version, characters: draft.characters } : {}),
-    ...(draft.viewerPromise ? { viewerPromise: draft.viewerPromise } : {}),
-    ...(draft.narrativeArc ? { narrativeArc: draft.narrativeArc } : {}),
     ...(draft.canonFacts ? { canonFacts: draft.canonFacts } : {}),
     hook: scriptSceneText(draft.scenes[0]!),
     duration_target: brief.durationSeconds,
@@ -14206,7 +14161,6 @@ function visualDirectorPlanValidation(
   scenes: VisualDirectorAgentInput["scenes"],
   catalog: VisualAssetProviderCapability[],
   runtimeMetadata: ProductionProviderRuntimeMetadata[] = [],
-  viewerPromise?: string,
 ): Parameters<typeof validateVisualDirectorPlan>[1] {
   const direction = brief.director;
   if (!direction) throw new Error("AI director configuration is incomplete.");
@@ -14220,7 +14174,6 @@ function visualDirectorPlanValidation(
     scenePositions: scenes.map((scene) => scene.position),
     presentationMode: brief.presentationMode ?? "narration",
     ...(brief.presentationMode === "character_drama" ? { characterSceneBindings: directorCharacterBindings(scenes) } : {}),
-    ...(viewerPromise ? { viewerPromise } : {}),
     sceneDurations: Object.fromEntries(scenes.map((scene) => [scene.position, scene.duration])),
     sceneVisualStrategies: Object.fromEntries(scenes.map((scene) => [scene.position, scene.visualStrategy])),
     allowedProviderIds: direction.assetProviderIds,
@@ -14321,7 +14274,6 @@ function screenwriterBrief(
     ...(brief.editorial ? { editorial: brief.editorial } : {}),
     ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
     ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
-    ...(brief.visualPlan ? { visualPlan: brief.visualPlan } : {}),
     ...(brief.seriesContext ? { seriesContext: brief.seriesContext } : {}),
     ...(brief.articleSources?.length ? { articleSources: brief.articleSources } : {}),
     ...(rework ? {
@@ -14423,10 +14375,6 @@ function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
     const visualIntent = requiredOutputString(rawBrief, "visualIntent");
     if (visualIntent.length > 1000) throw new Error("script input brief.visualIntent must contain at most 1000 characters.");
     brief.visualIntent = visualIntent;
-  }
-  if (rawBrief.visualPlan !== undefined) {
-    const visualPlan = parseProductionVisualPlan(rawBrief.visualPlan);
-    if (visualPlan) brief.visualPlan = visualPlan;
   }
   if (rawBrief.seriesContext !== undefined) {
     const seriesContext = parseProductionSeriesContext(rawBrief.seriesContext);

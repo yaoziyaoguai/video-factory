@@ -278,9 +278,7 @@ export interface SeriesRoadmapPayload {
     episodeNumber: number;
     pillar: string;
     title: string;
-    viewerPromise: string;
-    hook: string;
-    payoff: string;
+    concept: string;
     fromPrevious: string[];
     toNext: string[];
     inheritedFromPrevious: string[];
@@ -289,7 +287,6 @@ export interface SeriesRoadmapPayload {
 }
 
 export interface DirectorPlanPayload {
-  directorProfiles: unknown[];
   brief: unknown;
   scenes: unknown[];
   assetProviders: unknown[];
@@ -346,7 +343,6 @@ export type ScriptBrief = DurationIntent & {
   voiceTiming?: { rate: number; pauseScale: number };
   visualIntent?: string;
   visualProof?: string;
-  visualPlan?: Record<string, unknown>;
   seriesContext?: Record<string, unknown>;
   articleSources?: Record<string, unknown>[];
   editorial?: {
@@ -475,7 +471,7 @@ export interface CreativeDiscussionPayload {
   context: Record<string, unknown>;
   message: string;
   selection?: {
-    kind: "document" | "beat" | "scene";
+    kind: "document" | "scene";
     ids: string[];
     scenePositions: number[];
   };
@@ -896,7 +892,7 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
       },
     };
   }
-  assertExactKeys(record, ["directorProfiles", "brief", "scenes", "assetProviders", "economics", "costFeedback", "revision"], "payload");
+  assertExactKeys(record, ["brief", "scenes", "assetProviders", "economics", "costFeedback", "revision"], "payload");
   const revision = record.revision === undefined ? undefined : boundedRecord(record.revision, "payload.revision", 192 * 1024);
   const costFeedback = record.costFeedback === undefined
     ? undefined
@@ -904,7 +900,6 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
   return {
     kind,
     payload: {
-      directorProfiles: arrayValue(record.directorProfiles, "payload.directorProfiles"),
       brief: requireDirectorBrief(record.brief),
       scenes: arrayValue(record.scenes, "payload.scenes"),
       assetProviders: arrayValue(record.assetProviders, "payload.assetProviders"),
@@ -1648,7 +1643,6 @@ export function buildTaskPrompt(
       brief: task.payload.brief,
       scenes: task.payload.scenes,
       assetProviders: task.payload.assetProviders,
-      directorProfiles: task.payload.directorProfiles,
       economics: task.payload.economics,
       ...(task.payload.costFeedback?.length ? { costFeedback: task.payload.costFeedback } : {}),
       ...(task.payload.revision ? { revision: task.payload.revision } : {}),
@@ -1706,32 +1700,14 @@ function requireCreativeDiscussionDocument(
   const kind = stage === "treatment"
     ? "creative-treatment"
     : "director-plan";
-  // 导演稿经过宿主校验后会补入锁定的观众承诺；这是讨论输入的一部分，
-  // 但不是模型首次生成 director-plan 时应拥有的字段，因此只在此边界单独校验。
   let documentForOutputValidation = document;
   if (stage === "director") {
-    const visualBible = requireRecord(document.visualBible, "payload.currentDocument.visualBible");
-    let modelVisualBible = visualBible;
-    if (visualBible.viewerPromise !== undefined) {
-      const viewerPromise = requiredText(
-        visualBible.viewerPromise,
-        "payload.currentDocument.visualBible.viewerPromise",
-      );
-      if (viewerPromise.length > 500) {
-        throw new CodexExecutorError(
-          "payload.currentDocument.visualBible.viewerPromise exceeds 500 characters.",
-          false,
-        );
-      }
-      const { viewerPromise: _lockedViewerPromise, ...withoutLockedViewerPromise } = visualBible;
-      modelVisualBible = withoutLockedViewerPromise;
-    }
     const modelShots = Array.isArray(document.shots)
       ? document.shots.map((shot) => (typeof shot === "object" && shot !== null && !Array.isArray(shot))
         ? { reuseFromScenePosition: null, referenceFromScenePosition: null, ...shot as Record<string, unknown> }
         : shot)
       : document.shots;
-    documentForOutputValidation = { ...document, visualBible: modelVisualBible, shots: modelShots };
+    documentForOutputValidation = { ...document, shots: modelShots };
   }
   const error = outputValidationErrorFor(kind, documentForOutputValidation);
   if (error) {
@@ -1756,11 +1732,10 @@ function requireExistingScriptDiscussionDocument(
     return document;
   }
   const field = "payload.currentDocument";
-  // C6：字段白名单与正式 ScriptDraft 归一输出同源——顶层 viewerPromise/narrativeArc/
-  // canonFacts/scenes；scene 为 position/purpose/narration/duration/visual_strategy/
+  // C6：字段白名单与正式 ScriptDraft 归一输出同源——顶层 canonFacts/scenes；scene 为 position/purpose/narration/duration/visual_strategy/
   // visual_prompt/visible_action/on_screen_text/sound_cue/success_criteria/
   // failure_conditions/search_terms。任意额外字段不属于宿主已有稿合同，直接拒绝。
-  const topLevelAllowed = new Set(["viewerPromise", "narrativeArc", "canonFacts", "scenes"]);
+  const topLevelAllowed = new Set(["canonFacts", "scenes"]);
   for (const key of Object.keys(document)) {
     if (!topLevelAllowed.has(key)) throw new CodexExecutorError(`${field}.${key} is not part of the saved script contract.`, false);
   }
@@ -1776,8 +1751,6 @@ function requireExistingScriptDiscussionDocument(
       }
     });
   }
-  optionalNonEmptyText(document.viewerPromise, `${field}.viewerPromise`);
-  optionalNonEmptyText(document.narrativeArc, `${field}.narrativeArc`);
   if (document.canonFacts !== undefined
     && stringArray(document.canonFacts, `${field}.canonFacts`).length > 8) {
     throw new CodexExecutorError(`${field}.canonFacts must contain at most 8 entries.`, false);
@@ -1840,7 +1813,7 @@ function optionalBoundedTextList(value: unknown, field: string): void {
 function requireCreativeDiscussionSelection(value: unknown): NonNullable<CreativeDiscussionPayload["selection"]> {
   const record = requireRecord(value, "payload.selection");
   assertExactKeys(record, ["kind", "ids", "scenePositions"], "payload.selection");
-  if (record.kind !== "document" && record.kind !== "beat" && record.kind !== "scene") {
+  if (record.kind !== "document" && record.kind !== "scene") {
     throw new CodexExecutorError("payload.selection.kind is invalid.", false);
   }
   const ids = stringArray(record.ids, "payload.selection.ids");
@@ -1943,7 +1916,7 @@ export function buildContinuationPrompt(
     task.kind === "role-audit"
       ? "每轮都按同一版本 criteria 与 rubric 评估完整候选，再逐项报告 previousAudit 问题的修复状态。不得用旧问题已经关闭代替完整质量判断，也不得因修改很少就默认高分。"
       : [
-        "以宿主绑定的上一版完整候选为基线，解决本轮 revision 明确指出的问题。保留未受影响的事实、观众承诺、候选身份和已合格内容。",
+        "以宿主绑定的上一版完整候选为基线，解决本轮 revision 明确指出的问题。保留未受影响的事实、用户要求、候选身份和已合格内容。",
         "修复指令中的示例句只示范问题解法，不要求逐字采用；可以用更自然且同样准确的表达解决同一问题。",
         "修复范围由具体问题及必要依赖决定，不借修订另起主题，返回当前合同要求的完整结果。",
       ].join("\n"),
@@ -2077,9 +2050,7 @@ function requireSeriesTargetEpisode(value: unknown): NonNullable<SeriesRoadmapPa
     episodeNumber,
     pillar: requiredText(record.pillar, "payload.targetEpisode.pillar"),
     title: requiredText(record.title, "payload.targetEpisode.title"),
-    viewerPromise: requiredText(record.viewerPromise, "payload.targetEpisode.viewerPromise"),
-    hook: requiredText(record.hook, "payload.targetEpisode.hook"),
-    payoff: requiredText(record.payoff, "payload.targetEpisode.payoff"),
+    concept: requiredText(record.concept, "payload.targetEpisode.concept"),
     fromPrevious: stringArray(record.fromPrevious, "payload.targetEpisode.fromPrevious"),
     toNext: stringArray(record.toNext, "payload.targetEpisode.toNext"),
     inheritedFromPrevious: stringArray(record.inheritedFromPrevious, "payload.targetEpisode.inheritedFromPrevious"),
@@ -2152,8 +2123,8 @@ function requireDirectorBrief(value: unknown): Record<string, unknown> {
   if (brief.presentationMode === "character_drama") arrayValue(brief.characters, "payload.brief.characters");
   assertExactKeys(brief, [
     "presentationMode", "characters",
-    "title", "angle", "audience", "platform", "durationSeconds", "durationRange", "durationPolicy", "viewerPromise", "narrativeArc",
-    "requestedProfileId", "editorial", "visualProof", "visualIntent", "visualPlan", "voiceTiming", "budgetIntentionCny",
+    "title", "angle", "audience", "platform", "durationSeconds", "durationRange", "durationPolicy",
+    "editorial", "visualProof", "visualIntent", "voiceTiming", "budgetIntentionCny",
     "referenceGrammar", "seriesContext", "articleSources", "creativeTreatment", "planningIssues", "planningRevision", "productionCapabilities", "rework",
   ], "payload.brief");
   validateBudgetIntention(brief.budgetIntentionCny);
@@ -2745,9 +2716,7 @@ function requireCreativeTreatmentBrief(value: unknown): Record<string, unknown> 
   if (record.reworkInstruction !== undefined) {
     brief.reworkInstruction = boundedReworkInstruction(record.reworkInstruction, "payload.brief.reworkInstruction");
   }
-  if (record.visualPlan !== undefined) {
-    brief.visualPlan = boundedRecord(record.visualPlan, "payload.brief.visualPlan", 100_000);
-  }
+
   if (record.seriesContext !== undefined) {
     brief.seriesContext = boundedRecord(record.seriesContext, "payload.brief.seriesContext", 150_000);
   }
@@ -2839,9 +2808,7 @@ function requireScriptBrief(value: unknown): ScriptBrief {
   if (record.visualIntent !== undefined) {
     brief.visualIntent = boundedVisualIntent(record.visualIntent, "payload.brief.visualIntent");
   }
-  if (record.visualPlan !== undefined) {
-    brief.visualPlan = boundedRecord(record.visualPlan, "payload.brief.visualPlan", 100_000);
-  }
+
   if (record.seriesContext !== undefined) {
     brief.seriesContext = boundedRecord(record.seriesContext, "payload.brief.seriesContext", 150_000);
   }

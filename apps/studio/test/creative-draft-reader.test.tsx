@@ -4,11 +4,11 @@ import { CreativeDraftReader } from "../src/client/components/CreativeDraftReade
 
 describe("CreativeDraftReader", () => {
   it("puts the audience's actual script before production reference text", () => {
-    render(<CreativeDraftReader stage="script" value={{ narrativeArc: "这是一段制作参考", scenes: [
+    render(<CreativeDraftReader stage="script" value={{  scenes: [
       { id: "opening", position: 1, duration: 4, narration: "这是观众先听到的话", visual_prompt: "窗边" },
     ] }} />);
     const spoken = within(screen.getByRole("region", { name: "稿件正文" })).getByText("这是观众先听到的话");
-    const reference = screen.getByText("这是一段制作参考");
+    const reference = screen.getByText("窗边");
     expect(spoken.compareDocumentPosition(reference) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
   const originalAnimate = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "animate");
@@ -22,27 +22,13 @@ describe("CreativeDraftReader", () => {
     else delete (window as Partial<Window>).matchMedia;
   });
 
-  it("explains sound capability tokens without rewriting the creator's draft or hiding its original", () => {
-    const soundPrinciples = [
-      "保持轻声解说；narration=true，pauseControl=text_hint；musicTrack/soundEffectsTrack=false。",
-      "原声模式 audio.narration=false；continuousNarrationGroups=false；不要删掉雨声意图。",
-      "仅在转折处留白，句尾自然收住。",
-      "当前无音乐轨与音效轨（musicTrack、soundEffectsTrack 均为 false），因此不做配乐与音效设计。",
-    ];
-    const value = { soundPrinciples };
-    const before = JSON.stringify(value);
+  it("reads a free-form concept as one continuous draft without segment navigation", () => {
+    const value = { concept: "看雨落在窗沿。\n停一会儿，然后结束。" };
     render(<CreativeDraftReader stage="treatment" value={value} />);
-    expect(screen.getByText(/保持轻声解说；独立旁白：启用/)).toBeVisible();
-    expect(screen.getByText(/停顿：通过文字提示表达/)).toBeVisible();
-    expect(screen.getAllByText(/独立音乐与音效轨：未接入/)).toHaveLength(2);
-    expect(screen.getByText("当前无音乐轨与音效轨（独立音乐与音效轨：未接入），因此不做配乐与音效设计。")).toBeVisible();
-    expect(screen.getByText(/原声模式 独立旁白：不单独合成/)).toBeVisible();
-    expect(screen.getByText(/原声模式 独立旁白.*不要删掉雨声意图/)).toBeVisible();
-    expect(screen.getAllByText(soundPrinciples[2]!)[0]).toBeVisible();
-    const original = screen.getByText(soundPrinciples[0]!).closest("details");
-    expect(original).not.toHaveAttribute("open");
-    expect(within(original!).getByText("查看声音方向原文")).toBeVisible();
-    expect(JSON.stringify(value)).toBe(before);
+    expect(screen.getByText(/看雨落在窗沿/)).toBeVisible();
+    expect(screen.queryByRole("navigation", { name: "稿件段落" })).not.toBeInTheDocument();
+    expect(screen.queryByText("查看整篇")).not.toBeInTheDocument();
+    expect(value.concept).toBe("看雨落在窗沿。\n停一会儿，然后结束。");
   });
 
   it("shows readable director delivery labels in segment and whole-draft views without changing the plan", () => {
@@ -116,18 +102,14 @@ describe("CreativeDraftReader", () => {
   });
 
   it.each([
-    { stage: "treatment" as const, value: { viewerPromise: "全片承诺", payoff: "结尾兑现", progression: [
-      { beatId: "opening", purpose: "提出问题", viewerGain: "先看到问题" },
-      { beatId: "answer", purpose: "给出答案", viewerGain: "得到具体方法" },
-    ] }, button: "阅读内容推进 2", first: "提出问题：先看到问题", second: "给出答案：得到具体方法", context: "全片承诺" },
     { stage: "director" as const, value: { visualBible: { pacing: "先快后慢" }, shots: [
       { scenePosition: 3, visibleAction: "开场人物动作", deliveryType: "stock_video" },
       { scenePosition: 8, visibleAction: "结尾人物动作", deliveryType: "image" },
     ] }, button: "阅读镜头 8", first: "开场人物动作", second: "结尾人物动作", context: /先快后慢/ },
-    { stage: "script" as const, value: { narrativeArc: "全片结构", scenes: [
+    { stage: "script" as const, value: {  scenes: [
       { position: 3, narration: "无ID第一段" },
       { position: 8, narration: "无ID第二段" },
-    ] }, button: "阅读第 8 段", first: "无ID第一段", second: "无ID第二段", context: "全片结构" },
+    ] }, button: "阅读第 8 段", first: "无ID第一段", second: "无ID第二段", context: undefined },
   ])("uses the real $stage structure for segment reading and retains whole-draft context", ({ stage, value, button, first, second, context }) => {
     render(<CreativeDraftReader stage={stage} value={value} />);
     const reader = screen.getByRole("region", { name: "稿件阅读" });
@@ -137,7 +119,7 @@ describe("CreativeDraftReader", () => {
     fireEvent.click(within(reader).getByRole("button", { name: button }));
     expect(content.getByText(second)).toBeInTheDocument();
     expect(content.queryByText(first)).not.toBeInTheDocument();
-    expect(within(reader).getByText(context)).toBeInTheDocument();
+    if (context) expect(within(reader).getByText(context)).toBeInTheDocument();
     fireEvent.click(within(reader).getByRole("button", { name: "查看整篇" }));
     expect(within(reader).getByText(first)).toBeInTheDocument();
     expect(within(reader).getByText(second)).toBeInTheDocument();
@@ -150,7 +132,6 @@ describe("CreativeDraftReader", () => {
     { stage: "script" as const, value: { scenes: [{ narration: "第一份正文" }, { narration: "第二份正文" }] } },
     { stage: "script" as const, value: { scenes: [{ position: 3, narration: "第一份正文" }, { position: 3, narration: "第二份正文" }] } },
     { stage: "director" as const, value: { shots: [{ scenePosition: 4, visibleAction: "第一份正文" }, { scenePosition: 4, visibleAction: "第二份正文" }] } },
-    { stage: "treatment" as const, value: { progression: ["第一份正文", "第二份正文"] } },
   ])("retains the complete $stage draft when segment identity is missing, duplicated, or unstructured", ({ stage, value }) => {
     render(<CreativeDraftReader stage={stage} value={value} />);
     expect(screen.queryByRole("navigation", { name: "稿件段落" })).not.toBeInTheDocument();

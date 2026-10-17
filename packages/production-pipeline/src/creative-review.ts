@@ -39,7 +39,7 @@ export interface EffectiveUserInstruction {
 }
 
 export interface CreativeDiscussionSelection {
-  kind: "document" | "beat" | "scene";
+  kind: "document" | "scene";
   ids: string[];
   scenePositions: number[];
 }
@@ -1182,7 +1182,7 @@ function parseDiscussionSelection(value: unknown): CreativeDiscussionSelection {
   const allowed = new Set(["kind", "ids", "scenePositions"]);
   const unknown = Object.keys(value).find((key) => !allowed.has(key));
   if (unknown) throw new Error(`Creative review selection field '${unknown}' is not allowed.`);
-  if (value.kind !== "document" && value.kind !== "beat" && value.kind !== "scene") {
+  if (value.kind !== "document" && value.kind !== "scene") {
     throw new Error("Creative review selection kind is invalid.");
   }
   const ids = textArray(value.ids, "selection.ids", 24);

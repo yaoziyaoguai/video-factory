@@ -20,7 +20,6 @@ import type {
 } from "../shared/api.js";
 import { parseTopicIdeasOutput, TOPIC_EDITOR_AGENT_CONTRACT_VERSION, TOPIC_REVISION_LOOP_CONTRACT } from "./topic-editor-contract.js";
 import { platformLabel } from "../shared/platform-label.js";
-import { planVisualDirection } from "../shared/visual-plan.js";
 import { classifyTopicCategory, topicRiskLevel } from "./topic-taxonomy.js";
 import { topicIdeasModelPayload } from "./topic-ideas-payload.js";
 import type { TrendArticleReader, TrendArticleSnapshot } from "./trend-article-reader.js";
@@ -384,7 +383,7 @@ export class TrendOpportunityAgent {
       ...(input.articleUncertainties?.length ? { articleUncertainties: [...input.articleUncertainties] } : {}),
       score,
       category: classifyTopicCategory(title, input.track, input.relatedSignals.map((item) => item.title)),
-      visualPlan: structuredClone(input.visualPlan ?? planVisualDirection({ title, hook })),
+      ...(input.visualPlan ? { visualPlan: structuredClone(input.visualPlan) } : {}),
     };
   }
 }

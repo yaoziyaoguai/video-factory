@@ -20,7 +20,6 @@ function scriptReview(overrides: Partial<StudioCreativeReviewSnapshot> = {}): St
     allowedActions: ["discuss", "revise", "edit_draft", "confirm"],
     returnTargets: [],
     draft: {
-      narrativeArc: "问题到答案",
       scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "第一版旁白。", visual_prompt: "结果对照" }],
     },
     messages: [],
@@ -37,7 +36,6 @@ function scriptReviewV2(overrides: Partial<StudioCreativeReviewSnapshot> = {}): 
     draftSha256: shaV2,
     draftVersionId: "script-draft-9#v2",
     draft: {
-      narrativeArc: "问题到答案",
       scenes: [{ id: "scene-1", position: 1, duration: 8, narration: "B标签保存的新旁白。", visual_prompt: "结果对照" }],
     },
     ...overrides,
@@ -83,7 +81,7 @@ describe("creative draft two-tab recovery", () => {
     const fieldA = await editorField();
     await userEvent.clear(fieldA);
     await userEvent.type(fieldA, "A-未保存旁白");
-    fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "A的意见文字" } });
+    fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "A的意见文字" } });
     viewA.unmount();
 
     // 标签 B：独立会话存储、同一共享 localStorage；保存形成服务端 V2。
@@ -105,7 +103,7 @@ describe("creative draft two-tab recovery", () => {
     expect(recovered).toHaveValue("A-未保存旁白");
     expect(screen.getByText(/旧稿不能覆盖新稿/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存修订" })).toBeDisabled();
-    expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue("A的意见文字");
+    expect(screen.getByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue("A的意见文字");
     expect(screen.getByRole("button", { name: "采用脚本（未审计）" })).toBeDisabled();
   });
 
@@ -117,7 +115,7 @@ describe("creative draft two-tab recovery", () => {
     const fieldA = await editorField();
     await userEvent.clear(fieldA);
     await userEvent.type(fieldA, "A不想丢的字");
-    fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "A未发送的意见" } });
+    fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "A未发送的意见" } });
     viewA.unmount();
 
     const tabB = tabStorage();
@@ -132,15 +130,15 @@ describe("creative draft two-tab recovery", () => {
     render(<CreativeDiscussionPanel review={scriptReviewV2()} busy={false} onCommand={onCommand} />);
     const recovered = await editorField();
     expect(recovered).toHaveValue("A不想丢的字");
-    expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue("A未发送的意见");
+    expect(screen.getByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue("A未发送的意见");
   });
 
   it("keeps the unsent message for explicit reuse when the server version changes in place", async () => {
     const onCommand = vi.fn(async () => undefined);
     const { rerender } = render(<CreativeDiscussionPanel review={scriptReview()} busy={false} onCommand={onCommand} />);
-    fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "针对旧版的意见" } });
+    fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "针对旧版的意见" } });
     rerender(<CreativeDiscussionPanel review={scriptReviewV2()} busy={false} onCommand={onCommand} />);
-    expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue("针对旧版的意见");
+    expect(screen.getByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue("针对旧版的意见");
     expect(screen.getByRole("button", { name: "只讨论" })).toBeEnabled();
     expect(onCommand).not.toHaveBeenCalled();
   });
@@ -176,8 +174,8 @@ describe("creative draft two-tab recovery", () => {
     await userEvent.type(field, "内存里的字");
     expect(field).toHaveValue("内存里的字");
     expect(screen.getByText(/手工修订无法在本机保存/)).toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "意见也在内存里" } });
-    expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue("意见也在内存里");
+    fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "意见也在内存里" } });
+    expect(screen.getByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue("意见也在内存里");
     expect(screen.getByText(/本机草稿无法保存/)).toBeInTheDocument();
   });
 });
@@ -214,7 +212,7 @@ describe("legacy shared-key read-only import (C3)", () => {
     installTabStorage(sessionA);
     const first = render(<CreativeDiscussionPanel review={scriptReview({ runId: "run-legacy", draftVersionId: "legacy-art#v1" })} busy={false} onCommand={vi.fn(async () => undefined)} />);
     // 导入成功：意见与编辑稿进入本标签会话，但共享旧 key 字节不变
-    expect(await screen.findByPlaceholderText(/为什么这样开场/)).toHaveValue(originalMessage);
+    expect(await screen.findByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue(originalMessage);
     await screen.findByText(/手动修订这份稿件/);
     expect(screen.getByLabelText("分镜 1 · 旁白")).toHaveValue("旧版旁白");
     expect(shared.get(legacyMessageKey)).toBe(originalMessage);
@@ -228,7 +226,7 @@ describe("legacy shared-key read-only import (C3)", () => {
     const summary = screen.getByText(/手动修订这份稿件/);
     await userEvent.click(summary);
     expect(screen.getByLabelText("分镜 1 · 旁白")).toHaveValue((scriptReview().draft as { scenes: Array<{ narration: string }> }).scenes[0]!.narration);
-    expect(screen.getByPlaceholderText(/为什么这样开场/)).toHaveValue(originalMessage);
+    expect(screen.getByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue(originalMessage);
     expect(shared.get(legacyMessageKey)).toBe(originalMessage);
     expect(shared.get(legacyEditKey)).toBe(JSON.stringify(originalEdit));
     second.unmount();
@@ -237,7 +235,7 @@ describe("legacy shared-key read-only import (C3)", () => {
     const sessionB = tabStorage();
     installTabStorage(sessionB);
     const third = render(<CreativeDiscussionPanel review={scriptReview({ runId: "run-legacy", draftVersionId: "legacy-art#v1" })} busy={false} onCommand={vi.fn(async () => undefined)} />);
-    expect(await screen.findByPlaceholderText(/为什么这样开场/)).toHaveValue(originalMessage);
+    expect(await screen.findByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue(originalMessage);
     expect(shared.get(legacyMessageKey)).toBe(originalMessage);
     third.unmount();
   });
@@ -285,7 +283,7 @@ describe("legacy shared-key read-only import (C3)", () => {
 
 describe("session storage partial failure keeps in-page input (C5)", () => {
   it.each([
-    { stage: "treatment" as const, draft: { viewerPromise: "原承诺" }, label: "观众看完能得到什么" },
+    { stage: "treatment" as const, draft: { concept: "原构思" }, label: "构思正文" },
     { stage: "script" as const, draft: scriptReview().draft, label: "分镜 1 · 旁白" },
     { stage: "director" as const, draft: { visualBible: { pacing: "原节奏" } }, label: "全片视觉规则 · 节奏" },
   ])("RF2 keeps both $stage fields and a truthful warning across remounts during a read outage", async ({ stage, draft, label }) => {
@@ -443,7 +441,7 @@ describe("session storage partial failure keeps in-page input (C5)", () => {
     };
     installTabStorage(session);
     const first = render(<CreativeDiscussionPanel review={scriptReview()} busy={false} onCommand={vi.fn(async () => undefined)} />);
-    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    const composer = screen.getByPlaceholderText(/描述你想保留或修改的内容/);
     fireEvent.change(composer, { target: { value: "C5 写失败后的意见" } });
     await editorField();
     const field = screen.getByLabelText("分镜 1 · 旁白");
@@ -454,7 +452,7 @@ describe("session storage partial failure keeps in-page input (C5)", () => {
     first.unmount();
     // 卸载重挂：同一页面仍可从模块内存副本恢复（不承诺刷新后仍在）
     const second = render(<CreativeDiscussionPanel review={scriptReview()} busy={false} onCommand={vi.fn(async () => undefined)} />);
-    expect(await screen.findByPlaceholderText(/为什么这样开场/)).toHaveValue("C5 写失败后的意见");
+    expect(await screen.findByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue("C5 写失败后的意见");
     await screen.findByText(/手动修订这份稿件/);
     expect(screen.getByLabelText("分镜 1 · 旁白")).toHaveValue("C5 写失败后的旁白");
     second.unmount();
@@ -465,7 +463,7 @@ describe("session storage partial failure keeps in-page input (C5)", () => {
     const healthy = tabStorage();
     installTabStorage(healthy);
     const seed = render(<CreativeDiscussionPanel review={scriptReview()} busy={false} onCommand={vi.fn(async () => undefined)} />);
-    const seedComposer = screen.getByPlaceholderText(/为什么这样开场/);
+    const seedComposer = screen.getByPlaceholderText(/描述你想保留或修改的内容/);
     fireEvent.change(seedComposer, { target: { value: "旧的持久意见" } });
     await waitFor(() => expect(healthy.values.get("vf:creative-session:run-two-tabs:script:draft")).toBeTruthy());
     seed.unmount();
@@ -481,13 +479,13 @@ describe("session storage partial failure keeps in-page input (C5)", () => {
     };
     installTabStorage(failing);
     const first = render(<CreativeDiscussionPanel review={scriptReview()} busy={false} onCommand={vi.fn(async () => undefined)} />);
-    const composer = screen.getByPlaceholderText(/为什么这样开场/);
+    const composer = screen.getByPlaceholderText(/描述你想保留或修改的内容/);
     expect(composer).toHaveValue("旧的持久意见");
     fireEvent.change(composer, { target: { value: "更新后的内存意见" } });
     expect(composer).toHaveValue("更新后的内存意见");
     first.unmount();
     const second = render(<CreativeDiscussionPanel review={scriptReview()} busy={false} onCommand={vi.fn(async () => undefined)} />);
-    expect(await screen.findByPlaceholderText(/为什么这样开场/)).toHaveValue("更新后的内存意见");
+    expect(await screen.findByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue("更新后的内存意见");
     second.unmount();
 
     // clear 失败：用户明确放弃后，重挂不得从旧持久值复活
@@ -500,8 +498,8 @@ describe("session storage partial failure keeps in-page input (C5)", () => {
     };
     installTabStorage(clearFailing);
     const third = render(<CreativeDiscussionPanel review={scriptReview()} busy={false} onCommand={vi.fn(async () => undefined)} />);
-    expect(await screen.findByPlaceholderText(/为什么这样开场/)).toHaveValue("旧的持久意见");
-    fireEvent.change(screen.getByPlaceholderText(/为什么这样开场/), { target: { value: "将被放弃的意见" } });
+    expect(await screen.findByPlaceholderText(/描述你想保留或修改的内容/)).toHaveValue("旧的持久意见");
+    fireEvent.change(screen.getByPlaceholderText(/描述你想保留或修改的内容/), { target: { value: "将被放弃的意见" } });
     await editorField();
     await userEvent.clear(screen.getByLabelText("分镜 1 · 旁白"));
     await userEvent.type(screen.getByLabelText("分镜 1 · 旁白"), "将被放弃的旁白");

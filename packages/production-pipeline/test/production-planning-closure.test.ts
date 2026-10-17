@@ -180,15 +180,10 @@ function passingCreativeReviewExecution<T>(
         },
         audit: {
           version: "video-factory/role-audit-v2" as const,
-          rubricVersion: "video-factory/role-quality-rubric-v1",
+          rubricVersion: "video-factory/role-quality-rubric-v2",
           assessments: [{
             targetPath: "",
-            dimensions: [
-              { dimension: "attention" as const, score: 92, evidence: "开场给出具体对象。" },
-              { dimension: "progression" as const, score: 92, evidence: "中段逐步给出结果。" },
-              { dimension: "payoff" as const, score: 92, evidence: "结尾回答原承诺。" },
-              { dimension: "expression" as const, score: 92, evidence: "表达具体可执行。" },
-            ],
+            dimensions: [{ dimension: "consistency" as const, score: 92, evidence: "开场给出具体对象。" }, { dimension: "expression" as const, score: 92, evidence: "表达具体可执行。" }],
           }],
           verdict: "pass" as const,
           score: 92,
@@ -227,12 +222,7 @@ function repairingCreativeReviewExecution<T>(
           ...iteration.audit,
           assessments: [{
             targetPath: "",
-            dimensions: [
-              { dimension: "attention" as const, score: 70, evidence: "开场是抽象概括。" },
-              { dimension: "progression" as const, score: 70, evidence: "中段推进偏慢。" },
-              { dimension: "payoff" as const, score: 70, evidence: "结尾没有收束。" },
-              { dimension: "expression" as const, score: 70, evidence: "表达偏空。" },
-            ],
+            dimensions: [{ dimension: "consistency" as const, score: 70, evidence: "开场是抽象概括。" }, { dimension: "expression" as const, score: 70, evidence: "表达偏空。" }],
           }],
           verdict: "repair" as const,
           score: 70,
@@ -252,16 +242,8 @@ function repairingCreativeReviewExecution<T>(
 
 function legalTreatment(title: string): CreativeTreatment {
   return {
-    version: "video-factory/creative-treatment-v2",
-    viewerPromise: "看完能避开三个决策坑",
-    hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
-    progression: [
-      { beatId: "beat-1", purpose: "建立问题", viewerGain: "识别坑" },
-      { beatId: "beat-2", purpose: "给出方法", viewerGain: "可执行步骤" },
-    ],
-    payoff: "低风险决策清单",
-    visualPrinciples: ["真实动作", "少字多画面"],
-    soundPrinciples: ["环境声先行"],
+    version: "video-factory/creative-treatment-v3",
+    concept: "看完能避开三个决策坑",
     evidenceRequirements: [],
     feasibilityQuestions: [],
   };
@@ -376,8 +358,6 @@ function closureScreenwriter(spies: ClosureSpies): ScreenwriterAgent {
       }
       return {
         output: {
-          viewerPromise: "看完能避开三个决策坑",
-          narrativeArc: "问题-方法-清单",
           canonFacts: ["步骤可执行"],
           scenes: [1, 2, 3].map((position) => ({
             position,
@@ -426,9 +406,6 @@ function closureDirector(spies: ClosureSpies): VisualDirectorAgent {
       }
       return {
         version: "video-factory/director-plan-v1",
-        requestedProfileId: input.brief.requestedProfileId,
-        resolvedProfileId: "documentary-observer",
-        profileRationale: "用真实动作解释。",
         visualBible: {
           narrativeApproach: "逐步展示", motif: "窗边光影", pacing: "均匀", composition: "稳定中景",
           camera: "固定机位", color: "自然色", continuity: "同一时段", transitionGrammar: "硬切配字幕",
@@ -524,7 +501,6 @@ function closureBrief(overrides: { models?: Record<string, string>; title?: stri
       ...(overrides.creativeReview ? { creativeReview: "user-confirmed-v1" as const } : {}),
     },
     director: {
-      profileId: "auto",
       // CR3：显式覆盖时按覆盖值（正例须把受控生成来源放进本制作集合）；
       // 默认维持原口径。
       assetProviderIds: overrides.assetProviderIds
@@ -534,27 +510,6 @@ function closureBrief(overrides: { models?: Record<string, string>; title?: stri
     economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
     voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
   } as unknown as ProductionBrief;
-}
-
-function scriptStageTemplateSnapshot() {
-  return {
-    templateId: "planning-closure-template",
-    templateVersion: 1,
-    resolvedAt: "2026-09-13T00:00:00.000Z",
-    resolvedBlueprint: {
-      platform: "douyin",
-      durationSeconds: 24,
-      automationLevel: "assisted",
-      storyStructure: [{ id: "explain", label: "解释", purpose: "逐步解释", required: true }],
-      shotSlots: [{ id: "shot-explain", beatId: "explain", purpose: "展示动作", durationSeconds: 24, allowedCapabilities: ["asset.prepare"], manualReplacement: true }],
-      visualSystem: { composition: "一个镜头一个概念", colorIntent: "自然底色", subtitleDensity: "medium", pacing: "measured" },
-      soundSystem: { voiceIntent: "自然", pace: "medium", musicIntent: "轻盈" },
-      qualityRules: [{ id: "facts", label: "事实准确", dimension: "factual", required: true, threshold: 80 }],
-      capabilityRequirements: [{ capability: "script.draft", required: true }],
-    },
-    sourceLayers: [{ layer: "template", sourceId: "planning-closure-template@1", appliedFields: ["storyStructure"] }],
-    fieldSources: { storyStructure: "template" },
-  } as const;
 }
 
 function newClosurePipeline(
@@ -1646,32 +1601,6 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
     );
   });
 
-  it("strips a legacy template snapshot without invalidating accepted planning", async () => {
-    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-closure-script-edit-"));
-    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
-    const pipeline = newClosurePipeline(workspaceRoot, spies);
-    const run = await pipeline.start(closureBrief());
-    assert.equal(run.status, "needs_human");
-
-    // 模板已暂停参与新制作；旧字段只在新执行边界剥离，不能改变任何角色身份。
-    const original = await effectivePlanningInput(pipeline, run.id);
-    assert.equal(original.brief.templateSnapshot, undefined);
-    await pipeline.applyNodeInputOverride(run.id, {
-      nodeId: "creative-planning",
-      actor: "producer",
-      ...await jointPlanningEditTokens(pipeline, run.id),
-      input: { brief: { ...original.brief, templateSnapshot: scriptStageTemplateSnapshot() } },
-    });
-    const resumed = await pipeline.resumeStale(run.id);
-    assert.equal(resumed.status, "needs_human", JSON.stringify(resumed.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
-
-    assert.equal(spies.treatmentTitles.length, 1, "a retired template field must not change the treatment identity");
-    assert.equal(spies.screenwriterCalls.length, 1, "a retired template field must not rerun the script stage");
-    assert.equal(spies.directorCalls, 1, "a retired template field must not rerun the director stage");
-    const formal = resumed.artifacts.filter((artifact) => artifact.producer?.nodeId === "creative-planning" && artifact.kind === "script");
-    assert.equal(formal.length, 1, "the accepted planning artifact remains the only effective production artifact");
-  });
-
   it("isolates joint script and director role checkpoints by the actual selected model", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-closure-role-model-checkpoints-"));
     const spies: ClosureSpies = {
@@ -1949,9 +1878,6 @@ function flakyDirector(spies: ClosureSpies, options: { failFirstCall?: boolean }
       }
       return {
         version: "video-factory/director-plan-v1",
-        requestedProfileId: input.brief.requestedProfileId,
-        resolvedProfileId: "documentary-observer",
-        profileRationale: "用真实动作解释。",
         visualBible: {
           narrativeApproach: "逐步展示", motif: "窗边光影", pacing: "均匀", composition: "稳定中景",
           camera: "固定机位", color: "自然色", continuity: "同一时段", transitionGrammar: "硬切配字幕",
@@ -2002,9 +1928,6 @@ function closureLibraryDirector(spies: ClosureSpies): VisualDirectorAgent {
       spies.directorCalls += 1;
       return {
         version: "video-factory/director-plan-v1",
-        requestedProfileId: input.brief.requestedProfileId,
-        resolvedProfileId: "documentary-observer",
-        profileRationale: "用真实动作解释。",
         visualBible: {
           narrativeApproach: "逐步展示", motif: "窗边光影", pacing: "均匀", composition: "稳定中景",
           camera: "固定机位", color: "自然色", continuity: "同一时段", transitionGrammar: "硬切配字幕",
@@ -2182,7 +2105,7 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
       runTaskDetailed: async (kind, payload) => {
         calls.push(kind);
         if (kind === "role-audit") return { output: {
-          version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+          version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
           verdict: "pass", score: 92, summary: "格式错误的审计不能用作通过证据", issues: [], repairInstructions: [],
           assessments: [{ targetPath: "/scenes/0", dimensions: ["evidence", "coverage", "consistency", "actionability"].map(dimension => ({ dimension, score: 92, evidence: "模型给错了评价对象" })) }],
         } };
@@ -2525,7 +2448,7 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
     let searches = 0;
     let candidateOutput: unknown;
     const repair = {
-      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
       verdict: "repair", score: 50, summary: "需要补证",
       assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"].map(dimension => ({ dimension, score: 50, evidence: "证据不足" })) }],
       issues: [{ severity: "blocking", criterion: "可见证据", evidence: "不足", repairInstruction: "补齐证据" }], repairInstructions: ["补齐证据"],
@@ -2601,7 +2524,9 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
     const edited = await (await pipeline.dispatchCreativeReviewCommand(first.id, {
       action: "edit_draft", commandId: "save-after-deadline", actor: "creator", stage: "director",
       expectedRunRevision: recovered.revision, expectedReviewRevision: gate.reviewRevision, baseDraftSha256: gate.draftSha256,
-      document: { ...review.creativeReview.stages.director.currentDocument, profileRationale: "保留当前画面路线，等待核对素材证据。" },
+      document: { ...review.creativeReview.stages.director.currentDocument,
+        shots: (review.creativeReview.stages.director.currentDocument.shots as Array<Record<string, unknown>>).map(shot => ({ ...shot, rationale: `${shot.rationale}；保留当前镜头，等待视觉核验。` })),
+      },
     })).completion;
     assert.equal(edited.status, "needs_human");
     const editedGate = edited.nodeRuns.find(item => item.nodeId === "creative-planning")!.intervention!.continuation!;
@@ -2813,7 +2738,7 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
     assert.notEqual(normalTreatment.provenance?.providerId, "treatment-model-a");
   });
 
-  it("sends the accepted series promise into the treatment role request", async () => {
+  it("sends the episode concept into the treatment role without a separate locked promise", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-fix-treatment-promise-"));
     const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
     const capturedPromises: Array<string | undefined> = [];
@@ -2825,12 +2750,12 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
         agent: {
           id: TREATMENT_PROVIDER_ID,
           modelId: "treatment-model-a",
-          treat: async (input: { brief: { title: string; lockedViewerPromise?: string } }) => legalTreatment(input.brief.title),
-          treatDetailed: async (input: { brief: { title: string; lockedViewerPromise?: string } }) => {
+          treat: async (input: { brief: { title: string; seriesContext?: { episode: { concept: string } } } }) => legalTreatment(input.brief.title),
+          treatDetailed: async (input: { brief: { title: string; seriesContext?: { episode: { concept: string } } } }) => {
             spies.treatmentModelCalls.push("treatment-model-a");
             spies.treatmentTitles.push(input.brief.title);
             spies.treatmentCheckpointPresent.push(true);
-            capturedPromises.push(input.brief.lockedViewerPromise);
+            capturedPromises.push(input.brief.seriesContext?.episode.concept);
             return {
               output: legalTreatment(input.brief.title),
               trace: {
@@ -2867,9 +2792,7 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
           updatedAt: "2026-08-30T00:00:00.000Z",
           pillar: "真实实验",
           title: "第一集",
-          viewerPromise: "完成一次低成本验证",
-          hook: "先展示最容易失败的一步",
-          payoff: "给出可复现的结论",
+          concept: "完成一次低成本验证",
           planning: {
             source: "agent",
             role: "系列开拍总编",
@@ -2887,12 +2810,12 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
       },
     } as ProductionBrief);
     assert.equal(run.status, "needs_human", JSON.stringify(run.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
-    // 系列承诺进入构思角色的真实输入（宿主锁定，由 codex 构思角色合同覆盖模型输出），
+    // 系列承诺进入构思角色的真实输入（保持自由文本，不覆盖构思角色输出），
     // 不是只进入 checkpoint 或身份摘要。
     assert.deepEqual(
       capturedPromises,
       ["完成一次低成本验证"],
-      "the accepted series promise must reach the treatment role request as lockedViewerPromise",
+      "the accepted episode concept must reach the treatment role through series context",
     );
     // 无系列上下文的对照组：不构造承诺，构思角色自行生成。
     const plainSpies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
@@ -2905,11 +2828,11 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
         agent: {
           id: TREATMENT_PROVIDER_ID,
           modelId: "treatment-model-a",
-          treat: async (input: { brief: { title: string; lockedViewerPromise?: string } }) => legalTreatment(input.brief.title),
-          treatDetailed: async (input: { brief: { title: string; lockedViewerPromise?: string } }) => {
+          treat: async (input: { brief: { title: string; seriesContext?: { episode: { concept: string } } } }) => legalTreatment(input.brief.title),
+          treatDetailed: async (input: { brief: { title: string; seriesContext?: { episode: { concept: string } } } }) => {
             plainSpies.treatmentModelCalls.push("treatment-model-a");
             plainSpies.treatmentTitles.push(input.brief.title);
-            plainCaptured.push(input.brief.lockedViewerPromise);
+            plainCaptured.push(input.brief.seriesContext?.episode.concept);
             return {
               output: legalTreatment(input.brief.title),
               trace: {
@@ -3599,11 +3522,11 @@ for (const scopeChange of ["scene structure", "global intent"] as const) {
       treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
       screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
     };
-    const previousScript = { viewerPromise: "看完能避开三个决策坑", narrativeArc: "逐步解释", canonFacts: [],
+    const previousScript = {   canonFacts: [],
       scenes: [1, 2, 3, 4, 5, 6, 7].map((position) => ({ position, narration: `第${position}步核对。`,
         duration: position <= 4 ? 3 : 4, visual_strategy: "local", visual_prompt: `旧画面 ${position}`, search_terms: ["核对"] })),
     };
-    const candidate = scopeChange === "global intent" ? { ...previousScript, viewerPromise: "擅自换成另一种全片承诺" }
+    const candidate = scopeChange === "global intent" ? { ...previousScript, canonFacts: ["擅自改写已确认事实"] }
       : { ...previousScript, scenes: previousScript.scenes.slice(0, 5).map((scene, i) => ({
       ...scene, duration: i === 4 ? 4 : 5, visual_prompt: `新画面 ${scene.position}`,
     })) };
@@ -3808,16 +3731,11 @@ it("旧操作的异常经新操作重抛：helper 不改签、图层零登记、
     version: "video-factory/agent-loop-v1", role: "构思", contractVersion: "fixture-v1",
     criteria: [], status: "failed", maxIterations: 1,
     iterations: [{
-      iteration: 1, candidate: { payoff: "旧操作审过的稿" }, candidateHash: gate1.draftSha256,
+      iteration: 1, candidate: { concept: "旧操作审过的稿" }, candidateHash: gate1.draftSha256,
       audit: {
-        version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v1",
+        version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
         verdict: "pass", score: 95, summary: "旧操作的 pass 意见", issues: [], repairInstructions: [],
-        assessments: [{ targetPath: "", dimensions: [
-          { dimension: "attention", score: 95, evidence: "旧操作证据" },
-          { dimension: "progression", score: 95, evidence: "旧操作证据" },
-          { dimension: "payoff", score: 95, evidence: "旧操作证据" },
-          { dimension: "expression", score: 95, evidence: "旧操作证据" },
-        ] }],
+        assessments: [{ targetPath: "", dimensions: [{ dimension: "consistency", score: 95, evidence: "旧操作证据" }, { dimension: "expression", score: 95, evidence: "旧操作证据" }] }],
       },
     }],
   }, undefined, new Error("settled non-provider failure"));
@@ -3972,7 +3890,7 @@ it("F03：不可执行稿审计停点、确认边界拒绝、修正后续跑（�
   const invalidTreatment = {
     ...legalTreatment("F03 不可执行稿"),
     evidenceRequirements: [{
-      beatId: "beat-1", claim: "需要一个生成画面", requirement: "illustration_only" as const,
+      claim: "需要一个生成画面", requirement: "illustration_only" as const,
       suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" as const,
       retrievalProviderId: null,
     }],
@@ -4064,11 +3982,11 @@ it("P5：坏稿可补齐——边界拒绝保停点、兼容校验、补齐保�
   const badTreatment = {
     ...legalTreatment("P5 缺画面服务稿"),
     evidenceRequirements: [
-      { beatId: "beat-1", claim: "已提供素材", requirement: "factual_support" as const, suppliedSourceIds: [], critical: true, acquisition: "supplied" as const, retrievalProviderId: null },
-      { beatId: "beat-1", claim: "第 2 项图库画面", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "pipeline_retrievable" as const, retrievalProviderId: "pexels-stock-v1" },
-      { beatId: "beat-2", claim: "无需画面", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "not_needed" as const, retrievalProviderId: null },
-      { beatId: "beat-1", claim: "第 4 项生成画面", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" as const, retrievalProviderId: "seedream-image-v1" },
-      { beatId: "beat-2", claim: "第 5 项生成画面", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" as const, retrievalProviderId: null },
+      { claim: "已提供素材", requirement: "factual_support" as const, suppliedSourceIds: [], critical: true, acquisition: "supplied" as const, retrievalProviderId: null },
+      { claim: "第 2 项图库画面", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "pipeline_retrievable" as const, retrievalProviderId: "pexels-stock-v1" },
+      { claim: "无需画面", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "not_needed" as const, retrievalProviderId: null },
+      { claim: "第 4 项生成画面", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" as const, retrievalProviderId: "seedream-image-v1" },
+      { claim: "第 5 项生成画面", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" as const, retrievalProviderId: null },
     ],
   };
   const treatmentPort: CreativeTreatmentAgent = {
@@ -4116,7 +4034,7 @@ it("P5：坏稿可补齐——边界拒绝保停点、兼容校验、补齐保�
   const decisionsBefore = run.decisions.length;
 
   // 1) 手动改文字但不补服务：保存被命令边界拒绝，停点与全部事实保留，零外部调用。
-  const textOnlyEdit = { ...badTreatment, viewerPromise: "改了承诺但没补服务" };
+  const textOnlyEdit = { ...badTreatment, concept: "改了构思但没补服务" };
   await assert.rejects(
     pipeline.dispatchCreativeReviewCommand(run.id, {
       action: "edit_draft", commandId: "p5-text-only", actor: "creator", stage: gate.stage,
@@ -4157,7 +4075,7 @@ it("P5：坏稿可补齐——边界拒绝保停点、兼容校验、补齐保�
   // 3) 旧有效稿不加新硬门：不动服务字段的编辑（文本微调＋补齐第 5 项兼容服务）成功。
   const repaired = {
     ...badTreatment,
-    viewerPromise: "补齐服务后的承诺",
+    concept: "补齐服务后的构思",
     evidenceRequirements: badTreatment.evidenceRequirements.map((entry, index) =>
       index === 4 ? { ...entry, retrievalProviderId: "seedream-image-v1" } : entry),
   };
@@ -4209,7 +4127,7 @@ it("CR3/AP3：本制作来源范围外的服务在命令边界被拒绝（真实
   const badTreatment = {
     ...legalTreatment("CR3 来源范围稿"),
     evidenceRequirements: [
-      { beatId: "beat-2", claim: "生成画面缺服务", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" as const, retrievalProviderId: null },
+      { claim: "生成画面缺服务", requirement: "illustration_only" as const, suppliedSourceIds: [], critical: false, acquisition: "pipeline_generated" as const, retrievalProviderId: null },
     ],
   };
   const treatmentPort: CreativeTreatmentAgent = {
@@ -4270,7 +4188,7 @@ it("CR3/AP3：本制作来源范围外的服务在命令边界被拒绝（真实
     ...badTreatment,
     evidenceRequirements: badTreatment.evidenceRequirements.map((entry) => ({ ...entry, retrievalProviderId: "seedream-image-v1" })),
   };
-  for (const [label, replayDocument] of [["同体", rejectedDocument], ["异体", { ...rejectedDocument, viewerPromise: "换个承诺仍越范围" }]] as const) {
+  for (const [label, replayDocument] of [["同体", rejectedDocument], ["异体", { ...rejectedDocument, concept: "换个构思仍越范围" }]] as const) {
     await assert.rejects(
       pipeline.dispatchCreativeReviewCommand(run.id, {
         action: "edit_draft", commandId: "cr3-outside-run-scope", actor: "creator", stage: gate.stage,
@@ -4709,7 +4627,7 @@ describe("creative discussion unknown recovery (C1)", () => {
       }
       const isRevise = payload.requestMode === "revise";
       const revised = structuredClone(payload.currentDocument);
-      if (isRevise && payload.stage === "treatment") revised.payoff = "C1 修订后的结尾";
+      if (isRevise && payload.stage === "treatment") revised.concept = "C1 修订后的结尾";
       if (isRevise && payload.stage === "script") revised.scenes.at(-1).narration = "C1 修订后的最后一段旁白。";
       if (isRevise && payload.stage === "director") revised.visualBible = { ...revised.visualBible, pacing: "C1 修订后的节奏" };
       const result = {
@@ -5389,13 +5307,13 @@ describe("creative discussion unknown recovery (C1)", () => {
         assert.match((await studio.creativeReview(run.id))?.reviewContinuation?.detail ?? "", /缺少可核.*不会重新发送/);
         const replay = await (await rebuilt.dispatchCreativeReviewCommand(run.id, body)).completion;
         assert.equal(replay.revision, recovered.revision, "同一缺证据查询不重复修改诊断或稿件");
-        const document = { ...(draftBefore as Record<string, unknown>), payoff: "用户保留原成果后明确修改结尾" };
+        const document = { ...(draftBefore as Record<string, unknown>), concept: "用户保留原成果后明确修改结尾" };
         const edited = await (await rebuilt.dispatchCreativeReviewCommand(run.id, { action: "edit_draft", commandId: `rf4-edit-${damage}`,
           actor: "creator", stage: "treatment", expectedRunRevision: recovered.revision,
           expectedReviewRevision: gateOf(recovered).continuation.reviewRevision, baseDraftSha256: gateOf(recovered).continuation.draftSha256,
           baseDraftVersionId: stageReview(recovered, "treatment").currentDraft!.versionId!, document })).completion;
         assert.equal(edited.status, "needs_human");
-        assert.equal((stageReview(edited, "treatment").currentDocument as Record<string, unknown>).payoff, document.payoff);
+        assert.equal((stageReview(edited, "treatment").currentDocument as Record<string, unknown>).concept, document.concept);
         assert.equal(edited.creativeReviewOperations?.find(op => op.commandId === body.commandId)?.status, "unknown");
         assert.equal(fresh.mock.callCount(), callsBefore);
       } finally { fresh.mock.restore(); prepare.mock.restore(); submit.mock.restore(); harness.executor.release(); await harness.broker.close(); }

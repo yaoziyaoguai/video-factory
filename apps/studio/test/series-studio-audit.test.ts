@@ -13,7 +13,7 @@ it("an unspecified series style stays optional through creation, revision and hu
     planningAgent: {
       reviewEpisode: async () => { throw new Error("adoption must not audit"); },
       reviseEpisode: async (_series, episode) => ({
-        draft: { episodeNumber: 1, pillar: "城市情绪", title: "停下的那几秒", viewerPromise: "感受日常里的片刻安静", hook: "走了一天", payoff: "停下来也算到达",
+        draft: { episodeNumber: 1, pillar: "城市情绪", title: "停下的那几秒", concept: "感受日常里的片刻安静",
           fromPrevious: episode.continuity.fromPrevious, toNext: [] },
         planning: { ...episode.planning, source: "agent", auditStatus: "not_audited", auditIterations: 0 },
       }),
@@ -46,9 +46,7 @@ it("coalesces concurrent audits of one series version but permits a later explic
             episodeNumber: episode.episodeNumber,
             pillar: episode.pillar,
             title: episode.title,
-            viewerPromise: episode.viewerPromise,
-            hook: episode.hook,
-            payoff: episode.payoff,
+            concept: episode.concept,
             fromPrevious: [...episode.continuity.fromPrevious],
             toNext: [...episode.continuity.toNext],
           },
@@ -84,7 +82,7 @@ it("revises one series episode without auditing or adopting it, then adopts that
         assert.equal(instruction, "把开场写成一个具体问题");
         return { draft: {
           episodeNumber: episode.episodeNumber, pillar: episode.pillar, title: episode.title,
-          viewerPromise: episode.viewerPromise, hook: "开场先问观众会遇到的具体问题", payoff: episode.payoff,
+          concept: "开场先问观众会遇到的具体问题",
           fromPrevious: [...episode.continuity.fromPrevious], toNext: [...episode.continuity.toNext],
         }, planning: {
           source: "agent" as const, role: "系列总编", auditRole: "独立质量复核", auditStatus: "not_audited" as const,
@@ -105,8 +103,8 @@ it("revises one series episode without auditing or adopting it, then adopts that
   assert.equal(audits, 0);
   assert.equal(after.status, "planned");
   assert.notEqual(after.contentVersionId, before.contentVersionId);
-  assert.equal(after.versionHistory?.[0]?.hook, before.hook);
-  assert.equal(after.versionHistory?.at(-1)?.hook, "开场先问观众会遇到的具体问题");
+  assert.equal(after.versionHistory?.[0]?.concept, before.concept);
+  assert.equal(after.versionHistory?.at(-1)?.concept, "开场先问观众会遇到的具体问题");
   assert.equal(after.auditHistory?.some((audit) => audit.targetVersionId === after.contentVersionId), false);
   const adopted = await studio.advanceEpisode(created.id, 1);
   assert.equal(audits, 0, "adopting an unaudited revision must not silently run a model check");
@@ -129,7 +127,7 @@ it("coalesces identical in-flight episode revisions and rejects a conflicting in
         return {
           draft: {
             episodeNumber: episode.episodeNumber, pillar: episode.pillar, title: episode.title,
-            viewerPromise: episode.viewerPromise, hook: "新开场", payoff: episode.payoff,
+            concept: episode.concept,
             fromPrevious: [...episode.continuity.fromPrevious], toNext: [...episode.continuity.toNext],
           },
           planning: {

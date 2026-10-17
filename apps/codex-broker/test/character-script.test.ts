@@ -25,12 +25,12 @@ test("MC-A05 selects director-v2 and retains character bindings in the broker in
   assert.equal((schema.properties as Record<string, { const?: string }>).version!.const, "video-factory/director-plan-v2");
   const brief = { title: "找钥匙", angle: "四人对白", audience: "青年", platform: "douyin", durationSeconds: 24,
     presentationMode: "character_drama", characters: fixture.script.characters, productionCapabilities: summarizeProductionCapabilities([]) };
-  const task = validateTaskPayload("director-plan", { directorProfiles: [], brief, scenes: fixture.script.scenes,
+  const task = validateTaskPayload("director-plan", {  brief, scenes: fixture.script.scenes,
     assetProviders: [], economics: { allowMeteredProviders: false } });
   if (task.kind !== "director-plan") throw new Error("wrong task");
   assert.deepEqual(task.payload.brief, brief);
   assert.deepEqual(task.payload.scenes, fixture.script.scenes);
-  assert.throws(() => validateTaskPayload("director-plan", { directorProfiles: [], brief: { ...brief, presentationMode: "wrong" },
+  assert.throws(() => validateTaskPayload("director-plan", {  brief: { ...brief, presentationMode: "wrong" },
     scenes: [], assetProviders: [], economics: { allowMeteredProviders: false } }), /presentationMode/);
 });
 

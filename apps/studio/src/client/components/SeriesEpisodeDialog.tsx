@@ -52,9 +52,7 @@ function SeriesEpisodeDraft({ open, series: latestSeries, episode: latestEpisode
         expectedRevision: series.revision,
         pillar: required(data, "pillar"),
         title: required(data, "title"),
-        viewerPromise: required(data, "viewerPromise"),
-        hook: required(data, "hook"),
-        payoff: required(data, "payoff"),
+        concept: required(data, "concept"),
         fromPrevious: lines(data, "fromPrevious"),
         toNext: lines(data, "toNext"),
       }));
@@ -79,9 +77,7 @@ function SeriesEpisodeDraft({ open, series: latestSeries, episode: latestEpisode
             ? <select name="pillar" defaultValue={episode.pillar}>{series.pillars.map((pillar) => <option key={pillar} value={pillar}>{pillar}</option>)}</select>
             : <input name="pillar" defaultValue={episode.pillar} required />}</label>
           <label className="field field-wide"><span>单集标题</span><input name="title" defaultValue={episode.title} required data-dialog-initial-focus /></label>
-          <label className="field field-wide"><span>这一集给观众什么</span><textarea name="viewerPromise" defaultValue={episode.viewerPromise} rows={2} required /></label>
-          <label className="field field-wide"><span>开场钩子</span><textarea name="hook" defaultValue={episode.hook} rows={2} required /></label>
-          <label className="field field-wide"><span>本集必须兑现</span><textarea name="payoff" defaultValue={episode.payoff} rows={2} required /></label>
+          <label className="field field-wide"><span>本集想法</span><textarea name="concept" defaultValue={episode.concept} rows={5} required /></label>
           <label className="field"><span>本集额外承接要求</span><textarea name="fromPrevious" defaultValue={episode.continuity.fromPrevious.join("\n")} rows={3} placeholder="每行一项；系统继承的正史交接会单独保留" /></label>
           <label className="field"><span>留给下一集</span><textarea name="toNext" defaultValue={episode.continuity.toNext.join("\n")} rows={3} placeholder="每行一项" /></label>
           <p className="series-edit-notice field-wide"><PencilLine aria-hidden="true" size={16} /><span><strong>人工版本优先</strong> 系统不会把 AI 路线图的旧结果悄悄覆盖回来。保存后，原策划审计会标为已失效。</span></p>
@@ -95,7 +91,7 @@ function SeriesEpisodeDraft({ open, series: latestSeries, episode: latestEpisode
         {discardPromptOpen ? <div className="dialog-backdrop new-run-discard-backdrop" role="presentation">
           <section className="decision-dialog" aria-labelledby="episode-discard-title">
             <header className="dialog-header"><div><p className="eyebrow">未保存的修改</p><h2 id="episode-discard-title">要放弃这集的修改吗？</h2></div></header>
-            <div className="decision-dialog-copy"><AlertCircle aria-hidden="true" size={22} /><div><p>未保存的标题、开场和承接要求会丢失。</p><p>不会保存新版本、进入制作或调用模型。</p></div></div>
+            <div className="decision-dialog-copy"><AlertCircle aria-hidden="true" size={22} /><div><p>未保存的标题、想法和承接要求会丢失。</p><p>不会保存新版本、进入制作或调用模型。</p></div></div>
             <footer className="dialog-actions">
               <button className="button button-primary" type="button" data-dialog-initial-focus onClick={() => setDiscardPromptOpen(false)}>返回填写</button>
               <button className="button button-danger-ghost" type="button" onClick={onClose}>放弃并关闭</button>

@@ -997,13 +997,11 @@ interface ReworkSpies {
 }
 
 const CREATIVE_DIMENSION_EVIDENCE: Record<string, string> = {
-  attention: "前两秒给出具体问题。",
-  progression: "中段有可辨认的推进。",
-  payoff: "结尾兑现了承诺里的结论。",
-  expression: "画面要求在当前素材能力内可落地。",
+  consistency: "内容忠实于用户意图和已确认事实。",
+  expression: "表达清楚，符合当前制作能力。",
 };
 
-// 创作交付类角色的评估对象是整份候选（根路径 ""），维度由宿主固定为四维创作维度；
+// 创作交付类角色的评估对象是整份候选（根路径 ""），维度由宿主固定为创作维度；
 // 总分等于全部维度分的最低分，所以每维取同一个分数。
 const CREATIVE_ASSESSMENTS = [{
   targetPath: "",
@@ -1035,7 +1033,7 @@ function passingCreativeReviewExecution<T>(
         auditTrace: { taskKind: "role-audit" as const, promptVersion: "v1", prompt: "fixture review", providerId: "fixture-audit", modelId: `${modelId}-audit` },
         audit: {
           version: "video-factory/role-audit-v2" as const,
-          rubricVersion: "video-factory/role-quality-rubric-v1" as const,
+          rubricVersion: "video-factory/role-quality-rubric-v2" as const,
           verdict: "pass" as const,
           score: 92,
           assessments: CREATIVE_ASSESSMENTS,
@@ -1057,16 +1055,8 @@ function jointReworkAgents(spies: ReworkSpies, options: { narrations?: string[] 
     treat: async () => {
       spies.treatmentCalls += 1;
       return {
-        version: "video-factory/creative-treatment-v2",
-        viewerPromise: "看完能避开三个决策坑",
-        hook: { narrationIntent: "直接抛出问题", visualIntent: "真实生活场景" },
-        progression: [
-          { beatId: "beat-1", purpose: "建立问题", viewerGain: "识别坑" },
-          { beatId: "beat-2", purpose: "给出方法", viewerGain: "可执行步骤" },
-        ],
-        payoff: "低风险决策清单",
-        visualPrinciples: ["真实动作"],
-        soundPrinciples: ["环境声先行"],
+        version: "video-factory/creative-treatment-v3",
+        concept: "看完能避开三个决策坑",
         evidenceRequirements: [],
         feasibilityQuestions: [],
       };
@@ -1084,8 +1074,6 @@ function jointReworkAgents(spies: ReworkSpies, options: { narrations?: string[] 
   const draftScript = async (input: { brief: { rework?: { instruction?: string } } }) => {
     spies.screenwriterBodies.push(input.brief.rework?.instruction ?? "(无返工指令)");
     return {
-      viewerPromise: "看完能避开三个决策坑",
-      narrativeArc: "问题-方法-清单",
       canonFacts: ["步骤可执行"],
       scenes: [1, 2, 3].map((position) => ({
         position,
@@ -1101,9 +1089,6 @@ function jointReworkAgents(spies: ReworkSpies, options: { narrations?: string[] 
     spies.directorInputs.push(input);
     return {
       version: "video-factory/director-plan-v1" as const,
-      requestedProfileId: input.brief.requestedProfileId,
-      resolvedProfileId: "documentary-observer",
-      profileRationale: "用真实动作解释。",
       visualBible: {
         narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
         camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
@@ -1177,7 +1162,7 @@ function jointReworkBrief(): ProductionBrief {
       technicalReview: "python-technical-review-v1",
     },
     workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true, creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1" },
-    director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+    director: {  assetProviderIds: ["local-editorial-v1"] },
     economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
     voiceDirection: { profileId: "macos:Tingting", rate: 185, pauseScale: 1, masteringPreset: "natural" },
   } as unknown as ProductionBrief;
@@ -1463,7 +1448,7 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
       screenwriterAgent: { ...agents.screenwriterAgent!, draftDetailed: async input => {
         writerInputs.push(input);
         const execution = await agents.screenwriterAgent!.draftDetailed!(input);
-        return { ...execution, output: { ...execution.output, viewerPromise: input.brief.creativeTreatment!.viewerPromise } };
+        return execution;
       } },
     });
     const studio = new ProductionStudio({ workspaceRoot, pipeline,
@@ -1472,7 +1457,7 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     const first = (await studio.creativeReview(run.id))!;
     assert.equal(first.stage, "treatment");
     const original = JSON.stringify(first.draft);
-    const proposed = { ...(first.draft as Record<string, unknown>), viewerPromise: "B：不被催促的四秒钟", payoff: "B：回扣窗边的光，不加CTA", soundPrinciples: ["开头4秒静默，其后自然连贯"] };
+    const proposed = { ...(first.draft as Record<string, unknown>), concept: "B：不被催促的四秒钟。开头4秒静默，其后自然连贯。" };
     let command = await pipeline.dispatchCreativeReviewCommand(run.id, { action: "edit_draft", commandId: "adopt-B", actor: "creator", stage: "treatment",
       expectedRunRevision: first.runRevision, expectedReviewRevision: first.reviewRevision, baseDraftSha256: first.draftSha256, document: proposed });
     run = await command.completion;
@@ -1497,7 +1482,6 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     assert.ok(spies.directorInputs.length > 0);
     for (const input of spies.directorInputs) {
       assert.deepEqual(input.brief.creativeTreatment, proposed);
-      assert.equal(input.brief.viewerPromise, proposed.viewerPromise);
     }
     current = (await studio.creativeReview(run.id))!;
     command = await pipeline.dispatchCreativeReviewCommand(run.id, { action: "audit_current", commandId: "audit-director-B", actor: "creator", stage: "director",
@@ -1893,9 +1877,6 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
         const cheaper = input.costFeedback?.some((feedback) => feedback.reason === "too_expensive") === true;
         return {
           version: "video-factory/director-plan-v1",
-          requestedProfileId: input.brief.requestedProfileId,
-          resolvedProfileId: "documentary-observer",
-          profileRationale: cheaper ? "按费用反馈保留一镜生成。" : "先全部生成。",
           visualBible: {
             narrativeApproach: "逐步展示", pacing: "均匀", composition: "稳定中景",
             camera: "固定机位", color: "自然色", continuity: "同一时段", sound: "环境声",
@@ -1946,7 +1927,7 @@ describe("joint-v1 rework routes back to the right stages (B5)", () => {
     const paused = await confirmCreativeStages(pipeline, await pipeline.start({
       ...jointReworkBrief(),
       providers: { ...jointReworkBrief().providers, assets: "ai-shot-router-v1" },
-      director: { profileId: "auto", assetProviderIds: ["seedance-video-v1", "pexels-stock-v1"] },
+      director: {  assetProviderIds: ["seedance-video-v1", "pexels-stock-v1"] },
       economics: { recipeId: "custom", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 0 },
     } as ProductionBrief));
     const firstPlan = paused.nodeRuns.find((node) => node.nodeId === "assets")?.spendPlan;
@@ -3963,7 +3944,7 @@ describe("SND19 series normal entry through the real service chain", () => {
       },
       workflowFeatures: { assetSemanticRank, referenceGrammar: false, executablePlan: true,
         creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1", boundaryGates: "user-confirmed-v1" },
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      director: {  assetProviderIds: ["local-editorial-v1"] },
       economics: { recipeId: "economy-daily", allowMeteredProviders: true, maxPaidShots: 0, maxCostCny: 5 },
     };
   }
@@ -3991,9 +3972,7 @@ describe("SND19 series normal entry through the real service chain", () => {
         updatedAt: episode.updatedAt,
         pillar: episode.pillar,
         title: episode.title,
-        viewerPromise: episode.viewerPromise,
-        hook: episode.hook,
-        payoff: episode.payoff,
+        concept: episode.concept,
         planning: episode.planning,
       },
       bible: series.bible,
@@ -4161,7 +4140,7 @@ describe("F01 series unaudited revision can enter normal production (2026-10-02)
       },
       workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, executablePlan: true,
         creativePlanning: "joint-v1", creativeReview: "user-confirmed-v1", boundaryGates: "user-confirmed-v1" },
-      director: { profileId: "auto", assetProviderIds: ["local-editorial-v1"] },
+      director: {  assetProviderIds: ["local-editorial-v1"] },
       economics: { recipeId: "economy-daily", allowMeteredProviders: false, maxPaidShots: 0, maxCostCny: 0 },
     };
   }
@@ -4186,7 +4165,7 @@ describe("F01 series unaudited revision can enter normal production (2026-10-02)
         reviseEpisode: async (_series, episode) => ({
           draft: {
             episodeNumber: episode.episodeNumber, pillar: episode.pillar, title: episode.title,
-            viewerPromise: episode.viewerPromise, hook: "先给一个可核对的问题", payoff: episode.payoff,
+            concept: episode.concept,
             fromPrevious: [...episode.continuity.fromPrevious], toNext: [...episode.continuity.toNext],
           },
           planning: { ...episode.planning, source: "agent" as const, auditStatus: "not_audited" as const, auditIterations: 0 },

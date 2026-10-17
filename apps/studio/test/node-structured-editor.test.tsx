@@ -185,21 +185,17 @@ describe("NodeStructuredEditor", () => {
         { id: "hailuo-video-v1", label: "MiniMax 视频生成", deliveryTypes: ["generated_video"] },
       ]}
       value={{
-        requestedProfileId: "auto",
-        resolvedProfileId: "geometric-control",
-        profileRationale: "geometric-control 匹配本片",
         visualBible: { pacing: "节奏 measured，字幕密度 medium" },
         shots: [{ scenePosition: 1, narrativeRole: "question / shot-question：提出问题", preferredProviderId: "pexels-stock-v1" }],
       }}
       onChange={vi.fn()}
     />);
 
-    expect(screen.getByRole("combobox", { name: "指定风格" })).toHaveDisplayValue("自动匹配");
-    expect(screen.getByRole("combobox", { name: "导演风格" })).toHaveDisplayValue("几何秩序");
+    expect(screen.queryByRole("combobox", { name: "指定风格" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "导演风格" })).not.toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "首选画面来源" })).toHaveDisplayValue("Pexels 图库");
     expect(screen.getByRole("option", { name: "MiniMax 视频生成" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Seedance 视频生成" })).not.toBeInTheDocument();
-    expect(screen.getByDisplayValue("geometric-control 匹配本片")).toBeInTheDocument();
     expect(screen.getByDisplayValue("节奏 measured，字幕密度 medium")).toBeInTheDocument();
     expect(screen.getByDisplayValue("question / shot-question：提出问题")).toBeInTheDocument();
     expect(screen.queryByRole("spinbutton", { name: "镜头序号" })).not.toBeInTheDocument();

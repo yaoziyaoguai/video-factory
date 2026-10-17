@@ -14,9 +14,9 @@ import type { StudioSeriesEpisode } from "../shared/api.js";
 import type { SeriesEpisodeDraft } from "./series-planner.js";
 import type { SeriesRecord } from "./series-store.js";
 
-const SERIES_SHOWRUNNER_CONTRACT_VERSION = "series-showrunner-v2|role-audit-v9|series-roadmap-validator-v1|single-initial-audit-v1";
-const SERIES_GREENLIGHT_CONTRACT_VERSION = "series-greenlight-v2|role-audit-v9|series-roadmap-validator-v1|single-initial-audit-v1";
-const SERIES_REVISION_CONTRACT_VERSION = "series-episode-revision-v2|series-roadmap-validator-v1";
+const SERIES_SHOWRUNNER_CONTRACT_VERSION = "series-showrunner-v3|role-audit-v9|series-roadmap-validator-v2|single-initial-audit-v1";
+const SERIES_GREENLIGHT_CONTRACT_VERSION = "series-greenlight-v3|role-audit-v9|series-roadmap-validator-v2|single-initial-audit-v1";
+const SERIES_REVISION_CONTRACT_VERSION = "series-episode-revision-v3|series-roadmap-validator-v2";
 
 export interface SeriesPlanningResult {
   drafts: SeriesEpisodeDraft[];
@@ -62,8 +62,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
           episodeNumber: episode.episodeNumber,
           title: episode.title,
           pillar: episode.pillar,
-          viewerPromise: episode.viewerPromise,
-          payoff: episode.payoff,
+          concept: episode.concept,
           status: episode.status,
           continuity: episode.continuity,
         })),
@@ -82,9 +81,9 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
       contractVersion: SERIES_SHOWRUNNER_CONTRACT_VERSION,
       criteria: [
         "路线图严格遵守 Series Bible 与当前 Canon，不把未来计划、未验证结论或人物变化冒充已发生事实",
-        "每集有本集能够独立交付的问题、结果或体验，并说明对本季增加了什么；不能用下一集的承诺填补本集核心兑现。",
-        "相邻集的承接和留扣具体可用，但不以悬念替代本集 payoff，也不过度依赖尚未定版的前集内容",
-        "标题、hook、payoff与内容支柱一致；相邻集的具体问题、观看过程或所得至少有一项实质推进。同一栏目可以保持形式稳定，但不能用新标题重复同一内容。",
+        "本集想法回应系列创作意图，内容具体且没有与已确认要求冲突。",
+        "相邻集仅引用已知的交接与事实，不把尚未定版的前集内容当成已发生事实",
+        "标题、本集想法与已确认的内容支柱一致；不强制每集采用特定开场、推进与结尾。",
         "每集具备明确可见的短视频表达空间，能够在经济素材与必要的生成素材之间做逐镜选择",
         "集数连续、数量准确，且没有输入中不存在的事实、数字、经历、引用或来源",
       ],
@@ -103,7 +102,7 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
         criteria,
         context: {
           roleScope: {
-            owns: ["episodes title", "viewerPromise", "hook", "payoff", "pillar", "fromPrevious", "toNext"],
+            owns: ["episodes title", "concept", "pillar", "fromPrevious", "toNext"],
             doesNotOwn: ["Series Bible", "已定版 Canon", "已完成前集事实", "单集脚本与成片"],
           },
           upstreamFacts: request,
@@ -254,8 +253,8 @@ export class CodexSeriesPlanningAgent implements SeriesPlanningAgent {
       contractVersion: SERIES_GREENLIGHT_CONTRACT_VERSION,
       criteria: [
         "本集严格遵守最新 Series Bible 与 Canon，不把预告、计划、悬念或尚待验证的内容冒充正史",
-        "本集完整承接前集正式交接和连续性记忆，同时保持可独立兑现的观众承诺",
-        "标题、钩子、兑现、支柱和本季篇章一致，且不重复已经完成的前集",
+        "本集与前集正式交接和连续性记忆相容，保留用户想表达的内容",
+        "标题、本集想法、支柱和本季篇章一致",
         "保留人工明确决定；只有与最新正史或硬约束冲突时才修订，并说明可执行的修复",
         "fromPrevious 是创作者拥有的本集承接要求，必须与输入逐字逐项一致；只能修改 Agent 拥有的其他规划字段",
         "画面表达可实现，事实、数字、人物状态、引用和来源没有凭空新增",
@@ -429,8 +428,7 @@ function seriesPlanningContext(series: SeriesRecord) {
         episodeNumber: candidate.episodeNumber,
         title: candidate.title,
         pillar: candidate.pillar,
-        viewerPromise: candidate.viewerPromise,
-        payoff: candidate.payoff,
+        concept: candidate.concept,
         status: candidate.status,
         continuity: candidate.continuity,
       })),
@@ -442,9 +440,7 @@ function episodeDraft(episode: StudioSeriesEpisode): SeriesEpisodeDraft {
     episodeNumber: episode.episodeNumber,
     pillar: episode.pillar,
     title: episode.title,
-    viewerPromise: episode.viewerPromise,
-    hook: episode.hook,
-    payoff: episode.payoff,
+    concept: episode.concept,
     fromPrevious: [...episode.continuity.fromPrevious],
     toNext: [...episode.continuity.toNext],
   };
@@ -469,9 +465,7 @@ export function parseSeriesRoadmapOutput(
       episodeNumber,
       pillar,
       title: text(entry.title, `episode ${episodeNumber} title`),
-      viewerPromise: text(entry.viewerPromise, `episode ${episodeNumber} viewerPromise`),
-      hook: text(entry.hook, `episode ${episodeNumber} hook`),
-      payoff: text(entry.payoff, `episode ${episodeNumber} payoff`),
+      concept: text(entry.concept, `episode ${episodeNumber} concept`),
       fromPrevious: textArray(entry.fromPrevious, `episode ${episodeNumber} fromPrevious`),
       toNext: textArray(entry.toNext, `episode ${episodeNumber} toNext`),
     };
@@ -479,8 +473,8 @@ export function parseSeriesRoadmapOutput(
   if (new Set(episodes.map((episode) => episode.title)).size !== episodes.length) {
     throw new Error("Series roadmap episode titles must be distinct.");
   }
-  if (new Set(episodes.map((episode) => episode.viewerPromise)).size !== episodes.length) {
-    throw new Error("Series roadmap viewer promises must be distinct.");
+  if (new Set(episodes.map((episode) => episode.concept)).size !== episodes.length) {
+    throw new Error("Series roadmap episode concepts must be distinct.");
   }
   return { episodes };
 }

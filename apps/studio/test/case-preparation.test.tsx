@@ -6,7 +6,7 @@ import { studioApi } from "../src/client/api.js";
 import { NewRunDialog } from "../src/client/components/NewRunDialog.js";
 
 const providers: StudioProvider[] = [
-  { id: "python-template-v1", capability: "script.draft", label: "模板脚本", available: true, kind: "local" },
+  { id: "codex-screenwriter-v1", capability: "script.draft", label: "AI 编剧", available: true, kind: "local" },
   { id: "api-visual-director-v1", capability: "storyboard.plan", label: "AI 视觉导演", available: true, kind: "local" },
   { id: "ai-shot-router-v1", capability: "asset.prepare", label: "AI 逐镜路由", available: true, kind: "local" },
   { id: "pexels-stock-v1", capability: "asset.prepare", label: "Pexels 视频", available: true, kind: "external", status: "ready", deliveryTypes: ["stock_video", "stock_image"] },
@@ -92,7 +92,7 @@ describe("case preparation form", () => {
     expect(screen.getAllByText(new RegExp(caseInitialValues.angle.slice(0, 20))).length).toBeGreaterThanOrEqual(2);
   });
 
-  it("keeps the derived summary for non-case entries (series hook/payoff untouched)", () => {
+  it("keeps series input without deriving an opening promise or ending", () => {
     render(<NewRunDialog
       open
       providers={providers}
@@ -100,14 +100,16 @@ describe("case preparation form", () => {
         title: "系列标题",
         angle: "系列角度",
         audience: "创作者",
-        seriesContext: { seriesId: "s1", episodeNumber: 3, episode: { hook: "系列钩子", payoff: "系列收益" } } as never,
+        seriesContext: { seriesId: "s1", episodeNumber: 3, episode: { concept: "本集自由表达" } } as never,
       }}
       onClose={() => undefined}
       onSubmit={vi.fn(async () => undefined)}
     />);
-    expect(screen.getByText("系统整理的创作目标")).toBeInTheDocument();
-    expect(screen.getByText("系列钩子")).toBeInTheDocument();
-    expect(screen.getByText("系列收益")).toBeInTheDocument();
+    expect(screen.getByLabelText(/视频标题/)).toHaveValue("系列标题");
+    expect(screen.getByLabelText(/内容角度/)).toHaveValue("系列角度");
+    expect(screen.queryByText("系统整理的创作目标")).not.toBeInTheDocument();
+    expect(screen.queryByText("开头承诺")).not.toBeInTheDocument();
+    expect(screen.queryByText("结尾收益")).not.toBeInTheDocument();
     expect(screen.queryByText("已填写的创作目标")).toBeNull();
     expect(screen.queryByText("给这次创作起个标题；完整想法已放在内容角度")).toBeNull();
   });

@@ -27,23 +27,14 @@ export function creativeTreatmentRequest(): { protocolVersion: string; kind: str
 
 export function legalCreativeTreatmentOutput(): Record<string, unknown> {
   return {
-    version: "video-factory/creative-treatment-v2",
-    viewerPromise: "学会识别资料支持的结论边界",
-    hook: { narrationIntent: "提出一个具体判断", visualIntent: "展示原始资料的关键差异" },
-    progression: [
-      { beatId: "question", purpose: "建立问题", viewerGain: "知道要核对什么" },
-      { beatId: "evidence", purpose: "核对资料", viewerGain: "区分事实与推测" },
-      { beatId: "payoff", purpose: "兑现判断", viewerGain: "知道下一步如何判断" },
-    ],
-    payoff: "给出有条件的结论及下一步",
-    visualPrinciples: ["来源画面优先"],
-    soundPrinciples: ["自然语速、清楚停顿"],
-    evidenceRequirements: [{ beatId: "evidence", claim: "原材料中的陈述", requirement: "factual_support", suppliedSourceIds: ["source-1"], critical: true, acquisition: "supplied", retrievalProviderId: null }],
-    feasibilityQuestions: [{ beatId: "evidence", question: "来源画面是否可读且有使用依据" }],
+    version: "video-factory/creative-treatment-v3",
+    concept: "学会识别资料支持的结论边界",
+    evidenceRequirements: [{  claim: "原材料中的陈述", requirement: "factual_support", suppliedSourceIds: ["source-1"], critical: true, acquisition: "supplied", retrievalProviderId: null }],
+    feasibilityQuestions: [{  question: "来源画面是否可读且有使用依据" }],
   };
 }
 
-// schema 合法但语义非法：evidenceRequirements 引用不存在的 beatId，
+// 已取消的 beatId 也属于额外字段，不能混入当前输出合同。
 // 两种 adapter 都必须在字段级拒绝（JSON 解析成功不等于业务合同通过）。
 export function ghostBeatCreativeTreatmentOutput(): Record<string, unknown> {
   return {
@@ -62,67 +53,20 @@ export interface CreativeTreatmentWhitespaceCase {
 // 两套 executor 必须在 semantic 边界给出同样的字段级错误，不能各自复制用例。
 export function creativeTreatmentWhitespaceInvalidCases(): CreativeTreatmentWhitespaceCase[] {
   return [
-    {
-      field: "progression[0].purpose",
-      apply: (output) => {
-        (output.progression as Array<Record<string, unknown>>)[0]!.purpose = " ";
-      },
-    },
-    {
-      field: "progression[0].viewerGain",
-      apply: (output) => {
-        (output.progression as Array<Record<string, unknown>>)[0]!.viewerGain = " ";
-      },
-    },
-    {
-      field: "visualPrinciples[0]",
-      apply: (output) => {
-        output.visualPrinciples = [" "];
-      },
-    },
-    {
-      field: "soundPrinciples[0]",
-      apply: (output) => {
-        output.soundPrinciples = [" "];
-      },
-    },
-    {
-      field: "evidenceRequirements[0].beatId",
-      apply: (output) => {
-        (output.evidenceRequirements as Array<Record<string, unknown>>)[0]!.beatId = " ";
-      },
-    },
-    {
-      field: "feasibilityQuestions[0].beatId",
-      apply: (output) => {
-        (output.feasibilityQuestions as Array<Record<string, unknown>>)[0]!.beatId = " ";
-      },
-    },
-    {
-      field: "evidenceRequirements[0].suppliedSourceIds[0]",
-      apply: (output) => {
-        (output.evidenceRequirements as Array<Record<string, unknown>>)[0]!.suppliedSourceIds = [" "];
-      },
-    },
+    { field: "concept", apply: output => { output.concept = " "; } },
+    { field: "evidenceRequirements[0].claim", apply: output => { (output.evidenceRequirements as Array<Record<string, unknown>>)[0]!.claim = " "; } },
+    { field: "feasibilityQuestions[0].question", apply: output => { (output.feasibilityQuestions as Array<Record<string, unknown>>)[0]!.question = " "; } },
+    { field: "evidenceRequirements[0].suppliedSourceIds[0]", apply: output => { (output.evidenceRequirements as Array<Record<string, unknown>>)[0]!.suppliedSourceIds = [" "]; } },
   ];
 }
 
 // 宿主会把合法内容的首尾空格 trim 后接受；validator 收紧空白检查时不得误伤这类输出。
 export function paddedLegalCreativeTreatmentOutput(): Record<string, unknown> {
   const output = legalCreativeTreatmentOutput();
-  const progression = output.progression as Array<Record<string, unknown>>;
-  progression[0] = { ...progression[0]!, purpose: " 建立问题 ", viewerGain: " 知道要核对什么 " };
   const evidence = output.evidenceRequirements as Array<Record<string, unknown>>;
   evidence[0] = { ...evidence[0]!, claim: " 原材料中的陈述 ", suppliedSourceIds: [" source-1 "] };
-  (output.feasibilityQuestions as Array<Record<string, unknown>>)[0] = { beatId: "evidence", question: " 来源画面是否可读且有使用依据 " };
-  return {
-    ...output,
-    viewerPromise: " 学会识别资料支持的结论边界 ",
-    hook: { narrationIntent: " 提出一个具体判断 ", visualIntent: " 展示原始资料的关键差异 " },
-    payoff: " 给出有条件的结论及下一步 ",
-    visualPrinciples: [" 来源画面优先 "],
-    soundPrinciples: [" 自然语速、清楚停顿 "],
-  };
+  (output.feasibilityQuestions as Array<Record<string, unknown>>)[0] = { question: " 来源画面是否可读且有使用依据 " };
+  return { ...output, concept: " 学会识别资料支持的结论边界 " };
 }
 
 export type CreativeTreatmentSourceContractOutcome = "accepted" | "payload-rejected" | "output-rejected";
