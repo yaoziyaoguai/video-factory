@@ -38,7 +38,8 @@ const helperUrl = new URL("../../../scripts/production-cold-ingress.mjs", import
 const { coldIngressControl, buildBarrier, nginxProcesses } = await import(helperUrl) as {
   coldIngressControl(options: Options): Control;
   buildBarrier(bytes: Buffer, hostname: string, token: string): { replacement: Buffer; endpoints: Endpoint[] };
-  nginxProcesses(options: { procRoot: string; runCommand: (program: string, args: string[]) => Promise<string> }): {
+  nginxProcesses(options: { procRoot: string; runCommand: (program: string, args: string[]) => Promise<string>;
+    readProcFile?: (file: string, encoding: string) => Promise<string> }): {
     snapshot(timeoutMs: number): Promise<Snapshot>; identity(pid: number): Promise<ProcessIdentity | null>;
   };
 };
@@ -476,6 +477,47 @@ describe("production cold ingress transaction", () => {
 });
 
 describe("Linux Nginx process observations", () => {
+  function observationWithReadFailure(failedPath: string, code: string) {
+    const stat = (pid: number, ppid: number) => `${pid} (nginx) S ${ppid} ${Array<string>(17).fill("0").join(" ")} ${pid} 0\n`;
+    const files = new Map([
+      ["/proc/sys/kernel/random/boot_id", `${BOOT}\n`],
+      ["/proc/100/stat", stat(100, 1)],
+      ["/proc/100/cmdline", "nginx: master process /usr/sbin/nginx -g daemon on; master_process on;\0"],
+      ["/proc/100/task/100/children", "200 201 "],
+      ["/proc/200/stat", stat(200, 100)],
+      ["/proc/200/cmdline", "nginx: worker process is shutting down\0"],
+      ["/proc/201/stat", stat(201, 100)],
+      ["/proc/201/cmdline", "nginx: worker process\0"],
+    ]);
+    return nginxProcesses({ procRoot: "/proc", runCommand: async () => "100\n", readProcFile: async (file) => {
+      if (file === failedPath) throw Object.assign(new Error("injected proc read failure"), { code });
+      const value = files.get(file);
+      assert.notEqual(value, undefined, `unexpected proc file: ${file}`);
+      return value!;
+    } });
+  }
+
+  for (const file of ["stat", "cmdline"]) {
+    it(`keeps live workers when an exiting worker returns ESRCH from ${file}`, async () => {
+      const processes = observationWithReadFailure(`/proc/200/${file}`, "ESRCH");
+      const snapshot = await processes.snapshot(1000);
+      assert.equal(snapshot.master.pid, 100);
+      assert.deepEqual(snapshot.workers.map((worker) => worker.pid), [201]);
+      if (file === "stat") assert.equal(await processes.identity(200), null);
+    });
+    for (const code of ["EACCES", "EIO"]) {
+      it(`refuses to call a worker gone when reading ${file} fails with ${code}`, async () => {
+        const processes = observationWithReadFailure(`/proc/200/${file}`, code);
+        await assert.rejects(() => processes.snapshot(1000), { code });
+      });
+    }
+  }
+
+  it("still refuses a disappearing master or unreadable boot identity", async () => {
+    await assert.rejects(() => observationWithReadFailure("/proc/100/stat", "ESRCH").snapshot(1000), /Unknown Nginx master/);
+    await assert.rejects(() => observationWithReadFailure("/proc/sys/kernel/random/boot_id", "ESRCH").identity(200), { code: "ESRCH" });
+  });
+
   it("reads PID/starttime/boot identity, checks the master and refuses unknown children", async (t) => {
     const directory = await mkdtemp(path.join(tmpdir(), "vf-nginx-proc-"));
     t.after(() => rm(directory, { recursive: true, force: true }));

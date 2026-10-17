@@ -175,17 +175,18 @@ async function command(program, args, timeoutMs) {
   catch { fail(`Host command failed (${program === 'nginx' ? 'Nginx validation' : 'Nginx service control'}).`); }
 }
 
-export function nginxProcesses({ runCommand = command, procRoot = '/proc' } = {}) {
+export function nginxProcesses({ runCommand = command, procRoot = '/proc', readProcFile = readFile } = {}) {
   const boot = async () => {
-    const id = (await readFile(path.join(procRoot, 'sys/kernel/random/boot_id'), 'utf8')).trim();
+    const id = (await readProcFile(path.join(procRoot, 'sys/kernel/random/boot_id'), 'utf8')).trim();
     if (!/^[a-f0-9-]{36}$/.test(id)) fail('Unknown host boot identity.');
     return id;
   };
   const read = async (pid) => {
     const bootId = await boot();
     let text;
-    try { text = await readFile(path.join(procRoot, String(pid), 'stat'), 'utf8'); }
-    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    // Linux 在打开 /proc 文件后进程退出时返回 ESRCH；路径先消失则返回 ENOENT。
+    try { text = await readProcFile(path.join(procRoot, String(pid), 'stat'), 'utf8'); }
+    catch (error) { if (error.code === 'ENOENT' || error.code === 'ESRCH') return null; throw error; }
     const end = text.lastIndexOf(')');
     const fields = text.slice(end + 2).trim().split(/\s+/);
     if (!text.startsWith(`${pid} (`) || end < 0 || !/^\d+$/.test(fields[19] ?? '') || !/^\d+$/.test(fields[1] ?? '')) {
@@ -193,9 +194,9 @@ export function nginxProcesses({ runCommand = command, procRoot = '/proc' } = {}
     }
     return { pid, startTime: fields[19], bootId, ppid: Number(fields[1]) };
   };
-  const title = async (pid) => (await readFile(path.join(procRoot, String(pid), 'cmdline'), 'utf8')).replace(/\0/g, ' ').trim();
+  const title = async (pid) => (await readProcFile(path.join(procRoot, String(pid), 'cmdline'), 'utf8')).replace(/\0/g, ' ').trim();
   const children = async (pid) => {
-    const value = (await readFile(path.join(procRoot, String(pid), 'task', String(pid), 'children'), 'utf8')).trim();
+    const value = (await readProcFile(path.join(procRoot, String(pid), 'task', String(pid), 'children'), 'utf8')).trim();
     if (!/^\d+(?:\s+\d+)*$/.test(value)) fail('Nginx worker list is empty or unknown.');
     return value.split(/\s+/).map(Number);
   };
@@ -219,7 +220,7 @@ export function nginxProcesses({ runCommand = command, procRoot = '/proc' } = {}
           const worker = await read(child);
           if (!worker) continue;
           let name;
-          try { name = await title(child); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+          try { name = await title(child); } catch (error) { if (error.code === 'ENOENT' || error.code === 'ESRCH') continue; throw error; }
           const after = await read(child);
           if (!sameProcess(worker, after)) continue;
           if (worker.ppid !== pid) fail('Unknown Nginx child parent.');
