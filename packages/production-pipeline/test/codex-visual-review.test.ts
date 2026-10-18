@@ -80,7 +80,7 @@ const mutableReport: VisualReviewReport = { ...report, findings: report.findings
 
 const passingAudit = {
   version: "video-factory/role-audit-v2",
-  rubricVersion: "video-factory/role-quality-rubric-v2",
+  rubricVersion: "video-factory/role-quality-rubric-v3",
   assessments: [{
     targetPath: "",
     dimensions: [
@@ -662,7 +662,7 @@ describe("CodexVisualReviewAgent", () => {
     const sampling = reviewContext.sampling as Record<string, unknown>;
     assert.equal(sampling.mode, "scene_sequence");
     assert.deepEqual(sampling.phases, ["opening", "middle", "closing"]);
-    assert.match(String(sampling.evidenceBoundary), /Dense ordered samples.*approximate hold timing/);
+    assert.match(String(sampling.evidenceBoundary), /Two attributed samples can support a state comparison/);
     assert.deepEqual(reviewContext.renderConform, {
       policy: "scale_to_fill_center_crop",
       outputAspectRatio: "9:16",
@@ -789,7 +789,7 @@ describe("CodexVisualReviewAgent", () => {
           auditCalls += 1;
           return { output: auditCalls === 1 ? {
             version: "video-factory/role-audit-v2",
-            rubricVersion: "video-factory/role-quality-rubric-v2",
+            rubricVersion: "video-factory/role-quality-rubric-v3",
             assessments: [{
               targetPath: "",
               dimensions: [
@@ -891,7 +891,7 @@ describe("CodexVisualReviewAgent", () => {
           return {
             output: auditCalls === 1 ? {
               version: "video-factory/role-audit-v2",
-              rubricVersion: "video-factory/role-quality-rubric-v2",
+              rubricVersion: "video-factory/role-quality-rubric-v3",
               assessments: [{
                 targetPath: "",
                 dimensions: [
@@ -945,7 +945,7 @@ describe("CodexVisualReviewAgent", () => {
         runTaskDetailed: async () => ({
           output: {
             version: "video-factory/role-audit-v2",
-            rubricVersion: "video-factory/role-quality-rubric-v2",
+            rubricVersion: "video-factory/role-quality-rubric-v3",
             assessments: [{
               targetPath: "",
               dimensions: [
@@ -1659,8 +1659,8 @@ describe("CodexVisualReviewAgent", () => {
 
     assert.equal(claimEvidenceSufficient("static", ["a", "b"]), true);
     assert.equal(claimEvidenceSufficient("motion", ["a", "b"]), false);
-    assert.equal(claimEvidenceSufficient("motion", ["d", "d", "d"]), true);
-    assert.equal(claimEvidenceSufficient("motion", ["e", "f", "b", "1"]), true);
+    assert.equal(claimEvidenceSufficient("motion", ["d", "d", "d"]), false);
+    assert.equal(claimEvidenceSufficient("motion", ["e", "f", "b", "1"]), false);
     assert.equal(claimEvidenceSufficient("non_visual", ["e", "f", "b", "1"]), false);
 
     assert.throws(
@@ -1670,14 +1670,14 @@ describe("CodexVisualReviewAgent", () => {
       ),
       /cannot fail a motion claim/,
     );
-    assert.doesNotThrow(() => validateVisualReviewReport(
+    assert.throws(() => validateVisualReviewReport(
       failing({ claimType: "motion", evidenceStatus: "failed", severity: "warning", nextAction: "rework_asset" }, "d".repeat(64)),
       6_000, [1], frozenFrames,
-    ));
-    assert.doesNotThrow(() => validateVisualReviewReport(
+    ), /cannot fail a motion claim/);
+    assert.throws(() => validateVisualReviewReport(
       failing({ claimType: "motion", evidenceStatus: "failed", severity: "warning", nextAction: "rework_asset" }, "b".repeat(64)),
       6_000, [1], sequenceFrames,
-    ));
+    ), /cannot fail a motion claim/);
     // 采多少帧都采不到声音，所以 non_visual 的 failed 不因帧数增加而变得合法。
     assert.throws(
       () => validateVisualReviewReport(

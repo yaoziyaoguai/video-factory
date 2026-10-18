@@ -619,7 +619,7 @@ function topicCandidate(value: unknown): { ideas: unknown[] } {
 function passingAudit() {
   return {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v3",
     assessments: [{
       targetPath: "",
       dimensions: [

@@ -17,16 +17,16 @@ import {
 export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as const;
 export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
   "audio-review": "6c6b56182f84f80b419978baf78625b673b715c38d741731aba54963b874d555",
-  "topic-ideas": "96899f77953230107d658f22ce9b7fbf2b668c28c8c25227eeec8e190ec4afb5",
+  "topic-ideas": "48b510f8e3eb4c2e63b7cb07b75837222417ced1a315b02c19de470831239259",
   "series-roadmap": "5d474475aa1aad1310cce6498c942bdaaab1e5b410f79fd03dd0d344fa0e4f48",
-  "creative-treatment": "7453f88a2ea4db645c5eb1bbd1198d886d0fcecfcc65fab2a74676bba4b9449a",
-  "director-plan": "e36b31323c7fe82e1401e464f1b5309ec5eb5482e04452a3ff1f0b04856a3feb",
+  "creative-treatment": "88665a073ec55e1a05844d4d26644a564dbc78ebcdb409d295a6748aabd29964",
+  "director-plan": "ac55805cdb3bcb654c654e58b0f6bc62e99a6c5dcfc588ed9587c7859a4099bf",
   "script-draft": "6838d6b3954abe416b8fa4046455336262f7ec181a8ae0fe101aa08b0e76aef4",
   "publish-copy": "4a61554d6eff3acaaed522a35e2ba995f4ae5d3d9aeb5b5f3c62638f08ff4164",
-  "asset-rank": "40a5e220660ce6450aed18f0fdd3ceeda53f57f159f735cf2c1a3d84f8033dcb",
+  "asset-rank": "fd737dd0b780536a8b7faebd99d7603fdf58c51d08dc511c63d9f15699cdafbc",
   "reference-grammar": "97bc69a9ba5956cff572611773a4cd3310b67ed4f86411d9b6eb654f62e6af52",
-  "visual-review": "5df3d0cf128ec021a6847e96ba1f9ecb1844803dab7fd315ad3c5a082ebfcd13",
-  "role-audit": "547262ba0e97692a86f17d9be707756fa67d500568be3feb468cb47bead90c04",
+  "visual-review": "74ae954aa0f784a88b9ff1919acf45905a37803b7a56ae751476e68d9638ec60",
+  "role-audit": "2f907eb3612322708f1154104c4f2faac26a4ef2b7e5edefcc95a3dcccd9c04d",
   "creative-discussion": "f67be9993eef20d2b27d94b9dadace85312c80950959418790dc072e601637c7",
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
 

@@ -239,7 +239,7 @@ describe("ProductionPipeline semantic ranking fallback", () => {
                 },
                 audit: {
                   version: "video-factory/role-audit-v2",
-                  rubricVersion: "video-factory/role-quality-rubric-v2",
+                  rubricVersion: "video-factory/role-quality-rubric-v3",
                   assessments: [{
                     targetPath: "",
                     dimensions: [

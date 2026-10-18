@@ -151,7 +151,7 @@ const CREATIVE_ASSESSMENTS = [{
 function checkedCreativeExecution<T>(output: T, role: string, taskKind: "creative-treatment" | "script-draft" | "director-plan", modelId: string) {
   const audit = {
     version: "video-factory/role-audit-v2" as const,
-    rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+    rubricVersion: "video-factory/role-quality-rubric-v3" as const,
     verdict: "pass" as const,
     score: 92,
     assessments: CREATIVE_ASSESSMENTS,

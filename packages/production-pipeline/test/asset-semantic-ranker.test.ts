@@ -800,7 +800,7 @@ describe("asset semantic ranking", () => {
         const auditScore = rankAttempt === 1 ? 55 : 90;
         return { output: {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v3",
           assessments: [{
             targetPath: "",
             dimensions: [
@@ -1170,7 +1170,7 @@ describe("asset semantic ranking", () => {
 function passingAudit() {
   return {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v3",
     assessments: [{
       targetPath: "",
       dimensions: [

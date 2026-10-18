@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { it } from "node:test";
 import { SourceAssetPilotReviewer, type AssetPilotReviewInput } from "../src/asset-pilot-review.js";
-import { CodexVisualReviewAgent, type VisualReviewAgentInput, type VisualReviewMediaPayload } from "../src/codex-visual-review.js";
+import { CodexVisualReviewAgent, visualReviewBlocksContinuation, type VisualReviewAgentInput, type VisualReviewMediaPayload } from "../src/codex-visual-review.js";
 
 it("binds pilot approval to media, plan and reviewer, preserves scene identity and keeps traces private", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "vf-pilot-cache-"));
@@ -57,7 +57,7 @@ it("rejects findings outside the pilot before caching and can recover with a cor
         scores: { composition: 70, continuity: 70, pacing: 70, legibility: 70, safety: 90 },
         findings: [{ timecodeMs: 100, startTimecodeMs: 100, endTimecodeMs: 100,
           scenePosition: calls === 1 ? 2 : 3, targetNodeId: "assets", claimType: "static", evidenceStatus: "failed",
-          evidenceFrameSha256: null, nextAction: "rework_asset",
+          evidenceFrameSha256: "b".repeat(64), nextAction: "rework_asset",
           category: "continuity", severity: "warning", description: "灯位变化不连续", suggestion: "修改灯位移动过程" }],
         recommendation: "revise", confidence: 0.9,
       };
@@ -78,21 +78,24 @@ it("rejects findings outside the pilot before caching and can recover with a cor
 // 采样帧够不够判一条主张，规则与成片终审同源；否则模型可以把"我的采样不够"写成
 // "作品不成立"，操作员照着重做一次付费素材。
 it("judges a pilot claim against the frames the pilot itself sampled", async () => {
-  const motionFailed = (description: string) => ({
-    version: "video-factory/visual-review-v1", summary: description,
-    scores: { composition: 60, continuity: 60, pacing: 60, legibility: 60, safety: 90 },
+  const sampledClaim = (media: VisualReviewMediaPayload, claimType: "motion" | "state_change", status: "failed" | "not_observed") => ({
+    version: "video-factory/visual-review-v1", summary: status === "failed" ? "两次采样均显示杯子仍在桌面上。" : "抽帧不能确认连续动作。",
+    scores: { composition: 90, continuity: 90, pacing: 90, legibility: 90, safety: 90 },
     findings: [{
-      timecodeMs: 1_000, startTimecodeMs: 1_000, endTimecodeMs: 1_500,
-      scenePosition: 3, targetNodeId: "assets", claimType: "motion",
-      evidenceStatus: "failed", evidenceFrameSha256: null, nextAction: "rework_asset",
-      category: "continuity", severity: "warning",
-      description, suggestion: "重做这一镜的运动。",
+      timecodeMs: 1_000, startTimecodeMs: 1_000, endTimecodeMs: media.frames.at(-1)!.timecodeMs,
+      scenePosition: 3, targetNodeId: "assets", claimType,
+      evidenceStatus: status, evidenceFrameSha256: media.frames[0]!.sha256,
+      ...(claimType === "state_change" ? { endEvidenceFrameSha256: media.frames.at(-1)!.sha256 } : {}),
+      nextAction: status === "failed" ? "rework_asset" : "inspect_existing_media",
+      category: "continuity", severity: status === "failed" ? "warning" : "info",
+      description: status === "failed" ? "两次采样时杯子的位置没有变化。" : "抽帧不能确认杯子在两次采样之间如何移动。",
+      suggestion: status === "failed" ? "重新呈现被采用的结果状态。" : "先观看已有素材。",
     }],
     recommendation: "revise", confidence: 0.9,
   });
   const audit = {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v3",
     assessments: [{
       targetPath: "",
       dimensions: [
@@ -116,12 +119,12 @@ it("judges a pilot claim against the frames the pilot itself sampled", async () 
   await writeFile(assetPlanPath, JSON.stringify({ scene_assets: [{ scene_position: 3, provider: "pexels", query: "city" }] }));
   const request = { ...pilotInput, runRoot: root, outputDir: root, scriptPath, assetPlanPath };
 
-  const pilot = (media: VisualReviewMediaPayload) => new SourceAssetPilotReviewer([
+  const pilot = (media: VisualReviewMediaPayload, claimType: "motion" | "state_change" = "motion", status: "failed" | "not_observed" = "failed") => new SourceAssetPilotReviewer([
     new CodexVisualReviewAgent({
       media: { prepare: async () => media },
       client: {
-        runTask: async () => motionFailed("运动不成立。"),
-        runTaskDetailed: async (kind) => ({ output: kind === "visual-review" ? motionFailed("运动不成立。") : audit }),
+        runTask: async () => sampledClaim(media, claimType, status),
+        runTaskDetailed: async (kind) => ({ output: kind === "visual-review" ? sampledClaim(media, claimType, status) : audit }),
       },
       maxReviewIterations: 1,
     }),
@@ -135,10 +138,20 @@ it("judges a pilot claim against the frames the pilot itself sampled", async () 
     /cannot fail a motion claim/,
   );
 
-  // 采样窗口内逐字节相同是静帧唯一能证成的运动结论：同一份报告在这里成立。
-  const accepted = await pilot({ durationMs: 4_000, frames: [
+  const repeatedFrames: VisualReviewMediaPayload = { durationMs: 4_000, frames: [
     { timecodeMs: 1_000, sha256: "c".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 3 },
     { timecodeMs: 2_000, sha256: "c".repeat(64), jpegBase64: "/9j/2Q==", scenePosition: 3 },
-  ] }).review(request);
+  ] };
+  // 相同采样不能证明中间没有运动；负面连续运动结论仍须拒绝。
+  await assert.rejects(() => pilot(repeatedFrames).review(request), /cannot fail a motion claim/);
+  // 已有素材仍可人工检查；未确认项不应变成需要返工的缺陷。
+  const unknown = await pilot(repeatedFrames, "motion", "not_observed").review(request);
+  assert.equal(unknown.execution.output.findings[0]?.evidenceStatus, "not_observed");
+  assert.equal(visualReviewBlocksContinuation(unknown.execution.output), false);
+  // 两个明确引用的采样状态可以支持状态核对，不把它扩大成连续运动验收。
+  const accepted = await pilot(repeatedFrames, "state_change").review({ ...request, inputFingerprint: "state-check" });
   assert.equal(accepted.execution.output.findings[0]?.evidenceStatus, "failed");
+  assert.equal(accepted.execution.output.findings[0]?.claimType, "state_change");
+  assert.equal(accepted.execution.output.findings[0]?.endEvidenceFrameSha256, "c".repeat(64));
+  assert.equal(visualReviewBlocksContinuation(accepted.execution.output), true);
 });

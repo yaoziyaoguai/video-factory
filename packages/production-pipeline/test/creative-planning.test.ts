@@ -3395,7 +3395,7 @@ describe("B3 固定创作规划图", () => {
                 auditCalls += 1;
                 return { output: {
                   version: "video-factory/role-audit-v2",
-                  rubricVersion: "video-factory/role-quality-rubric-v2",
+                  rubricVersion: "video-factory/role-quality-rubric-v3",
                   verdict: "repair",
                   score: 91,
                   assessments: [{

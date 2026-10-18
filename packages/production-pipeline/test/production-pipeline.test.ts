@@ -12,6 +12,8 @@ import { CodexBridgeError, type CodexPreparedOperation } from "../src/codex-chat
 import { taskBinding } from "../src/codex-task-binding.js";
 import { contentSha256, stableJson } from "../src/creative-review.js";
 import { VisualReviewFallbackError } from "../src/codex-visual-review.js";
+import { VISUAL_REVIEW_MAX_FINDINGS } from "../src/visual-evidence-boundary.js";
+import { taskPromptFor } from "../../../apps/codex-broker/src/task-definitions.js";
 
 const brief = {
   protocolVersion: "video-factory/brief-v1",
@@ -448,7 +450,7 @@ function passedVisualReviewLoop(
       },
       audit: {
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v3",
         assessments: [{
           targetPath: "",
           dimensions: [
@@ -1170,7 +1172,7 @@ describe("ProductionPipeline", () => {
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.modelId, "deepseek-flash");
     assert.equal(
       waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/visual-review-v20",
+      taskPromptFor("visual-review").version,
     );
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.spendPlan, undefined);
     assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.executionReceipt?.billing, "subscription");
@@ -2260,7 +2262,7 @@ describe("ProductionPipeline", () => {
         runTaskDetailed: async (kind) => {
           calls.push(kind);
           if (kind === "role-audit" && failureStage === "host_invalid") return { output: {
-            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
+            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v3",
             score: 90, verdict: "pass", summary: "不能采用这条无依据的宿主纠正", issues: [], repairInstructions: [],
             assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"]
               .map(dimension => ({ dimension, score: 90, evidence: "夹具证据" })) }],
@@ -2805,7 +2807,7 @@ describe("ProductionPipeline", () => {
           scores: { composition: 80, continuity: 65, pacing: 80, legibility: 80, safety: 95 },
           findings: [{ timecodeMs: 6_000, startTimecodeMs: 6_000, endTimecodeMs: 6_000,
             scenePosition: 2, targetNodeId: "assets", claimType: "static", evidenceStatus: "failed",
-            evidenceFrameSha256: null, nextAction: "rework_asset", category: "continuity",
+            evidenceFrameSha256: "2".repeat(64), nextAction: "rework_asset", category: "continuity",
             severity: "warning", description: "动作不连续。", suggestion: "复用第一镜。" }],
           confidence: 0.9,
           recommendation: "revise",
@@ -4102,6 +4104,62 @@ describe("ProductionPipeline", () => {
     assert.equal(recovered.nodeRuns.find((node) => node.nodeId === "visual-review")?.status, "succeeded");
   });
 
+  it("restores a dual visual-review output above the single-report limit without widening unscoped manual reports", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-dual-visual-recovery-"));
+    const worker = new FakeWorker();
+    const findings: pipeline.VisualReviewReport["findings"] = Array.from({ length: VISUAL_REVIEW_MAX_FINDINGS + 1 }, (_, index) => ({
+      timecodeMs: 1_000, startTimecodeMs: 1_000, endTimecodeMs: 1_000, scenePosition: 1,
+      targetNodeId: "assets", claimType: "static", evidenceStatus: "not_observed",
+      evidenceFrameSha256: null, nextAction: "inspect_existing_media", category: "composition", severity: "info",
+      description: `待核对的采样内容 ${index + 1}`, suggestion: "检查已有画面。",
+    }));
+    const report: pipeline.VisualReviewReport = {
+      version: "video-factory/visual-review-v1", summary: "两份审片意见保留给人工复核。",
+      scores: { composition: 80, continuity: 80, pacing: 80, legibility: 80, safety: 95 },
+      findings, confidence: 0.8, recommendation: "revise",
+    };
+    const configured = new pipeline.ProductionPipeline({
+      workspaceRoot, worker,
+      visualReviewAgent: {
+        id: "codex-visual-review-v1", modelId: "codex-default",
+        review: async () => { throw new Error("Detailed review must be used."); },
+        reviewDetailed: async (input) => input.reviewStage === "source_assets"
+          ? { output: { ...report, findings: [], recommendation: "approve" } }
+          : {
+              output: report,
+              independentReviews: [
+                { providerId: "primary", modelId: "primary-model", output: { ...report, findings: findings.slice(0, VISUAL_REVIEW_MAX_FINDINGS) } },
+                { providerId: "secondary", modelId: "secondary-model", output: { ...report, findings: findings.slice(VISUAL_REVIEW_MAX_FINDINGS) } },
+              ],
+            },
+      },
+    });
+    const waiting = await configured.start({ ...brief, providers: { ...brief.providers, visualReview: "codex-visual-review-v1" } });
+    const visualOutput = waiting.nodeRuns.find((node) => node.nodeId === "visual-review")?.output as {
+      visualReviewPath: string; durationMs: number; report: pipeline.VisualReviewReport;
+    };
+    assert.equal(visualOutput.report.findings.length, VISUAL_REVIEW_MAX_FINDINGS + 1);
+    assert.equal(visualOutput.report.reviewScope?.actualModels.length, 2);
+    const unavailable = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+    await unavailable.applyNodeOverride(waiting.id, {
+      nodeId: "technical-review", actor: "reviewer",
+      output: waiting.nodeRuns.find((node) => node.nodeId === "technical-review")?.output,
+    });
+    const failed = await unavailable.resumeStale(waiting.id);
+    assert.equal(failed.nodeRuns.find((node) => node.nodeId === "visual-review")?.status, "failed");
+    const { reviewScope: _scope, independentReviews: _reviews, ...unscopedReport } = visualOutput.report;
+    await assert.rejects(() => unavailable.applyNodeOverride(waiting.id, {
+      nodeId: "visual-review", actor: "reviewer", allowTerminalEdit: true,
+      output: { ...visualOutput, report: unscopedReport },
+    }), /Visual review findings are invalid/);
+    const recovered = await unavailable.applyNodeOverride(waiting.id, {
+      nodeId: "visual-review", actor: "reviewer", output: visualOutput, allowTerminalEdit: true,
+    });
+    const restored = recovered.nodeRuns.find((node) => node.nodeId === "visual-review");
+    assert.equal(restored?.status, "succeeded");
+    assert.equal((restored?.output as typeof visualOutput).report.findings.length, VISUAL_REVIEW_MAX_FINDINGS + 1);
+  });
+
   it("can authorize an existing paid run while visual review is unavailable", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-visual-authorize-"));
     const worker = new FakeWorker();
@@ -5285,10 +5343,12 @@ describe("ProductionPipeline", () => {
     const plan = run.executionPlan?.find(({ nodeId }) => nodeId === "visual-direction");
     assert.equal(plan?.modelId, "deepseek-flash");
     assert.equal(plan?.configurationSource, "run_override");
+    assert.equal(plan?.parameters?.promptPack, taskPromptFor("director-plan").version);
     const node = run.nodeRuns.find(({ nodeId }) => nodeId === "visual-direction");
     assert.equal(node?.status, "failed");
     assert.equal(node?.executionReceipt?.modelId, "deepseek-flash");
     assert.equal(node?.executionReceipt?.configurationSource, "run_override");
+    assert.equal(node?.executionReceipt?.parameters?.promptPack, taskPromptFor("director-plan").version);
   });
 
   it("uses the newly selected director model when regenerating a failed node", async () => {
@@ -5855,7 +5915,7 @@ describe("ProductionPipeline", () => {
     });
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.parameters?.promptPack,
-      "video-factory/director-v29",
+      taskPromptFor("director-plan").version,
     );
     assert.equal(
       run.nodeRuns.find((node) => node.nodeId === "visual-direction")?.executionReceipt?.modelId,
@@ -10693,7 +10753,7 @@ describe("ProductionPipeline", () => {
               findings: [{
                 timecodeMs: 0, startTimecodeMs: 0, endTimecodeMs: 0, scenePosition: 1,
                 targetNodeId: "assets", claimType: "static", evidenceStatus: "failed",
-                evidenceFrameSha256: null, nextAction: "rework_asset", category: "legibility",
+                evidenceFrameSha256: "1".repeat(64), nextAction: "rework_asset", category: "legibility",
                 severity: "critical", description: "生成了水印", suggestion: "移除画面水印后重做此镜头",
               }],
             };

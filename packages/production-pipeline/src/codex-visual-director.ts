@@ -113,7 +113,7 @@ export class CodexVisualDirectorAgent implements VisualDirectorAgent {
         "真正的跨镜身份与因果要求有执行依据，独立生成和免责声明不能伪装保证；否定句中的词语不构成肯定要求。",
         "事实证据、生成示意、正式卡片与后期文字职责分清，不混入伪标签、内部说明、虚构库存或未声明能力。",
         "选择池内 Provider 只形成报价；质量满足后降本，无费用硬上限、提前审批要求、漏镜头或失败卡片兜底。",
-        "参考语法、系列规则、用户要求和上游 planningIssues 得到落实，不能要求逐字重复或擅自改变已接受收益。",
+        "参考语法、系列规则、用户要求和上游 planningIssues 得到落实，不能要求逐字重复或擅自改变用户意图与已采用内容。",
         "planningRevision 存在时，以 previousPlan 为修订基线，只改 affectedScenePositions 及必要依赖；其余镜头保持不变，已证实不可得的图库路线不得无新证据复活。",
         "rework 同时落实 visualDirectionInstruction 与 assetInstruction，仅修改授权范围并继承其余镜头；未受影响镜头由宿主逐字继承，候选无法改写其任何字段，不得要求方案为它们新增或改写字段；没有新审片证据不能标 verified。",
       ],

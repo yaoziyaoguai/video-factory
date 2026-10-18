@@ -5414,7 +5414,8 @@ async function pilotHarness(
         } : {
           timecodeMs: 0, startTimecodeMs: 0, endTimecodeMs: 0,
           scenePosition: position, targetNodeId: "assets", claimType: "static", evidenceStatus: "failed",
-          evidenceFrameSha256: null, nextAction: "rework_asset", category: "legibility", severity: "critical",
+          // 这里替身代表已完成抽帧核验的 reviewer；静态缺陷必须保留它引用的帧。
+          evidenceFrameSha256: "b".repeat(64), nextAction: "rework_asset", category: "legibility", severity: "critical",
           description: "生成了水印", suggestion: "移除画面水印后重做此镜头",
         }],
       };

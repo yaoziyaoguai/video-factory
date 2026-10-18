@@ -19,7 +19,7 @@ const MAX_STRUCTURED_OUTPUT_ATTEMPTS_PER_RUN = 2;
 export const ROLE_AUDIT_CRITERIA_MAX_ITEMS = 16;
 // 评分标准文本在 broker 的 ROLE_AUDIT_DIRECTIVE 里，维度归属在宿主这里。两侧的版本串
 // 必须一致：rubric 一改，旧版本给出的维度分就不再是本轮标准的结论，必须重评。
-export const ROLE_QUALITY_RUBRIC_VERSION = "video-factory/role-quality-rubric-v2";
+export const ROLE_QUALITY_RUBRIC_VERSION = "video-factory/role-quality-rubric-v3";
 
 const CREATIVE_AUDIT_DIMENSIONS = ["expression", "consistency"] as const;
 const PUBLISH_AUDIT_DIMENSIONS = ["expression", "consistency"] as const;
@@ -528,7 +528,6 @@ export async function runRoleAgentLoop<TOutput>(
         throw await failedLoopError(error, options, state, iterations, candidateExecution.trace, "audit");
       }
       try {
-        audit = timedValidateAudit(options, state, auditExecution.output, hostReadiness, candidate);
         if (auditContractDigest !== state.contractDigest) {
           // 原物理 audit 必须先结清，但旧合同的 verdict 不能认证当前 criteria。保留候选，
           // 清掉旧审计会话并迁移到当前 checkpoint，再提交一份当前标准的独立审计。
@@ -545,6 +544,7 @@ export async function runRoleAgentLoop<TOutput>(
           auditValidationFailure = undefined;
           continue;
         }
+        audit = timedValidateAudit(options, state, auditExecution.output, hostReadiness, candidate);
         break;
       } catch (error) {
         structuredAuditAttempts += 1;
@@ -1093,6 +1093,7 @@ export function roleContractDigest(options: Pick<RoleAgentLoopOptions<unknown>, 
   // 不纳入 digest，确保收紧自动轮次时仍能观察旧请求、复用已完成审计，不重复计费。
   return valueHash({
     contractVersion: options.contractVersion,
+    rubricVersion: ROLE_QUALITY_RUBRIC_VERSION,
     role: options.role,
     criteria: options.criteria,
     maxIterations: options.maxIterations,

@@ -33,6 +33,36 @@ function runFixture(nodeId = "publish-package"): StudioRunDetail {
 }
 
 describe("workdesk layout preserves decision and media boundaries", () => {
+  it("keeps unknown visual conclusions separate from defects in both merged and independent reports", async () => {
+    const user = userEvent.setup();
+    const run = runFixture("final-review");
+    const unknown = { recommendation: "revise", confidence: 0.9, scores: { pacing: 85 }, summary: "动作仍待确认。",
+      findings: [{ timecodeMs: 1000, scenePosition: 1, evidenceStatus: "not_observed", severity: "info", description: "抽帧不足以确认动作。" }],
+      coverage: { source: "host", requirements: [{ id: "scene-1-action", scenePosition: 1, text: "手将杯子转过半圈。", status: "unconfirmed", findingIndices: [0] }] } };
+    run.nodes[0]!.output = { report: { ...unknown,
+      reviewScope: { actualModels: [{ providerId: "review-one", modelId: "one" }, { providerId: "review-two", modelId: "two" }] },
+      independentReviews: [
+        { providerId: "review-one", modelId: "one", report: unknown },
+        { providerId: "review-two", modelId: "two", report: { recommendation: "approve", confidence: 0.9, scores: { pacing: 85 }, summary: "抽样画面清楚。", findings: [] } },
+      ],
+    } };
+    const onDecision = vi.fn();
+    render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} />);
+    await user.click(screen.getByRole("button", { name: "审片" }));
+    expect(screen.getByText("视觉审片 · 仍有未确认内容")).toBeVisible();
+    expect(screen.queryByText("视觉审片 · 有具体修改建议")).not.toBeInTheDocument();
+    await user.click(screen.getByText("完整审片报告与复核记录"));
+    const reports = screen.getByRole("region", { name: "双模型审片结果" });
+    expect(within(reports).getByText("视觉结论 · 仍有未确认内容")).toBeVisible();
+    expect(within(reports).getByText("仍有未确认内容")).toBeVisible();
+    expect(within(reports).getByText("抽样中未发现问题")).toBeVisible();
+    await user.click(within(reports).getByText("核对范围与未确认内容"));
+    expect(within(reports).getByText("镜头 1：手将杯子转过半圈。")).toBeVisible();
+    expect(onDecision).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "当前任务" }));
+    expect(screen.getByRole("button", { name: "接受风险并内部定版" })).toBeVisible();
+  });
+
   it("reports media loading failure without replacing the player or triggering a production action", () => {
     const onDecision = vi.fn();
     const run = runFixture("final-review");
@@ -130,14 +160,14 @@ describe("workdesk layout preserves decision and media boundaries", () => {
     const onDecision = vi.fn();
     const onQueryOriginalTextTask = vi.fn();
     render(<RunWorkbench run={run} decisionPending={false} onDecision={onDecision} onQueryOriginalTextTask={onQueryOriginalTextTask} />);
-    expect(screen.getByText("视觉审片建议修改后再审")).not.toBeVisible();
+    expect(screen.getByText("视觉审片 · 有具体修改建议")).not.toBeVisible();
     expect(screen.getByRole("region", { name: "当前步骤产物" })).toBeVisible();
     expect(screen.getByText(/缺少 2 个可验证的独立审片结果/)).toBeVisible();
     expect(screen.getByText(/1 项原审计的结果与费用待核/)).toBeVisible();
     expect(screen.getByRole("button", { name: "查询原声音审片" }).closest("details")).toBeNull();
     expect(screen.getByRole("status", { name: "当前决定" }).closest("details")).toBeNull();
     await user.click(screen.getByRole("button", { name: "审片" }));
-    expect(screen.getByText("视觉审片建议修改后再审")).toBeVisible();
+    expect(screen.getByText("视觉审片 · 有具体修改建议")).toBeVisible();
     expect(screen.getByTitle("成片预览")).toBeVisible();
     expect(onDecision).not.toHaveBeenCalled();
     expect(onQueryOriginalTextTask).not.toHaveBeenCalled();
@@ -159,7 +189,7 @@ describe("workdesk layout preserves decision and media boundaries", () => {
     const onDecision = vi.fn();
     render(<RunWorkbench run={runFixture("final-review")} decisionPending={false} onDecision={onDecision} />);
     await user.click(screen.getByRole("button", { name: "审片" }));
-    expect(screen.getByText("视觉审片建议修改后再审")).toBeVisible();
+    expect(screen.getByText("视觉审片 · 有具体修改建议")).toBeVisible();
     expect(screen.queryByText("成片审片记录与返工")).not.toBeInTheDocument();
     const video = screen.getByTitle("成片预览") as HTMLVideoElement;
     const bringIntoView = vi.fn();

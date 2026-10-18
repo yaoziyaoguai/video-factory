@@ -538,7 +538,7 @@ describe("FallbackScreenwriterAgent", () => {
       { hook: "候选构思" },
       {
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v3",
         verdict: "repair",
         score: 88,
         assessments: [],
@@ -728,7 +728,7 @@ describe("FallbackScreenwriterAgent", () => {
                 return {
                   output: {
                     version: "video-factory/role-audit-v2",
-                    rubricVersion: "video-factory/role-quality-rubric-v2",
+                    rubricVersion: "video-factory/role-quality-rubric-v3",
                     assessments: [{
                       targetPath: "",
                       dimensions: [{ dimension: "consistency", score: 96, evidence: "开场给出具体对象。" }, { dimension: "expression", score: 96, evidence: "旁白自然可读。" }],

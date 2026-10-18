@@ -67,7 +67,7 @@ function screenwriterAssessments(score: number) {
 
 const PASS_AUDIT = {
   version: "video-factory/role-audit-v2",
-  rubricVersion: "video-factory/role-quality-rubric-v2",
+  rubricVersion: "video-factory/role-quality-rubric-v3",
   verdict: "pass",
   score: 92,
   assessments: screenwriterAssessments(92),
@@ -79,7 +79,7 @@ const PASS_AUDIT = {
 
 const NEEDS_SOURCE_AUDIT = {
   version: "video-factory/role-audit-v2",
-  rubricVersion: "video-factory/role-quality-rubric-v2",
+  rubricVersion: "video-factory/role-quality-rubric-v3",
   verdict: "repair",
   score: 58,
   assessments: screenwriterAssessments(58),

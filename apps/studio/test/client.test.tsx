@@ -5407,7 +5407,8 @@ describe("Studio client", () => {
 
     render(<RunWorkbench run={run} providers={providers} decisionPending={false} onDecision={onDecision} />);
 
-    expect(screen.getByText("视觉审片建议修改后再审")).toBeInTheDocument();
+    // 合并报告只有未确认与提示，分支的缺陷不能凭 recommendation 替它补判。
+    expect(screen.getByText("视觉审片 · 仍有未确认内容")).toBeInTheDocument();
     expect(screen.getByText("请完整观看成片，确认内容和节奏。")).toBeInTheDocument();
     expect(screen.getAllByText("画面语义与导演方案不一致，应进入 人工补充素材 后再审。").length).toBeGreaterThan(0);
     expect(screen.queryByText(/manualReplacement/i)).not.toBeInTheDocument();

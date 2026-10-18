@@ -1,3 +1,4 @@
+import { VISUAL_REVIEW_MAX_FINDINGS } from "@video-factory/production-pipeline/visual-evidence-boundary";
 import { createHash } from "node:crypto";
 import { CHARACTER_SCRIPT_VERSION, validateCharacterScriptStructure } from "@video-factory/production-pipeline/character-script";
 import { AUDIO_REVIEW_PROMPT, AUDIO_REVIEW_SCHEMA } from "./audio-review-contract.js";
@@ -114,16 +115,16 @@ export const BROKER_TASK_INPUT_CONTRACTS = {
 
 const SEMANTIC_RULES_VERSION: Record<BrokerTaskKind, string> = {
   "audio-review": "audio-evidence-sha-time-ranges-v1",
-  "topic-ideas": "topic-ideas-semantics-v11|canonical-strategy-v1|article-sources-v2|cited-facts-v2|creator-paced-opening-v1",
+  "topic-ideas": "topic-ideas-semantics-v12|canonical-strategy-v1|article-sources-v2|cited-facts-v2|creator-paced-opening-v1",
   "series-roadmap": "series-roadmap-semantics-v3",
-  "creative-treatment": "creative-treatment-semantics-v14|production-capabilities-v4|host-readiness-v2|rework-instruction-v1|series-context-v2",
-  "director-plan": "director-plan-semantics-v15|production-capabilities-v4|voice-timing-v1|article-sources-v1|planning-revision-v1|director-plan-v2",
+  "creative-treatment": "creative-treatment-semantics-v15|production-capabilities-v4|host-readiness-v2|rework-instruction-v1|series-context-v2",
+  "director-plan": "director-plan-semantics-v16|production-capabilities-v4|voice-timing-v1|article-sources-v1|planning-revision-v1|director-plan-v2",
   "script-draft": "script-draft-semantics-v13|production-capabilities-v4|voice-timing-v1|creative-treatment-v3|canon-facts-v2|article-sources-v1|voice-adoption-boundary-v1|character-script-v1",
   "publish-copy": "publish-copy-semantics-v6",
-  "asset-rank": "asset-rank-semantics-v5",
+  "asset-rank": "asset-rank-semantics-v6",
   "reference-grammar": "reference-grammar-semantics-v4",
-  "visual-review": "visual-review-semantics-v11|source-timecode-v1|claim-evidence-capability-v1",
-  "role-audit": "role-audit-semantics-v12|creator-facing-issues-v1|planning-disposition-v1|host-readiness-review-v1|source-timecode-v1|role-quality-rubric-v2",
+  "visual-review": "visual-review-semantics-v12|source-timecode-v1|claim-evidence-capability-v2|adopted-condition-coverage-v1",
+  "role-audit": "role-audit-semantics-v13|creator-facing-issues-v1|planning-disposition-v1|host-readiness-review-v1|source-timecode-v1|role-quality-rubric-v3",
   "creative-discussion": "creative-discussion-semantics-v7|user-confirmed-v1|character-script-v1|director-plan-v2",
 };
 
@@ -196,6 +197,7 @@ const CREATIVE_TREATMENT_DIRECTIVE = [
   NATIVE_AUDIO_DIRECTIVE,
   DURATION_INTENT_DIRECTIVE,
   "根据用户的想法自由构思这条视频。concept 用自然、连贯的文字表达本片内容与表达方式，篇幅由内容决定。用户已提供完整想法时尊重原意，不另套策划结构。",
+  "concept 可以包含镜头、节奏、声音与有意留白的创作想法，不输出逐镜分镜，不复述费用、预算授权或系统时长政策，不声称素材已经获得。真实依赖或能力冲突写入现有 evidenceRequirements 和 feasibilityQuestions；这些制作边界用于判断可行性，不代替作品内容。",
   "不预设开场钩子、观众收益、递进段落、反转、结尾兑现、升华或互动问题。允许观察、吐槽、故事、氛围、留白和开放结尾；具体选择由用户意图与内容决定。",
   "保留用户明确要求、本次 reworkInstruction 和已确认的系列事实。",
   "事实依据与创作表达分开。只为真正依赖外部材料或特定能力的内容填写 evidenceRequirements 和 feasibilityQuestions；没有这类依赖时输出空数组，不为填表编造问题或来源。",
@@ -223,7 +225,7 @@ const DIRECTOR_PLAN_DIRECTIVE = [
   "原样复用更早母片使用 reuseFromScenePosition=N，并保持现有 query=REUSE_ONLY scene N 合同；不重新搜索、生成或计费。复用不同源区间可以呈现母片中真实已有的不同状态，不能凭复用创造母片没有的动作。",
   "使用更早独立生成图片作为参考再生成时，设置 referenceFromScenePosition=N，目标为 generated_image 且 Provider 明确支持参考图。它属于新生成和新报价，不是零成本复用，不得与 reuseFromScenePosition 同时使用。未使用的关系字段按 Schema 输出 null。",
   "跨镜身份要求应与实际复用/参考图关系和脚本论证一起判断。独立生成只能要求可见母题一致，不能承诺精确同一对象；“不承诺身份”的文字也不能豁免实际上依赖同一对象的核心因果或对照。",
-  "能力不足时先在保持核心观众收益的前提下重规划表达；不能以删弱成功条件、免责声明或空泛情绪伪装可执行。涉及用户锁定目标的真实冲突通过现有规划/审计流程交还，不虚构新状态。",
+  "能力不足时先在保持用户意图与已采用内容的前提下重规划表达；不能以删弱成功条件、免责声明或空泛情绪伪装可执行。涉及用户锁定目标的真实冲突通过现有规划/审计流程交还，不虚构新状态。",
   "local/editorial_card 仅用于主动设计的正式文字卡片，不满足真人、现场或连续动作要求。现有本地卡片是静态交付，不承诺逐字、逐项或物件动画；不得把缺素材、费用不足和调用失败写成内部说明卡。",
   "generationPrompt 只写 Provider 需要交付的主体、动作、构图、光线与风格，不放审批、费用、版权、披露或内部工作流文字。母片禁模型自造文字与标注；后期需求只有在输入明确支持时保留为独立叠加要求。",
   "successCriteria 只验当前母片能直接看见的内容；主字幕、裁切、AIGC 披露和发布操作由各自下游验收。读取脚本 onScreenText 与 soundCue，为文字留空间、让声音设计不冲突，不要求重复输出不存在的字段。",
@@ -250,7 +252,7 @@ const VISUAL_REVIEW_DIRECTIVE = [
   "先核对 reviewContext、时间线、sampling、帧映射和证据范围。pilotScenePositions 存在时仅审已列出的试片，未生成镜头只是上下文，不能因它们缺帧打回，也不能宣布全片通过。",
   "在本次实际覆盖范围内，判断已采用方案是否在可见画面中成立，不要求固定的开场、推进或结尾结构，也不预测播放量。只有画面证据支持时，才能指出关键对象看不清、承诺结果缺失或持续停留没有新增作用；未覆盖的连续节奏、声音和全片体验明确保留。",
   "scene_triplets 按同镜 opening/middle/closing 分组，scene_sequence 用相邻时间点检查可见推进和近似保持时长。稀疏模式只能证明已采样状态，不能把没有采到的动作判为没有发生，也不要求不存在的三帧结构。",
-  "每条 finding 必须用 claimType 声明这条主张要靠哪类证据判定：static 是某一刻的画面状态（构图、可读性、某物是否出现），motion 是随时间的变化（摇曳、连续推进、渐变、逐帧流畅），non_visual 是根本不落在画面里的东西（配音、节奏、旁白与字幕稿是否一致）。抽帧能判定 static，判不了 motion——稀疏静帧之间看起来相近既不能推出运动没发生，也不能推出运动发生了；更判不了 non_visual，采多少帧也采不到声音。motion 与 non_visual 的 failed 只在证据确实够时才允许：motion 需要该镜头被采了超过三帧的连续序列，或该镜头在采样窗口内逐字节完全相同（画面确实根本没动）；non_visual 需要你手上真有画面之外的证据。否则一律记 not_observed 并走 inspect_existing_media：不要把“我的采样不够”写成“作品不成立”。“超过三帧”与“采样帧逐字节相同”只是证据准入条件，不自动等于运动主张已经证成：相同采样帧之间仍可能发生变化，帧数达标也不代表覆盖了所讨论的动作。",
+  "每条 finding 用 claimType 声明证据范围：static 是采样时点的可见状态，state_change 是两个明确引用时点的状态比较，motion 是连续运动，non_visual 是声音等非视觉内容。静帧不能证成连续运动或声音的成功与失败；motion/non_visual 必须记 not_observed 并走 inspect_existing_media。相同 SHA 只说明采到的图相同，更多帧也不证明帧间过程。",
   "主体、动作对象、可见行为、构图和成功条件必须一致。只有证据充分显示缺失、替代、反向变化或其它违背时，才记 failed；看不清或覆盖不足记 not_observed，先检查已有媒体。",
   "文字先分类：可追溯来源原生文字、正式 editorial_card、renderManifest 声明的后期字幕与披露，按准确性和可读性检查；生成伪标签、乱码、伪 UI、水印与内部工作流术语按实际证据判污染。",
   "source_assets 尚未叠加主字幕和披露，不因此打回。正式卡片及身份可追溯的来源原生文字允许存在；非正式生成文字或污染确认存在时阻断，不因“任何文字出现”一律失败。",
@@ -261,7 +263,7 @@ const VISUAL_REVIEW_DIRECTIVE = [
   "“不承诺精确身份”不能豁免实际依赖同一人物、物件或空间的论证；但不得因否定句里出现“同一人物”就认定作品要求身份一致。判断整段叙事与可见画面。",
   "not_observed 只走 inspect_existing_media，不进入重买清单；failed 按实际责任走 replan_upstream/rework_asset。satisfied/not_applicable 为 info 且 nextAction=none。不用重复生成独立素材碰运气解决方案缺陷。",
   "保留当前审批门槛：五项评分均至少 75、confidence 至少 0.7，并且没有 failed 或 not_observed finding，才允许 approve。当前核心成功条件未确认时不能批准；不通过也不能据此自动扩大付费范围。",
-  "没有问题时 findings 为空，不为证明审片有价值而发明缺陷。收到 revision 时修正报告与证据的对应关系；不得为了通过报告审计删除真实问题、美化评分或伪造画面。必要的状态关系纠正应与原证据一致。",
+  "无明确条件且未发现问题时 findings 为空；有明确条件时报告核验状态，不为证明审片有价值而发明缺陷。收到 revision 时修正报告与证据的对应关系；不得为了通过报告审计删除真实问题、美化评分或伪造画面。必要的状态关系纠正应与原证据一致。",
   "你的报告通过独立审计，只代表报告可信，不代表素材或成片被批准。不同真实审片模型互不参考对方结论，最终合并由宿主完成。",
 ].join("\n");
 
@@ -295,14 +297,14 @@ const SCORING_RULES = [
 
 // 版本化 rubric：broker 与宿主共用同一份评分含义，分数不靠字段名猜。
 // 改动这里的文字要同时 bump ROLE_QUALITY_RUBRIC_VERSION 与 role-audit 的 semanticRulesVersion。
-export const ROLE_QUALITY_RUBRIC_VERSION = "video-factory/role-quality-rubric-v2" as const;
+export const ROLE_QUALITY_RUBRIC_VERSION = "video-factory/role-quality-rubric-v3" as const;
 
 const ROLE_AUDIT_RUBRIC = [
-  ...SCORING_RULES,
+  SCORING_RULES,
   "【总分归约】",
   "【创作维度】",
   "expression：依据用户所选表达方式判断内容是否清楚、自然、具体；诗意、口语、停顿与开放结尾都可以成立，不套统一的文风。",
-  "consistency：内容与用户明确要求、已确认内容和事实是否一致，内部是否有具体矛盾。不要求开场钩子、持续递进、反转或结尾兑现。",
+  "consistency：内容与用户明确要求、已确认内容和事实是否一致，内部是否有具体矛盾。不预设开场钩子、持续递进、反转或结尾兑现；用户明确要求的揭示、反转或结果仍须核对。",
   "【分档与修复】",
   "以可定位的问题判断：0—39 核心内容无法理解或偏离用户意图；40—59 存在严重表达或内容矛盾；60—79 有明确局部问题；80—89 内容成立且表达合适；90—100 能引用具体优点。",
   "低于80必须指出真实的表达障碍或内容冲突并给出有界建议。缺少某种叙事结构、风格偏好和审美分歧只能讨论，不能扣分或要求重写。",
@@ -315,7 +317,7 @@ const ROLE_AUDIT_RUBRIC = [
 ].join("\n");
 
 const TOPIC_SCORE_RUBRIC = [
-  ...SCORING_RULES,
+  SCORING_RULES,
   "【分档锚点】",
   "audienceDemand——低档：只有“这个题材很多人关心”“热点正上榜”这类泛化断言，或拿热度、榜单排名、来源数量当需求证据；合格：能指出具体是谁、在什么场景下会因为什么点开，并说明这条比同题材常见内容多给什么；高档：上一条成立且观众收益具体到能在开场兑现，不依赖“涨知识”“开眼界”这类空承诺",
   "visualFeasibility——低档：核心画面依赖未确定或与已知能力冲突；合格：有具体、可信的获取路线，关键职责可表达；高档：核心依赖得到当前输入明确支持，风险边界可说明",
@@ -345,17 +347,17 @@ const TOPIC_SCORE_RUBRIC = [
 ].join("\n");
 
 const VISUAL_REVIEW_SCORE_RUBRIC = [
-  ...SCORING_RULES,
+  SCORING_RULES,
   "【分档锚点】",
   "composition——低档：必要主体被遮挡、裁掉或难辨；合格：裁切后注意对象清楚，关键状态可见；高档：构图进一步帮助揭示、对比或引导注意，而非只是漂亮",
   "continuity——低档：证据充分显示核心关系或身份冲突；合格：本次需要核验的空间、对象和叙事关系成立；高档：连续关系不仅成立，还有效帮助理解；不从静帧推断未观察运动",
-  "pacing——低档：有证据表明关键兑现缺失或长段无作用；合格：在已覆盖范围内，停留、推进和兑现协调；高档：揭示顺序、保持与回收形成明确体验；不能仅凭帧数或切镜数量得高分",
+  "pacing——低档：有证据表明时序妨碍本片已采用的表达；合格：在已覆盖范围内，停留与变化适合本片内容；高档：能引用具体时序选择如何帮助本片表达；不能仅凭帧数或切镜数量得高分",
   "legibility——低档：必要信息不可读、被裁切或被污染干扰；合格：在实际尺寸、时间与阶段下可读；高档：阅读顺序、层级和留白进一步降低理解负担",
   "safety——低档：有证据支持当前范围内的实质违规或误导；合格：已覆盖项目没有已证实风险，必要标识与边界一致；高档：覆盖充分且没有发现问题；高分不能替代风险否决与未观察项处理",
 ].join("\n");
 
 const ASSET_RANK_SCORE_RUBRIC = [
-  ...SCORING_RULES,
+  SCORING_RULES,
   "【分档锚点】",
   "semanticScore——低档：核心不匹配或证据不足，低于 40；合格：达到既有采用基线，且明确剩余差异；高档：核心职责、裁切和连续关系都有可见支持",
   "【semanticScore 评分对象】",
@@ -432,7 +434,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
   }
   if (kind === "topic-ideas") {
     return {
-      version: "video-factory/topic-editor-v12",
+      version: "video-factory/topic-editor-v13",
       directive: TOPIC_IDEAS_DIRECTIVE,
       task: "从实时热点中提出最多 8 个原创短视频角度；只有所有输入的内容价值或视频表现价值均不足时，才输出空 ideas 数组。",
       outputRules: [
@@ -482,7 +484,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
   }
   if (kind === "creative-treatment") {
     return {
-      version: "video-factory/treatment-director-v10",
+      version: "video-factory/treatment-director-v11",
       directive: CREATIVE_TREATMENT_DIRECTIVE,
       task: "根据用户意图自由构思本片，交付可供阅读和讨论的构思正文。",
       outputRules: [
@@ -537,15 +539,16 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
   }
   if (kind === "visual-review") {
     return {
-      version: "video-factory/visual-review-v20",
+      version: "video-factory/visual-review-v21",
       directive: VISUAL_REVIEW_DIRECTIVE,
       task: "按时间顺序审查附带的关键帧并生成严格结构化视觉审片报告。",
       outputRules: [
         "顶层必须完整包含 version、summary、scores、findings、confidence、recommendation；version 必须固定为 video-factory/visual-review-v1。",
         "scores 必须完整包含 composition、continuity、pacing、legibility、safety，不得省略字段或增加字段。",
-        "findings 中每项必须完整包含 timecodeMs、startTimecodeMs、endTimecodeMs、scenePosition、targetNodeId、claimType、evidenceStatus、evidenceFrameSha256、nextAction、category、severity、description、suggestion；targetNodeId 只能是 creative-planning 或 assets；claimType 只能是 static、motion 或 non_visual。",
+        "findings 中每项必须完整包含 timecodeMs、startTimecodeMs、endTimecodeMs、scenePosition、targetNodeId、claimType、evidenceStatus、evidenceFrameSha256、nextAction、category、severity、description、suggestion；targetNodeId 只能是 creative-planning 或 assets；claimType 只能是 static、state_change、motion 或 non_visual；同时输出 requirementId（无对应条件则 null）与 endEvidenceFrameSha256（无第二帧则 null）。",
         "targetNodeId=creative-planning 时必须同时给出 planningStageId，取值只能是 treatment、script 或 director——它指明这个方案问题出在哪一段、要从哪一段重做：treatment 是构思与方向，script 是事实与论证，director 是分镜与可执行性。targetNodeId=assets 时 planningStageId 必须为 null：那不是方案的问题，重做方案会白花钱。",
-        "claimType=motion 的 finding 记 failed 只在两种情形下合法：该镜头被采了超过三帧的连续序列，或该镜头在采样窗口内的画面逐字节完全相同。claimType=non_visual 的 finding 不可能靠抽帧证成，记 failed 需要画面之外的证据。其余情形必须记 not_observed 并用 inspect_existing_media；用稀疏静帧判定运动没有发生、或用抽帧判定配音有问题，都会被拒绝。",
+        "static 的 satisfied/failed 必须引用同镜头 timecodeMs 的 evidenceFrameSha256。state_change 还必须用 endEvidenceFrameSha256 引用同镜头较晚 endTimecodeMs 的帧，只描述这两个采样状态；不能据此宣称全程流畅或动作一直没发生。motion/non_visual 在本支路只能记 not_observed。",
+        "逐项核对 reviewContext.requirements 已提供的当前采用条件；用 requirementId 关联原 id，不改写或新增目标。未覆盖记 not_observed；确实不适用于本阶段才记 not_applicable，并在 description 写明原因。空 findings 只表示未报告问题，不能代替条件核验。",
         "evidenceStatus 只能是 satisfied、failed、not_observed、not_applicable；nextAction 只能是 inspect_existing_media、replan_upstream、rework_asset、none。",
         "finding.category 只能是 composition、continuity、pacing、legibility、safety、other；severity 只能是 info、warning、critical。",
         "每条 finding 必须满足 startTimecodeMs <= timecodeMs <= endTimecodeMs，且时间码位于本次证据范围；不要混用源片时间码与成片时间码。",
@@ -554,25 +557,25 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
         "evidenceStatus=satisfied 或 not_applicable 时，severity 必须是 info，nextAction 必须是 none；不得同时要求返工。",
         "scores 的五项评分必须是 0 到 100 的整数。",
         "confidence 必须是 0 到 1 之间的数字。",
-        "没有问题时 findings 输出空数组，不要虚构问题。",
-        "约、建议、参考时间只用于评价节拍，不构成硬下限；仅当画面违反明确的最迟、至少、不得或用户锁定要求，或未兑现叙事效果时，才能据此标 failed。",
-        "只有五项评分均不低于 75、confidence 不低于 0.7，且没有 failed 或 not_observed finding 时才允许 recommendation=approve。",
+        "没有需核对条件且未发现问题时 findings 输出空数组，不要虚构问题；有条件时仍需报告各项的核验状态。",
+        "约、建议、参考时间只用于评价节拍，不构成硬下限；仅当画面违反明确的最迟、至少、不得或用户锁定要求，或未满足本片明确采用的表达要求时，才能据此标 failed。",
+        "只有五项评分均不低于 75、confidence 不低于 0.7，且没有 failed、not_observed 或遗漏的适用条件时才允许 recommendation=approve；结论仅限本次抽样。",
         "收到 revision 时，只按独立审计指出的证据问题修复报告；不得为了通过审计而美化评分、删除真实问题或改变画面事实。",
         VISUAL_REVIEW_SCORE_RUBRIC,
       ],
       examples: [
-        "正例：只有采样时间充分覆盖拉帘要求区间且画面确证动作未发生时才标 failed；采样不足时标 not_observed 并先检查已有素材，是否重新生成取决于方案可执行性与责任归因。",
-        '完整字段组合示例（仅示意结构与状态关系，不得复制时间、镜号、评分或描述）：{"version":"video-factory/visual-review-v1","summary":"现有抽帧未覆盖动作结果，需要先检查已有素材。","scores":{"composition":80,"continuity":75,"pacing":75,"legibility":85,"safety":95},"findings":[{"timecodeMs":2000,"startTimecodeMs":1500,"endTimecodeMs":2500,"scenePosition":1,"targetNodeId":"assets","planningStageId":null,"claimType":"motion","evidenceStatus":"not_observed","evidenceFrameSha256":null,"nextAction":"inspect_existing_media","category":"continuity","severity":"info","description":"当前抽帧没有覆盖动作结果。","suggestion":"补看现有片段或增加过程帧，不要重新购买素材。"}],"confidence":0.7,"recommendation":"revise"}',
+        "正例：要求结束时窗帘闭合，结束采样帧却清楚显示窗帘敞开，可按 static 标 failed；两张引用帧可用 state_change 比较窗帘位置，但不能据此认证拉帘全程流畅。连续动作仍记 not_observed，先检查已有素材。",
+        '完整字段组合示例（仅示意结构与状态关系，不得复制时间、镜号、评分或描述）：{"version":"video-factory/visual-review-v1","summary":"现有抽帧未覆盖动作结果，需要先检查已有素材。","scores":{"composition":80,"continuity":75,"pacing":75,"legibility":85,"safety":95},"findings":[{"timecodeMs":2000,"startTimecodeMs":1500,"endTimecodeMs":2500,"scenePosition":1,"targetNodeId":"assets","planningStageId":null,"claimType":"motion","requirementId":null,"endEvidenceFrameSha256":null,"evidenceStatus":"not_observed","evidenceFrameSha256":null,"nextAction":"inspect_existing_media","category":"continuity","severity":"info","description":"当前抽帧没有覆盖动作结果。","suggestion":"补看现有片段或增加过程帧，不要重新购买素材。"}],"confidence":0.7,"recommendation":"revise"}',
       ],
     };
   }
   if (kind === "role-audit") {
     return {
-      version: "video-factory/role-audit-v12",
+      version: "video-factory/role-audit-v13",
       directive: ROLE_AUDIT_DIRECTIVE,
       task: "对一个生产角色的候选交付进行独立质量审计，并决定通过或要求修复。",
       outputRules: [
-        "version 必须固定为 video-factory/role-audit-v2，rubricVersion 必须固定为 video-factory/role-quality-rubric-v2；verdict 只能是 pass 或 repair。",
+        "version 必须固定为 video-factory/role-audit-v2，rubricVersion 必须固定为 video-factory/role-quality-rubric-v3；verdict 只能是 pass 或 repair。",
         "assessments 每项完整包含 targetPath 与 dimensions；dimensions 每项完整包含 dimension、score、evidence，evidence 要引用候选里的具体位置。dimension 只能取 expression、evidence、coverage、consistency、actionability。",
         "宿主给定了评估对象与维度集合，不得改变维度、不得重复同一个 targetPath。选题与系列路线图按候选逐条评：ideas 非空时每条一个 /ideas/0、/ideas/1…，episodes 非空时每条一个 /episodes/0、/episodes/1…；合法空结果评的是“是否应为空”这个判断本身，用根路径 \"\" 加报告维度。构思、脚本、导演方案、发布文案评当前完整候选，用根路径 \"\"。创作交付和发布文案用 expression、consistency，报告交付（选片、审片、参考语法）用 evidence、coverage、consistency、actionability，不得用报告维度评创作交付。",
         "score 不是自由给定的数：它必须等于 assessments 中全部维度分的最低值；pass 要求 score 不低于 80 且没有 blocking issue。",
@@ -590,7 +593,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
   }
   if (kind === "asset-rank") {
     return {
-      version: "video-factory/asset-rank-v7",
+      version: "video-factory/asset-rank-v8",
       directive: ASSET_RANK_DIRECTIVE,
       task: "依据逐镜意图重排现有图库候选，并给出可审计的逐项理由。",
       outputRules: [
@@ -622,7 +625,7 @@ export function taskPromptFor(kind: BrokerTaskKind, platform?: string): BrokerTa
     };
   }
   return {
-    version: "video-factory/director-v31",
+    version: "video-factory/director-v32",
     directive: DIRECTOR_PLAN_DIRECTIVE,
     task: "生成视觉圣经和逐镜素材路由。",
     outputRules: [
@@ -1014,12 +1017,12 @@ const VISUAL_REVIEW_OUTPUT_SCHEMA = {
     },
     findings: {
       type: "array",
-      maxItems: 50,
+      maxItems: VISUAL_REVIEW_MAX_FINDINGS,
       items: {
         type: "object",
         required: [
           "timecodeMs", "startTimecodeMs", "endTimecodeMs", "scenePosition", "targetNodeId", "planningStageId",
-          "claimType", "evidenceStatus", "evidenceFrameSha256", "nextAction", "category", "severity", "description", "suggestion",
+          "claimType", "evidenceStatus", "evidenceFrameSha256", "endEvidenceFrameSha256", "requirementId", "nextAction", "category", "severity", "description", "suggestion",
         ],
         additionalProperties: false,
         properties: {
@@ -1029,9 +1032,11 @@ const VISUAL_REVIEW_OUTPUT_SCHEMA = {
           scenePosition: { type: "integer", minimum: 1 },
           targetNodeId: { type: "string", enum: ["creative-planning", "assets"] },
           planningStageId: { type: ["string", "null"], enum: ["treatment", "script", "director", null] },
-          claimType: { type: "string", enum: ["static", "motion", "non_visual"] },
+          claimType: { type: "string", enum: ["static", "state_change", "motion", "non_visual"] },
           evidenceStatus: { type: "string", enum: ["satisfied", "failed", "not_observed", "not_applicable"] },
           evidenceFrameSha256: { type: ["string", "null"], pattern: "^[a-f0-9]{64}$" },
+          endEvidenceFrameSha256: { type: ["string", "null"], pattern: "^[a-f0-9]{64}$" },
+          requirementId: { type: ["string", "null"], minLength: 1 },
           nextAction: { type: "string", enum: ["inspect_existing_media", "replan_upstream", "rework_asset", "none"] },
           category: {
             type: "string",
@@ -1347,7 +1352,7 @@ export function outputSemanticDiagnosticFor(kind: BrokerTaskKind, error: string)
   // 只映射校验器定义的固定句式，不将生成内容或任意属性名作为公开诊断。
   if (kind === "role-audit") {
     const rules: Array<[RegExp, string, string]> = [
-      [/^output\.rubricVersion must be video-factory\/role-quality-rubric-v2\.$/, "audit_rubric_version", "output.rubricVersion"],
+      [/^output\.rubricVersion must be video-factory\/role-quality-rubric-v3\.$/, "audit_rubric_version", "output.rubricVersion"],
       [/^output\.score must equal the lowest dimension score \(\d+(?:\.\d+)?\)\.$/, "audit_score_aggregation", "output.score"],
       [/^output\.verdict cannot pass with a score below 80, blocking issues, or repair instructions\.$/, "audit_pass_contradiction", "output.verdict"],
       [/^output\.repairInstructions must contain at least one entry when verdict is repair\.$/, "audit_repair_missing", "output.repairInstructions"],

@@ -363,7 +363,7 @@ describe("role agent loop audit boundary", () => {
   it("rejects a low-score pass even when the broker is bypassed", () => {
     assert.throws(() => validateRoleAudit({
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       verdict: "pass",
       score: 79,
       assessments: auditAssessments(CREATIVE_AUDIT_DIMENSIONS, 79),
@@ -404,7 +404,7 @@ describe("role agent loop audit boundary", () => {
         return {
           output: {
             version: "video-factory/role-audit-v2",
-            rubricVersion: "video-factory/role-quality-rubric-v2",
+            rubricVersion: "video-factory/role-quality-rubric-v3",
             verdict: "pass",
             score: 92,
             assessments: auditAssessments(CREATIVE_AUDIT_DIMENSIONS, 92),
@@ -894,8 +894,11 @@ describe("role agent loop audit boundary", () => {
         audit: async (operation) => {
           if (operation.preparedOperation) {
             const payload = operation.preparedOperation.envelope.payload as { contract?: unknown };
-            if (payload.contract === "old") oldAuditObservations += 1;
-            else currentAuditObservations += 1;
+            if (payload.contract === "old") {
+              oldAuditObservations += 1;
+              return { output: { ...passingAudit(), rubricVersion: "video-factory/role-quality-rubric-v2" } };
+            }
+            currentAuditObservations += 1;
             return { output: passingAudit() };
           }
           if (firstAudit) {
@@ -905,6 +908,7 @@ describe("role agent loop audit boundary", () => {
             await operation.requestOptions.beforeSubmit?.(prepared);
             throw new CodexBridgeError("old audit reply lost", false, "uncertain");
           }
+          assert.equal(operation.validationFailure, undefined, "an obsolete rubric is not a malformed current audit to repair");
           currentAuditSubmissions += 1;
           const prepared = preparedOperation(operation, "role-audit");
           prepared.envelope.payload = { contract: "current" };
@@ -1570,7 +1574,7 @@ describe("role agent loop audit boundary", () => {
         auditCalls += 1;
         return { output: {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v3",
           verdict: "repair",
           score: 55,
           assessments: auditAssessments(CREATIVE_AUDIT_DIMENSIONS, 55),
@@ -2069,7 +2073,7 @@ function auditAssessments(dimensions: readonly string[], score: number) {
 function passingAudit(dimensions: readonly string[] = CREATIVE_AUDIT_DIMENSIONS) {
   return {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v3",
     verdict: "pass",
     score: 92,
     assessments: auditAssessments(dimensions, 92),
@@ -2083,7 +2087,7 @@ function passingAudit(dimensions: readonly string[] = CREATIVE_AUDIT_DIMENSIONS)
 function repairingAudit(dimensions: readonly string[] = CREATIVE_AUDIT_DIMENSIONS) {
   return {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v3",
     verdict: "repair",
     score: 60,
     assessments: auditAssessments(dimensions, 60),

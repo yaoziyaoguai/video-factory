@@ -192,7 +192,7 @@ function validReport(): Record<string, unknown> {
       targetNodeId: "assets",
       planningStageId: null,
       claimType: "static", evidenceStatus: "failed",
-      evidenceFrameSha256: createHash("sha256")
+      endEvidenceFrameSha256: null, requirementId: null, evidenceFrameSha256: createHash("sha256")
         .update(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]))
         .digest("hex"),
       nextAction: "rework_asset",
@@ -252,7 +252,7 @@ function assetRankTask(withThumbnail: boolean) {
 function validRoleAudit(): Record<string, unknown> {
   return {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v3",
     assessments: [{
       targetPath: "",
       dimensions: [{ dimension: "consistency", score: 90, evidence: "开场就给出具体对象。" }, { dimension: "expression", score: 90, evidence: "旁白具体可理解。" }],
@@ -767,6 +767,66 @@ describe("ChatCompletionsExecutor", () => {
     assert.equal(calls, 2);
   });
 
+  for (const change of [
+    { field: "claimType", before: "static", after: "state_change" },
+    { field: "planningStageId", before: "script", after: "director" },
+    { field: "requirementId", before: "req-1", after: "req-2" },
+    { field: "endEvidenceFrameSha256", before: "a".repeat(64), after: "b".repeat(64) },
+    { field: "requirementId", before: undefined, after: "req-invented" },
+    { field: "endEvidenceFrameSha256", before: undefined, after: "b".repeat(64) },
+  ]) {
+    it(`rejects a visual format repair that ${change.before === undefined ? "invents" : "changes"} ${change.field}`, async () => {
+      const invalid: Record<string, unknown> = { ...validReport(), internalNote: "remove this unsupported field" };
+      const firstFinding = (invalid.findings as Array<Record<string, unknown>>)[0]!;
+      if (change.field === "planningStageId") {
+        firstFinding.targetNodeId = "creative-planning";
+        firstFinding.nextAction = "replan_upstream";
+      }
+      if (change.before === undefined) delete firstFinding[change.field];
+      else firstFinding[change.field] = change.before;
+      const { internalNote: _extra, ...changed } = structuredClone(invalid);
+      (changed.findings as Array<Record<string, unknown>>)[0]![change.field] = change.after;
+      let calls = 0;
+      const executor = chatExecutor({
+        env: { DEEPSEEK_API_KEY: API_KEY },
+        fetchFn: async () => {
+          calls += 1;
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: JSON.stringify(calls === 1 ? invalid : changed) } }],
+          }), { status: 200 });
+        },
+      });
+
+      await assert.rejects(() => executor.runTask(visualReviewTask()), (error: unknown) => {
+        assert.ok(error instanceof CodexExecutorError);
+        assert.equal(error.details?.reasonCode, "repair_semantic_drift");
+        return true;
+      });
+      assert.equal(calls, 2);
+    });
+  }
+
+  it("allows a visual format repair to fill missing nullable evidence links with null", async () => {
+    const invalid = validReport();
+    const finding = (invalid.findings as Array<Record<string, unknown>>)[0]!;
+    delete finding.requirementId;
+    delete finding.endEvidenceFrameSha256;
+    let calls = 0;
+    const executor = chatExecutor({
+      env: { DEEPSEEK_API_KEY: API_KEY },
+      fetchFn: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(calls === 1 ? invalid : validReport()) } }],
+        }), { status: 200 });
+      },
+    });
+
+    const result = await executor.runTask(visualReviewTask());
+    assert.deepEqual(JSON.parse(result.output), validReport());
+    assert.equal(calls, 2);
+  });
+
   it("sends director planning to the DeepSeek chat-completions endpoint with deepseek-flash", async () => {
     let capturedUrl = "";
     let capturedBody: Record<string, unknown> | undefined;
@@ -986,7 +1046,7 @@ describe("ChatCompletionsExecutor", () => {
     assert.match(capturedPrompt, /source-1/);
     assert.deepEqual(JSON.parse(result.output), output);
     assert.equal(result.trace?.taskKind, "creative-treatment");
-    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v10");
+    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v11");
 
     await assert.rejects(
       async () => executor.runTask(creativeTreatmentTask([])),
@@ -1628,7 +1688,7 @@ describe("ChatCompletionsExecutor", () => {
       targetNodeId: "assets",
       planningStageId: null,
       claimType: "static", evidenceStatus: "failed",
-      evidenceFrameSha256: createHash("sha256")
+      endEvidenceFrameSha256: null, requirementId: null, evidenceFrameSha256: createHash("sha256")
         .update(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]))
         .digest("hex"),
       nextAction: "rework_asset",

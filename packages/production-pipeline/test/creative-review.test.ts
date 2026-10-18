@@ -465,7 +465,7 @@ describe("three-stage creative review gates", () => {
                 auditOperationId: context.creativeReviewExecution.auditOperationId,
                 checkIdentity: contentSha256({ fixture: "first-valid-check" }),
                 audit: {
-                  version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
+                  version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v3",
                   verdict: "pass", score: 88, summary: "初稿意见仍有效。", issues: [], repairInstructions: [],
                   assessments: auditAssessments(88), planningDisposition: null, hostReadinessReview: null,
                 },
@@ -564,7 +564,7 @@ describe("three-stage creative review gates", () => {
       treatment: async context => context.creativeReviewExecution?.mode === "check"
         ? { artifactId: "other", output: otherTreatment, reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
           checkIdentity: "wrong-draft-audit", audit: {
-            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
+            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v3",
             verdict: "pass", score: 90, summary: "另一份稿件可用", issues: [], repairInstructions: [], assessments: auditAssessments(90),
           },
         } }
@@ -600,14 +600,14 @@ describe("three-stage creative review gates", () => {
       screenwriter: async context => context.creativeReviewExecution?.mode === "check"
         ? { artifactId: "script", output: script, reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
           checkIdentity: contentSha256({ stage: "script", round: "fixture" }), audit: {
-            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v2",
+            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v3",
             verdict: "pass" as const, score: 90, summary: "夹具意见：通过", issues: [], repairInstructions: [], assessments: auditAssessments(90),
           },
         } }
         : { artifactId: "script", output: script }, director: async context => context.creativeReviewExecution?.mode === "check"
         ? { artifactId: "director", output: director, reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
           checkIdentity: contentSha256({ stage: "director", round: "fixture" }), audit: {
-            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v2",
+            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v3",
             verdict: "pass" as const, score: 90, summary: "夹具意见：通过", issues: [], repairInstructions: [], assessments: auditAssessments(90),
           },
         } }
@@ -639,7 +639,7 @@ describe("three-stage creative review gates", () => {
     let ranks = 0;
     let drafts = 0;
     const checked = <T>(output: T, ctx?: CreativePlanningContext) => ({ artifactId: contentSha256(output), output, reviewCheck: { auditOperationId: (ctx?.creativeReviewExecution?.mode === "check" ? ctx.creativeReviewExecution.auditOperationId : undefined) ?? "fixture-op",
-      checkIdentity: contentSha256(output), audit: { version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v2" as const, verdict: "pass" as const, score: 90, summary: "可执行", issues: [], repairInstructions: [], assessments: auditAssessments(90) },
+      checkIdentity: contentSha256(output), audit: { version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v3" as const, verdict: "pass" as const, score: 90, summary: "可执行", issues: [], repairInstructions: [], assessments: auditAssessments(90) },
     } });
     const graph = createCreativePlanningGraph({ checkpointer: new MemorySaver(), ports: {
       treatment: async (context) => checked(treatment, context), screenwriter: async (context) => checked(script, context),
@@ -922,7 +922,7 @@ describe("three-stage creative review gates", () => {
             reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
               audit: {
                 version: "video-factory/role-audit-v2" as const,
-                rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+                rubricVersion: "video-factory/role-quality-rubric-v3" as const,
                 assessments: auditAssessments(76),
                 verdict: "repair" as const,
                 score: 76,
@@ -1008,7 +1008,7 @@ describe("three-stage creative review gates", () => {
             reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
               audit: {
                 version: "video-factory/role-audit-v2" as const,
-                rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+                rubricVersion: "video-factory/role-quality-rubric-v3" as const,
                 assessments: auditAssessments(76),
                 verdict: "repair" as const,
                 score: 76,
@@ -1095,7 +1095,7 @@ describe("three-stage creative review gates", () => {
             reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
               audit: {
                 version: "video-factory/role-audit-v2" as const,
-                rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+                rubricVersion: "video-factory/role-quality-rubric-v3" as const,
                 assessments: auditAssessments(92),
                 verdict: "pass" as const,
                 score: 92,
@@ -1168,7 +1168,7 @@ describe("three-stage creative review gates", () => {
     const ports: CreativePlanningPorts = {
       treatment: async (context) => ({ artifactId: "treatment-scope", output: treatment,
         ...(context.creativeReviewExecution?.mode === "check" ? { reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
-          audit: { version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+          audit: { version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v3" as const,
             assessments: auditAssessments(90), verdict: "pass" as const, score: 90, summary: "构思可继续", issues: [],
             repairInstructions: [], planningDisposition: null, hostReadinessReview: null },
           checkIdentity: contentSha256({ stage: "treatment", draft: contentSha256(treatment) }),
@@ -1211,7 +1211,7 @@ describe("three-stage creative review gates", () => {
       async (context: Parameters<CreativePlanningPorts["treatment"]>[0]) => ({
         artifactId, output,
         ...(context.creativeReviewExecution?.mode === "check" ? { reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
-          audit: { version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+          audit: { version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v3" as const,
             assessments: auditAssessments(90), verdict: "pass" as const, score: 90,
             summary: `${stage}可继续`, issues: [], repairInstructions: [], planningDisposition: null, hostReadinessReview: null },
           checkIdentity: contentSha256({ stage, draft: contentSha256(output) }),
@@ -1259,7 +1259,7 @@ describe("three-stage creative review gates", () => {
           calls.treatment += 1;
           return { artifactId: "treatment-discuss", output: treatment, reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
             checkIdentity: contentSha256({ stage: "treatment", round: "fixture" }), audit: {
-              version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v2",
+              version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v3",
               verdict: "pass" as const, score: 90, summary: "夹具意见：通过", issues: [], repairInstructions: [], assessments: auditAssessments(90),
             },
           } };
@@ -1271,7 +1271,7 @@ describe("three-stage creative review gates", () => {
       director: async context => context.creativeReviewExecution?.mode === "check"
         ? { artifactId: "director-unused", output: director, reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
           checkIdentity: contentSha256({ stage: "director", round: "fixture" }), audit: {
-            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v2",
+            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v3",
             verdict: "pass" as const, score: 90, summary: "夹具意见：通过", issues: [], repairInstructions: [], assessments: auditAssessments(90),
           },
         } }
@@ -1338,7 +1338,7 @@ describe("three-stage creative review gates", () => {
     const calls = { treatment: 0, audit: 0, script: 0 };
     const repairingAudit = {
       version: "video-factory/role-audit-v2" as const,
-      rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+      rubricVersion: "video-factory/role-quality-rubric-v3" as const,
       assessments: auditAssessments(64),
       verdict: "repair" as const,
       score: 64,
@@ -1388,7 +1388,7 @@ describe("three-stage creative review gates", () => {
       director: async context => context.creativeReviewExecution?.mode === "check"
         ? { artifactId: "director-unused", output: director, reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
           checkIdentity: contentSha256({ stage: "director", round: "fixture" }), audit: {
-            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v2",
+            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v3",
             verdict: "pass" as const, score: 90, summary: "夹具意见：通过", issues: [], repairInstructions: [], assessments: auditAssessments(90),
           },
         } }
@@ -1426,7 +1426,7 @@ describe("three-stage creative review gates", () => {
       treatment: async context => context.creativeReviewExecution?.mode === "check"
         ? { artifactId: "treatment-original", output: treatment, reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
           checkIdentity: contentSha256({ stage: "treatment", round: "fixture" }), audit: {
-            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v2",
+            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v3",
             verdict: "pass" as const, score: 90, summary: "夹具意见：通过", issues: [], repairInstructions: [], assessments: auditAssessments(90),
           },
         } }
@@ -1434,7 +1434,7 @@ describe("three-stage creative review gates", () => {
       screenwriter: async context => context.creativeReviewExecution?.mode === "check"
         ? { artifactId: "script-unused", output: script, reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
           checkIdentity: contentSha256({ stage: "script", round: "fixture" }), audit: {
-            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v2",
+            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v3",
             verdict: "pass" as const, score: 90, summary: "夹具意见：通过", issues: [], repairInstructions: [], assessments: auditAssessments(90),
           },
         } }
@@ -1442,7 +1442,7 @@ describe("three-stage creative review gates", () => {
       director: async context => context.creativeReviewExecution?.mode === "check"
         ? { artifactId: "director-unused", output: director, reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
           checkIdentity: contentSha256({ stage: "director", round: "fixture" }), audit: {
-            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v2",
+            version: "video-factory/role-audit-v2" as const, rubricVersion: "video-factory/role-quality-rubric-v3",
             verdict: "pass" as const, score: 90, summary: "夹具意见：通过", issues: [], repairInstructions: [], assessments: auditAssessments(90),
           },
         } }
@@ -1557,7 +1557,7 @@ describe("three-stage creative review gates", () => {
             reviewCheck: { auditOperationId: context.creativeReviewExecution?.auditOperationId ?? "fixture-op",
               audit: {
                 version: "video-factory/role-audit-v2" as const,
-                rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+                rubricVersion: "video-factory/role-quality-rubric-v3" as const,
                 assessments: auditAssessments(95),
                 verdict: "pass" as const,
                 score: 95,
@@ -1667,7 +1667,7 @@ describe("three-stage creative review gates", () => {
       auditOperationId: (ctx?.creativeReviewExecution?.mode === "check" ? ctx.creativeReviewExecution.auditOperationId : undefined) ?? "fixture-op",
       audit: {
         version: "video-factory/role-audit-v2" as const,
-        rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+        rubricVersion: "video-factory/role-quality-rubric-v3" as const,
         assessments: auditAssessments(92),
         verdict: "pass" as const,
         score: 92,
@@ -1796,7 +1796,7 @@ describe("three-stage creative review gates", () => {
       auditOperationId: (ctx?.creativeReviewExecution?.mode === "check" ? ctx.creativeReviewExecution.auditOperationId : undefined) ?? "fixture-op",
       audit: {
         version: "video-factory/role-audit-v2" as const,
-        rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+        rubricVersion: "video-factory/role-quality-rubric-v3" as const,
         assessments: auditAssessments(95),
         verdict: "pass" as const,
         score: 95,
@@ -2036,7 +2036,7 @@ console.log("T16 step at line 1487");
       auditOperationId: (ctx?.creativeReviewExecution?.mode === "check" ? ctx.creativeReviewExecution.auditOperationId : undefined) ?? "fixture-op",
       audit: {
         version: "video-factory/role-audit-v2" as const,
-        rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+        rubricVersion: "video-factory/role-quality-rubric-v3" as const,
         assessments: auditAssessments(95),
         verdict: "pass" as const,
         score: 95,
@@ -2246,7 +2246,7 @@ describe("自动循环停下时把决定交还给人", () => {
       auditOperationId: (ctx?.creativeReviewExecution?.mode === "check" ? ctx.creativeReviewExecution.auditOperationId : undefined) ?? "fixture-op",
     audit: {
       version: "video-factory/role-audit-v2" as const,
-      rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+      rubricVersion: "video-factory/role-quality-rubric-v3" as const,
       assessments: auditAssessments(92),
       verdict: "pass" as const,
       score: 92,
@@ -2352,7 +2352,7 @@ describe("自动循环停下时把决定交还给人", () => {
       produce: async () => ({ output: treatment }),
       audit: async () => ({ output: {
         version: "video-factory/role-audit-v2" as const,
-        rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+        rubricVersion: "video-factory/role-quality-rubric-v3" as const,
         verdict: "repair" as const,
         score: 91,
         assessments: [{ targetPath: "", dimensions: auditAssessments(91)[0]!.dimensions }],
@@ -2440,7 +2440,7 @@ console.log("T16 step at line 1787");
           produce: async () => ({ output: director }),
           audit: async () => ({ output: {
             version: "video-factory/role-audit-v2" as const,
-            rubricVersion: "video-factory/role-quality-rubric-v2" as const,
+            rubricVersion: "video-factory/role-quality-rubric-v3" as const,
             verdict: "repair" as const, score: 91, assessments: auditAssessments(91),
             summary: "创作方向需要用户决定", issues: [{ severity: "blocking" as const,
               criterion: "创作方向", evidence: "现有画面路线存在取舍", repairInstruction: "请用户决定画面路线" }],

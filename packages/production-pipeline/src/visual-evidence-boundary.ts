@@ -1,3 +1,9 @@
+// 24 镜 ×（导演 8 条 + 脚本 6 条）明确条件，加上不关联条件的缺陷意见。
+export const VISUAL_REVIEW_MAX_FINDINGS = 400;
+
+export const VISUAL_REVIEW_PASS_MIN_SCORE = 75;
+export const VISUAL_REVIEW_PASS_MIN_CONFIDENCE = 0.7;
+
 const CROSS_SCENE_IDENTITY = [
   /同一(?:人物|角色|人|主体|物件|物体|对象|杯子|产品|实验对象)/,
   /(?:上一镜|前一镜|前镜|前后镜|跨镜|镜头间).{0,18}(?:人物|角色|主体|物件|物体|对象|杯子|产品).{0,12}(?:一致|不变|相同|延续)/,

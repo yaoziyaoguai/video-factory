@@ -18,6 +18,7 @@ import { studioApi } from "../api.js";
 import { publishPackageDownloadFilename, videoDownloadFilename } from "../download-filename.js";
 import { parseDurationAmendment, type DurationAmendment } from "@video-factory/production-pipeline/executable-timeline";
 import { durationSecondsLabel } from "./CreativeDurationPanel.js";
+import { visualReviewConclusion, VisualReviewCoverageDetails, type VisualReviewConclusion } from "./VisualReviewConclusion.js";
 
 export function currentSubtitlePreview(run: StudioRunDetail) {
   const voice = run.nodes.find(node => node.id === "voice");
@@ -1034,7 +1035,7 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
             </header>
             {!visualReview ? <p className="review-advisory">机器视觉审片尚无完整结论。你仍可观看当前成片，已有决定和原请求记录保留。</p> : null}
               {visualReviewRequiresRevision && visualReview ? <div className="agent-review-decision" id="current-review-findings" tabIndex={-1}>
-                <strong>视觉审片建议修改后再审</strong>
+                <strong>视觉审片 · {visualReview.conclusion.label}</strong>
                 <p>完整结论保留在审片报告中。先核对当前成片，再决定如何处理下列意见。</p>
                 <div className="agent-review-facts">
                   <span>模型判定存在问题：<strong>{visualReview.findingCount}</strong> 项</span>
@@ -1106,7 +1107,8 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
                 ? visualReview.evidenceId ? "两者查看同一份成片证据" : "独立审查同一版成片"
                 : "审片结果不完整，不能按完整双审处理"}</small></header>
             <div className="merged-review-summary">
-              <span>视觉结论 · {visualReviewRecommendationLabel(visualReview.recommendation)}</span>
+              <span>视觉结论 · {visualReview.conclusion.label}</span>
+              <VisualReviewCoverageDetails conclusion={visualReview.conclusion} />
               <details className="review-full-summary">
                 <summary>查看完整结论原文</summary>
                 <p>{creatorFacingTechnicalText(visualReview.summary)}</p>
@@ -1119,7 +1121,7 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
             <div className="independent-review-list">
               {visualReview.independentReviews.map((review, index) => {
                 return <article key={`${review.providerId}:${review.modelId}:${index}`}>
-                <header><strong>{reviewProviderLabel(review.providerId, providers)}</strong><span>{visualReviewRecommendationLabel(review.recommendation)}</span></header>
+                <header><strong>{reviewProviderLabel(review.providerId, providers)}</strong><span>{review.conclusion.label}</span></header>
                 <small>{catalogModelLabel(providers, review.modelId) ?? review.modelId}{review.score !== undefined ? ` · ${review.score} 分` : ""}{` · ${review.findingCount} 项问题`}{review.auditVerdict === "repair" ? " · 独立审计未通过" : ""}</small>
                 {/* 单审的分支就是上方完整报告；多审各有独立来源，不能按正文相同合并。 */}
                 {!singleVisualReview ? <details className="review-full-summary">
@@ -1777,6 +1779,7 @@ function paidOperationCostLabel(item: StudioPaidNodeSummary["items"][number]): s
 }
 
 interface VisualReviewDecision {
+  conclusion: VisualReviewConclusion;
   audioReview?: unknown;
   mode: "single" | "dual" | "incomplete";
   recommendation: "approve" | "revise" | "reject";
@@ -1795,6 +1798,7 @@ interface VisualReviewDecision {
 }
 
 interface VisualReviewBranch {
+  conclusion: VisualReviewConclusion;
   providerId: string;
   modelId: string;
   recommendation: "approve" | "revise" | "reject";
@@ -1979,6 +1983,7 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
           : [];
         const auditVerdict = branchAuditVerdicts.get(`${value.providerId} ${value.modelId}`);
         return [{
+          conclusion: visualReviewConclusion(branch),
           providerId: value.providerId,
           modelId: value.modelId,
           recommendation,
@@ -2006,6 +2011,7 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
       : "incomplete";
   const independentReviews = mode === "single" && singleModel
     ? [{
+        conclusion: visualReviewConclusion(report),
         ...singleModel,
         recommendation: reviewRecommendation,
         summary: typeof report.summary === "string" && report.summary.trim() ? report.summary.trim() : "该模型没有提供审片摘要。",
@@ -2017,6 +2023,7 @@ function visualReviewDecision(run: StudioRunDetail): VisualReviewDecision | unde
       }]
     : reportedReviews;
   return {
+    conclusion: visualReviewConclusion(report),
     mode,
     audioReview: report.audioReview,
     recommendation: reviewRecommendation,
@@ -2045,12 +2052,6 @@ function sourceReviewDecisionEvidenceId(run: StudioRunDetail): string | null {
   if (!isRecord(output) || !isRecord(output.sourceReview)) return null;
   const evidenceId = output.sourceReview.evidenceId;
   return typeof evidenceId === "string" && /^[a-f0-9]{64}$/.test(evidenceId) ? evidenceId : null;
-}
-
-function visualReviewRecommendationLabel(value: VisualReviewDecision["recommendation"]): string {
-  if (value === "approve") return "通过";
-  if (value === "revise") return "修改后再审";
-  return "不通过";
 }
 
 /** 判定变动的条目：本轮结论与上一轮原文并排给出，避免只报"变了"却让人无处对照。 */

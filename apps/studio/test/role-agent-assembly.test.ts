@@ -84,7 +84,7 @@ function scoredDimensions(evidenceByDimension: Record<string, string>, score: nu
 // 报告型（视觉审片员）评四维报告维度，两者不能互换。
 const passingAudit = {
   version: "video-factory/role-audit-v2",
-  rubricVersion: "video-factory/role-quality-rubric-v2",
+  rubricVersion: "video-factory/role-quality-rubric-v3",
   verdict: "pass",
   score: 95,
   assessments: [{ targetPath: "", dimensions: scoredDimensions(CREATIVE_DIMENSION_EVIDENCE, 95) }],
@@ -447,7 +447,7 @@ describe("buildRoleAgentAssembly", () => {
   it("keeps assembled producer revisions isolated from prior model history", async () => {
     const repairAudit = {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       verdict: "repair",
       score: 70,
       assessments: [{ targetPath: "", dimensions: scoredDimensions(CREATIVE_DIMENSION_EVIDENCE, 70) }],

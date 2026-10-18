@@ -244,7 +244,7 @@ class ParsingTreatmentClient extends CodexBridgeClient {
       return {
         output: {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v3",
           assessments: [{
             targetPath: "",
             dimensions: [{ dimension: "consistency", score: 95, evidence: "开场就给出具体对象。" }, { dimension: "expression", score: 95, evidence: "表达决策具体可执行。" }],
@@ -374,7 +374,7 @@ class ParsingRepairClient extends CodexBridgeClient {
       return {
         output: {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v3",
           assessments: [{
             targetPath: "",
             dimensions: [{ dimension: "consistency", score: 95, evidence: "开场就给出具体对象。" }, { dimension: "expression", score: 95, evidence: "旁白具体可理解。" }],
@@ -568,7 +568,7 @@ describe("visual-review adapter × Broker parser", () => {
     };
     const audit = {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{
         targetPath: "",
         dimensions: [

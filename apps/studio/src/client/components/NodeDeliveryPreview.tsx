@@ -4,6 +4,7 @@ import { creatorContainerViewId, creatorViewId, isCreatorNestedField, isCreatorT
 import { unsplashPublicUrl } from "./UnsplashAttribution.js";
 import { hasStockAttribution, StockAttribution, stockPublicUrl, stockSourceUrl } from "./StockAttribution.js";
 import { platformLabel, providerLabel } from "../presentation.js";
+import { visualReviewConclusion, VisualReviewCoverageDetails } from "./VisualReviewConclusion.js";
 
 interface NodeDeliveryPreviewProps {
   nodeId: string;
@@ -190,6 +191,7 @@ export function NodeDeliveryPreview({ nodeId, value, nativeAudio = false }: Node
   if (!record) return <p className="node-document-state">这一步暂时没有可查看的详细内容。</p>;
   const inputPreview = nodeId.endsWith("-input");
   const viewId = creatorViewId(nodeId);
+  const reviewConclusion = viewId === "visual-review" ? visualReviewConclusion(record) : undefined;
   if (viewId === "voice" && !inputPreview && (record.audioMode === "native_av" || record.version === "video-factory/native-audio-plan-v1")) {
     return <section className="node-readable-preview" aria-label="视频原声说明">
       <h4>视频原声</h4>
@@ -248,8 +250,9 @@ export function NodeDeliveryPreview({ nodeId, value, nativeAudio = false }: Node
       {continuousVoice ? <ContinuousVoiceTimingPreview record={record} />
         : viewId === "voice" && !inputPreview ? <VoiceTimingPreview scenes={record.scenes} /> : null}
       {primary.length ? <dl className="node-preview-summary">{primary.map((key) => (
-        <div key={key}><dt>{fieldLabel(key, viewId)}</dt><dd>{formatScalar(record[key], key)}</dd></div>
+        <div key={key}><dt>{fieldLabel(key, viewId)}</dt><dd>{key === "recommendation" && reviewConclusion ? reviewConclusion.label : formatScalar(record[key], key)}</dd></div>
       ))}</dl> : null}
+      {reviewConclusion ? <VisualReviewCoverageDetails conclusion={reviewConclusion} /> : null}
       {nested.map((entry) => <section className="node-preview-section" key={entry.key}>
         <h4>{fieldLabel(entry.key, viewId)}</h4>
         <dl className="node-preview-facts">{Object.entries(entry.value).filter(([key, item]) => {

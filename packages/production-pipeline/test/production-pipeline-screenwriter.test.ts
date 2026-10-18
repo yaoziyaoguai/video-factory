@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { taskPromptFor } from "../../../apps/codex-broker/src/task-definitions.js";
 import {
   FallbackScreenwriterAgent,
   ProductionPipeline,
@@ -449,6 +450,9 @@ describe("ProductionPipeline codex screenwriter", () => {
     const plan = run.executionPlan?.find(({ nodeId }) => nodeId === "script");
     assert.equal(plan?.modelId, "deepseek-flash");
     assert.equal(plan?.configurationSource, "run_override");
+    assert.equal(plan?.parameters?.promptPack, taskPromptFor("script-draft").version);
+    assert.equal(run.nodeRuns.find(({ nodeId }) => nodeId === "script")?.executionReceipt?.parameters?.promptPack,
+      taskPromptFor("script-draft").version);
   });
 
   it("keeps the selected model in a pre-trace failure receipt without calling its backup", async () => {
@@ -483,6 +487,7 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.equal(node?.status, "failed");
     assert.equal(node?.executionReceipt?.modelId, "deepseek-flash");
     assert.equal(node?.executionReceipt?.configurationSource, "run_override");
+    assert.equal(node?.executionReceipt?.parameters?.promptPack, taskPromptFor("script-draft").version);
   });
 
   it("starts a fresh agent loop after an explicit retry of an exhausted node", async () => {
@@ -518,7 +523,7 @@ describe("ProductionPipeline codex screenwriter", () => {
               output: repairing
                 ? {
                     version: "video-factory/role-audit-v2",
-                    rubricVersion: "video-factory/role-quality-rubric-v2",
+                    rubricVersion: "video-factory/role-quality-rubric-v3",
                     assessments: [{
                       targetPath: "",
                       dimensions: [{ dimension: "consistency", score: 70, evidence: "开场没有具体对象。" }, { dimension: "expression", score: 70, evidence: "旁白句式拖沓。" }],
@@ -531,7 +536,7 @@ describe("ProductionPipeline codex screenwriter", () => {
                   }
                 : {
                     version: "video-factory/role-audit-v2",
-                    rubricVersion: "video-factory/role-quality-rubric-v2",
+                    rubricVersion: "video-factory/role-quality-rubric-v3",
                     assessments: [{
                       targetPath: "",
                       dimensions: [{ dimension: "consistency", score: 92, evidence: "开场给出具体对象。" }, { dimension: "expression", score: 92, evidence: "旁白自然可读。" }],
@@ -585,7 +590,7 @@ describe("ProductionPipeline codex screenwriter", () => {
             candidateHash: "a".repeat(64),
             audit: {
               version: "video-factory/role-audit-v2",
-              rubricVersion: "video-factory/role-quality-rubric-v2",
+              rubricVersion: "video-factory/role-quality-rubric-v3",
               assessments: [{
                 targetPath: "",
                 dimensions: [{ dimension: "consistency", score: 70, evidence: "开场没有具体对象。" }, { dimension: "expression", score: 70, evidence: "旁白句式拖沓。" }],
@@ -729,7 +734,7 @@ describe("ProductionPipeline codex screenwriter", () => {
             },
             audit: {
               version: "video-factory/role-audit-v2",
-              rubricVersion: "video-factory/role-quality-rubric-v2",
+              rubricVersion: "video-factory/role-quality-rubric-v3",
               assessments: [{
                 targetPath: "",
                 dimensions: [{ dimension: "consistency", score: 93, evidence: "开场给出具体对象。" }, { dimension: "expression", score: 93, evidence: "旁白自然可读。" }],

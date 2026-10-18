@@ -105,7 +105,7 @@ class RepairingClient extends CodexBridgeClient {
       const assessments = episodeAssessments(2, this.auditCount === 1 ? 72 : 91);
       return { output: this.auditCount === 1 ? {
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v3",
         verdict: "repair",
         score: 72,
         assessments,
@@ -114,7 +114,7 @@ class RepairingClient extends CodexBridgeClient {
         repairInstructions: ["让第二集兑现成本判断"],
       } : {
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v3",
         verdict: "pass",
         score: 91,
         assessments,
@@ -232,7 +232,7 @@ describe("CodexSeriesPlanningAgent", () => {
         return {
           output: {
             version: "video-factory/role-audit-v2",
-            rubricVersion: "video-factory/role-quality-rubric-v2",
+            rubricVersion: "video-factory/role-quality-rubric-v3",
             verdict: "pass",
             score: 94,
             // 系列开拍总编的候选是单集，episodes 只有一项。
@@ -302,7 +302,7 @@ describe("CodexSeriesPlanningAgent", () => {
           audits += 1;
           return { output: {
             version: "video-factory/role-audit-v2",
-            rubricVersion: "video-factory/role-quality-rubric-v2",
+            rubricVersion: "video-factory/role-quality-rubric-v3",
             verdict: audits === 1 ? "repair" : "pass",
             score: audits === 1 ? 70 : 95,
             assessments: episodeAssessments(1, audits === 1 ? 70 : 95),
@@ -485,7 +485,7 @@ class InterruptingSeriesClient extends CodexBridgeClient {
 function passingAudit(episodeCount: number) {
   return {
     version: "video-factory/role-audit-v2",
-    rubricVersion: "video-factory/role-quality-rubric-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v3",
     verdict: "pass",
     score: 94,
     assessments: episodeAssessments(episodeCount, 94),

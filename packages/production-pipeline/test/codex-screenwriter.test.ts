@@ -163,7 +163,7 @@ describe("CodexScreenwriterAgent", () => {
     revised.scenes[2]!.narration = "这一句承接前一句，不重新介绍素材。";
     const client = new SequencedCodexClient([draft, revised], "deepseek", "writer");
     const auditor = new SequencedCodexClient([{
-      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
+      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{ targetPath: "", dimensions: ["expression", "consistency"].map(dimension => ({ dimension, score: 85, evidence: "受控样例只证明当前意图可达，不证明真实质量改善。" })) }],
       verdict: "pass", score: 85, summary: "按当前作品目标给建议。", issues: [], repairInstructions: [],
     }], "zai", "auditor");
@@ -229,7 +229,7 @@ describe("CodexScreenwriterAgent", () => {
     repaired.scenes[0]!.narration = "别眨眼，先看结果。";
     const repairAudit = {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{
         targetPath: "",
         dimensions: [{ dimension: "consistency", score: 68, evidence: "首句只有说明，没有给出具体结果。" }, { dimension: "expression", score: 68, evidence: "旁白措辞偏抽象。" }],
@@ -243,7 +243,7 @@ describe("CodexScreenwriterAgent", () => {
     };
     const passAudit = {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{
         targetPath: "",
         dimensions: [{ dimension: "consistency", score: 91, evidence: "第一镜先给具体结果。" }, { dimension: "expression", score: 91, evidence: "旁白自然可读。" }],
@@ -346,7 +346,7 @@ describe("CodexScreenwriterAgent", () => {
       "script-draft": [first, repaired],
       "role-audit": [{
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v3",
         assessments: [{
           targetPath: "",
           dimensions: [{ dimension: "consistency", score: 72, evidence: "第一句没有先给结果。" }, { dimension: "expression", score: 72, evidence: "措辞偏说明。" }],
@@ -363,7 +363,7 @@ describe("CodexScreenwriterAgent", () => {
         repairInstructions: ["先展示结果。"],
       }, {
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v3",
         assessments: [{
           targetPath: "",
           dimensions: [{ dimension: "consistency", score: 92, evidence: "开场给出具体结果。" }, { dimension: "expression", score: 92, evidence: "旁白清楚。" }],
@@ -403,7 +403,7 @@ describe("CodexScreenwriterAgent", () => {
     const producerClient = new SequencedCodexClient([validDraft()]);
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{
         targetPath: "",
         dimensions: [{ dimension: "consistency", score: 92, evidence: "返工后开场具体。" }, { dimension: "expression", score: 92, evidence: "旁白自然。" }],
@@ -461,7 +461,7 @@ describe("CodexScreenwriterAgent", () => {
     };
     const repairAudit = {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{
         targetPath: "",
         dimensions: [{ dimension: "consistency", score: 72, evidence: "开场缺少具体动作。" }, { dimension: "expression", score: 72, evidence: "旁白描述含糊。" }],
@@ -475,7 +475,7 @@ describe("CodexScreenwriterAgent", () => {
     const producerClient = new SequencedCodexClient([candidate, repairedCandidate]);
     const auditClient = new SequencedCodexClient([repairAudit, {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{
         targetPath: "",
         dimensions: [{ dimension: "consistency", score: 92, evidence: "开场保持原有钩子。" }, { dimension: "expression", score: 92, evidence: "旁白可读。" }],
@@ -533,7 +533,7 @@ describe("CodexScreenwriterAgent", () => {
   it("uses the shared wall-clock deadline as an admission gate without shortening accepted operations", async () => {
     const client = new SequencedCodexClient([validDraft(), {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{
         targetPath: "",
         dimensions: [{ dimension: "consistency", score: 90, evidence: "开场具体。" }, { dimension: "expression", score: 90, evidence: "表达清楚。" }],
@@ -560,7 +560,7 @@ describe("CodexScreenwriterAgent", () => {
   it("allows three audit and repair rounds by default", async () => {
     const repairAudit = {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{
         targetPath: "",
         dimensions: [{ dimension: "consistency", score: 70, evidence: "开场没有先给结果。" }, { dimension: "expression", score: 70, evidence: "旁白偏概括。" }],
@@ -573,7 +573,7 @@ describe("CodexScreenwriterAgent", () => {
     };
     const passAudit = {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{
         targetPath: "",
         dimensions: [{ dimension: "consistency", score: 92, evidence: "先展示结果。" }, { dimension: "expression", score: 92, evidence: "旁白自然。" }],
@@ -638,7 +638,7 @@ describe("CodexScreenwriterAgent", () => {
     const producerClient = new SequencedCodexClient([rangedDraft]);
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{
         targetPath: "",
         dimensions: [{ dimension: "consistency", score: 92, evidence: "开场具体。" }, { dimension: "expression", score: 92, evidence: "旁白清楚。" }],
@@ -698,7 +698,7 @@ describe("CodexScreenwriterAgent", () => {
     const producerClient = new SequencedCodexClient([draft]);
     const auditClient = new SequencedCodexClient([{
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{
         targetPath: "",
         dimensions: [{ dimension: "consistency", score: 92, evidence: "开场给出具体对象。" }, { dimension: "expression", score: 92, evidence: "时长与表达匹配。" }],
@@ -726,7 +726,7 @@ describe("CodexScreenwriterAgent", () => {
   it("gives the auditor the same quantized content-led duration boundary used by execution", async () => {
     const producer = new SequencedCodexClient([{ scenes: [validScene(1, { duration: 1.015 })] }]);
     const audit = new SequencedCodexClient([{
-      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
+      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{ targetPath: "", dimensions: ["expression", "consistency"].map(dimension => ({ dimension, score: 90, evidence: "受控内容" })) }],
       verdict: "pass", score: 90, summary: "受控意见", issues: [], repairInstructions: [],
     }]);

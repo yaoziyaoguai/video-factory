@@ -89,7 +89,7 @@ class CapturingCodexClient extends CodexBridgeClient {
     if (kind === "role-audit") {
       return { output: {
         version: "video-factory/role-audit-v2",
-        rubricVersion: "video-factory/role-quality-rubric-v2",
+        rubricVersion: "video-factory/role-quality-rubric-v3",
         verdict: "pass",
         score: 92,
         assessments: ideaAssessments(92),
@@ -233,7 +233,7 @@ describe("TrendOpportunityAgent", () => {
         this.auditCalls += 1;
         return { output: this.auditCalls === 1 ? {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v3",
           verdict: "repair",
           score: 55,
           assessments: ideaAssessments(55),
@@ -248,7 +248,7 @@ describe("TrendOpportunityAgent", () => {
           repairInstructions: ["删除比例断言，保留可验证的前后对照角度。"],
         } : {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v3",
           verdict: "pass",
           score: 91,
           assessments: ideaAssessments(91),
@@ -306,7 +306,7 @@ describe("TrendOpportunityAgent", () => {
         }
         return { output: {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v3",
           verdict: "repair",
           score: 55,
           assessments: ideaAssessments(55),
@@ -389,7 +389,7 @@ describe("TrendOpportunityAgent", () => {
             monetization: 65, audienceDemand: 75,
           }] } }
           : { output: {
-            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
+            version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v3",
             verdict: "pass", score: 90, assessments: ideaAssessments(90), summary: "可以交给创作者选择。",
             issues: [{ severity: "advisory", criterion: "开头更具体", evidence: "当前只说三小时。",
               repairInstruction: "开头展示时间账本中最大的一块去向。" }],

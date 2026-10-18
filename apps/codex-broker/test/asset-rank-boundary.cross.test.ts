@@ -4,7 +4,7 @@ import { CodexAssetSemanticRanker, deterministicAssetRanking, type AssetCandidat
 import { validateTaskPayload } from "../src/codex-executor.js";
 import { taskPromptFor } from "../src/task-definitions.js";
 
-const audit = { version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
+const audit = { version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v3",
   verdict: "pass", score: 92, summary: "有据可查", issues: [], repairInstructions: [],
   assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"]
     .map(dimension => ({ dimension, score: 92, evidence: "根据实际缩略图" })) }],

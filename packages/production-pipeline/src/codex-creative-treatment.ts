@@ -349,7 +349,7 @@ function treatmentAuditContext(
       acquisitionValues: ["supplied", "pipeline_retrievable", "pipeline_generated", "external_required", "not_needed"],
       acquisitionRule: "图库检索用 pipeline_retrievable，AI画面生成用 pipeline_generated；两者均只用于 illustration_only，并以 retrievalProviderId 绑定当前允许的对应能力。可生成不代表已购买或已取得；事实取证不得由生成画面替代。",
       sourceReferenceRule: "suppliedSourceIds 只能引用 suppliedSources 中列出的 sourceId；无来源时保留空数组缺口",
-      treatmentBoundary: "构思以自由文本表达本片想法，不输出逐镜分镜，不写费用，不声称素材已经获得",
+      treatmentBoundary: "concept 以自由文本表达本片内容与表达方式，可以包含镜头、节奏、声音与有意留白的创作想法；不输出逐镜分镜，不复述费用、预算授权或系统时长政策，不声称素材已经获得。真实依赖或能力冲突写入现有 evidenceRequirements 和 feasibilityQuestions",
       budgetBoundary: "预算意向不是硬上限或付款授权，不得因为尚未批准费用而阻止讨论与规划；质量和事实边界不因降本而降低",
       productionCapabilities: brief.productionCapabilities ?? summarizeProductionCapabilities([]),
     },

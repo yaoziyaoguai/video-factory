@@ -616,7 +616,7 @@ function contractRepairPrompt(
   validationError: string,
 ): string {
   const protectedFields = kind === "visual-review"
-    ? "不得改变 scores、confidence、recommendation，或任何 finding 的时间、镜号、证据状态、证据帧、nextAction、severity、description、suggestion；无法只靠结构修复时原样返回。"
+    ? "不得改变 scores、confidence、recommendation，或任何 finding 的时间、镜号、claimType、planningStageId、requirementId、证据状态、证据帧（含 endEvidenceFrameSha256）、nextAction、severity、description、suggestion。缺失的 requirementId 与 endEvidenceFrameSha256 只能补 null，不能补造关联或证据；无法只靠结构修复时原样返回。"
     : "不得改变任何已经存在的内容字段值；只能补齐或移除不影响内容判断的结构字段。";
   return [
     originalPrompt,
@@ -701,8 +701,13 @@ function protectedVisualReviewContent(value: unknown): unknown {
         endTimecodeMs: finding.endTimecodeMs,
         scenePosition: finding.scenePosition,
         targetNodeId: finding.targetNodeId,
+        planningStageId: finding.planningStageId ?? null,
+        claimType: finding.claimType,
         evidenceStatus: finding.evidenceStatus,
         evidenceFrameSha256: finding.evidenceFrameSha256,
+        // 缺省与 null 都表示没有关联证据；补出非空值属于新判断，不能冒充结构修复。
+        endEvidenceFrameSha256: finding.endEvidenceFrameSha256 ?? null,
+        requirementId: finding.requirementId ?? null,
         nextAction: finding.nextAction,
         category: finding.category,
         severity: finding.severity,

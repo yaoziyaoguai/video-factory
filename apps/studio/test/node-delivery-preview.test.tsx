@@ -5,6 +5,39 @@ import { describe, expect, it } from "vitest";
 import { NodeDeliveryPreview } from "../src/client/components/NodeDeliveryPreview.js";
 
 describe("NodeDeliveryPreview", () => {
+  it.each([
+    { name: "clean sampled report", recommendation: "approve", findings: [], label: "抽样中未发现问题" },
+    { name: "unknown-only report", recommendation: "revise", findings: [{ evidenceStatus: "not_observed", severity: "info", description: "抽帧不足以确认动作。" }], label: "仍有未确认内容" },
+    { name: "concrete defect", recommendation: "revise", findings: [{ evidenceStatus: "failed", severity: "warning", description: "画面字幕被裁掉。" }], label: "有具体修改建议" },
+  ])("labels $name from evidence rather than treating every revision as a defect", ({ recommendation, findings, label }) => {
+    render(<NodeDeliveryPreview nodeId="visual-review" value={{ recommendation, confidence: 0.9, scores: { composition: 85 }, findings }} />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.queryByText("通过")).not.toBeInTheDocument();
+    expect(screen.queryByText("修改后再审")).not.toBeInTheDocument();
+  });
+
+  it("shows a missing adopted check and host evidence limitation without presenting it as a model observation", async () => {
+    render(<NodeDeliveryPreview nodeId="visual-review" value={{ recommendation: "approve", confidence: 0.9, scores: { composition: 85 },
+      coverage: { source: "host", requirements: [
+        { id: "scene-1-action", scenePosition: 1, text: "窗边的杯子留在桌面上。", status: "confirmed", findingIndices: [0] },
+        { id: "scene-2-action", scenePosition: 2, text: "手将杯子转过半圈。", status: "unconfirmed", findingIndices: [] },
+      ] }, findings: [{ evidenceStatus: "not_observed", severity: "info", reportedEvidenceStatus: "satisfied",
+        evidenceLimitation: "仅有静态采样，无法确认连续动作。", description: "模型原报告称动作完成。" }] }} />);
+    expect(screen.getByText("仍有未确认内容")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("核对范围与未确认内容"));
+    expect(screen.getByText(/1 项有对应证据，1 项未确认/)).toBeVisible();
+    expect(screen.getByText(/系统对报告覆盖范围的核对，不是额外一次模型审片/)).toBeVisible();
+    expect(screen.getByText("镜头 2：手将杯子转过半圈。")).toBeVisible();
+    expect(screen.getByText("证据限制：仅有静态采样，无法确认连续动作。")).toBeVisible();
+  });
+
+  it.each([{ confidence: 0.6, scores: { composition: 90 } }, { confidence: 0.9, scores: { composition: 60 } }])(
+    "keeps low-score or low-confidence approval qualified", ({ confidence, scores }) => {
+      render(<NodeDeliveryPreview nodeId="visual-review" value={{ recommendation: "approve", confidence, scores, findings: [] }} />);
+      expect(screen.getByText("仍有未确认内容")).toBeInTheDocument();
+    },
+  );
+
   it("shows the source asset review as a report instead of an empty creative document", () => {
     render(<NodeDeliveryPreview nodeId="asset-source-review" value={{ recommendation: "revise", confidence: 0.8,
       summary: "前三镜不符，需要换素材。", findings: [] }} />);
@@ -313,6 +346,7 @@ describe("NodeDeliveryPreview", () => {
 
     expect(screen.getByRole("heading", { name: "本轮审片结论" })).toBeInTheDocument();
     expect(screen.getByText("画面与叙事可以定版。")).toBeInTheDocument();
+    expect(screen.getByText("通过")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /拟加入系列设定的内容/ })).toBeInTheDocument();
     expect(screen.getByText("本集已经完成一次可复现的真实验证。")).toBeInTheDocument();
   });

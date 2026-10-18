@@ -180,7 +180,7 @@ function passingCreativeReviewExecution<T>(
         },
         audit: {
           version: "video-factory/role-audit-v2" as const,
-          rubricVersion: "video-factory/role-quality-rubric-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v3",
           assessments: [{
             targetPath: "",
             dimensions: [{ dimension: "consistency" as const, score: 92, evidence: "开场给出具体对象。" }, { dimension: "expression" as const, score: 92, evidence: "表达具体可执行。" }],
@@ -2105,7 +2105,7 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
       runTaskDetailed: async (kind, payload) => {
         calls.push(kind);
         if (kind === "role-audit") return { output: {
-          version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
+          version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v3",
           verdict: "pass", score: 92, summary: "格式错误的审计不能用作通过证据", issues: [], repairInstructions: [],
           assessments: [{ targetPath: "/scenes/0", dimensions: ["evidence", "coverage", "consistency", "actionability"].map(dimension => ({ dimension, score: 92, evidence: "模型给错了评价对象" })) }],
         } };
@@ -2448,7 +2448,7 @@ describe("joint-v1 planning closure Oracle fixes (B4-FIX)", () => {
     let searches = 0;
     let candidateOutput: unknown;
     const repair = {
-      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
+      version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v3",
       verdict: "repair", score: 50, summary: "需要补证",
       assessments: [{ targetPath: "", dimensions: ["evidence", "coverage", "consistency", "actionability"].map(dimension => ({ dimension, score: 50, evidence: "证据不足" })) }],
       issues: [{ severity: "blocking", criterion: "可见证据", evidence: "不足", repairInstruction: "补齐证据" }], repairInstructions: ["补齐证据"],
@@ -3733,7 +3733,7 @@ it("旧操作的异常经新操作重抛：helper 不改签、图层零登记、
     iterations: [{
       iteration: 1, candidate: { concept: "旧操作审过的稿" }, candidateHash: gate1.draftSha256,
       audit: {
-        version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
+        version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v3",
         verdict: "pass", score: 95, summary: "旧操作的 pass 意见", issues: [], repairInstructions: [],
         assessments: [{ targetPath: "", dimensions: [{ dimension: "consistency", score: 95, evidence: "旧操作证据" }, { dimension: "expression", score: 95, evidence: "旧操作证据" }] }],
       },

@@ -356,7 +356,7 @@ function visualReviewOutput(): Record<string, unknown> {
       planningStageId: null,
       claimType: "static",
       evidenceStatus: "failed",
-      evidenceFrameSha256: createHash("sha256")
+      endEvidenceFrameSha256: null, requirementId: null, evidenceFrameSha256: createHash("sha256")
         .update(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]))
         .digest("hex"),
       nextAction: "rework_asset",
@@ -1396,7 +1396,7 @@ describe("CodexExecutor.runTask", () => {
         receivedArgs = args;
         await writeFile(lastMessagePath, JSON.stringify({
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v3",
           assessments: [{
             targetPath: "",
             dimensions: [{ dimension: "consistency", score: 92, evidence: "开场就给出具体对象。" }, { dimension: "expression", score: 92, evidence: "旁白具体可理解。" }],
@@ -1536,7 +1536,7 @@ describe("CodexExecutor.runTask", () => {
 
     assert.equal(JSON.parse(result.output).concept, "学会识别资料支持的结论边界");
     assert.equal(result.trace?.taskKind, "creative-treatment");
-    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v10");
+    assert.equal(result.trace?.promptVersion, "video-factory/treatment-director-v11");
 
     const noSources = creativeTreatmentContractRequest();
     noSources.payload.suppliedSources = [];
@@ -1841,7 +1841,7 @@ describe("CodexExecutor.runTask", () => {
           imageBytes = imagePath ? await readFile(imagePath) : undefined;
           await writeFile(lastMessagePath, JSON.stringify({
             version: "video-factory/role-audit-v2",
-            rubricVersion: "video-factory/role-quality-rubric-v2",
+            rubricVersion: "video-factory/role-quality-rubric-v3",
             assessments: [{
               targetPath: "",
               dimensions: [{ dimension: "consistency", score: 92, evidence: "开场就给出具体对象。" }, { dimension: "expression", score: 92, evidence: "旁白具体可理解。" }],
@@ -1996,7 +1996,7 @@ describe("CodexExecutor.runTask", () => {
 
     const prompt = Buffer.concat(childRef?.stdinChunks ?? []).toString("utf8");
     assert.equal(result.trace?.taskKind, "topic-ideas");
-    assert.equal(result.trace?.promptVersion, "video-factory/topic-editor-v12");
+    assert.equal(result.trace?.promptVersion, "video-factory/topic-editor-v13");
     assert.equal(result.trace?.providerId, "openai");
     assert.equal(result.trace?.modelId, "gpt-5.3-codex");
     assert.equal(result.trace?.prompt, prompt);

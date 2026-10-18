@@ -21,7 +21,7 @@ export const roadmap = { episodes: [
   { episodeNumber: 2, pillar: "雨窗", title: "两滴雨水相遇", concept: "看见水滴汇合的过程",   fromPrevious: [], toNext: [] },
 ] };
 export function roadmapAudit() {
-  return { version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v2",
+  return { version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v3",
     verdict: "pass", score: 90, summary: "每集兑现独立观察。", issues: [], repairInstructions: [], planningDisposition: null, hostReadinessReview: null,
     assessments: roadmap.episodes.map((_, index) => ({ targetPath: `/episodes/${index}`, dimensions: ["expression", "consistency"].map((dimension) => ({ dimension, score: 90, evidence: "有明确可见的变化。" })) })),
   };

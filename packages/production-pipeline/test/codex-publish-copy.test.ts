@@ -68,7 +68,7 @@ describe("CodexPublishCopyWriter", () => {
         const auditScore = publishAttempt === 1 ? 58 : 91;
         return { output: {
           version: "video-factory/role-audit-v2",
-          rubricVersion: "video-factory/role-quality-rubric-v2",
+          rubricVersion: "video-factory/role-quality-rubric-v3",
           assessments: [{
             targetPath: "",
             dimensions: [{ dimension: "consistency", score: auditScore, evidence: "标题能让人停下。" }, { dimension: "expression", score: auditScore, evidence: "措辞自然不生硬。" }],
@@ -190,7 +190,7 @@ describe("CodexPublishCopyWriter revision and current-version audit", () => {
   function validAudit(verdict: "pass" | "repair", score: number, issues: Array<Record<string, unknown>> = []): Record<string, unknown> {
     return {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       assessments: [{
         targetPath: "",
         dimensions: [{ dimension: "consistency", score, evidence: "标题能让人停下。" }, { dimension: "expression", score, evidence: "措辞自然。" }],

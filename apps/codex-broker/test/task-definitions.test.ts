@@ -27,7 +27,7 @@ import {
 
 it("keeps audit semantic diagnostics on an allowlist of fixed validator messages", () => {
   for (const [message, reasonCode] of [
-    ["output.rubricVersion must be video-factory/role-quality-rubric-v2.", "audit_rubric_version"],
+    ["output.rubricVersion must be video-factory/role-quality-rubric-v3.", "audit_rubric_version"],
     ["output.score must equal the lowest dimension score (72.5).", "audit_score_aggregation"],
     ["output.verdict cannot pass with a score below 80, blocking issues, or repair instructions.", "audit_pass_contradiction"],
     ["output.repairInstructions must contain at least one entry when verdict is repair.", "audit_repair_missing"],
@@ -60,6 +60,42 @@ it("addresses the audit summary to creators and keeps machine checks out of thei
   assert.match(prompt, /summary.*面向创作者/);
   assert.match(prompt, /不要.*字段名.*路径.*英文枚举/);
   assert.match(prompt, /技术核对.*assessments.*evidence/);
+});
+
+it("keeps complete scoring sentences in all four assembled role prompts", () => {
+  const scoringSentences = [
+    "【评分规则】",
+    "先判断当前字段评的是什么，再寻找当前输入支持的可观察证据，最后选取分档。不要先写 80 或 90，再补理由。",
+    "来源缺失、观察不足与已观察失败分别描述。必要信息不足时，不能凭题材印象给出 90 分以上。",
+    "评分只表示当前职责与阶段下的判断。选题分不证明素材已经取得；报告分不证明作品通过；安全与事实硬冲突不能由其他高分抵消。",
+    "修订轮重新核对与改动有关的评分证据；没有变化的评分依据，不因 blocking 关闭而自动加分。",
+  ];
+  for (const kind of ["role-audit", "topic-ideas", "visual-review", "asset-rank"] as const) {
+    const prompt = taskPromptFor(kind);
+    const assembled = [prompt.directive, prompt.task, ...prompt.outputRules, ...prompt.examples].join("\n");
+    for (const sentence of scoringSentences) {
+      assert.equal(assembled.split(sentence).length - 1, 1, `${kind} must contain one intact scoring rule: ${sentence}`);
+    }
+  }
+});
+
+it("judges adopted creative intent without imposing a generic narrative arc", () => {
+  const treatment = taskPromptFor("creative-treatment");
+  const director = taskPromptFor("director-plan");
+  const audit = taskPromptFor("role-audit");
+  const review = taskPromptFor("visual-review");
+  assert.match(treatment.directive, /观察.*留白.*开放结尾/);
+  assert.match(treatment.directive, /concept.*不复述.*预算授权.*系统时长/);
+  assert.match(treatment.directive, /镜头、节奏、声音与有意留白/);
+  assert.match(treatment.directive, /真实依赖或能力冲突.*evidenceRequirements.*feasibilityQuestions/);
+  assert.match(director.directive, /保持用户意图与已采用内容/);
+  assert.doesNotMatch(director.directive, /核心观众收益/);
+  assert.match(audit.directive, /用户明确要求.*揭示、反转或结果.*仍须核对/);
+  const pacing = review.outputRules.join("\n").split("\n").find((line) => line.startsWith("pacing——"));
+  assert.ok(pacing);
+  assert.match(pacing, /已采用的表达.*停留与变化适合本片内容/);
+  assert.doesNotMatch(pacing, /推进和兑现|保持与回收|关键兑现/);
+  assert.match(audit.directive, /当前流水线拿不到的用户专属材料不能留到下游碰运气/);
 });
 
 function validDirectorPlan() {
@@ -283,21 +319,21 @@ describe("broker-owned task definitions", () => {
     assert.deepEqual(
       [topic.version, series.version, treatment.version, script.version, director.version],
       [
-        "video-factory/topic-editor-v12",
+        "video-factory/topic-editor-v13",
         "video-factory/series-showrunner-v4",
-        "video-factory/treatment-director-v10",
+        "video-factory/treatment-director-v11",
       "video-factory/screenwriter-v22",
-        "video-factory/director-v31",
+        "video-factory/director-v32",
       ],
     );
     assert.deepEqual(
       [publish.version, rank.version, reference.version, review.version, audit.version],
       [
         "video-factory/publish-editor-v4",
-        "video-factory/asset-rank-v7",
+        "video-factory/asset-rank-v8",
         "video-factory/reference-grammar-v4",
-        "video-factory/visual-review-v20",
-        "video-factory/role-audit-v12",
+        "video-factory/visual-review-v21",
+        "video-factory/role-audit-v13",
       ],
     );
 
@@ -342,10 +378,10 @@ describe("broker-owned task definitions", () => {
     assert.match(director.outputRules.join("\n"), /每个标量字段最多一句/);
     assert.match(review.directive, /scene_triplets.*opening.*middle.*closing/);
     // 证据能力规则必须按主张类型声明，且覆盖"画面之外的东西"这一类，否则模型只能靠题材猜。
-    assert.match(review.directive, /claimType 声明这条主张要靠哪类证据判定：static.*motion.*non_visual/);
-    assert.match(review.directive, /更判不了 non_visual，采多少帧也采不到声音/);
-    assert.match(review.outputRules.join("\n"), /claimType 只能是 static、motion 或 non_visual/);
-    assert.match(review.outputRules.join("\n"), /claimType=non_visual 的 finding 不可能靠抽帧证成/);
+    assert.match(review.directive, /claimType 声明证据范围：static.*state_change.*motion.*non_visual/);
+    assert.match(review.directive, /静帧不能证成连续运动或声音的成功与失败/);
+    assert.match(review.outputRules.join("\n"), /claimType 只能是 static、state_change、motion 或 non_visual/);
+    assert.match(review.outputRules.join("\n"), /motion\/non_visual 在本支路只能记 not_observed/);
     assert.ok(script.examples.some((example) => /反例/.test(example)));
     assert.ok(director.examples.some((example) => /startSeconds.*endSeconds.*action/.test(example)));
   });
@@ -418,7 +454,7 @@ describe("broker-owned task definitions", () => {
     assert.ok(creatorIssueSchema.creatorAction);
     assert.match(outputSchemaValidationErrorFor("role-audit", {
       version: "video-factory/role-audit-v2",
-      rubricVersion: "video-factory/role-quality-rubric-v2",
+      rubricVersion: "video-factory/role-quality-rubric-v3",
       verdict: "pass",
       score: 95,
       assessments: [{
@@ -528,7 +564,7 @@ describe("broker-owned task definitions", () => {
           targetNodeId: "assets",
           planningStageId: null,
           claimType: "static", evidenceStatus: "failed",
-          evidenceFrameSha256: "a".repeat(64),
+          endEvidenceFrameSha256: null, requirementId: null, evidenceFrameSha256: "a".repeat(64),
           nextAction: "rework_asset",
           category: "unknown",
           severity: "warning",
@@ -551,7 +587,7 @@ describe("broker-owned task definitions", () => {
         targetNodeId: "assets",
         planningStageId: null,
         claimType: "static", evidenceStatus: "failed",
-        evidenceFrameSha256: "not-a-sha256",
+        endEvidenceFrameSha256: null, requirementId: null, evidenceFrameSha256: "not-a-sha256",
         nextAction: "rework_asset",
         category: "continuity",
         severity: "warning",
@@ -577,7 +613,7 @@ describe("broker-owned task definitions", () => {
         targetNodeId: "assets",
         planningStageId: null,
         claimType: "static", evidenceStatus: "failed",
-        evidenceFrameSha256: "a".repeat(64),
+        endEvidenceFrameSha256: null, requirementId: null, evidenceFrameSha256: "a".repeat(64),
         nextAction: "rework_asset",
         category: "continuity",
         severity: "warning",
@@ -592,7 +628,7 @@ describe("broker-owned task definitions", () => {
         startTimecodeMs: 0,
         endTimecodeMs: 500,
         claimType: "static", evidenceStatus: "failed",
-        evidenceFrameSha256: "a".repeat(64),
+        endEvidenceFrameSha256: null, requirementId: null, evidenceFrameSha256: "a".repeat(64),
         nextAction: "rework_asset",
         category: "other",
         severity: "warning",
@@ -611,7 +647,7 @@ describe("broker-owned task definitions", () => {
         scenePosition: 1,
         targetNodeId: "creative-planning", planningStageId: "script",
         claimType: "static", evidenceStatus: "failed",
-        evidenceFrameSha256: "a".repeat(64),
+        endEvidenceFrameSha256: null, requirementId: null, evidenceFrameSha256: "a".repeat(64),
         nextAction: "replan_upstream",
         category: "pacing",
         severity: "warning",
@@ -787,7 +823,7 @@ describe("broker-owned task definitions", () => {
 
   it("accepts free-form concepts without required storytelling beats", () => {
     const prompt = taskPromptFor("creative-treatment");
-    assert.equal(prompt.version, "video-factory/treatment-director-v10");
+    assert.equal(prompt.version, "video-factory/treatment-director-v11");
     assert.match(prompt.directive, /不预设开场钩子/);
     assert.match(prompt.directive, /suppliedSourceIds 只能引用 suppliedSources/);
     assert.match(prompt.directive, /reworkInstruction/);
@@ -816,7 +852,7 @@ describe("broker-owned task definitions", () => {
   it("pins the creative-treatment semantic rules version that owns the whitespace contract", () => {
     assert.equal(
       taskContractDescriptorFor("creative-treatment").semanticRulesVersion,
-      "creative-treatment-semantics-v14|production-capabilities-v4|host-readiness-v2|rework-instruction-v1|series-context-v2",
+      "creative-treatment-semantics-v15|production-capabilities-v4|host-readiness-v2|rework-instruction-v1|series-context-v2",
     );
   });
 });

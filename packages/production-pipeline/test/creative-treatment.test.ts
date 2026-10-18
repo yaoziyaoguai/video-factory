@@ -192,7 +192,7 @@ test("必填顶层数组缺失被拒绝，显式空数组仍然合法", () => {
 
 const passingAudit = {
   version: "video-factory/role-audit-v2",
-  rubricVersion: "video-factory/role-quality-rubric-v2",
+  rubricVersion: "video-factory/role-quality-rubric-v3",
   assessments: [{
     targetPath: "",
     dimensions: [{ dimension: "consistency", score: 95, evidence: "开场提出一个具体判断。" }, { dimension: "expression", score: 95, evidence: "承诺表述自然可读。" }],
@@ -270,6 +270,11 @@ test("producer 将合同 fixture 转换为 CreativeTreatment 并复用 role-audi
   } }).context;
   assert.equal("productionCapabilities" in context.upstreamFacts, false);
   assert.ok(context.currentRoleContract.productionCapabilities, "完整能力仍供审计使用");
+  const boundary = String(context.currentRoleContract.treatmentBoundary);
+  assert.match(boundary, /本片内容与表达方式/);
+  assert.match(boundary, /镜头、节奏、声音与有意留白/);
+  assert.match(boundary, /不复述费用、预算授权或系统时长政策/);
+  assert.match(boundary, /真实依赖或能力冲突.*evidenceRequirements.*feasibilityQuestions/);
 });
 
 test("content-led reference and single-ended commitment survive treatment and audit inputs", async () => {
