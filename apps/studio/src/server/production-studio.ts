@@ -1,3 +1,4 @@
+import { loadStockProgress, stockProgressLabel } from "./stock-progress.js";
 import { createHash, randomUUID } from "node:crypto";
 import { holdMaintenanceWork } from "@video-factory/production-pipeline/maintenance";
 import { mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -13,6 +14,7 @@ import {
   scriptSceneText,
   canRetryRejectedReviewNode,
   canRetryNativeAudioNode,
+  canRetryStockPreparation,
   type ProductionNodeRetryOptions,
   canonicalProductionAssetIntentDigest,
   canonicalQualityContractDigest,
@@ -1798,6 +1800,7 @@ export class ProductionStudio {
       conflicts: creativeDraftConflicts(stageState?.conflicts),
       returnTargets,
       draft: structuredClone(stageState?.currentDocument),
+      ...(Array.isArray(output?.candidatePreviews) ? { candidatePreviews: creativeCandidatePreviews(output.candidatePreviews) } : {}),
       ...(stageState?.previousDocument !== null && stageState?.previousDocument !== undefined
         ? { previousDraft: structuredClone(stageState.previousDocument) }
         : {}),
@@ -3474,7 +3477,7 @@ export class ProductionStudio {
       && current.nodeRuns.find((node) => node.nodeId === nodeId)?.status === "failed";
     const retryingIncompleteSourceReview = current.status === "needs_human"
       && current.nodeRuns.find((node) => node.nodeId === nodeId)?.intervention?.kind === "source_review_retry";
-    if (!retryingFailure && !retryingIncompleteSourceReview && !canRetryRejectedReviewNode(current, nodeId) && !retryNativeAudio) {
+    if (!retryingFailure && !retryingIncompleteSourceReview && !canRetryRejectedReviewNode(current, nodeId) && !retryNativeAudio && !canRetryStockPreparation(current, nodeId)) {
       throw new StudioConflictError("这个节点当前不能重试，请刷新页面检查最新状态。");
     }
     assertExecutableRunContinuation(current);
@@ -3772,11 +3775,16 @@ async function withAgentLoopProgress(
       workflowOperationRequestId,
     );
     const activeProgress = progress && ["producing", "auditing", "repairing"].includes(progress.phase);
-    return progress && (!activeProgress || node.status === "running") ? { ...node, agentLoopProgress: progress } : node;
+    const stockProgress = ["running", "needs_human"].includes(node.status)
+      ? await loadStockProgress(workspaceRoot, detail.id, node.id, workflowOperationRequestId) : undefined;
+    return { ...node, ...(progress && (!activeProgress || node.status === "running") ? { agentLoopProgress: progress } : {}),
+      ...(stockProgress ? { stockProgress } : {}) };
+
   }));
   const active = nodes.find((node) => node.id === detail.currentAction?.nodeId)
     ?? nodes.find((node) => node.status === "running");
-  const actionLabel = active?.agentLoopProgress
+  const stockActive = active?.stockProgress && active.stockProgress.scenes.some(scene => ["searching", "downloading", "retrying"].includes(scene.state));
+  const actionLabel = stockActive ? stockProgressLabel(active.stockProgress!) : active?.agentLoopProgress
     ? agentLoopActionLabel(active.agentLoopProgress.role ?? active.role ?? "制作角色", active.agentLoopProgress)
     : undefined;
   return {
@@ -6207,4 +6215,22 @@ function creativeReviewCommandDraft(
     ...(input.expectedCheckIdentity === undefined ? {} : { expectedCheckIdentity: input.expectedCheckIdentity }),
     ...(input.durationAmendment ? { durationAmendment: input.durationAmendment } : {}),
   };
+}
+
+
+function creativeCandidatePreviews(value: unknown[]): import("../shared/api.js").StudioCandidatePreview[] {
+  const publicUrl = (value: unknown) => {
+    if (typeof value !== "string") return undefined;
+    try { const url = new URL(value); return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password ? value : undefined; }
+    catch { return undefined; }
+  };
+  return value.filter(isRecord).flatMap(scene => {
+    if (!Number.isSafeInteger(scene.scenePosition) || Number(scene.scenePosition) < 1 || !Array.isArray(scene.candidates)) return [];
+    return [{ scenePosition: Number(scene.scenePosition), candidates: scene.candidates.slice(0, 3).filter(isRecord).flatMap(candidate => {
+      if (typeof candidate.provider !== "string" || typeof candidate.assetId !== "string") return [];
+      const previewUrl = publicUrl(candidate.previewUrl), sourceUrl = publicUrl(candidate.sourceUrl);
+      return [{ provider: candidate.provider, assetId: candidate.assetId, visualReviewed: candidate.visualReviewed === true,
+        ...(previewUrl ? { previewUrl } : {}), ...(sourceUrl ? { sourceUrl } : {}) }];
+    }) }];
+  });
 }

@@ -104,7 +104,7 @@ function CostRanking({ title, groups, kind }: { title: string; groups: StudioCos
     const amount = group.actualCostCny;
     const label = kind === "provider" ? providerLabel(group.id) ?? group.label
       : group.id === "series.planning" ? "系列策划" : group.id === "topic.planning" ? "选题策划" : runNodeLabel(group.id);
-    return <div key={group.id}><span><b>{label}</b><small>{group.calls} 次执行</small></span><i><span style={{ width: `${Math.max(4, amount / max * 100)}%` }} /></i><strong>{group.actualPendingCount > 0 ? `¥${group.actualCostCny.toFixed(2)} + ${group.actualPendingCount} 笔待确认` : `¥${group.actualCostCny.toFixed(2)}`}</strong></div>;
+    return <div key={group.id}><span><b>{label}</b><small>{group.calls} 次执行</small></span><i><span style={{ width: `${Math.max(4, amount / max * 100)}%` }} /></i><strong>{actualCostLabel(group)}</strong></div>;
   }) : <p>暂无调用数据</p>}</section>;
 }
 
@@ -119,7 +119,8 @@ function capabilityLabel(line: StudioCostRunDetail["lines"][number], providers?:
   return model === provider ? provider : `${provider} · ${model}`;
 }
 
-function actualCostLabel(totals: StudioCostTotals): string {
+export function actualCostLabel(totals: Pick<StudioCostTotals, "actualPendingCount" | "actualCostCny">): string {
+  if (totals.actualPendingCount > 0 && totals.actualCostCny === 0) return `金额待核 · ${totals.actualPendingCount} 笔`;
   return totals.actualPendingCount > 0
     ? `¥${totals.actualCostCny.toFixed(2)} 已记录 + ${totals.actualPendingCount} 笔待确认`
     : `¥${totals.actualCostCny.toFixed(2)}`;

@@ -335,7 +335,7 @@ describe("durable task lifecycle v3", () => {
       client: new CodexBridgeClient({ socketPath, timeoutMs: 2_000, pollIntervalMs: 10, maxAttempts: 1 }),
       providerId: "codex-asset-ranker-v1",
       modelId: "fixture-model",
-      fetchThumbnail: async () => undefined,
+      fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0xff, 0xd9]),
     });
     const report = {
       version: "video-factory/asset-candidates-v1" as const,

@@ -8,7 +8,7 @@ import subprocess
 import time
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from urllib.error import HTTPError, URLError
 from dataclasses import asdict, dataclass, replace
@@ -18,6 +18,7 @@ from threading import Lock
 from typing import Callable, Iterable, List, Optional
 
 from .domain import Scene, SceneAsset, StockAssetCandidate
+from .stock_execution import StockExecution, StockPreparationStopped
 from .stock_cache import cached_pixabay_response
 from .wikimedia import normalize_images as normalize_wikimedia_images, normalize_videos as normalize_wikimedia_videos
 from .asset_transport import AssetNetworkError, open_asset_request, remaining, validate_asset_download_url
@@ -186,7 +187,7 @@ def search_routed_scene_asset_candidates(
     director_plan: dict,
     media_type: str = "video",
     limit: int = 6,
-    *, deadline: Optional[float] = None,
+    *, deadline: Optional[float] = None, execution: Optional[StockExecution] = None,
 ) -> tuple[Path, Path]:
     scene_list = list(scenes)
     shots = director_plan.get("shots")
@@ -239,18 +240,24 @@ def search_routed_scene_asset_candidates(
             provider = stock_provider_name(provider_id)
             stock_query = resolve_director_stock_query(scene, director_query)
             provider_search_attempts += 1
+            if execution is not None:
+                execution.progress(scene.position, len(scene_list), "searching", provider)
             try:
                 candidates = search_stock_query_variants(provider, stock_query, scene.search_terms, route_media_type, limit,
                                                         query_cache=query_cache, deadline=deadline)
             except Exception as error:
                 # 单一可替代来源的任何异常都只记为该来源失败，其余来源的候选照常交付（DF-03）。
                 # 公开报告只携带受控投影字段（类型/HTTP 状态/缺密钥提示），不带异常原文（R3-06）。
+                if execution is not None:
+                    execution.progress(scene.position, len(scene_list), "retrying", provider)
                 search_errors.append({
                     "provider_id": provider_id,
                     **public_provider_error_fields(error),
                 })
                 continue
             provider_search_successes += 1
+            if execution is not None:
+                execution.progress(scene.position, len(scene_list), "searching", provider, len(public_candidates))
             for candidate in candidates:
                 original = candidate.source_url or candidate.download_url
                 if original in seen_originals:
@@ -284,6 +291,8 @@ def search_routed_scene_asset_candidates(
             "scene_position": scene.position,
             "candidates": private_candidates,
         })
+        if execution is not None:
+            execution.progress(scene.position, len(scene_list), "completed", candidates=len(public_candidates))
     output = default_asset_search_report_path(workspace, job_id)
     inventory_output = default_asset_candidate_inventory_path(workspace, job_id)
     if provider_search_attempts > 0 and provider_search_successes == 0:
@@ -318,27 +327,55 @@ def prepare_scene_assets(
     media_type: str = "video",
     limit: int = 3,
     required_source_ends: Optional[dict[int, float]] = None,
+    reusable_assets: Optional[list[dict]] = None,
+    execution: Optional[StockExecution] = None,
 ) -> Path:
     asset_dir = workspace / "assets" / f"job-{job_id}"
     asset_dir.mkdir(parents=True, exist_ok=True)
     scene_assets: List[SceneAsset] = []
-
-    for scene in scenes:
-        query = query_for_scene(scene)
-        candidates = search_stock_assets(
-            provider=provider,
-            query=query,
-            media_type=media_type,
-            limit=limit,
-        )
-        if not candidates:
-            raise RuntimeError(f"No {provider} {media_type} asset found for scene {scene.position}: {query}")
-        failures: list[str] = []
-        asset = materialize_first_candidate(scene, candidates, asset_dir, failures=failures,
-                                            required_source_end=required_source_ends.get(scene.position) if required_source_ends else None)
-        if asset is None:
-            raise RuntimeError(f"No downloadable {provider} {media_type} asset found for scene {scene.position}: {'; '.join(failures)}")
-        scene_assets.append(asset)
+    scene_list = list(scenes)
+    try:
+        for scene in scene_list:
+            if execution is not None:
+                execution.check()
+                execution.progress(scene.position, len(scene_list), "searching", provider)
+            query = query_for_scene(scene)
+            try:
+                candidates = search_stock_assets(
+                    provider=provider, query=query, media_type=media_type, limit=limit,
+                    **({"deadline": execution.deadline} if execution and execution.deadline is not None else {}),
+                )
+            except RuntimeError:
+                if execution is not None:
+                    execution.check()
+                raise
+            if execution is not None:
+                execution.check()
+            if not candidates:
+                raise RuntimeError(f"No {provider} {media_type} asset found for scene {scene.position}: {query}")
+            reusable = {(item["provider"], item["assetId"]): item for item in (reusable_assets or [])
+                        if item["scenePosition"] == scene.position}
+            candidates.sort(key=lambda item: (item.provider, item.asset_id) not in reusable)
+            failures: list[str] = []
+            asset = materialize_first_candidate(scene, candidates, asset_dir, failures=failures,
+                required_source_end=required_source_ends.get(scene.position) if required_source_ends else None,
+                reusable_assets=reusable, execution=execution, total_scenes=len(scene_list))
+            if asset is None:
+                if execution is not None:
+                    raise StockPreparationStopped("STOCK_PREPARATION_UNAVAILABLE", f"镜头 {scene.position} 的候选未能完整获取或不满足所需时长，请检查网络或更换候选。")
+                raise RuntimeError(f"No downloadable {provider} {media_type} asset found for scene {scene.position}: {'; '.join(failures)}")
+            scene_assets.append(asset)
+            if execution is not None:
+                execution.progress(scene.position, len(scene_list), "completed", provider)
+    except StockPreparationStopped as error:
+        if execution is not None:
+            execution.progress(scene.position, len(scene_list), "stopped", provider)
+        plan_path = write_asset_plan(default_asset_plan_path(workspace, job_id), job_id, scene_assets)
+        partial = load_asset_plan(plan_path)
+        partial["preparation_complete"] = False
+        plan_path.write_text(json.dumps(partial, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        error.plan_path = plan_path
+        raise
 
     return write_asset_plan(default_asset_plan_path(workspace, job_id), job_id, scene_assets)
 
@@ -355,6 +392,7 @@ def prepare_routed_scene_assets(
     accepted_quality_scenes: Optional[set[int]] = None,
     required_source_ends: Optional[dict[int, float]] = None,
     reusable_assets: Optional[list[dict]] = None,
+    execution: Optional[StockExecution] = None,
 ) -> Path:
     asset_dir = workspace / "assets" / f"job-{job_id}"
     asset_dir.mkdir(parents=True, exist_ok=True)
@@ -403,6 +441,8 @@ def prepare_routed_scene_assets(
             claimed_stock_assets.discard((candidate.provider, candidate.asset_id))
 
     def prepare_scene(scene: Scene):
+        if execution is not None:
+            execution.check()
         route = routes.get(scene.position)
         if route is None:
             raise ValueError(f"Director plan is missing scene {scene.position}")
@@ -430,6 +470,7 @@ def prepare_routed_scene_assets(
             f"{provider}-stock-v1" for provider, _ in reusable
         })
         duplicate_options: list[tuple[str, List[StockAssetCandidate]]] = []
+        attempted_assets: set[tuple[str, str]] = set()
         editorial_card = is_explicit_editorial_card(preferred_id, delivery_type)
 
         if preferred_id == "local-editorial-v1":
@@ -453,6 +494,8 @@ def prepare_routed_scene_assets(
 
         for provider_id in provider_ids if actual_asset is None else []:
             try:
+                if execution is not None:
+                    execution.check()
                 if is_generative_provider(provider_id):
                     materialization_notes.append(
                         f"{provider_id}: skipped because generated-provider alternatives require an explicit rerun"
@@ -468,7 +511,8 @@ def prepare_routed_scene_assets(
                 discovered_candidates = (
                     list(inventory_by_scene.get(scene.position, {}).get(provider_id, []))
                     if candidate_inventory is not None
-                    else search_stock_query_variants(provider, stock_query, scene.search_terms, route_media_type, limit)
+                    else search_stock_query_variants(provider, stock_query, scene.search_terms, route_media_type, limit,
+                        **({"deadline": execution.deadline} if execution and execution.deadline is not None else {}))
                 )
                 candidates = reorder_candidates(discovered_candidates, ranking_by_scene.get(scene.position, []) if candidate_ranking is not None else None)
                 candidates.sort(key=lambda item: (item.provider, item.asset_id) not in reusable)
@@ -486,12 +530,17 @@ def prepare_routed_scene_assets(
                     failures=materialization_notes,
                     required_source_end=source_ends[scene.position],
                     reusable_assets=reusable,
+                    execution=execution, total_scenes=len(scene_list), attempted_assets=attempted_assets,
                 )
                 if actual_asset is not None:
                     actual_provider_id = provider_id
                     break
                 errors.append(f"{provider_id}: no downloadable candidates")
+            except StockPreparationStopped:
+                raise
             except (RuntimeError, ValueError) as error:
+                if execution is not None:
+                    execution.check()
                 errors.append(f"{provider_id}: {error}")
 
         if actual_asset is None:
@@ -503,13 +552,18 @@ def prepare_routed_scene_assets(
                     failures=materialization_notes,
                     required_source_end=source_ends[scene.position],
                     reusable_assets=reusable,
+                    execution=execution, total_scenes=len(scene_list), attempted_assets=attempted_assets,
                 )
                 if actual_asset is not None:
                     actual_provider_id = provider_id
                     break
 
         if actual_asset is None or actual_provider_id is None:
+            if execution is not None:
+                execution.check()
             details = [*errors, *materialization_notes]
+            if any(candidates for _, candidates in duplicate_options):
+                raise StockPreparationStopped("STOCK_PREPARATION_UNAVAILABLE", f"镜头 {scene.position} 的候选未能完整获取或不满足所需时长，请检查网络或更换候选。")
             raise RuntimeError(
                 f"No director-selected asset could be prepared for scene {scene.position}: {'; '.join(details)}"
             )
@@ -559,12 +613,29 @@ def prepare_routed_scene_assets(
         return actual_asset, routing_record
 
     primary_scenes = [scene for scene in scene_list if scene.position not in reuse_sources]
+    prepared_by_scene = {}
+    stopped = None
     with ThreadPoolExecutor(max_workers=min(ASSET_PREPARE_WORKERS, max(1, len(primary_scenes)))) as executor:
-        primary_prepared = list(executor.map(prepare_scene, primary_scenes))
-    prepared_by_scene = {
-        scene.position: prepared
-        for scene, prepared in zip(primary_scenes, primary_prepared)
-    }
+        futures = {executor.submit(prepare_scene, scene): scene for scene in primary_scenes}
+        for future in as_completed(futures):
+            scene = futures[future]
+            try:
+                prepared_by_scene[scene.position] = future.result()
+                if execution is not None:
+                    execution.progress(scene.position, len(scene_list), "completed", prepared_by_scene[scene.position][0].provider)
+            except StockPreparationStopped as error:
+                stopped = error
+                if execution is not None:
+                    execution.progress(scene.position, len(scene_list), "stopped")
+    if stopped is not None:
+        # 未完成计划只保存已验证的免费素材，不能进入渲染；恢复时仍按当前候选与时长校验。
+        completed = [item for _, item in sorted(prepared_by_scene.items()) if not item[1].get("generation_pending")]
+        plan_path = write_asset_plan(default_asset_plan_path(workspace, job_id), job_id, [item[0] for item in completed])
+        partial = load_asset_plan(plan_path)
+        partial.update(preparation_complete=False, director_routing=[item[1] for item in completed])
+        plan_path.write_text(json.dumps(partial, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        stopped.plan_path = plan_path
+        raise stopped
     pending_reuse = {scene.position: scene for scene in scene_list if scene.position in reuse_sources}
     while pending_reuse:
         resolved_positions = []
@@ -773,11 +844,16 @@ def materialize_first_candidate(
     failures: Optional[list[str]] = None,
     required_source_end: Optional[float] = None,
     reusable_assets: Optional[dict[tuple[str, str], dict]] = None,
+    execution: Optional[StockExecution] = None,
+    total_scenes: int = 1,
+    attempted_assets: Optional[set[tuple[str, str]]] = None,
 ) -> Optional[SceneAsset]:
     source_end = scene.duration if required_source_end is None else required_source_end
     if not math.isfinite(source_end) or source_end < scene.duration:
         raise ValueError("Required source interval is invalid")
     for candidate in candidates:
+        if execution is not None:
+            execution.check()
         # 图库整秒元数据可能向下取整；仅明确不够的先排除，其余由下载后的真实媒体复核。
         reported_duration = candidate.duration
         if (candidate.media_type == "video" and reported_duration > 0
@@ -786,10 +862,15 @@ def materialize_first_candidate(
             if failures is not None:
                 failures.append(f"{candidate.provider}:{candidate.asset_id}: 素材时长不足以覆盖镜头所需区间")
             continue
-        reusable = (reusable_assets or {}).get((candidate.provider, candidate.asset_id))
+        asset_key = (candidate.provider, candidate.asset_id)
+        if attempted_assets is not None and asset_key in attempted_assets:
+            continue
+        reusable = (reusable_assets or {}).get(asset_key)
         claimed = claim(candidate) if claim is not None else False
         if claim is not None and not claimed and reusable is None:
             continue
+        if attempted_assets is not None:
+            attempted_assets.add(asset_key)
         try:
             target = asset_dir / local_filename(scene.position, candidate)
             if reusable is not None:
@@ -801,13 +882,20 @@ def materialize_first_candidate(
                     raise RuntimeError("素材复用期间内容发生变化，不能采用")
                 actual_path = target
             else:
-                actual_path = materialize_candidate(candidate, target)
+                if execution is not None:
+                    execution.progress(scene.position, total_scenes, "downloading", candidate.provider)
+                actual_path = materialize_candidate(candidate, target, **({"execution": execution} if execution else {}))
             candidate = inspect_open_stock_file(candidate, actual_path)
             if candidate.media_type == "video" and candidate.duration + 1e-6 < source_end:
                 raise RuntimeError(f"素材实际时长 {candidate.duration:g} 秒不足以覆盖所需 {source_end:g} 秒")
         except RuntimeError as error:
             if release is not None and claimed:
                 release(candidate)
+            if isinstance(error, StockPreparationStopped):
+                raise
+            if execution is not None:
+                execution.progress(scene.position, total_scenes, "retrying", candidate.provider)
+                execution.check()
             if failures is not None:
                 failures.append(f"{candidate.provider}:{candidate.asset_id}: {error}")
             continue
@@ -1688,9 +1776,10 @@ def materialize_candidate(
     candidate: StockAssetCandidate,
     local_path: Path,
     opener: Optional[Callable] = None,
+    execution: Optional[StockExecution] = None,
 ) -> Path:
     with diagnostic_span('stock.materialize', provider=candidate.provider, mediaType=candidate.media_type) as facts:
-        result = _materialize_candidate(candidate, local_path, opener)
+        result = _materialize_candidate(candidate, local_path, opener, execution)
         facts['bytes'] = result.stat().st_size
         return result
 
@@ -1699,7 +1788,10 @@ def _materialize_candidate(
     candidate: StockAssetCandidate,
     local_path: Path,
     opener: Optional[Callable] = None,
+    execution: Optional[StockExecution] = None,
 ) -> Path:
+    if execution is not None:
+        execution.check()
     if candidate.provider == 'flickr':
         validate_flickr_adoption(candidate, flickr_api_client())
     if candidate.provider == "unsplash":
@@ -1723,13 +1815,18 @@ def _materialize_candidate(
     local_path.parent.mkdir(parents=True, exist_ok=True)
     if candidate.download_url.startswith("mock://"):
         return write_mock_image(candidate, local_path)
-    deadline = time.monotonic() + MAX_ASSET_REQUEST_SECONDS
+    if execution is not None:
+        execution.check()
+    deadline = min(time.monotonic() + MAX_ASSET_REQUEST_SECONDS,
+                   execution.deadline if execution is not None and execution.deadline is not None else math.inf)
     if opener is not None:
         validate_asset_download_url(candidate.download_url, timeout=remaining(deadline))
     request = urllib.request.Request(candidate.download_url, headers=download_headers(candidate.source_url))
     active_opener = opener or open_asset_request
     max_bytes = MAX_IMAGE_DOWNLOAD_BYTES if candidate.media_type == 'image' else MAX_ASSET_DOWNLOAD_BYTES
     for attempt in range(1, ASSET_DOWNLOAD_ATTEMPTS + 1):
+        if execution is not None:
+            execution.check()
         try:
             with active_opener(request, timeout=remaining(deadline)) as response:
                 validate_asset_content_type(candidate.media_type, response.headers.get("Content-Type"))
@@ -1740,7 +1837,7 @@ def _materialize_candidate(
                     )
                 # 连接、重试与正文共用原请求期限；不在正文层提前丢弃仍有预算的有效下载。
                 write_response_body(response, local_path, max_bytes,
-                                    max_seconds=remaining(deadline))
+                                    max_seconds=remaining(deadline), execution=execution)
                 if content_length > 0 and local_path.stat().st_size != content_length:
                     local_path.unlink(missing_ok=True)
                     raise RuntimeError(f'Asset download is incomplete for {candidate.provider}:{candidate.asset_id}')
@@ -1788,6 +1885,7 @@ def write_response_body(
     max_bytes: int,
     max_seconds: float = MAX_ASSET_DOWNLOAD_SECONDS,
     clock: Callable[[], float] = time.monotonic,
+    execution: Optional[StockExecution] = None,
 ) -> None:
     downloaded = 0
     started_at = clock()
@@ -1795,6 +1893,8 @@ def write_response_body(
     try:
         with local_path.open("wb") as output:
             while True:
+                if execution is not None:
+                    execution.check()
                 if clock() - started_at > max_seconds:
                     raise RuntimeError(f"Asset download timed out after {max_seconds:g}s: {local_path}")
                 # read1 returns currently buffered bytes instead of waiting to fill a large chunk.

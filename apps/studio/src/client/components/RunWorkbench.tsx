@@ -8,7 +8,7 @@ import { WorkbenchFiles, WorkbenchNavigation, WorkbenchRecords, WorkbenchStages,
 import { agentLoopPendingNote, agentLoopPhaseLabel, creatorFacingTechnicalText, creatorRunStatusLabel, platformLabel, providerLabel, reviewProviderLabel, catalogModelLabel, runNodeLabel, RUN_NODE_LABELS, sourceAssetReviewBreakdown } from "../presentation.js";
 import { NodeExecutionConfigurationEditor, NodeWorkspace, revealNodeWorkspace } from "./NodeWorkspace.js";
 import { nodeContentReview } from "./NodeContentReview.js";
-import { RunCostDetailPanel } from "./CostDashboard.js";
+import { RunCostDetailPanel, actualCostLabel } from "./CostDashboard.js";
 import { AudioReviewPanel } from "./AudioReviewPanel.js";
 import { CurrentFilmReinspection } from "./CurrentFilmReinspection.js";
 import { SubtitleRecoveryPanel } from "./SubtitleRecoveryPanel.js";
@@ -216,7 +216,9 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
   const activeSpendNode = readOnly ? undefined : creatorNodes.find((node) => node.status === "awaiting_spend_approval" || node.status === "approval_invalidated");
   const decidingDocument = ["publish-package", "reference-grammar"].includes(run.activeIntervention?.nodeId ?? "");
   const decidingPublishCopy = run.activeIntervention?.nodeId === "publish-package";
+  const stockPreparationStopped = run.activeIntervention?.kind === "stock_preparation_retry";
   const currentArtifactNode = (!video?.contentUrl || decidingDocument) && !creativeDiscussion && run.activeIntervention?.kind !== "creative_review"
+    && (!stockPreparationStopped || run.artifacts.some(artifact => artifact.producerNodeId === "assets" && artifact.kind === "media_asset"))
     ? creatorNodes.find((node) => node.id === (run.activeIntervention?.nodeId ?? (isStoppedStatus(run.status) ? run.currentNodeId : undefined)) && node.id !== activeSpendNode?.id)
     : undefined;
   const remainingCreatorNodes = creatorNodes.filter((node) => node.id !== activeSpendNode?.id && node.id !== currentArtifactNode?.id);
@@ -613,9 +615,10 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
 
       <div id="run-current" className="run-current-workspace" hidden={section !== "work" && section !== "review"}>
       <div className="workbench-current-task" hidden={section !== "work"}>
-      {creativeDiscussion}
+      <div hidden={run.status === "running" && run.activeIntervention?.kind !== "creative_review"}>{creativeDiscussion}</div>
       {!readOnly && !creativeDiscussion && run.activeIntervention?.kind === "creative_review" ? <p className="workspace-loading" role="status">正在读取当前方案与讨论。读取完成后才能确认此版本。</p> : null}
-      {!showReviewSurface && !readOnly && !creativeDiscussion && run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
+      {!showReviewSurface && !readOnly && !creativeDiscussion && run.status === "needs_human" && run.activeIntervention
+        && !stockPreparationStopped ? <CurrentDecisionBar run={run} /> : null}
       {activeSpendNode ? <section className="current-production-action" aria-labelledby="current-production-action-title">
         <header>
           <div><p className="eyebrow">当前需要处理</p><h2 id="current-production-action-title">现在需要你：确认{stepNameFor(activeSpendNode, activeSpendNode.label)}</h2></div>
@@ -627,15 +630,16 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
         <header><div><p className="eyebrow">自动制作中</p><h2>{runningNodeLabel(run)}</h2></div><StatusBadge status={run.status} /></header>
         <p>{creatorFacingTechnicalText(run.currentAction?.label) ?? runStateMessage(run)}</p>
         {run.progress ? <div className="run-live-metrics">
-          <span><Activity aria-hidden="true" size={15} /><strong>{run.progress.completedNodes} / {run.progress.totalNodes}</strong> 个步骤完成</span>
+          {run.currentNodeId !== "creative-planning" ? <span><Activity aria-hidden="true" size={15} /><strong>{run.progress.completedNodes} / {run.progress.totalNodes}</strong> 个步骤完成</span> : null}
           <span><Clock3 aria-hidden="true" size={15} />{run.progress.currentNodeElapsedSeconds !== undefined ? "当前步骤" : "累计处理"} <strong>{formatDuration(run.progress.currentNodeElapsedSeconds ?? run.progress.elapsedSeconds)}</strong></span>
           <span>{etaLabel(run.progress)}</span>
           <span>制作状态更新于 {formatClock(run.progress.lastUpdatedAt)}</span>
-          {costDetail ? <span>已记录费用 <strong>¥{costDetail.totals.actualCostCny.toFixed(2)}</strong>{costDetail.totals.actualPendingCount ? ` · ${costDetail.totals.actualPendingCount} 笔待确认是否扣费` : ""}</span> : null}
+          {costDetail ? <span>费用 <strong>{actualCostLabel(costDetail.totals)}</strong></span> : null}
           {connectionHeartbeatAt ? <span className="run-connection-live"><i aria-hidden="true" />制作服务连接刚刚确认</span> : null}
         </div> : null}
+        {run.nodes.find(node => node.id === run.currentNodeId)?.stockProgress ? <StockProgress progress={run.nodes.find(node => node.id === run.currentNodeId)!.stockProgress!} /> : null}
         {activeNodeModel(run, providers) ? <p className="run-active-provider">当前能力：{activeNodeModel(run, providers)}</p> : null}
-        {onRequestPause ? <button className="button button-ghost run-pause-button" type="button" disabled={pausePending || run.pauseRequested === true} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{run.pauseRequested ? "当前步骤完成后暂停" : "暂停后检查或修改"}</button> : null}
+        {onRequestPause ? <button className="button button-ghost run-pause-button" type="button" disabled={pausePending || run.pauseRequested === true} onClick={() => void onRequestPause()}><Pause aria-hidden="true" size={15} />{run.pauseRequested ? run.currentNodeId === "assets" ? "正在停止获取，已完成素材会保留" : "当前步骤完成后暂停" : "暂停后检查或修改"}</button> : null}
       </section> : null}
 
       {taskRecoveryPanel}
@@ -725,7 +729,7 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
 
         <aside className="review-panel" aria-label="审片与产物" data-tour="run-review">
           <div className="workbench-decision-content" hidden={section === "review"}>
-          {!readOnly && (video?.contentUrl || !creativeDiscussion) && run.status === "needs_human" && run.activeIntervention ? <CurrentDecisionBar run={run} /> : null}
+          {!readOnly && (video?.contentUrl || !creativeDiscussion) && run.status === "needs_human" && run.activeIntervention && !stockPreparationStopped ? <CurrentDecisionBar run={run} /> : null}
           {readOnly ? (
             <section className="run-state-panel" role="status">
               <p className="eyebrow">历史制作记录</p>
@@ -754,6 +758,18 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
                 {onRestart ? <button className="button button-secondary" type="button" disabled={nodeMutationPending || decisionPending || hasUncertainPaidOutcome(run)} onClick={onRestart}>调整方案，关联返工</button> : null}
                 <button className="button button-secondary" type="button" disabled={decisionPending || nodeMutationPending} onClick={() => openDecision("reject")}>终止制作</button>
               </div>
+            </section>
+          ) : run.activeIntervention?.kind === "stock_preparation_retry" ? (
+            <section className="intervention-panel" aria-label="免费素材获取已停止">
+              <h2>素材还没齐，已停止获取</h2>
+              <p>{run.activeIntervention.reason}</p>
+              {run.nodes.find(node => node.id === "assets")?.stockProgress ? <StockProgress progress={run.nodes.find(node => node.id === "assets")!.stockProgress!} /> : null}
+              <div className="decision-actions">
+                <button type="button" className="button button-primary" disabled={nodeMutationPending || !onRetryFailedNode}
+                  onClick={() => { void onRetryFailedNode?.("assets"); }}>继续获取素材</button>
+                <button type="button" className="button button-ghost" disabled={decisionPending} onClick={() => openDecision("reject")}>终止制作</button>
+              </div>
+              <p>继续时先复用已完成素材；如后续需要付费，仍按当前方案核对授权。</p>
             </section>
           ) : run.activeIntervention?.kind === "source_review_retry" && run.activeIntervention ? (
             <section className="intervention-panel" aria-label="试片审查暂停">
@@ -1179,7 +1195,7 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
         onSave={input => onConfigureNode!(assetConfigurationNode.id, input)}
       /> : null}
       {costDetail ? <details id="run-costs" className="secondary-cost-details run-cost-disclosure">
-        <summary><span><strong>本片调用与费用</strong><small>已记录 ¥{costDetail.totals.actualCostCny.toFixed(2)} · {costDetail.totals.actualPendingCount} 笔待确认是否扣费</small></span><b>展开</b></summary>
+        <summary><span><strong>本片调用与费用</strong><small>{actualCostLabel(costDetail.totals)}</small></span><b>展开</b></summary>
         <RunCostDetailPanel detail={costDetail} providers={providers} />
       </details> : null}
 
@@ -2478,4 +2494,17 @@ function safeRunError(message?: string): string {
     return "这一步执行失败。技术细节已保留在本地服务日志中；请先查看当前步骤的状态和可用恢复操作。";
   }
   return message;
+}
+
+
+function StockProgress({ progress }: { progress: import("../../shared/api.js").StudioStockProgress }) {
+  const completed = progress.scenes.filter(scene => scene.state === "completed").length;
+  const failures = progress.scenes.reduce((sum, scene) => sum + scene.failedAttempts, 0);
+  const labels = { searching: "正在检索", downloading: "正在下载", retrying: "获取失败，尝试其他候选", completed: "已完成", failed: "获取失败", stopped: "已停止" };
+  return <div className="stock-progress" aria-label="逐镜素材进度" aria-live="polite">
+    <p>{progress.phase === "search" ? "候选检索" : "素材获取"} · 已完成 {completed}/{progress.totalScenes} 镜{failures ? ` · ${failures} 次获取失败` : ""}</p>
+    <ul>{progress.scenes.map(scene => <li key={scene.scenePosition}>镜头 {scene.scenePosition} · {labels[scene.state]}
+      {scene.provider ? ` · ${providerLabel(`${scene.provider}-stock-v1`) ?? scene.provider}` : ""}
+      {progress.phase === "search" && scene.candidateCount ? ` · ${scene.candidateCount} 个候选` : ""}</li>)}</ul>
+  </div>;
 }

@@ -62,7 +62,7 @@ function manifest(assets: StudioIndexedAsset[]): StudioResourceManifest {
 
 const saved: StudioOpportunity = {
   id: "saved-manual", origin: "manual", title: "雨天里的一杯咖啡", platform: "douyin", track: "ordinary-life",
-  audience: "城市通勤者", painPoint: "雨天心情低落", hook: "一杯热咖啡让回家路变得温暖。", status: "draft", evidence: [],
+  audience: "城市通勤者", concept: "雨天里的一杯咖啡。\n\n不总结，只拍回家路上几个安静的瞬间。", painPoint: "", hook: "", status: "draft", evidence: [],
   score: { audienceReach: 0, visualFeasibility: 0, productionCostEfficiency: 0, novelty: 0, monetization: 0, seriesPotential: 0, complianceRisk: 0, final: 0 },
   scoreProvenance: { source: "受控人工草稿", scoredAt: "2026-10-11T00:00:00Z" },
   createdAt: "2026-10-11T00:00:00Z", updatedAt: "2026-10-11T00:00:00Z",
@@ -329,18 +329,18 @@ describe("UI/UX page refinements", () => {
     await user.click(await screen.findByRole("button", { name: "写下新想法" }));
     await user.type(screen.getByLabelText("选题标题"), saved.title);
     await user.type(screen.getByLabelText("目标受众"), saved.audience);
-    await user.type(screen.getByLabelText("核心痛点"), saved.painPoint);
-    await user.type(screen.getByLabelText("开场钩子"), saved.hook);
+    await user.type(screen.getByLabelText("创作想法"), saved.concept!);
     await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
     const next = await screen.findByRole("button", { name: "继续制作准备" });
     expect(next.closest('[role="status"]')).toHaveTextContent(saved.title);
     expect(next.closest('[role="status"]')).toHaveTextContent("保存不会生成视频或授权付费");
     expect(create).toHaveBeenCalledOnce();
-    expect(create.mock.calls[0]?.[0]).toMatchObject({ origin: "manual", title: saved.title, evidence: [] });
+    expect(create.mock.calls[0]?.[0]).toMatchObject({ origin: "manual", title: saved.title, concept: saved.concept, evidence: [] });
     await user.click(screen.getByRole("button", { name: new RegExp(other.title) }));
     await user.click(next);
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByLabelText("视频标题")).toHaveValue(saved.title);
+    expect(within(dialog).getByLabelText("内容角度")).toHaveValue(saved.concept);
     expect(start).not.toHaveBeenCalled();
     // 未配置能力的准备表单仍沿用原先的开工约束，快捷入口不能绕过。
     await waitFor(() => expect(within(dialog).getByRole("button", { name: "开始前期构思" })).toBeDisabled());
@@ -432,7 +432,7 @@ describe("UI/UX page refinements", () => {
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByLabelText("视频标题")).toHaveValue(adopted.title);
     expect(within(dialog).getByLabelText("目标受众")).toHaveValue(adopted.audience);
-    expect(within(dialog).getByLabelText("内容角度")).toHaveValue(adopted.hook);
+    expect(within(dialog).getByLabelText("内容角度")).toHaveValue(adopted.concept ?? [adopted.painPoint, adopted.hook].filter(Boolean).join("\n\n"));
     expect(start).not.toHaveBeenCalled();
   });
 });

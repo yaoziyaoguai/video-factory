@@ -153,8 +153,8 @@ describe("text task recovery UI", () => {
     const summary = screen.getByText("本片调用与费用").closest("summary")!;
     const details = summary.closest("details")!;
     expect(details).not.toHaveAttribute("open");
-    expect(summary).toHaveTextContent("已记录 ¥1.25");
-    expect(summary).toHaveTextContent("2 笔待确认是否扣费");
+    expect(summary).toHaveTextContent("¥1.25 已记录");
+    expect(summary).toHaveTextContent("2 笔待确认");
     expect(screen.getByRole("heading", { name: "调用与费用明细", hidden: true })).not.toBeVisible();
     await userEvent.click(summary);
     expect(details).toHaveAttribute("open");

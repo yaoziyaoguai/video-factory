@@ -337,7 +337,7 @@ export type {
   WorkerArtifactDescriptor,
   WorkerResponse,
 } from "./python-worker-client.js";
-export { advanceSceneCandidateRanking, canRetryRejectedReviewNode, canRetryNativeAudioNode, type ProductionNodeRetryOptions, effectiveProductionBrief, independentCreativeConsultationActions, HumanDecisionConflictError, VoiceTimingContinuationError, PaidOperationManualReconciliationError, planningFailureForCreators, ProductionPipeline, productionWorkflowVersion, summarizeReworkImpact, withBoundaryGate } from "./production-pipeline.js";
+export { advanceSceneCandidateRanking, canRetryRejectedReviewNode, canRetryNativeAudioNode, canRetryStockPreparation, type ProductionNodeRetryOptions, effectiveProductionBrief, independentCreativeConsultationActions, HumanDecisionConflictError, VoiceTimingContinuationError, PaidOperationManualReconciliationError, planningFailureForCreators, ProductionPipeline, productionWorkflowVersion, summarizeReworkImpact, withBoundaryGate } from "./production-pipeline.js";
 export {
   PRODUCTION_AUTHORIZATION_VERSION,
   canonicalProductionAssetIntentDigest,

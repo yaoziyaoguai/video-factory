@@ -6,7 +6,7 @@ import path from "node:path";
 import { readPlanningMaintenanceIntegrity, readPlanningOperations } from "../src/server/planning-operations.js";
 import { taskBinding } from "../../../packages/production-pipeline/src/codex-task-binding.js";
 import { CostStudio } from "../src/server/cost-studio.js";
-import { projectCheckpointExecutions } from "../../../packages/production-pipeline/src/model-execution-facts.js";
+import { projectRequestExecution, projectCheckpointExecutions } from "../../../packages/production-pipeline/src/model-execution-facts.js";
 
 describe("planning maintenance integrity", () => {
   function stoppedCheckpoint(key: string, kind: "series" | "topic" = "topic") {
@@ -963,4 +963,27 @@ describe("CostStudio", () => {
     assert.equal(scans, 1);
     assert.deepEqual(dashboard.runs.map((item) => item.runId), [run.id]);
   });
+});
+
+
+it("uses physical request facts to absorb an explicitly identified planning summary without inventing a bill", async () => {
+  const run = { id: "summary-run", initialInput: { title: "新的制作" }, nodeRuns: [], executionReceipts: [
+    { id: "summary", nodeId: "creative-planning", providerId: "creative-treatment-v1", modelId: "deepseek-flash",
+      billing: "subscription", startedAt: "2026-10-17T12:00:00Z", requestId: "planning-operation",
+      parameters: { accountingSource: "execution_summary", modelCallCount: 2 } },
+  ] };
+  const facts = ["request-1", "request-2"].map(requestId => projectRequestExecution({ nodeId: "creative-planning",
+    requestId, purpose: "produce", state: "completed", operationId: "planning-operation", evidenceSource: "checkpoint",
+    trace: { providerId: "deepseek", modelId: "deepseek-flash", modelAttemptCount: 1 } }));
+  const studio = new CostStudio(async () => [run], undefined, undefined, undefined,
+    async () => ({ facts, issues: [], currentOperationIds: { "creative-planning": "planning-operation" } }));
+  const result = await studio.runDetail(run.id);
+  assert.equal(result?.lines.length, 2);
+  assert.equal(result?.totals.legacyUnattributedReceipts, 0);
+  assert.equal(result?.totals.verifiedModelAttempts, 2);
+  assert.equal(result?.totals.actualPendingCount, 2, "真实金额仍待核，不能把汇总0元当作免费");
+  facts.pop();
+  const incomplete = await studio.runDetail(run.id);
+  assert.equal(incomplete?.totals.legacyUnattributedReceipts, 1, "无法完整归属时保留汇总证据");
+  assert.equal(run.executionReceipts.length, 1, "只读投影不能删除账本");
 });

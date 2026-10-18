@@ -684,9 +684,13 @@ describe("creative review confirm API contract", () => {
 
 describe("manual opportunity source contract (DG-UX-02)", () => {
   it("accepts an explicit manual opportunity with no reference links", () => {
-    const parsed = parseStudioOpportunityInput({ ...validOpportunity, origin: "manual", evidence: [] });
+    const parsed = parseStudioOpportunityInput({ ...validOpportunity, origin: "manual", concept: "雨停后的街角。\n留一点空白。", audience: "", evidence: [] });
     assert.deepEqual(parsed.evidence, []);
     assert.equal(parsed.origin, "manual");
+    assert.equal(parsed.concept, "雨停后的街角。\n留一点空白。");
+    assert.equal(parsed.audience, "");
+    assert.equal(parsed.painPoint, "");
+    assert.equal(parsed.hook, "");
   });
 
   it("keeps the at-least-one-signal rule for omitted or non-manual origins", () => {

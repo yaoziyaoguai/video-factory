@@ -133,12 +133,11 @@ function ManualFields() {
   return (
     <>
       <div className="form-section">
-        <div className="form-section-heading"><h3>快速录入</h3><span>你填写创作事实和方向，机会评分交给系统</span></div>
-        <label className="field field-wide"><span>选题标题</span><input name="title" required data-dialog-initial-focus placeholder="一个具体、可验证的内容命题" /></label>
+        <div className="form-section-heading"><h3>快速录入</h3><span>记下想拍的内容，形式和表达由你决定</span></div>
+        <label className="field field-wide"><span>选题标题</span><input name="title" required data-dialog-initial-focus placeholder="给这个想法起个名字" /></label>
         <label className="field"><span>目标平台</span><select name="platform" defaultValue="douyin"><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option><option value="bilibili">哔哩哔哩</option></select></label>
-        <label className="field"><span>目标受众</span><input name="audience" required placeholder="这条内容为谁解决问题" /></label>
-        <label className="field"><span>核心痛点</span><input name="painPoint" required placeholder="一个明确而具体的困扰" /></label>
-        <label className="field field-wide"><span>开场钩子</span><textarea name="hook" required rows={3} placeholder="前 3 秒要说出的关键一句" /></label>
+        <label className="field"><span>目标受众</span><input name="audience" placeholder="可选，想给谁看" /></label>
+        <label className="field field-wide"><span>创作想法</span><textarea name="concept" required rows={6} placeholder="一个观察、一段故事、想说的话，或你想看到的画面。按自己的方式写。" /></label>
       </div>
       <details className="opportunity-advanced">
         <summary>可选：补充参考来源</summary>
@@ -161,9 +160,10 @@ function formInput(data: FormData): StudioOpportunityInput {
     title,
     platform,
     track: "ordinary-life",
-    audience: required(data, "audience"),
-    painPoint: required(data, "painPoint"),
-    hook: required(data, "hook"),
+    audience: optional(data, "audience") ?? "",
+    concept: required(data, "concept"),
+    painPoint: "",
+    hook: "",
     // DG-UX-02：来源表达必须真实——用户没填参考链接就是零来源；填了链接才落一条
     // 用户参考记录，不伪造热榜信号或“已补充来源”的假象。
     origin: "manual",
@@ -201,8 +201,7 @@ const FIELD_LABELS: Record<string, string> = {
   title: "标题",
   platform: "平台",
   audience: "目标受众",
-  painPoint: "用户痛点",
-  hook: "开场钩子",
+  concept: "创作想法",
   json: "机会数据",
 };
 

@@ -18,7 +18,7 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
         <div>
           <p className="eyebrow">当前选题</p>
           <h2 id="opportunity-title">{opportunity.title}</h2>
-          <p>{opportunity.painPoint}</p>
+          {opportunity.painPoint ? <p>{opportunity.painPoint}</p> : null}
           {sourceBlocked ? <div className="opportunity-readiness-warning" role="status">
             <AlertTriangle aria-hidden="true" size={16} />
             <span>
@@ -67,8 +67,8 @@ export function OpportunityFocus({ opportunity, onSupplementSources }: Opportuni
       </div>
 
       <div className="creative-stage">
-        <span className="stage-kicker"><Target aria-hidden="true" size={14} />开场表达建议</span>
-        <blockquote>{opportunity.hook}</blockquote>
+        <span className="stage-kicker"><Target aria-hidden="true" size={14} />{opportunity.concept ? "创作想法" : "内容方向"}</span>
+        <blockquote style={{ whiteSpace: "pre-wrap" }}>{opportunity.concept ?? opportunity.hook}</blockquote>
         <div className="stage-meta">
           <span>{opportunity.audience}</span>
           <span>{opportunity.seriesName ?? (opportunity.category ? TOPIC_CATEGORY_LABELS[opportunity.category] : opportunity.origin === "trend" ? "热点选题" : "独立选题")}</span>

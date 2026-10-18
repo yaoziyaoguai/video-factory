@@ -26,7 +26,7 @@ import { ReworkScopeConflictError } from "../src/generative-asset-worker.js";
 import { parseCreativeTreatment } from "../src/creative-treatment.js";
 import { assessTreatmentReadiness } from "../src/treatment-readiness.js";
 import { summarizeProductionCapabilities } from "../src/production-capabilities.js";
-import { initialCreativeReviewState, publishCreativeDraft, recordCreativeDiscussion, applyCreativeReviewDeterministicCommand, applyCreativeReviewEditDraft, recordCreativeReviewCheck, confirmCreativeDraft, creativeReturnTargets, creativeReviewGate, returnCreativeReviewToStage, parseCreativeReviewResume } from "../src/creative-review.js";
+import { invalidateUnchangedTreatmentRequirements, initialCreativeReviewState, publishCreativeDraft, recordCreativeDiscussion, applyCreativeReviewDeterministicCommand, applyCreativeReviewEditDraft, recordCreativeReviewCheck, confirmCreativeDraft, creativeReturnTargets, creativeReviewGate, returnCreativeReviewToStage, parseCreativeReviewResume } from "../src/creative-review.js";
 
 // 构思、脚本、导演方案都是创作交付：宿主规定的评估对象是当前完整候选（根路径 ""），
 // 维度固定为 attention/progression/payoff/expression。全部分数取同一个值，
@@ -2827,4 +2827,49 @@ describe("withAuditOperationBinding guard (R8-01)", () => {
     assert.equal(rethrown, bound);
     assert.equal((bound as { auditOperationId?: string }).auditOperationId, "O3", "same binding must not be rewritten");
   });
+});
+
+
+describe("手改构思正文的派生约束", () => {
+  it("正文改变时清除旧派生要求，保留用户明确重写的要求和事实", () => {
+    const previous = { concept: "踩进水洼", evidenceRequirements: [{ claim: "鞋底踩水", critical: true }],
+      feasibilityQuestions: ["如何拍出水花"], facts: ["已确认的来源事实"] };
+    const next = { ...previous, concept: "只拍倒影" };
+    assert.deepEqual(invalidateUnchangedTreatmentRequirements(previous, next), {
+      ...next, evidenceRequirements: [], feasibilityQuestions: [],
+    });
+    assert.equal(previous.evidenceRequirements.length, 1);
+    const explicit = { ...next, evidenceRequirements: [{ claim: "倒影", critical: false }] };
+    assert.deepEqual(invalidateUnchangedTreatmentRequirements(previous, explicit), { ...explicit, feasibilityQuestions: [] });
+    assert.deepEqual(invalidateUnchangedTreatmentRequirements(previous, { ...previous }), previous);
+  });
+});
+
+
+it("invalidates hidden treatment requirements before edited-draft validation and keeps the new draft at the human gate", async () => {
+  const original: CreativeTreatment = { ...treatment,
+    evidenceRequirements: [{ claim: "鞋底踩水", requirement: "illustration_only", suppliedSourceIds: [], critical: true,
+      acquisition: "not_needed", retrievalProviderId: null }], feasibilityQuestions: [{ question: "如何呈现水花" }] };
+  const checked: unknown[] = [];
+  const graph = createCreativePlanningGraph({ checkpointer: new MemorySaver(), ports: {
+    treatment: async () => ({ artifactId: "original", output: original }),
+    screenwriter: async () => { throw new Error("保存不应开始下游"); },
+    director: async () => { throw new Error("保存不应开始下游"); },
+    compile: executablePlanCompilePort,
+    validateEditedDraft: (_stage, document) => { checked.push(structuredClone(document)); parseCreativeTreatment(document, []); },
+  } });
+  const input = { runId: "manual-free-concept", inputDigest: "manual-free-concept", durationRange: { minSeconds: 20, maxSeconds: 30 }, creativeReview: CREATIVE_REVIEW_FEATURE };
+  const threadId = planningThreadId(input.runId, input.inputDigest);
+  const initial = await runCreativePlanning(graph, { input, threadId });
+  if (initial.status !== "waiting_user") throw new Error("缺少构思停点");
+  const edited = await runCreativePlanning(graph, { input, threadId, resume: {
+    action: "edit_draft", stage: "treatment", actor: "creator", commandId: "manual-edit", document: { ...original, concept: "只看雨后的倒影" },
+    baseDraftSha256: initial.gate.draft.sha256, expectedReviewRevision: initial.gate.reviewRevision,
+  } });
+  assert.equal(edited.status, "waiting_user");
+  const expected = { ...original, concept: "只看雨后的倒影", evidenceRequirements: [], feasibilityQuestions: [] };
+  assert.ok(checked.length > 0);
+  for (const document of checked) assert.deepEqual(document, expected);
+  assert.deepEqual(edited.state.creativeReview!.stages.treatment.currentDocument, expected);
+  assert.equal(edited.state.creativeReview!.stages.treatment.confirmation, null);
 });

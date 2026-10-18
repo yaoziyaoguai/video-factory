@@ -19,7 +19,7 @@ from video_factory.voiceover import VoiceDoesNotFitError
 from video_factory.worker import WorkerProtocolError, handle_request, validate_request, validate_executable_plan
 
 
-def materialize_stock_test_video(candidate, target):
+def materialize_stock_test_video(candidate, target, **_controls):
     # 路由测试也交付可探测的真实媒体，避免用 b"video" 掩盖素材覆盖校验。
     target.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=blue:s=720x1280:r=25",
@@ -505,7 +505,7 @@ class WorkerContractTest(unittest.TestCase):
                     ),
                 ]
 
-            def materialize(_candidate, target):
+            def materialize(_candidate, target, **_controls):
                 return materialize_stock_test_video(_candidate, target)
 
             with patch("video_factory.stock_assets.search_stock_assets", side_effect=candidate) as search_assets, patch(
@@ -803,7 +803,7 @@ class WorkerContractTest(unittest.TestCase):
                 "candidateInventoryPath": str(inventory_path),
             }
             request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router", "mediaType": "video"}
-            def materialize(_candidate, target):
+            def materialize(_candidate, target, **_controls):
                 return materialize_stock_test_video(_candidate, target)
 
             def materialize_local(scene, query, asset_dir, _director_shot=None):
@@ -877,8 +877,15 @@ class WorkerContractTest(unittest.TestCase):
             request["parameters"] = {"providerId": "ai-shot-router-v1", "provider": "ai-router", "mediaType": "video"}
 
             with patch("video_factory.stock_assets.materialize_candidate", side_effect=RuntimeError("download timed out")):
-                with self.assertRaisesRegex(RuntimeError, "download timed out"):
-                    handle_request(request)
+                response = handle_request(request)
+                self.assertEqual(response["status"], "rejected")
+                self.assertEqual(response["error"]["code"], "STOCK_PREPARATION_UNAVAILABLE")
+                self.assertIn("候选未能完整获取", response["error"]["message"])
+                self.assertTrue(response["diagnostics"]["providerOutcomeKnown"])
+                plan = json.loads(Path(response["output"]["assetPlanPath"]).read_text())
+                self.assertIs(plan["preparation_complete"], False)
+                self.assertNotIn(1, [asset["scene_position"] for asset in plan["scene_assets"]])
+                self.assertTrue(all(asset["provider"] == "local" for asset in plan["scene_assets"]), "只保留原方案中明确要求的本地卡片，不用它们顶替失败镜头")
 
 
     def test_ai_router_fails_when_reviewed_stock_has_no_usable_candidate(self):
@@ -1139,7 +1146,7 @@ class WorkerContractTest(unittest.TestCase):
                     ),
                 ]
 
-            def materialize(_candidate, target):
+            def materialize(_candidate, target, **_controls):
                 if _candidate.media_type == "video":
                     return materialize_stock_test_video(_candidate, target)
                 target.write_bytes(b"image")

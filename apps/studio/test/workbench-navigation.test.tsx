@@ -159,3 +159,36 @@ describe("task-first workbench navigation", () => {
     expect(within(files).getByRole("link")).toHaveAttribute("href", "/film.mp4");
   });
 });
+
+
+it("lets accepted generation progress take over the canvas while retaining the prior draft in the DOM", () => {
+  const run = runFixture();
+  run.status = "running";
+  delete run.activeIntervention;
+  run.currentNodeId = "creative-planning";
+  render(<RunWorkbench run={run} creativeDiscussion={<textarea aria-label="未保存的稿件" defaultValue="我自己的文字" />}
+    decisionPending={false} onDecision={vi.fn()} />);
+  expect(screen.getByDisplayValue("我自己的文字")).not.toBeVisible();
+  expect(screen.getByText("自动制作中")).toBeVisible();
+});
+
+it("shows per-scene failures while downloading and resumes a stopped stock task through the retry action", () => {
+  const run = runFixture();
+  run.status = "running";
+  delete run.activeIntervention;
+  run.currentNodeId = "assets";
+  run.nodes[1] = { ...run.nodes[1]!, status: "running", stockProgress: { phase: "download", totalScenes: 2, updatedAt: run.startedAt,
+    scenes: [{ scenePosition: 1, state: "completed", provider: "pexels", candidateCount: 0, failedAttempts: 0 },
+      { scenePosition: 2, state: "retrying", provider: "pixabay", candidateCount: 0, failedAttempts: 2 }] } };
+  const retry = vi.fn(async () => {});
+  const props = { decisionPending: false, onDecision: vi.fn(), onRetryFailedNode: retry };
+  const view = render(<RunWorkbench run={run} {...props} />);
+  expect(screen.getByText("素材获取 · 已完成 1/2 镜 · 2 次获取失败")).toBeVisible();
+  view.rerender(<RunWorkbench run={{ ...run, status: "needs_human", nodes: run.nodes.map(node => node.id === "assets" ? { ...node, status: "needs_human" } : node),
+    activeIntervention: { id: "stock-stop", nodeId: "assets", kind: "stock_preparation_retry", reason: "网络未完成，已保留第一镜", options: ["reject"], createdAt: run.startedAt } }} {...props} />);
+  expect(screen.queryByRole("region", { name: "当前步骤产物" })).not.toBeInTheDocument();
+  expect(screen.queryByText("请查看本次动作说明")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "继续获取素材" }));
+  expect(retry).toHaveBeenCalledWith("assets");
+  expect(props.onDecision).not.toHaveBeenCalled();
+});

@@ -226,3 +226,17 @@
 @media (prefers-reduced-motion: reduce) {
   .studio-v3 .production-node .node-workspace-chevron { transition: none; }
 }
+
+/* 候选按镜头归组，预览和核验状态放在决定之前。 */
+.creative-candidate-previews { margin-block: 1.5rem; }
+.creative-candidate-previews h4 { margin: 1rem 0 .6rem; }
+.creative-candidate-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; }
+.creative-candidate-preview { margin: 0; min-width: 0; }
+.creative-candidate-preview img, .candidate-preview-unavailable { width: 100%; height: 9rem; object-fit: contain; border-radius: .5rem; background: var(--surface-muted, #eee9df); }
+.candidate-preview-unavailable { display: grid; place-items: center; font-size: .8rem; }
+.creative-candidate-preview figcaption { display: flex; flex-wrap: wrap; gap: .35rem .75rem; padding-block: .5rem; font-size: .8rem; }
+.stock-progress ul { padding-left: 1.25rem; line-height: 1.8; }
+@media (max-width: 600px) {
+  .creative-candidate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .creative-candidate-preview img, .candidate-preview-unavailable { height: 7rem; }
+}

@@ -1312,6 +1312,7 @@ export class WorkflowRunner {
       allowSourceReviewRetry?: boolean;
       allowSourceReviewDecision?: boolean;
       allowLocalPreparationRetry?: boolean;
+      allowStockPreparationRetry?: boolean;
     } = {},
   ): Promise<WorkflowRun<TInitialInput>> {
     validateWorkflowDefinition(definition);
@@ -1335,7 +1336,12 @@ export class WorkflowRunner {
       && localNode.intervention?.kind === "local_preparation_retry"
       && localNode.executionReceipt?.transport === "local_process"
       && localNode.executionReceipt.billing === "local_compute";
-    if (previousRun.status !== "failed" && !retryingRejectedNode && !reviewRetryPause && !reviewDecisionPause && !localPreparationPause) {
+    const stockPreparationPause = options.allowStockPreparationRetry === true
+      && previousRun.status === "needs_human" && localNode?.status === "needs_human"
+      && localNode.intervention?.kind === "stock_preparation_retry" && !localNode.outcomeUncertain
+      && localNode.executionReceipt?.transport === "local_process"
+      && (localNode.executionReceipt.billing === "free" || localNode.executionReceipt.meteredAttemptCount === 0);
+    if (previousRun.status !== "failed" && !retryingRejectedNode && !reviewRetryPause && !reviewDecisionPause && !localPreparationPause && !stockPreparationPause) {
       throw new Error(`Run '${previousRun.id}' is not failed.`);
     }
     const failedNode = previousRun.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId);
@@ -1343,7 +1349,8 @@ export class WorkflowRunner {
       || retryingRejectedNode && failedNode?.status === "rejected"
       || reviewRetryPause
       || reviewDecisionPause
-      || localPreparationPause;
+      || localPreparationPause
+      || stockPreparationPause;
     if (!failedNode || !retryableNodeStatus || !definition.nodes.some((node) => node.id === nodeId)) {
       throw new Error(`Node '${nodeId}' is not the failed node.`);
     }

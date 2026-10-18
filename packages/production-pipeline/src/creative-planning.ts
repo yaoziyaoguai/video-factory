@@ -5,7 +5,7 @@ import type { ScriptDraft } from "./codex-screenwriter.js";
 import type { ShotDecision, VisualDirectorPlan } from "./visual-director.js";
 import { assetReuseSourceScenePosition, ReworkScopeConflictError } from "./generative-asset-worker.js";
 import { validateAssetSemanticRanking, type AssetCandidateReport, type AssetSemanticRanking } from "./asset-semantic-ranker.js";
-import { applyCreativeReviewEditDraft } from "./creative-review.js";
+import { applyCreativeReviewEditDraft, invalidateUnchangedTreatmentRequirements } from "./creative-review.js";
 import { planningThreadId } from "./creative-planning-store.js";
 import { assertDurationCommitment, PlanContractError, quantizeDurationsToFrames, parseDurationBounds, type ExecutableDuration } from "./executable-timeline.js";
 import { RoleAgentLoopError, RoleAgentPlanningHaltError, isCompletedRoleAgentFailure } from "./role-agent-loop.js";
@@ -2455,9 +2455,11 @@ function reviewGateNode(
       if (!validateEditedDraft) {
         throw new Error("Creative planning ports do not support hand-edited drafts.");
       }
-      validateEditedDraft(stage, structuredClone(resume.document), state.scriptArtifact?.output ?? null, "draft");
-      const creativeReview = applyCreativeReviewEditDraft(state.creativeReview, resume, resume.document,
-        draftConflicts(state, stage, resume.document, validateEditedDraft));
+      const document = stage === "treatment"
+        ? invalidateUnchangedTreatmentRequirements(currentCreativeDocument(state, stage), resume.document) : resume.document;
+      validateEditedDraft(stage, structuredClone(document), state.scriptArtifact?.output ?? null, "draft");
+      const creativeReview = applyCreativeReviewEditDraft(state.creativeReview, resume, document,
+        draftConflicts(state, stage, document, validateEditedDraft));
       return {
         creativeReview,
         planningStop: null,

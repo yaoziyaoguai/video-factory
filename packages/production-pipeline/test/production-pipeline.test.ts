@@ -2175,6 +2175,70 @@ describe("ProductionPipeline", () => {
     assert.ok(reuse.every(item => /^[a-f0-9]{64}$/.test(item.sha256)));
   });
 
+  it("resumes a persisted stock pause through the normal retry API and carries verified partial assets into only one new attempt", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-stock-pause-recovery-"));
+    class PausedStockWorker extends FakeWorker {
+      assetCalls = 0;
+      override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+        const response = await super.run(request);
+        if (request.capability !== "asset.prepare") return response;
+        this.assetCalls++;
+        const paused = this.assetCalls === 1;
+        assert.equal(typeof request.operationId, "string");
+        assert.match(String(request.stockProgressPath), /nodes\/assets\/stock-progress.json$/);
+        if (paused) await writeFile(String(request.pauseRequestPath), "{}");
+        else await assert.rejects(stat(String(request.pauseRequestPath)), { code: "ENOENT" }, "继续动作应消费原暂停请求");
+        const scenes = await Promise.all((paused ? [1] : [1, 2]).map(async position => {
+          const uri = path.join(String(request.outputDir), `scene-${position}.jpg`);
+          const bytes = `verified-stock-fixture-${position}`;
+          await writeFile(uri, bytes);
+          response.artifacts.push({ ...response.artifacts[0]!, kind: "media_asset", uri,
+            sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: Buffer.byteLength(bytes),
+            provenance: { ...response.artifacts[0]!.provenance, scenePosition: position } });
+          return { scene_position: position, provider: "pexels", asset_id: `stock-${position}`, media_type: "image", local_path: uri };
+        }));
+        const bytes = JSON.stringify({ preparation_complete: !paused, scene_assets: scenes });
+        await writeFile(String(response.output!.assetPlanPath), bytes);
+        response.artifacts[0] = { ...response.artifacts[0]!, kind: "asset_plan", sizeBytes: Buffer.byteLength(bytes), sha256: createHash("sha256").update(bytes).digest("hex") };
+        if (paused) {
+          response.status = "rejected";
+          response.error = { code: "STOCK_PREPARATION_PAUSED", message: "已暂停，已完成素材保留。" };
+          response.diagnostics = { providerOutcomeKnown: true, meteredAttemptCount: 0 };
+        }
+        return response;
+      }
+    }
+    const worker = new PausedStockWorker();
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+    let run = await subject.start({ ...brief, providers: { ...brief.providers, assets: "pexels-stock-v1" },
+      workflowFeatures: { assetSemanticRank: false, referenceGrammar: false, boundaryGates: "user-confirmed-v1" } });
+    for (let count = 0; count < 5 && run.status === "needs_human"
+      && !pipeline.canRetryStockPreparation(run, "assets"); count++) {
+      run = await subject.decide(run.id, { interventionId: run.nodeRuns.find(node => node.status === "needs_human")!.intervention!.id,
+        action: "approve", actor: "owner", expectedRunRevision: run.revision, reviewEvidenceId: null });
+    }
+    assert.equal(pipeline.canRetryStockPreparation(run, "assets"), true);
+    const original = run.nodeRuns.find(node => node.nodeId === "assets")!;
+    const upstream = run.nodeRuns.filter(node => ["brief", "script"].includes(node.nodeId));
+    const completed = run.artifacts.find(item => item.kind === "media_asset")!;
+    assert.ok(completed.uri);
+    const restored = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+    const attempts = await Promise.allSettled([restored.retryFailedNode(run.id, "assets"), restored.retryFailedNode(run.id, "assets")]);
+    assert.equal(attempts.filter(item => item.status === "fulfilled").length, 1);
+    const recovered = (attempts.find(item => item.status === "fulfilled") as PromiseFulfilledResult<typeof run>).value;
+    const assets = recovered.nodeRuns.find(node => node.nodeId === "assets")!;
+    assert.equal(assets.status, "needs_human");
+    assert.equal(assets.intervention?.boundary, "node-complete", "素材齐备后仍由用户确认素材");
+    assert.notEqual(assets.operationRequestId, original.operationRequestId);
+    assert.equal(worker.assetCalls, 2);
+    assert.deepEqual(worker.calls.map(call => call.capability), ["script.draft", "asset.prepare", "asset.prepare"]);
+    assert.deepEqual(recovered.nodeRuns.filter(node => ["brief", "script"].includes(node.nodeId)), upstream);
+    assert.deepEqual((worker.calls.at(-1)!.input as Record<string, unknown>).reusableStockAssets, [{
+      scenePosition: 1, provider: "pexels", assetId: "stock-1", localPath: completed.uri, sha256: completed.sha256,
+    }]);
+    assert.equal(await readFile(completed.uri, "utf8"), "verified-stock-fixture-1");
+  });
+
   for (const failureStage of ["completed_failure", "not_accepted", "host_invalid", "uncertain", "rejected", "conflict"] as const) {
   it(`preserves a real source review draft and only offers user continuation for a settled audit (${failureStage})`, async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-source-audit-terminal-"));
@@ -12701,4 +12765,18 @@ describe("ProductionPipeline", () => {
     // 直接读取坏记录仍显式失败，不给替代结构。
     await assert.rejects(() => subject.loadPersisted("run-corrupt"));
   });
+});
+
+
+it("does not repeat the generic boundary after all creative drafts were explicitly adopted", async () => {
+  const stages = Object.fromEntries(["treatment", "script", "director"].map(stage => [stage, {
+    phase: "confirmed", currentDraft: { sha256: "a".repeat(64), versionId: `${stage}-v1` },
+    confirmation: { draftSha256: "a".repeat(64), versionId: `${stage}-v1` },
+  }]));
+  const output = { creativeReviewHistory: { directorReviewPurpose: "material_plan", stages } };
+  const node = pipeline.withBoundaryGate({ id: "creative-planning", label: "planning", capability: "script.draft", mode: "automatic",
+    execute: () => ({ status: "succeeded", output }) });
+  assert.equal((await node.execute!(undefined, {} as never)).status, "succeeded");
+  stages.director!.confirmation.versionId = "other-version";
+  assert.equal((await node.execute!(undefined, {} as never)).status, "needs_human", "未采用当前版时不能免签");
 });

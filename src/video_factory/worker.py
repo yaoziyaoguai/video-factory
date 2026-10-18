@@ -15,6 +15,7 @@ from typing import Any, Dict
 
 from .domain import Scene
 from .script_service import draft_script_from_values, draft_to_dict
+from .stock_execution import StockExecution, StockPreparationStopped
 from .stock_assets import (
     StockSearchUnavailableError,
     prepare_routed_scene_assets,
@@ -150,6 +151,19 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
+    try:
+        return _prepare_assets(request, output_dir, started_at)
+    except StockPreparationStopped as error:
+        if error.plan_path is None:
+            raise
+        response = prepared_asset_response(request, error.plan_path, started_at)
+        response.update(status="rejected", error={"code": error.code, "message": str(error) + " 已完成素材已保留，继续获取时会校验并复用。"})
+        response["diagnostics"]["providerOutcomeKnown"] = True
+        return response
+
+
+def _prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float) -> Dict[str, Any]:
+    execution = StockExecution(request)
     formal_script_path = require_existing_path(request["input"], "scriptPath")
     formal_script_bytes = formal_script_path.read_bytes()
     script_path, executable_plan = materialize_executable_script(
@@ -236,6 +250,7 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
             accepted_quality_scenes=accepted_quality_scenes,
             required_source_ends=source_ends,
             reusable_assets=request["input"].get("reusableStockAssets"),
+            execution=execution,
         )
     else:
         plan_path = prepare_scene_assets(
@@ -246,9 +261,15 @@ def prepare_assets(request: Dict[str, Any], output_dir: Path, started_at: float)
             media_type=str(parameters.get("mediaType", "video")),
             limit=int(parameters.get("limit", 6)),
             required_source_ends=source_ends,
+            reusable_assets=request["input"].get("reusableStockAssets"),
+            execution=execution,
         )
     if executable_plan is not None:
         project_executable_timings_into_asset_plan(plan_path, executable_plan)
+    return prepared_asset_response(request, plan_path, started_at)
+
+
+def prepared_asset_response(request: Dict[str, Any], plan_path: Path, started_at: float) -> Dict[str, Any]:
     plan_artifact = describe_artifact(
         path=plan_path,
         kind="asset_plan",
@@ -330,6 +351,7 @@ def search_assets(request: Dict[str, Any], output_dir: Path, started_at: float) 
             media_type=str(parameters.get("mediaType", "video")),
             limit=int(parameters.get("limit", 6)),
             **({"deadline": deadline} if deadline is not None else {}),
+            execution=StockExecution(request),
         )
     except StockSearchUnavailableError as error:
         # 这条 message 只由来源标识与错误类型构成（未受控异常原文不进入），可以直达界面；

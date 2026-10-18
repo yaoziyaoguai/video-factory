@@ -68,7 +68,7 @@ it("preflights the audit context with the same byte boundary as the Broker", asy
   intent.last = "";
   intent.last = "x".repeat(196480 - Buffer.byteLength(JSON.stringify(input.scenes)));
   let calls = 0;
-  await assert.rejects(new CodexAssetSemanticRanker({ fetchThumbnail: async () => undefined,
+  await assert.rejects(new CodexAssetSemanticRanker({ fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0xff, 0xd9]),
     client: { runTask: async () => ({}), runTaskDetailed: async () => { calls++; throw new Error("must not reach Broker"); } },
   }).rankDetailed(input), /context/);
   assert.equal(calls, 0);

@@ -2373,8 +2373,7 @@ describe("Creative OS", () => {
     await user.click(screen.getByRole("button", { name: "录入自己的选题" }));
     await user.type(await screen.findByLabelText("选题标题"), created.title);
     await user.type(screen.getByLabelText("目标受众"), "经常出门又不方便充电的通勤族");
-    await user.type(screen.getByLabelText("核心痛点"), "手机一天要充三次，不知道哪些习惯在耗电");
-    await user.type(screen.getByLabelText("开场钩子"), "这三个充电习惯，正在偷偷吃掉你的电量。");
+    await user.type(screen.getByLabelText("创作想法"), "手机一天要充三次，不知道哪些习惯在耗电");
     await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
 
     // 保存成功必须可见、可继续：提示 + 指向自定义入口待制作区的下一步链接。
@@ -2750,9 +2749,9 @@ describe("Creative OS", () => {
     expect(updateStatus).not.toHaveBeenCalled();
   });
 
-  it("shows an unsaved visual suggestion without submitting it as a user requirement", async () => {
+  it("carries the complete idea into production without submitting unadopted visual suggestions", async () => {
     const user = userEvent.setup();
-    const planless: StudioOpportunity = { ...opportunity };
+    const planless: StudioOpportunity = { ...opportunity, concept: "拍雨停后的街道，路灯映在积水里。\n\n留一段没有旁白的空镜，门铃响起后结束。" };
     delete planless.visualPlan;
     vi.spyOn(studioApi, "opportunities").mockResolvedValue([planless]);
     vi.spyOn(studioApi, "providers").mockResolvedValue([
@@ -2783,6 +2782,7 @@ describe("Creative OS", () => {
     await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    expect(start.mock.calls[0]![0]).toMatchObject({ angle: planless.concept });
     // 自动预览只是建议；用户没有填写或采用时，不能升级成正式创作要求。
     expect(start.mock.calls[0]![0]).not.toHaveProperty("visualPlan");
     expect(start.mock.calls[0]![0]).not.toHaveProperty("visualIntent");
@@ -2793,13 +2793,12 @@ describe("Creative OS", () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const { rerender } = render(<OpportunityDialog open onClose={() => undefined} onSubmit={onSubmit} />);
 
-    expect(screen.getByText("你填写创作事实和方向，机会评分交给系统")).toBeInTheDocument();
+    expect(screen.getByText("记下想拍的内容，形式和表达由你决定")).toBeInTheDocument();
     expect(screen.queryByLabelText("人群覆盖")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("合规风险")).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("选题标题"), opportunity.title);
     await user.type(screen.getByLabelText("目标受众"), opportunity.audience);
-    await user.type(screen.getByLabelText("核心痛点"), opportunity.painPoint);
-    await user.type(screen.getByLabelText("开场钩子"), opportunity.hook);
+    await user.type(screen.getByLabelText("创作想法"), opportunity.painPoint);
     await user.click(screen.getByText("可选：补充参考来源"));
     await user.type(screen.getByLabelText("参考链接"), "https://example.cn/source");
     await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
@@ -2828,15 +2827,17 @@ describe("Creative OS", () => {
     render(<OpportunityDialog open onClose={() => undefined} onSubmit={onSubmit} />);
 
     await user.type(screen.getByLabelText("选题标题"), "下班后的十分钟如何真正休息");
-    await user.type(screen.getByLabelText("目标受众"), "普通上班族");
-    await user.type(screen.getByLabelText("核心痛点"), "下班后无法切换状态");
-    await user.type(screen.getByLabelText("开场钩子"), "真正让人恢复的，可能不是继续刷手机。");
+    expect(screen.queryByLabelText("核心痛点")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("开场钩子")).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("创作想法"), "下班后无法切换状态");
     await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
 
     // DG-UX-02：不填参考链接就是零来源（origin manual），不再伪造 manual-supplement 占位。
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       track: "ordinary-life",
       origin: "manual",
+      concept: "下班后无法切换状态",
+      audience: "", painPoint: "", hook: "",
       evidence: [],
       scores: expect.objectContaining({ audienceReach: 70, complianceRisk: 20 }),
     }));

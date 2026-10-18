@@ -379,7 +379,9 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
         return false;
       }
       if (receipt?.status === "unknown" || receipt?.status === "running") {
-        setCompletionNotice("原操作结果仍未确定；原命令与输入已保留，请核对原请求，不要重复发送。原请求与费用保持待核。");
+        setCompletionNotice(receipt.status === "running"
+          ? "操作已受理，正在处理；完成后会自动更新。"
+          : "原操作结果仍未确定；原命令与输入已保留，请核对原请求，不要重复发送。原请求与费用保持待核。");
         return false;
       }
     } catch (caught) {
@@ -732,6 +734,12 @@ export function CreativeDiscussionPanel({ review, busy, onCommand, onDraftDirtyC
           <CreativeDraftEditor nativeAudio={nativeAudio} sessionSlotKey={sessionSlotKey} sessionBase={sessionBase} legacyEditStorageKey={`${storageKey}:edit`} draftIdentity={`${review.draftVersionId ?? review.draftArtifactId}:${review.draftSha256}`} stage={review.stage} draft={review.draft} busy={busy || review.phase === "checking" || !review.allowedActions.includes("edit_draft")} onSave={saveEditedDraft} onDirtyChange={setHasUnsavedEdits} evidenceRepairs={evidenceRepairs} providers={providers} allowedRetrievalProviderIds={review.stage === "treatment" ? review.draftValidation?.allowedRetrievalProviderIds : undefined} />
           {review.previousDraft !== undefined ? <CreativeDraftChanges key={`${review.runId}:${draftIdentity}`} stage={review.stage}
             current={review.draft} previous={review.previousDraft} nativeAudio={nativeAudio} /> : null}
+          {review.reviewPurpose === "material_plan" && review.candidatePreviews?.length ? <section className="creative-candidate-previews" aria-label="候选画面预览">
+            <h3>先看候选画面</h3><p>每镜显示排序靠前的 3 个候选。这里是预览，是否通过机器视觉核验单独标注。</p>
+            {review.candidatePreviews.map(scene => <div key={scene.scenePosition}><h4>镜头 {scene.scenePosition}</h4>
+              <div className="creative-candidate-grid">{scene.candidates.map(candidate => <CandidatePreview key={`${candidate.provider}:${candidate.assetId}`} candidate={candidate} />)}</div>
+            </div>)}
+          </section> : null}
           {review.stage !== "script" ? <>{durationPanel}{decisionBar}</> : null}
           {incompleteCheck ? <section className="creative-check-result" role="status"><strong>独立复核未完成 · 无评分</strong><p>{review.checkResult?.summary}</p></section> : null}
           {needsStockConsent ? <section className="creative-check-result" role="status">
@@ -1098,6 +1106,7 @@ function CreativeDraftEditor({ sessionSlotKey, sessionBase, legacyEditStorageKey
     {/* 收起时不渲染字段：可读稿和编辑器里会出现相同文字，展开才挂载避免同一屏两份同文。 */}
     {open ? <>
       <p className="creative-edit-state" role="status">{stale ? "当前方案已更新。你的未保存文字仍在下方，可先复制留存；请放弃旧稿修改、重新读取当前版本后再编辑。旧稿不能覆盖新稿。" : saving ? "正在保存修订，等待服务端确认…" : saveState === "failed" ? "保存未完成，输入仍保留。请查看错误后重试。" : dirty ? "修改尚未生效；保存后会形成未审新稿，等你决定是否审计或采用。" : saveState === "saved" ? "修订已保存。请核对当前稿，再决定是否审计或采用。" : "可直接修改文字。保存不会自动审计、采用或购买素材。"}</p>
+      {stage === "treatment" ? <p className="creative-edit-state">修改正文后，旧稿自动整理的素材要求与制作问题会在保存时清除，后续按新正文规划。</p> : null}
       {evidenceRepairs.length > 0 ? <fieldset className="creative-evidence-repairs">
         <legend>素材安排待补齐</legend>
         <p>以下素材安排还没选择画面服务；选择不会调用外部服务、不报价、不签费用，保存后形成未审新稿。</p>
@@ -1241,4 +1250,16 @@ function collectionTextFields(
     }
   });
   return fields;
+}
+
+
+function CandidatePreview({ candidate }: { candidate: import("../../shared/api.js").StudioCandidatePreview["candidates"][number] }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [candidate.previewUrl]);
+  return <figure className="creative-candidate-preview">
+    {candidate.previewUrl && !failed ? <img loading="lazy" src={candidate.previewUrl} alt={`${candidate.provider} 候选画面`} referrerPolicy="no-referrer" onError={() => setFailed(true)} />
+      : <div className="candidate-preview-unavailable">预览图未能读取</div>}
+    <figcaption><span>{candidate.visualReviewed ? "已完成机器视觉核验" : "机器尚未核验"}</span>
+      {candidate.sourceUrl ? <a href={candidate.sourceUrl} target="_blank" rel="noreferrer">查看素材来源 ↗</a> : null}</figcaption>
+  </figure>;
 }

@@ -878,6 +878,7 @@ describe("Studio client", () => {
     try {
       render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
       const composer = await screen.findByPlaceholderText("描述你想保留或修改的内容，也可以先讨论。");
+      const adopt = screen.getByRole("button", { name: "采用前期构思（未审计）" });
       await user.type(composer, "保留安静，不追加口号");
       await user.click(screen.getByRole("button", { name: "发送修订意见" }));
       await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
@@ -886,7 +887,9 @@ describe("Studio client", () => {
       });
       expect(screen.getByPlaceholderText("描述你想保留或修改的内容，也可以先讨论。")).toBe(composer);
       expect(composer).toHaveValue("保留安静，不追加口号");
-      expect(screen.getByRole("button", { name: "采用前期构思（未审计）" })).toBeDisabled();
+      expect(adopt).toBeInTheDocument();
+      expect(adopt).not.toBeVisible();
+      expect(adopt).toBeDisabled();
       expect(storage.has("vf:creative-command:run-1:treatment:draft")).toBe(true);
       await act(async () => { finish(); });
       await waitFor(() => expect(screen.getByText("修改后的结尾")).toBeInTheDocument());

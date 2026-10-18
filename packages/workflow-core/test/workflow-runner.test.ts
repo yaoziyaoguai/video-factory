@@ -60,6 +60,41 @@ describe("WorkflowRunner", () => {
     assert.notEqual(recovered.interventions.at(-1)!.id, next.interventions.at(-1)!.id);
   });
 
+  it("resumes only a known zero-spend stock pause and keeps the next paid node behind approval", async () => {
+    let calls = 0;
+    let paidCalls = 0;
+    const providers = new ProviderRegistry();
+    providers.register({ id: "paid-next", label: "Paid next", modelId: "paid-model", capability: "script.draft",
+      billing: "metered", transport: "http_api", approvalPolicy: "manual", estimatedCostCny: 1, maxCostCny: 1, maxAttempts: 1,
+      run: () => { paidCalls++; return {}; } });
+    const definition: WorkflowDefinition = { id: "stock-recovery", name: "Stock recovery", version: "1", nodes: [
+      { id: "assets", label: "Assets", capability: "asset.prepare", mode: "automatic", execute: () => {
+        calls++;
+        return calls === 1 ? { status: "needs_human", output: { assetPlanPath: "partial.json" },
+          receipt: { providerId: "stock", providerLabel: "Stock", modelId: "stock", transport: "local_process", billing: "free", parameters: {} },
+          intervention: { kind: "stock_preparation_retry", reason: "已暂停", requiredAction: "reject", options: ["reject"] } }
+          : { output: { assetPlanPath: "complete.json" } };
+      } },
+      { id: "next", label: "Next", capability: "script.draft", providerId: "paid-next", mode: "automatic", dependsOn: ["assets"] },
+    ] };
+    const runner = new WorkflowRunner({ clock, idFactory: deterministicIds(), providers });
+    const stopped = await runner.run(definition, {});
+    await assert.rejects(runner.retryFailedNode(definition, stopped, "assets"), /not failed/);
+    for (const reason of ["spent", "unknown", "ordinary-gate"]) {
+      const unsafe = structuredClone(stopped), node = unsafe.nodeRuns[0]!;
+      if (reason === "spent") { node.executionReceipt!.billing = "metered"; node.executionReceipt!.meteredAttemptCount = 1; }
+      if (reason === "unknown") node.outcomeUncertain = true;
+      if (reason === "ordinary-gate") delete node.intervention!.kind;
+      await assert.rejects(runner.retryFailedNode(definition, unsafe, "assets", { allowStockPreparationRetry: true }));
+    }
+    const resumed = await runner.retryFailedNode(definition, stopped, "assets", { allowStockPreparationRetry: true });
+    assert.equal(calls, 2);
+    assert.equal(resumed.status, "awaiting_spend_approval");
+    assert.equal(resumed.nodeRuns[0]!.status, "succeeded");
+    assert.equal(resumed.nodeRuns[1]!.status, "awaiting_spend_approval", "下一阶段仍保留自己的授权/确认边界");
+    assert.equal(paidCalls, 0);
+  });
+
   it("retries a local preparation pause without accepting output or reopening paid parents", async () => {
     let assets = 0, prepares = 0;
     const definition: WorkflowDefinition = { id: "local-recovery", name: "Local recovery", version: "1", nodes: [

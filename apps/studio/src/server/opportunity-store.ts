@@ -6,6 +6,7 @@ import type { ProductionArticleSourceSnapshot } from "@video-factory/production-
 import type { StudioArticleFact, StudioCandidateOrigin, StudioCandidateVerification, StudioEditorialDecision, StudioTopicCategory, StudioVisualPlan } from "../shared/api.js";
 
 export interface OpportunityRecord {
+  concept?: string;
   title: string;
   adoptedCandidateGenerationId?: string;
   adoptedCandidateAuditStatus?: "passed" | "awaiting_user" | "not_audited";

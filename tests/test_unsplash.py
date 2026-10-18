@@ -120,7 +120,7 @@ class UnsplashTest(unittest.TestCase):
             script.write_text(json.dumps({"scenes": [{"position": 1, "narration": "城市",
                 "duration": 3, "visual_strategy": "image", "visual_prompt": "city"}]}))
 
-            def download(candidate, target):
+            def download(candidate, target, *, execution=None):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"test-image")
                 return target

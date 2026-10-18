@@ -33,6 +33,25 @@ function review(overrides: Partial<StudioCreativeReviewSnapshot> = {}): StudioCr
   };
 }
 
+it("shows candidate evidence before adoption and keeps image failures distinct from machine review", () => {
+  const snapshot = review({ stage: "director", reviewPurpose: "material_plan", draft: { shots: [] },
+    candidatePreviews: [{ scenePosition: 1, candidates: [{ provider: "pexels", assetId: "one", previewUrl: "https://images.pexels.com/one.jpg",
+      sourceUrl: "https://www.pexels.com/photo/one", visualReviewed: false }] }] });
+  const props = { busy: false, onCommand: vi.fn(async () => undefined) };
+  const view = render(<CreativeDiscussionPanel review={snapshot} {...props} />);
+  const preview = screen.getByRole("region", { name: "候选画面预览" });
+  expect(within(preview).getByText("机器尚未核验")).toBeVisible();
+  expect(within(preview).getByRole("link", { name: /查看素材来源/ })).toHaveAttribute("href", "https://www.pexels.com/photo/one");
+  fireEvent.error(within(preview).getByRole("img"));
+  expect(within(preview).getByText("预览图未能读取")).toBeVisible();
+  view.rerender(<CreativeDiscussionPanel review={{ ...snapshot, candidatePreviews: [{ scenePosition: 1, candidates: [{
+    ...snapshot.candidatePreviews![0]!.candidates[0]!, previewUrl: "https://images.pexels.com/new.jpg", visualReviewed: true,
+  }] }] }} {...props} />);
+  expect(within(preview).getByRole("img")).toHaveAttribute("src", "https://images.pexels.com/new.jpg");
+  expect(within(preview).getByText("已完成机器视觉核验")).toBeVisible();
+  expect(props.onCommand).not.toHaveBeenCalled();
+});
+
 function useMobileViewport() {
   const matchMedia = window.matchMedia;
   vi.spyOn(window, "matchMedia").mockImplementation(query => ({

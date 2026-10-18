@@ -1,3 +1,4 @@
+import https from "node:https";
 import { createHash } from "node:crypto";
 import type { CodexBridgeClient, CodexPreparedOperation, CodexTaskExecution } from "./codex-chat.js";
 import { pendingRoleAgentOperation } from "./role-agent-checkpoint.js";
@@ -59,7 +60,7 @@ export interface AssetSemanticRanking {
   visualEvidence?: {
     reportDigest: string;
     supplementaryBatches: 0 | 1;
-    stopReason?: "deadline";
+    stopReason?: "deadline" | "thumbnails_unavailable";
     reviewed: Array<Omit<AssetRankThumbnail, "jpegBase64">>;
   };
 }
@@ -75,7 +76,7 @@ export interface CodexAssetSemanticRankerOptions {
   client: Pick<CodexBridgeClient, "runTask"> & Partial<Pick<CodexBridgeClient, "runTaskDetailed" | "observePrepared">>;
   providerId?: string;
   modelId?: string;
-  fetchThumbnail?: (url: string) => Promise<Buffer | undefined>;
+  fetchThumbnail?: (url: string, signal?: AbortSignal) => Promise<Buffer | undefined>;
   maxReviewIterations?: number;
 }
 
@@ -89,7 +90,8 @@ interface AssetRankThumbnail {
 
 const MAX_RANK_THUMBNAILS = 12;
 const MAX_THUMBNAIL_ATTEMPTS = 24;
-const THUMBNAIL_COLLECTION_MS = 20_000;
+const THUMBNAIL_COLLECTION_MS = 30_000;
+const THUMBNAIL_REQUEST_MS = 12_000;
 const RANKING_DEADLINE_MS = 10 * 60_000;
 const MAX_RANK_PAYLOAD_BYTES = 8 * 1024 * 1024;
 // 与 Broker 的逐图边界保持一致，避免在模型调用前被协议层拒绝。
@@ -127,6 +129,7 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
 
   async rank(report: AssetCandidateReport): Promise<AssetSemanticRanking> {
     const payload = await this.rankPayload(report);
+    if (!payload.thumbnails.length && report.scenes.some(scene => scene.candidates.length)) return unavailableThumbnailRanking(report);
     return validateAssetSemanticRanking(await this.options.client.runTask("asset-rank", payload), report);
   }
 
@@ -156,6 +159,11 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
       stored = structuredClone(next);
     };
     if (batch.finished) return structuredClone(batch.finished);
+    if (!pending && !batch.payload.thumbnails.length && report.scenes.some(scene => scene.candidates.length)) {
+      batch.finished = { output: unavailableThumbnailRanking(report) };
+      await persist(stored);
+      return structuredClone(batch.finished);
+    }
     await persist(stored);
     const finishDeadline = async (execution: CodexTaskExecution<AssetSemanticRanking>, noProgress = false) => {
       const summary = "候选画面复核已达到本次时间上限；保留已核验结果，未通过核验的候选不自动采用，请选择下一步。"
@@ -590,7 +598,7 @@ function combineAgentLoops(first: CodexTaskExecution["agentLoop"], last: CodexTa
 
 async function collectRankThumbnails(
   report: AssetCandidateReport,
-  fetchThumbnail: (url: string) => Promise<Buffer | undefined>,
+  fetchThumbnail: (url: string, signal?: AbortSignal) => Promise<Buffer | undefined>,
 ): Promise<AssetRankThumbnail[]> {
   const queue: Array<{ scenePosition: number; candidate: AssetCandidate }> = [];
   // 图库结果通常按来源成组。只交错镜头仍会让首个来源占满图像预算；
@@ -628,12 +636,12 @@ async function collectRankThumbnails(
     try {
       let download = fetched.get(item.candidate.previewUrl);
       if (!download) {
-        download = fetchThumbnail(item.candidate.previewUrl);
+        download = fetchThumbnail(item.candidate.previewUrl, AbortSignal.timeout(Math.max(1, Math.min(THUMBNAIL_REQUEST_MS, deadline - Date.now()))));
         fetched.set(item.candidate.previewUrl, download);
       }
       const jpeg = await Promise.race([
         download,
-        new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), Math.min(5_000, deadline - Date.now())); }),
+        new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), Math.min(THUMBNAIL_REQUEST_MS, Math.max(0, deadline - Date.now()))); }),
       ]);
       if (!jpeg || jpeg.length < 4 || jpeg.length > MAX_THUMBNAIL_BYTES || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) return undefined;
       return {
@@ -651,7 +659,7 @@ async function collectRankThumbnails(
     return undefined;
   };
   // 有界并发减少网络串行等待；按原队列收回结果，快慢不改变镜头公平性或候选身份。
-  // 批量大小不超过剩余图像槽位，维持12图/24尝试/20秒的原边界。
+  // 批量大小不超过剩余图像槽位，维持12图/24尝试，并在总期限内结束。
   for (let index = 0; index < queue.length && thumbnails.length < MAX_RANK_THUMBNAILS && Date.now() < deadline;) {
     const size = Math.min(3, MAX_RANK_THUMBNAILS - thumbnails.length);
     const batch = queue.slice(index, index + size);
@@ -663,31 +671,33 @@ async function collectRankThumbnails(
   return thumbnails;
 }
 
-async function downloadCandidateThumbnail(rawUrl: string): Promise<Buffer | undefined> {
+export async function downloadCandidateThumbnail(rawUrl: string, signal = AbortSignal.timeout(THUMBNAIL_REQUEST_MS)): Promise<Buffer | undefined> {
   const url = new URL(rawUrl);
-  if (url.protocol !== "https:" || !THUMBNAIL_HOSTS.has(url.hostname) || url.username || url.password) return undefined;
-  const response = await fetch(url, {
-    headers: { accept: "image/jpeg" },
-    redirect: "error",
-    signal: AbortSignal.timeout(5_000),
+  if (url.protocol !== "https:" || !THUMBNAIL_HOSTS.has(url.hostname) || url.username || url.password || url.port && url.port !== "443") return undefined;
+  return new Promise((resolve, reject) => {
+    // 云端跨网连接实测超过 Node 默认的250ms候选IP窗口；只调整此请求，不改进程全局网络策略。
+    const options: https.RequestOptions & { autoSelectFamily: boolean; autoSelectFamilyAttemptTimeout: number } = {
+      headers: { accept: "image/jpeg" }, signal, autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 3_000,
+    };
+    const request = https.get(url, options, response => {
+      const declaredLength = Number(response.headers["content-length"] ?? 0);
+      if (response.statusCode !== 200 || response.headers["content-type"]?.split(";", 1)[0]?.trim() !== "image/jpeg"
+        || !Number.isFinite(declaredLength) || declaredLength > MAX_THUMBNAIL_BYTES) {
+        response.destroy(); resolve(undefined); return;
+      }
+      const chunks: Buffer[] = [];
+      let received = 0;
+      response.on("data", (chunk: Buffer) => {
+        received += chunk.length;
+        if (received > MAX_THUMBNAIL_BYTES) { response.destroy(); resolve(undefined); }
+        else chunks.push(chunk);
+      });
+      response.on("end", () => resolve(Buffer.concat(chunks)));
+      response.on("error", reject);
+      response.on("aborted", () => resolve(undefined));
+    });
+    request.on("error", reject);
   });
-  if (!response.ok || response.headers.get("content-type")?.split(";", 1)[0]?.trim() !== "image/jpeg" || !response.body) return undefined;
-  const declaredLength = Number(response.headers.get("content-length") ?? 0);
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_THUMBNAIL_BYTES) return undefined;
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    received += value.byteLength;
-    if (received > MAX_THUMBNAIL_BYTES) {
-      await reader.cancel();
-      return undefined;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
 }
 
 async function sha256Hex(value: Buffer): Promise<string> {
@@ -821,9 +831,9 @@ export function validateAssetSemanticRanking(
       seen.add(key);
       return entry;
     });
-    if (evidence.stopReason !== undefined && evidence.stopReason !== "deadline") throw new Error("Invalid ranking stop reason.");
+    if (evidence.stopReason !== undefined && evidence.stopReason !== "deadline" && evidence.stopReason !== "thumbnails_unavailable") throw new Error("Invalid ranking stop reason.");
     visualEvidence = { reportDigest: evidence.reportDigest, supplementaryBatches: evidence.supplementaryBatches, reviewed,
-      ...(evidence.stopReason === "deadline" ? { stopReason: "deadline" as const } : {}),
+      ...(evidence.stopReason === "deadline" || evidence.stopReason === "thumbnails_unavailable" ? { stopReason: evidence.stopReason } : {}),
     };
   }
   return {
@@ -906,4 +916,11 @@ function finite(value: unknown, label: string, minimum = -Number.MAX_VALUE): num
 function booleanValue(value: unknown, label: string): boolean {
   if (typeof value !== "boolean") throw new Error(`${label} is invalid.`);
   return value;
+}
+
+
+function unavailableThumbnailRanking(report: AssetCandidateReport): AssetSemanticRanking {
+  const message = "候选预览图未能读取，尚未进行视觉核验，也未调用模型排序。请检查图库网络后重新选材，或查看候选来源并明确决定是否接受未核验风险。";
+  return { ...deterministicAssetRanking(report, message), summary: message,
+    visualEvidence: { reportDigest: reportDigest(report), reviewed: [], supplementaryBatches: 0, stopReason: "thumbnails_unavailable" } };
 }

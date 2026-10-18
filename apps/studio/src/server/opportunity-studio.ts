@@ -53,6 +53,7 @@ export class OpportunityStudio {
     try {
       return toOpportunity(await this.options.opportunities.create({
         title: input.title,
+        ...(input.concept ? { concept: input.concept } : {}),
         ...(input.adoptedCandidateGenerationId ? { adoptedCandidateGenerationId: input.adoptedCandidateGenerationId } : {}),
         ...(input.adoptedCandidateAuditStatus ? { adoptedCandidateAuditStatus: input.adoptedCandidateAuditStatus } : {}),
         candidate,
@@ -139,6 +140,7 @@ function toOpportunity(record: OpportunityRecord): StudioOpportunity {
     ...(record.adoptedCandidateGenerationId ? { adoptedCandidateGenerationId: record.adoptedCandidateGenerationId } : {}),
     ...(record.adoptedCandidateAuditStatus ? { adoptedCandidateAuditStatus: record.adoptedCandidateAuditStatus } : {}),
     title: record.title,
+    ...(record.concept ? { concept: record.concept } : {}),
     platform: record.candidate.platform,
     track: record.candidate.track,
     audience: record.candidate.audience,

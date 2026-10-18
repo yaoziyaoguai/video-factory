@@ -819,6 +819,7 @@ export interface StudioOpportunityScoreProvenance {
 }
 
 export interface StudioOpportunity {
+  concept?: string;
   id: string;
   adoptedCandidateGenerationId?: string;
   adoptedCandidateAuditStatus?: "passed" | "awaiting_user" | "not_audited";
@@ -849,6 +850,7 @@ export interface StudioOpportunity {
 }
 
 export interface StudioOpportunityInput {
+  concept?: string;
   title: string;
   platform: string;
   track: string;
@@ -1123,7 +1125,16 @@ export interface StudioNode {
   /** C1 结构化覆盖评估：报价等待节点上"范围未覆盖"的可区分原因与精确金额。 */
   spendAssessment?: StudioSpendAssessment;
   agentLoopProgress?: StudioAgentLoopProgress;
+  stockProgress?: StudioStockProgress;
   executionConfiguration?: StudioNodeExecutionConfiguration;
+}
+
+export interface StudioStockProgress {
+  phase: "search" | "download";
+  totalScenes: number;
+  updatedAt: string;
+  scenes: Array<{ scenePosition: number; state: "searching" | "downloading" | "retrying" | "completed" | "failed" | "stopped";
+    provider: string; candidateCount: number; failedAttempts: number }>;
 }
 
 export interface StudioSpendAssessment {
@@ -1496,7 +1507,7 @@ export interface StudioArtifact {
 export interface StudioIntervention {
   id: string;
   nodeId: string;
-  kind?: "creative_review" | "source_review_retry" | "source_review_decision" | "local_preparation_retry";
+  kind?: "creative_review" | "source_review_retry" | "source_review_decision" | "local_preparation_retry" | "stock_preparation_retry";
   /** 节点边界的"完成待放行"停点：这一步已做完，产物已存，只等你决定是否进入下一步。 */
   boundary?: "node-complete";
   reason: string;
@@ -1537,6 +1548,11 @@ export interface StudioCreativeDuration {
   unavailableReason?: string;
 }
 
+export interface StudioCandidatePreview {
+  scenePosition: number;
+  candidates: Array<{ provider: string; assetId: string; previewUrl?: string; sourceUrl?: string; visualReviewed: boolean }>;
+}
+
 export interface StudioCreativeReviewSnapshot {
   runId: string;
   runRevision: number;
@@ -1557,6 +1573,7 @@ export interface StudioCreativeReviewSnapshot {
     impact: string;
   }>;
   draft: unknown;
+  candidatePreviews?: StudioCandidatePreview[];
   previousDraft?: unknown;
   messages: Array<{ id: string; role: "user" | "assistant"; text: string; commandId: string }>;
   proposals: Array<{ proposalId: string; baseDraftSha256: string; baseDraftVersionId?: string; baseStageInputDigest?: string;
@@ -2051,7 +2068,7 @@ export interface StudioCostLine {
   meteredFailedAttemptCount?: number;
   subscriptionCallCount?: number;
   modelCallCount?: number;
-  accountingSource?: "document_operation" | "execution_fact";
+  accountingSource?: "document_operation" | "execution_fact" | "execution_summary";
   executionKeys?: string[];
   callCountPending?: boolean;
   /** 产生这份回执的物理请求身份；旧回执可能没有。 */
@@ -3131,9 +3148,10 @@ export function parseStudioOpportunityInput(value: unknown): StudioOpportunityIn
     title: requiredTrimmedString(input.title, "标题"),
     platform: requiredTrimmedString(input.platform, "平台"),
     track,
-    audience: requiredTrimmedString(input.audience, "目标受众"),
-    painPoint: requiredTrimmedString(input.painPoint, "用户痛点"),
-    hook: requiredTrimmedString(input.hook, "开场钩子"),
+    audience: origin === "manual" ? optionalString(input.audience) ?? "" : requiredTrimmedString(input.audience, "目标受众"),
+    painPoint: origin === "manual" ? "" : requiredTrimmedString(input.painPoint, "用户痛点"),
+    hook: origin === "manual" ? "" : requiredTrimmedString(input.hook, "开场钩子"),
+    ...(origin === "manual" ? { concept: requiredTrimmedString(input.concept, "创作想法") } : {}),
     evidence,
     scores,
     ...(candidateId ? { candidateId } : {}),

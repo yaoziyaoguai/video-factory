@@ -919,6 +919,16 @@ export function applyCreativeReviewDeterministicCommand(
   };
 }
 
+/** 正文改变后，未经修改的派生要求不再属于新稿；用户明确重写的依据仍保留。 */
+export function invalidateUnchangedTreatmentRequirements(previous: unknown, next: unknown): unknown {
+  if (!isRecord(previous) || !isRecord(next) || previous.concept === next.concept) return next;
+  const document = structuredClone(next);
+  for (const field of ["evidenceRequirements", "feasibilityQuestions"]) {
+    if (JSON.stringify(previous[field]) === JSON.stringify(next[field])) document[field] = [];
+  }
+  return document;
+}
+
 /**
  * 人工修订稿换入当前阶段。文档必须先由 gate 层按阶段合同校验（这里不做阶段 schema 校验，
  * 只做状态迁移）——校验与迁移分离，是因为阶段合同校验需要 brief/脚本上下文，那是组合根的职责。

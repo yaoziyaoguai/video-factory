@@ -905,6 +905,16 @@ export function canRetryNativeAudioNode(run: WorkflowRun<ProductionBrief>, nodeI
     && isObjectRecord(node.output) && node.output.audioMode === "native_av" && typeof node.output.nativeAudioIssue === "string";
 }
 
+/** 免费素材准备在付费提交前停下；普通节点确认和未知费用不能借此重跑。 */
+export function canRetryStockPreparation(run: WorkflowRun<ProductionBrief>, nodeId: string): boolean {
+  const node = run.nodeRuns.find(item => item.nodeId === nodeId);
+  return nodeId === "assets" && run.status === "needs_human" && node?.status === "needs_human"
+    && node.intervention?.kind === "stock_preparation_retry" && !node.outcomeUncertain
+    && node.executionReceipt?.transport === "local_process"
+    && (node.executionReceipt.billing === "free" || node.executionReceipt.meteredAttemptCount === 0)
+    && isObjectRecord(node.output) && typeof node.output.assetPlanPath === "string";
+}
+
 const INTERRUPTED_RUN_ERROR = "应用重启中断了这次制作，请重新发起制作。已完成的产物仍保留在本次记录中。";
 const DEFAULT_EXECUTION_LEASE_HEARTBEAT_MS = 5_000;
 const DEFAULT_EXECUTION_LEASE_STALE_MS = 30_000;
@@ -7499,6 +7509,7 @@ export class ProductionPipeline {
     const dispatched = await this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
       const retryRejectedReview = canRetryRejectedReviewNode(previous, nodeId);
       const retryNativeAudio = canRetryNativeAudioNode(previous, nodeId);
+      const retryStock = canRetryStockPreparation(previous, nodeId);
       if (options?.nativeAudioRecovery || retryNativeAudio) {
         const target = options?.nativeAudioRecovery;
         if (!retryNativeAudio || !target || target.expectedRunRevision !== previous.revision
@@ -7551,6 +7562,7 @@ export class ProductionPipeline {
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
         shouldPause: () => this.consumePauseRequest(runId),
       });
+      if (retryStock) await rm(this.pauseRequestPath(runId), { force: true });
       const result = await runner.retryFailedNode(
         this.createWorkflow(brief, {
           ...(creativeCommand ? { creativeReviewResume: creativeCommand.resume } : {}),
@@ -7564,7 +7576,9 @@ export class ProductionPipeline {
         }),
         withExecutableBrief(recoveryBase, brief),
         nodeId,
-        retryNativeAudio
+        retryStock
+          ? { allowStockPreparationRetry: true }
+          : retryNativeAudio
           ? { allowLocalPreparationRetry: true }
           : retryRejectedReview
           ? { allowRejectedNode: true }
@@ -8609,6 +8623,7 @@ export function withBoundaryGate(node: NodeDefinition): NodeDefinition {
       const result = await execute(input, context);
       // 成功臂的 status 是可选的，undefined 与 "succeeded" 同义，两者都要拦下来。
       if (result.status !== undefined && result.status !== "succeeded") return result;
+      if (node.id === "creative-planning" && confirmedCreativePlanningOutput(result.output)) return result;
       return {
         ...result,
         status: "needs_human",
@@ -8630,6 +8645,33 @@ export function withBoundaryGate(node: NodeDefinition): NodeDefinition {
       };
     },
   };
+}
+
+function planningCandidatePreviews(report: AssetCandidateReport, ranking?: AssetSemanticRanking) {
+  const safeUrl = (value: string) => { try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? value : undefined; } catch { return undefined; } };
+  return report.scenes.map(scene => {
+    const ranked = ranking?.scenes.find(item => item.scenePosition === scene.scenePosition)?.candidates ?? [];
+    const ordered = ranked.length ? ranked.flatMap(item => scene.candidates.filter(candidate => candidate.provider === item.provider && candidate.assetId === item.assetId)) : scene.candidates;
+    return { scenePosition: scene.scenePosition, candidates: ordered.slice(0, 3).map(candidate => ({
+      provider: candidate.provider, assetId: candidate.assetId,
+      previewUrl: safeUrl(candidate.previewUrl), sourceUrl: safeUrl(candidate.sourceUrl),
+      visualReviewed: ranking?.visualEvidence?.reviewed.some(item => item.scenePosition === scene.scenePosition
+        && item.provider === candidate.provider && item.assetId === candidate.assetId) ?? false,
+    })) };
+  });
+}
+
+function confirmedCreativePlanningOutput(output: unknown): boolean {
+  const history = isObjectRecord(output) ? output.creativeReviewHistory : undefined;
+  if (!isObjectRecord(history) || !isObjectRecord(history.stages) || history.directorReviewPurpose === "direction") return false;
+  const stages = history.stages;
+  return ["treatment", "script", "director"].every(stage => {
+    const state = stages[stage];
+    return isObjectRecord(state) && state.phase === "confirmed" && isObjectRecord(state.currentDraft)
+      && isObjectRecord(state.confirmation) && typeof state.currentDraft.sha256 === "string"
+      && state.confirmation.draftSha256 === state.currentDraft.sha256
+      && typeof state.currentDraft.versionId === "string" && state.confirmation.versionId === state.currentDraft.versionId;
+  });
 }
 
 function boundaryGatesEnabled(brief: Pick<ProductionBrief, "workflowFeatures">): boolean {
@@ -9281,6 +9323,15 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
       input = assetInput;
       if (input.reuseAssetPlanArtifactId !== undefined) {
         input = { ...input, reusableStockAssets: await verifiedReusableStockAssets(input.reuseAssetPlanArtifactId, context, this.runsRoot) };
+      } else {
+        const previousPlan = context.artifacts.filter(item => item.kind === "asset_plan" && item.producer?.nodeId === "assets").at(-1);
+        if (previousPlan?.uri) {
+          await verifyStoredArtifactWithinRoot(path.join(this.runsRoot, context.runId), previousPlan);
+          const plan: unknown = JSON.parse(await readFile(previousPlan.uri, "utf8"));
+          if (isObjectRecord(plan) && plan.preparation_complete === false) {
+            input = { ...input, reusableStockAssets: await verifiedReusableStockAssets(previousPlan.id, context, this.runsRoot) };
+          }
+        }
       }
     }
     if (this.config.capability === "voice.synthesize" && this.voiceManifestRecovery) {
@@ -9385,6 +9436,11 @@ class WorkerProvider implements Provider<Record<string, unknown>, WorkerResponse
       input,
       parameters,
       outputDir,
+      ...(["asset.prepare", "asset.search"].includes(this.config.capability) ? {
+        operationId: context.operationRequestId,
+        stockProgressPath: path.join(this.runsRoot, context.runId, "nodes", this.config.nodeId, "stock-progress.json"),
+        ...(this.config.capability === "asset.prepare" ? { pauseRequestPath: path.join(this.runsRoot, context.runId, ".pause-request.json") } : {}),
+      } : {}),
     }, this.withSourceRunSnapshot ? { withSourceRunSnapshot: this.withSourceRunSnapshot,
       ...(this.assetOperationRecoveryId ? { recoverOperationId: this.assetOperationRecoveryId } : {}),
     } : undefined);
@@ -11581,6 +11637,8 @@ function creativePlanningNode(
                 nodeRunId: "creative-planning",
                 attempt: searchAttempt.attempt,
                 capability: "asset.search",
+                operationId: context.operationRequestId,
+                stockProgressPath: path.join(runsRoot, context.runId, "nodes", "creative-planning", "stock-progress.json"),
                 input: { scriptPath: searchScriptPath, directorPlanPath: searchDirectorPlanPath },
                 parameters: { providerId: "asset-candidate-search-v1", provider: "ai-router", mediaType: "video", limit: 6 },
                 outputDir: searchAttempt.directory,
@@ -12430,6 +12488,9 @@ function creativePlanningNode(
             status: "needs_human",
             output: {
               creativeReview: outcome.state.creativeReview,
+              ...(stage === "director" && finalState.candidatesArtifact ? {
+                candidatePreviews: planningCandidatePreviews(finalState.candidatesArtifact.output, finalState.ranking?.output),
+              } : {}),
               blockingIssues,
               qualityAdvisories: (outcome.state.advisoryIssues ?? []).map(issue => ({
                 scenePositions: issue.scenePositions,
@@ -12483,9 +12544,9 @@ function creativePlanningNode(
               transport: "unix_socket",
               billing: "subscription",
               configurationSource: "system_default",
-              parameters: { planningRoute: libraryRoute ? "library" : "fixed", waitingStage: stage, ...(summary ?? {}) },
+              parameters: { accountingSource: "execution_summary", planningRoute: libraryRoute ? "library" : "fixed", waitingStage: stage, ...(summary ?? {}) },
               estimatedCostCny: 0,
-              requestId: context.nextId("creative-planning-waiting"),
+              ...(context.operationRequestId ? { requestId: context.operationRequestId } : {}),
             },
           };
         }
@@ -12598,11 +12659,12 @@ function creativePlanningNode(
         billing: "subscription" as const,
         configurationSource: "system_default" as const,
         parameters: {
+          accountingSource: "execution_summary",
           planningRoute: libraryRoute ? "library" : "fixed",
           ...(planningExecutionSummary ?? {}),
         },
         estimatedCostCny: 0,
-        requestId: context.nextId("creative-planning"),
+        ...(context.operationRequestId ? { requestId: context.operationRequestId } : {}),
       };
       // 图库路线的私有库存路径必须可得（登记/复用/残留三条分支都从执行记录或本次执行恢复），
       // 缺失即 fail closed——不允许下游拿公开报告冒充库存。
@@ -14496,7 +14558,8 @@ async function verifiedReusableStockAssets(planArtifactId: unknown, context: Wor
   await verifyStoredArtifactWithinRoot(runRoot, planArtifact);
   const plan = requireOutputRecord(JSON.parse(await readFile(planArtifact.uri, "utf8")), "reuse asset plan");
   if (!Array.isArray(plan.scene_assets)) throw new Error("Stock reuse plan has no scene assets.");
-  return Promise.all(plan.scene_assets.map(async raw => {
+  return Promise.all(plan.scene_assets.filter(raw => !(plan.preparation_complete === false
+    && isObjectRecord(raw) && raw.provider === "local")).map(async raw => {
     const scene = requireOutputRecord(raw, "reuse scene");
     if (!Number.isInteger(scene.scene_position) || Number(scene.scene_position) < 1
       || !FREE_STOCK_REMATCH_PROVIDERS.has(`${scene.provider}-stock-v1`)) {
@@ -16122,6 +16185,10 @@ async function workerResponseToNodeResult(
   const providerOutcomeKnown = response.diagnostics?.providerOutcomeKnown;
   if (providerOutcomeKnown !== undefined && typeof providerOutcomeKnown !== "boolean") {
     throw new Error("Worker diagnostics providerOutcomeKnown must be a boolean.");
+  }
+  if (response.status === "rejected" && ["STOCK_PREPARATION_PAUSED", "STOCK_PREPARATION_DEADLINE", "STOCK_PREPARATION_UNAVAILABLE"].includes(response.error?.code ?? "")) {
+    return { status: "needs_human", error, output: response.output ?? {}, artifacts, providerOutcomeKnown: true,
+      intervention: { kind: "stock_preparation_retry", reason: rawError, requiredAction: "request_changes", options: ["reject"] } };
   }
   if (response.status === "failed") {
     return {

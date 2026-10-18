@@ -425,6 +425,32 @@ function assertStageShape(stage: StageRecord, context: string): void {
 }
 
 describe("joint-v1 planning stage DTO (read-only projection)", () => {
+  it("exposes candidate previews at the material decision without inventing visual review evidence", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-candidate-preview-"));
+    const spies: PlanningSpies = { treatmentCalls: 0, screenwriterCalls: 0, directorCalls: 0, rankCalls: 0 };
+    const harness = newPlanningStudio(workspaceRoot, new PlanningStagesLibraryWorker(), reviewCapablePlanningAgents(spies));
+    const run = await harness.pipeline.start(planningBrief({ creativeReview: true, assetSemanticRank: true }));
+    for (let index = 0; index < 3; index++) {
+      const current = await harness.studio.creativeReview(run.id);
+      assert.ok(current, JSON.stringify({ index, nodes: (await harness.pipeline.show(run.id)).nodeRuns.map(node => ({ id: node.nodeId, status: node.status, error: node.error })) }));
+      const operation = await harness.pipeline.dispatchCreativeReviewCommand(run.id, {
+        action: "confirm", commandId: `preview-confirm-${index}`, actor: "creator", stage: current.stage,
+        expectedRunRevision: current.runRevision, expectedReviewRevision: current.reviewRevision,
+        baseDraftSha256: current.draftSha256, expectedCheckIdentity: current.checkResult!.checkIdentity,
+      });
+      await operation.completion;
+    }
+    const review = await harness.studio.creativeReview(run.id);
+    assert.equal(review?.reviewPurpose, "material_plan");
+    assert.equal(review?.candidatePreviews?.length, 3);
+    assert.deepEqual(review?.candidatePreviews?.[0], { scenePosition: 1, candidates: [{
+      provider: "pexels-stock-v1", assetId: "asset-1", visualReviewed: false,
+      previewUrl: "https://images.pexels.com/preview-1.jpg", sourceUrl: "https://videos.pexels.com/video-1",
+    }] });
+    assert.equal(spies.rankCalls, 1);
+    assert.equal(JSON.stringify(review?.candidatePreviews).includes(workspaceRoot), false);
+  });
+
   it("keeps all treatment versions, audits and adoption visible after moving to script", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-creative-history-"));
     const spies: PlanningSpies = { treatmentCalls: 0, screenwriterCalls: 0, directorCalls: 0, rankCalls: 0 };

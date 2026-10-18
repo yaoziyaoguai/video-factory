@@ -3,6 +3,11 @@ import { describe, it } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import https from "node:https";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import type { ClientRequest, IncomingMessage } from "node:http";
+import { downloadCandidateThumbnail } from "../src/asset-semantic-ranker.js";
 import { fileRoleAgentLoopCheckpoint } from "../src/role-agent-checkpoint.js";
 import { summarizeJointPlanningExecution } from "../src/production-pipeline.js";
 import {
@@ -31,6 +36,59 @@ const rawReport = {
     ],
   }],
 };
+
+describe("candidate thumbnail transport", () => {
+  it("rejects non-library URLs, credentials and alternate ports before connecting", async t => {
+    const get = t.mock.method(https, "get", () => { throw new Error("must not connect"); });
+    for (const url of ["http://images.pexels.com/a.jpg", "https://example.com/a.jpg", "https://images.pexels.com:8443/a.jpg",
+      "https://user:secret@images.pexels.com/a.jpg", "https://images.pexels.com.example.com/a.jpg"]) {
+      assert.equal(await downloadCandidateThumbnail(url), undefined);
+    }
+    assert.equal(get.mock.callCount(), 0);
+  });
+
+  it("bounds responses, refuses redirects and gives slow candidate IPs their own connection window", async t => {
+    const signal = new AbortController().signal;
+    let status = 200, contentType = "image/jpeg", declared = "4", bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+    t.mock.method(https, "get", (_url: URL, options: https.RequestOptions, callback: (response: IncomingMessage) => void) => {
+      assert.equal(options.signal, signal);
+      assert.equal((options as { autoSelectFamilyAttemptTimeout: number }).autoSelectFamilyAttemptTimeout, 3000);
+      const response = Object.assign(new PassThrough(), { statusCode: status, headers: { "content-type": contentType, "content-length": declared } });
+      queueMicrotask(() => { callback(response as unknown as IncomingMessage); response.end(bytes); });
+      return new EventEmitter() as ClientRequest;
+    });
+    const load = () => downloadCandidateThumbnail("https://cdn.pixabay.com/preview.jpg", signal);
+    assert.deepEqual(await load(), bytes);
+    status = 302;
+    assert.equal(await load(), undefined);
+    status = 200; contentType = "text/html";
+    assert.equal(await load(), undefined);
+    contentType = "image/jpeg"; declared = String(256 * 1024 + 1);
+    assert.equal(await load(), undefined);
+    declared = "0"; bytes = Buffer.alloc(256 * 1024 + 1);
+    assert.equal(await load(), undefined, "缺少长度头的响应也必须受字节上限约束");
+  });
+
+  it("settles interrupted requests and never treats a partial image as complete", async t => {
+    let interrupt: () => void = () => {};
+    let response: PassThrough;
+    t.mock.method(https, "get", (_url: URL, _options: https.RequestOptions, callback: (response: IncomingMessage) => void) => {
+      const request = new EventEmitter();
+      response = Object.assign(new PassThrough(), { statusCode: 200, headers: { "content-type": "image/jpeg" } });
+      queueMicrotask(() => callback(response as unknown as IncomingMessage));
+      interrupt = () => request.emit("error", new Error("connection aborted"));
+      return request as ClientRequest;
+    });
+    const aborted = downloadCandidateThumbnail("https://images.pexels.com/preview.jpg");
+    interrupt();
+    await assert.rejects(aborted, /aborted/);
+    const incomplete = downloadCandidateThumbnail("https://images.pexels.com/preview.jpg");
+    await new Promise(resolve => setImmediate(resolve));
+    response!.write(Buffer.from([0xff, 0xd8]));
+    response!.emit("aborted");
+    assert.equal(await incomplete, undefined);
+  });
+});
 
 describe("asset semantic ranking", () => {
   it("gives each scene's grouped sources visual evidence within the existing first-batch budget", async () => {
@@ -441,7 +499,7 @@ describe("asset semantic ranking", () => {
     intent.finalPadding = "";
     intent.finalPadding = "x".repeat(196480 - Buffer.byteLength(JSON.stringify(report.scenes)));
     let calls = 0;
-    const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => undefined,
+    const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
       client: { runTask: async () => ({}), runTaskDetailed: async kind => {
         calls++;
         return { output: kind === "asset-rank" ? { ...deterministicAssetRanking(report), source: "model" } : passingAudit() };
@@ -656,8 +714,8 @@ describe("asset semantic ranking", () => {
     let audits = 0;
     const output = deterministicAssetRanking(report);
     output.source = "model";
-    output.scenes[0]!.candidates[0]!.semanticScore = 90;
-    const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => undefined, maxReviewIterations: 1,
+    output.scenes[0]!.candidates.find(item => item.assetId === "second")!.semanticScore = 90;
+    const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async url => url.includes("first") ? Buffer.from([0xff, 0xd8, 0xff, 0xd9]) : undefined, maxReviewIterations: 1,
       client: { runTask: async () => output, runTaskDetailed: async (kind) => {
         if (kind === "role-audit") { audits++; return { output: passingAudit() }; }
         return { output: { ...output, visualEvidence: { reviewed: [{ provider: "pixabay", assetId: "second" }] } } };
@@ -870,7 +928,7 @@ describe("asset semantic ranking", () => {
           }],
         }),
       },
-      fetchThumbnail: async () => undefined,
+      fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
     });
     const ranking = await ranker.rank(report);
     assert.equal(ranking.modelId, "configured-codex");
@@ -916,7 +974,7 @@ describe("asset semantic ranking", () => {
           return deterministicAssetRanking(report);
         },
       },
-      fetchThumbnail: async () => undefined,
+      fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
     });
 
     await ranker.rank(report);
@@ -943,8 +1001,7 @@ describe("asset semantic ranking", () => {
 
     await ranker.rank(report);
 
-    const payload = seen[0] as { thumbnails: unknown[] };
-    assert.deepEqual(payload.thumbnails, []);
+    assert.equal(seen.length, 0, "所有图片超限时不提交没有视觉输入的模型调用");
   });
 
   it("resumes the saved ranking request and reuses its thumbnail snapshot", async () => {
@@ -1175,3 +1232,22 @@ function candidate(provider: string, assetId: string, score: number, width: numb
     score,
   };
 }
+
+
+it("stops empty-thumbnail ranking before any paid model request and replays the same unverified result", async () => {
+  let calls = 0, downloads = 0;
+  let saved: unknown;
+  const checkpoint = { key: "empty-thumbnail", load: async () => saved, save: async (value: unknown) => { saved = structuredClone(value); } };
+  const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => { downloads++; return undefined; },
+    client: { runTask: async () => { calls++; return {}; }, runTaskDetailed: async () => { calls++; return { output: {} }; } } });
+  const report = parseAssetCandidateReport(rawReport);
+  const result = await ranker.rankDetailed(report, checkpoint);
+  assert.equal(result.output.visualEvidence?.stopReason, "thumbnails_unavailable");
+  assert.deepEqual(result.output.visualEvidence?.reviewed, []);
+  assert.equal(result.output.source, "fallback");
+  assert.match(result.output.summary, /未调用模型/);
+  assert.equal(calls, 0);
+  const count = downloads;
+  assert.deepEqual(await ranker.rankDetailed(report, checkpoint), result);
+  assert.equal(downloads, count, "页面刷新不能悄悄重发");
+});

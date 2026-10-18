@@ -171,13 +171,22 @@ function runTiming(run: CostRunSource): NonNullable<StudioCostRunDetail["timing"
 
 function withExecutionFacts(detail: StudioCostRunDetail, projection: ModelExecutionProjection): StudioCostRunDetail {
   const covered = new Set<string>();
-  const lines = detail.lines.map((line) => {
-    if (!isModelLine(line)) return line;
+  const lines = detail.lines.flatMap((line): StudioCostLine[] => {
+    if (!isModelLine(line)) return [line];
+    // 节点汇总不是新请求。只有同操作的逐请求证据完整覆盖汇总时才消去，缺证据仍显式待核。
+    if (line.accountingSource === "execution_summary") {
+      const facts = projection.facts.filter(fact => fact.nodeId === line.nodeId && !!line.requestId && fact.operationId === line.requestId);
+      const count = facts.reduce((sum, fact) => sum + (fact.modelAttemptCount ?? 0), 0);
+      if (facts.every(fact => fact.modelAttemptCount !== null && !fact.conflict)
+        && line.subscriptionCallCount !== undefined && count === line.subscriptionCallCount) return [];
+      return [{ ...line, billing: "unverified", actualPending: true, callCountPending: true,
+        legacyUnattributed: true, legacySnapshotCount: 1 }];
+    }
     const related = projection.facts.filter((fact) => fact.nodeId === line.nodeId && fact.providerId === line.providerId
       && !!line.requestId && (fact.requestId === line.requestId || fact.operationId === line.requestId));
-    if (!related.length) return { ...line, legacyUnattributed: true as const, legacySnapshotCount: 1 };
+    if (!related.length) return [{ ...line, legacyUnattributed: true as const, legacySnapshotCount: 1 }];
     related.forEach((fact) => covered.add(fact.executionKey));
-    return { ...line, executionKeys: related.map((fact) => fact.executionKey) };
+    return [{ ...line, executionKeys: related.map((fact) => fact.executionKey) }];
   });
   for (const fact of projection.facts) {
     if (covered.has(fact.executionKey) || fact.accepted === false) continue;
@@ -325,6 +334,7 @@ function toRunDetail(
       ...(meteredFailedAttemptCount !== undefined ? { meteredFailedAttemptCount } : {}),
       ...(subscriptionCallCount !== undefined ? { subscriptionCallCount } : {}),
       ...(billing === "unverified" ? { modelCallCount: nonNegativeInteger(parameters?.modelCallCount) ?? 0 } : {}),
+      ...(parameters?.accountingSource === "execution_summary" ? { accountingSource: "execution_summary" as const } : {}),
       ...(documentOperation ? { accountingSource: "document_operation" as const,
         ...(parameters?.modelCallCountKnown === false ? { callCountPending: true } : {}) } : {}),
       ...(receipt.countConflict === true ? { countConflict: true } : {}),

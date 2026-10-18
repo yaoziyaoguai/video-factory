@@ -48,7 +48,7 @@ describe("opportunity draft protection", () => {
     let reject!: (error: Error) => void;
     const submit = vi.fn(() => new Promise<void>((_resolve, no) => { reject = no; }));
     render(<OpportunityDialog open onClose={close} onSubmit={submit} />);
-    for (const label of ["选题标题", "目标受众", "核心痛点", "开场钩子"]) await user.type(screen.getByLabelText(label), "要保留的内容");
+    for (const label of ["选题标题", "目标受众", "创作想法"]) await user.type(screen.getByLabelText(label), "要保留的内容");
     await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
     expect(submit).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "关闭" })).toBeDisabled();
@@ -58,6 +58,7 @@ describe("opportunity draft protection", () => {
     reject(new Error("保存暂不可用"));
     expect(await screen.findByRole("alert")).toHaveTextContent("保存暂不可用");
     expect(screen.getByLabelText("选题标题")).toHaveValue("要保留的内容");
+    expect(screen.getByLabelText("创作想法")).toHaveValue("要保留的内容");
     await user.keyboard("{Escape}");
     expect(screen.getByRole("button", { name: "返回填写" })).toBeVisible();
     expect(close).not.toHaveBeenCalled();
@@ -96,8 +97,7 @@ describe("manual opportunity source honesty (DG-UX-02)", () => {
     const view = render(<OpportunityDialog open {...props} />);
     await user.type(screen.getByLabelText("选题标题"), "窗边三分钟，找回注意力");
     await user.type(screen.getByLabelText("目标受众"), "注意力分散的上班族");
-    await user.type(screen.getByLabelText("核心痛点"), "工作间隙刷不掉的走神");
-    await user.type(screen.getByLabelText("开场钩子"), "先放下手机看窗边三分钟");
+    await user.type(screen.getByLabelText("创作想法"), "工作间隙放下手机，看窗边三分钟。");
     await user.click(screen.getByRole("button", { name: "保存创作草稿" }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
     const withoutLink = onSubmit.mock.calls[0]![0];
@@ -109,8 +109,7 @@ describe("manual opportunity source honesty (DG-UX-02)", () => {
     render(<OpportunityDialog open {...props} />);
     await user.type(screen.getByLabelText("选题标题"), "带参考链接的想法");
     await user.type(screen.getByLabelText("目标受众"), "注意力分散的上班族");
-    await user.type(screen.getByLabelText("核心痛点"), "工作间隙刷不掉的走神");
-    await user.type(screen.getByLabelText("开场钩子"), "先放下手机看窗边三分钟");
+    await user.type(screen.getByLabelText("创作想法"), "工作间隙放下手机，看窗边三分钟。");
     await user.click(screen.getByText("可选：补充参考来源"));
     await user.type(screen.getByLabelText("参考链接"), "https://qa-reference.invalid/article");
     await user.click(screen.getByRole("button", { name: "保存创作草稿" }));

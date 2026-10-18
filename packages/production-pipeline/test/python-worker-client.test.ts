@@ -11,10 +11,12 @@ describe("PythonWorkerClient", () => {
     const client = new PythonWorkerClient({ timeoutMs: 10_000, command: [process.execPath, "-e",
       `let text=''; process.stdin.on('data', chunk=>text+=chunk); process.stdin.on('end',()=>{const r=JSON.parse(text); process.stdout.write(JSON.stringify({protocolVersion:'video-factory/worker-v1',commandId:r.commandId,status:'succeeded',artifacts:[],output:{deadline:r.executionDeadlineUnixMs}}));});`] });
     const before = Date.now();
-    const response = await client.run({ commandId: "search-deadline", capability: "asset.search", executionDeadlineUnixMs: 1 });
-    const deadline = response.output?.deadline;
-    assert.equal(typeof deadline, "number");
-    assert.ok(Number(deadline) >= before + 9_000 && Number(deadline) <= Date.now() + 10_000);
+    for (const capability of ["asset.search", "asset.prepare"]) {
+      const response = await client.run({ commandId: "stock-deadline", capability, executionDeadlineUnixMs: 1 });
+      const deadline = response.output?.deadline;
+      assert.equal(typeof deadline, "number");
+      assert.ok(Number(deadline) >= before + 9_000 && Number(deadline) <= Date.now() + 10_000);
+    }
   });
   it("quotes narration groups through the real Python boundary without a provider key or paid operation", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "voice-quote-client-"));
