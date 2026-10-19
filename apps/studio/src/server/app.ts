@@ -31,6 +31,7 @@ import {
   parseStudioOpportunityInput,
   parseStudioOpportunityStatusInput,
   parseStudioDecisionInput,
+  parseStudioPauseResumeInput,
   parseStudioCreativeReviewCommandInput,
   parseStudioSceneRevisionInput,
 
@@ -211,11 +212,16 @@ export interface StudioServicePort {
   authorizeSpend(runId: string, nodeId: string, input: StudioSpendAuthorizationInput, approvedBy: string): Promise<StudioRunDetail>;
   rejectSpend(runId: string, nodeId: string, input: StudioSpendRejectionInput, rejectedBy: string): Promise<StudioRunDetail>;
   requestPause(runId: string): Promise<StudioRunDetail>;
-  resumePaused(runId: string): Promise<StudioRunDetail>;
+  resumePaused(runId: string, options?: { pauseRequestId?: string }): Promise<StudioRunDetail>;
   resumeStale(runId: string): Promise<StudioRunDetail>;
   queryOriginalTextTask(runId: string, target?: import("../shared/api.js").StudioOptionalReviewTarget): Promise<StudioRunDetail>;
-  retrieveOriginalTextTask(runId: string): Promise<StudioRunDetail>;
-  retryFailedNode(runId: string, nodeId: string, nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"]): Promise<StudioRunDetail>;
+  retrieveOriginalTextTask(runId: string, pauseRequestId?: string): Promise<StudioRunDetail>;
+  retryFailedNode(
+    runId: string,
+    nodeId: string,
+    nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"],
+    pauseRequestId?: string,
+  ): Promise<StudioRunDetail>;
   inspectPaidNode(runId: string, nodeId: string): Promise<StudioPaidNodeSummary>;
   reconcilePaidNode(runId: string, nodeId: string, input: StudioPaidReconciliationInput, actor: string): Promise<StudioRunDetail>;
   subscribe(runId: string, listener: (run: StudioRunDetail) => void): () => void;
@@ -1043,7 +1049,8 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/resume", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
-    return options.service.resumePaused(request.params.runId);
+    // A批：恢复必须携带详情投影的暂停身份（真正 paused 且无标记的旧记录可省略）。
+    return options.service.resumePaused(request.params.runId, parseStudioPauseResumeInput(request.body));
   });
 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/task-recovery/query", async (request) => {
@@ -1065,21 +1072,42 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
 
   app.post<{ Params: { runId: string } }>("/api/runs/:runId/task-recovery/retrieve", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
-    return options.service.retrieveOriginalTextTask(request.params.runId);
+    let pauseRequestId: string | undefined;
+    if (request.body !== undefined && request.body !== null) {
+      const input = requiredObject(request.body, "取回请求");
+      const unknown = Object.keys(input).find((key) => key !== "pauseRequestId");
+      if (unknown) throw new StudioInputError(`取回请求不支持字段“${unknown}”。`);
+      if (input.pauseRequestId !== undefined
+        && (typeof input.pauseRequestId !== "string" || !/^[0-9a-f]{64}$/.test(input.pauseRequestId))) {
+        throw new StudioInputError("暂停请求编号格式不正确，请刷新页面获取最新暂停状态。");
+      }
+      pauseRequestId = typeof input.pauseRequestId === "string" ? input.pauseRequestId : undefined;
+    }
+    return options.service.retrieveOriginalTextTask(request.params.runId, pauseRequestId);
   });
 
   app.post<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/retry", async (request) => {
     requireSafeRouteId(request.params.runId, "制作编号");
     requireSafeRouteId(request.params.nodeId, "节点编号");
     let recovery: StudioRunDetail["nativeAudioRecovery"];
+    let pauseRequestId: string | undefined;
     if (request.body !== undefined) {
-      const input = requiredObject(request.body, "原声恢复请求");
-      if (!Number.isSafeInteger(input.expectedRunRevision) || Number(input.expectedRunRevision) < 0) {
-        throw new StudioInputError("制作版本必须是非负整数。");
+      const input = requiredObject(request.body, "重试请求");
+      const unknown = Object.keys(input).find((key) => !["expectedRunRevision", "interventionId", "pauseRequestId"].includes(key));
+      if (unknown) throw new StudioInputError(`重试请求不支持字段“${unknown}”。`);
+      if (input.expectedRunRevision !== undefined || input.interventionId !== undefined) {
+        if (!Number.isSafeInteger(input.expectedRunRevision) || Number(input.expectedRunRevision) < 0) {
+          throw new StudioInputError("制作版本必须是非负整数。");
+        }
+        recovery = { expectedRunRevision: Number(input.expectedRunRevision), interventionId: requiredTrimmedString(input.interventionId, "原声准备停点") };
       }
-      recovery = { expectedRunRevision: Number(input.expectedRunRevision), interventionId: requiredTrimmedString(input.interventionId, "原声准备停点") };
+      if (input.pauseRequestId !== undefined
+        && (typeof input.pauseRequestId !== "string" || !/^[0-9a-f]{64}$/.test(input.pauseRequestId))) {
+        throw new StudioInputError("暂停请求编号格式不正确，请刷新页面获取最新暂停状态。");
+      }
+      pauseRequestId = typeof input.pauseRequestId === "string" ? input.pauseRequestId : undefined;
     }
-    return options.service.retryFailedNode(request.params.runId, request.params.nodeId, recovery);
+    return options.service.retryFailedNode(request.params.runId, request.params.nodeId, recovery, pauseRequestId);
   });
 
   app.get<{ Params: { runId: string; nodeId: string } }>("/api/runs/:runId/nodes/:nodeId/paid-operation", async (request) => {

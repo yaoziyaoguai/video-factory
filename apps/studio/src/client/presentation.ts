@@ -46,8 +46,9 @@ export function runNodeLabel(nodeId: string): string {
 }
 
 /** 列表和详情共用服务端阶段，不把所有人工停点都称为成片审片。 */
-export function creatorRunStatusLabel(run: Pick<StudioRunSummary, "status" | "currentNodeId" | "continuation" | "audioMode">): string | undefined {
+export function creatorRunStatusLabel(run: Pick<StudioRunSummary, "status" | "currentNodeId" | "continuation" | "audioMode" | "rankPaused">): string | undefined {
   if (isHistoricalReadOnlyRun(run)) return "历史只读";
+  if (run.rankPaused && run.status === "failed") return "候选核验已暂停";
   if (run.status !== "needs_human") return undefined;
   if (run.currentNodeId === "final-review") return "等你确认内部定版";
   if (run.currentNodeId === "voice" && run.audioMode === "native_av") return "等你确认原声试听";

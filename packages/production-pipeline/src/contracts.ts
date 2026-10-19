@@ -495,7 +495,7 @@ export function parseBrief(value: unknown): ProductionBrief {
     ...(nativeVideoProviderId ? { nativeVideoProviderId } : {}),
     title: requireString(value.title, "title"),
     angle: requireString(value.angle, "angle"),
-    audience: requireString(value.audience, "audience"),
+    audience: requireOptionalChoiceString(value.audience, "audience"),
     nicheSlug: requireString(value.nicheSlug, "nicheSlug"),
     ...duration,
     platform: requireProductionPlatform(value.platform),
@@ -1483,6 +1483,12 @@ function requireString(value: unknown, field: string): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new Error(`${field} must be a non-empty string.`);
   }
+  return value.trim();
+}
+
+/** 用户可选字段：空白规范化为空串表示「未指定」，不自动补默认受众；非法类型仍拒绝。 */
+function requireOptionalChoiceString(value: unknown, field: string): string {
+  if (typeof value !== "string") throw new Error(`${field} must be a string.`);
   return value.trim();
 }
 

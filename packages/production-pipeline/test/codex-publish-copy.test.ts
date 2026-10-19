@@ -147,6 +147,23 @@ describe("CodexPublishCopyWriter", () => {
     assert.equal(codexClient.calls.length, 0);
   });
 
+  // C 批次：受众未指定（空串）可进入发布文案任务；其余必填字段边界不变。
+  it("accepts an unspecified audience and forwards it verbatim as task data", async () => {
+    const codexClient = new CapturingCodexClient(() => rawCopy());
+    const writer = new CodexPublishCopyWriter({ client: codexClient });
+
+    await writer.write({ ...publishInput(), brief: { ...publishInput().brief, audience: "" } });
+
+    assert.equal(codexClient.calls.length, 1);
+    const payload = codexClient.calls[0]!.payload as PublishCopyInput;
+    assert.equal(payload.brief.audience, "");
+    await assert.rejects(
+      () => writer.write({ ...publishInput(), brief: { ...publishInput().brief, audience: 42 as unknown as string } }),
+      /brief\.audience must be a string/,
+    );
+    assert.equal(codexClient.calls.length, 1);
+  });
+
   it("accepts exact code-point boundaries", async () => {
     const codexClient = new CapturingCodexClient(() => rawCopy({
       title: "标".repeat(30),

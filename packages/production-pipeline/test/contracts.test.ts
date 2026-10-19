@@ -27,6 +27,19 @@ const validBrief = {
 } as const;
 
 describe("ProductionBrief", () => {
+  // postdogfood C：受众在用户表单上可选；空字符串明确表示「未指定」，
+  // 不自动补成「所有人」，非法类型仍拒绝，已填受众逐字保留（仅trim）。
+  it("accepts an unspecified audience as an empty string without inventing one", () => {
+    assert.equal(pipeline.parseBrief({ ...validBrief, audience: "" }).audience, "");
+    assert.equal(pipeline.parseBrief({ ...validBrief, audience: "   " }).audience, "");
+    assert.equal(pipeline.parseBrief({ ...validBrief, audience: " 宝妈群体 " }).audience, "宝妈群体");
+    for (const bad of [null, 42, {}, [], true]) {
+      assert.throws(() => pipeline.parseBrief({ ...validBrief, audience: bad }), /audience/);
+    }
+    const roundTripped = pipeline.parsePersistedBrief(JSON.parse(JSON.stringify(pipeline.parseBrief({ ...validBrief, audience: "  " }))));
+    assert.equal(roundTripped.audience, "", "保存/重读保持空受众语义");
+  });
+
   it("keeps content-led references separate from explicit bounds and preserves legacy semantics", () => {
     const modern = { ...validBrief, durationPolicy: "content-led-v1", durationSeconds: 50,
       providers: { ...validBrief.providers, director: "api-visual-director-v1" },

@@ -25,7 +25,7 @@ import {
 import { JsonOpportunityStore } from "../src/server/opportunity-store.js";
 import { CaseStudio } from "../src/server/case-studio.js";
 import { JsonRunArchiveStore } from "../src/server/run-archive-store.js";
-import { loadAgentLoopProgress, ProductionStudio } from "../src/server/production-studio.js";
+import { loadAgentLoopProgress, ProductionStudio, productionInputMessage, productionScopeContent } from "../src/server/production-studio.js";
 import { buildStudioApp } from "../src/server/app.js";
 import type { StudioDecisionInput, StudioOpportunityInput, StudioProvider, StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
 
@@ -194,6 +194,7 @@ class FakePipeline implements StudioPipelinePort {
     recoverOriginalTextTask?: boolean;
     resumeCompletedTextTask?: boolean;
     resumeCompletedTextTaskRequestId?: string;
+    pauseRequestId?: string;
   };
   retryDispatchCount = 0;
   lastExecutionConfigurationNodeId?: string;
@@ -201,6 +202,8 @@ class FakePipeline implements StudioPipelinePort {
   lastReconciliationOptions?: { settleOnly?: boolean };
   reconciliationError?: Error;
   pauseRequestedValue = false;
+  pauseMarker?: { pauseRequestId: string; legacy?: boolean; requestedAt?: string };
+  lastResumePausedOptions?: { pauseRequestId?: string };
   dispatchCount = 0;
   lastInput?: unknown;
   dispatchGate?: Promise<void>;
@@ -314,10 +317,19 @@ class FakePipeline implements StudioPipelinePort {
   }
 
   async pauseRequested(_runId: string): Promise<boolean> {
-    return this.pauseRequestedValue;
+    return this.pauseRequestedValue || this.pauseMarker !== undefined;
   }
 
-  async resumePaused(_runId: string): Promise<WorkflowRun<ProductionBrief>> {
+  async readPauseRequest(_runId: string): Promise<{ pauseRequestId: string; legacy?: boolean; requestedAt?: string } | undefined> {
+    return this.pauseMarker ?? (this.pauseRequestedValue ? { pauseRequestId: "f".repeat(64) } : undefined);
+  }
+
+  async resumePaused(_runId: string, options?: { pauseRequestId?: string }): Promise<WorkflowRun<ProductionBrief>> {
+    // 与真实 pipeline 相同的条件解除语义：标记存在时只有匹配身份才清除。
+    if (this.pauseMarker && options?.pauseRequestId === this.pauseMarker.pauseRequestId) {
+      this.pauseMarker = undefined;
+    }
+    this.lastResumePausedOptions = options;
     this.pauseRequestedValue = false;
     this.run = { ...this.run, status: "running" };
     return this.run;
@@ -429,6 +441,18 @@ async function completeTrendRefresh(service: StudioService, refreshId?: string):
 }
 
 describe("StudioService", () => {
+  // C 批次：受众是可选字段——报价摘要与错误文案都要承认「未指定」这一合法状态。
+  it("omits the audience segment of the quote scope when the brief leaves it unspecified", () => {
+    const base = { title: "留空受众的制作", angle: "只写标题和角度" };
+    assert.equal(productionScopeContent({ ...base, audience: "" }), "留空受众的制作｜只写标题和角度");
+    assert.equal(productionScopeContent({ ...base, audience: "宝妈群体" }), "留空受众的制作｜只写标题和角度｜面向宝妈群体");
+  });
+
+  it("explains the audience as optional instead of demanding it in brief validation errors", () => {
+    assert.match(productionInputMessage(new Error("audience must be a string.")), /目标受众.*可选|留空.*未指定/);
+    assert.equal(productionInputMessage(new Error("title must be a non-empty string.")), "请完整填写标题、内容角度、系列标识和平台。");
+  });
+
   it("serves healthy runs and marks costs incomplete through the real pipeline despite corrupt neighbours", async (t) => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-studio-run-scan-"));
     t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
@@ -1805,6 +1829,72 @@ describe("StudioService", () => {
     pipeline.run = { ...run, status: "running" };
     await service.requestPause(run.id);
     assert.equal(pipeline.pauseRequestedValue, true);
+  });
+
+  it("maps retained pause intent to explicit recovery entries instead of silently clearing it", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-studio-pause-contract-"));
+    const run = executableWaitingRun(workspaceRoot);
+    const token = "a".repeat(64);
+    const pipeline = new FakePipeline(run);
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+
+    // 详情投影带暂停身份；布尔 pauseRequested 与 pauseRecovery 同源。
+    pipeline.pauseMarker = { pauseRequestId: token, requestedAt: "2026-10-19T00:00:00.000Z" };
+    const detail = await service.getRun(run.id);
+    assert.equal(detail?.pauseRequested, true);
+    assert.equal(detail?.pauseRecovery?.pauseRequestId, token);
+
+    // needs_human + 标记：resume 不是解除通道，指向明确采用。
+    await assert.rejects(() => service.resumePaused(run.id), /采用并继续/);
+
+    // 采购待决 + 标记：不能借恢复绕过审批。
+    pipeline.run = { ...run, status: "awaiting_spend_approval" };
+    await assert.rejects(() => service.resumePaused(run.id), /审批/);
+
+    // 普通失败 + 标记：指向“解除暂停并重试”，不改写失败原因。
+    pipeline.run = {
+      ...run,
+      status: "failed",
+      nodeRuns: run.nodeRuns.map((node) => node.nodeId === "final-review"
+        ? { ...node, status: "failed" as const, intervention: undefined, error: "普通失败" } : node),
+      interventions: [],
+    };
+    await assert.rejects(() => service.resumePaused(run.id), /解除暂停并重试/);
+    // ASSET_RANK_PAUSED：给出候选核验专属出口，且不假装其他失败也是暂停。
+    pipeline.run = {
+      ...pipeline.run,
+      nodeRuns: pipeline.run.nodeRuns.map((node) => node.nodeId === "final-review"
+        ? { ...node, errorCode: "ASSET_RANK_PAUSED" as const } : node),
+    };
+    await assert.rejects(() => service.resumePaused(run.id), /继续候选核验/);
+
+    // 真 paused + 标记：无身份/错身份拒绝；正确身份恢复并只消费那一条标记。
+    pipeline.run = { ...run, status: "paused" };
+    await assert.rejects(() => service.resumePaused(run.id), /从最新页面继续/);
+    await assert.rejects(() => service.resumePaused(run.id, { pauseRequestId: "b".repeat(64) }), /新的暂停请求/);
+    assert.equal(pipeline.pauseMarker?.pauseRequestId, token, "被拒的恢复不得消费暂停意图");
+    const resumed = await service.resumePaused(run.id, { pauseRequestId: token });
+    assert.equal(resumed.status, "running");
+    assert.equal(pipeline.pauseMarker, undefined);
+    assert.equal(pipeline.lastResumePausedOptions?.pauseRequestId, token);
+
+    // 重试与批准都按用户提交的身份透传，服务端不代填。
+    pipeline.run = { ...run, status: "failed", interventions: [],
+      nodeRuns: run.nodeRuns.map((node) => node.nodeId === "final-review"
+        ? { ...node, status: "failed" as const, intervention: undefined, error: "普通失败" } : node) };
+    pipeline.pauseMarker = { pauseRequestId: token };
+    await service.retryFailedNode(run.id, "final-review", undefined, token);
+    assert.equal(pipeline.lastRetryOptions?.pauseRequestId, token);
+
+    pipeline.run = { ...run };
+    await service.decide(run.id, {
+      action: "approve",
+      expectedRunRevision: run.revision,
+      interventionId: "intervention-1",
+      reviewEvidenceId: null,
+      pauseRequestId: token,
+    }, "studio-owner");
+    assert.equal(pipeline.lastDecision?.pauseRequestId, token);
   });
 
   it("rejects executable fields when the persisted workflow version is incompatible", async () => {

@@ -1313,6 +1313,8 @@ export class WorkflowRunner {
       allowSourceReviewDecision?: boolean;
       allowLocalPreparationRetry?: boolean;
       allowStockPreparationRetry?: boolean;
+      /** 候选核验被宿主暂停后的接续：沿用原 operation 身份，不伪造 interrupted/unknown。 */
+      allowPausedOperationContinuation?: boolean;
     } = {},
   ): Promise<WorkflowRun<TInitialInput>> {
     validateWorkflowDefinition(definition);
@@ -1369,7 +1371,12 @@ export class WorkflowRunner {
     const retryNode = run.nodeRuns.find((nodeRun) => nodeRun.nodeId === nodeId)!;
     retryNode.status = "pending";
     const preserveSourceReviewAuthorization = reviewRetryPause || reviewDecisionPause;
-    const preserveInterruptedOperation = retryNode.interrupted === true || preserveSourceReviewAuthorization;
+    // 暂停接续只保留 operation 归属：它既不是中断后的不确定结果，也不恢复旧授权；
+    // 校验与 checkpoint 归属由调用方（pipeline）在执行租约内完成。
+    const preservePausedOperation = options.allowPausedOperationContinuation === true
+      && failedNode.errorCode === "ASSET_RANK_PAUSED" && !failedNode.outcomeUncertain;
+    const preserveInterruptedOperation = retryNode.interrupted === true || preserveSourceReviewAuthorization
+      || preservePausedOperation;
     retryNode.artifactIds = [];
     retryNode.qualityGateResults = [];
     // 创作命令的恢复可能再次中断：只保留命令关联，不把旧稿当成本次执行输出。

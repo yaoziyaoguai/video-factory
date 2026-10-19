@@ -169,24 +169,69 @@ function runTiming(run: CostRunSource): NonNullable<StudioCostRunDetail["timing"
   return { ...base, humanWaitMs };
 }
 
+// postdogfood B1：有操作归属但缺逐请求证据的回执/汇总统一转为「次数待核」行——
+// 不并入订阅精确总数，不伪装成历史旧累计，金额已核时不标成金额待核。
+function pendingAttributedLine(line: StudioCostLine): StudioCostLine {
+  const claimed = line.subscriptionCallCount ?? line.modelCallCount;
+  return { ...line, billing: "unverified",
+    ...(claimed !== undefined ? { modelCallCount: claimed } : {}),
+    callCountPending: true, actualPending: line.actualCostCny === undefined,
+    legacySnapshotCount: 1 };
+}
+
 function withExecutionFacts(detail: StudioCostRunDetail, projection: ModelExecutionProjection): StudioCostRunDetail {
   const covered = new Set<string>();
   const lines = detail.lines.flatMap((line): StudioCostLine[] => {
     if (!isModelLine(line)) return [line];
-    // 节点汇总不是新请求。只有同操作的逐请求证据完整覆盖汇总时才消去，缺证据仍显式待核。
+    // 节点汇总不是新请求。只有同操作的逐请求证据完整（无未知/冲突、读取无
+    // issues）、计数精确匹配、且没有会随消去丢失的独立金额时才移除汇总；
+    // 零调用没有正面覆盖证据，永远保留待核。
     if (line.accountingSource === "execution_summary") {
       const facts = projection.facts.filter(fact => fact.nodeId === line.nodeId && !!line.requestId && fact.operationId === line.requestId);
-      const count = facts.reduce((sum, fact) => sum + (fact.modelAttemptCount ?? 0), 0);
-      if (facts.every(fact => fact.modelAttemptCount !== null && !fact.conflict)
-        && line.subscriptionCallCount !== undefined && count === line.subscriptionCallCount) return [];
-      return [{ ...line, billing: "unverified", actualPending: true, callCountPending: true,
-        legacyUnattributed: true, legacySnapshotCount: 1 }];
+      const countsKnown = facts.length > 0
+        && facts.every(fact => fact.modelAttemptCount !== null && !fact.conflict);
+      const attemptTotal = facts.reduce((sum, fact) => sum + (fact.modelAttemptCount ?? 0), 0);
+      // 汇总行自身次数未知/待核时永不消去：缺数不能被默认值或恰好的子集事实伪装成
+      // 精确覆盖；已核实的子集事实照常由下方独立成行可见。
+      const summaryCountUnknown = line.executionSummaryPending === true || line.callCountPending === true
+        || line.subscriptionCallCount === undefined;
+      const exactCover = !summaryCountUnknown && projection.issues.length === 0 && countsKnown
+        && typeof line.subscriptionCallCount === "number" && line.subscriptionCallCount > 0
+        && line.subscriptionCallCount === attemptTotal;
+      if (exactCover && line.actualCostCny === undefined) return [];
+      return [pendingAttributedLine(line)];
     }
-    const related = projection.facts.filter((fact) => fact.nodeId === line.nodeId && fact.providerId === line.providerId
-      && !!line.requestId && (fact.requestId === line.requestId || fact.operationId === line.requestId));
-    if (!related.length) return [{ ...line, legacyUnattributed: true as const, legacySnapshotCount: 1 }];
-    related.forEach((fact) => covered.add(fact.executionKey));
-    return [{ ...line, executionKeys: related.map((fact) => fact.executionKey) }];
+    // 只有同一物理请求才可与fact合并并取得覆盖权；operationId相同仅代表同操作，
+    // 不能让一份回执隐藏该操作下多个物理请求的逐条证据。
+    const sameRequest = projection.facts.filter((fact) => fact.nodeId === line.nodeId && fact.providerId === line.providerId
+      && !!line.requestId && fact.requestId === line.requestId);
+    if (!sameRequest.length) {
+      const operationAttributed = line.accountingSource !== "document_operation" && !!line.requestId
+        && projection.facts.some((fact) => fact.nodeId === line.nodeId && fact.operationId === line.requestId);
+      if (operationAttributed) return [pendingAttributedLine(line)];
+      return [{ ...line, legacyUnattributed: true as const, legacySnapshotCount: 1 }];
+    }
+    // 同一物理请求的回执与事实必须呈现同一口径：把已核实的尝试次数/已知性/终态合入
+    // 保留行（登记数与事实数取较大值），不能让回执占位数（如 document 的 0 占位）把
+    // 已发生的调用藏成明细 0。金额权威字段不受合并影响，保持待核口径。
+    sameRequest.forEach((fact) => covered.add(fact.executionKey));
+    const requestCountsKnown = sameRequest.every((fact) => fact.modelAttemptCount !== null && !fact.conflict && fact.accepted !== null);
+    const requestAttemptTotal = sameRequest.reduce((sum, fact) => sum + (fact.modelAttemptCount ?? 0), 0);
+    const registeredCount = line.subscriptionCallCount ?? line.modelCallCount ?? 0;
+    const requestCount = Math.max(registeredCount, requestAttemptTotal);
+    const terminalStatus = sameRequest.length === 1 && sameRequest[0]!.state === "completed"
+      ? "succeeded" as const
+      : sameRequest.length === 1 && sameRequest[0]!.state === "completed_failure"
+        ? "failed" as const
+        : undefined;
+    const { callCountPending: _superseded, ...lineWithoutPending } = line;
+    return [{
+      ...lineWithoutPending,
+      executionKeys: sameRequest.map((fact) => fact.executionKey),
+      ...(line.billing === "subscription" ? { subscriptionCallCount: requestCount } : { modelCallCount: requestCount }),
+      ...(requestCountsKnown && requestAttemptTotal >= registeredCount ? {} : { callCountPending: true }),
+      ...(terminalStatus !== undefined && line.status === "unknown" ? { status: terminalStatus } : {}),
+    }];
   });
   for (const fact of projection.facts) {
     if (covered.has(fact.executionKey) || fact.accepted === false) continue;
@@ -201,7 +246,10 @@ function withExecutionFacts(detail: StudioCostRunDetail, projection: ModelExecut
   }
   const summary = summarizeModelExecutionFacts(projection.facts, projection.issues, projection.currentOperationIds);
   const cash = totals(lines);
-  const countExact = summary.countExact && (cash.legacyUnattributedReceipts ?? 0) === 0 && (cash.countConflicts ?? 0) === 0;
+  // 同请求回执可能比逐请求事实登记更多次数；保留已核实子集，但行级待核也必须使
+  // 总计不完整，不能仅凭事实子集把本次新增推成精确的 0。
+  const countExact = summary.countExact && !lines.some((line) => line.callCountPending === true)
+    && (cash.legacyUnattributedReceipts ?? 0) === 0 && (cash.countConflicts ?? 0) === 0;
   return { ...detail, lines, executionFacts: projection.facts, totals: {
     ...cash, ...summary, legacyUnattributedReceipts: cash.legacyUnattributedReceipts ?? 0,
     countConflicts: (cash.countConflicts ?? 0) + summary.countConflicts, countExact,
@@ -254,14 +302,20 @@ function toRunDetail(
     Array.isArray(run.executionReceipts) ? run.executionReceipts : [],
     [...paidReceipts, ...documentReceipts],
   );
-  const lines = receipts.flatMap((value, index): StudioCostLine[] => {
+  const lines = receipts.flatMap((value): StudioCostLine[] => {
     const receipt = isRecord(value) ? value : undefined;
     if (!receipt) return [];
-    const id = text(receipt.id) || `${text(receipt.nodeId)}:${text(receipt.startedAt)}:${index}`;
     const nodeId = text(receipt.nodeId);
     const receiptProviderId = text(receipt.providerId);
     const receiptModelId = text(receipt.modelId) || text(receipt.model) || "unknown";
     const startedAt = text(receipt.startedAt);
+    // 行ID是展示身份：优先持久receipt.id；无id时复用mergeReceipts的同一性字段
+    // 构建确定性键，绝不用数组index（插入/重排会漂移）。
+    const rawRequestId = text(receipt.requestId);
+    const rawModelId = text(receipt.modelId) || text(receipt.model);
+    const id = text(receipt.id) || (rawRequestId
+      ? `request:${receiptProviderId}:${rawRequestId}`
+      : [nodeId, startedAt, receiptProviderId, rawModelId].join(":"));
     if (!id || !nodeId || !receiptProviderId || !startedAt) return [];
     const { providerId, modelId } = actualMediaAttribution(receipt, receiptProviderId, receiptModelId);
     const billing = billingType(receipt.billing);
@@ -290,8 +344,17 @@ function toRunDetail(
       : undefined;
     const parameters = isRecord(receipt.parameters) ? receipt.parameters : undefined;
     const documentOperation = parameters?.accountingSource === "document_operation";
+    // execution_summary 是节点级汇总：缺逐请求证据（executionSummaryPending）或未登记
+    // 次数时不能默认成 1 次——缺数必须保持未知（callCountPending）。普通单次订阅回执
+    // 的既有默认 1 次不变。
+    const executionSummary = parameters?.accountingSource === "execution_summary";
+    const executionSummaryPending = executionSummary && parameters?.executionSummaryPending === true;
+    const registeredCallCount = nonNegativeInteger(parameters?.modelCallCount);
+    const summaryCountUnknown = executionSummary && (executionSummaryPending || registeredCallCount === undefined);
     const subscriptionCallCount = billing === "subscription"
-      ? nonNegativeInteger(parameters?.modelCallCount) ?? 1
+      ? executionSummary
+        ? summaryCountUnknown ? undefined : registeredCallCount
+        : registeredCallCount ?? 1
       : undefined;
     const quoteNode = Array.isArray(run.nodeRuns) ? run.nodeRuns.find((node) => isRecord(node) && node.nodeId === nodeId) : undefined;
     const boundQuote = isRecord(quoteNode) && isRecord(quoteNode.spendPlan)
@@ -334,7 +397,9 @@ function toRunDetail(
       ...(meteredFailedAttemptCount !== undefined ? { meteredFailedAttemptCount } : {}),
       ...(subscriptionCallCount !== undefined ? { subscriptionCallCount } : {}),
       ...(billing === "unverified" ? { modelCallCount: nonNegativeInteger(parameters?.modelCallCount) ?? 0 } : {}),
-      ...(parameters?.accountingSource === "execution_summary" ? { accountingSource: "execution_summary" as const } : {}),
+      ...(executionSummary ? { accountingSource: "execution_summary" as const,
+        ...(executionSummaryPending ? { executionSummaryPending: true as const } : {}),
+        ...(summaryCountUnknown ? { callCountPending: true } : {}) } : {}),
       ...(documentOperation ? { accountingSource: "document_operation" as const,
         ...(parameters?.modelCallCountKnown === false ? { callCountPending: true } : {}) } : {}),
       ...(receipt.countConflict === true ? { countConflict: true } : {}),
@@ -575,11 +640,15 @@ function mergeReceiptPair(
 }
 
 function totals(lines: CostLineBuild[]): StudioCostTotals {
-  const unverifiedModelCalls = lines.some((line) => line.billing === "unverified")
-    ? sum(lines, (line) => line.billing === "unverified" ? line.modelCallCount ?? 0 : 0)
+  // 次数待核的「归属回执/汇总」与execution facts重复，不并入已确认计数；
+  // checkpoint补充行（无legacySnapshotCount）是唯一证据，仍按未核实口径计数。
+  const attributedPending = (line: CostLineBuild) => line.callCountPending === true && line.legacySnapshotCount !== undefined;
+  const unverifiedCountable = (line: CostLineBuild) => line.billing === "unverified" && !attributedPending(line);
+  const unverifiedModelCalls = lines.some(unverifiedCountable)
+    ? sum(lines, (line) => unverifiedCountable(line) ? line.modelCallCount ?? 0 : 0)
     : undefined;
   const subscriptionCalls = sum(lines, (line) => line.billing === "subscription"
-    ? line.legacyUnattributed ? 0 : line.subscriptionCallCount ?? 1
+    ? line.legacyUnattributed || line.callCountPending === true ? 0 : line.subscriptionCallCount ?? 1
     : 0);
   const meteredCalls = sum(lines, (line) => line.billing === "metered" ? line.meteredAttemptCount ?? 0 : 0);
   const legacyUnattributedReceipts = sum(lines, (line) => line.legacySnapshotCount ?? 0);
@@ -613,9 +682,10 @@ function group(lines: StudioCostLine[], key: (line: StudioCostLine) => string): 
     label: id,
     calls: sum(items, (item) => item.billing === "metered"
       ? item.meteredAttemptCount ?? 0
+      : item.callCountPending === true && item.legacySnapshotCount !== undefined ? 0
       : item.billing === "unverified" ? item.modelCallCount ?? 0
       : item.billing === "subscription"
-        ? item.subscriptionCallCount ?? 1
+        ? item.callCountPending === true ? 0 : item.subscriptionCallCount ?? 1
         : 1),
     estimatedCostCny: money(sum(items, (item) => item.estimatedCostCny ?? 0)),
     actualCostCny: money(sum(items, (item) => item.actualCostCny ?? 0)),

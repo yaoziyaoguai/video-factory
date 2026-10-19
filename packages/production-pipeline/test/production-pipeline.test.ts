@@ -2100,7 +2100,8 @@ describe("ProductionPipeline", () => {
     assert.ok(failed.artifacts.some((artifact) => artifact.kind === "model_trace" && artifact.provenance.model === "deepseek-flash"));
   });
 
-  it("repairs short free stock through the normal retry action without rerunning upstream and stops for asset confirmation", async () => {
+  for (const pauseBeforeFailure of [false, true]) {
+  it(`repairs short free stock through the normal retry action without rerunning upstream (pause=${pauseBeforeFailure})`, async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-stock-range-recovery-"));
     class StockWorker extends FakeWorker {
       override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
@@ -2139,7 +2140,8 @@ describe("ProductionPipeline", () => {
           })) };
       } },
       assetProviders: [{ id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["video"], deliveryTypes: ["stock_video"] }],
-      visualReviewAgents: [{ id: "deepseek-visual-review-v1", modelId: "fixture", review: async () => {
+      visualReviewAgents: [{ id: "deepseek-visual-review-v1", modelId: "fixture", review: async input => {
+        if (pauseBeforeFailure) await subject.requestPause(path.basename(input.runRoot));
         throw new pipeline.PlanContractError("SOURCE_RANGE_TOO_SHORT", [2], "local input failure");
       } }],
     });
@@ -2157,28 +2159,51 @@ describe("ProductionPipeline", () => {
     assert.equal(failed.errorCode, "SOURCE_RANGE_TOO_SHORT");
     assert.doesNotMatch(failed.error!, /更换视觉审片模型|服务暂时不可用/);
     assert.deepEqual(failed.output, { sourceMediaFailure: { code: "SOURCE_RANGE_TOO_SHORT", scenePositions: [2], canRematch: true } });
+    const pause = await subject.readPauseRequest(run.id);
+    assert.equal(Boolean(pause), pauseBeforeFailure);
+    const options = pause ? { pauseRequestId: pause.pauseRequestId } : undefined;
     const upstream = run.nodeRuns.filter(node => ["brief", "script", "visual-direction"].includes(node.nodeId));
     const planPath = (run.nodeRuns.find(node => node.nodeId === "assets")!.output as { assetPlanPath: string }).assetPlanPath;
     const savedPlan = await readFile(planPath, "utf8");
     await writeFile(planPath, savedPlan + " ");
-    await assert.rejects(() => subject.retryFailedNode(run.id, "asset-source-review"), /SHA|size|integrity|match/i);
+    await assert.rejects(() => subject.retryFailedNode(run.id, "asset-source-review", options), /SHA|size|integrity|match/i);
     assert.equal(worker.calls.length, 2);
+    assert.deepEqual(await subject.readPauseRequest(run.id), pause, "产物校验拒绝不消费暂停");
     await writeFile(planPath, savedPlan);
-    const attempts = await Promise.allSettled([subject.retryFailedNode(run.id, "asset-source-review"), subject.retryFailedNode(run.id, "asset-source-review")]);
+    if (pause) {
+      await assert.rejects(subject.retryFailedNode(run.id, "asset-source-review"), pipeline.PauseRequestConflictError);
+      await assert.rejects(subject.retryFailedNode(run.id, "asset-source-review", { pauseRequestId: "old-token" }), pipeline.PauseRequestConflictError);
+      assert.equal(worker.calls.length, 2);
+      assert.deepEqual(await subject.readPauseRequest(run.id), pause);
+      const store = (subject as unknown as { store: pipeline.FileRunStore }).store;
+      const save = store.save.bind(store);
+      const failure = new Error("controlled rematch save failure");
+      store.save = async () => { throw failure; };
+      try {
+        await assert.rejects(subject.retryFailedNode(run.id, "asset-source-review", options), error => error === failure);
+      } finally { store.save = save; }
+      assert.deepEqual(await subject.readPauseRequest(run.id), pause, "首次保存失败不提前清暂停");
+      assert.equal((await subject.loadPersisted(run.id)).status, "failed");
+      assert.equal(worker.calls.length, 2);
+    }
+    const attempts = await Promise.allSettled([subject.retryFailedNode(run.id, "asset-source-review", options), subject.retryFailedNode(run.id, "asset-source-review", options)]);
     assert.equal(attempts.filter(item => item.status === "fulfilled").length, 1);
     const recovered = (attempts.find(item => item.status === "fulfilled") as PromiseFulfilledResult<typeof run>).value;
     assert.equal(recovered.status, "needs_human");
     assert.equal(recovered.nodeRuns.find(node => node.nodeId === "assets")!.status, "needs_human");
     assert.deepEqual(recovered.nodeRuns.filter(node => ["brief", "script", "visual-direction"].includes(node.nodeId)), upstream);
     assert.equal(directorCalls, 1);
+    assert.equal(await subject.readPauseRequest(run.id), undefined);
     assert.deepEqual(worker.calls.map(call => call.capability), ["script.draft", "asset.prepare", "asset.prepare"]);
     const reuse = (worker.calls.at(-1)!.input as { reusableStockAssets: Array<{ scenePosition: number; sha256: string }> }).reusableStockAssets;
     assert.deepEqual(reuse.map(item => item.scenePosition), [1, 2]);
     assert.ok(reuse.every(item => /^[a-f0-9]{64}$/.test(item.sha256)));
   });
+  }
 
   it("resumes a persisted stock pause through the normal retry API and carries verified partial assets into only one new attempt", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-stock-pause-recovery-"));
+    const stockPauseToken = "c".repeat(64);
     class PausedStockWorker extends FakeWorker {
       assetCalls = 0;
       override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
@@ -2188,7 +2213,12 @@ describe("ProductionPipeline", () => {
         const paused = this.assetCalls === 1;
         assert.equal(typeof request.operationId, "string");
         assert.match(String(request.stockProgressPath), /nodes\/assets\/stock-progress.json$/);
-        if (paused) await writeFile(String(request.pauseRequestPath), "{}");
+        if (paused) {
+          // 与 requestPause 相同的 v2 标记：恢复入口必须按这条身份条件解除。
+          await writeFile(String(request.pauseRequestPath), JSON.stringify({
+            version: 2, pauseRequestId: stockPauseToken, requestedAt: "2026-10-19T00:00:00.000Z", runRevision: 0,
+          }));
+        }
         else await assert.rejects(stat(String(request.pauseRequestPath)), { code: "ENOENT" }, "继续动作应消费原暂停请求");
         const scenes = await Promise.all((paused ? [1] : [1, 2]).map(async position => {
           const uri = path.join(String(request.outputDir), `scene-${position}.jpg`);
@@ -2225,7 +2255,10 @@ describe("ProductionPipeline", () => {
     const completed = run.artifacts.find(item => item.kind === "media_asset")!;
     assert.ok(completed.uri);
     const restored = new pipeline.ProductionPipeline({ workspaceRoot, worker });
-    const attempts = await Promise.allSettled([restored.retryFailedNode(run.id, "assets"), restored.retryFailedNode(run.id, "assets")]);
+    const attempts = await Promise.allSettled([
+      restored.retryFailedNode(run.id, "assets", { pauseRequestId: stockPauseToken }),
+      restored.retryFailedNode(run.id, "assets", { pauseRequestId: stockPauseToken }),
+    ]);
     assert.equal(attempts.filter(item => item.status === "fulfilled").length, 1);
     const recovered = (attempts.find(item => item.status === "fulfilled") as PromiseFulfilledResult<typeof run>).value;
     const assets = recovered.nodeRuns.find(node => node.nodeId === "assets")!;
@@ -9722,7 +9755,9 @@ describe("ProductionPipeline", () => {
     assert.deepEqual(paused.nodeRuns.map((node) => node.nodeId), ["brief", "script"]);
     assert.equal(worker.calls.filter((call) => call.capability === "script.draft").length, 1);
 
-    const completed = await subject.resumePaused(dispatched.runId);
+    // 恢复入口必须携带保留的暂停身份；无身份恢复按冲突拒绝。
+    const token = (await subject.readPauseRequest(dispatched.runId))!.pauseRequestId;
+    const completed = await subject.resumePaused(dispatched.runId, { pauseRequestId: token });
     assert.equal(completed.status, "needs_human");
     assert.equal(worker.calls.filter((call) => call.capability === "script.draft").length, 1);
   });
@@ -12839,4 +12874,156 @@ it("does not repeat the generic boundary after all creative drafts were explicit
   assert.equal((await node.execute!(undefined, {} as never)).status, "succeeded");
   stages.director!.confirmation.versionId = "other-version";
   assert.equal((await node.execute!(undefined, {} as never)).status, "needs_human", "未采用当前版时不能免签");
+});
+
+describe("postdogfood pause intent recovery", () => {
+  const pauseMarkerPath = (workspaceRoot: string, runId: string) =>
+    path.join(workspaceRoot, "runs", runId, ".pause-request.json");
+
+  class BlockingScriptWorker extends FakeWorker {
+    // tsconfig lib 未含 es2024，手动捕获 resolver 以获得可等待/可释放的屏障。
+    enteredResolve!: () => void;
+    releaseResolve!: () => void;
+    readonly entered = new Promise<void>((resolve) => { this.enteredResolve = resolve; });
+    readonly release = new Promise<void>((resolve) => { this.releaseResolve = resolve; });
+    failInstead = false;
+    override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+      if (request.capability === "script.draft") {
+        this.enteredResolve();
+        await this.release;
+        if (this.failInstead) throw new Error("simulated script failure after a pause request");
+      }
+      return super.run(request);
+    }
+  }
+
+  it("keeps the pause marker and reports honest acceptance when the active node fails after a pause request", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-pause-failed-intent-"));
+    const worker = new BlockingScriptWorker();
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+    const dispatched = await subject.dispatch(brief);
+    await worker.entered;
+
+    await subject.requestPause(dispatched.runId);
+    worker.failInstead = true;
+    worker.releaseResolve();
+    const failed = await dispatched.completion;
+
+    assert.equal(failed.status, "failed");
+    assert.equal(await subject.pauseRequested(dispatched.runId), true);
+    const marker = await subject.readPauseRequest(dispatched.runId);
+    assert.ok(marker, "the failed run must expose the retained pause intent with its identity");
+    assert.match(marker.pauseRequestId, /^[0-9a-f]{64}$/);
+  });
+
+  it("requires the matching pause identity before a paused run resumes and consumes only that marker", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-pause-resume-token-"));
+    const worker = new BlockingScriptWorker();
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+    const dispatched = await subject.dispatch(brief);
+    await worker.entered;
+
+    await subject.requestPause(dispatched.runId);
+    worker.releaseResolve();
+    const paused = await dispatched.completion;
+    assert.equal(paused.status, "paused");
+    assert.equal(await subject.pauseRequested(dispatched.runId), true, "pausing must retain the marker as persistent intent");
+    const token = (await subject.readPauseRequest(dispatched.runId))!.pauseRequestId;
+
+    await assert.rejects(() => subject.resumePaused(dispatched.runId), (error: unknown) => {
+      assert.ok(error instanceof pipeline.PauseRequestConflictError);
+      assert.match((error as Error).message, /暂停/);
+      return true;
+    });
+    assert.equal(await subject.pauseRequested(dispatched.runId), true, "a tokenless resume must not consume the intent");
+    await assert.rejects(
+      () => subject.resumePaused(dispatched.runId, { pauseRequestId: "not-the-token" }),
+      pipeline.PauseRequestConflictError,
+    );
+    assert.equal(await subject.pauseRequested(dispatched.runId), true);
+
+    const completed = await subject.resumePaused(dispatched.runId, { pauseRequestId: token });
+    assert.equal(completed.status, "needs_human");
+    assert.equal(await subject.pauseRequested(dispatched.runId), false);
+    assert.equal(worker.calls.filter((call) => call.capability === "script.draft").length, 1, "resume must not rerun completed nodes");
+  });
+
+  it("does not delete the pause marker when the resume dispatcher cannot obtain the execution lease", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-pause-resume-lease-"));
+    const worker = new BlockingScriptWorker();
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+    const dispatched = await subject.dispatch(brief);
+    await worker.entered;
+
+    await subject.requestPause(dispatched.runId);
+    worker.releaseResolve();
+    const paused = await dispatched.completion;
+    assert.equal(paused.status, "paused");
+    const token = (await subject.readPauseRequest(dispatched.runId))!.pauseRequestId;
+
+    await subject.withRunMaintenanceLease([dispatched.runId], async () => {
+      await assert.rejects(
+        () => subject.dispatchResumePaused(dispatched.runId, undefined, { pauseRequestId: token }),
+        pipeline.RunLockedError,
+      );
+      assert.equal(await subject.pauseRequested(dispatched.runId), true, "a rejected resume must leave the pause intent untouched");
+    });
+  });
+
+  it("does not let a superseded pause identity consume a newer pause request", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-pause-token-replace-"));
+    const worker = new BlockingScriptWorker();
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+    const dispatched = await subject.dispatch(brief);
+    await worker.entered;
+
+    // 运行中连续两次暂停请求：后一次覆盖前一次，旧 token 不得消费更新的意图。
+    await subject.requestPause(dispatched.runId);
+    const staleToken = (await subject.readPauseRequest(dispatched.runId))!.pauseRequestId;
+    await subject.requestPause(dispatched.runId);
+    const currentToken = (await subject.readPauseRequest(dispatched.runId))!.pauseRequestId;
+    assert.notEqual(currentToken, staleToken);
+    worker.releaseResolve();
+    const paused = await dispatched.completion;
+    assert.equal(paused.status, "paused");
+
+    // 旧身份恢复被拒：身份冲突在首个 checkpoint（状态校验之后）抛出，标记原样保留。
+    await assert.rejects(
+      () => subject.resumePaused(dispatched.runId, { pauseRequestId: staleToken }),
+      pipeline.PauseRequestConflictError,
+    );
+    assert.equal((await subject.readPauseRequest(dispatched.runId))!.pauseRequestId, currentToken,
+      "the newer intent must survive the stale recovery attempt");
+
+    // 匹配身份才消费该标记并继续；已消费的旧身份不能再消费之后出现的标记。
+    const resumed = await subject.resumePaused(dispatched.runId, { pauseRequestId: currentToken });
+    assert.equal(resumed.status, "needs_human");
+    assert.equal(await subject.pauseRequested(dispatched.runId), false);
+
+    // 非暂停状态下的恢复先被权威状态校验拒绝（先验后除的顺序合同），标记不被消费。
+    await writeFile(pauseMarkerPath(workspaceRoot, dispatched.runId), `${JSON.stringify({ requestedAt: new Date().toISOString() })}\n`, "utf8");
+    const replaced = (await subject.readPauseRequest(dispatched.runId))!.pauseRequestId;
+    assert.notEqual(replaced, currentToken);
+    await assert.rejects(
+      () => subject.resumePaused(dispatched.runId, { pauseRequestId: currentToken }),
+      /is not paused/,
+    );
+    assert.equal(await subject.pauseRequested(dispatched.runId), true, "a state-rejected resume must leave the pause intent untouched");
+  });
+
+  it("treats an unreadable pause marker as present instead of silently continuing", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-pause-marker-unreadable-"));
+    const worker = new BlockingScriptWorker();
+    const subject = new pipeline.ProductionPipeline({ workspaceRoot, worker });
+    const dispatched = await subject.dispatch(brief);
+    await worker.entered;
+    await worker.releaseResolve();
+    const paused = await dispatched.completion;
+    assert.equal(paused.status, "needs_human");
+
+    const markerPath = pauseMarkerPath(workspaceRoot, dispatched.runId);
+    await mkdir(path.dirname(markerPath), { recursive: true });
+    await writeFile(markerPath, "{not-json", "utf8");
+    await assert.rejects(() => subject.readPauseRequest(dispatched.runId));
+  });
 });

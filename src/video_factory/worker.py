@@ -1575,9 +1575,13 @@ def require_brief(input_payload: Dict[str, Any]) -> Dict[str, Any]:
         raise WorkerProtocolError(
             f"Unsupported brief protocolVersion: {brief.get('protocolVersion')!r}; expected {BRIEF_PROTOCOL_VERSION}"
         )
-    for field in ("title", "angle", "audience", "nicheSlug", "platform"):
+    for field in ("title", "angle", "nicheSlug", "platform"):
         if not isinstance(brief.get(field), str) or not brief[field].strip():
             raise WorkerProtocolError(f"Brief is missing {field}")
+    # 目标受众是用户可选字段：空串表示「未指定」，只校验类型；不自动补默认受众。
+    if not isinstance(brief.get("audience"), str):
+        raise WorkerProtocolError("Brief is missing audience")
+    brief["audience"] = brief["audience"].strip()
     duration = brief.get("durationSeconds")
     if not isinstance(duration, int) or duration < 20 or duration > 180:
         raise WorkerProtocolError("Brief durationSeconds must be an integer between 20 and 180")

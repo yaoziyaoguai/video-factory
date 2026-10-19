@@ -30,6 +30,7 @@ import {
   effectiveProductionBrief,
   PaidOperationManualReconciliationError,
   HumanDecisionConflictError,
+  PauseRequestConflictError,
   independentCreativeConsultationActions,
   parseBrief,
   parseExecutableProductionPlan,
@@ -238,10 +239,11 @@ export interface StudioPipelinePort {
     listener?: ProductionRunListener,
   ): Promise<DispatchedProductionRun>;
   requestPause(runId: string): Promise<void>;
-  clearPauseRequest?(runId: string): Promise<void>;
   pauseRequested(runId: string): Promise<boolean>;
-  resumePaused(runId: string): Promise<WorkflowRun<ProductionBrief>>;
-  dispatchResumePaused?(runId: string, listener?: ProductionRunListener): Promise<DispatchedProductionRun>;
+  /** A批：暂停意图的完整读取；恢复动作按返回的身份条件解除，不再提供无条件清标记。 */
+  readPauseRequest?(runId: string): Promise<{ pauseRequestId: string; legacy?: boolean; requestedAt?: string } | undefined>;
+  resumePaused(runId: string, options?: { pauseRequestId?: string }): Promise<WorkflowRun<ProductionBrief>>;
+  dispatchResumePaused?(runId: string, listener?: ProductionRunListener, options?: { pauseRequestId?: string }): Promise<DispatchedProductionRun>;
   resumeStale(runId: string): Promise<WorkflowRun<ProductionBrief>>;
   dispatchResumeStale?(runId: string, listener?: ProductionRunListener): Promise<DispatchedProductionRun>;
   retryFailedNode(
@@ -362,11 +364,11 @@ export class ProductionStudio {
 
   async get(runId: string): Promise<StudioRunDetail | undefined> {
     try {
-      const [run, archived, historyRuns, pauseRequested] = await Promise.all([
+      const [run, archived, historyRuns, pauseRecovery] = await Promise.all([
         this.options.pipeline.show(runId),
         this.options.archiveStore.list(),
         this.listHealthyRuns(),
-        this.options.pipeline.pauseRequested(runId),
+        this.readPauseRecovery(runId),
       ]);
       this.historicalNodeDurations = collectNodeDurationHistory(historyRuns);
       const productionPlanDigest = await currentExecutablePlanDigest(run, this.options.workspaceRoot);
@@ -400,7 +402,7 @@ export class ProductionStudio {
       }
       const detail = {
         ...withArchiveState(this.toDetail(run), archived[run.id]),
-        ...(pauseRequested ? { pauseRequested: true } : {}),
+        ...(pauseRecovery ? { pauseRequested: true as const, pauseRecovery } : {}),
         ...(productionPlanDigest ? { productionPlanDigest } : {}),
         ...(voiceTimingPlan ? { voiceTimingPlan } : {}),
         ...(reviewContinuationTargets.length ? { reviewContinuationTargets } : {}),
@@ -1169,7 +1171,7 @@ export class ProductionStudio {
       estimatedCostCny: plan.estimatedCostCny,
       maximumCostCny,
       scopeSummary: {
-        content: `${brief.title}｜${brief.angle}｜面向${brief.audience}`,
+        content: productionScopeContent(brief),
         assets: (plan.items ?? []).map((item) => ({
           assetKey: item.id,
           label: item.label,
@@ -1627,6 +1629,8 @@ export class ProductionStudio {
       ...(input.action === "approve" && input.acceptContentSuggestions === true ? { acceptContentSuggestions: true as const } : {}),
       ...(input.note ? { note: input.note } : {}),
       ...(input.reviewDispositions ? { reviewDispositions: input.reviewDispositions } : {}),
+      // A批：批准动作按用户提交的暂停身份条件解除；服务端不代填、不预删标记。
+      ...(input.action === "approve" && input.pauseRequestId !== undefined ? { pauseRequestId: input.pauseRequestId } : {}),
     };
     let updated: WorkflowRun<ProductionBrief>;
     try {
@@ -1642,6 +1646,9 @@ export class ProductionStudio {
     } catch (error) {
       if (error instanceof StaleRunRevisionError || (error instanceof Error && /locked by another writer/.test(error.message))) {
         throw new StudioConflictError("这条制作已被其他操作更新，请刷新页面后重试。");
+      }
+      if (error instanceof PauseRequestConflictError) {
+        throw new StudioConflictError("这条制作的暂停状态已变化，请刷新页面确认最新状态后再批准。");
       }
       // 决定前置条件不满足（证据错配/过期确认点/缺表态等）：文案面向操作员且可安全展示，
       // 以 409 + 原文返回，而不是脱敏成 500（EB-05）。
@@ -1949,6 +1956,9 @@ export class ProductionStudio {
       };
     } catch (error) {
       if (error instanceof HumanDecisionConflictError) throw new StudioConflictError(error.message);
+      if (error instanceof PauseRequestConflictError) {
+        throw new StudioConflictError("这条制作的暂停状态已变化，请刷新页面确认最新状态后再采用。");
+      }
       if (error instanceof StaleRunRevisionError || (error instanceof Error && /stale|another stage|locked by another writer|already used with different content/i.test(error.message))) {
         throw new StudioConflictError("当前方案已经更新，请查看最新版后重试。");
       }
@@ -2287,34 +2297,85 @@ export class ProductionStudio {
     if (!["running", "awaiting_spend_approval", "approval_invalidated"].includes(current.status)) {
       throw new StudioConflictError("这条制作当前不能暂停新的图片或视频任务。");
     }
-    await this.options.pipeline.requestPause(runId);
-    const detail = { ...this.toDetail(current), pauseRequested: true };
+    try {
+      await this.options.pipeline.requestPause(runId);
+    } catch (error) {
+      if (error instanceof PauseRequestConflictError) throw new StudioConflictError(error.message);
+      throw error;
+    }
+    const pauseRecovery = await this.readPauseRecovery(runId);
+    const detail = { ...this.toDetail(current), pauseRequested: true as const, ...(pauseRecovery ? { pauseRecovery } : {}) };
     this.publish(detail);
     return detail;
   }
 
-  async resumePaused(runId: string): Promise<StudioRunDetail> {
+  /** A批：暂停标记的完整投影。宿主未提供读取时退回布尔语义，但不再提供无条件清标记。 */
+  private async readPauseRecovery(runId: string): Promise<StudioRunDetail["pauseRecovery"]> {
+    if (this.options.pipeline.readPauseRequest) {
+      return await this.options.pipeline.readPauseRequest(runId) ?? undefined;
+    }
+    return await this.options.pipeline.pauseRequested(runId)
+      ? { pauseRequestId: "", legacy: true }
+      : undefined;
+  }
+
+  async resumePaused(runId: string, options?: { pauseRequestId?: string }): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
-    const pauseRequested = await this.options.pipeline.pauseRequested(runId);
-    if (current.status !== "paused" && !pauseRequested) throw new StudioConflictError("这条制作当前没有暂停。");
+    const marker = await this.readPauseRecovery(runId);
+    if (current.status !== "paused" && !marker) throw new StudioConflictError("这条制作当前没有暂停。");
     if (current.status !== "paused") {
-      await this.options.pipeline.clearPauseRequest?.(runId);
-      const detail = this.toDetail(current);
-      this.publish(detail);
-      return detail;
+      // A批状态合同：非 paused 的暂停标记不是 resume 可解除的对象。各状态给出对应出口，
+      // 不能在这里无条件删标记绕过审批、人工决定或失败重试的原有防护。
+      if (current.status === "running") {
+        throw new StudioConflictError("已请求暂停，当前任务会在安全边界停止；结束后可在此继续。");
+      }
+      if (current.status === "failed") {
+        throw new StudioConflictError(
+          current.nodeRuns.some((node) => node.status === "failed" && node.errorCode === "ASSET_RANK_PAUSED")
+            ? "候选核验已暂停：请在失败步骤上使用“继续候选核验”，会保留已完成结果并按同一操作继续。"
+            : "这一步失败，同时保留了暂停请求：请使用“解除暂停并重试”继续；失败原因不会被改写。",
+        );
+      }
+      if (current.status === "needs_human") {
+        throw new StudioConflictError("等待你的决定，后续自动执行已暂停；明确采用并继续时会合并解除这条暂停。");
+      }
+      if (current.status === "awaiting_spend_approval" || current.status === "approval_invalidated") {
+        throw new StudioConflictError("等待采购决定，同时已请求暂停；恢复不能绕过审批，请先完成审批操作。");
+      }
+      throw new StudioConflictError("这条制作当前状态不能通过恢复继续；请刷新页面确认最新状态。");
+    }
+    if (marker && marker.pauseRequestId) {
+      if (options?.pauseRequestId === undefined) {
+        throw new StudioConflictError("这条制作保留着暂停请求；请从最新页面继续，恢复动作会按这条暂停身份条件解除。");
+      }
+      if (options.pauseRequestId !== marker.pauseRequestId) {
+        throw new StudioConflictError(marker.legacy
+          ? "这条制作仍保留着暂停请求（历史格式）；请刷新页面获取最新暂停状态后再继续。"
+          : "这条制作已出现新的暂停请求，请刷新页面确认最新状态后再继续。");
+      }
     }
     assertExecutableRunContinuation(current);
-    if (this.options.pipeline.dispatchResumePaused) {
-      const dispatched = await this.options.pipeline.dispatchResumePaused(
-        runId,
-        (run) => this.publish(this.toDetail(run)),
-      );
-      return await this.dispatchedDetail(dispatched);
+    try {
+      if (this.options.pipeline.dispatchResumePaused) {
+        const dispatched = await this.options.pipeline.dispatchResumePaused(
+          runId,
+          (run) => this.publish(this.toDetail(run)),
+          options?.pauseRequestId !== undefined ? { pauseRequestId: options.pauseRequestId } : undefined,
+        );
+        return await this.dispatchedDetail(dispatched);
+      }
+      const updated = await this.options.pipeline.resumePaused(runId, options?.pauseRequestId !== undefined
+        ? { pauseRequestId: options.pauseRequestId } : undefined);
+      const detail = this.toDetail(updated);
+      this.publish(detail);
+      return detail;
+    } catch (error) {
+      // 预检后、租约内出现新暂停：不删除它，如实映射为可操作的刷新提示。
+      if (error instanceof PauseRequestConflictError) {
+        throw new StudioConflictError("这条制作的暂停状态已变化，请刷新页面确认最新状态后再继续。");
+      }
+      throw error;
     }
-    const updated = await this.options.pipeline.resumePaused(runId);
-    const detail = this.toDetail(updated);
-    this.publish(detail);
-    return detail;
   }
 
   async applyNodeOverride(
@@ -3283,8 +3344,13 @@ export class ProductionStudio {
     }
   }
 
-  async retryFailedNode(runId: string, nodeId: string, nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"]): Promise<StudioRunDetail> {
-    return this.retryFailedNodeInternal(runId, nodeId, false, nativeAudioRecovery);
+  async retryFailedNode(
+    runId: string,
+    nodeId: string,
+    nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"],
+    pauseRequestId?: string,
+  ): Promise<StudioRunDetail> {
+    return this.retryFailedNodeInternal(runId, nodeId, false, nativeAudioRecovery, pauseRequestId);
   }
 
   async queryOriginalTextTask(runId: string, target?: StudioOptionalReviewTarget): Promise<StudioRunDetail> {
@@ -3410,17 +3476,19 @@ export class ProductionStudio {
     return (await this.get(runId))!;
   }
 
-  async retrieveOriginalTextTask(runId: string): Promise<StudioRunDetail> {
-    const active = this.textTaskRetrievals.get(runId);
+  async retrieveOriginalTextTask(runId: string, pauseRequestId?: string): Promise<StudioRunDetail> {
+    // 去重键必须包含暂停身份：不同身份的取回各自校验，不能把一个身份的结果冒给另一个。
+    const retrievalKey = `${runId}:${pauseRequestId ?? ""}`;
+    const active = this.textTaskRetrievals.get(retrievalKey);
     if (active) return active;
-    const operation = this.retrieveOriginalTextTaskOnce(runId).finally(() => {
-      if (this.textTaskRetrievals.get(runId) === operation) this.textTaskRetrievals.delete(runId);
+    const operation = this.retrieveOriginalTextTaskOnce(runId, pauseRequestId).finally(() => {
+      if (this.textTaskRetrievals.get(retrievalKey) === operation) this.textTaskRetrievals.delete(retrievalKey);
     });
-    this.textTaskRetrievals.set(runId, operation);
+    this.textTaskRetrievals.set(retrievalKey, operation);
     return operation;
   }
 
-  private async retrieveOriginalTextTaskOnce(runId: string): Promise<StudioRunDetail> {
+  private async retrieveOriginalTextTaskOnce(runId: string, pauseRequestId?: string): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
     if (current.status === "paused") {
       throw new StudioConflictError("原任务结果已保留；请先显式继续自动制作，暂停状态不会被查询结果解除。");
@@ -3439,10 +3507,18 @@ export class ProductionStudio {
       || receipt.taskState !== "completed_success") {
       throw new StudioConflictError("原任务结果尚未核验完成，请先查询原任务。");
     }
-    return this.retryFailedNodeInternal(runId, pending.nodeId, true);
+    // 取回并接续是一次显式恢复动作：透传用户提交的暂停身份，由 pipeline 在执行租约内
+    // 按身份条件解除；这里不预检标记（预检不能代替租约内的最新校验）。
+    return this.retryFailedNodeInternal(runId, pending.nodeId, true, undefined, pauseRequestId);
   }
 
-  private async retryFailedNodeInternal(runId: string, nodeId: string, recoveredTextTask: boolean, nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"]): Promise<StudioRunDetail> {
+  private async retryFailedNodeInternal(
+    runId: string,
+    nodeId: string,
+    recoveredTextTask: boolean,
+    nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"],
+    pauseRequestId?: string,
+  ): Promise<StudioRunDetail> {
     const current = await this.loadRequiredRun(runId);
     const retryNativeAudio = canRetryNativeAudioNode(current, nodeId);
     if (nativeAudioRecovery || retryNativeAudio) {
@@ -3481,45 +3557,37 @@ export class ProductionStudio {
       throw new StudioConflictError("这个节点当前不能重试，请刷新页面检查最新状态。");
     }
     assertExecutableRunContinuation(current);
+    // A批：存在暂停标记的重试必须在执行租约内按身份条件解除；这里只透传用户提交的
+    // 暂停身份，不在这里预删标记。PauseRequestConflictError 映射为可操作的刷新提示。
+    const retryOptions: ProductionNodeRetryOptions = {
+      ...(nativeAudioRecovery ? { nativeAudioRecovery } : {}),
+      ...(recoveredTextTask || resumeCompletedTextTask ? {
+        recoverOriginalTextTask: true,
+        ...(resumeCompletedTextTask ? {
+          resumeCompletedTextTask: true,
+          resumeCompletedTextTaskRequestId: pendingTextTask!.operation.requestId,
+        } : {}),
+      } : {}),
+      ...(pauseRequestId !== undefined ? { pauseRequestId } : {}),
+    };
     try {
       if (this.options.pipeline.dispatchRetryFailedNode) {
         const dispatched = await this.options.pipeline.dispatchRetryFailedNode(
           runId,
           nodeId,
           (run) => this.publish(this.toDetail(run)),
-          nativeAudioRecovery ? { nativeAudioRecovery } : recoveredTextTask || resumeCompletedTextTask
-            ? {
-              recoverOriginalTextTask: true,
-              ...(resumeCompletedTextTask
-                ? {
-                  resumeCompletedTextTask: true,
-                  resumeCompletedTextTaskRequestId: pendingTextTask!.operation.requestId,
-                }
-                : {}),
-            }
-            : undefined,
+          retryOptions,
         );
         return await this.dispatchedDetail(dispatched);
       }
-      const updated = await this.options.pipeline.retryFailedNode(
-        runId,
-        nodeId,
-        nativeAudioRecovery ? { nativeAudioRecovery } : recoveredTextTask || resumeCompletedTextTask
-          ? {
-            recoverOriginalTextTask: true,
-            ...(resumeCompletedTextTask
-              ? {
-                resumeCompletedTextTask: true,
-                resumeCompletedTextTaskRequestId: pendingTextTask!.operation.requestId,
-              }
-              : {}),
-          }
-          : undefined,
-      );
+      const updated = await this.options.pipeline.retryFailedNode(runId, nodeId, retryOptions);
       const detail = this.toDetail(updated);
       this.publish(detail);
       return detail;
     } catch (error) {
+      if (error instanceof PauseRequestConflictError) {
+        throw new StudioConflictError("这条制作的暂停状态已变化，请刷新页面确认最新状态后再继续。");
+      }
       if (error instanceof HumanDecisionConflictError || error instanceof StaleRunRevisionError || (error instanceof Error && /locked by another writer/.test(error.message))) {
         throw new StudioConflictError("这条制作已被其他操作更新，请刷新后重试。");
       }
@@ -4587,6 +4655,11 @@ function toRunSummary(run: WorkflowRun<ProductionBrief>): StudioRunSummary {
     runPurpose: brief.runPurpose === "test" ? "test" : "production",
     workflowNodeIds: visibleWorkflowNodes(run).map((node) => node.id),
     ...(finalReviewOutcome ? { finalReviewOutcome } : {}),
+    // A批：列表仅对真实 typed 候选核验暂停投影标记；普通失败仍按失败展示。
+    ...(run.status === "failed"
+      && run.nodeRuns.some((node) => node.status === "failed" && node.errorCode === "ASSET_RANK_PAUSED")
+      ? { rankPaused: true as const }
+      : {}),
     ...(!continuationSupported ? { continuation: legacyRunContinuation() } : {}),
     ...(continuationSupported && run.status === "needs_human"
       ? { nextAction: "review" as const }
@@ -4731,6 +4804,7 @@ function toRunDetail(
       ...(node?.startedAt ? { startedAt: node.startedAt } : {}),
       ...(node?.finishedAt ? { finishedAt: node.finishedAt } : {}),
       ...(node?.error ? { error: redactManagedPathText(node.error) } : {}),
+      ...(typeof node?.errorCode === "string" ? { errorCode: node.errorCode } : {}),
       ...(node?.interrupted ? { interrupted: true } : {}),
       ...(node?.outcomeUncertain ? { outcomeUncertain: true } : {}),
       artifactIds: [...(node?.artifactIds ?? [])],
@@ -5462,7 +5536,12 @@ function assertExecutableRunContinuation(run: WorkflowRun<ProductionBrief>): voi
   }
 }
 
-function productionInputMessage(error: unknown): string {
+// 报价范围摘要的内容段：受众未指定时省略「面向」段，而不是显示空称呼或编造默认受众。
+export function productionScopeContent(brief: Pick<ProductionBrief, "title" | "angle" | "audience">): string {
+  return `${brief.title}｜${brief.angle}${brief.audience ? `｜面向${brief.audience}` : ""}`;
+}
+
+export function productionInputMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("budgetIntentionCny")) return "预算意向请输入 0 到 100000 元的有效金额，或留空；这不是付款授权。";
   if (message.includes("voiceDirection.profileId") && message.includes("providers.voice")) {
@@ -5473,7 +5552,8 @@ function productionInputMessage(error: unknown): string {
   if (message.includes("reviewMode")) return "人工终审设置无效。";
   if (message.includes("protocolVersion")) return "制作参数版本不受支持，请刷新页面后重试。";
   if (message.includes("seriesContext")) return "系列单集上下文与当前路线图不一致，请刷新系列页面后重新开始制作。";
-  if (/\b(title|angle|audience|nicheSlug|platform)\b/.test(message)) return "请完整填写标题、内容角度、目标受众、系列标识和平台。";
+  if (message.includes("audience")) return "目标受众是可选字段：留空表示未指定，填写时只能是文本。";
+  if (/\b(title|angle|nicheSlug|platform)\b/.test(message)) return "请完整填写标题、内容角度、系列标识和平台。";
   if (message.includes("providers")) return "制作能力配置不完整，请重新选择制作配方。";
   if (message.includes("economics")) return "付费能力设置不符合要求。";
   if (message.includes("voiceDirection")) return "配音设置不符合要求，请重新选择音色。";
@@ -6214,6 +6294,8 @@ function creativeReviewCommandDraft(
     ...(input.acceptQualityFallback === true ? { acceptQualityFallback: true as const } : {}),
     ...(input.expectedCheckIdentity === undefined ? {} : { expectedCheckIdentity: input.expectedCheckIdentity }),
     ...(input.durationAmendment ? { durationAmendment: input.durationAmendment } : {}),
+    // A批：采用确认携带要解除的暂停身份；其余创作命令在到达停点前不解除暂停。
+    ...(input.pauseRequestId !== undefined ? { pauseRequestId: input.pauseRequestId } : {}),
   };
 }
 

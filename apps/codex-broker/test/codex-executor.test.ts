@@ -569,6 +569,29 @@ describe("parseTaskRequest", () => {
     }
   });
 
+  // C 批次：目标受众是用户可选字段。script-draft 与 publish-copy 的受众允许
+  // 空串（未指定），其余必填字段的非空边界不变，非法类型仍拒绝。
+  it("accepts an unspecified audience on script-draft and publish-copy briefs", () => {
+    const script = scriptRequest();
+    (script.payload.brief as Record<string, unknown>).audience = "  ";
+    const scriptTask = parseTaskRequest(script);
+    if (scriptTask.kind !== "script-draft") throw new Error("expected script-draft task");
+    assert.equal(scriptTask.payload.brief.audience, "");
+
+    const publish = publishCopyRequest();
+    (publish.payload.brief as Record<string, unknown>).audience = "";
+    const publishTask = parseTaskRequest(publish);
+    if (publishTask.kind !== "publish-copy") throw new Error("expected publish-copy task");
+    assert.equal(publishTask.payload.brief.audience, "");
+
+    const badType = scriptRequest();
+    (badType.payload.brief as Record<string, unknown>).audience = null;
+    assert.throws(() => parseTaskRequest(badType), /audience/);
+    const blankTitle = publishCopyRequest();
+    (blankTitle.payload.brief as Record<string, unknown>).title = " ";
+    assert.throws(() => parseTaskRequest(blankTitle), /title must be a non-empty string/);
+  });
+
   it("accepts one or two saved scenes and publish narrations without lexical evidence rejection", () => {
     for (const count of [1, 2]) {
       const currentDocument = { scenes: Array.from({ length: count }, (_, index) => ({

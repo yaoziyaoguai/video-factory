@@ -9,8 +9,11 @@ import { describe, it, mock } from "node:test";
 import {
   CodexBridgeError,
   CodexBridgeClient,
+  CodexCreativeTreatmentAgent,
   ModelCandidatesExhaustedError,
   CodexScreenwriterAgent,
+  parseBrief,
+  type CodexTaskExecution,
   type CodexTaskKind,
   RoleAgentLoopError,
   HumanDecisionConflictError,
@@ -42,8 +45,11 @@ import { CodexBrokerServer } from "../../../apps/codex-broker/src/broker-server.
 import { runCreativeDiscussionTask } from "../src/codex-creative-discussion.js";
 import type { ValidatedTask } from "../../../apps/codex-broker/src/codex-executor.js";
 import { CodexAssetSemanticRanker, deterministicAssetRanking, type AssetCandidateReport } from "../src/asset-semantic-ranker.js";
+import { RoleAgentHostStop } from "../src/role-agent-loop.js";
+import { PauseRequestConflictError } from "../src/production-pipeline.js";
 import { ProductionStudio } from "../../../apps/studio/src/server/production-studio.js";
 import { JsonRunArchiveStore } from "../../../apps/studio/src/server/run-archive-store.js";
+import { CostStudio } from "../../../apps/studio/src/server/cost-studio.js";
 import { fallbackShotGrammar } from "../src/reference-grammar.js";
 
 // ---------------------------------------------------------------------------
@@ -3266,7 +3272,11 @@ describe("joint planning physical execution summary (Revision 9)", () => {
         cycle,
         maxIterations: 3,
         recoveryOwner: { runId, nodeId: "creative-planning", workflowOperationRequestId: ownerOperationRequestId },
-        operationGenerations: { "1:1:produce": produceGeneration, "1:1:audit": auditGeneration } as Record<string, number>,
+        // -1 仅为本夹具“该 phase 尚未调用”的输入；真实持久化不写负 generation。
+        operationGenerations: {
+          ...(produceGeneration >= 0 ? { "1:1:produce": produceGeneration } : {}),
+          ...(auditGeneration >= 0 ? { "1:1:audit": auditGeneration } : {}),
+        } as Record<string, number>,
         attemptedRequestIds,
         requestOwners: Object.fromEntries(attemptedRequestIds.map((requestId) => [requestId, ownerOperationRequestId])),
         phaseAttempts: { produce: produceGeneration + 1, audit: auditGeneration + 1 },
@@ -5447,5 +5457,467 @@ describe("creative discussion unknown recovery (C1)", () => {
         }
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 发布后 dogfood（POST-02）：候选核验暂停后的受保护恢复。
+// 暂停是持久意图：排序收到暂停后节点按 ASSET_RANK_PAUSED 失败并保留标记；
+// 恢复动作在同一执行租约内按 token 条件解除并沿用原 operation 身份。
+// ---------------------------------------------------------------------------
+describe("postdogfood candidate-ranking pause recovery", () => {
+  /** 第一次 asset.search 前设置可释放屏障：暂停标记确定写在规划执行中，而非节点边界竞态。 */
+  function gatedSearchWorker() {
+    const worker = new ClosureLibraryWorker();
+    const originalRun = worker.run.bind(worker);
+    let resolveEntered!: () => void;
+    let releaseGate!: () => void;
+    const entered = new Promise<void>((resolve) => { resolveEntered = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    let gated = false;
+    let searchCalls = 0;
+    worker.run = async (request: Record<string, unknown>) => {
+      if (request.capability === "asset.search") {
+        searchCalls += 1;
+        if (!gated) {
+          gated = true;
+          resolveEntered();
+          await gate;
+        }
+      }
+      return originalRun(request);
+    };
+    return {
+      worker,
+      entered,
+      release: () => { releaseGate(); },
+      get searchCalls() { return searchCalls; },
+    };
+  }
+
+  function pausingRankerFixture(
+    spies: ClosureSpies,
+    pauseOnFirstCheck: () => boolean,
+  ): NonNullable<ProductionPipelineOptions["assetSemanticRanker"]> {
+    let calls = 0;
+    return {
+      id: "codex-asset-ranker-v1",
+      modelId: "ranker-binding-model",
+      rank: async () => { throw new Error("closure fixtures must use rankDetailed"); },
+      rankDetailed: async (
+        report: { scenes: Array<{ scenePosition: number; candidates: Array<{ provider: string; assetId: string }> }> },
+        _checkpoint: unknown,
+        selectedModelId: string | undefined,
+        canStartSupplement?: () => Promise<boolean>,
+      ) => {
+        calls += 1;
+        spies.rankCalls += 1;
+        spies.rankRequests.push({});
+        if (calls === 1 && canStartSupplement && !(await canStartSupplement())) {
+          // 与真实 ranker 的 assertRankingNotPaused 相同：宿主暂停在提交模型前抛出。
+          throw new RoleAgentHostStop("paused", "已暂停候选核验，已完成结果保留；恢复后继续尚未完成的核验，不会重新提交原任务。");
+        }
+        return {
+          output: {
+            version: "video-factory/asset-ranking-v1",
+            source: "model",
+            providerId: "codex-asset-ranker-v1",
+            modelId: selectedModelId ?? "ranker-binding-model",
+            summary: "语义排序完成",
+            scenes: report.scenes.map((scene) => ({
+              scenePosition: scene.scenePosition,
+              summary: "高分候选可用",
+              candidates: scene.candidates.slice(0, 1).map((candidate, index) => ({
+                provider: candidate.provider,
+                assetId: candidate.assetId,
+                originalRank: index + 1,
+                rank: index + 1,
+                semanticScore: 80,
+                rationale: "语义分足够",
+                locked: false,
+              })),
+            })),
+          },
+          trace: {
+            taskKind: "asset-rank" as const,
+            promptVersion: "v1",
+            prompt: "fixture prompt",
+            providerId: "codex-asset-ranker-v1",
+            modelId: selectedModelId ?? "ranker-binding-model",
+          },
+        };
+      },
+    };
+  }
+
+  it("records a ranking pause as ASSET_RANK_PAUSED and recovers under the same operation after a token-matched release", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-rank-pause-recover-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const search = gatedSearchWorker();
+    let pauseRequestedForRank = false;
+    const pipelineInstance = new ProductionPipeline({
+      workspaceRoot,
+      worker: search.worker,
+      treatmentAgents: closureTreatmentAgents(spies),
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureLibraryDirector(spies),
+      assetSemanticRanker: pausingRankerFixture(spies, () => pauseRequestedForRank),
+      assetProviders: [
+        { id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] },
+        ...CLOSURE_ASSET_PROVIDERS,
+      ],
+    });
+    const dispatched = await pipelineInstance.dispatch(closureBrief({ assetSemanticRank: true }));
+    // 规划图已在候选搜索处等待：此刻写入的暂停只作用于候选核验，不会在节点间边界
+    // 提前把 run 停成 paused。
+    await search.entered;
+    await pipelineInstance.requestPause(dispatched.runId);
+    pauseRequestedForRank = true;
+    search.release();
+    const failed = await dispatched.completion;
+
+    assert.equal(failed.status, "failed", JSON.stringify(failed.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
+    const failedNode = failed.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    assert.equal(failedNode.errorCode, "ASSET_RANK_PAUSED");
+    assert.equal(failedNode.error, "已暂停候选核验，已完成结果保留；恢复后继续尚未完成的核验，不会重新提交原任务。");
+    assert.equal(await pipelineInstance.pauseRequested(dispatched.runId), true, "the pause intent must survive the typed failure");
+    const marker = await pipelineInstance.readPauseRequest(dispatched.runId);
+    assert.ok(marker);
+    assert.match(marker.pauseRequestId, /^[0-9a-f]{64}$/);
+
+    const originalOperationId = failedNode.operationRequestId;
+    assert.ok(originalOperationId, "the failed ranking attempt must carry its workflow operation identity");
+
+    // 错误 token 不得消费暂停，也不得启动执行。
+    await assert.rejects(
+      () => new ProductionPipeline({
+        workspaceRoot,
+        worker: search.worker,
+        treatmentAgents: closureTreatmentAgents(spies),
+        screenwriterAgent: closureScreenwriter(spies),
+        directorAgent: closureLibraryDirector(spies),
+        assetSemanticRanker: pausingRankerFixture(spies, () => false),
+        assetProviders: [
+          { id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] },
+          ...CLOSURE_ASSET_PROVIDERS,
+        ],
+      }).retryFailedNode(dispatched.runId, "creative-planning", { pauseRequestId: "stale-token" }),
+      (error: unknown) => error instanceof PauseRequestConflictError,
+    );
+    assert.equal(await pipelineInstance.pauseRequested(dispatched.runId), true);
+
+    // 正确恢复：一次动作完成校验、条件解除、并沿原 operation 继续到下一停点。
+    const resumed = await new ProductionPipeline({
+      workspaceRoot,
+      worker: search.worker,
+      treatmentAgents: closureTreatmentAgents(spies),
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureLibraryDirector(spies),
+      assetSemanticRanker: pausingRankerFixture(spies, () => false),
+      assetProviders: [
+        { id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] },
+        ...CLOSURE_ASSET_PROVIDERS,
+      ],
+    }).retryFailedNode(dispatched.runId, "creative-planning", { pauseRequestId: marker.pauseRequestId });
+    assert.equal(resumed.status, "needs_human", JSON.stringify(resumed.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
+    assert.equal(await pipelineInstance.pauseRequested(dispatched.runId), false);
+    assert.equal(search.searchCalls, 1, "recovery must reuse the candidate pool without a new search");
+    assert.equal(spies.treatmentTitles.length, 1, "treatment must not re-run");
+    assert.equal(spies.screenwriterCalls.length, 1, "script must not re-run");
+    const resumedNode = resumed.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    assert.equal(resumedNode.operationRequestId, originalOperationId,
+      "the pause continuation must keep the original ranking operation identity");
+  });
+
+  it("keeps a plain failure with a pause marker recoverable without rewriting it into an active pause", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-plain-fail-pause-marker-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const crashSearch = gatedSearchWorker();
+    const crashPipeline = new ProductionPipeline({
+      workspaceRoot,
+      worker: crashSearch.worker,
+      treatmentAgents: closureTreatmentAgents(spies),
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureLibraryDirector(spies),
+      assetSemanticRanker: closureRanker(spies),
+      planningFailpoints: { afterGraph: () => { throw new Error("simulated crash after the planning graph completed"); } },
+      assetProviders: [
+        { id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] },
+        ...CLOSURE_ASSET_PROVIDERS,
+      ],
+    });
+    const dispatched = await crashPipeline.dispatch(closureBrief({ assetSemanticRank: true }));
+    // 崩溃发生在规划图完成之后；暂停标记写在规划执行中，终态必须是普通 failed 而非 paused。
+    await crashSearch.entered;
+    await crashPipeline.requestPause(dispatched.runId);
+    crashSearch.release();
+    const failed = await dispatched.completion;
+
+    assert.equal(failed.status, "failed");
+    const failedNode = failed.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    assert.notEqual(failedNode.errorCode, "ASSET_RANK_PAUSED", "a generic crash must not be rewritten into an active pause");
+    assert.equal(await crashPipeline.pauseRequested(dispatched.runId), true);
+    const marker = await crashPipeline.readPauseRequest(dispatched.runId);
+    assert.ok(marker);
+
+    const resumed = await new ProductionPipeline({
+      workspaceRoot,
+      worker: new ClosureLibraryWorker(),
+      treatmentAgents: closureTreatmentAgents(spies),
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureLibraryDirector(spies),
+      assetSemanticRanker: closureRanker(spies),
+      assetProviders: [
+        { id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] },
+        ...CLOSURE_ASSET_PROVIDERS,
+      ],
+    }).retryFailedNode(dispatched.runId, "creative-planning", { pauseRequestId: marker!.pauseRequestId });
+    assert.equal(resumed.status, "needs_human");
+    assert.equal(await crashPipeline.pauseRequested(dispatched.runId), false, "the explicit retry must release the retained intent");
+  });
+});
+
+// postdogfood B2：创作规划整节点汇总在 generic failure 与 RoleAgentLoopError 路径统一归属
+// 真实 workflow operation（requestId=context.operationRequestId + execution_summary）；
+// 不再造 nextId('creative-planning-failure') 冒充模型请求。两条失败路径都要经过正式
+// receipt 保存→加载→CostStudio 投影证明物理身份仍在、汇总不遮蔽事实。
+describe("postdogfood planning failure summary attribution (B2)", () => {
+  /** 排序器抛普通错误：treatment/script/director 已完成（checkpoint 在盘），走 generic catch。 */
+  function crashingRanker(spies: ClosureSpies, message: string) {
+    const ranker = closureRanker(spies);
+    const rank = ranker.rankDetailed!;
+    let crashed = false;
+    ranker.rankDetailed = async (...args: Parameters<typeof rank>) => {
+      if (!crashed) {
+        crashed = true;
+        throw new Error(message);
+      }
+      return rank(...args);
+    };
+    return ranker;
+  }
+
+  function loopErrorTreatmentAgents(spies: ClosureSpies): Array<{ providerId: string; agent: CreativeTreatmentAgent }> {
+    return [{
+      providerId: "openai",
+      agent: {
+        id: TREATMENT_PROVIDER_ID,
+        modelId: "treatment-model-a",
+        treat: async () => { throw new Error("closure fixtures must run through treatDetailed"); },
+        treatDetailed: async () => {
+          spies.treatmentModelCalls.push("treatment-model-a");
+          throw new RoleAgentLoopError("treatment model call failed mid-loop", {
+            version: "video-factory/agent-loop-v1", role: "导演前期构思", contractVersion: "fixture",
+            criteria: [], status: "failed", maxIterations: 3,
+            iterations: [], failure: { stage: "completed_failure" },
+          }, {
+            taskKind: "creative-treatment", promptVersion: "v1", prompt: "fixture prompt",
+            providerId: "openai", modelId: "treatment-model-a",
+          });
+        },
+      },
+    }];
+  }
+
+  async function projectCosts(pipeline: ProductionPipeline, runId: string) {
+    const reloaded = await pipeline.loadPersisted(runId);
+    const costs = new CostStudio(async () => [reloaded], undefined, undefined, undefined,
+      (candidateId) => pipeline.readModelExecutionFacts(candidateId));
+    return { reloaded, detail: await costs.runDetail(runId) };
+  }
+
+  it("attributes a generic planning failure summary to the real operation identity across persistence and cost projection", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-b2-generic-summary-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const pipeline = new ProductionPipeline({
+      workspaceRoot,
+      worker: new ClosureLibraryWorker(),
+      treatmentAgents: closureTreatmentAgents(spies),
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureLibraryDirector(spies),
+      assetSemanticRanker: crashingRanker(spies, "semantic ranking backend crashed (ECONNREFUSED)"),
+      assetProviders: [
+        { id: "pexels-stock-v1", label: "Pexels", billing: "free", modes: ["实拍"], deliveryTypes: ["stock_video"] },
+        ...CLOSURE_ASSET_PROVIDERS,
+      ],
+    });
+    const dispatched = await pipeline.dispatch(closureBrief({ assetSemanticRank: true }));
+    const failed = await dispatched.completion;
+    assert.equal(failed.status, "failed", JSON.stringify(failed.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
+    const failedNode = failed.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    assert.match(failedNode.error ?? "", /semantic ranking backend crashed/);
+    assert.ok(failedNode.operationRequestId, "the failure must carry its workflow operation identity");
+    assert.equal(spies.treatmentTitles.length, 1, "failure must happen after the treatment role ran");
+
+    const receipt = failedNode.executionReceipt as Record<string, unknown> | undefined;
+    assert.ok(receipt, "the generic failure must persist a whole-node summary receipt");
+    assert.equal(receipt!.requestId, failedNode.operationRequestId,
+      "汇总身份必须是真实的workflow operation，不得再造 creative-planning-failure 编号");
+    assert.ok(!/creative-planning-failure/.test(String(receipt!.requestId ?? "")));
+    assert.equal((receipt!.parameters as Record<string, unknown>).accountingSource, "execution_summary");
+
+    // 正式保存→加载→CostStudio 投影：物理请求证据仍从 checkpoint 投影，汇总按操作身份归行。
+    const { reloaded, detail } = await projectCosts(pipeline, dispatched.runId);
+    const persistedNode = reloaded.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    assert.equal((persistedNode.executionReceipt as Record<string, unknown> | undefined)?.requestId,
+      failedNode.operationRequestId, "身份必须来自重新加载的持久回执，不是内存字段");
+    const facts = detail?.executionFacts ?? [];
+    // closure 夹具的角色/ranker 直接返回结果，不落 agent-loop checkpoint 文件：本场景
+    // facts 为空是真实状态——汇总必须保持待核，不得因缺数被当0次或精确覆盖。
+    assert.ok(facts.every((fact) => !fact.requestId.includes("creative-planning-failure")),
+      "任何事实都不得携带伪造的失败编号身份");
+    const summaryLine = detail?.lines.find((line) => line.requestId === failedNode.operationRequestId
+      && line.accountingSource !== "execution_fact");
+    assert.ok(summaryLine, "汇总行必须按真实操作身份出现在费用明细");
+    assert.equal(summaryLine?.callCountPending, true, "缺逐请求计数证据时汇总保持次数待核");
+    assert.equal(detail?.totals.countExact, false);
+    assert.equal(detail?.totals.verifiedModelAttempts, 0, "无物理事实证据时不得宣称已核实调用");
+  });
+
+  it("keeps trace provenance on a wrapped role-loop failure while attributing the summary to the same operation", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-b2-looperror-summary-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const pipeline = new ProductionPipeline({
+      workspaceRoot,
+      worker: new ClosureLibraryWorker(),
+      treatmentAgents: loopErrorTreatmentAgents(spies),
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureLibraryDirector(spies),
+      assetProviders: CLOSURE_ASSET_PROVIDERS,
+    });
+    const dispatched = await pipeline.dispatch(closureBrief());
+    const failed = await dispatched.completion;
+    assert.equal(failed.status, "failed", JSON.stringify(failed.nodeRuns.map((node) => ({ id: node.nodeId, status: node.status, error: node.error }))));
+    const failedNode = failed.nodeRuns.find((node) => node.nodeId === "creative-planning")!;
+    assert.match(failedNode.error ?? "", /treatment model call failed mid-loop/);
+    assert.ok(failedNode.operationRequestId);
+
+    const receipt = failedNode.executionReceipt as Record<string, unknown> | undefined;
+    assert.ok(receipt, "RoleAgentLoopError 失败必须留下整节点汇总回执");
+    // lastTrace 的真实供应方/模型来源保留；汇总身份与归属在参数层统一。
+    assert.equal(receipt!.providerId, "openai");
+    assert.equal(receipt!.modelId, "treatment-model-a");
+    assert.equal(receipt!.requestId, failedNode.operationRequestId);
+    assert.equal((receipt!.parameters as Record<string, unknown>).accountingSource, "execution_summary");
+
+    const { detail } = await projectCosts(pipeline, dispatched.runId);
+    const summaryLine = detail?.lines.find((line) => line.requestId === failedNode.operationRequestId
+      && line.accountingSource !== "execution_fact");
+    assert.ok(summaryLine, "wrapped 错误的汇总行同样按真实操作身份归属");
+    assert.equal(summaryLine?.callCountPending, true, "计数证据不完整时不得宣称精确");
+    assert.equal(detail?.totals.countExact, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R2-01（round2 audit）：parseBrief → 正式规划构思 adapter → 真实
+// CodexCreativeTreatmentAgent 的组合回归。修复前 validateTreatmentInput 把空串/
+// 空白受众当必填非空文本拒绝，空受众 brief 上游合同全通、只在角色校验处断裂。
+// 这里不手写构思替身——真实 validator 必须生效；fake 只落在模型边界
+// （runTaskDetailed 记录调用并返回合法构思/规划审计）。
+// ---------------------------------------------------------------------------
+describe("empty audience reaches the real treatment agent through parseBrief (R2-01)", () => {
+  const passingPlanningAudit = {
+    version: "video-factory/role-audit-v2",
+    rubricVersion: "video-factory/role-quality-rubric-v3",
+    assessments: [{
+      targetPath: "",
+      dimensions: [
+        { dimension: "consistency", score: 92, evidence: "构思回应当前输入的明确意图。" },
+        { dimension: "expression", score: 92, evidence: "表述具体可执行。" },
+      ],
+    }],
+    verdict: "pass",
+    score: 92,
+    summary: "构思满足合同。",
+    issues: [],
+    repairInstructions: [],
+    // 规划角色合同：verdict=pass 时 planningDisposition 必须显式 null（R2-01 组合链
+    // planningMode: true，非规划夹具缺这两个字段会在 check 阶段被拒收）。
+    planningDisposition: null,
+    hostReadinessReview: null,
+  };
+
+  class RecordingTreatmentClient extends CodexBridgeClient {
+    readonly calls: Array<{ kind: CodexTaskKind; payload: unknown }> = [];
+
+    constructor() {
+      super({ socketPath: "/nonexistent/vf-r2-01-combo.sock", sleep: async () => {} });
+    }
+
+    override async runTaskDetailed(kind: CodexTaskKind, payload: unknown): Promise<CodexTaskExecution> {
+      this.calls.push({ kind, payload });
+      if (kind === "creative-treatment") {
+        return {
+          output: {
+            version: "video-factory/creative-treatment-v3",
+            concept: "空受众也能完成构思",
+            evidenceRequirements: [],
+            feasibilityQuestions: [],
+          },
+          trace: { taskKind: kind, promptVersion: "test/creative-treatment", prompt: "prompt:creative-treatment",
+            providerId: "deepseek", modelId: "fake-treatment-model" },
+        };
+      }
+      if (kind === "role-audit") {
+        return {
+          output: structuredClone(passingPlanningAudit),
+          trace: { taskKind: kind, promptVersion: "test/role-audit", prompt: "prompt:role-audit",
+            providerId: "deepseek", modelId: "fake-audit-model" },
+        };
+      }
+      throw new Error(`Unexpected task ${kind}`);
+    }
+  }
+
+  const emptyClosureSpies = (): ClosureSpies => ({ treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+    screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] });
+
+  it("空受众经 parseBrief 进入真实构思角色，producer 收到未指定语义且停在人工确认", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-r2-01-empty-audience-"));
+    const spies = emptyClosureSpies();
+    const client = new RecordingTreatmentClient();
+    const pipeline = new ProductionPipeline({
+      workspaceRoot,
+      worker: new ClosureWorker(),
+      treatmentAgents: [{ providerId: "deepseek", agent: new CodexCreativeTreatmentAgent({ client, modelId: "fake-treatment-model" }) }],
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureDirector(spies),
+      assetProviders: CLOSURE_ASSET_PROVIDERS,
+    });
+    // 组合入口必须是 parseBrief：raw 输入经合同解析为 ""，不手 cast 绕过校验。
+    const brief = parseBrief({ ...closureBrief({ creativeReview: true }), audience: "   " });
+    assert.equal(brief.audience, "");
+    const run = await pipeline.start(brief);
+    assert.equal(run.status, "needs_human");
+    const treatmentCalls = client.calls.filter((call) => call.kind === "creative-treatment");
+    assert.ok(treatmentCalls.length >= 1, "真实构思角色至少完成一次 produce 调用");
+    for (const call of treatmentCalls) {
+      assert.equal((call.payload as { brief: { audience?: unknown } }).brief.audience, "");
+    }
+    const review = (run.nodeRuns.find((node) => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
+    assert.equal(review.activeStage, "treatment");
+    assert.ok(review.stages.treatment.currentDraft, "构思草稿已产生并停在人工确认");
+  });
+
+  it("明确受众经同一链路按 trim 后原意进入真实构思角色", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-r2-01-explicit-audience-"));
+    const spies = emptyClosureSpies();
+    const client = new RecordingTreatmentClient();
+    const pipeline = new ProductionPipeline({
+      workspaceRoot,
+      worker: new ClosureWorker(),
+      treatmentAgents: [{ providerId: "deepseek", agent: new CodexCreativeTreatmentAgent({ client, modelId: "fake-treatment-model" }) }],
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureDirector(spies),
+      assetProviders: CLOSURE_ASSET_PROVIDERS,
+    });
+    const brief = parseBrief({ ...closureBrief({ creativeReview: true }), audience: " 夜班护士 " });
+    assert.equal(brief.audience, "夜班护士");
+    const run = await pipeline.start(brief);
+    assert.equal(run.status, "needs_human");
+    const treatmentCalls = client.calls.filter((call) => call.kind === "creative-treatment");
+    assert.ok(treatmentCalls.length >= 1);
+    assert.equal((treatmentCalls[0]!.payload as { brief: { audience?: unknown } }).brief.audience, "夜班护士");
   });
 });

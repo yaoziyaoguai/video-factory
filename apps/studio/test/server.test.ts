@@ -791,6 +791,57 @@ describe("Studio API", () => {
     await app.close();
   });
 
+  it("forwards pause identities on resume, retry and retrieval with strict body parsing", async () => {
+    const observed: Array<{ kind: "resume" | "retry" | "retrieve"; pauseRequestId?: string; extra?: string }> = [];
+    const service = fakeService({
+      resumePaused: async (_runId, options) => {
+        observed.push({ kind: "resume", ...(options?.pauseRequestId !== undefined ? { pauseRequestId: options.pauseRequestId } : {}) });
+        return runDetail("running");
+      },
+      retryFailedNode: async (_runId, nodeId, _recovery, pauseRequestId) => {
+        observed.push({ kind: "retry", ...(pauseRequestId !== undefined ? { pauseRequestId } : {}) });
+        void nodeId;
+        return runDetail("running");
+      },
+      retrieveOriginalTextTask: async (_runId, pauseRequestId) => {
+        observed.push({ kind: "retrieve", ...(pauseRequestId !== undefined ? { pauseRequestId } : {}) });
+        return runDetail("running");
+      },
+    });
+    const app = buildStudioApp({ service });
+    const token = "c".repeat(64);
+
+    const resumeWithToken = await app.inject({ method: "POST", url: "/api/runs/run-1/resume", payload: { pauseRequestId: token } });
+    const resumeBare = await app.inject({ method: "POST", url: "/api/runs/run-1/resume" });
+    const resumeBadToken = await app.inject({ method: "POST", url: "/api/runs/run-1/resume", payload: { pauseRequestId: "not-hex" } });
+    const resumeUnknownField = await app.inject({ method: "POST", url: "/api/runs/run-1/resume", payload: { pauseRequestId: token, force: true } });
+    const retryWithToken = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/voice/retry", payload: { pauseRequestId: token } });
+    const retryBadToken = await app.inject({ method: "POST", url: "/api/runs/run-1/nodes/voice/retry", payload: { pauseRequestId: 42 } });
+    const retrieveWithToken = await app.inject({ method: "POST", url: "/api/runs/run-1/task-recovery/retrieve", payload: { pauseRequestId: token } });
+    const retrieveBare = await app.inject({ method: "POST", url: "/api/runs/run-1/task-recovery/retrieve" });
+    const retrieveBadToken = await app.inject({ method: "POST", url: "/api/runs/run-1/task-recovery/retrieve", payload: { pauseRequestId: "zz" } });
+    const retrieveUnknownField = await app.inject({ method: "POST", url: "/api/runs/run-1/task-recovery/retrieve", payload: { pauseRequestId: token, force: true } });
+
+    assert.equal(resumeWithToken.statusCode, 200);
+    assert.equal(resumeBare.statusCode, 200);
+    assert.equal(resumeBadToken.statusCode, 400);
+    assert.equal(resumeUnknownField.statusCode, 400);
+    assert.equal(retryWithToken.statusCode, 200);
+    assert.equal(retryBadToken.statusCode, 400);
+    assert.equal(retrieveWithToken.statusCode, 200);
+    assert.equal(retrieveBare.statusCode, 200);
+    assert.equal(retrieveBadToken.statusCode, 400);
+    assert.equal(retrieveUnknownField.statusCode, 400);
+    assert.deepEqual(observed, [
+      { kind: "resume", pauseRequestId: token },
+      { kind: "resume" },
+      { kind: "retry", pauseRequestId: token },
+      { kind: "retrieve", pauseRequestId: token },
+      { kind: "retrieve" },
+    ]);
+    await app.close();
+  });
+
   it("validates a manual paid reconciliation and injects the trusted server actor", async () => {
     let forwarded: { input: StudioPaidReconciliationInput; actor?: string } | undefined;
     const service = fakeService({

@@ -408,6 +408,73 @@ test("producer 输入合同：来源与时长边界先于模型调用被校验",
   assert.deepEqual(client.calls, []);
 });
 
+// R2-01：真实构思角色接受 string 空受众（""=未指定），producer 与 audit 收到同一语义；
+// 非 string 在模型调用 0 次时拒绝；其余必填文本字段不受放宽影响。
+test("真实构思两入口接受 string 空受众，producer/audit 收到同一未指定语义", async () => {
+  for (const audience of ["", "   "]) {
+    const treatClient = new ControlledTreatmentClient("deepseek", "deepseek-flash", (kind) => {
+      if (kind === "creative-treatment") return structuredClone(valid);
+      throw new Error(`Unexpected task ${kind}`);
+    });
+    const treatAgent = new CodexCreativeTreatmentAgent({ client: treatClient, modelId: "deepseek-flash" });
+    const treatment = await treatAgent.treat(agentInput({ audience }));
+    assert.equal(treatment.concept, valid.concept);
+    assert.equal((treatClient.calls[0]?.payload as { brief: { audience: string } }).brief.audience, "");
+
+    const detailedClient = new ControlledTreatmentClient("deepseek", "deepseek-flash", (kind) => {
+      if (kind === "creative-treatment") return structuredClone(valid);
+      if (kind === "role-audit") return passingAudit;
+      throw new Error(`Unexpected task ${kind}`);
+    });
+    const detailedAgent = new CodexCreativeTreatmentAgent({ client: detailedClient, modelId: "deepseek-flash" });
+    const execution = await detailedAgent.treatDetailed(agentInput({ audience }));
+    assert.equal(execution.agentLoop?.status, "passed");
+    const producer = detailedClient.calls[0]?.payload as { brief: { audience: string } };
+    const audit = detailedClient.calls[1]?.payload as { context: { upstreamFacts: { audience: string } } };
+    assert.equal(producer.brief.audience, "");
+    assert.equal(audit.context.upstreamFacts.audience, "");
+  }
+});
+
+test("明确受众按 trim 后原意进入 producer 与 audit", async () => {
+  const client = new ControlledTreatmentClient("deepseek", "deepseek-flash", (kind) => {
+    if (kind === "creative-treatment") return structuredClone(valid);
+    if (kind === "role-audit") return passingAudit;
+    throw new Error(`Unexpected task ${kind}`);
+  });
+  const agent = new CodexCreativeTreatmentAgent({ client, modelId: "deepseek-flash" });
+  await agent.treatDetailed(agentInput({ audience: "  刚开始独立生活的观众  " }));
+  const producer = client.calls[0]?.payload as { brief: { audience: string } };
+  const audit = client.calls[1]?.payload as { context: { upstreamFacts: { audience: string } } };
+  assert.equal(producer.brief.audience, "刚开始独立生活的观众");
+  assert.equal(audit.context.upstreamFacts.audience, "刚开始独立生活的观众");
+});
+
+test("非 string 受众在模型调用 0 次时被拒绝且不产生任何请求", async () => {
+  const client = new ControlledTreatmentClient("openai", "codex-default", () => {
+    throw new Error("model must not be called for invalid audience");
+  });
+  const agent = new CodexCreativeTreatmentAgent({ client });
+  for (const audience of [null, undefined, 42, true, { intended: "对象" }, ["数组"]]) {
+    // 非法值按 unknown 注入：验证运行时合同，而不是类型系统。
+    const input = { ...agentInput(), brief: { ...agentInput().brief, audience: audience as unknown as string } };
+    await assert.rejects(() => agent.treat(input), /audience/);
+    await assert.rejects(() => agent.treatDetailed(input), /audience/);
+  }
+  assert.deepEqual(client.calls, []);
+});
+
+test("受众放宽后其余必填文本字段仍拒绝空白", async () => {
+  const client = new ControlledTreatmentClient("openai", "codex-default", () => {
+    throw new Error("model must not be called for invalid input");
+  });
+  const agent = new CodexCreativeTreatmentAgent({ client });
+  for (const field of ["title", "angle", "nicheSlug", "platform"] as const) {
+    await assert.rejects(() => agent.treat(agentInput({ audience: "", [field]: "   " })), new RegExp(field));
+  }
+  assert.deepEqual(client.calls, []);
+});
+
 
 // CLOUD-11/P5.1：缺画面服务字段的结构化诊断——index 参数化（第 1 项与第 5 项），
 // null 与缺失（undefined）两种缺项都覆盖；非 pipeline 取得不误报。

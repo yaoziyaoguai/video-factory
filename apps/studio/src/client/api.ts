@@ -391,9 +391,11 @@ export const studioApi = {
     `/api/runs/${encodeURIComponent(runId)}/pause`,
     { method: "POST" },
   ),
-  resumePaused: (runId: string) => requestJson<StudioRunDetail>(
+  resumePaused: (runId: string, options?: { pauseRequestId?: string }) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/resume`,
-    { method: "POST" },
+    { method: "POST", ...(options?.pauseRequestId !== undefined
+      ? { headers: { "content-type": "application/json" }, body: JSON.stringify({ pauseRequestId: options.pauseRequestId }) }
+      : {}) },
   ),
   prepareReviewContinuation: (runId: string, input: StudioReviewContinuationInput) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/review-continuations`,
@@ -406,13 +408,28 @@ export const studioApi = {
     `/api/runs/${encodeURIComponent(runId)}/task-recovery/query`,
     { method: "POST", ...(target ? { headers: { "content-type": "application/json" }, body: JSON.stringify(target) } : {}) },
   ),
-  retrieveOriginalTextTask: (runId: string) => requestJson<StudioRunDetail>(
+  retrieveOriginalTextTask: (runId: string, pauseRequestId?: string) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/task-recovery/retrieve`,
-    { method: "POST" },
+    { method: "POST", ...(pauseRequestId !== undefined
+      ? { headers: { "content-type": "application/json" }, body: JSON.stringify({ pauseRequestId }) }
+      : {}) },
   ),
-  retryFailedNode: (runId: string, nodeId: string, nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"]) => requestJson<StudioRunDetail>(
+  retryFailedNode: (
+    runId: string,
+    nodeId: string,
+    nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"],
+    pauseRequestId?: string,
+  ) => requestJson<StudioRunDetail>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/retry`,
-    { method: "POST", ...(nativeAudioRecovery ? { headers: { "content-type": "application/json" }, body: JSON.stringify(nativeAudioRecovery) } : {}) },
+    {
+      method: "POST",
+      ...((nativeAudioRecovery || pauseRequestId !== undefined)
+        ? { headers: { "content-type": "application/json" }, body: JSON.stringify({
+          ...(nativeAudioRecovery ?? {}),
+          ...(pauseRequestId !== undefined ? { pauseRequestId } : {}),
+        }) }
+        : {}),
+    },
   ),
   paidOperation: (runId: string, nodeId: string) => requestJson<StudioPaidNodeSummary>(
     `/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/paid-operation`,

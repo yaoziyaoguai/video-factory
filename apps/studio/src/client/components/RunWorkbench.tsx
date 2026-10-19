@@ -149,6 +149,10 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
     artifact.id === run.publishPackageArtifactId && artifact.kind === "publish_package"
     && artifact.contentType === "application/json" && artifact.contentUrl) : undefined;
   const publishPackageDownloadName = publishPackage ? publishPackageDownloadFilename(run.title, publishPackage.id) : undefined;
+  // A批：暂停意图只按服务端投影与 typed 机器码区分，不按中文错误文本猜。
+  const pauseMarkerHeld = Boolean(run.pauseRecovery?.pauseRequestId);
+  const rankPauseFailure = run.status === "failed"
+    && run.nodes.some((node) => node.status === "failed" && node.errorCode === "ASSET_RANK_PAUSED");
   const subtitlePreview = currentSubtitlePreview(run);
   // loadeddata 的资格属于具体媒体源；同一个播放器换片时不能借用旧片的 ready 状态。
   const videoIdentity = video?.contentUrl ? `${run.id}\0${video.id}\0${video.contentUrl}` : undefined;
@@ -600,7 +604,7 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
         <div className="run-heading-copy">
           <p className="eyebrow">本次制作</p>
           <h1>{run.title}</h1>
-          <div className="run-title-meta"><span>{platformLabel(run.platform)} · 目标 {run.durationSeconds} 秒</span><details className="run-brief-context"><summary>创作目标与受众</summary><dl className="run-brief-facts"><div><dt>创作角度</dt><dd>{run.angle}</dd></div><div><dt>目标受众</dt><dd>{run.audience}</dd></div></dl></details></div>
+          <div className="run-title-meta"><span>{platformLabel(run.platform)} · 目标 {run.durationSeconds} 秒</span><details className="run-brief-context"><summary>创作目标与受众</summary><dl className="run-brief-facts"><div><dt>创作角度</dt><dd>{run.angle}</dd></div><div><dt>目标受众</dt><dd>{run.audience || "未指定"}</dd></div></dl></details></div>
         </div>
         <StatusBadge status={run.status} {...(run.status === "succeeded" && !readOnly
           ? { label: "内部交付已完成" }
@@ -927,12 +931,16 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
           ) : (
             <section className={`run-state-panel${run.failure ? " has-failure" : ""}`}>
               {run.failure ? <>
-                <p className="eyebrow">{sourceAssetFailure
-                  ? (sourceReviewIncomplete(run.failure) ? "制作已暂停，画面与费用都已保留" : "制作已安全停止")
-                  : `停在 ${run.failure.nodeLabel}`}</p>
-                <h2>{sourceAssetFailure
-                  ? (sourceReviewIncomplete(run.failure) ? "试片审查还没完成" : "画面预检未通过")
-                  : `${run.failure.nodeLabel}没有完成`}</h2>
+                <p className="eyebrow">{rankPauseFailure
+                  ? "已请求暂停"
+                  : sourceAssetFailure
+                    ? (sourceReviewIncomplete(run.failure) ? "制作已暂停，画面与费用都已保留" : "制作已安全停止")
+                    : `停在 ${run.failure.nodeLabel}`}</p>
+                <h2>{rankPauseFailure
+                  ? "候选核验已暂停"
+                  : sourceAssetFailure
+                    ? (sourceReviewIncomplete(run.failure) ? "试片审查还没完成" : "画面预检未通过")
+                    : `${run.failure.nodeLabel}没有完成`}</h2>
                 {sourceAssetFailure ? <>
                   <div className="run-failure-breakdown">
                     <strong>结论</strong>
@@ -1008,7 +1016,11 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
                   : <a className="button button-secondary" href="/topics?mode=series">查看系列安排</a>}
               </div> : run.status === "succeeded" && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />基于这版重新制作</button> : null}
               {hasPendingPlanningConfiguration && (run.status === "failed" || run.status === "rejected") ? <p className="run-failure-summary">模型选择尚未保存。请先保存模型，或恢复为当前模型后再重试。</p> : null}
-              {(run.status === "failed" || run.status === "rejected") && !run.taskRecovery && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && retryableNodeId(run) ? <button className={`button ${canRestorePreservedWork ? "button-secondary" : "button-primary"}`} type="button" disabled={nodeMutationPending || hasPendingPlanningConfiguration} onClick={() => void onRetryFailedNode(retryableNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{run.failure?.retryLabel ?? (sourceAssetFailure && run.status === "rejected" ? "重新检查已有试片" : run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤")}</button> : null}
+              {(run.status === "failed" || run.status === "rejected") && !run.taskRecovery && run.failure?.retryable !== false && !hasUncertainPaidOutcome(run) && onRetryFailedNode && retryableNodeId(run) ? <button className={`button ${canRestorePreservedWork ? "button-secondary" : "button-primary"}`} type="button" disabled={nodeMutationPending || hasPendingPlanningConfiguration} onClick={() => void onRetryFailedNode(retryableNodeId(run)!)}><RotateCcw aria-hidden="true" size={16} />{rankPauseFailure
+                ? "继续候选核验"
+                : run.status === "failed" && pauseMarkerHeld
+                  ? "解除暂停并重试"
+                  : run.failure?.retryLabel ?? (sourceAssetFailure && run.status === "rejected" ? "重新检查已有试片" : run.failure?.nodeId === "visual-review" ? "重试视觉审片" : "重试失败步骤")}</button> : null}
               {(run.status === "failed" || run.status === "rejected") && !run.taskRecovery && !hasUncertainPaidOutcome(run) && onRestart ? <button className="button button-secondary" type="button" onClick={onRestart}><RotateCcw aria-hidden="true" size={16} />调整方案后重新制作</button> : null}
               {run.status === "stale" && onRegenerateStale ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => { void onRegenerateStale().catch(() => undefined); }}><RotateCcw aria-hidden="true" size={16} />{isCostReplan ? "按降本意见重新规划并报价" : "按人工版本继续生成"}</button> : null}
               {run.status === "paused" && onResumePaused ? <button className="button button-primary" type="button" disabled={nodeMutationPending} onClick={() => void onResumePaused()}><Play aria-hidden="true" size={16} />继续自动制作</button> : null}
@@ -2443,8 +2455,12 @@ function runStateMessage(run: StudioRunDetail): string {
     }
     return safeRunError(run.nodes.find((node) => node.status === "failed")?.error);
   }
-  if (run.status === "awaiting_spend_approval") return "即将生成付费图片或视频，请先检查前面的内容、模型和本次报价。";
-  if (run.status === "needs_human") return "正在等待你的意见或确认；你可以继续讨论，确认后才会进入下一步。";
+  if (run.status === "awaiting_spend_approval") return run.pauseRecovery
+    ? "即将生成付费图片或视频，请先检查前面的内容、模型和本次报价；已请求的暂停仍会约束后续执行。"
+    : "即将生成付费图片或视频，请先检查前面的内容、模型和本次报价。";
+  if (run.status === "needs_human") return run.pauseRecovery
+    ? "正在等待你的意见或确认；后续自动执行已暂停，明确采用并继续时才解除这条暂停。"
+    : "正在等待你的意见或确认；你可以继续讨论，确认后才会进入下一步。";
   if (run.status === "approval_invalidated") return "输入、模型、报价或重试次数发生了变化，之前的费用确认已失效，请重新检查。";
   if (run.status === "stale" && hasDirectorCostFeedback(run)) {
     return "你已把上一份画面报价退回导演，降本意见已经保存。继续后会先调整方案，再给你一份新报价。";
@@ -2498,6 +2514,26 @@ function safeRunError(message?: string): string {
 }
 
 
+const STOCK_FAILURE_LABELS: Record<string, string> = {
+  dns_failure: "域名解析失败", connection_failure: "连接失败",
+  tls_failure: "TLS 校验失败", http_error: "图库返回错误", incomplete: "下载不完整",
+  too_large: "文件超出大小限制", invalid_media: "素材格式或时长不满足", unknown: "原因未识别",
+};
+// R2-07：超时要按真实阶段显示，不再一律叫连接超时；未知阶段统一“请求超时”。
+const STOCK_TIMEOUT_STAGE_LABELS: Record<string, string> = {
+  dns: "解析超时", connect: "连接超时", tls: "TLS 握手超时", http: "响应超时", body: "正文读取超时",
+};
+
+function stockFailureLine(scene: import("../../shared/api.js").StudioStockProgress["scenes"][number]): string {
+  // 只显示属于当前图库的最近失败；换库后的旧原因不当本次原因，completed 无失败。
+  if (!scene.lastFailure || scene.lastFailure.provider !== scene.provider || scene.state === "completed") return "";
+  const label = scene.lastFailure.reason === "timeout"
+    ? STOCK_TIMEOUT_STAGE_LABELS[scene.lastFailure.stage] ?? "请求超时"
+    : STOCK_FAILURE_LABELS[scene.lastFailure.reason] ?? "原因未识别";
+  const status = scene.lastFailure.httpStatus !== undefined ? `（HTTP ${scene.lastFailure.httpStatus}）` : "";
+  return `${label}${status}`;
+}
+
 function StockProgress({ progress }: { progress: import("../../shared/api.js").StudioStockProgress }) {
   const completed = progress.scenes.filter(scene => scene.state === "completed").length;
   const failures = progress.scenes.reduce((sum, scene) => sum + scene.failedAttempts, 0);
@@ -2506,6 +2542,7 @@ function StockProgress({ progress }: { progress: import("../../shared/api.js").S
     <p>{progress.phase === "search" ? "候选检索" : "素材获取"} · 已完成 {completed}/{progress.totalScenes} 镜{failures ? ` · ${failures} 次获取失败` : ""}</p>
     <ul>{progress.scenes.map(scene => <li key={scene.scenePosition}>镜头 {scene.scenePosition} · {labels[scene.state]}
       {scene.provider ? ` · ${providerLabel(`${scene.provider}-stock-v1`) ?? scene.provider}` : ""}
-      {progress.phase === "search" && scene.candidateCount ? ` · ${scene.candidateCount} 个候选` : ""}</li>)}</ul>
+      {progress.phase === "search" && scene.candidateCount ? ` · ${scene.candidateCount} 个候选` : ""}
+      {stockFailureLine(scene) ? ` · ${stockFailureLine(scene)}` : ""}</li>)}</ul>
   </div>;
 }

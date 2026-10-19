@@ -320,6 +320,17 @@ function buildControlledDetail(raw: string, nodeId: string): { technicalDetail: 
 function normalizeFailure(raw: string, node: StudioNode, provider?: string): Pick<StudioRunFailure, "category" | "summary" | "retryable" | "retryLabel" | "recoveryActions"> {
   const materialFailure = node.output && typeof node.output === "object" && "sourceMediaFailure" in node.output
     ? node.output.sourceMediaFailure : undefined;
+  // A批：typed 机器码是“候选核验主动暂停”的唯一事实来源；不匹配中文错误文本，
+  // 普通失败与 deadline/payload_limit 不伪装成主动暂停。
+  if (node.errorCode === "ASSET_RANK_PAUSED") {
+    return {
+      category: "node_failure",
+      summary: "候选核验已暂停：已完成结果保留，恢复后继续尚未完成的核验，不会重新提交原任务。",
+      retryable: true,
+      retryLabel: "继续候选核验",
+      recoveryActions: ["已完成的稿件与候选保留，可逐项查看", "点击「继续候选核验」按原操作继续；不会重新提交已完成的核验"],
+    };
+  }
   if (node.id === "asset-source-review" && materialFailure && typeof materialFailure === "object"
     && "code" in materialFailure && materialFailure.code === "SOURCE_RANGE_TOO_SHORT"
     && "scenePositions" in materialFailure && Array.isArray(materialFailure.scenePositions)

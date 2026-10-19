@@ -570,6 +570,41 @@ describe("WorkflowRunner", () => {
     assert.equal(secondCalls, 1);
   });
 
+  it("preserves the paused ranking operation identity when retrying its typed pause failure", async () => {
+    let calls = 0;
+    const definition: WorkflowDefinition = {
+      id: "paused-ranking-retry",
+      name: "Paused ranking retry",
+      version: "1.0.0",
+      nodes: [{
+        id: "ranking",
+        label: "Ranking",
+        capability: "script.draft",
+        mode: "automatic",
+        execute: () => {
+          calls += 1;
+          if (calls === 1) {
+            return { status: "failed" as const, error: "已暂停候选核验，已完成结果保留。", errorCode: "ASSET_RANK_PAUSED" };
+          }
+          return { output: { ranking: true } };
+        },
+      }],
+    };
+    const runner = new WorkflowRunner({ idFactory: deterministicIds() });
+    const failed = await runner.run(definition, {});
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.nodeRuns[0]?.errorCode, "ASSET_RANK_PAUSED");
+    assert.ok(failed.nodeRuns[0]?.operationRequestId, "the failed ranking attempt must own its workflow operation identity");
+
+    const retried = await runner.retryFailedNode(definition, failed, "ranking", { allowPausedOperationContinuation: true });
+    assert.equal(retried.status, "succeeded");
+    assert.equal(retried.nodeRuns[0]?.operationRequestId, failed.nodeRuns[0]?.operationRequestId,
+      "the pause continuation must stay under the same workflow operation, not mint a new one");
+    assert.notEqual(retried.nodeRuns[0]?.interrupted, true,
+      "a host pause before submission must not be recorded as an interrupted uncertain outcome");
+    assert.notEqual(retried.nodeRuns[0]?.outcomeUncertain, true);
+  });
+
   it("runs nodes in dependency order and tracks topic artifacts", async () => {
     const topicNode: NodeDefinition = {
       id: "topic-intelligence",

@@ -911,17 +911,19 @@ export class StudioService {
     return this.production.rejectSpend(runId, nodeId, input, rejectedBy);
   }
   requestPause(runId: string): Promise<StudioRunDetail> { return this.production.requestPause(runId); }
-  resumePaused(runId: string): Promise<StudioRunDetail> { return this.production.resumePaused(runId); }
+  resumePaused(runId: string, options?: { pauseRequestId?: string }): Promise<StudioRunDetail> {
+    return this.production.resumePaused(runId, options);
+  }
   resumeStale(runId: string): Promise<StudioRunDetail> { return this.production.resumeStale(runId); }
   queryOriginalTextTask(runId: string, target?: import("../shared/api.js").StudioOptionalReviewTarget): Promise<StudioRunDetail> {
     return this.production.queryOriginalTextTask(runId, target);
   }
-  async retrieveOriginalTextTask(runId: string): Promise<StudioRunDetail> {
+  async retrieveOriginalTextTask(runId: string, pauseRequestId?: string): Promise<StudioRunDetail> {
     const current = await this.production.get(runId);
     if (!current) throw new StudioNotFoundError("没有找到这条制作记录。");
     if (current.seriesId && current.episodeNumber) await this.series.resumeRun(current.seriesId, current.episodeNumber, runId);
     try {
-      const updated = await this.production.retrieveOriginalTextTask(runId);
+      const updated = await this.production.retrieveOriginalTextTask(runId, pauseRequestId);
       if (current.seriesId) await this.reconcileSeriesRuns();
       return updated;
     } catch (error) {
@@ -929,7 +931,12 @@ export class StudioService {
       throw error;
     }
   }
-  async retryFailedNode(runId: string, nodeId: string, nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"]): Promise<StudioRunDetail> {
+  async retryFailedNode(
+    runId: string,
+    nodeId: string,
+    nativeAudioRecovery?: StudioRunDetail["nativeAudioRecovery"],
+    pauseRequestId?: string,
+  ): Promise<StudioRunDetail> {
     const current = await this.production.get(runId);
     if (!current) throw new StudioNotFoundError("没有找到这条制作记录。");
     if (current.nodes.find((node) => node.id === nodeId)?.outcomeUncertain) {
@@ -942,7 +949,7 @@ export class StudioService {
       await this.series.resumeRun(current.seriesId, current.episodeNumber, runId);
     }
     try {
-      const updated = await this.production.retryFailedNode(runId, nodeId, nativeAudioRecovery);
+      const updated = await this.production.retryFailedNode(runId, nodeId, nativeAudioRecovery, pauseRequestId);
       if (current.seriesId) await this.reconcileSeriesRuns();
       return updated;
     } catch (error) {

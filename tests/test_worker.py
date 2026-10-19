@@ -174,6 +174,27 @@ class WorkerContractTest(unittest.TestCase):
             self.assertEqual(script["title"], "做决定前，先避开这 3 个坑")
             self.assertEqual(len(script["scenes"]), 5)
 
+    def test_script_draft_accepts_an_unspecified_audience_without_inventing_one(self):
+        # C 批次：受众是用户可选字段。空串按「未指定」放行制作，非法类型仍拒绝；
+        # 模板文案在无受众时自然改写，不得出现空称呼或编造默认受众。
+        with tempfile.TemporaryDirectory() as tmp:
+            for niche in ("life-avoidance", "emotion-stories"):
+                with self.subTest(niche=niche):
+                    request = self.valid_request("script.draft", Path(tmp) / niche / "attempt-1")
+                    request["input"]["brief"]["audience"] = "  "
+                    request["input"]["brief"]["nicheSlug"] = niche
+                    response = handle_request(request)
+                    self.assertEqual(response["status"], "succeeded")
+                    script = json.loads(Path(response["output"]["scriptPath"]).read_text(encoding="utf-8"))
+                    for scene in script["scenes"]:
+                        self.assertNotIn("给  的一句话", scene["narration"])
+                        self.assertNotIn("所有人", scene["narration"])
+
+        request = self.valid_request("script.draft", Path(tmp) / "bad-type")
+        request["input"]["brief"]["audience"] = None
+        with self.assertRaisesRegex(WorkerProtocolError, "audience"):
+            handle_request(request)
+
     def test_module_entrypoint_writes_exactly_one_json_response_to_stdout(self):
         with tempfile.TemporaryDirectory() as tmp:
             request = self.valid_request("script.draft", Path(tmp) / "script")

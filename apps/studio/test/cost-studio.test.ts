@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import { mkdir, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,6 +8,8 @@ import { readPlanningMaintenanceIntegrity, readPlanningOperations } from "../src
 import { taskBinding } from "../../../packages/production-pipeline/src/codex-task-binding.js";
 import { CostStudio } from "../src/server/cost-studio.js";
 import { projectRequestExecution, projectCheckpointExecutions } from "../../../packages/production-pipeline/src/model-execution-facts.js";
+import { ProductionPipeline as ProductionPipelineSource } from "../../../packages/production-pipeline/src/production-pipeline.js";
+import { summarizeJointPlanningExecution as summarizeJointPlanningExecutionSource } from "../../../packages/production-pipeline/src/production-pipeline.js";
 
 describe("planning maintenance integrity", () => {
   function stoppedCheckpoint(key: string, kind: "series" | "topic" = "topic") {
@@ -194,15 +197,20 @@ describe("CostStudio", () => {
       const detail = await studio.runDetail(run.id);
       assert.equal(detail?.totals.verifiedBrokerRequests, 4);
       assert.equal(detail?.totals.verifiedModelAttempts, 4);
-      assert.equal(detail?.totals.countExact, linked);
-      assert.equal(detail?.totals.legacyUnattributedReceipts, linked ? 0 : 3);
-      assert.equal(detail?.totals.newBrokerRequestsThisAttempt, linked ? 0 : null);
-      assert.equal(detail?.totals.newModelAttemptsThisAttempt, linked ? 0 : null);
-      if (!linked) {
-        const evidenceOnly = detail!.lines.filter((line) => line.accountingSource === "execution_fact");
-        assert.equal(evidenceOnly.length, 4);
-        assert.ok(evidenceOnly.every((line) => line.billing === "unverified" && line.actualPending && line.estimatedCostCny === null));
-      }
+      // postdogfood B1：requestId只等于facts的operationId时是「已归属操作但次数待核」，
+      // 不能取得覆盖权，也不得让countExact变精确；快照无论link与否都保留为待核行。
+      assert.equal(detail?.totals.countExact, false);
+      assert.equal(detail?.totals.legacyUnattributedReceipts, linked ? 1 : 3,
+        "link时三份同请求快照合并为一份待核；未link时是三份独立未归属回执");
+      assert.equal(detail?.totals.newBrokerRequestsThisAttempt, null);
+      assert.equal(detail?.totals.newModelAttemptsThisAttempt, null);
+      const evidenceOnly = detail!.lines.filter((line) => line.accountingSource === "execution_fact");
+      assert.equal(evidenceOnly.length, 4, "逐请求事实必须全部保持可见");
+      assert.ok(evidenceOnly.every((line) => line.billing === "unverified" && line.actualPending && line.estimatedCostCny === null));
+      const attributed = detail!.lines.find((line) => line.accountingSource !== "execution_fact");
+      assert.equal(attributed?.callCountPending, linked ? true : undefined,
+        "link时为次数待核行；未link时是旧累计未归属行");
+      assert.equal(attributed?.legacyUnattributed, linked ? undefined : true);
       assert.deepEqual(run, original);
       assert.deepEqual((await studio.runDetail(run.id))?.totals, detail?.totals);
       assert.equal((await studio.dashboard()).totals.verifiedModelAttempts, 4);
@@ -986,4 +994,368 @@ it("uses physical request facts to absorb an explicitly identified planning summ
   const incomplete = await studio.runDetail(run.id);
   assert.equal(incomplete?.totals.legacyUnattributedReceipts, 1, "无法完整归属时保留汇总证据");
   assert.equal(run.executionReceipts.length, 1, "只读投影不能删除账本");
+});
+
+// postdogfood B1：summary消去需要「精确覆盖+无未知/冲突+读取完整+无独立金额」同时成立；
+// 零调用没有正面证据、普通回执只有operationId、独立实付金额都不能让证据消失或计数变精确。
+describe("CostStudio execution-summary coverage (postdogfood B1)", () => {
+  const summaryReceipt = () => ({
+    id: "summary", nodeId: "creative-planning", providerId: "creative-treatment-v1", modelId: "deepseek-flash",
+    billing: "subscription", startedAt: "2026-10-17T12:00:00Z", requestId: "planning-operation",
+    parameters: { accountingSource: "execution_summary", modelCallCount: 2 },
+  });
+  const fact = (requestId: string, overrides: Record<string, unknown> = {}) => projectRequestExecution({
+    nodeId: "creative-planning", requestId, purpose: "produce", state: "completed",
+    operationId: "planning-operation", evidenceSource: "checkpoint",
+    trace: { providerId: "deepseek", modelId: "deepseek-flash", modelAttemptCount: 1 }, ...overrides,
+  });
+  const build = async (facts: ReturnType<typeof fact>[], issues: string[] = [], receipt = summaryReceipt()) => {
+    const run = { id: "summary-coverage", initialInput: { title: "汇总覆盖" }, nodeRuns: [],
+      executionReceipts: [structuredClone(receipt)] };
+    const studio = new CostStudio(async () => [run], undefined, undefined, undefined,
+      async () => ({ facts: structuredClone(facts), issues: structuredClone(issues),
+        currentOperationIds: { "creative-planning": "planning-operation" } }));
+    return await studio.runDetail(run.id);
+  };
+
+  it("keeps the summary pending unless exact per-request facts fully cover it", async () => {
+    const exact = await build([fact("request-1"), fact("request-2")]);
+    assert.equal(exact?.lines.some((line) => line.id === "summary"), false, "精确覆盖时只移除汇总行");
+    assert.equal(exact?.totals.verifiedModelAttempts, 2);
+    assert.equal(exact?.totals.countExact, true);
+
+    const missingOne = await build([fact("request-1")]);
+    const retained = missingOne?.lines.find((line) => line.id === "summary");
+    assert.ok(retained, "缺一份逐请求证据时保留汇总行待核");
+    assert.equal(retained?.callCountPending, true);
+    assert.equal(retained?.legacyUnattributed, undefined, "新失败汇总不得被标注成历史旧累计");
+    assert.equal(missingOne?.totals.countExact, false);
+    assert.equal(missingOne?.totals.legacyUnattributedReceipts, 1, "待核汇总仍计入待核份数");
+    assert.equal(missingOne?.totals.verifiedModelAttempts, 1);
+
+    const unknownCount = await build([fact("request-1"),
+      fact("request-2", { trace: { providerId: "deepseek", modelId: "deepseek-flash" } })]);
+    assert.ok(unknownCount?.lines.some((line) => line.id === "summary"), "尝试次数未知时保留汇总行");
+
+    const conflicted = await build([fact("request-1"),
+      fact("request-2", { trace: { providerId: "deepseek", modelId: "deepseek-flash", modelAttemptCount: 1, brokerRequestIdHash: "deadbeef" } })]);
+    assert.ok(conflicted?.lines.some((line) => line.id === "summary"), "证据冲突时保留汇总行");
+    assert.equal(conflicted?.totals.countExact, false);
+
+    const withIssue = await build([fact("request-1"), fact("request-2")], ["checkpoint unreadable"]);
+    assert.ok(withIssue?.lines.some((line) => line.id === "summary"), "投影读取不完整时保守保留汇总行");
+    assert.equal(withIssue?.totals.countExact, false);
+
+    const wrongOperation = await build([fact("request-1"), fact("request-2", { operationId: "other-operation" })]);
+    assert.ok(wrongOperation?.lines.some((line) => line.id === "summary"), "事实必须归属同一操作才可能覆盖");
+  });
+
+  it("never drops a zero-count summary without positive coverage evidence", async () => {
+    const zeroReceipt = { ...summaryReceipt(), parameters: { accountingSource: "execution_summary", modelCallCount: 0 } };
+    const noFacts = await build([], [], zeroReceipt);
+    const retained = noFacts?.lines.find((line) => line.id === "summary");
+    assert.ok(retained, "0次汇总没有逐请求证据时必须保留待核");
+    assert.equal(retained?.callCountPending, true);
+    assert.equal(noFacts?.totals.countExact, false);
+    assert.equal(noFacts?.totals.legacyUnattributedReceipts, 1);
+  });
+
+  it("keeps an independently settled amount on a summary even when counts are covered", async () => {
+    const paid = { ...summaryReceipt(), actualCostCny: 7, actualCostSource: "provider_reported" };
+    const result = await build([fact("request-1"), fact("request-2")], [], paid);
+    const retained = result?.lines.find((line) => line.id === "summary");
+    assert.ok(retained, "汇总带独立实付金额时不得因计数相等被消去");
+    assert.equal(retained?.actualCostCny, 7);
+    assert.equal(retained?.actualPending, false, "金额已核，不得伪装成金额待核");
+    assert.equal(result?.totals.actualCostCny, 7, "独立实付不因投影消去");
+  });
+
+  it("does not let an operation-attributed receipt hide physical facts of the same operation", async () => {
+    const plainReceipt = {
+      id: "plain", nodeId: "creative-planning", providerId: "deepseek", modelId: "deepseek-flash",
+      billing: "subscription", startedAt: "2026-10-17T12:00:00Z", requestId: "planning-operation",
+      parameters: { modelCallCount: 0 },
+    };
+    const run = { id: "operation-receipt", initialInput: { title: "操作回执" }, nodeRuns: [],
+      executionReceipts: [plainReceipt] };
+    const studio = new CostStudio(async () => [run], undefined, undefined, undefined,
+      async () => ({ facts: [fact("request-1"), fact("request-2"), fact("request-3")], issues: [],
+        currentOperationIds: { "creative-planning": "planning-operation" } }));
+    const detail = await studio.runDetail(run.id);
+    assert.equal(detail?.lines.filter((line) => line.accountingSource === "execution_fact").length, 3,
+      "同操作的每个物理请求都要保持可见");
+    const receiptLine = detail?.lines.find((line) => line.id === "plain");
+    assert.ok(receiptLine, "回执本身也保留为一行");
+    assert.equal(receiptLine?.callCountPending, true, "回执计数待核，不得宣称0次");
+    assert.equal(receiptLine?.legacyUnattributed, undefined, "有操作归属，不是历史旧累计");
+    assert.equal(detail?.totals.verifiedModelAttempts, 3);
+    assert.equal(detail?.totals.subscriptionCalls, 0, "计数待核的回执不并入订阅精确总数");
+    assert.equal(detail?.totals.countExact, false);
+  });
+
+  it("keeps cost line ids stable across inserts, reordering and repeated reads", async () => {
+    const receipt = (startedAt: string, extra: Record<string, unknown> = {}) => ({
+      nodeId: "script", providerId: "openai-codex", modelId: "codex", billing: "subscription",
+      status: "succeeded", startedAt, parameters: { modelCallCount: 1 }, ...extra,
+    });
+    const run = { id: "stable-ids", initialInput: { title: "稳定行身份" }, nodeRuns: [],
+      executionReceipts: [receipt("2026-10-17T10:00:00Z", { requestId: "request-a" }),
+        receipt("2026-10-17T11:00:00Z", { requestId: "request-b" })] };
+    const studio = new CostStudio(async () => [run]);
+    const first = await studio.runDetail(run.id);
+    const ids = first?.lines.map((line) => line.id) ?? [];
+    assert.equal(ids.length, 2);
+    assert.equal(new Set(ids).size, 2, "两个不同物理请求必须是不同的行");
+    // 插入更早回执 + 重排序 + 状态/金额补齐，已有行ID保持不变。
+    run.executionReceipts = [receipt("2026-10-17T09:00:00Z", { requestId: "request-c" }),
+      receipt("2026-10-17T11:00:00Z", { requestId: "request-b", status: "unknown", actualCostCny: 0.5 }),
+      receipt("2026-10-17T10:00:00Z", { requestId: "request-a" })];
+    const second = await studio.runDetail(run.id);
+    const secondIds = new Set(second?.lines.map((line) => line.id) ?? []);
+    assert.equal(second?.lines.length, 3);
+    for (const id of ids) assert.ok(secondIds.has(id), `行 ${id} 应保持稳定`);
+    assert.deepEqual((await studio.runDetail(run.id))?.lines.map((line) => line.id),
+      second?.lines.map((line) => line.id), "反复读取行ID不变");
+  });
+});
+
+// R2-04/R2-05：pending 汇总不得被默认计数伪装成精确覆盖；reader 读取不完整必须浮出为
+// issue/pending；同一物理请求的回执与事实必须合并成同一口径。场景由 round2 cost-probe
+// 迁移为期待正确行为的正式回归（探针断言缺陷存在，修后应失败）。
+describe("execution summary pending and same-request fact merge (round2 R2-04/R2-05)", () => {
+  const pendingReceipt = (parameters: Record<string, unknown> = {}) => ({
+    id: "summary", nodeId: "creative-planning", providerId: "creative-treatment-v1", modelId: "deepseek-flash",
+    billing: "subscription", startedAt: "2026-10-19T12:00:00Z", requestId: "planning-operation",
+    parameters: { accountingSource: "execution_summary", ...parameters },
+  });
+  const fact = (requestId: string, overrides: Record<string, unknown> = {}) => projectRequestExecution({
+    nodeId: "creative-planning", requestId, purpose: "produce", state: "completed",
+    operationId: "planning-operation", evidenceSource: "checkpoint",
+    trace: { providerId: "deepseek-flash", modelId: "deepseek-flash", modelAttemptCount: 1 }, ...overrides,
+  });
+  const project = async (receipt: Record<string, unknown>, facts: ReturnType<typeof fact>[], issues: string[] = []) => {
+    const run = { id: "pending-summary", initialInput: { title: "待核汇总" }, nodeRuns: [],
+      executionReceipts: [structuredClone(receipt)] };
+    const studio = new CostStudio(async () => [run], undefined, undefined, undefined,
+      async () => ({ facts: structuredClone(facts), issues: structuredClone(issues),
+        currentOperationIds: { "creative-planning": "planning-operation" } }));
+    return (await studio.runDetail(run.id))!;
+  };
+
+  it("keeps an executionSummaryPending summary unknown instead of defaulting it to one call", async () => {
+    const noFacts = await project(pendingReceipt({ executionSummaryPending: true }), []);
+    const retained = noFacts.lines.find((line) => line.id === "summary");
+    assert.ok(retained, "pending 汇总必须保留待核");
+    assert.equal(retained?.subscriptionCallCount, undefined, "缺登记数不得默认成 1 次");
+    assert.equal(retained?.callCountPending, true);
+    assert.equal(retained?.executionSummaryPending, true);
+    assert.equal(noFacts.totals.subscriptionCalls, 0, "缺数不并入订阅精确总数");
+    assert.equal(noFacts.totals.countExact, false);
+
+    const oneFact = await project(pendingReceipt({ executionSummaryPending: true }), [fact("request-1")]);
+    assert.ok(oneFact.lines.some((line) => line.id === "summary"),
+      "恰好的子集事实不能把 pending 汇总伪装成精确覆盖");
+    assert.equal(oneFact.totals.verifiedModelAttempts, 1, "已核实子集仍可见");
+    assert.equal(oneFact.totals.countExact, false);
+    assert.equal(oneFact.totals.legacyUnattributedReceipts, 1);
+  });
+
+  it("distinguishes an explicitly registered zero from an unknown count", async () => {
+    const zero = await project(pendingReceipt({ modelCallCount: 0 }), []);
+    const zeroLine = zero.lines.find((line) => line.id === "summary");
+    assert.ok(zeroLine);
+    assert.equal(zeroLine?.subscriptionCallCount, 0, "明确登记 0 保持数字 0");
+    const missing = await project(pendingReceipt(), []);
+    const missingLine = missing.lines.find((line) => line.id === "summary");
+    assert.ok(missingLine);
+    assert.equal(missingLine?.subscriptionCallCount, undefined, "缺数保持未知，不得默认成 1 或 0");
+    assert.equal(missingLine?.callCountPending, true);
+  });
+
+  it("keeps a settled amount dimension on a pending count summary", async () => {
+    const paid = { ...pendingReceipt({ executionSummaryPending: true }), actualCostCny: 7, actualCostSource: "provider_reported" };
+    const result = await project(paid, [fact("request-1")]);
+    const line = result.lines.find((line) => line.id === "summary");
+    assert.ok(line, "计数待核不因一份事实消去汇总行");
+    assert.equal(line?.actualCostCny, 7);
+    assert.equal(line?.actualPending, false);
+    assert.equal(result.totals.actualCostCny, 7);
+  });
+
+  it("keeps pending subscription counts out of totals when no projection is available", async () => {
+    const run = { id: "no-projection", initialInput: { title: "无投影" }, nodeRuns: [],
+      executionReceipts: [pendingReceipt({ executionSummaryPending: true })] };
+    const studio = new CostStudio(async () => [run]);
+    const detail = (await studio.runDetail(run.id))!;
+    const line = detail.lines.find((line) => line.id === "summary");
+    assert.equal(line?.subscriptionCallCount, undefined);
+    assert.equal(line?.callCountPending, true);
+    assert.equal(detail.totals.subscriptionCalls, 0, "无投影路径同样不得用默认 1 造数");
+  });
+
+  it("merges the same physical request into one visible count instead of hiding the fact", async () => {
+    for (const modelCallCount of [0, 1]) {
+      const receipt = { id: "same-request", nodeId: "creative-planning", providerId: "deepseek-flash",
+        modelId: "deepseek-flash", billing: "subscription", startedAt: "2026-10-19T12:00:00Z",
+        requestId: "request-1", parameters: { modelCallCount } };
+      const merged = await project(receipt, [fact("request-1")]);
+      assert.equal(merged.lines.length, 1, "正常0→1进展和1/1同事实都合并为一行");
+      assert.equal(merged.lines[0]?.subscriptionCallCount, 1, "不得显示占位0或把1+1相加");
+      assert.equal(merged.lines[0]?.callCountPending, undefined);
+      assert.equal(merged.totals.verifiedModelAttempts, 1);
+      assert.equal(merged.totals.subscriptionCalls, 1);
+      assert.equal(merged.totals.countExact, true, "明细与总计同口径才可精确");
+    }
+  });
+
+  it("keeps same-request pending counts incomplete in run and dashboard totals without changing recorded money", async () => {
+    for (const actualCostSource of ["configured_rate", "provider_reported", "manual_reconciled"] as const) {
+      const receipt = { id: "registered-two", nodeId: "publish-package", providerId: "deepseek-flash",
+        modelId: "deepseek-flash", billing: "unverified", status: "succeeded", startedAt: "2026-10-19T12:00:00Z",
+        requestId: "request-1", actualCostCny: 7, actualCostSource,
+        parameters: { accountingSource: "document_operation", modelCallCount: 2, modelCallCountKnown: true } };
+      const run = { id: "pending-physical-count", nodeRuns: [], executionReceipts: [receipt] };
+      const studio = new CostStudio(async () => [run], undefined, undefined, undefined,
+        async () => ({ facts: [fact("request-1", { nodeId: "publish-package" })], issues: [],
+          currentOperationIds: { "publish-package": "later-operation" } }));
+      const detail = (await studio.runDetail(run.id))!;
+      assert.equal(detail.lines.length, 1, "同一物理请求仍合并为一行");
+      assert.equal(detail.lines[0]?.modelCallCount, 2, "保留原登记数，不用子集覆盖");
+      assert.equal(detail.lines[0]?.callCountPending, true);
+      assert.equal(detail.lines[0]?.actualCostSource, actualCostSource, "次数待核不改变金额权威来源");
+      assert.equal(detail.lines[0]?.actualCostCny, 7);
+      assert.equal(detail.lines[0]?.actualPending, false, "次数与金额待核彼此独立");
+      const dashboard = await studio.dashboard();
+      for (const totals of [detail.totals, dashboard.runs[0]!.totals, dashboard.totals]) {
+        assert.equal(totals.verifiedModelAttempts, 1, "已核实子集仍可见");
+        assert.equal(totals.verifiedBrokerRequests, 1);
+        assert.equal(totals.countExact, false, "行级次数待核必须贯通所有总计");
+        assert.equal(totals.newModelAttemptsThisAttempt, null, "未知不能因旧操作被推为本次新增0");
+        assert.equal(totals.newBrokerRequestsThisAttempt, null);
+        assert.equal(totals.actualCostCny, 7, "不改变或重复累计已登记金额");
+      }
+    }
+  });
+
+  it("does not label a subscription receipt precise when the physical request was not accepted", async () => {
+    const receipt = { id: "registered-one", nodeId: "creative-planning", providerId: "deepseek-flash",
+      modelId: "deepseek-flash", billing: "subscription", startedAt: "2026-10-19T12:00:00Z",
+      requestId: "request-1", parameters: { modelCallCount: 1 } };
+    const result = await project(receipt, [fact("request-1", { state: "not_accepted" })]);
+    assert.equal(result.lines.length, 1);
+    assert.equal(result.lines[0]?.subscriptionCallCount, 1, "只保留登记，不擅自改写为0次");
+    assert.equal(result.lines[0]?.callCountPending, true);
+    assert.equal(result.totals.subscriptionCalls, 0, "待核登记不能冒充已确认订阅调用");
+    assert.equal(result.totals.verifiedModelAttempts, 0, "未受理的请求没有已核实模型尝试");
+    assert.equal(result.totals.verifiedBrokerRequests, 0);
+    assert.equal(result.totals.countExact, false);
+    assert.equal(result.totals.newModelAttemptsThisAttempt, null);
+    assert.equal(result.totals.newBrokerRequestsThisAttempt, null);
+  });
+
+  it("keeps the count pending when merged facts are unknown or conflicting", async () => {
+    const receipt = { id: "zero-registered", nodeId: "creative-planning", providerId: "deepseek-flash",
+      modelId: "deepseek-flash", billing: "subscription", startedAt: "2026-10-19T12:00:00Z",
+      requestId: "request-1", parameters: { modelCallCount: 0 } };
+    const unknown = await project(receipt,
+      [fact("request-1", { trace: { providerId: "deepseek-flash", modelId: "deepseek-flash" } })]);
+    assert.equal(unknown.lines[0]?.callCountPending, true, "次数未知的 fact 不能把计数定死");
+    assert.equal(unknown.totals.countExact, false);
+
+    const conflict = await project(receipt,
+      [fact("request-1", { trace: { providerId: "deepseek-flash", modelId: "deepseek-flash", modelAttemptCount: 1, brokerRequestIdHash: "deadbeef" } })]);
+    assert.equal(conflict.lines[0]?.callCountPending, true, "冲突证据不消除待核");
+    assert.equal(conflict.totals.countExact, false);
+  });
+
+  it("surfaces unreadable reader records as issues instead of pretending completeness", async () => {
+    // 真实 reader + 真实文件：损坏记录必须上报（issue/pending），合法子集数字仍返回。
+    const fixtureRoot = await mkdtemp(path.join(tmpdir(), "vf-r2-cost-readers-"));
+    try {
+      const checkpointDir = path.join(fixtureRoot, "runs", "reader-run", "nodes", "creative-planning", "agent-loop-checkpoints");
+      const discussionDir = path.join(fixtureRoot, "runs", "reader-run", "nodes", "creative-planning", "discussion-executions");
+      await mkdir(checkpointDir, { recursive: true });
+      await mkdir(discussionDir, { recursive: true });
+      await writeFile(path.join(checkpointDir, "broken.json"), "{not-json");
+      const checkpointIssues: string[] = [];
+      const checkpointOnly = await summarizeJointPlanningExecutionSource(path.join(fixtureRoot, "runs"), "reader-run", "op",
+        (issue) => checkpointIssues.push(issue));
+      assert.equal(checkpointOnly, undefined, "无合法记录时不编造数字");
+      assert.ok(checkpointIssues.some((issue) => issue.includes("checkpoint:broken.json:unreadable")),
+        JSON.stringify(checkpointIssues));
+
+      await writeFile(path.join(discussionDir, "good.json"), JSON.stringify({
+        version: "video-factory/creative-discussion-execution-v1", workflowOperationRequestId: "op",
+        commandId: "command-1", requestId: "physical-1", stage: "treatment", state: "completed",
+        trace: { providerId: "deepseek", modelId: "deepseek", modelAttemptCount: 1 },
+      }));
+      await writeFile(path.join(discussionDir, "broken.json"), "{not-json");
+      const mixedIssues: string[] = [];
+      const mixed = await summarizeJointPlanningExecutionSource(path.join(fixtureRoot, "runs"), "reader-run", "op",
+        (issue) => mixedIssues.push(issue));
+      assert.equal(mixed?.modelCallCount, 1, "合法记录的数字照常返回");
+      assert.ok(mixedIssues.some((issue) => issue.includes("discussion:broken.json:unreadable")),
+        JSON.stringify(mixedIssues));
+
+      const pipeline = new ProductionPipelineSource({ workspaceRoot: fixtureRoot,
+        worker: { run: async () => { throw new Error("cost projection must not execute worker"); } } as never });
+      const runFile = path.join(fixtureRoot, "runs", "reader-run", "run.json");
+      const projectionRun = { id: "reader-run", status: "failed", startedAt: "2026-10-19T00:00:00Z",
+        revision: 1, initialInput: { title: "读取不完整" }, nodeRuns: [], executionReceipts: [pendingReceipt({ executionSummaryPending: true })] };
+      await writeFile(runFile, JSON.stringify(projectionRun));
+      const projection = await pipeline.readModelExecutionFacts("reader-run");
+      assert.ok(projection.issues.some((issue) => issue.startsWith("creative-planning:discussion:")),
+        JSON.stringify(projection.issues));
+      assert.equal(projection.facts.length, 1, "合法 fact 保留");
+      const studio = new CostStudio(async () => [projectionRun], undefined, undefined, undefined,
+        async () => projection);
+      const detail = (await studio.runDetail("reader-run"))!;
+      assert.equal(detail.totals.countExact, false, "读取不完整不得声称精确");
+      assert.ok(detail.lines.some((line) => line.id === "summary"), "pending 汇总保留");
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("presents one consistent count when a document finishes between the two reads", async () => {
+    // document 回执在两次独立读取之间完成（确定性允许交错）：同响应内明细与总计必须同口径。
+    const fixtureRoot = await mkdtemp(path.join(tmpdir(), "vf-r2-doc-race-"));
+    try {
+      const docDir = path.join(fixtureRoot, "runs", "doc-race", "nodes", "publish-package", "document-commands");
+      await mkdir(docDir, { recursive: true });
+      const run = { id: "doc-race", status: "succeeded", startedAt: "2026-10-19T00:00:00Z", revision: 1,
+        initialInput: { title: "文档竞态" },
+        nodeRuns: [{ nodeId: "publish-package", status: "succeeded" }], executionReceipts: [] };
+      await writeFile(path.join(fixtureRoot, "runs", "doc-race", "run.json"), JSON.stringify(run));
+      const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+      const identity = { action: "audit", actor: "test", input: { expectedRunRevision: 1, expectedVersionId: "v1" } };
+      const documentCommand = { version: "video-factory/document-command-v1", commandId: "document-1",
+        requestDigest: digest(identity), ...identity, state: "pending",
+        createdAt: "2026-10-19T00:00:00Z", updatedAt: "2026-10-19T00:00:00Z",
+        prepared: { requestId: "doc-physical-1", brokerBinding: { providerId: "deepseek", modelId: "deepseek" } } };
+      const docPath = path.join(docDir, `${digest(documentCommand.commandId)}.json`);
+      await writeFile(docPath, JSON.stringify(documentCommand));
+      const pipeline = new ProductionPipelineSource({ workspaceRoot: fixtureRoot,
+        worker: { run: async () => { throw new Error("cost projection must not execute worker"); } } as never });
+      const studio = new CostStudio(async () => [run], undefined, undefined,
+        async (id) => {
+          const before = await pipeline.readDocumentExecutionReceipts(id);
+          await writeFile(docPath, JSON.stringify({ ...documentCommand, state: "completed",
+            execution: { trace: { providerId: "deepseek", modelId: "deepseek", modelAttemptCount: 1 } },
+            completedAt: "2026-10-19T00:00:01Z" }));
+          return before;
+        },
+        async (id) => pipeline.readModelExecutionFacts(id));
+      const detail = (await studio.runDetail("doc-race"))!;
+      assert.equal(detail.lines.length, 1);
+      assert.equal(detail.lines[0]?.modelCallCount, 1, "完成的物理请求次数必须并入明细");
+      assert.equal(detail.lines[0]?.callCountPending, undefined);
+      assert.equal(detail.lines[0]?.status, "succeeded");
+      assert.equal(detail.totals.verifiedModelAttempts, 1);
+      assert.equal(detail.totals.countExact, true, "明细与总计同口径");
+      assert.equal(detail.totals.actualPendingCount, 1, "金额维度独立保持待核");
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -33,6 +33,59 @@ it("shows separately verified requests, model attempts and unknown money without
   expect(screen.getByText(/累计模型处理：未记录完整/)).toBeTruthy();
   expect(screen.getByText("金额未核实")).toBeTruthy();
   expect(screen.queryByText(/无需核账|覆盖完整。|预估 ¥0.00/)).toBeNull();
+});
+
+// postdogfood B1：费用行区分三种事实——未归属回执、已归属操作但次数待核、次数已核金额待核；
+// 不把新失败叫旧累计，已核金额不得显示成「金额未核实」。
+it("distinguishes unattributed receipts, count-pending operation summaries and settled amounts", () => {
+  render(<RunCostDetailPanel detail={{ runId: "cost-b1", title: "三态", totals: {
+    estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 7, actualPendingCount: 2,
+    meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0,
+    verifiedModelAttempts: 4, countExact: false, legacyUnattributedReceipts: 2,
+  }, lines: [
+    { id: "legacy", runId: "cost-b1", runTitle: "三态", nodeId: "creative-planning", capability: "model.execute",
+      providerId: "deepseek", modelId: "deepseek-flash", billing: "subscription", status: "succeeded",
+      estimatedCostCny: 0, actualPending: true, startedAt: "", legacyUnattributed: true, legacySnapshotCount: 1 },
+    { id: "summary", runId: "cost-b1", runTitle: "三态", nodeId: "creative-planning", capability: "model.execute",
+      providerId: "deepseek", modelId: "deepseek-flash", billing: "unverified", status: "failed",
+      estimatedCostCny: null, actualPending: true, startedAt: "", requestId: "planning-operation",
+      subscriptionCallCount: 3, modelCallCount: 3, callCountPending: true, accountingSource: "execution_summary",
+      legacySnapshotCount: 1 },
+    { id: "paid-summary", runId: "cost-b1", runTitle: "三态", nodeId: "creative-planning", capability: "model.execute",
+      providerId: "deepseek", modelId: "deepseek-flash", billing: "unverified", status: "succeeded",
+      estimatedCostCny: null, actualCostCny: 7, actualCostSource: "provider_reported", actualPending: false,
+      startedAt: "", requestId: "planning-operation-paid", subscriptionCallCount: 2, modelCallCount: 2,
+      callCountPending: true, accountingSource: "execution_summary" },
+    { id: "fact", runId: "cost-b1", runTitle: "三态", nodeId: "creative-planning", capability: "model.execute",
+      providerId: "deepseek", modelId: "deepseek-flash", billing: "unverified", status: "succeeded",
+      estimatedCostCny: null, actualPending: true, startedAt: "", modelCallCount: 4,
+      accountingSource: "execution_fact" },
+  ] }} />);
+  expect(screen.getByText("历史累计记录尚未归属，不并入已核实调用总数")).toBeTruthy();
+  expect(screen.getByText("3 次按操作登记 · 次数待核（尚缺逐次请求证据）")).toBeTruthy();
+  expect(screen.getByText("4＋2 份待核")).toBeTruthy();
+  expect(screen.queryByText(/0 次已确认模型调用/)).toBeNull();
+  expect(screen.getByText("¥7.00")).toBeTruthy();
+});
+
+// R2-04/R2-05：未登记数字的待核汇总不得伪装成 0 次；只有新归属待核时总览不叫旧累计。
+it("labels count-unknown summaries as pending without inventing a zero count", () => {
+  render(<RunCostDetailPanel detail={{ runId: "cost-pending", title: "待核", totals: {
+    estimatedCostCny: 0, authorizedCostCny: 0, actualCostCny: 0, actualPendingCount: 1,
+    meteredCalls: 0, subscriptionCalls: 0, freeCalls: 0, failedMeteredCalls: 0,
+    verifiedModelAttempts: 1, countExact: false, legacyUnattributedReceipts: 1,
+  }, lines: [
+    { id: "pending-summary", runId: "cost-pending", runTitle: "待核", nodeId: "creative-planning",
+      capability: "model.execute", providerId: "deepseek", modelId: "deepseek-flash", billing: "unverified",
+      status: "unknown", estimatedCostCny: null, actualPending: true, startedAt: "",
+      requestId: "planning-operation", callCountPending: true, executionSummaryPending: true,
+      accountingSource: "execution_summary", legacySnapshotCount: 1 },
+  ] }} />);
+  expect(screen.getByText("次数待核（未登记计数，尚缺逐次请求证据）")).toBeTruthy();
+  expect(screen.queryByText(/0 次按操作登记/)).toBeNull();
+  expect(screen.queryByText(/0 次已确认模型调用/)).toBeNull();
+  expect(screen.getByText(/另有 1 份回执计数待核/)).toBeTruthy();
+  expect(screen.queryByText(/旧累计回执尚未归属/)).toBeNull();
 });
 
 it("labels human waiting and elapsed time separately without making unknown recovery free or instant", () => {
@@ -199,6 +252,64 @@ describe("Studio client", () => {
     expect(counts()).toEqual(["—", "—", "—"]);
     view.rerender(<MemoryRouter><ProductionQueue {...props} loading={false} /></MemoryRouter>);
     expect(counts()).toEqual(["0", "0", "0"]);
+  });
+
+  it("offers explicit pause recovery entries for typed ranking pauses and retained markers", async () => {
+    const onRetry = vi.fn();
+    const failure = { nodeId: "creative-planning", nodeLabel: "创作规划", category: "node_failure" as const,
+      summary: "候选核验已暂停：已完成结果保留，恢复后继续尚未完成的核验，不会重新提交原任务。",
+      impact: "已保存的创作进度保留在创作规划工作区，可逐项查看。",
+      retryable: true, recoveryActions: [], savedNodeCount: 1 };
+    const failedNodes = (errorCode?: string) => [
+      { id: "brief", label: "需求校验", role: "制片人", status: "succeeded" as const, artifactIds: [], qualityGateResults: [] },
+      { id: "creative-planning", label: "创作规划", role: "制片人", status: "failed" as const, artifactIds: [], qualityGateResults: [],
+        ...(errorCode ? { errorCode } : {}) },
+    ];
+    const { activeIntervention: _intervention, ...baseRun } = runDetail;
+    const rankPausedRun = { ...baseRun, status: "failed" as const, nodes: failedNodes("ASSET_RANK_PAUSED"),
+      failure, pauseRecovery: { pauseRequestId: "d".repeat(64) } };
+    const first = render(<RunWorkbench run={rankPausedRun} decisionPending={false} onDecision={vi.fn()} onRetryFailedNode={onRetry} />);
+    expect(screen.getByText("候选核验已暂停")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "继续候选核验" }));
+    expect(onRetry).toHaveBeenCalledWith("creative-planning");
+    first.unmount();
+
+    const plainFailedWithMarker = { ...baseRun, status: "failed" as const, nodes: failedNodes(),
+      failure, pauseRecovery: { pauseRequestId: "d".repeat(64) } };
+    const second = render(<RunWorkbench run={plainFailedWithMarker} decisionPending={false} onDecision={vi.fn()} onRetryFailedNode={onRetry} />);
+    expect(screen.getByRole("button", { name: "解除暂停并重试" })).toBeTruthy();
+    second.unmount();
+
+    // 无暂停标记的普通失败不得伪装成暂停，也不提供“解除暂停”出口。
+    const plainFailed = { ...baseRun, status: "failed" as const, nodes: failedNodes(), failure };
+    render(<RunWorkbench run={plainFailed} decisionPending={false} onDecision={vi.fn()} onRetryFailedNode={onRetry} />);
+    expect(screen.queryByRole("button", { name: "解除暂停并重试" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "继续候选核验" })).toBeNull();
+  });
+
+  it("sends the projected pause identity with recovery actions from the run page", async () => {
+    vi.restoreAllMocks();
+    vi.stubGlobal("EventSource", class { addEventListener() {} close() {} });
+    const token = "d".repeat(64);
+    const { activeIntervention: _stopped, ...pausedDetail } = runDetail;
+    const failedRun = { ...pausedDetail, status: "failed" as const,
+      nodes: [
+        { id: "brief", label: "需求校验", role: "制片人", status: "succeeded" as const, artifactIds: [], qualityGateResults: [] },
+        { id: "creative-planning", label: "创作规划", role: "制片人", status: "failed" as const, artifactIds: [], qualityGateResults: [] },
+      ],
+      failure: { nodeId: "creative-planning", nodeLabel: "创作规划", category: "node_failure" as const,
+        summary: "规划失败", impact: "已保存的创作进度保留。", retryable: true, recoveryActions: [], savedNodeCount: 1 },
+      pauseRecovery: { pauseRequestId: token } };
+    vi.spyOn(studioApi, "run").mockResolvedValue(failedRun);
+    vi.spyOn(studioApi, "runCosts").mockRejectedValue(new Error("no cost fixture"));
+    vi.spyOn(studioApi, "paidOperation").mockRejectedValue(new Error("no fixture"));
+    vi.spyOn(studioApi, "providers").mockResolvedValue(providers);
+    vi.spyOn(studioApi, "creativeReviewHistory").mockRejectedValue(new Error("no fixture"));
+    vi.spyOn(studioApi, "creativeReview").mockRejectedValue(new Error("no fixture"));
+    const retry = vi.spyOn(studioApi, "retryFailedNode").mockResolvedValue(failedRun);
+    render(<MemoryRouter initialEntries={["/projects/run-1"]}><Routes><Route path="/projects/:runId" element={<RunPage />} /></Routes></MemoryRouter>);
+    await userEvent.click(await screen.findByRole("button", { name: "解除暂停并重试" }));
+    expect(retry).toHaveBeenCalledWith("run-1", "creative-planning", undefined, token);
   });
 
   it.each(["applied", "accepted", "query-failed", "storage-denied"] as const)("observes the original local decision at the next stop without submitting another decision: %s", async state => {
@@ -1556,6 +1667,38 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("button", { name: "开始前期构思" }));
     expect(screen.getByLabelText("视频标题")).toHaveFocus();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  // C 批次：目标受众是可选字段——留空按「未指定」提交，不强制填写，也不自动补默认受众。
+  it("submits with an unspecified audience while title and angle stay required", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={onSubmit} />);
+    expect(screen.queryByLabelText("目标受众")).not.toHaveAttribute("required");
+    await user.type(screen.getByLabelText("视频标题"), "留空受众的制作");
+    await user.type(screen.getByLabelText("内容角度"), "只写标题和角度，先不定受众");
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit.mock.calls[0]![0]).toMatchObject({ title: "留空受众的制作", audience: "" });
+
+    cleanup();
+    const secondSubmit = vi.fn();
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={secondSubmit} />);
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
+    expect(screen.getByLabelText("视频标题")).toHaveFocus();
+    expect(secondSubmit).not.toHaveBeenCalled();
+  });
+
+  it("trims an explicit audience before submitting it verbatim", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(<NewRunDialog open providers={providers} onClose={() => undefined} onSubmit={onSubmit} />);
+    await user.type(screen.getByLabelText("视频标题"), "明确受众的制作");
+    await user.type(screen.getByLabelText("内容角度"), "面向特定人群的表达");
+    await user.type(screen.getByLabelText("目标受众"), "  宝妈群体  ");
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit.mock.calls[0]![0]).toMatchObject({ audience: "宝妈群体" });
   });
 
   it("keeps a multiline brief and its close protection after creation fails", async () => {

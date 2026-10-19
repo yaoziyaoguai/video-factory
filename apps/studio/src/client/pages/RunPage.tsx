@@ -301,9 +301,12 @@ function RunPageContent({ runId }: { runId: string }) {
     setDecisionPending(true);
     setError(undefined);
     try {
-      const nextRun = await withMutationProgress(() => input.commandId
-        ? submitLocalReviewCommand(runId, { kind: "decision", input: { ...input, commandId: input.commandId } })
-        : studioApi.decide(runId, input));
+      // A批：批准动作携带详情投影的暂停身份，服务端在执行租约内按身份条件解除。
+      const withPauseIdentity = input.action === "approve" && run?.pauseRecovery?.pauseRequestId
+        ? { ...input, pauseRequestId: run.pauseRecovery.pauseRequestId } : input;
+      const nextRun = await withMutationProgress(() => withPauseIdentity.commandId
+        ? submitLocalReviewCommand(runId, { kind: "decision", input: { ...withPauseIdentity, commandId: withPauseIdentity.commandId } })
+        : studioApi.decide(runId, withPauseIdentity));
       setRun((current) => preferRunSnapshot(current, nextRun));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -316,13 +319,16 @@ function RunPageContent({ runId }: { runId: string }) {
     setCreativeCommandPending(true);
     setError(undefined);
     try {
+      // A批：采用确认携带暂停身份；其他创作命令原样提交，不解除暂停。
+      const withPauseIdentity = input.action === "confirm" && run?.pauseRecovery?.pauseRequestId
+        ? { ...input, pauseRequestId: run.pauseRecovery.pauseRequestId } : input;
       let rejectionMessage: string | undefined;
       // POST 响应丢失也只观察同一 commandId；不把受理当成完成，不另造请求身份。
-      try { await studioApi.commandCreativeReview(runId, input); } catch (submitError) {
+      try { await studioApi.commandCreativeReview(runId, withPauseIdentity); } catch (submitError) {
         if (submitError instanceof StudioApiError && (submitError.status === 400 || submitError.status === 409)) {
           rejectionMessage = submitError.message;
         }
-        try { await studioApi.creativeReviewCommand(runId, input.commandId); } catch { throw submitError; }
+        try { await studioApi.creativeReviewCommand(runId, withPauseIdentity.commandId); } catch { throw submitError; }
       }
       const observe = async () => {
         for (let attempt = 0; attempt < 900; attempt += 1) {
@@ -617,7 +623,9 @@ function RunPageContent({ runId }: { runId: string }) {
     setNodeMutationPending(true);
     setError(undefined);
     try {
-      const nextRun = await withMutationProgress(() => studioApi.resumePaused(runId));
+      // A批：恢复提交详情投影的暂停身份；服务端在执行租约内按身份条件解除。
+      const pauseRequestId = run?.pauseRecovery?.pauseRequestId || undefined;
+      const nextRun = await withMutationProgress(() => studioApi.resumePaused(runId, pauseRequestId !== undefined ? { pauseRequestId } : undefined));
       setRun((current) => preferRunSnapshot(current, nextRun));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -631,7 +639,13 @@ function RunPageContent({ runId }: { runId: string }) {
     setNodeMutationPending(true);
     setError(undefined);
     try {
-      const nextRun = await withMutationProgress(() => studioApi.retryFailedNode(runId, nodeId, nodeId === "voice" ? run?.nativeAudioRecovery : undefined));
+      // 存在暂停标记时，重试就是“解除暂停并重试”：提交同一条暂停身份条件解除。
+      const nextRun = await withMutationProgress(() => studioApi.retryFailedNode(
+        runId,
+        nodeId,
+        nodeId === "voice" ? run?.nativeAudioRecovery : undefined,
+        run?.pauseRecovery?.pauseRequestId || undefined,
+      ));
       setRun((current) => preferRunSnapshot(current, nextRun));
       setConnectionWarning(undefined);
     } catch (caught) {
@@ -681,7 +695,8 @@ function RunPageContent({ runId }: { runId: string }) {
     setNodeMutationPending(true);
     setError(undefined);
     try {
-      const nextRun = await withMutationProgress(() => studioApi.retrieveOriginalTextTask(runId));
+      const nextRun = await withMutationProgress(() =>
+        studioApi.retrieveOriginalTextTask(runId, run?.pauseRecovery?.pauseRequestId || undefined));
       setRun((current) => preferRunSnapshot(current, nextRun));
       setConnectionWarning(undefined);
     } catch (caught) {

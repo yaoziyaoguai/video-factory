@@ -2238,6 +2238,15 @@ function requiredText(value: unknown, field: string): string {
   return value;
 }
 
+// 用户可选字段（如目标受众）：空白规范化为空串表示「未指定」，只校验类型；
+// 与宿主 parseBrief 的 trim-only 规范化语义一致，纯空白不进入模型提示。
+function optionalAudienceText(value: unknown, field: string): string {
+  if (typeof value !== "string") {
+    throw new CodexExecutorError(`${field} must be a string.`, false);
+  }
+  return value.trim();
+}
+
 function boundedRecord(value: unknown, field: string, maximumBytes: number): Record<string, unknown> {
   const result = requireRecord(value, field);
   if (Buffer.byteLength(JSON.stringify(result), "utf8") > maximumBytes) {
@@ -2752,7 +2761,7 @@ function requireScriptBrief(value: unknown): ScriptBrief {
   const brief: ScriptBrief = {
     title: requiredText(record.title, "payload.brief.title"),
     angle: requiredText(record.angle, "payload.brief.angle"),
-    audience: requiredText(record.audience, "payload.brief.audience"),
+    audience: optionalAudienceText(record.audience, "payload.brief.audience"),
     nicheSlug: requiredText(record.nicheSlug, "payload.brief.nicheSlug"),
     platform: requiredText(record.platform, "payload.brief.platform"),
     ...(contentLed ?? { durationSeconds: Number(durationSeconds) }),
@@ -2936,7 +2945,7 @@ function requirePublishBrief(value: unknown): PublishCopyBrief {
   return {
     title: requiredText(record.title, "payload.brief.title"),
     angle: requiredText(record.angle, "payload.brief.angle"),
-    audience: requiredText(record.audience, "payload.brief.audience"),
+    audience: optionalAudienceText(record.audience, "payload.brief.audience"),
     nicheSlug: requiredText(record.nicheSlug, "payload.brief.nicheSlug"),
   };
 }

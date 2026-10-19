@@ -64,7 +64,7 @@ import { REFERENCE_GRAMMAR_AGENT_CONTRACT_VERSION, fallbackShotGrammar, validate
 import { parseTaskBinding } from "./codex-task-binding.js";
 import { CodexBridgeClient, CodexBridgeError, codexBridgeErrorFromCause, validatePreparedOperation, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, type AgentLoopTrace, type CodexPreparedOperation, type CodexTaskExecution, type CodexTaskKind, type CodexTaskTrace, type ModelCandidateAttempt, type RoleAudit } from "./codex-chat.js";
 import { fileRoleAgentLoopCheckpoint, roleAgentCheckpointKey, roleAgentCheckpointRequestPhases as planningCheckpointRequestPhases } from "./role-agent-checkpoint.js";
-import { RoleAgentLoopError, isCompletedRoleAgentFailure, validateRoleAudit, type HostPlanningReadiness } from "./role-agent-loop.js";
+import { RoleAgentLoopError, RoleAgentHostStop, isCompletedRoleAgentFailure, validateRoleAudit, type HostPlanningReadiness } from "./role-agent-loop.js";
 import { classifyReviewDisposition, dispositionAllowsHumanStop } from "./review-disposition.js";
 import {
   assetReuseSourceScenePosition,
@@ -407,6 +407,8 @@ export interface ProductionCreativeReviewConfirmationDraft {
   expectedCheckIdentity?: string;
   baseDraftVersionId?: string;
   durationAmendment?: DurationAmendment;
+  /** 采用确认携带要解除的那条暂停请求身份；缺失而标记存在时按冲突拒绝。 */
+  pauseRequestId?: string;
 }
 
 export type ProductionCreativeReviewCommandDraft = {
@@ -420,7 +422,7 @@ export type ProductionCreativeReviewCommandDraft = {
   /** C1（收尾包）：完整版本身份，随命令持久化供迟到隔离核对；缺省按 legacy 身份。 */
   baseDraftVersionId?: string;
 } & (
-  | { action: "confirm"; acknowledgeRepair?: true; acknowledgeIncomplete?: true; acknowledgeUnaudited?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string; durationAmendment?: DurationAmendment }
+  | { action: "confirm"; acknowledgeRepair?: true; acknowledgeIncomplete?: true; acknowledgeUnaudited?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string; durationAmendment?: DurationAmendment; pauseRequestId?: string }
   | { action: "update_duration"; durationAmendment: DurationAmendment }
   | { action: "audit_current" }
   | { action: "discuss" | "revise"; message: string; selection?: { kind: "document" | "scene"; ids: string[]; scenePositions: number[] } }
@@ -892,6 +894,42 @@ export interface ProductionNodeRetryOptions {
   resumeCompletedTextTask?: boolean;
   resumeCompletedTextTaskRequestId?: string;
   nativeAudioRecovery?: { expectedRunRevision: number; interventionId: string };
+  /** 恢复动作提交时看到的暂停意图身份；与磁盘标记不一致时拒绝继续。 */
+  pauseRequestId?: string;
+}
+
+/** 暂停意图的持久身份：v2 记录自带一次性 token；旧记录用原始字节的比较 hash，不迁移生产旧文件。 */
+export interface PauseRequestRecord {
+  pauseRequestId: string;
+  requestedAt?: string;
+  runRevision?: number;
+  scopeNodeId?: string;
+  legacy?: boolean;
+}
+
+/** 暂停意图仍在（身份缺失/不一致）时恢复动作不得继续；调用方引导刷新后重试。 */
+export class PauseRequestConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PauseRequestConflictError";
+  }
+}
+
+interface PersistedPauseRequestV2 {
+  version: 2;
+  pauseRequestId: string;
+  requestedAt: string;
+  runRevision: number;
+  scopeNodeId?: string;
+}
+
+type ProductionRunCheckpoint = (
+  run: WorkflowRun<ProductionBrief>,
+  continuation?: { expectedPauseRequestId: string | undefined },
+) => Promise<void>;
+
+function newPauseRequestToken(): string {
+  return createHash("sha256").update(`${randomUUID()}${randomUUID()}`).digest("hex");
 }
 
 /** 只重做当前原声准备，不使已批准的素材失效，也不放行普通试听停点。 */
@@ -1087,7 +1125,7 @@ export class ProductionPipeline {
       providers: registry,
       clock: this.clock,
       idFactory: (prefix) => prefix === "run" ? runId : this.idFactory(prefix),
-      shouldPause: () => this.consumePauseRequest(runId),
+      shouldPause: () => this.pauseRequested(runId),
       checkpoint: async (run) => {
         const productionRun = run as WorkflowRun<ProductionBrief>;
         if (!created) {
@@ -1119,12 +1157,16 @@ export class ProductionPipeline {
     await firstCheckpoint;
     const completionWithLeaseRelease = completion.then(
       async (run) => {
-        if (run.status !== "paused") await rm(this.pauseRequestPath(runId), { force: true });
+        // 暂停意图是持久状态：只有执行完整终局且暂停从未在边界生效时才条件清除；
+        // failed/needs_human/paused 一律保留标记，交给显式恢复动作按身份解除。
+        if (run.status === "succeeded" || run.status === "rejected") {
+          await this.releaseSettledPauseRequest(runId);
+        }
         await this.releaseExecutionLease(executionLease);
         return run;
       },
       async (error: unknown) => {
-        await rm(this.pauseRequestPath(runId), { force: true });
+        // 执行异常（run 未必终局）时保留暂停意图：恢复路径会重新读取它。
         await this.releaseExecutionLease(executionLease);
         throw error;
       },
@@ -1257,7 +1299,8 @@ export class ProductionPipeline {
           + safeCount(isObjectRecord(checkpoint.phaseAttempts) ? checkpoint.phaseAttempts.audit : 0) > 0)) result.issues.push(`${source}:missing_request_identity`);
       }
     }
-    for (const receipt of await readCreativeDiscussionExecutions(this.runsRoot, runId)) {
+    for (const receipt of await readCreativeDiscussionExecutions(this.runsRoot, runId,
+      (issue) => result.issues.push(`creative-planning:discussion:${issue}`))) {
       result.facts.push(projectRequestExecution({ nodeId: "creative-planning", requestId: receipt.requestId,
         operationId: receipt.workflowOperationRequestId, purpose: "discussion", state: receipt.state,
         trace: receipt.trace, evidenceSource: `discussion:${receipt.commandId}` }));
@@ -1342,11 +1385,34 @@ export class ProductionPipeline {
     if (!["running", "awaiting_spend_approval", "approval_invalidated"].includes(run.status)) {
       throw new Error(`Run '${runId}' cannot be paused from status '${run.status}'.`);
     }
-    await writeFile(this.pauseRequestPath(runId), `${JSON.stringify({ requestedAt: this.clock() })}\n`, "utf8");
+    const record: PersistedPauseRequestV2 = {
+      version: 2,
+      pauseRequestId: newPauseRequestToken(),
+      requestedAt: this.clock(),
+      runRevision: run.revision,
+      ...(run.nodeRuns.find((node) => node.status === "running")?.nodeId
+        ? { scopeNodeId: run.nodeRuns.find((node) => node.status === "running")!.nodeId }
+        : {}),
+    };
+    await this.withPauseControlLock(runId, async () => {
+      // 取锁前的快照可能已过期：等锁期间 run 一旦进入新的操作轮次（重试/恢复/批准等
+      // 显式动作都会递增 revision），本次暂停针对的执行已被取代，必须拒绝写入，不能把
+      // 旧轮次的暂停标记压到后一次操作上。普通节点推进不递增 revision，同轮暂停不受影响。
+      const locked = await this.store.load<ProductionBrief>(runId);
+      if (locked.revision !== run.revision) {
+        throw new PauseRequestConflictError(`这条制作的执行已进入新的操作轮次（revision ${run.revision} -> ${locked.revision}），当时的暂停请求已失效；请刷新页面后重新暂停。`);
+      }
+      await writeTextAtomically(this.pauseRequestPath(runId), `${JSON.stringify(record)}\n`);
+    });
     const latest = await this.store.load<ProductionBrief>(runId);
-    if (!["running", "awaiting_spend_approval", "approval_invalidated"].includes(latest.status)) {
-      throw new Error(`Run '${runId}' can no longer be paused.`);
+    if (latest.status === "succeeded" || latest.status === "rejected") {
+      // 写入与终局交错：该暂停对本次执行已不可能生效。只条件撤销自己刚写的 token，
+      // 不能删掉任何更新的请求，也不能用失败响应掩盖已经写入的事实。
+      await this.revokeOwnPauseRequest(runId, record.pauseRequestId);
+      throw new Error(`Run '${runId}' settled as '${latest.status}' before the pause took effect.`);
     }
+    // 其余状态（running/停点/failed/paused/stale）下暂停意图已持久生效：如实受理，
+    // 由显式恢复动作在执行租约内按身份条件解除。
   }
 
   async clearPauseRequest(runId: string): Promise<void> {
@@ -1362,6 +1428,183 @@ export class ProductionPipeline {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
       throw error;
     }
+  }
+
+  async readPauseRequest(runId: string): Promise<PauseRequestRecord | undefined> {
+    return this.parsePauseRequestBytes(runId, await this.readPauseRequestBytes(runId));
+  }
+
+  private async readPauseRequestBytes(runId: string): Promise<Buffer | undefined> {
+    try {
+      return await readFile(this.pauseRequestPath(runId));
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) return undefined;
+      throw error;
+    }
+  }
+
+  private async parsePauseRequestBytes(runId: string, bytes: Buffer | undefined): Promise<PauseRequestRecord | undefined> {
+    if (!bytes) return undefined;
+    let value: unknown;
+    try {
+      value = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      value = undefined;
+    }
+    if (!isObjectRecord(value)) {
+      // 不可读不视为无暂停：宁可让恢复动作失败，也不能静默绕过用户的暂停意图。
+      throw new Error(`Run '${runId}' has an unreadable pause request; refusing to treat it as absent.`);
+    }
+    if (typeof value.pauseRequestId === "string" && value.pauseRequestId.length > 0) {
+      return {
+        pauseRequestId: value.pauseRequestId,
+        ...(typeof value.requestedAt === "string" ? { requestedAt: value.requestedAt } : {}),
+        ...(typeof value.runRevision === "number" ? { runRevision: value.runRevision } : {}),
+        ...(typeof value.scopeNodeId === "string" ? { scopeNodeId: value.scopeNodeId } : {}),
+      };
+    }
+    return {
+      // 旧格式无 token：用原始字节算仅用于比较的 hash，保持与 v2 一致的身份语义。
+      pauseRequestId: createHash("sha256").update(bytes).digest("hex"),
+      legacy: true,
+      ...(typeof value.requestedAt === "string" ? { requestedAt: value.requestedAt } : {}),
+    };
+  }
+
+  /**
+   * 暂停控制数据的短临界区：保护标记与恢复动作的首次 revision 保存，不等待模型或通知。
+   * 与长期 execution lease 分离（requestPause 不持有执行租约），锁丢失/超时必须拒绝变更。
+   */
+  private async withPauseControlLock<T>(runId: string, action: () => Promise<T>): Promise<T> {
+    const target = this.pauseRequestPath(runId);
+    await mkdir(path.dirname(target), { recursive: true });
+    let release: (() => Promise<void>) | undefined;
+    for (let attempts = 0; !release; attempts += 1) {
+      try {
+        release = await lockFile(target, {
+          realpath: false,
+          lockfilePath: this.pauseControlLockPath(runId),
+          stale: 30_000,
+          update: 1_000,
+          retries: 0,
+        });
+      } catch (error) {
+        // 短临界区排队等待（与旁白预留同一策略）；陈旧 30s 后可重新获取。
+        if (hasCode(error, "ELOCKED") && attempts < 600) {
+          await new Promise((resolve) => { setTimeout(resolve, 20); });
+          continue;
+        }
+        throw error;
+      }
+    }
+    try {
+      return await action();
+    } finally {
+      await release();
+    }
+  }
+
+  private pauseControlLockPath(runId: string): string {
+    return `${this.pauseRequestPath(runId)}.lock`;
+  }
+
+  /** 只撤销自己刚写的暂停 token；标记缺失或已被替换时不动磁盘。 */
+  private async revokeOwnPauseRequest(runId: string, pauseRequestId: string): Promise<void> {
+    await this.withPauseControlLock(runId, async () => {
+      const current = await this.parsePauseRequestBytes(runId, await this.readPauseRequestBytes(runId));
+      if (current?.pauseRequestId === pauseRequestId) {
+        await rm(this.pauseRequestPath(runId), { force: true });
+      }
+    });
+  }
+
+  /**
+   * 暂停身份校验、首次 revision 保存与解除必须共用短锁，包括尚无标记的情况。
+   * 先保存合法的原停点快照，再删除标记，最后保存恢复状态；这些磁盘操作都早于 provider。
+   * 中间快照保留原成果和停点，存储恢复、陈旧锁过期后可再次显式继续。
+   * 无标记也保留这次小 JSON 写，避免首次 save 已写入却报错时留下无执行者的 running。
+   */
+  private async persistPauseContinuation(
+    run: WorkflowRun<ProductionBrief>,
+    expectedRevision: number,
+    lease: ExecutionLeaseHandle,
+    expectedPauseRequestId: string | undefined,
+  ): Promise<void> {
+    const runId = run.id;
+    await this.withPauseControlLock(runId, async () => {
+      await this.assertExecutionLease(lease);
+      const bytes = await this.readPauseRequestBytes(runId);
+      const current = await this.parsePauseRequestBytes(runId, bytes);
+      if (current && (expectedPauseRequestId === undefined || expectedPauseRequestId !== current.pauseRequestId)) {
+        throw new PauseRequestConflictError(
+          current.legacy
+            ? "这条制作仍保留着暂停请求（历史格式）；请刷新页面获取最新暂停状态后再继续。"
+            : "这条制作已出现新的暂停请求，请刷新页面确认最新状态后再继续。",
+        );
+      }
+      // 读取最新同 revision 快照，保留已受理的人工确认回执，不能用 dispatcher 旧快照回滚它。
+      const stopped = await this.store.load<ProductionBrief>(runId);
+      if (stopped.revision !== expectedRevision) {
+        throw new StaleRunRevisionError(runId, expectedRevision, stopped.revision);
+      }
+      stopped.revision = run.revision;
+      await this.store.save(stopped, expectedRevision);
+      // 删除失败时原停点与原标记仍有效；这里绝不保存一个没有执行者的 running。
+      if (current) await rm(this.pauseRequestPath(runId));
+      try {
+        await this.assertExecutionLease(lease);
+        await this.store.checkpoint(run);
+      } catch (error) {
+        const recoveryErrors: unknown[] = [];
+        // 同一短锁内没有更新的 token；先恢复暂停，再恢复停点。即使磁盘再次失败，
+        // 错误也不能伪装为成功或丢掉原始异常，更不会进入 provider。
+        if (bytes) {
+          try { await writeTextAtomically(this.pauseRequestPath(runId), bytes.toString("utf8")); }
+          catch (restoreError) { recoveryErrors.push(restoreError); }
+        }
+        try { await this.store.checkpoint(stopped); }
+        catch (restoreError) { recoveryErrors.push(restoreError); }
+        if (recoveryErrors.length) {
+          throw new AggregateError([error, ...recoveryErrors], "恢复落盘失败，原停点恢复也未完成；请先检查存储状态，不会启动新任务。", { cause: error });
+        }
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * 恢复动作专用的 checkpoint 包装：首个 checkpoint（此时 runner 的权威校验与内存转换
+   * 均已通过、provider 尚未执行）把暂停身份传入同锁持久化；后续 checkpoint 直通。
+   * 校验被拒或身份不一致时错误沿 runner 的
+   * checkpoint 抛出，run 不落盘、provider 不启动。只允许接到携带暂停身份的显式恢复动作，
+   * 不得用于普通执行路径——那会把所有节点边界都变成自动清暂停。
+   */
+  private checkpointWithPauseRelease(
+    expectedPauseRequestId: string | undefined,
+    checkpoint: ProductionRunCheckpoint,
+  ): (run: WorkflowRun<ProductionBrief>) => Promise<void> {
+    let pauseReleased = false;
+    return async (run) => {
+      if (!pauseReleased) {
+        await checkpoint(run, { expectedPauseRequestId });
+        pauseReleased = true;
+        return;
+      }
+      await checkpoint(run);
+    };
+  }
+
+  /**
+   * 执行完整终局（succeeded/rejected）且暂停从未在边界生效时，条件清除不再适用的标记。
+   * failed/needs_human/paused 等可继续状态一律保留，由显式恢复动作条件解除。
+   */
+  private async releaseSettledPauseRequest(runId: string): Promise<void> {
+    if (!(await this.readPauseRequest(runId))) return;
+    await this.withPauseControlLock(runId, async () => {
+      if (await this.readPauseRequestBytes(runId)) {
+        await rm(this.pauseRequestPath(runId), { force: true });
+      }
+    });
   }
 
   async withRunMaintenanceLease<T>(runIds: string[], action: () => Promise<T>): Promise<T> {
@@ -1833,7 +2076,7 @@ export class ProductionPipeline {
         await this.options.reviewContinuationFailpoints?.afterAccepted?.();
       }
       let decisionCheckpointObserved = false;
-      const decisionCheckpoint = async (run: WorkflowRun<ProductionBrief>) => {
+      const decisionCheckpoint: ProductionRunCheckpoint = async (run, continuation) => {
         const operation = commandId ? run.reviewContinuationOperations?.find(item => item.commandId === commandId) : undefined;
         if (operation && run.decisions.some(item => item.commandId === commandId)) {
           const resultStop = run.nodeRuns.find(node => node.status === "needs_human" && node.intervention);
@@ -1844,7 +2087,8 @@ export class ProductionPipeline {
               if (resultStop.intervention.evidenceId) operation.resultEvidenceId = resultStop.intervention.evidenceId;
             }
           }
-          await checkpoint(run);
+          await checkpoint(run, continuation);
+          continuation = undefined;
           if (!decisionCheckpointObserved) {
             decisionCheckpointObserved = true;
             await this.options.reviewContinuationFailpoints?.afterDecisionCheckpoint?.();
@@ -1854,14 +2098,22 @@ export class ProductionPipeline {
             operation.finishedAt ??= this.clock();
           }
         }
-        await checkpoint(run);
+        await checkpoint(run, continuation);
       };
+      // 明确「采用并继续」的批准才条件解除保留的暂停意图；拒绝/修改停在原处，意图保留。
+      // needs_human + 暂停标记的合同：恢复工作台/编辑/查询不清标记，只有这里按身份合并解除。
+      // 解除放在首个 checkpoint 内（runner.resume 的恢复请求/干预校验之后）：校验被拒或
+      // 身份不一致时不消费意图、不启动执行也不落盘；decisionCheckpoint 内部的多次落盘由
+      // 一次性包装保证只解除一次。
+      const resumeCheckpoint = decision.action === "approve"
+        ? this.checkpointWithPauseRelease(decision.pauseRequestId, decisionCheckpoint)
+        : decisionCheckpoint;
       const runner = new WorkflowRunner({
         providers: registry,
         clock: this.clock,
         idFactory: this.idFactory,
-        checkpoint: (run) => decisionCheckpoint(run as WorkflowRun<ProductionBrief>),
-        shouldPause: () => this.consumePauseRequest(runId),
+        checkpoint: (run) => resumeCheckpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.pauseRequested(runId),
       });
       const definition = this.createWorkflow(brief);
       const approvingLocalRelayout = decision.action === "approve"
@@ -2029,7 +2281,7 @@ export class ProductionPipeline {
           clock: this.clock,
           idFactory: this.idFactory,
           checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
-          shouldPause: () => this.consumePauseRequest(runId),
+          shouldPause: () => this.pauseRequested(runId),
         });
         const result = await runner.continueWaitingNode(
           this.createWorkflow(brief, { creativeReviewResume: resume }),
@@ -2297,12 +2549,18 @@ export class ProductionPipeline {
               : draft.action === "return_to_stage"
                 ? { action: "return_to_stage", ...common, targetStage: draft.targetStage, acknowledgeImpact: true }
                 : (() => { throw new Error("Creative review action is invalid."); })();
+      // 明确「采用当前稿」的确认才条件解除保留的暂停意图；讨论/修改/返回/改时长都停在
+      // 原处，意图保留。解除放在首个 checkpoint 内（continueWaitingNode 的等待状态校验
+      // 之后）：身份缺失或不匹配时在命令边界拒绝，不消费当前停点也不落盘。
+      const confirmCheckpoint = draft.action === "confirm"
+        ? this.checkpointWithPauseRelease(draft.pauseRequestId, checkpoint)
+        : checkpoint;
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
         clock: this.clock,
         idFactory: this.idFactory,
-        checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
-        shouldPause: () => this.consumePauseRequest(runId),
+        checkpoint: (run) => confirmCheckpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.pauseRequested(runId),
       });
       const acceptedAt = this.clock();
       const acceptedRun: WorkflowRun<ProductionBrief> = {
@@ -6172,7 +6430,7 @@ export class ProductionPipeline {
         clock: this.clock,
         idFactory: this.idFactory,
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
-        shouldPause: () => this.consumePauseRequest(runId),
+        shouldPause: () => this.pauseRequested(runId),
       });
       return runner.authorizeSpend(this.createWorkflow(brief), withExecutableBrief(previous, brief), authorization);
     }, listener);
@@ -6241,7 +6499,7 @@ export class ProductionPipeline {
         clock: this.clock,
         idFactory: this.idFactory,
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
-        shouldPause: () => this.consumePauseRequest(runId),
+        shouldPause: () => this.pauseRequested(runId),
       });
       const stale = runner.applyExecutionConfigurationOverride(
         this.createWorkflow(nextBrief),
@@ -6274,7 +6532,7 @@ export class ProductionPipeline {
         clock: this.clock,
         idFactory: this.idFactory,
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
-        shouldPause: () => this.consumePauseRequest(runId),
+        shouldPause: () => this.pauseRequested(runId),
       });
       return runner.resumeStale(this.createWorkflow(brief), withExecutableBrief(previous, brief));
     }, listener);
@@ -6763,7 +7021,7 @@ export class ProductionPipeline {
         clock: this.clock,
         idFactory: this.idFactory,
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
-        shouldPause: () => this.consumePauseRequest(runId),
+        shouldPause: () => this.pauseRequested(runId),
       });
       let result = await runner.retryFailedNode(
         this.createWorkflow(brief),
@@ -6830,7 +7088,7 @@ export class ProductionPipeline {
           const requoteRunner = new WorkflowRunner({
             providers: this.createRegistry(brief), clock: this.clock, idFactory: this.idFactory,
             checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
-            shouldPause: () => this.consumePauseRequest(runId),
+            shouldPause: () => this.pauseRequested(runId),
           });
           result = await requoteRunner.retryFailedNode(
             this.createWorkflow(brief),
@@ -7482,7 +7740,7 @@ export class ProductionPipeline {
     const failedReview = observed.nodeRuns.find(node => node.nodeId === nodeId);
     if (nodeId === "asset-source-review" && observed.status === "failed" && failedReview?.status === "failed"
       && failedReview.errorCode === "SOURCE_RANGE_TOO_SHORT" && !failedReview.outcomeUncertain) {
-      await this.runPersistedTransition(runId, async previous => {
+      await this.runPersistedTransition(runId, async (previous, checkpoint) => {
         if (previous.revision !== observed.revision) throw new StaleRunRevisionError(runId, observed.revision, previous.revision);
         const brief = parsePersistedBrief(previous.initialInput);
         const assets = previous.nodeRuns.find(node => node.nodeId === "assets");
@@ -7497,12 +7755,16 @@ export class ProductionPipeline {
           && item.kind === "asset_plan" && item.uri === planPath && item.producer?.nodeId === "assets");
         if (!plan) throw new Error("当前素材方案缺少可核对的产物记录，不能重新匹配。");
         await verifyStoredArtifactWithinRoot(this.store.runDirectory(runId), plan);
+        // 显式恢复动作：先用同一正式编辑合同完成校验（expectedVersionId/停点 guards），
+        // 再在同一执行租约+短锁内保存新 revision 并条件解除暂停；校验被拒时意图保留。
         const runner = new WorkflowRunner({ providers: this.createRegistry(brief), clock: this.clock, idFactory: this.idFactory });
         // 使用同一正式编辑/失效合同，只重开素材及其后代；规划版本和已有文件保持不动。
-        return runner.applyNodeInputOverride(this.createWorkflow(brief), withExecutableBrief(previous, brief), {
+        const rematched = await runner.applyNodeInputOverride(this.createWorkflow(brief), withExecutableBrief(previous, brief), {
           nodeId: "assets", actor: "creator", expectedVersionId: inputVersion!.id, allowTerminalEdit: true,
           input: { ...assetInput, reuseAssetPlanArtifactId: plan.id },
         });
+        await checkpoint(rematched, { expectedPauseRequestId: options?.pauseRequestId });
+        return rematched;
       });
       return this.dispatchResumeStale(runId, listener);
     }
@@ -7555,14 +7817,22 @@ export class ProductionPipeline {
         operation.status = "running";
         delete operation.finishedAt;
       }
+      // 重试是一次显式恢复动作：暂停意图必须在同一执行租约内按身份条件解除，否则执行
+      // 会在第一个节点边界再次停下。解除放在首个 checkpoint 内（retryFailedNode 的
+      // not-failed/failedNode/uncertain 权威校验之后）：校验被拒或身份缺失/不一致时
+      // 不消费意图、不启动执行也不落盘。
+      const resumeCheckpoint = this.checkpointWithPauseRelease(options?.pauseRequestId, checkpoint);
+      // 已证明是同一排序操作的暂停接续才沿用原 operation 身份；普通失败重试不自动获得该许可。
+      const pausedRankingContinuation = failedNode?.errorCode === "ASSET_RANK_PAUSED"
+        && failedNode.status === "failed" && !failedNode.outcomeUncertain
+        && typeof failedNode.operationRequestId === "string";
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief, voiceManifestRecovery),
         clock: this.clock,
         idFactory: this.idFactory,
-        checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
-        shouldPause: () => this.consumePauseRequest(runId),
+        checkpoint: (run) => resumeCheckpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.pauseRequested(runId),
       });
-      if (retryStock) await rm(this.pauseRequestPath(runId), { force: true });
       const result = await runner.retryFailedNode(
         this.createWorkflow(brief, {
           ...(creativeCommand ? { creativeReviewResume: creativeCommand.resume } : {}),
@@ -7576,15 +7846,18 @@ export class ProductionPipeline {
         }),
         withExecutableBrief(recoveryBase, brief),
         nodeId,
-        retryStock
-          ? { allowStockPreparationRetry: true }
-          : retryNativeAudio
-          ? { allowLocalPreparationRetry: true }
-          : retryRejectedReview
-          ? { allowRejectedNode: true }
-          : previous.nodeRuns.find((node) => node.nodeId === nodeId)?.intervention?.kind === "source_review_retry"
-            ? { allowSourceReviewRetry: true }
-            : undefined,
+        {
+          ...(retryStock
+            ? { allowStockPreparationRetry: true }
+            : retryNativeAudio
+            ? { allowLocalPreparationRetry: true }
+            : retryRejectedReview
+            ? { allowRejectedNode: true }
+            : previous.nodeRuns.find((node) => node.nodeId === nodeId)?.intervention?.kind === "source_review_retry"
+              ? { allowSourceReviewRetry: true }
+              : {}),
+          ...(pausedRankingContinuation ? { allowPausedOperationContinuation: true } : {}),
+        },
       );
       // 取回原请求与重放原命令必须收口同一条回执，不能只恢复稿件却永久显示命令失败。
       // 仅消费本次失败节点携带的命令身份，不扫改其他历史失败记录。
@@ -7692,7 +7965,7 @@ export class ProductionPipeline {
         clock: this.clock,
         idFactory: this.idFactory,
         checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
-        shouldPause: () => this.consumePauseRequest(runId),
+        shouldPause: () => this.pauseRequested(runId),
       });
       return runner.rerunFromNode(
         this.createWorkflow(brief),
@@ -7702,24 +7975,27 @@ export class ProductionPipeline {
     }, listener);
   }
 
-  async resumePaused(runId: string): Promise<WorkflowRun<ProductionBrief>> {
-    const dispatched = await this.dispatchResumePaused(runId);
+  async resumePaused(runId: string, options?: { pauseRequestId?: string }): Promise<WorkflowRun<ProductionBrief>> {
+    const dispatched = await this.dispatchResumePaused(runId, undefined, options);
     return dispatched.completion;
   }
 
   async dispatchResumePaused(
     runId: string,
     listener?: ProductionRunListener,
+    options?: { pauseRequestId?: string },
   ): Promise<DispatchedProductionRun> {
-    await rm(this.pauseRequestPath(runId), { force: true });
     return this.dispatchPersistedTransition(runId, async (previous, checkpoint) => {
       const brief = parsePersistedBrief(previous.initialInput);
+      // 已取得执行租约；暂停解除放在首个 checkpoint 内（resumePaused 的 is-not-paused 等
+      // 权威校验之后）：租约冲突、状态/身份不一致时不消费意图、不启动执行也不落盘。
+      const resumeCheckpoint = this.checkpointWithPauseRelease(options?.pauseRequestId, checkpoint);
       const runner = new WorkflowRunner({
         providers: this.createRegistry(brief),
         clock: this.clock,
         idFactory: this.idFactory,
-        checkpoint: (run) => checkpoint(run as WorkflowRun<ProductionBrief>),
-        shouldPause: () => this.consumePauseRequest(runId),
+        checkpoint: (run) => resumeCheckpoint(run as WorkflowRun<ProductionBrief>),
+        shouldPause: () => this.pauseRequested(runId),
       });
       return runner.resumePaused(this.createWorkflow(brief), withExecutableBrief(previous, brief));
     }, listener);
@@ -7729,7 +8005,8 @@ export class ProductionPipeline {
     runId: string,
     transition: (
       previous: WorkflowRun<ProductionBrief>,
-      checkpoint: (run: WorkflowRun<ProductionBrief>) => Promise<void>,
+      checkpoint: ProductionRunCheckpoint,
+      lease: ExecutionLeaseHandle,
     ) => Promise<WorkflowRun<ProductionBrief>>,
     allowedDocumentCommandId?: string,
     allowUnchanged = false,
@@ -7741,16 +8018,17 @@ export class ProductionPipeline {
       await assertNoPendingDocumentCommands(this.store.runDirectory(runId), allowedDocumentCommandId);
       await assertNoPendingVoiceReconciliation(this.store.runDirectory(runId));
       let persisted = false;
-      const checkpoint = async (run: WorkflowRun<ProductionBrief>) => {
+      const checkpoint: ProductionRunCheckpoint = async (run, continuation) => {
         await this.assertExecutionLease(lease);
         if (!persisted) {
-          await this.store.save(run, previous.revision);
+          if (continuation) await this.persistPauseContinuation(run, previous.revision, lease, continuation.expectedPauseRequestId);
+          else await this.store.save(run, previous.revision);
           persisted = true;
           return;
         }
         await this.store.checkpoint(run);
       };
-      const result = await transition(previous, checkpoint);
+      const result = await transition(previous, checkpoint, lease);
       if (!persisted && (allowedDocumentCommandId || allowUnchanged) && result === previous) return previous;
       if (!persisted) {
         await this.assertExecutionLease(lease);
@@ -7766,8 +8044,9 @@ export class ProductionPipeline {
     runId: string,
     transition: (
       previous: WorkflowRun<ProductionBrief>,
-      checkpoint: (run: WorkflowRun<ProductionBrief>) => Promise<void>,
+      checkpoint: ProductionRunCheckpoint,
       notifyPersisted: (run: WorkflowRun<ProductionBrief>) => Promise<void>,
+      lease: ExecutionLeaseHandle,
     ) => Promise<WorkflowRun<ProductionBrief> | PersistedTransitionReplay>,
     listener?: ProductionRunListener,
     allowedDurationCommandId?: string,
@@ -7791,11 +8070,12 @@ export class ProductionPipeline {
       resolveCheckpoint = resolve;
       rejectCheckpoint = reject;
     });
-    const checkpoint = async (run: WorkflowRun<ProductionBrief>) => {
+    const checkpoint: ProductionRunCheckpoint = async (run, continuation) => {
       await this.assertExecutionLease(lease);
       await this.captureOptionalReviewDiagnostics(run);
       if (!persisted) {
-        await this.store.save(run, previous.revision);
+        if (continuation) await this.persistPauseContinuation(run, previous.revision, lease, continuation.expectedPauseRequestId);
+        else await this.store.save(run, previous.revision);
         persisted = true;
       } else {
         await this.store.checkpoint(run);
@@ -7809,7 +8089,7 @@ export class ProductionPipeline {
       await notifyListener(listener, run);
       resolveCheckpoint();
     };
-    const completion = transition(previous, checkpoint, notifyPersisted).then(
+    const completion = transition(previous, checkpoint, notifyPersisted, lease).then(
       async (result) => {
         if (isPersistedTransitionReplay(result)) {
           resolveCheckpoint();
@@ -7841,18 +8121,6 @@ export class ProductionPipeline {
 
   private pauseRequestPath(runId: string): string {
     return path.join(this.runsRoot, runId, ".pause-request.json");
-  }
-
-  private async consumePauseRequest(runId: string): Promise<boolean> {
-    const requestPath = this.pauseRequestPath(runId);
-    try {
-      await stat(requestPath);
-      await rm(requestPath, { force: true });
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      throw error;
-    }
   }
 
   private createRegistry(
@@ -12477,7 +12745,7 @@ function creativePlanningNode(
             `${inputDigest}:${stage}:${outcome.gate.draft.sha256}`,
           ));
           await recordExecutionTraces();
-          const summary = await summarizeJointPlanningExecution(runsRoot, context.runId, context.operationRequestId);
+          const { summary, summaryPending } = await summarizeJointPlanningExecutionTolerant(runsRoot, context.runId, context.operationRequestId);
           const blockingIssues = outcome.state.issues.map((issue) => ({
             target: issue.target,
             scenePositions: [...issue.scenePositions],
@@ -12544,7 +12812,14 @@ function creativePlanningNode(
               transport: "unix_socket",
               billing: "subscription",
               configurationSource: "system_default",
-              parameters: { accountingSource: "execution_summary", planningRoute: libraryRoute ? "library" : "fixed", waitingStage: stage, ...(summary ?? {}) },
+              // 摘要数字先铺开，归属与停点等保留字段在spread后统一赋值；读取失败只标待核。
+              parameters: {
+                ...(summary ?? {}),
+                ...(summaryPending ? { executionSummaryPending: true } : {}),
+                planningRoute: libraryRoute ? "library" : "fixed",
+                waitingStage: stage,
+                accountingSource: "execution_summary",
+              },
               estimatedCostCny: 0,
               ...(context.operationRequestId ? { requestId: context.operationRequestId } : {}),
             },
@@ -12581,6 +12856,10 @@ function creativePlanningNode(
         executablePlanArtifact = finalState.executablePlan ?? outcome.executablePlan;
         await recordExecutionTraces();
       } catch (error) {
+        // 候选核验的宿主暂停是持久意图触发的停机，不是模型失败：在规划边界识别真正来自
+        // 排序调用链的 RoleAgentHostStop('paused')（直接或 RoleAgentLoopError.sourceError 链），
+        // 投影为独立机器码 ASSET_RANK_PAUSED；deadline/payload_limit/普通错误不伪装成主动暂停。
+        const rankingPause = rankingPauseHostStopFrom(error);
         if (error instanceof RoleAgentLoopError) {
           const trace = error.lastTrace;
           const failed = await failedAgentLoopNodeResult({
@@ -12600,16 +12879,30 @@ function creativePlanningNode(
             },
             providerLabel: "joint-v1 创作规划",
           });
-          const summary = await summarizeJointPlanningExecution(runsRoot, context.runId, context.operationRequestId);
-          if (summary && failed.receipt) {
-            failed.receipt.parameters = { ...(failed.receipt.parameters ?? {}), ...summary };
+          const { summary, summaryPending } = await summarizeJointPlanningExecutionTolerant(runsRoot, context.runId, context.operationRequestId);
+          if (failed.receipt) {
+            // 整节点汇总的身份是本次真实workflow operation；lastTrace的供应方/模型来源
+            // 保留在回执上，归属与路由等保留字段在spread后统一赋值。
+            failed.receipt.parameters = {
+              ...(failed.receipt.parameters ?? {}),
+              ...(summary ?? {}),
+              ...(summaryPending ? { executionSummaryPending: true } : {}),
+              planningRoute: libraryRoute ? "library" : "fixed",
+              accountingSource: "execution_summary",
+            };
+            if (context.operationRequestId) failed.receipt.requestId = context.operationRequestId;
+          }
+          if (rankingPause) {
+            failed.error = rankingPause.message;
+            failed.errorCode = "ASSET_RANK_PAUSED";
           }
           return failed;
         }
-        const summary = await summarizeJointPlanningExecution(runsRoot, context.runId, context.operationRequestId);
+        const { summary, summaryPending } = await summarizeJointPlanningExecutionTolerant(runsRoot, context.runId, context.operationRequestId);
         return {
           status: "failed",
-          error: error instanceof Error ? error.message : String(error),
+          error: rankingPause ? rankingPause.message : error instanceof Error ? error.message : String(error),
+          ...(rankingPause ? { errorCode: "ASSET_RANK_PAUSED" as const } : {}),
           receipt: {
             providerId: currentBrief.providers.script,
             providerLabel: "joint-v1 创作规划",
@@ -12618,11 +12911,15 @@ function creativePlanningNode(
             billing: "subscription",
             configurationSource: "system_default",
             parameters: {
-              planningRoute: libraryRoute ? "library" : "fixed",
               ...(summary ?? {}),
+              ...(summaryPending ? { executionSummaryPending: true } : {}),
+              planningRoute: libraryRoute ? "library" : "fixed",
+              accountingSource: "execution_summary",
             },
             estimatedCostCny: 0,
-            requestId: context.nextId("creative-planning-failure"),
+            // 汇总身份是真实的workflow operation请求；缺失时保留无身份，
+            // 不再造 nextId('creative-planning-failure') 冒充模型请求。
+            ...(context.operationRequestId ? { requestId: context.operationRequestId } : {}),
           },
         };
       } finally {
@@ -12646,7 +12943,7 @@ function creativePlanningNode(
         : [];
       // 规划节点 receipt 的实际模型：只用真实执行 trace；来源缺失时显式 unknown，
       // 不用首选配置或角色默认模型冒充实际执行来源。
-      const planningExecutionSummary = await summarizeJointPlanningExecution(
+      const { summary: planningExecutionSummary, summaryPending: planningSummaryPending } = await summarizeJointPlanningExecutionTolerant(
         runsRoot,
         context.runId,
         context.operationRequestId,
@@ -12659,9 +12956,10 @@ function creativePlanningNode(
         billing: "subscription" as const,
         configurationSource: "system_default" as const,
         parameters: {
-          accountingSource: "execution_summary",
-          planningRoute: libraryRoute ? "library" : "fixed",
           ...(planningExecutionSummary ?? {}),
+          ...(planningSummaryPending ? { executionSummaryPending: true } : {}),
+          planningRoute: libraryRoute ? "library" : "fixed",
+          accountingSource: "execution_summary",
         },
         estimatedCostCny: 0,
         ...(context.operationRequestId ? { requestId: context.operationRequestId } : {}),
@@ -14403,7 +14701,7 @@ function validateScreenwriterInput(value: unknown): ScreenwriterAgentInput {
   const brief: ScreenwriterAgentInput["brief"] = {
     title: requiredOutputString(rawBrief, "title"),
     angle: requiredOutputString(rawBrief, "angle"),
-    audience: requiredOutputString(rawBrief, "audience"),
+    audience: optionalChoiceOutputString(rawBrief, "audience"),
     nicheSlug: requiredOutputString(rawBrief, "nicheSlug"),
     platform: requiredOutputString(rawBrief, "platform"),
     ...duration,
@@ -14986,7 +15284,7 @@ function validatePublishPackageInput(value: unknown): {
     brief: {
       title: requiredOutputString(brief, "title"),
       angle: requiredOutputString(brief, "angle"),
-      audience: requiredOutputString(brief, "audience"),
+      audience: optionalChoiceOutputString(brief, "audience"),
       nicheSlug: requiredOutputString(brief, "nicheSlug"),
       platform: requiredOutputString(brief, "platform"),
     },
@@ -15007,6 +15305,17 @@ function requiredOutputString(value: unknown, field: string): string {
   }
   const item = (value as Record<string, unknown>)[field];
   if (typeof item !== "string" || !item.trim()) throw new Error(`${field} must be a non-empty string.`);
+  return item.trim();
+}
+
+// 用户可选字段（如目标受众）：空白规范化为空串表示「未指定」，非法类型仍拒绝；
+// 其余必填字段继续走 requiredOutputString 的非空边界。
+function optionalChoiceOutputString(value: unknown, field: string): string {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${field} container must be an object.`);
+  }
+  const item = (value as Record<string, unknown>)[field];
+  if (typeof item !== "string") throw new Error(`${field} must be a string.`);
   return item.trim();
 }
 
@@ -16458,14 +16767,39 @@ async function mayStartAssetSupplement(runsRoot: string, runId: string): Promise
   }
 }
 
+/**
+ * 规划边界识别候选排序调用链上的宿主暂停：直接抛出的 RoleAgentHostStop('paused')，
+ * 或被 runRoleAgentLoop 包装进 RoleAgentLoopError.sourceError 链的同源错误。
+ * 只认 reason === "paused"；deadline/payload_limit/普通错误不得伪装成主动暂停。
+ */
+function rankingPauseHostStopFrom(error: unknown): RoleAgentHostStop | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== undefined && current !== null; depth += 1) {
+    if (current instanceof RoleAgentHostStop) {
+      return current.reason === "paused" ? current : undefined;
+    }
+    if (current instanceof RoleAgentLoopError) {
+      current = current.sourceError;
+      continue;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
 export async function summarizeJointPlanningExecution(
   runsRoot: string,
   runId: string,
   workflowOperationRequestId: string | undefined,
+  onIssue?: (issue: string) => void,
 ): Promise<Record<string, number> | undefined> {
   if (!workflowOperationRequestId) return undefined;
-  const checkpoints = await readNodeAccountingCheckpoints(runsRoot, runId, "creative-planning");
-  const discussionReceipts = await readCreativeDiscussionExecutions(runsRoot, runId);
+  // 读取不完整（损坏/无法核对身份的记录）通过旁路上报：数字照常返回已核实子集，
+  // 由调用方标记 pending，不允许静默吞掉后把不完整汇总当精确值。
+  const checkpoints = await readNodeAccountingCheckpoints(runsRoot, runId, "creative-planning",
+    onIssue ? (issue) => onIssue(`checkpoint:${issue}`) : undefined);
+  const discussionReceipts = await readCreativeDiscussionExecutions(runsRoot, runId,
+    onIssue ? (issue) => onIssue(`discussion:${issue}`) : undefined);
   // 同一 checkpoint 会跨操作恢复；先按物理 requestId 的首次归属全局去重，再分本次/历史。
   // 没有 requestOwners 的旧记录不能证明属于本次，宁可列入历史也不虚增当前调用。
   const current = summarizePlanningCheckpoints(
@@ -16497,6 +16831,25 @@ export async function summarizeJointPlanningExecution(
       previousLoopValidationMs: previous.loopValidationMs,
     } : {}),
   };
+}
+
+/** 汇总读取失败不能盖住原节点错误，更不能当0次：返回待核标记而非数字汇总。 */
+async function summarizeJointPlanningExecutionTolerant(
+  runsRoot: string,
+  runId: string,
+  workflowOperationRequestId: string | undefined,
+): Promise<{ summary?: Record<string, number>; summaryPending?: true }> {
+  // reader 内部吞掉的损坏记录也要浮出为 pending：数字仍返回已核实子集，完整性不声称。
+  const issues: string[] = [];
+  try {
+    const summary = await summarizeJointPlanningExecution(runsRoot, runId, workflowOperationRequestId, (issue) => issues.push(issue));
+    return {
+      ...(summary !== undefined ? { summary } : {}),
+      ...(issues.length ? { summaryPending: true } : {}),
+    };
+  } catch {
+    return { summaryPending: true };
+  }
 }
 
 /** 维护只核已有请求身份；不取回结果、不重发，也不结清 unknown 的费用。 */
@@ -16641,12 +16994,61 @@ async function readNodeAccountingCheckpoints(runsRoot: string, runId: string, no
       || value.recoveryOwner.runId !== runId
       || value.recoveryOwner.nodeId !== nodeId
       || strictIdentity && `${String(value.storageKey ?? value.key)}.json` !== name) {
-      if (strictIdentity) onIssue?.(`${name}:owner_unverifiable`);
+      // 费用投影（非 strict）同样要知道这份记录不可信：静默跳过会让不完整汇总冒充精确值。
+      onIssue?.(`${name}:owner_unverifiable`);
+      continue;
+    }
+    // strictIdentity 调用方是维护恢复，保留其原有专属校验；这里的新增规则只约束记账读取。
+    if (!strictIdentity && !accountingCheckpointShapeValid(value)) {
+      onIssue?.(`${name}:accounting_structure_invalid`);
       continue;
     }
     checkpoints.push(value);
   }
   return checkpoints;
+}
+
+/** 只校验记账消费的字段；旧记录缺值可待核，不把执行合同当作费用读取门槛。 */
+function accountingCheckpointShapeValid(value: Record<string, unknown>, depth = 0): boolean {
+  const count = (item: unknown) => typeof item === "number" && Number.isSafeInteger(item) && item >= 0;
+  const duration = (item: unknown) => typeof item === "number" && Number.isFinite(item) && item >= 0;
+  const optionalMap = (item: unknown, valid: (entry: unknown) => boolean) => item === undefined
+    || isObjectRecord(item) && Object.values(item).every(valid);
+  const traceValid = (item: unknown) => item === undefined || item === null || isObjectRecord(item)
+    && (item.modelAttemptCount === undefined || item.modelAttemptCount === null || count(item.modelAttemptCount));
+  const iterationValid = (item: unknown) => isObjectRecord(item)
+    && count(item.iteration) && Number(item.iteration) > 0
+    && traceValid(item.candidateTrace) && traceValid(item.auditTrace);
+  for (const field of ["attemptedRequestIds", "retriedRequestIds", "structuredRepairRequestIds"]) {
+    const ids = value[field];
+    if (ids !== undefined && (!Array.isArray(ids) || !ids.every(id => typeof id === "string" && id.trim().length > 0))) return false;
+  }
+  for (const field of ["phaseAttempts", "unacceptedPhaseAttempts"]) {
+    const phases = value[field];
+    if (phases !== undefined && (!isObjectRecord(phases)
+      || ["produce", "audit"].some(phase => phases[phase] !== undefined && !count(phases[phase])))) return false;
+  }
+  if (!optionalMap(value.phaseDurationsMs, duration)
+    || value.validationMs !== undefined && !duration(value.validationMs)
+    || value.structuredRepairModelCallCount !== undefined && !count(value.structuredRepairModelCallCount)
+    || !optionalMap(value.requestOwners, item => typeof item === "string" && item.trim().length > 0)
+    || !optionalMap(value.operationGenerations, count)
+    || !optionalMap(value.requestPhases, item => isObjectRecord(item)
+      && (item.phase === "produce" || item.phase === "audit") && count(item.iteration) && Number(item.iteration) > 0)
+    || !optionalMap(value.requestExecutions, item => isObjectRecord(item)
+      && ["completed", "completed_failure", "not_accepted", "unknown"].includes(String(item.state)) && traceValid(item.trace))) return false;
+  if (value.completed !== undefined && (!Array.isArray(value.completed) || !value.completed.every(iterationValid))
+    || value.pendingCandidate !== undefined && !iterationValid(value.pendingCandidate)) return false;
+  if (value.pendingOperation !== undefined) {
+    if (!isObjectRecord(value.pendingOperation) || !isObjectRecord(value.pendingOperation.operation)) return false;
+    const operation = value.pendingOperation.operation;
+    if (operation.requestId !== undefined && (typeof operation.requestId !== "string" || !operation.requestId.trim())) return false;
+  }
+  const batch = value.assetRankBatch;
+  if (isObjectRecord(batch) && batch.version === "asset-rank-batches-v1" && batch.phase === "supplement") {
+    if (!isObjectRecord(batch.primaryCheckpoint) || depth >= 8 || !accountingCheckpointShapeValid(batch.primaryCheckpoint, depth + 1)) return false;
+  }
+  return true;
 }
 
 function summarizePlanningCheckpoints(
@@ -17023,6 +17425,7 @@ async function recordCreativeDiscussionExecution(
 async function readCreativeDiscussionExecutions(
   runsRoot: string,
   runId: string,
+  onIssue?: (issue: string) => void,
 ): Promise<CreativeDiscussionExecutionRecord[]> {
   const directory = path.join(runsRoot, runId, "nodes", "creative-planning", "discussion-executions");
   let names: string[];
@@ -17041,10 +17444,15 @@ async function readCreativeDiscussionExecutions(
         || typeof value.commandId !== "string"
         || typeof value.requestId !== "string"
         || !["treatment", "script", "director"].includes(String(value.stage))
-        || !["completed", "completed_failure", "accepted_unknown", "not_accepted"].includes(String(value.state))) continue;
+        || !["completed", "completed_failure", "accepted_unknown", "not_accepted"].includes(String(value.state))) {
+        onIssue?.(`${name}:invalid_structure`);
+        continue;
+      }
       records.push(value as CreativeDiscussionExecutionRecord);
     } catch {
-      // 损坏的可观测性记录不能改变生产状态；忽略它，避免编造调用数。
+      // 损坏的可观测性记录不能改变生产状态；忽略它避免编造调用数，但必须上报
+      // 读取不完整，不能让剩下的子集冒充完整汇总。
+      onIssue?.(`${name}:unreadable`);
     }
   }
   return records;

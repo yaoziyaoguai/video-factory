@@ -630,6 +630,78 @@ describe("formal text-task recovery through Studio and joint-v1 pipeline", () =>
     });
   }
 
+  it("retrieves a paused accepted original success only with the matching pause identity", async (t) => {
+    // R2-02：暂停中的已受理原任务，取回必须携带用户所见的暂停身份才能条件解除并接续；
+    // 缺身份/错身份一律拒绝且标记保留，查询本身不得解除暂停。
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-r2-retrieve-pause-"));
+    const broker = await brokerFixture(workspaceRoot);
+    const counter = { calls: 0 };
+    const worker = new RecoveryWorker();
+    let subject!: ProductionPipeline;
+    let runId = "";
+    let pauseWritten = false;
+    const studios: ProductionStudio[] = [];
+    try {
+      const interrupting = new TrackingClient({
+        socketPath: broker.socketPath, timeoutMs: 30_000, maxAttempts: 1, pollIntervalMs: 10,
+        sleep: async () => {
+          await broker.executor.waitForFirstStarted();
+          if (!pauseWritten) {
+            pauseWritten = true;
+            await subject.requestPause(runId);
+          }
+          t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 30_001 });
+        },
+      });
+      subject = pipeline(workspaceRoot, interrupting, counter, undefined, worker);
+      const dispatch = await subject.dispatch(brief());
+      runId = dispatch.runId;
+      const failed = await dispatch.completion;
+      t.mock.timers.reset();
+      assert.equal(failed.status, "failed");
+      assert.equal(await subject.pauseRequested(runId), true, "失败后暂停标记保留");
+      const marker = (await subject.readPauseRequest(runId))!;
+      const originalRequestId = interrupting.submissions[0]!.requestId;
+
+      broker.executor.completeFirst("completed_success");
+      const resumedClient = new TrackingClient({ socketPath: broker.socketPath, timeoutMs: 3_000, maxAttempts: 1, pollIntervalMs: 10 });
+      const resumed = pipeline(workspaceRoot, resumedClient, counter, undefined, worker);
+      const studio = new ProductionStudio({ workspaceRoot, pipeline: resumed,
+        archiveStore: { list: async () => ({}) } as never, listProviders: async () => [] });
+      studios.push(studio);
+      let queried = await studio.queryOriginalTextTask(runId);
+      for (let attempt = 0; attempt < 100 && queried.taskRecovery?.taskState !== "completed_success"; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        queried = await studio.queryOriginalTextTask(runId);
+      }
+      assert.equal(queried.taskRecovery?.taskState, "completed_success");
+      assert.equal(await resumed.pauseRequested(runId), true, "查询不解除暂停");
+
+      await assert.rejects(() => studio.retrieveOriginalTextTask(runId), /暂停状态已变化/);
+      await assert.rejects(() => studio.retrieveOriginalTextTask(runId, "0".repeat(64)), /暂停状态已变化/);
+      assert.equal(await resumed.pauseRequested(runId), true, "被拒取回不消费标记");
+      assert.deepEqual(resumedClient.submissions, [], "被拒取回不提交新模型任务");
+
+      const recovered = await studio.retrieveOriginalTextTask(runId, marker.pauseRequestId);
+      assert.notEqual(recovered.status, "failed");
+      await studio.activeWork();
+      // 取回消费原 script-draft 结果（只观察原请求），恢复后的角色循环按正式合同补一次审计；
+      // 不得重新提交创作任务。
+      assert.equal(resumedClient.submissions.filter(entry => entry.kind === "script-draft").length, 0);
+      assert.equal(resumedClient.submissions.filter(entry => entry.kind === "role-audit").length, 1);
+      assert.deepEqual(resumedClient.observations, [originalRequestId]);
+      assert.equal(await resumed.pauseRequested(runId), false, "匹配身份取回按身份解除暂停标记");
+      const stopped = await waitForStopped(resumed, runId);
+      assert.equal(stopped.status, "needs_human", JSON.stringify(stopped.nodeRuns.map(n => ({ nodeId: n.nodeId, status: n.status, error: n.error }))));
+    } finally {
+      broker.executor.completeFirst("completed_success");
+      t.mock.timers.reset();
+      await Promise.all(studios.map(studio => studio.activeWork()));
+      await broker.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("settles a first-produce terminal failure through the real socket and releases the run", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-f05-"));
     const broker = await brokerFixture(workspaceRoot);

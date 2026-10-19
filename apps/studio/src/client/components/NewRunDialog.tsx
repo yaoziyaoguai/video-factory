@@ -752,7 +752,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         presentationMode,
         title: requiredString(data, "title"),
         angle: requiredString(data, "angle"),
-        audience: requiredString(data, "audience"),
+        // 受众是用户可选字段：留空按「未指定」提交（空串），只 trim 不补默认值。
+        audience: optionalTrimmedString(data, "audience"),
         nicheSlug: initialValues?.nicheSlug ?? topicSlug(requiredString(data, "title")),
         ...duration,
         platform,
@@ -957,7 +958,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 </label>
                 <label className="field">
                   <span>目标受众</span>
-                  <input name="audience" required defaultValue={initialValues?.audience ?? ""} placeholder="你想让谁看到这条视频" onChange={(event) => setBriefSummaryValues((current) => ({ ...current, audience: event.target.value }))} />
+                  <input name="audience" defaultValue={initialValues?.audience ?? ""} placeholder="可选，想给谁看" onChange={(event) => setBriefSummaryValues((current) => ({ ...current, audience: event.target.value }))} />
                 </label>
                 <label className="field field-compact">
                   <span>目标平台</span>
@@ -1500,7 +1501,7 @@ function CaseCreativeSummary({ title, audience, angle, visualProof, strategy }: 
     <header><strong>已填写的创作目标</strong><small>只展示你已填写的内容；留空项继续在上方补充</small></header>
     <dl>
       <div><dt>视频标题</dt><dd>{title.trim() || "待填写"}</dd></div>
-      <div><dt>目标受众</dt><dd>{audience.trim() || "待填写"}</dd></div>
+      <div><dt>目标受众</dt><dd>{audience.trim() || "未指定"}</dd></div>
       <div><dt>内容角度{truncated ? "（节选）" : ""}</dt><dd>{excerpt || "待填写"}</dd></div>
       {truncated ? <div><dt>内容角度全文</dt><dd><details className="case-angle-full"><summary>展开原文</summary><p>{angle.trim()}</p></details></dd></div> : null}
       {visualProof.trim() || strategy.trim() ? <div><dt>画面依据</dt><dd>{[visualProof.trim(), strategy.trim()].filter(Boolean).join("；")}</dd></div> : null}
@@ -1933,9 +1934,15 @@ function reworkFindingTargetStepLabels(grouped: GroupedReworkFindings): string[]
 
 function requiredString(data: FormData, key: string): string {
   const value = data.get(key);
-  const labels: Record<string, string> = { title: "视频标题", angle: "内容角度", audience: "目标受众", platform: "目标平台" };
+  const labels: Record<string, string> = { title: "视频标题", angle: "内容角度", platform: "目标平台" };
   if (typeof value !== "string" || !value.trim()) throw new Error(`${labels[key] ?? key}不能为空。`);
   return value.trim();
+}
+
+// 可选文本字段：仅去除首尾空白；留空返回空串表示「未指定」。
+function optionalTrimmedString(data: FormData, key: string): string {
+  const value = data.get(key);
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function topicSlug(title: string): string {

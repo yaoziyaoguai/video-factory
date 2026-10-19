@@ -247,10 +247,14 @@ function validatePublishCopyInput(input: PublishCopyInput): void {
   if (typeof input.platform !== "string" || !input.platform.trim()) {
     throw new Error("Publish copy platform must be a non-empty string.");
   }
-  for (const key of ["title", "angle", "audience", "nicheSlug"] as const) {
+  for (const key of ["title", "angle", "nicheSlug"] as const) {
     if (typeof input.brief[key] !== "string" || !input.brief[key].trim()) {
       throw new Error(`Publish copy brief.${key} must be a non-empty string.`);
     }
+  }
+  // 目标受众是用户可选字段：空串表示「未指定」，仅校验类型，不设非空下限。
+  if (typeof input.brief.audience !== "string") {
+    throw new Error("Publish copy brief.audience must be a string.");
   }
   if (!Array.isArray(input.narrations)
     || input.narrations.length < 1

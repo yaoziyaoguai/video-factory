@@ -43,7 +43,7 @@ export function RunCostDetailPanel({ detail, providers }: { detail: StudioCostRu
       <details className="cost-call-details">
         <summary><span><strong>调用与费用明细</strong><small>报价和授权不等于实际消费；结果不明确的调用要核对是否扣费，按配置费率登记的金额仍需与服务商账单核对。</small></span><b>{lines.length} 项</b></summary>
         <div className="cost-line-list">
-          {lines.length ? lines.map((line) => <article key={line.id}><span><strong>{line.role ?? runNodeLabel(line.nodeId)}</strong><small>{line.nodeId === "assets" ? "实际生成：" : ""}{capabilityLabel(line, providers)}</small></span><span><small>{line.callCount > 1 ? `${line.callCount} 份记录 · ` : ""}{costLineLabel(line)}</small><b>{line.billing === "unverified" ? "金额未核实" : line.actualPending ? `待确认是否扣费${line.estimatedCostCny === null ? " · 估价未记录" : ` · 预估 ¥${line.estimatedCostCny.toFixed(2)}`}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
+          {lines.length ? lines.map((line) => <article key={line.id}><span><strong>{line.role ?? runNodeLabel(line.nodeId)}</strong><small>{line.nodeId === "assets" ? "实际生成：" : ""}{capabilityLabel(line, providers)}</small></span><span><small>{line.callCount > 1 ? `${line.callCount} 份记录 · ` : ""}{costLineLabel(line)}</small><b>{line.billing === "unverified" && line.actualCostCny === undefined ? "金额未核实" : line.actualPending ? `待确认是否扣费${line.estimatedCostCny === null ? " · 估价未记录" : ` · 预估 ¥${line.estimatedCostCny.toFixed(2)}`}` : `¥${(line.actualCostCny ?? 0).toFixed(2)}`}</b></span></article>) : <p>本片尚未产生可计量调用。</p>}
         </div>
       </details>
     </section>
@@ -55,7 +55,7 @@ type GroupedCostLine = StudioCostRunDetail["lines"][number] & { callCount: numbe
 function groupCostLines(lines: StudioCostRunDetail["lines"]): GroupedCostLine[] {
   const grouped = new Map<string, GroupedCostLine>();
   for (const line of lines) {
-    const key = [line.role ?? line.nodeId, line.providerId, line.modelId, line.billing, line.status, line.actualPending, line.actualCostSource, line.legacyUnattributed, line.accountingSource].join("|");
+    const key = [line.role ?? line.nodeId, line.providerId, line.modelId, line.billing, line.status, line.actualPending, line.actualCostSource, line.legacyUnattributed, line.accountingSource, line.requestId ?? "", line.callCountPending].join("|");
     const current = grouped.get(key);
     if (!current) {
       grouped.set(key, { ...line, callCount: 1 });
@@ -81,9 +81,9 @@ function CostMetrics({ totals, compact = false }: { totals: StudioCostTotals; co
     <article><Gauge aria-hidden="true" size={17} /><span>历史累计报价授权额<small>不是实际消费，也不是当前可用额度。</small></span><strong>¥{totals.authorizedCostCny.toFixed(2)}</strong></article>
     <article><Clock3 aria-hidden="true" size={17} /><span>待确认是否扣费</span><strong>{totals.actualPendingCount}</strong></article>
     <article><RotateCcw aria-hidden="true" size={17} /><span>付费服务失败</span><strong>{totals.failedMeteredCalls}</strong></article>
-    {/* T04：计数口径按物理执行归并。旧快照未归属时不假装精确，也不把快照相加成总数。 */}
+    {/* T04：计数口径按物理执行归并。待核回执（未归属旧累计或缺少逐请求证据）不假装精确，也不把快照相加成总数。 */}
     <article><ReceiptText aria-hidden="true" size={17} /><span>已核实模型调用<small>{totals.countExact !== true
-      ? `另有 ${totals.legacyUnattributedReceipts ?? 0} 份旧累计回执尚未归属，或缺少请求尝试证据；总调用数未完全核定。`
+      ? `另有 ${totals.legacyUnattributedReceipts ?? 0} 份回执计数待核（未归属旧累计或缺少逐请求证据）；总调用数未完全核定。`
       : "按物理请求归并模型尝试，内部修复不重复计数。"}</small></span>
       <strong>{totals.verifiedModelAttempts ?? 0}{(totals.legacyUnattributedReceipts ?? 0) > 0 ? `＋${totals.legacyUnattributedReceipts} 份待核` : ""}</strong></article>
     <article><ReceiptText aria-hidden="true" size={17} /><span>已核实模型请求<small>一个请求可能包含多次模型尝试；不是素材采购次数。</small></span><strong>{totals.verifiedBrokerRequests ?? 0}</strong></article>
@@ -128,7 +128,20 @@ export function actualCostLabel(totals: Pick<StudioCostTotals, "actualPendingCou
 
 function costLineLabel(line: StudioCostRunDetail["lines"][number]): string {
   if (line.legacyUnattributed) return "历史累计记录尚未归属，不并入已核实调用总数";
-  if (line.billing === "unverified") return `${line.modelCallCount ?? 0} 次已确认模型调用${line.callCountPending ? "（计数尚未完整）" : ""} · 收费方式与金额待核账`;
+  // postdogfood B1 三态：已归属操作但次数待核——回执登记的次数缺逐请求证据，不算已确认；
+  // 未登记数字时显示纯待核文案，不把未知伪装成 0 次。
+  if (line.callCountPending && line.requestId && line.accountingSource !== "document_operation") {
+    const registered = line.subscriptionCallCount ?? line.modelCallCount;
+    return registered !== undefined
+      ? `${registered} 次按操作登记 · 次数待核（尚缺逐次请求证据）`
+      : "次数待核（未登记计数，尚缺逐次请求证据）";
+  }
+  if (line.billing === "unverified") {
+    if (line.callCountPending) {
+      return `${line.modelCallCount ? `${line.modelCallCount} 次` : "次数"}待核（尚缺逐次请求证据） · 收费方式与金额待核账`;
+    }
+    return `${line.modelCallCount ?? 0} 次已确认模型调用 · 收费方式与金额待核账`;
+  }
   if ((line.meteredFailedAttemptCount ?? 0) > 0) {
     return line.meteredAttemptCount === undefined
       ? `${line.meteredFailedAttemptCount} 次计费调用明确失败`

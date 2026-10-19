@@ -220,6 +220,21 @@ describe("ProductionPipeline codex screenwriter", () => {
     assert.deepEqual(assetInput.findings?.map(({ findingId }) => findingId), ["vf_222222222222222222222222"]);
   });
 
+  // C 批次：目标受众是用户可选字段。空串表示「未指定」，必须原样穿过
+  // parseBrief → screenwriterBrief → validateScreenwriterInput 进入模型合同，
+  // 不能被改成默认受众，也不能因非空校验把整条制作路线挡在门外。
+  it("carries an unspecified audience through the script input contract without inventing one", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-audience-"));
+    const { agent, inputs } = stubAgent(() => scriptDraft);
+    const pipeline = new ProductionPipeline({ workspaceRoot, worker: new RecordingWorker(), screenwriterAgent: agent });
+
+    const waiting = await pipeline.start({ ...brief, audience: "  " });
+
+    assert.equal(inputs.length, 1);
+    assert.equal(inputs[0]?.brief.audience, "", "空受众按未指定传递，不自动补默认受众");
+    assert.equal(waiting.nodeRuns.find((node) => node.nodeId === "script")?.status, "succeeded");
+  });
+
   it("reuses a verified unchanged source script before calling the screenwriter", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-screenwriter-reuse-"));
     const { agent, inputs } = stubAgent(() => scriptDraft);

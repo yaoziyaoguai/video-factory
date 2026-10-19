@@ -203,12 +203,18 @@ def build_hashtags(title: str, niche_slug: str = "general") -> list:
 
 
 def build_niche_narrations(title: str, angle: str, audience: str, niche_slug: str) -> list:
+    # 受众是用户可选字段：未指定时改用不点名受众的句式，不编造默认受众。
+    audience_line = (
+        f"给 {audience} 的一句话：能好好沟通就沟通，不能沟通就别用自责换连接。"
+        if audience.strip()
+        else "给你的一句话：能好好沟通就沟通，不能沟通就别用自责换连接。"
+    )
     templates = {
         "emotion-stories": [
             f"很多关系不是突然变淡的。今天这条讲「{title}」，先别急着对号入座。",
             f"最容易被忽略的是这个场景：你还在解释，对方其实已经不想理解了。角度是：{angle}。",
             "真正的反转是，沉默有时不是冷漠，而是一个人终于决定把力气留给自己。",
-            f"给 {audience} 的一句话：能好好沟通就沟通，不能沟通就别用自责换连接。",
+            audience_line,
             "你有没有遇到过那种突然不想解释的瞬间？评论区说一句，我做下一条。",
         ],
         "history-curiosities": [

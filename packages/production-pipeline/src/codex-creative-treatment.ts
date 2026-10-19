@@ -244,7 +244,8 @@ function treatmentPayload(input: CreativeTreatmentAgentInput): Record<string, un
     brief: {
       title: brief.title,
       angle: brief.angle,
-      audience: brief.audience,
+      // 空白与空串统一为「未指定」；有值保留 trim 后原意（校验已保证 string）。
+      audience: brief.audience.trim(),
       nicheSlug: brief.nicheSlug,
       platform: brief.platform,
       ...durationIntentFor(brief),
@@ -268,8 +269,12 @@ function treatmentPayload(input: CreativeTreatmentAgentInput): Record<string, un
 
 function validateTreatmentInput(input: CreativeTreatmentAgentInput): string[] {
   const { brief } = input;
-  for (const field of ["title", "angle", "audience", "nicheSlug", "platform"] as const) {
+  for (const field of ["title", "angle", "nicheSlug", "platform"] as const) {
     if (!brief[field].trim()) throw new Error(`Creative treatment brief.${field} must be a non-empty string.`);
+  }
+  // 目标受众是用户可选字段：空串/空白表示「未指定」，仅要求 string，不设非空下限。
+  if (typeof brief.audience !== "string") {
+    throw new Error("Creative treatment brief.audience must be a string.");
   }
   if (brief.durationPolicy === "content-led-v1") {
     validateContentLedDurationIntent(brief);
@@ -326,7 +331,7 @@ function treatmentAuditContext(
       ...(brief.budgetIntentionCny !== undefined ? { budgetIntentionCny: brief.budgetIntentionCny } : {}),
       title: brief.title,
       angle: brief.angle,
-      audience: brief.audience,
+      audience: brief.audience.trim(),
       platform: brief.platform,
       ...durationIntentFor(brief),
       ...(brief.editorial ? { editorial: brief.editorial } : {}),

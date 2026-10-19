@@ -192,3 +192,57 @@ it("shows per-scene failures while downloading and resumes a stopped stock task 
   expect(retry).toHaveBeenCalledWith("assets");
   expect(props.onDecision).not.toHaveBeenCalled();
 });
+
+// D 批次：每镜一行短原因——停止镜给出「已停止 · 图库 · 具体原因」；
+it("explains a stopped scene with its last safe failure reason in one line", () => {
+  const run = runFixture();
+  run.status = "needs_human";
+  run.currentNodeId = "assets";
+  run.activeIntervention = { id: "stock-stop", nodeId: "assets", kind: "stock_preparation_retry",
+    reason: "网络未完成，已保留第一镜", options: ["reject"], createdAt: run.startedAt };
+  run.nodes[1] = { ...run.nodes[1]!, status: "needs_human", stockProgress: { phase: "download", totalScenes: 2, updatedAt: run.startedAt,
+    scenes: [
+      { scenePosition: 1, state: "completed", provider: "pexels", candidateCount: 0, failedAttempts: 0 },
+      { scenePosition: 2, state: "stopped", provider: "pexels", candidateCount: 0, failedAttempts: 1,
+        lastFailure: { provider: "pexels", stage: "connect", reason: "timeout" } },
+    ] } };
+  render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} />);
+  const stoppedLine = screen.getByText(/镜头 2/).closest("li");
+  expect(stoppedLine).toHaveTextContent("镜头 2 · 已停止 · Pexels 图库 · 连接超时");
+  // 停止镜不说“尝试其他候选”；仍在获取的镜才保留该措辞。
+  expect(screen.queryByText(/尝试其他候选/)).toBeNull();
+});
+
+// R2-06/R2-07（round2）：全部来源失败的镜显示「获取失败」而非冒充完成；
+// 超时按真实阶段显示（body→正文读取超时），未知阶段统一「请求超时」。
+it("labels an all-sources-failed scene as failed with its stage-specific timeout reason", () => {
+  const run = runFixture();
+  run.status = "running";
+  delete run.activeIntervention;
+  run.currentNodeId = "assets";
+  run.nodes[1] = { ...run.nodes[1]!, status: "running", stockProgress: { phase: "search", totalScenes: 2, updatedAt: run.startedAt,
+    scenes: [
+      { scenePosition: 1, state: "completed", provider: "pexels", candidateCount: 3, failedAttempts: 0 },
+      { scenePosition: 2, state: "failed", provider: "pixabay", candidateCount: 0, failedAttempts: 2,
+        lastFailure: { provider: "pixabay", stage: "body", reason: "timeout" } },
+    ] } };
+  render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} />);
+  const failedLine = screen.getByText(/镜头 2/).closest("li");
+  expect(failedLine).toHaveTextContent("镜头 2 · 获取失败 · Pixabay 图库 · 正文读取超时");
+  expect(failedLine).not.toHaveTextContent("已完成");
+  expect(failedLine).not.toHaveTextContent("连接超时");
+});
+
+it("shows a generic request-timeout label when the failing stage is unknown", () => {
+  const run = runFixture();
+  run.status = "running";
+  delete run.activeIntervention;
+  run.currentNodeId = "assets";
+  run.nodes[1] = { ...run.nodes[1]!, status: "running", stockProgress: { phase: "download", totalScenes: 1, updatedAt: run.startedAt,
+    scenes: [{ scenePosition: 1, state: "retrying", provider: "pexels", candidateCount: 0, failedAttempts: 1,
+      lastFailure: { provider: "pexels", stage: "unknown", reason: "timeout" } }] } };
+  render(<RunWorkbench run={run} decisionPending={false} onDecision={vi.fn()} />);
+  const retryingLine = screen.getByText(/镜头 1/).closest("li");
+  expect(retryingLine).toHaveTextContent("镜头 1 · 获取失败，尝试其他候选 · Pexels 图库 · 请求超时");
+  expect(retryingLine).not.toHaveTextContent("连接超时");
+});

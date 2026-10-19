@@ -195,6 +195,8 @@ export interface HumanDecisionDraft {
   contentAuditStatus?: "passed" | "has_suggestions" | "not_audited";
   acceptUnauditedContent?: true;
   acceptContentSuggestions?: true;
+  /** 批准时随动作提交的暂停意图身份；与磁盘标记不一致时恢复动作拒绝继续（POST-02）。 */
+  pauseRequestId?: string;
 }
 
 export interface HumanDecision extends HumanDecisionDraft {

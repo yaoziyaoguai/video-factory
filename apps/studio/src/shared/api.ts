@@ -912,6 +912,8 @@ export interface StudioRunSummary {
     reason?: string;
   };
   nextAction?: "review" | "confirm_spend" | "regenerate";
+  /** A批：typed 机器码 ASSET_RANK_PAUSED 的列表投影；普通失败不带此标记。 */
+  rankPaused?: true;
   videoContentUrl?: string;
   archivedAt?: string;
   creationOrigin?: "trend" | "series" | "manual" | "case";
@@ -1055,6 +1057,11 @@ export interface StudioRunDetail extends StudioRunSummary {
   videoArtifactId?: string;
   publishPackageArtifactId?: string;
   pauseRequested?: boolean;
+  /**
+   * A批：持久暂停意图的服务端投影。恢复动作（继续/重试/批准/采用确认）必须原样提交
+   * pauseRequestId，页面不新增表单；缺失或过期的身份按冲突拒绝，不做无条件清标记。
+   */
+  pauseRecovery?: { pauseRequestId: string; legacy?: boolean; requestedAt?: string };
   reworkImpact?: StudioReworkImpactSummary;
   /** joint-v1 创作规划的真实子阶段（只读投影）；legacy run 无此字段。 */
   planningStages?: StudioPlanningStage[];
@@ -1107,6 +1114,8 @@ export interface StudioNode {
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  /** 机器可读失败码（如 A批的 ASSET_RANK_PAUSED）；普通失败可能缺省，不按文本猜测。 */
+  errorCode?: string;
   interrupted?: boolean;
   outcomeUncertain?: boolean;
   artifactIds: string[];
@@ -1134,7 +1143,9 @@ export interface StudioStockProgress {
   totalScenes: number;
   updatedAt: string;
   scenes: Array<{ scenePosition: number; state: "searching" | "downloading" | "retrying" | "completed" | "failed" | "stopped";
-    provider: string; candidateCount: number; failedAttempts: number }>;
+    provider: string; candidateCount: number; failedAttempts: number;
+    /** 最近一次失败的安全摘要（D 批次）：只含图库、阶段/原因枚举与整数状态码。 */
+    lastFailure?: { provider: string; stage: string; reason: string; httpStatus?: number } }>;
 }
 
 export interface StudioSpendAssessment {
@@ -1682,7 +1693,8 @@ type StudioCreativeReviewCommandBase = {
 
 export type StudioCreativeReviewCommandInput = StudioCreativeReviewCommandBase & (
   // 独立复核是"提议"而非"否决"：repair 时人仍可继续，但必须显式承担（与 return_to_stage 的 acknowledgeImpact 同模式）。
-  | { action: "confirm"; acknowledgeRepair?: boolean; acknowledgeIncomplete?: true; acknowledgeUnaudited?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string; durationAmendment?: DurationAmendment }
+  // A批：confirm 携带要解除的暂停身份；其余动作停在原处，不解除暂停。
+  | { action: "confirm"; acknowledgeRepair?: boolean; acknowledgeIncomplete?: true; acknowledgeUnaudited?: true; acceptQualityFallback?: true; expectedCheckIdentity?: string; durationAmendment?: DurationAmendment; pauseRequestId?: string }
   | { action: "update_duration"; durationAmendment: DurationAmendment }
   | { action: "audit_current" }
   | { action: "discuss" | "revise"; message: string; selection?: { kind: "document" | "scene"; ids: string[]; scenePositions: number[] } }
@@ -1727,7 +1739,7 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
           : input.action === "confirm"
             // 这两个字段曾经漏在白名单外，于是"看过意见，仍然确认"在 HTTP 入口就被拒，
             // 整条链在界面后面断掉、只在图级单测里看着是通的。
-            ? ["acknowledgeRepair", "acknowledgeIncomplete", "acknowledgeUnaudited", "acceptQualityFallback", "expectedCheckIdentity", "durationAmendment"]
+            ? ["acknowledgeRepair", "acknowledgeIncomplete", "acknowledgeUnaudited", "acceptQualityFallback", "expectedCheckIdentity", "durationAmendment", "pauseRequestId"]
         : [];
   const allowed = new Set([...commonFields, ...actionFields]);
   const unknown = Object.keys(input).find((key) => !allowed.has(key));
@@ -1816,6 +1828,11 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
     && (typeof expectedCheckIdentity !== "string" || !/^[a-f0-9]{64}$/.test(expectedCheckIdentity))) {
     throw new StudioInputError("复核意见编号格式不正确。");
   }
+  // A批：采用确认可携带要解除的暂停身份；必须是服务端投影的 64 位十六进制 token。
+  if (input.pauseRequestId !== undefined
+    && (typeof input.pauseRequestId !== "string" || !/^[0-9a-f]{64}$/.test(input.pauseRequestId))) {
+    throw new StudioInputError("暂停请求编号格式不正确，请刷新页面获取最新暂停状态。");
+  }
   // "仍然确认"必须说出它承担的是哪一条复核。说不出就不算"看过意见"：服务端只能拿当前
   // 记录去凑，人确认的就不是他看到的那条意见了。
   if ((input.acknowledgeRepair === true || input.acknowledgeIncomplete === true) && expectedCheckIdentity === undefined) {
@@ -1830,6 +1847,7 @@ export function parseStudioCreativeReviewCommandInput(value: unknown): StudioCre
     ...(input.acceptQualityFallback === true ? { acceptQualityFallback: true as const } : {}),
     ...(expectedCheckIdentity === undefined ? {} : { expectedCheckIdentity }),
     ...(durationAmendment ? { durationAmendment } : {}),
+    ...(typeof input.pauseRequestId === "string" ? { pauseRequestId: input.pauseRequestId } : {}),
   };
 }
 
@@ -2070,6 +2088,8 @@ export interface StudioCostLine {
   modelCallCount?: number;
   accountingSource?: "document_operation" | "execution_fact" | "execution_summary";
   executionKeys?: string[];
+  /** 节点级执行汇总缺逐请求证据（读取不完整或抛错）时由回执携带；只镜像既有 pending 状态，不新建账本语义。 */
+  executionSummaryPending?: true;
   callCountPending?: boolean;
   /** 产生这份回执的物理请求身份；旧回执可能没有。 */
   requestId?: string;
@@ -2364,6 +2384,8 @@ interface StudioDecisionInputBase {
   acceptContentSuggestions?: true;
   /** F04（§2.4）：成片可选审片续看停点的风险采用要求非空 commandId（幂等身份）。 */
   commandId?: string;
+  /** A批：批准动作要解除的那条暂停请求身份；有暂停标记时缺失按冲突拒绝，不做无条件清标记。 */
+  pauseRequestId?: string;
 }
 
 export type StudioDecisionInput = StudioDecisionInputBase & (
@@ -2874,12 +2896,20 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
     && (typeof input.commandId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.commandId))) {
     throw new StudioInputError("决定操作编号格式不正确。");
   }
+  // A批：只有批准动作可以携带要解除的暂停身份；调整/打回不解除暂停。
+  if (input.pauseRequestId !== undefined) {
+    if (input.action !== "approve") throw new StudioInputError("只有批准并继续时才能提交暂停请求编号。");
+    if (typeof input.pauseRequestId !== "string" || !/^[0-9a-f]{64}$/.test(input.pauseRequestId)) {
+      throw new StudioInputError("暂停请求编号格式不正确，请刷新页面获取最新暂停状态。");
+    }
+  }
   const parsed = {
     expectedRunRevision: Number(input.expectedRunRevision),
     interventionId,
     reviewEvidenceId,
     ...(typeof input.note === "string" && input.note.trim() ? { note: input.note.trim() } : {}),
     ...(typeof input.commandId === "string" ? { commandId: input.commandId } : {}),
+    ...(typeof input.pauseRequestId === "string" ? { pauseRequestId: input.pauseRequestId } : {}),
   };
   if (input.action === "request_changes") {
     if (input.reviewDispositions !== undefined) {
@@ -2897,6 +2927,22 @@ export function parseStudioDecisionInput(value: unknown): StudioDecisionInput {
     ...(input.acceptContentSuggestions === true ? { acceptContentSuggestions: true as const } : {}),
     ...(reviewDispositions ? { reviewDispositions } : {}),
   };
+}
+
+/**
+ * A批：/resume 的请求体。pauseRequestId 必须来自详情投影的暂停身份；真正 paused 且
+ * 无标记的旧记录可省略，存在暂停标记时缺失按冲突拒绝，不做无条件清标记。
+ */
+export function parseStudioPauseResumeInput(value: unknown): { pauseRequestId?: string } {
+  if (value === undefined || value === null) return {};
+  const input = requiredObject(value, "恢复请求");
+  const unknown = Object.keys(input).find((key) => key !== "pauseRequestId");
+  if (unknown) throw new StudioInputError(`恢复请求不支持字段“${unknown}”。`);
+  if (input.pauseRequestId === undefined) return {};
+  if (typeof input.pauseRequestId !== "string" || !/^[0-9a-f]{64}$/.test(input.pauseRequestId)) {
+    throw new StudioInputError("暂停请求编号格式不正确，请刷新页面获取最新暂停状态。");
+  }
+  return { pauseRequestId: input.pauseRequestId };
 }
 
 function parseReviewDispositions(
