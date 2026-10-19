@@ -5,7 +5,9 @@ import json
 import math
 from pathlib import Path
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, UnidentifiedImageError
+
+from .asset_transport import attach_failure_facts
 
 
 MAX_IMAGE_PIXELS = 80_000_000
@@ -31,7 +33,17 @@ def inspect_image_dimensions(path: Path) -> tuple[int, int]:
             image.verify()
         return size
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as error:
-        raise RuntimeError(f'图片校验失败：格式损坏、不支持或超过 {MAX_IMAGE_PIXELS} 像素上限') from error
+        # 解码器明确拒绝或格式/像素规则不满足才认定媒体无效；普通文件读写异常（含缺失、
+        # 权限和系统错误）只能确认发生在校验阶段，不能误报为图片损坏。保留原异常类别和文案。
+        if isinstance(error, TimeoutError):
+            reason = 'timeout'
+        elif isinstance(error, (UnidentifiedImageError, ValueError, SyntaxError, Image.DecompressionBombError)):
+            reason = 'invalid_media'
+        else:
+            reason = 'unknown'
+        raise attach_failure_facts(
+            RuntimeError(f'图片校验失败：格式损坏、不支持或超过 {MAX_IMAGE_PIXELS} 像素上限'),
+            'media', reason) from error
 
 
 def prepare_render_image(source: Path, target: Path, width: int, height: int) -> Path:

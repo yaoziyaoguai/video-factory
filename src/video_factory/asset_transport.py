@@ -21,13 +21,82 @@ UNSAFE_IPV6_NETWORKS = tuple(ipaddress.ip_network(value) for value in (
 
 
 class AssetNetworkError(URLError):
-    """仅携带阶段与错误类别，不泄漏带签名的 URL 或代理密码。"""
+    """仅携带阶段与错误类别，不泄漏带签名的 URL 或代理密码。
+
+    stage/reason 只允许安全枚举（dns/connect/tls/http/body/unknown 与
+    timeout/dns_failure/connection_failure/tls_failure/http_error/unknown）；
+    http_status 只允许整数状态码。不携带 URL、headers 或异常原文。
+    """
+
+    def __init__(self, message: str, *, stage: str = "unknown", reason: str = "unknown", http_status=None):
+        super().__init__(message)
+        self.stage = stage
+        self.failure_reason = reason
+        self.http_status = http_status if isinstance(http_status, int) and not isinstance(http_status, bool) else None
+
+
+# 与 stock_execution/Studio 白名单一致的安全枚举；跨边界只传这些，不传 URL/异常原文。
+ATTACHABLE_STAGE_VALUES = {"dns", "connect", "tls", "http", "body", "media", "operation", "unknown"}
+ATTACHABLE_REASON_VALUES = {
+    "timeout", "dns_failure", "connection_failure", "tls_failure", "http_error",
+    "incomplete", "too_large", "invalid_media", "unknown",
+}
+
+
+def attach_failure_facts(error: BaseException, stage: str, reason: str) -> BaseException:
+    """在实际边界给既有异常附加安全枚举事实；绝不改变异常类型或 raise 位置。
+
+    这是正文读取/媒体校验等 RuntimeError 传播链携带结构化阶段的唯一机制：
+    classify_network_failure 优先消费该属性，非法枚举被忽略。
+    """
+    if stage in ATTACHABLE_STAGE_VALUES and reason in ATTACHABLE_REASON_VALUES:
+        error.asset_failure_facts = (stage, reason)
+    return error
+
+
+def classify_network_failure(error: BaseException, stage_hint: str = "unknown"):
+    """从异常及其 cause 链映射安全分类；类型优先，不解析文本、不推断 VPN/欠费。
+
+    返回 (stage, reason, httpStatus)。遍历有界且防循环；无法判断时返回 unknown。
+    """
+    seen = set()
+    current = error
+    for _ in range(8):
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        facts = getattr(current, "asset_failure_facts", None)
+        if isinstance(facts, tuple) and len(facts) == 2 \
+                and facts[0] in ATTACHABLE_STAGE_VALUES and facts[1] in ATTACHABLE_REASON_VALUES:
+            # 实际边界显式标注的事实优先于类型推断；httpStatus 只信任 AssetNetworkError 自身。
+            return facts[0], facts[1], current.http_status if isinstance(current, AssetNetworkError) else None
+        if isinstance(current, AssetNetworkError):
+            return current.stage, current.failure_reason, current.http_status
+        if isinstance(current, HTTPError):
+            return "http", "http_error", current.code if isinstance(current.code, int) else None
+        if isinstance(current, ssl.SSLError):
+            return "tls", "tls_failure", None
+        if isinstance(current, socket.gaierror):
+            return "dns", "dns_failure", None
+        if isinstance(current, (ConnectionRefusedError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return stage_hint if stage_hint != "unknown" else "connect", "connection_failure", None
+        if isinstance(current, TimeoutError):
+            # 无阶段事实的裸超时不猜连接阶段：发生在哪一段（连接/正文/整体预算）未知。
+            return stage_hint if stage_hint != "unknown" else "unknown", "timeout", None
+        cause = current.__cause__ if isinstance(current.__cause__, BaseException) else None
+        if cause is None:
+            cause = current.__context__ if isinstance(current.__context__, BaseException) else None
+        if cause is None:
+            break
+        current = cause
+    return "unknown", "unknown", None
 
 
 def remaining(deadline: float) -> float:
     value = deadline - time.monotonic()
     if value <= 0:
-        raise AssetNetworkError("素材下载总时限已耗尽")
+        # 总时限耗尽恒为时间性失败；阶段由调用语境决定，不在这里猜。
+        raise attach_failure_facts(AssetNetworkError("素材下载总时限已耗尽", reason="timeout"), "unknown", "timeout")
     return value
 
 
@@ -45,9 +114,9 @@ def resolve_addresses(host: str, port: int, deadline: float):
     try:
         result = results.get(timeout=min(CONNECT_TIMEOUT, remaining(deadline)))
     except queue.Empty as error:
-        raise AssetNetworkError("DNS 解析超时") from error
+        raise AssetNetworkError("DNS 解析超时", stage="dns", reason="timeout") from error
     if isinstance(result, OSError):
-        raise AssetNetworkError("DNS 解析失败") from result
+        raise AssetNetworkError("DNS 解析失败", stage="dns", reason="dns_failure") from result
     return result
 
 
@@ -125,6 +194,8 @@ def open_pinned_asset_response(value: str, addresses: tuple[str, ...], headers: 
     last_error = None
     stage = "连接"
     for address in addresses:
+        # 每个 IP 从连接阶段重新起算：上一地址到达过的阶段不能泄漏到下一地址的分类。
+        stage_enum = "connect"
         connection = http.client.HTTPConnection(host, port)
         watchdog = None
         response = None
@@ -163,6 +234,7 @@ def open_pinned_asset_response(value: str, addresses: tuple[str, ...], headers: 
                 connection._tunnel()
             if parsed.scheme == "https":
                 stage = "TLS 握手"
+                stage_enum = "tls"
                 raw_socket = connection.sock
                 try:
                     connection.sock = ssl.create_default_context().wrap_socket(
@@ -175,6 +247,7 @@ def open_pinned_asset_response(value: str, addresses: tuple[str, ...], headers: 
                     raw_socket.close()
                     raise
             stage = "HTTP 响应"
+            stage_enum = "http"
             connection.sock.settimeout(remaining(deadline))
             origin_headers = {key: item for key, item in headers.items() if key.lower() not in {
                 "host", "authorization", "cookie", "proxy-authorization",
@@ -194,7 +267,11 @@ def open_pinned_asset_response(value: str, addresses: tuple[str, ...], headers: 
             if isinstance(error, ssl.SSLCertVerificationError):
                 break
     category = "超时" if isinstance(last_error, TimeoutError) else type(last_error).__name__
-    raise AssetNetworkError(f"{stage}失败（{category}，{'通过代理' if proxy else '直连'}）") from last_error
+    stage_code, reason_code, http_status = classify_network_failure(last_error, stage_hint=stage_enum)
+    raise AssetNetworkError(
+        f"{stage}失败（{category}，{'通过代理' if proxy else '直连'}）",
+        stage=stage_code, reason=reason_code, http_status=http_status,
+    ) from last_error
 
 
 def open_asset_request(request: urllib.request.Request, timeout: float):

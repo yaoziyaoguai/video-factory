@@ -7,9 +7,12 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+from .asset_transport import classify_network_failure
+
 
 _context = ContextVar('diagnostic_context', default={})
-_identifiers = {'runId', 'nodeRunId', 'commandId', 'capability', 'provider', 'mediaType', 'errorType'}
+_identifiers = {'runId', 'nodeRunId', 'commandId', 'capability', 'provider', 'mediaType', 'errorType',
+                'errorStage', 'errorReason'}
 _numbers = {'attempt', 'candidateCount', 'bytes', 'elapsedMs', 'httpStatus'}
 
 
@@ -50,6 +53,13 @@ def diagnostic_span(event, **facts):
         facts.update(errorType=type(error).__name__, elapsedMs=round((time.monotonic() - started) * 1000, 3))
         if isinstance(getattr(error, 'code', None), int):
             facts['httpStatus'] = error.code
+        # 网络失败的安全枚举分类（D 批次）：类型/cause 链提取，非 unknown 才记录。
+        stage, reason, http_status = classify_network_failure(error)
+        if stage != 'unknown' or reason != 'unknown':
+            facts['errorStage'] = stage
+            facts['errorReason'] = reason
+            if http_status is not None and 'httpStatus' not in facts:
+                facts['httpStatus'] = http_status
         _emit(event, 'failed', facts)
         raise
     else:

@@ -43,6 +43,29 @@ class DiagnosticsTest(unittest.TestCase):
         self.assertEqual(event['state'], 'failed')
         self.assertNotIn('secret', stderr.getvalue())
 
+    def test_structured_failure_classification_reaches_the_stage_log(self):
+        # D 批次：AssetNetworkError 携带的安全枚举与状态码进入白名单日志；
+        # 外层 RuntimeError 包装也不丢分类（沿 cause 链提取），且不携带原文。
+        from video_factory.asset_transport import AssetNetworkError
+        stderr = io.StringIO()
+        network = AssetNetworkError('连接失败（TimeoutError，直连）', stage='connect', reason='timeout')
+        wrapped = RuntimeError('Asset download failed after 3 attempts for pexels:sea')
+        wrapped.__cause__ = network
+        with contextlib.redirect_stderr(stderr), self.assertRaises(RuntimeError):
+            with diagnostic_span('stock.materialize', provider='pexels'):
+                raise wrapped
+        event = json.loads(stderr.getvalue().splitlines()[-1])
+        self.assertEqual(event['errorStage'], 'connect')
+        self.assertEqual(event['errorReason'], 'timeout')
+        self.assertNotIn('pexels:sea', stderr.getvalue())
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(AssetNetworkError):
+            with diagnostic_span('stock.materialize', provider='nasa'):
+                raise AssetNetworkError('HTTP 响应失败', stage='http', reason='http_error', http_status=429)
+        event = json.loads(stderr.getvalue().splitlines()[-1])
+        self.assertEqual((event['errorStage'], event['errorReason'], event['httpStatus']), ('http', 'http_error', 429))
+
     def test_logging_failure_does_not_break_work(self):
         with patch('sys.stderr.write', side_effect=OSError('disk full')):
             with diagnostic_span('stock.search'):

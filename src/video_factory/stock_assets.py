@@ -21,7 +21,8 @@ from .domain import Scene, SceneAsset, StockAssetCandidate
 from .stock_execution import StockExecution, StockPreparationStopped
 from .stock_cache import cached_pixabay_response
 from .wikimedia import normalize_images as normalize_wikimedia_images, normalize_videos as normalize_wikimedia_videos
-from .asset_transport import AssetNetworkError, open_asset_request, remaining, validate_asset_download_url
+from .asset_transport import (AssetNetworkError, attach_failure_facts, classify_network_failure, open_asset_request,
+                              remaining, validate_asset_download_url)
 from .open_stock import search_cleveland, search_met, search_nasa, search_openverse
 from .archive_stock import search_archive
 from .flickr_stock import search_flickr, validate_flickr_adoption
@@ -234,12 +235,15 @@ def search_routed_scene_asset_candidates(
         private_candidates = []
         seen_originals: set[str] = set()
         search_errors = []
+        scene_search_attempts = 0
+        scene_search_successes = 0
         for provider_id in provider_ids if reuse_from_scene_position is None else []:
             if is_generative_provider(provider_id) or stock_provider_name(provider_id) == "local":
                 continue
             provider = stock_provider_name(provider_id)
             stock_query = resolve_director_stock_query(scene, director_query)
             provider_search_attempts += 1
+            scene_search_attempts += 1
             if execution is not None:
                 execution.progress(scene.position, len(scene_list), "searching", provider)
             try:
@@ -249,13 +253,15 @@ def search_routed_scene_asset_candidates(
                 # 单一可替代来源的任何异常都只记为该来源失败，其余来源的候选照常交付（DF-03）。
                 # 公开报告只携带受控投影字段（类型/HTTP 状态/缺密钥提示），不带异常原文（R3-06）。
                 if execution is not None:
-                    execution.progress(scene.position, len(scene_list), "retrying", provider)
+                    execution.progress(scene.position, len(scene_list), "retrying", provider,
+                                        last_failure=stock_failure_fields(error, provider))
                 search_errors.append({
                     "provider_id": provider_id,
                     **public_provider_error_fields(error),
                 })
                 continue
             provider_search_successes += 1
+            scene_search_successes += 1
             if execution is not None:
                 execution.progress(scene.position, len(scene_list), "searching", provider, len(public_candidates))
             for candidate in candidates:
@@ -292,7 +298,13 @@ def search_routed_scene_asset_candidates(
             "candidates": private_candidates,
         })
         if execution is not None:
-            execution.progress(scene.position, len(scene_list), "completed", candidates=len(public_candidates))
+            # 本镜全部尝试来源都失败时如实记 failed：不把失败镜计成完成，也不清掉
+            # 最后一次失败摘要（completed 会清除 lastFailure）。部分失败后成功、成功
+            # 但 0 候选、以及 reuse/本地/生成镜（无检索尝试）仍记 completed。
+            if scene_search_attempts > 0 and scene_search_successes == 0:
+                execution.progress(scene.position, len(scene_list), "failed", candidates=len(public_candidates))
+            else:
+                execution.progress(scene.position, len(scene_list), "completed", candidates=len(public_candidates))
     output = default_asset_search_report_path(workspace, job_id)
     inventory_output = default_asset_candidate_inventory_path(workspace, job_id)
     if provider_search_attempts > 0 and provider_search_successes == 0:
@@ -894,7 +906,9 @@ def materialize_first_candidate(
             if isinstance(error, StockPreparationStopped):
                 raise
             if execution is not None:
-                execution.progress(scene.position, total_scenes, "retrying", candidate.provider)
+                # 逐镜失败摘要只带安全枚举与最后图库；进度是观察数据，写失败不影响下载结果。
+                execution.progress(scene.position, total_scenes, "retrying", candidate.provider,
+                                    last_failure=stock_failure_fields(error, candidate.provider))
                 execution.check()
             if failures is not None:
                 failures.append(f"{candidate.provider}:{candidate.asset_id}: {error}")
@@ -948,7 +962,18 @@ def _inspect_open_stock_file(candidate: StockAssetCandidate, path: Path) -> Stoc
         return replace(candidate, width=width, height=height, duration=duration)
     except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError) as error:
         path.unlink(missing_ok=True)
-        raise RuntimeError(f"素材真实文件校验失败（{candidate.provider}；尺寸不足、格式损坏或媒体工具不可用）") from error
+        # 媒体校验折叠为同一受控文案，但按成因携带结构化事实：工具缺失不能断言素材
+        # 损坏（unknown），ffprobe 判损坏/时长分辨率不足是确定的 invalid_media，挂起是
+        # timeout。只加事实，不改异常类型与消息。
+        if isinstance(error, (FileNotFoundError, PermissionError)):
+            media_reason = "unknown"
+        elif isinstance(error, subprocess.TimeoutExpired):
+            media_reason = "timeout"
+        else:
+            media_reason = "invalid_media"
+        raise attach_failure_facts(
+            RuntimeError(f"素材真实文件校验失败（{candidate.provider}；尺寸不足、格式损坏或媒体工具不可用）"),
+            "media", media_reason) from error
 
 
 def stock_provider_name(provider_id: str) -> str:
@@ -1605,6 +1630,32 @@ def public_provider_error_fields(error: Exception) -> dict:
     return fields
 
 
+def stock_failure_fields(error: BaseException, provider: str) -> Optional[dict]:
+    """把下载/检索失败映射为逐镜进度的安全 lastFailure 摘要。
+
+    分类优先走 cause 链里的现成异常类型（AssetNetworkError 携带的枚举、HTTPError、
+    TLS、DNS、超时），其次识别本模块自造消息的固定前缀（过大/不完整/时长不足）；
+    不解析外部文本，不推断 VPN 或账号状态。媒体格式/时长拒绝标 media，不冒充网络故障。
+    """
+    stage, reason, http_status = classify_network_failure(error)
+    message = str(error)
+    if stage == "unknown":
+        if message.startswith("Asset download is too large"):
+            stage, reason = "body", "too_large"
+        elif message.startswith("Asset download is incomplete"):
+            stage, reason = "body", "incomplete"
+        elif message.startswith("素材实际时长") or message.startswith("素材时长不足"):
+            stage, reason = "media", "invalid_media"
+        elif message.startswith("素材分辨率"):
+            stage, reason = "media", "invalid_media"
+        elif message.startswith("Asset download failed with HTTP"):
+            stage, reason = "http", "http_error"
+    failure = {"provider": provider, "stage": stage, "reason": reason}
+    if http_status is not None:
+        failure["httpStatus"] = http_status
+    return failure
+
+
 def search_stock_query_variants(provider: str, query: str, search_terms: list[str], media_type: str, limit: int,
                                *, query_cache: Optional[dict] = None, deadline: Optional[float] = None):
     queries = list(dict.fromkeys(value.strip() for value in [query, *search_terms] if isinstance(value, str) and value.strip()))[:3]
@@ -1896,19 +1947,36 @@ def write_response_body(
                 if execution is not None:
                     execution.check()
                 if clock() - started_at > max_seconds:
-                    raise RuntimeError(f"Asset download timed out after {max_seconds:g}s: {local_path}")
+                    # 正文边界的自造超限/超时：只附加安全枚举事实，不改异常类型，
+                    # 保持下载侧重试分派（RuntimeError 不重试）不变。
+                    raise attach_failure_facts(
+                        RuntimeError(f"Asset download timed out after {max_seconds:g}s: {local_path}"),
+                        "body", "timeout")
                 # read1 returns currently buffered bytes instead of waiting to fill a large chunk.
                 chunk = read_chunk(64 * 1024)
                 if clock() - started_at > max_seconds:
-                    raise RuntimeError(f"Asset download timed out after {max_seconds:g}s: {local_path}")
+                    raise attach_failure_facts(
+                        RuntimeError(f"Asset download timed out after {max_seconds:g}s: {local_path}"),
+                        "body", "timeout")
                 if not chunk:
                     break
                 downloaded += len(chunk)
                 if downloaded > max_bytes:
-                    raise RuntimeError(f"Asset download exceeded {max_bytes} bytes: {local_path}")
+                    raise attach_failure_facts(
+                        RuntimeError(f"Asset download exceeded {max_bytes} bytes: {local_path}"),
+                        "body", "too_large")
                 output.write(chunk)
-    except Exception:
+    except Exception as error:
         local_path.unlink(missing_ok=True)
+        # 正文读取边界的事实补充：裸超时等异常保持原类型重试语义，只带上 body 阶段；
+        # 已带明确阶段的（自造超限/超时）不动，操作暂停/预算停止保持独立停止语义。
+        if not isinstance(error, StockPreparationStopped):
+            facts = getattr(error, "asset_failure_facts", None)
+            if facts is None or facts[0] == "unknown":
+                reason = facts[1] if facts else classify_network_failure(error)[1]
+                if reason == "unknown":
+                    reason = "timeout" if isinstance(error, TimeoutError) else "unknown"
+                attach_failure_facts(error, "body", reason)
         raise
 
 

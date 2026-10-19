@@ -13,6 +13,7 @@ from unittest.mock import patch
 from video_factory.stock_assets import open_asset_request, materialize_candidate, write_response_body
 from video_factory.domain import StockAssetCandidate
 from video_factory.asset_transport import AssetNetworkError
+from urllib.error import HTTPError, URLError
 
 
 class WireSocket:
@@ -250,6 +251,147 @@ class StockTransportTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+    def test_network_failures_carry_structured_safe_classification(self):
+        # D 批次：分类只来自异常类型与本层自造消息，经有界 cause 链追溯；
+        # 不解析外部文本，也不推断 VPN/欠费。每格断言 (stage, reason, httpStatus)。
+        from video_factory.asset_transport import classify_network_failure
+
+        def gaierror_cause():
+            try:
+                try:
+                    raise socket.gaierror(-2, "Name or service not known")
+                except socket.gaierror as inner:
+                    raise URLError("wrapped") from inner
+            except URLError as outer:
+                return outer
+
+        cases = [
+            (AssetNetworkError("DNS 解析超时", stage="dns", reason="timeout"), ("dns", "timeout", None)),
+            (AssetNetworkError("连接失败", stage="connect", reason="connection_failure"), ("connect", "connection_failure", None)),
+            (AssetNetworkError("TLS 握手失败", stage="tls", reason="tls_failure"), ("tls", "tls_failure", None)),
+            (AssetNetworkError("HTTP 响应失败", stage="http", reason="http_error", http_status=429), ("http", "http_error", 429)),
+            (gaierror_cause(), ("dns", "dns_failure", None)),
+        ]
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(classify_network_failure(error), expected)
+
+        # 裸超时没有更具体类型：按调用处阶段提示归因，无提示时不再猜连接阶段。
+        self.assertEqual(classify_network_failure(TimeoutError(), stage_hint="body"), ("body", "timeout", None))
+        self.assertEqual(classify_network_failure(TimeoutError()), ("unknown", "timeout", None))
+
+        # 实际边界附加的安全枚举事实优先于类型推断；非法枚举被忽略。
+        from video_factory.asset_transport import attach_failure_facts
+        self.assertEqual(classify_network_failure(attach_failure_facts(RuntimeError("stream exceeded"), "body", "too_large")), ("body", "too_large", None))
+        self.assertEqual(classify_network_failure(attach_failure_facts(RuntimeError("bad attach"), "vpn", "hacked")), ("unknown", "unknown", None))
+
+        # HTTPError 保留状态码；cause 链成环时不无限遍历。
+        self.assertEqual(
+            classify_network_failure(HTTPError("https://m.example/a", 403, "Forbidden", None, None)),
+            ("http", "http_error", 403),
+        )
+        loop = RuntimeError("loop")
+        loop.__cause__ = loop
+        self.assertEqual(classify_network_failure(loop), ("unknown", "unknown", None))
+
+    def test_pinned_transport_failures_expose_stage_specific_errors(self):
+        request = urllib.request.Request("https://media.example/a")
+
+        # DNS 解析失败：gaierror → dns/dns_failure。
+        with patch("socket.getaddrinfo", side_effect=socket.gaierror(-2, "Name or service not known")):
+            with self.assertRaises(AssetNetworkError) as dns_error:
+                open_asset_request(request, 1)
+            self.assertEqual((dns_error.exception.stage, dns_error.exception.failure_reason), ("dns", "dns_failure"))
+
+        # 连接被拒：目标 IP 可解析但端口拒绝 → connect/connection_failure。
+        def refused(*args, **kwargs):
+            raise ConnectionRefusedError(111, "Connection refused")
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]), \
+             patch("socket.socket") as socket_class:
+            socket_class.return_value.connect.side_effect = refused
+            with self.assertRaises(AssetNetworkError) as connect_error:
+                open_asset_request(request, 1)
+            self.assertEqual((connect_error.exception.stage, connect_error.exception.failure_reason), ("connect", "connection_failure"))
+
+        # TLS 证书失败保留类型 → tls/tls_failure。
+        sock = WireSocket([b"HTTP/1.1 200 Connection established\r\n\r\n"])
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]), \
+             patch("socket.socket", return_value=sock), patch("urllib.request.getproxies", return_value={}), \
+             patch("ssl.create_default_context") as context:
+            context.return_value.wrap_socket.side_effect = ssl.SSLCertVerificationError("certificate rejected")
+            with self.assertRaises(AssetNetworkError) as tls_error:
+                open_asset_request(request, 1)
+            self.assertEqual((tls_error.exception.stage, tls_error.exception.failure_reason), ("tls", "tls_failure"))
+
+        # HTTP 4xx/5xx 状态：HTTPError 由调用方分类，这里校验 body 读取错误仍受控。
+        wire = WireSocket([b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n"])
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 443))]), \
+             patch("socket.socket", return_value=wire), patch("urllib.request.getproxies", return_value={}), \
+             patch("ssl.create_default_context") as context:
+            context.return_value.wrap_socket.return_value = wire
+            with self.assertRaises(HTTPError) as http_error:
+                open_asset_request(request, 1)
+            self.assertEqual(http_error.exception.code, 429)
+
+    def test_classification_never_leaks_private_details(self):
+        # 结构化字段与消息都不能带出签名 URL、代理凭据或异常原文。
+        error = AssetNetworkError("连接失败（TimeoutError，直连）", stage="connect", reason="timeout")
+        self.assertEqual(
+            {"stage": "connect", "reason": "timeout"},
+            {key: value for key, value in (("stage", error.stage), ("reason", error.failure_reason))},
+        )
+        self.assertEqual(error.http_status, None)
+
+    def test_second_address_failure_is_classified_from_its_own_stage(self):
+        # R2-07（round2）：上一 IP 已推进到 HTTP 响应阶段后，下一 IP 的连接失败
+        # 不能沿用 http 阶段——每个地址从连接阶段重新起算。
+        class HeaderTimeoutReader(io.BytesIO):
+            def readline(self, *args):
+                raise TimeoutError("response header timeout")
+
+        class HeaderTimeoutSocket:
+            def __init__(self):
+                self.sent = []
+                self.closed = False
+
+            def connect(self, target):
+                pass
+
+            def settimeout(self, timeout):
+                pass
+
+            def sendall(self, data):
+                self.sent.append(data)
+
+            def makefile(self, mode):
+                return HeaderTimeoutReader(b"") if "r" in mode else io.BytesIO()
+
+            def close(self):
+                self.closed = True
+
+            def shutdown(self, how):
+                pass
+
+        class RefusedSocket:
+            def connect(self, target):
+                raise ConnectionRefusedError(111, "Connection refused")
+
+            def settimeout(self, timeout):
+                pass
+
+            def close(self):
+                pass
+
+        with patch("socket.getaddrinfo", return_value=[
+                (2, 1, 6, "", ("93.184.216.34", 80)),
+                (2, 1, 6, "", ("93.184.216.35", 80)),
+        ]), patch("socket.socket", side_effect=[HeaderTimeoutSocket(), RefusedSocket()]), \
+             patch("urllib.request.getproxies", return_value={}):
+            with self.assertRaises(AssetNetworkError) as error:
+                open_asset_request(urllib.request.Request("http://media.example/a"), 1)
+        self.assertEqual((error.exception.stage, error.exception.failure_reason),
+                         ("connect", "connection_failure"))
 
 
 if __name__ == "__main__":
