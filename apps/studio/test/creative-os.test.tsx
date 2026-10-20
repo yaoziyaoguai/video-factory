@@ -13,6 +13,7 @@ import { SeriesDialog } from "../src/client/components/SeriesDialog.js";
 import { SeriesEpisodeDialog } from "../src/client/components/SeriesEpisodeDialog.js";
 import { SourceSupplementDialog } from "../src/client/components/SourceSupplementDialog.js";
 import { TopicEntryWorkspace } from "../src/client/components/TopicEntryWorkspace.js";
+import { CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION } from "../src/client/onboarding/creator-tour-state.js";
 import { ExperimentsPage } from "../src/client/pages/ExperimentsPage.js";
 import { ProductionPage } from "../src/client/pages/ProductionPage.js";
 import { ResourcesPage } from "../src/client/pages/ResourcesPage.js";
@@ -1252,18 +1253,25 @@ describe("Creative OS", () => {
     const user = userEvent.setup();
     vi.spyOn(studioApi, "health").mockResolvedValue({ status: "ok", runtime: {} });
     vi.spyOn(studioApi, "runs").mockResolvedValue([]);
-    render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
+    const previousTourState = window.localStorage.getItem(CREATOR_TOUR_STORAGE_KEY);
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    try {
+      render(<MemoryRouter><AppShell><div>content</div></AppShell></MemoryRouter>);
 
-    const trigger = screen.getByRole("button", { name: "搜索项目、选题或功能" });
-    await user.click(trigger);
-    const search = screen.getByRole("combobox", { name: "搜索项目、选题或功能" });
-    await user.type(search, "模板");
-    await user.keyboard("{Escape}");
+      const trigger = screen.getByRole("button", { name: "搜索项目、选题或功能" });
+      await user.click(trigger);
+      const search = screen.getByRole("combobox", { name: "搜索项目、选题或功能" });
+      await user.type(search, "模板");
+      await user.keyboard("{Escape}");
 
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    await waitFor(() => expect(trigger).toHaveFocus());
-    await user.click(trigger);
-    expect(screen.getByRole("combobox", { name: "搜索项目、选题或功能" })).toHaveValue("");
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      await waitFor(() => expect(trigger).toHaveFocus());
+      await user.click(trigger);
+      expect(screen.getByRole("combobox", { name: "搜索项目、选题或功能" })).toHaveValue("");
+    } finally {
+      if (previousTourState === null) window.localStorage.removeItem(CREATOR_TOUR_STORAGE_KEY);
+      else window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, previousTourState);
+    }
   });
 
   it("keeps opportunity selection, evidence, and production action in one workspace", async () => {

@@ -7,23 +7,75 @@ import { FULL_CREATOR_TOUR_STEPS, pageTourSteps } from "./creator-tour-steps.js"
 const AUTO_START_DELAY_MS = 650;
 
 interface CreatorTourControls {
-  startFullTour: () => void;
-  startPageTour: () => void;
+  startFullTour: (returnFocus?: HTMLElement | null) => void;
+  startPageTour: (returnFocus?: HTMLElement | null) => void;
+}
+
+interface TourLifecycle {
+  tour: Driver;
+  rememberCompletion: boolean;
+  /** 本次导览结束后要归还焦点的真实启动控件；自动导览没有 launcher，保持 undefined。 */
+  returnFocus?: HTMLElement | null;
+  /** 程序化销毁（路由切换/卸载/被新导览替换）不归还焦点，避免抢新页面焦点。 */
+  suppressFocusRestore?: boolean;
+  /** 已排定的归还帧；新导览或路由清理时必须取消，防止旧导览晚到 focus。 */
+  restoreFrame?: number;
 }
 
 export function useCreatorTour(): CreatorTourControls {
   const location = useLocation();
   const navigate = useNavigate();
-  const activeTourRef = useRef<{ tour: Driver; rememberCompletion: boolean } | undefined>(undefined);
+  const activeTourRef = useRef<TourLifecycle | undefined>(undefined);
   const replayPendingRef = useRef(false);
   const autoStartCheckedRef = useRef(false);
+  // 跨路由的完整导览：真实 launcher 随 pending 一起穿过 navigate，不回头猜 activeElement。
+  const pendingReturnFocusRef = useRef<HTMLElement | null>(null);
+  // 自然结束的 tour 会清掉 activeTourRef，但归还帧可能还没到；
+  // 新导览/路由清理必须能取消这个“已结束但未归还”的帧。
+  const restorePendingRef = useRef<TourLifecycle | undefined>(undefined);
 
-  const runTour = useCallback((steps: DriveStep[], rememberCompletion: boolean) => {
-    if (activeTourRef.current?.tour.isActive()) {
-      activeTourRef.current.rememberCompletion = false;
-      activeTourRef.current.tour.destroy();
+  const clearPendingReplay = useCallback(() => {
+    replayPendingRef.current = false;
+    pendingReturnFocusRef.current = null;
+  }, []);
+
+  const cancelFocusRestore = useCallback(() => {
+    const pending = restorePendingRef.current;
+    if (pending?.restoreFrame !== undefined) {
+      window.cancelAnimationFrame(pending.restoreFrame);
+      delete pending.restoreFrame;
     }
-    let lifecycle: { tour: Driver; rememberCompletion: boolean };
+    restorePendingRef.current = undefined;
+  }, []);
+
+  // driver 1.8.0 的 destroy 在 onDestroyed 之后还会同步执行内部 i.focus()，
+  // 因此归还必须排到下一帧：同步回调里的 focus 会被库自己的回焦覆盖。
+  const scheduleFocusRestore = useCallback((lifecycle: TourLifecycle) => {
+    const target = lifecycle.returnFocus;
+    if (!target || lifecycle.suppressFocusRestore) return;
+    lifecycle.restoreFrame = window.requestAnimationFrame(() => {
+      if (restorePendingRef.current === lifecycle) restorePendingRef.current = undefined;
+      delete lifecycle.restoreFrame;
+      // 目标已卸载/不可聚焦时安全降级：不抛错、不聚焦隐藏按钮、不伪造别的返回目标。
+      if (!target.isConnected || target.hasAttribute("disabled")) return;
+      if (typeof target.checkVisibility === "function" && !target.checkVisibility()) return;
+      target.focus();
+    });
+    restorePendingRef.current = lifecycle;
+  }, []);
+
+  const destroyActiveTour = useCallback((options: { suppressFocusRestore: boolean }) => {
+    cancelFocusRestore();
+    const active = activeTourRef.current;
+    if (!active?.tour.isActive()) return;
+    active.rememberCompletion = false;
+    active.suppressFocusRestore = options.suppressFocusRestore;
+    active.tour.destroy();
+  }, [cancelFocusRestore]);
+
+  const runTour = useCallback((steps: DriveStep[], rememberCompletion: boolean, returnFocus?: HTMLElement | null) => {
+    destroyActiveTour({ suppressFocusRestore: true });
+    let lifecycle: TourLifecycle;
     const tour = driver({
       steps: availableTourSteps(steps),
       animate: !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches,
@@ -49,28 +101,40 @@ export function useCreatorTour(): CreatorTourControls {
       onDestroyed: () => {
         if (lifecycle.rememberCompletion) completeCreatorTour();
         if (activeTourRef.current === lifecycle) activeTourRef.current = undefined;
+        scheduleFocusRestore(lifecycle);
       },
     });
-    lifecycle = { tour, rememberCompletion };
+    lifecycle = { tour, rememberCompletion, ...(returnFocus !== undefined ? { returnFocus } : {}) };
     activeTourRef.current = lifecycle;
     tour.drive();
-  }, []);
+  }, [destroyActiveTour, scheduleFocusRestore]);
 
-  const startFullTour = useCallback(() => {
+  const startFullTour = useCallback((returnFocus?: HTMLElement | null) => {
+    // 用户已经主动选择导览；即使首页的首次自动启动计时器仍在等待，也不能再覆盖这次选择。
+    autoStartCheckedRef.current = true;
     if (location.pathname !== "/") {
       replayPendingRef.current = true;
+      pendingReturnFocusRef.current = returnFocus ?? null;
       navigate("/");
       return;
     }
-    runTour(FULL_CREATOR_TOUR_STEPS, true);
-  }, [location.pathname, navigate, runTour]);
+    clearPendingReplay();
+    runTour(FULL_CREATOR_TOUR_STEPS, true, returnFocus);
+  }, [clearPendingReplay, location.pathname, navigate, runTour]);
 
-  const startPageTour = useCallback(() => {
-    runTour(pageTourSteps(location.pathname), false);
-  }, [location.pathname, runTour]);
+  const startPageTour = useCallback((returnFocus?: HTMLElement | null) => {
+    // 用户在导航等待期间显式选择了另一条导览，旧的跨路由请求随即失效。
+    autoStartCheckedRef.current = true;
+    clearPendingReplay();
+    runTour(pageTourSteps(location.pathname), false, returnFocus);
+  }, [clearPendingReplay, location.pathname, runTour]);
 
   useEffect(() => {
-    if (location.pathname !== "/") return;
+    if (location.pathname !== "/") {
+      // 已到达首页后又离开，不能在日后返回首页时突然重放旧导览。
+      clearPendingReplay();
+      return;
+    }
     const replayRequested = replayPendingRef.current;
     const shouldAutoStart = !autoStartCheckedRef.current && !hasCompletedCreatorTour();
     if (!replayRequested && !shouldAutoStart) return;
@@ -78,7 +142,9 @@ export function useCreatorTour(): CreatorTourControls {
     const timer = window.setTimeout(() => {
       if (replayPendingRef.current) {
         replayPendingRef.current = false;
-        runTour(FULL_CREATOR_TOUR_STEPS, true);
+        const carriedReturnFocus = pendingReturnFocusRef.current;
+        pendingReturnFocusRef.current = null;
+        runTour(FULL_CREATOR_TOUR_STEPS, true, carriedReturnFocus);
         return;
       }
       if (autoStartCheckedRef.current || hasCompletedCreatorTour()) return;
@@ -86,21 +152,16 @@ export function useCreatorTour(): CreatorTourControls {
       runTour(FULL_CREATOR_TOUR_STEPS, true);
     }, AUTO_START_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [location.pathname, runTour]);
+  }, [clearPendingReplay, location.pathname, runTour]);
 
   useEffect(() => {
-    const active = activeTourRef.current;
-    if (!active?.tour.isActive()) return;
-    active.rememberCompletion = false;
-    active.tour.destroy();
-  }, [location.pathname]);
+    destroyActiveTour({ suppressFocusRestore: true });
+  }, [location.pathname, destroyActiveTour]);
 
   useEffect(() => () => {
-    const active = activeTourRef.current;
-    if (!active?.tour.isActive()) return;
-    active.rememberCompletion = false;
-    active.tour.destroy();
-  }, []);
+    clearPendingReplay();
+    destroyActiveTour({ suppressFocusRestore: true });
+  }, [clearPendingReplay, destroyActiveTour]);
 
   return { startFullTour, startPageTour };
 }

@@ -171,6 +171,25 @@ describe("creator tour routing", () => {
     expect(driverMock.instance.drive).toHaveBeenCalledOnce();
   });
 
+  it("returns a manually started full tour to its launcher after returning home", async () => {
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    render(<MemoryRouter initialEntries={["/resources"]}><AppShell>
+      <div data-tour="topic-inbox">选题入口</div>
+    </AppShell></MemoryRouter>);
+    const launcher = screen.getAllByRole("button", { name: "打开创作向导" })[0]!;
+    launcher.focus();
+    fireEvent.click(launcher);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    fireEvent.click(screen.getByRole("button", { name: "完整流程导览" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    const config = driverMock.factory.mock.calls[0]?.[0];
+    // driver 在 onDestroyed 之后仍会把焦点归还到其记录的旧元素。
+    (config?.onDestroyed as (() => void) | undefined)?.();
+    document.getElementById("main-content")?.focus();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(launcher).toHaveFocus();
+  });
+
   it("keeps project and review pages unobstructed until the user opens the guide", async () => {
     window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
     render(
@@ -288,5 +307,251 @@ describe("creator tour routing", () => {
     endButton?.click();
     expect(driverMock.instance.destroy).toHaveBeenCalledOnce();
     expect(closeButton).toHaveAttribute("aria-label", "提前结束引导");
+  });
+
+  it("returns a same-page tour to its launcher on the next frame after completion", async () => {
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    render(<MemoryRouter initialEntries={["/projects"]}><AppShell><div data-tour="project-queue">项目队列</div></AppShell></MemoryRouter>);
+    const launcher = screen.getAllByRole("button", { name: "打开创作向导" })[0]!;
+    launcher.focus();
+    fireEvent.click(launcher);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    fireEvent.click(screen.getByRole("button", { name: "讲解当前页面" }));
+
+    const config = driverMock.factory.mock.calls.at(-1)?.[0];
+    (config?.onDestroyed as (() => void) | undefined)?.();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(launcher).toHaveFocus();
+  });
+
+  it("still returns focus to the opener when the guide is collapsed without a tour", async () => {
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    render(<MemoryRouter initialEntries={["/projects"]}><AppShell><div>项目队列</div></AppShell></MemoryRouter>);
+    const launcher = screen.getAllByRole("button", { name: "打开创作向导" })[0]!;
+    launcher.focus();
+    fireEvent.click(launcher);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+
+    fireEvent.click(screen.getByRole("button", { name: "收起创作向导" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(launcher).toHaveFocus();
+  });
+
+  it("does not steal focus on the new page when a route change destroys an active tour", async () => {
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    driverMock.instance.isActive.mockReturnValue(true);
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <AppShell>
+          <Routes>
+            <Route path="/" element={<Link to="/resources">前往资源</Link>} />
+            <Route path="/resources" element={<button type="button">资源页控件</button>} />
+          </Routes>
+        </AppShell>
+      </MemoryRouter>,
+    );
+    const launcher = screen.getAllByRole("button", { name: "打开创作向导" })[0]!;
+    launcher.focus();
+    fireEvent.click(launcher);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    fireEvent.click(screen.getByRole("button", { name: "完整流程导览" }));
+    const config = driverMock.factory.mock.calls.at(-1)?.[0];
+
+    fireEvent.click(screen.getByRole("link", { name: "前往资源" }));
+    expect(driverMock.instance.destroy).toHaveBeenCalledOnce();
+    // driver 1.8.0 在 onDestroyed 之后还有内部回焦；路由清理必须既不排归还帧，也不覆盖新页面焦点。
+    (config?.onDestroyed as (() => void) | undefined)?.();
+    const pageControl = screen.getByRole("button", { name: "资源页控件" });
+    pageControl.focus();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(pageControl).toHaveFocus();
+  });
+
+  it("does not steal focus when the app unmounts mid-tour", async () => {
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    driverMock.instance.isActive.mockReturnValue(true);
+    const { unmount } = render(<MemoryRouter initialEntries={["/"]}><AppShell><div data-tour="topic-inbox">选题入口</div></AppShell></MemoryRouter>);
+    const launcher = screen.getAllByRole("button", { name: "打开创作向导" })[0]!;
+    launcher.focus();
+    fireEvent.click(launcher);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    fireEvent.click(screen.getByRole("button", { name: "完整流程导览" }));
+    const config = driverMock.factory.mock.calls.at(-1)?.[0];
+
+    unmount();
+    expect(driverMock.instance.destroy).toHaveBeenCalledOnce();
+    expect(() => (config?.onDestroyed as (() => void) | undefined)?.()).not.toThrow();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(document.body).toHaveFocus();
+  });
+
+  it("cancels a pending restore frame when a new tour replaces the old one", async () => {
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    driverMock.instance.isActive.mockReturnValue(true);
+    render(<MemoryRouter initialEntries={["/"]}><AppShell><div data-tour="topic-inbox">选题入口</div></AppShell></MemoryRouter>);
+    const launcher = screen.getAllByRole("button", { name: "打开创作向导" })[0]!;
+    launcher.focus();
+    fireEvent.click(launcher);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    fireEvent.click(screen.getByRole("button", { name: "讲解当前页面" }));
+    expect(driverMock.instance.drive).toHaveBeenCalledOnce();
+    const pageTourConfig = driverMock.factory.mock.calls.at(-1)?.[0];
+
+    // 旧导览已结束、归还帧已排队，但尚未到来
+    (pageTourConfig?.onDestroyed as (() => void) | undefined)?.();
+    // 新完整导览在同一页替换它：旧归还帧必须被取消
+    fireEvent.click(launcher);
+    fireEvent.click(screen.getByRole("button", { name: "完整流程导览" }));
+    expect(driverMock.factory).toHaveBeenCalledTimes(2);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(launcher).not.toHaveFocus();
+  });
+
+  it("cancels a completed tour's pending focus restore when the route changes", async () => {
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    render(
+      <MemoryRouter initialEntries={["/projects"]}>
+        <AppShell>
+          <Routes>
+            <Route path="/projects" element={<><div data-tour="project-queue">项目队列</div><Link to="/resources">前往资源</Link></>} />
+            <Route path="/resources" element={<button type="button">资源页控件</button>} />
+          </Routes>
+        </AppShell>
+      </MemoryRouter>,
+    );
+    const launcher = screen.getAllByRole("button", { name: "打开创作向导" })[0]!;
+    launcher.focus();
+    fireEvent.click(launcher);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    fireEvent.click(screen.getByRole("button", { name: "讲解当前页面" }));
+    const config = driverMock.factory.mock.calls.at(-1)?.[0];
+
+    // 导览自然结束后 active lifecycle 已清空，但下一帧的焦点归还仍在等待。
+    (config?.onDestroyed as (() => void) | undefined)?.();
+    fireEvent.click(screen.getByRole("link", { name: "前往资源" }));
+    const pageControl = screen.getByRole("button", { name: "资源页控件" });
+    pageControl.focus();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(pageControl).toHaveFocus();
+  });
+
+  it("cancels a queued cross-route walkthrough when the user starts a page tour", async () => {
+    render(
+      <MemoryRouter initialEntries={["/resources"]}>
+        <AppShell>
+          <Routes>
+            <Route path="/" element={<div data-tour="topic-inbox">今日机会页</div>} />
+            <Route path="/resources" element={<div>资源页</div>} />
+          </Routes>
+        </AppShell>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "打开创作向导" })[0]!);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    fireEvent.click(screen.getByRole("button", { name: "完整流程导览" }));
+    expect(screen.getByText("今日机会页")).toBeInTheDocument();
+
+    // 首页的650ms重放尚未发生；用户明确选择当前页导览，旧请求必须失效。
+    fireEvent.click(screen.getAllByRole("button", { name: "打开创作向导" })[0]!);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    fireEvent.click(screen.getByRole("button", { name: "讲解当前页面" }));
+    expect(driverMock.instance.drive).toHaveBeenCalledOnce();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(driverMock.instance.drive).toHaveBeenCalledOnce();
+  });
+
+  it("does not let the pending first-visit auto tour replace a manually selected page tour", async () => {
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <AppShell><div data-tour="topic-inbox">选题入口</div></AppShell>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "打开创作向导" })[0]!);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    fireEvent.click(screen.getByRole("button", { name: "讲解当前页面" }));
+    expect(driverMock.instance.drive).toHaveBeenCalledOnce();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(driverMock.instance.drive).toHaveBeenCalledOnce();
+  });
+
+  it("does not replay an abandoned cross-route walkthrough after returning home later", async () => {
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    render(
+      <MemoryRouter initialEntries={["/resources"]}>
+        <AppShell>
+          <Routes>
+            <Route path="/" element={<Link to="/projects">离开首页</Link>} />
+            <Route path="/projects" element={<Link to="/">返回首页</Link>} />
+            <Route path="/resources" element={<div>资源页</div>} />
+          </Routes>
+        </AppShell>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "打开创作向导" })[0]!);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    fireEvent.click(screen.getByRole("button", { name: "完整流程导览" }));
+    fireEvent.click(screen.getByRole("link", { name: "离开首页" }));
+    fireEvent.click(screen.getByRole("link", { name: "返回首页" }));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(driverMock.instance.drive).not.toHaveBeenCalled();
+  });
+
+  it("does not fabricate a return target for the automatic tour", async () => {
+    render(<MemoryRouter initialEntries={["/"]}><AppShell><div data-tour="topic-inbox">选题入口</div></AppShell></MemoryRouter>);
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(driverMock.instance.drive).toHaveBeenCalledOnce();
+
+    const before = document.activeElement;
+    const config = driverMock.factory.mock.calls.at(-1)?.[0];
+    (config?.onDestroyed as (() => void) | undefined)?.();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(document.activeElement).toBe(before);
+  });
+
+  it("degrades safely when the recorded launcher is unmounted before the tour ends", async () => {
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    render(<MemoryRouter initialEntries={["/projects"]}><AppShell><div data-tour="project-queue">项目队列</div></AppShell></MemoryRouter>);
+    const launcher = screen.getAllByRole("button", { name: "打开创作向导" })[0]!;
+    launcher.focus();
+    fireEvent.click(launcher);
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    fireEvent.click(screen.getByRole("button", { name: "讲解当前页面" }));
+
+    launcher.remove();
+    const config = driverMock.factory.mock.calls.at(-1)?.[0];
+    expect(() => (config?.onDestroyed as (() => void) | undefined)?.()).not.toThrow();
+    await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+    expect(document.body).toHaveFocus();
+  });
+
+  it("disables tour animation under reduced motion", () => {
+    window.localStorage.setItem(CREATOR_TOUR_STORAGE_KEY, CREATOR_TOUR_VERSION);
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      media: query,
+      matches: query.includes("prefers-reduced-motion"),
+      onchange: null,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    try {
+      render(<MemoryRouter initialEntries={["/projects"]}><AppShell><div data-tour="project-queue">项目队列</div></AppShell></MemoryRouter>);
+      fireEvent.click(screen.getAllByRole("button", { name: "打开创作向导" })[0]!);
+      fireEvent.click(screen.getByRole("button", { name: "讲解当前页面" }));
+      const config = driverMock.factory.mock.calls.at(-1)?.[0];
+      expect(config?.animate).toBe(false);
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
   });
 });

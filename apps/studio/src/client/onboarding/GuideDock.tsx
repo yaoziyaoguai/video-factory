@@ -5,8 +5,8 @@ interface GuideDockProps {
   open: boolean;
   pathname: string;
   onOpenChange: (open: boolean) => void;
-  onStartFullTour: () => void;
-  onStartPageTour: () => void;
+  onStartFullTour: (returnFocus?: HTMLElement | null) => void;
+  onStartPageTour: (returnFocus?: HTMLElement | null) => void;
 }
 
 const WORKFLOW_STEPS = ["挑选题", "定方案", "跑制作", "做审片", "导出交付", "看复盘"];
@@ -14,23 +14,34 @@ const WORKFLOW_STEPS = ["挑选题", "定方案", "跑制作", "做审片", "导
 export function GuideDock({ open, pathname, onOpenChange, onStartFullTour, onStartPageTour }: GuideDockProps) {
   const panelRef = useRef<HTMLElement>(null);
   const primaryActionRef = useRef<HTMLButtonElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const wasOpenRef = useRef(false);
+  // 启动导览时面板会关闭，但归还焦点交给 tour lifecycle（下一帧回到启动控件），
+  // 普通关闭 effect 不再抢这次归还。
+  const focusOwnedByTourRef = useRef(false);
 
   useEffect(() => {
     if (open && !wasOpenRef.current) {
       returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       window.requestAnimationFrame(() => primaryActionRef.current?.focus());
     } else if (!open && wasOpenRef.current) {
-      window.requestAnimationFrame(() => returnFocusRef.current?.focus());
+      if (focusOwnedByTourRef.current) {
+        focusOwnedByTourRef.current = false;
+      } else {
+        window.requestAnimationFrame(() => returnFocusRef.current?.focus());
+      }
     }
     wasOpenRef.current = open;
   }, [onOpenChange, open]);
 
   const context = guideContext(pathname);
-  const start = (callback: () => void) => {
+  const start = (callback: (returnFocus?: HTMLElement | null) => void) => {
+    focusOwnedByTourRef.current = true;
     onOpenChange(false);
-    callback();
+    // 归还目标用打开面板的真实触发器（头部入口或 dock trigger 都可能），
+    // 没有记录（如程序化打开）时退回常驻的 dock trigger。
+    callback(returnFocusRef.current ?? triggerRef.current);
   };
   const handleDialogKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.key === "Escape") {
@@ -83,6 +94,7 @@ export function GuideDock({ open, pathname, onOpenChange, onStartFullTour, onSta
         </section>
       ) : null}
       <button
+        ref={triggerRef}
         className="guide-dock-trigger"
         type="button"
         aria-controls="creator-guide-panel"
