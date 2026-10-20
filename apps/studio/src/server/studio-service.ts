@@ -82,7 +82,7 @@ import type {
   StudioVoicePreviewInput,
   StudioVoiceProfile,
 } from "../shared/api.js";
-import { StudioInputError } from "../shared/api.js";
+import { CASE_SELECTION_RECONFIRM_REQUIRED, StudioInputError } from "../shared/api.js";
 import { RunLockedError, type ProductionBrief } from "@video-factory/production-pipeline";
 import type { WorkflowRun } from "@video-factory/workflow-core";
 import { CapabilityStudio } from "./capability-studio.js";
@@ -154,7 +154,7 @@ export interface StudioServiceOptions {
 /** 案例参考在制作链里只被用到这几件事；其余（取数、缓存）留在 CaseStudio 内部。 */
 export type CaseStudioPort = Pick<
   CaseStudio,
-  "search" | "readDetail" | "getSelection" | "saveSelection" | "clearSelection" | "articleSourcesFor" | "borrowDirectiveFor"
+  "search" | "readDetail" | "getSelection" | "saveSelection" | "clearSelection" | "articleSourcesFor" | "borrowDirectiveFor" | "referenceFor"
 >;
 
 /**
@@ -654,22 +654,30 @@ export class StudioService {
   /**
    * 案例参考的内容由服务端写入，和热点来源的 articleSources 走同一条通道。
    * 客户端只能指定"参考哪一条、想借鉴什么"：正文快照一律取自服务端保存的选中记录，
-   * 这样刷新、修改、移除之后，后续规划拿到的都是当前版本。
+   * 新表单必须校验所见参考身份；返工缺少表单指纹时只能继承来源制作已落盘的可信快照。
    */
   private async applyCaseReference(input: Record<string, unknown>): Promise<Record<string, unknown>> {
     const creation = isRecord(input.creationContext) ? input.creationContext : undefined;
     const caseSelectionId = typeof creation?.caseSelectionId === "string" ? creation.caseSelectionId.trim() : "";
     if (!caseSelectionId) throw new StudioInputError("这次制作没有指定参考内容，请返回案例页面重新选择。");
-    let articleSources;
-    let directive;
-    try {
-      articleSources = await this.cases.articleSourcesFor(caseSelectionId);
-      directive = await this.cases.borrowDirectiveFor(caseSelectionId);
-    } catch (error) {
-      throw new StudioInputError(error instanceof Error ? error.message : "参考内容不可用，请返回案例页面重新选择。");
+    const fingerprint = creation?.caseSelectionFingerprint;
+    let reference: Pick<Awaited<ReturnType<CaseStudioPort["referenceFor"]>>, "articleSources" | "directive"> | undefined;
+    if (typeof fingerprint === "string" && /^[a-f0-9]{64}$/.test(fingerprint)) {
+      let currentReference: Awaited<ReturnType<CaseStudioPort["referenceFor"]>>;
+      try {
+        currentReference = await this.cases.referenceFor(caseSelectionId);
+      } catch {
+        throw caseSelectionReconfirmConflict();
+      }
+      if (fingerprint !== currentReference.selectionFingerprint) throw caseSelectionReconfirmConflict();
+      reference = currentReference;
+    } else {
+      reference = await this.production.loadInheritedCaseReference(input, caseSelectionId);
+      if (!reference) throw caseSelectionReconfirmConflict();
     }
+    const { articleSources, directive } = reference;
     const angle = typeof input.angle === "string" ? input.angle.trim() : "";
-    const { caseReferenceDirective: _untrustedDirective, ...trustedCreation } = creation ?? {};
+    const { caseReferenceDirective: _untrustedDirective, caseSelectionFingerprint: _formFingerprint, ...trustedCreation } = creation ?? {};
     const alreadyIncluded = directive && angle.endsWith(directive);
     // 借鉴方式附在用户自己写的角度之后：用户的原话在前、不被改写，系统只补一句它选了什么。
     return {
@@ -1083,6 +1091,14 @@ export class StudioService {
       throw error;
     }
   }
+}
+
+function caseSelectionReconfirmConflict(): StudioConflictError {
+  return new StudioConflictError(
+    "参考选择已变化或缺少可核对的内容身份，请返回案例页面重新确认借鉴方式，再打开制作表单。",
+    undefined,
+    CASE_SELECTION_RECONFIRM_REQUIRED,
+  );
 }
 
 async function canonProposalForRun(

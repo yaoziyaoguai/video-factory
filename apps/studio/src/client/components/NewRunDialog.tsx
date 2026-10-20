@@ -40,6 +40,12 @@ interface NewRunDialogProps {
   onRetrySettings?: () => void;
   onClose: () => void;
   onSubmit: (input: StudioProductionInput) => Promise<void>;
+  submissionRecovery?: {
+    shouldOffer: (error: unknown) => boolean;
+    actionLabel: string;
+    successMessage: string;
+    recover: () => Promise<void>;
+  };
 }
 
 type BindingKey = keyof StudioProductionInput["providers"];
@@ -110,7 +116,7 @@ function canonicalRecipeId(recipeId: RecipeId | undefined): RecipeId {
   return recipeId === "keyshot-ai" || recipeId === "cinematic-ai" ? "keyshot-ai" : "free-stock";
 }
 
-export function NewRunDialog({ open, providers, initialDataReady = true, initialValues, inheritedNodeIds, requiredAffectedScenePositions, scopePrompt, inheritedReferenceVideo, creatorSettings, settingsError, onRetrySettings, onClose, onSubmit }: NewRunDialogProps) {
+export function NewRunDialog({ open, providers, initialDataReady = true, initialValues, inheritedNodeIds, requiredAffectedScenePositions, scopePrompt, inheritedReferenceVideo, creatorSettings, settingsError, onRetrySettings, onClose, onSubmit, submissionRecovery }: NewRunDialogProps) {
   const [audioMode, setAudioMode] = useState<"tts" | "native_av">("tts");
   const [nativeVideoProviderId, setNativeVideoProviderId] = useState("wan-video-v1");
   const nativeAudio = audioMode === "native_av";
@@ -171,6 +177,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const [inheritedSettingsOpen, setInheritedSettingsOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
+  const [submissionRecoveryAvailable, setSubmissionRecoveryAvailable] = useState(false);
+  const [submissionRecovering, setSubmissionRecovering] = useState(false);
+  const [submissionRecoveryMessage, setSubmissionRecoveryMessage] = useState<string>();
   const [voiceSelectionAvailable, setVoiceSelectionAvailable] = useState<boolean>();
   const [rework, setRework] = useState<StudioProductionInput["rework"]>(() => creatorFacingRework(
     initialValues?.rework,
@@ -493,6 +502,9 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     scrollToAssetSourcesOnOpen.current = false;
     setInheritedSettingsOpen(false);
     setError(undefined);
+    setSubmissionRecoveryAvailable(false);
+    setSubmissionRecovering(false);
+    setSubmissionRecoveryMessage(undefined);
     setVoiceSelectionAvailable(undefined);
     setRework(creatorFacingRework(initialValues?.rework, requiredAffectedScenePositions));
     setScopeDecisionConfirmed(false);
@@ -680,6 +692,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     const data = new FormData(form);
     setSubmitting(true);
     setError(undefined);
+    setSubmissionRecoveryAvailable(false);
+    setSubmissionRecoveryMessage(undefined);
     try {
       if (scopePrompt && !scopeDecisionConfirmed) {
         throw new Error("请先确认本轮返工范围；关闭窗口会保留原记录，不会开始新制作。");
@@ -791,8 +805,25 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       setReferenceVideo(undefined);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+      setSubmissionRecoveryAvailable(Boolean(submissionRecovery?.shouldOffer(caught)));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function recoverSubmission() {
+    if (!submissionRecovery || submissionRecovering || submitting) return;
+    setSubmissionRecovering(true);
+    setError(undefined);
+    try {
+      await submissionRecovery.recover();
+      setSubmissionRecoveryAvailable(false);
+      setSubmissionRecoveryMessage(submissionRecovery.successMessage);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      setSubmissionRecoveryAvailable(true);
+    } finally {
+      setSubmissionRecovering(false);
     }
   }
 
@@ -1429,6 +1460,13 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
             {missingProductionRoles.length > 0 ? <p className="form-error"><AlertCircle aria-hidden="true" size={16} />缺少正式生产能力：{missingProductionRoles.join("、")}。请先在创作设置中完成配置。<a className="button button-ghost" href={capabilitySettingsHref}>打开创作设置</a></p> : null}
             {visualSourceIssue ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{visualSourceIssue.message}</p> : null}
             {error ? <p className="form-error" role="alert"><AlertCircle aria-hidden="true" size={16} />{error}</p> : null}
+            {submissionRecoveryAvailable && submissionRecovery ? (
+              <button className="button button-secondary" type="button" disabled={submissionRecovering} onClick={() => void recoverSubmission()}>
+                <RefreshCw aria-hidden="true" size={16} className={submissionRecovering ? "spin" : undefined} />
+                {submissionRecovering ? "正在重新读取参考…" : submissionRecovery.actionLabel}
+              </button>
+            ) : null}
+            {submissionRecoveryMessage ? <p className="editorial-brief-note" role="status">{submissionRecoveryMessage}</p> : null}
           </div>
 
           <footer className="dialog-actions recipe-dialog-actions">

@@ -168,16 +168,28 @@ export class CaseStudio {
   }
 
   async articleSourcesFor(caseId: string): Promise<ProductionArticleSourceSnapshot[]> {
+    return (await this.referenceFor(caseId)).articleSources;
+  }
+
+  /** 一次读取绑定正文与借鉴方式，避免两个标签更新选择时拼出不同版本。 */
+  async referenceFor(caseId: string): Promise<{
+    selectionFingerprint: string;
+    articleSources: ProductionArticleSourceSnapshot[];
+    directive: string | undefined;
+  }> {
     const record = await this.selectionRecord(caseId);
     if (!record) throw new CaseSelectionError("这次制作引用的参考内容已经不存在，请返回案例列表重新选择。");
-    return [articleSourceFromSelection(record)];
+    return {
+      selectionFingerprint: selectionFingerprint(record),
+      articleSources: [articleSourceFromSelection(record)],
+      directive: borrowDirectiveFromSelection(record),
+    };
   }
 
   /** 用参考内容自己的身份拼一段可读的借鉴说明；只陈述用户选了什么，不加系统判断。 */
   async borrowDirectiveFor(caseId: string): Promise<string | undefined> {
     const record = await this.selectionRecord(caseId);
-    if (!record || record.borrowIntent.length === 0) return undefined;
-    return `参考《${record.title}》（${record.sourceLabel}，${record.contentTypeLabel}）的${record.borrowIntent.join("、")}；只借鉴做法，不改变本次主题与观点。`;
+    return record ? borrowDirectiveFromSelection(record) : undefined;
   }
 
   private recordSourceFailure(sourceId: string, failure: string): void {
@@ -395,7 +407,40 @@ function caseSourceId(record: CaseSelectionRecord): string {
 
 function toSelectionProjection(record: CaseSelectionRecord): StudioCaseSelection {
   const { snapshot: _snapshot, ...projection } = record;
-  return projection;
+  return { ...projection, selectionFingerprint: selectionFingerprint(record) };
+}
+
+function selectionFingerprint(record: CaseSelectionRecord): string {
+  // 选择时间相同也可能是两个不同意图；只重复保存相同内容则不制造无意义冲突。
+  // 指纹只覆盖实际消费的语义内容：selectedAt 与 snapshot.fetchedAt 是观察时间，
+  // 重读同一条内容只会让它们变化，不能因此把未过期的准备表单判成 stale。
+  // 显式列出字段并保持固定键序；borrowIntent 的顺序参与显示与消费，按用户表达顺序保留。
+  const snapshot = record.snapshot;
+  const semantic = {
+    caseId: record.caseId,
+    sourceId: record.sourceId,
+    sourceLabel: record.sourceLabel,
+    title: record.title,
+    originalUrl: record.originalUrl,
+    contentState: record.contentState,
+    contentTypeLabel: record.contentTypeLabel,
+    ...(record.language ? { language: record.language } : {}),
+    intent: record.intent,
+    borrowIntent: record.borrowIntent.map((axis) => axis),
+    snapshot: {
+      readStatus: snapshot.readStatus,
+      paragraphs: snapshot.paragraphs.map((paragraph) => ({ id: paragraph.id, text: paragraph.text })),
+      truncated: snapshot.truncated,
+      ...(snapshot.contentSha256 ? { contentSha256: snapshot.contentSha256 } : {}),
+      ...(snapshot.reason ? { reason: snapshot.reason } : {}),
+    },
+  };
+  return createHash("sha256").update(JSON.stringify(semantic)).digest("hex");
+}
+
+function borrowDirectiveFromSelection(record: CaseSelectionRecord): string | undefined {
+  if (record.borrowIntent.length === 0) return undefined;
+  return `参考《${record.title}》（${record.sourceLabel}，${record.contentTypeLabel}）的${record.borrowIntent.join("、")}；只借鉴做法，不改变本次主题与观点。`;
 }
 
 function searchableText(item: StudioCaseSummary): string {

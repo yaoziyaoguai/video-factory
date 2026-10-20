@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { studioApi } from "../src/client/api.js";
-import type { StudioProductionInput } from "../src/shared/api.js";
+import { CASE_SELECTION_RECONFIRM_REQUIRED, type StudioProductionInput } from "../src/shared/api.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -12,6 +12,24 @@ it("preserves structured stale human content identity without inferring it from 
     .mockResolvedValueOnce(new Response(JSON.stringify({ error: "stale human output", recovery: { ...recovery, code: "UNRELATED" } }), { status: 409 })));
   await expect(studioApi.regenerateStale("run-1")).rejects.toMatchObject({ status: 409, recovery });
   await expect(studioApi.regenerateStale("run-1")).rejects.toMatchObject({ status: 409, recovery: undefined });
+});
+
+it("preserves a machine-readable case conflict code without inferring it from the message", async () => {
+  vi.stubGlobal("fetch", vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      error: "参考已过期。",
+      code: CASE_SELECTION_RECONFIRM_REQUIRED,
+    }), { status: 409 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      error: "参考选择已变化，请重新确认。",
+      code: { untrusted: true },
+    }), { status: 409 })));
+
+  await expect(studioApi.caseSelection()).rejects.toMatchObject({
+    status: 409,
+    code: CASE_SELECTION_RECONFIRM_REQUIRED,
+  });
+  await expect(studioApi.caseSelection()).rejects.toMatchObject({ status: 409, code: undefined });
 });
 
 describe("source supplement client API", () => {

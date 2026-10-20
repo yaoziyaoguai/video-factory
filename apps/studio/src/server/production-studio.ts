@@ -657,6 +657,36 @@ export class ProductionStudio {
     return this.verifiedReferenceVideoForRun(source, sourceBrief);
   }
 
+  /**
+   * 案例返工只继承来源制作已落盘的服务端快照，不能借缺少指纹的旧表单去读取当前全局选择。
+   * 完整返工合同仍由 start() 内的 assertReworkSource 统一核对；这里仅为重建可信案例输入提前核对来源身份。
+   */
+  async loadInheritedCaseReference(input: unknown, caseSelectionId: string): Promise<{
+    articleSources: NonNullable<ProductionBrief["articleSources"]>;
+    directive: string | undefined;
+  } | undefined> {
+    if (!isRecord(input) || !isRecord(input.rework)) return undefined;
+    const sourceRunId = typeof input.rework.sourceRunId === "string" ? input.rework.sourceRunId : "";
+    const sourceRunRevision = Number(input.rework.sourceRunRevision);
+    if (!sourceRunId || !Number.isInteger(sourceRunRevision) || sourceRunRevision < 0) return undefined;
+    let source: WorkflowRun<ProductionBrief>;
+    try {
+      source = await this.options.pipeline.show(sourceRunId);
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) return undefined;
+      throw error;
+    }
+    if (source.revision !== sourceRunRevision) return undefined;
+    const sourceBrief = parsePersistedBrief(source.initialInput);
+    if (sourceBrief.creationContext?.origin !== "case"
+      || sourceBrief.creationContext.caseSelectionId !== caseSelectionId
+      || !sourceBrief.articleSources?.length) return undefined;
+    return {
+      articleSources: structuredClone(sourceBrief.articleSources),
+      directive: sourceBrief.creationContext.caseReferenceDirective,
+    };
+  }
+
   private async verifiedReferenceVideoForRun(
     run: WorkflowRun<ProductionBrief>,
     brief: ProductionBrief,

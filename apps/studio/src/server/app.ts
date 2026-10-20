@@ -1304,6 +1304,7 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
     }
     if (error instanceof StudioConflictError || error instanceof DocumentCommandConflictError) {
       void reply.code(409).send({ error: error.message,
+        ...(error instanceof StudioConflictError && error.code ? { code: error.code } : {}),
         ...(error instanceof StudioConflictError && error.recovery ? { recovery: error.recovery } : {}),
       });
       return;

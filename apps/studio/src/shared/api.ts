@@ -344,7 +344,12 @@ export interface StudioCaseSelection {
   /** 用户补充的本次创作意图。 */
   intent: string;
   selectedAt: string;
+  /** 当前参考内容的服务端身份；新建案例制作必须原样带回。 */
+  selectionFingerprint?: string;
 }
+
+/** 案例准备表单所见参考已无法核对，客户端应重新读取并让用户再次确认。 */
+export const CASE_SELECTION_RECONFIRM_REQUIRED = "CASE_SELECTION_RECONFIRM_REQUIRED";
 
 export interface StudioTrendSource {
   id: string;
@@ -2278,6 +2283,8 @@ export type StudioProductionInput = DurationIntent & {
     /** origin 为 case 时为空串：案例来源绑定的是服务端保存的参考，不是选题候选。 */
     opportunityId: string;
     caseSelectionId?: string;
+    /** 校验本次准备表单所见参考；只用于请求边界，不写入制作合同。 */
+    caseSelectionFingerprint?: string;
   };
   rework?: StudioReworkContext;
   voiceDirection?: StudioVoiceDirection;

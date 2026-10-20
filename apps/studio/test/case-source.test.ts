@@ -405,4 +405,77 @@ describe("CaseStudio", () => {
     // 移除后不得再被规划读到。
     await assert.rejects(() => new CaseStudio(options).articleSourcesFor("ted:one"), /重新选择/);
   });
+
+  it("keys the selection fingerprint on consumed content, not on observation timestamps", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-case-fingerprint-"));
+    let at = new Date("2026-10-19T00:00:00Z");
+    let bodyText = "第一版正文。";
+    // 同一条案例先以 title-only、再以有正文形态读取：正文是实际消费内容，变化必须体现在指纹里。
+    const sources: CaseSource[] = [
+      {
+        sourceId: "bilibili",
+        label: "哔哩哔哩",
+        list: async () => ({
+          items: [{
+            ...sampleItem("bilibili:BV1"),
+            sourceId: "bilibili",
+            sourceLabel: "哔哩哔哩",
+            contentState: "video_only",
+            contentTypeLabel: "仅视频信息",
+          }],
+        }),
+        readDetail: async (item: StudioCaseSummary): Promise<StudioCaseDetail> => ({
+          item,
+          transcript: {
+            state: "unavailable",
+            paragraphs: [],
+            truncated: false,
+            reason: "该平台只公开视频信息，没有可自动取得的正文。",
+            usageNote: "note",
+          },
+        }),
+      },
+      {
+        sourceId: "ted",
+        label: "TED",
+        list: async () => ({ items: [sampleItem("ted:one")] }),
+        readDetail: async (item: StudioCaseSummary): Promise<StudioCaseDetail> => ({
+          item: { ...item, contentState: "transcript", contentTypeLabel: "原站逐字稿" },
+          transcript: {
+            state: "read",
+            language: "zh",
+            paragraphs: [{ id: "p1", text: bodyText }],
+            truncated: false,
+            usageNote: "note",
+          },
+        }),
+      },
+    ];
+    const options = {
+      cacheRoot: path.join(root, "cache"),
+      selectionPath: path.join(root, "selection.json"),
+      now: () => at,
+      sources,
+    };
+    const cases = new CaseStudio(options);
+    const input = { caseId: "bilibili:BV1", intent: "同样的主题", borrowIntent: ["开场方式"] };
+    const first = await cases.saveSelection(input);
+    // 同内容重选只晚了一秒（title-only 快照的 fetchedAt 会随采集时间变化）：不应制造 stale 冲突。
+    at = new Date(at.getTime() + 1000);
+    const second = await cases.saveSelection(input);
+    assert.equal(second.selectionFingerprint, first.selectionFingerprint);
+    // 重启后从磁盘重读同一条记录：指纹稳定，不因进程内状态变化。
+    assert.equal((await new CaseStudio(options).getSelection())?.selectionFingerprint, first.selectionFingerprint);
+
+    // 实际消费内容变化仍必须冲突：意图、借鉴方式顺序（说明按序拼接，顺序即语义）、正文。
+    const changedIntent = await cases.saveSelection({ ...input, intent: "另一个主题" });
+    assert.notEqual(changedIntent.selectionFingerprint, first.selectionFingerprint);
+    const reorderedBorrow = await cases.saveSelection({ caseId: "ted:one", intent: "同样的主题", borrowIntent: ["结尾回收", "开场方式"] });
+    const orderedBorrow = await cases.saveSelection({ caseId: "ted:one", intent: "同样的主题", borrowIntent: ["开场方式", "结尾回收"] });
+    assert.notEqual(reorderedBorrow.selectionFingerprint, orderedBorrow.selectionFingerprint);
+    const beforeBodyChange = await cases.saveSelection({ caseId: "ted:one", intent: "同样的主题", borrowIntent: ["开场方式"] });
+    bodyText = "改过的正文。";
+    const afterBodyChange = await cases.saveSelection({ caseId: "ted:one", intent: "同样的主题", borrowIntent: ["开场方式"] });
+    assert.notEqual(afterBodyChange.selectionFingerprint, beforeBodyChange.selectionFingerprint);
+  });
 });

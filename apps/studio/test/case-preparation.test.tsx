@@ -140,6 +140,32 @@ describe("case preparation form", () => {
     expect(input.creationContext).toEqual({ origin: "case", opportunityId: "", caseSelectionId: "case-sel-1" });
   });
 
+  // CDF-04：表单校验用的参考身份必须原样随 creationContext 提交，不在这里被过滤或改写。
+  it("passes the case selection fingerprint through to the submitted creation context (CDF-04)", async () => {
+    const onSubmit = vi.fn(async (_input: StudioProductionInput) => undefined);
+    render(<NewRunDialog
+      open
+      providers={providers}
+      initialValues={{
+        title: "",
+        angle: "案例角度",
+        creationContext: { origin: "case", opportunityId: "", caseSelectionId: "case-sel-1", caseSelectionFingerprint: "fp-case-sel-1" },
+      }}
+      onClose={() => undefined}
+      onSubmit={onSubmit}
+    />);
+    await userEvent.type(screen.getByLabelText(/视频标题/), "带身份的标题");
+    await userEvent.click(screen.getByRole("button", { name: /开始前期构思/ }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    const input = onSubmit.mock.calls[0]![0] as StudioProductionInput;
+    expect(input.creationContext).toEqual({
+      origin: "case",
+      opportunityId: "",
+      caseSelectionId: "case-sel-1",
+      caseSelectionFingerprint: "fp-case-sel-1",
+    });
+  });
+
   it("does not overwrite typed fields when providers arrive late (V11)", async () => {
     vi.spyOn(studioApi, "templates").mockResolvedValue({ storeRevision: 0, templates: [] });
     vi.spyOn(studioApi, "voices").mockResolvedValue([]);

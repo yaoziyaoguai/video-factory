@@ -1,7 +1,7 @@
 import { ArrowRight, Check, ExternalLink, Loader2, RefreshCw, Search, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { STUDIO_CASE_BORROW_AXES } from "../../shared/api.js";
+import { CASE_SELECTION_RECONFIRM_REQUIRED, STUDIO_CASE_BORROW_AXES } from "../../shared/api.js";
 import type {
   StudioCaseCatalog,
   StudioCaseDetail,
@@ -11,7 +11,7 @@ import type {
   StudioProductionInput,
   StudioProvider,
 } from "../../shared/api.js";
-import { studioApi } from "../api.js";
+import { StudioApiError, studioApi } from "../api.js";
 import { NewRunDialog } from "../components/NewRunDialog.js";
 
 // 借鉴方式是给人选的固定几项，不是模型生成的建议：它只说明"这条参考的哪个方面值得学"，
@@ -38,6 +38,8 @@ export function CasesPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string>();
   const [selection, setSelection] = useState<StudioCaseSelection>();
+  // 准备表单绑定的是"打开表单时"的保存响应；共享 selection 会被首屏晚到的 GET 更新，不能拿它当表单身份。
+  const [dialogSelection, setDialogSelection] = useState<StudioCaseSelection>();
   const [intent, setIntent] = useState("");
   const [borrowIntent, setBorrowIntent] = useState<string[]>([]);
   const [selectionError, setSelectionError] = useState<string>();
@@ -149,13 +151,25 @@ export function CasesPage() {
     setSaving(true);
     setSelectionError(undefined);
     try {
-      setSelection(await studioApi.selectCase({ caseId: detail.item.id, intent, borrowIntent }));
-      setDialogOpen(true);
+      const record = await studioApi.selectCase({ caseId: detail.item.id, intent, borrowIntent });
+      setSelection(record);
+      openPreparationForm(record);
     } catch (caught) {
       setSelectionError(caught instanceof Error ? caught.message : "保存参考内容失败。");
     } finally {
       setSaving(false);
     }
+  }
+
+  // 表单只在服务端返回参考身份（selectionFingerprint）时打开：没有身份就不发送无指纹请求。
+  function openPreparationForm(record: StudioCaseSelection) {
+    if (!record.selectionFingerprint) {
+      setSelectionError("这次保存的参考没有返回内容身份（可能是旧版服务）。请刷新案例后重新选择，再开始创作。");
+      setDialogOpen(false);
+      return;
+    }
+    setDialogSelection(record);
+    setDialogOpen(true);
   }
 
   async function removeSelection() {
@@ -172,6 +186,19 @@ export function CasesPage() {
     const result = await studioApi.start(input);
     setDialogOpen(false);
     navigate(`/projects/${result.runId}`);
+  }
+
+  async function recoverDialogSelection() {
+    const latest = await studioApi.caseSelection();
+    if (!latest?.selectionFingerprint) {
+      throw new Error("当前参考已经被移除或缺少内容身份，请关闭制作表单后重新选择案例。");
+    }
+    if (!dialogSelection || latest.caseId !== dialogSelection.caseId) {
+      throw new Error("另一个页面已经换了参考案例。请关闭制作表单，核对案例后重新开始。");
+    }
+    // 仅在用户明确点击确认后换绑服务端身份；NewRunDialog 已初始化的本地草稿不会被重置。
+    setSelection(latest);
+    setDialogSelection(latest);
   }
 
   const facets = catalog?.facets;
@@ -223,7 +250,7 @@ export function CasesPage() {
               setBorrowIntent(record.borrowIntent);
               const item = catalog?.items.find((candidate) => candidate.id === record.caseId);
               if (item) void openDetail(item);
-              else setDialogOpen(true);
+              else openPreparationForm(record);
             }}>修改</button>
             <button className="button" type="button" onClick={() => void removeSelection()}>移除</button>
           </div>
@@ -410,7 +437,7 @@ export function CasesPage() {
         </section>
       </div>
 
-      {detail && selection && selection.caseId === detail.item.id ? (
+      {detail && dialogSelection && dialogSelection.caseId === detail.item.id ? (
         <NewRunDialog
           open={dialogOpen}
           providers={providers}
@@ -422,13 +449,27 @@ export function CasesPage() {
             // CLOUD-08：案例入口标题留空由用户命名；完整创作意图保存在内容角度里，
             // 不再让同一段文字同时充当标题与角度。
             title: "",
-            angle: selection.intent,
+            angle: dialogSelection.intent,
             ...(creatorSettings?.productionDefaults.platform ? { platform: creatorSettings.productionDefaults.platform } : {}),
             ...(creatorSettings?.productionDefaults.durationSeconds ? { durationSeconds: creatorSettings.productionDefaults.durationSeconds } : {}),
-            creationContext: { origin: "case", opportunityId: "", caseSelectionId: selection.caseId },
+            // 案例身份与校验指纹都来自打开表单时的保存响应快照，不随共享选择变化。
+            creationContext: {
+              origin: "case",
+              opportunityId: "",
+              caseSelectionId: dialogSelection.caseId,
+              ...(dialogSelection.selectionFingerprint ? { caseSelectionFingerprint: dialogSelection.selectionFingerprint } : {}),
+            },
           }}
-          onClose={() => setDialogOpen(false)}
+          onClose={() => { setDialogOpen(false); setDialogSelection(undefined); }}
           onSubmit={startProduction}
+          submissionRecovery={{
+            shouldOffer: (caught) => caught instanceof StudioApiError
+              && caught.status === 409
+              && caught.code === CASE_SELECTION_RECONFIRM_REQUIRED,
+            actionLabel: "重新读取参考并确认",
+            successMessage: "参考已重新读取并确认；标题、内容角度和其它表单修改已保留。请核对后再次开始。",
+            recover: recoverDialogSelection,
+          }}
         />
       ) : null}
     </main>

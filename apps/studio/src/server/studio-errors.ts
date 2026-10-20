@@ -6,7 +6,11 @@ export class StudioNotFoundError extends Error {
 }
 
 export class StudioConflictError extends Error {
-  constructor(message: string, readonly recovery?: StudioStaleHumanContentRecovery) {
+  constructor(
+    message: string,
+    readonly recovery?: StudioStaleHumanContentRecovery,
+    readonly code?: string,
+  ) {
     super(message);
     this.name = "StudioConflictError";
   }

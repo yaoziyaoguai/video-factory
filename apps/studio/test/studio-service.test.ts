@@ -27,7 +27,7 @@ import { CaseStudio } from "../src/server/case-studio.js";
 import { JsonRunArchiveStore } from "../src/server/run-archive-store.js";
 import { loadAgentLoopProgress, ProductionStudio, productionInputMessage, productionScopeContent } from "../src/server/production-studio.js";
 import { buildStudioApp } from "../src/server/app.js";
-import type { StudioDecisionInput, StudioOpportunityInput, StudioProvider, StudioSeries, StudioSeriesEpisode } from "../src/shared/api.js";
+import { CASE_SELECTION_RECONFIRM_REQUIRED, type StudioDecisionInput, type StudioOpportunityInput, type StudioProvider, type StudioSeries, type StudioSeriesEpisode } from "../src/shared/api.js";
 
 class StudioService extends ProductionStudioService {
   constructor(options: ConstructorParameters<typeof ProductionStudioService>[0]) {
@@ -576,6 +576,171 @@ describe("StudioService", () => {
     }
   });
 
+  it("rejects an old case form when another tab changed the same case's borrow intent", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-case-form-identity-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const item = { id: "ted:case-tabs", sourceId: "ted" as const, sourceLabel: "TED", title: "双标签参考",
+      originalUrl: "https://example.test/case-tabs", contentState: "transcript" as const, contentTypeLabel: "逐字稿",
+      topics: [], metrics: [], metricsFetchedAt: "2026-10-19T00:00:00Z", usageNote: "受控参考" };
+    const cases = new CaseStudio({ cacheRoot: path.join(workspaceRoot, "case-cache"), selectionPath: path.join(workspaceRoot, "selection.json"),
+      now: () => new Date("2026-10-19T00:00:00Z"),
+      sources: [{ sourceId: "ted", label: "TED", list: async () => ({ items: [item] }),
+        readDetail: async () => ({ item, transcript: { state: "read", fetchedAt: "2026-10-19T00:00:00Z",
+          paragraphs: [{ id: "p1", text: "来自服务端的参考正文" }], truncated: false, usageNote: "受控参考" } }) }] });
+    const service = new StudioService({ workspaceRoot, pipeline, cases, environment: {}, commandAvailable: allCommandsAvailable });
+    try {
+      const first = await service.selectCase({ caseId: item.id, intent: "A 的创作意图", borrowIntent: ["开场方式"] });
+      const firstInput = { ...brief, angle: first.intent, creationContext: {
+        origin: "case", opportunityId: "", caseSelectionId: item.id,
+        caseSelectionFingerprint: first.selectionFingerprint ?? "a".repeat(64),
+      } };
+      const second = await service.selectCase({ caseId: item.id, intent: "B 的创作意图", borrowIntent: ["结尾回收"] });
+      const before = pipeline.dispatchCount;
+      await assert.rejects(() => service.startRun(firstInput), /参考选择已变化.*重新/);
+      assert.equal(pipeline.dispatchCount, before, "旧表单不能带着另一标签的借鉴意图开工");
+      assert.equal(first.selectedAt, second.selectedAt, "固定时钟证明身份不能只用选择时间");
+      assert.match(first.selectionFingerprint ?? "", /^[a-f0-9]{64}$/);
+      assert.notEqual(first.selectionFingerprint, second.selectionFingerprint);
+
+      await service.startRun({ ...brief, angle: second.intent, creationContext: {
+        origin: "case", opportunityId: "", caseSelectionId: item.id, caseSelectionFingerprint: second.selectionFingerprint,
+      } });
+      const accepted = pipeline.lastInput as ProductionBrief;
+      assert.match(accepted.angle, /B 的创作意图.*\n.*结尾回收/s);
+      assert.equal(accepted.articleSources?.[0]?.paragraphs[0]?.text, "来自服务端的参考正文");
+      assert.equal("caseSelectionFingerprint" in accepted.creationContext!, false,
+        "表单校验身份不写进制作合同；返工从来源制作的可信快照继承参考");
+    } finally { await rm(workspaceRoot, { recursive: true, force: true }); }
+  });
+
+  it("maps case form identity checks onto HTTP statuses without bypassing on malformed fingerprints", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-case-route-identity-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const item = { id: "ted:case-route", sourceId: "ted" as const, sourceLabel: "TED", title: "路由身份参考",
+      originalUrl: "https://example.test/case-route", contentState: "transcript" as const, contentTypeLabel: "逐字稿",
+      topics: [], metrics: [], metricsFetchedAt: "2026-10-19T00:00:00Z", usageNote: "受控参考" };
+    const cases = new CaseStudio({ cacheRoot: path.join(workspaceRoot, "case-cache"), selectionPath: path.join(workspaceRoot, "selection.json"),
+      now: () => new Date("2026-10-19T00:00:00Z"),
+      sources: [{ sourceId: "ted", label: "TED", list: async () => ({ items: [item] }),
+        readDetail: async () => ({ item, transcript: { state: "read", fetchedAt: "2026-10-19T00:00:00Z",
+          paragraphs: [{ id: "p1", text: "来自路由测试的服务端参考正文" }], truncated: false, usageNote: "受控参考" } }) }] });
+    const service = new StudioService({ workspaceRoot, pipeline, cases, environment: {}, commandAvailable: allCommandsAvailable });
+    const app = buildStudioApp({ service, logger: false });
+    try {
+      const staleSelection = await service.selectCase({ caseId: item.id, intent: "旧标签的借鉴意图", borrowIntent: ["开场方式"] });
+      const current = await service.selectCase({ caseId: item.id, intent: "新标签的借鉴意图", borrowIntent: ["结尾回收"] });
+      const post = (fingerprint: unknown, key: string) => app.inject({ method: "POST", url: "/api/runs",
+        headers: { "idempotency-key": key },
+        payload: { ...brief, angle: "路由层校验的借鉴角度", creationContext: {
+          origin: "case", opportunityId: "", caseSelectionId: item.id, caseSelectionFingerprint: fingerprint } } });
+
+      // 新请求省略指纹：409 + 稳定机器码，不得静默绑定当前全局选择。
+      const missing = await post(undefined, "b1-route-missing-1");
+      assert.equal(missing.statusCode, 409, missing.body);
+      assert.equal(missing.json().code, CASE_SELECTION_RECONFIRM_REQUIRED);
+      assert.equal(pipeline.dispatchCount, 0, "缺少指纹的新请求不能进入制作派发");
+
+      // 旧表单指纹：409 + 可读原因，不产生任何制作任务。
+      const stale = await post(staleSelection.selectionFingerprint, "b1-route-stale-1");
+      assert.equal(stale.statusCode, 409, stale.body);
+      assert.equal(stale.json().code, CASE_SELECTION_RECONFIRM_REQUIRED);
+      assert.match(stale.json().error, /参考选择已变化.*重新/);
+      assert.equal(pipeline.dispatchCount, 0, "旧指纹必须在校验层被拦下，不能进入制作派发");
+
+      // 当前指纹：正常 202 开工。
+      const accepted = await post(current.selectionFingerprint, "b1-route-valid-1");
+      assert.equal(accepted.statusCode, 202, accepted.body);
+      assert.equal(pipeline.dispatchCount, 1);
+
+      // 畸形指纹一律拒绝：不绕过校验、不变成 500、也不再派发。
+      const malformed: Array<[string, unknown]> = [
+        ["number", 12345],
+        ["null", null],
+        ["empty", ""],
+        ["oversized", "f".repeat(5000)],
+      ];
+      for (const [label, value] of malformed) {
+        const response = await post(value, `b1-route-malformed-${label}-1`);
+        assert.equal(response.statusCode, 409,
+          `${label} 指纹必须以可恢复冲突拒绝，不能绕过校验或变成 500`);
+        assert.equal(response.json().code, CASE_SELECTION_RECONFIRM_REQUIRED);
+        assert.ok(response.json().error, `${label} 指纹拒绝时必须给出可读原因`);
+      }
+      assert.equal(pipeline.dispatchCount, 1, "所有畸形指纹都不能产生新的制作任务");
+    } finally {
+      await app.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps case trust boundaries across forged fields, switched cases and idempotent replays", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-case-trust-"));
+    const pipeline = new FakePipeline(waitingRun(workspaceRoot));
+    const items = [
+      { id: "ted:case-a", sourceId: "ted" as const, sourceLabel: "TED", title: "参考 A",
+        originalUrl: "https://example.test/a", contentState: "transcript" as const, contentTypeLabel: "逐字稿",
+        topics: [], metrics: [], metricsFetchedAt: "2026-10-19T00:00:00Z", usageNote: "受控参考" },
+      { id: "ted:case-b", sourceId: "ted" as const, sourceLabel: "TED", title: "参考 B",
+        originalUrl: "https://example.test/b", contentState: "transcript" as const, contentTypeLabel: "逐字稿",
+        topics: [], metrics: [], metricsFetchedAt: "2026-10-19T00:00:00Z", usageNote: "受控参考" },
+    ];
+    const transcriptText = (caseId: string) => (caseId === "ted:case-a" ? "服务端保存的参考正文 A" : "服务端保存的参考正文 B");
+    const cases = new CaseStudio({ cacheRoot: path.join(workspaceRoot, "case-cache"), selectionPath: path.join(workspaceRoot, "selection.json"),
+      now: () => new Date("2026-10-19T00:00:00Z"),
+      sources: [{ sourceId: "ted", label: "TED", list: async () => ({ items }),
+        readDetail: async (summary: { id: string }) => {
+          const detail = items.find((candidate) => candidate.id === summary.id)!;
+          return { item: detail, transcript: { state: "read" as const, fetchedAt: "2026-10-19T00:00:00Z",
+            paragraphs: [{ id: "p1", text: transcriptText(detail.id) }], truncated: false, usageNote: "受控参考" } };
+        } }] });
+    const service = new StudioService({ workspaceRoot, pipeline, cases, environment: {}, commandAvailable: allCommandsAvailable });
+    const app = buildStudioApp({ service, logger: false });
+    try {
+      const selection = await service.selectCase({ caseId: "ted:case-a", intent: "A 的创作意图", borrowIntent: ["开场方式"] });
+
+      // 客户端伪造 articleSources 与派生说明：服务端必须整体替换，不采信任何客户端正文。
+      const payload = { ...brief, angle: "用户自己写的借鉴角度", creationContext: {
+        origin: "case" as const, opportunityId: "", caseSelectionId: "ted:case-a",
+        caseSelectionFingerprint: selection.selectionFingerprint,
+        caseReferenceDirective: "客户端伪造的派生说明" },
+        articleSources: [{ sourceId: "forged", title: "伪造正文", url: "https://forged.test/x",
+          paragraphs: [{ id: "f1", text: "客户端夹带的伪造正文" }], fetchedAt: "2026-10-19T00:00:00Z" }] };
+      const forged = await app.inject({ method: "POST", url: "/api/runs",
+        headers: { "idempotency-key": "b1-trust-forged-1" }, payload });
+      assert.equal(forged.statusCode, 202, forged.body);
+      const acceptedBrief = pipeline.lastInput as ProductionBrief;
+      assert.equal(acceptedBrief.articleSources?.[0]?.paragraphs[0]?.text, "服务端保存的参考正文 A",
+        "客户端 articleSources 必须被服务端快照整体替换");
+      assert.ok(!JSON.stringify(acceptedBrief).includes("客户端夹带的伪造正文"), "伪造正文不能进入制作合同");
+      assert.equal(acceptedBrief.creationContext?.caseReferenceDirective, await cases.borrowDirectiveFor("ted:case-a"),
+        "派生说明只能由服务端按当前可信选择生成");
+      assert.equal("caseSelectionFingerprint" in acceptedBrief.creationContext!, false);
+      assert.match(acceptedBrief.angle, /^用户自己写的借鉴角度/);
+
+      // 幂等重放：选择在重放前被换掉，同键同参仍返回原 run，不重复开工。
+      await service.selectCase({ caseId: "ted:case-b", intent: "B 的创作意图", borrowIntent: [] });
+      const replay = await app.inject({ method: "POST", url: "/api/runs",
+        headers: { "idempotency-key": "b1-trust-forged-1" }, payload });
+      assert.equal(replay.statusCode, 202, replay.body);
+      assert.equal(replay.json().runId, forged.json().runId, "幂等重放必须返回原 run");
+      assert.equal(pipeline.dispatchCount, 1, "重放不能再派发新任务");
+
+      // 换案例后旧表单提交：指向 A 的旧指纹必须被拒绝，而不是读 B 的正文。
+      const before = pipeline.dispatchCount;
+      const switched = await app.inject({ method: "POST", url: "/api/runs",
+        headers: { "idempotency-key": "b1-trust-switch-1" },
+        payload: { ...brief, angle: "还想用旧参考的角度", creationContext: {
+          origin: "case" as const, opportunityId: "", caseSelectionId: "ted:case-a",
+          caseSelectionFingerprint: selection.selectionFingerprint } } });
+      assert.ok(switched.statusCode === 400 || switched.statusCode === 409, switched.body);
+      assert.match(switched.json().error, /重新选择|参考选择已变化/);
+      assert.equal(pipeline.dispatchCount, before, "换案例后旧表单不能开工");
+    } finally {
+      await app.close();
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the user's angle separate from trusted case instructions through repeated rework", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-case-rework-angle-"));
     const pipeline = new FakePipeline({ ...waitingRun(workspaceRoot), status: "failed", nodeRuns: [], artifacts: [] });
@@ -588,10 +753,10 @@ describe("StudioService", () => {
           paragraphs: [{ id: "p1", text: "仅为测试的参考正文" }], truncated: false, usageNote: "受控参考" } }) }] });
     const service = new StudioService({ workspaceRoot, pipeline, cases, environment: {}, commandAvailable: allCommandsAvailable });
     try {
-      await cases.saveSelection({ caseId: item.id, intent: "用户主题", borrowIntent: ["开场方式"] });
+      const selection = await cases.saveSelection({ caseId: item.id, intent: "用户主题", borrowIntent: ["开场方式"] });
       const angle = "我的参考与借鉴观点必须保留，不是系统注释。";
       await service.startRun({ ...brief, angle, creationContext: { origin: "case", opportunityId: "", caseSelectionId: item.id,
-        caseReferenceDirective: angle } });
+        caseSelectionFingerprint: selection.selectionFingerprint, caseReferenceDirective: angle } });
       const first = structuredClone(pipeline.lastInput as ProductionBrief);
       const directive = await cases.borrowDirectiveFor(item.id);
       assert.equal(first.angle, `${angle}\n${directive}`);
@@ -602,21 +767,75 @@ describe("StudioService", () => {
       const second = structuredClone(pipeline.lastInput as ProductionBrief);
       assert.equal(second.angle, first.angle);
       assert.deepEqual(first.articleSources, second.articleSources);
-      pipeline.run = { ...pipeline.run, initialInput: second };
+
+      pipeline.run = { ...pipeline.run, initialInput: second, nodeRuns: [] };
+      const persistedSnapshotDraft = (await service.reworkDraft(pipeline.run.id))!;
+      const editedBrief = {
+        ...second,
+        creationContext: {
+          ...second.creationContext!,
+          caseSelectionId: "ted:case-edited-after-draft",
+          caseReferenceDirective: "有效 brief 后来写入的错误说明",
+        },
+        articleSources: second.articleSources!.map((source) => ({
+          ...source,
+          paragraphs: source.paragraphs.map((paragraph) => ({
+            ...paragraph,
+            text: "有效 brief 后来写入的错误正文，不能被返工继承",
+          })),
+        })),
+      } satisfies ProductionBrief;
+      pipeline.run = {
+        ...pipeline.run,
+        initialInput: second,
+        nodeRuns: [{
+          nodeId: "brief",
+          status: "succeeded",
+          output: editedBrief,
+          artifactIds: [],
+          qualityGateResults: [],
+          outputState: {
+            nodeId: "brief",
+            generatedVersionId: "brief-generated",
+            effectiveVersionId: "brief-edited",
+            stale: false,
+            versions: [{
+              id: "brief-edited",
+              nodeId: "brief",
+              source: "human",
+              output: editedBrief,
+              artifactIds: [],
+              inputVersionIds: [],
+              createdAt: "2026-10-13T00:00:00Z",
+              createdBy: "owner",
+              schemaVersion: "video-factory/brief-v1",
+            }],
+          },
+        }],
+      };
+      await service.startRun(persistedSnapshotDraft.input);
+      const inheritedFromInitialInput = structuredClone(pipeline.lastInput as ProductionBrief);
+      assert.deepEqual(inheritedFromInitialInput.articleSources, second.articleSources,
+        "返工只继承 initialInput 中的服务端正文快照，不能读取后来编辑的有效 brief");
+      assert.equal(inheritedFromInitialInput.creationContext?.caseReferenceDirective, directive,
+        "返工只继承 initialInput 中的服务端派生说明，不能读取后来编辑的有效 brief");
+      pipeline.run = { ...pipeline.run, initialInput: second, nodeRuns: [] };
       const next = (await service.reworkDraft(pipeline.run.id))!;
       next.input.angle = "用户重新写的参考角度，不得按关键词删改。";
       await cases.saveSelection({ caseId: item.id, intent: "新主题", borrowIntent: ["结尾回收"] });
       await service.startRun(next.input);
       const third = pipeline.lastInput as ProductionBrief;
-      assert.equal(third.angle, `${next.input.angle}\n${await cases.borrowDirectiveFor(item.id)}`);
-      assert.ok(!third.angle.includes("的开场方式；"));
+      assert.equal(third.angle, `${next.input.angle}\n${directive}`,
+        "返工只继承来源制作的可信案例快照，不能换绑当前全局选择");
+      assert.deepEqual(third.articleSources, first.articleSources);
+      assert.ok(!third.angle.includes("的结尾回收；"));
       assert.equal(first.angle, `${angle}\n${directive}`, "原制作不可被返工改写");
       pipeline.run = { ...pipeline.run, initialInput: structuredClone(third) };
       const withoutBorrow = (await service.reworkDraft(pipeline.run.id))!;
       await cases.saveSelection({ caseId: item.id, intent: "只读参考正文", borrowIntent: [] });
       await service.startRun(withoutBorrow.input);
-      assert.equal((pipeline.lastInput as ProductionBrief).angle, next.input.angle);
-      assert.equal((pipeline.lastInput as ProductionBrief).creationContext?.caseReferenceDirective, undefined);
+      assert.equal((pipeline.lastInput as ProductionBrief).angle, third.angle);
+      assert.equal((pipeline.lastInput as ProductionBrief).creationContext?.caseReferenceDirective, directive);
 
       // 无派生标记的历史稿不迁移、不猜旧说明；当前精确说明仍不能再重复追加。
       const historical = structuredClone(first);
@@ -634,14 +853,28 @@ describe("StudioService", () => {
         assert.equal(saved.angle, flattened.angle, "已含当前完整说明时不重复追加");
         pipeline.run = { ...pipeline.run, initialInput: saved };
         const nextDraft = (await service.reworkDraft(pipeline.run.id))!;
-        assert.equal(nextDraft.input.angle, angle, "只去掉可信末尾说明，保留用户原话");
+        assert.equal(nextDraft.input.angle, flattened.angle,
+          "历史来源没有可信说明身份时不猜测或删除用户文字");
         await service.startRun(nextDraft.input);
-        assert.equal((pipeline.lastInput as ProductionBrief).angle, first.angle);
+        assert.equal((pipeline.lastInput as ProductionBrief).angle, flattened.angle);
       }
       await cases.clearSelection();
       const before = pipeline.dispatchCount;
-      await assert.rejects(() => service.startRun(next.input), /重新选择/);
-      assert.equal(pipeline.dispatchCount, before, "参考不存在时不能偷用旧正文或启动新制作");
+      await service.startRun(next.input);
+      assert.equal(pipeline.dispatchCount, before + 1, "当前选择已移除时仍可使用来源制作的可信快照返工");
+      assert.deepEqual((pipeline.lastInput as ProductionBrief).articleSources, first.articleSources);
+
+      const withoutTrustedSnapshot = structuredClone(first);
+      delete withoutTrustedSnapshot.articleSources;
+      pipeline.run = { ...pipeline.run, initialInput: withoutTrustedSnapshot };
+      const unsafeDraft = (await service.reworkDraft(pipeline.run.id))!;
+      const beforeUnsafe = pipeline.dispatchCount;
+      await assert.rejects(() => service.startRun(unsafeDraft.input), (error: unknown) => {
+        assert.ok(error instanceof StudioConflictError);
+        assert.equal(error.code, CASE_SELECTION_RECONFIRM_REQUIRED);
+        return true;
+      });
+      assert.equal(pipeline.dispatchCount, beforeUnsafe, "缺少可信案例快照的历史返工不能绑定当前选择或派发");
     } finally { await rm(workspaceRoot, { recursive: true, force: true }); }
   });
 
