@@ -1009,7 +1009,7 @@ describe("CostStudio execution-summary coverage (postdogfood B1)", () => {
     operationId: "planning-operation", evidenceSource: "checkpoint",
     trace: { providerId: "deepseek", modelId: "deepseek-flash", modelAttemptCount: 1 }, ...overrides,
   });
-  const build = async (facts: ReturnType<typeof fact>[], issues: string[] = [], receipt = summaryReceipt()) => {
+  const build = async (facts: ReturnType<typeof fact>[], issues: string[] = [], receipt: Record<string, unknown> = summaryReceipt()) => {
     const run = { id: "summary-coverage", initialInput: { title: "汇总覆盖" }, nodeRuns: [],
       executionReceipts: [structuredClone(receipt)] };
     const studio = new CostStudio(async () => [run], undefined, undefined, undefined,
@@ -1058,6 +1058,123 @@ describe("CostStudio execution-summary coverage (postdogfood B1)", () => {
     assert.equal(retained?.callCountPending, true);
     assert.equal(noFacts?.totals.countExact, false);
     assert.equal(noFacts?.totals.legacyUnattributedReceipts, 1);
+  });
+
+  it("does not count a zero-call operation with explicitly rejected requests as a pending model bill", async () => {
+    const rejected = fact("rejected-before-model", { state: "not_accepted", trace: undefined });
+    const receipt = { ...summaryReceipt(), parameters: { accountingSource: "execution_summary", modelCallCount: 0 } };
+    const result = await build([rejected], [], receipt);
+    assert.equal(result?.totals.verifiedModelAttempts, 0);
+    assert.equal(result?.totals.actualPendingCount, 0, "确定未受理的零调用操作不是待核模型金额");
+    assert.equal(result?.totals.legacyUnattributedReceipts, 0);
+    assert.equal(result?.totals.countExact, true);
+    assert.equal(result?.executionFacts?.[0]?.state, "not_accepted", "原拒收事实仍可追踪");
+  });
+
+  it("does not turn a fully recorded zero-call human stop into a pending model bill", async () => {
+    const receipt = { ...summaryReceipt(), status: "needs_human", finishedAt: "2026-10-17T12:00:01Z",
+      parameters: { accountingSource: "execution_summary", modelCallCount: 0, producerModelCallCount: 0,
+        auditModelCallCount: 0, discussionModelCallCount: 0, structuredRepairModelCallCount: 0,
+        unknownModelExecutionCount: 0 } };
+    const result = await build([], [], receipt);
+    assert.equal(result?.totals.actualPendingCount, 0, "完整零调用的人工作业不新增模型账单疑项");
+    assert.equal(result?.totals.legacyUnattributedReceipts, 0);
+    assert.equal(result?.totals.verifiedModelAttempts, 0);
+    assert.equal(result?.totals.countExact, true);
+    assert.equal(result?.lines.some(line => line.id === "summary"), false);
+    assert.equal(receipt.parameters.modelCallCount, 0, "只读投影不修改原回执");
+  });
+
+  it("keeps incomplete, unknown, unassigned and conflicting zero-call evidence pending", async () => {
+    const zero = { ...summaryReceipt(), status: "needs_human", finishedAt: "2026-10-17T12:00:01Z",
+      parameters: { accountingSource: "execution_summary", modelCallCount: 0, producerModelCallCount: 0,
+        auditModelCallCount: 0, discussionModelCallCount: 0, structuredRepairModelCallCount: 0,
+        unknownModelExecutionCount: 0 } };
+    const incomplete = { ...zero, parameters: { ...zero.parameters, unknownModelExecutionCount: undefined } };
+    const rejected = fact("rejected", { state: "not_accepted", trace: undefined });
+    const unknown = fact("uncertain", { state: "accepted_unknown",
+      trace: { providerId: "deepseek", modelId: "deepseek-flash", modelAttemptCount: 0 } });
+    const { operationId: _unassigned, ...unowned } = unknown;
+    const scenarios = [
+      { label: "缺分类不能猜零", receipt: incomplete, facts: [], issues: [] },
+      { label: "未知次数非零", receipt: { ...zero, parameters: { ...zero.parameters, unknownModelExecutionCount: 1 } }, facts: [], issues: [] },
+      { label: "原摘要待核", receipt: { ...zero, parameters: { ...zero.parameters, executionSummaryPending: true } }, facts: [], issues: [] },
+      { label: "仍在执行", receipt: { ...zero, status: "running" }, facts: [], issues: [] },
+      { label: "未结束", receipt: { ...zero, finishedAt: undefined }, facts: [], issues: [] },
+      { label: "缺操作身份", receipt: { ...zero, requestId: "" }, facts: [], issues: [] },
+      { label: "缺读档证据", receipt: zero, facts: [], issues: ["checkpoint unreadable"] },
+      { label: "同操作真实未知", receipt: zero, facts: [unknown], issues: [] },
+      { label: "未归属物理请求", receipt: zero, facts: [unowned], issues: [] },
+      { label: "拒收事实冲突", receipt: zero, facts: [{ ...rejected, conflict: true as const }], issues: [] },
+      { label: "回执冲突", receipt: { ...zero, countConflict: true }, facts: [], issues: [] },
+      { label: "其它操作拒收不能结清本操作", receipt: { ...summaryReceipt(), parameters: { accountingSource: "execution_summary", modelCallCount: 0 } },
+        facts: [{ ...rejected, operationId: "different-operation" }], issues: [] },
+    ];
+    for (const scenario of scenarios) {
+      const result = await build(scenario.facts, scenario.issues, scenario.receipt);
+      assert.equal(result?.lines.find(line => line.id === "summary")?.callCountPending, true, scenario.label);
+      assert.equal(result?.totals.countExact, false, scenario.label);
+      assert.ok((result?.totals.actualPendingCount ?? 0) > 0, scenario.label);
+    }
+    const run = { id: "no-reader", nodeRuns: [], executionReceipts: [zero] };
+    const noProjection = await new CostStudio(async () => [run]).runDetail(run.id);
+    assert.equal(noProjection?.totals.countExact, false, "没有事实读取器不推断计数完整");
+    assert.ok(noProjection?.lines.some(line => line.id === "summary"), "没有读取器保留原汇总");
+  });
+
+  it("keeps independent money and unrelated unknown requests when a zero-call operation is settled", async () => {
+    const zero = { ...summaryReceipt(), status: "needs_human", finishedAt: "2026-10-17T12:00:01Z",
+      parameters: { accountingSource: "execution_summary", modelCallCount: 0, producerModelCallCount: 0,
+        auditModelCallCount: 0, discussionModelCallCount: 0, structuredRepairModelCallCount: 0,
+        unknownModelExecutionCount: 0 } };
+    for (const actualCostSource of ["configured_rate", "provider_reported", "manual_reconciled"] as const) {
+      for (const facts of [[], [fact("rejected", { state: "not_accepted", trace: undefined })]]) {
+        const result = await build(facts, [], { ...zero, actualCostCny: 7, actualCostSource });
+        assert.equal(result?.totals.actualCostCny, 7);
+        assert.equal(result?.lines.find(line => line.id === "summary")?.actualCostSource, actualCostSource);
+      }
+    }
+    const unrelated = fact("earlier-unknown", { operationId: "earlier-operation", state: "accepted_unknown",
+      trace: { providerId: "deepseek", modelId: "deepseek-flash" } });
+    const result = await build([unrelated], [], zero);
+    assert.equal(result?.lines.some(line => line.id === "summary"), false, "当前完整零调用不增加历史请求疑项");
+    assert.equal(result?.totals.actualPendingCount, 1, "旧操作真正未知请求仍待核");
+    assert.equal(result?.totals.countExact, false);
+    assert.equal(result?.executionFacts?.[0]?.state, "accepted_unknown");
+  });
+
+  it("projects mixed completed, rejected and manual operations consistently in detail and dashboard", async () => {
+    const paidFacts = Array.from({ length: 9 }, (_, index) => fact(`physical-${index}`, { operationId: "generated" }));
+    const rejectedFacts = Array.from({ length: 4 }, (_, index) => fact(`rejected-${index}`, {
+      operationId: `rejected-operation-${index}`, state: "not_accepted", trace: undefined,
+    }));
+    const manual = { ...summaryReceipt(), id: "manual", requestId: "manual-operation", status: "needs_human",
+      finishedAt: "2026-10-17T12:00:01Z", parameters: { accountingSource: "execution_summary", modelCallCount: 0,
+        producerModelCallCount: 0, auditModelCallCount: 0, discussionModelCallCount: 0,
+        structuredRepairModelCallCount: 0, unknownModelExecutionCount: 0 } };
+    const run = { id: "mixed-operations", nodeRuns: [], executionReceipts: [
+      { ...summaryReceipt(), id: "generated", requestId: "generated",
+        parameters: { accountingSource: "execution_summary", modelCallCount: 9 } },
+      ...rejectedFacts.map(item => ({ ...summaryReceipt(), id: item.operationId!, requestId: item.operationId!,
+        parameters: { accountingSource: "execution_summary", modelCallCount: 0 } })), manual,
+    ] };
+    const facts = [...paidFacts, ...rejectedFacts];
+    const before = JSON.stringify({ run, facts });
+    const studio = new CostStudio(async () => [run], undefined, undefined, undefined,
+      async () => ({ facts, issues: [], currentOperationIds: { "creative-planning": "manual-operation" } }));
+    for (const totals of [(await studio.runDetail(run.id))!.totals, (await studio.dashboard()).totals]) {
+      assert.equal(totals.verifiedBrokerRequests, 9);
+      assert.equal(totals.verifiedModelAttempts, 9);
+      assert.equal(totals.actualPendingCount, 9, "只有九条已受理物理请求的金额待核，不再加四拒收和一次手编");
+      assert.equal(totals.legacyUnattributedReceipts, 0);
+      assert.equal(totals.countExact, true, "次数完整不代表现金已核");
+      assert.equal(totals.actualCostCny, 0, "不编造实付金额；仍有九笔actualPending");
+    }
+    const detail = (await studio.runDetail(run.id))!;
+    assert.equal(detail.executionFacts?.length, 13, "四拒收事实没有被改写或删除");
+    assert.equal(detail.lines.length, 9);
+    assert.equal(JSON.stringify({ run, facts }), before);
+    assert.equal(JSON.stringify(detail).includes("zeroCallSummaryIds"), false, "内部零调用判据不扩充API");
   });
 
   it("keeps an independently settled amount on a summary even when counts are covered", async () => {

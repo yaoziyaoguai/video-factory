@@ -95,11 +95,15 @@ export function failedModelCandidateAttempt(
   error: unknown,
   modelId: string,
   providerId: string,
+  requestId?: string,
 ): ModelCandidateAttempt {
   const bridgeError = errorChain(error).find((candidate): candidate is CodexBridgeError => candidate instanceof CodexBridgeError);
+  const modelAttemptCount = bridgeError?.failureDetails?.modelAttemptCount;
   return {
     modelId,
     providerId,
+    ...(requestId ? { requestId } : {}),
+    ...(modelAttemptCount !== undefined ? { modelAttemptCount } : {}),
     outcome: "failed",
     failureStage: bridgeError?.stage ?? "transport",
     failureReason: publicModelFailure(error),

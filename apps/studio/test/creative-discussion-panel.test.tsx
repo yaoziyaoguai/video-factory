@@ -76,6 +76,33 @@ it.each(["unknown", "error"] as const)("DF01 presents one discussion diagnostic 
   expect(screen.getByText("另一个仍有效的素材冲突")).toBeInTheDocument();
 });
 
+// A2：输入合同拒收的安全 fieldPath 诊断按服务端原文完整呈现——面板不得截断或改写
+// 括号/下标形态（payload.currentDocument.scenes[1].narration、request.message 均为白名单变体）。
+describe("input contract diagnostic rendering (A2)", () => {
+  it("shows the full field-path diagnostic verbatim when the operation was not accepted", () => {
+    const detail = "这次讨论/修改没有受理，本次没有执行新的请求；此前已发生的请求与费用以原请求台账为准。当前稿已保留，请查看当前方案后重新选择。"
+      + " 输入校验未通过：第 2 镜旁白（payload.currentDocument.scenes[1].narration），错误代码 input_contract。请检查对应内容；若当前稿可以正常保存仍被拒绝，请保留诊断排查合同，不要重复发送相同请求。";
+    render(<CreativeDiscussionPanel review={review({
+      reviewContinuation: { status: "rejected_operation", reasonCode: "discussion_not_accepted", detail, recordedAt: "now" },
+    })} busy={false} onCommand={vi.fn(async () => undefined)} />);
+    expect(screen.getByText(detail)).toBeInTheDocument();
+    expect(screen.getByText("这次讨论或修改没有完成")).toBeInTheDocument();
+  });
+
+  it("keeps the partial-rejection diagnostic visible while the whole request stays unknown", () => {
+    const detail = "这次讨论/修改的请求结果仍在核实。当前稿已保留；请核对原操作，不要重复发送；核实前费用保持未知。"
+      + " 输入校验未通过：修改意见（request.message），错误代码 input_contract。请检查对应内容；若当前稿可以正常保存仍被拒绝，请保留诊断排查合同，不要重复发送相同请求。";
+    render(<CreativeDiscussionPanel review={review({
+      reviewContinuation: { status: "unknown", reasonCode: "discussion_request_unknown", detail, recordedAt: "now" },
+      pendingConsultation: { commandId: "cmd-pending", allowedActions: ["edit_draft"], targetDraft: { sha256: sha } },
+    })} busy={false} onCommand={vi.fn(async () => undefined)} />);
+    // 整体口径仍是“在核实”：局部拒收诊断与“不自动重试/换模型”并列呈现，不承诺免费。
+    expect(screen.getByText("原讨论或修改仍在核实")).toBeInTheDocument();
+    expect(screen.getByText(detail)).toBeInTheDocument();
+    expect(screen.getByText(/不会自动重试或换模型/)).toBeInTheDocument();
+  });
+});
+
 beforeEach(() => {
   const values = new Map<string, string>();
   Object.defineProperty(window, "localStorage", {

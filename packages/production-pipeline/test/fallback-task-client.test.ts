@@ -76,6 +76,8 @@ describe("FallbackCodexTaskClient", () => {
     assert.deepEqual(result.trace?.modelCandidateAttempts?.map((attempt) => attempt.outcome), ["failed", "succeeded"]);
     assert.equal(openai.calls[0]?.requestId, "topic-request");
     assert.notEqual(deepseek.calls[0]?.requestId, "topic-request");
+    assert.deepEqual(result.trace?.modelCandidateAttempts?.map((attempt) => attempt.requestId),
+      [openai.calls[0]?.requestId, deepseek.calls[0]?.requestId], "候选回执保留各自物理 requestId");
     assert.equal(deepseek.calls[0]?.session?.handle, undefined);
   });
 

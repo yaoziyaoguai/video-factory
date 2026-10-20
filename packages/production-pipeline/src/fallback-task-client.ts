@@ -82,7 +82,7 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
           ...available.filter((candidate) => candidate.providerId !== affinityProviderId),
         ]
       : available;
-    const failures: Array<{ modelId: string; providerId: string; error: unknown }> = [];
+    const failures: Array<{ modelId: string; providerId: string; requestId?: string; error: unknown }> = [];
     for (const [position, candidate] of ordered.entries()) {
       const modelId = preferredModel && (modelForTask(candidate, kind) === preferredModel || candidate.modelCandidates?.includes(preferredModel))
         ? preferredModel : modelForTask(candidate, kind);
@@ -107,7 +107,8 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
           state: bridge?.stage === "completed_failure" ? "completed_failure" : bridge?.stage === "not_accepted" ? "not_accepted" : "unknown",
           ...(bridge?.failureDetails ? { trace: bridge.failureDetails } : {}),
         });
-        failures.push({ modelId, providerId: candidate.providerId, error });
+        failures.push({ modelId, providerId: candidate.providerId,
+          ...(candidateRequestId ? { requestId: candidateRequestId } : {}), error });
         // isModelProviderFailure 对 stage=uncertain 一律返回 false：请求可能已被 durable broker
         // 受理并仍在执行，绝不能为它生成新的 backup requestId（双跑风险），原样上抛。
         if (!isModelProviderFailure(error)) {
@@ -120,7 +121,9 @@ export class FallbackCodexTaskClient extends CodexBridgeClient {
       if (candidateRequestId) await requestOptions.onExecution?.({ requestId: candidateRequestId, state: "completed",
         ...(execution.trace ? { trace: execution.trace } : {}) });
       if (session) this.rememberAffinity(session.key, candidate.providerId);
-      return failures.length > 0 ? withFallbackTrace(execution, failures, modelId, candidate.providerId) : execution;
+      return failures.length > 0
+        ? withFallbackTrace(execution, failures, modelId, candidate.providerId, candidateRequestId)
+        : execution;
     }
     throw new ModelCandidatesExhaustedError(failures);
   }
@@ -169,19 +172,24 @@ function modelForTask(candidate: FallbackTaskClientCandidate, kind: CodexTaskKin
 
 function withFallbackTrace(
   execution: CodexTaskExecution,
-  failures: Array<{ modelId: string; providerId: string; error: unknown }>,
+  failures: Array<{ modelId: string; providerId: string; requestId?: string; error: unknown }>,
   modelId: string,
   providerId: string,
+  requestId: string | undefined,
 ): CodexTaskExecution {
   if (!execution.trace) return execution;
   const failedAttempts = failures.map((failure) => failedModelCandidateAttempt(
     failure.error,
     failure.modelId,
     failure.providerId,
+    failure.requestId,
   ));
   const successfulAttempts: ModelCandidateAttempt[] = execution.trace.modelCandidateAttempts ?? [{
     modelId: execution.trace.modelId || modelId,
     providerId: execution.trace.providerId || providerId,
+    ...(requestId ? { requestId } : {}),
+    ...(execution.trace.modelAttemptCount !== undefined
+      ? { modelAttemptCount: execution.trace.modelAttemptCount } : {}),
     outcome: "succeeded",
   }];
   return {

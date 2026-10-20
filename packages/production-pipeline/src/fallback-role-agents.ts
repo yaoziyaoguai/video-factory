@@ -1,4 +1,4 @@
-import type { CodexTaskExecution, ModelCandidateAttempt } from "./codex-chat.js";
+import type { CodexPreparedOperation, CodexTaskExecution, ModelCandidateAttempt } from "./codex-chat.js";
 import type { ScreenwriterAgent, ScreenwriterAgentInput } from "./codex-screenwriter.js";
 import {
   failedModelCandidateAttempt,
@@ -71,7 +71,7 @@ const DEFAULT_TEXT_AGENT_STAGE_ADMISSION_WINDOW_MS = 2_700_000;
 export class ModelCandidatesExhaustedError extends Error {
   readonly attempts: ModelCandidateAttempt[];
 
-  constructor(readonly failures: Array<{ modelId: string; providerId: string; error: unknown }>) {
+  constructor(readonly failures: Array<{ modelId: string; providerId: string; requestId?: string; error: unknown }>) {
     super(
       `${failures.length} 个候选模型调用未能完成：`
       + failures.map((failure, index) => `${index + 1}. ${failure.modelId} ${publicModelFailure(failure.error)}`).join("；")
@@ -83,6 +83,7 @@ export class ModelCandidatesExhaustedError extends Error {
       failure.error,
       failure.modelId,
       failure.providerId,
+      failure.requestId,
     ));
   }
 }
@@ -270,6 +271,8 @@ async function runCandidates<
     selectedModelId?: string;
     agentLoopCheckpoint?: RoleAgentLoopCheckpoint;
     agentLoopCheckpointForModel?: (modelId: string) => RoleAgentLoopCheckpoint;
+    requestId?: string;
+    beforeSubmit?: (operation: CodexPreparedOperation) => Promise<void>;
   },
 >(
   candidates: Array<RoleCandidate<TAgent>>,
@@ -278,15 +281,24 @@ async function runCandidates<
   execute: (agent: TAgent, input: TInput) => Promise<CodexTaskExecution<unknown>>,
 ): Promise<CodexTaskExecution<unknown>> {
   const ordered = orderCandidates(candidates, selectedModelId);
-  const failures: Array<{ modelId: string; providerId: string; error: unknown }> = [];
+  const failures: Array<{ modelId: string; providerId: string; requestId?: string; error: unknown }> = [];
   const unavailableProviderAccounts = new Set<string>();
   let resumeFrom: AgentLoopTrace | undefined;
   for (const [position, candidate] of ordered.entries()) {
     if (unavailableProviderAccounts.has(candidate.providerId)) continue;
     const modelId = requiredModelId(candidate.agent);
     const candidateInput = inputForCandidate(input, modelId, position, resumeFrom);
+    let physicalRequestId: string | undefined;
+    const originalBeforeSubmit = candidateInput.beforeSubmit;
+    const executionInput = originalBeforeSubmit ? {
+      ...candidateInput,
+      beforeSubmit: async (operation: CodexPreparedOperation) => {
+        physicalRequestId = operation.requestId;
+        await originalBeforeSubmit(operation);
+      },
+    } as TInput : candidateInput;
     try {
-      const execution = await execute(candidate.agent, candidateInput);
+      const execution = await execute(candidate.agent, executionInput);
       if (!execution.trace) {
         throw new Error(`Model candidate '${modelId}' completed without an immutable execution trace.`);
       }
@@ -314,17 +326,22 @@ async function runCandidates<
               failure.error,
               failure.modelId,
               failure.providerId,
+              failure.requestId,
             )),
             {
               modelId: resultTrace.modelId,
               providerId: resultTrace.providerId,
+              ...(physicalRequestId ? { requestId: physicalRequestId } : {}),
+              ...(resultTrace.modelAttemptCount !== undefined
+                ? { modelAttemptCount: resultTrace.modelAttemptCount } : {}),
               outcome: "succeeded" as const,
             },
           ],
         },
       };
     } catch (error) {
-      failures.push({ modelId: requiredModelId(candidate.agent), providerId: candidate.providerId, error });
+      failures.push({ modelId: requiredModelId(candidate.agent), providerId: candidate.providerId,
+        ...(physicalRequestId ? { requestId: physicalRequestId } : {}), error });
       if (isProviderAccountFailure(error)) unavailableProviderAccounts.add(candidate.providerId);
       if (isTransientRoleAuditProviderFailure(error)) {
         // 仅当审计请求能明确归类为可安全切换的瞬时故障（not_accepted 或 completed transient）时，

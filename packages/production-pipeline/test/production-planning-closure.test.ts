@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
@@ -42,7 +42,7 @@ import type { WorkflowRun } from "@video-factory/workflow-core";
 import { FileRunStore } from "../src/run-store.js";
 import { summarizeJointPlanningExecution } from "../src/production-pipeline.js";
 import { CodexBrokerServer } from "../../../apps/codex-broker/src/broker-server.js";
-import { runCreativeDiscussionTask } from "../src/codex-creative-discussion.js";
+import { runCreativeDiscussionTask, type CreativeDiscussionAgentInput } from "../src/codex-creative-discussion.js";
 import type { ValidatedTask } from "../../../apps/codex-broker/src/codex-executor.js";
 import { CodexAssetSemanticRanker, deterministicAssetRanking, type AssetCandidateReport } from "../src/asset-semantic-ranker.js";
 import { RoleAgentHostStop } from "../src/role-agent-loop.js";
@@ -1016,9 +1016,13 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
       const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
         screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
       const withGrammar = window === "afterRunSaved";
-      const referencePath = path.join(workspaceRoot, "reference.mp4");
+      const referenceUploadId = "00000000-0000-4000-8000-000000000006";
+      const referencePath = path.join(workspaceRoot, referenceUploadId, "reference.mp4");
       const referenceBytes = "Reference identity fixture (not a playback test).";
-      if (withGrammar) await writeFile(referencePath, referenceBytes);
+      if (withGrammar) {
+        await mkdir(path.dirname(referencePath), { recursive: true });
+        await writeFile(referencePath, referenceBytes);
+      }
       const pipeline = new ProductionPipeline({ workspaceRoot, worker: new ClosureWorker(),
         treatmentAgents: closureTreatmentAgents(spies), screenwriterAgent: closureScreenwriter(spies),
         directorAgent: closureDirector(spies), assetProviders: CLOSURE_ASSET_PROVIDERS,
@@ -1027,7 +1031,7 @@ describe("joint-v1 planning edit contract (B4-REMAINDER)", () => {
       const brief = closureBrief({ creativeReview: true });
       let run = await pipeline.start({ ...brief, durationPolicy: "content-led-v1", durationRange: { maxSeconds: 20 },
         ...(withGrammar ? { workflowFeatures: { ...brief.workflowFeatures!, referenceGrammar: true },
-          referenceVideo: { uploadId: "ref-duration", label: "隔离参考身份", path: referencePath, mimeType: "video/mp4" as const,
+          referenceVideo: { uploadId: referenceUploadId, label: "隔离参考身份", path: referencePath, mimeType: "video/mp4" as const,
             sizeBytes: Buffer.byteLength(referenceBytes), sha256: createHash("sha256").update(referenceBytes).digest("hex") } } : {}) });
       const reviewOf = (value: typeof run) => (value.nodeRuns.find(node => node.nodeId === "creative-planning")!.output as { creativeReview: CreativeReviewState }).creativeReview;
       let review = reviewOf(run);
@@ -3338,6 +3342,9 @@ describe("joint planning physical execution summary (Revision 9)", () => {
       requestId,
       stage: "treatment",
       state,
+      ...(["completed", "completed_failure"].includes(state) ? {
+        trace: { providerId: "discussion-fixture", modelId: "discussion-fixture", modelAttemptCount: 1 },
+      } : {}),
       ...(providerWaitMs === undefined ? {} : { providerWaitMs }),
     }, null, 2)}\n`);
     await Promise.all([
@@ -4249,6 +4256,13 @@ describe("creative discussion failure isolation (DG-UX-04)", () => {
             `受控讨论失败（${testCase.bridgeStage}）`,
             testCase.transient,
             testCase.bridgeStage,
+            testCase.bridgeStage === "rejected" ? 400 : undefined,
+            testCase.bridgeStage === "rejected" ? "contract_rejected" : undefined,
+            testCase.bridgeStage === "rejected" ? {
+              category: "invalid_request", reasonCode: "input_contract",
+              providerId: "fixture", modelId: "fixture", accepted: false,
+              fieldPath: "payload.currentDocument.scenes[1].narration",
+            } : undefined,
           );
         };
         const pipeline = new ProductionPipeline({
@@ -4324,6 +4338,18 @@ describe("creative discussion failure isolation (DG-UX-04)", () => {
         assert.deepEqual(stageAfter.currentDocument, documentBefore, "已保存稿未改动");
         assert.equal(stageAfter.currentDraft!.versionId, versionBefore);
         assert.equal(stageAfter.messages.length, messagesBefore, "失败不伪造模型回复");
+        if (testCase.bridgeStage === "rejected") {
+          assert.match(stageAfter.continuation!.detail, /第 2 镜.*旁白/);
+          assert.match(stageAfter.continuation!.detail, /input_contract/);
+          assert.match(stageAfter.continuation!.detail, /不要重复发送/);
+          const studio = new ProductionStudio({ workspaceRoot, pipeline, listProviders: async () => [],
+            archiveStore: new JsonRunArchiveStore(path.join(workspaceRoot, "archive.json")) });
+          const projected = await studio.creativeReview(settled.id);
+          assert.match(JSON.stringify(projected), /第 2 镜.*旁白/);
+          const recordDir = path.join(workspaceRoot, "runs", settled.id, "nodes", "creative-planning", "discussion-executions");
+          const records = await Promise.all((await readdir(recordDir)).map(async name => JSON.parse(await readFile(path.join(recordDir, name), "utf8"))));
+          assert.equal(records[0].candidates[0].diagnostic.fieldPath, "payload.currentDocument.scenes[1].narration");
+        }
         const operation = settled.creativeReviewOperations?.find((candidate) => candidate.commandId === "discuss-" + testCase.receipt);
         assert.ok(operation, "命令必须有持久回执");
         assert.equal(operation!.status, testCase.receipt, `回执应为 ${testCase.receipt}`);
@@ -4429,9 +4455,11 @@ describe("creative discussion failure isolation (DG-UX-04)", () => {
 describe("creative consultation fact classification (C2)", () => {
   type Shape =
     | { kind: "bridge"; stage: "completed_failure" | "rejected" | "not_accepted" | "uncertain" | "conflict" }
+    // A2：受理前确定性输入合同拒收（invalid_request/input_contract + 安全 fieldPath）。
+    | { kind: "bridge-contract" }
     | { kind: "wrapped"; stage: "uncertain" }
     | { kind: "plain" }
-    | { kind: "candidates"; stages: Array<"completed_failure" | "not_accepted" | "uncertain">; wrapDepth?: number; wrapFailures?: boolean }
+    | { kind: "candidates"; stages: Array<"completed_failure" | "not_accepted" | "uncertain" | "rejected_contract">; wrapDepth?: number; wrapFailures?: boolean }
     | { kind: "schema-rejected" };
   type Expect = {
     continuationStatus: "rejected_operation" | "error" | "unknown";
@@ -4458,21 +4486,38 @@ describe("creative consultation fact classification (C2)", () => {
       expect: { continuationStatus: "rejected_operation", reasonCode: "discussion_not_accepted", receipt: "not_accepted", executionState: "not_accepted" } },
     { label: "wrapped-all-not-accepted-retain-identities", shape: { kind: "candidates", stages: ["not_accepted", "not_accepted"], wrapDepth: 2 }, action: "discuss",
       expect: { continuationStatus: "rejected_operation", reasonCode: "discussion_not_accepted", receipt: "not_accepted", executionState: "not_accepted" } },
+    // A2：单一候选确定性输入合同拒收＝未受理，但必须携带可核对的安全 fieldPath 诊断。
+    { label: "input-contract-rejected-is-not-accepted-with-diagnostic", shape: { kind: "bridge-contract" }, action: "revise",
+      expect: { continuationStatus: "rejected_operation", reasonCode: "discussion_not_accepted", receipt: "not_accepted", executionState: "not_accepted" } },
+    // A2：一候选输入合同拒收、另一候选 unknown → 整体只按 unknown 核原请求；
+    // 局部拒收诊断保留，不得升格成整体已核清或承诺免费/换模型。
+    { label: "mixed-input-contract-then-uncertain-is-unknown", shape: { kind: "candidates", stages: ["rejected_contract", "uncertain"] }, action: "discuss",
+      expect: { continuationStatus: "unknown", reasonCode: "discussion_request_unknown", receipt: "unknown", executionState: "accepted_unknown" } },
     { label: "schema-rejected-result-is-failed", shape: { kind: "schema-rejected" }, action: "revise",
       expect: { continuationStatus: "error", reasonCode: "discussion_failed", receipt: "failed", executionState: "completed_failure" } },
   ];
 
+  // 受控输入合同拒收：rejected + invalid_request/input_contract，fieldPath 走安全白名单形态。
+  const contractRejectedError = () => new CodexBridgeError(
+    "受控（输入合同拒收）", false, "rejected", 400, "contract_rejected",
+    { category: "invalid_request", reasonCode: "input_contract", providerId: "c2-provider", modelId: "c2-model",
+      fieldPath: "payload.currentDocument.scenes[1].narration", accepted: false },
+  );
+
   const buildError = (shape: Shape): unknown => {
     if (shape.kind === "bridge") return new CodexBridgeError(`受控（${shape.stage}）`, shape.stage === "not_accepted", shape.stage);
+    if (shape.kind === "bridge-contract") return contractRejectedError();
     if (shape.kind === "wrapped") return new Error("外层普通错误", { cause: new CodexBridgeError("受控（uncertain）", false, "uncertain") });
     if (shape.kind === "plain") return new Error("没有任何 Bridge 证据的普通错误");
     if (shape.kind === "candidates") {
+      const candidateError = (stage: "completed_failure" | "not_accepted" | "uncertain" | "rejected_contract"): Error =>
+        stage === "rejected_contract" ? contractRejectedError() : new CodexBridgeError(`受控候选（${stage}）`, stage === "not_accepted", stage);
       let error: Error = new ModelCandidatesExhaustedError(shape.stages.map((stage, index) => ({
         modelId: `candidate-model-${index + 1}`,
         providerId: `candidate-provider-${index + 1}`,
         error: shape.wrapFailures
-          ? new Error("受控候选包装", { cause: new CodexBridgeError(`受控候选（${stage}）`, stage === "not_accepted", stage) })
-          : new CodexBridgeError(`受控候选（${stage}）`, stage === "not_accepted", stage),
+          ? new Error("受控候选包装", { cause: candidateError(stage) })
+          : candidateError(stage),
       })));
       for (let depth = 0; depth < (shape.wrapDepth ?? 0); depth += 1) error = new Error("受控角色包装", { cause: error });
       return error;
@@ -4494,10 +4539,18 @@ describe("creative consultation fact classification (C2)", () => {
         const current = cases.find((entry) => entry.label === order[callIndex - 1])!;
         if (current.shape.kind === "schema-rejected") {
           schemaRejected = true;
+          const requestId = String(input.requestId);
+          const beforeSubmit = input.beforeSubmit as ((operation: unknown) => Promise<void>) | undefined;
+          await beforeSubmit?.({
+            requestId,
+            brokerBinding: { requestId, providerId: "c2-provider", modelId: "c2-model" },
+            serializedEnvelope: "c2-schema-rejected",
+            route: { socketPath: "c2-schema-rejected.sock" },
+          });
           // 已受理并返回结果，但 revise 缺少阶段文档 → recordCreativeDiscussion 拒绝。
           return {
             output: { stage: input.stage, intent: "revise", reply: "已按意见修改", changeSummary: ["改写结尾"], treatment: null, script: null, director: null, upstreamRequest: null },
-            trace: { taskKind: "creative-discussion", promptVersion: "v3", providerId: "c2-provider", modelId: "c2-model", prompt: "c2" },
+            trace: { taskKind: "creative-discussion", promptVersion: "v3", providerId: "c2-provider", modelId: "c2-model", modelAttemptCount: 2, prompt: "c2" },
           };
         }
         throw buildError(current.shape);
@@ -4589,11 +4642,62 @@ describe("creative consultation fact classification (C2)", () => {
         const record = parsed.find((entry) => entry.commandId === commandId);
         assert.ok(record, `${gateStage}/${testCase.label} 必须有 durable 执行记录`);
         assert.equal(record!.state, testCase.expect.executionState, `${gateStage}/${testCase.label} 执行记录状态：${JSON.stringify(record)}`);
+        if (testCase.shape.kind === "schema-rejected") {
+          const trace = record!.trace as { providerId?: string; modelId?: string; modelAttemptCount?: number; modelCandidateAttempts?: Array<{ outcome: string; modelAttemptCount?: number }> } | undefined;
+          assert.equal(record!.factReason, "settled_failure", `${gateStage} 业务登记拒绝保留 settled_failure`);
+          assert.equal(trace?.providerId, "c2-provider", `${gateStage} 保留已执行 provider`);
+          assert.equal(trace?.modelId, "c2-model", `${gateStage} 保留已执行 model`);
+          assert.equal(trace?.modelAttemptCount, 2, `${gateStage} 保留已执行次数`);
+          if (gateStage === "treatment") {
+            assert.deepEqual(trace?.modelCandidateAttempts?.map((attempt) => ({
+              outcome: attempt.outcome, modelAttemptCount: attempt.modelAttemptCount,
+            })), [{ outcome: "succeeded", modelAttemptCount: 2 }], "fallback 成功候选的物理证据不能被业务拒收擦掉");
+          }
+          const operationId = String(record!.workflowOperationRequestId);
+          const projection = await pipeline.readModelExecutionFacts(settled.id);
+          const executionFacts = projection.facts.filter((fact) => fact.purpose === "discussion"
+            && fact.operationId === operationId);
+          assert.equal(executionFacts.length, 1, `${gateStage} 物理执行只投影一次`);
+          assert.equal(executionFacts[0]!.accepted, true, `${gateStage} 已执行事实不能伪装成未执行`);
+          assert.equal(executionFacts[0]!.modelAttemptCount, 2, `${gateStage} 物理调用次数精确`);
+          const summary = await summarizeJointPlanningExecution(path.join(workspaceRoot, "runs"), settled.id, operationId);
+          assert.equal(summary?.discussionModelCallCount, 2, `${gateStage} 汇总保留物理调用`);
+          assert.equal(summary?.unknownModelExecutionCount, 0, `${gateStage} 已知次数不再待核`);
+          const reloaded = await pipeline.loadPersisted(settled.id);
+          const costDetail = await new CostStudio(async () => [reloaded], undefined, undefined, undefined,
+            (candidateId) => pipeline.readModelExecutionFacts(candidateId)).runDetail(settled.id);
+          const costFact = costDetail!.executionFacts!.find((fact) => fact.purpose === "discussion"
+            && fact.operationId === operationId);
+          assert.equal(costFact?.modelAttemptCount, 2, `${gateStage} CostStudio 与物理事实一致`);
+          assert.ok(!costDetail!.lines.some((line) => line.accountingSource === "execution_summary"
+            && line.requestId === operationId && line.callCountPending === true), `${gateStage} 精确物理调用不应继续 pending`);
+        }
         if (testCase.shape.kind === "candidates" && testCase.shape.stages.length > 1) {
           // 每个物理候选的事实必须保留，后一个候选不能抹掉前一个已受理失败
           const candidateStates = (record!.candidates as Array<{ state: string }> | undefined)?.map((entry) => entry.state);
-          assert.deepEqual(candidateStates, testCase.shape.stages.map((stage) => stage === "completed_failure" ? "failed" : stage === "not_accepted" ? "not_accepted" : "unknown"),
+          assert.deepEqual(candidateStates, testCase.shape.stages.map((stage) =>
+            stage === "completed_failure" ? "failed" : stage === "not_accepted" || stage === "rejected_contract" ? "not_accepted" : "unknown"),
             `${gateStage}/${testCase.label} 候选事实保留`);
+        }
+        const contractCount = testCase.shape.kind === "bridge-contract" ? 1
+          : testCase.shape.kind === "candidates" ? testCase.shape.stages.filter((stage) => stage === "rejected_contract").length : 0;
+        if (contractCount > 0) {
+          // A2：输入合同拒收的局部证据原样保留——安全 fieldPath 诊断随候选事实落盘与展示，
+          // 不落任意错误正文；续接说明包含定位文案，可让用户核对具体镜/字段。
+          const diagnosticCandidates = ((record!.candidates as Array<{ diagnostic?: { reasonCode: string; fieldPath?: string } } | undefined>) ?? [])
+            .filter((entry) => entry?.diagnostic?.reasonCode === "input_contract");
+          assert.equal(diagnosticCandidates.length, contractCount, `${gateStage}/${testCase.label} input_contract 诊断数量`);
+          for (const entry of diagnosticCandidates) {
+            assert.equal(entry!.diagnostic!.fieldPath, "payload.currentDocument.scenes[1].narration", `${gateStage}/${testCase.label} 安全 fieldPath 原样保留`);
+          }
+          assert.match(continuation!.detail, /输入校验未通过：第 2 镜旁白（payload\.currentDocument\.scenes\[1\]\.narration），错误代码 input_contract/,
+            `${gateStage}/${testCase.label} 续接说明带定位诊断`);
+        }
+        if (testCase.label === "mixed-input-contract-then-uncertain-is-unknown") {
+          // A2：混合形态只说明局部拒收；整体仍按 unknown 核原请求，不得承诺整体免费或换模型重试。
+          assert.match(continuation!.detail, /请求结果仍在核实/, `${gateStage}/${testCase.label} 整体保持待核口径`);
+          assert.ok(!/全部.*(免费|不产生费用)/.test(continuation!.detail), `${gateStage}/${testCase.label} 不得承诺全部免费：${continuation!.detail}`);
+          assert.ok(!/换模型|改用其他模型|自动重试/.test(continuation!.detail), `${gateStage}/${testCase.label} 不得承诺换模型重试：${continuation!.detail}`);
         }
         // 各故障保留原停点；unknown不能借此自动开启另一条咨询。
         assert.equal(gateOf(settled).continuation.stage, gateStage);
@@ -4730,6 +4834,38 @@ describe("creative discussion unknown recovery (C1)", () => {
     }
     return current;
   }
+
+  for (const action of ["discuss", "revise"] as const) it(`CDF01 accepts saved silent scenes through the real broker for ${action}`, async () => {
+    const harness = await startRecoveryHarness();
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "script");
+      const studio = new ProductionStudio({ workspaceRoot: harness.workspaceRoot, pipeline, listProviders: async () => [],
+        archiveStore: new JsonRunArchiveStore(path.join(harness.workspaceRoot, "archive.json")) });
+      let shown = (await studio.creativeReview(run.id))!;
+      const document = structuredClone(stageReview(run, "script").currentDocument) as { scenes: Array<{ narration: string }> };
+      document.scenes[1]!.narration = "";
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, {
+        action: "edit_draft", commandId: `silent-save-${action}`, actor: "creator", stage: "script",
+        expectedRunRevision: run.revision, expectedReviewRevision: shown.reviewRevision,
+        baseDraftSha256: shown.draftSha256, baseDraftVersionId: shown.draftVersionId!, document,
+      })).completion;
+      shown = (await studio.creativeReview(run.id))!;
+      const command = { action, commandId: `silent-${action}`, actor: "creator", stage: shown.stage,
+        expectedRunRevision: run.revision, expectedReviewRevision: shown.reviewRevision,
+        baseDraftSha256: shown.draftSha256, baseDraftVersionId: shown.draftVersionId!, message: "保留第二镜静默，只调整结尾" };
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, command)).completion;
+      assert.equal(run.creativeReviewOperations?.at(-1)?.status, "completed");
+      assert.equal(run.status, "needs_human");
+      assert.equal(harness.executor.submits, 1, "真实Broker只受理一次，本地模型替身不联网");
+      assert.equal((stageReview(run, "script").currentDocument as typeof document).scenes[1]!.narration, "");
+      if (action === "discuss") assert.deepEqual(stageReview(run, "script").currentDocument, document);
+      const replay = await (await harness.buildPipeline().dispatchCreativeReviewCommand(run.id, command)).completion;
+      assert.equal(replay.creativeReviewOperations?.at(-1)?.status, "completed");
+      assert.equal(harness.executor.submits, 1, "重启后同体重放不重发模型");
+    } finally { harness.executor.release(); await harness.broker.close(); }
+  });
 
   it("DF03 allows narration preparation after an optional discussion without clearing its unknown facts", async () => {
     const harness = await startRecoveryHarness({ holdInitially: true });
@@ -5457,6 +5593,866 @@ describe("creative discussion unknown recovery (C1)", () => {
         }
       }
     }
+  });
+
+  it("C1-A observes an old-contract-digest prepared recovery against the original request only", async () => {
+    // 历史 prepared 携旧 digest：宿主合同常量已升级时，恢复仍按快照内绑定只观察原请求，
+    // 不得重新 prepare、不得换 requestId、不得用当前常量改写已保存证据。
+    const harness = await startRecoveryHarness({ holdInitially: true });
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      run = await confirmTo(pipeline, run, "treatment");
+      const gate = gateOf(run).continuation;
+      const commandId = "c1a-old-digest";
+      const dispatched = await pipeline.dispatchCreativeReviewCommand(run.id, {
+        action: "discuss",
+        commandId,
+        actor: "creator",
+        stage: "treatment",
+        expectedRunRevision: run.revision,
+        expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256,
+        message: "旧 digest 恢复意见",
+      });
+      const settled = await dispatched.completion;
+      assert.equal(settled.status, "needs_human");
+      assert.equal(harness.executor.submits, 1, "首次提交恰好一次物理请求");
+      assert.equal(stageReview(settled, "treatment").continuation?.status, "unknown");
+
+      const preparedDir = path.join(harness.workspaceRoot, "runs", run.id, "nodes", "creative-planning", "discussion-prepared");
+      const names = (await readdir(preparedDir)).filter((name) => name.endsWith(".json"));
+      assert.equal(names.length, 1, "首次派发只留一份 prepared");
+      const recordPath = path.join(preparedDir, names[0]!);
+      const record = JSON.parse(await readFile(recordPath, "utf8")) as {
+        prepared: { brokerBinding: Record<string, unknown>; serializedEnvelope?: unknown };
+      };
+      const originalRequestId = typeof record.prepared.brokerBinding.requestId === "string"
+        ? record.prepared.brokerBinding.requestId : undefined;
+      const oldDigest = "0".repeat(64);
+      record.prepared.brokerBinding = { ...record.prepared.brokerBinding, contractDigest: oldDigest };
+      await writeFile(recordPath, `${JSON.stringify(record)}\n`, "utf8");
+
+      harness.executor.release();
+      const replay = await pipeline.dispatchCreativeReviewCommand(settled.id, {
+        action: "discuss",
+        commandId,
+        actor: "creator",
+        stage: "treatment",
+        expectedRunRevision: run.revision,
+        expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256,
+        message: "旧 digest 恢复意见",
+      });
+      const replayed = await replay.completion;
+      assert.equal(harness.executor.submits, 1, "旧 digest 恢复不得重新物理提交");
+      const replayOperation = replayed.creativeReviewOperations?.find(op => op.commandId === commandId);
+      assert.equal(replayOperation?.status, "completed");
+      assert.equal(replayOperation?.resultDisposition, "applied");
+      assert.ok(stageReview(replayed, "treatment").messages.length >= 2, "原结果只应用一次");
+
+      const namesAfter = (await readdir(preparedDir)).filter((name) => name.endsWith(".json"));
+      assert.equal(namesAfter.length, 1, "恢复不得新增第二份 prepared");
+      const recordAfter = JSON.parse(await readFile(path.join(preparedDir, namesAfter[0]!), "utf8")) as {
+        prepared: { brokerBinding: Record<string, unknown> };
+      };
+      assert.equal(recordAfter.prepared.brokerBinding.contractDigest, oldDigest, "快照内旧 digest 不被当前常量改写");
+      if (originalRequestId) {
+        assert.equal(recordAfter.prepared.brokerBinding.requestId, originalRequestId, "原物理请求身份不变");
+      }
+    } finally {
+      await harness.broker.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A3 / CDF-03：prepared 已落盘而 discussion-executions 回执写失败（完成回执与
+// 失败回执两条写入都注入失败）时，记账读取不得把该操作当成精确零调用。
+// 故障注入在既有原子写 I/O 边界（回执目录只读），prepared 与主 run 记录正常；
+// 真 readModelExecutionFacts 与 CostStudio 两视图必须留下待核证据（issue +
+// prepared 事实），countExact=false，且读取不回写任何原档。
+// ---------------------------------------------------------------------------
+describe("creative discussion prepared accounting gap (A3)", () => {
+  class AccountingDiscussionExecutor {
+    submits = 0;
+    identity = { profileId: "deepseek", providerId: "a3-provider", modelId: "a3-model", taskKinds: ["creative-discussion", "role-audit"] };
+    modelCandidates = ["a3-provider"];
+    async runTask(task: ValidatedTask): Promise<{ output: string; sessionId: string; trace: Record<string, unknown> }> {
+      this.submits += 1;
+      const payload = task.payload as Record<string, any>;
+      if (task.kind !== "creative-discussion") throw new Error(`unexpected kind ${task.kind}`);
+      const isRevise = payload.requestMode === "revise";
+      const revised = structuredClone(payload.currentDocument);
+      if (isRevise && payload.stage === "treatment") revised.concept = "A3 修订后的结尾";
+      const result = {
+        stage: payload.stage, intent: isRevise ? "revise" : "explain",
+        reply: isRevise ? "已按意见修订；未审，等你决定。" : "A3 受控解释：当前稿从观察到行动再到收束。",
+        changeSummary: isRevise ? ["修订结尾"] : [],
+        treatment: isRevise && payload.stage === "treatment" ? revised : null,
+        script: null, director: null, upstreamRequest: null,
+      };
+      return {
+        output: JSON.stringify(result),
+        sessionId: "019c-a3-0000-7000-8000-000000000001",
+        trace: { taskKind: task.kind, providerId: "a3-provider", modelId: "a3-model", promptVersion: "controlled-a3",
+          contractDigest: task.expectedContractDigest, prompt: "A3 受控执行器" },
+      };
+    }
+  }
+
+  async function startAccountingHarness() {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-a3-"));
+    const sockets = path.join(workspaceRoot, "sockets");
+    await mkdir(sockets, { recursive: true });
+    const executor = new AccountingDiscussionExecutor();
+    const broker = new CodexBrokerServer({
+      socketPath: path.join(sockets, "a3.sock"),
+      executor: executor as unknown as ConstructorParameters<typeof CodexBrokerServer>[0]["executor"],
+      concurrency: 2, maxBacklog: 8,
+      idempotencyDirectory: path.join(workspaceRoot, "broker-idempotency"),
+      sessionDirectory: path.join(workspaceRoot, "broker-sessions"),
+    });
+    await broker.start();
+    const client = new CodexBridgeClient({ socketPath: path.join(sockets, "a3.sock"), timeoutMs: 400, pollIntervalMs: 20, maxAttempts: 1 });
+    const spies: ClosureSpies = {
+      treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [],
+      screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [],
+    };
+    const discussionViaBroker = (input: import("../src/codex-creative-discussion.js").CreativeDiscussionAgentInput) => runCreativeDiscussionTask(client, input);
+    const buildPipeline = () => new ProductionPipeline({
+      workspaceRoot,
+      worker: new ClosureWorker(),
+      treatmentAgents: closureTreatmentAgents(spies).map((entry) => ({
+        providerId: entry.providerId,
+        agent: Object.assign(entry.agent, { discussDetailed: discussionViaBroker }),
+      })),
+      screenwriterAgent: Object.assign(closureScreenwriter(spies), { discussDetailed: discussionViaBroker }) as ScreenwriterAgent,
+      directorAgent: Object.assign(closureDirector(spies), { discussDetailed: discussionViaBroker }) as VisualDirectorAgent,
+      assetProviders: CLOSURE_ASSET_PROVIDERS,
+    });
+    return { workspaceRoot, executor, broker, client, spies, buildPipeline };
+  }
+
+  const gateOfA3 = (run: WorkflowRun<ProductionBrief>) => {
+    const node = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+    assert.ok(node.intervention?.continuation, "A3 制作必须停在创作停点");
+    return { node, continuation: node.intervention.continuation };
+  };
+
+  async function startExactRequestCoverageFixture(prefix: string) {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), `vf-a3-${prefix}-`));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const pipeline = new ProductionPipeline({
+      workspaceRoot, worker: new ClosureWorker(),
+      treatmentAgents: closureTreatmentAgents(spies),
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureDirector(spies),
+      assetProviders: CLOSURE_ASSET_PROVIDERS,
+    });
+    const run = await pipeline.start(closureBrief({ creativeReview: true }));
+    const planningDir = path.join(workspaceRoot, "runs", run.id, "nodes", "creative-planning");
+    const executionsDir = path.join(planningDir, "discussion-executions");
+    const preparedDir = path.join(planningDir, "discussion-prepared");
+    await mkdir(executionsDir, { recursive: true });
+    await mkdir(preparedDir, { recursive: true });
+    const writePrepared = async (commandId: string, requestId: string, providerId: string, modelId: string) => {
+      const binding = { providerId, modelId, requestId };
+      const identity = createHash("sha256").update(`${requestId}:${JSON.stringify(binding)}`).digest("hex");
+      const record = {
+        version: "video-factory/creative-discussion-prepared-v1", runId: run.id, commandId, requestId,
+        stage: "treatment", action: "discuss", baseDraft: { sha256: "0".repeat(64) }, reviewRevision: 1,
+        prepared: { requestId, serializedEnvelope: "envelope", brokerBinding: binding, route: { socketPath: "x" } },
+        savedAt: "2026-10-20T00:00:00.000Z",
+      };
+      await writeFile(path.join(preparedDir, `${identity}.json`), `${JSON.stringify(record, null, 2)}\n`);
+    };
+    const writeReceipt = async (commandId: string, requestId: string, attempts: Array<Record<string, unknown>>) => {
+      const succeeded = attempts.find((attempt) => attempt.outcome === "succeeded")!;
+      const record = {
+        version: "video-factory/creative-discussion-execution-v1",
+        workflowOperationRequestId: `op-${commandId}`, commandId, requestId,
+        stage: "treatment", state: "completed",
+        trace: {
+          providerId: succeeded.providerId,
+          modelId: succeeded.modelId,
+          modelAttemptCount: succeeded.modelAttemptCount,
+          modelCandidateAttempts: attempts,
+        },
+      };
+      await writeFile(path.join(executionsDir, `${createHash("sha256").update(requestId).digest("hex")}.json`), `${JSON.stringify(record, null, 2)}\n`);
+    };
+    return { workspaceRoot, pipeline, run, executionsDir, writePrepared, writeReceipt };
+  }
+
+  async function runFallbackDiscussionAccounting(
+    firstFailureStage: "not_accepted" | "completed_failure",
+    options: {
+      sameProvider?: boolean;
+      failureModelAttemptCount?: number | null;
+      allCandidatesFail?: boolean;
+      finalFailureModelAttemptCount?: number | null;
+    } = {},
+  ) {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), `vf-a3-fallback-${firstFailureStage}-`));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const providerIds = options.sameProvider ? ["shared-provider", "shared-provider"] : ["openai", "deepseek"];
+    const treatmentAgents = closureTreatmentAgents(spies).map((entry, index) => {
+      const providerId = providerIds[index]!;
+      return {
+        providerId,
+        agent: {
+          ...entry.agent,
+          discussDetailed: async (input: CreativeDiscussionAgentInput) => {
+            const modelId = entry.agent.modelId!;
+            await input.beforeSubmit?.({
+              requestId: input.requestId,
+              brokerBinding: { requestId: input.requestId, providerId, modelId },
+              serializedEnvelope: `fixture-${providerId}-${modelId}`,
+              route: { socketPath: `fixture-${providerId}-${modelId}.sock` },
+            } as never);
+            if (index === 0) {
+              throw firstFailureStage === "not_accepted"
+                ? new CodexBridgeError("connection failed before acceptance", true, "not_accepted", 503, "model_provider_transient")
+                : new CodexBridgeError("accepted request returned no output", false, "completed_failure", 502, "model_provider_no_output",
+                    options.failureModelAttemptCount === null ? undefined : {
+                      category: "service_unavailable", reasonCode: "no_output", providerId, modelId,
+                      accepted: true, modelAttemptCount: options.failureModelAttemptCount ?? 2,
+                    });
+            }
+            if (options.allCandidatesFail) {
+              throw new CodexBridgeError("final accepted request returned no output", false, "completed_failure", 502,
+                "model_provider_no_output", options.finalFailureModelAttemptCount === null ? undefined : {
+                  category: "service_unavailable", reasonCode: "no_output", providerId, modelId,
+                  accepted: true, modelAttemptCount: options.finalFailureModelAttemptCount ?? 1,
+                });
+            }
+            return {
+              output: {
+                stage: input.stage, intent: "explain" as const, reply: "fallback 候选 B 已完成讨论。",
+                changeSummary: [], treatment: null, script: null, director: null, upstreamRequest: null,
+              },
+              trace: {
+                taskKind: "creative-discussion" as const, promptVersion: "a3-fallback-fixture-v1", prompt: "fixture",
+                providerId, modelId, modelAttemptCount: 1,
+              },
+            };
+          },
+        },
+      };
+    });
+    const pipeline = new ProductionPipeline({
+      workspaceRoot, worker: new ClosureWorker(), treatmentAgents,
+      screenwriterAgent: closureScreenwriter(spies), directorAgent: closureDirector(spies),
+      assetProviders: CLOSURE_ASSET_PROVIDERS,
+    });
+    let run = await pipeline.start(closureBrief({ creativeReview: true }));
+    const gate = gateOfA3(run).continuation;
+    const commandId = `a3-fallback-${firstFailureStage}`;
+    run = await (await pipeline.dispatchCreativeReviewCommand(run.id, {
+      action: "discuss", commandId, actor: "creator", stage: gate.stage,
+      expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+      baseDraftSha256: gate.draftSha256, message: "验证 fallback 费用证据",
+    })).completion;
+    assert.equal(run.status, "needs_human");
+    const executionsDir = path.join(workspaceRoot, "runs", run.id, "nodes", "creative-planning", "discussion-executions");
+    const names = (await readdir(executionsDir)).filter((name) => name.endsWith(".json"));
+    assert.equal(names.length, 1, "fallback 成功只写一份聚合回执");
+    const receipt = JSON.parse(await readFile(path.join(executionsDir, names[0]!), "utf8")) as {
+      workflowOperationRequestId: string;
+      state: string;
+      factReason?: string;
+      trace?: { providerId?: string; modelId?: string; modelCandidateAttempts?: Array<{ requestId?: string; providerId: string; modelId: string; outcome: string; failureStage?: string; modelAttemptCount?: number }> };
+    };
+    return { workspaceRoot, pipeline, run, commandId, receipt, providerIds };
+  }
+
+  it("keeps pending accounting evidence when both discussion receipt writes fail after prepared is saved", async (t) => {
+    const harness = await startAccountingHarness();
+    const executionsDirFor = (runId: string) => path.join(harness.workspaceRoot, "runs", runId, "nodes", "creative-planning", "discussion-executions");
+    const preparedDirFor = (runId: string) => path.join(harness.workspaceRoot, "runs", runId, "nodes", "creative-planning", "discussion-prepared");
+    try {
+      const pipeline = harness.buildPipeline();
+      let run = await pipeline.start(closureBrief({ creativeReview: true }));
+      let gate = gateOfA3(run).continuation;
+      assert.equal(gate.stage, "treatment");
+      // 第一条讨论正常完成：回执落盘，成为“先前操作”的证据来源。
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, {
+        action: "discuss", commandId: "a3-normal", actor: "creator", stage: gate.stage,
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, message: "先正常讨论一次",
+      })).completion;
+      assert.equal(run.status, "needs_human");
+      assert.equal(harness.executor.submits, 1);
+      const executionsDir = executionsDirFor(run.id);
+      assert.equal((await readdir(executionsDir)).filter((name) => name.endsWith(".json")).length, 1, "正常讨论必须留下回执");
+      // 注入：只读回执目录。探针验证注入确实生效，不以概率换结果。
+      await chmod(executionsDir, 0o555);
+      const probe = path.join(executionsDir, ".injection-probe");
+      let injectionEffective = false;
+      try { await writeFile(probe, "x"); } catch { injectionEffective = true; }
+      if (!injectionEffective) {
+        await chmod(executionsDir, 0o755);
+        return t.skip("回执目录只读注入在本环境无效（特权用户），跳过故障注入用例");
+      }
+      // 第二条讨论：prepared 正常保存、真实提交一次，但完成与失败两条回执写入都失败。
+      gate = gateOfA3(run).continuation;
+      run = await (await pipeline.dispatchCreativeReviewCommand(run.id, {
+        action: "discuss", commandId: "a3-injected", actor: "creator", stage: gate.stage,
+        expectedRunRevision: run.revision, expectedReviewRevision: gate.reviewRevision,
+        baseDraftSha256: gate.draftSha256, message: "回执写失败的讨论",
+      })).completion;
+      assert.equal(harness.executor.submits, 2, "模型替身对注入命令恰好调用一次");
+      const failedNode = run.nodeRuns.find((candidate) => candidate.nodeId === "creative-planning")!;
+      assert.ok(failedNode.operationRequestId, "失败路径必须保留本次操作身份");
+      assert.equal((await readdir(executionsDir)).filter((name) => name.endsWith(".json")).length, 1, "注入后回执目录仍只有第一条");
+      const preparedDir = preparedDirFor(run.id);
+      const preparedNames = (await readdir(preparedDir)).filter((name) => name.endsWith(".json"));
+      const preparedRecords = await Promise.all(preparedNames.map(async (name) =>
+        JSON.parse(await readFile(path.join(preparedDir, name), "utf8")) as { commandId: string; requestId: string }));
+      const injected = preparedRecords.find((record) => record.commandId === "a3-injected");
+      assert.ok(injected, "注入命令的 prepared 必须已落盘");
+      const executionNames = (await readdir(executionsDir)).filter((name) => name.endsWith(".json"));
+      const bytesBefore = new Map<string, string>(await Promise.all([
+        ...preparedNames.map(async (name) => [name, await readFile(path.join(preparedDir, name), "utf8")] as const),
+        ...executionNames.map(async (name) => [name, await readFile(path.join(executionsDir, name), "utf8")] as const),
+      ]));
+      // 事实一：readModelExecutionFacts 必须留下待核证据，不能读作完整零调用。
+      const projection = await pipeline.readModelExecutionFacts(run.id);
+      assert.ok(projection.issues.length > 0, `已保存 prepared 而回执缺失必须产生 issue：${JSON.stringify(projection.issues)}`);
+      const preparedFacts = projection.facts.filter((fact) => fact.state === "prepared" && fact.purpose === "discussion");
+      assert.equal(preparedFacts.length, 1, "缺回执的物理请求必须保留 prepared 事实");
+      assert.equal(preparedFacts[0]!.requestId, injected!.requestId, "事实指向原物理请求身份");
+      assert.equal(preparedFacts[0]!.accepted, null, "prepared 只证明已准备，不得猜已受理");
+      assert.equal(preparedFacts[0]!.modelAttemptCount, null, "未知次数保持 null，不得写成 0 或 1");
+      // 事实二：CostStudio runDetail 与 dashboard 两视图同一口径：countExact=false，汇总行不被六零消去。
+      const reloaded = await pipeline.loadPersisted(run.id);
+      const costs = new CostStudio(async () => [reloaded], undefined, undefined, undefined,
+        (candidateId) => pipeline.readModelExecutionFacts(candidateId));
+      const detail = await costs.runDetail(run.id);
+      assert.equal(detail!.totals.countExact, false, "回执缺失时费用计数不得宣称精确");
+      const failedSummaryLine = detail!.lines.find((line) => line.requestId === failedNode.operationRequestId
+        && line.accountingSource === "execution_summary");
+      assert.ok(failedSummaryLine, "失败操作的汇总行不得被零调用消去");
+      assert.equal(failedSummaryLine!.callCountPending, true, "汇总行保持次数待核");
+      const dashboard = await costs.dashboard();
+      assert.equal(dashboard.totals.countExact, false, "dashboard 与 runDetail 必须同一完整性口径");
+      // 事实三：读取不回写任何原档。
+      for (const [dir, names] of [[preparedDir, preparedNames], [executionsDir, (await readdir(executionsDir)).filter((name) => name.endsWith(".json"))]] as const) {
+        for (const name of names) {
+          assert.equal(await readFile(path.join(dir, name), "utf8"), bytesBefore.get(name), `读取不得改写原档 ${name}`);
+        }
+      }
+    } finally {
+      for (const runDir of await readdir(path.join(harness.workspaceRoot, "runs")).catch(() => [] as string[])) {
+        await chmod(executionsDirFor(runDir), 0o755).catch(() => undefined);
+      }
+      await harness.broker.close();
+    }
+  });
+
+  it("routes orphan, corrupt and binding-conflicted prepared records through issues without double counting settled ones", async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-a3-crafted-"));
+    const spies: ClosureSpies = { treatmentTitles: [], treatmentModelCalls: [], treatmentCheckpointPresent: [], screenwriterCalls: [], directorCalls: 0, searchCalls: 0, rankCalls: 0, rankRequests: [], rankCheckpoints: [] };
+    const pipeline = new ProductionPipeline({
+      workspaceRoot, worker: new ClosureWorker(),
+      treatmentAgents: closureTreatmentAgents(spies),
+      screenwriterAgent: closureScreenwriter(spies),
+      directorAgent: closureDirector(spies),
+      assetProviders: CLOSURE_ASSET_PROVIDERS,
+    });
+    const run = await pipeline.start(closureBrief({ creativeReview: true }));
+    assert.equal(gateOfA3(run).continuation.stage, "treatment");
+    const planningDir = path.join(workspaceRoot, "runs", run.id, "nodes", "creative-planning");
+    const executionsDir = path.join(planningDir, "discussion-executions");
+    const preparedDir = path.join(planningDir, "discussion-prepared");
+    await mkdir(executionsDir, { recursive: true });
+    await mkdir(preparedDir, { recursive: true });
+    const identityOf = (requestId: string, binding: Record<string, unknown>) =>
+      createHash("sha256").update(requestId + ":" + JSON.stringify(binding)).digest("hex");
+    const writePrepared = async (commandId: string, requestId: string, binding: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+      const record = { version: "video-factory/creative-discussion-prepared-v1", runId: run.id, commandId, requestId,
+        stage: "treatment", action: "discuss" as const, baseDraft: { sha256: "0".repeat(64) }, reviewRevision: 1,
+        prepared: { requestId, serializedEnvelope: "envelope", brokerBinding: binding, route: { socketPath: "x" } },
+        savedAt: "2026-10-20T00:00:00.000Z", ...extra };
+      const name = identityOf(requestId, binding);
+      await writeFile(path.join(preparedDir, `${name}.json`), `${JSON.stringify(record, null, 2)}\n`);
+      return name;
+    };
+    // 正常 settled：同物理请求有成回执 → 不多计（receipt 事实 1 条，无额外 prepared 事实）。
+    const settledReceipt = { version: "video-factory/creative-discussion-execution-v1",
+      workflowOperationRequestId: "op-settled", commandId: "a3-settled", requestId: "a3-req-settled",
+      stage: "treatment", state: "completed" as const,
+      trace: { providerId: "a3-provider", modelId: "a3-model", modelAttemptCount: 1 } };
+    await writeFile(path.join(executionsDir, `${createHash("sha256").update("a3-req-settled").digest("hex")}.json`), `${JSON.stringify(settledReceipt, null, 2)}\n`);
+    await writePrepared("a3-settled", "a3-req-settled", { providerId: "a3-provider", modelId: "a3-model", requestId: "a3-req-settled" });
+    // 孤立 prepared：无任何回执 → issue + prepared 事实。
+    await writePrepared("a3-orphan", "a3-req-orphan", { providerId: "a3-provider", modelId: "a3-model", requestId: "a3-req-orphan" });
+    // 损坏 prepared：不可解析 → issue，不阻塞其它证据。
+    await writeFile(path.join(preparedDir, `${identityOf("a3-req-corrupt", { providerId: "a3-provider", modelId: "a3-model" })}.json`), "{ not json");
+    // 同 requestId 不同 binding：回执只有一份，无法指认归属 → 冲突 issue，不追加事实。
+    const conflictReceipt = { version: "video-factory/creative-discussion-execution-v1",
+      workflowOperationRequestId: "op-conflict", commandId: "a3-conflict", requestId: "a3-req-conflict",
+      stage: "treatment", state: "completed" as const,
+      trace: { providerId: "a3-provider", modelId: "a3-model", modelAttemptCount: 1 } };
+    await writeFile(path.join(executionsDir, `${createHash("sha256").update("a3-req-conflict").digest("hex")}.json`), `${JSON.stringify(conflictReceipt, null, 2)}\n`);
+    await writePrepared("a3-conflict", "a3-req-conflict", { providerId: "a3-provider", modelId: "a3-model-a", requestId: "a3-req-conflict" });
+    await writePrepared("a3-conflict", "a3-req-conflict", { providerId: "a3-provider", modelId: "a3-model-b", requestId: "a3-req-conflict" });
+    // 两个不同物理 request 使用同一 provider/model，但回执只有一条候选事实：
+    // 该事实只能覆盖其中一个，另一个必须继续作为 prepared 缺口待核。
+    await writePrepared("a3-shared-provider", "a3-physical-a", { providerId: "a3-provider", modelId: "a3-shared-model", requestId: "a3-physical-a" });
+    await writePrepared("a3-shared-provider", "a3-physical-b", { providerId: "a3-provider", modelId: "a3-shared-model", requestId: "a3-physical-b" });
+    const sharedProviderReceipt = { version: "video-factory/creative-discussion-execution-v1",
+      workflowOperationRequestId: "op-shared-provider", commandId: "a3-shared-provider", requestId: "a3-logical-request",
+      stage: "treatment", state: "not_accepted" as const, candidates: [
+        { state: "not_accepted" as const, providerId: "a3-provider", modelId: "a3-shared-model" },
+      ] };
+    await writeFile(path.join(executionsDir, `${createHash("sha256").update("a3-logical-request").digest("hex")}.json`), `${JSON.stringify(sharedProviderReceipt, null, 2)}\n`);
+
+    const bytesBefore = new Map<string, string>(await Promise.all((await readdir(preparedDir)).map(async (name) => [name, await readFile(path.join(preparedDir, name), "utf8")] as const)));
+    const projection = await pipeline.readModelExecutionFacts(run.id);
+    // 已 settled 的物理请求只保留回执事实，不因 prepared 重复计数。
+    const settledFacts = projection.facts.filter((fact) => fact.requestId === "a3-req-settled");
+    assert.equal(settledFacts.length, 1, "正常 settled 不多计");
+    assert.equal(settledFacts[0]!.state, "completed");
+    // 孤立 prepared → 缺回执 issue + prepared 事实。
+    const orphanFacts = projection.facts.filter((fact) => fact.requestId === "a3-req-orphan");
+    assert.equal(orphanFacts.length, 1, "孤立 prepared 保留未知事实");
+    assert.equal(orphanFacts[0]!.state, "prepared");
+    // 损坏与冲突走 issues 通道；不泄漏原文正文。
+    assert.ok(projection.issues.some((issue) => issue.includes("a3-req-corrupt") || issue.includes("unreadable")), `损坏 prepared 必须上报：${JSON.stringify(projection.issues)}`);
+    assert.ok(projection.issues.some((issue) => issue.includes("binding_conflict")), `同请求不同 binding 必须上报冲突：${JSON.stringify(projection.issues)}`);
+    assert.ok(!projection.issues.some((issue) => issue.includes("not json")), "issue 不携带原文正文");
+    const conflictExtraFacts = projection.facts.filter((fact) => fact.requestId === "a3-req-conflict");
+    assert.equal(conflictExtraFacts.length, 1, "同物理 request 的冲突证据合并为一条待核事实，不重复计数");
+    assert.equal(conflictExtraFacts[0]!.conflict, true);
+    const sharedProviderPrepared = projection.facts.filter((fact) =>
+      ["a3-physical-a", "a3-physical-b"].includes(fact.requestId) && fact.state === "prepared");
+    assert.equal(sharedProviderPrepared.length, 2, "缺少物理 requestId 的旧候选不能猜测覆盖任一 prepared");
+    assert.ok(projection.issues.some((issue) => issue.includes("a3-shared-provider") && issue.includes("missing_candidate_identity")),
+      `缺物理身份必须上报：${JSON.stringify(projection.issues)}`);
+    assert.ok(projection.issues.some((issue) => issue.includes("a3-shared-provider") && issue.includes("uncovered_request")),
+      `未被覆盖的第二个物理请求必须上报：${JSON.stringify(projection.issues)}`);
+    // 读取不回写原档。
+    for (const [name, content] of bytesBefore) {
+      assert.equal(await readFile(path.join(preparedDir, name), "utf8"), content, `读取不得改写原档 ${name}`);
+    }
+  });
+
+  it("projects direct terminal receipts from the reported attempt count and keeps rejection at zero", async () => {
+    const fixture = await startExactRequestCoverageFixture("direct-receipt-count");
+    const cases = [
+      { state: "completed", modelAttemptCount: 2, expectedCount: 2 },
+      { state: "completed_failure", modelAttemptCount: 2, expectedCount: 2 },
+      { state: "not_accepted", modelAttemptCount: undefined, expectedCount: 0 },
+    ] as const;
+    for (const item of cases) {
+      const commandId = `a3-direct-${item.state}`;
+      const requestId = `${commandId}-request`;
+      const receipt = {
+        version: "video-factory/creative-discussion-execution-v1",
+        workflowOperationRequestId: `op-${commandId}`, commandId, requestId,
+        stage: "treatment", state: item.state,
+        trace: {
+          providerId: "a3-direct-provider", modelId: "a3-direct-model",
+          ...(item.modelAttemptCount !== undefined ? { modelAttemptCount: item.modelAttemptCount } : {}),
+        },
+      };
+      await writeFile(path.join(fixture.executionsDir, `${createHash("sha256").update(requestId).digest("hex")}.json`),
+        `${JSON.stringify(receipt, null, 2)}\n`);
+    }
+
+    const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+    for (const item of cases) {
+      const commandId = `a3-direct-${item.state}`;
+      const requestId = `${commandId}-request`;
+      const fact = projection.facts.find((candidate) => candidate.requestId === requestId)!;
+      assert.equal(fact.accepted, item.state === "not_accepted" ? false : true);
+      assert.equal(fact.modelAttemptCount, item.expectedCount);
+      const summary = await summarizeJointPlanningExecution(
+        path.join(fixture.workspaceRoot, "runs"), fixture.run.id, `op-${commandId}`,
+      );
+      assert.equal(summary?.discussionModelCallCount, item.expectedCount);
+      assert.equal(summary?.unknownModelExecutionCount, 0);
+    }
+  });
+
+  it("keeps a direct accepted terminal receipt pending when its attempt count is absent", async () => {
+    const fixture = await startExactRequestCoverageFixture("direct-receipt-missing-count");
+    const commandId = "a3-direct-missing-count";
+    const requestId = `${commandId}-request`;
+    const receipt = {
+      version: "video-factory/creative-discussion-execution-v1",
+      workflowOperationRequestId: `op-${commandId}`, commandId, requestId,
+      stage: "treatment", state: "completed_failure",
+      trace: { providerId: "a3-direct-provider", modelId: "a3-direct-model" },
+    };
+    await writeFile(path.join(fixture.executionsDir, `${createHash("sha256").update(requestId).digest("hex")}.json`),
+      `${JSON.stringify(receipt, null, 2)}\n`);
+
+    const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+    const fact = projection.facts.find((candidate) => candidate.requestId === requestId)!;
+    assert.equal(fact.state, "completed_failure");
+    assert.equal(fact.accepted, true);
+    assert.equal(fact.modelAttemptCount, null, "缺真实次数不能默认成一次");
+    const summary = await summarizeJointPlanningExecution(
+      path.join(fixture.workspaceRoot, "runs"), fixture.run.id, receipt.workflowOperationRequestId,
+    );
+    assert.equal(summary?.discussionModelCallCount, 0);
+    assert.equal(summary?.unknownModelExecutionCount, 1);
+  });
+
+  it("keeps an exact prepared gap when the receipt identity belongs to another provider/model", async () => {
+    const fixture = await startExactRequestCoverageFixture("exact-binding-mismatch");
+    const commandId = "a3-exact-binding-mismatch";
+    const requestId = "a3-exact-binding-mismatch-request";
+    await fixture.writePrepared(commandId, requestId, "a3-provider-a", "a3-model-a");
+    const receipt = {
+      version: "video-factory/creative-discussion-execution-v1",
+      workflowOperationRequestId: `op-${commandId}`, commandId, requestId,
+      stage: "treatment", state: "completed",
+      trace: { providerId: "a3-provider-b", modelId: "a3-model-b", modelAttemptCount: 1 },
+    };
+    await writeFile(path.join(fixture.executionsDir, `${createHash("sha256").update(requestId).digest("hex")}.json`), `${JSON.stringify(receipt, null, 2)}\n`);
+
+    const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+    const gap = projection.facts.find((fact) => fact.requestId === requestId && fact.state === "prepared");
+    assert.ok(gap, "相同 requestId 但 provider/model 不同的回执不能吞掉 prepared 缺口");
+    assert.equal(gap.providerId, "a3-provider-a");
+    assert.equal(gap.modelId, "a3-model-a");
+    assert.ok(projection.issues.some((issue) => issue.includes(commandId) && issue.includes("binding_conflict")),
+      `身份冲突必须显式上报：${JSON.stringify(projection.issues)}`);
+    assert.ok(projection.issues.some((issue) => issue.includes(commandId) && issue.includes("uncovered_request")),
+      `未覆盖请求必须显式上报：${JSON.stringify(projection.issues)}`);
+  });
+
+  for (const firstFailureStage of ["not_accepted", "completed_failure"] as const) {
+    it(`preserves fallback candidate evidence when ${firstFailureStage} candidate A is followed by successful candidate B`, async () => {
+      const fixture = await runFallbackDiscussionAccounting(firstFailureStage);
+      const physicalRequestId = fixture.receipt.trace?.modelCandidateAttempts?.[0]?.requestId;
+      assert.ok(physicalRequestId, "prepared 回调必须提供物理 requestId");
+      assert.deepEqual(fixture.receipt.trace?.modelCandidateAttempts?.map((attempt) => ({
+        requestId: attempt.requestId,
+        providerId: attempt.providerId, modelId: attempt.modelId, outcome: attempt.outcome,
+        ...(attempt.modelAttemptCount !== undefined ? { modelAttemptCount: attempt.modelAttemptCount } : {}),
+        ...(attempt.failureStage ? { failureStage: attempt.failureStage } : {}),
+      })), [
+        { requestId: physicalRequestId,
+          providerId: fixture.providerIds[0], modelId: "treatment-model-a", outcome: "failed",
+          ...(firstFailureStage === "completed_failure" ? { modelAttemptCount: 2 } : {}), failureStage: firstFailureStage },
+        { requestId: physicalRequestId,
+          providerId: fixture.providerIds[1], modelId: "treatment-model-b", outcome: "succeeded", modelAttemptCount: 1 },
+      ], "durable 回执必须保留 fallback A、B 的逐候选事实");
+
+      const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+      const discussionFacts = projection.facts.filter((fact) => fact.purpose === "discussion"
+        && fact.operationId === fixture.receipt.workflowOperationRequestId);
+      assert.equal(discussionFacts.length, 2, "fallback 两个物理候选必须投影成两条事实且不与最终 trace 双计");
+      const first = discussionFacts.find((fact) => fact.modelId === "treatment-model-a")!;
+      const second = discussionFacts.find((fact) => fact.modelId === "treatment-model-b")!;
+      assert.equal(first.state, firstFailureStage);
+      assert.equal(first.accepted, firstFailureStage === "completed_failure");
+      assert.equal(first.modelAttemptCount, firstFailureStage === "completed_failure" ? 2 : 0);
+      assert.equal(second.state, "completed");
+      assert.equal(second.accepted, true);
+      assert.equal(second.modelAttemptCount, 1);
+      assert.ok(!projection.facts.some((fact) => fact.purpose === "discussion" && fact.state === "prepared"),
+        "已由候选证据覆盖的 prepared 不得继续误报待核");
+      assert.ok(!projection.issues.some((issue) => issue.includes(fixture.commandId)),
+        `完整候选证据不得产生 A3 缺口：${JSON.stringify(projection.issues)}`);
+
+      const summary = await summarizeJointPlanningExecution(
+        path.join(fixture.workspaceRoot, "runs"), fixture.run.id, fixture.receipt.workflowOperationRequestId,
+      );
+      assert.equal(summary?.discussionModelCallCount, firstFailureStage === "completed_failure" ? 3 : 1,
+        "planning 汇总必须计入已受理失败与成功，未受理候选不计调用");
+      assert.equal(summary?.unknownModelExecutionCount, 0);
+
+      const reloaded = await fixture.pipeline.loadPersisted(fixture.run.id);
+      const costs = new CostStudio(async () => [reloaded], undefined, undefined, undefined,
+        (candidateId) => fixture.pipeline.readModelExecutionFacts(candidateId));
+      const detail = await costs.runDetail(fixture.run.id);
+      const costFacts = detail!.executionFacts!.filter((fact) => fact.purpose === "discussion"
+        && fact.operationId === fixture.receipt.workflowOperationRequestId);
+      assert.equal(costFacts.filter((fact) => fact.accepted === true).length,
+        firstFailureStage === "completed_failure" ? 2 : 1, "CostStudio 必须采用相同逐候选受理口径");
+      assert.ok(costFacts.every((fact) => fact.modelAttemptCount !== null), "明确候选终态不得继续显示次数待核");
+      assert.ok(!detail!.lines.some((line) => line.accountingSource === "execution_summary"
+        && line.requestId === fixture.receipt.workflowOperationRequestId && line.callCountPending === true),
+      "完整 fallback 事实不能让本次讨论汇总仍保持待核");
+    });
+  }
+
+  it("keeps a completed failure pending when the provider did not report its attempt count", async () => {
+    const fixture = await runFallbackDiscussionAccounting("completed_failure", { failureModelAttemptCount: null });
+    const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+    const facts = projection.facts.filter((fact) => fact.purpose === "discussion"
+      && fact.operationId === fixture.receipt.workflowOperationRequestId);
+    const failed = facts.find((fact) => fact.modelId === "treatment-model-a")!;
+    const succeeded = facts.find((fact) => fact.modelId === "treatment-model-b")!;
+    assert.equal(failed.state, "completed_failure");
+    assert.equal(failed.accepted, true);
+    assert.equal(failed.modelAttemptCount, null, "缺真实次数不能默认成一次");
+    assert.equal(succeeded.modelAttemptCount, 1);
+    const summary = await summarizeJointPlanningExecution(
+      path.join(fixture.workspaceRoot, "runs"), fixture.run.id, fixture.receipt.workflowOperationRequestId,
+    );
+    assert.equal(summary?.discussionModelCallCount, 1, "数字汇总只包含已核实的成功调用");
+    assert.equal(summary?.unknownModelExecutionCount, 1, "缺次数的已受理失败保持待核");
+  });
+
+  it("persists exact candidate attempts when every fallback discussion candidate fails", async () => {
+    const fixture = await runFallbackDiscussionAccounting("completed_failure", { allCandidatesFail: true });
+    assert.equal(fixture.receipt.state, "completed_failure");
+    assert.equal(fixture.receipt.factReason, "settled_failure");
+    assert.equal(fixture.receipt.trace?.providerId, undefined, "全失败回执不能伪造最终 provider");
+    assert.equal(fixture.receipt.trace?.modelId, undefined, "全失败回执不能伪造最终 model");
+    assert.deepEqual(fixture.receipt.trace?.modelCandidateAttempts?.map((attempt) => ({
+      providerId: attempt.providerId, modelId: attempt.modelId, outcome: attempt.outcome,
+      failureStage: attempt.failureStage, modelAttemptCount: attempt.modelAttemptCount,
+    })), [
+      { providerId: fixture.providerIds[0], modelId: "treatment-model-a", outcome: "failed",
+        failureStage: "completed_failure", modelAttemptCount: 2 },
+      { providerId: fixture.providerIds[1], modelId: "treatment-model-b", outcome: "failed",
+        failureStage: "completed_failure", modelAttemptCount: 1 },
+    ]);
+
+    const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+    const facts = projection.facts.filter((fact) => fact.purpose === "discussion"
+      && fact.operationId === fixture.receipt.workflowOperationRequestId);
+    assert.deepEqual(facts.map((fact) => fact.modelAttemptCount).sort(), [1, 2]);
+    assert.ok(facts.every((fact) => fact.state === "completed_failure" && fact.accepted === true));
+    assert.ok(!projection.issues.some((issue) => issue.includes(fixture.commandId)),
+      `完整全失败证据不得产生 A3 缺口：${JSON.stringify(projection.issues)}`);
+
+    const summary = await summarizeJointPlanningExecution(
+      path.join(fixture.workspaceRoot, "runs"), fixture.run.id, fixture.receipt.workflowOperationRequestId,
+    );
+    assert.equal(summary?.discussionModelCallCount, 3);
+    assert.equal(summary?.unknownModelExecutionCount, 0);
+
+    const reloaded = await fixture.pipeline.loadPersisted(fixture.run.id);
+    const detail = await new CostStudio(async () => [reloaded], undefined, undefined, undefined,
+      (candidateId) => fixture.pipeline.readModelExecutionFacts(candidateId)).runDetail(fixture.run.id);
+    const costFacts = detail!.executionFacts!.filter((fact) => fact.purpose === "discussion"
+      && fact.operationId === fixture.receipt.workflowOperationRequestId);
+    assert.deepEqual(costFacts.map((fact) => fact.modelAttemptCount).sort(), [1, 2]);
+    assert.ok(!detail!.lines.some((line) => line.accountingSource === "execution_summary"
+      && line.requestId === fixture.receipt.workflowOperationRequestId && line.callCountPending === true));
+  });
+
+  it("keeps an all-failed candidate pending when its real attempt count is absent", async () => {
+    const fixture = await runFallbackDiscussionAccounting("completed_failure", {
+      allCandidatesFail: true, finalFailureModelAttemptCount: null,
+    });
+    const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+    const facts = projection.facts.filter((fact) => fact.purpose === "discussion"
+      && fact.operationId === fixture.receipt.workflowOperationRequestId);
+    const known = facts.find((fact) => fact.modelId === "treatment-model-a")!;
+    const pending = facts.find((fact) => fact.modelId === "treatment-model-b")!;
+    assert.equal(known.modelAttemptCount, 2);
+    assert.equal(pending.state, "completed_failure");
+    assert.equal(pending.accepted, true);
+    assert.equal(pending.modelAttemptCount, null, "缺真实次数仍然待核，不能默认成一次");
+
+    const summary = await summarizeJointPlanningExecution(
+      path.join(fixture.workspaceRoot, "runs"), fixture.run.id, fixture.receipt.workflowOperationRequestId,
+    );
+    assert.equal(summary?.discussionModelCallCount, 2);
+    assert.equal(summary?.unknownModelExecutionCount, 1);
+
+    const reloaded = await fixture.pipeline.loadPersisted(fixture.run.id);
+    const detail = await new CostStudio(async () => [reloaded], undefined, undefined, undefined,
+      (candidateId) => fixture.pipeline.readModelExecutionFacts(candidateId)).runDetail(fixture.run.id);
+    const costPending = detail!.executionFacts!.find((fact) => fact.purpose === "discussion"
+      && fact.operationId === fixture.receipt.workflowOperationRequestId && fact.modelId === "treatment-model-b");
+    assert.equal(costPending?.modelAttemptCount, null);
+    assert.ok(detail!.lines.some((line) => line.accountingSource === "execution_summary"
+      && line.requestId === fixture.receipt.workflowOperationRequestId && line.callCountPending === true));
+  });
+
+  it("keeps same-provider fallback models as two distinct accepted execution facts", async () => {
+    const fixture = await runFallbackDiscussionAccounting("completed_failure", { sameProvider: true });
+    const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+    const facts = projection.facts.filter((fact) => fact.purpose === "discussion"
+      && fact.operationId === fixture.receipt.workflowOperationRequestId);
+    assert.equal(facts.length, 2);
+    assert.deepEqual(new Set(facts.map((fact) => fact.modelId)), new Set(["treatment-model-a", "treatment-model-b"]));
+    assert.equal(new Set(facts.map((fact) => fact.executionKey)).size, 2,
+      "同 provider/request 的不同模型候选必须保留独立 executionKey");
+    assert.deepEqual(new Set(facts.map((fact) => fact.executionKey)), new Set(facts.map((fact) => JSON.stringify([
+      "discussion-candidate", fixture.commandId, fact.requestId, fact.providerId, fact.modelId,
+    ]))), "executionKey 只由 durable 四元组决定，不依赖数组位置");
+    assert.deepEqual(facts.map((fact) => fact.modelAttemptCount).sort(), [1, 2]);
+    assert.ok(facts.every((fact) => fact.accepted === true && !fact.conflict));
+    const summary = await summarizeJointPlanningExecution(
+      path.join(fixture.workspaceRoot, "runs"), fixture.run.id, fixture.receipt.workflowOperationRequestId,
+    );
+    assert.equal(summary?.discussionModelCallCount, 3);
+    const reloaded = await fixture.pipeline.loadPersisted(fixture.run.id);
+    const detail = await new CostStudio(async () => [reloaded], undefined, undefined, undefined,
+      (candidateId) => fixture.pipeline.readModelExecutionFacts(candidateId)).runDetail(fixture.run.id);
+    const costFacts = detail!.executionFacts!.filter((fact) => fact.purpose === "discussion"
+      && fact.operationId === fixture.receipt.workflowOperationRequestId);
+    assert.equal(costFacts.length, 2);
+    assert.equal(costFacts.filter((fact) => fact.accepted === true).length, 2);
+    assert.ok(costFacts.every((fact) => !fact.conflict));
+  });
+
+  it("keeps transport fallback evidence pending instead of guessing zero or completed", async () => {
+    const fixture = await startExactRequestCoverageFixture("transport-pending");
+    const commandId = "a3-transport-pending";
+    const requestId = "a3-transport-pending-request";
+    await fixture.writePrepared(commandId, requestId, "a3-provider-a", "a3-model-a");
+    await fixture.writePrepared(commandId, requestId, "a3-provider-b", "a3-model-b");
+    const receipt = {
+      version: "video-factory/creative-discussion-execution-v1",
+      workflowOperationRequestId: `op-${commandId}`, commandId, requestId,
+      stage: "treatment", state: "completed",
+      trace: {
+        providerId: "a3-provider-b", modelId: "a3-model-b", modelAttemptCount: 1,
+        modelCandidateAttempts: [
+          { requestId, providerId: "a3-provider-a", modelId: "a3-model-a", outcome: "failed", failureStage: "transport", failureReason: "连接失败" },
+          { requestId, providerId: "a3-provider-b", modelId: "a3-model-b", modelAttemptCount: 1, outcome: "succeeded" },
+        ],
+      },
+    };
+    await writeFile(path.join(fixture.executionsDir, `${createHash("sha256").update(requestId).digest("hex")}.json`), `${JSON.stringify(receipt, null, 2)}\n`);
+    const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+    const facts = projection.facts.filter((fact) => fact.purpose === "discussion"
+      && fact.operationId === receipt.workflowOperationRequestId);
+    const transport = facts.find((fact) => fact.modelId === "a3-model-a")!;
+    const success = facts.find((fact) => fact.modelId === "a3-model-b")!;
+    assert.equal(transport.state, "unknown");
+    assert.equal(transport.accepted, null);
+    assert.equal(transport.modelAttemptCount, null);
+    assert.equal(success.state, "completed");
+    assert.equal(success.modelAttemptCount, 1);
+    assert.ok(!projection.facts.some((fact) => fact.purpose === "discussion" && fact.state === "prepared"));
+    const summary = await summarizeJointPlanningExecution(
+      path.join(fixture.workspaceRoot, "runs"), fixture.run.id, receipt.workflowOperationRequestId,
+    );
+    assert.equal(summary?.discussionModelCallCount, 1);
+    assert.equal(summary?.unknownModelExecutionCount, 1);
+  });
+
+  it("settles multiple prepared bindings sharing one exact request when candidates cover them one to one", async () => {
+    const fixture = await startExactRequestCoverageFixture("exact-complete");
+    const commandId = "a3-exact-complete";
+    const requestId = "a3-shared-exact-request";
+    await fixture.writePrepared(commandId, requestId, "a3-provider-a", "a3-model-a");
+    await fixture.writePrepared(commandId, requestId, "a3-provider-b", "a3-model-b");
+    await fixture.writeReceipt(commandId, requestId, [
+      { requestId, outcome: "failed", failureStage: "not_accepted", failureReason: "未受理", providerId: "a3-provider-a", modelId: "a3-model-a" },
+      { requestId, outcome: "succeeded", modelAttemptCount: 1, providerId: "a3-provider-b", modelId: "a3-model-b" },
+    ]);
+
+    const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+    assert.equal(projection.facts.filter((fact) => fact.requestId === requestId && fact.state === "prepared").length, 0,
+      "两个候选完整覆盖两个物理 prepared 时没有缺口");
+    assert.ok(!projection.issues.some((issue) => issue.includes(commandId)),
+      `完整一对一覆盖不得误报冲突：${JSON.stringify(projection.issues)}`);
+  });
+
+  it("keeps exactly one prepared gap when an exact shared request covers only one binding", async () => {
+    const fixture = await startExactRequestCoverageFixture("exact-partial");
+    const commandId = "a3-exact-partial";
+    const requestId = "a3-shared-partial-request";
+    await fixture.writePrepared(commandId, requestId, "a3-provider-a", "a3-model-a");
+    await fixture.writePrepared(commandId, requestId, "a3-provider-b", "a3-model-b");
+    await fixture.writeReceipt(commandId, requestId, [
+      { requestId, outcome: "succeeded", modelAttemptCount: 1, providerId: "a3-provider-a", modelId: "a3-model-a" },
+    ]);
+
+    const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+    const gaps = projection.facts.filter((fact) => fact.requestId === requestId && fact.state === "prepared");
+    assert.equal(gaps.length, 1, "一条候选只能覆盖一个物理 prepared");
+    assert.equal(gaps[0]!.providerId, "a3-provider-b");
+    assert.equal(gaps[0]!.modelId, "a3-model-b");
+    assert.ok(projection.issues.some((issue) => issue.includes(commandId) && issue.includes("uncovered_request")),
+      `未覆盖的物理请求必须上报：${JSON.stringify(projection.issues)}`);
+    assert.ok(!projection.issues.some((issue) => issue.includes(commandId) && issue.includes("binding_conflict")),
+      `可区分的部分覆盖不得误报 binding conflict：${JSON.stringify(projection.issues)}`);
+  });
+
+  it("rejects candidate receipts whose top-level state contradicts their failure-stage aggregate", async () => {
+    const fixture = await startExactRequestCoverageFixture("candidate-state-aggregate");
+    const cases = [
+      { label: "failure-overrides-rejection", state: "not_accepted", stages: ["not_accepted", "completed_failure"] },
+      { label: "unknown-overrides-failure", state: "completed_failure", stages: ["completed_failure", "uncertain"] },
+      { label: "all-rejected-is-not-accepted", state: "accepted_unknown", stages: ["not_accepted", "rejected"] },
+    ] as const;
+    for (const item of cases) {
+      const commandId = `a3-invalid-state-${item.label}`;
+      const requestId = `${commandId}-request`;
+      const attempts = item.stages.map((failureStage, index) => ({
+        requestId,
+        providerId: `a3-provider-${index}`,
+        modelId: `a3-model-${index}`,
+        outcome: "failed" as const,
+        failureStage,
+        failureReason: "受控候选失败",
+        ...(failureStage === "completed_failure" ? { modelAttemptCount: 2 } : {}),
+      }));
+      for (const attempt of attempts) {
+        await fixture.writePrepared(commandId, requestId, attempt.providerId, attempt.modelId);
+      }
+      const receipt = {
+        version: "video-factory/creative-discussion-execution-v1",
+        workflowOperationRequestId: `op-${commandId}`,
+        commandId,
+        requestId,
+        stage: "treatment",
+        state: item.state,
+        trace: { modelCandidateAttempts: attempts },
+      };
+      await writeFile(path.join(fixture.executionsDir, `${createHash("sha256").update(requestId).digest("hex")}.json`),
+        `${JSON.stringify(receipt, null, 2)}\n`);
+    }
+
+    const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+    assert.equal(projection.issues.filter((issue) => issue.includes("invalid_model_candidate_attempts")).length, cases.length,
+      `三份状态矛盾回执都必须拒绝：${JSON.stringify(projection.issues)}`);
+    for (const item of cases) {
+      const commandId = `a3-invalid-state-${item.label}`;
+      const requestId = `${commandId}-request`;
+      const facts = projection.facts.filter((fact) => fact.requestId === requestId);
+      assert.equal(facts.length, 2, `${item.label} 两个 prepared 身份都保留`);
+      assert.ok(facts.every((fact) => fact.state === "prepared" && fact.accepted === null
+        && fact.modelAttemptCount === null), `${item.label} 非法回执不能覆盖 prepared 或计费`);
+      const issues: string[] = [];
+      const summary = await summarizeJointPlanningExecution(
+        path.join(fixture.workspaceRoot, "runs"), fixture.run.id, `op-${commandId}`, (issue) => issues.push(issue),
+      );
+      assert.equal(summary?.discussionModelCallCount ?? 0, 0, `${item.label} 非法回执不计物理调用`);
+      assert.ok(issues.some((issue) => issue.includes("invalid_model_candidate_attempts")),
+        `${item.label} 汇总必须显式标记坏回执`);
+    }
+    const reloaded = await fixture.pipeline.loadPersisted(fixture.run.id);
+    const detail = await new CostStudio(async () => [reloaded], undefined, undefined, undefined,
+      (candidateId) => fixture.pipeline.readModelExecutionFacts(candidateId)).runDetail(fixture.run.id);
+    const invalidRequestIds = new Set(cases.map((item) => `a3-invalid-state-${item.label}-request`));
+    const costFacts = detail!.executionFacts!.filter((fact) => invalidRequestIds.has(fact.requestId));
+    assert.equal(costFacts.length, cases.length * 2);
+    assert.ok(costFacts.every((fact) => fact.state === "prepared" && fact.accepted === null
+      && fact.modelAttemptCount === null), "CostStudio 只能看到待核 prepared，不能采用矛盾回执计费");
+  });
+
+  it("rejects duplicate candidate identities instead of double counting them", async () => {
+    const fixture = await startExactRequestCoverageFixture("duplicate-identity");
+    const commandId = "a3-duplicate-identity";
+    const requestId = "a3-duplicate-request";
+    await fixture.writePrepared(commandId, requestId, "a3-provider", "a3-model");
+    await fixture.writeReceipt(commandId, requestId, [
+      { requestId, outcome: "failed", failureStage: "not_accepted", failureReason: "未受理", providerId: "a3-provider", modelId: "a3-model" },
+      { requestId, outcome: "succeeded", modelAttemptCount: 1, providerId: "a3-provider", modelId: "a3-model" },
+    ]);
+    const projection = await fixture.pipeline.readModelExecutionFacts(fixture.run.id);
+    assert.ok(projection.issues.some((issue) => issue.includes("invalid_model_candidate_attempts")),
+      `重复身份必须判回执无效：${JSON.stringify(projection.issues)}`);
+    const facts = projection.facts.filter((fact) => fact.requestId === requestId);
+    assert.equal(facts.length, 1);
+    assert.equal(facts[0]!.state, "prepared", "无效回执不能覆盖 prepared，也不能双计");
   });
 });
 

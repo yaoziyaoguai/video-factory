@@ -97,8 +97,9 @@ export class CostStudio {
     const projection = await this.readExecutionFacts?.(run.id);
     const usageList = projection ? [] : await this.readModelUsage?.(run.id) ?? [];
     const usageByNode = new Map(usageList.map((usage) => [usage.nodeId, usage]));
-    const detail = { ...toRunDetail(run, usageByNode, paidReceipts, documentReceipts), timing: runTiming(run) };
-    if (projection) return withExecutionFacts(detail, projection);
+    const { zeroCallSummaryIds, ...runDetail } = toRunDetail(run, usageByNode, paidReceipts, documentReceipts);
+    const detail = { ...runDetail, timing: runTiming(run) };
+    if (projection) return withExecutionFacts(detail, projection, zeroCallSummaryIds);
     for (const usage of usageList) {
       const recorded = detail.lines.filter((line) => line.nodeId === usage.nodeId && line.accountingSource !== "document_operation")
         .reduce((sum, line) => sum + (line.subscriptionCallCount ?? 0), 0);
@@ -179,13 +180,15 @@ function pendingAttributedLine(line: StudioCostLine): StudioCostLine {
     legacySnapshotCount: 1 };
 }
 
-function withExecutionFacts(detail: StudioCostRunDetail, projection: ModelExecutionProjection): StudioCostRunDetail {
+function withExecutionFacts(
+  detail: StudioCostRunDetail, projection: ModelExecutionProjection, zeroCallSummaryIds: ReadonlySet<string>,
+): StudioCostRunDetail {
   const covered = new Set<string>();
   const lines = detail.lines.flatMap((line): StudioCostLine[] => {
     if (!isModelLine(line)) return [line];
     // 节点汇总不是新请求。只有同操作的逐请求证据完整（无未知/冲突、读取无
     // issues）、计数精确匹配、且没有会随消去丢失的独立金额时才移除汇总；
-    // 零调用没有正面覆盖证据，永远保留待核。
+    // 零调用也要有正面证据：同操作请求全部明确未受理，不能仅凭汇总的 0 消去未知。
     if (line.accountingSource === "execution_summary") {
       const facts = projection.facts.filter(fact => fact.nodeId === line.nodeId && !!line.requestId && fact.operationId === line.requestId);
       const countsKnown = facts.length > 0
@@ -195,10 +198,16 @@ function withExecutionFacts(detail: StudioCostRunDetail, projection: ModelExecut
       // 精确覆盖；已核实的子集事实照常由下方独立成行可见。
       const summaryCountUnknown = line.executionSummaryPending === true || line.callCountPending === true
         || line.subscriptionCallCount === undefined;
+      const allRejected = facts.length > 0 && facts.every(fact => fact.state === "not_accepted"
+        && fact.accepted === false && fact.modelAttemptCount === 0);
       const exactCover = !summaryCountUnknown && projection.issues.length === 0 && countsKnown
-        && typeof line.subscriptionCallCount === "number" && line.subscriptionCallCount > 0
+        && typeof line.subscriptionCallCount === "number" && (line.subscriptionCallCount > 0 || allRejected)
         && line.subscriptionCallCount === attemptTotal;
-      if (exactCover && line.actualCostCny === undefined) return [];
+      // 完整分类均为零、已结束的本地操作没有物理模型请求；读取无缺口且同节点没有
+      // 未归属请求时，才把它识别为无需模型费用的操作。单个 0/缺字段不构成证明。
+      const recordedZero = zeroCallSummaryIds.has(line.id) && facts.length === 0 && projection.issues.length === 0
+        && !projection.facts.some(fact => fact.nodeId === line.nodeId && !fact.operationId);
+      if ((exactCover || recordedZero) && line.countConflict !== true && line.actualCostCny === undefined) return [];
       return [pendingAttributedLine(line)];
     }
     // 只有同一物理请求才可与fact合并并取得覆盖权；operationId相同仅代表同操作，
@@ -285,7 +294,7 @@ function toRunDetail(
   usageByNode: Map<string, NodeModelUsage> = new Map(),
   paidReceipts: unknown[] = [],
   documentReceipts: unknown[] = [],
-): StudioCostRunDetail {
+): StudioCostRunDetail & { zeroCallSummaryIds: Set<string> } {
   const title = runTitle(run.initialInput);
   const nodes = nodeMap(run.nodeRuns);
   const authorizations = Array.isArray(run.spendAuthorizations) ? run.spendAuthorizations : [];
@@ -302,6 +311,7 @@ function toRunDetail(
     Array.isArray(run.executionReceipts) ? run.executionReceipts : [],
     [...paidReceipts, ...documentReceipts],
   );
+  const zeroCallSummaryIds = new Set<string>();
   const lines = receipts.flatMap((value): StudioCostLine[] => {
     const receipt = isRecord(value) ? value : undefined;
     if (!receipt) return [];
@@ -351,6 +361,13 @@ function toRunDetail(
     const executionSummaryPending = executionSummary && parameters?.executionSummaryPending === true;
     const registeredCallCount = nonNegativeInteger(parameters?.modelCallCount);
     const summaryCountUnknown = executionSummary && (executionSummaryPending || registeredCallCount === undefined);
+    if (executionSummary && !summaryCountUnknown && receipt.countConflict !== true && rawRequestId
+      && ["needs_human", "succeeded", "failed"].includes(text(receipt.status))
+      && Number.isFinite(Date.parse(text(receipt.finishedAt)))
+      && ["modelCallCount", "producerModelCallCount", "auditModelCallCount", "discussionModelCallCount",
+        "structuredRepairModelCallCount", "unknownModelExecutionCount"].every(field => parameters?.[field] === 0)) {
+      zeroCallSummaryIds.add(id);
+    }
     const subscriptionCallCount = billing === "subscription"
       ? executionSummary
         ? summaryCountUnknown ? undefined : registeredCallCount
@@ -412,7 +429,7 @@ function toRunDetail(
     }];
   }).sort((left, right) => left.startedAt.localeCompare(right.startedAt));
   const attributedLines = foldLegacySubscriptionSnapshots(lines, usageByNode);
-  return { runId: run.id, title, totals: totals(attributedLines), lines: attributedLines };
+  return { runId: run.id, title, totals: totals(attributedLines), lines: attributedLines, zeroCallSummaryIds };
 }
 
 // T04/AC-06a：同一节点存在 checkpoint 权威计数时，没有请求身份的旧订阅累计快照

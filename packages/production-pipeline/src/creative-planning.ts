@@ -11,7 +11,7 @@ import { assertDurationCommitment, PlanContractError, quantizeDurationsToFrames,
 import { RoleAgentLoopError, RoleAgentPlanningHaltError, isCompletedRoleAgentFailure } from "./role-agent-loop.js";
 import { CodexBridgeError, codexBridgeErrorFromCause, type AgentLoopTrace, type RoleAudit, type RoleAuditPlanningDisposition } from "./codex-chat.js";
 import { ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
-import { classifyCreativeConsultationError, type CreativeConsultationFacts } from "./creative-discussion-facts.js";
+import { classifyCreativeConsultationError, creativeConsultationDiagnosticDetail, type CreativeConsultationFacts } from "./creative-discussion-facts.js";
 import { isModelProviderFailure, isTransientRoleAuditProviderFailure, publicModelFailure } from "./model-fallback.js";
 import {
   compileExecutableProductionPlan,
@@ -784,6 +784,7 @@ async function creativeConsultationFailureStop(
   const facts = classifyCreativeConsultationError(error, { settledNoResult: options.settledNoResult === true });
   await options.noteFact?.({ commandId: resume.commandId, stage, facts });
   const identityConflict = facts.fact === "unknown" && facts.reason === "identity_conflict";
+  const safeDetail = creativeConsultationDiagnosticDetail(facts);
   const diagnostic = {
     reasonCode: facts.fact === "not_accepted"
       ? "discussion_not_accepted"
@@ -798,6 +799,7 @@ async function creativeConsultationFailureStop(
           ? "这次讨论/修改的请求身份与已有任务记录冲突，结果需先核对原请求。当前稿已保留；请核对原操作，不要重复发送；核实前费用保持未知。"
           : "这次讨论/修改的请求结果仍在核实。当前稿已保留；请核对原操作，不要重复发送；核实前费用保持未知。",
   };
+  if (safeDetail) diagnostic.detail += ` ${safeDetail}`;
   return {
     planningStop: { reason: "needs_user" as const, issueIds: [], detail: diagnostic.detail },
     creativeReview: recordCreativeReviewContinuation(state.creativeReview, stage, {

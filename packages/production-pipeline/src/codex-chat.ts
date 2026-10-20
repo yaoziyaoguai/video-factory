@@ -27,7 +27,7 @@ export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
   "reference-grammar": "97bc69a9ba5956cff572611773a4cd3310b67ed4f86411d9b6eb654f62e6af52",
   "visual-review": "74ae954aa0f784a88b9ff1919acf45905a37803b7a56ae751476e68d9638ec60",
   "role-audit": "2f907eb3612322708f1154104c4f2faac26a4ef2b7e5edefcc95a3dcccd9c04d",
-  "creative-discussion": "f67be9993eef20d2b27d94b9dadace85312c80950959418790dc072e601637c7",
+  "creative-discussion": "6f33ee47ccdb0f06c9ce02614fc9d2467fa3c6b45b856ec3046045dc025013c6",
 } as const satisfies Partial<Record<CodexTaskKind, string>>;
 
 // 安全边界：kind 白名单是容器侧唯一能表达的任务意图；宿主机 broker 不接受 shell、command 或 cwd。
@@ -37,6 +37,10 @@ export type CodexTaskKind = (typeof CODEX_TASK_KINDS)[number];
 interface ModelCandidateAttemptBase {
   modelId: string;
   providerId: string;
+  /** 该候选实际提交/观察的宿主 requestId；旧回执可能缺失。 */
+  requestId?: string;
+  /** 仅在 broker/provider 明确返回时保存，不能由 failure stage 猜测。 */
+  modelAttemptCount?: number;
 }
 
 export type ModelCandidateAttempt = ModelCandidateAttemptBase & (
@@ -1490,6 +1494,10 @@ function parseModelCandidateAttempts(value: unknown): ModelCandidateAttempt[] | 
     if (typeof attempt.providerId !== "string" || !attempt.providerId) {
       throw new CodexBridgeError("Codex bridge model candidate attempt is missing its broker provider identity.", false);
     }
+    if (attempt.requestId !== undefined && (typeof attempt.requestId !== "string" || !attempt.requestId)) {
+      throw new CodexBridgeError("Codex bridge model candidate attempt request identity is invalid.", false);
+    }
+    const modelAttemptCount = optionalTokenCount(attempt.modelAttemptCount, "modelCandidateAttempts.modelAttemptCount");
     if (attempt.outcome === "succeeded"
       && (attempt.failureStage !== undefined || attempt.failureReason !== undefined)) {
       throw new CodexBridgeError("Codex bridge successful model candidate attempt cannot contain a failure.", false);
@@ -1501,6 +1509,8 @@ function parseModelCandidateAttempts(value: unknown): ModelCandidateAttempt[] | 
     return {
       modelId: attempt.modelId,
       providerId: attempt.providerId,
+      ...(typeof attempt.requestId === "string" ? { requestId: attempt.requestId } : {}),
+      ...(modelAttemptCount !== undefined ? { modelAttemptCount } : {}),
       outcome: attempt.outcome,
       ...(attempt.failureStage ? { failureStage: attempt.failureStage } : {}),
       ...(typeof attempt.failureReason === "string" ? { failureReason: attempt.failureReason } : {}),

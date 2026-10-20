@@ -1766,7 +1766,10 @@ function requireExistingScriptDiscussionDocument(
       throw new CodexExecutorError(`${sceneField}.position must be a positive integer.`, false);
     }
     optionalNonEmptyText(scene.purpose, `${sceneField}.purpose`);
-    requiredText(scene.narration, `${sceneField}.narration`);
+    // 已保存稿允许静默镜头；这里只核类型，不把创作留白当成缺失字段。
+    if (typeof scene.narration !== "string") {
+      throw new CodexExecutorError(`${sceneField}.narration must be a string.`, false);
+    }
     if (typeof scene.duration !== "number" || !Number.isFinite(scene.duration) || scene.duration <= 0) {
       throw new CodexExecutorError(`${sceneField}.duration must be a finite positive number.`, false);
     }

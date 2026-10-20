@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -877,6 +878,24 @@ describe("parseTaskRequest", () => {
     // 输出给讨论模型的文档未被填造字段或改写。
     assert.deepEqual(accepted.payload.currentDocument, savedScript);
 
+    // 静默是有效创作内容，已保存脚本的空旁白必须原样进入讨论/修订前的讨论。
+    for (const narration of ["", "   "]) {
+      const silentScript = {
+        ...savedScript,
+        scenes: savedScript.scenes.map((scene, index) => index === 1 ? { ...scene, narration } : scene),
+      };
+      for (const requestMode of ["discuss", "revise"]) {
+        const silentDiscussion = parseTaskRequest({
+          protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION, kind: "creative-discussion",
+          payload: { ...discussionPayload(silentScript), requestMode },
+          expectedContractDigest: taskContractDescriptorFor("creative-discussion").digest,
+        });
+        assert.equal(silentDiscussion.kind, "creative-discussion");
+        if (silentDiscussion.kind !== "creative-discussion") throw new Error("expected creative-discussion task");
+        assert.deepEqual(silentDiscussion.payload.currentDocument, silentScript);
+      }
+    }
+
     // 已有稿合法上界（1..8 条 criteria）必须可讨论：新模型输出 schema 的 1..6 不属于已有稿合同。
     parseDiscussion({
       ...savedScript,
@@ -940,6 +959,71 @@ describe("parseTaskRequest", () => {
     // 新模型 script-draft 输出 schema 不放松：缺 purpose 的产出仍不通过输出校验。
     const { outputValidationErrorFor } = await import("../src/task-definitions.js");
     assert.match(String(outputValidationErrorFor("script-draft", savedScript)), /purpose|required/);
+  });
+
+  it("CDF01 accepts silent scenes at any position in a second topic and rejects non-string narration or mixed document versions", async () => {
+    // 第二题材、不同镜数（2 镜办公室喜剧）的已保存稿：静默无论出现在哪一镜都可以讨论。
+    const officeScript = {
+      scenes: [
+        { position: 1, narration: "办公室的灯还亮着，键盘声停了。", duration: 6, visual_strategy: "stock", visual_prompt: "深夜办公室只剩一盏台灯", search_terms: ["深夜办公室"] },
+        { position: 2, narration: "", duration: 5, visual_strategy: "stock", visual_prompt: "椅子空着，屏幕还停在未发送的消息", search_terms: ["空椅子"] },
+      ],
+    };
+    const discussionPayload = (currentDocument: unknown, requestMode?: string) => ({
+      stage: "script",
+      currentDocument,
+      context: {
+        effectiveUserInstructions: [],
+        upstreamConfirmed: {},
+        productionCapabilities: { assetProviders: ["pexels-stock-v1"] },
+      },
+      message: "解释这个安排",
+      recentMessages: [],
+      ...(requestMode ? { requestMode } : {}),
+    });
+    const parseDiscussion = (currentDocument: unknown, requestMode?: string) => parseTaskRequest({
+      protocolVersion: CODEX_BRIDGE_PROTOCOL_VERSION,
+      kind: "creative-discussion",
+      payload: discussionPayload(currentDocument, requestMode),
+      expectedContractDigest: taskContractDescriptorFor("creative-discussion").digest,
+    });
+
+    // 开头静默（position 1）、末尾静默（最后一镜）、全镜静默都按已有稿合同受理，discuss/revise 同语义。
+    const openingSilent = { scenes: officeScript.scenes.map((scene, index) => index === 0 ? { ...scene, narration: "" } : scene) };
+    const closingSilent = { scenes: officeScript.scenes.map((scene, index) => index === officeScript.scenes.length - 1 ? { ...scene, narration: "" } : scene) };
+    const allSilent = { scenes: officeScript.scenes.map((scene) => ({ ...scene, narration: "" })) };
+    for (const [label, script] of [["opening", openingSilent], ["closing", closingSilent], ["all-silent", allSilent]] as const) {
+      for (const requestMode of ["discuss", "revise"] as const) {
+        const parsed = parseDiscussion(script, requestMode);
+        if (parsed.kind !== "creative-discussion") throw new Error(`expected creative-discussion for ${label}`);
+        assert.deepEqual(parsed.payload.currentDocument, script, `${label} silent script must pass through unchanged`);
+      }
+    }
+
+    // narration 只放宽到 string（含空串/纯空白）；null、数字仍拒收。
+    await assert.rejects(async () => parseDiscussion({
+      scenes: officeScript.scenes.map((scene, index) => index === 0 ? { ...scene, narration: null } : scene),
+    }), /narration/);
+    await assert.rejects(async () => parseDiscussion({
+      scenes: officeScript.scenes.map((scene, index) => index === 0 ? { ...scene, narration: 42 } : scene),
+    }), /narration/);
+
+    // 基础结构仍必需：整个文档缺 scenes 键不能当作空稿受理。
+    await assert.rejects(async () => parseDiscussion({ canonFacts: ["没有分镜"] }), /scenes/);
+
+    // 解说稿与角色剧稿不混：给解说稿盖角色稿版本戳按角色稿合同拒绝；真实角色稿按角色稿合同受理；
+    // 去掉版本戳的角色稿回到解说稿合同，因顶层多余字段被拒。
+    await assert.rejects(async () => parseDiscussion({
+      version: "video-factory/character-script-v1",
+      ...officeScript,
+    }), /character|dialogue|speaker|version|scenes/i);
+    const characterFixture = JSON.parse(readFileSync(new URL("../../../tests/fixtures/character-drama-cases.json", import.meta.url), "utf8")).script;
+    const parsedCharacter = parseDiscussion(characterFixture, "discuss");
+    if (parsedCharacter.kind !== "creative-discussion") throw new Error("expected creative-discussion for character script");
+    assert.deepEqual(parsedCharacter.payload.currentDocument, characterFixture);
+    const strippedCharacter = { ...characterFixture } as { version?: string };
+    delete strippedCharacter.version;
+    await assert.rejects(async () => parseDiscussion(strippedCharacter), /not part of the saved script contract|characters/i);
   });
 
   it("rejects retired template guidance on every new planning-role request", async () => {

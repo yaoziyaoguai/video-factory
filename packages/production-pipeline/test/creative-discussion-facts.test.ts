@@ -2,7 +2,32 @@ import assert from "node:assert/strict";
 import { it } from "node:test";
 import { CodexBridgeError } from "../src/codex-chat.js";
 import { ModelCandidatesExhaustedError } from "../src/fallback-role-agents.js";
-import { classifyCreativeConsultationError } from "../src/creative-discussion-facts.js";
+import { classifyCreativeConsultationError, creativeConsultationDiagnosticDetail } from "../src/creative-discussion-facts.js";
+
+it("preserves only safe input rejection diagnostics through role wrappers and candidate aggregation", () => {
+  const rejection = (fieldPath: string) => new CodexBridgeError("private input and credential text", false, "rejected", 400, "contract_rejected", {
+    category: "invalid_request", reasonCode: "input_contract", providerId: "fixture", modelId: "fixture", fieldPath,
+  });
+  const safe = new Error("wrapper with private text", { cause: rejection("payload.currentDocument.scenes[3].duration") });
+  const facts = classifyCreativeConsultationError(safe);
+  assert.deepEqual(facts.candidates[0]?.diagnostic, { reasonCode: "input_contract", fieldPath: "payload.currentDocument.scenes[3].duration" });
+  assert.match(creativeConsultationDiagnosticDetail(facts), /第 4 镜时长/);
+  assert.doesNotMatch(JSON.stringify(facts), /private|credential/);
+
+  const mixed = classifyCreativeConsultationError(new ModelCandidatesExhaustedError([
+    { providerId: "a", modelId: "a", error: safe },
+    { providerId: "b", modelId: "b", error: new CodexBridgeError("unknown", false, "uncertain") },
+  ]));
+  assert.equal(mixed.fact, "unknown", "输入拒收不能覆盖另一候选的未知结果");
+  assert.equal(mixed.candidates[0]?.diagnostic?.fieldPath, "payload.currentDocument.scenes[3].duration");
+  for (const unsafe of ["payload.private\nsecret", "/private/token", "payload." + "x".repeat(250)]) {
+    const scrubbed = classifyCreativeConsultationError(rejection(unsafe));
+    assert.deepEqual(scrubbed.candidates[0]?.diagnostic, { reasonCode: "input_contract" });
+    assert.ok(!JSON.stringify(scrubbed).includes(unsafe));
+  }
+  const untrusted = new Error("payload.currentDocument.scenes[1].narration invalid");
+  assert.equal(creativeConsultationDiagnosticDetail(classifyCreativeConsultationError(untrusted)), "");
+});
 
 it("RF3 preserves every candidate fact through an outer role error", () => {
   const error = new ModelCandidatesExhaustedError([

@@ -101,7 +101,7 @@ export const BROKER_TASK_INPUT_CONTRACTS = {
     imageFields: ["imageIndex", "sha256", "jpegBase64", "scenePosition", "timecodeMs", "sourceTimecodeMs", "phase", "provider", "assetId"],
   },
   "creative-discussion": {
-    version: "video-factory/creative-discussion-input-v4",
+    version: "video-factory/creative-discussion-input-v5",
     fields: ["stage", "requestMode", "currentDocument", "context", "message", "selection", "recentMessages"],
     messageMaxLength: 4_000,
     recentMessagesMaxItems: 20,

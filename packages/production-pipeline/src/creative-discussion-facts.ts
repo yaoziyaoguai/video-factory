@@ -19,6 +19,8 @@ export interface CreativeConsultationCandidateFact {
   state: CreativeConsultationFactState;
   providerId?: string;
   modelId?: string;
+  /** 仅保存宿主输入校验的安全定位，不落任意错误正文、提示词或服务商响应。 */
+  diagnostic?: { reasonCode: "input_contract"; fieldPath?: string };
 }
 
 export interface CreativeConsultationFacts {
@@ -42,13 +44,23 @@ function consultationEvidence(error: unknown): CodexBridgeError | ModelCandidate
   return undefined;
 }
 
-function classifySingle(error: unknown): { state: CreativeConsultationFactState; reason?: CreativeConsultationFactReason } {
+function classifySingle(error: unknown): CreativeConsultationCandidateFact & { reason?: CreativeConsultationFactReason } {
   const bridge = consultationEvidence(error);
   if (!(bridge instanceof CodexBridgeError)) {
     // 没有 Bridge 证据的普通错误：受理情况不可判定，保持 unknown，不猜成已核失败。
     return { state: "unknown", reason: "indeterminate_error" };
   }
-  if (bridge.stage === "not_accepted" || bridge.stage === "rejected") return { state: "not_accepted" };
+  if (bridge.stage === "not_accepted" || bridge.stage === "rejected") {
+    const details = bridge.failureDetails;
+    const fieldPath = details?.fieldPath;
+    const safeFieldPath = typeof fieldPath === "string" && fieldPath.length <= 240
+      && /^(?:request|payload)(?:\.[A-Za-z][A-Za-z0-9_]*|\[\d+\])+$/.test(fieldPath);
+    return {
+      state: "not_accepted",
+      ...(bridge.stage === "rejected" && details?.category === "invalid_request" && details.reasonCode === "input_contract"
+        ? { diagnostic: { reasonCode: "input_contract" as const, ...(safeFieldPath ? { fieldPath } : {}) } } : {}),
+    };
+  }
   if (bridge.stage === "completed_failure") return { state: "failed" };
   if (bridge.stage === "conflict") return { state: "unknown", reason: "identity_conflict" };
   return { state: "unknown", reason: "request_uncertain" }; // uncertain
@@ -70,19 +82,40 @@ export function classifyCreativeConsultationError(
   }
   const evidence = consultationEvidence(error);
   if (evidence instanceof ModelCandidatesExhaustedError) {
-    const candidates: CreativeConsultationCandidateFact[] = evidence.failures.map((failure) => ({
-      state: classifySingle(failure.error).state,
-      providerId: failure.providerId,
-      modelId: failure.modelId,
-    }));
+    const candidates: CreativeConsultationCandidateFact[] = evidence.failures.map((failure) => {
+      const single = classifySingle(failure.error);
+      return {
+        state: single.state,
+        providerId: failure.providerId,
+        modelId: failure.modelId,
+        ...(single.diagnostic ? { diagnostic: single.diagnostic } : {}),
+      };
+    });
     return { fact: aggregate(candidates.map((entry) => entry.state)), reason: reasonOf(candidates), candidates };
   }
   const single = classifySingle(error);
   return {
     fact: single.state,
     reason: single.reason ?? (single.state === "not_accepted" ? "all_candidates_not_accepted" : "settled_failure"),
-    candidates: [{ state: single.state }],
+    candidates: [{ state: single.state, ...(single.diagnostic ? { diagnostic: single.diagnostic } : {}) }],
   };
+}
+
+/** 安全诊断只补充原因；整体 unknown/failed 的恢复边界仍由原事实分类决定。 */
+export function creativeConsultationDiagnosticDetail(facts: CreativeConsultationFacts): string {
+  const labels: Record<string, string> = {
+    narration: "旁白", duration: "时长", visual_prompt: "画面描述", position: "镜号",
+    search_terms: "素材搜索词", scenes: "分镜", message: "修改意见", currentDocument: "当前稿件",
+  };
+  const diagnostics = facts.candidates.flatMap(candidate => candidate.diagnostic ? [candidate.diagnostic] : []);
+  return [...new Set(diagnostics.map(diagnostic => {
+    const field = diagnostic.fieldPath;
+    const scene = field?.match(/^payload\.currentDocument\.scenes\[(\d+)\](?:\.(\w+))?$/);
+    const label = scene
+      ? `第 ${Number(scene[1]) + 1} 镜${labels[scene[2] ?? ""] ?? "的字段"}`
+      : labels[field?.split(".").at(-1) ?? ""] ?? "提交内容";
+    return `输入校验未通过：${label}${field ? `（${field}）` : ""}，错误代码 input_contract。请检查对应内容；若当前稿可以正常保存仍被拒绝，请保留诊断排查合同，不要重复发送相同请求。`;
+  }))].join(" ");
 }
 
 function aggregate(states: CreativeConsultationFactState[]): CreativeConsultationFactState {

@@ -85,6 +85,7 @@ import {
 } from "./generative-asset-worker.js";
 import { SCREENWRITER_AGENT_CONTRACT_VERSION, validateScriptDraft, validateScriptDraftStructure, type ScreenwriterAgent, type ScreenwriterAgentInput, type ScriptDraft } from "./codex-screenwriter.js";
 import { FallbackBriefAuditAgent, FallbackCreativeTreatmentAgent, ModelCandidatesExhaustedError } from "./fallback-role-agents.js";
+import { failedModelCandidateAttempt } from "./model-fallback.js";
 import { assertNoPendingDocumentCommands, DocumentCommandConflictError, DocumentCommandStore, type DocumentExecutionReceipt } from "./document-command.js";
 import type { BriefAuditAgent } from "./codex-brief-audit.js";
 import { BRIEF_AUDIT_AGENT_CONTRACT_VERSION, BRIEF_AUDIT_PROVIDER_ID, briefAuditProjection } from "./codex-brief-audit.js";
@@ -1299,11 +1300,62 @@ export class ProductionPipeline {
           + safeCount(isObjectRecord(checkpoint.phaseAttempts) ? checkpoint.phaseAttempts.audit : 0) > 0)) result.issues.push(`${source}:missing_request_identity`);
       }
     }
-    for (const receipt of await readCreativeDiscussionExecutions(this.runsRoot, runId,
-      (issue) => result.issues.push(`creative-planning:discussion:${issue}`))) {
+    const discussionExecutions = await readCreativeDiscussionExecutions(this.runsRoot, runId,
+      (issue) => result.issues.push(`creative-planning:discussion:${issue}`));
+    for (const receipt of discussionExecutions) {
+      const attempts = receipt.trace?.modelCandidateAttempts;
+      if (attempts?.length) {
+        // 默认角色 fallback 的每个候选都是独立物理请求。成功回执必须展开候选事实：
+        // not_accepted 不计调用，completed_failure 与 succeeded 分别计入已受理失败和成功；
+        // uncertain/conflict/transport 保持待核，不能被最终成功候选改写成零次或已完成。
+        attempts.forEach((attempt) => {
+          if (!attempt.requestId) {
+            result.issues.push(`creative-planning:discussion:${receipt.commandId}:missing_candidate_identity`);
+            return;
+          }
+          const state = attempt.outcome === "succeeded" ? "completed" as const
+            : attempt.failureStage === "not_accepted" || attempt.failureStage === "rejected" ? "not_accepted" as const
+              : attempt.failureStage === "completed_failure" ? "completed_failure" as const
+                : "unknown" as const;
+          const finalTrace = attempt.outcome === "succeeded"
+            && attempt.providerId === receipt.trace?.providerId && attempt.modelId === receipt.trace.modelId
+            ? receipt.trace : undefined;
+          const fact = projectRequestExecution({
+            nodeId: "creative-planning", requestId: attempt.requestId,
+            operationId: receipt.workflowOperationRequestId, purpose: "discussion", state,
+            trace: {
+              ...(finalTrace ?? {}), providerId: attempt.providerId, modelId: attempt.modelId,
+              ...(attempt.modelAttemptCount !== undefined
+                ? { modelAttemptCount: attempt.modelAttemptCount } : {}),
+            },
+            evidenceSource: `discussion:${receipt.commandId}:candidate:${attempt.requestId}`,
+          });
+          // 讨论候选用 durable 四元组作事实身份；同 provider 的不同模型稳定分开，
+          // 重排回执数组不会改变 executionKey。
+          result.facts.push({
+            ...fact,
+            executionKey: discussionCandidateIdentity(receipt.commandId, attempt.requestId,
+              attempt.providerId, attempt.modelId),
+          });
+        });
+        continue;
+      }
+      const directAttemptCount = receipt.trace?.modelAttemptCount;
+      const directTrace = directAttemptCount === undefined
+        || Number.isSafeInteger(directAttemptCount) && directAttemptCount >= 0
+        ? receipt.trace
+        : { ...receipt.trace, modelAttemptCount: undefined };
       result.facts.push(projectRequestExecution({ nodeId: "creative-planning", requestId: receipt.requestId,
         operationId: receipt.workflowOperationRequestId, purpose: "discussion", state: receipt.state,
-        trace: receipt.trace, evidenceSource: `discussion:${receipt.commandId}` }));
+        trace: directTrace, evidenceSource: `discussion:${receipt.commandId}` }));
+    }
+    // A3/CDF-03：已保存 prepared 而无回执的物理请求保留 prepared 事实——只证明已准备，
+    // 受理与次数保持未知；不猜归属操作（无 workflowOperationRequestId，按未归属证据呈现）。
+    for (const gap of await readUncoveredDiscussionPrepared(this.runsRoot, runId, discussionExecutions,
+      (issue) => result.issues.push(`creative-planning:${issue}`))) {
+      result.facts.push(projectRequestExecution({ nodeId: "creative-planning", requestId: gap.requestId,
+        purpose: "discussion", state: "prepared", evidenceSource: `discussion-prepared:${gap.commandId}`,
+        binding: gap.brokerBinding }));
     }
     for (const nodeId of ["reference-grammar", "publish-package"]) {
       try {
@@ -12459,6 +12511,7 @@ function creativePlanningNode(
               // 包裹/普通错误=unknown、任一已受理失败保留 completed_failure，并保留每个
               // 实际候选的事实，不能让最后一个候选抹掉前面的已受理失败。
               const facts = classifyCreativeConsultationError(error);
+              const failedCandidateAttempts = failedCreativeDiscussionCandidateAttempts(error);
               await recordCreativeDiscussionExecution(runsRoot, context.runId, {
                 workflowOperationRequestId: context.operationRequestId,
                 commandId: discussion.commandId,
@@ -12466,7 +12519,10 @@ function creativePlanningNode(
                 stage: discussion.stage,
                 state: discussionExecutionStateFor(facts.fact),
                 factReason: facts.reason,
-                ...(facts.candidates.length > 1 ? { candidates: facts.candidates } : {}),
+                candidates: facts.candidates,
+                ...(failedCandidateAttempts
+                  ? { trace: { modelCandidateAttempts: failedCandidateAttempts } }
+                  : {}),
               });
               throw error;
             }
@@ -12480,14 +12536,27 @@ function creativePlanningNode(
           // C2：planning 侧才能核实的咨询事实（已返回结果但被结果合同拒绝）同步进
           // durable 执行记录；与端口 catch 共用同一分类器，记录不会谎称 completed。
           noteDiscussionFact: async ({ commandId, stage, facts }) => {
+            const requestId = creativeDiscussionRequestId(context.runId, commandId);
+            const state = discussionExecutionStateFor(facts.fact);
+            // discuss catch 已先写入物理候选证据；图层随后重复登记同一终态时沿用该 trace，
+            // 成功结果被业务登记合同拒绝时也沿用刚写入的 completed trace。两种情况都只
+            // 改业务终态，不得把真实 requestId / provider / modelAttemptCount 擦掉。
+            const existing = (await readCreativeDiscussionExecutions(runsRoot, context.runId))
+              .find((record) => record.commandId === commandId && record.requestId === requestId
+                && record.workflowOperationRequestId === context.operationRequestId
+                && (record.state === state && record.factReason === facts.reason
+                  && record.trace?.modelCandidateAttempts?.length
+                  || state === "completed_failure" && facts.reason === "settled_failure"
+                    && record.state === "completed" && record.trace?.providerId && record.trace.modelId));
             await recordCreativeDiscussionExecution(runsRoot, context.runId, {
               workflowOperationRequestId: context.operationRequestId,
               commandId,
-              requestId: creativeDiscussionRequestId(context.runId, commandId),
+              requestId,
               stage,
-              state: discussionExecutionStateFor(facts.fact),
+              state,
               factReason: facts.reason,
-              ...(facts.candidates.length > 1 ? { candidates: facts.candidates } : {}),
+              candidates: facts.candidates,
+              ...(existing?.trace ? { trace: existing.trace } : {}),
             });
           },
           ...(libraryRoute ? libraryPorts : {}),
@@ -16800,6 +16869,12 @@ export async function summarizeJointPlanningExecution(
     onIssue ? (issue) => onIssue(`checkpoint:${issue}`) : undefined);
   const discussionReceipts = await readCreativeDiscussionExecutions(runsRoot, runId,
     onIssue ? (issue) => onIssue(`discussion:${issue}`) : undefined);
+  // A3/CDF-03：与费用事实同一份 prepared 完整性判断——已保存 prepared 而无回执的物理
+  // 请求使汇总保持待核，不得把缺回执的操作读作精确零调用。
+  if (onIssue) {
+    await readUncoveredDiscussionPrepared(runsRoot, runId, discussionReceipts,
+      (issue) => onIssue(issue));
+  }
   // 同一 checkpoint 会跨操作恢复；先按物理 requestId 的首次归属全局去重，再分本次/历史。
   // 没有 requestOwners 的旧记录不能证明属于本次，宁可列入历史也不虚增当前调用。
   const current = summarizePlanningCheckpoints(
@@ -17201,14 +17276,53 @@ function summarizePlanningCheckpoints(
     });
   }
   for (const receipt of discussionReceiptsByRequest.values()) {
+    const attempts = receipt.trace?.modelCandidateAttempts;
+    if (attempts?.length) {
+      attempts.forEach((attempt) => {
+        if (!attempt.requestId) {
+          unknownRequestIds.add(`discussion:${receipt.commandId}:missing_candidate_identity`);
+          return;
+        }
+        const identity = discussionCandidateIdentity(receipt.commandId, attempt.requestId,
+          attempt.providerId, attempt.modelId);
+        if (attempt.outcome === "succeeded" || attempt.failureStage === "completed_failure") {
+          const modelCalls = attempt.modelAttemptCount
+            ?? (attempt.outcome === "succeeded"
+              && attempt.providerId === receipt.trace?.providerId && attempt.modelId === receipt.trace.modelId
+              ? receipt.trace.modelAttemptCount : undefined);
+          if (modelCalls === undefined) {
+            unknownRequestIds.add(identity);
+            return;
+          }
+          for (let call = 0; call < modelCalls; call += 1) {
+            discussionRequestIds.add(`${identity}:${call}`);
+          }
+        } else if (attempt.failureStage !== "not_accepted" && attempt.failureStage !== "rejected") {
+          unknownRequestIds.add(identity);
+        }
+      });
+      discussionMs += safeCount(receipt.providerWaitMs);
+      validationMs += safeCount(receipt.validationMs);
+      continue;
+    }
     if (receipt.state === "accepted_unknown") {
       unknownRequestIds.add(receipt.requestId);
       continue;
     }
     if (receipt.state === "not_accepted") continue;
-    discussionRequestIds.add(receipt.requestId);
+    const modelCalls = receipt.trace?.modelAttemptCount;
     discussionMs += safeCount(receipt.providerWaitMs);
     validationMs += safeCount(receipt.validationMs);
+    if (typeof modelCalls !== "number" || !Number.isSafeInteger(modelCalls) || modelCalls < 0) {
+      unknownRequestIds.add(receipt.requestId);
+      continue;
+    }
+    for (let call = 0; call < modelCalls; call += 1) {
+      discussionRequestIds.add(JSON.stringify([
+        "discussion-direct", receipt.commandId, receipt.requestId,
+        receipt.trace?.providerId ?? null, receipt.trace?.modelId ?? null, call,
+      ]));
+    }
   }
   const producerModelCallCount = producerRequestIds.size + legacyProducerModelCallCount + internalProducerModelCallCount;
   const auditModelCallCount = auditRequestIds.size + legacyAuditModelCallCount + internalAuditModelCallCount;
@@ -17256,8 +17370,8 @@ interface CreativeDiscussionExecutionRecord {
   /** C2：分类证据（settled_failure/identity_conflict/request_uncertain/indeterminate_error/all_candidates_not_accepted）。 */
   factReason?: string;
   /** C2：多候选时每个物理请求的单独事实；后一个候选不能抹掉前一个已受理失败。 */
-  candidates?: Array<{ state: "not_accepted" | "failed" | "unknown"; providerId?: string; modelId?: string }>;
-  trace?: Pick<CodexTaskTrace, "providerId" | "modelId" | "modelAttemptCount" | "requestIdHash" | "brokerRequestIdHash" | "providerWaitMs" | "queueWaitMs">;
+  candidates?: CreativeConsultationFacts["candidates"];
+  trace?: Partial<Pick<CodexTaskTrace, "providerId" | "modelId" | "modelAttemptCount" | "modelCandidateAttempts" | "requestIdHash" | "brokerRequestIdHash" | "providerWaitMs" | "queueWaitMs" | "validationMs">>;
   queueWaitMs?: number;
   providerWaitMs?: number;
   validationMs?: number;
@@ -17266,6 +17380,30 @@ interface CreativeDiscussionExecutionRecord {
 }
 
 const DISCUSSION_PREPARED_VERSION = "video-factory/creative-discussion-prepared-v1";
+
+function discussionCandidateIdentity(
+  commandId: string,
+  requestId: string,
+  providerId: string,
+  modelId: string,
+): string {
+  return JSON.stringify(["discussion-candidate", commandId, requestId, providerId, modelId]);
+}
+
+function failedCreativeDiscussionCandidateAttempts(error: unknown): ModelCandidateAttempt[] | undefined {
+  const seen = new Set<unknown>();
+  let current = error;
+  for (let depth = 0; depth < 6; depth += 1) {
+    if (seen.has(current)) return undefined;
+    seen.add(current);
+    if (current instanceof ModelCandidatesExhaustedError) {
+      return current.attempts.length > 0 ? current.attempts : undefined;
+    }
+    if (!(current instanceof Error)) return undefined;
+    current = current.cause;
+  }
+  return undefined;
+}
 
 /** 在持有run租约的调用方使用；只证明当前合法稿的三种确定性决定，不取消原请求。 */
 export function independentCreativeConsultationActions(
@@ -17321,7 +17459,7 @@ function creativeConsultationSourceIsCurrent(
 /** 只读取耐久快照中的原请求；不经过候选生成/重新准备信封。 */
 async function observeSavedCreativeDiscussion(records: CreativeDiscussionPreparedRecord[]): Promise<CodexTaskExecution<CreativeDiscussionResult>> {
   if (records.length === 0) throw new Error("原讨论缺少可核的请求快照，结果暂不能核实；不会重发。");
-  const failures: Array<{ modelId: string; providerId: string; error: unknown }> = [];
+  const failures: Array<{ modelId: string; providerId: string; requestId: string; error: unknown }> = [];
   for (const record of records) {
     const prepared = record.prepared as unknown as CodexPreparedOperation;
     try {
@@ -17331,9 +17469,29 @@ async function observeSavedCreativeDiscussion(records: CreativeDiscussionPrepare
       }
       const client = new CodexBridgeClient({ socketPath: prepared.route.socketPath });
       const execution = await client.observePrepared(prepared);
-      return { ...execution, output: parseCreativeDiscussionResult(execution.output) };
+      return {
+        ...execution,
+        output: parseCreativeDiscussionResult(execution.output),
+        ...(execution.trace ? { trace: {
+          ...execution.trace,
+          modelCandidateAttempts: [
+            ...failures.map((failure) => failedModelCandidateAttempt(
+              failure.error, failure.modelId, failure.providerId, failure.requestId,
+            )),
+            {
+              requestId: record.requestId,
+              providerId: execution.trace.providerId,
+              modelId: execution.trace.modelId,
+              ...(execution.trace.modelAttemptCount !== undefined
+                ? { modelAttemptCount: execution.trace.modelAttemptCount } : {}),
+              outcome: "succeeded" as const,
+            },
+          ],
+        } } : {}),
+      };
     } catch (error) {
-      failures.push({ modelId: prepared.brokerBinding?.modelId ?? "unknown", providerId: prepared.brokerBinding?.providerId ?? "unknown", error });
+      failures.push({ modelId: prepared.brokerBinding?.modelId ?? "unknown",
+        providerId: prepared.brokerBinding?.providerId ?? "unknown", requestId: record.requestId, error });
     }
   }
   throw new ModelCandidatesExhaustedError(failures);
@@ -17385,13 +17543,122 @@ async function readCreativeDiscussionPrepared(
   return records.sort((left, right) => left.savedAt.localeCompare(right.savedAt));
 }
 
+/** A3/CDF-03：已保存 prepared 而无可核回执的物理请求缺口（含 binding，供事实投影）。 */
+interface DiscussionPreparedGap {
+  commandId: string;
+  requestId: string;
+  brokerBinding: Record<string, unknown>;
+}
+
+/**
+ * A3/CDF-03：记账读取专用的 prepared 完整性扫描。恢复 reader 对单档损坏的静默容错
+ * 不能当作记账完整性的证明：坏档、结构/run 身份不符、身份哈希不匹配都必须上报 issue。
+ * 已保存 prepared 而无回执的物理请求返回为缺口——prepared 只证明已准备，受理与次数
+ * 仍未知；费用事实与操作汇总两个读取口共用这一份判断，任一侧都不能把缺回执读作零调用。
+ */
+async function readUncoveredDiscussionPrepared(
+  runsRoot: string,
+  runId: string,
+  executions: CreativeDiscussionExecutionRecord[],
+  onIssue?: (issue: string) => void,
+): Promise<DiscussionPreparedGap[]> {
+  const directory = path.join(runsRoot, runId, "nodes", "creative-planning", "discussion-prepared");
+  let names: string[];
+  try {
+    names = (await readdir(directory)).filter((name) => name.endsWith(".json"));
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return [];
+    onIssue?.("discussion-prepared:unreadable");
+    return [];
+  }
+  type PreparedEntry = DiscussionPreparedGap & { providerId: string; modelId: string; identity: string };
+  const entries: PreparedEntry[] = [];
+  for (const name of names) {
+    try {
+      const value = JSON.parse(await readFile(path.join(directory, name), "utf8")) as Partial<CreativeDiscussionPreparedRecord>;
+      const prepared = isObjectRecord(value.prepared) ? value.prepared : undefined;
+      const binding = prepared && isObjectRecord(prepared.brokerBinding) ? prepared.brokerBinding : undefined;
+      const providerId = binding && typeof binding.providerId === "string" && binding.providerId.trim()
+        ? binding.providerId : undefined;
+      const modelId = binding && typeof binding.modelId === "string" && binding.modelId.trim()
+        ? binding.modelId : undefined;
+      if (value.version !== DISCUSSION_PREPARED_VERSION || value.runId !== runId
+        || typeof value.commandId !== "string" || typeof value.requestId !== "string"
+        || !["treatment", "script", "director"].includes(String(value.stage))
+        || typeof prepared?.requestId !== "string" || prepared.requestId !== value.requestId
+        || !binding || !providerId || !modelId) {
+        onIssue?.(`discussion-prepared:${name}:invalid_structure`);
+        continue;
+      }
+      if (name !== `${createHash("sha256").update(`${value.requestId}:${JSON.stringify(binding)}`).digest("hex")}.json`) {
+        onIssue?.(`discussion-prepared:${name}:identity_mismatch`);
+        continue;
+      }
+      entries.push({
+        commandId: value.commandId,
+        requestId: value.requestId,
+        brokerBinding: binding,
+        providerId,
+        modelId,
+        identity: discussionCandidateIdentity(value.commandId, value.requestId, providerId, modelId),
+      });
+    } catch {
+      onIssue?.(`discussion-prepared:${name}:unreadable`);
+    }
+  }
+
+  const covered = new Set<string>();
+  const receiptRequestIds = new Set<string>();
+  const commandsWithReceipts = new Set<string>();
+  for (const receipt of executions) {
+    commandsWithReceipts.add(receipt.commandId);
+    receiptRequestIds.add(JSON.stringify([receipt.commandId, receipt.requestId]));
+    const attempts = receipt.trace?.modelCandidateAttempts;
+    if (attempts?.length) {
+      for (const attempt of attempts) {
+        if (!attempt.requestId) {
+          onIssue?.(`discussion-prepared:${receipt.commandId}:missing_candidate_identity`);
+          continue;
+        }
+        covered.add(discussionCandidateIdentity(receipt.commandId, attempt.requestId,
+          attempt.providerId, attempt.modelId));
+      }
+      continue;
+    }
+    // 单请求旧回执的外层 requestId 本身就是物理身份；只有 trace 同时给出绑定时才可直接核对。
+    if (receipt.trace?.providerId && receipt.trace.modelId) {
+      covered.add(discussionCandidateIdentity(receipt.commandId, receipt.requestId,
+        receipt.trace.providerId, receipt.trace.modelId));
+    } else if (receipt.candidates?.length) {
+      onIssue?.(`discussion-prepared:${receipt.commandId}:missing_candidate_identity`);
+    }
+  }
+
+  const gaps: DiscussionPreparedGap[] = [];
+  for (const entry of entries) {
+    if (covered.has(entry.identity)) continue;
+    if (!commandsWithReceipts.has(entry.commandId)) {
+      onIssue?.(`discussion-prepared:${entry.commandId}:missing_execution`);
+    } else {
+      const requestIdentity = JSON.stringify([entry.commandId, entry.requestId]);
+      const siblingCovered = entries.some((candidate) => candidate.commandId === entry.commandId
+        && candidate.requestId === entry.requestId && covered.has(candidate.identity));
+      if (receiptRequestIds.has(requestIdentity) && !siblingCovered) {
+        onIssue?.(`discussion-prepared:${entry.commandId}:binding_conflict`);
+      }
+      onIssue?.(`discussion-prepared:${entry.commandId}:uncovered_request`);
+    }
+    gaps.push({ commandId: entry.commandId, requestId: entry.requestId, brokerBinding: entry.brokerBinding });
+  }
+  return gaps;
+}
+
 async function recordCreativeDiscussionExecution(
   runsRoot: string,
   runId: string,
   input: Omit<CreativeDiscussionExecutionRecord, "version" | "workflowOperationRequestId"> & {
     workflowOperationRequestId: string | undefined;
-    trace?: CodexTaskTrace;
-  } & Partial<Pick<CreativeDiscussionExecutionRecord, "factReason" | "candidates">>,
+  },
 ): Promise<void> {
   if (!input.workflowOperationRequestId) return;
   const directory = path.join(runsRoot, runId, "nodes", "creative-planning", "discussion-executions");
@@ -17408,8 +17675,12 @@ async function recordCreativeDiscussionExecution(
     ...(input.factReason !== undefined ? { factReason: input.factReason } : {}),
     ...(input.candidates !== undefined ? { candidates: input.candidates } : {}),
     ...(input.trace ? { trace: {
-      providerId: input.trace.providerId, modelId: input.trace.modelId,
+      ...(input.trace.providerId !== undefined ? { providerId: input.trace.providerId } : {}),
+      ...(input.trace.modelId !== undefined ? { modelId: input.trace.modelId } : {}),
       ...(input.trace.modelAttemptCount !== undefined ? { modelAttemptCount: input.trace.modelAttemptCount } : {}),
+      ...(input.trace.modelCandidateAttempts?.length
+        ? { modelCandidateAttempts: structuredClone(input.trace.modelCandidateAttempts) }
+        : {}),
       ...(input.trace.requestIdHash ? { requestIdHash: input.trace.requestIdHash } : {}),
       ...(input.trace.brokerRequestIdHash ? { brokerRequestIdHash: input.trace.brokerRequestIdHash } : {}),
       ...(input.trace.providerWaitMs !== undefined ? { providerWaitMs: input.trace.providerWaitMs } : {}),
@@ -17438,7 +17709,12 @@ async function readCreativeDiscussionExecutions(
   const records: CreativeDiscussionExecutionRecord[] = [];
   for (const name of names) {
     try {
-      const value = JSON.parse(await readFile(path.join(directory, name), "utf8")) as Partial<CreativeDiscussionExecutionRecord>;
+      const parsed: unknown = JSON.parse(await readFile(path.join(directory, name), "utf8"));
+      const value = isObjectRecord(parsed) ? parsed as Partial<CreativeDiscussionExecutionRecord> : undefined;
+      if (!value) {
+        onIssue?.(`${name}:invalid_structure`);
+        continue;
+      }
       if (value.version !== "video-factory/creative-discussion-execution-v1"
         || typeof value.workflowOperationRequestId !== "string"
         || typeof value.commandId !== "string"
@@ -17446,6 +17722,48 @@ async function readCreativeDiscussionExecutions(
         || !["treatment", "script", "director"].includes(String(value.stage))
         || !["completed", "completed_failure", "accepted_unknown", "not_accepted"].includes(String(value.state))) {
         onIssue?.(`${name}:invalid_structure`);
+        continue;
+      }
+      const rawAttempts: unknown = value.trace?.modelCandidateAttempts;
+      const successfulAttempts = Array.isArray(rawAttempts)
+        ? rawAttempts.filter((attempt) => isObjectRecord(attempt) && attempt.outcome === "succeeded") : [];
+      const failedStages = Array.isArray(rawAttempts) ? rawAttempts.flatMap((attempt) => isObjectRecord(attempt)
+        && attempt.outcome === "failed" && typeof attempt.failureStage === "string" ? [attempt.failureStage] : []) : [];
+      const attemptIdentities = Array.isArray(rawAttempts) ? rawAttempts.flatMap((attempt) => isObjectRecord(attempt)
+        ? [JSON.stringify([attempt.requestId ?? null, attempt.providerId, attempt.modelId])] : []) : [];
+      const successfulCandidateReceipt = successfulAttempts.length === 1
+        && (value.state === "completed"
+          || value.state === "completed_failure" && value.factReason === "settled_failure")
+        && successfulAttempts[0]!.providerId === value.trace?.providerId
+        && successfulAttempts[0]!.modelId === value.trace?.modelId;
+      const failedCandidateState = failedStages.some((stage) => ["uncertain", "conflict", "transport"].includes(stage))
+        ? "accepted_unknown"
+        : failedStages.some((stage) => stage === "completed_failure")
+          ? "completed_failure"
+          : failedStages.length > 0 && failedStages.every((stage) => stage === "not_accepted" || stage === "rejected")
+            ? "not_accepted"
+            : undefined;
+      const failedCandidateReceipt = successfulAttempts.length === 0
+        && failedStages.length === (Array.isArray(rawAttempts) ? rawAttempts.length : 0)
+        && value.state === failedCandidateState
+        && value.trace?.providerId === undefined
+        && value.trace?.modelId === undefined
+        && value.trace?.modelAttemptCount === undefined;
+      if (rawAttempts !== undefined && (!Array.isArray(rawAttempts) || rawAttempts.length === 0
+        || rawAttempts.some((attempt) => !isObjectRecord(attempt)
+          || typeof attempt.providerId !== "string" || attempt.providerId.trim().length === 0
+          || typeof attempt.modelId !== "string" || attempt.modelId.trim().length === 0
+          || attempt.requestId !== undefined && (typeof attempt.requestId !== "string" || attempt.requestId.trim().length === 0)
+          || attempt.modelAttemptCount !== undefined
+            && (!Number.isSafeInteger(attempt.modelAttemptCount) || Number(attempt.modelAttemptCount) < 0)
+          || !["succeeded", "failed"].includes(String(attempt.outcome))
+          || attempt.outcome === "succeeded" && (attempt.failureStage !== undefined || attempt.failureReason !== undefined)
+          || attempt.outcome === "failed" && (![
+            "not_accepted", "completed_failure", "uncertain", "rejected", "conflict", "transport",
+          ].includes(String(attempt.failureStage)) || typeof attempt.failureReason !== "string"))
+        || attemptIdentities.length !== new Set(attemptIdentities).size
+        || !successfulCandidateReceipt && !failedCandidateReceipt)) {
+        onIssue?.(`${name}:invalid_model_candidate_attempts`);
         continue;
       }
       records.push(value as CreativeDiscussionExecutionRecord);

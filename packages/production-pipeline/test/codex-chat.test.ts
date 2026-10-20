@@ -13,6 +13,7 @@ import {
   codexBridgeErrorFromCause,
   type CodexTaskKind,
 } from "../src/codex-chat.js";
+import { classifyCreativeConsultationError, creativeConsultationDiagnosticDetail } from "../src/creative-discussion-facts.js";
 
 it("reads the nearest real broker failure through wrappers without trusting forged or older terminal state", () => {
   const terminal = new CodexBridgeError("completed", false, "completed_failure", 422);
@@ -497,6 +498,25 @@ describe("CodexBridgeClient", () => {
     } finally {
       await bridge.close();
     }
+  });
+
+  it("preserves safe contract rejection details over HTTP without retry or raw error disclosure", async () => {
+    const bridge = await startBridge((_request, response) => respondWithJson(response, 400, {
+      error: "private-provider-and-prompt-text", failureKind: "contract_rejected",
+      failureDetails: { category: "invalid_request", reasonCode: "input_contract", accepted: false,
+        providerId: "fixture", modelId: "fixture", fieldPath: "payload.currentDocument.scenes[1].narration" },
+    }));
+    try {
+      const client = new CodexBridgeClient({ socketPath: bridge.socketPath, maxAttempts: 3, sleep: async () => {} });
+      await assert.rejects(client.runTask("creative-discussion", {}), error => {
+        const facts = classifyCreativeConsultationError(error);
+        assert.equal(facts.fact, "not_accepted");
+        assert.match(creativeConsultationDiagnosticDetail(facts), /第 2 镜旁白/);
+        assert.doesNotMatch(JSON.stringify(facts), /private-provider-and-prompt-text/);
+        return true;
+      });
+      assert.equal(bridge.requests.length, 1);
+    } finally { await bridge.close(); }
   });
 
   it("does not retry executor failures that were already accepted", async () => {
