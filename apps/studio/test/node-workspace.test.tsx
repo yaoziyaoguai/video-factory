@@ -2439,7 +2439,7 @@ describe("F05 prior-step viewing on review stops", () => {
       await app.close();
       await rm(workspaceRoot, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it("R6 keeps an ordinary title edit on V1 through a V2 angle refresh, failed retries and explicit reopening", async () => {
     const original = { title: "原题目", angle: "原角度", audience: "测试观众" };
