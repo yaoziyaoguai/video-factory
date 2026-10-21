@@ -23,7 +23,7 @@ export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
   "director-plan": "ac55805cdb3bcb654c654e58b0f6bc62e99a6c5dcfc588ed9587c7859a4099bf",
   "script-draft": "6838d6b3954abe416b8fa4046455336262f7ec181a8ae0fe101aa08b0e76aef4",
   "publish-copy": "4a61554d6eff3acaaed522a35e2ba995f4ae5d3d9aeb5b5f3c62638f08ff4164",
-  "asset-rank": "fd737dd0b780536a8b7faebd99d7603fdf58c51d08dc511c63d9f15699cdafbc",
+  "asset-rank": "ff682b3d0b698e5824f4e0a2d704a022db7547f0be168bb4d74715bd071e9cca",
   "reference-grammar": "97bc69a9ba5956cff572611773a4cd3310b67ed4f86411d9b6eb654f62e6af52",
   "visual-review": "74ae954aa0f784a88b9ff1919acf45905a37803b7a56ae751476e68d9638ec60",
   "role-audit": "2f907eb3612322708f1154104c4f2faac26a4ef2b7e5edefcc95a3dcccd9c04d",
