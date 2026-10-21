@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
 import { CodexAssetSemanticRanker, deterministicAssetRanking, type AssetCandidateReport } from "../../../packages/production-pipeline/src/asset-semantic-ranker.js";
-import { validateTaskPayload } from "../src/codex-executor.js";
+import { buildTaskPrompt, validateTaskPayload } from "../src/codex-executor.js";
 import { taskPromptFor } from "../src/task-definitions.js";
 
 const audit = { version: "video-factory/role-audit-v2", rubricVersion: "video-factory/role-quality-rubric-v3",
@@ -68,10 +68,61 @@ it("preflights the audit context with the same byte boundary as the Broker", asy
   intent.last = "";
   intent.last = "x".repeat(196480 - Buffer.byteLength(JSON.stringify(input.scenes)));
   let calls = 0;
-  await assert.rejects(new CodexAssetSemanticRanker({ fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0xff, 0xd9]),
+  const result = await new CodexAssetSemanticRanker({ fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0xff, 0xd9]),
     client: { runTask: async () => ({}), runTaskDetailed: async () => { calls++; throw new Error("must not reach Broker"); } },
-  }).rankDetailed(input), /context/);
+  }).rankDetailed(input);
   assert.equal(calls, 0);
+  assert.equal(result.output.visualEvidence?.stopReason, "payload_limit");
+  assert.equal(result.output.source, "fallback");
+  assert.equal(result.agentLoop?.status, "awaiting_user");
+  assert.deepEqual(result.output.scenes.map(scene => scene.candidates.length), [12, 12]);
+  assert.deepEqual(result.output.visualEvidence?.reviewed, []);
+});
+
+it("shares director context for ten scenes and preserves all 114 candidates through both Broker boundaries", async () => {
+  const input = { ...report(), planningIntent: { rankingIntent: {
+    planContract: { visualBible: ["保持创作者已确认的自然光与色调。".repeat(200)] },
+    shots: Array.from({ length: 10 }, (_, index) => ({ scenePosition: index + 1,
+      visibleAction: `第${index + 1}镜：${"保留画面中物体运动的完整过程。".repeat(80)}`,
+      sourceInSeconds: 0, temporalBeats: [{ startSeconds: 0, endSeconds: 6, action: "自然移动" }],
+      successCriteria: ["保持当前镜头主体与动作"],
+    })),
+  } } };
+  input.scenes = Array.from({ length: 10 }, (_, index) => ({ ...report().scenes[0]!, scenePosition: index + 1,
+    candidates: report().scenes[0]!.candidates.slice(0, index === 5 ? 6 : 12),
+  }));
+  const before = structuredClone(input);
+  const calls: string[] = [];
+  const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0xff, 0xd9]),
+    client: { runTask: async () => { throw new Error("unaudited path"); }, runTaskDetailed: async (kind, payload) => {
+      const task = validateTaskPayload(kind, payload);
+      const parsed = task.payload;
+      calls.push(kind);
+      const wire = parsed as unknown as { scenes?: AssetCandidateReport["scenes"];
+        rankingContext?: { director: typeof input.planningIntent.rankingIntent };
+        context?: { upstreamFacts: { scenes: AssetCandidateReport["scenes"];
+          rankingContext: { director: typeof input.planningIntent.rankingIntent } } } };
+      const facts = kind === "asset-rank" ? wire : wire.context!.upstreamFacts;
+      assert.deepEqual(facts.rankingContext?.director, input.planningIntent.rankingIntent);
+      const modelData = JSON.parse(buildTaskPrompt(task).split("<<<TASK_DATA\n")[1]!.split("\nTASK_DATA>>>")[0]!);
+      assert.deepEqual((kind === "asset-rank" ? modelData : modelData.context.upstreamFacts).rankingContext.director,
+        input.planningIntent.rankingIntent, "共享要求必须实际进入模型提示词，不能只通过接口校验");
+      assert.deepEqual(facts.scenes!.flatMap(scene => scene.candidates), input.scenes.flatMap(scene => scene.candidates));
+      assert.ok(Buffer.byteLength(JSON.stringify(kind === "asset-rank" ? facts.scenes : wire.context)) <= 192 * 1024);
+      assert.equal(JSON.stringify(payload).split(input.planningIntent.rankingIntent.planContract.visualBible[0]!).length, 2);
+      if (kind === "role-audit") return { output: audit };
+      const output = deterministicAssetRanking(input);
+      const thumbnails = (payload as { thumbnails: Array<{ scenePosition: number; assetId: string }> }).thumbnails;
+      for (const scene of output.scenes) for (const candidate of scene.candidates) {
+        candidate.semanticScore = thumbnails.some(image => image.scenePosition === scene.scenePosition && image.assetId === candidate.assetId) ? 80 : 0;
+      }
+      return { output: { ...output, source: "model" } };
+    } },
+  });
+  const result = await ranker.rankDetailed(input);
+  assert.deepEqual(calls, ["asset-rank", "role-audit"]);
+  assert.equal(result.output.scenes.flatMap(scene => scene.candidates).length, 114);
+  assert.deepEqual(input, before);
 });
 
 it("ranks reused candidates against the current director timing instead of cached search intent", async () => {

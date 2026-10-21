@@ -60,7 +60,7 @@ export interface AssetSemanticRanking {
   visualEvidence?: {
     reportDigest: string;
     supplementaryBatches: 0 | 1;
-    stopReason?: "deadline" | "thumbnails_unavailable";
+    stopReason?: "deadline" | "thumbnails_unavailable" | "payload_limit";
     reviewed: Array<Omit<AssetRankThumbnail, "jpegBase64">>;
   };
 }
@@ -107,6 +107,7 @@ const THUMBNAIL_HOSTS = new Set(["images.pexels.com", "cdn.pixabay.com", "images
 export const ASSET_RANK_AGENT_CONTRACT_VERSION = "asset-rank-v3|role-audit-v9|asset-ranking-validator-v2-bounded-evidence";
 
 type RankPayload = AssetCandidateReport & { thumbnails: AssetRankThumbnail[] };
+type RankModelPayload = RankPayload & { rankingContext: { director?: unknown; neighbors: Array<Pick<AssetCandidateScene, "scenePosition" | "intent">> } };
 interface RankBatchState {
   version: "asset-rank-batches-v1";
   inputDigest: string;
@@ -143,6 +144,17 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
     let batch: RankBatchState;
     if (saved !== undefined) {
       batch = parseRankBatch(saved, inputDigest, report);
+      // 显式重试尚未受理过任何请求的失败批次时，重新给它一次执行窗口。
+      // 已提交、结果未知、已有候选或已完成批次仍沿用原时限和原请求。
+      if (batch.phase === "primary" && !batch.finished && !batch.primary && !pending
+        && isRecord(stored) && stored.status === "failed" && isRecord(stored.failure) && stored.failure.stage === "not_accepted"
+        && Array.isArray(stored.attemptedRequestIds) && stored.attemptedRequestIds.length === 0
+        && isRecord(stored.phaseAttempts) && stored.phaseAttempts.produce === 0 && stored.phaseAttempts.audit === 0
+        && Array.isArray(stored.completed) && stored.completed.length === 0 && !stored.pendingCandidate
+        && !stored.validationFailure && !stored.auditValidationFailure
+        && (stored.requestExecutions === undefined || isRecord(stored.requestExecutions) && Object.keys(stored.requestExecutions).length === 0)) {
+        batch.deadlineAt = Date.now() + RANKING_DEADLINE_MS;
+      }
     } else {
       const recovered = pending ? recoveredAssetRankPayload(pending, report) : undefined;
       batch = {
@@ -186,6 +198,21 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
         return await this.rankBatchDetailed(batch.payload, localCheckpoint, selectedModelId, batch.deadlineAt, report, canStartSupplement);
       } catch (error) {
         if (!(error instanceof RoleAgentLoopError)) throw error;
+        if (error.sourceError instanceof RoleAgentHostStop && error.sourceError.reason === "payload_limit"
+          && !(isRecord(stored) && isRecord(stored.pendingOperation))) {
+          // 容量停点沿用已有的未核验候选人工处理出口，不丢候选、不伪造模型评分。
+          const baseline = batch.primary?.output ?? deterministicAssetRanking(report, error.message);
+          batch.finished = {
+            output: { ...baseline, summary: error.message, visualEvidence: {
+              reportDigest: reportDigest(report), reviewed: baseline.visualEvidence?.reviewed ?? [],
+              supplementaryBatches: batch.phase === "supplement" ? 1 : 0, stopReason: "payload_limit",
+            } },
+            ...(error.lastTrace ? { trace: error.lastTrace } : {}),
+            agentLoop: { ...combineAgentLoops(batch.primary?.agentLoop, error.agentLoop)!, status: "awaiting_user" },
+          };
+          await persist(stored);
+          return batch.finished;
+        }
         if (error.sourceError instanceof RoleAuditOutputError && error.agentLoop.pendingCandidate
           && !(isRecord(stored) && isRecord(stored.pendingOperation))) {
           // 已取回却不合规的审计不是排序成果缺失。保留原失败及候选，交回人工决定；
@@ -377,11 +404,24 @@ export class CodexAssetSemanticRanker implements AssetSemanticRanker {
   }
 }
 
-// 补证只缩小候选范围，不缩小创作合同。通过 Broker 既有 intent 字符串字段传递导演要求与
-// 邻镜语义；checkpoint 专用 planningIntent 仍不能作为协议顶层字段发送。
-function rankModelPayload(payload: RankPayload, contextReport: AssetCandidateReport): RankPayload {
+// 公共合同、相关导演镜头与批次外邻镜只传一次；补证仍保留跨镜引用的依赖闭包。
+// checkpoint 专用 planningIntent 只用于身份，不作为协议字段发送。
+function rankModelPayload(payload: RankPayload, contextReport: AssetCandidateReport): RankModelPayload {
   const planning = (contextReport as AssetCandidateReport & { planningIntent?: unknown }).planningIntent;
   const director = isRecord(planning) ? planning.rankingIntent : undefined;
+  const positions = new Set(payload.scenes.map(scene => scene.scenePosition));
+  const related = new Set(payload.scenes.flatMap(scene => [scene.scenePosition - 1, scene.scenePosition, scene.scenePosition + 1]));
+  if (isRecord(director) && Array.isArray(director.shots)) {
+    for (let pass = 0; pass < director.shots.length; pass++) {
+      const before = related.size;
+      for (const shot of director.shots) if (isRecord(shot) && typeof shot.scenePosition === "number" && related.has(shot.scenePosition)) {
+        for (const key of ["referenceFromScenePosition", "reuseFromScenePosition"]) {
+          if (typeof shot[key] === "number") related.add(shot[key]);
+        }
+      }
+      if (related.size === before) break;
+    }
+  }
   const scenes = payload.scenes.map(scene => {
     const shot = isRecord(director) && Array.isArray(director.shots)
       ? director.shots.find(value => isRecord(value) && value.scenePosition === scene.scenePosition) : undefined;
@@ -399,33 +439,19 @@ function rankModelPayload(payload: RankPayload, contextReport: AssetCandidateRep
       temporal_beats: JSON.stringify(beats),
       success_criteria: JSON.stringify(shot.successCriteria ?? []),
     } : {};
-    const related = new Set([scene.scenePosition - 1, scene.scenePosition, scene.scenePosition + 1]);
-    if (isRecord(director) && Array.isArray(director.shots)) {
-      // 引用可以跨镜头距离；只补齐依赖闭包，不把无关全片上下文复制到每个镜头。
-      for (let pass = 0; pass < director.shots.length; pass++) {
-        const before = related.size;
-        for (const shot of director.shots) if (isRecord(shot) && typeof shot.scenePosition === "number" && related.has(shot.scenePosition)) {
-          for (const key of ["referenceFromScenePosition", "reuseFromScenePosition"]) {
-            if (typeof shot[key] === "number") related.add(shot[key]);
-          }
-        }
-        if (related.size === before) break;
-      }
-    }
-    return { ...scene, intent: {
-    ...scene.intent,
-    ...currentIntent,
-    rankingContext: JSON.stringify({
+    return { ...scene, intent: { ...scene.intent, ...currentIntent } };
+  });
+  return { version: payload.version, scenes, thumbnails: payload.thumbnails,
+    rankingContext: {
       ...(director === undefined ? {} : { director: isRecord(director) && Array.isArray(director.shots)
         ? { planContract: director.planContract, shots: director.shots.filter(shot => isRecord(shot)
           && typeof shot.scenePosition === "number" && related.has(shot.scenePosition)) }
         : director }),
-      neighbors: contextReport.scenes.filter(other => Math.abs(other.scenePosition - scene.scenePosition) === 1)
+      neighbors: contextReport.scenes.filter(other => !positions.has(other.scenePosition)
+        && payload.scenes.some(scene => Math.abs(other.scenePosition - scene.scenePosition) === 1))
         .map(other => ({ scenePosition: other.scenePosition, intent: other.intent })),
-    }),
-  } };
-  });
-  return { version: payload.version, scenes, thumbnails: payload.thumbnails };
+    },
+  };
 }
 
 function recoveredAssetRankPayload(
@@ -467,10 +493,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function rankAuditContext(payload: RankPayload) {
+function rankAuditContext(payload: RankModelPayload) {
   return {
     roleScope: { owns: ["候选排序", "semanticScore", "rationale"], doesNotOwn: ["新增候选", "删除候选", "下载素材", "锁定人工选择"] },
-    upstreamFacts: { version: payload.version, scenes: payload.scenes },
+    upstreamFacts: { version: payload.version, scenes: payload.scenes, rankingContext: payload.rankingContext },
     currentRoleContract: {
       preserveEveryCandidate: true, ranksStartAtOneAndAreUnique: true, lockedMustRemainFalse: true,
       automaticUseMinimumSemanticScore: 40,
@@ -484,12 +510,12 @@ function rankAuditContext(payload: RankPayload) {
 function boundedPayload<T>(kind: "asset-rank" | "role-audit", payload: T): T {
   const check = (value: unknown, field: string, maximum: number) => {
     if (value !== undefined && Buffer.byteLength(JSON.stringify(value)) > maximum) {
-      throw new RoleAgentHostStop("payload_limit", `候选核验资料超过接口的 ${field} 容量限制，未提交模型。请缩小本次画面方案后再确认；不会自动截掉候选或导演要求。`);
+      throw new RoleAgentHostStop("payload_limit", `候选核验资料超过接口的 ${field} 容量限制，本次核验请求未提交。原稿与候选已保留，未核验素材不会自动采用；可以回到导演讨论或人工处理候选，原样重试不会解决容量问题。`);
     }
   };
   check(payload, "payload", MAX_RANK_PAYLOAD_BYTES);
   if (isRecord(payload)) {
-    const limits = kind === "asset-rank" ? { scenes: 192 * 1024, revision: 192 * 1024 }
+    const limits = kind === "asset-rank" ? { scenes: 192 * 1024, rankingContext: 192 * 1024, revision: 192 * 1024 }
       : { context: 192 * 1024, candidate: 192 * 1024, previousAudit: 64 * 1024 };
     for (const [field, maximum] of Object.entries(limits)) check(payload[field], field, maximum);
     if (isRecord(payload.validationFailure)) {
@@ -831,9 +857,9 @@ export function validateAssetSemanticRanking(
       seen.add(key);
       return entry;
     });
-    if (evidence.stopReason !== undefined && evidence.stopReason !== "deadline" && evidence.stopReason !== "thumbnails_unavailable") throw new Error("Invalid ranking stop reason.");
+    if (evidence.stopReason !== undefined && evidence.stopReason !== "deadline" && evidence.stopReason !== "thumbnails_unavailable" && evidence.stopReason !== "payload_limit") throw new Error("Invalid ranking stop reason.");
     visualEvidence = { reportDigest: evidence.reportDigest, supplementaryBatches: evidence.supplementaryBatches, reviewed,
-      ...(evidence.stopReason === "deadline" || evidence.stopReason === "thumbnails_unavailable" ? { stopReason: evidence.stopReason } : {}),
+      ...(evidence.stopReason === "deadline" || evidence.stopReason === "thumbnails_unavailable" || evidence.stopReason === "payload_limit" ? { stopReason: evidence.stopReason } : {}),
     };
   }
   return {

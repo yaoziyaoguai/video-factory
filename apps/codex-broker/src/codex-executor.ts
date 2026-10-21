@@ -446,6 +446,7 @@ export interface AssetRankPayload {
   version: "video-factory/asset-candidates-v1";
   scenes: unknown[];
   thumbnails: AssetRankThumbnail[];
+  rankingContext?: Record<string, unknown>;
   revision?: Record<string, unknown>;
 }
 
@@ -866,7 +867,7 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
     return { kind, payload: { ...requireVisualReviewPayload(record), audioSha256, audio } };
   }
   if (kind === "asset-rank") {
-    assertExactKeys(record, ["version", "scenes", "thumbnails", "revision"], "payload");
+    assertExactKeys(record, ["version", "scenes", "thumbnails", "rankingContext", "revision"], "payload");
     if (record.version !== "video-factory/asset-candidates-v1") {
       throw new CodexExecutorError("payload.version must be video-factory/asset-candidates-v1.", false);
     }
@@ -876,7 +877,9 @@ export function validateTaskPayload(kind: BrokerTaskKind, value: unknown): Valid
     }
     const thumbnails = record.thumbnails === undefined ? [] : requireAssetRankThumbnails(record.thumbnails);
     const revision = record.revision === undefined ? undefined : boundedRecord(record.revision, "payload.revision", 192 * 1024);
-    return { kind, payload: { version: record.version, scenes, thumbnails, ...(revision ? { revision } : {}) } };
+    const rankingContext = record.rankingContext === undefined ? undefined : boundedRecord(record.rankingContext, "payload.rankingContext", 192 * 1024);
+    return { kind, payload: { version: record.version, scenes, thumbnails,
+      ...(rankingContext ? { rankingContext } : {}), ...(revision ? { revision } : {}) } };
   }
   if (kind === "reference-grammar") {
     assertExactKeys(record, ["durationMs", "frames", "sourceLabel", "revision"], "payload");
@@ -1595,6 +1598,7 @@ export function buildTaskPrompt(
     data = {
       version: task.payload.version,
       scenes: task.payload.scenes,
+      ...(task.payload.rankingContext ? { rankingContext: task.payload.rankingContext } : {}),
       thumbnails: task.payload.thumbnails.map((thumbnail, index) => ({
         imageIndex: index + 1,
         scenePosition: thumbnail.scenePosition,

@@ -9,6 +9,7 @@ import { PassThrough } from "node:stream";
 import type { ClientRequest, IncomingMessage } from "node:http";
 import { downloadCandidateThumbnail } from "../src/asset-semantic-ranker.js";
 import { fileRoleAgentLoopCheckpoint } from "../src/role-agent-checkpoint.js";
+import { RoleAgentHostStop } from "../src/role-agent-loop.js";
 import { summarizeJointPlanningExecution } from "../src/production-pipeline.js";
 import {
   CodexAssetSemanticRanker,
@@ -492,7 +493,7 @@ describe("asset semantic ranking", () => {
     assert.equal(calls, 0);
   });
 
-  it("rejects an oversized audit context before spending a producer call", async () => {
+  it("preserves oversized inputs at an unreviewed human stop without spending or replaying calls", async () => {
     const report = parseAssetCandidateReport(rawReport);
     const intent = report.scenes[0]!.intent;
     while (Buffer.byteLength(JSON.stringify(report.scenes)) < 194000) intent[`padding${Object.keys(intent).length}`] = "x".repeat(1900);
@@ -505,8 +506,49 @@ describe("asset semantic ranking", () => {
         return { output: kind === "asset-rank" ? { ...deterministicAssetRanking(report), source: "model" } : passingAudit() };
       } },
     });
-    await assert.rejects(ranker.rankDetailed(report), /context/);
+    let saved: unknown;
+    const checkpoint = { key: "capacity-stop", load: async () => structuredClone(saved), save: async (value: unknown) => { saved = structuredClone(value); } };
+    const result = await ranker.rankDetailed(report, checkpoint);
+    assert.equal(result.agentLoop?.status, "awaiting_user");
+    assert.equal(result.output.visualEvidence?.stopReason, "payload_limit");
+    assert.deepEqual(result.output.visualEvidence?.reviewed, []);
+    assert.equal(result.output.source, "fallback");
+    assert.ok(result.output.scenes.every(scene => scene.candidates.every(candidate => candidate.semanticScore === 0 && !candidate.locked)));
+    assert.equal(result.output.scenes.flatMap(scene => scene.candidates).length, report.scenes.flatMap(scene => scene.candidates).length);
+    assert.deepEqual(await ranker.rankDetailed(report, checkpoint), result);
     assert.equal(calls, 0);
+  });
+
+  it("allows a never-submitted failed checkpoint to retry after its old deadline without downloading again", async () => {
+    const report = parseAssetCandidateReport(rawReport);
+    let saved: unknown;
+    let legacyFailure: unknown;
+    let downloads = 0;
+    let rejectBeforeSubmission = true;
+    const calls: string[] = [];
+    const checkpoint = { key: "legacy-preflight", load: async () => structuredClone(saved), save: async (value: unknown) => {
+      saved = structuredClone(value);
+      const state = value as { status?: string; assetRankBatch?: { finished?: unknown } };
+      if (state.status === "failed" && !state.assetRankBatch?.finished) legacyFailure = structuredClone(value);
+    } };
+    const ranker = new CodexAssetSemanticRanker({ fetchThumbnail: async () => { downloads++; return Buffer.from([0xff, 0xd8, 0xff, 0xd9]); },
+      client: { runTask: async () => ({}), runTaskDetailed: async kind => {
+        if (rejectBeforeSubmission) throw new RoleAgentHostStop("payload_limit", "legacy capacity refusal");
+        calls.push(kind);
+        return { output: kind === "asset-rank" ? { ...deterministicAssetRanking(report), source: "model" } : passingAudit() };
+      } },
+    });
+    await ranker.rankDetailed(report, checkpoint);
+    assert.ok(legacyFailure, "保留旧版本会落下的 failed/not_accepted 快照");
+    saved = legacyFailure;
+    (saved as { assetRankBatch: { deadlineAt: number } }).assetRankBatch.deadlineAt = 0;
+    const priorDownloads = downloads;
+    rejectBeforeSubmission = false;
+    const result = await ranker.rankDetailed(report, checkpoint);
+    assert.deepEqual(calls, ["asset-rank", "role-audit"]);
+    assert.equal(result.agentLoop?.status, "passed");
+    assert.equal(result.output.visualEvidence?.reviewed.length, 2);
+    assert.equal(downloads, priorDownloads);
   });
 
   it("keeps a reserved supplement paused across restart and resumes only after permission returns", async () => {
@@ -577,11 +619,12 @@ describe("asset semantic ranking", () => {
     assert.deepEqual((calls[2]!.payload as TestPayload).scenes.map(scene => scene.scenePosition), [5]);
     assert.equal((calls[0]!.payload as TestPayload).thumbnails.length, 12);
     assert.equal((calls[2]!.payload as TestPayload).thumbnails.length, 10);
-    const context = JSON.parse((calls[2]!.payload as TestPayload).scenes[0]!.intent.rankingContext!);
+    const context = (calls[2]!.payload as TestPayload & { rankingContext: { director: typeof report.planningIntent.rankingIntent;
+      neighbors: Array<{ scenePosition: number }> } }).rankingContext;
     assert.deepEqual(context.director.planContract.visualBible, ["保持自然色调"]);
-    assert.equal(context.director.shots.at(-1).visibleAction, "平静海面，不强制方向");
+    assert.equal(context.director.shots.at(-1)!.visibleAction, "平静海面，不强制方向");
     assert.ok(context.director.shots.some((shot: { scenePosition: number }) => shot.scenePosition === 1), "non-adjacent references must be explicit in the supplementary context");
-    assert.equal(context.neighbors[0].scenePosition, 4);
+    assert.equal(context.neighbors[0]!.scenePosition, 4);
     assert.equal(Object.hasOwn(calls[2]!.payload as object, "planningIntent"), false);
     assert.equal(first.output.scenes[4]!.candidates[0]!.assetId, "5-4");
     assert.equal(first.output.scenes[4]!.candidates[0]!.semanticScore, 80);

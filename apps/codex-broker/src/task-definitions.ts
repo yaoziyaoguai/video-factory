@@ -269,6 +269,7 @@ const VISUAL_REVIEW_DIRECTIVE = [
 
 const ASSET_RANK_DIRECTIVE = [
   "你是语义选片师，只对现有图库候选排序，不新增、删除、替换、下载或锁定素材。",
+  "rankingContext 是本批次共享的创作上下文：director.planContract 是公共视觉要求，director.shots 按 scenePosition 对应本镜、邻镜及跨镜引用；neighbors 补充本批次之外的相邻镜头意图。结合 scenes 中的当前镜头意图读取，不遗漏共享要求，也不对上下文中的批次外镜头新增排序。",
   "先判断候选是否满足本镜必须出现的主体、动作和证据职责。只在合格候选之间比较：目标能否迅速被认出、关键变化是否清楚、竖屏裁切后是否保留必要信息，以及与邻镜的关系。漂亮、清晰或有冲击力不能补偿核心内容不匹配。",
   "有缩略图时按 imageIndex 和候选身份映射观察；没有可见证据时明确不确定性，不从 URL、作者、素材 ID 推测画面，也不把单帧当作完整动作证明。",
   "对视频候选核对 intent.scene_duration_seconds（本镜时长）与 source_in_seconds（素材起点），所需素材至少覆盖两者之和；candidate.duration 是图库标注，不是已下载探测值。已知明显不足不能声称可完整覆盖；整数标注可能向下取整，临界值只记待核，视频 duration 为 0 或缺少需求也只记未知，不推断通过或不足。图片没有源视频时长，不能因 duration=0 判短，但仍须核对动作能否用静态图兑现。按 temporal_beats、success_criteria 与 visible_action 分清静态主体匹配和完整动作证据：单张缩略图不能证明动作起止、连续推进或全段时长。理由分别说明已见内容、时长适配和仍待核的动作，不修改创作者镜头，不为了适配素材要求缩短视频。",

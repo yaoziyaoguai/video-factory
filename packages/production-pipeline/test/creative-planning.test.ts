@@ -1074,6 +1074,18 @@ describe("B3 固定创作规划图", () => {
       delete output.visualEvidence;
       assert.match(defaultAvailabilityReviewer(input)[0]!.reason, /证据不足/);
     });
+
+    it("核验容量不足保留明确的人工处理原因，不冒充候选不匹配或建议原样重试", () => {
+      const output = rankingFixture({ sceneTwoSemanticScore: 0 });
+      output.visualEvidence!.reviewed = output.visualEvidence!.reviewed.filter(item => item.scenePosition !== 2);
+      output.visualEvidence!.stopReason = "payload_limit";
+      output.summary = "候选核验资料超过容量限制，原稿与候选已保留；原样重试不会解决容量问题。";
+      const issues = defaultAvailabilityReviewer({ script: scriptFixture(), directorPlan: directorPlanFixture(),
+        ranking: { artifactId: "ranking:capacity", output } });
+      assert.equal(issues[0]?.target, "user");
+      assert.match(issues[0]!.reason, /证据不足/);
+      assert.equal(issues[0]?.requiredChange, output.summary);
+    });
   });
 
   // -------------------------------------------------------------------------

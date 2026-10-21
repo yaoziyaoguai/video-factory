@@ -660,7 +660,9 @@ export function defaultAvailabilityReviewer(input: AvailabilityReviewInput): Pla
         ? `候选画面证据不足：${scene.candidates.length} 个候选中仅 ${reviewedCandidateCount} 个完成视觉核验，尚不能判定其余素材是否合适`
         : "图库候选不足：该镜头没有达到自动采用语义阈值的候选",
       requiredChange: evidenceMissing
-        ? input.ranking.output.visualEvidence?.stopReason === "deadline"
+        ? input.ranking.output.visualEvidence?.stopReason === "payload_limit"
+          ? input.ranking.output.summary
+          : input.ranking.output.visualEvidence?.stopReason === "deadline"
           ? "本轮候选核验时间已用尽，未审查素材不会自动采用。请在导演讨论中调整画面要求或补充可核验素材后再确认；也可以停止，不会自动重置时限或购买素材。"
           : "本轮自动核验已停止；请讨论调整画面要求或补充可核验素材后再决定是否继续，不会自动购买或降低质量要求。"
         : "调整该镜头画面路线（检索词、生成或复用）；素材确实不可得时按 source/user 上报",
