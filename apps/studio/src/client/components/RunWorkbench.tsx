@@ -12,7 +12,7 @@ import { RunCostDetailPanel, actualCostLabel } from "./CostDashboard.js";
 import { AudioReviewPanel } from "./AudioReviewPanel.js";
 import { CurrentFilmReinspection } from "./CurrentFilmReinspection.js";
 import { SubtitleRecoveryPanel } from "./SubtitleRecoveryPanel.js";
-import { NarrationTimingEditor, type NarrationTimingToolSummary } from "./NarrationTimingEditor.js";
+import { NarrationTimingEditor, type NarrationTimingToolSummary, type NarrationVisualTimingAdjustment } from "./NarrationTimingEditor.js";
 import { decisionConsequenceView } from "./decision-consequence.js";
 import { studioApi } from "../api.js";
 import { publishPackageDownloadFilename, videoDownloadFilename } from "../download-filename.js";
@@ -100,6 +100,7 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
   const [prefillNotice, setPrefillNotice] = useState<{ basis: string; text: string }>();
   const reviewEditGeneration = useRef(0);
   const [replanningVoice, setReplanningVoice] = useState(false);
+  const [visualTimingAdjustment, setVisualTimingAdjustment] = useState<ReturnType<typeof voiceTimingConflict>>();
   const [voiceDurationSeconds, setVoiceDurationSeconds] = useState("");
   const [voiceScenePosition, setVoiceScenePosition] = useState(0);
   const [voiceIntentSnapshot, setVoiceIntentSnapshot] = useState<StudioRunDetail["durationIntent"]>();
@@ -115,6 +116,7 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
     acceptContentSuggestions?: true;
   }>();
   const previewRef = useRef<HTMLVideoElement>(null);
+  const [videoDuration, setVideoDuration] = useState<{ identity: string; seconds: number }>();
   const [viewingFocusIdentity, setViewingFocusIdentity] = useState<string>();
   const viewingFocusToggleRef = useRef<HTMLButtonElement>(null);
   // 终审可选时间工具的折叠摘要状态（CLOUD-03）：组件保持挂载，折叠只藏表单不丢未保存输入。
@@ -131,6 +133,7 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
   const approveDialogRef = useDialogFocus<HTMLElement>(approving, closeApproveDecision, decisionPending);
   const closeVoiceTimingDecision = () => {
     setReplanningVoice(false);
+    setVisualTimingAdjustment(undefined);
     setDecisionSnapshot(undefined);
   };
   const voiceTimingDialogRef = useDialogFocus<HTMLElement>(replanningVoice, closeVoiceTimingDecision, decisionPending);
@@ -156,6 +159,8 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
   const subtitlePreview = currentSubtitlePreview(run);
   // loadeddata 的资格属于具体媒体源；同一个播放器换片时不能借用旧片的 ready 状态。
   const videoIdentity = video?.contentUrl ? `${run.id}\0${video.id}\0${video.contentUrl}` : undefined;
+  const currentVideoDuration = videoDuration?.identity === videoIdentity ? videoDuration?.seconds : undefined;
+  const durationTargetLabel = run.durationIntent?.policy === "content-led-v1" ? "参考目标" : "目标时长";
   const viewingFocused = Boolean(videoIdentity && viewingFocusIdentity === videoIdentity);
   useEffect(() => {
     setViewingFocusIdentity(undefined);
@@ -266,10 +271,12 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
     && run.nodes.some((node) => node.id === "visual-review")
     && ["needs_human", "rejected"].includes(run.status)
     && ["visual-review", "final-review"].includes(run.activeIntervention?.nodeId ?? run.currentNodeId ?? "");
-  const voiceTiming = voiceTimingConflict(run);
+  const voiceConflict = voiceTimingConflict(run);
+  const voiceTiming = replanningVoice && visualTimingAdjustment ? visualTimingAdjustment : voiceConflict;
+  const shorteningVisual = Boolean(replanningVoice && visualTimingAdjustment);
   const selectedVoiceCut = voiceTiming?.cuts?.find((cut) => cut.scenePosition === voiceScenePosition);
-  const voiceMinimum = voiceTiming?.groupId ? (selectedVoiceCut ? selectedVoiceCut.frameCount / 30
-    + voiceTiming.requiredSeconds - voiceTiming.plannedSeconds : Infinity) : voiceTiming?.requiredSeconds ?? Infinity;
+  const voiceMinimum = voiceTiming?.groupId ? (selectedVoiceCut ? Math.max(1 / 30, selectedVoiceCut.frameCount / 30
+    + voiceTiming.requiredSeconds - voiceTiming.plannedSeconds) : Infinity) : voiceTiming?.requiredSeconds ?? Infinity;
   const voiceContentLed = voiceIntentSnapshot?.policy === "content-led-v1";
   const voiceTimingStale = Boolean(replanningVoice && (!decisionSnapshot
     || decisionSnapshot.expectedRunRevision !== run.revision || decisionSnapshot.interventionId !== run.activeIntervention?.id
@@ -447,6 +454,11 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
     {...(onRunUpdated ? { onRunUpdated } : {})}
     characterDrama={run.presentationMode === "character_drama"}
     nativeAudio={nativeAudio}
+    {...(!nativeAudio && !readOnly && run.status === "needs_human" && run.activeIntervention?.nodeId === "voice" && run.voiceTimingPlan
+      ? { onAdjustVisualTiming: openVisualTimingDecision } : {})}
+    {...(node.id === "render" && videoIdentity && !node.outputState?.stale
+      && (node.outputState ? node.outputState.versions.find(version => version.id === node.outputState?.effectiveVersionId)?.artifactIds : node.artifactIds)?.includes(video!.id)
+      ? { onPreviewRender: openCurrentFilm } : {})}
     {...(run.characterScriptEditTarget && onPrepareReviewContinuation ? { onEditCharacters: editCharacters } : {})}
     acceptedPlanDigest={run.productionPlanDigest ?? ""}
     runArtifacts={run.artifacts}
@@ -525,14 +537,15 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
   };
 
   const openVoiceTimingDecision = () => {
-    if (!run.activeIntervention || !voiceTiming) return;
+    if (!run.activeIntervention || !voiceConflict) return;
+    setVisualTimingAdjustment(undefined);
     setDecisionSnapshot({
       expectedRunRevision: run.revision,
       interventionId: run.activeIntervention.id,
       reviewEvidenceId: null,
     });
-    setVoiceScenePosition(voiceTiming.groupId ? 0 : voiceTiming.scenePosition);
-    setVoiceDurationSeconds(voiceTiming.groupId ? "" : String(voiceTiming.requiredSeconds));
+    setVoiceScenePosition(voiceConflict.groupId ? 0 : voiceConflict.scenePosition);
+    setVoiceDurationSeconds(voiceConflict.groupId ? "" : String(voiceConflict.requiredSeconds));
     setVoiceIntentSnapshot(run.durationIntent);
     setVoicePlanSnapshot(run.voiceTimingPlan);
     setVoiceCommitmentAction("keep");
@@ -540,6 +553,22 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
     setVoiceMaxSeconds("");
     setReplanningVoice(true);
   };
+  function openVisualTimingDecision(value: NarrationVisualTimingAdjustment) {
+    if (run.status !== "needs_human" || run.activeIntervention?.nodeId !== "voice" || !run.voiceTimingPlan) return;
+    const cuts = run.voiceTimingPlan.cuts.filter(cut => value.sourceScenePositions.includes(cut.scenePosition));
+    if (!cuts.length || !Number.isFinite(value.requiredSeconds) || value.requiredSeconds <= 0 || value.requiredSeconds >= value.plannedSeconds) return;
+    setVisualTimingAdjustment({ scenePosition: 0, groupId: value.groupId, cuts,
+      plannedSeconds: value.plannedSeconds, requiredSeconds: value.requiredSeconds });
+    setDecisionSnapshot({ expectedRunRevision: run.revision, interventionId: run.activeIntervention.id, reviewEvidenceId: null });
+    setVoiceScenePosition(0);
+    setVoiceDurationSeconds("");
+    setVoiceIntentSnapshot(run.durationIntent);
+    setVoicePlanSnapshot(run.voiceTimingPlan);
+    setVoiceCommitmentAction("keep");
+    setVoiceMinSeconds("");
+    setVoiceMaxSeconds("");
+    setReplanningVoice(true);
+  }
 
   const workbenchRef = useRef<HTMLElement>(null);
   const [navigation, setNavigation] = useState<{ runId: string; section: WorkbenchSection; nodeId?: string }>({ runId: run.id, section: "work" });
@@ -571,6 +600,14 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
     const current = nodeId === currentArtifactNode?.id || nodeId === activeSpendNode?.id || (nodeId === run.currentNodeId && Boolean(creativeDiscussion));
     setNavigation({ runId: run.id, section: current ? "work" : "process", nodeId });
     revealNodeWorkspace(nodeId);
+  }
+  function openCurrentFilm() {
+    pauseWorkspaceMedia();
+    setNavigation({ runId: run.id, section: "review" });
+    window.requestAnimationFrame(() => {
+      previewRef.current?.focus({ preventScroll: true });
+      previewRef.current?.closest(".video-stage")?.scrollIntoView?.({ block: "start" });
+    });
   }
   useEffect(() => {
     const root = workbenchRef.current;
@@ -604,10 +641,14 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
         <div className="run-heading-copy">
           <p className="eyebrow">本次制作</p>
           <h1>{run.title}</h1>
-          <div className="run-title-meta"><span>{platformLabel(run.platform)} · 目标 {run.durationSeconds} 秒</span><details className="run-brief-context"><summary>创作目标与受众</summary><dl className="run-brief-facts"><div><dt>创作角度</dt><dd>{run.angle}</dd></div><div><dt>目标受众</dt><dd>{run.audience || "未指定"}</dd></div></dl></details></div>
+          <div className="run-title-meta"><span>{platformLabel(run.platform)} · {videoIdentity
+            ? currentVideoDuration !== undefined ? `本版成片 ${durationSecondsLabel(currentVideoDuration)} 秒` : "本版成片 · 时长待读取"
+            : `${durationTargetLabel} ${run.durationIntent?.referenceSeconds ?? run.durationSeconds} 秒`}</span><details className="run-brief-context"><summary>创作目标与受众</summary><dl className="run-brief-facts"><div><dt>创作角度</dt><dd>{run.angle}</dd></div><div><dt>目标受众</dt><dd>{run.audience || "未指定"}</dd></div><div><dt>{durationTargetLabel}</dt><dd>{run.durationIntent?.referenceSeconds ?? run.durationSeconds} 秒</dd></div></dl></details></div>
         </div>
         <StatusBadge status={run.status} {...(run.status === "succeeded" && !readOnly
           ? { label: "内部交付已完成" }
+          : run.status === "needs_human" && run.finalReviewOutcome === "approved" && run.activeIntervention?.nodeId === "publish-package" && video?.contentUrl
+          ? { label: "成片已完成 · 发布文案待确认" }
           : run.status === "failed" && video?.contentUrl && run.failure?.nodeId === "visual-review"
           ? { label: "已有成片 · 审片待处理" }
           : creatorRunStatusLabel(run) ? { label: creatorRunStatusLabel(run)! } : {})} />
@@ -708,8 +749,14 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
           {viewingFocused ? <p className="viewing-focus-hint">按 Esc 退出专注观看；审片意见与决定保留在下方。</p> : null}
           <div className={`video-frame${videoIdentity && filmRevealIdentity === videoIdentity ? " film-reveal-active" : ""}`}>
             {video?.contentUrl ? (
-              <video ref={previewRef} title="成片预览" src={`${video.contentUrl}#t=0.1`} controls playsInline preload="auto"
-                onLoadStart={() => { setReadyVideoIdentity(undefined); setFailedVideoIdentity(undefined); }}
+              <video ref={previewRef} tabIndex={0} title="成片预览" src={`${video.contentUrl}#t=0.1`} controls playsInline preload="auto"
+                onLoadStart={() => { setReadyVideoIdentity(undefined); setFailedVideoIdentity(undefined); setVideoDuration(undefined); }}
+                onLoadedMetadata={(event) => {
+                  const media = event.currentTarget;
+                  if (media === previewRef.current && videoIdentity && Number.isFinite(media.duration) && media.duration > 0) {
+                    setVideoDuration({ identity: videoIdentity, seconds: media.duration });
+                  }
+                }}
                 onLoadedData={(event) => {
                   if (event.currentTarget.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
                     && event.currentTarget.getAttribute("src") === `${video.contentUrl}#t=0.1`) {
@@ -865,7 +912,7 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
                       <XCircle aria-hidden="true" size={17} />终止制作
                     </button>
                   ) : null}
-                </> : voiceTiming ? <>
+                </> : voiceConflict ? <>
                   <button className="button button-primary" type="button" disabled={decisionPending} onClick={openVoiceTimingDecision}>
                     <RotateCcw aria-hidden="true" size={17} />调整方案
                   </button>
@@ -1219,19 +1266,20 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
         <div className="dialog-backdrop" role="presentation">
           <section ref={voiceTimingDialogRef} className="decision-dialog" role="dialog" aria-modal="true" aria-labelledby="voice-timing-title" tabIndex={-1}>
             <header className="dialog-header">
-              <div><p className="eyebrow">调整统一方案</p><h2 id="voice-timing-title">调整配音时长</h2></div>
+              <div><p className="eyebrow">调整统一方案</p><h2 id="voice-timing-title">{shorteningVisual ? "缩短画面空档" : "调整配音时长"}</h2></div>
               <button className="icon-button" type="button" onClick={closeVoiceTimingDecision} disabled={decisionPending} title="关闭"><X aria-hidden="true" size={19} /></button>
             </header>
-            <p>自然配音需要 {voiceTiming.requiredSeconds} 秒，当前{voiceTiming.groupId ? "整组画面" : "镜头"}只有 {voiceTiming.plannedSeconds} 秒。接受新时长后，系统会重排统一时间轴并重新检查素材、画面和成片。原音频保留；素材不够长时需要重新选材，新增购买仍须确认报价。</p>
+            {shorteningVisual ? <p>本段原声与已安排的停顿至少需要 {durationSecondsLabel(voiceTiming.requiredSeconds)} 秒，当前画面为 {durationSecondsLabel(voiceTiming.plannedSeconds)} 秒。选择一个镜头，确认要缩短的时长；不改词、不加速原声、不自动删除显式留白。采用后会更新统一时间轴，重新检查画面与声音并回到试听确认。</p>
+              : <p>自然配音需要 {voiceTiming.requiredSeconds} 秒，当前{voiceTiming.groupId ? "整组画面" : "镜头"}只有 {voiceTiming.plannedSeconds} 秒。接受新时长后，系统会重排统一时间轴并重新检查素材、画面和成片。原音频保留；素材不够长时需要重新选材，新增购买仍须确认报价。</p>}
             {voicePlanSnapshot && voiceProposedTotalFrames !== undefined ? <p role="status">整片时长：原 {durationSecondsLabel(voicePlanSnapshot.totalFrames / 30)} 秒（{voicePlanSnapshot.totalFrames} 帧） → 建议 {durationSecondsLabel(voiceProposedTotalFrames / 30)} 秒（{voiceProposedTotalFrames} 帧）。这次确认只采用当前方案的上述调整；素材覆盖及费用仍需按新版本核对。</p>
               : voiceContentLed && !voicePlanSnapshot ? <p role="status">当前完整时间轴暂不可核对，请等待详情更新后重新打开调整。参考目标不代表原成片时长。</p> : null}
-            {voiceTiming.groupId ? <label className="field field-wide"><span>选择要延长的镜头</span>
+            {voiceTiming.groupId ? <label className="field field-wide"><span>{shorteningVisual ? "选择要缩短的镜头" : "选择要延长的镜头"}</span>
               <select value={voiceScenePosition || ""} onChange={(event) => {
                 const position = Number(event.target.value);
                 const cut = voiceTiming.cuts?.find((candidate) => candidate.scenePosition === position);
                 setVoiceScenePosition(position);
-                setVoiceDurationSeconds(cut ? String(Number((cut.frameCount / 30 + voiceTiming.requiredSeconds - voiceTiming.plannedSeconds).toFixed(6))) : "");
-              }}><option value="">请自行选择，不会自动拉长第一镜</option>{voiceTiming.cuts?.map((cut) =>
+                setVoiceDurationSeconds(cut ? String(Number(Math.max(1 / 30, cut.frameCount / 30 + voiceTiming.requiredSeconds - voiceTiming.plannedSeconds).toFixed(6))) : "");
+              }}><option value="">{shorteningVisual ? "请自行选择，不会自动缩短第一镜" : "请自行选择，不会自动拉长第一镜"}</option>{voiceTiming.cuts?.map((cut) =>
                 <option key={cut.scenePosition} value={cut.scenePosition}>镜头 {cut.scenePosition}（现长 {(cut.frameCount / 30).toFixed(1)} 秒）</option>)}</select></label> : null}
             <label className="field field-wide">
               <span>{voiceScenePosition ? `镜头 ${voiceScenePosition} 时长（秒）` : "选中镜头的新时长（秒）"}</span>
@@ -1239,7 +1287,7 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
                 type="number"
                 min={Number.isFinite(voiceMinimum) ? voiceMinimum : undefined}
                 disabled={!voiceScenePosition}
-                max={voiceContentLed ? undefined : 180}
+                max={shorteningVisual && selectedVoiceCut ? (selectedVoiceCut.frameCount - 1) / 30 : voiceContentLed ? undefined : 180}
                 step="0.001"
                 value={voiceDurationSeconds}
                 onChange={(event) => setVoiceDurationSeconds(event.target.value)}
@@ -1267,7 +1315,7 @@ export function RunWorkbench({ run, creativeDiscussion, creativeHistory, assetCo
               <button
                 className="button button-primary"
                 type="button"
-                disabled={decisionPending || voiceTimingStale || Boolean(voiceAmendmentError) || !decisionSnapshot || !voiceScenePosition || !Number.isFinite(Number(voiceDurationSeconds)) || Number(voiceDurationSeconds) < voiceMinimum - 1e-6 || (!voiceContentLed && Number(voiceDurationSeconds) > 180) || (voiceContentLed && (!Number.isSafeInteger(voiceProposedTotalFrames) || !voicePlanSnapshot))}
+                disabled={decisionPending || voiceTimingStale || Boolean(voiceAmendmentError) || !decisionSnapshot || !voiceScenePosition || !Number.isFinite(Number(voiceDurationSeconds)) || Number(voiceDurationSeconds) < voiceMinimum - 1e-6 || (shorteningVisual && (!selectedVoiceCut || voiceRequestedFrames >= selectedVoiceCut.frameCount)) || (!voiceContentLed && Number(voiceDurationSeconds) > 180) || (voiceContentLed && (!Number.isSafeInteger(voiceProposedTotalFrames) || !voicePlanSnapshot))}
                 onClick={() => decisionSnapshot && void onDecision({
                   action: "request_changes",
                   ...decisionSnapshot,

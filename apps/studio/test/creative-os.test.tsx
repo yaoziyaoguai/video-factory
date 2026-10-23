@@ -3353,7 +3353,8 @@ describe("Creative OS", () => {
     expect(screen.getByRole("heading", { name: "新建制作默认值" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "发布渠道" })).toBeInTheDocument();
     const recipeSelect = screen.getByRole("combobox", { name: "默认画面来源策略" });
-    expect(within(recipeSelect).getAllByRole("option")).toHaveLength(2);
+    expect(within(recipeSelect).getAllByRole("option").map(option => option.getAttribute("value")))
+      .toEqual(["free-stock", "keyshot-ai", "generated-only"]);
     expect(recipeSelect).toHaveValue("free-stock");
     expect(within(recipeSelect).queryByRole("option", { name: "经济日更" })).not.toBeInTheDocument();
     expect(within(recipeSelect).queryByRole("option", { name: "开放精品生成" })).not.toBeInTheDocument();

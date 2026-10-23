@@ -246,3 +246,78 @@ it("shows a generic request-timeout label when the failing stage is unknown", ()
   expect(retryingLine).toHaveTextContent("镜头 1 · 获取失败，尝试其他候选 · Pexels 图库 · 请求超时");
   expect(retryingLine).not.toHaveTextContent("连接超时");
 });
+
+it("shows metadata duration only for the selected film and keeps the reference target in details", () => {
+  const run = runFixture(true);
+  run.durationIntent = { policy: "content-led-v1", briefSha256: "a".repeat(64), referenceSeconds: 24 };
+  const props = { decisionPending: false, onDecision: vi.fn() };
+  const { rerender } = render(<RunWorkbench run={run} {...props} />);
+  const header = document.querySelector<HTMLElement>(".run-header")!;
+  const video = screen.getByTitle("成片预览");
+  Object.defineProperty(video, "duration", { configurable: true, value: 61 });
+  fireEvent.loadedMetadata(video);
+  expect(header).toHaveTextContent("本版成片 61 秒");
+  fireEvent.click(within(header).getByText("创作目标与受众"));
+  expect(header).toHaveTextContent("参考目标24 秒");
+  const next = { ...run, videoArtifactId: "film-2", artifacts: [...run.artifacts, { ...run.artifacts[0]!, id: "film-2", contentUrl: "/film-2.mp4" }] };
+  rerender(<RunWorkbench run={next} {...props} />);
+  expect(header).not.toHaveTextContent("本版成片 61 秒");
+  const newVideo = screen.getByTitle("成片预览");
+  Object.defineProperty(newVideo, "duration", { value: 43.5 });
+  fireEvent.loadedMetadata(newVideo);
+  fireEvent.loadedMetadata(video);
+  expect(header).toHaveTextContent("本版成片 43.5 秒");
+});
+
+it("opens the existing current film from the completed render stage without replay or mutation", async () => {
+  const decide = vi.fn();
+  render(<RunWorkbench run={runFixture(true)} decisionPending={false} onDecision={decide} />);
+  const video = screen.getByTitle("成片预览") as HTMLVideoElement;
+  video.currentTime = 8;
+  clickTab("制作流程");
+  fireEvent.click(within(screen.getByRole("navigation", { name: "制作阶段" })).getByRole("button", { name: /渲染/ }));
+  clickTab("查看本版成片");
+  expect(screen.getByTitle("成片预览")).toBe(video);
+  expect(video).toBeVisible();
+  expect(video.currentTime).toBe(8);
+  await vi.waitFor(() => expect(video).toHaveFocus());
+  expect(decide).not.toHaveBeenCalled();
+});
+
+it("explains approved film and pending publishing copy as separate outcomes", () => {
+  const run = runFixture(true);
+  run.finalReviewOutcome = "approved";
+  run.currentNodeId = "publish-package";
+  run.activeIntervention = { ...run.activeIntervention!, nodeId: "publish-package" };
+  run.nodes.push({ id: "publish-package", label: "发布包", status: "needs_human", artifactIds: [], qualityGateResults: [], output: { title: "文案待确认" } });
+  const decide = vi.fn();
+  render(<RunWorkbench run={run} decisionPending={false} onDecision={decide} />);
+  expect(document.querySelector(".run-header")).toHaveTextContent("成片已完成 · 发布文案待确认");
+  expect(run.status).toBe("needs_human");
+  expect(decide).not.toHaveBeenCalled();
+});
+
+it("previews current media and groups internal production records without losing downloads", () => {
+  const run = runFixture(true);
+  run.nodes[1]!.artifactIds = ["image", "audio", "plan"];
+  run.artifacts.push(
+    { id: "image", kind: "media_asset", contentType: "image/jpeg", contentUrl: "/image.jpg", scenePosition: 1, producerNodeId: "assets", createdAt: run.startedAt },
+    { id: "audio", kind: "voiceover", contentType: "audio/wav", contentUrl: "/voice.wav", producerNodeId: "voice", createdAt: run.startedAt },
+    { id: "plan", kind: "executable_plan", contentType: "application/json", contentUrl: "/plan.json", producerNodeId: "creative-planning", createdAt: run.startedAt },
+  );
+  const decide = vi.fn();
+  render(<RunWorkbench run={run} decisionPending={false} onDecision={decide} />);
+  clickTab("文案与文件");
+  const files = screen.getByRole("region", { name: "文案与文件" });
+  expect(within(files).getByLabelText("成片 画面预览")).toHaveAttribute("src", "/film.mp4");
+  const image = within(files).getByRole("img", { name: "画面素材 · 镜头 1 画面预览" });
+  expect(image).toHaveAttribute("src", "/image.jpg");
+  expect(within(files).getByLabelText("配音 试听")).toHaveAttribute("src", "/voice.wav");
+  expect(within(files).getByText("执行方案")).not.toBeVisible();
+  fireEvent.click(within(files).getByText(/制作记录文件（1）/));
+  expect(within(files).getByRole("link", { name: /执行方案/ })).toHaveAttribute("href", "/plan.json");
+  fireEvent.error(image);
+  expect(within(files).getByText(/画面素材 · 镜头 1 预览读取失败/)).toBeVisible();
+  expect(within(files).getByRole("link", { name: /下载画面素材/ })).toHaveAttribute("href", "/image.jpg");
+  expect(decide).not.toHaveBeenCalled();
+});

@@ -1981,7 +1981,7 @@ describe("Studio client", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("请选择目标平台");
   });
 
-  it("shows only two real visual strategies and maps a legacy cinematic default to paid key shots", async () => {
+  it("shows three visual strategies and preserves legacy cinematic as mixed", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     const providersWithPaidVisuals: StudioProvider[] = [...providers, {
@@ -2006,7 +2006,7 @@ describe("Studio client", () => {
       onSubmit={onSubmit}
     />);
 
-    expect(screen.getAllByRole("radio", { name: /(?:仅免费画面|允许 AI 生成画面，按实际镜头报价)/ })).toHaveLength(2);
+    expect(screen.getAllByRole("radio", { name: /(?:仅免费画面|允许 AI 生成画面，按实际镜头报价|全部生成画面)/ })).toHaveLength(3);
     expect(screen.getByRole("radio", { name: /允许 AI 生成画面，按实际镜头报价/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: /视觉审片/ })).toBeDisabled();
@@ -2020,6 +2020,29 @@ describe("Studio client", () => {
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
       providers: expect.objectContaining({ visualReview: "deepseek-visual-review-v1" }),
+    }));
+  });
+
+  it("submits all-generated mode with only generated sources, and excludes free generation from free mode", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const catalog: StudioProvider[] = [...providers, {
+      id: "free-generated-provider", capability: "asset.prepare", label: "免费额度生成图片", available: true,
+      kind: "external", billing: "free", deliveryTypes: ["generated_image"],
+    }];
+    render(<NewRunDialog open providers={catalog} onClose={() => undefined} onSubmit={onSubmit} />);
+    await user.click(screen.getByText("03 模型与高级设置"));
+    expect(screen.getByRole("checkbox", { name: /免费额度生成图片/ })).toBeDisabled();
+    await user.click(screen.getByRole("radio", { name: /全部生成画面/ }));
+    expect(screen.getByRole("checkbox", { name: /免费额度生成图片/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /Pexels/ })).toBeDisabled();
+    await user.type(screen.getByLabelText("视频标题"), "完整生成画面");
+    await user.type(screen.getByLabelText("内容角度"), "用生成画面表达原创故事");
+    await user.type(screen.getByLabelText("目标受众"), "内容创作者");
+    await user.click(screen.getByRole("button", { name: "开始前期构思" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      economics: { recipeId: "generated-only", allowMeteredProviders: false },
+      director: { assetProviderIds: ["free-generated-provider"] },
     }));
   });
 
@@ -3249,7 +3272,7 @@ describe("Studio client", () => {
       },
     ];
     vi.spyOn(studioApi, "voices").mockResolvedValue([
-      { id: "minimax:Chinese (Mandarin)_News_Anchor", providerId: "minimax-tts-v1", label: "新闻主播", locale: "zh-CN", engine: "minimax", curated: true },
+      { id: "minimax:female-chengshu", providerId: "minimax-tts-v1", label: "成熟自然女声", locale: "zh-CN", engine: "minimax", curated: true },
     ]);
     render(<NewRunDialog open providers={providersWithMeteredVoice} onClose={() => undefined} onSubmit={onSubmit} />);
 
@@ -3328,7 +3351,7 @@ describe("Studio client", () => {
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
       providers: expect.objectContaining({ voice: "minimax-tts-v1" }),
-      voiceDirection: expect.objectContaining({ profileId: "minimax:Chinese (Mandarin)_News_Anchor" }),
+      voiceDirection: expect.objectContaining({ profileId: "minimax:female-chengshu" }),
     }));
   });
 
@@ -3774,7 +3797,7 @@ describe("Studio client", () => {
     ];
     vi.spyOn(studioApi, "voices").mockResolvedValue([
       { id: "macos:Tingting", providerId: "macos-say-v1", label: "Tingting", locale: "zh-CN", engine: "macos", curated: true },
-      { id: "minimax:Chinese (Mandarin)_News_Anchor", providerId: "minimax-tts-v1", label: "新闻女声", locale: "zh-CN", engine: "minimax", curated: true },
+      { id: "minimax:female-chengshu", providerId: "minimax-tts-v1", label: "成熟自然女声", locale: "zh-CN", engine: "minimax", curated: true },
     ]);
     render(<NewRunDialog
       open
@@ -3794,7 +3817,7 @@ describe("Studio client", () => {
     await user.click(screen.getByRole("button", { name: "开始前期构思" }));
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      voiceDirection: expect.objectContaining({ profileId: "minimax:Chinese (Mandarin)_News_Anchor" }),
+      voiceDirection: expect.objectContaining({ profileId: "minimax:female-chengshu" }),
       providers: expect.objectContaining({ voice: "minimax-tts-v1" }),
     }));
   });
@@ -7637,7 +7660,7 @@ describe("Studio client", () => {
     const { activeIntervention: _activeIntervention, ...withoutIntervention } = runDetail;
     render(<RunWorkbench run={withoutIntervention} decisionPending={false} onDecision={async () => undefined} />);
 
-    expect(screen.getByText(/抖音 · 目标 24 秒/)).toBeInTheDocument();
+    expect(screen.getByText(/抖音 · 本版成片 · 时长待读取/)).toBeInTheDocument();
     expect(screen.queryByText(/版本\s*3/)).not.toBeInTheDocument();
   });
 

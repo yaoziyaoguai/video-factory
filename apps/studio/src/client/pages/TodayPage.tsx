@@ -690,7 +690,7 @@ export function TodayPage() {
       <SeriesDialog open={seriesDialogOpen} onClose={() => setSeriesDialogOpen(false)} onSubmit={createSeries} />
       <NewRunDialog open={productionDialogOpen} providers={providers} initialDataReady={!providersLoading && !settingsLoading && !settingsError} {...(creatorSettings ? { creatorSettings } : {})} {...(settingsError ? { settingsError } : {})} onRetrySettings={() => void retrySettings()} {...(selected ? { initialValues: {
         title: selected.title,
-        angle: selected.concept ?? [selected.painPoint, selected.hook].filter(Boolean).join("\n\n"),
+        angle: selected.concept ?? selected.painPoint ?? selected.title,
         audience: selected.audience,
         nicheSlug: selected.track,
         platform: selected.origin === "trend"

@@ -15,7 +15,7 @@ interface VoiceStudioProps {
   sectionLabel?: string;
 }
 
-const PREVIEW_TEXT = "真正让人停下来的，不是更响的声音，而是恰到好处的节奏。";
+const PREVIEW_TEXT = "今天路过河边，发现那棵树的叶子已经黄了。风一吹，落在水面上，慢慢漂远。";
 const RECOMMENDED_VOICES = new Set([
   "macos:Tingting",
   "macos:Meijia",

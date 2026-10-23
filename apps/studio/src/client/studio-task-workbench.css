@@ -123,6 +123,20 @@
 .workbench-file-list > a:hover { background: var(--paper-soft); }
 .workbench-file-list > a > span { flex: 1; min-width: 0; }
 .workbench-file-list small { display: block; margin-top: 5px; color: var(--muted); font-size: 13px; }
+.workbench-media-files { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 18px; margin-bottom: 24px; }
+.workbench-media-files figure { min-width: 0; margin: 0; overflow: clip; background: var(--paper); border: 1px solid var(--line); border-radius: var(--workbench-radius); }
+.workbench-file-preview { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 180px; background: var(--stage); color: var(--frame-ink); }
+.workbench-file-preview :is(img, video) { display: block; width: 100%; height: 240px; object-fit: contain; }
+.workbench-file-preview audio { width: calc(100% - 24px); max-width: 100%; }
+.workbench-file-preview .media-preview-error { padding: 12px; color: var(--frame-ink); }
+.workbench-media-files figcaption { display: flex; align-items: start; justify-content: space-between; gap: 12px; padding: 16px; }
+.workbench-media-files figcaption > div { min-width: 0; overflow-wrap: anywhere; }
+.workbench-media-files figcaption strong { font-size: 15px; }
+.workbench-media-files figcaption small { display: block; margin-top: 6px; font-size: 13px; color: var(--muted); }
+.workbench-media-files figcaption a.button { flex-shrink: 0; min-height: 44px; }
+.workbench-technical-files { margin-top: 24px; }
+.workbench-technical-files > summary { padding-block: 14px; cursor: pointer; color: var(--muted); }
+.workbench-technical-files > p { font-size: 14px; color: var(--muted); }
 .workbench-history-list { list-style: none; padding: 0; margin: 32px 0; }
 .workbench-history-list li { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 28px; padding: 0 0 28px; }
 .workbench-history-list time { color: var(--muted); font-size: 13px; }

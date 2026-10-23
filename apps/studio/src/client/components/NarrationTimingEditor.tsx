@@ -124,8 +124,15 @@ export interface NarrationTimingToolSummary {
   stale: boolean;
 }
 
+export interface NarrationVisualTimingAdjustment {
+  groupId: string;
+  sourceScenePositions: number[];
+  plannedSeconds: number;
+  requiredSeconds: number;
+}
+
 /** 生成后只调窗口、落点和显式留白；文本、音色、分组和原声音来源保持不变。 */
-export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, interventionId, disabled, onStateSummary }: {
+export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, interventionId, disabled, onStateSummary, onAdjustVisualTiming }: {
   runId: string;
   revision: number;
   voiceNode: StudioNode;
@@ -133,8 +140,11 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
   interventionId: string;
   disabled: boolean;
   onStateSummary?: (summary: NarrationTimingToolSummary) => void;
+  onAdjustVisualTiming?: (adjustment: NarrationVisualTimingAdjustment) => void;
 }) {
   const [plan, setPlan] = useState<SupportedNarrationPlan>();
+  const [timingSummary, setTimingSummary] = useState<StudioNarrationPlanPreview["timingSummary"]>();
+  const [voiceStop, setVoiceStop] = useState(false);
   const [legacySource, setLegacySource] = useState<StudioNarrationPlanPreview["legacySource"]>();
   const [legacyUnavailable, setLegacyUnavailable] = useState<string>();
   const [characters, setCharacters] = useState<Array<{ id: string; name: string }>>([]);
@@ -215,6 +225,8 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
         const ignoreStoredDraft = discardingDraftRef.current || ignoredDraftRunRef.current === runId || Boolean(appliedOperation);
         const stored = ignoreStoredDraft ? {} : readTimingDraft(runId, identity);
         setPlan(response.plan);
+        setTimingSummary(response.timingSummary);
+        setVoiceStop(response.editorContext.mode === "voice_stop");
         setLegacySource(response.legacySource);
         setLegacyUnavailable(response.legacySourceUnavailableReason);
         setCharacters(response.editorContext?.characters ?? []);
@@ -571,8 +583,16 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
   const locked = Boolean(busyToken) || disabled || stale || !sourceTracked;
   return <section className="node-preview-section narration-timing-editor" aria-label="只调整配音时间">
     <h3>只调整配音时间</h3>
-    {legacySource ? <p>已核对原逐镜配音：这里只移动整段声音，不改词、不拆段；字幕仍沿用原逐镜显示，不冒充逐句同步字幕。</p> : null}
+    {legacySource ? <p>已核对原逐镜配音：这里只移动整段声音，不改词、不拆段；暂不支持直接缩短画面。字幕仍沿用原逐镜显示，不冒充逐句同步字幕。</p> : null}
     <p>复用原配音，本地调整窗口、落点和明确留白；不重新购买、不改文本、不改音色、不改变画面总时长。完成后停在声音试听，由你确认才继续渲染。</p>
+    {timingSummary ? <aside className="narration-timing-summary" aria-label="声音与画面时长">
+      <p>画面 {timingSummary.durationSeconds.toFixed(2)} 秒 · 原声 {timingSummary.sourceAudioSeconds.toFixed(2)} 秒 · 明确留白 {timingSummary.explicitSilenceSeconds.toFixed(2)} 秒</p>
+      {timingSummary.unfilledSeconds > 1 / 30 ? <>
+        <p role="status">另有 {timingSummary.unfilledSeconds.toFixed(2)} 秒画面未被旁白覆盖；片尾空档也会在这里列出。连续旁白不会自动消除这些时间。</p>
+        <p>未覆盖区间：{timingSummary.unfilledRanges.map(range => `${range.startSeconds.toFixed(2)}–${range.endSeconds.toFixed(2)} 秒`).join("；")}。</p>
+        <p>可以保留这些呼吸空间，或调整声音落点；若要缩短成片，请明确调整画面时长。原声内部的停顿仍需试听。</p>
+      </> : <p>原声与明确留白已覆盖画面时长；原声内部的停顿仍需试听。</p>}
+    </aside> : null}
     {outputConflict ? <p role="alert">上一段放不下：需要 {String(outputConflict.requiredFrames)} 帧，当前窗口只有 {String(outputConflict.availableFrames)} 帧。可扩大窗口或调整显式留白。</p> : null}
     {listenArtifacts.length ? <p>原声试听：{listenArtifacts.map((artifact) => <audio key={artifact.id} controls preload="none"
       src={`/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifact.id)}/content`} />)}</p> :
@@ -582,6 +602,16 @@ export function NarrationTimingEditor({ runId, revision, voiceNode, artifacts, i
       return <fieldset key={group.groupId} disabled={locked}>
         <legend>{"speakerId" in original ? `台词 ${index + 1} · ${characters.find((item) => item.id === original.speakerId)?.name ?? "角色"}` : `第 ${index + 1} 段`} · 镜头 {original.sourceScenePositions.join("、")}</legend>
         <p>{original.text}</p>
+        {(() => {
+          const measured = timingSummary?.groups.find(item => item.groupId === group.groupId);
+          if (!measured) return null;
+          return <><small>原声 {measured.audioSeconds.toFixed(2)} 秒，当前落在 {measured.startSeconds.toFixed(2)}–{measured.endSeconds.toFixed(2)} 秒。</small>
+            {onAdjustVisualTiming && voiceStop && !legacySource && plan.version === "video-factory/narration-plan-v1"
+              && !outputConflict && measured.availableFrames > measured.requiredFrames
+              ? <button type="button" className="button button-secondary" disabled={locked || dirty || Boolean(pendingEnvelope)}
+                onClick={() => onAdjustVisualTiming({ groupId: group.groupId, sourceScenePositions: original.sourceScenePositions,
+                  plannedSeconds: measured.availableFrames / 30, requiredSeconds: measured.requiredFrames / 30 })}>缩短第 {index + 1} 段画面</button> : null}</>;
+        })()}
         {editableWindows ? <>
           <label className="field"><span>窗口开始（秒）</span><input type="text" inputMode="decimal" aria-label={`第 ${index + 1} 段窗口开始秒`}
             value={secondsInputs[`w${index}s`] ?? frameSeconds(group.windowStart)} onChange={(event) => changeSeconds(`w${index}s`, event.target.value)}

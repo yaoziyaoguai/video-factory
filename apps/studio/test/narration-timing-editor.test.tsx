@@ -714,3 +714,38 @@ it("keeps keyboard focus in the dirty reload confirmation and Escape returns wit
   expect(screen.getByLabelText("第 2 段落点")).toHaveValue("end");
   expect(dispatch).not.toHaveBeenCalled();
 });
+
+it("shows extra blank time separately and opens an explicit visual shortening review without submitting", async () => {
+  const preview = previewFixture();
+  preview.plan = preview.editorContext.defaultPlan;
+  preview.timingSummary = { durationSeconds: 20, sourceAudioSeconds: 17, explicitSilenceSeconds: 0,
+    unfilledSeconds: 3, unfilledRanges: [{ startSeconds: 17, endSeconds: 20 }],
+    groups: [{ groupId: "narration-1", sourceScenePositions: [1, 2], audioSeconds: 17,
+      startSeconds: 0, endSeconds: 17, requiredFrames: 510, availableFrames: 600 }] };
+  vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(preview);
+  const submit = vi.spyOn(studioApi, "requestNarrationRevision");
+  const openReview = vi.fn();
+  render(<NarrationTimingEditor runId="run-timing" revision={7} voiceNode={voiceNode} artifacts={artifacts}
+    interventionId="intervention-active" disabled={false} onAdjustVisualTiming={openReview} />);
+  await screen.findByText(/另有 3.00 秒画面未被旁白覆盖/);
+  expect(screen.getByText(/17.00–20.00 秒/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "缩短第 1 段画面" }));
+  expect(openReview).toHaveBeenCalledWith({ groupId: "narration-1", sourceScenePositions: [1, 2], plannedSeconds: 20, requiredSeconds: 17 });
+  expect(submit).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByLabelText("第 1 段留空秒"), { target: { value: "0.5" } });
+  expect(screen.getByRole("button", { name: "缩短第 1 段画面" })).toBeDisabled();
+});
+
+it("does not offer implicit picture shortening for explicit segmented or final-review plans", async () => {
+  const preview = previewFixture();
+  preview.editorContext.mode = "final_review";
+  preview.timingSummary = { durationSeconds: 20, sourceAudioSeconds: 12, explicitSilenceSeconds: 2,
+    unfilledSeconds: 6, unfilledRanges: [{ startSeconds: 14, endSeconds: 20 }],
+    groups: [{ groupId: "ng-2", sourceScenePositions: [1, 2], audioSeconds: 10,
+      startSeconds: 5, endSeconds: 15, requiredFrames: 300, availableFrames: 450 }] };
+  vi.spyOn(studioApi, "narrationPlan").mockResolvedValue(preview);
+  render(<NarrationTimingEditor runId="run-timing" revision={7} voiceNode={voiceNode} artifacts={artifacts}
+    interventionId="intervention-active" disabled={false} onAdjustVisualTiming={vi.fn()} />);
+  await screen.findByText(/另有 6.00 秒画面未被旁白覆盖/);
+  expect(screen.queryByRole("button", { name: /缩短第/ })).not.toBeInTheDocument();
+});

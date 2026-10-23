@@ -675,6 +675,7 @@ function voiceProfileLabel(value: string): string {
 }
 
 function fieldLabel(key: string, viewId?: string): string {
+  if (key === "duration_target" && viewId === "render") return "本版方案时长";
   if (key === "description" && viewId === "publish-package") return "发布正文";
   if (key === "summary") return ({ "reference-grammar": "参考视频分析摘要", "asset-semantic-rank": "候选排序摘要", "visual-review": "视觉审片摘要" } as Record<string, string>)[viewId ?? ""] ?? "摘要";
   if (key === "provider") return viewId === "voice" ? "配音服务" : viewId === "assets" ? "素材来源" : "服务或来源";

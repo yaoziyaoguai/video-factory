@@ -35,6 +35,38 @@ function planningRun(): StudioRunDetail {
 }
 
 describe("in-production asset source access", () => {
+  it("saves an explicit all-generated mode and keeps other paid-role permission", async () => {
+    const run = planningRun();
+    run.nodes[1]!.executionConfiguration!.economics = { recipeId: "free-stock", allowMeteredProviders: true };
+    const configure = vi.fn(async () => undefined);
+    render(<RunWorkbench run={run} providers={providers} decisionPending={false} onDecision={vi.fn()} onConfigureNode={configure} />);
+    await userEvent.click(screen.getByRole("button", { name: "设置与费用" }));
+    const editor = within(screen.getByRole("region", { name: "本片画面来源" }));
+    await userEvent.click(editor.getByRole("button", { name: "调整" }));
+    expect(editor.getByRole("checkbox", { name: /通义万相视频/ })).toBeDisabled();
+    await userEvent.selectOptions(editor.getByRole("combobox", { name: "本片画面来源模式" }), "generated-only");
+    expect(editor.getByRole("checkbox", { name: /Pexels 视频/ })).not.toBeChecked();
+    expect(editor.getByRole("checkbox", { name: /Pexels 视频/ })).toBeDisabled();
+    await userEvent.click(editor.getByRole("checkbox", { name: /通义万相视频/ }));
+    await userEvent.click(editor.getByRole("button", { name: "保存选择" }));
+    expect(configure).toHaveBeenCalledWith("assets", expect.objectContaining({
+      assetProviderIds: ["wan-video-v1"], economics: { recipeId: "generated-only", allowMeteredProviders: true },
+    }));
+  });
+
+  it("keeps native AV outside the three TTS visual source modes", async () => {
+    const run = planningRun();
+    run.nodes[1]!.executionConfiguration = { providerId: "ai-shot-router-v1", audioMode: "native_av",
+      modelSelections: { "wan-video-v1": "wan3.0-video" }, assetProviderIds: ["wan-video-v1"],
+      economics: { recipeId: "custom", allowMeteredProviders: true } };
+    render(<RunWorkbench run={run} providers={providers} decisionPending={false} onDecision={vi.fn()} onConfigureNode={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "设置与费用" }));
+    const editor = within(screen.getByRole("region", { name: "本片画面来源" }));
+    await userEvent.click(editor.getByRole("button", { name: "调整" }));
+    expect(editor.queryByRole("combobox", { name: "本片画面来源模式" })).not.toBeInTheDocument();
+    expect(editor.getByText(/原生音画逐镜生成有声视频/)).toBeVisible();
+  });
+
   it("keeps the existing voice permission when saving only free visual sources", async () => {
     const run = planningRun();
     run.nodes[1]!.executionConfiguration!.economics = { allowMeteredProviders: true };

@@ -13,6 +13,7 @@ import {
   Sparkles,
   UploadCloud,
 } from "lucide-react";
+import { canonicalVisualRecipeId } from "../../shared/visual-source-compatibility.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import type {
@@ -54,7 +55,8 @@ const LOCAL_CAPABILITY_IMPACT_LABELS: Record<string, string> = {
 };
 const RECIPE_OPTIONS: Array<{ id: StudioProductionRecipeId; label: string }> = [
   { id: "free-stock", label: "仅免费画面" },
-  { id: "keyshot-ai", label: "允许 AI 生成画面，按实际镜头报价" },
+  { id: "keyshot-ai", label: "混合画面（已有素材与生成画面）" },
+  { id: "generated-only", label: "全部生成画面（可复用生成母片）" },
 ];
 const RESOURCE_SECTION_IDS = [
   "creation-defaults",
@@ -404,7 +406,7 @@ export function ResourcesPage() {
             <ProductionEnvironmentStatus capabilities={capabilities} services={services} />
           </div>
           <div className="configuration-fields">
-            <label className="field"><span>画面来源策略</span><select aria-label="默认画面来源策略" value={defaultRecipeId} onChange={(event) => setDefaultRecipeId(event.target.value as StudioProductionRecipeId)}>{RECIPE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select><small>启用付费画面后，仍须查看本片报价并单独确认费用；保存默认值不是购买授权。</small></label>
+            <label className="field"><span>画面来源策略</span><select aria-label="默认画面来源策略" value={defaultRecipeId} onChange={(event) => setDefaultRecipeId(event.target.value as StudioProductionRecipeId)}>{RECIPE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select><small>免费仅指画面，不包含文字、配音和审片。生成费用仍按本片报价确认；保存默认值不会购买。</small></label>
             <label className="field"><span>目标平台</span><select aria-label="默认目标平台" value={productionDefaults.platform} onChange={(event) => setProductionDefaults((current) => ({ ...current, platform: event.target.value as StudioProductionDefaults["platform"] }))}><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option><option value="bilibili">哔哩哔哩</option></select></label>
             <label className="field"><span>默认参考时长（秒）</span><input type="number" step="any" min="0.01" aria-label="默认视频时长" value={productionDefaults.durationSeconds || ""} onChange={(event) => setProductionDefaults((current) => ({ ...current, durationSeconds: Number(event.target.value) }))} /><small>只是创作参考；实际时长在脚本阶段由你确认。</small></label>
           </div>
@@ -1069,7 +1071,7 @@ function sameVoiceDirection(left: StudioVoiceDirection, right: StudioVoiceDirect
 }
 
 function canonicalRecipeId(recipeId: StudioProductionRecipeId): StudioProductionRecipeId {
-  return recipeId === "keyshot-ai" || recipeId === "cinematic-ai" ? "keyshot-ai" : "free-stock";
+  return canonicalVisualRecipeId(recipeId);
 }
 
 function sameProductionDefaults(left: StudioProductionDefaults | undefined, right: StudioProductionDefaults): boolean {

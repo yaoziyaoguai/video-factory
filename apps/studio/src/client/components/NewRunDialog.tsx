@@ -20,8 +20,9 @@ import { NATIVE_AUDIO_PROVIDER, NATIVE_VIDEO_MODELS } from "@video-factory/produ
 import { defaultStudioDurationRange, DEFAULT_STUDIO_VOICE_DIRECTION, type StudioCreatorSettings, type StudioProductionInput, type StudioProvider, type StudioReferenceVideo, type StudioReworkDraft, type StudioReworkFinding } from "../../shared/api.js";
 import { parseDurationBounds, validateContentLedDurationIntent, type DurationBounds, type DurationIntent } from "@video-factory/production-pipeline/executable-timeline";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
-import { visualSourceCompatibilityIssue } from "../../shared/visual-source-compatibility.js";
+import { canonicalVisualRecipeId, visualSourceAllowedForRecipe, visualSourceCompatibilityIssue } from "../../shared/visual-source-compatibility.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
+import { BackgroundMusicControl } from "./BackgroundMusicControl.js";
 import { VoiceStudio } from "./VoiceStudio.js";
 import { studioApi } from "../api.js";
 import { creatorFacingTechnicalText, providerLabel, providerModelLabel } from "../presentation.js";
@@ -94,14 +95,20 @@ const RECIPES: Array<{
   {
     id: "free-stock",
     label: "仅免费画面",
-    description: "导演只使用已启用的免费图库或你主动允许的本地编辑画面",
+    description: "不调用生图、生视频；使用免费图库和已启用的本地编辑画面。文字、配音和审片费用另计",
     allowMeteredProviders: false,
     recommended: true,
   },
   {
     id: "keyshot-ai",
-    label: "允许 AI 生成画面，按实际镜头报价",
-    description: "导演可建议生成关键图片或视频；付费生成按本次报价范围授权，范围内列明的有限修复共用额度，超出范围需重新确认",
+    label: "混合画面 · 允许 AI 生成画面，按实际镜头报价",
+    description: "按内容混用已有画面和生成图片、视频，不限定比例；付费生成按实际镜头报价后确认",
+    allowMeteredProviders: true,
+  },
+  {
+    id: "generated-only",
+    label: "全部生成画面",
+    description: "每镜使用生成图片或视频，可复用已生成母片；按实际新增生成报价后确认",
     allowMeteredProviders: true,
   },
 ];
@@ -113,7 +120,7 @@ function isProductionPlatform(value: string | undefined): value is typeof PRODUC
 }
 
 function canonicalRecipeId(recipeId: RecipeId | undefined): RecipeId {
-  return recipeId === "keyshot-ai" || recipeId === "cinematic-ai" ? "keyshot-ai" : "free-stock";
+  return canonicalVisualRecipeId(recipeId);
 }
 
 export function NewRunDialog({ open, providers, initialDataReady = true, initialValues, inheritedNodeIds, requiredAffectedScenePositions, scopePrompt, inheritedReferenceVideo, creatorSettings, settingsError, onRetrySettings, onClose, onSubmit, submissionRecovery }: NewRunDialogProps) {
@@ -161,6 +168,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   const scrollToAssetSourcesOnOpen = useRef(false);
   const initialScrollResetPending = useRef(false);
   const [referenceUploading, setReferenceUploading] = useState(false);
+  const [backgroundMusic, setBackgroundMusic] = useState<StudioProductionInput["backgroundMusic"]>();
+  const [musicUploading, setMusicUploading] = useState(false);
   const [referenceError, setReferenceError] = useState<string>();
   const [briefSummaryValues, setBriefSummaryValues] = useState(() => ({
     title: initialValues?.title ?? "",
@@ -225,8 +234,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     bindings, recipeId, platform, presentationMode, audioMode, nativeVideoProviderId, durationSeconds, durationReferenceDraft, durationRange, durationRangeDrafts,
     assetProviderIds: [...assetProviderIds].sort(), modelSelections, voiceDirection, budgetIntention,
     semanticRankEnabled, acceptUnreviewedFirstCut, briefSummaryValues, visualBriefValues, inheritEditorial,
-    referenceVideo: referenceVideo ? { ...referenceVideo } : null, rework,
-  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, durationRange, durationRangeDrafts, durationSeconds, durationReferenceDraft, modelSelections, platform, presentationMode, audioMode, nativeVideoProviderId, recipeId, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection, inheritEditorial]);
+    backgroundMusic, referenceVideo: referenceVideo ? { ...referenceVideo } : null, rework,
+  }), [acceptUnreviewedFirstCut, assetProviderIds, bindings, briefSummaryValues, budgetIntention, durationRange, durationRangeDrafts, durationSeconds, durationReferenceDraft, modelSelections, platform, presentationMode, audioMode, nativeVideoProviderId, recipeId, backgroundMusic, referenceVideo, rework, semanticRankEnabled, visualBriefValues, voiceDirection, inheritEditorial]);
   useLayoutEffect(() => {
     if (!open || !initialDataReady || !initializedForOpen.current) return;
     if (baselineSnapshotRef.current === null) baselineSnapshotRef.current = formSnapshot;
@@ -356,8 +365,8 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
           ? "现在不能作为画面来源"
           : !provider.available
             ? creatorFacingTechnicalText(provider.requirement) ?? "当前未配置或暂不可用"
-            : provider.billing === "metered" && !selectedRecipe.allowMeteredProviders
-              ? "当前选择的是仅免费画面策略"
+            : !visualSourceAllowedForRecipe(selectedRecipe.id, provider)
+              ? "此来源不符合当前画面来源策略"
               : undefined;
       if (reason) {
         issues.push({
@@ -399,7 +408,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
       });
     }
     return issues;
-  }, [assetProviderIds, nativeAudio, nativeVideoProviderId, effectiveBindings, initialValues?.rework, modelSelections, providers, selectedRecipe.allowMeteredProviders, voiceSelectionAvailable]);
+  }, [assetProviderIds, nativeAudio, nativeVideoProviderId, effectiveBindings, initialValues?.rework, modelSelections, providers, selectedRecipe.id, voiceSelectionAvailable]);
   const missingCapabilities = CAPABILITIES.filter((item) => {
     return !item.optional
       && !(nativeAudio && item.key === "voice")
@@ -481,6 +490,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
     // 只有用户或入口明确指定的模型才属于本次覆盖。全局默认值由服务端按优先级解析。
     setModelSelections({ ...(initialValues?.models ?? {}) });
     setVoiceDirection(resolvedVoiceDirection);
+    setBackgroundMusic(initialValues?.backgroundMusic);
     setBudgetIntention(String(initialValues?.budgetIntentionCny ?? ""));
     setAcceptUnreviewedFirstCut(initialValues?.visualReviewPolicy === "allow_unreviewed_first_cut");
     setSemanticRankEnabled(initialValues?.workflowFeatures?.assetSemanticRank ?? Boolean(initialBindings.director));
@@ -646,7 +656,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   }
 
   function toggleAssetProvider(provider: StudioProvider) {
-    if (!provider.available || (provider.billing === "metered" && !selectedRecipe.allowMeteredProviders)) return;
+    if (!provider.available || (!visualSourceAllowedForRecipe(selectedRecipe.id, provider))) return;
     if (provider.id === "local-editorial-v1" && imageStory) return;
     setAssetProviderIds((current) => {
       if (current.includes(provider.id)) return current.filter((id) => id !== provider.id);
@@ -688,7 +698,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
   }
 
   async function submit(form: HTMLFormElement) {
-    if (submitting) return;
+    if (submitting || musicUploading || referenceUploading) return;
     const data = new FormData(form);
     setSubmitting(true);
     setError(undefined);
@@ -780,11 +790,14 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
         ...(initialValues?.seriesContext ? { seriesContext: initialValues.seriesContext } : {}),
         ...(initialValues?.creationContext ? { creationContext: initialValues.creationContext } : {}),
         ...(rework ? { rework } : {}),
+        ...(!nativeAudio && backgroundMusic ? { backgroundMusic } : {}),
         ...(nativeAudio ? { audioMode: "native_av", nativeVideoProviderId } : { voiceDirection,
           ...(initialValues?.audioMode !== undefined ? { audioMode: "tts" as const } : {}) }),
         providers: providersForRun,
         models: modelsForRun,
         workflowFeatures: {
+          ...(!nativeAudio && presentationMode !== "character_drama" && providersForRun.voice === "minimax-tts-v1"
+            ? { narrationMode: "continuous-v1" as const } : {}),
           assetSemanticRank: effectiveSemanticRank,
           referenceGrammar: Boolean(referenceVideo),
           executablePlan: true,
@@ -1176,6 +1189,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
               </fieldset>
             </section>
 
+            {!nativeAudio ? <BackgroundMusicControl value={backgroundMusic} onChange={setBackgroundMusic} onBusyChange={setMusicUploading} /> : null}
             {!nativeAudio ? <VoiceStudio
               sectionLabel="05"
               value={voiceDirection}
@@ -1380,7 +1394,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                   {assetSources.map((provider) => {
                     const checked = assetProviderIds.includes(provider.id);
                     const disabled = !provider.available
-                      || (provider.billing === "metered" && !selectedRecipe.allowMeteredProviders)
+                      || (!visualSourceAllowedForRecipe(selectedRecipe.id, provider))
                       || (provider.id === "local-editorial-v1" && imageStory);
                     return <label key={provider.id} className={checked ? "asset-source-option is-selected" : "asset-source-option"}>
                       <input
@@ -1488,7 +1502,7 @@ export function NewRunDialog({ open, providers, initialDataReady = true, initial
                 return;
               }
               void submit(form);
-            }} disabled={submitting || referenceUploading || productionBlocked || (Boolean(scopePrompt) && !scopeDecisionConfirmed) || (visualReviewUnavailable && !acceptUnreviewedFirstCut)} data-tour="production-start">
+            }} disabled={submitting || referenceUploading || musicUploading || productionBlocked || (Boolean(scopePrompt) && !scopeDecisionConfirmed) || (visualReviewUnavailable && !acceptUnreviewedFirstCut)} data-tour="production-start">
               <Check aria-hidden="true" size={17} />
               {submitting ? "正在创建..." : "开始前期构思"}
             </button>
@@ -1553,7 +1567,7 @@ function productionStepLabel(capability: string): string {
 
 function defaultVoiceDirection(providers: StudioProvider[]): NonNullable<StudioProductionInput["voiceDirection"]> {
   const profileId = providers.some((provider) => provider.id === "minimax-tts-v1" && provider.available)
-    ? "minimax:Chinese (Mandarin)_News_Anchor"
+    ? "minimax:female-chengshu"
     : DEFAULT_STUDIO_VOICE_DIRECTION.profileId;
   return { ...DEFAULT_STUDIO_VOICE_DIRECTION, profileId };
 }
@@ -1632,16 +1646,11 @@ function recipeAvailable(recipe: (typeof RECIPES)[number], providers: StudioProv
   const foundationReady = providers.some((provider) => provider.id === "api-visual-director-v1" && provider.available)
     && providers.some((provider) => provider.id === "ai-shot-router-v1" && provider.available);
   if (!foundationReady) return false;
-  if (!recipe.allowMeteredProviders) {
-    return providers.some((provider) => isAutomaticAssetSource(provider) && provider.available && provider.billing !== "metered");
-  }
-  return providers.some((provider) => {
-    return provider.available
-      && isAssetSource(provider)
-      && provider.billing === "metered"
-      && provider.estimatedCnyPerClip !== undefined
-      && provider.estimatedCnyPerClip > 0;
-  });
+  return providers.some(provider => isAutomaticAssetSource(provider) && provider.available
+    && visualSourceAllowedForRecipe(recipe.id, provider)
+    && (recipe.id !== "keyshot-ai" || provider.billing === "metered"
+      || provider.deliveryTypes?.some(type => type === "generated_image" || type === "generated_video"))
+    && (provider.billing !== "metered" || (provider.estimatedCnyPerClip ?? 0) > 0));
 }
 
 function sourceIdsForRecipe(
@@ -1650,7 +1659,8 @@ function sourceIdsForRecipe(
   preferredId?: string,
 ): string[] {
   const free = providers
-    .filter((provider) => isAutomaticAssetSource(provider) && provider.available && provider.billing !== "metered")
+    .filter((provider) => isAutomaticAssetSource(provider) && provider.available && provider.billing !== "metered"
+      && visualSourceAllowedForRecipe(recipe.id, provider))
     .map((provider) => provider.id);
   if (!recipe.allowMeteredProviders) return free;
   const preferredMetered = preferredId
@@ -1663,7 +1673,8 @@ function sourceIdsForRecipe(
       })
     : undefined;
   const metered = providers
-    .filter((provider) => isAssetSource(provider) && provider.available && provider.billing === "metered" && provider.estimatedCnyPerClip)
+    .filter((provider) => isAssetSource(provider) && provider.available && provider.billing === "metered" && provider.estimatedCnyPerClip
+      && visualSourceAllowedForRecipe(recipe.id, provider))
     .sort((left, right) => (
       Number(right.id === preferredMetered?.id) - Number(left.id === preferredMetered?.id)
       || (left.estimatedCnyPerClip ?? Infinity) - (right.estimatedCnyPerClip ?? Infinity)

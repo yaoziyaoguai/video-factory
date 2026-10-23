@@ -310,6 +310,10 @@ export const studioApi = {
     `/api/runs/${encodeURIComponent(runId)}/narration-revisions`,
     { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) },
   ),
+  uploadBackgroundMusic: (file: File, licenseNote: string) => requestJson<import("../shared/api.js").StudioMusicUpload>("/api/background-music", {
+    method: "POST", headers: { "content-type": "application/octet-stream", "x-video-factory-filename": encodeURIComponent(file.name),
+      "x-video-factory-license": encodeURIComponent(licenseNote) }, body: file,
+  }),
   uploadReferenceVideo: (file: File) => requestJson<StudioReferenceVideo>("/api/reference-videos", {
     method: "POST",
     headers: {

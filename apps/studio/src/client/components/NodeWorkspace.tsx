@@ -1,6 +1,7 @@
 import { Activity, AlertTriangle, Check, ChevronDown, CircleDollarSign, Clock3, FilePenLine, Pause, Save, Settings2, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { StudioArtifact, StudioNode, StudioNodeExecutionConfigurationInput, StudioNodeInputOverrideInput, StudioNodeOverrideInput, StudioProductionQuote, StudioProvider, StudioRunStatus, StudioSpendAuthorizationInput, StudioSpendRejectionInput } from "../../shared/api.js";
+import { canonicalVisualRecipeId, visualSourceAllowedForRecipe } from "../../shared/visual-source-compatibility.js";
 import { selectableModelsForCapability } from "../../shared/model-compatibility.js";
 import { studioApi } from "../api.js";
 import { useDialogFocus } from "../hooks/useDialogFocus.js";
@@ -8,13 +9,13 @@ import { agentLoopPendingNote, agentLoopPhaseLabel, catalogModelLabel, creatorFa
 import { hasCreatorDocumentContent } from "../creator-document-policy.js";
 import { clearCreativeSessionFields, creativeSessionSlotKey, creativeSessionStorage, readCreativeSessionSlot, writeCreativeSessionFields, type CreativeDraftSessionBase } from "../creative-draft-session.js";
 import { NodeDeliveryPreview } from "./NodeDeliveryPreview.js";
+import { ArtifactMediaPreview } from "./ArtifactMediaPreview.js";
 import { NarrationPlanEditor } from "./NarrationPlanEditor.js";
-import { NarrationTimingEditor } from "./NarrationTimingEditor.js";
+import { NarrationTimingEditor, type NarrationVisualTimingAdjustment } from "./NarrationTimingEditor.js";
 import { NodeDocumentCommands } from "./NodeDocumentCommands.js";
 import { NodeContentReview, nodeContentReview } from "./NodeContentReview.js";
 import { NodeDocumentHistory } from "./NodeDocumentHistory.js";
 import { statusLabel } from "./StatusBadge.js";
-import { unsplashPublicUrl } from "./UnsplashAttribution.js";
 import { hasStockAttribution, StockAttribution } from "./StockAttribution.js";
 import { NodeStructuredEditor } from "./NodeStructuredEditor.js";
 import { PlanningStagesPanel } from "./PlanningStagesPanel.js";
@@ -37,6 +38,9 @@ interface NodeWorkspaceProps {
   characterDrama?: boolean;
   nativeAudio?: boolean;
   onEditCharacters?: () => void;
+  /** 跳到宿主已有的当前成片播放器，不重新渲染或自动播放。 */
+  onPreviewRender?: () => void;
+  onAdjustVisualTiming?: (value: NarrationVisualTimingAdjustment) => void;
   acceptedPlanDigest: string;
   artifacts: StudioArtifact[];
   /** 整个 run 的产物（声音时间编辑需要跨节点的 voice 产物身份）。 */
@@ -73,7 +77,7 @@ interface NodeWorkspaceProps {
   onRejectSpend?: (nodeId: string, input: StudioSpendRejectionInput) => Promise<void>;
 }
 
-export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, onRunUpdated, characterDrama: propsCharacterDrama = false, nativeAudio = false, onEditCharacters, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, workspaceActive, onDocumentReadinessChange, hideExecutionConfiguration = false, hideAgentProgress = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
+export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus, runId, runRevision, onRunUpdated, characterDrama: propsCharacterDrama = false, nativeAudio = false, onEditCharacters, onPreviewRender, onAdjustVisualTiming, acceptedPlanDigest, artifacts, runArtifacts, activeInterventionId, busy, readOnly = false, optionalReviewUncertaintySafe, currentDelivery = false, workspaceActive, onDocumentReadinessChange, hideExecutionConfiguration = false, hideAgentProgress = false, pauseBusy = false, pauseRequested = false, planningStages, onPendingPlanningConfigurationChange, onRequestPause, onOverride, onInputOverride = async () => undefined, onReviseDocument, onAuditDocument, onConfigure = async () => undefined, onAuthorize,
   onAuthorizeProductionScope = async input => { await studioApi.authorizeProductionScope(runId, input); },
   onAmendProductionScope = async (authorizationId, input) => { await studioApi.amendProductionScope(runId, authorizationId, input); },
   onRejectSpend = async () => undefined }: NodeWorkspaceProps) {
@@ -92,7 +96,6 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
   const [editingDocument, setEditingDocument] = useState(false);
   // F05：前序步骤没有挂载正文卡片时，记录被点开的那一条，用于就地说明原因。
   const [unavailableSource, setUnavailableSource] = useState<string | undefined>();
-  const [failedVisualSources, setFailedVisualSources] = useState<Set<string>>(() => new Set());
   const [authorizing, setAuthorizing] = useState(false);
   const [rejectingSpend, setRejectingSpend] = useState(false);
   const [spendRejectionReason, setSpendRejectionReason] = useState<StudioSpendRejectionInput["reason"]>("too_expensive");
@@ -622,6 +625,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
           voiceNode={nodes.find((candidate) => candidate.id === "voice")!}
           artifacts={runArtifacts ?? artifacts}
           interventionId={activeInterventionId}
+          {...(onAdjustVisualTiming ? { onAdjustVisualTiming } : {})}
           disabled={busy || runStatus === "running"} /> : null}
     {/* 当前待决定文档移到决定区时，不让同名互斥分组在旧卡片卸载前关闭新卡片。 */}
     <details
@@ -641,7 +645,7 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         <span className="node-workspace-title"><strong>{node.label}</strong><small>{node.role ?? "制作角色"}</small></span>
         {capability && !showPlanningStages ? <span className="node-workspace-provenance">{capability}</span> : <span />}
         <span className="node-workspace-labels">
-          <span className="node-workspace-status">{node.outcomeUncertain ? "结果待核" : node.outputState?.stale ? "待重新生成" : node.status === "skipped" ? "已跳过" : node.status === "succeeded" ? "已保留" : statusLabel(node.status)}</span>
+          <span className="node-workspace-status">{node.outcomeUncertain ? "结果待核" : node.outputState?.stale ? "待重新生成" : node.status === "skipped" ? "已跳过" : statusLabel(node.status)}</span>
           {node.outputState?.stale ? <span className="node-stale-label"><AlertTriangle aria-hidden="true" size={14} />旧结果</span> : null}
         </span>
         <ChevronDown className="node-workspace-chevron" aria-hidden="true" size={17} />
@@ -651,11 +655,13 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
         {showPlanningStages && capability ? <details className="node-capability-details"><summary>本次使用的创作服务</summary><p>{capability}</p></details> : null}
         {node.agentLoopProgress && !hideAgentProgress ? <div className={`agent-loop-progress is-stacked is-${node.agentLoopProgress.phase}`} role="status">
           {["asset-source-review", "visual-review"].includes(node.id) ? <span>以下是对审片报告的复核，不代表素材或成片质量通过。素材问题以审片正文为准。</span> : null}
-          <strong>{agentLoopPhaseLabel(node.agentLoopProgress, node.status !== "running" && effectiveVersion?.source === "human")}</strong>
+          <strong>{node.status !== "running" && effectiveVersion?.source === "human" ? "修改前的模型复核记录"
+            : node.status === "succeeded" ? "已完成步骤的模型复核记录" : agentLoopPhaseLabel(node.agentLoopProgress)}</strong>
           {node.agentLoopProgress.latestAudit ? contentReview
             ? <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分；完整原文见对应版本的审计记录。</span>
             : <span>上一轮 {node.agentLoopProgress.latestAudit.score} 分：{node.agentLoopProgress.latestAudit.summary}</span>
-            : <span>{agentLoopPendingNote(node.agentLoopProgress)}</span>}
+            : <span>{node.status === "succeeded" && !["failed", "passed"].includes(node.agentLoopProgress.phase)
+              ? "这一步已经完成，未附可展示的报告详情；历史模型记录不改变当前采用结果。" : agentLoopPendingNote(node.agentLoopProgress)}</span>}
           <span>实际模型调用：创作 {node.agentLoopProgress.producerModelCallCount ?? 0} 次，审计 {node.agentLoopProgress.auditModelCallCount ?? 0} 次{(node.agentLoopProgress.structuredRepairModelCallCount ?? 0) > 0 ? `（其中结构修复 ${node.agentLoopProgress.structuredRepairModelCallCount} 次）` : ""}。查询、刷新和等待不计为新调用。</span>
         </div> : null}
         {fallbackReason ? <p className="node-workspace-warning" role="alert"><AlertTriangle aria-hidden="true" size={16} /><span><strong>{fallbackHeading}</strong>：{fallbackReason}</span></p> : null}
@@ -820,26 +826,14 @@ export function NodeWorkspace({ node, nodes = [node], providers = [], runStatus,
 
         <section className="node-output-preview node-creator-delivery">
           <header><div><strong>{node.id === "creative-planning" ? "规划交付目录" : `${node.role ?? "制作角色"}的交付`}</strong><small>{node.id === "creative-planning" ? "逐项查看已保存的阶段稿和正式交付；修改与确认在创作工作台进行" : deliveryEditHint(node.id, effectiveVersion?.source, hasDelivery, node.status, runStatus, pauseRequested, nativeAudio, audioIsCurrent)}</small></div>{canEdit && hasDelivery && !editing && (!editableArtifact || documentPreview !== undefined) ? <button className="button button-ghost" type="button" onClick={beginEditing}><FilePenLine aria-hidden="true" size={15} />编辑交付</button> : null}</header>
+          {node.id === "render" && onPreviewRender ? <button type="button" className="button button-secondary" onClick={onPreviewRender}>查看本版成片</button> : null}
           {["assets", "asset-source-review"].includes(node.id) && visualArtifacts.length ? <div className={visualsAreCurrent ? "node-visual-preview" : "node-visual-preview is-stale"}>
             <header><strong>{visualsAreCurrent ? "实际素材画面" : "上次生成的素材画面"}</strong><small>{visualArtifacts.length} 个可预览素材{visualsAreCurrent ? "" : " · 将重新检查适用性，只重做不再适用的部分"}</small></header>
             <div>
               {visualArtifacts.map((artifact, index) => {
-                const source = artifact.contentType?.startsWith("video/") ? artifact.contentUrl : artifact.providerId === "unsplash-stock-v1" ? unsplashPublicUrl(artifact.previewUrl, "images.unsplash.com") : artifact.contentUrl;
-                const identity = `${artifact.id}:${source}`;
                 const label = artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`;
-                const failed = failedVisualSources.has(identity);
-                const onError = () => setFailedVisualSources(previous => new Set(previous).add(identity));
-                const onReady = () => setFailedVisualSources(previous => {
-                  if (!previous.has(identity)) return previous;
-                  const next = new Set(previous);
-                  next.delete(identity);
-                  return next;
-                });
                 return <figure key={artifact.id}>
-                {artifact.contentType?.startsWith("video/")
-                  ? <video aria-label={`${label} 画面预览`} src={source} controls playsInline preload="metadata" onError={onError} onLoadedData={onReady} />
-                  : <img alt={`${label} 画面预览`} src={source} loading="lazy" onError={onError} onLoad={onReady} hidden={failed} />}
-                {failed ? <p className="media-preview-error" role="status">{label} 预览读取失败，原素材记录仍保留。</p> : null}
+                <ArtifactMediaPreview artifact={artifact} label={label} />
                 <figcaption><span>{artifact.scenePosition ? `镜头 ${artifact.scenePosition}` : `素材 ${index + 1}`}</span><small>{hasStockAttribution(artifact.providerId) ? <StockAttribution provider={artifact.providerId} creator={artifact.creator} creatorUrl={artifact.creatorUrl} licenseNote={artifact.licenseNote} /> : providerLabel(artifact.providerId) ?? "素材来源未记录"}</small></figcaption>
               </figure>; })}
             </div>
@@ -1169,6 +1163,7 @@ export function NodeExecutionConfigurationEditor({ node, providers, runStatus, r
   const [providerId, setProviderId] = useState(configuration.providerId);
   const [modelSelections, setModelSelections] = useState<Record<string, string>>({ ...configuration.modelSelections });
   const [assetProviderIds, setAssetProviderIds] = useState<string[]>([...(configuration.assetProviderIds ?? [])]);
+  const [recipeId, setRecipeId] = useState(configuration.economics?.recipeId ?? "custom");
   const [error, setError] = useState<string>();
   const terminal = runStatus === "succeeded" || runStatus === "failed" || runStatus === "rejected";
   const failedRecovery = runStatus === "failed" && node.status === "failed";
@@ -1209,6 +1204,7 @@ export function NodeExecutionConfigurationEditor({ node, providers, runStatus, r
     setProviderId(configuration.providerId);
     setModelSelections({ ...configuration.modelSelections });
     setAssetProviderIds([...(configuration.assetProviderIds ?? [])]);
+    setRecipeId(configuration.economics?.recipeId ?? "custom");
   }, [configuration, editing]);
 
   function updateAssetSource(assetProviderId: string, enabled: boolean) {
@@ -1243,6 +1239,7 @@ export function NodeExecutionConfigurationEditor({ node, providers, runStatus, r
         ...(node.id === "assets" ? {
           assetProviderIds,
           economics: {
+            ...(configuration.economics?.recipeId || recipeId !== "custom" ? { recipeId } : {}),
             // 此标志也覆盖已选配音服务；画面来源编辑不能撤销其它节点的既有许可。
             allowMeteredProviders: configuration.economics?.allowMeteredProviders === true || meteredSources.length > 0,
           },
@@ -1297,6 +1294,11 @@ export function NodeExecutionConfigurationEditor({ node, providers, runStatus, r
           <div><dt>重新确认</dt><dd>更换画面来源，或切换到时长、任务能力不同的视频模型，会让导演重新规划；同一来源下，只有能力兼容的模型切换才从画面素材继续。保存后旧费用确认会自动失效。</dd></div>
           <div><dt>待新方案确定</dt><dd>哪些镜头可以复用、哪些需要生成及新增费用，以新方案与报价为准；不会把保存设置当作生成授权。</dd></div>
         </dl>
+        {configuration.audioMode !== "native_av" ? <label className="field"><span>画面来源模式</span><select aria-label="本片画面来源模式" value={canonicalVisualRecipeId(recipeId)} onChange={event => {
+          const next = event.target.value as "free-stock" | "keyshot-ai" | "generated-only";
+          setRecipeId(next);
+          setAssetProviderIds(current => current.filter(id => assetSources.some(provider => provider.id === id && visualSourceAllowedForRecipe(next, provider))));
+        }}><option value="free-stock">免费画面</option><option value="keyshot-ai">混合画面</option><option value="generated-only">全部生成画面</option></select><small>免费仅指画面；文字、配音和审片费用另计。全部生成允许复用已生成母片。</small></label> : <p>原生音画逐镜生成有声视频，保持本片选定的视频来源与型号。</p>}
         <div className="node-asset-source-options">
           {inheritedUnavailableAssetSources.map((provider) => <article key={provider.id} className="is-selected">
             <label><input type="checkbox" checked onChange={(event) => updateAssetSource(provider.id, event.target.checked)} /><span><strong>{provider.label}</strong><small>已失效 · 取消选择后保存</small></span></label>
@@ -1305,7 +1307,7 @@ export function NodeExecutionConfigurationEditor({ node, providers, runStatus, r
             const selected = assetProviderIds.includes(provider.id);
             const compatibleModels = selectableModelsForCapability(provider.modelProfiles, provider.capability);
             return <article key={provider.id} className={selected ? "is-selected" : ""}>
-              <label><input type="checkbox" checked={selected} onChange={(event) => updateAssetSource(provider.id, event.target.checked)} /><span><strong>{provider.label}</strong><small>{provider.deliveryTypes?.includes("generated_video") ? "AI 视频 · " : provider.deliveryTypes?.includes("generated_image") ? "AI 图片 · " : ""}{provider.billing === "metered" ? "按镜头计费" : "免费来源"}</small></span></label>
+              <label><input type="checkbox" checked={selected} disabled={!visualSourceAllowedForRecipe(recipeId, provider)} onChange={(event) => updateAssetSource(provider.id, event.target.checked)} /><span><strong>{provider.label}</strong><small>{provider.deliveryTypes?.includes("generated_video") ? "AI 视频 · " : provider.deliveryTypes?.includes("generated_image") ? "AI 图片 · " : ""}{provider.billing === "metered" ? "按镜头计费" : "免费来源"}</small></span></label>
               {selected && compatibleModels.length ? <select aria-label={`${provider.label}模型`} value={modelSelections[provider.id] ?? ""} onChange={(event) => setModelSelections((current) => ({ ...current, [provider.id]: event.target.value }))}>
                 <option value="">使用推荐：{providerModelLabel(provider, provider.defaultModelId)}</option>
                 {compatibleModels.map((model) => <option key={model.id} value={model.id}>{model.label}{model.recommended ? " · 推荐" : ""}</option>)}
@@ -1346,10 +1348,15 @@ function executionConfigurationSummary(node: StudioNode, providers: StudioProvid
   const configuration = node.executionConfiguration!;
   if (node.id === "assets") {
     const sources = (configuration.assetProviderIds ?? []).map((id) => providers.find((provider) => provider.id === id)?.label ?? providerLabel(id) ?? "未识别的画面来源");
-    const budget = configuration.economics?.allowMeteredProviders
+    const budget = configuration.economics?.recipeId === "free-stock"
+      ? " · 免费画面（不调用生图、生视频）"
+      : configuration.economics?.allowMeteredProviders
       ? " · 按实际方案报价 · 执行前逐笔确认"
       : " · 当前不调用付费生成";
-    return `${sources.join("、") || "未选择来源"}${budget}`;
+    const mode = configuration.audioMode === "native_av" ? "原生音画 · "
+      : configuration.economics?.recipeId === "generated-only" ? "全部生成画面 · "
+        : configuration.economics?.recipeId === "keyshot-ai" ? "混合画面 · " : "";
+    return `${mode}${sources.join("、") || "未选择来源"}${budget}`;
   }
   const provider = providers.find((candidate) => candidate.id === configuration.providerId);
   const modelId = configuration.modelSelections[configuration.providerId] ?? provider?.defaultModelId;

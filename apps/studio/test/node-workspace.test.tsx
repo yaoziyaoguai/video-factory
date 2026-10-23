@@ -2592,3 +2592,18 @@ describe("F05 prior-step viewing on review stops", () => {
     expect(screen.getByRole("textbox", { name: "标题" })).toHaveValue("旧暂存标题");
   });
 });
+
+it("labels an adopted generated delivery's pending audit advice as historical without a false current decision", () => {
+  const node: StudioNode = { ...succeededNode, agentLoopProgress: {
+    iteration: 1, maxIterations: 1, completedIterations: 1, phase: "awaiting_user",
+  } };
+  const props = { acceptedPlanDigest: TEST_PLAN_DIGEST, runId: "run-nw", runRevision: 2, artifacts: [], busy: false,
+    onOverride: vi.fn(), onAuthorize: vi.fn() };
+  const { container, rerender } = render(<NodeWorkspace {...props} node={node} runStatus="needs_human" />);
+  expect(container.querySelector(".node-workspace-status")).toHaveTextContent("已完成");
+  expect(screen.getByText("已完成步骤的模型复核记录")).toBeInTheDocument();
+  expect(screen.queryByText(/是否修改或继续由你决定|正在等待你的决定/)).not.toBeInTheDocument();
+  rerender(<NodeWorkspace {...props} node={{ ...node, status: "needs_human" }} runStatus="needs_human" />);
+  expect(screen.getByText(/是否修改或继续由你决定/)).toBeInTheDocument();
+  expect(screen.getByText("正在等待你的决定，没有继续自动修订。")).toBeInTheDocument();
+});

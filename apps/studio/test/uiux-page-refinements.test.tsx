@@ -131,7 +131,7 @@ describe("UI/UX page refinements", () => {
     await user.click(overview);
     expect(overview.closest("details")).not.toHaveAttribute("open");
     expect(screen.getByText("成片合成不可用").closest("details")).toBeNull();
-    expect(screen.getByText(/保存默认值不是购买授权/).closest("label")).toContainElement(screen.getByRole("combobox", { name: "默认画面来源策略" }));
+    expect(screen.getByText(/生成费用仍按本片报价确认；保存默认值不会购买/).closest("label")).toContainElement(screen.getByRole("combobox", { name: "默认画面来源策略" }));
 
     const links = within(screen.getByRole("navigation", { name: "配置分区" })).getAllByRole("link");
     expect(links).toHaveLength(9);
@@ -285,7 +285,7 @@ describe("UI/UX page refinements", () => {
     expect(within(status).getByText("本机中文配音已就绪")).toBeInTheDocument();
     expect(within(status).getByText("云端配音未配置或不可用")).toBeInTheDocument();
     expect(within(status).queryByText("成片合成已就绪")).not.toBeInTheDocument();
-    expect(screen.getByText(/保存默认值不是购买授权/)).toBeInTheDocument();
+    expect(screen.getByText(/生成费用仍按本片报价确认；保存默认值不会购买/)).toBeInTheDocument();
   });
 
   it.each([1, 12, 40])("keeps search and license status visible for %i assets while low-frequency filters are collapsed", async (count) => {

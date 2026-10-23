@@ -1,8 +1,10 @@
 import { ArrowRight, Check, Clock3, Download, FileText, Settings2 } from "lucide-react";
 import { useEffect, useRef, type ReactNode } from "react";
-import type { StudioRunDetail } from "../../shared/api.js";
+import type { StudioArtifact, StudioRunDetail } from "../../shared/api.js";
 import { RUN_NODE_LABELS } from "../presentation.js";
 import { statusLabel } from "./StatusBadge.js";
+import { ArtifactMediaPreview } from "./ArtifactMediaPreview.js";
+import { hasStockAttribution, StockAttribution } from "./StockAttribution.js";
 
 export type WorkbenchSection = "work" | "review" | "process" | "files" | "records" | "settings";
 
@@ -56,15 +58,30 @@ export function WorkbenchFiles({ run, onOpenNode }: { run: StudioRunDetail; onOp
   if (run.videoArtifactId) currentIds.add(run.videoArtifactId);
   if (run.publishPackageArtifactId) currentIds.add(run.publishPackageArtifactId);
   const files = run.artifacts.filter(artifact => currentIds.has(artifact.id) && artifact.contentUrl);
+  const media = files.filter(file => !TECHNICAL_ARTIFACTS.has(file.kind) && /^(?:image|video|audio)\//.test(file.contentType ?? ""));
+  const documents = files.filter(file => !media.includes(file) && !TECHNICAL_ARTIFACTS.has(file.kind));
+  const records = files.filter(file => TECHNICAL_ARTIFACTS.has(file.kind));
   const publishing = run.nodes.find(node => node.id === "publish-package");
+  const fileLinks = (entries: StudioArtifact[]) => <div className="workbench-file-list">{entries.map(file => <a key={file.id} href={file.contentUrl} download>
+    <FileText size={20} aria-hidden="true" /><span><strong>{artifactLabel(file.kind)}{file.scenePosition ? ` · 镜头 ${file.scenePosition}` : ""}</strong>
+      <small>{file.producerNodeId ? nodeLabel(run, file.producerNodeId) : "制作产物"} · {formatTime(file.createdAt)}</small></span><Download size={18} aria-hidden="true" />
+  </a>)}</div>;
   return <section className="workbench-files" aria-label="文案与文件">
     <header className="workbench-section-heading"><div><p className="eyebrow">本版交付</p><h2>文案与文件</h2><p>查看当前采用的内容，下载需要的成果。</p></div>
       {publishing ? <button className="button button-secondary" type="button" onClick={() => onOpenNode(publishing.id)}>查看与编辑发布文案<ArrowRight size={16} aria-hidden="true" /></button> : null}
     </header>
-    <div className="workbench-file-list">{files.map(file => <a key={file.id} href={file.contentUrl} download>
-      <FileText size={20} aria-hidden="true" /><span><strong>{artifactLabel(file.kind)}{file.scenePosition ? ` · 镜头 ${file.scenePosition}` : ""}</strong>
-        <small>{file.producerNodeId ? nodeLabel(run, file.producerNodeId) : "制作产物"} · {formatTime(file.createdAt)}</small></span><Download size={18} aria-hidden="true" />
-    </a>)}</div>
+    {media.length ? <div className="workbench-media-files">{media.map(file => {
+      const label = `${artifactLabel(file.kind)}${file.scenePosition ? ` · 镜头 ${file.scenePosition}` : ""}`;
+      return <figure key={file.id}>
+        <div className="workbench-file-preview"><ArtifactMediaPreview artifact={file} label={label} /></div>
+        <figcaption><div><strong>{label}</strong><small>{formatTime(file.createdAt)}</small>
+          {hasStockAttribution(file.providerId) ? <small><StockAttribution provider={file.providerId} creator={file.creator} creatorUrl={file.creatorUrl} licenseNote={file.licenseNote} /></small> : null}</div>
+          <a className="button button-ghost" href={file.contentUrl} download aria-label={`下载${label}`}><Download size={16} aria-hidden="true" />下载</a>
+        </figcaption>
+      </figure>;
+    })}</div> : null}
+    {documents.length ? fileLinks(documents) : null}
+    {records.length ? <details className="workbench-technical-files"><summary>制作记录文件（{records.length}）</summary><p>方案、检查与合成记录，可按需下载核对。</p>{fileLinks(records)}</details> : null}
     {!files.length ? <p className="workbench-empty">当前还没有可下载的文件。成果准备好后会出现在这里。</p> : null}
   </section>;
 }
@@ -86,9 +103,15 @@ function nodeLabel(run: StudioRunDetail, id: string, fallback?: string) {
   return id === "voice" && run.audioMode === "native_av" ? "原声与时间轴" : RUN_NODE_LABELS[id] ?? fallback ?? "制作产物";
 }
 
+const TECHNICAL_ARTIFACTS = new Set(["asset_plan", "asset_candidates", "asset_ranking", "executable_plan", "render_manifest", "voiceover_plan", "narration_plan", "voiceover_raw_manifest", "review_diagnostic", "review_frame"]);
+
 function artifactLabel(kind: string) {
   return ({ render: "成片", video: "视频", publish_package: "发布包", voiceover: "配音", narration_vtt: "同步字幕",
-    narration_srt: "字幕", script: "脚本", storyboard: "导演分镜", director_plan: "导演分镜", media_asset: "画面素材", asset: "画面素材", asset_plan: "素材计划", voiceover_plan: "配音时间方案", render_manifest: "合成记录", review_report: "检查报告", creative_treatment: "前期构思", visual_review: "审片报告" } as Record<string, string>)[kind] ?? "制作文件";
+    narration_srt: "字幕", script: "脚本", storyboard: "导演分镜", director_plan: "导演分镜", media_asset: "画面素材", asset: "画面素材", asset_plan: "素材计划", voiceover_plan: "配音时间方案", render_manifest: "合成记录", review_report: "检查报告", creative_treatment: "前期构思", visual_review: "审片报告",
+    asset_candidates: "候选素材清单", asset_ranking: "选材排序", executable_plan: "执行方案", narration_plan: "旁白时间计划",
+    voiceover_raw: "原始配音", voiceover_raw_manifest: "原始配音记录", review_diagnostic: "检查诊断", review_frame: "审片画面",
+    technical_review: "技术检查报告", audio_review: "声音审片报告", reference_grammar: "参考视频分析", native_audio_plan: "原声时间计划",
+  } as Record<string, string>)[kind] ?? "其他制作文件";
 }
 
 function formatTime(value: string) {

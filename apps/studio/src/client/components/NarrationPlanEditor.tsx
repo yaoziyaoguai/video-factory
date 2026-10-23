@@ -574,7 +574,7 @@ export function NarrationPlanEditor({ runId, runRevision, disabled, characterDra
   return <section className="node-preview-section narration-plan-editor" aria-label={characterMode ? "角色配音方案" : "连贯旁白方案"}>
     <h3>{characterMode ? "角色配音方案" : "让旁白连成故事"}</h3>
     {characterMode && onEditCharacters ? <button type="button" className="button button-ghost" disabled={disabled || Boolean(busyToken)} onClick={onEditCharacters}>修改角色、台词或音色</button> : null}
-    <p>{characterMode ? "逐句核对角色与音色，调整说话时间。先保存计划，再由你确认制作；不会把对白合并成单人旁白。" : "相邻镜头的旁白连起来说，换镜时不断句；无旁白镜头保留留白。不改原稿、不改变画面总时长。文字里的“停两秒”不会自动变成精确停顿。"}</p>
+    <p>{characterMode ? "逐句核对角色与音色，调整说话时间。先保存计划，再由你确认制作；不会把对白合并成单人旁白。" : "新制作默认把相邻镜头的旁白连起来说，换镜时不断句；无旁白镜头保留留白。不改原稿、不改变画面总时长。文字里的“停两秒”不会自动变成精确停顿。"}</p>
     <button type="button" className="button button-secondary" disabled={Boolean(busyToken) || disabled} onClick={requestLoad}>
       {characterMode ? preview ? "重新查看角色配音方案" : "查看角色配音方案" : preview ? "重新查看旁白方案" : "查看连贯旁白方案"}
     </button>
