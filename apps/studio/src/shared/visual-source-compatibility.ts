@@ -1,4 +1,4 @@
-import type { StudioProvider, StudioTemplate } from "./api.js";
+import type { StudioProvider, StudioTemplate, StudioProductionRecipeId } from "./api.js";
 
 type TemplateWithShotSlots = Pick<StudioTemplate, "shotSlots">;
 type VisualSource = Pick<StudioProvider, "deliveryTypes">;
@@ -30,4 +30,17 @@ function capabilitiesFor(deliveryTypes: NonNullable<StudioProvider["deliveryType
   if (deliveryTypes.includes("generated_video")) capabilities.add("asset.generate.video");
   if (deliveryTypes.some((type) => type === "generated_image" || type === "generated_video")) capabilities.add("asset.generate");
   return [...capabilities];
+}
+
+export function canonicalVisualRecipeId(recipeId: StudioProductionRecipeId | undefined): StudioProductionRecipeId {
+  if (recipeId === "generated-only") return recipeId;
+  return recipeId === "keyshot-ai" || recipeId === "cinematic-ai" || recipeId === "custom" ? "keyshot-ai" : "free-stock";
+}
+
+/** 画面来源由交付能力决定，不能把免费额度或已付订阅误当成非生成素材。 */
+export function visualSourceAllowedForRecipe(recipeId: StudioProductionRecipeId | undefined, provider: Pick<StudioProvider, "deliveryTypes" | "billing">): boolean {
+  const generated = provider.deliveryTypes?.some(type => type === "generated_image" || type === "generated_video") === true;
+  if (recipeId === "free-stock") return !generated && provider.billing !== "metered";
+  if (recipeId === "generated-only") return generated;
+  return true;
 }

@@ -5740,7 +5740,7 @@ describe("ProductionPipeline", () => {
         shots: input.scenes.map((scene) => ({
           scenePosition: scene.position,
           narrativeRole: "解释",
-          authenticityPolicy: "evidence",
+          authenticityPolicy: "illustrative",
           preferredProviderId: "fixture-generated-image-v1",
           deliveryType: "generated_image",
           alternativeProviderIds: [],
@@ -5750,7 +5750,7 @@ describe("ProductionPipeline", () => {
           ],
           query: scene.visualPrompt,
           generationPrompt: `竖屏插画：${scene.visualPrompt}`,
-          rationale: "错误地把生成插画当作事实证据。",
+          rationale: "使用生成插画说明场景，不声称是真实事件影像。",
           continuityNote: "保持相同色调。",
           confidence: 0.8,
           estimatedCostCny: 0,

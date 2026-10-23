@@ -1,3 +1,4 @@
+import { parseBackgroundMusic, type ProductionBackgroundMusic } from "./background-music.js";
 import { createHash } from "node:crypto";
 import { REQUIRED_CODEX_TASK_CONTRACT_DIGESTS } from "./codex-chat.js";
 import { parseDurationBounds, type DurationIntent, type DurationRange } from "./executable-timeline.js";
@@ -17,7 +18,7 @@ export interface ProductionProviderBindings {
   visualReview?: string;
 }
 
-export type ProductionRecipeId = "economy-daily" | "free-stock" | "keyshot-ai" | "cinematic-ai" | "custom";
+export type ProductionRecipeId = "economy-daily" | "free-stock" | "keyshot-ai" | "generated-only" | "cinematic-ai" | "custom";
 
 export interface ProductionEconomics {
   recipeId: ProductionRecipeId;
@@ -234,6 +235,8 @@ export interface ProductionReworkContext {
 }
 
 export interface ProductionWorkflowFeatures {
+  /** 新建普通解说的连续配音选择；缺失不迁移旧制作。 */
+  narrationMode?: "continuous-v1";
   assetSemanticRank: boolean;
   referenceGrammar: boolean;
   executablePlan?: boolean;
@@ -354,6 +357,7 @@ export type ProductionBrief = DurationIntent & {
   budgetIntentionCny?: number;
   spendFeedback?: ProductionSpendFeedback[];
   voiceDirection?: ProductionVoiceDirection;
+  backgroundMusic?: ProductionBackgroundMusic;
   editorial?: ProductionEditorialDirection;
   visualProof?: string;
   visualIntent?: string;
@@ -376,7 +380,7 @@ const PRODUCTION_BRIEF_INPUT_KEYS = new Set([
   "platform", "reviewMode", "runPurpose", "visualReviewPolicy", "providers", "models", "modelSelectionSources", "frozenModelSelections", "workflowFeatures",
   "referenceVideo", "director", "economics", "spendFeedback", "voiceDirection", "editorial", "visualProof",
   "visualIntent", "seriesContext", "creationContext", "rework", "taskContractDigests",
-  "articleSources", "budgetIntentionCny", "presentationMode", "audioMode", "nativeVideoProviderId",
+  "articleSources", "budgetIntentionCny", "presentationMode", "audioMode", "nativeVideoProviderId", "backgroundMusic",
 ]);
 
 export function requireTtsVoiceDirection(brief: ProductionBrief): ProductionVoiceDirection {
@@ -407,6 +411,8 @@ export function parseBrief(value: unknown): ProductionBrief {
     throw new Error("audioMode must be tts or native_av.");
   }
   const native = value.audioMode === "native_av";
+  const backgroundMusic = parseBackgroundMusic(value.backgroundMusic);
+  if (native && backgroundMusic) throw new Error("原生音画保留源片声音，不添加独立背景音乐。");
   if (!native && value.nativeVideoProviderId !== undefined) throw new Error("nativeVideoProviderId requires native_av.");
 
   const providers = requireRecord(value.providers, "providers");
@@ -519,6 +525,7 @@ export function parseBrief(value: unknown): ProductionBrief {
       // 边界闸门可以独立于共同创作规划存在（旧规划链也能逐节点放行），所以它必须自己
       // 把 workflowFeatures 带进落盘结果——漏掉这一步，标记会在解析时静默消失，重读
       // 出来的 run 版本退回 1.0.0 且不再有闸门。
+      || workflowFeatures.narrationMode
       || workflowFeatures.boundaryGates
       ? { workflowFeatures }
       : {}),
@@ -528,6 +535,7 @@ export function parseBrief(value: unknown): ProductionBrief {
     ...(budgetIntentionCny !== undefined ? { budgetIntentionCny } : {}),
     ...(spendFeedback.length ? { spendFeedback } : {}),
     ...(voiceDirection ? { voiceDirection } : {}),
+    ...(backgroundMusic ? { backgroundMusic } : {}),
     ...(editorial ? { editorial } : {}),
     ...(visualProof ? { visualProof } : {}),
     ...(visualIntent ? { visualIntent } : {}),
@@ -1203,6 +1211,9 @@ function parseWorkflowFeatures(value: unknown): ProductionWorkflowFeatures {
   if (input.creativeReview === "user-confirmed-v1" && input.creativePlanning !== "joint-v1") {
     throw new Error("workflowFeatures.creativeReview requires creativePlanning 'joint-v1'.");
   }
+  if (input.narrationMode !== undefined && input.narrationMode !== "continuous-v1") {
+    throw new Error("workflowFeatures.narrationMode must be continuous-v1 when provided.");
+  }
   if (input.boundaryGates !== undefined && input.boundaryGates !== "user-confirmed-v1") {
     throw new Error("workflowFeatures.boundaryGates must be the literal 'user-confirmed-v1' when provided.");
   }
@@ -1212,6 +1223,7 @@ function parseWorkflowFeatures(value: unknown): ProductionWorkflowFeatures {
     ...(input.executablePlan === true ? { executablePlan: true } : {}),
     ...(input.creativePlanning === "joint-v1" ? { creativePlanning: "joint-v1" } : {}),
     ...(input.creativeReview === "user-confirmed-v1" ? { creativeReview: "user-confirmed-v1" } : {}),
+    ...(input.narrationMode === "continuous-v1" ? { narrationMode: "continuous-v1" } : {}),
     ...(input.boundaryGates === "user-confirmed-v1" ? { boundaryGates: "user-confirmed-v1" } : {}),
   };
 }
@@ -1453,7 +1465,7 @@ function parseEconomics(value: unknown): ProductionEconomics {
   }
   const input = requireRecord(value, "economics");
   const recipeId = requireString(input.recipeId, "economics.recipeId") as ProductionRecipeId;
-  if (!new Set<ProductionRecipeId>(["economy-daily", "free-stock", "keyshot-ai", "cinematic-ai", "custom"]).has(recipeId)) {
+  if (!new Set<ProductionRecipeId>(["economy-daily", "free-stock", "keyshot-ai", "generated-only", "cinematic-ai", "custom"]).has(recipeId)) {
     throw new Error("economics.recipeId is invalid.");
   }
   if (typeof input.allowMeteredProviders !== "boolean") {

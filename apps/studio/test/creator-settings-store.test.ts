@@ -6,13 +6,20 @@ import { describe, it } from "node:test";
 import { JsonCreatorSettingsStore } from "../src/server/creator-settings-store.js";
 
 describe("JsonCreatorSettingsStore", () => {
+  it("persists the all-generated default without folding it into mixed mode", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-generated-default-"));
+    const file = path.join(root, "settings.json");
+    await new JsonCreatorSettingsStore(file).update({ defaultRecipeId: "generated-only" });
+    assert.equal((await new JsonCreatorSettingsStore(file).get()).defaultRecipeId, "generated-only");
+  });
+
   it("returns economic defaults and persists creator choices", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "video-factory-settings-"));
     const file = path.join(root, "creator-settings.json");
     const store = new JsonCreatorSettingsStore(file);
 
     const defaults = await store.get();
-    assert.equal(defaults.defaultRecipeId, "economy-daily");
+    assert.equal(defaults.defaultRecipeId, "free-stock");
     assert.deepEqual(defaults.productionDefaults, {
       reviewMode: "manual",
       platform: "douyin",

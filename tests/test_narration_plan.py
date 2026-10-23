@@ -24,6 +24,22 @@ class NarrationPlanTest(unittest.TestCase):
         self.assertEqual(plan["silences"], [])
         self.assertEqual([scene["duration"] for scene in scenes], [6, 6, 8])
 
+    def test_confirmed_202_seconds_keeps_source_binding_without_a_second_duration_ceiling(self):
+        from video_factory.narration_plan import derive_base_groups_v2
+        scenes = [{"position": 1, "duration": 202.5, "narration": "按完整内容讲述。"}]
+        plan = build_narration_plan(scenes, script_sha256="a" * 64, visual_sha256="b" * 64)
+        self.assertEqual(plan["visualPlan"]["totalFrames"], 6075)
+        self.assertEqual(derive_base_groups_v2(scenes)[0]["frame_range"]["endFrame"], 6075)
+        self.assertEqual(validate_narration_plan(plan, scenes, script_sha256="a" * 64, visual_sha256="b" * 64), plan)
+        with self.assertRaises(ValueError):
+            validate_narration_plan(plan, scenes, script_sha256="a" * 64, visual_sha256="c" * 64)
+        for duration in [(1 << 53) - 1, 1e308, 1e-9, -1, float("inf")]:
+            with self.subTest(duration=duration):
+                with self.assertRaises(ValueError):
+                    build_narration_plan([{**scenes[0], "duration": duration}], script_sha256="a" * 64, visual_sha256="b" * 64)
+                with self.assertRaises(ValueError):
+                    derive_base_groups_v2([{**scenes[0], "duration": duration}])
+
     def test_explicit_silence_splits_groups_and_never_becomes_paid_narration(self):
         scenes = [
             {"position": 1, "duration": 10, "narration": "把今天放慢一点。"},

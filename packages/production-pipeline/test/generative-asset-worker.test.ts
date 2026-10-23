@@ -60,6 +60,27 @@ const summaryBrief: ProductionBrief = {
 };
 
 describe("GenerativeAssetWorkerClient", () => {
+  it("rejects forbidden visual routes before generation or stock download", async (t) => {
+    const root = await mkdtemp(path.join(tmpdir(), "vf-visual-mode-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const scriptPath = path.join(root, "script.json"), directorPath = path.join(root, "director.json");
+    await writeFile(scriptPath, JSON.stringify({ scenes: [{ position: 1, duration: 5, visual_strategy: "stock", visual_prompt: "普通街角" }] }));
+    let calls = 0;
+    const subject = new GenerativeAssetWorkerClient({ adapters: [], fallback: { run: async () => { calls++; throw new Error("must not call provider"); } } });
+    for (const [recipeId, providerId, deliveryType] of [
+      ["free-stock", "seedance-video-v1", "generated_video"],
+      ["free-stock", "seedream-image-v1", "generated_image"],
+      ["generated-only", "pexels-stock-v1", "stock_video"],
+      ["generated-only", "local-editorial-v1", "editorial_card"],
+    ] as const) {
+      await writeFile(directorPath, JSON.stringify({ shots: [{ scenePosition: 1, preferredProviderId: providerId, deliveryType, query: "街角", generationPrompt: "街角" }] }));
+      const base = routedWorkerRequest(scriptPath, directorPath, path.join(root, recipeId + providerId), 1, 0);
+      const request = { ...base, parameters: { ...base.parameters, recipeId } };
+      await assert.rejects(() => subject.run(request), recipeId === "free-stock" ? /免费画面/ : /全部生成/);
+    }
+    assert.equal(calls, 0);
+  });
+
   for (const mode of ["direct", "director", "character", "native"] as const) it(`V01-2 preserves the clean ${mode} prompt and paid request identity`, async (t) => {
     const root = await mkdtemp(path.join(tmpdir(), "vf-prompt-golden-"));
     t.after(() => rm(root, { recursive: true, force: true }));

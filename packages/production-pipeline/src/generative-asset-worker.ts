@@ -416,6 +416,12 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       return this.runDirectorRoutes(request, parameters, execution);
     }
     if (parameters.audioMode === "native_av") throw new Error("原生音画必须通过当前采用的逐镜画面方案执行。");
+    if (parameters.recipeId === "free-stock" && KNOWN_METERED_ASSET_PROVIDERS.has(providerId)) {
+      throw new Error("免费画面模式不能使用生图或生视频。");
+    }
+    if (parameters.recipeId === "generated-only" && !KNOWN_METERED_ASSET_PROVIDERS.has(providerId)) {
+      throw new Error("全部生成模式不能使用图库或本地编辑画面。");
+    }
     const modelSelections = optionalStringRecord(parameters.modelSelections, "modelSelections");
     const modelId = modelSelections[providerId];
     const binding = this.resolveBinding(providerId, modelId);
@@ -743,6 +749,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     modelSelections: Record<string, string>;
     audioMode?: unknown;
     nativeVideoProviderId?: unknown;
+    recipeId?: unknown;
   }): Promise<{
     script: Record<string, unknown>;
     scenes: ScriptScene[];
@@ -757,6 +764,17 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
     const directorPlan = requiredRecord(JSON.parse(await readFile(options.directorPlanPath, "utf8")), "Director plan");
     assertCharacterDirectorBindings(script, directorPlan);
     const routedShots = parseRoutedShots(directorPlan.shots);
+    for (const route of routedShots) {
+      const generated = route.deliveryType === "generated_image" || route.deliveryType === "generated_video";
+      if (options.recipeId === "free-stock"
+        && (generated || route.providerIds.some(id => KNOWN_METERED_ASSET_PROVIDERS.has(id)))) {
+        throw new Error(`免费画面模式不能使用生图或生视频：第 ${route.scenePosition} 镜。`);
+      }
+      if (options.recipeId === "generated-only"
+        && (!generated || route.providerIds.some(id => !KNOWN_METERED_ASSET_PROVIDERS.has(id)))) {
+        throw new Error(`全部生成模式要求每镜使用生成图片或视频（可复用生成母片）：第 ${route.scenePosition} 镜。`);
+      }
+    }
     if (native) {
       const provider = requiredString(options.nativeVideoProviderId, "nativeVideoProviderId");
       assertNativeVideoModel(provider, options.modelSelections[provider]);
@@ -1009,6 +1027,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
         scriptPath,
         directorPlanPath,
         modelSelections,
+        recipeId: request.parameters.recipeId,
         audioMode: request.parameters.audioMode,
         nativeVideoProviderId: request.parameters.nativeVideoProviderId,
       });
@@ -1070,6 +1089,7 @@ export class GenerativeAssetWorkerClient implements WorkerClient {
       scriptPath,
       directorPlanPath,
       modelSelections,
+      recipeId: parameters.recipeId,
       audioMode: parameters.audioMode,
       nativeVideoProviderId: parameters.nativeVideoProviderId,
     });

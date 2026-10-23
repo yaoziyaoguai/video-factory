@@ -58,15 +58,15 @@ def _scene_timings(scenes: list[dict[str, Any]]) -> list[tuple[dict[str, Any], i
                 or scene["position"] != position or not isinstance(scene.get("narration"), str)):
             raise ValueError("Narration sources must match the ordered visual scenes.")
         duration = scene.get("duration")
-        if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
+        if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0 or not math.isfinite(duration * FPS):
             raise ValueError("Narration visual duration must be finite and positive.")
         frames = round(duration * FPS)
         if frames <= 0 or abs(frames - duration * FPS) > 1e-6:
             raise ValueError("Narration visual cuts must use the confirmed 30 fps timeline.")
         timings.append((scene, cursor, cursor + frames))
         cursor += frames
-    if cursor > 180 * FPS:
-        raise ValueError("Narration plan exceeds the supported short-video duration.")
+    if cursor > (1 << 53) - 1:
+        raise ValueError("Narration plan requires a safe integer frame timeline.")
     return timings
 
 
@@ -196,14 +196,14 @@ def _derive_v2_facts(scenes: list[dict[str, Any]]) -> dict[str, Any]:
     for position, scene in enumerate(scenes, start=1):
         duration = scene.get("duration")
         if (not isinstance(duration, (int, float)) or isinstance(duration, bool)
-                or not math.isfinite(duration) or duration <= 0
+                or not math.isfinite(duration) or duration <= 0 or not math.isfinite(duration * FPS)
                 or abs(round(duration * FPS) - duration * FPS) > 1e-6):
             raise ValueError("v2 基础有词区必须与已确认的 30fps 画面时间线一致。")
         start_frame = cursor
         end_frame = start_frame + round(duration * FPS)
         cursor = end_frame
-        if cursor > 180 * FPS:
-            raise ValueError("v2 计划超出短视频时长范围。")
+        if cursor <= start_frame or cursor > (1 << 53) - 1:
+            raise ValueError("v2 计划须使用有效的整数帧时间线。")
         narration = scene.get("narration")
         if not isinstance(narration, str):
             raise ValueError("v2 原稿旁白必须是字符串。")

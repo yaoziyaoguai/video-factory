@@ -16,12 +16,12 @@ import {
 
 export const CODEX_BRIDGE_PROTOCOL_VERSION = "video-factory/codex-bridge-v2" as const;
 export const REQUIRED_CODEX_TASK_CONTRACT_DIGESTS = {
-  "audio-review": "6c6b56182f84f80b419978baf78625b673b715c38d741731aba54963b874d555",
-  "topic-ideas": "48b510f8e3eb4c2e63b7cb07b75837222417ced1a315b02c19de470831239259",
+  "audio-review": "0b02a5e0fee5243129430e760ba8ad86fd5bc72b99b81a8655f944b06bd74458",
+  "topic-ideas": "153ab764435ff76223006ebda5b575baed214fd7126a40f6ff38be66a50e9181",
   "series-roadmap": "5d474475aa1aad1310cce6498c942bdaaab1e5b410f79fd03dd0d344fa0e4f48",
-  "creative-treatment": "88665a073ec55e1a05844d4d26644a564dbc78ebcdb409d295a6748aabd29964",
-  "director-plan": "ac55805cdb3bcb654c654e58b0f6bc62e99a6c5dcfc588ed9587c7859a4099bf",
-  "script-draft": "6838d6b3954abe416b8fa4046455336262f7ec181a8ae0fe101aa08b0e76aef4",
+  "creative-treatment": "4e957909334d5d5dde65c7e2ad37fc8af3fa1979367873f753cd49aaae9a9e71",
+  "director-plan": "1b026db25e10e348d275ff7546a914f9b463176791910159ad41652b613addef",
+  "script-draft": "f58fff796ebba747332f430bfbe8790167977130b6e713164dd831bfe6aa401f",
   "publish-copy": "4a61554d6eff3acaaed522a35e2ba995f4ae5d3d9aeb5b5f3c62638f08ff4164",
   "asset-rank": "ff682b3d0b698e5824f4e0a2d704a022db7547f0be168bb4d74715bd071e9cca",
   "reference-grammar": "97bc69a9ba5956cff572611773a4cd3310b67ed4f86411d9b6eb654f62e6af52",

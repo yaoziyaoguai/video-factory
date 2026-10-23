@@ -122,7 +122,7 @@ export type StudioNarrationConfirmV2Result = {
   run: StudioRunDetail;
 };
 
-export type StudioProductionRecipeId = "economy-daily" | "free-stock" | "keyshot-ai" | "cinematic-ai" | "custom";
+export type StudioProductionRecipeId = "economy-daily" | "free-stock" | "keyshot-ai" | "generated-only" | "cinematic-ai" | "custom";
 
 export interface StudioProductionDefaults {
   reviewMode: "manual" | "automatic";
@@ -1167,10 +1167,12 @@ export interface StudioSpendAssessment {
 }
 
 export interface StudioNodeExecutionConfiguration {
+  audioMode?: "tts" | "native_av";
   providerId: string;
   modelSelections: Record<string, string>;
   assetProviderIds?: string[];
   economics?: {
+    recipeId?: StudioProductionRecipeId;
     allowMeteredProviders: boolean;
   };
 }
@@ -1382,6 +1384,7 @@ export interface StudioNodeExecutionConfigurationInput {
   /** 仅 nodeId=creative-planning 可携带；声明本次模型/执行配置调整针对的创作规划阶段。 */
   planningStageId?: StudioPlanningEditableStage;
   economics?: {
+    recipeId?: StudioProductionRecipeId;
     allowMeteredProviders: boolean;
   };
   confirmTerminalEdit?: boolean;
@@ -2288,6 +2291,7 @@ export type StudioProductionInput = DurationIntent & {
   };
   rework?: StudioReworkContext;
   voiceDirection?: StudioVoiceDirection;
+  backgroundMusic?: StudioBackgroundMusic;
   providers: {
     script: string;
     director?: string;
@@ -2299,6 +2303,7 @@ export type StudioProductionInput = DurationIntent & {
   };
   models?: Record<string, string>;
   workflowFeatures?: {
+    narrationMode?: "continuous-v1";
     assetSemanticRank: boolean;
     referenceGrammar: boolean;
     executablePlan?: boolean;
@@ -2607,7 +2612,7 @@ export function parseStudioCreatorSettingsPatch(value: unknown): StudioCreatorSe
     };
   }
   if (input.defaultRecipeId !== undefined) {
-    if (!new Set(["economy-daily", "free-stock", "keyshot-ai", "cinematic-ai", "custom"]).has(String(input.defaultRecipeId))) {
+    if (!new Set(["economy-daily", "free-stock", "keyshot-ai", "generated-only", "cinematic-ai", "custom"]).has(String(input.defaultRecipeId))) {
       throw new StudioInputError("默认制作配方无效。");
     }
     patch.defaultRecipeId = input.defaultRecipeId as StudioProductionRecipeId;
@@ -3420,4 +3425,11 @@ function nonNegativeInteger(value: unknown, label: string): number {
     throw new StudioInputError(`${label}必须是非负整数。`);
   }
   return value;
+}
+
+export interface StudioMusicUpload {
+  uploadId: string; label: string; licenseNote: string; durationSeconds: number;
+}
+export interface StudioBackgroundMusic extends StudioMusicUpload {
+  volume: number; fadeInSeconds: number; fadeOutSeconds: number; ducking: boolean;
 }

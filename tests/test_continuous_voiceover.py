@@ -545,6 +545,10 @@ class ContinuousVoiceoverTest(unittest.TestCase):
                 third = run("changed-layout", "c", "d")
                 self.assertEqual(len(calls), 3, "改变画面时间不能使合成缓存失效")
                 self.assertEqual(second["rawAudio"], third["rawAudio"])
+                scenes[2]["duration"] = 1
+                fourth = run("shorter-layout", "c", "e")
+                self.assertEqual(len(calls), 3, "明确缩短画面仍复用完整原声，不重新购买")
+                self.assertEqual(third["rawAudio"], fourth["rawAudio"])
             self.assertTrue(all(call["subtitle_enable"] and call["subtitle_type"] == "sentence" for call in calls))
             ledger = json.loads(Path(second["ledgerPath"]).read_text())
             self.assertEqual(ledger["version"], "video-factory/voice-operation-v3")
@@ -593,6 +597,30 @@ class ContinuousVoiceoverTest(unittest.TestCase):
             self.assertEqual([group["unfilledWindowSamples"] for group in result["groups"]],
                              [8 * SAMPLE_RATE, 3 * SAMPLE_RATE])
             self.assertTrue(any(samples[-1000:]))
+
+    def test_reviewed_shorter_windows_remove_extra_gaps_without_rebuying_or_cutting_audio(self):
+        original = [{"position": 1, "duration": 10, "narration": "停一下。"},
+                    {"position": 2, "duration": 4, "narration": "……"},
+                    {"position": 3, "duration": 6, "narration": "再出发。"}]
+        reviewed = [{**scene, "duration": duration} for scene, duration in zip(original, [3, 4, 3])]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first, second = root / "first.wav", root / "second.wav"
+            tone(first, 2)
+            tone(second, 3)
+            hashes = [hashlib.sha256(source.read_bytes()).hexdigest() for source in (first, second)]
+            plan = build_narration_plan(reviewed, script_sha256="a" * 64, visual_sha256="c" * 64)
+            plan["groups"][0]["placement"]["offsetFrames"] = 30
+            result = assemble_narration_track(plan, {plan["groups"][0]["id"]: first,
+                                                     plan["groups"][1]["id"]: second}, root / "reviewed")
+            self.assertEqual(result["duration"], 10)
+            with wave.open(result["pcm_path"], "rb") as audio:
+                samples = array("h", audio.readframes(audio.getnframes()))
+            self.assertFalse(any(samples[:SAMPLE_RATE]))  # 用户的一秒落点保留。
+            self.assertFalse(any(samples[3 * SAMPLE_RATE:7 * SAMPLE_RATE]))  # 明确留白仍为四秒。
+            self.assertTrue(any(abs(sample) > 1000 for sample in samples[-1000:]))  # 没把空档搬到片尾。
+            self.assertEqual(hashes, [hashlib.sha256(source.read_bytes()).hexdigest() for source in (first, second)])
+            self.assertEqual([group["sourceAudioSamples"] for group in result["groups"]], [2 * SAMPLE_RATE, 3 * SAMPLE_RATE])
 
     def test_long_group_keeps_paid_raw_audio_and_reports_a_group_conflict_without_truncation(self):
         scenes = [{"position": 1, "duration": 1, "narration": "长声音不能被截断。"}]

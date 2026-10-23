@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import http from "node:http";
@@ -16,7 +17,7 @@ import type {
   ProductionSceneRevisionDraft,
   ProductionSpendRejectionDraft,
 } from "@video-factory/production-pipeline";
-import { CodexBridgeClient, effectiveProductionBrief, HumanDecisionConflictError, PaidOperationManualReconciliationError, ProductionPipeline, productionWorkflowVersion, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, StaleRunRevisionError, type CodexPreparedOperation } from "@video-factory/production-pipeline";
+import { CodexBridgeClient, effectiveProductionBrief, HumanDecisionConflictError, PaidOperationManualReconciliationError, parseBrief, ProductionPipeline, productionWorkflowVersion, REQUIRED_CODEX_TASK_CONTRACT_DIGESTS, StaleRunRevisionError, type CodexPreparedOperation } from "@video-factory/production-pipeline";
 import {
   StudioConflictError,
   StudioService as ProductionStudioService,
@@ -3795,6 +3796,74 @@ describe("StudioService", () => {
       }),
       /需要连接 Pexels 图库服务/,
     );
+  });
+
+  it("carries only server-verified background music through StudioService into a real pipeline", async (t) => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-studio-music-pipeline-"));
+    t.after(() => rm(workspaceRoot, { recursive: true, force: true }));
+    let externalCalls = 0;
+    const forbiddenExternalCall = async (): Promise<never> => {
+      externalCalls += 1;
+      throw new Error("The brief boundary must stop before any model or worker call");
+    };
+    const pipeline = new ProductionPipeline({
+      workspaceRoot,
+      worker: { run: forbiddenExternalCall },
+      screenwriterAgent: { id: "codex-screenwriter-v1", draft: forbiddenExternalCall },
+      directorAgent: { id: "api-visual-director-v1", plan: forbiddenExternalCall },
+      treatmentAgents: [{ providerId: "codex-screenwriter-v1", agent: { id: "test-treatment", treat: forbiddenExternalCall } }],
+      assetProviders: [{ id: "local-editorial-v1", label: "本地卡片", billing: "free", modes: [], deliveryTypes: ["editorial_card"] }],
+    });
+    const dispatch = pipeline.dispatch.bind(pipeline);
+    const dispatched: DispatchedProductionRun[] = [];
+    t.mock.method(pipeline, "dispatch", async (...args: Parameters<ProductionPipeline["dispatch"]>) => {
+      const result = await dispatch(...args);
+      dispatched.push(result);
+      return result;
+    });
+    const service = new StudioService({ workspaceRoot, pipeline, commandAvailable: allCommandsAvailable, environment: {} });
+    const fixture = path.join(workspaceRoot, "music.wav");
+    execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=2", fixture]);
+    const bytes = await readFile(fixture);
+    const uploaded = await service.uploadBackgroundMusic({ label: "两秒合成音乐", licenseNote: "本地合成测试夹具", bytes });
+    const mix = { volume: 0.25, fadeInSeconds: 1, fadeOutSeconds: 1.5, ducking: true };
+    const inputMusic = {
+      ...mix, uploadId: uploaded.uploadId,
+      path: "/untrusted/client/music.wav", sha256: "0".repeat(64),
+      label: "伪造名称", licenseNote: "伪造授权", durationSeconds: 99,
+    };
+    const started = await service.startRun({ ...brief, backgroundMusic: inputMusic });
+    assert.equal(dispatched.length, 1);
+    const completed = await dispatched[0]!.completion;
+    assert.equal(completed.status, "needs_human");
+    assert.equal(completed.nodeRuns.find(node => node.nodeId === "brief")?.status, "needs_human");
+    const persisted = await pipeline.show(started.runId);
+    const trustedMusic = {
+      ...mix, uploadId: uploaded.uploadId, label: uploaded.label, licenseNote: uploaded.licenseNote,
+      durationSeconds: 2, sha256: createHash("sha256").update(bytes).digest("hex"),
+      path: await realpath(path.join(workspaceRoot, "music", uploaded.uploadId, "source")),
+    };
+    assert.deepEqual(persisted.initialInput.backgroundMusic, trustedMusic);
+    assert.deepEqual((persisted.nodeRuns.find(node => node.nodeId === "brief")?.output as ProductionBrief).backgroundMusic, trustedMusic);
+    assert.deepEqual(await readFile(trustedMusic.path), bytes);
+
+    const nativeBrief = {
+      ...brief, audioMode: "native_av", nativeVideoProviderId: "wan-video-v1",
+      providers: { ...brief.providers, voice: "python-native-audio-v1" },
+      director: { assetProviderIds: ["wan-video-v1"] }, models: { "wan-video-v1": "wan3.0-video" },
+      economics: { recipeId: "custom", allowMeteredProviders: true },
+    };
+    // 先证明原生简报本身合法，再核验音乐冲突在分派前被拒绝。
+    assert.equal(parseBrief(nativeBrief).audioMode, "native_av");
+    assert.throws(() => parseBrief({ ...nativeBrief, backgroundMusic: trustedMusic }), /原生音画.*背景音乐/);
+    await assert.rejects(() => service.startRun({ ...nativeBrief, backgroundMusic: inputMusic }), /制作参数不符合要求/);
+    assert.equal(dispatched.length, 1);
+
+    const withoutMusic = await service.startRun(brief);
+    assert.equal(dispatched.length, 2);
+    assert.equal((await dispatched[1]!.completion).status, "needs_human");
+    assert.equal("backgroundMusic" in (await pipeline.show(withoutMusic.runId)).initialInput, false);
+    assert.equal(externalCalls, 0);
   });
 
   it("does not trust article source snapshots supplied by the run client", async () => {

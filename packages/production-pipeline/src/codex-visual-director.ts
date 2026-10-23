@@ -578,6 +578,7 @@ function visualDirectorAuditContext(
       })),
       productionCapabilities: brief.productionCapabilities,
       economics: input.economics,
+      visualSourcePolicy: visualSourcePolicy(input.economics.recipeId),
       spendApprovalBoundary: {
         enabledAssetProvidersAreAuthorizedForPlanning: true,
         selectingMeteredProviderCreatesQuoteOnly: true,
@@ -672,4 +673,10 @@ function validationFor(input: VisualDirectorAgentInput): VisualDirectorPlanValid
     requiredAspectRatio: "9:16",
     economics: input.economics,
   };
+}
+
+function visualSourcePolicy(recipeId: VisualDirectorAgentInput["economics"]["recipeId"]): string {
+  if (recipeId === "free-stock") return "只使用非生成免费画面，不调用生图、生视频；配音或文字模型的费用许可不会改变这条画面规则。";
+  if (recipeId === "generated-only") return "每个镜头必须使用生成图片或视频，可复用已生成母片；不得用生成画面冒充真实事件证据。";
+  return "可以按内容需要混用已有素材与生成画面，不要求任何固定比例；费用按实际新增生成报价。";
 }

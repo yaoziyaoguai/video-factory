@@ -1,3 +1,4 @@
+import { visualSourceAllowedForRecipe } from "../shared/visual-source-compatibility.js";
 import { loadStockProgress, stockProgressLabel } from "./stock-progress.js";
 import { createHash, randomUUID } from "node:crypto";
 import { holdMaintenanceWork } from "@video-factory/production-pipeline/maintenance";
@@ -582,6 +583,10 @@ export class ProductionStudio {
       director: structuredClone(reworkDirector),
       economics: structuredClone(brief.economics),
       ...(brief.voiceDirection ? { voiceDirection: structuredClone(brief.voiceDirection) } : {}),
+      ...(brief.backgroundMusic ? { backgroundMusic: { uploadId: brief.backgroundMusic.uploadId,
+        label: brief.backgroundMusic.label, licenseNote: brief.backgroundMusic.licenseNote, durationSeconds: brief.backgroundMusic.durationSeconds,
+        volume: brief.backgroundMusic.volume, fadeInSeconds: brief.backgroundMusic.fadeInSeconds,
+        fadeOutSeconds: brief.backgroundMusic.fadeOutSeconds, ducking: brief.backgroundMusic.ducking } } : {}),
       ...(brief.editorial ? { editorial: structuredClone(brief.editorial) } : {}),
       ...(brief.visualProof ? { visualProof: brief.visualProof } : {}),
       ...(brief.visualIntent ? { visualIntent: brief.visualIntent } : {}),
@@ -1618,7 +1623,8 @@ export class ProductionStudio {
     if (!existingCommand && (input.interventionId !== intervention!.id || input.expectedRunRevision !== current.revision)) {
       throw new StudioConflictError("你查看的成片或审片意见已经更新，请重新查看后再确认。");
     }
-    if (!existingCommand && !intervention!.options?.includes(input.action)) {
+    const requestedVoiceTimingChange = input.action === "request_changes" && intervention?.nodeId === "voice" && input.voiceTiming !== undefined;
+    if (!existingCommand && !intervention!.options?.includes(input.action) && !requestedVoiceTimingChange) {
       throw new StudioConflictError("当前确认点不支持这个操作，请刷新后重试。");
     }
     if (!existingCommand && input.action === "request_changes") {
@@ -3079,6 +3085,7 @@ export class ProductionStudio {
       && (
         input.assetProviderIds !== undefined
           && !sameProviderIdSet(currentBrief.director?.assetProviderIds, updatedBrief.director?.assetProviderIds)
+        || currentBrief.economics.recipeId !== updatedBrief.economics.recipeId
         || videoModelContractChanged(currentBrief, updatedBrief, providers)
       )
       ? replanNodeId
@@ -3725,6 +3732,9 @@ export class ProductionStudio {
 
   private async assertProvidersAvailable(brief: ProductionBrief): Promise<StudioProvider[]> {
     const providers = await this.options.listProviders();
+    if (brief.audioMode === "native_av" && brief.economics.recipeId === "free-stock") {
+      throw new StudioInputError("原生音画逐镜生成有声视频，不能使用免费画面模式；切换声音方式请创建关联返工。");
+    }
     const deepseekReviewReady = providers.some((provider) => provider.id === "deepseek-visual-review-v1"
       && provider.capability === "quality.review.visual"
       && provider.available
@@ -3811,6 +3821,10 @@ export class ProductionStudio {
       if (!selected.available) {
         throw new StudioInputError(`“${selected.label}”当前不可用：${selected.requirement ?? "缺少运行条件"}。`);
       }
+      if (capability === "asset.prepare" && selected.id !== "ai-shot-router-v1"
+        && brief.audioMode !== "native_av" && !visualSourceAllowedForRecipe(brief.economics.recipeId, selected)) {
+        throw new StudioInputError(`“${selected.label}”不符合当前画面来源模式。`);
+      }
       if (selected.billing !== "metered") continue;
       if (!brief.economics.allowMeteredProviders) {
         throw new StudioInputError(`当前配方未允许使用付费能力“${selected.label}”。`);
@@ -3827,6 +3841,9 @@ export class ProductionStudio {
         if (!selected.available) throw new StudioInputError(`导演素材池中的“${selected.label}”当前不可用。`);
         if (selected.kind === "test" || selected.id === "ai-shot-router-v1") {
           throw new StudioInputError(`“${selected.label}”不能作为导演的镜头素材来源。`);
+        }
+        if (brief.audioMode !== "native_av" && !visualSourceAllowedForRecipe(brief.economics.recipeId, selected)) {
+          throw new StudioInputError(`“${selected.label}”不符合当前画面来源模式；请调整来源或模式。`);
         }
         if (selected.billing === "metered") {
           if (!brief.economics.allowMeteredProviders) {
@@ -5032,7 +5049,7 @@ function nodeExecutionConfiguration(
       providerId,
       modelSelections,
       ...(nodeId === "assets" && brief.director ? { assetProviderIds: [...brief.director.assetProviderIds] } : {}),
-      ...(nodeId === "assets" ? { economics: { ...brief.economics } } : {}),
+      ...(nodeId === "assets" ? { economics: { ...brief.economics }, audioMode: brief.audioMode ?? "tts" } : {}),
     },
   };
 }
@@ -5747,7 +5764,7 @@ function applyNodeExecutionConfiguration(
   }
 
   const economics = input.economics
-    ? { recipeId: "custom" as const, ...input.economics }
+    ? { ...brief.economics, ...input.economics }
     : brief.economics;
   return parseBrief({
     ...brief,

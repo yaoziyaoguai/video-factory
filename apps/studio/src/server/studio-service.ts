@@ -94,6 +94,7 @@ import type { LocalCapabilityService } from "./local-capabilities.js";
 import { OpportunityStudio } from "./opportunity-studio.js";
 import { JsonOpportunityStore, type StudioOpportunityRepository } from "./opportunity-store.js";
 import { ProductionStartDispatchedError, ProductionStudio, type StudioPipelinePort } from "./production-studio.js";
+import { BackgroundMusicStore } from "./background-music-store.js";
 import { ReferenceVideoStore } from "./reference-video-store.js";
 import { ResourceGovernanceStudio } from "./resource-governance-studio.js";
 import { JsonRunArchiveStore, type RunArchiveRepository } from "./run-archive-store.js";
@@ -172,6 +173,7 @@ export class StudioService {
   private readonly templates: TemplateStudio;
   private readonly costs: CostStudio;
   private readonly referenceVideos: ReferenceVideoStore;
+  private readonly backgroundMusic: BackgroundMusicStore;
   private readonly resourceGovernance: ResourceGovernanceStudio;
   private readonly cases: CaseStudioPort;
 
@@ -296,6 +298,7 @@ export class StudioService {
       ...(options.publishers ? { publishers: options.publishers } : {}),
       now,
     });
+    this.backgroundMusic = new BackgroundMusicStore(path.join(options.workspaceRoot, "music"));
     this.referenceVideos = new ReferenceVideoStore(path.join(options.workspaceRoot, "uploads", "reference-videos"), now);
   }
 
@@ -523,6 +526,15 @@ export class StudioService {
   }
   clearCaseSelection(): Promise<void> { return this.cases.clearSelection(); }
   runCostDetail(runId: string): Promise<StudioCostRunDetail | undefined> { return this.costs.runDetail(runId); }
+  async uploadBackgroundMusic(input: { label: string; licenseNote: string; bytes: Buffer }) {
+    try { return await this.backgroundMusic.upload(input); }
+    catch (error) { throw new StudioInputError(error instanceof Error && /^[背请音]/.test(error.message) ? error.message : "音乐文件无法读取，请使用有效的音频文件。"); }
+  }
+  async backgroundMusicResource(uploadId: string) {
+    try {
+      return await this.backgroundMusic.resource(uploadId);
+    } catch { throw new StudioInputError("背景音乐不存在或内容已变化。"); }
+  }
   async uploadReferenceVideo(input: { label: string; mimeType: string; bytes: Buffer }): Promise<StudioReferenceVideo> {
     try {
       return await this.referenceVideos.upload(input);
@@ -602,6 +614,10 @@ export class StudioService {
           ...trustedInput,
           referenceVideo: { uploadId: staged.uploadId, label: staged.label },
         };
+      }
+      if (isRecord(trustedInput) && trustedInput.backgroundMusic !== undefined) {
+        try { trustedInput = { ...trustedInput, backgroundMusic: await this.backgroundMusic.resolve(trustedInput.backgroundMusic) }; }
+        catch { throw new StudioInputError("背景音乐不存在、内容已变化或混音设置无效，请重新选择。"); }
       }
       let started: StartRunResponse;
       if (!isRecord(trustedInput) || !isRecord(trustedInput.referenceVideo)) {

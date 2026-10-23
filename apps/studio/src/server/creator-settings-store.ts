@@ -37,7 +37,7 @@ interface CreatorSettingsFile {
 export const DEFAULT_CREATOR_SETTINGS: StudioCreatorSettings = {
   voiceDirection: { ...DEFAULT_STUDIO_VOICE_DIRECTION },
   voiceDirectionCustomized: false,
-  defaultRecipeId: "economy-daily",
+  defaultRecipeId: "free-stock",
   roleProviderDefaults: {},
   modelDefaults: {},
   productionDefaults: { ...DEFAULT_STUDIO_PRODUCTION_DEFAULTS },

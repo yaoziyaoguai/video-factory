@@ -178,6 +178,8 @@ export interface StudioServicePort {
   costDashboard(): Promise<StudioCostDashboard>;
   runCostDetail(runId: string): Promise<StudioCostRunDetail | undefined>;
   startRun(input: unknown, idempotencyKey?: string): Promise<StartRunResponse>;
+  uploadBackgroundMusic?(input: { label: string; licenseNote: string; bytes: Buffer }): Promise<import("../shared/api.js").StudioMusicUpload>;
+  backgroundMusicResource?(uploadId: string): Promise<{ path: string; contentType: string }>;
   uploadReferenceVideo?(input: { label: string; mimeType: string; bytes: Buffer }): Promise<StudioReferenceVideo>;
   deleteReferenceVideo?(uploadId: string): Promise<void>;
   decide(runId: string, input: StudioDecisionInput, actor: string): Promise<StudioRunDetail>;
@@ -665,6 +667,21 @@ export function buildStudioApp(options: BuildStudioAppOptions): FastifyInstance 
       return detail;
     },
   );
+
+  app.post<{ Body: Buffer }>("/api/background-music", { bodyLimit: 20 * 1024 * 1024 }, async (request, reply) => {
+    if (!options.service.uploadBackgroundMusic || !Buffer.isBuffer(request.body)) throw new StudioInputError("音乐上传不可用。");
+    let label: string, licenseNote: string;
+    try {
+      label = decodeURIComponent(String(request.headers["x-video-factory-filename"] ?? ""));
+      licenseNote = decodeURIComponent(String(request.headers["x-video-factory-license"] ?? ""));
+    } catch { throw new StudioInputError("音乐名称或授权说明编码不正确。"); }
+    return reply.code(201).send(await options.service.uploadBackgroundMusic({ label, licenseNote, bytes: request.body }));
+  });
+  app.get<{ Params: { uploadId: string } }>("/api/background-music/:uploadId", async (request, reply) => {
+    if (!options.service.backgroundMusicResource || !/^[a-f0-9]{64}$/.test(request.params.uploadId)) throw new StudioInputError("背景音乐编号不正确。");
+    const resource = await options.service.backgroundMusicResource(request.params.uploadId);
+    return reply.header("content-type", resource.contentType).header("cache-control", "private, max-age=86400").send(createReadStream(resource.path));
+  });
 
   app.post<{ Body: Buffer }>("/api/reference-videos", async (request, reply) => {
     if (!options.service.uploadReferenceVideo) throw new StudioInputError("当前环境没有启用参考视频上传。");
@@ -1634,7 +1651,11 @@ function parseNodeExecutionConfigurationInput(value: unknown): StudioNodeExecuti
   if (input.economics !== undefined) {
     const candidate = requireRecord(input.economics, "节点预算");
     if (typeof candidate.allowMeteredProviders !== "boolean") throw new StudioInputError("付费能力开关格式不正确。");
+    if (candidate.recipeId !== undefined && !["free-stock", "keyshot-ai", "generated-only", "economy-daily", "cinematic-ai", "custom"].includes(String(candidate.recipeId))) {
+      throw new StudioInputError("画面来源模式无效。");
+    }
     economics = {
+      ...(candidate.recipeId !== undefined ? { recipeId: candidate.recipeId as NonNullable<NonNullable<StudioNodeExecutionConfigurationInput["economics"]>["recipeId"]> } : {}),
       allowMeteredProviders: candidate.allowMeteredProviders,
     };
   }

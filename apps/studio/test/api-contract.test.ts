@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 
+it("accepts all three visual source defaults", () => {
+  for (const defaultRecipeId of ["free-stock", "keyshot-ai", "generated-only"]) {
+    assert.equal(parseStudioCreatorSettingsPatch({ defaultRecipeId }).defaultRecipeId, defaultRecipeId);
+  }
+});
+
 it("preserves the complete draft version on a creative command", () => {
   const input = { action: "discuss", commandId: "version-bound-command", expectedRunRevision: 2, expectedReviewRevision: 5,
     stage: "script", baseDraftSha256: "a".repeat(64), baseDraftVersionId: "script-draft:original#v1", message: "解释结尾" };

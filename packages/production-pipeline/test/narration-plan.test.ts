@@ -243,3 +243,17 @@ describe("narration-plan-v2 共享用例（与 Python 同判）", () => {
     }
   });
 });
+
+
+it("follows a confirmed 202.5 second timeline instead of imposing a second 180 second ceiling", () => {
+  const scenes = [{ position: 1, duration: 202.5, narration: "按完整内容讲述。" }];
+  const plan = buildNarrationPlan(scenes, "a".repeat(64), "b".repeat(64));
+  assert.equal(plan.visualPlan.totalFrames, 6075);
+  assert.deepEqual(validateNarrationPlan(plan, plan), plan);
+  assert.equal(deriveBaseGroupsV2(scenes)[0]!.frameRange.endFrame, 6075);
+  assert.throws(() => validateNarrationPlan(plan, { ...plan, visualPlan: { ...plan.visualPlan, sha256: "c".repeat(64) } }), /画面/);
+  for (const duration of [Number.MAX_SAFE_INTEGER, 1e308, 1e-9, -1, Infinity]) {
+    assert.throws(() => buildNarrationPlan([{ ...scenes[0], duration }], "a".repeat(64), "b".repeat(64)));
+    assert.throws(() => deriveBaseGroupsV2([{ ...scenes[0]!, duration }]));
+  }
+});

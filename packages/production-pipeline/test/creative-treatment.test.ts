@@ -26,7 +26,7 @@ test("自由构思接受并保留正文", () => {
   assert.equal(parseCreativeTreatment(valid, ["source-1"]).concept, valid.concept);
 });
 
-test("配音能力按真实 Provider 投影且不虚构音乐或音效轨", () => {
+test("配音能力声明已接线的单轨音乐，原生音画和未选择声音不推断支持", () => {
   const providers = [{
     id: "stock-ready",
     deliveryTypes: ["stock_video"],
@@ -37,21 +37,21 @@ test("配音能力按真实 Provider 投影且不虚构音乐或音效轨", () =
     narration: true,
     pauseControl: "punctuation",
     continuousNarrationGroups: false,
-    musicTrack: false,
+    musicTrack: true,
     soundEffectsTrack: false,
   });
   assert.deepEqual(summarizeProductionCapabilities(providers, "minimax-tts-v1").audio, {
     narration: true,
     pauseControl: "text_hint",
     continuousNarrationGroups: true,
-    musicTrack: false,
+    musicTrack: true,
     soundEffectsTrack: false,
   });
   assert.deepEqual(summarizeProductionCapabilities(providers, "kokoro-local-v1").audio, {
     narration: true,
     pauseControl: "unsupported",
     continuousNarrationGroups: false,
-    musicTrack: false,
+    musicTrack: true,
     soundEffectsTrack: false,
   });
   assert.deepEqual(summarizeProductionCapabilities(providers).audio, {

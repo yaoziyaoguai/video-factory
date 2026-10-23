@@ -291,6 +291,7 @@ export interface DirectorPlanPayload {
   scenes: unknown[];
   assetProviders: unknown[];
   economics: {
+    recipeId?: "economy-daily" | "free-stock" | "keyshot-ai" | "generated-only" | "cinematic-ai" | "custom";
     allowMeteredProviders: boolean;
   };
   costFeedback?: Array<{
@@ -2111,11 +2112,17 @@ function requireDirectorCostFeedback(value: unknown): NonNullable<DirectorPlanPa
 
 function requireDirectorEconomics(value: unknown): DirectorPlanPayload["economics"] {
   const record = requireRecord(value, "payload.economics");
-  assertExactKeys(record, ["allowMeteredProviders"], "payload.economics");
+  assertExactKeys(record, ["recipeId", "allowMeteredProviders"], "payload.economics");
   if (typeof record.allowMeteredProviders !== "boolean") {
     throw new CodexExecutorError("payload.economics.allowMeteredProviders must be a boolean.", false);
   }
-  return { allowMeteredProviders: record.allowMeteredProviders };
+  if (record.recipeId !== undefined && !["economy-daily", "free-stock", "keyshot-ai", "generated-only", "cinematic-ai", "custom"].includes(String(record.recipeId))) {
+    throw new CodexExecutorError("payload.economics.recipeId is invalid.", false);
+  }
+  return {
+    ...(record.recipeId !== undefined ? { recipeId: record.recipeId as NonNullable<DirectorPlanPayload["economics"]["recipeId"]> } : {}),
+    allowMeteredProviders: record.allowMeteredProviders,
+  };
 }
 
 function validateBudgetIntention(value: unknown): void {

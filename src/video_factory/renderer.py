@@ -860,6 +860,12 @@ def render_audio_input(manifest: dict) -> list[str]:
         if plan.get("version") != NATIVE_AUDIO_VERSION or not track.is_file() or file_sha(track) != plan.get("trackSha256"):
             raise RuntimeError("Native render cannot fall back to silence or a different audio track.")
         return ["-i", str(track)]
+    music = manifest.get("background_music")
+    if music:
+        track = Path(str(music.get("trackPath", "")))
+        if not track.is_file() or file_sha(track) != music.get("trackSha256"):
+            raise RuntimeError("Background music mix content changed.")
+        return ["-i", str(track)]
     voiceover_plan = manifest.get("voiceover_plan")
     if voiceover_plan:
         return ["-i", str(voiceover_plan["track_path"])]
@@ -898,7 +904,10 @@ def render_job_manifest(
     voiceover_plan_path: Optional[Path] = None,
     resolution: str = "1080x1920",
     native_audio_plan_path: Optional[Path] = None,
+    background_music: Optional[dict] = None,
 ) -> Path:
+    if native_audio_plan_path is not None and background_music is not None:
+        raise RuntimeError("Native audio does not accept an independent music track.")
     if native_audio_plan_path is not None and voiceover_plan_path is not None:
         raise RuntimeError("Native audio and TTS plans cannot be mixed.")
     output_dir = workspace / "renders" / str(job_id)
@@ -926,6 +935,13 @@ def render_job_manifest(
         validate_asset_plan(asset_plan, resolved_asset_plan_path)
     if not ffmpeg_available():
         raise RuntimeError("FFmpeg and ffprobe are required for MP4 rendering. Install them, then rerun render-job.")
+    if background_music is not None:
+        from .background_music import mix_background_music
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        duration = sum(timeline_frame_counts(manifest["slides"])) / 30
+        voice_path = Path(voiceover_plan["track_path"]) if voiceover_plan else None
+        manifest["background_music"] = mix_background_music(background_music, voice_path, duration, output_dir / "mixed_audio.wav")
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if asset_plan is not None:
         render_asset_video(manifest_path, output_dir, asset_plan, resolution=resolution)
         return manifest_path

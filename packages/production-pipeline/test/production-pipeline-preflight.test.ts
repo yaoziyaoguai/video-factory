@@ -103,6 +103,27 @@ class RecordingWorker {
   }
 }
 
+// 只替换模型边界，排轨时长与正式产物身份由夹具明确给出；不声称真实 TTS 验收。
+class MeasuredVoiceWorker extends RecordingWorker {
+  override async run(request: Record<string, unknown>): Promise<WorkerResponse> {
+    const response = await super.run(request);
+    if (request.capability !== "voice.synthesize") return response;
+    const input = request.input as Record<string, unknown>;
+    const plan = JSON.parse(await readFile(String(input.narrationPlanPath), "utf8"));
+    const sourceAudioSamples = 24 * 44100;
+    const group = plan.groups[0];
+    const startSample = group.placement.anchor === "start" ? group.window.startFrame * 1470
+      : group.window.endFrame * 1470 - sourceAudioSamples;
+    const content = JSON.stringify({ version: "video-factory/voiceover-plan-v3", narrationPlan: plan,
+      groups: [{ ...group, sourceAudioSamples, startSample, endSample: startSample + sourceAudioSamples }],
+      track_path: response.output!.trackPath });
+    await writeFile(String(response.output!.voiceoverPlanPath), content);
+    response.artifacts[0] = { ...response.artifacts[0]!, kind: "voiceover_plan",
+      sha256: createHash("sha256").update(content).digest("hex"), sizeBytes: Buffer.byteLength(content) };
+    return response;
+  }
+}
+
 class VoiceConflictWorker extends RecordingWorker {
   private conflictReturned = false;
   constructor(private readonly grouped = false) { super(); }
@@ -421,14 +442,17 @@ describe("ProductionPipeline production preflight", () => {
     // 此worker只验证Host输入/产物保留，不把二次worker执行当成零TTS或真实媒体证据。
   });
 
-  for (const mode of ["regular", "group-conflict", "upstream-edit", "upstream-edit-v2", "character-v3"]) it(`confirms continuous narration before TTS without releasing the current user gate (${mode})`, async () => {
+  for (const mode of ["default", "default-long", "legacy-default", "shorten", "regular", "group-conflict", "upstream-edit", "upstream-edit-v2", "character-v3"]) it(`confirms continuous narration before TTS without releasing the current user gate (${mode})`, async () => {
     const groupedConflict = mode === "group-conflict";
+    const defaultNarration = mode.startsWith("default");
+    const unplanned = defaultNarration || mode === "legacy-default";
     const character = mode === "character-v3";
     const characterScript = JSON.parse(await readFile(new URL("../../../tests/fixtures/character-drama-cases.json", import.meta.url), "utf8")).script as CharacterScript;
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "video-factory-narration-confirm-"));
-    const worker = groupedConflict ? new VoiceConflictWorker(true) : new RecordingWorker();
+    const worker = groupedConflict ? new VoiceConflictWorker(true) : mode === "shorten" ? new MeasuredVoiceWorker() : new RecordingWorker();
     const pipeline = new ProductionPipeline({ workspaceRoot, worker,
-      screenwriterAgent: { id: "codex-screenwriter-v1", draft: async () => character ? structuredClone(characterScript) : ({  scenes }) },
+      screenwriterAgent: { id: "codex-screenwriter-v1", draft: async () => character ? structuredClone(characterScript) : ({ scenes: mode === "default-long"
+        ? Array.from({ length: 9 }, (_, index) => ({ ...scenes[0]!, position: index + 1, duration: 22.5 })) : scenes }) },
       directorAgent: { ...directorAgent(), plan: async (input) => {
         const plan = await directorAgent().plan(input) as NarrationVisualDirectorPlan;
         return character ? { ...plan, version: "video-factory/director-plan-v2",
@@ -443,8 +467,8 @@ describe("ProductionPipeline production preflight", () => {
     let run = await pipeline.start({ protocolVersion: "video-factory/brief-v1", title: "三个动作连成故事",
       ...(character ? { presentationMode: "character_drama" } : {}),
       angle: "连续叙事", audience: "普通创作者", nicheSlug: "life-actions", durationSeconds: 24,
-      durationRange: { minSeconds: 20, maxSeconds: 34 }, platform: "douyin", runPurpose: "test", reviewMode: "manual",
-      workflowFeatures: { boundaryGates: "user-confirmed-v1", assetSemanticRank: false, referenceGrammar: false },
+      ...(mode === "default-long" ? { durationPolicy: "content-led-v1" } : { durationRange: { minSeconds: 20, maxSeconds: 34 } }), platform: "douyin", runPurpose: "test", reviewMode: "manual",
+      workflowFeatures: { ...(defaultNarration ? { narrationMode: "continuous-v1" } : {}), boundaryGates: "user-confirmed-v1", assetSemanticRank: false, referenceGrammar: false },
       providers: { script: "codex-screenwriter-v1", director: "api-visual-director-v1", assets: "ai-shot-router-v1",
         voice: "minimax-tts-v1", render: "python-ffmpeg-v1", technicalReview: "python-technical-review-v1" },
       director: {  assetProviderIds: ["pexels-stock-v1"] },
@@ -461,9 +485,12 @@ describe("ProductionPipeline production preflight", () => {
     const preview = await pipeline.previewNarrationPlan(run.id);
     assert.equal(preview.plan.groups.length, character ? 8 : 1);
     let chosen = structuredClone(preview.plan);
-    chosen.groups[0]!.placement.anchor = "end";
+    if (!unplanned) chosen.groups[0]!.placement.anchor = "end";
     let saved: typeof run;
-    if (character) {
+    if (unplanned) {
+      saved = run;
+      assert.equal(run.artifacts.some(artifact => artifact.kind === "narration_plan"), false);
+    } else if (character) {
       assert.equal(preview.plan.version, "video-factory/narration-plan-v3");
       if (preview.plan.version !== "video-factory/narration-plan-v3") throw new Error("requires v3");
       const ticket = await pipeline.previewNarrationPlanV2(run.id, {
@@ -504,8 +531,8 @@ describe("ProductionPipeline production preflight", () => {
     assert.equal(saved.status, "needs_human");
     assert.deepEqual(saved.nodeRuns.find((node) => node.nodeId === "assets")!.intervention, originalGate);
     assert.equal(worker.requests.some((request) => request.capability === "voice.synthesize"), false);
-    assert.equal((await pipeline.previewNarrationPlan(run.id)).confirmed, true);
-    await assert.rejects(() => pipeline.confirmNarrationPlan(run.id, { expectedRunRevision: run.revision, plan: chosen, actor: "creator" }), /revision/i);
+    assert.equal((await pipeline.previewNarrationPlan(run.id)).confirmed, !unplanned);
+    if (!unplanned) await assert.rejects(() => pipeline.confirmNarrationPlan(run.id, { expectedRunRevision: run.revision, plan: chosen, actor: "creator" }), /revision/i);
     if (mode === "upstream-edit" || mode === "upstream-edit-v2") {
       const preflight = saved.nodeRuns.find((node) => node.nodeId === "production-preflight")!;
       const output = preflight.output as { executablePlanPath: string };
@@ -549,9 +576,42 @@ describe("ProductionPipeline production preflight", () => {
       expectedRunRevision: saved.revision, reviewEvidenceId: null });
     assert.equal(voiced.nodeRuns.find((node) => node.nodeId === "voice")?.status, "needs_human", JSON.stringify(voiced));
     const voiceInput = worker.requests.find((request) => request.capability === "voice.synthesize")!.input;
+    if (mode === "legacy-default") {
+      assert.equal(voiceInput.narrationPlanPath, undefined, "没有新开工标记的旧制作不自动迁移");
+      assert.equal(voiced.artifacts.some(artifact => artifact.kind === "narration_plan"), false);
+      return;
+    }
     assert.deepEqual(JSON.parse(await readFile(String(voiceInput.narrationPlanPath), "utf8")), chosen);
+    if (defaultNarration) {
+      assert.equal(chosen.visualPlan.totalFrames, mode === "default-long" ? 6075 : 945);
+      assert.equal(voiced.artifacts.filter(artifact => artifact.kind === "narration_plan").length, 1);
+      assert.equal(typeof voiceInput.voiceInputIdentity, "object", "默认计划也必须保留原声恢复身份");
+    }
     assert.equal(voiced.nodeRuns.some((node) => node.nodeId === "render"), false);
-    if (groupedConflict) {
+    if (mode === "shorten") {
+      const voiceNode = voiced.nodeRuns.find(node => node.nodeId === "voice")!;
+      const measured = await pipeline.previewNarrationPlan(run.id);
+      assert.equal(measured.timingSummary!.sourceAudioSeconds, 24);
+      assert.equal(measured.timingSummary!.unfilledSeconds, 7.5);
+      assert.deepEqual(measured.timingSummary!.unfilledRanges, [{ startSeconds: 0, endSeconds: 7.5 }]);
+      const draft = { expectedRunRevision: voiced.revision, interventionId: voiceNode.intervention!.id,
+        groupId: "narration-1", scenePosition: 3, durationSeconds: 4, actor: "creator" };
+      await assert.rejects(pipeline.requestVoiceTimingRevision(run.id, { ...draft, durationSeconds: 3.9 }), /natural speech|丢失/);
+      await assert.rejects(pipeline.requestVoiceTimingRevision(run.id, { ...draft, groupId: "stale-group" }), /当前声音/);
+      const revised = await pipeline.requestVoiceTimingRevision(run.id, draft);
+      assert.equal(revised.status, "needs_human");
+      const owner = revised.nodeRuns.find(node => node.nodeId === "production-preflight")!;
+      const result = JSON.parse(await readFile(String((owner.output as Record<string, unknown>).executablePlanPath), "utf8"));
+      assert.equal(result.totalFrames, 720);
+      assert.deepEqual(result.cuts.map((cut: { frameCount: number }) => cut.frameCount), [300, 300, 120]);
+      const carried = revised.artifacts.filter(item => item.kind === "narration_plan").at(-1)!;
+      const carriedPlan = JSON.parse(await readFile(carried.uri!, "utf8"));
+      assert.equal(carriedPlan.groups[0].text, chosen.groups[0]!.text);
+      assert.equal(carriedPlan.groups[0].placement.anchor, "end");
+      assert.equal(worker.requests.filter(item => item.capability === "voice.synthesize").length, 1,
+        "显式缩短先返回画面确认，不自动重新购买声音");
+      await assert.rejects(pipeline.requestVoiceTimingRevision(run.id, draft), /revision/);
+    } else if (groupedConflict) {
       const voiceNode = voiced.nodeRuns.find((node) => node.nodeId === "voice")!;
       assert.equal((voiceNode.output as { conflict: { code: string } }).conflict.code, "NARRATION_GROUP_DOES_NOT_FIT");
       assert.deepEqual(voiceNode.intervention?.options, ["request_changes", "reject"]);

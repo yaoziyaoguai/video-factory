@@ -69,7 +69,7 @@ export function summarizeProductionCapabilities(
         : native || voiceProviderId === "minimax-tts-v1" ? "text_hint" : "unsupported",
       // 只有已接线的连续组 worker 链路才声明该能力；其它 provider 保持 false，不由 narration 推断。
       continuousNarrationGroups: voiceProviderId === "minimax-tts-v1",
-      musicTrack: false,
+      musicTrack: !native && Boolean(voiceProviderId),
       soundEffectsTrack: false,
     },
   };

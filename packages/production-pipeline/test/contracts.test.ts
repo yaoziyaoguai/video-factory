@@ -487,6 +487,21 @@ describe("ProductionBrief", () => {
     assert.equal(brief.voiceDirection?.profileId, "minimax:female-chengshu");
   });
 
+  it("preserves the three visual modes independently from other metered roles", () => {
+    for (const recipeId of ["free-stock", "keyshot-ai", "generated-only"] as const) {
+      const parsed = pipeline.parseBrief({ ...validBrief, economics: { recipeId, allowMeteredProviders: true } });
+      assert.equal(parsed.economics.recipeId, recipeId);
+      assert.equal(parsed.economics.allowMeteredProviders, true);
+    }
+  });
+
+  it("keeps continuous narration opt-in without migrating old briefs", () => {
+    assert.equal(pipeline.parseBrief(validBrief).workflowFeatures?.narrationMode, undefined);
+    const workflowFeatures = { assetSemanticRank: false, referenceGrammar: false, narrationMode: "continuous-v1" };
+    assert.equal(pipeline.parseBrief({ ...validBrief, workflowFeatures }).workflowFeatures?.narrationMode, "continuous-v1");
+    assert.throws(() => pipeline.parseBrief({ ...validBrief, workflowFeatures: { ...workflowFeatures, narrationMode: "unknown" } }), /narrationMode/);
+  });
+
   it("normalizes legacy video-wide limits because every paid action is quoted separately", () => {
     const brief = pipeline.parseBrief({
       ...validBrief,

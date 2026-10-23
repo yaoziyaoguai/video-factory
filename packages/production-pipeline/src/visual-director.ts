@@ -1,5 +1,6 @@
 import {
   type ProductionArticleSourceSnapshot,
+  type ProductionRecipeId,
   type ProductionReworkFinding,
   type ProductionSeriesContext,
   type ProductionSpendFeedbackReason,
@@ -129,6 +130,7 @@ export interface VisualDirectorPlanValidation {
 }
 
 export interface VisualDirectorEconomics {
+  recipeId?: ProductionRecipeId;
   allowMeteredProviders: boolean;
 }
 
@@ -325,6 +327,15 @@ function validateDirectorDocument(value: unknown, options: VisualDirectorPlanVal
           `Director plan provider '${unsupportedProvider}' does not support the required ${options.requiredAspectRatio} aspect ratio.`,
         );
       }
+    }
+    const generatedDelivery = deliveryType === "generated_image" || deliveryType === "generated_video";
+    if (options.economics.recipeId === "free-stock"
+      && (generatedDelivery || [preferredProviderId, ...alternativeProviderIds].some(id => generative.has(id)))) {
+      throw new Error(`免费画面模式不能使用生图或生视频：第 ${scenePosition} 镜。`);
+    }
+    if (options.economics.recipeId === "generated-only"
+      && (!generatedDelivery || [preferredProviderId, ...alternativeProviderIds].some(id => !generative.has(id)))) {
+      throw new Error(`全部生成模式要求每镜使用生成图片或视频（可复用生成母片）：第 ${scenePosition} 镜。`);
     }
     const authenticityPolicy = authenticity(shot.authenticityPolicy, `shots[${index}].authenticityPolicy`);
     if (authenticityPolicy === "evidence" && [preferredProviderId, ...alternativeProviderIds].some((id) => generative.has(id))) {

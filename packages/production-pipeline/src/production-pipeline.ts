@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { holdMaintenanceWork } from "./maintenance.js";
+import { summarizeNarrationTiming, type NarrationTimingSummary } from "./narration-timing.js";
 import { inspectLegacyVoiceSource, type LegacyVoiceSourceFiles } from "./legacy-narration-source.js";
 import type { LegacyNarrationSource } from "./narration-relayout.js";
 import { reviewDecisionBasis } from "./review-decision-prefill.js";
@@ -2110,6 +2111,19 @@ export class ProductionPipeline {
       }
       const registry = this.createRegistry(brief);
       const acceptedBase = structuredClone(previous);
+      // 新的普通解说在进入配音时保存连续计划；现有计划、原生音画和已开始的声音不迁移。
+      if (decision.action === "approve" && brief.audioMode !== "native_av"
+        && brief.presentationMode !== "character_drama" && brief.providers.voice === "minimax-tts-v1"
+        && brief.workflowFeatures?.narrationMode === "continuous-v1"
+        && usesExecutablePlan(brief)
+        && activeInterventionNode.nodeId === (brief.providers.visualReview ? "asset-source-review" : "assets")
+        && !previous.artifacts.some(artifact => artifact.kind === "narration_plan")
+        && !previous.nodeRuns.some(node => node.nodeId === "voice" && (node.operationRequestId || node.outputState))) {
+        const context = await this.narrationPlanContext(previous);
+        if (context.plan.version === "video-factory/narration-plan-v1") {
+          await this.storeNarrationPlanInput(acceptedBase, context.plan, context, decision.actor);
+        }
+      }
       if (optionalApproval && commandId && !replay) {
         const visualProof = currentVisualReviewDelivery(previous);
         const proofArtifact = isObjectRecord(visualProof)
@@ -3788,10 +3802,12 @@ export class ProductionPipeline {
       const legacy = await this.legacyNarrationSource(run, context).catch(error => ({
         unavailable: error instanceof Error ? error.message : "旧声音来源暂不能核验。",
       }));
+      const legacyTiming = legacy && !("unavailable" in legacy) ? await this.readNarrationTimingSummary(run, legacy.plan) : undefined;
       if (legacy) return { expectedRunRevision: run.revision, confirmed: false,
         sourceContextId: this.narrationSourceContextIdV2(run, context, this.voiceProviderConfigDigest(run, context)),
         plan: "unavailable" in legacy ? context.plan : legacy.plan,
-        ...("unavailable" in legacy ? { legacySourceUnavailableReason: legacy.unavailable } : { legacySource: legacy.source }),
+        ...("unavailable" in legacy ? { legacySourceUnavailableReason: legacy.unavailable } : { legacySource: legacy.source,
+          ...(legacyTiming ? { timingSummary: legacyTiming } : {}) }),
         editorContext: { mode: context.editorMode, defaultPlan: context.plan, baseGroups: [], savedPlanStatus: "none" } };
     }
     const voiceConfig = providerConfigs(parsePersistedBrief(run.initialInput), this.options).find((config) => config.nodeId === "voice")!;
@@ -3891,9 +3907,11 @@ export class ProductionPipeline {
     }
     const plan = savedPlanStatus === "current" && savedPlan ? savedPlan : context.plan;
     const quote = await quoteFor(plan);
+    const timingSummary = context.editorMode !== "pre_generation" ? await this.readNarrationTimingSummary(run, plan) : undefined;
     return {
       expectedRunRevision: run.revision,
       confirmed: savedPlanStatus === "current",
+      ...(timingSummary ? { timingSummary } : {}),
       sourceContextId,
       plan,
       ...(quote ? { quote } : {}),
@@ -3912,6 +3930,18 @@ export class ProductionPipeline {
     };
   }
 
+  private async readNarrationTimingSummary(run: WorkflowRun<ProductionBrief>, plan: SupportedNarrationPlan): Promise<NarrationTimingSummary | undefined> {
+    const node = run.nodeRuns.find(candidate => candidate.nodeId === "voice");
+    const version = node?.outputState?.versions.find(candidate => candidate.id === node.outputState?.effectiveVersionId);
+    if (!node || !version || node.outputState?.stale || node.inputState?.stale) return undefined;
+    const output = effectiveNodeOutput(node);
+    const artifact = run.artifacts.find(candidate => candidate.kind === "voiceover_plan"
+      && version.artifactIds.includes(candidate.id) && candidate.uri === output?.voiceoverPlanPath);
+    if (!artifact?.uri) return undefined;
+    await verifyStoredArtifactWithinRoot(this.store.runDirectory(run.id), artifact);
+    return summarizeNarrationTiming(plan, JSON.parse(await readFile(artifact.uri, "utf8")));
+  }
+
   async confirmNarrationPlan(runId: string, draft: {
     expectedRunRevision: number; plan: unknown; actor: string;
   }): Promise<WorkflowRun<ProductionBrief>> {
@@ -3925,33 +3955,38 @@ export class ProductionPipeline {
         throw new HumanDecisionConflictError("角色声音计划须先预览，再凭同一票据保存。");
       }
       const plan = validateNarrationPlan(draft.plan, context.plan);
-      const content = `${JSON.stringify(plan, null, 2)}\n`;
-      const sha256 = createHash("sha256").update(content).digest("hex");
-      const directory = path.join(this.store.runDirectory(runId), "nodes", "voice", "plans");
-      await mkdir(directory, { recursive: true });
-      const planPath = path.join(directory, `${sha256}.json`);
-      await writeTextAtomically(planPath, content);
       const next = structuredClone(previous);
-      const node = next.nodeRuns.find((candidate) => candidate.nodeId === "voice") ?? {
-        nodeId: "voice", role: "声音导演", status: "pending" as const, startedAt: this.clock(), artifactIds: [], qualityGateResults: [],
-      };
-      if (!next.nodeRuns.includes(node)) next.nodeRuns.push(node);
-      const artifactId = this.idFactory("artifact");
-      next.artifacts.push({ id: artifactId, kind: "narration_plan", uri: planPath, sha256,
-        sizeBytes: Buffer.byteLength(content), contentType: "application/json", schemaVersion: plan.version,
-        parentArtifactIds: context.parentArtifactIds, createdAt: this.clock(), producer: { nodeId: "voice", attempt: 0 },
-        provenance: { providerId: "creator-narration-plan-v1", providerVersion: "1" } });
-      const versionId = this.idFactory("input-version");
-      node.inputState = { nodeId: "voice", effectiveVersionId: versionId, stale: false, versions: [
-        ...(node.inputState?.versions ?? []), { id: versionId, nodeId: "voice", source: "derived", createdAt: this.clock(),
-          createdBy: draft.actor, schemaVersion: plan.version, upstreamVersionIds: context.upstreamVersionIds,
-          ...(node.inputState ? { parentVersionId: node.inputState.effectiveVersionId } : {}),
-          value: { ...context.voiceInput, narrationPlanPath: planPath, voiceInputVersionId: versionId } },
-      ] };
+      await this.storeNarrationPlanInput(next, plan, context, draft.actor);
       // 只保存下一步的声音输入，不批准当前素材停点，也不触发配音或任何付费请求。
       next.revision += 1;
       return next;
     });
+  }
+
+  private async storeNarrationPlanInput(next: WorkflowRun<ProductionBrief>, plan: NarrationPlan,
+    context: Awaited<ReturnType<ProductionPipeline["narrationPlanContext"]>>, actor: string): Promise<void> {
+    const content = `${JSON.stringify(plan, null, 2)}\n`;
+    const sha256 = createHash("sha256").update(content).digest("hex");
+    const directory = path.join(this.store.runDirectory(next.id), "nodes", "voice", "plans");
+    await mkdir(directory, { recursive: true });
+    const planPath = path.join(directory, `${sha256}.json`);
+    await writeTextAtomically(planPath, content);
+    const node = next.nodeRuns.find((candidate) => candidate.nodeId === "voice") ?? {
+      nodeId: "voice", role: "声音导演", status: "pending" as const, startedAt: this.clock(), artifactIds: [], qualityGateResults: [],
+    };
+    if (!next.nodeRuns.includes(node)) next.nodeRuns.push(node);
+    const artifactId = this.idFactory("artifact");
+    next.artifacts.push({ id: artifactId, kind: "narration_plan", uri: planPath, sha256,
+      sizeBytes: Buffer.byteLength(content), contentType: "application/json", schemaVersion: plan.version,
+      parentArtifactIds: context.parentArtifactIds, createdAt: this.clock(), producer: { nodeId: "voice", attempt: 0 },
+      provenance: { providerId: "creator-narration-plan-v1", providerVersion: "1" } });
+    const versionId = this.idFactory("input-version");
+    node.inputState = { nodeId: "voice", effectiveVersionId: versionId, stale: false, versions: [
+      ...(node.inputState?.versions ?? []), { id: versionId, nodeId: "voice", source: "derived", createdAt: this.clock(),
+        createdBy: actor, schemaVersion: plan.version, upstreamVersionIds: context.upstreamVersionIds,
+        ...(node.inputState ? { parentVersionId: node.inputState.effectiveVersionId } : {}),
+        value: { ...context.voiceInput, narrationPlanPath: planPath, voiceInputVersionId: versionId } },
+    ] };
   }
 
   private async legacyNarrationSource(run: WorkflowRun<ProductionBrief>,
@@ -4614,7 +4649,10 @@ export class ProductionPipeline {
       const voiceNode = previous.nodeRuns.find((node) => node.nodeId === "voice" && node.status === "needs_human");
       if (!voiceNode) throw new Error("Voice timing revision requires the active voice node.");
       const intervention = voiceNode?.intervention;
-      if (intervention?.id !== draft.interventionId || !intervention.options?.includes("request_changes")) {
+      const voiceOutput = requireOutputRecord(effectiveNodeOutput(voiceNode), "voice output");
+      const completedVoice = voiceNode.outputState && !voiceNode.outputState.stale
+        && (!voiceOutput.conflict || voiceOutput.conflictResolved === true || voiceOutput.conflictResolved === "relayout");
+      if (intervention?.id !== draft.interventionId || (!intervention.options?.includes("request_changes") && !completedVoice)) {
         throw new Error("Voice timing revision requires the active planning intervention.");
       }
       const brief = effectiveProductionBrief(previous);
@@ -4630,25 +4668,36 @@ export class ProductionPipeline {
         const { durationRange: _previousRange, ...unchanged } = brief;
         nextBrief = parseBrief({ ...unchanged, ...(amendment.range ? { durationRange: amendment.range } : {}) });
       }
-      const voiceOutput = requireOutputRecord(voiceNode.output, "voice output");
-      const groupConflict = isObjectRecord(voiceOutput.conflict) && voiceOutput.conflict.code === "NARRATION_GROUP_DOES_NOT_FIT"
+      // 成功试听后也可明确缩短无旁白窗口。只读核对当前原声，不能凭客户端数字截词或删留白。
+      const timingPreview = completedVoice ? await this.previewNarrationPlan(runId) : undefined;
+      if (timingPreview && (timingPreview.legacySource || timingPreview.plan.version !== "video-factory/narration-plan-v1" || !timingPreview.timingSummary)) {
+        throw new HumanDecisionConflictError("这版声音暂不能直接缩短画面；旧逐镜、显式分段与角色计划请先在规划中调整，原声音保留。");
+      }
+      const shorteningGroup = timingPreview?.timingSummary?.groups.find(group =>
+        group.groupId === draft.groupId && group.sourceScenePositions.includes(draft.scenePosition));
+      if (timingPreview && (!shorteningGroup || shorteningGroup.requiredFrames >= shorteningGroup.availableFrames)) {
+        throw new HumanDecisionConflictError("所选旁白段没有可缩短的无旁白窗口，请重新查看当前声音。");
+      }
+      const groupConflict = !completedVoice && isObjectRecord(voiceOutput.conflict) && voiceOutput.conflict.code === "NARRATION_GROUP_DOES_NOT_FIT"
         ? parseNarrationGroupConflict(voiceOutput.conflict) : undefined;
       // §4.2.7 v2 首次 fit 冲突的改画面适配：v2 冲突不携带 cuts（不伪装完整时间线），
       // 场景时长从当前正式 executable plan 取；旧 parser 不吞 v2 事实。
-      const v2ConflictRecord = isObjectRecord(voiceOutput.conflict)
+      const v2ConflictRecord = !completedVoice && isObjectRecord(voiceOutput.conflict)
         && voiceOutput.conflict.code === "NARRATION_GROUP_DOES_NOT_FIT_V2" ? voiceOutput.conflict : undefined;
-      const conflict = groupConflict || v2ConflictRecord ? undefined : parseVoiceDoesNotFitConflict(voiceOutput.conflict);
-      if (groupConflict ? draft.groupId !== groupConflict.groupId || !groupConflict.sourceScenePositions.includes(draft.scenePosition)
+      const conflict = shorteningGroup || groupConflict || v2ConflictRecord ? undefined : parseVoiceDoesNotFitConflict(voiceOutput.conflict);
+      if (!shorteningGroup && (groupConflict ? draft.groupId !== groupConflict.groupId || !groupConflict.sourceScenePositions.includes(draft.scenePosition)
         : v2ConflictRecord
           ? draft.groupId !== v2ConflictRecord.groupId
             || !Array.isArray(v2ConflictRecord.sourceScenePositions)
             || !v2ConflictRecord.sourceScenePositions.includes(draft.scenePosition)
-          : draft.groupId !== undefined || draft.scenePosition !== conflict!.scenePosition) {
+          : draft.groupId !== undefined || draft.scenePosition !== conflict!.scenePosition)) {
         throw new Error("Voice timing revision scene is no longer current.");
       }
       // v2 的必需时长 = 当前镜头 cut + 缺口帧（availableFrames 不足以容纳 requiredFrames 的部分）。
       let requiredSeconds: number;
-      if (groupConflict) {
+      if (shorteningGroup) {
+        requiredSeconds = 1 / 30; // 正式镜头时长读回后再核可减少的帧数。
+      } else if (groupConflict) {
         requiredSeconds = (groupConflict.cuts.find((cut) => cut.scenePosition === draft.scenePosition)!.frameCount
           + groupConflict.requiredFrames - (groupConflict.window.endFrame - groupConflict.window.startFrame)) / 30;
       } else if (v2ConflictRecord) {
@@ -4707,6 +4756,13 @@ export class ProductionPipeline {
         && actual.startFrame === cut.startFrame && actual.frameCount === cut.frameCount))) {
         throw new HumanDecisionConflictError("这组旁白的画面方案已变化，请先核对当前版本。");
       }
+      if (shorteningGroup) {
+        const cut = currentPlan.cuts.find(item => item.scenePosition === draft.scenePosition);
+        if (!cut || draft.durationSeconds >= cut.frameCount / 30) {
+          throw new HumanDecisionConflictError("此操作只缩短所选画面的无旁白部分，请输入比当前镜头短的时长。");
+        }
+        requiredSeconds = Math.max(1, cut.frameCount - (shorteningGroup.availableFrames - shorteningGroup.requiredFrames)) / 30;
+      }
       const requestedFrameCount = Math.ceil(draft.durationSeconds * currentPlan.fps - 1e-6);
       const requiredFrameCount = Math.ceil(requiredSeconds * currentPlan.fps - 1e-6);
       if (!Number.isSafeInteger(requestedFrameCount) || requestedFrameCount < 1 || requestedFrameCount < requiredFrameCount) {
@@ -4731,6 +4787,13 @@ export class ProductionPipeline {
       // 先核原付费事实，再写任何新方案；新范围不能洗掉原请求或关联源的未知费用。
       await this.assertDurationChangeSafe(previous);
       const revisionBase = structuredClone(withExecutableBrief(previous, nextBrief));
+      if (shorteningGroup) {
+        // 原成功试听停点保留 approve/reject；仅此已核原声的明确修改命令授予本地修订动作。
+        // 既有 runner 仍校验同一停点、父版本与完整后代失效，不绕过其修订合同。
+        const voiceStop = revisionBase.nodeRuns.find(node => node.nodeId === "voice")!.intervention!;
+        voiceStop.options = [...new Set([...(voiceStop.options ?? []), "request_changes" as const])];
+        revisionBase.interventions = revisionBase.interventions.map(item => item.id === voiceStop.id ? structuredClone(voiceStop) : item);
+      }
       if (draft.durationAmendment && usesJointCreativePlanning(nextBrief)) {
         const owner = revisionBase.nodeRuns.find(node => node.nodeId === planOwnerNodeId)!;
         const inputState = owner.inputState;
@@ -4777,7 +4840,8 @@ export class ProductionPipeline {
           planOwnerNodeId,
           [currentPlanArtifact.id, ...voiceNode.artifactIds],
           "human-voice-timing-revision-v1",
-          "Creator accepted a longer cut for the complete natural-speed narration.",
+          shorteningGroup ? "Creator shortened an unfilled narration window without trimming speech or explicit silence."
+            : "Creator accepted a longer cut for the complete natural-speed narration.",
         )],
         // F6 残留收口：新版本保留当前方案的规划支撑引用集（joint 为整组 planning 证据，
         // legacy 为同版本其余产物），使修订后的 current version 仍满足引用闭包——
@@ -4802,7 +4866,7 @@ export class ProductionPipeline {
           note: `镜头 ${draft.scenePosition} 时长调整为 ${requestedFrameCount / currentPlan.fps} 秒。`,
         },
       });
-      if (groupConflict) await this.carryConfirmedNarrationPlan(previous, revised, draft.actor);
+      if (groupConflict || shorteningGroup) await this.carryConfirmedNarrationPlan(previous, revised, draft.actor);
       return revised;
     });
     try { return await this.resumeStale(runId); }
@@ -8555,11 +8619,19 @@ export class ProductionPipeline {
             scriptPath: planning.scriptPath,
             ...(planning.executablePlanPath !== undefined ? { executablePlanPath: planning.executablePlanPath } : {}),
             assetPlanPath: outputPath(context, "assets", "assetPlanPath"),
+            ...(brief.backgroundMusic ? { backgroundMusic: brief.backgroundMusic } : {}),
             ...(brief.audioMode === "native_av" ? { audioMode: "native_av", nativeAudioPlanPath: outputPath(context, "voice", "nativeAudioPlanPath") }
               : { voiceoverPlanPath: outputPath(context, "voice", "voiceoverPlanPath") }),
           };
         },
         "剪辑师",
+        (input) => {
+          const value = requireOutputRecord(input, "render input");
+          if (!isDeepStrictEqual(value.backgroundMusic, brief.backgroundMusic)) {
+            throw new HumanDecisionConflictError("背景音乐只能使用本片已选择的曲目与混音设置；更换请通过关联返工。");
+          }
+          return value;
+        },
       ),
       workerNode(
         "technical-review",
@@ -10643,7 +10715,7 @@ function directorStageInputIdentity(
     },
     referenceGrammar: referenceGrammar ?? null,
     assetProviders: directorAssetProviderInputs(brief, options),
-    economics: { allowMeteredProviders: brief.economics.allowMeteredProviders },
+    economics: { recipeId: brief.economics.recipeId, allowMeteredProviders: brief.economics.allowMeteredProviders },
     spendFeedback: brief.spendFeedback?.slice(-10) ?? [],
     ...(brief.rework ? {
       rework: {
@@ -12266,7 +12338,7 @@ function creativePlanningNode(
                 : {}),
               ...(feedback.note ? { note: feedback.note } : {}),
             }));
-            const directorEconomics = { allowMeteredProviders: currentBrief.economics.allowMeteredProviders };
+            const directorEconomics = { recipeId: currentBrief.economics.recipeId, allowMeteredProviders: currentBrief.economics.allowMeteredProviders };
             const scopedPlanningScenePositions = [...new Set(planningContext.issues.flatMap((issue) => (
               issue.scenePositions.length > 0
                 ? issue.scenePositions
@@ -13559,7 +13631,7 @@ function directorNode(
           : {}),
         ...(feedback.note ? { note: feedback.note } : {}),
       }));
-      const directorEconomics = { allowMeteredProviders: currentBrief.economics.allowMeteredProviders };
+      const directorEconomics = { recipeId: currentBrief.economics.recipeId, allowMeteredProviders: currentBrief.economics.allowMeteredProviders };
       const parentArtifactIds = context.artifacts
         .filter((artifact) => artifact.producer && ["script", "reference-grammar"].includes(artifact.producer.nodeId))
         .map((artifact) => artifact.id);
@@ -14047,6 +14119,7 @@ function directorReuseIdentity(brief: ProductionBrief): Record<string, unknown> 
     visualIntent: brief.visualIntent,
     seriesContext: brief.seriesContext,
     direction: brief.director,
+    recipeId: brief.economics.recipeId,
     allowMeteredProviders: brief.economics.allowMeteredProviders,
     directorProviderId: brief.providers.director,
     modelSelections: Object.fromEntries(
@@ -14606,7 +14679,8 @@ function visualDirectorPlanValidation(
     sceneDurations: Object.fromEntries(scenes.map((scene) => [scene.position, scene.duration])),
     sceneVisualStrategies: Object.fromEntries(scenes.map((scene) => [scene.position, scene.visualStrategy])),
     allowedProviderIds: direction.assetProviderIds,
-    generativeProviderIds: selectedProviders.filter((provider) => provider.generative).map((provider) => provider.id),
+    generativeProviderIds: selectedProviders.filter((provider) => provider.generative
+      || provider.deliveryTypes.some(type => type === "generated_image" || type === "generated_video")).map((provider) => provider.id),
     providerDeliveryTypes: Object.fromEntries(
       selectedProviders.map((provider) => [provider.id, [...provider.deliveryTypes]]),
     ),
@@ -14632,7 +14706,7 @@ function visualDirectorPlanValidation(
       }),
     ),
     requiredAspectRatio: "9:16",
-    economics: { allowMeteredProviders: brief.economics.allowMeteredProviders },
+    economics: { recipeId: brief.economics.recipeId, allowMeteredProviders: brief.economics.allowMeteredProviders },
   };
 }
 
@@ -15957,6 +16031,7 @@ function providerConfigs(brief: ProductionBrief, options: ProductionPipelineOpti
       : []),
     providerConfig(brief.providers.assets, "asset.prepare", "assets", {
       maxCostCny: 0,
+      recipeId: brief.economics.recipeId,
       ...(brief.audioMode === "native_av" ? { audioMode: "native_av", nativeVideoProviderId: brief.nativeVideoProviderId } : {}),
       modelSelections: resolvedAssetModels(brief, runtimeMetadata),
       ...(brief.providers.visualReview ? {
@@ -17878,6 +17953,7 @@ function validateBriefInputOverride(value: unknown, workflowBrief: ProductionBri
     director: parsed.director,
     economics: parsed.economics,
     voiceDirection: parsed.voiceDirection,
+    backgroundMusic: parsed.backgroundMusic,
     reviewMode: parsed.reviewMode,
   }) === JSON.stringify({
     audioMode: workflowBrief.audioMode, nativeVideoProviderId: workflowBrief.nativeVideoProviderId,
@@ -17890,6 +17966,7 @@ function validateBriefInputOverride(value: unknown, workflowBrief: ProductionBri
     director: workflowBrief.director,
     economics: workflowBrief.economics,
     voiceDirection: workflowBrief.voiceDirection,
+    backgroundMusic: workflowBrief.backgroundMusic,
     reviewMode: workflowBrief.reviewMode,
   });
   if (!immutableConfigurationMatches) {
@@ -17933,6 +18010,7 @@ function mergeCurrentBrief(value: unknown, workflowBrief: ProductionBrief): Prod
     director: workflowBrief.director,
     economics: workflowBrief.economics,
     voiceDirection: workflowBrief.voiceDirection,
+    backgroundMusic: workflowBrief.backgroundMusic,
     reviewMode: workflowBrief.reviewMode,
     spendFeedback: workflowBrief.spendFeedback,
     taskContractDigests: workflowBrief.taskContractDigests,

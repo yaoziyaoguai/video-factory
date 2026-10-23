@@ -633,8 +633,11 @@ describe("parseTaskRequest", () => {
     assert.deepEqual(director.payload.assetProviders, [{ id: "local-editorial-v1", label: "本地", deliveryTypes: ["editorial_card"], estimatedCnyPerClip: 0 }]);
     assert.deepEqual(director.payload.costFeedback, directorRequest().payload.costFeedback);
     assert.deepEqual((director.payload.brief as Record<string, unknown>).articleSources, [verifiedArticleSource()]);
-    assert.match(buildTaskPrompt(director), /优先尝试免费图库/);
-    assert.doesNotMatch(buildTaskPrompt(director), /maxPaidShots|maxCostCny|recipeId/);
+    const directorPrompt = buildTaskPrompt(director);
+    assert.match(directorPrompt, /优先尝试免费图库/);
+    assert.doesNotMatch(directorPrompt, /maxPaidShots|maxCostCny/);
+    assert.match(directorPrompt, /economics\.recipeId 决定画面来源/);
+    assert.match(directorPrompt, /允许混合且不规定比例/);
 
     const script = parseTaskRequest(scriptRequest());
     assert.equal(script.kind, "script-draft");
@@ -1089,6 +1092,19 @@ describe("parseTaskRequest", () => {
     ) as Record<string, unknown>;
     assert.deepEqual(Object.keys(repairData), ["revision"]);
     assert.equal((repairData.revision as Record<string, unknown>).mode, "repair-bootstrap");
+  });
+
+  it("preserves explicit visual source modes across the director broker boundary", () => {
+    for (const recipeId of ["free-stock", "keyshot-ai", "generated-only"] as const) {
+      const request = directorRequest();
+      request.payload.economics = { recipeId, allowMeteredProviders: true };
+      const parsed = parseTaskRequest(request);
+      const data = JSON.parse(buildTaskPrompt(parsed).split("<<<TASK_DATA\n")[1]!.split("\nTASK_DATA>>>")[0]!);
+      assert.deepEqual(data.economics, { recipeId, allowMeteredProviders: true });
+    }
+    const request = directorRequest();
+    request.payload.economics = { recipeId: "unlimited", allowMeteredProviders: true };
+    assert.throws(() => parseTaskRequest(request), /economics.recipeId/);
   });
 
   it("rejects legacy video-wide caps in director payloads", async () => {

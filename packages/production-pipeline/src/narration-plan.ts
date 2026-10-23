@@ -66,6 +66,7 @@ export interface NarrationPlanPreview {
   /** 旧逐镜声音只读核验后提供；不是补写历史 manifest 或重新合成许可。 */
   legacySource?: import("./narration-relayout.js").LegacyNarrationSource;
   legacySourceUnavailableReason?: string;
+  timingSummary?: import("./narration-timing.js").NarrationTimingSummary;
   editorContext: {
     mode: "pre_generation" | "voice_stop" | "final_review";
     defaultPlan: NarrationPlan | CharacterNarrationPlan;
@@ -118,7 +119,7 @@ export function buildNarrationPlan(scenes: unknown, scriptSha256: string, visual
     }
     const startFrame = plan.visualPlan.totalFrames;
     const endFrame = startFrame + Math.round(scene.duration * 30);
-    if (endFrame <= startFrame || endFrame > 5400) throw new Error("旁白方案超出短视频时长范围。");
+    if (endFrame <= startFrame || !Number.isSafeInteger(endFrame)) throw new Error("旁白方案须使用有效的整数帧时间线。");
     plan.visualPlan.totalFrames = endFrame;
     if (!/[\p{L}\p{N}]/u.test(scene.narration)) {
       plan.silences.push({ id: `silence-${scene.position}`, startFrame, endFrame, source: "legacy_silent_scene" });
@@ -220,7 +221,7 @@ export function deriveV2SourceFacts(scenes: Array<{ position: number; narration:
     const startFrame = cursor;
     const endFrame = startFrame + Math.round(duration * 30);
     cursor = endFrame;
-    if (cursor > 5400) throw new NarrationTextV2Error("v2 计划超出短视频时长范围。");
+    if (cursor <= startFrame || !Number.isSafeInteger(cursor)) throw new NarrationTextV2Error("v2 计划须使用有效的整数帧时间线。");
     const trimmed = trimV2(scene.narration);
     if (!isWordyV2(trimmed)) {
       legacySilences.push({ id: `silence-${position}`, startFrame, endFrame });

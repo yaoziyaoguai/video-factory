@@ -1269,6 +1269,7 @@ def render_video(request: Dict[str, Any], output_dir: Path, started_at: float) -
         asset_plan_path=asset_plan_path,
         voiceover_plan_path=voiceover_plan_path,
         native_audio_plan_path=native_plan_path,
+        background_music=request["input"].get("backgroundMusic"),
         resolution=resolution,
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

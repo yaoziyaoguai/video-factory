@@ -860,7 +860,9 @@ describe("broker-owned task definitions", () => {
 // T08：连续旁白能力语义——提示词不再误述能力，角色与审计读取同一能力事实。
 it("keeps audio advice within connected tools without denying observable sound defects", () => {
   const rules = JSON.stringify(taskPromptFor("audio-review"));
-  assert.match(rules, /未接入独立背景音乐、环境音或拟音的添加与混轨/);
+  assert.match(rules, /创作者上传并选择的一条背景音乐/);
+  assert.match(rules, /原生音画保留源片声音，不叠独立轨/);
+  assert.match(rules, /环境音与拟音尚无独立补轨能力/);
   assert.match(rules, /不因此隐瞒真实听到的问题/);
   assert.match(rules, /外部后期建议/);
 });

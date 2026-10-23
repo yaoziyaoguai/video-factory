@@ -53,6 +53,28 @@ function shot(scenePosition: number, preferredProviderId: string): VisualDirecto
 }
 
 describe("validateVisualDirectorPlan", () => {
+  it("enforces visual source mode independently of cost permission and allows generated master reuse", () => {
+    const options: VisualDirectorPlanValidation = {
+      scenePositions: [1], allowedProviderIds: ["pexels-stock-v1", "seedance-video-v1"],
+      generativeProviderIds: ["seedance-video-v1"], estimatedCnyPerClip: { "seedance-video-v1": 0 },
+      economics: { recipeId: "free-stock", allowMeteredProviders: true },
+    };
+    assert.throws(() => validateVisualDirectorPlan(plan([shot(1, "seedance-video-v1")]), options), /免费画面/);
+    assert.equal(validateVisualDirectorPlan(plan([shot(1, "pexels-stock-v1")]), options).shots.length, 1);
+    options.economics.recipeId = "generated-only";
+    assert.throws(() => validateVisualDirectorPlan(plan([shot(1, "pexels-stock-v1")]), options), /全部生成/);
+    assert.equal(validateVisualDirectorPlan(plan([shot(1, "seedance-video-v1")]), options).shots.length, 1);
+    options.scenePositions = [1, 2];
+    const reused = plan([shot(1, "seedance-video-v1"), { ...shot(2, "seedance-video-v1"), authenticityPolicy: "illustrative", reuseFromScenePosition: 1 }]);
+    assert.equal(validateVisualDirectorPlan(reused, options).shots[1]!.reuseFromScenePosition, 1);
+    options.economics.recipeId = "keyshot-ai";
+    assert.equal(validateVisualDirectorPlan(plan([shot(1, "seedance-video-v1"), shot(2, "pexels-stock-v1")]), options).shots.length, 2);
+    options.economics.recipeId = "generated-only";
+    const evidence = plan([{ ...shot(1, "seedance-video-v1"), authenticityPolicy: "evidence" }]);
+    options.scenePositions = [1];
+    assert.throws(() => validateVisualDirectorPlan(evidence, options), /evidence.*generative/);
+  });
+
   it("leaves lexical claims to semantic review while retaining the evidence-provider boundary", () => {
     const options: VisualDirectorPlanValidation = { scenePositions: [1], allowedProviderIds: ["seedance-video-v1"],
       generativeProviderIds: ["seedance-video-v1"], estimatedCnyPerClip: { "seedance-video-v1": 1 }, economics };

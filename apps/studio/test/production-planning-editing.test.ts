@@ -671,6 +671,43 @@ describe("planningStageId editing API (B4-REMAINDER)", () => {
     assert.equal(planning.status, "stale", "the asset-source adjustment must invalidate the joint planning node");
   });
 
+  it("validates visual source modes on the server and replans when the mode changes", async (t) => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-source-mode-server-"));
+    const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };
+    const generated = { id: "wan-video-v1", label: "受控 AI 视频", billing: "metered" as const, modes: ["AI"], deliveryTypes: ["generated_video" as const], estimatedCnyPerClip: 1, generative: true };
+    const pipeline = new ProductionPipeline({ workspaceRoot, ...editingAgents(spies), worker: new EditingWorker(),
+      assetProviders: [...EDITING_ASSET_PROVIDERS, generated],
+      providerRuntimeMetadata: [{ id: "wan-video-v1", label: "受控 AI 视频", modelId: "wan-video", transport: "http_api",
+        billing: "metered", estimatedCostCny: 1, maxAttempts: 1, approvalPolicy: "manual" }] });
+    const studio = new ProductionStudio({ workspaceRoot, pipeline,
+      archiveStore: { list: async () => [], add: async () => {}, remove: async () => {} },
+      listProviders: async () => [...editingProviders(), { ...generated, capability: "asset.prepare", kind: "external" as const, available: true }],
+    });
+    const brief = editingBrief();
+    const first = await pipeline.start({ ...brief, providers: { ...brief.providers, assets: "ai-shot-router-v1" },
+      visualReviewPolicy: "allow_unreviewed_first_cut" });
+    const before = await pipeline.loadPersisted(first.id);
+    const callsBefore = spies.directorCalls;
+    await assert.rejects(() => studio.applyNodeExecutionConfiguration(first.id, "assets", {
+      expectedRunRevision: before.revision, assetProviderIds: ["wan-video-v1"], economics: { recipeId: "free-stock", allowMeteredProviders: true },
+    }, "producer"), /画面来源模式/);
+    await assert.rejects(() => studio.applyNodeExecutionConfiguration(first.id, "assets", {
+      expectedRunRevision: before.revision, assetProviderIds: ["local-editorial-v1"], economics: { recipeId: "generated-only", allowMeteredProviders: true },
+    }, "producer"), /画面来源模式/);
+    assert.deepEqual(await pipeline.loadPersisted(first.id), before);
+    const accepted = await studio.applyNodeExecutionConfiguration(first.id, "assets", {
+      expectedRunRevision: before.revision, assetProviderIds: ["wan-video-v1"], economics: { recipeId: "keyshot-ai", allowMeteredProviders: true },
+    }, "producer");
+    const apply = t.mock.method(pipeline, "applyNodeExecutionConfiguration");
+    const changed = await studio.applyNodeExecutionConfiguration(first.id, "assets", {
+      expectedRunRevision: accepted.revision, assetProviderIds: ["wan-video-v1"], economics: { recipeId: "generated-only", allowMeteredProviders: true },
+    }, "producer");
+    assert.equal(apply.mock.calls[0]?.arguments[1], "creative-planning", "mode-only changes replan even with the same source IDs");
+    assert.equal(changed.nodes.find(node => node.id === "assets")?.executionConfiguration?.economics?.recipeId, "generated-only");
+    assert.equal(changed.nodes.find(node => node.id === "creative-planning")?.status, "stale");
+    assert.equal(spies.directorCalls, callsBefore, "configuration does not generate a new plan or buy media");
+  });
+
   it("persists a free-to-AI source switch without generating, buying, approving, or changing another run", async () => {
     const workspaceRoot = await mkdtemp(path.join(tmpdir(), "vf-assets-config-only-"));
     const spies: EditingSpies = { treatmentCalls: [], screenwriterCalls: [], directorCalls: 0, directorModels: [] };

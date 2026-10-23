@@ -426,3 +426,6 @@ export { DocumentCommandStore, DocumentCommandConflictError, DocumentCommandPend
 export type { DocumentCommandRecord } from "./document-command.js";
 export type { CliDependencies } from "./cli.js";
 export { SourceAssetPilotReviewer, type AssetPilotReviewer, type AssetPilotReviewInput, type AssetPilotReviewResult } from "./asset-pilot-review.js";
+
+export { parseBackgroundMusicMix } from "./background-music.js";
+export type { BackgroundMusicMix, ProductionBackgroundMusic } from "./background-music.js";
