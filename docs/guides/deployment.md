@@ -24,3 +24,16 @@ docker ps --filter name=video_factory_prod
 发布失败会保留私有备份在 `/var/backups/video-factory/frame-<run>-<attempt>/`，自动尝试恢复原容器。新版本若已修改 Agent 数据，会先保留失败现场，再取回升级前的 Agent 数据。SSH 排查先核对 Actions 的失败步骤、健康接口的版本与容器状态；原始服务器环境文件和含用户内容的日志不应贴到公开 issue。
 
 若在运行一段时间后决定手动回退，先停新写入并另作一次备份，再选择要恢复的版本与数据时间点；直接恢复旧数据库会丢掉上线后的新创作。仅重新启动旧代码不能撤销数据迁移。
+
+## 阿里云出口：按真实目标分流
+
+现有 ECS 的 OpenVPN 隧道在宿主机，容器使用宿主路由。生产环境的 `FRAME_HTTP_PROXY`、`FRAME_HTTPS_PROXY` 默认留空，不把所有请求交给同一个 HTTP 代理。
+
+| 实际目的地 | 路径 |
+| --- | --- |
+| OpenAI API（文本、图片、语音、Web Search）、Pexels、Wikimedia、FreeToUse、Incompetech | 境外出口。OpenAI 的流式请求及语音 WebSocket 使用同一 API 域名。 |
+| 火山方舟北京、百炼大陆、MiniMax 中国站，以及已核实的国内媒体下载域名 | 阿里云物理出口直连。不要把同一品牌的国际站一起归为国内。 |
+| 同机 NewsNow 等热点服务 | `video-factory-trends` 内网，用配置的服务地址。 |
+| 抖音与 TikTok 榜单 | 按实际榜源路由：Frame 访问 DataXAPI 和 Kabo；中文榜单不表示请求一定发往国内平台服务器。 |
+
+接口和媒体下载可能使用不同 CDN。现有国内域名清单在 [domestic-service-hosts.txt](../../scripts/domestic-service-hosts.txt)，宿主定时用 [刷新脚本](../../scripts/refresh-domestic-routes.py)补充解析结果。对新下载域名，先从容器确认域名、由宿主按容器来源核实出口，再决定是否加入清单；不要将所有阿里云 OSS、国际 CDN 或整个供应商品牌硬编码成一条线路。VPN 配置、节点、凭据不进入仓库。未带 Key 的探测能证实连通性，不能证实模型额度或一次真实生成。

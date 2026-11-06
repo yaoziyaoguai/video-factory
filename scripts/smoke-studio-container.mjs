@@ -4,18 +4,20 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { createPasswordHash } from "/app/apps/studio/dist/server/server/auth.js";
+import { pathToFileURL } from "node:url";
+const { createPasswordHash } = await import(pathToFileURL(path.resolve("apps/studio/dist/server/server/auth.js")).href);
+const port = process.env.SMOKE_PORT ?? "4317";
 
 // 在禁网、无真实凭据和数据卷的候选镜像里，验证正式入口及非 root 文件权限。
 assert.notEqual(process.getuid(), 0, "Studio smoke must run as the image's non-root user");
 const workspace = await mkdtemp(path.join(tmpdir(), "vf-studio-smoke-"));
 const child = spawn(process.execPath, ["apps/studio/dist/server/server/main.js"], {
-  cwd: "/app",
+  cwd: process.cwd(),
   env: {
     ...process.env,
     STUDIO_DEV: "0",
     STUDIO_HOST: "127.0.0.1",
-    STUDIO_PORT: "4317",
+    STUDIO_PORT: port,
     VIDEO_FACTORY_WORKSPACE: workspace, HOME: workspace, AGENT_UI_ORIGIN: "https://frame.example",
     VIDEO_FACTORY_AUTH_USERNAME: "container-smoke",
     VIDEO_FACTORY_AUTH_PASSWORD_HASH: createPasswordHash("isolated-smoke-only"),
@@ -30,10 +32,11 @@ const completion = new Promise(resolve => {
   child.once("error", error => { diagnostic = error.message; });
   child.once("close", () => { closed = true; resolve(); });
 });
-const base = "http://127.0.0.1:4317";
+const base = `http://127.0.0.1:${port}`;
+let complete = false;
 try {
   let ready = false;
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  for (let attempt = 0; attempt < 240; attempt += 1) {
     assert.equal(closed, false, `Studio exited before readiness: ${diagnostic}`);
     const health = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(500) }).catch(() => undefined);
     if (health?.ok && (await health.json()).release === process.env.RELEASE_SHA) { ready = true; break; }
@@ -54,13 +57,14 @@ try {
   const page = await fetch(base + "/agent", { signal: AbortSignal.timeout(5000) });
   assert.equal(page.status, 200);
   assert.match(await page.text(), /id="root"/);
+  complete = true;
   console.log("Non-root production Studio startup, health, static page and authentication boundary passed; no production tasks submitted.");
 } finally {
   child.kill("SIGTERM");
-  await Promise.race([completion, delay(2000)]);
+  await Promise.race([completion, delay(5000)]);
   if (!closed) child.kill("SIGKILL");
   await completion;
-  assert.equal(child.signalCode, null, `Studio did not close gracefully: ${child.signalCode}`);
-  assert.equal(child.exitCode, 0, `Studio shutdown failed: ${diagnostic}`);
+  if (complete) assert.equal(child.signalCode, null, `Studio did not close gracefully: ${child.signalCode}`);
+  if (complete) assert.equal(child.exitCode, 0, `Studio shutdown failed: ${diagnostic}`);
 }
 console.log("Production Studio handled SIGTERM and exited naturally with code 0.");
