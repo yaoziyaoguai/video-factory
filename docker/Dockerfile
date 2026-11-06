@@ -1,104 +1,34 @@
-ARG NODE_IMAGE=node:22-alpine
-
-FROM ${NODE_IMAGE} AS dependencies
-
-ARG ALPINE_MIRROR
-ARG NPM_REGISTRY
-ARG NODE_DIST_URL
-
+FROM node:22-bookworm-slim AS build
 WORKDIR /app
-RUN if [ -n "$ALPINE_MIRROR" ]; then \
-      sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR%/}|g" /etc/apk/repositories; \
-    fi \
-    && apk add --no-cache python3 make g++
-COPY package.json package-lock.json ./
-COPY apps/codex-broker/package.json apps/codex-broker/package.json
-COPY apps/studio/package.json apps/studio/package.json
-COPY packages/production-pipeline/package.json packages/production-pipeline/package.json
-COPY packages/template-core/package.json packages/template-core/package.json
-COPY packages/workflow-core/package.json packages/workflow-core/package.json
-RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi \
-    && if [ -n "$NODE_DIST_URL" ]; then npm_config_disturl="$NODE_DIST_URL" npm ci; else npm ci; fi
-
-FROM dependencies AS builder
-
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ git ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY package*.json ./
+COPY apps/codex-broker/package.json apps/codex-broker/
+COPY apps/studio/package.json apps/studio/
+COPY packages/production-pipeline/package.json packages/production-pipeline/
+COPY packages/template-core/package.json packages/template-core/
+COPY packages/workflow-core/package.json packages/workflow-core/
+RUN npm ci --no-audit --no-fund
 COPY . .
-RUN npm run build
+RUN npm run studio:build && npm prune --omit=dev --no-audit --no-fund && mkdir -p apps/studio/node_modules
 
-FROM dependencies AS production-dependencies
-
-RUN npm prune --omit=dev
-
-FROM ${NODE_IMAGE} AS runtime
-
-ARG ALPINE_MIRROR
-
-ENV NODE_ENV=production \
-    STUDIO_HOST=0.0.0.0 \
-    STUDIO_PORT=4317 \
-    VIDEO_FACTORY_WORKSPACE=/data/factory \
-    PYTHONUNBUFFERED=1
-
-RUN if [ -n "$ALPINE_MIRROR" ]; then \
-      sed -i "s|https://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR%/}|g" /etc/apk/repositories; \
-    fi \
-    && apk add --no-cache \
-      ca-certificates \
-      ffmpeg \
-      font-noto-cjk \
-      py3-pillow \
-      python3 \
-      tar
-
+FROM node:22-bookworm-slim
+ENV NODE_ENV=production STUDIO_HOST=0.0.0.0 STUDIO_PORT=4317 VIDEO_FACTORY_WORKSPACE=/data/factory HOME=/data/factory
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk ca-certificates git && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 1001 frame && useradd -u 1001 -g frame -d /data/factory frame && install -d -o frame -g frame /data/factory
 WORKDIR /app
-
-COPY pyproject.toml ./
-COPY src ./src
-COPY examples ./examples
-
-COPY --from=production-dependencies /app/node_modules ./node_modules
-COPY package.json package-lock.json ./
-COPY apps/codex-broker/package.json apps/codex-broker/package.json
-COPY packages/production-pipeline/package.json packages/production-pipeline/package.json
-COPY packages/template-core/package.json packages/template-core/package.json
-COPY packages/workflow-core/package.json packages/workflow-core/package.json
-COPY --from=builder /app/packages/production-pipeline/dist packages/production-pipeline/dist
-COPY --from=builder /app/packages/template-core/dist packages/template-core/dist
-COPY --from=builder /app/packages/workflow-core/dist packages/workflow-core/dist
-COPY apps/studio/package.json apps/studio/package.json
-COPY --from=builder /app/apps/studio/dist apps/studio/dist
-# 仅供宿主机部署脚本 docker cp 提取到 systemd 服务；容器内的 app 不启动 broker。
-COPY apps/codex-broker/package.json apps/codex-broker/package.json
-COPY --from=builder /app/apps/codex-broker/dist apps/codex-broker/dist
-# 宿主机只提取 apps/codex-broker；仅携带轻量协议合同，不加载 pipeline 运行时。
-COPY --from=production-dependencies /app/node_modules/undici apps/codex-broker/node_modules/undici
-COPY packages/production-pipeline/package.json apps/codex-broker/node_modules/@video-factory/production-pipeline/package.json
-COPY --from=builder /app/packages/production-pipeline/dist/model-connection.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/model-connection.js
-COPY --from=builder /app/packages/production-pipeline/dist/model-attempt-usage.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/model-attempt-usage.js
-COPY --from=builder /app/packages/production-pipeline/dist/audio-review.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/audio-review.js
-COPY --from=builder /app/packages/production-pipeline/dist/diagnostics.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/diagnostics.js
-COPY --from=builder /app/packages/production-pipeline/dist/maintenance.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/maintenance.js
-COPY --from=builder /app/packages/production-pipeline/dist/visual-evidence-boundary.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/visual-evidence-boundary.js
-COPY --from=builder /app/packages/production-pipeline/dist/character-script.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/character-script.js
-COPY --from=builder /app/packages/production-pipeline/dist/executable-timeline.js apps/codex-broker/node_modules/@video-factory/production-pipeline/dist/executable-timeline.js
-COPY apps/codex-broker/deploy apps/codex-broker/deploy
-# 备份恢复验证工具（R2）：部署脚本在隔离容器内用它核对恢复副本，不进业务运行时。
-COPY scripts/verify-production-backup.mjs scripts/verify-production-backup.mjs
-
-# 宿主机的私密 umask 可能让源码为 0600；镜像应用文件必须可被非 root 用户读取。
-# /app 只含构建产物和代码，运行凭据与用户数据在镜像之外，保持各自的严格权限。
-RUN addgroup --system --gid 1001 video-factory \
-    && adduser --system --uid 1001 --ingroup video-factory --home /app video-factory \
-    && mkdir -p /data/factory \
-    && chown -R video-factory:video-factory /data \
-    && chmod -R a+rX /app
-
-USER video-factory
-
+COPY --from=build --chown=frame:frame /app/node_modules ./node_modules
+COPY --from=build --chown=frame:frame /app/apps/studio/node_modules apps/studio/node_modules
+COPY --chown=frame:frame package.json ./
+COPY --chown=frame:frame apps/studio/package.json apps/studio/
+COPY --from=build --chown=frame:frame /app/apps/studio/dist apps/studio/dist
+COPY --chown=frame:frame apps/studio/skills apps/studio/skills
+COPY --chown=frame:frame packages/production-pipeline/package.json packages/production-pipeline/
+COPY --chown=frame:frame packages/template-core/package.json packages/template-core/
+COPY --chown=frame:frame packages/workflow-core/package.json packages/workflow-core/
+COPY --from=build --chown=frame:frame /app/packages/production-pipeline/dist packages/production-pipeline/dist
+COPY --from=build --chown=frame:frame /app/packages/template-core/dist packages/template-core/dist
+COPY --from=build --chown=frame:frame /app/packages/workflow-core/dist packages/workflow-core/dist
+USER frame
 EXPOSE 4317
-VOLUME ["/data/factory"]
-
-HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=6 \
-  CMD ["node", "-e", "fetch('http://127.0.0.1:4317/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
-
-CMD ["node", "apps/studio/dist/server/server/main.js"]
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=4 CMD node -e "fetch('http://127.0.0.1:4317/api/health').then(async r=>{if(!r.ok||(await r.json()).product!=='frame')process.exit(1)}).catch(()=>process.exit(1))"
+CMD ["node","apps/studio/dist/server/server/main.js"]

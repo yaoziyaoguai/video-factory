@@ -16,7 +16,7 @@ const child = spawn(process.execPath, ["apps/studio/dist/server/server/main.js"]
     STUDIO_DEV: "0",
     STUDIO_HOST: "127.0.0.1",
     STUDIO_PORT: "4317",
-    VIDEO_FACTORY_WORKSPACE: workspace,
+    VIDEO_FACTORY_WORKSPACE: workspace, HOME: workspace, AGENT_UI_ORIGIN: "https://frame.example",
     VIDEO_FACTORY_AUTH_USERNAME: "container-smoke",
     VIDEO_FACTORY_AUTH_PASSWORD_HASH: createPasswordHash("isolated-smoke-only"),
     VIDEO_FACTORY_AUTH_SESSION_SECRET: "isolated-smoke-only-not-a-production-secret",
@@ -36,12 +36,22 @@ try {
   for (let attempt = 0; attempt < 60; attempt += 1) {
     assert.equal(closed, false, `Studio exited before readiness: ${diagnostic}`);
     const health = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(500) }).catch(() => undefined);
-    if (health?.ok && (await health.json()).status === "ok") { ready = true; break; }
+    if (health?.ok && (await health.json()).release === process.env.RELEASE_SHA) { ready = true; break; }
     await delay(250);
   }
   assert.equal(ready, true, `Studio never became ready: ${diagnostic}`);
-  assert.equal((await fetch(`${base}/api/runs`, { signal: AbortSignal.timeout(5000) })).status, 401);
-  const page = await fetch(base, { signal: AbortSignal.timeout(5000) });
+  for (const route of ["/bootstrap", "/settings/model-connections"]) {
+    assert.equal((await fetch(base + "/api/agent/v1" + route)).status, 401);
+  }
+  const login = await fetch(base + "/api/auth/login", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({username:"container-smoke",password:"isolated-smoke-only"})});
+  assert.equal(login.status, 200);
+  const cookie = login.headers.get("set-cookie").split(";")[0];
+  const skills = await fetch(base + "/api/agent/v1/settings/skills", { headers: {cookie} });
+  assert.equal(skills.status, 200);
+  assert.ok((await skills.json()).skills.some(s => s.id === "travel-prompt-kit"), "Missing built-in skill in the production image");
+  const created = await fetch(base + "/api/agent/v1/conversations", {method:"POST", headers:{ cookie, origin:"https://frame.example", "content-type":"application/json", "x-video-factory-request":"studio"}, body:JSON.stringify({commandId:"cmd-container-smoke", title:"Container smoke"})});
+  assert.equal(created.status, 201, await created.text());
+  const page = await fetch(base + "/agent", { signal: AbortSignal.timeout(5000) });
   assert.equal(page.status, 200);
   assert.match(await page.text(), /id="root"/);
   console.log("Non-root production Studio startup, health, static page and authentication boundary passed; no production tasks submitted.");

@@ -875,70 +875,10 @@ rollback_broker
     assert.match(deployJob, /appleboy\/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345/);
     assert.match(deployJob, /git -C "\$PROJECT_PATH" fetch "\$bundle_path" HEAD/);
     assert.match(deployJob, /test "\$\(git -C "\$PROJECT_PATH" rev-parse FETCH_HEAD\)" = "\$RELEASE_SHA"/);
-    assert.match(deployJob, /trap 'rm -f "\$bundle_path"' EXIT/);
+    assert.match(deployJob, /trap 'rm -f "\$bundle_path" "\$image"' EXIT/);
     assert.doesNotMatch(deployJob, /git fetch origin/);
   });
 
-  it("preserves an explicit boolean cold backup opt-out across Actions and SSH while defaulting to backup", async () => {
-    const workflow = await readFile(path.join(repositoryRoot, ".github", "workflows", "ci-cd.yml"), "utf8");
-    assert.match(workflow, /backup_existing_data:\n\s+description:.*\n\s+type: boolean\n\s+default: true/);
-    assert.ok(workflow.includes("BACKUP_EXISTING_DATA: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.backup_existing_data) == 'false' && 'false' || 'true' }}"));
-    assert.match(workflow, /envs: [^\n]*EXPECTED_PREVIOUS_RELEASE,BACKUP_EXISTING_DATA/);
-    assert.ok(workflow.includes('[[ "$BACKUP_EXISTING_DATA" == true || "$BACKUP_EXISTING_DATA" == false ]]'));
-    assert.ok(workflow.includes('[[ "$BACKUP_EXISTING_DATA" == true || "$UPGRADE_MODE" == cold ]]'));
-    assert.ok(workflow.includes('VIDEO_FACTORY_BACKUP_EXISTING_DATA="$BACKUP_EXISTING_DATA"'));
-  });
-
-  it("gives the maintenance parent only group traversal and preserves private rollback files", async () => {
-    const deploy = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
-    const workflow = await readFile(path.join(repositoryRoot, ".github", "workflows", "ci-cd.yml"), "utf8");
-    const deployInstall = deploy.match(/^install -d -o root -g vf-bridge -m 0710 "\$deployment_state"$/m)?.[0];
-    const workflowInstall = workflow.match(/install -d -o root -g vf-bridge -m 0710 "\$\(dirname "\$rollback_config"\)"/)?.[0];
-    assert.ok(deployInstall);
-    assert.ok(workflowInstall);
-    const directory = await mkdtemp(path.join(tmpdir(), "vf-maintenance-parent-"));
-    const parent = path.join(directory, "deployment");
-    const privateFile = path.join(parent, "before-release.json");
-    try {
-      await mkdir(parent, { mode: 0o700 });
-      await writeFile(privateFile, "private-fixture\n", { mode: 0o600 });
-      const before = await stat(privateFile);
-      for (const command of [deployInstall, workflowInstall]) {
-        // 本机测试实际模式与文件保全；root/vf-bridge 的跨用户边界另由 Linux 服务身份核验。
-        await execFileAsync("bash", ["-c", `umask 077\n${command.replace(" -o root -g vf-bridge", "")}`], {
-          env: { ...process.env, deployment_state: parent, rollback_config: privateFile },
-        });
-        assert.equal((await stat(parent)).mode & 0o7777, 0o710);
-        const after = await stat(privateFile);
-        assert.equal(after.mode & 0o7777, 0o600);
-        assert.equal(after.ino, before.ino);
-        assert.equal(await readFile(privateFile, "utf8"), "private-fixture\n");
-      }
-    } finally { await rm(directory, { recursive: true, force: true }); }
-  });
-
-  for (const cold of [false, true]) {
-    it(`refuses inaccessible maintenance before ${cold ? "cold" : "online"} writer shutdown`, async () => {
-      const result = await runDeployFailureScenario("success", { cold, env: { TEST_MAINTENANCE_ACCESS_FAILS: "1" } });
-      assert.match(result.stderr, /DeepSeek broker cannot access the shared maintenance directory/);
-      assert.match(result.trace, /maintenance-access:-u vf-deepseek-codex -g vf-bridge/);
-      assert.doesNotMatch(result.trace, /ingress:enter|cold:stop-|compose[^\n]* stop |systemctl:stop |systemctl:restart |backup:|compose[^\n]* up /);
-      assert.equal(result.gateAfter, result.gateBefore);
-      assert.equal(result.appRunning, true);
-      assert.equal(result.appRelease, "b".repeat(40));
-      assert.match(result.currentRelease, /previous$/);
-      assert.equal(result.unitBackupsRemaining, false);
-    });
-  }
-
-  for (const scenario of ["tracked", "untracked"] as const) {
-    it(`refuses to build a release checkout with ${scenario} changes`, async () => {
-      const stderr = await runDirtyReleaseScenario(scenario);
-
-      assert.match(stderr, /Release checkout is not clean; refusing to build/);
-      assert.match(stderr, scenario === "tracked" ? /tracked\.txt/ : /local-only\.txt/);
-    });
-  }
 
   it("checks a reused GitHub release worktree before checkout can hide local files", async () => {
     const workflow = await readFile(path.join(repositoryRoot, ".github", "workflows", "ci-cd.yml"), "utf8");

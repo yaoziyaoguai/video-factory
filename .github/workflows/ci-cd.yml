@@ -1,239 +1,124 @@
 name: CI/CD
-
 on:
-  workflow_dispatch:
-    inputs:
-      upgrade_mode:
-        description: "Maintenance protocol upgrade (cold temporarily closes this site)"
-        type: choice
-        options: [online, cold]
-        default: online
-      expected_previous_release:
-        description: "Required for cold: exact last successful production SHA"
-        type: string
-        default: ""
-      backup_existing_data:
-        description: "Back up existing data (disable only for an authorized cold release without historical data retention)"
-        type: boolean
-        default: true
-  pull_request:
-    branches: [main]
   push:
     branches: [main]
-
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 permissions:
   contents: read
 
 jobs:
   verify:
-    name: Test and build
+    name: Test and build Frame
     concurrency:
       group: video-factory-verify-${{ github.ref }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Pull the official Node base image before running tests
-        run: timeout 120 docker pull docker.io/library/node:22-alpine
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: 22
           cache: npm
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
           cache: pip
       - name: Install media test dependencies
         run: |
-          # runner 默认 Azure 镜像曾卡住索引更新；使用同一 Ubuntu 官方仓库的 HTTPS 源。
           sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes ffmpeg fonts-noto-cjk
-      - run: npm ci
-      - run: python -m pip install -e .
-      - run: PYTHONPATH=src python -m unittest discover -s tests
-      - run: npm test
-      - run: bash -n scripts/deploy-production.sh scripts/backup-production.sh scripts/setup-codex-broker-host.sh scripts/setup-deepseek-codex-broker-host.sh
-      - run: docker compose --env-file .env.docker.prod.example -f docker/docker-compose.prod.yml config --quiet
-      - name: Reproduce private-umask release checkout permissions
-        run: chmod -R go-rwx apps packages src examples
-      - run: >-
-          docker build
-          --build-arg NODE_IMAGE=docker.io/library/node:22-alpine
-          --file docker/Dockerfile
-          --tag video-factory:ci .
-      - name: Boot production Studio as the image user without network or credentials
-        run: >-
-          docker run --rm --network none
-          --mount type=bind,src=${{ github.workspace }}/scripts/smoke-studio-container.mjs,dst=/tmp/smoke-studio-container.mjs,readonly
-          --entrypoint node video-factory:ci /tmp/smoke-studio-container.mjs
-      - name: Verify Flickr through packaged Python worker
-        run: >-
-          docker run --rm --network none
-          --mount type=bind,src=${{ github.workspace }}/tests,dst=/tmp/vf-tests,readonly
-          --env PYTHONPATH=/app/src --entrypoint python3 video-factory:ci
-          -m unittest discover -s /tmp/vf-tests -p test_flickr.py
-      - name: Render a Linux container smoke video
-        run: >-
-          docker run --rm --network none video-factory:ci
-          node packages/production-pipeline/dist/cli.js run
-          examples/briefs/linux-container-smoke.json
-          --workspace /tmp/video-factory-smoke
-
-  security:
-    name: Dependency security
-    concurrency:
-      group: video-factory-security-${{ github.ref }}
-      cancel-in-progress: true
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
+          sudo apt-get -o Acquire::Retries=2 update
+          sudo apt-get install -y ffmpeg fonts-noto-cjk
+          python -m pip install -e . jsonschema==4.25.1
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
+      - run: npm run contracts:check && python contracts/agent/v1/verify-openapi.py
+      - run: PYTHONPATH=src python -m unittest discover -s tests
+      - run: npm test
+      - run: bash -n scripts/deploy-frame.sh
+      - name: Build and boot the production image without network or credentials
+        run: |
+          image=video-factory:release-$GITHUB_SHA
+          docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" -f docker/Dockerfile -t "$image" .
+          docker run --rm --read-only --tmpfs /tmp:rw,mode=1777 --network none \
+            -v "$PWD/scripts/smoke-studio-container.mjs:/tmp/smoke-studio-container.mjs:ro" \
+            -e RELEASE_SHA="$GITHUB_SHA" --entrypoint node "$image" /tmp/smoke-studio-container.mjs
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then docker save "$image" | gzip -1 > frame-image.tar.gz; fi
+      - uses: actions/upload-artifact@v4
+        if: github.ref == 'refs/heads/main'
+        with:
+          name: frame-image
+          path: frame-image.tar.gz
+          compression-level: 0
+          retention-days: 1
 
   deploy:
     name: Deploy to Alibaba ECS
+    needs: verify
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     concurrency:
       group: video-factory-production
       cancel-in-progress: false
-    runs-on: ubuntu-latest
-    needs: [verify, security]
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     environment: production
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Skip a superseded release
+        with: {fetch-depth: 0}
+      - name: Select current main
         id: latest
         run: |
-          latest_sha="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
-          test -n "$latest_sha"
-          if [[ "$latest_sha" == "$GITHUB_SHA" ]]; then
-            echo 'current=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'current=false' >> "$GITHUB_OUTPUT"
-            echo 'A newer main commit exists; skipping this deployment.'
-          fi
-      - name: Package the verified commit
+          latest="$(git ls-remote --exit-code origin refs/heads/main | cut -f1)"
+          if [[ "$latest" == "$GITHUB_SHA" ]]; then echo current=true >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/download-artifact@v4
+        if: steps.latest.outputs.current == 'true'
+        with: {name: frame-image}
+      - name: Package the tested release
         if: steps.latest.outputs.current == 'true'
         run: |
           git bundle create "video-factory-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.bundle" HEAD
-          test "$(git bundle list-heads "video-factory-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.bundle" | awk '$2 == "HEAD" { print $1 }')" = "$GITHUB_SHA"
-      - name: Transfer release bundle
+          mv frame-image.tar.gz "frame-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+      - uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345
         if: steps.latest.outputs.current == 'true'
-        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: video-factory-release-${{ github.run_id }}-${{ github.run_attempt }}.bundle
+          source: "video-factory-release-*.bundle,frame-*.tar.gz"
           target: /tmp
-          overwrite: true
-      - name: Deploy with rollback
+          command_timeout: 35m
+      - uses: appleboy/ssh-action@2ead5e36573f08b82fbfce1504f1a4b05a647c6f
         if: steps.latest.outputs.current == 'true'
-        uses: appleboy/ssh-action@2ead5e36573f08b82fbfce1504f1a4b05a647c6f # v1.2.2
         env:
           PROJECT_PATH: ${{ secrets.PROJECT_PATH }}
           PUBLIC_HEALTH_URL: ${{ secrets.PUBLIC_HEALTH_URL }}
           RELEASE_SHA: ${{ github.sha }}
           DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
-          UPGRADE_MODE: ${{ inputs.upgrade_mode || 'online' }}
-          EXPECTED_PREVIOUS_RELEASE: ${{ inputs.expected_previous_release || '' }}
-          BACKUP_EXISTING_DATA: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.backup_existing_data) == 'false' && 'false' || 'true' }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 40m
-          envs: PROJECT_PATH,PUBLIC_HEALTH_URL,RELEASE_SHA,DEPLOY_RUN,UPGRADE_MODE,EXPECTED_PREVIOUS_RELEASE,BACKUP_EXISTING_DATA
+          envs: PROJECT_PATH,PUBLIC_HEALTH_URL,RELEASE_SHA,DEPLOY_RUN
           script: |
             set -euo pipefail
             umask 077
-            [[ "$DEPLOY_RUN" =~ ^[0-9]+-[0-9]+$ ]]
-            [[ "$UPGRADE_MODE" == online || "$UPGRADE_MODE" == cold ]]
-            [[ "$BACKUP_EXISTING_DATA" == true || "$BACKUP_EXISTING_DATA" == false ]]
-            [[ "$BACKUP_EXISTING_DATA" == true || "$UPGRADE_MODE" == cold ]]
-            if [[ "$UPGRADE_MODE" == cold ]]; then
-              [[ "$EXPECTED_PREVIOUS_RELEASE" =~ ^[0-9a-f]{40}$ ]]
-            fi
             bundle_path="/tmp/video-factory-release-${DEPLOY_RUN}.bundle"
-            release_path="${PROJECT_PATH}.release"
-            trap 'rm -f "$bundle_path"' EXIT
-            test -f "$bundle_path"
+            image="/tmp/frame-${DEPLOY_RUN}.tar.gz"
+            trap 'rm -f "$bundle_path" "$image"' EXIT
             exec 9>/var/lock/video-factory-deploy.lock
             flock -w 2400 9
             cd "$PROJECT_PATH"
-            maintenance="$PROJECT_PATH/.dogfood-maintenance.json"
-            if [[ -f "$maintenance" ]]; then
-              python3 - "$maintenance" "$RELEASE_SHA" <<'PY'
-            import json,sys,pathlib,os,stat
-            path=pathlib.Path(sys.argv[1]); info=path.lstat()
-            assert stat.S_ISREG(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o600
-            data=json.loads(path.read_text())
-            assert data['targetSha']==sys.argv[2] and data['status']=='cleaned_waiting_for_actions'
-            assert pathlib.Path(data['backup'],'SHA256SUMS').is_file()
-            PY
-            fi
-            git -C "$PROJECT_PATH" bundle verify "$bundle_path"
+            git bundle verify "$bundle_path"
             git -C "$PROJECT_PATH" fetch "$bundle_path" HEAD
             test "$(git -C "$PROJECT_PATH" rev-parse FETCH_HEAD)" = "$RELEASE_SHA"
-            last_release="$PROJECT_PATH/.last-successful-release"
-            if [[ -s "$last_release" ]]; then
-              git merge-base --is-ancestor "$(cat "$last_release")" "$RELEASE_SHA" || {
-                echo 'Refusing a release older than the last successful deployment.' >&2
-                exit 1
-              }
-            fi
-            # 在 checkout 之前保存旧版解析配置，并以容器实际环境覆盖已更新的 env 文件。
-            rollback_config="/opt/video-factory/codex-broker/deployment/before-${DEPLOY_RUN}.json"
-            # 共享维护目录在其下；仅允许 broker 组穿越，配置文件仍受 umask 077 保护。
-            install -d -o root -g vf-bridge -m 0710 "$(dirname "$rollback_config")"
-            if docker inspect video_factory_prod >/dev/null 2>&1; then
-              VIDEO_FACTORY_CODEX_SOCKET_GID="$(getent group vf-bridge | cut -d: -f3)" \
-                docker compose --project-name video-factory --env-file "$PROJECT_PATH/.env.docker.prod" \
-                -f "$release_path/docker/docker-compose.prod.yml" config --format json > "$rollback_config"
-              python3 - "$rollback_config" <<'PY'
-            import json,sys,subprocess,pathlib
-            path=pathlib.Path(sys.argv[1])
-            config=json.loads(path.read_text())
-            old=json.loads(subprocess.check_output(['docker','inspect','video_factory_prod']))[0]
-            config['services']['app']['environment']=dict(item.split('=',1) for item in old['Config']['Env'])
-            config['services']['app']['image']='video-factory:rollback'
-            config['services']['app'].pop('build',None)
-            path.write_text(json.dumps(config).replace('$','$$'))
-            PY
-            fi
+            if [[ -s .last-successful-release ]]; then git merge-base --is-ancestor "$(cat .last-successful-release)" "$RELEASE_SHA"; fi
+            release_path="${PROJECT_PATH}.release"
             if [[ -e "$release_path/.git" ]]; then
-              if ! release_status="$(git -C "$release_path" status --porcelain=v1 --untracked-files=all)"; then
-                echo "Unable to verify release worktree cleanliness; refusing to reuse it." >&2
-                exit 1
-              fi
-              if [[ -n "$release_status" ]]; then
-                echo "Release worktree is not clean; refusing to reuse it." >&2
-                printf '%s\n' "$release_status" >&2
-                exit 1
-              fi
+              if [[ -n "$(git -C "$release_path" status --porcelain=v1 --untracked-files=all)" ]]; then echo "Release worktree is not clean; refusing to reuse it" >&2; exit 1; fi
               git -C "$release_path" checkout --detach "$RELEASE_SHA"
-            elif [[ -e "$release_path" ]]; then
-              echo "Release path exists but is not a Git worktree: $release_path" >&2
-              exit 1
             else
               git worktree add --detach "$release_path" "$RELEASE_SHA"
             fi
-            test "$(git -C "$release_path" rev-parse HEAD)" = "$RELEASE_SHA"
-            VIDEO_FACTORY_ENV_FILE="$PROJECT_PATH/.env.docker.prod" \
-              VIDEO_FACTORY_ROLLBACK_COMPOSE_FILE="$rollback_config" \
-              VIDEO_FACTORY_UPGRADE_MODE="$UPGRADE_MODE" \
-              VIDEO_FACTORY_BACKUP_EXISTING_DATA="$BACKUP_EXISTING_DATA" \
-              VIDEO_FACTORY_EXPECTED_PREVIOUS_RELEASE="$EXPECTED_PREVIOUS_RELEASE" \
-              VIDEO_FACTORY_LAST_RELEASE_FILE="$last_release" \
-              PUBLIC_HEALTH_URL="$PUBLIC_HEALTH_URL" \
-              bash "$release_path/scripts/deploy-production.sh"
-            printf '%s\n' "$RELEASE_SHA" > "$last_release.partial"
-            mv "$last_release.partial" "$last_release"
-            if [[ -f "$maintenance" ]]; then mv "$maintenance" "$maintenance.consumed"; fi
+            docker load -i "$image"
+            bash "$release_path/scripts/deploy-frame.sh"
