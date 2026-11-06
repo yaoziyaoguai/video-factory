@@ -385,6 +385,30 @@ describe("workspace 状态合并与预览策略", () => {
 // —— 组件冒烟 ——
 
 describe("AgentWorkbench", () => {
+  it("没有当前文本模型也能编辑草稿，去配置再回来不会丢失或误发", async () => {
+    let models: Bootstrap["models"] = [];
+    const calls = installWorkbenchRoutes({ conversations: [], onRequest: url =>
+      url.endsWith("/bootstrap") ? { status: 200, body: { ...BOOTSTRAP, models } } : null });
+    const page = renderAt("/agent");
+    const example = "我想做一条视频，先一起聊聊想法";
+    await userEvent.click(screen.getByRole("button", { name: example }));
+    const input = screen.getByRole("textbox", { name: "消息输入" });
+    await userEvent.type(input, "{End}。{Enter}先聊结尾。");
+    const draft = example + "。\n先聊结尾。";
+    expect(input).toHaveValue(draft);
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "配置文本模型" }));
+    expect(await screen.findByText("添加你的第一个模型连接")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "返回对话" }));
+    expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue(draft);
+    page.unmount();
+    models = BOOTSTRAP.models;
+    renderAt("/agent");
+    await waitFor(() => expect(screen.getByRole("button", { name: "发送" })).toBeEnabled());
+    expect(screen.getByRole("textbox", { name: "消息输入" })).toHaveValue(draft);
+    expect(calls.filter(call => call.method === "POST")).toHaveLength(0);
+  });
+
   it("渲染三栏骨架：模型状态如实展示、会话列表来自 API、预览列表列出产物", async () => {
     const snapshot = snapshotFixture(conversationFixture("conv-1", "旅行视频讨论"), {
       messages: [

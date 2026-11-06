@@ -19,7 +19,7 @@ export function FrameSettings({ page, bootstrap, conversations, onConversation, 
   const [skillsVisited, setSkillsVisited] = useState(page === "skills");
   useEffect(() => { if (page === "skills") setSkillsVisited(true); }, [page]);
   return <section className="agent-settings-page" aria-label={framePageTitle[page]} hidden={page === "chat"}><div className="agent-settings-content">
-    <header className="agent-settings-heading"><h2>{framePageTitle[page]}</h2></header>
+    <header className="agent-settings-heading"><h2>{framePageTitle[page]}</h2>{page === "models" ? <button type="button" className="agent-text-link" onClick={() => onPage("chat")}>返回对话</button> : null}</header>
     {page === "models" ? <ModelConnectionsPanel onCatalogRefresh={onCatalogRefresh} /> : page === "services" ? <ServicesDirectory />
       : page === "library" ? <WorkLibrary /> : page === "profile" ? <ProfileEditor bootstrap={bootstrap} conversations={conversations} onConversation={onConversation} onPage={onPage} onLogout={onLogout} onCatalogRefresh={onCatalogRefresh} /> : null}
     {skillsVisited || page === "skills" ? <div hidden={page !== "skills"}><SkillPackagesPanel visible={page === "skills"} onCatalogRefresh={onCatalogRefresh} onMutationChange={onSkillMutationChange} /></div> : null}

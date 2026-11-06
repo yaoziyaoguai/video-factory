@@ -473,7 +473,7 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
   const updateDraftText = (text: string) => updateDraft({ text });
   const unbindTarget = () => updateDraft({ targetArtifactId: null, targetRevisionId: null });
   const bindTarget = (artifact: ArtifactHead) => updateDraft({ targetArtifactId: artifact.id, targetRevisionId: selection?.revisionId ?? artifact.revisionId, proposalId: null, proposalDigest: null });
-  const model = bootstrap?.models.find(entry => entry.kind === "text" && entry.isDefault) ?? bootstrap?.models.find(entry => entry.kind === "text") ?? null;
+  const model = bootstrap?.models.find(entry => entry.kind === "text" && entry.isDefault);
   // render没有模型条目；具体提案能否受理由服务端实际目录与受理事务判断。
   // 模拟媒体只指测试装配的目录条目；文本 features 已是用户备注，不决定运行状态（T2）。
   const isSimulated = bootstrap?.models.some(model => model.kind !== "text" && model.features.includes("offline-fixture")) ?? false;
@@ -959,13 +959,12 @@ export function AgentWorkbench({ onLogout }: { onLogout?: (() => Promise<void>) 
               {currentDraft.proposalId ? <div className="agent-target-chip"><span>回复《{view.proposals.find(p => p.id === currentDraft.proposalId)?.spec.title ?? "已选提案"}》 · 制作请发送「确认制作」，也可继续讨论</span><button type="button" onClick={() => updateDraft({ proposalId: null, proposalDigest: null })} aria-label="清除提案引用"><X /></button></div> : null}
               {currentDraft.targetArtifactId ? <div className="agent-target-chip">针对：{view.artifacts.find(item => item.id === currentDraft.targetArtifactId)?.title ?? "已选作品"}<button type="button" onClick={unbindTarget} aria-label="清除修改目标"><X /></button></div> : null}
               <div className="agent-composer-card">
-                <textarea ref={composerInput} value={currentDraft.text} onChange={event => updateDraftText(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} placeholder="说说想法，改改作品，或换件事聊…" disabled={!canSend} aria-label="消息输入" />
+                <textarea ref={composerInput} value={currentDraft.text} onChange={event => updateDraftText(event.target.value)} onKeyDown={event => { if (canSend && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} placeholder="说说想法，改改作品，或换件事聊…" aria-label="消息输入" aria-describedby="agent-composer-hint" />
                 <div className="agent-composer-tools"><label className="agent-skill-selector"><Sparkles /><select aria-label="指定 Skill" disabled={!!currentDraft.proposalId || Boolean(skillMutation)} value={skillId ?? ""} onChange={event => { setSkillId(event.target.value || null); setSkillNotice(""); }}><option value="">Skill · 自动选择</option>{bootstrap?.skills.map(skill => <option key={skill.id} value={skill.id}>{skill.name}</option>)}</select></label>
                   <div className="agent-send-actions">{view.activeRequestId ? <button type="button" disabled={!!currentDraft.proposalId || Boolean(skillMutation) || !currentDraft.text.trim() || sendingNow || !!pendingSend[conversationId!]} onClick={() => void sendMessage("steer")}>干预本轮</button> : null}<button className="agent-send" type="button" aria-label="发送" onClick={() => void sendMessage()} disabled={!canSend || Boolean(skillMutation) || !currentDraft.text.trim() || sendingNow || !!pendingSend[conversationId!]}><ArrowUp /></button></div>
                 </div>
               </div>
-              <span className="agent-composer-hint">Enter 发送 · Shift + Enter 换行</span>
-              {!canSend && bootstrap ? <button className="agent-text-link" type="button" onClick={() => setPage("models")}>查看文本模型状态</button> : null}
+              {canSend ? <span id="agent-composer-hint" className="agent-composer-hint">Enter 发送 · Shift + Enter 换行</span> : <div id="agent-composer-hint" className="agent-config-note" role="status">{bootstrap ? <>可以先写草稿，发送前请<button className="agent-text-link" type="button" onClick={() => setPage("models")}>配置文本模型</button>。</> : "可以先写草稿。"}</div>}
               {conversationId && pendingSend[conversationId] && !sendingNow ? <button type="button" className="agent-retry-send" onClick={() => void sendMessage("new", true)}>重试上次发送（保留原请求）</button> : null}
             </footer>
           </section>
