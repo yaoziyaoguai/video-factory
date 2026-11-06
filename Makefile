@@ -43,7 +43,7 @@ setup-local-runtime:
 	bash scripts/setup-local-runtime.sh
 
 setup-local-trends:
-	bash scripts/setup-local-trends.sh
+	bash scripts/local-trends.sh start
 
 local-trends-status:
 	bash scripts/local-trends.sh status

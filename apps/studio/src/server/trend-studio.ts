@@ -483,7 +483,7 @@ export function buildTrendSourceCatalog(
       status: localReady("trendradar") ? "ready" : "needs_config",
       description: "本地聚合中文热榜、RSS、排名轨迹与历史 SQLite，并为 Agent 提供 MCP 分析入口。",
       cadence: "建议 30 分钟",
-      requirement: localReady("trendradar") ? "本地采集器与 Web 报告已通过健康检查" : "运行 make setup-local-trends",
+      requirement: localReady("trendradar") ? "本地采集器与 Web 报告已通过健康检查" : "需单独部署旧版 TrendRadar",
       docsUrl: "https://github.com/sansan0/TrendRadar",
     },
     {
@@ -503,7 +503,7 @@ export function buildTrendSourceCatalog(
       status: localReady("dailyhot") ? "ready" : "needs_config",
       description: "本地统一 JSON / RSS 热榜接口，补充抖音、微博、快手、百度和垂类榜单。",
       cadence: "建议 30-60 分钟",
-      requirement: localReady("dailyhot") ? "本地 API 已接入统一热点网关" : "运行 make setup-local-trends",
+      requirement: localReady("dailyhot") ? "本地 API 已接入统一热点网关" : "需单独部署 DailyHot",
       docsUrl: "https://github.com/imsyy/DailyHotApi",
     },
     {
@@ -513,7 +513,7 @@ export function buildTrendSourceCatalog(
       status: localReady("rsshub") ? "ready" : "needs_config",
       description: "补充港台、新马、海外中文媒体和垂直社区，不把新闻更新误当成平台热度。",
       cadence: "按 Feed 更新",
-      requirement: localReady("rsshub") ? "本地 RSS 路由服务已通过健康检查" : "运行 make setup-local-trends",
+      requirement: localReady("rsshub") ? "本地 RSS 路由服务已通过健康检查" : "需单独部署 RSSHub",
       docsUrl: "https://docs.rsshub.app/deploy/",
     },
     {

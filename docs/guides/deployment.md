@@ -8,7 +8,9 @@
 
 GitHub 的 `production` 环境使用既有 `SERVER_HOST`、`SERVER_USER`、`SSH_PRIVATE_KEY`、`PROJECT_PATH` 和 `PUBLIC_HEALTH_URL`。健康地址应为站点的公开 HTTPS 地址，例如 `https://video.example.com/api/health`。服务器已有 Git 工作副本、Docker Compose、反向代理和站点证书；首次安装另需创建 `video-factory_video_factory_workspace` 卷和 `video-factory-trends` 外部网络，卷根应可由 uid/gid 1001 写入。外部只暴露反向代理，应用端口绑定 127.0.0.1:4317。代理需要对 SSE 禁用响应缓冲。
 
-服务器的 `$PROJECT_PATH/.env.docker.prod`（权限 0600）保存登录配置；变量名见 [环境示例](../../.env.docker.prod.example)。模型与免费服务在已登录的设置页配置，数据持久化在卷内 `/data/factory/agent`。热点服务的地址按服务器上的实际部署填写。不要把本机 loopback、真实服务 Key 或工作站数据库提交进 Git。
+服务器的 `$PROJECT_PATH/.env.docker.prod`（权限 0600）保存登录配置；变量名见 [环境示例](../../.env.docker.prod.example)。模型与免费服务在已登录的设置页配置，数据持久化在卷内 `/data/factory/agent`。不要把本机 loopback、真实服务 Key 或工作站数据库提交进 Git。
+
+国内选题榜单按需使用 NewsNow。可复用已有实例；如需同机运行，用 `make setup-local-trends` 启动，生产容器在同一 Docker 网络时填写 `http://vf-newsnow:4444`。宿主机运行的 Frame 可填 `http://127.0.0.1:4444`，独立服务器则填它自己的可达地址。在「免费服务 → 视频选题」选择榜单并允许 Agent 使用。该命令只管理 NewsNow，不会拉起旧抓取服务；正式发布不会自动开启、替换或覆盖这个配置。
 
 ## 切换、验证与恢复
 
