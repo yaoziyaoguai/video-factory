@@ -1,4 +1,5 @@
 import { readFileSync, realpathSync, statSync } from "node:fs";
+import { VIDEO_TOPIC_CHARTS } from "../../shared/agent/video-topics.js";
 import { isAbsolute, join, relative, sep } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "@earendil-works/pi-ai";
@@ -293,7 +294,7 @@ export class BusinessTools implements PiBusinessTools {
       return { sources: [chart], retrievedAt: this.clock(), topics: [] };
     }
     const config = captureNewsNowConfig(this.db);
-    if (!config) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "NewsNow 资讯服务未启用，请在设置里配置来源后再读。");
+    if (!config) throw new AgentToolError("CAPABILITY_UNAVAILABLE", "国内平台榜单未启用，可在「免费服务 → 视频选题」里配置。");
     // 提供的 sourceIds 只能是当前配置集合的非空子集；结果顺序沿选定集合。
     const selected = input.sourceIds ? config.sourceIds.filter(id => input.sourceIds!.includes(id)) : config.sourceIds;
     if (input.sourceIds && (selected.length !== input.sourceIds.length || selected.length === 0)) {
@@ -658,8 +659,8 @@ export function buildAgentTools(
 
   const readTrends: ToolDefinition = {
     name: "read_trends",
-    label: "读取热点榜单",
-    description: "找抖音热门 BGM 用 musicChart=douyin-music（曲名搜索页），TikTok 热门原声用 musicChart=tiktok-sounds（Kabo 公开榜前五、具体原声页）。两个平台分别读取。回复给曲名、榜单时间和对应链接；不代表已获得音频或混音许可。普通资讯读 NewsNow：sourceIds 省略时读全部已配置来源。limit 1–20；结果只代表所选榜单。",
+    label: "查看平台榜单",
+    description: `找短视频选题时读已配置的 NewsNow 榜单：${Object.entries(VIDEO_TOPIC_CHARTS).map(([id, label]) => label + "=" + id).join("、")}。用户指定平台时传相应 sourceIds；省略时读全部已配置来源。保留榜单时间、标题与原链接。找热门配乐才用 musicChart：douyin-music 给曲名搜索页，tiktok-sounds 给 Kabo 公开前五与原声页；两榜分别读取，均不授予音频使用许可。limit 1–20。`,
     parameters: inlineSchema("ToolReadTrends"),
     async execute(toolCallId, args, signal) {
       const context = requireContext(holder, toolCallId);

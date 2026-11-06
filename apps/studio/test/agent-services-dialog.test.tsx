@@ -111,9 +111,9 @@ describe("T3 免费服务列表与配置面板", () => {
     const { calls } = installRoutes({ newsnow: call => call.method === "GET" ? { status: 200, body: UNCONFIGURED_NEWSNOW }
       : patches(calls).length === 1 ? pendingSave : { status: 200, body: { settings: { ...UNCONFIGURED_NEWSNOW, revision: 1 }, replayed: false } } });
     renderServicesPage();
-    await userEvent.click(screen.getByRole("tab", { name: /热点/ }));
-    await userEvent.click(await screen.findByRole("button", { name: /配置 NewsNow/ }));
-    const dialog = await screen.findByRole("dialog", { name: "配置 NewsNow" });
+    await userEvent.click(screen.getByRole("tab", { name: /视频选题/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /配置 国内平台榜单/ }));
+    const dialog = await screen.findByRole("dialog", { name: "配置 国内平台榜单" });
     const endpoint = within(dialog).getByLabelText(/实例地址/);
     await userEvent.type(endpoint, "https://draft.example");
     await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
@@ -131,7 +131,7 @@ describe("T3 免费服务列表与配置面板", () => {
     const { calls, state } = installRoutes();
     state.settings.pexels = { ...UNCONFIGURED_PEXELS, revision: 2, credentialConfigured: true, apiKey: "shared-key" };
     renderServicesPage();
-    expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["热点资讯", "图片素材", "视频素材", "音乐素材"]);
+    expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["视频选题", "图片素材", "视频素材", "音乐素材"]);
     for (const name of ["Pexels", "Pixabay", "Unsplash", "Wikimedia Commons", "NASA", "The Met", "Cleveland"]) {
       expect(await screen.findByRole("switch", { name: `允许 Agent 使用 ${name}` })).toBeInTheDocument();
     }
@@ -209,8 +209,8 @@ describe("T3 免费服务列表与配置面板", () => {
     });
     state.settings.newsnow = { serviceId: "newsnow", revision: 3, enabled: true, endpoint: "https://news.example", sourceIds: ["zhihu", "weibo"], topics: ["科技"] };
     renderServicesPage();
-    await userEvent.click(screen.getByRole("tab", { name: /热点资讯/ }));
-    const toggle = await screen.findByRole("switch", { name: "允许 Agent 使用 NewsNow" });
+    await userEvent.click(screen.getByRole("tab", { name: /视频选题/ }));
+    const toggle = await screen.findByRole("switch", { name: "允许 Agent 使用 国内平台榜单" });
     expect(toggle).toHaveAttribute("aria-checked", "true");
     await userEvent.click(toggle);
     await waitFor(() => expect(screen.getByText("已停用")).toBeVisible());
@@ -280,9 +280,9 @@ describe("T3 免费服务列表与配置面板", () => {
       },
     });
     renderServicesPage();
-    await userEvent.click(screen.getByRole("tab", { name: /热点资讯/ }));
-    await userEvent.click(await screen.findByRole("button", { name: /配置 NewsNow/ }));
-    const dialog = await screen.findByRole("dialog", { name: "配置 NewsNow" });
+    await userEvent.click(screen.getByRole("tab", { name: /视频选题/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /配置 国内平台榜单/ }));
+    const dialog = await screen.findByRole("dialog", { name: "配置 国内平台榜单" });
 
     // 启用但缺地址与来源：字段错误，不发命令。
     await userEvent.click(within(dialog).getByLabelText("允许 Agent 使用这个来源"));
@@ -291,7 +291,8 @@ describe("T3 免费服务列表与配置面板", () => {
     expect(patches(calls).length).toBe(0);
 
     await userEvent.type(within(dialog).getByLabelText("实例地址"), "https://news.example");
-    await userEvent.type(within(dialog).getByLabelText(/已配置来源 ID/), "zhihu、weibo");
+    await userEvent.click(within(dialog).getByRole("button", { name: "填入抖音、快手和 B 站榜单" }));
+    expect(patches(calls)).toHaveLength(0);
     await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
 
     // 409：展示最新公开值并保留草稿输入。
@@ -301,11 +302,11 @@ describe("T3 免费服务列表与配置面板", () => {
     expect(latest).toHaveTextContent("https://other.example");
     expect(latest).toHaveTextContent("hackernews");
     const patch1 = patches(calls).at(-1)!;
-    expect(patch1.body).toEqual({ commandId: expect.any(String), expectedRevision: 0, enabled: true, endpoint: "https://news.example", sourceIds: ["zhihu", "weibo"], topics: [] });
+    expect(patch1.body).toEqual({ commandId: expect.any(String), expectedRevision: 0, enabled: true, endpoint: "https://news.example", sourceIds: ["douyin", "kuaishou", "bilibili-hot-video"], topics: [] });
 
     // 重存走新 revision 成功，对话框关闭。
     await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "配置 NewsNow" })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "配置 国内平台榜单" })).toBeNull());
     const patch2 = patches(calls).at(-1)!;
     expect((patch2.body as { expectedRevision: number }).expectedRevision).toBe(5);
     expect(await screen.findByText("已选用 · 未验证")).toBeVisible();
@@ -343,8 +344,8 @@ describe("T3 免费服务列表与配置面板", () => {
     expect(await screen.findByRole("switch", { name: "允许 Agent 使用 Pexels" })).toBeVisible();
     // 切到热点页签后搜索词不串页。
     await userEvent.type(screen.getByLabelText("搜索服务"), "zzz不存在");
-    await userEvent.click(screen.getByRole("tab", { name: /热点资讯/ }));
-    expect(await screen.findByRole("switch", { name: "允许 Agent 使用 NewsNow" })).toBeVisible();
+    await userEvent.click(screen.getByRole("tab", { name: /视频选题/ }));
+    expect(await screen.findByRole("switch", { name: "允许 Agent 使用 国内平台榜单" })).toBeVisible();
   });
 });
 
@@ -396,8 +397,8 @@ it("已保存的素材 Key 直接展示在行内；Pexels Key 可在配置面板
   expect(await screen.findByLabelText("API Key")).toHaveValue("pexels-visible");
   expect(screen.getByLabelText("API Key")).toHaveAttribute("type", "text");
   await userEvent.click(screen.getByRole("button", { name: "关闭配置" }));
-  await userEvent.click(screen.getByRole("tab", { name: "热点资讯" }));
-  expect(await screen.findByRole("switch", { name: "允许 Agent 使用 NewsNow" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("tab", { name: "视频选题" }));
+  expect(await screen.findByRole("switch", { name: "允许 Agent 使用 国内平台榜单" })).toBeInTheDocument();
   expect(screen.queryByText("RSSHub")).toBeNull();
   expect(screen.queryByLabelText("RSSHub API Key")).toBeNull();
 });

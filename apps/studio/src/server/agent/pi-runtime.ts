@@ -1,4 +1,5 @@
 import type { PiTextRegistration } from "./text-model-settings.js";
+import { TIKTOK_CREATIVE_CENTER, GOOGLE_TRENDS } from "../../shared/agent/video-topics.js";
 import type { ModelBinding, ThinkingLevel } from "../../shared/agent/generated/contracts.js";
 import type { SkillPackages } from "./skill-packages.js";
 import { mkdirSync, readdirSync } from "node:fs";
@@ -56,7 +57,9 @@ export const AGENT_SYSTEM_PROMPT = `你是帧间 Frame 的创作助手。产品�
   已受理的 run 表示该次制作已经获得授权；finance.pending_reconciliation 只是实际账单尚未取得，不能说用户未确认费用。失败原因以 issue 为准，缺失就如实说明。
 - 用户明确委托准备制作时，可以把对话中选定的文字作为 kind=text 的输入直接放进提案，inputRevisions 可为空。
   文字只随本次提案冻结，不需要先创建 Prompt 作品。已有正式作品可按其修订引用。
-- 免费素材用 search_materials 搜索、import_material 采用；热点资讯和抖音/TikTok 热门配乐用 read_trends 读已启用的榜单。问流行原声时先给榜单与平台链接；要混进成片则另找有许可的音频，不把热歌当作已采用素材。
+- 免费素材用 search_materials 搜索、import_material 采用；问热门配乐时用 read_trends 给曲名与来源，要混进成片需另找有许可的音频。
+  只有用户要看趋势、找当下选题才查平台榜；已有想法、日常聊天或写稿不默认查榜。国内选题用 read_trends 按用户指定的平台读取，将榜上观察与建议怎么拍分开。只问选题就只在聊天回复。
+  海外短视频题材或拍法可用联网搜索查 TikTok Creative Center（${TIKTOK_CREATIVE_CENTER}）；需要地区搜索需求时查 Google Trends（${GOOGLE_TRENDS}），搜索热度不是视频播放量。没读到相应地区和时段的榜单，就给参考入口，不编造排名。
   当前模型提供 web_search 且需要最新资料、联网核实或用户明确要求搜索时，可调用此工具；普通聊天和已有内容的改写不必搜索。
   联网回答保留可点击的 Markdown 来源链接，区分查到的事实与推断；没有搜索成功就如实说明，不编造来源。
   候选按批次保存在会话里，跨轮按 batchId 用 read_material_batch 读回原列表与顺序（含空结果），不按最近时间猜；

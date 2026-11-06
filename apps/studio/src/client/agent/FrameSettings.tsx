@@ -1,4 +1,5 @@
 import { MUSIC_CHART_URLS } from "../../shared/agent/music-charts.js";
+import { VIDEO_TOPIC_CHARTS, TIKTOK_CREATIVE_CENTER, GOOGLE_TRENDS } from "../../shared/agent/video-topics.js";
 import { ModelConnectionsPanel } from "./ModelConnectionsPanel.js";
 import { SkillPackagesPanel } from "./SkillPackagesPanel.js";
 import { WorkLibrary } from "./WorkLibrary.js";
@@ -40,10 +41,10 @@ const SERVICE_CATALOG = [
   { id: "cleveland", kind: "keyless", name: "Cleveland", description: "克里夫兰艺术博物馆 CC0 馆藏", kinds: ["image"], access: "无需密钥" },
   { id: "archive", kind: "keyless", name: "Internet Archive", description: "公有领域与开放许可的历史影像", kinds: ["video"], access: "无需密钥" },
   { id: "freetouse", kind: "keyless", name: "FreeToUse", description: "个人社交平台自制视频的音乐与歌曲，采用前需确认用途并署名", kinds: ["audio"], access: "无需密钥" },
-  { id: "newsnow", kind: "newsnow", name: "NewsNow", description: "社区、财经与新闻热点快照", kinds: ["trend"], access: "自托管地址" },
+  { id: "newsnow", kind: "newsnow", name: "国内平台榜单", description: "通过 NewsNow 按需查抖音、快手和 B 站，也可自选来源", kinds: ["trend"], access: "实例地址" },
 ] as const;
 const SERVICE_GROUPS = [
-  { id: "trend", label: "热点资讯", icon: TrendingUp, purpose: "发现选题信号，保留来源和发布时间。", footnote: "自托管工具不等于无限免费；具体数据源、部署成本与调用限制由所接服务决定。" },
+  { id: "trend", label: "视频选题", icon: TrendingUp, purpose: "找选题时看平台榜单；核实背景时再联网搜索。", footnote: "" },
   { id: "image", label: "图片素材", icon: Image, purpose: "查找已有图片，补充画面与创作参考。", footnote: "免费来源也有许可和调用限制，采用素材时保留作者与来源；同一来源在各页签共用一份配置。" },
   { id: "video", label: "视频素材", icon: Film, purpose: "查找已有视频，补充镜头与参考。", footnote: "免费来源也有许可和调用限制，采用素材时保留作者与来源；同一来源在各页签共用一份配置。" },
   { id: "audio", label: "音乐素材", icon: Music2, purpose: "查平台热歌，或找有许可、可混入视频的配乐。", footnote: "热歌榜仅提供平台链接。采用曲库音乐时，会保留曲目、作者与许可。" },
@@ -187,7 +188,7 @@ function ServicesDirectory() {
       </article>; })}
     </div>
     {!rows.length ? <div className="agent-settings-empty"><Search aria-hidden="true" /><h3>没有匹配的服务</h3><button type="button" onClick={() => setQuery("")}>清除搜索</button></div> : null}
-    <p className="agent-service-footnote">{catalog.footnote}</p>
+    <p className="agent-service-footnote">{group === "trend" ? <>海外选题参考：<a href={TIKTOK_CREATIVE_CENTER} target="_blank" rel="noreferrer">TikTok 热门标签与视频 ↗</a>{" · "}<a href={GOOGLE_TRENDS} target="_blank" rel="noreferrer">Google 地区搜索热度 ↗</a></> : catalog.footnote}</p>
     {configTarget?.kind === "newsnow" ? <NewsNowConfigDialog onClose={closeConfig} onSaved={settings => setLoads(prev => ({ ...prev, newsnow: { phase: "ready", settings } }))} /> : null}
     {configTarget?.kind === "keyed" ? <KeyedServiceConfigDialog row={configTarget} onClose={closeConfig} onSaved={() => void loadService(configTarget.id)} /> : null}
   </>;
@@ -411,7 +412,7 @@ function NewsNowConfigDialog({ onClose, onSaved }: { onClose: () => void; onSave
   return <div className="agent-modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) close(); }}>
     <div className="agent-modal agent-config-dialog" role="dialog" aria-modal="true" aria-labelledby="newsnow-config-title" ref={dialog} onKeyDown={onKeyDown}>
       <header className="agent-modal-header">
-        <div><h3 id="newsnow-config-title">配置 NewsNow</h3><p>自托管实例 · Key 不适用 · 保存不发起调用</p></div>
+        <div><h3 id="newsnow-config-title">配置 国内平台榜单</h3><p>通过 NewsNow 读取所选榜单，保存时不会抓取。</p></div>
         <button type="button" className="agent-icon-button" aria-label="关闭配置" onClick={close}><X aria-hidden="true" /></button>
       </header>
       {phase === "loading" ? <p className="agent-config-note">正在读取配置…</p> : phase === "loadFailed" ? <div className="agent-config-note">
@@ -426,7 +427,8 @@ function NewsNowConfigDialog({ onClose, onSaved }: { onClose: () => void; onSave
         </div>
         <div className="agent-config-field">
           <label htmlFor="newsnow-config-sources">已配置来源 ID（顿号分隔，1–5 个）</label>
-          <input disabled={saving} id="newsnow-config-sources" value={sourceIds} onChange={event => edit(setSourceIds)(event.target.value)} autoComplete="off" placeholder="zhihu、weibo、github" aria-invalid={Boolean(errors.sourceIds)} aria-describedby={errors.sourceIds ? "newsnow-config-sources-error" : undefined} />
+          <input disabled={saving} id="newsnow-config-sources" value={sourceIds} onChange={event => edit(setSourceIds)(event.target.value)} autoComplete="off" placeholder="例如 douyin" aria-invalid={Boolean(errors.sourceIds)} aria-describedby={errors.sourceIds ? "newsnow-config-sources-error" : undefined} />
+          <button type="button" className="agent-text-link" disabled={saving} onClick={() => edit(setSourceIds)(Object.keys(VIDEO_TOPIC_CHARTS).join("、"))}>填入抖音、快手和 B 站榜单</button>
           {errors.sourceIds ? <span className="agent-field-error" id="newsnow-config-sources-error" role="alert">{errors.sourceIds}</span> : null}
         </div>
         <div className="agent-config-field">
@@ -434,7 +436,7 @@ function NewsNowConfigDialog({ onClose, onSaved }: { onClose: () => void; onSave
           <input disabled={saving} id="newsnow-config-topics" value={topics} onChange={event => edit(setTopics)(event.target.value)} autoComplete="off" placeholder="人工智能、科技、生活方式" aria-invalid={Boolean(errors.topics)} aria-describedby={errors.topics ? "newsnow-config-topics-error" : undefined} />
           {errors.topics ? <span className="agent-field-error" id="newsnow-config-topics-error" role="alert">{errors.topics}</span> : null}
         </div>
-        <p className="agent-config-summary">读取榜单时省略来源即读这里配置的完整集合；关闭状态可保留配置。资讯只是所选来源的标题与链接信号，不等于核实新闻事实。</p>
+        <p className="agent-config-summary">只有你想看趋势时才会读取。榜单保留来源和链接，不能当作已核实的新闻。</p>
         {notice ? <p className="agent-field-error" role="alert">{notice}</p> : null}
         {conflict && !conflictReadFailed ? <aside className="agent-config-note" aria-label="当前已保存 NewsNow 配置"><strong>当前已保存</strong><p>{settings?.enabled ? "已选用" : "已停用"} · {settings?.endpoint ?? "未配置地址"}</p><p>来源：{settings?.sourceIds.join("、") || "未配置"}</p><p>主题：{settings?.topics.join("、") || "未设置"}</p></aside> : null}
         {conflictReadFailed ? <button type="button" onClick={() => void readConflict()}>重试读取最新配置</button> : null}

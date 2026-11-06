@@ -920,7 +920,7 @@ it("Frame 三个设置入口独立，往返保留预览、目标和草稿，不�
   await userEvent.click(screen.getByRole("button", { name: "模型配置" }));
   expect(screen.getAllByRole("tab")).toHaveLength(4);
   await userEvent.click(screen.getByRole("button", { name: "免费服务" }));
-  expect(screen.getByRole("tab", { name: "热点资讯" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "视频选题" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: /用户页/ }));
   expect(screen.getByLabelText("显示名称")).toHaveValue("本地用户");
   await userEvent.click(within(screen.getByRole("navigation", { name: "会话列表" })).getByRole("button", { name: "随时接着聊" }));
