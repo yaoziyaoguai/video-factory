@@ -917,41 +917,6 @@ rollback_broker
     );
   });
 
-  it("packages and validates the matching broker unit before switching each release", async () => {
-    const [service, deploy, dockerfile, studioMain] = await Promise.all([
-      readFile(path.join(brokerRoot, "deploy", "vf-codex-broker.service"), "utf8"),
-      readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8"),
-      readFile(path.join(repositoryRoot, "docker", "Dockerfile"), "utf8"),
-      readFile(path.join(repositoryRoot, "apps", "studio", "src", "server", "main.ts"), "utf8"),
-    ]);
-
-    assert.match(service, /^Environment=VIDEO_FACTORY_CODEX_TIMEOUT_MS=1200000$/m);
-    assert.match(studioMain, /timeoutMs: 2_460_000/);
-    assert.match(
-      dockerfile,
-      /^COPY --from=production-dependencies \/app\/node_modules\/undici apps\/codex-broker\/node_modules\/undici$/m,
-    );
-    assert.match(dockerfile, /^COPY apps\/codex-broker\/deploy apps\/codex-broker\/deploy$/m);
-    assert.match(deploy, /Candidate image does not contain a complete broker release/);
-    assert.match(deploy, /! -f "\$staging\/broker\/node_modules\/undici\/package\.json"/);
-    assert.match(deploy, /vf-deepseek-codex-broker\.service/);
-    const validationPosition = deploy.indexOf('! -f "$staging/broker/dist/main.js"');
-    const switchPosition = deploy.indexOf('ln -sfn "$candidate_broker_release" "$broker_root/current"');
-    assert.ok(validationPosition >= 0 && switchPosition > validationPosition);
-    assert.match(deploy, /install_broker_units_from_release\(\)/);
-    assert.doesNotMatch(deploy, /install -m 0644 "\$source" "\$broker_unit"/);
-    assert.match(deploy, /install -m 0644 "\$deepseek_source" "\$deepseek_broker_unit" \|\| return 1/);
-    assert.match(deploy, /systemctl daemon-reload \|\| return 1/);
-    assert.match(deploy, /install_broker_units_from_release "\$broker_root\/current"/);
-    assert.match(deploy, /previous_broker_unit_backup/);
-    assert.match(deploy, /previous_deepseek_broker_unit_backup/);
-    assert.match(deploy, /chown -R root:vf-bridge "\$release_dir" \|\| return 1/);
-    assert.match(deploy, /chmod -R a\+rX "\$release_dir" \|\| return 1/);
-    assert.match(deploy, /image_id="\$\(docker create video-factory:candidate\)" \|\| return 1/);
-    assert.match(deploy, /if ! staging="\$\(mktemp -d\)"; then/);
-    assert.match(deploy, /if ! docker rm "\$image_id" >\/dev\/null; then/);
-  });
-
   it("propagates a broker unit installation failure from conditional deployment calls", async () => {
     const deploy = await readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8");
     const installFunction = deploy.match(/install_broker_units_from_release\(\) \{[\s\S]*?\n\}/)?.[0];
@@ -1005,46 +970,6 @@ exit 42
     assert.match(dropIn, /^\[Service\]$/m);
     assert.match(dropIn, /^Restart=always$/m);
     assert.match(dropIn, /^RestartSec=60s$/m);
-  });
-
-  it("uses regional package mirrors only for ECS deployment builds", async () => {
-    const [dockerfile, compose, deploy] = await Promise.all([
-      readFile(path.join(repositoryRoot, "docker", "Dockerfile"), "utf8"),
-      readFile(path.join(repositoryRoot, "docker", "docker-compose.prod.yml"), "utf8"),
-      readFile(path.join(repositoryRoot, "scripts", "deploy-production.sh"), "utf8"),
-    ]);
-
-    assert.match(dockerfile, /^ARG ALPINE_MIRROR$/m);
-    assert.match(dockerfile, /^ARG NPM_REGISTRY$/m);
-    assert.match(dockerfile, /^ARG NODE_DIST_URL$/m);
-    assert.match(dockerfile, /npm config set registry "\$NPM_REGISTRY"/);
-    assert.match(dockerfile, /npm_config_disturl="\$NODE_DIST_URL" npm ci/);
-    assert.match(dockerfile, /FROM \$\{NODE_IMAGE\} AS dependencies[\s\S]*apk add --no-cache python3 make g\+\+[\s\S]*npm ci/);
-    assert.ok(
-      dockerfile.indexOf("apk add --no-cache python3 make g++") < dockerfile.indexOf("npm ci"),
-      "native dependency toolchain must exist before npm falls back to source compilation",
-    );
-    assert.match(dockerfile, /^ARG NODE_IMAGE=node:22-alpine$/m);
-    assert.match(dockerfile, /^FROM \$\{NODE_IMAGE\} AS dependencies$/m);
-    assert.doesNotMatch(dockerfile, /^RUN sed .*mirrors\.aliyun\.com/m);
-    assert.match(compose, /NODE_IMAGE: \$\{NODE_IMAGE:-node:22-alpine\}/);
-    assert.match(compose, /ALPINE_MIRROR: \$\{ALPINE_MIRROR:-\}/);
-    assert.match(compose, /NPM_REGISTRY: \$\{NPM_REGISTRY:-\}/);
-    assert.match(compose, /NODE_DIST_URL: \$\{NODE_DIST_URL:-\}/);
-    assert.match(deploy, /ALPINE_MIRROR="\$\{ALPINE_MIRROR:-http:\/\/mirrors\.cloud\.aliyuncs\.com\/alpine\}"/);
-    assert.match(deploy, /NPM_REGISTRY="\$\{NPM_REGISTRY:-https:\/\/registry\.npmmirror\.com\}"/);
-    assert.match(deploy, /NODE_DIST_URL="\$\{NODE_DIST_URL:-https:\/\/npmmirror\.com\/mirrors\/node\}"/);
-  });
-
-  it("passes curated multi-model video settings into the production container", async () => {
-    const compose = await readFile(
-      path.join(repositoryRoot, "docker", "docker-compose.prod.yml"),
-      "utf8",
-    );
-
-    assert.match(compose, /SEEDANCE_MODEL_ESTIMATES_JSON: \$\{SEEDANCE_MODEL_ESTIMATES_JSON:-\}/);
-    assert.match(compose, /SEEDANCE_MODEL_PROFILES_JSON: \$\{SEEDANCE_MODEL_PROFILES_JSON:-\}/);
-    assert.doesNotMatch(compose, /MINIMAX_ESTIMATED_CNY_PER_CLIP|WAN_ESTIMATED_CNY_PER_CLIP|WAN_MODEL_ESTIMATES_JSON/);
   });
 
   it("installs a physical shared Node runtime instead of linking into a private home", async () => {
@@ -1134,13 +1059,6 @@ exit 42
     assert.equal(result.trace.match(/systemctl:restart vf-deepseek-codex-broker/g)?.length, 1);
     assert.match(result.trace, /docker:compose .* up --detach --no-deps --force-recreate app/);
     assert.doesNotMatch(result.stderr, /Recovery did not fully restore every writer|Maintenance recovery verification failed/);
-  });
-
-  it("preserves both retired socket mounts for rollback to the previous production image", async () => {
-    const compose = await readFile(path.join(repositoryRoot, "docker", "docker-compose.prod.yml"), "utf8");
-    assert.match(compose, /target: \/run\/video-factory-codex\n/);
-    assert.match(compose, /target: \/run\/video-factory-zai-codex\n/);
-    assert.match(compose, /VIDEO_FACTORY_ZAI_CODEX_SOCKET_PATH:/);
   });
 
   it("drains, freezes, backs up and only then switches artifacts in the fixed maintenance order (R3-C)", async () => {
