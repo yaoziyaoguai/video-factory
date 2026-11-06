@@ -1,194 +1,34 @@
-# VideoFactory
+# 帧间 Frame · Video Agent
 
-VideoFactory 是面向个人创作者的短视频制作工具。你可以从热点、系列、自有想法或案例 / 脚本开始，制作解说视频或多角色剧情。构思、脚本、选材、声音和成片都由你逐步确认，结果和修改记录可以回看。
+帧间是一个用对话做视频的桌面 Web 工作台。你可以先聊选题、问提示词、找素材，在同一段对话里做几条不同的视频。你明确开始创作后，Frame 才会引导你把一个想法做成作品。
 
-当前版本为 V1 个人试用版，支持本地运行和单实例云端部署。操作界面是 Web Studio；TypeScript 管理制作流程、版本、确认与费用记录，Python 和 FFmpeg 处理媒体，宿主机模型服务处理文本与内容理解请求。
+1. 给出目标，和 Agent 讨论内容。每一步产生的脚本、画面与声音方案、片段或视频先放在草稿区。
+2. 看稿、提意见、选定具体版本。只有你认可的内容进入确认区；认可方案可以暂不制作。
+3. 要制作时查看提案、估价与范围，确认本次预算后后台执行。制作使用已确认版本，换型号、继续聊天都不会改写这次任务。
+4. 生成的视频先供预览。你确认成片后，可从作品库找到视频、对应文稿与原对话。
 
-四个入口已完成本地受控声音全链验证，包括真实 FFmpeg 渲染和播放。受控验证不代表真实配音韵律、内容质量或服务商稳定性已经全面验收，这些仍需要实际试用。
+## 本地运行
 
-## 先做一条视频
+需要 **Node.js 22.23.1**（或兼容的 22 LTS）、npm；媒体处理使用 `ffmpeg` 和 `ffprobe`。首次安装原生依赖时可能需要 Python 3 与 C++ 构建工具。
 
-已有可用的 Studio 时，不需要先安装开发环境。
-
-1. 选一个入口，准备自己的想法或参考内容。
-2. 打开“新建制作”，核对简报、视频形式和声音来源。
-3. 点击“开始前期构思”，等待简报检查。
-4. 确认内容简报，查看生成的构思。
-5. 核对脚本和时长，再确认导演方案与画面来源。
-6. 核对素材报价，试听声音，查看渲染后的成片。
-7. 完成人工终审，确认发布文案，下载成片和发布包。
-
-中途不满意时，在当前步骤编辑或提交修改意见。上游修改会使受影响的下游结果过期，旧稿和旧产物仍会保留。
-
-| 你已有的内容 | 选择入口 | 先做什么 |
-| --- | --- | --- |
-| 一条热点或新闻线索 | 热点 | 核对来源，采用选题后新建制作 |
-| 一个连续更新的栏目 | 系列 | 保存系列，按需生成路线图，再选择本集 |
-| 自己想讲的一件事 | 自有想法 | 写下目标、受众和画面要求 |
-| 参考视频或已有脚本 | 案例 / 脚本 | 说明借鉴内容和自己的修改方向 |
-
-保存想法、创建系列或采用选题，不等于开始制作。制作中的阶段确认则会继续下游：采用构思后生成脚本，采用脚本后生成导演方案。下一阶段可能调用模型；查看费用说明后再确认。
-
-完整步骤见[制作流程与声音调整](docs/guides/production-workflow.md)。也可下载[流程图解 HTML](docs/guides/production-overview.html)，用浏览器打开；GitHub 文件页只展示源码。[图解源稿](docs/guides/production-overview.md)保留在仓库中。
-
-## 当前生产原则
-
-- **自由构思。** 构思用一段自由正文表达，系列单集用“本集想法”记录内容。不套制作模板或内置导演风格，不要求观众承诺、开场钩子、段落推进和结尾兑现；导演根据用户要求与当前内容组织画面。事实来源、实际制作能力、用户时长要求和费用授权仍需满足。
-- **由用户推进。** 构思、脚本和导演方案依次生成，初稿附一轮内容审计。你可以采用，也可以多选建议、补充自己的要求后修改。修订稿不会自动再审；是否再次审计或进入下一步由你决定。
-- **时长先看方案、再确认。** 新制作的目标时长仅作参考，脚本阶段展示模型建议的总长与各镜安排，采用该版时一并确认。你也可以明确设定最短或最长时长；发生冲突时保留完整稿件，可修改内容或调整承诺。单镜、双镜方案均可使用，具体镜头仍须满足所选模型和实际媒体的能力。
-- **质量意见不替代决定。** 内容评分、审片建议和未复核风险会如实展示。可恢复问题保留修改、换来源或知情继续的出口；没有真实素材、音轨或成片时，不用占位内容伪装成功。
-- **费用按能力说明。** 付费图片和视频先报价并由用户确认；独立配音按配置自动计费，不逐笔弹素材报价。模型原生音画保留视频自带声音，不另买配音。授权金额、配置估算与已记录费用分开显示，服务商实付以账单为准。
-- **请求不盲目重发。** 只有未受理或已明确结束、允许切换的故障才使用其他候选模型；请求结果不确定时查询原请求，不重新购买。
-- **系列候选与审计分别保留。** 创建系列只保存栏目和规则草稿，明确生成动作才调用模型。已生成且格式有效的候选，在审计失败或结果待核后仍可查看。查询沿原请求核对；取回只写待采用草稿，不自动采用或再次审计。当前稿已变化或历史版本无法核对时，不覆盖当前稿。
-- **返工有范围、有版本。** 修改要求进入对应生产输入。没有镜号的人工返工意见也会形成有效范围；旧稿件和产物保留，但不替代新版确认。已物化的镜头可以明确复用，不重复生成或计费。
-- **配音可先规划、后调时间。** 生成前编辑分段和留白；保留了分组原声与来源清单的制作，可在生成后复用原声调整位置与静默，不重新调用配音服务。旧逐镜 MiniMax 配音也可在原音频与请求账本核验后整段移位，保留原逐镜字幕。调整后回到试听确认，已有下游成片不继续当作当前版本。来源缺失或尚未核清时，原声音仍可试听、采用，不会自动重购。
-- **视频形式与声音来源在创建时选择。** 四个入口共用解说视频与角色剧情。默认使用独立配音，角色剧情可选择各角色的系统音色；也可主动选择“模型原生音画”，让同一视频模型逐镜生成画面和声音。原生模式没有独立音色选择与配音时间编辑，不保证台词、口型或跨镜人物一致性，不提供同步字幕。真实效果需结合样片判断。
-- **来源和许可可追查。** 热点读不到正文时明确标注；素材保留作者、来源和许可。默认面向个人非商业创作，但剪辑、署名和公开发布仍须遵守具体条款。
-- **发布由用户完成。** 系统提供成片与发布包，当前不自动上传外部平台。声音、音乐和音效只展示实际接入的能力。
-- **文案单独确认。** 成片经过独立人工终审后，发布文案仍由你确认。已完成制作也可修订或审计文案；AI 修订版需要单独采用，不重复对同一成片逐条表态。媒体或审片证据改变后，需要重新终审。
-
-具体操作见[制作流程与声音调整](docs/guides/production-workflow.md)。
-
-## 系统结构
-
-```mermaid
-flowchart LR
-    S[热点 / 系列 / 自有想法 / 案例或脚本] --> B[内容简报：编辑并确认]
-    B --> TREAT[构思：初稿与审计建议]
-    TREAT -->|用户确认| SCRIPT[脚本：初稿与审计建议]
-    SCRIPT -->|用户确认| PLAN[导演方案与选材：确认]
-    PLAN --> M[素材：报价确认、执行与预检]
-    M --> V[声音：独立配音或视频原声试听]
-    V -->|独立配音可只调时间| V
-    V -->|用户确认| RENDER[渲染与技术检查]
-    RENDER --> REVIEW[成片审片与人工终审]
-    REVIEW -->|确认| P[成片与发布包]
-    REVIEW -->|修改| PLAN
-
-    C[React Studio] --> API[Fastify API]
-    API --> PIPE[ProductionPipeline]
-    PIPE --> CORE[workflow-core]
-    PIPE --> BROKER[DeepSeek broker]
-    PIPE --> WORKER[Python media worker]
-    PIPE --> STORE[(run / settings / series JSON)]
+```sh
+npm ci
+npm run studio:build
+STUDIO_DEV=1 STUDIO_HOST=127.0.0.1 STUDIO_PORT=4478 npm run studio:start
 ```
 
-主要边界：
+浏览器打开 [本机工作台](http://127.0.0.1:4478/agent)。首次在「模型配置」填写你自己的连接，按文本、图片、视频、配音选择当前型号。可在「免费服务」启用素材、音乐和资讯来源，在「Skill 管理」安装或移除扩展。聊天需要已配置的文本模型；付费媒体需要相应型号与本次制作授权。空数据库不会带入任何人的密钥、会话或素材。
 
-- `packages/workflow-core`：DAG、节点、Provider、artifact、intervention 与审批合同。
-- `packages/production-pipeline`：生产角色、逐镜路由、报价、run checkpoint、revision/CAS、返修和发布包。
-- `apps/studio`：Creator Studio UI、API、持久化服务与生产 worker。
-- `apps/codex-broker`：宿主机模型服务、接入协议与耐久请求记录，通过 Unix socket 与 Studio 通信。
-- `src/video_factory`：Python 媒体 worker、素材准备、配音、渲染和确定性媒体检查。
+默认数据目录是 `workspace/factory/agent/`。设置 `AGENT_DATA_DIR` 可将数据库、Pi 会话和媒体放在其他持久目录。开发模式仅在本机使用；服务器部署使用登录和 HTTPS。
 
-## 开发环境
+## 文档与验证
 
-要求 Node.js 22、Python 3.11、FFmpeg 和 ffprobe。macOS 本地确定性配音还需要系统 `say`。
+| 我想了解 | 入口 |
+| --- | --- |
+| 对话、草稿、确认与作品库如何配合 | [产品与交互设计](docs/agent/product-design.md) · [界面规范](DESIGN.md) |
+| Pi 与业务服务的职责、存储和制作流程 | [架构设计](docs/agent/architecture.md) |
+| HTTP、事件流、类型和工具边界 | [接口索引](contracts/agent/v1/IMPORT.md) · [OpenAPI](contracts/agent/v1/openapi.json) · [JSON Schema](contracts/agent/v1/contracts.schema.json) |
+| GitHub Actions、生产配置、备份与回滚 | [部署手册](docs/guides/deployment.md) |
+| 查询已退役的 Video Factory 架构 | [过期文档](docs/过期文档/README.md) |
 
-```bash
-cd video-factory
-npm install
-make setup-local-runtime
-make setup-local-trends
-make studio-local
-```
-
-打开 [http://127.0.0.1:4317](http://127.0.0.1:4317)。`make studio-local` 使用本地 DeepSeek 配置启动模型服务，再启动 Studio；默认凭据文件由 `scripts/studio-dev-with-codex.sh` 指向 `.local/secrets/deepseek.env`，可用 `DEEPSEEK_ENV_FILE` 指定。只调试不依赖模型服务的确定性路径时可运行：
-
-```bash
-npm run studio:dev
-```
-
-本地热点服务默认只绑定 `127.0.0.1`：
-
-- TrendRadar：`8080`
-- TrendRadar MCP：`3333`
-- NewsNow：`4444`
-- DailyHotApi：`6688`
-- RSSHub：`1200`
-
-状态检查：
-
-```bash
-make local-trends-status
-curl --fail --unix-socket .local/runtime/deepseek-codex/worker.sock http://localhost/health
-```
-
-## 模型与素材配置
-
-日常使用在“创作设置”查看画面来源、模型和声音能力。新建制作时，展开“02 画面与声音”，在“画面来源策略”选择“仅免费画面”或“允许 AI 生成画面，按实际镜头报价”。独立配音也能搭配 AI 画面；画面来源与声音来源分别选择。模型原生音画使用所选视频模型，不显示图库策略。
-
-从示例创建本地配置：
-
-```bash
-cp .env.example .env
-```
-
-`.env`、`.env.local`、运行数据和所有密钥都被 Git 忽略。Studio 只返回能力是否就绪，不会通过 API 或资源页面回传密钥。
-
-模型库与角色默认分开管理。添加模型时选择实际协议和能力，再设置角色默认；新设置不会覆盖已经创建的制作。详见[模型与声音审片配置](docs/guides/model-configuration.md)。
-
-常用外部能力：
-
-- Pexels 图片/视频：`PEXELS_API_KEY`
-- Pixabay 图片/视频：`PIXABAY_API_KEY`
-- Unsplash 图片：`UNSPLASH_ACCESS_KEY`；保留作者署名、CDN 预览和采用时的下载事件。仅图片，不提供视频；开发额度与正式应用审核由 Unsplash 决定。
-- Coverr 视频：`COVERR_API_KEY`；Demo 免费额度每小时 50 次，保留来源与作者信息，只使用官方签名下载链接。
-- Flickr 图片：`FLICKR_API_KEY`；需要正式 API 权限，逐文件保留许可与署名。
-- Seedream / Seedance：`ARK_API_KEY`；Seedance 另需对应 model/估价配置
-- MiniMax 视频与 TTS：`MINIMAX_API_KEY` 与对应 model；TTS 保留后台核算估价
-- Wan：`DASHSCOPE_API_KEY`、workspace 与当前已接入的 model
-
-图片和视频规格用于生成逐镜报价，不冒充厂商实时账单，也不构成整片预算上限。Seedream、MiniMax Hailuo 与 Wan 的内建模型按已审核规格报价；Seedance 2.5 按分辨率、时长与公开 token 费率估算，其他显式自定义模型使用部署配置估价。模型原生音画仅适用于已适配的 `wan3.0-video`、`MiniMax-H3` 和 `doubao-seedance-2-5-260628`；已配置不代表当前账号已完成真实验证。
-
-费用页也展示创建制作前的系列和选题模型操作。每次已返回的用量按原请求记录，包括结构修复和模型切换。token 用量不等于实付；缺失用量或尚未核账的金额会保留待核说明，不按免费结清。
-
-素材库显示已经归档的素材；外部来源在“创作设置 → 画面来源”查看。国内摄图网、站酷海洛已核实正式 API，但**尚未接入生产采购**，不能把普通会员或官网链接当成可用接口。见[素材来源配置指南](docs/guides/stock-sources.md)。
-
-## 验证
-
-完整自动化门禁：
-
-```bash
-make test
-```
-
-真实媒体 E2E：
-
-```bash
-make test-e2e
-```
-
-`make test` 覆盖 Python、TypeScript、Studio、broker、生产 build 和 package smoke。真实媒体 E2E 会调用 FFmpeg、ffprobe 和本地音频能力，不是 mock 测试。
-
-不需要外部 API key 的容器/媒体 smoke 使用 `examples/briefs/linux-container-smoke.json`。其中本地 editorial card 是测试 brief 的显式创作选择，不是生产失败 fallback。
-
-## 部署
-
-个人开发使用 `main` 主分支，禁止强推和删除。普通推送触发 GitHub Actions 的依赖安全检查、完整测试、构建与 Linux 容器成片 smoke；两项 CI 作业通过后，按该提交的精确 SHA 部署到阿里云。
-
-部署使用宿主机 DeepSeek broker 和 Docker Studio，验证服务身份及应用健康；切换失败则回滚。密钥、工作区和本地 QA 记录不进 Git。详见[生产部署指南](docs/guides/production-deployment.md)。
-
-## 文档
-
-- [素材来源配置](docs/guides/stock-sources.md)
-- [制作流程与声音调整](docs/guides/production-workflow.md)
-- [流程图解：下载后用浏览器打开](docs/guides/production-overview.html)
-- [流程图解源稿](docs/guides/production-overview.md)
-- [模型与声音审片配置](docs/guides/model-configuration.md)
-- [生产部署](docs/guides/production-deployment.md)
-- [视觉与交互规范](DESIGN.md)
-- [领域语言](CONTEXT.md)
-- [版本说明](CHANGELOG.md)
-
-运行现场、历史研发记录、截图和测试日志不随当前公开版本发布。
-
-## 当前边界
-
-- 发布包和多平台合规编排已经存在，但真实平台上传仍由人工完成。
-- 平台表现连接器尚未接入；真实发布数据仍需外部记录。
-- 当前持久化和 execution lease 面向单实例（本地或 ECS），不是多实例分布式协调方案。
-- 配音时间调整不改变原声的文字、音色、语速或情绪，也不是重新合成自然语音。需要改词或重录时回到对应创作步骤，可能产生新的费用。
-- 真实声音审片取决于模型是否支持音频输入；未发送真实音频时明确显示未审听，不能用转写或画面抽帧代替。
-- 当前生产渲染按 30fps 核对帧数和时长；例如 24 秒成片应输出 720 帧，并在整条时间线上持续有画面。
-- 本地自动化通过不代表真实服务商、所有网络环境、内容质量或用户听感已经通过验收。
+`npm run contracts:check` 离线检查接口、样例与生成类型。`npm test` 运行仓库测试；只验工作台可在构建后运行 `npm run test:agent --workspace @video-factory/studio`。这些测试不需要真实模型凭据。
